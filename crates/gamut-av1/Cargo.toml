@@ -1,0 +1,22 @@
+[package]
+name = "gamut-av1"
+description = "AV1 image encoder and decoder (intra-frame coding, the basis for AVIF)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+gamut-color.workspace = true
+gamut-dsp.workspace = true
+gamut-bitstream.workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "gamut-bitstream"
+description = "Low-level bit readers/writers and entropy coders (ANS, arithmetic, Huffman) shared by gamut codecs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true

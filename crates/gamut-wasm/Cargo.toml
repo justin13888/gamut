@@ -1,0 +1,23 @@
+[package]
+name = "gamut-wasm"
+description = "WebAssembly bindings for the gamut image codecs, for running encoders in the browser."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+gamut = { workspace = true, features = ["all"] }
+wasm-bindgen.workspace = true

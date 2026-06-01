@@ -1,8 +1,44 @@
-[package]
-name = "gamut"
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
+authors = ["Justin Chung"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/justin13888/gamut"
+homepage = "https://github.com/justin13888/gamut"
+readme = "README.md"
+keywords = ["image", "codec", "encoding", "compression"]
+categories = ["multimedia::images", "encoding", "compression"]
+# `description` is set per-crate for better crates.io discoverability.
 
-[dependencies]
+[workspace.lints.rust]
+missing_docs = "warn" # becomes a hard error under `clippy -D warnings` in CI
+
+[workspace.dependencies]
+# Third-party
 thiserror = "2.0.18"
 tracing = "0.1.44"
+bitflags = "2.6"
+clap = { version = "4.5", features = ["derive"] }
+wasm-bindgen = "0.2"
+
+# Internal crates (path + version so they are publishable to crates.io;
+# release-plz keeps the versions in sync on bumps).
+gamut-core = { path = "crates/gamut-core", version = "0.1.0" }
+gamut-color = { path = "crates/gamut-color", version = "0.1.0" }
+gamut-dsp = { path = "crates/gamut-dsp", version = "0.1.0" }
+gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.1.0" }
+gamut-isobmff = { path = "crates/gamut-isobmff", version = "0.1.0" }
+gamut-riff = { path = "crates/gamut-riff", version = "0.1.0" }
+gamut-av1 = { path = "crates/gamut-av1", version = "0.1.0" }
+gamut-av2 = { path = "crates/gamut-av2", version = "0.1.0" }
+gamut-avif = { path = "crates/gamut-avif", version = "0.1.0" }
+gamut-jxl = { path = "crates/gamut-jxl", version = "0.1.0" }
+gamut-webp = { path = "crates/gamut-webp", version = "0.1.0" }
+gamut-heic = { path = "crates/gamut-heic", version = "0.1.0" }
+gamut-vvc = { path = "crates/gamut-vvc", version = "0.1.0" }
+gamut = { path = "crates/gamut", version = "0.1.0" }

@@ -1,0 +1,20 @@
+[package]
+name = "gamut-isobmff"
+description = "ISO Base Media File Format (ISOBMFF) box/atom utilities, used by the AVIF and HEIC containers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+gamut-bitstream.workspace = true

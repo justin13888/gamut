@@ -1,0 +1,18 @@
+# Configuration for release-plz (https://release-plz.dev).
+#
+# The workspace uses a single unified version: every crate shares `version` from
+# `[workspace.package]` and is bumped together. release-plz determines the
+# dependency-correct publish order automatically (e.g. gamut-core before gamut-color
+# before gamut-avif before gamut), so the crates.io "dependency must already be
+# published" constraint is handled for us.
+
+[workspace]
+# Keep internal `{ version = "..." }` dependency requirements in sync on bumps.
+dependencies_update = true
+# Create a GitHub release and tag for each published version.
+git_release_enable = true
+git_tag_enable = true
+# All 17 crates publish to crates.io by default — this reserves the `gamut-*`
+# namespace. To stop distributing a crate via crates.io later (e.g. move gamut-wasm
+# to npm or gamut-ffi to compiled artifacts), add a `[[package]]` block with
+# `publish = false`.
