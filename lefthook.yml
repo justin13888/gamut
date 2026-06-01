@@ -1,0 +1,24 @@
+pre-commit:
+  piped: true
+  commands:
+    format-fix:
+      priority: 1
+      glob: "**/*.rs"
+      stage_fixed: true
+      run: cargo fmt
+    lint-fix:
+      priority: 2
+      glob: "**/*.rs"
+      stage_fixed: true
+      run: cargo clippy --fix --allow-dirty --allow-staged
+
+pre-push:
+  commands:
+    format-check:
+      run: cargo fmt --check
+    lint-check:
+      run: cargo clippy -- -D warnings
+    test:
+      run: cargo test
+    coverage:
+      run: just coverage
