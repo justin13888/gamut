@@ -1,0 +1,39 @@
+[package]
+name = "gamut"
+description = "Space-efficient image encoding libraries — a unified API over per-format codecs, selected via Cargo features."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+
+# Optional format crates, enabled via the features below.
+gamut-avif = { workspace = true, optional = true }
+gamut-jxl = { workspace = true, optional = true }
+gamut-webp = { workspace = true, optional = true }
+gamut-heic = { workspace = true, optional = true }
+gamut-vvc = { workspace = true, optional = true }
+gamut-av1 = { workspace = true, optional = true }
+gamut-av2 = { workspace = true, optional = true }
+
+[features]
+default = []
+avif = ["dep:gamut-avif", "dep:gamut-av1"]
+jxl = ["dep:gamut-jxl"]
+webp = ["dep:gamut-webp"]
+heic = ["dep:gamut-heic"]
+vvc = ["dep:gamut-vvc"]
+av1 = ["dep:gamut-av1"]
+av2 = ["dep:gamut-av2"]
+all = ["avif", "jxl", "webp", "heic", "vvc", "av1", "av2"]

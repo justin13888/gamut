@@ -1,0 +1,26 @@
+[package]
+name = "gamut-cli"
+description = "Command-line image converter built on gamut (e.g. `gamut convert input.png output.jxl --quality 80`)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+# The crate is `gamut-cli` (so `cargo install gamut-cli`), but it ships a `gamut` binary.
+[[bin]]
+name = "gamut"
+path = "src/main.rs"
+
+[dependencies]
+gamut = { workspace = true, features = ["all"] }
+clap.workspace = true
+tracing.workspace = true

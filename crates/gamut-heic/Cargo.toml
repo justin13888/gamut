@@ -1,0 +1,21 @@
+[package]
+name = "gamut-heic"
+description = "HEIC/HEIF image encoder and decoder."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+gamut-color.workspace = true
+gamut-isobmff.workspace = true

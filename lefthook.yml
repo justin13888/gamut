@@ -5,20 +5,20 @@ pre-commit:
       priority: 1
       glob: "**/*.rs"
       stage_fixed: true
-      run: cargo fmt
+      run: cargo fmt --all
     lint-fix:
       priority: 2
       glob: "**/*.rs"
       stage_fixed: true
-      run: cargo clippy --fix --allow-dirty --allow-staged
+      run: cargo clippy --workspace --fix --allow-dirty --allow-staged
 
 pre-push:
   commands:
     format-check:
-      run: cargo fmt --check
+      run: cargo fmt --all --check
     lint-check:
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
     test:
-      run: cargo test
+      run: cargo test --workspace --all-features
     coverage:
       run: just coverage

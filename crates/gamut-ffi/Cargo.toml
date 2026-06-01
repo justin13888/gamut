@@ -1,0 +1,22 @@
+[package]
+name = "gamut-ffi"
+description = "C-compatible FFI bindings for the gamut image codecs, for use from C, C++, Python, Go, and more."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+gamut = { workspace = true, features = ["all"] }
