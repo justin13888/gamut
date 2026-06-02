@@ -2,6 +2,61 @@
 
 A collection of space-efficient image encoding libraries, organized as a Cargo workspace.
 
+## Why gamut?
+
+The world doesn't lack image codecs. libavif/libaom, libwebp, and libjpeg-turbo are
+mature, fast, and battle-tested — we're not out to beat a decade of hand-tuned SIMD
+assembly on raw encode speed. gamut exists because "fast C that works" still leaves real
+gaps, and those gaps are exactly where a clean-slate, pure-Rust, permissively-licensed
+implementation wins.
+
+- **Memory safety on the industry's worst attack surface.** Image parsers chew on hostile,
+  attacker-controlled bytes from the open internet, and the C codecs have the CVE record to
+  show how that goes — libwebp's CVE-2023-4863 was a zero-click, wormable heap overflow that
+  triggered emergency out-of-band patches across browsers, Electron apps, and mobile OSes in
+  a single week. Safe Rust deletes that entire bug class (spatial and temporal memory
+  corruption) from the encode and parse paths. For anything that ingests untrusted images,
+  that alone justifies the rewrite.
+
+- **Builds anywhere `cargo` does.** No autotools, no CMake, no nasm/yasm, no vendored C, no
+  FFI boundary to audit. `cargo build` cross-compiles cleanly to wasm32, aarch64, and musl
+  targets that libaom makes miserable — one toolchain, reproducible builds, no system-library
+  version skew.
+
+- **WASM as a first-class target, not an afterthought.** The C codecs run through Emscripten
+  come out large, slow to instantiate, and awkward to tree-shake. A native Rust → wasm build
+  is smaller and talks to the JS/TS ecosystem directly, which makes serverless/edge image
+  optimization (Workers, Lambda, and friends) practical instead of shipping a multi-megabyte
+  blob.
+
+- **A genuinely clean license story.** gamut deliberately targets royalty-free formats and
+  ships under MIT OR Apache-2.0 — no GPL/LGPL reach, no vendored-code license soup, no
+  static-linking exceptions to reason about. Patent-unencumbered formats deserve
+  permissively-licensed code to match.
+
+- **Encoder-first, size-first — the gap the Rust ecosystem actually has.** Most Rust imaging
+  is decode-only and hands the hard encoders off to C wrappers. gamut is built the other way
+  round: encoders are the product, and the thing we optimize is *output bytes at a given
+  quality and speed*, with the space/time tradeoff documented per format. That's the number
+  that lands on storage and bandwidth bills.
+
+- **One codebase, shared primitives.** Color management, DSP, bitstream, and container parsing
+  live in shared crates (`gamut-color`, `gamut-dsp`, `gamut-bitstream`, `gamut-isobmff`,
+  `gamut-riff`) instead of being re-implemented inside each separate C library. Consistent
+  behavior across formats, one API, one place to fix a color bug — and you compile in only the
+  formats you enable via Cargo features.
+
+- **Readable enough to change.** Implemented clean-slate from the official specs in
+  `references/`, the code is something you can actually audit, fork, and experiment with —
+  not decades of accreted platform `#ifdef`s and inline assembly.
+
+### Scope
+
+The initial focus is **AVIF, WebP, and JPEG** — the formats with the best
+size-versus-compatibility tradeoff today. JPEG XL is intentionally out of scope for now (it
+is better served by a dedicated effort). The other format crates in the tree (HEIC, VVC,
+AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens.
+
 ## Usage
 
 Add the umbrella `gamut` crate and enable only the formats you need:
