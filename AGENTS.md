@@ -18,22 +18,11 @@ on shared primitives. Dependency edges (a crate depends on those to its right):
 - **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff. **gamut-heic** ← isobmff, core, color.
 - **gamut-cli** (binary named `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib). ← gamut.
 
-### Metadata & dependencies
+## Reference
 
-All cargo metadata is centralized in the root `[workspace.package]` /
-`[workspace.dependencies]`. New crates inherit shared fields via `.workspace = true` and set
-only their own unique `description`. Add a third-party dependency to the root
-`[workspace.dependencies]` first, then reference it with `<dep>.workspace = true`.
+All codec implementations must follow the official specs that should be attached in `references/`
 
-Key shared deps:
-
-- **tracing** -- structured diagnostic logging emitted by the encoders; no subscriber is
-  configured here (this is a library — the consuming application installs one).
-- **thiserror** -- derives `std::error::Error` for the public error enums so callers get
-  ergonomic, typed encoding/decoding failures.
-
-## Quality
-
+## Validation
 Validate changes:
 
 ```bash

@@ -94,6 +94,24 @@ just coverage
 The bindings/binary crates (`gamut-cli`, `gamut-wasm`, `gamut-ffi`) are excluded from the
 gate — their entry points are not meaningfully unit-testable.
 
+## AI Policy
+
+Vibe-coded contributions are welcome. AI-assisted PRs are accepted as long as you
+personally vouch for the work — you've read it, you understand it, and you stand behind it
+as if you'd written every line — and it matches the project's existing code style and
+requirements. The CI and git hooks loosely enforce the bare minimum; meeting that bar is
+necessary but not sufficient. Review your output before opening a PR.
+
+## Versioning
+
+The workspace ships a single unified version: every crate shares `version` from
+`[workspace.package]` and is bumped together. On a minor release, all crates move to the new
+minor version even if a given crate saw no meaningful change — keeping the version numbers
+aligned across the workspace is worth more than per-crate precision.
+
+Patch versions are the exception: a hot patch may be released for individual crates, so patch
+levels can diverge between releases before the next minor pulls everything back into lockstep.
+
 ## Releases
 
 Publishing to crates.io is automated with [release-plz](https://release-plz.dev). On pushes
