@@ -1,5 +1,7 @@
 # gamut
 
+> Project Status: Early development. Do not use it for anything serious!
+
 A collection of space-efficient image encoding libraries, organized as a Cargo workspace.
 
 ## Why gamut?
