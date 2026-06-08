@@ -100,7 +100,8 @@ All cargo metadata is centralized in the root `[workspace.package]` /
 
 ## Prerequisites
 
-- [Rust (rustup)](https://rustup.rs) -- toolchain (channel pinned via `rust-toolchain.toml`)
+- [Rust (rustup)](https://rustup.rs) -- toolchain (channel pinned via `rust-toolchain.toml`);
+  see [Minimum Supported Rust Version](#minimum-supported-rust-version) for the lower bound
 - [just](https://github.com/casey/just) -- command runner
 - [Lefthook](https://github.com/evilmartians/lefthook) -- git hooks manager
 - [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) -- code coverage tool
@@ -123,13 +124,21 @@ cargo test --workspace
 | `just lint-fix`  | Lint and auto-fix                        |
 | `just coverage`  | Run tests with coverage (min 80%)        |
 
-## Tech Stack
+## Minimum Supported Rust Version (MSRV)
 
-- **Language:** Rust (edition 2024)
-- **Formatter:** rustfmt
-- **Linter:** Clippy
-- **Release:** [release-plz](https://release-plz.dev) (dependency-ordered crates.io publishing)
-- **Key Dependencies:** tracing, thiserror, bitflags, clap, wasm-bindgen
+The MSRV is **Rust 1.88** (stable), built against **edition 2024**. This is the lowest
+version CI is expected to support, and it is declared once in the root `[workspace.package]`
+(`rust-version = "1.88"`); every crate inherits it via `rust-version.workspace = true`.
+
+Policy:
+
+- The MSRV is the floor we test and publish against, not necessarily the newest toolchain.
+  Day-to-day development tracks the latest `stable` (pinned to the `stable` channel in
+  `rust-toolchain.toml`).
+- Raising the MSRV is a deliberate, semver-relevant change: bump `rust-version` in the root
+  `Cargo.toml` and note it here. Pre-1.0, an MSRV bump rides a minor release.
+- Edition (`2024`) is likewise centralized in `[workspace.package]` and inherited by every
+  crate; it changes only alongside an MSRV bump that allows it.
 
 ## Git Hooks
 
