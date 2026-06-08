@@ -1,7 +1,7 @@
 [package]
 name = "gamut-isobmff"
 description = "ISO Base Media File Format (ISOBMFF) box/atom utilities, used by the AVIF and HEIC containers."
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

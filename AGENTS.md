@@ -47,3 +47,13 @@ just coverage        # coverage (minimum 80%)
   module docs + declarations (traits/types without bodies), **no placeholder `fn` bodies**
   (a `todo!()`-bodied fn adds an uncovered region). The `gamut-(cli|wasm|ffi)` crates are
   excluded from coverage via `--ignore-filename-regex`.
+
+## Versioning
+
+Each crate is versioned **independently** per SemVer — there is no shared workspace version,
+and releases do not guarantee version consistency across crates. Only `version` is per-crate;
+all other metadata (`edition`, `rust-version`/MSRV, license, repository) is workspace-owned
+and inherited via `*.workspace = true`. Version bumps, per-crate changelogs, and crates.io
+publishing are automated by release-plz from conventional-commit history — write conventional
+commit messages and do not hand-edit versions for routine changes. `just versions` lists every
+crate's current version; `just bump <crate> <level>` is a manual escape hatch.
