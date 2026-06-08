@@ -124,15 +124,7 @@ cargo test --workspace
 | `just lint-fix`  | Lint and auto-fix                        |
 | `just coverage`  | Run tests with coverage (min 80%)        |
 
-## Tech Stack
-
-- **Language:** Rust (edition 2024, [MSRV 1.88](#minimum-supported-rust-version))
-- **Formatter:** rustfmt
-- **Linter:** Clippy
-- **Release:** [release-plz](https://release-plz.dev) (dependency-ordered crates.io publishing)
-- **Key Dependencies:** tracing, thiserror, bitflags, clap, wasm-bindgen
-
-## Minimum Supported Rust Version
+## Minimum Supported Rust Version (MSRV)
 
 The MSRV is **Rust 1.88** (stable), built against **edition 2024**. This is the lowest
 version CI is expected to support, and it is declared once in the root `[workspace.package]`
