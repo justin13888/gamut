@@ -1,13 +1,15 @@
 # Configuration for release-plz (https://release-plz.dev).
 #
-# The workspace uses a single unified version: every crate shares `version` from
-# `[workspace.package]` and is bumped together. release-plz determines the
-# dependency-correct publish order automatically (e.g. gamut-core before gamut-color
-# before gamut-avif before gamut), so the crates.io "dependency must already be
-# published" constraint is handled for us.
+# Each crate is versioned independently: there is no shared `[workspace.package].version`,
+# so release-plz computes every crate's next version on its own from its conventional-commit
+# history, writes a per-crate CHANGELOG.md, and creates a per-crate `<crate>-v<version>` tag
+# plus GitHub release. It also rewrites the internal `{ version = "..." }` dependency
+# requirements when a dependency bumps, and publishes in dependency-correct order (e.g.
+# gamut-core before gamut-color before gamut-avif before gamut), so the crates.io
+# "dependency must already be published" constraint is handled for us.
 
 [workspace]
-# Keep internal `{ version = "..." }` dependency requirements in sync on bumps.
+# Refresh the whole `Cargo.lock` (not just workspace members) on a release run.
 dependencies_update = true
 # Create a GitHub release and tag for each published version.
 git_release_enable = true

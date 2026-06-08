@@ -29,3 +29,12 @@ test:
 # meaningfully unit-testable and would otherwise skew the gate.
 coverage:
     cargo llvm-cov --workspace --all-features --ignore-filename-regex 'crates/gamut-(cli|wasm|ffi)/' --fail-under-lines 80
+
+# List every workspace crate and its version
+versions:
+    cargo metadata --no-deps --format-version 1 | jq -r '.packages | sort_by(.name)[] | "\(.name) \(.version)"'
+
+# Bump a single crate's version (level = major | minor | patch). Convenience/escape
+# hatch; routine bumps are automated by release-plz from conventional commits.
+bump crate level:
+    cargo set-version -p {{crate}} --bump {{level}}

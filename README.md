@@ -95,8 +95,9 @@ format.
 | `gamut-wasm`      | WebAssembly bindings                                                     | placeholder |
 | `gamut-ffi`       | C-compatible FFI bindings                                                | placeholder |
 
-All cargo metadata is centralized in the root `[workspace.package]` /
-`[workspace.dependencies]`; each crate inherits via `.workspace = true`.
+All cargo metadata except per-crate `version` is centralized in the root
+`[workspace.package]` / `[workspace.dependencies]`; each crate inherits the shared fields via
+`.workspace = true` and sets its own `version` (see [Versioning](#versioning)).
 
 ## Prerequisites
 
@@ -105,6 +106,8 @@ All cargo metadata is centralized in the root `[workspace.package]` /
 - [just](https://github.com/casey/just) -- command runner
 - [Lefthook](https://github.com/evilmartians/lefthook) -- git hooks manager
 - [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) -- code coverage tool
+- [jq](https://jqlang.github.io/jq/) -- JSON processor (optional; used by `just versions`)
+- [cargo-edit](https://github.com/killercup/cargo-edit) -- provides `cargo set-version` (optional; used by `just bump`)
 
 ## Quick Start
 
@@ -123,6 +126,8 @@ cargo test --workspace
 | `just lint`      | Lint with Clippy (warnings as errors)    |
 | `just lint-fix`  | Lint and auto-fix                        |
 | `just coverage`  | Run tests with coverage (min 80%)        |
+| `just versions`  | List every crate's version               |
+| `just bump <crate> <level>` | Bump one crate (`major`\|`minor`\|`patch`) |
 
 ## Minimum Supported Rust Version (MSRV)
 
@@ -173,19 +178,27 @@ necessary but not sufficient. Review your output before opening a PR.
 
 ## Versioning
 
-The workspace ships a single unified version: every crate shares `version` from
-`[workspace.package]` and is bumped together. On a minor release, all crates move to the new
-minor version even if a given crate saw no meaningful change — keeping the version numbers
-aligned across the workspace is worth more than per-crate precision.
+Every crate is versioned **independently** following [SemVer](https://semver.org), based on
+its own changes. There is **no** guarantee that versions line up across the workspace — a
+change to one codec bumps only that crate (and anything that depends on it), so version
+numbers drift apart over time. Only `version` is per-crate; shared metadata such as the
+edition and [MSRV](#minimum-supported-rust-version) stays workspace-owned.
 
-Patch versions are the exception: a hot patch may be released for individual crates, so patch
-levels can diverge between releases before the next minor pulls everything back into lockstep.
+Bumps are automated: [release-plz](https://release-plz.dev) reads each crate's
+conventional-commit history, computes its next version, and updates dependents' requirements
+as needed. Each crate keeps its own `CHANGELOG.md` and is tagged and GitHub-released as
+`<crate>-v<version>` (e.g. `gamut-core-v0.2.0`) — there is no single repo-wide version tag,
+so the umbrella `gamut` crate's version serves as the headline "project" version. Run
+`just versions` to see every crate's current version at a glance.
 
 ## Releases
 
 Publishing to crates.io is automated with [release-plz](https://release-plz.dev). On pushes
-to `master` it opens a release PR (version bumps + changelogs); merging that PR publishes
-every changed crate in dependency order. Requires a `CARGO_REGISTRY_TOKEN` repository secret.
+to `master` it opens a release PR (per-crate version bumps + changelogs); merging that PR
+publishes every changed crate in dependency order, then creates the per-crate tags and GitHub
+releases. Publishing authenticates via crates.io
+[Trusted Publishing](https://crates.io/docs/trusted-publishing) (OIDC) — no
+`CARGO_REGISTRY_TOKEN` secret is stored.
 
 ## License
 

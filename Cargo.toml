@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+# No shared `version`: each crate is versioned independently (see README "Versioning").
 edition = "2024"
 rust-version = "1.88" # MSRV; see README "Minimum Supported Rust Version"
 authors = ["Justin Chung"]
@@ -30,19 +30,21 @@ wasm-bindgen = "0.2"
 # `default-features = false` drops image's own avif/webp decoders and rayon.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "pnm"] }
 
-# Internal crates (path + version so they are publishable to crates.io;
-# release-plz keeps the versions in sync on bumps).
+# Internal crates. `path` is used for local builds so cross-crate edits resolve without a
+# crates.io round-trip; `version` is the requirement recorded in the published manifest.
+# Versions are independent per crate — release-plz rewrites these requirements automatically
+# when a dependency's version bumps.
 gamut-core = { path = "crates/gamut-core", version = "0.1.0" }
-gamut-color = { path = "crates/gamut-color", version = "0.1.0" }
-gamut-dsp = { path = "crates/gamut-dsp", version = "0.1.0" }
-gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.1.0" }
-gamut-isobmff = { path = "crates/gamut-isobmff", version = "0.1.0" }
+gamut-color = { path = "crates/gamut-color", version = "0.2.0" }
+gamut-dsp = { path = "crates/gamut-dsp", version = "0.2.0" }
+gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.0" }
+gamut-isobmff = { path = "crates/gamut-isobmff", version = "0.2.0" }
 gamut-riff = { path = "crates/gamut-riff", version = "0.1.0" }
-gamut-av1 = { path = "crates/gamut-av1", version = "0.1.0" }
+gamut-av1 = { path = "crates/gamut-av1", version = "0.2.0" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.0" }
-gamut-avif = { path = "crates/gamut-avif", version = "0.1.0" }
+gamut-avif = { path = "crates/gamut-avif", version = "0.2.0" }
 gamut-jxl = { path = "crates/gamut-jxl", version = "0.1.0" }
 gamut-webp = { path = "crates/gamut-webp", version = "0.1.0" }
 gamut-heic = { path = "crates/gamut-heic", version = "0.1.0" }
 gamut-vvc = { path = "crates/gamut-vvc", version = "0.1.0" }
-gamut = { path = "crates/gamut", version = "0.1.0" }
+gamut = { path = "crates/gamut", version = "0.2.0" }
