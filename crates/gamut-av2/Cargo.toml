@@ -1,6 +1,6 @@
 [package]
 name = "gamut-av2"
-description = "AV2 (AOMedia Video 2) image encoder and decoder — the next-generation AV1 successor."
+description = "AV2 image encoder and decoder (intra-frame still-image coding from AOMedia Video 2, AV1's successor)."
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true

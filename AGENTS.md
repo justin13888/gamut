@@ -6,7 +6,14 @@ under `crates/`.
 ## Workspace layout
 
 The umbrella crate `gamut` re-exports format crates behind Cargo features; everything builds
-on shared primitives. Dependency edges (a crate depends on those to its right):
+on shared primitives.
+
+gamut is **image-first** and implements no video primitives: codec crates named after video
+formats (`av1`/`av2`/`vvc`, HEVC-based `heic`, VP8-lineage `webp`) cover only the intra-frame
+still-image subset — no inter-frame/motion/sequence coding. Encoder-first; decoders only where
+the Rust ecosystem lacks a strong, feature-complete implementation.
+
+Dependency edges (a crate depends on those to its right):
 
 - **gamut** -- umbrella; optional deps on the format crates, gated by features (`avif`,
   `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `all`). `default = []`. The `primitives` feature

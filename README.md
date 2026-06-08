@@ -40,7 +40,8 @@ implementation wins.
   is decode-only and hands the hard encoders off to C wrappers. gamut is built the other way
   round: encoders are the product, and the thing we optimize is *output bytes at a given
   quality and speed*, with the space/time tradeoff documented per format. That's the number
-  that lands on storage and bandwidth bills.
+  that lands on storage and bandwidth bills. Decoders may follow where the Rust ecosystem
+  lacks a strong, feature-complete implementation, but encoders are the priority.
 
 - **One codebase, shared primitives.** Color management, DSP, bitstream, and container parsing
   live in shared crates (`gamut-color`, `gamut-dsp`, `gamut-bitstream`, `gamut-isobmff`,
@@ -58,6 +59,12 @@ The initial focus is **AVIF, WebP, and JPEG** — the formats with the best
 size-versus-compatibility tradeoff today. JPEG XL is intentionally out of scope for now (it
 is better served by a dedicated effort). The other format crates in the tree (HEIC, VVC,
 AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens.
+
+**gamut is image-first.** Even where a format's codec (AV1, AV2, VVC, HEVC) is fundamentally a
+video codec, gamut implements only the intra-frame, still-image subset those formats use — no
+inter-frame prediction, no motion compensation, no video sequences. The video-named codec
+crates (`gamut-av1`, `gamut-av2`, `gamut-vvc`, and HEVC-based `gamut-heic`) are still-image
+encoders, not video codecs, and gamut will not grow video primitives.
 
 ## Usage
 
@@ -82,18 +89,18 @@ format.
 | `gamut-color`     | Color spaces, pixel formats, bit depths, chroma subsampling, transfers  | placeholder |
 | `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering            | placeholder |
 | `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)       | placeholder |
-| `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                                 | placeholder |
-| `gamut-riff`      | RIFF container utilities (WebP)                                          | placeholder |
-| `gamut-av1`       | AV1 image encoder/decoder (basis for AVIF)                              | placeholder |
-| `gamut-av2`       | AV2 (next-gen AV1 successor) encoder/decoder                            | placeholder |
-| `gamut-avif`      | AVIF encoder/decoder                                                     | placeholder |
-| `gamut-jxl`       | JPEG XL encoder/decoder                                                  | placeholder |
-| `gamut-webp`      | WebP encoder/decoder                                                     | placeholder |
-| `gamut-heic`      | HEIC/HEIF encoder/decoder                                                | placeholder |
-| `gamut-vvc`       | VVC (H.266) encoder/decoder                                              | placeholder |
+| `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                                | placeholder |
+| `gamut-riff`      | RIFF container utilities (WebP)                                         | placeholder |
+| `gamut-av1`       | AV1 still-image (intra-frame) encoder/decoder — basis for AVIF          | placeholder |
+| `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor         | placeholder |
+| `gamut-avif`      | AVIF encoder/decoder                                                    | placeholder |
+| `gamut-jxl`       | JPEG XL encoder/decoder                                                 | placeholder |
+| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                             | placeholder |
+| `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                      | placeholder |
+| `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                         | placeholder |
 | `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives        | sandbox     |
-| `gamut-wasm`      | WebAssembly bindings                                                     | placeholder |
-| `gamut-ffi`       | C-compatible FFI bindings                                                | placeholder |
+| `gamut-wasm`      | WebAssembly bindings                                                    | placeholder |
+| `gamut-ffi`       | C-compatible FFI bindings                                               | placeholder |
 
 All cargo metadata except per-crate `version` is centralized in the root
 `[workspace.package]` / `[workspace.dependencies]`; each crate inherits the shared fields via
