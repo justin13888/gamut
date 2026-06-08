@@ -1,0 +1,4 @@
+# Spec/reference documents are vendored material, not project source.
+# Exclude from GitHub Linguist language statistics and collapse in diffs.
+references/** linguist-documentation
+references/** linguist-vendored
