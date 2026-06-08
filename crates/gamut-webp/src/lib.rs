@@ -1,4 +1,5 @@
-//! WebP image encoder and decoder — a VP8/VP8L bitstream wrapped in a RIFF container.
+//! WebP image encoder and decoder — an intra-frame VP8/VP8L still-image bitstream wrapped in a
+//! RIFF container.
 //!
 //! Placeholder — implementation pending.
 #![forbid(unsafe_code)]

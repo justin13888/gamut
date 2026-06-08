@@ -1,6 +1,6 @@
 [package]
 name = "gamut-vvc"
-description = "VVC (H.266) image encoder and decoder."
+description = "VVC (H.266) image encoder and decoder (intra-frame still-image coding)."
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true

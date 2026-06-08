@@ -1,6 +1,6 @@
 [package]
 name = "gamut-avif"
-description = "AVIF (AV1 Image File Format) encoder and decoder."
+description = "AVIF image encoder — AV1 still frames wrapped in an ISOBMFF container (the full .avif format)."
 version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true

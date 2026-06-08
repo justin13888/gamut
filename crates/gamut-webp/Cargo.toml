@@ -1,6 +1,6 @@
 [package]
 name = "gamut-webp"
-description = "WebP image encoder and decoder."
+description = "WebP image encoder and decoder (intra-frame VP8/VP8L still images in a RIFF container)."
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true

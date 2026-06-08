@@ -3,6 +3,10 @@
 `gamut-avif` is a pure-Rust, memory-safe AVIF encoder that wraps AV1 intra-frame bitstreams in an
 ISOBMFF/MIAF container.
 
+This is the high-level crate most users want: give it pixels, get a complete `.avif` file. It is
+orchestration only — [`gamut-av1`](../gamut-av1) does the AV1 coding and
+[`gamut-isobmff`](../gamut-isobmff) writes the container.
+
 ## Goals
 
 Part of the [gamut](../../README.md) workspace, this crate exists to provide AVIF **encoding** that
