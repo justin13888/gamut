@@ -15,9 +15,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 /// Detailed version string for `-V`/`--version`: the package version plus build provenance
-/// (git commit, working-tree state, build profile, target triple, rustc, and commit date),
-/// all captured at compile time by `build.rs`. Useful for pinning down exactly which build a
-/// bug report came from.
+/// (git commit, working-tree state, build profile, target triple, rustc, commit date, and
+/// build timestamp), all captured at compile time by `build.rs`. Useful for pinning down
+/// exactly which build a bug report came from.
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\ncommit:  ",
@@ -33,6 +33,8 @@ const LONG_VERSION: &str = concat!(
     env!("GAMUT_RUSTC_VERSION"),
     "\ncommit date: ",
     env!("GAMUT_COMMIT_DATE"),
+    "\nbuilt:   ",
+    env!("GAMUT_BUILD_TIMESTAMP"),
 );
 
 /// Sandbox CLI for the gamut codecs and primitives.
