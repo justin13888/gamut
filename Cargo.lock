@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "gamut"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gamut-av1",
  "gamut-av2",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av1"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-avif"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gamut-av1",
  "gamut-color",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-bitstream"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gamut-core",
 ]
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-color"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags",
  "gamut-core",
@@ -261,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-dsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gamut-core",
 ]
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-isobmff"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gamut-bitstream",
  "gamut-core",
