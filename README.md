@@ -91,9 +91,9 @@ format.
 | `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)       | placeholder |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                                | placeholder |
 | `gamut-riff`      | RIFF container utilities (WebP)                                         | placeholder |
-| `gamut-av1`       | AV1 still-image (intra-frame) encoder/decoder — basis for AVIF          | placeholder |
+| `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF    | M0 lossless |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor         | placeholder |
-| `gamut-avif`      | AVIF encoder/decoder                                                    | placeholder |
+| `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                 | M0 lossless |
 | `gamut-jxl`       | JPEG XL encoder/decoder                                                 | placeholder |
 | `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                             | placeholder |
 | `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                      | placeholder |

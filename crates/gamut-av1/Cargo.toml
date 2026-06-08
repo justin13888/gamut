@@ -1,6 +1,6 @@
 [package]
 name = "gamut-av1"
-description = "AV1 image encoder and decoder (intra-frame coding, the basis for AVIF)."
+description = "AV1 still-image (intra-frame) encoder — the standalone codec layer beneath AVIF."
 version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true

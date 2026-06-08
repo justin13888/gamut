@@ -3,6 +3,10 @@
 `gamut-av1` is a pure-Rust AV1 image encoder. AVIF relies on AV1 intra-frame coding, so this crate
 is usable standalone as well as through [`gamut-avif`](../gamut-avif).
 
+If you want a complete `.avif` file, use [`gamut-avif`](../gamut-avif). Reach for this crate when you
+need the **raw AV1 still bitstream** itself — to embed in your own container or build another
+AV1-based format. It operates on `Planar8` planes and emits an AV1 temporal unit, not a container.
+
 ## Goals
 
 Part of the [gamut](../../README.md) workspace, this crate exists to provide AV1 **still-image
