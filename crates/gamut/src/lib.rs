@@ -10,9 +10,20 @@
 //! [`core`] (re-exported from [`gamut-core`](https://crates.io/crates/gamut-core)) is always
 //! available and provides the shared [`core::Encoder`] / [`core::Decoder`] traits and the
 //! common [`core::Error`] type. Each format module appears only when its feature is enabled.
+//!
+//! The `primitives` feature additionally re-exports the shared building blocks the codecs are
+//! made of — `color` (pixel formats / CICP), `dsp` (transforms), and `bitstream` (bit writer
+//! + AV1 symbol coder) — for tooling and sandbox use such as the `gamut` CLI.
 #![forbid(unsafe_code)]
 
 pub use gamut_core as core;
+
+#[cfg(feature = "primitives")]
+pub use gamut_bitstream as bitstream;
+#[cfg(feature = "primitives")]
+pub use gamut_color as color;
+#[cfg(feature = "primitives")]
+pub use gamut_dsp as dsp;
 
 #[cfg(feature = "av1")]
 pub use gamut_av1 as av1;

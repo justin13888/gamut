@@ -68,7 +68,10 @@ Add the umbrella `gamut` crate and enable only the formats you need:
 gamut = { version = "0.1", features = ["avif", "jxl"] }
 ```
 
-The umbrella has no default features, so a bare dependency compiles only `gamut-core`.
+The umbrella has no default features, so a bare dependency compiles only `gamut-core`. The
+`primitives` feature additionally re-exports the shared building blocks (`gamut::color` /
+`gamut::dsp` / `gamut::bitstream`) for tooling and sandbox use; `all` enables it along with every
+format.
 
 ## Crates
 
@@ -88,7 +91,7 @@ The umbrella has no default features, so a bare dependency compiles only `gamut-
 | `gamut-webp`      | WebP encoder/decoder                                                     | placeholder |
 | `gamut-heic`      | HEIC/HEIF encoder/decoder                                                | placeholder |
 | `gamut-vvc`       | VVC (H.266) encoder/decoder                                              | placeholder |
-| `gamut-cli`       | `gamut` command-line image converter                                    | placeholder |
+| `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives        | sandbox     |
 | `gamut-wasm`      | WebAssembly bindings                                                     | placeholder |
 | `gamut-ffi`       | C-compatible FFI bindings                                                | placeholder |
 

@@ -1,6 +1,6 @@
 [package]
 name = "gamut-cli"
-description = "Command-line image converter built on gamut (e.g. `gamut convert input.png output.jxl --quality 80`)."
+description = "Sandbox CLI for the gamut codecs: decode PNG/JPEG/PPM and encode AVIF, plus inspection of the shared color/dsp/bitstream primitives (e.g. `gamut convert input.png output.avif`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,6 +21,11 @@ name = "gamut"
 path = "src/main.rs"
 
 [dependencies]
+# `all` pulls in the format codecs plus the `primitives` re-exports (color/dsp/bitstream).
 gamut = { workspace = true, features = ["all"] }
 clap.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+# Decode-only: read PNG/JPEG/PPM inputs. Encoding stays entirely in the gamut crates.
+image.workspace = true

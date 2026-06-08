@@ -16,6 +16,10 @@ lint:
 lint-fix:
     cargo clippy --workspace --fix --allow-dirty --allow-staged
 
+# Install the gamut CLI binary
+install-cli:
+    cargo install --path crates/gamut-cli
+
 # Run tests
 test:
     cargo test --workspace --all-features
