@@ -185,6 +185,30 @@ fn directional_modes_match_dav1d() {
 }
 
 #[test]
+fn filter_intra_modes_match_dav1d() {
+    if !dav1d_available() {
+        eprintln!("skipping recon_dav1d: dav1d not installed");
+        return;
+    }
+    // Mixed flat-plus-fine-texture content: the encoder's per-block search picks recursive
+    // filter-intra (§7.11.2.3, signaled as a DC_PRED block + `use_filter_intra` + a
+    // `filter_intra_mode`) on many blocks. dav1d must run the same recursive predictor and reach the
+    // encoder's reconstruction byte-for-byte. (The encoder selects all five filter modes on this
+    // content, so it covers FILTER_DC/V/H/D157/PAETH through the real decoder.)
+    let textured = |x: u32, y: u32| {
+        let r = (x.wrapping_mul(3).wrapping_add(y) % 256) as u8;
+        let g = ((x + y.wrapping_mul(2)) % 256) as u8;
+        let b = (128 + ((x ^ y) % 64)) as u8;
+        [r, g, b]
+    };
+    for &q in &[6u8, 24, 88, 170] {
+        for &(w, h) in &[(8, 8), (16, 16), (37, 21), (64, 40)] {
+            check(&planes(w, h, textured), q);
+        }
+    }
+}
+
+#[test]
 fn flat_lossy_reconstruction_matches_dav1d() {
     if !dav1d_available() {
         return;

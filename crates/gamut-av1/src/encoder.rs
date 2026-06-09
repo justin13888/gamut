@@ -77,7 +77,7 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
     let mi_cols = 2 * ((width + 7) >> 3);
     let mi_rows = 2 * ((height + 7) >> 3);
 
-    let seq_payload = headers::sequence_header_payload(&config, width, height);
+    let seq_payload = headers::sequence_header_payload(&config, width, height, qindex > 0);
     let mut frame_payload = headers::frame_header_payload(width, height, mi_cols, mi_rows, qindex);
     let (tile_bytes, recon) = FrameEncoder::new(planes, qindex).encode();
     frame_payload.extend_from_slice(&tile_bytes);

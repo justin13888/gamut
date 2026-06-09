@@ -96,7 +96,14 @@ pub(crate) fn write_obu(out: &mut Vec<u8>, obu_type: u8, payload: &[u8]) {
 
 /// Builds the sequence-header OBU payload for the M0 config (reduced still picture, profile 1,
 /// 8-bit, identity 4:4:4, full range), terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
-pub(crate) fn sequence_header_payload(cfg: &Av1StillConfig, width: u32, height: u32) -> Vec<u8> {
+/// `lossy` enables `enable_filter_intra` (recursive filter-intra is used only on the lossy path;
+/// the lossless path stays DC-only and emits no `use_filter_intra` symbols).
+pub(crate) fn sequence_header_payload(
+    cfg: &Av1StillConfig,
+    width: u32,
+    height: u32,
+    lossy: bool,
+) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.put_bits(u32::from(cfg.seq_profile), 3); // seq_profile
     w.put_bit(1); // still_picture
@@ -111,7 +118,9 @@ pub(crate) fn sequence_header_payload(cfg: &Av1StillConfig, width: u32, height: 
     w.put_bits(height - 1, hbits); // max_frame_height_minus_1
     // frame_id_numbers_present_flag = 0 (reduced)
     w.put_bit(0); // use_128x128_superblock = 0
-    w.put_bit(0); // enable_filter_intra = 0
+    // Filter-intra (recursive DC-prediction, §7.11.2.3) is used only on the lossy path; the
+    // lossless path stays DC-only and emits no `use_filter_intra` symbols.
+    w.put_bit(u8::from(lossy)); // enable_filter_intra
     w.put_bit(0); // enable_intra_edge_filter = 0
     w.put_bit(0); // enable_superres = 0
     w.put_bit(0); // enable_cdef = 0
