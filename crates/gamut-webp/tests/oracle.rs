@@ -12,7 +12,7 @@
 mod common;
 
 use common::{libwebp_decode_rgba, libwebp_encode_lossless_rgba, libwebp_get_info, pattern_rgba};
-use gamut_webp::WebpDecoder;
+use gamut_webp::{Dimensions, WebpDecoder, WebpEncoder};
 
 /// The standard dimension matrix exercised by the differential tests, including the awkward
 /// single-row / single-column / non-power-of-two cases.
@@ -72,5 +72,29 @@ fn gamut_decodes_libwebp_lossless_to_source() {
             "dims mismatch at {w}x{h}"
         );
         assert_eq!(out, rgba_to_rgb(&rgba), "pixel mismatch at {w}x{h}");
+    }
+}
+
+#[test]
+fn libwebp_decodes_gamut_lossless_to_source() {
+    // The reverse direction: gamut encodes, libwebp (the reference) decodes, and must recover the
+    // source pixels — proving gamut emits a conformant lossless stream.
+    for &(w, h) in DIMENSIONS {
+        let rgb = rgba_to_rgb(&pattern_rgba(w, h));
+        let mut webp = Vec::new();
+        WebpEncoder::lossless()
+            .encode_rgb8(
+                &rgb,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+                &mut webp,
+            )
+            .expect("gamut encode");
+        assert_eq!(libwebp_get_info(&webp), Some((w, h)), "get_info at {w}x{h}");
+        let decoded = libwebp_decode_rgba(&webp);
+        assert_eq!((decoded.width, decoded.height), (w, h));
+        assert_eq!(rgba_to_rgb(&decoded.rgba), rgb, "pixel mismatch at {w}x{h}");
     }
 }

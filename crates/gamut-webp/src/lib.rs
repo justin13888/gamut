@@ -25,3 +25,4 @@ pub mod vp8l;
 pub use config::{WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::WebpEncoder;
+pub use gamut_core::Dimensions;

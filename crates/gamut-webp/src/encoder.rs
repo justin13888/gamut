@@ -1,12 +1,15 @@
 //! The public WebP encoder: orchestrates color handling, the VP8/VP8L bitstream, and the RIFF
 //! container, mirroring the shape of [`gamut_avif::AvifEncoder`](https://docs.rs/gamut-avif).
 //!
-//! The bitstream paths are under construction (tracked in `../STATUS.md`), so [`WebpEncoder`]
-//! validates its inputs and then returns [`Error::Unsupported`] until the VP8L M0 path lands.
+//! The lossless **VP8L** path is implemented (see [`crate::vp8l::encoder`]); the lossy **VP8** path
+//! still returns [`Error::Unsupported`].
 
 use gamut_core::{Dimensions, Encoder, Error, Result};
+use gamut_riff::write_simple_lossless;
 
 use crate::config::{WebpConfig, WebpMode};
+use crate::vp8l::encoder::encode as encode_vp8l;
+use crate::vp8l::transform::make_argb;
 
 /// Encodes 8-bit RGB images to WebP.
 ///
@@ -69,12 +72,18 @@ impl WebpEncoder {
                 "WebP: RGB buffer length does not match dimensions",
             ));
         }
-        // The container/color plumbing is ready (see gamut-riff); the bitstream encoders are not.
-        let _ = out;
         match self.config.mode {
-            WebpMode::Lossless => Err(Error::Unsupported(
-                "WebP VP8L (lossless) encoding not yet implemented",
-            )),
+            WebpMode::Lossless => {
+                let argb: Vec<u32> = pixels
+                    .chunks_exact(3)
+                    .map(|p| make_argb(0xff, p[0], p[1], p[2]))
+                    .collect();
+                let bitstream = encode_vp8l(&argb, dims)?;
+                let file = write_simple_lossless(&bitstream);
+                let written = file.len();
+                out.extend_from_slice(&file);
+                Ok(written)
+            }
             WebpMode::Lossy => Err(Error::Unsupported(
                 "WebP VP8 (lossy) encoding not yet implemented",
             )),
@@ -116,11 +125,23 @@ mod tests {
     }
 
     #[test]
-    fn lossless_is_unsupported_for_now() {
+    fn lossless_encodes_a_valid_webp_file() {
+        // A solid 2x2 RGB image encodes to a RIFF/WebP file that the gamut decoder reads back
+        // bit-exactly (the round-trip is the lossless guarantee).
         let mut out = Vec::new();
-        let rgb = vec![0u8; 2 * 2 * 3];
-        let err = WebpEncoder::lossless().encode_rgb8(&rgb, dims(2, 2), &mut out);
-        assert!(matches!(err, Err(Error::Unsupported(_))));
+        let rgb = [0x10, 0x20, 0x30].repeat(4);
+        let written = WebpEncoder::lossless()
+            .encode_rgb8(&rgb, dims(2, 2), &mut out)
+            .expect("encode");
+        assert_eq!(written, out.len());
+        assert_eq!(&out[0..4], b"RIFF");
+
+        let mut decoded = Vec::new();
+        let d = crate::WebpDecoder::new()
+            .decode_to_rgb8(&out, &mut decoded)
+            .expect("decode");
+        assert_eq!(d, dims(2, 2));
+        assert_eq!(decoded, rgb);
     }
 
     #[test]
@@ -134,8 +155,11 @@ mod tests {
     #[test]
     fn encoder_trait_delegates() {
         let mut out = Vec::new();
-        let rgb = vec![0u8; 3];
-        let err = (&WebpEncoder::new() as &dyn Encoder).encode(&rgb, dims(1, 1), &mut out);
-        assert!(matches!(err, Err(Error::Unsupported(_))));
+        let rgb = [7u8, 8, 9];
+        let written = (&WebpEncoder::new() as &dyn Encoder)
+            .encode(&rgb, dims(1, 1), &mut out)
+            .expect("encode via trait");
+        assert_eq!(written, out.len());
+        assert_eq!(&out[0..4], b"RIFF");
     }
 }
