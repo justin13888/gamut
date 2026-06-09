@@ -10,7 +10,9 @@
 pub mod cicp;
 mod format;
 mod planar;
+mod ycbcr;
 
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 pub use format::{BitDepth, ChromaSubsampling, PixelFormat};
 pub use planar::Planar8;
+pub use ycbcr::{Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};
