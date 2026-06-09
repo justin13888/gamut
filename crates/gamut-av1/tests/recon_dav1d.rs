@@ -203,6 +203,35 @@ fn deblock_matches_dav1d() {
 }
 
 #[test]
+fn cdef_matches_dav1d() {
+    if !dav1d_available() {
+        eprintln!("skipping recon_dav1d: dav1d not installed");
+        return;
+    }
+    // Strong directional structure (diagonal/edged content) gives the CDEF direction search (§7.15.2)
+    // distinct per-8×8 directions and non-trivial variance, so the primary+secondary deringing filter
+    // (§7.15.3) actually fires. The encoder runs deblock → CDEF on its reconstruction and dav1d does
+    // the same on decode, so byte-equality validates the direction search, constrain, taps, and the
+    // out-of-frame sample availability — at quantizers spanning the signaled CDEF strength range.
+    let edged = |x: u32, y: u32| {
+        let d = ((x + y) % 16) as u8; // 45° structure on the 8×8 CDEF grid
+        let r = if d < 8 { 40 } else { 210 };
+        let g = (30u8).wrapping_add(d.wrapping_mul(13));
+        let b = if (x.wrapping_sub(y)) % 12 < 6 {
+            70
+        } else {
+            190
+        };
+        [r, g, b]
+    };
+    for &q in &[32u8, 80, 128, 220] {
+        for &(w, h) in &[(8, 8), (16, 16), (35, 23), (64, 40)] {
+            check(&planes(w, h, edged), q);
+        }
+    }
+}
+
+#[test]
 fn flat_lossy_reconstruction_matches_dav1d() {
     // A solid color: every residual quantizes to zero, so the reconstruction is the DC prediction
     // chain — a clean test that prediction-from-reconstruction tracks the decoder exactly.
