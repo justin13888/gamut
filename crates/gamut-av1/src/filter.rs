@@ -5,11 +5,11 @@
 //! is decoded), so the encoder applies them once to its final reconstruction to match a conformant
 //! decoder's output.
 //!
-//! Deblock: all blocks are 4×4 under `TX_MODE_LARGEST`, so every transform/prediction edge coincides
-//! and `filterSize == 4` everywhere — only the narrow (4-tap) filter (§7.14.6.3) runs. The frame is a
-//! single intra key-frame with one segment, `loop_filter_sharpness = 0`, and
-//! `loop_filter_delta_enabled = 0`, so the strength is a single signaled `loop_filter_level` (the
-//! same value for both luma passes and both chroma planes).
+//! Deblock: blocks are 4×4 or 8×8 under `TX_MODE_LARGEST`, so the transform and prediction edges
+//! coincide; `filterSize` is 4 (narrow, §7.14.6.3) for any edge touching a 4×4 transform and 8 (wide,
+//! §7.14.6.4) for an 8×8↔8×8 edge. The frame is a single intra key-frame with one segment,
+//! `loop_filter_sharpness = 0`, and `loop_filter_delta_enabled = 0`, so the strength is a single
+//! signaled `loop_filter_level` (the same value for both luma passes and both chroma planes).
 //!
 //! CDEF: a single signaled strength set (`cdef_bits = 0`) is applied to every 8×8 block; the
 //! per-block `cdef_idx` is `L(0)` (no tile bits). `Skips` is 0 so every block is filtered. For 4:4:4,
@@ -26,27 +26,93 @@ pub(crate) fn deblock_level(qindex: u8) -> u8 {
     (u32::from(qindex) / 4).min(63) as u8
 }
 
-/// `Round2Signed`-free narrow (4-tap) deblock of one boundary sample (§7.14.6.2 mask + §7.14.6.3
-/// filter, 8-bit). `base` is the index of `q0` (the first sample on the near side of the edge);
-/// `step` is the index stride between successive samples perpendicular to the edge (`1` for a
-/// vertical edge, the row stride for a horizontal edge). `p0`/`p1` lie at `base - step` /
-/// `base - 2*step`, `q1` at `base + step`.
-fn narrow_filter(buf: &mut [u8], base: usize, step: usize, limit: i32, blimit: i32, thresh: i32) {
+/// The per-edge loop-filter strength thresholds (§7.14.4), all derived from `loop_filter_level` at
+/// `loop_filter_sharpness = 0`: `limit`/`blimit` gate whether filtering happens, `thresh` the
+/// high-edge-variance test.
+#[derive(Clone, Copy)]
+struct Strength {
+    limit: i32,
+    blimit: i32,
+    thresh: i32,
+}
+
+/// Computes the deblock masks (§7.14.6.2) for one boundary sample and, if the filter applies,
+/// returns `(hevMask, flatMask)`. `base` is the index of `q0`; `step` the stride perpendicular to
+/// the edge (`1` vertical, row stride horizontal). `filter_size` is 4 or 8; `is_luma` selects the
+/// tap count. Returns `None` when `filterMask == 0` (no filtering). 8-bit (`BitDepth == 8`).
+fn deblock_masks(
+    buf: &[u8],
+    base: usize,
+    step: usize,
+    filter_size: usize,
+    is_luma: bool,
+    st: Strength,
+) -> Option<(bool, bool)> {
+    let Strength {
+        limit,
+        blimit,
+        thresh,
+    } = st;
+    let s = |k: isize| -> i32 { i32::from(buf[(base as isize + k * step as isize) as usize]) };
+    let (q0, q1, p0, p1) = (s(0), s(1), s(-1), s(-2));
+
+    // filterLen: 4 for the narrow case; chroma wide = 6; luma wide (filterSize 8) = 8. Samples
+    // beyond ±2 are only read (and only in bounds) when the corresponding filterLen requires them.
+    let filter_len = if filter_size == 4 {
+        4
+    } else if !is_luma {
+        6
+    } else {
+        8
+    };
+
+    let hev = (p1 - p0).abs() > thresh || (q1 - q0).abs() > thresh;
+
+    let mut mask = (p1 - p0).abs() > limit
+        || (q1 - q0).abs() > limit
+        || (p0 - q0).abs() * 2 + (p1 - q1).abs() / 2 > blimit;
+    let (q2, p2) = if filter_len >= 6 {
+        let (q2, p2) = (s(2), s(-3));
+        mask |= (p2 - p1).abs() > limit || (q2 - q1).abs() > limit;
+        (q2, p2)
+    } else {
+        (0, 0)
+    };
+    let (q3, p3) = if filter_len >= 8 {
+        let (q3, p3) = (s(3), s(-4));
+        mask |= (p3 - p2).abs() > limit || (q3 - q2).abs() > limit;
+        (q3, p3)
+    } else {
+        (0, 0)
+    };
+    if mask {
+        return None; // filterMask == 0
+    }
+
+    // flatMask (only meaningful for filterSize >= 8, where filterLen >= 6 so p2/q2 are read);
+    // thresholdBd = 1 << (BitDepth - 8) = 1.
+    let flat = if filter_size >= 8 {
+        let t = 1;
+        let mut fm = (p1 - p0).abs() > t
+            || (q1 - q0).abs() > t
+            || (p2 - p0).abs() > t
+            || (q2 - q0).abs() > t;
+        if filter_len >= 8 {
+            fm |= (p3 - p0).abs() > t || (q3 - q0).abs() > t;
+        }
+        !fm
+    } else {
+        false
+    };
+    Some((hev, flat))
+}
+
+/// Narrow (4-tap) deblock filter (§7.14.6.3): modifies up to two samples each side of the edge.
+fn narrow_apply(buf: &mut [u8], base: usize, step: usize, hev: bool) {
     let q0 = i32::from(buf[base]);
     let q1 = i32::from(buf[base + step]);
     let p0 = i32::from(buf[base - step]);
     let p1 = i32::from(buf[base - 2 * step]);
-
-    // filterMask (§7.14.6.2): bail unless the samples straddling the edge are close enough.
-    let mask = (p1 - p0).abs() > limit
-        || (q1 - q0).abs() > limit
-        || (p0 - q0).abs() * 2 + (p1 - q1).abs() / 2 > blimit;
-    if mask {
-        return;
-    }
-    // hevMask: high edge variance ⇒ only the innermost sample on each side is modified.
-    let hev = (p1 - p0).abs() > thresh || (q1 - q0).abs() > thresh;
-
     let clamp = |v: i32| v.clamp(-128, 127);
     let (ps1, ps0, qs0, qs1) = (p1 - 128, p0 - 128, q0 - 128, q1 - 128);
     let mut filter = if hev { clamp(ps1 - qs1) } else { 0 };
@@ -62,18 +128,61 @@ fn narrow_filter(buf: &mut [u8], base: usize, step: usize, limit: i32, blimit: i
     }
 }
 
+/// Wide (low-pass) deblock filter (§7.14.6.4) with `log2Size == 3` (the only wide size reachable
+/// without ≥16 transforms). Luma uses `n = 3, n2 = 0` (modifies 3 samples each side); chroma uses
+/// `n = 2, n2 = 1` (modifies 2 each side). All taps read the original samples, then write.
+fn wide_apply(buf: &mut [u8], base: usize, step: usize, is_luma: bool) {
+    let (n, n2): (isize, isize) = if is_luma { (3, 0) } else { (2, 1) };
+    let read = |k: isize| -> i32 { i32::from(buf[(base as isize + k * step as isize) as usize]) };
+    let mut out = [0i32; 6]; // up to 2*n = 6 modified samples (i = -n .. n-1)
+    for i in -n..n {
+        let mut t = 0i32;
+        for j in -n..=n {
+            let p = (i + j).clamp(-(n + 1), n);
+            let tap = if j.abs() <= n2 { 2 } else { 1 };
+            t += read(p) * tap;
+        }
+        out[(i + n) as usize] = (t + 4) >> 3; // Round2(t, log2Size = 3)
+    }
+    for i in -n..n {
+        buf[(base as isize + i * step as isize) as usize] = out[(i + n) as usize] as u8;
+    }
+}
+
+/// Filters one boundary sample: computes the masks, then applies the narrow or wide filter per the
+/// §7.14.6.1 selection (`filterSize == 4` or `!flatMask` ⇒ narrow; else wide with `log2Size == 3`).
+fn filter_sample(
+    buf: &mut [u8],
+    base: usize,
+    step: usize,
+    filter_size: usize,
+    is_luma: bool,
+    st: Strength,
+) {
+    if let Some((hev, flat)) = deblock_masks(buf, base, step, filter_size, is_luma, st) {
+        if filter_size == 4 || !flat {
+            narrow_apply(buf, base, step, hev);
+        } else {
+            wide_apply(buf, base, step, is_luma);
+        }
+    }
+}
+
 /// Applies the deblocking loop filter to the coded-grid reconstruction planes in place (§7.14).
-/// `coded_w` is the plane row stride; `width`/`height` are the visible (display) dimensions for the
-/// `onScreen` test. The filter follows the spec's 4×4 MI-grid iteration: an edge whose origin lies
-/// inside the visible area is filtered across all four samples of the MI block, which can extend into
-/// the coded-grid padding at a partial bottom/right edge — exactly as a conformant decoder does (the
-/// padding is then cropped away; the coded grid is a multiple of 8, so these reads stay in bounds).
-/// All planes are 4:4:4, so the chroma planes share the luma grid.
+/// `coded_w` is the plane row stride; `mi_cols` strides the `tx_log2` map (`Tx_Width_Log2` per 4×4
+/// MI cell, shared by all planes for 4:4:4); `width`/`height` are the visible dimensions for the
+/// `onScreen` test. Only transform-block edges are filtered (an 8×8 block's internal 4-line is not a
+/// transform edge); the filter size is `Min(Tx_Width)` across the edge — 4 (narrow) for any edge
+/// touching a 4×4 transform, 8 (wide) for an 8×8↔8×8 edge. Partial bottom/right edges filter into the
+/// coded-grid padding exactly as a conformant decoder does (the coded grid is a multiple of 8, so the
+/// reads stay in bounds); the padding is then cropped.
 pub(crate) fn deblock(
     planes: &mut [Vec<u8>; 3],
     coded_w: usize,
+    mi_cols: usize,
     width: usize,
     height: usize,
+    tx_log2: &[u8],
     qindex: u8,
 ) {
     let lvl = i32::from(deblock_level(qindex));
@@ -82,32 +191,59 @@ pub(crate) fn deblock(
     }
     // sharpness = 0 ⇒ shift = 0; the same level applies to both luma passes and both chroma planes.
     let limit = lvl.max(1);
-    let blimit = 2 * (lvl + 2) + limit;
-    let thresh = lvl >> 4;
+    let st = Strength {
+        limit,
+        blimit: 2 * (lvl + 2) + limit,
+        thresh: lvl >> 4,
+    };
 
-    for plane in planes.iter_mut() {
+    for (plane_idx, plane) in planes.iter_mut().enumerate() {
+        let is_luma = plane_idx == 0;
+        let size_cap = if is_luma { 16 } else { 8 };
+
         // Pass 0: vertical edges. Each on-screen edge (column x = 4, 8, … inside the frame) filters
-        // the four sample rows of its MI block. The whole pass must finish before the horizontal
-        // pass, which reads the vertical-filtered samples.
+        // the four sample rows of its MI block, when the column is a transform-block edge. The whole
+        // pass must finish before the horizontal pass, which reads the vertical-filtered samples.
         let mut x = 4;
         while x < width {
+            let col = x >> 2;
             let mut y = 0;
             while y < height {
-                for i in 0..4 {
-                    narrow_filter(plane, (y + i) * coded_w + x, 1, limit, blimit, thresh);
+                let row = y >> 2;
+                let txw = 1usize << tx_log2[row * mi_cols + col];
+                if x % txw == 0 {
+                    let prev_txw = 1usize << tx_log2[row * mi_cols + (col - 1)];
+                    let filter_size = prev_txw.min(txw).min(size_cap);
+                    for i in 0..4 {
+                        filter_sample(plane, (y + i) * coded_w + x, 1, filter_size, is_luma, st);
+                    }
                 }
                 y += 4;
             }
             x += 4;
         }
         // Pass 1: horizontal edges (row y = 4, 8, … inside the frame), filtering the four columns of
-        // each MI block.
+        // each MI block when the row is a transform-block edge.
         let mut y = 4;
         while y < height {
+            let row = y >> 2;
             let mut x = 0;
             while x < width {
-                for i in 0..4 {
-                    narrow_filter(plane, y * coded_w + (x + i), coded_w, limit, blimit, thresh);
+                let col = x >> 2;
+                let txh = 1usize << tx_log2[row * mi_cols + col];
+                if y % txh == 0 {
+                    let prev_txh = 1usize << tx_log2[(row - 1) * mi_cols + col];
+                    let filter_size = prev_txh.min(txh).min(size_cap);
+                    for i in 0..4 {
+                        filter_sample(
+                            plane,
+                            y * coded_w + (x + i),
+                            coded_w,
+                            filter_size,
+                            is_luma,
+                            st,
+                        );
+                    }
                 }
                 x += 4;
             }
@@ -375,7 +511,18 @@ mod tests {
         // the filterMask passes and, with no high edge variance, two samples each side are adjusted
         // toward a gradient. Hand-traced: filter = 24, filter1 = filter2 = 3, f = 2.
         let mut buf = [100u8, 100, 108, 108];
-        narrow_filter(&mut buf, 2, 1, 10, 34, 0);
+        filter_sample(
+            &mut buf,
+            2,
+            1,
+            4,
+            true,
+            Strength {
+                limit: 10,
+                blimit: 34,
+                thresh: 0,
+            },
+        );
         assert_eq!(buf, [102, 103, 105, 106]);
     }
 
@@ -383,7 +530,18 @@ mod tests {
     fn narrow_filter_skips_large_step() {
         // A step of 20 exceeds blimit at lvl 10, so filterMask is 0 and nothing changes.
         let mut buf = [100u8, 100, 120, 120];
-        narrow_filter(&mut buf, 2, 1, 10, 34, 0);
+        filter_sample(
+            &mut buf,
+            2,
+            1,
+            4,
+            true,
+            Strength {
+                limit: 10,
+                blimit: 34,
+                thresh: 0,
+            },
+        );
         assert_eq!(buf, [100, 100, 120, 120]);
     }
 
@@ -443,7 +601,9 @@ mod tests {
             vec![128u8; 16 * 16],
             vec![128u8; 16 * 16],
         ];
-        deblock(&mut flat, 16, 16, 16, 64);
+        // 16×16 ⇒ 4×4 MI grid, all 4×4 transforms (tx_log2 = 2 everywhere ⇒ narrow filter).
+        let tx_log2 = vec![2u8; 4 * 4];
+        deblock(&mut flat, 16, 4, 16, 16, &tx_log2, 64);
         assert!(flat[0].iter().all(|&v| v == 128));
 
         // A vertical step at column 8 gets smoothed across the x = 8 boundary.
@@ -454,7 +614,7 @@ mod tests {
             }
         }
         let before = planes[0].clone();
-        deblock(&mut planes, 16, 16, 16, 64); // qindex 64 ⇒ level 16
+        deblock(&mut planes, 16, 4, 16, 16, &tx_log2, 64); // qindex 64 ⇒ level 16
         assert_ne!(
             planes[0], before,
             "deblock should modify samples near the edge"

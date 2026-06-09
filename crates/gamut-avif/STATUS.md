@@ -111,7 +111,7 @@ not a contract:
 | `skip` = 1 (no-residual / all-zero blocks) | §5.11.11 | ☐ | M1 |
 | intra_segment_id (segment 0) | §5.11.8/.9 | ✅ | M0 |
 | per-block read_cdef / read_delta_qindex / read_delta_lf | §5.11.56/.12/.13 | ☐ | M1 |
-| read_tx_size / read_var_tx_size (lossless → TX_4X4) | §5.11.15-.17 | ✅ (forced) | M0 |
+| read_tx_size / read_var_tx_size (TX_MODE_LARGEST → tx = block) | §5.11.15-.17 | ✅ (4×4 + 8×8 blocks) | M0/M1 |
 
 ## D. AV1 — intra prediction (§7.11.2)
 
@@ -158,15 +158,15 @@ not a contract:
 | full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ☐ | M1/M6 |
 | CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ☐ | M1 |
 | `coeffs()` TX_4X4: txb_skip/eob/base/br/sign/dc_sign/golomb | §5.11.39 | ✅ | M0 |
-| `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ☐ | M1 |
+| `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8) | M1 |
 | scan table `Default_Scan_4x4` + context-offset tables | §9.2/§9.3/§8.3.2 | ✅ | M0 |
-| all scan tables (default/col/row per tx size) | §9.2 | ☐ | M1 |
+| all scan tables (default/col/row per tx size) | §9.2 | ✅ (4×4 + 8×8 default) | M1 |
 
 ## H. AV1 — in-loop filters & post (§7.14-§7.18; all bypassed under CodedLossless)
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4 narrow filter) | M1 |
+| deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8, narrow + wide) | M1 |
 | CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy 4:4:4) | M1 |
 | loop restoration (Wiener + self-guided) | §5.9.20,§7.17 | ☐ | M1 |
 | superres horizontal upscaling | §5.9.8,§7.16 | ☐ | M1 |
