@@ -29,6 +29,10 @@ wasm-bindgen = "0.2"
 # Decode-only: gamut-cli reads PNG/JPEG/PPM inputs; all encoding stays in gamut crates.
 # `default-features = false` drops image's own avif/webp decoders and rayon.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "pnm"] }
+# libwebp FFI — used ONLY as a dev-dependency oracle in gamut-webp's differential tests, never
+# in shipped code. Handwritten bindings (no bindgen/libclang); statically links bundled libwebp,
+# so the test build needs a C toolchain while the library itself stays C-free.
+libwebp-sys2 = "0.2"
 
 # Internal crates. `path` is used for local builds so cross-crate edits resolve without a
 # crates.io round-trip; `version` is the requirement recorded in the published manifest.

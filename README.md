@@ -64,7 +64,9 @@ AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens.
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no
 inter-frame prediction, no motion compensation, no video sequences. The video-named codec
 crates (`gamut-av1`, `gamut-av2`, `gamut-vvc`, and HEVC-based `gamut-heic`) are still-image
-encoders, not video codecs, and gamut will not grow video primitives.
+encoders, not video codecs, and gamut will not grow video primitives. This extends to
+container-level multi-frame sequences: WebP animation (`ANIM`/`ANMF`) is out of scope even
+though each frame is an independent keyframe — only single still images are supported.
 
 ## Usage
 
@@ -90,12 +92,12 @@ format.
 | `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering            | placeholder |
 | `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)       | placeholder |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                                | placeholder |
-| `gamut-riff`      | RIFF container utilities (WebP)                                         | placeholder |
+| `gamut-riff`      | RIFF container utilities (WebP)                                         | implemented |
 | `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF    | M0 lossless |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor         | placeholder |
 | `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                 | M0 lossless |
 | `gamut-jxl`       | JPEG XL encoder/decoder                                                 | placeholder |
-| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                             | placeholder |
+| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                             | VP8L lossless |
 | `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                      | placeholder |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                         | placeholder |
 | `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives        | sandbox     |

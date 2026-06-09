@@ -16,18 +16,25 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
 
 ## Usage
 
-No public API yet — implementation pending. Once it lands, `gamut-riff` will expose a chunk
-reader/writer that [`gamut-webp`](../gamut-webp) drives; most consumers will use it indirectly
-through `gamut-webp` rather than directly.
+`gamut-riff` exposes a RIFF chunk reader (`RiffReader`) and writer (`RiffWriter`), a `FourCc` type,
+and WebP-specific helpers (`write_simple_lossless` / `write_simple_lossy`, `WebpChunkId`). It is
+driven by [`gamut-webp`](../gamut-webp); most consumers use it indirectly through that crate rather
+than directly.
 
 ## Status
 
-Placeholder — implementation pending.
+The simple-WebP container (RIFF/WEBP header + `VP8 `/`VP8L` chunk read/write) is implemented.
+Extended-WebP chunks (`VP8X`, `ALPH`, `ANIM`/`ANMF`, metadata) are tracked alongside the codec in
+[`gamut-webp/STATUS.md`](../gamut-webp/STATUS.md) (section A).
 
 ## Roadmap
 
-- RIFF chunk writer for the simple-WebP case (`RIFF`/`WEBP` + `VP8 `/`VP8L`).
-- Extended WebP (`VP8X`): alpha (`ALPH`), animation (`ANIM`/`ANMF`), and metadata chunks.
+- RIFF chunk reader/writer for the simple-WebP case (`RIFF`/`WEBP` + `VP8 `/`VP8L`). — done
+- Extended WebP (`VP8X`) — **in scope**: alpha (`ALPH`) and metadata chunks (`ICCP`, `EXIF`,
+  `XMP `), read + write.
+- Animation (`ANIM`/`ANMF`) — **out of scope** (recognized FourCCs only). Multi-frame sequences sit
+  outside the image-first charter; see
+  [`gamut-webp/STATUS.md`](../gamut-webp/STATUS.md#scope-decisions--non-core-feature-paths).
 
 ## License
 

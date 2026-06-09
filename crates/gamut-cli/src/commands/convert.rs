@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use gamut::avif::AvifEncoder;
+use gamut::webp::WebpEncoder;
 
 use crate::error::CliError;
 use crate::input::decode_rgb8;
@@ -24,12 +25,14 @@ pub(crate) struct ConvertArgs {
     qindex: u8,
 }
 
-/// Output container/codec for `gamut convert`. Only AVIF is implemented today; the other
-/// gamut formats are still stubs.
+/// Output container/codec for `gamut convert`. Both AVIF and WebP (VP8L lossless) encoding are
+/// implemented.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum OutputFormat {
     /// AVIF (8-bit RGB; lossless or lossy intra via `--qindex`).
     Avif,
+    /// WebP (VP8L lossless).
+    Webp,
 }
 
 /// Runs the `convert` command: decode the input, encode it, and report the result.
@@ -51,6 +54,9 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
             AvifEncoder::new()
                 .with_qindex(args.qindex)
                 .encode_rgb8(&rgb, dims, &mut out)?;
+        }
+        OutputFormat::Webp => {
+            WebpEncoder::new().encode_rgb8(&rgb, dims, &mut out)?;
         }
     }
     tracing::info!(bytes = out.len(), qindex = args.qindex, "encoded output");
@@ -88,6 +94,7 @@ fn resolve_format(args: &ConvertArgs) -> Result<OutputFormat, CliError> {
         .as_deref()
     {
         Some("avif") => Ok(OutputFormat::Avif),
+        Some("webp") => Ok(OutputFormat::Webp),
         Some(other) => Err(CliError::UnsupportedOutput(other.to_string())),
         None => Err(CliError::UnsupportedOutput("<none>".to_string())),
     }
