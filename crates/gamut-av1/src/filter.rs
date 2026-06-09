@@ -5,9 +5,11 @@
 //! is decoded), so the encoder applies them once to its final reconstruction to match a conformant
 //! decoder's output.
 //!
-//! Deblock: blocks are 4×4 or 8×8 under `TX_MODE_LARGEST`, so the transform and prediction edges
-//! coincide; `filterSize` is 4 (narrow, §7.14.6.3) for any edge touching a 4×4 transform and 8 (wide,
-//! §7.14.6.4) for an 8×8↔8×8 edge. The frame is a single intra key-frame with one segment,
+//! Deblock: blocks are 4×4, 8×8 or 16×16 under `TX_MODE_LARGEST`, so the transform and prediction
+//! edges coincide; `filterSize` is `Min(16 luma / 8 chroma, baseSize)` where `baseSize` is the
+//! minimum transform width across the edge: 4 (narrow, §7.14.6.3) for any edge touching a 4×4
+//! transform, 8 (wide, §7.14.6.4 `log2Size = 3`) for an 8↔8 edge, and 16 (wide, §7.14.6.4
+//! `log2Size = 4`) for a 16↔16 luma edge. The frame is a single intra key-frame with one segment,
 //! `loop_filter_sharpness = 0`, and `loop_filter_delta_enabled = 0`, so the strength is a single
 //! signaled `loop_filter_level` (the same value for both luma passes and both chroma planes).
 //!
@@ -47,7 +49,7 @@ fn deblock_masks(
     filter_size: usize,
     is_luma: bool,
     st: Strength,
-) -> Option<(bool, bool)> {
+) -> Option<(bool, bool, bool)> {
     let Strength {
         limit,
         blimit,
@@ -104,7 +106,23 @@ fn deblock_masks(
     } else {
         false
     };
-    Some((hev, flat))
+
+    // flatMask2 (only required for filterSize == 16): are the outer samples p4..p6 / q4..q6 also flat?
+    // Only read at the wide 16-tap luma edges, where p6 = s(-7) / q6 = s(6) are guaranteed in bounds.
+    let flat2 = if filter_size >= 16 {
+        let t = 1;
+        let (q4, q5, q6, p4, p5, p6) = (s(4), s(5), s(6), s(-5), s(-6), s(-7));
+        let fm = (p6 - p0).abs() > t
+            || (q6 - q0).abs() > t
+            || (p5 - p0).abs() > t
+            || (q5 - q0).abs() > t
+            || (p4 - p0).abs() > t
+            || (q4 - q0).abs() > t;
+        !fm
+    } else {
+        false
+    };
+    Some((hev, flat, flat2))
 }
 
 /// Narrow (4-tap) deblock filter (§7.14.6.3): modifies up to two samples each side of the edge.
@@ -128,13 +146,21 @@ fn narrow_apply(buf: &mut [u8], base: usize, step: usize, hev: bool) {
     }
 }
 
-/// Wide (low-pass) deblock filter (§7.14.6.4) with `log2Size == 3` (the only wide size reachable
-/// without ≥16 transforms). Luma uses `n = 3, n2 = 0` (modifies 3 samples each side); chroma uses
-/// `n = 2, n2 = 1` (modifies 2 each side). All taps read the original samples, then write.
-fn wide_apply(buf: &mut [u8], base: usize, step: usize, is_luma: bool) {
-    let (n, n2): (isize, isize) = if is_luma { (3, 0) } else { (2, 1) };
+/// Wide (low-pass) deblock filter (§7.14.6.4), parameterized by `log2_size`. `log2_size == 4` (a
+/// 16↔16 luma edge) uses `n = 6, n2 = 1` (modifies 6 samples each side from p6..q6); `log2_size == 3`
+/// uses `n = 3, n2 = 0` for luma (3 each side) and `n = 2, n2 = 1` for chroma (2 each side). All taps
+/// read the original samples, then write.
+fn wide_apply(buf: &mut [u8], base: usize, step: usize, is_luma: bool, log2_size: u32) {
+    let (n, n2): (isize, isize) = if log2_size == 4 {
+        (6, 1)
+    } else if is_luma {
+        (3, 0)
+    } else {
+        (2, 1)
+    };
     let read = |k: isize| -> i32 { i32::from(buf[(base as isize + k * step as isize) as usize]) };
-    let mut out = [0i32; 6]; // up to 2*n = 6 modified samples (i = -n .. n-1)
+    let mut out = [0i32; 12]; // up to 2*n = 12 modified samples (i = -n .. n-1)
+    let rnd = 1i32 << (log2_size - 1);
     for i in -n..n {
         let mut t = 0i32;
         for j in -n..=n {
@@ -142,15 +168,16 @@ fn wide_apply(buf: &mut [u8], base: usize, step: usize, is_luma: bool) {
             let tap = if j.abs() <= n2 { 2 } else { 1 };
             t += read(p) * tap;
         }
-        out[(i + n) as usize] = (t + 4) >> 3; // Round2(t, log2Size = 3)
+        out[(i + n) as usize] = (t + rnd) >> log2_size; // Round2(t, log2Size)
     }
     for i in -n..n {
         buf[(base as isize + i * step as isize) as usize] = out[(i + n) as usize] as u8;
     }
 }
 
-/// Filters one boundary sample: computes the masks, then applies the narrow or wide filter per the
-/// §7.14.6.1 selection (`filterSize == 4` or `!flatMask` ⇒ narrow; else wide with `log2Size == 3`).
+/// Filters one boundary sample: computes the masks, then applies the filter per the §7.14.6.1
+/// selection — narrow if `filterSize == 4` or `!flatMask`; else wide `log2Size == 3` if
+/// `filterSize == 8` or `!flatMask2`; else (a 16↔16 luma edge) wide `log2Size == 4`.
 fn filter_sample(
     buf: &mut [u8],
     base: usize,
@@ -159,11 +186,13 @@ fn filter_sample(
     is_luma: bool,
     st: Strength,
 ) {
-    if let Some((hev, flat)) = deblock_masks(buf, base, step, filter_size, is_luma, st) {
+    if let Some((hev, flat, flat2)) = deblock_masks(buf, base, step, filter_size, is_luma, st) {
         if filter_size == 4 || !flat {
             narrow_apply(buf, base, step, hev);
+        } else if filter_size == 8 || !flat2 {
+            wide_apply(buf, base, step, is_luma, 3);
         } else {
-            wide_apply(buf, base, step, is_luma);
+            wide_apply(buf, base, step, is_luma, 4);
         }
     }
 }
@@ -172,8 +201,9 @@ fn filter_sample(
 /// `coded_w` is the plane row stride; `mi_cols` strides the `tx_log2` map (`Tx_Width_Log2` per 4×4
 /// MI cell, shared by all planes for 4:4:4); `width`/`height` are the visible dimensions for the
 /// `onScreen` test. Only transform-block edges are filtered (an 8×8 block's internal 4-line is not a
-/// transform edge); the filter size is `Min(Tx_Width)` across the edge — 4 (narrow) for any edge
-/// touching a 4×4 transform, 8 (wide) for an 8×8↔8×8 edge. Partial bottom/right edges filter into the
+/// transform edge); the filter size is `Min(Tx_Width)` across the edge (capped at 16 luma / 8 chroma)
+/// — 4 (narrow) for any edge touching a 4×4 transform, 8 (wide) for an 8↔8 edge, 16 (wide) for a
+/// 16↔16 luma edge. Partial bottom/right edges filter into the
 /// coded-grid padding exactly as a conformant decoder does (the coded grid is a multiple of 8, so the
 /// reads stay in bounds); the padding is then cropped.
 pub(crate) fn deblock(

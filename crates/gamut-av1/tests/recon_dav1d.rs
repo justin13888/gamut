@@ -295,3 +295,46 @@ fn directional_and_filter_intra_8x8_match_dav1d() {
         }
     }
 }
+
+#[test]
+fn transform_16x16_blocks_match_dav1d() {
+    // Very-low-amplitude ramps keep each 16×16 block under the split threshold, so the encoder codes
+    // them as single TX_16X16 blocks (PARTITION_NONE at BLOCK_16X16) — exercising the 256-coefficient
+    // scan/CDFs (Eob_Pt_256, the txSzCtx-2 coeff tables), the per-`intraDir` 16×16 transform-type CDF,
+    // 16×16 directional/filter-intra prediction, and — between adjacent 16×16 luma blocks — the wide
+    // `filterSize == 16` deblock filter (§7.14.6.4 with log2Size = 4) plus its flatMask2. The three
+    // orientations sweep the angle space; byte-equality with dav1d validates every new path. Sizes
+    // are ≥ a superblock fraction so 16×16 blocks form in the interior at offsets that are multiples
+    // of four MI cells.
+    let diagonal = |x: u32, y: u32| {
+        let v = (40 + (x as i32 + y as i32) / 8).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    let tilted = |x: u32, y: u32| {
+        let v = (50 + (x as i32 * 2 + y as i32) / 6).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    let patches = |x: u32, y: u32| {
+        let v = (60 + ((x / 16 + y / 16) % 3) as i32 * 6).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    for f in [&diagonal as &dyn Fn(u32, u32) -> [u8; 3], &tilted, &patches] {
+        for &q in &[21u8, 64, 130, 220] {
+            for &(w, h) in &[(96u32, 96u32), (64, 64), (100, 80)] {
+                check(&planes(w, h, f), q);
+            }
+        }
+    }
+}
