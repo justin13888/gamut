@@ -246,6 +246,8 @@ impl<'a> FrameEncoder<'a> {
                 self.height,
                 self.qindex,
             );
+            // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15).
+            planes = crate::filter::cdef(&planes, self.coded_w, self.qindex);
         }
         let recon = Reconstruction {
             planes,

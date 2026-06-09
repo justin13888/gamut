@@ -123,7 +123,8 @@ pub(crate) fn sequence_header_payload(
     w.put_bit(u8::from(lossy)); // enable_filter_intra
     w.put_bit(0); // enable_intra_edge_filter = 0
     w.put_bit(0); // enable_superres = 0
-    w.put_bit(0); // enable_cdef = 0
+    // CDEF (§7.15) is used only on the lossy path; the lossless path is CodedLossless (CDEF off).
+    w.put_bit(u8::from(lossy)); // enable_cdef
     w.put_bit(0); // enable_restoration = 0
 
     // color_config(): high_bitdepth=0; (profile 1 ⇒ mono_chrome=0 inferred);
@@ -210,7 +211,18 @@ pub(crate) fn frame_header_payload(
         }
         w.put_bits(0, 3); // loop_filter_sharpness
         w.put_bit(0); // loop_filter_delta_enabled = 0
-        // cdef_params(): enable_cdef = 0 ⇒ no bits. lr_params(): enable_restoration = 0 ⇒ no bits.
+        // cdef_params(): enable_cdef = 1 ⇒ CdefDamping = 3, cdef_bits = 0 (one strength set applied
+        // everywhere; cdef_idx is then L(0) = 0 bits in the tile). The secondary strength is signaled
+        // pre-mapping (the decoder maps 3 → 4), so a stored 4 is emitted as 3.
+        let (y_pri, y_sec, uv_pri, uv_sec) = crate::filter::cdef_strengths(base_q_idx);
+        let sec_code = |s: i32| -> u32 { if s == 4 { 3 } else { s as u32 } };
+        w.put_bits(0, 2); // cdef_damping_minus_3 (CdefDamping = 3)
+        w.put_bits(0, 2); // cdef_bits = 0
+        w.put_bits(y_pri as u32, 4); // cdef_y_pri_strength[0]
+        w.put_bits(sec_code(y_sec), 2); // cdef_y_sec_strength[0]
+        w.put_bits(uv_pri as u32, 4); // cdef_uv_pri_strength[0]
+        w.put_bits(sec_code(uv_sec), 2); // cdef_uv_sec_strength[0]
+        // lr_params(): enable_restoration = 0 ⇒ no bits.
         w.put_bit(0); // read_tx_mode: tx_mode_select = 0 ⇒ TX_MODE_LARGEST
         // frame_reference_mode / skip_mode_params (intra) ⇒ no bits. allow_warped_motion = 0.
     }
