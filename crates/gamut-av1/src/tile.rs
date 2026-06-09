@@ -45,6 +45,8 @@ pub(crate) struct FrameEncoder<'a> {
     coded_h: usize,
     /// `base_q_idx`; 0 ⇒ lossless WHT path, > 0 ⇒ lossy DCT path.
     qindex: u8,
+    /// Coefficient-CDF quantizer context (§8.3.2): 0 if `qindex ≤ 20`, 1 if ≤ 60, 2 if ≤ 120, else 3.
+    qctx: usize,
     dc_quant: i32,
     ac_quant: i32,
     /// Reconstructed samples per plane on the coded grid (lossy path only).
@@ -86,6 +88,12 @@ impl<'a> FrameEncoder<'a> {
             coded_w,
             coded_h,
             qindex,
+            qctx: match qindex {
+                0..=20 => 0,
+                21..=60 => 1,
+                61..=120 => 2,
+                _ => 3,
+            },
             dc_quant: dc_q(8, i32::from(qindex)),
             ac_quant: ac_q(8, i32::from(qindex)),
             recon,
@@ -308,6 +316,7 @@ impl<'a> FrameEncoder<'a> {
         quant: &[i32; 16],
     ) {
         let ptype = usize::from(plane > 0);
+        let qctx = self.qctx;
         let scan = &cdf::DEFAULT_SCAN_4X4;
 
         let mut eob = 0usize;
@@ -319,7 +328,7 @@ impl<'a> FrameEncoder<'a> {
 
         let txb_ctx = self.txb_skip_ctx(plane, x4, y4, block_w);
         self.sym
-            .encode_symbol(usize::from(eob == 0), &cdf::TXB_SKIP[txb_ctx]);
+            .encode_symbol(usize::from(eob == 0), &cdf::TXB_SKIP[qctx][txb_ctx]);
         if eob == 0 {
             self.set_ctx(plane, x4, y4, 0, 0);
             return;
@@ -333,14 +342,15 @@ impl<'a> FrameEncoder<'a> {
 
         // eob position (TX_CLASS_2D ⇒ eob_pt context 0).
         let eobpt = eobpt_from_eob(eob);
-        self.sym.encode_symbol(eobpt - 1, &cdf::EOB_PT_16[ptype][0]);
+        self.sym
+            .encode_symbol(eobpt - 1, &cdf::EOB_PT_16[qctx][ptype][0]);
         if eobpt >= 3 {
             let nbits = eobpt - 2;
             let base = (1usize << (eobpt - 2)) + 1;
             let extra = eob - base;
             self.sym.encode_symbol(
                 (extra >> (nbits - 1)) & 1,
-                &cdf::EOB_EXTRA[ptype][eobpt - 3],
+                &cdf::EOB_EXTRA[qctx][ptype][eobpt - 3],
             );
             let mut i = nbits as isize - 2;
             while i >= 0 {
@@ -358,12 +368,12 @@ impl<'a> FrameEncoder<'a> {
                 let ctx = coeff_base_eob_ctx(c);
                 self.sym.encode_symbol(
                     (level.min(3) - 1) as usize,
-                    &cdf::COEFF_BASE_EOB[ptype][ctx],
+                    &cdf::COEFF_BASE_EOB[qctx][ptype][ctx],
                 );
             } else {
                 let ctx = coeff_base_ctx(pos, &levels);
                 self.sym
-                    .encode_symbol(level.min(3) as usize, &cdf::COEFF_BASE[ptype][ctx]);
+                    .encode_symbol(level.min(3) as usize, &cdf::COEFF_BASE[qctx][ptype][ctx]);
             }
             if level > NUM_BASE_LEVELS {
                 let br_ctx = coeff_br_ctx(pos, &levels);
@@ -371,7 +381,7 @@ impl<'a> FrameEncoder<'a> {
                 for _ in 0..4 {
                     let brv = rem.min(3);
                     self.sym
-                        .encode_symbol(brv as usize, &cdf::COEFF_BR[ptype][br_ctx]);
+                        .encode_symbol(brv as usize, &cdf::COEFF_BR[qctx][ptype][br_ctx]);
                     rem -= brv;
                     if brv < 3 {
                         break;

@@ -42,9 +42,10 @@ pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> 
 }
 
 /// Encodes 8-bit 4:4:4 identity planes (Y=G, U=B, V=R) as an AV1 intra keyframe at quantizer
-/// `qindex` (`base_q_idx`). `qindex == 0` is lossless; `1..=20` is lossy intra (DCT + quantization)
-/// while keeping coefficient-CDF quantizer context 0. Returns the encoded still and the
-/// reconstruction (the exact decoder output) for verification.
+/// `qindex` (`base_q_idx`). `qindex == 0` is lossless; `1..=255` is lossy intra (DCT +
+/// quantization), selecting the coefficient-CDF quantizer context per spec §8.3.2 (0 if `qindex`
+/// ≤ 20, 1 if ≤ 60, 2 if ≤ 120, else 3). Returns the encoded still and the reconstruction (the
+/// exact decoder output) for verification.
 ///
 /// # Errors
 ///
@@ -235,8 +236,9 @@ mod tests {
     #[test]
     fn lossy_encode_structure_and_determinism() {
         // Exercises the lossy path (DCT + quant + reconstruction) across sizes/qindex without a
-        // decoder: OBU framing, deterministic output, and the reconstruction dimensions.
-        for &q in &[1u8, 8, 20] {
+        // decoder: OBU framing, deterministic output, and the reconstruction dimensions. The
+        // qindex set spans every coefficient-CDF quantizer context (≤20, ≤60, ≤120, else).
+        for &q in &[1u8, 8, 20, 40, 90, 200, 255] {
             for (w, h) in [(1, 1), (8, 8), (17, 13), (40, 24), (130, 70)] {
                 let p = planes(w, h, |x, y| {
                     [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8]
