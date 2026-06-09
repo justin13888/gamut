@@ -306,10 +306,10 @@ impl<'a> FrameEncoder<'a> {
             if self.qindex == 0 {
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
                 false
-            } else if (bw == 8 || bw == 16) && !self.should_split(r, c, bw) {
-                // Lossy: an 8×8 or 16×16 region coded as a single PARTITION_NONE block + one
-                // TX_8X8 / TX_16X16 when it is smooth enough; otherwise split for per-block
-                // mode/transform adaptation (16×16 → four 8×8, which recurse to 4×4 as needed).
+            } else if (bw == 8 || bw == 16 || bw == 32) && !self.should_split(r, c, bw) {
+                // Lossy: an 8×8 / 16×16 / 32×32 region coded as a single PARTITION_NONE block + one
+                // TX_8X8 / TX_16X16 / TX_32X32 when it is smooth enough; otherwise split for per-block
+                // mode/transform adaptation (each SPLIT halves, recursing down to 4×4 as needed).
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
                 false
             } else {
@@ -436,7 +436,8 @@ impl<'a> FrameEncoder<'a> {
             let fi_cdf: &[u16] = match bw {
                 4 => &cdf::FILTER_INTRA_4X4,
                 8 => &cdf::FILTER_INTRA_8X8,
-                _ => &cdf::FILTER_INTRA_16X16,
+                16 => &cdf::FILTER_INTRA_16X16,
+                _ => &cdf::FILTER_INTRA_32X32,
             };
             self.sym
                 .encode_symbol(usize::from(filter_intra.is_some()), fi_cdf);
@@ -470,7 +471,8 @@ impl<'a> FrameEncoder<'a> {
         // plane; otherwise it is a raster of 4×4 transforms.
         let large_tx = match bw {
             8 => TxSize::Tx8x8,
-            _ => TxSize::Tx16x16,
+            16 => TxSize::Tx16x16,
+            _ => TxSize::Tx32x32,
         };
         for plane in 0..3 {
             let pred = Pred {
@@ -591,10 +593,13 @@ impl<'a> FrameEncoder<'a> {
             intra_dir,
         );
 
+        // dqDenom (§7.12.3) divides the dequantized coefficient by the transform size class: 2 for
+        // 32×32 (1 for ≤16×16). A conformant decoder applies it, so the encoder reconstruction must.
+        let dq_denom = tx_size.dq_denom();
         let mut dq = vec![0i32; n * n];
         for (i, &lvl) in levels.iter().enumerate() {
             let q = if i == 0 { self.dc_quant } else { self.ac_quant };
-            dq[i] = dequant(lvl, q, 1, 8);
+            dq[i] = dequant(lvl, q, dq_denom, 8);
         }
         let resid = inverse_transform_2d(&dq, tx_size, tx, 8);
         for i in 0..n {
@@ -606,13 +611,18 @@ impl<'a> FrameEncoder<'a> {
     }
 
     /// Forward-transforms and quantizes a square residual under transform type `tx`, returning the
-    /// quantized coefficient levels (DC uses `dc_quant`, AC uses `ac_quant`).
+    /// quantized coefficient levels (DC uses `dc_quant`, AC uses `ac_quant`). Coefficients are
+    /// pre-scaled by `dqDenom` so that `dequant(level, q, dqDenom)` recovers the coefficient (the
+    /// decoder divides by `dqDenom` for 32×32; §7.12.3) — without it a 32×32 block would reconstruct
+    /// at half residual amplitude. This is a quality choice; bit-exactness is unaffected (both the
+    /// encoder reconstruction and the decoder dequantize the same coded levels with the same divisor).
     fn quantize_tx(&self, res: &[i32], tx_size: TxSize, tx: TxType) -> Vec<i32> {
         let coeff = forward_transform_2d(res, tx_size, tx);
+        let denom = tx_size.dq_denom();
         let mut levels = vec![0i32; coeff.len()];
         for (i, &c) in coeff.iter().enumerate() {
             let q = if i == 0 { self.dc_quant } else { self.ac_quant };
-            levels[i] = quantize(c, q);
+            levels[i] = quantize(c * denom, q);
         }
         levels
     }
@@ -620,8 +630,16 @@ impl<'a> FrameEncoder<'a> {
     /// Selects a luma transform type from `TX_SET_INTRA_2` by a simple coded-cost proxy (sum of
     /// `1 + |level|` over non-zero coefficients), preferring `DCT_DCT` on ties. Returns the type,
     /// its `Tx_Type_Intra_Inv_Set2` symbol, and the quantized levels. The choice is a quality
-    /// decision (any valid type round-trips bit-exactly); only the *signaling* must be correct.
+    /// decision (any valid type round-trips bit-exactly); only the *signaling* must be correct. A
+    /// 32×32 block is `TX_SET_DCTONLY` (§5.11.48), so it is forced to `DCT_DCT` (no type is signaled).
     fn select_tx_type(&self, res: &[i32], tx_size: TxSize) -> (TxType, usize, Vec<i32>) {
+        if tx_size.width() >= 32 {
+            return (
+                TxType::DctDct,
+                1,
+                self.quantize_tx(res, tx_size, TxType::DctDct),
+            );
+        }
         let cost = |levels: &[i32]| -> i32 {
             levels
                 .iter()
@@ -1141,10 +1159,10 @@ impl<'a> FrameEncoder<'a> {
             return vec![self.dc_pred(plane, sx, sy, n); n * n];
         }
         let (above, left, top_left) = self.reference_basic(plane, sx, sy, n);
-        let w: &[i32] = if n == 8 {
-            &cdf::SM_WEIGHTS_8X8
-        } else {
-            &cdf::SM_WEIGHTS_16X16
+        let w: &[i32] = match n {
+            8 => &cdf::SM_WEIGHTS_8X8,
+            16 => &cdf::SM_WEIGHTS_16X16,
+            _ => &cdf::SM_WEIGHTS_32X32,
         };
         let mut pred = vec![0i32; n * n];
         for i in 0..n {
@@ -1407,7 +1425,7 @@ impl<'a> FrameEncoder<'a> {
     ) {
         let ptype = usize::from(plane > 0);
         let qctx = self.qctx;
-        let n = tx_size.width(); // square: width == height (4, 8, or 16)
+        let n = tx_size.width(); // square: width == height (4, 8, 16, or 32)
         let bwl = tx_size.log2_width() as usize;
         let area = n * n;
         let n4 = n / 4; // MI cells the transform spans on each axis
@@ -1441,13 +1459,23 @@ impl<'a> FrameEncoder<'a> {
                 &cdf::COEFF_BASE_CTX_OFFSET_8X8,
             ),
             // 16×16 reuses the 8×8 Coeff_Base_Ctx_Offset (identical in the spec).
-            _ => (
+            16 => (
                 &cdf::DEFAULT_SCAN_16X16,
                 &cdf::TXB_SKIP_16X16,
                 &cdf::EOB_EXTRA_16X16,
                 &cdf::COEFF_BASE_EOB_16X16,
                 &cdf::COEFF_BASE_16X16,
                 &cdf::COEFF_BR_16X16,
+                &cdf::COEFF_BASE_CTX_OFFSET_8X8,
+            ),
+            // 32×32 likewise reuses the 8×8 Coeff_Base_Ctx_Offset (identical in the spec).
+            _ => (
+                &cdf::DEFAULT_SCAN_32X32,
+                &cdf::TXB_SKIP_32X32,
+                &cdf::EOB_EXTRA_32X32,
+                &cdf::COEFF_BASE_EOB_32X32,
+                &cdf::COEFF_BASE_32X32,
+                &cdf::COEFF_BR_32X32,
                 &cdf::COEFF_BASE_CTX_OFFSET_8X8,
             ),
         };
@@ -1470,8 +1498,9 @@ impl<'a> FrameEncoder<'a> {
         // transform_type (§5.11.39): signaled only for luma when not all-zero and base_q_idx > 0.
         // Reduced tx set + 4×4/8×8/16×16 intra ⇒ TX_SET_INTRA_2; `tx_sym` indexes
         // Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}. The CDF is uniform
-        // across intra direction for 4×4/8×8 but per-`intraDir` for 16×16 (§9.4).
-        if self.qindex > 0 && plane == 0 {
+        // across intra direction for 4×4/8×8 but per-`intraDir` for 16×16 (§9.4). A 32×32 intra block
+        // is TX_SET_DCTONLY (§5.11.48 `txSzSqrUp == TX_32X32`), so no transform type is signaled.
+        if self.qindex > 0 && plane == 0 && n <= 16 {
             let tx_cdf: &[u16] = if n == 16 {
                 &cdf::INTRA_TX_TYPE_SET2_16X16[intra_dir]
             } else {
@@ -1480,8 +1509,8 @@ impl<'a> FrameEncoder<'a> {
             self.sym.encode_symbol(tx_sym, tx_cdf);
         }
 
-        // eob position (TX_CLASS_2D ⇒ eob_pt context 0). 16-coeff blocks use Eob_Pt_16, 64-coeff
-        // (8×8) blocks Eob_Pt_64, 256-coeff (16×16) blocks Eob_Pt_256.
+        // eob position (TX_CLASS_2D ⇒ eob_pt context 0). 16/64/256/1024-coeff blocks use
+        // Eob_Pt_16/64/256/1024; the 1024 (32×32) table has no neighbour-context dimension (§8.3.2).
         let eobpt = eobpt_from_eob(eob);
         match n {
             4 => self
@@ -1490,9 +1519,12 @@ impl<'a> FrameEncoder<'a> {
             8 => self
                 .sym
                 .encode_symbol(eobpt - 1, &cdf::EOB_PT_64[qctx][ptype][0]),
-            _ => self
+            16 => self
                 .sym
                 .encode_symbol(eobpt - 1, &cdf::EOB_PT_256[qctx][ptype][0]),
+            _ => self
+                .sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_1024[qctx][ptype]),
         }
         if eobpt >= 3 {
             let nbits = eobpt - 2;
