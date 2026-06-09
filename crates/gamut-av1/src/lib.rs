@@ -10,12 +10,13 @@
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), `cdf` = default CDF + scan + context
-//! tables (§9.2/§9.4/§8.3.2).
+//! tables (§9.2/§9.4/§8.3.2), [`quant`] = quantizer tables + dequant (§7.12).
 #![forbid(unsafe_code)]
 
 mod cdf;
 mod encoder;
 mod headers;
+pub mod quant;
 mod tile;
 
 pub use encoder::{EncodedStill, encode_still_lossless_identity};
