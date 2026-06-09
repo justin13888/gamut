@@ -122,7 +122,7 @@ not a contract:
 | SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ☐ | M1 |
 | PAETH | §7.11.2 | ☐ | M1 |
 | recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4) | M1 |
-| chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ☐ | M1 |
+| chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy 4:4:4 4×4) | M1 |
 | palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ☐ | M1 |
 | intra block copy (`allow_intrabc`) | §7.11.x,§5.11.x | ☐ | M1 |
 

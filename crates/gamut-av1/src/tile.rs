@@ -13,8 +13,9 @@
 //!   `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, §7.11.2) plus recursive **filter-intra** (§7.11.2.3,
 //!   signaled as `DC_PRED` + `use_filter_intra`); it is signaled with the above/left mode context.
 //!   The luma transform type is chosen from `TX_SET_INTRA_2`
-//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled; chroma is `DC_PRED` +
-//!   `DCT_DCT`. Prediction reads a **reconstruction buffer** that the encoder maintains exactly as
+//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled; chroma is `DC_PRED` or
+//!   **chroma-from-luma** (`UV_CFL_PRED`, §7.11.5, when it beats DC) + `DCT_DCT`. Prediction reads a
+//!   **reconstruction buffer** that the encoder maintains exactly as
 //!   the decoder would (predict → transform → quantize → dequantize → inverse-transform → add →
 //!   store), so the encoder's reconstruction is bit-exact with a conformant decoder's output.
 //!
@@ -58,6 +59,9 @@ const SMOOTH_V_PRED: u8 = 10;
 const SMOOTH_H_PRED: u8 = 11;
 /// `PAETH_PRED` (§3).
 const PAETH_PRED: u8 = 12;
+/// `UV_CFL_PRED` (§3): the chroma-from-luma `uv_mode` value (the 14th symbol of the CfL-allowed
+/// `uv_mode` CDF). Selected for chroma on the lossy path when CfL beats plain `DC_PRED`.
+const UV_CFL_PRED: u8 = 13;
 /// The luma intra modes the lossy path searches over. All are bit-exact from only the immediate
 /// above/left neighbours plus the top-left corner: the non-directional modes by construction, and
 /// the included directional modes because `angle_delta = 0` (4×4 blocks) and `pAngle ∈ {90, 180}`
@@ -79,6 +83,17 @@ const LUMA_MODES: [u8; 13] = [
     SMOOTH_H_PRED,
     PAETH_PRED,
 ];
+
+/// How a single transform block's samples are predicted. `mode` is the intra mode (`DC_PRED` for
+/// chroma); `filter_intra` overrides luma prediction with a recursive filter-intra mode (§7.11.2.3);
+/// `cfl_alpha` adds the chroma-from-luma high-frequency term (§7.11.5). At most one of the latter
+/// two is set, and only on its respective plane.
+#[derive(Clone, Copy)]
+struct Pred {
+    mode: u8,
+    filter_intra: Option<u8>,
+    cfl_alpha: Option<i32>,
+}
 
 /// The reconstructed (decoded) planes on the coded MI grid, used as prediction neighbours in the
 /// lossy path and exported for the bit-exact decoder cross-check.
@@ -311,11 +326,23 @@ impl<'a> FrameEncoder<'a> {
         }];
         self.sym
             .encode_symbol(usize::from(y_mode), &cdf::INTRA_FRAME_Y_MODE[amode][lmode]);
-        // uv_mode = DC_PRED. Its CDF is indexed by the luma mode (CfL allowed only for 4×4 in
-        // 4:4:4); the decoder reads it after intra_frame_y_mode, so it must match the signaled mode.
+        // uv_mode. Its CDF is indexed by the luma mode. CfL is allowed when Max(w,h) <= 32 (always
+        // for the lossy 4×4 blocks, where bw == 4); the encoder picks chroma-from-luma when it beats
+        // plain DC_PRED, then emits read_cfl_alphas. Otherwise uv_mode = DC_PRED. The decoder reads
+        // this right after intra_frame_y_mode, so it must match the signaled luma mode.
+        let cfl = if self.qindex > 0 && bw == 4 {
+            self.select_cfl(c * 4, r * 4)
+        } else {
+            None
+        };
         let ym = usize::from(y_mode);
         if bw == 4 {
-            self.sym.encode_symbol(0, &cdf::UV_MODE_CFL_ALLOWED[ym]);
+            let uv = if cfl.is_some() { UV_CFL_PRED } else { DC_PRED };
+            self.sym
+                .encode_symbol(usize::from(uv), &cdf::UV_MODE_CFL_ALLOWED[ym]);
+            if let Some((au, av)) = cfl {
+                self.emit_cfl_alphas(au, av);
+            }
         } else {
             self.sym.encode_symbol(0, &cdf::UV_MODE_CFL_NOT_ALLOWED[ym]);
         }
@@ -343,10 +370,18 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // residual(): per plane, raster of 4×4 transform blocks (Lossless ⇒ TX_4X4). Luma uses the
-        // block's intra mode; chroma is DC_PRED.
+        // block's intra mode; chroma is DC_PRED, plus the CfL high-frequency term when selected.
+        // Luma (plane 0) is reconstructed first, so the chroma CfL reads finalized luma recon.
         for plane in 0..3 {
-            let mode = if plane == 0 { y_mode } else { DC_PRED };
-            let fi = if plane == 0 { filter_intra } else { None };
+            let pred = Pred {
+                mode: if plane == 0 { y_mode } else { DC_PRED },
+                filter_intra: if plane == 0 { filter_intra } else { None },
+                cfl_alpha: match (plane, cfl) {
+                    (1, Some((au, _))) => Some(au),
+                    (2, Some((_, av))) => Some(av),
+                    _ => None,
+                },
+            };
             for ty in 0..n4 {
                 for tx in 0..n4 {
                     let sx = c * 4 + tx * 4;
@@ -354,7 +389,7 @@ impl<'a> FrameEncoder<'a> {
                     if sx >= self.coded_w || sy >= self.coded_h {
                         continue; // transform block entirely outside the frame
                     }
-                    self.transform_block(plane, sx, sy, bw, mode, fi);
+                    self.transform_block(plane, sx, sy, bw, pred);
                 }
             }
         }
@@ -372,18 +407,18 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    fn transform_block(
-        &mut self,
-        plane: usize,
-        sx: usize,
-        sy: usize,
-        block_w: usize,
-        mode: u8,
-        filter_intra: Option<u8>,
-    ) {
-        let pred = match filter_intra {
+    fn transform_block(&mut self, plane: usize, sx: usize, sy: usize, block_w: usize, desc: Pred) {
+        let pred = match desc.filter_intra {
             Some(fi) if plane == 0 => self.predict_filter_intra_4x4(plane, sx, sy, fi),
-            _ => self.predict_4x4(plane, sx, sy, mode),
+            _ => {
+                // Chroma DC base prediction, then (for CfL) add the alpha-scaled luma high-frequency
+                // from the *reconstructed* luma of this block (§7.11.5).
+                let mut p = self.predict_4x4(plane, sx, sy, desc.mode);
+                if let Some(alpha) = desc.cfl_alpha {
+                    self.apply_cfl(&mut p, sx, sy, alpha);
+                }
+                p
+            }
         };
         let mut res = [0i32; 16];
         for i in 0..4 {
@@ -778,6 +813,111 @@ impl<'a> FrameEncoder<'a> {
             (DC_PRED, best_fi)
         } else {
             (best_mode, None)
+        }
+    }
+
+    /// Adds the chroma-from-luma high-frequency term to a 4×4 chroma DC prediction in place
+    /// (§7.11.5). For 4:4:4 the subsampled luma `L[i][j]` is just the reconstructed luma sample
+    /// (`× 8`, i.e. 3 fractional bits); `lumaAvg = Round2(ΣL, 4)`. Each chroma sample becomes
+    /// `Clip1(dc + Round2Signed(alpha * (L - lumaAvg), 6))`. `alpha == 0` is a no-op (plain DC).
+    fn apply_cfl(&self, pred: &mut [i32; 16], sx: usize, sy: usize, alpha: i32) {
+        let mut l = [0i32; 16];
+        let mut sum = 0i32;
+        for i in 0..4 {
+            for j in 0..4 {
+                let v = i32::from(self.recon[0][(sy + i) * self.coded_w + (sx + j)]) << 3;
+                l[i * 4 + j] = v;
+                sum += v;
+            }
+        }
+        let luma_avg = (sum + 8) >> 4; // Round2(sum, Tx_Width_Log2 + Tx_Height_Log2) = Round2(_, 4)
+        for (p, &lv) in pred.iter_mut().zip(&l) {
+            *p = (*p + round2_signed(alpha * (lv - luma_avg), 6)).clamp(0, 255);
+        }
+    }
+
+    /// Picks chroma-from-luma alphas for the 4×4 chroma blocks at `(sx, sy)` by minimizing per-plane
+    /// SAD against the source chroma, or returns `None` when plain `DC_PRED` is at least as good for
+    /// both planes (so the cheaper `uv_mode = DC_PRED` is signaled). The alpha search uses the
+    /// *source* luma as a proxy for the reconstruction (a quality decision; the signaled alpha is
+    /// applied to the true reconstruction in [`Self::apply_cfl`], so the result is bit-exact either
+    /// way). Returns `(CflAlphaU, CflAlphaV)`, each in `-16..=16` and not both zero.
+    fn select_cfl(&self, sx: usize, sy: usize) -> Option<(i32, i32)> {
+        // Source luma high-frequency (matching apply_cfl's reconstructed-luma formula).
+        let mut l = [0i32; 16];
+        let mut sum = 0i32;
+        for i in 0..4 {
+            for j in 0..4 {
+                let v = self.sample(0, sx + j, sy + i) << 3;
+                l[i * 4 + j] = v;
+                sum += v;
+            }
+        }
+        let luma_avg = (sum + 8) >> 4;
+
+        let best_alpha = |plane: usize| -> i32 {
+            let dc = self.dc_avg(plane, sx, sy);
+            let sad = |alpha: i32| -> i32 {
+                let mut s = 0;
+                for i in 0..4 {
+                    for j in 0..4 {
+                        let pred = (dc + round2_signed(alpha * (l[i * 4 + j] - luma_avg), 6))
+                            .clamp(0, 255);
+                        s += (self.sample(plane, sx + j, sy + i) - pred).abs();
+                    }
+                }
+                s
+            };
+            // alpha 0 (plain DC) is the baseline; CflAlpha magnitudes are 1..=16, either sign.
+            let mut best = 0i32;
+            let mut best_sad = sad(0);
+            for mag in 1..=16 {
+                for &a in &[mag, -mag] {
+                    let s = sad(a);
+                    if s < best_sad {
+                        best_sad = s;
+                        best = a;
+                    }
+                }
+            }
+            best
+        };
+
+        let au = best_alpha(1);
+        let av = best_alpha(2);
+        if au == 0 && av == 0 {
+            None
+        } else {
+            Some((au, av))
+        }
+    }
+
+    /// Emits `read_cfl_alphas` (§5.11.45): the joint `cfl_alpha_signs` symbol, then the per-plane
+    /// `cfl_alpha_u`/`cfl_alpha_v` magnitudes (`|alpha| - 1`) for the non-zero planes, each under the
+    /// sign-derived context.
+    fn emit_cfl_alphas(&mut self, au: i32, av: i32) {
+        let sign = |a: i32| -> usize {
+            if a == 0 {
+                0 // CFL_SIGN_ZERO
+            } else if a < 0 {
+                1 // CFL_SIGN_NEG
+            } else {
+                2 // CFL_SIGN_POS
+            }
+        };
+        let (su, sv) = (sign(au), sign(av));
+        // signs + 1 = 3 * signU + signV  ⇒  cfl_alpha_signs = 3 * signU + signV - 1.
+        let signs = 3 * su + sv - 1;
+        self.sym.encode_symbol(signs, &cdf::CFL_SIGN);
+        if su != 0 {
+            let ctx = (su - 1) * 3 + sv;
+            self.sym
+                .encode_symbol((au.abs() - 1) as usize, &cdf::CFL_ALPHA[ctx]);
+        }
+        if sv != 0 {
+            let ctx = (sv - 1) * 3 + su;
+            self.sym
+                .encode_symbol((av.abs() - 1) as usize, &cdf::CFL_ALPHA[ctx]);
         }
     }
 
@@ -1226,6 +1366,33 @@ mod tests {
                 "filter-intra mode {fi} should preserve a flat reference"
             );
         }
+    }
+
+    #[test]
+    fn cfl_prediction_matches_spec() {
+        // Reconstructed luma with a pure column gradient 80,88,96,104 (constant down each column).
+        // For 4:4:4, L = luma*8, lumaAvg = Round2(ΣL, 4); with alpha = 2 the per-column high-freq
+        // term Round2Signed(2*(L-avg), 6) is -3,-1,+1,+3, added to a flat DC chroma prediction.
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let mut e = FrameEncoder::new(&p, 32);
+        let cw = e.coded_w;
+        for i in 0..4 {
+            for j in 0..4 {
+                e.recon[0][(4 + i) * cw + (4 + j)] = (80 + 8 * j) as u8;
+            }
+        }
+        let mut pred = [128i32; 16];
+        e.apply_cfl(&mut pred, 4, 4, 2);
+        assert_eq!(
+            pred,
+            [
+                125, 127, 129, 131, 125, 127, 129, 131, 125, 127, 129, 131, 125, 127, 129, 131
+            ]
+        );
+        // alpha = 0 is a no-op (plain DC).
+        let mut flat = [100i32; 16];
+        e.apply_cfl(&mut flat, 4, 4, 0);
+        assert_eq!(flat, [100; 16]);
     }
 
     #[test]
