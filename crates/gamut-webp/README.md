@@ -38,6 +38,12 @@ lossy → extended container) are tracked component-by-component in [`STATUS.md`
 implemented component is validated against libwebp as an oracle via `libwebp-sys` (bit-exact for
 lossless), backed by internal forward/inverse round-trips and the in-crate decoder.
 
+**Non-core feature paths** are decided in [`STATUS.md`](STATUS.md#scope-decisions--non-core-feature-paths):
+alpha/transparency (`VP8X` + `ALPH`) and color/metadata chunks (`ICCP` ICC profiles, `EXIF`, `XMP `)
+are **in scope** — embedded on encode and preserved on decode. Animation (`ANIM`/`ANMF`) is **out of
+scope** under the image-first charter (each frame is an independent keyframe, but multi-frame
+sequences don't fit the single-image API); its chunks are tracked only for container completeness.
+
 ## License
 
 Licensed under either of MIT or Apache-2.0 at your option.

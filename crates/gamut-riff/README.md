@@ -30,7 +30,11 @@ Extended-WebP chunks (`VP8X`, `ALPH`, `ANIM`/`ANMF`, metadata) are tracked along
 ## Roadmap
 
 - RIFF chunk reader/writer for the simple-WebP case (`RIFF`/`WEBP` + `VP8 `/`VP8L`). — done
-- Extended WebP (`VP8X`): alpha (`ALPH`), animation (`ANIM`/`ANMF`), and metadata chunks.
+- Extended WebP (`VP8X`) — **in scope**: alpha (`ALPH`) and metadata chunks (`ICCP`, `EXIF`,
+  `XMP `), read + write.
+- Animation (`ANIM`/`ANMF`) — **out of scope** (recognized FourCCs only). Multi-frame sequences sit
+  outside the image-first charter; see
+  [`gamut-webp/STATUS.md`](../gamut-webp/STATUS.md#scope-decisions--non-core-feature-paths).
 
 ## License
 

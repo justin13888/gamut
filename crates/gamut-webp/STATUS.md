@@ -13,8 +13,8 @@ gamut-webp ships a **native decoder** too: the Rust ecosystem's WebP decoders al
 whose memory-unsafety drove CVEs such as the zero-click CVE-2023-4863, so a `#![forbid(unsafe_code)]`
 decoder is worth carrying. The in-crate decoder also doubles as the encoder's tier-2 oracle.
 
-**Status:** ✅ = implemented · ☐ = planned. **Milestone (M)** is indicative sequencing, not a
-contract:
+**Status:** ✅ = implemented · ☐ = planned (in scope) · ⊘ = out of scope (tracked for
+container-completeness only). **Milestone (M)** is indicative sequencing, not a contract:
 
 - **M0** — MVP: the RIFF/WebP container (read + write) and the minimal **VP8L lossless** still-image
   path (header, LSB bit I/O, canonical prefix codes, image data with the subtract-green transform),
@@ -25,15 +25,41 @@ contract:
 - **M2** — **VP8 lossy** key-frame intra: boolean entropy coder, frame header, intra prediction
   (16×16 / B_PRED / chroma), integer 4×4 DCT + WHT, dequantization, token coding, loop filters.
   Requires BT.601 YCbCr 4:2:0 in gamut-color (new). `WebpEncoder::lossy`.
-- **M3** — Extended container: `VP8X` + alpha (`ALPH`, raw + lossless), simple→extended promotion.
-- **M4** — Color & metadata: `ICCP` ICC profiles, `EXIF` / `XMP ` metadata.
-- **M5** — Animation: `ANIM` / `ANMF` (largely out of scope under the image-first charter; tracked
-  for container completeness only).
+- **M3** — Extended container (**in scope**, encode + decode): `VP8X` + alpha (`ALPH`, raw +
+  lossless), simple→extended promotion. Alpha is a flagship still-image feature; `VP8X` is its
+  enabler.
+- **M4** — Color & metadata (**in scope**, embed on encode + preserve on decode): `ICCP` ICC
+  profiles, `EXIF` / `XMP ` metadata, unknown-chunk round-trip preservation.
+- **M5** — Animation: `ANIM` / `ANMF` — **out of scope** (decision 2026-06-09). Multi-frame
+  sequences fall outside the image-first charter and the single-image `gamut_core` traits; WebP
+  animation needs no codec work (each frame is an independent keyframe) but does need a non-trait
+  multi-frame API. Rows are kept for container-completeness only: encode is not planned, decode may
+  be revisited later. See [Scope decisions](#scope-decisions--non-core-feature-paths).
 - **M6** — Decoder hardening: fuzzing, conformance corpus, malformed-input rejection surface.
 
 The numbering of the two parts mirrors the two reference families: **Part 1** (sections A–F) is the
 WebP container + VP8L lossless surface from `references/webp/`; **Part 2** (sections G–N) is the VP8
 lossy-intra surface from `references/vp8/`. Section O is the cross-cutting API / oracle / tooling.
+
+---
+
+## Scope decisions — non-core feature paths
+
+The core surface is the single still image (VP8L lossless + VP8 lossy intra, 8-bit RGB). Beyond
+that, WebP's RIFF container carries optional chunks; this table records the **scope decision** for
+each non-core path (in/out, and encode vs. decode), so the component tables below can be read against
+a settled charter rather than a wish-list. `gamut-riff` already recognizes every FourCC involved
+(`WebpChunkId`), so these are product-scope calls, not capability gaps.
+
+| Feature path | Chunks | Decision | Encode | Decode | M | Rationale |
+| --- | --- | --- | --- | --- | --- | --- |
+| Alpha / transparency | VP8L native ARGB; `ALPH` + `VP8X` (lossy) | **In scope** | ✅ | ✅ | M3 | Flagship still-image feature (PNG-parity). VP8L alpha is free in ARGB; lossy alpha needs `ALPH` + `VP8X`. |
+| Extended container | `VP8X` | **In scope** | ✅ | ✅ | M3 | Required enabler for lossy alpha, ICC, and metadata. Emitted only when a feature needs it (simple→extended promotion). |
+| Color profile | `ICCP` | **In scope** | ✅ embed | ✅ preserve | M4 | Color correctness on wide-gamut images. |
+| Metadata | `EXIF`, `XMP ` | **In scope** | ✅ embed | ✅ preserve | M4 | Cheap round-trip passthrough; preserved across decode→encode. |
+| Animation | `ANIM`, `ANMF` | **Out of scope** (tracked only) | ✕ | deferred | M5 | Sequence content, against the image-first charter ("no video sequences") and the single-image `gamut_core` traits. Each `ANMF` frame is an independent keyframe — no codec work needed — but assembly requires a non-trait multi-frame API. Rows kept for container-completeness; a decode-only path may be revisited later. |
+
+Markers: ✅ shipped · ✕ not planned · *deferred* = possible later, no commitment now.
 
 ---
 
@@ -57,9 +83,9 @@ Owner: [`gamut-riff`](../gamut-riff).
 | `ICCP` color profile chunk | §2.7.2 | ☐ | M4 |
 | `EXIF` / `XMP ` metadata chunks | §2.7.3 | ☐ | M4 |
 | chunk ordering enforcement (reconstruction chunks in canonical order) | §2.7 | ☐ | M4 |
-| `ANIM` global animation parameters (bg color, loop count) | §2.7.1 (Animation) | ☐ | M5 |
-| `ANMF` per-frame chunk + frame disposal/blend, canvas assembly | §2.7.1 (Animation) | ☐ | M5 |
-| unknown-chunk passthrough (preserve order) | §2.7.4 | ☐ | M5 |
+| `ANIM` global animation parameters (bg color, loop count) | §2.7.1 (Animation) | ⊘ | M5 |
+| `ANMF` per-frame chunk + frame disposal/blend, canvas assembly | §2.7.1 (Animation) | ⊘ | M5 |
+| unknown-chunk passthrough (preserve order) | §2.7.4 | ☐ | M4 |
 
 ## B. VP8L bitstream header (RFC 9649 §3.4; Google *Lossless Bitstream*)
 
