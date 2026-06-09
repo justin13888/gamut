@@ -16,12 +16,14 @@ decoder is worth carrying. The in-crate decoder also doubles as the encoder's ti
 **Status:** ✅ = implemented · ☐ = planned (in scope) · ⊘ = out of scope (tracked for
 container-completeness only). **Milestone (M)** is indicative sequencing, not a contract:
 
-- **M0** — MVP: the RIFF/WebP container (read + write) and the minimal **VP8L lossless** still-image
-  path (header, LSB bit I/O, canonical prefix codes, image data with the subtract-green transform),
-  8-bit RGB, simple file format (`RIFF`/`WEBP`/`VP8L`). `WebpEncoder::lossless` + native
+- **M0** — ✅ **done**: the RIFF/WebP container (read + write) and the minimal **VP8L lossless**
+  still-image path (header, LSB bit I/O, canonical prefix codes, image data with the subtract-green
+  transform), 8-bit RGB, simple file format (`RIFF`/`WEBP`/`VP8L`). `WebpEncoder::lossless` + native
   `WebpDecoder`. Verified bit-exact against libwebp (`libwebp-sys`) and against gamut's own decoder.
-- **M1** — VP8L full: predictor / color / color-indexing transforms, LZ77 backward references, color
-  cache, meta prefix codes — compression-ratio quality, still bit-exact lossless.
+- **M1** — ✅ **done**: VP8L full — predictor / color / color-indexing transforms, LZ77 backward
+  references, color cache, meta prefix codes — bit-exact lossless. The **decoder** reads the entire
+  spec (any conformant stream); the **encoder** emits every feature with simple heuristics, leaving
+  compression-density tuning (optimal mode/parse/clustering) to issue #31.
 - **M2** — **VP8 lossy** key-frame intra: boolean entropy coder, frame header, intra prediction
   (16×16 / B_PRED / chroma), integer 4×4 DCT + WHT, dequantization, token coding, loop filters.
   Requires BT.601 YCbCr 4:2:0 in gamut-color (new). `WebpEncoder::lossy`.
@@ -93,10 +95,10 @@ Owner: `gamut-webp/src/vp8l/header.rs`.
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| `0x2f` signature byte | RFC 9649 §3.4 | ☐ | M0 |
-| 14-bit width-1 / 14-bit height-1 | §3.4 | ☐ | M0 |
-| `alpha_is_used` hint (1 bit) | §3.4 | ☐ | M0 |
-| version number (3 bits, must be 0) | §3.4 | ☐ | M0 |
+| `0x2f` signature byte | RFC 9649 §3.4 | ✅ | M0 |
+| 14-bit width-1 / 14-bit height-1 | §3.4 | ✅ | M0 |
+| `alpha_is_used` hint (1 bit) | §3.4 | ✅ | M0 |
+| version number (3 bits, must be 0) | §3.4 | ✅ | M0 |
 
 ## C. VP8L entropy coding / prefix codes (RFC 9649 §3.7)
 
@@ -104,12 +106,12 @@ Owner: `gamut-webp/src/vp8l/prefix.rs`.
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| canonical prefix (Huffman) code: build from code lengths | RFC 9649 §3.7.2 | ☐ | M0 |
-| prefix-code decode (table-driven) — encoder oracle + native decode | §3.7.2 | ☐ | M0 |
-| simple-code-length code (1–2 symbols) | §3.7.2 | ☐ | M0 |
-| normal code: code-length code lengths + length-coded symbols | §3.7.2 | ☐ | M1 |
-| prefix-code group: green+length / red / blue / alpha / distance (5 codes) | §3.7.1 | ☐ | M1 |
-| meta prefix codes (entropy-image selecting per-block code groups) | §3.7.3 | ☐ | M1 |
+| canonical prefix (Huffman) code: build from code lengths | RFC 9649 §3.7.2 | ✅ | M0 |
+| prefix-code decode (table-driven) — encoder oracle + native decode | §3.7.2 | ✅ | M0 |
+| simple-code-length code (1–2 symbols) | §3.7.2 | ✅ | M0 |
+| normal code: code-length code lengths + length-coded symbols | §3.7.2 | ✅ | M1 |
+| prefix-code group: green+length / red / blue / alpha / distance (5 codes) | §3.7.1 | ✅ | M1 |
+| meta prefix codes (entropy-image selecting per-block code groups) | §3.7.3 | ✅ | M1 |
 
 ## D. VP8L image data (RFC 9649 §3.6)
 
@@ -117,11 +119,11 @@ Owner: `gamut-webp/src/vp8l/{lz77,color_cache,encoder,decoder}.rs`.
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| literal ARGB pixel coding | RFC 9649 §3.6 | ☐ | M0 |
-| scan-order pixel reconstruction | §3.6 | ☐ | M0 |
-| LZ77 backward references: length/distance prefix codes | §3.6.2 | ☐ | M1 |
-| distance mapping (2-D distance → plane code) | §3.6.2 | ☐ | M1 |
-| color cache (hash of recent colors) | §3.6.3 | ☐ | M1 |
+| literal ARGB pixel coding | RFC 9649 §3.6 | ✅ | M0 |
+| scan-order pixel reconstruction | §3.6 | ✅ | M0 |
+| LZ77 backward references: length/distance prefix codes | §3.6.2 | ✅ | M1 |
+| distance mapping (2-D distance → plane code) | §3.6.2 | ✅ | M1 |
+| color cache (hash of recent colors) | §3.6.3 | ✅ | M1 |
 
 ## E. VP8L transforms (RFC 9649 §3.5)
 
@@ -129,10 +131,10 @@ Owner: `gamut-webp/src/vp8l/transform.rs`. Transforms are emitted in order and i
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| subtract-green transform (forward + inverse) | RFC 9649 §3.5 | ☐ | M0 |
-| predictor (spatial) transform, 14 modes, block-size image | §3.5 | ☐ | M1 |
-| color transform (green→red, green→blue, red→blue) | §3.5 | ☐ | M1 |
-| color-indexing (palette) transform + index packing | §3.5 | ☐ | M1 |
+| subtract-green transform (forward + inverse) | RFC 9649 §3.5 | ✅ | M0 |
+| predictor (spatial) transform, 14 modes, block-size image | §3.5 | ✅ | M1 |
+| color transform (green→red, green→blue, red→blue) | §3.5 | ✅ | M1 |
+| color-indexing (palette) transform + index packing | §3.5 | ✅ | M1 |
 
 ## F. VP8L bit I/O (RFC 9649 §3.3)
 
@@ -141,8 +143,8 @@ Owner: `gamut-webp/src/vp8l/bit_io.rs`. **LSB-first**, diverging from `gamut-bit
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| LSB-first `ReadBits(n)` reader | RFC 9649 §3.3 | ☐ | M0 |
-| LSB-first bit writer (encoder side) | §3.3 | ☐ | M0 |
+| LSB-first `ReadBits(n)` reader | RFC 9649 §3.3 | ✅ | M0 |
+| LSB-first bit writer (encoder side) | §3.3 | ✅ | M0 |
 
 ---
 
@@ -243,7 +245,7 @@ Owner: [`gamut-color`](../gamut-color). VP8L is RGB-native (no YCbCr); VP8 needs
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| VP8L: 8-bit RGB / ARGB, identity (no color conversion) | — | ☐ | M0 |
+| VP8L: 8-bit RGB / ARGB, identity (no color conversion) | — | ✅ | M0 |
 | VP8: BT.601 RGB↔YCbCr + 4:2:0 chroma subsample/upsample (**new** module) | RFC 6386 §14.2; Google *WebP Container* (BT.601) | ☐ | M2 |
 | alpha-channel plane handling | §2.7.1 (Alpha) | ☐ | M3 |
 
@@ -255,12 +257,12 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| `WebpEncoder` + `gamut_core::Encoder` impl (RGB8) | gamut-webp | ☐ | M0 |
-| `WebpDecoder` + `gamut_core::Decoder` impl (→ RGB8) | gamut-webp | ☐ | M0 |
-| `WebpConfig` / `WebpMode` native config | gamut-webp | ☐ | M0 |
-| container parse + format routing (pre-codec, returns `Unsupported`) | RFC 9649 §2 | ✅ | M0 |
-| tier-1 oracle: internal forward/inverse round-trips (transforms, coders) | — | ☐ | M0 |
-| tier-2 oracle: hermetic native decoder reproduces encoder output | — | ☐ | M0 |
-| tier-3 oracle: `libwebp-sys` differential (enc→libwebp-dec, libwebp-enc→dec) | — | ☐ | M0 |
-| CLI `gamut convert … .webp` (encode) + `.webp` decode input | gamut-cli | ☐ | M0 |
+| `WebpEncoder` + `gamut_core::Encoder` impl (RGB8) | gamut-webp | ✅ | M0 |
+| `WebpDecoder` + `gamut_core::Decoder` impl (→ RGB8) | gamut-webp | ✅ | M0 |
+| `WebpConfig` / `WebpMode` native config | gamut-webp | ✅ | M0 |
+| container parse + format routing (`VP8L` decoded; `VP8`/`VP8X` return `Unsupported`) | RFC 9649 §2 | ✅ | M0 |
+| tier-1 oracle: internal forward/inverse round-trips (transforms, coders) | — | ✅ | M0 |
+| tier-2 oracle: hermetic native decoder reproduces encoder output | — | ✅ | M0 |
+| tier-3 oracle: `libwebp-sys` differential (enc→libwebp-dec, libwebp-enc→dec) | — | ✅ | M0 |
+| CLI `gamut convert … .webp` (encode) + `.webp` decode input | gamut-cli | ✅ | M0 |
 | wasm / ffi bindings for WebP | gamut-{wasm,ffi} | ☐ | future |

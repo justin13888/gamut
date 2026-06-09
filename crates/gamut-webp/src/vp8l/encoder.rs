@@ -10,7 +10,7 @@
 //! Compression *quality* (optimal transform/mode choice, LZ77 parsing, entropy clustering) is
 //! deferred to issue #31; this code only needs to emit a valid stream that round-trips. Each
 //! channel's prefix code is built from the true histogram via
-//! [`build_length_limited_lengths`](crate::vp8l::prefix::build_length_limited_lengths) and written
+//! [`build_length_limited_lengths`] and written
 //! with the normal code-length code. Single-symbol codes (e.g. a solid color, or the unused distance
 //! code) consume no bits, exactly as the decoder expects.
 

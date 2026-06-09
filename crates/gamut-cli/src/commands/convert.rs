@@ -21,13 +21,13 @@ pub(crate) struct ConvertArgs {
     format: Option<OutputFormat>,
 }
 
-/// Output container/codec for `gamut convert`. AVIF encoding is implemented; WebP is recognized but
-/// its encoder is still under construction (it returns an "unsupported" error until VP8L M0 lands).
+/// Output container/codec for `gamut convert`. Both AVIF and WebP (VP8L lossless) encoding are
+/// implemented.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum OutputFormat {
     /// AVIF (lossless 8-bit RGB, milestone M0).
     Avif,
-    /// WebP (VP8L lossless; encoder not yet implemented).
+    /// WebP (VP8L lossless).
     Webp,
 }
 

@@ -27,9 +27,9 @@ WebP is one of gamut's three initial focus formats (alongside AVIF and JPEG).
 
 The public API follows the same shape as [`gamut-avif`](../gamut-avif): a `WebpEncoder` implementing
 [`gamut_core::Encoder`] and a `WebpDecoder` implementing [`gamut_core::Decoder`], both reachable
-through the umbrella crate's `webp` feature. Encoding is wired but returns
-[`gamut_core::Error::Unsupported`] until the VP8L M0 path lands; decoding already parses the RIFF
-container and routes by bitstream type.
+through the umbrella crate's `webp` feature. **VP8L lossless** encode and decode are fully
+implemented — `WebpEncoder::lossless` emits a conformant bit-exact stream, and `WebpDecoder` decodes
+any conformant VP8L stream. The lossy VP8 path returns [`gamut_core::Error::Unsupported`] for now.
 
 ## Status
 

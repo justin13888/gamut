@@ -5,9 +5,9 @@
 //! and a color cache ([`color_cache`], §3.6.3), all read/written with an LSB-first bit stream
 //! ([`bit_io`], §3.3). The component breakdown and milestones live in `../STATUS.md` (sections B-F).
 //!
-//! These modules currently expose the declarative type surface the encoder and decoder fill in. The
-//! M0 path — [`header`] + subtract-green ([`transform`]) + [`prefix`] codes + literal pixels — is
-//! under construction; the `encode`/`decode` entry points land with it.
+//! The full lossless path is implemented: [`decoder::decode`] reads any conformant VP8L stream and
+//! [`encoder::encode`] emits a bit-exact-lossless one. Each module cites the spec section it covers;
+//! the component breakdown is tracked in `../STATUS.md`.
 
 pub mod bit_io;
 pub mod color_cache;

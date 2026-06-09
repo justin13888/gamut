@@ -8,11 +8,11 @@
 //! implement. The implementation status and milestones are tracked in `STATUS.md`.
 //!
 //! gamut is image-first, so only the intra/key-frame still-image subset of VP8 is in scope (no
-//! inter-frame prediction, motion, or sequences). The bitstream paths are under construction:
-//! [`WebpEncoder`] validates inputs then returns [`gamut_core::Error::Unsupported`] until the VP8L
-//! M0 path lands, while [`WebpDecoder`] already parses the RIFF container and routes by bitstream
-//! type. Every implemented component is validated against libwebp as an oracle (see the crate's
-//! `tests/`).
+//! inter-frame prediction, motion, or sequences). The **VP8L lossless** path is fully implemented:
+//! [`WebpDecoder`] decodes any conformant VP8L stream (every transform, LZ77, the color cache, and
+//! meta prefix codes), and [`WebpEncoder::lossless`] emits a conformant bit-exact-lossless stream.
+//! The lossy VP8 path still returns [`gamut_core::Error::Unsupported`]. Every component is validated
+//! against libwebp as an oracle, in both directions (see the crate's `tests/`).
 #![forbid(unsafe_code)]
 
 mod config;
