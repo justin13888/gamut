@@ -1,0 +1,24 @@
+# Dev-only oracle: NOT a member of the gamut workspace (it is listed under
+# `[workspace].exclude` in the root manifest and pulled in only as a path
+# `dev-dependency`). Keeping it out of the workspace means a plain `cargo build`
+# of the shipped crates never invokes meson/ninja or links libdav1d — the C
+# toolchain is required only when building the cross-check tests. Because it is
+# excluded, it cannot use `*.workspace = true` inheritance, so metadata is local.
+[package]
+name = "dav1d-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: decodes AV1 OBU streams with a vendored, statically-linked libdav1d for gamut's bit-exact cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares that this crate provides the native `dav1d` library, so Cargo links it
+# exactly once and rejects a second crate claiming the same native lib.
+links = "dav1d"
+
+[lib]
+# The crate exposes a hand-written safe wrapper; there are no doctests to run.
+doctest = false
+
+[build-dependencies]
+bindgen = "0.71"

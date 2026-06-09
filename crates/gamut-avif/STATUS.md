@@ -11,7 +11,7 @@ not a contract:
 
 - **M0** — MVP (current): lossless intra, identity `mc=0`, 4:4:4, 8-bit, full range, single tile,
   64×64 superblocks, `DC_PRED`, forced `TX_4X4` Walsh–Hadamard, static default CDFs
-  (`disable_cdf_update = 1`). Verified bit-exact against `avifdec`/`dav1d`.
+  (`disable_cdf_update = 1`). Verified bit-exact against vendored `libavif`/`dav1d`.
 - **M1** — Lossy intra: forward DCT/ADST + quantization + RD/rate control, CDF adaptation, full
   intra mode set, variable tx size/type, multi-tile, in-loop filters, 128×128 SB, full partition
   set, segmentation/delta-q, superres, screen-content tools (palette/intrabc).
@@ -75,7 +75,7 @@ not a contract:
 | full seq header: timing_info, decoder_model_info, multiple operating points | §5.5.1-.5.5.5 | ☐ | M6 |
 | `frame_id_numbers_present` | §5.5 | ☐ | — |
 | `use_128x128_superblock` | §5.5 | ☐ | M1 |
-| `enable_filter_intra`/`enable_intra_edge_filter`=0 | §5.5 | ✅ (off) | M0 |
+| `enable_filter_intra` (1 on lossy, 0 on lossless) / `enable_intra_edge_filter`=0 | §5.5 | ✅ | M0/M1 |
 | `enable_superres`/`cdef`/`restoration`=0 | §5.5 | ✅ (off) | M0 |
 | color_config: mc=0 identity, 4:4:4, high_bitdepth=0, full range | §5.5.2 | ✅ | M0 |
 | color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ☐ | M2 |
@@ -121,7 +121,7 @@ not a contract:
 | directional V/H/D45/.../D67 + `angle_delta` + edge filter/upsample | §7.11.2.4/.9-.12 | ☐ | M1 |
 | SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ☐ | M1 |
 | PAETH | §7.11.2 | ☐ | M1 |
-| recursive filter-intra | §7.11.2.3,§5.11.24 | ☐ | M1 |
+| recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4) | M1 |
 | chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ☐ | M1 |
 | palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ☐ | M1 |
 | intra block copy (`allow_intrabc`) | §7.11.x,§5.11.x | ☐ | M1 |

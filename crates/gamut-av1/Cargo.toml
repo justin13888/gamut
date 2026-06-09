@@ -20,3 +20,9 @@ gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-dsp.workspace = true
 gamut-bitstream.workspace = true
+
+[dev-dependencies]
+# dav1d as the bit-exact reconstruction oracle (FFI to a vendored, statically-linked
+# libdav1d). Dev-only: the shipped library is C-free and needs no decoder. Building
+# these tests requires meson/ninja/nasm and the `third_party/dav1d` submodule.
+dav1d-oracle = { path = "../../tooling/dav1d-oracle" }

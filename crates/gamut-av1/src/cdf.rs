@@ -78,6 +78,71 @@ pub static INTRA_MODE_CONTEXT: [usize; 13] = [0, 1, 2, 3, 4, 4, 4, 4, 3, 0, 1, 2
 /// `Sm_Weights_Tx_4x4` (§7.11.2.6): smooth-prediction interpolation weights for a 4-wide/tall side.
 pub static SM_WEIGHTS_4X4: [i32; 4] = [255, 149, 85, 64];
 
+/// `Default_Filter_Intra_Cdf[BLOCK_4X4]` (§9.4): the binary `use_filter_intra` flag for a 4×4 block.
+/// Filter-intra is only signaled when the luma mode is `DC_PRED` and `Max(w, h) <= 32`; every lossy
+/// luma block here is 4×4, so this single (`MiSize == BLOCK_4X4`) CDF applies.
+pub static FILTER_INTRA_4X4: [u16; 2] = [4621, 32768];
+
+/// `Default_Filter_Intra_Mode_Cdf` (§9.4): the 5-symbol `filter_intra_mode` CDF
+/// (`{FILTER_DC, FILTER_V, FILTER_H, FILTER_D157, FILTER_PAETH}`).
+pub static FILTER_INTRA_MODE: [u16; 5] = [8949, 12776, 17211, 29558, 32768];
+
+/// `Intra_Filter_Taps[INTRA_FILTER_MODES][8][7]` (§7.11.2.3): the recursive filter-intra taps. For
+/// each filter mode, eight 4×2 output positions weight the 7-sample neighbourhood `p[0..6]`; the
+/// weighted sum is scaled by `INTRA_FILTER_SCALE_BITS = 4` (`Round2Signed`). Taps can be negative.
+pub static INTRA_FILTER_TAPS: [[[i8; 7]; 8]; 5] = [
+    [
+        [-6, 10, 0, 0, 0, 12, 0],
+        [-5, 2, 10, 0, 0, 9, 0],
+        [-3, 1, 1, 10, 0, 7, 0],
+        [-3, 1, 1, 2, 10, 5, 0],
+        [-4, 6, 0, 0, 0, 2, 12],
+        [-3, 2, 6, 0, 0, 2, 9],
+        [-3, 2, 2, 6, 0, 2, 7],
+        [-3, 1, 2, 2, 6, 3, 5],
+    ],
+    [
+        [-10, 16, 0, 0, 0, 10, 0],
+        [-6, 0, 16, 0, 0, 6, 0],
+        [-4, 0, 0, 16, 0, 4, 0],
+        [-2, 0, 0, 0, 16, 2, 0],
+        [-10, 16, 0, 0, 0, 0, 10],
+        [-6, 0, 16, 0, 0, 0, 6],
+        [-4, 0, 0, 16, 0, 0, 4],
+        [-2, 0, 0, 0, 16, 0, 2],
+    ],
+    [
+        [-8, 8, 0, 0, 0, 16, 0],
+        [-8, 0, 8, 0, 0, 16, 0],
+        [-8, 0, 0, 8, 0, 16, 0],
+        [-8, 0, 0, 0, 8, 16, 0],
+        [-4, 4, 0, 0, 0, 0, 16],
+        [-4, 0, 4, 0, 0, 0, 16],
+        [-4, 0, 0, 4, 0, 0, 16],
+        [-4, 0, 0, 0, 4, 0, 16],
+    ],
+    [
+        [-2, 8, 0, 0, 0, 10, 0],
+        [-1, 3, 8, 0, 0, 6, 0],
+        [-1, 2, 3, 8, 0, 4, 0],
+        [0, 1, 2, 3, 8, 2, 0],
+        [-1, 4, 0, 0, 0, 3, 10],
+        [-1, 3, 4, 0, 0, 4, 6],
+        [-1, 2, 3, 4, 0, 4, 4],
+        [-1, 2, 2, 3, 4, 3, 3],
+    ],
+    [
+        [-12, 14, 0, 0, 0, 14, 0],
+        [-10, 0, 14, 0, 0, 12, 0],
+        [-9, 0, 0, 14, 0, 11, 0],
+        [-8, 0, 0, 0, 14, 10, 0],
+        [-10, 12, 0, 0, 0, 0, 14],
+        [-9, 1, 12, 0, 0, 0, 12],
+        [-8, 0, 0, 12, 0, 1, 11],
+        [-7, 0, 0, 1, 12, 1, 9],
+    ],
+];
+
 /// `Default_Intra_Frame_Y_Mode_Cdf` (§9.4), indexed `[above_ctx][left_ctx]` (both via
 /// [`INTRA_MODE_CONTEXT`]), then the 13-symbol `y_mode` CDF.
 pub static INTRA_FRAME_Y_MODE: [[[u16; 13]; 5]; 5] = [

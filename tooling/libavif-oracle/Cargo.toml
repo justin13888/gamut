@@ -1,0 +1,21 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under
+# `[workspace].exclude` in the root manifest, pulled in only as a path
+# `dev-dependency`). See `tooling/dav1d-oracle/Cargo.toml` for the rationale; the
+# same applies here. This crate statically links libavif (built from the
+# `third_party/libavif` submodule with the vendored dav1d as its decoder).
+[package]
+name = "libavif-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: decodes AVIF files with a vendored, statically-linked libavif (dav1d backend) for gamut's end-to-end container cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares this crate as the sole provider of the native `avif` library.
+links = "avif"
+
+[lib]
+doctest = false
+
+[build-dependencies]
+bindgen = "0.71"
