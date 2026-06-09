@@ -11,7 +11,7 @@ not a contract:
 
 - **M0** — MVP (current): lossless intra, identity `mc=0`, 4:4:4, 8-bit, full range, single tile,
   64×64 superblocks, `DC_PRED`, forced `TX_4X4` Walsh–Hadamard, static default CDFs
-  (`disable_cdf_update = 1`). Verified bit-exact against `avifdec`/`dav1d`.
+  (`disable_cdf_update = 1`). Verified bit-exact against vendored `libavif`/`dav1d`.
 - **M1** — Lossy intra: forward DCT/ADST + quantization + RD/rate control, CDF adaptation, full
   intra mode set, variable tx size/type, multi-tile, in-loop filters, 128×128 SB, full partition
   set, segmentation/delta-q, superres, screen-content tools (palette/intrabc).

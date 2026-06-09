@@ -1,0 +1,6 @@
+[submodule "third_party/dav1d"]
+	path = third_party/dav1d
+	url = https://code.videolan.org/videolan/dav1d.git
+[submodule "third_party/libavif"]
+	path = third_party/libavif
+	url = https://github.com/AOMediaCodec/libavif.git

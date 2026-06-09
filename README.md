@@ -118,9 +118,20 @@ All cargo metadata except per-crate `version` is centralized in the root
 - [jq](https://jqlang.github.io/jq/) -- JSON processor (optional; used by `just versions`)
 - [cargo-edit](https://github.com/killercup/cargo-edit) -- provides `cargo set-version` (optional; used by `just bump`)
 
+Building the **shipped crates** needs only the Rust toolchain — they are pure Rust with no C
+dependencies. Building the **cross-check tests** additionally needs a C toolchain plus
+[meson](https://mesonbuild.com), [ninja](https://ninja-build.org),
+[nasm](https://www.nasm.us) and [CMake](https://cmake.org): those tests link reference
+decoders (dav1d, libavif) built from the git submodules under `third_party/` via the dev-only
+oracle crates in `tooling/`. Nothing is taken from system-installed decoders. On Debian/Ubuntu:
+`sudo apt-get install meson ninja-build nasm cmake pkg-config`.
+
 ## Quick Start
 
 ```bash
+# The cross-check tests link vendored dav1d/libavif from third_party/ submodules.
+git submodule update --init --recursive
+
 cargo build --workspace
 cargo test --workspace
 ```

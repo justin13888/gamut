@@ -25,10 +25,11 @@ test:
     cargo test --workspace --all-features
 
 # Run tests with coverage (enforces 80% line coverage).
-# Bindings/binary crates (cli, wasm, ffi) are excluded — their entry points are not
-# meaningfully unit-testable and would otherwise skew the gate.
+# Bindings/binary crates (cli, wasm, ffi) and the dev-only `tooling/` oracles are
+# excluded — their entry points are not meaningfully unit-testable and would otherwise
+# skew the gate.
 coverage:
-    cargo llvm-cov --workspace --all-features --ignore-filename-regex 'crates/gamut-(cli|wasm|ffi)/' --fail-under-lines 80
+    cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi)|tooling)/' --fail-under-lines 80
 
 # List every workspace crate and its version
 versions:

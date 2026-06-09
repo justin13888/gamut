@@ -20,3 +20,10 @@ gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-av1.workspace = true
 gamut-isobmff.workspace = true
+
+[dev-dependencies]
+# libavif as the end-to-end container oracle (FFI to a vendored, statically-linked
+# libavif with a vendored dav1d backend). Dev-only: the shipped library is C-free.
+# Building these tests requires cmake/meson/ninja/nasm and the `third_party/libavif`
+# + `third_party/dav1d` submodules.
+libavif-oracle = { path = "../../tooling/libavif-oracle" }
