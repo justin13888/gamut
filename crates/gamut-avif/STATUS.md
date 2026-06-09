@@ -166,7 +166,7 @@ not a contract:
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| deblocking loop filter | §5.9.11,§7.14 | ☐ | M1 |
+| deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4 narrow filter) | M1 |
 | CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ☐ | M1 |
 | loop restoration (Wiener + self-guided) | §5.9.20,§7.17 | ☐ | M1 |
 | superres horizontal upscaling | §5.9.8,§7.16 | ☐ | M1 |

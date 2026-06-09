@@ -31,8 +31,20 @@ fn check(planes: &Planar8, qindex: u8) {
     let (still, recon) = encode_still_intra(planes, qindex).unwrap();
     let (w, h) = (recon.width as usize, recon.height as usize);
 
-    // A standalone Section-5 OBU stream needs a leading temporal-delimiter OBU (AVIF omits it
-    // inside the container). TD = obu_type 2, has_size_field, empty payload.
+    let dir = std::env::temp_dir();
+    // A globally-unique stamp: tests run in parallel and several share (w, h, qindex), so the
+    // process id alone would collide on the temp paths and race.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let stamp = format!(
+        "{}_{w}x{h}_q{qindex}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    let obu_path = dir.join(format!("gamut_recon_{stamp}.obu"));
+    let y4m_path = dir.join(format!("gamut_recon_{stamp}.y4m"));
+    // A standalone Section-5 OBU stream for dav1d needs a temporal-delimiter OBU first (AVIF omits
+    // it inside the container). TD = obu_type 2, has_size_field, empty payload.
     let mut stream = vec![0x12u8, 0x00];
     stream.extend_from_slice(&still.obus);
 
@@ -163,6 +175,29 @@ fn cfl_chroma_from_luma_matches_dav1d() {
     for &q in &[6u8, 24, 88, 170] {
         for &(w, h) in &[(8, 8), (16, 16), (37, 21), (64, 40)] {
             check(&planes(w, h, cfl), q);
+        }
+    }
+}
+
+#[test]
+fn deblock_matches_dav1d() {
+    // Block-aligned flat tiles with moderate steps between them: after quantization the 4×4 block
+    // boundaries carry exactly the small discontinuities the deblocking loop filter (§7.14) smooths.
+    // The encoder applies the filter to its reconstruction and dav1d applies it on decode, so the
+    // byte-for-byte match validates the narrow-filter math, masks, and the vertical-then-horizontal
+    // pass ordering across the full quantizer (and hence loop-filter-level) range.
+    let tiles = |x: u32, y: u32| {
+        let step = ((x / 4 + y / 4) % 6) as u8; // changes every 4 px ⇒ on the block grid
+        let v = 60u8.wrapping_add(step.wrapping_mul(18));
+        [
+            v,
+            v.wrapping_add(20),
+            200u8.wrapping_sub(step.wrapping_mul(12)),
+        ]
+    };
+    for &q in &[16u8, 48, 110, 200] {
+        for &(w, h) in &[(8, 8), (16, 16), (35, 23), (64, 40)] {
+            check(&planes(w, h, tiles), q);
         }
     }
 }

@@ -234,8 +234,21 @@ impl<'a> FrameEncoder<'a> {
             }
             r += SB4;
         }
+        // Deblocking loop filter (§7.14): a post-process on the final reconstruction (intra
+        // prediction during encoding read the pre-filter samples, so this does not affect any
+        // prediction). The lossless path is `CodedLossless`, where the filter is disabled.
+        let mut planes = self.recon;
+        if self.qindex > 0 {
+            crate::filter::deblock(
+                &mut planes,
+                self.coded_w,
+                self.width,
+                self.height,
+                self.qindex,
+            );
+        }
         let recon = Reconstruction {
-            planes: self.recon,
+            planes,
             coded_w: self.coded_w,
         };
         (self.sym.finish(), recon)

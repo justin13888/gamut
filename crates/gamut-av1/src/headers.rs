@@ -199,10 +199,15 @@ pub(crate) fn frame_header_payload(
     if !lossless {
         // delta_q_params(): base_q_idx > 0 ⇒ delta_q_present (0). delta_lf_params(): none.
         w.put_bit(0); // delta_q_present = 0
-        // loop_filter_params(): not CodedLossless ⇒ present, but all levels 0 (deblock disabled).
-        w.put_bits(0, 6); // loop_filter_level[0]
-        w.put_bits(0, 6); // loop_filter_level[1]
-        // levels are 0 ⇒ no loop_filter_level[2]/[3].
+        // loop_filter_params(): a single deblock level (the same for both luma passes and both
+        // chroma planes), scaled from base_q_idx. level 0 ⇒ deblock disabled and level[2]/[3] omitted.
+        let lf = u32::from(crate::filter::deblock_level(base_q_idx));
+        w.put_bits(lf, 6); // loop_filter_level[0]
+        w.put_bits(lf, 6); // loop_filter_level[1]
+        if lf != 0 {
+            w.put_bits(lf, 6); // loop_filter_level[2] (U)
+            w.put_bits(lf, 6); // loop_filter_level[3] (V)
+        }
         w.put_bits(0, 3); // loop_filter_sharpness
         w.put_bit(0); // loop_filter_delta_enabled = 0
         // cdef_params(): enable_cdef = 0 ⇒ no bits. lr_params(): enable_restoration = 0 ⇒ no bits.
