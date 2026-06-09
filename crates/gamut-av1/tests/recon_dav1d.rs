@@ -139,6 +139,30 @@ fn lossy_reconstruction_matches_dav1d_all_qctx() {
 }
 
 #[test]
+fn tx_type_selection_matches_dav1d() {
+    if !dav1d_available() {
+        eprintln!("skipping recon_dav1d: dav1d not installed");
+        return;
+    }
+    // Content engineered so the encoder's per-block transform-type search picks non-DCT_DCT types
+    // from TX_SET_INTRA_2 (IDTX on sharp screen-content edges, ADST on directional ramps). dav1d
+    // must decode whatever type was signaled to the encoder's reconstruction byte-for-byte, so this
+    // exercises the ADST/IDTX inverse transforms end-to-end through the real decoder.
+    let screen = |x: u32, y: u32| {
+        // 1-pixel-wide vertical bars + a diagonal ramp: high-frequency, impulse-like residuals.
+        let bar = if x.is_multiple_of(2) { 235 } else { 20 } as u8;
+        let ramp = ((x.wrapping_add(y)).wrapping_mul(9) % 256) as u8;
+        let diag = if (x + y).is_multiple_of(7) { 250 } else { 40 } as u8;
+        [bar, ramp, diag]
+    };
+    for &q in &[10u8, 32, 80, 160] {
+        for &(w, h) in &[(8, 8), (16, 16), (37, 21), (64, 40)] {
+            check(&planes(w, h, screen), q);
+        }
+    }
+}
+
+#[test]
 fn flat_lossy_reconstruction_matches_dav1d() {
     if !dav1d_available() {
         return;

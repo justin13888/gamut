@@ -6,9 +6,11 @@
 //! - **Lossless** (`qindex == 0`): forced `TX_4X4` Walsh–Hadamard; prediction neighbours are the
 //!   source samples (which equal the reconstruction under lossless); partitions are
 //!   `PARTITION_NONE` except at the right/bottom frame edges.
-//! - **Lossy** (`qindex > 0`): `DCT_DCT` `TX_4X4` with quantization. Blocks are forced all-4×4
+//! - **Lossy** (`qindex > 0`): `TX_4X4` with quantization. Blocks are forced all-4×4
 //!   (`PARTITION_SPLIT` everywhere) so each uses a 4×4 transform under `TX_MODE_LARGEST` with no
-//!   tx-depth signaling, and the luma transform type is signaled `DCT_DCT`. Prediction reads a
+//!   tx-depth signaling. The luma transform type is chosen per block from `TX_SET_INTRA_2`
+//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled; chroma is `DCT_DCT`.
+//!   Prediction reads a
 //!   **reconstruction buffer** that the encoder maintains exactly as the decoder would (predict →
 //!   transform → quantize → dequantize → inverse-transform → add → store), so the encoder's
 //!   reconstruction is bit-exact with a conformant decoder's output.
@@ -238,32 +240,80 @@ impl<'a> FrameEncoder<'a> {
         }
         if self.qindex == 0 {
             let quant = gamut_dsp::fwht4x4(&res);
-            self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &quant);
+            self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &quant, 1);
             return;
         }
 
-        // Lossy: forward DCT, quantize, code, then reconstruct exactly as the decoder will and
-        // store into the reconstruction buffer for later prediction.
-        let coeff = forward_transform_2d(&res, TxSize::Tx4x4, TxType::DctDct);
-        let mut levels = [0i32; 16];
-        for (i, &c) in coeff.iter().enumerate() {
-            let q = if i == 0 { self.dc_quant } else { self.ac_quant };
-            levels[i] = quantize(c, q);
-        }
-        self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &levels);
+        // Lossy: pick the transform type (luma only — chroma is forced DCT_DCT, which is not
+        // signaled), forward-transform + quantize, code, then reconstruct exactly as the decoder
+        // will and store into the reconstruction buffer for later prediction. Because the recon is
+        // `pred + inverse(dequant(levels))` and the decoder runs the same inverse on the same
+        // levels, the result is bit-exact for whichever transform type is signaled.
+        let (tx, tx_sym, levels) = if plane == 0 {
+            self.select_tx_type(&res)
+        } else {
+            (TxType::DctDct, 1, self.quantize_tx(&res, TxType::DctDct))
+        };
+        self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &levels, tx_sym);
 
         let mut dq = [0i32; 16];
         for (i, &lvl) in levels.iter().enumerate() {
             let q = if i == 0 { self.dc_quant } else { self.ac_quant };
             dq[i] = dequant(lvl, q, 1, 8);
         }
-        let resid = inverse_transform_2d(&dq, TxSize::Tx4x4, TxType::DctDct, 8);
+        let resid = inverse_transform_2d(&dq, TxSize::Tx4x4, tx, 8);
         for i in 0..4 {
             for j in 0..4 {
                 let v = (avg + resid[i * 4 + j]).clamp(0, 255) as u8;
                 self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = v;
             }
         }
+    }
+
+    /// Forward-transforms and quantizes a 4×4 residual under transform type `tx`, returning the
+    /// 16 quantized coefficient levels (DC uses `dc_quant`, AC uses `ac_quant`).
+    fn quantize_tx(&self, res: &[i32; 16], tx: TxType) -> [i32; 16] {
+        let coeff = forward_transform_2d(res, TxSize::Tx4x4, tx);
+        let mut levels = [0i32; 16];
+        for (i, &c) in coeff.iter().enumerate() {
+            let q = if i == 0 { self.dc_quant } else { self.ac_quant };
+            levels[i] = quantize(c, q);
+        }
+        levels
+    }
+
+    /// Selects a luma 4×4 transform type from `TX_SET_INTRA_2` by a simple coded-cost proxy (sum of
+    /// `1 + |level|` over non-zero coefficients), preferring `DCT_DCT` on ties. Returns the type,
+    /// its `Tx_Type_Intra_Inv_Set2` symbol, and the quantized levels. The choice is a quality
+    /// decision (any valid type round-trips bit-exactly); only the *signaling* must be correct.
+    fn select_tx_type(&self, res: &[i32; 16]) -> (TxType, usize, [i32; 16]) {
+        let cost = |levels: &[i32; 16]| -> i32 {
+            levels
+                .iter()
+                .map(|&l| if l == 0 { 0 } else { 1 + l.abs() })
+                .sum()
+        };
+        // Start from DCT_DCT (symbol 1) so it wins ties; the rest of TX_SET_INTRA_2 follows.
+        let mut best = (
+            TxType::DctDct,
+            1usize,
+            self.quantize_tx(res, TxType::DctDct),
+        );
+        let mut best_cost = cost(&best.2);
+        for (tx, sym) in [
+            (TxType::AdstAdst, 2usize),
+            (TxType::AdstDct, 3),
+            (TxType::DctAdst, 4),
+            (TxType::Idtx, 0),
+        ] {
+            let levels = self.quantize_tx(res, tx);
+            let c = cost(&levels);
+            if c < best_cost {
+                best_cost = c;
+                best = (tx, sym, levels);
+            }
+        }
+        best
     }
 
     /// DC intra prediction value for a 4×4 at coded position `(sx, sy)` (§7.11.2.5). In the lossless
@@ -314,6 +364,7 @@ impl<'a> FrameEncoder<'a> {
         y4: usize,
         block_w: usize,
         quant: &[i32; 16],
+        tx_sym: usize,
     ) {
         let ptype = usize::from(plane > 0);
         let qctx = self.qctx;
@@ -335,9 +386,11 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // transform_type (§5.11.39): signaled only for luma when not all-zero and base_q_idx > 0.
-        // Reduced tx set + 4×4 intra ⇒ TX_SET_INTRA_2; symbol 1 = DCT_DCT.
+        // Reduced tx set + 4×4 intra ⇒ TX_SET_INTRA_2; `tx_sym` indexes
+        // Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}.
         if self.qindex > 0 && plane == 0 {
-            self.sym.encode_symbol(1, &cdf::INTRA_TX_TYPE_SET2_4X4_DC);
+            self.sym
+                .encode_symbol(tx_sym, &cdf::INTRA_TX_TYPE_SET2_4X4_DC);
         }
 
         // eob position (TX_CLASS_2D ⇒ eob_pt context 0).
@@ -575,5 +628,52 @@ fn golomb(sym: &mut SymbolEncoder, x: u32) {
     while i >= 0 {
         sym.encode_literal((x >> i) & 1, 1);
         i -= 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gamut_color::Planar8;
+
+    /// A 4×4 mid-grey image is enough to construct an encoder; selection depends only on the
+    /// residual and the quantizers, not the plane contents.
+    fn grey4x4() -> Planar8 {
+        Planar8::from_rgb8_identity(&[128u8; 4 * 4 * 3], 4, 4).unwrap()
+    }
+
+    #[test]
+    fn tx_type_selection_matches_set2_mapping() {
+        let p = grey4x4();
+        let e = FrameEncoder::new(&p, 48);
+
+        // A flat residual concentrates into the DCT DC bin (one coefficient), so DCT_DCT wins and
+        // is signaled as Tx_Type_Intra_Inv_Set2 symbol 1.
+        let (tx, sym, _) = e.select_tx_type(&[40i32; 16]);
+        assert!(matches!(tx, TxType::DctDct));
+        assert_eq!(sym, 1);
+
+        // A single non-DC impulse stays a single coefficient under the identity transform but
+        // spreads across many DCT bins, so IDTX wins and is signaled as symbol 0.
+        let mut impulse = [0i32; 16];
+        impulse[5] = 220;
+        let (tx, sym, levels) = e.select_tx_type(&impulse);
+        assert!(matches!(tx, TxType::Idtx));
+        assert_eq!(sym, 0);
+        assert_eq!(levels.iter().filter(|&&l| l != 0).count(), 1);
+    }
+
+    #[test]
+    fn tx_type_selection_is_deterministic() {
+        let p = grey4x4();
+        let e = FrameEncoder::new(&p, 90);
+        let mut res = [0i32; 16];
+        for (i, v) in res.iter_mut().enumerate() {
+            *v = (i as i32 - 8) * 17;
+        }
+        let a = e.select_tx_type(&res);
+        let b = e.select_tx_type(&res);
+        assert_eq!(a.1, b.1);
+        assert_eq!(a.2, b.2);
     }
 }
