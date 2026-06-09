@@ -23,13 +23,17 @@ use crate::vp8l::prefix::{
     build_length_limited_lengths, green_alphabet_size, write_normal_prefix_code,
 };
 use crate::vp8l::transform::{
-    COLOR_TRANSFORM, PREDICTOR_TRANSFORM, SUBTRACT_GREEN_TRANSFORM, alpha, blue, forward_color,
-    forward_predictor, forward_subtract_green, green, red,
+    COLOR_INDEXING_TRANSFORM, COLOR_TRANSFORM, PREDICTOR_TRANSFORM, SUBTRACT_GREEN_TRANSFORM,
+    alpha, blue, forward_color, forward_color_indexing, forward_predictor, forward_subtract_green,
+    green, red, subtract_pixels,
 };
 
 /// Block-size exponent for the predictor/color sub-images (16×16 blocks). Optimal block sizing is a
 /// density tuning knob deferred to issue #31.
 const TRANSFORM_SIZE_BITS: u8 = 4;
+
+/// Maximum number of distinct colors for the color-indexing (palette) transform (RFC 9649 §4.4).
+const MAX_PALETTE_SIZE: usize = 256;
 
 /// Encodes an ARGB image (scan order, `0xAARRGGBB`) to a VP8L bitstream body — the bytes that go
 /// inside the `VP8L` chunk, signature byte included.
@@ -51,30 +55,74 @@ pub fn encode(argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
     let mut w = BitWriter::new();
     header.write(&mut w);
 
-    let mut pixels = argb.to_vec();
+    // Few-color images take the palette path; everything else takes the spatial-transform path.
+    // Choosing the densest path for a given image is a tuning concern deferred to issue #31.
+    match build_palette(argb) {
+        Some(palette) => encode_palette(&mut w, argb, dims, &palette),
+        None => encode_spatial(&mut w, argb, dims),
+    }
+    Ok(w.finish())
+}
+
+/// Encodes via the spatial transforms (subtract-green, predictor, color) applied in read order; the
+/// decoder inverts them last-first.
+fn encode_spatial(w: &mut BitWriter, argb: &[u32], dims: Dimensions) {
     let (width, height) = (dims.width, dims.height);
+    let mut pixels = argb.to_vec();
 
-    // Apply the forward transforms in read order; the decoder inverts them last-first.
-    // 1. Subtract-green (no transform data).
     forward_subtract_green(&mut pixels);
-    write_transform_tag(&mut w, SUBTRACT_GREEN_TRANSFORM);
+    write_transform_tag(w, SUBTRACT_GREEN_TRANSFORM);
 
-    // 2. Spatial predictor.
     let (residual, predictor_sub) = forward_predictor(&pixels, width, height, TRANSFORM_SIZE_BITS);
     pixels = residual;
-    write_transform_tag(&mut w, PREDICTOR_TRANSFORM);
+    write_transform_tag(w, PREDICTOR_TRANSFORM);
     w.write_bits(u32::from(TRANSFORM_SIZE_BITS - 2), 3);
-    write_image(&mut w, &predictor_sub, false);
+    write_image(w, &predictor_sub, false);
 
-    // 3. Color transform.
     let color_sub = forward_color(&mut pixels, width, height, TRANSFORM_SIZE_BITS);
-    write_transform_tag(&mut w, COLOR_TRANSFORM);
+    write_transform_tag(w, COLOR_TRANSFORM);
     w.write_bits(u32::from(TRANSFORM_SIZE_BITS - 2), 3);
-    write_image(&mut w, &color_sub, false);
+    write_image(w, &color_sub, false);
 
     w.write_bits(0, 1); // End of transforms.
-    write_image(&mut w, &pixels, true);
-    Ok(w.finish())
+    write_image(w, &pixels, true);
+}
+
+/// Encodes via the color-indexing (palette) transform: the subtraction-coded palette followed by the
+/// bundled index image (RFC 9649 §4.4).
+fn encode_palette(w: &mut BitWriter, argb: &[u32], dims: Dimensions, palette: &[u32]) {
+    write_transform_tag(w, COLOR_INDEXING_TRANSFORM);
+    w.write_bits((palette.len() - 1) as u32, 8);
+
+    // The palette is stored as a height-1 image, subtraction-coded onto the previous entry.
+    let mut palette_image = vec![0u32; palette.len()];
+    palette_image[0] = palette[0];
+    for i in 1..palette.len() {
+        palette_image[i] = subtract_pixels(palette[i], palette[i - 1]);
+    }
+    write_image(w, &palette_image, false);
+
+    let (bundled, _bundled_width) = forward_color_indexing(argb, dims.width, dims.height, palette);
+    w.write_bits(0, 1); // End of transforms.
+    write_image(w, &bundled, true);
+}
+
+/// Collects the distinct colors in first-seen order, or `None` if there are more than
+/// [`MAX_PALETTE_SIZE`] (in which case the palette transform does not apply). Sorting the palette for
+/// denser subtraction coding is deferred to issue #31.
+fn build_palette(pixels: &[u32]) -> Option<Vec<u32>> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut palette = Vec::new();
+    for &p in pixels {
+        if seen.insert(p) {
+            if palette.len() == MAX_PALETTE_SIZE {
+                return None;
+            }
+            palette.push(p);
+        }
+    }
+    Some(palette)
 }
 
 /// Writes a "transform present" bit followed by the 2-bit transform type.
@@ -169,6 +217,35 @@ mod tests {
     fn round_trips_solid_color() {
         let img = vec![make_argb(0xff, 9, 9, 9); 17 * 9];
         round_trip(&img, 17, 9);
+    }
+
+    #[test]
+    fn round_trips_many_colors_via_spatial_path() {
+        // > 256 distinct colors forces the spatial-transform path (subtract-green/predictor/color).
+        let (w, h) = (64u32, 48u32);
+        let img: Vec<u32> = (0..(w * h))
+            .map(|i| {
+                make_argb(
+                    0xff,
+                    (i & 0xff) as u8,
+                    ((i >> 8) & 0xff) as u8,
+                    (i * 13) as u8,
+                )
+            })
+            .collect();
+        assert!(
+            build_palette(&img).is_none(),
+            "test image must exceed the palette limit"
+        );
+        round_trip(&img, w, h);
+    }
+
+    #[test]
+    fn round_trips_two_color_palette() {
+        // A 2-color image bundles 8 pixels per byte (width_bits = 3).
+        let (a, b) = (make_argb(0xff, 0, 0, 0), make_argb(0xff, 255, 255, 255));
+        let img: Vec<u32> = (0..30).map(|i| if i % 3 == 0 { a } else { b }).collect();
+        round_trip(&img, 6, 5);
     }
 
     #[test]

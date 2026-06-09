@@ -127,6 +127,18 @@ pub const fn add_pixels(a: u32, b: u32) -> u32 {
     )
 }
 
+/// Subtracts two pixels channel-wise modulo 256 (used to subtraction-encode the color table).
+#[inline]
+#[must_use]
+pub const fn subtract_pixels(a: u32, b: u32) -> u32 {
+    make_argb(
+        alpha(a).wrapping_sub(alpha(b)),
+        red(a).wrapping_sub(red(b)),
+        green(a).wrapping_sub(green(b)),
+        blue(a).wrapping_sub(blue(b)),
+    )
+}
+
 // --- Subtract-green (RFC 9649 §4.3) ---------------------------------------------------------------
 
 /// Inverse subtract-green: add the green value back into red and blue for every pixel.
@@ -540,6 +552,41 @@ pub fn color_index_width_bits(table_size: usize) -> u8 {
     }
 }
 
+/// Forward color-indexing: maps each pixel to its `palette` index and packs the indices into the
+/// green channel (pixel bundling), returning `(bundled_image, bundled_width)` (RFC 9649 §4.4).
+/// Callers must guarantee every pixel appears in `palette`.
+#[must_use]
+pub fn forward_color_indexing(
+    pixels: &[u32],
+    width: u32,
+    height: u32,
+    palette: &[u32],
+) -> (Vec<u32>, u32) {
+    use std::collections::HashMap;
+    let width_bits = color_index_width_bits(palette.len());
+    let pixels_per = 1usize << width_bits;
+    let bits_per = 8 / pixels_per as u32;
+    let bundled_width = div_round_up(width, pixels_per as u32);
+    let index_of: HashMap<u32, u32> = palette
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i as u32))
+        .collect();
+    let w = width as usize;
+    let bw = bundled_width as usize;
+    let mut bundled = vec![0xff00_0000u32; bw * height as usize];
+    for y in 0..height as usize {
+        for x in 0..w {
+            let index = index_of.get(&pixels[y * w + x]).copied().unwrap_or(0);
+            let pos = y * bw + x / pixels_per;
+            let shift = (x % pixels_per) as u32 * bits_per;
+            let packed = u32::from(green(bundled[pos])) | (index << shift);
+            bundled[pos] = make_argb(0xff, 0, packed as u8, 0);
+        }
+    }
+    (bundled, bundled_width)
+}
+
 /// Inverse color-indexing: expands the bundled index image (`bundled_width` × `height`) back to
 /// `expanded_width` columns, replacing each green-channel index with its `table` color (or
 /// transparent black when the index is out of range) (RFC 9649 §4.4).
@@ -813,6 +860,33 @@ mod tests {
         let sub = forward_color(&mut px, w, h, 2);
         inverse_color(&mut px, w, h, 2, &sub);
         assert_eq!(px, orig);
+    }
+
+    #[test]
+    fn forward_color_indexing_inverts() {
+        // 3-color palette -> width_bits 2 -> 4 indices packed per pixel.
+        let palette = vec![
+            make_argb(0xff, 10, 20, 30),
+            make_argb(0x80, 40, 50, 60),
+            make_argb(0xff, 0, 0, 0),
+        ];
+        let (w, h) = (5u32, 2u32);
+        let orig: Vec<u32> = (0..(w * h)).map(|i| palette[(i % 3) as usize]).collect();
+        let (bundled, bundled_width) = forward_color_indexing(&orig, w, h, &palette);
+        assert_eq!(bundled_width, 2); // div_round_up(5, 4)
+        let restored = inverse_color_indexing(&bundled, bundled_width, h, w, &palette);
+        assert_eq!(restored, orig);
+    }
+
+    #[test]
+    fn forward_color_indexing_two_color_bundles_eight() {
+        let palette = vec![make_argb(0xff, 1, 2, 3), make_argb(0xff, 9, 9, 9)];
+        let (w, h) = (10u32, 1u32);
+        let orig: Vec<u32> = (0..w).map(|i| palette[(i % 2) as usize]).collect();
+        let (bundled, bundled_width) = forward_color_indexing(&orig, w, h, &palette);
+        assert_eq!(bundled_width, 2); // div_round_up(10, 8)
+        let restored = inverse_color_indexing(&bundled, bundled_width, h, w, &palette);
+        assert_eq!(restored, orig);
     }
 
     #[test]
