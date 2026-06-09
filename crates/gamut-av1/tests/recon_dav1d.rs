@@ -241,6 +241,33 @@ fn cfl_chroma_from_luma_matches_dav1d() {
 }
 
 #[test]
+fn deblock_matches_dav1d() {
+    if !dav1d_available() {
+        eprintln!("skipping recon_dav1d: dav1d not installed");
+        return;
+    }
+    // Block-aligned flat tiles with moderate steps between them: after quantization the 4×4 block
+    // boundaries carry exactly the small discontinuities the deblocking loop filter (§7.14) smooths.
+    // The encoder applies the filter to its reconstruction and dav1d applies it on decode, so the
+    // byte-for-byte match validates the narrow-filter math, masks, and the vertical-then-horizontal
+    // pass ordering across the full quantizer (and hence loop-filter-level) range.
+    let tiles = |x: u32, y: u32| {
+        let step = ((x / 4 + y / 4) % 6) as u8; // changes every 4 px ⇒ on the block grid
+        let v = 60u8.wrapping_add(step.wrapping_mul(18));
+        [
+            v,
+            v.wrapping_add(20),
+            200u8.wrapping_sub(step.wrapping_mul(12)),
+        ]
+    };
+    for &q in &[16u8, 48, 110, 200] {
+        for &(w, h) in &[(8, 8), (16, 16), (35, 23), (64, 40)] {
+            check(&planes(w, h, tiles), q);
+        }
+    }
+}
+
+#[test]
 fn flat_lossy_reconstruction_matches_dav1d() {
     if !dav1d_available() {
         return;

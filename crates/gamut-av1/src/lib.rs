@@ -15,6 +15,7 @@
 
 mod cdf;
 mod encoder;
+mod filter;
 mod headers;
 pub mod quant;
 mod tile;
