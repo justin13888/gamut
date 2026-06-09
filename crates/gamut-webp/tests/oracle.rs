@@ -98,3 +98,62 @@ fn libwebp_decodes_gamut_lossless_to_source() {
         assert_eq!(rgba_to_rgb(&decoded.rgba), rgb, "pixel mismatch at {w}x{h}");
     }
 }
+
+/// Encodes interleaved RGB with gamut and decodes it with libwebp, asserting the pixels survive.
+fn assert_gamut_encode_libwebp_decode(rgb: &[u8], w: u32, h: u32, label: &str) {
+    let mut webp = Vec::new();
+    WebpEncoder::lossless()
+        .encode_rgb8(
+            rgb,
+            Dimensions {
+                width: w,
+                height: h,
+            },
+            &mut webp,
+        )
+        .expect("gamut encode");
+    let decoded = libwebp_decode_rgba(&webp);
+    assert_eq!((decoded.width, decoded.height), (w, h), "dims for {label}");
+    assert_eq!(rgba_to_rgb(&decoded.rgba), rgb, "pixels for {label}");
+}
+
+#[test]
+fn libwebp_decodes_every_gamut_encoder_path() {
+    // Each image steers gamut's encoder down a different path; libwebp must decode them all.
+    let (w, h) = (40u32, 40u32);
+    let n = (w * h) as usize;
+
+    // Solid color → palette transform with 8-pixel bundling.
+    let solid: Vec<u8> = [30u8, 60, 90].repeat(n);
+    assert_gamut_encode_libwebp_decode(&solid, w, h, "solid");
+
+    // Few colors, repetitive → palette + color cache + LZ77.
+    let palette = [[10u8, 20, 30], [40, 50, 60], [70, 80, 90]];
+    let few: Vec<u8> = (0..n).flat_map(|i| palette[i % 3]).collect();
+    assert_gamut_encode_libwebp_decode(&few, w, h, "few-color");
+
+    // 32 colors split top/bottom → palette + multi-group entropy image.
+    let regioned: Vec<u8> = (0..n)
+        .flat_map(|i| {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let scatter = ((x * 7 + y * 11) % 16) as u8;
+            let base = if y < h / 2 { 0 } else { 16 };
+            let idx = base + scatter;
+            [idx, idx.wrapping_mul(7), idx.wrapping_mul(13)]
+        })
+        .collect();
+    assert_gamut_encode_libwebp_decode(&regioned, w, h, "multi-region");
+
+    // Many colors → spatial transforms (subtract-green/predictor/color) + LZ77 + cache.
+    let many: Vec<u8> = (0..n)
+        .flat_map(|i| {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            [
+                (x * 9 + y * 5) as u8,
+                (x * 13 + y * 7) as u8,
+                (x * 17 + y * 3) as u8,
+            ]
+        })
+        .collect();
+    assert_gamut_encode_libwebp_decode(&many, w, h, "many-color");
+}

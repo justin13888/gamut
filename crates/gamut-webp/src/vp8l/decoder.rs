@@ -373,4 +373,56 @@ mod tests {
         let (_, pixels) = decode(&stream).expect("decode");
         assert!(pixels.iter().all(|&p| p == color));
     }
+
+    #[test]
+    fn rejects_out_of_range_color_cache_bits() {
+        // color-cache-info with size bits = 0 is invalid (valid range is 1..=11).
+        let mut w = BitWriter::new();
+        Vp8lHeader::from_dimensions(
+            Dimensions {
+                width: 4,
+                height: 4,
+            },
+            false,
+        )
+        .unwrap()
+        .write(&mut w);
+        w.write_bits(0, 1); // no transforms
+        w.write_bits(1, 1); // use color cache
+        w.write_bits(0, 4); // cache_code_bits = 0 → invalid
+        let bytes = w.finish();
+        assert!(matches!(decode(&bytes), Err(Error::InvalidInput(_))));
+    }
+
+    #[test]
+    fn decode_never_panics_on_arbitrary_payloads() {
+        // A valid small header followed by pseudo-random bits: every malformed transform / prefix
+        // code / image-data path must surface as `Err`, never a panic. Bounded dimensions keep the
+        // pixel allocation tiny regardless of the random bits.
+        let mut header = BitWriter::new();
+        Vp8lHeader::from_dimensions(
+            Dimensions {
+                width: 4,
+                height: 4,
+            },
+            false,
+        )
+        .unwrap()
+        .write(&mut header);
+        let header = header.finish();
+
+        let mut state = 0x1234_5678_9abc_def0u64;
+        for _ in 0..5000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let len = (state % 48) as usize + 1;
+            let mut bytes = header.clone();
+            for k in 0..len {
+                bytes.push((state >> ((k % 8) * 8)) as u8);
+            }
+            // Result is intentionally ignored; the point is that it returns rather than panics.
+            let _ = decode(&bytes);
+        }
+    }
 }
