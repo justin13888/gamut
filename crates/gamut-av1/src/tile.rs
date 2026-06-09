@@ -84,13 +84,28 @@ const LUMA_MODES: [u8; 13] = [
     PAETH_PRED,
 ];
 
+/// The eight directional luma modes, in `YMode` order (`V`..`D67`), used to drive the ≥8×8 angle
+/// search. Each is a candidate base angle that `AngleDeltaY ∈ [-3, 3]` fine-tunes.
+const DIRECTIONAL_MODES: [u8; 8] = [
+    V_PRED, H_PRED, D45_PRED, D135_PRED, D113_PRED, D157_PRED, D203_PRED, D67_PRED,
+];
+
+/// True for the eight directional intra modes (`V_PRED..=D67_PRED`, mode indices `1..=8`), which is
+/// `is_directional_mode` (§7.11.2). These are the modes for which `angle_delta_y` is signaled (≥8×8)
+/// and whose prediction follows the directional process (§7.11.2.4).
+const fn is_directional(mode: u8) -> bool {
+    V_PRED <= mode && mode <= D67_PRED
+}
+
 /// How a single transform block's samples are predicted. `mode` is the intra mode (`DC_PRED` for
-/// chroma); `filter_intra` overrides luma prediction with a recursive filter-intra mode (§7.11.2.3);
-/// `cfl_alpha` adds the chroma-from-luma high-frequency term (§7.11.5). At most one of the latter
-/// two is set, and only on its respective plane.
+/// chroma); `angle_delta` is the directional fine angle (`AngleDeltaY`, signaled only for ≥8×8 luma
+/// directional blocks); `filter_intra` overrides luma prediction with a recursive filter-intra mode
+/// (§7.11.2.3); `cfl_alpha` adds the chroma-from-luma high-frequency term (§7.11.5). At most one of
+/// the latter two is set, and only on its respective plane.
 #[derive(Clone, Copy)]
 struct Pred {
     mode: u8,
+    angle_delta: i8,
     filter_intra: Option<u8>,
     cfl_alpha: Option<i32>,
 }
@@ -358,12 +373,13 @@ impl<'a> FrameEncoder<'a> {
         // predicts DC_PRED; the lossy path searches the non-directional luma modes (plus directional
         // and filter-intra at 4×4) and signals the choice with the above/left mode context.
         self.sym.encode_symbol(0, &cdf::SKIP[0]);
-        let (y_mode, filter_intra) = if self.qindex == 0 {
-            (DC_PRED, None)
+        let (y_mode, angle_delta, filter_intra) = if self.qindex == 0 {
+            (DC_PRED, 0i8, None)
         } else if lossy_8x8 {
-            (self.select_luma_mode_8x8(c * 4, r * 4), None)
+            self.select_luma_mode_8x8(c * 4, r * 4)
         } else {
-            self.select_luma_mode(c * 4, r * 4)
+            let (m, fi) = self.select_luma_mode(c * 4, r * 4);
+            (m, 0, fi)
         };
         let amode = cdf::INTRA_MODE_CONTEXT[if r > 0 {
             usize::from(self.mi_ymode[(r - 1) * self.mi_cols + c])
@@ -377,6 +393,14 @@ impl<'a> FrameEncoder<'a> {
         }];
         self.sym
             .encode_symbol(usize::from(y_mode), &cdf::INTRA_FRAME_Y_MODE[amode][lmode]);
+        // intra_angle_info_y (§5.11.42): for MiSize ≥ BLOCK_8X8 with a directional YMode, the fine
+        // angle `AngleDeltaY ∈ [-3, 3]` is signaled (biased by MAX_ANGLE_DELTA = 3) under the
+        // per-mode `Angle_Delta_Cdf`. 4×4 blocks never reach this (MiSize < BLOCK_8X8 ⇒ delta = 0).
+        if bw >= 8 && is_directional(y_mode) {
+            let sym = (i32::from(angle_delta) + 3) as usize;
+            self.sym
+                .encode_symbol(sym, &cdf::ANGLE_DELTA[(y_mode - V_PRED) as usize]);
+        }
         // uv_mode. Its CDF is indexed by the luma mode. `is_cfl_allowed` is `MiSize == BLOCK_4X4`
         // when Lossless, else `Max(w, h) <= 32` — so CfL is allowed for the lossy 4×4 and 8×8 blocks
         // and the lossless 4×4 blocks. When allowed, the encoder picks chroma-from-luma if it beats
@@ -400,8 +424,8 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // filter_intra_mode_info (§5.11.24): with enable_filter_intra = 1 (lossy path), every
-        // DC_PRED luma block ≤ 32px signals use_filter_intra (PaletteSizeY is always 0 here). The
-        // CDF is the block-size row; 8×8 blocks always signal 0 (8×8 filter-intra is a later phase).
+        // DC_PRED luma block ≤ 32px signals use_filter_intra (PaletteSizeY is always 0 here), under
+        // the block-size CDF row. Both 4×4 and 8×8 DC_PRED blocks may enable it.
         if self.qindex > 0 && y_mode == DC_PRED {
             let fi_cdf = if bw == 4 {
                 &cdf::FILTER_INTRA_4X4
@@ -437,6 +461,7 @@ impl<'a> FrameEncoder<'a> {
         for plane in 0..3 {
             let pred = Pred {
                 mode: if plane == 0 { y_mode } else { DC_PRED },
+                angle_delta: if plane == 0 { angle_delta } else { 0 },
                 filter_intra: if plane == 0 { filter_intra } else { None },
                 cfl_alpha: match (plane, cfl) {
                     (1, Some((au, _))) => Some(au),
@@ -502,9 +527,9 @@ impl<'a> FrameEncoder<'a> {
         // inverse on the same levels, the result is bit-exact for whichever transform type is signaled.
         let n = tx_size.width();
         let pred: Vec<i32> = match desc.filter_intra {
-            Some(fi) if plane == 0 => self.predict_filter_intra_4x4(plane, sx, sy, fi).to_vec(),
+            Some(fi) if plane == 0 => self.predict_filter_intra(plane, sx, sy, n, fi),
             _ => {
-                let mut p = self.predict_intra(plane, sx, sy, desc.mode, n);
+                let mut p = self.predict_intra(plane, sx, sy, desc.mode, n, desc.angle_delta);
                 if let Some(alpha) = desc.cfl_alpha {
                     self.apply_cfl(&mut p, sx, sy, alpha, n);
                 }
@@ -689,52 +714,60 @@ impl<'a> FrameEncoder<'a> {
         (above, left, top_left)
     }
 
-    /// Builds the 4×4 recursive filter-intra prediction (§7.11.2.3) for luma at coded `(sx, sy)`
-    /// under `filter_intra_mode`. With `w == h == 4` the spec's `w4 = 1`, `h2 = 2`: two stacked 4×2
-    /// sub-blocks, the lower filtering the predicted samples of the upper. Each output 4×2 weights a
-    /// 7-sample neighbourhood `p` by [`cdf::INTRA_FILTER_TAPS`] and scales by `INTRA_FILTER_SCALE_BITS
-    /// = 4`. Only `AboveRow[-1..3]` / `LeftCol[-1..3]` are read, so no above-right / below-left
-    /// extension is needed. Used only on the lossy path, where `enable_filter_intra = 1`.
-    fn predict_filter_intra_4x4(
+    /// Builds the `n × n` recursive filter-intra prediction (§7.11.2.3) for luma at coded `(sx, sy)`
+    /// under `filter_intra_mode`. The block is tiled into `w4 = n/4` by `h2 = n/2` overlapping 4×2
+    /// sub-blocks, processed top-to-bottom then left-to-right so each sub-block can filter the already
+    /// predicted samples of the one above and to its left. Each output 4×2 weights a 7-sample
+    /// neighbourhood `p` by [`cdf::INTRA_FILTER_TAPS`] and scales by `INTRA_FILTER_SCALE_BITS = 4`
+    /// (`Round2Signed`). Only `AboveRow[-1..n-1]` / `LeftCol[-1..n-1]` are read, so no above-right /
+    /// below-left extension is needed. Used only on the lossy path, where `enable_filter_intra = 1`.
+    fn predict_filter_intra(
         &self,
         plane: usize,
         sx: usize,
         sy: usize,
+        n: usize,
         fi_mode: u8,
-    ) -> [i32; 16] {
-        let (above, left, top_left) = self.reference_4x4(plane, sx, sy);
+    ) -> Vec<i32> {
+        let (above, left, top_left) = self.reference_basic(plane, sx, sy, n);
         let above_row = |k: i32| -> i32 { if k < 0 { top_left } else { above[k as usize] } };
         let left_col = |k: i32| -> i32 { if k < 0 { top_left } else { left[k as usize] } };
         let taps = &cdf::INTRA_FILTER_TAPS[fi_mode as usize];
-        let mut pred = [0i32; 16];
-        // For each 4×2 sub-block (i2 = 0..1; j4 is always 0 since w4 = 1).
-        for i2 in 0..2i32 {
-            // p[0..6]: the 7 neighbouring samples (§7.11.2.3). The top sub-block reads AboveRow; the
-            // bottom one reads the top sub-block's predicted row 1 plus LeftCol.
-            let mut p = [0i32; 7];
-            for (i, pi) in p.iter_mut().enumerate() {
-                let i = i as i32;
-                *pi = if i < 5 {
-                    if i2 == 0 {
-                        above_row(i - 1)
-                    } else if i == 0 {
-                        left_col((i2 << 1) - 1)
+        let (w4, h2, nn) = ((n >> 2) as i32, (n >> 1) as i32, n as i32);
+        let mut pred = vec![0i32; n * n];
+        // For each 4×2 sub-block (i2 = rows of 2, j4 = columns of 4), in this exact order so the
+        // dependencies on the sub-block above (`(i2<<1)-1`) and to the left (`(j4<<2)-1`) are ready.
+        for i2 in 0..h2 {
+            for j4 in 0..w4 {
+                // p[0..6]: the 7 neighbouring samples (§7.11.2.3). Top row reads AboveRow; left column
+                // reads LeftCol; the interior reads already-predicted samples.
+                let mut p = [0i32; 7];
+                for (i, pi) in p.iter_mut().enumerate() {
+                    let i = i as i32;
+                    *pi = if i < 5 {
+                        if i2 == 0 {
+                            above_row((j4 << 2) + i - 1)
+                        } else if j4 == 0 && i == 0 {
+                            left_col((i2 << 1) - 1)
+                        } else {
+                            pred[(((i2 << 1) - 1) * nn + (j4 << 2) + i - 1) as usize]
+                        }
+                    } else if j4 == 0 {
+                        left_col((i2 << 1) + i - 5)
                     } else {
-                        pred[(((i2 << 1) - 1) * 4 + (i - 1)) as usize]
+                        pred[(((i2 << 1) + i - 5) * nn + (j4 << 2) - 1) as usize]
+                    };
+                }
+                for i1 in 0..2i32 {
+                    for j1 in 0..4i32 {
+                        let row = ((i1 << 2) + j1) as usize;
+                        let mut pr = 0i32;
+                        for (k, &tap) in taps[row].iter().enumerate() {
+                            pr += i32::from(tap) * p[k];
+                        }
+                        let idx = (((i2 << 1) + i1) * nn + (j4 << 2) + j1) as usize;
+                        pred[idx] = round2_signed(pr, 4).clamp(0, 255);
                     }
-                } else {
-                    left_col((i2 << 1) + i - 5)
-                };
-            }
-            for i1 in 0..2i32 {
-                for j1 in 0..4i32 {
-                    let row = ((i1 << 2) + j1) as usize;
-                    let mut pr = 0i32;
-                    for (k, &tap) in taps[row].iter().enumerate() {
-                        pr += i32::from(tap) * p[k];
-                    }
-                    let idx = (((i2 << 1) + i1) * 4 + j1) as usize;
-                    pred[idx] = round2_signed(pr, 4).clamp(0, 255);
                 }
             }
         }
@@ -866,14 +899,153 @@ impl<'a> FrameEncoder<'a> {
     }
 
     /// Builds the `n × n` intra prediction for `plane` at coded `(sx, sy)` under `mode`. 4×4 blocks
-    /// dispatch to [`Self::predict_4x4`] (the full mode set); 8×8 blocks support the non-directional
-    /// modes only (`DC`/`SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH` — directional 8×8 prediction, which
-    /// needs `angle_delta` and the intra edge filter, is a later phase).
-    fn predict_intra(&self, plane: usize, sx: usize, sy: usize, mode: u8, n: usize) -> Vec<i32> {
+    /// dispatch to [`Self::predict_4x4`] (`angle_delta` is always 0 there — never signaled for
+    /// `MiSize < BLOCK_8X8`). 8×8 blocks use the non-directional predictor for `DC`/`SMOOTH*`/`PAETH`
+    /// and the general directional process (§7.11.2.4) — fine-tuned by `angle_delta` — otherwise.
+    fn predict_intra(
+        &self,
+        plane: usize,
+        sx: usize,
+        sy: usize,
+        mode: u8,
+        n: usize,
+        angle_delta: i8,
+    ) -> Vec<i32> {
         if n == 4 {
             return self.predict_4x4(plane, sx, sy, mode).to_vec();
         }
+        if is_directional(mode) {
+            return self.predict_directional(plane, sx, sy, n, mode, angle_delta);
+        }
         self.predict_8x8_nondir(plane, sx, sy, mode)
+    }
+
+    /// Builds the §7.11.2.2 reference samples for an `n × n` directional block: `AboveRow[0..2n]`,
+    /// `LeftCol[0..2n]`, and the top-left corner (`AboveRow[-1] == LeftCol[-1]`). The extended
+    /// (`> n`) samples are real reconstruction only when the above-right / below-left `n × n` region
+    /// has been decoded (`BlockDecoded`, §5.11.34, stepped by `n / 4` MI cells); otherwise they
+    /// replicate the last in-block edge sample. With `enable_intra_edge_filter = 0` no edge filtering
+    /// or upsampling is applied. Generalizes [`Self::reference_4x4`] (which is the `n == 4` case).
+    fn reference_directional(
+        &self,
+        plane: usize,
+        sx: usize,
+        sy: usize,
+        n: usize,
+    ) -> (Vec<i32>, Vec<i32>, i32) {
+        let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
+        let have_above = sy > 0;
+        let have_left = sx > 0;
+        let step = (n / 4) as isize;
+        let (by, bx) = (
+            sy as isize / 4 - self.sb_r as isize,
+            sx as isize / 4 - self.sb_c as isize,
+        );
+        let have_above_right = self.block_decoded_at(by - 1, bx + step);
+        let have_below_left = self.block_decoded_at(by + step, bx - 1);
+        let (max_x, max_y) = (self.coded_w - 1, self.coded_h - 1);
+
+        let mut above = vec![127i32; 2 * n];
+        if have_above {
+            let above_limit = max_x.min(sx + if have_above_right { 2 * n } else { n } - 1);
+            for (i, a) in above.iter_mut().enumerate() {
+                *a = nb(above_limit.min(sx + i), sy - 1);
+            }
+        } else if have_left {
+            above = vec![nb(sx - 1, sy); 2 * n];
+        }
+
+        let mut left = vec![129i32; 2 * n];
+        if have_left {
+            let left_limit = max_y.min(sy + if have_below_left { 2 * n } else { n } - 1);
+            for (i, l) in left.iter_mut().enumerate() {
+                *l = nb(sx - 1, left_limit.min(sy + i));
+            }
+        } else if have_above {
+            left = vec![nb(sx, sy - 1); 2 * n];
+        }
+
+        let top_left = if have_above && have_left {
+            nb(sx - 1, sy - 1)
+        } else if have_above {
+            nb(sx, sy - 1)
+        } else if have_left {
+            nb(sx - 1, sy)
+        } else {
+            128
+        };
+        (above, left, top_left)
+    }
+
+    /// Directional intra prediction (§7.11.2.4) for an `n × n` block, with `pAngle = Mode_To_Angle +
+    /// angle_delta * ANGLE_STEP` and `upsampleAbove = upsampleLeft = 0` (the intra edge filter is
+    /// disabled). Cardinal angles (`90`/`180`) copy a single edge; zone 1 (`< 90`) interpolates along
+    /// the extended above row; zone 2 (`90 < · < 180`) interpolates along the above row, falling back
+    /// to the left column past the top edge; zone 3 (`> 180`) interpolates along the extended left
+    /// column. `Dr_Intra_Derivative` supplies `dx`/`dy`; each interpolation is `Round2(_, 5)`.
+    fn predict_directional(
+        &self,
+        plane: usize,
+        sx: usize,
+        sy: usize,
+        n: usize,
+        mode: u8,
+        angle_delta: i8,
+    ) -> Vec<i32> {
+        let p_angle = cdf::MODE_TO_ANGLE[mode as usize] + i32::from(angle_delta) * 3;
+        let (above, left, top_left) = self.reference_directional(plane, sx, sy, n);
+        let above_row = |k: i32| -> i32 { if k < 0 { top_left } else { above[k as usize] } };
+        let left_col = |k: i32| -> i32 { if k < 0 { top_left } else { left[k as usize] } };
+        let mut pred = vec![0i32; n * n];
+        for i in 0..n as i32 {
+            for j in 0..n as i32 {
+                let v = if p_angle == 90 {
+                    above[j as usize]
+                } else if p_angle == 180 {
+                    left[i as usize]
+                } else if p_angle < 90 {
+                    // Zone 1: ray sweeps the above row (extended to the above-right).
+                    let dx = cdf::DR_INTRA_DERIVATIVE[p_angle as usize];
+                    let idx = (i + 1) * dx;
+                    let base = (idx >> 6) + j;
+                    let max_base_x = (2 * n - 1) as i32; // (w + h - 1)
+                    if base < max_base_x {
+                        let shift = (idx >> 1) & 0x1F;
+                        (above[base as usize] * (32 - shift)
+                            + above[(base + 1) as usize] * shift
+                            + 16)
+                            >> 5
+                    } else {
+                        above[max_base_x as usize]
+                    }
+                } else if p_angle < 180 {
+                    // Zone 2: ray sweeps the above row, falling back to the left column past the top.
+                    let dx = cdf::DR_INTRA_DERIVATIVE[(180 - p_angle) as usize];
+                    let dy = cdf::DR_INTRA_DERIVATIVE[(p_angle - 90) as usize];
+                    let idx = (j << 6) - (i + 1) * dx;
+                    let base = idx >> 6;
+                    if base >= -1 {
+                        let shift = (idx >> 1) & 0x1F;
+                        (above_row(base) * (32 - shift) + above_row(base + 1) * shift + 16) >> 5
+                    } else {
+                        let idx2 = (i << 6) - (j + 1) * dy;
+                        let base2 = idx2 >> 6;
+                        let shift = (idx2 >> 1) & 0x1F;
+                        (left_col(base2) * (32 - shift) + left_col(base2 + 1) * shift + 16) >> 5
+                    }
+                } else {
+                    // Zone 3: ray sweeps the left column (extended to the below-left).
+                    let dy = cdf::DR_INTRA_DERIVATIVE[(270 - p_angle) as usize];
+                    let idx = (j + 1) * dy;
+                    let base = (idx >> 6) + i;
+                    let shift = (idx >> 1) & 0x1F;
+                    (left[base as usize] * (32 - shift) + left[(base + 1) as usize] * shift + 16)
+                        >> 5
+                };
+                pred[(i * n as i32 + j) as usize] = v;
+            }
+        }
+        pred
     }
 
     /// Builds the §7.11.2.1 reference samples for a non-directional `n × n` block: `AboveRow[0..n]`,
@@ -977,7 +1149,7 @@ impl<'a> FrameEncoder<'a> {
     /// The choice is a quality decision; every option reconstructs bit-exactly, so only the
     /// signaling must be correct.
     fn select_luma_mode(&self, sx: usize, sy: usize) -> (u8, Option<u8>) {
-        let sad = |pred: &[i32; 16]| -> i32 {
+        let sad = |pred: &[i32]| -> i32 {
             let mut s = 0;
             for i in 0..4 {
                 for j in 0..4 {
@@ -1000,7 +1172,7 @@ impl<'a> FrameEncoder<'a> {
         let mut best_fi: Option<u8> = None;
         let mut best_fi_sad = i32::MAX;
         for fi in 0..5u8 {
-            let s = sad(&self.predict_filter_intra_4x4(0, sx, sy, fi));
+            let s = sad(&self.predict_filter_intra(0, sx, sy, 4, fi));
             if s < best_fi_sad {
                 best_fi_sad = s;
                 best_fi = Some(fi);
@@ -1013,11 +1185,14 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    /// Picks the lossy luma mode for an 8×8 block minimizing SAD against the source, restricted to
-    /// the non-directional modes (`DC`/`SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`), with `DC_PRED`
-    /// winning ties. Directional 8×8 modes and 8×8 filter-intra are later phases. The choice is a
-    /// quality decision; every option reconstructs bit-exactly.
-    fn select_luma_mode_8x8(&self, sx: usize, sy: usize) -> u8 {
+    /// Picks the lossy luma mode for an 8×8 block minimizing SAD against the source. It searches the
+    /// non-directional modes (`DC`/`SMOOTH*`/`PAETH`), the eight directional modes each over
+    /// `angle_delta ∈ [-3, 3]`, and (for `DC_PRED`) the five recursive filter-intra modes. Returns
+    /// the `YMode`, its `AngleDeltaY` (0 for non-directional), and the chosen `filter_intra_mode`
+    /// when filter-intra strictly wins. Regular modes win ties (and `DC_PRED`/`angle_delta = 0` win
+    /// among them), so cheaper signaling is preferred. Every option reconstructs bit-exactly; this is
+    /// purely a quality decision, so only the resulting signaling must be correct.
+    fn select_luma_mode_8x8(&self, sx: usize, sy: usize) -> (u8, i8, Option<u8>) {
         const N: usize = 8;
         let sad = |pred: &[i32]| -> i32 {
             let mut s = 0;
@@ -1028,16 +1203,39 @@ impl<'a> FrameEncoder<'a> {
             }
             s
         };
-        let mut best_mode = DC_PRED;
+        let mut best = (DC_PRED, 0i8);
         let mut best_sad = sad(&self.predict_8x8_nondir(0, sx, sy, DC_PRED));
         for &mode in &[SMOOTH_PRED, SMOOTH_V_PRED, SMOOTH_H_PRED, PAETH_PRED] {
             let s = sad(&self.predict_8x8_nondir(0, sx, sy, mode));
             if s < best_sad {
                 best_sad = s;
-                best_mode = mode;
+                best = (mode, 0);
             }
         }
-        best_mode
+        for &mode in &DIRECTIONAL_MODES {
+            for ad in -3..=3i8 {
+                let s = sad(&self.predict_directional(0, sx, sy, N, mode, ad));
+                if s < best_sad {
+                    best_sad = s;
+                    best = (mode, ad);
+                }
+            }
+        }
+        // Recursive filter-intra (signaled as DC_PRED + use_filter_intra); strict improvement only.
+        let mut best_fi: Option<u8> = None;
+        let mut best_fi_sad = i32::MAX;
+        for fi in 0..5u8 {
+            let s = sad(&self.predict_filter_intra(0, sx, sy, N, fi));
+            if s < best_fi_sad {
+                best_fi_sad = s;
+                best_fi = Some(fi);
+            }
+        }
+        if best_fi_sad < best_sad {
+            (DC_PRED, 0, best_fi)
+        } else {
+            (best.0, best.1, None)
+        }
     }
 
     /// Adds the chroma-from-luma high-frequency term to a 4×4 chroma DC prediction in place
@@ -1621,6 +1819,53 @@ mod tests {
     }
 
     #[test]
+    fn general_directional_matches_4x4_path() {
+        // The size-generic directional predictor (used for 8×8) must reproduce the validated 4×4
+        // predictor exactly when n = 4 and angle_delta = 0, for every directional mode — including
+        // the zone-1/3 modes that read the above-right / below-left extension. All BlockDecoded
+        // cells are marked available so both code paths read the same extended references.
+        let p = Planar8::from_rgb8_identity(&[128u8; 16 * 16 * 3], 16, 16).unwrap();
+        let mut e = FrameEncoder::new(&p, 32);
+        let cw = e.coded_w;
+        for y in 0..e.coded_h {
+            for x in 0..cw {
+                e.recon[0][y * cw + x] = ((x * 7 + y * 13 + 5) & 0xff) as u8;
+            }
+        }
+        e.block_decoded.iter_mut().for_each(|b| *b = 1);
+        for &mode in &DIRECTIONAL_MODES {
+            let general = e.predict_directional(0, 4, 4, 4, mode, 0);
+            let baseline = e.predict_4x4(0, 4, 4, mode).to_vec();
+            assert_eq!(general, baseline, "directional mode {mode} (n=4) mismatch");
+        }
+    }
+
+    #[test]
+    fn directional_8x8_angle_delta_in_range() {
+        // 8×8 directional prediction with every angle_delta must stay in [0, 255] (no OOB / overflow
+        // across all four zones), exercising the extended 16-sample reference arrays.
+        let p = Planar8::from_rgb8_identity(&[128u8; 32 * 32 * 3], 32, 32).unwrap();
+        let mut e = FrameEncoder::new(&p, 32);
+        let cw = e.coded_w;
+        for y in 0..e.coded_h {
+            for x in 0..cw {
+                e.recon[0][y * cw + x] = (((x * 11) ^ (y * 5 + 9)) & 0xff) as u8;
+            }
+        }
+        e.block_decoded.iter_mut().for_each(|b| *b = 1);
+        for &mode in &DIRECTIONAL_MODES {
+            for ad in -3..=3i8 {
+                let pred = e.predict_directional(0, 8, 8, 8, mode, ad);
+                assert_eq!(pred.len(), 64);
+                assert!(
+                    pred.iter().all(|&x| (0..=255).contains(&x)),
+                    "8×8 mode {mode} angle_delta {ad} out of range"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn reference_sample_fallbacks_at_frame_corner() {
         // Block at (0,0): no above, no left. Defaults are AboveRow=127, LeftCol=129, top-left=128.
         let p = grey4x4();
@@ -1675,7 +1920,7 @@ mod tests {
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.coded_w;
         e.recon[0][3 * cw + 4] = 16; // AboveRow[0]
-        let pred = e.predict_filter_intra_4x4(0, 4, 4, 0);
+        let pred = e.predict_filter_intra(0, 4, 4, 4, 0);
         assert_eq!(
             pred,
             [10, 2, 1, 1, 6, 2, 2, 1, 4, 2, 2, 1, 2, 2, 2, 1],
@@ -1697,7 +1942,7 @@ mod tests {
         e.recon[0][3 * cw + 3] = 77; // top-left
         for fi in 0..5u8 {
             assert_eq!(
-                e.predict_filter_intra_4x4(0, 4, 4, fi),
+                e.predict_filter_intra(0, 4, 4, 4, fi),
                 [77; 16],
                 "filter-intra mode {fi} should preserve a flat reference"
             );

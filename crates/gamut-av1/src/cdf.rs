@@ -82,13 +82,45 @@ pub static SM_WEIGHTS_4X4: [i32; 4] = [255, 149, 85, 64];
 /// `Sm_Weights_Tx_8x8` (§7.11.2.6): smooth-prediction interpolation weights for an 8-wide/tall side.
 pub static SM_WEIGHTS_8X8: [i32; 8] = [255, 197, 146, 105, 73, 50, 37, 32];
 
+/// `Mode_To_Angle[INTRA_MODES]` (§9.3): the base prediction angle (degrees) for each intra mode. The
+/// non-directional modes map to `0`; the eight directional modes (`V`/`H`/`D45`/`D135`/`D113`/`D157`/
+/// `D203`/`D67`) map to their nominal angle. The signaled `AngleDeltaY` shifts this by `±3°` per step.
+pub static MODE_TO_ANGLE: [i32; 13] = [0, 90, 180, 45, 135, 113, 157, 203, 67, 0, 0, 0, 0];
+
+/// `Dr_Intra_Derivative[90]` (§9.3): the directional-prediction derivative indexed by the in-zone
+/// angle. Only the angles reachable from `Mode_To_Angle ± {0,3,6,9}°` are populated (the rest are
+/// `0` and never indexed): zone 1 reads `[pAngle]`, zone 2 reads `[180 - pAngle]` and `[pAngle - 90]`,
+/// zone 3 reads `[270 - pAngle]`.
+pub static DR_INTRA_DERIVATIVE: [i32; 90] = [
+    0, 0, 0, 1023, 0, 0, 547, 0, 0, 372, 0, 0, 0, 0, // 0..13
+    273, 0, 0, 215, 0, 0, 178, 0, 0, 151, 0, 0, 132, 0, 0, // 14..28
+    116, 0, 0, 102, 0, 0, 0, 90, 0, 0, 80, 0, 0, 71, 0, 0, // 29..44
+    64, 0, 0, 57, 0, 0, 51, 0, 0, 45, 0, 0, 0, 40, 0, 0, // 45..60
+    35, 0, 0, 31, 0, 0, 27, 0, 0, 23, 0, 0, 19, 0, 0, // 61..75
+    15, 0, 0, 0, 0, 11, 0, 0, 7, 0, 0, 3, 0, 0, // 76..89
+];
+
+/// `Default_Angle_Delta_Cdf[DIRECTIONAL_MODES][2*MAX_ANGLE_DELTA + 1]` (§9.4): the 7-symbol
+/// `angle_delta_y` CDF for each directional mode, indexed by `YMode - V_PRED`. The signaled symbol is
+/// `AngleDeltaY + MAX_ANGLE_DELTA` (`MAX_ANGLE_DELTA = 3`), so the decoded delta spans `-3..=3`.
+pub static ANGLE_DELTA: [[u16; 7]; 8] = [
+    [2180, 5032, 7567, 22776, 26989, 30217, 32768], // V_PRED
+    [2301, 5608, 8801, 23487, 26974, 30330, 32768], // H_PRED
+    [3780, 11018, 13699, 19354, 23083, 31286, 32768], // D45_PRED
+    [4581, 11226, 15147, 17138, 21834, 28397, 32768], // D135_PRED
+    [1737, 10927, 14509, 19588, 22745, 28823, 32768], // D113_PRED
+    [2664, 10176, 12485, 17650, 21600, 30495, 32768], // D157_PRED
+    [2240, 11096, 15453, 20341, 22561, 28917, 32768], // D203_PRED
+    [3605, 10428, 12459, 17676, 21244, 30655, 32768], // D67_PRED
+];
+
 /// `Default_Filter_Intra_Cdf[BLOCK_4X4]` (§9.4): the binary `use_filter_intra` flag for a 4×4 block.
 /// Filter-intra is only signaled when the luma mode is `DC_PRED` and `Max(w, h) <= 32`.
 pub static FILTER_INTRA_4X4: [u16; 2] = [4621, 32768];
 
-/// `Default_Filter_Intra_Cdf[BLOCK_8X8]` (§9.4): the `use_filter_intra` flag for an 8×8 block. The
-/// 8×8 luma path always signals `use_filter_intra = 0` (recursive filter-intra at 8×8 is a later
-/// phase), but the flag must still be coded under the correct (`MiSize == BLOCK_8X8`) CDF.
+/// `Default_Filter_Intra_Cdf[BLOCK_8X8]` (§9.4): the `use_filter_intra` flag for an 8×8 block, coded
+/// under the `MiSize == BLOCK_8X8` CDF. An 8×8 `DC_PRED` luma block may enable recursive filter-intra
+/// (§7.11.2.3), which at 8×8 tiles the block as `w4 = 2` by `h2 = 4` overlapping 4×2 sub-blocks.
 pub static FILTER_INTRA_8X8: [u16; 2] = [7866, 32768];
 
 /// `Default_Filter_Intra_Mode_Cdf` (§9.4): the 5-symbol `filter_intra_mode` CDF
