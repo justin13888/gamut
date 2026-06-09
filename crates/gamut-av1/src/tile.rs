@@ -37,6 +37,12 @@ const DC_PRED: u8 = 0;
 const V_PRED: u8 = 1;
 /// `H_PRED` (§3): directional, `pAngle = 180` (copy the left column).
 const H_PRED: u8 = 2;
+/// `D45_PRED` (§3): directional, `pAngle = 45` (zone 1, needs above-right samples).
+const D45_PRED: u8 = 3;
+/// `D203_PRED` (§3): directional, `pAngle = 203` (zone 3, needs below-left samples).
+const D203_PRED: u8 = 7;
+/// `D67_PRED` (§3): directional, `pAngle = 67` (zone 1, needs above-right samples).
+const D67_PRED: u8 = 8;
 /// `D135_PRED` (§3): directional, `pAngle = 135`.
 const D135_PRED: u8 = 4;
 /// `D113_PRED` (§3): directional, `pAngle = 113`.
@@ -55,15 +61,18 @@ const PAETH_PRED: u8 = 12;
 /// above/left neighbours plus the top-left corner: the non-directional modes by construction, and
 /// the included directional modes because `angle_delta = 0` (4×4 blocks) and `pAngle ∈ {90, 180}`
 /// (cardinal) or `90 < pAngle < 180` (zone 2) keep every reference index within `[-1, 3]`. The
-/// other directional angles (`D45`/`D67`/`D203`) need above-right/below-left samples and are a
-/// later phase.
-const LUMA_MODES: [u8; 10] = [
+/// directional angles `D45`/`D67` (zone 1) and `D203` (zone 3) additionally read the above-right /
+/// below-left reconstruction via the `BlockDecoded` availability map.
+const LUMA_MODES: [u8; 13] = [
     DC_PRED,
     V_PRED,
     H_PRED,
+    D45_PRED,
     D135_PRED,
     D113_PRED,
     D157_PRED,
+    D203_PRED,
+    D67_PRED,
     SMOOTH_PRED,
     SMOOTH_V_PRED,
     SMOOTH_H_PRED,
@@ -103,7 +112,18 @@ pub(crate) struct FrameEncoder<'a> {
     mi_bsl: Vec<u8>,
     /// The luma intra mode (`YMode`) chosen for each MI cell, for the `intra_frame_y_mode` context.
     mi_ymode: Vec<u8>,
+    /// Top-left MI position of the superblock currently being encoded (for `BlockDecoded` indexing).
+    sb_r: usize,
+    sb_c: usize,
+    /// `BlockDecoded` (§5.11.3) for the current superblock's luma plane: one flag per 4×4, indexed
+    /// `[(by + 1) * BD_STRIDE + (bx + 1)]` for superblock-relative `(by, bx)` in `-1..=16`. Drives
+    /// the above-right / below-left reference-sample availability for directional prediction.
+    block_decoded: Vec<u8>,
 }
+
+/// Row stride of [`FrameEncoder::block_decoded`]: a 64×64 superblock is 16 MI wide, plus the `-1`
+/// guard row/column and the `+16` below/right edge ⇒ indices `-1..=16` → 18 entries.
+const BD_STRIDE: usize = 18;
 
 impl<'a> FrameEncoder<'a> {
     /// Creates an encoder over the 4:4:4 identity planes (Y=G, U=B, V=R) at quantizer `qindex`
@@ -149,7 +169,33 @@ impl<'a> FrameEncoder<'a> {
             left_dc: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_ymode: vec![0; mi_cols * mi_rows],
+            sb_r: 0,
+            sb_c: 0,
+            block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
         }
+    }
+
+    /// `clear_block_decoded_flags` (§5.11.3) for the luma plane of the superblock at MI `(r, c)`:
+    /// the row above and column left of the superblock (within the frame) are available; the
+    /// interior is not yet decoded; the below-left corner is forced unavailable.
+    fn clear_block_decoded(&mut self, r: usize, c: usize) {
+        const SB4: isize = 16;
+        let sb_width4 = (self.mi_cols - c) as isize;
+        let sb_height4 = (self.mi_rows - r) as isize;
+        for y in -1..=SB4 {
+            for x in -1..=SB4 {
+                // The row above the superblock and the column to its left (within the frame) are
+                // already reconstructed; the interior is not yet decoded.
+                let avail = (y < 0 && x < sb_width4) || (x < 0 && y < sb_height4);
+                self.block_decoded[(y + 1) as usize * BD_STRIDE + (x + 1) as usize] = avail.into();
+            }
+        }
+        self.block_decoded[(SB4 + 1) as usize * BD_STRIDE] = 0; // [sbSize4][-1] = 0
+    }
+
+    /// Reads a `BlockDecoded` flag at superblock-relative `(by, bx)` (both in `-1..=16`).
+    fn block_decoded_at(&self, by: isize, bx: isize) -> bool {
+        self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] != 0
     }
 
     /// Encodes the tile and returns the symbol-coded bytes (`decode_tile`, §5.11.2) plus the
@@ -164,6 +210,9 @@ impl<'a> FrameEncoder<'a> {
             }
             let mut c = 0;
             while c < self.mi_cols {
+                self.sb_r = r;
+                self.sb_c = c;
+                self.clear_block_decoded(r, c);
                 self.encode_partition(r, c, 64);
                 c += SB4;
             }
@@ -292,6 +341,18 @@ impl<'a> FrameEncoder<'a> {
                         continue; // transform block entirely outside the frame
                     }
                     self.transform_block(plane, sx, sy, bw, mode);
+                }
+            }
+        }
+
+        // Mark this block's 4×4 cells decoded (`BlockDecoded`, §5.11.34) so later neighbours see the
+        // correct above-right / below-left availability for directional prediction.
+        for ty in 0..n4 {
+            for tx in 0..n4 {
+                let by = (r + ty) as isize - self.sb_r as isize;
+                let bx = (c + tx) as isize - self.sb_c as isize;
+                if (0..16).contains(&by) && (0..16).contains(&bx) {
+                    self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
                 }
             }
         }
@@ -438,26 +499,36 @@ impl<'a> FrameEncoder<'a> {
         let have_above = sy > 0;
         let have_left = sx > 0;
 
-        let mut above = [0i32; 4];
+        // Above-right / below-left availability (§5.11.34) for the directional zone-1/3 angles.
+        let (by, bx) = (
+            sy as isize / 4 - self.sb_r as isize,
+            sx as isize / 4 - self.sb_c as isize,
+        );
+        let have_above_right = self.block_decoded_at(by - 1, bx + 1);
+        let have_below_left = self.block_decoded_at(by + 1, bx - 1);
+        let (max_x, max_y) = (self.coded_w - 1, self.coded_h - 1);
+
+        // AboveRow[0..8] and LeftCol[0..8] (= w + h samples) with the §7.11.2.1 availability rules.
+        // When the neighbour is available, samples past the block width replicate the last valid one
+        // unless above-right / below-left has been decoded (then they are real samples).
+        let mut above = [127i32; 8]; // (1 << (BitDepth-1)) - 1 when neither neighbour exists
         if have_above {
-            for (j, a) in above.iter_mut().enumerate() {
-                *a = nb(sx + j, sy - 1);
+            let above_limit = max_x.min(sx + if have_above_right { 8 } else { 4 } - 1);
+            for (i, a) in above.iter_mut().enumerate() {
+                *a = nb(above_limit.min(sx + i), sy - 1);
             }
         } else if have_left {
-            above = [nb(sx - 1, sy); 4]; // CurrFrame[y][x-1]
-        } else {
-            above = [127; 4]; // (1 << (BitDepth-1)) - 1
+            above = [nb(sx - 1, sy); 8]; // CurrFrame[y][x-1]
         }
 
-        let mut left = [0i32; 4];
+        let mut left = [129i32; 8]; // (1 << (BitDepth-1)) + 1 when neither neighbour exists
         if have_left {
+            let left_limit = max_y.min(sy + if have_below_left { 8 } else { 4 } - 1);
             for (i, l) in left.iter_mut().enumerate() {
-                *l = nb(sx - 1, sy + i);
+                *l = nb(sx - 1, left_limit.min(sy + i));
             }
         } else if have_above {
-            left = [nb(sx, sy - 1); 4]; // CurrFrame[y-1][x]
-        } else {
-            left = [129; 4]; // (1 << (BitDepth-1)) + 1
+            left = [nb(sx, sy - 1); 8]; // CurrFrame[y-1][x]
         }
 
         let top_left = if have_above && have_left {
@@ -470,12 +541,16 @@ impl<'a> FrameEncoder<'a> {
             128 // 1 << (BitDepth-1)
         };
 
-        // Directional derivatives (`Dr_Intra_Derivative`) for the zone-2 angles (90 < pAngle < 180):
-        // dx = Dr[180 - pAngle], dy = Dr[pAngle - 90]. Unused by the non-directional / cardinal modes.
+        // Directional derivatives (`Dr_Intra_Derivative`). Zone 1 (pAngle < 90): dx = Dr[pAngle].
+        // Zone 2 (90 < pAngle < 180): dx = Dr[180 - pAngle], dy = Dr[pAngle - 90]. Zone 3
+        // (pAngle > 180): dy = Dr[270 - pAngle]. Unused by the non-directional / cardinal modes.
         let (dx, dy): (i32, i32) = match mode {
+            D45_PRED => (64, 0),    // Dr[45]
+            D67_PRED => (27, 0),    // Dr[67]
             D135_PRED => (64, 64),  // Dr[45], Dr[45]
             D113_PRED => (27, 151), // Dr[67], Dr[23]
             D157_PRED => (151, 27), // Dr[23], Dr[67]
+            D203_PRED => (0, 27),   // Dr[67]
             _ => (0, 0),
         };
 
@@ -486,6 +561,33 @@ impl<'a> FrameEncoder<'a> {
                 pred[i * 4 + j] = match mode {
                     V_PRED => above[j],
                     H_PRED => left[i],
+                    D45_PRED | D67_PRED => {
+                        // §7.11.2.4 zone 1 (pAngle < 90): interpolate along the (extended) above row.
+                        let (ii, jj) = (i as i32, j as i32);
+                        let idx = (ii + 1) * dx;
+                        let base = (idx >> 6) + jj;
+                        let max_base_x = 4 + 4 - 1; // (w + h - 1)
+                        if base < max_base_x {
+                            let shift = (idx >> 1) & 0x1F;
+                            (above[base as usize] * (32 - shift)
+                                + above[(base + 1) as usize] * shift
+                                + 16)
+                                >> 5
+                        } else {
+                            above[max_base_x as usize]
+                        }
+                    }
+                    D203_PRED => {
+                        // §7.11.2.4 zone 3 (pAngle > 180): interpolate along the (extended) left col.
+                        let (ii, jj) = (i as i32, j as i32);
+                        let idx = (jj + 1) * dy;
+                        let base = (idx >> 6) + ii;
+                        let shift = (idx >> 1) & 0x1F;
+                        (left[base as usize] * (32 - shift)
+                            + left[(base + 1) as usize] * shift
+                            + 16)
+                            >> 5
+                    }
                     D135_PRED | D113_PRED | D157_PRED => {
                         // §7.11.2.4 zone 2 (upsample disabled): interpolate along the above row,
                         // falling back to the left column when the ray leaves the top edge. Indices
@@ -970,5 +1072,24 @@ mod tests {
                     .all(|&x| (0..=255).contains(&x))
             );
         }
+    }
+
+    #[test]
+    fn d45_reads_above_right_when_available() {
+        // Block at (4,4) ⇒ superblock-relative (by, bx) = (1, 1). Mark the above-right 4×4 decoded
+        // so D45 (pAngle 45) reads the real extended above-row samples 4..8.
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let mut e = FrameEncoder::new(&p, 32);
+        let cw = e.coded_w;
+        for (k, &v) in [10u8, 20, 30, 40, 50, 60, 70, 80].iter().enumerate() {
+            e.recon[0][3 * cw + (4 + k)] = v; // above row incl. above-right (x=4..12)
+        }
+        e.clear_block_decoded(0, 0);
+        e.block_decoded[BD_STRIDE + 3] = 1; // (by-1, bx+1) = (0, 2) decoded ⇒ haveAboveRight
+        // dx = 64 ⇒ shift = 0, base = (i+1)+j; row 0 = above[1..5] = [20,30,40,50] (50 is an
+        // above-right sample) and the bottom-right clamps to above[w+h-1] = above[7] = 80.
+        let d45 = e.predict_4x4(0, 4, 4, D45_PRED);
+        assert_eq!(&d45[0..4], &[20, 30, 40, 50]);
+        assert_eq!(d45[15], 80);
     }
 }
