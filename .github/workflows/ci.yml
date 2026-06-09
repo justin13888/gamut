@@ -11,6 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The cross-check tests link vendored dav1d/libavif from these submodules.
+          submodules: recursive
+      - name: Install native build deps (vendored dav1d/libavif oracles)
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm cmake pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -26,6 +31,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install native build deps (vendored dav1d/libavif oracles)
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm cmake pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -33,7 +42,7 @@ jobs:
       - name: Generate coverage report
         run: >-
           cargo llvm-cov --workspace --all-features
-          --ignore-filename-regex 'crates/gamut-(cli|wasm|ffi)/'
+          --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi)|tooling)/'
           --lcov --output-path lcov.info --fail-under-lines 80
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only

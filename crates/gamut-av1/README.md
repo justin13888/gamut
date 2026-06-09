@@ -19,7 +19,8 @@ encoding** that is:
   is auditable and forkable. Modules mirror the spec: `headers` = OBU framing + sequence/frame
   headers (§5.3/§5.5/§5.9), `tile` = partition/prediction/coefficient coding (§5.11), `cdf` =
   default CDF + scan + context tables (§9.2/§9.4/§8.3.2).
-- **Decoder-verified.** Output is checked against real decoders (`dav1d`, `avifdec`).
+- **Decoder-verified.** Output is checked bit-exact against real decoders (`dav1d`, `libavif`),
+  linked from vendored `third_party/` submodules — never from system-installed binaries.
 - **Buildable anywhere `cargo` is.** No C, no nasm — cross-compiles cleanly (wasm32, aarch64, musl).
 
 It builds on [`gamut-color`](../gamut-color) (pixel formats / CICP), [`gamut-dsp`](../gamut-dsp)

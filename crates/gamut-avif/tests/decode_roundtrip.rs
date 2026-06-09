@@ -1,20 +1,14 @@
-//! End-to-end correctness: encode → `avifdec` → Y4M → compare planes to the source.
+//! End-to-end correctness: encode → decode with libavif → compare planes to the source.
 //!
-//! This is the authoritative correctness check (a real AV1 decoder must reproduce the input
-//! bit-exactly under lossless coding). It is skipped when `avifdec` (libavif) is not installed, so
-//! CI without the tool still passes; the hermetic unit tests carry the coverage gate.
+//! This is the authoritative container check: a real AVIF reader must parse gamut's container and
+//! reproduce the encoder's pixels. libavif (dav1d backend) is linked in from the
+//! `third_party/libavif` + `third_party/dav1d` submodules via the `libavif-oracle` dev-dependency,
+//! so the check is hermetic and always runs — it never depends on an `avifdec` binary being
+//! installed. Building these tests therefore needs cmake/meson/ninja/nasm and the checked-out
+//! submodules (`git submodule update --init --recursive`).
 
 use gamut_avif::AvifEncoder;
 use gamut_core::{Dimensions, Encoder};
-use std::process::Command;
-
-fn avifdec_available() -> bool {
-    Command::new("avifdec")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// Source RGB pattern (structure + variation to exercise nonzero coefficients).
 fn rgb_at(x: u32, y: u32) -> (u8, u8, u8) {
@@ -25,7 +19,8 @@ fn rgb_at(x: u32, y: u32) -> (u8, u8, u8) {
     )
 }
 
-fn roundtrip(w: u32, h: u32) {
+/// Builds the interleaved RGB source buffer for a `w`×`h` frame.
+fn source_rgb(w: u32, h: u32) -> Vec<u8> {
     let mut rgb = vec![0u8; (w * h * 3) as usize];
     for y in 0..h {
         for x in 0..w {
@@ -36,6 +31,11 @@ fn roundtrip(w: u32, h: u32) {
             rgb[i + 2] = b;
         }
     }
+    rgb
+}
+
+fn roundtrip(w: u32, h: u32) {
+    let rgb = source_rgb(w, h);
 
     let mut avif = Vec::new();
     AvifEncoder::new()
@@ -49,33 +49,10 @@ fn roundtrip(w: u32, h: u32) {
         )
         .unwrap();
 
-    let dir = std::env::temp_dir();
-    let base = format!("gamut_rt_{}_{w}x{h}", std::process::id());
-    let avif_path = dir.join(format!("{base}.avif"));
-    let y4m_path = dir.join(format!("{base}.y4m"));
-    std::fs::write(&avif_path, &avif).unwrap();
-
-    let out = Command::new("avifdec")
-        .arg(&avif_path)
-        .arg(&y4m_path)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "avifdec failed for {w}x{h}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let y4m = std::fs::read(&y4m_path).unwrap();
-    let _ = std::fs::remove_file(&avif_path);
-    let _ = std::fs::remove_file(&y4m_path);
-
-    // Y4M: "<header>\nFRAME\n" then Y, U, V planes (w*h bytes each for C444).
-    let hdr_end = y4m.iter().position(|&b| b == b'\n').unwrap();
-    let after = &y4m[hdr_end + 1..];
-    let frame_end = after.iter().position(|&b| b == b'\n').unwrap();
-    let planes = &after[frame_end + 1..];
-    let n = (w * h) as usize;
-    let (yp, up, vp) = (&planes[0..n], &planes[n..2 * n], &planes[2 * n..3 * n]);
+    let decoded = libavif_oracle::decode_avif(&avif)
+        .unwrap_or_else(|e| panic!("libavif decode failed for {w}x{h}: {e}"));
+    assert_eq!((decoded.width, decoded.height), (w, h));
+    let [yp, up, vp] = &decoded.planes;
 
     // Identity matrix mapping: Y=G, U=B, V=R.
     for y in 0..h {
@@ -90,11 +67,7 @@ fn roundtrip(w: u32, h: u32) {
 }
 
 #[test]
-fn lossless_roundtrip_via_avifdec() {
-    if !avifdec_available() {
-        eprintln!("skipping decode_roundtrip: avifdec (libavif) not installed");
-        return;
-    }
+fn lossless_roundtrip_via_libavif() {
     // Tiny, non-aligned (edge padding + forced partition splits), single-SB, and multi-SB frames.
     for (w, h) in [
         (1, 1),
@@ -109,59 +82,14 @@ fn lossless_roundtrip_via_avifdec() {
     }
 }
 
-/// Decodes the `avifdec` Y4M output for a temp AVIF file into three `w*h` planes (Y, U, V).
-fn avifdec_planes(avif: &[u8], w: u32, h: u32, tag: &str) -> [Vec<u8>; 3] {
-    let dir = std::env::temp_dir();
-    let base = format!("gamut_lossy_{}_{tag}_{w}x{h}", std::process::id());
-    let avif_path = dir.join(format!("{base}.avif"));
-    let y4m_path = dir.join(format!("{base}.y4m"));
-    std::fs::write(&avif_path, avif).unwrap();
-    let out = Command::new("avifdec")
-        .arg(&avif_path)
-        .arg(&y4m_path)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "avifdec failed for {w}x{h} {tag}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let y4m = std::fs::read(&y4m_path).unwrap();
-    let _ = std::fs::remove_file(&avif_path);
-    let _ = std::fs::remove_file(&y4m_path);
-    let hdr_end = y4m.iter().position(|&b| b == b'\n').unwrap();
-    let after = &y4m[hdr_end + 1..];
-    let frame_end = after.iter().position(|&b| b == b'\n').unwrap();
-    let planes = &after[frame_end + 1..];
-    let n = (w * h) as usize;
-    [
-        planes[0..n].to_vec(),
-        planes[n..2 * n].to_vec(),
-        planes[2 * n..3 * n].to_vec(),
-    ]
-}
-
 #[test]
-fn lossy_roundtrip_via_avifdec() {
-    if !avifdec_available() {
-        eprintln!("skipping decode_roundtrip: avifdec (libavif) not installed");
-        return;
-    }
+fn lossy_roundtrip_via_libavif() {
     // For lossy coding the decoded image is not the source, but it must equal the AV1 encoder's
-    // own reconstruction byte-for-byte: avifdec runs a conformant decoder over the OBUs the
+    // own reconstruction byte-for-byte: libavif runs a conformant decoder (dav1d) over the OBUs the
     // container carries, so this validates the whole container + lossy AV1 path end-to-end.
     for &q in &[6u8, 24, 64, 150] {
         for &(w, h) in &[(8, 8), (17, 13), (40, 24), (100, 80)] {
-            let mut rgb = vec![0u8; (w * h * 3) as usize];
-            for y in 0..h {
-                for x in 0..w {
-                    let i = ((y * w + x) * 3) as usize;
-                    let (r, g, b) = rgb_at(x, y);
-                    rgb[i] = r;
-                    rgb[i + 1] = g;
-                    rgb[i + 2] = b;
-                }
-            }
+            let rgb = source_rgb(w, h);
 
             let mut avif = Vec::new();
             AvifEncoder::new()
@@ -180,12 +108,13 @@ fn lossy_roundtrip_via_avifdec() {
             let planes = gamut_color::Planar8::from_rgb8_identity(&rgb, w, h).unwrap();
             let (_, recon) = gamut_av1::encode_still_intra(&planes, q).unwrap();
 
-            let dec = avifdec_planes(&avif, w, h, &format!("q{q}"));
+            let decoded = libavif_oracle::decode_avif(&avif)
+                .unwrap_or_else(|e| panic!("libavif decode failed for {w}x{h} q{q}: {e}"));
             // Identity matrix: decoded Y/U/V planes are the AV1 recon planes 0/1/2.
-            for (p, (d, r)) in dec.iter().zip(&recon.planes).enumerate() {
+            for (p, (d, r)) in decoded.planes.iter().zip(&recon.planes).enumerate() {
                 assert_eq!(
                     d, r,
-                    "plane {p} mismatch (avifdec vs AV1 recon) for {w}x{h} q{q}"
+                    "plane {p} mismatch (libavif vs AV1 recon) for {w}x{h} q{q}"
                 );
             }
         }

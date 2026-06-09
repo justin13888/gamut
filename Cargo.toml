@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Dev-only differential oracles that statically link vendored C decoders (libdav1d,
+# libavif) from `third_party/` submodules. Excluded from the workspace so a plain
+# `cargo build` of the shipped crates never needs a C toolchain — they are pulled in
+# only as path `dev-dependencies` when building the cross-check tests. See their
+# manifests under `tooling/`.
+exclude = ["tooling/dav1d-oracle", "tooling/libavif-oracle"]
 
 [workspace.package]
 # No shared `version`: each crate is versioned independently (see README "Versioning").

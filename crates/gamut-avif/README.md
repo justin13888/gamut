@@ -54,8 +54,9 @@ interleaved RGB layout).
 Today (milestone **M0**) the encoder produces **lossless** still images: 8-bit RGB mapped to AV1
 identity-matrix 4:4:4 (so the decoded image is bit-exact to the input), wrapped as a single `av01`
 item. The space/time tradeoff is the obvious one — lossless output is exact but large; it makes no
-attempt to be compact yet, and correctness is the priority. Output is verified against real
-decoders (`avifdec`, `dav1d`).
+attempt to be compact yet, and correctness is the priority. Output is verified bit-exact against
+real decoders (`libavif`, `dav1d`), linked from vendored `third_party/` submodules rather than
+system-installed binaries.
 
 Everything beyond M0 — lossy intra (DCT + quantization), alpha, HDR/wide-gamut, 10/12-bit and
 4:2:0/4:2:2, image sequences, and the rest of the AV1/AVIF surface — is tracked, row by row

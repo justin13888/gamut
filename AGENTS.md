@@ -43,6 +43,12 @@ just lint            # lint (Clippy, warnings as errors)
 just coverage        # coverage (minimum 80%)
 ```
 
+The shipped crates are pure Rust, but the decoder cross-check tests link reference decoders
+(dav1d, libavif) built from the `third_party/` git submodules via the dev-only oracle crates in
+`tooling/`. Running the tests therefore needs the submodules checked out
+(`git submodule update --init --recursive`) and meson/ninja/nasm/cmake/pkg-config on `PATH`.
+No system-installed decoder binaries are used.
+
 ## Conventions
 
 - All `pub` items need doc comments. Mark fallible/owning return types with `#[must_use]`
