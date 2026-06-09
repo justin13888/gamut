@@ -19,3 +19,14 @@ pub mod transform;
 pub use bit_io::{BitReader, BitWriter};
 pub use header::{VP8L_SIGNATURE, Vp8lHeader};
 pub use transform::Vp8lTransform;
+
+/// Ceiling division `⌈num / den⌉`, used to size sub-resolution images and bundled widths
+/// (the spec's `DIV_ROUND_UP`). Returns 0 when `den` is 0. All VP8L callers pass `num <= 16384`
+/// and `den` a power of two, so the `num + den - 1` cannot overflow.
+#[must_use]
+pub(crate) const fn div_round_up(num: u32, den: u32) -> u32 {
+    if den == 0 {
+        return 0;
+    }
+    num.div_ceil(den)
+}
