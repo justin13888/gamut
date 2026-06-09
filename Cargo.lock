@@ -75,9 +75,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bitflags"
-version = "2.11.1"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 
 [[package]]
 name = "bumpalo"
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "gamut"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-av1",
  "gamut-av2",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av1"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av2"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-avif"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-av1",
  "gamut-color",
@@ -226,14 +226,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-bitstream"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-core",
 ]
 
 [[package]]
 name = "gamut-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "gamut",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-color"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bitflags",
  "gamut-core",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
  "tracing",
@@ -261,21 +261,21 @@ dependencies = [
 
 [[package]]
 name = "gamut-dsp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-core",
 ]
 
 [[package]]
 name = "gamut-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut",
 ]
 
 [[package]]
 name = "gamut-heic"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut-color",
  "gamut-core",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-isobmff"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-core",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-jxl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-riff"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-core",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-vvc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-wasm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut",
  "wasm-bindgen",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-webp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -613,9 +613,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.122"
+version = "0.2.123"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ed04576f974d2b2fba0f38c51dbc5518011e38c36bf1143164be765528fd409"
+checksum = "a254a4b10c19a76f09a27640e7ffbf9bc30bf67e16a3bf28aaefa4920fe81563"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -626,9 +626,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.122"
+version = "0.2.123"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "916151b09da36bd82f6615cbf3a419e2f0ba23a03c6160e8e92eb6bd4aa1dec6"
+checksum = "24a40fc75b0ec6f3746ceb10d36f53a93dcd68a93b11b6445983945d79eba0dc"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -636,9 +636,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.122"
+version = "0.2.123"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "299047362ccbfce148b67ab7e73349f77748e00c8296f9542adfad2ad82c5c5e"
+checksum = "908f34bd9b9ce3d4caf07b72dfab63d61504d156856c6bd3cd87fa350cf3985b"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -649,9 +649,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.122"
+version = "0.2.123"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a929b2c61f11ba3e9bc35b50c1f25cb38e0e892c0c231ae2b8cf78d5dad4437"
+checksum = "7acbf7616c27b194bbb550bf77ed0c2c3e5b7fd1260a93082b95fb7f47959b92"
 dependencies = [
  "unicode-ident",
 ]
