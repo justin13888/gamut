@@ -252,6 +252,41 @@ pub static INTRA_FRAME_Y_MODE: [[[u16; 13]; 5]; 5] = [
     ],
 ];
 
+/// `Default_Cfl_Sign_Cdf` (§9.4): the 8-symbol joint `cfl_alpha_signs` (`CFL_JOINT_SIGNS`) CDF.
+/// Symbol `s` packs `signU = (s + 1) / 3`, `signV = (s + 1) % 3` (`ZERO`/`NEG`/`POS`); the all-zero
+/// pair is excluded, so a CfL block always has at least one non-zero alpha.
+pub static CFL_SIGN: [u16; 8] = [1418, 2123, 13340, 18405, 26972, 28343, 32294, 32768];
+
+/// `Default_Cfl_Alpha_Cdf[CFL_ALPHA_CONTEXTS]` (§9.4): the 16-symbol `cfl_alpha_u`/`cfl_alpha_v` CDF
+/// (`|alpha| - 1`). The U context is `(signU - 1) * 3 + signV`; the V context is
+/// `(signV - 1) * 3 + signU`.
+pub static CFL_ALPHA: [[u16; 16]; 6] = [
+    [
+        7637, 20719, 31401, 32481, 32657, 32688, 32692, 32696, 32700, 32704, 32708, 32712, 32716,
+        32720, 32724, 32768,
+    ],
+    [
+        14365, 23603, 28135, 31168, 32167, 32395, 32487, 32573, 32620, 32647, 32668, 32672, 32676,
+        32680, 32684, 32768,
+    ],
+    [
+        11532, 22380, 28445, 31360, 32349, 32523, 32584, 32649, 32673, 32677, 32681, 32685, 32689,
+        32693, 32697, 32768,
+    ],
+    [
+        26990, 31402, 32282, 32571, 32692, 32696, 32700, 32704, 32708, 32712, 32716, 32720, 32724,
+        32728, 32732, 32768,
+    ],
+    [
+        17248, 26058, 28904, 30608, 31305, 31877, 32126, 32321, 32394, 32464, 32516, 32560, 32576,
+        32593, 32622, 32768,
+    ],
+    [
+        14738, 21678, 25779, 27901, 29024, 30302, 30980, 31843, 32144, 32413, 32520, 32594, 32622,
+        32656, 32660, 32768,
+    ],
+];
+
 /// `Default_Uv_Mode_Cfl_Not_Allowed_Cdf` (§9.4), indexed `[YMode]` (the luma mode), then the uv_mode CDF.
 pub static UV_MODE_CFL_NOT_ALLOWED: [[u16; 13]; 13] = [
     [

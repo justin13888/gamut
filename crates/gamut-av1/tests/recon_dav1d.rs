@@ -55,7 +55,15 @@ fn check(planes: &Planar8, qindex: u8) {
     let (w, h) = (recon.width as usize, recon.height as usize);
 
     let dir = std::env::temp_dir();
-    let stamp = format!("{}_{w}x{h}_q{qindex}", std::process::id());
+    // A globally-unique stamp: tests run in parallel and several share (w, h, qindex), so the
+    // process id alone would collide on the temp paths and race.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let stamp = format!(
+        "{}_{w}x{h}_q{qindex}_{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
     let obu_path = dir.join(format!("gamut_recon_{stamp}.obu"));
     let y4m_path = dir.join(format!("gamut_recon_{stamp}.y4m"));
     // A standalone Section-5 OBU stream for dav1d needs a temporal-delimiter OBU first (AVIF omits
@@ -204,6 +212,30 @@ fn filter_intra_modes_match_dav1d() {
     for &q in &[6u8, 24, 88, 170] {
         for &(w, h) in &[(8, 8), (16, 16), (37, 21), (64, 40)] {
             check(&planes(w, h, textured), q);
+        }
+    }
+}
+
+#[test]
+fn cfl_chroma_from_luma_matches_dav1d() {
+    if !dav1d_available() {
+        eprintln!("skipping recon_dav1d: dav1d not installed");
+        return;
+    }
+    // Chroma that tracks the luma high-frequency: U falls as luma rises (negative alpha), V rises
+    // with it (positive alpha). The encoder's per-block CfL search then signals uv_mode = UV_CFL_PRED
+    // with non-zero CflAlphaU/CflAlphaV, and dav1d must run §7.11.5 chroma-from-luma to the encoder's
+    // reconstruction byte-for-byte — exercising both alpha signs and read_cfl_alphas end-to-end.
+    let cfl = |x: u32, y: u32| {
+        let base = ((x.wrapping_mul(7).wrapping_add(y.wrapping_mul(5))) % 200) as i32 + 28; // luma
+        let g = base as u8;
+        let r = (base / 2 + 100).clamp(0, 255) as u8; // tracks +luma
+        let b = (220 - base / 2).clamp(0, 255) as u8; // tracks -luma
+        [r, g, b]
+    };
+    for &q in &[6u8, 24, 88, 170] {
+        for &(w, h) in &[(8, 8), (16, 16), (37, 21), (64, 40)] {
+            check(&planes(w, h, cfl), q);
         }
     }
 }
