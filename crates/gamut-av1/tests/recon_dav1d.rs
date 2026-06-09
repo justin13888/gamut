@@ -116,6 +116,29 @@ fn lossy_reconstruction_matches_dav1d() {
 }
 
 #[test]
+fn lossy_reconstruction_matches_dav1d_all_qctx() {
+    if !dav1d_available() {
+        eprintln!("skipping recon_dav1d: dav1d not installed");
+        return;
+    }
+    // The same textured content, but at quantizers spanning every coefficient-CDF quantizer
+    // context: qctx 1 (21..=60), qctx 2 (61..=120) and qctx 3 (121..=255). A wrong CDF table makes
+    // the arithmetic decode diverge, so dav1d byte-equality is a hard correctness gate per qctx.
+    let texture = |x: u32, y: u32| {
+        let r = (x.wrapping_mul(5).wrapping_add(y.wrapping_mul(3)) % 256) as u8;
+        let g = ((x.wrapping_add(y).wrapping_mul(2)) % 256) as u8;
+        let b = (64 + ((x.wrapping_mul(7) ^ y) % 128)) as u8;
+        [r, g, b]
+    };
+    // One representative qindex per context boundary, plus the extremes.
+    for &q in &[21u8, 40, 60, 61, 90, 120, 121, 200, 255] {
+        for &(w, h) in &[(8, 8), (17, 13), (40, 24), (100, 70)] {
+            check(&planes(w, h, texture), q);
+        }
+    }
+}
+
+#[test]
 fn flat_lossy_reconstruction_matches_dav1d() {
     if !dav1d_available() {
         return;
