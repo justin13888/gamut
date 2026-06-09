@@ -20,5 +20,5 @@ pub mod quant;
 mod tile;
 pub mod transform;
 
-pub use encoder::{EncodedStill, encode_still_lossless_identity};
+pub use encoder::{EncodedStill, ReconImage, encode_still_intra, encode_still_lossless_identity};
 pub use headers::Av1StillConfig;
