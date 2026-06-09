@@ -1,5 +1,5 @@
-//! The single-tile, all-intra encoder: superblock/partition iteration (§5.11.2/.4), DC intra
-//! prediction (§7.11.2.5), the forward transform (via `gamut-dsp`), and coefficient coding with
+//! The single-tile, all-intra encoder: superblock/partition iteration (§5.11.2/.4), intra
+//! prediction (§7.11.2), the forward transform (via `gamut-dsp`), and coefficient coding with
 //! full context derivation (§5.11.39, §8.3.2).
 //!
 //! Two paths share this code, selected by `qindex` (`base_q_idx`):
@@ -8,12 +8,13 @@
 //!   `PARTITION_NONE` except at the right/bottom frame edges.
 //! - **Lossy** (`qindex > 0`): `TX_4X4` with quantization. Blocks are forced all-4×4
 //!   (`PARTITION_SPLIT` everywhere) so each uses a 4×4 transform under `TX_MODE_LARGEST` with no
-//!   tx-depth signaling. The luma transform type is chosen per block from `TX_SET_INTRA_2`
-//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled; chroma is `DCT_DCT`.
-//!   Prediction reads a
-//!   **reconstruction buffer** that the encoder maintains exactly as the decoder would (predict →
-//!   transform → quantize → dequantize → inverse-transform → add → store), so the encoder's
-//!   reconstruction is bit-exact with a conformant decoder's output.
+//!   tx-depth signaling. The luma prediction mode is chosen per block from the non-directional set
+//!   `{DC, SMOOTH, SMOOTH_V, SMOOTH_H, PAETH}` (§7.11.2) and signaled with the above/left mode
+//!   context; the luma transform type is chosen from `TX_SET_INTRA_2`
+//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled; chroma is `DC_PRED` +
+//!   `DCT_DCT`. Prediction reads a **reconstruction buffer** that the encoder maintains exactly as
+//!   the decoder would (predict → transform → quantize → dequantize → inverse-transform → add →
+//!   store), so the encoder's reconstruction is bit-exact with a conformant decoder's output.
 //!
 //! The frame is coded on the MI-unit grid (`mi_cols*4 × mi_rows*4`, dimensions rounded up to a
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
@@ -28,6 +29,26 @@ use gamut_color::Planar8;
 const NUM_BASE_LEVELS: i32 = 2;
 /// `NUM_BASE_LEVELS + COEFF_BASE_RANGE`, the golomb threshold (§5.11.39).
 const COEFF_BASE_PLUS_RANGE: i32 = 14;
+
+/// `DC_PRED` (§3): the only mode used for chroma and the lossless path.
+const DC_PRED: u8 = 0;
+/// `SMOOTH_PRED` (§3).
+const SMOOTH_PRED: u8 = 9;
+/// `SMOOTH_V_PRED` (§3).
+const SMOOTH_V_PRED: u8 = 10;
+/// `SMOOTH_H_PRED` (§3).
+const SMOOTH_H_PRED: u8 = 11;
+/// `PAETH_PRED` (§3).
+const PAETH_PRED: u8 = 12;
+/// The non-directional luma intra modes the lossy path searches over (no `angle_delta`/edge filter,
+/// so each reconstructs bit-exactly with only the immediate above/left neighbours).
+const LUMA_MODES: [u8; 5] = [
+    DC_PRED,
+    SMOOTH_PRED,
+    SMOOTH_V_PRED,
+    SMOOTH_H_PRED,
+    PAETH_PRED,
+];
 
 /// The reconstructed (decoded) planes on the coded MI grid, used as prediction neighbours in the
 /// lossy path and exported for the bit-exact decoder cross-check.
@@ -60,6 +81,8 @@ pub(crate) struct FrameEncoder<'a> {
     left_dc: [Vec<u8>; 3],
     /// `Mi_Width_Log2` of the block covering each MI cell (for the partition context).
     mi_bsl: Vec<u8>,
+    /// The luma intra mode (`YMode`) chosen for each MI cell, for the `intra_frame_y_mode` context.
+    mi_ymode: Vec<u8>,
 }
 
 impl<'a> FrameEncoder<'a> {
@@ -105,6 +128,7 @@ impl<'a> FrameEncoder<'a> {
             left_level: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
             left_dc: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
             mi_bsl: vec![0; mi_cols * mi_rows],
+            mi_ymode: vec![0; mi_cols * mi_rows],
         }
     }
 
@@ -196,27 +220,50 @@ impl<'a> FrameEncoder<'a> {
         let n4 = bw / 4;
         let bsl = n4.trailing_zeros() as u8;
 
-        // intra_frame_mode_info: skip=0 (ctx 0), y_mode=DC_PRED (ctx [0][0]), uv_mode=DC_PRED.
+        // intra_frame_mode_info: skip=0 (ctx 0), then y_mode and uv_mode. The lossless path always
+        // predicts DC_PRED; the lossy path searches the non-directional luma modes per 4×4 block
+        // (blocks are all 4×4 there) and signals the choice with the above/left mode context.
         self.sym.encode_symbol(0, &cdf::SKIP[0]);
-        self.sym.encode_symbol(0, &cdf::INTRA_FRAME_Y_MODE_DC_DC);
-        let uv: &[u16] = if bw == 4 {
-            &cdf::UV_MODE_CFL_ALLOWED_DC
+        let y_mode = if self.qindex > 0 {
+            self.select_y_mode(c * 4, r * 4)
         } else {
-            &cdf::UV_MODE_CFL_NOT_ALLOWED_DC
+            DC_PRED
         };
-        self.sym.encode_symbol(0, uv);
+        let amode = cdf::INTRA_MODE_CONTEXT[if r > 0 {
+            usize::from(self.mi_ymode[(r - 1) * self.mi_cols + c])
+        } else {
+            usize::from(DC_PRED)
+        }];
+        let lmode = cdf::INTRA_MODE_CONTEXT[if c > 0 {
+            usize::from(self.mi_ymode[r * self.mi_cols + (c - 1)])
+        } else {
+            usize::from(DC_PRED)
+        }];
+        self.sym
+            .encode_symbol(usize::from(y_mode), &cdf::INTRA_FRAME_Y_MODE[amode][lmode]);
+        // uv_mode = DC_PRED. Its CDF is indexed by the luma mode (CfL allowed only for 4×4 in
+        // 4:4:4); the decoder reads it after intra_frame_y_mode, so it must match the signaled mode.
+        let ym = usize::from(y_mode);
+        if bw == 4 {
+            self.sym.encode_symbol(0, &cdf::UV_MODE_CFL_ALLOWED[ym]);
+        } else {
+            self.sym.encode_symbol(0, &cdf::UV_MODE_CFL_NOT_ALLOWED[ym]);
+        }
 
         for y in 0..n4 {
             for x in 0..n4 {
                 let (rr, cc) = (r + y, c + x);
                 if rr < self.mi_rows && cc < self.mi_cols {
                     self.mi_bsl[rr * self.mi_cols + cc] = bsl;
+                    self.mi_ymode[rr * self.mi_cols + cc] = y_mode;
                 }
             }
         }
 
-        // residual(): per plane, raster of 4×4 transform blocks (Lossless ⇒ TX_4X4).
+        // residual(): per plane, raster of 4×4 transform blocks (Lossless ⇒ TX_4X4). Luma uses the
+        // block's intra mode; chroma is DC_PRED.
         for plane in 0..3 {
+            let mode = if plane == 0 { y_mode } else { DC_PRED };
             for ty in 0..n4 {
                 for tx in 0..n4 {
                     let sx = c * 4 + tx * 4;
@@ -224,18 +271,18 @@ impl<'a> FrameEncoder<'a> {
                     if sx >= self.coded_w || sy >= self.coded_h {
                         continue; // transform block entirely outside the frame
                     }
-                    self.transform_block(plane, sx, sy, bw);
+                    self.transform_block(plane, sx, sy, bw, mode);
                 }
             }
         }
     }
 
-    fn transform_block(&mut self, plane: usize, sx: usize, sy: usize, block_w: usize) {
-        let avg = self.dc_avg(plane, sx, sy);
+    fn transform_block(&mut self, plane: usize, sx: usize, sy: usize, block_w: usize, mode: u8) {
+        let pred = self.predict_4x4(plane, sx, sy, mode);
         let mut res = [0i32; 16];
         for i in 0..4 {
             for j in 0..4 {
-                res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - avg;
+                res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - pred[i * 4 + j];
             }
         }
         if self.qindex == 0 {
@@ -264,7 +311,7 @@ impl<'a> FrameEncoder<'a> {
         let resid = inverse_transform_2d(&dq, TxSize::Tx4x4, tx, 8);
         for i in 0..4 {
             for j in 0..4 {
-                let v = (avg + resid[i * 4 + j]).clamp(0, 255) as u8;
+                let v = (pred[i * 4 + j] + resid[i * 4 + j]).clamp(0, 255) as u8;
                 self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = v;
             }
         }
@@ -356,6 +403,114 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    /// Builds the 4×4 intra prediction for `plane` at coded position `(sx, sy)` under `mode`
+    /// (§7.11.2). `DC_PRED` replicates [`Self::dc_avg`]; the non-directional modes
+    /// (`PAETH`/`SMOOTH`/`SMOOTH_V`/`SMOOTH_H`) are only used for lossy luma and read the
+    /// reconstruction buffer, applying the spec's reference-sample availability fallbacks. Returns
+    /// the prediction row-major. The supported modes never read past the 4 above / 4 left samples
+    /// plus the top-left corner, so above-right / below-left extension is not needed.
+    fn predict_4x4(&self, plane: usize, sx: usize, sy: usize, mode: u8) -> [i32; 16] {
+        if mode == DC_PRED {
+            return [self.dc_avg(plane, sx, sy); 16];
+        }
+        let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
+        let have_above = sy > 0;
+        let have_left = sx > 0;
+
+        let mut above = [0i32; 4];
+        if have_above {
+            for (j, a) in above.iter_mut().enumerate() {
+                *a = nb(sx + j, sy - 1);
+            }
+        } else if have_left {
+            above = [nb(sx - 1, sy); 4]; // CurrFrame[y][x-1]
+        } else {
+            above = [127; 4]; // (1 << (BitDepth-1)) - 1
+        }
+
+        let mut left = [0i32; 4];
+        if have_left {
+            for (i, l) in left.iter_mut().enumerate() {
+                *l = nb(sx - 1, sy + i);
+            }
+        } else if have_above {
+            left = [nb(sx, sy - 1); 4]; // CurrFrame[y-1][x]
+        } else {
+            left = [129; 4]; // (1 << (BitDepth-1)) + 1
+        }
+
+        let top_left = if have_above && have_left {
+            nb(sx - 1, sy - 1)
+        } else if have_above {
+            nb(sx, sy - 1)
+        } else if have_left {
+            nb(sx - 1, sy)
+        } else {
+            128 // 1 << (BitDepth-1)
+        };
+
+        let w = cdf::SM_WEIGHTS_4X4;
+        let mut pred = [0i32; 16];
+        for i in 0..4 {
+            for j in 0..4 {
+                pred[i * 4 + j] = match mode {
+                    PAETH_PRED => {
+                        let base = above[j] + left[i] - top_left;
+                        let p_left = (base - left[i]).abs();
+                        let p_top = (base - above[j]).abs();
+                        let p_tl = (base - top_left).abs();
+                        if p_left <= p_top && p_left <= p_tl {
+                            left[i]
+                        } else if p_top <= p_tl {
+                            above[j]
+                        } else {
+                            top_left
+                        }
+                    }
+                    SMOOTH_PRED => {
+                        let v = w[i] * above[j]
+                            + (256 - w[i]) * left[3]
+                            + w[j] * left[i]
+                            + (256 - w[j]) * above[3];
+                        (v + 256) >> 9 // Round2(_, 9)
+                    }
+                    SMOOTH_V_PRED => {
+                        let v = w[i] * above[j] + (256 - w[i]) * left[3];
+                        (v + 128) >> 8 // Round2(_, 8)
+                    }
+                    _ => {
+                        // SMOOTH_H_PRED
+                        let v = w[j] * left[i] + (256 - w[j]) * above[3];
+                        (v + 128) >> 8 // Round2(_, 8)
+                    }
+                };
+            }
+        }
+        pred
+    }
+
+    /// Picks the lossy luma intra mode minimizing prediction SAD against the source 4×4 at
+    /// `(sx, sy)`, preferring `DC_PRED` on ties. The choice is a quality decision; every mode
+    /// reconstructs bit-exactly, so only the signaling must be correct.
+    fn select_y_mode(&self, sx: usize, sy: usize) -> u8 {
+        let mut best_mode = DC_PRED;
+        let mut best_sad = i32::MAX;
+        for &mode in &LUMA_MODES {
+            let pred = self.predict_4x4(0, sx, sy, mode);
+            let mut sad = 0;
+            for i in 0..4 {
+                for j in 0..4 {
+                    sad += (self.sample(0, sx + j, sy + i) - pred[i * 4 + j]).abs();
+                }
+            }
+            if sad < best_sad {
+                best_sad = sad;
+                best_mode = mode;
+            }
+        }
+        best_mode
+    }
+
     #[allow(clippy::too_many_lines)]
     fn code_coeffs(
         &mut self,
@@ -389,8 +544,7 @@ impl<'a> FrameEncoder<'a> {
         // Reduced tx set + 4×4 intra ⇒ TX_SET_INTRA_2; `tx_sym` indexes
         // Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}.
         if self.qindex > 0 && plane == 0 {
-            self.sym
-                .encode_symbol(tx_sym, &cdf::INTRA_TX_TYPE_SET2_4X4_DC);
+            self.sym.encode_symbol(tx_sym, &cdf::INTRA_TX_TYPE_SET2_4X4);
         }
 
         // eob position (TX_CLASS_2D ⇒ eob_pt context 0).
@@ -675,5 +829,49 @@ mod tests {
         let b = e.select_tx_type(&res);
         assert_eq!(a.1, b.1);
         assert_eq!(a.2, b.2);
+    }
+
+    #[test]
+    fn predictors_match_spec_formulas() {
+        // 12×12 mid-grey image → the coded grid has a block at (4,4) with available neighbours.
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let mut e = FrameEncoder::new(&p, 32);
+        let cw = e.coded_w;
+        // Above row at y=3, x=4..8; left col at x=3, y=4..8; top-left at (3,3).
+        for j in 0..4 {
+            e.recon[0][3 * cw + (4 + j)] = 100;
+        }
+        for i in 0..4 {
+            e.recon[0][(4 + i) * cw + 3] = 50;
+        }
+        e.recon[0][3 * cw + 3] = 80;
+
+        // PAETH: base = 100 + 50 - 80 = 70; |70-80| (top-left) is smallest, so every sample = 80.
+        let paeth = e.predict_4x4(0, 4, 4, PAETH_PRED);
+        assert_eq!(paeth, [80; 16]);
+
+        // SMOOTH_V row 0 uses weight 255: (255*100 + 1*50 + 128) >> 8 = 100; row 3 weight 64:
+        // (64*100 + 192*50 + 128) >> 8 = 63.
+        let sv = e.predict_4x4(0, 4, 4, SMOOTH_V_PRED);
+        assert_eq!(sv[0], 100);
+        assert_eq!(sv[12], 63);
+
+        // SMOOTH_H column 0 uses weight 255: (255*50 + 1*100 + 128) >> 8 = 50.
+        let sh = e.predict_4x4(0, 4, 4, SMOOTH_H_PRED);
+        assert_eq!(sh[0], 50);
+
+        // SMOOTH (i=0,j=0): (255*100 + 1*50 + 255*50 + 1*100 + 256) >> 9 = 75.
+        let sm = e.predict_4x4(0, 4, 4, SMOOTH_PRED);
+        assert_eq!(sm[0], 75);
+    }
+
+    #[test]
+    fn reference_sample_fallbacks_at_frame_corner() {
+        // Block at (0,0): no above, no left. Defaults are AboveRow=127, LeftCol=129, top-left=128.
+        let p = grey4x4();
+        let e = FrameEncoder::new(&p, 32);
+        // PAETH base = 127 + 129 - 128 = 128; distances are |128-129|=1 (left), |128-127|=1 (top),
+        // |128-128|=0 (top-left), so the top-left default (128) wins and every sample is 128.
+        assert_eq!(e.predict_4x4(0, 0, 0, PAETH_PRED), [128; 16]);
     }
 }
