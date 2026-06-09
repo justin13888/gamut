@@ -338,3 +338,45 @@ fn transform_16x16_blocks_match_dav1d() {
         }
     }
 }
+
+#[test]
+fn transform_32x32_blocks_match_dav1d() {
+    // Near-flat ramps (slope < 1/px over 32 px) keep whole 32×32 regions below the split threshold,
+    // so the encoder codes them as single TX_32X32 blocks (PARTITION_NONE at BLOCK_32X32). This
+    // exercises the 1024-coefficient scan/CDFs (Eob_Pt_1024 — which, unlike the smaller eob classes,
+    // has no neighbour-context dimension — and the txSzCtx-3 coeff tables), the `dqDenom = 2`
+    // dequantization divisor unique to 32×32 (§7.12.3), DCT_DCT-only coding (TX_SET_DCTONLY ⇒ no
+    // transform-type symbol), and 32×32 DC/smooth/directional/filter-intra prediction. Adjacent 32×32
+    // luma edges deblock at filterSize 16 (the cap). Byte-equality with dav1d validates every path.
+    let diagonal = |x: u32, y: u32| {
+        let v = (48 + (x as i32 + y as i32) / 16).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    let tilted = |x: u32, y: u32| {
+        let v = (40 + (x as i32 * 2 + y as i32) / 20).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    let patches = |x: u32, y: u32| {
+        let v = (70 + ((x / 32 + y / 32) % 3) as i32 * 5).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    for f in [&diagonal as &dyn Fn(u32, u32) -> [u8; 3], &tilted, &patches] {
+        for &q in &[21u8, 64, 130, 220] {
+            for &(w, h) in &[(96u32, 96u32), (72, 68), (128, 96)] {
+                check(&planes(w, h, f), q);
+            }
+        }
+    }
+}

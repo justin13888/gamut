@@ -111,17 +111,17 @@ not a contract:
 | `skip` = 1 (no-residual / all-zero blocks) | §5.11.11 | ☐ | M1 |
 | intra_segment_id (segment 0) | §5.11.8/.9 | ✅ | M0 |
 | per-block read_cdef / read_delta_qindex / read_delta_lf | §5.11.56/.12/.13 | ☐ | M1 |
-| read_tx_size / read_var_tx_size (TX_MODE_LARGEST → tx = block) | §5.11.15-.17 | ✅ (4×4 + 8×8 + 16×16 blocks) | M0/M1 |
+| read_tx_size / read_var_tx_size (TX_MODE_LARGEST → tx = block) | §5.11.15-.17 | ✅ (4×4 + 8×8 + 16×16 + 32×32 blocks) | M0/M1 |
 
 ## D. AV1 — intra prediction (§7.11.2)
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | `DC_PRED`, availability-aware (luma + chroma) | §7.11.2.5 | ✅ | M0 |
-| directional V/H/D45/.../D67 + `angle_delta` + edge filter/upsample | §7.11.2.4/.9-.12 | ✅ (lossy luma 4×4; 8×8/16×16 + `angle_delta`; edge filter/upsample `enable_intra_edge_filter=0`) | M1 |
+| directional V/H/D45/.../D67 + `angle_delta` + edge filter/upsample | §7.11.2.4/.9-.12 | ✅ (lossy luma 4×4; 8×8/16×16/32×32 + `angle_delta`; edge filter/upsample `enable_intra_edge_filter=0`) | M1 |
 | SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ☐ | M1 |
 | PAETH | §7.11.2 | ☐ | M1 |
-| recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4 + 8×8 + 16×16) | M1 |
+| recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4 + 8×8 + 16×16 + 32×32) | M1 |
 | chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy 4:4:4 4×4) | M1 |
 | palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ☐ | M1 |
 | intra block copy (`allow_intrabc`) | §7.11.x,§5.11.x | ☐ | M1 |
@@ -158,9 +158,9 @@ not a contract:
 | full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ☐ | M1/M6 |
 | CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ☐ | M1 |
 | `coeffs()` TX_4X4: txb_skip/eob/base/br/sign/dc_sign/golomb | §5.11.39 | ✅ | M0 |
-| `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8 + 16×16) | M1 |
+| `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8 + 16×16 + 32×32, 32×32 DCT-only) | M1 |
 | scan table `Default_Scan_4x4` + context-offset tables | §9.2/§9.3/§8.3.2 | ✅ | M0 |
-| all scan tables (default/col/row per tx size) | §9.2 | ✅ (4×4 + 8×8 + 16×16 default) | M1 |
+| all scan tables (default/col/row per tx size) | §9.2 | ✅ (4×4 + 8×8 + 16×16 + 32×32 default) | M1 |
 
 ## H. AV1 — in-loop filters & post (§7.14-§7.18; all bypassed under CodedLossless)
 
