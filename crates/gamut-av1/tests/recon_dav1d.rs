@@ -249,3 +249,49 @@ fn flat_lossy_reconstruction_matches_dav1d() {
     // chain — a clean test that prediction-from-reconstruction tracks the decoder exactly.
     check(&planes(48, 40, |_, _| [200, 100, 50]), 16);
 }
+
+#[test]
+fn directional_and_filter_intra_8x8_match_dav1d() {
+    // Smooth low-amplitude ramps keep each 8×8 block below the split threshold, so the encoder codes
+    // them as single TX_8X8 blocks — and their oriented gradients drive the 8×8 directional search,
+    // where MiSize ≥ BLOCK_8X8 signals `angle_delta_y` (§5.11.42) and prediction follows the general
+    // directional process (§7.11.2.4). Three orientations sweep the angle space across all four zones
+    // (cardinal / zone-1 / zone-2 / zone-3) and non-zero angle deltas; the residual texture also
+    // selects 8×8 recursive filter-intra. Byte-equality with dav1d validates the new angle signaling,
+    // the 16-sample reference extension, and the size-generic filter-intra predictor.
+    let tilted_h = |x: u32, y: u32| {
+        let v = (50 + (x as i32 * 4 + y as i32) / 3).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    let diagonal = |x: u32, y: u32| {
+        let v = (40 + (x as i32 + y as i32) / 2).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    let tilted_v = |x: u32, y: u32| {
+        let v = (50 + (y as i32 * 4 + x as i32) / 3).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    for f in [
+        &tilted_h as &dyn Fn(u32, u32) -> [u8; 3],
+        &diagonal,
+        &tilted_v,
+    ] {
+        for &q in &[21u8, 64, 130, 220] {
+            for &(w, h) in &[(64u32, 64u32), (40, 40), (90, 72)] {
+                check(&planes(w, h, f), q);
+            }
+        }
+    }
+}

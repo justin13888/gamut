@@ -118,10 +118,10 @@ not a contract:
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | `DC_PRED`, availability-aware (luma + chroma) | §7.11.2.5 | ✅ | M0 |
-| directional V/H/D45/.../D67 + `angle_delta` + edge filter/upsample | §7.11.2.4/.9-.12 | ☐ | M1 |
+| directional V/H/D45/.../D67 + `angle_delta` + edge filter/upsample | §7.11.2.4/.9-.12 | ✅ (lossy luma 4×4; 8×8 + `angle_delta`; edge filter/upsample `enable_intra_edge_filter=0`) | M1 |
 | SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ☐ | M1 |
 | PAETH | §7.11.2 | ☐ | M1 |
-| recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4) | M1 |
+| recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4 + 8×8) | M1 |
 | chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy 4:4:4 4×4) | M1 |
 | palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ☐ | M1 |
 | intra block copy (`allow_intrabc`) | §7.11.x,§5.11.x | ☐ | M1 |
