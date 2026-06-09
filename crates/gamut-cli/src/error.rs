@@ -30,7 +30,7 @@ pub(crate) enum CliError {
     Codec(#[from] gamut::core::Error),
 
     /// The requested output format is not (yet) supported by the CLI.
-    #[error("unsupported output format: {0} (only 'avif' is supported)")]
+    #[error("unsupported output format: {0} (supported: 'avif', 'webp')")]
     UnsupportedOutput(String),
 
     /// A command argument was malformed in a way clap could not catch.
