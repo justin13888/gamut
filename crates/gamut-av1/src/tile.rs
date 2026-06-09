@@ -90,6 +90,11 @@ const DIRECTIONAL_MODES: [u8; 8] = [
     V_PRED, H_PRED, D45_PRED, D135_PRED, D113_PRED, D157_PRED, D203_PRED, D67_PRED,
 ];
 
+/// `Filter_Intra_Mode_To_Intra_Dir[INTRA_FILTER_MODES]` (§9.3): maps a filter-intra mode to the
+/// `intraDir` used to select the 16×16 transform-type CDF (§9.4). Order:
+/// `{FILTER_DC, FILTER_V, FILTER_H, FILTER_D157, FILTER_PAETH}`.
+const FILTER_INTRA_MODE_TO_INTRA_DIR: [u8; 5] = [DC_PRED, V_PRED, H_PRED, D157_PRED, DC_PRED];
+
 /// True for the eight directional intra modes (`V_PRED..=D67_PRED`, mode indices `1..=8`), which is
 /// `is_directional_mode` (§7.11.2). These are the modes for which `angle_delta_y` is signaled (≥8×8)
 /// and whose prediction follows the directional process (§7.11.2.4).
@@ -301,13 +306,14 @@ impl<'a> FrameEncoder<'a> {
             if self.qindex == 0 {
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
                 false
-            } else if bw == 8 && !self.should_split_8x8(r, c) {
-                // Lossy: an 8×8 region coded as a single PARTITION_NONE block + TX_8X8 when it is
-                // smooth enough; otherwise split to 4×4 for per-block mode/transform adaptation.
+            } else if (bw == 8 || bw == 16) && !self.should_split(r, c, bw) {
+                // Lossy: an 8×8 or 16×16 region coded as a single PARTITION_NONE block + one
+                // TX_8X8 / TX_16X16 when it is smooth enough; otherwise split for per-block
+                // mode/transform adaptation (16×16 → four 8×8, which recurse to 4×4 as needed).
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
                 false
             } else {
-                // Lossy: PARTITION_SPLIT (down to 4×4, or into four 8×8 candidates at bw == 16).
+                // Lossy: PARTITION_SPLIT.
                 self.sym.encode_symbol(3, partition_cdf(bsl, ctx));
                 true
             }
@@ -342,18 +348,18 @@ impl<'a> FrameEncoder<'a> {
         usize::from(left) * 2 + usize::from(above)
     }
 
-    /// Decides whether the lossy 8×8 region at MI `(r, c)` should split into four 4×4 blocks rather
-    /// than be coded as a single 8×8 (`PARTITION_NONE`). A textured region (large luma range over the
-    /// 8×8 source) splits so each 4×4 can pick its own mode and transform type; a smooth region stays
-    /// 8×8, where one prediction and a single TX_8X8 code it more compactly. This is a quality
-    /// decision — either choice reconstructs bit-exactly — so the threshold is a deterministic
-    /// placeholder (rate-distortion partition search is deferred).
-    fn should_split_8x8(&self, r: usize, c: usize) -> bool {
+    /// Decides whether the lossy `bw × bw` region at MI `(r, c)` should split rather than be coded as
+    /// a single `PARTITION_NONE` block. A textured region (large luma range over the source) splits so
+    /// each sub-block can pick its own mode and transform; a smooth region stays whole, where one
+    /// prediction and a single larger transform code it more compactly. This is a quality decision —
+    /// either choice reconstructs bit-exactly — so the threshold is a deterministic placeholder
+    /// (rate-distortion partition search is deferred).
+    fn should_split(&self, r: usize, c: usize, bw: usize) -> bool {
         let (sx, sy) = (c * 4, r * 4);
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
-        for i in 0..8 {
-            for j in 0..8 {
+        for i in 0..bw {
+            for j in 0..bw {
                 let v = self.sample(0, sx + j, sy + i);
                 lo = lo.min(v);
                 hi = hi.max(v);
@@ -365,18 +371,18 @@ impl<'a> FrameEncoder<'a> {
     fn encode_block(&mut self, r: usize, c: usize, bw: usize) {
         let n4 = bw / 4;
         let bsl = n4.trailing_zeros() as u8;
-        // TX_MODE_LARGEST ⇒ the transform spans the whole block. The lossy path codes 8×8 blocks as
-        // a single TX_8X8; everything else (lossy 4×4, lossless) uses 4×4 transforms.
-        let lossy_8x8 = self.qindex > 0 && bw == 8;
+        // TX_MODE_LARGEST ⇒ the transform spans the whole block. The lossy path codes an 8×8 or 16×16
+        // block as a single TX_8X8 / TX_16X16; lossy 4×4 and lossless use 4×4 transforms.
+        let lossy_large = self.qindex > 0 && bw >= 8;
 
         // intra_frame_mode_info: skip=0 (ctx 0), then y_mode and uv_mode. The lossless path always
         // predicts DC_PRED; the lossy path searches the non-directional luma modes (plus directional
-        // and filter-intra at 4×4) and signals the choice with the above/left mode context.
+        // and filter-intra) and signals the choice with the above/left mode context.
         self.sym.encode_symbol(0, &cdf::SKIP[0]);
         let (y_mode, angle_delta, filter_intra) = if self.qindex == 0 {
             (DC_PRED, 0i8, None)
-        } else if lossy_8x8 {
-            self.select_luma_mode_8x8(c * 4, r * 4)
+        } else if lossy_large {
+            self.select_luma_mode_nxn(c * 4, r * 4, bw)
         } else {
             let (m, fi) = self.select_luma_mode(c * 4, r * 4);
             (m, 0, fi)
@@ -427,10 +433,10 @@ impl<'a> FrameEncoder<'a> {
         // DC_PRED luma block ≤ 32px signals use_filter_intra (PaletteSizeY is always 0 here), under
         // the block-size CDF row. Both 4×4 and 8×8 DC_PRED blocks may enable it.
         if self.qindex > 0 && y_mode == DC_PRED {
-            let fi_cdf = if bw == 4 {
-                &cdf::FILTER_INTRA_4X4
-            } else {
-                &cdf::FILTER_INTRA_8X8
+            let fi_cdf: &[u16] = match bw {
+                4 => &cdf::FILTER_INTRA_4X4,
+                8 => &cdf::FILTER_INTRA_8X8,
+                _ => &cdf::FILTER_INTRA_16X16,
             };
             self.sym
                 .encode_symbol(usize::from(filter_intra.is_some()), fi_cdf);
@@ -441,8 +447,12 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // Per-MI bookkeeping: block size, luma mode (for neighbour contexts), and the transform-size
-        // log2 (`2` for 4×4, `3` for 8×8) consumed by the deblocking loop filter.
-        let txl = if lossy_8x8 { 3u8 } else { 2u8 };
+        // log2 (`2` for 4×4, `3` for 8×8, `4` for 16×16) consumed by the deblocking loop filter.
+        let txl = if lossy_large {
+            bw.trailing_zeros() as u8
+        } else {
+            2u8
+        };
         for y in 0..n4 {
             for x in 0..n4 {
                 let (rr, cc) = (r + y, c + x);
@@ -456,8 +466,12 @@ impl<'a> FrameEncoder<'a> {
 
         // residual(): per plane. Luma uses the block's intra mode; chroma is DC_PRED, plus the CfL
         // high-frequency term when selected. Luma (plane 0) is reconstructed first, so the chroma
-        // CfL reads finalized luma recon. A lossy 8×8 block is one TX_8X8 per plane; otherwise it is
-        // a raster of 4×4 transforms.
+        // CfL reads finalized luma recon. A lossy 8×8 / 16×16 block is one TX_8X8 / TX_16X16 per
+        // plane; otherwise it is a raster of 4×4 transforms.
+        let large_tx = match bw {
+            8 => TxSize::Tx8x8,
+            _ => TxSize::Tx16x16,
+        };
         for plane in 0..3 {
             let pred = Pred {
                 mode: if plane == 0 { y_mode } else { DC_PRED },
@@ -469,8 +483,8 @@ impl<'a> FrameEncoder<'a> {
                     _ => None,
                 },
             };
-            if lossy_8x8 {
-                self.transform_block(plane, c * 4, r * 4, bw, TxSize::Tx8x8, pred);
+            if lossy_large {
+                self.transform_block(plane, c * 4, r * 4, bw, large_tx, pred);
             } else {
                 for ty in 0..n4 {
                     for tx in 0..n4 {
@@ -517,7 +531,16 @@ impl<'a> FrameEncoder<'a> {
                 }
             }
             let quant = gamut_dsp::fwht4x4(&res);
-            self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, TxSize::Tx4x4, &quant, 1);
+            self.code_coeffs(
+                plane,
+                sx >> 2,
+                sy >> 2,
+                block_w,
+                TxSize::Tx4x4,
+                &quant,
+                1,
+                0,
+            );
             return;
         }
 
@@ -551,7 +574,22 @@ impl<'a> FrameEncoder<'a> {
                 self.quantize_tx(&res, tx_size, TxType::DctDct),
             )
         };
-        self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, tx_size, &levels, tx_sym);
+        // intraDir (§9.4) keys the 16×16 transform-type CDF: the filter-intra mode's mapped direction
+        // when filter-intra is used, else YMode. Ignored for 4×4/8×8 (uniform CDF) and for chroma.
+        let intra_dir = match desc.filter_intra {
+            Some(fi) => usize::from(FILTER_INTRA_MODE_TO_INTRA_DIR[fi as usize]),
+            None => usize::from(desc.mode),
+        };
+        self.code_coeffs(
+            plane,
+            sx >> 2,
+            sy >> 2,
+            block_w,
+            tx_size,
+            &levels,
+            tx_sym,
+            intra_dir,
+        );
 
         let mut dq = vec![0i32; n * n];
         for (i, &lvl) in levels.iter().enumerate() {
@@ -900,8 +938,9 @@ impl<'a> FrameEncoder<'a> {
 
     /// Builds the `n × n` intra prediction for `plane` at coded `(sx, sy)` under `mode`. 4×4 blocks
     /// dispatch to [`Self::predict_4x4`] (`angle_delta` is always 0 there — never signaled for
-    /// `MiSize < BLOCK_8X8`). 8×8 blocks use the non-directional predictor for `DC`/`SMOOTH*`/`PAETH`
-    /// and the general directional process (§7.11.2.4) — fine-tuned by `angle_delta` — otherwise.
+    /// `MiSize < BLOCK_8X8`). 8×8 and 16×16 blocks use the non-directional predictor for
+    /// `DC`/`SMOOTH*`/`PAETH` and the general directional process (§7.11.2.4) — fine-tuned by
+    /// `angle_delta` — otherwise.
     fn predict_intra(
         &self,
         plane: usize,
@@ -917,7 +956,7 @@ impl<'a> FrameEncoder<'a> {
         if is_directional(mode) {
             return self.predict_directional(plane, sx, sy, n, mode, angle_delta);
         }
-        self.predict_8x8_nondir(plane, sx, sy, mode)
+        self.predict_nondir(plane, sx, sy, n, mode)
     }
 
     /// Builds the §7.11.2.2 reference samples for an `n × n` directional block: `AboveRow[0..2n]`,
@@ -1094,19 +1133,23 @@ impl<'a> FrameEncoder<'a> {
         (above, left, top_left)
     }
 
-    /// Non-directional 8×8 intra prediction (§7.11.2): `DC_PRED`, `PAETH_PRED`, and the three
-    /// `SMOOTH` modes, using the 8-wide smooth weights. Reads the reconstruction buffer.
-    fn predict_8x8_nondir(&self, plane: usize, sx: usize, sy: usize, mode: u8) -> Vec<i32> {
-        const N: usize = 8;
+    /// Non-directional `n × n` intra prediction (§7.11.2): `DC_PRED`, `PAETH_PRED`, and the three
+    /// `SMOOTH` modes, using the `n`-wide smooth weights (`Sm_Weights_Tx_NxN`). Reads the
+    /// reconstruction buffer. Used for the lossy 8×8 and 16×16 non-directional luma blocks.
+    fn predict_nondir(&self, plane: usize, sx: usize, sy: usize, n: usize, mode: u8) -> Vec<i32> {
         if mode == DC_PRED {
-            return vec![self.dc_pred(plane, sx, sy, N); N * N];
+            return vec![self.dc_pred(plane, sx, sy, n); n * n];
         }
-        let (above, left, top_left) = self.reference_basic(plane, sx, sy, N);
-        let w = cdf::SM_WEIGHTS_8X8;
-        let mut pred = vec![0i32; N * N];
-        for i in 0..N {
-            for j in 0..N {
-                pred[i * N + j] = match mode {
+        let (above, left, top_left) = self.reference_basic(plane, sx, sy, n);
+        let w: &[i32] = if n == 8 {
+            &cdf::SM_WEIGHTS_8X8
+        } else {
+            &cdf::SM_WEIGHTS_16X16
+        };
+        let mut pred = vec![0i32; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                pred[i * n + j] = match mode {
                     PAETH_PRED => {
                         let base = above[j] + left[i] - top_left;
                         let p_left = (base - left[i]).abs();
@@ -1122,18 +1165,18 @@ impl<'a> FrameEncoder<'a> {
                     }
                     SMOOTH_PRED => {
                         let v = w[i] * above[j]
-                            + (256 - w[i]) * left[N - 1]
+                            + (256 - w[i]) * left[n - 1]
                             + w[j] * left[i]
-                            + (256 - w[j]) * above[N - 1];
+                            + (256 - w[j]) * above[n - 1];
                         (v + 256) >> 9
                     }
                     SMOOTH_V_PRED => {
-                        let v = w[i] * above[j] + (256 - w[i]) * left[N - 1];
+                        let v = w[i] * above[j] + (256 - w[i]) * left[n - 1];
                         (v + 128) >> 8
                     }
                     _ => {
                         // SMOOTH_H_PRED
-                        let v = w[j] * left[i] + (256 - w[j]) * above[N - 1];
+                        let v = w[j] * left[i] + (256 - w[j]) * above[n - 1];
                         (v + 128) >> 8
                     }
                 };
@@ -1185,28 +1228,27 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    /// Picks the lossy luma mode for an 8×8 block minimizing SAD against the source. It searches the
-    /// non-directional modes (`DC`/`SMOOTH*`/`PAETH`), the eight directional modes each over
-    /// `angle_delta ∈ [-3, 3]`, and (for `DC_PRED`) the five recursive filter-intra modes. Returns
-    /// the `YMode`, its `AngleDeltaY` (0 for non-directional), and the chosen `filter_intra_mode`
-    /// when filter-intra strictly wins. Regular modes win ties (and `DC_PRED`/`angle_delta = 0` win
-    /// among them), so cheaper signaling is preferred. Every option reconstructs bit-exactly; this is
-    /// purely a quality decision, so only the resulting signaling must be correct.
-    fn select_luma_mode_8x8(&self, sx: usize, sy: usize) -> (u8, i8, Option<u8>) {
-        const N: usize = 8;
+    /// Picks the lossy luma mode for an `n × n` (8×8 or 16×16) block minimizing SAD against the
+    /// source. It searches the non-directional modes (`DC`/`SMOOTH*`/`PAETH`), the eight directional
+    /// modes each over `angle_delta ∈ [-3, 3]`, and (for `DC_PRED`) the five recursive filter-intra
+    /// modes. Returns the `YMode`, its `AngleDeltaY` (0 for non-directional), and the chosen
+    /// `filter_intra_mode` when filter-intra strictly wins. Regular modes win ties (and
+    /// `DC_PRED`/`angle_delta = 0` win among them), so cheaper signaling is preferred. Every option
+    /// reconstructs bit-exactly; this is purely a quality decision, so only the signaling must match.
+    fn select_luma_mode_nxn(&self, sx: usize, sy: usize, n: usize) -> (u8, i8, Option<u8>) {
         let sad = |pred: &[i32]| -> i32 {
             let mut s = 0;
-            for i in 0..N {
-                for j in 0..N {
-                    s += (self.sample(0, sx + j, sy + i) - pred[i * N + j]).abs();
+            for i in 0..n {
+                for j in 0..n {
+                    s += (self.sample(0, sx + j, sy + i) - pred[i * n + j]).abs();
                 }
             }
             s
         };
         let mut best = (DC_PRED, 0i8);
-        let mut best_sad = sad(&self.predict_8x8_nondir(0, sx, sy, DC_PRED));
+        let mut best_sad = sad(&self.predict_nondir(0, sx, sy, n, DC_PRED));
         for &mode in &[SMOOTH_PRED, SMOOTH_V_PRED, SMOOTH_H_PRED, PAETH_PRED] {
-            let s = sad(&self.predict_8x8_nondir(0, sx, sy, mode));
+            let s = sad(&self.predict_nondir(0, sx, sy, n, mode));
             if s < best_sad {
                 best_sad = s;
                 best = (mode, 0);
@@ -1214,7 +1256,7 @@ impl<'a> FrameEncoder<'a> {
         }
         for &mode in &DIRECTIONAL_MODES {
             for ad in -3..=3i8 {
-                let s = sad(&self.predict_directional(0, sx, sy, N, mode, ad));
+                let s = sad(&self.predict_directional(0, sx, sy, n, mode, ad));
                 if s < best_sad {
                     best_sad = s;
                     best = (mode, ad);
@@ -1225,7 +1267,7 @@ impl<'a> FrameEncoder<'a> {
         let mut best_fi: Option<u8> = None;
         let mut best_fi_sad = i32::MAX;
         for fi in 0..5u8 {
-            let s = sad(&self.predict_filter_intra(0, sx, sy, N, fi));
+            let s = sad(&self.predict_filter_intra(0, sx, sy, n, fi));
             if s < best_fi_sad {
                 best_fi_sad = s;
                 best_fi = Some(fi);
@@ -1361,10 +1403,11 @@ impl<'a> FrameEncoder<'a> {
         tx_size: TxSize,
         quant: &[i32],
         tx_sym: usize,
+        intra_dir: usize,
     ) {
         let ptype = usize::from(plane > 0);
         let qctx = self.qctx;
-        let n = tx_size.width(); // square: width == height (4 or 8)
+        let n = tx_size.width(); // square: width == height (4, 8, or 16)
         let bwl = tx_size.log2_width() as usize;
         let area = n * n;
         let n4 = n / 4; // MI cells the transform spans on each axis
@@ -1378,8 +1421,8 @@ impl<'a> FrameEncoder<'a> {
             &[[[[u16; 4]; 42]; 2]; 4],
             &[[[[u16; 4]; 21]; 2]; 4],
             &[[u8; 5]; 5],
-        ) = if n == 4 {
-            (
+        ) = match n {
+            4 => (
                 &cdf::DEFAULT_SCAN_4X4,
                 &cdf::TXB_SKIP,
                 &cdf::EOB_EXTRA,
@@ -1387,9 +1430,8 @@ impl<'a> FrameEncoder<'a> {
                 &cdf::COEFF_BASE,
                 &cdf::COEFF_BR,
                 &cdf::COEFF_BASE_CTX_OFFSET_4X4,
-            )
-        } else {
-            (
+            ),
+            8 => (
                 &cdf::DEFAULT_SCAN_8X8,
                 &cdf::TXB_SKIP_8X8,
                 &cdf::EOB_EXTRA_8X8,
@@ -1397,7 +1439,17 @@ impl<'a> FrameEncoder<'a> {
                 &cdf::COEFF_BASE_8X8,
                 &cdf::COEFF_BR_8X8,
                 &cdf::COEFF_BASE_CTX_OFFSET_8X8,
-            )
+            ),
+            // 16×16 reuses the 8×8 Coeff_Base_Ctx_Offset (identical in the spec).
+            _ => (
+                &cdf::DEFAULT_SCAN_16X16,
+                &cdf::TXB_SKIP_16X16,
+                &cdf::EOB_EXTRA_16X16,
+                &cdf::COEFF_BASE_EOB_16X16,
+                &cdf::COEFF_BASE_16X16,
+                &cdf::COEFF_BR_16X16,
+                &cdf::COEFF_BASE_CTX_OFFSET_8X8,
+            ),
         };
 
         let mut eob = 0usize;
@@ -1416,21 +1468,31 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // transform_type (§5.11.39): signaled only for luma when not all-zero and base_q_idx > 0.
-        // Reduced tx set + 4×4/8×8 intra ⇒ TX_SET_INTRA_2; `tx_sym` indexes
-        // Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}.
+        // Reduced tx set + 4×4/8×8/16×16 intra ⇒ TX_SET_INTRA_2; `tx_sym` indexes
+        // Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}. The CDF is uniform
+        // across intra direction for 4×4/8×8 but per-`intraDir` for 16×16 (§9.4).
         if self.qindex > 0 && plane == 0 {
-            self.sym.encode_symbol(tx_sym, &cdf::INTRA_TX_TYPE_SET2);
+            let tx_cdf: &[u16] = if n == 16 {
+                &cdf::INTRA_TX_TYPE_SET2_16X16[intra_dir]
+            } else {
+                &cdf::INTRA_TX_TYPE_SET2
+            };
+            self.sym.encode_symbol(tx_sym, tx_cdf);
         }
 
         // eob position (TX_CLASS_2D ⇒ eob_pt context 0). 16-coeff blocks use Eob_Pt_16, 64-coeff
-        // (8×8) blocks use the wider Eob_Pt_64 table.
+        // (8×8) blocks Eob_Pt_64, 256-coeff (16×16) blocks Eob_Pt_256.
         let eobpt = eobpt_from_eob(eob);
-        if n == 4 {
-            self.sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_16[qctx][ptype][0]);
-        } else {
-            self.sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_64[qctx][ptype][0]);
+        match n {
+            4 => self
+                .sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_16[qctx][ptype][0]),
+            8 => self
+                .sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_64[qctx][ptype][0]),
+            _ => self
+                .sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_256[qctx][ptype][0]),
         }
         if eobpt >= 3 {
             let nbits = eobpt - 2;
