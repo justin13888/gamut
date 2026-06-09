@@ -11,6 +11,7 @@
 
 pub mod bit_io;
 pub mod color_cache;
+pub mod decoder;
 pub mod header;
 pub mod lz77;
 pub mod prefix;

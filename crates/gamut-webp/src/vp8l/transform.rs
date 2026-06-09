@@ -82,27 +82,49 @@ impl Vp8lTransform {
     }
 }
 
-// --- ARGB channel helpers -------------------------------------------------------------------------
+// --- ARGB channel helpers (shared with the decoder/encoder) ---------------------------------------
 
+/// Extracts the alpha channel of an `0xAARRGGBB` pixel.
 #[inline]
-const fn alpha(p: u32) -> u8 {
+#[must_use]
+pub const fn alpha(p: u32) -> u8 {
     (p >> 24) as u8
 }
+/// Extracts the red channel of an `0xAARRGGBB` pixel.
 #[inline]
-const fn red(p: u32) -> u8 {
+#[must_use]
+pub const fn red(p: u32) -> u8 {
     (p >> 16) as u8
 }
+/// Extracts the green channel of an `0xAARRGGBB` pixel.
 #[inline]
-const fn green(p: u32) -> u8 {
+#[must_use]
+pub const fn green(p: u32) -> u8 {
     (p >> 8) as u8
 }
+/// Extracts the blue channel of an `0xAARRGGBB` pixel.
 #[inline]
-const fn blue(p: u32) -> u8 {
+#[must_use]
+pub const fn blue(p: u32) -> u8 {
     p as u8
 }
+/// Packs four channels into an `0xAARRGGBB` pixel.
 #[inline]
-const fn make_argb(a: u8, r: u8, g: u8, b: u8) -> u32 {
+#[must_use]
+pub const fn make_argb(a: u8, r: u8, g: u8, b: u8) -> u32 {
     ((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
+/// Adds two pixels channel-wise modulo 256 (used to subtraction-decode/encode the color table).
+#[inline]
+#[must_use]
+pub const fn add_pixels(a: u32, b: u32) -> u32 {
+    make_argb(
+        alpha(a).wrapping_add(alpha(b)),
+        red(a).wrapping_add(red(b)),
+        green(a).wrapping_add(green(b)),
+        blue(a).wrapping_add(blue(b)),
+    )
 }
 
 // --- Subtract-green (RFC 9649 §4.3) ---------------------------------------------------------------
