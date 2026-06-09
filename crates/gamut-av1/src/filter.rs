@@ -5,8 +5,9 @@
 //! is decoded), so the encoder applies them once to its final reconstruction to match a conformant
 //! decoder's output.
 //!
-//! Deblock: blocks are 4×4, 8×8 or 16×16 under `TX_MODE_LARGEST`, so the transform and prediction
-//! edges coincide; `filterSize` is `Min(16 luma / 8 chroma, baseSize)` where `baseSize` is the
+//! Deblock: under `TX_MODE_SELECT` a luma block (≤32×32) uses one block-size or several smaller
+//! square transforms; 4:4:4 chroma always uses the block-size transform. `filterSize` is
+//! `Min(16 luma / 8 chroma, baseSize)` where `baseSize` is the
 //! minimum transform width across the edge: 4 (narrow, §7.14.6.3) for any edge touching a 4×4
 //! transform, 8 (wide, §7.14.6.4 `log2Size = 3`) for an 8↔8 edge, and 16 (wide, §7.14.6.4
 //! `log2Size = 4`) for a 16↔16 luma edge. The frame is a single intra key-frame with one segment,
@@ -198,14 +199,15 @@ fn filter_sample(
 }
 
 /// Applies the deblocking loop filter to the coded-grid reconstruction planes in place (§7.14).
-/// `coded_w` is the plane row stride; `mi_cols` strides the `tx_log2` map (`Tx_Width_Log2` per 4×4
-/// MI cell, shared by all planes for 4:4:4); `width`/`height` are the visible dimensions for the
-/// `onScreen` test. Only transform-block edges are filtered (an 8×8 block's internal 4-line is not a
-/// transform edge); the filter size is `Min(Tx_Width)` across the edge (capped at 16 luma / 8 chroma)
-/// — 4 (narrow) for any edge touching a 4×4 transform, 8 (wide) for an 8↔8 edge, 16 (wide) for a
-/// 16↔16 luma edge. Partial bottom/right edges filter into the
-/// coded-grid padding exactly as a conformant decoder does (the coded grid is a multiple of 8, so the
-/// reads stay in bounds); the padding is then cropped.
+/// `coded_w` is the plane row stride; `mi_cols` strides the per-MI maps; `width`/`height` are the
+/// visible dimensions for the `onScreen` test. The luma transform size per 4×4 MI cell comes from
+/// `tx_log2` (which, under `TX_MODE_SELECT`, can be smaller than the block); 4:4:4 chroma always uses
+/// the block-size transform, so its size is `mi_bsl + 2`. Only transform-block edges are filtered; the
+/// filter size is `Min(Tx_Width)` across the edge (capped at 16 luma / 8 chroma) — 4 (narrow) for any
+/// edge touching a 4×4 transform, 8 (wide) for an 8↔8 edge, 16 (wide) for a 16↔16 luma edge. Partial
+/// bottom/right edges filter into the coded-grid padding exactly as a conformant decoder does (the
+/// coded grid is a multiple of 8, so the reads stay in bounds); the padding is then cropped.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn deblock(
     planes: &mut [Vec<u8>; 3],
     coded_w: usize,
@@ -213,6 +215,7 @@ pub(crate) fn deblock(
     width: usize,
     height: usize,
     tx_log2: &[u8],
+    mi_bsl: &[u8],
     qindex: u8,
 ) {
     let lvl = i32::from(deblock_level(qindex));
@@ -230,6 +233,15 @@ pub(crate) fn deblock(
     for (plane_idx, plane) in planes.iter_mut().enumerate() {
         let is_luma = plane_idx == 0;
         let size_cap = if is_luma { 16 } else { 8 };
+        // Transform width/height (log2) for this plane at MI `cell`: luma uses the signaled tx size;
+        // 4:4:4 chroma uses the block-size transform (`mi_bsl + 2`).
+        let txlog2 = |cell: usize| -> u32 {
+            if is_luma {
+                u32::from(tx_log2[cell])
+            } else {
+                u32::from(mi_bsl[cell]) + 2
+            }
+        };
 
         // Pass 0: vertical edges. Each on-screen edge (column x = 4, 8, … inside the frame) filters
         // the four sample rows of its MI block, when the column is a transform-block edge. The whole
@@ -240,9 +252,9 @@ pub(crate) fn deblock(
             let mut y = 0;
             while y < height {
                 let row = y >> 2;
-                let txw = 1usize << tx_log2[row * mi_cols + col];
+                let txw = 1usize << txlog2(row * mi_cols + col);
                 if x % txw == 0 {
-                    let prev_txw = 1usize << tx_log2[row * mi_cols + (col - 1)];
+                    let prev_txw = 1usize << txlog2(row * mi_cols + (col - 1));
                     let filter_size = prev_txw.min(txw).min(size_cap);
                     for i in 0..4 {
                         filter_sample(plane, (y + i) * coded_w + x, 1, filter_size, is_luma, st);
@@ -260,9 +272,9 @@ pub(crate) fn deblock(
             let mut x = 0;
             while x < width {
                 let col = x >> 2;
-                let txh = 1usize << tx_log2[row * mi_cols + col];
+                let txh = 1usize << txlog2(row * mi_cols + col);
                 if y % txh == 0 {
-                    let prev_txh = 1usize << tx_log2[(row - 1) * mi_cols + col];
+                    let prev_txh = 1usize << txlog2((row - 1) * mi_cols + col);
                     let filter_size = prev_txh.min(txh).min(size_cap);
                     for i in 0..4 {
                         filter_sample(
@@ -631,9 +643,11 @@ mod tests {
             vec![128u8; 16 * 16],
             vec![128u8; 16 * 16],
         ];
-        // 16×16 ⇒ 4×4 MI grid, all 4×4 transforms (tx_log2 = 2 everywhere ⇒ narrow filter).
+        // 16×16 ⇒ 4×4 MI grid, all 4×4 transforms (tx_log2 = 2 everywhere ⇒ narrow filter). The
+        // 4×4 blocks have `mi_bsl = 0`, so chroma tx is also 4×4 (log2 = 0 + 2).
         let tx_log2 = vec![2u8; 4 * 4];
-        deblock(&mut flat, 16, 4, 16, 16, &tx_log2, 64);
+        let mi_bsl = vec![0u8; 4 * 4];
+        deblock(&mut flat, 16, 4, 16, 16, &tx_log2, &mi_bsl, 64);
         assert!(flat[0].iter().all(|&v| v == 128));
 
         // A vertical step at column 8 gets smoothed across the x = 8 boundary.
@@ -644,7 +658,7 @@ mod tests {
             }
         }
         let before = planes[0].clone();
-        deblock(&mut planes, 16, 4, 16, 16, &tx_log2, 64); // qindex 64 ⇒ level 16
+        deblock(&mut planes, 16, 4, 16, 16, &tx_log2, &mi_bsl, 64); // qindex 64 ⇒ level 16
         assert_ne!(
             planes[0], before,
             "deblock should modify samples near the edge"

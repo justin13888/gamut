@@ -149,8 +149,8 @@ pub(crate) fn sequence_header_payload(
 /// (`byte_alignment`, no trailing one — the tile data follows in the same `OBU_FRAME`).
 ///
 /// `base_q_idx == 0` selects the lossless path (`CodedLossless`, forced `TX_4X4` WHT, in-loop
-/// filters/`tx_mode` emit nothing). `base_q_idx > 0` selects the lossy path: `TX_MODE_LARGEST`,
-/// in-loop filters present but disabled (all levels 0), and `tx_mode_select = 0`. All quantizer
+/// filters/`tx_mode` emit nothing). `base_q_idx > 0` selects the lossy path: `TX_MODE_SELECT`
+/// (per-block `tx_depth`), in-loop filters present but disabled (all levels 0). All quantizer
 /// deltas are 0 and `using_qmatrix = 0`.
 ///
 /// The returned bytes precede the tile (symbol-coded) data; together they form the frame OBU
@@ -223,7 +223,7 @@ pub(crate) fn frame_header_payload(
         w.put_bits(uv_pri as u32, 4); // cdef_uv_pri_strength[0]
         w.put_bits(sec_code(uv_sec), 2); // cdef_uv_sec_strength[0]
         // lr_params(): enable_restoration = 0 ⇒ no bits.
-        w.put_bit(0); // read_tx_mode: tx_mode_select = 0 ⇒ TX_MODE_LARGEST
+        w.put_bit(1); // read_tx_mode: tx_mode_select = 1 ⇒ TX_MODE_SELECT (per-block tx_depth)
         // frame_reference_mode / skip_mode_params (intra) ⇒ no bits. allow_warped_motion = 0.
     }
     // CodedLossless ⇒ loop_filter / cdef / lr / tx_mode emit nothing (TxMode = ONLY_4X4).

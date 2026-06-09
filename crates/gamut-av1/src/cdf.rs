@@ -146,6 +146,27 @@ pub static FILTER_INTRA_32X32: [u16; 2] = [22343, 32768];
 /// (`{FILTER_DC, FILTER_V, FILTER_H, FILTER_D157, FILTER_PAETH}`).
 pub static FILTER_INTRA_MODE: [u16; 5] = [8949, 12776, 17211, 29558, 32768];
 
+/// `Default_Tx_8x8_Cdf[TX_SIZE_CONTEXTS][2]` (§9.4): the `tx_depth` CDF for a `BLOCK_8X8` block
+/// (`Max_Tx_Depth = 1`, so `tx_depth ∈ {0, 1}` ⇒ TX_8X8 or TX_4X4). Indexed by the neighbour
+/// context `(aboveTxW >= 8) + (leftTxH >= 8)`.
+pub static TX_SIZE_8X8: [[u16; 2]; 3] = [[19968, 32768], [19968, 32768], [24320, 32768]];
+
+/// `Default_Tx_16x16_Cdf[TX_SIZE_CONTEXTS][3]` (§9.4): the `tx_depth` CDF for a `BLOCK_16X16` block
+/// (`tx_depth ∈ {0, 1, 2}` ⇒ TX_16X16 / TX_8X8 / TX_4X4).
+pub static TX_SIZE_16X16: [[u16; 3]; 3] = [
+    [12272, 30172, 32768],
+    [12272, 30172, 32768],
+    [18677, 30848, 32768],
+];
+
+/// `Default_Tx_32x32_Cdf[TX_SIZE_CONTEXTS][3]` (§9.4): the `tx_depth` CDF for a `BLOCK_32X32` block
+/// (`tx_depth ∈ {0, 1, 2}` ⇒ TX_32X32 / TX_16X16 / TX_8X8; `tx_depth` is capped at `MAX_TX_DEPTH`).
+pub static TX_SIZE_32X32: [[u16; 3]; 3] = [
+    [12986, 15180, 32768],
+    [12986, 15180, 32768],
+    [24302, 25602, 32768],
+];
+
 /// `Intra_Filter_Taps[INTRA_FILTER_MODES][8][7]` (§7.11.2.3): the recursive filter-intra taps. For
 /// each filter mode, eight 4×2 output positions weight the 7-sample neighbourhood `p[0..6]`; the
 /// weighted sum is scaled by `INTRA_FILTER_SCALE_BITS = 4` (`Round2Signed`). Taps can be negative.

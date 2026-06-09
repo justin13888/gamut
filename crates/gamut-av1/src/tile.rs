@@ -102,6 +102,17 @@ const fn is_directional(mode: u8) -> bool {
     V_PRED <= mode && mode <= D67_PRED
 }
 
+/// The square transform size of the given side length (4/8/16/32). Used to map a `bw >> tx_depth`
+/// width back to a [`TxSize`] under `TX_MODE_SELECT`.
+const fn square_tx(width: usize) -> TxSize {
+    match width {
+        4 => TxSize::Tx4x4,
+        8 => TxSize::Tx8x8,
+        16 => TxSize::Tx16x16,
+        _ => TxSize::Tx32x32,
+    }
+}
+
 /// How a single transform block's samples are predicted. `mode` is the intra mode (`DC_PRED` for
 /// chroma); `angle_delta` is the directional fine angle (`AngleDeltaY`, signaled only for ≥8×8 luma
 /// directional blocks); `filter_intra` overrides luma prediction with a recursive filter-intra mode
@@ -270,6 +281,7 @@ impl<'a> FrameEncoder<'a> {
                 self.width,
                 self.height,
                 &self.tx_log2,
+                &self.mi_bsl,
                 self.qindex,
             );
             // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15).
@@ -355,7 +367,12 @@ impl<'a> FrameEncoder<'a> {
     /// either choice reconstructs bit-exactly — so the threshold is a deterministic placeholder
     /// (rate-distortion partition search is deferred).
     fn should_split(&self, r: usize, c: usize, bw: usize) -> bool {
-        let (sx, sy) = (c * 4, r * 4);
+        self.luma_range(c * 4, r * 4, bw) > 32
+    }
+
+    /// Source-luma range (max − min) over the `bw × bw` block at coded `(sx, sy)`. Used by the
+    /// partition and transform-depth heuristics.
+    fn luma_range(&self, sx: usize, sy: usize, bw: usize) -> i32 {
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
         for i in 0..bw {
@@ -365,7 +382,39 @@ impl<'a> FrameEncoder<'a> {
                 hi = hi.max(v);
             }
         }
-        hi - lo > 32
+        hi - lo
+    }
+
+    /// Context for the `tx_depth` CDF (§8.3.2): `(aboveTxW ≥ bw) + (leftTxH ≥ bw)`, where the
+    /// neighbour transform width/height come from the per-MI `tx_log2` map (0 when unavailable).
+    fn tx_depth_ctx(&self, r: usize, c: usize, bw: usize) -> usize {
+        let above_w = if r > 0 {
+            1usize << self.tx_log2[(r - 1) * self.mi_cols + c]
+        } else {
+            0
+        };
+        let left_h = if c > 0 {
+            1usize << self.tx_log2[r * self.mi_cols + (c - 1)]
+        } else {
+            0
+        };
+        usize::from(above_w >= bw) + usize::from(left_h >= bw)
+    }
+
+    /// Picks the luma `tx_depth` (0..=`max_depth`, itself ≤ `MAX_TX_DEPTH = 2`) for a lossy ≥8×8
+    /// block: smoother blocks keep one block-size transform, more textured ones split the transform
+    /// (one prediction mode, several sub-transforms). This is a quality decision — every depth
+    /// reconstructs bit-exactly — so the range thresholds are a deterministic placeholder.
+    fn select_tx_depth(&self, sx: usize, sy: usize, bw: usize, max_depth: usize) -> usize {
+        let range = self.luma_range(sx, sy, bw);
+        let depth = if range > 24 {
+            2
+        } else if range > 12 {
+            1
+        } else {
+            0
+        };
+        depth.min(max_depth)
     }
 
     fn encode_block(&mut self, r: usize, c: usize, bw: usize) {
@@ -447,13 +496,30 @@ impl<'a> FrameEncoder<'a> {
             }
         }
 
-        // Per-MI bookkeeping: block size, luma mode (for neighbour contexts), and the transform-size
-        // log2 (`2` for 4×4, `3` for 8×8, `4` for 16×16) consumed by the deblocking loop filter.
-        let txl = if lossy_large {
-            bw.trailing_zeros() as u8
+        // read_block_tx_size (§5.11.16): under TX_MODE_SELECT a lossy ≥8×8 luma block signals
+        // `tx_depth`, choosing a luma transform `bw >> tx_depth` (square, ≥ 4×4). Chroma never signals
+        // — for 4:4:4 it always uses the block-size transform (`Max_Tx_Size_Rect`). The CDF is keyed by
+        // block size (`Max_Tx_Depth`); the context is `(aboveTxW ≥ bw) + (leftTxH ≥ bw)`.
+        let luma_tx = if lossy_large {
+            let max_depth = if bw == 8 { 1 } else { 2 };
+            let tx_depth = self.select_tx_depth(c * 4, r * 4, bw, max_depth);
+            let ctx = self.tx_depth_ctx(r, c, bw);
+            let cdf: &[u16] = match bw {
+                8 => &cdf::TX_SIZE_8X8[ctx],
+                16 => &cdf::TX_SIZE_16X16[ctx],
+                _ => &cdf::TX_SIZE_32X32[ctx],
+            };
+
+            self.sym.encode_symbol(tx_depth, cdf);
+            square_tx(bw >> tx_depth)
         } else {
-            2u8
+            TxSize::Tx4x4
         };
+
+        // Per-MI bookkeeping: block size, luma mode (for neighbour contexts), and the luma
+        // transform-size log2 — consumed by the deblocking loop filter (which derives the chroma tx
+        // size from `mi_bsl` since 4:4:4 chroma uses the block-size transform).
+        let txl = luma_tx.log2_width() as u8;
         for y in 0..n4 {
             for x in 0..n4 {
                 let (rr, cc) = (r + y, c + x);
@@ -465,11 +531,11 @@ impl<'a> FrameEncoder<'a> {
             }
         }
 
-        // residual(): per plane. Luma uses the block's intra mode; chroma is DC_PRED, plus the CfL
-        // high-frequency term when selected. Luma (plane 0) is reconstructed first, so the chroma
-        // CfL reads finalized luma recon. A lossy 8×8 / 16×16 block is one TX_8X8 / TX_16X16 per
-        // plane; otherwise it is a raster of 4×4 transforms.
-        let large_tx = match bw {
+        // residual(): per plane. Luma uses the block's intra mode and signaled transform size (a
+        // raster of `luma_tx` sub-transforms, each predicted + reconstructed in turn); 4:4:4 chroma is
+        // DC_PRED (plus the CfL term) over one block-size transform. Luma (plane 0) is fully
+        // reconstructed before chroma, so the chroma CfL reads finalized luma recon.
+        let chroma_tx = match bw {
             8 => TxSize::Tx8x8,
             16 => TxSize::Tx16x16,
             _ => TxSize::Tx32x32,
@@ -485,31 +551,39 @@ impl<'a> FrameEncoder<'a> {
                     _ => None,
                 },
             };
-            if lossy_large {
-                self.transform_block(plane, c * 4, r * 4, bw, large_tx, pred);
+            let (ptx, pw) = if plane == 0 {
+                (luma_tx, luma_tx.width())
+            } else if lossy_large {
+                (chroma_tx, bw)
             } else {
-                for ty in 0..n4 {
-                    for tx in 0..n4 {
-                        let sx = c * 4 + tx * 4;
-                        let sy = r * 4 + ty * 4;
-                        if sx >= self.coded_w || sy >= self.coded_h {
-                            continue; // transform block entirely outside the frame
-                        }
-                        self.transform_block(plane, sx, sy, bw, TxSize::Tx4x4, pred);
+                (TxSize::Tx4x4, 4)
+            };
+            let mut sy = r * 4;
+            while sy < r * 4 + bw {
+                let mut sx = c * 4;
+                while sx < c * 4 + bw {
+                    if sx < self.coded_w && sy < self.coded_h {
+                        self.transform_block(plane, sx, sy, bw, ptx, pred);
                     }
+                    // BlockDecoded (§5.11.34) is updated after each *transform* block (not the whole
+                    // block), so a later luma sub-transform's directional prediction sees the
+                    // above-right / below-left siblings just reconstructed. Luma-grid only (chroma is
+                    // never directional); marked on the luma pass.
+                    if plane == 0 {
+                        for ty in 0..pw / 4 {
+                            for tx in 0..pw / 4 {
+                                let by = (sy / 4 + ty) as isize - self.sb_r as isize;
+                                let bx = (sx / 4 + tx) as isize - self.sb_c as isize;
+                                if (0..16).contains(&by) && (0..16).contains(&bx) {
+                                    self.block_decoded
+                                        [(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
+                                }
+                            }
+                        }
+                    }
+                    sx += pw;
                 }
-            }
-        }
-
-        // Mark this block's 4×4 cells decoded (`BlockDecoded`, §5.11.34) so later neighbours see the
-        // correct above-right / below-left availability for directional prediction.
-        for ty in 0..n4 {
-            for tx in 0..n4 {
-                let by = (r + ty) as isize - self.sb_r as isize;
-                let bx = (c + tx) as isize - self.sb_c as isize;
-                if (0..16).contains(&by) && (0..16).contains(&bx) {
-                    self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
-                }
+                sy += pw;
             }
         }
     }
@@ -968,11 +1042,15 @@ impl<'a> FrameEncoder<'a> {
         n: usize,
         angle_delta: i8,
     ) -> Vec<i32> {
-        if n == 4 {
-            return self.predict_4x4(plane, sx, sy, mode).to_vec();
-        }
+        // Directional modes go through the general process so the block's `angle_delta` is honored —
+        // including a 4×4 sub-transform of a ≥8×8 directional block under TX_MODE_SELECT (where
+        // `angle_delta` may be non-zero). For `n == 4, angle_delta == 0` this matches `predict_4x4`
+        // exactly (pinned by `general_directional_matches_4x4_path`).
         if is_directional(mode) {
             return self.predict_directional(plane, sx, sy, n, mode, angle_delta);
+        }
+        if n == 4 {
+            return self.predict_4x4(plane, sx, sy, mode).to_vec();
         }
         self.predict_nondir(plane, sx, sy, n, mode)
     }
