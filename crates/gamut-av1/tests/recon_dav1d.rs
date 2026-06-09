@@ -31,18 +31,6 @@ fn check(planes: &Planar8, qindex: u8) {
     let (still, recon) = encode_still_intra(planes, qindex).unwrap();
     let (w, h) = (recon.width as usize, recon.height as usize);
 
-    let dir = std::env::temp_dir();
-    // A globally-unique stamp: tests run in parallel and several share (w, h, qindex), so the
-    // process id alone would collide on the temp paths and race.
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let stamp = format!(
-        "{}_{w}x{h}_q{qindex}_{}",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    );
-    let obu_path = dir.join(format!("gamut_recon_{stamp}.obu"));
-    let y4m_path = dir.join(format!("gamut_recon_{stamp}.y4m"));
     // A standalone Section-5 OBU stream for dav1d needs a temporal-delimiter OBU first (AVIF omits
     // it inside the container). TD = obu_type 2, has_size_field, empty payload.
     let mut stream = vec![0x12u8, 0x00];
@@ -203,11 +191,35 @@ fn deblock_matches_dav1d() {
 }
 
 #[test]
-fn cdef_matches_dav1d() {
-    if !dav1d_available() {
-        eprintln!("skipping recon_dav1d: dav1d not installed");
-        return;
+fn mixed_4x4_and_8x8_blocks_match_dav1d() {
+    // Content with both smooth regions (low local range ⇒ the encoder codes a single 8×8 block with
+    // TX_8X8) and high-frequency regions (⇒ split to 4×4). An 8×8 transform spans two MI cells, so its
+    // coefficient contexts that accumulate over neighbours — `dc_sign`, `txb_skip`, the level context
+    // — must sum across both cells. When an 8×8 block borders 4×4 blocks with non-uniform DC signs,
+    // reading a single cell diverges from a conformant decoder, so this is the gate for that mix.
+    let mixed = |x: u32, y: u32| {
+        // 16×16 smooth tiles (each a flat-ish gradient) separated by sharp seams every 16 px.
+        let smooth = (((x % 16) + (y % 16)) * 2) as i32 + 40;
+        let seam = if x.is_multiple_of(16) || y.is_multiple_of(16) {
+            200
+        } else {
+            0
+        };
+        let v = (smooth + seam).clamp(0, 255);
+        let r = (v / 2 + 90).clamp(0, 255); // chroma tracks luma (drives CfL on 8×8 blocks)
+        let b = (210 - v / 2).clamp(0, 255);
+        [r as u8, v as u8, b as u8]
+    };
+    for &q in &[21u8, 64, 130, 220] {
+        // Sizes that force the partial-superblock / padding paths around the 8×8 blocks.
+        for &(w, h) in &[(40, 40), (100, 70), (90, 96)] {
+            check(&planes(w, h, mixed), q);
+        }
     }
+}
+
+#[test]
+fn cdef_matches_dav1d() {
     // Strong directional structure (diagonal/edged content) gives the CDEF direction search (§7.15.2)
     // distinct per-8×8 directions and non-trivial variance, so the primary+secondary deringing filter
     // (§7.15.3) actually fires. The encoder runs deblock → CDEF on its reconstruction and dav1d does

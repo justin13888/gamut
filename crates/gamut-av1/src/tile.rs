@@ -128,6 +128,9 @@ pub(crate) struct FrameEncoder<'a> {
     mi_bsl: Vec<u8>,
     /// The luma intra mode (`YMode`) chosen for each MI cell, for the `intra_frame_y_mode` context.
     mi_ymode: Vec<u8>,
+    /// `Tx_Width_Log2` of the transform covering each MI cell (`2` for 4×4, `3` for 8×8), consumed by
+    /// the deblocking loop filter to locate transform edges and pick the filter size.
+    tx_log2: Vec<u8>,
     /// Top-left MI position of the superblock currently being encoded (for `BlockDecoded` indexing).
     sb_r: usize,
     sb_c: usize,
@@ -185,6 +188,7 @@ impl<'a> FrameEncoder<'a> {
             left_dc: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_ymode: vec![0; mi_cols * mi_rows],
+            tx_log2: vec![2; mi_cols * mi_rows],
             sb_r: 0,
             sb_c: 0,
             block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
@@ -242,8 +246,10 @@ impl<'a> FrameEncoder<'a> {
             crate::filter::deblock(
                 &mut planes,
                 self.coded_w,
+                self.mi_cols,
                 self.width,
                 self.height,
+                &self.tx_log2,
                 self.qindex,
             );
             // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15).
@@ -277,13 +283,18 @@ impl<'a> FrameEncoder<'a> {
             false // PARTITION_NONE forced, no symbol
         } else if has_rows && has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
-            if self.qindex > 0 {
-                // Lossy: force PARTITION_SPLIT down to 4×4 so every block uses a 4×4 transform.
-                self.sym.encode_symbol(3, partition_cdf(bsl, ctx));
-                true
-            } else {
+            if self.qindex == 0 {
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
                 false
+            } else if bw == 8 && !self.should_split_8x8(r, c) {
+                // Lossy: an 8×8 region coded as a single PARTITION_NONE block + TX_8X8 when it is
+                // smooth enough; otherwise split to 4×4 for per-block mode/transform adaptation.
+                self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
+                false
+            } else {
+                // Lossy: PARTITION_SPLIT (down to 4×4, or into four 8×8 candidates at bw == 16).
+                self.sym.encode_symbol(3, partition_cdf(bsl, ctx));
+                true
             }
         } else if has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
@@ -316,18 +327,43 @@ impl<'a> FrameEncoder<'a> {
         usize::from(left) * 2 + usize::from(above)
     }
 
+    /// Decides whether the lossy 8×8 region at MI `(r, c)` should split into four 4×4 blocks rather
+    /// than be coded as a single 8×8 (`PARTITION_NONE`). A textured region (large luma range over the
+    /// 8×8 source) splits so each 4×4 can pick its own mode and transform type; a smooth region stays
+    /// 8×8, where one prediction and a single TX_8X8 code it more compactly. This is a quality
+    /// decision — either choice reconstructs bit-exactly — so the threshold is a deterministic
+    /// placeholder (rate-distortion partition search is deferred).
+    fn should_split_8x8(&self, r: usize, c: usize) -> bool {
+        let (sx, sy) = (c * 4, r * 4);
+        let mut lo = i32::MAX;
+        let mut hi = i32::MIN;
+        for i in 0..8 {
+            for j in 0..8 {
+                let v = self.sample(0, sx + j, sy + i);
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        hi - lo > 32
+    }
+
     fn encode_block(&mut self, r: usize, c: usize, bw: usize) {
         let n4 = bw / 4;
         let bsl = n4.trailing_zeros() as u8;
+        // TX_MODE_LARGEST ⇒ the transform spans the whole block. The lossy path codes 8×8 blocks as
+        // a single TX_8X8; everything else (lossy 4×4, lossless) uses 4×4 transforms.
+        let lossy_8x8 = self.qindex > 0 && bw == 8;
 
         // intra_frame_mode_info: skip=0 (ctx 0), then y_mode and uv_mode. The lossless path always
-        // predicts DC_PRED; the lossy path searches the non-directional luma modes per 4×4 block
-        // (blocks are all 4×4 there) and signals the choice with the above/left mode context.
+        // predicts DC_PRED; the lossy path searches the non-directional luma modes (plus directional
+        // and filter-intra at 4×4) and signals the choice with the above/left mode context.
         self.sym.encode_symbol(0, &cdf::SKIP[0]);
-        let (y_mode, filter_intra) = if self.qindex > 0 {
-            self.select_luma_mode(c * 4, r * 4)
-        } else {
+        let (y_mode, filter_intra) = if self.qindex == 0 {
             (DC_PRED, None)
+        } else if lossy_8x8 {
+            (self.select_luma_mode_8x8(c * 4, r * 4), None)
+        } else {
+            self.select_luma_mode(c * 4, r * 4)
         };
         let amode = cdf::INTRA_MODE_CONTEXT[if r > 0 {
             usize::from(self.mi_ymode[(r - 1) * self.mi_cols + c])
@@ -341,17 +377,18 @@ impl<'a> FrameEncoder<'a> {
         }];
         self.sym
             .encode_symbol(usize::from(y_mode), &cdf::INTRA_FRAME_Y_MODE[amode][lmode]);
-        // uv_mode. Its CDF is indexed by the luma mode. CfL is allowed when Max(w,h) <= 32 (always
-        // for the lossy 4×4 blocks, where bw == 4); the encoder picks chroma-from-luma when it beats
-        // plain DC_PRED, then emits read_cfl_alphas. Otherwise uv_mode = DC_PRED. The decoder reads
-        // this right after intra_frame_y_mode, so it must match the signaled luma mode.
-        let cfl = if self.qindex > 0 && bw == 4 {
-            self.select_cfl(c * 4, r * 4)
+        // uv_mode. Its CDF is indexed by the luma mode. `is_cfl_allowed` is `MiSize == BLOCK_4X4`
+        // when Lossless, else `Max(w, h) <= 32` — so CfL is allowed for the lossy 4×4 and 8×8 blocks
+        // and the lossless 4×4 blocks. When allowed, the encoder picks chroma-from-luma if it beats
+        // plain DC_PRED, then emits read_cfl_alphas; otherwise uv_mode = DC_PRED.
+        let cfl_allowed = if self.qindex == 0 { bw == 4 } else { bw <= 32 };
+        let cfl = if self.qindex > 0 && cfl_allowed {
+            self.select_cfl(c * 4, r * 4, bw)
         } else {
             None
         };
         let ym = usize::from(y_mode);
-        if bw == 4 {
+        if cfl_allowed {
             let uv = if cfl.is_some() { UV_CFL_PRED } else { DC_PRED };
             self.sym
                 .encode_symbol(usize::from(uv), &cdf::UV_MODE_CFL_ALLOWED[ym]);
@@ -364,29 +401,39 @@ impl<'a> FrameEncoder<'a> {
 
         // filter_intra_mode_info (§5.11.24): with enable_filter_intra = 1 (lossy path), every
         // DC_PRED luma block ≤ 32px signals use_filter_intra (PaletteSizeY is always 0 here). The
-        // 4×4 blocks always satisfy the size bound, so the CDF is the BLOCK_4X4 row.
+        // CDF is the block-size row; 8×8 blocks always signal 0 (8×8 filter-intra is a later phase).
         if self.qindex > 0 && y_mode == DC_PRED {
+            let fi_cdf = if bw == 4 {
+                &cdf::FILTER_INTRA_4X4
+            } else {
+                &cdf::FILTER_INTRA_8X8
+            };
             self.sym
-                .encode_symbol(usize::from(filter_intra.is_some()), &cdf::FILTER_INTRA_4X4);
+                .encode_symbol(usize::from(filter_intra.is_some()), fi_cdf);
             if let Some(fi) = filter_intra {
                 self.sym
                     .encode_symbol(usize::from(fi), &cdf::FILTER_INTRA_MODE);
             }
         }
 
+        // Per-MI bookkeeping: block size, luma mode (for neighbour contexts), and the transform-size
+        // log2 (`2` for 4×4, `3` for 8×8) consumed by the deblocking loop filter.
+        let txl = if lossy_8x8 { 3u8 } else { 2u8 };
         for y in 0..n4 {
             for x in 0..n4 {
                 let (rr, cc) = (r + y, c + x);
                 if rr < self.mi_rows && cc < self.mi_cols {
                     self.mi_bsl[rr * self.mi_cols + cc] = bsl;
                     self.mi_ymode[rr * self.mi_cols + cc] = y_mode;
+                    self.tx_log2[rr * self.mi_cols + cc] = txl;
                 }
             }
         }
 
-        // residual(): per plane, raster of 4×4 transform blocks (Lossless ⇒ TX_4X4). Luma uses the
-        // block's intra mode; chroma is DC_PRED, plus the CfL high-frequency term when selected.
-        // Luma (plane 0) is reconstructed first, so the chroma CfL reads finalized luma recon.
+        // residual(): per plane. Luma uses the block's intra mode; chroma is DC_PRED, plus the CfL
+        // high-frequency term when selected. Luma (plane 0) is reconstructed first, so the chroma
+        // CfL reads finalized luma recon. A lossy 8×8 block is one TX_8X8 per plane; otherwise it is
+        // a raster of 4×4 transforms.
         for plane in 0..3 {
             let pred = Pred {
                 mode: if plane == 0 { y_mode } else { DC_PRED },
@@ -397,14 +444,18 @@ impl<'a> FrameEncoder<'a> {
                     _ => None,
                 },
             };
-            for ty in 0..n4 {
-                for tx in 0..n4 {
-                    let sx = c * 4 + tx * 4;
-                    let sy = r * 4 + ty * 4;
-                    if sx >= self.coded_w || sy >= self.coded_h {
-                        continue; // transform block entirely outside the frame
+            if lossy_8x8 {
+                self.transform_block(plane, c * 4, r * 4, bw, TxSize::Tx8x8, pred);
+            } else {
+                for ty in 0..n4 {
+                    for tx in 0..n4 {
+                        let sx = c * 4 + tx * 4;
+                        let sy = r * 4 + ty * 4;
+                        if sx >= self.coded_w || sy >= self.coded_h {
+                            continue; // transform block entirely outside the frame
+                        }
+                        self.transform_block(plane, sx, sy, bw, TxSize::Tx4x4, pred);
                     }
-                    self.transform_block(plane, sx, sy, bw, pred);
                 }
             }
         }
@@ -422,62 +473,80 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    fn transform_block(&mut self, plane: usize, sx: usize, sy: usize, block_w: usize, desc: Pred) {
-        let pred = match desc.filter_intra {
-            Some(fi) if plane == 0 => self.predict_filter_intra_4x4(plane, sx, sy, fi),
+    fn transform_block(
+        &mut self,
+        plane: usize,
+        sx: usize,
+        sy: usize,
+        block_w: usize,
+        tx_size: TxSize,
+        desc: Pred,
+    ) {
+        // Lossless: forced 4×4 Walsh–Hadamard, DC prediction, source-as-recon (M0 path, unchanged).
+        if self.qindex == 0 {
+            let pred = self.predict_4x4(plane, sx, sy, desc.mode);
+            let mut res = [0i32; 16];
+            for i in 0..4 {
+                for j in 0..4 {
+                    res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - pred[i * 4 + j];
+                }
+            }
+            let quant = gamut_dsp::fwht4x4(&res);
+            self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, TxSize::Tx4x4, &quant, 1);
+            return;
+        }
+
+        // Lossy, square transform of side `n` (4 or 8). Predict from the reconstruction buffer,
+        // forward-transform + quantize, code, then reconstruct exactly as the decoder will and store
+        // back. Because the recon is `pred + inverse(dequant(levels))` and the decoder runs the same
+        // inverse on the same levels, the result is bit-exact for whichever transform type is signaled.
+        let n = tx_size.width();
+        let pred: Vec<i32> = match desc.filter_intra {
+            Some(fi) if plane == 0 => self.predict_filter_intra_4x4(plane, sx, sy, fi).to_vec(),
             _ => {
-                // Chroma DC base prediction, then (for CfL) add the alpha-scaled luma high-frequency
-                // from the *reconstructed* luma of this block (§7.11.5).
-                let mut p = self.predict_4x4(plane, sx, sy, desc.mode);
+                let mut p = self.predict_intra(plane, sx, sy, desc.mode, n);
                 if let Some(alpha) = desc.cfl_alpha {
-                    self.apply_cfl(&mut p, sx, sy, alpha);
+                    self.apply_cfl(&mut p, sx, sy, alpha, n);
                 }
                 p
             }
         };
-        let mut res = [0i32; 16];
-        for i in 0..4 {
-            for j in 0..4 {
-                res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - pred[i * 4 + j];
+        let mut res = vec![0i32; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                res[i * n + j] = self.sample(plane, sx + j, sy + i) - pred[i * n + j];
             }
         }
-        if self.qindex == 0 {
-            let quant = gamut_dsp::fwht4x4(&res);
-            self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &quant, 1);
-            return;
-        }
-
-        // Lossy: pick the transform type (luma only — chroma is forced DCT_DCT, which is not
-        // signaled), forward-transform + quantize, code, then reconstruct exactly as the decoder
-        // will and store into the reconstruction buffer for later prediction. Because the recon is
-        // `pred + inverse(dequant(levels))` and the decoder runs the same inverse on the same
-        // levels, the result is bit-exact for whichever transform type is signaled.
         let (tx, tx_sym, levels) = if plane == 0 {
-            self.select_tx_type(&res)
+            self.select_tx_type(&res, tx_size)
         } else {
-            (TxType::DctDct, 1, self.quantize_tx(&res, TxType::DctDct))
+            (
+                TxType::DctDct,
+                1,
+                self.quantize_tx(&res, tx_size, TxType::DctDct),
+            )
         };
-        self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &levels, tx_sym);
+        self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, tx_size, &levels, tx_sym);
 
-        let mut dq = [0i32; 16];
+        let mut dq = vec![0i32; n * n];
         for (i, &lvl) in levels.iter().enumerate() {
             let q = if i == 0 { self.dc_quant } else { self.ac_quant };
             dq[i] = dequant(lvl, q, 1, 8);
         }
-        let resid = inverse_transform_2d(&dq, TxSize::Tx4x4, tx, 8);
-        for i in 0..4 {
-            for j in 0..4 {
-                let v = (pred[i * 4 + j] + resid[i * 4 + j]).clamp(0, 255) as u8;
+        let resid = inverse_transform_2d(&dq, tx_size, tx, 8);
+        for i in 0..n {
+            for j in 0..n {
+                let v = (pred[i * n + j] + resid[i * n + j]).clamp(0, 255) as u8;
                 self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = v;
             }
         }
     }
 
-    /// Forward-transforms and quantizes a 4×4 residual under transform type `tx`, returning the
-    /// 16 quantized coefficient levels (DC uses `dc_quant`, AC uses `ac_quant`).
-    fn quantize_tx(&self, res: &[i32; 16], tx: TxType) -> [i32; 16] {
-        let coeff = forward_transform_2d(res, TxSize::Tx4x4, tx);
-        let mut levels = [0i32; 16];
+    /// Forward-transforms and quantizes a square residual under transform type `tx`, returning the
+    /// quantized coefficient levels (DC uses `dc_quant`, AC uses `ac_quant`).
+    fn quantize_tx(&self, res: &[i32], tx_size: TxSize, tx: TxType) -> Vec<i32> {
+        let coeff = forward_transform_2d(res, tx_size, tx);
+        let mut levels = vec![0i32; coeff.len()];
         for (i, &c) in coeff.iter().enumerate() {
             let q = if i == 0 { self.dc_quant } else { self.ac_quant };
             levels[i] = quantize(c, q);
@@ -485,12 +554,12 @@ impl<'a> FrameEncoder<'a> {
         levels
     }
 
-    /// Selects a luma 4×4 transform type from `TX_SET_INTRA_2` by a simple coded-cost proxy (sum of
+    /// Selects a luma transform type from `TX_SET_INTRA_2` by a simple coded-cost proxy (sum of
     /// `1 + |level|` over non-zero coefficients), preferring `DCT_DCT` on ties. Returns the type,
     /// its `Tx_Type_Intra_Inv_Set2` symbol, and the quantized levels. The choice is a quality
     /// decision (any valid type round-trips bit-exactly); only the *signaling* must be correct.
-    fn select_tx_type(&self, res: &[i32; 16]) -> (TxType, usize, [i32; 16]) {
-        let cost = |levels: &[i32; 16]| -> i32 {
+    fn select_tx_type(&self, res: &[i32], tx_size: TxSize) -> (TxType, usize, Vec<i32>) {
+        let cost = |levels: &[i32]| -> i32 {
             levels
                 .iter()
                 .map(|&l| if l == 0 { 0 } else { 1 + l.abs() })
@@ -500,7 +569,7 @@ impl<'a> FrameEncoder<'a> {
         let mut best = (
             TxType::DctDct,
             1usize,
-            self.quantize_tx(res, TxType::DctDct),
+            self.quantize_tx(res, tx_size, TxType::DctDct),
         );
         let mut best_cost = cost(&best.2);
         for (tx, sym) in [
@@ -509,7 +578,7 @@ impl<'a> FrameEncoder<'a> {
             (TxType::DctAdst, 4),
             (TxType::Idtx, 0),
         ] {
-            let levels = self.quantize_tx(res, tx);
+            let levels = self.quantize_tx(res, tx_size, tx);
             let c = cost(&levels);
             if c < best_cost {
                 best_cost = c;
@@ -523,6 +592,13 @@ impl<'a> FrameEncoder<'a> {
     /// path neighbours are the (padded) source (which equals the reconstruction); in the lossy path
     /// they are the reconstruction buffer, matching the decoder exactly.
     fn dc_avg(&self, plane: usize, sx: usize, sy: usize) -> i32 {
+        self.dc_pred(plane, sx, sy, 4)
+    }
+
+    /// `DC_PRED` value for an `n × n` block at coded `(sx, sy)` (§7.11.2.5): the rounded average of
+    /// the available `n` above and `n` left neighbours (both sides ⇒ `Round2(sum, log2(n) + 1)`; one
+    /// side ⇒ `Round2(sum, log2(n))`; neither ⇒ `1 << (BitDepth - 1)`).
+    fn dc_pred(&self, plane: usize, sx: usize, sy: usize, n: usize) -> i32 {
         let nb = |x: usize, y: usize| -> i32 {
             if self.qindex > 0 {
                 i32::from(self.recon[plane][y * self.coded_w + x])
@@ -530,30 +606,31 @@ impl<'a> FrameEncoder<'a> {
                 self.sample(plane, x, y)
             }
         };
+        let log2 = n.trailing_zeros();
         let have_above = sy > 0;
         let have_left = sx > 0;
         match (have_above, have_left) {
             (true, true) => {
                 let mut s = 0;
-                for k in 0..4 {
+                for k in 0..n {
                     s += nb(sx + k, sy - 1);
                     s += nb(sx - 1, sy + k);
                 }
-                (s + 4) >> 3
+                (s + n as i32) >> (log2 + 1)
             }
             (false, true) => {
                 let mut s = 0;
-                for k in 0..4 {
+                for k in 0..n {
                     s += nb(sx - 1, sy + k);
                 }
-                (s + 2) >> 2
+                (s + (n as i32 >> 1)) >> log2
             }
             (true, false) => {
                 let mut s = 0;
-                for k in 0..4 {
+                for k in 0..n {
                     s += nb(sx + k, sy - 1);
                 }
-                (s + 2) >> 2
+                (s + (n as i32 >> 1)) >> log2
             }
             (false, false) => 128, // 1 << (BitDepth - 1)
         }
@@ -788,6 +865,111 @@ impl<'a> FrameEncoder<'a> {
         pred
     }
 
+    /// Builds the `n × n` intra prediction for `plane` at coded `(sx, sy)` under `mode`. 4×4 blocks
+    /// dispatch to [`Self::predict_4x4`] (the full mode set); 8×8 blocks support the non-directional
+    /// modes only (`DC`/`SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH` — directional 8×8 prediction, which
+    /// needs `angle_delta` and the intra edge filter, is a later phase).
+    fn predict_intra(&self, plane: usize, sx: usize, sy: usize, mode: u8, n: usize) -> Vec<i32> {
+        if n == 4 {
+            return self.predict_4x4(plane, sx, sy, mode).to_vec();
+        }
+        self.predict_8x8_nondir(plane, sx, sy, mode)
+    }
+
+    /// Builds the §7.11.2.1 reference samples for a non-directional `n × n` block: `AboveRow[0..n]`,
+    /// `LeftCol[0..n]`, and the top-left corner, with the availability fallbacks (`127`/`129`/edge
+    /// replication). The supported non-directional modes never read above-right / below-left, so the
+    /// references stop at `n` samples (no `BlockDecoded` extension).
+    fn reference_basic(
+        &self,
+        plane: usize,
+        sx: usize,
+        sy: usize,
+        n: usize,
+    ) -> (Vec<i32>, Vec<i32>, i32) {
+        let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
+        let have_above = sy > 0;
+        let have_left = sx > 0;
+        let (max_x, max_y) = (self.coded_w - 1, self.coded_h - 1);
+
+        let mut above = vec![127i32; n];
+        if have_above {
+            for (i, a) in above.iter_mut().enumerate() {
+                *a = nb(max_x.min(sx + i), sy - 1);
+            }
+        } else if have_left {
+            above = vec![nb(sx - 1, sy); n];
+        }
+
+        let mut left = vec![129i32; n];
+        if have_left {
+            for (i, l) in left.iter_mut().enumerate() {
+                *l = nb(sx - 1, max_y.min(sy + i));
+            }
+        } else if have_above {
+            left = vec![nb(sx, sy - 1); n];
+        }
+
+        let top_left = if have_above && have_left {
+            nb(sx - 1, sy - 1)
+        } else if have_above {
+            nb(sx, sy - 1)
+        } else if have_left {
+            nb(sx - 1, sy)
+        } else {
+            128
+        };
+        (above, left, top_left)
+    }
+
+    /// Non-directional 8×8 intra prediction (§7.11.2): `DC_PRED`, `PAETH_PRED`, and the three
+    /// `SMOOTH` modes, using the 8-wide smooth weights. Reads the reconstruction buffer.
+    fn predict_8x8_nondir(&self, plane: usize, sx: usize, sy: usize, mode: u8) -> Vec<i32> {
+        const N: usize = 8;
+        if mode == DC_PRED {
+            return vec![self.dc_pred(plane, sx, sy, N); N * N];
+        }
+        let (above, left, top_left) = self.reference_basic(plane, sx, sy, N);
+        let w = cdf::SM_WEIGHTS_8X8;
+        let mut pred = vec![0i32; N * N];
+        for i in 0..N {
+            for j in 0..N {
+                pred[i * N + j] = match mode {
+                    PAETH_PRED => {
+                        let base = above[j] + left[i] - top_left;
+                        let p_left = (base - left[i]).abs();
+                        let p_top = (base - above[j]).abs();
+                        let p_tl = (base - top_left).abs();
+                        if p_left <= p_top && p_left <= p_tl {
+                            left[i]
+                        } else if p_top <= p_tl {
+                            above[j]
+                        } else {
+                            top_left
+                        }
+                    }
+                    SMOOTH_PRED => {
+                        let v = w[i] * above[j]
+                            + (256 - w[i]) * left[N - 1]
+                            + w[j] * left[i]
+                            + (256 - w[j]) * above[N - 1];
+                        (v + 256) >> 9
+                    }
+                    SMOOTH_V_PRED => {
+                        let v = w[i] * above[j] + (256 - w[i]) * left[N - 1];
+                        (v + 128) >> 8
+                    }
+                    _ => {
+                        // SMOOTH_H_PRED
+                        let v = w[j] * left[i] + (256 - w[j]) * above[N - 1];
+                        (v + 128) >> 8
+                    }
+                };
+            }
+        }
+        pred
+    }
+
     /// Picks the lossy luma prediction minimizing SAD against the source 4×4 at `(sx, sy)`. Returns
     /// the `YMode` to signal and, when recursive filter-intra (§7.11.2.3) beats every regular mode,
     /// the chosen `filter_intra_mode` (signaled as `YMode = DC_PRED` + `use_filter_intra = 1`).
@@ -831,21 +1013,50 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    /// Picks the lossy luma mode for an 8×8 block minimizing SAD against the source, restricted to
+    /// the non-directional modes (`DC`/`SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`), with `DC_PRED`
+    /// winning ties. Directional 8×8 modes and 8×8 filter-intra are later phases. The choice is a
+    /// quality decision; every option reconstructs bit-exactly.
+    fn select_luma_mode_8x8(&self, sx: usize, sy: usize) -> u8 {
+        const N: usize = 8;
+        let sad = |pred: &[i32]| -> i32 {
+            let mut s = 0;
+            for i in 0..N {
+                for j in 0..N {
+                    s += (self.sample(0, sx + j, sy + i) - pred[i * N + j]).abs();
+                }
+            }
+            s
+        };
+        let mut best_mode = DC_PRED;
+        let mut best_sad = sad(&self.predict_8x8_nondir(0, sx, sy, DC_PRED));
+        for &mode in &[SMOOTH_PRED, SMOOTH_V_PRED, SMOOTH_H_PRED, PAETH_PRED] {
+            let s = sad(&self.predict_8x8_nondir(0, sx, sy, mode));
+            if s < best_sad {
+                best_sad = s;
+                best_mode = mode;
+            }
+        }
+        best_mode
+    }
+
     /// Adds the chroma-from-luma high-frequency term to a 4×4 chroma DC prediction in place
     /// (§7.11.5). For 4:4:4 the subsampled luma `L[i][j]` is just the reconstructed luma sample
     /// (`× 8`, i.e. 3 fractional bits); `lumaAvg = Round2(ΣL, 4)`. Each chroma sample becomes
     /// `Clip1(dc + Round2Signed(alpha * (L - lumaAvg), 6))`. `alpha == 0` is a no-op (plain DC).
-    fn apply_cfl(&self, pred: &mut [i32; 16], sx: usize, sy: usize, alpha: i32) {
-        let mut l = [0i32; 16];
+    fn apply_cfl(&self, pred: &mut [i32], sx: usize, sy: usize, alpha: i32, n: usize) {
+        let mut l = vec![0i32; n * n];
         let mut sum = 0i32;
-        for i in 0..4 {
-            for j in 0..4 {
+        for i in 0..n {
+            for j in 0..n {
                 let v = i32::from(self.recon[0][(sy + i) * self.coded_w + (sx + j)]) << 3;
-                l[i * 4 + j] = v;
+                l[i * n + j] = v;
                 sum += v;
             }
         }
-        let luma_avg = (sum + 8) >> 4; // Round2(sum, Tx_Width_Log2 + Tx_Height_Log2) = Round2(_, 4)
+        // lumaAvg = Round2(ΣL, Tx_Width_Log2 + Tx_Height_Log2) = Round2(ΣL, 2 * log2(n)).
+        let shift = 2 * n.trailing_zeros();
+        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
         for (p, &lv) in pred.iter_mut().zip(&l) {
             *p = (*p + round2_signed(alpha * (lv - luma_avg), 6)).clamp(0, 255);
         }
@@ -857,26 +1068,27 @@ impl<'a> FrameEncoder<'a> {
     /// *source* luma as a proxy for the reconstruction (a quality decision; the signaled alpha is
     /// applied to the true reconstruction in [`Self::apply_cfl`], so the result is bit-exact either
     /// way). Returns `(CflAlphaU, CflAlphaV)`, each in `-16..=16` and not both zero.
-    fn select_cfl(&self, sx: usize, sy: usize) -> Option<(i32, i32)> {
+    fn select_cfl(&self, sx: usize, sy: usize, n: usize) -> Option<(i32, i32)> {
         // Source luma high-frequency (matching apply_cfl's reconstructed-luma formula).
-        let mut l = [0i32; 16];
+        let mut l = vec![0i32; n * n];
         let mut sum = 0i32;
-        for i in 0..4 {
-            for j in 0..4 {
+        for i in 0..n {
+            for j in 0..n {
                 let v = self.sample(0, sx + j, sy + i) << 3;
-                l[i * 4 + j] = v;
+                l[i * n + j] = v;
                 sum += v;
             }
         }
-        let luma_avg = (sum + 8) >> 4;
+        let shift = 2 * n.trailing_zeros();
+        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
 
         let best_alpha = |plane: usize| -> i32 {
-            let dc = self.dc_avg(plane, sx, sy);
+            let dc = self.dc_pred(plane, sx, sy, n);
             let sad = |alpha: i32| -> i32 {
                 let mut s = 0;
-                for i in 0..4 {
-                    for j in 0..4 {
-                        let pred = (dc + round2_signed(alpha * (l[i * 4 + j] - luma_avg), 6))
+                for i in 0..n {
+                    for j in 0..n {
+                        let pred = (dc + round2_signed(alpha * (l[i * n + j] - luma_avg), 6))
                             .clamp(0, 255);
                         s += (self.sample(plane, sx + j, sy + i) - pred).abs();
                     }
@@ -937,52 +1149,98 @@ impl<'a> FrameEncoder<'a> {
     }
 
     #[allow(clippy::too_many_lines)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::too_many_arguments,
+        clippy::type_complexity
+    )]
     fn code_coeffs(
         &mut self,
         plane: usize,
         x4: usize,
         y4: usize,
         block_w: usize,
-        quant: &[i32; 16],
+        tx_size: TxSize,
+        quant: &[i32],
         tx_sym: usize,
     ) {
         let ptype = usize::from(plane > 0);
         let qctx = self.qctx;
-        let scan = &cdf::DEFAULT_SCAN_4X4;
+        let n = tx_size.width(); // square: width == height (4 or 8)
+        let bwl = tx_size.log2_width() as usize;
+        let area = n * n;
+        let n4 = n / 4; // MI cells the transform spans on each axis
+
+        // Size-specific tables (same `[qctx][...]` layout; bound where the element types match).
+        let (scan, txb_skip, eob_extra, base_eob, base, br, offset): (
+            &[usize],
+            &[[[u16; 2]; 13]; 4],
+            &[[[[u16; 2]; 9]; 2]; 4],
+            &[[[[u16; 3]; 4]; 2]; 4],
+            &[[[[u16; 4]; 42]; 2]; 4],
+            &[[[[u16; 4]; 21]; 2]; 4],
+            &[[u8; 5]; 5],
+        ) = if n == 4 {
+            (
+                &cdf::DEFAULT_SCAN_4X4,
+                &cdf::TXB_SKIP,
+                &cdf::EOB_EXTRA,
+                &cdf::COEFF_BASE_EOB,
+                &cdf::COEFF_BASE,
+                &cdf::COEFF_BR,
+                &cdf::COEFF_BASE_CTX_OFFSET_4X4,
+            )
+        } else {
+            (
+                &cdf::DEFAULT_SCAN_8X8,
+                &cdf::TXB_SKIP_8X8,
+                &cdf::EOB_EXTRA_8X8,
+                &cdf::COEFF_BASE_EOB_8X8,
+                &cdf::COEFF_BASE_8X8,
+                &cdf::COEFF_BR_8X8,
+                &cdf::COEFF_BASE_CTX_OFFSET_8X8,
+            )
+        };
 
         let mut eob = 0usize;
-        for c in 0..16 {
+        for c in 0..area {
             if quant[scan[c]] != 0 {
                 eob = c + 1;
             }
         }
 
-        let txb_ctx = self.txb_skip_ctx(plane, x4, y4, block_w);
+        let txb_ctx = self.txb_skip_ctx(plane, x4, y4, block_w, n);
         self.sym
-            .encode_symbol(usize::from(eob == 0), &cdf::TXB_SKIP[qctx][txb_ctx]);
+            .encode_symbol(usize::from(eob == 0), &txb_skip[qctx][txb_ctx]);
         if eob == 0 {
-            self.set_ctx(plane, x4, y4, 0, 0);
+            self.set_ctx(plane, x4, y4, n4, 0, 0);
             return;
         }
 
         // transform_type (§5.11.39): signaled only for luma when not all-zero and base_q_idx > 0.
-        // Reduced tx set + 4×4 intra ⇒ TX_SET_INTRA_2; `tx_sym` indexes
+        // Reduced tx set + 4×4/8×8 intra ⇒ TX_SET_INTRA_2; `tx_sym` indexes
         // Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}.
         if self.qindex > 0 && plane == 0 {
-            self.sym.encode_symbol(tx_sym, &cdf::INTRA_TX_TYPE_SET2_4X4);
+            self.sym.encode_symbol(tx_sym, &cdf::INTRA_TX_TYPE_SET2);
         }
 
-        // eob position (TX_CLASS_2D ⇒ eob_pt context 0).
+        // eob position (TX_CLASS_2D ⇒ eob_pt context 0). 16-coeff blocks use Eob_Pt_16, 64-coeff
+        // (8×8) blocks use the wider Eob_Pt_64 table.
         let eobpt = eobpt_from_eob(eob);
-        self.sym
-            .encode_symbol(eobpt - 1, &cdf::EOB_PT_16[qctx][ptype][0]);
+        if n == 4 {
+            self.sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_16[qctx][ptype][0]);
+        } else {
+            self.sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_64[qctx][ptype][0]);
+        }
         if eobpt >= 3 {
             let nbits = eobpt - 2;
-            let base = (1usize << (eobpt - 2)) + 1;
-            let extra = eob - base;
+            let base_eob_val = (1usize << (eobpt - 2)) + 1;
+            let extra = eob - base_eob_val;
             self.sym.encode_symbol(
                 (extra >> (nbits - 1)) & 1,
-                &cdf::EOB_EXTRA[qctx][ptype][eobpt - 3],
+                &eob_extra[qctx][ptype][eobpt - 3],
             );
             let mut i = nbits as isize - 2;
             while i >= 0 {
@@ -992,28 +1250,26 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // Base levels + base range, scanned from the last coefficient back to DC.
-        let mut levels = [0i32; 16];
+        let mut levels = vec![0i32; area];
         for c in (0..eob).rev() {
             let pos = scan[c];
             let level = quant[pos].abs();
             if c == eob - 1 {
-                let ctx = coeff_base_eob_ctx(c);
-                self.sym.encode_symbol(
-                    (level.min(3) - 1) as usize,
-                    &cdf::COEFF_BASE_EOB[qctx][ptype][ctx],
-                );
-            } else {
-                let ctx = coeff_base_ctx(pos, &levels);
+                let ctx = coeff_base_eob_ctx(c, area);
                 self.sym
-                    .encode_symbol(level.min(3) as usize, &cdf::COEFF_BASE[qctx][ptype][ctx]);
+                    .encode_symbol((level.min(3) - 1) as usize, &base_eob[qctx][ptype][ctx]);
+            } else {
+                let ctx = coeff_base_ctx(pos, &levels, bwl, n, offset);
+                self.sym
+                    .encode_symbol(level.min(3) as usize, &base[qctx][ptype][ctx]);
             }
             if level > NUM_BASE_LEVELS {
-                let br_ctx = coeff_br_ctx(pos, &levels);
+                let br_ctx = coeff_br_ctx(pos, &levels, bwl, n);
                 let mut rem = level - 3;
                 for _ in 0..4 {
                     let brv = rem.min(3);
                     self.sym
-                        .encode_symbol(brv as usize, &cdf::COEFF_BR[qctx][ptype][br_ctx]);
+                        .encode_symbol(brv as usize, &br[qctx][ptype][br_ctx]);
                     rem -= brv;
                     if brv < 3 {
                         break;
@@ -1029,7 +1285,7 @@ impl<'a> FrameEncoder<'a> {
             if level != 0 {
                 let neg = quant[pos] < 0;
                 if c == 0 {
-                    let ctx = self.dc_sign_ctx(plane, x4, y4);
+                    let ctx = self.dc_sign_ctx(plane, x4, y4, n4);
                     self.sym
                         .encode_symbol(usize::from(neg), &cdf::DC_SIGN[ptype][ctx]);
                 } else {
@@ -1049,23 +1305,51 @@ impl<'a> FrameEncoder<'a> {
         } else {
             2
         };
-        self.set_ctx(plane, x4, y4, cul, dc_cat);
+        self.set_ctx(plane, x4, y4, n4, cul, dc_cat);
     }
 
-    fn set_ctx(&mut self, plane: usize, x4: usize, y4: usize, cul: u8, dc: u8) {
-        self.above_level[plane][x4] = cul;
-        self.above_dc[plane][x4] = dc;
-        self.left_level[plane][y4] = cul;
-        self.left_dc[plane][y4] = dc;
+    /// Writes `culLevel`/`dcCategory` into the above/left level-context arrays for every MI cell the
+    /// transform block spans (§5.11.39: `for i in 0..w4`/`0..h4`). `n4 = Tx_Width / 4`.
+    fn set_ctx(&mut self, plane: usize, x4: usize, y4: usize, n4: usize, cul: u8, dc: u8) {
+        for k in 0..n4 {
+            if x4 + k < self.mi_cols {
+                self.above_level[plane][x4 + k] = cul;
+                self.above_dc[plane][x4 + k] = dc;
+            }
+            if y4 + k < self.mi_rows {
+                self.left_level[plane][y4 + k] = cul;
+                self.left_dc[plane][y4 + k] = dc;
+            }
+        }
     }
 
-    fn txb_skip_ctx(&self, plane: usize, x4: usize, y4: usize, block_w: usize) -> usize {
+    /// `all_zero` (txb_skip) context (§8.3.2). `block_w` is the residual-block width, `tx_w` the
+    /// transform width: luma uses ctx 0 when the transform covers the whole block (the only case the
+    /// lossy path reaches, since `TX_MODE_LARGEST` ⇒ tx == block); otherwise (lossless, where a
+    /// larger block is split into 4×4 transforms) it falls back to the neighbour-level classification.
+    fn txb_skip_ctx(
+        &self,
+        plane: usize,
+        x4: usize,
+        y4: usize,
+        block_w: usize,
+        tx_w: usize,
+    ) -> usize {
+        let n4 = tx_w / 4;
         if plane == 0 {
-            if block_w == 4 {
+            if block_w == tx_w {
                 return 0;
             }
-            let top = i32::from(self.above_level[0][x4]);
-            let left = i32::from(self.left_level[0][y4]);
+            let mut top = 0i32;
+            let mut left = 0i32;
+            for k in 0..n4 {
+                if x4 + k < self.mi_cols {
+                    top = top.max(i32::from(self.above_level[0][x4 + k]));
+                }
+                if y4 + k < self.mi_rows {
+                    left = left.max(i32::from(self.left_level[0][y4 + k]));
+                }
+            }
             if top == 0 && left == 0 {
                 1
             } else if top == 0 || left == 0 {
@@ -1078,23 +1362,46 @@ impl<'a> FrameEncoder<'a> {
                 6
             }
         } else {
-            let above = self.above_level[plane][x4] | self.above_dc[plane][x4];
-            let left = self.left_level[plane][y4] | self.left_dc[plane][y4];
+            let mut above = 0u8;
+            let mut left = 0u8;
+            for k in 0..n4 {
+                if x4 + k < self.mi_cols {
+                    above |= self.above_level[plane][x4 + k] | self.above_dc[plane][x4 + k];
+                }
+                if y4 + k < self.mi_rows {
+                    left |= self.left_level[plane][y4 + k] | self.left_dc[plane][y4 + k];
+                }
+            }
             let mut ctx = usize::from(above != 0) + usize::from(left != 0) + 7;
-            if block_w * block_w > 16 {
+            // bw*bh > w*h ⇒ the block is larger than the transform (lossless 4×4 tx in an ≥8×8
+            // block). Under TX_MODE_LARGEST (the lossy path) tx == block, so this never adds.
+            if block_w * block_w > tx_w * tx_w {
                 ctx += 3;
             }
             ctx
         }
     }
 
-    fn dc_sign_ctx(&self, plane: usize, x4: usize, y4: usize) -> usize {
+    /// `dc_sign` context (§8.3.2): the sum of DC-sign contributions (`+1` positive, `-1` negative)
+    /// over every MI cell the transform spans (`n4 = Tx_Width / 4` above cells and `n4` left cells).
+    /// A single cell each is correct only for `TX_4X4`; an 8×8 transform with non-uniform neighbour
+    /// DC categories needs the full sum or the arithmetic decode diverges.
+    fn dc_sign_ctx(&self, plane: usize, x4: usize, y4: usize, n4: usize) -> usize {
         let mut s = 0i32;
-        for &cat in &[self.above_dc[plane][x4], self.left_dc[plane][y4]] {
-            if cat == 1 {
-                s -= 1;
-            } else if cat == 2 {
-                s += 1;
+        for k in 0..n4 {
+            if x4 + k < self.mi_cols {
+                match self.above_dc[plane][x4 + k] {
+                    1 => s -= 1,
+                    2 => s += 1,
+                    _ => {}
+                }
+            }
+            if y4 + k < self.mi_rows {
+                match self.left_dc[plane][y4 + k] {
+                    1 => s -= 1,
+                    2 => s += 1,
+                    _ => {}
+                }
             }
         }
         if s < 0 {
@@ -1149,41 +1456,55 @@ fn eobpt_from_eob(eob: usize) -> usize {
     }
 }
 
-fn coeff_base_eob_ctx(c: usize) -> usize {
+/// `get_coeff_base_ctx` for the end-of-block coefficient (§8.3.2), `isEob == 1`, for a square
+/// `TX_CLASS_2D` block of `area` (`= width * height`) coefficients. Maps the scan index `c` to one
+/// of the 4 `coeff_base_eob` contexts.
+fn coeff_base_eob_ctx(c: usize, area: usize) -> usize {
     if c == 0 {
         0
-    } else if c <= 2 {
+    } else if c <= area / 8 {
         1
-    } else if c <= 4 {
+    } else if c <= area / 4 {
         2
     } else {
         3
     }
 }
 
-fn coeff_base_ctx(pos: usize, levels: &[i32; 16]) -> usize {
-    let (row, col) = (pos >> 2, pos & 3);
+/// `get_coeff_base_ctx` for a non-EOB coefficient (§8.3.2) of a square `TX_CLASS_2D` block: `bwl` is
+/// `Tx_Width_Log2`, `n = 1 << bwl` is the (square) transform side, and `offset` is the
+/// `Coeff_Base_Ctx_Offset[txSz]` table. `levels` holds the magnitudes already decoded along the
+/// reverse scan, indexed by the linear coefficient position.
+fn coeff_base_ctx(
+    pos: usize,
+    levels: &[i32],
+    bwl: usize,
+    n: usize,
+    offset: &[[u8; 5]; 5],
+) -> usize {
+    let (row, col) = (pos >> bwl, pos & (n - 1));
     let mut mag = 0i32;
     for &(dr, dc) in &cdf::SIG_REF_DIFF_OFFSET_2D {
         let (rr, cc) = (row + dr, col + dc);
-        if rr < 4 && cc < 4 {
-            mag += levels[(rr << 2) + cc].abs().min(3);
+        if rr < n && cc < n {
+            mag += levels[(rr << bwl) + cc].abs().min(3);
         }
     }
     let ctx = (((mag + 1) >> 1).min(4)) as usize;
     if row == 0 && col == 0 {
         return 0;
     }
-    ctx + usize::from(cdf::COEFF_BASE_CTX_OFFSET_4X4[row.min(4)][col.min(4)])
+    ctx + usize::from(offset[row.min(4)][col.min(4)])
 }
 
-fn coeff_br_ctx(pos: usize, levels: &[i32; 16]) -> usize {
-    let (row, col) = (pos >> 2, pos & 3);
+/// `get_coeff_br_ctx` for a square `TX_CLASS_2D` block (§8.3.2): `bwl = Tx_Width_Log2`, `n = 1 << bwl`.
+fn coeff_br_ctx(pos: usize, levels: &[i32], bwl: usize, n: usize) -> usize {
+    let (row, col) = (pos >> bwl, pos & (n - 1));
     let mut mag = 0i32;
     for &(dr, dc) in &cdf::MAG_REF_OFFSET_2D {
         let (rr, cc) = (row + dr, col + dc);
-        if rr < 4 && cc < 4 {
-            mag += levels[(rr << 2) + cc].abs().min(15);
+        if rr < n && cc < n {
+            mag += levels[(rr << bwl) + cc].abs().min(15);
         }
     }
     let mag = (((mag + 1) >> 1).min(6)) as usize;
@@ -1237,7 +1558,7 @@ mod tests {
 
         // A flat residual concentrates into the DCT DC bin (one coefficient), so DCT_DCT wins and
         // is signaled as Tx_Type_Intra_Inv_Set2 symbol 1.
-        let (tx, sym, _) = e.select_tx_type(&[40i32; 16]);
+        let (tx, sym, _) = e.select_tx_type(&[40i32; 16], TxSize::Tx4x4);
         assert!(matches!(tx, TxType::DctDct));
         assert_eq!(sym, 1);
 
@@ -1245,7 +1566,7 @@ mod tests {
         // spreads across many DCT bins, so IDTX wins and is signaled as symbol 0.
         let mut impulse = [0i32; 16];
         impulse[5] = 220;
-        let (tx, sym, levels) = e.select_tx_type(&impulse);
+        let (tx, sym, levels) = e.select_tx_type(&impulse, TxSize::Tx4x4);
         assert!(matches!(tx, TxType::Idtx));
         assert_eq!(sym, 0);
         assert_eq!(levels.iter().filter(|&&l| l != 0).count(), 1);
@@ -1259,8 +1580,8 @@ mod tests {
         for (i, v) in res.iter_mut().enumerate() {
             *v = (i as i32 - 8) * 17;
         }
-        let a = e.select_tx_type(&res);
-        let b = e.select_tx_type(&res);
+        let a = e.select_tx_type(&res, TxSize::Tx4x4);
+        let b = e.select_tx_type(&res, TxSize::Tx4x4);
         assert_eq!(a.1, b.1);
         assert_eq!(a.2, b.2);
     }
@@ -1397,7 +1718,7 @@ mod tests {
             }
         }
         let mut pred = [128i32; 16];
-        e.apply_cfl(&mut pred, 4, 4, 2);
+        e.apply_cfl(&mut pred, 4, 4, 2, 4);
         assert_eq!(
             pred,
             [
@@ -1406,7 +1727,7 @@ mod tests {
         );
         // alpha = 0 is a no-op (plain DC).
         let mut flat = [100i32; 16];
-        e.apply_cfl(&mut flat, 4, 4, 0);
+        e.apply_cfl(&mut flat, 4, 4, 0, 4);
         assert_eq!(flat, [100; 16]);
     }
 
