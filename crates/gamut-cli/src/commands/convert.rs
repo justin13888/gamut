@@ -18,13 +18,17 @@ pub(crate) struct ConvertArgs {
     /// Output format. Defaults to the output file's extension.
     #[arg(long, value_enum)]
     format: Option<OutputFormat>,
+    /// AV1 quantizer (`base_q_idx`): 0 is lossless (default), 1–255 is lossy intra (higher = more
+    /// quantization, smaller files).
+    #[arg(long, default_value_t = 0)]
+    qindex: u8,
 }
 
 /// Output container/codec for `gamut convert`. Only AVIF is implemented today; the other
 /// gamut formats are still stubs.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum OutputFormat {
-    /// AVIF (lossless 8-bit RGB, milestone M0).
+    /// AVIF (8-bit RGB; lossless or lossy intra via `--qindex`).
     Avif,
 }
 
@@ -44,10 +48,12 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
     let mut out = Vec::new();
     match format {
         OutputFormat::Avif => {
-            AvifEncoder::new().encode_rgb8(&rgb, dims, &mut out)?;
+            AvifEncoder::new()
+                .with_qindex(args.qindex)
+                .encode_rgb8(&rgb, dims, &mut out)?;
         }
     }
-    tracing::info!(bytes = out.len(), "encoded output");
+    tracing::info!(bytes = out.len(), qindex = args.qindex, "encoded output");
 
     std::fs::write(&args.output, &out).map_err(|source| CliError::Io {
         path: args.output.clone(),
