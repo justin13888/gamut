@@ -16,5 +16,6 @@ pub mod lz77;
 pub mod prefix;
 pub mod transform;
 
+pub use bit_io::{BitReader, BitWriter};
 pub use header::{VP8L_SIGNATURE, Vp8lHeader};
 pub use transform::Vp8lTransform;
