@@ -148,6 +148,26 @@ fn filter_intra_modes_match_dav1d() {
 }
 
 #[test]
+fn cfl_chroma_from_luma_matches_dav1d() {
+    // Chroma that tracks the luma high-frequency: U falls as luma rises (negative alpha), V rises
+    // with it (positive alpha). The encoder's per-block CfL search then signals uv_mode = UV_CFL_PRED
+    // with non-zero CflAlphaU/CflAlphaV, and dav1d must run §7.11.5 chroma-from-luma to the encoder's
+    // reconstruction byte-for-byte — exercising both alpha signs and read_cfl_alphas end-to-end.
+    let cfl = |x: u32, y: u32| {
+        let base = ((x.wrapping_mul(7).wrapping_add(y.wrapping_mul(5))) % 200) as i32 + 28; // luma
+        let g = base as u8;
+        let r = (base / 2 + 100).clamp(0, 255) as u8; // tracks +luma
+        let b = (220 - base / 2).clamp(0, 255) as u8; // tracks -luma
+        [r, g, b]
+    };
+    for &q in &[6u8, 24, 88, 170] {
+        for &(w, h) in &[(8, 8), (16, 16), (37, 21), (64, 40)] {
+            check(&planes(w, h, cfl), q);
+        }
+    }
+}
+
+#[test]
 fn flat_lossy_reconstruction_matches_dav1d() {
     // A solid color: every residual quantizes to zero, so the reconstruction is the DC prediction
     // chain — a clean test that prediction-from-reconstruction tracks the decoder exactly.
