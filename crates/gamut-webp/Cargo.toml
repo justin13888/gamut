@@ -21,3 +21,7 @@ gamut-color.workspace = true
 gamut-dsp.workspace = true
 gamut-bitstream.workspace = true
 gamut-riff.workspace = true
+
+[dev-dependencies]
+# libwebp as the differential-test oracle (FFI). Dev-only: the shipped library is C-free.
+libwebp-sys2.workspace = true
