@@ -8,8 +8,9 @@
 //!   `PARTITION_NONE` except at the right/bottom frame edges.
 //! - **Lossy** (`qindex > 0`): `TX_4X4` with quantization. Blocks are forced all-4×4
 //!   (`PARTITION_SPLIT` everywhere) so each uses a 4×4 transform under `TX_MODE_LARGEST` with no
-//!   tx-depth signaling. The luma prediction mode is chosen per block from the non-directional set
-//!   `{DC, SMOOTH, SMOOTH_V, SMOOTH_H, PAETH}` (§7.11.2) and signaled with the above/left mode
+//!   tx-depth signaling. The luma prediction mode is chosen per block from
+//!   `{DC, V, H, D135, D113, D157, SMOOTH, SMOOTH_V, SMOOTH_H, PAETH}` (§7.11.2; the directional
+//!   angles that stay within the immediate neighbours) and signaled with the above/left mode
 //!   context; the luma transform type is chosen from `TX_SET_INTRA_2`
 //!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled; chroma is `DC_PRED` +
 //!   `DCT_DCT`. Prediction reads a **reconstruction buffer** that the encoder maintains exactly as
@@ -32,6 +33,16 @@ const COEFF_BASE_PLUS_RANGE: i32 = 14;
 
 /// `DC_PRED` (§3): the only mode used for chroma and the lossless path.
 const DC_PRED: u8 = 0;
+/// `V_PRED` (§3): directional, `pAngle = 90` (copy the above row).
+const V_PRED: u8 = 1;
+/// `H_PRED` (§3): directional, `pAngle = 180` (copy the left column).
+const H_PRED: u8 = 2;
+/// `D135_PRED` (§3): directional, `pAngle = 135`.
+const D135_PRED: u8 = 4;
+/// `D113_PRED` (§3): directional, `pAngle = 113`.
+const D113_PRED: u8 = 5;
+/// `D157_PRED` (§3): directional, `pAngle = 157`.
+const D157_PRED: u8 = 6;
 /// `SMOOTH_PRED` (§3).
 const SMOOTH_PRED: u8 = 9;
 /// `SMOOTH_V_PRED` (§3).
@@ -40,10 +51,19 @@ const SMOOTH_V_PRED: u8 = 10;
 const SMOOTH_H_PRED: u8 = 11;
 /// `PAETH_PRED` (§3).
 const PAETH_PRED: u8 = 12;
-/// The non-directional luma intra modes the lossy path searches over (no `angle_delta`/edge filter,
-/// so each reconstructs bit-exactly with only the immediate above/left neighbours).
-const LUMA_MODES: [u8; 5] = [
+/// The luma intra modes the lossy path searches over. All are bit-exact from only the immediate
+/// above/left neighbours plus the top-left corner: the non-directional modes by construction, and
+/// the included directional modes because `angle_delta = 0` (4×4 blocks) and `pAngle ∈ {90, 180}`
+/// (cardinal) or `90 < pAngle < 180` (zone 2) keep every reference index within `[-1, 3]`. The
+/// other directional angles (`D45`/`D67`/`D203`) need above-right/below-left samples and are a
+/// later phase.
+const LUMA_MODES: [u8; 10] = [
     DC_PRED,
+    V_PRED,
+    H_PRED,
+    D135_PRED,
+    D113_PRED,
+    D157_PRED,
     SMOOTH_PRED,
     SMOOTH_V_PRED,
     SMOOTH_H_PRED,
@@ -404,10 +424,11 @@ impl<'a> FrameEncoder<'a> {
     }
 
     /// Builds the 4×4 intra prediction for `plane` at coded position `(sx, sy)` under `mode`
-    /// (§7.11.2). `DC_PRED` replicates [`Self::dc_avg`]; the non-directional modes
-    /// (`PAETH`/`SMOOTH`/`SMOOTH_V`/`SMOOTH_H`) are only used for lossy luma and read the
-    /// reconstruction buffer, applying the spec's reference-sample availability fallbacks. Returns
-    /// the prediction row-major. The supported modes never read past the 4 above / 4 left samples
+    /// (§7.11.2). `DC_PRED` replicates [`Self::dc_avg`]; the other supported modes (non-directional
+    /// `PAETH`/`SMOOTH`/`SMOOTH_V`/`SMOOTH_H` and directional `V`/`H`/`D135`/`D113`/`D157`) are only
+    /// used for lossy luma and read the reconstruction buffer, applying the spec's reference-sample
+    /// availability fallbacks. Returns the prediction row-major. With `enable_intra_edge_filter = 0`
+    /// and `angle_delta = 0` (4×4), the supported modes never read past the 4 above / 4 left samples
     /// plus the top-left corner, so above-right / below-left extension is not needed.
     fn predict_4x4(&self, plane: usize, sx: usize, sy: usize, mode: u8) -> [i32; 16] {
         if mode == DC_PRED {
@@ -449,11 +470,51 @@ impl<'a> FrameEncoder<'a> {
             128 // 1 << (BitDepth-1)
         };
 
+        // Directional derivatives (`Dr_Intra_Derivative`) for the zone-2 angles (90 < pAngle < 180):
+        // dx = Dr[180 - pAngle], dy = Dr[pAngle - 90]. Unused by the non-directional / cardinal modes.
+        let (dx, dy): (i32, i32) = match mode {
+            D135_PRED => (64, 64),  // Dr[45], Dr[45]
+            D113_PRED => (27, 151), // Dr[67], Dr[23]
+            D157_PRED => (151, 27), // Dr[23], Dr[67]
+            _ => (0, 0),
+        };
+
         let w = cdf::SM_WEIGHTS_4X4;
         let mut pred = [0i32; 16];
         for i in 0..4 {
             for j in 0..4 {
                 pred[i * 4 + j] = match mode {
+                    V_PRED => above[j],
+                    H_PRED => left[i],
+                    D135_PRED | D113_PRED | D157_PRED => {
+                        // §7.11.2.4 zone 2 (upsample disabled): interpolate along the above row,
+                        // falling back to the left column when the ray leaves the top edge. Indices
+                        // -1 map to the top-left corner; the chosen angles keep them within [-1, 3].
+                        let (ii, jj) = (i as i32, j as i32);
+                        let idx = (jj << 6) - (ii + 1) * dx;
+                        let base = idx >> 6;
+                        if base >= -1 {
+                            let shift = (idx >> 1) & 0x1F;
+                            let a0 = if base < 0 {
+                                top_left
+                            } else {
+                                above[base as usize]
+                            };
+                            let a1 = above[(base + 1) as usize];
+                            (a0 * (32 - shift) + a1 * shift + 16) >> 5 // Round2(_, 5)
+                        } else {
+                            let idx2 = (ii << 6) - (jj + 1) * dy;
+                            let base2 = idx2 >> 6;
+                            let shift = (idx2 >> 1) & 0x1F;
+                            let l0 = if base2 < 0 {
+                                top_left
+                            } else {
+                                left[base2 as usize]
+                            };
+                            let l1 = left[(base2 + 1) as usize];
+                            (l0 * (32 - shift) + l1 * shift + 16) >> 5 // Round2(_, 5)
+                        }
+                    }
                     PAETH_PRED => {
                         let base = above[j] + left[i] - top_left;
                         let p_left = (base - left[i]).abs();
@@ -873,5 +934,41 @@ mod tests {
         // PAETH base = 127 + 129 - 128 = 128; distances are |128-129|=1 (left), |128-127|=1 (top),
         // |128-128|=0 (top-left), so the top-left default (128) wins and every sample is 128.
         assert_eq!(e.predict_4x4(0, 0, 0, PAETH_PRED), [128; 16]);
+    }
+
+    #[test]
+    fn directional_predictors_match_spec() {
+        // Block at (4,4) with a ramped above row [60,90,120,150], left column [40,80,120,160],
+        // top-left 100.
+        let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
+        let mut e = FrameEncoder::new(&p, 32);
+        let cw = e.coded_w;
+        for (j, &v) in [60u8, 90, 120, 150].iter().enumerate() {
+            e.recon[0][3 * cw + (4 + j)] = v;
+        }
+        for (i, &v) in [40u8, 80, 120, 160].iter().enumerate() {
+            e.recon[0][(4 + i) * cw + 3] = v;
+        }
+        e.recon[0][3 * cw + 3] = 100;
+
+        // V (pAngle 90): every row is a copy of the above row.
+        let v = e.predict_4x4(0, 4, 4, V_PRED);
+        assert_eq!(&v[0..4], &[60, 90, 120, 150]);
+        assert_eq!(&v[12..16], &[60, 90, 120, 150]);
+        // H (pAngle 180): every column is a copy of the left column.
+        let h = e.predict_4x4(0, 4, 4, H_PRED);
+        assert_eq!([h[0], h[4], h[8], h[12]], [40, 80, 120, 160]);
+        // D135: the main diagonal carries the top-left corner; row 0 = [TL, above0, above1, above2].
+        let d135 = e.predict_4x4(0, 4, 4, D135_PRED);
+        assert_eq!(&d135[0..4], &[100, 60, 90, 120]);
+        assert_eq!([d135[0], d135[5], d135[10], d135[15]], [100, 100, 100, 100]);
+        // All directional outputs stay in range.
+        for &m in &[D113_PRED, D157_PRED] {
+            assert!(
+                e.predict_4x4(0, 4, 4, m)
+                    .iter()
+                    .all(|&x| (0..=255).contains(&x))
+            );
+        }
     }
 }

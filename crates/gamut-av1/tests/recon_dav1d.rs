@@ -163,6 +163,28 @@ fn tx_type_selection_matches_dav1d() {
 }
 
 #[test]
+fn directional_modes_match_dav1d() {
+    if !dav1d_available() {
+        eprintln!("skipping recon_dav1d: dav1d not installed");
+        return;
+    }
+    // Strong vertical, horizontal and diagonal structure so the mode search picks the directional
+    // modes (V/H/D135/D113/D157). dav1d must decode each signaled angle to the encoder
+    // reconstruction byte-for-byte, exercising the directional prediction process end-to-end.
+    let directional = |x: u32, y: u32| {
+        let vert = if (x / 2).is_multiple_of(2) { 210 } else { 30 } as u8; // vertical bars
+        let horiz = if (y / 2).is_multiple_of(2) { 200 } else { 40 } as u8; // horizontal bars
+        let diag = (((x + y) * 16) % 256) as u8; // 45° ramp
+        [vert, horiz, diag]
+    };
+    for &q in &[8u8, 28, 96, 180] {
+        for &(w, h) in &[(8, 8), (16, 16), (37, 21), (64, 40)] {
+            check(&planes(w, h, directional), q);
+        }
+    }
+}
+
+#[test]
 fn flat_lossy_reconstruction_matches_dav1d() {
     if !dav1d_available() {
         return;
