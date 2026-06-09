@@ -139,6 +139,16 @@ pub fn inverse_subtract_green(pixels: &mut [u32]) {
     }
 }
 
+/// Forward subtract-green: subtract the green value from red and blue for every pixel.
+pub fn forward_subtract_green(pixels: &mut [u32]) {
+    for p in pixels.iter_mut() {
+        let g = green(*p);
+        let r = red(*p).wrapping_sub(g);
+        let b = blue(*p).wrapping_sub(g);
+        *p = make_argb(alpha(*p), r, g, b);
+    }
+}
+
 // --- Predictor transform (RFC 9649 §4.1) ----------------------------------------------------------
 
 #[inline]
@@ -241,6 +251,53 @@ fn add_residual(res: u32, pred: u32) -> u32 {
     )
 }
 
+/// Subtracts a predicted pixel `pred` from a value `value` (mod 256 per channel) — the forward of
+/// [`add_residual`].
+#[inline]
+fn sub_residual(value: u32, pred: u32) -> u32 {
+    make_argb(
+        alpha(value).wrapping_sub(alpha(pred)),
+        red(value).wrapping_sub(red(pred)),
+        green(value).wrapping_sub(green(pred)),
+        blue(value).wrapping_sub(blue(pred)),
+    )
+}
+
+/// The predicted value for pixel `(x, y)` from already-known neighbors in `img` (RFC 9649 §4.1),
+/// applied identically by both the forward and inverse passes so they always agree. The border
+/// rules (top-left, top row, left column, rightmost-column TR wrap) are handled here; `mode` is used
+/// only for interior pixels.
+#[inline]
+fn predicted_value(img: &[u32], width: usize, x: usize, y: usize, mode: u8) -> u32 {
+    let idx = y * width + x;
+    if x == 0 && y == 0 {
+        0xff00_0000
+    } else if y == 0 {
+        img[idx - 1] // top row: predict from left
+    } else if x == 0 {
+        img[idx - width] // left column: predict from top
+    } else {
+        let l = img[idx - 1];
+        let t = img[idx - width];
+        let tl = img[idx - width - 1];
+        // TR is the pixel above-right, except on the rightmost column where it wraps to the first
+        // pixel of the current row (the contiguous-buffer behavior, RFC 9649 §4.1).
+        let tr = if x + 1 < width {
+            img[idx - width + 1]
+        } else {
+            img[y * width]
+        };
+        predict(mode, l, t, tl, tr)
+    }
+}
+
+/// Looks up the predictor mode for pixel `(x, y)` from the sub-resolution mode image.
+#[inline]
+fn block_mode(blocks: &[u32], transform_width: usize, size_bits: u8, x: usize, y: usize) -> u8 {
+    let block = (y >> size_bits) * transform_width + (x >> size_bits);
+    blocks.get(block).map_or(0, |&b| green(b))
+}
+
 /// Inverse predictor transform: reconstructs `pixels` (holding residuals) in scan order, adding back
 /// each pixel's predicted value. `blocks` is the sub-resolution mode image (RFC 9649 §4.1).
 pub fn inverse_predictor(
@@ -257,31 +314,85 @@ pub fn inverse_predictor(
     let transform_width = div_round_up(width, 1 << size_bits) as usize;
     for y in 0..height as usize {
         for x in 0..w {
+            let mode = block_mode(blocks, transform_width, size_bits, x, y);
+            let pred = predicted_value(pixels, w, x, y, mode);
             let idx = y * w + x;
-            let pred = if x == 0 && y == 0 {
-                0xff00_0000
-            } else if y == 0 {
-                pixels[idx - 1] // top row: predict from left
-            } else if x == 0 {
-                pixels[idx - w] // left column: predict from top
-            } else {
-                let l = pixels[idx - 1];
-                let t = pixels[idx - w];
-                let tl = pixels[idx - w - 1];
-                // TR is the pixel above-right, except on the rightmost column where it wraps to the
-                // first pixel of the current row (the contiguous-buffer behavior, RFC 9649 §4.1).
-                let tr = if x + 1 < w {
-                    pixels[idx - w + 1]
-                } else {
-                    pixels[y * w]
-                };
-                let block = (y >> size_bits) * transform_width + (x >> size_bits);
-                let mode = blocks.get(block).map_or(0, |&b| green(b));
-                predict(mode, l, t, tl, tr)
-            };
             pixels[idx] = add_residual(pixels[idx], pred);
         }
     }
+}
+
+/// Forward predictor transform: chooses a per-block predictor mode and replaces each pixel with its
+/// residual `pixel - prediction`. Returns `(residuals, mode_sub_image)`; the sub-image's green
+/// channel carries the chosen mode per block (RFC 9649 §4.1). Mode selection minimizes the summed
+/// residual magnitude — a simple heuristic; optimal selection is deferred to issue #31.
+#[must_use]
+pub fn forward_predictor(
+    pixels: &[u32],
+    width: u32,
+    height: u32,
+    size_bits: u8,
+) -> (Vec<u32>, Vec<u32>) {
+    let w = width as usize;
+    let h = height as usize;
+    let transform_width = div_round_up(width, 1 << size_bits) as usize;
+    let transform_height = div_round_up(height, 1 << size_bits) as usize;
+
+    let mut sub_image = vec![0xff00_0000u32; transform_width * transform_height];
+    for by in 0..transform_height {
+        for bx in 0..transform_width {
+            let mode = best_predictor_mode(pixels, w, h, size_bits, bx, by);
+            sub_image[by * transform_width + bx] = make_argb(0xff, 0, mode, 0);
+        }
+    }
+
+    let mut residuals = vec![0u32; pixels.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let mode = block_mode(&sub_image, transform_width, size_bits, x, y);
+            let pred = predicted_value(pixels, w, x, y, mode);
+            let idx = y * w + x;
+            residuals[idx] = sub_residual(pixels[idx], pred);
+        }
+    }
+    (residuals, sub_image)
+}
+
+/// Channel-wise "distance from zero modulo 256" — a cheap proxy for residual entropy.
+#[inline]
+fn residual_cost(res: u32) -> u64 {
+    let c = |v: u8| u64::from(v.min(v.wrapping_neg()));
+    c(alpha(res)) + c(red(res)) + c(green(res)) + c(blue(res))
+}
+
+/// Picks the predictor mode that minimizes the summed residual magnitude over a block.
+fn best_predictor_mode(
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    size_bits: u8,
+    bx: usize,
+    by: usize,
+) -> u8 {
+    let block_size = 1usize << size_bits;
+    let x0 = bx * block_size;
+    let y0 = by * block_size;
+    let mut best_mode = 0u8;
+    let mut best_cost = u64::MAX;
+    for mode in 0..NUM_PREDICTOR_MODES {
+        let mut cost = 0u64;
+        for y in y0..(y0 + block_size).min(height) {
+            for x in x0..(x0 + block_size).min(width) {
+                let pred = predicted_value(pixels, width, x, y, mode);
+                cost += residual_cost(sub_residual(pixels[y * width + x], pred));
+            }
+        }
+        if cost < best_cost {
+            best_cost = cost;
+            best_mode = mode;
+        }
+    }
+    best_mode
 }
 
 // --- Color transform (RFC 9649 §4.2) --------------------------------------------------------------
@@ -321,6 +432,95 @@ pub fn inverse_color(pixels: &mut [u32], width: u32, height: u32, size_bits: u8,
             pixels[idx] = make_argb(alpha(p), (tmp_red & 0xff) as u8, g, (tmp_blue & 0xff) as u8);
         }
     }
+}
+
+/// Packs a `ColorTransformElement` into a sub-image pixel as the spec prescribes: `A=255,
+/// R=red_to_blue, G=green_to_blue, B=green_to_red` (RFC 9649 §4.2).
+#[inline]
+#[must_use]
+fn pack_color_element(green_to_red: i8, green_to_blue: i8, red_to_blue: i8) -> u32 {
+    make_argb(
+        0xff,
+        red_to_blue as u8,
+        green_to_blue as u8,
+        green_to_red as u8,
+    )
+}
+
+/// Forward color transform: subtracts the per-block color deltas from red and blue. Returns the
+/// sub-resolution element image. The forward uses the **original** red for the `red_to_blue` term,
+/// matching the inverse which adds it back using the reconstructed (== original) red (RFC 9649
+/// §4.2). Per-block elements are estimated by simple least squares; optimal selection is deferred to
+/// issue #31.
+#[must_use]
+pub fn forward_color(pixels: &mut [u32], width: u32, height: u32, size_bits: u8) -> Vec<u32> {
+    let w = width as usize;
+    let h = height as usize;
+    let transform_width = div_round_up(width, 1 << size_bits) as usize;
+    let transform_height = div_round_up(height, 1 << size_bits) as usize;
+    let block_size = 1usize << size_bits;
+
+    let mut sub_image = vec![pack_color_element(0, 0, 0); transform_width * transform_height];
+    for by in 0..transform_height {
+        for bx in 0..transform_width {
+            let (g2r, g2b, r2b) = estimate_color_element(pixels, w, h, block_size, bx, by);
+            sub_image[by * transform_width + bx] = pack_color_element(g2r, g2b, r2b);
+            for y in (by * block_size)..((by + 1) * block_size).min(h) {
+                for x in (bx * block_size)..((bx + 1) * block_size).min(w) {
+                    let p = pixels[y * w + x];
+                    let g = green(p) as i8;
+                    let orig_red = red(p);
+                    let new_red = (i32::from(orig_red) - color_transform_delta(g2r, g)) & 0xff;
+                    let new_blue = (i32::from(blue(p))
+                        - color_transform_delta(g2b, g)
+                        - color_transform_delta(r2b, orig_red as i8))
+                        & 0xff;
+                    pixels[y * w + x] =
+                        make_argb(alpha(p), new_red as u8, green(p), new_blue as u8);
+                }
+            }
+        }
+    }
+    sub_image
+}
+
+/// Estimates the three color-transform coefficients for one block by least squares against the
+/// channel pairs `(red, green)`, `(blue, green)`, and `(blue, red)`.
+fn estimate_color_element(
+    pixels: &[u32],
+    width: usize,
+    height: usize,
+    block_size: usize,
+    bx: usize,
+    by: usize,
+) -> (i8, i8, i8) {
+    let mut rg = 0i64; // sum(red * green)
+    let mut gg = 0i64; // sum(green * green)
+    let mut bg = 0i64; // sum(blue * green)
+    let mut br = 0i64; // sum(blue * red)
+    let mut rr = 0i64; // sum(red * red)
+    for y in (by * block_size)..((by + 1) * block_size).min(height) {
+        for x in (bx * block_size)..((bx + 1) * block_size).min(width) {
+            let p = pixels[y * width + x];
+            let r = i64::from(red(p) as i8);
+            let g = i64::from(green(p) as i8);
+            let b = i64::from(blue(p) as i8);
+            rg += r * g;
+            gg += g * g;
+            bg += b * g;
+            br += b * r;
+            rr += r * r;
+        }
+    }
+    // delta(t, c) ≈ t * c / 32, so t ≈ 32 * sum(target * basis) / sum(basis^2).
+    let coeff = |num: i64, den: i64| -> i8 {
+        if den == 0 {
+            0
+        } else {
+            ((num * 32) / den).clamp(-128, 127) as i8
+        }
+    };
+    (coeff(rg, gg), coeff(bg, gg), coeff(br, rr))
 }
 
 // --- Color indexing (RFC 9649 §4.4) ---------------------------------------------------------------
@@ -445,7 +645,12 @@ mod tests {
 
     /// A test-local forward predictor mirroring `inverse_predictor`, to validate the inverse end to
     /// end (scan order + every border rule) without depending on the encoder.
-    fn forward_predictor(orig: &[u32], width: usize, height: usize, mode: u8) -> Vec<u32> {
+    fn forward_predictor_fixed_mode(
+        orig: &[u32],
+        width: usize,
+        height: usize,
+        mode: u8,
+    ) -> Vec<u32> {
         let mut res = vec![0u32; orig.len()];
         for y in 0..height {
             for x in 0..width {
@@ -497,7 +702,7 @@ mod tests {
         for mode in 0..NUM_PREDICTOR_MODES {
             // One block covering the whole image: size_bits large enough that transform_width == 1.
             let blocks = vec![make_argb(0xff, 0, mode, 0)];
-            let mut res = forward_predictor(&orig, w, h, mode);
+            let mut res = forward_predictor_fixed_mode(&orig, w, h, mode);
             inverse_predictor(&mut res, w as u32, h as u32, 3, &blocks);
             assert_eq!(res, orig, "mode {mode} failed to round-trip");
         }
@@ -573,6 +778,41 @@ mod tests {
         let bundled16 = vec![make_argb(0xff, 0, 0x53, 0)];
         let out16 = inverse_color_indexing(&bundled16, 1, 1, 2, &table16);
         assert_eq!(out16, vec![table16[3], table16[5]]);
+    }
+
+    #[test]
+    fn forward_subtract_green_inverts() {
+        let mut px: Vec<u32> = (0..20)
+            .map(|i| make_argb(i as u8, (i * 3) as u8, (i * 7 + 1) as u8, (i * 11) as u8))
+            .collect();
+        let orig = px.clone();
+        forward_subtract_green(&mut px);
+        inverse_subtract_green(&mut px);
+        assert_eq!(px, orig);
+    }
+
+    #[test]
+    fn forward_predictor_inverts() {
+        let (w, h) = (6u32, 4u32);
+        let orig: Vec<u32> = (0..(w * h))
+            .map(|i| make_argb(0xff, (i * 3) as u8, (i ^ 0x2a) as u8, (i * 5) as u8))
+            .collect();
+        let (residual, sub) = forward_predictor(&orig, w, h, 2);
+        let mut recon = residual;
+        inverse_predictor(&mut recon, w, h, 2, &sub);
+        assert_eq!(recon, orig);
+    }
+
+    #[test]
+    fn forward_color_inverts() {
+        let (w, h) = (5u32, 3u32);
+        let orig: Vec<u32> = (0..(w * h))
+            .map(|i| make_argb(0xff, (i * 9) as u8, (i * 5 + 3) as u8, (i * 29) as u8))
+            .collect();
+        let mut px = orig.clone();
+        let sub = forward_color(&mut px, w, h, 2);
+        inverse_color(&mut px, w, h, 2, &sub);
+        assert_eq!(px, orig);
     }
 
     #[test]

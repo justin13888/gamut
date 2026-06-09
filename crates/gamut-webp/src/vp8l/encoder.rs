@@ -1,13 +1,15 @@
 //! VP8L image-data encoder.
 //!
-//! Produces a conformant, bit-exact-lossless VP8L bitstream. This baseline emits literal ARGB
-//! pixels under a single prefix-code group with no transforms, color cache, or LZ77 — the
-//! density-improving features (forward transforms, backward references, the cache, and multi-group
-//! entropy images) layer on in later commits of the issue-#22 series. Compression *quality* (optimal
-//! transform/mode choice, LZ77 parsing, entropy clustering) is deferred to issue #31; this code only
-//! needs to emit a valid stream that round-trips.
+//! Produces a conformant, bit-exact-lossless VP8L bitstream. The encoder applies the forward
+//! transforms (subtract-green, then the spatial predictor, then the color transform), emitting each
+//! transform and its sub-resolution data, and then codes the residual image as literal ARGB pixels
+//! under a single prefix-code group. The remaining density features (color indexing, LZ77 backward
+//! references, the color cache, and multi-group entropy images) layer on in later commits of the
+//! issue-#22 series.
 //!
-//! Each channel's prefix code is built from the true pixel histogram via
+//! Compression *quality* (optimal transform/mode choice, LZ77 parsing, entropy clustering) is
+//! deferred to issue #31; this code only needs to emit a valid stream that round-trips. Each
+//! channel's prefix code is built from the true histogram via
 //! [`build_length_limited_lengths`](crate::vp8l::prefix::build_length_limited_lengths) and written
 //! with the normal code-length code. Single-symbol codes (e.g. a solid color, or the unused distance
 //! code) consume no bits, exactly as the decoder expects.
@@ -20,7 +22,14 @@ use crate::vp8l::prefix::{
     MAX_CODE_LENGTH, NUM_DISTANCE_CODES, NUM_LITERAL_CODES, PrefixEncoder,
     build_length_limited_lengths, green_alphabet_size, write_normal_prefix_code,
 };
-use crate::vp8l::transform::{alpha, blue, green, red};
+use crate::vp8l::transform::{
+    COLOR_TRANSFORM, PREDICTOR_TRANSFORM, SUBTRACT_GREEN_TRANSFORM, alpha, blue, forward_color,
+    forward_predictor, forward_subtract_green, green, red,
+};
+
+/// Block-size exponent for the predictor/color sub-images (16×16 blocks). Optimal block sizing is a
+/// density tuning knob deferred to issue #31.
+const TRANSFORM_SIZE_BITS: u8 = 4;
 
 /// Encodes an ARGB image (scan order, `0xAARRGGBB`) to a VP8L bitstream body — the bytes that go
 /// inside the `VP8L` chunk, signature byte included.
@@ -41,16 +50,47 @@ pub fn encode(argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
 
     let mut w = BitWriter::new();
     header.write(&mut w);
-    w.write_bits(0, 1); // No transforms.
-    write_literal_image(&mut w, argb);
+
+    let mut pixels = argb.to_vec();
+    let (width, height) = (dims.width, dims.height);
+
+    // Apply the forward transforms in read order; the decoder inverts them last-first.
+    // 1. Subtract-green (no transform data).
+    forward_subtract_green(&mut pixels);
+    write_transform_tag(&mut w, SUBTRACT_GREEN_TRANSFORM);
+
+    // 2. Spatial predictor.
+    let (residual, predictor_sub) = forward_predictor(&pixels, width, height, TRANSFORM_SIZE_BITS);
+    pixels = residual;
+    write_transform_tag(&mut w, PREDICTOR_TRANSFORM);
+    w.write_bits(u32::from(TRANSFORM_SIZE_BITS - 2), 3);
+    write_image(&mut w, &predictor_sub, false);
+
+    // 3. Color transform.
+    let color_sub = forward_color(&mut pixels, width, height, TRANSFORM_SIZE_BITS);
+    write_transform_tag(&mut w, COLOR_TRANSFORM);
+    w.write_bits(u32::from(TRANSFORM_SIZE_BITS - 2), 3);
+    write_image(&mut w, &color_sub, false);
+
+    w.write_bits(0, 1); // End of transforms.
+    write_image(&mut w, &pixels, true);
     Ok(w.finish())
 }
 
-/// Writes the main ARGB image as literal pixels under a single prefix-code group (no cache, no meta
-/// prefix codes).
-fn write_literal_image(w: &mut BitWriter, pixels: &[u32]) {
+/// Writes a "transform present" bit followed by the 2-bit transform type.
+fn write_transform_tag(w: &mut BitWriter, transform_type: u8) {
+    w.write_bits(1, 1);
+    w.write_bits(u32::from(transform_type), 2);
+}
+
+/// Writes one image (any role) as literal pixels under a single prefix-code group. `allow_meta`
+/// matches the decoder: the top-level image writes the meta-prefix bit (single group), sub-images
+/// do not.
+fn write_image(w: &mut BitWriter, pixels: &[u32], allow_meta: bool) {
     w.write_bits(0, 1); // No color cache.
-    w.write_bits(0, 1); // Single meta prefix code.
+    if allow_meta {
+        w.write_bits(0, 1); // Single meta prefix code.
+    }
 
     let mut green_hist = vec![0u32; green_alphabet_size(0)];
     let mut red_hist = vec![0u32; NUM_LITERAL_CODES];
