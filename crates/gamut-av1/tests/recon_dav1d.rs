@@ -414,3 +414,25 @@ fn variable_tx_size_match_dav1d() {
         }
     }
 }
+
+#[test]
+fn delta_q_match_dav1d() {
+    // delta_q_present: each superblock's first block signals a per-SB delta_q, so CurrentQIndex (and
+    // the dc/ac dequantizer step) varies across superblocks while the coefficient-CDF qctx stays at
+    // its frame value (init_coeff_cdfs derives it from base_q_idx, §8.3.2). Multi-superblock sizes
+    // (> 64 px) exercise several deltas; base_q_idx values sit on the qctx boundaries (20/60/120) so
+    // a ±delta pushes CurrentQIndex across the boundary without changing qctx — the case that would
+    // desync if qctx tracked CurrentQIndex. Byte-equality with dav1d validates the per-block quantizer
+    // tracking and the frame-level qctx.
+    let texture = |x: u32, y: u32| {
+        let r = (x.wrapping_mul(3).wrapping_add(y) % 256) as u8;
+        let g = ((x + y.wrapping_mul(2)) % 256) as u8;
+        let b = (128 + ((x ^ y) % 64)) as u8;
+        [r, g, b]
+    };
+    for &q in &[20u8, 21, 60, 61, 120, 121, 200] {
+        for &(w, h) in &[(64u32, 64u32), (96, 96), (160, 96), (100, 70)] {
+            check(&planes(w, h, texture), q);
+        }
+    }
+}
