@@ -17,6 +17,20 @@ pub struct EncodedStill {
     pub config: Av1StillConfig,
 }
 
+/// The encoder's reconstructed image: exactly the samples a conformant decoder produces for
+/// [`EncodedStill`]. Cropped to the display dimensions (the coded-grid padding is dropped, as on
+/// decode). Used for the bit-exact decoder cross-check.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct ReconImage {
+    /// Display width.
+    pub width: u32,
+    /// Display height.
+    pub height: u32,
+    /// Reconstructed planes (Y=G, U=B, V=R), each `width * height` samples, row-major.
+    pub planes: [Vec<u8>; 3],
+}
+
 /// Encodes 8-bit 4:4:4 identity planes (Y=G, U=B, V=R) as a lossless AV1 intra keyframe.
 ///
 /// # Errors
@@ -24,6 +38,19 @@ pub struct EncodedStill {
 /// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
 /// dimensions exceed AV1 level 6.0 (out of M0 scope).
 pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> {
+    Ok(encode_still_intra(planes, 0)?.0)
+}
+
+/// Encodes 8-bit 4:4:4 identity planes (Y=G, U=B, V=R) as an AV1 intra keyframe at quantizer
+/// `qindex` (`base_q_idx`). `qindex == 0` is lossless; `1..=20` is lossy intra (DCT + quantization)
+/// while keeping coefficient-CDF quantizer context 0. Returns the encoded still and the
+/// reconstruction (the exact decoder output) for verification.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
+/// dimensions exceed AV1 level 6.0.
+pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill, ReconImage)> {
     let width = planes.width();
     let height = planes.height();
     if width == 0 || height == 0 {
@@ -50,13 +77,46 @@ pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> 
     let mi_rows = 2 * ((height + 7) >> 3);
 
     let seq_payload = headers::sequence_header_payload(&config, width, height);
-    let mut frame_payload = headers::frame_header_payload(width, height, mi_cols, mi_rows);
-    frame_payload.extend_from_slice(&FrameEncoder::new(planes).encode());
+    let mut frame_payload = headers::frame_header_payload(width, height, mi_cols, mi_rows, qindex);
+    let (tile_bytes, recon) = FrameEncoder::new(planes, qindex).encode();
+    frame_payload.extend_from_slice(&tile_bytes);
 
-    Ok(EncodedStill {
+    // Crop the reconstruction from the coded grid to the display dimensions. For the lossless path
+    // the reconstruction equals the source, so use the source planes directly.
+    let recon_planes = if qindex == 0 {
+        [
+            crop(planes.plane(0), width, planes.width(), height),
+            crop(planes.plane(1), width, planes.width(), height),
+            crop(planes.plane(2), width, planes.width(), height),
+        ]
+    } else {
+        [
+            crop(&recon.planes[0], width, recon.coded_w as u32, height),
+            crop(&recon.planes[1], width, recon.coded_w as u32, height),
+            crop(&recon.planes[2], width, recon.coded_w as u32, height),
+        ]
+    };
+
+    let still = EncodedStill {
         obus: headers::assemble_temporal_unit(&seq_payload, &frame_payload),
         config,
-    })
+    };
+    let recon = ReconImage {
+        width,
+        height,
+        planes: recon_planes,
+    };
+    Ok((still, recon))
+}
+
+/// Crops a `src_stride`-wide plane to `width × height`, row-major.
+fn crop(plane: &[u8], width: u32, src_stride: u32, height: u32) -> Vec<u8> {
+    let (w, sw, h) = (width as usize, src_stride as usize, height as usize);
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        out.extend_from_slice(&plane[y * sw..y * sw + w]);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -170,5 +230,59 @@ mod tests {
     fn rejects_zero_dimension() {
         let p = Planar8::from_rgb8_identity(&[], 0, 0).unwrap();
         assert!(encode_still_lossless_identity(&p).is_err());
+    }
+
+    #[test]
+    fn lossy_encode_structure_and_determinism() {
+        // Exercises the lossy path (DCT + quant + reconstruction) across sizes/qindex without a
+        // decoder: OBU framing, deterministic output, and the reconstruction dimensions.
+        for &q in &[1u8, 8, 20] {
+            for (w, h) in [(1, 1), (8, 8), (17, 13), (40, 24), (130, 70)] {
+                let p = planes(w, h, |x, y| {
+                    [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8]
+                });
+                let (still, recon) = encode_still_intra(&p, q).unwrap();
+                assert_eq!(parse_obus(&still.obus).len(), 2, "{w}x{h} q{q}");
+                assert_eq!(recon.width, w);
+                assert_eq!(recon.height, h);
+                for plane in &recon.planes {
+                    assert_eq!(plane.len(), (w * h) as usize);
+                }
+                // Determinism.
+                let (again, _) = encode_still_intra(&p, q).unwrap();
+                assert_eq!(still.obus, again.obus, "{w}x{h} q{q} not deterministic");
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_flat_image_reconstructs_near_source() {
+        // A solid color quantizes every AC residual to zero; the DC-prediction reconstruction
+        // should land within a couple of levels of the source (light quantization).
+        let (_, recon) = encode_still_intra(&planes(48, 40, |_, _| [200, 100, 50]), 12).unwrap();
+        // Planes are identity-mapped Y=G, U=B, V=R, so the source plane DCs are [100, 50, 200].
+        for (plane, &want) in recon.planes.iter().zip(&[100u8, 50, 200]) {
+            for &got in plane {
+                assert!(
+                    i32::from(got).abs_diff(i32::from(want)) <= 3,
+                    "flat recon {got} far from {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_high_contrast_encodes() {
+        // A ±max checkerboard makes large coefficients (golomb tails) in the lossy path too.
+        let (still, recon) = encode_still_intra(
+            &planes(48, 48, |x, y| {
+                let v = if (x + y) % 2 == 0 { 0 } else { 255 };
+                [v, 255 - v, v]
+            }),
+            16,
+        )
+        .unwrap();
+        assert_eq!(parse_obus(&still.obus).len(), 2);
+        assert_eq!(recon.planes[0].len(), 48 * 48);
     }
 }

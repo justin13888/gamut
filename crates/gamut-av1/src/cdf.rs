@@ -64,6 +64,12 @@ pub static PARTITION_W64: [[u16; 10]; 4] = [
 /// `Default_Skip_Cdf`, indexed [ctx].
 pub static SKIP: [[u16; 2]; 3] = [[31671, 32768], [16515, 32768], [4576, 32768]];
 
+/// `Default_Intra_Tx_Type_Set2_Cdf[Tx_Size_Sqr(TX_4X4)=0][DC_PRED=0]` (AV1 §9.4). Used to signal the
+/// transform type for a lossy 4×4 luma block, where `reduced_tx_set` ⇒ `TX_SET_INTRA_2`. Symbol
+/// values index `Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`, so the
+/// encoder emits symbol 1 for `DCT_DCT`.
+pub static INTRA_TX_TYPE_SET2_4X4_DC: [u16; 5] = [6554, 13107, 19661, 26214, 32768];
+
 /// `Default_Intra_Frame_Y_Mode_Cdf[0][0]` (above/left both `DC_PRED`).
 pub static INTRA_FRAME_Y_MODE_DC_DC: [u16; 13] = [
     15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466, 32768,

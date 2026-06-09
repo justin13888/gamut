@@ -1,13 +1,24 @@
-//! The single-tile, all-intra, lossless encoder: superblock/partition iteration (§5.11.2/.4),
-//! DC intra prediction (§7.11.2.5), the forward 4×4 WHT (via `gamut-dsp`), and coefficient coding
-//! with full context derivation (§5.11.39, §8.3.2).
+//! The single-tile, all-intra encoder: superblock/partition iteration (§5.11.2/.4), DC intra
+//! prediction (§7.11.2.5), the forward transform (via `gamut-dsp`), and coefficient coding with
+//! full context derivation (§5.11.39, §8.3.2).
 //!
-//! All coded blocks are square `DC_PRED` intra blocks; partitions are `PARTITION_NONE` except at
-//! the right/bottom frame edges, where the spec's forced splitting applies. The frame is coded on
-//! the MI-unit grid (`mi_cols*4 × mi_rows*4`, i.e. dimensions rounded up to a multiple of 8); the
-//! out-of-frame padding is edge-replicated and cropped away on decode.
+//! Two paths share this code, selected by `qindex` (`base_q_idx`):
+//! - **Lossless** (`qindex == 0`): forced `TX_4X4` Walsh–Hadamard; prediction neighbours are the
+//!   source samples (which equal the reconstruction under lossless); partitions are
+//!   `PARTITION_NONE` except at the right/bottom frame edges.
+//! - **Lossy** (`qindex > 0`): `DCT_DCT` `TX_4X4` with quantization. Blocks are forced all-4×4
+//!   (`PARTITION_SPLIT` everywhere) so each uses a 4×4 transform under `TX_MODE_LARGEST` with no
+//!   tx-depth signaling, and the luma transform type is signaled `DCT_DCT`. Prediction reads a
+//!   **reconstruction buffer** that the encoder maintains exactly as the decoder would (predict →
+//!   transform → quantize → dequantize → inverse-transform → add → store), so the encoder's
+//!   reconstruction is bit-exact with a conformant decoder's output.
+//!
+//! The frame is coded on the MI-unit grid (`mi_cols*4 × mi_rows*4`, dimensions rounded up to a
+//! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
 
 use crate::cdf;
+use crate::quant::{ac_q, dc_q, dequant, quantize};
+use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::Planar8;
 
@@ -15,6 +26,13 @@ use gamut_color::Planar8;
 const NUM_BASE_LEVELS: i32 = 2;
 /// `NUM_BASE_LEVELS + COEFF_BASE_RANGE`, the golomb threshold (§5.11.39).
 const COEFF_BASE_PLUS_RANGE: i32 = 14;
+
+/// The reconstructed (decoded) planes on the coded MI grid, used as prediction neighbours in the
+/// lossy path and exported for the bit-exact decoder cross-check.
+pub(crate) struct Reconstruction {
+    pub planes: [Vec<u8>; 3],
+    pub coded_w: usize,
+}
 
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
@@ -25,6 +43,12 @@ pub(crate) struct FrameEncoder<'a> {
     mi_rows: usize,
     coded_w: usize,
     coded_h: usize,
+    /// `base_q_idx`; 0 ⇒ lossless WHT path, > 0 ⇒ lossy DCT path.
+    qindex: u8,
+    dc_quant: i32,
+    ac_quant: i32,
+    /// Reconstructed samples per plane on the coded grid (lossy path only).
+    recon: [Vec<u8>; 3],
     sym: SymbolEncoder,
     above_level: [Vec<u8>; 3],
     above_dc: [Vec<u8>; 3],
@@ -35,20 +59,36 @@ pub(crate) struct FrameEncoder<'a> {
 }
 
 impl<'a> FrameEncoder<'a> {
-    /// Creates an encoder over the 4:4:4 identity planes (Y=G, U=B, V=R).
-    pub(crate) fn new(planes: &'a Planar8) -> Self {
+    /// Creates an encoder over the 4:4:4 identity planes (Y=G, U=B, V=R) at quantizer `qindex`
+    /// (`base_q_idx`; 0 selects the lossless path).
+    pub(crate) fn new(planes: &'a Planar8, qindex: u8) -> Self {
         let width = planes.width() as usize;
         let height = planes.height() as usize;
         let mi_cols = 2 * ((width + 7) >> 3);
         let mi_rows = 2 * ((height + 7) >> 3);
+        let coded_w = mi_cols * 4;
+        let coded_h = mi_rows * 4;
+        let recon = if qindex > 0 {
+            [
+                vec![0u8; coded_w * coded_h],
+                vec![0u8; coded_w * coded_h],
+                vec![0u8; coded_w * coded_h],
+            ]
+        } else {
+            [Vec::new(), Vec::new(), Vec::new()]
+        };
         Self {
             planes: [planes.plane(0), planes.plane(1), planes.plane(2)],
             width,
             height,
             mi_cols,
             mi_rows,
-            coded_w: mi_cols * 4,
-            coded_h: mi_rows * 4,
+            coded_w,
+            coded_h,
+            qindex,
+            dc_quant: dc_q(8, i32::from(qindex)),
+            ac_quant: ac_q(8, i32::from(qindex)),
+            recon,
             sym: SymbolEncoder::new(),
             above_level: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
             above_dc: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
@@ -58,8 +98,9 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    /// Encodes the tile and returns the symbol-coded bytes (`decode_tile`, §5.11.2).
-    pub(crate) fn encode(mut self) -> Vec<u8> {
+    /// Encodes the tile and returns the symbol-coded bytes (`decode_tile`, §5.11.2) plus the
+    /// reconstruction (lossy path).
+    pub(crate) fn encode(mut self) -> (Vec<u8>, Reconstruction) {
         const SB4: usize = 16; // 64×64 superblock in MI units
         let mut r = 0;
         while r < self.mi_rows {
@@ -74,7 +115,11 @@ impl<'a> FrameEncoder<'a> {
             }
             r += SB4;
         }
-        self.sym.finish()
+        let recon = Reconstruction {
+            planes: self.recon,
+            coded_w: self.coded_w,
+        };
+        (self.sym.finish(), recon)
     }
 
     /// Padded (edge-replicated) source sample of `plane` at coded-grid position `(x, y)`.
@@ -98,8 +143,14 @@ impl<'a> FrameEncoder<'a> {
             false // PARTITION_NONE forced, no symbol
         } else if has_rows && has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
-            self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
-            false
+            if self.qindex > 0 {
+                // Lossy: force PARTITION_SPLIT down to 4×4 so every block uses a 4×4 transform.
+                self.sym.encode_symbol(3, partition_cdf(bsl, ctx));
+                true
+            } else {
+                self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
+                false
+            }
         } else if has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
             let cdf2 = split_or_horz_cdf(partition_cdf(bsl, ctx));
@@ -177,35 +228,69 @@ impl<'a> FrameEncoder<'a> {
                 res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - avg;
             }
         }
-        let quant = gamut_dsp::fwht4x4(&res);
-        self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &quant);
+        if self.qindex == 0 {
+            let quant = gamut_dsp::fwht4x4(&res);
+            self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &quant);
+            return;
+        }
+
+        // Lossy: forward DCT, quantize, code, then reconstruct exactly as the decoder will and
+        // store into the reconstruction buffer for later prediction.
+        let coeff = forward_transform_2d(&res, TxSize::Tx4x4, TxType::DctDct);
+        let mut levels = [0i32; 16];
+        for (i, &c) in coeff.iter().enumerate() {
+            let q = if i == 0 { self.dc_quant } else { self.ac_quant };
+            levels[i] = quantize(c, q);
+        }
+        self.code_coeffs(plane, sx >> 2, sy >> 2, block_w, &levels);
+
+        let mut dq = [0i32; 16];
+        for (i, &lvl) in levels.iter().enumerate() {
+            let q = if i == 0 { self.dc_quant } else { self.ac_quant };
+            dq[i] = dequant(lvl, q, 1, 8);
+        }
+        let resid = inverse_transform_2d(&dq, TxSize::Tx4x4, TxType::DctDct, 8);
+        for i in 0..4 {
+            for j in 0..4 {
+                let v = (avg + resid[i * 4 + j]).clamp(0, 255) as u8;
+                self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = v;
+            }
+        }
     }
 
-    /// DC intra prediction value for a 4×4 at coded position `(sx, sy)` (§7.11.2.5). Neighbours are
-    /// the reconstructed samples, which equal the (padded) source under lossless coding.
+    /// DC intra prediction value for a 4×4 at coded position `(sx, sy)` (§7.11.2.5). In the lossless
+    /// path neighbours are the (padded) source (which equals the reconstruction); in the lossy path
+    /// they are the reconstruction buffer, matching the decoder exactly.
     fn dc_avg(&self, plane: usize, sx: usize, sy: usize) -> i32 {
+        let nb = |x: usize, y: usize| -> i32 {
+            if self.qindex > 0 {
+                i32::from(self.recon[plane][y * self.coded_w + x])
+            } else {
+                self.sample(plane, x, y)
+            }
+        };
         let have_above = sy > 0;
         let have_left = sx > 0;
         match (have_above, have_left) {
             (true, true) => {
                 let mut s = 0;
                 for k in 0..4 {
-                    s += self.sample(plane, sx + k, sy - 1);
-                    s += self.sample(plane, sx - 1, sy + k);
+                    s += nb(sx + k, sy - 1);
+                    s += nb(sx - 1, sy + k);
                 }
                 (s + 4) >> 3
             }
             (false, true) => {
                 let mut s = 0;
                 for k in 0..4 {
-                    s += self.sample(plane, sx - 1, sy + k);
+                    s += nb(sx - 1, sy + k);
                 }
                 (s + 2) >> 2
             }
             (true, false) => {
                 let mut s = 0;
                 for k in 0..4 {
-                    s += self.sample(plane, sx + k, sy - 1);
+                    s += nb(sx + k, sy - 1);
                 }
                 (s + 2) >> 2
             }
@@ -238,6 +323,12 @@ impl<'a> FrameEncoder<'a> {
         if eob == 0 {
             self.set_ctx(plane, x4, y4, 0, 0);
             return;
+        }
+
+        // transform_type (§5.11.39): signaled only for luma when not all-zero and base_q_idx > 0.
+        // Reduced tx set + 4×4 intra ⇒ TX_SET_INTRA_2; symbol 1 = DCT_DCT.
+        if self.qindex > 0 && plane == 0 {
+            self.sym.encode_symbol(1, &cdf::INTRA_TX_TYPE_SET2_4X4_DC);
         }
 
         // eob position (TX_CLASS_2D ⇒ eob_pt context 0).

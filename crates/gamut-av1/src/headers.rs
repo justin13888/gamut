@@ -135,12 +135,24 @@ pub(crate) fn sequence_header_payload(cfg: &Av1StillConfig, width: u32, height: 
     w.into_bytes()
 }
 
-/// Builds the uncompressed frame header for the lossless intra keyframe (AV1 §5.9.2), byte-aligned
+/// Builds the uncompressed frame header for the intra keyframe (AV1 §5.9.2), byte-aligned
 /// (`byte_alignment`, no trailing one — the tile data follows in the same `OBU_FRAME`).
+///
+/// `base_q_idx == 0` selects the lossless path (`CodedLossless`, forced `TX_4X4` WHT, in-loop
+/// filters/`tx_mode` emit nothing). `base_q_idx > 0` selects the lossy path: `TX_MODE_LARGEST`,
+/// in-loop filters present but disabled (all levels 0), and `tx_mode_select = 0`. All quantizer
+/// deltas are 0 and `using_qmatrix = 0`.
 ///
 /// The returned bytes precede the tile (symbol-coded) data; together they form the frame OBU
 /// payload (AV1 §5.10).
-pub(crate) fn frame_header_payload(width: u32, height: u32, mi_cols: u32, mi_rows: u32) -> Vec<u8> {
+pub(crate) fn frame_header_payload(
+    width: u32,
+    height: u32,
+    mi_cols: u32,
+    mi_rows: u32,
+    base_q_idx: u8,
+) -> Vec<u8> {
+    let lossless = base_q_idx == 0;
     let mut w = BitWriter::new();
     // reduced_still_picture_header ⇒ KEY_FRAME, show_frame=1, FrameIsIntra=1 (no bits).
     w.put_bit(1); // disable_cdf_update = 1
@@ -166,17 +178,29 @@ pub(crate) fn frame_header_payload(width: u32, height: u32, mi_cols: u32, mi_row
     }
     // TileColsLog2 == TileRowsLog2 == 0 ⇒ no context_update_tile_id / tile_size_bytes.
 
-    // quantization_params(): base_q_idx = 0 ⇒ CodedLossless.
-    w.put_bits(0, 8); // base_q_idx
+    // quantization_params().
+    w.put_bits(u32::from(base_q_idx), 8); // base_q_idx
     w.put_bit(0); // DeltaQYDc: delta_coded = 0
     w.put_bit(0); // DeltaQUDc: delta_coded = 0
     w.put_bit(0); // DeltaQUAc: delta_coded = 0
     w.put_bit(0); // using_qmatrix = 0
 
     w.put_bit(0); // segmentation_enabled = 0
-    // delta_q_params / delta_lf_params: base_q_idx == 0 ⇒ no bits.
-    // CodedLossless ⇒ loop_filter / cdef / lr / tx_mode emit nothing.
-    // frame_reference_mode / skip_mode_params (intra) ⇒ no bits. allow_warped_motion=0.
+
+    if !lossless {
+        // delta_q_params(): base_q_idx > 0 ⇒ delta_q_present (0). delta_lf_params(): none.
+        w.put_bit(0); // delta_q_present = 0
+        // loop_filter_params(): not CodedLossless ⇒ present, but all levels 0 (deblock disabled).
+        w.put_bits(0, 6); // loop_filter_level[0]
+        w.put_bits(0, 6); // loop_filter_level[1]
+        // levels are 0 ⇒ no loop_filter_level[2]/[3].
+        w.put_bits(0, 3); // loop_filter_sharpness
+        w.put_bit(0); // loop_filter_delta_enabled = 0
+        // cdef_params(): enable_cdef = 0 ⇒ no bits. lr_params(): enable_restoration = 0 ⇒ no bits.
+        w.put_bit(0); // read_tx_mode: tx_mode_select = 0 ⇒ TX_MODE_LARGEST
+        // frame_reference_mode / skip_mode_params (intra) ⇒ no bits. allow_warped_motion = 0.
+    }
+    // CodedLossless ⇒ loop_filter / cdef / lr / tx_mode emit nothing (TxMode = ONLY_4X4).
     w.put_bit(1); // reduced_tx_set = 1
     // global_motion_params / film_grain_params (intra, not present) ⇒ no bits.
 
