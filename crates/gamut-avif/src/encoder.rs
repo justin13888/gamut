@@ -1,29 +1,40 @@
 //! The AVIF still-image encoder: RGB → identity planes → AV1 temporal unit → ISOBMFF container.
 
-use gamut_av1::{EncodedStill, encode_still_lossless_identity};
+use gamut_av1::{EncodedStill, encode_still_intra, encode_still_lossless_identity};
 use gamut_color::Planar8;
 use gamut_core::{Dimensions, Encoder, Result};
 use gamut_isobmff::{Av1cConfig, AvifStillImage, NclxColr, write_avif_still};
 
 /// Encodes images to AVIF still images.
 ///
-/// M0 is lossless 8-bit RGB (identity matrix, 4:4:4); there is no configuration yet. Use
+/// 8-bit RGB in, mapped to AV1 identity-matrix 4:4:4. By default the encode is **lossless**;
+/// [`AvifEncoder::with_qindex`] selects a lossy quantizer (`base_q_idx`, `1..=255`). Use
 /// [`AvifEncoder::encode_rgb8`] for the explicit RGB entry point, or the [`Encoder`] trait (which
 /// assumes the same 8-bit interleaved RGB layout).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AvifEncoder {
-    _private: (),
+    /// AV1 `base_q_idx`: `0` is lossless, `1..=255` is lossy intra (higher = more quantization).
+    qindex: u8,
 }
 
 impl AvifEncoder {
-    /// Creates an encoder.
+    /// Creates an encoder (lossless by default).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets the AV1 quantizer (`base_q_idx`): `0` is lossless, `1..=255` is lossy intra (higher
+    /// quantizes more aggressively for smaller files). Returns the updated encoder for chaining.
+    #[must_use]
+    pub fn with_qindex(mut self, qindex: u8) -> Self {
+        self.qindex = qindex;
+        self
+    }
+
     /// Encodes 8-bit interleaved RGB (`width * height * 3` bytes, row-major, no padding) into a
-    /// complete AVIF file appended to `out`, returning the number of bytes written.
+    /// complete AVIF file appended to `out`, returning the number of bytes written. Lossless unless
+    /// a lossy quantizer was set with [`AvifEncoder::with_qindex`].
     ///
     /// # Errors
     ///
@@ -31,7 +42,11 @@ impl AvifEncoder {
     /// [`gamut_core::Error::Unsupported`] if the dimensions exceed AV1 level 6.0.
     pub fn encode_rgb8(&self, rgb: &[u8], dims: Dimensions, out: &mut Vec<u8>) -> Result<usize> {
         let planes = Planar8::from_rgb8_identity(rgb, dims.width, dims.height)?;
-        let still = encode_still_lossless_identity(&planes)?;
+        let still = if self.qindex == 0 {
+            encode_still_lossless_identity(&planes)?
+        } else {
+            encode_still_intra(&planes, self.qindex)?.0
+        };
         let file = build_avif(&still, dims);
         out.extend_from_slice(&file);
         Ok(file.len())
@@ -110,6 +125,38 @@ mod tests {
             b"meta", b"av1C", b"ispe", b"pixi", b"colr", b"mdat", b"av01",
         ] {
             assert!(f.windows(4).any(|w| w == fourcc), "missing box {fourcc:?}");
+        }
+    }
+
+    #[test]
+    fn lossy_produces_valid_avif_container() {
+        // A lossy quantizer still produces the same well-formed container; only the mdat payload
+        // (the AV1 OBUs) differs. Exercises the with_qindex path across quantizer contexts.
+        let mut rgb = vec![0u8; 48 * 32 * 3];
+        for (i, b) in rgb.iter_mut().enumerate() {
+            *b = (i * 29) as u8;
+        }
+        for q in [4u8, 40, 200] {
+            let mut out = Vec::new();
+            let n = AvifEncoder::new()
+                .with_qindex(q)
+                .encode_rgb8(
+                    &rgb,
+                    Dimensions {
+                        width: 48,
+                        height: 32,
+                    },
+                    &mut out,
+                )
+                .unwrap();
+            assert_eq!(n, out.len());
+            assert_eq!(&out[4..8], b"ftyp");
+            for fourcc in [b"meta", b"av1C", b"ispe", b"mdat", b"av01"] {
+                assert!(
+                    out.windows(4).any(|w| w == fourcc),
+                    "missing box {fourcc:?}"
+                );
+            }
         }
     }
 
