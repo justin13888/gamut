@@ -34,6 +34,56 @@ const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
 /// coarse stand-in for `B_PRED`'s extra mode-signaling cost (true rate-distortion search is issue #32).
 const BPRED_SAD_PENALTY: u32 = 160;
 
+/// Segment-id coding tree (RFC 6386 §10 `mb_segment_tree`): four leaves over two boolean decisions.
+const MB_SEGMENT_TREE: &[i8] = &[2, 4, 0, -1, -2, -3];
+
+/// Per-segment quantizer deltas the encoder assigns (delta mode) when segmentation is enabled — a
+/// coarse spread so distinct macroblock regions get distinct quantizers (refinement is issue #32).
+const SEGMENT_QUANT_DELTAS: [i8; 4] = [-12, -4, 4, 12];
+
+/// Encoder feature toggles for a frame. Defaults to the normal loop filter and no segmentation.
+#[derive(Clone, Copy, Default)]
+pub struct EncodeOptions {
+    /// Use the simple loop filter instead of the normal one.
+    pub simple_filter: bool,
+    /// Emit four quantizer segments, assigned per macroblock by luma mean.
+    pub segmented: bool,
+}
+
+/// The clamped base quantizer index for segment `s` (RFC 6386 §9.3/§10): the absolute or
+/// delta-adjusted value when segmentation is enabled, else the frame base.
+fn segment_q_index(seg: &Segmentation, base_y_ac: u8, s: usize) -> i32 {
+    if !seg.enabled {
+        return i32::from(base_y_ac);
+    }
+    let q = if seg.abs_delta {
+        i32::from(seg.quantizer[s])
+    } else {
+        i32::from(base_y_ac) + i32::from(seg.quantizer[s])
+    };
+    q.clamp(0, 127)
+}
+
+/// The four per-segment quantizer factor sets for a frame (all equal when segmentation is disabled).
+fn segment_quant_factors(header: &Vp8FrameHeader) -> [QuantFactors; 4] {
+    core::array::from_fn(|s| {
+        let base_q = segment_q_index(&header.segmentation, header.quant.y_ac, s);
+        QuantFactors::new(base_q, &header.quant)
+    })
+}
+
+/// The mean luma of macroblock `(mb_x, mb_y)` in a `stride`-wide plane, used to assign its segment.
+fn mb_luma_mean(src: &[u8], stride: usize, mb_x: usize, mb_y: usize) -> u32 {
+    let (px, py) = (mb_x * 16, mb_y * 16);
+    let mut sum = 0u32;
+    for r in 0..16 {
+        for c in 0..16 {
+            sum += u32::from(src[(py + r) * stride + px + c]);
+        }
+    }
+    sum / 256
+}
+
 /// Per-macroblock-column entropy context: whether the prior block in each position carried at least
 /// one non-zero coefficient (RFC 6386 §13.3). A single instance also serves as the running "left"
 /// context, reset at the start of each macroblock row.
@@ -833,20 +883,30 @@ fn decode_mb_tokens(
 /// Uses the normal loop filter.
 #[must_use]
 pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
-    encode_frame_filtered(yuv, quant_index, false)
+    encode_frame_filtered(yuv, quant_index, EncodeOptions::default())
 }
 
-/// Encodes a frame with an explicit loop-filter type — `simple_filter` selects the simple filter,
-/// otherwise the normal filter (what [`encode_frame`] uses). Splitting this out keeps both decoder
-/// filter paths reachable from tests.
+/// Encodes a frame with explicit [`EncodeOptions`] — the loop-filter type and whether to emit
+/// quantizer segments. [`encode_frame`] uses the defaults (normal filter, unsegmented). This lets the
+/// differential oracle drive the alternative encoder paths.
 #[must_use]
-fn encode_frame_filtered(
+pub fn encode_frame_filtered(
     yuv: &Yuv420,
     quant_index: u8,
-    simple_filter: bool,
+    opts: EncodeOptions,
 ) -> (Vec<u8>, FrameBuffers) {
-    let header = frame_header(yuv.width(), yuv.height(), quant_index, simple_filter);
-    let qf = QuantFactors::for_frame(&header.quant);
+    let mut header = frame_header(yuv.width(), yuv.height(), quant_index, opts.simple_filter);
+    if opts.segmented {
+        header.segmentation = Segmentation {
+            enabled: true,
+            update_map: true,
+            abs_delta: false,
+            quantizer: SEGMENT_QUANT_DELTAS,
+            filter_strength: [0; 4],
+            tree_probs: [128, 128, 128],
+        };
+    }
+    let seg_qf = segment_quant_factors(&header);
     let mut recon = FrameBuffers::new(yuv.width(), yuv.height());
 
     let (yw, yh) = (recon.y_stride(), recon.mb_rows * 16);
@@ -856,6 +916,17 @@ fn encode_frame_filtered(
     let vch = Yuv420::chroma_height(yuv.height()) as usize;
     let src_u = pad_plane(yuv.u(), vcw, vch, cw, ch);
     let src_v = pad_plane(yuv.v(), vcw, vch, cw, ch);
+
+    let segment_map: Vec<usize> = (0..recon.mb_rows * recon.mb_cols)
+        .map(|i| {
+            if header.segmentation.enabled {
+                let (mbx, mby) = (i % recon.mb_cols, i / recon.mb_cols);
+                (mb_luma_mean(&src_y, yw, mbx, mby) / 64).min(3) as usize
+            } else {
+                0
+            }
+        })
+        .collect();
 
     let mut modes = BoolEncoder::new();
     header::write_frame_header(&mut modes, &header);
@@ -869,6 +940,8 @@ fn encode_frame_filtered(
         let mut left = EntropyCtx::default();
         let mut left_bmodes = [B_DC_PRED; 4];
         for mb_x in 0..recon.mb_cols {
+            let segment = segment_map[mb_y * recon.mb_cols + mb_x];
+            let qf = seg_qf[segment];
             let uv_mode = select_chroma_mode(&recon, &src_u, &src_v, cw, mb_x, mb_y);
             let u_pred = predict_chroma(&recon.u, recon.c_stride(), mb_x, mb_y, uv_mode);
             let v_pred = predict_chroma(&recon.v, recon.c_stride(), mb_x, mb_y, uv_mode);
@@ -896,6 +969,9 @@ fn encode_frame_filtered(
                 ..Default::default()
             };
 
+            if header.segmentation.update_map {
+                modes.put_tree(MB_SEGMENT_TREE, &header.segmentation.tree_probs, segment);
+            }
             let y_mode = if use_bpred { B_PRED } else { wb_mode };
             modes.put_tree(
                 prediction::KF_YMODE_TREE,
@@ -965,7 +1041,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
             "VP8: multiple token partitions not yet supported",
         ));
     }
-    let qf = QuantFactors::for_frame(&head.quant);
+    let seg_qf = segment_quant_factors(&head);
     let mut residuals = BoolDecoder::new(&data[part0_end..]);
     let mut recon = FrameBuffers::new(u32::from(chunk.width), u32::from(chunk.height));
 
@@ -976,6 +1052,12 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
         let mut left = EntropyCtx::default();
         let mut left_bmodes = [B_DC_PRED; 4];
         for mb_x in 0..recon.mb_cols {
+            let segment = if head.segmentation.update_map {
+                modes.get_tree(MB_SEGMENT_TREE, &head.segmentation.tree_probs)
+            } else {
+                0
+            };
+            let qf = seg_qf[segment];
             let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
             let is_bpred = y_mode == B_PRED;
             let sub_modes = if is_bpred {
@@ -1157,13 +1239,36 @@ mod tests {
         for simple in [true, false] {
             for &q in &[20u8, 60, 110] {
                 let yuv = detailed(48, 32);
-                let (bits, recon) = encode_frame_filtered(&yuv, q, simple);
+                let opts = EncodeOptions {
+                    simple_filter: simple,
+                    segmented: false,
+                };
+                let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
                 let dec = decode_frame(&bits).expect("decode");
                 let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
                 assert_eq!(enc.y(), dec.y(), "luma simple={simple} q{q}");
                 assert_eq!(enc.u(), dec.u(), "u simple={simple} q{q}");
                 assert_eq!(enc.v(), dec.v(), "v simple={simple} q{q}");
             }
+        }
+    }
+
+    #[test]
+    fn segmentation_round_trips_bit_exact() {
+        // Four quantizer segments (assigned by macroblock luma mean) must reconstruct identically in
+        // the encoder and the decoder across a range of base quantizers.
+        for &q in &[10u8, 40, 90] {
+            let yuv = detailed(64, 48);
+            let opts = EncodeOptions {
+                simple_filter: false,
+                segmented: true,
+            };
+            let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
+            let dec = decode_frame(&bits).expect("decode");
+            let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
+            assert_eq!(enc.y(), dec.y(), "luma q{q}");
+            assert_eq!(enc.u(), dec.u(), "u q{q}");
+            assert_eq!(enc.v(), dec.v(), "v q{q}");
         }
     }
 

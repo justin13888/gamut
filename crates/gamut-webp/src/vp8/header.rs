@@ -2,12 +2,12 @@
 //! start code, dimensions) plus the boolean-coded header fields (color space, loop filter, partition
 //! count, quantizer indices, coefficient-probability updates).
 //!
-//! gamut codes key frames only (`key_frame` bit = 0). The encoder emits the minimal header a
-//! still image needs — segmentation and per-macroblock loop-filter adjustments disabled, no
-//! coefficient-probability updates — while the decoder fully parses the quantizer indices and the
-//! token-probability-update record (so it tracks the working [`CoeffProbs`]); the segmentation and
-//! loop-filter-adjustment *bodies* are rejected for now and land with their codec features (P11/P12).
-//! Tracked in `../STATUS.md` section H.
+//! gamut codes key frames only (`key_frame` bit = 0). The header carries the `update_segmentation()`
+//! record (per-segment quantizer/filter adjustments + the segment-id tree probs), the loop-filter
+//! parameters, the partition count, the quantizer indices, and the coefficient-probability-update
+//! record — all parsed by the decoder so it tracks the working [`CoeffProbs`]. Per-macroblock
+//! loop-filter adjustments (`mb_lf_adjustments`) are the one body still rejected. Tracked in
+//! `../STATUS.md` section H.
 
 use gamut_core::{Error, Result};
 
@@ -27,10 +27,15 @@ pub struct Segmentation {
     pub enabled: bool,
     /// Whether the per-macroblock segment map is (re)transmitted this frame.
     pub update_map: bool,
-    /// Per-segment quantizer adjustment (absolute or delta, per the frame's `abs_delta` flag).
+    /// Feature-data mode: `true` = absolute values, `false` = deltas from the frame base
+    /// (`segment_feature_mode`).
+    pub abs_delta: bool,
+    /// Per-segment quantizer adjustment (absolute or delta, per [`abs_delta`](Self::abs_delta)).
     pub quantizer: [i8; 4],
     /// Per-segment loop-filter-level adjustment.
     pub filter_strength: [i8; 4],
+    /// Branch probabilities for the segment-id tree (default 255 each).
+    pub tree_probs: [u8; 3],
 }
 
 /// Loop-filter header parameters (RFC 6386 §9.4).
@@ -231,17 +236,93 @@ fn read_quant_indices(dec: &mut BoolDecoder) -> QuantIndices {
     }
 }
 
+/// Writes the `update_segmentation()` record (RFC 6386 §19.2): the map-update flag, optional feature
+/// data (per-segment quantizer and loop-filter adjustments), and optional segment-id tree probs.
+fn write_update_segmentation(enc: &mut BoolEncoder, seg: &Segmentation) {
+    enc.put_flag(seg.update_map);
+    let update_data = seg.abs_delta || seg.quantizer != [0; 4] || seg.filter_strength != [0; 4];
+    enc.put_flag(update_data);
+    if update_data {
+        enc.put_flag(seg.abs_delta); // segment_feature_mode
+        for q in seg.quantizer {
+            write_segment_feature(enc, q, 7);
+        }
+        for f in seg.filter_strength {
+            write_segment_feature(enc, f, 6);
+        }
+    }
+    if seg.update_map {
+        for p in seg.tree_probs {
+            if p == 255 {
+                enc.put_flag(false); // segment_prob_update: keep the default 255
+            } else {
+                enc.put_flag(true);
+                enc.put_literal(u32::from(p), 8);
+            }
+        }
+    }
+}
+
+/// Writes one signed segment-feature value as `present` flag + magnitude + sign (RFC 6386 §19.2).
+fn write_segment_feature(enc: &mut BoolEncoder, value: i8, bits: u32) {
+    if value == 0 {
+        enc.put_flag(false);
+    } else {
+        enc.put_flag(true);
+        enc.put_literal(u32::from(value.unsigned_abs()), bits);
+        enc.put_flag(value < 0);
+    }
+}
+
+/// Reads the `update_segmentation()` record, mirroring [`write_update_segmentation`].
+fn read_update_segmentation(dec: &mut BoolDecoder) -> Segmentation {
+    let update_map = dec.get_flag();
+    let mut seg = Segmentation {
+        enabled: true,
+        update_map,
+        tree_probs: [255; 3],
+        ..Segmentation::default()
+    };
+    if dec.get_flag() {
+        seg.abs_delta = dec.get_flag();
+        for q in &mut seg.quantizer {
+            *q = read_segment_feature(dec, 7);
+        }
+        for f in &mut seg.filter_strength {
+            *f = read_segment_feature(dec, 6);
+        }
+    }
+    if update_map {
+        for p in &mut seg.tree_probs {
+            if dec.get_flag() {
+                *p = dec.get_literal(8) as u8;
+            }
+        }
+    }
+    seg
+}
+
+/// Reads one signed segment-feature value, mirroring [`write_segment_feature`].
+fn read_segment_feature(dec: &mut BoolDecoder, bits: u32) -> i8 {
+    if dec.get_flag() {
+        let mag = dec.get_literal(bits) as i8;
+        if dec.get_flag() { -mag } else { mag }
+    } else {
+        0
+    }
+}
+
 /// Writes the boolean-coded key-frame header (RFC 6386 §19.2) into the first (control) partition's
-/// encoder `enc`, leaving it open for the per-macroblock records that follow. Emits the minimal
-/// header: segmentation and loop-filter adjustments disabled, no coefficient-probability updates.
+/// encoder `enc`, leaving it open for the per-macroblock records that follow. Loop-filter adjustments
+/// stay disabled (P14 territory); segmentation and coefficient-probability updates are emitted as
+/// configured.
 pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
-    debug_assert!(
-        !header.segmentation.enabled,
-        "P6 encodes segmentation-disabled headers only"
-    );
     enc.put_literal(u32::from(header.color_space), 1);
     enc.put_flag(!header.clamp_required); // clamping_type: 1 = no clamp needed
-    enc.put_flag(false); // segmentation_enabled (body in P12)
+    enc.put_flag(header.segmentation.enabled);
+    if header.segmentation.enabled {
+        write_update_segmentation(enc, &header.segmentation);
+    }
     enc.put_flag(header.loop_filter.simple); // filter_type
     enc.put_literal(u32::from(header.loop_filter.level), 6);
     enc.put_literal(u32::from(header.loop_filter.sharpness), 3);
@@ -261,17 +342,19 @@ pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] for segmentation or loop-filter adjustments (those land with their
-/// codec features in P11/P12).
+/// Returns [`Error::Unsupported`] for per-macroblock loop-filter adjustments (those land with the
+/// remaining header features).
 pub fn read_frame_header(
     chunk: &UncompressedChunk,
     dec: &mut BoolDecoder,
 ) -> Result<(Vp8FrameHeader, CoeffProbs)> {
     let color_space = dec.get_literal(1) as u8;
     let clamp_required = !dec.get_flag();
-    if dec.get_flag() {
-        return Err(Error::Unsupported("VP8: segmentation not yet supported"));
-    }
+    let segmentation = if dec.get_flag() {
+        read_update_segmentation(dec)
+    } else {
+        Segmentation::default()
+    };
     let loop_filter = LoopFilterParams {
         simple: dec.get_flag(),
         level: dec.get_literal(6) as u8,
@@ -301,7 +384,7 @@ pub fn read_frame_header(
         version: chunk.version,
         color_space,
         clamp_required,
-        segmentation: Segmentation::default(),
+        segmentation,
         loop_filter,
         token_partitions,
         quant,
@@ -442,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_segmentation_and_lf_adjust() {
+    fn rejects_unsupported_lf_adjust() {
         let chunk = UncompressedChunk {
             is_key_frame: true,
             version: 0,
@@ -453,17 +536,6 @@ mod tests {
             horizontal_scale: 0,
             vertical_scale: 0,
         };
-        // color_space, clamping, segmentation_enabled = 1.
-        let mut seg = BoolEncoder::new();
-        seg.put_literal(0, 1);
-        seg.put_flag(true);
-        seg.put_flag(true);
-        let bytes = seg.finish();
-        assert!(matches!(
-            read_frame_header(&chunk, &mut BoolDecoder::new(&bytes)),
-            Err(Error::Unsupported(_))
-        ));
-
         // color_space, clamping, segmentation=0, filter_type, level(6), sharpness(3), lf_adj = 1.
         let mut lf = BoolEncoder::new();
         lf.put_literal(0, 1);
@@ -478,5 +550,33 @@ mod tests {
             read_frame_header(&chunk, &mut BoolDecoder::new(&bytes)),
             Err(Error::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn segmentation_round_trips() {
+        let mut header = sample_header();
+        header.segmentation = Segmentation {
+            enabled: true,
+            update_map: true,
+            abs_delta: false,
+            quantizer: [-8, -2, 5, 12],
+            filter_strength: [0; 4],
+            tree_probs: [120, 200, 64],
+        };
+        let chunk = UncompressedChunk {
+            is_key_frame: true,
+            version: 0,
+            show_frame: true,
+            first_partition_size: 0,
+            width: header.width,
+            height: header.height,
+            horizontal_scale: 0,
+            vertical_scale: 0,
+        };
+        let mut enc = BoolEncoder::new();
+        write_frame_header(&mut enc, &header);
+        let bytes = enc.finish();
+        let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes)).unwrap();
+        assert_eq!(decoded.segmentation, header.segmentation);
     }
 }
