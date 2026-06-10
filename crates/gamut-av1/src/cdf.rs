@@ -4047,3 +4047,11 @@ pub static PALETTE_SIZE_8_Y_COLOR: [[u16; 8]; 5] = [
 /// `Palette_Color_Context[PALETTE_MAX_COLOR_CONTEXT_HASH + 1]` (§9.3): maps the color-context hash
 /// to the palette color-index context (0..4). The `-1` entries are hashes that never occur.
 pub static PALETTE_COLOR_CONTEXT: [i8; 9] = [-1, -1, 0, -1, -1, 4, 3, 2, 1];
+
+/// `Default_Segment_Id_Cdf[SEGMENT_ID_CONTEXTS]` (§9.4): the `segment_id` CDF (8 segments), indexed
+/// by the spatial-prediction context derived from the above/left/above-left segment ids.
+pub static SEGMENT_ID: [[u16; 8]; 3] = [
+    [5622, 7893, 16093, 18233, 27809, 28373, 32533, 32768],
+    [14274, 18230, 22557, 24935, 29980, 30851, 32344, 32768],
+    [27527, 28487, 28723, 28890, 32397, 32647, 32679, 32768],
+];

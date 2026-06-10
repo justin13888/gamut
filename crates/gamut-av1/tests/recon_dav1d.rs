@@ -504,3 +504,23 @@ fn palette_blocks_match_dav1d() {
         }
     }
 }
+
+#[test]
+fn segmentation_match_dav1d() {
+    // segmentation_enabled with SEG_LVL_ALT_Q on two segments: every non-skip block is assigned a
+    // spatially-varied segment id (coded via neg_interleave under the spatial-prediction context) and
+    // quantized at CurrentQIndex + the segment's alt-Q delta. Textured content keeps blocks non-skip so
+    // the ids are actually coded and the per-segment quantizer changes the residual; dav1d must derive
+    // the same per-block quantizer and reach the encoder reconstruction byte-for-byte.
+    let textured = |x: u32, y: u32| {
+        let r = (x.wrapping_mul(5).wrapping_add(y.wrapping_mul(3)) % 256) as u8;
+        let g = ((x.wrapping_add(y).wrapping_mul(2)) % 256) as u8;
+        let b = (40 + ((x.wrapping_mul(7) ^ y) % 160)) as u8;
+        [r, g, b]
+    };
+    for &q in &[8u8, 32, 96, 180] {
+        for &(w, h) in &[(32u32, 32u32), (64, 48), (96, 72)] {
+            check(&planes(w, h, textured), q);
+        }
+    }
+}

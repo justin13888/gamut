@@ -206,7 +206,26 @@ pub(crate) fn frame_header_payload(
     w.put_bit(0); // DeltaQUAc: delta_coded = 0
     w.put_bit(0); // using_qmatrix = 0
 
-    w.put_bit(0); // segmentation_enabled = 0
+    // segmentation_params(): on the lossy path, enable per-segment alternate quantizers
+    // (SEG_LVL_ALT_Q) on a couple of segments so blocks can carry their own quantizer.
+    if lossless {
+        w.put_bit(0); // segmentation_enabled = 0
+    } else {
+        w.put_bit(1); // segmentation_enabled = 1
+        // primary_ref_frame == PRIMARY_REF_NONE ⇒ update_map/temporal/data are inferred (no bits).
+        // feature loop: MAX_SEGMENTS (8) × SEG_LVL_MAX (8). Only SEG_LVL_ALT_Q (feature 0) is used.
+        for seg in 0..8usize {
+            for feat in 0..8usize {
+                if let (0, Some(delta)) = (feat, crate::tile::SEG_ALT_Q[seg]) {
+                    w.put_bit(1); // feature_enabled = 1
+                    // feature_value su(1 + Segmentation_Feature_Bits[ALT_Q]=8) = su(9), signed.
+                    w.put_bits((delta & 0x1FF) as u32, 9);
+                    continue;
+                }
+                w.put_bit(0); // feature_enabled = 0
+            }
+        }
+    }
 
     if !lossless {
         // delta_q_params(): base_q_idx > 0 ⇒ delta_q_present = 1, delta_q_res = 0 (deltas in qindex
