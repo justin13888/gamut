@@ -28,3 +28,19 @@ pub(crate) fn decode_rgb8(path: &Path) -> Result<(Vec<u8>, Dimensions), CliError
     let (width, height) = rgb.dimensions();
     Ok((rgb.into_raw(), Dimensions { width, height }))
 }
+
+/// Decodes a supported image file into interleaved 8-bit RGBA, keeping the alpha channel (fully
+/// opaque when the source has none). Returns `width * height * 4` bytes, row-major.
+pub(crate) fn decode_rgba8(path: &Path) -> Result<(Vec<u8>, Dimensions), CliError> {
+    let reader = image::ImageReader::open(path).map_err(|source| CliError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let decoded = reader.decode().map_err(|source| CliError::Decode {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok((rgba.into_raw(), Dimensions { width, height }))
+}

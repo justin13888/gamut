@@ -8,11 +8,13 @@
 //! implement. The implementation status and milestones are tracked in `STATUS.md`.
 //!
 //! gamut is image-first, so only the intra/key-frame still-image subset of VP8 is in scope (no
-//! inter-frame prediction, motion, or sequences). The **VP8L lossless** path is fully implemented:
-//! [`WebpDecoder`] decodes any conformant VP8L stream (every transform, LZ77, the color cache, and
-//! meta prefix codes), and [`WebpEncoder::lossless`] emits a conformant bit-exact-lossless stream.
-//! The lossy VP8 path still returns [`gamut_core::Error::Unsupported`]. Every component is validated
-//! against libwebp as an oracle, in both directions (see the crate's `tests/`).
+//! inter-frame prediction, motion, or sequences). Both codecs are fully implemented, for RGB
+//! ([`WebpEncoder::encode_rgb8`]) and RGBA ([`WebpEncoder::encode_rgba8`]): **VP8L lossless**
+//! (every transform, LZ77, the color cache, meta prefix codes) and **VP8 lossy** key-frame intra
+//! (DC/V/H/TM and per-4×4 B_PRED prediction, the simple and normal loop filters, segmentation, 1/2/4/8
+//! token partitions, and skip). Transparent lossy images use the extended (`VP8X`) container with an
+//! `ALPH` alpha chunk. Every component is validated against libwebp as an oracle in both directions
+//! (bit-exact at the YUV-plane level for lossy), plus a malformed-input robustness corpus.
 #![forbid(unsafe_code)]
 
 mod config;

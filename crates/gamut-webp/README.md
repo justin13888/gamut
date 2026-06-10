@@ -27,16 +27,23 @@ WebP is one of gamut's three initial focus formats (alongside AVIF and JPEG).
 
 The public API follows the same shape as [`gamut-avif`](../gamut-avif): a `WebpEncoder` implementing
 [`gamut_core::Encoder`] and a `WebpDecoder` implementing [`gamut_core::Decoder`], both reachable
-through the umbrella crate's `webp` feature. **VP8L lossless** encode and decode are fully
-implemented — `WebpEncoder::lossless` emits a conformant bit-exact stream, and `WebpDecoder` decodes
-any conformant VP8L stream. The lossy VP8 path returns [`gamut_core::Error::Unsupported`] for now.
+through the umbrella crate's `webp` feature. **Both codecs are fully implemented**, for RGB and RGBA:
+
+- **VP8L lossless** — `WebpEncoder::lossless` emits a conformant bit-exact stream; `WebpDecoder`
+  decodes any conformant VP8L stream.
+- **VP8 lossy** — `WebpEncoder::lossy(quality)` runs the full intra key-frame codec (DC/V/H/TM and
+  per-4×4 B_PRED prediction, the simple and normal loop filters, segmentation, token partitions, and
+  skip); `WebpDecoder` decodes any conformant key frame.
+- **Alpha** — `encode_rgba8` / `decode_to_rgba8`. A transparent lossy image uses the extended
+  (`VP8X`) format with an `ALPH` chunk (raw or lossless); an opaque one stays a simple file.
 
 ## Status
 
 The intra-frame still-image surface and its milestones (M0 VP8L lossless → M1 VP8L full → M2 VP8
-lossy → extended container) are tracked component-by-component in [`STATUS.md`](STATUS.md). Every
-implemented component is validated against libwebp as an oracle via `libwebp-sys` (bit-exact for
-lossless), backed by internal forward/inverse round-trips and the in-crate decoder.
+lossy → M3 extended container + alpha) are tracked component-by-component in [`STATUS.md`](STATUS.md).
+Every component is validated against libwebp as an oracle via `libwebp-sys`, **bit-exact in both
+directions** (gamut↔libwebp, at the YUV-plane level for lossy), backed by internal forward/inverse
+round-trips, the in-crate decoder, and a malformed-input robustness corpus.
 
 **Non-core feature paths** are decided in [`STATUS.md`](STATUS.md#scope-decisions--non-core-feature-paths):
 alpha/transparency (`VP8X` + `ALPH`) and color/metadata chunks (`ICCP` ICC profiles, `EXIF`, `XMP `)
