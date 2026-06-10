@@ -93,7 +93,7 @@ not a contract:
 | segmentation (8 segments, features, temporal pred) | §5.9.14 | ☐ | M1 |
 | delta_q_params / delta_lf_params | §5.9.17/.18 | ☐ | M1 |
 | read_tx_mode → ONLY_4X4 (lossless) | §5.9.21 | ✅ | M0 |
-| TX_MODE_SELECT / TX_MODE_LARGEST | §5.9.21 | ☐ | M1 |
+| TX_MODE_SELECT / TX_MODE_LARGEST | §5.9.21 | ✅ (TX_MODE_SELECT, lossy intra) | M1 |
 | `reduced_tx_set`=1 | §5.9.2 | ✅ | M0 |
 | frame_reference_mode / skip_mode_params (intra → off) | §5.9.22/.23 | ✅ (off) | M0 |
 | global_motion_params | §5.9.24 | ☐ | M6 |
@@ -111,7 +111,7 @@ not a contract:
 | `skip` = 1 (no-residual / all-zero blocks) | §5.11.11 | ☐ | M1 |
 | intra_segment_id (segment 0) | §5.11.8/.9 | ✅ | M0 |
 | per-block read_cdef / read_delta_qindex / read_delta_lf | §5.11.56/.12/.13 | ☐ | M1 |
-| read_tx_size / read_var_tx_size (TX_MODE_LARGEST → tx = block) | §5.11.15-.17 | ✅ (4×4 + 8×8 + 16×16 + 32×32 blocks) | M0/M1 |
+| read_tx_size / read_var_tx_size (per-block tx_depth) | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square tx_depth 0..2) | M0/M1 |
 
 ## D. AV1 — intra prediction (§7.11.2)
 

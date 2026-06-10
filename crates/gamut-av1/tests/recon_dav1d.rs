@@ -380,3 +380,37 @@ fn transform_32x32_blocks_match_dav1d() {
         }
     }
 }
+
+#[test]
+fn variable_tx_size_match_dav1d() {
+    // Moderately-textured smooth blocks (low enough range to stay PARTITION_NONE, high enough that
+    // the encoder splits the transform): under TX_MODE_SELECT a ≥8×8 luma block signals tx_depth and
+    // uses one block-size prediction mode with several smaller square sub-transforms, while 4:4:4
+    // chroma keeps one block-size transform. Exercises tx_depth 1 and 2 across 8×8/16×16/32×32 blocks,
+    // the per-transform-block BlockDecoded update (directional sub-transforms see their just-coded
+    // siblings), the luma txb_skip neighbour context, and the per-plane deblock (luma at the sub-tx
+    // size, chroma at the block size). Byte-equality with dav1d validates all of it.
+    let ramp = |x: u32, y: u32| {
+        let v = (48 + ((x % 32 + y % 32) as i32) / 2).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    let blocky = |x: u32, y: u32| {
+        let v = (40 + ((x % 16 + y % 16) as i32)).clamp(0, 255);
+        [
+            (v / 2 + 80).clamp(0, 255) as u8,
+            v as u8,
+            (200 - v / 2).clamp(0, 255) as u8,
+        ]
+    };
+    for f in [&ramp as &dyn Fn(u32, u32) -> [u8; 3], &blocky] {
+        for &q in &[14u8, 48, 110, 200] {
+            for &(w, h) in &[(64u32, 64u32), (40, 40), (96, 72)] {
+                check(&planes(w, h, f), q);
+            }
+        }
+    }
+}
