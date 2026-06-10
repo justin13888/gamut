@@ -126,6 +126,46 @@ pub fn libwebp_encode_lossless_rgba(rgba: &[u8], width: u32, height: u32) -> Vec
     bytes
 }
 
+/// Encodes an interleaved RGBA image to a lossy (VP8) WebP file with libwebp at `quality` (`0..=100`),
+/// returning the file bytes. This drives the reverse-direction oracle: a real libwebp encoder's VP8
+/// stream (with its own filter, segmentation, and probability choices) that gamut must decode.
+///
+/// `rgba` must be exactly `width * height * 4` bytes. Panics (these are tests) on a bad buffer size or
+/// a libwebp error.
+#[must_use]
+pub fn libwebp_encode_lossy_rgba(rgba: &[u8], width: u32, height: u32, quality: f32) -> Vec<u8> {
+    let expected = width as usize * height as usize * 4;
+    assert_eq!(
+        rgba.len(),
+        expected,
+        "RGBA buffer is not width*height*4 bytes"
+    );
+
+    let mut out_ptr: *mut u8 = std::ptr::null_mut();
+    let stride = width as c_int * 4;
+    // SAFETY: `rgba` is valid for `expected` bytes; `out_ptr` receives a libwebp-allocated buffer we
+    // copy out and free below. The dimensions/stride describe `rgba` exactly.
+    let size = unsafe {
+        libwebp_sys::WebPEncodeRGBA(
+            rgba.as_ptr(),
+            width as c_int,
+            height as c_int,
+            stride,
+            quality,
+            &mut out_ptr,
+        )
+    };
+    assert!(
+        size != 0 && !out_ptr.is_null(),
+        "libwebp lossy encode failed"
+    );
+    // SAFETY: libwebp guarantees `out_ptr` points to `size` valid bytes.
+    let bytes = unsafe { slice::from_raw_parts(out_ptr, size) }.to_vec();
+    // SAFETY: `out_ptr` was allocated by libwebp and must be released with WebPFree.
+    unsafe { libwebp_sys::WebPFree(out_ptr.cast::<c_void>()) };
+    bytes
+}
+
 /// Reads the canvas dimensions of a WebP file with libwebp, or `None` if it is not a valid WebP.
 #[must_use]
 pub fn libwebp_get_info(webp: &[u8]) -> Option<(u32, u32)> {

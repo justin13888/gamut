@@ -1,13 +1,13 @@
-//! Differential oracle (libwebp) for the VP8L lossless decoder.
+//! Differential oracle (libwebp) for the WebP codecs — lossless (VP8L) and lossy (VP8).
 //!
-//! libwebp is the third-party reference: its lossless encoder freely uses predictors, the color
-//! transform, LZ77 backward references, and the color cache, so decoding its output through gamut
-//! exercises the whole decode surface. The checks here are:
-//!   - libwebp self-round-trip (proves the FFI harness + linked libwebp build);
-//!   - **libwebp encode → gamut decode == source** (the native decoder reproduces libwebp's output).
-//!
-//! The encoder-side differential (gamut encode → libwebp decode == source) lands with the encoder
-//! commits.
+//! libwebp is the third-party reference. Lossy is checked at the YUV-plane level (RGB↔YCbCr is
+//! implementation-defined and off the bit-exact gate), in both directions:
+//!   - **gamut encode → libwebp decode == gamut decode**, across every encoder feature (prediction,
+//!     loop filters, segmentation, token partitions, skip) — pinning gamut's streams as conformant;
+//!   - **libwebp encode → gamut decode == libwebp decode**, bit-exact — pinning gamut's decoder
+//!     against the full feature surface a production encoder emits (per-segment filter levels,
+//!     probability updates, …);
+//!   - the lossless round-trips (libwebp self-round-trip; gamut↔libwebp) that shipped with VP8L.
 
 mod common;
 
@@ -349,6 +349,49 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
                 lib.v.as_slice(),
                 "V mismatch at {w}x{h} q{quant_index}"
             );
+        }
+    }
+}
+
+/// Extracts the `VP8 ` (lossy) chunk payload from a RIFF/WebP file.
+fn vp8_payload(webp: &[u8]) -> Vec<u8> {
+    use gamut_riff::{RiffReader, WebpChunkId};
+    RiffReader::new(webp)
+        .expect("riff")
+        .filter_map(Result::ok)
+        .find(|c| matches!(WebpChunkId::from(c.fourcc), WebpChunkId::Vp8))
+        .expect("VP8 chunk")
+        .payload
+        .to_vec()
+}
+
+#[test]
+fn gamut_decodes_libwebp_lossy_bit_exact() {
+    // The reverse-direction conformance gate: a real libwebp lossy encoder emits VP8 streams using its
+    // own loop filter, segmentation, token-probability updates, and skip choices. gamut's native
+    // decoder must reproduce libwebp's own YUV output bit-for-bit — proving it handles the full
+    // feature surface a production encoder actually emits, not just gamut's own streams.
+    use common::{libwebp_decode_yuv, libwebp_encode_lossy_rgba};
+
+    for &(w, h) in &[
+        (16u32, 16u32),
+        (32, 32),
+        (64, 48),
+        (49, 33),
+        (80, 17),
+        (255, 3),
+    ] {
+        for q in [6.0f32, 35.0, 70.0, 100.0] {
+            let rgba = pattern_rgba(w, h);
+            let webp = libwebp_encode_lossy_rgba(&rgba, w, h, q);
+            let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
+                .expect("gamut decode")
+                .to_yuv420();
+            let lib = libwebp_decode_yuv(&webp);
+            assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
+            assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{q}");
+            assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{q}");
+            assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{q}");
         }
     }
 }
