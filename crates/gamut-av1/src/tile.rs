@@ -181,6 +181,8 @@ pub(crate) struct FrameEncoder<'a> {
     mi_bsl: Vec<u8>,
     /// The luma intra mode (`YMode`) chosen for each MI cell, for the `intra_frame_y_mode` context.
     mi_ymode: Vec<u8>,
+    /// The `skip` flag of the block covering each MI cell, for the `skip` context (§8.3.2).
+    mi_skip: Vec<u8>,
     /// `Tx_Width_Log2` of the transform covering each MI cell (`2` for 4×4, `3` for 8×8), consumed by
     /// the deblocking loop filter to locate transform edges and pick the filter size.
     tx_log2: Vec<u8>,
@@ -239,6 +241,7 @@ impl<'a> FrameEncoder<'a> {
             left_dc: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_ymode: vec![0; mi_cols * mi_rows],
+            mi_skip: vec![0; mi_cols * mi_rows],
             tx_log2: vec![2; mi_cols * mi_rows],
             sb_r: 0,
             sb_c: 0,
@@ -307,7 +310,13 @@ impl<'a> FrameEncoder<'a> {
                 self.qindex,
             );
             // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15).
-            planes = crate::filter::cdef(&planes, self.coded_w, self.qindex);
+            planes = crate::filter::cdef(
+                &planes,
+                self.coded_w,
+                &self.mi_skip,
+                self.mi_cols,
+                self.qindex,
+            );
         }
         let recon = Reconstruction {
             planes,
@@ -422,6 +431,37 @@ impl<'a> FrameEncoder<'a> {
         self.set_quant(nq);
     }
 
+    /// Context for the `skip` flag (§8.3.2): `aboveSkip + leftSkip` from the per-MI `mi_skip` map.
+    fn skip_ctx(&self, r: usize, c: usize) -> usize {
+        let above = r > 0 && self.mi_skip[(r - 1) * self.mi_cols + c] != 0;
+        let left = c > 0 && self.mi_skip[r * self.mi_cols + (c - 1)] != 0;
+        usize::from(above) + usize::from(left)
+    }
+
+    /// Whether a lossy block at MI `(r, c)` can be coded with `skip = 1` (no residual): every plane is
+    /// flat over the block and its `DC_PRED` from the reconstruction exactly equals that value, so the
+    /// residual is identically zero. For such a block `skip = 1` and `skip = 0` reconstruct to the
+    /// same samples (prediction), so signalling `skip` is a lossless bit saving. The luma mode a flat
+    /// block selects is `DC_PRED` with no CfL / filter-intra, so the predicted samples equal the
+    /// source — the chosen `skip` is therefore bit-exact regardless of the (deterministic) mode.
+    fn block_is_skippable(&self, r: usize, c: usize, bw: usize) -> bool {
+        let (sx, sy) = (c * 4, r * 4);
+        for plane in 0..3 {
+            let v0 = self.sample(plane, sx, sy);
+            for i in 0..bw {
+                for j in 0..bw {
+                    if self.sample(plane, sx + j, sy + i) != v0 {
+                        return false;
+                    }
+                }
+            }
+            if self.dc_pred(plane, sx, sy, bw) != v0 {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Source-luma range (max − min) over the `bw × bw` block at coded `(sx, sy)`. Used by the
     /// partition and transform-depth heuristics.
     fn luma_range(&self, sx: usize, sy: usize, bw: usize) -> i32 {
@@ -479,7 +519,13 @@ impl<'a> FrameEncoder<'a> {
         // intra_frame_mode_info: skip=0 (ctx 0), then y_mode and uv_mode. The lossless path always
         // predicts DC_PRED; the lossy path searches the non-directional luma modes (plus directional
         // and filter-intra) and signals the choice with the above/left mode context.
-        self.sym.encode_symbol(0, &cdf::SKIP[0]);
+        // read_skip (§5.11.11): a lossy block whose residual is identically zero (flat + perfectly
+        // DC-predicted) is coded with skip = 1 — no residual, reconstruction = prediction. The context
+        // is the above/left skip flags.
+        let skip = self.qindex > 0 && self.block_is_skippable(r, c, bw);
+
+        let sctx = self.skip_ctx(r, c);
+        self.sym.encode_symbol(usize::from(skip), &cdf::SKIP[sctx]);
         // read_delta_qindex (§5.11.12): the first coded block of each superblock signals delta_q and
         // updates the active quantizer; later blocks in the superblock inherit it. (read_cdef and
         // read_delta_lf code no bits here: cdef_bits = 0 and delta_lf_present = 0.)
@@ -586,6 +632,7 @@ impl<'a> FrameEncoder<'a> {
                     self.mi_bsl[rr * self.mi_cols + cc] = bsl;
                     self.mi_ymode[rr * self.mi_cols + cc] = y_mode;
                     self.tx_log2[rr * self.mi_cols + cc] = txl;
+                    self.mi_skip[rr * self.mi_cols + cc] = u8::from(skip);
                 }
             }
         }
@@ -622,7 +669,7 @@ impl<'a> FrameEncoder<'a> {
                 let mut sx = c * 4;
                 while sx < c * 4 + bw {
                     if sx < self.coded_w && sy < self.coded_h {
-                        self.transform_block(plane, sx, sy, bw, ptx, pred);
+                        self.transform_block(plane, sx, sy, bw, ptx, pred, skip);
                     }
                     // BlockDecoded (§5.11.34) is updated after each *transform* block (not the whole
                     // block), so a later luma sub-transform's directional prediction sees the
@@ -647,6 +694,7 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn transform_block(
         &mut self,
         plane: usize,
@@ -655,6 +703,7 @@ impl<'a> FrameEncoder<'a> {
         block_w: usize,
         tx_size: TxSize,
         desc: Pred,
+        skip: bool,
     ) {
         // Lossless: forced 4×4 Walsh–Hadamard, DC prediction, source-as-recon (M0 path, unchanged).
         if self.qindex == 0 {
@@ -694,6 +743,18 @@ impl<'a> FrameEncoder<'a> {
                 p
             }
         };
+        // skip = 1: no residual is coded; the reconstruction is the (clipped) prediction, and the
+        // neighbour level/dc contexts are reset to 0 (`reset_block_context`, §5.11.10).
+        if skip {
+            for i in 0..n {
+                for j in 0..n {
+                    self.recon[plane][(sy + i) * self.coded_w + (sx + j)] =
+                        pred[i * n + j].clamp(0, 255) as u8;
+                }
+            }
+            self.set_ctx(plane, sx >> 2, sy >> 2, n / 4, 0, 0);
+            return;
+        }
         let mut res = vec![0i32; n * n];
         for i in 0..n {
             for j in 0..n {

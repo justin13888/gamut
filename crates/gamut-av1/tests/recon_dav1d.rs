@@ -436,3 +436,26 @@ fn delta_q_match_dav1d() {
         }
     }
 }
+
+#[test]
+fn skip_blocks_match_dav1d() {
+    // Large flat regions: interior blocks are perfectly DC-predicted (residual identically zero), so
+    // the encoder codes them with skip = 1 (no residual; reconstruction = prediction). This exercises
+    // the skip flag + its neighbour context, the reset of the level/dc coefficient contexts, and the
+    // CDEF rule that an all-skip 8×8 block is not filtered (§7.15.1). A solid colour makes most
+    // interior blocks skip; a two-region split adds skip/non-skip neighbour-context variety.
+    let solid = |_x: u32, _y: u32| [180u8, 90, 40];
+    let halves = |x: u32, _y: u32| {
+        if x < 48 {
+            [180u8, 90, 40]
+        } else {
+            [60, 150, 200]
+        }
+    };
+    for &q in &[16u8, 48, 110, 200] {
+        for &(w, h) in &[(64u32, 64u32), (96, 80), (128, 96)] {
+            check(&planes(w, h, solid), q);
+            check(&planes(w, h, halves), q);
+        }
+    }
+}
