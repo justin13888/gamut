@@ -131,7 +131,7 @@ not a contract:
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | inverse 4×4 Walsh-Hadamard (lossless) + matched forward | §7.13.2.10 | ✅ | M0 |
-| inverse DCT 4/8/16/32/64 + forward DCT | §7.13.2.2/.3 | ☐ | M1 |
+| inverse DCT 4/8/16/32/64 + forward DCT | §7.13.2.2/.3 | ✅ (4/8/16/32/64, used through TX_64X64) | M1 |
 | inverse ADST4/8/16 (+FLIPADST) + forward | §7.13.2.4-.9 | ☐ | M1 |
 | identity transform 4/8/16/32 (IDTX / V_ / H_) | §7.13.2.11-.15 | ☐ | M1 |
 | 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ☐ | M1 |
@@ -158,9 +158,9 @@ not a contract:
 | full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ☐ | M1/M6 |
 | CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ☐ | M1 |
 | `coeffs()` TX_4X4: txb_skip/eob/base/br/sign/dc_sign/golomb | §5.11.39 | ✅ | M0 |
-| `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8 + 16×16 + 32×32, 32×32 DCT-only) | M1 |
+| `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8 + 16×16 + 32×32 + 64×64, 32×32/64×64 DCT-only) | M1 |
 | scan table `Default_Scan_4x4` + context-offset tables | §9.2/§9.3/§8.3.2 | ✅ | M0 |
-| all scan tables (default/col/row per tx size) | §9.2 | ✅ (4×4 + 8×8 + 16×16 + 32×32 default) | M1 |
+| all scan tables (default/col/row per tx size) | §9.2 | ✅ (4×4 + 8×8 + 16×16 + 32×32 + 64×64 default) | M1 |
 
 ## H. AV1 — in-loop filters & post (§7.14-§7.18; all bypassed under CodedLossless)
 

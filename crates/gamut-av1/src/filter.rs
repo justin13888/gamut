@@ -240,12 +240,13 @@ pub(crate) fn deblock(
         let is_luma = plane_idx == 0;
         let size_cap = if is_luma { 16 } else { 8 };
         // Transform width/height (log2) for this plane at MI `cell`: luma uses the signaled tx size;
-        // 4:4:4 chroma uses the block-size transform (`mi_bsl + 2`).
+        // 4:4:4 chroma uses the block-size transform (`mi_bsl + 2`) capped at TX_32X32 (chroma never
+        // uses TX_64X64, so a 64×64 block's chroma is a raster of 32×32 transforms with an edge at 32).
         let txlog2 = |cell: usize| -> u32 {
             if is_luma {
                 u32::from(tx_log2[cell])
             } else {
-                u32::from(mi_bsl[cell]) + 2
+                (u32::from(mi_bsl[cell]) + 2).min(5)
             }
         };
 
