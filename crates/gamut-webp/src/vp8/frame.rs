@@ -7,8 +7,8 @@
 //! DC/V/H/TM **or** per-4×4 `B_PRED` (ten directional submodes), and chroma whole-block 8×8 DC/V/H/TM;
 //! the encoder picks the lowest-SAD candidate per macroblock. A whole-block macroblock carries a Y2
 //! (luma-DC WHT) block; a `B_PRED` one codes luma DC inline (plane 3). The reconstruction is deblocked
-//! by the simple or normal loop filter as a final pass. One token partition; per-MB skip, token
-//! partitions, and the remaining header features land later. STATUS.md section L.
+//! by the simple or normal loop filter as a final pass. Tokens may be split across 1/2/4/8 partitions
+//! by macroblock row. Per-MB skip and the remaining header features land later. STATUS.md section L.
 
 // The macroblock/block math indexes several fixed-size arrays in lock-step (and over partial ranges
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
@@ -41,13 +41,26 @@ const MB_SEGMENT_TREE: &[i8] = &[2, 4, 0, -1, -2, -3];
 /// coarse spread so distinct macroblock regions get distinct quantizers (refinement is issue #32).
 const SEGMENT_QUANT_DELTAS: [i8; 4] = [-12, -4, 4, 12];
 
-/// Encoder feature toggles for a frame. Defaults to the normal loop filter and no segmentation.
-#[derive(Clone, Copy, Default)]
+/// Encoder feature toggles for a frame. Defaults to the normal loop filter, no segmentation, and a
+/// single token partition.
+#[derive(Clone, Copy)]
 pub struct EncodeOptions {
     /// Use the simple loop filter instead of the normal one.
     pub simple_filter: bool,
     /// Emit four quantizer segments, assigned per macroblock by luma mean.
     pub segmented: bool,
+    /// Number of DCT token partitions (1, 2, 4, or 8); macroblock rows are assigned round-robin.
+    pub partitions: u8,
+}
+
+impl Default for EncodeOptions {
+    fn default() -> Self {
+        Self {
+            simple_filter: false,
+            segmented: false,
+            partitions: 1,
+        }
+    }
 }
 
 /// The clamped base quantizer index for segment `s` (RFC 6386 §9.3/§10): the absolute or
@@ -906,6 +919,8 @@ pub fn encode_frame_filtered(
             tree_probs: [128, 128, 128],
         };
     }
+    header.token_partitions = opts.partitions.max(1);
+    let n = header.token_partitions as usize;
     let seg_qf = segment_quant_factors(&header);
     let mut recon = FrameBuffers::new(yuv.width(), yuv.height());
 
@@ -930,7 +945,7 @@ pub fn encode_frame_filtered(
 
     let mut modes = BoolEncoder::new();
     header::write_frame_header(&mut modes, &header);
-    let mut residuals = BoolEncoder::new();
+    let mut residuals: Vec<BoolEncoder> = (0..n).map(|_| BoolEncoder::new()).collect();
     let probs = &tokens::DEFAULT_COEFF_PROBS;
 
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
@@ -999,7 +1014,7 @@ pub fn encode_frame_filtered(
 
             filter_interior[mb_y * recon.mb_cols + mb_x] = use_bpred || mb_has_coeffs(&levels);
             encode_mb_tokens(
-                &mut residuals,
+                &mut residuals[mb_y % n],
                 &mut above[mb_x],
                 &mut left,
                 probs,
@@ -1014,12 +1029,47 @@ pub fn encode_frame_filtered(
     apply_loop_filter(&mut recon, &header.loop_filter, &filter_interior);
 
     let part0 = modes.finish();
-    let part1 = residuals.finish();
-    let mut out = Vec::with_capacity(UNCOMPRESSED_CHUNK_LEN + part0.len() + part1.len());
+    let token_parts: Vec<Vec<u8>> = residuals.into_iter().map(BoolEncoder::finish).collect();
+    let mut out = Vec::new();
     header::write_uncompressed_chunk(&header, part0.len() as u32, &mut out);
     out.extend_from_slice(&part0);
-    out.extend_from_slice(&part1);
+    // The first N-1 token-partition sizes are stored as 3-byte little-endian prefixes (§9.5); the
+    // last partition's size is implied by the remainder.
+    for part in &token_parts[..n - 1] {
+        let len = part.len() as u32;
+        out.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8]);
+    }
+    for part in &token_parts {
+        out.extend_from_slice(part);
+    }
     (out, recon)
+}
+
+/// Splits the token-partition section (everything after the control partition) into `n` boolean
+/// decoders (RFC 6386 §9.5): the first `n-1` partition sizes are 3-byte little-endian prefixes, the
+/// last partition's size is the remainder.
+fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>> {
+    let sizes_len = (n - 1) * 3;
+    if data.len() < sizes_len {
+        return Err(Error::InvalidInput("VP8: token-partition sizes truncated"));
+    }
+    let mut decoders = Vec::with_capacity(n);
+    let mut offset = sizes_len;
+    for i in 0..n {
+        let size = if i < n - 1 {
+            let s = &data[i * 3..i * 3 + 3];
+            usize::from(s[0]) | (usize::from(s[1]) << 8) | (usize::from(s[2]) << 16)
+        } else {
+            data.len() - offset
+        };
+        let end = offset
+            .checked_add(size)
+            .filter(|&e| e <= data.len())
+            .ok_or(Error::InvalidInput("VP8: token partition exceeds frame"))?;
+        decoders.push(BoolDecoder::new(&data[offset..end]));
+        offset = end;
+    }
+    Ok(decoders)
 }
 
 /// Decodes a VP8 key-frame bitstream (the `VP8 ` chunk payload) into reconstructed planes.
@@ -1027,7 +1077,7 @@ pub fn encode_frame_filtered(
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] for a malformed stream or [`Error::Unsupported`] for features not
-/// yet implemented (B_PRED, multiple token partitions, …).
+/// yet implemented (per-macroblock loop-filter adjustments, …).
 pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let chunk = header::read_uncompressed_chunk(data)?;
     let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
@@ -1036,13 +1086,9 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     }
     let mut modes = BoolDecoder::new(&data[UNCOMPRESSED_CHUNK_LEN..part0_end]);
     let (head, coeff_probs) = header::read_frame_header(&chunk, &mut modes)?;
-    if head.token_partitions != 1 {
-        return Err(Error::Unsupported(
-            "VP8: multiple token partitions not yet supported",
-        ));
-    }
     let seg_qf = segment_quant_factors(&head);
-    let mut residuals = BoolDecoder::new(&data[part0_end..]);
+    let n = head.token_partitions as usize;
+    let mut residuals = split_token_partitions(&data[part0_end..], n)?;
     let mut recon = FrameBuffers::new(u32::from(chunk.width), u32::from(chunk.height));
 
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
@@ -1074,7 +1120,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
                 let above_right = above_right_source(&recon, mb_x, mb_y);
                 decode_bpred_luma(
                     &mut recon,
-                    &mut residuals,
+                    &mut residuals[mb_y % n],
                     &mut above[mb_x],
                     &mut left,
                     &coeff_probs,
@@ -1086,7 +1132,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
                 );
                 let mut levels = MbLevels::default();
                 decode_chroma_tokens(
-                    &mut residuals,
+                    &mut residuals[mb_y % n],
                     &mut above[mb_x],
                     &mut left,
                     &coeff_probs,
@@ -1097,8 +1143,12 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
                 filter_interior[mb_y * recon.mb_cols + mb_x] = true; // B_PRED always filters interiors
             } else {
                 let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
-                let levels =
-                    decode_mb_tokens(&mut residuals, &mut above[mb_x], &mut left, &coeff_probs);
+                let levels = decode_mb_tokens(
+                    &mut residuals[mb_y % n],
+                    &mut above[mb_x],
+                    &mut left,
+                    &coeff_probs,
+                );
                 reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
                 reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
                 reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
@@ -1242,6 +1292,7 @@ mod tests {
                 let opts = EncodeOptions {
                     simple_filter: simple,
                     segmented: false,
+                    partitions: 1,
                 };
                 let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
                 let dec = decode_frame(&bits).expect("decode");
@@ -1262,6 +1313,7 @@ mod tests {
             let opts = EncodeOptions {
                 simple_filter: false,
                 segmented: true,
+                partitions: 1,
             };
             let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
             let dec = decode_frame(&bits).expect("decode");
@@ -1269,6 +1321,26 @@ mod tests {
             assert_eq!(enc.y(), dec.y(), "luma q{q}");
             assert_eq!(enc.u(), dec.u(), "u q{q}");
             assert_eq!(enc.v(), dec.v(), "v q{q}");
+        }
+    }
+
+    #[test]
+    fn token_partitions_round_trip_bit_exact() {
+        // 1/2/4/8 token partitions must each reconstruct identically; a tall image routes macroblock
+        // rows across all eight partitions.
+        for partitions in [1u8, 2, 4, 8] {
+            let yuv = detailed(32, 160);
+            let opts = EncodeOptions {
+                simple_filter: false,
+                segmented: false,
+                partitions,
+            };
+            let (bits, recon) = encode_frame_filtered(&yuv, 30, opts);
+            let dec = decode_frame(&bits).expect("decode");
+            let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
+            assert_eq!(enc.y(), dec.y(), "luma p{partitions}");
+            assert_eq!(enc.u(), dec.u(), "u p{partitions}");
+            assert_eq!(enc.v(), dec.v(), "v p{partitions}");
         }
     }
 

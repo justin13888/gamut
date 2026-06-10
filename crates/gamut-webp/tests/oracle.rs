@@ -240,19 +240,20 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
     use gamut_riff::write_simple_lossy;
     use gamut_webp::vp8::frame::{EncodeOptions, decode_frame, encode_frame_filtered};
 
+    let base = EncodeOptions::default();
     let cases = [
         (
             "simple-filter",
             EncodeOptions {
                 simple_filter: true,
-                segmented: false,
+                ..base
             },
         ),
         (
             "segmented",
             EncodeOptions {
-                simple_filter: false,
                 segmented: true,
+                ..base
             },
         ),
         (
@@ -260,11 +261,42 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
             EncodeOptions {
                 simple_filter: true,
                 segmented: true,
+                ..base
+            },
+        ),
+        (
+            "partitions-2",
+            EncodeOptions {
+                partitions: 2,
+                ..base
+            },
+        ),
+        (
+            "partitions-4",
+            EncodeOptions {
+                partitions: 4,
+                ..base
+            },
+        ),
+        (
+            "partitions-8",
+            EncodeOptions {
+                partitions: 8,
+                ..base
+            },
+        ),
+        (
+            "everything",
+            EncodeOptions {
+                simple_filter: true,
+                segmented: true,
+                partitions: 4,
             },
         ),
     ];
     for (label, opts) in cases {
-        for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33)] {
+        // (33, 145) spans ten macroblock rows, so the eight-partition cases route across every one.
+        for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33), (33, 145)] {
             for &q in &[12u8, 48] {
                 let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
                 let webp = write_simple_lossy(&payload);
