@@ -6,8 +6,9 @@
 //! reconstruction is bit-identical to any conformant decoder's output. Luma uses whole-block 16×16
 //! DC/V/H/TM **or** per-4×4 `B_PRED` (ten directional submodes), and chroma whole-block 8×8 DC/V/H/TM;
 //! the encoder picks the lowest-SAD candidate per macroblock. A whole-block macroblock carries a Y2
-//! (luma-DC WHT) block; a `B_PRED` one codes luma DC inline (plane 3). One token partition, no loop
-//! filter or skip yet — those and the remaining header features land later. STATUS.md section L.
+//! (luma-DC WHT) block; a `B_PRED` one codes luma DC inline (plane 3). The reconstruction is deblocked
+//! by the simple or normal loop filter as a final pass. One token partition; per-MB skip, token
+//! partitions, and the remaining header features land later. STATUS.md section L.
 
 // The macroblock/block math indexes several fixed-size arrays in lock-step (and over partial ranges
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
@@ -114,10 +115,48 @@ impl FrameBuffers {
     }
 }
 
-/// Picks a simple-filter strength from the base quantizer — stronger quantization deblocks harder. A
+/// Picks a loop-filter strength from the base quantizer — stronger quantization deblocks harder. A
 /// coarse heuristic (true filter-level selection is part of issue #32); a level of 0 disables it.
-fn simple_filter_level(quant_index: u8) -> u8 {
+fn filter_level(quant_index: u8) -> u8 {
     quant_index / 2
+}
+
+/// Applies the frame's configured loop filter to the reconstruction as a final whole-frame pass: the
+/// simple filter deblocks luma only, the normal filter luma and chroma. A zero level is a no-op.
+fn apply_loop_filter(recon: &mut FrameBuffers, lf: &LoopFilterParams, filter_interior: &[bool]) {
+    if lf.level == 0 {
+        return;
+    }
+    let (ys, cs, mbc, mbr) = (
+        recon.y_stride(),
+        recon.c_stride(),
+        recon.mb_cols,
+        recon.mb_rows,
+    );
+    if lf.simple {
+        loop_filter::simple_filter_luma(
+            &mut recon.y,
+            ys,
+            mbc,
+            mbr,
+            lf.level,
+            lf.sharpness,
+            filter_interior,
+        );
+    } else {
+        loop_filter::normal_filter(
+            &mut recon.y,
+            &mut recon.u,
+            &mut recon.v,
+            ys,
+            cs,
+            mbc,
+            mbr,
+            lf.level,
+            lf.sharpness,
+            filter_interior,
+        );
+    }
 }
 
 /// Whether a macroblock carries any non-zero quantized coefficient — the second half of the
@@ -129,8 +168,8 @@ fn mb_has_coeffs(levels: &MbLevels) -> bool {
         || levels.v.iter().flatten().any(|&x| x != 0)
 }
 
-/// Builds the minimal key-frame header for the given dimensions and base quantizer index.
-fn frame_header(width: u32, height: u32, quant_index: u8) -> Vp8FrameHeader {
+/// Builds the minimal key-frame header for the given dimensions, base quantizer, and filter type.
+fn frame_header(width: u32, height: u32, quant_index: u8, simple_filter: bool) -> Vp8FrameHeader {
     Vp8FrameHeader {
         width: width as u16,
         height: height as u16,
@@ -141,8 +180,8 @@ fn frame_header(width: u32, height: u32, quant_index: u8) -> Vp8FrameHeader {
         clamp_required: true,
         segmentation: Segmentation::default(),
         loop_filter: LoopFilterParams {
-            simple: true,
-            level: simple_filter_level(quant_index),
+            simple: simple_filter,
+            level: filter_level(quant_index),
             sharpness: 0,
         },
         token_partitions: 1,
@@ -791,9 +830,22 @@ fn decode_mb_tokens(
 
 /// Encodes a [`Yuv420`] image as a VP8 key-frame bitstream (the `VP8 ` chunk payload), returning the
 /// bitstream and the encoder's reconstruction (the tier-2 oracle: it must equal any decoder's output).
+/// Uses the normal loop filter.
 #[must_use]
 pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
-    let header = frame_header(yuv.width(), yuv.height(), quant_index);
+    encode_frame_filtered(yuv, quant_index, false)
+}
+
+/// Encodes a frame with an explicit loop-filter type — `simple_filter` selects the simple filter,
+/// otherwise the normal filter (what [`encode_frame`] uses). Splitting this out keeps both decoder
+/// filter paths reachable from tests.
+#[must_use]
+fn encode_frame_filtered(
+    yuv: &Yuv420,
+    quant_index: u8,
+    simple_filter: bool,
+) -> (Vec<u8>, FrameBuffers) {
+    let header = frame_header(yuv.width(), yuv.height(), quant_index, simple_filter);
     let qf = QuantFactors::for_frame(&header.quant);
     let mut recon = FrameBuffers::new(yuv.width(), yuv.height());
 
@@ -883,16 +935,7 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
         }
     }
 
-    let (stride, mbc, mbr) = (recon.y_stride(), recon.mb_cols, recon.mb_rows);
-    loop_filter::simple_filter_luma(
-        &mut recon.y,
-        stride,
-        mbc,
-        mbr,
-        header.loop_filter.level,
-        header.loop_filter.sharpness,
-        &filter_interior,
-    );
+    apply_loop_filter(&mut recon, &header.loop_filter, &filter_interior);
 
     let part0 = modes.finish();
     let part1 = residuals.finish();
@@ -920,11 +963,6 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     if head.token_partitions != 1 {
         return Err(Error::Unsupported(
             "VP8: multiple token partitions not yet supported",
-        ));
-    }
-    if head.loop_filter.level > 0 && !head.loop_filter.simple {
-        return Err(Error::Unsupported(
-            "VP8: normal loop filter not yet supported",
         ));
     }
     let qf = QuantFactors::for_frame(&head.quant);
@@ -989,16 +1027,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
         }
     }
 
-    let (stride, mbc, mbr) = (recon.y_stride(), recon.mb_cols, recon.mb_rows);
-    loop_filter::simple_filter_luma(
-        &mut recon.y,
-        stride,
-        mbc,
-        mbr,
-        head.loop_filter.level,
-        head.loop_filter.sharpness,
-        &filter_interior,
-    );
+    apply_loop_filter(&mut recon, &head.loop_filter, &filter_interior);
     Ok(recon)
 }
 
@@ -1116,6 +1145,24 @@ mod tests {
         ] {
             for &q in &[0u8, 10, 40, 80, 127] {
                 assert_encoder_recon_matches_decoder(w, h, q);
+            }
+        }
+    }
+
+    #[test]
+    fn both_loop_filters_reconstruct_bit_exact() {
+        // The simple (luma-only) and normal (luma+chroma) filters must each reconstruct identically
+        // in the encoder and decoder — exercising both decoder filter paths on coefficient-bearing
+        // content (so interior edges are filtered too).
+        for simple in [true, false] {
+            for &q in &[20u8, 60, 110] {
+                let yuv = detailed(48, 32);
+                let (bits, recon) = encode_frame_filtered(&yuv, q, simple);
+                let dec = decode_frame(&bits).expect("decode");
+                let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
+                assert_eq!(enc.y(), dec.y(), "luma simple={simple} q{q}");
+                assert_eq!(enc.u(), dec.u(), "u simple={simple} q{q}");
+                assert_eq!(enc.v(), dec.v(), "v simple={simple} q{q}");
             }
         }
     }
