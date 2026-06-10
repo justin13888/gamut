@@ -185,10 +185,35 @@ fn filter_level(quant_index: u8) -> u8 {
     quant_index / 2
 }
 
+/// The clamped loop-filter level for segment `s` (RFC 6386 §10/§15.4): the segment's absolute or
+/// delta-adjusted filter strength when segmentation is enabled, else the frame base level.
+fn segment_filter_level(base: u8, seg: &Segmentation, s: usize) -> u8 {
+    if !seg.enabled {
+        return base;
+    }
+    let level = if seg.abs_delta {
+        i32::from(seg.filter_strength[s])
+    } else {
+        i32::from(base) + i32::from(seg.filter_strength[s])
+    };
+    level.clamp(0, 63) as u8
+}
+
 /// Applies the frame's configured loop filter to the reconstruction as a final whole-frame pass: the
-/// simple filter deblocks luma only, the normal filter luma and chroma. A zero level is a no-op.
-fn apply_loop_filter(recon: &mut FrameBuffers, lf: &LoopFilterParams, filter_interior: &[bool]) {
-    if lf.level == 0 {
+/// simple filter deblocks luma only, the normal filter luma and chroma. Each macroblock is filtered at
+/// its segment's level (uniform when segmentation is disabled); an all-zero level set is a no-op.
+fn apply_loop_filter(
+    recon: &mut FrameBuffers,
+    lf: &LoopFilterParams,
+    seg: &Segmentation,
+    segment_map: &[usize],
+    filter_interior: &[bool],
+) {
+    let mb_level: Vec<u8> = segment_map
+        .iter()
+        .map(|&s| segment_filter_level(lf.level, seg, s))
+        .collect();
+    if mb_level.iter().all(|&l| l == 0) {
         return;
     }
     let (ys, cs, mbc, mbr) = (
@@ -203,7 +228,7 @@ fn apply_loop_filter(recon: &mut FrameBuffers, lf: &LoopFilterParams, filter_int
             ys,
             mbc,
             mbr,
-            lf.level,
+            &mb_level,
             lf.sharpness,
             filter_interior,
         );
@@ -216,7 +241,7 @@ fn apply_loop_filter(recon: &mut FrameBuffers, lf: &LoopFilterParams, filter_int
             cs,
             mbc,
             mbr,
-            lf.level,
+            &mb_level,
             lf.sharpness,
             filter_interior,
         );
@@ -1077,7 +1102,13 @@ pub fn encode_frame_filtered(
         }
     }
 
-    apply_loop_filter(&mut recon, &header.loop_filter, &filter_interior);
+    apply_loop_filter(
+        &mut recon,
+        &header.loop_filter,
+        &header.segmentation,
+        &segment_map,
+        &filter_interior,
+    );
 
     let part0 = modes.finish();
     let token_parts: Vec<Vec<u8>> = residuals.into_iter().map(BoolEncoder::finish).collect();
@@ -1131,6 +1162,9 @@ fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>>
 /// yet implemented (per-macroblock loop-filter adjustments, …).
 pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let chunk = header::read_uncompressed_chunk(data)?;
+    if chunk.width == 0 || chunk.height == 0 {
+        return Err(Error::InvalidInput("VP8: zero frame dimension"));
+    }
     let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
     if part0_end > data.len() {
         return Err(Error::InvalidInput("VP8: first partition exceeds frame"));
@@ -1145,6 +1179,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
     let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
     let mut filter_interior = vec![false; recon.mb_cols * recon.mb_rows];
+    let mut segment_map = vec![0usize; recon.mb_cols * recon.mb_rows];
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
         let mut left_bmodes = [B_DC_PRED; 4];
@@ -1154,6 +1189,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
             } else {
                 0
             };
+            segment_map[mb_y * recon.mb_cols + mb_x] = segment;
             let qf = seg_qf[segment];
             let skip = head.mb_no_skip_coeff && modes.get_bool(head.prob_skip_false);
             let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
@@ -1222,7 +1258,13 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
         }
     }
 
-    apply_loop_filter(&mut recon, &head.loop_filter, &filter_interior);
+    apply_loop_filter(
+        &mut recon,
+        &head.loop_filter,
+        &head.segmentation,
+        &segment_map,
+        &filter_interior,
+    );
     Ok(recon)
 }
 

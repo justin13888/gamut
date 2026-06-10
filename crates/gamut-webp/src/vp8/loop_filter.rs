@@ -101,24 +101,26 @@ fn filter_hedge(plane: &mut [u8], stride: usize, px: usize, ey: usize, edge_limi
 /// Applies the simple loop filter to a macroblock-aligned luma `plane` (RFC 6386 §15.1/§15.2). Each
 /// macroblock filters, in order, its left and top inter-macroblock edges (always) and its interior
 /// vertical/horizontal subblock edges (only where `filter_interior[mb]` is set — i.e. the macroblock
-/// is `B_PRED` or carries coefficients). Chroma is left unfiltered. A zero `level` is a no-op.
+/// is `B_PRED` or carries coefficients), at its own `mb_level[mb]` (a level of 0 skips it; per-segment
+/// filter levels make this vary by macroblock). Chroma is left unfiltered.
 pub fn simple_filter_luma(
     plane: &mut [u8],
     stride: usize,
     mb_cols: usize,
     mb_rows: usize,
-    level: u8,
+    mb_level: &[u8],
     sharpness: u8,
     filter_interior: &[bool],
 ) {
-    if level == 0 {
-        return;
-    }
-    let interior = interior_limit(level, sharpness);
-    let mbedge_limit = (i32::from(level) + 2) * 2 + interior;
-    let sub_bedge_limit = i32::from(level) * 2 + interior;
     for mb_y in 0..mb_rows {
         for mb_x in 0..mb_cols {
+            let level = mb_level[mb_y * mb_cols + mb_x];
+            if level == 0 {
+                continue;
+            }
+            let interior = interior_limit(level, sharpness);
+            let mbedge_limit = (i32::from(level) + 2) * 2 + interior;
+            let sub_bedge_limit = i32::from(level) * 2 + interior;
             let (px, py) = (mb_x * 16, mb_y * 16);
             let do_interior = filter_interior[mb_y * mb_cols + mb_x];
             if mb_x > 0 {
@@ -336,19 +338,20 @@ pub fn normal_filter(
     c_stride: usize,
     mb_cols: usize,
     mb_rows: usize,
-    level: u8,
+    mb_level: &[u8],
     sharpness: u8,
     filter_interior: &[bool],
 ) {
-    if level == 0 {
-        return;
-    }
-    let interior = interior_limit(level, sharpness);
-    let mbedge = (i32::from(level) + 2) * 2 + interior;
-    let sub_bedge = i32::from(level) * 2 + interior;
-    let hev_t = keyframe_hev_threshold(level);
     for mb_y in 0..mb_rows {
         for mb_x in 0..mb_cols {
+            let level = mb_level[mb_y * mb_cols + mb_x];
+            if level == 0 {
+                continue;
+            }
+            let interior = interior_limit(level, sharpness);
+            let mbedge = (i32::from(level) + 2) * 2 + interior;
+            let sub_bedge = i32::from(level) * 2 + interior;
+            let hev_t = keyframe_hev_threshold(level);
             let do_interior = filter_interior[mb_y * mb_cols + mb_x];
             let (left, top) = (mb_x > 0, mb_y > 0);
             normal_filter_plane(
@@ -451,7 +454,7 @@ mod tests {
     fn zero_level_is_a_no_op() {
         let mut plane: Vec<u8> = (0..16 * 16).map(|i| (i % 256) as u8).collect();
         let before = plane.clone();
-        simple_filter_luma(&mut plane, 16, 1, 1, 0, 0, &[true]);
+        simple_filter_luma(&mut plane, 16, 1, 1, &[0], 0, &[true]);
         assert_eq!(plane, before);
     }
 
@@ -466,7 +469,7 @@ mod tests {
             }
         }
         // filter_interior = false for both macroblocks → only the inter-macroblock edge at x=16 runs.
-        simple_filter_luma(&mut plane, stride, 2, 1, 20, 0, &[false, false]);
+        simple_filter_luma(&mut plane, stride, 2, 1, &[20, 20], 0, &[false, false]);
         // The edge pixels move toward each other; far pixels and the (skipped) interior are untouched.
         assert_eq!((plane[15], plane[16]), (105, 115));
         assert_eq!(plane[0], 100, "left interior untouched");
