@@ -108,7 +108,7 @@ not a contract:
 | full partition set: HORZ/VERT/SPLIT/HORZ_A/B/VERT_A/B/HORZ_4/VERT_4 | §5.11.4 | ☐ | M1 |
 | `intra_frame_mode_info` (KEY-frame block) | §5.11.7 | ✅ | M0 |
 | `skip` flag = 0 (residual always coded) | §5.11.11 | ✅ | M0 |
-| `skip` = 1 (no-residual / all-zero blocks) | §5.11.11 | ☐ | M1 |
+| `skip` = 1 (no-residual / all-zero blocks) | §5.11.11 | ✅ (lossy; all-skip 8×8 unfiltered by CDEF) | M1 |
 | intra_segment_id (segment 0) | §5.11.8/.9 | ✅ | M0 |
 | per-block read_cdef / read_delta_qindex / read_delta_lf | §5.11.56/.12/.13 | ☐ | M1 |
 | read_tx_size / read_var_tx_size (per-block tx_depth) | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square tx_depth 0..2) | M0/M1 |

@@ -468,7 +468,13 @@ fn cdef_filter_block(
 /// `cdef_bits` is 0, so a single signaled strength set applies everywhere). All reads are from the
 /// pre-CDEF (deblocked) input, so a fresh output is produced. 4:4:4 ⇒ chroma shares the luma grid and
 /// `Cdef_Uv_Dir` is the identity.
-pub(crate) fn cdef(planes: &[Vec<u8>; 3], coded_w: usize, qindex: u8) -> [Vec<u8>; 3] {
+pub(crate) fn cdef(
+    planes: &[Vec<u8>; 3],
+    coded_w: usize,
+    mi_skip: &[u8],
+    mi_cols: usize,
+    qindex: u8,
+) -> [Vec<u8>; 3] {
     let (y_pri, y_sec, uv_pri, uv_sec) = cdef_strengths(qindex);
     let mut out = planes.clone();
     if y_pri == 0 && y_sec == 0 && uv_pri == 0 && uv_sec == 0 {
@@ -479,6 +485,16 @@ pub(crate) fn cdef(planes: &[Vec<u8>; 3], coded_w: usize, qindex: u8) -> [Vec<u8
     while y0 < coded_h {
         let mut x0 = 0;
         while x0 < coded_w {
+            // §7.15.1: CDEF is not applied to an 8×8 block whose four 4×4 cells are all `skip`.
+            let (r4, c4) = (y0 / 4, x0 / 4);
+            let all_skip = mi_skip[r4 * mi_cols + c4] != 0
+                && mi_skip[r4 * mi_cols + (c4 + 1)] != 0
+                && mi_skip[(r4 + 1) * mi_cols + c4] != 0
+                && mi_skip[(r4 + 1) * mi_cols + (c4 + 1)] != 0;
+            if all_skip {
+                x0 += 8;
+                continue;
+            }
             let (y_dir, var) = cdef_direction(&planes[0], coded_w, x0, y0);
             // Luma: the primary strength is scaled by the block variance (§7.15.1 steps 4-5).
             let dir = if y_pri == 0 { 0 } else { y_dir };
@@ -613,7 +629,9 @@ mod tests {
             vec![128u8; 16 * 16],
             vec![128u8; 16 * 16],
         ];
-        assert_eq!(cdef(&flat, 16, 255), flat);
+        // 16×16 ⇒ 4×4 MI grid; no block is skip, so CDEF visits every 8×8.
+        let mi_skip = vec![0u8; 4 * 4];
+        assert_eq!(cdef(&flat, 16, &mi_skip, 4, 255), flat);
 
         // CDEF only attenuates *small* oscillations (large diffs are constrained away to preserve
         // edges). A low-amplitude vertical stripe gives the direction search a clear direction and a
@@ -628,7 +646,7 @@ mod tests {
                 planes[0][y * 16 + x] = if x % 2 == 0 { 126 } else { 132 };
             }
         }
-        let out = cdef(&planes, 16, 255);
+        let out = cdef(&planes, 16, &mi_skip, 4, 255);
         assert_ne!(
             out[0], planes[0],
             "CDEF should dering a low-amplitude oscillation"
