@@ -198,8 +198,11 @@ pub(crate) fn frame_header_payload(
     w.put_bit(0); // segmentation_enabled = 0
 
     if !lossless {
-        // delta_q_params(): base_q_idx > 0 ⇒ delta_q_present (0). delta_lf_params(): none.
-        w.put_bit(0); // delta_q_present = 0
+        // delta_q_params(): base_q_idx > 0 ⇒ delta_q_present = 1, delta_q_res = 0 (deltas in qindex
+        // units). delta_lf_params(): delta_lf_present = 0 (the loop-filter level stays frame-level).
+        w.put_bit(1); // delta_q_present = 1
+        w.put_bits(0, 2); // delta_q_res = 0
+        w.put_bit(0); // delta_lf_present = 0
         // loop_filter_params(): a single deblock level (the same for both luma passes and both
         // chroma planes), scaled from base_q_idx. level 0 ⇒ deblock disabled and level[2]/[3] omitted.
         let lf = u32::from(crate::filter::deblock_level(base_q_idx));

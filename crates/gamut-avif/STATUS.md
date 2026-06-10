@@ -88,10 +88,10 @@ not a contract:
 | tile_info: single tile | §5.9.15 | ✅ | M0 |
 | multi-tile (spacing, tile_size_bytes, context_update_tile_id) | §5.9.15/.16 | ☐ | M1 |
 | quantization: base_q_idx=0 ⇒ CodedLossless | §5.9.12 | ✅ | M0 |
-| quantization: base_q_idx>0, delta-Q, using_qmatrix | §5.9.12/.13,§9.5 | ☐ | M1 |
+| quantization: base_q_idx>0, delta-Q, using_qmatrix | §5.9.12/.13,§9.5 | ✅ (base_q_idx>0 + per-SB delta-Q; qmatrix ☐) | M1 |
 | segmentation_params (disabled) | §5.9.14 | ✅ (off) | M0 |
 | segmentation (8 segments, features, temporal pred) | §5.9.14 | ☐ | M1 |
-| delta_q_params / delta_lf_params | §5.9.17/.18 | ☐ | M1 |
+| delta_q_params / delta_lf_params | §5.9.17/.18 | ✅ (delta_q; delta_lf ☐) | M1 |
 | read_tx_mode → ONLY_4X4 (lossless) | §5.9.21 | ✅ | M0 |
 | TX_MODE_SELECT / TX_MODE_LARGEST | §5.9.21 | ✅ (TX_MODE_SELECT, lossy intra) | M1 |
 | `reduced_tx_set`=1 | §5.9.2 | ✅ | M0 |

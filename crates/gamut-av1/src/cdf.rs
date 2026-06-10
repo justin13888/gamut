@@ -167,6 +167,11 @@ pub static TX_SIZE_32X32: [[u16; 3]; 3] = [
     [24302, 25602, 32768],
 ];
 
+/// `Default_Delta_Q_Cdf` (§9.4): the 4-symbol `delta_q_abs` CDF. Symbols 0..2 are the magnitude
+/// directly; symbol 3 (`DELTA_Q_SMALL`) escapes to an explicit-bit encoding for larger magnitudes
+/// (the encoder keeps `|delta| <= 2`, so the escape is never used).
+pub static DELTA_Q: [u16; 4] = [28160, 32120, 32677, 32768];
+
 /// `Intra_Filter_Taps[INTRA_FILTER_MODES][8][7]` (§7.11.2.3): the recursive filter-intra taps. For
 /// each filter mode, eight 4×2 output positions weight the 7-sample neighbourhood `p[0..6]`; the
 /// weighted sum is scaled by `INTRA_FILTER_SCALE_BITS = 4` (`Round2Signed`). Taps can be negative.

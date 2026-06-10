@@ -102,6 +102,20 @@ const fn is_directional(mode: u8) -> bool {
     V_PRED <= mode && mode <= D67_PRED
 }
 
+/// The coefficient-CDF quantizer context (§8.3.2) for a quantizer index: `0` if `≤ 20`, `1` if
+/// `≤ 60`, `2` if `≤ 120`, else `3`.
+const fn qctx_for(qindex: i32) -> usize {
+    if qindex <= 20 {
+        0
+    } else if qindex <= 60 {
+        1
+    } else if qindex <= 120 {
+        2
+    } else {
+        3
+    }
+}
+
 /// The square transform size of the given side length (4/8/16/32). Used to map a `bw >> tx_depth`
 /// width back to a [`TxSize`] under `TX_MODE_SELECT`.
 const fn square_tx(width: usize) -> TxSize {
@@ -144,10 +158,18 @@ pub(crate) struct FrameEncoder<'a> {
     coded_h: usize,
     /// `base_q_idx`; 0 ⇒ lossless WHT path, > 0 ⇒ lossy DCT path.
     qindex: u8,
-    /// Coefficient-CDF quantizer context (§8.3.2): 0 if `qindex ≤ 20`, 1 if ≤ 60, 2 if ≤ 120, else 3.
+    /// Coefficient-CDF quantizer context (§8.3.2): 0 if `base_q_idx ≤ 20`, 1 if ≤ 60, 2 if ≤ 120,
+    /// else 3. Frame-level — `init_coeff_cdfs` derives it from `base_q_idx`, so it is **not** changed
+    /// by the per-superblock `delta_q` (only the `dc_quant`/`ac_quant` step sizes follow that).
     qctx: usize,
     dc_quant: i32,
     ac_quant: i32,
+    /// `CurrentQIndex` (§7.12.2): `base_q_idx` plus the accumulated per-superblock `delta_q`.
+    current_qindex: i32,
+    /// Whether `delta_q_present` (lossy path); when set, the first block of each superblock signals a
+    /// `delta_q` and `read_deltas` gates it.
+    delta_q_present: bool,
+    read_deltas: bool,
     /// Reconstructed samples per plane on the coded grid (lossy path only).
     recon: [Vec<u8>; 3],
     sym: SymbolEncoder,
@@ -203,14 +225,12 @@ impl<'a> FrameEncoder<'a> {
             coded_w,
             coded_h,
             qindex,
-            qctx: match qindex {
-                0..=20 => 0,
-                21..=60 => 1,
-                61..=120 => 2,
-                _ => 3,
-            },
+            qctx: qctx_for(i32::from(qindex)),
             dc_quant: dc_q(8, i32::from(qindex)),
             ac_quant: ac_q(8, i32::from(qindex)),
+            current_qindex: i32::from(qindex),
+            delta_q_present: qindex > 0,
+            read_deltas: false,
             recon,
             sym: SymbolEncoder::new(),
             above_level: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
@@ -263,6 +283,8 @@ impl<'a> FrameEncoder<'a> {
             while c < self.mi_cols {
                 self.sb_r = r;
                 self.sb_c = c;
+                // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
+                self.read_deltas = self.delta_q_present;
                 self.clear_block_decoded(r, c);
                 self.encode_partition(r, c, 64);
                 c += SB4;
@@ -370,6 +392,36 @@ impl<'a> FrameEncoder<'a> {
         self.luma_range(c * 4, r * 4, bw) > 32
     }
 
+    /// Updates the active dequantizers to `CurrentQIndex` — used when a `delta_q` changes it. Only the
+    /// `dc_quant`/`ac_quant` step sizes follow `CurrentQIndex`; the coefficient-CDF context `qctx`
+    /// stays at its frame value (`init_coeff_cdfs` derives it from `base_q_idx`, §8.3.2), so it is
+    /// deliberately not touched here.
+    fn set_quant(&mut self, qindex: i32) {
+        self.current_qindex = qindex;
+        self.dc_quant = dc_q(8, qindex);
+        self.ac_quant = ac_q(8, qindex);
+    }
+
+    /// `read_delta_qindex` (§5.11.12) for the first block of a superblock: signals a small per-SB
+    /// `delta_q` (magnitude coded under `Default_Delta_Q_Cdf`, then a sign bit) and updates
+    /// `CurrentQIndex = Clip3(1, 255, CurrentQIndex + delta)` (with `delta_q_res = 0`). The delta is a
+    /// quality placeholder (any value reconstructs bit-exactly) chosen to oscillate around the frame
+    /// quantizer so adjacent superblocks differ. Magnitude is kept ≤ 2, so the `DELTA_Q_SMALL` escape
+    /// is never coded.
+    fn signal_delta_q(&mut self) {
+        let sb_idx = self.sb_r / 16 + self.sb_c / 16;
+        let delta: i32 = match sb_idx % 3 {
+            0 => 1,
+            1 => -1,
+            _ => 2,
+        };
+        let abs = delta.unsigned_abs() as usize;
+        self.sym.encode_symbol(abs, &cdf::DELTA_Q);
+        self.sym.encode_literal(u32::from(delta < 0), 1); // delta_q_sign_bit (1 ⇒ negative)
+        let nq = (self.current_qindex + delta).clamp(1, 255);
+        self.set_quant(nq);
+    }
+
     /// Source-luma range (max − min) over the `bw × bw` block at coded `(sx, sy)`. Used by the
     /// partition and transform-depth heuristics.
     fn luma_range(&self, sx: usize, sy: usize, bw: usize) -> i32 {
@@ -428,6 +480,13 @@ impl<'a> FrameEncoder<'a> {
         // predicts DC_PRED; the lossy path searches the non-directional luma modes (plus directional
         // and filter-intra) and signals the choice with the above/left mode context.
         self.sym.encode_symbol(0, &cdf::SKIP[0]);
+        // read_delta_qindex (§5.11.12): the first coded block of each superblock signals delta_q and
+        // updates the active quantizer; later blocks in the superblock inherit it. (read_cdef and
+        // read_delta_lf code no bits here: cdef_bits = 0 and delta_lf_present = 0.)
+        if self.read_deltas {
+            self.signal_delta_q();
+            self.read_deltas = false;
+        }
         let (y_mode, angle_delta, filter_intra) = if self.qindex == 0 {
             (DC_PRED, 0i8, None)
         } else if lossy_large {
