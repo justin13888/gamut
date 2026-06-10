@@ -19,6 +19,7 @@ mod config;
 mod decoder;
 mod encoder;
 
+pub mod alpha;
 pub mod vp8;
 pub mod vp8l;
 

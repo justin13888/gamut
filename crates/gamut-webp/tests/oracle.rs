@@ -395,3 +395,43 @@ fn gamut_decodes_libwebp_lossy_bit_exact() {
         }
     }
 }
+
+#[test]
+fn libwebp_decodes_gamut_lossy_alpha_exactly() {
+    // gamut encodes lossy color plus a raw `ALPH` alpha plane in an extended (`VP8X`) file; libwebp
+    // must recover the exact alpha (alpha is lossless). The lossy color is not compared.
+    use common::libwebp_decode_rgba;
+
+    for &(w, h) in &[(16u32, 16u32), (32, 24), (17, 9), (49, 33)] {
+        let rgba: Vec<u8> = (0..(w * h) as usize)
+            .flat_map(|i| {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                [
+                    (x * 7) as u8,
+                    (y * 9) as u8,
+                    (x ^ y) as u8,
+                    ((x * 11 + y * 5) & 0xff) as u8,
+                ]
+            })
+            .collect();
+        let mut file = Vec::new();
+        WebpEncoder::lossy(70)
+            .encode_rgba8(
+                &rgba,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+                &mut file,
+            )
+            .expect("gamut rgba encode");
+        let decoded = libwebp_decode_rgba(&file);
+        assert_eq!((decoded.width, decoded.height), (w, h), "dims at {w}x{h}");
+        let lib_alpha: Vec<u8> = decoded.rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(
+            lib_alpha, src_alpha,
+            "libwebp must recover gamut's exact alpha at {w}x{h}"
+        );
+    }
+}
