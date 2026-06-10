@@ -7,7 +7,7 @@ use gamut::avif::AvifEncoder;
 use gamut::webp::WebpEncoder;
 
 use crate::error::CliError;
-use crate::input::decode_rgb8;
+use crate::input::{decode_rgb8, decode_rgba8};
 
 /// Arguments for `gamut convert`.
 #[derive(Args)]
@@ -23,15 +23,20 @@ pub(crate) struct ConvertArgs {
     /// quantization, smaller files).
     #[arg(long, default_value_t = 0)]
     qindex: u8,
+    /// Encode lossy (WebP VP8 intra) instead of lossless. Ignored for AVIF (use `--qindex`).
+    #[arg(long)]
+    lossy: bool,
+    /// Lossy WebP quality, 0–100 (higher is better but larger). Only used with `--lossy`.
+    #[arg(long, default_value_t = 75)]
+    quality: u8,
 }
 
-/// Output container/codec for `gamut convert`. Both AVIF and WebP (VP8L lossless) encoding are
-/// implemented.
+/// Output container/codec for `gamut convert`.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum OutputFormat {
     /// AVIF (8-bit RGB; lossless or lossy intra via `--qindex`).
     Avif,
-    /// WebP (VP8L lossless).
+    /// WebP — lossless (VP8L) or lossy (VP8, with `--lossy`); transparency is preserved.
     Webp,
 }
 
@@ -39,27 +44,40 @@ pub(crate) enum OutputFormat {
 pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
     let format = resolve_format(args)?;
 
-    let (rgb, dims) = decode_rgb8(&args.input)?;
-    let raw_len = rgb.len();
-    tracing::info!(
-        width = dims.width,
-        height = dims.height,
-        bytes = raw_len,
-        "decoded input"
-    );
-
     let mut out = Vec::new();
-    match format {
+    let (raw_len, dims) = match format {
         OutputFormat::Avif => {
+            let (rgb, dims) = decode_rgb8(&args.input)?;
+            tracing::info!(
+                width = dims.width,
+                height = dims.height,
+                bytes = rgb.len(),
+                "decoded input"
+            );
             AvifEncoder::new()
                 .with_qindex(args.qindex)
                 .encode_rgb8(&rgb, dims, &mut out)?;
+            (rgb.len(), dims)
         }
         OutputFormat::Webp => {
-            WebpEncoder::new().encode_rgb8(&rgb, dims, &mut out)?;
+            // RGBA so transparency survives; `encode_rgba8` emits a simple file when fully opaque.
+            let (rgba, dims) = decode_rgba8(&args.input)?;
+            tracing::info!(
+                width = dims.width,
+                height = dims.height,
+                bytes = rgba.len(),
+                "decoded input"
+            );
+            let encoder = if args.lossy {
+                WebpEncoder::lossy(args.quality)
+            } else {
+                WebpEncoder::lossless()
+            };
+            encoder.encode_rgba8(&rgba, dims, &mut out)?;
+            (rgba.len(), dims)
         }
-    }
-    tracing::info!(bytes = out.len(), qindex = args.qindex, "encoded output");
+    };
+    tracing::info!(bytes = out.len(), lossy = args.lossy, "encoded output");
 
     std::fs::write(&args.output, &out).map_err(|source| CliError::Io {
         path: args.output.clone(),
