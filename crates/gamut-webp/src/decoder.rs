@@ -7,7 +7,8 @@
 use gamut_core::{Decoder, Dimensions, Error, Result};
 use gamut_riff::{RiffReader, WebpChunkId};
 
-use crate::vp8l::decoder::{argb_to_rgb8, decode as decode_vp8l};
+use crate::alpha;
+use crate::vp8l::decoder::{argb_to_rgb8, argb_to_rgba8, decode as decode_vp8l};
 
 /// Decodes a WebP file to interleaved 8-bit RGB.
 ///
@@ -68,6 +69,52 @@ impl WebpDecoder {
         Err(Error::InvalidInput(
             "WebP: no VP8/VP8L/VP8X bitstream chunk",
         ))
+    }
+
+    /// Decodes the WebP file in `data` to interleaved 8-bit RGBA, appending the pixels to `out` and
+    /// returning the image [`Dimensions`]. A simple (alpha-less) file decodes to opaque RGBA; an
+    /// extended file's `ALPH` chunk supplies the alpha; a `VP8L` bitstream carries its own.
+    ///
+    /// # Errors
+    ///
+    /// As for [`decode_to_rgb8`](Self::decode_to_rgb8), plus [`Error::Unsupported`] for a
+    /// lossless-compressed `ALPH` chunk.
+    pub fn decode_to_rgba8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
+        let mut alph: Option<&[u8]> = None;
+        for chunk in RiffReader::new(data)? {
+            let chunk = chunk?;
+            match WebpChunkId::from(chunk.fourcc) {
+                WebpChunkId::Vp8x => {
+                    gamut_riff::Vp8xHeader::from_payload(chunk.payload)?;
+                }
+                WebpChunkId::Alpha => alph = Some(chunk.payload),
+                WebpChunkId::Vp8l => {
+                    let (dims, argb) = decode_vp8l(chunk.payload)?;
+                    argb_to_rgba8(&argb, out);
+                    return Ok(dims);
+                }
+                WebpChunkId::Vp8 => {
+                    let yuv = crate::vp8::frame::decode_frame(chunk.payload)?.to_yuv420();
+                    let dims = Dimensions {
+                        width: yuv.width(),
+                        height: yuv.height(),
+                    };
+                    let (w, h) = (dims.width as usize, dims.height as usize);
+                    let alpha = match alph {
+                        Some(payload) => alpha::read_alph(payload, w, h)?,
+                        None => vec![0xffu8; w * h],
+                    };
+                    let rgb = yuv.to_rgb8();
+                    out.reserve(w * h * 4);
+                    for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
+                        out.extend_from_slice(&[px[0], px[1], px[2], a]);
+                    }
+                    return Ok(dims);
+                }
+                _ => continue,
+            }
+        }
+        Err(Error::InvalidInput("WebP: no VP8/VP8L bitstream chunk"))
     }
 }
 
