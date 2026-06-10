@@ -3,11 +3,11 @@
 //!
 //! This is the keystone of the lossy path. Each macroblock is predicted from the **reconstructed**
 //! neighbors in a recon buffer (the encoder predicts exactly as the decoder does), so the encoder's
-//! reconstruction is bit-identical to any conformant decoder's output. Whole-block luma 16×16 and
-//! chroma 8×8 prediction supports the DC/V/H/TM modes (the encoder picks the lowest-SAD mode per
-//! macroblock); each macroblock carries a Y2 (luma-DC WHT) block, one token partition, and no loop
-//! filter or skip. Per-4×4 `B_PRED`, loop filters, and the remaining header features land later.
-//! Tracked in `../STATUS.md` section L.
+//! reconstruction is bit-identical to any conformant decoder's output. Luma uses whole-block 16×16
+//! DC/V/H/TM **or** per-4×4 `B_PRED` (ten directional submodes), and chroma whole-block 8×8 DC/V/H/TM;
+//! the encoder picks the lowest-SAD candidate per macroblock. A whole-block macroblock carries a Y2
+//! (luma-DC WHT) block; a `B_PRED` one codes luma DC inline (plane 3). One token partition, no loop
+//! filter or skip yet — those and the remaining header features land later. STATUS.md section L.
 
 // The macroblock/block math indexes several fixed-size arrays in lock-step (and over partial ranges
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
@@ -20,13 +20,17 @@ use super::bool_coder::{BoolDecoder, BoolEncoder};
 use super::header::{
     self, LoopFilterParams, QuantIndices, Segmentation, UNCOMPRESSED_CHUNK_LEN, Vp8FrameHeader,
 };
-use super::prediction::{self, B_PRED, DC_PRED, H_PRED, TM_PRED, V_PRED};
+use super::prediction::{self, B_DC_PRED, B_PRED, DC_PRED, H_PRED, NUM_BMODES, TM_PRED, V_PRED};
 use super::quant::{self, QuantFactors};
 use super::tokens::{self, CoeffProbs};
 use super::transform::{clamp255, fdct4x4, fwht4x4, idct4x4, iwht4x4};
 
 /// The whole-block prediction modes the encoder considers, in signaling order.
 const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
+
+/// SAD margin by which per-subblock `B_PRED` must beat the best whole-block mode to be chosen — a
+/// coarse stand-in for `B_PRED`'s extra mode-signaling cost (true rate-distortion search is issue #32).
+const BPRED_SAD_PENALTY: u32 = 160;
 
 /// Per-macroblock-column entropy context: whether the prior block in each position carried at least
 /// one non-zero coefficient (RFC 6386 §13.3). A single instance also serves as the running "left"
@@ -213,6 +217,71 @@ fn corner_pixel(plane: &[u8], stride: usize, px: usize, py: usize, mb_x: usize, 
     } else {
         plane[(py - 1) * stride + px - 1]
     }
+}
+
+/// One reconstructed luma pixel, or its off-frame edge value (127 above the frame, 129 to the left).
+fn luma_pixel(recon: &FrameBuffers, y: i32, x: i32) -> u8 {
+    if y < 0 {
+        127
+    } else if x < 0 {
+        129
+    } else {
+        recon.y[y as usize * recon.y_stride() + x as usize]
+    }
+}
+
+/// The four above-right pixels of the macroblock's top-right subblock, shared by all right-column
+/// subblocks (RFC 6386 §12.3 `copy_down`). Matching libwebp: 127 on the top row; the next
+/// macroblock's top-left four pixels normally; or the current macroblock's last above pixel
+/// replicated on the rightmost column (`frame_dec.c`: `memset(top_right, top[15])`).
+fn above_right_source(recon: &FrameBuffers, mb_x: usize, mb_y: usize) -> [u8; 4] {
+    if mb_y == 0 {
+        return [127; 4];
+    }
+    let stride = recon.y_stride();
+    let row = (mb_y * 16 - 1) * stride;
+    if mb_x + 1 >= recon.mb_cols {
+        [recon.y[row + mb_x * 16 + 15]; 4]
+    } else {
+        let base = row + mb_x * 16 + 16;
+        [
+            recon.y[base],
+            recon.y[base + 1],
+            recon.y[base + 2],
+            recon.y[base + 3],
+        ]
+    }
+}
+
+/// Gathers a 4×4 luma subblock's prediction neighbors from the in-place reconstruction: the eight
+/// above pixels `A[0..8]` (four above, four above-right), the four left `L[0..4]`, and the above-left
+/// corner. `(sx, sy)` is the subblock's top-left in frame coordinates and `c` its column within the
+/// macroblock (the right column, `c == 3`, takes its above-right from the shared `above_right`).
+fn subblock_neighbors(
+    recon: &FrameBuffers,
+    sx: usize,
+    sy: usize,
+    c: usize,
+    above_right: &[u8; 4],
+) -> ([u8; 8], [u8; 4], u8) {
+    let (xi, yi) = (sx as i32, sy as i32);
+    let corner = luma_pixel(recon, yi - 1, xi - 1);
+    let mut a = [0u8; 8];
+    for k in 0..4 {
+        a[k] = luma_pixel(recon, yi - 1, xi + k as i32);
+    }
+    if c == 3 {
+        a[4..8].copy_from_slice(above_right);
+    } else {
+        for k in 0..4 {
+            a[4 + k] = luma_pixel(recon, yi - 1, xi + 4 + k as i32);
+        }
+    }
+    let mut l = [0u8; 4];
+    for k in 0..4 {
+        l[k] = luma_pixel(recon, yi + k as i32, xi - 1);
+    }
+    (a, l, corner)
 }
 
 /// Produces the 16×16 luma prediction for macroblock `(mb_x, mb_y)` under whole-block `mode`.
@@ -446,48 +515,242 @@ fn quantize_chroma(
     levels
 }
 
+/// Encodes the luma plane of a `B_PRED` macroblock: per subblock (raster order), selects the
+/// lowest-SAD submode, quantizes the residual (plane 3 — DC included, no Y2), and reconstructs in
+/// place so the next subblock predicts from it. Returns the 16 submodes, their quantized levels, and
+/// the total prediction SAD (for the macroblock mode decision).
+fn encode_bpred_luma(
+    recon: &mut FrameBuffers,
+    src: &[u8],
+    stride: usize,
+    mb_x: usize,
+    mb_y: usize,
+    qf: &QuantFactors,
+    above_right: &[u8; 4],
+) -> ([usize; 16], [[i16; 16]; 16], u32) {
+    let (px, py, rstride) = (mb_x * 16, mb_y * 16, recon.y_stride());
+    let mut sub_modes = [B_DC_PRED; 16];
+    let mut levels = [[0i16; 16]; 16];
+    let mut total_sad = 0u32;
+    for i in 0..16 {
+        let (r, c) = (i / 4, i % 4);
+        let (sx, sy) = (px + c * 4, py + r * 4);
+        let (a, l, corner) = subblock_neighbors(recon, sx, sy, c, above_right);
+        let src_sub = read_block(src, stride, sx, sy);
+        let mut best = (B_DC_PRED, u32::MAX, [0u8; 16]);
+        for m in 0..NUM_BMODES {
+            let pred = prediction::subblock_predict(m, &a, &l, corner);
+            let sad: u32 = (0..16)
+                .map(|k| i32::from(src_sub[k]).abs_diff(i32::from(pred[k])))
+                .sum();
+            if sad < best.1 {
+                best = (m, sad, pred);
+            }
+        }
+        let (mode, sad, pred) = best;
+        sub_modes[i] = mode;
+        total_sad += sad;
+
+        let residue: [i16; 16] = core::array::from_fn(|k| src_sub[k] - i16::from(pred[k]));
+        let coeffs = fdct4x4(&residue);
+        levels[i][0] = quant::quantize(coeffs[0], qf.y1_dc);
+        for k in 1..16 {
+            levels[i][k] = quant::quantize(coeffs[k], qf.y1_ac);
+        }
+        let mut dq = [0i16; 16];
+        dq[0] = quant::dequantize(levels[i][0], qf.y1_dc);
+        for k in 1..16 {
+            dq[k] = quant::dequantize(levels[i][k], qf.y1_ac);
+        }
+        let residue = idct4x4(&dq);
+        let pred_i16: [i16; 16] = core::array::from_fn(|k| i16::from(pred[k]));
+        write_block(&mut recon.y, rstride, sx, sy, &pred_i16, &residue);
+    }
+    (sub_modes, levels, total_sad)
+}
+
+/// Decodes and reconstructs the luma plane of a `B_PRED` macroblock from its submodes and the token
+/// partition, interleaving token decode and reconstruction (each subblock predicts from the one
+/// before it) and threading the plane-3 non-zero context. Leaves the Y2 context untouched.
+#[allow(clippy::too_many_arguments)] // the reconstruction loop genuinely needs all of this state
+fn decode_bpred_luma(
+    recon: &mut FrameBuffers,
+    dec: &mut BoolDecoder,
+    above: &mut EntropyCtx,
+    left: &mut EntropyCtx,
+    probs: &CoeffProbs,
+    mb_x: usize,
+    mb_y: usize,
+    qf: &QuantFactors,
+    sub_modes: &[usize; 16],
+    above_right: &[u8; 4],
+) {
+    let (px, py, rstride) = (mb_x * 16, mb_y * 16, recon.y_stride());
+    for i in 0..16 {
+        let (r, c) = (i / 4, i % 4);
+        let (sx, sy) = (px + c * 4, py + r * 4);
+        let ctx = usize::from(above.y[c]) + usize::from(left.y[r]);
+        let mut lev = [0i16; 16];
+        let has = tokens::decode_block(dec, &mut lev, 3, ctx, probs);
+        above.y[c] = has;
+        left.y[r] = has;
+
+        let (a, l, corner) = subblock_neighbors(recon, sx, sy, c, above_right);
+        let pred = prediction::subblock_predict(sub_modes[i], &a, &l, corner);
+        let mut dq = [0i16; 16];
+        dq[0] = quant::dequantize(lev[0], qf.y1_dc);
+        for k in 1..16 {
+            dq[k] = quant::dequantize(lev[k], qf.y1_ac);
+        }
+        let residue = idct4x4(&dq);
+        let pred_i16: [i16; 16] = core::array::from_fn(|k| i16::from(pred[k]));
+        write_block(&mut recon.y, rstride, sx, sy, &pred_i16, &residue);
+    }
+}
+
+/// The above/left subblock-mode context for the `j`th subblock (RFC 6386 §11.3): the mode of the
+/// subblock above (within the macroblock for rows > 0, else `above_col`) and to the left (within for
+/// columns > 0, else `left_col`).
+fn bmode_context(
+    sub_modes: &[usize; 16],
+    above_col: &[usize; 4],
+    left_col: &[usize; 4],
+    i: usize,
+) -> (usize, usize) {
+    let (r, c) = (i / 4, i % 4);
+    let a = if r > 0 {
+        sub_modes[i - 4]
+    } else {
+        above_col[c]
+    };
+    let l = if c > 0 { sub_modes[i - 1] } else { left_col[r] };
+    (a, l)
+}
+
+/// Writes the 16 `B_PRED` submodes, each tree-coded with its neighbor context (RFC 6386 §11.3).
+fn write_bmodes(
+    modes: &mut BoolEncoder,
+    sub_modes: &[usize; 16],
+    above_col: &[usize; 4],
+    left_col: &[usize; 4],
+) {
+    for i in 0..16 {
+        let (a, l) = bmode_context(sub_modes, above_col, left_col, i);
+        modes.put_tree(
+            prediction::BMODE_TREE,
+            &prediction::KF_BMODE_PROB[a][l],
+            sub_modes[i],
+        );
+    }
+}
+
+/// Reads the 16 `B_PRED` submodes, mirroring [`write_bmodes`].
+fn read_bmodes(
+    modes: &mut BoolDecoder,
+    above_col: &[usize; 4],
+    left_col: &[usize; 4],
+) -> [usize; 16] {
+    let mut sub_modes = [B_DC_PRED; 16];
+    for i in 0..16 {
+        let (a, l) = bmode_context(&sub_modes, above_col, left_col, i);
+        sub_modes[i] = modes.get_tree(prediction::BMODE_TREE, &prediction::KF_BMODE_PROB[a][l]);
+    }
+    sub_modes
+}
+
+/// The macroblock's bottom-row and right-column subblock modes, to seed the above/left context of the
+/// next row/column (RFC 6386 §11.3 caveat 4): the actual submodes for `B_PRED`, else the constant
+/// derived from the whole-block luma mode.
+fn bmode_propagation(
+    is_bpred: bool,
+    luma_mode: usize,
+    sub_modes: &[usize; 16],
+) -> ([usize; 4], [usize; 4]) {
+    if is_bpred {
+        (
+            [sub_modes[12], sub_modes[13], sub_modes[14], sub_modes[15]],
+            [sub_modes[3], sub_modes[7], sub_modes[11], sub_modes[15]],
+        )
+    } else {
+        let bm = prediction::bmode_for_luma(luma_mode);
+        ([bm; 4], [bm; 4])
+    }
+}
+
 /// Codes one macroblock's coefficient blocks in Y2 → Y → U → V order, threading the `above`/`left`
-/// non-zero context (RFC 6386 §13.3).
+/// non-zero context (RFC 6386 §13.3). A `B_PRED` macroblock has no Y2 block (its context persists)
+/// and codes luma with plane 3 (DC included); otherwise luma uses plane 0 (DC carried by Y2).
 fn encode_mb_tokens(
     enc: &mut BoolEncoder,
     above: &mut EntropyCtx,
     left: &mut EntropyCtx,
     probs: &CoeffProbs,
     levels: &MbLevels,
+    is_bpred: bool,
 ) {
-    let has = tokens::encode_block(
-        enc,
-        &levels.y2,
-        1,
-        usize::from(above.y2) + usize::from(left.y2),
-        probs,
-    );
-    above.y2 = has;
-    left.y2 = has;
+    if !is_bpred {
+        let ctx = usize::from(above.y2) + usize::from(left.y2);
+        let has = tokens::encode_block(enc, &levels.y2, 1, ctx, probs);
+        above.y2 = has;
+        left.y2 = has;
+    }
+    let plane = if is_bpred { 3 } else { 0 };
     for i in 0..16 {
         let (r, c) = (i / 4, i % 4);
         let ctx = usize::from(above.y[c]) + usize::from(left.y[r]);
-        let has = tokens::encode_block(enc, &levels.y[i], 0, ctx, probs);
+        let has = tokens::encode_block(enc, &levels.y[i], plane, ctx, probs);
         above.y[c] = has;
         left.y[r] = has;
     }
-    for i in 0..4 {
-        let (r, c) = (i / 2, i % 2);
-        let ctx = usize::from(above.u[c]) + usize::from(left.u[r]);
-        let has = tokens::encode_block(enc, &levels.u[i], 2, ctx, probs);
-        above.u[c] = has;
-        left.u[r] = has;
-    }
-    for i in 0..4 {
-        let (r, c) = (i / 2, i % 2);
-        let ctx = usize::from(above.v[c]) + usize::from(left.v[r]);
-        let has = tokens::encode_block(enc, &levels.v[i], 2, ctx, probs);
-        above.v[c] = has;
-        left.v[r] = has;
+    encode_chroma_tokens(enc, above, left, probs, levels);
+}
+
+/// Codes a macroblock's U then V chroma blocks (plane 2).
+fn encode_chroma_tokens(
+    enc: &mut BoolEncoder,
+    above: &mut EntropyCtx,
+    left: &mut EntropyCtx,
+    probs: &CoeffProbs,
+    levels: &MbLevels,
+) {
+    for (plane_levels, above_ctx, left_ctx) in [
+        (&levels.u, &mut above.u, &mut left.u),
+        (&levels.v, &mut above.v, &mut left.v),
+    ] {
+        for i in 0..4 {
+            let (r, c) = (i / 2, i % 2);
+            let ctx = usize::from(above_ctx[c]) + usize::from(left_ctx[r]);
+            let has = tokens::encode_block(enc, &plane_levels[i], 2, ctx, probs);
+            above_ctx[c] = has;
+            left_ctx[r] = has;
+        }
     }
 }
 
-/// Decodes one macroblock's coefficient blocks, mirroring [`encode_mb_tokens`].
+/// Decodes a macroblock's U then V chroma blocks into `levels`, mirroring [`encode_chroma_tokens`].
+fn decode_chroma_tokens(
+    dec: &mut BoolDecoder,
+    above: &mut EntropyCtx,
+    left: &mut EntropyCtx,
+    probs: &CoeffProbs,
+    levels: &mut MbLevels,
+) {
+    for (plane_levels, above_ctx, left_ctx) in [
+        (&mut levels.u, &mut above.u, &mut left.u),
+        (&mut levels.v, &mut above.v, &mut left.v),
+    ] {
+        for i in 0..4 {
+            let (r, c) = (i / 2, i % 2);
+            let ctx = usize::from(above_ctx[c]) + usize::from(left_ctx[r]);
+            let has = tokens::decode_block(dec, &mut plane_levels[i], 2, ctx, probs);
+            above_ctx[c] = has;
+            left_ctx[r] = has;
+        }
+    }
+}
+
+/// Decodes a whole-block (non-`B_PRED`) macroblock's coefficient blocks: Y2, 16 luma (plane 0), then
+/// chroma.
 fn decode_mb_tokens(
     dec: &mut BoolDecoder,
     above: &mut EntropyCtx,
@@ -495,13 +758,8 @@ fn decode_mb_tokens(
     probs: &CoeffProbs,
 ) -> MbLevels {
     let mut levels = MbLevels::default();
-    let has = tokens::decode_block(
-        dec,
-        &mut levels.y2,
-        1,
-        usize::from(above.y2) + usize::from(left.y2),
-        probs,
-    );
+    let ctx = usize::from(above.y2) + usize::from(left.y2);
+    let has = tokens::decode_block(dec, &mut levels.y2, 1, ctx, probs);
     above.y2 = has;
     left.y2 = has;
     for i in 0..16 {
@@ -511,20 +769,7 @@ fn decode_mb_tokens(
         above.y[c] = has;
         left.y[r] = has;
     }
-    for i in 0..4 {
-        let (r, c) = (i / 2, i % 2);
-        let ctx = usize::from(above.u[c]) + usize::from(left.u[r]);
-        let has = tokens::decode_block(dec, &mut levels.u[i], 2, ctx, probs);
-        above.u[c] = has;
-        left.u[r] = has;
-    }
-    for i in 0..4 {
-        let (r, c) = (i / 2, i % 2);
-        let ctx = usize::from(above.v[c]) + usize::from(left.v[r]);
-        let has = tokens::decode_block(dec, &mut levels.v[i], 2, ctx, probs);
-        above.v[c] = has;
-        left.v[r] = has;
-    }
+    decode_chroma_tokens(dec, above, left, probs, &mut levels);
     levels
 }
 
@@ -550,36 +795,73 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
     let probs = &tokens::DEFAULT_COEFF_PROBS;
 
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
+    let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
+        let mut left_bmodes = [B_DC_PRED; 4];
         for mb_x in 0..recon.mb_cols {
-            let y_mode = select_luma_mode(&recon, &src_y, yw, mb_x, mb_y);
             let uv_mode = select_chroma_mode(&recon, &src_u, &src_v, cw, mb_x, mb_y);
-            let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
             let u_pred = predict_chroma(&recon.u, recon.c_stride(), mb_x, mb_y, uv_mode);
             let v_pred = predict_chroma(&recon.v, recon.c_stride(), mb_x, mb_y, uv_mode);
 
-            let mut levels = MbLevels::default();
-            quantize_luma(&src_y, yw, mb_x, mb_y, &y_pred, &qf, &mut levels);
-            levels.u = quantize_chroma(&src_u, cw, mb_x, mb_y, &u_pred, &qf);
-            levels.v = quantize_chroma(&src_v, cw, mb_x, mb_y, &v_pred, &qf);
+            // Whole-block luma candidate and its prediction SAD.
+            let wb_mode = select_luma_mode(&recon, &src_y, yw, mb_x, mb_y);
+            let wb_sad = block_sad(
+                &predict_luma(&recon, mb_x, mb_y, wb_mode),
+                &src_y,
+                yw,
+                mb_x,
+                mb_y,
+                16,
+            );
 
-            reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
-            let cstride = recon.c_stride();
-            reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
-            reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
+            // B_PRED candidate — scribbles its reconstruction into recon.y while selecting submodes.
+            let above_right = above_right_source(&recon, mb_x, mb_y);
+            let (sub_modes, bpred_levels, bpred_sad) =
+                encode_bpred_luma(&mut recon, &src_y, yw, mb_x, mb_y, &qf, &above_right);
+            let use_bpred = bpred_sad + BPRED_SAD_PENALTY < wb_sad;
 
+            let mut levels = MbLevels {
+                u: quantize_chroma(&src_u, cw, mb_x, mb_y, &u_pred, &qf),
+                v: quantize_chroma(&src_v, cw, mb_x, mb_y, &v_pred, &qf),
+                ..Default::default()
+            };
+
+            let y_mode = if use_bpred { B_PRED } else { wb_mode };
             modes.put_tree(
                 prediction::KF_YMODE_TREE,
                 &prediction::KF_YMODE_PROB,
                 y_mode,
             );
+            if use_bpred {
+                levels.y = bpred_levels;
+                write_bmodes(&mut modes, &sub_modes, &above_bmodes[mb_x], &left_bmodes);
+            } else {
+                // Overwrite the B_PRED scribbles with the whole-block reconstruction.
+                let y_pred = predict_luma(&recon, mb_x, mb_y, wb_mode);
+                quantize_luma(&src_y, yw, mb_x, mb_y, &y_pred, &qf, &mut levels);
+                reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
+            }
             modes.put_tree(
                 prediction::KF_UV_MODE_TREE,
                 &prediction::KF_UV_MODE_PROB,
                 uv_mode,
             );
-            encode_mb_tokens(&mut residuals, &mut above[mb_x], &mut left, probs, &levels);
+
+            let cstride = recon.c_stride();
+            reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
+            reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
+
+            encode_mb_tokens(
+                &mut residuals,
+                &mut above[mb_x],
+                &mut left,
+                probs,
+                &levels,
+                use_bpred,
+            );
+
+            (above_bmodes[mb_x], left_bmodes) = bmode_propagation(use_bpred, wb_mode, &sub_modes);
         }
     }
 
@@ -616,26 +898,57 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let mut recon = FrameBuffers::new(u32::from(chunk.width), u32::from(chunk.height));
 
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
+    let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
+        let mut left_bmodes = [B_DC_PRED; 4];
         for mb_x in 0..recon.mb_cols {
             let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
-            if y_mode == B_PRED {
-                return Err(Error::Unsupported(
-                    "VP8: B_PRED luma mode not yet supported",
-                ));
-            }
+            let is_bpred = y_mode == B_PRED;
+            let sub_modes = if is_bpred {
+                read_bmodes(&mut modes, &above_bmodes[mb_x], &left_bmodes)
+            } else {
+                [B_DC_PRED; 16]
+            };
             let uv_mode = modes.get_tree(prediction::KF_UV_MODE_TREE, &prediction::KF_UV_MODE_PROB);
-            let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
             let u_pred = predict_chroma(&recon.u, recon.c_stride(), mb_x, mb_y, uv_mode);
             let v_pred = predict_chroma(&recon.v, recon.c_stride(), mb_x, mb_y, uv_mode);
-            let levels =
-                decode_mb_tokens(&mut residuals, &mut above[mb_x], &mut left, &coeff_probs);
-
-            reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
             let cstride = recon.c_stride();
-            reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
-            reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
+
+            if is_bpred {
+                let above_right = above_right_source(&recon, mb_x, mb_y);
+                decode_bpred_luma(
+                    &mut recon,
+                    &mut residuals,
+                    &mut above[mb_x],
+                    &mut left,
+                    &coeff_probs,
+                    mb_x,
+                    mb_y,
+                    &qf,
+                    &sub_modes,
+                    &above_right,
+                );
+                let mut levels = MbLevels::default();
+                decode_chroma_tokens(
+                    &mut residuals,
+                    &mut above[mb_x],
+                    &mut left,
+                    &coeff_probs,
+                    &mut levels,
+                );
+                reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
+                reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
+            } else {
+                let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
+                let levels =
+                    decode_mb_tokens(&mut residuals, &mut above[mb_x], &mut left, &coeff_probs);
+                reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
+                reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
+                reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
+            }
+
+            (above_bmodes[mb_x], left_bmodes) = bmode_propagation(is_bpred, y_mode, &sub_modes);
         }
     }
     Ok(recon)
@@ -660,6 +973,75 @@ mod tests {
             .map(|i| ((i * 11 + 128) & 0xff) as u8)
             .collect();
         Yuv420::new(width, height, y, u, v).unwrap()
+    }
+
+    /// Builds B_PRED-favorable content: each 4×4 region carries a different gradient direction, so a
+    /// single whole-block mode predicts the macroblock poorly but per-subblock modes do not.
+    fn detailed(width: u32, height: u32) -> Yuv420 {
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = (
+            Yuv420::chroma_width(width) as usize,
+            Yuv420::chroma_height(height) as usize,
+        );
+        let y = (0..w * h)
+            .map(|i| {
+                let (x, yy) = (i % w, i / w);
+                let v = match (x / 4 + yy / 4) % 4 {
+                    0 => x * 18,
+                    1 => yy * 18,
+                    2 => (x + yy) * 18,
+                    _ => x.wrapping_sub(yy).wrapping_mul(18),
+                };
+                (v & 0xff) as u8
+            })
+            .collect();
+        let u = (0..cw * ch).map(|i| ((i * 3) & 0xff) as u8).collect();
+        let v = (0..cw * ch).map(|i| ((i * 9 + 70) & 0xff) as u8).collect();
+        Yuv420::new(width, height, y, u, v).unwrap()
+    }
+
+    /// Counts macroblocks coded as `B_PRED` by re-reading partition 0, to confirm the path is
+    /// genuinely exercised (not merely available).
+    fn count_bpred_macroblocks(data: &[u8]) -> usize {
+        let chunk = header::read_uncompressed_chunk(data).unwrap();
+        let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
+        let mut modes = BoolDecoder::new(&data[UNCOMPRESSED_CHUNK_LEN..part0_end]);
+        let _ = header::read_frame_header(&chunk, &mut modes).unwrap();
+        let mb_cols = (chunk.width as usize).div_ceil(16);
+        let mb_rows = (chunk.height as usize).div_ceil(16);
+        let mut above_bmodes = vec![[B_DC_PRED; 4]; mb_cols];
+        let mut count = 0;
+        for _ in 0..mb_rows {
+            let mut left_bmodes = [B_DC_PRED; 4];
+            for mb_x in 0..mb_cols {
+                let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
+                let is_bpred = y_mode == B_PRED;
+                let sub_modes = if is_bpred {
+                    count += 1;
+                    read_bmodes(&mut modes, &above_bmodes[mb_x], &left_bmodes)
+                } else {
+                    [B_DC_PRED; 16]
+                };
+                let _ = modes.get_tree(prediction::KF_UV_MODE_TREE, &prediction::KF_UV_MODE_PROB);
+                (above_bmodes[mb_x], left_bmodes) = bmode_propagation(is_bpred, y_mode, &sub_modes);
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn bpred_is_exercised_and_bit_exact() {
+        let yuv = detailed(48, 48);
+        let (bitstream, recon) = encode_frame(&yuv, 8);
+        assert!(
+            count_bpred_macroblocks(&bitstream) > 0,
+            "detailed content should select B_PRED for some macroblocks"
+        );
+        let decoded = decode_frame(&bitstream).expect("decode");
+        let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
+        assert_eq!(enc.y(), dec.y(), "B_PRED luma mismatch");
+        assert_eq!(enc.u(), dec.u(), "B_PRED u mismatch");
+        assert_eq!(enc.v(), dec.v(), "B_PRED v mismatch");
     }
 
     /// Tier-2: the encoder's reconstruction must equal the native decoder's output, bit-for-bit.

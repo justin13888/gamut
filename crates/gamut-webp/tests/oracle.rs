@@ -173,6 +173,65 @@ fn synthetic_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
     gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
 }
 
+/// B_PRED-favorable content: each 4×4 region carries a different gradient direction, so a single
+/// whole-block mode predicts the macroblock poorly and gamut's encoder picks per-subblock `B_PRED`.
+fn detailed_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
+    let (wu, hu) = (w as usize, h as usize);
+    let (cw, ch) = (
+        gamut_color::Yuv420::chroma_width(w) as usize,
+        gamut_color::Yuv420::chroma_height(h) as usize,
+    );
+    let y = (0..wu * hu)
+        .map(|i| {
+            let (x, yy) = (i % wu, i / wu);
+            let v = match (x / 4 + yy / 4) % 4 {
+                0 => x * 18,
+                1 => yy * 18,
+                2 => (x + yy) * 18,
+                _ => x.wrapping_sub(yy).wrapping_mul(18),
+            };
+            (v & 0xff) as u8
+        })
+        .collect();
+    let u = (0..cw * ch).map(|i| ((i * 3) & 0xff) as u8).collect();
+    let v = (0..cw * ch).map(|i| ((i * 9 + 70) & 0xff) as u8).collect();
+    gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
+}
+
+#[test]
+fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
+    // Detailed content drives gamut's encoder into per-4×4 B_PRED macroblocks; libwebp must decode the
+    // same gamut bitstream to identical YUV — the tier-3 conformance gate for the B_PRED path.
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::vp8::frame::{decode_frame, encode_frame};
+
+    for &(w, h) in &[(16u32, 16u32), (32, 32), (48, 48), (49, 33), (64, 16)] {
+        for &quant_index in &[0u8, 8, 40] {
+            let (payload, _) = encode_frame(&detailed_yuv(w, h), quant_index);
+            let webp = write_simple_lossy(&payload);
+            let lib = libwebp_decode_yuv(&webp);
+            let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+            assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
+            assert_eq!(
+                gamut.y(),
+                lib.y.as_slice(),
+                "B_PRED Y mismatch at {w}x{h} q{quant_index}"
+            );
+            assert_eq!(
+                gamut.u(),
+                lib.u.as_slice(),
+                "B_PRED U mismatch at {w}x{h} q{quant_index}"
+            );
+            assert_eq!(
+                gamut.v(),
+                lib.v.as_slice(),
+                "B_PRED V mismatch at {w}x{h} q{quant_index}"
+            );
+        }
+    }
+}
+
 #[test]
 fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
     // A VP8 bitstream decodes to a deterministic integer YUV, so gamut's own decoder and libwebp must
