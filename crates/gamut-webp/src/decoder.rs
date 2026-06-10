@@ -1,8 +1,8 @@
 //! The public WebP decoder: parses the RIFF container and routes to the VP8/VP8L bitstream decoder.
 //!
 //! Container parsing and format routing are implemented (via [`gamut_riff`]). The lossless **VP8L**
-//! path is fully decoded natively (see [`crate::vp8l::decoder`]); the lossy **VP8** and extended
-//! **VP8X** paths still return [`Error::Unsupported`].
+//! and lossy **VP8** bitstreams are decoded natively; an extended **VP8X** file is parsed and its
+//! inner bitstream decoded (its `ALPH` alpha chunk is applied in a later milestone).
 
 use gamut_core::{Decoder, Dimensions, Error, Result};
 use gamut_riff::{RiffReader, WebpChunkId};
@@ -56,9 +56,11 @@ impl WebpDecoder {
                     return Ok(dims);
                 }
                 WebpChunkId::Vp8x => {
-                    return Err(Error::Unsupported(
-                        "extended WebP (VP8X) decoding not yet implemented",
-                    ));
+                    // Validate the extended-format header, then fall through to the inner VP8/VP8L
+                    // bitstream chunk that follows. Alpha (the `ALPH` chunk gated by the VP8X alpha
+                    // flag) is decoded in a later milestone.
+                    gamut_riff::Vp8xHeader::from_payload(chunk.payload)?;
+                    continue;
                 }
                 _ => continue,
             }
@@ -125,13 +127,52 @@ mod tests {
     }
 
     #[test]
-    fn routes_extended_container_to_vp8x() {
-        let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::VP8X, &[0u8; 10]);
-        let file = w.finish();
+    fn decodes_extended_container_with_inner_bitstream() {
+        use gamut_riff::{Vp8xHeader, write_extended};
+        // A VP8X feature header followed by a VP8L bitstream decodes to the inner image (the alpha
+        // flag's `ALPH` chunk is handled in a later milestone).
+        let inner = solid_lossless_webp(2, 2, 0x11, 0x22, 0x33);
+        let vp8l = RiffReader::new(&inner)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .payload
+            .to_vec();
+        let header = Vp8xHeader {
+            canvas_width: 2,
+            canvas_height: 2,
+            ..Default::default()
+        };
+        let file = write_extended(&header, &[(FourCc::VP8L, &vp8l)]);
         let mut out = Vec::new();
-        let err = WebpDecoder::new().decode_to_rgb8(&file, &mut out);
-        assert!(matches!(err, Err(Error::Unsupported(m)) if m.contains("VP8X")));
+        let dims = WebpDecoder::new()
+            .decode_to_rgb8(&file, &mut out)
+            .expect("decode VP8X file");
+        assert_eq!(
+            dims,
+            Dimensions {
+                width: 2,
+                height: 2
+            }
+        );
+        assert_eq!(out, [0x11, 0x22, 0x33].repeat(4));
+    }
+
+    #[test]
+    fn rejects_extended_container_without_bitstream() {
+        // A VP8X header with no following bitstream chunk has nothing to decode.
+        let header = gamut_riff::Vp8xHeader {
+            canvas_width: 4,
+            canvas_height: 4,
+            ..Default::default()
+        };
+        let file = gamut_riff::write_extended(&header, &[]);
+        let mut out = Vec::new();
+        assert!(matches!(
+            WebpDecoder::new().decode_to_rgb8(&file, &mut out),
+            Err(Error::InvalidInput(_))
+        ));
     }
 
     #[test]

@@ -29,5 +29,8 @@ mod writer;
 pub use chunk::{CHUNK_HEADER_LEN, Chunk, ChunkHeader};
 pub use fourcc::FourCc;
 pub use reader::RiffReader;
-pub use webp::{WebpChunkId, write_simple_lossless, write_simple_lossy};
+pub use webp::{
+    VP8X_PAYLOAD_LEN, Vp8xHeader, WebpChunkId, write_extended, write_simple_lossless,
+    write_simple_lossy,
+};
 pub use writer::RiffWriter;
