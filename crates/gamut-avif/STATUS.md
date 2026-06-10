@@ -105,7 +105,8 @@ not a contract:
 | --- | --- | --- | --- |
 | single-tile `decode_tile`, above/left context clear | §5.11.2/.3 | ✅ | M0 |
 | `decode_partition`: PARTITION_NONE + edge-forced SPLIT/HORZ/VERT | §5.11.4 | ✅ | M0 |
-| full partition set: HORZ/VERT/SPLIT/HORZ_A/B/VERT_A/B/HORZ_4/VERT_4 | §5.11.4 | ☐ | M1 |
+| full partition set: HORZ/VERT/SPLIT/HORZ_A/B/VERT_A/B/HORZ_4/VERT_4 | §5.11.4 | ✅ (HORZ/VERT + NONE/SPLIT; A/B/4 deferred) | M1 |
+| rectangular transforms TX_16X8/8X16/32X16/16X32 (+scan, aspect coeff ctx) | §7.13.3/§8.3.2 | ✅ | M1 |
 | `intra_frame_mode_info` (KEY-frame block) | §5.11.7 | ✅ | M0 |
 | `skip` flag = 0 (residual always coded) | §5.11.11 | ✅ | M0 |
 | `skip` = 1 (no-residual / all-zero blocks) | §5.11.11 | ✅ (lossy; all-skip 8×8 unfiltered by CDEF) | M1 |

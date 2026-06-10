@@ -562,3 +562,49 @@ fn transform_64x64_blocks_match_dav1d() {
         }
     }
 }
+#[test]
+fn rectangular_partitions_match_dav1d() {
+    // A single horizontal or vertical luma+chroma edge over a 16×16 or 32×32 region makes the encoder
+    // pick PARTITION_HORZ / PARTITION_VERT, coding two rectangular halves each as one rectangular
+    // transform (TX_16X8/8X16/32X16/16X32). Exercises the rect scan, the aspect-specific coeff-base
+    // offset, the rect prediction, and the rect deblock edges — all bit-exact against dav1d.
+    for &q in &[16u8, 64, 144] {
+        // 32×32 → HORZ (TX_32X16) and VERT (TX_16X32), with a chroma edge so chroma codes a residual.
+        check(
+            &planes(32, 32, |_, y| {
+                if y < 16 {
+                    [50, 60, 50]
+                } else {
+                    [200, 150, 200]
+                }
+            }),
+            q,
+        );
+        check(
+            &planes(32, 32, |x, _| {
+                if x < 16 {
+                    [50, 60, 50]
+                } else {
+                    [200, 150, 200]
+                }
+            }),
+            q,
+        );
+        // 16×16 blocks across a larger frame → HORZ (TX_16X8) / VERT (TX_8X16) with neighbours on all
+        // sides (so the rect tx-depth and deblock neighbour contexts are exercised).
+        check(
+            &planes(64, 64, |_, y| {
+                let v = if (y % 16) < 8 { 50 } else { 160 };
+                [128, v, 128]
+            }),
+            q,
+        );
+        check(
+            &planes(64, 64, |x, _| {
+                let v = if (x % 16) < 8 { 50 } else { 160 };
+                [128, v, 128]
+            }),
+            q,
+        );
+    }
+}

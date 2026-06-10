@@ -216,7 +216,9 @@ pub(crate) fn deblock(
     width: usize,
     height: usize,
     tx_log2: &[u8],
+    tx_log2_h: &[u8],
     mi_bsl: &[u8],
+    mi_bsl_h: &[u8],
     mi_dlf: &[i8],
     qindex: u8,
 ) {
@@ -247,6 +249,15 @@ pub(crate) fn deblock(
                 u32::from(tx_log2[cell])
             } else {
                 (u32::from(mi_bsl[cell]) + 2).min(5)
+            }
+        };
+        // The transform *height* (log2) — equals `txlog2` for square transforms, differs for
+        // rectangular ones; the horizontal pass sizes its edges by this.
+        let txlog2_h = |cell: usize| -> u32 {
+            if is_luma {
+                u32::from(tx_log2_h[cell])
+            } else {
+                (u32::from(mi_bsl_h[cell]) + 2).min(5)
             }
         };
 
@@ -281,9 +292,9 @@ pub(crate) fn deblock(
             let mut x = 0;
             while x < width {
                 let col = x >> 2;
-                let txh = 1usize << txlog2(row * mi_cols + col);
+                let txh = 1usize << txlog2_h(row * mi_cols + col);
                 if y % txh == 0 {
-                    let prev_txh = 1usize << txlog2((row - 1) * mi_cols + col);
+                    let prev_txh = 1usize << txlog2_h((row - 1) * mi_cols + col);
                     let filter_size = prev_txh.min(txh).min(size_cap);
                     // The edge takes the level of its q0-side (bottom) block (§7.14.4).
                     let st = strength_for(row * mi_cols + col);
@@ -677,7 +688,9 @@ mod tests {
         let tx_log2 = vec![2u8; 4 * 4];
         let mi_bsl = vec![0u8; 4 * 4];
         let mi_dlf = vec![0i8; 4 * 4];
-        deblock(&mut flat, 16, 4, 16, 16, &tx_log2, &mi_bsl, &mi_dlf, 64);
+        deblock(
+            &mut flat, 16, 4, 16, 16, &tx_log2, &tx_log2, &mi_bsl, &mi_bsl, &mi_dlf, 64,
+        );
         assert!(flat[0].iter().all(|&v| v == 128));
 
         // A vertical step at column 8 gets smoothed across the x = 8 boundary.
@@ -688,7 +701,19 @@ mod tests {
             }
         }
         let before = planes[0].clone();
-        deblock(&mut planes, 16, 4, 16, 16, &tx_log2, &mi_bsl, &mi_dlf, 64); // qindex 64 ⇒ level 16
+        deblock(
+            &mut planes,
+            16,
+            4,
+            16,
+            16,
+            &tx_log2,
+            &tx_log2,
+            &mi_bsl,
+            &mi_bsl,
+            &mi_dlf,
+            64,
+        ); // qindex 64 ⇒ level 16
         assert_ne!(
             planes[0], before,
             "deblock should modify samples near the edge"
