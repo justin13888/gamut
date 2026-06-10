@@ -1377,6 +1377,25 @@ pub static COEFF_BASE_CTX_OFFSET_8X8: [[u8; 5]; 5] = [
     [21, 21, 21, 21, 21],
 ];
 
+/// `Coeff_Base_Ctx_Offset` for a WIDE (`w > h`) rectangular transform (`dav1d_lo_ctx_offsets[1]`).
+/// The square table is wrong for rectangular blocks — the low-frequency positions differ (§8.3.2).
+pub static COEFF_BASE_CTX_OFFSET_WIDE: [[u8; 5]; 5] = [
+    [0, 16, 6, 6, 21],
+    [16, 16, 6, 21, 21],
+    [16, 16, 21, 21, 21],
+    [16, 16, 21, 21, 21],
+    [16, 16, 21, 21, 21],
+];
+
+/// `Coeff_Base_Ctx_Offset` for a TALL (`w < h`) rectangular transform (`dav1d_lo_ctx_offsets[2]`).
+pub static COEFF_BASE_CTX_OFFSET_TALL: [[u8; 5]; 5] = [
+    [0, 11, 11, 11, 11],
+    [11, 11, 11, 11, 11],
+    [6, 6, 21, 21, 21],
+    [6, 21, 21, 21, 21],
+    [21, 21, 21, 21, 21],
+];
+
 /// `Sig_Ref_Diff_Offset[TX_CLASS_2D]` (§8.3.2): `(row, col)` neighbour offsets for `coeff_base`.
 pub static SIG_REF_DIFF_OFFSET_2D: [(usize, usize); 5] = [(0, 1), (1, 0), (1, 1), (0, 2), (2, 0)];
 
@@ -4655,3 +4674,143 @@ pub static COEFF_BASE_64X64: [[[[u16; 4]; 42]; 2]; 4] = [
         ],
     ],
 ];
+
+/// Generates the `Default_Scan` order for a `w × h` transform (§9.2): the up-right diagonal scan in
+/// gamut's row-major (`row * w + col`) coefficient layout. Even anti-diagonals are walked bottom→top,
+/// odd ones top→bottom — the rule that reproduces the hand-written square `DEFAULT_SCAN_*` tables, so
+/// it extends them to the rectangular sizes consistently with the same layout the inverse transform
+/// reads. Returns `w * h` distinct positions.
+#[must_use]
+pub fn default_scan(w: usize, h: usize) -> Vec<usize> {
+    let mut scan = Vec::with_capacity(w * h);
+    for d in 0..(w + h - 1) {
+        let i_lo = d.saturating_sub(w - 1);
+        let i_hi = d.min(h - 1);
+        // Within each anti-diagonal the row index walks one direction. A square block alternates
+        // (the boustrophedon pattern of the hand tables); a wide block (`w > h`) always descends and a
+        // tall block always ascends — the orientation that matches dav1d's rectangular scan tables
+        // once transposed into gamut's row-major coefficient layout.
+        let descending = if w == h { d % 2 == 0 } else { w > h };
+        if descending {
+            for i in (i_lo..=i_hi).rev() {
+                scan.push(i * w + (d - i));
+            }
+        } else {
+            for i in i_lo..=i_hi {
+                scan.push(i * w + (d - i));
+            }
+        }
+    }
+    scan
+}
+
+/// `Default_Eob_Pt_128_Cdf` (§9.4): eob-position CDF for the 128-coefficient rect transforms
+/// (8×16/16×8), indexed `[qctx][ptype][eobCtx][8]`.
+pub static EOB_PT_128: [[[[u16; 8]; 2]; 2]; 4] = [
+    [
+        [
+            [219, 482, 1140, 2091, 3680, 6028, 12586, 32768],
+            [371, 699, 1254, 4830, 9479, 12562, 17497, 32768],
+        ],
+        [
+            [5245, 7456, 12880, 15852, 20033, 23932, 27608, 32768],
+            [2054, 3472, 5869, 14232, 18242, 20590, 26752, 32768],
+        ],
+    ],
+    [
+        [
+            [685, 933, 1488, 2714, 4766, 8562, 19254, 32768],
+            [217, 352, 618, 2303, 5261, 9969, 17472, 32768],
+        ],
+        [
+            [8045, 11200, 15497, 19595, 23948, 27408, 30938, 32768],
+            [2310, 4160, 7471, 14997, 17931, 20768, 30240, 32768],
+        ],
+    ],
+    [
+        [
+            [1366, 1738, 2527, 5016, 9355, 15797, 24643, 32768],
+            [354, 558, 944, 2760, 7287, 14037, 21779, 32768],
+        ],
+        [
+            [13627, 16246, 20173, 24429, 27948, 30415, 31863, 32768],
+            [6275, 9889, 14769, 23164, 27988, 30493, 32272, 32768],
+        ],
+    ],
+    [
+        [
+            [3472, 4885, 7489, 12481, 18517, 24536, 29635, 32768],
+            [886, 1731, 3271, 8469, 15569, 22126, 28383, 32768],
+        ],
+        [
+            [24313, 26062, 28385, 30107, 31217, 31898, 32345, 32768],
+            [9165, 13282, 21150, 30286, 31894, 32571, 32712, 32768],
+        ],
+    ],
+];
+
+/// `Default_Eob_Pt_512_Cdf` (§9.4): eob-position CDF for the 512-coefficient rect transforms
+/// (16×32/32×16), indexed `[qctx][ptype][10]` (no eob-context dimension, like 1024).
+pub static EOB_PT_512: [[[u16; 10]; 2]; 4] = [
+    [
+        [
+            641, 983, 3707, 5430, 10234, 14958, 18788, 23412, 26061, 32768,
+        ],
+        [
+            5095, 6446, 9996, 13354, 16017, 17986, 20919, 26129, 29140, 32768,
+        ],
+    ],
+    [
+        [
+            1230, 2278, 5035, 7776, 11871, 15346, 19590, 24584, 28749, 32768,
+        ],
+        [
+            7265, 9979, 15819, 19250, 21780, 23846, 26478, 28396, 31811, 32768,
+        ],
+    ],
+    [
+        [
+            2624, 3936, 6480, 9686, 13979, 17726, 23267, 28410, 31078, 32768,
+        ],
+        [
+            12015, 14769, 19588, 22052, 24222, 25812, 27300, 29219, 32114, 32768,
+        ],
+    ],
+    [
+        [
+            5927, 7809, 10923, 14597, 19439, 24135, 28456, 31142, 32060, 32768,
+        ],
+        [
+            21093, 23043, 25742, 27658, 29097, 29716, 30073, 30820, 31956, 32768,
+        ],
+    ],
+];
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    #[test]
+    fn default_scan_reproduces_square_tables() {
+        assert_eq!(default_scan(4, 4), DEFAULT_SCAN_4X4);
+        assert_eq!(default_scan(8, 8), DEFAULT_SCAN_8X8);
+        assert_eq!(default_scan(16, 16), DEFAULT_SCAN_16X16);
+        assert_eq!(default_scan(32, 32), DEFAULT_SCAN_32X32);
+    }
+
+    #[test]
+    fn default_scan_is_a_permutation() {
+        for &(w, h) in &[(4, 8), (8, 4), (8, 16), (16, 8), (16, 32), (32, 16)] {
+            let s = default_scan(w, h);
+            assert_eq!(s.len(), w * h);
+            let mut seen = vec![false; w * h];
+            for &p in &s {
+                assert!(
+                    p < w * h && !seen[p],
+                    "{w}x{h} scan not a permutation at {p}"
+                );
+                seen[p] = true;
+            }
+        }
+    }
+}

@@ -241,6 +241,19 @@ const fn square_tx(width: usize) -> TxSize {
     }
 }
 
+/// The transform size that exactly covers a `w × h` block (the rectangular block's `Max_Tx_Size`
+/// under `TX_MODE_LARGEST`): a square block maps to its square transform, a rectangular one to the
+/// matching rectangular transform.
+const fn rect_tx(w: usize, h: usize) -> TxSize {
+    match (w, h) {
+        (16, 8) => TxSize::Tx16x8,
+        (8, 16) => TxSize::Tx8x16,
+        (32, 16) => TxSize::Tx32x16,
+        (16, 32) => TxSize::Tx16x32,
+        _ => square_tx(w),
+    }
+}
+
 /// How a single transform block's samples are predicted. `mode` is the intra mode (`DC_PRED` for
 /// chroma); `angle_delta` is the directional fine angle (`AngleDeltaY`, signaled only for ≥8×8 luma
 /// directional blocks); `filter_intra` overrides luma prediction with a recursive filter-intra mode
@@ -295,6 +308,14 @@ pub(crate) struct FrameEncoder<'a> {
     left_dc: [Vec<u8>; 3],
     /// `Mi_Width_Log2` of the block covering each MI cell (for the partition context).
     mi_bsl: Vec<u8>,
+    /// `Mi_Height_Log2` of the block covering each MI cell (the height counterpart of `mi_bsl`), for
+    /// the deblock filter to size a rectangular block's chroma horizontal edges.
+    mi_bsl_h: Vec<u8>,
+    /// `AbovePartitionContext`/`LeftPartitionContext` (§5.11.4): per-column / per-row partition
+    /// context bitmasks updated from `AL_PART_CTX` after each terminal partition. A given block level
+    /// reads bit `bsl - 1`; this distinguishes HORZ/VERT/NONE neighbours (which `mi_bsl` alone cannot).
+    above_partition: Vec<u8>,
+    left_partition: Vec<u8>,
     /// The luma intra mode (`YMode`) chosen for each MI cell, for the `intra_frame_y_mode` context.
     mi_ymode: Vec<u8>,
     /// The `skip` flag of the block covering each MI cell, for the `skip` context (§8.3.2).
@@ -314,6 +335,10 @@ pub(crate) struct FrameEncoder<'a> {
     /// `Tx_Width_Log2` of the transform covering each MI cell (`2` for 4×4, `3` for 8×8), consumed by
     /// the deblocking loop filter to locate transform edges and pick the filter size.
     tx_log2: Vec<u8>,
+    /// `Tx_Height_Log2` of the transform covering each MI cell — equals `tx_log2` for square
+    /// transforms, differs for rectangular ones. The `tx_depth` context reads a left neighbour's tx
+    /// *height* and an above neighbour's tx *width*, so both are tracked.
+    tx_log2_h: Vec<u8>,
     /// Top-left MI position of the superblock currently being encoded (for `BlockDecoded` indexing).
     sb_r: usize,
     sb_c: usize,
@@ -326,6 +351,39 @@ pub(crate) struct FrameEncoder<'a> {
 /// Row stride of [`FrameEncoder::block_decoded`]: a 64×64 superblock is 16 MI wide, plus the `-1`
 /// guard row/column and the `+16` below/right edge ⇒ indices `-1..=16` → 18 entries.
 const BD_STRIDE: usize = 18;
+
+/// `Partition_Context` lookup (`dav1d_al_part_ctx[2][N_BL_LEVELS][PARTITION]`, §5.11.4), restricted to
+/// the partition types this encoder emits: `[above|left][block level 0=128…4=8][NONE|HORZ|VERT|SPLIT]`.
+/// After a terminal partition, the block's MI cells take these context bytes; a later block reads bit
+/// `bsl - 1` of the neighbour byte to form its partition context. The SPLIT column is only ever read at
+/// 8×8 (`bl == 4`) — at coarser levels a split recurses and the column (0) is unused.
+const AL_PART_CTX: [[[u8; 4]; 5]; 2] = [
+    [
+        [0x00, 0x00, 0x10, 0x00],
+        [0x10, 0x10, 0x18, 0x00],
+        [0x18, 0x18, 0x1c, 0x00],
+        [0x1c, 0x1c, 0x1e, 0x00],
+        [0x1e, 0x1e, 0x1f, 0x1f],
+    ],
+    [
+        [0x00, 0x10, 0x00, 0x00],
+        [0x10, 0x18, 0x10, 0x00],
+        [0x18, 0x1c, 0x18, 0x00],
+        [0x1c, 0x1e, 0x1c, 0x00],
+        [0x1e, 0x1f, 0x1e, 0x1f],
+    ],
+];
+
+/// `Sm_Weights` (§9.3) for a transform dimension `size` (8/16/32/64). The SMOOTH predictors weight
+/// each axis independently, so a rectangular block reads a different-length table per axis.
+fn sm_weights(size: usize) -> &'static [i32] {
+    match size {
+        8 => &cdf::SM_WEIGHTS_8X8,
+        16 => &cdf::SM_WEIGHTS_16X16,
+        32 => &cdf::SM_WEIGHTS_32X32,
+        _ => &cdf::SM_WEIGHTS_64X64,
+    }
+}
 
 impl<'a> FrameEncoder<'a> {
     /// Creates an encoder over the 4:4:4 identity planes (Y=G, U=B, V=R) at quantizer `qindex`
@@ -369,6 +427,9 @@ impl<'a> FrameEncoder<'a> {
             left_level: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
             left_dc: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
             mi_bsl: vec![0; mi_cols * mi_rows],
+            mi_bsl_h: vec![0; mi_cols * mi_rows],
+            above_partition: vec![0; mi_cols],
+            left_partition: vec![0; mi_rows],
             mi_ymode: vec![0; mi_cols * mi_rows],
             mi_skip: vec![0; mi_cols * mi_rows],
             mi_segid: vec![0; mi_cols * mi_rows],
@@ -376,6 +437,7 @@ impl<'a> FrameEncoder<'a> {
             mi_pcolors: vec![[0u8; 8]; mi_cols * mi_rows],
             mi_dlf: vec![0; mi_cols * mi_rows],
             tx_log2: vec![2; mi_cols * mi_rows],
+            tx_log2_h: vec![2; mi_cols * mi_rows],
             sb_r: 0,
             sb_c: 0,
             block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
@@ -439,7 +501,9 @@ impl<'a> FrameEncoder<'a> {
                 self.width,
                 self.height,
                 &self.tx_log2,
+                &self.tx_log2_h,
                 &self.mi_bsl,
+                &self.mi_bsl_h,
                 &self.mi_dlf,
                 self.qindex,
             );
@@ -476,53 +540,101 @@ impl<'a> FrameEncoder<'a> {
         let has_cols = c + half < self.mi_cols;
         let bsl = num4x4.trailing_zeros() as usize; // Mi_Width_Log2
 
-        let split = if bw < 8 {
-            false // PARTITION_NONE forced, no symbol
+        // `bp`: the chosen partition (0 NONE, 1 HORZ, 2 VERT, 3 SPLIT; `usize::MAX` = no partition
+        // decoded, for the forced-NONE sub-8×8 blocks).
+        let bp = if bw < 8 {
+            usize::MAX
         } else if has_rows && has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
             if self.qindex == 0 {
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
-                false
+                0
+            } else if let Some(d) = self.decide_rect(r, c, bw) {
+                // PARTITION_HORZ (1) / PARTITION_VERT (2): two rectangular halves, each its own mode
+                // and one matching rectangular transform.
+                self.sym.encode_symbol(d, partition_cdf(bsl, ctx));
+                d
             } else if (8..=64).contains(&bw) && !self.should_split(r, c, bw) {
                 // Lossy: an 8×8…64×64 region coded as a single PARTITION_NONE block + one
                 // TX_8X8…TX_64X64 when it is smooth enough; otherwise split for per-block
                 // mode/transform adaptation (each SPLIT halves, recursing down to 4×4 as needed).
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
-                false
+                0
             } else {
-                // Lossy: PARTITION_SPLIT.
-                self.sym.encode_symbol(3, partition_cdf(bsl, ctx));
-                true
+                self.sym.encode_symbol(3, partition_cdf(bsl, ctx)); // PARTITION_SPLIT
+                3
             }
         } else if has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
             let cdf2 = split_or_horz_cdf(partition_cdf(bsl, ctx));
             self.sym.encode_symbol(1, &cdf2); // split
-            true
+            3
         } else if has_rows {
             let ctx = self.partition_ctx(r, c, bsl);
             let cdf2 = split_or_vert_cdf(partition_cdf(bsl, ctx));
             self.sym.encode_symbol(1, &cdf2); // split
-            true
+            3
         } else {
-            true // forced PARTITION_SPLIT, no symbol
+            3 // forced PARTITION_SPLIT, no symbol
         };
 
-        if !split {
-            self.encode_block(r, c, bw);
-        } else {
-            let h = bw / 2;
-            self.encode_partition(r, c, h);
-            self.encode_partition(r, c + half, h);
-            self.encode_partition(r + half, c, h);
-            self.encode_partition(r + half, c + half, h);
+        // AbovePartitionContext/LeftPartitionContext update (§5.11.4): a terminal partition (NONE/
+        // HORZ/VERT) writes its level's context; PARTITION_SPLIT writes only at 8×8 (its 4×4 children
+        // decode no partition), otherwise its children update as they recurse. The forced-NONE sub-8×8
+        // case (`bp = MAX`) decodes no partition, so it writes nothing.
+        if bw >= 8 && bp != usize::MAX && (bp != 3 || bsl == 1) {
+            self.update_partition_ctx(r, c, bsl, bp);
+        }
+
+        match bp {
+            usize::MAX | 0 => self.encode_block(r, c, bw, bw),
+            1 => {
+                // PARTITION_HORZ: top then bottom half, each `bw × bw/2`.
+                self.encode_block(r, c, bw, bw / 2);
+                if r + half < self.mi_rows {
+                    self.encode_block(r + half, c, bw, bw / 2);
+                }
+            }
+            2 => {
+                // PARTITION_VERT: left then right half, each `bw/2 × bw`.
+                self.encode_block(r, c, bw / 2, bw);
+                if c + half < self.mi_cols {
+                    self.encode_block(r, c + half, bw / 2, bw);
+                }
+            }
+            _ => {
+                let h = bw / 2;
+                self.encode_partition(r, c, h);
+                self.encode_partition(r, c + half, h);
+                self.encode_partition(r + half, c, h);
+                self.encode_partition(r + half, c + half, h);
+            }
         }
     }
 
     fn partition_ctx(&self, r: usize, c: usize, bsl: usize) -> usize {
-        let above = r > 0 && usize::from(self.mi_bsl[(r - 1) * self.mi_cols + c]) < bsl;
-        let left = c > 0 && usize::from(self.mi_bsl[r * self.mi_cols + (c - 1)]) < bsl;
+        // §8.3.2: `above`/`left` are bit `4 - bl == bsl - 1` of the neighbour partition context.
+        let bit = bsl - 1;
+        let above = (self.above_partition[c] >> bit) & 1;
+        let left = (self.left_partition[r] >> bit) & 1;
         usize::from(left) * 2 + usize::from(above)
+    }
+
+    /// Updates `AbovePartitionContext`/`LeftPartitionContext` over the `n4 × n4` MI cells of a block
+    /// coded with terminal partition `bp` (0 = NONE, 1 = HORZ, 2 = VERT) at level `bsl`
+    /// (`Mi_Width_Log2`). `PARTITION_SPLIT` does not update — its children write their own context.
+    fn update_partition_ctx(&mut self, r: usize, c: usize, bsl: usize, bp: usize) {
+        let bl = 5 - bsl; // block level: BL_128X128=0 … BL_8X8=4
+        let n4 = 1usize << bsl;
+        let (a, l) = (AL_PART_CTX[0][bl][bp], AL_PART_CTX[1][bl][bp]);
+        for k in 0..n4 {
+            if c + k < self.mi_cols {
+                self.above_partition[c + k] = a;
+            }
+            if r + k < self.mi_rows {
+                self.left_partition[r + k] = l;
+            }
+        }
     }
 
     /// Decides whether the lossy `bw × bw` region at MI `(r, c)` should split rather than be coded as
@@ -544,7 +656,7 @@ impl<'a> FrameEncoder<'a> {
         if self.decide_palette(r, c, bw).is_some() {
             return false;
         }
-        self.luma_range(c * 4, r * 4, bw) > 32
+        self.luma_range(c * 4, r * 4, bw, bw) > 32
     }
 
     /// Updates the active dequantizers to `CurrentQIndex` — used when a `delta_q` changes it. Only the
@@ -682,7 +794,7 @@ impl<'a> FrameEncoder<'a> {
                     }
                 }
             }
-            if self.dc_pred(plane, sx, sy, bw) != v0 {
+            if self.dc_pred(plane, sx, sy, bw, bw) != v0 {
                 return false;
             }
         }
@@ -721,7 +833,7 @@ impl<'a> FrameEncoder<'a> {
                     }
                 }
             }
-            if self.dc_pred(plane, sx, sy, bw) != v0 {
+            if self.dc_pred(plane, sx, sy, bw, bw) != v0 {
                 return None;
             }
         }
@@ -865,7 +977,7 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         for plane in 1..3 {
-            let dc = self.dc_pred(plane, sx, sy, bw).clamp(0, 255) as u8;
+            let dc = self.dc_pred(plane, sx, sy, bw, bw).clamp(0, 255) as u8;
             for i in 0..bw {
                 for j in 0..bw {
                     self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = dc;
@@ -873,17 +985,17 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         for plane in 0..3 {
-            self.set_ctx(plane, sx >> 2, sy >> 2, bw / 4, 0, 0);
+            self.set_ctx(plane, sx >> 2, sy >> 2, bw / 4, bw / 4, 0, 0);
         }
     }
 
     /// Source-luma range (max − min) over the `bw × bw` block at coded `(sx, sy)`. Used by the
     /// partition and transform-depth heuristics.
-    fn luma_range(&self, sx: usize, sy: usize, bw: usize) -> i32 {
+    fn luma_range(&self, sx: usize, sy: usize, w: usize, h: usize) -> i32 {
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
-        for i in 0..bw {
-            for j in 0..bw {
+        for i in 0..h {
+            for j in 0..w {
                 let v = self.sample(0, sx + j, sy + i);
                 lo = lo.min(v);
                 hi = hi.max(v);
@@ -892,20 +1004,51 @@ impl<'a> FrameEncoder<'a> {
         hi - lo
     }
 
+    /// Decides whether to code a square `bw × bw` region (16×16 or 32×32, fully on-screen) as two
+    /// rectangular halves: `Some(1)` PARTITION_HORZ (top/bottom `bw × bw/2`) or `Some(2)` PARTITION_VERT
+    /// (left/right `bw/2 × bw`). Chosen when the whole block is textured (would otherwise split) but a
+    /// single horizontal or vertical edge makes both halves smooth — so each half gets one mode/
+    /// transform. A quality decision (every choice reconstructs bit-exactly); the threshold is a
+    /// deterministic placeholder. `None` falls through to the NONE/SPLIT decision.
+    fn decide_rect(&self, r: usize, c: usize, bw: usize) -> Option<usize> {
+        if bw != 16 && bw != 32 {
+            return None;
+        }
+        let n4 = bw / 4;
+        if r + n4 > self.mi_rows || c + n4 > self.mi_cols {
+            return None; // a partial block crops cleanly as smaller squares
+        }
+        let (sx, sy, hp) = (c * 4, r * 4, bw / 2);
+        if self.luma_range(sx, sy, bw, bw) <= 32 {
+            return None; // smooth enough to keep whole (PARTITION_NONE)
+        }
+        let horz_ok =
+            self.luma_range(sx, sy, bw, hp) <= 32 && self.luma_range(sx, sy + hp, bw, hp) <= 32;
+        let vert_ok =
+            self.luma_range(sx, sy, hp, bw) <= 32 && self.luma_range(sx + hp, sy, hp, bw) <= 32;
+        if horz_ok {
+            Some(1)
+        } else if vert_ok {
+            Some(2)
+        } else {
+            None
+        }
+    }
+
     /// Context for the `tx_depth` CDF (§8.3.2): `(aboveTxW ≥ bw) + (leftTxH ≥ bw)`, where the
     /// neighbour transform width/height come from the per-MI `tx_log2` map (0 when unavailable).
-    fn tx_depth_ctx(&self, r: usize, c: usize, bw: usize) -> usize {
+    fn tx_depth_ctx(&self, r: usize, c: usize, bw: usize, bh: usize) -> usize {
         let above_w = if r > 0 {
             1usize << self.tx_log2[(r - 1) * self.mi_cols + c]
         } else {
             0
         };
         let left_h = if c > 0 {
-            1usize << self.tx_log2[r * self.mi_cols + (c - 1)]
+            1usize << self.tx_log2_h[r * self.mi_cols + (c - 1)]
         } else {
             0
         };
-        usize::from(above_w >= bw) + usize::from(left_h >= bw)
+        usize::from(above_w >= bw) + usize::from(left_h >= bh)
     }
 
     /// Picks the luma `tx_depth` (0..=`max_depth`, itself ≤ `MAX_TX_DEPTH = 2`) for a lossy ≥8×8
@@ -913,7 +1056,7 @@ impl<'a> FrameEncoder<'a> {
     /// (one prediction mode, several sub-transforms). This is a quality decision — every depth
     /// reconstructs bit-exactly — so the range thresholds are a deterministic placeholder.
     fn select_tx_depth(&self, sx: usize, sy: usize, bw: usize, max_depth: usize) -> usize {
-        let range = self.luma_range(sx, sy, bw);
+        let range = self.luma_range(sx, sy, bw, bw);
         let depth = if range > 24 {
             2
         } else if range > 12 {
@@ -924,12 +1067,18 @@ impl<'a> FrameEncoder<'a> {
         depth.min(max_depth)
     }
 
-    fn encode_block(&mut self, r: usize, c: usize, bw: usize) {
+    fn encode_block(&mut self, r: usize, c: usize, bw: usize, bh: usize) {
         let n4 = bw / 4;
+        let n4h = bh / 4;
         let bsl = n4.trailing_zeros() as u8;
+        let bsl_h = n4h.trailing_zeros() as u8;
+        // A rectangular block (from PARTITION_HORZ/VERT) is coded as one matching rectangular transform
+        // (OPTION A); it uses a SMOOTH-family non-directional mode (so no palette/filter-intra/CfL) and
+        // never `skip = 1` (its residual, possibly all-zero, is always coded).
+        let is_rect = bw != bh;
         // TX_MODE_LARGEST ⇒ the transform spans the whole block. The lossy path codes an 8×8 or 16×16
         // block as a single TX_8X8 / TX_16X16; lossy 4×4 and lossless use 4×4 transforms.
-        let lossy_large = self.qindex > 0 && bw >= 8;
+        let lossy_large = self.qindex > 0 && bw.min(bh) >= 8;
 
         // intra_frame_mode_info: skip=0 (ctx 0), then y_mode and uv_mode. The lossless path always
         // predicts DC_PRED; the lossy path searches the non-directional luma modes (plus directional
@@ -938,12 +1087,13 @@ impl<'a> FrameEncoder<'a> {
         // `skip = 1`: the reconstruction is the palette (luma) plus DC chroma, so no residual is
         // needed. Otherwise a block whose residual is identically zero (flat + DC-predicted) is also
         // `skip = 1`. The skip context is the above/left skip flags.
-        let palette = if self.qindex > 0 && (8..=32).contains(&bw) {
+        let palette = if self.qindex > 0 && !is_rect && (8..=32).contains(&bw) {
             self.decide_palette(r, c, bw)
         } else {
             None
         };
-        let skip = palette.is_some() || (self.qindex > 0 && self.block_is_skippable(r, c, bw));
+        let skip =
+            palette.is_some() || (self.qindex > 0 && !is_rect && self.block_is_skippable(r, c, bw));
 
         let sctx = self.skip_ctx(r, c);
         self.sym.encode_symbol(usize::from(skip), &cdf::SKIP[sctx]);
@@ -960,7 +1110,7 @@ impl<'a> FrameEncoder<'a> {
         // cdef_bits = 0.) A block that fills the whole superblock (`MiSize == sbSize`, i.e. a 64×64
         // block) and is `skip` codes neither delta — `read_delta_qindex`/`read_delta_lf` return early.
         if self.read_deltas {
-            if !(bw == 64 && skip) {
+            if !(bw == 64 && bh == 64 && skip) {
                 self.signal_delta_q();
                 self.signal_delta_lf();
             }
@@ -974,6 +1124,10 @@ impl<'a> FrameEncoder<'a> {
         let (y_mode, angle_delta, filter_intra) = if palette.is_some() || self.qindex == 0 {
             // Palette requires YMode == DC_PRED (and no filter-intra); lossless also forces DC_PRED.
             (DC_PRED, 0i8, None)
+        } else if is_rect {
+            // A rectangular block picks a SMOOTH-family non-directional mode (never DC, so no palette/
+            // filter-intra signaling follows, and never directional, so prediction stays square-free).
+            (self.select_luma_mode_rect(c * 4, r * 4, bw, bh), 0, None)
         } else if lossy_large {
             self.select_luma_mode_nxn(c * 4, r * 4, bw)
         } else {
@@ -1004,13 +1158,17 @@ impl<'a> FrameEncoder<'a> {
         // when Lossless, else `Max(w, h) <= 32` — so CfL is allowed for the lossy 4×4 and 8×8 blocks
         // and the lossless 4×4 blocks. When allowed, the encoder picks chroma-from-luma if it beats
         // plain DC_PRED, then emits read_cfl_alphas; otherwise uv_mode = DC_PRED.
-        let cfl_allowed = if self.qindex == 0 { bw == 4 } else { bw <= 32 };
+        let cfl_allowed = if self.qindex == 0 {
+            bw == 4
+        } else {
+            bw.max(bh) <= 32
+        };
         let cfl = if palette.is_some() {
             None // a palette block's chroma is DC_PRED (no CfL)
-        } else if self.qindex > 0 && cfl_allowed {
+        } else if self.qindex > 0 && cfl_allowed && !is_rect {
             self.select_cfl(c * 4, r * 4, bw)
         } else {
-            None
+            None // CfL is square-only here; a rectangular block's chroma is plain DC_PRED
         };
         let ym = usize::from(y_mode);
         if cfl_allowed {
@@ -1030,7 +1188,7 @@ impl<'a> FrameEncoder<'a> {
         // (Palette is only *chosen* for ≤32 — `palette` is `None` at 64 — but the flag is still coded.)
         if self.qindex > 0 && (8..=64).contains(&bw) {
             if y_mode == DC_PRED {
-                let bctx = 2 * bw.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
+                let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
                 let above = r > 0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
                 let left = c > 0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
                 let pctx = usize::from(above) + usize::from(left);
@@ -1057,7 +1215,7 @@ impl<'a> FrameEncoder<'a> {
         // filter_intra_mode_info (§5.11.24): a DC_PRED luma block ≤ 32px with no palette
         // (`PaletteSizeY == 0`) signals use_filter_intra, under the block-size CDF row. A 64×64 block
         // (`Max(w, h) > 32`) does not signal it.
-        if self.qindex > 0 && y_mode == DC_PRED && palette.is_none() && bw <= 32 {
+        if self.qindex > 0 && y_mode == DC_PRED && palette.is_none() && bw <= 32 && bh <= 32 {
             let fi_cdf: &[u16] = match bw {
                 4 => &cdf::FILTER_INTRA_4X4,
                 8 => &cdf::FILTER_INTRA_8X8,
@@ -1083,10 +1241,21 @@ impl<'a> FrameEncoder<'a> {
         // `tx_depth`, choosing a luma transform `bw >> tx_depth` (square, ≥ 4×4). Chroma never signals
         // — for 4:4:4 it always uses the block-size transform (`Max_Tx_Size_Rect`). The CDF is keyed by
         // block size (`Max_Tx_Depth`); the context is `(aboveTxW ≥ bw) + (leftTxH ≥ bw)`.
-        let luma_tx = if lossy_large {
+        let luma_tx = if is_rect {
+            // One rectangular transform fills the block (tx_depth = 0). The CDF is keyed by the
+            // bounding square (`txSzSqrUp = Max(bw, bh)`); the context is `(aboveTxW ≥ bw) +
+            // (leftTxH ≥ bh)`, exactly as for a square block of that size.
+            let ctx = self.tx_depth_ctx(r, c, bw, bh);
+            let cdf: &[u16] = match bw.max(bh) {
+                16 => &cdf::TX_SIZE_16X16[ctx],
+                _ => &cdf::TX_SIZE_32X32[ctx],
+            };
+            self.sym.encode_symbol(0, cdf);
+            rect_tx(bw, bh)
+        } else if lossy_large {
             let max_depth = if bw == 8 { 1 } else { 2 };
             let tx_depth = self.select_tx_depth(c * 4, r * 4, bw, max_depth);
-            let ctx = self.tx_depth_ctx(r, c, bw);
+            let ctx = self.tx_depth_ctx(r, c, bw, bw);
             let cdf: &[u16] = match bw {
                 8 => &cdf::TX_SIZE_8X8[ctx],
                 16 => &cdf::TX_SIZE_16X16[ctx],
@@ -1104,6 +1273,7 @@ impl<'a> FrameEncoder<'a> {
         // transform-size log2 — consumed by the deblocking loop filter (which derives the chroma tx
         // size from `mi_bsl` since 4:4:4 chroma uses the block-size transform).
         let txl = luma_tx.log2_width() as u8;
+        let txl_h = luma_tx.log2_height() as u8;
         let (psize, pcolors) = match &palette {
             Some(pal) => {
                 let mut buf = [0u8; 8];
@@ -1112,13 +1282,15 @@ impl<'a> FrameEncoder<'a> {
             }
             None => (0u8, [0u8; 8]),
         };
-        for y in 0..n4 {
+        for y in 0..n4h {
             for x in 0..n4 {
                 let (rr, cc) = (r + y, c + x);
                 if rr < self.mi_rows && cc < self.mi_cols {
                     self.mi_bsl[rr * self.mi_cols + cc] = bsl;
+                    self.mi_bsl_h[rr * self.mi_cols + cc] = bsl_h;
                     self.mi_ymode[rr * self.mi_cols + cc] = y_mode;
                     self.tx_log2[rr * self.mi_cols + cc] = txl;
+                    self.tx_log2_h[rr * self.mi_cols + cc] = txl_h;
                     self.mi_skip[rr * self.mi_cols + cc] = u8::from(skip);
                     self.mi_psize[rr * self.mi_cols + cc] = psize;
                     self.mi_pcolors[rr * self.mi_cols + cc] = pcolors;
@@ -1149,10 +1321,15 @@ impl<'a> FrameEncoder<'a> {
         // DC_PRED (plus the CfL term) over the block-size transform — but chroma never uses TX_64X64,
         // so a 64×64 block's chroma is a 2×2 raster of TX_32X32. Luma (plane 0) is fully reconstructed
         // before chroma, so the chroma CfL reads finalized luma recon.
-        let chroma_tx = match bw {
-            8 => TxSize::Tx8x8,
-            16 => TxSize::Tx16x16,
-            _ => TxSize::Tx32x32,
+        let chroma_tx = if is_rect {
+            // 4:4:4 chroma uses the same rectangular transform as luma (one transform fills the block).
+            rect_tx(bw, bh)
+        } else {
+            match bw {
+                8 => TxSize::Tx8x8,
+                16 => TxSize::Tx16x16,
+                _ => TxSize::Tx32x32,
+            }
         };
         for plane in 0..3 {
             let pred = Pred {
@@ -1165,17 +1342,17 @@ impl<'a> FrameEncoder<'a> {
                     _ => None,
                 },
             };
-            let (ptx, pw) = if plane == 0 {
-                (luma_tx, luma_tx.width())
+            let (ptx, pw, ph) = if plane == 0 {
+                (luma_tx, luma_tx.width(), luma_tx.height())
             } else if lossy_large {
-                // Chroma transform width — the chroma block size (`bw`) capped at 32 (no TX_64X64);
-                // the residual loop steps by `pw`, so a 64×64 block's chroma forms a 2×2 raster.
-                (chroma_tx, chroma_tx.width())
+                // Chroma transform size — the chroma block size capped at 32 (no TX_64X64); the
+                // residual loop steps by `pw`/`ph`, so e.g. a 64×64 block's chroma forms a 2×2 raster.
+                (chroma_tx, chroma_tx.width(), chroma_tx.height())
             } else {
-                (TxSize::Tx4x4, 4)
+                (TxSize::Tx4x4, 4, 4)
             };
             let mut sy = r * 4;
-            while sy < r * 4 + bw {
+            while sy < r * 4 + bh {
                 let mut sx = c * 4;
                 while sx < c * 4 + bw {
                     if sx < self.coded_w && sy < self.coded_h {
@@ -1186,7 +1363,7 @@ impl<'a> FrameEncoder<'a> {
                     // above-right / below-left siblings just reconstructed. Luma-grid only (chroma is
                     // never directional); marked on the luma pass.
                     if plane == 0 {
-                        for ty in 0..pw / 4 {
+                        for ty in 0..ph / 4 {
                             for tx in 0..pw / 4 {
                                 let by = (sy / 4 + ty) as isize - self.sb_r as isize;
                                 let bx = (sx / 4 + tx) as isize - self.sb_c as isize;
@@ -1199,7 +1376,7 @@ impl<'a> FrameEncoder<'a> {
                     }
                     sx += pw;
                 }
-                sy += pw;
+                sy += ph;
             }
         }
     }
@@ -1242,13 +1419,13 @@ impl<'a> FrameEncoder<'a> {
         // forward-transform + quantize, code, then reconstruct exactly as the decoder will and store
         // back. Because the recon is `pred + inverse(dequant(levels))` and the decoder runs the same
         // inverse on the same levels, the result is bit-exact for whichever transform type is signaled.
-        let n = tx_size.width();
+        let (tw, th) = (tx_size.width(), tx_size.height());
         let pred: Vec<i32> = match desc.filter_intra {
-            Some(fi) if plane == 0 => self.predict_filter_intra(plane, sx, sy, n, fi),
+            Some(fi) if plane == 0 => self.predict_filter_intra(plane, sx, sy, tw, fi),
             _ => {
-                let mut p = self.predict_intra(plane, sx, sy, desc.mode, n, desc.angle_delta);
+                let mut p = self.predict_intra(plane, sx, sy, desc.mode, tw, th, desc.angle_delta);
                 if let Some(alpha) = desc.cfl_alpha {
-                    self.apply_cfl(&mut p, sx, sy, alpha, n);
+                    self.apply_cfl(&mut p, sx, sy, alpha, tw);
                 }
                 p
             }
@@ -1256,22 +1433,24 @@ impl<'a> FrameEncoder<'a> {
         // skip = 1: no residual is coded; the reconstruction is the (clipped) prediction, and the
         // neighbour level/dc contexts are reset to 0 (`reset_block_context`, §5.11.10).
         if skip {
-            for i in 0..n {
-                for j in 0..n {
+            for i in 0..th {
+                for j in 0..tw {
                     self.recon[plane][(sy + i) * self.coded_w + (sx + j)] =
-                        pred[i * n + j].clamp(0, 255) as u8;
+                        pred[i * tw + j].clamp(0, 255) as u8;
                 }
             }
-            self.set_ctx(plane, sx >> 2, sy >> 2, n / 4, 0, 0);
+            self.set_ctx(plane, sx >> 2, sy >> 2, tw / 4, th / 4, 0, 0);
             return;
         }
-        let mut res = vec![0i32; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                res[i * n + j] = self.sample(plane, sx + j, sy + i) - pred[i * n + j];
+        let mut res = vec![0i32; tw * th];
+        for i in 0..th {
+            for j in 0..tw {
+                res[i * tw + j] = self.sample(plane, sx + j, sy + i) - pred[i * tw + j];
             }
         }
-        let (tx, tx_sym, levels) = if plane == 0 {
+        // A square luma transform searches the reduced intra tx-type set; chroma and every rectangular
+        // transform use DCT_DCT (its set is DCT-only for ≥32, and DCT is chosen for the ≤16 rect sizes).
+        let (tx, tx_sym, levels) = if plane == 0 && tw == th {
             self.select_tx_type(&res, tx_size)
         } else {
             (
@@ -1297,11 +1476,11 @@ impl<'a> FrameEncoder<'a> {
             intra_dir,
         );
 
-        // dqDenom (§7.12.3) divides the dequantized coefficient by the transform size class: 2 for
-        // 32×32 (1 for ≤16×16). A conformant decoder applies it, so the encoder reconstruction must.
+        // dqDenom (§7.12.3) divides the dequantized coefficient by the transform size class. A
+        // conformant decoder applies it, so the encoder reconstruction must.
         let dq_denom = tx_size.dq_denom();
-        let mut dq = vec![0i32; n * n];
-        if n == 64 {
+        let mut dq = vec![0i32; tw * th];
+        if tw == 64 && th == 64 {
             // Re-expand the 32-stride coded levels into the top-left 32×32 of the 64-stride array the
             // inverse transform reads (the remaining coefficients stay zero).
             for i in 0..32 {
@@ -1321,9 +1500,9 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         let resid = inverse_transform_2d(&dq, tx_size, tx, 8);
-        for i in 0..n {
-            for j in 0..n {
-                let v = (pred[i * n + j] + resid[i * n + j]).clamp(0, 255) as u8;
+        for i in 0..th {
+            for j in 0..tw {
+                let v = (pred[i * tw + j] + resid[i * tw + j]).clamp(0, 255) as u8;
                 self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = v;
             }
         }
@@ -1408,13 +1587,13 @@ impl<'a> FrameEncoder<'a> {
     /// path neighbours are the (padded) source (which equals the reconstruction); in the lossy path
     /// they are the reconstruction buffer, matching the decoder exactly.
     fn dc_avg(&self, plane: usize, sx: usize, sy: usize) -> i32 {
-        self.dc_pred(plane, sx, sy, 4)
+        self.dc_pred(plane, sx, sy, 4, 4)
     }
 
     /// `DC_PRED` value for an `n × n` block at coded `(sx, sy)` (§7.11.2.5): the rounded average of
     /// the available `n` above and `n` left neighbours (both sides ⇒ `Round2(sum, log2(n) + 1)`; one
     /// side ⇒ `Round2(sum, log2(n))`; neither ⇒ `1 << (BitDepth - 1)`).
-    fn dc_pred(&self, plane: usize, sx: usize, sy: usize, n: usize) -> i32 {
+    fn dc_pred(&self, plane: usize, sx: usize, sy: usize, w: usize, h: usize) -> i32 {
         let nb = |x: usize, y: usize| -> i32 {
             if self.qindex > 0 {
                 i32::from(self.recon[plane][y * self.coded_w + x])
@@ -1422,31 +1601,34 @@ impl<'a> FrameEncoder<'a> {
                 self.sample(plane, x, y)
             }
         };
-        let log2 = n.trailing_zeros();
         let have_above = sy > 0;
         let have_left = sx > 0;
+        // §7.11.2.5 DC: average the `w` above + `h` left samples (a plain integer divide, since for a
+        // rectangular block `w + h` is not a power of two; for square blocks this is the usual shift).
         match (have_above, have_left) {
             (true, true) => {
                 let mut s = 0;
-                for k in 0..n {
+                for k in 0..w {
                     s += nb(sx + k, sy - 1);
+                }
+                for k in 0..h {
                     s += nb(sx - 1, sy + k);
                 }
-                (s + n as i32) >> (log2 + 1)
+                (s + ((w + h) as i32 >> 1)) / (w + h) as i32
             }
             (false, true) => {
                 let mut s = 0;
-                for k in 0..n {
+                for k in 0..h {
                     s += nb(sx - 1, sy + k);
                 }
-                (s + (n as i32 >> 1)) >> log2
+                (s + (h as i32 >> 1)) / h as i32
             }
             (true, false) => {
                 let mut s = 0;
-                for k in 0..n {
+                for k in 0..w {
                     s += nb(sx + k, sy - 1);
                 }
-                (s + (n as i32 >> 1)) >> log2
+                (s + (w as i32 >> 1)) / w as i32
             }
             (false, false) => 128, // 1 << (BitDepth - 1)
         }
@@ -1520,7 +1702,7 @@ impl<'a> FrameEncoder<'a> {
         n: usize,
         fi_mode: u8,
     ) -> Vec<i32> {
-        let (above, left, top_left) = self.reference_basic(plane, sx, sy, n);
+        let (above, left, top_left) = self.reference_basic(plane, sx, sy, n, n);
         let above_row = |k: i32| -> i32 { if k < 0 { top_left } else { above[k as usize] } };
         let left_col = |k: i32| -> i32 { if k < 0 { top_left } else { left[k as usize] } };
         let taps = &cdf::INTRA_FILTER_TAPS[fi_mode as usize];
@@ -1694,15 +1876,24 @@ impl<'a> FrameEncoder<'a> {
     /// `MiSize < BLOCK_8X8`). 8×8 and 16×16 blocks use the non-directional predictor for
     /// `DC`/`SMOOTH*`/`PAETH` and the general directional process (§7.11.2.4) — fine-tuned by
     /// `angle_delta` — otherwise.
+    #[allow(clippy::too_many_arguments)]
     fn predict_intra(
         &self,
         plane: usize,
         sx: usize,
         sy: usize,
         mode: u8,
-        n: usize,
+        w: usize,
+        h: usize,
         angle_delta: i8,
     ) -> Vec<i32> {
+        // Directional prediction and the 4×4 fast path are square-only; a rectangular transform block
+        // only ever uses the non-directional modes (the encoder never selects a directional mode for a
+        // rectangular partition, so `angle_delta` is irrelevant there).
+        if w != h {
+            return self.predict_nondir(plane, sx, sy, w, h, mode);
+        }
+        let n = w;
         // Directional modes go through the general process so the block's `angle_delta` is honored —
         // including a 4×4 sub-transform of a ≥8×8 directional block under TX_MODE_SELECT (where
         // `angle_delta` may be non-zero). For `n == 4, angle_delta == 0` this matches `predict_4x4`
@@ -1713,7 +1904,7 @@ impl<'a> FrameEncoder<'a> {
         if n == 4 {
             return self.predict_4x4(plane, sx, sy, mode).to_vec();
         }
-        self.predict_nondir(plane, sx, sy, n, mode)
+        self.predict_nondir(plane, sx, sy, n, n, mode)
     }
 
     /// Builds the §7.11.2.2 reference samples for an `n × n` directional block: `AboveRow[0..2n]`,
@@ -1853,29 +2044,30 @@ impl<'a> FrameEncoder<'a> {
         plane: usize,
         sx: usize,
         sy: usize,
-        n: usize,
+        w: usize,
+        h: usize,
     ) -> (Vec<i32>, Vec<i32>, i32) {
         let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
         let have_above = sy > 0;
         let have_left = sx > 0;
         let (max_x, max_y) = (self.coded_w - 1, self.coded_h - 1);
 
-        let mut above = vec![127i32; n];
+        let mut above = vec![127i32; w];
         if have_above {
             for (i, a) in above.iter_mut().enumerate() {
                 *a = nb(max_x.min(sx + i), sy - 1);
             }
         } else if have_left {
-            above = vec![nb(sx - 1, sy); n];
+            above = vec![nb(sx - 1, sy); w];
         }
 
-        let mut left = vec![129i32; n];
+        let mut left = vec![129i32; h];
         if have_left {
             for (i, l) in left.iter_mut().enumerate() {
                 *l = nb(sx - 1, max_y.min(sy + i));
             }
         } else if have_above {
-            left = vec![nb(sx, sy - 1); n];
+            left = vec![nb(sx, sy - 1); h];
         }
 
         let top_left = if have_above && have_left {
@@ -1893,21 +2085,27 @@ impl<'a> FrameEncoder<'a> {
     /// Non-directional `n × n` intra prediction (§7.11.2): `DC_PRED`, `PAETH_PRED`, and the three
     /// `SMOOTH` modes, using the `n`-wide smooth weights (`Sm_Weights_Tx_NxN`). Reads the
     /// reconstruction buffer. Used for the lossy 8×8 and 16×16 non-directional luma blocks.
-    fn predict_nondir(&self, plane: usize, sx: usize, sy: usize, n: usize, mode: u8) -> Vec<i32> {
+    fn predict_nondir(
+        &self,
+        plane: usize,
+        sx: usize,
+        sy: usize,
+        w: usize,
+        h: usize,
+        mode: u8,
+    ) -> Vec<i32> {
         if mode == DC_PRED {
-            return vec![self.dc_pred(plane, sx, sy, n); n * n];
+            return vec![self.dc_pred(plane, sx, sy, w, h); w * h];
         }
-        let (above, left, top_left) = self.reference_basic(plane, sx, sy, n);
-        let w: &[i32] = match n {
-            8 => &cdf::SM_WEIGHTS_8X8,
-            16 => &cdf::SM_WEIGHTS_16X16,
-            32 => &cdf::SM_WEIGHTS_32X32,
-            _ => &cdf::SM_WEIGHTS_64X64,
-        };
-        let mut pred = vec![0i32; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                pred[i * n + j] = match mode {
+        let (above, left, top_left) = self.reference_basic(plane, sx, sy, w, h);
+        // SMOOTH weights are per axis: `sw` (horizontal, indexed by column) and `sh` (vertical, by
+        // row). For a square block `sw == sh`; for a rectangular block they differ in length.
+        let sw = sm_weights(w);
+        let sh = sm_weights(h);
+        let mut pred = vec![0i32; w * h];
+        for i in 0..h {
+            for j in 0..w {
+                pred[i * w + j] = match mode {
                     PAETH_PRED => {
                         let base = above[j] + left[i] - top_left;
                         let p_left = (base - left[i]).abs();
@@ -1922,19 +2120,19 @@ impl<'a> FrameEncoder<'a> {
                         }
                     }
                     SMOOTH_PRED => {
-                        let v = w[i] * above[j]
-                            + (256 - w[i]) * left[n - 1]
-                            + w[j] * left[i]
-                            + (256 - w[j]) * above[n - 1];
+                        let v = sh[i] * above[j]
+                            + (256 - sh[i]) * left[h - 1]
+                            + sw[j] * left[i]
+                            + (256 - sw[j]) * above[w - 1];
                         (v + 256) >> 9
                     }
                     SMOOTH_V_PRED => {
-                        let v = w[i] * above[j] + (256 - w[i]) * left[n - 1];
+                        let v = sh[i] * above[j] + (256 - sh[i]) * left[h - 1];
                         (v + 128) >> 8
                     }
                     _ => {
                         // SMOOTH_H_PRED
-                        let v = w[j] * left[i] + (256 - w[j]) * above[n - 1];
+                        let v = sw[j] * left[i] + (256 - sw[j]) * above[w - 1];
                         (v + 128) >> 8
                     }
                 };
@@ -1986,6 +2184,33 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    /// Picks the lossy luma mode for a rectangular `w × h` block minimizing SAD against the source.
+    /// It searches only the non-`DC` non-directional modes (`SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`):
+    /// staying off `DC_PRED` means no `palette`/`use_filter_intra` flags follow, and staying off the
+    /// directional modes keeps prediction within the rectangular non-directional path. Every option
+    /// reconstructs bit-exactly, so this is purely a quality choice.
+    fn select_luma_mode_rect(&self, sx: usize, sy: usize, w: usize, h: usize) -> u8 {
+        let sad = |pred: &[i32]| -> i32 {
+            let mut s = 0;
+            for i in 0..h {
+                for j in 0..w {
+                    s += (self.sample(0, sx + j, sy + i) - pred[i * w + j]).abs();
+                }
+            }
+            s
+        };
+        let mut best = SMOOTH_PRED;
+        let mut best_sad = sad(&self.predict_nondir(0, sx, sy, w, h, SMOOTH_PRED));
+        for &mode in &[SMOOTH_V_PRED, SMOOTH_H_PRED, PAETH_PRED] {
+            let s = sad(&self.predict_nondir(0, sx, sy, w, h, mode));
+            if s < best_sad {
+                best_sad = s;
+                best = mode;
+            }
+        }
+        best
+    }
+
     /// Picks the lossy luma mode for an `n × n` (8×8 or 16×16) block minimizing SAD against the
     /// source. It searches the non-directional modes (`DC`/`SMOOTH*`/`PAETH`), the eight directional
     /// modes each over `angle_delta ∈ [-3, 3]`, and (for `DC_PRED`) the five recursive filter-intra
@@ -2004,9 +2229,9 @@ impl<'a> FrameEncoder<'a> {
             s
         };
         let mut best = (DC_PRED, 0i8);
-        let mut best_sad = sad(&self.predict_nondir(0, sx, sy, n, DC_PRED));
+        let mut best_sad = sad(&self.predict_nondir(0, sx, sy, n, n, DC_PRED));
         for &mode in &[SMOOTH_PRED, SMOOTH_V_PRED, SMOOTH_H_PRED, PAETH_PRED] {
-            let s = sad(&self.predict_nondir(0, sx, sy, n, mode));
+            let s = sad(&self.predict_nondir(0, sx, sy, n, n, mode));
             if s < best_sad {
                 best_sad = s;
                 best = (mode, 0);
@@ -2081,7 +2306,7 @@ impl<'a> FrameEncoder<'a> {
         let luma_avg = (sum + (1 << (shift - 1))) >> shift;
 
         let best_alpha = |plane: usize| -> i32 {
-            let dc = self.dc_pred(plane, sx, sy, n);
+            let dc = self.dc_pred(plane, sx, sy, n, n);
             let sad = |alpha: i32| -> i32 {
                 let mut s = 0;
                 for i in 0..n {
@@ -2165,30 +2390,43 @@ impl<'a> FrameEncoder<'a> {
     ) {
         let ptype = usize::from(plane > 0);
         let qctx = self.qctx;
-        let n = tx_size.width(); // square: width == height (4, 8, 16, 32, or 64)
-        let n4 = n / 4; // MI cells the transform spans on each axis (16 for 64×64)
-        // TX_64X64 codes only its top-left 32×32 sub-block (§7.13): the scan, area, and coefficient
-        // contexts use the 32×32 "adjusted" size, while the CDF tables and `txb_skip`/`set_ctx` span
-        // the full 64×64 (`n`/`n4`).
-        let (code_n, bwl) = if n == 64 {
-            (32usize, 5usize)
-        } else {
-            (n, tx_size.log2_width() as usize)
-        };
-        let area = code_n * code_n;
+        let (w, h) = (tx_size.width(), tx_size.height());
+        // OPTION A: a rectangular block is coded as the single transform that fills it, so block == tx.
+        let block_h = if w == h { block_w } else { h };
+        let (w4, h4) = (w / 4, h / 4); // MI cells the transform spans on each axis
+        // A >32 dimension (TX_64X64) codes only its top-left 32-wide/high sub-block (§7.13): the scan,
+        // area and coefficient contexts use the `code_w × code_h` region, while the CDF tables and
+        // `txb_skip`/`set_ctx` span the full transform.
+        let (code_w, code_h) = (w.min(32), h.min(32));
+        let bwl = code_w.trailing_zeros() as usize;
+        let area = code_w * code_h;
+        // The rectangular transforms share their bounding square's coefficient CDFs (`txSzCtx` = that
+        // square's ctx; the `coeff_br` Min(txSzCtx,3) cap is already baked into the 64 row). Only the
+        // scan order and the eob class (by coefficient count) differ.
+        let up_sq = w.max(h);
 
-        // Size-specific tables (same `[qctx][...]` layout; bound where the element types match).
-        let (scan, txb_skip, eob_extra, base_eob, base, br, offset): (
-            &[usize],
+        let rect_scan;
+        let scan: &[usize] = match (w, h) {
+            (4, 4) => &cdf::DEFAULT_SCAN_4X4,
+            (8, 8) => &cdf::DEFAULT_SCAN_8X8,
+            (16, 16) => &cdf::DEFAULT_SCAN_16X16,
+            (32, 32) | (64, 64) => &cdf::DEFAULT_SCAN_32X32, // both code a 32×32 region
+            _ => {
+                rect_scan = cdf::default_scan(code_w, code_h);
+                &rect_scan
+            }
+        };
+
+        // Size-specific CDF tables, selected by the bounding square (same `[qctx][...]` layout).
+        let (txb_skip, eob_extra, base_eob, base, br, offset): (
             &[[[u16; 2]; 13]; 4],
             &[[[[u16; 2]; 9]; 2]; 4],
             &[[[[u16; 3]; 4]; 2]; 4],
             &[[[[u16; 4]; 42]; 2]; 4],
             &[[[[u16; 4]; 21]; 2]; 4],
             &[[u8; 5]; 5],
-        ) = match n {
+        ) = match up_sq {
             4 => (
-                &cdf::DEFAULT_SCAN_4X4,
                 &cdf::TXB_SKIP,
                 &cdf::EOB_EXTRA,
                 &cdf::COEFF_BASE_EOB,
@@ -2197,7 +2435,6 @@ impl<'a> FrameEncoder<'a> {
                 &cdf::COEFF_BASE_CTX_OFFSET_4X4,
             ),
             8 => (
-                &cdf::DEFAULT_SCAN_8X8,
                 &cdf::TXB_SKIP_8X8,
                 &cdf::EOB_EXTRA_8X8,
                 &cdf::COEFF_BASE_EOB_8X8,
@@ -2205,9 +2442,7 @@ impl<'a> FrameEncoder<'a> {
                 &cdf::COEFF_BR_8X8,
                 &cdf::COEFF_BASE_CTX_OFFSET_8X8,
             ),
-            // 16×16 reuses the 8×8 Coeff_Base_Ctx_Offset (identical in the spec).
             16 => (
-                &cdf::DEFAULT_SCAN_16X16,
                 &cdf::TXB_SKIP_16X16,
                 &cdf::EOB_EXTRA_16X16,
                 &cdf::COEFF_BASE_EOB_16X16,
@@ -2215,9 +2450,7 @@ impl<'a> FrameEncoder<'a> {
                 &cdf::COEFF_BR_16X16,
                 &cdf::COEFF_BASE_CTX_OFFSET_8X8,
             ),
-            // 32×32 likewise reuses the 8×8 Coeff_Base_Ctx_Offset (identical in the spec).
             32 => (
-                &cdf::DEFAULT_SCAN_32X32,
                 &cdf::TXB_SKIP_32X32,
                 &cdf::EOB_EXTRA_32X32,
                 &cdf::COEFF_BASE_EOB_32X32,
@@ -2225,12 +2458,8 @@ impl<'a> FrameEncoder<'a> {
                 &cdf::COEFF_BR_32X32,
                 &cdf::COEFF_BASE_CTX_OFFSET_8X8,
             ),
-            // 64×64: the coded region is the top-left 32×32, so it reuses the 32×32 scan and the 8×8
-            // Coeff_Base_Ctx_Offset, with its own `txSzCtx = 4` skip/base CDFs — except the base-range
-            // (`coeff_br`) CDF, whose `txSzCtx` is capped at TX_32X32 (`Min(txSzCtx, 3)`, §8.3.2), so
-            // it shares the 32×32 `coeff_br` table.
+            // 64: `txSzCtx = 4` skip/base CDFs but `coeff_br` capped at TX_32X32 (Min(txSzCtx,3)).
             _ => (
-                &cdf::DEFAULT_SCAN_32X32,
                 &cdf::TXB_SKIP_64X64,
                 &cdf::EOB_EXTRA_64X64,
                 &cdf::COEFF_BASE_EOB_64X64,
@@ -2240,6 +2469,16 @@ impl<'a> FrameEncoder<'a> {
             ),
         };
 
+        // A rectangular transform uses an aspect-specific `coeff_base` offset table (§8.3.2): the
+        // square table only fits `w == h`; wide and tall blocks differ at the low frequencies.
+        let offset: &[[u8; 5]; 5] = if w > h {
+            &cdf::COEFF_BASE_CTX_OFFSET_WIDE
+        } else if w < h {
+            &cdf::COEFF_BASE_CTX_OFFSET_TALL
+        } else {
+            offset
+        };
+
         let mut eob = 0usize;
         for c in 0..area {
             if quant[scan[c]] != 0 {
@@ -2247,11 +2486,20 @@ impl<'a> FrameEncoder<'a> {
             }
         }
 
-        let txb_ctx = self.txb_skip_ctx(plane, x4, y4, block_w, n);
+        if w != h && plane == 0 && std::env::var("GAMUT_DBG").is_ok() {
+            eprintln!(
+                "ENC rect {}x{} eob={} scan5={:?}",
+                w,
+                h,
+                eob,
+                &scan[..5.min(scan.len())]
+            );
+        }
+        let txb_ctx = self.txb_skip_ctx(plane, x4, y4, block_w, block_h, w, h);
         self.sym
             .encode_symbol(usize::from(eob == 0), &txb_skip[qctx][txb_ctx]);
         if eob == 0 {
-            self.set_ctx(plane, x4, y4, n4, 0, 0);
+            self.set_ctx(plane, x4, y4, w4, h4, 0, 0);
             return;
         }
 
@@ -2260,8 +2508,10 @@ impl<'a> FrameEncoder<'a> {
         // Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}. The CDF is uniform
         // across intra direction for 4×4/8×8 but per-`intraDir` for 16×16 (§9.4). A 32×32 intra block
         // is TX_SET_DCTONLY (§5.11.48 `txSzSqrUp == TX_32X32`), so no transform type is signaled.
-        if self.qindex > 0 && plane == 0 && n <= 16 {
-            let tx_cdf: &[u16] = if n == 16 {
+        // The set is TX_SET_INTRA_2 when `txSzSqrUp ≤ TX_16X16` (`up_sq ≤ 16`), else DCTONLY (no
+        // type). The CDF is keyed by `txSzSqr = Min(w, h)`: uniform for ≤ 8, per-`intraDir` for 16×16.
+        if self.qindex > 0 && plane == 0 && up_sq <= 16 {
+            let tx_cdf: &[u16] = if w.min(h) == 16 {
                 &cdf::INTRA_TX_TYPE_SET2_16X16[intra_dir]
             } else {
                 &cdf::INTRA_TX_TYPE_SET2
@@ -2269,19 +2519,25 @@ impl<'a> FrameEncoder<'a> {
             self.sym.encode_symbol(tx_sym, tx_cdf);
         }
 
-        // eob position (TX_CLASS_2D ⇒ eob_pt context 0). 16/64/256/1024-coeff blocks use
-        // Eob_Pt_16/64/256/1024; the 1024 (32×32) table has no neighbour-context dimension (§8.3.2).
+        // eob position (TX_CLASS_2D ⇒ eob_pt context 0). The eob class is the coded coefficient count
+        // (`area`): 16/64/128/256/512/1024. The 512 and 1024 tables have no neighbour-context dimension.
         let eobpt = eobpt_from_eob(eob);
-        match n {
-            4 => self
-                .sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_16[qctx][ptype][0]),
-            8 => self
-                .sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_64[qctx][ptype][0]),
+        match area {
             16 => self
                 .sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_16[qctx][ptype][0]),
+            64 => self
+                .sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_64[qctx][ptype][0]),
+            128 => self
+                .sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_128[qctx][ptype][0]),
+            256 => self
+                .sym
                 .encode_symbol(eobpt - 1, &cdf::EOB_PT_256[qctx][ptype][0]),
+            512 => self
+                .sym
+                .encode_symbol(eobpt - 1, &cdf::EOB_PT_512[qctx][ptype]),
             _ => self
                 .sym
                 .encode_symbol(eobpt - 1, &cdf::EOB_PT_1024[qctx][ptype]),
@@ -2311,12 +2567,12 @@ impl<'a> FrameEncoder<'a> {
                 self.sym
                     .encode_symbol((level.min(3) - 1) as usize, &base_eob[qctx][ptype][ctx]);
             } else {
-                let ctx = coeff_base_ctx(pos, &levels, bwl, code_n, offset);
+                let ctx = coeff_base_ctx(pos, &levels, bwl, code_w, code_h, offset);
                 self.sym
                     .encode_symbol(level.min(3) as usize, &base[qctx][ptype][ctx]);
             }
             if level > NUM_BASE_LEVELS {
-                let br_ctx = coeff_br_ctx(pos, &levels, bwl, code_n);
+                let br_ctx = coeff_br_ctx(pos, &levels, bwl, code_w, code_h);
                 let mut rem = level - 3;
                 for _ in 0..4 {
                     let brv = rem.min(3);
@@ -2337,7 +2593,7 @@ impl<'a> FrameEncoder<'a> {
             if level != 0 {
                 let neg = quant[pos] < 0;
                 if c == 0 {
-                    let ctx = self.dc_sign_ctx(plane, x4, y4, n4);
+                    let ctx = self.dc_sign_ctx(plane, x4, y4, w4, h4);
                     self.sym
                         .encode_symbol(usize::from(neg), &cdf::DC_SIGN[ptype][ctx]);
                 } else {
@@ -2357,17 +2613,29 @@ impl<'a> FrameEncoder<'a> {
         } else {
             2
         };
-        self.set_ctx(plane, x4, y4, n4, cul, dc_cat);
+        self.set_ctx(plane, x4, y4, w4, h4, cul, dc_cat);
     }
 
     /// Writes `culLevel`/`dcCategory` into the above/left level-context arrays for every MI cell the
     /// transform block spans (§5.11.39: `for i in 0..w4`/`0..h4`). `n4 = Tx_Width / 4`.
-    fn set_ctx(&mut self, plane: usize, x4: usize, y4: usize, n4: usize, cul: u8, dc: u8) {
-        for k in 0..n4 {
+    #[allow(clippy::too_many_arguments)]
+    fn set_ctx(
+        &mut self,
+        plane: usize,
+        x4: usize,
+        y4: usize,
+        w4: usize,
+        h4: usize,
+        cul: u8,
+        dc: u8,
+    ) {
+        for k in 0..w4 {
             if x4 + k < self.mi_cols {
                 self.above_level[plane][x4 + k] = cul;
                 self.above_dc[plane][x4 + k] = dc;
             }
+        }
+        for k in 0..h4 {
             if y4 + k < self.mi_rows {
                 self.left_level[plane][y4 + k] = cul;
                 self.left_dc[plane][y4 + k] = dc;
@@ -2379,25 +2647,30 @@ impl<'a> FrameEncoder<'a> {
     /// transform width: luma uses ctx 0 when the transform covers the whole block (the only case the
     /// lossy path reaches, since `TX_MODE_LARGEST` ⇒ tx == block); otherwise (lossless, where a
     /// larger block is split into 4×4 transforms) it falls back to the neighbour-level classification.
+    #[allow(clippy::too_many_arguments)]
     fn txb_skip_ctx(
         &self,
         plane: usize,
         x4: usize,
         y4: usize,
         block_w: usize,
+        block_h: usize,
         tx_w: usize,
+        tx_h: usize,
     ) -> usize {
-        let n4 = tx_w / 4;
+        let (w4, h4) = (tx_w / 4, tx_h / 4);
         if plane == 0 {
-            if block_w == tx_w {
+            if block_w == tx_w && block_h == tx_h {
                 return 0;
             }
             let mut top = 0i32;
             let mut left = 0i32;
-            for k in 0..n4 {
+            for k in 0..w4 {
                 if x4 + k < self.mi_cols {
                     top = top.max(i32::from(self.above_level[0][x4 + k]));
                 }
+            }
+            for k in 0..h4 {
                 if y4 + k < self.mi_rows {
                     left = left.max(i32::from(self.left_level[0][y4 + k]));
                 }
@@ -2416,18 +2689,21 @@ impl<'a> FrameEncoder<'a> {
         } else {
             let mut above = 0u8;
             let mut left = 0u8;
-            for k in 0..n4 {
+            for k in 0..w4 {
                 if x4 + k < self.mi_cols {
                     above |= self.above_level[plane][x4 + k] | self.above_dc[plane][x4 + k];
                 }
+            }
+            for k in 0..h4 {
                 if y4 + k < self.mi_rows {
                     left |= self.left_level[plane][y4 + k] | self.left_dc[plane][y4 + k];
                 }
             }
             let mut ctx = usize::from(above != 0) + usize::from(left != 0) + 7;
-            // bw*bh > w*h ⇒ the block is larger than the transform (lossless 4×4 tx in an ≥8×8
-            // block). Under TX_MODE_LARGEST (the lossy path) tx == block, so this never adds.
-            if block_w * block_w > tx_w * tx_w {
+            // bw*bh > tw*th ⇒ the block is larger than the transform (4×4 tx in an ≥8×8 lossless block,
+            // or a rectangular block whose chroma is split). Under TX_MODE_LARGEST tx == block, so this
+            // never adds for the square lossy path.
+            if block_w * block_h > tx_w * tx_h {
                 ctx += 3;
             }
             ctx
@@ -2438,9 +2714,9 @@ impl<'a> FrameEncoder<'a> {
     /// over every MI cell the transform spans (`n4 = Tx_Width / 4` above cells and `n4` left cells).
     /// A single cell each is correct only for `TX_4X4`; an 8×8 transform with non-uniform neighbour
     /// DC categories needs the full sum or the arithmetic decode diverges.
-    fn dc_sign_ctx(&self, plane: usize, x4: usize, y4: usize, n4: usize) -> usize {
+    fn dc_sign_ctx(&self, plane: usize, x4: usize, y4: usize, w4: usize, h4: usize) -> usize {
         let mut s = 0i32;
-        for k in 0..n4 {
+        for k in 0..w4 {
             if x4 + k < self.mi_cols {
                 match self.above_dc[plane][x4 + k] {
                     1 => s -= 1,
@@ -2448,6 +2724,8 @@ impl<'a> FrameEncoder<'a> {
                     _ => {}
                 }
             }
+        }
+        for k in 0..h4 {
             if y4 + k < self.mi_rows {
                 match self.left_dc[plane][y4 + k] {
                     1 => s -= 1,
@@ -2531,14 +2809,15 @@ fn coeff_base_ctx(
     pos: usize,
     levels: &[i32],
     bwl: usize,
-    n: usize,
+    w: usize,
+    h: usize,
     offset: &[[u8; 5]; 5],
 ) -> usize {
-    let (row, col) = (pos >> bwl, pos & (n - 1));
+    let (row, col) = (pos >> bwl, pos & (w - 1));
     let mut mag = 0i32;
     for &(dr, dc) in &cdf::SIG_REF_DIFF_OFFSET_2D {
         let (rr, cc) = (row + dr, col + dc);
-        if rr < n && cc < n {
+        if rr < h && cc < w {
             mag += levels[(rr << bwl) + cc].abs().min(3);
         }
     }
@@ -2549,13 +2828,14 @@ fn coeff_base_ctx(
     ctx + usize::from(offset[row.min(4)][col.min(4)])
 }
 
-/// `get_coeff_br_ctx` for a square `TX_CLASS_2D` block (§8.3.2): `bwl = Tx_Width_Log2`, `n = 1 << bwl`.
-fn coeff_br_ctx(pos: usize, levels: &[i32], bwl: usize, n: usize) -> usize {
-    let (row, col) = (pos >> bwl, pos & (n - 1));
+/// `get_coeff_br_ctx` for a `TX_CLASS_2D` block (§8.3.2): `bwl = Tx_Width_Log2`; the coded region is
+/// `w × h` (`w == h` for a square transform, the top-left `32 × 32` for `TX_64X64`).
+fn coeff_br_ctx(pos: usize, levels: &[i32], bwl: usize, w: usize, h: usize) -> usize {
+    let (row, col) = (pos >> bwl, pos & (w - 1));
     let mut mag = 0i32;
     for &(dr, dc) in &cdf::MAG_REF_OFFSET_2D {
         let (rr, cc) = (row + dr, col + dc);
-        if rr < n && cc < n {
+        if rr < h && cc < w {
             mag += levels[(rr << bwl) + cc].abs().min(15);
         }
     }
