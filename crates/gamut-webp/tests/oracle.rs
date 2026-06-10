@@ -435,3 +435,42 @@ fn libwebp_decodes_gamut_lossy_alpha_exactly() {
         );
     }
 }
+
+#[test]
+fn gamut_decodes_libwebp_lossy_alpha_exactly() {
+    // libwebp encodes lossy color plus a *compressed* (C=1) `ALPH` plane (what cwebp emits); gamut's
+    // decoder must recover the exact alpha — the reverse-direction gate for the lossless-alpha path.
+    use common::libwebp_encode_lossy_rgba;
+
+    for &(w, h) in &[(16u32, 16u32), (32, 24), (49, 33), (80, 17)] {
+        let rgba: Vec<u8> = (0..(w * h) as usize)
+            .flat_map(|i| {
+                let (x, y) = (i as u32 % w, i as u32 / w);
+                [
+                    (x * 7) as u8,
+                    (y * 9) as u8,
+                    (x ^ y) as u8,
+                    ((x * 11 + y * 5) & 0xff) as u8,
+                ]
+            })
+            .collect();
+        let webp = libwebp_encode_lossy_rgba(&rgba, w, h, 75.0);
+        let mut out = Vec::new();
+        let d = WebpDecoder::new()
+            .decode_to_rgba8(&webp, &mut out)
+            .expect("gamut decode libwebp lossy+alpha");
+        assert_eq!(
+            d,
+            Dimensions {
+                width: w,
+                height: h
+            }
+        );
+        let dec_alpha: Vec<u8> = out.chunks_exact(4).map(|p| p[3]).collect();
+        let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(
+            dec_alpha, src_alpha,
+            "gamut must recover libwebp's exact alpha at {w}x{h}"
+        );
+    }
+}

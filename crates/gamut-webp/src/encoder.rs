@@ -151,7 +151,7 @@ impl WebpEncoder {
                 } else {
                     let alpha: Vec<u8> = pixels.chunks_exact(4).map(|p| p[3]).collect();
                     let alph =
-                        alpha::write_raw_alph(&alpha, dims.width as usize, dims.height as usize);
+                        alpha::write_alph(&alpha, dims.width as usize, dims.height as usize)?;
                     let header = Vp8xHeader {
                         alpha: true,
                         canvas_width: dims.width,
