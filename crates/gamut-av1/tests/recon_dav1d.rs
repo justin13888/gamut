@@ -45,6 +45,17 @@ fn check(planes: &Planar8, qindex: u8) {
     );
 
     for (p, (dec, enc)) in decoded.planes.iter().zip(&recon.planes).enumerate() {
+        if dec != enc && std::env::var("GAMUT_DBG").is_ok() {
+            let k = dec
+                .iter()
+                .zip(enc.iter())
+                .position(|(d, e)| d != e)
+                .unwrap();
+            eprintln!(
+                "DIFF p{p} idx{k} dec={} enc={} [{w}x{h} q{qindex}]",
+                dec[k], enc[k]
+            );
+        }
         assert_eq!(
             dec, enc,
             "plane {p} mismatch (decoder vs encoder reconstruction) for {w}x{h} q{qindex}"
@@ -521,6 +532,33 @@ fn segmentation_match_dav1d() {
     for &q in &[8u8, 32, 96, 180] {
         for &(w, h) in &[(32u32, 32u32), (64, 48), (96, 72)] {
             check(&planes(w, h, textured), q);
+        }
+    }
+}
+
+#[test]
+fn transform_64x64_blocks_match_dav1d() {
+    // 64×64 blocks: PARTITION_NONE + TX_64X64 luma (chroma is a 2×2 raster of TX_32X32, since chroma
+    // never uses TX_64X64). Solid content is DC-predictable, so interior superblocks code skip = 1,
+    // and a skip 64×64 block — one that fills the whole superblock — codes no delta-q/delta-lf
+    // (`read_delta_qindex`/`read_delta_lf` return early). Gradient content codes a multi-coefficient
+    // residual instead. The size matrix exercises a single superblock (64×64), the horizontal,
+    // vertical, and 2-D multi-superblock layouts (a skip 64×64 SB followed by another SB), and
+    // partial superblocks cropped at the frame edge (which split to ≤32×32 rather than code a
+    // partial 64×64 block).
+    let solid = |_: u32, _: u32| [128u8, 90, 128];
+    let grad = |x: u32, y: u32| [128u8, 90 + ((x % 64) / 8 + (y % 64) / 8) as u8, 128];
+    for &(w, h) in &[
+        (64u32, 64u32),
+        (128, 64),
+        (64, 128),
+        (128, 128),
+        (128, 96),
+        (96, 128),
+    ] {
+        for &q in &[16u8, 64, 144] {
+            check(&planes(w, h, solid), q);
+            check(&planes(w, h, grad), q);
         }
     }
 }

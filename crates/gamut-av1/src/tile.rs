@@ -236,7 +236,8 @@ const fn square_tx(width: usize) -> TxSize {
         4 => TxSize::Tx4x4,
         8 => TxSize::Tx8x8,
         16 => TxSize::Tx16x16,
-        _ => TxSize::Tx32x32,
+        32 => TxSize::Tx32x32,
+        _ => TxSize::Tx64x64,
     }
 }
 
@@ -482,9 +483,9 @@ impl<'a> FrameEncoder<'a> {
             if self.qindex == 0 {
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
                 false
-            } else if (bw == 8 || bw == 16 || bw == 32) && !self.should_split(r, c, bw) {
-                // Lossy: an 8×8 / 16×16 / 32×32 region coded as a single PARTITION_NONE block + one
-                // TX_8X8 / TX_16X16 / TX_32X32 when it is smooth enough; otherwise split for per-block
+            } else if (8..=64).contains(&bw) && !self.should_split(r, c, bw) {
+                // Lossy: an 8×8…64×64 region coded as a single PARTITION_NONE block + one
+                // TX_8X8…TX_64X64 when it is smooth enough; otherwise split for per-block
                 // mode/transform adaptation (each SPLIT halves, recursing down to 4×4 as needed).
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
                 false
@@ -531,6 +532,13 @@ impl<'a> FrameEncoder<'a> {
     /// either choice reconstructs bit-exactly — so the threshold is a deterministic placeholder
     /// (rate-distortion partition search is deferred).
     fn should_split(&self, r: usize, c: usize, bw: usize) -> bool {
+        let n4 = bw / 4;
+        // A 64×64 block that extends past the frame edge is split: the encoder only codes a
+        // `PARTITION_NONE` 64×64 block when the whole superblock is on-screen (a partial 64×64 block
+        // is valid but adds no value, and the smaller sub-blocks crop cleanly).
+        if bw == 64 && (r + n4 > self.mi_rows || c + n4 > self.mi_cols) {
+            return true;
+        }
         // A palette-able block (few luma colors + flat chroma) is kept whole so it can use palette
         // mode, even though its luma range is large — splitting it would forfeit the palette coding.
         if self.decide_palette(r, c, bw).is_some() {
@@ -949,10 +957,13 @@ impl<'a> FrameEncoder<'a> {
         };
         // read_delta_qindex (§5.11.12): the first coded block of each superblock signals delta_q and
         // updates `CurrentQIndex`; later blocks in the superblock inherit it. (read_cdef codes no bits:
-        // cdef_bits = 0.)
+        // cdef_bits = 0.) A block that fills the whole superblock (`MiSize == sbSize`, i.e. a 64×64
+        // block) and is `skip` codes neither delta — `read_delta_qindex`/`read_delta_lf` return early.
         if self.read_deltas {
-            self.signal_delta_q();
-            self.signal_delta_lf();
+            if !(bw == 64 && skip) {
+                self.signal_delta_q();
+                self.signal_delta_lf();
+            }
             self.read_deltas = false;
         }
         // Per-block quantizer get_qindex(segment) = Clip3(0, 255, CurrentQIndex + alt_q) (§7.12.2):
@@ -1016,7 +1027,8 @@ impl<'a> FrameEncoder<'a> {
         // palette_mode_info (§5.11.46): with allow_screen_content_tools an 8×8..64×64 block signals
         // `has_palette_y` (when YMode == DC_PRED) and `has_palette_uv` (when UVMode == DC_PRED). When
         // luma palette is selected, the palette size, the cache-usage flags, and the colors follow.
-        if self.qindex > 0 && (8..=32).contains(&bw) {
+        // (Palette is only *chosen* for ≤32 — `palette` is `None` at 64 — but the flag is still coded.)
+        if self.qindex > 0 && (8..=64).contains(&bw) {
             if y_mode == DC_PRED {
                 let bctx = 2 * bw.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
                 let above = r > 0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
@@ -1043,8 +1055,9 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // filter_intra_mode_info (§5.11.24): a DC_PRED luma block ≤ 32px with no palette
-        // (`PaletteSizeY == 0`) signals use_filter_intra, under the block-size CDF row.
-        if self.qindex > 0 && y_mode == DC_PRED && palette.is_none() {
+        // (`PaletteSizeY == 0`) signals use_filter_intra, under the block-size CDF row. A 64×64 block
+        // (`Max(w, h) > 32`) does not signal it.
+        if self.qindex > 0 && y_mode == DC_PRED && palette.is_none() && bw <= 32 {
             let fi_cdf: &[u16] = match bw {
                 4 => &cdf::FILTER_INTRA_4X4,
                 8 => &cdf::FILTER_INTRA_8X8,
@@ -1077,7 +1090,8 @@ impl<'a> FrameEncoder<'a> {
             let cdf: &[u16] = match bw {
                 8 => &cdf::TX_SIZE_8X8[ctx],
                 16 => &cdf::TX_SIZE_16X16[ctx],
-                _ => &cdf::TX_SIZE_32X32[ctx],
+                32 => &cdf::TX_SIZE_32X32[ctx],
+                _ => &cdf::TX_SIZE_64X64[ctx],
             };
 
             self.sym.encode_symbol(tx_depth, cdf);
@@ -1132,8 +1146,9 @@ impl<'a> FrameEncoder<'a> {
 
         // residual(): per plane. Luma uses the block's intra mode and signaled transform size (a
         // raster of `luma_tx` sub-transforms, each predicted + reconstructed in turn); 4:4:4 chroma is
-        // DC_PRED (plus the CfL term) over one block-size transform. Luma (plane 0) is fully
-        // reconstructed before chroma, so the chroma CfL reads finalized luma recon.
+        // DC_PRED (plus the CfL term) over the block-size transform — but chroma never uses TX_64X64,
+        // so a 64×64 block's chroma is a 2×2 raster of TX_32X32. Luma (plane 0) is fully reconstructed
+        // before chroma, so the chroma CfL reads finalized luma recon.
         let chroma_tx = match bw {
             8 => TxSize::Tx8x8,
             16 => TxSize::Tx16x16,
@@ -1153,7 +1168,9 @@ impl<'a> FrameEncoder<'a> {
             let (ptx, pw) = if plane == 0 {
                 (luma_tx, luma_tx.width())
             } else if lossy_large {
-                (chroma_tx, bw)
+                // Chroma transform width — the chroma block size (`bw`) capped at 32 (no TX_64X64);
+                // the residual loop steps by `pw`, so a 64×64 block's chroma forms a 2×2 raster.
+                (chroma_tx, chroma_tx.width())
             } else {
                 (TxSize::Tx4x4, 4)
             };
@@ -1284,9 +1301,24 @@ impl<'a> FrameEncoder<'a> {
         // 32×32 (1 for ≤16×16). A conformant decoder applies it, so the encoder reconstruction must.
         let dq_denom = tx_size.dq_denom();
         let mut dq = vec![0i32; n * n];
-        for (i, &lvl) in levels.iter().enumerate() {
-            let q = if i == 0 { self.dc_quant } else { self.ac_quant };
-            dq[i] = dequant(lvl, q, dq_denom, 8);
+        if n == 64 {
+            // Re-expand the 32-stride coded levels into the top-left 32×32 of the 64-stride array the
+            // inverse transform reads (the remaining coefficients stay zero).
+            for i in 0..32 {
+                for j in 0..32 {
+                    let q = if i == 0 && j == 0 {
+                        self.dc_quant
+                    } else {
+                        self.ac_quant
+                    };
+                    dq[i * 64 + j] = dequant(levels[i * 32 + j], q, dq_denom, 8);
+                }
+            }
+        } else {
+            for (i, &lvl) in levels.iter().enumerate() {
+                let q = if i == 0 { self.dc_quant } else { self.ac_quant };
+                dq[i] = dequant(lvl, q, dq_denom, 8);
+            }
         }
         let resid = inverse_transform_2d(&dq, tx_size, tx, 8);
         for i in 0..n {
@@ -1306,6 +1338,22 @@ impl<'a> FrameEncoder<'a> {
     fn quantize_tx(&self, res: &[i32], tx_size: TxSize, tx: TxType) -> Vec<i32> {
         let coeff = forward_transform_2d(res, tx_size, tx);
         let denom = tx_size.dq_denom();
+        if tx_size.width() == 64 {
+            // TX_64X64 codes only its top-left 32×32 sub-block; compact those into the 32-stride
+            // 1024-coefficient layout the coding/scan expect (the rest are zeroed by the transform).
+            let mut levels = vec![0i32; 32 * 32];
+            for i in 0..32 {
+                for j in 0..32 {
+                    let q = if i == 0 && j == 0 {
+                        self.dc_quant
+                    } else {
+                        self.ac_quant
+                    };
+                    levels[i * 32 + j] = quantize(coeff[i * 64 + j] * denom, q);
+                }
+            }
+            return levels;
+        }
         let mut levels = vec![0i32; coeff.len()];
         for (i, &c) in coeff.iter().enumerate() {
             let q = if i == 0 { self.dc_quant } else { self.ac_quant };
@@ -1853,7 +1901,8 @@ impl<'a> FrameEncoder<'a> {
         let w: &[i32] = match n {
             8 => &cdf::SM_WEIGHTS_8X8,
             16 => &cdf::SM_WEIGHTS_16X16,
-            _ => &cdf::SM_WEIGHTS_32X32,
+            32 => &cdf::SM_WEIGHTS_32X32,
+            _ => &cdf::SM_WEIGHTS_64X64,
         };
         let mut pred = vec![0i32; n * n];
         for i in 0..n {
@@ -2116,10 +2165,17 @@ impl<'a> FrameEncoder<'a> {
     ) {
         let ptype = usize::from(plane > 0);
         let qctx = self.qctx;
-        let n = tx_size.width(); // square: width == height (4, 8, 16, or 32)
-        let bwl = tx_size.log2_width() as usize;
-        let area = n * n;
-        let n4 = n / 4; // MI cells the transform spans on each axis
+        let n = tx_size.width(); // square: width == height (4, 8, 16, 32, or 64)
+        let n4 = n / 4; // MI cells the transform spans on each axis (16 for 64×64)
+        // TX_64X64 codes only its top-left 32×32 sub-block (§7.13): the scan, area, and coefficient
+        // contexts use the 32×32 "adjusted" size, while the CDF tables and `txb_skip`/`set_ctx` span
+        // the full 64×64 (`n`/`n4`).
+        let (code_n, bwl) = if n == 64 {
+            (32usize, 5usize)
+        } else {
+            (n, tx_size.log2_width() as usize)
+        };
+        let area = code_n * code_n;
 
         // Size-specific tables (same `[qctx][...]` layout; bound where the element types match).
         let (scan, txb_skip, eob_extra, base_eob, base, br, offset): (
@@ -2160,12 +2216,25 @@ impl<'a> FrameEncoder<'a> {
                 &cdf::COEFF_BASE_CTX_OFFSET_8X8,
             ),
             // 32×32 likewise reuses the 8×8 Coeff_Base_Ctx_Offset (identical in the spec).
-            _ => (
+            32 => (
                 &cdf::DEFAULT_SCAN_32X32,
                 &cdf::TXB_SKIP_32X32,
                 &cdf::EOB_EXTRA_32X32,
                 &cdf::COEFF_BASE_EOB_32X32,
                 &cdf::COEFF_BASE_32X32,
+                &cdf::COEFF_BR_32X32,
+                &cdf::COEFF_BASE_CTX_OFFSET_8X8,
+            ),
+            // 64×64: the coded region is the top-left 32×32, so it reuses the 32×32 scan and the 8×8
+            // Coeff_Base_Ctx_Offset, with its own `txSzCtx = 4` skip/base CDFs — except the base-range
+            // (`coeff_br`) CDF, whose `txSzCtx` is capped at TX_32X32 (`Min(txSzCtx, 3)`, §8.3.2), so
+            // it shares the 32×32 `coeff_br` table.
+            _ => (
+                &cdf::DEFAULT_SCAN_32X32,
+                &cdf::TXB_SKIP_64X64,
+                &cdf::EOB_EXTRA_64X64,
+                &cdf::COEFF_BASE_EOB_64X64,
+                &cdf::COEFF_BASE_64X64,
                 &cdf::COEFF_BR_32X32,
                 &cdf::COEFF_BASE_CTX_OFFSET_8X8,
             ),
@@ -2242,12 +2311,12 @@ impl<'a> FrameEncoder<'a> {
                 self.sym
                     .encode_symbol((level.min(3) - 1) as usize, &base_eob[qctx][ptype][ctx]);
             } else {
-                let ctx = coeff_base_ctx(pos, &levels, bwl, n, offset);
+                let ctx = coeff_base_ctx(pos, &levels, bwl, code_n, offset);
                 self.sym
                     .encode_symbol(level.min(3) as usize, &base[qctx][ptype][ctx]);
             }
             if level > NUM_BASE_LEVELS {
-                let br_ctx = coeff_br_ctx(pos, &levels, bwl, n);
+                let br_ctx = coeff_br_ctx(pos, &levels, bwl, code_n);
                 let mut rem = level - 3;
                 for _ in 0..4 {
                     let brv = rem.min(3);
