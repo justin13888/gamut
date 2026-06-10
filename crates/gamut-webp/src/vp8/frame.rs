@@ -8,7 +8,8 @@
 //! the encoder picks the lowest-SAD candidate per macroblock. A whole-block macroblock carries a Y2
 //! (luma-DC WHT) block; a `B_PRED` one codes luma DC inline (plane 3). The reconstruction is deblocked
 //! by the simple or normal loop filter as a final pass. Tokens may be split across 1/2/4/8 partitions
-//! by macroblock row. Per-MB skip and the remaining header features land later. STATUS.md section L.
+//! by macroblock row, and all-zero macroblocks are coded as skipped. Per-macroblock loop-filter
+//! adjustments are the remaining VP8 header feature. STATUS.md section L.
 
 // The macroblock/block math indexes several fixed-size arrays in lock-step (and over partial ranges
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
@@ -253,8 +254,46 @@ fn frame_header(width: u32, height: u32, quant_index: u8, simple_filter: bool) -
             ..QuantIndices::default()
         },
         refresh_entropy_probs: true,
-        mb_no_skip_coeff: false,
-        prob_skip_false: 0,
+        // Enable per-macroblock skip coding. The skip-false probability falls with the quantizer,
+        // since coarser quantization yields more all-zero (skippable) macroblocks.
+        mb_no_skip_coeff: true,
+        prob_skip_false: (255 - quant_index).max(1),
+    }
+}
+
+/// Resets a macroblock's coefficient context to "no non-zero coefficients" for a skipped macroblock
+/// (RFC 6386 §11.1): equivalent to coding all-zero blocks, but the `B_PRED` Y2 context persists since
+/// such a macroblock carries no Y2 block.
+fn clear_mb_context(above: &mut EntropyCtx, left: &mut EntropyCtx, is_bpred: bool) {
+    if !is_bpred {
+        above.y2 = false;
+        left.y2 = false;
+    }
+    above.y = [false; 4];
+    left.y = [false; 4];
+    above.u = [false; 2];
+    left.u = [false; 2];
+    above.v = [false; 2];
+    left.v = [false; 2];
+}
+
+/// Reconstructs a skipped `B_PRED` macroblock's luma: each subblock is its prediction with no residual
+/// (the encoder's all-zero-coefficient reconstruction).
+fn reconstruct_bpred_zero(
+    recon: &mut FrameBuffers,
+    mb_x: usize,
+    mb_y: usize,
+    sub_modes: &[usize; 16],
+    above_right: &[u8; 4],
+) {
+    let (px, py, rstride) = (mb_x * 16, mb_y * 16, recon.y_stride());
+    for i in 0..16 {
+        let (r, c) = (i / 4, i % 4);
+        let (sx, sy) = (px + c * 4, py + r * 4);
+        let (a, l, corner) = subblock_neighbors(recon, sx, sy, c, above_right);
+        let pred = prediction::subblock_predict(sub_modes[i], &a, &l, corner);
+        let pred_i16: [i16; 16] = core::array::from_fn(|k| i16::from(pred[k]));
+        write_block(&mut recon.y, rstride, sx, sy, &pred_i16, &[0i16; 16]);
     }
 }
 
@@ -983,24 +1022,29 @@ pub fn encode_frame_filtered(
                 v: quantize_chroma(&src_v, cw, mb_x, mb_y, &v_pred, &qf),
                 ..Default::default()
             };
+            // Compute the luma levels before writing modes so the skip flag — which precedes the luma
+            // mode — reflects the whole macroblock. Whole-block luma is reconstructed afterward (B_PRED
+            // was already reconstructed during submode selection).
+            let wb_pred = (!use_bpred).then(|| predict_luma(&recon, mb_x, mb_y, wb_mode));
+            if let Some(yp) = &wb_pred {
+                quantize_luma(&src_y, yw, mb_x, mb_y, yp, &qf, &mut levels);
+            } else {
+                levels.y = bpred_levels;
+            }
+            let skip = !mb_has_coeffs(&levels);
+            let y_mode = if use_bpred { B_PRED } else { wb_mode };
 
             if header.segmentation.update_map {
                 modes.put_tree(MB_SEGMENT_TREE, &header.segmentation.tree_probs, segment);
             }
-            let y_mode = if use_bpred { B_PRED } else { wb_mode };
+            modes.put_bool(header.prob_skip_false, skip);
             modes.put_tree(
                 prediction::KF_YMODE_TREE,
                 &prediction::KF_YMODE_PROB,
                 y_mode,
             );
             if use_bpred {
-                levels.y = bpred_levels;
                 write_bmodes(&mut modes, &sub_modes, &above_bmodes[mb_x], &left_bmodes);
-            } else {
-                // Overwrite the B_PRED scribbles with the whole-block reconstruction.
-                let y_pred = predict_luma(&recon, mb_x, mb_y, wb_mode);
-                quantize_luma(&src_y, yw, mb_x, mb_y, &y_pred, &qf, &mut levels);
-                reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
             }
             modes.put_tree(
                 prediction::KF_UV_MODE_TREE,
@@ -1008,19 +1052,26 @@ pub fn encode_frame_filtered(
                 uv_mode,
             );
 
+            if let Some(yp) = &wb_pred {
+                reconstruct_luma(&mut recon, mb_x, mb_y, yp, &levels, &qf);
+            }
             let cstride = recon.c_stride();
             reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
             reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
 
             filter_interior[mb_y * recon.mb_cols + mb_x] = use_bpred || mb_has_coeffs(&levels);
-            encode_mb_tokens(
-                &mut residuals[mb_y % n],
-                &mut above[mb_x],
-                &mut left,
-                probs,
-                &levels,
-                use_bpred,
-            );
+            if skip {
+                clear_mb_context(&mut above[mb_x], &mut left, use_bpred);
+            } else {
+                encode_mb_tokens(
+                    &mut residuals[mb_y % n],
+                    &mut above[mb_x],
+                    &mut left,
+                    probs,
+                    &levels,
+                    use_bpred,
+                );
+            }
 
             (above_bmodes[mb_x], left_bmodes) = bmode_propagation(use_bpred, wb_mode, &sub_modes);
         }
@@ -1104,6 +1155,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
                 0
             };
             let qf = seg_qf[segment];
+            let skip = head.mb_no_skip_coeff && modes.get_bool(head.prob_skip_false);
             let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
             let is_bpred = y_mode == B_PRED;
             let sub_modes = if is_bpred {
@@ -1116,43 +1168,54 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
             let v_pred = predict_chroma(&recon.v, recon.c_stride(), mb_x, mb_y, uv_mode);
             let cstride = recon.c_stride();
 
+            // A skipped macroblock has no coefficients: its residual is zero (the reconstruction is the
+            // prediction) and no tokens are read.
+            let mut levels = MbLevels::default();
             if is_bpred {
                 let above_right = above_right_source(&recon, mb_x, mb_y);
-                decode_bpred_luma(
-                    &mut recon,
-                    &mut residuals[mb_y % n],
-                    &mut above[mb_x],
-                    &mut left,
-                    &coeff_probs,
-                    mb_x,
-                    mb_y,
-                    &qf,
-                    &sub_modes,
-                    &above_right,
-                );
-                let mut levels = MbLevels::default();
-                decode_chroma_tokens(
-                    &mut residuals[mb_y % n],
-                    &mut above[mb_x],
-                    &mut left,
-                    &coeff_probs,
-                    &mut levels,
-                );
+                if skip {
+                    reconstruct_bpred_zero(&mut recon, mb_x, mb_y, &sub_modes, &above_right);
+                } else {
+                    decode_bpred_luma(
+                        &mut recon,
+                        &mut residuals[mb_y % n],
+                        &mut above[mb_x],
+                        &mut left,
+                        &coeff_probs,
+                        mb_x,
+                        mb_y,
+                        &qf,
+                        &sub_modes,
+                        &above_right,
+                    );
+                    decode_chroma_tokens(
+                        &mut residuals[mb_y % n],
+                        &mut above[mb_x],
+                        &mut left,
+                        &coeff_probs,
+                        &mut levels,
+                    );
+                }
                 reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
                 reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
                 filter_interior[mb_y * recon.mb_cols + mb_x] = true; // B_PRED always filters interiors
             } else {
                 let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
-                let levels = decode_mb_tokens(
-                    &mut residuals[mb_y % n],
-                    &mut above[mb_x],
-                    &mut left,
-                    &coeff_probs,
-                );
+                if !skip {
+                    levels = decode_mb_tokens(
+                        &mut residuals[mb_y % n],
+                        &mut above[mb_x],
+                        &mut left,
+                        &coeff_probs,
+                    );
+                }
                 reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
                 reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
                 reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
                 filter_interior[mb_y * recon.mb_cols + mb_x] = mb_has_coeffs(&levels);
+            }
+            if skip {
+                clear_mb_context(&mut above[mb_x], &mut left, is_bpred);
             }
 
             (above_bmodes[mb_x], left_bmodes) = bmode_propagation(is_bpred, y_mode, &sub_modes);
@@ -1211,22 +1274,30 @@ mod tests {
 
     /// Counts macroblocks coded as `B_PRED` by re-reading partition 0, to confirm the path is
     /// genuinely exercised (not merely available).
-    fn count_bpred_macroblocks(data: &[u8]) -> usize {
+    /// Re-reads partition 0 (modes) and returns `(B_PRED macroblocks, skipped macroblocks)`, to
+    /// confirm those paths are genuinely exercised.
+    fn mode_stats(data: &[u8]) -> (usize, usize) {
         let chunk = header::read_uncompressed_chunk(data).unwrap();
         let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
         let mut modes = BoolDecoder::new(&data[UNCOMPRESSED_CHUNK_LEN..part0_end]);
-        let _ = header::read_frame_header(&chunk, &mut modes).unwrap();
+        let (head, _) = header::read_frame_header(&chunk, &mut modes).unwrap();
         let mb_cols = (chunk.width as usize).div_ceil(16);
         let mb_rows = (chunk.height as usize).div_ceil(16);
         let mut above_bmodes = vec![[B_DC_PRED; 4]; mb_cols];
-        let mut count = 0;
+        let (mut bpred, mut skipped) = (0, 0);
         for _ in 0..mb_rows {
             let mut left_bmodes = [B_DC_PRED; 4];
             for mb_x in 0..mb_cols {
+                if head.segmentation.update_map {
+                    let _ = modes.get_tree(MB_SEGMENT_TREE, &head.segmentation.tree_probs);
+                }
+                if head.mb_no_skip_coeff && modes.get_bool(head.prob_skip_false) {
+                    skipped += 1;
+                }
                 let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
                 let is_bpred = y_mode == B_PRED;
                 let sub_modes = if is_bpred {
-                    count += 1;
+                    bpred += 1;
                     read_bmodes(&mut modes, &above_bmodes[mb_x], &left_bmodes)
                 } else {
                     [B_DC_PRED; 16]
@@ -1235,7 +1306,7 @@ mod tests {
                 (above_bmodes[mb_x], left_bmodes) = bmode_propagation(is_bpred, y_mode, &sub_modes);
             }
         }
-        count
+        (bpred, skipped)
     }
 
     #[test]
@@ -1243,7 +1314,7 @@ mod tests {
         let yuv = detailed(48, 48);
         let (bitstream, recon) = encode_frame(&yuv, 8);
         assert!(
-            count_bpred_macroblocks(&bitstream) > 0,
+            mode_stats(&bitstream).0 > 0,
             "detailed content should select B_PRED for some macroblocks"
         );
         let decoded = decode_frame(&bitstream).expect("decode");
@@ -1251,6 +1322,34 @@ mod tests {
         assert_eq!(enc.y(), dec.y(), "B_PRED luma mismatch");
         assert_eq!(enc.u(), dec.u(), "B_PRED u mismatch");
         assert_eq!(enc.v(), dec.v(), "B_PRED v mismatch");
+    }
+
+    #[test]
+    fn mb_skip_is_exercised_and_bit_exact() {
+        // A flat image predicts to 128 with a zero residual, so every macroblock is skipped; the
+        // decode must reproduce it from the skip flags alone.
+        let (w, h) = (48u32, 48u32);
+        let (cw, ch) = (
+            Yuv420::chroma_width(w) as usize,
+            Yuv420::chroma_height(h) as usize,
+        );
+        let yuv = Yuv420::new(
+            w,
+            h,
+            vec![128u8; (w * h) as usize],
+            vec![128u8; cw * ch],
+            vec![128u8; cw * ch],
+        )
+        .unwrap();
+        let (bits, recon) = encode_frame(&yuv, 60);
+        assert!(
+            mode_stats(&bits).1 > 0,
+            "flat content should skip macroblocks"
+        );
+        let dec = decode_frame(&bits).expect("decode");
+        assert_eq!(recon.to_yuv420().y(), dec.to_yuv420().y());
+        assert_eq!(recon.to_yuv420().u(), dec.to_yuv420().u());
+        assert_eq!(recon.to_yuv420().v(), dec.to_yuv420().v());
     }
 
     /// Tier-2: the encoder's reconstruction must equal the native decoder's output, bit-for-bit.
