@@ -87,25 +87,49 @@ impl Token {
 /// Returns [`Error::InvalidInput`] if `argb.len()` does not equal `width * height`, or the
 /// dimensions are out of the VP8L range.
 pub fn encode(argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
-    let expected = (dims.width as usize).checked_mul(dims.height as usize);
-    if expected != Some(argb.len()) {
-        return Err(Error::InvalidInput(
-            "VP8L: pixel buffer does not match dimensions",
-        ));
-    }
+    check_dimensions(argb, dims)?;
     let alpha_is_used = argb.iter().any(|&p| alpha(p) != 0xff);
     let header = Vp8lHeader::from_dimensions(dims, alpha_is_used)?;
-
     let mut w = BitWriter::new();
     header.write(&mut w);
-
-    // Few-color images take the palette path; everything else takes the spatial-transform path.
-    // Choosing the densest path for a given image is a tuning concern deferred to issue #31.
-    match build_palette(argb) {
-        Some(palette) => encode_palette(&mut w, argb, dims, &palette),
-        None => encode_spatial(&mut w, argb, dims),
-    }
+    write_image_body(&mut w, argb, dims);
     Ok(w.finish())
+}
+
+/// Encodes an ARGB image to a **headerless** VP8L image-stream — the transform chain plus the
+/// spatially-coded image, without the dimension-carrying header. This is the form a
+/// lossless-compressed `ALPH` chunk takes (RFC 9649 §2.7.1, implicit dimensions); the header in a
+/// full [`encode`] is exactly five (byte-aligned) bytes, so this is that output minus those bytes.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `argb.len()` does not equal `width * height`.
+pub fn encode_image(argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
+    check_dimensions(argb, dims)?;
+    let mut w = BitWriter::new();
+    write_image_body(&mut w, argb, dims);
+    Ok(w.finish())
+}
+
+/// Validates that `argb` holds exactly `width * height` pixels.
+fn check_dimensions(argb: &[u32], dims: Dimensions) -> Result<()> {
+    if (dims.width as usize).checked_mul(dims.height as usize) == Some(argb.len()) {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(
+            "VP8L: pixel buffer does not match dimensions",
+        ))
+    }
+}
+
+/// Writes the image body (transforms + spatially-coded image). Few-color images take the palette
+/// path; everything else takes the spatial-transform path. Choosing the densest path for a given
+/// image is a tuning concern deferred to issue #31.
+fn write_image_body(w: &mut BitWriter, argb: &[u32], dims: Dimensions) {
+    match build_palette(argb) {
+        Some(palette) => encode_palette(w, argb, dims, &palette),
+        None => encode_spatial(w, argb, dims),
+    }
 }
 
 /// Encodes via the spatial transforms (subtract-green, predictor, color) applied in read order; the

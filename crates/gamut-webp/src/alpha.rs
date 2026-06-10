@@ -3,12 +3,16 @@
 //!
 //! The plane is optionally **filtered** — each value predicted from its left, top, or
 //! left+top−topleft (gradient) neighbor, the residual stored — which decorrelates it so the
-//! lossless compressor (method `1`, [`crate::vp8l`]) packs it tighter. The filter is bijective and
-//! lossless regardless of how the residuals are stored, so raw storage (method `0`) round-trips the
-//! alpha exactly. This module implements the chunk header, the four filters, and **raw** storage;
-//! lossless-compressed storage layers on top in a later milestone.
+//! lossless compressor packs it tighter. The filter is bijective and lossless regardless of how the
+//! residuals are stored, so the alpha round-trips exactly either way. This module implements the
+//! chunk header, the four filters, and both storage methods: **raw** (`C=0`) and **lossless** (`C=1`,
+//! a headerless [`crate::vp8l`] image-stream carrying the residuals in its green channel).
 
-use gamut_core::{Error, Result};
+use gamut_core::{Dimensions, Error, Result};
+
+use crate::vp8l::bit_io::BitReader;
+use crate::vp8l::decoder::decode_image;
+use crate::vp8l::encoder::encode_image;
 
 /// Alpha filtering method (RFC 9649 §2.7.1 Figure 10, field `F`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,29 +153,75 @@ pub fn write_raw_alph(plane: &[u8], width: usize, height: usize) -> Vec<u8> {
     out
 }
 
-/// Decodes an `ALPH` chunk payload into the alpha plane (RFC 9649 §2.7.1). Only the raw compression
-/// method (`C = 0`) is handled here; lossless-compressed alpha (`C = 1`) is a later milestone.
+/// Builds a **lossless-compressed** `ALPH` chunk payload (compression method `C=1`): the alpha values
+/// are placed in the green channel of an opaque ARGB image and encoded as a headerless VP8L
+/// image-stream (RFC 9649 §2.7.1). No pre-filter is applied (`F=0`); the VP8L spatial predictors do
+/// the decorrelation.
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for an empty payload or a raw payload of the wrong length, and
-/// [`Error::Unsupported`] for the lossless compression method.
+/// Propagates a VP8L encoding error (only a dimension mismatch, which cannot occur here).
+fn write_compressed_alph(plane: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    let argb: Vec<u32> = plane
+        .iter()
+        .map(|&a| 0xff00_0000 | (u32::from(a) << 8))
+        .collect();
+    let dims = Dimensions {
+        width: width as u32,
+        height: height as u32,
+    };
+    let stream = encode_image(&argb, dims)?;
+    let mut out = Vec::with_capacity(1 + stream.len());
+    out.push(0x01); // P = 0, F = 0, C = 1 (lossless)
+    out.extend_from_slice(&stream);
+    Ok(out)
+}
+
+/// Builds the smaller of the raw and lossless-compressed `ALPH` payloads for an alpha plane.
+///
+/// # Errors
+///
+/// Propagates a VP8L encoding error from the compressed path.
+pub fn write_alph(plane: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
+    let raw = write_raw_alph(plane, width, height);
+    let compressed = write_compressed_alph(plane, width, height)?;
+    Ok(if compressed.len() < raw.len() {
+        compressed
+    } else {
+        raw
+    })
+}
+
+/// Decodes an `ALPH` chunk payload into the alpha plane (RFC 9649 §2.7.1), handling both the raw
+/// (`C=0`) and lossless-compressed (`C=1`) storage methods. Compressed alpha is a headerless VP8L
+/// image-stream whose green channel holds the filtered residuals; either way the filter `F` is then
+/// inverted.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for an empty payload, a raw payload of the wrong length, or a
+/// malformed compressed stream.
 pub fn read_alph(payload: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
     let &header = payload
         .first()
         .ok_or(Error::InvalidInput("ALPH: empty chunk"))?;
     let method = AlphaFilter::from_code(header >> 2);
-    let compression = header & 0x3;
-    if compression != 0 {
-        return Err(Error::Unsupported(
-            "ALPH: lossless-compressed alpha not yet supported",
-        ));
-    }
-    let residuals = &payload[1..];
-    if residuals.len() != width * height {
-        return Err(Error::InvalidInput("ALPH: raw alpha length mismatch"));
-    }
-    Ok(unfilter(residuals, width, height, method))
+    let data = &payload[1..];
+    let residuals = match header & 0x3 {
+        0 => {
+            if data.len() != width * height {
+                return Err(Error::InvalidInput("ALPH: raw alpha length mismatch"));
+            }
+            data.to_vec()
+        }
+        1 => {
+            let mut r = BitReader::new(data);
+            let argb = decode_image(&mut r, width as u32, height as u32)?;
+            argb.iter().map(|&p| (p >> 8) as u8).collect() // green channel
+        }
+        _ => return Err(Error::InvalidInput("ALPH: reserved compression method")),
+    };
+    Ok(unfilter(&residuals, width, height, method))
 }
 
 #[cfg(test)]
@@ -226,6 +276,31 @@ mod tests {
     fn read_alph_rejects_bad_input() {
         assert!(read_alph(&[], 4, 4).is_err());
         assert!(read_alph(&[0, 1, 2], 4, 4).is_err(), "wrong raw length");
-        assert!(read_alph(&[0x01], 0, 0).is_err(), "C=1 unsupported");
+        assert!(
+            read_alph(&[0x01, 0x00], 8, 8).is_err(),
+            "truncated compressed stream"
+        );
+    }
+
+    #[test]
+    fn compressed_alph_round_trips() {
+        let (w, h) = (20, 12);
+        let plane = pattern(w, h);
+        let chunk = write_compressed_alph(&plane, w, h).unwrap();
+        assert_eq!(chunk[0] & 0x3, 1, "compression method is lossless");
+        assert_eq!(read_alph(&chunk, w, h).unwrap(), plane);
+    }
+
+    #[test]
+    fn write_alph_picks_the_smaller_and_round_trips() {
+        // A smoothly-banded plane compresses well, so the chosen payload should beat the raw size.
+        let (w, h) = (64, 64);
+        let plane: Vec<u8> = (0..w * h).map(|i| ((i / w) * 4) as u8).collect();
+        let chunk = write_alph(&plane, w, h).unwrap();
+        assert!(
+            chunk.len() < 1 + w * h,
+            "compressible alpha should beat raw"
+        );
+        assert_eq!(read_alph(&chunk, w, h).unwrap(), plane);
     }
 }

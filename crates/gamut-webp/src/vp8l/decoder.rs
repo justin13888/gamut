@@ -36,9 +36,19 @@ const MAX_PIXELS: usize = 16384 * 16384;
 pub fn decode(data: &[u8]) -> Result<(Dimensions, Vec<u32>)> {
     let mut r = BitReader::new(data);
     let header = Vp8lHeader::read(&mut r)?;
-    let width = u32::from(header.width);
-    let height = u32::from(header.height);
+    let (width, height) = (u32::from(header.width), u32::from(header.height));
+    let pixels = decode_image(&mut r, width, height)?;
+    Ok((Dimensions { width, height }, pixels))
+}
 
+/// Decodes a **headerless** VP8L image-stream of the given dimensions: the transform chain followed by
+/// the spatially-coded image (RFC 9649 §3/§4) — the body of [`decode`] after the header. This is also
+/// the form a lossless-compressed `ALPH` chunk takes, whose dimensions are implicit (§2.7.1).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for any malformed, truncated, or over-spec stream.
+pub fn decode_image(r: &mut BitReader<'_>, width: u32, height: u32) -> Result<Vec<u32>> {
     // Read the transform chain (each type at most once), tracking the working width that
     // color-indexing shrinks for everything read after it (RFC 9649 §4).
     let mut transforms: Vec<Vp8lTransform> = Vec::new();
@@ -50,7 +60,7 @@ pub fn decode(data: &[u8]) -> Result<(Dimensions, Vec<u32>)> {
             return Err(Error::InvalidInput("VP8L: transform type repeated"));
         }
         seen[transform_type] = true;
-        let transform = read_transform(&mut r, transform_type as u8, work_width, height)?;
+        let transform = read_transform(r, transform_type as u8, work_width, height)?;
         if let Vp8lTransform::ColorIndexing { table, .. } = &transform {
             let width_bits = color_index_width_bits(table.len());
             work_width = div_round_up(work_width, 1 << width_bits);
@@ -59,14 +69,13 @@ pub fn decode(data: &[u8]) -> Result<(Dimensions, Vec<u32>)> {
     }
 
     // Decode the (possibly width-reduced) main image, then invert the transforms in reverse order.
-    let mut pixels = read_image(&mut r, work_width, height, true)?;
+    let mut pixels = read_image(r, work_width, height, true)?;
     let mut current_width = work_width;
     for transform in transforms.iter().rev() {
         current_width = transform.apply_inverse(&mut pixels, current_width, height);
     }
     debug_assert_eq!(current_width, width);
-
-    Ok((Dimensions { width, height }, pixels))
+    Ok(pixels)
 }
 
 /// Reads one transform's data, given the working `width`/`height` at this point in the stream.
