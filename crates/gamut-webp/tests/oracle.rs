@@ -233,6 +233,52 @@ fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
 }
 
 #[test]
+fn gamut_lossy_options_match_libwebp_bit_exact() {
+    // The alternative encoder paths — the simple loop filter and quantizer segmentation — must each
+    // produce a stream libwebp decodes identically to gamut's decoder (the tier-3 conformance gate).
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::vp8::frame::{EncodeOptions, decode_frame, encode_frame_filtered};
+
+    let cases = [
+        (
+            "simple-filter",
+            EncodeOptions {
+                simple_filter: true,
+                segmented: false,
+            },
+        ),
+        (
+            "segmented",
+            EncodeOptions {
+                simple_filter: false,
+                segmented: true,
+            },
+        ),
+        (
+            "segmented+simple",
+            EncodeOptions {
+                simple_filter: true,
+                segmented: true,
+            },
+        ),
+    ];
+    for (label, opts) in cases {
+        for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33)] {
+            for &q in &[12u8, 48] {
+                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
+                let webp = write_simple_lossy(&payload);
+                let lib = libwebp_decode_yuv(&webp);
+                let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+                assert_eq!(gamut.y(), lib.y.as_slice(), "{label} Y at {w}x{h} q{q}");
+                assert_eq!(gamut.u(), lib.u.as_slice(), "{label} U at {w}x{h} q{q}");
+                assert_eq!(gamut.v(), lib.v.as_slice(), "{label} V at {w}x{h} q{q}");
+            }
+        }
+    }
+}
+
+#[test]
 fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
     // A VP8 bitstream decodes to a deterministic integer YUV, so gamut's own decoder and libwebp must
     // agree bit-for-bit on the same gamut-produced bitstream — the tier-3 conformance gate that pins
