@@ -185,6 +185,9 @@ pub(crate) struct FrameEncoder<'a> {
     mi_ymode: Vec<u8>,
     /// The `skip` flag of the block covering each MI cell, for the `skip` context (§8.3.2).
     mi_skip: Vec<u8>,
+    /// `PaletteSizeY` of the block covering each MI cell (0 = no palette), for the `has_palette_y`
+    /// context (and, once palette selection lands, `get_palette_cache`).
+    mi_psize: Vec<u8>,
     /// `DeltaLF` (loop-filter-level delta) of the block covering each MI cell (§7.14.4), consumed by
     /// the deblocking filter to vary the level per superblock.
     mi_dlf: Vec<i8>,
@@ -248,6 +251,7 @@ impl<'a> FrameEncoder<'a> {
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_ymode: vec![0; mi_cols * mi_rows],
             mi_skip: vec![0; mi_cols * mi_rows],
+            mi_psize: vec![0; mi_cols * mi_rows],
             mi_dlf: vec![0; mi_cols * mi_rows],
             tx_log2: vec![2; mi_cols * mi_rows],
             sb_r: 0,
@@ -612,6 +616,24 @@ impl<'a> FrameEncoder<'a> {
             }
         } else {
             self.sym.encode_symbol(0, &cdf::UV_MODE_CFL_NOT_ALLOWED[ym]);
+        }
+
+        // palette_mode_info (§5.11.46): with allow_screen_content_tools, an 8×8..64×64 block signals
+        // `has_palette_y` (when YMode == DC_PRED) and `has_palette_uv` (when UVMode == DC_PRED). The
+        // encoder does not select palette yet, so both flags are 0 (palette selection + the color and
+        // index-map coding are a follow-up). The Y context counts neighbouring blocks with a palette.
+        if self.qindex > 0 && (8..=32).contains(&bw) {
+            if y_mode == DC_PRED {
+                let bctx = 2 * bw.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
+                let above = r > 0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
+                let left = c > 0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
+                let pctx = usize::from(above) + usize::from(left);
+                self.sym.encode_symbol(0, &cdf::PALETTE_Y_MODE[bctx][pctx]);
+            }
+            if cfl.is_none() {
+                // UVMode == DC_PRED; the context is `(PaletteSizeY > 0)`, which is 0 here.
+                self.sym.encode_symbol(0, &cdf::PALETTE_UV_MODE[0]);
+            }
         }
 
         // filter_intra_mode_info (§5.11.24): with enable_filter_intra = 1 (lossy path), every
