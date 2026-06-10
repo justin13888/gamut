@@ -11,8 +11,9 @@
 //! minimum transform width across the edge: 4 (narrow, §7.14.6.3) for any edge touching a 4×4
 //! transform, 8 (wide, §7.14.6.4 `log2Size = 3`) for an 8↔8 edge, and 16 (wide, §7.14.6.4
 //! `log2Size = 4`) for a 16↔16 luma edge. The frame is a single intra key-frame with one segment,
-//! `loop_filter_sharpness = 0`, and `loop_filter_delta_enabled = 0`, so the strength is a single
-//! signaled `loop_filter_level` (the same value for both luma passes and both chroma planes).
+//! `loop_filter_sharpness = 0`, and `loop_filter_delta_enabled = 0`; `delta_lf_present = 1`, so the
+//! level is the frame `loop_filter_level` plus a per-superblock `DeltaLF` (each edge takes the level
+//! of its q0-side block, §7.14.4 — the same `loop_filter_level` for both luma passes and chroma).
 //!
 //! CDEF: a single signaled strength set (`cdef_bits = 0`) is applied to every 8×8 block; the
 //! per-block `cdef_idx` is `L(0)` (no tile bits). `Skips` is 0 so every block is filtered. For 4:4:4,
@@ -216,18 +217,23 @@ pub(crate) fn deblock(
     height: usize,
     tx_log2: &[u8],
     mi_bsl: &[u8],
+    mi_dlf: &[i8],
     qindex: u8,
 ) {
-    let lvl = i32::from(deblock_level(qindex));
-    if lvl == 0 {
-        return;
+    let base_lvl = i32::from(deblock_level(qindex));
+    if base_lvl == 0 {
+        return; // frame loop_filter_level 0 ⇒ delta_lf is also 0 (encoder), so every level is 0.
     }
-    // sharpness = 0 ⇒ shift = 0; the same level applies to both luma passes and both chroma planes.
-    let limit = lvl.max(1);
-    let st = Strength {
-        limit,
-        blimit: 2 * (lvl + 2) + limit,
-        thresh: lvl >> 4,
+    // The per-superblock loop-filter level is `Clip3(0, 63, loop_filter_level + DeltaLF)`; with
+    // `loop_filter_sharpness = 0` the strength thresholds derive from it directly (§7.14.4/.5).
+    let strength_for = |cell: usize| -> Strength {
+        let lvl = (base_lvl + i32::from(mi_dlf[cell])).clamp(0, 63);
+        let limit = lvl.max(1);
+        Strength {
+            limit,
+            blimit: 2 * (lvl + 2) + limit,
+            thresh: lvl >> 4,
+        }
     };
 
     for (plane_idx, plane) in planes.iter_mut().enumerate() {
@@ -256,6 +262,8 @@ pub(crate) fn deblock(
                 if x % txw == 0 {
                     let prev_txw = 1usize << txlog2(row * mi_cols + (col - 1));
                     let filter_size = prev_txw.min(txw).min(size_cap);
+                    // The edge takes the level of its q0-side (right) block (§7.14.4).
+                    let st = strength_for(row * mi_cols + col);
                     for i in 0..4 {
                         filter_sample(plane, (y + i) * coded_w + x, 1, filter_size, is_luma, st);
                     }
@@ -276,6 +284,8 @@ pub(crate) fn deblock(
                 if y % txh == 0 {
                     let prev_txh = 1usize << txlog2((row - 1) * mi_cols + col);
                     let filter_size = prev_txh.min(txh).min(size_cap);
+                    // The edge takes the level of its q0-side (bottom) block (§7.14.4).
+                    let st = strength_for(row * mi_cols + col);
                     for i in 0..4 {
                         filter_sample(
                             plane,
@@ -665,7 +675,8 @@ mod tests {
         // 4×4 blocks have `mi_bsl = 0`, so chroma tx is also 4×4 (log2 = 0 + 2).
         let tx_log2 = vec![2u8; 4 * 4];
         let mi_bsl = vec![0u8; 4 * 4];
-        deblock(&mut flat, 16, 4, 16, 16, &tx_log2, &mi_bsl, 64);
+        let mi_dlf = vec![0i8; 4 * 4];
+        deblock(&mut flat, 16, 4, 16, 16, &tx_log2, &mi_bsl, &mi_dlf, 64);
         assert!(flat[0].iter().all(|&v| v == 128));
 
         // A vertical step at column 8 gets smoothed across the x = 8 boundary.
@@ -676,7 +687,7 @@ mod tests {
             }
         }
         let before = planes[0].clone();
-        deblock(&mut planes, 16, 4, 16, 16, &tx_log2, &mi_bsl, 64); // qindex 64 ⇒ level 16
+        deblock(&mut planes, 16, 4, 16, 16, &tx_log2, &mi_bsl, &mi_dlf, 64); // qindex 64 ⇒ level 16
         assert_ne!(
             planes[0], before,
             "deblock should modify samples near the edge"
