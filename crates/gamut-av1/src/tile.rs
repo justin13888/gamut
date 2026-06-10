@@ -102,6 +102,81 @@ const fn is_directional(mode: u8) -> bool {
     V_PRED <= mode && mode <= D67_PRED
 }
 
+/// A selected luma palette for a block (§5.11.46/.49): the sorted distinct colors and the per-pixel
+/// `ColorMapY` (index into `colors`, row-major over the block).
+struct PaletteBlock {
+    colors: Vec<u8>,
+    index_map: Vec<u8>,
+}
+
+/// The `palette_color_idx_y` CDF for a luma palette of size `n` (2..=8) at color context `ctx`
+/// (§9.4). `n` is the palette size; `ctx` is `Palette_Color_Context[hash]`.
+fn palette_color_cdf(n: usize, ctx: usize) -> &'static [u16] {
+    match n {
+        2 => &cdf::PALETTE_SIZE_2_Y_COLOR[ctx],
+        3 => &cdf::PALETTE_SIZE_3_Y_COLOR[ctx],
+        4 => &cdf::PALETTE_SIZE_4_Y_COLOR[ctx],
+        5 => &cdf::PALETTE_SIZE_5_Y_COLOR[ctx],
+        6 => &cdf::PALETTE_SIZE_6_Y_COLOR[ctx],
+        7 => &cdf::PALETTE_SIZE_7_Y_COLOR[ctx],
+        _ => &cdf::PALETTE_SIZE_8_Y_COLOR[ctx],
+    }
+}
+
+/// `CeilLog2(x)` (§4.7): the smallest `k` with `2^k >= x` (0 for `x <= 1`).
+fn ceil_log2(x: usize) -> u32 {
+    if x < 2 { 0 } else { (x - 1).ilog2() + 1 }
+}
+
+/// `get_palette_color_context` (§5.11.50): from the three already-decoded neighbours of `(r, c)` in
+/// the `bw`-wide `color_map`, computes the reordered `ColorOrder` (most-likely color first) and the
+/// color context. `n` is the palette size.
+fn palette_color_context(
+    color_map: &[u8],
+    bw: usize,
+    r: usize,
+    c: usize,
+    n: usize,
+) -> ([usize; 8], usize) {
+    let mut scores = [0i32; 8];
+    let mut order = [0usize; 8];
+    for (i, o) in order.iter_mut().enumerate() {
+        *o = i;
+    }
+    if c > 0 {
+        scores[color_map[r * bw + (c - 1)] as usize] += 2;
+    }
+    if r > 0 && c > 0 {
+        scores[color_map[(r - 1) * bw + (c - 1)] as usize] += 1;
+    }
+    if r > 0 {
+        scores[color_map[(r - 1) * bw + c] as usize] += 2;
+    }
+    // Partial selection sort of the first PALETTE_NUM_NEIGHBORS = 3 by descending score, rotating the
+    // chosen entry into place.
+    for i in 0..3 {
+        let mut max_idx = i;
+        for j in (i + 1)..n {
+            if scores[j] > scores[max_idx] {
+                max_idx = j;
+            }
+        }
+        if max_idx != i {
+            let (ms, mo) = (scores[max_idx], order[max_idx]);
+            let mut k = max_idx;
+            while k > i {
+                scores[k] = scores[k - 1];
+                order[k] = order[k - 1];
+                k -= 1;
+            }
+            scores[i] = ms;
+            order[i] = mo;
+        }
+    }
+    let hash = (scores[0] + scores[1] * 2 + scores[2] * 2) as usize;
+    (order, cdf::PALETTE_COLOR_CONTEXT[hash] as usize)
+}
+
 /// The coefficient-CDF quantizer context (§8.3.2) for a quantizer index: `0` if `≤ 20`, `1` if
 /// `≤ 60`, `2` if `≤ 120`, else `3`.
 const fn qctx_for(qindex: i32) -> usize {
@@ -186,8 +261,11 @@ pub(crate) struct FrameEncoder<'a> {
     /// The `skip` flag of the block covering each MI cell, for the `skip` context (§8.3.2).
     mi_skip: Vec<u8>,
     /// `PaletteSizeY` of the block covering each MI cell (0 = no palette), for the `has_palette_y`
-    /// context (and, once palette selection lands, `get_palette_cache`).
+    /// context and `get_palette_cache`.
     mi_psize: Vec<u8>,
+    /// `PaletteColors` (the sorted luma palette, up to 8 entries) of the block covering each MI cell,
+    /// for `get_palette_cache` (only the first `mi_psize` entries are meaningful).
+    mi_pcolors: Vec<[u8; 8]>,
     /// `DeltaLF` (loop-filter-level delta) of the block covering each MI cell (§7.14.4), consumed by
     /// the deblocking filter to vary the level per superblock.
     mi_dlf: Vec<i8>,
@@ -252,6 +330,7 @@ impl<'a> FrameEncoder<'a> {
             mi_ymode: vec![0; mi_cols * mi_rows],
             mi_skip: vec![0; mi_cols * mi_rows],
             mi_psize: vec![0; mi_cols * mi_rows],
+            mi_pcolors: vec![[0u8; 8]; mi_cols * mi_rows],
             mi_dlf: vec![0; mi_cols * mi_rows],
             tx_log2: vec![2; mi_cols * mi_rows],
             sb_r: 0,
@@ -410,6 +489,11 @@ impl<'a> FrameEncoder<'a> {
     /// either choice reconstructs bit-exactly — so the threshold is a deterministic placeholder
     /// (rate-distortion partition search is deferred).
     fn should_split(&self, r: usize, c: usize, bw: usize) -> bool {
+        // A palette-able block (few luma colors + flat chroma) is kept whole so it can use palette
+        // mode, even though its luma range is large — splitting it would forfeit the palette coding.
+        if self.decide_palette(r, c, bw).is_some() {
+            return false;
+        }
         self.luma_range(c * 4, r * 4, bw) > 32
     }
 
@@ -496,6 +580,194 @@ impl<'a> FrameEncoder<'a> {
         true
     }
 
+    /// Decides whether to code a lossy block at MI `(r, c)` with luma palette mode (§5.11.46): the
+    /// luma block must have 2..=8 distinct colors, and (so the block can be coded `skip = 1` with the
+    /// reconstruction being exactly the palette + DC chroma) every chroma plane must be flat and
+    /// DC-predictable. Returns the sorted palette and the per-pixel index map. This is a quality
+    /// decision; any choice reconstructs bit-exactly, so only the signaling has to be correct.
+    fn decide_palette(&self, r: usize, c: usize, bw: usize) -> Option<PaletteBlock> {
+        let (sx, sy) = (c * 4, r * 4);
+        // Distinct luma colors (sorted).
+        let mut set = [false; 256];
+        let mut count = 0;
+        for i in 0..bw {
+            for j in 0..bw {
+                let v = self.sample(0, sx + j, sy + i) as usize;
+                if !set[v] {
+                    set[v] = true;
+                    count += 1;
+                }
+            }
+        }
+        if !(2..=8).contains(&count) {
+            return None;
+        }
+        // Chroma must be flat and exactly DC-predictable (chroma residual identically 0 ⇒ skip = 1).
+        for plane in 1..3 {
+            let v0 = self.sample(plane, sx, sy);
+            for i in 0..bw {
+                for j in 0..bw {
+                    if self.sample(plane, sx + j, sy + i) != v0 {
+                        return None;
+                    }
+                }
+            }
+            if self.dc_pred(plane, sx, sy, bw) != v0 {
+                return None;
+            }
+        }
+        let colors: Vec<u8> = (0..256).filter(|&v| set[v]).map(|v| v as u8).collect();
+        let mut index_map = vec![0u8; bw * bw];
+        for i in 0..bw {
+            for j in 0..bw {
+                let v = self.sample(0, sx + j, sy + i) as u8;
+                index_map[i * bw + j] = colors.binary_search(&v).unwrap_or(0) as u8;
+            }
+        }
+
+        Some(PaletteBlock { colors, index_map })
+    }
+
+    /// `get_palette_cache` (§5.11.46) for luma: the sorted, deduplicated merge of the above (only
+    /// when the block is not at the top of its 64-superblock) and left blocks' palettes.
+    fn palette_cache(&self, r: usize, c: usize) -> Vec<u8> {
+        let above_n = if !r.is_multiple_of(16) {
+            self.mi_psize[(r - 1) * self.mi_cols + c] as usize
+        } else {
+            0
+        };
+        let left_n = if c > 0 {
+            self.mi_psize[r * self.mi_cols + (c - 1)] as usize
+        } else {
+            0
+        };
+        let blank = [0u8; 8];
+        let above = if above_n > 0 {
+            &self.mi_pcolors[(r - 1) * self.mi_cols + c]
+        } else {
+            &blank
+        };
+        let left = if left_n > 0 {
+            &self.mi_pcolors[r * self.mi_cols + (c - 1)]
+        } else {
+            &blank
+        };
+        let mut cache: Vec<u8> = Vec::new();
+        let push = |cache: &mut Vec<u8>, v: u8| {
+            if cache.last() != Some(&v) {
+                cache.push(v);
+            }
+        };
+        let (mut ai, mut li) = (0, 0);
+        while ai < above_n && li < left_n {
+            let (ac, lc) = (above[ai], left[li]);
+            if lc < ac {
+                push(&mut cache, lc);
+                li += 1;
+            } else {
+                push(&mut cache, ac);
+                ai += 1;
+                if lc == ac {
+                    li += 1;
+                }
+            }
+        }
+        while ai < above_n {
+            push(&mut cache, above[ai]);
+            ai += 1;
+        }
+        while li < left_n {
+            push(&mut cache, left[li]);
+            li += 1;
+        }
+        cache
+    }
+
+    /// `ns(n)` literal coding (§4.10.7) of `val ∈ [0, n)`.
+    fn encode_ns(&mut self, val: usize, n: usize) {
+        if n <= 1 {
+            return;
+        }
+        let w = n.ilog2() + 1;
+        let m = (1usize << w) - n;
+        if val < m {
+            self.sym.encode_literal(val as u32, w - 1);
+        } else {
+            let coded = val + m;
+            self.sym.encode_literal((coded >> 1) as u32, w - 1);
+            self.sym.encode_literal((coded & 1) as u32, 1);
+        }
+    }
+
+    /// Signals the luma palette colors (§5.11.46): the cache-usage flags (all 0 — the encoder reuses
+    /// no cached color) followed by every palette color as new — the first raw, the rest delta-coded.
+    fn signal_palette_colors(&mut self, colors: &[u8], cache_n: usize) {
+        let psize = colors.len();
+        // use_palette_color_cache_y flags: 0 for each cached color (none reused), while idx < psize.
+        // Since none are used, idx stays 0 and all `cache_n` flags are emitted.
+        for _ in 0..cache_n {
+            self.sym.encode_literal(0, 1);
+        }
+        // New colors: the first is raw 8-bit; the rest are positive deltas coded in `palette_bits`.
+        self.sym.encode_literal(u32::from(colors[0]), 8);
+        if psize > 1 {
+            self.sym.encode_literal(3, 2); // palette_num_extra_bits_y = 3 ⇒ palette_bits = 8 (always fits)
+            let mut palette_bits = 5 + 3u32;
+            for idx in 1..psize {
+                let delta = i32::from(colors[idx]) - i32::from(colors[idx - 1]); // ≥ 1 (sorted distinct)
+                self.sym.encode_literal((delta - 1) as u32, palette_bits);
+                let range = 256 - i32::from(colors[idx]) - 1;
+                palette_bits = palette_bits.min(ceil_log2(range.max(1) as usize));
+            }
+        }
+    }
+
+    /// Signals the luma `color_index_map_y` (§5.11.49): the top-left index via `ns()`, then the
+    /// remaining indices in anti-diagonal (wavefront) order, each as the position of its color in the
+    /// neighbour-derived `ColorOrder`, coded under the size/context palette-color CDF.
+    fn signal_palette_tokens(&mut self, index_map: &[u8], bw: usize, psize: usize) {
+        self.encode_ns(index_map[0] as usize, psize);
+        for i in 1..(2 * bw - 1) {
+            let j_start = i.min(bw - 1);
+            let j_end = i.saturating_sub(bw - 1);
+            let mut j = j_start;
+            loop {
+                let (rr, cc) = (i - j, j);
+                let (order, ctx) = palette_color_context(index_map, bw, rr, cc, psize);
+                let actual = index_map[rr * bw + cc] as usize;
+                let sym = order.iter().position(|&x| x == actual).unwrap_or(0);
+                self.sym.encode_symbol(sym, palette_color_cdf(psize, ctx));
+                if j == j_end {
+                    break;
+                }
+                j -= 1;
+            }
+        }
+    }
+
+    /// Reconstructs a palette block: luma is `palette[ColorMapY]`, chroma is the (flat) DC prediction.
+    /// No residual is coded (the block is `skip = 1`), and the neighbour level/dc contexts are reset.
+    fn recon_palette(&mut self, r: usize, c: usize, bw: usize, pal: &PaletteBlock) {
+        let (sx, sy) = (c * 4, r * 4);
+        for i in 0..bw {
+            for j in 0..bw {
+                let idx = pal.index_map[i * bw + j] as usize;
+                self.recon[0][(sy + i) * self.coded_w + (sx + j)] = pal.colors[idx];
+            }
+        }
+        for plane in 1..3 {
+            let dc = self.dc_pred(plane, sx, sy, bw).clamp(0, 255) as u8;
+            for i in 0..bw {
+                for j in 0..bw {
+                    self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = dc;
+                }
+            }
+        }
+        for plane in 0..3 {
+            self.set_ctx(plane, sx >> 2, sy >> 2, bw / 4, 0, 0);
+        }
+    }
+
     /// Source-luma range (max − min) over the `bw × bw` block at coded `(sx, sy)`. Used by the
     /// partition and transform-depth heuristics.
     fn luma_range(&self, sx: usize, sy: usize, bw: usize) -> i32 {
@@ -553,10 +825,16 @@ impl<'a> FrameEncoder<'a> {
         // intra_frame_mode_info: skip=0 (ctx 0), then y_mode and uv_mode. The lossless path always
         // predicts DC_PRED; the lossy path searches the non-directional luma modes (plus directional
         // and filter-intra) and signals the choice with the above/left mode context.
-        // read_skip (§5.11.11): a lossy block whose residual is identically zero (flat + perfectly
-        // DC-predicted) is coded with skip = 1 — no residual, reconstruction = prediction. The context
-        // is the above/left skip flags.
-        let skip = self.qindex > 0 && self.block_is_skippable(r, c, bw);
+        // palette_mode_info / read_skip. A palette block (luma 2..=8 colors + flat chroma) is coded
+        // `skip = 1`: the reconstruction is the palette (luma) plus DC chroma, so no residual is
+        // needed. Otherwise a block whose residual is identically zero (flat + DC-predicted) is also
+        // `skip = 1`. The skip context is the above/left skip flags.
+        let palette = if self.qindex > 0 && (8..=32).contains(&bw) {
+            self.decide_palette(r, c, bw)
+        } else {
+            None
+        };
+        let skip = palette.is_some() || (self.qindex > 0 && self.block_is_skippable(r, c, bw));
 
         let sctx = self.skip_ctx(r, c);
         self.sym.encode_symbol(usize::from(skip), &cdf::SKIP[sctx]);
@@ -568,7 +846,8 @@ impl<'a> FrameEncoder<'a> {
             self.signal_delta_lf();
             self.read_deltas = false;
         }
-        let (y_mode, angle_delta, filter_intra) = if self.qindex == 0 {
+        let (y_mode, angle_delta, filter_intra) = if palette.is_some() || self.qindex == 0 {
+            // Palette requires YMode == DC_PRED (and no filter-intra); lossless also forces DC_PRED.
             (DC_PRED, 0i8, None)
         } else if lossy_large {
             self.select_luma_mode_nxn(c * 4, r * 4, bw)
@@ -601,7 +880,9 @@ impl<'a> FrameEncoder<'a> {
         // and the lossless 4×4 blocks. When allowed, the encoder picks chroma-from-luma if it beats
         // plain DC_PRED, then emits read_cfl_alphas; otherwise uv_mode = DC_PRED.
         let cfl_allowed = if self.qindex == 0 { bw == 4 } else { bw <= 32 };
-        let cfl = if self.qindex > 0 && cfl_allowed {
+        let cfl = if palette.is_some() {
+            None // a palette block's chroma is DC_PRED (no CfL)
+        } else if self.qindex > 0 && cfl_allowed {
             self.select_cfl(c * 4, r * 4, bw)
         } else {
             None
@@ -618,28 +899,38 @@ impl<'a> FrameEncoder<'a> {
             self.sym.encode_symbol(0, &cdf::UV_MODE_CFL_NOT_ALLOWED[ym]);
         }
 
-        // palette_mode_info (§5.11.46): with allow_screen_content_tools, an 8×8..64×64 block signals
-        // `has_palette_y` (when YMode == DC_PRED) and `has_palette_uv` (when UVMode == DC_PRED). The
-        // encoder does not select palette yet, so both flags are 0 (palette selection + the color and
-        // index-map coding are a follow-up). The Y context counts neighbouring blocks with a palette.
+        // palette_mode_info (§5.11.46): with allow_screen_content_tools an 8×8..64×64 block signals
+        // `has_palette_y` (when YMode == DC_PRED) and `has_palette_uv` (when UVMode == DC_PRED). When
+        // luma palette is selected, the palette size, the cache-usage flags, and the colors follow.
         if self.qindex > 0 && (8..=32).contains(&bw) {
             if y_mode == DC_PRED {
                 let bctx = 2 * bw.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
                 let above = r > 0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
                 let left = c > 0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
                 let pctx = usize::from(above) + usize::from(left);
-                self.sym.encode_symbol(0, &cdf::PALETTE_Y_MODE[bctx][pctx]);
+                self.sym.encode_symbol(
+                    usize::from(palette.is_some()),
+                    &cdf::PALETTE_Y_MODE[bctx][pctx],
+                );
+                if let Some(pal) = &palette {
+                    // palette_size_y_minus_2, then the colors (cache flags + new colors).
+                    self.sym
+                        .encode_symbol(pal.colors.len() - 2, &cdf::PALETTE_Y_SIZE[bctx]);
+                    let cache_n = self.palette_cache(r, c).len();
+                    let colors = pal.colors.clone();
+                    self.signal_palette_colors(&colors, cache_n);
+                }
             }
+            // UVMode == DC_PRED; the context is `(PaletteSizeY > 0)`. No chroma palette is used.
             if cfl.is_none() {
-                // UVMode == DC_PRED; the context is `(PaletteSizeY > 0)`, which is 0 here.
-                self.sym.encode_symbol(0, &cdf::PALETTE_UV_MODE[0]);
+                let uctx = usize::from(palette.is_some());
+                self.sym.encode_symbol(0, &cdf::PALETTE_UV_MODE[uctx]);
             }
         }
 
-        // filter_intra_mode_info (§5.11.24): with enable_filter_intra = 1 (lossy path), every
-        // DC_PRED luma block ≤ 32px signals use_filter_intra (PaletteSizeY is always 0 here), under
-        // the block-size CDF row. Both 4×4 and 8×8 DC_PRED blocks may enable it.
-        if self.qindex > 0 && y_mode == DC_PRED {
+        // filter_intra_mode_info (§5.11.24): a DC_PRED luma block ≤ 32px with no palette
+        // (`PaletteSizeY == 0`) signals use_filter_intra, under the block-size CDF row.
+        if self.qindex > 0 && y_mode == DC_PRED && palette.is_none() {
             let fi_cdf: &[u16] = match bw {
                 4 => &cdf::FILTER_INTRA_4X4,
                 8 => &cdf::FILTER_INTRA_8X8,
@@ -652,6 +943,13 @@ impl<'a> FrameEncoder<'a> {
                 self.sym
                     .encode_symbol(usize::from(fi), &cdf::FILTER_INTRA_MODE);
             }
+        }
+
+        // palette_tokens (§5.11.49): the color_index_map_y, coded after mode_info and before
+        // read_block_tx_size.
+        if let Some(pal) = &palette {
+            let idx_map = pal.index_map.clone();
+            self.signal_palette_tokens(&idx_map, bw, pal.colors.len());
         }
 
         // read_block_tx_size (§5.11.16): under TX_MODE_SELECT a lossy ≥8×8 luma block signals
@@ -678,6 +976,14 @@ impl<'a> FrameEncoder<'a> {
         // transform-size log2 — consumed by the deblocking loop filter (which derives the chroma tx
         // size from `mi_bsl` since 4:4:4 chroma uses the block-size transform).
         let txl = luma_tx.log2_width() as u8;
+        let (psize, pcolors) = match &palette {
+            Some(pal) => {
+                let mut buf = [0u8; 8];
+                buf[..pal.colors.len()].copy_from_slice(&pal.colors);
+                (pal.colors.len() as u8, buf)
+            }
+            None => (0u8, [0u8; 8]),
+        };
         for y in 0..n4 {
             for x in 0..n4 {
                 let (rr, cc) = (r + y, c + x);
@@ -686,9 +992,27 @@ impl<'a> FrameEncoder<'a> {
                     self.mi_ymode[rr * self.mi_cols + cc] = y_mode;
                     self.tx_log2[rr * self.mi_cols + cc] = txl;
                     self.mi_skip[rr * self.mi_cols + cc] = u8::from(skip);
+                    self.mi_psize[rr * self.mi_cols + cc] = psize;
+                    self.mi_pcolors[rr * self.mi_cols + cc] = pcolors;
                     self.mi_dlf[rr * self.mi_cols + cc] = self.current_dlf as i8;
                 }
             }
+        }
+
+        // A palette block reconstructs directly (luma = palette[ColorMapY], chroma = DC) with no
+        // residual, then marks its luma cells decoded so later directional predictions see them.
+        if let Some(pal) = palette {
+            self.recon_palette(r, c, bw, &pal);
+            for ty in 0..bw / 4 {
+                for tx in 0..bw / 4 {
+                    let by = (r + ty) as isize - self.sb_r as isize;
+                    let bx = (c + tx) as isize - self.sb_c as isize;
+                    if (0..16).contains(&by) && (0..16).contains(&bx) {
+                        self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
+                    }
+                }
+            }
+            return;
         }
 
         // residual(): per plane. Luma uses the block's intra mode and signaled transform size (a
