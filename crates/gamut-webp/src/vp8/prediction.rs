@@ -7,6 +7,7 @@
 //! `*_PRED` constants below are the same values as tree-leaf indices for the coders.
 
 use super::bool_coder::{Prob, Tree};
+use super::transform::clamp255;
 
 /// Luma 16×16 prediction mode (RFC 6386 §11.2, §12.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +108,54 @@ pub fn dc_predict(n: usize, above: Option<&[u8]>, left: Option<&[u8]>) -> u8 {
     }
 }
 
+/// The `n` neighbor pixels, substituting `fill` for an off-frame edge.
+fn edge(pixels: Option<&[u8]>, fill: u8) -> [u8; 16] {
+    let mut e = [fill; 16];
+    if let Some(p) = pixels {
+        e[..p.len()].copy_from_slice(p);
+    }
+    e
+}
+
+/// Fills `out[..n*n]` (row-major) with the whole-block prediction for `mode` — `DC_PRED`, `V_PRED`,
+/// `H_PRED`, or `TM_PRED` (RFC 6386 §12.2/§12.3). `above`/`left` are the `n` reconstructed neighbor
+/// pixels (`None` off-frame: V/H/TM substitute the 127/129 out-of-bounds values, while DC uses its
+/// averaging edge exception); `corner` is the above-left pixel TrueMotion propagates from.
+pub fn predict_block(
+    mode: usize,
+    n: usize,
+    above: Option<&[u8]>,
+    left: Option<&[u8]>,
+    corner: u8,
+    out: &mut [u8],
+) {
+    match mode {
+        V_PRED => {
+            let a = edge(above, 127);
+            for r in 0..n {
+                out[r * n..r * n + n].copy_from_slice(&a[..n]);
+            }
+        }
+        H_PRED => {
+            let l = edge(left, 129);
+            for r in 0..n {
+                out[r * n..r * n + n].fill(l[r]);
+            }
+        }
+        TM_PRED => {
+            let a = edge(above, 127);
+            let l = edge(left, 129);
+            let p = i32::from(corner);
+            for r in 0..n {
+                for c in 0..n {
+                    out[r * n + c] = clamp255(i32::from(l[r]) + i32::from(a[c]) - p);
+                }
+            }
+        }
+        _ => out[..n * n].fill(dc_predict(n, above, left)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +194,56 @@ mod tests {
         assert_eq!(KF_UV_MODE_TREE.len(), 6);
         assert_eq!(LumaMode::Dc as usize, DC_PRED);
         assert_eq!(ChromaMode::TrueMotion as usize, TM_PRED);
+    }
+
+    #[test]
+    fn vertical_prediction_copies_the_above_row() {
+        let above: Vec<u8> = (0..16).map(|i| (i * 10) as u8).collect();
+        let mut out = [0u8; 256];
+        predict_block(V_PRED, 16, Some(&above), Some(&[50u8; 16]), 200, &mut out);
+        for r in 0..16 {
+            assert_eq!(&out[r * 16..r * 16 + 16], &above[..]);
+        }
+    }
+
+    #[test]
+    fn horizontal_prediction_copies_the_left_column() {
+        let left: Vec<u8> = (0..16).map(|i| (i * 10) as u8).collect();
+        let mut out = [0u8; 256];
+        predict_block(H_PRED, 16, Some(&[50u8; 16]), Some(&left), 200, &mut out);
+        for r in 0..16 {
+            assert!(out[r * 16..r * 16 + 16].iter().all(|&p| p == left[r]));
+        }
+    }
+
+    #[test]
+    fn truemotion_propagates_from_the_corner() {
+        // X[r][c] = clamp255(L[r] + A[c] - P).
+        let above = [10u8, 20, 30, 40];
+        let left = [100u8, 110, 120, 130];
+        let p = 50i32;
+        let mut out = [0u8; 16];
+        predict_block(TM_PRED, 4, Some(&above), Some(&left), p as u8, &mut out);
+        for r in 0..4 {
+            for c in 0..4 {
+                let expect = (i32::from(left[r]) + i32::from(above[c]) - p).clamp(0, 255) as u8;
+                assert_eq!(out[r * 4 + c], expect, "TM at ({r},{c})");
+            }
+        }
+    }
+
+    #[test]
+    fn off_frame_edges_use_127_and_129() {
+        let mut out = [0u8; 256];
+        predict_block(V_PRED, 16, None, Some(&[5u8; 16]), 0, &mut out);
+        assert!(
+            out.iter().all(|&p| p == 127),
+            "vertical off the top row fills 127"
+        );
+        predict_block(H_PRED, 16, Some(&[5u8; 16]), None, 0, &mut out);
+        assert!(
+            out.iter().all(|&p| p == 129),
+            "horizontal off the left column fills 129"
+        );
     }
 }
