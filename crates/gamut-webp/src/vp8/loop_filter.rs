@@ -4,9 +4,11 @@
 //! **final whole-frame pass** — intra prediction (§12) reads the *unfiltered* reconstruction, so the
 //! encoder reconstructs the frame unfiltered (predicting from it) and only then deblocks the output.
 //!
-//! This module implements the **simple filter** (§15.2), which acts on luma edges only. The normal
-//! filter (§15.3) and its high-edge-variance test land in P11. Control parameters derive from the
-//! frame's `loop_filter_level` and `sharpness_level` per §15.4. Tracked in `../STATUS.md` section M.
+//! This module implements both the **simple filter** (§15.2 — luma edges only) and the **normal
+//! filter** (§15.3 — luma and chroma, with a high-edge-variance test that selects between a six-tap
+//! macroblock-edge and a four-tap subblock-edge adjustment). Control parameters (the interior, edge,
+//! and HEV limits) derive from the frame's `loop_filter_level` and `sharpness_level` per §15.4.
+//! Tracked in `../STATUS.md` section M.
 
 /// Clamps an intermediate to the signed 8-bit range (RFC 6386 §15.2 `c`).
 fn c(v: i32) -> i32 {
@@ -139,6 +141,265 @@ pub fn simple_filter_luma(
     }
 }
 
+/// Whether to filter the segment at all (RFC 6386 §15.3 `filter_yes`): the edge difference must be
+/// within `edge` and every adjacent interior difference within `interior`. Indices name the eight
+/// segment pixels `p3 p2 p1 p0 | q0 q1 q2 q3`.
+#[allow(clippy::too_many_arguments)]
+fn filter_yes(
+    interior: i32,
+    edge: i32,
+    plane: &[u8],
+    p3: usize,
+    p2: usize,
+    p1: usize,
+    p0: usize,
+    q0: usize,
+    q1: usize,
+    q2: usize,
+    q3: usize,
+) -> bool {
+    let d = |a: usize, b: usize| (i32::from(plane[a]) - i32::from(plane[b])).abs();
+    (d(p0, q0) * 2 + d(p1, q1) / 2) <= edge
+        && d(p3, p2) <= interior
+        && d(p2, p1) <= interior
+        && d(p1, p0) <= interior
+        && d(q3, q2) <= interior
+        && d(q2, q1) <= interior
+        && d(q1, q0) <= interior
+}
+
+/// The high-edge-variance test (RFC 6386 §15.3 `hev`): true if either inner difference exceeds the
+/// threshold, which steers the normal filter toward the simpler outer-tap adjustment.
+fn hev(threshold: i32, p1: u8, p0: u8, q0: u8, q1: u8) -> bool {
+    (i32::from(p1) - i32::from(p0)).abs() > threshold
+        || (i32::from(q1) - i32::from(q0)).abs() > threshold
+}
+
+/// The eight segment indices straddling an edge at `idx` with `step` between consecutive pixels
+/// (`1` for a vertical edge, `stride` for a horizontal one): `(p3, p2, p1, p0, q0, q1, q2, q3)`.
+fn segment_indices(
+    idx: usize,
+    step: usize,
+) -> (usize, usize, usize, usize, usize, usize, usize, usize) {
+    (
+        idx - 4 * step,
+        idx - 3 * step,
+        idx - 2 * step,
+        idx - step,
+        idx,
+        idx + step,
+        idx + 2 * step,
+        idx + 3 * step,
+    )
+}
+
+/// Normal inter-subblock filter for one segment (RFC 6386 §15.3 `subblock_filter`): the simple
+/// adjustment, plus a half-strength adjustment of the next pixels in when edge variance is low.
+fn normal_subblock_segment(
+    plane: &mut [u8],
+    idx: usize,
+    step: usize,
+    edge: i32,
+    interior: i32,
+    hev_t: i32,
+) {
+    let (p3, p2, p1, p0, q0, q1, q2, q3) = segment_indices(idx, step);
+    if !filter_yes(interior, edge, plane, p3, p2, p1, p0, q0, q1, q2, q3) {
+        return;
+    }
+    let hv = hev(hev_t, plane[p1], plane[p0], plane[q0], plane[q1]);
+    let a = (common_adjust(hv, plane, p1, p0, q0, q1) + 1) >> 1;
+    if !hv {
+        plane[q1] = s2u(u2s(plane[q1]) - a);
+        plane[p1] = s2u(u2s(plane[p1]) + a);
+    }
+}
+
+/// Normal inter-macroblock filter for one segment (RFC 6386 §15.3 `MBfilter`): a six-tap adjustment
+/// with magnitude decaying away from the edge when variance is low, else the simple adjustment.
+fn normal_mb_segment(
+    plane: &mut [u8],
+    idx: usize,
+    step: usize,
+    edge: i32,
+    interior: i32,
+    hev_t: i32,
+) {
+    let (p3, p2, p1, p0, q0, q1, q2, q3) = segment_indices(idx, step);
+    if !filter_yes(interior, edge, plane, p3, p2, p1, p0, q0, q1, q2, q3) {
+        return;
+    }
+    if hev(hev_t, plane[p1], plane[p0], plane[q0], plane[q1]) {
+        common_adjust(true, plane, p1, p0, q0, q1);
+        return;
+    }
+    let (sp2, sp1, sp0) = (u2s(plane[p2]), u2s(plane[p1]), u2s(plane[p0]));
+    let (sq0, sq1, sq2) = (u2s(plane[q0]), u2s(plane[q1]), u2s(plane[q2]));
+    let w = c(c(sp1 - sq1) + 3 * (sq0 - sp0));
+    let a = c((27 * w + 63) >> 7);
+    plane[q0] = s2u(sq0 - a);
+    plane[p0] = s2u(sp0 + a);
+    let a = c((18 * w + 63) >> 7);
+    plane[q1] = s2u(sq1 - a);
+    plane[p1] = s2u(sp1 + a);
+    let a = c((9 * w + 63) >> 7);
+    plane[q2] = s2u(sq2 - a);
+    plane[p2] = s2u(sp2 + a);
+}
+
+/// The key-frame high-edge-variance threshold from the filter level (RFC 6386 §15.4).
+fn keyframe_hev_threshold(level: u8) -> i32 {
+    if level >= 40 {
+        2
+    } else if level >= 15 {
+        1
+    } else {
+        0
+    }
+}
+
+/// Filters one macroblock of a plane with the normal filter: the left/top inter-macroblock edges
+/// (six-tap) and — where `interior_edges` — the interior subblock edges (four-tap). `size` is 16 for
+/// luma or 8 for chroma; `sub` the interior edge offsets (`[4,8,12]` luma, `[4]` chroma).
+#[allow(clippy::too_many_arguments)]
+fn normal_filter_plane(
+    plane: &mut [u8],
+    stride: usize,
+    px: usize,
+    py: usize,
+    size: usize,
+    sub: &[usize],
+    left: bool,
+    top: bool,
+    interior_edges: bool,
+    mbedge: i32,
+    sub_bedge: i32,
+    interior: i32,
+    hev_t: i32,
+) {
+    if left {
+        for r in 0..size {
+            normal_mb_segment(plane, (py + r) * stride + px, 1, mbedge, interior, hev_t);
+        }
+    }
+    if interior_edges {
+        for &dx in sub {
+            for r in 0..size {
+                normal_subblock_segment(
+                    plane,
+                    (py + r) * stride + px + dx,
+                    1,
+                    sub_bedge,
+                    interior,
+                    hev_t,
+                );
+            }
+        }
+    }
+    if top {
+        for col in 0..size {
+            normal_mb_segment(
+                plane,
+                py * stride + px + col,
+                stride,
+                mbedge,
+                interior,
+                hev_t,
+            );
+        }
+    }
+    if interior_edges {
+        for &dy in sub {
+            for col in 0..size {
+                normal_subblock_segment(
+                    plane,
+                    (py + dy) * stride + px + col,
+                    stride,
+                    sub_bedge,
+                    interior,
+                    hev_t,
+                );
+            }
+        }
+    }
+}
+
+/// Applies the normal loop filter to the macroblock-aligned Y, U, and V planes (RFC 6386 §15.3),
+/// macroblock by macroblock in raster order. Unlike the simple filter this deblocks chroma too. A
+/// zero `level` is a no-op.
+#[allow(clippy::too_many_arguments)]
+pub fn normal_filter(
+    y: &mut [u8],
+    u: &mut [u8],
+    v: &mut [u8],
+    y_stride: usize,
+    c_stride: usize,
+    mb_cols: usize,
+    mb_rows: usize,
+    level: u8,
+    sharpness: u8,
+    filter_interior: &[bool],
+) {
+    if level == 0 {
+        return;
+    }
+    let interior = interior_limit(level, sharpness);
+    let mbedge = (i32::from(level) + 2) * 2 + interior;
+    let sub_bedge = i32::from(level) * 2 + interior;
+    let hev_t = keyframe_hev_threshold(level);
+    for mb_y in 0..mb_rows {
+        for mb_x in 0..mb_cols {
+            let do_interior = filter_interior[mb_y * mb_cols + mb_x];
+            let (left, top) = (mb_x > 0, mb_y > 0);
+            normal_filter_plane(
+                y,
+                y_stride,
+                mb_x * 16,
+                mb_y * 16,
+                16,
+                &[4, 8, 12],
+                left,
+                top,
+                do_interior,
+                mbedge,
+                sub_bedge,
+                interior,
+                hev_t,
+            );
+            normal_filter_plane(
+                u,
+                c_stride,
+                mb_x * 8,
+                mb_y * 8,
+                8,
+                &[4],
+                left,
+                top,
+                do_interior,
+                mbedge,
+                sub_bedge,
+                interior,
+                hev_t,
+            );
+            normal_filter_plane(
+                v,
+                c_stride,
+                mb_x * 8,
+                mb_y * 8,
+                8,
+                &[4],
+                left,
+                top,
+                do_interior,
+                mbedge,
+                sub_bedge,
+                interior,
+                hev_t,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,5 +472,49 @@ mod tests {
         assert_eq!(plane[0], 100, "left interior untouched");
         assert_eq!(plane[31], 120, "right interior untouched");
         assert_eq!(plane[3], 100, "interior subblock edge at x=4 skipped");
+    }
+
+    #[test]
+    fn filter_yes_and_hev_gate_on_the_thresholds() {
+        let smooth = [60u8, 64, 68, 72, 84, 88, 92, 96]; // p3 p2 p1 p0 | q0 q1 q2 q3
+        assert!(filter_yes(100, 1000, &smooth, 0, 1, 2, 3, 4, 5, 6, 7));
+        assert!(
+            !filter_yes(2, 1000, &smooth, 0, 1, 2, 3, 4, 5, 6, 7),
+            "tiny interior limit disables"
+        );
+        assert!(
+            !hev(10, smooth[2], smooth[3], smooth[4], smooth[5]),
+            "gentle ramp is not high-variance"
+        );
+        assert!(
+            hev(10, 50, 100, 110, 160),
+            "a 50-step on one side is high-variance"
+        );
+    }
+
+    #[test]
+    fn normal_mb_filter_adjusts_six_pixels_when_variance_is_low() {
+        // A gentle ramp across the edge (no HEV): the six-tap filter touches p2..q2 but not p3/q3.
+        let mut seg = [60u8, 64, 68, 72, 84, 88, 92, 96];
+        let before = seg;
+        normal_mb_segment(&mut seg, 4, 1, 1000, 100, 10);
+        for i in [1usize, 2, 3, 4, 5, 6] {
+            assert_ne!(seg[i], before[i], "pixel {i} adjusted");
+        }
+        assert_eq!(seg[0], before[0], "p3 untouched");
+        assert_eq!(seg[7], before[7], "q3 untouched");
+    }
+
+    #[test]
+    fn normal_mb_filter_falls_back_to_simple_under_high_variance() {
+        // A 50-step before the edge triggers HEV → only the two-pixel simple adjust runs (p0, q0);
+        // the outer p2/q2 are left untouched.
+        let mut seg = [50u8, 50, 50, 100, 110, 160, 160, 160];
+        let before = seg;
+        normal_mb_segment(&mut seg, 4, 1, 10_000, 10_000, 10);
+        assert_eq!(seg[1], before[1], "p2 untouched under HEV");
+        assert_eq!(seg[6], before[6], "q2 untouched under HEV");
+        assert_ne!(seg[3], before[3], "p0 adjusted");
+        assert_ne!(seg[4], before[4], "q0 adjusted");
     }
 }
