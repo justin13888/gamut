@@ -64,6 +64,23 @@ pub static PARTITION_W64: [[u16; 10]; 4] = [
 /// `Default_Skip_Cdf`, indexed [ctx].
 pub static SKIP: [[u16; 2]; 3] = [[31671, 32768], [16515, 32768], [4576, 32768]];
 
+/// `Default_Palette_Y_Mode_Cdf[PALETTE_BLOCK_SIZE_CONTEXTS][PALETTE_Y_MODE_CONTEXTS]` (§9.4): the
+/// `has_palette_y` flag, indexed by the block-size context (`Mi_W_Log2 + Mi_H_Log2 - 2`) and the
+/// neighbour context (`#{above,left palettes present}`).
+pub static PALETTE_Y_MODE: [[[u16; 2]; 3]; 7] = [
+    [[31676, 32768], [3419, 32768], [1261, 32768]],
+    [[31912, 32768], [2859, 32768], [980, 32768]],
+    [[31823, 32768], [3400, 32768], [781, 32768]],
+    [[32030, 32768], [3561, 32768], [904, 32768]],
+    [[32309, 32768], [7337, 32768], [1462, 32768]],
+    [[32265, 32768], [4015, 32768], [1521, 32768]],
+    [[32450, 32768], [7946, 32768], [129, 32768]],
+];
+
+/// `Default_Palette_Uv_Mode_Cdf[PALETTE_UV_MODE_CONTEXTS]` (§9.4): the `has_palette_uv` flag, indexed
+/// by `(PaletteSizeY > 0)`.
+pub static PALETTE_UV_MODE: [[u16; 2]; 2] = [[32461, 32768], [21488, 32768]];
+
 /// `Default_Intra_Tx_Type_Set2_Cdf[Tx_Size_Sqr(TX_4X4)=0][DC_PRED=0]` (AV1 §9.4). Used to signal the
 /// transform type for a lossy 4×4 luma block, where `reduced_tx_set` ⇒ `TX_SET_INTRA_2`. Symbol
 /// values index `Tx_Type_Intra_Inv_Set2 = {IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`.
