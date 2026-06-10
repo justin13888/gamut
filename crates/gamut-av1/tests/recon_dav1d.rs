@@ -479,3 +479,28 @@ fn delta_lf_match_dav1d() {
         }
     }
 }
+
+#[test]
+fn palette_blocks_match_dav1d() {
+    // Screen-content luma: a small global color set arranged so each 8×8..32×32 block sees 2..=8
+    // distinct values, with flat chroma (U = V = 128 everywhere) so the block is DC-skippable on
+    // chroma. The encoder codes such blocks with luma palette + skip = 1; dav1d decodes the palette,
+    // the wavefront color-index map, and the cached colors back to the encoder reconstruction. This
+    // exercises palette_mode_info (size/colors), the color cache, palette_tokens (the color context),
+    // and predict_palette.
+    // `from_rgb8_identity` maps G → luma, so the variation is in the G channel; R = B = 128 keeps
+    // both chroma planes flat (DC-skippable). The number of distinct luma colors per 32×32 region is
+    // `2 + ((x/32)+(y/32))%7` ∈ 2..=8, so different regions select different palette sizes (exercising
+    // every `Default_Palette_Size_N_Y_Color_Cdf`), and the wavefront index map sees varied contexts.
+    let lut = [20u8, 50, 80, 110, 140, 170, 200, 230];
+    let screen = move |x: u32, y: u32| {
+        let n = 2 + ((x / 32) + (y / 32)) as usize % 7;
+        let idx = ((x / 4) + 2 * (y / 4)) as usize % n;
+        [128, lut[idx], 128]
+    };
+    for &q in &[20u8, 64, 130, 210] {
+        for &(w, h) in &[(64u32, 64u32), (96, 80), (160, 96)] {
+            check(&planes(w, h, screen), q);
+        }
+    }
+}

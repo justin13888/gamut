@@ -123,7 +123,7 @@ not a contract:
 | PAETH | §7.11.2 | ☐ | M1 |
 | recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4 + 8×8 + 16×16 + 32×32) | M1 |
 | chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy 4:4:4 4×4) | M1 |
-| palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ◐ (allow_screen_content_tools=1 + `has_palette` signaling; selection/colors/index map WIP) | M1 |
+| palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ✅ (lossy luma 8×8/16×16/32×32; sizes 2..8; color cache + wavefront index map) | M1 |
 | intra block copy (`allow_intrabc`) | §7.11.x,§5.11.x | ☐ | M1 |
 
 ## E. AV1 — transforms (§7.13)
