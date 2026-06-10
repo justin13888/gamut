@@ -3,10 +3,11 @@
 //!
 //! This is the keystone of the lossy path. Each macroblock is predicted from the **reconstructed**
 //! neighbors in a recon buffer (the encoder predicts exactly as the decoder does), so the encoder's
-//! reconstruction is bit-identical to any conformant decoder's output. The minimal pipeline here codes
-//! every macroblock with `DC_PRED` luma (16×16) and chroma (8×8), a Y2 (luma-DC WHT) block, one token
-//! partition, and no loop filter or skip; later phases add the remaining modes, filters, and header
-//! features. Tracked in `../STATUS.md` section L.
+//! reconstruction is bit-identical to any conformant decoder's output. Whole-block luma 16×16 and
+//! chroma 8×8 prediction supports the DC/V/H/TM modes (the encoder picks the lowest-SAD mode per
+//! macroblock); each macroblock carries a Y2 (luma-DC WHT) block, one token partition, and no loop
+//! filter or skip. Per-4×4 `B_PRED`, loop filters, and the remaining header features land later.
+//! Tracked in `../STATUS.md` section L.
 
 // The macroblock/block math indexes several fixed-size arrays in lock-step (and over partial ranges
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
@@ -19,10 +20,13 @@ use super::bool_coder::{BoolDecoder, BoolEncoder};
 use super::header::{
     self, LoopFilterParams, QuantIndices, Segmentation, UNCOMPRESSED_CHUNK_LEN, Vp8FrameHeader,
 };
-use super::prediction::{self, DC_PRED};
+use super::prediction::{self, B_PRED, DC_PRED, H_PRED, TM_PRED, V_PRED};
 use super::quant::{self, QuantFactors};
 use super::tokens::{self, CoeffProbs};
 use super::transform::{clamp255, fdct4x4, fwht4x4, idct4x4, iwht4x4};
+
+/// The whole-block prediction modes the encoder considers, in signaling order.
+const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
 
 /// Per-macroblock-column entropy context: whether the prior block in each position carried at least
 /// one non-zero coefficient (RFC 6386 §13.3). A single instance also serves as the running "left"
@@ -171,38 +175,151 @@ fn read_block(plane: &[u8], stride: usize, x: usize, y: usize) -> [i16; 16] {
     b
 }
 
-/// Writes `clamp255(pred + residue)` into the 4×4 block at `(x, y)` of `plane`.
-fn write_block(plane: &mut [u8], stride: usize, x: usize, y: usize, pred: u8, residue: &[i16; 16]) {
+/// Extracts the 4×4 sub-block at `(sub_x, sub_y)` of a `stride`-wide prediction block, as 16-bit.
+fn sub_pred(pred: &[u8], stride: usize, sub_x: usize, sub_y: usize) -> [i16; 16] {
+    let mut out = [0i16; 16];
     for r in 0..4 {
         for c in 0..4 {
-            let v = i32::from(pred) + i32::from(residue[r * 4 + c]);
+            out[r * 4 + c] = i16::from(pred[(sub_y + r) * stride + sub_x + c]);
+        }
+    }
+    out
+}
+
+/// Writes `clamp255(pred + residue)` into the 4×4 block at `(x, y)` of `plane`.
+fn write_block(
+    plane: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    pred: &[i16; 16],
+    residue: &[i16; 16],
+) {
+    for r in 0..4 {
+        for c in 0..4 {
+            let v = i32::from(pred[r * 4 + c]) + i32::from(residue[r * 4 + c]);
             plane[(y + r) * stride + x + c] = clamp255(v);
         }
     }
 }
 
-/// The luma DC prediction value for the macroblock at `(mb_x, mb_y)` of `recon`.
-fn luma_dc(recon: &FrameBuffers, mb_x: usize, mb_y: usize) -> u8 {
+/// The above-left corner pixel for prediction: 127 on the top macroblock row, 129 on the left column,
+/// otherwise the reconstructed pixel (RFC 6386 §12.2).
+fn corner_pixel(plane: &[u8], stride: usize, px: usize, py: usize, mb_x: usize, mb_y: usize) -> u8 {
+    if mb_y == 0 {
+        127
+    } else if mb_x == 0 {
+        129
+    } else {
+        plane[(py - 1) * stride + px - 1]
+    }
+}
+
+/// Produces the 16×16 luma prediction for macroblock `(mb_x, mb_y)` under whole-block `mode`.
+fn predict_luma(recon: &FrameBuffers, mb_x: usize, mb_y: usize, mode: usize) -> [u8; 256] {
     let (px, py, stride) = (mb_x * 16, mb_y * 16, recon.y_stride());
     let above = (mb_y > 0).then(|| row_at(&recon.y, stride, px, py - 1, 16));
     let left = (mb_x > 0).then(|| col_at(&recon.y, stride, px - 1, py, 16));
-    prediction::dc_predict(
+    let corner = corner_pixel(&recon.y, stride, px, py, mb_x, mb_y);
+    let mut pred = [0u8; 256];
+    prediction::predict_block(
+        mode,
         16,
         above.as_ref().map(|a| &a[..16]),
         left.as_ref().map(|l| &l[..16]),
-    )
+        corner,
+        &mut pred,
+    );
+    pred
 }
 
-/// The chroma DC prediction value for one plane at `(mb_x, mb_y)`.
-fn chroma_dc(plane: &[u8], stride: usize, mb_x: usize, mb_y: usize) -> u8 {
+/// Produces the 8×8 prediction for one chroma plane under whole-block `mode`.
+fn predict_chroma(plane: &[u8], stride: usize, mb_x: usize, mb_y: usize, mode: usize) -> [u8; 64] {
     let (px, py) = (mb_x * 8, mb_y * 8);
     let above = (mb_y > 0).then(|| row_at(plane, stride, px, py - 1, 8));
     let left = (mb_x > 0).then(|| col_at(plane, stride, px - 1, py, 8));
-    prediction::dc_predict(
+    let corner = corner_pixel(plane, stride, px, py, mb_x, mb_y);
+    let mut pred = [0u8; 64];
+    prediction::predict_block(
+        mode,
         8,
         above.as_ref().map(|a| &a[..8]),
         left.as_ref().map(|l| &l[..8]),
-    )
+        corner,
+        &mut pred,
+    );
+    pred
+}
+
+/// Sum of absolute differences between an `n`×`n` prediction and the source macroblock.
+fn block_sad(pred: &[u8], src: &[u8], stride: usize, mb_x: usize, mb_y: usize, n: usize) -> u32 {
+    let mut sad = 0u32;
+    for r in 0..n {
+        for c in 0..n {
+            let s = i32::from(src[(mb_y * n + r) * stride + mb_x * n + c]);
+            sad += s.abs_diff(i32::from(pred[r * n + c]));
+        }
+    }
+    sad
+}
+
+/// Selects the lowest-SAD whole-block luma mode (a simple proxy; rate-distortion search is issue #32).
+fn select_luma_mode(
+    recon: &FrameBuffers,
+    src: &[u8],
+    stride: usize,
+    mb_x: usize,
+    mb_y: usize,
+) -> usize {
+    let mut best = (DC_PRED, u32::MAX);
+    for mode in WHOLE_BLOCK_MODES {
+        let sad = block_sad(
+            &predict_luma(recon, mb_x, mb_y, mode),
+            src,
+            stride,
+            mb_x,
+            mb_y,
+            16,
+        );
+        if sad < best.1 {
+            best = (mode, sad);
+        }
+    }
+    best.0
+}
+
+/// Selects the lowest-combined-SAD chroma mode (shared by U and V).
+fn select_chroma_mode(
+    recon: &FrameBuffers,
+    src_u: &[u8],
+    src_v: &[u8],
+    stride: usize,
+    mb_x: usize,
+    mb_y: usize,
+) -> usize {
+    let mut best = (DC_PRED, u32::MAX);
+    for mode in WHOLE_BLOCK_MODES {
+        let su = block_sad(
+            &predict_chroma(&recon.u, recon.c_stride(), mb_x, mb_y, mode),
+            src_u,
+            stride,
+            mb_x,
+            mb_y,
+            8,
+        );
+        let sv = block_sad(
+            &predict_chroma(&recon.v, recon.c_stride(), mb_x, mb_y, mode),
+            src_v,
+            stride,
+            mb_x,
+            mb_y,
+            8,
+        );
+        if su + sv < best.1 {
+            best = (mode, su + sv);
+        }
+    }
+    best.0
 }
 
 /// Reconstructs the 16 luma sub-blocks of a macroblock: the Y2 inverse-WHT supplies each sub-block's
@@ -212,7 +329,7 @@ fn reconstruct_luma(
     recon: &mut FrameBuffers,
     mb_x: usize,
     mb_y: usize,
-    pred: u8,
+    pred: &[u8; 256],
     levels: &MbLevels,
     qf: &QuantFactors,
 ) {
@@ -231,8 +348,15 @@ fn reconstruct_luma(
             dq[k] = quant::dequantize(levels.y[i][k], qf.y1_ac);
         }
         let residue = idct4x4(&dq);
-        let (x, y) = (mb_x * 16 + (i % 4) * 4, mb_y * 16 + (i / 4) * 4);
-        write_block(&mut recon.y, stride, x, y, pred, &residue);
+        let (sc, sr) = (i % 4, i / 4);
+        write_block(
+            &mut recon.y,
+            stride,
+            mb_x * 16 + sc * 4,
+            mb_y * 16 + sr * 4,
+            &sub_pred(pred, 16, sc * 4, sr * 4),
+            &residue,
+        );
     }
 }
 
@@ -242,7 +366,7 @@ fn reconstruct_chroma(
     stride: usize,
     mb_x: usize,
     mb_y: usize,
-    pred: u8,
+    pred: &[u8; 64],
     levels: &[[i16; 16]; 4],
     qf: &QuantFactors,
 ) {
@@ -253,28 +377,36 @@ fn reconstruct_chroma(
             dq[k] = quant::dequantize(levels[i][k], qf.uv_ac);
         }
         let residue = idct4x4(&dq);
-        let (x, y) = (mb_x * 8 + (i % 2) * 4, mb_y * 8 + (i / 2) * 4);
-        write_block(plane, stride, x, y, pred, &residue);
+        let (sc, sr) = (i % 2, i / 2);
+        write_block(
+            plane,
+            stride,
+            mb_x * 8 + sc * 4,
+            mb_y * 8 + sr * 4,
+            &sub_pred(pred, 8, sc * 4, sr * 4),
+            &residue,
+        );
     }
 }
 
-/// Transforms + quantizes one luma macroblock against its DC prediction, returning the Y2 and per
+/// Transforms + quantizes one luma macroblock against its prediction, returning the Y2 and per
 /// sub-block AC levels.
 fn quantize_luma(
     src: &[u8],
     stride: usize,
     mb_x: usize,
     mb_y: usize,
-    pred: u8,
+    pred: &[u8; 256],
     qf: &QuantFactors,
     levels: &mut MbLevels,
 ) {
     let mut y_coeffs = [[0i16; 16]; 16];
     let mut y_dc = [0i16; 16];
     for i in 0..16 {
-        let (x, y) = (mb_x * 16 + (i % 4) * 4, mb_y * 16 + (i / 4) * 4);
-        let block = read_block(src, stride, x, y);
-        let residue: [i16; 16] = core::array::from_fn(|k| block[k] - i16::from(pred));
+        let (sc, sr) = (i % 4, i / 4);
+        let block = read_block(src, stride, mb_x * 16 + sc * 4, mb_y * 16 + sr * 4);
+        let p = sub_pred(pred, 16, sc * 4, sr * 4);
+        let residue: [i16; 16] = core::array::from_fn(|k| block[k] - p[k]);
         y_coeffs[i] = fdct4x4(&residue);
         y_dc[i] = y_coeffs[i][0];
     }
@@ -290,20 +422,21 @@ fn quantize_luma(
     }
 }
 
-/// Transforms + quantizes one chroma plane's four sub-blocks against its DC prediction.
+/// Transforms + quantizes one chroma plane's four sub-blocks against its prediction.
 fn quantize_chroma(
     src: &[u8],
     stride: usize,
     mb_x: usize,
     mb_y: usize,
-    pred: u8,
+    pred: &[u8; 64],
     qf: &QuantFactors,
 ) -> [[i16; 16]; 4] {
     let mut levels = [[0i16; 16]; 4];
     for i in 0..4 {
-        let (x, y) = (mb_x * 8 + (i % 2) * 4, mb_y * 8 + (i / 2) * 4);
-        let block = read_block(src, stride, x, y);
-        let residue: [i16; 16] = core::array::from_fn(|k| block[k] - i16::from(pred));
+        let (sc, sr) = (i % 2, i / 2);
+        let block = read_block(src, stride, mb_x * 8 + sc * 4, mb_y * 8 + sr * 4);
+        let p = sub_pred(pred, 8, sc * 4, sr * 4);
+        let residue: [i16; 16] = core::array::from_fn(|k| block[k] - p[k]);
         let coeffs = fdct4x4(&residue);
         levels[i][0] = quant::quantize(coeffs[0], qf.uv_dc);
         for k in 1..16 {
@@ -403,7 +536,6 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
     let qf = QuantFactors::for_frame(&header.quant);
     let mut recon = FrameBuffers::new(yuv.width(), yuv.height());
 
-    // Macroblock-aligned source planes.
     let (yw, yh) = (recon.y_stride(), recon.mb_rows * 16);
     let (cw, ch) = (recon.c_stride(), recon.mb_rows * 8);
     let src_y = pad_plane(yuv.y(), yuv.width() as usize, yuv.height() as usize, yw, yh);
@@ -421,29 +553,31 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
         for mb_x in 0..recon.mb_cols {
-            let y_pred = luma_dc(&recon, mb_x, mb_y);
-            let u_pred = chroma_dc(&recon.u, recon.c_stride(), mb_x, mb_y);
-            let v_pred = chroma_dc(&recon.v, recon.c_stride(), mb_x, mb_y);
+            let y_mode = select_luma_mode(&recon, &src_y, yw, mb_x, mb_y);
+            let uv_mode = select_chroma_mode(&recon, &src_u, &src_v, cw, mb_x, mb_y);
+            let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
+            let u_pred = predict_chroma(&recon.u, recon.c_stride(), mb_x, mb_y, uv_mode);
+            let v_pred = predict_chroma(&recon.v, recon.c_stride(), mb_x, mb_y, uv_mode);
 
             let mut levels = MbLevels::default();
-            quantize_luma(&src_y, yw, mb_x, mb_y, y_pred, &qf, &mut levels);
-            levels.u = quantize_chroma(&src_u, cw, mb_x, mb_y, u_pred, &qf);
-            levels.v = quantize_chroma(&src_v, cw, mb_x, mb_y, v_pred, &qf);
+            quantize_luma(&src_y, yw, mb_x, mb_y, &y_pred, &qf, &mut levels);
+            levels.u = quantize_chroma(&src_u, cw, mb_x, mb_y, &u_pred, &qf);
+            levels.v = quantize_chroma(&src_v, cw, mb_x, mb_y, &v_pred, &qf);
 
-            reconstruct_luma(&mut recon, mb_x, mb_y, y_pred, &levels, &qf);
+            reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
             let cstride = recon.c_stride();
-            reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, u_pred, &levels.u, &qf);
-            reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, v_pred, &levels.v, &qf);
+            reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
+            reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
 
             modes.put_tree(
                 prediction::KF_YMODE_TREE,
                 &prediction::KF_YMODE_PROB,
-                DC_PRED,
+                y_mode,
             );
             modes.put_tree(
                 prediction::KF_UV_MODE_TREE,
                 &prediction::KF_UV_MODE_PROB,
-                DC_PRED,
+                uv_mode,
             );
             encode_mb_tokens(&mut residuals, &mut above[mb_x], &mut left, probs, &levels);
         }
@@ -463,7 +597,7 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] for a malformed stream or [`Error::Unsupported`] for features not
-/// yet implemented (non-DC prediction modes, multiple token partitions, …).
+/// yet implemented (B_PRED, multiple token partitions, …).
 pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let chunk = header::read_uncompressed_chunk(data)?;
     let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
@@ -485,27 +619,23 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
         for mb_x in 0..recon.mb_cols {
-            if modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB) != DC_PRED {
+            let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
+            if y_mode == B_PRED {
                 return Err(Error::Unsupported(
-                    "VP8: non-DC luma mode not yet supported",
+                    "VP8: B_PRED luma mode not yet supported",
                 ));
             }
-            if modes.get_tree(prediction::KF_UV_MODE_TREE, &prediction::KF_UV_MODE_PROB) != DC_PRED
-            {
-                return Err(Error::Unsupported(
-                    "VP8: non-DC chroma mode not yet supported",
-                ));
-            }
-            let y_pred = luma_dc(&recon, mb_x, mb_y);
-            let u_pred = chroma_dc(&recon.u, recon.c_stride(), mb_x, mb_y);
-            let v_pred = chroma_dc(&recon.v, recon.c_stride(), mb_x, mb_y);
+            let uv_mode = modes.get_tree(prediction::KF_UV_MODE_TREE, &prediction::KF_UV_MODE_PROB);
+            let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
+            let u_pred = predict_chroma(&recon.u, recon.c_stride(), mb_x, mb_y, uv_mode);
+            let v_pred = predict_chroma(&recon.v, recon.c_stride(), mb_x, mb_y, uv_mode);
             let levels =
                 decode_mb_tokens(&mut residuals, &mut above[mb_x], &mut left, &coeff_probs);
 
-            reconstruct_luma(&mut recon, mb_x, mb_y, y_pred, &levels, &qf);
+            reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
             let cstride = recon.c_stride();
-            reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, u_pred, &levels.u, &qf);
-            reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, v_pred, &levels.v, &qf);
+            reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
+            reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
         }
     }
     Ok(recon)
@@ -565,7 +695,6 @@ mod tests {
         let yuv = pattern(16, 16);
         let (mut bitstream, _) = encode_frame(&yuv, 40);
         bitstream.truncate(UNCOMPRESSED_CHUNK_LEN + 1);
-        // Decoding must not panic; it either errors or zero-pads, but stays well-defined.
         let _ = decode_frame(&bitstream);
     }
 }
