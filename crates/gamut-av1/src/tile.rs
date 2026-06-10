@@ -177,6 +177,44 @@ fn palette_color_context(
     (order, cdf::PALETTE_COLOR_CONTEXT[hash] as usize)
 }
 
+/// Per-segment `SEG_LVL_ALT_Q` quantizer deltas (§5.9.14): `Some(delta)` enables the feature on that
+/// segment (its block quantizer is `Clip3(0, 255, CurrentQIndex + delta)`), `None` leaves the segment
+/// on the frame quantizer. The header signals this exact table, so encoder and decoder agree. The two
+/// active segments give the spatial `segment_id` prediction real work without `SegIdPreSkip`
+/// (`SEG_LVL_ALT_Q` < `SEG_LVL_REF_FRAME`). `LastActiveSegId` is the highest `Some` index (2 here).
+///
+/// The deltas are **positive** so a segment's quantizer is always `> 0`: a segment whose
+/// `get_qindex` is 0 would be *coded-lossless* (§7.12.2) and require the Walsh–Hadamard path, which
+/// this lossy encoder does not select per-segment.
+pub(crate) const SEG_ALT_Q: [Option<i32>; 8] =
+    [None, Some(20), Some(50), None, None, None, None, None];
+
+/// `LastActiveSegId` (§5.9.14): the highest segment index with an enabled feature.
+const LAST_ACTIVE_SEG: i32 = 2;
+
+/// `neg_interleave(x, ref, max)` — the encoder inverse of the decoder's `neg_deinterleave` (§5.11.9):
+/// maps the segment id `x` to the difference coded relative to the predicted id `ref`.
+fn neg_interleave(x: i32, r: i32, max: i32) -> i32 {
+    if r == 0 {
+        return x;
+    }
+    if r >= max - 1 {
+        return max - x - 1;
+    }
+    let bounded = if 2 * r < max {
+        (x - r).abs() <= r
+    } else {
+        (x - r).abs() < max - r
+    };
+    if bounded {
+        if x <= r { (r - x) * 2 } else { (x - r) * 2 - 1 }
+    } else if 2 * r < max {
+        x
+    } else {
+        max - (x + 1)
+    }
+}
+
 /// The coefficient-CDF quantizer context (§8.3.2) for a quantizer index: `0` if `≤ 20`, `1` if
 /// `≤ 60`, `2` if `≤ 120`, else `3`.
 const fn qctx_for(qindex: i32) -> usize {
@@ -260,6 +298,9 @@ pub(crate) struct FrameEncoder<'a> {
     mi_ymode: Vec<u8>,
     /// The `skip` flag of the block covering each MI cell, for the `skip` context (§8.3.2).
     mi_skip: Vec<u8>,
+    /// `SegmentIds` of the block covering each MI cell (§5.11.9), for the `segment_id` spatial
+    /// prediction and per-segment quantizer.
+    mi_segid: Vec<u8>,
     /// `PaletteSizeY` of the block covering each MI cell (0 = no palette), for the `has_palette_y`
     /// context and `get_palette_cache`.
     mi_psize: Vec<u8>,
@@ -329,6 +370,7 @@ impl<'a> FrameEncoder<'a> {
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_ymode: vec![0; mi_cols * mi_rows],
             mi_skip: vec![0; mi_cols * mi_rows],
+            mi_segid: vec![0; mi_cols * mi_rows],
             mi_psize: vec![0; mi_cols * mi_rows],
             mi_pcolors: vec![[0u8; 8]; mi_cols * mi_rows],
             mi_dlf: vec![0; mi_cols * mi_rows],
@@ -505,6 +547,65 @@ impl<'a> FrameEncoder<'a> {
         self.current_qindex = qindex;
         self.dc_quant = dc_q(8, qindex);
         self.ac_quant = ac_q(8, qindex);
+    }
+
+    /// Sets the active dc/ac quantizers for a block to `get_qindex(segment)` (§7.12.2): the segment's
+    /// `SEG_LVL_ALT_Q` delta is added to `CurrentQIndex` (the delta-Q accumulator, left unchanged), so
+    /// each block can quantize at its own step size.
+    fn apply_seg_quant(&mut self, segid: usize) {
+        let alt = SEG_ALT_Q[segid].unwrap_or(0);
+        let bq = (self.current_qindex + alt).clamp(0, 255);
+        self.dc_quant = dc_q(8, bq);
+        self.ac_quant = ac_q(8, bq);
+    }
+
+    /// `read_segment_id` (§5.11.9) after the skip flag (`SegIdPreSkip = 0`): derives the predicted
+    /// segment id from the above/left/above-left neighbours. A skip block inherits the prediction (no
+    /// bits); otherwise the encoder's deterministic assignment is coded as `neg_interleave` of the id
+    /// relative to the prediction, under `Default_Segment_Id_Cdf[ctx]`. Returns the chosen id.
+    fn signal_segment_id(&mut self, r: usize, c: usize, skip: bool) -> usize {
+        let cols = self.mi_cols;
+        let prev_ul = if r > 0 && c > 0 {
+            i32::from(self.mi_segid[(r - 1) * cols + (c - 1)])
+        } else {
+            -1
+        };
+        let prev_u = if r > 0 {
+            i32::from(self.mi_segid[(r - 1) * cols + c])
+        } else {
+            -1
+        };
+        let prev_l = if c > 0 {
+            i32::from(self.mi_segid[r * cols + (c - 1)])
+        } else {
+            -1
+        };
+        let pred = if prev_u == -1 {
+            prev_l.max(0)
+        } else if prev_l == -1 || prev_ul == prev_u {
+            prev_u
+        } else {
+            prev_l
+        };
+        if skip {
+            return pred as usize; // inherited, no bits
+        }
+        // Deterministic assignment in 0..=LastActiveSegId; spatially varied so the three contexts and
+        // both alt-Q segments are exercised. Any valid assignment reconstructs bit-exactly.
+        let assigned = ((r + c) as i32) % (LAST_ACTIVE_SEG + 1);
+        let ctx = if prev_ul < 0 {
+            0
+        } else if prev_ul == prev_u && prev_ul == prev_l {
+            2
+        } else if prev_ul == prev_u || prev_ul == prev_l || prev_u == prev_l {
+            1
+        } else {
+            0
+        };
+        let diff = neg_interleave(assigned, pred, LAST_ACTIVE_SEG + 1);
+        self.sym.encode_symbol(diff as usize, &cdf::SEGMENT_ID[ctx]);
+
+        assigned as usize
     }
 
     /// `read_delta_qindex` (§5.11.12) for the first block of a superblock: signals a small per-SB
@@ -838,13 +939,26 @@ impl<'a> FrameEncoder<'a> {
 
         let sctx = self.skip_ctx(r, c);
         self.sym.encode_symbol(usize::from(skip), &cdf::SKIP[sctx]);
+        // intra_segment_id / read_segment_id (§5.11.9): with segmentation on, code the block's
+        // segment id right after the skip flag (`SegIdPreSkip = 0`). A skip block inherits the
+        // predicted id with no bits.
+        let segid = if self.qindex > 0 {
+            self.signal_segment_id(r, c, skip)
+        } else {
+            0
+        };
         // read_delta_qindex (§5.11.12): the first coded block of each superblock signals delta_q and
-        // updates the active quantizer; later blocks in the superblock inherit it. (read_cdef and
-        // read_delta_lf code no bits here: cdef_bits = 0 and delta_lf_present = 0.)
+        // updates `CurrentQIndex`; later blocks in the superblock inherit it. (read_cdef codes no bits:
+        // cdef_bits = 0.)
         if self.read_deltas {
             self.signal_delta_q();
             self.signal_delta_lf();
             self.read_deltas = false;
+        }
+        // Per-block quantizer get_qindex(segment) = Clip3(0, 255, CurrentQIndex + alt_q) (§7.12.2):
+        // only the dc/ac step sizes follow the segment; `CurrentQIndex` stays the delta-Q accumulator.
+        if self.qindex > 0 {
+            self.apply_seg_quant(segid);
         }
         let (y_mode, angle_delta, filter_intra) = if palette.is_some() || self.qindex == 0 {
             // Palette requires YMode == DC_PRED (and no filter-intra); lossless also forces DC_PRED.
@@ -994,6 +1108,7 @@ impl<'a> FrameEncoder<'a> {
                     self.mi_skip[rr * self.mi_cols + cc] = u8::from(skip);
                     self.mi_psize[rr * self.mi_cols + cc] = psize;
                     self.mi_pcolors[rr * self.mi_cols + cc] = pcolors;
+                    self.mi_segid[rr * self.mi_cols + cc] = segid as u8;
                     self.mi_dlf[rr * self.mi_cols + cc] = self.current_dlf as i8;
                 }
             }
