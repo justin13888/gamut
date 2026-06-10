@@ -46,9 +46,14 @@ impl WebpDecoder {
                     return Ok(dims);
                 }
                 WebpChunkId::Vp8 => {
-                    return Err(Error::Unsupported(
-                        "WebP VP8 (lossy) decoding not yet implemented",
-                    ));
+                    let recon = crate::vp8::frame::decode_frame(chunk.payload)?;
+                    let yuv = recon.to_yuv420();
+                    let dims = Dimensions {
+                        width: yuv.width(),
+                        height: yuv.height(),
+                    };
+                    out.extend_from_slice(&yuv.to_rgb8());
+                    return Ok(dims);
                 }
                 WebpChunkId::Vp8x => {
                     return Err(Error::Unsupported(
@@ -112,10 +117,11 @@ mod tests {
 
     #[test]
     fn routes_lossy_container_to_vp8() {
+        // A `VP8 ` chunk reaches the VP8 decoder, which rejects this malformed (non-key-frame, 3-byte)
+        // payload rather than panicking.
         let file = write_simple_lossy(&[0x9d, 0x01, 0x2a]);
         let mut out = Vec::new();
-        let err = WebpDecoder::new().decode_to_rgb8(&file, &mut out);
-        assert!(matches!(err, Err(Error::Unsupported(m)) if m.contains("VP8 (lossy)")));
+        assert!(WebpDecoder::new().decode_to_rgb8(&file, &mut out).is_err());
     }
 
     #[test]

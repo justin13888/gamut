@@ -11,6 +11,7 @@
 //! `../STATUS.md` (sections G-N).
 
 pub mod bool_coder;
+pub mod frame;
 pub mod header;
 pub mod loop_filter;
 pub mod prediction;
