@@ -25,3 +25,6 @@ gamut-riff.workspace = true
 [dev-dependencies]
 # libwebp as the differential-test oracle (FFI). Dev-only: the shipped library is C-free.
 libwebp-sys2.workspace = true
+# Used by the lossy oracle tests to build YUV inputs and wrap raw VP8 bitstreams.
+gamut-color.workspace = true
+gamut-riff.workspace = true

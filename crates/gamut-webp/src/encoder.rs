@@ -4,12 +4,21 @@
 //! The lossless **VP8L** path is implemented (see [`crate::vp8l::encoder`]); the lossy **VP8** path
 //! still returns [`Error::Unsupported`].
 
+use gamut_color::Yuv420;
 use gamut_core::{Dimensions, Encoder, Error, Result};
-use gamut_riff::write_simple_lossless;
+use gamut_riff::{write_simple_lossless, write_simple_lossy};
 
 use crate::config::{WebpConfig, WebpMode};
+use crate::vp8::frame::encode_frame;
 use crate::vp8l::encoder::encode as encode_vp8l;
 use crate::vp8l::transform::make_argb;
+
+/// Maps a `0..=100` quality to a VP8 base quantizer index (`0..=127`); higher quality → lower index
+/// (less quantization). This is the keystone's simple mapping; finer rate control is issue #32.
+fn quality_to_quant(quality: u8) -> u8 {
+    let q = u32::from(quality.min(100));
+    ((100 - q) * 127 / 100) as u8
+}
 
 /// Encodes 8-bit RGB images to WebP.
 ///
@@ -84,9 +93,14 @@ impl WebpEncoder {
                 out.extend_from_slice(&file);
                 Ok(written)
             }
-            WebpMode::Lossy => Err(Error::Unsupported(
-                "WebP VP8 (lossy) encoding not yet implemented",
-            )),
+            WebpMode::Lossy => {
+                let yuv = Yuv420::from_rgb8(pixels, dims.width, dims.height)?;
+                let (payload, _recon) = encode_frame(&yuv, quality_to_quant(self.config.quality));
+                let file = write_simple_lossy(&payload);
+                let written = file.len();
+                out.extend_from_slice(&file);
+                Ok(written)
+            }
         }
     }
 }
@@ -145,11 +159,22 @@ mod tests {
     }
 
     #[test]
-    fn lossy_is_unsupported_for_now() {
+    fn lossy_encodes_a_decodable_webp_file() {
+        // Lossy now produces a RIFF/WebP the native decoder reads back to RGB of the right shape (the
+        // pixels are lossy, so only structure is checked here; bit-exactness is the libwebp oracle).
         let mut out = Vec::new();
-        let rgb = vec![0u8; 2 * 3 * 3];
-        let err = WebpEncoder::lossy(80).encode_rgb8(&rgb, dims(2, 3), &mut out);
-        assert!(matches!(err, Err(Error::Unsupported(_))));
+        let rgb = [40u8, 80, 120].repeat(16 * 16);
+        let written = WebpEncoder::lossy(60)
+            .encode_rgb8(&rgb, dims(16, 16), &mut out)
+            .expect("lossy encode");
+        assert_eq!(written, out.len());
+        assert_eq!(&out[0..4], b"RIFF");
+        let mut decoded = Vec::new();
+        let d = crate::WebpDecoder::new()
+            .decode_to_rgb8(&out, &mut decoded)
+            .expect("decode");
+        assert_eq!(d, dims(16, 16));
+        assert_eq!(decoded.len(), 16 * 16 * 3);
     }
 
     #[test]

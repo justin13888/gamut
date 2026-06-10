@@ -157,3 +157,61 @@ fn libwebp_decodes_every_gamut_encoder_path() {
         .collect();
     assert_gamut_encode_libwebp_decode(&many, w, h, "many-color");
 }
+
+/// Builds a structured YUV 4:2:0 image (real residuals to exercise the transforms/tokens).
+fn synthetic_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
+    let (wu, hu) = (w as usize, h as usize);
+    let (cw, ch) = (
+        gamut_color::Yuv420::chroma_width(w) as usize,
+        gamut_color::Yuv420::chroma_height(h) as usize,
+    );
+    let y = (0..wu * hu)
+        .map(|i| ((i * 9 + (i / wu) * 5) & 0xff) as u8)
+        .collect();
+    let u = (0..cw * ch).map(|i| ((i * 3 + 80) & 0xff) as u8).collect();
+    let v = (0..cw * ch).map(|i| ((i * 7 + 150) & 0xff) as u8).collect();
+    gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
+}
+
+#[test]
+fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
+    // A VP8 bitstream decodes to a deterministic integer YUV, so gamut's own decoder and libwebp must
+    // agree bit-for-bit on the same gamut-produced bitstream — the tier-3 conformance gate that pins
+    // the encoder to a spec-valid stream. (gamut additionally checks encoder-recon == its own decoder
+    // in frame.rs; together these need no pixel tolerance.)
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::vp8::frame::{decode_frame, encode_frame};
+
+    for &(w, h) in &[
+        (16u32, 16u32),
+        (32, 32),
+        (17, 9),
+        (64, 48),
+        (80, 16),
+        (33, 49),
+    ] {
+        for &quant_index in &[0u8, 20, 60, 110] {
+            let (payload, _) = encode_frame(&synthetic_yuv(w, h), quant_index);
+            let webp = write_simple_lossy(&payload);
+            let lib = libwebp_decode_yuv(&webp);
+            let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+            assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
+            assert_eq!(
+                gamut.y(),
+                lib.y.as_slice(),
+                "Y mismatch at {w}x{h} q{quant_index}"
+            );
+            assert_eq!(
+                gamut.u(),
+                lib.u.as_slice(),
+                "U mismatch at {w}x{h} q{quant_index}"
+            );
+            assert_eq!(
+                gamut.v(),
+                lib.v.as_slice(),
+                "V mismatch at {w}x{h} q{quant_index}"
+            );
+        }
+    }
+}

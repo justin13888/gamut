@@ -14,6 +14,71 @@
 use std::ffi::{c_int, c_void};
 use std::slice;
 
+/// A YUV 4:2:0 image decoded by libwebp: a full-resolution luma plane and half-resolution chroma.
+pub struct DecodedYuv {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Luma plane, `width * height` bytes, row-major.
+    pub y: Vec<u8>,
+    /// Cb (U) plane, `ceil(width/2) * ceil(height/2)` bytes.
+    pub u: Vec<u8>,
+    /// Cr (V) plane.
+    pub v: Vec<u8>,
+}
+
+/// Decodes a WebP file with libwebp into YUV 4:2:0 planes (cropped to the visible dimensions, with the
+/// libwebp row strides removed). This is the bit-exact comparison surface for the lossy codec: a VP8
+/// bitstream decodes to the same integer YUV in any conformant decoder.
+#[must_use]
+pub fn libwebp_decode_yuv(webp: &[u8]) -> DecodedYuv {
+    let mut width: c_int = 0;
+    let mut height: c_int = 0;
+    let mut u_ptr: *mut u8 = std::ptr::null_mut();
+    let mut v_ptr: *mut u8 = std::ptr::null_mut();
+    let mut stride: c_int = 0;
+    let mut uv_stride: c_int = 0;
+    // SAFETY: `webp` is a valid slice; the out-params receive the dimensions, the U/V plane pointers
+    // (into the single returned allocation), and the row strides. The Y pointer owns the allocation.
+    let y_ptr = unsafe {
+        libwebp_sys::WebPDecodeYUV(
+            webp.as_ptr(),
+            webp.len(),
+            &mut width,
+            &mut height,
+            &mut u_ptr,
+            &mut v_ptr,
+            &mut stride,
+            &mut uv_stride,
+        )
+    };
+    assert!(!y_ptr.is_null(), "libwebp YUV decode failed");
+    let (w, h) = (width as usize, height as usize);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+    // SAFETY: each plane is valid for `rows * stride` bytes; we copy out `pw` per row, discarding pad.
+    let copy_plane = |ptr: *const u8, row_stride: usize, pw: usize, ph: usize| {
+        let mut out = vec![0u8; pw * ph];
+        for row in 0..ph {
+            let src = unsafe { slice::from_raw_parts(ptr.add(row * row_stride), pw) };
+            out[row * pw..row * pw + pw].copy_from_slice(src);
+        }
+        out
+    };
+    let y = copy_plane(y_ptr, stride as usize, w, h);
+    let u = copy_plane(u_ptr, uv_stride as usize, cw, ch);
+    let v = copy_plane(v_ptr, uv_stride as usize, cw, ch);
+    // SAFETY: `y_ptr` is the head of the single libwebp allocation backing all three planes.
+    unsafe { libwebp_sys::WebPFree(y_ptr.cast::<c_void>()) };
+    DecodedYuv {
+        width: width as u32,
+        height: height as u32,
+        y,
+        u,
+        v,
+    }
+}
+
 /// An RGBA image decoded by libwebp: interleaved 8-bit `R,G,B,A` pixels plus dimensions.
 pub struct DecodedRgba {
     /// Image width in pixels.
