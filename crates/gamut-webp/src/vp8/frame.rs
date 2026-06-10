@@ -20,6 +20,7 @@ use super::bool_coder::{BoolDecoder, BoolEncoder};
 use super::header::{
     self, LoopFilterParams, QuantIndices, Segmentation, UNCOMPRESSED_CHUNK_LEN, Vp8FrameHeader,
 };
+use super::loop_filter;
 use super::prediction::{self, B_DC_PRED, B_PRED, DC_PRED, H_PRED, NUM_BMODES, TM_PRED, V_PRED};
 use super::quant::{self, QuantFactors};
 use super::tokens::{self, CoeffProbs};
@@ -113,6 +114,21 @@ impl FrameBuffers {
     }
 }
 
+/// Picks a simple-filter strength from the base quantizer — stronger quantization deblocks harder. A
+/// coarse heuristic (true filter-level selection is part of issue #32); a level of 0 disables it.
+fn simple_filter_level(quant_index: u8) -> u8 {
+    quant_index / 2
+}
+
+/// Whether a macroblock carries any non-zero quantized coefficient — the second half of the
+/// loop-filter interior-edge skip rule (RFC 6386 §15.1).
+fn mb_has_coeffs(levels: &MbLevels) -> bool {
+    levels.y2.iter().any(|&x| x != 0)
+        || levels.y.iter().flatten().any(|&x| x != 0)
+        || levels.u.iter().flatten().any(|&x| x != 0)
+        || levels.v.iter().flatten().any(|&x| x != 0)
+}
+
 /// Builds the minimal key-frame header for the given dimensions and base quantizer index.
 fn frame_header(width: u32, height: u32, quant_index: u8) -> Vp8FrameHeader {
     Vp8FrameHeader {
@@ -125,8 +141,8 @@ fn frame_header(width: u32, height: u32, quant_index: u8) -> Vp8FrameHeader {
         clamp_required: true,
         segmentation: Segmentation::default(),
         loop_filter: LoopFilterParams {
-            simple: false,
-            level: 0,
+            simple: true,
+            level: simple_filter_level(quant_index),
             sharpness: 0,
         },
         token_partitions: 1,
@@ -796,6 +812,7 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
 
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
     let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
+    let mut filter_interior = vec![false; recon.mb_cols * recon.mb_rows];
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
         let mut left_bmodes = [B_DC_PRED; 4];
@@ -852,6 +869,7 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
             reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
             reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
 
+            filter_interior[mb_y * recon.mb_cols + mb_x] = use_bpred || mb_has_coeffs(&levels);
             encode_mb_tokens(
                 &mut residuals,
                 &mut above[mb_x],
@@ -864,6 +882,17 @@ pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
             (above_bmodes[mb_x], left_bmodes) = bmode_propagation(use_bpred, wb_mode, &sub_modes);
         }
     }
+
+    let (stride, mbc, mbr) = (recon.y_stride(), recon.mb_cols, recon.mb_rows);
+    loop_filter::simple_filter_luma(
+        &mut recon.y,
+        stride,
+        mbc,
+        mbr,
+        header.loop_filter.level,
+        header.loop_filter.sharpness,
+        &filter_interior,
+    );
 
     let part0 = modes.finish();
     let part1 = residuals.finish();
@@ -893,12 +922,18 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
             "VP8: multiple token partitions not yet supported",
         ));
     }
+    if head.loop_filter.level > 0 && !head.loop_filter.simple {
+        return Err(Error::Unsupported(
+            "VP8: normal loop filter not yet supported",
+        ));
+    }
     let qf = QuantFactors::for_frame(&head.quant);
     let mut residuals = BoolDecoder::new(&data[part0_end..]);
     let mut recon = FrameBuffers::new(u32::from(chunk.width), u32::from(chunk.height));
 
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
     let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
+    let mut filter_interior = vec![false; recon.mb_cols * recon.mb_rows];
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
         let mut left_bmodes = [B_DC_PRED; 4];
@@ -939,6 +974,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
                 );
                 reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
                 reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
+                filter_interior[mb_y * recon.mb_cols + mb_x] = true; // B_PRED always filters interiors
             } else {
                 let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
                 let levels =
@@ -946,11 +982,23 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
                 reconstruct_luma(&mut recon, mb_x, mb_y, &y_pred, &levels, &qf);
                 reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
                 reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
+                filter_interior[mb_y * recon.mb_cols + mb_x] = mb_has_coeffs(&levels);
             }
 
             (above_bmodes[mb_x], left_bmodes) = bmode_propagation(is_bpred, y_mode, &sub_modes);
         }
     }
+
+    let (stride, mbc, mbr) = (recon.y_stride(), recon.mb_cols, recon.mb_rows);
+    loop_filter::simple_filter_luma(
+        &mut recon.y,
+        stride,
+        mbc,
+        mbr,
+        head.loop_filter.level,
+        head.loop_filter.sharpness,
+        &filter_interior,
+    );
     Ok(recon)
 }
 
