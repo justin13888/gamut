@@ -459,3 +459,23 @@ fn skip_blocks_match_dav1d() {
         }
     }
 }
+
+#[test]
+fn delta_lf_match_dav1d() {
+    // delta_lf_present: each superblock's first block signals a per-SB delta_lf, so the deblocking
+    // loop-filter level varies across superblocks (loop_filter_level + accumulated DeltaLF, per
+    // §7.14.4). Structured content gives the deblock real work; multi-superblock sizes (> 64 px)
+    // exercise several distinct per-SB levels. Byte-equality with dav1d validates the per-edge level
+    // (taken from the q0-side block) and the DeltaLF accumulation.
+    let edged = |x: u32, y: u32| {
+        let bar = if (x / 3).is_multiple_of(2) { 70 } else { 190 } as u8;
+        let ramp = ((x.wrapping_add(y).wrapping_mul(11)) % 256) as u8;
+        let band = if (y / 4).is_multiple_of(2) { 60 } else { 200 } as u8;
+        [bar, ramp, band]
+    };
+    for &q in &[24u8, 64, 128, 220] {
+        for &(w, h) in &[(96u32, 96u32), (160, 96), (128, 128)] {
+            check(&planes(w, h, edged), q);
+        }
+    }
+}

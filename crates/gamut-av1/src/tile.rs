@@ -166,6 +166,8 @@ pub(crate) struct FrameEncoder<'a> {
     ac_quant: i32,
     /// `CurrentQIndex` (§7.12.2): `base_q_idx` plus the accumulated per-superblock `delta_q`.
     current_qindex: i32,
+    /// `CurrentDeltaLF` (§7.14.4): the accumulated per-superblock loop-filter-level delta.
+    current_dlf: i32,
     /// Whether `delta_q_present` (lossy path); when set, the first block of each superblock signals a
     /// `delta_q` and `read_deltas` gates it.
     delta_q_present: bool,
@@ -183,6 +185,9 @@ pub(crate) struct FrameEncoder<'a> {
     mi_ymode: Vec<u8>,
     /// The `skip` flag of the block covering each MI cell, for the `skip` context (§8.3.2).
     mi_skip: Vec<u8>,
+    /// `DeltaLF` (loop-filter-level delta) of the block covering each MI cell (§7.14.4), consumed by
+    /// the deblocking filter to vary the level per superblock.
+    mi_dlf: Vec<i8>,
     /// `Tx_Width_Log2` of the transform covering each MI cell (`2` for 4×4, `3` for 8×8), consumed by
     /// the deblocking loop filter to locate transform edges and pick the filter size.
     tx_log2: Vec<u8>,
@@ -231,6 +236,7 @@ impl<'a> FrameEncoder<'a> {
             dc_quant: dc_q(8, i32::from(qindex)),
             ac_quant: ac_q(8, i32::from(qindex)),
             current_qindex: i32::from(qindex),
+            current_dlf: 0,
             delta_q_present: qindex > 0,
             read_deltas: false,
             recon,
@@ -242,6 +248,7 @@ impl<'a> FrameEncoder<'a> {
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_ymode: vec![0; mi_cols * mi_rows],
             mi_skip: vec![0; mi_cols * mi_rows],
+            mi_dlf: vec![0; mi_cols * mi_rows],
             tx_log2: vec![2; mi_cols * mi_rows],
             sb_r: 0,
             sb_c: 0,
@@ -307,6 +314,7 @@ impl<'a> FrameEncoder<'a> {
                 self.height,
                 &self.tx_log2,
                 &self.mi_bsl,
+                &self.mi_dlf,
                 self.qindex,
             );
             // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15).
@@ -431,6 +439,28 @@ impl<'a> FrameEncoder<'a> {
         self.set_quant(nq);
     }
 
+    /// `read_delta_lf` (§5.11.13, `delta_lf_multi = 0`) for the first block of a superblock: signals a
+    /// small per-SB `delta_lf` (magnitude under `Default_Delta_Lf_Cdf`, then a sign bit when non-zero)
+    /// and updates `CurrentDeltaLF = Clip3(-MAX_LOOP_FILTER, MAX_LOOP_FILTER, CurrentDeltaLF + delta)`.
+    /// The delta is a non-negative `{0, 1}` placeholder (so the per-superblock loop-filter level only
+    /// rises above the frame level — `loop_filter_level + DeltaLF` stays positive and the p-side-level
+    /// fallback for a zero level is never needed). When the frame level is 0 the delta is forced to 0
+    /// (the deblock stays disabled). Magnitude ≤ 2 ⇒ the `DELTA_LF_SMALL` escape is never coded.
+    fn signal_delta_lf(&mut self) {
+        let lf = i32::from(crate::filter::deblock_level(self.qindex));
+        let delta: i32 = if lf == 0 {
+            0
+        } else {
+            (self.sb_r / 16 + self.sb_c / 16) as i32 % 2
+        };
+        let abs = delta.unsigned_abs() as usize;
+        self.sym.encode_symbol(abs, &cdf::DELTA_LF);
+        if abs > 0 {
+            self.sym.encode_literal(u32::from(delta < 0), 1); // delta_lf_sign_bit
+        }
+        self.current_dlf = (self.current_dlf + delta).clamp(-63, 63);
+    }
+
     /// Context for the `skip` flag (§8.3.2): `aboveSkip + leftSkip` from the per-MI `mi_skip` map.
     fn skip_ctx(&self, r: usize, c: usize) -> usize {
         let above = r > 0 && self.mi_skip[(r - 1) * self.mi_cols + c] != 0;
@@ -531,6 +561,7 @@ impl<'a> FrameEncoder<'a> {
         // read_delta_lf code no bits here: cdef_bits = 0 and delta_lf_present = 0.)
         if self.read_deltas {
             self.signal_delta_q();
+            self.signal_delta_lf();
             self.read_deltas = false;
         }
         let (y_mode, angle_delta, filter_intra) = if self.qindex == 0 {
@@ -633,6 +664,7 @@ impl<'a> FrameEncoder<'a> {
                     self.mi_ymode[rr * self.mi_cols + cc] = y_mode;
                     self.tx_log2[rr * self.mi_cols + cc] = txl;
                     self.mi_skip[rr * self.mi_cols + cc] = u8::from(skip);
+                    self.mi_dlf[rr * self.mi_cols + cc] = self.current_dlf as i8;
                 }
             }
         }
