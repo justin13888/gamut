@@ -4,6 +4,7 @@
 //! and lossy **VP8** bitstreams are decoded natively; an extended **VP8X** file is parsed and its
 //! inner bitstream decoded (its `ALPH` alpha chunk is applied in a later milestone).
 
+use gamut_color::Bt601Range;
 use gamut_core::{Decoder, Dimensions, Error, Result};
 use gamut_riff::{RiffReader, WebpChunkId};
 
@@ -53,7 +54,8 @@ impl WebpDecoder {
                         width: yuv.width(),
                         height: yuv.height(),
                     };
-                    out.extend_from_slice(&yuv.to_rgb8());
+                    // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
+                    out.extend_from_slice(&yuv.to_rgb8(Bt601Range::Limited));
                     return Ok(dims);
                 }
                 WebpChunkId::Vp8x => {
@@ -104,7 +106,7 @@ impl WebpDecoder {
                         Some(payload) => alpha::read_alph(payload, w, h)?,
                         None => vec![0xffu8; w * h],
                     };
-                    let rgb = yuv.to_rgb8();
+                    let rgb = yuv.to_rgb8(Bt601Range::Limited);
                     out.reserve(w * h * 4);
                     for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
                         out.extend_from_slice(&[px[0], px[1], px[2], a]);

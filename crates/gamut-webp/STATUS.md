@@ -252,7 +252,7 @@ Owner: [`gamut-color`](../gamut-color). VP8L is RGB-native (no YCbCr); VP8 needs
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | VP8L: 8-bit RGB / ARGB, identity (no color conversion) | — | ✅ | M0 |
-| VP8: BT.601 RGB↔YCbCr + 4:2:0 chroma subsample/upsample (**new** module) | RFC 6386 §14.2; Google *WebP Container* (BT.601) | ✅ | M2 |
+| VP8: **limited-range** BT.601 RGB↔YCbCr + 4:2:0 chroma subsample/upsample (**new** module) | RFC 6386 §14.2; Google *WebP Container* (BT.601) | ✅ | M2 |
 | alpha-channel plane handling | §2.7.1 (Alpha) | ✅ | M3 |
 
 ---
