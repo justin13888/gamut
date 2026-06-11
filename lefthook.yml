@@ -1,3 +1,10 @@
+# Reject non-conventional commit messages (policy in .convco). `--from-stdin` reads the
+# message being committed; `--strip` drops git's comment/whitespace lines first.
+commit-msg:
+  commands:
+    conventional:
+      run: convco check --from-stdin --strip < {1}
+
 pre-commit:
   piped: true
   commands:
@@ -14,6 +21,10 @@ pre-commit:
 
 pre-push:
   commands:
+    conventional:
+      # Check only this branch's commits (since it diverged from origin/master);
+      # the merge-base excludes master's own (possibly non-conventional) history.
+      run: convco check "$(git merge-base origin/master HEAD)..HEAD"
     format-check:
       run: cargo fmt --all --check
     lint-check:
