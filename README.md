@@ -53,6 +53,10 @@ implementation wins.
   `references/`, the code is something you can actually audit, fork, and experiment with —
   not decades of accreted platform `#ifdef`s and inline assembly.
 
+### Author's Remarks
+
+In 2026, `gamut` started when there were no robust, well-tested Rust implementations of various image and color primitives. We want this to be the de-facto, permissivel-licensed choice for most color and image needs, primarily for professional use cases. Implementing this ecosystem of libraries (crates) without commercial backing is also made possible when image formats are spec-driven and LLM agents sufficiently speed up work (when used correctly).
+
 ### Scope
 
 The initial focus is **AVIF, WebP, and JPEG** — the formats with the best
