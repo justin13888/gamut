@@ -84,7 +84,7 @@ not a contract:
 | `disable_cdf_update`=1 (static CDFs) | §5.9.2 | ✅ | M0 |
 | `disable_cdf_update`=0 + frame-end CDF update | §5.9.2,§7.7 | ☐ | M1 |
 | frame_size / render_size (no override, no superres) | §5.9.5/.6 | ✅ | M0 |
-| frame_size_override + superres upscaling | §5.9.7/.8,§7.16 | ☐ | M1 |
+| superres_params (enable_superres + use_superres + coded_denom) | §5.9.8,§7.16 | ✅ (frame_size_override deferred) | M1 |
 | tile_info: single tile | §5.9.15 | ✅ | M0 |
 | multi-tile (uniform spacing, tile_size_bytes, context_update_tile_id, tile group) | §5.9.15/.16 | ✅ (2 cols ≥2 SB wide; rows deferred) | M1 |
 | quantization: base_q_idx=0 ⇒ CodedLossless | §5.9.12 | ✅ | M0 |
@@ -170,7 +170,7 @@ not a contract:
 | deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8/16×16, narrow + wide + widest) | M1 |
 | CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy 4:4:4) | M1 |
 | loop restoration: Wiener (luma) + stripe boundaries + per-SB unit signaling | §5.9.20,§7.17 | ✅ (Wiener luma; self-guided/chroma deferred) | M1 |
-| superres horizontal upscaling | §5.9.8,§7.16 | ☐ | M1 |
+| superres horizontal upscaling (8-tap polyphase, LR after upscale) | §5.9.8,§7.16 | ✅ (opt-in via `encode_still_intra_superres`) | M1 |
 | film grain synthesis | §5.9.30,§7.18.3 | ☐ | M4 |
 
 ## I. AV1 — inter coding (image sequences `avis` only; AVIF still image is intra-only)
