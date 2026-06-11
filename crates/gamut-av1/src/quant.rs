@@ -12,6 +12,7 @@
 
 mod tables;
 
+use gamut_dsp::round_div_nearest;
 use tables::{AC_QLOOKUP, DC_QLOOKUP};
 
 /// Map a bit depth (8, 10, or 12) to the quantizer-table row index `(BitDepth - 8) >> 1`.
@@ -71,12 +72,7 @@ pub fn dequant(level: i32, q: i32, dq_denom: i32, bit_depth: u32) -> i32 {
 #[must_use]
 pub fn quantize(coeff: i32, q: i32) -> i32 {
     assert!(q > 0, "quantize: q must be positive");
-    let half = q / 2;
-    if coeff >= 0 {
-        (coeff + half) / q
-    } else {
-        -((-coeff + half) / q)
-    }
+    round_div_nearest(coeff, q)
 }
 
 #[cfg(test)]

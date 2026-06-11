@@ -14,7 +14,8 @@
 //! [`TxType::flip_lr`].
 
 use gamut_dsp::{
-    forward_adst, forward_dct, forward_identity, inverse_adst, inverse_dct, inverse_identity,
+    clip3, forward_adst, forward_dct, forward_identity, inverse_adst, inverse_dct,
+    inverse_identity, round2,
 };
 
 /// The 19 AV1 transform sizes (`TX_SIZES_ALL`), in spec order.
@@ -183,14 +184,6 @@ fn forward_1d(kind: Tx1d, t: &mut [i64], n: u32) {
         Tx1d::Adst => forward_adst(t, n),
         Tx1d::Identity => forward_identity(t, n),
     }
-}
-
-fn round2(x: i64, n: u32) -> i64 {
-    if n == 0 { x } else { (x + (1 << (n - 1))) >> n }
-}
-
-fn clip3(low: i64, high: i64, x: i64) -> i64 {
-    x.clamp(low, high)
 }
 
 /// 2-D inverse transform (AV1 §7.13.3). `dequant` is the row-major `h × w` array of dequantized
