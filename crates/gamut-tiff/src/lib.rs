@@ -12,10 +12,11 @@
 //! is implemented clean-slate from the TIFF 6.0 specification (`references/tiff/tiff6.pdf`,
 //! Adobe/Aldus, Final — June 3 1992) rather than wrapping libtiff.
 //!
-//! Implementation in progress (see issue #107). The container layer — the byte-order header, the
-//! IFD/tag model, and the reader/writer that (de)serialise it — is in place ([`ifd`], [`reader`],
-//! [`writer`], [`tags`]); the image codecs and the [`gamut_core::Encoder`]/[`gamut_core::Decoder`]
-//! pixel paths land in subsequent phases.
+//! Implementation in progress (see issue #107). The container layer ([`ifd`], [`reader`],
+//! [`writer`], [`tags`]) and the uncompressed baseline pixel path are in place: [`TiffEncoder`]
+//! writes 8-bit grayscale and RGB strips and [`TiffDecoder`] reads them back (both implement the
+//! [`gamut_core::Encoder`]/[`gamut_core::Decoder`] traits). Compression schemes and the remaining
+//! colour modes land in subsequent phases.
 #![forbid(unsafe_code)]
 
 pub mod compression;
@@ -30,4 +31,4 @@ pub use decoder::TiffDecoder;
 pub use encoder::TiffEncoder;
 pub use ifd::{ByteOrder, Field, FieldType, Ifd, PhotometricInterpretation, Predictor, Value};
 pub use reader::{TiffFile, read};
-pub use writer::write;
+pub use writer::{write, write_image};

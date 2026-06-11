@@ -89,6 +89,52 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
     out
 }
 
+/// Serialises a single-IFD TIFF image: the supplied directory plus its strip data.
+///
+/// `StripByteCounts` is set from the strip lengths and `StripOffsets` from where the strips land —
+/// contiguously after the header, the IFD, and its value pool. The caller supplies the rest of the
+/// directory (dimensions, photometric, compression, …). The strips are written verbatim, so the
+/// caller is responsible for any per-strip compression.
+#[must_use]
+pub fn write_image(order: ByteOrder, ifd: &Ifd, strips: &[Vec<u8>]) -> Vec<u8> {
+    use crate::ifd::Value;
+    use crate::tags;
+
+    let counts: Vec<u32> = strips.iter().map(|s| s.len() as u32).collect();
+    let mut ifd = ifd.clone();
+    ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(counts));
+    // A correctly-sized placeholder so the directory layout (and thus the strip base) is final;
+    // the StripOffsets *content* does not affect the layout, only its values do.
+    ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0; strips.len()]));
+
+    // Writing the directory alone yields exactly the header + IFD + value pool, so its length is
+    // where the strip data begins (rounded up to a word boundary).
+    let base = even(
+        write(&TiffFile {
+            order,
+            ifds: vec![ifd.clone()],
+        })
+        .len(),
+    );
+    let mut offsets = Vec::with_capacity(strips.len());
+    let mut cursor = base;
+    for s in strips {
+        offsets.push(cursor as u32);
+        cursor += s.len();
+    }
+    ifd.set(tags::STRIP_OFFSETS, Value::Long(offsets));
+
+    let mut out = write(&TiffFile {
+        order,
+        ifds: vec![ifd],
+    });
+    out.resize(base, 0); // pad to the even strip base (a no-op unless the value pool ended odd)
+    for s in strips {
+        out.extend_from_slice(s);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
