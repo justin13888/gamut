@@ -6,7 +6,7 @@ members = ["crates/*"]
 # `cargo build` of the shipped crates never needs a C toolchain — they are pulled in
 # only as path `dev-dependencies` when building the cross-check tests. See their
 # manifests under `tooling/`.
-exclude = ["tooling/dav1d-oracle", "tooling/libavif-oracle"]
+exclude = ["tooling/dav1d-oracle", "tooling/libavif-oracle", "tooling/libtiff-oracle"]
 
 [workspace.package]
 # No shared `version`: each crate is versioned independently (see README "Versioning").

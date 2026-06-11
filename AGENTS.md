@@ -51,9 +51,9 @@ just mutants         # mutation testing (run `mise install` once; heavier — ne
 just check-commits   # commit messages are Conventional Commits
 ```
 
-The shipped crates are pure Rust, but the decoder cross-check tests link reference decoders
-(dav1d, libavif) built from the `third_party/` git submodules via the dev-only oracle crates in
-`tooling/`. Running the tests therefore needs the submodules checked out
+The shipped crates are pure Rust, but the decoder cross-check tests link reference codecs
+(dav1d, libavif, libtiff) built from the `third_party/` git submodules via the dev-only oracle
+crates in `tooling/`. Running the tests therefore needs the submodules checked out
 (`git submodule update --init --recursive`) and the build tools on `PATH` — CMake/Ninja/Meson
 come from mise; nasm and pkg-config are system packages (`apt-get install nasm pkg-config`).
 No system-installed decoder binaries are used.
