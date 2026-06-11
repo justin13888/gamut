@@ -4,17 +4,11 @@
 ///
 /// This is the single home for the `clip_pixel` / `clamp255` operation every codec performs when
 /// writing a reconstructed sample (prediction + residual, loop-filter output, color conversion)
-/// back to an 8-bit plane. It is a `const fn` using explicit branches rather than [`Ord::clamp`]
-/// so it can be used in `const` contexts and stays friendly to later branchless/SIMD tuning.
+/// back to an 8-bit plane — one definition for later branchless/SIMD tuning. The `as u8` cast is
+/// lossless because [`Ord::clamp`] has already constrained the value to `0..=255`.
 #[must_use]
-pub const fn clip_pixel8(x: i32) -> u8 {
-    if x < 0 {
-        0
-    } else if x > 255 {
-        255
-    } else {
-        x as u8
-    }
+pub fn clip_pixel8(x: i32) -> u8 {
+    x.clamp(0, 255) as u8
 }
 
 #[cfg(test)]
