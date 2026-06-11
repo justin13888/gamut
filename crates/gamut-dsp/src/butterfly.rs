@@ -14,6 +14,8 @@
 //! `T` is held in `i64`: an 8-bit coefficient (≤ `2^16` after dequant) times `cos128` (≤ `2^12`)
 //! stays far below the `i64` range, so the only saturation is the explicit `Clip3` inside [`h`].
 
+use crate::math::{clip3, round2};
+
 /// `Cos128_Lookup` (AV1 §7.13.2.1): `round(4096 * cos(i * pi / 128))` for `i = 0..=64`.
 pub(crate) const COS128_LOOKUP: [i64; 65] = [
     4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017, 3996, 3973, 3948, 3920, 3889, 3857, 3822,
@@ -39,16 +41,6 @@ pub(crate) fn cos128(angle: i32) -> i64 {
 /// `sin128(angle)` (AV1 §7.13.2.1), defined as `cos128(angle - 64)`.
 pub(crate) fn sin128(angle: i32) -> i64 {
     cos128(angle - 64)
-}
-
-/// `Round2(x, n)` (AV1 §4.7): rounding right shift, `x` for `n == 0` (arithmetic `>>`, ties up).
-pub(crate) fn round2(x: i64, n: u32) -> i64 {
-    if n == 0 { x } else { (x + (1 << (n - 1))) >> n }
-}
-
-/// `Clip3(low, high, x)` (AV1 §4.7): clamp `x` to the inclusive range `[low, high]`.
-pub(crate) fn clip3(low: i64, high: i64, x: i64) -> i64 {
-    x.clamp(low, high)
 }
 
 /// `brev(num_bits, x)` (AV1 §7.13.2.1): reverse the low `num_bits` bits of `x`.
@@ -110,15 +102,6 @@ mod tests {
             let want = (4096.0 * (f64::from(angle) * std::f64::consts::PI / 128.0).sin()).round();
             assert_eq!(sin128(angle), want as i64, "sin128({angle})");
         }
-    }
-
-    #[test]
-    fn round2_matches_definition() {
-        assert_eq!(round2(7, 0), 7);
-        assert_eq!(round2(7, 1), 4); // (7 + 1) >> 1
-        assert_eq!(round2(-1, 1), 0); // (-1 + 1) >> 1, ties toward +inf
-        assert_eq!(round2(-3, 1), -1); // (-3 + 1) >> 1 = -1
-        assert_eq!(round2(8, 2), 2); // (8 + 2) >> 2 = 2
     }
 
     #[test]

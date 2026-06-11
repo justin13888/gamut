@@ -24,7 +24,8 @@
 //! FLIPADST is not a separate transform: it is the ADST applied to a flipped sample order, so the
 //! flip ([`flip_in_place`]) is bookkeeping handled by the 2-D assembly, sharing this 1-D ADST.
 
-use crate::butterfly::{b, h, round2};
+use crate::butterfly::{b, h};
+use crate::math::round2;
 
 const SINPI_1_9: i64 = 1321;
 const SINPI_2_9: i64 = 2482;

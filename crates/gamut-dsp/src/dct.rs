@@ -12,7 +12,8 @@
 //! rate-distortion layer. The per-pass normalization shifts that make the 2-D round trip unit-gain
 //! live in the 2-D process (AV1 §7.13.3), implemented separately.
 
-use crate::butterfly::{b, brev, cos128, h, round2};
+use crate::butterfly::{b, brev, cos128, h};
+use crate::math::round2;
 
 /// In-place 1-D inverse DCT of the length-`2^n` array `t` (`2 ≤ n ≤ 6`), per AV1 §7.13.2.3.
 ///

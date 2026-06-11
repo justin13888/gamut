@@ -9,7 +9,7 @@
 //! every size, the forward rounds (an inherent, small loss reconciled with the 2-D shifts in AV1
 //! §7.13.3).
 
-use crate::butterfly::round2;
+use crate::math::round2;
 
 /// In-place 1-D inverse identity transform of the length-`2^n` array `t` (`2 ≤ n ≤ 5`), per
 /// AV1 §7.13.2.15.
