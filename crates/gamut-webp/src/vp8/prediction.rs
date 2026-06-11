@@ -7,8 +7,9 @@
 //! [`LumaMode`] / [`SubBlockMode`] / [`ChromaMode`] enums name the full mode space; the `*_PRED` and
 //! `B_*_PRED` constants are the same values as the tree-leaf indices for the coders.
 
+use gamut_color::clip_pixel8;
+
 use super::bool_coder::{Prob, Tree};
-use super::transform::clamp255;
 
 /// Luma 16×16 prediction mode (RFC 6386 §11.2, §12.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +150,7 @@ pub fn predict_block(
             let p = i32::from(corner);
             for r in 0..n {
                 for c in 0..n {
-                    out[r * n + c] = clamp255(i32::from(l[r]) + i32::from(a[c]) - p);
+                    out[r * n + c] = clip_pixel8(i32::from(l[r]) + i32::from(a[c]) - p);
                 }
             }
         }
@@ -253,7 +254,7 @@ pub fn subblock_predict(mode: usize, above: &[u8; 8], left: &[u8; 4], corner: u8
         B_TM_PRED => {
             for r in 0..4 {
                 for c in 0..4 {
-                    set(r, c, clamp255(lx[r + 1] + ax[c + 1] - i32::from(corner)));
+                    set(r, c, clip_pixel8(lx[r + 1] + ax[c + 1] - i32::from(corner)));
                 }
             }
         }
@@ -576,7 +577,7 @@ mod tests {
 
     #[test]
     fn truemotion_propagates_from_the_corner() {
-        // X[r][c] = clamp255(L[r] + A[c] - P).
+        // X[r][c] = clip_pixel8(L[r] + A[c] - P).
         let above = [10u8, 20, 30, 40];
         let left = [100u8, 110, 120, 130];
         let p = 50i32;
@@ -584,7 +585,7 @@ mod tests {
         predict_block(TM_PRED, 4, Some(&above), Some(&left), p as u8, &mut out);
         for r in 0..4 {
             for c in 0..4 {
-                let expect = (i32::from(left[r]) + i32::from(above[c]) - p).clamp(0, 255) as u8;
+                let expect = clip_pixel8(i32::from(left[r]) + i32::from(above[c]) - p);
                 assert_eq!(out[r * 4 + c], expect, "TM at ({r},{c})");
             }
         }
@@ -622,7 +623,7 @@ mod tests {
         let out = subblock_predict(B_TM_PRED, &a, &l, p);
         for r in 0..4 {
             for c in 0..4 {
-                let want = (i32::from(l[r]) + i32::from(a[c]) - i32::from(p)).clamp(0, 255) as u8;
+                let want = clip_pixel8(i32::from(l[r]) + i32::from(a[c]) - i32::from(p));
                 assert_eq!(out[r * 4 + c], want, "TM at ({r},{c})");
             }
         }

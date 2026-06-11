@@ -6,6 +6,8 @@
 //! lands with the encoder (issue #22 commit series); the inverse application here is what the
 //! decoder runs, last-read transform first.
 
+use gamut_color::clip_pixel8;
+
 use crate::vp8l::div_round_up;
 
 /// Transform type code for the 2-bit on-the-wire tag: spatial predictor (RFC 9649 §4.1).
@@ -173,17 +175,6 @@ fn average2(a: u32, b: u32) -> u32 {
     )
 }
 
-#[inline]
-const fn clamp_u8(v: i32) -> u8 {
-    if v < 0 {
-        0
-    } else if v > 255 {
-        255
-    } else {
-        v as u8
-    }
-}
-
 /// The `Select` predictor: returns whichever of `l`/`t` is closer (Manhattan) to `l + t - tl`.
 fn select(l: u32, t: u32, tl: u32) -> u32 {
     let pred = |cl: u8, ct: u8, ctl: u8| i32::from(cl) + i32::from(ct) - i32::from(ctl);
@@ -206,7 +197,7 @@ fn select(l: u32, t: u32, tl: u32) -> u32 {
 
 #[inline]
 fn clamp_add_subtract_full(a: u32, b: u32, c: u32) -> u32 {
-    let f = |ca: u8, cb: u8, cc: u8| clamp_u8(i32::from(ca) + i32::from(cb) - i32::from(cc));
+    let f = |ca: u8, cb: u8, cc: u8| clip_pixel8(i32::from(ca) + i32::from(cb) - i32::from(cc));
     make_argb(
         f(alpha(a), alpha(b), alpha(c)),
         f(red(a), red(b), red(c)),
@@ -219,7 +210,7 @@ fn clamp_add_subtract_full(a: u32, b: u32, c: u32) -> u32 {
 fn clamp_add_subtract_half(a: u32, b: u32) -> u32 {
     let f = |ca: u8, cb: u8| {
         let ca = i32::from(ca);
-        clamp_u8(ca + (ca - i32::from(cb)) / 2)
+        clip_pixel8(ca + (ca - i32::from(cb)) / 2)
     };
     make_argb(
         f(alpha(a), alpha(b)),

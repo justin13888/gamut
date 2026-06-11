@@ -16,12 +16,6 @@ const SINPI8_SQRT2: i32 = 35468;
 /// `sqrt(2) * cos(pi/8) - 1` in 16-bit fixed point (RFC 6386 §14.4).
 const COSPI8_SQRT2_MINUS1: i32 = 20091;
 
-/// Saturates a 32-bit value to the unsigned 8-bit pixel range (RFC 6386 §14.5 `clamp255`).
-#[must_use]
-pub fn clamp255(x: i32) -> u8 {
-    x.clamp(0, 255) as u8
-}
-
 /// Inverse 4×4 DCT (RFC 6386 §14.4): maps the 16 dequantized coefficients to the 4×4 residue,
 /// bit-exact with the reference `short_idct4x4llm_c`. A vertical (column) pass feeds a horizontal
 /// (row) pass; intermediates are stored as 16-bit as the spec requires.
@@ -226,15 +220,6 @@ mod tests {
         let mut b = [0i16; 16];
         b[0] = dc;
         b
-    }
-
-    #[test]
-    fn clamp255_saturates() {
-        assert_eq!(clamp255(-1), 0);
-        assert_eq!(clamp255(0), 0);
-        assert_eq!(clamp255(128), 128);
-        assert_eq!(clamp255(255), 255);
-        assert_eq!(clamp255(1000), 255);
     }
 
     #[test]
