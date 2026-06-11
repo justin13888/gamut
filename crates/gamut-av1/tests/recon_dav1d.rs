@@ -608,3 +608,24 @@ fn rectangular_partitions_match_dav1d() {
         );
     }
 }
+
+#[test]
+fn multi_tile_matches_dav1d() {
+    // Frames ≥ 2 superblocks wide are coded as two tile columns (§5.9.15). Each tile decodes
+    // independently: a block at the tile's left edge has no left neighbour, and a block at the
+    // tile's right edge must not treat the (not-yet-decoded) adjacent tile as an available
+    // above-right. Strong directional structure makes the mode search pick angles that read those
+    // edges, so dav1d byte-equality proves the per-tile reset, the tile-boundary neighbour
+    // availability, and the tile-group framing across every coefficient-CDF quantizer context.
+    let directional = |x: u32, y: u32| {
+        let vert = if (x / 2).is_multiple_of(2) { 210 } else { 30 } as u8;
+        let horiz = if (y / 2).is_multiple_of(2) { 200 } else { 40 } as u8;
+        let diag = (((x + y) * 16) % 256) as u8;
+        [vert, horiz, diag]
+    };
+    for &q in &[2u8, 20, 21, 90, 121, 255] {
+        for &(w, h) in &[(72, 16), (100, 70), (130, 96)] {
+            check(&planes(w, h, directional), q);
+        }
+    }
+}

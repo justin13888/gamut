@@ -9,6 +9,11 @@ const OBU_SEQUENCE_HEADER: u8 = 1;
 /// `OBU_FRAME` (frame header + tile group in one OBU).
 pub(crate) const OBU_FRAME: u8 = 6;
 
+/// `TileSizeBytes` (§5.11.1): the width of each non-final tile's little-endian size prefix in the
+/// tile group. Four bytes covers any tile a still image produces; signalled as `minus_1` in the
+/// frame header's `tile_info`.
+pub(crate) const TILE_SIZE_BYTES: usize = 4;
+
 /// The sequence-header field values that `gamut-avif` must mirror into `av1C` and `colr`
 /// (AV1-ISOBMFF v1.3.0 §2.3.4). Fixed by the M0 config except `seq_level_idx_0`, which depends on
 /// the image size.
@@ -184,20 +189,35 @@ pub(crate) fn frame_header_payload(
     }
     // disable_frame_end_update_cdf inferred 1.
 
-    // tile_info(): single tile. Emit increment-stop bits only where the level/size permit > 0 tiles.
+    // tile_info() (§5.9.15): uniform spacing, two tile columns when the frame is ≥ 2 superblocks
+    // wide (else one). `tile_cols_log2` mirrors the split `FrameEncoder::encode` applies.
     let _ = (width, height);
     let sb_cols = (mi_cols + 15) >> 4;
     let sb_rows = (mi_rows + 15) >> 4;
     let max_log2_tile_cols = tile_log2(1, sb_cols.min(64));
     let max_log2_tile_rows = tile_log2(1, sb_rows.min(64));
+    let tile_cols_log2 = u32::from(sb_cols >= 2);
     w.put_bit(1); // uniform_tile_spacing_flag
-    if max_log2_tile_cols > 0 {
-        w.put_bit(0); // increment_tile_cols_log2 = 0 (stay at 1 tile column)
+    // increment_tile_cols_log2 loop (min log2 is 0 at these sizes): 1 to grow TileColsLog2, 0 to stop.
+    let mut t = 0;
+    while t < max_log2_tile_cols {
+        let inc = t < tile_cols_log2;
+        w.put_bit(u8::from(inc));
+        if inc {
+            t += 1;
+        } else {
+            break;
+        }
     }
     if max_log2_tile_rows > 0 {
-        w.put_bit(0); // increment_tile_rows_log2 = 0 (stay at 1 tile row)
+        w.put_bit(0); // increment_tile_rows_log2 = 0 (one tile row)
     }
-    // TileColsLog2 == TileRowsLog2 == 0 ⇒ no context_update_tile_id / tile_size_bytes.
+    if tile_cols_log2 > 0 {
+        // context_update_tile_id is `TileRowsLog2 + TileColsLog2` bits (tile 0); then
+        // tile_size_bytes_minus_1 (2 bits).
+        w.put_bits(0, tile_cols_log2);
+        w.put_bits(TILE_SIZE_BYTES as u32 - 1, 2);
+    }
 
     // quantization_params().
     w.put_bits(u32::from(base_q_idx), 8); // base_q_idx
@@ -266,7 +286,13 @@ pub(crate) fn frame_header_payload(
     w.put_bit(1); // reduced_tx_set = 1
     // global_motion_params / film_grain_params (intra, not present) ⇒ no bits.
 
-    w.byte_align();
+    w.byte_align(); // byte_alignment after frame_header_obu (§5.10)
+    // tile_group_obu prefix (§5.11.1): for more than one tile, tile_start_and_end_present_flag = 0,
+    // then re-align so the tile_size fields / tile data begin on a byte boundary.
+    if tile_cols_log2 > 0 {
+        w.put_bit(0); // tile_start_and_end_present_flag
+        w.byte_align();
+    }
     w.into_bytes()
 }
 
