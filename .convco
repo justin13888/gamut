@@ -1,0 +1,19 @@
+# Conventional-commit policy for `convco check`
+# (https://convco.github.io/configuration/).
+#
+# Enforced locally via lefthook (commit-msg + pre-push) and in CI on PRs. These are
+# convco's built-in defaults, made explicit so the policy is visible and tweakable.
+# Scope is optional (default scopeRegex). `section`/`hidden` only affect `convco
+# changelog`, not `check`; release-plz keeps its own changelog config.
+types:
+  - { type: feat,     section: Features }
+  - { type: fix,      section: Fixes }
+  - { type: docs,     section: Documentation }
+  - { type: perf,     section: Performance }
+  - { type: refactor, section: Refactor }
+  - { type: build, hidden: true }
+  - { type: chore, hidden: true }
+  - { type: ci,    hidden: true }
+  - { type: style, hidden: true }
+  - { type: test,  hidden: true }
+lineLength: 80

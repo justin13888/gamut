@@ -116,19 +116,25 @@ All cargo metadata except per-crate `version` is centralized in the root
 
 - [Rust (rustup)](https://rustup.rs) -- toolchain (channel pinned via `rust-toolchain.toml`);
   see [Minimum Supported Rust Version](#minimum-supported-rust-version) for the lower bound
-- [just](https://github.com/casey/just) -- command runner
-- [Lefthook](https://github.com/evilmartians/lefthook) -- git hooks manager
-- [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) -- code coverage tool
-- [jq](https://jqlang.github.io/jq/) -- JSON processor (optional; used by `just versions`)
-- [cargo-edit](https://github.com/killercup/cargo-edit) -- provides `cargo set-version` (optional; used by `just bump`)
+- [mise](https://mise.jdx.dev) -- provisions the rest of the dev tooling from `mise.toml`:
+  [just](https://github.com/casey/just) (command runner),
+  [Lefthook](https://github.com/evilmartians/lefthook) (git hooks),
+  [convco](https://convco.github.io) (conventional-commit linter),
+  [jq](https://jqlang.github.io/jq/),
+  [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (coverage),
+  [cargo-edit](https://github.com/killercup/cargo-edit) (`cargo set-version` for `just bump`),
+  and the C build tools [CMake](https://cmake.org), [Ninja](https://ninja-build.org) and
+  [Meson](https://mesonbuild.com). After cloning, run `mise trust && mise install`, then
+  activate mise in your shell (e.g. `eval "$(mise activate zsh)"`) so these land on `PATH` —
+  the git hooks and `just` recipes invoke them directly.
 
 Building the **shipped crates** needs only the Rust toolchain — they are pure Rust with no C
 dependencies. Building the **cross-check tests** additionally needs a C toolchain plus
-[meson](https://mesonbuild.com), [ninja](https://ninja-build.org),
-[nasm](https://www.nasm.us) and [CMake](https://cmake.org): those tests link reference
-decoders (dav1d, libavif) built from the git submodules under `third_party/` via the dev-only
-oracle crates in `tooling/`. Nothing is taken from system-installed decoders. On Debian/Ubuntu:
-`sudo apt-get install meson ninja-build nasm cmake pkg-config`.
+[nasm](https://www.nasm.us) and pkg-config — the two build deps that stay system packages
+(CMake, Ninja and Meson come from mise). Those tests link reference decoders (dav1d, libavif)
+built from the git submodules under `third_party/` via the dev-only oracle crates in `tooling/`;
+nothing is taken from system-installed decoders. Install the two on Debian/Ubuntu with
+`sudo apt-get install nasm pkg-config` (macOS: `brew install nasm pkg-config`).
 
 ## Quick Start
 
@@ -136,21 +142,26 @@ oracle crates in `tooling/`. Nothing is taken from system-installed decoders. On
 # The cross-check tests link vendored dav1d/libavif from third_party/ submodules.
 git submodule update --init --recursive
 
+# Dev tooling + git hooks (see Prerequisites; also needs system nasm + pkg-config).
+mise trust && mise install
+lefthook install
+
 cargo build --workspace
 cargo test --workspace
 ```
 
 ## Development
 
-| Command                     | Description                                |
-| --------------------------- | ------------------------------------------ |
-| `cargo build --workspace`   | Build all crates                           |
-| `just test`                 | Run tests (workspace, all features)        |
-| `just format`               | Format code                                |
-| `just lint`                 | Lint with Clippy (warnings as errors)      |
-| `just lint-fix`             | Lint and auto-fix                          |
-| `just coverage`             | Run tests with coverage (min 80%)          |
-| `just versions`             | List every crate's version                 |
+| Command          | Description                              |
+| ---------------- | ---------------------------------------- |
+| `cargo build --workspace` | Build all crates                |
+| `just test`      | Run tests (workspace, all features)      |
+| `just format`    | Format code                              |
+| `just lint`      | Lint with Clippy (warnings as errors)    |
+| `just lint-fix`  | Lint and auto-fix                        |
+| `just check-commits` | Check commits are Conventional Commits |
+| `just coverage`  | Run tests with coverage (min 80%)        |
+| `just versions`  | List every crate's version               |
 | `just bump <crate> <level>` | Bump one crate (`major`\|`minor`\|`patch`) |
 
 ## Minimum Supported Rust Version (MSRV)
@@ -171,14 +182,19 @@ Policy:
 
 ## Git Hooks
 
-This project uses [Lefthook](https://github.com/evilmartians/lefthook). Pre-commit hooks
-auto-fix formatting and linting on staged files. Pre-push hooks run format checks, lint
-checks, tests, and a coverage gate.
+This project uses [Lefthook](https://github.com/evilmartians/lefthook) (provisioned by mise);
+run `lefthook install` once after `mise install` to register the hooks. The `commit-msg` hook
+rejects messages that aren't [Conventional Commits](https://www.conventionalcommits.org)
+(policy in `.convco`). Pre-commit hooks auto-fix formatting and linting on staged files.
+Pre-push hooks re-check the branch's commit messages and run format checks, lint checks, tests,
+and a coverage gate. The hooks call mise-managed tools (convco, cargo-llvm-cov), so keep mise
+activated in your shell.
 
 ## CI/CD
 
-GitHub Actions runs format checks, linting, tests, and coverage on pushes to `master` and
-pull requests.
+GitHub Actions provisions tooling via [mise](https://mise.jdx.dev) and runs format checks,
+linting, tests, and coverage on pushes to `master` and pull requests. Pull requests
+additionally validate every commit message against Conventional Commits with convco.
 
 ## Code Coverage
 
@@ -214,6 +230,10 @@ as needed. Each crate keeps its own `CHANGELOG.md` and is tagged and GitHub-rele
 `<crate>-v<version>` (e.g. `gamut-core-v0.2.0`) — there is no single repo-wide version tag,
 so the umbrella `gamut` crate's version serves as the headline "project" version. Run
 `just versions` to see every crate's current version at a glance.
+
+Because release-plz keys versions and changelogs off commit messages, those messages are
+enforced as [Conventional Commits](https://www.conventionalcommits.org) — by the git hooks
+locally and the CI PR check (see [Git Hooks](#git-hooks)) — to keep the changelogs clean.
 
 ## Releases
 

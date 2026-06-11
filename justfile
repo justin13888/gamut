@@ -16,6 +16,10 @@ lint:
 lint-fix:
     cargo clippy --workspace --fix --allow-dirty --allow-staged
 
+# Check this branch's commits follow Conventional Commits (convco)
+check-commits:
+    convco check "$(git merge-base origin/master HEAD)..HEAD"
+
 # Install the gamut CLI binary
 install-cli:
     cargo install --path crates/gamut-cli
