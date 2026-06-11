@@ -19,6 +19,8 @@
 
 use gamut_core::{Error, Result};
 
+use crate::clip_pixel8;
+
 /// Fixed-point fractional bits for the conversion coefficients.
 const FIX: i32 = 16;
 /// Rounding addend (`0.5` in the fixed-point scale).
@@ -41,11 +43,6 @@ pub enum Bt601Range {
     /// Limited / "studio" range: luma in `16..=235`, chroma in `16..=240`. The range libwebp and the
     /// WebP/VP8 ecosystem (browsers, `dwebp`, …) assume, so files encoded this way render correctly.
     Limited,
-}
-
-/// Saturates a fixed-point-derived integer to the unsigned 8-bit range.
-fn clip8(x: i32) -> u8 {
-    x.clamp(0, 255) as u8
 }
 
 /// libwebp's `MultHi` (`src/dsp/yuv.h`): the high bits of a fixed-point product, `(v * coeff) >> 8`.
@@ -73,7 +70,7 @@ pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: Bt601Range) -> (u8, u8, u8) {
             let y = (19595 * r + 38470 * g + 7471 * b + HALF) >> FIX;
             let cb = (-11059 * r - 21709 * g + 32768 * b + CHROMA_BIAS) >> FIX;
             let cr = (32768 * r - 27439 * g - 5329 * b + CHROMA_BIAS) >> FIX;
-            (clip8(y), clip8(cb), clip8(cr))
+            (clip_pixel8(y), clip_pixel8(cb), clip_pixel8(cr))
         }
         // libwebp's per-pixel coefficients (src/dsp/yuv.h `VP8RGBToY/U/V`): studio swing, +16 luma
         // offset; chroma uses the same `(128 << FIX) + HALF` bias as the full-range path.
@@ -81,7 +78,7 @@ pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: Bt601Range) -> (u8, u8, u8) {
             let y = (16839 * r + 33059 * g + 6420 * b + LUMA_BIAS_LIMITED + HALF) >> FIX;
             let cb = (-9719 * r - 19081 * g + 28800 * b + CHROMA_BIAS) >> FIX;
             let cr = (28800 * r - 24116 * g - 4684 * b + CHROMA_BIAS) >> FIX;
-            (clip8(y), clip8(cb), clip8(cr))
+            (clip_pixel8(y), clip_pixel8(cb), clip_pixel8(cr))
         }
     }
 }
@@ -97,7 +94,7 @@ pub fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8, range: Bt601Range) -> (u8, u8, u8) {
             let r = y + ((91881 * cr + HALF) >> FIX);
             let g = y + ((-22554 * cb - 46802 * cr + HALF) >> FIX);
             let b = y + ((116130 * cb + HALF) >> FIX);
-            (clip8(r), clip8(g), clip8(b))
+            (clip_pixel8(r), clip_pixel8(g), clip_pixel8(b))
         }
         // libwebp's exact per-pixel inverse (src/dsp/yuv.h `VP8YUVToR/G/B`): the studio-swing offsets
         // are folded into the additive constants, so the raw 0..=255 samples feed straight in.
