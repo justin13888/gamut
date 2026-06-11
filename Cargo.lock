@@ -259,6 +259,7 @@ dependencies = [
  "gamut-dsp",
  "gamut-heic",
  "gamut-jxl",
+ "gamut-tiff",
  "gamut-vvc",
  "gamut-webp",
 ]
@@ -377,6 +378,16 @@ version = "0.1.0"
 dependencies = [
  "gamut-bitstream",
  "gamut-core",
+]
+
+[[package]]
+name = "gamut-tiff"
+version = "0.1.0"
+dependencies = [
+ "gamut-bitstream",
+ "gamut-color",
+ "gamut-core",
+ "gamut-dsp",
 ]
 
 [[package]]

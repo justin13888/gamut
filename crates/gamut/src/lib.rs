@@ -35,6 +35,8 @@ pub use gamut_avif as avif;
 pub use gamut_heic as heic;
 #[cfg(feature = "jxl")]
 pub use gamut_jxl as jxl;
+#[cfg(feature = "tiff")]
+pub use gamut_tiff as tiff;
 #[cfg(feature = "vvc")]
 pub use gamut_vvc as vvc;
 #[cfg(feature = "webp")]

@@ -16,7 +16,7 @@ the Rust ecosystem lacks a strong, feature-complete implementation.
 Dependency edges (a crate depends on those to its right):
 
 - **gamut** -- umbrella; optional deps on the format crates, gated by features (`avif`,
-  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `all`). `default = []`. The `primitives` feature
+  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `all`). `default = []`. The `primitives` feature
   additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling; `all` includes it.
 - **gamut-core** -- `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`. No
   internal deps; everything else depends on it.
@@ -24,6 +24,9 @@ Dependency edges (a crate depends on those to its right):
 - **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core, bitstream.
 - **gamut-av1** / **gamut-av2** / **gamut-jxl** / **gamut-vvc** -- codecs. ← core, color, dsp, bitstream.
 - **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff. **gamut-heic** ← isobmff, core, color.
+- **gamut-tiff** -- self-contained TIFF 6.0; natively still-image, so its own IFD/tag structure is
+  the container (uses neither isobmff nor riff). Bundles its compressions (None/PackBits/LZW/CCITT/
+  JPEG). ← core, color, dsp, bitstream.
 - **gamut-cli** (binary named `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib). ← gamut.
   `gamut-cli` is the sandbox that exercises the implemented features: it decodes input via the
   third-party `image` crate (PNG/JPEG/PPM) but encodes only with gamut crates, and exposes the
