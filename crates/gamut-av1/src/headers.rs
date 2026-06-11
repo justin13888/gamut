@@ -130,7 +130,7 @@ pub(crate) fn sequence_header_payload(
     w.put_bit(0); // enable_superres = 0
     // CDEF (§7.15) is used only on the lossy path; the lossless path is CodedLossless (CDEF off).
     w.put_bit(u8::from(lossy)); // enable_cdef
-    w.put_bit(0); // enable_restoration = 0
+    w.put_bit(u8::from(lossy)); // enable_restoration (1 on the lossy path: luma Wiener)
 
     // color_config(): high_bitdepth=0; (profile 1 ⇒ mono_chrome=0 inferred);
     // color_description_present_flag=1; cp/tc/mc; (mc==IDENTITY ⇒ color_range/subsampling
@@ -278,7 +278,15 @@ pub(crate) fn frame_header_payload(
         w.put_bits(sec_code(y_sec), 2); // cdef_y_sec_strength[0]
         w.put_bits(uv_pri as u32, 4); // cdef_uv_pri_strength[0]
         w.put_bits(sec_code(uv_sec), 2); // cdef_uv_sec_strength[0]
-        // lr_params(): enable_restoration = 0 ⇒ no bits.
+        // lr_params() (§5.9.20): luma RESTORE_WIENER, chroma RESTORE_NONE. `lr_type` is 2 bits per
+        // plane (`Remap_Lr_Type`: 0=NONE, 2=WIENER); only luma uses restoration.
+        w.put_bits(2, 2); // FrameRestorationType[0] = RESTORE_WIENER
+        w.put_bits(0, 2); // FrameRestorationType[1] = RESTORE_NONE
+        w.put_bits(0, 2); // FrameRestorationType[2] = RESTORE_NONE
+        // usesLr ⇒ lr_unit_shift. Not a 128×128 superblock ⇒ f(1) then (if set) lr_unit_extra f(1).
+        // shift = 2 ⇒ LoopRestorationSize = 256. usesChromaLr = 0 ⇒ no lr_uv_shift.
+        w.put_bit(1); // lr_unit_shift bit 0
+        w.put_bit(1); // lr_unit_extra ⇒ lr_unit_shift = 2
         w.put_bit(1); // read_tx_mode: tx_mode_select = 1 ⇒ TX_MODE_SELECT (per-block tx_depth)
         // frame_reference_mode / skip_mode_params (intra) ⇒ no bits. allow_warped_motion = 0.
     }
