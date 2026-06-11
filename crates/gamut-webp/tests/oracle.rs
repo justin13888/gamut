@@ -668,6 +668,102 @@ fn gamut_decodes_libwebp_lossy_forced_features_bit_exact() {
 }
 
 #[test]
+fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
+    // The color-conversion gate. WebP/VP8 is *limited-range* BT.601, and gamut-color now matches
+    // libwebp's per-pixel RGB→YUV (src/dsp/yuv.h `VP8RGBToY/U/V`) exactly: the luma plane is
+    // bit-exact, and chroma differs by ≤2 only because gamut box-averages 2×2 before converting while
+    // libwebp sums-then-converts (a rounding-order difference). A regression to full-range — the bug
+    // this fix closed — would shift luma by ~17 and fail the `assert_eq` below.
+    use common::libwebp_rgba_to_yuv;
+    use gamut_color::{Bt601Range, Yuv420};
+
+    let chroma_max = |a: &[u8], b: &[u8]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (i32::from(*x) - i32::from(*y)).abs())
+            .max()
+            .unwrap_or(0)
+    };
+    for &(w, h) in DIMENSIONS.iter().chain(&[(128u32, 96u32), (300, 70)]) {
+        let rgba = photo_like_rgba(w, h, 0x5eed);
+        let gamut =
+            Yuv420::from_rgb8(&rgba_to_rgb(&rgba), w, h, Bt601Range::Limited).expect("from_rgb8");
+        let lib = libwebp_rgba_to_yuv(&rgba, w, h);
+        assert_eq!(
+            gamut.y(),
+            lib.y.as_slice(),
+            "luma must be bit-exact at {w}x{h}"
+        );
+        assert!(chroma_max(gamut.u(), &lib.u) <= 2, "U within 2 at {w}x{h}");
+        assert!(chroma_max(gamut.v(), &lib.v) <= 2, "V within 2 at {w}x{h}");
+    }
+}
+
+#[test]
+fn gamut_lossy_webp_decodes_correctly_in_libwebp() {
+    // End-to-end interop regression guard: gamut encodes lossy WebP, libwebp (the browser-equivalent
+    // decoder) decodes it, and the result must match the source within the lossy budget — *not* the
+    // systematic per-sample colour shift the old full-range encoding produced in every standard
+    // decoder. Mean absolute error is the robust metric (lossy edges spike the max).
+    for &(w, h) in &[(64u32, 48u32), (128, 96), (49, 33)] {
+        let rgb = rgba_to_rgb(&photo_like_rgba(w, h, 0x1cef));
+        let mut webp = Vec::new();
+        WebpEncoder::lossy(90)
+            .encode_rgb8(
+                &rgb,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+                &mut webp,
+            )
+            .expect("gamut encode");
+        let lib = rgba_to_rgb(&libwebp_decode_rgba(&webp).rgba);
+        let mae: f64 = lib
+            .iter()
+            .zip(&rgb)
+            .map(|(a, b)| f64::from((i32::from(*a) - i32::from(*b)).unsigned_abs()))
+            .sum::<f64>()
+            / rgb.len() as f64;
+        assert!(
+            mae <= 8.0,
+            "gamut→libwebp interop MAE {mae:.2} too high at {w}x{h} (colour shift regression?)"
+        );
+    }
+}
+
+#[test]
+fn gamut_decodes_libwebp_lossy_close_to_libwebp() {
+    // The decode direction: gamut and libwebp must decode the *same* libwebp-encoded stream to close
+    // RGB. The per-pixel YUV→RGB inverse is bit-exact with libwebp (pinned in gamut-color's
+    // `limited_range_matches_libwebp_anchors` unit test); the residual here is chroma *upsampling*
+    // (gamut nearest-replicates, libwebp uses fancy bilinear) — a quality choice (issue #32), not a
+    // colour error. A regression of the inverse back to full-range would blow well past this bound.
+    use common::libwebp_encode_lossy_rgba;
+
+    let max_abs = |a: &[u8], b: &[u8]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (i32::from(*x) - i32::from(*y)).abs())
+            .max()
+            .unwrap_or(0)
+    };
+    for &(w, h) in &[(64u32, 48u32), (128, 96), (49, 33)] {
+        let rgba = photo_like_rgba(w, h, 0x2ab0);
+        let webp = libwebp_encode_lossy_rgba(&rgba, w, h, 90.0);
+        let mut gamut = Vec::new();
+        WebpDecoder::new()
+            .decode_to_rgb8(&webp, &mut gamut)
+            .expect("gamut decode");
+        let lib = rgba_to_rgb(&libwebp_decode_rgba(&webp).rgba);
+        assert!(
+            max_abs(&gamut, &lib) <= 24,
+            "gamut vs libwebp decode differs by >24 at {w}x{h} (more than chroma upsampling)"
+        );
+    }
+}
+
+#[test]
 fn libwebp_decodes_gamut_lossy_alpha_exactly() {
     // gamut encodes lossy color plus a raw `ALPH` alpha plane in an extended (`VP8X`) file; libwebp
     // must recover the exact alpha (alpha is lossless). The lossy color is not compared.

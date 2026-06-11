@@ -79,6 +79,59 @@ pub fn libwebp_decode_yuv(webp: &[u8]) -> DecodedYuv {
     }
 }
 
+/// Runs libwebp's BT.601 RGB→YUV 4:2:0 conversion — the same one `WebPEncode` applies to lossy input
+/// — on interleaved RGBA, returning the YUV planes. Used to pin gamut-color's own conversion against
+/// the reference *within a tolerance*: the exact rounding and chroma downsampling are
+/// implementation-defined, so this is not a bit-exact surface. Panics (these are tests) on a bad
+/// buffer size or a libwebp error.
+#[must_use]
+pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
+    let expected = width as usize * height as usize * 4;
+    assert_eq!(
+        rgba.len(),
+        expected,
+        "RGBA buffer is not width*height*4 bytes"
+    );
+    // SAFETY: the picture is zero-initialised then Init-filled. With the default `use_argb = 0`,
+    // `WebPPictureImportRGBA` runs libwebp's RGBA→YUV conversion in-line (see `Import` →
+    // `ImportYUVAFromRGBA` in picture_csp_enc.c), filling the y/u/v planes (valid for `rows * stride`
+    // bytes), which we copy out per row before freeing the picture.
+    unsafe {
+        let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPPictureInit(&mut pic) != 0,
+            "WebPPictureInit failed"
+        );
+        pic.width = width as c_int;
+        pic.height = height as c_int;
+        assert!(
+            libwebp_sys::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), width as c_int * 4) != 0,
+            "WebPPictureImportRGBA failed"
+        );
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let copy_plane = |ptr: *const u8, row_stride: usize, pw: usize, ph: usize| {
+            let mut out = vec![0u8; pw * ph];
+            for row in 0..ph {
+                let src = slice::from_raw_parts(ptr.add(row * row_stride), pw);
+                out[row * pw..row * pw + pw].copy_from_slice(src);
+            }
+            out
+        };
+        let y = copy_plane(pic.y, pic.y_stride as usize, w, h);
+        let u = copy_plane(pic.u, pic.uv_stride as usize, cw, ch);
+        let v = copy_plane(pic.v, pic.uv_stride as usize, cw, ch);
+        libwebp_sys::WebPPictureFree(&mut pic);
+        DecodedYuv {
+            width,
+            height,
+            y,
+            u,
+            v,
+        }
+    }
+}
+
 /// An RGBA image decoded by libwebp: interleaved 8-bit `R,G,B,A` pixels plus dimensions.
 pub struct DecodedRgba {
     /// Image width in pixels.
