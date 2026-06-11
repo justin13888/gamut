@@ -52,11 +52,50 @@ pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> 
 /// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
 /// dimensions exceed AV1 level 6.0.
 pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill, ReconImage)> {
+    encode_with(planes, qindex, None)
+}
+
+/// Like [`encode_still_intra`] but codes the frame with horizontal **superres** (§7.16): the source
+/// is downscaled to `FrameWidth = (UpscaledWidth*8 + denom/2)/denom` (where `denom = coded_denom + 9`,
+/// `coded_denom` in `0..=7`), coded at that width, and the reconstruction is upscaled back to the
+/// display width. Lossy path only.
+pub fn encode_still_intra_superres(
+    planes: &Planar8,
+    qindex: u8,
+    coded_denom: u8,
+) -> Result<(EncodedStill, ReconImage)> {
+    encode_with(planes, qindex, Some(coded_denom))
+}
+
+fn encode_with(
+    planes: &Planar8,
+    qindex: u8,
+    coded_denom: Option<u8>,
+) -> Result<(EncodedStill, ReconImage)> {
     let width = planes.width();
     let height = planes.height();
     if width == 0 || height == 0 {
         return Err(Error::InvalidInput("image has a zero dimension"));
     }
+
+    // Superres downscales the source horizontally to the coded (Frame) width; the reconstruction is
+    // upscaled back to `width` at the end. `coded_src` is what the block encoder actually codes.
+    let (coded_w, coded_src) = match coded_denom {
+        Some(cd) => {
+            let denom = cd as usize + 9;
+            let dw = crate::filter::superres_downscaled_width(width as usize, denom);
+            let dp: [Vec<u8>; 3] = std::array::from_fn(|i| {
+                crate::filter::superres_downscale_plane(
+                    planes.plane(i),
+                    width as usize,
+                    dw,
+                    height as usize,
+                )
+            });
+            (dw as u32, Planar8::from_planes(dw as u32, height, dp)?)
+        }
+        None => (width, planes.clone()),
+    };
 
     let config = Av1StillConfig {
         seq_profile: 1,
@@ -74,12 +113,14 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
         full_range: true,
     };
 
-    let mi_cols = 2 * ((width + 7) >> 3);
+    let mi_cols = 2 * ((coded_w + 7) >> 3);
     let mi_rows = 2 * ((height + 7) >> 3);
 
-    let seq_payload = headers::sequence_header_payload(&config, width, height, qindex > 0);
-    let mut frame_payload = headers::frame_header_payload(width, height, mi_cols, mi_rows, qindex);
-    let (tile_bytes, recon) = FrameEncoder::new(planes, qindex).encode();
+    let seq_payload =
+        headers::sequence_header_payload(&config, width, height, qindex > 0, coded_denom.is_some());
+    let mut frame_payload =
+        headers::frame_header_payload(coded_w, height, mi_cols, mi_rows, qindex, coded_denom);
+    let (tile_bytes, recon) = FrameEncoder::new(&coded_src, qindex).encode();
     // tile_group_obu (§5.11.1): the frame header already emitted the tile-group prefix (the
     // `tile_start_and_end_present_flag` and re-alignment for a multi-tile frame). Each tile but the
     // last is prefixed by its byte size minus one as a little-endian `TileSizeBytes`-byte field.
@@ -92,19 +133,54 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
     }
 
     // Crop the reconstruction from the coded grid to the display dimensions. For the lossless path
-    // the reconstruction equals the source, so use the source planes directly.
-    let recon_planes = if qindex == 0 {
-        [
-            crop(planes.plane(0), width, planes.width(), height),
-            crop(planes.plane(1), width, planes.width(), height),
-            crop(planes.plane(2), width, planes.width(), height),
-        ]
+    // the reconstruction equals the source. With superres the coded grid is the downscaled width, so
+    // each plane is cropped to `coded_w` and then upscaled horizontally to the display `width`.
+    let (uw, uh) = (width as usize, height as usize);
+    let recon_planes: [Vec<u8>; 3] = if qindex == 0 {
+        std::array::from_fn(|i| crop(planes.plane(i), width, planes.width(), height))
+    } else if coded_denom.is_some() {
+        // §7.4 order: superres upscale (downscaled → display width) happens **before** loop
+        // restoration, which then runs on the upscaled luma. The deblocked-luma boundary is upscaled
+        // too (only read by multi-stripe frames).
+        let mut up: [Vec<u8>; 3] = std::array::from_fn(|i| {
+            crate::filter::superres_upscale_plane(
+                &recon.planes[i],
+                recon.coded_w,
+                coded_w as usize,
+                uw,
+                uh,
+            )
+        });
+        let deblock_up = crate::filter::superres_upscale_plane(
+            &recon.deblocked_luma,
+            recon.coded_w,
+            coded_w as usize,
+            uw,
+            uh,
+        );
+        crate::filter::loop_restore_wiener_luma(
+            &mut up[0],
+            &deblock_up,
+            uw,
+            uw,
+            uh,
+            crate::filter::WIENER_DEFAULT,
+            crate::filter::WIENER_DEFAULT,
+        );
+        up
     } else {
-        [
-            crop(&recon.planes[0], width, recon.coded_w as u32, height),
-            crop(&recon.planes[1], width, recon.coded_w as u32, height),
-            crop(&recon.planes[2], width, recon.coded_w as u32, height),
-        ]
+        // No superres: loop restoration runs on the (display-width) coded reconstruction.
+        let mut planes = recon.planes.clone();
+        crate::filter::loop_restore_wiener_luma(
+            &mut planes[0],
+            &recon.deblocked_luma,
+            recon.coded_w,
+            uw,
+            uh,
+            crate::filter::WIENER_DEFAULT,
+            crate::filter::WIENER_DEFAULT,
+        );
+        std::array::from_fn(|i| crop(&planes[i], width, recon.coded_w as u32, height))
     };
 
     let still = EncodedStill {

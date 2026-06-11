@@ -88,25 +88,25 @@ format.
 
 ## Crates
 
-| Crate             | Purpose                                                                 | Status      |
-| ----------------- | ----------------------------------------------------------------------- | ----------- |
-| `gamut`           | Umbrella crate; re-exports the format crates behind Cargo features      | scaffold    |
-| `gamut-core`      | Core traits (`Encoder`/`Decoder`), image buffers, dimensions, errors    | scaffold    |
-| `gamut-color`     | Color spaces, pixel formats, bit depths, chroma subsampling, transfers  | placeholder |
-| `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering            | placeholder |
-| `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)       | placeholder |
-| `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                                | placeholder |
-| `gamut-riff`      | RIFF container utilities (WebP)                                         | implemented |
-| `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF    | M0 lossless |
-| `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor         | placeholder |
-| `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                 | M0 lossless |
-| `gamut-jxl`       | JPEG XL encoder/decoder                                                 | placeholder |
-| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                             | VP8L lossless |
-| `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                      | placeholder |
-| `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                         | placeholder |
-| `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives        | sandbox     |
-| `gamut-wasm`      | WebAssembly bindings                                                    | placeholder |
-| `gamut-ffi`       | C-compatible FFI bindings                                               | placeholder |
+| Crate             | Purpose                                                                | Status                                 |
+| ----------------- | ---------------------------------------------------------------------- | -------------------------------------- |
+| `gamut`           | Umbrella crate; re-exports the format crates behind Cargo features     | implemented                            |
+| `gamut-core`      | Core traits (`Encoder`/`Decoder`), image buffers, dimensions, errors   | WIP                                    |
+| `gamut-color`     | Color spaces, pixel formats, bit depths, chroma subsampling, transfers | stabilizing api                        |
+| `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering           | stabilizing api                        |
+| `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)      | stabilizing api                        |
+| `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | finalizing api                         |
+| `gamut-riff`      | RIFF container utilities (WebP)                                        | finalizing api                         |
+| `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF   | implemented lossless and lossy (alpha) |
+| `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
+| `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                | stabilizing with gamut-av1             |
+| `gamut-jxl`       | JPEG XL encoder/decoder                                                | placeholder                            |
+| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                            | implemented VP8 + VP8L (+alpha)        |
+| `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                     | placeholder                            |
+| `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
+| `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives       | ready for use                          |
+| `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
+| `gamut-ffi`       | C-compatible FFI bindings                                              | placeholder                            |
 
 All cargo metadata except per-crate `version` is centralized in the root
 `[workspace.package]` / `[workspace.dependencies]`; each crate inherits the shared fields via

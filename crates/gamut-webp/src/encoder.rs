@@ -5,7 +5,7 @@
 //! implemented, for RGB ([`WebpEncoder::encode_rgb8`]) and RGBA ([`WebpEncoder::encode_rgba8`]) input;
 //! transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk.
 
-use gamut_color::Yuv420;
+use gamut_color::{Bt601Range, Yuv420};
 use gamut_core::{Dimensions, Encoder, Error, Result};
 use gamut_riff::{FourCc, Vp8xHeader, write_extended, write_simple_lossless, write_simple_lossy};
 
@@ -96,7 +96,8 @@ impl WebpEncoder {
                 Ok(written)
             }
             WebpMode::Lossy => {
-                let yuv = Yuv420::from_rgb8(pixels, dims.width, dims.height)?;
+                // WebP/VP8 is limited-range BT.601 (what libwebp + browsers decode); see Bt601Range.
+                let yuv = Yuv420::from_rgb8(pixels, dims.width, dims.height, Bt601Range::Limited)?;
                 let (payload, _recon) = encode_frame(&yuv, quality_to_quant(self.config.quality));
                 let file = write_simple_lossy(&payload);
                 let written = file.len();
@@ -144,7 +145,7 @@ impl WebpEncoder {
                     .chunks_exact(4)
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
-                let yuv = Yuv420::from_rgb8(&rgb, dims.width, dims.height)?;
+                let yuv = Yuv420::from_rgb8(&rgb, dims.width, dims.height, Bt601Range::Limited)?;
                 let (vp8, _) = encode_frame(&yuv, quality_to_quant(self.config.quality));
                 if pixels.chunks_exact(4).all(|p| p[3] == 0xff) {
                     write_simple_lossy(&vp8)

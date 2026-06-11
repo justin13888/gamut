@@ -272,6 +272,11 @@ struct Pred {
 pub(crate) struct Reconstruction {
     pub planes: [Vec<u8>; 3],
     pub coded_w: usize,
+    /// Post-deblock (pre-CDEF) luma, retained for the loop-restoration stripe boundaries. Loop
+    /// restoration is applied by the caller **after** any superres upscale (§7.4 order:
+    /// deblock → CDEF → superres → loop restoration), so both the CDEF luma (`planes[0]`) and this
+    /// are upscaled first when superres is active. Empty on the lossless path.
+    pub deblocked_luma: Vec<u8>,
 }
 
 /// Encoder for the single tile that spans the whole frame.
@@ -481,6 +486,34 @@ impl<'a> FrameEncoder<'a> {
 
     /// Encodes the tile and returns the symbol-coded bytes (`decode_tile`, §5.11.2) plus the
     /// reconstruction (lossy path).
+    /// Signals the loop-restoration units (§5.11.57 `read_lr`) whose top-left falls in the superblock
+    /// at MI `(r, c)`. Luma uses `RESTORE_WIENER` with the default reference filter — every coded
+    /// coefficient delta is zero — and chroma is `RESTORE_NONE`. The unit grid is 256×256
+    /// (`lr_unit_shift = 2`); the same filter is later applied by [`crate::filter::loop_restore_wiener_luma`].
+    fn write_lr(&mut self, r: usize, c: usize) {
+        const UNIT: usize = 256;
+        // (offset, num_syms, k) for the three Wiener half-taps (§5.11.58 read_lr_unit).
+        const TAPS: [(i32, i32, u32); 3] = [(5, 16, 1), (23, 32, 2), (17, 64, 3)];
+        let unit_cols = ((self.width + UNIT / 2) / UNIT).max(1);
+        let unit_rows = ((self.height + UNIT / 2) / UNIT).max(1);
+        let row_start = (r * 4).div_ceil(UNIT);
+        let row_end = unit_rows.min(((r + 16) * 4).div_ceil(UNIT));
+        let col_start = (c * 4).div_ceil(UNIT);
+        let col_end = unit_cols.min(((c + 16) * 4).div_ceil(UNIT));
+        for _ in row_start..row_end {
+            for _ in col_start..col_end {
+                // restore_wiener = 1 (use Wiener), then vertical then horizontal half-taps.
+                self.sym.encode_symbol(1, &cdf::RESTORE_WIENER);
+                for _pass in 0..2 {
+                    for (j, &(off, num_syms, k)) in TAPS.iter().enumerate() {
+                        let v = crate::filter::WIENER_DEFAULT[j] + off;
+                        encode_subexp_with_ref(&mut self.sym, v, num_syms, k, v);
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn encode(mut self) -> (Vec<Vec<u8>>, Reconstruction) {
         const SB4: usize = 16; // 64×64 superblock in MI units
         let sb_cols = self.mi_cols.div_ceil(SB4);
@@ -513,6 +546,9 @@ impl<'a> FrameEncoder<'a> {
                     // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
                     self.read_deltas = self.delta_q_present;
                     self.clear_block_decoded(r, c);
+                    if self.qindex > 0 {
+                        self.write_lr(r, c);
+                    }
                     self.encode_partition(r, c, 64);
                     c += SB4;
                 }
@@ -525,6 +561,7 @@ impl<'a> FrameEncoder<'a> {
         // prediction during encoding read the pre-filter samples, so this does not affect any
         // prediction). The lossless path is `CodedLossless`, where the filter is disabled.
         let mut planes = self.recon;
+        let mut deblocked_luma = Vec::new();
         if self.qindex > 0 {
             crate::filter::deblock(
                 &mut planes,
@@ -539,7 +576,10 @@ impl<'a> FrameEncoder<'a> {
                 &self.mi_dlf,
                 self.qindex,
             );
-            // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15).
+            // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15). The
+            // deblocked luma is retained for the loop-restoration stripe boundaries (§7.17); loop
+            // restoration itself is applied by the caller after the optional superres upscale.
+            deblocked_luma = planes[0].clone();
             planes = crate::filter::cdef(
                 &planes,
                 self.coded_w,
@@ -551,6 +591,7 @@ impl<'a> FrameEncoder<'a> {
         let recon = Reconstruction {
             planes,
             coded_w: self.coded_w,
+            deblocked_luma,
         };
         (tile_bytes, recon)
     }
@@ -2893,6 +2934,63 @@ fn round2_signed(x: i32, n: u32) -> i32 {
     } else {
         -((-x + (1 << (n - 1))) >> n)
     }
+}
+
+/// `NS(n)` non-symmetric literal (§4.10.7): codes a value in `0..n` with `floor(log2(n))` or +1 bits.
+fn encode_ns(sym: &mut SymbolEncoder, v: u32, n: u32) {
+    let w = (32 - n.leading_zeros()) as i32; // FloorLog2(n) + 1
+    let m = (1u32 << w) - n;
+    if v < m {
+        sym.encode_literal(v, (w - 1) as u32);
+    } else {
+        let x = v + m;
+        sym.encode_literal(x >> 1, (w - 1) as u32);
+        sym.encode_literal(x & 1, 1);
+    }
+}
+
+/// `encode_subexp(v)` — the inverse of §4.10.8 `decode_subexp`: codes `v` in `0..num_syms` with a
+/// sub-exponential prefix keyed by `k`.
+fn encode_subexp(sym: &mut SymbolEncoder, v: u32, num_syms: u32, k: u32) {
+    let (mut i, mut mk) = (0u32, 0u32);
+    loop {
+        let b2 = if i != 0 { k + i - 1 } else { k };
+        let a = 1u32 << b2;
+        if num_syms <= mk + 3 * a {
+            encode_ns(sym, v - mk, num_syms - mk);
+            return;
+        } else if v >= mk + a {
+            sym.encode_literal(1, 1); // subexp_more_bits
+            i += 1;
+            mk += a;
+        } else {
+            sym.encode_literal(0, 1);
+            sym.encode_literal(v - mk, b2);
+            return;
+        }
+    }
+}
+
+/// Recenters `v` around reference `r` (the inverse of §4.10.10 `inverse_recenter`).
+fn recenter(r: i32, v: i32) -> u32 {
+    if v > 2 * r {
+        v as u32
+    } else if v < r {
+        (2 * (r - v) - 1) as u32
+    } else {
+        (2 * (v - r)) as u32
+    }
+}
+
+/// `encode_unsigned_subexp_with_ref(v, mx, k, r)` (§4.10.9 inverse): codes `v` in `0..mx` against
+/// reference `r` so that coding `v == r` emits the shortest (zero-delta) code.
+fn encode_subexp_with_ref(sym: &mut SymbolEncoder, v: i32, mx: i32, k: u32, r: i32) {
+    let recentered = if (r << 1) <= mx {
+        recenter(r, v)
+    } else {
+        recenter(mx - 1 - r, mx - 1 - v)
+    };
+    encode_subexp(sym, recentered, mx as u32, k);
 }
 
 /// Exp-Golomb tail used for coefficient magnitudes above the base-range cap (§5.11.39).
