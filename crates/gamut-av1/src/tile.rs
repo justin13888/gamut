@@ -283,6 +283,14 @@ pub(crate) struct FrameEncoder<'a> {
     mi_rows: usize,
     coded_w: usize,
     coded_h: usize,
+    /// MI boundaries of the tile currently being encoded (`0`/`mi_cols`/`mi_rows` for a single tile).
+    /// A tile decodes independently, so neighbour availability (prediction samples and symbol
+    /// contexts) stops at the tile edge even when it is not the frame edge.
+    tile_c0: usize,
+    tile_x0: usize,
+    /// Exclusive right/bottom MI boundary of the current tile (`MiColEnd`/`MiRowEnd`).
+    tile_c1: usize,
+    tile_r1: usize,
     /// `base_q_idx`; 0 ⇒ lossless WHT path, > 0 ⇒ lossy DCT path.
     qindex: u8,
     /// Coefficient-CDF quantizer context (§8.3.2): 0 if `base_q_idx ≤ 20`, 1 if ≤ 60, 2 if ≤ 120,
@@ -412,6 +420,10 @@ impl<'a> FrameEncoder<'a> {
             mi_rows,
             coded_w,
             coded_h,
+            tile_c0: 0,
+            tile_x0: 0,
+            tile_c1: mi_cols,
+            tile_r1: mi_rows,
             qindex,
             qctx: qctx_for(i32::from(qindex)),
             dc_quant: dc_q(8, i32::from(qindex)),
@@ -449,8 +461,8 @@ impl<'a> FrameEncoder<'a> {
     /// interior is not yet decoded; the below-left corner is forced unavailable.
     fn clear_block_decoded(&mut self, r: usize, c: usize) {
         const SB4: isize = 16;
-        let sb_width4 = (self.mi_cols - c) as isize;
-        let sb_height4 = (self.mi_rows - r) as isize;
+        let sb_width4 = (self.tile_c1 - c) as isize;
+        let sb_height4 = (self.tile_r1 - r) as isize;
         for y in -1..=SB4 {
             for x in -1..=SB4 {
                 // The row above the superblock and the column to its left (within the frame) are
@@ -469,25 +481,45 @@ impl<'a> FrameEncoder<'a> {
 
     /// Encodes the tile and returns the symbol-coded bytes (`decode_tile`, §5.11.2) plus the
     /// reconstruction (lossy path).
-    pub(crate) fn encode(mut self) -> (Vec<u8>, Reconstruction) {
+    pub(crate) fn encode(mut self) -> (Vec<Vec<u8>>, Reconstruction) {
         const SB4: usize = 16; // 64×64 superblock in MI units
-        let mut r = 0;
-        while r < self.mi_rows {
-            for plane in 0..3 {
-                self.left_level[plane].iter_mut().for_each(|v| *v = 0);
-                self.left_dc[plane].iter_mut().for_each(|v| *v = 0);
+        let sb_cols = self.mi_cols.div_ceil(SB4);
+        // Uniform tile spacing (§5.9.15): split a multi-superblock-wide frame into two tile columns
+        // so the multi-tile framing is exercised. Each tile decodes independently — its symbol
+        // contexts and `CurrentQIndex`/`DeltaLF` accumulators reset, and neighbour availability stops
+        // at the tile edge (handled by `tile_c0`/`tile_x0`).
+        let tile_cols = if sb_cols >= 2 { 2 } else { 1 };
+        let size_sb = sb_cols.div_ceil(tile_cols);
+        let mut tile_bytes: Vec<Vec<u8>> = Vec::with_capacity(tile_cols);
+        for t in 0..tile_cols {
+            let c_start = (t * size_sb * SB4).min(self.mi_cols);
+            let c_end = ((t + 1) * size_sb * SB4).min(self.mi_cols);
+            self.tile_c0 = c_start;
+            self.tile_x0 = c_start * 4;
+            self.tile_c1 = c_end;
+            // Per-tile reset: a fresh range coder and the delta accumulators back to frame defaults.
+            self.set_quant(i32::from(self.qindex));
+            self.current_dlf = 0;
+            let mut r = 0;
+            while r < self.mi_rows {
+                for plane in 0..3 {
+                    self.left_level[plane].iter_mut().for_each(|v| *v = 0);
+                    self.left_dc[plane].iter_mut().for_each(|v| *v = 0);
+                }
+                let mut c = c_start;
+                while c < c_end {
+                    self.sb_r = r;
+                    self.sb_c = c;
+                    // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
+                    self.read_deltas = self.delta_q_present;
+                    self.clear_block_decoded(r, c);
+                    self.encode_partition(r, c, 64);
+                    c += SB4;
+                }
+                r += SB4;
             }
-            let mut c = 0;
-            while c < self.mi_cols {
-                self.sb_r = r;
-                self.sb_c = c;
-                // ReadDeltas is armed per superblock (§7.18); the first block then signals delta_q.
-                self.read_deltas = self.delta_q_present;
-                self.clear_block_decoded(r, c);
-                self.encode_partition(r, c, 64);
-                c += SB4;
-            }
-            r += SB4;
+            let sym = std::mem::replace(&mut self.sym, SymbolEncoder::new());
+            tile_bytes.push(sym.finish());
         }
         // Deblocking loop filter (§7.14): a post-process on the final reconstruction (intra
         // prediction during encoding read the pre-filter samples, so this does not affect any
@@ -520,7 +552,7 @@ impl<'a> FrameEncoder<'a> {
             planes,
             coded_w: self.coded_w,
         };
-        (self.sym.finish(), recon)
+        (tile_bytes, recon)
     }
 
     /// Padded (edge-replicated) source sample of `plane` at coded-grid position `(x, y)`.
@@ -616,7 +648,12 @@ impl<'a> FrameEncoder<'a> {
         // §8.3.2: `above`/`left` are bit `4 - bl == bsl - 1` of the neighbour partition context.
         let bit = bsl - 1;
         let above = (self.above_partition[c] >> bit) & 1;
-        let left = (self.left_partition[r] >> bit) & 1;
+        // A tile's left edge has no left neighbour (left_partition holds the adjacent tile's value).
+        let left = if c > self.tile_c0 {
+            (self.left_partition[r] >> bit) & 1
+        } else {
+            0
+        };
         usize::from(left) * 2 + usize::from(above)
     }
 
@@ -685,7 +722,7 @@ impl<'a> FrameEncoder<'a> {
     /// relative to the prediction, under `Default_Segment_Id_Cdf[ctx]`. Returns the chosen id.
     fn signal_segment_id(&mut self, r: usize, c: usize, skip: bool) -> usize {
         let cols = self.mi_cols;
-        let prev_ul = if r > 0 && c > 0 {
+        let prev_ul = if r > 0 && c > self.tile_c0 {
             i32::from(self.mi_segid[(r - 1) * cols + (c - 1)])
         } else {
             -1
@@ -695,7 +732,7 @@ impl<'a> FrameEncoder<'a> {
         } else {
             -1
         };
-        let prev_l = if c > 0 {
+        let prev_l = if c > self.tile_c0 {
             i32::from(self.mi_segid[r * cols + (c - 1)])
         } else {
             -1
@@ -773,7 +810,7 @@ impl<'a> FrameEncoder<'a> {
     /// Context for the `skip` flag (§8.3.2): `aboveSkip + leftSkip` from the per-MI `mi_skip` map.
     fn skip_ctx(&self, r: usize, c: usize) -> usize {
         let above = r > 0 && self.mi_skip[(r - 1) * self.mi_cols + c] != 0;
-        let left = c > 0 && self.mi_skip[r * self.mi_cols + (c - 1)] != 0;
+        let left = c > self.tile_c0 && self.mi_skip[r * self.mi_cols + (c - 1)] != 0;
         usize::from(above) + usize::from(left)
     }
 
@@ -857,7 +894,7 @@ impl<'a> FrameEncoder<'a> {
         } else {
             0
         };
-        let left_n = if c > 0 {
+        let left_n = if c > self.tile_c0 {
             self.mi_psize[r * self.mi_cols + (c - 1)] as usize
         } else {
             0
@@ -1043,7 +1080,7 @@ impl<'a> FrameEncoder<'a> {
         } else {
             0
         };
-        let left_h = if c > 0 {
+        let left_h = if c > self.tile_c0 {
             1usize << self.tx_log2_h[r * self.mi_cols + (c - 1)]
         } else {
             0
@@ -1139,7 +1176,7 @@ impl<'a> FrameEncoder<'a> {
         } else {
             usize::from(DC_PRED)
         }];
-        let lmode = cdf::INTRA_MODE_CONTEXT[if c > 0 {
+        let lmode = cdf::INTRA_MODE_CONTEXT[if c > self.tile_c0 {
             usize::from(self.mi_ymode[r * self.mi_cols + (c - 1)])
         } else {
             usize::from(DC_PRED)
@@ -1190,7 +1227,7 @@ impl<'a> FrameEncoder<'a> {
             if y_mode == DC_PRED {
                 let bctx = bw.trailing_zeros() as usize + bh.trailing_zeros() as usize - 6; // Mi_W_Log2 + Mi_H_Log2 - 2
                 let above = r > 0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
-                let left = c > 0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
+                let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
                 let pctx = usize::from(above) + usize::from(left);
                 self.sym.encode_symbol(
                     usize::from(palette.is_some()),
@@ -1602,7 +1639,7 @@ impl<'a> FrameEncoder<'a> {
             }
         };
         let have_above = sy > 0;
-        let have_left = sx > 0;
+        let have_left = sx > self.tile_x0;
         // §7.11.2.5 DC: average the `w` above + `h` left samples (a plain integer divide, since for a
         // rectangular block `w + h` is not a power of two; for square blocks this is the usual shift).
         match (have_above, have_left) {
@@ -1644,7 +1681,7 @@ impl<'a> FrameEncoder<'a> {
     fn reference_4x4(&self, plane: usize, sx: usize, sy: usize) -> ([i32; 8], [i32; 8], i32) {
         let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
         let have_above = sy > 0;
-        let have_left = sx > 0;
+        let have_left = sx > self.tile_x0;
 
         // Above-right / below-left availability (§5.11.34) for the directional zone-1/3 angles.
         let (by, bx) = (
@@ -1922,7 +1959,7 @@ impl<'a> FrameEncoder<'a> {
     ) -> (Vec<i32>, Vec<i32>, i32) {
         let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
         let have_above = sy > 0;
-        let have_left = sx > 0;
+        let have_left = sx > self.tile_x0;
         let step = (n / 4) as isize;
         let (by, bx) = (
             sy as isize / 4 - self.sb_r as isize,
@@ -2049,7 +2086,7 @@ impl<'a> FrameEncoder<'a> {
     ) -> (Vec<i32>, Vec<i32>, i32) {
         let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
         let have_above = sy > 0;
-        let have_left = sx > 0;
+        let have_left = sx > self.tile_x0;
         let (max_x, max_y) = (self.coded_w - 1, self.coded_h - 1);
 
         let mut above = vec![127i32; w];

@@ -86,7 +86,7 @@ not a contract:
 | frame_size / render_size (no override, no superres) | §5.9.5/.6 | ✅ | M0 |
 | frame_size_override + superres upscaling | §5.9.7/.8,§7.16 | ☐ | M1 |
 | tile_info: single tile | §5.9.15 | ✅ | M0 |
-| multi-tile (spacing, tile_size_bytes, context_update_tile_id) | §5.9.15/.16 | ☐ | M1 |
+| multi-tile (uniform spacing, tile_size_bytes, context_update_tile_id, tile group) | §5.9.15/.16 | ✅ (2 cols ≥2 SB wide; rows deferred) | M1 |
 | quantization: base_q_idx=0 ⇒ CodedLossless | §5.9.12 | ✅ | M0 |
 | quantization: base_q_idx>0, delta-Q, using_qmatrix | §5.9.12/.13,§9.5 | ✅ (base_q_idx>0 + per-SB delta-Q; qmatrix ☐) | M1 |
 | segmentation_params (disabled) | §5.9.14 | ✅ (off) | M0 |

@@ -80,7 +80,16 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
     let seq_payload = headers::sequence_header_payload(&config, width, height, qindex > 0);
     let mut frame_payload = headers::frame_header_payload(width, height, mi_cols, mi_rows, qindex);
     let (tile_bytes, recon) = FrameEncoder::new(planes, qindex).encode();
-    frame_payload.extend_from_slice(&tile_bytes);
+    // tile_group_obu (§5.11.1): the frame header already emitted the tile-group prefix (the
+    // `tile_start_and_end_present_flag` and re-alignment for a multi-tile frame). Each tile but the
+    // last is prefixed by its byte size minus one as a little-endian `TileSizeBytes`-byte field.
+    for (i, tile) in tile_bytes.iter().enumerate() {
+        if i + 1 < tile_bytes.len() {
+            let sz = (tile.len() - 1) as u32;
+            frame_payload.extend_from_slice(&sz.to_le_bytes()[..headers::TILE_SIZE_BYTES]);
+        }
+        frame_payload.extend_from_slice(tile);
+    }
 
     // Crop the reconstruction from the coded grid to the display dimensions. For the lossless path
     // the reconstruction equals the source, so use the source planes directly.
