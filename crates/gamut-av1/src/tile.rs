@@ -272,6 +272,11 @@ struct Pred {
 pub(crate) struct Reconstruction {
     pub planes: [Vec<u8>; 3],
     pub coded_w: usize,
+    /// Post-deblock (pre-CDEF) luma, retained for the loop-restoration stripe boundaries. Loop
+    /// restoration is applied by the caller **after** any superres upscale (§7.4 order:
+    /// deblock → CDEF → superres → loop restoration), so both the CDEF luma (`planes[0]`) and this
+    /// are upscaled first when superres is active. Empty on the lossless path.
+    pub deblocked_luma: Vec<u8>,
 }
 
 /// Encoder for the single tile that spans the whole frame.
@@ -556,6 +561,7 @@ impl<'a> FrameEncoder<'a> {
         // prediction during encoding read the pre-filter samples, so this does not affect any
         // prediction). The lossless path is `CodedLossless`, where the filter is disabled.
         let mut planes = self.recon;
+        let mut deblocked_luma = Vec::new();
         if self.qindex > 0 {
             crate::filter::deblock(
                 &mut planes,
@@ -570,10 +576,10 @@ impl<'a> FrameEncoder<'a> {
                 &self.mi_dlf,
                 self.qindex,
             );
-            // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15). Loop
-            // restoration then reads the post-CDEF frame for its interior and the **deblocked** frame
-            // (saved here, before CDEF) for the stripe boundaries (§7.17).
-            let deblocked = planes.clone();
+            // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15). The
+            // deblocked luma is retained for the loop-restoration stripe boundaries (§7.17); loop
+            // restoration itself is applied by the caller after the optional superres upscale.
+            deblocked_luma = planes[0].clone();
             planes = crate::filter::cdef(
                 &planes,
                 self.coded_w,
@@ -581,20 +587,11 @@ impl<'a> FrameEncoder<'a> {
                 self.mi_cols,
                 self.qindex,
             );
-            // Loop restoration: luma Wiener with the default filter, chroma RESTORE_NONE.
-            crate::filter::loop_restore_wiener_luma(
-                &mut planes[0],
-                &deblocked[0],
-                self.coded_w,
-                self.width,
-                self.height,
-                crate::filter::WIENER_DEFAULT,
-                crate::filter::WIENER_DEFAULT,
-            );
         }
         let recon = Reconstruction {
             planes,
             coded_w: self.coded_w,
+            deblocked_luma,
         };
         (tile_bytes, recon)
     }

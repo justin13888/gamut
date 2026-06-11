@@ -650,3 +650,34 @@ fn loop_restoration_matches_dav1d() {
         }
     }
 }
+
+#[test]
+fn superres_matches_dav1d() {
+    // Horizontal superres (§7.16): the source is coded at FrameWidth = UpscaledWidth*8/denom and the
+    // reconstruction is upscaled back. dav1d must upscale the coded frame identically — this exercises
+    // the 8-tap polyphase filter, the subpel geometry, and the superres frame-header signaling.
+    let texture = |x: u32, y: u32| {
+        let r = (x.wrapping_mul(5).wrapping_add(y.wrapping_mul(3)) % 256) as u8;
+        let g = ((x.wrapping_add(y).wrapping_mul(2)) % 256) as u8;
+        let b = (64 + ((x.wrapping_mul(7) ^ y) % 128)) as u8;
+        [r, g, b]
+    };
+    for &denom in &[0u8, 3, 7] {
+        for &(w, h) in &[(64, 32), (100, 48), (33, 20), (80, 130)] {
+            let p = planes(w, h, texture);
+            let (still, recon) = gamut_av1::encode_still_intra_superres(&p, 40, denom).unwrap();
+            let mut stream = vec![0x12u8, 0x00];
+            stream.extend_from_slice(&still.obus);
+            let decoded = dav1d_oracle::decode_obu(&stream)
+                .unwrap_or_else(|e| panic!("dav1d failed {w}x{h} denom{denom}: {e}"));
+            assert_eq!(
+                (decoded.width as usize, decoded.height as usize),
+                (recon.width as usize, recon.height as usize),
+                "dims {w}x{h} denom{denom}"
+            );
+            for (pl, (dec, enc)) in decoded.planes.iter().zip(&recon.planes).enumerate() {
+                assert_eq!(dec, enc, "plane {pl} mismatch {w}x{h} denom{denom}");
+            }
+        }
+    }
+}

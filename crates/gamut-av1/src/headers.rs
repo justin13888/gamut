@@ -108,6 +108,7 @@ pub(crate) fn sequence_header_payload(
     width: u32,
     height: u32,
     lossy: bool,
+    superres: bool,
 ) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.put_bits(u32::from(cfg.seq_profile), 3); // seq_profile
@@ -127,7 +128,7 @@ pub(crate) fn sequence_header_payload(
     // lossless path stays DC-only and emits no `use_filter_intra` symbols.
     w.put_bit(u8::from(lossy)); // enable_filter_intra
     w.put_bit(0); // enable_intra_edge_filter = 0
-    w.put_bit(0); // enable_superres = 0
+    w.put_bit(u8::from(superres)); // enable_superres
     // CDEF (§7.15) is used only on the lossy path; the lossless path is CodedLossless (CDEF off).
     w.put_bit(u8::from(lossy)); // enable_cdef
     w.put_bit(u8::from(lossy)); // enable_restoration (1 on the lossy path: luma Wiener)
@@ -166,6 +167,7 @@ pub(crate) fn frame_header_payload(
     mi_cols: u32,
     mi_rows: u32,
     base_q_idx: u8,
+    superres_coded_denom: Option<u8>,
 ) -> Vec<u8> {
     let lossless = base_q_idx == 0;
     let mut w = BitWriter::new();
@@ -179,12 +181,19 @@ pub(crate) fn frame_header_payload(
         // it to 1), so 0 is emitted.
         w.put_bit(0); // force_integer_mv
     }
-    // frame_size_override_flag=0; order_hint f(0); primary_ref_frame inferred; refresh_frame_flags
-    // inferred — all no bits.
-    // frame_size(): no override ⇒ from seq header; superres disabled. render_size():
+    // frame_size_override_flag=0 (reduced_still_picture_header); order_hint f(0); primary_ref_frame
+    // inferred; refresh_frame_flags inferred — all no bits.
+    // frame_size(): no override ⇒ UpscaledWidth from the sequence header. superres_params (§5.9.8) is
+    // present only when enable_superres; then FrameWidth = downscaled and the reconstruction is
+    // upscaled back to UpscaledWidth.
+    if let Some(cd) = superres_coded_denom {
+        w.put_bit(1); // use_superres
+        w.put_bits(u32::from(cd), 3); // coded_denom (SuperresDenom = coded_denom + 9)
+    }
+    // render_size():
     w.put_bit(0); // render_and_frame_size_different = 0
-    if !lossless {
-        // allow_screen_content_tools && UpscaledWidth == FrameWidth (no superres) ⇒ allow_intrabc.
+    if !lossless && superres_coded_denom.is_none() {
+        // allow_intrabc is coded only when UpscaledWidth == FrameWidth (i.e. no superres).
         w.put_bit(0); // allow_intrabc = 0
     }
     // disable_frame_end_update_cdf inferred 1.

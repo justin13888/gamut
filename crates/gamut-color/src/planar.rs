@@ -43,6 +43,24 @@ impl Planar8 {
         })
     }
 
+    /// Builds a `Planar8` directly from three `width * height` planes (`Y/U/V`, already in the
+    /// identity GBR order). Used by the encoder to wrap a horizontally-downscaled source for superres.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if any plane's length is not `width * height`.
+    pub fn from_planes(width: u32, height: u32, planes: [Vec<u8>; 3]) -> Result<Self> {
+        let n = width as usize * height as usize;
+        if planes.iter().any(|p| p.len() != n) {
+            return Err(Error::InvalidInput("plane length != width * height"));
+        }
+        Ok(Self {
+            width,
+            height,
+            planes,
+        })
+    }
+
     /// Reverses [`Planar8::from_rgb8_identity`], producing an interleaved 8-bit RGB buffer.
     #[must_use]
     pub fn to_rgb8_identity(&self) -> Vec<u8> {
