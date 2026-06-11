@@ -629,3 +629,24 @@ fn multi_tile_matches_dav1d() {
         }
     }
 }
+
+#[test]
+fn loop_restoration_matches_dav1d() {
+    // Luma Wiener loop restoration (§7.17) is applied to every lossy frame. Tall frames span several
+    // 64-row restoration stripes (56 + 64 + …); each stripe's top/bottom boundary rows come from the
+    // deblocked (pre-CDEF) reconstruction. Heights 70/130/200 exercise 2/3/4 stripes, and the wide
+    // cases also cross a tile-column boundary — dav1d byte-equality proves the stripe-boundary
+    // sourcing, the per-superblock unit signaling (restore_wiener + subexp coefficients), and the
+    // filter math end-to-end.
+    let texture = |x: u32, y: u32| {
+        let r = (x.wrapping_mul(5).wrapping_add(y.wrapping_mul(3)) % 256) as u8;
+        let g = ((x.wrapping_add(y).wrapping_mul(2)) % 256) as u8;
+        let b = (64 + ((x.wrapping_mul(7) ^ y) % 128)) as u8;
+        [r, g, b]
+    };
+    for &q in &[8u8, 40, 120, 200] {
+        for &(w, h) in &[(48, 130), (100, 200), (24, 60)] {
+            check(&planes(w, h, texture), q);
+        }
+    }
+}

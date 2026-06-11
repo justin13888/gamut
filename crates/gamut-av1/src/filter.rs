@@ -570,6 +570,109 @@ pub(crate) fn cdef(
     out
 }
 
+/// The default Wiener restoration half-taps (`Wiener_Taps_Mid`, §9.x) — also the per-unit reference
+/// the subexp coefficient deltas are coded against, so coding this filter emits a zero delta.
+pub(crate) const WIENER_DEFAULT: [i32; 3] = [3, -7, 15];
+
+/// Applies the §7.17 Wiener loop-restoration filter to the luma plane in place (the post-CDEF
+/// reconstruction `cdef`), reading the **deblocked** (pre-CDEF) reconstruction `deblock` for the
+/// loop-restoration stripe boundaries. `fh`/`fv` are the three signaled half-taps for the horizontal
+/// and vertical 7-tap symmetric filters.
+///
+/// The frame is processed in 64-row stripes offset by 8 (the first is 56 rows). Within a stripe the
+/// filter reads the post-CDEF samples; the two rows immediately above the stripe top and below the
+/// stripe bottom come from the deblocked reconstruction (the saved "loop restoration line"), with the
+/// third tap replicating the nearer boundary row. At the frame top/bottom and left/right edges the
+/// nearest in-frame sample is replicated (a single restoration unit spans the width). 8-bit:
+/// horizontal `round_bits = 3`, vertical `round_bits = 11`, `round_offset = 1 << 18`.
+pub(crate) fn loop_restore_wiener_luma(
+    cdef: &mut [u8],
+    deblock: &[u8],
+    coded_w: usize,
+    width: usize,
+    height: usize,
+    fh: [i32; 3],
+    fv: [i32; 3],
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    // 7-tap symmetric filters. The horizontal centre excludes the implicit +128 (added per sample),
+    // the vertical centre includes it (§7.17.4).
+    let fh7 = [
+        fh[0],
+        fh[1],
+        fh[2],
+        -2 * (fh[0] + fh[1] + fh[2]),
+        fh[2],
+        fh[1],
+        fh[0],
+    ];
+    let fv7 = [
+        fv[0],
+        fv[1],
+        fv[2],
+        128 - 2 * (fv[0] + fv[1] + fv[2]),
+        fv[2],
+        fv[1],
+        fv[0],
+    ];
+    let src_cdef = cdef.to_vec();
+    // Horizontal 7-tap filter of one source row → a `width`-long buffer clipped to `0..=8191`.
+    let h_row = |buf: &[u8], row: usize| -> Vec<i32> {
+        (0..width)
+            .map(|x| {
+                let base = row * coded_w;
+                let mut sum = (1i32 << 14) + i32::from(buf[base + x]) * 128;
+                for (i, &tap) in fh7.iter().enumerate() {
+                    let sx = (x as isize + i as isize - 3).clamp(0, width as isize - 1) as usize;
+                    sum += i32::from(buf[base + sx]) * tap;
+                }
+                ((sum + 4) >> 3).clamp(0, 8191)
+            })
+            .collect()
+    };
+    let mut st = 0usize;
+    while st < height {
+        let stripe_h = if st == 0 {
+            56.min(height)
+        } else {
+            64.min(height - st)
+        };
+        let se = st + stripe_h;
+        // Horizontal-filter the band of rows the vertical 7-tap spans: `st-3 ..= se+2`, each picking
+        // its source (post-CDEF interior, deblocked boundary, or replicated edge).
+        let band: Vec<Vec<i32>> = ((st as isize - 3)..=(se as isize + 2))
+            .map(|sr| {
+                if sr >= st as isize && sr < se as isize {
+                    h_row(&src_cdef, sr as usize)
+                } else if sr < st as isize {
+                    if st > 0 {
+                        h_row(deblock, sr.max(st as isize - 2) as usize)
+                    } else {
+                        h_row(&src_cdef, 0)
+                    }
+                } else if se < height {
+                    h_row(deblock, sr.min(se as isize + 1) as usize)
+                } else {
+                    h_row(&src_cdef, height - 1)
+                }
+            })
+            .collect();
+        for y in st..se {
+            for x in 0..width {
+                let mut sum = -(1i32 << 18);
+                for (t, &tap) in fv7.iter().enumerate() {
+                    let bi = (y as isize + t as isize - 3 - (st as isize - 3)) as usize;
+                    sum += band[bi][x] * tap;
+                }
+                cdef[y * coded_w + x] = ((sum + 1024) >> 11).clamp(0, 255) as u8;
+            }
+        }
+        st = se;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

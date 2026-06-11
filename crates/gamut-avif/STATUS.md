@@ -169,7 +169,7 @@ not a contract:
 | --- | --- | --- | --- |
 | deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8/16×16, narrow + wide + widest) | M1 |
 | CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy 4:4:4) | M1 |
-| loop restoration (Wiener + self-guided) | §5.9.20,§7.17 | ☐ | M1 |
+| loop restoration: Wiener (luma) + stripe boundaries + per-SB unit signaling | §5.9.20,§7.17 | ✅ (Wiener luma; self-guided/chroma deferred) | M1 |
 | superres horizontal upscaling | §5.9.8,§7.16 | ☐ | M1 |
 | film grain synthesis | §5.9.30,§7.18.3 | ☐ | M4 |
 
