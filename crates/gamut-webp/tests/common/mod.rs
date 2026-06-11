@@ -219,3 +219,46 @@ pub fn pattern_rgba(width: u32, height: u32) -> Vec<u8> {
     }
     rgba
 }
+
+/// Generates a deterministic, fully-opaque RGBA image with **photographic-like statistics**: smooth
+/// low-frequency gradients and a coarse blob (large correlated regions, the bulk of a real photo)
+/// overlaid with low-amplitude high-frequency detail and a few hard rectangle edges. This drives the
+/// encoder down realistic residual/token/back-reference paths that the purely algebraic
+/// [`pattern_rgba`] never reaches, while staying RNG-free so the corpus is reproducible and
+/// version-controlled. `seed` varies the content. Alpha is held at 255 (see [`pattern_rgba`]).
+#[must_use]
+pub fn photo_like_rgba(width: u32, height: u32, seed: u32) -> Vec<u8> {
+    let (w, h) = (i64::from(width).max(1), i64::from(height).max(1));
+    // Small integer value-noise: hash (x, y, seed) into a high-frequency byte in `0..=255`.
+    let hash = |x: i64, y: i64| -> i64 {
+        let mut v = x.wrapping_mul(374_761_393)
+            ^ y.wrapping_mul(668_265_263)
+            ^ i64::from(seed).wrapping_mul(2_246_822_519);
+        v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+        (v ^ (v >> 16)) & 0xff
+    };
+    let clamp = |v: i64| v.clamp(0, 255) as u8;
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..h {
+        for x in 0..w {
+            // Low-frequency smooth base: per-channel ramps plus a shared diagonal so large regions
+            // correlate (what spatial prediction and LZ77 exploit).
+            let base_r = x * 200 / w + y * 30 / h;
+            let base_g = y * 200 / h + (x + y) * 20 / (w + h);
+            let base_b = (x + y) * 160 / (w + h) + 40;
+            // Low-amplitude detail (sensor-noise / texture analogue) and a few hard luminance steps
+            // (sharp edges exercise B_PRED mode selection and the loop filter).
+            let detail = (hash(x, y) - 128) / 12;
+            let edge = if (x * 3 / w) % 2 == 0 && (y * 3 / h) % 2 == 0 {
+                40
+            } else {
+                0
+            };
+            rgba.push(clamp(base_r + detail + edge)); // R
+            rgba.push(clamp(base_g + detail)); // G
+            rgba.push(clamp(base_b - detail + edge)); // B
+            rgba.push(0xff); // A (opaque)
+        }
+    }
+    rgba
+}
