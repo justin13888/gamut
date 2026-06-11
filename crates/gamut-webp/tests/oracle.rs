@@ -11,7 +11,10 @@
 
 mod common;
 
-use common::{libwebp_decode_rgba, libwebp_encode_lossless_rgba, libwebp_get_info, pattern_rgba};
+use common::{
+    libwebp_decode_rgba, libwebp_encode_lossless_rgba, libwebp_get_info, pattern_rgba,
+    photo_like_rgba,
+};
 use gamut_webp::{Dimensions, WebpDecoder, WebpEncoder};
 
 /// The standard dimension matrix exercised by the differential tests, including the awkward
@@ -25,6 +28,13 @@ const DIMENSIONS: &[(u32, u32)] = &[
     (255, 1),
     (1, 255),
 ];
+
+/// Larger canvases that push past the small-block regime the `DIMENSIONS` matrix (≤255px) stays in:
+/// VP8 macroblock grids spanning many rows, and VP8L entropy-image regions plus LZ77 back-references
+/// whose distances only exceed 256 above this size. `(300, 70)` is deliberately not a multiple of
+/// libwebp's histogram block size, so it straddles entropy-image tile boundaries.
+const LARGE_DIMENSIONS: &[(u32, u32)] =
+    &[(256, 256), (384, 288), (640, 480), (1024, 768), (300, 70)];
 
 /// Drops the alpha byte of an interleaved RGBA buffer, yielding interleaved RGB.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
@@ -156,6 +166,35 @@ fn libwebp_decodes_every_gamut_encoder_path() {
         })
         .collect();
     assert_gamut_encode_libwebp_decode(&many, w, h, "many-color");
+}
+
+#[test]
+fn gamut_decodes_libwebp_lossless_realistic_and_large() {
+    // Photographic-like content over the small matrix *and* large canvases (>256px): libwebp encodes
+    // with whatever transforms/entropy-images/long back-references it likes, and gamut must decode
+    // back to the exact source. This reaches VP8L decode paths (multi-tile entropy images, long LZ77
+    // distances) that the ≤255px algebraic patterns never exercise.
+    for &(w, h) in DIMENSIONS.iter().chain(LARGE_DIMENSIONS) {
+        let rgba = photo_like_rgba(w, h, 0x51ed);
+        let webp = libwebp_encode_lossless_rgba(&rgba, w, h);
+        let mut out = Vec::new();
+        let dims = WebpDecoder::new()
+            .decode_to_rgb8(&webp, &mut out)
+            .expect("gamut decode");
+        assert_eq!((dims.width, dims.height), (w, h), "dims at {w}x{h}");
+        assert_eq!(out, rgba_to_rgb(&rgba), "pixel mismatch at {w}x{h}");
+    }
+}
+
+#[test]
+fn libwebp_decodes_gamut_lossless_realistic_and_large() {
+    // The reverse direction over the same realistic + large matrix: gamut encodes, the reference
+    // decodes back to source — pinning gamut's VP8L *encoder* paths (entropy images, long backward
+    // references) as conformant at scale, not just on tiny inputs.
+    for &(w, h) in DIMENSIONS.iter().chain(LARGE_DIMENSIONS) {
+        let rgb = rgba_to_rgb(&photo_like_rgba(w, h, 0x9a1c));
+        assert_gamut_encode_libwebp_decode(&rgb, w, h, &format!("realistic {w}x{h}"));
+    }
 }
 
 /// Builds a structured YUV 4:2:0 image (real residuals to exercise the transforms/tokens).
