@@ -41,6 +41,7 @@ just test            # correctness
 just format-check    # formatting
 just lint            # lint (Clippy, warnings as errors)
 just coverage        # coverage (minimum 80%)
+just mutants         # mutation testing (run `mise install` once; heavier — needs submodules + C toolchain)
 ```
 
 The shipped crates are pure Rust, but the decoder cross-check tests link reference decoders

@@ -1,0 +1,87 @@
+name: Mutants
+
+# Mutation testing with cargo-mutants (https://mutants.rs). cargo-mutants is installed from
+# the pinned `mise.toml` entry via mise, so CI and local use the same binary.
+#
+# Two jobs:
+#   * incremental — runs on every PR, mutating only the code changed in the diff
+#     (`--in-diff`). BLOCKING: a surviving mutant in changed code fails the check, so new
+#     code must be mutation-covered.
+#   * full — manual (workflow_dispatch) full-workspace survey. Informational only
+#     (continue-on-error) and uploads a report; existing code still has gaps, so it must
+#     not gate merges. Flip to blocking once the baseline is clean.
+
+on:
+  pull_request:
+  workflow_dispatch:
+  # Uncomment to also run a full survey weekly (Mondays 06:00 UTC):
+  # schedule:
+  #   - cron: "0 6 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: mutants-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Mutate only the code changed by the PR. Fast and blocking.
+  incremental:
+    name: Incremental (PR diff)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The cross-check (oracle) tests link vendored dav1d/libavif from these submodules;
+          # mutants in gamut-av1/avif/webp need them to build a green baseline.
+          submodules: recursive
+          # Full history so we can diff against the PR's base branch.
+          fetch-depth: 0
+      - name: Install native build deps (vendored dav1d/libavif oracles)
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm cmake pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-mutants (pinned via mise)
+        uses: jdx/mise-action@v2
+      - name: Compute changed regions vs base branch
+        run: |
+          git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+          git diff "origin/${{ github.base_ref }}...HEAD" > mutants.diff
+          echo "Changed files cargo-mutants will consider:"
+          git --no-pager diff --stat "origin/${{ github.base_ref }}...HEAD"
+      - name: Run cargo-mutants on the diff
+        run: cargo mutants --no-shuffle -vV --in-diff mutants.diff
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-incremental
+          path: mutants.out
+
+  # Full-workspace survey. Manual; informational only.
+  full:
+    name: Full workspace
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install native build deps (vendored dav1d/libavif oracles)
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm cmake pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-mutants (pinned via mise)
+        uses: jdx/mise-action@v2
+      - name: Run cargo-mutants over the whole workspace
+        # Informational: surviving mutants in existing code don't fail the run.
+        continue-on-error: true
+        run: cargo mutants --no-shuffle -vV
+      - name: Upload mutants report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-full
+          path: mutants.out
