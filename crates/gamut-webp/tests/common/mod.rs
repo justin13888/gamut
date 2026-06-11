@@ -166,6 +166,108 @@ pub fn libwebp_encode_lossy_rgba(rgba: &[u8], width: u32, height: u32, quality: 
     bytes
 }
 
+/// libwebp lossy-encoder knobs the one-shot [`libwebp_encode_lossy_rgba`] (`WebPEncodeRGBA`) cannot
+/// reach. Driving these through the advanced `WebPEncode` path lets the reverse-direction oracle
+/// *force* decode features a real encoder can emit but cwebp's defaults rarely do — the simple loop
+/// filter, a chosen segment count, low/high encoder effort — so gamut's decoder is pinned against the
+/// full VP8 surface rather than whatever libwebp happens to pick.
+///
+/// Note: `WebPConfig.partitions` (token-partition count) is deliberately absent — libwebp's encoder
+/// only range-checks it and always writes a single partition (`config_enc.c`), so it cannot source a
+/// multi-partition stream. gamut's multi-partition *decode* is instead pinned in the forward
+/// direction (gamut encodes 2/4/8 partitions → libwebp decodes them) in
+/// `gamut_lossy_options_match_libwebp_bit_exact`.
+#[derive(Clone, Copy, Debug)]
+pub struct LibwebpLossyConfig {
+    /// Quality factor, `0.0..=100.0`.
+    pub quality: f32,
+    /// Loop-filter type: `0` = simple, `1` = complex (normal).
+    pub filter_type: i32,
+    /// Number of segments, `1..=4`.
+    pub segments: i32,
+    /// Encoder method / effort, `0..=6` (deeper analysis ⇒ more probability updates, segmentation).
+    pub method: i32,
+    /// Deblocking filter strength, `0..=100` (`0` disables the loop filter).
+    pub filter_strength: i32,
+}
+
+/// Appends libwebp's emitted output chunks into the `Vec<u8>` behind `picture.custom_ptr`. Matches the
+/// `WebPWriterFunction` ABI so it can be installed as `picture.writer`.
+extern "C" fn collect_writer(
+    data: *const u8,
+    data_size: usize,
+    picture: *const libwebp_sys::WebPPicture,
+) -> c_int {
+    // SAFETY: `picture.custom_ptr` is the `&mut Vec<u8>` installed in `libwebp_encode_lossy_rgba_config`
+    // below; `data` is valid for `data_size` bytes for the duration of this callback.
+    unsafe {
+        let out = &mut *((*picture).custom_ptr.cast::<Vec<u8>>());
+        out.extend_from_slice(slice::from_raw_parts(data, data_size));
+    }
+    1
+}
+
+/// Encodes interleaved RGBA to a lossy WebP via libwebp's **advanced** `WebPEncode` API under an
+/// explicit [`LibwebpLossyConfig`], returning the file bytes. Unlike [`libwebp_encode_lossy_rgba`],
+/// this forces specific VP8 encoder features so the reverse-direction oracle can pin gamut's decoder
+/// against the full surface a production encoder *can* emit. Panics (these are tests) on a bad buffer
+/// size or a libwebp error.
+#[must_use]
+pub fn libwebp_encode_lossy_rgba_config(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    cfg: &LibwebpLossyConfig,
+) -> Vec<u8> {
+    let expected = width as usize * height as usize * 4;
+    assert_eq!(
+        rgba.len(),
+        expected,
+        "RGBA buffer is not width*height*4 bytes"
+    );
+
+    let mut out: Vec<u8> = Vec::new();
+    // SAFETY: each libwebp struct is zero-initialised then filled by its `*Init` function before use;
+    // the picture borrows `rgba` (via the import copy) and writes through `collect_writer` into `out`
+    // for the duration of `WebPEncode` only; every raw pointer below stays valid across the calls.
+    unsafe {
+        let mut config: libwebp_sys::WebPConfig = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPConfigInit(&mut config) != 0,
+            "WebPConfigInit failed (version mismatch?)"
+        );
+        config.quality = cfg.quality;
+        config.filter_type = cfg.filter_type;
+        config.segments = cfg.segments;
+        config.method = cfg.method;
+        config.filter_strength = cfg.filter_strength;
+        assert!(
+            libwebp_sys::WebPValidateConfig(&config) != 0,
+            "WebPValidateConfig rejected {cfg:?}"
+        );
+
+        let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPPictureInit(&mut pic) != 0,
+            "WebPPictureInit failed (version mismatch?)"
+        );
+        pic.width = width as c_int;
+        pic.height = height as c_int;
+        // Imports into the ARGB buffer (sets use_argb=1); WebPEncode converts ARGB→YUV for lossy.
+        assert!(
+            libwebp_sys::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), width as c_int * 4) != 0,
+            "WebPPictureImportRGBA failed"
+        );
+        pic.writer = Some(collect_writer);
+        pic.custom_ptr = std::ptr::from_mut(&mut out).cast::<c_void>();
+
+        let ok = libwebp_sys::WebPEncode(&config, &mut pic);
+        libwebp_sys::WebPPictureFree(&mut pic);
+        assert!(ok != 0, "WebPEncode failed for {cfg:?}");
+    }
+    out
+}
+
 /// Reads the canvas dimensions of a WebP file with libwebp, or `None` if it is not a valid WebP.
 #[must_use]
 pub fn libwebp_get_info(webp: &[u8]) -> Option<(u32, u32)> {

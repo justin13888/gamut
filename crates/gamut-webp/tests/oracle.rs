@@ -553,6 +553,121 @@ fn gamut_decodes_libwebp_lossy_realistic_and_large() {
 }
 
 #[test]
+fn gamut_decodes_libwebp_lossy_forced_features_bit_exact() {
+    // The one-shot `WebPEncodeRGBA` the other reverse-direction tests use can't independently reach
+    // the VP8 feature surface — it runs at a fixed method with the complex loop filter and libwebp's
+    // default segmentation. Drive libwebp's *advanced* encoder to force each knob in turn (simple vs
+    // complex filter, 1..=4 segments, low/high effort, filter strength, then several at once) and
+    // require gamut's decoder to reproduce libwebp's own YUV bit-for-bit on every variant — pinning
+    // the decoder against streams a production encoder can emit but cwebp's defaults rarely do.
+    use common::{LibwebpLossyConfig, libwebp_decode_yuv, libwebp_encode_lossy_rgba_config};
+
+    let base = LibwebpLossyConfig {
+        quality: 75.0,
+        filter_type: 1,
+        segments: 1,
+        method: 4,
+        filter_strength: 60,
+    };
+
+    // Guard: prove the advanced config actually reaches the encoder. This is a *conformance* gate
+    // (gamut must match whatever libwebp emits), so it would still pass if the forcing were silently
+    // ignored — but then it would add nothing over the default-config reverse oracle. Require distinct
+    // feature settings to produce distinct streams for the same input. (Token-partition count is *not*
+    // guarded here: libwebp's encoder ignores `config.partitions` and always writes one partition —
+    // see `LibwebpLossyConfig` — so that path is covered forward in `gamut_lossy_options_*` instead.)
+    {
+        let (w, h) = (64u32, 48);
+        let rgba = photo_like_rgba(w, h, 0x00c0_ffee);
+        let one = libwebp_encode_lossy_rgba_config(&rgba, w, h, &base);
+        let simple = libwebp_encode_lossy_rgba_config(
+            &rgba,
+            w,
+            h,
+            &LibwebpLossyConfig {
+                filter_type: 0,
+                ..base
+            },
+        );
+        assert_ne!(
+            one, simple,
+            "switching to the simple loop filter must change the stream"
+        );
+        let multi_seg = libwebp_encode_lossy_rgba_config(
+            &rgba,
+            w,
+            h,
+            &LibwebpLossyConfig {
+                segments: 4,
+                ..base
+            },
+        );
+        assert_ne!(
+            one, multi_seg,
+            "forcing four segments must change the stream"
+        );
+    }
+
+    let mut cases: Vec<(String, LibwebpLossyConfig)> = Vec::new();
+    for filter_type in [0, 1] {
+        cases.push((
+            format!("filter_type={filter_type}"),
+            LibwebpLossyConfig {
+                filter_type,
+                ..base
+            },
+        ));
+    }
+    for segments in [1, 2, 3, 4] {
+        cases.push((
+            format!("segments={segments}"),
+            LibwebpLossyConfig { segments, ..base },
+        ));
+    }
+    for method in [0, 3, 6] {
+        cases.push((
+            format!("method={method}"),
+            LibwebpLossyConfig { method, ..base },
+        ));
+    }
+    for filter_strength in [0, 30] {
+        cases.push((
+            format!("filter_strength={filter_strength}"),
+            LibwebpLossyConfig {
+                filter_strength,
+                ..base
+            },
+        ));
+    }
+    cases.push((
+        "combined".into(),
+        LibwebpLossyConfig {
+            filter_type: 0,
+            segments: 4,
+            method: 6,
+            filter_strength: 20,
+            ..base
+        },
+    ));
+
+    // (128, 96) spans six MB rows, exercising per-segment filter levels across many rows.
+    for &(w, h) in &[(32u32, 32u32), (64, 48), (49, 33), (128, 96)] {
+        let rgba = photo_like_rgba(w, h, 0x00c0_ffee);
+        for (label, cfg) in &cases {
+            let webp = libwebp_encode_lossy_rgba_config(&rgba, w, h, cfg);
+            let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
+                .expect("gamut decode")
+                .to_yuv420();
+            let lib = libwebp_decode_yuv(&webp);
+            assert_eq!((lib.width, lib.height), (w, h), "dims {label} at {w}x{h}");
+            assert_eq!(gamut.y(), lib.y.as_slice(), "Y {label} at {w}x{h}");
+            assert_eq!(gamut.u(), lib.u.as_slice(), "U {label} at {w}x{h}");
+            assert_eq!(gamut.v(), lib.v.as_slice(), "V {label} at {w}x{h}");
+        }
+    }
+}
+
+#[test]
 fn libwebp_decodes_gamut_lossy_alpha_exactly() {
     // gamut encodes lossy color plus a raw `ALPH` alpha plane in an extended (`VP8X`) file; libwebp
     // must recover the exact alpha (alpha is lossless). The lossy color is not compared.
