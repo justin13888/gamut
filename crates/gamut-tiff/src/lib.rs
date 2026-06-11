@@ -12,15 +12,22 @@
 //! is implemented clean-slate from the TIFF 6.0 specification (`references/tiff/tiff6.pdf`,
 //! Adobe/Aldus, Final — June 3 1992) rather than wrapping libtiff.
 //!
-//! Placeholder skeleton — implementation pending (see issue #107). The type declarations below
-//! sketch the data model the implementation phases flesh out; no encoding/decoding logic exists
-//! yet.
+//! Implementation in progress (see issue #107). The container layer — the byte-order header, the
+//! IFD/tag model, and the reader/writer that (de)serialise it — is in place ([`ifd`], [`reader`],
+//! [`writer`], [`tags`]); the image codecs and the [`gamut_core::Encoder`]/[`gamut_core::Decoder`]
+//! pixel paths land in subsequent phases.
 #![forbid(unsafe_code)]
 
 pub mod compression;
 pub mod decoder;
 pub mod encoder;
 pub mod ifd;
+pub mod reader;
+pub mod tags;
+pub mod writer;
 
 pub use decoder::TiffDecoder;
 pub use encoder::TiffEncoder;
+pub use ifd::{ByteOrder, Field, FieldType, Ifd, PhotometricInterpretation, Predictor, Value};
+pub use reader::{TiffFile, read};
+pub use writer::write;

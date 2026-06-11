@@ -20,8 +20,8 @@ lossy → MAE/PSNR tolerance.
 
 | Phase | Spec § | Scope | Status |
 | ----- | ------ | ----- | ------ |
-| P1  | —       | Scaffold: crate, workspace wiring, docs, region-free skeleton | ✅ in progress |
-| P2  | §2      | TIFF structure: header, IFD read/write, field types, value/offset packing | ☐ |
+| P1  | —       | Scaffold: crate, workspace wiring, docs, region-free skeleton | ✅ done |
+| P2  | §2      | TIFF structure: header, IFD read/write, field types, value/offset packing | ✅ done |
 | P3  | §3–4,6  | **Keystone** — uncompressed grayscale + RGB via strips; `Encoder`/`Decoder` | ☐ |
 | P4  | —       | libtiff oracle + pixel-exact both-direction differential gate | ☐ |
 | P5  | §3,9    | Bilevel (1-bit) + 4-bit gray + PackBits | ☐ |
