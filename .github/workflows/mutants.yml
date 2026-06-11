@@ -44,7 +44,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-mutants (pinned via mise)
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
+        with:
+          # Only cargo-mutants — a bare `mise install` would also build every other
+          # mise.toml tool (convco, cargo-edit, …) that this job doesn't need.
+          install_args: cargo:cargo-mutants
       - name: Compute changed regions vs base branch
         run: |
           git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
@@ -74,7 +78,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-mutants (pinned via mise)
-        uses: jdx/mise-action@v2
+        uses: jdx/mise-action@v4
+        with:
+          # Only cargo-mutants — a bare `mise install` would also build every other
+          # mise.toml tool (convco, cargo-edit, …) that this job doesn't need.
+          install_args: cargo:cargo-mutants
       - name: Run cargo-mutants over the whole workspace
         # Informational: surviving mutants in existing code don't fail the run.
         continue-on-error: true
