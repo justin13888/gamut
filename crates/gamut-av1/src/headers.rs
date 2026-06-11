@@ -108,6 +108,7 @@ pub(crate) fn sequence_header_payload(
     width: u32,
     height: u32,
     lossy: bool,
+    superres: bool,
 ) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.put_bits(u32::from(cfg.seq_profile), 3); // seq_profile
@@ -127,10 +128,10 @@ pub(crate) fn sequence_header_payload(
     // lossless path stays DC-only and emits no `use_filter_intra` symbols.
     w.put_bit(u8::from(lossy)); // enable_filter_intra
     w.put_bit(0); // enable_intra_edge_filter = 0
-    w.put_bit(0); // enable_superres = 0
+    w.put_bit(u8::from(superres)); // enable_superres
     // CDEF (§7.15) is used only on the lossy path; the lossless path is CodedLossless (CDEF off).
     w.put_bit(u8::from(lossy)); // enable_cdef
-    w.put_bit(0); // enable_restoration = 0
+    w.put_bit(u8::from(lossy)); // enable_restoration (1 on the lossy path: luma Wiener)
 
     // color_config(): high_bitdepth=0; (profile 1 ⇒ mono_chrome=0 inferred);
     // color_description_present_flag=1; cp/tc/mc; (mc==IDENTITY ⇒ color_range/subsampling
@@ -166,6 +167,7 @@ pub(crate) fn frame_header_payload(
     mi_cols: u32,
     mi_rows: u32,
     base_q_idx: u8,
+    superres_coded_denom: Option<u8>,
 ) -> Vec<u8> {
     let lossless = base_q_idx == 0;
     let mut w = BitWriter::new();
@@ -179,12 +181,19 @@ pub(crate) fn frame_header_payload(
         // it to 1), so 0 is emitted.
         w.put_bit(0); // force_integer_mv
     }
-    // frame_size_override_flag=0; order_hint f(0); primary_ref_frame inferred; refresh_frame_flags
-    // inferred — all no bits.
-    // frame_size(): no override ⇒ from seq header; superres disabled. render_size():
+    // frame_size_override_flag=0 (reduced_still_picture_header); order_hint f(0); primary_ref_frame
+    // inferred; refresh_frame_flags inferred — all no bits.
+    // frame_size(): no override ⇒ UpscaledWidth from the sequence header. superres_params (§5.9.8) is
+    // present only when enable_superres; then FrameWidth = downscaled and the reconstruction is
+    // upscaled back to UpscaledWidth.
+    if let Some(cd) = superres_coded_denom {
+        w.put_bit(1); // use_superres
+        w.put_bits(u32::from(cd), 3); // coded_denom (SuperresDenom = coded_denom + 9)
+    }
+    // render_size():
     w.put_bit(0); // render_and_frame_size_different = 0
-    if !lossless {
-        // allow_screen_content_tools && UpscaledWidth == FrameWidth (no superres) ⇒ allow_intrabc.
+    if !lossless && superres_coded_denom.is_none() {
+        // allow_intrabc is coded only when UpscaledWidth == FrameWidth (i.e. no superres).
         w.put_bit(0); // allow_intrabc = 0
     }
     // disable_frame_end_update_cdf inferred 1.
@@ -278,7 +287,15 @@ pub(crate) fn frame_header_payload(
         w.put_bits(sec_code(y_sec), 2); // cdef_y_sec_strength[0]
         w.put_bits(uv_pri as u32, 4); // cdef_uv_pri_strength[0]
         w.put_bits(sec_code(uv_sec), 2); // cdef_uv_sec_strength[0]
-        // lr_params(): enable_restoration = 0 ⇒ no bits.
+        // lr_params() (§5.9.20): luma RESTORE_WIENER, chroma RESTORE_NONE. `lr_type` is 2 bits per
+        // plane (`Remap_Lr_Type`: 0=NONE, 2=WIENER); only luma uses restoration.
+        w.put_bits(2, 2); // FrameRestorationType[0] = RESTORE_WIENER
+        w.put_bits(0, 2); // FrameRestorationType[1] = RESTORE_NONE
+        w.put_bits(0, 2); // FrameRestorationType[2] = RESTORE_NONE
+        // usesLr ⇒ lr_unit_shift. Not a 128×128 superblock ⇒ f(1) then (if set) lr_unit_extra f(1).
+        // shift = 2 ⇒ LoopRestorationSize = 256. usesChromaLr = 0 ⇒ no lr_uv_shift.
+        w.put_bit(1); // lr_unit_shift bit 0
+        w.put_bit(1); // lr_unit_extra ⇒ lr_unit_shift = 2
         w.put_bit(1); // read_tx_mode: tx_mode_select = 1 ⇒ TX_MODE_SELECT (per-block tx_depth)
         // frame_reference_mode / skip_mode_params (intra) ⇒ no bits. allow_warped_motion = 0.
     }

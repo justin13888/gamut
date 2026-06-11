@@ -1,9 +1,26 @@
-# mise-managed dev tools (https://mise.jdx.dev). The Rust toolchain itself stays pinned in
-# `rust-toolchain.toml`; mise only provides extra CLIs not covered by rustup.
+# Developer tooling for gamut, managed by mise (https://mise.jdx.dev).
+#
+# Bootstrap after cloning:
+#   mise trust && mise install
+# Activate mise in your shell (e.g. `eval "$(mise activate zsh)"`) so these land on
+# PATH — the git hooks (lefthook) and `just` recipes invoke them directly.
+#
+# Not managed here:
+#   * Rust   — pinned by rustup via rust-toolchain.toml.
+#   * nasm, pkg-config — system packages (apt/brew); they lack clean mise backends and
+#     are only needed to build the vendored dav1d/libavif cross-check oracles.
+
 [tools]
-# Mutation-testing CLI. Built from the pinned crate version via the `cargo` backend, which
-# works natively on every platform (cargo-mutants ships no aarch64 release binary, so the
-# prebuilt `ubi`/`github` backends can't serve Apple Silicon). Pinned for reproducibility;
-# bump deliberately. Invoked as `cargo mutants` (see `.cargo/mutants.toml` and the `mutants*`
-# recipes in the justfile). First install compiles from source; mise caches the result.
-"cargo:cargo-mutants" = "27.1.0"
+# Dev workflow
+just                          = "1.52.0"
+lefthook                      = "2.1.9"
+jq                            = "1.8.1"
+"ubi:convco/convco"           = "0.6.4"   # conventional-commit linter (GitHub release binary)
+"aqua:taiki-e/cargo-llvm-cov" = "0.8.7"   # coverage (taiki-e prebuilt binary)
+"cargo:cargo-edit"            = "0.13.11" # `cargo set-version` for `just bump` (compiled from source)
+"cargo:cargo-mutants"         = "27.1.0"
+
+# Native build deps for the cross-check tests (build vendored dav1d/libavif from third_party/)
+cmake                         = "4.3.3"
+ninja                         = "1.13.2"
+meson                         = "1.11.1"  # pipx backend — needs a python3 on PATH

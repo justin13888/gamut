@@ -88,25 +88,25 @@ format.
 
 ## Crates
 
-| Crate             | Purpose                                                                 | Status      |
-| ----------------- | ----------------------------------------------------------------------- | ----------- |
-| `gamut`           | Umbrella crate; re-exports the format crates behind Cargo features      | scaffold    |
-| `gamut-core`      | Core traits (`Encoder`/`Decoder`), image buffers, dimensions, errors    | scaffold    |
-| `gamut-color`     | Color spaces, pixel formats, bit depths, chroma subsampling, transfers  | placeholder |
-| `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering            | placeholder |
-| `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)       | placeholder |
-| `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                                | placeholder |
-| `gamut-riff`      | RIFF container utilities (WebP)                                         | implemented |
-| `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF    | M0 lossless |
-| `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor         | placeholder |
-| `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                 | M0 lossless |
-| `gamut-jxl`       | JPEG XL encoder/decoder                                                 | placeholder |
-| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                             | VP8L lossless |
-| `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                      | placeholder |
-| `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                         | placeholder |
-| `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives        | sandbox     |
-| `gamut-wasm`      | WebAssembly bindings                                                    | placeholder |
-| `gamut-ffi`       | C-compatible FFI bindings                                               | placeholder |
+| Crate             | Purpose                                                                | Status                                 |
+| ----------------- | ---------------------------------------------------------------------- | -------------------------------------- |
+| `gamut`           | Umbrella crate; re-exports the format crates behind Cargo features     | implemented                            |
+| `gamut-core`      | Core traits (`Encoder`/`Decoder`), image buffers, dimensions, errors   | WIP                                    |
+| `gamut-color`     | Color spaces, pixel formats, bit depths, chroma subsampling, transfers | stabilizing api                        |
+| `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering           | stabilizing api                        |
+| `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)      | stabilizing api                        |
+| `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | finalizing api                         |
+| `gamut-riff`      | RIFF container utilities (WebP)                                        | finalizing api                         |
+| `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF   | implemented lossless and lossy (alpha) |
+| `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
+| `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                | stabilizing with gamut-av1             |
+| `gamut-jxl`       | JPEG XL encoder/decoder                                                | placeholder                            |
+| `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                            | implemented VP8 + VP8L (+alpha)        |
+| `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                     | placeholder                            |
+| `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
+| `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives       | ready for use                          |
+| `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
+| `gamut-ffi`       | C-compatible FFI bindings                                              | placeholder                            |
 
 All cargo metadata except per-crate `version` is centralized in the root
 `[workspace.package]` / `[workspace.dependencies]`; each crate inherits the shared fields via
@@ -116,25 +116,35 @@ All cargo metadata except per-crate `version` is centralized in the root
 
 - [Rust (rustup)](https://rustup.rs) -- toolchain (channel pinned via `rust-toolchain.toml`);
   see [Minimum Supported Rust Version](#minimum-supported-rust-version) for the lower bound
-- [just](https://github.com/casey/just) -- command runner
-- [Lefthook](https://github.com/evilmartians/lefthook) -- git hooks manager
-- [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) -- code coverage tool
-- [jq](https://jqlang.github.io/jq/) -- JSON processor (optional; used by `just versions`)
-- [cargo-edit](https://github.com/killercup/cargo-edit) -- provides `cargo set-version` (optional; used by `just bump`)
+- [mise](https://mise.jdx.dev) -- provisions the rest of the dev tooling from `mise.toml`:
+  [just](https://github.com/casey/just) (command runner),
+  [Lefthook](https://github.com/evilmartians/lefthook) (git hooks),
+  [convco](https://convco.github.io) (conventional-commit linter),
+  [jq](https://jqlang.github.io/jq/),
+  [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (coverage),
+  [cargo-edit](https://github.com/killercup/cargo-edit) (`cargo set-version` for `just bump`),
+  and the C build tools [CMake](https://cmake.org), [Ninja](https://ninja-build.org) and
+  [Meson](https://mesonbuild.com). After cloning, run `mise trust && mise install`, then
+  activate mise in your shell (e.g. `eval "$(mise activate zsh)"`) so these land on `PATH` —
+  the git hooks and `just` recipes invoke them directly.
 
 Building the **shipped crates** needs only the Rust toolchain — they are pure Rust with no C
 dependencies. Building the **cross-check tests** additionally needs a C toolchain plus
-[meson](https://mesonbuild.com), [ninja](https://ninja-build.org),
-[nasm](https://www.nasm.us) and [CMake](https://cmake.org): those tests link reference
-decoders (dav1d, libavif) built from the git submodules under `third_party/` via the dev-only
-oracle crates in `tooling/`. Nothing is taken from system-installed decoders. On Debian/Ubuntu:
-`sudo apt-get install meson ninja-build nasm cmake pkg-config`.
+[nasm](https://www.nasm.us) and pkg-config — the two build deps that stay system packages
+(CMake, Ninja and Meson come from mise). Those tests link reference decoders (dav1d, libavif)
+built from the git submodules under `third_party/` via the dev-only oracle crates in `tooling/`;
+nothing is taken from system-installed decoders. Install the two on Debian/Ubuntu with
+`sudo apt-get install nasm pkg-config` (macOS: `brew install nasm pkg-config`).
 
 ## Quick Start
 
 ```bash
 # The cross-check tests link vendored dav1d/libavif from third_party/ submodules.
 git submodule update --init --recursive
+
+# Dev tooling + git hooks (see Prerequisites; also needs system nasm + pkg-config).
+mise trust && mise install
+lefthook install
 
 cargo build --workspace
 cargo test --workspace
@@ -149,6 +159,7 @@ cargo test --workspace
 | `just format`    | Format code                              |
 | `just lint`      | Lint with Clippy (warnings as errors)    |
 | `just lint-fix`  | Lint and auto-fix                        |
+| `just check-commits` | Check commits are Conventional Commits |
 | `just coverage`  | Run tests with coverage (min 80%)        |
 | `just versions`  | List every crate's version               |
 | `just bump <crate> <level>` | Bump one crate (`major`\|`minor`\|`patch`) |
@@ -171,14 +182,19 @@ Policy:
 
 ## Git Hooks
 
-This project uses [Lefthook](https://github.com/evilmartians/lefthook). Pre-commit hooks
-auto-fix formatting and linting on staged files. Pre-push hooks run format checks, lint
-checks, tests, and a coverage gate.
+This project uses [Lefthook](https://github.com/evilmartians/lefthook) (provisioned by mise);
+run `lefthook install` once after `mise install` to register the hooks. The `commit-msg` hook
+rejects messages that aren't [Conventional Commits](https://www.conventionalcommits.org)
+(policy in `.convco`). Pre-commit hooks auto-fix formatting and linting on staged files.
+Pre-push hooks re-check the branch's commit messages and run format checks, lint checks, tests,
+and a coverage gate. The hooks call mise-managed tools (convco, cargo-llvm-cov), so keep mise
+activated in your shell.
 
 ## CI/CD
 
-GitHub Actions runs format checks, linting, tests, and coverage on pushes to `master` and
-pull requests.
+GitHub Actions provisions tooling via [mise](https://mise.jdx.dev) and runs format checks,
+linting, tests, and coverage on pushes to `master` and pull requests. Pull requests
+additionally validate every commit message against Conventional Commits with convco.
 
 ## Code Coverage
 
@@ -214,6 +230,10 @@ as needed. Each crate keeps its own `CHANGELOG.md` and is tagged and GitHub-rele
 `<crate>-v<version>` (e.g. `gamut-core-v0.2.0`) — there is no single repo-wide version tag,
 so the umbrella `gamut` crate's version serves as the headline "project" version. Run
 `just versions` to see every crate's current version at a glance.
+
+Because release-plz keys versions and changelogs off commit messages, those messages are
+enforced as [Conventional Commits](https://www.conventionalcommits.org) — by the git hooks
+locally and the CI PR check (see [Git Hooks](#git-hooks)) — to keep the changelogs clean.
 
 ## Releases
 

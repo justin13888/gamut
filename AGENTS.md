@@ -34,7 +34,10 @@ Dependency edges (a crate depends on those to its right):
 All codec implementations must follow the official specs that should be attached in `references/`
 
 ## Validation
-Validate changes:
+
+Dev tooling (just, lefthook, convco, cargo-llvm-cov, CMake/Ninja/Meson, …) is provisioned by
+[mise](https://mise.jdx.dev): run `mise install` and activate mise in your shell. Validate
+changes:
 
 ```bash
 just test            # correctness
@@ -42,12 +45,14 @@ just format-check    # formatting
 just lint            # lint (Clippy, warnings as errors)
 just coverage        # coverage (minimum 80%)
 just mutants         # mutation testing (run `mise install` once; heavier — needs submodules + C toolchain)
+just check-commits   # commit messages are Conventional Commits
 ```
 
 The shipped crates are pure Rust, but the decoder cross-check tests link reference decoders
 (dav1d, libavif) built from the `third_party/` git submodules via the dev-only oracle crates in
 `tooling/`. Running the tests therefore needs the submodules checked out
-(`git submodule update --init --recursive`) and meson/ninja/nasm/cmake/pkg-config on `PATH`.
+(`git submodule update --init --recursive`) and the build tools on `PATH` — CMake/Ninja/Meson
+come from mise; nasm and pkg-config are system packages (`apt-get install nasm pkg-config`).
 No system-installed decoder binaries are used.
 
 ## Conventions
@@ -69,5 +74,6 @@ and releases do not guarantee version consistency across crates. Only `version` 
 all other metadata (`edition`, `rust-version`/MSRV, license, repository) is workspace-owned
 and inherited via `*.workspace = true`. Version bumps, per-crate changelogs, and crates.io
 publishing are automated by release-plz from conventional-commit history — write conventional
-commit messages and do not hand-edit versions for routine changes. `just versions` lists every
+commit messages (enforced by convco via the `commit-msg`/`pre-push` git hooks and the CI PR
+check) and do not hand-edit versions for routine changes. `just versions` lists every
 crate's current version; `just bump <crate> <level>` is a manual escape hatch.

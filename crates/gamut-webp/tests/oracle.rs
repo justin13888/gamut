@@ -11,7 +11,10 @@
 
 mod common;
 
-use common::{libwebp_decode_rgba, libwebp_encode_lossless_rgba, libwebp_get_info, pattern_rgba};
+use common::{
+    libwebp_decode_rgba, libwebp_encode_lossless_rgba, libwebp_get_info, pattern_rgba,
+    photo_like_rgba,
+};
 use gamut_webp::{Dimensions, WebpDecoder, WebpEncoder};
 
 /// The standard dimension matrix exercised by the differential tests, including the awkward
@@ -25,6 +28,13 @@ const DIMENSIONS: &[(u32, u32)] = &[
     (255, 1),
     (1, 255),
 ];
+
+/// Larger canvases that push past the small-block regime the `DIMENSIONS` matrix (≤255px) stays in:
+/// VP8 macroblock grids spanning many rows, and VP8L entropy-image regions plus LZ77 back-references
+/// whose distances only exceed 256 above this size. `(300, 70)` is deliberately not a multiple of
+/// libwebp's histogram block size, so it straddles entropy-image tile boundaries.
+const LARGE_DIMENSIONS: &[(u32, u32)] =
+    &[(256, 256), (384, 288), (640, 480), (1024, 768), (300, 70)];
 
 /// Drops the alpha byte of an interleaved RGBA buffer, yielding interleaved RGB.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
@@ -158,6 +168,35 @@ fn libwebp_decodes_every_gamut_encoder_path() {
     assert_gamut_encode_libwebp_decode(&many, w, h, "many-color");
 }
 
+#[test]
+fn gamut_decodes_libwebp_lossless_realistic_and_large() {
+    // Photographic-like content over the small matrix *and* large canvases (>256px): libwebp encodes
+    // with whatever transforms/entropy-images/long back-references it likes, and gamut must decode
+    // back to the exact source. This reaches VP8L decode paths (multi-tile entropy images, long LZ77
+    // distances) that the ≤255px algebraic patterns never exercise.
+    for &(w, h) in DIMENSIONS.iter().chain(LARGE_DIMENSIONS) {
+        let rgba = photo_like_rgba(w, h, 0x51ed);
+        let webp = libwebp_encode_lossless_rgba(&rgba, w, h);
+        let mut out = Vec::new();
+        let dims = WebpDecoder::new()
+            .decode_to_rgb8(&webp, &mut out)
+            .expect("gamut decode");
+        assert_eq!((dims.width, dims.height), (w, h), "dims at {w}x{h}");
+        assert_eq!(out, rgba_to_rgb(&rgba), "pixel mismatch at {w}x{h}");
+    }
+}
+
+#[test]
+fn libwebp_decodes_gamut_lossless_realistic_and_large() {
+    // The reverse direction over the same realistic + large matrix: gamut encodes, the reference
+    // decodes back to source — pinning gamut's VP8L *encoder* paths (entropy images, long backward
+    // references) as conformant at scale, not just on tiny inputs.
+    for &(w, h) in DIMENSIONS.iter().chain(LARGE_DIMENSIONS) {
+        let rgb = rgba_to_rgb(&photo_like_rgba(w, h, 0x9a1c));
+        assert_gamut_encode_libwebp_decode(&rgb, w, h, &format!("realistic {w}x{h}"));
+    }
+}
+
 /// Builds a structured YUV 4:2:0 image (real residuals to exercise the transforms/tokens).
 fn synthetic_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
     let (wu, hu) = (w as usize, h as usize);
@@ -195,6 +234,56 @@ fn detailed_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
         .collect();
     let u = (0..cw * ch).map(|i| ((i * 3) & 0xff) as u8).collect();
     let v = (0..cw * ch).map(|i| ((i * 9 + 70) & 0xff) as u8).collect();
+    gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
+}
+
+/// Builds a YUV 4:2:0 image with **photographic-like statistics** directly in the YUV domain (so the
+/// bit-exact YUV conformance gate stays independent of the RGB↔YCbCr layer, which PR4 pins
+/// separately): a smooth luma gradient + low-amplitude detail + hard region edges, with gently
+/// varying chroma. RNG-free and `seed`-parameterised, like [`common::photo_like_rgba`].
+fn photo_like_yuv(w: u32, h: u32, seed: u32) -> gamut_color::Yuv420 {
+    let (wu, hu) = (w as usize, h as usize);
+    let (cw, ch) = (
+        gamut_color::Yuv420::chroma_width(w) as usize,
+        gamut_color::Yuv420::chroma_height(h) as usize,
+    );
+    let hash = |x: i64, y: i64, k: i64| -> i64 {
+        let mut v = x.wrapping_mul(374_761_393)
+            ^ y.wrapping_mul(668_265_263)
+            ^ k.wrapping_mul(2_654_435_761)
+            ^ i64::from(seed).wrapping_mul(2_246_822_519);
+        v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+        (v ^ (v >> 16)) & 0xff
+    };
+    let clamp = |v: i64| v.clamp(0, 255) as u8;
+    let (wi, hi) = (wu.max(1) as i64, hu.max(1) as i64);
+    let y = (0..wu * hu)
+        .map(|i| {
+            let (x, yy) = ((i % wu) as i64, (i / wu) as i64);
+            // Smooth diagonal base + small detail + sharp 8-region steps (B_PRED / loop-filter bait).
+            let base = x * 170 / wi + yy * 60 / hi;
+            let detail = (hash(x, yy, 0) - 128) / 10;
+            let edge = if (x * 4 / wi + yy * 4 / hi) % 2 == 0 {
+                28
+            } else {
+                0
+            };
+            clamp(base + detail + edge)
+        })
+        .collect();
+    let (cwi, chi) = (cw.max(1) as i64, ch.max(1) as i64);
+    let u = (0..cw * ch)
+        .map(|i| {
+            let (x, yy) = ((i % cw) as i64, (i / cw) as i64);
+            clamp(100 + x * 70 / cwi + (hash(x, yy, 1) - 128) / 16)
+        })
+        .collect();
+    let v = (0..cw * ch)
+        .map(|i| {
+            let (x, yy) = ((i % cw) as i64, (i / cw) as i64);
+            clamp(140 + yy * 60 / chi + (hash(x, yy, 2) - 128) / 16)
+        })
+        .collect();
     gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
 }
 
@@ -353,6 +442,41 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
     }
 }
 
+#[test]
+fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
+    // The same tier-3 conformance gate as above, but on photographic-like YUV and on canvases far
+    // larger than the small synthetic frames: macroblock grids spanning dozens of rows (8-partition
+    // routing across all of them) and realistic residual/token distributions. gamut's own decoder and
+    // libwebp must still agree bit-for-bit on the gamut-produced stream.
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::vp8::frame::{decode_frame, encode_frame};
+
+    // Large sizes span many MB rows (768/16 = 48, so 8-partition routing touches every row) and an
+    // awkward width (513×97). gamut's encoder is fast enough here that the full range stays cheap.
+    let dims = [
+        (32u32, 32u32),
+        (64, 48),
+        (256, 256),
+        (384, 288),
+        (640, 480),
+        (1024, 768),
+        (513, 97),
+    ];
+    for &(w, h) in &dims {
+        for &quant_index in &[12u8, 56] {
+            let (payload, _) = encode_frame(&photo_like_yuv(w, h, 0x7e57), quant_index);
+            let webp = write_simple_lossy(&payload);
+            let lib = libwebp_decode_yuv(&webp);
+            let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+            assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
+            assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{quant_index}");
+            assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{quant_index}");
+            assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{quant_index}");
+        }
+    }
+}
+
 /// Extracts the `VP8 ` (lossy) chunk payload from a RIFF/WebP file.
 fn vp8_payload(webp: &[u8]) -> Vec<u8> {
     use gamut_riff::{RiffReader, WebpChunkId};
@@ -393,6 +517,249 @@ fn gamut_decodes_libwebp_lossy_bit_exact() {
             assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{q}");
             assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{q}");
         }
+    }
+}
+
+#[test]
+fn gamut_decodes_libwebp_lossy_realistic_and_large() {
+    // The reverse direction at scale: libwebp lossy-encodes photographic RGBA over a lossy-appropriate
+    // small matrix plus the full LARGE_DIMENSIONS (up to 1024×768), and gamut's decoder must reproduce
+    // libwebp's own YUV bit-for-bit — pinning the decode paths (per-segment filter levels, probability
+    // updates, partitioning) on frames far larger and more varied than the tiny synthetic inputs.
+    use common::{libwebp_decode_yuv, libwebp_encode_lossy_rgba};
+
+    let small = [
+        (16u32, 16u32),
+        (32, 32),
+        (64, 48),
+        (49, 33),
+        (80, 17),
+        (255, 3),
+    ];
+    for &(w, h) in small.iter().chain(LARGE_DIMENSIONS) {
+        for q in [20.0f32, 80.0] {
+            let rgba = photo_like_rgba(w, h, 0x1d0f);
+            let webp = libwebp_encode_lossy_rgba(&rgba, w, h, q);
+            let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
+                .expect("gamut decode")
+                .to_yuv420();
+            let lib = libwebp_decode_yuv(&webp);
+            assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
+            assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{q}");
+            assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{q}");
+            assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{q}");
+        }
+    }
+}
+
+#[test]
+fn gamut_decodes_libwebp_lossy_forced_features_bit_exact() {
+    // The one-shot `WebPEncodeRGBA` the other reverse-direction tests use can't independently reach
+    // the VP8 feature surface — it runs at a fixed method with the complex loop filter and libwebp's
+    // default segmentation. Drive libwebp's *advanced* encoder to force each knob in turn (simple vs
+    // complex filter, 1..=4 segments, low/high effort, filter strength, then several at once) and
+    // require gamut's decoder to reproduce libwebp's own YUV bit-for-bit on every variant — pinning
+    // the decoder against streams a production encoder can emit but cwebp's defaults rarely do.
+    use common::{LibwebpLossyConfig, libwebp_decode_yuv, libwebp_encode_lossy_rgba_config};
+
+    let base = LibwebpLossyConfig {
+        quality: 75.0,
+        filter_type: 1,
+        segments: 1,
+        method: 4,
+        filter_strength: 60,
+    };
+
+    // Guard: prove the advanced config actually reaches the encoder. This is a *conformance* gate
+    // (gamut must match whatever libwebp emits), so it would still pass if the forcing were silently
+    // ignored — but then it would add nothing over the default-config reverse oracle. Require distinct
+    // feature settings to produce distinct streams for the same input. (Token-partition count is *not*
+    // guarded here: libwebp's encoder ignores `config.partitions` and always writes one partition —
+    // see `LibwebpLossyConfig` — so that path is covered forward in `gamut_lossy_options_*` instead.)
+    {
+        let (w, h) = (64u32, 48);
+        let rgba = photo_like_rgba(w, h, 0x00c0_ffee);
+        let one = libwebp_encode_lossy_rgba_config(&rgba, w, h, &base);
+        let simple = libwebp_encode_lossy_rgba_config(
+            &rgba,
+            w,
+            h,
+            &LibwebpLossyConfig {
+                filter_type: 0,
+                ..base
+            },
+        );
+        assert_ne!(
+            one, simple,
+            "switching to the simple loop filter must change the stream"
+        );
+        let multi_seg = libwebp_encode_lossy_rgba_config(
+            &rgba,
+            w,
+            h,
+            &LibwebpLossyConfig {
+                segments: 4,
+                ..base
+            },
+        );
+        assert_ne!(
+            one, multi_seg,
+            "forcing four segments must change the stream"
+        );
+    }
+
+    let mut cases: Vec<(String, LibwebpLossyConfig)> = Vec::new();
+    for filter_type in [0, 1] {
+        cases.push((
+            format!("filter_type={filter_type}"),
+            LibwebpLossyConfig {
+                filter_type,
+                ..base
+            },
+        ));
+    }
+    for segments in [1, 2, 3, 4] {
+        cases.push((
+            format!("segments={segments}"),
+            LibwebpLossyConfig { segments, ..base },
+        ));
+    }
+    for method in [0, 3, 6] {
+        cases.push((
+            format!("method={method}"),
+            LibwebpLossyConfig { method, ..base },
+        ));
+    }
+    for filter_strength in [0, 30] {
+        cases.push((
+            format!("filter_strength={filter_strength}"),
+            LibwebpLossyConfig {
+                filter_strength,
+                ..base
+            },
+        ));
+    }
+    cases.push((
+        "combined".into(),
+        LibwebpLossyConfig {
+            filter_type: 0,
+            segments: 4,
+            method: 6,
+            filter_strength: 20,
+            ..base
+        },
+    ));
+
+    // (128, 96) spans six MB rows, exercising per-segment filter levels across many rows.
+    for &(w, h) in &[(32u32, 32u32), (64, 48), (49, 33), (128, 96)] {
+        let rgba = photo_like_rgba(w, h, 0x00c0_ffee);
+        for (label, cfg) in &cases {
+            let webp = libwebp_encode_lossy_rgba_config(&rgba, w, h, cfg);
+            let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
+                .expect("gamut decode")
+                .to_yuv420();
+            let lib = libwebp_decode_yuv(&webp);
+            assert_eq!((lib.width, lib.height), (w, h), "dims {label} at {w}x{h}");
+            assert_eq!(gamut.y(), lib.y.as_slice(), "Y {label} at {w}x{h}");
+            assert_eq!(gamut.u(), lib.u.as_slice(), "U {label} at {w}x{h}");
+            assert_eq!(gamut.v(), lib.v.as_slice(), "V {label} at {w}x{h}");
+        }
+    }
+}
+
+#[test]
+fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
+    // The color-conversion gate. WebP/VP8 is *limited-range* BT.601, and gamut-color now matches
+    // libwebp's per-pixel RGB→YUV (src/dsp/yuv.h `VP8RGBToY/U/V`) exactly: the luma plane is
+    // bit-exact, and chroma differs by ≤2 only because gamut box-averages 2×2 before converting while
+    // libwebp sums-then-converts (a rounding-order difference). A regression to full-range — the bug
+    // this fix closed — would shift luma by ~17 and fail the `assert_eq` below.
+    use common::libwebp_rgba_to_yuv;
+    use gamut_color::{Bt601Range, Yuv420};
+
+    let chroma_max = |a: &[u8], b: &[u8]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (i32::from(*x) - i32::from(*y)).abs())
+            .max()
+            .unwrap_or(0)
+    };
+    for &(w, h) in DIMENSIONS.iter().chain(&[(128u32, 96u32), (300, 70)]) {
+        let rgba = photo_like_rgba(w, h, 0x5eed);
+        let gamut =
+            Yuv420::from_rgb8(&rgba_to_rgb(&rgba), w, h, Bt601Range::Limited).expect("from_rgb8");
+        let lib = libwebp_rgba_to_yuv(&rgba, w, h);
+        assert_eq!(
+            gamut.y(),
+            lib.y.as_slice(),
+            "luma must be bit-exact at {w}x{h}"
+        );
+        assert!(chroma_max(gamut.u(), &lib.u) <= 2, "U within 2 at {w}x{h}");
+        assert!(chroma_max(gamut.v(), &lib.v) <= 2, "V within 2 at {w}x{h}");
+    }
+}
+
+#[test]
+fn gamut_lossy_webp_decodes_correctly_in_libwebp() {
+    // End-to-end interop regression guard: gamut encodes lossy WebP, libwebp (the browser-equivalent
+    // decoder) decodes it, and the result must match the source within the lossy budget — *not* the
+    // systematic per-sample colour shift the old full-range encoding produced in every standard
+    // decoder. Mean absolute error is the robust metric (lossy edges spike the max).
+    for &(w, h) in &[(64u32, 48u32), (128, 96), (49, 33)] {
+        let rgb = rgba_to_rgb(&photo_like_rgba(w, h, 0x1cef));
+        let mut webp = Vec::new();
+        WebpEncoder::lossy(90)
+            .encode_rgb8(
+                &rgb,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+                &mut webp,
+            )
+            .expect("gamut encode");
+        let lib = rgba_to_rgb(&libwebp_decode_rgba(&webp).rgba);
+        let mae: f64 = lib
+            .iter()
+            .zip(&rgb)
+            .map(|(a, b)| f64::from((i32::from(*a) - i32::from(*b)).unsigned_abs()))
+            .sum::<f64>()
+            / rgb.len() as f64;
+        assert!(
+            mae <= 8.0,
+            "gamut→libwebp interop MAE {mae:.2} too high at {w}x{h} (colour shift regression?)"
+        );
+    }
+}
+
+#[test]
+fn gamut_decodes_libwebp_lossy_close_to_libwebp() {
+    // The decode direction: gamut and libwebp must decode the *same* libwebp-encoded stream to close
+    // RGB. The per-pixel YUV→RGB inverse is bit-exact with libwebp (pinned in gamut-color's
+    // `limited_range_matches_libwebp_anchors` unit test); the residual here is chroma *upsampling*
+    // (gamut nearest-replicates, libwebp uses fancy bilinear) — a quality choice (issue #32), not a
+    // colour error. A regression of the inverse back to full-range would blow well past this bound.
+    use common::libwebp_encode_lossy_rgba;
+
+    let max_abs = |a: &[u8], b: &[u8]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (i32::from(*x) - i32::from(*y)).abs())
+            .max()
+            .unwrap_or(0)
+    };
+    for &(w, h) in &[(64u32, 48u32), (128, 96), (49, 33)] {
+        let rgba = photo_like_rgba(w, h, 0x2ab0);
+        let webp = libwebp_encode_lossy_rgba(&rgba, w, h, 90.0);
+        let mut gamut = Vec::new();
+        WebpDecoder::new()
+            .decode_to_rgb8(&webp, &mut gamut)
+            .expect("gamut decode");
+        let lib = rgba_to_rgb(&libwebp_decode_rgba(&webp).rgba);
+        assert!(
+            max_abs(&gamut, &lib) <= 24,
+            "gamut vs libwebp decode differs by >24 at {w}x{h} (more than chroma upsampling)"
+        );
     }
 }
 

@@ -64,6 +64,10 @@ pub static PARTITION_W64: [[u16; 10]; 4] = [
 /// `Default_Skip_Cdf`, indexed [ctx].
 pub static SKIP: [[u16; 2]; 3] = [[31671, 32768], [16515, 32768], [4576, 32768]];
 
+/// `restore_wiener` (§9.4): the bool selecting RESTORE_WIENER vs RESTORE_NONE for a restoration unit
+/// when the plane's frame restoration type is WIENER. Default (static) CDF.
+pub static RESTORE_WIENER: [u16; 2] = [11570, 32768];
+
 /// `Default_Palette_Y_Mode_Cdf[PALETTE_BLOCK_SIZE_CONTEXTS][PALETTE_Y_MODE_CONTEXTS]` (§9.4): the
 /// `has_palette_y` flag, indexed by the block-size context (`Mi_W_Log2 + Mi_H_Log2 - 2`) and the
 /// neighbour context (`#{above,left palettes present}`).

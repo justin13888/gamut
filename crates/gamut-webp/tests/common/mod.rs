@@ -79,6 +79,59 @@ pub fn libwebp_decode_yuv(webp: &[u8]) -> DecodedYuv {
     }
 }
 
+/// Runs libwebp's BT.601 RGB→YUV 4:2:0 conversion — the same one `WebPEncode` applies to lossy input
+/// — on interleaved RGBA, returning the YUV planes. Used to pin gamut-color's own conversion against
+/// the reference *within a tolerance*: the exact rounding and chroma downsampling are
+/// implementation-defined, so this is not a bit-exact surface. Panics (these are tests) on a bad
+/// buffer size or a libwebp error.
+#[must_use]
+pub fn libwebp_rgba_to_yuv(rgba: &[u8], width: u32, height: u32) -> DecodedYuv {
+    let expected = width as usize * height as usize * 4;
+    assert_eq!(
+        rgba.len(),
+        expected,
+        "RGBA buffer is not width*height*4 bytes"
+    );
+    // SAFETY: the picture is zero-initialised then Init-filled. With the default `use_argb = 0`,
+    // `WebPPictureImportRGBA` runs libwebp's RGBA→YUV conversion in-line (see `Import` →
+    // `ImportYUVAFromRGBA` in picture_csp_enc.c), filling the y/u/v planes (valid for `rows * stride`
+    // bytes), which we copy out per row before freeing the picture.
+    unsafe {
+        let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPPictureInit(&mut pic) != 0,
+            "WebPPictureInit failed"
+        );
+        pic.width = width as c_int;
+        pic.height = height as c_int;
+        assert!(
+            libwebp_sys::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), width as c_int * 4) != 0,
+            "WebPPictureImportRGBA failed"
+        );
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+        let copy_plane = |ptr: *const u8, row_stride: usize, pw: usize, ph: usize| {
+            let mut out = vec![0u8; pw * ph];
+            for row in 0..ph {
+                let src = slice::from_raw_parts(ptr.add(row * row_stride), pw);
+                out[row * pw..row * pw + pw].copy_from_slice(src);
+            }
+            out
+        };
+        let y = copy_plane(pic.y, pic.y_stride as usize, w, h);
+        let u = copy_plane(pic.u, pic.uv_stride as usize, cw, ch);
+        let v = copy_plane(pic.v, pic.uv_stride as usize, cw, ch);
+        libwebp_sys::WebPPictureFree(&mut pic);
+        DecodedYuv {
+            width,
+            height,
+            y,
+            u,
+            v,
+        }
+    }
+}
+
 /// An RGBA image decoded by libwebp: interleaved 8-bit `R,G,B,A` pixels plus dimensions.
 pub struct DecodedRgba {
     /// Image width in pixels.
@@ -166,6 +219,108 @@ pub fn libwebp_encode_lossy_rgba(rgba: &[u8], width: u32, height: u32, quality: 
     bytes
 }
 
+/// libwebp lossy-encoder knobs the one-shot [`libwebp_encode_lossy_rgba`] (`WebPEncodeRGBA`) cannot
+/// reach. Driving these through the advanced `WebPEncode` path lets the reverse-direction oracle
+/// *force* decode features a real encoder can emit but cwebp's defaults rarely do — the simple loop
+/// filter, a chosen segment count, low/high encoder effort — so gamut's decoder is pinned against the
+/// full VP8 surface rather than whatever libwebp happens to pick.
+///
+/// Note: `WebPConfig.partitions` (token-partition count) is deliberately absent — libwebp's encoder
+/// only range-checks it and always writes a single partition (`config_enc.c`), so it cannot source a
+/// multi-partition stream. gamut's multi-partition *decode* is instead pinned in the forward
+/// direction (gamut encodes 2/4/8 partitions → libwebp decodes them) in
+/// `gamut_lossy_options_match_libwebp_bit_exact`.
+#[derive(Clone, Copy, Debug)]
+pub struct LibwebpLossyConfig {
+    /// Quality factor, `0.0..=100.0`.
+    pub quality: f32,
+    /// Loop-filter type: `0` = simple, `1` = complex (normal).
+    pub filter_type: i32,
+    /// Number of segments, `1..=4`.
+    pub segments: i32,
+    /// Encoder method / effort, `0..=6` (deeper analysis ⇒ more probability updates, segmentation).
+    pub method: i32,
+    /// Deblocking filter strength, `0..=100` (`0` disables the loop filter).
+    pub filter_strength: i32,
+}
+
+/// Appends libwebp's emitted output chunks into the `Vec<u8>` behind `picture.custom_ptr`. Matches the
+/// `WebPWriterFunction` ABI so it can be installed as `picture.writer`.
+extern "C" fn collect_writer(
+    data: *const u8,
+    data_size: usize,
+    picture: *const libwebp_sys::WebPPicture,
+) -> c_int {
+    // SAFETY: `picture.custom_ptr` is the `&mut Vec<u8>` installed in `libwebp_encode_lossy_rgba_config`
+    // below; `data` is valid for `data_size` bytes for the duration of this callback.
+    unsafe {
+        let out = &mut *((*picture).custom_ptr.cast::<Vec<u8>>());
+        out.extend_from_slice(slice::from_raw_parts(data, data_size));
+    }
+    1
+}
+
+/// Encodes interleaved RGBA to a lossy WebP via libwebp's **advanced** `WebPEncode` API under an
+/// explicit [`LibwebpLossyConfig`], returning the file bytes. Unlike [`libwebp_encode_lossy_rgba`],
+/// this forces specific VP8 encoder features so the reverse-direction oracle can pin gamut's decoder
+/// against the full surface a production encoder *can* emit. Panics (these are tests) on a bad buffer
+/// size or a libwebp error.
+#[must_use]
+pub fn libwebp_encode_lossy_rgba_config(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    cfg: &LibwebpLossyConfig,
+) -> Vec<u8> {
+    let expected = width as usize * height as usize * 4;
+    assert_eq!(
+        rgba.len(),
+        expected,
+        "RGBA buffer is not width*height*4 bytes"
+    );
+
+    let mut out: Vec<u8> = Vec::new();
+    // SAFETY: each libwebp struct is zero-initialised then filled by its `*Init` function before use;
+    // the picture borrows `rgba` (via the import copy) and writes through `collect_writer` into `out`
+    // for the duration of `WebPEncode` only; every raw pointer below stays valid across the calls.
+    unsafe {
+        let mut config: libwebp_sys::WebPConfig = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPConfigInit(&mut config) != 0,
+            "WebPConfigInit failed (version mismatch?)"
+        );
+        config.quality = cfg.quality;
+        config.filter_type = cfg.filter_type;
+        config.segments = cfg.segments;
+        config.method = cfg.method;
+        config.filter_strength = cfg.filter_strength;
+        assert!(
+            libwebp_sys::WebPValidateConfig(&config) != 0,
+            "WebPValidateConfig rejected {cfg:?}"
+        );
+
+        let mut pic: libwebp_sys::WebPPicture = std::mem::zeroed();
+        assert!(
+            libwebp_sys::WebPPictureInit(&mut pic) != 0,
+            "WebPPictureInit failed (version mismatch?)"
+        );
+        pic.width = width as c_int;
+        pic.height = height as c_int;
+        // Imports into the ARGB buffer (sets use_argb=1); WebPEncode converts ARGB→YUV for lossy.
+        assert!(
+            libwebp_sys::WebPPictureImportRGBA(&mut pic, rgba.as_ptr(), width as c_int * 4) != 0,
+            "WebPPictureImportRGBA failed"
+        );
+        pic.writer = Some(collect_writer);
+        pic.custom_ptr = std::ptr::from_mut(&mut out).cast::<c_void>();
+
+        let ok = libwebp_sys::WebPEncode(&config, &mut pic);
+        libwebp_sys::WebPPictureFree(&mut pic);
+        assert!(ok != 0, "WebPEncode failed for {cfg:?}");
+    }
+    out
+}
+
 /// Reads the canvas dimensions of a WebP file with libwebp, or `None` if it is not a valid WebP.
 #[must_use]
 pub fn libwebp_get_info(webp: &[u8]) -> Option<(u32, u32)> {
@@ -214,6 +369,49 @@ pub fn pattern_rgba(width: u32, height: u32) -> Vec<u8> {
             rgba.push(((x * 7 + y * 3) & 0xff) as u8); // R
             rgba.push(((x ^ (y * 5)) & 0xff) as u8); // G
             rgba.push(((x * x + y) & 0xff) as u8); // B
+            rgba.push(0xff); // A (opaque)
+        }
+    }
+    rgba
+}
+
+/// Generates a deterministic, fully-opaque RGBA image with **photographic-like statistics**: smooth
+/// low-frequency gradients and a coarse blob (large correlated regions, the bulk of a real photo)
+/// overlaid with low-amplitude high-frequency detail and a few hard rectangle edges. This drives the
+/// encoder down realistic residual/token/back-reference paths that the purely algebraic
+/// [`pattern_rgba`] never reaches, while staying RNG-free so the corpus is reproducible and
+/// version-controlled. `seed` varies the content. Alpha is held at 255 (see [`pattern_rgba`]).
+#[must_use]
+pub fn photo_like_rgba(width: u32, height: u32, seed: u32) -> Vec<u8> {
+    let (w, h) = (i64::from(width).max(1), i64::from(height).max(1));
+    // Small integer value-noise: hash (x, y, seed) into a high-frequency byte in `0..=255`.
+    let hash = |x: i64, y: i64| -> i64 {
+        let mut v = x.wrapping_mul(374_761_393)
+            ^ y.wrapping_mul(668_265_263)
+            ^ i64::from(seed).wrapping_mul(2_246_822_519);
+        v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+        (v ^ (v >> 16)) & 0xff
+    };
+    let clamp = |v: i64| v.clamp(0, 255) as u8;
+    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..h {
+        for x in 0..w {
+            // Low-frequency smooth base: per-channel ramps plus a shared diagonal so large regions
+            // correlate (what spatial prediction and LZ77 exploit).
+            let base_r = x * 200 / w + y * 30 / h;
+            let base_g = y * 200 / h + (x + y) * 20 / (w + h);
+            let base_b = (x + y) * 160 / (w + h) + 40;
+            // Low-amplitude detail (sensor-noise / texture analogue) and a few hard luminance steps
+            // (sharp edges exercise B_PRED mode selection and the loop filter).
+            let detail = (hash(x, y) - 128) / 12;
+            let edge = if (x * 3 / w) % 2 == 0 && (y * 3 / h) % 2 == 0 {
+                40
+            } else {
+                0
+            };
+            rgba.push(clamp(base_r + detail + edge)); // R
+            rgba.push(clamp(base_g + detail)); // G
+            rgba.push(clamp(base_b - detail + edge)); // B
             rgba.push(0xff); // A (opaque)
         }
     }
