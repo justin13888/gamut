@@ -78,12 +78,14 @@ pub fn encode_rgb8(
     height: u32,
     compression: Compression,
 ) -> Result<Vec<u8>, String> {
-    encode(
+    encode_packed(
         pixels,
         width,
         height,
         3,
+        8,
         sys::PHOTOMETRIC_RGB as u16,
+        (width as usize) * 3,
         compression,
     )
 }
@@ -99,33 +101,77 @@ pub fn encode_gray8(
     height: u32,
     compression: Compression,
 ) -> Result<Vec<u8>, String> {
-    encode(
+    encode_packed(
         pixels,
         width,
         height,
         1,
+        8,
         sys::PHOTOMETRIC_MINISBLACK as u16,
+        width as usize,
         compression,
     )
 }
 
-fn encode(
+/// Encodes a 1-bit bilevel image (`MINISBLACK`) from one byte per pixel (0 = black, non-zero =
+/// white), packing the bits MSB-first.
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_bilevel(
     pixels: &[u8],
     width: u32,
     height: u32,
-    spp: u16,
-    photometric: u16,
     compression: Compression,
 ) -> Result<Vec<u8>, String> {
-    let row_bytes = (width as usize)
-        .checked_mul(spp as usize)
-        .ok_or("dimensions overflow")?;
     if pixels.len()
-        != row_bytes
+        != (width as usize)
+            .checked_mul(height as usize)
+            .ok_or("overflow")?
+    {
+        return Err("pixel buffer does not match dimensions".into());
+    }
+    let stored = (width as usize).div_ceil(8);
+    let mut packed = vec![0u8; stored * height as usize];
+    for y in 0..height as usize {
+        let row = &pixels[y * width as usize..(y + 1) * width as usize];
+        let dst = &mut packed[y * stored..(y + 1) * stored];
+        for (x, &p) in row.iter().enumerate() {
+            if p != 0 {
+                dst[x / 8] |= 0x80 >> (x % 8);
+            }
+        }
+    }
+    encode_packed(
+        &packed,
+        width,
+        height,
+        1,
+        1,
+        sys::PHOTOMETRIC_MINISBLACK as u16,
+        stored,
+        compression,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_packed(
+    packed: &[u8],
+    width: u32,
+    height: u32,
+    spp: u16,
+    bps: u16,
+    photometric: u16,
+    stored_row_bytes: usize,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    if packed.len()
+        != stored_row_bytes
             .checked_mul(height as usize)
             .ok_or("dimensions overflow")?
     {
-        return Err("pixel buffer does not match dimensions".into());
+        return Err("packed buffer does not match dimensions".into());
     }
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let path = dir.path().join("oracle.tiff");
@@ -134,11 +180,13 @@ fn encode(
     unsafe {
         encode_inner(
             &cpath,
-            pixels,
+            packed,
             width,
             height,
             spp,
+            bps,
             photometric,
+            stored_row_bytes,
             compression.code(),
         )?;
     }
@@ -175,20 +223,54 @@ unsafe fn read_scanlines(t: *mut sys::TIFF) -> Result<DecodedImage, String> {
         sys::TIFFGetFieldDefaulted(t, sys::TIFFTAG_SAMPLESPERPIXEL, &mut spp as *mut u16);
         sys::TIFFGetFieldDefaulted(t, sys::TIFFTAG_BITSPERSAMPLE, &mut bps as *mut u16);
     }
-    if bps != 8 {
-        return Err(format!("expected 8-bit samples, got {bps}"));
+    let mut photometric: u16 = sys::PHOTOMETRIC_MINISBLACK as u16;
+    unsafe {
+        sys::TIFFGetFieldDefaulted(t, sys::TIFFTAG_PHOTOMETRIC, &mut photometric as *mut u16);
     }
-    let row_bytes = (width as usize) * (spp as usize);
     let scanline = unsafe { sys::TIFFScanlineSize(t) } as usize;
-    let mut buf = vec![0u8; scanline.max(row_bytes).max(1)];
-    let mut pixels = Vec::with_capacity(row_bytes * height as usize);
-    for row in 0..height {
-        let rc = unsafe { sys::TIFFReadScanline(t, buf.as_mut_ptr() as *mut c_void, row, 0) };
-        if rc != 1 {
-            return Err(format!("TIFFReadScanline failed at row {row}"));
+
+    let pixels = match bps {
+        8 => {
+            let row_bytes = (width as usize) * (spp as usize);
+            let mut buf = vec![0u8; scanline.max(row_bytes).max(1)];
+            let mut pixels = Vec::with_capacity(row_bytes * height as usize);
+            for row in 0..height {
+                let rc =
+                    unsafe { sys::TIFFReadScanline(t, buf.as_mut_ptr() as *mut c_void, row, 0) };
+                if rc != 1 {
+                    return Err(format!("TIFFReadScanline failed at row {row}"));
+                }
+                pixels.extend_from_slice(&buf[..row_bytes]);
+            }
+            pixels
         }
-        pixels.extend_from_slice(&buf[..row_bytes]);
-    }
+        1 => {
+            // 1-bit: unpack each MSB-first bit to a 0/255 sample, matching gamut's gray output.
+            let white_is_zero = photometric == sys::PHOTOMETRIC_MINISWHITE as u16;
+            let stored = (width as usize).div_ceil(8);
+            let mut buf = vec![0u8; scanline.max(stored).max(1)];
+            let mut pixels = Vec::with_capacity((width as usize) * (height as usize));
+            for row in 0..height {
+                let rc =
+                    unsafe { sys::TIFFReadScanline(t, buf.as_mut_ptr() as *mut c_void, row, 0) };
+                if rc != 1 {
+                    return Err(format!("TIFFReadScanline failed at row {row}"));
+                }
+                for x in 0..width as usize {
+                    let bit = (buf[x / 8] >> (7 - (x % 8))) & 1;
+                    let white = if white_is_zero { bit == 0 } else { bit == 1 };
+                    pixels.push(if white { 255 } else { 0 });
+                }
+            }
+            return Ok(DecodedImage {
+                width,
+                height,
+                samples_per_pixel: 1,
+                pixels,
+            });
+        }
+        _ => return Err(format!("unsupported bits-per-sample {bps}")),
+    };
     Ok(DecodedImage {
         width,
         height,
@@ -197,13 +279,16 @@ unsafe fn read_scanlines(t: *mut sys::TIFF) -> Result<DecodedImage, String> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn encode_inner(
     cpath: &CString,
-    pixels: &[u8],
+    packed: &[u8],
     width: u32,
     height: u32,
     spp: u16,
+    bps: u16,
     photometric: u16,
+    stored_row_bytes: usize,
     compression: u16,
 ) -> Result<(), String> {
     let mode = CString::new("w").map_err(|e| e.to_string())?;
@@ -211,26 +296,40 @@ unsafe fn encode_inner(
     if t.is_null() {
         return Err("TIFFOpen (write) failed".into());
     }
-    let result =
-        unsafe { write_scanlines(t, pixels, width, height, spp, photometric, compression) };
+    let result = unsafe {
+        write_scanlines(
+            t,
+            packed,
+            width,
+            height,
+            spp,
+            bps,
+            photometric,
+            stored_row_bytes,
+            compression,
+        )
+    };
     unsafe { sys::TIFFClose(t) };
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn write_scanlines(
     t: *mut sys::TIFF,
-    pixels: &[u8],
+    packed: &[u8],
     width: u32,
     height: u32,
     spp: u16,
+    bps: u16,
     photometric: u16,
+    stored_row_bytes: usize,
     compression: u16,
 ) -> Result<(), String> {
     // uint32 fields take a `u32` vararg; uint16 fields are promoted to `c_int`.
     unsafe {
         sys::TIFFSetField(t, sys::TIFFTAG_IMAGEWIDTH, width);
         sys::TIFFSetField(t, sys::TIFFTAG_IMAGELENGTH, height);
-        sys::TIFFSetField(t, sys::TIFFTAG_BITSPERSAMPLE, 8 as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_BITSPERSAMPLE, bps as c_int);
         sys::TIFFSetField(t, sys::TIFFTAG_SAMPLESPERPIXEL, spp as c_int);
         sys::TIFFSetField(t, sys::TIFFTAG_PHOTOMETRIC, photometric as c_int);
         sys::TIFFSetField(t, sys::TIFFTAG_COMPRESSION, compression as c_int);
@@ -243,10 +342,10 @@ unsafe fn write_scanlines(
         sys::TIFFSetField(t, sys::TIFFTAG_ROWSPERSTRIP, rps);
     }
 
-    let row_bytes = (width as usize) * (spp as usize);
+    let row_bytes = stored_row_bytes;
     let mut scratch = vec![0u8; row_bytes];
     for row in 0..height as usize {
-        scratch.copy_from_slice(&pixels[row * row_bytes..(row + 1) * row_bytes]);
+        scratch.copy_from_slice(&packed[row * row_bytes..(row + 1) * row_bytes]);
         let rc = unsafe {
             sys::TIFFWriteScanline(t, scratch.as_mut_ptr() as *mut c_void, row as u32, 0)
         };

@@ -25,7 +25,7 @@ lossy → MAE/PSNR tolerance.
 | P3  | §3–4,6  | **Keystone** — uncompressed grayscale + RGB via strips; `Encoder`/`Decoder` | ✅ done |
 | P4  | —       | libtiff oracle + pixel-exact both-direction differential gate | ✅ done |
 | P5  | §9      | PackBits compression (8-bit gray/RGB) | ✅ done |
-| P5b | §3      | Bilevel (1-bit) + FillOrder (4-bit gray deferred to P13) | ☐ |
+| P5b | §3      | Bilevel (1-bit) + FillOrder (4-bit gray deferred to P13) | ✅ done |
 | P6  | §5      | Palette-color (ColorMap) | ☐ |
 | P7  | §7–8    | Baseline field-reference hardening + CLI `convert → .tiff` | ☐ |
 | P8  | §10     | Modified Huffman (Compression=2) | ☐ |

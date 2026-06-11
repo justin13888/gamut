@@ -12,6 +12,8 @@ pub const IMAGE_LENGTH: u16 = 257;
 pub const BITS_PER_SAMPLE: u16 = 258;
 /// `Compression` (259) — the compression scheme applied to the image data.
 pub const COMPRESSION: u16 = 259;
+/// `FillOrder` (266) — the logical bit order within a byte (1 = MSB-first, the default).
+pub const FILL_ORDER: u16 = 266;
 /// `PhotometricInterpretation` (262) — the colour space of the image data.
 pub const PHOTOMETRIC_INTERPRETATION: u16 = 262;
 /// `StripOffsets` (273) — the byte offset of each strip.

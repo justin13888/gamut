@@ -102,15 +102,17 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         ));
     }
 
+    if ifd.get_u32(tags::FILL_ORDER).unwrap_or(1) != 1 {
+        return Err(Error::Unsupported("TIFF: FillOrder 2 not supported"));
+    }
     let spp = ifd.get_u32(tags::SAMPLES_PER_PIXEL).unwrap_or(1) as usize;
     let bits = ifd
         .get_u32_vec(tags::BITS_PER_SAMPLE)
         .unwrap_or_else(|| vec![1; spp]);
-    if bits.len() != spp || bits.iter().any(|&b| b != 8) {
-        return Err(Error::Unsupported(
-            "TIFF: only 8-bit samples supported so far",
-        ));
+    if bits.len() != spp || bits.iter().any(|&b| b != bits[0]) {
+        return Err(Error::Unsupported("TIFF: mixed bit depths not supported"));
     }
+    let bps = bits[0];
 
     let photometric = PhotometricInterpretation::from_code(require_u32(
         ifd,
@@ -120,10 +122,11 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
     .ok_or(Error::Unsupported(
         "TIFF: unknown photometric interpretation",
     ))?;
-    let invert = match (spp, photometric) {
-        (1, PhotometricInterpretation::BlackIsZero) => false,
-        (1, PhotometricInterpretation::WhiteIsZero) => true,
-        (3, PhotometricInterpretation::Rgb) => false,
+    // `white_is_zero` selects which sample value maps to white (TIFF 6.0 §8 PhotometricInterpretation).
+    let white_is_zero = match (spp, bps, photometric) {
+        (1, 1 | 8, PhotometricInterpretation::WhiteIsZero) => true,
+        (1, 1 | 8, PhotometricInterpretation::BlackIsZero) => false,
+        (3, 8, PhotometricInterpretation::Rgb) => false,
         _ => {
             return Err(Error::Unsupported(
                 "TIFF: photometric/sample combination not supported yet",
@@ -131,10 +134,19 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         }
     };
 
-    let row_bytes = width
-        .checked_mul(spp)
-        .ok_or(Error::InvalidInput("TIFF: image too large"))?;
-    let total = row_bytes
+    // Bytes of one stored (packed) row, before unpacking to 8-bit output samples.
+    let stored_row_bytes = match bps {
+        8 => width
+            .checked_mul(spp)
+            .ok_or(Error::InvalidInput("TIFF: image too large"))?,
+        1 => width.div_ceil(8), // spp == 1, guaranteed by the match above
+        _ => {
+            return Err(Error::Unsupported(
+                "TIFF: only 1- and 8-bit samples supported so far",
+            ));
+        }
+    };
+    let stored_total = stored_row_bytes
         .checked_mul(height)
         .ok_or(Error::InvalidInput("TIFF: image too large"))?;
 
@@ -153,37 +165,54 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         return Err(Error::InvalidInput("TIFF: strip count mismatch"));
     }
 
-    let mut pixels = Vec::with_capacity(total);
+    // Decompress strips into the packed (stored) row bytes.
+    let mut packed = Vec::with_capacity(stored_total);
     for (i, (&off, &cnt)) in offsets.iter().zip(&counts).enumerate() {
         let rows = rows_per_strip.min(height - i * rows_per_strip);
-        let want = rows * row_bytes;
+        let want = rows * stored_row_bytes;
         let raw = data
             .get(off as usize..off as usize + cnt as usize)
             .ok_or(Error::InvalidInput("TIFF: strip out of bounds"))?;
         match compression {
-            Compression::PackBits => pixels.extend_from_slice(&packbits::decode(raw, want)?),
+            Compression::PackBits => packed.extend_from_slice(&packbits::decode(raw, want)?),
             _ => {
                 let strip = raw
                     .get(..want)
                     .ok_or(Error::InvalidInput("TIFF: strip shorter than expected"))?;
-                pixels.extend_from_slice(strip);
+                packed.extend_from_slice(strip);
             }
         }
     }
-    debug_assert_eq!(pixels.len(), total);
+    debug_assert_eq!(packed.len(), stored_total);
 
-    if invert {
-        for v in &mut pixels {
-            *v = 255 - *v;
+    // Unpack the stored bytes into 8-bit output samples.
+    let (out_spp, pixels) = if bps == 8 {
+        let mut px = packed;
+        if white_is_zero {
+            for v in &mut px {
+                *v = 255 - *v;
+            }
         }
-    }
+        (spp, px)
+    } else {
+        let mut px = Vec::with_capacity(width * height);
+        for y in 0..height {
+            let row = &packed[y * stored_row_bytes..(y + 1) * stored_row_bytes];
+            for x in 0..width {
+                let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
+                let white = if white_is_zero { bit == 0 } else { bit == 1 };
+                px.push(if white { 255 } else { 0 });
+            }
+        }
+        (1, px)
+    };
 
     Ok(DecodedImage {
         dims: Dimensions {
             width: width as u32,
             height: height as u32,
         },
-        samples_per_pixel: spp,
+        samples_per_pixel: out_spp,
         pixels,
     })
 }
