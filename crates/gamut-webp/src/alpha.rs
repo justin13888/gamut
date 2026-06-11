@@ -8,6 +8,7 @@
 //! chunk header, the four filters, and both storage methods: **raw** (`C=0`) and **lossless** (`C=1`,
 //! a headerless [`crate::vp8l`] image-stream carrying the residuals in its green channel).
 
+use gamut_color::clip_pixel8;
 use gamut_core::{Dimensions, Error, Result};
 
 use crate::vp8l::bit_io::BitReader;
@@ -84,7 +85,7 @@ impl AlphaFilter {
                         i32::from(at(x, y - 1)),
                         i32::from(at(x - 1, y - 1)),
                     );
-                    (a + b - c).clamp(0, 255) as u8
+                    clip_pixel8(a + b - c)
                 }
             }
         }

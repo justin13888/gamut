@@ -15,7 +15,7 @@
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
 #![allow(clippy::needless_range_loop)]
 
-use gamut_color::Yuv420;
+use gamut_color::{Yuv420, clip_pixel8};
 use gamut_core::{Error, Result};
 
 use super::bool_coder::{BoolDecoder, BoolEncoder};
@@ -26,7 +26,7 @@ use super::loop_filter;
 use super::prediction::{self, B_DC_PRED, B_PRED, DC_PRED, H_PRED, NUM_BMODES, TM_PRED, V_PRED};
 use super::quant::{self, QuantFactors};
 use super::tokens::{self, CoeffProbs};
-use super::transform::{clamp255, fdct4x4, fwht4x4, idct4x4, iwht4x4};
+use super::transform::{fdct4x4, fwht4x4, idct4x4, iwht4x4};
 
 /// The whole-block prediction modes the encoder considers, in signaling order.
 const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
@@ -372,7 +372,7 @@ fn sub_pred(pred: &[u8], stride: usize, sub_x: usize, sub_y: usize) -> [i16; 16]
     out
 }
 
-/// Writes `clamp255(pred + residue)` into the 4×4 block at `(x, y)` of `plane`.
+/// Writes `clip_pixel8(pred + residue)` into the 4×4 block at `(x, y)` of `plane`.
 fn write_block(
     plane: &mut [u8],
     stride: usize,
@@ -384,7 +384,7 @@ fn write_block(
     for r in 0..4 {
         for c in 0..4 {
             let v = i32::from(pred[r * 4 + c]) + i32::from(residue[r * 4 + c]);
-            plane[(y + r) * stride + x + c] = clamp255(v);
+            plane[(y + r) * stride + x + c] = clip_pixel8(v);
         }
     }
 }

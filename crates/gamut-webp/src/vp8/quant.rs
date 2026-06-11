@@ -10,6 +10,8 @@
 //! `0..=127`) is the dixie `dequant_init` reference (§20.4). Dequant products are stored as 16-bit
 //! signed integers, as the spec mandates. Tracked in `../STATUS.md` section L.
 
+use gamut_dsp::round_div_nearest;
+
 use super::header::QuantIndices;
 
 /// `QINDEX_RANGE`: the number of quantizer indices (RFC 6386 §14.1).
@@ -117,15 +119,8 @@ pub fn dequantize(level: i16, factor: i16) -> i16 {
 /// deferred to issue #32.
 #[must_use]
 pub fn quantize(coeff: i16, factor: i16) -> i16 {
-    let f = i32::from(factor);
-    debug_assert!(f > 0, "dequant factor is always >= 4");
-    let c = i32::from(coeff);
-    let level = if c >= 0 {
-        (c + f / 2) / f
-    } else {
-        -((-c + f / 2) / f)
-    };
-    level as i16
+    debug_assert!(factor > 0, "dequant factor is always >= 4");
+    round_div_nearest(i32::from(coeff), i32::from(factor)) as i16
 }
 
 #[cfg(test)]

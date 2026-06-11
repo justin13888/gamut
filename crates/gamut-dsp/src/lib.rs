@@ -9,15 +9,21 @@
 //!
 //! The 2-D assembly that selects per `PlaneTxType` and applies the per-pass normalization shifts
 //! (AV1 §7.13.3) is tracked in `gamut-avif/STATUS.md`.
+//!
+//! Alongside the transforms, [`mod@math`] exposes the small AV1 §4.7 integer arithmetic
+//! primitives ([`round2`], [`round2_signed`], [`clip3`]) and the shared forward-quantize
+//! rounding ([`round_div_nearest`]) that the codec crates build on.
 #![forbid(unsafe_code)]
 
 mod adst;
 mod butterfly;
 mod dct;
 mod identity;
+mod math;
 mod wht;
 
 pub use adst::{flip_in_place, forward_adst, inverse_adst};
 pub use dct::{forward_dct, inverse_dct};
 pub use identity::{forward_identity, inverse_identity};
+pub use math::{clip3, round_div_nearest, round2, round2_signed};
 pub use wht::{fwht4x4, iwht4x4};

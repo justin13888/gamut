@@ -26,7 +26,8 @@ use crate::cdf;
 use crate::quant::{ac_q, dc_q, dequant, quantize};
 use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 use gamut_bitstream::SymbolEncoder;
-use gamut_color::Planar8;
+use gamut_color::{Planar8, clip_pixel8};
+use gamut_dsp::round2_signed;
 
 /// `NUM_BASE_LEVELS` (§3).
 const NUM_BASE_LEVELS: i32 = 2;
@@ -1055,7 +1056,7 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         for plane in 1..3 {
-            let dc = self.dc_pred(plane, sx, sy, bw, bw).clamp(0, 255) as u8;
+            let dc = clip_pixel8(self.dc_pred(plane, sx, sy, bw, bw));
             for i in 0..bw {
                 for j in 0..bw {
                     self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = dc;
@@ -1514,7 +1515,7 @@ impl<'a> FrameEncoder<'a> {
             for i in 0..th {
                 for j in 0..tw {
                     self.recon[plane][(sy + i) * self.coded_w + (sx + j)] =
-                        pred[i * tw + j].clamp(0, 255) as u8;
+                        clip_pixel8(pred[i * tw + j]);
                 }
             }
             self.set_ctx(plane, sx >> 2, sy >> 2, tw / 4, th / 4, 0, 0);
@@ -1580,7 +1581,7 @@ impl<'a> FrameEncoder<'a> {
         let resid = inverse_transform_2d(&dq, tx_size, tx, 8);
         for i in 0..th {
             for j in 0..tw {
-                let v = (pred[i * tw + j] + resid[i * tw + j]).clamp(0, 255) as u8;
+                let v = clip_pixel8(pred[i * tw + j] + resid[i * tw + j]);
                 self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = v;
             }
         }
@@ -2924,15 +2925,6 @@ fn coeff_br_ctx(pos: usize, levels: &[i32], bwl: usize, w: usize, h: usize) -> u
         mag + 7
     } else {
         mag + 14
-    }
-}
-
-/// `Round2Signed(x, n)` (§4.7): symmetric rounding right shift (rounds the magnitude, keeps sign).
-fn round2_signed(x: i32, n: u32) -> i32 {
-    if x >= 0 {
-        (x + (1 << (n - 1))) >> n
-    } else {
-        -((-x + (1 << (n - 1))) >> n)
     }
 }
 
