@@ -12,7 +12,7 @@ use crate::input::{decode_rgb8, decode_rgba8};
 /// Arguments for `gamut convert`.
 #[derive(Args)]
 pub(crate) struct ConvertArgs {
-    /// Input image (PNG, JPEG, or PPM/P6).
+    /// Input image (PNG, JPEG, PPM/P6, or WebP). WebP is decoded by gamut's own decoder.
     input: PathBuf,
     /// Output file. The format is inferred from its extension unless `--format` is given.
     output: PathBuf,
