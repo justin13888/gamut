@@ -35,6 +35,19 @@ test:
 coverage:
     cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi)|tooling)/' --fail-under-lines 80
 
+# Mutation testing, whole workspace; slow. Needs `mise install` + submodules + C toolchain.
+mutants:
+    cargo mutants
+
+# Mutation testing of only the code changed vs master; fast (mirrors the PR CI job).
+mutants-diff:
+    git diff origin/master...HEAD > target/mutants.diff
+    cargo mutants --in-diff target/mutants.diff
+
+# Mutation testing of one crate, e.g. `just mutants-crate gamut-bitstream`.
+mutants-crate crate:
+    cargo mutants -p {{crate}}
+
 # List every workspace crate and its version
 versions:
     cargo metadata --no-deps --format-version 1 | jq -r '.packages | sort_by(.name)[] | "\(.name) \(.version)"'

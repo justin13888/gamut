@@ -44,6 +44,7 @@ just test            # correctness
 just format-check    # formatting
 just lint            # lint (Clippy, warnings as errors)
 just coverage        # coverage (minimum 80%)
+just mutants         # mutation testing (run `mise install` once; heavier — needs submodules + C toolchain)
 just check-commits   # commit messages are Conventional Commits
 ```
 

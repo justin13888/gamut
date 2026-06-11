@@ -15,9 +15,10 @@
 just                          = "1.52.0"
 lefthook                      = "2.1.9"
 jq                            = "1.8.1"
-"ubi:convco/convco"           = "0.6.4"   # conventional-commit linter (GitHub release binary)
+"cargo:convco"                = "0.6.4"   # conventional-commit linter (built from source: its release assets are named convco-{ubuntu,deb,macos}.zip, which the ubi/github backend can't match, and there's no macOS-arm64 asset)
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"   # coverage (taiki-e prebuilt binary)
 "cargo:cargo-edit"            = "0.13.11" # `cargo set-version` for `just bump` (compiled from source)
+"cargo:cargo-mutants"         = "27.1.0"
 
 # Native build deps for the cross-check tests (build vendored dav1d/libavif from third_party/)
 cmake                         = "4.3.3"

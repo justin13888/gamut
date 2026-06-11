@@ -69,6 +69,6 @@ jobs:
           fetch-depth: 0 # convco walks base..head, so it needs full history
       - uses: jdx/mise-action@v4
         with:
-          install_args: ubi:convco/convco
+          install_args: cargo:convco
       - name: Check PR commit messages
         run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
