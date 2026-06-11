@@ -237,6 +237,56 @@ fn detailed_yuv(w: u32, h: u32) -> gamut_color::Yuv420 {
     gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
 }
 
+/// Builds a YUV 4:2:0 image with **photographic-like statistics** directly in the YUV domain (so the
+/// bit-exact YUV conformance gate stays independent of the RGB↔YCbCr layer, which PR4 pins
+/// separately): a smooth luma gradient + low-amplitude detail + hard region edges, with gently
+/// varying chroma. RNG-free and `seed`-parameterised, like [`common::photo_like_rgba`].
+fn photo_like_yuv(w: u32, h: u32, seed: u32) -> gamut_color::Yuv420 {
+    let (wu, hu) = (w as usize, h as usize);
+    let (cw, ch) = (
+        gamut_color::Yuv420::chroma_width(w) as usize,
+        gamut_color::Yuv420::chroma_height(h) as usize,
+    );
+    let hash = |x: i64, y: i64, k: i64| -> i64 {
+        let mut v = x.wrapping_mul(374_761_393)
+            ^ y.wrapping_mul(668_265_263)
+            ^ k.wrapping_mul(2_654_435_761)
+            ^ i64::from(seed).wrapping_mul(2_246_822_519);
+        v = (v ^ (v >> 13)).wrapping_mul(1_274_126_177);
+        (v ^ (v >> 16)) & 0xff
+    };
+    let clamp = |v: i64| v.clamp(0, 255) as u8;
+    let (wi, hi) = (wu.max(1) as i64, hu.max(1) as i64);
+    let y = (0..wu * hu)
+        .map(|i| {
+            let (x, yy) = ((i % wu) as i64, (i / wu) as i64);
+            // Smooth diagonal base + small detail + sharp 8-region steps (B_PRED / loop-filter bait).
+            let base = x * 170 / wi + yy * 60 / hi;
+            let detail = (hash(x, yy, 0) - 128) / 10;
+            let edge = if (x * 4 / wi + yy * 4 / hi) % 2 == 0 {
+                28
+            } else {
+                0
+            };
+            clamp(base + detail + edge)
+        })
+        .collect();
+    let (cwi, chi) = (cw.max(1) as i64, ch.max(1) as i64);
+    let u = (0..cw * ch)
+        .map(|i| {
+            let (x, yy) = ((i % cw) as i64, (i / cw) as i64);
+            clamp(100 + x * 70 / cwi + (hash(x, yy, 1) - 128) / 16)
+        })
+        .collect();
+    let v = (0..cw * ch)
+        .map(|i| {
+            let (x, yy) = ((i % cw) as i64, (i / cw) as i64);
+            clamp(140 + yy * 60 / chi + (hash(x, yy, 2) - 128) / 16)
+        })
+        .collect();
+    gamut_color::Yuv420::new(w, h, y, u, v).unwrap()
+}
+
 #[test]
 fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
     // Detailed content drives gamut's encoder into per-4×4 B_PRED macroblocks; libwebp must decode the
@@ -392,6 +442,41 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
     }
 }
 
+#[test]
+fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
+    // The same tier-3 conformance gate as above, but on photographic-like YUV and on canvases far
+    // larger than the small synthetic frames: macroblock grids spanning dozens of rows (8-partition
+    // routing across all of them) and realistic residual/token distributions. gamut's own decoder and
+    // libwebp must still agree bit-for-bit on the gamut-produced stream.
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::vp8::frame::{decode_frame, encode_frame};
+
+    // Large sizes span many MB rows (768/16 = 48, so 8-partition routing touches every row) and an
+    // awkward width (513×97). gamut's encoder is fast enough here that the full range stays cheap.
+    let dims = [
+        (32u32, 32u32),
+        (64, 48),
+        (256, 256),
+        (384, 288),
+        (640, 480),
+        (1024, 768),
+        (513, 97),
+    ];
+    for &(w, h) in &dims {
+        for &quant_index in &[12u8, 56] {
+            let (payload, _) = encode_frame(&photo_like_yuv(w, h, 0x7e57), quant_index);
+            let webp = write_simple_lossy(&payload);
+            let lib = libwebp_decode_yuv(&webp);
+            let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+            assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
+            assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{quant_index}");
+            assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{quant_index}");
+            assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{quant_index}");
+        }
+    }
+}
+
 /// Extracts the `VP8 ` (lossy) chunk payload from a RIFF/WebP file.
 fn vp8_payload(webp: &[u8]) -> Vec<u8> {
     use gamut_riff::{RiffReader, WebpChunkId};
@@ -422,6 +507,38 @@ fn gamut_decodes_libwebp_lossy_bit_exact() {
     ] {
         for q in [6.0f32, 35.0, 70.0, 100.0] {
             let rgba = pattern_rgba(w, h);
+            let webp = libwebp_encode_lossy_rgba(&rgba, w, h, q);
+            let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
+                .expect("gamut decode")
+                .to_yuv420();
+            let lib = libwebp_decode_yuv(&webp);
+            assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
+            assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{q}");
+            assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{q}");
+            assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{q}");
+        }
+    }
+}
+
+#[test]
+fn gamut_decodes_libwebp_lossy_realistic_and_large() {
+    // The reverse direction at scale: libwebp lossy-encodes photographic RGBA over a lossy-appropriate
+    // small matrix plus the full LARGE_DIMENSIONS (up to 1024×768), and gamut's decoder must reproduce
+    // libwebp's own YUV bit-for-bit — pinning the decode paths (per-segment filter levels, probability
+    // updates, partitioning) on frames far larger and more varied than the tiny synthetic inputs.
+    use common::{libwebp_decode_yuv, libwebp_encode_lossy_rgba};
+
+    let small = [
+        (16u32, 16u32),
+        (32, 32),
+        (64, 48),
+        (49, 33),
+        (80, 17),
+        (255, 3),
+    ];
+    for &(w, h) in small.iter().chain(LARGE_DIMENSIONS) {
+        for q in [20.0f32, 80.0] {
+            let rgba = photo_like_rgba(w, h, 0x1d0f);
             let webp = libwebp_encode_lossy_rgba(&rgba, w, h, q);
             let gamut = gamut_webp::vp8::frame::decode_frame(&vp8_payload(&webp))
                 .expect("gamut decode")
