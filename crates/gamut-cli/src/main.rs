@@ -1,9 +1,9 @@
 //! `gamut` — a command-line sandbox over the gamut image codecs and their shared primitives.
 //!
-//! It decodes PNG/JPEG/PPM input (via the third-party [`image`] crate) and encodes exclusively
-//! with the gamut crates, and surfaces the shared `color` / `dsp` / `bitstream` primitives as
-//! inspection subcommands so the latest workspace features are exercisable without writing
-//! throwaway Rust. See the crate README for the full command reference.
+//! It decodes input — PNG/JPEG/PPM via the third-party [`image`] crate, and WebP via gamut's own
+//! decoder — and encodes exclusively with the gamut crates, and surfaces the shared `color` /
+//! `dsp` / `bitstream` primitives as inspection subcommands so the latest workspace features are
+//! exercisable without writing throwaway Rust. See the crate README for the full command reference.
 #![forbid(unsafe_code)]
 
 mod commands;
@@ -52,7 +52,7 @@ struct Cli {
 /// Top-level subcommands, each grouped by the crate it exercises.
 #[derive(Subcommand)]
 enum Command {
-    /// Decode an image (PNG/JPEG/PPM) and re-encode it with a gamut codec (gamut-avif).
+    /// Decode an image (PNG/JPEG/PPM/WebP) and re-encode it as AVIF or WebP (gamut-avif/gamut-webp).
     Convert(commands::convert::ConvertArgs),
     /// AV1 still-image operations (gamut-av1).
     #[command(subcommand)]
