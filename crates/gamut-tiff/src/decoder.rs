@@ -2,7 +2,7 @@
 
 use gamut_core::{Decoder, Dimensions, Error, Result};
 
-use crate::compression::Compression;
+use crate::compression::{Compression, packbits};
 use crate::ifd::{Ifd, PhotometricInterpretation};
 use crate::{reader, tags};
 
@@ -93,10 +93,8 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
 
     let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))
         .ok_or(Error::Unsupported("TIFF: unknown compression"))?;
-    if compression != Compression::None {
-        return Err(Error::Unsupported(
-            "TIFF: only uncompressed images supported so far",
-        ));
+    if !matches!(compression, Compression::None | Compression::PackBits) {
+        return Err(Error::Unsupported("TIFF: compression not supported yet"));
     }
     if ifd.get_u32(tags::PLANAR_CONFIGURATION).unwrap_or(1) != 1 {
         return Err(Error::Unsupported(
@@ -159,13 +157,18 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
     for (i, (&off, &cnt)) in offsets.iter().zip(&counts).enumerate() {
         let rows = rows_per_strip.min(height - i * rows_per_strip);
         let want = rows * row_bytes;
-        let strip = data
+        let raw = data
             .get(off as usize..off as usize + cnt as usize)
             .ok_or(Error::InvalidInput("TIFF: strip out of bounds"))?;
-        let strip = strip
-            .get(..want)
-            .ok_or(Error::InvalidInput("TIFF: strip shorter than expected"))?;
-        pixels.extend_from_slice(strip);
+        match compression {
+            Compression::PackBits => pixels.extend_from_slice(&packbits::decode(raw, want)?),
+            _ => {
+                let strip = raw
+                    .get(..want)
+                    .ok_or(Error::InvalidInput("TIFF: strip shorter than expected"))?;
+                pixels.extend_from_slice(strip);
+            }
+        }
     }
     debug_assert_eq!(pixels.len(), total);
 

@@ -13,10 +13,11 @@
 //! Adobe/Aldus, Final — June 3 1992) rather than wrapping libtiff.
 //!
 //! Implementation in progress (see issue #107). The container layer ([`ifd`], [`reader`],
-//! [`writer`], [`tags`]) and the uncompressed baseline pixel path are in place: [`TiffEncoder`]
-//! writes 8-bit grayscale and RGB strips and [`TiffDecoder`] reads them back (both implement the
-//! [`gamut_core::Encoder`]/[`gamut_core::Decoder`] traits). Compression schemes and the remaining
-//! colour modes land in subsequent phases.
+//! [`writer`], [`tags`]) and the baseline pixel path are in place: [`TiffEncoder`] writes 8-bit
+//! grayscale and RGB strips — uncompressed or PackBits-compressed ([`compression`]) — and
+//! [`TiffDecoder`] reads them back (both implement the [`gamut_core::Encoder`]/
+//! [`gamut_core::Decoder`] traits). The remaining compression schemes and colour modes land in
+//! subsequent phases.
 #![forbid(unsafe_code)]
 
 pub mod compression;
@@ -27,6 +28,7 @@ pub mod reader;
 pub mod tags;
 pub mod writer;
 
+pub use compression::Compression;
 pub use decoder::TiffDecoder;
 pub use encoder::TiffEncoder;
 pub use ifd::{ByteOrder, Field, FieldType, Ifd, PhotometricInterpretation, Predictor, Value};

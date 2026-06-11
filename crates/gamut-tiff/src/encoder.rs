@@ -2,23 +2,26 @@
 
 use gamut_core::{Dimensions, Encoder, Error, Result};
 
-use crate::compression::Compression;
+use crate::compression::{Compression, packbits};
 use crate::ifd::{ByteOrder, Ifd, PhotometricInterpretation, Value};
 use crate::{tags, writer};
 
-/// Encoder for uncompressed baseline TIFF images.
+/// Encoder for baseline TIFF images.
 ///
-/// This phase writes `Compression = None` (1), chunky (`PlanarConfiguration = 1`) strips of 8-bit
-/// samples. Compression schemes and richer colour modes are added in later phases.
+/// Writes chunky (`PlanarConfiguration = 1`) strips of 8-bit samples, optionally PackBits-compressed
+/// ([`Self::with_compression`]). Richer colour modes and compression schemes are added in later
+/// phases.
 #[derive(Debug, Clone)]
 pub struct TiffEncoder {
     order: ByteOrder,
+    compression: Compression,
 }
 
 impl Default for TiffEncoder {
     fn default() -> Self {
         Self {
             order: ByteOrder::LittleEndian,
+            compression: Compression::None,
         }
     }
 }
@@ -34,6 +37,15 @@ impl TiffEncoder {
     #[must_use]
     pub fn with_byte_order(mut self, order: ByteOrder) -> Self {
         self.order = order;
+        self
+    }
+
+    /// Returns a copy of this encoder that compresses image data with `compression`.
+    ///
+    /// Supported so far: [`Compression::None`] and [`Compression::PackBits`].
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
         self
     }
 
@@ -88,14 +100,16 @@ impl TiffEncoder {
             ));
         }
 
-        // Partition rows into strips of roughly 8 KB (TIFF 6.0 §7 recommendation).
+        // Partition rows into strips of roughly 8 KB (TIFF 6.0 §7 recommendation), then apply the
+        // per-row strip codec.
         let rows_per_strip = (8192 / row_bytes).clamp(1, h);
         let mut strips: Vec<Vec<u8>> = Vec::new();
         let mut row = 0;
         while row < h {
             let rows = rows_per_strip.min(h - row);
             let start = row * row_bytes;
-            strips.push(pixels[start..start + rows * row_bytes].to_vec());
+            let raw = &pixels[start..start + rows * row_bytes];
+            strips.push(self.compress_strip(raw, row_bytes)?);
             row += rows;
         }
 
@@ -105,7 +119,7 @@ impl TiffEncoder {
         ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8; spp]));
         ifd.set(
             tags::COMPRESSION,
-            Value::Short(vec![Compression::None.code()]),
+            Value::Short(vec![self.compression.code()]),
         );
         ifd.set(
             tags::PHOTOMETRIC_INTERPRETATION,
@@ -120,6 +134,23 @@ impl TiffEncoder {
         let bytes = writer::write_image(self.order, &ifd, &strips);
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
+    }
+
+    /// Applies the selected compression to one strip's raw bytes, row by row.
+    fn compress_strip(&self, raw: &[u8], row_bytes: usize) -> Result<Vec<u8>> {
+        match self.compression {
+            Compression::None => Ok(raw.to_vec()),
+            Compression::PackBits => {
+                let mut out = Vec::new();
+                for row in raw.chunks(row_bytes) {
+                    packbits::encode_row(row, &mut out);
+                }
+                Ok(out)
+            }
+            _ => Err(Error::Unsupported(
+                "TIFF: unsupported compression for encoding",
+            )),
+        }
     }
 }
 

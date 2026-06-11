@@ -4,6 +4,8 @@
 //! the remainder are extensions (TIFF 6.0 Part 2). Each scheme is decoded/encoded per strip or
 //! tile; the per-scheme codecs land in later phases.
 
+pub mod packbits;
+
 /// A compression scheme applied to a strip or tile of image data.
 ///
 /// The discriminants are documented with their on-disk `Compression` tag values.
