@@ -57,6 +57,7 @@ gamut-jxl = { path = "crates/gamut-jxl", version = "0.1.0" }
 gamut-webp = { path = "crates/gamut-webp", version = "0.1.0" }
 gamut-heic = { path = "crates/gamut-heic", version = "0.1.0" }
 gamut-vvc = { path = "crates/gamut-vvc", version = "0.1.0" }
+gamut-tiff = { path = "crates/gamut-tiff", version = "0.1.0" }
 gamut = { path = "crates/gamut", version = "0.2.0" }
 
 [profile.release]

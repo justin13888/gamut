@@ -62,7 +62,9 @@ In 2026, `gamut` started when there were no robust, well-tested Rust implementat
 The initial focus is **AVIF, WebP, and JPEG** — the formats with the best
 size-versus-compatibility tradeoff today. JPEG XL is intentionally out of scope for now (it
 is better served by a dedicated effort). The other format crates in the tree (HEIC, VVC,
-AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens.
+AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens. **TIFF 6.0**
+(`gamut-tiff`) is newly scaffolded and under active implementation (issue #107) as a
+royalty-free, natively still-image format — a good long-term fit for the image-first focus.
 
 **gamut is image-first.** Even where a format's codec (AV1, AV2, VVC, HEVC) is fundamentally a
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no
@@ -104,6 +106,7 @@ format.
 | `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                            | implemented VP8 + VP8L (+alpha)        |
 | `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                     | placeholder                            |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
+| `gamut-tiff`      | TIFF 6.0 encoder/decoder — self-contained (own IFD/tag container)      | scaffolding (impl in progress, #107)   |
 | `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives       | ready for use                          |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
 | `gamut-ffi`       | C-compatible FFI bindings                                              | placeholder                            |
