@@ -15,5 +15,12 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# BigTIFF (`references/tiff/bigtiff.html`): 64-bit offsets/counts and the `Long8`/`SLong8`/`Ifd8`
+# field types. Additive — off by default so classic-only consumers (e.g. gamut-exif) stay lean;
+# gamut-tiff enables it. See `STATUS.md` (P8).
+bigtiff = []
+
 [dependencies]
 gamut-core.workspace = true

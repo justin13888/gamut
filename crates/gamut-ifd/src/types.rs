@@ -3,9 +3,10 @@
 /// The type of a tag's value, stored as the 2-byte `Type` of an IFD entry (TIFF 6.0 §2).
 ///
 /// The discriminants match the on-disk codes (`Byte` is `1`, `Short` is `3`, `Rational` is `5`,
-/// …). These twelve are the TIFF 6.0 field types; the BigTIFF 64-bit additions (`Long8`/`SLong8`/
-/// `Ifd8`) are out of the current scaffold's scope (see `STATUS.md`, gated behind a future
-/// `bigtiff` feature so the set stays additive).
+/// …). The first twelve are the TIFF 6.0 field types; the BigTIFF 64-bit additions
+/// (`Long8`/`SLong8`/`Ifd8`, codes `16`–`18`) appear only when the `bigtiff` feature is enabled,
+/// so the set stays additive and a classic-only build treats those codes as unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
     /// `1` — an 8-bit unsigned integer.
     Byte,
@@ -31,4 +32,122 @@ pub enum FieldType {
     Float,
     /// `12` — a 64-bit IEEE double-precision float.
     Double,
+    /// `16` — a 64-bit unsigned integer (BigTIFF; `references/tiff/bigtiff.html`).
+    #[cfg(feature = "bigtiff")]
+    Long8,
+    /// `17` — a 64-bit signed (two's-complement) integer (BigTIFF).
+    #[cfg(feature = "bigtiff")]
+    SLong8,
+    /// `18` — a 64-bit unsigned IFD offset (BigTIFF).
+    #[cfg(feature = "bigtiff")]
+    Ifd8,
+}
+
+impl FieldType {
+    /// Returns the field type for an on-disk type code, or `None` for an unknown code.
+    ///
+    /// Without the `bigtiff` feature, the 64-bit BigTIFF codes (`16`–`18`) are unknown and return
+    /// `None`, so a classic-only reader skips fields of those types rather than failing.
+    #[must_use]
+    pub fn from_code(code: u16) -> Option<Self> {
+        Some(match code {
+            1 => FieldType::Byte,
+            2 => FieldType::Ascii,
+            3 => FieldType::Short,
+            4 => FieldType::Long,
+            5 => FieldType::Rational,
+            6 => FieldType::SByte,
+            7 => FieldType::Undefined,
+            8 => FieldType::SShort,
+            9 => FieldType::SLong,
+            10 => FieldType::SRational,
+            11 => FieldType::Float,
+            12 => FieldType::Double,
+            #[cfg(feature = "bigtiff")]
+            16 => FieldType::Long8,
+            #[cfg(feature = "bigtiff")]
+            17 => FieldType::SLong8,
+            #[cfg(feature = "bigtiff")]
+            18 => FieldType::Ifd8,
+            _ => return None,
+        })
+    }
+
+    /// Returns the on-disk type code.
+    #[must_use]
+    pub fn code(self) -> u16 {
+        match self {
+            FieldType::Byte => 1,
+            FieldType::Ascii => 2,
+            FieldType::Short => 3,
+            FieldType::Long => 4,
+            FieldType::Rational => 5,
+            FieldType::SByte => 6,
+            FieldType::Undefined => 7,
+            FieldType::SShort => 8,
+            FieldType::SLong => 9,
+            FieldType::SRational => 10,
+            FieldType::Float => 11,
+            FieldType::Double => 12,
+            #[cfg(feature = "bigtiff")]
+            FieldType::Long8 => 16,
+            #[cfg(feature = "bigtiff")]
+            FieldType::SLong8 => 17,
+            #[cfg(feature = "bigtiff")]
+            FieldType::Ifd8 => 18,
+        }
+    }
+
+    /// Returns the number of bytes in a single value of this type.
+    #[must_use]
+    pub fn size(self) -> usize {
+        match self {
+            FieldType::Byte | FieldType::Ascii | FieldType::SByte | FieldType::Undefined => 1,
+            FieldType::Short | FieldType::SShort => 2,
+            FieldType::Long | FieldType::SLong | FieldType::Float => 4,
+            FieldType::Rational | FieldType::SRational | FieldType::Double => 8,
+            #[cfg(feature = "bigtiff")]
+            FieldType::Long8 | FieldType::SLong8 | FieldType::Ifd8 => 8,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_type_codes_round_trip() {
+        for code in 1..=12u16 {
+            let ty = FieldType::from_code(code).expect("known type");
+            assert_eq!(ty.code(), code);
+        }
+        assert_eq!(FieldType::from_code(0), None);
+        assert_eq!(FieldType::from_code(13), None);
+        assert_eq!(FieldType::Rational.size(), 8);
+        assert_eq!(FieldType::Short.size(), 2);
+    }
+
+    #[cfg(feature = "bigtiff")]
+    #[test]
+    fn bigtiff_field_type_codes_round_trip() {
+        for code in 16..=18u16 {
+            let ty = FieldType::from_code(code).expect("known BigTIFF type");
+            assert_eq!(ty.code(), code);
+        }
+        assert_eq!(FieldType::from_code(19), None);
+        // The BigTIFF 64-bit types are all 8 bytes wide.
+        assert_eq!(FieldType::Long8.size(), 8);
+        assert_eq!(FieldType::SLong8.size(), 8);
+        assert_eq!(FieldType::Ifd8.size(), 8);
+    }
+
+    /// Without `bigtiff`, codes 16–18 are unknown so a classic-only reader skips those fields.
+    #[cfg(not(feature = "bigtiff"))]
+    #[test]
+    fn bigtiff_codes_unknown_without_feature() {
+        assert_eq!(FieldType::from_code(16), None);
+        assert_eq!(FieldType::from_code(17), None);
+        assert_eq!(FieldType::from_code(18), None);
+    }
 }

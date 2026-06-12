@@ -11,11 +11,26 @@
 //! compression, or photometry, which stay in the codec.
 //!
 //! Structure follows **TIFF 6.0** (`references/tiff/tiff6.pdf`, Adobe/Aldus, Final — June 3 1992,
-//! §2). The type names here intentionally mirror `gamut-tiff`'s current structural types so the
-//! codec can later adopt this crate as a near-zero-diff refactor (see `STATUS.md`).
+//! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write`] serialises one
+//! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
 //!
-//! Placeholder skeleton — implementation pending (see issue #34). The type declarations below sketch
-//! the data model the implementation phases flesh out; no reading/writing logic exists yet.
+//! ## BigTIFF
+//!
+//! The `bigtiff` cargo feature adds BigTIFF support (`references/tiff/bigtiff.html`): the
+//! [`Variant::Big`] container with 64-bit offsets/counts and the [`FieldType::Long8`] /
+//! `SLong8` / `Ifd8` field types. It is additive and off by default, so classic-only consumers
+//! (e.g. EXIF metadata) stay lean; the TIFF codec enables it.
+//!
+//! ```
+//! use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, write};
+//!
+//! let mut ifd = Ifd::new();
+//! ifd.set(256, Value::Short(vec![640])); // ImageWidth
+//! ifd.set(257, Value::Short(vec![480])); // ImageLength
+//! let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
+//! let bytes = write(&file);
+//! assert_eq!(read(&bytes).unwrap(), file);
+//! ```
 #![forbid(unsafe_code)]
 
 pub mod byte_order;
@@ -26,8 +41,8 @@ pub mod value;
 pub mod writer;
 
 pub use byte_order::ByteOrder;
-pub use entry::{Field, Ifd, TiffHeader};
-pub use reader::IfdReader;
+pub use entry::{Field, Ifd, Variant};
+pub use reader::{TiffFile, read, read_header};
 pub use types::FieldType;
 pub use value::Value;
-pub use writer::IfdWriter;
+pub use writer::write;
