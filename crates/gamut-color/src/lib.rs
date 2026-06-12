@@ -9,6 +9,7 @@
 
 pub mod cicp;
 mod format;
+pub mod gamut_map;
 mod linalg;
 pub mod matrix;
 pub mod oklab;
