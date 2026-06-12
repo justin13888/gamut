@@ -11,6 +11,7 @@ pub mod cicp;
 mod format;
 mod pixel;
 mod planar;
+pub mod transfer;
 mod ycbcr;
 
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
