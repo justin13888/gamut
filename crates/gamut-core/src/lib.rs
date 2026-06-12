@@ -103,6 +103,52 @@ pub trait Decoder {
     fn decode(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions>;
 }
 
+/// Encodes an [`ImageRef`] of a specific pixel layout `P` into a compressed byte stream.
+///
+/// A codec implements this once per pixel layout it supports (`impl EncodeImage<Rgb8> for …`,
+/// `impl EncodeImage<Cmyk8> for …`, …), so asking it to encode an unsupported layout is a compile
+/// error rather than a runtime `Unsupported`. The input is pre-validated by [`ImageRef::new`], so an
+/// implementation never re-checks the buffer length. As with [`Encoder`], bytes are appended to
+/// `out` to keep callers that reuse a scratch buffer allocation-conscious.
+pub trait EncodeImage<P: Pixel> {
+    /// Encode `image` into `out` (appended), returning the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] if the requested encoder configuration is not implemented, or
+    /// [`Error::InvalidInput`] if the image violates a format constraint (e.g. a dimension limit).
+    fn encode_image(&self, image: ImageRef<'_, P>, out: &mut Vec<u8>) -> Result<usize>;
+}
+
+/// Decodes a compressed byte stream into an owned [`ImageBuf`] of pixel layout `P`.
+///
+/// `P` selects the layout the caller wants back; a codec implements this for each layout it can
+/// present (converting internally as needed, e.g. grayscale → [`Rgb8`]). Returning an owned
+/// [`ImageBuf`] keeps the dimensions, samples, and layout brand together so the result can't be
+/// misinterpreted.
+pub trait DecodeImage<P: Pixel> {
+    /// Decode `data` into a fresh [`ImageBuf`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `data` is malformed, or [`Error::Unsupported`] if it uses
+    /// a feature that is not implemented or cannot be presented as `P`.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<P>>;
+
+    /// Decode `data` into `dst`, reusing its allocation where possible.
+    ///
+    /// The default forwards to [`DecodeImage::decode_image`]; a codec may override it to refill
+    /// `dst`'s backing storage in place across repeated calls.
+    ///
+    /// # Errors
+    ///
+    /// As [`DecodeImage::decode_image`].
+    fn decode_image_into(&self, data: &[u8], dst: &mut ImageBuf<P>) -> Result<()> {
+        *dst = self.decode_image(data)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +221,54 @@ mod tests {
         assert_eq!(d.num_pixels(), Some(0xFFFF * 0xFFFF));
         // ...but scaling by usize::MAX channels overflows on any platform.
         assert_eq!(d.sample_count(usize::MAX), None);
+    }
+}
+
+#[cfg(test)]
+mod trait_tests {
+    use super::*;
+
+    /// A trivial codec: encodes by copying the samples out, decodes a fixed 1x1 gray pixel.
+    /// Exists only to exercise the trait defaults and object-safety.
+    struct Trivial;
+
+    impl EncodeImage<Gray8> for Trivial {
+        fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
+            out.extend_from_slice(image.as_samples());
+            Ok(image.as_samples().len())
+        }
+    }
+
+    impl DecodeImage<Gray8> for Trivial {
+        fn decode_image(&self, _data: &[u8]) -> Result<ImageBuf<Gray8>> {
+            ImageBuf::<Gray8>::new(vec![42u8], Dimensions::new(1, 1)?)
+        }
+    }
+
+    #[test]
+    fn encode_image_appends_and_counts() {
+        let img = ImageBuf::<Gray8>::new(vec![1, 2, 3, 4], Dimensions::new(2, 2).unwrap()).unwrap();
+        let mut out = vec![0xFF];
+        let n = Trivial.encode_image(img.as_ref(), &mut out).unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(out, vec![0xFF, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn decode_image_into_default_forwards() {
+        let mut dst = ImageBuf::<Gray8>::zeroed(Dimensions::new(1, 1).unwrap()).unwrap();
+        Trivial.decode_image_into(&[], &mut dst).unwrap();
+        assert_eq!(dst.as_samples(), &[42]);
+    }
+
+    #[test]
+    fn traits_are_object_safe() {
+        // Compiles and runs only while both traits stay object-safe (e.g. for `Box<dyn …>`).
+        let enc: &dyn EncodeImage<Gray8> = &Trivial;
+        let dec: &dyn DecodeImage<Gray8> = &Trivial;
+        let img = ImageBuf::<Gray8>::new(vec![7u8], Dimensions::new(1, 1).unwrap()).unwrap();
+        let mut out = Vec::new();
+        assert_eq!(enc.encode_image(img.as_ref(), &mut out).unwrap(), 1);
+        assert_eq!(dec.decode_image(&[]).unwrap().as_samples(), &[42]);
     }
 }
