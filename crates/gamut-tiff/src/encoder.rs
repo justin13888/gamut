@@ -3,7 +3,7 @@
 use gamut_core::{Dimensions, Encoder, Error, Result};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
-use crate::ifd::{ByteOrder, Ifd, PhotometricInterpretation, Predictor, Value};
+use crate::ifd::{ByteOrder, Ifd, PhotometricInterpretation, Predictor, Value, Variant};
 use crate::{tags, writer};
 
 /// The on-disk sample layout of an image, shared by the 8-bit and bilevel encode paths.
@@ -319,7 +319,7 @@ impl TiffEncoder {
             return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, out);
         }
         let (ifd, strips) = self.build_strip_image(packed, dims, layout, extra_fields)?;
-        let bytes = writer::write_image(self.order, &ifd, &strips);
+        let bytes = writer::write_image(self.order, Variant::Classic, &ifd, &strips);
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }
@@ -440,7 +440,7 @@ impl TiffEncoder {
                 &extra,
             )?);
         }
-        let bytes = writer::write_multipage(self.order, &images);
+        let bytes = writer::write_multipage(self.order, Variant::Classic, &images);
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }
@@ -571,7 +571,7 @@ impl TiffEncoder {
             ifd.set(*tag, value.clone());
         }
 
-        let bytes = writer::write_image_tiled(self.order, &ifd, &tiles);
+        let bytes = writer::write_image_tiled(self.order, Variant::Classic, &ifd, &tiles);
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }

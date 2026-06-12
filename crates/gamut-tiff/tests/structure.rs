@@ -1,6 +1,6 @@
 //! Structural round-trip and robustness tests for the TIFF container layer (P2).
 
-use gamut_tiff::{ByteOrder, Ifd, TiffFile, Value, read, tags, write};
+use gamut_tiff::{ByteOrder, Ifd, TiffFile, Value, Variant, read, tags, write};
 
 #[test]
 fn public_api_roundtrips_a_directory() {
@@ -11,19 +11,24 @@ fn public_api_roundtrips_a_directory() {
     ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(150, 1)]));
     ifd.set(305, Value::Ascii("gamut".to_owned())); // Software tag, out-of-line
 
-    for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
-        let file = TiffFile {
-            order,
-            ifds: vec![ifd.clone()],
-        };
-        let bytes = write(&file);
-        let parsed = read(&bytes).expect("read back");
-        assert_eq!(parsed, file);
-        assert_eq!(parsed.ifds[0].get_u32(tags::IMAGE_WIDTH), Some(320));
-        assert_eq!(
-            parsed.ifds[0].get_u32_vec(tags::BITS_PER_SAMPLE),
-            Some(vec![8, 8, 8])
-        );
+    // Both byte orders and both container variants (classic TIFF and BigTIFF) round-trip.
+    for variant in [Variant::Classic, Variant::Big] {
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            let file = TiffFile {
+                order,
+                variant,
+                ifds: vec![ifd.clone()],
+            };
+            let bytes = write(&file);
+            let parsed = read(&bytes).expect("read back");
+            assert_eq!(parsed, file);
+            assert_eq!(parsed.variant, variant);
+            assert_eq!(parsed.ifds[0].get_u32(tags::IMAGE_WIDTH), Some(320));
+            assert_eq!(
+                parsed.ifds[0].get_u32_vec(tags::BITS_PER_SAMPLE),
+                Some(vec![8, 8, 8])
+            );
+        }
     }
 }
 

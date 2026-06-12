@@ -1,7 +1,9 @@
 //! End-to-end pixel round-trips for the uncompressed baseline path (P3, the keystone).
 
 use gamut_core::Dimensions;
-use gamut_tiff::{ByteOrder, Ifd, TiffDecoder, TiffEncoder, Value, tags, writer::write_image};
+use gamut_tiff::{
+    ByteOrder, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags, writer::write_image,
+};
 
 const SIZES: &[(u32, u32)] = &[
     (1, 1),
@@ -131,7 +133,12 @@ fn white_is_zero_is_inverted_on_decode() {
     ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![0])); // WhiteIsZero
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
     ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![1]));
-    let tiff = write_image(ByteOrder::LittleEndian, &ifd, &[vec![0u8, 255u8]]);
+    let tiff = write_image(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        &ifd,
+        &[vec![0u8, 255u8]],
+    );
 
     let mut out = Vec::new();
     TiffDecoder::new()
