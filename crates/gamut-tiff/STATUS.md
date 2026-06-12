@@ -31,7 +31,7 @@ lossy → MAE/PSNR tolerance.
 | P8  | §10     | Modified Huffman (Compression=2) | ✅ done |
 | P9  | §13     | LZW (Compression=5) | ✅ done |
 | P10 | §14     | Differencing predictor (Predictor=2) | ✅ done |
-| P11 | §11     | CCITT T.4 / T.6 fax (Compression=3/4) | ☐ |
+| P11 | §11     | CCITT Group 4 / T.6 fax (Compression=4); G3-2D deferred | ✅ done |
 | P12 | §15     | Tiled images | ☐ |
 | P13 | §18–19  | Planar config + associated alpha + sample format (16-bit/float) | ☐ |
 | P14 | §16     | CMYK | ☐ |

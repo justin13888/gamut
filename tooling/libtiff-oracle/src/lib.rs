@@ -31,6 +31,8 @@ pub enum Compression {
     Lzw,
     /// CCITT Group 3 1-D Modified Huffman (`COMPRESSION_CCITTRLE`).
     CcittRle,
+    /// CCITT Group 4 (T.6) fax (`COMPRESSION_CCITTFAX4`).
+    CcittGroup4Fax,
 }
 
 impl Compression {
@@ -40,6 +42,7 @@ impl Compression {
             Compression::PackBits => sys::COMPRESSION_PACKBITS as u16,
             Compression::Lzw => sys::COMPRESSION_LZW as u16,
             Compression::CcittRle => sys::COMPRESSION_CCITTRLE as u16,
+            Compression::CcittGroup4Fax => sys::COMPRESSION_CCITTFAX4 as u16,
         }
     }
 }

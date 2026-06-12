@@ -6,7 +6,10 @@
 //! followed by exactly one terminating code; and each row starts on a byte boundary (no EOL, no
 //! fill bits, no RTC). T.4/T.6 (Group 3/4) reuse these tables in a later phase.
 
+mod g4;
 mod tables;
+
+pub use g4::{g4_decode_strip, g4_encode_strip};
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -128,7 +131,11 @@ struct BitReader<'a> {
     pos: usize,
 }
 
-impl BitReader<'_> {
+impl<'a> BitReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
     fn read_bit(&mut self) -> Option<u8> {
         let byte = self.data.get(self.pos / 8)?;
         let bit = (byte >> (7 - (self.pos % 8))) & 1;

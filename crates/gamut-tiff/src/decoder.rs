@@ -106,7 +106,11 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         .ok_or(Error::Unsupported("TIFF: unknown compression"))?;
     if !matches!(
         compression,
-        Compression::None | Compression::PackBits | Compression::CcittRle | Compression::Lzw
+        Compression::None
+            | Compression::PackBits
+            | Compression::CcittRle
+            | Compression::CcittGroup4Fax
+            | Compression::Lzw
     ) {
         return Err(Error::Unsupported("TIFF: compression not supported yet"));
     }
@@ -127,9 +131,13 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         return Err(Error::Unsupported("TIFF: mixed bit depths not supported"));
     }
     let bps = bits[0];
-    if compression == Compression::CcittRle && bps != 1 {
+    if matches!(
+        compression,
+        Compression::CcittRle | Compression::CcittGroup4Fax
+    ) && bps != 1
+    {
         return Err(Error::Unsupported(
-            "TIFF: Modified Huffman requires a bilevel image",
+            "TIFF: CCITT coding requires a bilevel image",
         ));
     }
     let use_predictor = match ifd.get_u32(tags::PREDICTOR).unwrap_or(1) {
@@ -219,6 +227,9 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
             Compression::PackBits => packed.extend_from_slice(&packbits::decode(raw, want)?),
             Compression::CcittRle => {
                 packed.extend_from_slice(&ccitt::mh_decode_strip(raw, rows, width)?);
+            }
+            Compression::CcittGroup4Fax => {
+                packed.extend_from_slice(&ccitt::g4_decode_strip(raw, rows, width)?);
             }
             Compression::Lzw => packed.extend_from_slice(&lzw::decode(raw, want)?),
             _ => {

@@ -330,6 +330,15 @@ impl TiffEncoder {
                 }
                 ccitt::mh_encode_strip(raw, row_bytes, dims.width as usize)
             }
+            Compression::CcittGroup4Fax => {
+                if layout.bits_per_sample != 1 {
+                    return Err(Error::Unsupported(
+                        "TIFF: Group 4 fax requires a bilevel image",
+                    ));
+                }
+                let rows = raw.len() / row_bytes;
+                ccitt::g4_encode_strip(raw, row_bytes, rows, dims.width as usize)
+            }
             Compression::Lzw => Ok(lzw::encode(raw)),
             _ => Err(Error::Unsupported(
                 "TIFF: unsupported compression for encoding",
