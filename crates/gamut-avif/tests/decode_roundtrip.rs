@@ -120,3 +120,52 @@ fn lossy_roundtrip_via_libavif() {
         }
     }
 }
+
+#[test]
+fn orientation_transforms_roundtrip_via_libavif() {
+    // `irot`/`imir` are display-time transforms marked *essential*: a conformant reader must parse
+    // and honour them or reject the file, so libavif decoding successfully proves they are
+    // well-formed MIAF properties. libavif (default settings) does not bake the transform into the
+    // returned samples, so the stored planes are unchanged — the lossless pixels still round-trip.
+    let (w, h) = (24u32, 16u32);
+    let rgb = source_rgb(w, h);
+    for (rot, mir) in [
+        (1u8, None),
+        (0u8, Some(1u8)),
+        (3u8, Some(0u8)),
+        (2u8, Some(1u8)),
+    ] {
+        let mut enc = AvifEncoder::new().with_rotation_ccw(rot);
+        if let Some(axis) = mir {
+            enc = enc.with_mirror(axis);
+        }
+        let mut avif = Vec::new();
+        enc.encode(
+            &rgb,
+            Dimensions {
+                width: w,
+                height: h,
+            },
+            &mut avif,
+        )
+        .unwrap();
+
+        let decoded = libavif_oracle::decode_avif(&avif)
+            .unwrap_or_else(|e| panic!("libavif rejected irot={rot} imir={mir:?}: {e}"));
+        assert_eq!(
+            (decoded.width, decoded.height),
+            (w, h),
+            "coded dims unchanged"
+        );
+        let [yp, up, vp] = &decoded.planes;
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) as usize;
+                let (r, g, b) = rgb_at(x, y);
+                assert_eq!(yp[i], g, "Y at ({x},{y}) irot={rot} imir={mir:?}");
+                assert_eq!(up[i], b);
+                assert_eq!(vp[i], r);
+            }
+        }
+    }
+}

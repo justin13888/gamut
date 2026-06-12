@@ -13,4 +13,4 @@
 mod boxes;
 mod writer;
 
-pub use writer::{Av1cConfig, AvifStillImage, NclxColr, write_avif_still};
+pub use writer::{Av1cConfig, AvifStillImage, ImageTransform, NclxColr, write_avif_still};

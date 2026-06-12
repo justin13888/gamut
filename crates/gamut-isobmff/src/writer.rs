@@ -41,6 +41,20 @@ pub struct NclxColr {
     pub full_range: bool,
 }
 
+/// Image-orientation transform properties (`irot`/`imir`, ISO/IEC 23008-12 §6.5.10/§6.5.12),
+/// applied by a reader at display time — the stored pixels are unchanged, so this records e.g. an
+/// EXIF orientation without re-encoding rotated samples. Both are transformative properties and are
+/// therefore associated as *essential* (MIAF §7.3.6.7). They apply in the order `irot` then `imir`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ImageTransform {
+    /// `irot` rotation in 90° steps (`angle`, 0..=3), applied anti-clockwise per ISO/IEC 23008-12.
+    /// `0` writes no `irot` box.
+    pub rotation_ccw: u8,
+    /// `imir` mirror axis: `Some(0)` mirrors about a vertical axis (left↔right), `Some(1)` about a
+    /// horizontal axis (top↔bottom). `None` writes no `imir` box.
+    pub mirror_axis: Option<u8>,
+}
+
 /// Everything needed to serialize one AVIF still image.
 #[derive(Debug, Clone)]
 pub struct AvifStillImage<'a> {
@@ -56,6 +70,8 @@ pub struct AvifStillImage<'a> {
     pub av1c: Av1cConfig,
     /// nclx colour information for `colr`.
     pub nclx: NclxColr,
+    /// Optional `irot`/`imir` display-orientation transforms (default: none).
+    pub transform: ImageTransform,
     /// The AV1 temporal unit (sequence header OBU + frame OBU) placed in `mdat`.
     pub item_data: &'a [u8],
 }
@@ -159,7 +175,9 @@ fn write_iinf(bb: &mut BoxBuilder) {
     bb.end_box(start);
 }
 
-/// `iprp` = `ipco` (av1C, ispe, pixi, colr) + `ipma` associating them with item 1.
+/// `iprp` = `ipco` (av1C, ispe, pixi, colr, optional irot/imir) + `ipma` associating them with
+/// item 1. Association entries are `(property_index, essential)`: `av1C` and the transformative
+/// properties are essential; `ispe`/`pixi`/`colr` are not.
 fn write_iprp(bb: &mut BoxBuilder, img: &AvifStillImage) {
     let start = bb.begin_box(b"iprp");
     let ipco = bb.begin_box(b"ipco");
@@ -167,8 +185,35 @@ fn write_iprp(bb: &mut BoxBuilder, img: &AvifStillImage) {
     write_ispe(bb, img.width, img.height); // 2
     write_pixi(bb, img.num_channels, img.bit_depth); // 3
     write_colr(bb, &img.nclx); // 4
+    let mut assoc = vec![(1u8, true), (2, false), (3, false), (4, false)];
+    let mut next_index = 5u8;
+    if img.transform.rotation_ccw != 0 {
+        write_irot(bb, img.transform.rotation_ccw);
+        assoc.push((next_index, true));
+        next_index += 1;
+    }
+    if let Some(axis) = img.transform.mirror_axis {
+        write_imir(bb, axis);
+        assoc.push((next_index, true));
+    }
     bb.end_box(ipco);
-    write_ipma(bb);
+    write_ipma(bb, &assoc);
+    bb.end_box(start);
+}
+
+/// `irot`: image rotation property (ISO/IEC 23008-12 §6.5.10). A plain `Box` (not a `FullBox`) whose
+/// single byte is `reserved(6) | angle(2)`; `angle` is the anti-clockwise rotation in 90° steps.
+fn write_irot(bb: &mut BoxBuilder, angle: u8) {
+    let start = bb.begin_box(b"irot");
+    bb.u8(angle & 0x03);
+    bb.end_box(start);
+}
+
+/// `imir`: image mirroring property (ISO/IEC 23008-12 §6.5.12). A plain `Box` whose single byte is
+/// `reserved(7) | axis(1)`; `axis` 0 mirrors about a vertical axis, 1 about a horizontal axis.
+fn write_imir(bb: &mut BoxBuilder, axis: u8) {
+    let start = bb.begin_box(b"imir");
+    bb.u8(axis & 0x01);
     bb.end_box(start);
 }
 
@@ -220,17 +265,21 @@ fn write_colr(bb: &mut BoxBuilder, c: &NclxColr) {
     bb.end_box(start);
 }
 
-/// `ipma` v0: item 1 → properties (av1C essential; ispe/pixi/colr non-essential).
-fn write_ipma(bb: &mut BoxBuilder) {
+/// `ipma` v0: item 1 → its properties. `assoc` lists `(property_index, essential)` in association
+/// order; with `flags = 0` each association is a single byte `essential(1) | index(7)` (indices stay
+/// ≤ 127, so 7 bits suffice).
+fn write_ipma(bb: &mut BoxBuilder, assoc: &[(u8, bool)]) {
     let start = bb.begin_box(b"ipma");
     bb.full_box(0, 0);
     bb.u32(1); // entry_count
     bb.u16(1); // item_ID
-    bb.u8(4); // association_count
-    bb.u8(0x80 | 1); // av1C: essential, property index 1
-    bb.u8(2); // ispe: non-essential, index 2
-    bb.u8(3); // pixi: non-essential, index 3
-    bb.u8(4); // colr: non-essential, index 4
+    bb.u8(assoc.len() as u8); // association_count
+    for &(index, essential) in assoc {
+        // The essential flag is bit 7; the property index (≤ 127) occupies bits 0..6. Written as an
+        // addition rather than `0x80 | index` so the operator is mutation-observable (OR/XOR/ADD all
+        // coincide for the disjoint bit 7, which would otherwise leave an equivalent mutant).
+        bb.u8(if essential { index + 0x80 } else { index });
+    }
     bb.end_box(start);
 }
 
@@ -284,6 +333,7 @@ mod tests {
                 matrix_coefficients: 0,
                 full_range: true,
             },
+            transform: ImageTransform::default(),
             item_data: item,
         };
         write_avif_still(&img)
@@ -349,5 +399,130 @@ mod tests {
                 "missing box {fourcc:?}"
             );
         }
+    }
+
+    /// Returns the body bytes (after the 8-byte size+type header) of the first box of type `fourcc`.
+    fn box_body<'a>(buf: &'a [u8], fourcc: &[u8; 4]) -> &'a [u8] {
+        let p = buf
+            .windows(4)
+            .position(|w| w == fourcc)
+            .unwrap_or_else(|| panic!("box {fourcc:?} not found"));
+        let size = be32(buf, p - 4) as usize;
+        &buf[p + 4..p - 4 + size]
+    }
+
+    fn image_with_transform(item: &[u8], transform: ImageTransform) -> Vec<u8> {
+        let img = AvifStillImage {
+            width: 4,
+            height: 4,
+            bit_depth: 8,
+            num_channels: 3,
+            av1c: Av1cConfig {
+                seq_profile: 1,
+                seq_level_idx_0: 1,
+                seq_tier_0: 0,
+                high_bitdepth: false,
+                twelve_bit: false,
+                monochrome: false,
+                chroma_subsampling_x: 0,
+                chroma_subsampling_y: 0,
+                chroma_sample_position: 0,
+            },
+            nclx: NclxColr {
+                colour_primaries: 1,
+                transfer_characteristics: 13,
+                matrix_coefficients: 0,
+                full_range: true,
+            },
+            transform,
+            item_data: item,
+        };
+        write_avif_still(&img)
+    }
+
+    #[test]
+    fn no_transform_writes_no_irot_or_imir() {
+        let file = image_with_transform(&[0u8; 8], ImageTransform::default());
+        assert!(
+            !file.windows(4).any(|w| w == b"irot"),
+            "irot must be absent"
+        );
+        assert!(
+            !file.windows(4).any(|w| w == b"imir"),
+            "imir must be absent"
+        );
+        // ipma still associates exactly the four base properties.
+        let ipma = box_body(&file, b"ipma");
+        assert_eq!(ipma[4 + 4 + 2], 4, "association_count");
+        assert_eq!(
+            &ipma[4 + 4 + 2 + 1..4 + 4 + 2 + 1 + 4],
+            &[0x80 | 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn irot_and_imir_are_written_essential() {
+        // 90° anti-clockwise rotation + a horizontal-axis mirror.
+        let file = image_with_transform(
+            &[0u8; 8],
+            ImageTransform {
+                rotation_ccw: 1,
+                mirror_axis: Some(1),
+            },
+        );
+        // irot/imir are plain Boxes with a single byte: reserved + angle/axis.
+        let irot = box_body(&file, b"irot");
+        assert_eq!(irot, &[1], "irot angle = 1, reserved bits zero");
+        let imir = box_body(&file, b"imir");
+        assert_eq!(imir, &[1], "imir axis = 1, reserved bits zero");
+        // ipma associates the four base properties plus irot (index 5) and imir (index 6); both
+        // transformative properties are essential (high bit set).
+        let ipma = box_body(&file, b"ipma");
+        assert_eq!(ipma[4 + 4 + 2], 6, "association_count");
+        assert_eq!(
+            &ipma[4 + 4 + 2 + 1..4 + 4 + 2 + 1 + 6],
+            &[0x80 | 1, 2, 3, 4, 0x80 | 5, 0x80 | 6]
+        );
+    }
+
+    #[test]
+    fn rotation_only_uses_index_five() {
+        // With no mirror, a rotation takes property index 5 and is the only extra association.
+        let file = image_with_transform(
+            &[0u8; 8],
+            ImageTransform {
+                rotation_ccw: 3,
+                mirror_axis: None,
+            },
+        );
+        assert_eq!(box_body(&file, b"irot"), &[3]);
+        assert!(!file.windows(4).any(|w| w == b"imir"));
+        let ipma = box_body(&file, b"ipma");
+        assert_eq!(ipma[4 + 4 + 2], 5);
+        assert_eq!(
+            &ipma[4 + 4 + 2 + 1..4 + 4 + 2 + 1 + 5],
+            &[0x80 | 1, 2, 3, 4, 0x80 | 5]
+        );
+    }
+
+    #[test]
+    fn mirror_only_axis_zero_uses_index_five() {
+        // A vertical-axis mirror with no rotation: `imir` body is the axis byte 0 (distinct from the
+        // axis-1 case above), and it takes property index 5.
+        let file = image_with_transform(
+            &[0u8; 8],
+            ImageTransform {
+                rotation_ccw: 0,
+                mirror_axis: Some(0),
+            },
+        );
+        assert_eq!(box_body(&file, b"imir"), &[0]);
+        assert!(!file.windows(4).any(|w| w == b"irot"));
+        let ipma = box_body(&file, b"ipma");
+        assert_eq!(ipma[4 + 4 + 2], 5);
+        assert_eq!(
+            &ipma[4 + 4 + 2 + 1..4 + 4 + 2 + 1 + 5],
+            &[0x80 | 1, 2, 3, 4, 0x80 | 5]
+        );
     }
 }
