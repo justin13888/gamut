@@ -1,7 +1,7 @@
 [package]
 name = "gamut-xmp"
 description = "XMP (Extensible Metadata Platform) RDF/XML metadata parser and serializer for gamut image metadata."
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
