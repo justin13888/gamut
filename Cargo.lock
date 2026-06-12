@@ -257,6 +257,7 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+ "gamut-exif",
  "gamut-heic",
  "gamut-icc",
  "gamut-ifd",
@@ -338,6 +339,14 @@ name = "gamut-dsp"
 version = "0.2.0"
 dependencies = [
  "gamut-core",
+]
+
+[[package]]
+name = "gamut-exif"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+ "gamut-ifd",
 ]
 
 [[package]]

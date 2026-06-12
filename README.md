@@ -110,6 +110,7 @@ format.
 | `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                     | placeholder                            |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
 | `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | scaffolding (impl in progress, #34)    |
+| `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on gamut-ifd        | scaffolding (impl in progress, #34)    |
 | `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | scaffolding (impl in progress, #34)    |
 | `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | scaffolding (impl in progress, #34)    |
 | `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives       | ready for use                          |
