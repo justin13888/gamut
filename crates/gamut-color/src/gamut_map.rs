@@ -27,7 +27,7 @@ pub fn in_gamut(rgb: [f64; 3]) -> bool {
 /// An in-gamut input is returned unchanged. Otherwise the colour is projected
 /// toward the achromatic anchor `(L + l_blend·(0.5 − L), 0, 0)` — which is always
 /// in gamut — and bisection over `t ∈ [0, 1]` converges onto the gamut surface
-/// in exactly [`CLAMP_ITERATIONS`] steps. `a` and `b` shrink by the same factor,
+/// in exactly `CLAMP_ITERATIONS` (16) steps. `a` and `b` shrink by the same factor,
 /// so hue is preserved; lightness drifts toward 0.5 in proportion to how far out
 /// of gamut the colour was (`l_blend = 0` keeps `L` fixed).
 ///

@@ -3,7 +3,7 @@
 //!
 //! These builders let the per-gamut `M1` tables in [`crate::oklab`] be *computed
 //! from first principles* rather than trusted as hand-copied literals: the
-//! [`derived_matrices_match_literals`](tests) test checks
+//! `derived_matrices_match_literals` test checks
 //! `derive_m1(gamut) ≈ oklab::Gamut::m1_matrix()` to `1e-7`, so a typo in either
 //! place is caught. The factorization follows Ottosson:
 //! `M1[gamut] = M_LMS · M_XYZ[gamut]`, where `M_LMS = M1[sRGB] · M_XYZ[sRGB]⁻¹`
