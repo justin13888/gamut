@@ -2,3 +2,10 @@
 # Exclude from GitHub Linguist language statistics and collapse in diffs.
 references/** linguist-documentation
 references/** linguist-vendored
+
+# Dev-only trees: kept in the repo for contributors (a plain `git clone` still gets them),
+# but stripped from `git archive` source tarballs (GitHub release "Source code" archives) so
+# distributed artifacts don't carry vendored spec documents or the C-decoder submodules.
+/references export-ignore
+/third_party export-ignore
+/tooling export-ignore
