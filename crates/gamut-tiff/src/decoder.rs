@@ -2,7 +2,7 @@
 
 use gamut_core::{Decoder, Dimensions, Error, Result};
 
-use crate::compression::{Compression, ccitt, packbits};
+use crate::compression::{Compression, ccitt, lzw, packbits};
 use crate::ifd::{Ifd, PhotometricInterpretation};
 use crate::{reader, tags};
 
@@ -106,7 +106,7 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         .ok_or(Error::Unsupported("TIFF: unknown compression"))?;
     if !matches!(
         compression,
-        Compression::None | Compression::PackBits | Compression::CcittRle
+        Compression::None | Compression::PackBits | Compression::CcittRle | Compression::Lzw
     ) {
         return Err(Error::Unsupported("TIFF: compression not supported yet"));
     }
@@ -212,6 +212,7 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
             Compression::CcittRle => {
                 packed.extend_from_slice(&ccitt::mh_decode_strip(raw, rows, width)?);
             }
+            Compression::Lzw => packed.extend_from_slice(&lzw::decode(raw, want)?),
             _ => {
                 let strip = raw
                     .get(..want)

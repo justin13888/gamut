@@ -2,7 +2,7 @@
 
 use gamut_core::{Dimensions, Encoder, Error, Result};
 
-use crate::compression::{Compression, ccitt, packbits};
+use crate::compression::{Compression, ccitt, lzw, packbits};
 use crate::ifd::{ByteOrder, Ifd, PhotometricInterpretation, Value};
 use crate::{tags, writer};
 
@@ -306,6 +306,7 @@ impl TiffEncoder {
                 }
                 ccitt::mh_encode_strip(raw, row_bytes, dims.width as usize)
             }
+            Compression::Lzw => Ok(lzw::encode(raw)),
             _ => Err(Error::Unsupported(
                 "TIFF: unsupported compression for encoding",
             )),

@@ -5,6 +5,7 @@
 //! tile; the per-scheme codecs land in later phases.
 
 pub mod ccitt;
+pub mod lzw;
 pub mod packbits;
 
 /// A compression scheme applied to a strip or tile of image data.
