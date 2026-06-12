@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use gamut::avif::AvifEncoder;
+use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
 use gamut::webp::WebpEncoder;
 
 use crate::error::CliError;
@@ -29,6 +30,9 @@ pub(crate) struct ConvertArgs {
     /// Lossy WebP quality, 0–100 (higher is better but larger). Only used with `--lossy`.
     #[arg(long, default_value_t = 75)]
     quality: u8,
+    /// Compress TIFF output with PackBits run-length encoding instead of storing it uncompressed.
+    #[arg(long)]
+    packbits: bool,
 }
 
 /// Output container/codec for `gamut convert`.
@@ -38,6 +42,8 @@ pub(crate) enum OutputFormat {
     Avif,
     /// WebP — lossless (VP8L) or lossy (VP8, with `--lossy`); transparency is preserved.
     Webp,
+    /// TIFF (8-bit RGB; uncompressed, or PackBits with `--packbits`).
+    Tiff,
 }
 
 /// Runs the `convert` command: decode the input, encode it, and report the result.
@@ -76,6 +82,24 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
             encoder.encode_rgba8(&rgba, dims, &mut out)?;
             (rgba.len(), dims)
         }
+        OutputFormat::Tiff => {
+            let (rgb, dims) = decode_rgb8(&args.input)?;
+            tracing::info!(
+                width = dims.width,
+                height = dims.height,
+                bytes = rgb.len(),
+                "decoded input"
+            );
+            let compression = if args.packbits {
+                TiffCompression::PackBits
+            } else {
+                TiffCompression::None
+            };
+            TiffEncoder::new()
+                .with_compression(compression)
+                .encode_rgb8(&rgb, dims, &mut out)?;
+            (rgb.len(), dims)
+        }
     };
     tracing::info!(bytes = out.len(), lossy = args.lossy, "encoded output");
 
@@ -113,6 +137,7 @@ fn resolve_format(args: &ConvertArgs) -> Result<OutputFormat, CliError> {
     {
         Some("avif") => Ok(OutputFormat::Avif),
         Some("webp") => Ok(OutputFormat::Webp),
+        Some("tiff" | "tif") => Ok(OutputFormat::Tiff),
         Some(other) => Err(CliError::UnsupportedOutput(other.to_string())),
         None => Err(CliError::UnsupportedOutput("<none>".to_string())),
     }

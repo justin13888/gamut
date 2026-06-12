@@ -16,7 +16,7 @@ the Rust ecosystem lacks a strong, feature-complete implementation.
 Dependency edges (a crate depends on those to its right):
 
 - **gamut** -- umbrella; optional deps on the format crates, gated by features (`avif`,
-  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `metadata`, `all`). `default = []`. The `primitives`
+  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `metadata`, `all`). `default = []`. The `primitives`
   feature additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling, and the
   `metadata` feature re-exports the image-metadata primitives; `all` includes both.
 - **gamut-core** -- `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`. No
@@ -31,6 +31,9 @@ Dependency edges (a crate depends on those to its right):
   **gamut-xmp**; **gamut-iptc** ← xmp) and the **gamut-metadata** facade (← exif/xmp/icc/iptc) layer
   on top, grouped under the umbrella `metadata` feature (issue #34); the format crates will consume
   the facade for embedded metadata.
+- **gamut-tiff** -- self-contained TIFF 6.0; natively still-image, so its own IFD/tag structure is
+  the container (uses neither isobmff nor riff). Bundles its compressions (None/PackBits/LZW/CCITT/
+  JPEG). ← core, color, dsp, bitstream.
 - **gamut-cli** (binary named `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib). ← gamut.
   `gamut-cli` is the sandbox that exercises the implemented features: it decodes input via the
   third-party `image` crate (PNG/JPEG/PPM) but encodes only with gamut crates, and exposes the
@@ -55,9 +58,9 @@ just mutants         # mutation testing (run `mise install` once; heavier — ne
 just check-commits   # commit messages are Conventional Commits
 ```
 
-The shipped crates are pure Rust, but the decoder cross-check tests link reference decoders
-(dav1d, libavif) built from the `third_party/` git submodules via the dev-only oracle crates in
-`tooling/`. Running the tests therefore needs the submodules checked out
+The shipped crates are pure Rust, but the decoder cross-check tests link reference codecs
+(dav1d, libavif, libtiff) built from the `third_party/` git submodules via the dev-only oracle
+crates in `tooling/`. Running the tests therefore needs the submodules checked out
 (`git submodule update --init --recursive`) and the build tools on `PATH` — CMake/Ninja/Meson
 come from mise; nasm and pkg-config are system packages (`apt-get install nasm pkg-config`).
 No system-installed decoder binaries are used.

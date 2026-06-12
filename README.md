@@ -62,7 +62,9 @@ In 2026, `gamut` started when there were no robust, well-tested Rust implementat
 The initial focus is **AVIF, WebP, and JPEG** — the formats with the best
 size-versus-compatibility tradeoff today. JPEG XL is intentionally out of scope for now (it
 is better served by a dedicated effort). The other format crates in the tree (HEIC, VVC,
-AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens.
+AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens. **TIFF 6.0**
+(`gamut-tiff`) is newly scaffolded and under active implementation (issue #107) as a
+royalty-free, natively still-image format — a good long-term fit for the image-first focus.
 
 Alongside the codecs, gamut is growing **shared image-metadata primitives** (issue #34) — EXIF,
 XMP, ICC, and IPTC, plus the TIFF/IFD container core (`gamut-ifd`) that EXIF builds on — so the
@@ -115,6 +117,7 @@ format.
 | `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | scaffolding (impl in progress, #34)    |
 | `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | scaffolding (impl in progress, #34)    |
 | `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | scaffolding (impl in progress, #34)    |
+| `gamut-tiff`      | TIFF 6.0 encoder/decoder — self-contained (own IFD/tag container)      | baseline + extensions (YCbCr/Lab/JPEG WIP) |
 | `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives       | ready for use                          |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
 | `gamut-ffi`       | C-compatible FFI bindings                                              | placeholder                            |
