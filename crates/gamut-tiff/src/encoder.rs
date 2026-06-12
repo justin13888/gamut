@@ -25,6 +25,7 @@ pub struct TiffEncoder {
     compression: Compression,
     predictor: Predictor,
     tiling: Option<(u32, u32)>,
+    big_tiff: bool,
 }
 
 impl Default for TiffEncoder {
@@ -34,6 +35,7 @@ impl Default for TiffEncoder {
             compression: Compression::None,
             predictor: Predictor::None,
             tiling: None,
+            big_tiff: false,
         }
     }
 }
@@ -77,6 +79,28 @@ impl TiffEncoder {
     pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
         self.tiling = Some((tile_width, tile_height));
         self
+    }
+
+    /// Returns a copy of this encoder that writes BigTIFF (magic `43`, 64-bit offsets) instead of
+    /// classic TIFF.
+    ///
+    /// BigTIFF only widens the container's structural fields; every colour mode, compression
+    /// scheme, strip/tile layout, and multi-page feature applies unchanged, so this composes with
+    /// the other builders. Its 64-bit offsets let a file exceed the 4 GiB classic limit. A reader
+    /// detects the variant from the header magic, so no decoder flag is needed. Defaults to off.
+    #[must_use]
+    pub fn with_big_tiff(mut self, big_tiff: bool) -> Self {
+        self.big_tiff = big_tiff;
+        self
+    }
+
+    /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
+    fn variant(&self) -> Variant {
+        if self.big_tiff {
+            Variant::Big
+        } else {
+            Variant::Classic
+        }
     }
 
     /// Encodes an 8-bit grayscale image: one sample per pixel, `BlackIsZero`.
@@ -319,7 +343,7 @@ impl TiffEncoder {
             return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, out);
         }
         let (ifd, strips) = self.build_strip_image(packed, dims, layout, extra_fields)?;
-        let bytes = writer::write_image(self.order, Variant::Classic, &ifd, &strips);
+        let bytes = writer::write_image(self.order, self.variant(), &ifd, &strips);
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }
@@ -440,7 +464,7 @@ impl TiffEncoder {
                 &extra,
             )?);
         }
-        let bytes = writer::write_multipage(self.order, Variant::Classic, &images);
+        let bytes = writer::write_multipage(self.order, self.variant(), &images);
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }
@@ -571,7 +595,7 @@ impl TiffEncoder {
             ifd.set(*tag, value.clone());
         }
 
-        let bytes = writer::write_image_tiled(self.order, Variant::Classic, &ifd, &tiles);
+        let bytes = writer::write_image_tiled(self.order, self.variant(), &ifd, &tiles);
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }
@@ -636,5 +660,29 @@ mod tests {
             .expect("encode");
         assert_eq!(n, out.len());
         assert_eq!(&out[0..2], b"II");
+        // Classic TIFF by default: magic 42.
+        assert_eq!(out[2], 42);
+    }
+
+    #[test]
+    fn with_big_tiff_emits_bigtiff_header() {
+        let mut out = Vec::new();
+        TiffEncoder::new()
+            .with_big_tiff(true)
+            .encode_rgb8(
+                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                Dimensions {
+                    width: 2,
+                    height: 2,
+                },
+                &mut out,
+            )
+            .expect("encode");
+        // Magic 43, the fixed offset-size 8, and a 16-byte header (first IFD at offset >= 16).
+        let (order, variant, first) = crate::reader::read_header(&out).expect("header");
+        assert_eq!(order, ByteOrder::LittleEndian);
+        assert_eq!(variant, Variant::Big);
+        assert_eq!(out[2], 0x2b);
+        assert!(first >= 16);
     }
 }
