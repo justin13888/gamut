@@ -263,6 +263,7 @@ dependencies = [
  "gamut-ifd",
  "gamut-iptc",
  "gamut-jxl",
+ "gamut-metadata",
  "gamut-vvc",
  "gamut-webp",
  "gamut-xmp",
@@ -404,6 +405,17 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+]
+
+[[package]]
+name = "gamut-metadata"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+ "gamut-exif",
+ "gamut-icc",
+ "gamut-iptc",
+ "gamut-xmp",
 ]
 
 [[package]]

@@ -32,6 +32,8 @@ pub use gamut_ifd as ifd;
 #[cfg(feature = "metadata")]
 pub use gamut_iptc as iptc;
 #[cfg(feature = "metadata")]
+pub use gamut_metadata as metadata;
+#[cfg(feature = "metadata")]
 pub use gamut_xmp as xmp;
 
 #[cfg(feature = "primitives")]
