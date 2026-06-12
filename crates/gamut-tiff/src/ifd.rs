@@ -6,6 +6,11 @@
 //! sorted in ascending tag order, and a 4-byte offset to the next IFD (or `0`). An entry carries
 //! its value inline when it fits in four bytes, or otherwise a file offset to it.
 //!
+//! BigTIFF ([`Variant::Big`]) keeps the same model but widens those structural fields to 64 bits
+//! (a 16-byte header with magic `43`, an 8-byte entry count, 20-byte entries, and an 8-byte inline
+//! threshold / next-IFD pointer); the [`Variant`] helpers carry every width so the reader and
+//! writer stay variant-agnostic.
+//!
 //! These types model that structure; [`crate::reader`] parses it and [`crate::writer`] serialises
 //! it.
 

@@ -18,7 +18,8 @@ struct SampleLayout {
 ///
 /// Writes chunky (`PlanarConfiguration = 1`) strips, optionally PackBits-compressed
 /// ([`Self::with_compression`]). Supports 8-bit grayscale/RGB and 1-bit bilevel; richer colour
-/// modes and compression schemes are added in later phases.
+/// modes and compression schemes are added in later phases. Emits classic TIFF by default, or
+/// BigTIFF (64-bit offsets) when [`Self::with_big_tiff`] is set.
 #[derive(Debug, Clone)]
 pub struct TiffEncoder {
     order: ByteOrder,

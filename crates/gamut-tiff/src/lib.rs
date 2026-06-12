@@ -10,15 +10,18 @@
 //!
 //! The encoder and decoder are reachable through the umbrella crate's `tiff` feature. Everything
 //! is implemented clean-slate from the TIFF 6.0 specification (`references/tiff/tiff6.pdf`,
-//! Adobe/Aldus, Final — June 3 1992) rather than wrapping libtiff.
+//! Adobe/Aldus, Final — June 3 1992) and the BigTIFF extension (`references/tiff/bigtiff.html`)
+//! rather than wrapping libtiff.
 //!
 //! Implementation in progress (see issue #107). The container layer ([`ifd`], [`reader`],
 //! [`writer`], [`tags`]) and the baseline pixel path are in place: [`TiffEncoder`] writes 8-bit
 //! grayscale/RGB/RGBA/CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles) —
 //! uncompressed, PackBits, LZW, or (for bilevel) Modified Huffman / Group 4 fax ([`compression`]) —
 //! and [`TiffDecoder`] reads them back (both implement the
-//! [`gamut_core::Encoder`]/[`gamut_core::Decoder`] traits). The remaining compression schemes and
-//! colour modes land in subsequent phases.
+//! [`gamut_core::Encoder`]/[`gamut_core::Decoder`] traits). Both the classic 32-bit container and
+//! **BigTIFF** (magic `43`, 64-bit offsets, for files past 4 GiB) are written and read: opt into
+//! BigTIFF with [`TiffEncoder::with_big_tiff`], and the decoder detects the variant from the
+//! header. The remaining compression schemes and colour modes land in subsequent phases.
 #![forbid(unsafe_code)]
 
 pub mod compression;
