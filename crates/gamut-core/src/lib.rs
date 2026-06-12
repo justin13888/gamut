@@ -5,6 +5,12 @@
 //! here, so that callers get a single, consistent error surface regardless of format.
 #![forbid(unsafe_code)]
 
+mod pixel;
+
+pub use pixel::{
+    Bilevel, Cmyk8, ColorModel, Gray8, Gray16, Indexed8, Pixel, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
+};
+
 /// Errors produced by gamut encoders and decoders.
 ///
 /// Marked `#[non_exhaustive]` so additional variants can be added as formats land without a
