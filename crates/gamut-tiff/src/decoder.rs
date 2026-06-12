@@ -4,6 +4,7 @@ use gamut_core::{Decoder, Dimensions, Error, Result};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
 use crate::ifd::PhotometricInterpretation;
+use crate::palette::Palette8;
 use crate::tags;
 use gamut_ifd::{Ifd, read};
 
@@ -38,8 +39,9 @@ enum Mode {
     Rgba,
     /// Interleaved CMYK (4 separated ink samples).
     Cmyk,
-    /// Palette colour: 8-bit indices into a 3×256 16-bit `ColorMap`.
-    Palette(Vec<u32>),
+    /// Palette colour: 8-bit indices into a [`Palette8`] colour table. Boxed because the 768-byte
+    /// table would otherwise dwarf the other variants.
+    Palette(Box<Palette8>),
 }
 
 impl TiffDecoder {
@@ -258,12 +260,7 @@ fn decode_image(data: &[u8], page: usize) -> Result<DecodedImage> {
             let cm = ifd
                 .get_u32_vec(tags::COLOR_MAP)
                 .ok_or(Error::InvalidInput("TIFF: palette image missing ColorMap"))?;
-            if cm.len() != 3 * 256 {
-                return Err(Error::InvalidInput(
-                    "TIFF: ColorMap must have 3*256 entries",
-                ));
-            }
-            Mode::Palette(cm)
+            Mode::Palette(Box::new(Palette8::from_tiff_colormap(&cm)?))
         }
         _ => {
             return Err(Error::Unsupported(
@@ -338,14 +335,11 @@ fn decode_image(data: &[u8], page: usize) -> Result<DecodedImage> {
             }
             (1, px)
         }
-        Mode::Palette(cm) => {
-            // Each 8-bit index selects a 16-bit RGB triple; the high byte is the 8-bit sample.
+        Mode::Palette(palette) => {
+            // Each 8-bit index selects an RGB triple from the colour table.
             let mut px = Vec::with_capacity(width * height * 3);
             for &idx in &packed {
-                let i = idx as usize;
-                px.push((cm[i] >> 8) as u8);
-                px.push((cm[256 + i] >> 8) as u8);
-                px.push((cm[512 + i] >> 8) as u8);
+                px.extend_from_slice(&palette.entry(idx));
             }
             (3, px)
         }

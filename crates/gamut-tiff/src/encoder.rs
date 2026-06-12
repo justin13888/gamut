@@ -4,6 +4,7 @@ use gamut_core::{Dimensions, Encoder, Error, Result};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
+use crate::palette::Palette8;
 use crate::{tags, writer};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
@@ -270,16 +271,8 @@ impl TiffEncoder {
                 "TIFF: index buffer length does not match dimensions",
             ));
         }
-        if palette.len() != 256 * 3 {
-            return Err(Error::InvalidInput("TIFF: palette must be 256 RGB entries"));
-        }
-        // ColorMap: 3×256 16-bit values (all reds, then greens, then blues); 8-bit → 16-bit by ×257.
-        let mut colormap = vec![0u16; 3 * 256];
-        for i in 0..256 {
-            colormap[i] = u16::from(palette[3 * i]) * 257;
-            colormap[256 + i] = u16::from(palette[3 * i + 1]) * 257;
-            colormap[512 + i] = u16::from(palette[3 * i + 2]) * 257;
-        }
+        // Palette8 owns the length check and the 8-bit RGB → 16-bit planar ColorMap conversion.
+        let colormap = Palette8::from_rgb_triples(palette)?.to_tiff_colormap();
         self.encode_packed(
             indices,
             dims,
