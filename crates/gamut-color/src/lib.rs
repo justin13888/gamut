@@ -9,6 +9,8 @@
 
 pub mod cicp;
 mod format;
+mod linalg;
+pub mod oklab;
 mod pixel;
 mod planar;
 pub mod transfer;
