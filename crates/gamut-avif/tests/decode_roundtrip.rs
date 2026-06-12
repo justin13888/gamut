@@ -59,9 +59,9 @@ fn roundtrip(w: u32, h: u32) {
         for x in 0..w {
             let i = (y * w + x) as usize;
             let (r, g, b) = rgb_at(x, y);
-            assert_eq!(yp[i], g, "Y!=G at ({x},{y}) in {w}x{h}");
-            assert_eq!(up[i], b, "U!=B at ({x},{y}) in {w}x{h}");
-            assert_eq!(vp[i], r, "V!=R at ({x},{y}) in {w}x{h}");
+            assert_eq!(yp[i], u16::from(g), "Y!=G at ({x},{y}) in {w}x{h}");
+            assert_eq!(up[i], u16::from(b), "U!=B at ({x},{y}) in {w}x{h}");
+            assert_eq!(vp[i], u16::from(r), "V!=R at ({x},{y}) in {w}x{h}");
         }
     }
 }
@@ -162,9 +162,13 @@ fn orientation_transforms_roundtrip_via_libavif() {
             for x in 0..w {
                 let i = (y * w + x) as usize;
                 let (r, g, b) = rgb_at(x, y);
-                assert_eq!(yp[i], g, "Y at ({x},{y}) irot={rot} imir={mir:?}");
-                assert_eq!(up[i], b);
-                assert_eq!(vp[i], r);
+                assert_eq!(
+                    yp[i],
+                    u16::from(g),
+                    "Y at ({x},{y}) irot={rot} imir={mir:?}"
+                );
+                assert_eq!(up[i], u16::from(b));
+                assert_eq!(vp[i], u16::from(r));
             }
         }
     }
