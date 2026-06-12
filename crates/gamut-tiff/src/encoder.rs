@@ -2,7 +2,7 @@
 
 use gamut_core::{Dimensions, Encoder, Error, Result};
 
-use crate::compression::{Compression, packbits};
+use crate::compression::{Compression, ccitt, packbits};
 use crate::ifd::{ByteOrder, Ifd, PhotometricInterpretation, Value};
 use crate::{tags, writer};
 
@@ -245,7 +245,7 @@ impl TiffEncoder {
             let rows = rows_per_strip.min(h - row);
             let start = row * stored_row_bytes;
             let raw = &packed[start..start + rows * stored_row_bytes];
-            strips.push(self.compress_strip(raw, stored_row_bytes)?);
+            strips.push(self.compress_strip(raw, dims, layout)?);
             row += rows;
         }
 
@@ -281,8 +281,14 @@ impl TiffEncoder {
         Ok(bytes.len())
     }
 
-    /// Applies the selected compression to one strip's raw bytes, row by row.
-    fn compress_strip(&self, raw: &[u8], row_bytes: usize) -> Result<Vec<u8>> {
+    /// Applies the selected compression to one strip's already-packed bytes.
+    fn compress_strip(
+        &self,
+        raw: &[u8],
+        dims: Dimensions,
+        layout: &SampleLayout,
+    ) -> Result<Vec<u8>> {
+        let row_bytes = layout.stored_row_bytes;
         match self.compression {
             Compression::None => Ok(raw.to_vec()),
             Compression::PackBits => {
@@ -291,6 +297,14 @@ impl TiffEncoder {
                     packbits::encode_row(row, &mut out);
                 }
                 Ok(out)
+            }
+            Compression::CcittRle => {
+                if layout.bits_per_sample != 1 {
+                    return Err(Error::Unsupported(
+                        "TIFF: Modified Huffman requires a bilevel image",
+                    ));
+                }
+                ccitt::mh_encode_strip(raw, row_bytes, dims.width as usize)
             }
             _ => Err(Error::Unsupported(
                 "TIFF: unsupported compression for encoding",

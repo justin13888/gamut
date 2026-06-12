@@ -28,7 +28,7 @@ lossy → MAE/PSNR tolerance.
 | P5b | §3      | Bilevel (1-bit) + FillOrder (4-bit gray deferred to P13) | ✅ done |
 | P6  | §5      | Palette-color (ColorMap, 8-bit indices) | ✅ done |
 | P7  | §7–8    | CLI `convert → .tiff` (uncompressed/PackBits RGB) | ✅ done |
-| P8  | §10     | Modified Huffman (Compression=2) | ☐ |
+| P8  | §10     | Modified Huffman (Compression=2) | ✅ done |
 | P9  | §13     | LZW (Compression=5) | ☐ |
 | P10 | §14     | Differencing predictor (Predictor=2) | ☐ |
 | P11 | §11     | CCITT T.4 / T.6 fax (Compression=3/4) | ☐ |

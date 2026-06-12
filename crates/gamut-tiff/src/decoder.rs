@@ -2,7 +2,7 @@
 
 use gamut_core::{Decoder, Dimensions, Error, Result};
 
-use crate::compression::{Compression, packbits};
+use crate::compression::{Compression, ccitt, packbits};
 use crate::ifd::{Ifd, PhotometricInterpretation};
 use crate::{reader, tags};
 
@@ -104,7 +104,10 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
 
     let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))
         .ok_or(Error::Unsupported("TIFF: unknown compression"))?;
-    if !matches!(compression, Compression::None | Compression::PackBits) {
+    if !matches!(
+        compression,
+        Compression::None | Compression::PackBits | Compression::CcittRle
+    ) {
         return Err(Error::Unsupported("TIFF: compression not supported yet"));
     }
     if ifd.get_u32(tags::PLANAR_CONFIGURATION).unwrap_or(1) != 1 {
@@ -124,6 +127,11 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         return Err(Error::Unsupported("TIFF: mixed bit depths not supported"));
     }
     let bps = bits[0];
+    if compression == Compression::CcittRle && bps != 1 {
+        return Err(Error::Unsupported(
+            "TIFF: Modified Huffman requires a bilevel image",
+        ));
+    }
 
     let photometric = PhotometricInterpretation::from_code(require_u32(
         ifd,
@@ -201,6 +209,9 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
             .ok_or(Error::InvalidInput("TIFF: strip out of bounds"))?;
         match compression {
             Compression::PackBits => packed.extend_from_slice(&packbits::decode(raw, want)?),
+            Compression::CcittRle => {
+                packed.extend_from_slice(&ccitt::mh_decode_strip(raw, rows, width)?);
+            }
             _ => {
                 let strip = raw
                     .get(..want)
