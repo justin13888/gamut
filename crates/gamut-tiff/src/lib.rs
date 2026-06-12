@@ -14,10 +14,10 @@
 //!
 //! Implementation in progress (see issue #107). The container layer ([`ifd`], [`reader`],
 //! [`writer`], [`tags`]) and the baseline pixel path are in place: [`TiffEncoder`] writes 8-bit
-//! grayscale/RGB and 1-bit bilevel strips — uncompressed or PackBits-compressed ([`compression`])
-//! — and [`TiffDecoder`] reads them back (both implement the [`gamut_core::Encoder`]/
-//! [`gamut_core::Decoder`] traits). The remaining compression schemes and colour modes land in
-//! subsequent phases.
+//! grayscale/RGB, 1-bit bilevel, and 8-bit palette strips — uncompressed or PackBits-compressed
+//! ([`compression`]) — and [`TiffDecoder`] reads them back (both implement the
+//! [`gamut_core::Encoder`]/[`gamut_core::Decoder`] traits). The remaining compression schemes and
+//! colour modes land in subsequent phases.
 #![forbid(unsafe_code)]
 
 pub mod compression;

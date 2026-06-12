@@ -67,6 +67,70 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<DecodedImage, String> {
     unsafe { decode_inner(&cpath) }
 }
 
+/// Decodes a TIFF with libtiff's high-level RGBA reader, returning `(width, height, RGBA bytes)`.
+///
+/// Unlike [`decode_tiff`] (which returns raw samples), this resolves the colour map and
+/// photometric interpretation, so it validates palette/colour handling against the reference.
+///
+/// # Errors
+///
+/// Returns a message if the file cannot be written to a temp file or decoded.
+pub fn decode_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("oracle.tiff");
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let cpath = c_path(&path)?;
+    // SAFETY: `cpath` is valid; the handle is closed on every path.
+    unsafe { decode_rgba_inner(&cpath) }
+}
+
+unsafe fn decode_rgba_inner(cpath: &CString) -> Result<(u32, u32, Vec<u8>), String> {
+    let mode = CString::new("r").map_err(|e| e.to_string())?;
+    let t = unsafe { sys::TIFFOpen(cpath.as_ptr(), mode.as_ptr()) };
+    if t.is_null() {
+        return Err("TIFFOpen (read) failed".into());
+    }
+    let out = unsafe { read_rgba(t) };
+    unsafe { sys::TIFFClose(t) };
+    out
+}
+
+unsafe fn read_rgba(t: *mut sys::TIFF) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut width: u32 = 0;
+    let mut height: u32 = 0;
+    unsafe {
+        if sys::TIFFGetField(t, sys::TIFFTAG_IMAGEWIDTH, &mut width as *mut u32) != 1
+            || sys::TIFFGetField(t, sys::TIFFTAG_IMAGELENGTH, &mut height as *mut u32) != 1
+        {
+            return Err("missing dimensions".into());
+        }
+    }
+    let n = (width as usize) * (height as usize);
+    let mut raster = vec![0u32; n.max(1)];
+    let rc = unsafe {
+        sys::TIFFReadRGBAImageOriented(
+            t,
+            width,
+            height,
+            raster.as_mut_ptr(),
+            sys::ORIENTATION_TOPLEFT as c_int,
+            0,
+        )
+    };
+    if rc != 1 {
+        return Err("TIFFReadRGBAImageOriented failed".into());
+    }
+    let mut rgba = Vec::with_capacity(n * 4);
+    for &px in &raster[..n] {
+        // libtiff packs each pixel as ABGR (R is the low byte; see the TIFFGetR/G/B/A macros).
+        rgba.push((px & 0xff) as u8);
+        rgba.push(((px >> 8) & 0xff) as u8);
+        rgba.push(((px >> 16) & 0xff) as u8);
+        rgba.push(((px >> 24) & 0xff) as u8);
+    }
+    Ok((width, height, rgba))
+}
+
 /// Encodes interleaved 8-bit RGB with libtiff at the given compression, returning the TIFF bytes.
 ///
 /// # Errors

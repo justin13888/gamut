@@ -130,6 +130,59 @@ impl TiffEncoder {
                 stored_row_bytes,
                 photometric: PhotometricInterpretation::BlackIsZero,
             },
+            &[],
+            out,
+        )
+    }
+
+    /// Encodes an 8-bit palette-colour image.
+    ///
+    /// `indices` is `width * height` bytes (one palette index per pixel); `palette` is `256 * 3`
+    /// bytes of 8-bit RGB (entry `i` is `palette[3*i..3*i+3]`). Returns the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `indices` does not match `dims`, `dims` is empty, or
+    /// `palette` is not exactly 256 RGB entries.
+    pub fn encode_palette8(
+        &self,
+        indices: &[u8],
+        palette: &[u8],
+        dims: Dimensions,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        let (w, h) = (dims.width as usize, dims.height as usize);
+        if w == 0 || h == 0 {
+            return Err(Error::InvalidInput("TIFF: zero-sized image"));
+        }
+        if indices.len()
+            != w.checked_mul(h)
+                .ok_or(Error::InvalidInput("TIFF: image too large"))?
+        {
+            return Err(Error::InvalidInput(
+                "TIFF: index buffer length does not match dimensions",
+            ));
+        }
+        if palette.len() != 256 * 3 {
+            return Err(Error::InvalidInput("TIFF: palette must be 256 RGB entries"));
+        }
+        // ColorMap: 3×256 16-bit values (all reds, then greens, then blues); 8-bit → 16-bit by ×257.
+        let mut colormap = vec![0u16; 3 * 256];
+        for i in 0..256 {
+            colormap[i] = u16::from(palette[3 * i]) * 257;
+            colormap[256 + i] = u16::from(palette[3 * i + 1]) * 257;
+            colormap[512 + i] = u16::from(palette[3 * i + 2]) * 257;
+        }
+        self.encode_packed(
+            indices,
+            dims,
+            &SampleLayout {
+                spp: 1,
+                bits_per_sample: 8,
+                stored_row_bytes: w,
+                photometric: PhotometricInterpretation::Palette,
+            },
+            &[(tags::COLOR_MAP, Value::Short(colormap))],
             out,
         )
     }
@@ -166,6 +219,7 @@ impl TiffEncoder {
                 stored_row_bytes: row_bytes,
                 photometric,
             },
+            &[],
             out,
         )
     }
@@ -177,6 +231,7 @@ impl TiffEncoder {
         packed: &[u8],
         dims: Dimensions,
         layout: &SampleLayout,
+        extra_fields: &[(u16, Value)],
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         let h = dims.height as usize;
@@ -217,6 +272,9 @@ impl TiffEncoder {
         ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
+        for (tag, value) in extra_fields {
+            ifd.set(*tag, value.clone());
+        }
 
         let bytes = writer::write_image(self.order, &ifd, &strips);
         out.extend_from_slice(&bytes);

@@ -6,10 +6,11 @@ use crate::compression::{Compression, packbits};
 use crate::ifd::{Ifd, PhotometricInterpretation};
 use crate::{reader, tags};
 
-/// Decoder for uncompressed baseline TIFF images.
+/// Decoder for baseline TIFF images.
 ///
-/// This phase reads `Compression = None` (1), chunky, 8-bit grayscale and RGB images. Other
-/// compressions and colour modes return [`Error::Unsupported`] until their phases land.
+/// Reads chunky images compressed with `None` or PackBits: 8-bit grayscale/RGB, 1-bit bilevel,
+/// and 8-bit palette colour. Other compressions and colour modes return [`Error::Unsupported`]
+/// until their phases land.
 #[derive(Debug, Clone, Default)]
 pub struct TiffDecoder {
     _private: (),
@@ -20,6 +21,16 @@ struct DecodedImage {
     dims: Dimensions,
     samples_per_pixel: usize,
     pixels: Vec<u8>,
+}
+
+/// How a decoded image's stored samples map to output pixels.
+enum Mode {
+    /// Grayscale; `white_is_zero` selects which sample value is white.
+    Gray { white_is_zero: bool },
+    /// Interleaved RGB.
+    Rgb,
+    /// Palette colour: 8-bit indices into a 3×256 16-bit `ColorMap`.
+    Palette(Vec<u32>),
 }
 
 impl TiffDecoder {
@@ -122,11 +133,26 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
     .ok_or(Error::Unsupported(
         "TIFF: unknown photometric interpretation",
     ))?;
-    // `white_is_zero` selects which sample value maps to white (TIFF 6.0 §8 PhotometricInterpretation).
-    let white_is_zero = match (spp, bps, photometric) {
-        (1, 1 | 8, PhotometricInterpretation::WhiteIsZero) => true,
-        (1, 1 | 8, PhotometricInterpretation::BlackIsZero) => false,
-        (3, 8, PhotometricInterpretation::Rgb) => false,
+    // How stored samples become the decoded output (TIFF 6.0 §8 PhotometricInterpretation).
+    let mode = match (spp, bps, photometric) {
+        (1, 1 | 8, PhotometricInterpretation::WhiteIsZero) => Mode::Gray {
+            white_is_zero: true,
+        },
+        (1, 1 | 8, PhotometricInterpretation::BlackIsZero) => Mode::Gray {
+            white_is_zero: false,
+        },
+        (3, 8, PhotometricInterpretation::Rgb) => Mode::Rgb,
+        (1, 8, PhotometricInterpretation::Palette) => {
+            let cm = ifd
+                .get_u32_vec(tags::COLOR_MAP)
+                .ok_or(Error::InvalidInput("TIFF: palette image missing ColorMap"))?;
+            if cm.len() != 3 * 256 {
+                return Err(Error::InvalidInput(
+                    "TIFF: ColorMap must have 3*256 entries",
+                ));
+            }
+            Mode::Palette(cm)
+        }
         _ => {
             return Err(Error::Unsupported(
                 "TIFF: photometric/sample combination not supported yet",
@@ -185,26 +211,42 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
     }
     debug_assert_eq!(packed.len(), stored_total);
 
-    // Unpack the stored bytes into 8-bit output samples.
-    let (out_spp, pixels) = if bps == 8 {
-        let mut px = packed;
-        if white_is_zero {
-            for v in &mut px {
-                *v = 255 - *v;
+    // Unpack the stored bytes into 8-bit output samples per the photometric mode.
+    let (out_spp, pixels) = match mode {
+        Mode::Rgb => (3, packed),
+        Mode::Gray { white_is_zero } if bps == 8 => {
+            let mut px = packed;
+            if white_is_zero {
+                for v in &mut px {
+                    *v = 255 - *v;
+                }
             }
+            (1, px)
         }
-        (spp, px)
-    } else {
-        let mut px = Vec::with_capacity(width * height);
-        for y in 0..height {
-            let row = &packed[y * stored_row_bytes..(y + 1) * stored_row_bytes];
-            for x in 0..width {
-                let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
-                let white = if white_is_zero { bit == 0 } else { bit == 1 };
-                px.push(if white { 255 } else { 0 });
+        Mode::Gray { white_is_zero } => {
+            // bps == 1: expand each MSB-first bit to a 0/255 sample.
+            let mut px = Vec::with_capacity(width * height);
+            for y in 0..height {
+                let row = &packed[y * stored_row_bytes..(y + 1) * stored_row_bytes];
+                for x in 0..width {
+                    let bit = (row[x / 8] >> (7 - (x % 8))) & 1;
+                    let white = if white_is_zero { bit == 0 } else { bit == 1 };
+                    px.push(if white { 255 } else { 0 });
+                }
             }
+            (1, px)
         }
-        (1, px)
+        Mode::Palette(cm) => {
+            // Each 8-bit index selects a 16-bit RGB triple; the high byte is the 8-bit sample.
+            let mut px = Vec::with_capacity(width * height * 3);
+            for &idx in &packed {
+                let i = idx as usize;
+                px.push((cm[i] >> 8) as u8);
+                px.push((cm[256 + i] >> 8) as u8);
+                px.push((cm[512 + i] >> 8) as u8);
+            }
+            (3, px)
+        }
     };
 
     Ok(DecodedImage {
