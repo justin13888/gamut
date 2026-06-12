@@ -24,6 +24,8 @@
 pub use gamut_core as core;
 
 #[cfg(feature = "metadata")]
+pub use gamut_icc as icc;
+#[cfg(feature = "metadata")]
 pub use gamut_ifd as ifd;
 
 #[cfg(feature = "primitives")]
