@@ -7,10 +7,10 @@ subsampling, the CICP code points carried in nclx / AV1 sequence headers, and pl
 
 Part of the [gamut](../../README.md) workspace, this crate exists to:
 
-- **Centralize color management.** One place defines [`PixelFormat`], [`BitDepth`],
-  [`ChromaSubsampling`], the CICP enums ([`ColourPrimaries`], [`TransferCharacteristics`],
-  [`MatrixCoefficients`], [`ColorRange`]), and the [`Planar8`] buffer — so a color bug is fixed once,
-  not re-implemented per format.
+- **Centralize color management.** One place defines [`BitDepth`], [`ChromaSubsampling`], the CICP
+  enums ([`ColourPrimaries`], [`TransferCharacteristics`], [`MatrixCoefficients`], [`ColorRange`]),
+  and the [`Planar8`] buffer — so a color bug is fixed once, not re-implemented per format. (The
+  interleaved pixel layouts are the typed `Pixel` markers in `gamut-core`.)
 - **Model the full spec surface up front.** The M0 AVIF path uses only a narrow slice (8-bit RGB in,
   mapped to identity `mc = 0` 4:4:4 planes), but the enums intentionally cover the wider range of
   formats, bit depths, subsamplings, and CICP code points so later milestones (M2 pixel formats, M4
