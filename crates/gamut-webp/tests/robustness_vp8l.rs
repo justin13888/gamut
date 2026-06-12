@@ -6,9 +6,10 @@
 //! ships a `#![forbid(unsafe_code)]` decoder — which is moot if hostile input can still *panic* it
 //! into a denial of service.
 
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
 use gamut_riff::{RiffReader, WebpChunkId};
 use gamut_webp::vp8l::decoder::decode as decode_vp8l;
-use gamut_webp::{Dimensions, WebpDecoder, WebpEncoder};
+use gamut_webp::{WebpDecoder, WebpEncoder};
 
 /// A small but non-trivial RGB image (gradients + a bit of structure) so the encoded VP8L stream uses
 /// transforms, LZ77 back-references, and the color cache — the parts a fuzzer should reach.
@@ -31,12 +32,15 @@ fn valid_vp8l_payload() -> Vec<u8> {
     let (w, h) = (24u32, 18u32);
     let mut file = Vec::new();
     WebpEncoder::lossless()
-        .encode_rgb8(
-            &sample_rgb(w, h),
-            Dimensions {
-                width: w,
-                height: h,
-            },
+        .encode_image(
+            ImageRef::<Rgb8>::new(
+                &sample_rgb(w, h),
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+            )
+            .unwrap(),
             &mut file,
         )
         .expect("gamut lossless encode");
@@ -131,12 +135,15 @@ fn webp_container_survives_corrupted_vp8l_chunk() {
     let (w, h) = (24u32, 18u32);
     let mut file = Vec::new();
     WebpEncoder::lossless()
-        .encode_rgb8(
-            &sample_rgb(w, h),
-            Dimensions {
-                width: w,
-                height: h,
-            },
+        .encode_image(
+            ImageRef::<Rgb8>::new(
+                &sample_rgb(w, h),
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+            )
+            .unwrap(),
             &mut file,
         )
         .expect("encode");
@@ -144,18 +151,15 @@ fn webp_container_survives_corrupted_vp8l_chunk() {
     // starts at offset 20; corrupting from there leaves the container parseable but the body garbage.
     let payload_start = 20.min(file.len());
     let dec = WebpDecoder::new();
-    let mut out = Vec::new();
     for seed in 0..64u32 {
         let mut bad = file.clone();
         let noise = pseudo_random_bytes(seed, bad.len() - payload_start);
         bad[payload_start..].copy_from_slice(&noise);
-        out.clear();
-        let _ = dec.decode_to_rgb8(&bad, &mut out); // err or ok, never panic
+        let _: gamut_core::Result<ImageBuf<Rgb8>> = dec.decode_image(&bad); // err or ok, never panic
     }
     // Truncating the whole file at every length must also be panic-free.
     for cut in 0..file.len() {
-        out.clear();
-        let _ = dec.decode_to_rgb8(&file[..cut], &mut out);
+        let _: gamut_core::Result<ImageBuf<Rgb8>> = dec.decode_image(&file[..cut]);
     }
 }
 

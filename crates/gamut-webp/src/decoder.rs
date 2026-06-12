@@ -5,7 +5,7 @@
 //! inner bitstream decoded (its `ALPH` alpha chunk is applied in a later milestone).
 
 use gamut_color::Bt601Range;
-use gamut_core::{Decoder, Dimensions, Error, Result};
+use gamut_core::{DecodeImage, Dimensions, Error, ImageBuf, Result, Rgb8, Rgba8};
 use gamut_riff::{RiffReader, WebpChunkId};
 
 use crate::alpha;
@@ -29,14 +29,8 @@ impl WebpDecoder {
     }
 
     /// Decodes the WebP file in `data` to interleaved 8-bit RGB, appending the pixels to `out` and
-    /// returning the image [`Dimensions`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP container or carries no
-    /// recognized bitstream chunk, or [`Error::Unsupported`] for the identified bitstream until its
-    /// decode path is implemented.
-    pub fn decode_to_rgb8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
+    /// returning the image [`Dimensions`]. Backs the [`DecodeImage<Rgb8>`] impl.
+    fn decode_rgb8_into(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
         // Reconstruction chunks must precede metadata, so the first VP8/VP8L/VP8X chunk wins; any
         // leading metadata/unknown chunks are skipped (RFC 9649 §2.7).
         for chunk in RiffReader::new(data)? {
@@ -75,13 +69,9 @@ impl WebpDecoder {
 
     /// Decodes the WebP file in `data` to interleaved 8-bit RGBA, appending the pixels to `out` and
     /// returning the image [`Dimensions`]. A simple (alpha-less) file decodes to opaque RGBA; an
-    /// extended file's `ALPH` chunk supplies the alpha; a `VP8L` bitstream carries its own.
-    ///
-    /// # Errors
-    ///
-    /// As for [`decode_to_rgb8`](Self::decode_to_rgb8), plus [`Error::Unsupported`] for a
-    /// lossless-compressed `ALPH` chunk.
-    pub fn decode_to_rgba8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
+    /// extended file's `ALPH` chunk supplies the alpha; a `VP8L` bitstream carries its own. Backs the
+    /// [`DecodeImage<Rgba8>`] impl.
+    fn decode_rgba8_into(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
         let mut alph: Option<&[u8]> = None;
         for chunk in RiffReader::new(data)? {
             let chunk = chunk?;
@@ -120,9 +110,19 @@ impl WebpDecoder {
     }
 }
 
-impl Decoder for WebpDecoder {
-    fn decode(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        self.decode_to_rgb8(data, out)
+impl DecodeImage<Rgb8> for WebpDecoder {
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
+        let mut px = Vec::new();
+        let dims = self.decode_rgb8_into(data, &mut px)?;
+        ImageBuf::new(px, dims)
+    }
+}
+
+impl DecodeImage<Rgba8> for WebpDecoder {
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
+        let mut px = Vec::new();
+        let dims = self.decode_rgba8_into(data, &mut px)?;
+        ImageBuf::new(px, dims)
     }
 }
 
@@ -154,16 +154,15 @@ mod tests {
     #[test]
     fn decodes_lossless_container_to_rgb8() {
         let file = solid_lossless_webp(2, 2, 0x12, 0x34, 0x56);
-        let mut out = Vec::new();
-        let dims = WebpDecoder::new().decode_to_rgb8(&file, &mut out).unwrap();
+        let got: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&file).unwrap();
         assert_eq!(
-            dims,
+            got.dimensions(),
             Dimensions {
                 width: 2,
                 height: 2
             }
         );
-        assert_eq!(out, [0x12, 0x34, 0x56].repeat(4));
+        assert_eq!(got.as_samples(), [0x12, 0x34, 0x56].repeat(4).as_slice());
     }
 
     #[test]
@@ -171,8 +170,8 @@ mod tests {
         // A `VP8 ` chunk reaches the VP8 decoder, which rejects this malformed (non-key-frame, 3-byte)
         // payload rather than panicking.
         let file = write_simple_lossy(&[0x9d, 0x01, 0x2a]);
-        let mut out = Vec::new();
-        assert!(WebpDecoder::new().decode_to_rgb8(&file, &mut out).is_err());
+        let got: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
+        assert!(got.is_err());
     }
 
     #[test]
@@ -194,18 +193,17 @@ mod tests {
             ..Default::default()
         };
         let file = write_extended(&header, &[(FourCc::VP8L, &vp8l)]);
-        let mut out = Vec::new();
-        let dims = WebpDecoder::new()
-            .decode_to_rgb8(&file, &mut out)
+        let got: ImageBuf<Rgb8> = WebpDecoder::new()
+            .decode_image(&file)
             .expect("decode VP8X file");
         assert_eq!(
-            dims,
+            got.dimensions(),
             Dimensions {
                 width: 2,
                 height: 2
             }
         );
-        assert_eq!(out, [0x11, 0x22, 0x33].repeat(4));
+        assert_eq!(got.as_samples(), [0x11, 0x22, 0x33].repeat(4).as_slice());
     }
 
     #[test]
@@ -217,11 +215,8 @@ mod tests {
             ..Default::default()
         };
         let file = gamut_riff::write_extended(&header, &[]);
-        let mut out = Vec::new();
-        assert!(matches!(
-            WebpDecoder::new().decode_to_rgb8(&file, &mut out),
-            Err(Error::InvalidInput(_))
-        ));
+        let got: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
+        assert!(matches!(got, Err(Error::InvalidInput(_))));
     }
 
     #[test]
@@ -242,16 +237,15 @@ mod tests {
         w.write_chunk(FourCc::ICCP, &[1, 2, 3, 4]);
         w.write_chunk(FourCc::VP8L, &vp8l);
         let file = w.finish();
-        let mut out = Vec::new();
-        let dims = WebpDecoder::new().decode_to_rgb8(&file, &mut out).unwrap();
+        let got: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&file).unwrap();
         assert_eq!(
-            dims,
+            got.dimensions(),
             Dimensions {
                 width: 1,
                 height: 1
             }
         );
-        assert_eq!(out, [9, 8, 7]);
+        assert_eq!(got.as_samples(), [9, 8, 7].as_slice());
     }
 
     #[test]
@@ -259,15 +253,13 @@ mod tests {
         let mut w = RiffWriter::new();
         w.write_chunk(FourCc::EXIF, &[0xee; 6]);
         let file = w.finish();
-        let mut out = Vec::new();
-        let err = WebpDecoder::new().decode_to_rgb8(&file, &mut out);
+        let err: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(matches!(err, Err(Error::InvalidInput(_))));
     }
 
     #[test]
     fn rejects_non_riff_data() {
-        let mut out = Vec::new();
-        let err = (&WebpDecoder::new() as &dyn Decoder).decode(b"not a webp", &mut out);
+        let err: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(b"not a webp");
         assert!(matches!(err, Err(Error::InvalidInput(_))));
     }
 }

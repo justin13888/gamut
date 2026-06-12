@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use gamut::avif::AvifEncoder;
-use gamut::core::{EncodeImage, ImageRef, Rgb8};
+use gamut::core::{EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
 use gamut::webp::WebpEncoder;
 
@@ -63,7 +63,7 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
             );
             AvifEncoder::new()
                 .with_qindex(args.qindex)
-                .encode_rgb8(&rgb, dims, &mut out)?;
+                .encode_image(ImageRef::<Rgb8>::new(&rgb, dims)?, &mut out)?;
             (rgb.len(), dims)
         }
         OutputFormat::Webp => {
@@ -80,7 +80,7 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
             } else {
                 WebpEncoder::lossless()
             };
-            encoder.encode_rgba8(&rgba, dims, &mut out)?;
+            encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)
         }
         OutputFormat::Tiff => {

@@ -8,7 +8,7 @@
 //! submodules (`git submodule update --init --recursive`).
 
 use gamut_avif::AvifEncoder;
-use gamut_core::{Dimensions, Encoder};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 
 /// Source RGB pattern (structure + variation to exercise nonzero coefficients).
 fn rgb_at(x: u32, y: u32) -> (u8, u8, u8) {
@@ -39,12 +39,15 @@ fn roundtrip(w: u32, h: u32) {
 
     let mut avif = Vec::new();
     AvifEncoder::new()
-        .encode(
-            &rgb,
-            Dimensions {
-                width: w,
-                height: h,
-            },
+        .encode_image(
+            ImageRef::<Rgb8>::new(
+                &rgb,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+            )
+            .unwrap(),
             &mut avif,
         )
         .unwrap();
@@ -94,12 +97,15 @@ fn lossy_roundtrip_via_libavif() {
             let mut avif = Vec::new();
             AvifEncoder::new()
                 .with_qindex(q)
-                .encode_rgb8(
-                    &rgb,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
+                .encode_image(
+                    ImageRef::<Rgb8>::new(
+                        &rgb,
+                        Dimensions {
+                            width: w,
+                            height: h,
+                        },
+                    )
+                    .unwrap(),
                     &mut avif,
                 )
                 .unwrap();
@@ -140,12 +146,15 @@ fn orientation_transforms_roundtrip_via_libavif() {
             enc = enc.with_mirror(axis);
         }
         let mut avif = Vec::new();
-        enc.encode(
-            &rgb,
-            Dimensions {
-                width: w,
-                height: h,
-            },
+        enc.encode_image(
+            ImageRef::<Rgb8>::new(
+                &rgb,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+            )
+            .unwrap(),
             &mut avif,
         )
         .unwrap();
