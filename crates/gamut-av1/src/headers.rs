@@ -1,5 +1,8 @@
 //! AV1 OBU framing (§5.3, Annex B), the reduced-still-picture sequence header (§5.5), and the
-//! lossless intra-keyframe uncompressed frame header (§5.9.2), specialised to the M0 config.
+//! all-intra keyframe uncompressed frame header (§5.9.2). Both the lossless M0 config and the lossy
+//! intra path are emitted: `base_q_idx > 0` with per-superblock delta-Q/delta-LF, segmentation
+//! (`SEG_LVL_ALT_Q`), CDEF, loop restoration, superres, and uniform multi-tile — all still under
+//! `disable_cdf_update = 1` and `using_qmatrix = 0` (8-bit 4:4:4, identity matrix, full range).
 
 use gamut_bitstream::{BitWriter, write_leb128};
 use gamut_core::{Error, Result};

@@ -1,6 +1,7 @@
-//! The in-loop filters applied to the reconstructed frame after all blocks are decoded: the
-//! **deblocking loop filter** (§7.14, applied first) then **CDEF** (§7.15, deringing). They run in
-//! the decoder's order (deblock → CDEF) and are pure post-processes — intra prediction during
+//! The in-loop filters and post-processing applied to the reconstructed frame after all blocks are
+//! decoded, in the decoder's order (§7.4): the **deblocking loop filter** (§7.14) then **CDEF**
+//! (§7.15, deringing), then optional **superres** horizontal upscaling (§7.16) and **loop
+//! restoration** (§7.17, luma Wiener). They are pure post-processes — intra prediction during
 //! encoding reads the *pre-filter* reconstruction (§7.4 applies the loop filters only after the tile
 //! is decoded), so the encoder applies them once to its final reconstruction to match a conformant
 //! decoder's output.
