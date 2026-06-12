@@ -24,9 +24,9 @@ format** — a good long-term fit for gamut's image-first focus.
 
 ## Usage
 
-[`TiffEncoder`] (implementing [`gamut_core::Encoder`]) writes 8-bit grayscale, RGB, palette, and
-1-bit bilevel images — uncompressed or PackBits — and [`TiffDecoder`] (implementing
-[`gamut_core::Decoder`]) reads them back, both reachable through the umbrella crate's `tiff`
+[`TiffEncoder`] (implementing [`gamut_core::EncodeImage`] per pixel layout) writes 8-bit grayscale,
+RGB, palette, and 1-bit bilevel images — uncompressed or PackBits — and [`TiffDecoder`] (implementing
+[`gamut_core::DecodeImage`]) reads them back, both reachable through the umbrella crate's `tiff`
 feature:
 
 ```rust

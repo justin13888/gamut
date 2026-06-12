@@ -8,8 +8,9 @@
 //! ```
 //!
 //! [`core`] (re-exported from [`gamut-core`](https://crates.io/crates/gamut-core)) is always
-//! available and provides the shared [`core::Encoder`] / [`core::Decoder`] traits and the
-//! common [`core::Error`] type. Each format module appears only when its feature is enabled.
+//! available and provides the shared [`core::EncodeImage`] / [`core::DecodeImage`] traits, the
+//! branded [`core::ImageRef`] / [`core::ImageBuf`] buffers, and the common [`core::Error`] type.
+//! Each format module appears only when its feature is enabled.
 //!
 //! The `primitives` feature additionally re-exports the shared building blocks the codecs are
 //! made of — `color` (pixel formats / CICP), `dsp` (transforms), and `bitstream` (bit writer

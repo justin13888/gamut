@@ -1,8 +1,9 @@
 //! Core traits, image buffers, dimensions, and error types shared across the gamut codecs.
 //!
 //! This crate is dependency-free with respect to the format crates: every codec in the
-//! workspace builds on the [`Encoder`] / [`Decoder`] traits and the [`Error`] type defined
-//! here, so that callers get a single, consistent error surface regardless of format.
+//! workspace builds on the [`EncodeImage`] / [`DecodeImage`] traits, the branded [`ImageRef`] /
+//! [`ImageBuf`] buffers, and the [`Error`] type defined here, so that callers get a single,
+//! consistent error surface regardless of format.
 #![forbid(unsafe_code)]
 
 mod image;
@@ -78,38 +79,13 @@ impl Dimensions {
     }
 }
 
-/// Encodes an in-memory image into a compressed byte stream.
-///
-/// Implementations append the encoded bytes to `out` rather than allocating a fresh buffer,
-/// keeping hot paths allocation-conscious for callers that reuse a scratch buffer.
-pub trait Encoder {
-    /// Encode `pixels` (described by `dims`) into `out`, returning the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `pixels` does not match `dims`, or
-    /// [`Error::Unsupported`] if the requested configuration is not implemented.
-    fn encode(&self, pixels: &[u8], dims: Dimensions, out: &mut Vec<u8>) -> Result<usize>;
-}
-
-/// Decodes a compressed byte stream into raw pixels.
-pub trait Decoder {
-    /// Decode `data` into `out`, returning the decoded image [`Dimensions`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `data` is malformed, or [`Error::Unsupported`] if
-    /// the stream uses a feature that is not implemented.
-    fn decode(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions>;
-}
-
 /// Encodes an [`ImageRef`] of a specific pixel layout `P` into a compressed byte stream.
 ///
 /// A codec implements this once per pixel layout it supports (`impl EncodeImage<Rgb8> for …`,
 /// `impl EncodeImage<Cmyk8> for …`, …), so asking it to encode an unsupported layout is a compile
 /// error rather than a runtime `Unsupported`. The input is pre-validated by [`ImageRef::new`], so an
-/// implementation never re-checks the buffer length. As with [`Encoder`], bytes are appended to
-/// `out` to keep callers that reuse a scratch buffer allocation-conscious.
+/// implementation never re-checks the buffer length. Bytes are appended to `out` to keep callers
+/// that reuse a scratch buffer allocation-conscious.
 pub trait EncodeImage<P: Pixel> {
     /// Encode `image` into `out` (appended), returning the number of bytes written.
     ///
