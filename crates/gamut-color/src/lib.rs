@@ -10,6 +10,7 @@
 pub mod cicp;
 mod format;
 mod linalg;
+pub mod matrix;
 pub mod oklab;
 mod pixel;
 mod planar;
