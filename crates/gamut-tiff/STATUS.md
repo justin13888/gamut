@@ -27,7 +27,7 @@ lossy → MAE/PSNR tolerance.
 | P5  | §9      | PackBits compression (8-bit gray/RGB) | ✅ done |
 | P5b | §3      | Bilevel (1-bit) + FillOrder (4-bit gray deferred to P13) | ✅ done |
 | P6  | §5      | Palette-color (ColorMap, 8-bit indices) | ✅ done |
-| P7  | §7–8    | Baseline field-reference hardening + CLI `convert → .tiff` | ☐ |
+| P7  | §7–8    | CLI `convert → .tiff` (uncompressed/PackBits RGB) | ✅ done |
 | P8  | §10     | Modified Huffman (Compression=2) | ☐ |
 | P9  | §13     | LZW (Compression=5) | ☐ |
 | P10 | §14     | Differencing predictor (Predictor=2) | ☐ |

@@ -24,14 +24,29 @@ format** — a good long-term fit for gamut's image-first focus.
 
 ## Usage
 
-No public API yet — implementation pending (issue #107). It will follow the same shape as the
-other format crates: a `TiffEncoder` implementing [`gamut_core::Encoder`] and a `TiffDecoder`
-implementing [`gamut_core::Decoder`], reachable through the umbrella crate's `tiff` feature.
+[`TiffEncoder`] (implementing [`gamut_core::Encoder`]) writes 8-bit grayscale, RGB, palette, and
+1-bit bilevel images — uncompressed or PackBits — and [`TiffDecoder`] (implementing
+[`gamut_core::Decoder`]) reads them back, both reachable through the umbrella crate's `tiff`
+feature:
+
+```rust
+use gamut_core::Dimensions;
+use gamut_tiff::{Compression, TiffEncoder};
+
+let mut tiff = Vec::new();
+TiffEncoder::new()
+    .with_compression(Compression::PackBits)
+    .encode_rgb8(&rgb, Dimensions { width, height }, &mut tiff)
+    .expect("encode");
+```
+
+More colour modes and compression schemes are landing incrementally (see Status).
 
 ## Status
 
-Scaffolding — **under active implementation** (issue #107). See [STATUS.md](STATUS.md) for the
-phase-by-phase progress of the TIFF 6.0 campaign.
+**Under active implementation** (issue #107). Baseline TIFF (uncompressed/PackBits; grayscale, RGB,
+palette, bilevel) is done and conformance-checked against libtiff; the extensions are landing
+incrementally. See [STATUS.md](STATUS.md) for phase-by-phase progress.
 
 ## Roadmap
 
