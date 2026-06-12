@@ -12,7 +12,9 @@
 //!
 //! Alongside the transforms, [`mod@math`] exposes the small AV1 §4.7 integer arithmetic
 //! primitives ([`round2`], [`round2_signed`], [`clip3`]) and the shared forward-quantize
-//! rounding ([`round_div_nearest`]) that the codec crates build on.
+//! rounding ([`round_div_nearest`]) that the codec crates build on, and [`mod@mulaw`] adds
+//! µ-law companding/quantization ([`mu_compress`] / [`mu_expand`] / [`mu_quantize`] /
+//! [`mu_dequantize`]).
 #![forbid(unsafe_code)]
 
 mod adst;
@@ -20,10 +22,12 @@ mod butterfly;
 mod dct;
 mod identity;
 mod math;
+mod mulaw;
 mod wht;
 
 pub use adst::{flip_in_place, forward_adst, inverse_adst};
 pub use dct::{forward_dct, inverse_dct};
 pub use identity::{forward_identity, inverse_identity};
 pub use math::{clip3, round_div_nearest, round2, round2_signed};
+pub use mulaw::{mu_compress, mu_dequantize, mu_expand, mu_quantize};
 pub use wht::{fwht4x4, iwht4x4};

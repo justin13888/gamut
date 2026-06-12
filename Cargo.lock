@@ -263,6 +263,7 @@ dependencies = [
  "gamut-ifd",
  "gamut-iptc",
  "gamut-jxl",
+ "gamut-tonemap",
  "gamut-metadata",
  "gamut-vvc",
  "gamut-webp",
@@ -423,6 +424,13 @@ name = "gamut-riff"
 version = "0.1.0"
 dependencies = [
  "gamut-bitstream",
+ "gamut-core",
+]
+
+[[package]]
+name = "gamut-tonemap"
+version = "0.1.1"
+dependencies = [
  "gamut-core",
 ]
 
