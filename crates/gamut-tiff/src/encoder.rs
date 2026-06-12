@@ -2,8 +2,8 @@
 
 use gamut_core::{Dimensions, Encoder, Error, Result};
 
-use crate::compression::{Compression, ccitt, lzw, packbits};
-use crate::ifd::{ByteOrder, Ifd, PhotometricInterpretation, Value};
+use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
+use crate::ifd::{ByteOrder, Ifd, PhotometricInterpretation, Predictor, Value};
 use crate::{tags, writer};
 
 /// The on-disk sample layout of an image, shared by the 8-bit and bilevel encode paths.
@@ -23,6 +23,7 @@ struct SampleLayout {
 pub struct TiffEncoder {
     order: ByteOrder,
     compression: Compression,
+    predictor: Predictor,
 }
 
 impl Default for TiffEncoder {
@@ -30,6 +31,7 @@ impl Default for TiffEncoder {
         Self {
             order: ByteOrder::LittleEndian,
             compression: Compression::None,
+            predictor: Predictor::None,
         }
     }
 }
@@ -49,11 +51,18 @@ impl TiffEncoder {
     }
 
     /// Returns a copy of this encoder that compresses image data with `compression`.
-    ///
-    /// Supported so far: [`Compression::None`] and [`Compression::PackBits`].
     #[must_use]
     pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Returns a copy of this encoder that applies `predictor` before compression.
+    ///
+    /// [`Predictor::HorizontalDifferencing`] requires 8-bit samples and pairs well with LZW.
+    #[must_use]
+    pub fn with_predictor(mut self, predictor: Predictor) -> Self {
+        self.predictor = predictor;
         self
     }
 
@@ -237,6 +246,18 @@ impl TiffEncoder {
         let h = dims.height as usize;
         let stored_row_bytes = layout.stored_row_bytes;
 
+        // Apply the horizontal-differencing predictor (8-bit only) before compression.
+        let predicting = self.predictor == Predictor::HorizontalDifferencing;
+        if predicting && layout.bits_per_sample != 8 {
+            return Err(Error::Unsupported("TIFF: predictor requires 8-bit samples"));
+        }
+        let predicted = predicting.then(|| {
+            let mut buf = packed.to_vec();
+            predictor::forward(&mut buf, stored_row_bytes, layout.spp);
+            buf
+        });
+        let packed: &[u8] = predicted.as_deref().unwrap_or(packed);
+
         // Partition rows into strips of roughly 8 KB (TIFF 6.0 §7), then apply the strip codec.
         let rows_per_strip = (8192 / stored_row_bytes.max(1)).clamp(1, h);
         let mut strips: Vec<Vec<u8>> = Vec::new();
@@ -272,6 +293,9 @@ impl TiffEncoder {
         ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
+        if predicting {
+            ifd.set(tags::PREDICTOR, Value::Short(vec![2]));
+        }
         for (tag, value) in extra_fields {
             ifd.set(*tag, value.clone());
         }

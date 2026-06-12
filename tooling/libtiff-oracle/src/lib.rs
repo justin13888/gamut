@@ -154,6 +154,7 @@ pub fn encode_rgb8(
         sys::PHOTOMETRIC_RGB as u16,
         (width as usize) * 3,
         compression,
+        1,
     )
 }
 
@@ -177,6 +178,7 @@ pub fn encode_gray8(
         sys::PHOTOMETRIC_MINISBLACK as u16,
         width as usize,
         compression,
+        1,
     )
 }
 
@@ -219,6 +221,55 @@ pub fn encode_bilevel(
         sys::PHOTOMETRIC_MINISBLACK as u16,
         stored,
         compression,
+        1,
+    )
+}
+
+/// Encodes interleaved 8-bit RGB with the horizontal-differencing predictor (`Predictor = 2`).
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_rgb8_predictor(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    encode_packed(
+        pixels,
+        width,
+        height,
+        3,
+        8,
+        sys::PHOTOMETRIC_RGB as u16,
+        (width as usize) * 3,
+        compression,
+        2,
+    )
+}
+
+/// Encodes 8-bit grayscale with the horizontal-differencing predictor (`Predictor = 2`).
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_gray8_predictor(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    encode_packed(
+        pixels,
+        width,
+        height,
+        1,
+        8,
+        sys::PHOTOMETRIC_MINISBLACK as u16,
+        width as usize,
+        compression,
+        2,
     )
 }
 
@@ -232,6 +283,7 @@ fn encode_packed(
     photometric: u16,
     stored_row_bytes: usize,
     compression: Compression,
+    predictor: u16,
 ) -> Result<Vec<u8>, String> {
     if packed.len()
         != stored_row_bytes
@@ -255,6 +307,7 @@ fn encode_packed(
             photometric,
             stored_row_bytes,
             compression.code(),
+            predictor,
         )?;
     }
     std::fs::read(&path).map_err(|e| e.to_string())
@@ -357,6 +410,7 @@ unsafe fn encode_inner(
     photometric: u16,
     stored_row_bytes: usize,
     compression: u16,
+    predictor: u16,
 ) -> Result<(), String> {
     let mode = CString::new("w").map_err(|e| e.to_string())?;
     let t = unsafe { sys::TIFFOpen(cpath.as_ptr(), mode.as_ptr()) };
@@ -374,6 +428,7 @@ unsafe fn encode_inner(
             photometric,
             stored_row_bytes,
             compression,
+            predictor,
         )
     };
     unsafe { sys::TIFFClose(t) };
@@ -391,6 +446,7 @@ unsafe fn write_scanlines(
     photometric: u16,
     stored_row_bytes: usize,
     compression: u16,
+    predictor: u16,
 ) -> Result<(), String> {
     // uint32 fields take a `u32` vararg; uint16 fields are promoted to `c_int`.
     unsafe {
@@ -405,6 +461,10 @@ unsafe fn write_scanlines(
             sys::TIFFTAG_PLANARCONFIG,
             sys::PLANARCONFIG_CONTIG as c_int,
         );
+        // Predictor must be set after compression; libtiff applies it for LZW/Deflate.
+        if predictor != 1 {
+            sys::TIFFSetField(t, sys::TIFFTAG_PREDICTOR, predictor as c_int);
+        }
         let rps = sys::TIFFDefaultStripSize(t, 0);
         sys::TIFFSetField(t, sys::TIFFTAG_ROWSPERSTRIP, rps);
     }

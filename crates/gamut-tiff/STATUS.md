@@ -30,7 +30,7 @@ lossy → MAE/PSNR tolerance.
 | P7  | §7–8    | CLI `convert → .tiff` (uncompressed/PackBits RGB) | ✅ done |
 | P8  | §10     | Modified Huffman (Compression=2) | ✅ done |
 | P9  | §13     | LZW (Compression=5) | ✅ done |
-| P10 | §14     | Differencing predictor (Predictor=2) | ☐ |
+| P10 | §14     | Differencing predictor (Predictor=2) | ✅ done |
 | P11 | §11     | CCITT T.4 / T.6 fax (Compression=3/4) | ☐ |
 | P12 | §15     | Tiled images | ☐ |
 | P13 | §18–19  | Planar config + associated alpha + sample format (16-bit/float) | ☐ |

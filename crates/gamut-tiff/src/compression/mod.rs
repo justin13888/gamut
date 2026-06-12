@@ -7,6 +7,7 @@
 pub mod ccitt;
 pub mod lzw;
 pub mod packbits;
+pub mod predictor;
 
 /// A compression scheme applied to a strip or tile of image data.
 ///

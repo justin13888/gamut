@@ -2,7 +2,7 @@
 
 use gamut_core::{Decoder, Dimensions, Error, Result};
 
-use crate::compression::{Compression, ccitt, lzw, packbits};
+use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
 use crate::ifd::{Ifd, PhotometricInterpretation};
 use crate::{reader, tags};
 
@@ -132,6 +132,14 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
             "TIFF: Modified Huffman requires a bilevel image",
         ));
     }
+    let use_predictor = match ifd.get_u32(tags::PREDICTOR).unwrap_or(1) {
+        1 => false,
+        2 => true,
+        _ => return Err(Error::Unsupported("TIFF: unknown predictor")),
+    };
+    if use_predictor && bps != 8 {
+        return Err(Error::Unsupported("TIFF: predictor requires 8-bit samples"));
+    }
 
     let photometric = PhotometricInterpretation::from_code(require_u32(
         ifd,
@@ -222,6 +230,11 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         }
     }
     debug_assert_eq!(packed.len(), stored_total);
+
+    // Reverse the horizontal-differencing predictor (8-bit only) before unpacking.
+    if use_predictor {
+        predictor::reverse(&mut packed, stored_row_bytes, spp);
+    }
 
     // Unpack the stored bytes into 8-bit output samples per the photometric mode.
     let (out_spp, pixels) = match mode {
