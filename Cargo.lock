@@ -257,10 +257,16 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+ "gamut-exif",
  "gamut-heic",
+ "gamut-icc",
+ "gamut-ifd",
+ "gamut-iptc",
  "gamut-jxl",
+ "gamut-metadata",
  "gamut-vvc",
  "gamut-webp",
+ "gamut-xmp",
 ]
 
 [[package]]
@@ -338,6 +344,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gamut-exif"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+ "gamut-ifd",
+]
+
+[[package]]
 name = "gamut-ffi"
 version = "0.1.0"
 dependencies = [
@@ -351,6 +365,28 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-isobmff",
+]
+
+[[package]]
+name = "gamut-icc"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+]
+
+[[package]]
+name = "gamut-ifd"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+]
+
+[[package]]
+name = "gamut-iptc"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+ "gamut-xmp",
 ]
 
 [[package]]
@@ -369,6 +405,17 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+]
+
+[[package]]
+name = "gamut-metadata"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+ "gamut-exif",
+ "gamut-icc",
+ "gamut-iptc",
+ "gamut-xmp",
 ]
 
 [[package]]
@@ -407,6 +454,13 @@ dependencies = [
  "gamut-dsp",
  "gamut-riff",
  "libwebp-sys2 0.2.0",
+]
+
+[[package]]
+name = "gamut-xmp"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
 ]
 
 [[package]]

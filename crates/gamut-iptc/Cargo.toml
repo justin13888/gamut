@@ -1,0 +1,20 @@
+[package]
+name = "gamut-iptc"
+description = "IPTC photo metadata (legacy IIM + IPTC Photo Metadata Core/Extension over XMP) parser and serializer for gamut."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+gamut-xmp.workspace = true
