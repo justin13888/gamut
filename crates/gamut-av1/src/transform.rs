@@ -253,7 +253,7 @@ pub fn inverse_transform_2d(dequant: &[i32], tx: TxSize, ty: TxType, bit_depth: 
 /// recovers `x` up to quantization. Reconstruction correctness does not depend on this function.
 ///
 /// `residual` is the row-major `h × w` residual; the result is the row-major `h × w` coefficient
-/// array. FLIPADST flips are not applied here (see [`TxType::flip_ud`]/[`flip_lr`]).
+/// array. FLIPADST flips are not applied here (see [`TxType::flip_ud`]/[`TxType::flip_lr`]).
 ///
 /// # Panics
 /// Panics if `residual.len() < width * height`.

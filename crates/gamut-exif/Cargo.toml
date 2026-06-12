@@ -1,0 +1,20 @@
+[package]
+name = "gamut-exif"
+description = "EXIF (Exif 3.0 / CIPA DC-008) image metadata parser and serializer, built on the shared TIFF/IFD core."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+gamut-ifd.workspace = true

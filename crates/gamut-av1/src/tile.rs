@@ -1,23 +1,25 @@
-//! The single-tile, all-intra encoder: superblock/partition iteration (§5.11.2/.4), intra
-//! prediction (§7.11.2), the forward transform (via `gamut-dsp`), and coefficient coding with
-//! full context derivation (§5.11.39, §8.3.2).
+//! The all-intra tile encoder: superblock/partition iteration (§5.11.2/.4), intra prediction
+//! (§7.11.2), the forward transform (via `gamut-dsp`), and coefficient coding with full context
+//! derivation (§5.11.39, §8.3.2). One or more uniform tiles (§5.11.1) are coded with this path.
 //!
 //! Two paths share this code, selected by `qindex` (`base_q_idx`):
 //! - **Lossless** (`qindex == 0`): forced `TX_4X4` Walsh–Hadamard; prediction neighbours are the
 //!   source samples (which equal the reconstruction under lossless); partitions are
 //!   `PARTITION_NONE` except at the right/bottom frame edges.
-//! - **Lossy** (`qindex > 0`): `TX_4X4` with quantization. Blocks are forced all-4×4
-//!   (`PARTITION_SPLIT` everywhere) so each uses a 4×4 transform under `TX_MODE_LARGEST` with no
-//!   tx-depth signaling. The luma prediction mode is chosen per block from all 13 intra modes
-//!   (`DC`, the eight directional `V`/`H`/`D45`/`D135`/`D113`/`D157`/`D203`/`D67`, and
-//!   `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, §7.11.2) plus recursive **filter-intra** (§7.11.2.3,
-//!   signaled as `DC_PRED` + `use_filter_intra`); it is signaled with the above/left mode context.
-//!   The luma transform type is chosen from `TX_SET_INTRA_2`
-//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled; chroma is `DC_PRED` or
+//! - **Lossy** (`qindex > 0`): recursive `PARTITION_NONE`/`HORZ`/`VERT`/`SPLIT` down to 4×4, with
+//!   per-superblock `delta_q`/`delta_lf` and optional segmentation (`SEG_LVL_ALT_Q`). Each luma
+//!   block codes a transform under `TX_MODE_SELECT` (square `tx_depth` 0..2; sizes `TX_4X4`..
+//!   `TX_64X64`, with `TX_32X32`/`TX_64X64` DCT-only). The luma prediction mode is chosen per block
+//!   from all 13 intra modes (`DC`, the eight directional `V`/`H`/`D45`/`D135`/`D113`/`D157`/`D203`/
+//!   `D67` with `angle_delta`, and `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, §7.11.2), plus recursive
+//!   **filter-intra** (§7.11.2.3, signaled as `DC_PRED` + `use_filter_intra`) and **palette**
+//!   (§7.11.4); the luma transform type is chosen from `TX_SET_INTRA_2`
+//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled. Chroma is `DC_PRED` or
 //!   **chroma-from-luma** (`UV_CFL_PRED`, §7.11.5, when it beats DC) + `DCT_DCT`. Prediction reads a
-//!   **reconstruction buffer** that the encoder maintains exactly as
-//!   the decoder would (predict → transform → quantize → dequantize → inverse-transform → add →
-//!   store), so the encoder's reconstruction is bit-exact with a conformant decoder's output.
+//!   **reconstruction buffer** that the encoder maintains exactly as the decoder would (predict →
+//!   transform → quantize → dequantize → inverse-transform → add → store), so the encoder's
+//!   reconstruction is bit-exact with a conformant decoder's output; the in-loop filters
+//!   (deblocking, CDEF, loop restoration, superres) are applied afterward in `filter`.
 //!
 //! The frame is coded on the MI-unit grid (`mi_cols*4 × mi_rows*4`, dimensions rounded up to a
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
@@ -240,6 +242,22 @@ const fn square_tx(width: usize) -> TxSize {
         32 => TxSize::Tx32x32,
         _ => TxSize::Tx64x64,
     }
+}
+
+/// Whether a square block of `num4x4 × num4x4` MI cells at MI position `(r, c)` overhangs the
+/// `mi_rows × mi_cols` frame, i.e. does not fully fit. AV1 still codes such a block (a
+/// `PARTITION_NONE` is allowed when only the top/left half is in-frame), but the lossy
+/// reconstruction buffer is the MI-frame size, so an overhanging block must instead be force-split
+/// (see [`FrameEncoder::encode_partition`]). A block exactly reaching an edge (`r + num4x4 ==
+/// mi_rows`) fits and is not flagged.
+const fn block_exceeds_frame(
+    r: usize,
+    c: usize,
+    num4x4: usize,
+    mi_rows: usize,
+    mi_cols: usize,
+) -> bool {
+    r + num4x4 > mi_rows || c + num4x4 > mi_cols
 }
 
 /// The transform size that exactly covers a `w × h` block (the rectangular block's `Max_Tx_Size`
@@ -623,6 +641,15 @@ impl<'a> FrameEncoder<'a> {
             if self.qindex == 0 {
                 self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
                 0
+            } else if block_exceeds_frame(r, c, num4x4, self.mi_rows, self.mi_cols) {
+                // The block extends past the frame edge (only its top/left half is in-frame, which is
+                // why `has_rows && has_cols` still hold). AV1 permits a frame-spanning PARTITION_NONE
+                // here, but the lossy reconstruction buffer is the MI-frame size, so a single
+                // block-size transform would write out of bounds. Force PARTITION_SPLIT — always a
+                // legal choice in this branch — so the recursion descends until every coded transform
+                // fits (a 4×4 leaf always fits); the out-of-frame leaves are skipped in `residual`.
+                self.sym.encode_symbol(3, partition_cdf(bsl, ctx)); // PARTITION_SPLIT
+                3
             } else if let Some(d) = self.decide_rect(r, c, bw) {
                 // PARTITION_HORZ (1) / PARTITION_VERT (2): two rectangular halves, each its own mode
                 // and one matching rectangular transform.
@@ -3008,6 +3035,20 @@ mod tests {
     /// residual and the quantizers, not the plane contents.
     fn grey4x4() -> Planar8 {
         Planar8::from_rgb8_identity(&[128u8; 4 * 4 * 3], 4, 4).unwrap()
+    }
+
+    #[test]
+    fn block_exceeds_frame_flags_only_overhang() {
+        // Fully inside, with room to spare.
+        assert!(!block_exceeds_frame(0, 0, 8, 16, 16));
+        // Exactly reaching each edge fits (pins `>` vs `>=`, and `+` vs `*` at non-zero positions).
+        assert!(!block_exceeds_frame(0, 0, 8, 8, 8)); // r+8 == 8 and c+8 == 8
+        assert!(!block_exceeds_frame(2, 0, 6, 8, 8)); // r+6 == 8 exactly
+        assert!(!block_exceeds_frame(0, 2, 6, 8, 8)); // c+6 == 8 exactly
+        // Overhanging only the bottom edge, or only the right edge, must still flag (pins `||` vs
+        // `&&`, the row/col `>` mutants, and the `c*num4x4`/`r*num4x4` mutants at position 0).
+        assert!(block_exceeds_frame(0, 0, 8, 6, 99)); // rows overhang only
+        assert!(block_exceeds_frame(0, 0, 8, 99, 6)); // cols overhang only
     }
 
     #[test]

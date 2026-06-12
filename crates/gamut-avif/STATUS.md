@@ -6,8 +6,9 @@ ISOBMFF; 23008-12 HEIF; 23000-22 MIAF; ITU-T H.273 CICP). Rows are **technical c
 user features. This is the map for extension: each module's doc comment cites the same spec
 sections, and a row flips ☐→✅ (with the module cross-reference) when it ships.
 
-**Status:** ✅ = implemented (milestone M0) · ☐ = planned. **Milestone** is indicative sequencing,
-not a contract:
+**Status:** ✅ = implemented · ☐ = planned. A ✅ cell may carry a qualifier when the row is only
+partially covered. M0 is complete and **most of M1 (lossy intra) has landed**; the **M** column is
+the milestone that motivates a row — indicative sequencing, not a contract:
 
 - **M0** — MVP (current): lossless intra, identity `mc=0`, 4:4:4, 8-bit, full range, single tile,
   64×64 superblocks, `DC_PRED`, forced `TX_4X4` Walsh–Hadamard, static default CDFs
@@ -22,6 +23,8 @@ not a contract:
 - **M5** — Container transforms & derivation: `irot`/`imir`/`clap`/`pasp`, `grid`/overlay,
   thumbnails, `idat`, `iloc` v1/v2.
 - **M6** — Image sequences: `avis` brand, ISOBMFF tracks, full AV1 inter-coding machinery.
+  **Out of scope** for this image-first crate (no inter-frame/motion/sequence coding per the
+  workspace charter); rows are listed for completeness only.
 
 ## A. Container / file format (ISOBMFF · HEIF · MIAF · AVIF · AV1-ISOBMFF)
 
@@ -120,8 +123,8 @@ not a contract:
 | --- | --- | --- | --- |
 | `DC_PRED`, availability-aware (luma + chroma) | §7.11.2.5 | ✅ | M0 |
 | directional V/H/D45/.../D67 + `angle_delta` + edge filter/upsample | §7.11.2.4/.9-.12 | ✅ (lossy luma 4×4; 8×8/16×16/32×32 + `angle_delta`; edge filter/upsample `enable_intra_edge_filter=0`) | M1 |
-| SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ☐ | M1 |
-| PAETH | §7.11.2 | ☐ | M1 |
+| SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ✅ (lossy luma, square 4×4–32×32 + rectangular; SAD-selected) | M1 |
+| PAETH | §7.11.2 | ✅ (lossy luma, square 4×4–32×32 + rectangular; SAD-selected) | M1 |
 | recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4 + 8×8 + 16×16 + 32×32) | M1 |
 | chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy 4:4:4 4×4) | M1 |
 | palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ✅ (lossy luma 8×8/16×16/32×32; sizes 2..8; color cache + wavefront index map) | M1 |
@@ -133,18 +136,18 @@ not a contract:
 | --- | --- | --- | --- |
 | inverse 4×4 Walsh-Hadamard (lossless) + matched forward | §7.13.2.10 | ✅ | M0 |
 | inverse DCT 4/8/16/32/64 + forward DCT | §7.13.2.2/.3 | ✅ (4/8/16/32/64, used through TX_64X64) | M1 |
-| inverse ADST4/8/16 (+FLIPADST) + forward | §7.13.2.4-.9 | ☐ | M1 |
-| identity transform 4/8/16/32 (IDTX / V_ / H_) | §7.13.2.11-.15 | ☐ | M1 |
-| 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ☐ | M1 |
-| variable tx size / `txfm_split` | §5.11.15-.17 | ☐ | M1 |
-| encoder forward transform + tx-type/size RD search | (encoder) | ☐ | M1 |
+| inverse ADST4/8/16 (+FLIPADST) + forward | §7.13.2.4-.9 | ✅ (ADST 4/8/16 fwd+inv, emitted via TX_SET_INTRA_2; FLIPADST reconstruct path present, unused under `reduced_tx_set=1`) | M1 |
+| identity transform 4/8/16/32 (IDTX / V_ / H_) | §7.13.2.11-.15 | ✅ (IDTX emitted via TX_SET_INTRA_2; V_/H_ axis variants present in dispatch, unused under `reduced_tx_set=1`) | M1 |
+| 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ✅ (normative `inverse_transform_2d`; intra `TX_SET_INTRA_2`/`TX_SET_DCTONLY`; inter sets M6) | M1 |
+| variable tx size / `txfm_split` | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square `tx_depth` 0..2; rectangular `txfm_split` deferred) | M1 |
+| encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + heuristic tx-type/tx-size search; true RD deferred) | M1 |
 
 ## F. AV1 — quantization (§7.12)
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | lossless dequant (q_idx 0) feeding WHT reconstruct | §7.12.2/.3 | ✅ | M0 |
-| dc_q/ac_q lookup tables (8/10/12-bit) | §7.12.2 | ☐ | M1/M2 |
+| dc_q/ac_q lookup tables (8/10/12-bit) | §7.12.2 | ✅ (8/10/12-bit tables; 8-bit exercised, 10/12-bit wired at M2) | M1/M2 |
 | quantizer matrices (qm_y/u/v) | §9.5 | ☐ | M1 |
 | encoder quantization (dead-zone, RDOQ) | (encoder) | ☐ | M1 |
 
@@ -156,7 +159,7 @@ not a contract:
 | `encode_literal` (equiprobable `read_bool` inverse) | §8.2.3/.5 | ✅ | M0 |
 | static default CDFs: Partition, Skip, IntraFrameYMode, UvMode(±CfL) | §9.4 | ✅ | M0 |
 | coeff CDFs (qctx0, TX_4X4): TxbSkip/EobPt16/EobExtra/CoeffBaseEob/CoeffBase/CoeffBr/DcSign | §9.4 | ✅ | M0 |
-| full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ☐ | M1/M6 |
+| full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ✅ (intra: coeff CDFs all used tx sizes × qctx 0–3, mode/partition/palette; inter/MV deferred M6) | M1/M6 |
 | CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ☐ | M1 |
 | `coeffs()` TX_4X4: txb_skip/eob/base/br/sign/dc_sign/golomb | §5.11.39 | ✅ | M0 |
 | `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8 + 16×16 + 32×32 + 64×64, 32×32/64×64 DCT-only) | M1 |

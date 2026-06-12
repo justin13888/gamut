@@ -16,14 +16,21 @@ the Rust ecosystem lacks a strong, feature-complete implementation.
 Dependency edges (a crate depends on those to its right):
 
 - **gamut** -- umbrella; optional deps on the format crates, gated by features (`avif`,
-  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `all`). `default = []`. The `primitives` feature
-  additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling; `all` includes it.
+  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `metadata`, `all`). `default = []`. The `primitives`
+  feature additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling, and the
+  `metadata` feature re-exports the image-metadata primitives; `all` includes both.
 - **gamut-core** -- `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`. No
   internal deps; everything else depends on it.
 - **gamut-color** / **gamut-dsp** / **gamut-bitstream** -- shared primitives. ← core.
 - **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core, bitstream.
 - **gamut-av1** / **gamut-av2** / **gamut-jxl** / **gamut-vvc** -- codecs. ← core, color, dsp, bitstream.
 - **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff. **gamut-heic** ← isobmff, core, color.
+- **gamut-ifd** -- TIFF/IFD container core (byte order, field types, IFD read/write); a low-level
+  container primitive (sibling to bitstream), shared by EXIF metadata and — as a later follow-up —
+  the `gamut-tiff` codec. ← core. The per-format metadata crates (**gamut-exif** ← ifd; **gamut-icc**;
+  **gamut-xmp**; **gamut-iptc** ← xmp) and the **gamut-metadata** facade (← exif/xmp/icc/iptc) layer
+  on top, grouped under the umbrella `metadata` feature (issue #34); the format crates will consume
+  the facade for embedded metadata.
 - **gamut-cli** (binary named `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib). ← gamut.
   `gamut-cli` is the sandbox that exercises the implemented features: it decodes input via the
   third-party `image` crate (PNG/JPEG/PPM) but encodes only with gamut crates, and exposes the

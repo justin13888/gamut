@@ -64,6 +64,11 @@ size-versus-compatibility tradeoff today. JPEG XL is intentionally out of scope 
 is better served by a dedicated effort). The other format crates in the tree (HEIC, VVC,
 AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens.
 
+Alongside the codecs, gamut is growing **shared image-metadata primitives** (issue #34) — EXIF,
+XMP, ICC, and IPTC, plus the TIFF/IFD container core (`gamut-ifd`) that EXIF builds on — so the
+format crates can read, preserve, and embed metadata. These are newly scaffolded; the long-term
+goal is de-facto, fully-featured implementations (for EXIF, exiftool-class tag coverage).
+
 **gamut is image-first.** Even where a format's codec (AV1, AV2, VVC, HEVC) is fundamentally a
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no
 inter-frame prediction, no motion compensation, no video sequences. The video-named codec
@@ -104,6 +109,12 @@ format.
 | `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                            | implemented VP8 + VP8L (+alpha)        |
 | `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                     | placeholder                            |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
+| `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | scaffolding (impl in progress, #34)    |
+| `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on gamut-ifd        | scaffolding (impl in progress, #34)    |
+| `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | scaffolding (impl in progress, #34)    |
+| `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | scaffolding (impl in progress, #34)    |
+| `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | scaffolding (impl in progress, #34)    |
+| `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | scaffolding (impl in progress, #34)    |
 | `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives       | ready for use                          |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
 | `gamut-ffi`       | C-compatible FFI bindings                                              | placeholder                            |

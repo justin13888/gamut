@@ -7,9 +7,12 @@
 //!
 //! CDF convention (matches §8.2.6): a CDF for `N` symbols is a slice of `N` cumulative values in
 //! `[0, 32768]`, strictly non-decreasing, with `cdf[N - 1] == 32768`. `cdf[i]` is the cumulative
-//! probability (× 32768) of symbols `0..=i`. The adaptation counter the spec stores as a trailing
-//! `cdf[N]` element is irrelevant here: this MVP runs with `disable_cdf_update = 1`, so CDFs are
-//! static and never adapted. Adaptation is deferred to M1 (see `gamut-avif/STATUS.md`).
+//! probability (× 32768) of symbols `0..=i`. Two coding modes are provided:
+//! [`SymbolEncoder::encode_symbol`] codes against a *static* CDF (`disable_cdf_update = 1`), while
+//! [`SymbolEncoder::encode_symbol_adapt`] applies the §8.2.6 adaptation after each symbol
+//! (`disable_cdf_update = 0`), nudging the CDF toward the just-coded symbol. The adaptation counter
+//! the spec keeps as a trailing `cdf[N]` element is carried alongside as a separate `&mut u16`; a
+//! decoder must apply the identical update after each symbol to stay in lockstep.
 //!
 //! The hermetic `SymbolDecoder` in this module's tests is a direct transcription of §8.2 and is
 //! the oracle that proves the encoder correct without any external decoder.
@@ -76,6 +79,20 @@ impl SymbolEncoder {
         };
         let fh = CDF_PROB_TOP - u32::from(cdf[symbol]);
         self.encode_q15(fl, fh, symbol as u32, nsyms as u32);
+    }
+
+    /// Encodes `symbol` against an *adapting* cumulative `cdf`, then applies the §8.2.6 CDF
+    /// adaptation in place (`disable_cdf_update = 0`). `count` is the spec's trailing `cdf[N]`
+    /// adaptation counter (start it at 0 for a freshly initialised context); it is bumped here, up to
+    /// a maximum of 32. A decoder must apply the identical §8.2.6 update (decode the symbol, then the
+    /// same adaptation) with the same `count` so its CDF tracks the encoder's exactly.
+    ///
+    /// # Panics
+    ///
+    /// Debug builds assert `symbol < cdf.len()` and the CDF normalisation invariants.
+    pub fn encode_symbol_adapt(&mut self, symbol: usize, cdf: &mut [u16], count: &mut u16) {
+        self.encode_symbol(symbol, cdf);
+        update_cdf(cdf, symbol, count);
     }
 
     /// Encodes the low `n` bits of `value` as equiprobable bits, most-significant bit first.
@@ -174,6 +191,33 @@ impl SymbolEncoder {
     }
 }
 
+/// Adapts a cumulative `cdf` toward the just-coded `symbol` and bumps the adaptation `count`, per
+/// AV1 §8.2.6 (`disable_cdf_update = 0`). `cdf` is the gamut `N`-entry cumulative form
+/// (`cdf[N - 1] == 32768`, which is never touched); `count` is the spec's trailing `cdf[N]`
+/// counter, capped at 32 — a higher count slows adaptation. The encoder and a conformant decoder
+/// invoke this identically after coding each symbol, so their CDFs evolve in lockstep.
+fn update_cdf(cdf: &mut [u16], symbol: usize, count: &mut u16) {
+    let n = cdf.len();
+    // rate = 3 + (count > 15) + (count > 31) + Min(FloorLog2(N), 2).
+    let rate = 3
+        + u32::from(*count > 15)
+        + u32::from(*count > 31)
+        + (31 - (n as u32).leading_zeros()).min(2);
+    // §8.2.6 with the loop's `tmp` 0/32768 split made explicit. The fixed top entry
+    // (cdf[N - 1] == 32768) is never updated; entries before `symbol` move toward 0 and those from
+    // `symbol` up to N - 2 move toward 32768, each by `delta >> rate`.
+    let (_top, body) = cdf.split_last_mut().expect("a CDF has at least one entry");
+    for v in &mut body[..symbol] {
+        *v -= *v >> rate;
+    }
+    for v in &mut body[symbol..] {
+        *v += ((1u16 << 15) - *v) >> rate;
+    }
+    if *count < 32 {
+        *count += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +293,15 @@ mod tests {
             self.value = padded ^ (((self.value + 1) << bits) - 1);
             self.max_bits -= i64::from(bits);
             symbol as usize
+        }
+
+        /// `read_symbol(cdf)` with the §8.2.6 adaptation enabled — the decoder mirror of
+        /// [`SymbolEncoder::encode_symbol_adapt`]. Decodes against the current CDF, then applies the
+        /// same [`update_cdf`] so the oracle's CDF tracks the encoder's.
+        fn read_symbol_adapt(&mut self, cdf: &mut [u16], count: &mut u16) -> usize {
+            let s = self.read_symbol(cdf);
+            update_cdf(cdf, s, count);
+            s
         }
 
         fn read_literal(&mut self, n: u32) -> u32 {
@@ -379,5 +432,111 @@ mod tests {
                 assert_eq!(dec.read_symbol(&cdf) as u32, payload);
             }
         }
+    }
+
+    #[test]
+    fn update_cdf_matches_spec_formula() {
+        // Hand-computed from AV1 §8.2.6: rate = 3 + (count > 15) + (count > 31) + Min(FloorLog2(N), 2),
+        // then each entry before `symbol` moves toward 0 and each from `symbol` on moves toward 32768
+        // by `delta >> rate`. The round-trip tests below cannot pin this — the encoder and decoder
+        // adapt in lockstep even with a wrong-but-symmetric formula — so the exact values are checked
+        // here directly.
+        fn upd(cdf: &[u16], symbol: usize, count: u16) -> (Vec<u16>, u16) {
+            let mut c = cdf.to_vec();
+            let mut n = count;
+            update_cdf(&mut c, symbol, &mut n);
+            (c, n)
+        }
+        // N = 2 (FloorLog2 = 1). The count thresholds 15 and 31 each step the rate.
+        assert_eq!(upd(&[16384, 32768], 0, 0), (vec![17408, 32768], 1)); // rate 4: +(16384 >> 4)
+        assert_eq!(upd(&[16384, 32768], 1, 0), (vec![15360, 32768], 1)); // rate 4: -(16384 >> 4)
+        assert_eq!(upd(&[16384, 32768], 0, 15), (vec![17408, 32768], 16)); // 15 > 15 false ⇒ rate 4
+        assert_eq!(upd(&[16384, 32768], 0, 16), (vec![16896, 32768], 17)); // 16 > 15 true  ⇒ rate 5
+        assert_eq!(upd(&[16384, 32768], 0, 31), (vec![16896, 32768], 32)); // 31 > 31 false ⇒ rate 5
+        assert_eq!(upd(&[16384, 32768], 0, 32), (vec![16640, 32768], 32)); // 32 > 31 true ⇒ rate 6, count saturates
+        // N = 3 (FloorLog2 = 1): a mid-symbol update with count 20.
+        assert_eq!(
+            upd(&[10000, 20000, 32768], 1, 20),
+            (vec![9688, 20399, 32768], 21)
+        ); // rate 5
+        // N = 8 (FloorLog2 = 3, capped to 2) pins Min(.., 2) and the full sweep.
+        assert_eq!(
+            upd(
+                &[4096, 8192, 12288, 16384, 20480, 24576, 28672, 32768],
+                3,
+                0
+            ),
+            (
+                vec![3968, 7936, 11904, 16896, 20864, 24832, 28800, 32768],
+                1
+            ) // rate 5
+        );
+    }
+
+    #[test]
+    fn adaptive_single_cdf_roundtrips() {
+        // Encode a long, skewed stream against one adapting CDF. The decoder, starting from the same
+        // initial CDF and applying the identical update, must recover every symbol and end with a
+        // byte-identical CDF + count.
+        let mut rng = Lcg(0xa1b2_c3d4_e5f6_0719);
+        let init = random_cdf(&mut rng, 6);
+        let mut enc = SymbolEncoder::new();
+        let mut ecdf = init.clone();
+        let mut ecount = 0u16;
+        let mut syms = Vec::new();
+        for _ in 0..10_000 {
+            // Skew toward symbol 0 so the CDF moves substantially.
+            let s = (rng.below(6) * rng.below(2)) as usize;
+            enc.encode_symbol_adapt(s, &mut ecdf, &mut ecount);
+            syms.push(s);
+        }
+        let bytes = enc.finish();
+        let mut dec = SymbolDecoder::new(&bytes);
+        let mut dcdf = init.clone();
+        let mut dcount = 0u16;
+        for (i, &s) in syms.iter().enumerate() {
+            assert_eq!(
+                dec.read_symbol_adapt(&mut dcdf, &mut dcount),
+                s,
+                "event {i}"
+            );
+        }
+        assert_eq!(ecdf, dcdf, "encoder/decoder CDFs diverged");
+        assert_eq!(ecount, dcount);
+        assert_ne!(
+            ecdf, init,
+            "CDF should have adapted away from its initial state"
+        );
+    }
+
+    #[test]
+    fn adaptive_multi_context_roundtrips() {
+        // Several independent adapting contexts, interleaved — the realistic usage where each syntax
+        // element has its own CDF + count and they must not cross-contaminate.
+        let mut rng = Lcg(0x0011_2233_4455_6677);
+        let inits: Vec<Vec<u16>> = (2..=10).map(|n| random_cdf(&mut rng, n)).collect();
+        let mut enc = SymbolEncoder::new();
+        let mut ecdfs = inits.clone();
+        let mut ecounts = vec![0u16; inits.len()];
+        let mut events = Vec::new();
+        for _ in 0..15_000 {
+            let ctx = rng.below(inits.len() as u32) as usize;
+            let s = rng.below(ecdfs[ctx].len() as u32) as usize;
+            enc.encode_symbol_adapt(s, &mut ecdfs[ctx], &mut ecounts[ctx]);
+            events.push((ctx, s));
+        }
+        let bytes = enc.finish();
+        let mut dec = SymbolDecoder::new(&bytes);
+        let mut dcdfs = inits.clone();
+        let mut dcounts = vec![0u16; inits.len()];
+        for (i, &(ctx, s)) in events.iter().enumerate() {
+            assert_eq!(
+                dec.read_symbol_adapt(&mut dcdfs[ctx], &mut dcounts[ctx]),
+                s,
+                "event {i} ctx {ctx}"
+            );
+        }
+        assert_eq!(ecdfs, dcdfs);
+        assert_eq!(ecounts, dcounts);
     }
 }
