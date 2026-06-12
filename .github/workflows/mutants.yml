@@ -32,7 +32,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # The cross-check (oracle) tests link vendored dav1d/libavif from these submodules;
           # mutants in gamut-av1/avif/webp need them to build a green baseline.
@@ -59,7 +59,7 @@ jobs:
         run: cargo mutants --no-shuffle -vV --in-diff mutants.diff
       - name: Upload mutants report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mutants-incremental
           path: mutants.out
@@ -70,7 +70,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
       - name: Install native build deps (vendored dav1d/libavif oracles)
@@ -89,7 +89,7 @@ jobs:
         run: cargo mutants --no-shuffle -vV
       - name: Upload mutants report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mutants-full
           path: mutants.out

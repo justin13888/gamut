@@ -20,7 +20,7 @@ jobs:
     name: Release PR
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # release-plz needs full history for changelogs
       - uses: dtolnay/rust-toolchain@stable
@@ -39,14 +39,14 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       # Exchanges the workflow's OIDC identity for a short-lived crates.io token.
       # Requires Trusted Publishing to be configured on each crate at
       # crates.io/crates/<name>/settings (and each crate to already exist).
-      - uses: rust-lang/crates-io-auth-action@v1
+      - uses: rust-lang/crates-io-auth-action@v1.0.4
         id: auth
       - name: release-plz (release)
         uses: release-plz/action@v0.5
