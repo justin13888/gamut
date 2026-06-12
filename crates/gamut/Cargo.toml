@@ -33,6 +33,9 @@ gamut-color = { workspace = true, optional = true }
 gamut-dsp = { workspace = true, optional = true }
 gamut-bitstream = { workspace = true, optional = true }
 
+# Optional tone-mapping primitives, re-exported behind the `tonemap` feature.
+gamut-tonemap = { workspace = true, optional = true }
+
 [features]
 default = []
 avif = ["dep:gamut-avif", "dep:gamut-av1"]
@@ -44,4 +47,6 @@ av1 = ["dep:gamut-av1"]
 av2 = ["dep:gamut-av2"]
 # Re-export the shared building blocks (`color`/`dsp`/`bitstream`) for tooling.
 primitives = ["dep:gamut-color", "dep:gamut-dsp", "dep:gamut-bitstream"]
-all = ["avif", "jxl", "webp", "heic", "vvc", "av1", "av2", "primitives"]
+# Re-export the tone-mapping primitives.
+tonemap = ["dep:gamut-tonemap"]
+all = ["avif", "jxl", "webp", "heic", "vvc", "av1", "av2", "primitives", "tonemap"]
