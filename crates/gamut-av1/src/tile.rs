@@ -28,7 +28,7 @@ use crate::cdf;
 use crate::quant::{ac_q, dc_q, dequant, quantize};
 use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 use gamut_bitstream::SymbolEncoder;
-use gamut_color::{Planar8, clip_pixel8};
+use gamut_color::{Planar8, clip_pixel};
 use gamut_dsp::round2_signed;
 
 /// `NUM_BASE_LEVELS` (§3).
@@ -289,13 +289,15 @@ struct Pred {
 /// The reconstructed (decoded) planes on the coded MI grid, used as prediction neighbours in the
 /// lossy path and exported for the bit-exact decoder cross-check.
 pub(crate) struct Reconstruction {
-    pub planes: [Vec<u8>; 3],
+    pub planes: [Vec<u16>; 3],
     pub coded_w: usize,
+    /// Bits per sample (8, 10, or 12); the planes carry values in `0..=(1 << bit_depth) - 1`.
+    pub bit_depth: u32,
     /// Post-deblock (pre-CDEF) luma, retained for the loop-restoration stripe boundaries. Loop
     /// restoration is applied by the caller **after** any superres upscale (§7.4 order:
     /// deblock → CDEF → superres → loop restoration), so both the CDEF luma (`planes[0]`) and this
     /// are upscaled first when superres is active. Empty on the lossless path.
-    pub deblocked_luma: Vec<u8>,
+    pub deblocked_luma: Vec<u16>,
 }
 
 /// Encoder for the single tile that spans the whole frame.
@@ -331,8 +333,12 @@ pub(crate) struct FrameEncoder<'a> {
     /// `delta_q` and `read_deltas` gates it.
     delta_q_present: bool,
     read_deltas: bool,
-    /// Reconstructed samples per plane on the coded grid (lossy path only).
-    recon: [Vec<u8>; 3],
+    /// Bits per sample (8, 10, or 12); sets the reconstruction clamp range and dequant/transform
+    /// bit depth.
+    bit_depth: u32,
+    /// Reconstructed samples per plane on the coded grid (lossy path only), each in
+    /// `0..=(1 << bit_depth) - 1`.
+    recon: [Vec<u16>; 3],
     sym: SymbolEncoder,
     above_level: [Vec<u8>; 3],
     above_dc: [Vec<u8>; 3],
@@ -427,11 +433,14 @@ impl<'a> FrameEncoder<'a> {
         let mi_rows = 2 * ((height + 7) >> 3);
         let coded_w = mi_cols * 4;
         let coded_h = mi_rows * 4;
+        // 8-bit input today; the buffer and clamp range are bit-depth-generic for the M2 high-bit-
+        // depth path.
+        let bit_depth = 8u32;
         let recon = if qindex > 0 {
             [
-                vec![0u8; coded_w * coded_h],
-                vec![0u8; coded_w * coded_h],
-                vec![0u8; coded_w * coded_h],
+                vec![0u16; coded_w * coded_h],
+                vec![0u16; coded_w * coded_h],
+                vec![0u16; coded_w * coded_h],
             ]
         } else {
             [Vec::new(), Vec::new(), Vec::new()]
@@ -450,12 +459,13 @@ impl<'a> FrameEncoder<'a> {
             tile_r1: mi_rows,
             qindex,
             qctx: qctx_for(i32::from(qindex)),
-            dc_quant: dc_q(8, i32::from(qindex)),
-            ac_quant: ac_q(8, i32::from(qindex)),
+            dc_quant: dc_q(bit_depth, i32::from(qindex)),
+            ac_quant: ac_q(bit_depth, i32::from(qindex)),
             current_qindex: i32::from(qindex),
             current_dlf: 0,
             delta_q_present: qindex > 0,
             read_deltas: false,
+            bit_depth,
             recon,
             sym: SymbolEncoder::new(),
             above_level: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
@@ -610,6 +620,7 @@ impl<'a> FrameEncoder<'a> {
         let recon = Reconstruction {
             planes,
             coded_w: self.coded_w,
+            bit_depth: self.bit_depth,
             deblocked_luma,
         };
         (tile_bytes, recon)
@@ -1079,11 +1090,11 @@ impl<'a> FrameEncoder<'a> {
         for i in 0..bw {
             for j in 0..bw {
                 let idx = pal.index_map[i * bw + j] as usize;
-                self.recon[0][(sy + i) * self.coded_w + (sx + j)] = pal.colors[idx];
+                self.recon[0][(sy + i) * self.coded_w + (sx + j)] = u16::from(pal.colors[idx]);
             }
         }
         for plane in 1..3 {
-            let dc = clip_pixel8(self.dc_pred(plane, sx, sy, bw, bw));
+            let dc = clip_pixel(self.dc_pred(plane, sx, sy, bw, bw), self.bit_depth);
             for i in 0..bw {
                 for j in 0..bw {
                     self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = dc;
@@ -1539,10 +1550,10 @@ impl<'a> FrameEncoder<'a> {
         // skip = 1: no residual is coded; the reconstruction is the (clipped) prediction, and the
         // neighbour level/dc contexts are reset to 0 (`reset_block_context`, §5.11.10).
         if skip {
-            for i in 0..th {
-                for j in 0..tw {
+            for (i, prow) in pred.chunks_exact(tw).enumerate() {
+                for (j, &pv) in prow.iter().enumerate() {
                     self.recon[plane][(sy + i) * self.coded_w + (sx + j)] =
-                        clip_pixel8(pred[i * tw + j]);
+                        clip_pixel(pv, self.bit_depth);
                 }
             }
             self.set_ctx(plane, sx >> 2, sy >> 2, tw / 4, th / 4, 0, 0);
@@ -1608,7 +1619,7 @@ impl<'a> FrameEncoder<'a> {
         let resid = inverse_transform_2d(&dq, tx_size, tx, 8);
         for i in 0..th {
             for j in 0..tw {
-                let v = clip_pixel8(pred[i * tw + j] + resid[i * tw + j]);
+                let v = clip_pixel(pred[i * tw + j] + resid[i * tw + j], self.bit_depth);
                 self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = v;
             }
         }
@@ -3131,7 +3142,7 @@ mod tests {
         let cw = e.coded_w;
         for y in 0..e.coded_h {
             for x in 0..cw {
-                e.recon[0][y * cw + x] = ((x * 7 + y * 13 + 5) & 0xff) as u8;
+                e.recon[0][y * cw + x] = ((x * 7 + y * 13 + 5) & 0xff) as u16;
             }
         }
         e.block_decoded.iter_mut().for_each(|b| *b = 1);
@@ -3151,7 +3162,7 @@ mod tests {
         let cw = e.coded_w;
         for y in 0..e.coded_h {
             for x in 0..cw {
-                e.recon[0][y * cw + x] = (((x * 11) ^ (y * 5 + 9)) & 0xff) as u8;
+                e.recon[0][y * cw + x] = (((x * 11) ^ (y * 5 + 9)) & 0xff) as u16;
             }
         }
         e.block_decoded.iter_mut().for_each(|b| *b = 1);
@@ -3184,10 +3195,10 @@ mod tests {
         let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.coded_w;
-        for (j, &v) in [60u8, 90, 120, 150].iter().enumerate() {
+        for (j, &v) in [60u16, 90, 120, 150].iter().enumerate() {
             e.recon[0][3 * cw + (4 + j)] = v;
         }
-        for (i, &v) in [40u8, 80, 120, 160].iter().enumerate() {
+        for (i, &v) in [40u16, 80, 120, 160].iter().enumerate() {
             e.recon[0][(4 + i) * cw + 3] = v;
         }
         e.recon[0][3 * cw + 3] = 100;
@@ -3261,7 +3272,7 @@ mod tests {
         let cw = e.coded_w;
         for i in 0..4 {
             for j in 0..4 {
-                e.recon[0][(4 + i) * cw + (4 + j)] = (80 + 8 * j) as u8;
+                e.recon[0][(4 + i) * cw + (4 + j)] = (80 + 8 * j) as u16;
             }
         }
         let mut pred = [128i32; 16];
@@ -3285,7 +3296,7 @@ mod tests {
         let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
         let cw = e.coded_w;
-        for (k, &v) in [10u8, 20, 30, 40, 50, 60, 70, 80].iter().enumerate() {
+        for (k, &v) in [10u16, 20, 30, 40, 50, 60, 70, 80].iter().enumerate() {
             e.recon[0][3 * cw + (4 + k)] = v; // above row incl. above-right (x=4..12)
         }
         e.clear_block_decoded(0, 0);

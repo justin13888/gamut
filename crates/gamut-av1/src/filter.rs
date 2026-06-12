@@ -46,7 +46,7 @@ struct Strength {
 /// the edge (`1` vertical, row stride horizontal). `filter_size` is 4 or 8; `is_luma` selects the
 /// tap count. Returns `None` when `filterMask == 0` (no filtering). 8-bit (`BitDepth == 8`).
 fn deblock_masks(
-    buf: &[u8],
+    buf: &[u16],
     base: usize,
     step: usize,
     filter_size: usize,
@@ -129,7 +129,7 @@ fn deblock_masks(
 }
 
 /// Narrow (4-tap) deblock filter (§7.14.6.3): modifies up to two samples each side of the edge.
-fn narrow_apply(buf: &mut [u8], base: usize, step: usize, hev: bool) {
+fn narrow_apply(buf: &mut [u16], base: usize, step: usize, hev: bool) {
     let q0 = i32::from(buf[base]);
     let q1 = i32::from(buf[base + step]);
     let p0 = i32::from(buf[base - step]);
@@ -140,12 +140,12 @@ fn narrow_apply(buf: &mut [u8], base: usize, step: usize, hev: bool) {
     filter = clamp(filter + 3 * (qs0 - ps0));
     let filter1 = clamp(filter + 4) >> 3;
     let filter2 = clamp(filter + 3) >> 3;
-    buf[base] = (clamp(qs0 - filter1) + 128) as u8; // oq0
-    buf[base - step] = (clamp(ps0 + filter2) + 128) as u8; // op0
+    buf[base] = (clamp(qs0 - filter1) + 128) as u16; // oq0
+    buf[base - step] = (clamp(ps0 + filter2) + 128) as u16; // op0
     if !hev {
         let f = (filter1 + 1) >> 1; // Round2(filter1, 1)
-        buf[base + step] = (clamp(qs1 - f) + 128) as u8; // oq1
-        buf[base - 2 * step] = (clamp(ps1 + f) + 128) as u8; // op1
+        buf[base + step] = (clamp(qs1 - f) + 128) as u16; // oq1
+        buf[base - 2 * step] = (clamp(ps1 + f) + 128) as u16; // op1
     }
 }
 
@@ -153,7 +153,7 @@ fn narrow_apply(buf: &mut [u8], base: usize, step: usize, hev: bool) {
 /// 16↔16 luma edge) uses `n = 6, n2 = 1` (modifies 6 samples each side from p6..q6); `log2_size == 3`
 /// uses `n = 3, n2 = 0` for luma (3 each side) and `n = 2, n2 = 1` for chroma (2 each side). All taps
 /// read the original samples, then write.
-fn wide_apply(buf: &mut [u8], base: usize, step: usize, is_luma: bool, log2_size: u32) {
+fn wide_apply(buf: &mut [u16], base: usize, step: usize, is_luma: bool, log2_size: u32) {
     let (n, n2): (isize, isize) = if log2_size == 4 {
         (6, 1)
     } else if is_luma {
@@ -174,7 +174,7 @@ fn wide_apply(buf: &mut [u8], base: usize, step: usize, is_luma: bool, log2_size
         out[(i + n) as usize] = (t + rnd) >> log2_size; // Round2(t, log2Size)
     }
     for i in -n..n {
-        buf[(base as isize + i * step as isize) as usize] = out[(i + n) as usize] as u8;
+        buf[(base as isize + i * step as isize) as usize] = out[(i + n) as usize] as u16;
     }
 }
 
@@ -182,7 +182,7 @@ fn wide_apply(buf: &mut [u8], base: usize, step: usize, is_luma: bool, log2_size
 /// selection — narrow if `filterSize == 4` or `!flatMask`; else wide `log2Size == 3` if
 /// `filterSize == 8` or `!flatMask2`; else (a 16↔16 luma edge) wide `log2Size == 4`.
 fn filter_sample(
-    buf: &mut [u8],
+    buf: &mut [u16],
     base: usize,
     step: usize,
     filter_size: usize,
@@ -211,7 +211,7 @@ fn filter_sample(
 /// coded grid is a multiple of 8, so the reads stay in bounds); the padding is then cropped.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn deblock(
-    planes: &mut [Vec<u8>; 3],
+    planes: &mut [Vec<u16>; 3],
     coded_w: usize,
     mi_cols: usize,
     width: usize,
@@ -370,7 +370,7 @@ pub(crate) const CDEF_DAMPING: i32 = 3;
 /// `var` of the luma 8×8 block whose top-left is at coded `(x0, y0)`. The index-based loops mirror
 /// the spec's `partial`/`cost` accumulation directly.
 #[allow(clippy::needless_range_loop)]
-fn cdef_direction(luma: &[u8], coded_w: usize, x0: usize, y0: usize) -> (usize, i32) {
+fn cdef_direction(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> (usize, i32) {
     let mut partial = [[0i64; 15]; 8];
     for i in 0..8 {
         for j in 0..8 {
@@ -429,8 +429,8 @@ fn cdef_direction(luma: &[u8], coded_w: usize, x0: usize, y0: usize) -> (usize, 
 /// grid is unavailable and skipped. `w`/`h` are the block extent in this plane.
 #[allow(clippy::too_many_arguments)]
 fn cdef_filter_block(
-    input: &[u8],
-    output: &mut [u8],
+    input: &[u16],
+    output: &mut [u16],
     coded_w: usize,
     coded_h: usize,
     x0: usize,
@@ -480,8 +480,9 @@ fn cdef_filter_block(
                     }
                 }
             }
-            let v = x + ((8 + sum - i32::from(sum < 0)) >> 4);
-            output[(y0 + i) * coded_w + (x0 + j)] = v.clamp(mn, mx) as u8;
+            // `(8 + sum - (sum < 0)) >> 4` is `Round2Signed(sum, 4)` (round to nearest, ties toward 0).
+            let v = x + gamut_dsp::round2_signed(sum, 4);
+            output[(y0 + i) * coded_w + (x0 + j)] = v.clamp(mn, mx) as u16;
         }
     }
 }
@@ -492,12 +493,12 @@ fn cdef_filter_block(
 /// pre-CDEF (deblocked) input, so a fresh output is produced. 4:4:4 ⇒ chroma shares the luma grid and
 /// `Cdef_Uv_Dir` is the identity.
 pub(crate) fn cdef(
-    planes: &[Vec<u8>; 3],
+    planes: &[Vec<u16>; 3],
     coded_w: usize,
     mi_skip: &[u8],
     mi_cols: usize,
     qindex: u8,
-) -> [Vec<u8>; 3] {
+) -> [Vec<u16>; 3] {
     let (y_pri, y_sec, uv_pri, uv_sec) = cdef_strengths(qindex);
     let mut out = planes.clone();
     if y_pri == 0 && y_sec == 0 && uv_pri == 0 && uv_sec == 0 {
@@ -587,8 +588,8 @@ pub(crate) const WIENER_DEFAULT: [i32; 3] = [3, -7, 15];
 /// nearest in-frame sample is replicated (a single restoration unit spans the width). 8-bit:
 /// horizontal `round_bits = 3`, vertical `round_bits = 11`, `round_offset = 1 << 18`.
 pub(crate) fn loop_restore_wiener_luma(
-    cdef: &mut [u8],
-    deblock: &[u8],
+    cdef: &mut [u16],
+    deblock: &[u16],
     coded_w: usize,
     width: usize,
     height: usize,
@@ -620,7 +621,7 @@ pub(crate) fn loop_restore_wiener_luma(
     ];
     let src_cdef = cdef.to_vec();
     // Horizontal 7-tap filter of one source row → a `width`-long buffer clipped to `0..=8191`.
-    let h_row = |buf: &[u8], row: usize| -> Vec<i32> {
+    let h_row = |buf: &[u16], row: usize| -> Vec<i32> {
         (0..width)
             .map(|x| {
                 let base = row * coded_w;
@@ -667,7 +668,7 @@ pub(crate) fn loop_restore_wiener_luma(
                     let bi = (y as isize + t as isize - 3 - (st as isize - 3)) as usize;
                     sum += band[bi][x] * tap;
                 }
-                cdef[y * coded_w + x] = gamut_color::clip_pixel8((sum + 1024) >> 11);
+                cdef[y * coded_w + x] = gamut_color::clip_pixel((sum + 1024) >> 11, 8);
             }
         }
         st = se;
@@ -724,17 +725,17 @@ fn superres_x0(in_w: usize, out_w: usize, step: i32) -> i32 {
 /// filter steps the subpel source position by `step = ((src_w << 14) + dst_w/2) / dst_w`, starting at
 /// `superres_x0`; out-of-frame samples replicate the nearest column. 8-bit (`FILTER_BITS = 7`).
 pub(crate) fn superres_upscale_plane(
-    src: &[u8],
+    src: &[u16],
     src_stride: usize,
     frame_w: usize,
     dst_w: usize,
     height: usize,
-) -> Vec<u8> {
+) -> Vec<u16> {
     // The subpel geometry (step/initial offset) is keyed by `FrameWidth`, but the source samples are
     // clamped to the coded grid (`src_stride = 4*bw`, padded past FrameWidth), matching dav1d.
     let step = (((frame_w << 14) + dst_w / 2) / dst_w) as i32;
     let x0 = superres_x0(frame_w, dst_w, step);
-    let mut dst = vec![0u8; dst_w * height];
+    let mut dst = vec![0u16; dst_w * height];
     for y in 0..height {
         let (base, dbase) = (y * src_stride, y * dst_w);
         let mut mx = x0;
@@ -746,7 +747,7 @@ pub(crate) fn superres_upscale_plane(
                 let sx = (src_x + k as i32 - 3).clamp(0, src_stride as i32 - 1) as usize;
                 sum += i32::from(tap) * i32::from(src[base + sx]);
             }
-            dst[dbase + x] = gamut_color::clip_pixel8((-sum + 64) >> 7);
+            dst[dbase + x] = gamut_color::clip_pixel((-sum + 64) >> 7, 8);
             mx += step;
             src_x += mx >> 14;
             mx &= 0x3fff;
@@ -801,7 +802,7 @@ mod tests {
         // p1,p0,q0,q1 = 100,100,108,108 (a step of 8). At lvl = 10 (limit 10, blimit 34, thresh 0)
         // the filterMask passes and, with no high edge variance, two samples each side are adjusted
         // toward a gradient. Hand-traced: filter = 24, filter1 = filter2 = 3, f = 2.
-        let mut buf = [100u8, 100, 108, 108];
+        let mut buf = [100u16, 100, 108, 108];
         filter_sample(
             &mut buf,
             2,
@@ -820,7 +821,7 @@ mod tests {
     #[test]
     fn narrow_filter_skips_large_step() {
         // A step of 20 exceeds blimit at lvl 10, so filterMask is 0 and nothing changes.
-        let mut buf = [100u8, 100, 120, 120];
+        let mut buf = [100u16, 100, 120, 120];
         filter_sample(
             &mut buf,
             2,
@@ -858,9 +859,9 @@ mod tests {
         // A flat plane: every neighbour difference is zero, so constrain is zero and CDEF is identity
         // even with non-zero strengths.
         let flat = [
-            vec![128u8; 16 * 16],
-            vec![128u8; 16 * 16],
-            vec![128u8; 16 * 16],
+            vec![128u16; 16 * 16],
+            vec![128u16; 16 * 16],
+            vec![128u16; 16 * 16],
         ];
         // 16×16 ⇒ 4×4 MI grid; no block is skip, so CDEF visits every 8×8.
         let mi_skip = vec![0u8; 4 * 4];
@@ -870,9 +871,9 @@ mod tests {
         // edges). A low-amplitude vertical stripe gives the direction search a clear direction and a
         // small enough neighbour difference for the constrained sum to be non-zero ⇒ samples change.
         let mut planes = [
-            vec![128u8; 16 * 16],
-            vec![128u8; 16 * 16],
-            vec![128u8; 16 * 16],
+            vec![128u16; 16 * 16],
+            vec![128u16; 16 * 16],
+            vec![128u16; 16 * 16],
         ];
         for y in 0..16 {
             for x in 0..16 {
@@ -890,9 +891,9 @@ mod tests {
     fn deblock_leaves_flat_image_unchanged_but_filters_edges() {
         // Flat plane: every difference is zero, so the filter is a no-op.
         let mut flat = [
-            vec![128u8; 16 * 16],
-            vec![128u8; 16 * 16],
-            vec![128u8; 16 * 16],
+            vec![128u16; 16 * 16],
+            vec![128u16; 16 * 16],
+            vec![128u16; 16 * 16],
         ];
         // 16×16 ⇒ 4×4 MI grid, all 4×4 transforms (tx_log2 = 2 everywhere ⇒ narrow filter). The
         // 4×4 blocks have `mi_bsl = 0`, so chroma tx is also 4×4 (log2 = 0 + 2).
@@ -905,7 +906,11 @@ mod tests {
         assert!(flat[0].iter().all(|&v| v == 128));
 
         // A vertical step at column 8 gets smoothed across the x = 8 boundary.
-        let mut planes = [vec![0u8; 16 * 16], vec![0u8; 16 * 16], vec![0u8; 16 * 16]];
+        let mut planes = [
+            vec![0u16; 16 * 16],
+            vec![0u16; 16 * 16],
+            vec![0u16; 16 * 16],
+        ];
         for y in 0..16 {
             for x in 0..16 {
                 planes[0][y * 16 + x] = if x < 8 { 100 } else { 108 };

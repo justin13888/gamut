@@ -8,14 +8,17 @@
 # C toolchain + the third_party/ git submodules checked out.
 all_features = true
 
-# Don't mutate the binary/binding crates: their entry points aren't unit-tested, so every
-# mutant would be an un-killable false "missed". Same set excluded from the coverage gate
-# (justfile `coverage`, --ignore-filename-regex). Stub crates (av2/jxl/vvc/heic) contain no
-# function bodies and generate no mutants, so they need no entry here.
+# Don't mutate the binary/binding crates or the dev-only oracle crates: the binaries' entry points
+# aren't unit-tested, and `tooling/` holds the differential *reference decoders* (dav1d/libavif) —
+# the test oracle, not the system under test, so mutating it is meaningless (and its high-bit-depth
+# FFI paths are only exercised once the encoder emits them). This matches the coverage gate, which
+# excludes the same set (justfile `coverage`, --ignore-filename-regex). Stub crates
+# (av2/jxl/vvc/heic) contain no function bodies and generate no mutants, so they need no entry here.
 exclude_globs = [
     "crates/gamut-cli/**",
     "crates/gamut-wasm/**",
     "crates/gamut-ffi/**",
+    "tooling/**",
 ]
 
 # The test suites are fast (sub-second baselines), so a mutant that runs much longer is

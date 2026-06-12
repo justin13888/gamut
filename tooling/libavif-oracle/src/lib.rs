@@ -12,32 +12,33 @@
 
 #![allow(non_upper_case_globals, non_camel_case_types, non_snake_case)]
 
-use std::ptr;
-
 mod sys {
     #![allow(dead_code)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-/// A decoded 8-bit planar image: one tightly packed `width * height` plane per component.
+/// A decoded planar image: one tightly packed `width * height` plane per component, each sample
+/// widened to `u16` (8-bit samples occupy `0..=255`, 10-/12-bit use the wider range).
 ///
-/// gamut emits 4:4:4 identity-matrix stills, so the three planes are full-resolution and carry
-/// `[Y, U, V]` (which under the identity matrix are `G, B, R`).
+/// gamut emits 4:4:4 stills, so the three planes are full-resolution and carry `[Y, U, V]` (which
+/// under the identity matrix are `G, B, R`).
 pub struct DecodedImage {
     /// Luma width in pixels.
     pub width: u32,
     /// Luma height in pixels.
     pub height: u32,
-    /// `[Y, U, V]` planes, each in raster order with no row padding.
-    pub planes: [Vec<u8>; 3],
+    /// Bits per component (8, 10, or 12).
+    pub bit_depth: u8,
+    /// `[Y, U, V]` planes, each in raster order with no row padding; samples widened to `u16`.
+    pub planes: [Vec<u16>; 3],
 }
 
-/// Decodes the first frame of an AVIF file into its 8-bit 4:4:4 YUV planes.
+/// Decodes the first frame of an AVIF file into its 4:4:4 YUV planes (8/10/12-bit, widened to `u16`).
 ///
 /// # Errors
 ///
 /// Returns a message (including libavif's own result string) if the file cannot be parsed or
-/// decoded, or if the decoded image is not 8-bit 4:4:4 (the only form gamut emits).
+/// decoded, or if the decoded image is not 4:4:4 or not 8/10/12-bit (the forms gamut emits).
 pub fn decode_avif(avif: &[u8]) -> Result<DecodedImage, String> {
     // SAFETY: the decoder and image handles below are created and destroyed in matched pairs on
     // every return path; pointers passed to libavif stay valid for each call's duration.
@@ -74,8 +75,9 @@ unsafe fn decode_inner(avif: &[u8]) -> Result<DecodedImage, String> {
 
 /// Copies the three YUV planes out of a decoded `avifImage` into owned, unpadded buffers.
 unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
-    if image.depth != 8 {
-        return Err(format!("expected 8-bit image, got {}-bit", image.depth));
+    let depth = image.depth as u8;
+    if !matches!(depth, 8 | 10 | 12) {
+        return Err(format!("unexpected bit depth: {depth}-bit"));
     }
     if image.yuvFormat != sys::AVIF_PIXEL_FORMAT_YUV444 {
         return Err(format!(
@@ -87,7 +89,7 @@ unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
     let h = image.height as usize;
 
     // SAFETY: a successfully decoded 4:4:4 image owns three planes of `h` rows; `yuvRowBytes[p]`
-    // (>= w) is the stride of plane `p`.
+    // (the byte stride) spaces consecutive rows of plane `p`.
     unsafe {
         let mut planes = [Vec::new(), Vec::new(), Vec::new()];
         for (p, plane) in planes.iter_mut().enumerate() {
@@ -95,26 +97,42 @@ unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
             if base.is_null() {
                 return Err(format!("plane {p} is null"));
             }
-            *plane = copy_plane(base, image.yuvRowBytes[p] as usize, w, h);
+            *plane = copy_plane(base, image.yuvRowBytes[p] as usize, w, h, depth);
         }
         let [y, u, v] = planes;
         Ok(DecodedImage {
             width: image.width,
             height: image.height,
+            bit_depth: depth,
             planes: [y, u, v],
         })
     }
 }
 
-/// Copies a `w`×`h` 8-bit plane from a strided buffer into a tightly packed `Vec`.
-unsafe fn copy_plane(base: *const u8, stride: usize, w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
-    // SAFETY: caller guarantees `base` addresses `h` rows of at least `w` bytes spaced `stride`
-    // apart; `out` is exactly `w * h` bytes, so each row copy stays in bounds of both buffers.
+/// Copies a `w`×`h` plane from a strided libavif buffer into a tightly packed `u16` `Vec`. `depth`
+/// is the bit depth: at 8 the source samples are bytes (widened to `u16`); at 10/12 they are native-
+/// endian `u16` and `byte_stride` is in bytes.
+unsafe fn copy_plane(
+    base: *const u8,
+    byte_stride: usize,
+    w: usize,
+    h: usize,
+    depth: u8,
+) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
+    // SAFETY: caller guarantees `base` addresses `h` rows of at least `w` samples spaced
+    // `byte_stride` bytes apart; each read stays within row `row`'s `w` samples and `out` is exactly
+    // `w * h` elements.
     unsafe {
         for row in 0..h {
-            let src = base.add(stride * row);
-            ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(row * w), w);
+            let row_base = base.add(byte_stride * row);
+            for col in 0..w {
+                out[row * w + col] = if depth == 8 {
+                    u16::from(*row_base.add(col))
+                } else {
+                    *row_base.cast::<u16>().add(col)
+                };
+            }
         }
     }
     out

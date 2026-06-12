@@ -27,8 +27,11 @@ pub struct ReconImage {
     pub width: u32,
     /// Display height.
     pub height: u32,
-    /// Reconstructed planes (Y=G, U=B, V=R), each `width * height` samples, row-major.
-    pub planes: [Vec<u8>; 3],
+    /// Bits per sample (8, 10, or 12); the planes carry values in `0..=(1 << bit_depth) - 1`.
+    pub bit_depth: u8,
+    /// Reconstructed planes (Y=G, U=B, V=R), each `width * height` samples, row-major, widened to
+    /// `u16`.
+    pub planes: [Vec<u16>; 3],
 }
 
 /// Encodes 8-bit 4:4:4 identity planes (Y=G, U=B, V=R) as a lossless AV1 intra keyframe.
@@ -136,13 +139,19 @@ fn encode_with(
     // the reconstruction equals the source. With superres the coded grid is the downscaled width, so
     // each plane is cropped to `coded_w` and then upscaled horizontally to the display `width`.
     let (uw, uh) = (width as usize, height as usize);
-    let recon_planes: [Vec<u8>; 3] = if qindex == 0 {
-        std::array::from_fn(|i| crop(planes.plane(i), width, planes.width(), height))
+    let recon_planes: [Vec<u16>; 3] = if qindex == 0 {
+        // Lossless: the reconstruction equals the 8-bit source; widen it into the u16 recon buffer.
+        std::array::from_fn(|i| {
+            crop(planes.plane(i), width, planes.width(), height)
+                .into_iter()
+                .map(u16::from)
+                .collect()
+        })
     } else if coded_denom.is_some() {
         // §7.4 order: superres upscale (downscaled → display width) happens **before** loop
         // restoration, which then runs on the upscaled luma. The deblocked-luma boundary is upscaled
         // too (only read by multi-stripe frames).
-        let mut up: [Vec<u8>; 3] = std::array::from_fn(|i| {
+        let mut up: [Vec<u16>; 3] = std::array::from_fn(|i| {
             crate::filter::superres_upscale_plane(
                 &recon.planes[i],
                 recon.coded_w,
@@ -190,13 +199,14 @@ fn encode_with(
     let recon = ReconImage {
         width,
         height,
+        bit_depth: recon.bit_depth as u8,
         planes: recon_planes,
     };
     Ok((still, recon))
 }
 
 /// Crops a `src_stride`-wide plane to `width × height`, row-major.
-fn crop(plane: &[u8], width: u32, src_stride: u32, height: u32) -> Vec<u8> {
+fn crop<T: Copy>(plane: &[T], width: u32, src_stride: u32, height: u32) -> Vec<T> {
     let (w, sw, h) = (width as usize, src_stride as usize, height as usize);
     let mut out = Vec::with_capacity(w * h);
     for y in 0..h {

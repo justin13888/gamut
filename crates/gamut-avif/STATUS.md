@@ -47,7 +47,7 @@ the milestone that motivates a row — indicative sequencing, not a contract:
 | `colr` type `rICC`/`prof` (ICC profile) | 23008-12 | ☐ | M4 |
 | `pasp` pixel aspect ratio | 14496-12 | ☐ | M5 |
 | `clap` clean aperture | 23008-12 | ☐ | M5 |
-| `irot` rotation / `imir` mirror | 23008-12 | ☐ | M5 |
+| `irot` rotation / `imir` mirror | 23008-12 | ✅ (essential transform properties; `AvifEncoder::with_rotation_ccw`/`with_mirror`) | M5 |
 | `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4 | ☐ | M3 |
 | `prem` premultiplied-alpha association | AVIF §4 | ☐ | M3 |
 | `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ☐ | M3/M5 |

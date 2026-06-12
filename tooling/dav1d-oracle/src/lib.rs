@@ -18,7 +18,8 @@ mod sys {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
 
-/// A decoded 8-bit planar picture: one tightly packed `width * height` plane per component.
+/// A decoded planar picture: one tightly packed `width * height` plane per component, with each
+/// sample widened to `u16` (8-bit samples occupy `0..=255`, 10-/12-bit use the wider range).
 ///
 /// For 4:2:0 / 4:2:2 content the chroma planes are subsampled, so `planes[1]` / `planes[2]` are
 /// smaller than `planes[0]`; for the 4:4:4 stills gamut emits, all three are `width * height`.
@@ -27,8 +28,10 @@ pub struct DecodedPicture {
     pub width: u32,
     /// Luma height in pixels.
     pub height: u32,
-    /// `[Y, U, V]` planes, each in raster order with no row padding.
-    pub planes: [Vec<u8>; 3],
+    /// Bits per component (8, 10, or 12).
+    pub bit_depth: u8,
+    /// `[Y, U, V]` planes, each in raster order with no row padding; samples widened to `u16`.
+    pub planes: [Vec<u16>; 3],
 }
 
 /// `DAV1D_ERR(EAGAIN)`: the decoder's "feed me more data / drain a picture first" sentinel. dav1d
@@ -46,7 +49,7 @@ fn err_again() -> c_int {
 /// # Errors
 ///
 /// Returns a message if dav1d cannot be initialized, the stream produces no picture, or the
-/// decoded picture is not 8-bit (gamut only emits 8-bit stills).
+/// decoded picture is not 8/10/12-bit (the bit depths gamut emits).
 pub fn decode_obu(obus: &[u8]) -> Result<DecodedPicture, String> {
     // SAFETY: every pointer handed to dav1d below is either a stack value we own for the duration
     // of the call or a buffer dav1d itself allocated; we pair every successful `*_create`/picture
@@ -112,8 +115,9 @@ unsafe fn decode_obu_inner(obus: &[u8]) -> Result<DecodedPicture, String> {
 
 /// Copies the three planes out of a decoded dav1d picture into owned, unpadded buffers.
 unsafe fn extract(pic: &sys::Dav1dPicture) -> Result<DecodedPicture, String> {
-    if pic.p.bpc != 8 {
-        return Err(format!("expected 8-bit picture, got {} bpc", pic.p.bpc));
+    let bpc = pic.p.bpc as u8;
+    if !matches!(bpc, 8 | 10 | 12) {
+        return Err(format!("unexpected bit depth: {bpc} bpc"));
     }
     let w = pic.p.w as usize;
     let h = pic.p.h as usize;
@@ -122,12 +126,13 @@ unsafe fn extract(pic: &sys::Dav1dPicture) -> Result<DecodedPicture, String> {
     // SAFETY: `pic` is a live dav1d picture; its `data`/`stride` describe planes of at least the
     // dimensions reported in `pic.p` for the given layout.
     unsafe {
-        let y = copy_plane(pic.data[0].cast::<u8>(), pic.stride[0], w, h);
-        let u = copy_plane(pic.data[1].cast::<u8>(), pic.stride[1], cw, ch);
-        let v = copy_plane(pic.data[2].cast::<u8>(), pic.stride[1], cw, ch);
+        let y = copy_plane(pic.data[0].cast::<u8>(), pic.stride[0], w, h, bpc);
+        let u = copy_plane(pic.data[1].cast::<u8>(), pic.stride[1], cw, ch, bpc);
+        let v = copy_plane(pic.data[2].cast::<u8>(), pic.stride[1], cw, ch, bpc);
         Ok(DecodedPicture {
             width: w as u32,
             height: h as u32,
+            bit_depth: bpc,
             planes: [y, u, v],
         })
     }
@@ -144,15 +149,25 @@ fn chroma_dims(layout: sys::Dav1dPixelLayout, w: usize, h: usize) -> (usize, usi
     }
 }
 
-/// Copies a `w`×`h` 8-bit plane from a strided dav1d buffer into a tightly packed `Vec`.
-unsafe fn copy_plane(base: *const u8, stride: isize, w: usize, h: usize) -> Vec<u8> {
-    let mut out = vec![0u8; w * h];
-    // SAFETY: caller guarantees `base` addresses `h` rows of at least `w` bytes spaced `stride`
-    // apart; `out` is exactly `w * h` bytes, so each row copy stays in bounds of both buffers.
+/// Copies a `w`×`h` plane from a strided dav1d buffer into a tightly packed `u16` `Vec`. `bpc` is
+/// the bit depth: at 8 the source samples are bytes (widened to `u16`); at 10/12 they are native-
+/// endian `u16` and `byte_stride` is in bytes. A zero-sized plane (`w == 0`, monochrome chroma)
+/// yields an empty `Vec`.
+unsafe fn copy_plane(base: *const u8, byte_stride: isize, w: usize, h: usize, bpc: u8) -> Vec<u16> {
+    let mut out = vec![0u16; w * h];
+    // SAFETY: caller guarantees `base` addresses `h` rows of at least `w` samples spaced
+    // `byte_stride` bytes apart; each read below stays within row `row`'s `w` samples and `out` is
+    // exactly `w * h` elements.
     unsafe {
         for row in 0..h {
-            let src = base.offset(stride * row as isize);
-            ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(row * w), w);
+            let row_base = base.offset(byte_stride * row as isize);
+            for col in 0..w {
+                out[row * w + col] = if bpc == 8 {
+                    u16::from(*row_base.add(col))
+                } else {
+                    *row_base.cast::<u16>().add(col)
+                };
+            }
         }
     }
     out

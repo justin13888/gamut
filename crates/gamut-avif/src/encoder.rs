@@ -3,18 +3,21 @@
 use gamut_av1::{EncodedStill, encode_still_intra, encode_still_lossless_identity};
 use gamut_color::Planar8;
 use gamut_core::{Dimensions, Encoder, Result};
-use gamut_isobmff::{Av1cConfig, AvifStillImage, NclxColr, write_avif_still};
+use gamut_isobmff::{Av1cConfig, AvifStillImage, ImageTransform, NclxColr, write_avif_still};
 
 /// Encodes images to AVIF still images.
 ///
 /// 8-bit RGB in, mapped to AV1 identity-matrix 4:4:4. By default the encode is **lossless**;
 /// [`AvifEncoder::with_qindex`] selects a lossy quantizer (`base_q_idx`, `1..=255`). Use
 /// [`AvifEncoder::encode_rgb8`] for the explicit RGB entry point, or the [`Encoder`] trait (which
-/// assumes the same 8-bit interleaved RGB layout).
+/// assumes the same 8-bit interleaved RGB layout). [`AvifEncoder::with_rotation_ccw`] /
+/// [`AvifEncoder::with_mirror`] add `irot`/`imir` display-orientation transforms.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AvifEncoder {
     /// AV1 `base_q_idx`: `0` is lossless, `1..=255` is lossy intra (higher = more quantization).
     qindex: u8,
+    /// Optional `irot`/`imir` display-orientation transforms.
+    transform: ImageTransform,
 }
 
 impl AvifEncoder {
@@ -29,6 +32,25 @@ impl AvifEncoder {
     #[must_use]
     pub fn with_qindex(mut self, qindex: u8) -> Self {
         self.qindex = qindex;
+        self
+    }
+
+    /// Adds an `irot` display rotation of `quarter_turns × 90°` applied anti-clockwise (the value is
+    /// taken modulo 4, so `0` clears it). The stored pixels are unchanged — a reader rotates at
+    /// display time — so this records e.g. a camera's EXIF orientation without re-encoding. Returns
+    /// the updated encoder for chaining.
+    #[must_use]
+    pub fn with_rotation_ccw(mut self, quarter_turns: u8) -> Self {
+        self.transform.rotation_ccw = quarter_turns % 4;
+        self
+    }
+
+    /// Adds an `imir` display mirror: `axis = 0` mirrors about a vertical axis (left↔right), `1`
+    /// about a horizontal axis (top↔bottom). The stored pixels are unchanged. Returns the updated
+    /// encoder for chaining.
+    #[must_use]
+    pub fn with_mirror(mut self, axis: u8) -> Self {
+        self.transform.mirror_axis = Some(axis & 1);
         self
     }
 
@@ -47,7 +69,7 @@ impl AvifEncoder {
         } else {
             encode_still_intra(&planes, self.qindex)?.0
         };
-        let file = build_avif(&still, dims);
+        let file = build_avif(&still, dims, self.transform);
         out.extend_from_slice(&file);
         Ok(file.len())
     }
@@ -56,7 +78,7 @@ impl AvifEncoder {
 /// Wraps the encoded AV1 temporal unit in the AVIF container, stamping `av1C`/`colr`/`ispe`/`pixi`
 /// from the AV1 configuration so the cross-box consistency requirements hold by construction
 /// (AVIF v1.2.0 §2.2, AV1-ISOBMFF v1.3.0 §2.3.4).
-fn build_avif(still: &EncodedStill, dims: Dimensions) -> Vec<u8> {
+fn build_avif(still: &EncodedStill, dims: Dimensions, transform: ImageTransform) -> Vec<u8> {
     let c = &still.config;
     let av1c = Av1cConfig {
         seq_profile: c.seq_profile,
@@ -82,6 +104,7 @@ fn build_avif(still: &EncodedStill, dims: Dimensions) -> Vec<u8> {
         num_channels: 3,
         av1c,
         nclx,
+        transform,
         item_data: &still.obus,
     };
     write_avif_still(&image)
@@ -218,5 +241,54 @@ mod tests {
             .unwrap();
         assert_eq!(out.len(), 2 + n);
         assert_eq!(&out[0..2], &[0xAA, 0xBB]);
+    }
+
+    fn encode_with(enc: AvifEncoder, w: u32, h: u32) -> Vec<u8> {
+        let mut rgb = vec![0u8; (w * h * 3) as usize];
+        for (i, b) in rgb.iter_mut().enumerate() {
+            *b = (i * 37) as u8;
+        }
+        let mut out = Vec::new();
+        enc.encode_rgb8(
+            &rgb,
+            Dimensions {
+                width: w,
+                height: h,
+            },
+            &mut out,
+        )
+        .unwrap();
+        out
+    }
+
+    #[test]
+    fn with_rotation_ccw_emits_irot_and_normalizes_mod_four() {
+        // A non-zero rotation emits an `irot` whose body byte is the angle. `irot` lives in `meta`,
+        // which precedes `mdat`, so the first occurrence is the property box (not stray OBU bytes).
+        let f = encode_with(AvifEncoder::new().with_rotation_ccw(1), 4, 4);
+        let p = f
+            .windows(4)
+            .position(|w| w == b"irot")
+            .expect("irot present");
+        assert_eq!(f[p + 4] & 0x03, 1, "irot angle = 1");
+        // 4 ≡ 0 (mod 4) clears the rotation, so no `irot` is written.
+        let f0 = encode_with(AvifEncoder::new().with_rotation_ccw(4), 4, 4);
+        assert!(
+            !f0.windows(4).any(|w| w == b"irot"),
+            "rotation 4 ≡ 0 ⇒ no irot"
+        );
+    }
+
+    #[test]
+    fn with_mirror_emits_imir_axis() {
+        for axis in [0u8, 1] {
+            let f = encode_with(AvifEncoder::new().with_mirror(axis), 4, 4);
+            let p = f
+                .windows(4)
+                .position(|w| w == b"imir")
+                .expect("imir present");
+            assert_eq!(f[p + 4] & 0x01, axis, "imir axis = {axis}");
+            assert!(!f.windows(4).any(|w| w == b"irot"), "mirror only ⇒ no irot");
+        }
     }
 }
