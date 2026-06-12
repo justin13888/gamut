@@ -278,6 +278,59 @@ pub fn encode_gray8(
     )
 }
 
+/// Encodes interleaved 8-bit RGB as **BigTIFF** (64-bit offsets) at the given compression.
+///
+/// libtiff reads classic TIFF and BigTIFF through the same API, so it is the decode side that is
+/// transparent; this wrapper exercises the gamut decoder against a libtiff-produced BigTIFF file.
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_rgb8_bigtiff(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    encode_packed_mode(
+        pixels,
+        width,
+        height,
+        3,
+        8,
+        sys::PHOTOMETRIC_RGB as u16,
+        (width as usize) * 3,
+        compression,
+        1,
+        true,
+    )
+}
+
+/// Encodes 8-bit grayscale (`MINISBLACK`) as **BigTIFF** (64-bit offsets) at the given compression.
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_gray8_bigtiff(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    encode_packed_mode(
+        pixels,
+        width,
+        height,
+        1,
+        8,
+        sys::PHOTOMETRIC_MINISBLACK as u16,
+        width as usize,
+        compression,
+        1,
+        true,
+    )
+}
+
 /// Encodes a 1-bit bilevel image (`MINISBLACK`) from one byte per pixel (0 = black, non-zero =
 /// white), packing the bits MSB-first.
 ///
@@ -381,6 +434,33 @@ fn encode_packed(
     compression: Compression,
     predictor: u16,
 ) -> Result<Vec<u8>, String> {
+    encode_packed_mode(
+        packed,
+        width,
+        height,
+        spp,
+        bps,
+        photometric,
+        stored_row_bytes,
+        compression,
+        predictor,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_packed_mode(
+    packed: &[u8],
+    width: u32,
+    height: u32,
+    spp: u16,
+    bps: u16,
+    photometric: u16,
+    stored_row_bytes: usize,
+    compression: Compression,
+    predictor: u16,
+    bigtiff: bool,
+) -> Result<Vec<u8>, String> {
     if packed.len()
         != stored_row_bytes
             .checked_mul(height as usize)
@@ -404,6 +484,7 @@ fn encode_packed(
             stored_row_bytes,
             compression.code(),
             predictor,
+            bigtiff,
         )?;
     }
     std::fs::read(&path).map_err(|e| e.to_string())
@@ -685,8 +766,10 @@ unsafe fn encode_inner(
     stored_row_bytes: usize,
     compression: u16,
     predictor: u16,
+    bigtiff: bool,
 ) -> Result<(), String> {
-    let mode = CString::new("w").map_err(|e| e.to_string())?;
+    // libtiff selects BigTIFF (64-bit offsets) from the "w8" open mode; "w" writes classic TIFF.
+    let mode = CString::new(if bigtiff { "w8" } else { "w" }).map_err(|e| e.to_string())?;
     let t = unsafe { sys::TIFFOpen(cpath.as_ptr(), mode.as_ptr()) };
     if t.is_null() {
         return Err("TIFFOpen (write) failed".into());
