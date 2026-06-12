@@ -258,6 +258,7 @@ dependencies = [
  "gamut-core",
  "gamut-dsp",
  "gamut-heic",
+ "gamut-icc",
  "gamut-ifd",
  "gamut-jxl",
  "gamut-vvc",
@@ -352,6 +353,13 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-isobmff",
+]
+
+[[package]]
+name = "gamut-icc"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
 ]
 
 [[package]]
