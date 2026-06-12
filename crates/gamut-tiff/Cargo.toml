@@ -20,3 +20,8 @@ gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-dsp.workspace = true
 gamut-bitstream.workspace = true
+
+[dev-dependencies]
+# Differential cross-check oracle: a vendored, statically-linked libtiff (built from the
+# `third_party/libtiff` submodule). Dev-only and excluded from the workspace.
+libtiff-oracle = { path = "../../tooling/libtiff-oracle" }

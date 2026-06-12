@@ -20,22 +20,37 @@ lossy → MAE/PSNR tolerance.
 
 | Phase | Spec § | Scope | Status |
 | ----- | ------ | ----- | ------ |
-| P1  | —       | Scaffold: crate, workspace wiring, docs, region-free skeleton | ✅ in progress |
-| P2  | §2      | TIFF structure: header, IFD read/write, field types, value/offset packing | ☐ |
-| P3  | §3–4,6  | **Keystone** — uncompressed grayscale + RGB via strips; `Encoder`/`Decoder` | ☐ |
-| P4  | —       | libtiff oracle + pixel-exact both-direction differential gate | ☐ |
-| P5  | §3,9    | Bilevel (1-bit) + 4-bit gray + PackBits | ☐ |
-| P6  | §5      | Palette-color (ColorMap) | ☐ |
-| P7  | §7–8    | Baseline field-reference hardening + CLI `convert → .tiff` | ☐ |
-| P8  | §10     | Modified Huffman (Compression=2) | ☐ |
-| P9  | §13     | LZW (Compression=5) | ☐ |
-| P10 | §14     | Differencing predictor (Predictor=2) | ☐ |
-| P11 | §11     | CCITT T.4 / T.6 fax (Compression=3/4) | ☐ |
-| P12 | §15     | Tiled images | ☐ |
-| P13 | §18–19  | Planar config + associated alpha + sample format (16-bit/float) | ☐ |
-| P14 | §16     | CMYK | ☐ |
-| P15 | §21     | YCbCr | ☐ |
-| P16 | §20,23  | RGB colorimetry + CIE L\*a\*b\* | ☐ |
-| P17 | §12,17  | Multi-page documents + halftone hints | ☐ |
-| P18 | §22     | JPEG-in-TIFF (Compression=7) — deferrable tail | ☐ |
-| P19 | —       | Finalization: robustness corpus, interop sweep, docs | ☐ |
+| P1  | —       | Scaffold: crate, workspace wiring, docs, region-free skeleton | ✅ done |
+| P2  | §2      | TIFF structure: header, IFD read/write, field types, value/offset packing | ✅ done |
+| P3  | §3–4,6  | **Keystone** — uncompressed grayscale + RGB via strips; `Encoder`/`Decoder` | ✅ done |
+| P4  | —       | libtiff oracle + pixel-exact both-direction differential gate | ✅ done |
+| P5  | §9      | PackBits compression (8-bit gray/RGB) | ✅ done |
+| P5b | §3      | Bilevel (1-bit) + FillOrder (4-bit gray deferred to P13) | ✅ done |
+| P6  | §5      | Palette-color (ColorMap, 8-bit indices) | ✅ done |
+| P7  | §7–8    | CLI `convert → .tiff` (uncompressed/PackBits RGB) | ✅ done |
+| P8  | §10     | Modified Huffman (Compression=2) | ✅ done |
+| P9  | §13     | LZW (Compression=5) | ✅ done |
+| P10 | §14     | Differencing predictor (Predictor=2) | ✅ done |
+| P11 | §11     | CCITT Group 4 / T.6 fax (Compression=4); G3-2D deferred | ✅ done |
+| P12 | §15     | Tiled images (8-bit; None/PackBits/LZW) | ✅ done |
+| P13 | §18     | RGBA (ExtraSamples alpha); planar / 16-bit / float deferred | ✅ done |
+| P14 | §16     | CMYK (Separated, 8-bit) | ✅ done |
+| P15 | §21     | YCbCr | ⏳ deferred |
+| P16 | §20,23  | RGB colorimetry + CIE L\*a\*b\* | ⏳ deferred |
+| P17 | §12     | Multi-page documents (halftone hints deferred) | ✅ done |
+| P18 | §22     | JPEG-in-TIFF (Compression=7) — deferrable tail | ⏳ deferred |
+| P19 | —       | Finalization: decoder robustness corpus + docs | ✅ done |
+
+## Deferred to follow-up campaigns
+
+These TIFF 6.0 extensions are not yet implemented. Each is a self-contained follow-up that plugs
+into the existing strip/tile pipeline and the libtiff oracle the same way every codec above did:
+
+- **YCbCr (§21, P15)** and **CIE L\*a\*b\* / RGB colorimetry (§20, §23, P16)** — need colour-space
+  conversions in `gamut-color` matched bit-close to libtiff's integer math (cf. the WebP
+  full-vs-limited-range trap), plus chroma subsampling for YCbCr.
+- **JPEG-in-TIFF (§22, P18)** — a full baseline JPEG DCT codec (the largest single piece); implement
+  TN2 "new-style" `Compression = 7`. Needs a `libjpeg`-enabled libtiff oracle build.
+- **Smaller deferrals:** CCITT Group 3 2-D / T.4 EOL framing (Group 3 1-D = the Modified Huffman of
+  P8); `PlanarConfiguration = 2`; 16-bit / IEEE-float samples (§19); 4-bit grayscale; halftone
+  hints (§17); document-storage metadata tags (§12 beyond `PageNumber`).

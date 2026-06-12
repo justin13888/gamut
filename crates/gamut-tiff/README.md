@@ -24,26 +24,45 @@ format** — a good long-term fit for gamut's image-first focus.
 
 ## Usage
 
-No public API yet — implementation pending (issue #107). It will follow the same shape as the
-other format crates: a `TiffEncoder` implementing [`gamut_core::Encoder`] and a `TiffDecoder`
-implementing [`gamut_core::Decoder`], reachable through the umbrella crate's `tiff` feature.
+[`TiffEncoder`] (implementing [`gamut_core::Encoder`]) writes 8-bit grayscale, RGB, palette, and
+1-bit bilevel images — uncompressed or PackBits — and [`TiffDecoder`] (implementing
+[`gamut_core::Decoder`]) reads them back, both reachable through the umbrella crate's `tiff`
+feature:
+
+```rust
+use gamut_core::Dimensions;
+use gamut_tiff::{Compression, TiffEncoder};
+
+let mut tiff = Vec::new();
+TiffEncoder::new()
+    .with_compression(Compression::PackBits)
+    .encode_rgb8(&rgb, Dimensions { width, height }, &mut tiff)
+    .expect("encode");
+```
+
+More colour modes and compression schemes are landing incrementally (see Status).
 
 ## Status
 
-Scaffolding — **under active implementation** (issue #107). See [STATUS.md](STATUS.md) for the
-phase-by-phase progress of the TIFF 6.0 campaign.
+**Implemented and conformance-checked against libtiff** (issue #107):
+
+- **Structure** — byte-order header, IFD/tag read & write, strips and tiles, multi-page documents.
+- **Colour modes** (8-bit) — grayscale, RGB, RGBA (alpha), palette, CMYK, and 1-bit bilevel.
+- **Compression** — uncompressed, PackBits, LZW (+ horizontal differencing predictor), and the
+  bilevel CCITT schemes Modified Huffman (Group 3 1-D) and Group 4 (T.6).
+- The decoder is hardened against hostile input (`#![forbid(unsafe_code)]`, a size cap, and a
+  byte-flip fuzz corpus).
+
+**Not yet implemented** (see [STATUS.md](STATUS.md)): YCbCr (§21), CIE L\*a\*b\* / RGB colorimetry
+(§20, §23), JPEG-in-TIFF (§22), and smaller items (CCITT Group 3 2-D, planar config, 16-bit/float
+samples, halftone hints).
 
 ## Roadmap
 
-Full TIFF 6.0 (§1–23), delivered as a stack of small PRs:
-
-- **Baseline** — TIFF structure / IFD model, uncompressed grayscale & RGB (the keystone), bilevel
-  & PackBits, palette colour, baseline field reference + CLI.
-- **Compression extensions** — Modified Huffman, LZW + differencing predictor, CCITT T.4 / T.6
-  fax.
-- **Layout & colour extensions** — tiled images, planar config, associated alpha, 16-bit/float
-  samples, CMYK, YCbCr, RGB colorimetry, CIE L\*a\*b\*, multi-page documents.
-- **JPEG-in-TIFF** (§22) and finalization (robustness corpus, interop sweep) last.
+The remaining TIFF 6.0 features each land as a follow-up PR that plugs into the same strip/tile
+pipeline and libtiff oracle: the colour spaces (YCbCr, L\*a\*b\*) need `gamut-color` conversions
+matched to libtiff's integer math; JPEG-in-TIFF needs a baseline DCT codec and a `libjpeg`-enabled
+oracle build.
 
 Correctness is pinned with a differential oracle against **libtiff**: gamut-encode → libtiff-decode
 and libtiff-encode → gamut-decode must agree pixel-for-pixel on every lossless path.
