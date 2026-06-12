@@ -93,7 +93,9 @@ fn init_table() -> Vec<Vec<u8>> {
 /// output is shorter than `expected`.
 pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
     let mut reader = BitReader { data, pos: 0 };
-    let mut out = Vec::with_capacity(expected);
+    // Cap the pre-allocation so a malformed `expected` can't reserve a huge buffer up front; the
+    // buffer still grows as the (input-bounded) decode produces bytes.
+    let mut out = Vec::with_capacity(expected.min(1 << 16));
     let mut table = init_table();
     let mut width = 9u32;
     let mut prev: Option<u32> = None;

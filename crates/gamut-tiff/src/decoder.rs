@@ -16,6 +16,10 @@ pub struct TiffDecoder {
     _private: (),
 }
 
+/// Upper bound on a decoded image's stored bytes, guarding against malformed huge dimensions and
+/// decompression bombs (64 MiB — e.g. a 4096×4096 RGBA image).
+const MAX_IMAGE_BYTES: usize = 64 << 20;
+
 /// An image decoded to interleaved 8-bit samples in `BlackIsZero`/RGB convention.
 struct DecodedImage {
     dims: Dimensions,
@@ -282,6 +286,9 @@ fn decode_image(data: &[u8], page: usize) -> Result<DecodedImage> {
     let stored_total = stored_row_bytes
         .checked_mul(height)
         .ok_or(Error::InvalidInput("TIFF: image too large"))?;
+    if stored_total > MAX_IMAGE_BYTES {
+        return Err(Error::Unsupported("TIFF: image exceeds the size limit"));
+    }
 
     // Reassemble the stored (packed) row bytes from tiles or strips.
     let layout = Layout {
@@ -441,8 +448,15 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
     if offsets.len() != across * down || counts.len() != across * down {
         return Err(Error::InvalidInput("TIFF: tile count mismatch"));
     }
-    let tile_row_bytes = tw * l.spp;
-    let tile_size = th * tile_row_bytes;
+    let tile_row_bytes = tw
+        .checked_mul(l.spp)
+        .ok_or(Error::InvalidInput("TIFF: tile too large"))?;
+    let tile_size = th
+        .checked_mul(tile_row_bytes)
+        .ok_or(Error::InvalidInput("TIFF: tile too large"))?;
+    if tile_size > MAX_IMAGE_BYTES {
+        return Err(Error::Unsupported("TIFF: tile exceeds the size limit"));
+    }
     let mut packed = vec![0u8; l.stored_row_bytes * l.height];
     for ty in 0..down {
         for tx in 0..across {
