@@ -1,23 +1,25 @@
-//! The single-tile, all-intra encoder: superblock/partition iteration (§5.11.2/.4), intra
-//! prediction (§7.11.2), the forward transform (via `gamut-dsp`), and coefficient coding with
-//! full context derivation (§5.11.39, §8.3.2).
+//! The all-intra tile encoder: superblock/partition iteration (§5.11.2/.4), intra prediction
+//! (§7.11.2), the forward transform (via `gamut-dsp`), and coefficient coding with full context
+//! derivation (§5.11.39, §8.3.2). One or more uniform tiles (§5.11.1) are coded with this path.
 //!
 //! Two paths share this code, selected by `qindex` (`base_q_idx`):
 //! - **Lossless** (`qindex == 0`): forced `TX_4X4` Walsh–Hadamard; prediction neighbours are the
 //!   source samples (which equal the reconstruction under lossless); partitions are
 //!   `PARTITION_NONE` except at the right/bottom frame edges.
-//! - **Lossy** (`qindex > 0`): `TX_4X4` with quantization. Blocks are forced all-4×4
-//!   (`PARTITION_SPLIT` everywhere) so each uses a 4×4 transform under `TX_MODE_LARGEST` with no
-//!   tx-depth signaling. The luma prediction mode is chosen per block from all 13 intra modes
-//!   (`DC`, the eight directional `V`/`H`/`D45`/`D135`/`D113`/`D157`/`D203`/`D67`, and
-//!   `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, §7.11.2) plus recursive **filter-intra** (§7.11.2.3,
-//!   signaled as `DC_PRED` + `use_filter_intra`); it is signaled with the above/left mode context.
-//!   The luma transform type is chosen from `TX_SET_INTRA_2`
-//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled; chroma is `DC_PRED` or
+//! - **Lossy** (`qindex > 0`): recursive `PARTITION_NONE`/`HORZ`/`VERT`/`SPLIT` down to 4×4, with
+//!   per-superblock `delta_q`/`delta_lf` and optional segmentation (`SEG_LVL_ALT_Q`). Each luma
+//!   block codes a transform under `TX_MODE_SELECT` (square `tx_depth` 0..2; sizes `TX_4X4`..
+//!   `TX_64X64`, with `TX_32X32`/`TX_64X64` DCT-only). The luma prediction mode is chosen per block
+//!   from all 13 intra modes (`DC`, the eight directional `V`/`H`/`D45`/`D135`/`D113`/`D157`/`D203`/
+//!   `D67` with `angle_delta`, and `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, §7.11.2), plus recursive
+//!   **filter-intra** (§7.11.2.3, signaled as `DC_PRED` + `use_filter_intra`) and **palette**
+//!   (§7.11.4); the luma transform type is chosen from `TX_SET_INTRA_2`
+//!   (`{IDTX, DCT_DCT, ADST_ADST, ADST_DCT, DCT_ADST}`) and signaled. Chroma is `DC_PRED` or
 //!   **chroma-from-luma** (`UV_CFL_PRED`, §7.11.5, when it beats DC) + `DCT_DCT`. Prediction reads a
-//!   **reconstruction buffer** that the encoder maintains exactly as
-//!   the decoder would (predict → transform → quantize → dequantize → inverse-transform → add →
-//!   store), so the encoder's reconstruction is bit-exact with a conformant decoder's output.
+//!   **reconstruction buffer** that the encoder maintains exactly as the decoder would (predict →
+//!   transform → quantize → dequantize → inverse-transform → add → store), so the encoder's
+//!   reconstruction is bit-exact with a conformant decoder's output; the in-loop filters
+//!   (deblocking, CDEF, loop restoration, superres) are applied afterward in `filter`.
 //!
 //! The frame is coded on the MI-unit grid (`mi_cols*4 × mi_rows*4`, dimensions rounded up to a
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
