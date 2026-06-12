@@ -29,6 +29,8 @@ enum Mode {
     Gray { white_is_zero: bool },
     /// Interleaved RGB.
     Rgb,
+    /// Interleaved RGBA (RGB + one extra alpha sample).
+    Rgba,
     /// Palette colour: 8-bit indices into a 3×256 16-bit `ColorMap`.
     Palette(Vec<u32>),
 }
@@ -56,9 +58,44 @@ impl TiffDecoder {
                 }
             }
             3 => out.extend_from_slice(&img.pixels),
+            4 => {
+                for px in img.pixels.chunks_exact(4) {
+                    out.extend_from_slice(&px[0..3]); // drop alpha
+                }
+            }
             _ => {
                 return Err(Error::Unsupported(
                     "TIFF: cannot present this sample layout as RGB",
+                ));
+            }
+        }
+        Ok(img.dims)
+    }
+
+    /// Decodes the first image to interleaved 8-bit RGBA (RGB gains opaque alpha, grayscale is
+    /// replicated then made opaque).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] for a
+    /// feature not yet implemented.
+    pub fn decode_to_rgba8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
+        let img = decode_image(data)?;
+        match img.samples_per_pixel {
+            1 => {
+                for &v in &img.pixels {
+                    out.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            3 => {
+                for px in img.pixels.chunks_exact(3) {
+                    out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                }
+            }
+            4 => out.extend_from_slice(&img.pixels),
+            _ => {
+                return Err(Error::Unsupported(
+                    "TIFF: cannot present this sample layout as RGBA",
                 ));
             }
         }
@@ -166,6 +203,7 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
             white_is_zero: false,
         },
         (3, 8, PhotometricInterpretation::Rgb) => Mode::Rgb,
+        (4, 8, PhotometricInterpretation::Rgb) => Mode::Rgba,
         (1, 8, PhotometricInterpretation::Palette) => {
             let cm = ifd
                 .get_u32_vec(tags::COLOR_MAP)
@@ -224,6 +262,7 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
     // Unpack the stored bytes into 8-bit output samples per the photometric mode.
     let (out_spp, pixels) = match mode {
         Mode::Rgb => (3, packed),
+        Mode::Rgba => (4, packed),
         Mode::Gray { white_is_zero } if bps == 8 => {
             let mut px = packed;
             if white_is_zero {

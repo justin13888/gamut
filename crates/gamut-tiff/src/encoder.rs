@@ -106,6 +106,47 @@ impl TiffEncoder {
         self.encode_8bit(pixels, dims, 3, PhotometricInterpretation::Rgb, out)
     }
 
+    /// Encodes an 8-bit RGBA image: four interleaved samples per pixel (`RGBARGBA…`).
+    ///
+    /// The fourth sample is stored as *unassociated* alpha (`ExtraSamples = 2`, not premultiplied).
+    /// `pixels` is `width * height * 4` bytes, row-major. Returns the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `pixels` does not match `dims` or `dims` is empty.
+    pub fn encode_rgba8(
+        &self,
+        pixels: &[u8],
+        dims: Dimensions,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        let (w, h) = (dims.width as usize, dims.height as usize);
+        if w == 0 || h == 0 {
+            return Err(Error::InvalidInput("TIFF: zero-sized image"));
+        }
+        let expected = w
+            .checked_mul(h)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or(Error::InvalidInput("TIFF: image too large"))?;
+        if pixels.len() != expected {
+            return Err(Error::InvalidInput(
+                "TIFF: pixel buffer length does not match dimensions",
+            ));
+        }
+        self.encode_packed(
+            pixels,
+            dims,
+            &SampleLayout {
+                spp: 4,
+                bits_per_sample: 8,
+                stored_row_bytes: w * 4,
+                photometric: PhotometricInterpretation::Rgb,
+            },
+            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))], // unassociated alpha
+            out,
+        )
+    }
+
     /// Encodes a 1-bit bilevel image, stored as `BlackIsZero` (one bit per pixel, MSB-first).
     ///
     /// `pixels` is `width * height` bytes, one per pixel: zero is black, any non-zero value is

@@ -161,6 +161,75 @@ pub fn encode_rgb8(
     )
 }
 
+/// Encodes interleaved 8-bit RGBA with libtiff (`ExtraSamples = unassociated alpha`).
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_rgba8(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    if pixels.len() != (width as usize) * (height as usize) * 4 {
+        return Err("pixel buffer does not match dimensions".into());
+    }
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("oracle.tiff");
+    let cpath = c_path(&path)?;
+    // SAFETY: `cpath` is valid; the handle is closed before we read the file back.
+    unsafe {
+        let mode = CString::new("w").map_err(|e| e.to_string())?;
+        let t = sys::TIFFOpen(cpath.as_ptr(), mode.as_ptr());
+        if t.is_null() {
+            return Err("TIFFOpen (write) failed".into());
+        }
+        let result = write_rgba(t, pixels, width, height, compression.code());
+        sys::TIFFClose(t);
+        result?;
+    }
+    std::fs::read(&path).map_err(|e| e.to_string())
+}
+
+unsafe fn write_rgba(
+    t: *mut sys::TIFF,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    compression: u16,
+) -> Result<(), String> {
+    let extra: [u16; 1] = [sys::EXTRASAMPLE_UNASSALPHA as u16];
+    unsafe {
+        sys::TIFFSetField(t, sys::TIFFTAG_IMAGEWIDTH, width);
+        sys::TIFFSetField(t, sys::TIFFTAG_IMAGELENGTH, height);
+        sys::TIFFSetField(t, sys::TIFFTAG_BITSPERSAMPLE, 8 as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_SAMPLESPERPIXEL, 4 as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_PHOTOMETRIC, sys::PHOTOMETRIC_RGB as c_int);
+        sys::TIFFSetField(
+            t,
+            sys::TIFFTAG_PLANARCONFIG,
+            sys::PLANARCONFIG_CONTIG as c_int,
+        );
+        sys::TIFFSetField(t, sys::TIFFTAG_COMPRESSION, compression as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_EXTRASAMPLES, 1 as c_int, extra.as_ptr());
+        let rps = sys::TIFFDefaultStripSize(t, 0);
+        sys::TIFFSetField(t, sys::TIFFTAG_ROWSPERSTRIP, rps);
+    }
+    let row_bytes = (width as usize) * 4;
+    let mut scratch = vec![0u8; row_bytes];
+    for row in 0..height as usize {
+        scratch.copy_from_slice(&pixels[row * row_bytes..(row + 1) * row_bytes]);
+        let rc = unsafe {
+            sys::TIFFWriteScanline(t, scratch.as_mut_ptr() as *mut c_void, row as u32, 0)
+        };
+        if rc != 1 {
+            return Err(format!("TIFFWriteScanline failed at row {row}"));
+        }
+    }
+    Ok(())
+}
+
 /// Encodes 8-bit grayscale (`MINISBLACK`) with libtiff at the given compression.
 ///
 /// # Errors

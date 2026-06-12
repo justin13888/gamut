@@ -33,7 +33,7 @@ lossy → MAE/PSNR tolerance.
 | P10 | §14     | Differencing predictor (Predictor=2) | ✅ done |
 | P11 | §11     | CCITT Group 4 / T.6 fax (Compression=4); G3-2D deferred | ✅ done |
 | P12 | §15     | Tiled images (8-bit; None/PackBits/LZW) | ✅ done |
-| P13 | §18–19  | Planar config + associated alpha + sample format (16-bit/float) | ☐ |
+| P13 | §18     | RGBA (ExtraSamples alpha); planar / 16-bit / float deferred | ✅ done |
 | P14 | §16     | CMYK | ☐ |
 | P15 | §21     | YCbCr | ☐ |
 | P16 | §20,23  | RGB colorimetry + CIE L\*a\*b\* | ☐ |

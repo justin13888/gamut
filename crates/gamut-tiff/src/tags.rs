@@ -34,6 +34,8 @@ pub const PLANAR_CONFIGURATION: u16 = 284;
 pub const RESOLUTION_UNIT: u16 = 296;
 /// `Predictor` (317) — the prediction scheme applied before compression.
 pub const PREDICTOR: u16 = 317;
+/// `ExtraSamples` (338) — the meaning of each extra component (e.g. alpha) beyond the photometric.
+pub const EXTRA_SAMPLES: u16 = 338;
 /// `ColorMap` (320) — the palette for palette-colour images.
 pub const COLOR_MAP: u16 = 320;
 /// `TileWidth` (322) — the width of each tile in pixels (a multiple of 16).
