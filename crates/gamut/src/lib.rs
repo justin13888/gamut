@@ -14,9 +14,17 @@
 //! The `primitives` feature additionally re-exports the shared building blocks the codecs are
 //! made of — `color` (pixel formats / CICP), `dsp` (transforms), and `bitstream` (bit writer
 //! + AV1 symbol coder) — for tooling and sandbox use such as the `gamut` CLI.
+//!
+//! The `metadata` feature re-exports the shared image-metadata primitives (issue #34) — the
+//! TIFF/IFD container core (`ifd`) plus, as they land, the per-format crates (`exif`/`xmp`/`icc`/
+//! `iptc`) and the `metadata` facade that unifies them — for tooling and for the container crates
+//! to consume.
 #![forbid(unsafe_code)]
 
 pub use gamut_core as core;
+
+#[cfg(feature = "metadata")]
+pub use gamut_ifd as ifd;
 
 #[cfg(feature = "primitives")]
 pub use gamut_bitstream as bitstream;
