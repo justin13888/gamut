@@ -23,18 +23,39 @@ machinery. It is:
   through every access rather than fixed at compile time.
 - **Dependency-light.** Builds only on [`gamut-core`](../gamut-core).
 
-The public types deliberately mirror `gamut-tiff`'s current structural types so the codec can later
-adopt this crate as a near-zero-diff refactor (a tracked, out-of-scope follow-up).
+The public types deliberately mirror `gamut-tiff`'s structural types: the codec was migrated onto
+this crate as a near-zero-diff refactor (issue #107), and now consumes it instead of an inlined copy.
 
 ## Usage
 
-No public API yet — implementation pending (issue #34). The type declarations sketch the data model
-(`ByteOrder`, `FieldType`, `Value`, `Field`, `Ifd`, `TiffHeader`) the implementation phases flesh
-out, plus the `IfdReader` / `IfdWriter` entry points.
+`read` / `read_header` parse a stream into a [`TiffFile`] (`ByteOrder` + `Variant` + a `Vec<Ifd>`);
+`write` serialises one back, handling the two-pass offset layout. Each `Ifd` is a tag-sorted set of
+`Field`s, each holding a typed [`Value`]; `FieldType` carries the on-disk type codes.
+
+```rust
+use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, write};
+
+let mut ifd = Ifd::new();
+ifd.set(256, Value::Short(vec![640])); // ImageWidth
+ifd.set(257, Value::Short(vec![480])); // ImageLength
+let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
+let bytes = write(&file);
+assert_eq!(read(&bytes).unwrap(), file);
+```
+
+Tag *numbers* are passed literally — tag *semantics* live in the consuming codec (e.g. `gamut-tiff`'s
+`tags` module), not in this structural core.
+
+### BigTIFF
+
+The `bigtiff` cargo feature adds BigTIFF (`references/tiff/bigtiff.html`): the `Variant::Big`
+container with 64-bit offsets/counts and the `Long8` / `SLong8` / `Ifd8` field types. It is additive
+and off by default — classic-only consumers (EXIF) stay lean; `gamut-tiff` enables it.
 
 ## Status
 
-Scaffolding — **under active implementation** (issue #34). See [STATUS.md](STATUS.md).
+Structural core implemented (issue #107). The EXIF-specific layers (sub-IFD traversal, fuzz corpus)
+remain under issue #34. See [STATUS.md](STATUS.md).
 
 ## License
 
