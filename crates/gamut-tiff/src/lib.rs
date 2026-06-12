@@ -14,9 +14,9 @@
 //!
 //! Implementation in progress (see issue #107). The container layer ([`ifd`], [`reader`],
 //! [`writer`], [`tags`]) and the baseline pixel path are in place: [`TiffEncoder`] writes 8-bit
-//! grayscale/RGB, 1-bit bilevel, and 8-bit palette strips — uncompressed, PackBits, LZW, or (for
-//! bilevel) Modified Huffman / Group 4 fax ([`compression`]) — and [`TiffDecoder`] reads them back
-//! (both implement the
+//! grayscale/RGB/RGBA/CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles) —
+//! uncompressed, PackBits, LZW, or (for bilevel) Modified Huffman / Group 4 fax ([`compression`]) —
+//! and [`TiffDecoder`] reads them back (both implement the
 //! [`gamut_core::Encoder`]/[`gamut_core::Decoder`] traits). The remaining compression schemes and
 //! colour modes land in subsequent phases.
 #![forbid(unsafe_code)]

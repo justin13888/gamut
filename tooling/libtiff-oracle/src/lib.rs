@@ -230,6 +230,30 @@ unsafe fn write_rgba(
     Ok(())
 }
 
+/// Encodes interleaved 8-bit CMYK with libtiff (`PhotometricInterpretation = Separated`).
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_cmyk8(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    encode_packed(
+        pixels,
+        width,
+        height,
+        4,
+        8,
+        sys::PHOTOMETRIC_SEPARATED as u16,
+        (width as usize) * 4,
+        compression,
+        1,
+    )
+}
+
 /// Encodes 8-bit grayscale (`MINISBLACK`) with libtiff at the given compression.
 ///
 /// # Errors

@@ -147,6 +147,24 @@ impl TiffEncoder {
         )
     }
 
+    /// Encodes an 8-bit CMYK image: four interleaved ink samples per pixel (`CMYKCMYK…`).
+    ///
+    /// `PhotometricInterpretation = Separated` (5); each sample is ink dot coverage where 0 is 0 %
+    /// and 255 is 100 % (TIFF 6.0 §16). `pixels` is `width * height * 4` bytes, row-major. Returns
+    /// the number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `pixels` does not match `dims` or `dims` is empty.
+    pub fn encode_cmyk8(
+        &self,
+        pixels: &[u8],
+        dims: Dimensions,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        self.encode_8bit(pixels, dims, 4, PhotometricInterpretation::Cmyk, out)
+    }
+
     /// Encodes a 1-bit bilevel image, stored as `BlackIsZero` (one bit per pixel, MSB-first).
     ///
     /// `pixels` is `width * height` bytes, one per pixel: zero is black, any non-zero value is

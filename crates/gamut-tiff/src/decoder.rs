@@ -31,6 +31,8 @@ enum Mode {
     Rgb,
     /// Interleaved RGBA (RGB + one extra alpha sample).
     Rgba,
+    /// Interleaved CMYK (4 separated ink samples).
+    Cmyk,
     /// Palette colour: 8-bit indices into a 3×256 16-bit `ColorMap`.
     Palette(Vec<u32>),
 }
@@ -99,6 +101,21 @@ impl TiffDecoder {
                 ));
             }
         }
+        Ok(img.dims)
+    }
+
+    /// Decodes the first image to interleaved 8-bit CMYK; errors unless it is a 4-sample image.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] if the image
+    /// is not 4-sample (CMYK).
+    pub fn decode_to_cmyk8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
+        let img = decode_image(data)?;
+        if img.samples_per_pixel != 4 {
+            return Err(Error::Unsupported("TIFF: image is not 4-sample CMYK"));
+        }
+        out.extend_from_slice(&img.pixels);
         Ok(img.dims)
     }
 
@@ -204,6 +221,7 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         },
         (3, 8, PhotometricInterpretation::Rgb) => Mode::Rgb,
         (4, 8, PhotometricInterpretation::Rgb) => Mode::Rgba,
+        (4, 8, PhotometricInterpretation::Cmyk) => Mode::Cmyk,
         (1, 8, PhotometricInterpretation::Palette) => {
             let cm = ifd
                 .get_u32_vec(tags::COLOR_MAP)
@@ -262,7 +280,7 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
     // Unpack the stored bytes into 8-bit output samples per the photometric mode.
     let (out_spp, pixels) = match mode {
         Mode::Rgb => (3, packed),
-        Mode::Rgba => (4, packed),
+        Mode::Rgba | Mode::Cmyk => (4, packed),
         Mode::Gray { white_is_zero } if bps == 8 => {
             let mut px = packed;
             if white_is_zero {
