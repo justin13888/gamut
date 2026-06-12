@@ -30,6 +30,7 @@ gamut-av2 = { workspace = true, optional = true }
 # Optional image-metadata primitives (issue #34), re-exported behind the `metadata` feature.
 gamut-ifd = { workspace = true, optional = true }
 gamut-icc = { workspace = true, optional = true }
+gamut-xmp = { workspace = true, optional = true }
 
 # Optional shared primitives, re-exported behind the `primitives` feature for
 # tooling/sandbox use (e.g. gamut-cli); not needed for plain format encoding.
@@ -50,5 +51,5 @@ av2 = ["dep:gamut-av2"]
 primitives = ["dep:gamut-color", "dep:gamut-dsp", "dep:gamut-bitstream"]
 # Image metadata primitives (issue #34): the shared TIFF/IFD core plus the per-format crates
 # (EXIF/XMP/ICC/IPTC) and the `gamut-metadata` facade. Crates are appended as each one lands.
-metadata = ["dep:gamut-ifd", "dep:gamut-icc"]
+metadata = ["dep:gamut-ifd", "dep:gamut-icc", "dep:gamut-xmp"]
 all = ["avif", "jxl", "webp", "heic", "vvc", "av1", "av2", "primitives", "metadata"]

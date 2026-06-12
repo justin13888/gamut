@@ -263,6 +263,7 @@ dependencies = [
  "gamut-jxl",
  "gamut-vvc",
  "gamut-webp",
+ "gamut-xmp",
 ]
 
 [[package]]
@@ -423,6 +424,13 @@ dependencies = [
  "gamut-dsp",
  "gamut-riff",
  "libwebp-sys2 0.2.0",
+]
+
+[[package]]
+name = "gamut-xmp"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
 ]
 
 [[package]]

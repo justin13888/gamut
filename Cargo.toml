@@ -60,6 +60,7 @@ gamut-vvc = { path = "crates/gamut-vvc", version = "0.1.0" }
 # Image metadata primitives (issue #34): the shared TIFF/IFD core plus per-format crates.
 gamut-ifd = { path = "crates/gamut-ifd", version = "0.1.0" }
 gamut-icc = { path = "crates/gamut-icc", version = "0.1.0" }
+gamut-xmp = { path = "crates/gamut-xmp", version = "0.1.0" }
 gamut = { path = "crates/gamut", version = "0.2.0" }
 
 [profile.release]

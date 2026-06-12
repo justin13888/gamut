@@ -27,6 +27,8 @@ pub use gamut_core as core;
 pub use gamut_icc as icc;
 #[cfg(feature = "metadata")]
 pub use gamut_ifd as ifd;
+#[cfg(feature = "metadata")]
+pub use gamut_xmp as xmp;
 
 #[cfg(feature = "primitives")]
 pub use gamut_bitstream as bitstream;
