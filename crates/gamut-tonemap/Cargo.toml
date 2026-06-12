@@ -1,0 +1,19 @@
+[package]
+name = "gamut-tonemap"
+description = "Tone-mapping math primitives: built-in tone curves plus an extensible trait for custom operators."
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
