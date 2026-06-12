@@ -1,6 +1,19 @@
 //! Planar 8-bit image buffers and the identity (`mc = 0`) RGB ↔ plane mapping.
 
-use gamut_core::{Error, Result};
+use gamut_core::{Error, ImageRef, Result, Rgb8};
+
+/// Maps an interleaved RGB buffer (`n` pixels) to identity GBR planes (`Y=G, U=B, V=R`).
+fn rgb_to_gbr_planes(rgb: &[u8], n: usize) -> [Vec<u8>; 3] {
+    let mut g = vec![0u8; n];
+    let mut b = vec![0u8; n];
+    let mut r = vec![0u8; n];
+    for i in 0..n {
+        r[i] = rgb[i * 3];
+        g[i] = rgb[i * 3 + 1];
+        b[i] = rgb[i * 3 + 2];
+    }
+    [g, b, r]
+}
 
 /// Three full-resolution (4:4:4) 8-bit planes, each `width * height` samples, row-major.
 ///
@@ -28,19 +41,25 @@ impl Planar8 {
                 "rgb buffer length != width * height * 3",
             ));
         }
-        let mut g = vec![0u8; n];
-        let mut b = vec![0u8; n];
-        let mut r = vec![0u8; n];
-        for i in 0..n {
-            r[i] = rgb[i * 3];
-            g[i] = rgb[i * 3 + 1];
-            b[i] = rgb[i * 3 + 2];
-        }
         Ok(Self {
             width,
             height,
-            planes: [g, b, r],
+            planes: rgb_to_gbr_planes(rgb, n),
         })
+    }
+
+    /// Like [`Planar8::from_rgb8_identity`] but takes a pre-validated [`ImageRef`], so it is
+    /// infallible — the view already guarantees `rgb.len() == width * height * 3`. This is the
+    /// boundary an encoder uses to turn a typed RGB image into AV1 identity planes.
+    #[must_use]
+    pub fn from_rgb8_identity_view(img: ImageRef<'_, Rgb8>) -> Self {
+        let (width, height) = (img.width(), img.height());
+        let n = width as usize * height as usize;
+        Self {
+            width,
+            height,
+            planes: rgb_to_gbr_planes(img.as_samples(), n),
+        }
     }
 
     /// Builds a `Planar8` directly from three `width * height` planes (`Y/U/V`, already in the
@@ -119,5 +138,17 @@ mod tests {
     #[test]
     fn wrong_length_errors() {
         assert!(Planar8::from_rgb8_identity(&[0, 1, 2, 3], 1, 1).is_err());
+    }
+
+    #[test]
+    fn view_ctor_matches_slice_ctor() {
+        let rgb: Vec<u8> = (0..=200u8).cycle().take(3 * 2 * 3).collect(); // 3x2 image
+        let from_slice = Planar8::from_rgb8_identity(&rgb, 3, 2).unwrap();
+        let view = ImageRef::<Rgb8>::new(&rgb, gamut_core::Dimensions::new(3, 2).unwrap()).unwrap();
+        let from_view = Planar8::from_rgb8_identity_view(view);
+        assert_eq!((from_view.width(), from_view.height()), (3, 2));
+        for i in 0..3 {
+            assert_eq!(from_view.plane(i), from_slice.plane(i));
+        }
     }
 }

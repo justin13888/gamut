@@ -41,6 +41,18 @@ impl BitDepth {
     pub fn bits(self) -> u8 {
         self as u8
     }
+
+    /// The [`BitDepth`] for `bits` (8, 10, or 12), or `None` for any other value. The inverse of
+    /// [`BitDepth::bits`], for turning a codec's raw integer bit depth back into the typed form.
+    #[must_use]
+    pub fn from_bits(bits: u32) -> Option<Self> {
+        match bits {
+            8 => Some(BitDepth::Eight),
+            10 => Some(BitDepth::Ten),
+            12 => Some(BitDepth::Twelve),
+            _ => None,
+        }
+    }
 }
 
 /// Chroma subsampling of the coded planes (AV1 `subsampling_x` / `subsampling_y`, §5.5.2).
@@ -83,6 +95,12 @@ mod tests {
         assert_eq!(BitDepth::Eight.bits(), 8);
         assert_eq!(BitDepth::Ten.bits(), 10);
         assert_eq!(BitDepth::Twelve.bits(), 12);
+        // from_bits is the inverse of bits() for the three valid depths; other values are None.
+        for d in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+            assert_eq!(BitDepth::from_bits(u32::from(d.bits())), Some(d));
+        }
+        assert_eq!(BitDepth::from_bits(16), None);
+        assert_eq!(BitDepth::from_bits(0), None);
     }
 
     #[test]
