@@ -1,0 +1,25 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under
+# `[workspace].exclude` in the root manifest, pulled in only as a path
+# `dev-dependency`). It statically links libtiff (built from the
+# `third_party/libtiff` submodule with all optional codecs disabled, so the
+# only schemes available are libtiff's built-in ones: none, PackBits, LZW, and
+# CCITT). Used by gamut-tiff's differential cross-checks.
+[package]
+name = "libtiff-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: encodes/decodes TIFF files with a vendored, statically-linked libtiff for gamut's conformance cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares this crate as the sole provider of the native `tiff` library.
+links = "tiff"
+
+[lib]
+doctest = false
+
+[dependencies]
+tempfile = "3"
+
+[build-dependencies]
+bindgen = "0.71"

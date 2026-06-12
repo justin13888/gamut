@@ -1,0 +1,27 @@
+[package]
+name = "gamut-tiff"
+description = "TIFF 6.0 (Tagged Image File Format) image encoder and decoder."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+gamut-color.workspace = true
+gamut-dsp.workspace = true
+gamut-bitstream.workspace = true
+
+[dev-dependencies]
+# Differential cross-check oracle: a vendored, statically-linked libtiff (built from the
+# `third_party/libtiff` submodule). Dev-only and excluded from the workspace.
+libtiff-oracle = { path = "../../tooling/libtiff-oracle" }
