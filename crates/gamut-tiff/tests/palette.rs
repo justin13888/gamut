@@ -1,7 +1,7 @@
 //! Palette-colour images: tier-1 round-trips and libtiff cross-checks (P6).
 
-use gamut_core::Dimensions;
-use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
+use gamut_core::{DecodeImage, Dimensions, ImageBuf, ImageRef, Indexed8, Rgb8};
+use gamut_tiff::{Compression, Palette8, TiffDecoder, TiffEncoder};
 
 const SIZES: &[(u32, u32)] = &[(1, 1), (5, 4), (17, 13), (64, 40)];
 
@@ -45,21 +45,25 @@ fn palette_roundtrips_in_gamut() {
             TiffEncoder::new()
                 .with_compression(comp)
                 .encode_palette8(
-                    &idx,
-                    &pal,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
+                    ImageRef::<Indexed8>::new(
+                        &idx,
+                        Dimensions {
+                            width: w,
+                            height: h,
+                        },
+                    )
+                    .unwrap(),
+                    &Palette8::from_rgb_triples(&pal).unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
-            let mut rgb = Vec::new();
-            let dims = TiffDecoder::new()
-                .decode_to_rgb8(&tiff, &mut rgb)
-                .expect("decode");
-            assert_eq!((dims.width, dims.height), (w, h));
-            assert_eq!(rgb, expected_rgb(&idx, &pal), "{comp:?} {w}x{h}");
+            let rgb: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+            assert_eq!((rgb.dimensions().width, rgb.dimensions().height), (w, h));
+            assert_eq!(
+                rgb.as_samples(),
+                expected_rgb(&idx, &pal).as_slice(),
+                "{comp:?} {w}x{h}"
+            );
         }
     }
 }
@@ -72,12 +76,15 @@ fn gamut_palette_is_resolved_by_libtiff() {
         let mut tiff = Vec::new();
         TiffEncoder::new()
             .encode_palette8(
-                &idx,
-                &pal,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
+                ImageRef::<Indexed8>::new(
+                    &idx,
+                    Dimensions {
+                        width: w,
+                        height: h,
+                    },
+                )
+                .unwrap(),
+                &Palette8::from_rgb_triples(&pal).unwrap(),
                 &mut tiff,
             )
             .expect("encode");

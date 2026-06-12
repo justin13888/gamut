@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use gamut::avif::AvifEncoder;
+use gamut::core::{EncodeImage, ImageRef, Rgb8};
 use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
 use gamut::webp::WebpEncoder;
 
@@ -95,9 +96,10 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
             } else {
                 TiffCompression::None
             };
+            let image = ImageRef::<Rgb8>::new(&rgb, dims)?;
             TiffEncoder::new()
                 .with_compression(compression)
-                .encode_rgb8(&rgb, dims, &mut out)?;
+                .encode_image(image, &mut out)?;
             (rgb.len(), dims)
         }
     };

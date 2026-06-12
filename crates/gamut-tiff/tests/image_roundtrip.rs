@@ -1,6 +1,6 @@
 //! End-to-end pixel round-trips for the uncompressed baseline path (P3, the keystone).
 
-use gamut_core::Dimensions;
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
 use gamut_tiff::{
     ByteOrder, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags, writer::write_image,
 };
@@ -45,16 +45,17 @@ fn rgb_roundtrips_all_sizes_both_orders() {
             let mut tiff = Vec::new();
             let n = TiffEncoder::new()
                 .with_byte_order(order)
-                .encode_rgb8(&src, dims, &mut tiff)
+                .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut tiff)
                 .expect("encode");
             assert_eq!(n, tiff.len());
 
-            let mut out = Vec::new();
-            let got = TiffDecoder::new()
-                .decode_to_rgb8(&tiff, &mut out)
-                .expect("decode");
-            assert_eq!((got.width, got.height), (w, h), "dims {w}x{h} {order:?}");
-            assert_eq!(out, src, "pixels {w}x{h} {order:?}");
+            let got: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+            assert_eq!(
+                (got.dimensions().width, got.dimensions().height),
+                (w, h),
+                "dims {w}x{h} {order:?}"
+            );
+            assert_eq!(got.as_samples(), src.as_slice(), "pixels {w}x{h} {order:?}");
         }
     }
 }
@@ -69,20 +70,15 @@ fn gray_roundtrips_and_replicates_to_rgb() {
         let src = gray_pattern(w, h);
         let mut tiff = Vec::new();
         TiffEncoder::new()
-            .encode_gray8(&src, dims, &mut tiff)
+            .encode_image(ImageRef::<Gray8>::new(&src, dims).unwrap(), &mut tiff)
             .expect("encode");
 
-        let mut g = Vec::new();
-        let got = TiffDecoder::new()
-            .decode_to_gray8(&tiff, &mut g)
-            .expect("gray");
-        assert_eq!((got.width, got.height), (w, h));
-        assert_eq!(g, src);
+        let got: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&tiff).expect("gray");
+        assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+        assert_eq!(got.as_samples(), src.as_slice());
 
-        let mut rgb = Vec::new();
-        TiffDecoder::new()
-            .decode_to_rgb8(&tiff, &mut rgb)
-            .expect("rgb");
+        let rgb: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("rgb");
+        let rgb = rgb.as_samples();
         for (i, &v) in src.iter().enumerate() {
             assert_eq!(&rgb[i * 3..i * 3 + 3], &[v, v, v]);
         }
@@ -96,12 +92,15 @@ fn multi_strip_image_is_split_and_reassembled() {
     let src = rgb_pattern(w, h);
     let mut tiff = Vec::new();
     TiffEncoder::new()
-        .encode_rgb8(
-            &src,
-            Dimensions {
-                width: w,
-                height: h,
-            },
+        .encode_image(
+            ImageRef::<Rgb8>::new(
+                &src,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+            )
+            .unwrap(),
             &mut tiff,
         )
         .expect("encode");
@@ -115,11 +114,8 @@ fn multi_strip_image_is_split_and_reassembled() {
         offs.len()
     );
 
-    let mut out = Vec::new();
-    TiffDecoder::new()
-        .decode_to_rgb8(&tiff, &mut out)
-        .expect("decode");
-    assert_eq!(out, src);
+    let got: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+    assert_eq!(got.as_samples(), src.as_slice());
 }
 
 #[test]
@@ -140,9 +136,6 @@ fn white_is_zero_is_inverted_on_decode() {
         &[vec![0u8, 255u8]],
     );
 
-    let mut out = Vec::new();
-    TiffDecoder::new()
-        .decode_to_gray8(&tiff, &mut out)
-        .expect("decode");
-    assert_eq!(out, vec![255, 0]);
+    let got: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+    assert_eq!(got.as_samples(), &[255, 0]);
 }

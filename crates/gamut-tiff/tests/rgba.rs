@@ -1,6 +1,6 @@
 //! RGBA images (4 samples, unassociated alpha): tier-1 + libtiff cross-checks (P13).
 
-use gamut_core::Dimensions;
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
 use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
 
 const SIZES: &[(u32, u32)] = &[(1, 1), (3, 7), (17, 13), (64, 40)];
@@ -26,32 +26,29 @@ fn rgba_roundtrips_in_gamut() {
             let mut tiff = Vec::new();
             TiffEncoder::new()
                 .with_compression(comp)
-                .encode_rgba8(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
+                .encode_image(
+                    ImageRef::<Rgba8>::new(
+                        &src,
+                        Dimensions {
+                            width: w,
+                            height: h,
+                        },
+                    )
+                    .unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
-            let mut out = Vec::new();
-            let dims = TiffDecoder::new()
-                .decode_to_rgba8(&tiff, &mut out)
-                .expect("decode");
-            assert_eq!((dims.width, dims.height), (w, h));
-            assert_eq!(out, src, "{comp:?} {w}x{h}");
+            let got: ImageBuf<Rgba8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+            assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+            assert_eq!(got.as_samples(), src.as_slice(), "{comp:?} {w}x{h}");
 
             // RGB view drops alpha.
-            let mut rgb = Vec::new();
-            TiffDecoder::new()
-                .decode_to_rgb8(&tiff, &mut rgb)
-                .expect("rgb");
+            let rgb: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("rgb");
             let expect_rgb: Vec<u8> = src
                 .chunks_exact(4)
                 .flat_map(|p| [p[0], p[1], p[2]])
                 .collect();
-            assert_eq!(rgb, expect_rgb);
+            assert_eq!(rgb.as_samples(), expect_rgb.as_slice());
         }
     }
 }
@@ -63,12 +60,15 @@ fn gamut_rgba_is_decoded_by_libtiff() {
         let mut tiff = Vec::new();
         TiffEncoder::new()
             .with_compression(Compression::Lzw)
-            .encode_rgba8(
-                &src,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
+            .encode_image(
+                ImageRef::<Rgba8>::new(
+                    &src,
+                    Dimensions {
+                        width: w,
+                        height: h,
+                    },
+                )
+                .unwrap(),
                 &mut tiff,
             )
             .expect("encode");
@@ -84,10 +84,9 @@ fn libtiff_rgba_is_decoded_by_gamut() {
         let src = rgba_pattern(w, h);
         let tiff = libtiff_oracle::encode_rgba8(&src, w, h, libtiff_oracle::Compression::Lzw)
             .expect("libtiff encode");
-        let mut out = Vec::new();
-        TiffDecoder::new()
-            .decode_to_rgba8(&tiff, &mut out)
+        let got: ImageBuf<Rgba8> = TiffDecoder::new()
+            .decode_image(&tiff)
             .expect("gamut decode");
-        assert_eq!(out, src, "{w}x{h}");
+        assert_eq!(got.as_samples(), src.as_slice(), "{w}x{h}");
     }
 }

@@ -1,6 +1,6 @@
 //! Tiled images: tier-1 round-trips and libtiff cross-checks (P12).
 
-use gamut_core::Dimensions;
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
 use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
 
 // Dimensions that don't divide the 16×16 tiles, exercising edge-tile padding.
@@ -33,41 +33,41 @@ fn tiled_roundtrips_in_gamut() {
             TiffEncoder::new()
                 .with_compression(comp)
                 .with_tiling(16, 16)
-                .encode_rgb8(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
+                .encode_image(
+                    ImageRef::<Rgb8>::new(
+                        &src,
+                        Dimensions {
+                            width: w,
+                            height: h,
+                        },
+                    )
+                    .unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
-            let mut out = Vec::new();
-            let dims = TiffDecoder::new()
-                .decode_to_rgb8(&tiff, &mut out)
-                .expect("decode");
-            assert_eq!((dims.width, dims.height), (w, h));
-            assert_eq!(out, src, "{comp:?} {w}x{h}");
+            let got: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+            assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+            assert_eq!(got.as_samples(), src.as_slice(), "{comp:?} {w}x{h}");
 
             let gray = gray_pattern(w, h);
             let mut gtiff = Vec::new();
             TiffEncoder::new()
                 .with_compression(comp)
                 .with_tiling(32, 16)
-                .encode_gray8(
-                    &gray,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
+                .encode_image(
+                    ImageRef::<Gray8>::new(
+                        &gray,
+                        Dimensions {
+                            width: w,
+                            height: h,
+                        },
+                    )
+                    .unwrap(),
                     &mut gtiff,
                 )
                 .expect("encode");
-            let mut gout = Vec::new();
-            TiffDecoder::new()
-                .decode_to_gray8(&gtiff, &mut gout)
-                .expect("decode");
-            assert_eq!(gout, gray, "gray {comp:?} {w}x{h}");
+            let gout: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&gtiff).expect("decode");
+            assert_eq!(gout.as_samples(), gray.as_slice(), "gray {comp:?} {w}x{h}");
         }
     }
 }
@@ -80,12 +80,15 @@ fn gamut_tiled_is_decoded_by_libtiff() {
         TiffEncoder::new()
             .with_compression(Compression::Lzw)
             .with_tiling(16, 16)
-            .encode_rgb8(
-                &src,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
+            .encode_image(
+                ImageRef::<Rgb8>::new(
+                    &src,
+                    Dimensions {
+                        width: w,
+                        height: h,
+                    },
+                )
+                .unwrap(),
                 &mut tiff,
             )
             .expect("encode");
@@ -107,10 +110,9 @@ fn libtiff_tiled_is_decoded_by_gamut() {
         let tiff =
             libtiff_oracle::encode_rgb8_tiled(&src, w, h, 16, 16, libtiff_oracle::Compression::Lzw)
                 .expect("libtiff encode");
-        let mut out = Vec::new();
-        TiffDecoder::new()
-            .decode_to_rgb8(&tiff, &mut out)
+        let got: ImageBuf<Rgb8> = TiffDecoder::new()
+            .decode_image(&tiff)
             .expect("gamut decode");
-        assert_eq!(out, src, "{w}x{h}");
+        assert_eq!(got.as_samples(), src.as_slice(), "{w}x{h}");
     }
 }

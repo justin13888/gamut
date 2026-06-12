@@ -1,6 +1,6 @@
 //! Multi-page documents: tier-1 + libtiff cross-checks (P17).
 
-use gamut_core::Dimensions;
+use gamut_core::{Dimensions, ImageBuf, ImageRef, Rgb8};
 use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
 
 /// Distinct RGB pages of differing dimensions.
@@ -21,16 +21,17 @@ fn pages() -> Vec<(Vec<u8>, u32, u32)> {
 #[test]
 fn multipage_roundtrips_in_gamut() {
     let p = pages();
-    let refs: Vec<(&[u8], Dimensions)> = p
+    let refs: Vec<ImageRef<'_, Rgb8>> = p
         .iter()
         .map(|(d, w, h)| {
-            (
+            ImageRef::<Rgb8>::new(
                 d.as_slice(),
                 Dimensions {
                     width: *w,
                     height: *h,
                 },
             )
+            .unwrap()
         })
         .collect();
     let mut tiff = Vec::new();
@@ -42,33 +43,28 @@ fn multipage_roundtrips_in_gamut() {
     let dec = TiffDecoder::new();
     assert_eq!(dec.page_count(&tiff).expect("count"), p.len());
     for (i, (data, w, h)) in p.iter().enumerate() {
-        let mut out = Vec::new();
-        let dims = dec
-            .decode_page_to_rgb8(&tiff, i, &mut out)
-            .expect("decode page");
-        assert_eq!((dims.width, dims.height), (*w, *h));
-        assert_eq!(&out, data, "page {i}");
+        let got: ImageBuf<Rgb8> = dec.decode_page(&tiff, i).expect("decode page");
+        assert_eq!((got.dimensions().width, got.dimensions().height), (*w, *h));
+        assert_eq!(got.as_samples(), data.as_slice(), "page {i}");
     }
     // Out-of-range page is rejected.
-    assert!(
-        dec.decode_page_to_rgb8(&tiff, p.len(), &mut Vec::new())
-            .is_err()
-    );
+    assert!(dec.decode_page(&tiff, p.len()).is_err());
 }
 
 #[test]
 fn gamut_multipage_is_decoded_by_libtiff() {
     let p = pages();
-    let refs: Vec<(&[u8], Dimensions)> = p
+    let refs: Vec<ImageRef<'_, Rgb8>> = p
         .iter()
         .map(|(d, w, h)| {
-            (
+            ImageRef::<Rgb8>::new(
                 d.as_slice(),
                 Dimensions {
                     width: *w,
                     height: *h,
                 },
             )
+            .unwrap()
         })
         .collect();
     let mut tiff = Vec::new();
@@ -91,9 +87,7 @@ fn libtiff_multipage_is_decoded_by_gamut() {
     let dec = TiffDecoder::new();
     assert_eq!(dec.page_count(&tiff).expect("count"), p.len());
     for (i, (data, _, _)) in p.iter().enumerate() {
-        let mut out = Vec::new();
-        dec.decode_page_to_rgb8(&tiff, i, &mut out)
-            .expect("gamut decode page");
-        assert_eq!(&out, data, "page {i}");
+        let got: ImageBuf<Rgb8> = dec.decode_page(&tiff, i).expect("gamut decode page");
+        assert_eq!(got.as_samples(), data.as_slice(), "page {i}");
     }
 }
