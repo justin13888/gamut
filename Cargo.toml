@@ -62,6 +62,7 @@ gamut-ifd = { path = "crates/gamut-ifd", version = "0.1.0" }
 gamut-icc = { path = "crates/gamut-icc", version = "0.1.0" }
 gamut-xmp = { path = "crates/gamut-xmp", version = "0.1.0" }
 gamut-exif = { path = "crates/gamut-exif", version = "0.1.0" }
+gamut-iptc = { path = "crates/gamut-iptc", version = "0.1.0" }
 gamut = { path = "crates/gamut", version = "0.2.0" }
 
 [profile.release]

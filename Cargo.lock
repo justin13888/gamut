@@ -261,6 +261,7 @@ dependencies = [
  "gamut-heic",
  "gamut-icc",
  "gamut-ifd",
+ "gamut-iptc",
  "gamut-jxl",
  "gamut-vvc",
  "gamut-webp",
@@ -377,6 +378,14 @@ name = "gamut-ifd"
 version = "0.1.0"
 dependencies = [
  "gamut-core",
+]
+
+[[package]]
+name = "gamut-iptc"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+ "gamut-xmp",
 ]
 
 [[package]]
