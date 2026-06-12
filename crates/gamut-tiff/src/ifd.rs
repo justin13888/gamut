@@ -39,6 +39,15 @@ impl ByteOrder {
         }
     }
 
+    /// Decodes a 64-bit unsigned integer from eight bytes in this order (BigTIFF offsets/counts).
+    #[must_use]
+    pub fn u64(self, b: [u8; 8]) -> u64 {
+        match self {
+            ByteOrder::LittleEndian => u64::from_le_bytes(b),
+            ByteOrder::BigEndian => u64::from_be_bytes(b),
+        }
+    }
+
     /// Encodes a 16-bit unsigned integer to two bytes in this order.
     #[must_use]
     pub fn pack_u16(self, v: u16) -> [u8; 2] {
@@ -55,6 +64,83 @@ impl ByteOrder {
             ByteOrder::LittleEndian => v.to_le_bytes(),
             ByteOrder::BigEndian => v.to_be_bytes(),
         }
+    }
+
+    /// Encodes a 64-bit unsigned integer to eight bytes in this order (BigTIFF offsets/counts).
+    #[must_use]
+    pub fn pack_u64(self, v: u64) -> [u8; 8] {
+        match self {
+            ByteOrder::LittleEndian => v.to_le_bytes(),
+            ByteOrder::BigEndian => v.to_be_bytes(),
+        }
+    }
+}
+
+/// Which variant of the TIFF container a file uses, distinguished by the header magic number.
+///
+/// The two variants share an identical tag/IFD/pixel model; they differ only in the width of the
+/// structural fields — BigTIFF widens every file offset (and the IFD entry count and per-field
+/// value count) from 32 to 64 bits so a file may exceed 4 GiB (`references/tiff/bigtiff.html`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Variant {
+    /// Classic TIFF 6.0: magic `42`, an 8-byte header, 12-byte IFD entries, 32-bit offsets.
+    Classic,
+    /// BigTIFF: magic `43`, a 16-byte header, 20-byte IFD entries, 64-bit offsets.
+    Big,
+}
+
+impl Variant {
+    /// The header magic number (`42` for classic, `43` for BigTIFF).
+    #[must_use]
+    pub fn magic(self) -> u16 {
+        match self {
+            Variant::Classic => 42,
+            Variant::Big => 43,
+        }
+    }
+
+    /// The size of the image file header in bytes (8 classic, 16 BigTIFF).
+    #[must_use]
+    pub fn header_size(self) -> usize {
+        match self {
+            Variant::Classic => 8,
+            Variant::Big => 16,
+        }
+    }
+
+    /// The on-disk size of one IFD entry in bytes (12 classic, 20 BigTIFF).
+    #[must_use]
+    pub fn entry_size(self) -> usize {
+        match self {
+            Variant::Classic => 12,
+            Variant::Big => 20,
+        }
+    }
+
+    /// The size of an IFD's leading entry-count field in bytes (2 classic, 8 BigTIFF).
+    #[must_use]
+    pub fn count_size(self) -> usize {
+        match self {
+            Variant::Classic => 2,
+            Variant::Big => 8,
+        }
+    }
+
+    /// The size of a file offset (first-IFD pointer, next-IFD pointer, value offset) in bytes
+    /// (4 classic, 8 BigTIFF).
+    #[must_use]
+    pub fn offset_size(self) -> usize {
+        match self {
+            Variant::Classic => 4,
+            Variant::Big => 8,
+        }
+    }
+
+    /// The largest value, in bytes, that is stored inline in an IFD entry rather than out of line
+    /// (4 classic, 8 BigTIFF — equal to [`Self::offset_size`]).
+    #[must_use]
+    pub fn inline_threshold(self) -> usize {
+        self.offset_size()
     }
 }
 
@@ -87,6 +173,12 @@ pub enum FieldType {
     Float,
     /// `12` — a 64-bit IEEE double-precision float.
     Double,
+    /// `16` — a 64-bit unsigned integer (BigTIFF; `references/tiff/bigtiff.html`).
+    Long8,
+    /// `17` — a 64-bit signed (two's-complement) integer (BigTIFF).
+    SLong8,
+    /// `18` — a 64-bit unsigned IFD offset (BigTIFF).
+    Ifd8,
 }
 
 impl FieldType {
@@ -106,6 +198,9 @@ impl FieldType {
             10 => FieldType::SRational,
             11 => FieldType::Float,
             12 => FieldType::Double,
+            16 => FieldType::Long8,
+            17 => FieldType::SLong8,
+            18 => FieldType::Ifd8,
             _ => return None,
         })
     }
@@ -126,6 +221,9 @@ impl FieldType {
             FieldType::SRational => 10,
             FieldType::Float => 11,
             FieldType::Double => 12,
+            FieldType::Long8 => 16,
+            FieldType::SLong8 => 17,
+            FieldType::Ifd8 => 18,
         }
     }
 
@@ -136,7 +234,12 @@ impl FieldType {
             FieldType::Byte | FieldType::Ascii | FieldType::SByte | FieldType::Undefined => 1,
             FieldType::Short | FieldType::SShort => 2,
             FieldType::Long | FieldType::SLong | FieldType::Float => 4,
-            FieldType::Rational | FieldType::SRational | FieldType::Double => 8,
+            FieldType::Rational
+            | FieldType::SRational
+            | FieldType::Double
+            | FieldType::Long8
+            | FieldType::SLong8
+            | FieldType::Ifd8 => 8,
         }
     }
 }
@@ -168,6 +271,12 @@ pub enum Value {
     Float(Vec<f32>),
     /// `DOUBLE` values.
     Double(Vec<f64>),
+    /// `LONG8` values (BigTIFF 64-bit unsigned integers).
+    Long8(Vec<u64>),
+    /// `SLONG8` values (BigTIFF 64-bit signed integers).
+    SLong8(Vec<i64>),
+    /// `IFD8` values (BigTIFF 64-bit IFD offsets).
+    Ifd8(Vec<u64>),
 }
 
 impl Value {
@@ -187,6 +296,9 @@ impl Value {
             Value::SRational(_) => FieldType::SRational,
             Value::Float(_) => FieldType::Float,
             Value::Double(_) => FieldType::Double,
+            Value::Long8(_) => FieldType::Long8,
+            Value::SLong8(_) => FieldType::SLong8,
+            Value::Ifd8(_) => FieldType::Ifd8,
         }
     }
 
@@ -206,6 +318,8 @@ impl Value {
             Value::SRational(v) => v.len(),
             Value::Float(v) => v.len(),
             Value::Double(v) => v.len(),
+            Value::Long8(v) | Value::Ifd8(v) => v.len(),
+            Value::SLong8(v) => v.len(),
         }
     }
 
@@ -215,27 +329,36 @@ impl Value {
         self.count() * self.field_type().size()
     }
 
-    /// Coerces a single unsigned-integer value (`BYTE`, `SHORT`, or `LONG`) to `u32`.
+    /// Coerces a single unsigned-integer value (`BYTE`, `SHORT`, `LONG`, or BigTIFF
+    /// `LONG8`/`IFD8`) to `u32`.
     ///
     /// TIFF readers accept any of these types for an integer field (TIFF 6.0 §2); returns `None`
-    /// if the value is not a single unsigned integer.
+    /// if the value is not a single unsigned integer or a `LONG8`/`IFD8` exceeds `u32::MAX` (only
+    /// possible past the 4 GiB classic-TIFF limit, which an in-memory decode cannot reach anyway).
     #[must_use]
     pub fn as_u32(&self) -> Option<u32> {
         match self {
             Value::Byte(v) if v.len() == 1 => Some(u32::from(v[0])),
             Value::Short(v) if v.len() == 1 => Some(u32::from(v[0])),
             Value::Long(v) if v.len() == 1 => Some(v[0]),
+            Value::Long8(v) | Value::Ifd8(v) if v.len() == 1 => u32::try_from(v[0]).ok(),
             _ => None,
         }
     }
 
-    /// Coerces an array of unsigned integers (`BYTE`, `SHORT`, or `LONG`) to `Vec<u32>`.
+    /// Coerces an array of unsigned integers (`BYTE`, `SHORT`, `LONG`, or BigTIFF `LONG8`/`IFD8`)
+    /// to `Vec<u32>`.
+    ///
+    /// Returns `None` for any other type, or if a `LONG8`/`IFD8` element exceeds `u32::MAX`. This
+    /// lets the decoder read BigTIFF `StripOffsets`/`StripByteCounts`, which libtiff writes as
+    /// `LONG8`.
     #[must_use]
     pub fn as_u32_vec(&self) -> Option<Vec<u32>> {
         match self {
             Value::Byte(v) => Some(v.iter().map(|&x| u32::from(x)).collect()),
             Value::Short(v) => Some(v.iter().map(|&x| u32::from(x)).collect()),
             Value::Long(v) => Some(v.clone()),
+            Value::Long8(v) | Value::Ifd8(v) => v.iter().map(|&x| u32::try_from(x).ok()).collect(),
             _ => None,
         }
     }
@@ -305,6 +428,16 @@ impl Value {
                     }
                 }
             }
+            Value::Long8(v) | Value::Ifd8(v) => {
+                for &x in v {
+                    out.extend_from_slice(&order.pack_u64(x));
+                }
+            }
+            Value::SLong8(v) => {
+                for &x in v {
+                    out.extend_from_slice(&order.pack_u64(x as u64));
+                }
+            }
         }
         out
     }
@@ -327,6 +460,11 @@ impl Value {
         let u32s = |b: &[u8]| -> Vec<u32> {
             b.chunks_exact(4)
                 .map(|c| order.u32([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+        let u64s = |b: &[u8]| -> Vec<u64> {
+            b.chunks_exact(8)
+                .map(|c| order.u64([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect()
         };
         Ok(match ty {
@@ -371,6 +509,9 @@ impl Value {
                 }
                 Value::Double(v)
             }
+            FieldType::Long8 => Value::Long8(u64s(bytes)),
+            FieldType::Ifd8 => Value::Ifd8(u64s(bytes)),
+            FieldType::SLong8 => Value::SLong8(u64s(bytes).into_iter().map(|x| x as i64).collect()),
         })
     }
 }
@@ -510,21 +651,55 @@ mod tests {
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
             assert_eq!(order.u16(order.pack_u16(0xABCD)), 0xABCD);
             assert_eq!(order.u32(order.pack_u32(0x0123_4567)), 0x0123_4567);
+            assert_eq!(
+                order.u64(order.pack_u64(0x0123_4567_89AB_CDEF)),
+                0x0123_4567_89AB_CDEF
+            );
         }
         assert_eq!(ByteOrder::LittleEndian.pack_u16(0x00FF), [0xFF, 0x00]);
         assert_eq!(ByteOrder::BigEndian.pack_u16(0x00FF), [0x00, 0xFF]);
+        assert_eq!(
+            ByteOrder::LittleEndian.pack_u64(0xFF),
+            [0xFF, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            ByteOrder::BigEndian.pack_u64(0xFF),
+            [0, 0, 0, 0, 0, 0, 0, 0xFF]
+        );
     }
 
     #[test]
     fn field_type_codes_round_trip() {
-        for code in 1..=12u16 {
+        for code in (1..=12u16).chain(16..=18) {
             let ty = FieldType::from_code(code).expect("known type");
             assert_eq!(ty.code(), code);
         }
         assert_eq!(FieldType::from_code(0), None);
         assert_eq!(FieldType::from_code(13), None);
+        assert_eq!(FieldType::from_code(19), None);
         assert_eq!(FieldType::Rational.size(), 8);
         assert_eq!(FieldType::Short.size(), 2);
+        // The BigTIFF 64-bit types are all 8 bytes wide.
+        assert_eq!(FieldType::Long8.size(), 8);
+        assert_eq!(FieldType::SLong8.size(), 8);
+        assert_eq!(FieldType::Ifd8.size(), 8);
+    }
+
+    #[test]
+    fn variant_layout_constants() {
+        assert_eq!(Variant::Classic.magic(), 42);
+        assert_eq!(Variant::Big.magic(), 43);
+        assert_eq!(Variant::Classic.header_size(), 8);
+        assert_eq!(Variant::Big.header_size(), 16);
+        assert_eq!(Variant::Classic.entry_size(), 12);
+        assert_eq!(Variant::Big.entry_size(), 20);
+        assert_eq!(Variant::Classic.count_size(), 2);
+        assert_eq!(Variant::Big.count_size(), 8);
+        assert_eq!(Variant::Classic.offset_size(), 4);
+        assert_eq!(Variant::Big.offset_size(), 8);
+        // The inline threshold equals the offset size: values up to that many bytes pack inline.
+        assert_eq!(Variant::Classic.inline_threshold(), 4);
+        assert_eq!(Variant::Big.inline_threshold(), 8);
     }
 
     fn value_roundtrip(value: Value, order: ByteOrder) {
@@ -549,6 +724,12 @@ mod tests {
             value_roundtrip(Value::Float(vec![1.5, -0.25]), order);
             value_roundtrip(Value::Double(vec![1.5, -0.0625]), order);
             value_roundtrip(Value::Undefined(vec![0, 255, 7]), order);
+            value_roundtrip(
+                Value::Long8(vec![0x0123_4567_89AB_CDEF, 0, u64::MAX]),
+                order,
+            );
+            value_roundtrip(Value::SLong8(vec![-1, i64::MIN, 42]), order);
+            value_roundtrip(Value::Ifd8(vec![16, 0x1_0000_0000]), order);
         }
     }
 
@@ -563,6 +744,12 @@ mod tests {
             Value::Short(vec![1, 2, 3]).as_u32_vec(),
             Some(vec![1, 2, 3])
         );
+        // BigTIFF LONG8/IFD8 coerce to u32 when in range, so the decoder reads 64-bit offsets.
+        assert_eq!(Value::Long8(vec![70000]).as_u32(), Some(70000));
+        assert_eq!(Value::Ifd8(vec![8, 1024]).as_u32_vec(), Some(vec![8, 1024]));
+        // ...and fail cleanly past u32::MAX rather than truncating silently.
+        assert_eq!(Value::Long8(vec![0x1_0000_0000]).as_u32(), None);
+        assert_eq!(Value::Long8(vec![1, 0x1_0000_0000]).as_u32_vec(), None);
     }
 
     #[test]
