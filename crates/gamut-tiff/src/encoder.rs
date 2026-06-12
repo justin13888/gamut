@@ -3,8 +3,9 @@
 use gamut_core::{Dimensions, Encoder, Error, Result};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
-use crate::ifd::{ByteOrder, Ifd, PhotometricInterpretation, Predictor, Value, Variant};
+use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::{tags, writer};
+use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
 /// The on-disk sample layout of an image, shared by the 8-bit and bilevel encode paths.
 struct SampleLayout {
@@ -680,7 +681,7 @@ mod tests {
             )
             .expect("encode");
         // Magic 43, the fixed offset-size 8, and a 16-byte header (first IFD at offset >= 16).
-        let (order, variant, first) = crate::reader::read_header(&out).expect("header");
+        let (order, variant, first) = gamut_ifd::read_header(&out).expect("header");
         assert_eq!(order, ByteOrder::LittleEndian);
         assert_eq!(variant, Variant::Big);
         assert_eq!(out[2], 0x2b);

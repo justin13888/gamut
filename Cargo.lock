@@ -470,6 +470,7 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+ "gamut-ifd",
  "libtiff-oracle",
 ]
 

@@ -3,8 +3,9 @@
 use gamut_core::{Decoder, Dimensions, Error, Result};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
-use crate::ifd::{Ifd, PhotometricInterpretation};
-use crate::{reader, tags};
+use crate::ifd::PhotometricInterpretation;
+use crate::tags;
+use gamut_ifd::{Ifd, read};
 
 /// Decoder for baseline TIFF images.
 ///
@@ -64,7 +65,7 @@ impl TiffDecoder {
     ///
     /// Returns [`Error::InvalidInput`] if the file header or IFD chain is malformed.
     pub fn page_count(&self, data: &[u8]) -> Result<usize> {
-        Ok(reader::read(data)?.ifds.len())
+        Ok(read(data)?.ifds.len())
     }
 
     /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit RGB (page 0 is the first).
@@ -175,7 +176,7 @@ fn require_u32(ifd: &Ifd, tag: u16, what: &'static str) -> Result<u32> {
 }
 
 fn decode_image(data: &[u8], page: usize) -> Result<DecodedImage> {
-    let file = reader::read(data)?;
+    let file = read(data)?;
     let ifd = file
         .ifds
         .get(page)
@@ -486,7 +487,7 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::encoder::TiffEncoder;
-    use crate::ifd::ByteOrder;
+    use gamut_ifd::ByteOrder;
 
     #[test]
     fn rejects_truncated_file() {
