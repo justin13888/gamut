@@ -36,3 +36,11 @@ pub const RESOLUTION_UNIT: u16 = 296;
 pub const PREDICTOR: u16 = 317;
 /// `ColorMap` (320) — the palette for palette-colour images.
 pub const COLOR_MAP: u16 = 320;
+/// `TileWidth` (322) — the width of each tile in pixels (a multiple of 16).
+pub const TILE_WIDTH: u16 = 322;
+/// `TileLength` (323) — the height of each tile in pixels (a multiple of 16).
+pub const TILE_LENGTH: u16 = 323;
+/// `TileOffsets` (324) — the byte offset of each tile.
+pub const TILE_OFFSETS: u16 = 324;
+/// `TileByteCounts` (325) — the number of (compressed) bytes in each tile.
+pub const TILE_BYTE_COUNTS: u16 = 325;

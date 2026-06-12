@@ -200,46 +200,20 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         .checked_mul(height)
         .ok_or(Error::InvalidInput("TIFF: image too large"))?;
 
-    let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
-        Some(0) | None => height, // default: a single strip
-        Some(r) => (r as usize).min(height),
+    // Reassemble the stored (packed) row bytes from tiles or strips.
+    let layout = Layout {
+        width,
+        height,
+        spp,
+        bps,
+        stored_row_bytes,
+        compression,
     };
-    let offsets = ifd
-        .get_u32_vec(tags::STRIP_OFFSETS)
-        .ok_or(Error::InvalidInput("TIFF: missing StripOffsets"))?;
-    let counts = ifd
-        .get_u32_vec(tags::STRIP_BYTE_COUNTS)
-        .ok_or(Error::InvalidInput("TIFF: missing StripByteCounts"))?;
-    let strips = height.div_ceil(rows_per_strip);
-    if offsets.len() != strips || counts.len() != strips {
-        return Err(Error::InvalidInput("TIFF: strip count mismatch"));
-    }
-
-    // Decompress strips into the packed (stored) row bytes.
-    let mut packed = Vec::with_capacity(stored_total);
-    for (i, (&off, &cnt)) in offsets.iter().zip(&counts).enumerate() {
-        let rows = rows_per_strip.min(height - i * rows_per_strip);
-        let want = rows * stored_row_bytes;
-        let raw = data
-            .get(off as usize..off as usize + cnt as usize)
-            .ok_or(Error::InvalidInput("TIFF: strip out of bounds"))?;
-        match compression {
-            Compression::PackBits => packed.extend_from_slice(&packbits::decode(raw, want)?),
-            Compression::CcittRle => {
-                packed.extend_from_slice(&ccitt::mh_decode_strip(raw, rows, width)?);
-            }
-            Compression::CcittGroup4Fax => {
-                packed.extend_from_slice(&ccitt::g4_decode_strip(raw, rows, width)?);
-            }
-            Compression::Lzw => packed.extend_from_slice(&lzw::decode(raw, want)?),
-            _ => {
-                let strip = raw
-                    .get(..want)
-                    .ok_or(Error::InvalidInput("TIFF: strip shorter than expected"))?;
-                packed.extend_from_slice(strip);
-            }
-        }
-    }
+    let mut packed = if ifd.get(tags::TILE_WIDTH).is_some() {
+        decode_tiles(ifd, data, &layout)?
+    } else {
+        decode_strips(ifd, data, &layout)?
+    };
     debug_assert_eq!(packed.len(), stored_total);
 
     // Reverse the horizontal-differencing predictor (8-bit only) before unpacking.
@@ -293,6 +267,121 @@ fn decode_image(data: &[u8]) -> Result<DecodedImage> {
         samples_per_pixel: out_spp,
         pixels,
     })
+}
+
+/// The decoded image's storage parameters, shared by the strip and tile readers.
+struct Layout {
+    width: usize,
+    height: usize,
+    spp: usize,
+    bps: u32,
+    stored_row_bytes: usize,
+    compression: Compression,
+}
+
+/// Decompresses one strip/tile of byte-level data (`None`/PackBits/LZW) to `want` bytes.
+fn decompress_simple(raw: &[u8], want: usize, compression: Compression) -> Result<Vec<u8>> {
+    match compression {
+        Compression::None => raw
+            .get(..want)
+            .map(<[u8]>::to_vec)
+            .ok_or(Error::InvalidInput("TIFF: block shorter than expected")),
+        Compression::PackBits => packbits::decode(raw, want),
+        Compression::Lzw => lzw::decode(raw, want),
+        _ => Err(Error::Unsupported(
+            "TIFF: compression not supported for this layout",
+        )),
+    }
+}
+
+/// Reassembles the stored row bytes from strips.
+fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
+    let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
+        Some(0) | None => l.height,
+        Some(r) => (r as usize).min(l.height),
+    };
+    let offsets = ifd
+        .get_u32_vec(tags::STRIP_OFFSETS)
+        .ok_or(Error::InvalidInput("TIFF: missing StripOffsets"))?;
+    let counts = ifd
+        .get_u32_vec(tags::STRIP_BYTE_COUNTS)
+        .ok_or(Error::InvalidInput("TIFF: missing StripByteCounts"))?;
+    let strips = l.height.div_ceil(rows_per_strip);
+    if offsets.len() != strips || counts.len() != strips {
+        return Err(Error::InvalidInput("TIFF: strip count mismatch"));
+    }
+    let mut packed = Vec::with_capacity(l.stored_row_bytes * l.height);
+    for (i, (&off, &cnt)) in offsets.iter().zip(&counts).enumerate() {
+        let rows = rows_per_strip.min(l.height - i * rows_per_strip);
+        let want = rows * l.stored_row_bytes;
+        let raw = data
+            .get(off as usize..off as usize + cnt as usize)
+            .ok_or(Error::InvalidInput("TIFF: strip out of bounds"))?;
+        match l.compression {
+            Compression::CcittRle => {
+                packed.extend_from_slice(&ccitt::mh_decode_strip(raw, rows, l.width)?);
+            }
+            Compression::CcittGroup4Fax => {
+                packed.extend_from_slice(&ccitt::g4_decode_strip(raw, rows, l.width)?);
+            }
+            other => packed.extend_from_slice(&decompress_simple(raw, want, other)?),
+        }
+    }
+    Ok(packed)
+}
+
+/// Reassembles the stored row bytes from tiles (8-bit only), cropping the edge-tile padding.
+fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
+    if l.bps != 8 {
+        return Err(Error::Unsupported(
+            "TIFF: tiled images supported only for 8-bit samples so far",
+        ));
+    }
+    let tw = ifd
+        .get_u32(tags::TILE_WIDTH)
+        .ok_or(Error::InvalidInput("TIFF: missing TileWidth"))? as usize;
+    let th = ifd
+        .get_u32(tags::TILE_LENGTH)
+        .ok_or(Error::InvalidInput("TIFF: missing TileLength"))? as usize;
+    if tw == 0 || th == 0 {
+        return Err(Error::InvalidInput("TIFF: zero tile dimension"));
+    }
+    let offsets = ifd
+        .get_u32_vec(tags::TILE_OFFSETS)
+        .ok_or(Error::InvalidInput("TIFF: missing TileOffsets"))?;
+    let counts = ifd
+        .get_u32_vec(tags::TILE_BYTE_COUNTS)
+        .ok_or(Error::InvalidInput("TIFF: missing TileByteCounts"))?;
+    let across = l.width.div_ceil(tw);
+    let down = l.height.div_ceil(th);
+    if offsets.len() != across * down || counts.len() != across * down {
+        return Err(Error::InvalidInput("TIFF: tile count mismatch"));
+    }
+    let tile_row_bytes = tw * l.spp;
+    let tile_size = th * tile_row_bytes;
+    let mut packed = vec![0u8; l.stored_row_bytes * l.height];
+    for ty in 0..down {
+        for tx in 0..across {
+            let idx = ty * across + tx;
+            let (off, cnt) = (offsets[idx] as usize, counts[idx] as usize);
+            let raw = data
+                .get(off..off + cnt)
+                .ok_or(Error::InvalidInput("TIFF: tile out of bounds"))?;
+            let tile = decompress_simple(raw, tile_size, l.compression)?;
+            let copy_cols = tw.min(l.width - tx * tw);
+            for r in 0..th {
+                let dst_row = ty * th + r;
+                if dst_row >= l.height {
+                    break;
+                }
+                let src = r * tile_row_bytes;
+                let dst = dst_row * l.stored_row_bytes + tx * tw * l.spp;
+                packed[dst..dst + copy_cols * l.spp]
+                    .copy_from_slice(&tile[src..src + copy_cols * l.spp]);
+            }
+        }
+    }
+    Ok(packed)
 }
 
 #[cfg(test)]

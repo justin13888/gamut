@@ -34,4 +34,4 @@ pub use decoder::TiffDecoder;
 pub use encoder::TiffEncoder;
 pub use ifd::{ByteOrder, Field, FieldType, Ifd, PhotometricInterpretation, Predictor, Value};
 pub use reader::{TiffFile, read};
-pub use writer::{write, write_image};
+pub use writer::{write, write_image, write_image_tiled};

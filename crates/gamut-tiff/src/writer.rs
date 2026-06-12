@@ -89,26 +89,55 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
     out
 }
 
-/// Serialises a single-IFD TIFF image: the supplied directory plus its strip data.
-///
-/// `StripByteCounts` is set from the strip lengths and `StripOffsets` from where the strips land —
-/// contiguously after the header, the IFD, and its value pool. The caller supplies the rest of the
-/// directory (dimensions, photometric, compression, …). The strips are written verbatim, so the
-/// caller is responsible for any per-strip compression.
+/// Serialises a single-IFD strip TIFF image: the supplied directory plus its strip data,
+/// referenced by `StripOffsets`/`StripByteCounts`. The strips are written verbatim, so the caller
+/// is responsible for any per-strip compression.
 #[must_use]
 pub fn write_image(order: ByteOrder, ifd: &Ifd, strips: &[Vec<u8>]) -> Vec<u8> {
-    use crate::ifd::Value;
-    use crate::tags;
+    write_blocks(
+        order,
+        ifd,
+        strips,
+        crate::tags::STRIP_OFFSETS,
+        crate::tags::STRIP_BYTE_COUNTS,
+    )
+}
 
-    let counts: Vec<u32> = strips.iter().map(|s| s.len() as u32).collect();
+/// Serialises a single-IFD tiled TIFF image: the directory plus its tile data, referenced by
+/// `TileOffsets`/`TileByteCounts`. The caller supplies the `TileWidth`/`TileLength` fields and any
+/// per-tile compression.
+#[must_use]
+pub fn write_image_tiled(order: ByteOrder, ifd: &Ifd, tiles: &[Vec<u8>]) -> Vec<u8> {
+    write_blocks(
+        order,
+        ifd,
+        tiles,
+        crate::tags::TILE_OFFSETS,
+        crate::tags::TILE_BYTE_COUNTS,
+    )
+}
+
+/// Lays out a directory plus a list of data blocks, recording each block's length under
+/// `bytecount_tag` and its file offset under `offset_tag` (contiguously after the header, the IFD,
+/// and its value pool).
+fn write_blocks(
+    order: ByteOrder,
+    ifd: &Ifd,
+    blocks: &[Vec<u8>],
+    offset_tag: u16,
+    bytecount_tag: u16,
+) -> Vec<u8> {
+    use crate::ifd::Value;
+
+    let counts: Vec<u32> = blocks.iter().map(|s| s.len() as u32).collect();
     let mut ifd = ifd.clone();
-    ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(counts));
-    // A correctly-sized placeholder so the directory layout (and thus the strip base) is final;
-    // the StripOffsets *content* does not affect the layout, only its values do.
-    ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0; strips.len()]));
+    ifd.set(bytecount_tag, Value::Long(counts));
+    // A correctly-sized placeholder so the directory layout (and thus the data base) is final; the
+    // offset *content* does not affect the layout, only its values do.
+    ifd.set(offset_tag, Value::Long(vec![0; blocks.len()]));
 
     // Writing the directory alone yields exactly the header + IFD + value pool, so its length is
-    // where the strip data begins (rounded up to a word boundary).
+    // where the block data begins (rounded up to a word boundary).
     let base = even(
         write(&TiffFile {
             order,
@@ -116,20 +145,20 @@ pub fn write_image(order: ByteOrder, ifd: &Ifd, strips: &[Vec<u8>]) -> Vec<u8> {
         })
         .len(),
     );
-    let mut offsets = Vec::with_capacity(strips.len());
+    let mut offsets = Vec::with_capacity(blocks.len());
     let mut cursor = base;
-    for s in strips {
+    for s in blocks {
         offsets.push(cursor as u32);
         cursor += s.len();
     }
-    ifd.set(tags::STRIP_OFFSETS, Value::Long(offsets));
+    ifd.set(offset_tag, Value::Long(offsets));
 
     let mut out = write(&TiffFile {
         order,
         ifds: vec![ifd],
     });
-    out.resize(base, 0); // pad to the even strip base (a no-op unless the value pool ended odd)
-    for s in strips {
+    out.resize(base, 0); // pad to the even base (a no-op unless the value pool ended odd)
+    for s in blocks {
         out.extend_from_slice(s);
     }
     out

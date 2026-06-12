@@ -316,6 +316,107 @@ fn encode_packed(
     std::fs::read(&path).map_err(|e| e.to_string())
 }
 
+/// Encodes 8-bit RGB as a **tiled** TIFF with `tile_w × tile_h` tiles at the given compression.
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_rgb8_tiled(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    if pixels.len() != (width as usize) * (height as usize) * 3 {
+        return Err("pixel buffer does not match dimensions".into());
+    }
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("oracle.tiff");
+    let cpath = c_path(&path)?;
+    // SAFETY: `cpath` is valid; the handle is closed before we read the file back.
+    unsafe {
+        let mode = CString::new("w").map_err(|e| e.to_string())?;
+        let t = sys::TIFFOpen(cpath.as_ptr(), mode.as_ptr());
+        if t.is_null() {
+            return Err("TIFFOpen (write) failed".into());
+        }
+        let result = write_tiles(t, pixels, width, height, tile_w, tile_h, compression.code());
+        sys::TIFFClose(t);
+        result?;
+    }
+    std::fs::read(&path).map_err(|e| e.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn write_tiles(
+    t: *mut sys::TIFF,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    compression: u16,
+) -> Result<(), String> {
+    unsafe {
+        sys::TIFFSetField(t, sys::TIFFTAG_IMAGEWIDTH, width);
+        sys::TIFFSetField(t, sys::TIFFTAG_IMAGELENGTH, height);
+        sys::TIFFSetField(t, sys::TIFFTAG_BITSPERSAMPLE, 8 as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_SAMPLESPERPIXEL, 3 as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_PHOTOMETRIC, sys::PHOTOMETRIC_RGB as c_int);
+        sys::TIFFSetField(
+            t,
+            sys::TIFFTAG_PLANARCONFIG,
+            sys::PLANARCONFIG_CONTIG as c_int,
+        );
+        sys::TIFFSetField(t, sys::TIFFTAG_COMPRESSION, compression as c_int);
+        sys::TIFFSetField(t, sys::TIFFTAG_TILEWIDTH, tile_w);
+        sys::TIFFSetField(t, sys::TIFFTAG_TILELENGTH, tile_h);
+    }
+    let spp = 3usize;
+    let (w, h, tw, th) = (
+        width as usize,
+        height as usize,
+        tile_w as usize,
+        tile_h as usize,
+    );
+    let tile_row = tw * spp;
+    let tile_size = th * tile_row;
+    let across = w.div_ceil(tw);
+    let down = h.div_ceil(th);
+    let mut buf = vec![0u8; tile_size];
+    for ty in 0..down {
+        for tx in 0..across {
+            buf.iter_mut().for_each(|b| *b = 0);
+            let copy_cols = tw.min(w - tx * tw);
+            for r in 0..th {
+                let src_row = ty * th + r;
+                if src_row >= h {
+                    break;
+                }
+                let src = src_row * w * spp + tx * tw * spp;
+                let dst = r * tile_row;
+                buf[dst..dst + copy_cols * spp]
+                    .copy_from_slice(&pixels[src..src + copy_cols * spp]);
+            }
+            let tile = unsafe { sys::TIFFComputeTile(t, (tx * tw) as u32, (ty * th) as u32, 0, 0) };
+            let rc = unsafe {
+                sys::TIFFWriteEncodedTile(
+                    t,
+                    tile,
+                    buf.as_mut_ptr() as *mut c_void,
+                    tile_size as i64,
+                )
+            };
+            if rc < 0 {
+                return Err(format!("TIFFWriteEncodedTile failed at tile ({tx},{ty})"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn c_path(path: &Path) -> Result<CString, String> {
     CString::new(path.to_str().ok_or("non-UTF-8 temp path")?).map_err(|e| e.to_string())
 }

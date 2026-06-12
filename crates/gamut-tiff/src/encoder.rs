@@ -24,6 +24,7 @@ pub struct TiffEncoder {
     order: ByteOrder,
     compression: Compression,
     predictor: Predictor,
+    tiling: Option<(u32, u32)>,
 }
 
 impl Default for TiffEncoder {
@@ -32,6 +33,7 @@ impl Default for TiffEncoder {
             order: ByteOrder::LittleEndian,
             compression: Compression::None,
             predictor: Predictor::None,
+            tiling: None,
         }
     }
 }
@@ -63,6 +65,17 @@ impl TiffEncoder {
     #[must_use]
     pub fn with_predictor(mut self, predictor: Predictor) -> Self {
         self.predictor = predictor;
+        self
+    }
+
+    /// Returns a copy of this encoder that writes the image as tiles of `tile_width × tile_height`
+    /// pixels instead of strips.
+    ///
+    /// Both dimensions must be positive multiples of 16. Tiling is currently supported for 8-bit
+    /// images compressed with `None`/PackBits/LZW (no predictor).
+    #[must_use]
+    pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
+        self.tiling = Some((tile_width, tile_height));
         self
     }
 
@@ -243,6 +256,9 @@ impl TiffEncoder {
         extra_fields: &[(u16, Value)],
         out: &mut Vec<u8>,
     ) -> Result<usize> {
+        if let Some((tw, tl)) = self.tiling {
+            return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, out);
+        }
         let h = dims.height as usize;
         let stored_row_bytes = layout.stored_row_bytes;
 
@@ -314,14 +330,6 @@ impl TiffEncoder {
     ) -> Result<Vec<u8>> {
         let row_bytes = layout.stored_row_bytes;
         match self.compression {
-            Compression::None => Ok(raw.to_vec()),
-            Compression::PackBits => {
-                let mut out = Vec::new();
-                for row in raw.chunks(row_bytes) {
-                    packbits::encode_row(row, &mut out);
-                }
-                Ok(out)
-            }
             Compression::CcittRle => {
                 if layout.bits_per_sample != 1 {
                     return Err(Error::Unsupported(
@@ -339,11 +347,109 @@ impl TiffEncoder {
                 let rows = raw.len() / row_bytes;
                 ccitt::g4_encode_strip(raw, row_bytes, rows, dims.width as usize)
             }
+            _ => self.compress_bytes(raw, row_bytes),
+        }
+    }
+
+    /// Byte-level compression of one strip/tile (the schemes that work on raw bytes).
+    fn compress_bytes(&self, raw: &[u8], row_bytes: usize) -> Result<Vec<u8>> {
+        match self.compression {
+            Compression::None => Ok(raw.to_vec()),
+            Compression::PackBits => {
+                let mut out = Vec::new();
+                for row in raw.chunks(row_bytes) {
+                    packbits::encode_row(row, &mut out);
+                }
+                Ok(out)
+            }
             Compression::Lzw => Ok(lzw::encode(raw)),
             _ => Err(Error::Unsupported(
                 "TIFF: unsupported compression for encoding",
             )),
         }
+    }
+
+    /// Lays out an 8-bit image as a grid of `tile_w × tile_h` tiles (edge tiles zero-padded).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_tiled(
+        &self,
+        packed: &[u8],
+        dims: Dimensions,
+        layout: &SampleLayout,
+        extra_fields: &[(u16, Value)],
+        tile_w: u32,
+        tile_h: u32,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        if layout.bits_per_sample != 8 {
+            return Err(Error::Unsupported(
+                "TIFF: tiling supported only for 8-bit images so far",
+            ));
+        }
+        if self.predictor != Predictor::None {
+            return Err(Error::Unsupported(
+                "TIFF: predictor with tiling not supported yet",
+            ));
+        }
+        let (tw, th) = (tile_w as usize, tile_h as usize);
+        if tw == 0 || th == 0 || tw % 16 != 0 || th % 16 != 0 {
+            return Err(Error::InvalidInput(
+                "TIFF: tile dimensions must be positive multiples of 16",
+            ));
+        }
+        let (w, h, spp) = (dims.width as usize, dims.height as usize, layout.spp);
+        let stored_row_bytes = layout.stored_row_bytes;
+        let tile_row_bytes = tw * spp;
+        let tiles_across = w.div_ceil(tw);
+        let tiles_down = h.div_ceil(th);
+
+        let mut tiles: Vec<Vec<u8>> = Vec::with_capacity(tiles_across * tiles_down);
+        for ty in 0..tiles_down {
+            for tx in 0..tiles_across {
+                let mut tile = vec![0u8; th * tile_row_bytes];
+                for r in 0..th {
+                    let src_row = ty * th + r;
+                    if src_row >= h {
+                        break;
+                    }
+                    let copy_cols = tw.min(w - tx * tw);
+                    let src = (src_row * stored_row_bytes) + (tx * tw) * spp;
+                    let dst = r * tile_row_bytes;
+                    tile[dst..dst + copy_cols * spp]
+                        .copy_from_slice(&packed[src..src + copy_cols * spp]);
+                }
+                tiles.push(self.compress_bytes(&tile, tile_row_bytes)?);
+            }
+        }
+
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, dim_value(dims.width));
+        ifd.set(tags::IMAGE_LENGTH, dim_value(dims.height));
+        ifd.set(
+            tags::BITS_PER_SAMPLE,
+            Value::Short(vec![layout.bits_per_sample; spp]),
+        );
+        ifd.set(
+            tags::COMPRESSION,
+            Value::Short(vec![self.compression.code()]),
+        );
+        ifd.set(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            Value::Short(vec![layout.photometric.code()]),
+        );
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp as u16]));
+        ifd.set(tags::TILE_WIDTH, dim_value(tile_w));
+        ifd.set(tags::TILE_LENGTH, dim_value(tile_h));
+        ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
+        ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
+        ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
+        for (tag, value) in extra_fields {
+            ifd.set(*tag, value.clone());
+        }
+
+        let bytes = writer::write_image_tiled(self.order, &ifd, &tiles);
+        out.extend_from_slice(&bytes);
+        Ok(bytes.len())
     }
 }
 
