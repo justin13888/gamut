@@ -1,9 +1,10 @@
 //! The TIFF decoder.
 
-use gamut_core::{Decoder, Dimensions, Error, Result};
+use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result, Rgb8, Rgba8};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
 use crate::ifd::PhotometricInterpretation;
+use crate::palette::Palette8;
 use crate::tags;
 use gamut_ifd::{Ifd, read};
 
@@ -38,8 +39,9 @@ enum Mode {
     Rgba,
     /// Interleaved CMYK (4 separated ink samples).
     Cmyk,
-    /// Palette colour: 8-bit indices into a 3×256 16-bit `ColorMap`.
-    Palette(Vec<u32>),
+    /// Palette colour: 8-bit indices into a [`Palette8`] colour table. Boxed because the 768-byte
+    /// table would otherwise dwarf the other variants.
+    Palette(Box<Palette8>),
 }
 
 impl TiffDecoder {
@@ -47,16 +49,6 @@ impl TiffDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Decodes the first image to interleaved 8-bit RGB (grayscale is replicated across channels).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] for a
-    /// feature not yet implemented.
-    pub fn decode_to_rgb8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        self.decode_page_to_rgb8(data, 0, out)
     }
 
     /// Returns the number of pages (subfile IFDs) in a TIFF.
@@ -68,106 +60,103 @@ impl TiffDecoder {
         Ok(read(data)?.ifds.len())
     }
 
-    /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit RGB (page 0 is the first).
+    /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit [`Rgb8`] (page 0 is the first;
+    /// grayscale is replicated across channels, any alpha is dropped). Multi-page access is
+    /// TIFF-specific, so it stays inherent; the [`DecodeImage`] impls present page 0.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] for malformed input or an out-of-range page, or
     /// [`Error::Unsupported`] for a feature not yet implemented.
-    pub fn decode_page_to_rgb8(
-        &self,
-        data: &[u8],
-        page: usize,
-        out: &mut Vec<u8>,
-    ) -> Result<Dimensions> {
-        let img = decode_image(data, page)?;
-        match img.samples_per_pixel {
-            1 => {
-                out.reserve(img.pixels.len() * 3);
-                for &v in &img.pixels {
-                    out.extend_from_slice(&[v, v, v]);
-                }
-            }
-            3 => out.extend_from_slice(&img.pixels),
-            4 => {
-                for px in img.pixels.chunks_exact(4) {
-                    out.extend_from_slice(&px[0..3]); // drop alpha
-                }
-            }
-            _ => {
-                return Err(Error::Unsupported(
-                    "TIFF: cannot present this sample layout as RGB",
-                ));
-            }
-        }
-        Ok(img.dims)
-    }
-
-    /// Decodes the first image to interleaved 8-bit RGBA (RGB gains opaque alpha, grayscale is
-    /// replicated then made opaque).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] for a
-    /// feature not yet implemented.
-    pub fn decode_to_rgba8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let img = decode_image(data, 0)?;
-        match img.samples_per_pixel {
-            1 => {
-                for &v in &img.pixels {
-                    out.extend_from_slice(&[v, v, v, 255]);
-                }
-            }
-            3 => {
-                for px in img.pixels.chunks_exact(3) {
-                    out.extend_from_slice(&[px[0], px[1], px[2], 255]);
-                }
-            }
-            4 => out.extend_from_slice(&img.pixels),
-            _ => {
-                return Err(Error::Unsupported(
-                    "TIFF: cannot present this sample layout as RGBA",
-                ));
-            }
-        }
-        Ok(img.dims)
-    }
-
-    /// Decodes the first image to interleaved 8-bit CMYK; errors unless it is a 4-sample image.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] if the image
-    /// is not 4-sample (CMYK).
-    pub fn decode_to_cmyk8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let img = decode_image(data, 0)?;
-        if img.samples_per_pixel != 4 {
-            return Err(Error::Unsupported("TIFF: image is not 4-sample CMYK"));
-        }
-        out.extend_from_slice(&img.pixels);
-        Ok(img.dims)
-    }
-
-    /// Decodes the first image to 8-bit grayscale; errors unless it is a single-sample image.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] if the image
-    /// is not single-sample grayscale.
-    pub fn decode_to_gray8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let img = decode_image(data, 0)?;
-        if img.samples_per_pixel != 1 {
-            return Err(Error::Unsupported("TIFF: image is not grayscale"));
-        }
-        out.extend_from_slice(&img.pixels);
-        Ok(img.dims)
+    pub fn decode_page(&self, data: &[u8], page: usize) -> Result<ImageBuf<Rgb8>> {
+        let img = decode_page_samples(data, page)?;
+        ImageBuf::new(present_rgb(&img)?, img.dims)
     }
 }
 
-impl Decoder for TiffDecoder {
-    fn decode(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        self.decode_to_rgb8(data, out)
+impl DecodeImage<Rgb8> for TiffDecoder {
+    /// Grayscale is replicated across channels; any alpha is dropped.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
+        self.decode_page(data, 0)
     }
+}
+
+impl DecodeImage<Rgba8> for TiffDecoder {
+    /// RGB gains opaque alpha; grayscale is replicated then made opaque.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
+        let img = decode_page_samples(data, 0)?;
+        ImageBuf::new(present_rgba(&img)?, img.dims)
+    }
+}
+
+impl DecodeImage<Cmyk8> for TiffDecoder {
+    /// Errors unless the image is 4-sample; the samples pass through unchanged.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Cmyk8>> {
+        let img = decode_page_samples(data, 0)?;
+        if img.samples_per_pixel != 4 {
+            return Err(Error::Unsupported("TIFF: image is not 4-sample CMYK"));
+        }
+        ImageBuf::new(img.pixels, img.dims)
+    }
+}
+
+impl DecodeImage<Gray8> for TiffDecoder {
+    /// Errors unless the image is single-sample; the samples pass through unchanged.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
+        let img = decode_page_samples(data, 0)?;
+        if img.samples_per_pixel != 1 {
+            return Err(Error::Unsupported("TIFF: image is not grayscale"));
+        }
+        ImageBuf::new(img.pixels, img.dims)
+    }
+}
+
+/// Presents decoded samples as interleaved 8-bit RGB (1 → replicated, 3 → as-is, 4 → alpha dropped).
+fn present_rgb(img: &DecodedImage) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(img.dims.width as usize * img.dims.height as usize * 3);
+    match img.samples_per_pixel {
+        1 => {
+            for &v in &img.pixels {
+                out.extend_from_slice(&[v, v, v]);
+            }
+        }
+        3 => out.extend_from_slice(&img.pixels),
+        4 => {
+            for px in img.pixels.chunks_exact(4) {
+                out.extend_from_slice(&px[0..3]);
+            }
+        }
+        _ => {
+            return Err(Error::Unsupported(
+                "TIFF: cannot present this sample layout as RGB",
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Presents decoded samples as interleaved 8-bit RGBA (1 → replicated opaque, 3 → opaque, 4 → as-is).
+fn present_rgba(img: &DecodedImage) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(img.dims.width as usize * img.dims.height as usize * 4);
+    match img.samples_per_pixel {
+        1 => {
+            for &v in &img.pixels {
+                out.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        3 => {
+            for px in img.pixels.chunks_exact(3) {
+                out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+            }
+        }
+        4 => out.extend_from_slice(&img.pixels),
+        _ => {
+            return Err(Error::Unsupported(
+                "TIFF: cannot present this sample layout as RGBA",
+            ));
+        }
+    }
+    Ok(out)
 }
 
 /// Reads a required unsigned-integer tag.
@@ -175,7 +164,7 @@ fn require_u32(ifd: &Ifd, tag: u16, what: &'static str) -> Result<u32> {
     ifd.get_u32(tag).ok_or(Error::InvalidInput(what))
 }
 
-fn decode_image(data: &[u8], page: usize) -> Result<DecodedImage> {
+fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     let file = read(data)?;
     let ifd = file
         .ifds
@@ -258,12 +247,7 @@ fn decode_image(data: &[u8], page: usize) -> Result<DecodedImage> {
             let cm = ifd
                 .get_u32_vec(tags::COLOR_MAP)
                 .ok_or(Error::InvalidInput("TIFF: palette image missing ColorMap"))?;
-            if cm.len() != 3 * 256 {
-                return Err(Error::InvalidInput(
-                    "TIFF: ColorMap must have 3*256 entries",
-                ));
-            }
-            Mode::Palette(cm)
+            Mode::Palette(Box::new(Palette8::from_tiff_colormap(&cm)?))
         }
         _ => {
             return Err(Error::Unsupported(
@@ -338,14 +322,11 @@ fn decode_image(data: &[u8], page: usize) -> Result<DecodedImage> {
             }
             (1, px)
         }
-        Mode::Palette(cm) => {
-            // Each 8-bit index selects a 16-bit RGB triple; the high byte is the 8-bit sample.
+        Mode::Palette(palette) => {
+            // Each 8-bit index selects an RGB triple from the colour table.
             let mut px = Vec::with_capacity(width * height * 3);
             for &idx in &packed {
-                let i = idx as usize;
-                px.push((cm[i] >> 8) as u8);
-                px.push((cm[256 + i] >> 8) as u8);
-                px.push((cm[512 + i] >> 8) as u8);
+                px.extend_from_slice(&palette.entry(idx));
             }
             (3, px)
         }
@@ -487,13 +468,14 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::encoder::TiffEncoder;
+    use gamut_core::{EncodeImage, ImageRef};
     use gamut_ifd::ByteOrder;
 
     #[test]
     fn rejects_truncated_file() {
         let dec = TiffDecoder::new();
-        let mut out = Vec::new();
-        assert!(dec.decode_to_rgb8(&[], &mut out).is_err());
+        let got: Result<ImageBuf<Rgb8>> = dec.decode_image(&[]);
+        assert!(got.is_err());
     }
 
     #[test]
@@ -507,14 +489,11 @@ mod tests {
             let mut tiff = Vec::new();
             TiffEncoder::new()
                 .with_byte_order(order)
-                .encode_gray8(&pixels, dims, &mut tiff)
+                .encode_image(ImageRef::<Gray8>::new(&pixels, dims).unwrap(), &mut tiff)
                 .expect("encode");
-            let mut out = Vec::new();
-            let got = TiffDecoder::new()
-                .decode_to_gray8(&tiff, &mut out)
-                .expect("decode");
-            assert_eq!((got.width, got.height), (5, 3));
-            assert_eq!(out, pixels);
+            let got: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+            assert_eq!(got.dimensions(), dims);
+            assert_eq!(got.as_samples(), pixels.as_slice());
         }
     }
 }

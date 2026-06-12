@@ -2,11 +2,11 @@
 //! container, mirroring the shape of [`gamut_avif::AvifEncoder`](https://docs.rs/gamut-avif).
 //!
 //! Both the lossless **VP8L** path (see [`crate::vp8l::encoder`]) and the lossy **VP8** path are
-//! implemented, for RGB ([`WebpEncoder::encode_rgb8`]) and RGBA ([`WebpEncoder::encode_rgba8`]) input;
-//! transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk.
+//! implemented, via the [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) and `EncodeImage<Rgba8>`
+//! impls; transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk.
 
 use gamut_color::{Bt601Range, Yuv420};
-use gamut_core::{Dimensions, Encoder, Error, Result};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8, Rgba8};
 use gamut_riff::{FourCc, Vp8xHeader, write_extended, write_simple_lossless, write_simple_lossy};
 
 use crate::alpha;
@@ -25,7 +25,7 @@ fn quality_to_quant(quality: u8) -> u8 {
 /// Encodes 8-bit RGB images to WebP.
 ///
 /// Construct with [`WebpEncoder::new`] (lossless), [`WebpEncoder::lossless`], or
-/// [`WebpEncoder::lossy`], then call [`WebpEncoder::encode_rgb8`] (or the [`Encoder`] trait method).
+/// [`WebpEncoder::lossy`], then encode via the [`EncodeImage`](gamut_core::EncodeImage) trait.
 #[derive(Debug, Clone, Default)]
 pub struct WebpEncoder {
     /// Encoder configuration (mode + quality).
@@ -67,22 +67,14 @@ impl WebpEncoder {
         self.config
     }
 
-    /// Encodes interleaved 8-bit RGB `pixels` (row-major, 3 bytes per pixel) described by `dims`,
-    /// appending the WebP file to `out` and returning the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `pixels.len()` does not equal `width * height * 3`, or
-    /// [`Error::Unsupported`] for the requested mode until its bitstream path is implemented.
-    pub fn encode_rgb8(&self, pixels: &[u8], dims: Dimensions, out: &mut Vec<u8>) -> Result<usize> {
-        let expected = (dims.width as usize)
-            .checked_mul(dims.height as usize)
-            .and_then(|n| n.checked_mul(3));
-        if expected != Some(pixels.len()) {
-            return Err(Error::InvalidInput(
-                "WebP: RGB buffer length does not match dimensions",
-            ));
-        }
+    /// Encodes interleaved 8-bit RGB `pixels` (row-major) of `dims`, appending the WebP file to
+    /// `out`. Backs the [`EncodeImage<Rgb8>`] impl; the buffer is already validated by [`ImageRef`].
+    fn encode_rgb8_inner(
+        &self,
+        pixels: &[u8],
+        dims: Dimensions,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
         match self.config.mode {
             WebpMode::Lossless => {
                 let argb: Vec<u32> = pixels
@@ -107,31 +99,16 @@ impl WebpEncoder {
         }
     }
 
-    /// Encodes interleaved 8-bit RGBA `pixels` (row-major, 4 bytes per pixel) described by `dims`,
-    /// appending the WebP file to `out` and returning the number of bytes written.
-    ///
-    /// A fully opaque image produces a simple file (no alpha overhead). A transparent one uses the
-    /// extended (`VP8X`) format: for the lossy path the color goes to a `VP8 ` chunk and the alpha to a
-    /// raw `ALPH` chunk (lossless alpha, lossy color); the lossless path carries alpha in the `VP8L`
-    /// bitstream itself.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `pixels.len()` does not equal `width * height * 4`.
-    pub fn encode_rgba8(
+    /// Encodes interleaved 8-bit RGBA `pixels` (row-major) of `dims`, appending the WebP file to
+    /// `out`. A fully opaque image produces a simple file; a transparent one uses the extended
+    /// (`VP8X`) format with a raw `ALPH` alpha chunk (lossy color) or in-bitstream alpha (lossless).
+    /// Backs the [`EncodeImage<Rgba8>`] impl; the buffer is already validated by [`ImageRef`].
+    fn encode_rgba8_inner(
         &self,
         pixels: &[u8],
         dims: Dimensions,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let expected = (dims.width as usize)
-            .checked_mul(dims.height as usize)
-            .and_then(|n| n.checked_mul(4));
-        if expected != Some(pixels.len()) {
-            return Err(Error::InvalidInput(
-                "WebP: RGBA buffer length does not match dimensions",
-            ));
-        }
         let file = match self.config.mode {
             WebpMode::Lossless => {
                 let argb: Vec<u32> = pixels
@@ -169,15 +146,22 @@ impl WebpEncoder {
     }
 }
 
-impl Encoder for WebpEncoder {
-    fn encode(&self, pixels: &[u8], dims: Dimensions, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_rgb8(pixels, dims, out)
+impl EncodeImage<Rgb8> for WebpEncoder {
+    fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_rgb8_inner(image.as_samples(), image.dimensions(), out)
+    }
+}
+
+impl EncodeImage<Rgba8> for WebpEncoder {
+    fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_rgba8_inner(image.as_samples(), image.dimensions(), out)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gamut_core::{DecodeImage, ImageBuf};
 
     fn dims(w: u32, h: u32) -> Dimensions {
         Dimensions {
@@ -197,9 +181,8 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_buffer_length() {
-        let mut out = Vec::new();
-        let err = WebpEncoder::new().encode_rgb8(&[0u8; 10], dims(2, 2), &mut out);
-        assert!(matches!(err, Err(Error::InvalidInput(_))));
+        // Validation now lives at the ImageRef boundary, before the encoder is even called.
+        assert!(ImageRef::<Rgb8>::new(&[0u8; 10], dims(2, 2)).is_err());
     }
 
     #[test]
@@ -209,17 +192,16 @@ mod tests {
         let mut out = Vec::new();
         let rgb = [0x10, 0x20, 0x30].repeat(4);
         let written = WebpEncoder::lossless()
-            .encode_rgb8(&rgb, dims(2, 2), &mut out)
+            .encode_image(ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap(), &mut out)
             .expect("encode");
         assert_eq!(written, out.len());
         assert_eq!(&out[0..4], b"RIFF");
 
-        let mut decoded = Vec::new();
-        let d = crate::WebpDecoder::new()
-            .decode_to_rgb8(&out, &mut decoded)
+        let decoded: ImageBuf<Rgb8> = crate::WebpDecoder::new()
+            .decode_image(&out)
             .expect("decode");
-        assert_eq!(d, dims(2, 2));
-        assert_eq!(decoded, rgb);
+        assert_eq!(decoded.dimensions(), dims(2, 2));
+        assert_eq!(decoded.as_samples(), rgb.as_slice());
     }
 
     #[test]
@@ -229,16 +211,15 @@ mod tests {
         let mut out = Vec::new();
         let rgb = [40u8, 80, 120].repeat(16 * 16);
         let written = WebpEncoder::lossy(60)
-            .encode_rgb8(&rgb, dims(16, 16), &mut out)
+            .encode_image(ImageRef::<Rgb8>::new(&rgb, dims(16, 16)).unwrap(), &mut out)
             .expect("lossy encode");
         assert_eq!(written, out.len());
         assert_eq!(&out[0..4], b"RIFF");
-        let mut decoded = Vec::new();
-        let d = crate::WebpDecoder::new()
-            .decode_to_rgb8(&out, &mut decoded)
+        let decoded: ImageBuf<Rgb8> = crate::WebpDecoder::new()
+            .decode_image(&out)
             .expect("decode");
-        assert_eq!(d, dims(16, 16));
-        assert_eq!(decoded.len(), 16 * 16 * 3);
+        assert_eq!(decoded.dimensions(), dims(16, 16));
+        assert_eq!(decoded.as_samples().len(), 16 * 16 * 3);
     }
 
     #[test]
@@ -259,16 +240,18 @@ mod tests {
             .collect();
         let mut file = Vec::new();
         WebpEncoder::lossy(75)
-            .encode_rgba8(&rgba, dims(w, h), &mut file)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims(w, h)).unwrap(),
+                &mut file,
+            )
             .expect("rgba encode");
         assert_eq!(&file[0..4], b"RIFF");
 
-        let mut out = Vec::new();
-        let d = crate::WebpDecoder::new()
-            .decode_to_rgba8(&file, &mut out)
+        let decoded: ImageBuf<Rgba8> = crate::WebpDecoder::new()
+            .decode_image(&file)
             .expect("rgba decode");
-        assert_eq!(d, dims(w, h));
-        let dec_alpha: Vec<u8> = out.chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(decoded.dimensions(), dims(w, h));
+        let dec_alpha: Vec<u8> = decoded.as_samples().chunks_exact(4).map(|p| p[3]).collect();
         let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
         assert_eq!(dec_alpha, src_alpha, "alpha must round-trip losslessly");
     }
@@ -279,7 +262,10 @@ mod tests {
         let rgba = [120u8, 60, 200, 0xff].repeat(16 * 16);
         let mut file = Vec::new();
         WebpEncoder::lossy(60)
-            .encode_rgba8(&rgba, dims(16, 16), &mut file)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims(16, 16)).unwrap(),
+                &mut file,
+            )
             .expect("rgba encode");
         // A fully-opaque image carries no alpha overhead — just a single `VP8 ` chunk.
         let ids: Vec<_> = RiffReader::new(&file)
@@ -290,11 +276,12 @@ mod tests {
     }
 
     #[test]
-    fn encoder_trait_delegates() {
+    fn encode_image_is_object_safe() {
         let mut out = Vec::new();
         let rgb = [7u8, 8, 9];
-        let written = (&WebpEncoder::new() as &dyn Encoder)
-            .encode(&rgb, dims(1, 1), &mut out)
+        let enc: &dyn EncodeImage<Rgb8> = &WebpEncoder::new();
+        let written = enc
+            .encode_image(ImageRef::<Rgb8>::new(&rgb, dims(1, 1)).unwrap(), &mut out)
             .expect("encode via trait");
         assert_eq!(written, out.len());
         assert_eq!(&out[0..4], b"RIFF");

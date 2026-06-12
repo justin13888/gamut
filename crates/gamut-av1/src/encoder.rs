@@ -2,8 +2,8 @@
 
 use crate::headers::{self, Av1StillConfig};
 use crate::tile::FrameEncoder;
-use gamut_color::Planar8;
 use gamut_color::cicp::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::{BitDepth, Planar8};
 use gamut_core::{Error, Result};
 
 /// The encoded AV1 temporal unit (sequence-header OBU + frame OBU) for one still image, plus the
@@ -27,8 +27,8 @@ pub struct ReconImage {
     pub width: u32,
     /// Display height.
     pub height: u32,
-    /// Bits per sample (8, 10, or 12); the planes carry values in `0..=(1 << bit_depth) - 1`.
-    pub bit_depth: u8,
+    /// Bits per sample; the planes carry values in `0..=(1 << bit_depth.bits()) - 1`.
+    pub bit_depth: BitDepth,
     /// Reconstructed planes (Y=G, U=B, V=R), each `width * height` samples, row-major, widened to
     /// `u16`.
     pub planes: [Vec<u16>; 3],
@@ -199,7 +199,9 @@ fn encode_with(
     let recon = ReconImage {
         width,
         height,
-        bit_depth: recon.bit_depth as u8,
+        bit_depth: BitDepth::from_bits(recon.bit_depth).ok_or(Error::Unsupported(
+            "AV1: unsupported reconstruction bit depth",
+        ))?,
         planes: recon_planes,
     };
     Ok((still, recon))

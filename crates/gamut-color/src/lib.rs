@@ -26,7 +26,7 @@ pub mod transfer;
 mod ycbcr;
 
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
-pub use format::{BitDepth, ChromaSubsampling, PixelFormat};
+pub use format::{BitDepth, ChromaSubsampling};
 pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
 pub use ycbcr::{Bt601Range, Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};

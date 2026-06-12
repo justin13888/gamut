@@ -1,9 +1,12 @@
 //! The TIFF encoder.
 
-use gamut_core::{Dimensions, Encoder, Error, Result};
+use gamut_core::{
+    Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, ImageRef, Indexed8, Result, Rgb8, Rgba8,
+};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
+use crate::palette::Palette8;
 use crate::{tags, writer};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
@@ -105,184 +108,24 @@ impl TiffEncoder {
         }
     }
 
-    /// Encodes an 8-bit grayscale image: one sample per pixel, `BlackIsZero`.
+    /// Encodes an 8-bit palette-colour image: one [`Indexed8`] sample per pixel selecting an entry
+    /// of `palette`.
     ///
-    /// `pixels` is `width * height` bytes, row-major. Returns the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `pixels` does not match `dims` or `dims` is empty.
-    pub fn encode_gray8(
-        &self,
-        pixels: &[u8],
-        dims: Dimensions,
-        out: &mut Vec<u8>,
-    ) -> Result<usize> {
-        self.encode_8bit(pixels, dims, 1, PhotometricInterpretation::BlackIsZero, out)
-    }
-
-    /// Encodes an 8-bit RGB image: three interleaved samples per pixel (`RGBRGB…`).
-    ///
-    /// `pixels` is `width * height * 3` bytes, row-major. Returns the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `pixels` does not match `dims` or `dims` is empty.
-    pub fn encode_rgb8(&self, pixels: &[u8], dims: Dimensions, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_8bit(pixels, dims, 3, PhotometricInterpretation::Rgb, out)
-    }
-
-    /// Encodes an 8-bit RGBA image: four interleaved samples per pixel (`RGBARGBA…`).
-    ///
-    /// The fourth sample is stored as *unassociated* alpha (`ExtraSamples = 2`, not premultiplied).
-    /// `pixels` is `width * height * 4` bytes, row-major. Returns the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `pixels` does not match `dims` or `dims` is empty.
-    pub fn encode_rgba8(
-        &self,
-        pixels: &[u8],
-        dims: Dimensions,
-        out: &mut Vec<u8>,
-    ) -> Result<usize> {
-        let (w, h) = (dims.width as usize, dims.height as usize);
-        if w == 0 || h == 0 {
-            return Err(Error::InvalidInput("TIFF: zero-sized image"));
-        }
-        let expected = w
-            .checked_mul(h)
-            .and_then(|n| n.checked_mul(4))
-            .ok_or(Error::InvalidInput("TIFF: image too large"))?;
-        if pixels.len() != expected {
-            return Err(Error::InvalidInput(
-                "TIFF: pixel buffer length does not match dimensions",
-            ));
-        }
-        self.encode_packed(
-            pixels,
-            dims,
-            &SampleLayout {
-                spp: 4,
-                bits_per_sample: 8,
-                stored_row_bytes: w * 4,
-                photometric: PhotometricInterpretation::Rgb,
-            },
-            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))], // unassociated alpha
-            out,
-        )
-    }
-
-    /// Encodes an 8-bit CMYK image: four interleaved ink samples per pixel (`CMYKCMYK…`).
-    ///
-    /// `PhotometricInterpretation = Separated` (5); each sample is ink dot coverage where 0 is 0 %
-    /// and 255 is 100 % (TIFF 6.0 §16). `pixels` is `width * height * 4` bytes, row-major. Returns
-    /// the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `pixels` does not match `dims` or `dims` is empty.
-    pub fn encode_cmyk8(
-        &self,
-        pixels: &[u8],
-        dims: Dimensions,
-        out: &mut Vec<u8>,
-    ) -> Result<usize> {
-        self.encode_8bit(pixels, dims, 4, PhotometricInterpretation::Cmyk, out)
-    }
-
-    /// Encodes a 1-bit bilevel image, stored as `BlackIsZero` (one bit per pixel, MSB-first).
-    ///
-    /// `pixels` is `width * height` bytes, one per pixel: zero is black, any non-zero value is
-    /// white. Returns the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `pixels` does not match `dims` or `dims` is empty.
-    pub fn encode_bilevel(
-        &self,
-        pixels: &[u8],
-        dims: Dimensions,
-        out: &mut Vec<u8>,
-    ) -> Result<usize> {
-        let (w, h) = (dims.width as usize, dims.height as usize);
-        if w == 0 || h == 0 {
-            return Err(Error::InvalidInput("TIFF: zero-sized image"));
-        }
-        if pixels.len()
-            != w.checked_mul(h)
-                .ok_or(Error::InvalidInput("TIFF: image too large"))?
-        {
-            return Err(Error::InvalidInput(
-                "TIFF: pixel buffer length does not match dimensions",
-            ));
-        }
-        let stored_row_bytes = w.div_ceil(8);
-        let mut packed = vec![0u8; stored_row_bytes * h];
-        for y in 0..h {
-            let row = &pixels[y * w..(y + 1) * w];
-            let dst = &mut packed[y * stored_row_bytes..(y + 1) * stored_row_bytes];
-            for (x, &p) in row.iter().enumerate() {
-                if p != 0 {
-                    dst[x / 8] |= 0x80 >> (x % 8);
-                }
-            }
-        }
-        self.encode_packed(
-            &packed,
-            dims,
-            &SampleLayout {
-                spp: 1,
-                bits_per_sample: 1,
-                stored_row_bytes,
-                photometric: PhotometricInterpretation::BlackIsZero,
-            },
-            &[],
-            out,
-        )
-    }
-
-    /// Encodes an 8-bit palette-colour image.
-    ///
-    /// `indices` is `width * height` bytes (one palette index per pixel); `palette` is `256 * 3`
-    /// bytes of 8-bit RGB (entry `i` is `palette[3*i..3*i+3]`). Returns the number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if `indices` does not match `dims`, `dims` is empty, or
-    /// `palette` is not exactly 256 RGB entries.
+    /// `indices` is the `width * height` index buffer (already validated by [`ImageRef`]); `palette`
+    /// is the 256-entry colour table. Returns the number of bytes written. Palette colour does not
+    /// fit the single-buffer [`EncodeImage`] shape (it needs the separate colour table), so it stays
+    /// an inherent method.
     pub fn encode_palette8(
         &self,
-        indices: &[u8],
-        palette: &[u8],
-        dims: Dimensions,
+        indices: ImageRef<'_, Indexed8>,
+        palette: &Palette8,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let (w, h) = (dims.width as usize, dims.height as usize);
-        if w == 0 || h == 0 {
-            return Err(Error::InvalidInput("TIFF: zero-sized image"));
-        }
-        if indices.len()
-            != w.checked_mul(h)
-                .ok_or(Error::InvalidInput("TIFF: image too large"))?
-        {
-            return Err(Error::InvalidInput(
-                "TIFF: index buffer length does not match dimensions",
-            ));
-        }
-        if palette.len() != 256 * 3 {
-            return Err(Error::InvalidInput("TIFF: palette must be 256 RGB entries"));
-        }
-        // ColorMap: 3×256 16-bit values (all reds, then greens, then blues); 8-bit → 16-bit by ×257.
-        let mut colormap = vec![0u16; 3 * 256];
-        for i in 0..256 {
-            colormap[i] = u16::from(palette[3 * i]) * 257;
-            colormap[256 + i] = u16::from(palette[3 * i + 1]) * 257;
-            colormap[512 + i] = u16::from(palette[3 * i + 2]) * 257;
-        }
+        let w = indices.width() as usize;
+        let colormap = palette.to_tiff_colormap();
         self.encode_packed(
-            indices,
-            dims,
+            indices.as_samples(),
+            indices.dimensions(),
             &SampleLayout {
                 spp: 1,
                 bits_per_sample: 8,
@@ -302,21 +145,10 @@ impl TiffEncoder {
         photometric: PhotometricInterpretation,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let (w, h) = (dims.width as usize, dims.height as usize);
-        if w == 0 || h == 0 {
-            return Err(Error::InvalidInput("TIFF: zero-sized image"));
-        }
-        let row_bytes = w
-            .checked_mul(spp)
-            .ok_or(Error::InvalidInput("TIFF: image too large"))?;
-        let expected = row_bytes
-            .checked_mul(h)
-            .ok_or(Error::InvalidInput("TIFF: image too large"))?;
-        if pixels.len() != expected {
-            return Err(Error::InvalidInput(
-                "TIFF: pixel buffer length does not match dimensions",
-            ));
-        }
+        // The caller is an EncodeImage impl handing us an ImageRef-validated buffer, so
+        // pixels.len() == width * height * spp holds and the product cannot overflow.
+        let row_bytes = dims.width as usize * spp;
+        debug_assert_eq!(pixels.len(), row_bytes * dims.height as usize);
         self.encode_packed(
             pixels,
             dims,
@@ -418,18 +250,16 @@ impl TiffEncoder {
         Ok((ifd, strips))
     }
 
-    /// Encodes several 8-bit RGB images as the pages of one multi-page TIFF.
+    /// Encodes several 8-bit [`Rgb8`] images as the pages of one multi-page TIFF.
     ///
-    /// Each page is `(pixels, dims)` with `pixels` of length `width * height * 3`. Returns the
-    /// number of bytes written.
+    /// Each page is a validated [`ImageRef`]. Returns the number of bytes written.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `pages` is empty or any page's buffer does not match its
-    /// dimensions.
+    /// Returns [`Error::InvalidInput`] if `pages` is empty.
     pub fn encode_pages_rgb8(
         &self,
-        pages: &[(&[u8], Dimensions)],
+        pages: &[ImageRef<'_, Rgb8>],
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         if pages.is_empty() {
@@ -437,26 +267,15 @@ impl TiffEncoder {
         }
         let total = pages.len() as u16;
         let mut images: Vec<(Ifd, Vec<Vec<u8>>)> = Vec::with_capacity(pages.len());
-        for (i, &(pixels, dims)) in pages.iter().enumerate() {
-            let (w, h) = (dims.width as usize, dims.height as usize);
-            if w == 0 || h == 0 {
-                return Err(Error::InvalidInput("TIFF: zero-sized image"));
-            }
-            let row_bytes = w
-                .checked_mul(3)
-                .ok_or(Error::InvalidInput("TIFF: image too large"))?;
-            if pixels.len() != row_bytes * h {
-                return Err(Error::InvalidInput(
-                    "TIFF: pixel buffer length does not match dimensions",
-                ));
-            }
+        for (i, page) in pages.iter().enumerate() {
+            let row_bytes = page.width() as usize * 3;
             let extra = [
                 (tags::NEW_SUBFILE_TYPE, Value::Long(vec![2])), // bit 1: page of a multi-page image
                 (tags::PAGE_NUMBER, Value::Short(vec![i as u16, total])),
             ];
             images.push(self.build_strip_image(
-                pixels,
-                dims,
+                page.as_samples(),
+                page.dimensions(),
                 &SampleLayout {
                     spp: 3,
                     bits_per_sample: 8,
@@ -603,9 +422,90 @@ impl TiffEncoder {
     }
 }
 
-impl Encoder for TiffEncoder {
-    fn encode(&self, pixels: &[u8], dims: Dimensions, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_rgb8(pixels, dims, out)
+impl EncodeImage<Gray8> for TiffEncoder {
+    fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_8bit(
+            image.as_samples(),
+            image.dimensions(),
+            1,
+            PhotometricInterpretation::BlackIsZero,
+            out,
+        )
+    }
+}
+
+impl EncodeImage<Rgb8> for TiffEncoder {
+    fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_8bit(
+            image.as_samples(),
+            image.dimensions(),
+            3,
+            PhotometricInterpretation::Rgb,
+            out,
+        )
+    }
+}
+
+impl EncodeImage<Cmyk8> for TiffEncoder {
+    /// `PhotometricInterpretation = Separated` (5); each sample is ink coverage (0 = 0 %, 255 = 100 %).
+    fn encode_image(&self, image: ImageRef<'_, Cmyk8>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_8bit(
+            image.as_samples(),
+            image.dimensions(),
+            4,
+            PhotometricInterpretation::Cmyk,
+            out,
+        )
+    }
+}
+
+impl EncodeImage<Rgba8> for TiffEncoder {
+    /// Stores the fourth sample as *unassociated* alpha (`ExtraSamples = 2`, not premultiplied).
+    fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        let row_bytes = image.width() as usize * 4;
+        self.encode_packed(
+            image.as_samples(),
+            image.dimensions(),
+            &SampleLayout {
+                spp: 4,
+                bits_per_sample: 8,
+                stored_row_bytes: row_bytes,
+                photometric: PhotometricInterpretation::Rgb,
+            },
+            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
+            out,
+        )
+    }
+}
+
+impl EncodeImage<Bilevel> for TiffEncoder {
+    /// Packs one byte per pixel (`0` = black, non-zero = white) MSB-first into bits, `BlackIsZero`.
+    fn encode_image(&self, image: ImageRef<'_, Bilevel>, out: &mut Vec<u8>) -> Result<usize> {
+        let (w, h) = (image.width() as usize, image.height() as usize);
+        let pixels = image.as_samples();
+        let stored_row_bytes = w.div_ceil(8);
+        let mut packed = vec![0u8; stored_row_bytes * h];
+        for y in 0..h {
+            let row = &pixels[y * w..(y + 1) * w];
+            let dst = &mut packed[y * stored_row_bytes..(y + 1) * stored_row_bytes];
+            for (x, &p) in row.iter().enumerate() {
+                if p != 0 {
+                    dst[x / 8] |= 0x80 >> (x % 8);
+                }
+            }
+        }
+        self.encode_packed(
+            &packed,
+            image.dimensions(),
+            &SampleLayout {
+                spp: 1,
+                bits_per_sample: 1,
+                stored_row_bytes,
+                photometric: PhotometricInterpretation::BlackIsZero,
+            },
+            &[],
+            out,
+        )
     }
 }
 
@@ -623,24 +523,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_mismatched_buffer() {
-        let enc = TiffEncoder::new();
-        let mut out = Vec::new();
+    fn image_ref_rejects_mismatched_buffer() {
+        // Validation now lives at the ImageRef boundary, so a wrong-length or zero-sized buffer
+        // can't even be constructed for the encoder's pixel types.
         let dims = Dimensions {
             width: 2,
             height: 2,
         };
-        assert!(enc.encode_rgb8(&[0; 11], dims, &mut out).is_err());
-        assert!(enc.encode_gray8(&[0; 3], dims, &mut out).is_err());
-        assert!(enc.encode_bilevel(&[0; 3], dims, &mut out).is_err());
+        assert!(ImageRef::<Rgb8>::new(&[0; 11], dims).is_err());
+        assert!(ImageRef::<Gray8>::new(&[0; 3], dims).is_err());
+        assert!(ImageRef::<Bilevel>::new(&[0; 3], dims).is_err());
         assert!(
-            enc.encode_rgb8(
+            ImageRef::<Rgb8>::new(
                 &[],
                 Dimensions {
                     width: 0,
                     height: 1
-                },
-                &mut out
+                }
             )
             .is_err()
         );
@@ -651,12 +550,15 @@ mod tests {
         let enc = TiffEncoder::new();
         let mut out = Vec::new();
         let n = enc
-            .encode_rgb8(
-                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                Dimensions {
-                    width: 2,
-                    height: 2,
-                },
+            .encode_image(
+                ImageRef::<Rgb8>::new(
+                    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                    Dimensions {
+                        width: 2,
+                        height: 2,
+                    },
+                )
+                .unwrap(),
                 &mut out,
             )
             .expect("encode");
@@ -671,12 +573,15 @@ mod tests {
         let mut out = Vec::new();
         TiffEncoder::new()
             .with_big_tiff(true)
-            .encode_rgb8(
-                &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                Dimensions {
-                    width: 2,
-                    height: 2,
-                },
+            .encode_image(
+                ImageRef::<Rgb8>::new(
+                    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                    Dimensions {
+                        width: 2,
+                        height: 2,
+                    },
+                )
+                .unwrap(),
                 &mut out,
             )
             .expect("encode");

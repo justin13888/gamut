@@ -15,7 +15,8 @@ use common::{
     libwebp_decode_rgba, libwebp_encode_lossless_rgba, libwebp_get_info, pattern_rgba,
     photo_like_rgba,
 };
-use gamut_webp::{Dimensions, WebpDecoder, WebpEncoder};
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
+use gamut_webp::{WebpDecoder, WebpEncoder};
 
 /// The standard dimension matrix exercised by the differential tests, including the awkward
 /// single-row / single-column / non-power-of-two cases.
@@ -72,16 +73,20 @@ fn gamut_decodes_libwebp_lossless_to_source() {
     for &(w, h) in DIMENSIONS {
         let rgba = pattern_rgba(w, h);
         let webp = libwebp_encode_lossless_rgba(&rgba, w, h);
-        let mut out = Vec::new();
-        let dims = WebpDecoder::new()
-            .decode_to_rgb8(&webp, &mut out)
+        let got: ImageBuf<Rgb8> = WebpDecoder::new()
+            .decode_image(&webp)
             .expect("gamut decode");
+        let dims = got.dimensions();
         assert_eq!(
             (dims.width, dims.height),
             (w, h),
             "dims mismatch at {w}x{h}"
         );
-        assert_eq!(out, rgba_to_rgb(&rgba), "pixel mismatch at {w}x{h}");
+        assert_eq!(
+            got.as_samples(),
+            rgba_to_rgb(&rgba).as_slice(),
+            "pixel mismatch at {w}x{h}"
+        );
     }
 }
 
@@ -93,12 +98,15 @@ fn libwebp_decodes_gamut_lossless_to_source() {
         let rgb = rgba_to_rgb(&pattern_rgba(w, h));
         let mut webp = Vec::new();
         WebpEncoder::lossless()
-            .encode_rgb8(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
+            .encode_image(
+                ImageRef::<Rgb8>::new(
+                    &rgb,
+                    Dimensions {
+                        width: w,
+                        height: h,
+                    },
+                )
+                .unwrap(),
                 &mut webp,
             )
             .expect("gamut encode");
@@ -113,12 +121,15 @@ fn libwebp_decodes_gamut_lossless_to_source() {
 fn assert_gamut_encode_libwebp_decode(rgb: &[u8], w: u32, h: u32, label: &str) {
     let mut webp = Vec::new();
     WebpEncoder::lossless()
-        .encode_rgb8(
-            rgb,
-            Dimensions {
-                width: w,
-                height: h,
-            },
+        .encode_image(
+            ImageRef::<Rgb8>::new(
+                rgb,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+            )
+            .unwrap(),
             &mut webp,
         )
         .expect("gamut encode");
@@ -177,12 +188,16 @@ fn gamut_decodes_libwebp_lossless_realistic_and_large() {
     for &(w, h) in DIMENSIONS.iter().chain(LARGE_DIMENSIONS) {
         let rgba = photo_like_rgba(w, h, 0x51ed);
         let webp = libwebp_encode_lossless_rgba(&rgba, w, h);
-        let mut out = Vec::new();
-        let dims = WebpDecoder::new()
-            .decode_to_rgb8(&webp, &mut out)
+        let got: ImageBuf<Rgb8> = WebpDecoder::new()
+            .decode_image(&webp)
             .expect("gamut decode");
+        let dims = got.dimensions();
         assert_eq!((dims.width, dims.height), (w, h), "dims at {w}x{h}");
-        assert_eq!(out, rgba_to_rgb(&rgba), "pixel mismatch at {w}x{h}");
+        assert_eq!(
+            got.as_samples(),
+            rgba_to_rgb(&rgba).as_slice(),
+            "pixel mismatch at {w}x{h}"
+        );
     }
 }
 
@@ -709,12 +724,15 @@ fn gamut_lossy_webp_decodes_correctly_in_libwebp() {
         let rgb = rgba_to_rgb(&photo_like_rgba(w, h, 0x1cef));
         let mut webp = Vec::new();
         WebpEncoder::lossy(90)
-            .encode_rgb8(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
+            .encode_image(
+                ImageRef::<Rgb8>::new(
+                    &rgb,
+                    Dimensions {
+                        width: w,
+                        height: h,
+                    },
+                )
+                .unwrap(),
                 &mut webp,
             )
             .expect("gamut encode");
@@ -751,13 +769,12 @@ fn gamut_decodes_libwebp_lossy_close_to_libwebp() {
     for &(w, h) in &[(64u32, 48u32), (128, 96), (49, 33)] {
         let rgba = photo_like_rgba(w, h, 0x2ab0);
         let webp = libwebp_encode_lossy_rgba(&rgba, w, h, 90.0);
-        let mut gamut = Vec::new();
-        WebpDecoder::new()
-            .decode_to_rgb8(&webp, &mut gamut)
+        let gamut: ImageBuf<Rgb8> = WebpDecoder::new()
+            .decode_image(&webp)
             .expect("gamut decode");
         let lib = rgba_to_rgb(&libwebp_decode_rgba(&webp).rgba);
         assert!(
-            max_abs(&gamut, &lib) <= 24,
+            max_abs(gamut.as_samples(), &lib) <= 24,
             "gamut vs libwebp decode differs by >24 at {w}x{h} (more than chroma upsampling)"
         );
     }
@@ -783,12 +800,15 @@ fn libwebp_decodes_gamut_lossy_alpha_exactly() {
             .collect();
         let mut file = Vec::new();
         WebpEncoder::lossy(70)
-            .encode_rgba8(
-                &rgba,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
+            .encode_image(
+                ImageRef::<Rgba8>::new(
+                    &rgba,
+                    Dimensions {
+                        width: w,
+                        height: h,
+                    },
+                )
+                .unwrap(),
                 &mut file,
             )
             .expect("gamut rgba encode");
@@ -822,18 +842,17 @@ fn gamut_decodes_libwebp_lossy_alpha_exactly() {
             })
             .collect();
         let webp = libwebp_encode_lossy_rgba(&rgba, w, h, 75.0);
-        let mut out = Vec::new();
-        let d = WebpDecoder::new()
-            .decode_to_rgba8(&webp, &mut out)
+        let got: ImageBuf<Rgba8> = WebpDecoder::new()
+            .decode_image(&webp)
             .expect("gamut decode libwebp lossy+alpha");
         assert_eq!(
-            d,
+            got.dimensions(),
             Dimensions {
                 width: w,
                 height: h
             }
         );
-        let dec_alpha: Vec<u8> = out.chunks_exact(4).map(|p| p[3]).collect();
+        let dec_alpha: Vec<u8> = got.as_samples().chunks_exact(4).map(|p| p[3]).collect();
         let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
         assert_eq!(
             dec_alpha, src_alpha,

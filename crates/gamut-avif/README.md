@@ -33,21 +33,22 @@ writer + AV1 symbol coder), [`gamut-av1`](../gamut-av1) (the AV1 keyframe encode
 
 ```rust
 use gamut_avif::AvifEncoder;
-use gamut_core::{Dimensions, Encoder};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 
 let width = 64;
 let height = 64;
 let rgb: Vec<u8> = vec![0; width * height * 3]; // 8-bit interleaved RGB
 
+let dims = Dimensions { width: width as u32, height: height as u32 };
 let mut avif = Vec::new();
 AvifEncoder::new()
-    .encode_rgb8(&rgb, Dimensions { width: width as u32, height: height as u32 }, &mut avif)
+    .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).expect("dimensions"), &mut avif)
     .expect("encode");
 std::fs::write("out.avif", &avif).unwrap();
 ```
 
-`AvifEncoder` also implements the [`gamut_core::Encoder`] trait (assuming the same 8-bit
-interleaved RGB layout).
+`AvifEncoder` implements [`gamut_core::EncodeImage<Rgb8>`], so the input is a typed
+[`gamut_core::ImageRef`] and handing it an unsupported pixel layout is a compile error.
 
 ## Status
 

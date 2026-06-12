@@ -2,15 +2,15 @@
 
 use gamut_av1::{EncodedStill, encode_still_intra, encode_still_lossless_identity};
 use gamut_color::Planar8;
-use gamut_core::{Dimensions, Encoder, Result};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
 use gamut_isobmff::{Av1cConfig, AvifStillImage, ImageTransform, NclxColr, write_avif_still};
 
 /// Encodes images to AVIF still images.
 ///
 /// 8-bit RGB in, mapped to AV1 identity-matrix 4:4:4. By default the encode is **lossless**;
 /// [`AvifEncoder::with_qindex`] selects a lossy quantizer (`base_q_idx`, `1..=255`). Use
-/// [`AvifEncoder::encode_rgb8`] for the explicit RGB entry point, or the [`Encoder`] trait (which
-/// assumes the same 8-bit interleaved RGB layout). [`AvifEncoder::with_rotation_ccw`] /
+/// Encode via the [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) trait, taking a typed
+/// [`ImageRef`]. [`AvifEncoder::with_rotation_ccw`] /
 /// [`AvifEncoder::with_mirror`] add `irot`/`imir` display-orientation transforms.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AvifEncoder {
@@ -53,26 +53,6 @@ impl AvifEncoder {
         self.transform.mirror_axis = Some(axis & 1);
         self
     }
-
-    /// Encodes 8-bit interleaved RGB (`width * height * 3` bytes, row-major, no padding) into a
-    /// complete AVIF file appended to `out`, returning the number of bytes written. Lossless unless
-    /// a lossy quantizer was set with [`AvifEncoder::with_qindex`].
-    ///
-    /// # Errors
-    ///
-    /// [`gamut_core::Error::InvalidInput`] if `rgb.len() != width * height * 3`, or
-    /// [`gamut_core::Error::Unsupported`] if the dimensions exceed AV1 level 6.0.
-    pub fn encode_rgb8(&self, rgb: &[u8], dims: Dimensions, out: &mut Vec<u8>) -> Result<usize> {
-        let planes = Planar8::from_rgb8_identity(rgb, dims.width, dims.height)?;
-        let still = if self.qindex == 0 {
-            encode_still_lossless_identity(&planes)?
-        } else {
-            encode_still_intra(&planes, self.qindex)?.0
-        };
-        let file = build_avif(&still, dims, self.transform);
-        out.extend_from_slice(&file);
-        Ok(file.len())
-    }
 }
 
 /// Wraps the encoded AV1 temporal unit in the AVIF container, stamping `av1C`/`colr`/`ispe`/`pixi`
@@ -110,10 +90,19 @@ fn build_avif(still: &EncodedStill, dims: Dimensions, transform: ImageTransform)
     write_avif_still(&image)
 }
 
-impl Encoder for AvifEncoder {
-    /// Encodes `pixels` as 8-bit interleaved RGB. See [`AvifEncoder::encode_rgb8`].
-    fn encode(&self, pixels: &[u8], dims: Dimensions, out: &mut Vec<u8>) -> Result<usize> {
-        self.encode_rgb8(pixels, dims, out)
+impl EncodeImage<Rgb8> for AvifEncoder {
+    /// Maps the RGB image to AV1 identity 4:4:4 planes and wraps the temporal unit in an AVIF file.
+    fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
+        let dims = image.dimensions();
+        let planes = Planar8::from_rgb8_identity_view(image);
+        let still = if self.qindex == 0 {
+            encode_still_lossless_identity(&planes)?
+        } else {
+            encode_still_intra(&planes, self.qindex)?.0
+        };
+        let file = build_avif(&still, dims, self.transform);
+        out.extend_from_slice(&file);
+        Ok(file.len())
     }
 }
 
@@ -127,15 +116,12 @@ mod tests {
             *b = (i * 37) as u8;
         }
         let mut out = Vec::new();
+        let dims = Dimensions {
+            width: w,
+            height: h,
+        };
         AvifEncoder::new()
-            .encode_rgb8(
-                &rgb,
-                Dimensions {
-                    width: w,
-                    height: h,
-                },
-                &mut out,
-            )
+            .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut out)
             .unwrap();
         out
     }
@@ -163,12 +149,15 @@ mod tests {
             let mut out = Vec::new();
             let n = AvifEncoder::new()
                 .with_qindex(q)
-                .encode_rgb8(
-                    &rgb,
-                    Dimensions {
-                        width: 48,
-                        height: 32,
-                    },
+                .encode_image(
+                    ImageRef::<Rgb8>::new(
+                        &rgb,
+                        Dimensions {
+                            width: 48,
+                            height: 32,
+                        },
+                    )
+                    .unwrap(),
                     &mut out,
                 )
                 .unwrap();
@@ -195,32 +184,14 @@ mod tests {
     }
 
     #[test]
-    fn encoder_trait_matches_rgb8() {
-        let rgb: Vec<u8> = (0..8 * 8 * 3u32).map(|i| (i * 3) as u8).collect();
-        let d = Dimensions {
-            width: 8,
-            height: 8,
-        };
-        let mut via_rgb = Vec::new();
-        AvifEncoder::new()
-            .encode_rgb8(&rgb, d, &mut via_rgb)
-            .unwrap();
-        let mut via_trait = Vec::new();
-        let n = AvifEncoder::new().encode(&rgb, d, &mut via_trait).unwrap();
-        assert_eq!(via_rgb, via_trait);
-        assert_eq!(n, via_trait.len());
-    }
-
-    #[test]
     fn rejects_wrong_length() {
-        let mut out = Vec::new();
-        let r = AvifEncoder::new().encode_rgb8(
+        // The wrong-length buffer can't even be wrapped in an ImageRef for the encoder.
+        let r = ImageRef::<Rgb8>::new(
             &[0; 10],
             Dimensions {
                 width: 4,
                 height: 4,
             },
-            &mut out,
         );
         assert!(r.is_err());
     }
@@ -230,12 +201,15 @@ mod tests {
         let mut out = vec![0xAA, 0xBB];
         let rgb = vec![128u8; 4 * 4 * 3];
         let n = AvifEncoder::new()
-            .encode_rgb8(
-                &rgb,
-                Dimensions {
-                    width: 4,
-                    height: 4,
-                },
+            .encode_image(
+                ImageRef::<Rgb8>::new(
+                    &rgb,
+                    Dimensions {
+                        width: 4,
+                        height: 4,
+                    },
+                )
+                .unwrap(),
                 &mut out,
             )
             .unwrap();
@@ -249,15 +223,12 @@ mod tests {
             *b = (i * 37) as u8;
         }
         let mut out = Vec::new();
-        enc.encode_rgb8(
-            &rgb,
-            Dimensions {
-                width: w,
-                height: h,
-            },
-            &mut out,
-        )
-        .unwrap();
+        let dims = Dimensions {
+            width: w,
+            height: h,
+        };
+        enc.encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut out)
+            .unwrap();
         out
     }
 

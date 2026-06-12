@@ -1,0 +1,279 @@
+//! Branded, length-validated interleaved image buffers: [`ImageRef`] (borrowed) and [`ImageBuf`]
+//! (owned).
+//!
+//! Both wrap a flat sample slice/vec of `P::Sample` (`u8` or `u16`) plus [`Dimensions`], branded
+//! with a [`Pixel`] marker `P`. The invariant `len == width * height * P::CHANNELS` (with non-zero
+//! dimensions) is checked **once**, at construction, so codecs receive a buffer that is already
+//! known-good and can pull the raw slice back out via [`ImageRef::as_samples`] with zero overhead —
+//! their hot loops are byte-identical to operating on a bare `&[u8]`. The brand is what makes a
+//! format mismatch (e.g. feeding [`crate::Cmyk8`] data to an [`crate::Rgba8`] encoder) a compile
+//! error instead of a silent reinterpretation.
+
+use core::marker::PhantomData;
+
+use crate::{Dimensions, Error, Pixel, Result};
+
+/// The required sample count for `dims` at `P`'s channel count, rejecting empty or overflowing
+/// dimensions. The single validation shared by every buffer constructor.
+fn expected_len<P: Pixel>(dims: Dimensions) -> Result<usize> {
+    if dims.is_empty() {
+        return Err(Error::InvalidInput("zero-sized image"));
+    }
+    dims.sample_count(P::CHANNELS)
+        .ok_or(Error::InvalidInput("image dimensions overflow usize"))
+}
+
+/// A borrowed, length-validated view of an interleaved image of pixel type `P`.
+///
+/// Cheap to copy (a slice + [`Dimensions`] + a zero-sized marker). Construct one at an API boundary
+/// with [`ImageRef::new`]; pass it to an [`crate::EncodeImage`] implementation.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageRef<'a, P: Pixel> {
+    data: &'a [P::Sample],
+    dims: Dimensions,
+    _p: PhantomData<P>,
+}
+
+impl<'a, P: Pixel> ImageRef<'a, P> {
+    /// Brands `data` as an image of `dims`, validating that its length is exactly
+    /// `width * height * P::CHANNELS`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `dims` is zero-sized, if `width * height * channels`
+    /// overflows `usize`, or if `data.len()` does not equal that product.
+    pub fn new(data: &'a [P::Sample], dims: Dimensions) -> Result<Self> {
+        let want = expected_len::<P>(dims)?;
+        if data.len() != want {
+            return Err(Error::InvalidInput(
+                "image buffer length does not match dimensions",
+            ));
+        }
+        Ok(Self {
+            data,
+            dims,
+            _p: PhantomData,
+        })
+    }
+
+    /// The image dimensions.
+    #[must_use]
+    pub fn dimensions(self) -> Dimensions {
+        self.dims
+    }
+
+    /// Image width in pixels.
+    #[must_use]
+    pub fn width(self) -> u32 {
+        self.dims.width
+    }
+
+    /// Image height in pixels.
+    #[must_use]
+    pub fn height(self) -> u32 {
+        self.dims.height
+    }
+
+    /// The raw interleaved samples (`width * height * P::CHANNELS` of them, row-major). The
+    /// zero-cost escape hatch a codec uses to feed its existing slice-based hot path.
+    #[must_use]
+    pub fn as_samples(self) -> &'a [P::Sample] {
+        self.data
+    }
+
+    /// Row `y` as a `width * P::CHANNELS`-sample slice.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `y >= height`.
+    #[must_use]
+    pub fn row(self, y: u32) -> &'a [P::Sample] {
+        let row_len = self.dims.width as usize * P::CHANNELS;
+        let start = y as usize * row_len;
+        &self.data[start..start + row_len]
+    }
+
+    /// Iterates the rows top to bottom, each a `width * P::CHANNELS`-sample slice.
+    #[must_use]
+    pub fn rows(self) -> impl ExactSizeIterator<Item = &'a [P::Sample]> {
+        let row_len = self.dims.width as usize * P::CHANNELS;
+        self.data.chunks_exact(row_len)
+    }
+
+    /// The `P::CHANNELS` samples of the pixel at `(x, y)`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `x >= width` or `y >= height`.
+    #[must_use]
+    pub fn pixel(self, x: u32, y: u32) -> &'a [P::Sample] {
+        let i = (y as usize * self.dims.width as usize + x as usize) * P::CHANNELS;
+        &self.data[i..i + P::CHANNELS]
+    }
+}
+
+/// An owned, length-validated interleaved image of pixel type `P`.
+///
+/// The owning counterpart of [`ImageRef`]; the natural return of a decoder, carrying its
+/// dimensions, samples, and layout brand as one unit so a caller can never misinterpret the result.
+#[derive(Debug, Clone)]
+#[must_use]
+pub struct ImageBuf<P: Pixel> {
+    data: Vec<P::Sample>,
+    dims: Dimensions,
+    _p: PhantomData<P>,
+}
+
+impl<P: Pixel> ImageBuf<P> {
+    /// Takes ownership of `data` as an image of `dims`, validating its length the same way as
+    /// [`ImageRef::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `dims` is zero-sized, if the sample count overflows
+    /// `usize`, or if `data.len()` does not equal `width * height * P::CHANNELS`.
+    pub fn new(data: Vec<P::Sample>, dims: Dimensions) -> Result<Self> {
+        // Reuse the single source of truth for the length invariant.
+        ImageRef::<P>::new(&data, dims)?;
+        Ok(Self {
+            data,
+            dims,
+            _p: PhantomData,
+        })
+    }
+
+    /// An all-zero image of `dims` (every sample `P::Sample::default()`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `dims` is zero-sized or the sample count overflows `usize`.
+    pub fn zeroed(dims: Dimensions) -> Result<Self> {
+        let want = expected_len::<P>(dims)?;
+        Ok(Self {
+            data: vec![P::Sample::default(); want],
+            dims,
+            _p: PhantomData,
+        })
+    }
+
+    /// Borrows this image as an [`ImageRef`]. Infallible — the invariant already holds.
+    #[must_use]
+    pub fn as_ref(&self) -> ImageRef<'_, P> {
+        ImageRef {
+            data: &self.data,
+            dims: self.dims,
+            _p: PhantomData,
+        }
+    }
+
+    /// The image dimensions.
+    #[must_use]
+    pub fn dimensions(&self) -> Dimensions {
+        self.dims
+    }
+
+    /// The raw interleaved samples, row-major.
+    #[must_use]
+    pub fn as_samples(&self) -> &[P::Sample] {
+        &self.data
+    }
+
+    /// Consumes the image, returning its backing sample vector.
+    #[must_use]
+    pub fn into_samples(self) -> Vec<P::Sample> {
+        self.data
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Rgb8, Rgb16};
+
+    fn dims(w: u32, h: u32) -> Dimensions {
+        Dimensions {
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn new_validates_length() {
+        let rgb = vec![0u8; 2 * 2 * 3];
+        let img = ImageRef::<Rgb8>::new(&rgb, dims(2, 2)).unwrap();
+        assert_eq!(img.dimensions(), dims(2, 2));
+        assert_eq!((img.width(), img.height()), (2, 2));
+        assert_eq!(img.as_samples().len(), 12);
+        // Too short and too long both rejected.
+        assert!(ImageRef::<Rgb8>::new(&rgb[..11], dims(2, 2)).is_err());
+        let long = vec![0u8; 13];
+        assert!(ImageRef::<Rgb8>::new(&long, dims(2, 2)).is_err());
+    }
+
+    #[test]
+    fn new_rejects_zero_sized() {
+        let empty: [u8; 0] = [];
+        assert!(ImageRef::<Rgb8>::new(&empty, dims(0, 4)).is_err());
+        assert!(ImageRef::<Rgb8>::new(&empty, dims(4, 0)).is_err());
+    }
+
+    #[test]
+    fn rejects_overflowing_dimensions() {
+        // width*height fits usize on 64-bit but *3 channels overflows; on 32-bit width*height
+        // already overflows. Either way expected_len returns the overflow error.
+        let big = dims(u32::MAX, u32::MAX);
+        assert!(ImageRef::<Rgb8>::new(&[], big).is_err());
+        assert!(ImageBuf::<Rgb8>::zeroed(big).is_err());
+    }
+
+    #[test]
+    fn row_and_pixel_access() {
+        // 3x2 RGB, pixel (x,y) tagged so we can spot misindexing.
+        let mut rgb = vec![0u8; 3 * 2 * 3];
+        for y in 0..2u32 {
+            for x in 0..3u32 {
+                let i = (y as usize * 3 + x as usize) * 3;
+                rgb[i] = x as u8;
+                rgb[i + 1] = y as u8;
+                rgb[i + 2] = 0xAA;
+            }
+        }
+        let img = ImageRef::<Rgb8>::new(&rgb, dims(3, 2)).unwrap();
+        assert_eq!(img.row(1).len(), 9);
+        assert_eq!(img.pixel(2, 1), &[2, 1, 0xAA]);
+        assert_eq!(img.pixel(0, 0), &[0, 0, 0xAA]);
+        let rows: Vec<_> = img.rows().collect();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.len() == 9));
+    }
+
+    #[test]
+    fn high_bit_depth_samples() {
+        // 2x1 RGB16 = 2 pixels * 3 channels = 6 u16 samples.
+        let rgb16 = vec![1000u16; 6];
+        let img = ImageRef::<Rgb16>::new(&rgb16, dims(2, 1)).unwrap();
+        assert_eq!(img.as_samples().len(), 6);
+        assert_eq!(img.pixel(1, 0), &[1000, 1000, 1000]);
+        // A u16 buffer of the wrong length is still rejected.
+        assert!(ImageRef::<Rgb16>::new(&[0u16; 5], dims(2, 1)).is_err());
+    }
+
+    #[test]
+    fn owned_buffer_roundtrips() {
+        let buf = ImageBuf::<Rgb8>::new(vec![7u8; 12], dims(2, 2)).unwrap();
+        assert_eq!(buf.dimensions(), dims(2, 2));
+        assert_eq!(buf.as_samples().len(), 12);
+        assert_eq!(buf.as_ref().pixel(0, 0), &[7, 7, 7]);
+        assert_eq!(buf.into_samples(), vec![7u8; 12]);
+        // Wrong length rejected on the owned path too.
+        assert!(ImageBuf::<Rgb8>::new(vec![0u8; 11], dims(2, 2)).is_err());
+    }
+
+    #[test]
+    fn zeroed_is_all_default_and_correct_length() {
+        let buf = ImageBuf::<Rgb8>::zeroed(dims(4, 3)).unwrap();
+        assert_eq!(buf.as_samples().len(), 4 * 3 * 3);
+        assert!(buf.as_samples().iter().all(|&s| s == 0));
+        assert!(ImageBuf::<Rgb8>::zeroed(dims(0, 3)).is_err());
+    }
+}

@@ -22,7 +22,7 @@ dropped; a dedicated effort is likely a better home for a full JXL encoder.
 ## Usage
 
 No public API yet — implementation pending. It will follow the same shape as
-[`gamut-avif`](../gamut-avif): an encoder type implementing [`gamut_core::Encoder`], reachable
+[`gamut-avif`](../gamut-avif): an encoder type implementing [`gamut_core::EncodeImage`], reachable
 through the umbrella crate's `jxl` feature.
 
 ## Status

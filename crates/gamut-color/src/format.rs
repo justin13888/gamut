@@ -1,27 +1,9 @@
-//! Pixel formats, bit depths, and chroma subsampling.
+//! Coded-plane bit depth and chroma subsampling.
 //!
-//! M0 uses [`PixelFormat::Rgb8`], [`BitDepth::Eight`], and [`ChromaSubsampling::Cs444`]; the other
-//! variants model the spec surface for later milestones (see `gamut-avif/STATUS.md`).
-
-/// Layout of an interleaved input pixel buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PixelFormat {
-    /// 8-bit RGB, 3 interleaved bytes per pixel, row-major, no padding.
-    Rgb8,
-    /// 8-bit RGBA, 4 interleaved bytes per pixel (alpha handled at M3).
-    Rgba8,
-}
-
-impl PixelFormat {
-    /// Bytes per pixel in this layout.
-    #[must_use]
-    pub fn bytes_per_pixel(self) -> usize {
-        match self {
-            PixelFormat::Rgb8 => 3,
-            PixelFormat::Rgba8 => 4,
-        }
-    }
-}
+//! These describe a codec's *coded* planes, distinct from an interleaved buffer's layout — that is
+//! the [`Pixel`](gamut_core::Pixel) vocabulary (`Rgb8`, `Rgba8`, …) in `gamut-core`. [`BitDepth`] is
+//! wired into the AV1 reconstruction; [`ChromaSubsampling`] models only `Cs444` (4:4:4) at M0, with
+//! the subsampled variants reserved for M2 (see `gamut-avif/STATUS.md`).
 
 /// Bits per sample of a coded plane.
 #[repr(u8)]
@@ -40,6 +22,18 @@ impl BitDepth {
     #[must_use]
     pub fn bits(self) -> u8 {
         self as u8
+    }
+
+    /// The [`BitDepth`] for `bits` (8, 10, or 12), or `None` for any other value. The inverse of
+    /// [`BitDepth::bits`], for turning a codec's raw integer bit depth back into the typed form.
+    #[must_use]
+    pub fn from_bits(bits: u32) -> Option<Self> {
+        match bits {
+            8 => Some(BitDepth::Eight),
+            10 => Some(BitDepth::Ten),
+            12 => Some(BitDepth::Twelve),
+            _ => None,
+        }
     }
 }
 
@@ -73,16 +67,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pixel_format_bpp() {
-        assert_eq!(PixelFormat::Rgb8.bytes_per_pixel(), 3);
-        assert_eq!(PixelFormat::Rgba8.bytes_per_pixel(), 4);
-    }
-
-    #[test]
     fn bit_depth_bits() {
         assert_eq!(BitDepth::Eight.bits(), 8);
         assert_eq!(BitDepth::Ten.bits(), 10);
         assert_eq!(BitDepth::Twelve.bits(), 12);
+        // from_bits is the inverse of bits() for the three valid depths; other values are None.
+        for d in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
+            assert_eq!(BitDepth::from_bits(u32::from(d.bits())), Some(d));
+        }
+        assert_eq!(BitDepth::from_bits(16), None);
+        assert_eq!(BitDepth::from_bits(0), None);
     }
 
     #[test]

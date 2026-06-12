@@ -2,9 +2,10 @@
 
 use clap::Subcommand;
 use gamut::color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, PixelFormat,
+    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients,
     TransferCharacteristics,
 };
+use gamut::core::{Cmyk8, Gray8, Pixel, Rgb8, Rgba8};
 
 use crate::error::CliError;
 
@@ -23,6 +24,16 @@ pub(crate) fn run(cmd: &ColorCommand) -> Result<(), CliError> {
             Ok(())
         }
     }
+}
+
+/// Prints a compile-time [`Pixel`] layout's constants.
+fn print_pixel<P: Pixel>(name: &str) {
+    println!(
+        "  {name}: {} ch, {} bytes/pixel, {:?}",
+        P::CHANNELS,
+        P::BYTES_PER_PIXEL,
+        P::MODEL,
+    );
 }
 
 /// Prints the gamut-color enums alongside their spec code points / descriptors.
@@ -68,10 +79,11 @@ fn list() {
         println!("  {:>3}  {range:?}", range.flag());
     }
 
-    println!("pixel formats:");
-    for pf in [PixelFormat::Rgb8, PixelFormat::Rgba8] {
-        println!("  {pf:?}: {} bytes/pixel", pf.bytes_per_pixel());
-    }
+    println!("pixel layouts (channels, bytes/pixel, colour model):");
+    print_pixel::<Gray8>("Gray8");
+    print_pixel::<Rgb8>("Rgb8");
+    print_pixel::<Rgba8>("Rgba8");
+    print_pixel::<Cmyk8>("Cmyk8");
 
     println!("bit depths:");
     for bd in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {

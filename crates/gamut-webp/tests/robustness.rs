@@ -3,6 +3,7 @@
 //! untrusted input cannot be *memory*-unsafe; this corpus additionally pins that no input drives it
 //! to *panic* (which would be a denial-of-service on a server decoding user uploads).
 
+use gamut_core::{DecodeImage, ImageBuf, Rgb8};
 use gamut_webp::WebpDecoder;
 use gamut_webp::vp8::frame::{decode_frame, encode_frame};
 
@@ -66,7 +67,6 @@ fn vp8_decode_survives_bit_flips() {
 #[test]
 fn webp_decoder_rejects_non_webp_containers() {
     let dec = WebpDecoder::new();
-    let mut out = Vec::new();
     for bad in [
         &b""[..],
         &b"RIFF"[..],
@@ -75,10 +75,7 @@ fn webp_decoder_rejects_non_webp_containers() {
         &[0u8; 64][..],
         &[0xffu8; 64][..],
     ] {
-        out.clear();
-        assert!(
-            dec.decode_to_rgb8(bad, &mut out).is_err(),
-            "non-WebP input must be rejected"
-        );
+        let r: gamut_core::Result<ImageBuf<Rgb8>> = dec.decode_image(bad);
+        assert!(r.is_err(), "non-WebP input must be rejected");
     }
 }

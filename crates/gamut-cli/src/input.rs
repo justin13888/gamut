@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use gamut::core::Dimensions;
+use gamut::core::{DecodeImage, Dimensions, ImageBuf, Rgb8, Rgba8};
 use gamut::webp::WebpDecoder;
 
 use crate::error::CliError;
@@ -49,14 +49,16 @@ fn decode_bytes(
 ) -> Result<(Vec<u8>, Dimensions), CliError> {
     if is_webp(bytes) {
         let decoder = WebpDecoder::new();
-        let mut out = Vec::new();
         // `?` maps `gamut::core::Error` to `CliError::Codec` via the existing `#[from]` impl.
-        let dims = if want_alpha {
-            decoder.decode_to_rgba8(bytes, &mut out)?
+        return Ok(if want_alpha {
+            let img: ImageBuf<Rgba8> = decoder.decode_image(bytes)?;
+            let dims = img.dimensions();
+            (img.into_samples(), dims)
         } else {
-            decoder.decode_to_rgb8(bytes, &mut out)?
-        };
-        return Ok((out, dims));
+            let img: ImageBuf<Rgb8> = decoder.decode_image(bytes)?;
+            let dims = img.dimensions();
+            (img.into_samples(), dims)
+        });
     }
 
     let decoded = image::load_from_memory(bytes).map_err(|source| CliError::Decode {
@@ -84,13 +86,17 @@ fn is_webp(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gamut::core::{EncodeImage, ImageRef};
     use gamut::webp::WebpEncoder;
 
     /// Encodes `rgba` as a lossless (so bit-exact) WebP file for the round-trip tests.
     fn lossless_webp(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         WebpEncoder::lossless()
-            .encode_rgba8(rgba, Dimensions { width, height }, &mut out)
+            .encode_image(
+                ImageRef::<Rgba8>::new(rgba, Dimensions { width, height }).unwrap(),
+                &mut out,
+            )
             .expect("encode webp");
         out
     }

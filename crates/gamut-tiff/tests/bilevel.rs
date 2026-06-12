@@ -1,6 +1,6 @@
 //! 1-bit bilevel images: tier-1 round-trips and libtiff cross-checks (P5b).
 
-use gamut_core::Dimensions;
+use gamut_core::{Bilevel, DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef};
 use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
 
 // Widths deliberately not multiples of 8 exercise the row bit-padding.
@@ -26,21 +26,21 @@ fn bilevel_roundtrips_in_gamut() {
             let mut tiff = Vec::new();
             TiffEncoder::new()
                 .with_compression(comp)
-                .encode_bilevel(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
+                .encode_image(
+                    ImageRef::<Bilevel>::new(
+                        &src,
+                        Dimensions {
+                            width: w,
+                            height: h,
+                        },
+                    )
+                    .unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
-            let mut out = Vec::new();
-            let dims = TiffDecoder::new()
-                .decode_to_gray8(&tiff, &mut out)
-                .expect("decode");
-            assert_eq!((dims.width, dims.height), (w, h));
-            assert_eq!(out, src, "{comp:?} {w}x{h}");
+            let got: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+            assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
+            assert_eq!(got.as_samples(), src.as_slice(), "{comp:?} {w}x{h}");
         }
     }
 }
@@ -53,12 +53,15 @@ fn gamut_bilevel_is_decoded_by_libtiff() {
             let mut tiff = Vec::new();
             TiffEncoder::new()
                 .with_compression(comp)
-                .encode_bilevel(
-                    &src,
-                    Dimensions {
-                        width: w,
-                        height: h,
-                    },
+                .encode_image(
+                    ImageRef::<Bilevel>::new(
+                        &src,
+                        Dimensions {
+                            width: w,
+                            height: h,
+                        },
+                    )
+                    .unwrap(),
                     &mut tiff,
                 )
                 .expect("encode");
@@ -76,11 +79,10 @@ fn libtiff_bilevel_is_decoded_by_gamut() {
         for &(w, h) in SIZES {
             let src = pattern(w, h);
             let tiff = libtiff_oracle::encode_bilevel(&src, w, h, comp).expect("libtiff encode");
-            let mut out = Vec::new();
-            TiffDecoder::new()
-                .decode_to_gray8(&tiff, &mut out)
+            let got: ImageBuf<Gray8> = TiffDecoder::new()
+                .decode_image(&tiff)
                 .expect("gamut decode");
-            assert_eq!(out, src, "{comp:?} {w}x{h}");
+            assert_eq!(got.as_samples(), src.as_slice(), "{comp:?} {w}x{h}");
         }
     }
 }

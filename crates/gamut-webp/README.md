@@ -26,15 +26,16 @@ WebP is one of gamut's three initial focus formats (alongside AVIF and JPEG).
 ## Usage
 
 The public API follows the same shape as [`gamut-avif`](../gamut-avif): a `WebpEncoder` implementing
-[`gamut_core::Encoder`] and a `WebpDecoder` implementing [`gamut_core::Decoder`], both reachable
-through the umbrella crate's `webp` feature. **Both codecs are fully implemented**, for RGB and RGBA:
+[`gamut_core::EncodeImage`] and a `WebpDecoder` implementing [`gamut_core::DecodeImage`], both
+reachable through the umbrella crate's `webp` feature. **Both codecs are fully implemented**, taking
+a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
 
 - **VP8L lossless** — `WebpEncoder::lossless` emits a conformant bit-exact stream; `WebpDecoder`
   decodes any conformant VP8L stream.
 - **VP8 lossy** — `WebpEncoder::lossy(quality)` runs the full intra key-frame codec (DC/V/H/TM and
   per-4×4 B_PRED prediction, the simple and normal loop filters, segmentation, token partitions, and
   skip); `WebpDecoder` decodes any conformant key frame.
-- **Alpha** — `encode_rgba8` / `decode_to_rgba8`. A transparent lossy image uses the extended
+- **Alpha** — `EncodeImage<Rgba8>` / `DecodeImage<Rgba8>`. A transparent lossy image uses the extended
   (`VP8X`) format with an `ALPH` chunk (raw or lossless); an opaque one stays a simple file.
 
 ## Status
