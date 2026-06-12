@@ -51,7 +51,31 @@ impl TiffDecoder {
     /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] for a
     /// feature not yet implemented.
     pub fn decode_to_rgb8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let img = decode_image(data)?;
+        self.decode_page_to_rgb8(data, 0, out)
+    }
+
+    /// Returns the number of pages (subfile IFDs) in a TIFF.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the file header or IFD chain is malformed.
+    pub fn page_count(&self, data: &[u8]) -> Result<usize> {
+        Ok(reader::read(data)?.ifds.len())
+    }
+
+    /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit RGB (page 0 is the first).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for malformed input or an out-of-range page, or
+    /// [`Error::Unsupported`] for a feature not yet implemented.
+    pub fn decode_page_to_rgb8(
+        &self,
+        data: &[u8],
+        page: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<Dimensions> {
+        let img = decode_image(data, page)?;
         match img.samples_per_pixel {
             1 => {
                 out.reserve(img.pixels.len() * 3);
@@ -82,7 +106,7 @@ impl TiffDecoder {
     /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] for a
     /// feature not yet implemented.
     pub fn decode_to_rgba8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let img = decode_image(data)?;
+        let img = decode_image(data, 0)?;
         match img.samples_per_pixel {
             1 => {
                 for &v in &img.pixels {
@@ -111,7 +135,7 @@ impl TiffDecoder {
     /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] if the image
     /// is not 4-sample (CMYK).
     pub fn decode_to_cmyk8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let img = decode_image(data)?;
+        let img = decode_image(data, 0)?;
         if img.samples_per_pixel != 4 {
             return Err(Error::Unsupported("TIFF: image is not 4-sample CMYK"));
         }
@@ -126,7 +150,7 @@ impl TiffDecoder {
     /// Returns [`Error::InvalidInput`] for malformed input, or [`Error::Unsupported`] if the image
     /// is not single-sample grayscale.
     pub fn decode_to_gray8(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let img = decode_image(data)?;
+        let img = decode_image(data, 0)?;
         if img.samples_per_pixel != 1 {
             return Err(Error::Unsupported("TIFF: image is not grayscale"));
         }
@@ -146,9 +170,12 @@ fn require_u32(ifd: &Ifd, tag: u16, what: &'static str) -> Result<u32> {
     ifd.get_u32(tag).ok_or(Error::InvalidInput(what))
 }
 
-fn decode_image(data: &[u8]) -> Result<DecodedImage> {
+fn decode_image(data: &[u8], page: usize) -> Result<DecodedImage> {
     let file = reader::read(data)?;
-    let ifd = &file.ifds[0];
+    let ifd = file
+        .ifds
+        .get(page)
+        .ok_or(Error::InvalidInput("TIFF: page index out of range"))?;
 
     let width = require_u32(ifd, tags::IMAGE_WIDTH, "TIFF: missing ImageWidth")? as usize;
     let height = require_u32(ifd, tags::IMAGE_LENGTH, "TIFF: missing ImageLength")? as usize;

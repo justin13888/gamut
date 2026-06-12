@@ -37,6 +37,6 @@ lossy → MAE/PSNR tolerance.
 | P14 | §16     | CMYK (Separated, 8-bit) | ✅ done |
 | P15 | §21     | YCbCr | ☐ |
 | P16 | §20,23  | RGB colorimetry + CIE L\*a\*b\* | ☐ |
-| P17 | §12,17  | Multi-page documents + halftone hints | ☐ |
+| P17 | §12     | Multi-page documents (halftone hints deferred) | ✅ done |
 | P18 | §22     | JPEG-in-TIFF (Compression=7) — deferrable tail | ☐ |
 | P19 | —       | Finalization: robustness corpus, interop sweep, docs | ☐ |

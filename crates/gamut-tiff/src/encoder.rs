@@ -318,6 +318,21 @@ impl TiffEncoder {
         if let Some((tw, tl)) = self.tiling {
             return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, out);
         }
+        let (ifd, strips) = self.build_strip_image(packed, dims, layout, extra_fields)?;
+        let bytes = writer::write_image(self.order, &ifd, &strips);
+        out.extend_from_slice(&bytes);
+        Ok(bytes.len())
+    }
+
+    /// Builds one strip image's directory (without `StripOffsets`/`StripByteCounts`) and its
+    /// compressed strips, applying the predictor and strip codec.
+    fn build_strip_image(
+        &self,
+        packed: &[u8],
+        dims: Dimensions,
+        layout: &SampleLayout,
+        extra_fields: &[(u16, Value)],
+    ) -> Result<(Ifd, Vec<Vec<u8>>)> {
         let h = dims.height as usize;
         let stored_row_bytes = layout.stored_row_bytes;
 
@@ -374,8 +389,58 @@ impl TiffEncoder {
         for (tag, value) in extra_fields {
             ifd.set(*tag, value.clone());
         }
+        Ok((ifd, strips))
+    }
 
-        let bytes = writer::write_image(self.order, &ifd, &strips);
+    /// Encodes several 8-bit RGB images as the pages of one multi-page TIFF.
+    ///
+    /// Each page is `(pixels, dims)` with `pixels` of length `width * height * 3`. Returns the
+    /// number of bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `pages` is empty or any page's buffer does not match its
+    /// dimensions.
+    pub fn encode_pages_rgb8(
+        &self,
+        pages: &[(&[u8], Dimensions)],
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        if pages.is_empty() {
+            return Err(Error::InvalidInput("TIFF: no pages to encode"));
+        }
+        let total = pages.len() as u16;
+        let mut images: Vec<(Ifd, Vec<Vec<u8>>)> = Vec::with_capacity(pages.len());
+        for (i, &(pixels, dims)) in pages.iter().enumerate() {
+            let (w, h) = (dims.width as usize, dims.height as usize);
+            if w == 0 || h == 0 {
+                return Err(Error::InvalidInput("TIFF: zero-sized image"));
+            }
+            let row_bytes = w
+                .checked_mul(3)
+                .ok_or(Error::InvalidInput("TIFF: image too large"))?;
+            if pixels.len() != row_bytes * h {
+                return Err(Error::InvalidInput(
+                    "TIFF: pixel buffer length does not match dimensions",
+                ));
+            }
+            let extra = [
+                (tags::NEW_SUBFILE_TYPE, Value::Long(vec![2])), // bit 1: page of a multi-page image
+                (tags::PAGE_NUMBER, Value::Short(vec![i as u16, total])),
+            ];
+            images.push(self.build_strip_image(
+                pixels,
+                dims,
+                &SampleLayout {
+                    spp: 3,
+                    bits_per_sample: 8,
+                    stored_row_bytes: row_bytes,
+                    photometric: PhotometricInterpretation::Rgb,
+                },
+                &extra,
+            )?);
+        }
+        let bytes = writer::write_multipage(self.order, &images);
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }

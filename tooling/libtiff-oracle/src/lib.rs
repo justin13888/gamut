@@ -510,6 +510,83 @@ unsafe fn write_tiles(
     Ok(())
 }
 
+/// Encodes several 8-bit RGB images as the pages of one multi-page TIFF.
+///
+/// Each page is `(pixels, width, height)` with `pixels` of length `width * height * 3`.
+///
+/// # Errors
+///
+/// Returns a message if a page's buffer does not match its dimensions or libtiff fails to write.
+pub fn encode_pages_rgb8(
+    pages: &[(&[u8], u32, u32)],
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("oracle.tiff");
+    let cpath = c_path(&path)?;
+    // SAFETY: `cpath` is valid; the handle is closed before we read the file back.
+    unsafe {
+        let mode = CString::new("w").map_err(|e| e.to_string())?;
+        let t = sys::TIFFOpen(cpath.as_ptr(), mode.as_ptr());
+        if t.is_null() {
+            return Err("TIFFOpen (write) failed".into());
+        }
+        let result = (|| {
+            for &(pixels, w, h) in pages {
+                if pixels.len() != (w as usize) * (h as usize) * 3 {
+                    return Err("pixel buffer does not match dimensions".to_string());
+                }
+                write_scanlines(
+                    t,
+                    pixels,
+                    w,
+                    h,
+                    3,
+                    8,
+                    sys::PHOTOMETRIC_RGB as u16,
+                    (w as usize) * 3,
+                    compression.code(),
+                    1,
+                )?;
+                if sys::TIFFWriteDirectory(t) != 1 {
+                    return Err("TIFFWriteDirectory failed".to_string());
+                }
+            }
+            Ok(())
+        })();
+        sys::TIFFClose(t);
+        result?;
+    }
+    std::fs::read(&path).map_err(|e| e.to_string())
+}
+
+/// Decodes page `page` of a multi-page TIFF with libtiff into interleaved 8-bit samples.
+///
+/// # Errors
+///
+/// Returns a message if the file cannot be parsed or the page is out of range.
+pub fn decode_page(bytes: &[u8], page: u32) -> Result<DecodedImage, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("oracle.tiff");
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let cpath = c_path(&path)?;
+    // SAFETY: `cpath` is valid; the handle is closed on every path.
+    unsafe {
+        let mode = CString::new("r").map_err(|e| e.to_string())?;
+        let t = sys::TIFFOpen(cpath.as_ptr(), mode.as_ptr());
+        if t.is_null() {
+            return Err("TIFFOpen (read) failed".into());
+        }
+        let out = if sys::TIFFSetDirectory(t, page) != 1 {
+            Err("TIFFSetDirectory failed".into())
+        } else {
+            read_scanlines(t)
+        };
+        sys::TIFFClose(t);
+        out
+    }
+}
+
 fn c_path(path: &Path) -> Result<CString, String> {
     CString::new(path.to_str().ok_or("non-UTF-8 temp path")?).map_err(|e| e.to_string())
 }

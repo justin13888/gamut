@@ -4,8 +4,12 @@
 //! Part 2 extension sections. Only the tags the encoder/decoder act on are named here; unknown
 //! tags are still parsed structurally by the reader.
 
+/// `NewSubfileType` (254) — a bit field describing the kind of data in this subfile.
+pub const NEW_SUBFILE_TYPE: u16 = 254;
 /// `ImageWidth` (256) — the number of columns, i.e. pixels per row.
 pub const IMAGE_WIDTH: u16 = 256;
+/// `PageNumber` (297) — the page index and total page count of a multi-page document.
+pub const PAGE_NUMBER: u16 = 297;
 /// `ImageLength` (257) — the number of rows (scanlines).
 pub const IMAGE_LENGTH: u16 = 257;
 /// `BitsPerSample` (258) — bits per component, one value per sample.
