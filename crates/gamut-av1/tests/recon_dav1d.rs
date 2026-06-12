@@ -681,3 +681,52 @@ fn superres_matches_dav1d() {
         }
     }
 }
+
+#[test]
+fn smooth_modes_match_dav1d() {
+    // Smooth, low-frequency content (a non-separable bilinear/quadratic field) so the per-block
+    // mode search prefers the non-directional SMOOTH family over DC and the directional copies:
+    // the SMOOTH blend (§7.11.2.6) reproduces a smooth ramp, while DC leaves the whole gradient as
+    // residual and a directional mode can only copy one edge. The SMOOTH predictors live in
+    // `predict_nondir`, so dav1d byte-equality exercises that path end-to-end. Mode choice is a
+    // prediction-SAD decision (independent of `qindex`), so any quantizer drives the same modes.
+    let smooth = |x: u32, y: u32| {
+        let (x, y) = (x as i32, y as i32);
+        let r = (40 + (x * 3 + y * 2) / 2).clamp(0, 255) as u8;
+        let g = (30 + (x * y) / 16).clamp(0, 255) as u8; // bilinear cross term (non-separable)
+        let b = (210 - (x * 2 + y * 3) / 3).clamp(0, 255) as u8;
+        [r, g, b]
+    };
+    // The non-square cases also pin a partition-edge regression: a smooth region keeps a single
+    // large PARTITION_NONE block, and at the frame edge that block extends past the MI-frame, so it
+    // must be force-split rather than coded whole (otherwise its block-size transform writes out of
+    // the reconstruction buffer). The geometries cover both overhang axes and block sizes: 31×17 →
+    // coded 32×24 overhangs a 32×32 block's rows; 17×31 → coded 24×32 overhangs its columns; 40×36 →
+    // coded 40×40 overhangs a 64×64 superblock. dav1d byte-equality proves the forced split is
+    // signaled correctly.
+    for &q in &[8u8, 40, 120] {
+        for &(w, h) in &[(16, 16), (32, 32), (24, 40), (31, 17), (17, 31), (40, 36)] {
+            check(&planes(w, h, smooth), q);
+        }
+    }
+}
+
+#[test]
+fn paeth_mode_matches_dav1d() {
+    // Separable additive content `f(x,y) = u(x) + v(y)` (no clamping, so it stays planar): PAETH's
+    // predictor `left + above - aboveleft` is then near-exact, while DC/SMOOTH/directional all leave
+    // a growing residual, so the mode search selects PAETH (§7.11.2). PAETH is the fourth
+    // non-directional mode in `predict_nondir`; dav1d byte-equality validates its reconstruction.
+    let separable = |x: u32, y: u32| {
+        let (x, y) = (x as i32, y as i32);
+        let r = (20 + x + 2 * y) as u8; // ≤ ~130 over the sizes below: stays planar, no clamp/wrap
+        let g = (30 + 2 * x + y) as u8;
+        let b = (60 + x + y) as u8;
+        [r, g, b]
+    };
+    for &q in &[6u8, 40, 120] {
+        for &(w, h) in &[(16, 16), (32, 32), (24, 40), (31, 17)] {
+            check(&planes(w, h, separable), q);
+        }
+    }
+}
