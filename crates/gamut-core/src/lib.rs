@@ -5,8 +5,10 @@
 //! here, so that callers get a single, consistent error surface regardless of format.
 #![forbid(unsafe_code)]
 
+mod image;
 mod pixel;
 
+pub use image::{ImageBuf, ImageRef};
 pub use pixel::{
     Bilevel, Cmyk8, ColorModel, Gray8, Gray16, Indexed8, Pixel, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
 };
