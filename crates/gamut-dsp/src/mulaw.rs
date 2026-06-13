@@ -141,6 +141,18 @@ mod tests {
         assert!(mu_dequantize(0, 0, MU).is_err());
     }
 
+    #[test]
+    fn round_half_away_from_zero_at_ties() {
+        // Half-ties round away from zero in both directions; non-ties round to nearest. Ties are the
+        // only inputs that distinguish the `x >= 0` sign split and the `x - 0.5` bias from their
+        // mutations, and the higher-level quantizer tests never land exactly on one.
+        assert_eq!(round_half_away_from_zero(2.5), 3.0);
+        assert_eq!(round_half_away_from_zero(-2.5), -3.0);
+        assert_eq!(round_half_away_from_zero(2.4), 2.0);
+        assert_eq!(round_half_away_from_zero(-2.4), -2.0);
+        assert_eq!(round_half_away_from_zero(0.0), 0.0);
+    }
+
     /// Golden vectors transcribed from chromahash `spec/test-vectors/unit-mulaw.json`
     /// (MIT OR Apache-2.0). Tier-1 `std` math reproduces chromahash's deterministic
     /// outputs to within this tolerance; the integer index matches exactly.
