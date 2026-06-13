@@ -112,6 +112,10 @@ mod tests {
         assert_eq!(MatrixCoefficients::Identity.code_point(), 0);
         assert_eq!(MatrixCoefficients::Bt709.code_point(), 1);
         assert_eq!(ColourPrimaries::Bt709.code_point(), 1);
+        // A second, non-1 primaries value pins `self as u16` (a constant `1` would pass on Bt709
+        // alone).
+        assert_eq!(ColourPrimaries::Bt2020.code_point(), 9);
+        assert_eq!(ColourPrimaries::DisplayP3.code_point(), 12);
         assert_eq!(TransferCharacteristics::Srgb.code_point(), 13);
         assert_eq!(TransferCharacteristics::Pq.code_point(), 16);
         assert_eq!(ColorRange::Full.flag(), 1);
