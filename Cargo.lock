@@ -290,6 +290,7 @@ dependencies = [
  "gamut-bitstream",
  "gamut-color",
  "gamut-core",
+ "gamut-dng",
  "gamut-dsp",
  "gamut-exif",
  "gamut-heic",
@@ -370,6 +371,13 @@ version = "0.2.0"
 dependencies = [
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "gamut-dng"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
 ]
 
 [[package]]

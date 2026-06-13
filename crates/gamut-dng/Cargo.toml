@@ -1,0 +1,19 @@
+[package]
+name = "gamut-dng"
+description = "DNG (Adobe Digital Negative) 1.7.1 raw-image encoder and decoder."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
