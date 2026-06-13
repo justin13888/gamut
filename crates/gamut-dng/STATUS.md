@@ -41,7 +41,7 @@ encode→decode round-trips guard every lossless path.
 | P12 | Ch4     | Deflate/ZIP (8) encode+decode + horizontal-difference predictor (`miniz_oxide`) | 🚧 in progress |
 | P13 | Ch4     | Lossless JPEG (7) encode+decode (Huffman + predictor) — the largest single codec | ☐ planned |
 | P14 | Ch2     | Tiled raw layout (`TileOffsets`/`TileByteCounts`) | ☐ planned |
-| P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) | ☐ planned |
+| P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
 | P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) embedding | ☐ planned |
 | P17 | Ch2     | Digests: MD5 `NewRawImageDigest`/`RawImageDigest`/`RawDataUniqueID` | ☐ planned |
 | P18 | Ch7     | `OpcodeList1/2/3` container + raw-blob attach (standard opcode library deferred) | ☐ planned |

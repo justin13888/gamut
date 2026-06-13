@@ -82,6 +82,24 @@ fn gamut_and_adobe_decoders_agree() {
 }
 
 #[test]
+fn bigtiff_roundtrips_and_validates() {
+    let raw = common::sample_raw(48, 32, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_big_tiff(true)
+        .with_dng_version([1, 7, 0, 0])
+        .with_backward_version([1, 7, 0, 0])
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    assert_eq!(&dng[2..3], &[0x2b], "BigTIFF magic 43");
+    // gamut decodes its own BigTIFF...
+    let decoded = DngDecoder::new().decode(&dng).expect("decode BigTIFF");
+    assert_eq!(decoded.raw, raw);
+    // ...and the Adobe SDK accepts it.
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept a BigTIFF DNG");
+}
+
+#[test]
 fn decoder_rejects_garbage() {
     assert!(DngDecoder::new().decode(b"not a dng").is_err());
     assert!(DngDecoder::new().decode(&[]).is_err());

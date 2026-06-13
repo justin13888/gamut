@@ -20,6 +20,7 @@ pub struct DngEncoder {
     order: ByteOrder,
     dng_version: [u8; 4],
     backward_version: [u8; 4],
+    big_tiff: bool,
 }
 
 impl Default for DngEncoder {
@@ -30,6 +31,7 @@ impl Default for DngEncoder {
             // parse the file) is the widely-supported 1.1.0.0.
             dng_version: [1, 4, 0, 0],
             backward_version: [1, 1, 0, 0],
+            big_tiff: false,
         }
     }
 }
@@ -63,9 +65,25 @@ impl DngEncoder {
         self
     }
 
-    /// The container variant this encoder writes.
+    /// Returns a copy of this encoder that writes **BigTIFF** (64-bit offsets) instead of classic
+    /// TIFF, letting a DNG exceed the 4 GiB classic limit (a DNG 1.7 feature).
+    ///
+    /// BigTIFF only widens the container's structural fields; every photometry, bit depth, and
+    /// profile applies unchanged. A reader detects the variant from the header, so the decoder needs
+    /// no flag. Callers should also declare a `DNGVersion`/`DNGBackwardVersion` of at least 1.7.0.0.
+    #[must_use]
+    pub fn with_big_tiff(mut self, big_tiff: bool) -> Self {
+        self.big_tiff = big_tiff;
+        self
+    }
+
+    /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
     fn variant(&self) -> Variant {
-        Variant::Classic
+        if self.big_tiff {
+            Variant::Big
+        } else {
+            Variant::Classic
+        }
     }
 
     /// Encodes a raw image — a CFA mosaic or a demosaiced `LinearRaw` — as a DNG, appending the
