@@ -28,6 +28,13 @@ install-cli:
 test:
     cargo test --workspace --all-features
 
+# Run performance benchmarks (Divan; issue #149). Like `just test`, this builds the codec
+# crates' cross-check-oracle dev-dependencies, so it needs the submodules + C toolchain.
+# To pass Divan flags (e.g. `--sample-count 50`) target one harness directly, since the
+# per-crate libtest stubs reject them: `cargo bench -p gamut-webp --bench codec -- <flags>`.
+bench:
+    cargo bench --workspace
+
 # Run tests with coverage (enforces 80% line coverage).
 # Bindings/binary crates (cli, wasm, ffi) and the dev-only `tooling/` oracles are
 # excluded — their entry points are not meaningfully unit-testable and would otherwise
