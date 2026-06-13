@@ -84,6 +84,10 @@ pub(crate) struct Ancillary {
     pub phys: Option<(u32, u32, u8)>,
     /// tIME: year, month, day, hour, minute, second.
     pub time: Option<[u8; 7]>,
+    /// iCCP: (profile name, raw ICC profile bytes); compressed at emit time.
+    pub iccp: Option<(String, Vec<u8>)>,
+    /// eXIf: raw EXIF/TIFF bytes (the chunk payload starts with the TIFF byte-order marker).
+    pub exif: Option<Vec<u8>>,
     /// tEXt / zTXt / iTXt entries, emitted in insertion order.
     texts: Vec<TextEntry>,
 }
@@ -134,6 +138,15 @@ impl Ancillary {
         if let Some(gamma) = self.gamma {
             chunk::write_chunk(out, *b"gAMA", &gamma.to_be_bytes());
         }
+        if let Some((name, profile)) = &self.iccp {
+            let mut data = name.clone().into_bytes();
+            data.push(0); // null separator
+            data.push(0); // compression method: 0 = zlib/deflate
+            DeflateEncoder::new()
+                .with_level(Level::Best)
+                .zlib_compress(profile, &mut data);
+            chunk::write_chunk(out, *b"iCCP", &data);
+        }
         if let Some(sbit) = &self.sbit {
             chunk::write_chunk(out, *b"sBIT", sbit);
         }
@@ -144,6 +157,9 @@ impl Ancillary {
 
     /// Emits the remaining ancillary chunks that precede `IDAT` (after any `PLTE`/`tRNS`).
     pub(crate) fn write_post_plte(&self, out: &mut Vec<u8>) {
+        if let Some(exif) = &self.exif {
+            chunk::write_chunk(out, *b"eXIf", exif);
+        }
         if let Some(bkgd) = &self.bkgd {
             chunk::write_chunk(out, *b"bKGD", bkgd);
         }
@@ -246,6 +262,28 @@ mod tests {
             vec![7, 234, 6, 13, 1, 2, 3]
         ); // 2026 = 0x07EA
         assert_eq!(find_chunk(&out, b"tEXt").unwrap(), b"Title\0hi".to_vec());
+    }
+
+    #[test]
+    fn iccp_and_exif_framing() {
+        let a = Ancillary {
+            iccp: Some(("p".to_string(), b"the quick brown fox".to_vec())),
+            exif: Some(vec![0x49, 0x49, 0x2A, 0x00]),
+            ..Default::default()
+        };
+        let mut pre = vec![0u8; 8];
+        a.write_pre_plte(&mut pre);
+        let iccp = find_chunk(&pre, b"iCCP").unwrap();
+        assert_eq!(&iccp[..2], b"p\0"); // profile name + null
+        assert_eq!(iccp[2], 0); // compression method
+        assert_eq!(iccp[3], 0x78); // zlib CMF byte begins the compressed profile
+
+        let mut post = vec![0u8; 8];
+        a.write_post_plte(&mut post);
+        assert_eq!(
+            find_chunk(&post, b"eXIf").unwrap(),
+            vec![0x49, 0x49, 0x2A, 0x00]
+        );
     }
 
     #[test]

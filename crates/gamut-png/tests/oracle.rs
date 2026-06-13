@@ -20,6 +20,19 @@ const SIZES: &[(u32, u32)] = &[
     (100, 70),
 ];
 
+/// Whether a chunk of the given 4-byte type appears in the PNG stream.
+fn contains_chunk(png: &[u8], ty: &[u8; 4]) -> bool {
+    let mut i = 8; // skip the signature
+    while i + 12 <= png.len() {
+        let len = u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+        if &png[i + 4..i + 8] == ty {
+            return true;
+        }
+        i += 12 + len;
+    }
+    false
+}
+
 /// A deterministic RGB pattern with enough structure to exercise filtering and matching.
 fn rgb_pattern(w: u32, h: u32) -> Vec<u8> {
     let mut v = Vec::with_capacity((w * h * 3) as usize);
@@ -305,6 +318,43 @@ fn ancillary_chunks_are_accepted_by_libpng() {
         .with_international_text("Author", "gämut")
         .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
         .expect("encode");
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(dec.pixels, src);
+}
+
+#[test]
+fn metadata_chunks_embed_and_image_survives() {
+    let (w, h) = (12u32, 12u32);
+    let src = rgb_pattern(w, h);
+    let dims = Dimensions::new(w, h).unwrap();
+
+    // Minimal-but-plausible EXIF (TIFF header + empty IFD) and ICC profile (132-byte header).
+    let exif = [
+        0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let mut icc = vec![0u8; 132];
+    icc[0..4].copy_from_slice(&132u32.to_be_bytes()); // profile size
+    icc[8..12].copy_from_slice(&0x0210_0000u32.to_be_bytes()); // version 2.1
+    icc[12..16].copy_from_slice(b"mntr");
+    icc[16..20].copy_from_slice(b"RGB ");
+    icc[20..24].copy_from_slice(b"XYZ ");
+    icc[36..40].copy_from_slice(b"acsp"); // ICC signature
+    let xmp = r#"<?xpacket begin=""?><x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta><?xpacket end="r"?>"#;
+
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .with_exif(&exif)
+        .with_icc_profile("test profile", &icc)
+        .with_xmp(xmp)
+        .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
+        .expect("encode");
+
+    assert!(contains_chunk(&png, b"eXIf"), "eXIf present");
+    assert!(contains_chunk(&png, b"iCCP"), "iCCP present");
+    assert!(contains_chunk(&png, b"iTXt"), "iTXt (XMP) present");
+
+    // libpng parses every chunk (decompressing iCCP); the image must survive unchanged.
     let dec = libpng_oracle::decode(&png);
     assert_eq!(dec.pixels, src);
 }

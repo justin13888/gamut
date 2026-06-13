@@ -106,6 +106,11 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
             (&raw mut cursor).cast::<c_void>(),
             Some(read_callback),
         );
+        // Treat recoverable (benign) errors in ancillary chunks as warnings: gamut-png frames
+        // metadata chunks (eXIf/iCCP/...) but does not validate their payloads, so an oracle
+        // checking the *image* should not abort on third-party metadata content. Critical errors
+        // (IHDR, IDAT, CRC) still abort.
+        sys::png_set_benign_errors(png, 1);
         sys::png_read_info(png, info);
 
         let width = sys::png_get_image_width(png, info);

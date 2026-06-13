@@ -175,6 +175,32 @@ impl PngEncoder {
         self
     }
 
+    /// Embeds raw EXIF metadata (eXIf chunk). `exif` is the EXIF/TIFF byte stream beginning with the
+    /// byte-order marker (`II`/`MM`) — for example the bytes produced by `gamut-exif`.
+    #[must_use]
+    pub fn with_exif(mut self, exif: &[u8]) -> Self {
+        self.ancillary.exif = Some(exif.to_vec());
+        self
+    }
+
+    /// Embeds an ICC colour profile (iCCP chunk), zlib-compressed. `profile` is the raw ICC profile
+    /// — for example the bytes produced by `gamut-icc`. (Mutually exclusive with [`Self::with_srgb`]
+    /// per the spec; set only one.)
+    #[must_use]
+    pub fn with_icc_profile(mut self, name: &str, profile: &[u8]) -> Self {
+        self.ancillary.iccp = Some((name.to_string(), profile.to_vec()));
+        self
+    }
+
+    /// Embeds an XMP packet (an iTXt chunk with the standard `XML:com.adobe.xmp` keyword). `xmp` is
+    /// the XMP/RDF document — for example the bytes produced by `gamut-xmp`.
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: &str) -> Self {
+        self.ancillary
+            .add_text_international("XML:com.adobe.xmp", xmp);
+        self
+    }
+
     /// Encodes an 8-bit indexed (palette) image. Indexed colour does not fit the single-buffer
     /// [`EncodeImage`] shape because it needs a separate palette, so it is an inherent method.
     ///
