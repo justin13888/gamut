@@ -39,6 +39,7 @@ mod adler32;
 mod bitwriter;
 mod block;
 mod encoder;
+mod huffman;
 mod zlib;
 
 pub use adler32::adler32;

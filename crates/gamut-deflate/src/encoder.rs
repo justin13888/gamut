@@ -2,7 +2,6 @@
 //! `compress` (raw RFC 1951) / `zlib_compress` (RFC 1950) entry points.
 
 use crate::adler32::adler32;
-use crate::bitwriter::BitWriter;
 use crate::{block, zlib};
 
 /// Compression effort, trading encode time for output size. Every level produces a correct stream;
@@ -52,11 +51,9 @@ impl DeflateEncoder {
     /// Encodes `data` as a raw DEFLATE stream (RFC 1951), appending to `out` and returning the
     /// number of bytes written. Any input — including empty — produces a valid stream.
     pub fn compress(&self, data: &[u8], out: &mut Vec<u8>) -> usize {
-        let start = out.len();
-        let mut w = BitWriter::new();
-        self.deflate(&mut w, data);
-        out.extend_from_slice(&w.finish());
-        out.len() - start
+        let body = self.deflate_body(data);
+        out.extend_from_slice(&body);
+        body.len()
     }
 
     /// Encodes `data` as a zlib stream (RFC 1950): a 2-byte header, the DEFLATE body, and a
@@ -65,19 +62,28 @@ impl DeflateEncoder {
     pub fn zlib_compress(&self, data: &[u8], out: &mut Vec<u8>) -> usize {
         let start = out.len();
         out.extend_from_slice(&zlib::header(self.level));
-        let mut w = BitWriter::new();
-        self.deflate(&mut w, data);
-        out.extend_from_slice(&w.finish());
+        out.extend_from_slice(&self.deflate_body(data));
         out.extend_from_slice(&adler32(1, data).to_be_bytes());
         out.len() - start
     }
 
-    /// Emits the DEFLATE body for `data` into `w`.
-    fn deflate(&self, w: &mut BitWriter, data: &[u8]) {
-        // D1: stored blocks for every level. Later phases route Fast/Default/Best through the
-        // fixed- and dynamic-Huffman block coders for actual compression.
-        let _ = self.level;
-        block::write_stored(w, data);
+    /// Builds the DEFLATE body for `data`, choosing the smallest block encoding the level offers.
+    fn deflate_body(&self, data: &[u8]) -> Vec<u8> {
+        match self.level {
+            // The uncompressed floor.
+            Level::Store => block::stored(data),
+            // D2: keep the smaller of stored vs fixed-Huffman (literals only). Later phases add
+            // LZ77 back-references and dynamic Huffman, choosing per block.
+            Level::Fast | Level::Default | Level::Best => {
+                let stored = block::stored(data);
+                let fixed = block::fixed(data);
+                if fixed.len() <= stored.len() {
+                    fixed
+                } else {
+                    stored
+                }
+            }
+        }
     }
 }
 
@@ -103,5 +109,26 @@ mod tests {
         // Trailer is the big-endian Adler-32 of the *uncompressed* data.
         let trailer = &out[out.len() - 4..];
         assert_eq!(trailer, adler32(1, data).to_be_bytes());
+    }
+
+    #[test]
+    fn fixed_huffman_beats_stored_on_ascii_text() {
+        // All-ASCII bytes (< 144) get 8-bit fixed codes, so a fixed block undercuts stored's
+        // per-block byte overhead. The encoder must pick it.
+        let data = b"the quick brown fox jumps over the lazy dog. ".repeat(40);
+        let mut fixed = Vec::new();
+        DeflateEncoder::new()
+            .with_level(Level::Fast)
+            .zlib_compress(&data, &mut fixed);
+        let mut store = Vec::new();
+        DeflateEncoder::new()
+            .with_level(Level::Store)
+            .zlib_compress(&data, &mut store);
+        assert!(
+            fixed.len() < store.len(),
+            "fixed {} should beat stored {}",
+            fixed.len(),
+            store.len()
+        );
     }
 }
