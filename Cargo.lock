@@ -373,6 +373,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gamut-deflate"
+version = "0.1.0"
+dependencies = [
+ "zlib-oracle",
+]
+
+[[package]]
 name = "gamut-dsp"
 version = "0.2.1"
 dependencies = [
@@ -1293,6 +1300,13 @@ dependencies = [
  "serde_json",
  "unicode-xid",
  "wasmparser",
+]
+
+[[package]]
+name = "zlib-oracle"
+version = "0.0.0"
+dependencies = [
+ "bindgen",
 ]
 
 [[package]]
