@@ -29,12 +29,12 @@ decoder returns the sensor samples (CFA mosaic or linear RGB) plus the parsed me
 ## Usage
 
 ```rust,ignore
-use gamut_dng::{DngEncoder, RawImage, CameraProfile};
+use gamut_dng::{CameraProfile, DngEncoder, RawImage};
 
+// `raw` is a RawImage (CFA mosaic or LinearRaw); `profile` is a CameraProfile.
 let mut dng = Vec::new();
 DngEncoder::new()
-    .with_camera_profile(profile)
-    .encode_cfa(&raw_image, &mut dng)
+    .encode(&raw, &profile, &mut dng)
     .expect("encode");
 ```
 

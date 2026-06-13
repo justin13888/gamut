@@ -11,7 +11,7 @@ fn encode(order: ByteOrder, width: u32, height: u32, bits: u16) -> Vec<u8> {
     let mut dng = Vec::new();
     DngEncoder::new()
         .with_byte_order(order)
-        .encode_cfa(&raw, &profile, &mut dng)
+        .encode(&raw, &profile, &mut dng)
         .expect("encode");
     dng
 }
@@ -33,4 +33,14 @@ fn adobe_sdk_validates_be_16bit_cfa() {
 fn adobe_sdk_validates_8bit_cfa() {
     let dng = encode(ByteOrder::LittleEndian, 32, 24, 8);
     gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept gamut's 8-bit DNG");
+}
+
+#[test]
+fn adobe_sdk_validates_linear_raw() {
+    let raw = common::sample_linear_raw(48, 36, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept gamut's LinearRaw DNG");
 }

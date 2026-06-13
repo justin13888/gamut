@@ -4,17 +4,17 @@ use gamut_core::{Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
 use crate::profile::{CameraProfile, srational, urational};
-use crate::raw::RawImage;
+use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{Compression, PhotometricInterpretation};
 use crate::writer::{ImageBlocks, write_cfa_dng};
 use crate::{preview, tags};
 
 /// Encoder for DNG (Adobe Digital Negative) raw images.
 ///
-/// [`encode_cfa`](Self::encode_cfa) writes a colour-filter-array raw image as a DNG: an IFD 0
-/// holding a small RGB preview plus the camera/colour-profile tags, and a raw sub-IFD holding the
-/// full-resolution mosaic. Defaults to little-endian (`II`) classic TIFF; richer photometries,
-/// compression, and metadata are added in later phases (see `STATUS.md`).
+/// [`encode`](Self::encode) writes a raw image — a CFA mosaic or a demosaiced `LinearRaw` — as a
+/// DNG: an IFD 0 holding a small RGB preview plus the camera/colour-profile tags, and a raw
+/// sub-IFD holding the full-resolution image. Defaults to little-endian (`II`) classic TIFF;
+/// richer compression and metadata are added in later phases (see `STATUS.md`).
 #[derive(Debug, Clone)]
 pub struct DngEncoder {
     order: ByteOrder,
@@ -68,26 +68,27 @@ impl DngEncoder {
         Variant::Classic
     }
 
-    /// Encodes a CFA (mosaic) raw image as a DNG, appending the bytes to `out` and returning the
-    /// number written.
+    /// Encodes a raw image — a CFA mosaic or a demosaiced `LinearRaw` — as a DNG, appending the
+    /// bytes to `out` and returning the number written.
     ///
-    /// `raw` supplies the sensor mosaic and its CFA description / levels; `profile` supplies the
+    /// `raw` supplies the sensor samples plus the photometry and levels; `profile` supplies the
     /// colour calibration and as-shot white balance. The output is an IFD 0 holding an RGB preview
-    /// plus the DNG/profile tags, with the full-resolution CFA image in a `SubIFDs` sub-IFD.
+    /// plus the DNG/profile tags, with the full-resolution image in a `SubIFDs` sub-IFD.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if the raw is not a 3-colour CFA or its bit depth is not 8 or
-    /// 16 (other depths need the bit-packing phase). Propagates buffer/validation errors.
-    pub fn encode_cfa(
+    /// Returns [`Error::Unsupported`] if the raw is not 3-colour (the profile is a `3 × 3` matrix)
+    /// or its bit depth is not 8 or 16 (other depths need the bit-packing phase). Propagates
+    /// buffer/validation errors.
+    pub fn encode(
         &self,
         raw: &RawImage,
         profile: &CameraProfile,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        if raw.cfa_plane_color().len() != 3 {
+        if color_plane_count(raw) != 3 {
             return Err(Error::Unsupported(
-                "DNG: only 3-colour (RGB) CFA is supported so far",
+                "DNG: only 3-colour (RGB) raw images are supported so far",
             ));
         }
         let bits = raw.bits_per_sample();
@@ -97,7 +98,7 @@ impl DngEncoder {
             ));
         }
 
-        let (preview_dims, preview_rgb) = preview::cfa_preview(raw);
+        let (preview_dims, preview_rgb) = preview::raw_preview(raw);
         let ifd0 = self.build_ifd0(profile, preview_dims);
         let raw_ifd = build_raw_ifd(raw);
 
@@ -192,40 +193,61 @@ impl DngEncoder {
     }
 }
 
-/// Builds the raw sub-IFD: the CFA image tags, the CFA pattern, and the black/white levels. The
-/// strip offsets are filled in by the writer.
+/// The number of distinct colour planes a raw's photometry carries (`CFAPlaneColor` length for a
+/// mosaic, the plane count for a linear image).
+fn color_plane_count(raw: &RawImage) -> usize {
+    match raw.photometry() {
+        RawPhotometry::Cfa { plane_color, .. } => plane_color.len(),
+        RawPhotometry::LinearRaw { planes } => usize::from(*planes),
+    }
+}
+
+/// Builds the raw sub-IFD: the image-data tags, the photometry-specific tags (CFA pattern, or
+/// `LinearRaw` planes), and the black/white levels. The strip offsets are filled in by the writer.
 fn build_raw_ifd(raw: &RawImage) -> Ifd {
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
-    let (rr, rc) = raw.cfa_repeat();
+    let spp = raw.samples_per_pixel();
     ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![0])); // full-resolution main image
     ifd.set(tags::IMAGE_WIDTH, count_value(dims.width));
     ifd.set(tags::IMAGE_LENGTH, count_value(dims.height));
     ifd.set(
         tags::BITS_PER_SAMPLE,
-        Value::Short(vec![raw.bits_per_sample()]),
+        Value::Short(vec![raw.bits_per_sample(); usize::from(spp)]),
     );
     ifd.set(
         tags::COMPRESSION,
         Value::Short(vec![Compression::Uncompressed.code()]),
     );
-    ifd.set(
-        tags::PHOTOMETRIC_INTERPRETATION,
-        Value::Short(vec![PhotometricInterpretation::Cfa.code()]),
-    );
-    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
     ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height));
-    ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![1])); // unsigned integer
-    ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![rr, rc]));
-    ifd.set(tags::CFA_PATTERN, Value::Byte(raw.cfa_pattern().to_vec()));
-    ifd.set(
-        tags::CFA_PLANE_COLOR,
-        Value::Byte(raw.cfa_plane_color().to_vec()),
-    );
-    ifd.set(
-        tags::CFA_LAYOUT,
-        Value::Short(vec![raw.cfa_layout().code()]),
-    );
+    ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![1; usize::from(spp)])); // unsigned integer
+    match raw.photometry() {
+        RawPhotometry::Cfa {
+            repeat,
+            pattern,
+            plane_color,
+            layout,
+        } => {
+            ifd.set(
+                tags::PHOTOMETRIC_INTERPRETATION,
+                Value::Short(vec![PhotometricInterpretation::Cfa.code()]),
+            );
+            ifd.set(
+                tags::CFA_REPEAT_PATTERN_DIM,
+                Value::Short(vec![repeat.0, repeat.1]),
+            );
+            ifd.set(tags::CFA_PATTERN, Value::Byte(pattern.clone()));
+            ifd.set(tags::CFA_PLANE_COLOR, Value::Byte(plane_color.clone()));
+            ifd.set(tags::CFA_LAYOUT, Value::Short(vec![layout.code()]));
+        }
+        RawPhotometry::LinearRaw { .. } => {
+            ifd.set(
+                tags::PHOTOMETRIC_INTERPRETATION,
+                Value::Short(vec![PhotometricInterpretation::LinearRaw.code()]),
+            );
+        }
+    }
     ifd.set(tags::BLACK_LEVEL_REPEAT_DIM, Value::Short(vec![1, 1]));
     ifd.set(tags::BLACK_LEVEL, count_value(raw.black_level()));
     ifd.set(tags::WHITE_LEVEL, count_value(raw.white_level()));
@@ -235,7 +257,7 @@ fn build_raw_ifd(raw: &RawImage) -> Ifd {
     ifd
 }
 
-/// Serialises mosaic samples to bytes at `bits` per sample in `order` (caller guarantees 8 or 16).
+/// Serialises samples to bytes at `bits` per sample in `order` (caller guarantees 8 or 16).
 fn serialize_samples(samples: &[u16], bits: u16, order: ByteOrder) -> Vec<u8> {
     if bits == 8 {
         samples.iter().map(|&s| s as u8).collect()
@@ -319,7 +341,7 @@ mod tests {
         let mut out = Vec::new();
         let n = DngEncoder::new()
             .with_byte_order(order)
-            .encode_cfa(&raw, &profile, &mut out)
+            .encode(&raw, &profile, &mut out)
             .expect("encode");
         assert_eq!(n, out.len());
 
@@ -398,7 +420,7 @@ mod tests {
         let mut out = Vec::new();
         assert!(
             DngEncoder::new()
-                .encode_cfa(&raw12, &profile, &mut out)
+                .encode(&raw12, &profile, &mut out)
                 .is_err()
         );
     }

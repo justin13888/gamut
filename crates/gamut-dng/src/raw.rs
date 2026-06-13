@@ -1,5 +1,5 @@
-//! The raw sensor image an encoder consumes: the sample buffer plus the colour-filter-array
-//! description and the black/white levels needed to interpret it.
+//! The raw sensor image an encoder consumes: the sample buffer plus the photometry (CFA mosaic or
+//! demosaiced linear) and the black/white levels needed to interpret it.
 
 use gamut_core::{Dimensions, Error, Result};
 
@@ -23,36 +23,55 @@ pub mod cfa_color {
     pub const WHITE: u8 = 6;
 }
 
-/// A raw, single-plane **colour-filter-array (mosaic)** sensor image plus the metadata required to
-/// store it as a DNG raw sub-IFD.
+/// How a raw image's samples map to colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawPhotometry {
+    /// A colour-filter-array (mosaic) image: one sample per pixel, its colour given by the
+    /// repeating pattern. Stored with `PhotometricInterpretation = CFA` and one sample per pixel.
+    Cfa {
+        /// The repeat-pattern dimensions `(rows, cols)` (e.g. `(2, 2)` for Bayer).
+        repeat: (u16, u16),
+        /// The pattern colours, row-major over the repeat tile (length `rows * cols`).
+        pattern: Vec<u8>,
+        /// The distinct CFA plane colours (e.g. `[R, G, B]`).
+        plane_color: Vec<u8>,
+        /// The physical CFA layout.
+        layout: CfaLayout,
+    },
+    /// A demosaiced ("linear") image: `planes` interleaved samples per pixel. Stored with
+    /// `PhotometricInterpretation = LinearRaw`.
+    LinearRaw {
+        /// Colour planes per pixel (e.g. 3 for RGB).
+        planes: u16,
+    },
+}
+
+/// A raw sensor image plus the metadata required to store it as a DNG raw sub-IFD.
 ///
-/// Samples are one unsigned integer per sensel, row-major, `width * height` long. The CFA pattern
-/// (e.g. `[R, G, G, B]` over a `2 × 2` repeat) names the colour of each sensel; `cfa_plane_color`
-/// lists the distinct plane colours (e.g. `[R, G, B]`). Black/white levels bound the linear range.
+/// Samples are unsigned integers, row-major, `width * height * samples_per_pixel` long — one per
+/// pixel for a [`Cfa`](RawPhotometry::Cfa) mosaic, `planes` interleaved per pixel for
+/// [`LinearRaw`](RawPhotometry::LinearRaw). Black/white levels bound the linear range.
 ///
-/// Built with [`RawImage::new_cfa`] (which validates the buffer and pattern sizes) and refined with
-/// the `with_*` setters; full bit-depth packing, multi-value levels, and linearisation arrive in
-/// later phases (see `STATUS.md`).
+/// Built with [`RawImage::new_cfa`] or [`RawImage::new_linear_raw`] (which validate the buffer and
+/// pattern) and refined with the `with_*` setters.
 #[derive(Debug, Clone)]
 pub struct RawImage {
     dims: Dimensions,
     bits_per_sample: u16,
+    samples_per_pixel: u16,
     black_level: u32,
     white_level: u32,
-    cfa_repeat: (u16, u16),
-    cfa_pattern: Vec<u8>,
-    cfa_plane_color: Vec<u8>,
-    cfa_layout: CfaLayout,
     active_area: Option<[u32; 4]>,
+    photometry: RawPhotometry,
     samples: Vec<u16>,
 }
 
 impl RawImage {
-    /// Creates a CFA raw image from a mosaic `samples` buffer.
+    /// Creates a CFA (mosaic) raw image from a single-plane `samples` buffer.
     ///
     /// `cfa_repeat` is `(rows, cols)` of the repeating pattern tile and `cfa_pattern` lists its
-    /// colours in row-major order (length `rows * cols`). Defaults: black level `0`, white level
-    /// `2^bits_per_sample - 1`, plane colours `[R, G, B]`, rectangular layout, full active area.
+    /// colours row-major (length `rows * cols`). Defaults: black `0`, white `2^bits - 1`, plane
+    /// colours `[R, G, B]`, rectangular layout, full active area.
     ///
     /// # Errors
     ///
@@ -65,33 +84,60 @@ impl RawImage {
         cfa_pattern: Vec<u8>,
         samples: Vec<u16>,
     ) -> Result<Self> {
-        if !(1..=16).contains(&bits_per_sample) {
-            return Err(Error::InvalidInput("DNG: bits_per_sample must be 1..=16"));
-        }
+        check_bits(bits_per_sample)?;
         let (rr, rc) = cfa_repeat;
         if rr == 0 || rc == 0 || cfa_pattern.len() != usize::from(rr) * usize::from(rc) {
             return Err(Error::InvalidInput(
                 "DNG: CFA pattern length must equal cfa_repeat rows * cols",
             ));
         }
-        let expected = dims
-            .num_pixels()
-            .ok_or(Error::InvalidInput("DNG: image dimensions overflow"))?;
-        if samples.len() != expected {
-            return Err(Error::InvalidInput(
-                "DNG: sample count must equal width * height",
-            ));
-        }
+        check_sample_count(dims, 1, &samples)?;
         Ok(Self {
             dims,
             bits_per_sample,
+            samples_per_pixel: 1,
             black_level: 0,
             white_level: white_level_default(bits_per_sample),
-            cfa_repeat,
-            cfa_pattern,
-            cfa_plane_color: vec![cfa_color::RED, cfa_color::GREEN, cfa_color::BLUE],
-            cfa_layout: CfaLayout::Rectangular,
             active_area: None,
+            photometry: RawPhotometry::Cfa {
+                repeat: cfa_repeat,
+                pattern: cfa_pattern,
+                plane_color: vec![cfa_color::RED, cfa_color::GREEN, cfa_color::BLUE],
+                layout: CfaLayout::Rectangular,
+            },
+            samples,
+        })
+    }
+
+    /// Creates a demosaiced ("linear") raw image of `planes` interleaved samples per pixel.
+    ///
+    /// Defaults: black `0`, white `2^bits - 1`, full active area.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `bits_per_sample` is not in `1..=16`, `planes` is zero,
+    /// or `samples.len()` is not `width * height * planes`.
+    pub fn new_linear_raw(
+        dims: Dimensions,
+        bits_per_sample: u16,
+        planes: u16,
+        samples: Vec<u16>,
+    ) -> Result<Self> {
+        check_bits(bits_per_sample)?;
+        if planes == 0 {
+            return Err(Error::InvalidInput(
+                "DNG: LinearRaw needs at least one plane",
+            ));
+        }
+        check_sample_count(dims, planes, &samples)?;
+        Ok(Self {
+            dims,
+            bits_per_sample,
+            samples_per_pixel: planes,
+            black_level: 0,
+            white_level: white_level_default(bits_per_sample),
+            active_area: None,
+            photometry: RawPhotometry::LinearRaw { planes },
             samples,
         })
     }
@@ -118,17 +164,21 @@ impl RawImage {
         self
     }
 
-    /// Sets the distinct CFA plane colours (default `[R, G, B]`). Returns `self` for chaining.
+    /// Sets the distinct CFA plane colours (no effect on a linear image). Returns `self`.
     #[must_use]
-    pub fn with_cfa_plane_color(mut self, cfa_plane_color: Vec<u8>) -> Self {
-        self.cfa_plane_color = cfa_plane_color;
+    pub fn with_cfa_plane_color(mut self, colors: Vec<u8>) -> Self {
+        if let RawPhotometry::Cfa { plane_color, .. } = &mut self.photometry {
+            *plane_color = colors;
+        }
         self
     }
 
-    /// Sets the CFA layout (default [`CfaLayout::Rectangular`]). Returns `self` for chaining.
+    /// Sets the CFA layout (no effect on a linear image). Returns `self`.
     #[must_use]
     pub fn with_cfa_layout(mut self, cfa_layout: CfaLayout) -> Self {
-        self.cfa_layout = cfa_layout;
+        if let RawPhotometry::Cfa { layout, .. } = &mut self.photometry {
+            *layout = cfa_layout;
+        }
         self
     }
 
@@ -144,6 +194,12 @@ impl RawImage {
         self.bits_per_sample
     }
 
+    /// Samples per pixel (1 for a CFA mosaic, the plane count for a linear image).
+    #[must_use]
+    pub fn samples_per_pixel(&self) -> u16 {
+        self.samples_per_pixel
+    }
+
     /// The black level (zero-light encoding value).
     #[must_use]
     pub fn black_level(&self) -> u32 {
@@ -156,40 +212,46 @@ impl RawImage {
         self.white_level
     }
 
-    /// The CFA repeat-pattern dimensions `(rows, cols)`.
-    #[must_use]
-    pub fn cfa_repeat(&self) -> (u16, u16) {
-        self.cfa_repeat
-    }
-
-    /// The CFA pattern colours, row-major over the repeat tile.
-    #[must_use]
-    pub fn cfa_pattern(&self) -> &[u8] {
-        &self.cfa_pattern
-    }
-
-    /// The distinct CFA plane colours.
-    #[must_use]
-    pub fn cfa_plane_color(&self) -> &[u8] {
-        &self.cfa_plane_color
-    }
-
-    /// The CFA layout.
-    #[must_use]
-    pub fn cfa_layout(&self) -> CfaLayout {
-        self.cfa_layout
-    }
-
     /// The active-area rectangle `[top, left, bottom, right]`, if set.
     #[must_use]
     pub fn active_area(&self) -> Option<[u32; 4]> {
         self.active_area
     }
 
-    /// The mosaic samples, row-major, `width * height` long.
+    /// The image's photometry (CFA mosaic or linear).
+    #[must_use]
+    pub fn photometry(&self) -> &RawPhotometry {
+        &self.photometry
+    }
+
+    /// The samples, row-major, `width * height * samples_per_pixel` long.
     #[must_use]
     pub fn samples(&self) -> &[u16] {
         &self.samples
+    }
+}
+
+/// Validates a bit depth is in the storable range.
+fn check_bits(bits: u16) -> Result<()> {
+    if (1..=16).contains(&bits) {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput("DNG: bits_per_sample must be 1..=16"))
+    }
+}
+
+/// Validates `samples.len()` equals `width * height * spp`.
+fn check_sample_count(dims: Dimensions, spp: u16, samples: &[u16]) -> Result<()> {
+    let expected = dims
+        .num_pixels()
+        .and_then(|p| p.checked_mul(usize::from(spp)))
+        .ok_or(Error::InvalidInput("DNG: image dimensions overflow"))?;
+    if samples.len() == expected {
+        Ok(())
+    } else {
+        Err(Error::InvalidInput(
+            "DNG: sample count must equal width * height * samples_per_pixel",
+        ))
     }
 }
 
@@ -222,18 +284,24 @@ mod tests {
         )
         .expect("valid");
         assert_eq!(raw.white_level(), 65535);
-        assert_eq!(raw.black_level(), 0);
-        assert_eq!(raw.cfa_plane_color(), &[0, 1, 2]);
-        assert_eq!(raw.cfa_layout(), CfaLayout::Rectangular);
+        assert_eq!(raw.samples_per_pixel(), 1);
+        assert!(matches!(raw.photometry(), RawPhotometry::Cfa { .. }));
+    }
+
+    #[test]
+    fn new_linear_raw_validates() {
+        let raw = RawImage::new_linear_raw(dims(2, 2), 16, 3, vec![0u16; 12]).expect("valid");
+        assert_eq!(raw.samples_per_pixel(), 3);
+        assert_eq!(raw.photometry(), &RawPhotometry::LinearRaw { planes: 3 });
+        // Wrong sample count (needs w*h*planes = 12).
+        assert!(RawImage::new_linear_raw(dims(2, 2), 16, 3, vec![0; 11]).is_err());
+        assert!(RawImage::new_linear_raw(dims(2, 2), 16, 0, vec![]).is_err());
     }
 
     #[test]
     fn new_cfa_rejects_bad_sizes() {
-        // Wrong sample count.
         assert!(RawImage::new_cfa(dims(4, 4), 16, (2, 2), vec![0, 1, 1, 2], vec![0; 15]).is_err());
-        // Pattern length mismatch.
         assert!(RawImage::new_cfa(dims(4, 4), 16, (2, 2), vec![0, 1, 1], vec![0; 16]).is_err());
-        // Out-of-range bit depth.
         assert!(RawImage::new_cfa(dims(4, 4), 17, (2, 2), vec![0, 1, 1, 2], vec![0; 16]).is_err());
     }
 
@@ -243,7 +311,8 @@ mod tests {
             .unwrap()
             .with_black_level(64)
             .with_white_level(4095)
-            .with_active_area([0, 0, 2, 2]);
+            .with_active_area([0, 0, 2, 2])
+            .with_cfa_layout(CfaLayout::Rectangular);
         assert_eq!(raw.black_level(), 64);
         assert_eq!(raw.white_level(), 4095);
         assert_eq!(raw.active_area(), Some([0, 0, 2, 2]));

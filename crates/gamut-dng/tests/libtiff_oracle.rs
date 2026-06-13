@@ -18,7 +18,7 @@ fn libtiff_reads_ifd0_preview() {
         let mut dng = Vec::new();
         DngEncoder::new()
             .with_byte_order(order)
-            .encode_cfa(&raw, &profile, &mut dng)
+            .encode(&raw, &profile, &mut dng)
             .expect("encode");
 
         let dec = libtiff_oracle::decode_tiff(&dng).expect("libtiff must parse the DNG's IFD 0");

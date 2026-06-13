@@ -33,8 +33,8 @@ encode→decode round-trips guard every lossless path.
 | P4  | Ch2–5   | **Keystone** uncompressed CFA DNG: IFD0 preview + raw sub-IFD, mandatory tags, strips, II/MM | ✅ done |
 | P5  | —       | `tooling/gamut-dng-oracle`: auto-extract + `cc`-build SDK + `extern "C"` shim | ✅ done |
 | P6  | —       | Adobe oracle gate on: gamut-encode → `dng_validate`; libtiff IFD-0 cross-check | ✅ done |
-| P7  | Ch4     | `LinearRaw` photometric (demosaiced RGB), samples-per-pixel / photometric handling | 🚧 in progress |
-| P8  | Ch6     | Colour & calibration: ColorMatrix1/2/3, CameraCalibration, Reduction/Forward, illuminants, profile tags + `CameraProfile` API | ☐ planned |
+| P7  | Ch4     | `LinearRaw` photometric (demosaiced RGB), samples-per-pixel / photometric handling | ✅ done |
+| P8  | Ch6     | Colour & calibration: ColorMatrix1/2/3, CameraCalibration, Reduction/Forward, illuminants, profile tags + `CameraProfile` API | 🚧 in progress |
 | P9  | Ch5     | Levels & geometry: BlackLevel(+RepeatDim/Delta), WhiteLevel, LinearizationTable, ActiveArea, MaskedAreas, DefaultScale/Crop, bit-depth packing (8/10/12/14/16) | ☐ planned |
 | P10 | Ch2     | Embedded preview/thumbnail in IFD0 (uncompressed RGB; JPEG preview optional) | ☐ planned |
 | P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs/ExifIFD), unpack samples, return raw image + metadata | ☐ planned |
