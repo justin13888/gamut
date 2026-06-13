@@ -31,6 +31,10 @@ fn main() {
             .args([
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DBUILD_SHARED_LIBS=OFF",
+                // Build position-independent objects so the static archive links into Rust's
+                // (PIE-by-default on modern toolchains) test binaries without R_X86_64_32
+                // relocation errors.
+                "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
                 // Disable every optional codec/dependency and the auxiliary build targets so the
                 // static archive is self-contained.
                 "-Dzlib=OFF",
