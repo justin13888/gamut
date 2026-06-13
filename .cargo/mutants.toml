@@ -26,3 +26,18 @@ exclude_globs = [
 # slow mutant on a loaded CI runner isn't misreported as a timeout, without burning minutes
 # per hang.
 minimum_test_timeout = 60
+
+# Provably-equivalent mutants: ones that cannot change observable behaviour, so no test can kill
+# them. They are excluded here (with the reason) rather than papered over with contrived tests.
+# Each regex is scoped to one function + operator so it can only match the intended mutant — never
+# a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
+# an entry. (Sibling #110 PRs each append their crate's entries; they union on merge.)
+exclude_re = [
+    # gamut-riff `Vp8xHeader::to_payload`: the feature-flag byte ORs five single bits each shifted to
+    # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
+    # gamut-riff `Vp8xHeader::from_payload`: the `le24` closure ORs three bytes at offsets 0/8/16
+    # (`b[0] | (b[1]<<8) | (b[2]<<16)`), again disjoint. Both functions' `| -> ^` are equivalent.
+    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
+    'replace \| with \^ in Vp8xHeader::to_payload',
+    'replace \| with \^ in Vp8xHeader::from_payload',
+]

@@ -214,6 +214,43 @@ mod tests {
     }
 
     #[test]
+    fn vp8x_all_flags_and_large_canvas_round_trip() {
+        // Every feature flag set and a canvas large enough that both 24-bit dimensions use all three
+        // bytes — the existing round-trip only sets `alpha` and a sub-2^16 canvas, so the other
+        // flags' shifts/masks and the high dimension byte (`>> 16`) went unexercised.
+        let h = Vp8xHeader {
+            icc_profile: true,
+            alpha: true,
+            exif_metadata: true,
+            xmp_metadata: true,
+            animation: true,
+            canvas_width: 0x12_3456 + 1,
+            canvas_height: 0x65_4321 + 1,
+        };
+        let p = h.to_payload();
+        // flags = icc(0x20) | alpha(0x10) | exif(0x08) | xmp(0x04) | anim(0x02).
+        assert_eq!(p[0], 0x3E);
+        // 24-bit little-endian width-1 then height-1.
+        assert_eq!(&p[4..7], &[0x56, 0x34, 0x12]);
+        assert_eq!(&p[7..10], &[0x21, 0x43, 0x65]);
+        assert_eq!(Vp8xHeader::from_payload(&p).unwrap(), h);
+    }
+
+    #[test]
+    fn vp8x_no_flags_round_trips() {
+        // All flags clear: each `flags & MASK` test (notably `alpha`, the one set above) is exercised
+        // in its *false* state, so a mask mutated to `|` (always-set) is caught.
+        let h = Vp8xHeader {
+            canvas_width: 1,
+            canvas_height: 1,
+            ..Default::default()
+        };
+        let p = h.to_payload();
+        assert_eq!(p[0], 0x00);
+        assert_eq!(Vp8xHeader::from_payload(&p).unwrap(), h);
+    }
+
+    #[test]
     fn from_payload_rejects_short_input() {
         assert!(Vp8xHeader::from_payload(&[0u8; 9]).is_err());
     }
