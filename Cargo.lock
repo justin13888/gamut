@@ -462,6 +462,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gamut-png"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+ "gamut-deflate",
+ "libpng-oracle",
+]
+
+[[package]]
 name = "gamut-riff"
 version = "0.1.1"
 dependencies = [
@@ -652,6 +661,13 @@ checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
  "cfg-if",
  "windows-link",
+]
+
+[[package]]
+name = "libpng-oracle"
+version = "0.0.0"
+dependencies = [
+ "bindgen",
 ]
 
 [[package]]
