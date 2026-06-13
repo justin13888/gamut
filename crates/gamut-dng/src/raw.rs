@@ -62,6 +62,7 @@ pub struct RawImage {
     black_level: u32,
     white_level: u32,
     active_area: Option<[u32; 4]>,
+    default_crop: Option<([u32; 2], [u32; 2])>,
     photometry: RawPhotometry,
     samples: Vec<u16>,
 }
@@ -99,6 +100,7 @@ impl RawImage {
             black_level: 0,
             white_level: white_level_default(bits_per_sample),
             active_area: None,
+            default_crop: None,
             photometry: RawPhotometry::Cfa {
                 repeat: cfa_repeat,
                 pattern: cfa_pattern,
@@ -137,6 +139,7 @@ impl RawImage {
             black_level: 0,
             white_level: white_level_default(bits_per_sample),
             active_area: None,
+            default_crop: None,
             photometry: RawPhotometry::LinearRaw { planes },
             samples,
         })
@@ -161,6 +164,15 @@ impl RawImage {
     #[must_use]
     pub fn with_active_area(mut self, active_area: [u32; 4]) -> Self {
         self.active_area = Some(active_area);
+        self
+    }
+
+    /// Sets the default-crop rectangle as `(origin, size)` in pixels relative to the active area —
+    /// the region a renderer crops to by default (`DefaultCropOrigin` / `DefaultCropSize`). Returns
+    /// `self` for chaining.
+    #[must_use]
+    pub fn with_default_crop(mut self, origin: [u32; 2], size: [u32; 2]) -> Self {
+        self.default_crop = Some((origin, size));
         self
     }
 
@@ -216,6 +228,12 @@ impl RawImage {
     #[must_use]
     pub fn active_area(&self) -> Option<[u32; 4]> {
         self.active_area
+    }
+
+    /// The default-crop `(origin, size)` in pixels, if set.
+    #[must_use]
+    pub fn default_crop(&self) -> Option<([u32; 2], [u32; 2])> {
+        self.default_crop
     }
 
     /// The image's photometry (CFA mosaic or linear).

@@ -55,3 +55,39 @@ fn adobe_sdk_validates_full_calibration_profile() {
     gamut_dng_oracle::validate_dng(&dng)
         .expect("Adobe DNG SDK must accept a dual-illuminant / forward-matrix profile");
 }
+
+/// The Adobe SDK must decode the stage-1 samples back to exactly what we packed — the definitive
+/// check that gamut's bit-packing (12/14/16-bit, MSB-first, byte-aligned rows) matches DNG.
+#[test]
+fn adobe_decodes_packed_cfa_samples_exactly() {
+    for bits in [12u16, 14, 16] {
+        let raw = common::sample_raw(64, 48, bits);
+        let mut dng = Vec::new();
+        DngEncoder::new()
+            .encode(&raw, &common::sample_profile(), &mut dng)
+            .expect("encode");
+        let decoded = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe reads raw");
+        assert_eq!((decoded.width, decoded.height, decoded.planes), (64, 48, 1));
+        assert_eq!(
+            decoded.samples,
+            raw.samples(),
+            "Adobe stage-1 must match the {bits}-bit input mosaic"
+        );
+    }
+}
+
+#[test]
+fn adobe_decodes_linear_raw_samples_exactly() {
+    let raw = common::sample_linear_raw(48, 36, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let decoded = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe reads raw");
+    assert_eq!((decoded.width, decoded.height, decoded.planes), (48, 36, 3));
+    assert_eq!(
+        decoded.samples,
+        raw.samples(),
+        "Adobe stage-1 LinearRaw must match input"
+    );
+}

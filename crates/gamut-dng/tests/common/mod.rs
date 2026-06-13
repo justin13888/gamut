@@ -33,6 +33,7 @@ pub fn sample_raw(width: u32, height: u32, bits: u16) -> RawImage {
     .with_black_level(0)
     .with_white_level(max)
     .with_active_area([0, 0, height, width])
+    .with_default_crop([0, 0], [width, height])
 }
 
 /// A synthetic 3-plane (RGB) demosaiced linear raw image of the given size and bit depth.

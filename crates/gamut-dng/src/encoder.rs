@@ -7,7 +7,7 @@ use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{Compression, PhotometricInterpretation};
 use crate::writer::{ImageBlocks, write_cfa_dng};
-use crate::{preview, tags};
+use crate::{bitpack, preview, tags};
 
 /// Encoder for DNG (Adobe Digital Negative) raw images.
 ///
@@ -77,9 +77,8 @@ impl DngEncoder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if the raw is not 3-colour (the profile is a `3 × 3` matrix)
-    /// or its bit depth is not 8 or 16 (other depths need the bit-packing phase). Propagates
-    /// buffer/validation errors.
+    /// Returns [`Error::Unsupported`] if the raw is not 3-colour (the profile is a `3 × 3` matrix).
+    /// Propagates buffer/validation errors.
     pub fn encode(
         &self,
         raw: &RawImage,
@@ -92,11 +91,8 @@ impl DngEncoder {
             ));
         }
         let bits = raw.bits_per_sample();
-        if bits != 8 && bits != 16 {
-            return Err(Error::Unsupported(
-                "DNG: only 8- and 16-bit samples are supported so far",
-            ));
-        }
+        let samples_per_row =
+            raw.dimensions().width as usize * usize::from(raw.samples_per_pixel());
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
         let ifd0 = self.build_ifd0(profile, preview_dims);
@@ -110,7 +106,12 @@ impl DngEncoder {
         let raw_blocks = ImageBlocks {
             offset_tag: tags::STRIP_OFFSETS,
             bytecount_tag: tags::STRIP_BYTE_COUNTS,
-            blocks: vec![serialize_samples(raw.samples(), bits, self.order)],
+            blocks: vec![bitpack::pack(
+                raw.samples(),
+                bits,
+                samples_per_row,
+                self.order,
+            )],
         };
 
         let bytes = write_cfa_dng(
@@ -300,20 +301,14 @@ fn build_raw_ifd(raw: &RawImage) -> Ifd {
     if let Some([t, l, b, r]) = raw.active_area() {
         ifd.set(tags::ACTIVE_AREA, Value::Long(vec![t, l, b, r]));
     }
-    ifd
-}
-
-/// Serialises samples to bytes at `bits` per sample in `order` (caller guarantees 8 or 16).
-fn serialize_samples(samples: &[u16], bits: u16, order: ByteOrder) -> Vec<u8> {
-    if bits == 8 {
-        samples.iter().map(|&s| s as u8).collect()
-    } else {
-        let mut out = Vec::with_capacity(samples.len() * 2);
-        for &s in samples {
-            out.extend_from_slice(&order.pack_u16(s));
-        }
-        out
+    if let Some((origin, size)) = raw.default_crop() {
+        ifd.set(
+            tags::DEFAULT_CROP_ORIGIN,
+            Value::Long(vec![origin[0], origin[1]]),
+        );
+        ifd.set(tags::DEFAULT_CROP_SIZE, Value::Long(vec![size[0], size[1]]));
     }
+    ifd
 }
 
 /// Stores a dimension/count as `SHORT` when it fits, else `LONG` (both valid per TIFF 6.0 §2).
@@ -368,17 +363,6 @@ mod tests {
         .with_black_level(8)
         .with_white_level(u32::from(max))
         .with_active_area([0, 0, h, w])
-    }
-
-    fn deserialize_samples(bytes: &[u8], bits: u16, order: ByteOrder) -> Vec<u16> {
-        if bits == 8 {
-            bytes.iter().map(|&b| u16::from(b)).collect()
-        } else {
-            bytes
-                .chunks_exact(2)
-                .map(|c| order.u16([c[0], c[1]]))
-                .collect()
-        }
     }
 
     fn roundtrip_structure(order: ByteOrder, bits: u16) {
@@ -439,7 +423,8 @@ mod tests {
         let len = raw_ifd
             .get_u32_vec(tags::STRIP_BYTE_COUNTS)
             .expect("counts")[0] as usize;
-        let got = deserialize_samples(&out[off..off + len], bits, order);
+        // sample_raw is 8x6, one plane (CFA), so samples_per_row = 8, rows = 6.
+        let got = crate::bitpack::unpack(&out[off..off + len], bits, 8, 6, order);
         assert_eq!(got, raw.samples(), "raw samples must round-trip");
     }
 
@@ -459,15 +444,30 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_inputs() {
+    fn cfa_dng_roundtrips_packed_depths() {
+        for bits in [10, 12, 14] {
+            roundtrip_structure(ByteOrder::LittleEndian, bits);
+            roundtrip_structure(ByteOrder::BigEndian, bits);
+        }
+    }
+
+    #[test]
+    fn rejects_non_rgb_inputs() {
         let profile = sample_profile();
-        // 12-bit packing is a later phase.
-        let raw12 = sample_raw(4, 4, 12);
-        let mut out = Vec::new();
+        // A 4-plane linear image is not a 3-colour profile target.
+        let raw4 =
+            RawImage::new_linear_raw(Dimensions::new(4, 4).unwrap(), 16, 4, vec![0; 64]).unwrap();
         assert!(
             DngEncoder::new()
-                .encode(&raw12, &profile, &mut out)
+                .encode(&raw4, &profile, &mut Vec::new())
                 .is_err()
+        );
+        // ...but a 12-bit RGB CFA now encodes (packed) fine.
+        let raw12 = sample_raw(4, 4, 12);
+        assert!(
+            DngEncoder::new()
+                .encode(&raw12, &profile, &mut Vec::new())
+                .is_ok()
         );
     }
 }

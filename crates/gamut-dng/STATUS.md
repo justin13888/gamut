@@ -35,9 +35,9 @@ encode→decode round-trips guard every lossless path.
 | P6  | —       | Adobe oracle gate on: gamut-encode → `dng_validate`; libtiff IFD-0 cross-check | ✅ done |
 | P7  | Ch4     | `LinearRaw` photometric (demosaiced RGB), samples-per-pixel / photometric handling | ✅ done |
 | P8  | Ch6     | Colour & calibration: ColorMatrix1/2, CameraCalibration, ForwardMatrix, illuminants, AnalogBalance, BaselineExposure, profile name/policy + `CameraProfile` API | ✅ done |
-| P9  | Ch5     | Levels & geometry: BlackLevel(+RepeatDim/Delta), WhiteLevel, LinearizationTable, ActiveArea, MaskedAreas, DefaultScale/Crop, bit-depth packing (8/10/12/14/16) | 🚧 in progress |
-| P10 | Ch2     | Embedded preview/thumbnail in IFD0 (uncompressed RGB; JPEG preview optional) | ☐ planned |
-| P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs/ExifIFD), unpack samples, return raw image + metadata | ☐ planned |
+| P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). LinearizationTable / MaskedAreas / BlackLevelDelta deferred | ✅ done |
+| P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
+| P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs/ExifIFD), unpack samples, return raw image + metadata | 🚧 in progress |
 | P12 | Ch4     | Deflate/ZIP (8) encode+decode + horizontal-difference predictor (`miniz_oxide`) | ☐ planned |
 | P13 | Ch4     | Lossless JPEG (7) encode+decode (Huffman + predictor) — the largest single codec | ☐ planned |
 | P14 | Ch2     | Tiled raw layout (`TileOffsets`/`TileByteCounts`) | ☐ planned |

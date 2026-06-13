@@ -36,6 +36,7 @@ pub mod raw;
 pub mod tags;
 pub mod values;
 
+mod bitpack;
 mod preview;
 mod writer;
 
