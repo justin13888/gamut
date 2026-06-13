@@ -115,7 +115,11 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
 
     // Flatten the tree, then link the top-level directories through the next-IFD chain.
     let mut nodes: Vec<Node> = Vec::new();
-    let top: Vec<usize> = file.ifds.iter().map(|ifd| push_node(ifd, &mut nodes)).collect();
+    let top: Vec<usize> = file
+        .ifds
+        .iter()
+        .map(|ifd| push_node(ifd, &mut nodes))
+        .collect();
     for pair in top.windows(2) {
         nodes[pair[0]].next = Some(pair[1]);
     }
@@ -335,9 +339,18 @@ mod tests {
         let exif_offset = root_ifd.get_u32(34665).expect("ExifIFD pointer");
 
         // Following the pointers re-parses the children exactly.
-        assert_eq!(read_ifd_at(&bytes, sub_offsets[0].into(), order, variant).unwrap(), raw_a);
-        assert_eq!(read_ifd_at(&bytes, sub_offsets[1].into(), order, variant).unwrap(), raw_b);
-        assert_eq!(read_ifd_at(&bytes, exif_offset.into(), order, variant).unwrap(), exif);
+        assert_eq!(
+            read_ifd_at(&bytes, sub_offsets[0].into(), order, variant).unwrap(),
+            raw_a
+        );
+        assert_eq!(
+            read_ifd_at(&bytes, sub_offsets[1].into(), order, variant).unwrap(),
+            raw_b
+        );
+        assert_eq!(
+            read_ifd_at(&bytes, exif_offset.into(), order, variant).unwrap(),
+            exif
+        );
     }
 
     #[test]
@@ -366,12 +379,22 @@ mod tests {
         let bytes = write(&file);
         let parsed = read(&bytes).expect("read");
         let child_off = parsed.ifds[0].get_u32(330).expect("SubIFDs");
-        let child_ifd = read_ifd_at(&bytes, child_off.into(), ByteOrder::LittleEndian, Variant::Classic)
-            .expect("child");
+        let child_ifd = read_ifd_at(
+            &bytes,
+            child_off.into(),
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+        )
+        .expect("child");
         assert_eq!(child_ifd.get(256), Some(&Value::Short(vec![32])));
         let gc_off = child_ifd.get_u32(34665).expect("nested ExifIFD");
-        let gc = read_ifd_at(&bytes, gc_off.into(), ByteOrder::LittleEndian, Variant::Classic)
-            .expect("grandchild");
+        let gc = read_ifd_at(
+            &bytes,
+            gc_off.into(),
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+        )
+        .expect("grandchild");
         assert_eq!(gc, grandchild);
     }
 

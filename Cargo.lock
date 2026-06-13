@@ -378,6 +378,7 @@ name = "gamut-dng"
 version = "0.1.0"
 dependencies = [
  "gamut-core",
+ "gamut-ifd",
 ]
 
 [[package]]

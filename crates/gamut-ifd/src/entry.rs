@@ -186,7 +186,10 @@ impl Ifd {
     pub fn add_sub_ifd(&mut self, tag: u16, ifd: Ifd) {
         match self.sub_ifds.iter_mut().find(|s| s.tag == tag) {
             Some(s) => s.ifds.push(ifd),
-            None => self.sub_ifds.push(SubIfd { tag, ifds: vec![ifd] }),
+            None => self.sub_ifds.push(SubIfd {
+                tag,
+                ifds: vec![ifd],
+            }),
         }
     }
 }

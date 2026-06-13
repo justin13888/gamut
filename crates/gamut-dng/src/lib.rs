@@ -30,14 +30,24 @@
 //! IFDs, offset loops, and truncation.
 #![forbid(unsafe_code)]
 
+pub mod encoder;
+pub mod profile;
+pub mod raw;
 pub mod tags;
 pub mod values;
 
+mod preview;
+mod writer;
+
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
-// not also depend on `gamut-core` directly. The remaining DNG-specific modules (the camera profile
-// and raw-image inputs, the encoder/decoder, and the compression schemes) land in subsequent
-// phases — see `STATUS.md`.
+// not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
+// The decoder and the compression schemes land in subsequent phases — see `STATUS.md`.
 pub use gamut_core::{Dimensions, Error, Result};
+pub use gamut_ifd::ByteOrder;
+
+pub use encoder::DngEncoder;
+pub use profile::CameraProfile;
+pub use raw::RawImage;
 pub use values::{
     CalibrationIlluminant, CfaLayout, Compression, PhotometricInterpretation, Predictor,
     PreviewColorSpace, ProfileEmbedPolicy, SampleFormat,

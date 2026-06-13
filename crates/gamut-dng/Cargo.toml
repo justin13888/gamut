@@ -17,3 +17,6 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
+# DNG is a TIFF/EP profile: the IFD container (incl. sub-IFD trees and the BigTIFF variant) is the
+# shared gamut-ifd primitive. `bigtiff` is enabled for the DNG 1.7 64-bit-offset variant.
+gamut-ifd = { workspace = true, features = ["bigtiff"] }
