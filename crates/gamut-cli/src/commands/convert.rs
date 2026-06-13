@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 use gamut::avif::AvifEncoder;
 use gamut::core::{EncodeImage, ImageRef, Rgb8, Rgba8};
+use gamut::png::{Level as PngLevel, PngEncoder};
 use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
 use gamut::webp::WebpEncoder;
 
@@ -45,6 +46,8 @@ pub(crate) enum OutputFormat {
     Webp,
     /// TIFF (8-bit RGB; uncompressed, or PackBits with `--packbits`).
     Tiff,
+    /// PNG — lossless; transparency preserved, with automatic lossless colour-type reduction.
+    Png,
 }
 
 /// Runs the `convert` command: decode the input, encode it, and report the result.
@@ -102,6 +105,22 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 .encode_image(image, &mut out)?;
             (rgb.len(), dims)
         }
+        OutputFormat::Png => {
+            // RGBA so transparency survives; auto-reduce drops it (and chooses grey/palette) when
+            // that is lossless.
+            let (rgba, dims) = decode_rgba8(&args.input)?;
+            tracing::info!(
+                width = dims.width,
+                height = dims.height,
+                bytes = rgba.len(),
+                "decoded input"
+            );
+            PngEncoder::new()
+                .with_compression(PngLevel::Best)
+                .with_auto_reduce(true)
+                .encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
+            (rgba.len(), dims)
+        }
     };
     tracing::info!(bytes = out.len(), lossy = args.lossy, "encoded output");
 
@@ -140,6 +159,7 @@ fn resolve_format(args: &ConvertArgs) -> Result<OutputFormat, CliError> {
         Some("avif") => Ok(OutputFormat::Avif),
         Some("webp") => Ok(OutputFormat::Webp),
         Some("tiff" | "tif") => Ok(OutputFormat::Tiff),
+        Some("png") => Ok(OutputFormat::Png),
         Some(other) => Err(CliError::UnsupportedOutput(other.to_string())),
         None => Err(CliError::UnsupportedOutput("<none>".to_string())),
     }

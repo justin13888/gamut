@@ -41,4 +41,6 @@ pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use color::ColorType;
 pub use encoder::PngEncoder;
 pub use filter::{FilterStrategy, FilterType};
+/// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
+pub use gamut_deflate::Level;
 pub use palette::PngPalette;

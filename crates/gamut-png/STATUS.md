@@ -27,4 +27,4 @@ with the source; output size is benchmarked against libpng at maximum compressio
 | P7 | §11.3 | Standard ancillary chunks: gAMA/cHRM/sRGB/sBIT/bKGD/pHYs/tIME/tEXt/zTXt/iTXt | ✅ done |
 | P8 | §11.3 | Metadata: eXIf, iCCP (deflate-compressed), iTXt-XMP (raw-bytes setters) | ✅ done |
 | P9 | §4.5 | **Space opt:** lossless palette/gray/alpha-drop reduction (size-estimate chosen) + brute-force filter strategy | ✅ done |
-| P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ⏳ todo |
+| P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ✅ done |

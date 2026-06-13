@@ -298,6 +298,7 @@ dependencies = [
  "gamut-iptc",
  "gamut-jxl",
  "gamut-metadata",
+ "gamut-png",
  "gamut-tiff",
  "gamut-tonemap",
  "gamut-vvc",

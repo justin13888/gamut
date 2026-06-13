@@ -54,6 +54,8 @@ pub use gamut_avif as avif;
 pub use gamut_heic as heic;
 #[cfg(feature = "jxl")]
 pub use gamut_jxl as jxl;
+#[cfg(feature = "png")]
+pub use gamut_png as png;
 #[cfg(feature = "tiff")]
 pub use gamut_tiff as tiff;
 #[cfg(feature = "tonemap")]
