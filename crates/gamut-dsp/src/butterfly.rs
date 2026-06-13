@@ -122,4 +122,24 @@ mod tests {
         h(&mut t, 0, 1, true, 16);
         assert_eq!(t, [-2, 8]);
     }
+
+    #[test]
+    fn hadamard_clips_to_signed_range() {
+        // The Clip3 in `h` only matters when the sum/difference leaves the signed r-bit range — the
+        // moderate-value tests above never trigger it, so the exact bounds (low = -(1<<(r-1)),
+        // high = (1<<(r-1)) - 1) go unchecked. With r = 4 the range is [-8, 7]; drive each of the
+        // sum and difference past each bound and pin the clamped result.
+        let mut t = [10i64, 5]; // sum 15 -> high 7; diff 5 in range
+        h(&mut t, 0, 1, false, 4);
+        assert_eq!(t, [7, 5]);
+        let mut t = [10i64, -5]; // sum 5 in range; diff 15 -> high 7
+        h(&mut t, 0, 1, false, 4);
+        assert_eq!(t, [5, 7]);
+        let mut t = [-10i64, -5]; // sum -15 -> low -8; diff -5 in range
+        h(&mut t, 0, 1, false, 4);
+        assert_eq!(t, [-8, -5]);
+        let mut t = [-10i64, 5]; // sum -5 in range; diff -15 -> low -8
+        h(&mut t, 0, 1, false, 4);
+        assert_eq!(t, [-5, -8]);
+    }
 }
