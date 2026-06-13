@@ -32,6 +32,7 @@ mod crc32;
 mod encoder;
 mod filter;
 mod ihdr;
+mod pack;
 mod palette;
 
 pub use color::ColorType;

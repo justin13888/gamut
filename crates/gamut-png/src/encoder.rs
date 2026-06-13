@@ -3,8 +3,8 @@
 //! palette, sub-byte depths, ancillary chunks, and space optimisations layer on in later phases.
 
 use gamut_core::{
-    EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Indexed8, Pixel, Result,
-    Rgb8, Rgb16, Rgba8, Rgba16,
+    Bilevel, EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Indexed8, Pixel,
+    Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
@@ -12,6 +12,7 @@ use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
 use crate::filter::{self, FilterStrategy};
 use crate::ihdr;
+use crate::pack;
 use crate::palette::PngPalette;
 
 /// IDAT payload cap. A decoder concatenates consecutive IDATs, so the split is transparent; a
@@ -75,13 +76,23 @@ impl PngEncoder {
             return Err(Error::InvalidInput("PNG: palette index out of range"));
         }
         let dims = image.dimensions();
+        // Use the smallest bit depth that holds every index — a free, lossless space win.
+        let depth = index_bit_depth(palette.len());
+        let packed;
+        let sample_bytes = if depth < 8 {
+            packed =
+                pack::pack_scanlines(indices, dims.width as usize, dims.height as usize, depth);
+            packed.as_slice()
+        } else {
+            indices
+        };
         let plte = palette.plte();
         let trns = palette.trns();
         Ok(self.write_png(
             (dims.width, dims.height),
-            indices,
+            sample_bytes,
             ColorType::Indexed,
-            8,
+            depth,
             |out| {
                 chunk::write_chunk(out, *b"PLTE", &plte);
                 if let Some(alpha) = trns {
@@ -138,8 +149,10 @@ impl PngEncoder {
         pre_idat: F,
         out: &mut Vec<u8>,
     ) -> usize {
-        let bpp = color.channels() * (bit_depth as usize / 8);
-        let row_bytes = width as usize * bpp;
+        // Stride in bytes per pixel (≥1, even for sub-byte depths) and the padded row length.
+        let bits_per_pixel = color.channels() * bit_depth as usize;
+        let bpp = bits_per_pixel.div_ceil(8).max(1);
+        let row_bytes = (width as usize * bits_per_pixel).div_ceil(8);
 
         let start = out.len();
         out.extend_from_slice(&SIGNATURE);
@@ -155,6 +168,16 @@ impl PngEncoder {
 
         chunk::write_chunk(out, *b"IEND", &[]);
         out.len() - start
+    }
+}
+
+/// The smallest indexed bit depth (1, 2, 4, or 8) that can address `palette_len` entries.
+fn index_bit_depth(palette_len: usize) -> u8 {
+    match palette_len {
+        0..=2 => 1,
+        3..=4 => 2,
+        5..=16 => 4,
+        _ => 8,
     }
 }
 
@@ -174,6 +197,26 @@ fn write_idat(out: &mut Vec<u8>, zlib_stream: &[u8]) {
 impl EncodeImage<Gray8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
         Ok(self.encode_8bit(image, ColorType::Grayscale, out))
+    }
+}
+impl EncodeImage<Bilevel> for PngEncoder {
+    /// Bilevel pixels (0 = black, non-zero = white) are packed to a 1-bit greyscale image.
+    fn encode_image(&self, image: ImageRef<'_, Bilevel>, out: &mut Vec<u8>) -> Result<usize> {
+        let dims = image.dimensions();
+        let bits: Vec<u8> = image
+            .as_samples()
+            .iter()
+            .map(|&v| u8::from(v != 0))
+            .collect();
+        let packed = pack::pack_scanlines(&bits, dims.width as usize, dims.height as usize, 1);
+        Ok(self.write_png(
+            (dims.width, dims.height),
+            &packed,
+            ColorType::Grayscale,
+            1,
+            |_| {},
+            out,
+        ))
     }
 }
 impl EncodeImage<Rgb8> for PngEncoder {

@@ -4,8 +4,8 @@
 //! and asserting the pixels (and IHDR fields) match the source exactly.
 
 use gamut_core::{
-    Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Indexed8, Rgb8,
-    Rgb16, Rgba8, Rgba16,
+    Bilevel, Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Indexed8,
+    Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::Level;
 use gamut_png::{FilterStrategy, FilterType, PngEncoder, PngPalette};
@@ -201,10 +201,11 @@ fn indexed8_with_palette_and_transparency_round_trips() {
         )
         .expect("encode");
 
-    // Raw decode: it is a palette image and the indices survive exactly.
+    // Raw decode: it is a palette image and the indices survive exactly. Five entries fit in a
+    // 4-bit index, which the encoder selects automatically.
     let dec = libpng_oracle::decode(&png);
     assert_eq!(dec.color_type, libpng_oracle::COLOR_PALETTE);
-    assert_eq!(dec.bit_depth, 8);
+    assert_eq!(dec.bit_depth, 4);
     assert_eq!(dec.pixels, indices);
 
     // Expanded decode: palette colours and tRNS resolve to the intended RGBA.
@@ -232,6 +233,52 @@ fn indexed8_rejects_out_of_range_index() {
         &mut png,
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn indexed_uses_minimal_bit_depth() {
+    // Palette size determines the smallest index bit depth; libpng must report it and recover the
+    // indices (png_set_packing unpacks sub-byte indices to one byte each).
+    for (entries, depth) in [(2usize, 1u8), (4, 2), (16, 4), (17, 8)] {
+        let rgb: Vec<[u8; 3]> = (0..entries).map(|i| [i as u8, 0, 0]).collect();
+        let palette = PngPalette::new(&rgb).unwrap();
+        let (w, h) = (20u32, 8u32);
+        let indices: Vec<u8> = (0..(w * h) as usize).map(|i| (i % entries) as u8).collect();
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .encode_indexed8(
+                ImageRef::<Indexed8>::new(&indices, Dimensions::new(w, h).unwrap()).unwrap(),
+                &palette,
+                &mut png,
+            )
+            .expect("encode");
+        let dec = libpng_oracle::decode(&png);
+        assert_eq!(dec.color_type, libpng_oracle::COLOR_PALETTE, "{entries}");
+        assert_eq!(dec.bit_depth, depth, "{entries} entries");
+        assert_eq!(dec.pixels, indices, "{entries} entries");
+    }
+}
+
+#[test]
+fn bilevel_round_trips_as_1bit_gray() {
+    // A non-byte-aligned width exercises sub-byte row padding.
+    let (w, h) = (19u32, 7u32);
+    let src: Vec<u8> = (0..(w * h) as usize)
+        .map(|i| u8::from(i % 3 == 0) * 200)
+        .collect();
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .encode_image(
+            ImageRef::<Bilevel>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
+            &mut png,
+        )
+        .expect("encode");
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(dec.color_type, libpng_oracle::COLOR_GRAY);
+    assert_eq!(dec.bit_depth, 1);
+    let expected: Vec<u8> = src.iter().map(|&v| u8::from(v != 0)).collect();
+    assert_eq!(dec.pixels, expected);
 }
 
 #[test]

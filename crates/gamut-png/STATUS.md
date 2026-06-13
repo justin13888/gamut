@@ -23,7 +23,7 @@ with the source; output size is benchmarked against libpng at maximum compressio
 | P3 | §9 | All 5 scanline filters (None/Sub/Up/Average/Paeth) + `MinSumAbs` selection | ✅ done |
 | P4 | §6.1 | Colour types: Gray8/Gray16/Rgb16/Rgba8/Rgba16/GrayAlpha8/16 (16-bit big-endian) | ✅ done |
 | P5 | §11.2.2/§11.3.2 | Indexed (`encode_indexed8` + PLTE + tRNS), 8-bit | ✅ done |
-| P6 | §7.2 | Sub-byte depths 1/2/4 (grey + indexed; bilevel) | ⏳ todo |
+| P6 | §7.2 | Sub-byte depths: 1-bit bilevel grey + auto-minimal-depth indexed (1/2/4) | ✅ done |
 | P7 | §11.3 | Standard ancillary chunks: gAMA/cHRM/sRGB/sBIT/bKGD/pHYs/tIME/tEXt/zTXt/iTXt | ⏳ todo |
 | P8 | §11.3 | Metadata: eXIf, iCCP (deflate-compressed), iTXt-XMP | ⏳ todo |
 | P9 | §4.5 | **Space opt:** bit-depth/palette/gray/alpha/16→8 reduction; brute-force filter strategy; `Level::Best` | ⏳ todo |
