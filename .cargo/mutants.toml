@@ -26,3 +26,16 @@ exclude_globs = [
 # slow mutant on a loaded CI runner isn't misreported as a timeout, without burning minutes
 # per hang.
 minimum_test_timeout = 60
+
+# Provably-equivalent mutants: ones that cannot change observable behaviour, so no test can kill
+# them. They are excluded here (with the reason) rather than papered over with contrived tests.
+# Each regex is scoped to one function + operator so it can only match the intended mutant — never
+# a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
+# an entry. (Sibling #110 PRs each append their crate's entries; they union on merge.)
+exclude_re = [
+    # gamut-ifd `Value::decode`: the DOUBLE assembly OR's a 32-bit low half with a 32-bit high half
+    # shifted up by 32 (`u64::from(a) | (u64::from(b) << 32)`). The operands occupy disjoint bits, so
+    # `|` is identical to `^`; both `| -> ^` mutations are equivalent.
+    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
+    'replace \| with \^ in Value::decode',
+]
