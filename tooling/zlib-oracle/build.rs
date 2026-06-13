@@ -73,7 +73,10 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}", path_str(&submodule.join("zlib.h")));
+    println!(
+        "cargo:rerun-if-changed={}",
+        path_str(&submodule.join("zlib.h"))
+    );
 }
 
 /// Recursively copies `src` into `dst` (skipping `.git`) so an in-source-modifying build never
@@ -92,7 +95,8 @@ fn copy_dir(src: &Path, dst: &Path) {
         if path.is_dir() {
             copy_dir(&path, &target);
         } else {
-            std::fs::copy(&path, &target).unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
+            std::fs::copy(&path, &target)
+                .unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
         }
     }
 }

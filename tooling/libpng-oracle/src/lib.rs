@@ -101,11 +101,7 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
             len: bytes.len(),
             pos: 0,
         };
-        sys::png_set_read_fn(
-            png,
-            (&raw mut cursor).cast::<c_void>(),
-            Some(read_callback),
-        );
+        sys::png_set_read_fn(png, (&raw mut cursor).cast::<c_void>(), Some(read_callback));
         // Treat recoverable (benign) errors in ancillary chunks as warnings: gamut-png frames
         // metadata chunks (eXIf/iCCP/...) but does not validate their payloads, so an oracle
         // checking the *image* should not abort on third-party metadata content. Critical errors
@@ -189,6 +185,10 @@ mod tests {
     #[test]
     fn links_libpng_1_6() {
         // Confirms the static lib, bindgen FFI, and link line are all wired correctly.
-        assert!(version() >= 10600, "expected libpng 1.6.x, got {}", version());
+        assert!(
+            version() >= 10600,
+            "expected libpng 1.6.x, got {}",
+            version()
+        );
     }
 }

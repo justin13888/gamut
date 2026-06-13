@@ -113,7 +113,10 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}", path_str(&png_src.join("png.h")));
+    println!(
+        "cargo:rerun-if-changed={}",
+        path_str(&png_src.join("png.h"))
+    );
 }
 
 /// Recursively copies `src` into `dst` (skipping `.git`) so an in-source-modifying build never
