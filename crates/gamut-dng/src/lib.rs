@@ -32,6 +32,7 @@
 
 pub mod decoder;
 pub mod encoder;
+pub mod metadata;
 pub mod profile;
 pub mod raw;
 pub mod tags;
@@ -51,6 +52,7 @@ pub use gamut_ifd::ByteOrder;
 
 pub use decoder::{DecodedDng, DngDecoder};
 pub use encoder::DngEncoder;
+pub use metadata::{DngMetadata, ExifMetadata};
 pub use profile::CameraProfile;
 pub use raw::RawImage;
 pub use values::{

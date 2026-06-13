@@ -154,6 +154,49 @@ fn lossless_jpeg_roundtrips_and_validates() {
 }
 
 #[test]
+fn metadata_embeds_and_roundtrips() {
+    use gamut_dng::{DngMetadata, ExifMetadata};
+    let raw = common::sample_raw(32, 24, 16);
+    let meta = DngMetadata {
+        exif: ExifMetadata {
+            exposure_time: Some((1, 250)),
+            f_number: Some((28, 10)),
+            iso_speed: Some(400),
+            date_time_original: Some("2026:06:13 12:00:00".to_owned()),
+            focal_length: Some((50, 1)),
+        },
+        xmp: Some(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>"#.to_vec()),
+        iptc: Some(vec![0x1c, 0x02, 0x05, 0x00, 0x03, b'a', b'b', b'c']),
+        icc: Some(vec![0u8; 16]),
+    };
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_metadata(meta.clone())
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+
+    // The Adobe SDK accepts a DNG carrying an EXIF sub-IFD + XMP/IPTC/ICC blocks.
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept a metadata-rich DNG");
+
+    // gamut reconstructs every block.
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    let got = &decoded.metadata;
+    assert_eq!(got.exif.exposure_time, Some((1, 250)));
+    assert_eq!(got.exif.f_number, Some((28, 10)));
+    assert_eq!(got.exif.iso_speed, Some(400));
+    assert_eq!(
+        got.exif.date_time_original.as_deref(),
+        Some("2026:06:13 12:00:00")
+    );
+    assert_eq!(got.exif.focal_length, Some((50, 1)));
+    assert_eq!(got.xmp, meta.xmp);
+    assert_eq!(got.iptc, meta.iptc);
+    assert_eq!(got.icc, meta.icc);
+    // The raw image still round-trips alongside the metadata.
+    assert_eq!(decoded.raw, raw);
+}
+
+#[test]
 fn decoder_rejects_garbage() {
     assert!(DngDecoder::new().decode(b"not a dng").is_err());
     assert!(DngDecoder::new().decode(&[]).is_err());

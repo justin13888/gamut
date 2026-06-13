@@ -3,6 +3,7 @@
 use gamut_core::{Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
+use crate::metadata::DngMetadata;
 use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{Compression, PhotometricInterpretation};
@@ -22,6 +23,7 @@ pub struct DngEncoder {
     backward_version: [u8; 4],
     big_tiff: bool,
     compression: Compression,
+    metadata: DngMetadata,
 }
 
 impl Default for DngEncoder {
@@ -34,6 +36,7 @@ impl Default for DngEncoder {
             backward_version: [1, 1, 0, 0],
             big_tiff: false,
             compression: Compression::Uncompressed,
+            metadata: DngMetadata::default(),
         }
     }
 }
@@ -90,6 +93,13 @@ impl DngEncoder {
         self
     }
 
+    /// Returns a copy of this encoder that embeds `metadata` (EXIF sub-IFD + XMP/IPTC/ICC blocks).
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: DngMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
     fn variant(&self) -> Variant {
         if self.big_tiff {
@@ -139,7 +149,13 @@ impl DngEncoder {
         };
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
-        let ifd0 = self.build_ifd0(profile, preview_dims);
+        let mut ifd0 = self.build_ifd0(profile, preview_dims);
+        // Embed metadata: XMP/IPTC/ICC blocks go in IFD 0; EXIF becomes an `ExifIFD` sub-IFD.
+        if !self.metadata.is_empty()
+            && let Some(exif) = self.metadata.apply(&mut ifd0)
+        {
+            ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
+        }
         let raw_ifd = build_raw_ifd(raw, self.compression);
 
         let preview_blocks = ImageBlocks {

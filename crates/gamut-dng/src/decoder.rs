@@ -8,6 +8,7 @@
 use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant, read, read_ifd_at};
 
+use crate::metadata::{DngMetadata, ExifMetadata};
 use crate::profile::CameraProfile;
 use crate::raw::RawImage;
 use crate::values::{
@@ -24,6 +25,8 @@ pub struct DecodedDng {
     pub profile: CameraProfile,
     /// The `DNGVersion` the file declares.
     pub dng_version: [u8; 4],
+    /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
+    pub metadata: DngMetadata,
 }
 
 /// Decoder for DNG (Adobe Digital Negative) raw images.
@@ -58,12 +61,50 @@ impl DngDecoder {
         let raw = decode_raw_image(&raw_ifd, data, order)?;
         let profile = decode_profile(ifd0)?;
         let dng_version = read_version(ifd0)?;
+        let metadata = decode_metadata(ifd0, data, order, variant);
 
         Ok(DecodedDng {
             raw,
             profile,
             dng_version,
+            metadata,
         })
+    }
+}
+
+/// Reconstructs embedded metadata from IFD 0: the XMP/IPTC/ICC blocks and the EXIF sub-IFD.
+fn decode_metadata(ifd0: &Ifd, data: &[u8], order: ByteOrder, variant: Variant) -> DngMetadata {
+    let exif = ifd0
+        .get_u32(tags::EXIF_IFD)
+        .and_then(|offset| read_ifd_at(data, u64::from(offset), order, variant).ok())
+        .map(|exif_ifd| decode_exif(&exif_ifd))
+        .unwrap_or_default();
+    DngMetadata {
+        exif,
+        xmp: bytes_value(ifd0.get(tags::XMP)),
+        iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
+        icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
+    }
+}
+
+/// Reads the common capture settings out of an EXIF sub-IFD.
+fn decode_exif(exif: &Ifd) -> ExifMetadata {
+    ExifMetadata {
+        exposure_time: rational_pair(exif.get(tags::EXPOSURE_TIME)),
+        f_number: rational_pair(exif.get(tags::F_NUMBER)),
+        iso_speed: exif
+            .get_u32(tags::ISO_SPEED_RATINGS)
+            .and_then(|v| u16::try_from(v).ok()),
+        date_time_original: ascii_value(exif.get(tags::DATE_TIME_ORIGINAL)),
+        focal_length: rational_pair(exif.get(tags::FOCAL_LENGTH)),
+    }
+}
+
+/// Extracts the first `(numerator, denominator)` of an unsigned `RATIONAL` value.
+fn rational_pair(value: Option<&Value>) -> Option<(u32, u32)> {
+    match value? {
+        Value::Rational(r) => r.first().copied(),
+        _ => None,
     }
 }
 

@@ -89,6 +89,23 @@ pub const ICC_PROFILE: u16 = 34675;
 pub const GPS_INFO: u16 = 34853;
 
 // ---------------------------------------------------------------------------------------------
+// EXIF sub-IFD tags (a constrained TIFF IFD reached through `ExifIFD`).
+// ---------------------------------------------------------------------------------------------
+
+/// `ExposureTime` (33434, 0x829A) — exposure time in seconds (`RATIONAL`).
+pub const EXPOSURE_TIME: u16 = 33434;
+/// `FNumber` (33437, 0x829D) — the lens F number (`RATIONAL`).
+pub const F_NUMBER: u16 = 33437;
+/// `ISOSpeedRatings` (34855, 0x8827) — the ISO speed (`SHORT`).
+pub const ISO_SPEED_RATINGS: u16 = 34855;
+/// `ExifVersion` (36864, 0x9000) — the EXIF version, four ASCII bytes (`UNDEFINED`).
+pub const EXIF_VERSION: u16 = 36864;
+/// `DateTimeOriginal` (36867, 0x9003) — capture date/time (`ASCII`, `YYYY:MM:DD HH:MM:SS`).
+pub const DATE_TIME_ORIGINAL: u16 = 36867;
+/// `FocalLength` (37386, 0x920A) — lens focal length in mm (`RATIONAL`).
+pub const FOCAL_LENGTH: u16 = 37386;
+
+// ---------------------------------------------------------------------------------------------
 // DNG-private tags (0xC612–0xC7B5).
 // ---------------------------------------------------------------------------------------------
 
