@@ -66,6 +66,10 @@ mod tests {
         assert_eq!(round2_signed(0, 4), 0);
         // Differs from round2 on negative ties: round2(-1, 1) == 0, round2_signed(-1, 1) == -1.
         assert_eq!(round2_signed(-1, 1), -1);
+        // A tie at n = 2 where the `1 << (n - 1)` rounding bias is load-bearing: without the +2
+        // bias, 2 >> 2 == 0, so these pin the bias (and rule out `<< -> >>`).
+        assert_eq!(round2_signed(2, 2), 1); // 0.5 -> 1
+        assert_eq!(round2_signed(-2, 2), -1);
     }
 
     #[test]
