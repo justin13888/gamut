@@ -338,16 +338,35 @@ mod tests {
     }
 
     #[test]
+    fn count_and_byte_len_are_exact() {
+        // `count` / `byte_len` are otherwise only an internal `Vec::with_capacity` hint and a
+        // round-trip-tolerated length, so pin them directly. ASCII counts the trailing NUL.
+        assert_eq!(Value::Ascii("gamut".into()).count(), 6);
+        assert_eq!(Value::Short(vec![1, 2, 3]).count(), 3);
+        assert_eq!(Value::Short(vec![1, 2, 3]).byte_len(), 6); // 3 * 2
+        assert_eq!(Value::Ascii("ab".into()).byte_len(), 3); // 3 * 1
+        assert_eq!(Value::Rational(vec![(1, 2)]).byte_len(), 8); // 1 * 8
+    }
+
+    #[test]
     fn integer_coercion_accepts_byte_short_long() {
         assert_eq!(Value::Byte(vec![5]).as_u32(), Some(5));
         assert_eq!(Value::Short(vec![300]).as_u32(), Some(300));
         assert_eq!(Value::Long(vec![70000]).as_u32(), Some(70000));
+        // Multi-element values are not scalars: each type's `v.len() == 1` guard must reject them
+        // (not just SHORT).
+        assert_eq!(Value::Byte(vec![1, 2]).as_u32(), None);
         assert_eq!(Value::Short(vec![1, 2]).as_u32(), None);
+        assert_eq!(Value::Long(vec![1, 2]).as_u32(), None);
         assert_eq!(Value::Ascii("x".into()).as_u32(), None);
+        // Every accepted vector type round-trips through as_u32_vec, not only SHORT.
+        assert_eq!(Value::Byte(vec![1, 2, 3]).as_u32_vec(), Some(vec![1, 2, 3]));
         assert_eq!(
             Value::Short(vec![1, 2, 3]).as_u32_vec(),
             Some(vec![1, 2, 3])
         );
+        assert_eq!(Value::Long(vec![7, 8]).as_u32_vec(), Some(vec![7, 8]));
+        assert_eq!(Value::Ascii("x".into()).as_u32_vec(), None);
     }
 
     /// BigTIFF `LONG8`/`IFD8` coerce to `u32` when in range, so a decoder reads 64-bit offsets;
@@ -359,6 +378,9 @@ mod tests {
         assert_eq!(Value::Ifd8(vec![8, 1024]).as_u32_vec(), Some(vec![8, 1024]));
         assert_eq!(Value::Long8(vec![0x1_0000_0000]).as_u32(), None);
         assert_eq!(Value::Long8(vec![1, 0x1_0000_0000]).as_u32_vec(), None);
+        // A multi-element (but in-range) value still isn't a scalar — pins the `v.len() == 1` guard
+        // rather than the out-of-range path above.
+        assert_eq!(Value::Long8(vec![1, 2]).as_u32(), None);
     }
 
     #[test]

@@ -168,12 +168,25 @@ mod tests {
         let x = 0.5;
         assert!((adobe_rgb_eotf(x) - adobe_rgb_eotf_standard(x)).abs() > 1e-4);
         assert!((prophoto_rgb_eotf(0.02) - prophoto_rgb_eotf_standard(0.02)).abs() > 1e-4);
+        // Pin the *exact* standard exponent: a mutated `563 / 256` (e.g. `563 % 256` or `563 * 256`)
+        // still "differs" from x^2.2, so the inequality above can't see it.
+        assert!((adobe_rgb_eotf_standard(0.5) - 0.5_f64.powf(563.0 / 256.0)).abs() < 1e-15);
     }
 
     #[test]
     fn prophoto_standard_toe_is_linear() {
         // Below 1/32 the standard curve is exactly x/16.
         assert!((prophoto_rgb_eotf_standard(1.0 / 64.0) - (1.0 / 64.0) / 16.0).abs() < 1e-15);
+        // The toe meets the power curve exactly at the x = 1/32 breakpoint — both are 2^-9, since
+        // 32 = 2^5 and 5 * 1.8 = 9 — so the curve is continuous there. That continuity is precisely
+        // why `<` vs `<=` at the threshold is unobservable (an equivalent mutant, excluded in
+        // .cargo/mutants.toml). Above the breakpoint the curve is x^1.8; x = 0.5 pins the power side
+        // and catches a mutated `1.0 / 32.0` threshold (e.g. `1.0 % 32.0 == 1.0`, extending the toe).
+        assert_eq!(
+            prophoto_rgb_eotf_standard(1.0 / 32.0),
+            (1.0_f64 / 32.0).powf(1.8)
+        );
+        assert!((prophoto_rgb_eotf_standard(0.5) - 0.5_f64.powf(1.8)).abs() < 1e-15);
     }
 
     #[test]

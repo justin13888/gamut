@@ -403,4 +403,101 @@ mod tests {
         assert!(Yuv420::from_rgb8(&[0, 1, 2, 3], 1, 1, Limited).is_err());
         assert!(Yuv420::from_rgb8(&[], 0, 1, Limited).is_err());
     }
+
+    #[test]
+    fn vp8_clip8_fast_path_and_clamps() {
+        // In-range values (`v & !MASK2 == 0`) take the `>> FIX2` fast path; out-of-range values clamp
+        // hard to 0 (low) or 255 (high). The negative case pins `v < 0` against `v == 0`.
+        assert_eq!(vp8_clip8(0), 0);
+        assert_eq!(vp8_clip8(640), 10); // 640 >> 6
+        assert_eq!(vp8_clip8(MASK2), (MASK2 >> FIX2) as u8); // largest in-range value (= 255)
+        assert_eq!(vp8_clip8(MASK2 + 1), 255); // first out-of-range high
+        assert_eq!(vp8_clip8(-1), 0); // out-of-range low
+    }
+
+    #[test]
+    fn full_range_inverse_anchor() {
+        // Neutral gray inverts to itself. Every channel lands on 128 — away from the 0/255 clamp —
+        // so the `+ HALF` rounding term of each `ycbcr_to_rgb` component is observable (a mutated
+        // `- HALF` shifts each result to 127).
+        assert_eq!(ycbcr_to_rgb(128, 128, 128, Full), (128, 128, 128));
+    }
+
+    #[test]
+    fn box_subsample_matches_reference_for_varying_image() {
+        // A spatially-varying 5x3 image (odd dims ⇒ partial edge blocks, incl. a 1-pixel corner) so
+        // the chroma box-average exercises the source coordinates `cx*2`/`cy*2` and the per-block
+        // `count` rounding. An independent reference re-derives the expected U/V; any mutated
+        // coordinate or rounding in `from_rgb8` diverges from it.
+        let (w, h) = (5usize, 3usize);
+        let mut rgb = vec![0u8; w * h * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 3;
+                rgb[i] = (x * 50).min(255) as u8;
+                rgb[i + 1] = (y * 90).min(255) as u8;
+                rgb[i + 2] = ((x + y) * 35).min(255) as u8;
+            }
+        }
+        let yuv = Yuv420::from_rgb8(&rgb, w as u32, h as u32, Full).unwrap();
+        let cw = Yuv420::chroma_width(w as u32) as usize;
+        let ch = Yuv420::chroma_height(h as u32) as usize;
+        for cy in 0..ch {
+            for cx in 0..cw {
+                let (mut su, mut sv, mut count) = (0u32, 0u32, 0u32);
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let (px, py) = (cx * 2 + dx, cy * 2 + dy);
+                        if px < w && py < h {
+                            let i = (py * w + px) * 3;
+                            let (_, cb, cr) = rgb_to_ycbcr(rgb[i], rgb[i + 1], rgb[i + 2], Full);
+                            su += u32::from(cb);
+                            sv += u32::from(cr);
+                            count += 1;
+                        }
+                    }
+                }
+                assert_eq!(
+                    yuv.u()[cy * cw + cx],
+                    ((su + count / 2) / count) as u8,
+                    "u[{cx},{cy}]"
+                );
+                assert_eq!(
+                    yuv.v()[cy * cw + cx],
+                    ((sv + count / 2) / count) as u8,
+                    "v[{cx},{cy}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn to_rgb8_matches_reference_upsampling() {
+        // Distinct per-position Y/U/V so the nearest-chroma index `(py/2)*cw + (px/2)` and the luma
+        // index `py*w + px` both matter; an independent reference upsamples identically. An empty
+        // `vec![]` body, a mutated index, or wrong index arithmetic all diverge.
+        let (w, h) = (5u32, 3u32);
+        let cw = Yuv420::chroma_width(w);
+        let chh = Yuv420::chroma_height(h);
+        let y: Vec<u8> = (0..w * h).map(|i| (i * 7 % 251) as u8).collect();
+        let u: Vec<u8> = (0..cw * chh).map(|i| (30 + i * 17 % 200) as u8).collect();
+        let v: Vec<u8> = (0..cw * chh).map(|i| (220 - i * 13 % 200) as u8).collect();
+        let yuv = Yuv420::new(w, h, y.clone(), u.clone(), v.clone()).unwrap();
+        assert_eq!((yuv.width(), yuv.height()), (w, h));
+        let out = yuv.to_rgb8(Full);
+        assert_eq!(out.len(), (w * h * 3) as usize);
+        let (wu, cwu) = (w as usize, cw as usize);
+        for py in 0..h as usize {
+            for px in 0..wu {
+                let ci = (py / 2) * cwu + (px / 2);
+                let (r, g, b) = ycbcr_to_rgb(y[py * wu + px], u[ci], v[ci], Full);
+                let o = (py * wu + px) * 3;
+                assert_eq!(
+                    (out[o], out[o + 1], out[o + 2]),
+                    (r, g, b),
+                    "pixel ({px},{py})"
+                );
+            }
+        }
+    }
 }
