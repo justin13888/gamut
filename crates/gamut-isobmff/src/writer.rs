@@ -221,14 +221,17 @@ fn write_imir(bb: &mut BoxBuilder, axis: u8) {
 fn write_av1c(bb: &mut BoxBuilder, c: &Av1cConfig) {
     let start = bb.begin_box(b"av1C");
     bb.u8(0x81); // marker = 1, version = 1
-    bb.u8((c.seq_profile << 5) | (c.seq_level_idx_0 & 0x1f));
+    // Each sub-field occupies a disjoint bit range, so `+` equals `|` here; it is written as `+`
+    // (matching `write_ipma`) so a mutated operator changes the byte rather than leaving an
+    // equivalent OR/XOR mutant. `av1c_and_colr_bodies_encode_every_field` pins every field.
+    bb.u8((c.seq_profile << 5) + (c.seq_level_idx_0 & 0x1f));
     bb.u8((c.seq_tier_0 << 7)
-        | (u8::from(c.high_bitdepth) << 6)
-        | (u8::from(c.twelve_bit) << 5)
-        | (u8::from(c.monochrome) << 4)
-        | (c.chroma_subsampling_x << 3)
-        | (c.chroma_subsampling_y << 2)
-        | (c.chroma_sample_position & 0x3));
+        + (u8::from(c.high_bitdepth) << 6)
+        + (u8::from(c.twelve_bit) << 5)
+        + (u8::from(c.monochrome) << 4)
+        + (c.chroma_subsampling_x << 3)
+        + (c.chroma_subsampling_y << 2)
+        + (c.chroma_sample_position & 0x3));
     bb.u8(0x00); // reserved(3)=0, initial_presentation_delay_present(1)=0, reserved(4)=0
     // configOBUs: empty (sequence header lives only in the sample)
     bb.end_box(start);
@@ -523,6 +526,49 @@ mod tests {
         assert_eq!(
             &ipma[4 + 4 + 2 + 1..4 + 4 + 2 + 1 + 5],
             &[0x80 | 1, 2, 3, 4, 0x80 | 5]
+        );
+    }
+
+    #[test]
+    fn av1c_and_colr_bodies_encode_every_field() {
+        // Distinct, non-zero values in every av1C/colr field so each shift, mask, and combine is
+        // observable (the sample image leaves most of these fields zero, hiding the encoding).
+        let img = AvifStillImage {
+            width: 4,
+            height: 4,
+            bit_depth: 8,
+            num_channels: 3,
+            av1c: Av1cConfig {
+                // Every field non-zero so each `+`/`<<` is observable — a zero field would make its
+                // term `0`, leaving the operator unobservable (`0 + x == 0 - x`, `0 << n == 0 >> n`).
+                seq_profile: 5,        // 0b101
+                seq_level_idx_0: 0x15, // 0b10101
+                seq_tier_0: 1,
+                high_bitdepth: true,
+                twelve_bit: true,
+                monochrome: true,
+                chroma_subsampling_x: 1,
+                chroma_subsampling_y: 1,
+                chroma_sample_position: 2, // 0b10
+            },
+            nclx: NclxColr {
+                colour_primaries: 2,
+                transfer_characteristics: 3,
+                matrix_coefficients: 5,
+                full_range: true,
+            },
+            transform: ImageTransform::default(),
+            item_data: &[0u8; 8],
+        };
+        let file = write_avif_still(&img);
+        // marker/version 0x81; (seq_profile<<5)+(level&0x1f)=0xA0+0x15=0xB5; the flags byte sets
+        // tier/high_bitdepth/twelve_bit/monochrome/subsampling_x/_y plus chroma position 2:
+        // 0x80+0x40+0x20+0x10+0x08+0x04+0x02=0xFE; trailing reserved 0x00.
+        assert_eq!(box_body(&file, b"av1C"), &[0x81, 0xB5, 0xFE, 0x00]);
+        // 'nclx' + big-endian u16 primaries/transfer/matrix + full_range_flag in bit 7.
+        assert_eq!(
+            box_body(&file, b"colr"),
+            &[b'n', b'c', b'l', b'x', 0, 2, 0, 3, 0, 5, 0x80]
         );
     }
 }
