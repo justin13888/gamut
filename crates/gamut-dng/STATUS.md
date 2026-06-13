@@ -40,25 +40,34 @@ encode→decode round-trips guard every lossless path.
 | P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe | ✅ done |
 | P12 | Ch4     | Deflate/ZIP (8) encode+decode (`miniz_oxide`, zlib format) — CFA + LinearRaw, Adobe-validated | ✅ done |
 | P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3, predictor-1, Huffman) — CFA + LinearRaw, Adobe decodes pixel-exact | ✅ done |
-| P14 | Ch2     | Tiled raw layout (`TileOffsets`/`TileByteCounts`) | ☐ planned |
+| P14 | Ch2     | Tiled raw layout (`TileOffsets`/`TileByteCounts`) | ⏳ deferred |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
 | P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated | ✅ done |
-| P17 | Ch2     | Digests: MD5 `NewRawImageDigest`/`RawImageDigest`/`RawDataUniqueID` | ☐ planned |
-| P18 | Ch7     | `OpcodeList1/2/3` container + raw-blob attach (standard opcode library deferred) | ☐ planned |
-| P19 | Ch7–8   | CLI `convert → .dng`; finalization: robustness corpus, docs, top-to-bottom API review | ☐ planned |
+| P17 | Ch2     | Digests: MD5 `NewRawImageDigest`/`RawImageDigest`/`RawDataUniqueID` | ⏳ deferred |
+| P18 | Ch7     | `OpcodeList1/2/3` container + standard opcode library | ⏳ deferred |
+| P19 | —       | Finalization: docs + top-to-bottom API review (CLI N/A — DNG needs raw sensor input, not the CLI's processed PNG/JPEG inputs) | ✅ done |
 
 ## Deferred to follow-up campaigns
 
-Each plugs into the same IFD-tree / strip-tile pipeline and the Adobe + libtiff oracles the same
-way every phase above does:
+The baseline (P1–P16) ships the full encode+decode pipeline — container/sub-IFD tree, CFA +
+LinearRaw, uncompressed / Deflate / lossless-JPEG compression, the colour-calibration profile,
+8/10/12/14/16-bit packing, embedded preview, EXIF/XMP/IPTC/ICC metadata, and BigTIFF — all
+Adobe-validated. The remaining items each plug into the same IFD-tree / strip pipeline and the
+Adobe + libtiff oracles the same way every phase above does:
 
+- **Tiled layout** (P14) — `TileOffsets`/`TileByteCounts`; the strip pipeline already covers every
+  pixel mode, and the `ImageBlocks` writer already lays out N blocks, so tiling is a layout swap
+  (tile/untile with edge padding) plus the decoder's tile reassembly.
+- **Raw digests** (P17) — `NewRawImageDigest`/`RawImageDigest` must bit-match the SDK's internal
+  MD5-over-image algorithm; verifying that needs a `qDNGValidate=1` oracle build (the current build
+  suppresses digest-mismatch reporting). `RawDataUniqueID` is an opaque MD5 the SDK does not verify.
 - **JPEG XL compression** (`Compression = 52546`, DNG 1.7) — depends on a working `gamut-jxl`
   encoder; the oracle already links/stubs libjxl so it can read Adobe's JXL sample DNGs.
 - **Lossy JPEG** (`Compression = 34892`) — skipped as low-value; needs a baseline DCT codec
   (`gamut-tiff` likewise deferred JPEG-in-TIFF).
-- **The standard opcode library** — `WarpRectilinear`/`WarpFisheye`, `FixVignetteRadial`,
-  `FixBadPixelsConstant`/`List`, `TrimBounds`, `MapTable`/`MapPolynomial`, `GainMap`,
-  `DeltaPerRow`/`Col`, `ScalePerRow`/`Col` (P18 ships only the list container + raw-blob attach).
+- **The opcode lists** (P18) — the `OpcodeList1/2/3` container plus the standard opcode library:
+  `WarpRectilinear`/`WarpFisheye`, `FixVignetteRadial`, `FixBadPixelsConstant`/`List`, `TrimBounds`,
+  `MapTable`/`MapPolynomial`, `GainMap`, `DeltaPerRow`/`Col`, `ScalePerRow`/`Col`.
 - **Advanced image types** — transparency masks, depth maps, semantic masks, and the enhanced
   image (`NewSubFileType` 4/8/16/0x10004); `ProfileGainTableMap`, `RGBTables`, `ImageStats`,
   `ImageSequenceInfo`, C2PA manifest.

@@ -42,19 +42,22 @@ DngEncoder::new()
 
 ## Status
 
-In active development against issue #109; see [STATUS.md](STATUS.md) for the per-feature
-phase table and the deferred tail.
+Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
+[STATUS.md](STATUS.md) for the per-feature phase table.
 
-- **In scope:** uncompressed, Lossless JPEG (7), and Deflate/ZIP (8) compression; CFA and
-  `LinearRaw` photometry; the full colour/calibration tag set; black/white levels and bit-depth
-  packing; embedded preview; EXIF/XMP/IPTC/ICC metadata; classic TIFF and BigTIFF; strips and
-  tiles; MD5 raw digests; the opcode-list container.
-- **Deferred** (tracked in `STATUS.md`): JPEG XL compression (depends on `gamut-jxl`), lossy JPEG,
-  the standard opcode library, transparency/depth/semantic masks, and floating-point samples.
+- **Encode + decode**, both directions Adobe-validated: CFA mosaic and `LinearRaw` photometry;
+  **uncompressed, Deflate/ZIP (8), and lossless JPEG (7)** compression; the colour-calibration
+  profile (ColorMatrix1/2, CameraCalibration, ForwardMatrix, dual illuminant, AnalogBalance,
+  BaselineExposure, profile identity); black/white levels, active area, default crop, and
+  8/10/12/14/16-bit packing; an embedded RGB preview; EXIF/XMP/IPTC/ICC metadata; classic TIFF and
+  **BigTIFF**.
+- **Deferred** (tracked in `STATUS.md`): tiled layout, MD5 raw digests, the opcode lists, JPEG XL
+  (depends on `gamut-jxl`), lossy JPEG, transparency/depth/semantic masks, and floating-point
+  samples.
 
-Correctness is pinned with the **Adobe DNG SDK** oracle (gamut-encode → `dng_validate` must accept
-the file; Adobe sample DNGs → gamut-decode must match), the **libtiff** oracle for the
-TIFF-container/strip layer, and internal encode→decode round-trips on every lossless path.
+Correctness is pinned with the **Adobe DNG SDK** oracle — gamut-encode → `dng_validate` accepts the
+file, and the SDK's stage-1 decode matches gamut's own decode pixel-for-pixel — plus the **libtiff**
+oracle for the TIFF-container/preview layer and internal encode→decode round-trips on every path.
 
 ## License
 

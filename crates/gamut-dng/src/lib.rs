@@ -46,7 +46,6 @@ mod writer;
 
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
 // not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
-// The decoder and the compression schemes land in subsequent phases — see `STATUS.md`.
 pub use gamut_core::{Dimensions, Error, Result};
 pub use gamut_ifd::ByteOrder;
 
