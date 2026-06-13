@@ -39,7 +39,7 @@ encode→decode round-trips guard every lossless path.
 | P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
 | P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe | ✅ done |
 | P12 | Ch4     | Deflate/ZIP (8) encode+decode (`miniz_oxide`, zlib format) — CFA + LinearRaw, Adobe-validated | ✅ done |
-| P13 | Ch4     | Lossless JPEG (7) encode+decode (Huffman + predictor) — the largest single codec | 🚧 in progress |
+| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3, predictor-1, Huffman) — CFA + LinearRaw, Adobe decodes pixel-exact | ✅ done |
 | P14 | Ch2     | Tiled raw layout (`TileOffsets`/`TileByteCounts`) | ☐ planned |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
 | P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) embedding | ☐ planned |

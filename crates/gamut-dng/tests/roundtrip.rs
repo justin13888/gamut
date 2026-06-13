@@ -123,6 +123,37 @@ fn deflate_roundtrips_and_validates() {
 }
 
 #[test]
+fn lossless_jpeg_roundtrips_and_validates() {
+    use gamut_dng::Compression;
+    let cases = [
+        common::sample_raw(64, 48, 16),
+        common::sample_raw(33, 21, 12), // odd width, 12-bit
+        common::sample_linear_raw(48, 36, 16),
+    ];
+    for raw in cases {
+        let mut dng = Vec::new();
+        DngEncoder::new()
+            .with_compression(Compression::LosslessJpeg)
+            .encode(&raw, &common::sample_profile(), &mut dng)
+            .expect("encode");
+        // gamut round-trips its own lossless JPEG...
+        let decoded = DngDecoder::new()
+            .decode(&dng)
+            .expect("decode lossless JPEG");
+        assert_eq!(decoded.raw, raw);
+        // ...and the Adobe SDK validates and decodes it to the same samples.
+        gamut_dng_oracle::validate_dng(&dng)
+            .expect("Adobe DNG SDK must accept a lossless-JPEG DNG");
+        let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+        assert_eq!(
+            adobe.samples,
+            raw.samples(),
+            "Adobe must decode gamut's lossless JPEG pixel-for-pixel"
+        );
+    }
+}
+
+#[test]
 fn decoder_rejects_garbage() {
     assert!(DngDecoder::new().decode(b"not a dng").is_err());
     assert!(DngDecoder::new().decode(&[]).is_err());

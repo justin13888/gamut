@@ -7,7 +7,7 @@ use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{Compression, PhotometricInterpretation};
 use crate::writer::{ImageBlocks, write_cfa_dng};
-use crate::{bitpack, compression, preview, tags};
+use crate::{bitpack, compression, lossless_jpeg, preview, tags};
 
 /// Encoder for DNG (Adobe Digital Negative) raw images.
 ///
@@ -122,11 +122,21 @@ impl DngEncoder {
             ));
         }
         let bits = raw.bits_per_sample();
-        let samples_per_row =
-            raw.dimensions().width as usize * usize::from(raw.samples_per_pixel());
+        let (width, height) = (
+            raw.dimensions().width as usize,
+            raw.dimensions().height as usize,
+        );
+        let spp = usize::from(raw.samples_per_pixel());
+        let samples_per_row = width * spp;
 
-        let packed = bitpack::pack(raw.samples(), bits, samples_per_row, self.order);
-        let raw_strip = compression::compress(self.compression, &packed)?;
+        // Lossless JPEG codes samples directly; the byte-oriented schemes compress the packed
+        // stream.
+        let raw_strip = if self.compression == Compression::LosslessJpeg {
+            lossless_jpeg::encode(raw.samples(), width, height, spp, bits)
+        } else {
+            let packed = bitpack::pack(raw.samples(), bits, samples_per_row, self.order);
+            compression::compress(self.compression, &packed)?
+        };
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
         let ifd0 = self.build_ifd0(profile, preview_dims);

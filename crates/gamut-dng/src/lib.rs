@@ -39,6 +39,7 @@ pub mod values;
 
 mod bitpack;
 mod compression;
+mod lossless_jpeg;
 mod preview;
 mod writer;
 

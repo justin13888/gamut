@@ -13,7 +13,7 @@ use crate::raw::RawImage;
 use crate::values::{
     CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy,
 };
-use crate::{bitpack, compression, tags};
+use crate::{bitpack, compression, lossless_jpeg, tags};
 
 /// A decoded DNG: the raw sensor image, the camera colour profile, and the declared DNG version.
 #[derive(Debug, Clone)]
@@ -117,14 +117,45 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
             "DNG: raw IFD missing PhotometricInterpretation",
         ))?;
 
-    let packed = gather_strips(ifd, data, compression)?;
     let samples_per_row = (width as usize)
         .checked_mul(spp as usize)
         .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
-    let samples = bitpack::unpack(&packed, bits, samples_per_row, height as usize, order);
     let expected = samples_per_row
         .checked_mul(height as usize)
         .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+
+    let chunks = strip_chunks(ifd, data)?;
+    let samples = match compression {
+        Compression::Uncompressed | Compression::Deflate => {
+            let mut packed = Vec::new();
+            for chunk in &chunks {
+                packed.extend_from_slice(&compression::decompress(compression, chunk)?);
+            }
+            bitpack::unpack(&packed, bits, samples_per_row, height as usize, order)
+        }
+        // Lossless JPEG decodes samples directly; strips concatenate as row-bands.
+        Compression::LosslessJpeg => {
+            let mut samples = Vec::with_capacity(expected);
+            let mut rows_seen = 0usize;
+            for chunk in &chunks {
+                let jpeg = lossless_jpeg::decode(chunk)?;
+                if jpeg.width != width as usize || jpeg.components != spp as usize {
+                    return Err(Error::InvalidInput("DNG: lossless-JPEG geometry mismatch"));
+                }
+                rows_seen += jpeg.height;
+                samples.extend(jpeg.samples);
+            }
+            if rows_seen != height as usize {
+                return Err(Error::InvalidInput("DNG: lossless-JPEG rows mismatch"));
+            }
+            samples
+        }
+        _ => {
+            return Err(Error::Unsupported(
+                "DNG: this compression is not yet decodable",
+            ));
+        }
+    };
     if samples.len() != expected {
         return Err(Error::InvalidInput("DNG: raw image data is truncated"));
     }
@@ -178,8 +209,8 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
     Ok(raw)
 }
 
-/// Concatenates the IFD's strips (decompressing per `compression`) into the packed sample stream.
-fn gather_strips(ifd: &Ifd, data: &[u8], compression: Compression) -> Result<Vec<u8>> {
+/// Returns the IFD's strips as raw byte slices (in order), to be decompressed per the scheme.
+fn strip_chunks<'a>(ifd: &Ifd, data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
     let offsets = ifd
         .get_u32_vec(tags::STRIP_OFFSETS)
         .ok_or(Error::Unsupported(
@@ -193,18 +224,18 @@ fn gather_strips(ifd: &Ifd, data: &[u8], compression: Compression) -> Result<Vec
             "DNG: strip offset/count length mismatch",
         ));
     }
-    let mut packed = Vec::new();
+    let mut chunks = Vec::with_capacity(offsets.len());
     for (offset, count) in offsets.iter().zip(counts) {
         let start = *offset as usize;
         let end = start
             .checked_add(count as usize)
             .ok_or(Error::InvalidInput("DNG: strip extent overflow"))?;
-        let chunk = data
-            .get(start..end)
-            .ok_or(Error::InvalidInput("DNG: strip out of bounds"))?;
-        packed.extend_from_slice(&compression::decompress(compression, chunk)?);
+        chunks.push(
+            data.get(start..end)
+                .ok_or(Error::InvalidInput("DNG: strip out of bounds"))?,
+        );
     }
-    Ok(packed)
+    Ok(chunks)
 }
 
 /// Reconstructs the [`CameraProfile`] from IFD 0's identity and calibration tags.
