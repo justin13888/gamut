@@ -33,6 +33,11 @@ minimum_test_timeout = 60
 # a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
 # an entry. (Sibling #110 PRs each append their crate's entries; they union on merge.)
 exclude_re = [
+    # gamut-ifd `Value::decode`: the DOUBLE assembly OR's a 32-bit low half with a 32-bit high half
+    # shifted up by 32 (`u64::from(a) | (u64::from(b) << 32)`). The operands occupy disjoint bits, so
+    # `|` is identical to `^`; both `| -> ^` mutations are equivalent.
+    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
+    'replace \| with \^ in Value::decode',
     # gamut-dsp `adst_output_permute`: the index is `(d << 3) | (c << 2) | (b << 1) | a`, where each
     # of a/b/c/d is a single bit (0 or 1) shifted to a distinct position, so the OR'd operands never
     # share bits and `|` is identical to `^`. The three `| -> ^` mutations are therefore equivalent.
