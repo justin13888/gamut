@@ -8,13 +8,18 @@ use std::process::Command;
 fn main() {
     let manifest_dir = PathBuf::from(env("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env("OUT_DIR"));
-    let src = manifest_dir.join("../../third_party/zlib");
-
+    let submodule = manifest_dir.join("../../third_party/zlib");
     assert!(
-        src.join("CMakeLists.txt").exists(),
+        submodule.join("CMakeLists.txt").exists(),
         "vendored zlib not found under {} — run `git submodule update --init --recursive`",
-        src.display()
+        submodule.display()
     );
+    // zlib's CMake deletes the in-source `zconf.h` during an out-of-source build, which would dirty
+    // the submodule. Build from a private copy under OUT_DIR so the vendored source stays pristine.
+    let src = out_dir.join("zlib-src");
+    if !src.join("CMakeLists.txt").exists() {
+        copy_dir(&submodule, &src);
+    }
 
     // ---- CMake-build a static zlib. -------------------------------------------------------
     let build = out_dir.join("zlib-build");
@@ -68,7 +73,28 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}", path_str(&src.join("zlib.h")));
+    println!("cargo:rerun-if-changed={}", path_str(&submodule.join("zlib.h")));
+}
+
+/// Recursively copies `src` into `dst` (skipping `.git`) so an in-source-modifying build never
+/// touches the vendored submodule.
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
+    for entry in std::fs::read_dir(src)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", src.display()))
+        .flatten()
+    {
+        let path = entry.path();
+        if path.file_name().is_some_and(|n| n == ".git") {
+            continue;
+        }
+        let target = dst.join(path.file_name().expect("dir entry has a name"));
+        if path.is_dir() {
+            copy_dir(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
+        }
+    }
 }
 
 /// Reads a required build-time env var, panicking (this is a build script) if absent.

@@ -9,15 +9,21 @@ use std::process::Command;
 fn main() {
     let manifest_dir = PathBuf::from(env("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env("OUT_DIR"));
-    let zlib_src = manifest_dir.join("../../third_party/zlib");
+    let zlib_submodule = manifest_dir.join("../../third_party/zlib");
     let png_src = manifest_dir.join("../../third_party/libpng");
 
-    for (name, src) in [("zlib", &zlib_src), ("libpng", &png_src)] {
+    for (name, src) in [("zlib", &zlib_submodule), ("libpng", &png_src)] {
         assert!(
             src.join("CMakeLists.txt").exists(),
             "vendored {name} not found under {} — run `git submodule update --init --recursive`",
             src.display()
         );
+    }
+    // zlib's CMake deletes the in-source `zconf.h` during an out-of-source build; build from a
+    // private copy under OUT_DIR so the vendored submodule stays pristine.
+    let zlib_src = out_dir.join("zlib-src");
+    if !zlib_src.join("CMakeLists.txt").exists() {
+        copy_dir(&zlib_submodule, &zlib_src);
     }
 
     // ---- 1. Build + install a static, PIC zlib so libpng can find it and we can link it. -------
@@ -108,6 +114,27 @@ fn main() {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", path_str(&png_src.join("png.h")));
+}
+
+/// Recursively copies `src` into `dst` (skipping `.git`) so an in-source-modifying build never
+/// touches the vendored submodule.
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
+    for entry in fs::read_dir(src)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", src.display()))
+        .flatten()
+    {
+        let path = entry.path();
+        if path.file_name().is_some_and(|n| n == ".git") {
+            continue;
+        }
+        let target = dst.join(path.file_name().expect("dir entry has a name"));
+        if path.is_dir() {
+            copy_dir(&path, &target);
+        } else {
+            fs::copy(&path, &target).unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
+        }
+    }
 }
 
 /// Finds a static archive `lib<...stem...>.a` directly inside `dir`.
