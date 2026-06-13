@@ -17,3 +17,10 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+
+[[bench]]
+name = "wht"
+harness = false

@@ -20,3 +20,10 @@ gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-dsp.workspace = true
 gamut-bitstream.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+
+[[bench]]
+name = "encode"
+harness = false

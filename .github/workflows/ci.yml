@@ -20,6 +20,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
+      - name: Bench compile-check
+        run: cargo bench --workspace --all-features --no-run
 
   coverage:
     name: Coverage

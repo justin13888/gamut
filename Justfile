@@ -20,6 +20,10 @@ lint-fix:
 test:
     cargo test --workspace --all-features
 
+# Run performance benchmarks
+bench:
+    cargo bench --workspace --all-features
+
 # Run tests with coverage (enforces 80% line coverage).
 # Bindings/binary crates (cli, wasm, ffi) are excluded — their entry points are not
 # meaningfully unit-testable and would otherwise skew the gate.
