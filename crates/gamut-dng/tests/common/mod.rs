@@ -3,7 +3,7 @@
 
 use gamut_core::Dimensions;
 use gamut_dng::raw::cfa_color;
-use gamut_dng::{CalibrationIlluminant, CameraProfile, RawImage};
+use gamut_dng::{CalibrationIlluminant, CameraProfile, ProfileEmbedPolicy, RawImage};
 
 /// A synthetic RGGB Bayer raw image of the given size and bit depth, with a deterministic,
 /// spatially-varying mosaic and a full active area.
@@ -65,4 +65,21 @@ pub fn sample_profile() -> CameraProfile {
         [0.5128, 1.0, 0.7059],
     )
     .expect("valid profile")
+}
+
+/// A fully-populated profile: dual illuminant, per-camera calibration, forward matrix, analog
+/// balance, baseline exposure, and profile identity.
+#[must_use]
+pub fn sample_profile_full() -> CameraProfile {
+    let matrix2 = [0.90, -0.10, -0.05, -0.30, 1.20, 0.10, 0.00, -0.15, 0.80];
+    let forward = [0.60, 0.20, 0.16, 0.30, 0.70, 0.00, 0.00, 0.05, 0.78];
+    let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    sample_profile()
+        .with_second_illuminant(matrix2, CalibrationIlluminant::StandardLightA)
+        .with_camera_calibration(identity, None)
+        .with_forward_matrices(forward, None)
+        .with_analog_balance([1.0, 1.0, 1.0])
+        .with_baseline_exposure(0.5)
+        .with_profile_name("gamut Standard")
+        .with_profile_embed_policy(ProfileEmbedPolicy::NoRestrictions)
 }

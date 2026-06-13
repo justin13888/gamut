@@ -44,3 +44,14 @@ fn adobe_sdk_validates_linear_raw() {
         .expect("encode");
     gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept gamut's LinearRaw DNG");
 }
+
+#[test]
+fn adobe_sdk_validates_full_calibration_profile() {
+    let raw = common::sample_raw(48, 32, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile_full(), &mut dng)
+        .expect("encode");
+    gamut_dng_oracle::validate_dng(&dng)
+        .expect("Adobe DNG SDK must accept a dual-illuminant / forward-matrix profile");
+}

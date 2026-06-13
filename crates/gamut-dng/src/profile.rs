@@ -1,13 +1,14 @@
-//! The camera colour profile an encoder writes into the DNG: the colour-calibration matrix, the
-//! calibration illuminant, and the as-shot white balance.
+//! The camera colour profile an encoder writes into the DNG: the colour-calibration matrices, the
+//! calibration illuminant(s), and the as-shot white balance.
 //!
-//! This is the minimal profile a colour DNG needs. The second/third illuminant, the camera- and
-//! forward-calibration matrices, and the profile look/tone tables are layered on in a later phase
-//! (see `STATUS.md`).
+//! A minimal profile needs only `ColorMatrix1` + an illuminant + `AsShotNeutral`; the `with_*`
+//! setters add the optional dual-illuminant matrices, per-camera calibration, forward matrices, and
+//! the profile-identity tags. (The third illuminant and the profile look/tone tables remain for a
+//! later phase — see `STATUS.md`.)
 
 use gamut_core::{Error, Result};
 
-use crate::values::CalibrationIlluminant;
+use crate::values::{CalibrationIlluminant, ProfileEmbedPolicy};
 
 /// The denominator used when storing a coordinate as a TIFF `RATIONAL`/`SRATIONAL`.
 ///
@@ -33,23 +34,33 @@ pub(crate) fn urational(x: f64) -> (u32, u32) {
 /// balance the shot was taken under.
 ///
 /// `color_matrix1` is the row-major `3 × 3` matrix mapping CIE XYZ (under `calibration_illuminant1`)
-/// to the camera's native colour space, stored in the `ColorMatrix1` tag. `as_shot_neutral` is the
-/// camera-native value of a neutral (grey) subject — the as-shot white balance — stored in
-/// `AsShotNeutral`.
+/// to the camera's native colour space (`ColorMatrix1`). `as_shot_neutral` is the camera-native
+/// value of a neutral subject (`AsShotNeutral`). The optional second illuminant, per-camera
+/// calibration, forward matrices, analog balance, and identity fields are set via the `with_*`
+/// methods.
 #[derive(Debug, Clone)]
 pub struct CameraProfile {
     unique_camera_model: String,
     color_matrix1: [f64; 9],
     calibration_illuminant1: CalibrationIlluminant,
     as_shot_neutral: [f64; 3],
+    color_matrix2: Option<([f64; 9], CalibrationIlluminant)>,
+    camera_calibration1: Option<[f64; 9]>,
+    camera_calibration2: Option<[f64; 9]>,
+    forward_matrix1: Option<[f64; 9]>,
+    forward_matrix2: Option<[f64; 9]>,
+    analog_balance: Option<[f64; 3]>,
+    baseline_exposure: Option<f64>,
+    profile_name: Option<String>,
+    profile_embed_policy: Option<ProfileEmbedPolicy>,
 }
 
 impl CameraProfile {
-    /// Creates a profile for a 3-colour (RGB) camera.
+    /// Creates a profile for a 3-colour (RGB) camera with a single calibration illuminant.
     ///
     /// `color_matrix1` is the row-major `3 × 3` XYZ → camera-native matrix; `as_shot_neutral` is the
     /// 3-component as-shot neutral. `unique_camera_model` must be a non-empty, non-localized model
-    /// name (the `UniqueCameraModel` tag, which raw processors key their calibration on).
+    /// name (the `UniqueCameraModel` tag raw processors key their calibration on).
     ///
     /// # Errors
     ///
@@ -77,7 +88,72 @@ impl CameraProfile {
             color_matrix1,
             calibration_illuminant1,
             as_shot_neutral,
+            color_matrix2: None,
+            camera_calibration1: None,
+            camera_calibration2: None,
+            forward_matrix1: None,
+            forward_matrix2: None,
+            analog_balance: None,
+            baseline_exposure: None,
+            profile_name: None,
+            profile_embed_policy: None,
         })
+    }
+
+    /// Adds a second calibration illuminant and its `ColorMatrix2` (dual-illuminant calibration).
+    #[must_use]
+    pub fn with_second_illuminant(
+        mut self,
+        color_matrix2: [f64; 9],
+        calibration_illuminant2: CalibrationIlluminant,
+    ) -> Self {
+        self.color_matrix2 = Some((color_matrix2, calibration_illuminant2));
+        self
+    }
+
+    /// Sets the per-camera `CameraCalibration1` (and optionally `CameraCalibration2`) matrices.
+    #[must_use]
+    pub fn with_camera_calibration(mut self, cc1: [f64; 9], cc2: Option<[f64; 9]>) -> Self {
+        self.camera_calibration1 = Some(cc1);
+        self.camera_calibration2 = cc2;
+        self
+    }
+
+    /// Sets the `ForwardMatrix1` (and optionally `ForwardMatrix2`) white-balanced camera → XYZ(D50)
+    /// matrices.
+    #[must_use]
+    pub fn with_forward_matrices(mut self, fm1: [f64; 9], fm2: Option<[f64; 9]>) -> Self {
+        self.forward_matrix1 = Some(fm1);
+        self.forward_matrix2 = fm2;
+        self
+    }
+
+    /// Sets the `AnalogBalance` (per-plane gain applied before the colour matrix).
+    #[must_use]
+    pub fn with_analog_balance(mut self, analog_balance: [f64; 3]) -> Self {
+        self.analog_balance = Some(analog_balance);
+        self
+    }
+
+    /// Sets the `BaselineExposure` (default exposure compensation, in stops).
+    #[must_use]
+    pub fn with_baseline_exposure(mut self, stops: f64) -> Self {
+        self.baseline_exposure = Some(stops);
+        self
+    }
+
+    /// Sets the `ProfileName`.
+    #[must_use]
+    pub fn with_profile_name(mut self, name: impl Into<String>) -> Self {
+        self.profile_name = Some(name.into());
+        self
+    }
+
+    /// Sets the `ProfileEmbedPolicy`.
+    #[must_use]
+    pub fn with_profile_embed_policy(mut self, policy: ProfileEmbedPolicy) -> Self {
+        self.profile_embed_policy = Some(policy);
+        self
     }
 
     /// The non-localized unique camera model name.
@@ -103,6 +179,51 @@ impl CameraProfile {
     pub fn as_shot_neutral(&self) -> &[f64; 3] {
         &self.as_shot_neutral
     }
+
+    /// The second-illuminant `(ColorMatrix2, CalibrationIlluminant2)`, if set.
+    #[must_use]
+    pub fn second_illuminant(&self) -> Option<&([f64; 9], CalibrationIlluminant)> {
+        self.color_matrix2.as_ref()
+    }
+
+    /// The `(CameraCalibration1, CameraCalibration2)` matrices, if set.
+    #[must_use]
+    pub fn camera_calibration(&self) -> (Option<&[f64; 9]>, Option<&[f64; 9]>) {
+        (
+            self.camera_calibration1.as_ref(),
+            self.camera_calibration2.as_ref(),
+        )
+    }
+
+    /// The `(ForwardMatrix1, ForwardMatrix2)` matrices, if set.
+    #[must_use]
+    pub fn forward_matrices(&self) -> (Option<&[f64; 9]>, Option<&[f64; 9]>) {
+        (self.forward_matrix1.as_ref(), self.forward_matrix2.as_ref())
+    }
+
+    /// The `AnalogBalance`, if set.
+    #[must_use]
+    pub fn analog_balance(&self) -> Option<&[f64; 3]> {
+        self.analog_balance.as_ref()
+    }
+
+    /// The `BaselineExposure` in stops, if set.
+    #[must_use]
+    pub fn baseline_exposure(&self) -> Option<f64> {
+        self.baseline_exposure
+    }
+
+    /// The `ProfileName`, if set.
+    #[must_use]
+    pub fn profile_name(&self) -> Option<&str> {
+        self.profile_name.as_deref()
+    }
+
+    /// The `ProfileEmbedPolicy`, if set.
+    #[must_use]
+    pub fn profile_embed_policy(&self) -> Option<ProfileEmbedPolicy> {
+        self.profile_embed_policy
+    }
 }
 
 #[cfg(test)]
@@ -115,7 +236,6 @@ mod tests {
         assert!((f64::from(n) / f64::from(d) + 0.5).abs() < 1e-9);
         let (n, d) = urational(0.8);
         assert!((f64::from(n) / f64::from(d) - 0.8).abs() < 1e-9);
-        // Negatives clamp to zero for the unsigned form.
         assert_eq!(urational(-1.0), (0, RATIONAL_DEN as u32));
     }
 
@@ -125,5 +245,33 @@ mod tests {
         assert!(CameraProfile::new("Cam", m, CalibrationIlluminant::D65, [0.5, 1.0, 0.6]).is_ok());
         assert!(CameraProfile::new("", m, CalibrationIlluminant::D65, [0.5, 1.0, 0.6]).is_err());
         assert!(CameraProfile::new("Cam", m, CalibrationIlluminant::D65, [0.0, 1.0, 0.6]).is_err());
+    }
+
+    #[test]
+    fn optional_fields_set() {
+        let m = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let p = CameraProfile::new(
+            "Cam",
+            m,
+            CalibrationIlluminant::StandardLightA,
+            [0.5, 1.0, 0.6],
+        )
+        .unwrap()
+        .with_second_illuminant(m, CalibrationIlluminant::D65)
+        .with_camera_calibration(m, Some(m))
+        .with_forward_matrices(m, None)
+        .with_analog_balance([1.0, 1.0, 1.0])
+        .with_baseline_exposure(0.25)
+        .with_profile_name("gamut Standard")
+        .with_profile_embed_policy(ProfileEmbedPolicy::NoRestrictions);
+        assert_eq!(p.second_illuminant().unwrap().1, CalibrationIlluminant::D65);
+        assert!(p.camera_calibration().1.is_some());
+        assert!(p.forward_matrices().1.is_none());
+        assert_eq!(p.baseline_exposure(), Some(0.25));
+        assert_eq!(p.profile_name(), Some("gamut Standard"));
+        assert_eq!(
+            p.profile_embed_policy(),
+            Some(ProfileEmbedPolicy::NoRestrictions)
+        );
     }
 }

@@ -189,8 +189,54 @@ impl DngEncoder {
                     .collect(),
             ),
         );
+
+        // Optional calibration / profile-identity fields.
+        if let Some((matrix2, illuminant2)) = profile.second_illuminant() {
+            ifd.set(tags::COLOR_MATRIX2, srational_matrix(matrix2));
+            ifd.set(
+                tags::CALIBRATION_ILLUMINANT2,
+                Value::Short(vec![illuminant2.code()]),
+            );
+        }
+        let (cc1, cc2) = profile.camera_calibration();
+        if let Some(cc1) = cc1 {
+            ifd.set(tags::CAMERA_CALIBRATION1, srational_matrix(cc1));
+        }
+        if let Some(cc2) = cc2 {
+            ifd.set(tags::CAMERA_CALIBRATION2, srational_matrix(cc2));
+        }
+        let (fm1, fm2) = profile.forward_matrices();
+        if let Some(fm1) = fm1 {
+            ifd.set(tags::FORWARD_MATRIX1, srational_matrix(fm1));
+        }
+        if let Some(fm2) = fm2 {
+            ifd.set(tags::FORWARD_MATRIX2, srational_matrix(fm2));
+        }
+        if let Some(ab) = profile.analog_balance() {
+            ifd.set(
+                tags::ANALOG_BALANCE,
+                Value::Rational(ab.iter().map(|&x| urational(x)).collect()),
+            );
+        }
+        if let Some(stops) = profile.baseline_exposure() {
+            ifd.set(
+                tags::BASELINE_EXPOSURE,
+                Value::SRational(vec![srational(stops)]),
+            );
+        }
+        if let Some(name) = profile.profile_name() {
+            ifd.set(tags::PROFILE_NAME, Value::Ascii(name.to_owned()));
+        }
+        if let Some(policy) = profile.profile_embed_policy() {
+            ifd.set(tags::PROFILE_EMBED_POLICY, Value::Long(vec![policy.code()]));
+        }
         ifd
     }
+}
+
+/// Builds an `SRATIONAL` value from a row-major `3 × 3` colour/calibration matrix.
+fn srational_matrix(m: &[f64; 9]) -> Value {
+    Value::SRational(m.iter().map(|&x| srational(x)).collect())
 }
 
 /// The number of distinct colour planes a raw's photometry carries (`CFAPlaneColor` length for a
