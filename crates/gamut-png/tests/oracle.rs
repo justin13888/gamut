@@ -3,7 +3,10 @@
 //! gamut ships no PNG decoder, so correctness is proven by decoding the encoder's output with libpng
 //! and asserting the pixels (and IHDR fields) match the source exactly.
 
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_core::{
+    Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Rgb8, Rgb16, Rgba8,
+    Rgba16,
+};
 use gamut_deflate::Level;
 use gamut_png::{FilterStrategy, FilterType, PngEncoder};
 
@@ -108,6 +111,68 @@ fn filtering_shrinks_a_gradient() {
         filtered < unfiltered,
         "filtered {filtered} should beat unfiltered {unfiltered}"
     );
+}
+
+/// Encodes an 8-bit image of pixel type `$ty` and asserts libpng decodes the exact source bytes
+/// with the expected colour type.
+macro_rules! check_8bit {
+    ($ty:ty, $channels:expr, $color:expr) => {{
+        let (w, h) = (20u32, 15u32);
+        let n = (w * h) as usize * $channels;
+        let src: Vec<u8> = (0..n)
+            .map(|i| (i.wrapping_mul(37) ^ (i >> 2)) as u8)
+            .collect();
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_compression(Level::Best)
+            .encode_image(
+                ImageRef::<$ty>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
+                &mut png,
+            )
+            .expect("encode");
+        let dec = libpng_oracle::decode(&png);
+        assert_eq!(dec.bit_depth, 8, "{}", stringify!($ty));
+        assert_eq!(dec.color_type, $color, "{}", stringify!($ty));
+        assert_eq!(dec.pixels, src, "{}", stringify!($ty));
+    }};
+}
+
+/// As [`check_8bit`] but for 16-bit samples, comparing against the big-endian serialisation.
+macro_rules! check_16bit {
+    ($ty:ty, $channels:expr, $color:expr) => {{
+        let (w, h) = (18u32, 13u32);
+        let n = (w * h) as usize * $channels;
+        let src: Vec<u16> = (0..n).map(|i| (i.wrapping_mul(1009)) as u16).collect();
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_compression(Level::Best)
+            .encode_image(
+                ImageRef::<$ty>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
+                &mut png,
+            )
+            .expect("encode");
+        let dec = libpng_oracle::decode(&png);
+        assert_eq!(dec.bit_depth, 16, "{}", stringify!($ty));
+        assert_eq!(dec.color_type, $color, "{}", stringify!($ty));
+        let expected: Vec<u8> = src.iter().flat_map(|s| s.to_be_bytes()).collect();
+        assert_eq!(dec.pixels, expected, "{}", stringify!($ty));
+    }};
+}
+
+#[test]
+fn eight_bit_colour_types_round_trip() {
+    check_8bit!(Gray8, 1, libpng_oracle::COLOR_GRAY);
+    check_8bit!(GrayAlpha8, 2, libpng_oracle::COLOR_GRAY_ALPHA);
+    check_8bit!(Rgb8, 3, libpng_oracle::COLOR_RGB);
+    check_8bit!(Rgba8, 4, libpng_oracle::COLOR_RGBA);
+}
+
+#[test]
+fn sixteen_bit_colour_types_round_trip() {
+    check_16bit!(Gray16, 1, libpng_oracle::COLOR_GRAY);
+    check_16bit!(GrayAlpha16, 2, libpng_oracle::COLOR_GRAY_ALPHA);
+    check_16bit!(Rgb16, 3, libpng_oracle::COLOR_RGB);
+    check_16bit!(Rgba16, 4, libpng_oracle::COLOR_RGBA);
 }
 
 #[test]
