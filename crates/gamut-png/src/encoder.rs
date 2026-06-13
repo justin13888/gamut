@@ -3,8 +3,8 @@
 //! palette, sub-byte depths, ancillary chunks, and space optimisations layer on in later phases.
 
 use gamut_core::{
-    EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Pixel, Result, Rgb8, Rgb16,
-    Rgba8, Rgba16,
+    EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Indexed8, Pixel, Result,
+    Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
@@ -12,6 +12,7 @@ use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
 use crate::filter::{self, FilterStrategy};
 use crate::ihdr;
+use crate::palette::PngPalette;
 
 /// IDAT payload cap. A decoder concatenates consecutive IDATs, so the split is transparent; a
 /// large-ish cap keeps the 12-byte per-chunk overhead negligible.
@@ -56,6 +57,41 @@ impl PngEncoder {
         self
     }
 
+    /// Encodes an 8-bit indexed (palette) image. Indexed colour does not fit the single-buffer
+    /// [`EncodeImage`] shape because it needs a separate palette, so it is an inherent method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if any index is out of range for `palette`.
+    pub fn encode_indexed8(
+        &self,
+        image: ImageRef<'_, Indexed8>,
+        palette: &PngPalette,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        let indices = image.as_samples();
+        let max_index = indices.iter().copied().max().unwrap_or(0);
+        if usize::from(max_index) >= palette.len() {
+            return Err(Error::InvalidInput("PNG: palette index out of range"));
+        }
+        let dims = image.dimensions();
+        let plte = palette.plte();
+        let trns = palette.trns();
+        Ok(self.write_png(
+            (dims.width, dims.height),
+            indices,
+            ColorType::Indexed,
+            8,
+            |out| {
+                chunk::write_chunk(out, *b"PLTE", &plte);
+                if let Some(alpha) = trns {
+                    chunk::write_chunk(out, *b"tRNS", alpha);
+                }
+            },
+            out,
+        ))
+    }
+
     /// Encodes an 8-bit-per-sample image (samples are already PNG's storage bytes).
     fn encode_8bit<P: Pixel<Sample = u8>>(
         &self,
@@ -64,7 +100,14 @@ impl PngEncoder {
         out: &mut Vec<u8>,
     ) -> usize {
         let dims = image.dimensions();
-        self.write_png((dims.width, dims.height), image.as_samples(), color, 8, out)
+        self.write_png(
+            (dims.width, dims.height),
+            image.as_samples(),
+            color,
+            8,
+            |_| {},
+            out,
+        )
     }
 
     /// Encodes a 16-bit-per-sample image, serialising samples big-endian (PNG's network byte order).
@@ -80,18 +123,19 @@ impl PngEncoder {
         for &sample in samples {
             bytes.extend_from_slice(&sample.to_be_bytes());
         }
-        self.write_png((dims.width, dims.height), &bytes, color, 16, out)
+        self.write_png((dims.width, dims.height), &bytes, color, 16, |_| {}, out)
     }
 
-    /// Shared back end: signature → IHDR → filtered + DEFLATE-compressed scanlines as IDAT(s) → IEND.
-    /// `sample_bytes` is the image in PNG storage order; the stride is derived from `color` and
-    /// `bit_depth`.
-    fn write_png(
+    /// Shared back end: signature → IHDR → `pre_idat` chunks (e.g. PLTE/tRNS) → filtered +
+    /// DEFLATE-compressed scanlines as IDAT(s) → IEND. `sample_bytes` is the image in PNG storage
+    /// order; the stride is derived from `color` and `bit_depth`.
+    fn write_png<F: FnOnce(&mut Vec<u8>)>(
         &self,
         (width, height): (u32, u32),
         sample_bytes: &[u8],
         color: ColorType,
         bit_depth: u8,
+        pre_idat: F,
         out: &mut Vec<u8>,
     ) -> usize {
         let bpp = color.channels() * (bit_depth as usize / 8);
@@ -100,6 +144,7 @@ impl PngEncoder {
         let start = out.len();
         out.extend_from_slice(&SIGNATURE);
         ihdr::write(out, width, height, bit_depth, color);
+        pre_idat(out);
 
         let filtered = filter::filter_image(self.filter, sample_bytes, row_bytes, bpp);
         let mut idat = Vec::new();

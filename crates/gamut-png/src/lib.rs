@@ -32,7 +32,9 @@ mod crc32;
 mod encoder;
 mod filter;
 mod ihdr;
+mod palette;
 
 pub use color::ColorType;
 pub use encoder::PngEncoder;
 pub use filter::{FilterStrategy, FilterType};
+pub use palette::PngPalette;

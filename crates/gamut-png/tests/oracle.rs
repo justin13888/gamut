@@ -4,11 +4,11 @@
 //! and asserting the pixels (and IHDR fields) match the source exactly.
 
 use gamut_core::{
-    Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Rgb8, Rgb16, Rgba8,
-    Rgba16,
+    Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Indexed8, Rgb8,
+    Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::Level;
-use gamut_png::{FilterStrategy, FilterType, PngEncoder};
+use gamut_png::{FilterStrategy, FilterType, PngEncoder, PngPalette};
 
 const SIZES: &[(u32, u32)] = &[
     (1, 1),
@@ -173,6 +173,65 @@ fn sixteen_bit_colour_types_round_trip() {
     check_16bit!(GrayAlpha16, 2, libpng_oracle::COLOR_GRAY_ALPHA);
     check_16bit!(Rgb16, 3, libpng_oracle::COLOR_RGB);
     check_16bit!(Rgba16, 4, libpng_oracle::COLOR_RGBA);
+}
+
+#[test]
+fn indexed8_with_palette_and_transparency_round_trips() {
+    let (w, h) = (24u32, 18u32);
+    let rgb: Vec<[u8; 3]> = vec![
+        [10, 20, 30],
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+        [128, 128, 128],
+    ];
+    let alpha = vec![0u8, 255, 128]; // entries 0/1/2 have alpha; 3/4 are opaque
+    let palette = PngPalette::with_transparency(&rgb, &alpha).unwrap();
+    let indices: Vec<u8> = (0..(w * h) as usize)
+        .map(|i| (i % rgb.len()) as u8)
+        .collect();
+
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .encode_indexed8(
+            ImageRef::<Indexed8>::new(&indices, Dimensions::new(w, h).unwrap()).unwrap(),
+            &palette,
+            &mut png,
+        )
+        .expect("encode");
+
+    // Raw decode: it is a palette image and the indices survive exactly.
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(dec.color_type, libpng_oracle::COLOR_PALETTE);
+    assert_eq!(dec.bit_depth, 8);
+    assert_eq!(dec.pixels, indices);
+
+    // Expanded decode: palette colours and tRNS resolve to the intended RGBA.
+    let (dw, dh, rgba) = libpng_oracle::decode_rgba8(&png);
+    assert_eq!((dw, dh), (w, h));
+    let expected: Vec<u8> = indices
+        .iter()
+        .flat_map(|&idx| {
+            let [r, g, b] = rgb[idx as usize];
+            let a = alpha.get(idx as usize).copied().unwrap_or(255);
+            [r, g, b, a]
+        })
+        .collect();
+    assert_eq!(rgba, expected);
+}
+
+#[test]
+fn indexed8_rejects_out_of_range_index() {
+    let palette = PngPalette::new(&[[0, 0, 0], [255, 255, 255]]).unwrap();
+    let indices = vec![0u8, 1, 2]; // 2 is out of range for a 2-entry palette
+    let mut png = Vec::new();
+    let result = PngEncoder::new().encode_indexed8(
+        ImageRef::<Indexed8>::new(&indices, Dimensions::new(3, 1).unwrap()).unwrap(),
+        &palette,
+        &mut png,
+    );
+    assert!(result.is_err());
 }
 
 #[test]

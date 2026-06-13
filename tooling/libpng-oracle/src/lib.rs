@@ -142,6 +142,35 @@ pub fn decode(bytes: &[u8]) -> DecodedImage {
     }
 }
 
+/// Decodes a PNG to 8-bit RGBA via libpng's simplified API, resolving palette and tRNS to actual
+/// colours. Returns `(width, height, rgba)`. Useful for verifying that palette entries and
+/// transparency resolve to the colours the encoder intended.
+#[must_use]
+pub fn decode_rgba8(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+    unsafe {
+        let mut image: sys::png_image = std::mem::zeroed();
+        image.version = sys::PNG_IMAGE_VERSION;
+        let ok = sys::png_image_begin_read_from_memory(
+            &raw mut image,
+            bytes.as_ptr().cast::<c_void>(),
+            bytes.len(),
+        );
+        assert!(ok != 0, "png_image_begin_read_from_memory failed");
+        image.format = sys::PNG_FORMAT_RGBA;
+        let (width, height) = (image.width, image.height);
+        let mut rgba = vec![0u8; width as usize * height as usize * 4];
+        let ok = sys::png_image_finish_read(
+            &raw mut image,
+            std::ptr::null(),
+            rgba.as_mut_ptr().cast::<c_void>(),
+            0, // row stride: 0 = packed (width * 4)
+            std::ptr::null_mut(),
+        );
+        assert!(ok != 0, "png_image_finish_read failed");
+        (width, height, rgba)
+    }
+}
+
 /// The libpng version number the oracle links against (e.g. `10643` for 1.6.43).
 #[must_use]
 pub fn version() -> u32 {
