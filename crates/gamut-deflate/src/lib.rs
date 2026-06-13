@@ -38,6 +38,7 @@
 mod adler32;
 mod bitwriter;
 mod block;
+mod dynamic;
 mod encoder;
 mod huffman;
 mod lz77;

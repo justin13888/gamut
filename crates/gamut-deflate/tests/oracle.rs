@@ -86,3 +86,45 @@ fn zlib_stream_round_trips_via_zlib() {
         }
     }
 }
+
+#[test]
+fn competitive_with_zlib_level_9() {
+    // Dynamic Huffman + lazy matching should land within a few percent of zlib's maximum level
+    // (and usually beat it) while still inflating exactly. The optimal-parse phase widens the gap.
+    let inputs: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "text",
+            b"the quick brown fox jumps over the lazy dog. ".repeat(300),
+        ),
+        ("ramp", (0..20_000u32).map(|i| (i % 256) as u8).collect()),
+        (
+            "pseudo",
+            (0..20_000u32)
+                .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+                .collect(),
+        ),
+        ("mixed", {
+            let mut v = b"header header header ".repeat(50);
+            v.extend((0..8_000u32).map(|i| (i.wrapping_mul(48_271) >> 20) as u8));
+            v
+        }),
+    ];
+    for (name, data) in &inputs {
+        let mut def = Vec::new();
+        DeflateEncoder::new()
+            .with_level(Level::Default)
+            .zlib_compress(data, &mut def);
+        assert_eq!(
+            zlib_oracle::inflate_zlib(&def).unwrap(),
+            *data,
+            "{name}: round-trip"
+        );
+        let z9 = zlib_oracle::compress(data, 9).unwrap();
+        assert!(
+            def.len() <= z9.len() + z9.len() / 20,
+            "{name}: gamut Default {} should be within 5% of zlib-9 {}",
+            def.len(),
+            z9.len()
+        );
+    }
+}

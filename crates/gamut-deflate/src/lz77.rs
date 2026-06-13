@@ -111,27 +111,44 @@ impl Matcher {
     }
 }
 
-/// Parses `data` into a greedy LZ77 token stream, searching up to `max_chain` candidates per
-/// position. A larger `max_chain` finds more/longer matches at the cost of time.
-pub(crate) fn parse(data: &[u8], max_chain: usize) -> Vec<Token> {
+/// Parses `data` into an LZ77 token stream, searching up to `max_chain` candidates per position.
+///
+/// With `lazy` set, the parser uses lazy matching (RFC 1951 §4): after finding a match it checks
+/// whether the next position starts a longer one and, if so, defers — emitting the current byte as a
+/// literal. This finds better parses than pure greedy at a small time cost. A larger `max_chain`
+/// finds more/longer matches, also at a time cost.
+pub(crate) fn parse(data: &[u8], max_chain: usize, lazy: bool) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut matcher = Matcher::new();
     let n = data.len();
     let mut pos = 0;
     while pos < n {
-        if let Some((len, dist)) = matcher.find(data, pos, max_chain) {
-            tokens.push(Token::Match { len, dist });
-            // Insert every position the match covers so later matches can reference inside it.
-            let end = pos + len as usize;
-            while pos < end {
-                matcher.insert(data, pos);
-                pos += 1;
-            }
-        } else {
+        let current = matcher.find(data, pos, max_chain);
+        matcher.insert(data, pos); // pos becomes a candidate for subsequent positions
+        let Some((len, dist)) = current else {
             tokens.push(Token::Literal(data[pos]));
-            matcher.insert(data, pos);
             pos += 1;
+            continue;
+        };
+        // Lazy matching: if the next position begins a strictly longer match, defer this one.
+        if lazy
+            && (len as usize) < MAX_MATCH
+            && pos + 1 < n
+            && let Some((next_len, _)) = matcher.find(data, pos + 1, max_chain)
+            && next_len > len
+        {
+            tokens.push(Token::Literal(data[pos]));
+            pos += 1;
+            continue;
         }
+        tokens.push(Token::Match { len, dist });
+        // `pos` is already inserted; insert the rest of the covered span so future matches can
+        // reference inside it.
+        let end = pos + len as usize;
+        for p in (pos + 1)..end {
+            matcher.insert(data, p);
+        }
+        pos = end;
     }
     tokens
 }
@@ -143,7 +160,7 @@ mod tests {
     #[test]
     fn all_literals_when_no_repeats() {
         let data = [1u8, 2, 3, 4, 5];
-        let tokens = parse(&data, 128);
+        let tokens = parse(&data, 128, false);
         assert_eq!(tokens.len(), 5);
         assert!(tokens.iter().all(|t| matches!(t, Token::Literal(_))));
     }
@@ -152,7 +169,7 @@ mod tests {
     fn finds_a_repeated_block() {
         // "abcabc": positions 0-2 are literals, then a match (len 3, dist 3).
         let data = b"abcabc";
-        let tokens = parse(data, 128);
+        let tokens = parse(data, 128, false);
         assert_eq!(tokens[0], Token::Literal(b'a'));
         assert_eq!(tokens[1], Token::Literal(b'b'));
         assert_eq!(tokens[2], Token::Literal(b'c'));
@@ -163,7 +180,7 @@ mod tests {
     fn long_run_uses_overlapping_match() {
         // A run of identical bytes becomes a literal then a long overlapping match at distance 1.
         let data = vec![0x5Au8; 300];
-        let tokens = parse(&data, 128);
+        let tokens = parse(&data, 128, false);
         assert_eq!(tokens[0], Token::Literal(0x5A));
         // The next token copies at distance 1, capped at the 258-byte maximum length.
         assert_eq!(tokens[1], Token::Match { len: 258, dist: 1 });
@@ -173,7 +190,7 @@ mod tests {
     fn respects_minimum_match_length() {
         // A 2-byte repeat is too short to reference; it stays literal.
         let data = b"abxxab";
-        let tokens = parse(data, 128);
+        let tokens = parse(data, 128, false);
         assert!(tokens.iter().all(|t| matches!(t, Token::Literal(_))));
     }
 }

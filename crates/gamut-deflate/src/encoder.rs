@@ -2,7 +2,7 @@
 //! `compress` (raw RFC 1951) / `zlib_compress` (RFC 1950) entry points.
 
 use crate::adler32::adler32;
-use crate::{block, lz77, zlib};
+use crate::{block, dynamic, lz77, zlib};
 
 /// Compression effort, trading encode time for output size. Every level produces a correct stream;
 /// they differ only in ratio.
@@ -72,17 +72,21 @@ impl DeflateEncoder {
         match self.level {
             // The uncompressed floor.
             Level::Store => block::stored(data),
-            // LZ77 parse, then keep the smaller of stored vs fixed-Huffman. Dynamic Huffman and a
-            // per-block choice land in later phases.
+            // LZ77 parse, then keep the smallest of stored / fixed-Huffman / dynamic-Huffman.
+            // Per-block splitting and the optimal parse build on this in later phases.
             Level::Fast | Level::Default | Level::Best => {
-                let tokens = lz77::parse(data, self.max_chain());
-                let stored = block::stored(data);
+                let lazy = !matches!(self.level, Level::Fast);
+                let tokens = lz77::parse(data, self.max_chain(), lazy);
+                let mut best = block::stored(data);
                 let fixed = block::fixed(&tokens);
-                if fixed.len() <= stored.len() {
-                    fixed
-                } else {
-                    stored
+                if fixed.len() < best.len() {
+                    best = fixed;
                 }
+                let dynamic = dynamic::body(&tokens);
+                if dynamic.len() < best.len() {
+                    best = dynamic;
+                }
+                best
             }
         }
     }

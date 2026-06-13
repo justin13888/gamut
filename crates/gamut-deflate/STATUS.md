@@ -21,7 +21,7 @@ with the input; size is benchmarked against zlib's own `compress2` at the matchi
 | P-D1 | RFC 1950/1951 | Scaffold + workspace wiring + zlib-oracle/submodule; LSB `BitWriter`; Adler-32; zlib header (CMF/FLG/FCHECK); **stored blocks** (the always-correct floor) | ✅ done |
 | P-D2 | §3.2.6 | Fixed-Huffman blocks (literals); per-input choice of stored vs fixed | ✅ done |
 | P-D3 | §3.2.5, §4 | Length/distance symbol tables (exhaustive inversion tests); greedy hash-chain LZ77 matcher under fixed Huffman | ✅ done |
-| P-D4 | §3.2.2, §3.2.7 | **Dynamic Huffman**: length-limited code build + canonical codes + code-length RLE (16/17/18); per-block min-cost selection; lazy matching → `Level::Default` | ⏳ todo |
+| P-D4 | §3.2.2, §3.2.7 | **Dynamic Huffman**: length-limited code build + canonical codes + code-length RLE (16/17/18); stored/fixed/dynamic min-cost selection; lazy matching → `Level::Default` | ✅ done |
 | P-D5 | §4 | Entropy-cost block splitting | ⏳ todo |
 | P-D6 | — | **Optimal parse** (zopfli-style DP + iterative entropy model) + package-merge 15-bit length limiting → `Level::Best` | ⏳ todo |
 
