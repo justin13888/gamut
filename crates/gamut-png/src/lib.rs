@@ -26,6 +26,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod ancillary;
 mod chunk;
 mod color;
 mod crc32;
@@ -35,6 +36,7 @@ mod ihdr;
 mod pack;
 mod palette;
 
+pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use color::ColorType;
 pub use encoder::PngEncoder;
 pub use filter::{FilterStrategy, FilterType};

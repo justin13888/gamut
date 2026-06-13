@@ -8,7 +8,7 @@ use gamut_core::{
     Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::Level;
-use gamut_png::{FilterStrategy, FilterType, PngEncoder, PngPalette};
+use gamut_png::{FilterStrategy, FilterType, PhysicalUnit, PngEncoder, PngPalette, SrgbIntent};
 
 const SIZES: &[(u32, u32)] = &[
     (1, 1),
@@ -279,6 +279,34 @@ fn bilevel_round_trips_as_1bit_gray() {
     assert_eq!(dec.bit_depth, 1);
     let expected: Vec<u8> = src.iter().map(|&v| u8::from(v != 0)).collect();
     assert_eq!(dec.pixels, expected);
+}
+
+#[test]
+fn ancillary_chunks_are_accepted_by_libpng() {
+    // Pile on every standard ancillary chunk. libpng validates them on read (and decompresses
+    // zTXt/iTXt internally), so if any chunk were malformed the oracle would abort. The pixels must
+    // also survive unchanged.
+    let (w, h) = (16u32, 16u32);
+    let src = rgb_pattern(w, h);
+    let dims = Dimensions::new(w, h).unwrap();
+    let comment = "the quick brown fox ".repeat(20);
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .with_gamma(1.0 / 2.2)
+        .with_srgb(SrgbIntent::Perceptual)
+        .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
+        .with_significant_bits(&[8, 8, 8])
+        .with_background_rgb(0, 0, 0)
+        .with_physical_dimensions(2835, 2835, PhysicalUnit::Meter)
+        .with_time(2026, 6, 13, 1, 2, 3)
+        .with_text("Title", "gamut")
+        .with_compressed_text("Comment", &comment)
+        .with_international_text("Author", "gämut")
+        .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
+        .expect("encode");
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(dec.pixels, src);
 }
 
 #[test]

@@ -8,6 +8,7 @@ use gamut_core::{
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
+use crate::ancillary::{Ancillary, PhysicalUnit, SrgbIntent};
 use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
 use crate::filter::{self, FilterStrategy};
@@ -24,6 +25,7 @@ const IDAT_MAX: usize = 1 << 16;
 pub struct PngEncoder {
     level: Level,
     filter: FilterStrategy,
+    ancillary: Ancillary,
 }
 
 impl Default for PngEncoder {
@@ -40,6 +42,7 @@ impl PngEncoder {
         Self {
             level: Level::Default,
             filter: FilterStrategy::MinSumAbs,
+            ancillary: Ancillary::default(),
         }
     }
 
@@ -55,6 +58,120 @@ impl PngEncoder {
     #[must_use]
     pub fn with_filter(mut self, filter: FilterStrategy) -> Self {
         self.filter = filter;
+        self
+    }
+
+    /// Records an image gamma (gAMA chunk). `gamma` is the encoding gamma, e.g. `1.0 / 2.2`.
+    #[must_use]
+    pub fn with_gamma(mut self, gamma: f64) -> Self {
+        self.ancillary.gamma = Some((gamma * 100_000.0).round().max(0.0) as u32);
+        self
+    }
+
+    /// Records the standard colour-space rendering intent (sRGB chunk).
+    #[must_use]
+    pub fn with_srgb(mut self, intent: SrgbIntent) -> Self {
+        self.ancillary.set_srgb(intent);
+        self
+    }
+
+    /// Records the white point and RGB primary chromaticities (cHRM chunk), each as `(x, y)`.
+    #[must_use]
+    pub fn with_chromaticities(
+        mut self,
+        white: (f64, f64),
+        red: (f64, f64),
+        green: (f64, f64),
+        blue: (f64, f64),
+    ) -> Self {
+        let q = |v: f64| (v * 100_000.0).round().max(0.0) as u32;
+        self.ancillary.chrm = Some([
+            q(white.0),
+            q(white.1),
+            q(red.0),
+            q(red.1),
+            q(green.0),
+            q(green.1),
+            q(blue.0),
+            q(blue.1),
+        ]);
+        self
+    }
+
+    /// Records the number of significant bits per channel (sBIT chunk). The length must match the
+    /// colour type (1 for grey, 2 for grey+alpha, 3 for RGB/indexed, 4 for RGBA).
+    #[must_use]
+    pub fn with_significant_bits(mut self, bits: &[u8]) -> Self {
+        self.ancillary.sbit = Some(bits.to_vec());
+        self
+    }
+
+    /// Records a greyscale background colour (bKGD chunk) for greyscale images.
+    #[must_use]
+    pub fn with_background_gray(mut self, gray: u16) -> Self {
+        self.ancillary.bkgd = Some(gray.to_be_bytes().to_vec());
+        self
+    }
+
+    /// Records an RGB background colour (bKGD chunk) for truecolour images.
+    #[must_use]
+    pub fn with_background_rgb(mut self, red: u16, green: u16, blue: u16) -> Self {
+        let mut data = Vec::with_capacity(6);
+        data.extend_from_slice(&red.to_be_bytes());
+        data.extend_from_slice(&green.to_be_bytes());
+        data.extend_from_slice(&blue.to_be_bytes());
+        self.ancillary.bkgd = Some(data);
+        self
+    }
+
+    /// Records a palette-index background colour (bKGD chunk) for indexed images.
+    #[must_use]
+    pub fn with_background_index(mut self, index: u8) -> Self {
+        self.ancillary.bkgd = Some(vec![index]);
+        self
+    }
+
+    /// Records the intended physical pixel dimensions (pHYs chunk).
+    #[must_use]
+    pub fn with_physical_dimensions(mut self, x_ppu: u32, y_ppu: u32, unit: PhysicalUnit) -> Self {
+        self.ancillary.set_physical(x_ppu, y_ppu, unit);
+        self
+    }
+
+    /// Records the last-modification time (tIME chunk), in UTC.
+    #[must_use]
+    pub fn with_time(
+        mut self,
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    ) -> Self {
+        self.ancillary
+            .set_time(year, month, day, hour, minute, second);
+        self
+    }
+
+    /// Adds an uncompressed Latin-1 text annotation (tEXt chunk).
+    #[must_use]
+    pub fn with_text(mut self, keyword: &str, text: &str) -> Self {
+        self.ancillary.add_text_latin1(keyword, text);
+        self
+    }
+
+    /// Adds a zlib-compressed Latin-1 text annotation (zTXt chunk).
+    #[must_use]
+    pub fn with_compressed_text(mut self, keyword: &str, text: &str) -> Self {
+        self.ancillary.add_text_compressed(keyword, text);
+        self
+    }
+
+    /// Adds an uncompressed UTF-8 text annotation (iTXt chunk).
+    #[must_use]
+    pub fn with_international_text(mut self, keyword: &str, text: &str) -> Self {
+        self.ancillary.add_text_international(keyword, text);
         self
     }
 
@@ -157,7 +274,9 @@ impl PngEncoder {
         let start = out.len();
         out.extend_from_slice(&SIGNATURE);
         ihdr::write(out, width, height, bit_depth, color);
-        pre_idat(out);
+        self.ancillary.write_pre_plte(out); // colour-space chunks precede PLTE
+        pre_idat(out); // PLTE + tRNS (indexed only)
+        self.ancillary.write_post_plte(out); // background / physical / timing / text
 
         let filtered = filter::filter_image(self.filter, sample_bytes, row_bytes, bpp);
         let mut idat = Vec::new();
