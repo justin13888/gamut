@@ -26,3 +26,21 @@ exclude_globs = [
 # slow mutant on a loaded CI runner isn't misreported as a timeout, without burning minutes
 # per hang.
 minimum_test_timeout = 60
+
+# Provably-equivalent mutants: no input distinguishes them from the original, so no test can kill
+# them. Each entry is scoped to one function + operator and carries the equivalence argument. Prefer
+# tightening the code so a mutant is unviable (e.g. matching on `Ordering` instead of `<`/`>`); only
+# list a mutant here when the equivalence is inherent to the arithmetic.
+exclude_re = [
+    # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
+    # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
+    # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.
+    'replace < with <= in dequant',
+    # gamut-av1 cdf::diagonal_count — `w + h - 1` is the anti-diagonal count; diagonals at index
+    # `≥ w+h-1` are empty (`i_lo > i_hi`), so any bound that is larger or equal walks the same
+    # non-empty diagonals and yields an identical scan. All three operator mutations only enlarge
+    # (or keep) the bound, hence equivalent; a *smaller* bound (not generated here) would differ.
+    'replace \+ with \* in diagonal_count',
+    'replace - with \+ in diagonal_count',
+    'replace - with / in diagonal_count',
+]

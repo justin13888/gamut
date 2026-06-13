@@ -265,6 +265,23 @@ mod tests {
         out
     }
 
+    /// Returns the payload bytes of the first OBU (the sequence header) — its header byte and
+    /// LEB128 size prefix stripped.
+    fn seq_header_payload(d: &[u8]) -> &[u8] {
+        let mut i = 1; // skip the OBU header byte
+        let (mut size, mut shift) = (0usize, 0);
+        loop {
+            let b = d[i];
+            i += 1;
+            size |= usize::from(b & 0x7f) << shift;
+            shift += 7;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        &d[i..i + size]
+    }
+
     #[test]
     fn obu_stream_is_seq_then_frame() {
         let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
@@ -326,8 +343,34 @@ mod tests {
 
     #[test]
     fn rejects_zero_dimension() {
-        let p = Planar8::from_rgb8_identity(&[], 0, 0).unwrap();
-        assert!(encode_still_lossless_identity(&p).is_err());
+        // Each axis is rejected independently: a 0×0, a 0×4 and a 4×0 image must all fail with the
+        // guard's own message. The mixed cases (exactly one zero) are what force the guard to be an
+        // `||` — under `&&` a 0×4 slips through to fault deeper in the encoder.
+        for (w, h) in [(0, 0), (0, 4), (4, 0)] {
+            let p = Planar8::from_rgb8_identity(&[], w, h).unwrap();
+            match encode_still_intra(&p, 0) {
+                Err(Error::InvalidInput(msg)) => {
+                    assert_eq!(msg, "image has a zero dimension", "{w}x{h}");
+                }
+                other => panic!("{w}x{h}: expected zero-dimension InvalidInput, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn lossless_sequence_header_clears_lossy_flags() {
+        // `encode_with` passes `qindex > 0` as the sequence header's `lossy` flag, which gates
+        // enable_filter_intra/cdef/restoration. At qindex 0 (lossless) those bits must be 0; at a
+        // lossy qindex they are 1. Same image and no superres, so the sequence-header payload differs
+        // *only* by that flag — distinguishing `qindex > 0` from an always-true `qindex >= 0`.
+        let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
+        let (lossless, _) = encode_still_intra(&p, 0).unwrap();
+        let (lossy, _) = encode_still_intra(&p, 8).unwrap();
+        assert_ne!(
+            seq_header_payload(&lossless.obus),
+            seq_header_payload(&lossy.obus),
+            "lossless and lossy sequence headers must differ in the lossy flags",
+        );
     }
 
     #[test]
