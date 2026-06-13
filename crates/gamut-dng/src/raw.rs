@@ -54,7 +54,7 @@ pub enum RawPhotometry {
 ///
 /// Built with [`RawImage::new_cfa`] or [`RawImage::new_linear_raw`] (which validate the buffer and
 /// pattern) and refined with the `with_*` setters.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RawImage {
     dims: Dimensions,
     bits_per_sample: u16,

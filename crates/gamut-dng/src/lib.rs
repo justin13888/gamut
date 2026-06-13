@@ -30,6 +30,7 @@
 //! IFDs, offset loops, and truncation.
 #![forbid(unsafe_code)]
 
+pub mod decoder;
 pub mod encoder;
 pub mod profile;
 pub mod raw;
@@ -46,6 +47,7 @@ mod writer;
 pub use gamut_core::{Dimensions, Error, Result};
 pub use gamut_ifd::ByteOrder;
 
+pub use decoder::{DecodedDng, DngDecoder};
 pub use encoder::DngEncoder;
 pub use profile::CameraProfile;
 pub use raw::RawImage;

@@ -37,8 +37,8 @@ encode→decode round-trips guard every lossless path.
 | P8  | Ch6     | Colour & calibration: ColorMatrix1/2, CameraCalibration, ForwardMatrix, illuminants, AnalogBalance, BaselineExposure, profile name/policy + `CameraProfile` API | ✅ done |
 | P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). LinearizationTable / MaskedAreas / BlackLevelDelta deferred | ✅ done |
 | P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
-| P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs/ExifIFD), unpack samples, return raw image + metadata | 🚧 in progress |
-| P12 | Ch4     | Deflate/ZIP (8) encode+decode + horizontal-difference predictor (`miniz_oxide`) | ☐ planned |
+| P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe | ✅ done |
+| P12 | Ch4     | Deflate/ZIP (8) encode+decode + horizontal-difference predictor (`miniz_oxide`) | 🚧 in progress |
 | P13 | Ch4     | Lossless JPEG (7) encode+decode (Huffman + predictor) — the largest single codec | ☐ planned |
 | P14 | Ch2     | Tiled raw layout (`TileOffsets`/`TileByteCounts`) | ☐ planned |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) | ☐ planned |

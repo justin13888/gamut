@@ -36,7 +36,6 @@ pub(crate) fn pack(
 ///
 /// Returns up to `rows * samples_per_row` samples (fewer if `bytes` is short).
 #[must_use]
-#[allow(dead_code)] // the round-trip tests use it now; the decoder (P11) is its production consumer
 pub(crate) fn unpack(
     bytes: &[u8],
     bits: u16,
@@ -84,7 +83,6 @@ fn pack_msb_rows(samples: &[u16], bits: u16, samples_per_row: usize) -> Vec<u8> 
 }
 
 /// Inverse of [`pack_msb_rows`].
-#[allow(dead_code)] // see `unpack`
 fn unpack_msb_rows(bytes: &[u8], bits: u16, samples_per_row: usize, rows: usize) -> Vec<u16> {
     if samples_per_row == 0 {
         return Vec::new();
