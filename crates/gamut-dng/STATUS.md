@@ -27,10 +27,10 @@ encode→decode round-trips guard every lossless path.
 
 | Phase | DNG § | Scope | Status |
 | ----- | ----- | ----- | ------ |
-| P1  | —       | Scaffold: crate, workspace + umbrella wiring, README, region-free skeleton | 🚧 in progress |
-| P2  | —       | **Keystone** `gamut-ifd`: sub-IFD tree writer + pointer patching + `read_ifd_at` | ☐ planned |
-| P3  | Ch3     | DNG tag + value tables (`tags`, `values`) from the SDK headers | ☐ planned |
-| P4  | Ch2–5   | **Keystone** uncompressed CFA DNG: IFD0 preview + raw sub-IFD, mandatory tags, strips, II/MM | ☐ planned |
+| P1  | —       | Scaffold: crate, workspace + umbrella wiring, README, region-free skeleton | ✅ done |
+| P2  | —       | **Keystone** `gamut-ifd`: sub-IFD tree writer + pointer patching + `read_ifd_at` | ✅ done |
+| P3  | Ch3     | DNG tag + value tables (`tags`, `values`) from the SDK headers | ✅ done |
+| P4  | Ch2–5   | **Keystone** uncompressed CFA DNG: IFD0 preview + raw sub-IFD, mandatory tags, strips, II/MM | 🚧 in progress |
 | P5  | —       | `tooling/gamut-dng-oracle`: auto-extract + `cc`-build SDK + `extern "C"` shim | ☐ planned |
 | P6  | —       | Adobe oracle gate on: gamut-encode → `dng_validate`; sample DNG → gamut-decode; libtiff cross-check | ☐ planned |
 | P7  | Ch4     | `LinearRaw` photometric (demosaiced RGB), samples-per-pixel / photometric handling | ☐ planned |

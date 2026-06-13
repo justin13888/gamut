@@ -30,8 +30,15 @@
 //! IFDs, offset loops, and truncation.
 #![forbid(unsafe_code)]
 
+pub mod tags;
+pub mod values;
+
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
-// not also depend on `gamut-core` directly. The DNG-specific modules (tags, values, the camera
-// profile and raw-image inputs, the encoder/decoder, and the compression schemes) land in
-// subsequent phases — see `STATUS.md`.
+// not also depend on `gamut-core` directly. The remaining DNG-specific modules (the camera profile
+// and raw-image inputs, the encoder/decoder, and the compression schemes) land in subsequent
+// phases — see `STATUS.md`.
 pub use gamut_core::{Dimensions, Error, Result};
+pub use values::{
+    CalibrationIlluminant, CfaLayout, Compression, PhotometricInterpretation, Predictor,
+    PreviewColorSpace, ProfileEmbedPolicy, SampleFormat,
+};
