@@ -82,7 +82,13 @@ impl DeflateEncoder {
                 if fixed.len() < best.len() {
                     best = fixed;
                 }
-                let dynamic = dynamic::body(&tokens);
+                // Best splits into multiple dynamic blocks where it saves bits; the others use a
+                // single block (already at/below zlib-9).
+                let dynamic = if matches!(self.level, Level::Best) {
+                    dynamic::multi_body(&tokens)
+                } else {
+                    dynamic::body(&tokens)
+                };
                 if dynamic.len() < best.len() {
                     best = dynamic;
                 }

@@ -22,7 +22,7 @@ with the input; size is benchmarked against zlib's own `compress2` at the matchi
 | P-D2 | §3.2.6 | Fixed-Huffman blocks (literals); per-input choice of stored vs fixed | ✅ done |
 | P-D3 | §3.2.5, §4 | Length/distance symbol tables (exhaustive inversion tests); greedy hash-chain LZ77 matcher under fixed Huffman | ✅ done |
 | P-D4 | §3.2.2, §3.2.7 | **Dynamic Huffman**: length-limited code build + canonical codes + code-length RLE (16/17/18); stored/fixed/dynamic min-cost selection; lazy matching → `Level::Default` | ✅ done |
-| P-D5 | §4 | Entropy-cost block splitting | ⏳ todo |
+| P-D5 | §4 | Cost-driven block splitting (recursive best-split) → `Level::Best` | ✅ done |
 | P-D6 | — | **Optimal parse** (zopfli-style DP + iterative entropy model) + package-merge 15-bit length limiting → `Level::Best` | ⏳ todo |
 
 ## Notes / deferred
