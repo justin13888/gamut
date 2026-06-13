@@ -4,6 +4,12 @@
 use crate::adler32::adler32;
 use crate::{block, dynamic, lz77, zlib};
 
+/// Largest input for which `Level::Best` runs the (quadratic-ish) optimal parse; above this it falls
+/// back to lazy matching with block splitting, which already lands at/below zlib-9.
+const OPTIMAL_PARSE_LIMIT: usize = 1 << 20;
+/// Cost-model refinement passes for the optimal parse.
+const OPTIMAL_PARSE_ITERATIONS: u32 = 6;
+
 /// Compression effort, trading encode time for output size. Every level produces a correct stream;
 /// they differ only in ratio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -75,8 +81,17 @@ impl DeflateEncoder {
             // LZ77 parse, then keep the smallest of stored / fixed-Huffman / dynamic-Huffman.
             // Per-block splitting and the optimal parse build on this in later phases.
             Level::Fast | Level::Default | Level::Best => {
-                let lazy = !matches!(self.level, Level::Fast);
-                let tokens = lz77::parse(data, self.max_chain(), lazy);
+                let chain = self.max_chain();
+                let tokens = if matches!(self.level, Level::Best) {
+                    if data.len() <= OPTIMAL_PARSE_LIMIT {
+                        lz77::parse_optimal(data, chain, OPTIMAL_PARSE_ITERATIONS)
+                    } else {
+                        lz77::parse(data, chain, true)
+                    }
+                } else {
+                    // Fast = greedy, Default = lazy.
+                    lz77::parse(data, chain, matches!(self.level, Level::Default))
+                };
                 let mut best = block::stored(data);
                 let fixed = block::fixed(&tokens);
                 if fixed.len() < best.len() {

@@ -110,21 +110,23 @@ fn competitive_with_zlib_level_9() {
         }),
     ];
     for (name, data) in &inputs {
-        let mut def = Vec::new();
-        DeflateEncoder::new()
-            .with_level(Level::Default)
-            .zlib_compress(data, &mut def);
-        assert_eq!(
-            zlib_oracle::inflate_zlib(&def).unwrap(),
-            *data,
-            "{name}: round-trip"
-        );
         let z9 = zlib_oracle::compress(data, 9).unwrap();
-        assert!(
-            def.len() <= z9.len() + z9.len() / 20,
-            "{name}: gamut Default {} should be within 5% of zlib-9 {}",
-            def.len(),
-            z9.len()
-        );
+        for level in [Level::Default, Level::Best] {
+            let mut out = Vec::new();
+            DeflateEncoder::new()
+                .with_level(level)
+                .zlib_compress(data, &mut out);
+            assert_eq!(
+                zlib_oracle::inflate_zlib(&out).unwrap(),
+                *data,
+                "{name} {level:?}: round-trip"
+            );
+            assert!(
+                out.len() <= z9.len() + z9.len() / 20,
+                "{name} {level:?}: gamut {} should be within 5% of zlib-9 {}",
+                out.len(),
+                z9.len()
+            );
+        }
     }
 }

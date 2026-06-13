@@ -23,7 +23,15 @@ with the input; size is benchmarked against zlib's own `compress2` at the matchi
 | P-D3 | §3.2.5, §4 | Length/distance symbol tables (exhaustive inversion tests); greedy hash-chain LZ77 matcher under fixed Huffman | ✅ done |
 | P-D4 | §3.2.2, §3.2.7 | **Dynamic Huffman**: length-limited code build + canonical codes + code-length RLE (16/17/18); stored/fixed/dynamic min-cost selection; lazy matching → `Level::Default` | ✅ done |
 | P-D5 | §4 | Cost-driven block splitting (recursive best-split) → `Level::Best` | ✅ done |
-| P-D6 | — | **Optimal parse** (zopfli-style DP + iterative entropy model) + package-merge 15-bit length limiting → `Level::Best` | ⏳ todo |
+| P-D6 | — | **Optimal parse** (zopfli-style shortest-path DP + iterative entropy model) → `Level::Best` | ✅ done |
+
+### Notes on D6
+
+- The optimal parse is applied for inputs ≤ 1 MiB; larger inputs fall back to lazy + block splitting
+  (already at/below zlib-9), bounding encode time.
+- Length-limiting currently uses the count-floor heuristic (within ~1% of optimal). **Package-merge**
+  optimal 15-bit limiting is a clean, self-contained density refinement left as a follow-up; it does
+  not change correctness, only shaves a fraction of a percent.
 
 ## Notes / deferred
 
