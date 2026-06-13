@@ -11,7 +11,8 @@ mod pixel;
 
 pub use image::{ImageBuf, ImageRef};
 pub use pixel::{
-    Bilevel, Cmyk8, ColorModel, Gray8, Gray16, Indexed8, Pixel, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
+    Bilevel, Cmyk8, ColorModel, Gray8, Gray16, GrayAlpha8, GrayAlpha16, Indexed8, Pixel, Rgb8,
+    Rgb16, Rgba8, Rgba16, Sample,
 };
 
 /// Errors produced by gamut encoders and decoders.
