@@ -185,4 +185,13 @@ mod tests {
         assert_eq!(ifd.get_u32(256), Some(8));
         assert_eq!(ifd.fields().len(), 3);
     }
+
+    #[test]
+    fn get_u32_vec_reads_arrays_and_misses() {
+        let mut ifd = Ifd::new();
+        ifd.set(258, Value::Short(vec![8, 8, 8]));
+        assert_eq!(ifd.get_u32_vec(258), Some(vec![8, 8, 8]));
+        // Absent tag is None (distinguishes the real coercion from a constant Some/None).
+        assert_eq!(ifd.get_u32_vec(999), None);
+    }
 }

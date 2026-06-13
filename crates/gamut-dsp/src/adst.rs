@@ -330,6 +330,19 @@ mod tests {
     }
 
     #[test]
+    fn forward_adst_exact_values() {
+        // As with forward_dct, the proportional round-trip pins forward_adst only up to scale, so the
+        // `UNIT` impulse scale and the `acc += m_inv * x` accumulation (negate / zero / `* -> +`) need
+        // exact snapshots. Correctness is established by the proportional inverse-vs-naive test.
+        let mut t = [100i64, 100, 100, 100];
+        forward_adst(&mut t, 2);
+        assert_eq!(t, [267, 82, 40, 17]);
+        let mut t = [200i64, -100, 50, -25];
+        forward_adst(&mut t, 2);
+        assert_eq!(t, [22, 102, 162, 263]);
+    }
+
+    #[test]
     fn dc_coefficient_basis_increases_across_block() {
         // The lowest-frequency ADST basis (the response to coeff 0) is a quarter sine wave that
         // rises monotonically across the block — `sin((m+1)π/9)` for DST-VII, `sin((2m+1)π/4N)`
