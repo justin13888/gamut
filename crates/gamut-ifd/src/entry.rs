@@ -91,14 +91,35 @@ pub struct Field {
     pub value: Value,
 }
 
+/// A sub-IFD pointer: a tag whose value is the file offset (or array of offsets) of one or more
+/// nested IFDs that are **not** part of the top-level next-IFD chain.
+///
+/// This is how TIFF/EP and DNG attach child directories. `SubIFDs` (330) points at the
+/// full-resolution raw image IFD(s); `ExifIFD` (34665) and `GPSInfo` (34853) point at the EXIF and
+/// GPS sub-directories. [`write`](crate::write) lays the children out and synthesises the pointer
+/// field, patching it with their absolute offset(s). The generic [`read`](crate::read) does **not**
+/// follow these — it cannot know which arbitrary `LONG` tags are offsets — so a decoder reads the
+/// offset value(s) and re-parses each child with [`read_ifd_at`](crate::read_ifd_at).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubIfd {
+    /// The pointer tag (e.g. `330` for `SubIFDs`).
+    pub tag: u16,
+    /// The child IFD(s) the tag points at — exactly one for `ExifIFD`/`GPSInfo`, one or more for
+    /// `SubIFDs`.
+    pub ifds: Vec<Ifd>,
+}
+
 /// A parsed Image File Directory — one node in the IFD chain (a TIFF page, or an EXIF/GPS/Interop
 /// sub-directory).
 ///
 /// Fields are kept sorted in ascending tag order, as required on disk (TIFF 6.0 §2); the accessors
-/// preserve that invariant.
+/// preserve that invariant. A directory may also carry [`sub_ifds`](Self::sub_ifds) — child
+/// directories referenced by a pointer tag rather than the next-IFD chain (e.g. a DNG's raw
+/// sub-IFD or its EXIF sub-IFD); the writer lays those out and synthesises their pointer fields.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Ifd {
     fields: Vec<Field>,
+    sub_ifds: Vec<SubIfd>,
 }
 
 impl Ifd {
@@ -140,6 +161,32 @@ impl Ifd {
         match self.fields.binary_search_by_key(&tag, |f| f.tag) {
             Ok(i) => self.fields[i].value = value,
             Err(i) => self.fields.insert(i, Field { tag, value }),
+        }
+    }
+
+    /// Returns the directory's sub-IFD pointers (see [`SubIfd`]).
+    #[must_use]
+    pub fn sub_ifds(&self) -> &[SubIfd] {
+        &self.sub_ifds
+    }
+
+    /// Attaches `ifds` as the child directories of pointer `tag`, replacing any existing group for
+    /// that tag.
+    ///
+    /// The pointer field (a `LONG`/`LONG8` array of the children's offsets) is synthesised by the
+    /// writer, so `tag` must **not** also be [`set`](Self::set) as a regular field.
+    pub fn set_sub_ifd(&mut self, tag: u16, ifds: Vec<Ifd>) {
+        match self.sub_ifds.iter_mut().find(|s| s.tag == tag) {
+            Some(s) => s.ifds = ifds,
+            None => self.sub_ifds.push(SubIfd { tag, ifds }),
+        }
+    }
+
+    /// Appends a single child directory to pointer `tag`, creating the group if it does not exist.
+    pub fn add_sub_ifd(&mut self, tag: u16, ifd: Ifd) {
+        match self.sub_ifds.iter_mut().find(|s| s.tag == tag) {
+            Some(s) => s.ifds.push(ifd),
+            None => self.sub_ifds.push(SubIfd { tag, ifds: vec![ifd] }),
         }
     }
 }

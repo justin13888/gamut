@@ -1,4 +1,4 @@
-//! Serialisation of the TIFF byte-order header and the IFD chain.
+//! Serialisation of the TIFF byte-order header and the IFD tree.
 //!
 //! The writer lays the stream out in two passes: it first computes where each IFD and each
 //! out-of-line value lands (header → IFDs → value pool, every block on an even/word boundary),
@@ -10,18 +10,82 @@
 //! need absolute offsets that are only known once sizes are fixed, so the layout is planned then
 //! the offset words are back-patched. A read → write → read round-trip reproduces the directory
 //! exactly.
+//!
+//! ## Sub-IFD trees
+//!
+//! Beyond the top-level next-IFD chain ([`TiffFile::ifds`]), an [`Ifd`] may carry
+//! [`sub_ifds`](Ifd::sub_ifds): child directories referenced by a pointer *tag* rather than the
+//! chain (e.g. a DNG's raw sub-IFD via `SubIFDs`, or an `ExifIFD`). The layout generalises to the
+//! whole **tree** — every directory (top-level and descendant) is placed first, then a single
+//! value pool — and each pointer tag's value is synthesised as a `LONG`/`LONG8` array of its
+//! children's offsets. With no sub-IFDs this reduces to the flat chain, byte-for-byte.
 
-use crate::{ByteOrder, Ifd, TiffFile, Variant};
+use crate::{ByteOrder, Ifd, TiffFile, Value, Variant};
 
 /// Rounds `n` up to the next even (word) boundary, as required for value offsets.
 fn even(n: usize) -> usize {
     n + (n & 1)
 }
 
-/// The on-disk size of an IFD for `variant`: the entry count, one entry per field, and the
-/// next-IFD pointer (e.g. classic `2 + 12n + 4`, BigTIFF `8 + 20n + 8`).
-fn ifd_size(ifd: &Ifd, variant: Variant) -> usize {
-    variant.count_size() + ifd.fields().len() * variant.entry_size() + variant.offset_size()
+/// A field value to emit: either borrowed from the directory, or a sub-IFD pointer-offset array the
+/// writer synthesises once the child directories have been placed.
+enum FieldRef<'a> {
+    /// A real field value, borrowed from the source [`Ifd`].
+    Real(&'a Value),
+    /// A synthesised `SubIFDs`/`ExifIFD`-style pointer: the offsets of the child directories.
+    Synth(Value),
+}
+
+impl FieldRef<'_> {
+    fn value(&self) -> &Value {
+        match self {
+            FieldRef::Real(v) => v,
+            FieldRef::Synth(v) => v,
+        }
+    }
+}
+
+/// One IFD flattened out of the tree, with its placement bookkeeping.
+struct Node<'a> {
+    /// The source directory (for its real fields).
+    ifd: &'a Ifd,
+    /// Each sub-IFD pointer as `(tag, child node indices)`, in `sub_ifds` order.
+    pointers: Vec<(u16, Vec<usize>)>,
+    /// The next directory in the top-level chain (`None` for descendants and the last page).
+    next: Option<usize>,
+    /// Number of on-disk entries: real fields plus one synthesised entry per pointer.
+    n_entries: usize,
+    /// The directory's absolute file offset (assigned in pass 1).
+    offset: u64,
+}
+
+/// Appends `ifd` and its descendants to `nodes` (parent before children), returning `ifd`'s index.
+fn push_node<'a>(ifd: &'a Ifd, nodes: &mut Vec<Node<'a>>) -> usize {
+    let idx = nodes.len();
+    nodes.push(Node {
+        ifd,
+        pointers: Vec::new(),
+        next: None,
+        n_entries: 0,
+        offset: 0,
+    });
+    let mut pointers = Vec::with_capacity(ifd.sub_ifds().len());
+    for sub in ifd.sub_ifds() {
+        let children: Vec<usize> = sub.ifds.iter().map(|c| push_node(c, nodes)).collect();
+        pointers.push((sub.tag, children));
+    }
+    nodes[idx].n_entries = ifd.fields().len() + pointers.len();
+    nodes[idx].pointers = pointers;
+    idx
+}
+
+/// Builds a pointer field value (a child-offset array) of the right type for `variant`.
+fn pointer_value(variant: Variant, offsets: Vec<u64>) -> Value {
+    match variant {
+        Variant::Classic => Value::Long(offsets.iter().map(|&o| o as u32).collect()),
+        #[cfg(feature = "bigtiff")]
+        Variant::Big => Value::Long8(offsets),
+    }
 }
 
 /// Writes an offset-sized integer (`u32` classic / `u64` BigTIFF) at `pos`, used for every file
@@ -34,11 +98,13 @@ fn put_offset(out: &mut [u8], pos: usize, v: u64, order: ByteOrder, variant: Var
     }
 }
 
-/// Serialises a TIFF/IFD stream (header + IFD chain + out-of-line value pool) to bytes.
+/// Serialises a TIFF/IFD stream (header + IFD tree + out-of-line value pool) to bytes.
 ///
-/// IFDs are written in order and linked through their next-IFD pointers; out-of-line values are
-/// appended in a value pool after the directories. Image/pixel data is not handled here — a codec
-/// composes that around this primitive (see `gamut-tiff`'s strip/tile writers).
+/// Top-level IFDs ([`TiffFile::ifds`]) are written in order and linked through their next-IFD
+/// pointers; any [`sub_ifds`](Ifd::sub_ifds) are laid out as additional directories and referenced
+/// by a synthesised pointer field. Out-of-line values are appended in a value pool after the
+/// directories. Image/pixel data is not handled here — a codec composes that around this primitive
+/// (see `gamut-tiff`'s strip/tile writers).
 #[must_use]
 pub fn write(file: &TiffFile) -> Vec<u8> {
     let order = file.order;
@@ -47,28 +113,50 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
     let offset_size = variant.offset_size();
     let inline = variant.inline_threshold();
 
-    // Pass 1: place the header and IFDs, then the value pool. Record each IFD's start and each
-    // out-of-line value's (offset, bytes).
-    let mut cursor = even(variant.header_size());
-    let mut ifd_offsets: Vec<u64> = Vec::with_capacity(file.ifds.len());
-    for ifd in &file.ifds {
-        ifd_offsets.push(cursor as u64);
-        cursor = even(cursor + ifd_size(ifd, variant));
+    // Flatten the tree, then link the top-level directories through the next-IFD chain.
+    let mut nodes: Vec<Node> = Vec::new();
+    let top: Vec<usize> = file.ifds.iter().map(|ifd| push_node(ifd, &mut nodes)).collect();
+    for pair in top.windows(2) {
+        nodes[pair[0]].next = Some(pair[1]);
     }
-    // Per-IFD, per-field out-of-line value offset (0 if packed inline).
-    let mut value_offsets: Vec<Vec<u64>> = Vec::with_capacity(file.ifds.len());
+
+    // Pass 1a: place every directory block (top-level and descendant), each on a word boundary.
+    let mut cursor = even(variant.header_size());
+    for node in &mut nodes {
+        node.offset = cursor as u64;
+        cursor = even(cursor + variant.count_size() + node.n_entries * entry_size + offset_size);
+    }
+
+    // With every directory offset known, synthesise each pointer field (a child-offset array) and
+    // build each directory's tag-sorted entry list (real fields interleaved with pointers).
+    let mut entries_per_node: Vec<Vec<(u16, FieldRef)>> = Vec::with_capacity(nodes.len());
+    for node in &nodes {
+        let mut entries: Vec<(u16, FieldRef)> = Vec::with_capacity(node.n_entries);
+        for field in node.ifd.fields() {
+            entries.push((field.tag, FieldRef::Real(&field.value)));
+        }
+        for (tag, children) in &node.pointers {
+            let offsets = children.iter().map(|&ci| nodes[ci].offset).collect();
+            entries.push((*tag, FieldRef::Synth(pointer_value(variant, offsets))));
+        }
+        entries.sort_by_key(|(tag, _)| *tag);
+        entries_per_node.push(entries);
+    }
+
+    // Pass 1b: place the out-of-line value pool after the directories.
+    let mut value_offsets: Vec<Vec<u64>> = Vec::with_capacity(nodes.len());
     let mut pool: Vec<(usize, Vec<u8>)> = Vec::new();
-    for ifd in &file.ifds {
-        let mut offs = Vec::with_capacity(ifd.fields().len());
-        for field in ifd.fields() {
-            let bytes = field.value.encode(order);
-            if bytes.len() <= inline {
+    for entries in &entries_per_node {
+        let mut offs = Vec::with_capacity(entries.len());
+        for (_tag, field) in entries {
+            let byte_len = field.value().byte_len();
+            if byte_len <= inline {
                 offs.push(0);
             } else {
                 cursor = even(cursor);
                 offs.push(cursor as u64);
-                pool.push((cursor, bytes.clone()));
-                cursor += bytes.len();
+                pool.push((cursor, field.value().encode(order)));
+                cursor += byte_len;
             }
         }
         value_offsets.push(offs);
@@ -81,7 +169,7 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
         ByteOrder::BigEndian => b"MM",
     });
     out[2..4].copy_from_slice(&order.pack_u16(variant.magic()));
-    let first = ifd_offsets.first().copied().unwrap_or(0);
+    let first = nodes.first().map_or(0, |n| n.offset);
     match variant {
         Variant::Classic => out[4..8].copy_from_slice(&order.pack_u32(first as u32)),
         #[cfg(feature = "bigtiff")]
@@ -93,26 +181,22 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
         }
     }
 
-    for (idx, ifd) in file.ifds.iter().enumerate() {
-        let mut pos = ifd_offsets[idx] as usize;
-        let n = ifd.fields().len();
+    for (idx, entries) in entries_per_node.iter().enumerate() {
+        let node = &nodes[idx];
+        let mut pos = node.offset as usize;
+        let n = entries.len();
         match variant {
             Variant::Classic => out[pos..pos + 2].copy_from_slice(&order.pack_u16(n as u16)),
             #[cfg(feature = "bigtiff")]
             Variant::Big => out[pos..pos + 8].copy_from_slice(&order.pack_u64(n as u64)),
         }
         pos += variant.count_size();
-        for (field, &voff) in ifd.fields().iter().zip(&value_offsets[idx]) {
-            let bytes = field.value.encode(order);
-            out[pos..pos + 2].copy_from_slice(&order.pack_u16(field.tag));
-            out[pos + 2..pos + 4].copy_from_slice(&order.pack_u16(field.value.field_type().code()));
-            put_offset(
-                &mut out,
-                pos + 4,
-                field.value.count() as u64,
-                order,
-                variant,
-            );
+        for ((tag, field), &voff) in entries.iter().zip(&value_offsets[idx]) {
+            let value = field.value();
+            let bytes = value.encode(order);
+            out[pos..pos + 2].copy_from_slice(&order.pack_u16(*tag));
+            out[pos + 2..pos + 4].copy_from_slice(&order.pack_u16(value.field_type().code()));
+            put_offset(&mut out, pos + 4, value.count() as u64, order, variant);
             let value_pos = pos + 4 + offset_size;
             if bytes.len() <= inline {
                 // Inline, left-justified: low bytes hold the value, remainder is zero.
@@ -122,7 +206,7 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
             }
             pos += entry_size;
         }
-        let next = file.ifds.get(idx + 1).map_or(0, |_| ifd_offsets[idx + 1]);
+        let next = node.next.map_or(0, |ni| nodes[ni].offset);
         put_offset(&mut out, pos, next, order, variant);
     }
 
@@ -135,7 +219,7 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Value, read, read_header};
+    use crate::{read, read_header, read_ifd_at};
 
     // Tag numbers are used literally: tag semantics live in the consuming codec, not this
     // structural core. 256/257 = ImageWidth/ImageLength, 258 = BitsPerSample, 282 = XResolution.
@@ -199,12 +283,105 @@ mod tests {
         assert_eq!(read_header(&bytes).expect("header").2, 8);
     }
 
+    /// A directory with no sub-IFDs must serialise byte-for-byte as it did before tree support, so
+    /// the flat path (and `gamut-tiff`'s libtiff oracle) is unaffected.
+    #[test]
+    fn flat_layout_is_unchanged_by_tree_support() {
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd()],
+        };
+        let bytes = write(&file);
+        // Golden layout: 8-byte header, IFD0 at 8 (5 entries), value pool after. Re-reading must
+        // reproduce the directory exactly, and there is no second (sub-)IFD in the chain.
+        let (_order, _variant, first) = read_header(&bytes).expect("header");
+        assert_eq!(first, 8);
+        assert_eq!(read(&bytes).expect("read").ifds.len(), 1);
+    }
+
+    fn subifd_tree_roundtrips(order: ByteOrder, variant: Variant) {
+        // IFD0 carries a raw sub-IFD (tag 330) with two children and an EXIF sub-IFD (tag 34665).
+        let mut raw_a = Ifd::new();
+        raw_a.set(256, Value::Short(vec![16]));
+        raw_a.set(257, Value::Short(vec![16]));
+        raw_a.set(254, Value::Long(vec![0])); // NewSubFileType = full-resolution
+        let mut raw_b = Ifd::new();
+        raw_b.set(256, Value::Short(vec![8]));
+        raw_b.set(257, Value::Short(vec![8]));
+        let mut exif = Ifd::new();
+        exif.set(33434, Value::Rational(vec![(1, 100)])); // ExposureTime
+
+        let mut root = sample_ifd();
+        root.set_sub_ifd(330, vec![raw_a.clone(), raw_b.clone()]);
+        root.set_sub_ifd(34665, vec![exif.clone()]);
+
+        let file = TiffFile {
+            order,
+            variant,
+            ifds: vec![root],
+        };
+        let bytes = write(&file);
+
+        // The generic reader returns just the top-level chain (the children are not chained).
+        let parsed = read(&bytes).expect("read back");
+        assert_eq!(parsed.ifds.len(), 1);
+        let root_ifd = &parsed.ifds[0];
+        // Its real fields survive...
+        assert_eq!(root_ifd.get(256), Some(&Value::Short(vec![640])));
+        // ...and the synthesised pointer tags are present as offset arrays.
+        let sub_offsets = root_ifd.get_u32_vec(330).expect("SubIFDs pointer");
+        assert_eq!(sub_offsets.len(), 2);
+        let exif_offset = root_ifd.get_u32(34665).expect("ExifIFD pointer");
+
+        // Following the pointers re-parses the children exactly.
+        assert_eq!(read_ifd_at(&bytes, sub_offsets[0].into(), order, variant).unwrap(), raw_a);
+        assert_eq!(read_ifd_at(&bytes, sub_offsets[1].into(), order, variant).unwrap(), raw_b);
+        assert_eq!(read_ifd_at(&bytes, exif_offset.into(), order, variant).unwrap(), exif);
+    }
+
+    #[test]
+    fn classic_subifd_tree_roundtrips_both_orders() {
+        subifd_tree_roundtrips(ByteOrder::LittleEndian, Variant::Classic);
+        subifd_tree_roundtrips(ByteOrder::BigEndian, Variant::Classic);
+    }
+
+    #[test]
+    fn nested_subifd_tree_roundtrips() {
+        // A grandchild: IFD0 -> SubIFD -> its own (e.g. EXIF) sub-IFD, exercising recursion.
+        let mut grandchild = Ifd::new();
+        grandchild.set(33434, Value::Rational(vec![(1, 200)]));
+        let mut child = Ifd::new();
+        child.set(256, Value::Short(vec![32]));
+        child.set_sub_ifd(34665, vec![grandchild.clone()]);
+        let mut root = Ifd::new();
+        root.set(256, Value::Short(vec![64]));
+        root.set_sub_ifd(330, vec![child]);
+
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![root],
+        };
+        let bytes = write(&file);
+        let parsed = read(&bytes).expect("read");
+        let child_off = parsed.ifds[0].get_u32(330).expect("SubIFDs");
+        let child_ifd = read_ifd_at(&bytes, child_off.into(), ByteOrder::LittleEndian, Variant::Classic)
+            .expect("child");
+        assert_eq!(child_ifd.get(256), Some(&Value::Short(vec![32])));
+        let gc_off = child_ifd.get_u32(34665).expect("nested ExifIFD");
+        let gc = read_ifd_at(&bytes, gc_off.into(), ByteOrder::LittleEndian, Variant::Classic)
+            .expect("grandchild");
+        assert_eq!(gc, grandchild);
+    }
+
     #[cfg(feature = "bigtiff")]
     #[test]
     fn bigtiff_roundtrips_and_inline_threshold() {
         roundtrip(ByteOrder::LittleEndian, Variant::Big);
         roundtrip(ByteOrder::BigEndian, Variant::Big);
         multi_ifd_roundtrip(Variant::Big);
+        subifd_tree_roundtrips(ByteOrder::LittleEndian, Variant::Big);
 
         // The 8-byte XResolution rational is out of line in classic TIFF (>4 B) but packs inline
         // in BigTIFF (<=8 B); both must round-trip identically.

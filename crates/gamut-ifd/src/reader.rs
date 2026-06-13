@@ -148,6 +148,22 @@ fn read_ifd(data: &[u8], offset: usize, order: ByteOrder, variant: Variant) -> R
     Ok((ifd, next))
 }
 
+/// Reads the single IFD located at `offset` in `data`, ignoring its next-IFD pointer.
+///
+/// This is how a codec follows a **sub-IFD pointer** (see [`SubIfd`](crate::SubIfd)): the generic
+/// [`read`] cannot know which `LONG` tags are offsets, so it leaves a pointer tag as a plain
+/// integer value; the codec reads that offset and calls this to parse the child directory (e.g. a
+/// DNG raw sub-IFD via `SubIFDs`, or an `ExifIFD`). `order` and `variant` come from the enclosing
+/// file's header (via [`read_header`]).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the directory at `offset` is out of bounds or a field value
+/// is truncated.
+pub fn read_ifd_at(data: &[u8], offset: u64, order: ByteOrder, variant: Variant) -> Result<Ifd> {
+    read_ifd(data, offset as usize, order, variant).map(|(ifd, _next)| ifd)
+}
+
 /// Parses a TIFF/IFD stream: the header followed by the whole IFD chain.
 ///
 /// # Errors

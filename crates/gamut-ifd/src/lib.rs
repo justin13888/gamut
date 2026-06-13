@@ -41,8 +41,8 @@ pub mod value;
 pub mod writer;
 
 pub use byte_order::ByteOrder;
-pub use entry::{Field, Ifd, Variant};
-pub use reader::{TiffFile, read, read_header};
+pub use entry::{Field, Ifd, SubIfd, Variant};
+pub use reader::{TiffFile, read, read_header, read_ifd_at};
 pub use types::FieldType;
 pub use value::Value;
 pub use writer::write;
