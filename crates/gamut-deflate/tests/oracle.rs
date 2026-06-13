@@ -48,6 +48,26 @@ fn raw_deflate_round_trips_via_zlib() {
 }
 
 #[test]
+fn back_references_compress_and_round_trip() {
+    // Highly repetitive input must shrink dramatically once LZ77 matches are emitted — and still
+    // inflate back to the original through the reference decoder.
+    let data = b"the quick brown fox jumps over the lazy dog. ".repeat(200);
+    for &level in &[Level::Fast, Level::Default, Level::Best] {
+        let mut out = Vec::new();
+        DeflateEncoder::new()
+            .with_level(level)
+            .zlib_compress(&data, &mut out);
+        assert_eq!(zlib_oracle::inflate_zlib(&out).unwrap(), data);
+        assert!(
+            out.len() < data.len() / 4,
+            "level {level:?}: {} should be far smaller than {}",
+            out.len(),
+            data.len()
+        );
+    }
+}
+
+#[test]
 fn zlib_stream_round_trips_via_zlib() {
     for data in corpus() {
         for &level in LEVELS {

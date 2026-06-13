@@ -40,6 +40,8 @@ mod bitwriter;
 mod block;
 mod encoder;
 mod huffman;
+mod lz77;
+mod symbols;
 mod zlib;
 
 pub use adler32::adler32;

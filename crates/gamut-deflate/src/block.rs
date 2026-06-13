@@ -1,11 +1,12 @@
-//! DEFLATE block writers. D1–D2 implement stored (uncompressed) and fixed-Huffman blocks; LZ77
-//! matching and dynamic Huffman land in later phases.
+//! DEFLATE block writers. Stored (uncompressed) and fixed-Huffman blocks are implemented here;
+//! dynamic Huffman lands in a later phase.
 //!
 //! Each public helper returns a complete, byte-aligned DEFLATE body (`BFINAL` set) so the encoder
 //! can build a few candidates and keep the smallest.
 
 use crate::bitwriter::BitWriter;
-use crate::huffman;
+use crate::lz77::Token;
+use crate::{huffman, symbols};
 
 /// Maximum payload of a single stored block (`LEN` is a `u16`); larger inputs are split.
 const MAX_STORED: usize = 0xFFFF;
@@ -17,12 +18,33 @@ pub(crate) fn stored(data: &[u8]) -> Vec<u8> {
     w.finish()
 }
 
-/// Encodes `data` as a complete fixed-Huffman DEFLATE body (literals only — no back-references
-/// until the LZ77 phase lands).
-pub(crate) fn fixed(data: &[u8]) -> Vec<u8> {
+/// Encodes a parsed LZ77 token stream as a complete fixed-Huffman DEFLATE body (BTYPE = 01).
+pub(crate) fn fixed(tokens: &[Token]) -> Vec<u8> {
     let mut w = BitWriter::new();
-    write_fixed(&mut w, data);
+    w.write_bits(1, 1); // BFINAL = 1 (one block covers the whole input)
+    w.write_bits(0b01, 2); // BTYPE = 01 (fixed Huffman)
+    for &token in tokens {
+        match token {
+            Token::Literal(b) => emit_litlen(&mut w, u16::from(b)),
+            Token::Match { len, dist } => {
+                let (lsym, lextra_bits, lextra) = symbols::length_code(len);
+                emit_litlen(&mut w, lsym);
+                w.write_bits(lextra, lextra_bits);
+                let (dsym, dextra_bits, dextra) = symbols::distance_code(dist);
+                let (dcode, dlen) = huffman::fixed_distance(dsym);
+                w.write_bits(huffman::reverse_bits(dcode, dlen), dlen);
+                w.write_bits(dextra, dextra_bits);
+            }
+        }
+    }
+    emit_litlen(&mut w, 256); // end of block
     w.finish()
+}
+
+/// Emits the fixed Huffman code for a literal/length symbol.
+fn emit_litlen(w: &mut BitWriter, sym: u16) {
+    let (code, len) = huffman::fixed_litlen(sym);
+    w.write_bits(huffman::reverse_bits(code, len), len);
 }
 
 /// Writes `data` as one or more stored blocks (BTYPE = 00), splitting at 65535 bytes. `BFINAL` is
@@ -47,21 +69,6 @@ fn write_stored_block(w: &mut BitWriter, chunk: &[u8], is_final: bool) {
     w.write_bytes(&len.to_le_bytes());
     w.write_bytes(&(!len).to_le_bytes()); // NLEN = one's complement of LEN
     w.write_bytes(chunk);
-}
-
-/// Writes `data` as a single fixed-Huffman block (BTYPE = 01): every byte as its fixed literal code
-/// followed by the end-of-block symbol. `BFINAL` is set (one block covers the whole input).
-fn write_fixed(w: &mut BitWriter, data: &[u8]) {
-    w.write_bits(1, 1); // BFINAL = 1
-    w.write_bits(0b01, 2); // BTYPE = 01 (fixed Huffman)
-    for &b in data {
-        let (code, len) = huffman::fixed_literal(b);
-        w.write_bits(huffman::reverse_bits(code, len), len);
-    }
-    w.write_bits(
-        huffman::reverse_bits(huffman::FIXED_EOB_CODE, huffman::FIXED_EOB_LEN),
-        huffman::FIXED_EOB_LEN,
-    );
 }
 
 #[cfg(test)]
@@ -94,7 +101,6 @@ mod tests {
     #[test]
     fn empty_fixed_block_is_header_plus_eob() {
         // BFINAL=1 (bit 0), BTYPE=01 (bits 1-2) -> low 3 bits 0b011; then the 7-bit EOB code 0.
-        // 3 + 7 = 10 bits -> 2 bytes. The first byte's low 3 bits are 011 = 0x03; rest zero.
         assert_eq!(fixed(&[]), vec![0x03, 0x00]);
     }
 }

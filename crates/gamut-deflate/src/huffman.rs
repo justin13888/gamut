@@ -1,4 +1,4 @@
-//! Huffman coding for DEFLATE: bit-reversal and the fixed code table (RFC 1951 §3.2.6).
+//! Huffman coding for DEFLATE: bit-reversal and the fixed code tables (RFC 1951 §3.2.6).
 //!
 //! DEFLATE packs Huffman codes most-significant-bit-of-the-code first, but [`BitWriter`] is
 //! LSB-first, so every code is bit-reversed via [`reverse_bits`] before emission. The canonical
@@ -20,21 +20,25 @@ pub(crate) fn reverse_bits(value: u32, len: u32) -> u32 {
     r
 }
 
-/// The fixed Huffman code for a literal `byte`, as `(code, bit_length)` (RFC 1951 §3.2.6).
+/// The fixed Huffman code `(code, bit_length)` for a literal/length symbol (RFC 1951 §3.2.6).
 ///
-/// `code` is the canonical value read MSB-first; pass it through [`reverse_bits`] before emitting.
-/// Literals 0–143 are 8 bits, 144–255 are 9 bits.
-pub(crate) fn fixed_literal(byte: u8) -> (u32, u32) {
-    match byte {
-        0..=143 => (0x30 + u32::from(byte), 8),
-        144..=255 => (0x190 + (u32::from(byte) - 144), 9),
+/// Covers the whole literal/length alphabet 0..=287; callers pass only symbols that occur
+/// (literals 0..=255, end-of-block 256, length symbols 257..=285). `code` is the canonical value
+/// read MSB-first; pass it through [`reverse_bits`] before emitting.
+pub(crate) fn fixed_litlen(sym: u16) -> (u32, u32) {
+    match sym {
+        0..=143 => (0x30 + u32::from(sym), 8),
+        144..=255 => (0x190 + (u32::from(sym) - 144), 9),
+        256..=279 => (u32::from(sym) - 256, 7),
+        _ => (0xC0 + (u32::from(sym) - 280), 8), // 280..=287
     }
 }
 
-/// Fixed Huffman end-of-block symbol (256): the 7-bit canonical code `0`.
-pub(crate) const FIXED_EOB_CODE: u32 = 0;
-/// Bit length of the fixed end-of-block code.
-pub(crate) const FIXED_EOB_LEN: u32 = 7;
+/// The fixed Huffman code `(code, bit_length)` for a distance symbol 0..=29: a 5-bit code equal to
+/// the symbol number (RFC 1951 §3.2.6). MSB-first; reverse before emitting.
+pub(crate) fn fixed_distance(sym: u16) -> (u32, u32) {
+    (u32::from(sym), 5)
+}
 
 #[cfg(test)]
 mod tests {
@@ -46,7 +50,7 @@ mod tests {
         assert_eq!(reverse_bits(0b1011, 4), 0b1101);
         assert_eq!(reverse_bits(0, 7), 0);
         assert_eq!(reverse_bits(0b1, 1), 0b1);
-        // Higher bits beyond `len` are ignored.
+        // Bits beyond `len` are ignored.
         assert_eq!(reverse_bits(0b1_0000_0001, 1), 0b1);
     }
 
@@ -61,10 +65,20 @@ mod tests {
     }
 
     #[test]
-    fn fixed_literal_boundaries() {
-        assert_eq!(fixed_literal(0), (0x30, 8));
-        assert_eq!(fixed_literal(143), (0xBF, 8));
-        assert_eq!(fixed_literal(144), (0x190, 9));
-        assert_eq!(fixed_literal(255), (0x1FF, 9));
+    fn fixed_litlen_boundaries() {
+        assert_eq!(fixed_litlen(0), (0x30, 8));
+        assert_eq!(fixed_litlen(143), (0xBF, 8));
+        assert_eq!(fixed_litlen(144), (0x190, 9));
+        assert_eq!(fixed_litlen(255), (0x1FF, 9));
+        assert_eq!(fixed_litlen(256), (0, 7)); // end of block
+        assert_eq!(fixed_litlen(279), (23, 7));
+        assert_eq!(fixed_litlen(280), (0xC0, 8));
+        assert_eq!(fixed_litlen(285), (0xC5, 8));
+    }
+
+    #[test]
+    fn fixed_distance_is_five_bit_identity() {
+        assert_eq!(fixed_distance(0), (0, 5));
+        assert_eq!(fixed_distance(29), (29, 5));
     }
 }
