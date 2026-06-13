@@ -20,3 +20,10 @@ gamut-core.workspace = true
 # DNG is a TIFF/EP profile: the IFD container (incl. sub-IFD trees and the BigTIFF variant) is the
 # shared gamut-ifd primitive. `bigtiff` is enabled for the DNG 1.7 64-bit-offset variant.
 gamut-ifd = { workspace = true, features = ["bigtiff"] }
+
+[dev-dependencies]
+# Authoritative conformance oracle: the headless-built Adobe DNG SDK 1.7.1 (gamut encode →
+# dng_validate must accept). Dev-only; statically linked from the committed SDK ZIP.
+gamut-dng-oracle = { path = "../../tooling/gamut-dng-oracle" }
+# A DNG is a valid TIFF, so libtiff cross-checks the container and the IFD-0 preview pixels.
+libtiff-oracle = { path = "../../tooling/libtiff-oracle" }
