@@ -31,8 +31,20 @@ minimum_test_timeout = 60
 # them. They are excluded here (with the reason) rather than papered over with contrived tests.
 # Each regex is scoped to one function + operator so it can only match the intended mutant — never
 # a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
-# an entry. (Sibling #110 PRs each append their crate's entries; they union on merge.)
+# an entry.
 exclude_re = [
+    # gamut-bitstream `ec_partition`: its only `-` is the constant shift `7 - EC_PROB_SHIFT` (= 1,
+    # since EC_PROB_SHIFT = 6). The `- → /` mutation yields `7 / EC_PROB_SHIFT` = 1 — the identical
+    # value — so it is unkillable. (`- → +`/`*` give 13/42 and are caught by the round-trip tests.)
+    'replace - with / in ec_partition',
+    # gamut-bitstream `SymbolEncoder::finish`: `s = 10 + cnt`, and the encoder holds `cnt` in
+    # [-9, -1] (verified over 200k streams), so `s >= 1` always and the `if s > 0` flush guard is
+    # always taken. `> → >=` is therefore unobservable. (`> → ==`/`<` skip the loop and are caught.)
+    'replace > with >= in SymbolEncoder::finish',
+    # gamut-bitstream `SymbolEncoder::finish`: with `s <= 9` the flush loop runs at most twice, and
+    # the `n` it shifts is only consumed on an iteration that never executes, so `n >>= 8` is dead.
+    # `>>= → <<=` is unobservable. (The loop-bound and `e`/`n` init mutants stay live and are caught.)
+    'replace >>= with <<= in SymbolEncoder::finish',
     # gamut-tiff `stored_total > MAX_IMAGE_BYTES` (decode_page_samples) and `tile_size > MAX_IMAGE_BYTES`
     # (decode_tiles) are *allocation* guards: relaxing `>` to `==`/`>=` only changes whether a 64 MiB+
     # buffer is reserved before the (still inevitable) decode error — the malformed file is rejected
