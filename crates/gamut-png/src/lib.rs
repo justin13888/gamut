@@ -30,7 +30,9 @@ mod chunk;
 mod color;
 mod crc32;
 mod encoder;
+mod filter;
 mod ihdr;
 
 pub use color::ColorType;
 pub use encoder::PngEncoder;
+pub use filter::{FilterStrategy, FilterType};

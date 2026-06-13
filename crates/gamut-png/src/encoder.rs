@@ -7,6 +7,7 @@ use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
+use crate::filter::{self, FilterStrategy};
 use crate::ihdr;
 
 /// IDAT payload cap. A decoder concatenates consecutive IDATs, so the split is transparent; a
@@ -17,6 +18,7 @@ const IDAT_MAX: usize = 1 << 16;
 #[derive(Debug, Clone)]
 pub struct PngEncoder {
     level: Level,
+    filter: FilterStrategy,
 }
 
 impl Default for PngEncoder {
@@ -26,11 +28,13 @@ impl Default for PngEncoder {
 }
 
 impl PngEncoder {
-    /// Creates an encoder with balanced [`Level::Default`] compression.
+    /// Creates an encoder with balanced [`Level::Default`] compression and the [`FilterStrategy::MinSumAbs`]
+    /// filter heuristic.
     #[must_use]
     pub fn new() -> Self {
         Self {
             level: Level::Default,
+            filter: FilterStrategy::MinSumAbs,
         }
     }
 
@@ -39,6 +43,13 @@ impl PngEncoder {
     #[must_use]
     pub fn with_compression(mut self, level: Level) -> Self {
         self.level = level;
+        self
+    }
+
+    /// Sets the scanline [`FilterStrategy`].
+    #[must_use]
+    pub fn with_filter(mut self, filter: FilterStrategy) -> Self {
+        self.filter = filter;
         self
     }
 }
@@ -52,12 +63,8 @@ impl EncodeImage<Rgb8> for PngEncoder {
         out.extend_from_slice(&SIGNATURE);
         ihdr::write(out, dims.width, dims.height, 8, ColorType::Truecolor);
 
-        // Filter every scanline with None (filter-type byte 0, then the raw row).
-        let mut filtered = Vec::with_capacity((row_bytes + 1) * dims.height as usize);
-        for row in image.as_samples().chunks_exact(row_bytes) {
-            filtered.push(0);
-            filtered.extend_from_slice(row);
-        }
+        // Filter the scanlines (truecolour 8-bit: 3 bytes per pixel), then DEFLATE.
+        let filtered = filter::filter_image(self.filter, image.as_samples(), row_bytes, 3);
 
         let mut idat = Vec::new();
         DeflateEncoder::new()

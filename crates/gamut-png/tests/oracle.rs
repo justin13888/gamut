@@ -5,7 +5,7 @@
 
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_deflate::Level;
-use gamut_png::PngEncoder;
+use gamut_png::{FilterStrategy, FilterType, PngEncoder};
 
 const SIZES: &[(u32, u32)] = &[
     (1, 1),
@@ -54,6 +54,60 @@ fn gamut_rgb8_is_decoded_by_libpng() {
             assert_eq!(dec.pixels, src, "pixels {w}x{h} {level:?}");
         }
     }
+}
+
+#[test]
+fn every_filter_strategy_round_trips() {
+    let (w, h) = (32, 24);
+    let src = rgb_pattern(w, h);
+    let dims = Dimensions::new(w, h).unwrap();
+    let strategies = [
+        FilterStrategy::None,
+        FilterStrategy::Fixed(FilterType::Sub),
+        FilterStrategy::Fixed(FilterType::Up),
+        FilterStrategy::Fixed(FilterType::Average),
+        FilterStrategy::Fixed(FilterType::Paeth),
+        FilterStrategy::MinSumAbs,
+    ];
+    for strategy in strategies {
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_filter(strategy)
+            .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
+            .expect("encode");
+        let dec = libpng_oracle::decode(&png);
+        assert_eq!(dec.pixels, src, "{strategy:?}");
+    }
+}
+
+#[test]
+fn filtering_shrinks_a_gradient() {
+    // A smooth gradient compresses much better filtered than unfiltered.
+    let (w, h) = (64u32, 64u32);
+    let mut src = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            src.push((x * 4) as u8);
+            src.push((y * 4) as u8);
+            src.push(((x + y) * 2) as u8);
+        }
+    }
+    let dims = Dimensions::new(w, h).unwrap();
+    let encode = |strategy| {
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_filter(strategy)
+            .with_compression(Level::Best)
+            .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
+            .expect("encode");
+        png.len()
+    };
+    let unfiltered = encode(FilterStrategy::None);
+    let filtered = encode(FilterStrategy::MinSumAbs);
+    assert!(
+        filtered < unfiltered,
+        "filtered {filtered} should beat unfiltered {unfiltered}"
+    );
 }
 
 #[test]
