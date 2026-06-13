@@ -541,6 +541,7 @@ dependencies = [
  "gamut-dng-oracle",
  "gamut-ifd",
  "libtiff-oracle",
+ "miniz_oxide",
 ]
 
 [[package]]

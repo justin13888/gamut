@@ -38,6 +38,7 @@ pub mod tags;
 pub mod values;
 
 mod bitpack;
+mod compression;
 mod preview;
 mod writer;
 

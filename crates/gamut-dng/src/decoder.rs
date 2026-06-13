@@ -13,7 +13,7 @@ use crate::raw::RawImage;
 use crate::values::{
     CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy,
 };
-use crate::{bitpack, tags};
+use crate::{bitpack, compression, tags};
 
 /// A decoded DNG: the raw sensor image, the camera colour profile, and the declared DNG version.
 #[derive(Debug, Clone)]
@@ -202,14 +202,7 @@ fn gather_strips(ifd: &Ifd, data: &[u8], compression: Compression) -> Result<Vec
         let chunk = data
             .get(start..end)
             .ok_or(Error::InvalidInput("DNG: strip out of bounds"))?;
-        match compression {
-            Compression::Uncompressed => packed.extend_from_slice(chunk),
-            _ => {
-                return Err(Error::Unsupported(
-                    "DNG: this compression is not yet decodable",
-                ));
-            }
-        }
+        packed.extend_from_slice(&compression::decompress(compression, chunk)?);
     }
     Ok(packed)
 }

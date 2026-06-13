@@ -100,6 +100,29 @@ fn bigtiff_roundtrips_and_validates() {
 }
 
 #[test]
+fn deflate_roundtrips_and_validates() {
+    use gamut_dng::Compression;
+    let cases = [
+        common::sample_raw(64, 48, 16),
+        common::sample_linear_raw(48, 36, 16),
+    ];
+    for raw in cases {
+        let mut dng = Vec::new();
+        DngEncoder::new()
+            .with_compression(Compression::Deflate)
+            .encode(&raw, &common::sample_profile(), &mut dng)
+            .expect("encode");
+        // gamut decodes its own Deflate output...
+        let decoded = DngDecoder::new().decode(&dng).expect("decode Deflate");
+        assert_eq!(decoded.raw, raw);
+        // ...and the Adobe SDK both validates and decodes it to the same samples.
+        gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept a Deflate DNG");
+        let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+        assert_eq!(adobe.samples, raw.samples());
+    }
+}
+
+#[test]
 fn decoder_rejects_garbage() {
     assert!(DngDecoder::new().decode(b"not a dng").is_err());
     assert!(DngDecoder::new().decode(&[]).is_err());

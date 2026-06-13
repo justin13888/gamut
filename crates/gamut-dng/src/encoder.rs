@@ -7,7 +7,7 @@ use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
 use crate::values::{Compression, PhotometricInterpretation};
 use crate::writer::{ImageBlocks, write_cfa_dng};
-use crate::{bitpack, preview, tags};
+use crate::{bitpack, compression, preview, tags};
 
 /// Encoder for DNG (Adobe Digital Negative) raw images.
 ///
@@ -21,6 +21,7 @@ pub struct DngEncoder {
     dng_version: [u8; 4],
     backward_version: [u8; 4],
     big_tiff: bool,
+    compression: Compression,
 }
 
 impl Default for DngEncoder {
@@ -32,6 +33,7 @@ impl Default for DngEncoder {
             dng_version: [1, 4, 0, 0],
             backward_version: [1, 1, 0, 0],
             big_tiff: false,
+            compression: Compression::Uncompressed,
         }
     }
 }
@@ -77,6 +79,17 @@ impl DngEncoder {
         self
     }
 
+    /// Returns a copy of this encoder that compresses the raw image with `compression`.
+    ///
+    /// [`Uncompressed`](Compression::Uncompressed) and [`Deflate`](Compression::Deflate) are
+    /// supported; lossless JPEG and JPEG XL are added in later phases. The preview is always
+    /// stored uncompressed.
+    #[must_use]
+    pub fn with_compression(mut self, compression: Compression) -> Self {
+        self.compression = compression;
+        self
+    }
+
     /// The container variant this encoder writes (BigTIFF when [`Self::with_big_tiff`] is set).
     fn variant(&self) -> Variant {
         if self.big_tiff {
@@ -112,9 +125,12 @@ impl DngEncoder {
         let samples_per_row =
             raw.dimensions().width as usize * usize::from(raw.samples_per_pixel());
 
+        let packed = bitpack::pack(raw.samples(), bits, samples_per_row, self.order);
+        let raw_strip = compression::compress(self.compression, &packed)?;
+
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
         let ifd0 = self.build_ifd0(profile, preview_dims);
-        let raw_ifd = build_raw_ifd(raw);
+        let raw_ifd = build_raw_ifd(raw, self.compression);
 
         let preview_blocks = ImageBlocks {
             offset_tag: tags::STRIP_OFFSETS,
@@ -124,12 +140,7 @@ impl DngEncoder {
         let raw_blocks = ImageBlocks {
             offset_tag: tags::STRIP_OFFSETS,
             bytecount_tag: tags::STRIP_BYTE_COUNTS,
-            blocks: vec![bitpack::pack(
-                raw.samples(),
-                bits,
-                samples_per_row,
-                self.order,
-            )],
+            blocks: vec![raw_strip],
         };
 
         let bytes = write_cfa_dng(
@@ -269,7 +280,7 @@ fn color_plane_count(raw: &RawImage) -> usize {
 
 /// Builds the raw sub-IFD: the image-data tags, the photometry-specific tags (CFA pattern, or
 /// `LinearRaw` planes), and the black/white levels. The strip offsets are filled in by the writer.
-fn build_raw_ifd(raw: &RawImage) -> Ifd {
+fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Ifd {
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
     let spp = raw.samples_per_pixel();
@@ -280,10 +291,7 @@ fn build_raw_ifd(raw: &RawImage) -> Ifd {
         tags::BITS_PER_SAMPLE,
         Value::Short(vec![raw.bits_per_sample(); usize::from(spp)]),
     );
-    ifd.set(
-        tags::COMPRESSION,
-        Value::Short(vec![Compression::Uncompressed.code()]),
-    );
+    ifd.set(tags::COMPRESSION, Value::Short(vec![compression.code()]));
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
     ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height));
     ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![1; usize::from(spp)])); // unsigned integer
