@@ -35,6 +35,7 @@ mod filter;
 mod ihdr;
 mod pack;
 mod palette;
+mod reduce;
 
 pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use color::ColorType;

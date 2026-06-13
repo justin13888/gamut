@@ -31,6 +31,9 @@ pub enum FilterStrategy {
     /// Per scanline, pick the filter minimising the sum of absolute residuals — the standard
     /// libpng heuristic. A good size/speed balance and the default.
     MinSumAbs,
+    /// Encode the whole image under several filter strategies, DEFLATE each, and keep the smallest.
+    /// Pairs with [`Level::Best`](gamut_deflate::Level::Best) for maximum compression; slowest.
+    BruteForce,
 }
 
 /// The Paeth predictor (PNG §9.4): chooses whichever of `a` (left), `b` (above), `c` (above-left)
@@ -98,7 +101,11 @@ pub(crate) fn filter_image(
         let filter = match strategy {
             FilterStrategy::None => FilterType::None,
             FilterStrategy::Fixed(f) => f,
-            FilterStrategy::MinSumAbs => choose_min_sum_abs(cur, prev, bpp, &mut scratch),
+            // BruteForce is resolved to concrete strategies by the encoder; if it reaches here, fall
+            // back to the per-scanline heuristic.
+            FilterStrategy::MinSumAbs | FilterStrategy::BruteForce => {
+                choose_min_sum_abs(cur, prev, bpp, &mut scratch)
+            }
         };
         out.push(filter as u8);
         filter_row(filter, cur, prev, bpp, &mut scratch);

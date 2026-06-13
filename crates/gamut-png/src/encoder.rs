@@ -3,22 +3,33 @@
 //! palette, sub-byte depths, ancillary chunks, and space optimisations layer on in later phases.
 
 use gamut_core::{
-    Bilevel, EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Indexed8, Pixel,
-    Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Bilevel, Dimensions, EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef,
+    Indexed8, Pixel, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::ancillary::{Ancillary, PhysicalUnit, SrgbIntent};
 use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
-use crate::filter::{self, FilterStrategy};
+use crate::filter::{self, FilterStrategy, FilterType};
 use crate::ihdr;
 use crate::pack;
 use crate::palette::PngPalette;
+use crate::reduce::{self, Reduced};
 
 /// IDAT payload cap. A decoder concatenates consecutive IDATs, so the split is transparent; a
 /// large-ish cap keeps the 12-byte per-chunk overhead negligible.
 const IDAT_MAX: usize = 1 << 16;
+
+/// Whole-image filter strategies tried by [`FilterStrategy::BruteForce`].
+const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 6] = [
+    FilterStrategy::None,
+    FilterStrategy::Fixed(FilterType::Sub),
+    FilterStrategy::Fixed(FilterType::Up),
+    FilterStrategy::Fixed(FilterType::Average),
+    FilterStrategy::Fixed(FilterType::Paeth),
+    FilterStrategy::MinSumAbs,
+];
 
 /// A reusable PNG encoder.
 #[derive(Debug, Clone)]
@@ -26,6 +37,7 @@ pub struct PngEncoder {
     level: Level,
     filter: FilterStrategy,
     ancillary: Ancillary,
+    auto_reduce: bool,
 }
 
 impl Default for PngEncoder {
@@ -43,6 +55,7 @@ impl PngEncoder {
             level: Level::Default,
             filter: FilterStrategy::MinSumAbs,
             ancillary: Ancillary::default(),
+            auto_reduce: false,
         }
     }
 
@@ -58,6 +71,17 @@ impl PngEncoder {
     #[must_use]
     pub fn with_filter(mut self, filter: FilterStrategy) -> Self {
         self.filter = filter;
+        self
+    }
+
+    /// Enables automatic lossless reduction of truecolour input to a smaller colour type
+    /// (greyscale, palette, or alpha-dropped) when it does not change any pixel.
+    ///
+    /// Off by default so the output colour type matches the input. Enable it — ideally with
+    /// [`Level::Best`] and [`FilterStrategy::BruteForce`] — for the smallest possible files.
+    #[must_use]
+    pub fn with_auto_reduce(mut self, enabled: bool) -> Self {
+        self.auto_reduce = enabled;
         self
     }
 
@@ -220,7 +244,7 @@ impl PngEncoder {
         }
         let dims = image.dimensions();
         // Use the smallest bit depth that holds every index — a free, lossless space win.
-        let depth = index_bit_depth(palette.len());
+        let depth = reduce::index_bit_depth(palette.len());
         let packed;
         let sample_bytes = if depth < 8 {
             packed =
@@ -304,25 +328,81 @@ impl PngEncoder {
         pre_idat(out); // PLTE + tRNS (indexed only)
         self.ancillary.write_post_plte(out); // background / physical / timing / text
 
-        let filtered = filter::filter_image(self.filter, sample_bytes, row_bytes, bpp);
-        let mut idat = Vec::new();
-        DeflateEncoder::new()
-            .with_level(self.level)
-            .zlib_compress(&filtered, &mut idat);
+        let idat = self.compress_scanlines(sample_bytes, row_bytes, bpp);
         write_idat(out, &idat);
 
         chunk::write_chunk(out, *b"IEND", &[]);
         out.len() - start
     }
-}
 
-/// The smallest indexed bit depth (1, 2, 4, or 8) that can address `palette_len` entries.
-fn index_bit_depth(palette_len: usize) -> u8 {
-    match palette_len {
-        0..=2 => 1,
-        3..=4 => 2,
-        5..=16 => 4,
-        _ => 8,
+    /// Filters and DEFLATE-compresses the scanlines into a zlib stream. For
+    /// [`FilterStrategy::BruteForce`] it compresses under every whole-image strategy and keeps the
+    /// smallest; otherwise it uses the single configured strategy.
+    fn compress_scanlines(&self, sample_bytes: &[u8], row_bytes: usize, bpp: usize) -> Vec<u8> {
+        let deflate = DeflateEncoder::new().with_level(self.level);
+        let compress = |strategy| {
+            let filtered = filter::filter_image(strategy, sample_bytes, row_bytes, bpp);
+            let mut idat = Vec::new();
+            deflate.zlib_compress(&filtered, &mut idat);
+            idat
+        };
+        if matches!(self.filter, FilterStrategy::BruteForce) {
+            BRUTE_FORCE_STRATEGIES
+                .into_iter()
+                .map(compress)
+                .min_by_key(Vec::len)
+                .unwrap_or_default()
+        } else {
+            compress(self.filter)
+        }
+    }
+
+    /// Writes a reduced encoding chosen by [`reduce::analyze`].
+    fn write_reduced(&self, dims: Dimensions, reduced: Reduced, out: &mut Vec<u8>) -> usize {
+        let wh = (dims.width, dims.height);
+        match reduced {
+            Reduced::Gray8(samples) => {
+                self.write_png(wh, &samples, ColorType::Grayscale, 8, |_| {}, out)
+            }
+            Reduced::GrayAlpha8(samples) => {
+                self.write_png(wh, &samples, ColorType::GrayscaleAlpha, 8, |_| {}, out)
+            }
+            Reduced::Rgb8(samples) => {
+                self.write_png(wh, &samples, ColorType::Truecolor, 8, |_| {}, out)
+            }
+            Reduced::Indexed {
+                depth,
+                indices,
+                plte,
+                trns,
+            } => {
+                let packed;
+                let sample_bytes = if depth < 8 {
+                    packed = pack::pack_scanlines(
+                        &indices,
+                        dims.width as usize,
+                        dims.height as usize,
+                        depth,
+                    );
+                    packed.as_slice()
+                } else {
+                    &indices
+                };
+                self.write_png(
+                    wh,
+                    sample_bytes,
+                    ColorType::Indexed,
+                    depth,
+                    |out| {
+                        chunk::write_chunk(out, *b"PLTE", &plte);
+                        if let Some(alpha) = &trns {
+                            chunk::write_chunk(out, *b"tRNS", alpha);
+                        }
+                    },
+                    out,
+                )
+            }
+        }
     }
 }
 
@@ -366,11 +446,21 @@ impl EncodeImage<Bilevel> for PngEncoder {
 }
 impl EncodeImage<Rgb8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.auto_reduce
+            && let Some(reduced) = reduce::analyze(image.as_samples(), 3)
+        {
+            return Ok(self.write_reduced(image.dimensions(), reduced, out));
+        }
         Ok(self.encode_8bit(image, ColorType::Truecolor, out))
     }
 }
 impl EncodeImage<Rgba8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.auto_reduce
+            && let Some(reduced) = reduce::analyze(image.as_samples(), 4)
+        {
+            return Ok(self.write_reduced(image.dimensions(), reduced, out));
+        }
         Ok(self.encode_8bit(image, ColorType::TruecolorAlpha, out))
     }
 }

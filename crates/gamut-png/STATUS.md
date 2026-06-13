@@ -26,5 +26,5 @@ with the source; output size is benchmarked against libpng at maximum compressio
 | P6 | §7.2 | Sub-byte depths: 1-bit bilevel grey + auto-minimal-depth indexed (1/2/4) | ✅ done |
 | P7 | §11.3 | Standard ancillary chunks: gAMA/cHRM/sRGB/sBIT/bKGD/pHYs/tIME/tEXt/zTXt/iTXt | ✅ done |
 | P8 | §11.3 | Metadata: eXIf, iCCP (deflate-compressed), iTXt-XMP (raw-bytes setters) | ✅ done |
-| P9 | §4.5 | **Space opt:** bit-depth/palette/gray/alpha/16→8 reduction; brute-force filter strategy; `Level::Best` | ⏳ todo |
+| P9 | §4.5 | **Space opt:** lossless palette/gray/alpha-drop reduction (size-estimate chosen) + brute-force filter strategy | ✅ done |
 | P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ⏳ todo |

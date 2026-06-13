@@ -360,6 +360,99 @@ fn metadata_chunks_embed_and_image_survives() {
 }
 
 #[test]
+fn auto_reduce_is_lossless_smaller_and_picks_the_right_type() {
+    let (w, h) = (32u32, 32u32);
+    let n = (w * h) as usize;
+    // Opaque greyscale stored as RGBA -> should reduce to greyscale.
+    let gray: Vec<u8> = (0..n)
+        .flat_map(|i| {
+            let v = (i * 5) as u8;
+            [v, v, v, 255]
+        })
+        .collect();
+    // Three colours, one translucent -> palette + tRNS.
+    let palette: Vec<u8> = (0..n)
+        .flat_map(|i| match i % 3 {
+            0 => [200, 0, 0, 255],
+            1 => [0, 200, 0, 128],
+            _ => [0, 0, 200, 255],
+        })
+        .collect();
+    // Opaque, many distinct, non-grey -> drop the alpha channel (RGB).
+    let mut opaque = Vec::with_capacity(n * 4);
+    for y in 0..h {
+        for x in 0..w {
+            opaque.extend_from_slice(&[x as u8, y as u8, (x * y) as u8, 255]);
+        }
+    }
+
+    let cases: [(&str, &Vec<u8>, u8); 3] = [
+        ("gray", &gray, libpng_oracle::COLOR_GRAY),
+        ("palette", &palette, libpng_oracle::COLOR_PALETTE),
+        ("opaque", &opaque, libpng_oracle::COLOR_RGB),
+    ];
+    let dims = Dimensions::new(w, h).unwrap();
+    for (name, src, expected_type) in cases {
+        let mut reduced = Vec::new();
+        PngEncoder::new()
+            .with_compression(Level::Best)
+            .with_auto_reduce(true)
+            .encode_image(ImageRef::<Rgba8>::new(src, dims).unwrap(), &mut reduced)
+            .expect("encode");
+        assert_eq!(
+            libpng_oracle::decode(&reduced).color_type,
+            expected_type,
+            "{name}: reduced to the expected colour type"
+        );
+        // Lossless: resolving the reduced image back to RGBA equals the source.
+        let (_, _, rgba) = libpng_oracle::decode_rgba8(&reduced);
+        assert_eq!(&rgba, src, "{name}: reduction is lossless");
+
+        // Greyscale reduction (3 varying channels -> 1) is the robust size win; palette and
+        // alpha-drop can merely tie an already-tiny RGBA stream once DEFLATE has exploited the
+        // redundancy, so only assert a strict win for the greyscale case.
+        if name == "gray" {
+            let mut full = Vec::new();
+            PngEncoder::new()
+                .with_compression(Level::Best)
+                .encode_image(ImageRef::<Rgba8>::new(src, dims).unwrap(), &mut full)
+                .expect("encode");
+            assert!(
+                reduced.len() < full.len(),
+                "gray: reduced {} should beat full {}",
+                reduced.len(),
+                full.len()
+            );
+        }
+    }
+}
+
+#[test]
+fn brute_force_filtering_round_trips_and_is_competitive() {
+    let (w, h) = (48u32, 48u32);
+    let src = rgb_pattern(w, h);
+    let dims = Dimensions::new(w, h).unwrap();
+    let encode = |filter| {
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_compression(Level::Best)
+            .with_auto_reduce(false)
+            .with_filter(filter)
+            .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
+            .expect("encode");
+        png
+    };
+    let brute = encode(FilterStrategy::BruteForce);
+    assert_eq!(
+        libpng_oracle::decode(&brute).pixels,
+        src,
+        "brute-force round-trip"
+    );
+    // Brute force tries MinSumAbs among its candidates, so it never loses to it.
+    assert!(brute.len() <= encode(FilterStrategy::MinSumAbs).len());
+}
+
+#[test]
 fn solid_image_round_trips() {
     // A flat colour is the highly-compressible extreme; libpng must still recover it exactly.
     let (w, h) = (40, 30);
