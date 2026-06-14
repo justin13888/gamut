@@ -19,6 +19,13 @@ pub(crate) struct TagEntry {
     pub(crate) size: u32,
 }
 
+/// The byte offset just past the tag table — the header (128) + the count word (4) + `tag_count`
+/// twelve-byte entries — and thus the lowest valid tag-data offset. Shared by the serializer's
+/// layout and the strict parser's overlap check.
+pub(crate) const fn tag_table_end(tag_count: usize) -> usize {
+    128 + 4 + 12 * tag_count
+}
+
 /// Parses the tag table: a `u32` count at offset 128 followed by `count` twelve-byte rows
 /// (ICC.1:2022 §7.3).
 ///

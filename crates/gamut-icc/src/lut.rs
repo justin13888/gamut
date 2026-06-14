@@ -783,4 +783,34 @@ mod tests {
         e[offsets_at + 12..offsets_at + 16].copy_from_slice(&(off_clut as u32).to_be_bytes());
         assert!(decode_lut_a_to_b(&e).is_err());
     }
+
+    #[test]
+    fn clut_precision_full_scale() {
+        assert_eq!(ClutPrecision::U8.full_scale(), 255);
+        assert_eq!(ClutPrecision::U16.full_scale(), 65535);
+    }
+
+    #[test]
+    fn lut_b_to_a_round_trips_with_16_input_channels() {
+        // An all-1 grid keeps the node count at 1, so a full 16-channel CLUT stays tiny — this
+        // exercises the decoder's 16-channel upper boundary.
+        let identity = || CurveOrParametric::Curve(Curve::Identity);
+        let lut = LutBToA {
+            input_channels: 16,
+            output_channels: 2,
+            b_curves: (0..16).map(|_| identity()).collect(),
+            matrix: None,
+            m_curves: None,
+            clut: Some(Clut {
+                grid_points: vec![1; 16],
+                output_channels: 2,
+                precision: ClutPrecision::U8,
+                samples: vec![10, 20], // 1 node × 2 outputs
+            }),
+            a_curves: None,
+        };
+        let mut out = Vec::new();
+        encode_lut_b_to_a(&lut, &mut out);
+        assert_eq!(decode_lut_b_to_a(&out).unwrap(), lut);
+    }
 }

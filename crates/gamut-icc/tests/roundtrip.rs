@@ -57,6 +57,19 @@ fn serialization_is_well_formed() {
         assert_eq!(size, out.len(), "{label}: size field");
         assert!(out.len().is_multiple_of(4), "{label}: 4-byte aligned");
         assert_eq!(&out[36..40], b"acsp", "{label}: acsp magic");
+
+        // The first tag's data lands exactly at the (4-byte-aligned) end of the tag table, pinning
+        // the writer's offset arithmetic.
+        let count = u32::from_be_bytes([out[128], out[129], out[130], out[131]]) as usize;
+        if count > 0 {
+            let first_offset =
+                u32::from_be_bytes([out[136], out[137], out[138], out[139]]) as usize;
+            assert_eq!(
+                first_offset,
+                (128 + 4 + 12 * count).next_multiple_of(4),
+                "{label}: first tag data offset"
+            );
+        }
     }
 }
 

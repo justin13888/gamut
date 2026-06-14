@@ -210,6 +210,8 @@ fn element_header(out: &mut Vec<u8>, type_sig: &[u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::curve::CurveOrParametric;
+    use crate::lut::Matrix3x3;
     use crate::primitives::U8Fixed8;
 
     /// Builds an element: a four-byte type signature, four reserved bytes, then the payload.
@@ -366,6 +368,15 @@ mod tests {
                 function_type: 0,
                 params: vec![S15Fixed16::from_f64(2.2)],
             }),
+            // Types 2 and 4 exercise the 4- and 7-parameter decode paths.
+            TagData::ParametricCurve(ParametricCurve {
+                function_type: 2,
+                params: (0..4).map(|i| S15Fixed16::from_f64(f64::from(i))).collect(),
+            }),
+            TagData::ParametricCurve(ParametricCurve {
+                function_type: 4,
+                params: (0..7).map(|i| S15Fixed16::from_f64(f64::from(i))).collect(),
+            }),
             TagData::Text("hello".to_owned()),
             TagData::DateTime(DateTime {
                 year: 2026,
@@ -400,5 +411,35 @@ mod tests {
         let mut out = Vec::new();
         encode_tag(&data, &mut out);
         assert_eq!(decode_tag(&out).unwrap(), data);
+    }
+
+    #[test]
+    fn lut_elements_dispatch_through_decode_tag() {
+        // `decode_tag` must route the LUT type signatures to their decoders, not the Raw fallback.
+        let lut8 = TagData::Lut8(Lut8 {
+            input_channels: 1,
+            output_channels: 1,
+            grid_points: 2,
+            matrix: Matrix3x3 {
+                elements: [S15Fixed16(0); 9],
+            },
+            input_table: vec![0u8; 256],
+            clut: vec![0, 1],
+            output_table: vec![0u8; 256],
+        });
+        let mba = TagData::LutBToA(LutBToA {
+            input_channels: 1,
+            output_channels: 1,
+            b_curves: vec![CurveOrParametric::Curve(Curve::Identity)],
+            matrix: None,
+            m_curves: None,
+            clut: None,
+            a_curves: None,
+        });
+        for data in [lut8, mba] {
+            let mut out = Vec::new();
+            encode_tag(&data, &mut out);
+            assert_eq!(decode_tag(&out).unwrap(), data);
+        }
     }
 }

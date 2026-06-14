@@ -164,8 +164,10 @@ impl ProfileVersion {
     }
 
     /// Re-encodes the second version byte: minor in the high nibble, bug-fix in the low nibble.
+    /// (`+` rather than `|` — the nibbles are disjoint so they are equal, but `+` keeps the
+    /// arithmetic mutation-testable.)
     fn minor_bugfix_byte(self) -> u8 {
-        ((self.minor & 0x0F) << 4) | (self.bugfix & 0x0F)
+        ((self.minor & 0x0F) << 4) + (self.bugfix & 0x0F)
     }
 }
 
@@ -498,6 +500,45 @@ mod tests {
         // Spot-check the nCLR signature encoding (decimal digit and hex letter).
         assert_eq!(ColorSpace::NColor(3).to_signature(), Signature(*b"3CLR"));
         assert_eq!(ColorSpace::NColor(10).to_signature(), Signature(*b"ACLR"));
+
+        // Signatures that resemble `nCLR` but break exactly one of the `_CLR` constraints must be
+        // rejected (each pins one conjunct of the recognition guard).
+        for bad in [b"3xLR", b"3CxR", b"3CLx", b"3zzz", b"1CLR"] {
+            assert!(
+                ColorSpace::from_signature(Signature(*bad)).is_err(),
+                "{:?} should be rejected",
+                core::str::from_utf8(bad).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn profile_id_zero_detection() {
+        assert!(ProfileId::ZERO.is_zero());
+        let mut id = ProfileId::ZERO;
+        id.0[7] = 1;
+        assert!(!id.is_zero());
+    }
+
+    #[test]
+    fn version_with_bugfix_round_trips_through_write() {
+        let mut header = ProfileHeader::parse(&sample_header()).unwrap();
+        header.version = ProfileVersion {
+            major: 4,
+            minor: 3,
+            bugfix: 2,
+        };
+        let mut out = Vec::new();
+        header.write(&mut out);
+        let parsed = ProfileHeader::parse(&out).unwrap();
+        assert_eq!(
+            parsed.version,
+            ProfileVersion {
+                major: 4,
+                minor: 3,
+                bugfix: 2,
+            }
+        );
     }
 
     #[test]

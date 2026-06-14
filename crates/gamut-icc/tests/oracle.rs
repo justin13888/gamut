@@ -354,10 +354,11 @@ fn profile_id_matches_lcms() {
     assert_eq!(id_ours.0, id_lcms);
 }
 
-/// The `IccReader` façade parses through both its lenient default and strict mode (lcms profiles
-/// are conformant, so strict succeeds too).
+/// The `IccReader` façade parses through both its lenient default and strict mode, and strict mode
+/// actually tightens parsing: a non-conformant profile (a nonzero reserved header byte) that the
+/// lenient default accepts is rejected under strict.
 #[test]
-fn reader_facade_parses() {
+fn reader_facade_lenient_and_strict() {
     let bytes = lcms2_oracle::srgb().to_bytes();
     assert!(gamut_icc::IccReader::new().parse(&bytes).is_ok());
     assert!(
@@ -365,6 +366,16 @@ fn reader_facade_parses() {
             .strict(true)
             .parse(&bytes)
             .is_ok()
+    );
+
+    let mut poked = bytes.clone();
+    poked[100] = 1; // a reserved header byte (offset 100..128)
+    assert!(gamut_icc::IccReader::new().parse(&poked).is_ok());
+    assert!(
+        gamut_icc::IccReader::new()
+            .strict(true)
+            .parse(&poked)
+            .is_err()
     );
 }
 

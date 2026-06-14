@@ -6,7 +6,7 @@ use md5::{Digest, Md5};
 use crate::header::{ProfileHeader, ProfileId};
 use crate::primitives::Signature;
 use crate::tag_types::{TagData, decode_tag};
-use crate::tags::parse_tag_table;
+use crate::tags::{parse_tag_table, tag_table_end};
 
 /// A parsed ICC profile: the [`ProfileHeader`] plus its tags, decoded and in file order.
 ///
@@ -50,7 +50,7 @@ impl IccProfile {
             ));
         }
         let entries = parse_tag_table(bytes)?;
-        let data_start = 128 + 4 + 12 * entries.len();
+        let data_start = tag_table_end(entries.len());
         let mut tags = Vec::with_capacity(entries.len());
         for entry in entries {
             let start = entry.offset as usize;

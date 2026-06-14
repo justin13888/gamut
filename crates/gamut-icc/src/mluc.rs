@@ -263,6 +263,9 @@ mod tests {
         assert_eq!(mluc.text(b"en", b"US"), Some("Hi"));
         assert_eq!(mluc.text(b"de", b"DE"), Some("Hallo"));
         assert_eq!(mluc.text(b"fr", b"FR"), None);
+        // A mixed query (one field from each record) must match neither — the language *and* the
+        // country have to agree.
+        assert_eq!(mluc.text(b"en", b"DE"), None);
         assert_eq!(mluc.first(), Some("Hi"));
     }
 
@@ -328,6 +331,29 @@ mod tests {
         let mut out = Vec::new();
         encode_mluc(&mluc, &mut out);
         assert_eq!(decode_mluc(&out).unwrap(), mluc);
+    }
+
+    #[test]
+    fn rejects_mluc_with_small_record_size() {
+        let mut e = b"mluc\x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&1u32.to_be_bytes()); // one record
+        e.extend_from_slice(&8u32.to_be_bytes()); // record size 8 (< the 12-byte minimum)
+        e.extend_from_slice(&[0u8; 12]); // room for the mutant to read a record before failing
+        assert!(decode_mluc(&e).is_err());
+    }
+
+    #[test]
+    fn text_description_accepts_maximum_macintosh_count() {
+        let mut e = b"desc\x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&1u32.to_be_bytes()); // ASCII count (just the NUL)
+        e.push(0);
+        e.extend_from_slice(&0u32.to_be_bytes()); // unicode language
+        e.extend_from_slice(&0u32.to_be_bytes()); // unicode count
+        e.extend_from_slice(&0u16.to_be_bytes()); // script code
+        e.push(67); // the maximum ScriptCode count
+        e.extend_from_slice(&[5u8; 67]);
+        let desc = decode_text_description(&e).unwrap();
+        assert_eq!(desc.macintosh.len(), 67);
     }
 
     #[test]

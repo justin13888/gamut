@@ -6,6 +6,7 @@ use crate::bytes::pad_to_4;
 use crate::primitives::Signature;
 use crate::profile::IccProfile;
 use crate::tag_types::encode_tag;
+use crate::tags::tag_table_end;
 
 /// Writer for an ICC profile, with serialization options.
 ///
@@ -55,8 +56,7 @@ pub(crate) fn write_profile(profile: &IccProfile, recompute_id: bool) -> Vec<u8>
 
     // Pass 2: place element data after the header and tag table, 4-byte aligned, de-duplicating
     // byte-identical elements (as real writers share e.g. the three `*TRC` curves).
-    let tag_table_len = 4 + 12 * elements.len();
-    let data_start = (128 + tag_table_len).next_multiple_of(4);
+    let data_start = tag_table_end(elements.len()).next_multiple_of(4);
     let mut blob = Vec::new();
     let mut layout: Vec<(u32, u32)> = Vec::with_capacity(elements.len());
     let mut seen: HashMap<&[u8], u32> = HashMap::new();

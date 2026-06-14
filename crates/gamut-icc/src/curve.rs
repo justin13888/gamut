@@ -86,25 +86,14 @@ impl ParametricCurve {
             p(5, 0.0),
             p(6, 0.0),
         );
-        // A non-negative base keeps `powf` real; the spec's domain conditions already hold for
-        // conformant parameters, so the clamp only guards against degenerate inputs.
+        // `(aX + b)^g`, clamping the base to keep `powf` real. For types 1 and 2 this clamp also
+        // realizes the spec's `else 0` branch (when `aX + b < 0`), so they need no explicit
+        // condition; types 3 and 4 switch to a separate linear segment below the threshold `d`.
         let power = |base: f64| base.max(0.0).powf(g);
         match self.function_type {
             0 => x.powf(g),
-            1 => {
-                if a * x + b >= 0.0 {
-                    power(a * x + b)
-                } else {
-                    0.0
-                }
-            }
-            2 => {
-                if a * x + b >= 0.0 {
-                    power(a * x + b) + c
-                } else {
-                    c
-                }
-            }
+            1 => power(a * x + b),
+            2 => power(a * x + b) + c,
             3 => {
                 if x >= d {
                     power(a * x + b)
@@ -288,12 +277,43 @@ mod tests {
         assert!(close(c.eval(1.0), 1.0));
         // Halfway to the first node: between 0 and 32768 at fraction 0.5.
         assert!(close(c.eval(0.25), 16384.0 / 65535.0));
+        // Halfway to the second node (lower index 1, both endpoints non-zero) — pins the
+        // interpolation offset and weighting.
+        assert!(close(c.eval(0.75), (32768.0 + 16383.5) / 65535.0));
         // Degenerate tables still evaluate.
         assert!(close(
             Curve::Sampled(vec![32768]).eval(0.7),
             32768.0 / 65535.0
         ));
         assert_eq!(Curve::Sampled(vec![]).eval(0.3), 0.3);
+    }
+
+    #[test]
+    fn curve_or_parametric_evaluates_both_arms() {
+        assert!(close(
+            CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200))).eval(0.5),
+            0.25
+        ));
+        assert!(close(
+            CurveOrParametric::Parametric(ParametricCurve {
+                function_type: 0,
+                params: vec![s15(2.0)],
+            })
+            .eval(0.5),
+            0.25
+        ));
+    }
+
+    #[test]
+    fn read_curve_body_ignores_trailing_bytes() {
+        // A sampled curve (count 2) followed by extra bytes still decodes — the bound requires
+        // *enough* bytes, not an exact length.
+        let mut buf = 2u32.to_be_bytes().to_vec();
+        buf.extend_from_slice(&100u16.to_be_bytes());
+        buf.extend_from_slice(&200u16.to_be_bytes());
+        buf.extend_from_slice(&[0xAB, 0xCD, 0xEF, 0x12]); // trailing padding
+        let curve = read_curve_body(&mut ByteReader::new(&buf)).unwrap();
+        assert_eq!(curve, Curve::Sampled(vec![100, 200]));
     }
 
     #[test]
@@ -336,6 +356,7 @@ mod tests {
         };
         assert!(close(curve.eval(0.75), 0.75)); // (a·x+b)^g
         assert!(close(curve.eval(0.25), 0.125)); // c·x
+        assert!(close(curve.eval(0.5), 0.5)); // at the threshold x == d, the power segment applies
     }
 
     #[test]
@@ -364,5 +385,6 @@ mod tests {
         };
         assert!(close(curve.eval(0.75), 0.875)); // x + e
         assert!(close(curve.eval(0.25), 0.375)); // c·x + f
+        assert!(close(curve.eval(0.5), 0.625)); // at x == d, the power+e segment applies
     }
 }
