@@ -112,6 +112,17 @@ impl<'a, P: Pixel> ImageRef<'a, P> {
     }
 }
 
+/// Two views are equal when they have the same dimensions and the same samples. Hand-written rather
+/// than derived so the brand `P` carries no `PartialEq` bound (only the samples and dimensions are
+/// compared). Comparing dimensions first short-circuits the sample comparison on a size mismatch.
+impl<P: Pixel> PartialEq for ImageRef<'_, P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.dims == other.dims && self.data == other.data
+    }
+}
+
+impl<P: Pixel> Eq for ImageRef<'_, P> {}
+
 /// An owned, length-validated interleaved image of pixel type `P`.
 ///
 /// The owning counterpart of [`ImageRef`]; the natural return of a decoder, carrying its
@@ -209,10 +220,22 @@ impl<P: Pixel> ImageBuf<P> {
     }
 }
 
+/// Two images are equal when they have the same dimensions and the same samples. Hand-written
+/// rather than derived so the brand `P` carries no `PartialEq` bound (only the samples and
+/// dimensions are compared). Comparing dimensions first short-circuits the sample comparison on a
+/// size mismatch.
+impl<P: Pixel> PartialEq for ImageBuf<P> {
+    fn eq(&self, other: &Self) -> bool {
+        self.dims == other.dims && self.data == other.data
+    }
+}
+
+impl<P: Pixel> Eq for ImageBuf<P> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Rgb8, Rgb16};
+    use crate::{Gray8, Rgb8, Rgb16};
 
     fn dims(w: u32, h: u32) -> Dimensions {
         Dimensions {
@@ -297,6 +320,31 @@ mod tests {
         assert_eq!(buf.into_samples(), vec![7u8; 12]);
         // Wrong length rejected on the owned path too.
         assert!(ImageBuf::<Rgb8>::new(vec![0u8; 11], dims(2, 2)).is_err());
+    }
+
+    #[test]
+    fn equality_compares_both_dimensions_and_samples() {
+        let a = ImageBuf::<Rgb8>::new(vec![1, 2, 3, 4, 5, 6], dims(2, 1)).unwrap();
+        let b = ImageBuf::<Rgb8>::new(vec![1, 2, 3, 4, 5, 6], dims(2, 1)).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(b, a); // symmetric
+
+        // Same dimensions, different samples -> not equal (catches "compares only dims").
+        let diff_data = ImageBuf::<Rgb8>::new(vec![1, 2, 3, 4, 5, 7], dims(2, 1)).unwrap();
+        assert_ne!(a, diff_data);
+
+        // Same samples and same total count, different dimensions -> not equal (catches "compares
+        // only data", and the `&&` collapsing to a single clause). 2x3 and 3x2 are both 6 Gray8
+        // samples.
+        let portrait = ImageBuf::<Gray8>::new(vec![0, 1, 2, 3, 4, 5], dims(2, 3)).unwrap();
+        let landscape = ImageBuf::<Gray8>::new(vec![0, 1, 2, 3, 4, 5], dims(3, 2)).unwrap();
+        assert_eq!(portrait.as_samples(), landscape.as_samples());
+        assert_ne!(portrait, landscape);
+
+        // The borrowed view mirrors the owned equality through `as_ref()`.
+        assert_eq!(a.as_ref(), b.as_ref());
+        assert_ne!(a.as_ref(), diff_data.as_ref());
+        assert_ne!(portrait.as_ref(), landscape.as_ref());
     }
 
     #[test]
