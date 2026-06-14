@@ -3,7 +3,12 @@
 //! `.icc` fixtures are committed; gamut-icc decodes the same bytes and the decoded values are
 //! asserted equal to what lcms2 reports.
 
-use gamut_icc::{IccProfile, ProfileHeader, S15Fixed16, TagData};
+use gamut_icc::{IccProfile, ProfileHeader, S15Fixed16, Signature, TagData};
+use lcms2_oracle::tag;
+
+/// The Rec.709/sRGB primaries and D65 white point, for synthesizing matrix/TRC profiles.
+const D65: [f64; 2] = [0.3127, 0.3290];
+const REC709_PRIMARIES: [[f64; 2]; 3] = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]];
 
 /// The header's PCS illuminant (ICC.1:2022 §7.2.16) is mandated to be D50; lcms2 writes exactly
 /// that. Decoding those three `s15Fixed16` fields from a real lcms2-produced profile exercises the
@@ -116,5 +121,91 @@ fn tag_set_matches_lcms() {
                 assert_eq!(&type_sig.0, &bytes[0..4], "{label}: raw type signature");
             }
         }
+    }
+}
+
+/// The XYZ colorant/white-point tags decode to the same tristimulus values lcms reads back.
+#[test]
+fn xyz_tags_match_lcms() {
+    let profile = lcms2_oracle::srgb();
+    let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
+    for tagsig in [
+        tag::MEDIA_WHITE_POINT,
+        tag::RED_COLORANT,
+        tag::GREEN_COLORANT,
+        tag::BLUE_COLORANT,
+    ] {
+        let data = parsed
+            .get(Signature::from_u32(tagsig))
+            .expect("tag present");
+        let TagData::Xyz(values) = data else {
+            panic!("expected XYZ for {tagsig:#010x}");
+        };
+        let ours = values[0].to_f64();
+        let theirs = profile.read_xyz(tagsig).expect("lcms reads XYZ");
+        for k in 0..3 {
+            assert!(
+                (ours[k] - theirs[k]).abs() < 2.0 / 65536.0,
+                "{tagsig:#010x}[{k}]: {} vs {}",
+                ours[k],
+                theirs[k]
+            );
+        }
+    }
+}
+
+/// Decoded tone curves evaluate to the same values as lcms, for both a parametric (sRGB) and a
+/// pure-gamma TRC. Sampling `eval` at points across [0, 1] pins the curve formulas.
+#[test]
+fn tone_curves_match_lcms() {
+    let cases = [
+        ("srgb", lcms2_oracle::srgb()),
+        (
+            "gamma2.2",
+            lcms2_oracle::rgb_matrix_shaper(D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]),
+        ),
+    ];
+    for (label, profile) in cases {
+        let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
+        let data = parsed
+            .get(Signature::from_u32(tag::RED_TRC))
+            .expect("rTRC present");
+        for i in 0..=16 {
+            let x = f64::from(i) / 16.0;
+            let ours = eval_curve(data, x);
+            let theirs = f64::from(
+                profile
+                    .eval_tone_curve(tag::RED_TRC, x as f32)
+                    .expect("lcms evaluates the curve"),
+            );
+            assert!(
+                (ours - theirs).abs() < 2.0e-3,
+                "{label} @ {x}: {ours} vs {theirs}"
+            );
+        }
+    }
+}
+
+/// A non-D50 (here D65) matrix profile carries a chromatic-adaptation matrix, stored as an
+/// `s15Fixed16ArrayType` of nine values (the 3×3 matrix).
+#[test]
+fn chad_decodes_as_s15fixed16_array() {
+    let profile = lcms2_oracle::rgb_matrix_shaper(D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]);
+    let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
+    let data = parsed
+        .get(Signature::from_u32(tag::CHROMATIC_ADAPTATION))
+        .expect("chad present");
+    let TagData::S15Fixed16Array(values) = data else {
+        panic!("expected sf32 chad");
+    };
+    assert_eq!(values.len(), 9);
+}
+
+/// Evaluates whichever tone-curve element a tag holds.
+fn eval_curve(data: &TagData, x: f64) -> f64 {
+    match data {
+        TagData::Curve(curve) => curve.eval(x),
+        TagData::ParametricCurve(curve) => curve.eval(x),
+        other => panic!("expected a tone curve, got {other:?}"),
     }
 }

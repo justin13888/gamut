@@ -1,8 +1,10 @@
 //! The decoded element data a tag can hold (ICC.1:2022 §10).
 
-use gamut_core::Result;
+use gamut_core::{Error, Result};
 
-use crate::primitives::Signature;
+use crate::bytes::ByteReader;
+use crate::curve::{Curve, ParametricCurve};
+use crate::primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, XyzNumber};
 
 /// The decoded data of a tag element.
 ///
@@ -13,6 +15,20 @@ use crate::primitives::Signature;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TagData {
+    /// `XYZ ` — one or more CIE XYZ triplets (`XYZType`); colorant, white/black point, luminance.
+    Xyz(Vec<XyzNumber>),
+    /// `curv` — a sampled/identity/gamma tone curve (`curveType`).
+    Curve(Curve),
+    /// `para` — a parametric tone curve (`parametricCurveType`).
+    ParametricCurve(ParametricCurve),
+    /// `text` — 7-bit ASCII text (`textType`), NUL terminator stripped.
+    Text(String),
+    /// `dtim` — a date-time (`dateTimeType`).
+    DateTime(DateTime),
+    /// `sig ` — a four-byte signature value (`signatureType`).
+    Signature(Signature),
+    /// `sf32` — an array of `s15Fixed16` numbers (`s15Fixed16ArrayType`, e.g. `chad`).
+    S15Fixed16Array(Vec<S15Fixed16>),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -27,14 +43,24 @@ pub enum TagData {
 /// Decodes one tag element from its bytes; the element begins with its four-byte type signature
 /// followed by four reserved bytes (ICC.1:2022 §10).
 ///
-/// Every element is currently preserved as [`TagData::Raw`]; semantic decoders for the modelled
-/// element types are layered on in later phases, falling back to `Raw` for the rest.
+/// Modelled element types are decoded semantically; any other type (or an element too short to carry
+/// a type signature) is preserved as [`TagData::Raw`], which round-trips verbatim. A *modelled* type
+/// whose payload is malformed is a parse error rather than a silent fallback.
 pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
     let type_sig = element_type_signature(element);
-    Ok(TagData::Raw {
-        type_sig,
-        bytes: element.to_vec(),
-    })
+    match &type_sig.0 {
+        b"XYZ " => decode_xyz(element),
+        b"curv" => Ok(TagData::Curve(decode_curve(element)?)),
+        b"para" => Ok(TagData::ParametricCurve(decode_parametric(element)?)),
+        b"text" => decode_text(element),
+        b"dtim" => Ok(TagData::DateTime(decode_date_time(element)?)),
+        b"sig " => Ok(TagData::Signature(decode_signature(element)?)),
+        b"sf32" => decode_s15fixed16_array(element),
+        _ => Ok(TagData::Raw {
+            type_sig,
+            bytes: element.to_vec(),
+        }),
+    }
 }
 
 /// The element's four-byte type signature, or [`Signature::ZERO`] for an element shorter than four
@@ -46,21 +72,225 @@ fn element_type_signature(element: &[u8]) -> Signature {
     }
 }
 
+fn decode_xyz(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 12;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.xyz_number()?);
+    }
+    Ok(TagData::Xyz(values))
+}
+
+fn decode_curve(element: &[u8]) -> Result<Curve> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.u32()? as usize;
+    Ok(match count {
+        0 => Curve::Identity,
+        1 => Curve::Gamma(U8Fixed8(r.u16()?)),
+        n => {
+            if n.checked_mul(2).is_none_or(|bytes| bytes > r.remaining()) {
+                return Err(Error::InvalidInput("icc: curve table exceeds element"));
+            }
+            let mut table = Vec::with_capacity(n);
+            for _ in 0..n {
+                table.push(r.u16()?);
+            }
+            Curve::Sampled(table)
+        }
+    })
+}
+
+fn decode_parametric(element: &[u8]) -> Result<ParametricCurve> {
+    let mut r = ByteReader::at(element, 8)?;
+    let function_type = r.u16()?;
+    r.skip(2)?; // reserved
+    let count = r.remaining() / 4;
+    let mut params = Vec::with_capacity(count);
+    for _ in 0..count {
+        params.push(r.s15fixed16()?);
+    }
+    Ok(ParametricCurve {
+        function_type,
+        params,
+    })
+}
+
+fn decode_text(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let n = r.remaining();
+    let raw = r.bytes(n)?;
+    if !raw.is_ascii() {
+        return Err(Error::InvalidInput("icc: non-ASCII textType"));
+    }
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    let text: String = raw[..end].iter().map(|&b| b as char).collect();
+    Ok(TagData::Text(text))
+}
+
+fn decode_date_time(element: &[u8]) -> Result<DateTime> {
+    ByteReader::at(element, 8)?.date_time()
+}
+
+fn decode_signature(element: &[u8]) -> Result<Signature> {
+    ByteReader::at(element, 8)?.signature()
+}
+
+fn decode_s15fixed16_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 4;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.s15fixed16()?);
+    }
+    Ok(TagData::S15Fixed16Array(values))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Builds an element: a four-byte type signature, four reserved bytes, then the payload.
+    fn element(type_sig: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut e = Vec::with_capacity(8 + payload.len());
+        e.extend_from_slice(type_sig);
+        e.extend_from_slice(&[0; 4]);
+        e.extend_from_slice(payload);
+        e
+    }
+
+    #[test]
+    fn decodes_xyz() {
+        let mut payload = Vec::new();
+        for raw in [0x0000_F6D6_i32, 0x0001_0000, 0x0000_D32D] {
+            payload.extend_from_slice(&raw.to_be_bytes());
+        }
+        let TagData::Xyz(values) = decode_tag(&element(b"XYZ ", &payload)).unwrap() else {
+            panic!("expected XYZ");
+        };
+        assert_eq!(
+            values,
+            vec![XyzNumber {
+                x: S15Fixed16(0x0000_F6D6),
+                y: S15Fixed16(0x0001_0000),
+                z: S15Fixed16(0x0000_D32D),
+            }]
+        );
+    }
+
+    #[test]
+    fn decodes_curve_variants() {
+        let identity = element(b"curv", &0u32.to_be_bytes());
+        assert_eq!(
+            decode_tag(&identity).unwrap(),
+            TagData::Curve(Curve::Identity)
+        );
+
+        let mut gamma = 1u32.to_be_bytes().to_vec();
+        gamma.extend_from_slice(&0x0233u16.to_be_bytes()); // u8Fixed8 ≈ 2.2
+        assert_eq!(
+            decode_tag(&element(b"curv", &gamma)).unwrap(),
+            TagData::Curve(Curve::Gamma(U8Fixed8(0x0233)))
+        );
+
+        let mut sampled = 3u32.to_be_bytes().to_vec();
+        for v in [0u16, 32768, 65535] {
+            sampled.extend_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(
+            decode_tag(&element(b"curv", &sampled)).unwrap(),
+            TagData::Curve(Curve::Sampled(vec![0, 32768, 65535]))
+        );
+    }
+
+    #[test]
+    fn rejects_curve_with_bogus_count() {
+        let bogus = element(b"curv", &0xFFFF_FFFFu32.to_be_bytes());
+        assert!(decode_tag(&bogus).is_err());
+    }
+
+    #[test]
+    fn decodes_parametric_curve() {
+        let mut payload = 1u16.to_be_bytes().to_vec(); // function type 1
+        payload.extend_from_slice(&[0, 0]); // reserved
+        for v in [1.0, 1.0, 0.0] {
+            payload.extend_from_slice(&S15Fixed16::from_f64(v).0.to_be_bytes());
+        }
+        let TagData::ParametricCurve(curve) = decode_tag(&element(b"para", &payload)).unwrap()
+        else {
+            panic!("expected parametric curve");
+        };
+        assert_eq!(curve.function_type, 1);
+        assert_eq!(curve.params.len(), 3);
+    }
+
+    #[test]
+    fn decodes_text_and_strips_nul() {
+        let data = decode_tag(&element(b"text", b"Copyright\0")).unwrap();
+        assert_eq!(data, TagData::Text("Copyright".to_owned()));
+    }
+
+    #[test]
+    fn rejects_non_ascii_text() {
+        assert!(decode_tag(&element(b"text", &[0x80, 0x00])).is_err());
+    }
+
+    #[test]
+    fn decodes_date_time() {
+        let mut payload = Vec::new();
+        for v in [2026u16, 6, 14, 12, 30, 45] {
+            payload.extend_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(
+            decode_tag(&element(b"dtim", &payload)).unwrap(),
+            TagData::DateTime(DateTime {
+                year: 2026,
+                month: 6,
+                day: 14,
+                hours: 12,
+                minutes: 30,
+                seconds: 45,
+            })
+        );
+    }
+
+    #[test]
+    fn decodes_signature() {
+        assert_eq!(
+            decode_tag(&element(b"sig ", b"prtr")).unwrap(),
+            TagData::Signature(Signature(*b"prtr"))
+        );
+    }
+
+    #[test]
+    fn decodes_s15fixed16_array() {
+        let mut payload = Vec::new();
+        for v in [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] {
+            payload.extend_from_slice(&S15Fixed16::from_f64(v).0.to_be_bytes());
+        }
+        let TagData::S15Fixed16Array(values) = decode_tag(&element(b"sf32", &payload)).unwrap()
+        else {
+            panic!("expected sf32 array");
+        };
+        assert_eq!(values.len(), 9);
+        assert_eq!(values[0], S15Fixed16(0x0001_0000));
+    }
+
     #[test]
     fn unknown_element_is_preserved_as_raw() {
-        let element = b"zzzz\x00\x00\x00\x00payload".to_vec();
-        let TagData::Raw { type_sig, bytes } = decode_tag(&element).unwrap();
+        let raw = element(b"zzzz", b"payload");
+        let TagData::Raw { type_sig, bytes } = decode_tag(&raw).unwrap() else {
+            panic!("expected Raw");
+        };
         assert_eq!(type_sig, Signature(*b"zzzz"));
-        assert_eq!(bytes, element); // byte-for-byte verbatim
+        assert_eq!(bytes, raw); // byte-for-byte verbatim
     }
 
     #[test]
     fn short_element_has_zero_type_signature() {
-        let TagData::Raw { type_sig, bytes } = decode_tag(&[1, 2]).unwrap();
+        let TagData::Raw { type_sig, bytes } = decode_tag(&[1, 2]).unwrap() else {
+            panic!("expected Raw");
+        };
         assert_eq!(type_sig, Signature::ZERO);
         assert_eq!(bytes, vec![1, 2]);
     }

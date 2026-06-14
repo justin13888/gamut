@@ -29,6 +29,11 @@ impl<'a> ByteReader<'a> {
         Ok(Self { buf, pos: offset })
     }
 
+    /// The number of unread bytes remaining.
+    pub(crate) fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
     /// Reads the next `n` bytes, advancing the cursor; errors if fewer than `n` remain.
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self

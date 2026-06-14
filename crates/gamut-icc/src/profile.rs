@@ -77,15 +77,16 @@ mod tests {
         b.extend_from_slice(b"wtpt");
         b.extend_from_slice(&(offset as u32).to_be_bytes());
         b.extend_from_slice(&12u32.to_be_bytes());
-        b.extend_from_slice(b"XYZ \x00\x00\x00\x00\x00\x00\x00\x00"); // 12-byte element
+        b.extend_from_slice(b"zzzz\x00\x00\x00\x00\x00\x00\x00\x00"); // unknown 12-byte element
 
         let profile = IccProfile::parse(&b).unwrap();
         assert_eq!(profile.tags.len(), 1);
+        // An unmodelled element type is preserved as Raw and is still locatable by signature.
         assert!(matches!(
             profile.get(Signature(*b"wtpt")),
             Some(TagData::Raw { .. })
         ));
-        assert!(profile.get(Signature(*b"zzzz")).is_none());
+        assert!(profile.get(Signature(*b"abcd")).is_none());
     }
 
     #[test]

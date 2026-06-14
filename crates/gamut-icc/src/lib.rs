@@ -16,6 +16,7 @@
 
 mod bytes;
 
+pub mod curve;
 pub mod header;
 pub mod primitives;
 pub mod profile;
@@ -24,6 +25,7 @@ pub mod tag_types;
 pub mod tags;
 pub mod writer;
 
+pub use curve::{Curve, ParametricCurve};
 pub use header::{
     ColorSpace, DeviceClass, ProfileHeader, ProfileId, ProfileVersion, RenderingIntent,
 };
