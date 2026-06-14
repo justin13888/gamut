@@ -144,11 +144,13 @@ All cargo metadata except per-crate `version` is centralized in the root
 
 Building the **shipped crates** needs only the Rust toolchain — they are pure Rust with no C
 dependencies. Building the **cross-check tests** additionally needs a C toolchain plus
-[nasm](https://www.nasm.us) and pkg-config — the two build deps that stay system packages
-(CMake, Ninja and Meson come from mise). Those tests link reference decoders (dav1d, libavif)
-built from the git submodules under `third_party/` via the dev-only oracle crates in `tooling/`;
-nothing is taken from system-installed decoders. Install the two on Debian/Ubuntu with
-`sudo apt-get install nasm pkg-config` (macOS: `brew install nasm pkg-config`).
+pkg-config — the one build dep that stays a system package (CMake, Ninja and Meson come from
+mise; [nasm](https://www.nasm.us), needed to assemble dav1d's x86 SIMD, is built from a
+vendored source tarball by the oracle build scripts, so it is not a system dependency). Those
+tests link reference decoders (dav1d, libavif) built from the git submodules under
+`third_party/` via the dev-only oracle crates in `tooling/`; nothing is taken from
+system-installed decoders. Install pkg-config on Debian/Ubuntu with
+`sudo apt-get install pkg-config` (macOS: `brew install pkg-config`).
 
 ## Quick Start
 
@@ -156,7 +158,7 @@ nothing is taken from system-installed decoders. Install the two on Debian/Ubunt
 # The cross-check tests link vendored dav1d/libavif from third_party/ submodules.
 git submodule update --init --recursive
 
-# Dev tooling + git hooks (see Prerequisites; also needs system nasm + pkg-config).
+# Dev tooling + git hooks (see Prerequisites; also needs system pkg-config).
 mise trust && mise install
 lefthook install
 

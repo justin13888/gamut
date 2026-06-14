@@ -18,4 +18,12 @@ links = "avif"
 doctest = false
 
 [build-dependencies]
-bindgen = "0.71"
+# 0.72 (vs 0.71 in the sibling oracles): libavif's public header forward-declares
+# `struct avifImage` / `avifIO` before fully defining them, and bindgen 0.71 renders those as
+# opaque (`_address`-only) types under newer libclang (e.g. clang 22), which fails to compile.
+# 0.72 resolves the complete definitions. The dav1d/libtiff headers lack this pattern and build
+# fine at 0.71, so they are left untouched.
+bindgen = "0.72"
+# Builds a vendored nasm from a committed source tarball so the stage-1 dav1d meson build
+# can assemble dav1d's x86 SIMD without a system nasm (no-op on non-x86 targets).
+nasm-vendor = { path = "../nasm-vendor" }

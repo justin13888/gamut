@@ -411,4 +411,28 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[should_panic(expected = "array shorter than 2^n")]
+    fn inverse_dct_panics_on_short_array() {
+        // The length precondition is `t.len() >= 1 << n`. A mutated `1 << n` (e.g. `1 >> n == 0`)
+        // makes the assert vacuous; pin it via the exact panic message (a later out-of-bounds panic
+        // would carry a different one).
+        let mut t = [0i64; 3];
+        inverse_dct(&mut t, 2, 16);
+    }
+
+    #[test]
+    fn forward_dct_exact_values() {
+        // The proportional test pins forward_dct only up to a global scale, so a negated (`acc -=`),
+        // zeroed (`acc *=`), or `x * cos -> x + cos` accumulation survives it. These exact snapshots
+        // (the implementation is independently shown correct by the proportional naive-DCT test) pin
+        // the actual values, sign and magnitude included.
+        let mut t = [100i64, 100, 100, 100];
+        forward_dct(&mut t, 2);
+        assert_eq!(t, [283, 0, 0, 0]); // flat input -> DC only
+        let mut t = [200i64, -100, 50, -25, 10, 0, 5, -5];
+        forward_dct(&mut t, 3);
+        assert_eq!(t, [95, 135, 139, 161, 159, 198, 214, 174]);
+    }
 }

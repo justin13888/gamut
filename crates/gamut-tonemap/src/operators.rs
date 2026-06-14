@@ -154,6 +154,11 @@ mod tests {
         assert_eq!(c.map(2.0), 1.0);
         assert_eq!(c.max(), 1.0);
         assert_eq!(Clamp::default().max(), SDR_WHITE_NORMALIZED);
+        // A non-1.0 bound pins `max()`: the cases above all equal 1.0, which a constant-1.0 mutant
+        // also returns.
+        let c2 = Clamp::new(2.5).expect("valid bound");
+        assert_eq!(c2.max(), 2.5);
+        assert_eq!(c2.map(3.0), 2.5);
     }
 
     #[test]
@@ -212,6 +217,9 @@ mod tests {
             ReinhardExtended::default().white(),
             DEFAULT_REINHARD_WHITE
         ));
+        // Pin the ratio's literal value (203 / 100 = 2.03), not just the self-referential default,
+        // so a mutated `/` in the constant is observable.
+        assert!(close(DEFAULT_REINHARD_WHITE, 2.03));
     }
 
     #[test]

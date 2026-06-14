@@ -6,7 +6,17 @@ members = ["crates/*"]
 # `cargo build` of the shipped crates never needs a C toolchain — they are pulled in
 # only as path `dev-dependencies` when building the cross-check tests. See their
 # manifests under `tooling/`.
-exclude = ["tooling/dav1d-oracle", "tooling/libavif-oracle", "tooling/libtiff-oracle"]
+exclude = [
+    "tooling/dav1d-oracle",
+    "tooling/libavif-oracle",
+    "tooling/libtiff-oracle",
+    "tooling/zlib-oracle",
+    "tooling/libpng-oracle",
+    # Dev-only helper that builds a vendored nasm from a committed source tarball so the
+    # oracles above can assemble dav1d's x86 SIMD without a system nasm. Excluded for the
+    # same reason: a plain `cargo build` of the shipped crates must never compile it.
+    "tooling/nasm-vendor",
+]
 
 [workspace.package]
 # No shared `version`: each crate is versioned independently (see README "Versioning").
@@ -39,6 +49,10 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # in shipped code. Handwritten bindings (no bindgen/libclang); statically links bundled libwebp,
 # so the test build needs a C toolchain while the library itself stays C-free.
 libwebp-sys2 = "0.2"
+# Benchmark harness (issue #149). Dev-only: pulled in as a `dev-dependency` by each crate's
+# `[[bench]]` target, never by shipped code. Lightweight (few transitive deps) and reports
+# throughput counters; `just bench` runs the suite.
+divan = "0.1"
 
 # Internal crates. `path` is used for local builds so cross-crate edits resolve without a
 # crates.io round-trip; `version` is the requirement recorded in the published manifest.
@@ -48,6 +62,8 @@ gamut-core = { path = "crates/gamut-core", version = "0.2.0" }
 gamut-color = { path = "crates/gamut-color", version = "0.3.0" }
 gamut-dsp = { path = "crates/gamut-dsp", version = "0.2.1" }
 gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.1" }
+gamut-deflate = { path = "crates/gamut-deflate", version = "0.1.0" }
+gamut-png = { path = "crates/gamut-png", version = "0.1.0" }
 gamut-isobmff = { path = "crates/gamut-isobmff", version = "0.3.0" }
 gamut-riff = { path = "crates/gamut-riff", version = "0.1.1" }
 gamut-av1 = { path = "crates/gamut-av1", version = "0.3.0" }

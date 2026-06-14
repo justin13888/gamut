@@ -141,6 +141,23 @@ mod tests {
     }
 
     #[test]
+    fn from_planes_validates_and_wraps() {
+        // 3x2 ⇒ n = 6. Three distinct planes, each length 6.
+        let g: Vec<u8> = (0..6).collect();
+        let b: Vec<u8> = (10..16).collect();
+        let r: Vec<u8> = (20..26).collect();
+        let p = Planar8::from_planes(3, 2, [g.clone(), b.clone(), r.clone()]).unwrap();
+        assert_eq!((p.width(), p.height()), (3, 2));
+        assert_eq!(p.plane(0), &g[..]);
+        assert_eq!(p.plane(1), &b[..]);
+        assert_eq!(p.plane(2), &r[..]);
+        // The valid case above only passes when `n == 3 * 2`: a mutated `width * height` (3 + 2 = 5,
+        // 3 / 2 = 1) or an inverted `!=` length check would reject these correctly-sized planes.
+        assert!(Planar8::from_planes(3, 2, [vec![0; 6], vec![0; 6], vec![0; 5]]).is_err());
+        assert!(Planar8::from_planes(3, 2, [vec![0; 5], vec![0; 6], vec![0; 6]]).is_err());
+    }
+
+    #[test]
     fn view_ctor_matches_slice_ctor() {
         let rgb: Vec<u8> = (0..=200u8).cycle().take(3 * 2 * 3).collect(); // 3x2 image
         let from_slice = Planar8::from_rgb8_identity(&rgb, 3, 2).unwrap();

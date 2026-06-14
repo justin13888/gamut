@@ -145,4 +145,29 @@ mod tests {
             assert_eq!(read_bits(&bytes, &mut pos, n), v, "field {v:#x}/{n}");
         }
     }
+
+    #[test]
+    fn bit_len_and_alignment_track_writes() {
+        let mut w = BitWriter::new();
+        assert_eq!(w.bit_len(), 0);
+        assert!(w.is_byte_aligned());
+
+        // Aligned with one full byte buffered: bit_len is `bytes.len() * 8`. Distinguishes the
+        // multiply from `+`/`/` (1 + 8 = 9, 1 / 8 = 0, both != 8).
+        w.put_bits(0xAB, 8);
+        assert_eq!(w.bit_len(), 8);
+        assert!(w.is_byte_aligned());
+
+        // Two full bytes: pins `bytes.len() * 8` again with a different length (2 * 8 = 16).
+        w.put_bits(0xCD, 8);
+        assert_eq!(w.bit_len(), 16);
+
+        // Partial byte with more than one byte buffered: bit_len is `(bytes.len() - 1) * 8 +
+        // bit_pos`. With bytes.len() == 3 the `* 8` is distinguishable from `/ 8`
+        // ((3 - 1) * 8 + 5 = 21 vs (3 - 1) / 8 + 5 = 5), and the writer is no longer aligned, so
+        // `is_byte_aligned` cannot be a constant `true`.
+        w.put_bits(0b10101, 5);
+        assert_eq!(w.bit_len(), 21);
+        assert!(!w.is_byte_aligned());
+    }
 }

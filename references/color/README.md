@@ -20,6 +20,32 @@ derivation as a unit test (`gamut-color::matrix`) so the literal `M1_*` tables a
 
 ---
 
+## Vendored primary sources
+
+The freely-published primary sources for the values below are vendored alongside this README so the
+literals can be audited offline. The paywalled SMPTE/IEC/ISO editions cannot be redistributed — every
+constant they define is instead transcribed with its exact value in the tables below (see
+*Not vendored*).
+
+| file | source |
+|------|--------|
+| `oklab-ottosson.html`    | Björn Ottosson, "A perceptual color space for image processing" — <https://bottosson.github.io/posts/oklab/> |
+| `bradford-lindbloom.html`| Bruce Lindbloom, chromatic adaptation (Bradford CAT) — <http://www.brucelindbloom.com/Eqn_ChromAdapt.html> |
+| `itu-r-bt709-6.pdf`      | ITU-R BT.709-6 — sRGB/BT.709 primaries & white point |
+| `itu-r-bt2020-2.pdf`     | ITU-R BT.2020-2 — BT.2020 primaries & white point |
+| `itu-r-bt2100-2.pdf`     | ITU-R BT.2100-2 — PQ/HLG systems (BT.2100-3 is now in force; `-2` is the edition cited below) |
+| `adobe-rgb-1998.pdf`     | Adobe RGB (1998) Color Image Encoding — primaries & γ (authentic Adobe file via the Internet Archive; Adobe's host no longer serves it) |
+| `romm-rgb.pdf`           | ROMM RGB / ProPhoto white paper — the free primary reference for ISO 22028-2's reference encoding |
+
+## Not vendored (paywalled — values transcribed inline below)
+
+- **SMPTE ST 2084:2014** (PQ inverse EOTF) and **SMPTE EG 432-1** (DCI-P3 with D65) — SMPTE, paywalled.
+- **IEC 61966-2-1** (sRGB transfer functions) — IEC, paywalled.
+- **ISO 22028-2** (ROMM/ProPhoto reference colour encoding) — ISO, paywalled; the ROMM RGB white paper
+  above is the freely-published primary reference for the same primaries and encoding.
+
+---
+
 ## OKLab matrices — Björn Ottosson
 
 Source: "A perceptual color space for image processing", Björn Ottosson,
