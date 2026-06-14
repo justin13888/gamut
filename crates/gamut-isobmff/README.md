@@ -1,56 +1,72 @@
 # gamut-isobmff
 
-`gamut-isobmff` writes the ISO Base Media File Format (ISOBMFF) box structure that the AVIF — and
-later HEIC — containers are built from.
+`gamut-isobmff` is a pure-Rust implementation of the **ISO Base Media File Format (ISOBMFF)
+still-image container core**: the `ftyp` brands, the `meta` box of image items with their properties
+and payloads, and the offset-driven read/write spine. It models *structure only* — the coded
+bitstream (the `av1C`/`hvcC` record and the sample data) stays opaque.
 
 ## Goals
 
-Part of the [gamut](../../README.md) workspace, this crate exists to:
+Part of the [gamut](../../README.md) workspace, this crate exists because the ISOBMFF/HEIF container
+is shared by two otherwise-separate codecs:
 
-- **Own the container, not the codec.** It serializes the ISOBMFF box tree (`ftyp`, `meta`, `mdat`,
-  …) and leaves the coded bitstream to the codec crates, so AVIF and HEIC share one container
-  implementation.
-- **Emit the minimal valid box set.** M0 writes exactly the boxes a single still-image item needs
-  (AVIF v1.2.0 §9.1.1): `ftyp`, then a `meta` box holding `hdlr`/`pitm`/`iloc`/`iinf`(`infe`)/
-  `iprp`(`ipco`+`ipma`), followed by an `mdat` carrying the AV1 temporal unit — see
-  [`write_avif_still`].
-- **Stay spec-faithful and cross-checked.** Box byte layouts follow ISO/IEC 14496-12 (ISOBMFF) and
-  ISO/IEC 23008-12 (HEIF) — paywalled and not in [`../../references/`](../../references) — verified
-  against the public AVIF v1.2.0 box table and libavif/ffmpeg output, and validated with `avifdec`.
-- **Stay memory-safe.** `#![forbid(unsafe_code)]`.
+- **AVIF** ([`gamut-avif`](../gamut-avif)) — AV1 still images: item type `av01`, codec config `av1C`.
+- **HEIC** ([`gamut-heic`](../gamut-heic)) — HEVC still images: item type `hvc1`, codec config `hvcC`.
+
+Factoring the container out keeps the two from duplicating the box tree and the fiddly,
+security-sensitive `iloc` offset machinery. It is:
+
+- **Codec-agnostic.** The codec configuration is carried as opaque bytes
+  ([`PropertyKind::CodecConfiguration`]), so the same `write`/`read` serve `av01`/`av1C` and
+  `hvc1`/`hvcC` with no container changes.
+- **Memory-safe on hostile input.** `#![forbid(unsafe_code)]` — ISOBMFF is offset-driven, a classic
+  parser-exploit surface (truncation, overruns, out-of-range indices), so every read is
+  bounds-checked.
+- **Dependency-light.** Builds only on [`gamut-core`](../gamut-core).
 
 ## Usage
 
-```rust
-use gamut_isobmff::{Av1cConfig, AvifStillImage, NclxColr, write_avif_still};
+`write` serialises an [`IsoBmffImage`] (its `ftyp` brands, the `pitm` primary item, and the image
+items) into a complete `ftyp` + `meta` + `mdat` file; `read` parses one back. Each [`Item`] carries
+its type, name, properties, and payload; the writer derives the `iloc` offsets and the shared
+`ipco`/`ipma` so the two are inverse for any file this crate writes.
 
-// `item_data` is the AV1 temporal unit produced by `gamut-av1`; `av1c`/`nclx` mirror the
-// AV1 sequence header. `gamut-avif` wires these together for you end to end.
-let img = AvifStillImage {
-    width: 64,
-    height: 64,
-    bit_depth: 8,
-    num_channels: 3,
-    av1c: av1c_config,   // Av1cConfig: seq_profile, level, subsampling, ...
-    nclx: nclx_colr,     // NclxColr: CICP code points + full_range
-    item_data: &obus,    // AV1 temporal unit
+```rust
+use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, read, write};
+
+let img = IsoBmffImage {
+    major_brand: *b"avif",
+    minor_version: 0,
+    compatible_brands: vec![*b"avif", *b"mif1", *b"miaf"],
+    primary_item_id: 1,
+    items: vec![Item {
+        id: 1,
+        item_type: *b"av01",
+        name: String::new(),
+        properties: vec![Property {
+            essential: false,
+            kind: PropertyKind::ImageSpatialExtents { width: 64, height: 64 },
+        }],
+        payload: vec![/* the coded bitstream, opaque to this crate */],
+    }],
 };
-let avif_bytes: Vec<u8> = write_avif_still(&img);
+let bytes = write(&img);
+assert_eq!(read(&bytes).unwrap(), img);
 ```
 
-See [`gamut-avif`](../gamut-avif) for the full encode path that drives this crate.
+See [`gamut-avif`](../gamut-avif) for the full encode path that drives this crate (it builds the
+`av1C` record and the AVIF brand set, then calls `write`).
 
 ## Status
 
-M0 writes the minimal box set for a single lossless AVIF still image. The richer item set — alpha
-(`auxl`), `grid`, transform properties, and sequence tracks (`moov`/`trak`), plus HEIC `hvc1`
-support — is deferred per [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md).
+Models the HEIF still-image box set: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc` v0/`iinf`+`infe` v2/`iprp`),
+the `ispe`/`pixi`/`colr`/`irot`/`imir` properties, opaque codec configuration, and `mdat`.
+Unrecognised property boxes round-trip verbatim. Image sequences/tracks, `iloc` v1/v2, multi-extent
+items, `idat`/`grid`/alpha, and ICC `colr` are out of scope — see [STATUS.md](STATUS.md).
 
-## Roadmap
-
-- Alpha auxiliary items, image transforms (`irot`/`imir`/`clap`), and grids.
-- Sequence tracks for animated AVIF.
-- HEIC/HEVC item support, shared with this crate.
+Box byte layouts follow ISO/IEC 14496-12 (ISOBMFF) and ISO/IEC 23008-12 (HEIF) — paywalled, so
+cross-checked against the public AVIF box table and a vendored libavif/dav1d differential oracle
+(via [`gamut-avif`](../gamut-avif)). See [`references/isobmff`](../../references/isobmff).
 
 ## License
 
