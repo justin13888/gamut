@@ -6,7 +6,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::{ByteOrder, FieldType, Ifd, Value, Variant};
+use crate::{ByteOrder, Coverage, FieldType, Ifd, UnknownField, Value, Variant};
 
 /// A parsed TIFF/IFD stream: its byte order, container variant, and the chain of Image File
 /// Directories.
@@ -102,7 +102,20 @@ pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
 /// The field widths follow `variant`: the entry count is 2 bytes (classic) or 8 (BigTIFF), each
 /// entry is 12 or 20 bytes, a value packs inline when it fits in the offset width (4 or 8), and
 /// the next-IFD pointer is 4 or 8 bytes.
-fn read_ifd(data: &[u8], offset: usize, order: ByteOrder, variant: Variant) -> Result<(Ifd, u64)> {
+///
+/// When `cov` is `Some`, the IFD body (count field + entries + next pointer) and each out-of-line
+/// value's byte range are [`mark`](Coverage::mark)ed for byte-range accounting; the caller marks
+/// the file header itself. When `unknown` is `Some`, an entry whose field-type code is
+/// unrecognised is recorded there instead of only being skipped. With both `None` this is the
+/// plain reader — no allocations, no marks — so the [`read`]/[`read_ifd_at`] hot path is unchanged.
+fn read_ifd_inner(
+    data: &[u8],
+    offset: usize,
+    order: ByteOrder,
+    variant: Variant,
+    mut cov: Option<&mut Coverage>,
+    mut unknown: Option<&mut Vec<UnknownField>>,
+) -> Result<(Ifd, u64)> {
     let entry_size = variant.entry_size();
     let inline = variant.inline_threshold();
     // The entry count is the only field whose width differs from the offset width (2 vs 8).
@@ -114,8 +127,14 @@ fn read_ifd(data: &[u8], offset: usize, order: ByteOrder, variant: Variant) -> R
     let entries_start = offset + variant.count_size();
     let next_pos = entries_start + count * entry_size;
     // Bound the directory to the file so a corrupt count fails fast rather than allocating.
-    if next_pos + variant.offset_size() > data.len() {
+    let body_end = next_pos + variant.offset_size();
+    if body_end > data.len() {
         return Err(Error::InvalidInput("TIFF: IFD extends past end of file"));
+    }
+    // The directory body — count field, all entry records (inline values included), and the
+    // next-IFD pointer — is one contiguous span; out-of-line values are marked per entry below.
+    if let Some(c) = cov.as_deref_mut() {
+        c.mark(offset as u64, (body_end - offset) as u64);
     }
     let mut ifd = Ifd::new();
     for i in 0..count {
@@ -125,8 +144,19 @@ fn read_ifd(data: &[u8], offset: usize, order: ByteOrder, variant: Variant) -> R
         // The value count and the value/offset field both follow the offset width.
         let value_count = offset_at(data, pos + 4, order, variant)? as usize;
         let value_pos = pos + 4 + variant.offset_size();
-        // Per spec, readers skip fields with an unexpected (unknown) field type.
+        // Per spec, readers skip fields with an unexpected (unknown) field type; a deconstruct
+        // records the skipped entry so the dropped field (and any out-of-line bytes it would have
+        // covered) is surfaced rather than silently lost.
         let Some(ty) = FieldType::from_code(type_code) else {
+            if let Some(u) = unknown.as_deref_mut() {
+                u.push(UnknownField {
+                    ifd_offset: offset as u64,
+                    tag,
+                    type_code,
+                    count: value_count as u64,
+                    entry_offset: pos as u64,
+                });
+            }
             continue;
         };
         let byte_len = value_count
@@ -139,7 +169,14 @@ fn read_ifd(data: &[u8], offset: usize, order: ByteOrder, variant: Variant) -> R
             let bytes = data
                 .get(voff..)
                 .ok_or(Error::InvalidInput("TIFF: value offset out of bounds"))?;
-            Value::decode(ty, value_count, bytes, order)?
+            let value = Value::decode(ty, value_count, bytes, order)?;
+            // Mark the on-disk span (`value_count * ty.size()`, padding included) — not the decoded
+            // value's `byte_len`, which for ASCII stops at the first NUL and would leave the
+            // padding looking like a gap.
+            if let Some(c) = cov.as_deref_mut() {
+                c.mark(voff as u64, byte_len as u64);
+            }
+            value
         };
         // A duplicate tag keeps the last occurrence; `set` maintains sort order.
         ifd.set(tag, value);
@@ -161,17 +198,52 @@ fn read_ifd(data: &[u8], offset: usize, order: ByteOrder, variant: Variant) -> R
 /// Returns [`Error::InvalidInput`] if the directory at `offset` is out of bounds or a field value
 /// is truncated.
 pub fn read_ifd_at(data: &[u8], offset: u64, order: ByteOrder, variant: Variant) -> Result<Ifd> {
-    read_ifd(data, offset as usize, order, variant).map(|(ifd, _next)| ifd)
+    read_ifd_inner(data, offset as usize, order, variant, None, None).map(|(ifd, _next)| ifd)
 }
 
-/// Parses a TIFF/IFD stream: the header followed by the whole IFD chain.
+/// Like [`read_ifd_at`] but threads byte-range accounting: it marks the IFD body and every
+/// out-of-line value into `cov`, records any unknown-field-type entries into `unknown`, and
+/// returns the next-IFD offset alongside the directory.
+///
+/// A codec uses this to account a sub-IFD it reaches by following a pointer tag (a DNG raw
+/// sub-IFD, `ExifIFD`, `GPSInfo`, …); the enclosing file's header and top-level chain are
+/// accounted by [`read_with_coverage`].
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if the header is invalid, an offset is out of bounds, the IFD
-/// chain loops, or a field value is truncated.
-pub fn read(data: &[u8]) -> Result<TiffFile> {
+/// Returns [`Error::InvalidInput`] if the directory at `offset` is out of bounds or a field value
+/// is truncated.
+pub fn read_ifd_at_with_coverage(
+    data: &[u8],
+    offset: u64,
+    order: ByteOrder,
+    variant: Variant,
+    cov: &mut Coverage,
+    unknown: &mut Vec<UnknownField>,
+) -> Result<(Ifd, u64)> {
+    read_ifd_inner(
+        data,
+        offset as usize,
+        order,
+        variant,
+        Some(cov),
+        Some(unknown),
+    )
+}
+
+/// Walks a TIFF/IFD stream's header and top-level IFD chain, optionally accounting bytes.
+///
+/// With both sinks `None` this is the body of [`read`]; with `Some` it additionally marks the
+/// header and every IFD body/out-of-line value into `cov` and records unknown-field-type entries.
+fn read_chain(
+    data: &[u8],
+    mut cov: Option<&mut Coverage>,
+    mut unknown: Option<&mut Vec<UnknownField>>,
+) -> Result<TiffFile> {
     let (order, variant, first) = read_header(data)?;
+    if let Some(c) = cov.as_deref_mut() {
+        c.mark(0, variant.header_size() as u64);
+    }
     let mut ifds = Vec::new();
     let mut offset = first as usize;
     let mut seen = Vec::new();
@@ -183,7 +255,14 @@ pub fn read(data: &[u8]) -> Result<TiffFile> {
             return Err(Error::InvalidInput("TIFF: too many IFDs"));
         }
         seen.push(offset);
-        let (ifd, next) = read_ifd(data, offset, order, variant)?;
+        let (ifd, next) = read_ifd_inner(
+            data,
+            offset,
+            order,
+            variant,
+            cov.as_deref_mut(),
+            unknown.as_deref_mut(),
+        )?;
         ifds.push(ifd);
         offset = next as usize;
     }
@@ -195,6 +274,35 @@ pub fn read(data: &[u8]) -> Result<TiffFile> {
         variant,
         ifds,
     })
+}
+
+/// Parses a TIFF/IFD stream: the header followed by the whole IFD chain.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the header is invalid, an offset is out of bounds, the IFD
+/// chain loops, or a field value is truncated.
+pub fn read(data: &[u8]) -> Result<TiffFile> {
+    read_chain(data, None, None)
+}
+
+/// Like [`read`] but threads byte-range accounting through the whole top-level walk: it marks the
+/// header and every IFD body / out-of-line value into `cov`, and records any unknown-field-type
+/// entries into `unknown`.
+///
+/// This accounts the header and the top-level IFD chain; a codec accounts each sub-IFD it follows
+/// with [`read_ifd_at_with_coverage`] and marks its own strip/tile byte ranges, then
+/// [`finish`](Coverage::finish)es `cov` into the [`CoverageReport`](crate::CoverageReport).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] under the same conditions as [`read`].
+pub fn read_with_coverage(
+    data: &[u8],
+    cov: &mut Coverage,
+    unknown: &mut Vec<UnknownField>,
+) -> Result<TiffFile> {
+    read_chain(data, Some(cov), Some(unknown))
 }
 
 #[cfg(test)]
@@ -260,5 +368,97 @@ mod tests {
         ];
         assert_eq!(data.len(), 18);
         assert!(read(&data).is_err());
+    }
+
+    /// An IFD whose out-of-line values are all even-length, so [`crate::write`] emits no alignment
+    /// padding and a deconstruct can account every byte.
+    fn even_value_ifd() -> Ifd {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![640])); // inline (2 bytes)
+        ifd.set(258, Value::Short(vec![8, 8, 8])); // 6 bytes -> out of line
+        ifd.set(282, Value::Rational(vec![(300, 1)])); // 8 bytes -> out of line
+        ifd
+    }
+
+    #[test]
+    fn read_with_coverage_accounts_a_written_file() {
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![even_value_ifd()],
+        };
+        let bytes = crate::write(&file);
+        let mut cov = Coverage::new(bytes.len() as u64);
+        let mut unknown = Vec::new();
+        let parsed = read_with_coverage(&bytes, &mut cov, &mut unknown).expect("read");
+        // The coverage reader returns exactly what the plain reader would.
+        assert_eq!(parsed, file);
+        assert!(unknown.is_empty());
+        let report = cov.finish();
+        assert!(report.is_fully_covered(), "report: {report:?}");
+        assert_eq!(report.covered_bytes, bytes.len() as u64);
+    }
+
+    #[test]
+    fn unknown_field_type_is_recorded_under_coverage() {
+        // One IFD entry with an unrecognised field-type code (13). The plain reader skips it and the
+        // coverage reader records it; the 12-byte entry is part of the IFD body, so the file stays
+        // fully covered.
+        let data = [
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD @ 8
+            0x01, 0x00, // entry count = 1
+            0x99, 0x99, // tag 0x9999
+            0x0d, 0x00, // type 13 (unknown)
+            0x01, 0x00, 0x00, 0x00, // value count = 1
+            0x00, 0x00, 0x00, 0x00, // value/offset
+            0x00, 0x00, 0x00, 0x00, // next IFD = 0
+        ];
+        let mut cov = Coverage::new(data.len() as u64);
+        let mut unknown = Vec::new();
+        let parsed = read_with_coverage(&data, &mut cov, &mut unknown).expect("read");
+        assert_eq!(parsed.ifds[0].fields().len(), 0); // entry was skipped
+        assert_eq!(unknown.len(), 1);
+        assert_eq!(unknown[0].tag, 0x9999);
+        assert_eq!(unknown[0].type_code, 13);
+        assert_eq!(unknown[0].ifd_offset, 8);
+        assert_eq!(unknown[0].entry_offset, 10);
+        assert_eq!(unknown[0].count, 1);
+        assert!(cov.finish().is_fully_covered());
+    }
+
+    #[test]
+    fn read_ifd_at_with_coverage_accounts_a_subifd() {
+        // Root + one sub-IFD, each with an even-length out-of-line value: accounting the root chain
+        // and then the child via the pointer must leave no byte unclaimed.
+        let mut child = Ifd::new();
+        child.set(256, Value::Short(vec![16]));
+        child.set(258, Value::Short(vec![8, 8, 8])); // 6 bytes -> out of line
+        let mut root = Ifd::new();
+        root.set(256, Value::Short(vec![640]));
+        root.set(258, Value::Short(vec![8, 8, 8])); // 6 bytes -> out of line
+        root.set_sub_ifd(330, vec![child]);
+        let bytes = crate::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![root],
+        });
+
+        let mut cov = Coverage::new(bytes.len() as u64);
+        let mut unknown = Vec::new();
+        let parsed = read_with_coverage(&bytes, &mut cov, &mut unknown).expect("root");
+        let child_off = parsed.ifds[0].get_u32(330).expect("SubIFDs pointer");
+        let (_child, next) = read_ifd_at_with_coverage(
+            &bytes,
+            child_off.into(),
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            &mut cov,
+            &mut unknown,
+        )
+        .expect("child");
+        assert_eq!(next, 0);
+        assert!(unknown.is_empty());
+        let report = cov.finish();
+        assert!(report.is_fully_covered(), "report: {report:?}");
     }
 }

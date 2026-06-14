@@ -3,69 +3,16 @@
 //! Key frames code, per macroblock, a luma 16×16 mode and a chroma 8×8 mode, each tree-coded over the
 //! boolean coder with fixed key-frame probabilities (§11.2, §11.4). [`predict_block`] handles the four
 //! whole-block modes (DC/V/H/TM); [`subblock_predict`] the ten 4×4 `B_PRED` submodes, whose modes are
-//! themselves context-coded against the above/left neighbors via [`KF_BMODE_PROB`] (§11.3). The
-//! [`LumaMode`] / [`SubBlockMode`] / [`ChromaMode`] enums name the full mode space; the `*_PRED` and
-//! `B_*_PRED` constants are the same values as the tree-leaf indices for the coders.
+//! themselves context-coded against the above/left neighbors via [`KF_BMODE_PROB`] (§11.3). Modes
+//! are carried as `usize` indices throughout: the `*_PRED` (whole-block) and `B_*_PRED` (subblock)
+//! constants are the same values as the tree-leaf indices the coders use.
 
 use gamut_color::clip_pixel8;
 
 use super::bool_coder::{Prob, Tree};
 
-/// Luma 16×16 prediction mode (RFC 6386 §11.2, §12.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LumaMode {
-    /// DC (average of available top/left edges) prediction.
-    Dc,
-    /// Vertical prediction from the row above.
-    Vertical,
-    /// Horizontal prediction from the column to the left.
-    Horizontal,
-    /// TrueMotion prediction (top row + left column − top-left corner).
-    TrueMotion,
-    /// Per-4×4-subblock prediction; selects a [`SubBlockMode`] for each of the 16 subblocks.
-    BPred,
-}
-
-/// Luma 4×4 subblock prediction mode, used when the macroblock mode is [`LumaMode::BPred`]
-/// (RFC 6386 §11.2, §12.3). Ten directional / averaging modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubBlockMode {
-    /// DC (average) prediction.
-    Dc,
-    /// TrueMotion prediction.
-    TrueMotion,
-    /// Vertical prediction.
-    Vertical,
-    /// Horizontal prediction.
-    Horizontal,
-    /// Down-left diagonal prediction.
-    LeftDown,
-    /// Down-right diagonal prediction.
-    RightDown,
-    /// Vertical-right diagonal prediction.
-    VerticalRight,
-    /// Vertical-left diagonal prediction.
-    VerticalLeft,
-    /// Horizontal-down diagonal prediction.
-    HorizontalDown,
-    /// Horizontal-up diagonal prediction.
-    HorizontalUp,
-}
-
-/// Chroma 8×8 prediction mode (RFC 6386 §12.2). The same four modes as the luma 16×16 set.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChromaMode {
-    /// DC (average) prediction.
-    Dc,
-    /// Vertical prediction.
-    Vertical,
-    /// Horizontal prediction.
-    Horizontal,
-    /// TrueMotion prediction.
-    TrueMotion,
-}
-
-/// `DC_PRED` whole-block mode index (matches [`LumaMode::Dc`] / [`ChromaMode::Dc`]).
+/// `DC_PRED` whole-block mode index — luma 16×16 and chroma 8×8 (RFC 6386 §11.2, §12.2). The codec
+/// works in these `usize` mode indices throughout.
 pub const DC_PRED: usize = 0;
 /// `V_PRED` (vertical) whole-block mode index.
 pub const V_PRED: usize = 1;
@@ -237,11 +184,6 @@ pub fn subblock_predict(mode: usize, above: &[u8; 8], left: &[u8; 4], corner: u8
         ax[3],
         ax[4],
     ];
-    // B_DC_PRED (and any out-of-range mode): the no-edge-exception average of the eight neighbors.
-    if mode == B_DC_PRED || mode > B_HU_PRED {
-        let v = ((ax[1] + ax[2] + ax[3] + ax[4] + lx[1] + lx[2] + lx[3] + lx[4] + 4) >> 3) as u8;
-        return [v; 16];
-    }
     let a3 = |j: usize| avg3(ax[j], ax[j + 1], ax[j + 2]); // avg3p(A + j)
     let a2 = |j: usize| avg2(ax[j + 1], ax[j + 2]); // avg2p(A + j)
     let l3 = |r: usize| avg3(lx[r], lx[r + 1], lx[r + 2]); // avg3p(L + r)
@@ -520,6 +462,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subblock_predict_known_vectors() {
+        // Absolute per-mode output for fixed neighbors pins every B_PRED submode's averaging
+        // arithmetic — including B_DC_PRED, which the encoder's content-driven mode selection rarely
+        // chooses (so the differential oracle never exercises it). above = A[0..8], left = L[0..4],
+        // corner P = 60.
+        let above = [10u8, 40, 70, 100, 130, 160, 190, 220];
+        let left = [20u8, 50, 80, 110];
+        let expected: [[u8; 16]; NUM_BMODES] = [
+            [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60],
+            [0, 0, 30, 60, 0, 30, 60, 90, 30, 60, 90, 120, 60, 90, 120, 150],
+            [30, 40, 70, 100, 30, 40, 70, 100, 30, 40, 70, 100, 30, 40, 70, 100],
+            [38, 38, 38, 38, 50, 50, 50, 50, 80, 80, 80, 80, 103, 103, 103, 103],
+            [40, 70, 100, 130, 70, 100, 130, 160, 100, 130, 160, 190, 130, 160, 190, 213],
+            [38, 30, 40, 70, 38, 38, 30, 40, 50, 38, 38, 30, 80, 50, 38, 38],
+            [35, 25, 55, 85, 38, 30, 40, 70, 38, 35, 25, 55, 50, 38, 30, 40],
+            [25, 55, 85, 115, 40, 70, 100, 130, 55, 85, 115, 160, 70, 100, 130, 190],
+            [40, 38, 30, 40, 35, 38, 40, 38, 65, 50, 35, 38, 95, 80, 65, 50],
+            [35, 50, 65, 80, 65, 80, 95, 103, 95, 103, 110, 110, 110, 110, 110, 110],
+        ];
+        for (mode, want) in expected.iter().enumerate() {
+            assert_eq!(
+                subblock_predict(mode, &above, &left, 60),
+                *want,
+                "subblock_predict mode {mode} mismatch"
+            );
+        }
+    }
+
+    #[test]
     fn dc_top_left_is_128() {
         assert_eq!(dc_predict(16, None, None), 128);
         assert_eq!(dc_predict(8, None, None), 128);
@@ -551,8 +522,6 @@ mod tests {
     fn mode_trees_are_well_formed() {
         assert_eq!(KF_YMODE_TREE.len(), 8);
         assert_eq!(KF_UV_MODE_TREE.len(), 6);
-        assert_eq!(LumaMode::Dc as usize, DC_PRED);
-        assert_eq!(ChromaMode::TrueMotion as usize, TM_PRED);
     }
 
     #[test]

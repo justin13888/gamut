@@ -16,6 +16,21 @@
 //! token partitions, and skip). Transparent lossy images use the extended (`VP8X`) container with an
 //! `ALPH` alpha chunk. Every component is validated against libwebp as an oracle in both directions
 //! (bit-exact at the YUV-plane level for lossy), plus a malformed-input robustness corpus.
+//!
+//! # Limitations
+//!
+//! The crate codes the single still image. Some container features are deliberately deferred or out
+//! of scope (see `STATUS.md` for the full matrix):
+//!
+//! - **Embedded metadata** — `ICCP` color profiles and `EXIF` / `XMP ` metadata are neither emitted
+//!   on encode nor surfaced on decode (such chunks are skipped). Planned once the `gamut-metadata`
+//!   facade lands (issue #34); the `gamut_core` still-image traits also carry no metadata channel yet.
+//! - **Animation** — `ANIM` / `ANMF` multi-frame sequences are out of scope under the image-first
+//!   charter. Each frame is an independent key frame, but assembling them needs a non-trait API.
+//! - **Lossy quality** — the `0..=100` quality maps coarsely onto the VP8 base quantizer;
+//!   rate-distortion tuning is tracked in issue #32.
+//! - **Lossless** — always reproduces the input exactly and ignores the quality value; tuning
+//!   compression density is tracked in issue #31.
 #![forbid(unsafe_code)]
 
 mod config;

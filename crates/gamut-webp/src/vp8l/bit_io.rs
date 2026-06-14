@@ -1,10 +1,9 @@
 //! VP8L bit I/O: an **LSB-first** bit stream (RFC 9649 §3.3).
 //!
-//! VP8L reads values least-significant-bit-first within each byte, which is the opposite order to
-//! [`gamut_bitstream::BitWriter`](https://docs.rs/gamut-bitstream)'s MSB-first `f(n)` fields. The
-//! reader ([`BitReader`], `ReadBits(n)`) and the matching writer ([`BitWriter`]) land here at
-//! milestone M0; if a second consumer (e.g. a future JPEG/JXL path) needs LSB-first bit I/O, this is
-//! a candidate to graduate into `gamut-bitstream`. Tracked in `../STATUS.md` section F.
+//! VP8L reads values least-significant-bit-first within each byte — the opposite order to the
+//! MSB-first `f(n)` fields used by the AV1-family codecs. That incompatibility is why this LSB-first
+//! reader ([`BitReader`], `ReadBits(n)`) and writer ([`BitWriter`]) are implemented in-crate rather
+//! than reusing a shared bit-stream primitive. Tracked in `../STATUS.md` section F.
 //!
 //! Per the spec, "the bytes are read in the natural order of the stream ... and bits of each byte
 //! are read in least-significant-bit-first order. When multiple bits are read at the same time, the
@@ -87,6 +86,7 @@ impl<'a> BitReader<'a> {
 
     /// Total number of bits consumed so far.
     #[must_use]
+    #[cfg(test)]
     pub fn bits_consumed(&self) -> usize {
         self.byte_pos * 8 - self.bits_in_acc as usize
     }
@@ -94,6 +94,7 @@ impl<'a> BitReader<'a> {
     /// Whether every bit of the input has been consumed (the trailing partial byte, if any, is
     /// treated as zero padding and is not counted as remaining data).
     #[must_use]
+    #[cfg(test)]
     pub fn is_exhausted(&self) -> bool {
         self.byte_pos >= self.data.len() && self.bits_in_acc == 0
     }
@@ -138,6 +139,7 @@ impl BitWriter {
 
     /// Number of bits written so far (including any pending partial byte).
     #[must_use]
+    #[cfg(test)]
     pub fn bit_len(&self) -> usize {
         self.buf.len() * 8 + self.bits_in_acc as usize
     }

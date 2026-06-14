@@ -39,15 +39,10 @@ impl WebpEncoder {
         Self::default()
     }
 
-    /// Creates an encoder that produces a lossless VP8L bitstream.
+    /// Creates an encoder that produces a lossless VP8L bitstream (the default mode).
     #[must_use]
     pub fn lossless() -> Self {
-        Self {
-            config: WebpConfig {
-                mode: WebpMode::Lossless,
-                ..WebpConfig::default()
-            },
-        }
+        Self::default()
     }
 
     /// Creates an encoder that produces a lossy VP8 bitstream at the given `quality` (`0..=100`).
@@ -273,6 +268,46 @@ mod tests {
             .map(|c| WebpChunkId::from(c.unwrap().fourcc))
             .collect();
         assert_eq!(ids, vec![WebpChunkId::Vp8]);
+    }
+
+    #[test]
+    fn quality_to_quant_maps_endpoints_and_is_monotonic() {
+        // Higher quality → lower base quantizer index; pins the exact mapping the lossy path relies
+        // on (otherwise the function can be replaced by a constant with no test noticing).
+        assert_eq!(quality_to_quant(0), 127);
+        assert_eq!(quality_to_quant(100), 0);
+        assert_eq!(quality_to_quant(50), 63);
+        assert_eq!(quality_to_quant(75), 31);
+        assert_eq!(quality_to_quant(255), 0, "quality saturates at 100");
+        for q in 1u8..=100 {
+            assert!(
+                quality_to_quant(q) <= quality_to_quant(q - 1),
+                "must be non-increasing at q={q}"
+            );
+        }
+    }
+
+    #[test]
+    fn transparent_lossy_sets_the_vp8x_alpha_flag() {
+        use gamut_riff::{RiffReader, Vp8xHeader, WebpChunkId};
+        // A transparent lossy image is wrapped in an extended (VP8X) file whose feature header must
+        // advertise alpha, so conformant decoders know to read the ALPH chunk.
+        let rgba: Vec<u8> = (0..16 * 16u32)
+            .flat_map(|i| [10u8, 20, 30, (i & 0x7f) as u8])
+            .collect();
+        let mut file = Vec::new();
+        WebpEncoder::lossy(60)
+            .encode_image(ImageRef::<Rgba8>::new(&rgba, dims(16, 16)).unwrap(), &mut file)
+            .expect("encode");
+        let vp8x = RiffReader::new(&file)
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|c| matches!(WebpChunkId::from(c.fourcc), WebpChunkId::Vp8x))
+            .expect("transparent lossy must emit a VP8X chunk");
+        assert!(
+            Vp8xHeader::from_payload(vp8x.payload).unwrap().alpha,
+            "VP8X must advertise alpha for a transparent image"
+        );
     }
 
     #[test]

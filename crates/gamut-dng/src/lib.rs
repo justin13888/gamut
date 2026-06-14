@@ -31,6 +31,7 @@
 #![forbid(unsafe_code)]
 
 pub mod decoder;
+pub mod deconstruct;
 pub mod encoder;
 pub mod metadata;
 pub mod profile;
@@ -50,6 +51,7 @@ pub use gamut_core::{Dimensions, Error, Result};
 pub use gamut_ifd::ByteOrder;
 
 pub use decoder::{DecodedDng, DngDecoder};
+pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstruct};
 pub use encoder::DngEncoder;
 pub use metadata::{DngMetadata, ExifMetadata};
 pub use profile::CameraProfile;
