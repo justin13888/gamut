@@ -16,10 +16,10 @@
 
 use crate::cicp::TransferCharacteristics;
 
-/// SDR diffuse-white reference luminance (cd/m²), per ITU-R BT.2408.
-pub const SDR_REFERENCE_WHITE_NITS: f64 = 203.0;
-/// PQ peak luminance (cd/m²), per SMPTE ST 2084.
-pub const PQ_PEAK_NITS: f64 = 10_000.0;
+// The reference luminance levels are defined once in `gamut_core::luminance` (see
+// `references/color/README.md`) and re-exported here so existing `gamut_color::transfer::*` paths
+// keep resolving.
+pub use gamut_core::luminance::{HDR_REFERENCE_WHITE_NITS, PQ_PEAK_NITS};
 
 // --- sRGB (IEC 61966-2-1) --------------------------------------------------
 
@@ -98,10 +98,10 @@ pub fn pq_eotf(x: f64) -> f64 {
 }
 
 /// BT.2020 **encoder-exact** path: PQ inverse EOTF → nits → Reinhard tone map to
-/// SDR `[0, 1)` relative to the 203-nit reference white (`L / (1 + L)`).
+/// SDR `[0, 1)` relative to the BT.2408 HDR reference white (203 nits; `L / (1 + L)`).
 #[must_use]
 pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
-    let l = pq_eotf(x) / SDR_REFERENCE_WHITE_NITS;
+    let l = pq_eotf(x) / HDR_REFERENCE_WHITE_NITS;
     l / (1.0 + l)
 }
 

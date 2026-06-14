@@ -15,7 +15,7 @@
 use crate::cicp::{ColourPrimaries, TransferCharacteristics};
 use crate::oklab::{Gamut, linear_rgb_to_oklab};
 use crate::transfer::{
-    SDR_REFERENCE_WHITE_NITS, adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf,
+    HDR_REFERENCE_WHITE_NITS, adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf,
 };
 
 /// A tone-mapping operator carried by a [`SourceProfile`].
@@ -23,7 +23,8 @@ use crate::transfer::{
 pub enum ToneMap {
     /// Reinhard `L / (1 + L)`, with `L` relative to `reference_white_nits`.
     Reinhard {
-        /// SDR reference white luminance (cd/m²).
+        /// Reference white luminance (cd/m²) the curve normalizes against — the BT.2408 HDR
+        /// reference white (203) for the BT.2020 PQ path.
         reference_white_nits: f64,
     },
 }
@@ -69,7 +70,7 @@ impl SourceTransfer {
     pub fn tonemap(self) -> Option<ToneMap> {
         match self {
             SourceTransfer::Bt2020Pq => Some(ToneMap::Reinhard {
-                reference_white_nits: SDR_REFERENCE_WHITE_NITS,
+                reference_white_nits: HDR_REFERENCE_WHITE_NITS,
             }),
             _ => None,
         }
