@@ -50,6 +50,7 @@ impl Vp8lHeader {
     }
 
     /// Returns the header's dimensions.
+    #[cfg(test)]
     #[must_use]
     pub fn dimensions(&self) -> Dimensions {
         Dimensions {

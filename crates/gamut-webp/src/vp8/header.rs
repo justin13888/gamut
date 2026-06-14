@@ -6,8 +6,8 @@
 //! record (per-segment quantizer/filter adjustments + the segment-id tree probs), the loop-filter
 //! parameters, the partition count, the quantizer indices, and the coefficient-probability-update
 //! record — all parsed by the decoder so it tracks the working [`CoeffProbs`]. Per-macroblock
-//! loop-filter adjustments (`mb_lf_adjustments`) are the one body still rejected. Tracked in
-//! `../STATUS.md` section H.
+//! loop-filter adjustments (`mb_lf_adjustments`) are parsed into [`LoopFilterDeltas`] and applied to
+//! each macroblock's filter level during reconstruction. Tracked in `../STATUS.md` section H.
 
 use gamut_core::{Error, Result};
 
@@ -38,6 +38,19 @@ pub struct Segmentation {
     pub tree_probs: [u8; 3],
 }
 
+/// Per-macroblock loop-filter deltas (RFC 6386 §9.4 `mb_lf_adjustments`). For key frames every
+/// macroblock is intra, so only the intra reference-frame class (`ref_frame[0]`) applies to all
+/// macroblocks and the `B_PRED` mode class (`mode[0]`) applies additionally to 4×4-predicted ones;
+/// the other entries are inter-frame classes gamut never codes but round-trips for completeness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LoopFilterDeltas {
+    /// Reference-frame deltas, indexed intra / last / golden / altref. Only index 0 (intra) applies
+    /// to key frames.
+    pub ref_frame: [i8; 4],
+    /// Prediction-mode-class deltas. Only index 0 (the `B_PRED` class) applies to key frames.
+    pub mode: [i8; 4],
+}
+
 /// Loop-filter header parameters (RFC 6386 §9.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LoopFilterParams {
@@ -47,6 +60,9 @@ pub struct LoopFilterParams {
     pub level: u8,
     /// Sharpness level (`0..=7`).
     pub sharpness: u8,
+    /// Per-macroblock reference/mode loop-filter deltas (`mb_lf_adjustments`); all-zero when the
+    /// feature is disabled.
+    pub deltas: LoopFilterDeltas,
 }
 
 /// Dequantization indices (RFC 6386 §9.6): a base AC index plus a signed delta per plane/coefficient.
@@ -312,9 +328,46 @@ fn read_segment_feature(dec: &mut BoolDecoder, bits: u32) -> i8 {
     }
 }
 
+/// Writes `mb_lf_adjustments()` (RFC 6386 §9.4, §19.2): the enable flag, then — when any delta is
+/// non-zero — the update flag and the four reference-frame and four mode deltas, each coded as an
+/// update flag + `L(6)` magnitude + sign (the same shape as a segment feature).
+fn write_mb_lf_adjustments(enc: &mut BoolEncoder, deltas: &LoopFilterDeltas) {
+    let enabled = deltas.ref_frame != [0; 4] || deltas.mode != [0; 4];
+    enc.put_flag(enabled); // loop_filter_adj_enable
+    if enabled {
+        enc.put_flag(true); // mode_ref_lf_delta_update: transmit the values this frame
+        for delta in deltas.ref_frame {
+            write_segment_feature(enc, delta, 6);
+        }
+        for delta in deltas.mode {
+            write_segment_feature(enc, delta, 6);
+        }
+    }
+}
+
+/// Reads `mb_lf_adjustments()` (RFC 6386 §9.4, §19.2), mirroring [`write_mb_lf_adjustments`]. A delta
+/// not transmitted this frame keeps its default of zero — gamut codes key frames only, so there is no
+/// prior frame whose deltas would persist.
+fn read_mb_lf_adjustments(dec: &mut BoolDecoder) -> LoopFilterDeltas {
+    let mut deltas = LoopFilterDeltas::default();
+    if dec.get_flag() {
+        // loop_filter_adj_enable
+        if dec.get_flag() {
+            // mode_ref_lf_delta_update
+            for delta in &mut deltas.ref_frame {
+                *delta = read_segment_feature(dec, 6);
+            }
+            for delta in &mut deltas.mode {
+                *delta = read_segment_feature(dec, 6);
+            }
+        }
+    }
+    deltas
+}
+
 /// Writes the boolean-coded key-frame header (RFC 6386 §19.2) into the first (control) partition's
-/// encoder `enc`, leaving it open for the per-macroblock records that follow. Loop-filter adjustments
-/// stay disabled (P14 territory); segmentation and coefficient-probability updates are emitted as
+/// encoder `enc`, leaving it open for the per-macroblock records that follow. Segmentation,
+/// per-macroblock loop-filter adjustments, and coefficient-probability updates are emitted as
 /// configured.
 pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
     enc.put_literal(u32::from(header.color_space), 1);
@@ -326,7 +379,7 @@ pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
     enc.put_flag(header.loop_filter.simple); // filter_type
     enc.put_literal(u32::from(header.loop_filter.level), 6);
     enc.put_literal(u32::from(header.loop_filter.sharpness), 3);
-    enc.put_flag(false); // loop_filter_adj_enable (body in P11)
+    write_mb_lf_adjustments(enc, &header.loop_filter.deltas);
     enc.put_literal(log2_partitions(header.token_partitions), 2);
     write_quant_indices(enc, &header.quant);
     enc.put_flag(header.refresh_entropy_probs);
@@ -338,16 +391,13 @@ pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
 }
 
 /// Reads the boolean-coded key-frame header (RFC 6386 §19.2) from the control-partition decoder `dec`,
-/// returning the header and the working coefficient-probability table after any updates.
-///
-/// # Errors
-///
-/// Returns [`Error::Unsupported`] for per-macroblock loop-filter adjustments (those land with the
-/// remaining header features).
+/// returning the header and the working coefficient-probability table after any updates. Reading
+/// cannot fail: the boolean coder yields zero past the end of input rather than erroring, so every
+/// field has a defined value even on a truncated control partition.
 pub fn read_frame_header(
     chunk: &UncompressedChunk,
     dec: &mut BoolDecoder,
-) -> Result<(Vp8FrameHeader, CoeffProbs)> {
+) -> (Vp8FrameHeader, CoeffProbs) {
     let color_space = dec.get_literal(1) as u8;
     let clamp_required = !dec.get_flag();
     let segmentation = if dec.get_flag() {
@@ -355,16 +405,15 @@ pub fn read_frame_header(
     } else {
         Segmentation::default()
     };
+    let simple = dec.get_flag();
+    let level = dec.get_literal(6) as u8;
+    let sharpness = dec.get_literal(3) as u8;
     let loop_filter = LoopFilterParams {
-        simple: dec.get_flag(),
-        level: dec.get_literal(6) as u8,
-        sharpness: dec.get_literal(3) as u8,
+        simple,
+        level,
+        sharpness,
+        deltas: read_mb_lf_adjustments(dec),
     };
-    if dec.get_flag() {
-        return Err(Error::Unsupported(
-            "VP8: loop-filter adjustments not yet supported",
-        ));
-    }
     let token_partitions = 1u8 << dec.get_literal(2);
     let quant = read_quant_indices(dec);
     let refresh_entropy_probs = dec.get_flag();
@@ -392,7 +441,7 @@ pub fn read_frame_header(
         mb_no_skip_coeff,
         prob_skip_false,
     };
-    Ok((header, coeff_probs))
+    (header, coeff_probs)
 }
 
 #[cfg(test)]
@@ -413,6 +462,7 @@ mod tests {
                 simple: false,
                 level: 0,
                 sharpness: 0,
+                ..Default::default()
             },
             token_partitions: 1,
             quant: QuantIndices::default(),
@@ -438,7 +488,7 @@ mod tests {
 
         let end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
         let mut dec = BoolDecoder::new(&stream[UNCOMPRESSED_CHUNK_LEN..end]);
-        let (decoded, probs) = read_frame_header(&chunk, &mut dec).expect("header");
+        let (decoded, probs) = read_frame_header(&chunk, &mut dec);
         assert_eq!(&decoded, header);
         assert_eq!(
             probs, DEFAULT_COEFF_PROBS,
@@ -483,6 +533,7 @@ mod tests {
             simple: true,
             level: 47,
             sharpness: 5,
+            ..Default::default()
         };
         header.color_space = 1;
         header.clamp_required = false;
@@ -525,31 +576,60 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_lf_adjust() {
-        let chunk = UncompressedChunk {
-            is_key_frame: true,
-            version: 0,
-            show_frame: true,
-            first_partition_size: 0,
-            width: 16,
-            height: 16,
-            horizontal_scale: 0,
-            vertical_scale: 0,
+    fn mb_lf_adjustments_round_trip_and_disable() {
+        // The deltas survive a write→read of the `mb_lf_adjustments()` record across the all-zero
+        // (disabled), ref-only, mode-only, and fully-populated cases.
+        for deltas in [
+            LoopFilterDeltas::default(),
+            LoopFilterDeltas {
+                ref_frame: [5, 0, -3, 0],
+                mode: [0; 4],
+            },
+            LoopFilterDeltas {
+                ref_frame: [0; 4],
+                mode: [-8, 0, 0, 7],
+            },
+            LoopFilterDeltas {
+                ref_frame: [1, -2, 3, -4],
+                mode: [10, -20, 30, -31],
+            },
+        ] {
+            let mut enc = BoolEncoder::new();
+            write_mb_lf_adjustments(&mut enc, &deltas);
+            let bytes = enc.finish();
+            let got = read_mb_lf_adjustments(&mut BoolDecoder::new(&bytes));
+            assert_eq!(got, deltas, "deltas {deltas:?} must round-trip");
+        }
+        // A disabled (all-zero) record is a single `0` bit, so it must encode strictly shorter than a
+        // populated one — pinning that the encoder takes the disabled path when there is nothing to send.
+        let enc_len = |d: &LoopFilterDeltas| {
+            let mut e = BoolEncoder::new();
+            write_mb_lf_adjustments(&mut e, d);
+            e.finish().len()
         };
-        // color_space, clamping, segmentation=0, filter_type, level(6), sharpness(3), lf_adj = 1.
-        let mut lf = BoolEncoder::new();
-        lf.put_literal(0, 1);
-        lf.put_flag(true);
-        lf.put_flag(false);
-        lf.put_flag(false);
-        lf.put_literal(0, 6);
-        lf.put_literal(0, 3);
-        lf.put_flag(true);
-        let bytes = lf.finish();
-        assert!(matches!(
-            read_frame_header(&chunk, &mut BoolDecoder::new(&bytes)),
-            Err(Error::Unsupported(_))
-        ));
+        assert!(
+            enc_len(&LoopFilterDeltas::default())
+                < enc_len(&LoopFilterDeltas {
+                    ref_frame: [9; 4],
+                    mode: [9; 4],
+                }),
+            "an all-zero adjustment record must encode shorter than a populated one"
+        );
+    }
+
+    #[test]
+    fn loop_filter_deltas_round_trip_through_frame_header() {
+        let mut header = sample_header();
+        header.loop_filter = LoopFilterParams {
+            simple: false,
+            level: 30,
+            sharpness: 0,
+            deltas: LoopFilterDeltas {
+                ref_frame: [5, 0, -3, 0],
+                mode: [-8, 0, 0, 7],
+            },
+        };
+        roundtrip(&header);
     }
 
     #[test]
@@ -576,7 +656,7 @@ mod tests {
         let mut enc = BoolEncoder::new();
         write_frame_header(&mut enc, &header);
         let bytes = enc.finish();
-        let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes)).unwrap();
+        let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes));
         assert_eq!(decoded.segmentation, header.segmentation);
     }
 }

@@ -47,7 +47,7 @@ the milestone that motivates a row — indicative sequencing, not a contract:
 | `colr` type `rICC`/`prof` (ICC profile) | 23008-12 | ☐ | M4 |
 | `pasp` pixel aspect ratio | 14496-12 | ☐ | M5 |
 | `clap` clean aperture | 23008-12 | ☐ | M5 |
-| `irot` rotation / `imir` mirror | 23008-12 | ✅ (essential transform properties; `AvifEncoder::with_rotation_ccw`/`with_mirror`) | M5 |
+| `irot` rotation / `imir` mirror | 23008-12 | ✅ (essential transform properties; `AvifEncoder::with_rotation`/`with_mirror`) | M5 |
 | `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4 | ☐ | M3 |
 | `prem` premultiplied-alpha association | AVIF §4 | ☐ | M3 |
 | `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ☐ | M3/M5 |
@@ -201,10 +201,10 @@ the milestone that motivates a row — indicative sequencing, not a contract:
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| `gamut_core::Encoder` impl (RGB8 assumption) | gamut-core | ✅ | M0 |
-| `AvifEncoder::encode_rgb8` native API | gamut-avif | ✅ | M0 |
+| `gamut_core::EncodeImage<Rgb8>` impl (typed input) | gamut-core | ✅ | M0 |
+| `AvifEncoder::{new, lossless, lossy, config}` builder API | gamut-avif | ✅ | M0/M1 |
 | RGBA8 input + alpha-plane extraction | gamut-color/avif | ☐ | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ☐ | M2/M4 |
-| quality/speed config + rate control | gamut-avif/av1 | ☐ | M1 |
+| quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
 | `gamut_core::Decoder` (AVIF → pixels) | gamut-avif | ☐ | future |
 | CLI / wasm / ffi wiring for AVIF | gamut-{cli,wasm,ffi} | ☐ | future |

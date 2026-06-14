@@ -35,15 +35,14 @@ writer + AV1 symbol coder), [`gamut-av1`](../gamut-av1) (the AV1 keyframe encode
 use gamut_avif::AvifEncoder;
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 
-let width = 64;
-let height = 64;
-let rgb: Vec<u8> = vec![0; width * height * 3]; // 8-bit interleaved RGB
+let (width, height) = (64u32, 64);
+let rgb: Vec<u8> = vec![0; (width * height * 3) as usize]; // 8-bit interleaved RGB
+let dims = Dimensions { width, height };
+let image = ImageRef::<Rgb8>::new(&rgb, dims).expect("buffer length matches dimensions");
 
-let dims = Dimensions { width: width as u32, height: height as u32 };
-let mut avif = Vec::new();
-AvifEncoder::new()
-    .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).expect("dimensions"), &mut avif)
-    .expect("encode");
+// Lossless by default. `AvifEncoder::lossy(quality)` (0..=100) trades fidelity for a smaller
+// file; `with_rotation` / `with_mirror` add display-orientation transforms.
+let avif = AvifEncoder::new().encode_to_vec(image).expect("encode");
 std::fs::write("out.avif", &avif).unwrap();
 ```
 
@@ -52,16 +51,16 @@ std::fs::write("out.avif", &avif).unwrap();
 
 ## Status
 
-Today (milestone **M0**) the encoder produces **lossless** still images: 8-bit RGB mapped to AV1
-identity-matrix 4:4:4 (so the decoded image is bit-exact to the input), wrapped as a single `av01`
-item. The space/time tradeoff is the obvious one — lossless output is exact but large; it makes no
-attempt to be compact yet, and correctness is the priority. Output is verified bit-exact against
-real decoders (`libavif`, `dav1d`), linked from vendored `third_party/` submodules rather than
-system-installed binaries.
+The encoder produces **lossless** (the default, milestone **M0**) and **lossy** (milestone **M1**,
+via `AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 identity-matrix 4:4:4 and
+wrapped as a single `av01` item. Lossless output is bit-exact to the input; lossy trades fidelity
+for size on a `0..=100` quality scale (higher = closer to the source). `irot`/`imir` display
+orientation is supported. Output is verified against real decoders (`libavif`, `dav1d`), linked from
+vendored `third_party/` submodules rather than system-installed binaries.
 
-Everything beyond M0 — lossy intra (DCT + quantization), alpha, HDR/wide-gamut, 10/12-bit and
-4:2:0/4:2:2, image sequences, and the rest of the AV1/AVIF surface — is tracked, row by row
-against the relevant specs, in [STATUS.md](STATUS.md).
+Everything beyond — alpha, HDR/wide-gamut, 10/12-bit and 4:2:0/4:2:2, ICC/Exif/XMP metadata, image
+sequences, an AVIF decoder, and the rest of the AV1/AVIF surface — is tracked, row by row against
+the relevant specs, in [STATUS.md](STATUS.md).
 
 ## License
 

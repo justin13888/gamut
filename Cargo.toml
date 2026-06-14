@@ -14,6 +14,7 @@ exclude = [
     "tooling/gamut-iptc-oracle",
     "tooling/zlib-oracle",
     "tooling/libpng-oracle",
+    "tooling/exiv2-oracle",
     # Dev-only helper that builds a vendored nasm from a committed source tarball so the
     # oracles above can assemble dav1d's x86 SIMD without a system nasm. Excluded for the
     # same reason: a plain `cargo build` of the shipped crates must never compile it.
@@ -43,6 +44,11 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "fmt"] }
 bitflags = "2.6"
 clap = { version = "4.5", features = ["derive"] }
+# XML reader for gamut-xmp's RDF/XML parser. Used only internally — gamut-xmp's public API (its
+# error type included) exposes no quick-xml types, so this stays an implementation detail that can
+# be bumped without a breaking change. Default features only (UTF-8; the namespace-resolving
+# `NsReader` is in core).
+quick-xml = "0.40"
 wasm-bindgen = "0.2"
 # Decode-only: gamut-cli reads PNG/JPEG/PPM inputs; all encoding stays in gamut crates.
 # `default-features = false` drops image's own avif/webp decoders and rayon.
