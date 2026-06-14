@@ -18,6 +18,25 @@
 //! [`XmpMeta::set_lang_alt`] cover the common cases; [`WellKnownNs`] supplies the standard schema
 //! URIs so you do not hand-write them.
 //!
+//! ```
+//! use gamut_xmp::{WellKnownNs, XmpMeta};
+//!
+//! let dc = WellKnownNs::DublinCore.uri();
+//! let xmp = WellKnownNs::Xmp.uri();
+//!
+//! let mut meta = XmpMeta::new();
+//! meta.set_lang_alt(dc, "title", "x-default", "My Photo");
+//! meta.set_text(xmp, "CreatorTool", "gamut");
+//!
+//! // Serialize to an embeddable packet, then read it back.
+//! let packet = meta.to_packet();
+//! let parsed = XmpMeta::from_packet(&packet)?;
+//!
+//! assert_eq!(parsed.get_lang_alt(dc, "title", "x-default"), Some("My Photo"));
+//! assert_eq!(parsed.get_text(xmp, "CreatorTool"), Some("gamut"));
+//! # Ok::<(), gamut_xmp::XmpError>(())
+//! ```
+//!
 //! # Design notes
 //!
 //! - **Reads more than it writes.** The parser accepts the broad RDF/XML input XMP permits (Part 1
