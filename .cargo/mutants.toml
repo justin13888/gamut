@@ -138,4 +138,11 @@ exclude_re = [
     # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
     # *is* observable and is killed by a test at x = 0.5.)
     'replace < with <= in prophoto_rgb_eotf_standard',
+    # gamut-iptc `IimBlock::parse`: every `|` assembles a big-endian length from disjoint octet
+    # positions — `(hi << 8) | lo` (standard length), `(k_hi << 8) | k_lo` (extended descriptor
+    # width), and `(len << 8) | byte` (extended length accumulator). In each the left operand's low
+    # 8 bits are zero before the OR, so the operands never share a bit and `|` is identical to `^`.
+    # All three `| -> ^` mutations are therefore equivalent. (The `<<`, `>`, and `==`/`>=` mutations
+    # in this function are observable and killed by the extended-descriptor tests.)
+    'replace \| with \^ in IimBlock::parse',
 ]
