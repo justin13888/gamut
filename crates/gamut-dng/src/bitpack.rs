@@ -4,11 +4,14 @@
 //! - **8-bit**: one byte per sample.
 //! - **16-bit**: two bytes per sample, in the file's byte order.
 //! - **other depths** (e.g. 10/12/14-bit): samples packed **MSB-first**, with each *row* padded to
-//!   a byte boundary (rows begin on byte boundaries). The bit packing is byte-order-independent.
+//!   a byte boundary (rows begin on byte boundaries). This sub-byte layout is byte-order-independent
+//!   and is shared with the other TIFF-family formats, so it lives in [`gamut_bitstream`]; only the
+//!   8/16-bit whole-byte paths below depend on the file's byte order.
 //!
 //! `samples_per_row` is `width * samples_per_pixel` (the per-plane samples interleave for
 //! `LinearRaw`, so they pack/unpack identically to a single wider row of values).
 
+use gamut_bitstream::{pack_msb_rows, unpack_msb_rows};
 use gamut_ifd::ByteOrder;
 
 /// Packs `samples` to the uncompressed DNG byte stream at `bits` per sample.
@@ -53,64 +56,10 @@ pub(crate) fn unpack(
     }
 }
 
-/// The byte length of one MSB-packed row of `samples_per_row` samples at `bits` each.
-fn row_bytes(samples_per_row: usize, bits: u16) -> usize {
-    (samples_per_row * usize::from(bits)).div_ceil(8)
-}
-
-/// MSB-first bit packing with byte-aligned rows.
-fn pack_msb_rows(samples: &[u16], bits: u16, samples_per_row: usize) -> Vec<u8> {
-    if samples_per_row == 0 {
-        return Vec::new();
-    }
-    let rows = samples.len() / samples_per_row;
-    let rb = row_bytes(samples_per_row, bits);
-    let mut out = vec![0u8; rb * rows];
-    for r in 0..rows {
-        let base = r * rb;
-        let mut bit = 0usize;
-        for c in 0..samples_per_row {
-            let v = samples[r * samples_per_row + c];
-            for k in (0..bits).rev() {
-                if (v >> k) & 1 == 1 {
-                    out[base + bit / 8] |= 0x80 >> (bit % 8);
-                }
-                bit += 1;
-            }
-        }
-    }
-    out
-}
-
-/// Inverse of [`pack_msb_rows`].
-fn unpack_msb_rows(bytes: &[u8], bits: u16, samples_per_row: usize, rows: usize) -> Vec<u16> {
-    if samples_per_row == 0 {
-        return Vec::new();
-    }
-    let rb = row_bytes(samples_per_row, bits);
-    let mut out = Vec::with_capacity(samples_per_row * rows);
-    for r in 0..rows {
-        let base = r * rb;
-        if base + rb > bytes.len() {
-            break;
-        }
-        let mut bit = 0usize;
-        for _ in 0..samples_per_row {
-            let mut v = 0u16;
-            for _ in 0..bits {
-                let b = (bytes[base + bit / 8] >> (7 - bit % 8)) & 1;
-                v = (v << 1) | u16::from(b);
-                bit += 1;
-            }
-            out.push(v);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gamut_bitstream::row_bytes;
 
     fn roundtrip(bits: u16, spr: usize, rows: usize, order: ByteOrder) {
         let max = ((1u32 << bits) - 1) as u16;
@@ -137,9 +86,23 @@ mod tests {
     }
 
     #[test]
-    fn twelve_bit_packs_two_samples_into_three_bytes() {
-        // 0xABC, 0xDEF -> MSB-first: AB CD EF.
-        let packed = pack(&[0x0ABC, 0x0DEF], 12, 2, ByteOrder::LittleEndian);
-        assert_eq!(packed, vec![0xAB, 0xCD, 0xEF]);
+    fn sixteen_bit_honours_byte_order() {
+        // 0x1234 -> LE bytes 34 12, BE bytes 12 34; round-trips back under the same order.
+        let le = pack(&[0x1234], 16, 1, ByteOrder::LittleEndian);
+        let be = pack(&[0x1234], 16, 1, ByteOrder::BigEndian);
+        assert_eq!(le, vec![0x34, 0x12]);
+        assert_eq!(be, vec![0x12, 0x34]);
+        assert_eq!(unpack(&le, 16, 1, 1, ByteOrder::LittleEndian), vec![0x1234]);
+        assert_eq!(unpack(&be, 16, 1, 1, ByteOrder::BigEndian), vec![0x1234]);
+    }
+
+    #[test]
+    fn eight_bit_narrows_to_one_byte_each() {
+        let packed = pack(&[0x00, 0x7F, 0xFF], 8, 3, ByteOrder::LittleEndian);
+        assert_eq!(packed, vec![0x00, 0x7F, 0xFF]);
+        assert_eq!(
+            unpack(&packed, 8, 3, 1, ByteOrder::LittleEndian),
+            vec![0x00, 0x7F, 0xFF]
+        );
     }
 }

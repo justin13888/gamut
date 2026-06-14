@@ -20,6 +20,8 @@ gamut-core.workspace = true
 # DNG is a TIFF/EP profile: the IFD container (incl. sub-IFD trees and the BigTIFF variant) is the
 # shared gamut-ifd primitive. `bigtiff` is enabled for the DNG 1.7 64-bit-offset variant.
 gamut-ifd = { workspace = true, features = ["bigtiff"] }
+# Shared MSB-first sample bit-packing for sub-byte depths (10/12/14-bit); see `bitpack`.
+gamut-bitstream.workspace = true
 # Pure-Rust zlib/Deflate for the DNG ZIP (Compression = 8) codec; keeps the shipped crate C-free.
 miniz_oxide = "0.8"
 

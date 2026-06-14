@@ -614,6 +614,7 @@ dependencies = [
 name = "gamut-dng"
 version = "0.1.0"
 dependencies = [
+ "gamut-bitstream",
  "gamut-core",
  "gamut-dng-oracle",
  "gamut-ifd",
