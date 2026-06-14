@@ -34,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 pub mod byte_order;
+pub mod coverage;
 pub mod entry;
 pub mod reader;
 pub mod types;
@@ -41,8 +42,11 @@ pub mod value;
 pub mod writer;
 
 pub use byte_order::ByteOrder;
+pub use coverage::{Coverage, CoverageReport, Overlap, Range, UnknownField};
 pub use entry::{Field, Ifd, SubIfd, Variant};
-pub use reader::{TiffFile, read, read_header, read_ifd_at};
+pub use reader::{
+    TiffFile, read, read_header, read_ifd_at, read_ifd_at_with_coverage, read_with_coverage,
+};
 pub use types::FieldType;
 pub use value::Value;
 pub use writer::write;
