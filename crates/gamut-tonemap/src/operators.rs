@@ -1,4 +1,4 @@
-//! Built-in tone-mapping operators implementing [`ToneCurve`](crate::curve::ToneCurve).
+//! Built-in tone-mapping operators implementing [`ToneCurve`].
 //!
 //! Every operator maps non-negative linear-light input to a tone-mapped output. Parameterless
 //! operators ([`Linear`], [`Reinhard`], [`Aces`]) are zero-sized; parameterized operators
@@ -285,8 +285,7 @@ pub struct Drago {
 
 impl Drago {
     /// Create a Drago curve for a scene whose maximum luminance is `world_max`, with the default
-    /// bias ([`DEFAULT_DRAGO_BIAS`](crate::constants::DEFAULT_DRAGO_BIAS)). Tune it with
-    /// [`Drago::with_bias`].
+    /// bias ([`DEFAULT_DRAGO_BIAS`]). Tune it with [`Drago::with_bias`].
     ///
     /// # Errors
     ///
