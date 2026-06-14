@@ -4,12 +4,14 @@
 ///
 /// XMP is, at heart, a set of (namespace, name) → value triples describing one resource. Nested
 /// structure and ordering are carried in the [`XmpValue`] tree, not here.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct XmpMeta {
     /// The top-level properties, each qualified by its namespace.
     pub properties: Vec<XmpProperty>,
 }
 
 /// One XMP property: a namespaced name, its value, and any qualifiers.
+#[derive(Debug, Clone, PartialEq)]
 pub struct XmpProperty {
     /// The XML namespace URI the property name lives in (e.g. the Dublin Core URI for `dc:title`).
     pub namespace: String,
@@ -23,6 +25,7 @@ pub struct XmpProperty {
 }
 
 /// An XMP value: a simple literal, a nested structure, or an array (Adobe XMP Part 1 §6.4–6.5).
+#[derive(Debug, Clone, PartialEq)]
 pub enum XmpValue {
     /// A simple literal value (text; typed values like dates/integers are text in the model).
     Simple(String),
@@ -33,6 +36,7 @@ pub enum XmpValue {
 }
 
 /// The three RDF array kinds XMP uses (Adobe XMP Part 1 §6.5).
+#[derive(Debug, Clone, PartialEq)]
 pub enum XmpArray {
     /// `rdf:Bag` — an unordered array.
     Bag(Vec<XmpValue>),
