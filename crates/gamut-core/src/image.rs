@@ -178,6 +178,18 @@ impl<P: Pixel> ImageBuf<P> {
         &self.data
     }
 
+    /// The raw interleaved samples as a mutable slice, row-major.
+    ///
+    /// Lets a caller edit pixels in place — post-process a decoded image, or refill an existing
+    /// buffer (see [`DecodeImage::decode_image_into`](crate::DecodeImage::decode_image_into)) —
+    /// without the [`ImageBuf::into_samples`] + [`ImageBuf::new`] round-trip. The slice length is
+    /// fixed at `width * height * P::CHANNELS`, so the length invariant is preserved: values may
+    /// change, the count cannot.
+    #[must_use]
+    pub fn as_mut_samples(&mut self) -> &mut [P::Sample] {
+        &mut self.data
+    }
+
     /// Consumes the image, returning its backing sample vector.
     #[must_use]
     pub fn into_samples(self) -> Vec<P::Sample> {
@@ -273,6 +285,25 @@ mod tests {
         assert_eq!(buf.into_samples(), vec![7u8; 12]);
         // Wrong length rejected on the owned path too.
         assert!(ImageBuf::<Rgb8>::new(vec![0u8; 11], dims(2, 2)).is_err());
+    }
+
+    #[test]
+    fn as_mut_samples_edits_in_place() {
+        let mut buf = ImageBuf::<Rgb8>::zeroed(dims(2, 2)).unwrap();
+        // Distinct per-index sentinels (not a uniform fill) so a slice that aliases the wrong
+        // region or length is caught, not just a no-op write.
+        let samples = buf.as_mut_samples();
+        assert_eq!(samples.len(), 2 * 2 * 3);
+        for (i, s) in samples.iter_mut().enumerate() {
+            *s = i as u8;
+        }
+        // The edits are observable through the shared accessor...
+        assert_eq!(buf.as_samples(), &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        // ...and persist into the owned vector (i.e. we mutated the backing storage, not a copy).
+        assert_eq!(
+            buf.into_samples(),
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
     }
 
     #[test]
