@@ -18,5 +18,8 @@ Reference specifications for the `gamut-iptc` crate.
 
 ## Conformance
 
-Differential oracle against **exiv2** (which reads/writes both IIM and IPTC-in-XMP), plus exiftool
-golden data; see [`gamut-iptc/STATUS.md`](../../crates/gamut-iptc/STATUS.md).
+Differential oracle against **exiv2** — a vendored, statically-linked build in
+[`tooling/gamut-iptc-oracle`](../../tooling/gamut-iptc-oracle) (from the `third_party/exiv2`
+submodule). exiv2's XMP toolkit is disabled in that build (no Expat), so it cross-checks the legacy
+IIM dataset stream and the Photoshop IRB; the IPTC-in-XMP property leg is left to the gamut-xmp
+oracle. See [`gamut-iptc/STATUS.md`](../../crates/gamut-iptc/STATUS.md).
