@@ -10,15 +10,15 @@
 //! M2 (also requiring BT.601 YCbCr 4:2:0 in `gamut-color`). The component breakdown lives in
 //! `../STATUS.md` (sections G-N).
 
-pub mod bool_coder;
+// Most users want [`WebpEncoder`](crate::WebpEncoder)/[`WebpDecoder`](crate::WebpDecoder); [`frame`]
+// is the documented low-level entry point (encode/decode a VP8 key frame directly). The remaining
+// spec-section modules that `frame` is assembled from are crate-internal.
 pub mod frame;
-pub mod header;
-pub mod loop_filter;
-pub mod prediction;
-pub mod quant;
-pub mod tokens;
-pub mod transform;
 
-pub use header::{VP8_KEYFRAME_START_CODE, Vp8FrameHeader};
-pub use prediction::{ChromaMode, LumaMode, SubBlockMode};
-pub use tokens::Token;
+pub(crate) mod bool_coder;
+pub(crate) mod header;
+pub(crate) mod loop_filter;
+pub(crate) mod prediction;
+pub(crate) mod quant;
+pub(crate) mod tokens;
+pub(crate) mod transform;

@@ -100,6 +100,7 @@ impl QuantFactors {
 
     /// Derives the factors for a frame with segmentation disabled, using `indices.y_ac` as the base
     /// quantizer index.
+    #[cfg(test)]
     #[must_use]
     pub fn for_frame(indices: &QuantIndices) -> Self {
         Self::new(i32::from(indices.y_ac), indices)

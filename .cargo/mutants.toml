@@ -145,4 +145,35 @@ exclude_re = [
     # All three `| -> ^` mutations are therefore equivalent. (The `<<`, `>`, and `==`/`>=` mutations
     # in this function are observable and killed by the extended-descriptor tests.)
     'replace \| with \^ in IimBlock::parse',
+    # gamut-avif `AvifEncoder::lossless`: a named, intent-revealing alias for the default encoder
+    # (the default mode is already lossless), so its body *is* `Self::default()` and the
+    # `-> Default::default()` replacement is byte-identical — provably equivalent, unkillable. It
+    # exists to pair with `lossy()` and make the call site explicit; `new()` (also `Self::default()`)
+    # generates no such mutant. This is the only mutant the function produces.
+    'replace AvifEncoder::lossless -> Self with Default::default\(\)',
+    # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
+    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75 }`); replacing the body with the
+    # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
+    # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
+    'replace WebpEncoder::lossless -> Self with Default::default\(\)',
+    # gamut-webp `alpha::write_compressed_alph`: `0xff00_0000 | (u32::from(a) << 8)` ORs the opaque
+    # alpha byte (bits 24-31) with the green byte (bits 8-15); the operands are disjoint, so `|` == `^`.
+    'replace \| with \^ in write_compressed_alph',
+    # gamut-webp `transform::fwht4x4` negative-bias correction `x += i32::from(x < 0)`: the only value
+    # where `<` and `<=` disagree is x == 0, where the extra +1 is absorbed by the subsequent
+    # `(x + 3) >> 3` (both yield 0), so the four `< -> <=` mutations are unobservable. (The `+=`→`-=`,
+    # `<`→`>` and `<`→`==` mutants ARE killed: the `[0, -1, 0, …]` golden vector drives the column
+    # intermediates to ±4, where the correct and mutated roundings diverge.)
+    'replace < with <= in fwht4x4',
+    # gamut-webp `BoolDecoder::get_literal`: `v = (v << 1) | u32::from(get_flag())` ORs a flag bit (0
+    # or 1) into a freshly-vacated low bit, so the operands are disjoint and `|` is identical to `^`.
+    'replace \| with \^ in BoolDecoder<.a>::get_literal',
+    # gamut-webp `loop_filter::s2u`: `(c(v) + 128) as u8`. `+ 128` and `- 128` differ by 256, which the
+    # `as u8` truncation discards, so the result is identical — the `+ -> -` mutation is unobservable.
+    'replace \+ with - in s2u',
+    # gamut-webp `alpha::write_alph` returns the smaller of the raw and lossless encodings. At an exact
+    # size tie `<` keeps raw and `<=` would keep compressed, but both decode to identical alpha (the
+    # transform is bijective) and real content never ties, so no non-contrived test can distinguish
+    # them. (`< -> >` / `< -> ==` pick the *larger*/wrong encoding and are caught by the round-trip.)
+    'replace < with <= in write_alph',
 ]

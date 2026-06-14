@@ -12,14 +12,15 @@ pub enum WebpMode {
 
 /// Configuration for a [`WebpEncoder`](crate::WebpEncoder).
 ///
-/// `quality` ranges `0..=100`. For [`WebpMode::Lossy`] it is the usual quality factor (higher =
-/// larger, closer to the source); for [`WebpMode::Lossless`] it is interpreted as an effort level
-/// (higher = smaller output, more work). It is ignored where a mode does not use it.
+/// `quality` ranges `0..=100` and applies only to [`WebpMode::Lossy`], where it is the usual quality
+/// factor (higher = larger output, closer to the source). [`WebpMode::Lossless`] reproduces the
+/// input exactly and currently ignores `quality`; tuning lossless compression density (a possible
+/// future effort knob) is tracked in issue #31.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WebpConfig {
     /// The bitstream mode to encode.
     pub mode: WebpMode,
-    /// Quality / effort, `0..=100`.
+    /// Lossy quality factor, `0..=100` (higher = larger, closer to the source). Ignored for lossless.
     pub quality: u8,
 }
 

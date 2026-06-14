@@ -17,3 +17,13 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
+# RDF/XML lexing for the reader. An internal detail: no quick-xml type appears in this crate's
+# public API (see `XmpError`), so it does not constrain the crate's own SemVer.
+quick-xml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Differential conformance oracle: a vendored, statically-linked exiv2 (with its bundled Adobe
+# XMP Toolkit, XMPCore) built from the `third_party/exiv2` + `third_party/expat` submodules.
+# Dev-only and excluded from the workspace; needs the submodules and a C++ toolchain.
+exiv2-oracle = { path = "../../tooling/exiv2-oracle" }

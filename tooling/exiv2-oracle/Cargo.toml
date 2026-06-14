@@ -1,0 +1,24 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under `[workspace].exclude` in the
+# root manifest, pulled in only as a path `dev-dependency`). It builds exiv2 0.28 from the
+# `third_party/exiv2` submodule (with its bundled Adobe XMP Toolkit, XMPCore) and the
+# `third_party/expat` submodule it depends on, links them behind a small `extern "C"` shim, and lets
+# gamut-xmp's conformance tests round-trip their XMP through the authoritative reference engine.
+#
+# Hermetic: expat is vendored and built from source, so the only system library needed is zlib (as
+# the existing C oracles already require); see `build.rs`.
+[package]
+name = "exiv2-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: round-trips XMP through exiv2's bundled Adobe XMPCore for gamut-xmp's conformance cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares this crate as the sole provider of the native `exiv2` library.
+links = "exiv2"
+
+[lib]
+doctest = false
+
+[build-dependencies]
+cc = "1"

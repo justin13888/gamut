@@ -298,6 +298,81 @@ mod tests {
         assert!(max_err <= 2, "fwht∘iwht error {max_err} exceeds tolerance");
     }
 
+    /// A residue/DC vector with mixed signs, extremes, and no zero rows, so every coefficient
+    /// position and rounding constant of the forward transforms is exercised.
+    const RICH: [i16; 16] = [120, -33, 5, 90, -200, 14, 7, -60, 255, -255, 33, 12, -1, 2, -3, 4];
+
+    #[test]
+    fn fdct_known_vectors() {
+        // Golden vectors pin the libvpx-matched forward DCT arithmetic (every coefficient position
+        // and rounding constant), which the tolerance round-trip alone cannot. The expected values
+        // are the current output, validated end-to-end against libwebp by the frame-level oracle in
+        // tests/oracle.rs (forward → quantize → inverse is bit-exact there).
+        let ramp: [i16; 16] = core::array::from_fn(|i| (i as i16) * 7 - 50);
+        assert_eq!(
+            fdct4x4(&ramp),
+            [20, -62, 0, -4, -249, 0, 0, 0, 0, 0, 0, 0, -17, 0, 0, 0]
+        );
+        assert_eq!(
+            fdct4x4(&RICH),
+            [-5, -1, 225, 240, 41, -77, -55, -111, 189, 16, 17, -183, 235, 229, 567, 408]
+        );
+    }
+
+    #[test]
+    fn fwht_known_vectors() {
+        // Golden vectors pinning the libvpx-matched forward Walsh-Hadamard arithmetic. The negative
+        // and high-magnitude inputs drive the column-pass intermediates negative and across the
+        // odd-residue boundaries, so the per-column negative-bias correction (`x += (x < 0)`) and
+        // its rounding are exercised — what the tolerance round-trip cannot. Expected values are the
+        // current output, validated end-to-end against libwebp by the frame-level oracle.
+        let ramp: [i16; 16] = core::array::from_fn(|i| (i as i16) * 7 - 50);
+        let cases: &[([i16; 16], [i16; 16])] = &[
+            (
+                ramp,
+                [20, -56, 0, -28, -224, 0, 0, 0, 0, 0, 0, 0, -112, 0, 0, 0],
+            ),
+            (
+                RICH,
+                [-4, -93, 225, 221, -52, -48, -268, -300, 189, 85, 17, -163, 232, 40, 502, 378],
+            ),
+            (
+                [-255; 16],
+                [-2039, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                [
+                    -100, -200, -150, -50, -175, -25, -225, -75, -125, -175, -50, -200, -100, -150,
+                    -225, -25,
+                ],
+                [-1024, -25, 175, -125, 25, 25, 25, -175, 25, -75, 275, -25, -25, -125, -75, 325],
+            ),
+            (
+                [255, -255, 200, -200, 150, -150, 100, -100, 50, -50, 25, -25, 75, -75, 125, -125],
+                [0, 0, 80, 980, 0, 0, 130, 430, 0, 0, -70, 330, 0, 0, 80, 80],
+            ),
+            (
+                [-1, -9, -17, -25, -33, -41, -49, -57, -65, -73, -81, -89, -97, -105, -113, -121],
+                [-487, 64, 0, 32, 256, 0, 0, 0, 0, 0, 0, 0, 128, 0, 0, 0],
+            ),
+            (
+                [4, 12, 20, 28, 36, 44, 52, 60, 68, 76, 84, 92, 100, 108, 116, 124],
+                [512, -64, 0, -32, -256, 0, 0, 0, 0, 0, 0, 0, -128, 0, 0, 0],
+            ),
+            // Drives every column-pass intermediate to ±4 — the boundary that distinguishes the
+            // negative-bias correction (`x += (x < 0)`) from its mutants: the values round to 0 only
+            // with the correct rounding, while a flipped `+=`/`<` op yields ±1.
+            ([0, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [0; 16]),
+            (
+                [3, -5, 0, 0, 7, 0, -9, 0, 0, 11, 0, -13, 0, 0, 15, 0],
+                [5, 11, -7, 11, -8, 2, 31, -5, 9, -28, 0, 11, -9, 10, -8, -1],
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(fwht4x4(input), *expected, "fwht mismatch for {input:?}");
+        }
+    }
+
     #[test]
     fn transforms_are_deterministic() {
         let mut b = [0i16; 16];
