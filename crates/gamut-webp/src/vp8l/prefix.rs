@@ -531,6 +531,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canonical_codes_and_decoder_agree_with_unused_symbols() {
+        use crate::vp8l::bit_io::{BitReader, BitWriter};
+        // A complete code (Kraft sum = 1) with gaps (length-0 unused symbols) and several lengths, so
+        // the canonical-code construction's `len > 0 && len <= MAX` filter and the decoder's offset
+        // prefix-sum are exercised. canonical_codes (encoder, LSB-first) and from_code_lengths
+        // (decoder) are independent implementations of the same canonical algorithm, so writing each
+        // symbol's code and reading it back must recover the symbol — pinning both.
+        let lengths: &[u8] = &[2, 0, 1, 3, 0, 3]; // 1/2 + 1/4 + 1/8 + 1/8 = 1; symbols 1 and 4 unused
+        let codes = canonical_codes(lengths);
+        let decoder = PrefixCode::from_code_lengths(lengths).expect("complete code");
+        for (sym, &len) in lengths.iter().enumerate() {
+            if len == 0 {
+                continue;
+            }
+            let mut w = BitWriter::new();
+            w.write_bits(u32::from(codes[sym]), u32::from(len));
+            let bytes = w.finish();
+            assert_eq!(
+                decoder.read_symbol(&mut BitReader::new(&bytes)).unwrap() as usize,
+                sym,
+                "symbol {sym} must round-trip through canonical_codes + from_code_lengths"
+            );
+        }
+    }
+
+    #[test]
     fn reverse_bits_matches_manual() {
         assert_eq!(reverse_bits(0b1, 1), 0b1);
         assert_eq!(reverse_bits(0b10, 2), 0b01);

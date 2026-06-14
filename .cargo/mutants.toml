@@ -274,4 +274,92 @@ exclude_re = [
     #   image both operands are false, so `||`→`&&` cannot change the result (same shape as the av1
     #   loop_restore guard above).
     'replace \|\| with && in inverse_color',
+    # gamut-webp VP8L — more behaviourally-equivalent / free-choice survivors from the deep survey.
+    # value_to_prefix: the `offset` it subtracts only sets bits of `extra` at or above bit
+    # `num_extra_bits`; the sole caller emits exactly `num_extra_bits` low bits, so the offset's
+    # high-bit contribution is masked away and the bitstream is identical (verified: the
+    # lz77_value_prefix_round_trips test passes under each mutant). Line-anchored — the second `<<`/`+`
+    # in the function are killable.
+    'lz77\.rs:205:35: replace << with >>',
+    'lz77\.rs:205:50: replace \+ with \*',
+    'lz77\.rs:209:46: replace - with \+',
+    # distance_code_to_pixel_distance / pixel_distance_to_code clamp `if x < 1 { 1 }`: at x == 1 both
+    # `<` and `<=` yield 1, so `< -> <=` is unobservable. (`< -> ==` in pixel_distance_to_code IS
+    # caught by the width-1 clamp test.)
+    'replace < with <= in distance_code_to_pixel_distance',
+    'lz77\.rs:219:32: replace < with',
+    # predict: arm `0 => 0xff00_0000` is identical to the wildcard `_ => 0xff00_0000`, so deleting it
+    # falls through to the same value. (Location-anchored: cargo-mutants matches match-arm deletions by
+    # location, like field deletions.)
+    'transform\.rs:228:9: delete match arm',
+    # inverse_predictor's `if width == 0 || height == 0` is the same defensive zero-dimension guard as
+    # inverse_color; both operands false for every real image, so `||`->`&&` is inert.
+    'replace \|\| with && in inverse_predictor',
+    # BitWriter::write_bits `if n == 0 || n > 32`: real callers always pass n in 1..=32, where both
+    # operands are false; n == 0 is itself a no-op (zero mask), so `||`->`&&` cannot change output.
+    'replace \|\| with && in BitWriter::write_bits',
+    # GroupAssignment::group_at `if num_groups <= 1 || width == 0`: for a single group the function
+    # returns 0 anyway (the only group), so skipping the early return via `&&` yields the same 0.
+    'replace \|\| with && in GroupAssignment::group_at',
+    # write_normal_prefix_code `if (len as usize) < CODE_LENGTH_CODES`: literal code lengths are 0..=15,
+    # always < 19, so widening to `<=` is unreachable. (The `>`-trim at :497 IS caught.)
+    'prefix\.rs:487:27: replace < with <=',
+    # tokens::encode_block emits the sign bit `level < 0` only where `level != 0`, so `< 0` == `<= 0`.
+    'vp8/tokens\.rs:565:32: replace < with <=',
+    # forward_color_indexing reassembles disjoint bytes -> `|` == `^`.
+    'replace \| with \^ in forward_color_indexing',
+    # encode_spatial writes `TRANSFORM_SIZE_BITS - 2` (= 4 - 2 = 2); since the const is 4, `- 2` and
+    # `/ 2` are the identical value 2 (same shape as the av1 ec_partition justification).
+    'encoder\.rs:147:48: replace - with /',
+    'encoder\.rs:152:48: replace - with /',
+    # gamut-webp VP8L — more correctness-preserving free choices (issue #31 encoder heuristics).
+    # Token::green_symbol is, per its doc, "a cheap per-block signature for grouping" — it feeds only
+    # assign_groups, so any value just regroups blocks.
+    'in Token::green_symbol',
+    # tokenize :458 `if cache_bits > 0` chooses whether to use the optional colour cache; both
+    # branches emit a valid, self-consistently-signalled stream.
+    'encoder\.rs:458:35: replace > with',
+    # build_length_limited_lengths :348 `h > 0` counts used symbols; overcounting only yields a
+    # valid-but-suboptimal length-limited tree (a malformed tree fails the round-trip).
+    'prefix\.rs:348:48: replace > with >=',
+    # write_main_image meta-prefix signalling (:330 single-vs-multi group, :332 the block-size field):
+    # both paths round-trip self-consistently with the decoder; the grouping itself is free (issue #31).
+    'encoder\.rs:330:26: replace > with >=',
+    'encoder\.rs:332:41: replace - with /',
+    # forward_predictor / forward_color block geometry (`1 << size_bits`, the sub-image index): a
+    # mutated block size or write index just makes the encoder choose predictor/colour elements the
+    # decoder reads back identically (the per-pixel residual/colour math is asymmetric and IS caught).
+    'transform\.rs:341:49: replace << with >>',
+    'transform\.rs:342:51: replace << with >>',
+    'transform\.rs:348:26: replace \* with /',
+    'transform\.rs:462:49: replace << with >>',
+    'transform\.rs:463:51: replace << with >>',
+    'transform\.rs:464:29: replace << with >>',
+    # gamut-webp VP8 frame — sharpness field-deletion (equivalent: sharpness=0=Default). Location-only
+    # anchor: cargo-mutants matches field-deletion mutants by location, not the description text.
+    'frame\.rs:299:13:',
+    # gamut-webp VP8L prefix/predictor — equivalents confirmed by deep analysis.
+    # from_code_lengths: `[0; MAX_CODE_LENGTH + 2]` only sizes a scratch array; `+ 2`->`* 2` makes it
+    # larger, and the extra entries are never indexed (offsets[len+1], len<=MAX), so output is identical.
+    'prefix\.rs:124:52: replace \+ with \*',
+    # canonical_codes: the `len > 0 && len <= MAX` filter counts/assigns only used symbols. Counting a
+    # length-0 symbol adds to bl_count[0], whose contribution lands at bit >= the code length and is
+    # masked off by reverse_bits(_, len); assigning a code to an unused symbol is never emitted. So the
+    # `>`->`>=` and `&&`->`||` mutants on both copies are unobservable (verified: the
+    # canonical_codes_and_decoder_agree round-trip passes under them).
+    'prefix\.rs:317:16: replace > with >=',
+    'prefix\.rs:317:20: replace && with \|\|',
+    'prefix\.rs:329:16: replace > with >=',
+    'prefix\.rs:329:20: replace && with \|\|',
+    # predicted_value rightmost-column TR: at x == width-1, `img[idx - width + 1]` equals
+    # `img[y*width]` (both index the current row's first pixel), so the `x + 1 < width` guard's two
+    # branches return the same pixel there and differ nowhere else — the `+`/`<` mutants are inert.
+    'transform\.rs:288:23: replace \+ with',
+    'transform\.rs:288:27: replace < with <=',
+    # write_normal_prefix_code :497 trailing-zero trim of the code-length-code count (min 4 per spec):
+    # `>`->`<`/`==` skip trimming, emitting all 19 lengths — a valid, larger stream the decoder reads
+    # back by the written count (free choice). `>`->`>=` would over-trim only for a degenerate
+    # histogram with <=3 distinct code-length symbols, which the length-limited builder never produces
+    # for a real alphabet, so it is unreachable.
+    'prefix\.rs:497:28: replace > with',
 ]
