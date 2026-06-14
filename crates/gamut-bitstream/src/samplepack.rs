@@ -61,7 +61,9 @@ pub fn unpack_msb_rows(bytes: &[u8], bits: u16, samples_per_row: usize, rows: us
             let mut v = 0u16;
             for _ in 0..bits {
                 let b = (bytes[base + bit / 8] >> (7 - bit % 8)) & 1;
-                v = (v << 1) | u16::from(b);
+                // `+`, not `|`: `v << 1` always has a clear low bit, so `|`/`^`/`+` agree here — but
+                // `+` is the form that stays mutation-testable (a `|`->`^` swap would be equivalent).
+                v = (v << 1) + u16::from(b);
                 bit += 1;
             }
             out.push(v);
