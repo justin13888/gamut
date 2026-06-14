@@ -22,7 +22,7 @@ pub fn in_gamut(rgb: [f64; 3]) -> bool {
         && rgb[2] <= 1.0
 }
 
-/// Hue-preserving soft gamut clamp of an OKLab colour into the sRGB gamut.
+/// Hue-preserving soft gamut clamp of an OKLab colour `[L, a, b]` into the sRGB gamut.
 ///
 /// An in-gamut input is returned unchanged. Otherwise the colour is projected
 /// toward the achromatic anchor `(L + l_blend·(0.5 − L), 0, 0)` — which is always
@@ -31,13 +31,29 @@ pub fn in_gamut(rgb: [f64; 3]) -> bool {
 /// so hue is preserved; lightness drifts toward 0.5 in proportion to how far out
 /// of gamut the colour was (`l_blend = 0` keeps `L` fixed).
 ///
-/// Precondition: `l` should be in `[0, 1]`.
+/// `lab` matches the `[L, a, b]` layout returned by [`linear_rgb_to_oklab`].
+/// Precondition: `lab[0]` (L) should be in `[0, 1]`.
+///
+/// [`linear_rgb_to_oklab`]: crate::oklab::linear_rgb_to_oklab
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::gamut_map::{in_gamut, soft_gamut_clamp};
+/// use gamut_color::oklab::oklab_to_linear_srgb;
+/// // An over-saturated OKLab colour is pulled onto the sRGB gamut surface...
+/// let clamped = soft_gamut_clamp([0.5, 0.4, 0.0], 0.0);
+/// assert!(in_gamut(oklab_to_linear_srgb(clamped)));
+/// // ...while an already in-gamut colour is returned unchanged.
+/// assert_eq!(soft_gamut_clamp([0.5, 0.0, 0.0], 0.0), [0.5, 0.0, 0.0]);
+/// ```
 #[must_use]
-pub fn soft_gamut_clamp(l: f64, a: f64, b: f64, l_blend: f64) -> [f64; 3] {
-    if in_gamut(oklab_to_linear_srgb([l, a, b])) {
-        return [l, a, b];
+pub fn soft_gamut_clamp(lab: [f64; 3], l_blend: f64) -> [f64; 3] {
+    if in_gamut(oklab_to_linear_srgb(lab)) {
+        return lab;
     }
 
+    let [l, a, b] = lab;
     let anchor_l = l + l_blend * (0.5 - l);
 
     let mut lo = 0.0_f64;
@@ -73,7 +89,7 @@ mod tests {
     #[test]
     fn in_gamut_color_passes_through() {
         for blend in [0.0, 0.35, 0.5] {
-            assert_eq!(soft_gamut_clamp(0.5, 0.0, 0.0, blend), [0.5, 0.0, 0.0]);
+            assert_eq!(soft_gamut_clamp([0.5, 0.0, 0.0], blend), [0.5, 0.0, 0.0]);
         }
     }
 
@@ -81,7 +97,7 @@ mod tests {
     fn blend_zero_preserves_lightness_and_hue() {
         let (l, a, b) = (0.5, 0.4, 0.0);
         assert!(!in_gamut(oklab_to_linear_srgb([l, a, b])));
-        let [lo, ao, bo] = soft_gamut_clamp(l, a, b, 0.0);
+        let [lo, ao, bo] = soft_gamut_clamp([l, a, b], 0.0);
         assert_eq!(lo, l, "L unchanged at blend 0");
         assert!(ao.abs() <= a.abs() + 1e-12, "chroma must not grow");
         assert!(bo.abs() <= 1e-12);
@@ -91,7 +107,7 @@ mod tests {
     #[test]
     fn preserves_hue_angle() {
         let (l, a, b) = (0.5, 0.3, -0.2);
-        let [_, ao, bo] = soft_gamut_clamp(l, a, b, 0.35);
+        let [_, ao, bo] = soft_gamut_clamp([l, a, b], 0.35);
         // a and b shrink by the same factor → cross product (hue) stays zero.
         assert!((a * bo - b * ao).abs() < 1e-12);
         assert!(ao * a >= 0.0 && bo * b >= 0.0);
@@ -143,7 +159,7 @@ mod tests {
             ([0.9, 0.0, 0.0, 0.5], [0.9, 0.0, 0.0]),
         ];
         for &([l, a, b, blend], want) in cases {
-            let got = soft_gamut_clamp(l, a, b, blend);
+            let got = soft_gamut_clamp([l, a, b], blend);
             for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
                 assert!(
                     (g - w).abs() < 1e-6,

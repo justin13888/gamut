@@ -16,14 +16,26 @@
 
 use crate::cicp::TransferCharacteristics;
 
-/// SDR diffuse-white reference luminance (cd/m²), per ITU-R BT.2408.
-pub const SDR_REFERENCE_WHITE_NITS: f64 = 203.0;
+/// HDR reference white — the graphics / diffuse-white luminance (cd/m²), per ITU-R BT.2408. The
+/// BT.2020 PQ path tone-maps relative to this level. Named to match the same-value constant in the
+/// `gamut-tonemap` crate (this crate keeps an `f64` copy for its Tier-1 encoder-exact path).
+pub const HDR_REFERENCE_WHITE_NITS: f64 = 203.0;
 /// PQ peak luminance (cd/m²), per SMPTE ST 2084.
 pub const PQ_PEAK_NITS: f64 = 10_000.0;
 
 // --- sRGB (IEC 61966-2-1) --------------------------------------------------
 
 /// sRGB EOTF: gamma-encoded signal → linear light, on `[0, 1]`.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::srgb_eotf;
+/// assert_eq!(srgb_eotf(0.0), 0.0);
+/// assert!((srgb_eotf(1.0) - 1.0).abs() < 1e-12);
+/// // sRGB 0.5 is ~0.214 in linear light.
+/// assert!((srgb_eotf(0.5) - 0.214).abs() < 1e-3);
+/// ```
 #[must_use]
 pub fn srgb_eotf(x: f64) -> f64 {
     if x <= 0.04045 {
@@ -99,9 +111,14 @@ pub fn pq_eotf(x: f64) -> f64 {
 
 /// BT.2020 **encoder-exact** path: PQ inverse EOTF → nits → Reinhard tone map to
 /// SDR `[0, 1)` relative to the 203-nit reference white (`L / (1 + L)`).
+///
+/// The `L / (1 + L)` step is the basic Reinhard operator. For general-purpose tone-curve operators
+/// on linear light (Reinhard, extended Reinhard, …) see the separate `gamut-tonemap` crate; this is
+/// the `f64` curve baked into the BT.2020 transfer so a metrics tool can predict the encoder's exact
+/// output (`gamut-tonemap` is the `f32` general toolkit, this is the Tier-1 encoder-exact path).
 #[must_use]
 pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
-    let l = pq_eotf(x) / SDR_REFERENCE_WHITE_NITS;
+    let l = pq_eotf(x) / HDR_REFERENCE_WHITE_NITS;
     l / (1.0 + l)
 }
 
@@ -222,10 +239,32 @@ mod tests {
         }
     }
 
+    /// Independent oracle for [`pq_eotf`]: the BT.2100 Table 4 *forward* PQ OETF (luminance →
+    /// signal) is a different formula arrangement than the inverse `pq_eotf` implements, so
+    /// composing them must recover the input. A transcription slip in the inverse (swapped
+    /// `c2`/`c3`, a wrong reciprocal) would break the round-trip even though both share the
+    /// constants. (`bt2020_pq_full_signal_near_one` was dropped: the reference-formula test above
+    /// already pins `bt2020_pq_to_sdr(1.0)` exactly.)
     #[test]
-    fn bt2020_pq_full_signal_near_one() {
-        let max = bt2020_pq_to_sdr(1.0);
-        assert!(max > 0.9 && max < 1.0, "PQ(1.0) → {max}");
+    fn pq_eotf_inverts_bt2100_forward_oetf() {
+        // E' = ((c1 + c2·Y^m1) / (1 + c3·Y^m1))^m2, with Y = L / 10000.
+        fn pq_oetf(nits: f64) -> f64 {
+            const M1: f64 = 0.1593017578125;
+            const M2: f64 = 78.84375;
+            const C1: f64 = 0.8359375;
+            const C2: f64 = 18.8515625;
+            const C3: f64 = 18.6875;
+            let yp = (nits / PQ_PEAK_NITS).powf(M1);
+            ((C1 + C2 * yp) / (1.0 + C3 * yp)).powf(M2)
+        }
+        for &nits in &[0.0, 1.0, 10.0, 100.0, 203.0, 1000.0, 4000.0, 10000.0] {
+            let back = pq_eotf(pq_oetf(nits));
+            let tol = 1e-9 * nits.max(1.0);
+            assert!(
+                (back - nits).abs() <= tol,
+                "pq round-trip at {nits} nits → {back}"
+            );
+        }
     }
 
     #[test]

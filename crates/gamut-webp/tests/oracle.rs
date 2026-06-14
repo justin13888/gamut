@@ -690,7 +690,7 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
     // libwebp sums-then-converts (a rounding-order difference). A regression to full-range — the bug
     // this fix closed — would shift luma by ~17 and fail the `assert_eq` below.
     use common::libwebp_rgba_to_yuv;
-    use gamut_color::{Bt601Range, Yuv420};
+    use gamut_color::{ColorRange, Yuv420};
 
     let chroma_max = |a: &[u8], b: &[u8]| {
         a.iter()
@@ -702,7 +702,7 @@ fn gamut_rgb_to_yuv_matches_libwebp_limited_range() {
     for &(w, h) in DIMENSIONS.iter().chain(&[(128u32, 96u32), (300, 70)]) {
         let rgba = photo_like_rgba(w, h, 0x5eed);
         let gamut =
-            Yuv420::from_rgb8(&rgba_to_rgb(&rgba), w, h, Bt601Range::Limited).expect("from_rgb8");
+            Yuv420::from_rgb8(&rgba_to_rgb(&rgba), w, h, ColorRange::Limited).expect("from_rgb8");
         let lib = libwebp_rgba_to_yuv(&rgba, w, h);
         assert_eq!(
             gamut.y(),

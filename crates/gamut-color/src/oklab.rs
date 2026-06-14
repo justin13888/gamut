@@ -105,6 +105,17 @@ impl Gamut {
 }
 
 /// Convert linear RGB to OKLab using the source `gamut`'s `M1` matrix.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::Gamut;
+/// use gamut_color::oklab::linear_rgb_to_oklab;
+/// // White maps to L≈1 with near-zero chroma.
+/// let lab = linear_rgb_to_oklab([1.0, 1.0, 1.0], Gamut::Srgb);
+/// assert!((lab[0] - 1.0).abs() < 1e-6);
+/// assert!(lab[1].abs() < 1e-6 && lab[2].abs() < 1e-6);
+/// ```
 #[must_use]
 pub fn linear_rgb_to_oklab(rgb: [f64; 3], gamut: Gamut) -> [f64; 3] {
     let lms = matvec3(gamut.m1_matrix(), rgb);
@@ -114,6 +125,11 @@ pub fn linear_rgb_to_oklab(rgb: [f64; 3], gamut: Gamut) -> [f64; 3] {
 }
 
 /// Convert OKLab to **linear sRGB** (always sRGB, via `M1⁻¹[sRGB]`).
+///
+/// Intentionally sRGB-only: this is the inverse [`gamut_map`](crate::gamut_map) uses to test sRGB
+/// gamut membership, and sRGB is the encode target. The forward [`linear_rgb_to_oklab`] takes a
+/// [`Gamut`] because source pixels arrive in many gamuts; the reverse only needs the one target, so
+/// per-gamut inverses are deferred until a use case needs them.
 #[must_use]
 pub fn oklab_to_linear_srgb(lab: [f64; 3]) -> [f64; 3] {
     let c = matvec3(&M2_INV, lab);

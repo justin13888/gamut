@@ -31,6 +31,16 @@ pub struct Planar8 {
 impl Planar8 {
     /// Maps an interleaved 8-bit RGB buffer to identity planes (`Y=G, U=B, V=R`).
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_color::Planar8;
+    /// let rgb = [10, 20, 30, 40, 50, 60]; // two RGB pixels
+    /// let planes = Planar8::from_rgb8_identity(&rgb, 2, 1).expect("valid length");
+    /// assert_eq!(planes.plane(0), &[20u8, 50]); // Y carries G
+    /// assert_eq!(planes.to_rgb8_identity(), rgb); // round-trips
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`.
