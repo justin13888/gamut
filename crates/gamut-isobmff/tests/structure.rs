@@ -84,6 +84,18 @@ fn base_props() -> Vec<Property> {
 }
 
 #[test]
+fn meta_contains_the_required_child_boxes() {
+    let f = write(&file(vec![item(1, base_props(), vec![1, 2, 3, 4])]));
+    for fourcc in [
+        b"hdlr", b"pitm", b"iloc", b"iinf", b"infe", b"iprp", b"ipco", b"ipma",
+    ] {
+        assert!(count(&f, fourcc) >= 1, "missing box {fourcc:?}");
+    }
+    // The handler must be a picture handler.
+    assert_eq!(&box_body(&f, b"hdlr")[8..12], b"pict");
+}
+
+#[test]
 fn top_level_layout_is_ftyp_then_meta_then_mdat() {
     let f = write(&file(vec![item(1, base_props(), vec![1, 2, 3, 4])]));
     assert_eq!(&f[4..8], b"ftyp");

@@ -133,3 +133,29 @@ fn ipma_property_index_zero_errors() {
     let e = read(&f).unwrap_err();
     assert!(e.to_string().contains("index out of range"), "{e}");
 }
+
+#[test]
+fn open_ended_box_is_unsupported() {
+    // A top-level box with size 0 (extends to EOF) is rejected — this crate never writes one.
+    let e = read(&[0, 0, 0, 0, b'f', b't', b'y', b'p']).unwrap_err();
+    assert!(e.to_string().contains("open-ended"), "{e}");
+}
+
+#[test]
+fn non_picture_handler_is_unsupported() {
+    let mut f = valid();
+    let p = find(&f, b"pict"); // the hdlr handler_type
+    f[p..p + 4].copy_from_slice(b"vide");
+    let e = read(&f).unwrap_err();
+    assert!(e.to_string().contains("non-picture handler"), "{e}");
+}
+
+#[test]
+fn ipma_16bit_indices_are_unsupported() {
+    let mut f = valid();
+    let p = find(&f, b"ipma");
+    // ipma body = version(1) + flags(3); the low flags byte is at body offset 3 (absolute p+4+3).
+    f[p + 7] |= 1; // flags & 1 ⇒ 16-bit property indices
+    let e = read(&f).unwrap_err();
+    assert!(e.to_string().contains("16-bit property indices"), "{e}");
+}

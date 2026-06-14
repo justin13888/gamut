@@ -174,12 +174,13 @@ fn parse_meta(body: &[u8]) -> Result<Meta> {
     })
 }
 
-/// Reads a `FullBox` header, returning `(version, flags)`.
-fn full_box_header(r: &mut BoxReader) -> Result<(u8, u32)> {
+/// Reads a `FullBox` header, returning the version and skipping the 3 flags bytes. No box in the
+/// still-image profile reads flags except `ipma` (which reads its single relevant bit inline), so
+/// the flags are not decoded here.
+fn full_box_header(r: &mut BoxReader) -> Result<u8> {
     let version = r.u8()?;
-    let f = r.take(3)?;
-    let flags = (u32::from(f[0]) << 16) | (u32::from(f[1]) << 8) | u32::from(f[2]);
-    Ok((version, flags))
+    r.take(3)?; // flags (unused in this profile)
+    Ok(version)
 }
 
 /// `hdlr`: require `handler_type == "pict"` (HEIF image).
@@ -197,8 +198,7 @@ fn parse_hdlr(body: &[u8]) -> Result<()> {
 /// `pitm` v0: the primary item id.
 fn parse_pitm(body: &[u8]) -> Result<u16> {
     let mut r = BoxReader::new(body);
-    let (version, _) = full_box_header(&mut r)?;
-    if version != 0 {
+    if full_box_header(&mut r)? != 0 {
         return Err(Error::Unsupported(
             "ISOBMFF: pitm version (only v0 supported)",
         ));
@@ -209,8 +209,7 @@ fn parse_pitm(body: &[u8]) -> Result<u16> {
 /// `iloc` v0: one extent per item, `construction_method` 0.
 fn parse_iloc(body: &[u8]) -> Result<Vec<IlocEntry>> {
     let mut r = BoxReader::new(body);
-    let (version, _) = full_box_header(&mut r)?;
-    if version != 0 {
+    if full_box_header(&mut r)? != 0 {
         return Err(Error::Unsupported(
             "ISOBMFF: iloc version (only v0 supported)",
         ));
@@ -225,11 +224,10 @@ fn parse_iloc(body: &[u8]) -> Result<Vec<IlocEntry>> {
     if base & 0xf0 != 0 {
         return Err(Error::Unsupported("ISOBMFF: iloc base_offset_size != 0"));
     }
+    // `item_count` is untrusted; do not pre-allocate from it — the bounded reads below fail on
+    // truncation, so a malformed count errors after a bounded number of iterations.
     let item_count = r.u16()?;
-    if usize::from(item_count) > r.remaining() {
-        return Err(Error::InvalidInput("ISOBMFF: iloc truncated"));
-    }
-    let mut entries = Vec::with_capacity(usize::from(item_count));
+    let mut entries = Vec::new();
     for _ in 0..item_count {
         let id = r.u16()?;
         let _data_reference_index = r.u16()?;
@@ -247,17 +245,13 @@ fn parse_iloc(body: &[u8]) -> Result<Vec<IlocEntry>> {
 /// `iinf` v0 + `infe` v2 children.
 fn parse_iinf(body: &[u8]) -> Result<Vec<InfeEntry>> {
     let mut r = BoxReader::new(body);
-    let (version, _) = full_box_header(&mut r)?;
-    if version != 0 {
+    if full_box_header(&mut r)? != 0 {
         return Err(Error::Unsupported(
             "ISOBMFF: iinf version (only v0 supported)",
         ));
     }
     let entry_count = r.u16()?;
-    if usize::from(entry_count) > r.remaining() {
-        return Err(Error::InvalidInput("ISOBMFF: iinf truncated"));
-    }
-    let mut entries = Vec::with_capacity(usize::from(entry_count));
+    let mut entries = Vec::new();
     for _ in 0..entry_count {
         let b = r
             .next_box()?
@@ -273,8 +267,7 @@ fn parse_iinf(body: &[u8]) -> Result<Vec<InfeEntry>> {
 /// `infe` v2: item id, type, name.
 fn parse_infe(body: &[u8]) -> Result<InfeEntry> {
     let mut r = BoxReader::new(body);
-    let (version, _) = full_box_header(&mut r)?;
-    if version != 2 {
+    if full_box_header(&mut r)? != 2 {
         return Err(Error::Unsupported(
             "ISOBMFF: infe version (only v2 supported)",
         ));
@@ -345,10 +338,7 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
             let mut r = BoxReader::new(body);
             full_box_header(&mut r)?;
             let count = r.u8()?;
-            if usize::from(count) > r.remaining() {
-                return Err(Error::InvalidInput("ISOBMFF: pixi truncated"));
-            }
-            let mut bits_per_channel = Vec::with_capacity(usize::from(count));
+            let mut bits_per_channel = Vec::new();
             for _ in 0..count {
                 bits_per_channel.push(r.u8()?);
             }
@@ -398,29 +388,30 @@ fn parse_property(ty: [u8; 4], body: &[u8]) -> Result<PropertyKind> {
 /// `ipma` v0 (single-byte associations): each item id → its `(property_index, essential)` list.
 fn parse_ipma(body: &[u8]) -> Result<ItemAssociations> {
     let mut r = BoxReader::new(body);
-    let (version, flags) = full_box_header(&mut r)?;
+    // `ipma` is the one box whose flags matter: `flags & 1` selects 16-bit property indices, which
+    // this profile does not support. Read version + the flags byte directly (the upper two flag
+    // bytes carry no meaning here).
+    let version = r.u8()?;
+    let _flags_hi = r.take(2)?;
+    let flags_lo = r.u8()?;
     if version != 0 {
         return Err(Error::Unsupported(
             "ISOBMFF: ipma version (only v0 supported)",
         ));
     }
-    if flags & 1 == 1 {
+    if flags_lo & 1 == 1 {
         return Err(Error::Unsupported(
             "ISOBMFF: ipma 16-bit property indices (flags & 1)",
         ));
     }
+    // `entry_count`/`association_count` are untrusted; do not pre-allocate from them — the bounded
+    // reads below fail on truncation after a bounded number of iterations.
     let entry_count = r.u32()?;
-    if entry_count as usize > r.remaining() {
-        return Err(Error::InvalidInput("ISOBMFF: ipma truncated"));
-    }
-    let mut out = Vec::with_capacity(entry_count as usize);
+    let mut out = Vec::new();
     for _ in 0..entry_count {
         let item_id = r.u16()?;
         let assoc_count = r.u8()?;
-        if usize::from(assoc_count) > r.remaining() {
-            return Err(Error::InvalidInput("ISOBMFF: ipma truncated"));
-        }
-        let mut row = Vec::with_capacity(usize::from(assoc_count));
+        let mut row = Vec::new();
         for _ in 0..assoc_count {
             let byte = r.u8()?;
             row.push((u16::from(byte & 0x7f), (byte & 0x80) != 0));

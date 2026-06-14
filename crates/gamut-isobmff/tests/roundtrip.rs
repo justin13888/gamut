@@ -149,6 +149,30 @@ fn codec_configuration_with_non_trivial_data() {
 }
 
 #[test]
+fn colr_full_range_false() {
+    // The full_range flag (bit 7 of the last colr byte) must round-trip when clear, not just set.
+    let mut item = av01_item(1, vec![3; 9]);
+    item.properties[3] = Property {
+        essential: false,
+        kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+            colour_primaries: 9,
+            transfer_characteristics: 16,
+            matrix_coefficients: 9,
+            full_range: false,
+        })),
+    };
+    assert_roundtrips(&single(item));
+}
+
+#[test]
+fn non_default_primary_item_id() {
+    // A primary_item_id other than 1 must be preserved (the item id and pitm agree).
+    let img = single(av01_item(7, vec![1, 2, 3, 4, 5]));
+    assert_eq!(img.primary_item_id, 7);
+    assert_roundtrips(&img);
+}
+
+#[test]
 fn two_items_sharing_a_property() {
     // Two items whose ispe/pixi/colr are identical exercise the ipco dedup → ipma re-expand path.
     let img = IsoBmffImage {
