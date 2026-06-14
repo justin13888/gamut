@@ -112,10 +112,12 @@ pub trait DecodeImage<P: Pixel> {
     /// a feature that is not implemented or cannot be presented as `P`.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<P>>;
 
-    /// Decode `data` into `dst`, reusing its allocation where possible.
+    /// Decode `data` into `dst`, reusing its allocation when possible.
     ///
-    /// The default forwards to [`DecodeImage::decode_image`]; a codec may override it to refill
-    /// `dst`'s backing storage in place across repeated calls.
+    /// The default implementation always replaces the buffer (`*dst = self.decode_image(data)?`). A
+    /// codec may override it to reuse `dst`'s sample storage — via [`ImageBuf::as_mut_samples`] —
+    /// across repeated calls whose decoded dimensions match `dst`'s, falling back to replacement
+    /// otherwise. Either way `dst` holds the decoded image on success.
     ///
     /// # Errors
     ///
