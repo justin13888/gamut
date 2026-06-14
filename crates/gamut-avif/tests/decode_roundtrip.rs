@@ -87,9 +87,11 @@ fn lossless_roundtrip_via_libavif() {
 
 /// Mirrors gamut-avif's documented quality→`base_q_idx` mapping (see `references/avif/README.md`):
 /// the test needs the exact `base_q_idx` that [`AvifEncoder::lossy`] selects, so it can compute the
-/// matching AV1 reconstruction to compare the decoded pixels against.
+/// matching AV1 reconstruction to compare the decoded pixels against. The production mapping clamps
+/// out-of-range quality; the tests only feed `0..=100`, so this asserts that precondition instead.
 fn quality_to_quant(quality: u8) -> u8 {
-    (((100 - u32::from(quality.min(100))) * 255 / 100) as u8).max(1)
+    debug_assert!(quality <= 100, "quality must be 0..=100, got {quality}");
+    (((100 - u32::from(quality)) * 255 / 100) as u8).max(1)
 }
 
 #[test]
