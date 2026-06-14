@@ -192,6 +192,9 @@ mod tests {
     fn rejects_non_utf8_body() {
         let mut bytes = b"<rdf:RDF>".to_vec();
         bytes.push(0xFF); // invalid UTF-8 in the body
-        assert!(matches!(XmpPacket::scan(&bytes), Err(XmpError::Encoding(_))));
+        assert!(matches!(
+            XmpPacket::scan(&bytes),
+            Err(XmpError::Encoding(_))
+        ));
     }
 }

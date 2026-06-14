@@ -136,7 +136,11 @@ impl XmpItem {
     pub fn lang_text(lang: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             value: XmpValue::Simple(text.into()),
-            qualifiers: vec![XmpProperty::new(XML_NAMESPACE, "lang", XmpValue::Simple(lang.into()))],
+            qualifiers: vec![XmpProperty::new(
+                XML_NAMESPACE,
+                "lang",
+                XmpValue::Simple(lang.into()),
+            )],
         }
     }
 
@@ -317,7 +321,9 @@ mod tests {
         meta.set(XmpProperty::new(
             DC,
             "subject",
-            XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(XmpValue::Simple("x".into()))])),
+            XmpValue::Array(XmpArray::Bag(vec![XmpItem::new(XmpValue::Simple(
+                "x".into(),
+            ))])),
         ));
         assert_eq!(meta.get_text(DC, "subject"), None);
     }

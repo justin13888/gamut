@@ -407,7 +407,10 @@ fn is_lang(qualifier: &XmpProperty) -> bool {
 
 /// The `xml:lang` value among a qualifier list, if any.
 fn lang_of(qualifiers: &[XmpProperty]) -> Option<&str> {
-    qualifiers.iter().find(|q| is_lang(q)).and_then(XmpProperty::text)
+    qualifiers
+        .iter()
+        .find(|q| is_lang(q))
+        .and_then(XmpProperty::text)
 }
 
 /// Pushes `count` indentation spaces (one per nesting level).
@@ -459,7 +462,11 @@ mod tests {
 
     #[test]
     fn simple_value_is_element_text() {
-        let out = body(vec![XmpProperty::new(XMP, "Rating", XmpValue::Simple("3".into()))]);
+        let out = body(vec![XmpProperty::new(
+            XMP,
+            "Rating",
+            XmpValue::Simple("3".into()),
+        )]);
         assert_eq!(
             out,
             "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \
@@ -512,7 +519,11 @@ mod tests {
         let out = body(vec![XmpProperty::new(
             XMP,
             "Thumb",
-            XmpValue::Structured(vec![XmpProperty::new(XMP, "w", XmpValue::Simple("9".into()))]),
+            XmpValue::Structured(vec![XmpProperty::new(
+                XMP,
+                "w",
+                XmpValue::Simple("9".into()),
+            )]),
         )]);
         let expected = "  <xmp:Thumb>\n   <rdf:Description>\n    <xmp:w>9</xmp:w>\n   \
                         </rdf:Description>\n  </xmp:Thumb>";
@@ -525,7 +536,11 @@ mod tests {
             namespace: DC.into(),
             name: "rights".into(),
             value: XmpValue::Simple("(c) Me".into()),
-            qualifiers: vec![XmpProperty::new(XMP, "owner", XmpValue::Simple("Me".into()))],
+            qualifiers: vec![XmpProperty::new(
+                XMP,
+                "owner",
+                XmpValue::Simple("Me".into()),
+            )],
         };
         let out = body(vec![prop]);
         let expected = "  <dc:rights>\n   <rdf:Description>\n    <rdf:value>(c) Me</rdf:value>\n    \
@@ -571,13 +586,20 @@ mod tests {
     #[test]
     fn empty_meta_self_closes_description() {
         let out = body(vec![]);
-        assert!(out.contains("<rdf:Description rdf:about=\"\"/>"), "got:\n{out}");
+        assert!(
+            out.contains("<rdf:Description rdf:about=\"\"/>"),
+            "got:\n{out}"
+        );
     }
 
     #[test]
     fn packet_has_header_body_and_trailer() {
         let meta = XmpMeta {
-            properties: vec![XmpProperty::new(XMP, "Rating", XmpValue::Simple("3".into()))],
+            properties: vec![XmpProperty::new(
+                XMP,
+                "Rating",
+                XmpValue::Simple("3".into()),
+            )],
         };
         let packet = String::from_utf8(meta.to_packet()).unwrap();
         assert!(packet.starts_with("<?xpacket begin=\"\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n"));
@@ -597,8 +619,14 @@ mod tests {
 
     #[test]
     fn writable_writer_emits_requested_padding() {
-        let padded = XmpWriter::new().padding(2000).serialize(&XmpMeta::new()).len();
-        let bare = XmpWriter::new().writable(false).serialize(&XmpMeta::new()).len();
+        let padded = XmpWriter::new()
+            .padding(2000)
+            .serialize(&XmpMeta::new())
+            .len();
+        let bare = XmpWriter::new()
+            .writable(false)
+            .serialize(&XmpMeta::new())
+            .len();
         // The writable packet is larger by at least the requested padding.
         assert!(padded >= bare + 2000, "padded {padded} vs bare {bare}");
     }

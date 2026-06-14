@@ -17,7 +17,7 @@ use quick_xml::name::{LocalName, QName, ResolveResult};
 
 use crate::error::{Result, XmpError};
 use crate::model::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
-use crate::namespace::{RDF_NAMESPACE, XMPMETA_NAMESPACE, XML_NAMESPACE};
+use crate::namespace::{RDF_NAMESPACE, XML_NAMESPACE, XMPMETA_NAMESPACE};
 use crate::packet::split_packet;
 
 impl XmpMeta {
@@ -258,10 +258,9 @@ fn parse_description(desc: &Element, meta: &mut XmpMeta) -> Result<()> {
 
 /// Parses a property element into an [`XmpProperty`].
 fn parse_property(elem: &Element) -> Result<XmpProperty> {
-    let namespace = elem
-        .ns
-        .clone()
-        .ok_or_else(|| XmpError::Prohibited(format!("property <{}> has no namespace", elem.local)))?;
+    let namespace = elem.ns.clone().ok_or_else(|| {
+        XmpError::Prohibited(format!("property <{}> has no namespace", elem.local))
+    })?;
     let (value, qualifiers) = parse_value(elem)?;
     Ok(XmpProperty {
         namespace,
@@ -277,7 +276,10 @@ fn parse_value(elem: &Element) -> Result<(XmpValue, Vec<XmpProperty>)> {
     // 1. `rdf:parseType` — only "Resource" (the concise struct form, §7.9.2.3) is allowed.
     if let Some(parse_type) = attr(elem, RDF_NAMESPACE, "parseType") {
         if parse_type == "Resource" {
-            return Ok((XmpValue::Structured(struct_fields(elem)?), lang_qualifier(elem)));
+            return Ok((
+                XmpValue::Structured(struct_fields(elem)?),
+                lang_qualifier(elem),
+            ));
         }
         return Err(XmpError::UnsupportedForm(format!(
             "rdf:parseType=\"{parse_type}\" on <{}> (only \"Resource\" is allowed)",
@@ -327,10 +329,16 @@ fn parse_value(elem: &Element) -> Result<(XmpValue, Vec<XmpProperty>)> {
 /// an `rdf:Description` holding an `rdf:value` — a value with general qualifiers (Part 1 §7.8).
 fn parse_node(node: &Element) -> Result<(XmpValue, Vec<XmpProperty>)> {
     if is(node, RDF_NAMESPACE, "Bag") {
-        return Ok((XmpValue::Array(XmpArray::Bag(parse_items(node)?)), Vec::new()));
+        return Ok((
+            XmpValue::Array(XmpArray::Bag(parse_items(node)?)),
+            Vec::new(),
+        ));
     }
     if is(node, RDF_NAMESPACE, "Seq") {
-        return Ok((XmpValue::Array(XmpArray::Seq(parse_items(node)?)), Vec::new()));
+        return Ok((
+            XmpValue::Array(XmpArray::Seq(parse_items(node)?)),
+            Vec::new(),
+        ));
     }
     if is(node, RDF_NAMESPACE, "Alt") {
         let items = parse_items(node)?;
@@ -560,12 +568,10 @@ mod tests {
 
     #[test]
     fn parses_language_alternative() {
-        let meta = parse(&rdf(
-            "<dc:title><rdf:Alt>\
+        let meta = parse(&rdf("<dc:title><rdf:Alt>\
              <rdf:li xml:lang=\"x-default\">Hi</rdf:li>\
              <rdf:li xml:lang=\"fr\">Salut</rdf:li>\
-             </rdf:Alt></dc:title>",
-        ));
+             </rdf:Alt></dc:title>"));
         assert_eq!(meta.get_lang_alt(DC, "title", "x-default"), Some("Hi"));
         assert_eq!(meta.get_lang_alt(DC, "title", "fr"), Some("Salut"));
     }
@@ -588,12 +594,10 @@ mod tests {
 
     #[test]
     fn parses_general_qualifier_form() {
-        let meta = parse(&rdf(
-            "<dc:rights><rdf:Description>\
+        let meta = parse(&rdf("<dc:rights><rdf:Description>\
              <rdf:value>(c) Me</rdf:value>\
              <xmp:owner>Me</xmp:owner>\
-             </rdf:Description></dc:rights>",
-        ));
+             </rdf:Description></dc:rights>"));
         let prop = meta.get(DC, "rights").unwrap();
         assert_eq!(prop.value, XmpValue::Simple("(c) Me".into()));
         assert_eq!(prop.qualifiers.len(), 1);
@@ -619,18 +623,18 @@ mod tests {
 
     #[test]
     fn rejects_disallowed_parse_type() {
-        let err = XmpMeta::from_packet(
-            rdf("<dc:x rdf:parseType=\"Literal\"><b/></dc:x>").as_bytes(),
-        )
-        .unwrap_err();
+        let err =
+            XmpMeta::from_packet(rdf("<dc:x rdf:parseType=\"Literal\"><b/></dc:x>").as_bytes())
+                .unwrap_err();
         assert!(matches!(err, XmpError::UnsupportedForm(_)), "got {err:?}");
     }
 
     #[test]
     fn rejects_rdf_numbered_array_items() {
-        let err =
-            XmpMeta::from_packet(rdf("<dc:x><rdf:Bag><rdf:_1>a</rdf:_1></rdf:Bag></dc:x>").as_bytes())
-                .unwrap_err();
+        let err = XmpMeta::from_packet(
+            rdf("<dc:x><rdf:Bag><rdf:_1>a</rdf:_1></rdf:Bag></dc:x>").as_bytes(),
+        )
+        .unwrap_err();
         assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
     }
 

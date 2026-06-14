@@ -70,9 +70,17 @@ fn canonical_serialization_is_idempotent() {
             XmpProperty::new("http://www.w3.org/XML/1998/namespace", "lang", simple("en")),
         ],
     };
-    for meta in [rich_meta(), XmpMeta { properties: vec![messy] }, XmpMeta::new()] {
+    for meta in [
+        rich_meta(),
+        XmpMeta {
+            properties: vec![messy],
+        },
+        XmpMeta::new(),
+    ] {
         let once = meta.to_rdf();
-        let twice = XmpMeta::from_packet(once.as_bytes()).expect("reparse").to_rdf();
+        let twice = XmpMeta::from_packet(once.as_bytes())
+            .expect("reparse")
+            .to_rdf();
         assert_eq!(once, twice, "canonical form must be a fixed point");
     }
 }

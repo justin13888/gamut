@@ -165,11 +165,17 @@ mod tests {
     #[test]
     fn uri_and_prefix_are_exact_and_round_trip() {
         // Exact strings — a typo in any URI/prefix is a survived mutant otherwise.
-        assert_eq!(WellKnownNs::DublinCore.uri(), "http://purl.org/dc/elements/1.1/");
+        assert_eq!(
+            WellKnownNs::DublinCore.uri(),
+            "http://purl.org/dc/elements/1.1/"
+        );
         assert_eq!(WellKnownNs::DublinCore.prefix(), "dc");
         assert_eq!(WellKnownNs::Xmp.uri(), "http://ns.adobe.com/xap/1.0/");
         assert_eq!(WellKnownNs::Iptc4XmpCore.prefix(), "Iptc4xmpCore");
-        assert_eq!(WellKnownNs::XmpDynamicMedia.uri(), "http://ns.adobe.com/xmp/1.0/DynamicMedia/");
+        assert_eq!(
+            WellKnownNs::XmpDynamicMedia.uri(),
+            "http://ns.adobe.com/xmp/1.0/DynamicMedia/"
+        );
         assert_eq!(WellKnownNs::Dimensions.prefix(), "stDim");
         assert_eq!(WellKnownNs::Pdf.uri(), "http://ns.adobe.com/pdf/1.3/");
 
