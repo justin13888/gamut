@@ -13,7 +13,8 @@
 //! - [`operators`] — the built-in curves: [`Reinhard`](operators::Reinhard) and
 //!   [`ReinhardExtended`](operators::ReinhardExtended), plus the [`Linear`](operators::Linear)
 //!   passthrough and [`Clamp`](operators::Clamp).
-//! - [`constants`] — reference white-luminance levels and per-operator parameter defaults.
+//! - [`constants`] — per-operator parameter defaults. (Absolute reference luminances in nits live
+//!   in [`gamut_core::luminance`].)
 //!
 //! # Inputs and the HDR-to-SDR pipeline
 //!
