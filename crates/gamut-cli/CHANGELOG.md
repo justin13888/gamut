@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/justin13888/gamut/compare/gamut-cli-v0.2.0...gamut-cli-v0.2.1) - 2026-06-14
+
+### Added
+
+- *(cli)* show resolved gamut library version in gamut -V
+
+### Other
+
+- Merge branch 'master' into feat/png
+
 ## [0.2.0](https://github.com/justin13888/gamut/compare/gamut-cli-v0.1.0...gamut-cli-v0.2.0) - 2026-06-12
 
 ### Added

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/justin13888/gamut/compare/gamut-av1-v0.3.0...gamut-av1-v0.3.1) - 2026-06-14
+
+### Other
+
+- Merge branch 'master' into test/mutants-av1
+- *(av1)* close mutation gaps in tile.rs (block coding + entropy)
+- *(av1)* close mutation gaps in filter.rs (in-loop filters)
+- *(av1)* close mutation gaps in quant, transform, headers, encoder, cdf
+
 ## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-av1-v0.2.0...gamut-av1-v0.3.0) - 2026-06-12
 
 ### Added

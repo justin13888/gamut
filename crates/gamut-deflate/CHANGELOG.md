@@ -1,0 +1,19 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0](https://github.com/justin13888/gamut/releases/tag/gamut-deflate-v0.1.0) - 2026-06-14
+
+### Added
+
+- *(deflate)* add zopfli-style optimal parse (Level::Best)
+- *(deflate)* add cost-driven block splitting (Level::Best)
+- *(deflate)* add dynamic-Huffman blocks and lazy matching (Level::Default)
+- *(deflate)* add LZ77 matching and length/distance symbol coding
+- *(deflate)* add fixed-Huffman blocks with stored-vs-fixed selection
+- *(deflate)* scaffold gamut-deflate with stored blocks + zlib oracle
