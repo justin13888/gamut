@@ -349,14 +349,14 @@ mod tests {
 
     #[test]
     fn parametric_type3_has_linear_toe() {
-        // g=1, a=1, b=0, c=0.5, d=0.5.
+        // g=1, a=1, b=0.0625, c=0.5, d=0.5 (a non-zero b pins the `a·x + b` term).
         let curve = ParametricCurve {
             function_type: 3,
-            params: vec![s15(1.0), s15(1.0), s15(0.0), s15(0.5), s15(0.5)],
+            params: vec![s15(1.0), s15(1.0), s15(0.0625), s15(0.5), s15(0.5)],
         };
-        assert!(close(curve.eval(0.75), 0.75)); // (a·x+b)^g
+        assert!(close(curve.eval(0.75), 0.8125)); // (a·x + b)^g
         assert!(close(curve.eval(0.25), 0.125)); // c·x
-        assert!(close(curve.eval(0.5), 0.5)); // at the threshold x == d, the power segment applies
+        assert!(close(curve.eval(0.5), 0.5625)); // at the threshold x == d, the power segment applies
     }
 
     #[test]
@@ -370,21 +370,21 @@ mod tests {
 
     #[test]
     fn parametric_type4_has_offset_linear_toe() {
-        // g=1, a=1, b=0, c=0.5, d=0.5, e=0.125, f=0.25 (exactly representable).
+        // g=1, a=1, b=0.0625, c=0.5, d=0.5, e=0.125, f=0.25 (a non-zero b pins `a·x + b`).
         let curve = ParametricCurve {
             function_type: 4,
             params: vec![
                 s15(1.0),
                 s15(1.0),
-                s15(0.0),
+                s15(0.0625),
                 s15(0.5),
                 s15(0.5),
                 s15(0.125),
                 s15(0.25),
             ],
         };
-        assert!(close(curve.eval(0.75), 0.875)); // x + e
+        assert!(close(curve.eval(0.75), 0.9375)); // (a·x + b)^g + e
         assert!(close(curve.eval(0.25), 0.375)); // c·x + f
-        assert!(close(curve.eval(0.5), 0.625)); // at x == d, the power+e segment applies
+        assert!(close(curve.eval(0.5), 0.6875)); // at x == d, the power+e segment applies
     }
 }
