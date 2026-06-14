@@ -35,10 +35,12 @@ fn cfa_roundtrips_through_gamut() {
 
 #[test]
 fn linear_raw_roundtrips_through_gamut() {
-    // Cover sub-byte depths too: with 3 planes the packed-row width is `width * planes`, so a wrong
-    // samples-per-row would mis-pack the (bit-packed) sub-byte cases.
+    // Cover sub-byte depths too: with 3 planes the packed-row width is `width * planes`. The *odd*
+    // width 47 makes `width * planes * bits` not a whole number of bytes at 10/12/14-bit, so each
+    // row is padded — a wrong samples-per-row then mis-packs the stream (an even width would pad
+    // identically either way and hide the bug).
     for bits in [10u16, 12, 14, 16] {
-        let raw = common::sample_linear_raw(48, 36, bits);
+        let raw = common::sample_linear_raw(47, 36, bits);
         let mut dng = Vec::new();
         DngEncoder::new()
             .encode(&raw, &common::sample_profile(), &mut dng)
