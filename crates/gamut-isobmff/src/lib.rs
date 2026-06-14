@@ -45,4 +45,4 @@ mod writer;
 
 pub use model::{ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind};
 pub use reader::read;
-pub use writer::{Av1cConfig, AvifStillImage, ImageTransform, write, write_avif_still};
+pub use writer::write;

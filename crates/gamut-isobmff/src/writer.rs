@@ -7,13 +7,13 @@
 //! (ISOBMFF) and ISO/IEC 23008-12 (HEIF); see `references/isobmff`.
 
 use crate::boxes::BoxBuilder;
-use crate::model::{ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind};
+use crate::model::{ColourInformation, IsoBmffImage, Item, PropertyKind};
 
 /// Serialises `image` into a complete ISOBMFF file (`ftyp` + `meta` + `mdat`).
 ///
 /// Offsets and lengths are written as 32-bit fields, so the file (and each item payload) must be
-/// below 4 GiB — always true for a still image. `read(&write(&image))` reproduces `image` for any
-/// value this crate can construct.
+/// below 4 GiB — always true for a still image. [`read`](crate::read)`(&write(&image))` reproduces
+/// `image` for any value this crate can construct.
 #[must_use]
 pub fn write(image: &IsoBmffImage) -> Vec<u8> {
     let mut bb = BoxBuilder::new();
@@ -226,137 +226,4 @@ fn serialize_property(kind: &PropertyKind) -> Vec<u8> {
         }
     }
     bb.into_vec()
-}
-
-// ---------------------------------------------------------------------------------------------
-// Transitional AVIF-still shim — superseded by `gamut-avif` building the model directly. Removed
-// once the consumer migrates (issue #184). Kept here so the workspace stays green across the
-// migration commits.
-// ---------------------------------------------------------------------------------------------
-
-/// The AV1 configuration record stamped into the `av1C` property (AV1-ISOBMFF v1.3.0 §2.3.3/§2.3.4).
-#[derive(Debug, Clone, Copy)]
-pub struct Av1cConfig {
-    /// `seq_profile` (3 bits).
-    pub seq_profile: u8,
-    /// `seq_level_idx[0]` (5 bits).
-    pub seq_level_idx_0: u8,
-    /// `seq_tier[0]` (1 bit).
-    pub seq_tier_0: u8,
-    /// `high_bitdepth` flag (1 bit).
-    pub high_bitdepth: bool,
-    /// `twelve_bit` flag (1 bit).
-    pub twelve_bit: bool,
-    /// `mono_chrome` flag (1 bit).
-    pub monochrome: bool,
-    /// `subsampling_x` (1 bit).
-    pub chroma_subsampling_x: u8,
-    /// `subsampling_y` (1 bit).
-    pub chroma_subsampling_y: u8,
-    /// `chroma_sample_position` (2 bits).
-    pub chroma_sample_position: u8,
-}
-
-/// Image-orientation transform properties (`irot`/`imir`, ISO/IEC 23008-12 §6.5.10/§6.5.12).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ImageTransform {
-    /// `irot` rotation in 90° steps (`angle`, 0..=3), anti-clockwise. `0` writes no `irot` box.
-    pub rotation_ccw: u8,
-    /// `imir` mirror axis: `Some(0)` vertical (left↔right), `Some(1)` horizontal (top↔bottom).
-    /// `None` writes no `imir` box.
-    pub mirror_axis: Option<u8>,
-}
-
-/// Everything needed to serialise one AVIF still image.
-#[derive(Debug, Clone)]
-pub struct AvifStillImage<'a> {
-    /// Image width in pixels (written to `ispe`).
-    pub width: u32,
-    /// Image height in pixels (written to `ispe`).
-    pub height: u32,
-    /// Bits per channel (written to `pixi`).
-    pub bit_depth: u8,
-    /// Number of channels (written to `pixi`).
-    pub num_channels: u8,
-    /// AV1 configuration record for `av1C`.
-    pub av1c: Av1cConfig,
-    /// nclx colour information for `colr`.
-    pub nclx: NclxColr,
-    /// Optional `irot`/`imir` display-orientation transforms (default: none).
-    pub transform: ImageTransform,
-    /// The AV1 temporal unit (sequence header OBU + frame OBU) placed in `mdat`.
-    pub item_data: &'a [u8],
-}
-
-/// The 4-byte `AV1CodecConfigurationRecord` body (empty `configOBUs`).
-fn av1c_record(c: &Av1cConfig) -> [u8; 4] {
-    [
-        0x81, // marker = 1, version = 1
-        (c.seq_profile << 5) + (c.seq_level_idx_0 & 0x1f),
-        (c.seq_tier_0 << 7)
-            + (u8::from(c.high_bitdepth) << 6)
-            + (u8::from(c.twelve_bit) << 5)
-            + (u8::from(c.monochrome) << 4)
-            + (c.chroma_subsampling_x << 3)
-            + (c.chroma_subsampling_y << 2)
-            + (c.chroma_sample_position & 0x3),
-        0x00, // reserved(3)=0, initial_presentation_delay_present(1)=0, reserved(4)=0
-    ]
-}
-
-/// Serialises `img` into a complete AVIF file. Transitional wrapper over [`write`].
-#[must_use]
-pub fn write_avif_still(img: &AvifStillImage) -> Vec<u8> {
-    let mut properties = vec![
-        Property {
-            essential: true,
-            kind: PropertyKind::CodecConfiguration {
-                kind: *b"av1C",
-                data: av1c_record(&img.av1c).to_vec(),
-            },
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::ImageSpatialExtents {
-                width: img.width,
-                height: img.height,
-            },
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::PixelInformation {
-                bits_per_channel: vec![img.bit_depth; img.num_channels as usize],
-            },
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::Colour(ColourInformation::Nclx(img.nclx)),
-        },
-    ];
-    if img.transform.rotation_ccw != 0 {
-        properties.push(Property {
-            essential: true,
-            kind: PropertyKind::Rotation(img.transform.rotation_ccw),
-        });
-    }
-    if let Some(axis) = img.transform.mirror_axis {
-        properties.push(Property {
-            essential: true,
-            kind: PropertyKind::Mirror(axis),
-        });
-    }
-    let image = IsoBmffImage {
-        major_brand: *b"avif",
-        minor_version: 0,
-        compatible_brands: vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
-        primary_item_id: 1,
-        items: vec![Item {
-            id: 1,
-            item_type: *b"av01",
-            name: String::new(),
-            properties,
-            payload: img.item_data.to_vec(),
-        }],
-    };
-    write(&image)
 }

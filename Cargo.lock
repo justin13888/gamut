@@ -566,7 +566,6 @@ name = "gamut-isobmff"
 version = "0.3.0"
 dependencies = [
  "divan",
- "gamut-bitstream",
  "gamut-core",
 ]
 
