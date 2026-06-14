@@ -99,7 +99,6 @@ impl WebpDecoder {
                         None => vec![0xffu8; w * h],
                     };
                     let rgb = yuv.to_rgb8(ColorRange::Limited);
-                    out.reserve(w * h * 4);
                     for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
                         out.extend_from_slice(&[px[0], px[1], px[2], a]);
                     }
@@ -263,5 +262,41 @@ mod tests {
     fn rejects_non_riff_data() {
         let err: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(b"not a webp");
         assert!(matches!(err, Err(Error::InvalidInput(_))));
+    }
+
+    #[test]
+    fn decodes_lossless_container_to_rgba8() {
+        // A VP8L file decoded to RGBA carries the stream's own alpha (opaque here). Pins the VP8L arm
+        // of the RGBA decoder, which deleting would route to "no bitstream".
+        let file = solid_lossless_webp(2, 2, 0x12, 0x34, 0x56);
+        let got: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).unwrap();
+        assert_eq!(got.dimensions(), Dimensions { width: 2, height: 2 });
+        assert_eq!(
+            got.as_samples(),
+            [0x12, 0x34, 0x56, 0xff].repeat(4).as_slice()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_vp8x_header() {
+        // A VP8X chunk with a too-short payload (a valid one is 10 bytes) is malformed: the decoder
+        // must parse-and-reject it, not silently skip to the inner bitstream. Pins the VP8X arm of
+        // both the RGB and RGBA paths.
+        let inner = solid_lossless_webp(2, 2, 1, 2, 3);
+        let vp8l = RiffReader::new(&inner)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .payload
+            .to_vec();
+        let mut w = RiffWriter::new();
+        w.write_chunk(FourCc::VP8X, &[0u8; 4]);
+        w.write_chunk(FourCc::VP8L, &vp8l);
+        let file = w.finish();
+        let rgb: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
+        assert!(rgb.is_err(), "RGB decode must reject a malformed VP8X header");
+        let rgba: Result<ImageBuf<Rgba8>> = WebpDecoder::new().decode_image(&file);
+        assert!(rgba.is_err(), "RGBA decode must reject a malformed VP8X header");
     }
 }

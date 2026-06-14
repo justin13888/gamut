@@ -237,11 +237,6 @@ pub fn subblock_predict(mode: usize, above: &[u8; 8], left: &[u8; 4], corner: u8
         ax[3],
         ax[4],
     ];
-    // B_DC_PRED (and any out-of-range mode): the no-edge-exception average of the eight neighbors.
-    if mode == B_DC_PRED || mode > B_HU_PRED {
-        let v = ((ax[1] + ax[2] + ax[3] + ax[4] + lx[1] + lx[2] + lx[3] + lx[4] + 4) >> 3) as u8;
-        return [v; 16];
-    }
     let a3 = |j: usize| avg3(ax[j], ax[j + 1], ax[j + 2]); // avg3p(A + j)
     let a2 = |j: usize| avg2(ax[j + 1], ax[j + 2]); // avg2p(A + j)
     let l3 = |r: usize| avg3(lx[r], lx[r + 1], lx[r + 2]); // avg3p(L + r)
@@ -518,6 +513,35 @@ pub const KF_BMODE_PROB: [[[Prob; 9]; NUM_BMODES]; NUM_BMODES] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subblock_predict_known_vectors() {
+        // Absolute per-mode output for fixed neighbors pins every B_PRED submode's averaging
+        // arithmetic — including B_DC_PRED, which the encoder's content-driven mode selection rarely
+        // chooses (so the differential oracle never exercises it). above = A[0..8], left = L[0..4],
+        // corner P = 60.
+        let above = [10u8, 40, 70, 100, 130, 160, 190, 220];
+        let left = [20u8, 50, 80, 110];
+        let expected: [[u8; 16]; NUM_BMODES] = [
+            [60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60],
+            [0, 0, 30, 60, 0, 30, 60, 90, 30, 60, 90, 120, 60, 90, 120, 150],
+            [30, 40, 70, 100, 30, 40, 70, 100, 30, 40, 70, 100, 30, 40, 70, 100],
+            [38, 38, 38, 38, 50, 50, 50, 50, 80, 80, 80, 80, 103, 103, 103, 103],
+            [40, 70, 100, 130, 70, 100, 130, 160, 100, 130, 160, 190, 130, 160, 190, 213],
+            [38, 30, 40, 70, 38, 38, 30, 40, 50, 38, 38, 30, 80, 50, 38, 38],
+            [35, 25, 55, 85, 38, 30, 40, 70, 38, 35, 25, 55, 50, 38, 30, 40],
+            [25, 55, 85, 115, 40, 70, 100, 130, 55, 85, 115, 160, 70, 100, 130, 190],
+            [40, 38, 30, 40, 35, 38, 40, 38, 65, 50, 35, 38, 95, 80, 65, 50],
+            [35, 50, 65, 80, 65, 80, 95, 103, 95, 103, 110, 110, 110, 110, 110, 110],
+        ];
+        for (mode, want) in expected.iter().enumerate() {
+            assert_eq!(
+                subblock_predict(mode, &above, &left, 60),
+                *want,
+                "subblock_predict mode {mode} mismatch"
+            );
+        }
+    }
 
     #[test]
     fn dc_top_left_is_128() {
