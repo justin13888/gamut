@@ -1,11 +1,13 @@
 //! The AVIF still-image encoder: RGB → identity planes → AV1 temporal unit → ISOBMFF container.
 
-use gamut_av1::{Av1StillConfig, EncodedStill, encode_still_intra, encode_still_lossless_identity};
+use gamut_av1::{Av1StillConfig, EncodedStill, encode_still_intra};
 use gamut_color::Planar8;
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind, write,
 };
+
+use crate::config::{AvifConfig, AvifMode};
 
 /// The encoder's display-orientation transforms, applied by a reader at display time (the stored
 /// pixels are unchanged). Maps to the `irot`/`imir` item properties.
@@ -19,32 +21,56 @@ struct ImageTransform {
 
 /// Encodes images to AVIF still images.
 ///
-/// 8-bit RGB in, mapped to AV1 identity-matrix 4:4:4. By default the encode is **lossless**;
-/// [`AvifEncoder::with_qindex`] selects a lossy quantizer (`base_q_idx`, `1..=255`). Use
-/// Encode via the [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) trait, taking a typed
-/// [`ImageRef`]. [`AvifEncoder::with_rotation_ccw`] /
-/// [`AvifEncoder::with_mirror`] add `irot`/`imir` display-orientation transforms.
+/// 8-bit RGB in, mapped to AV1 identity-matrix 4:4:4 planes. Construct with [`AvifEncoder::new`]
+/// (lossless), [`AvifEncoder::lossless`], or [`AvifEncoder::lossy`], then encode via the
+/// [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) trait, taking a typed [`ImageRef`].
+/// [`AvifEncoder::with_rotation_ccw`] / [`AvifEncoder::with_mirror`] add `irot`/`imir`
+/// display-orientation transforms.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AvifEncoder {
-    /// AV1 `base_q_idx`: `0` is lossless, `1..=255` is lossy intra (higher = more quantization).
-    qindex: u8,
+    /// Lossless/lossy mode and the lossy quality factor.
+    config: AvifConfig,
     /// Optional `irot`/`imir` display-orientation transforms.
     transform: ImageTransform,
 }
 
 impl AvifEncoder {
-    /// Creates an encoder (lossless by default).
+    /// Creates an encoder with the default configuration (lossless).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Sets the AV1 quantizer (`base_q_idx`): `0` is lossless, `1..=255` is lossy intra (higher
-    /// quantizes more aggressively for smaller files). Returns the updated encoder for chaining.
+    /// Creates an encoder that produces a **lossless** still image — the decoded output is bit-exact
+    /// to the input.
     #[must_use]
-    pub fn with_qindex(mut self, qindex: u8) -> Self {
-        self.qindex = qindex;
-        self
+    pub fn lossless() -> Self {
+        Self {
+            config: AvifConfig {
+                mode: AvifMode::Lossless,
+                ..AvifConfig::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Creates an encoder that produces a **lossy** still image at the given `quality` (`0..=100`,
+    /// higher = larger output, closer to the source; values above `100` are clamped).
+    #[must_use]
+    pub fn lossy(quality: u8) -> Self {
+        Self {
+            config: AvifConfig {
+                mode: AvifMode::Lossy,
+                quality,
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Returns the encoder's configuration.
+    #[must_use]
+    pub fn config(&self) -> AvifConfig {
+        self.config
     }
 
     /// Adds an `irot` display rotation of `quarter_turns × 90°` applied anti-clockwise (the value is
@@ -150,16 +176,27 @@ fn build_avif(still: &EncodedStill, dims: Dimensions, transform: ImageTransform)
     write(&image)
 }
 
+/// Maps a `0..=100` quality to an AV1 `base_q_idx` (`1..=255`); higher quality → lower index (less
+/// quantization). `base_q_idx 0` (the lossless WHT path) is reserved for [`AvifEncoder::lossless`],
+/// so the lossy path stays on the DCT pipeline — `lossy(100)` is the finest lossy quantizer, not
+/// lossless. Finer rate control (target size/metric) is future work (see `STATUS.md`).
+fn quality_to_quant(quality: u8) -> u8 {
+    let q = u32::from(quality.min(100));
+    (((100 - q) * 255 / 100) as u8).max(1)
+}
+
 impl EncodeImage<Rgb8> for AvifEncoder {
     /// Maps the RGB image to AV1 identity 4:4:4 planes and wraps the temporal unit in an AVIF file.
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
         let planes = Planar8::from_rgb8_identity_view(image);
-        let still = if self.qindex == 0 {
-            encode_still_lossless_identity(&planes)?
-        } else {
-            encode_still_intra(&planes, self.qindex)?.0
+        // base_q_idx 0 is the lossless path; encode_still_intra(_, 0) is exactly what
+        // encode_still_lossless_identity does, so a single call covers both modes.
+        let base_q_idx = match self.config.mode {
+            AvifMode::Lossless => 0,
+            AvifMode::Lossy => quality_to_quant(self.config.quality),
         };
+        let still = encode_still_intra(&planes, base_q_idx)?.0;
         let file = build_avif(&still, dims, self.transform);
         out.extend_from_slice(&file);
         Ok(file.len())
@@ -226,15 +263,14 @@ mod tests {
     #[test]
     fn lossy_produces_valid_avif_container() {
         // A lossy quantizer still produces the same well-formed container; only the mdat payload
-        // (the AV1 OBUs) differs. Exercises the with_qindex path across quantizer contexts.
+        // (the AV1 OBUs) differs. Exercises the lossy path across quality settings.
         let mut rgb = vec![0u8; 48 * 32 * 3];
         for (i, b) in rgb.iter_mut().enumerate() {
             *b = (i * 29) as u8;
         }
-        for q in [4u8, 40, 200] {
+        for quality in [90u8, 50, 10] {
             let mut out = Vec::new();
-            let n = AvifEncoder::new()
-                .with_qindex(q)
+            let n = AvifEncoder::lossy(quality)
                 .encode_image(
                     ImageRef::<Rgb8>::new(
                         &rgb,

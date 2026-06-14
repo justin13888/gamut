@@ -85,18 +85,25 @@ fn lossless_roundtrip_via_libavif() {
     }
 }
 
+/// Mirrors gamut-avif's documented quality→`base_q_idx` mapping (see `references/avif/README.md`):
+/// the test needs the exact `base_q_idx` that [`AvifEncoder::lossy`] selects, so it can compute the
+/// matching AV1 reconstruction to compare the decoded pixels against.
+fn quality_to_quant(quality: u8) -> u8 {
+    (((100 - u32::from(quality.min(100))) * 255 / 100) as u8).max(1)
+}
+
 #[test]
 fn lossy_roundtrip_via_libavif() {
     // For lossy coding the decoded image is not the source, but it must equal the AV1 encoder's
     // own reconstruction byte-for-byte: libavif runs a conformant decoder (dav1d) over the OBUs the
     // container carries, so this validates the whole container + lossy AV1 path end-to-end.
-    for &q in &[6u8, 24, 64, 150] {
+    for &quality in &[95u8, 80, 50, 20] {
+        let qidx = quality_to_quant(quality);
         for &(w, h) in &[(8, 8), (17, 13), (40, 24), (100, 80)] {
             let rgb = source_rgb(w, h);
 
             let mut avif = Vec::new();
-            AvifEncoder::new()
-                .with_qindex(q)
+            AvifEncoder::lossy(quality)
                 .encode_image(
                     ImageRef::<Rgb8>::new(
                         &rgb,
@@ -112,15 +119,15 @@ fn lossy_roundtrip_via_libavif() {
 
             // The AV1 layer's reconstruction (the exact decoder output) for the same input.
             let planes = gamut_color::Planar8::from_rgb8_identity(&rgb, w, h).unwrap();
-            let (_, recon) = gamut_av1::encode_still_intra(&planes, q).unwrap();
+            let (_, recon) = gamut_av1::encode_still_intra(&planes, qidx).unwrap();
 
             let decoded = libavif_oracle::decode_avif(&avif)
-                .unwrap_or_else(|e| panic!("libavif decode failed for {w}x{h} q{q}: {e}"));
+                .unwrap_or_else(|e| panic!("libavif decode failed for {w}x{h} q{quality}: {e}"));
             // Identity matrix: decoded Y/U/V planes are the AV1 recon planes 0/1/2.
             for (p, (d, r)) in decoded.planes.iter().zip(&recon.planes).enumerate() {
                 assert_eq!(
                     d, r,
-                    "plane {p} mismatch (libavif vs AV1 recon) for {w}x{h} q{q}"
+                    "plane {p} mismatch (libavif vs AV1 recon) for {w}x{h} q{quality}"
                 );
             }
         }
