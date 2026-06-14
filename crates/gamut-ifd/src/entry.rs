@@ -244,4 +244,25 @@ mod tests {
         // Absent tag is None (distinguishes the real coercion from a constant Some/None).
         assert_eq!(ifd.get_u32_vec(999), None);
     }
+
+    #[test]
+    fn add_sub_ifd_accumulates_per_tag() {
+        let mut ifd = Ifd::new();
+        ifd.add_sub_ifd(330, Ifd::new());
+        ifd.add_sub_ifd(330, Ifd::new());
+        ifd.add_sub_ifd(34665, Ifd::new());
+        // One group per distinct tag (not one per call), and tag 330 holds both children.
+        assert_eq!(ifd.sub_ifds.len(), 2);
+        assert_eq!(ifd.sub_ifds.iter().filter(|s| s.tag == 330).count(), 1);
+        assert_eq!(
+            ifd.sub_ifds
+                .iter()
+                .find(|s| s.tag == 330)
+                .unwrap()
+                .ifds
+                .len(),
+            2
+        );
+        assert!(ifd.sub_ifds.iter().any(|s| s.tag == 34665));
+    }
 }

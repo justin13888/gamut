@@ -449,4 +449,47 @@ mod tests {
             Some(&Value::Rational(vec![(300, 1)]))
         );
     }
+
+    #[test]
+    fn subifd_children_are_placed_consecutively_after_the_root() {
+        // Pass-1a places each directory right after the previous one, word-aligned. With a single
+        // inline field each, the sizes are exact, so the children land at fixed offsets — pinning the
+        // per-directory cursor arithmetic (which round-trips can't, since wrong-but-consistent
+        // offsets still parse).
+        let mut child_a = Ifd::new();
+        child_a.set(256, Value::Short(vec![1]));
+        let mut child_b = Ifd::new();
+        child_b.set(256, Value::Short(vec![1]));
+        let mut root = Ifd::new();
+        root.set(256, Value::Short(vec![1]));
+        root.set_sub_ifd(330, vec![child_a, child_b]);
+
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![root],
+        });
+        let offs = read(&bytes).expect("read").ifds[0]
+            .get_u32_vec(330)
+            .expect("SubIFDs pointer");
+        // header(8) + root dir(count 2 + 2 entries*12 + next 4 = 30) -> child A at 38;
+        // child A dir(2 + 1*12 + 4 = 18) -> child B at 56.
+        assert_eq!(offs, vec![38, 56]);
+    }
+
+    #[test]
+    fn out_of_line_value_pool_is_tightly_packed() {
+        // sample_ifd carries several out-of-line values; each advances the cursor by its own length.
+        // A mutated advance (e.g. `*=` for `+=`) would balloon the file far past this bound.
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd()],
+        });
+        assert!(
+            bytes.len() < 256,
+            "value pool not tightly packed: {} bytes",
+            bytes.len()
+        );
+    }
 }
