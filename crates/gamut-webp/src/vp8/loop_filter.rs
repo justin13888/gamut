@@ -65,10 +65,7 @@ fn interior_limit(level: u8, sharpness: u8) -> i32 {
     let mut limit = i32::from(level);
     if sharpness > 0 {
         limit >>= if sharpness > 4 { 2 } else { 1 };
-        let cap = 9 - i32::from(sharpness);
-        if limit > cap {
-            limit = cap;
-        }
+        limit = limit.min(9 - i32::from(sharpness));
     }
     limit.max(1)
 }
@@ -448,6 +445,67 @@ mod tests {
         assert_eq!(interior_limit(20, 0), 20);
         assert_eq!(interior_limit(20, 1), 8); // 20 >> 1 = 10, capped to 9 - 1 = 8
         assert_eq!(interior_limit(40, 6), 3); // 40 >> 2 = 10, capped to 9 - 6 = 3
+        // Uncapped cases pin the shift direction and the `>4` sharpness split that the capped cases
+        // above mask: the shifted value stays below the cap, so it survives unchanged.
+        assert_eq!(interior_limit(8, 1), 4); // 8 >> 1 = 4, below cap 8
+        assert_eq!(interior_limit(8, 5), 2); // sharpness > 4 → 8 >> 2 = 2, below cap 4
+        assert_eq!(interior_limit(8, 4), 4); // sharpness ≤ 4 → 8 >> 1 = 4, below cap 5
+    }
+
+    #[test]
+    fn simple_filter_indexes_mb_level_per_macroblock() {
+        // A 2×2 macroblock grid where only the bottom row carries a non-zero level. A wrong row index
+        // (`mb_y / mb_cols` instead of `mb_y * mb_cols`) would read the top row's zero level and skip
+        // the bottom row's inter-macroblock top edge — invisible when the level is uniform.
+        let stride = 32; // two macroblock columns
+        let mut plane = vec![0u8; stride * 32]; // two macroblock rows
+        // A step of 40 across the row-1 top edge: its filter difference (100) sits between the
+        // halved and doubled macroblock-edge limits, so it is filtered only with the correct `* 2`
+        // (pinning that constant too), and only if the row's own level (40) is read.
+        for y in 0..32 {
+            for x in 0..stride {
+                plane[y * stride + x] = if y < 16 { 100 } else { 140 };
+            }
+        }
+        let before = plane.clone();
+        simple_filter_luma(&mut plane, stride, 2, 2, &[0, 0, 40, 40], 0, &[false; 4]);
+        assert_ne!(
+            (plane[15 * stride], plane[16 * stride]),
+            (before[15 * stride], before[16 * stride]),
+            "the bottom row's top edge must be deblocked at its own (40) level"
+        );
+        assert_eq!(plane[0], 100, "the top row (level 0) is untouched");
+    }
+
+    #[test]
+    fn simple_filter_reads_the_interior_flag_at_the_macroblock_index() {
+        // A 2×2 macroblock grid where only the bottom-left macroblock (flat index 2) flags
+        // interior filtering. Reading the flag at a wrong index (`mb_y / mb_cols` instead of
+        // `mb_y * mb_cols`) would read index 0 (= false) for that macroblock and skip its
+        // interior subblock edges — invisible when the flags are uniform.
+        let stride = 32; // two macroblock columns
+        let mut plane = vec![100u8; stride * 32]; // two macroblock rows
+        // A step of 10 at the x=4 interior subblock edge, present in both left-column
+        // macroblocks; only the bottom-left one is flagged to filter it. Equal on both sides of
+        // the y=16 macroblock edge, so that edge stays flat and cannot perturb the assertion.
+        for y in 0..32 {
+            for x in 0..4 {
+                plane[y * stride + x] = 110;
+            }
+        }
+        let before = plane.clone();
+        simple_filter_luma(&mut plane, stride, 2, 2, &[20; 4], 0, &[false, false, true, false]);
+        assert_ne!(
+            plane[20 * stride + 3],
+            before[20 * stride + 3],
+            "the bottom-left macroblock's interior subblock edge must filter when its own flag \
+             (index 2, not 0) is set"
+        );
+        assert_eq!(
+            plane[4 * stride + 3],
+            before[4 * stride + 3],
+            "the top-left macroblock's interior flag (index 0) is unset, so its edge is untouched"
+        );
     }
 
     #[test]

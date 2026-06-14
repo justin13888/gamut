@@ -50,3 +50,168 @@ pub const TILE_LENGTH: u16 = 323;
 pub const TILE_OFFSETS: u16 = 324;
 /// `TileByteCounts` (325) — the number of (compressed) bytes in each tile.
 pub const TILE_BYTE_COUNTS: u16 = 325;
+/// `SubIFDs` (330) — offsets of child image IFDs (reduced-resolution / page / mask subfiles).
+pub const SUB_IFDS: u16 = 330;
+/// `XMP` (700) — an XMP metadata packet, stored as a byte array.
+pub const XMP: u16 = 700;
+/// `Copyright` (33432) — the copyright notice.
+pub const COPYRIGHT: u16 = 33432;
+/// `IPTC` (33723) — an IPTC/NAA metadata block.
+pub const IPTC_NAA: u16 = 33723;
+/// `ExifIFD` (34665) — the offset of the Exif private sub-IFD.
+pub const EXIF_IFD: u16 = 34665;
+/// `ICCProfile` (34675) — an embedded ICC colour profile.
+pub const ICC_PROFILE: u16 = 34675;
+/// `GPSInfo` (34853) — the offset of the GPS private sub-IFD.
+pub const GPS_INFO: u16 = 34853;
+/// `InteroperabilityIFD` (40965) — the offset of the Exif Interoperability sub-IFD.
+pub const INTEROPERABILITY_IFD: u16 = 40965;
+
+/// Whether `tag` is one this crate recognises as part of TIFF 6.0 — the baseline reference (§8)
+/// plus the Part 2 still-image extension tags — as opposed to a private or unknown tag a strict
+/// deconstruct should flag.
+///
+/// Recognition is *structural*: a recognised tag is a standard one, not necessarily one the
+/// encoder/decoder act on (e.g. `Orientation`, `Software`, `DateTime`). Tags inside an Exif/GPS
+/// sub-IFD belong to a different namespace and are not judged here.
+#[must_use]
+pub fn is_known_tag(tag: u16) -> bool {
+    matches!(
+        tag,
+        // Named structural / codec / pointer tags above.
+        NEW_SUBFILE_TYPE
+            | IMAGE_WIDTH
+            | IMAGE_LENGTH
+            | BITS_PER_SAMPLE
+            | COMPRESSION
+            | PHOTOMETRIC_INTERPRETATION
+            | FILL_ORDER
+            | STRIP_OFFSETS
+            | SAMPLES_PER_PIXEL
+            | ROWS_PER_STRIP
+            | STRIP_BYTE_COUNTS
+            | X_RESOLUTION
+            | Y_RESOLUTION
+            | PLANAR_CONFIGURATION
+            | RESOLUTION_UNIT
+            | PREDICTOR
+            | EXTRA_SAMPLES
+            | COLOR_MAP
+            | TILE_WIDTH
+            | TILE_LENGTH
+            | TILE_OFFSETS
+            | TILE_BYTE_COUNTS
+            | PAGE_NUMBER
+            | SUB_IFDS
+            | XMP
+            | COPYRIGHT
+            | IPTC_NAA
+            | EXIF_IFD
+            | ICC_PROFILE
+            | GPS_INFO
+            | INTEROPERABILITY_IFD
+            // Other TIFF 6.0 baseline (§8) and Part 2 still-image extension tags a valid file may
+            // carry but the codec does not act on. Kept as numeric literals — no codec constant
+            // is needed for tags the pixel path never reads.
+            | 255 // SubfileType
+            | 263 // Threshholding
+            | 264 // CellWidth
+            | 265 // CellLength
+            | 269 // DocumentName
+            | 270 // ImageDescription
+            | 271 // Make
+            | 272 // Model
+            | 274 // Orientation
+            | 280 // MinSampleValue
+            | 281 // MaxSampleValue
+            | 285 // PageName
+            | 286 // XPosition
+            | 287 // YPosition
+            | 288 // FreeOffsets
+            | 289 // FreeByteCounts
+            | 290 // GrayResponseUnit
+            | 291 // GrayResponseCurve
+            | 292 // T4Options
+            | 293 // T6Options
+            | 301 // TransferFunction
+            | 305 // Software
+            | 306 // DateTime
+            | 315 // Artist
+            | 316 // HostComputer
+            | 318 // WhitePoint
+            | 319 // PrimaryChromaticities
+            | 321 // HalftoneHints
+            | 326 // BadFaxLines
+            | 327 // CleanFaxData
+            | 328 // ConsecutiveBadFaxLines
+            | 332 // InkSet
+            | 333 // InkNames
+            | 334 // NumberOfInks
+            | 336 // DotRange
+            | 337 // TargetPrinter
+            | 339 // SampleFormat
+            | 340..=342 // SMinSampleValue / SMaxSampleValue / TransferRange
+            | 343 // ClipPath
+            | 344 // XClipPathUnits
+            | 345 // YClipPathUnits
+            | 346 // Indexed
+            | 347 // JPEGTables
+            | 351 // OPIProxy
+            | 512..=521 // JPEG-in-TIFF (JPEGProc … JPEGACTables)
+            | 529..=532 // YCbCrCoefficients / Subsampling / Positioning / ReferenceBlackWhite
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_tags_are_known() {
+        // Every named structural/codec/pointer tag must be recognised — a guard against adding a
+        // constant but forgetting to extend `is_known_tag`.
+        for tag in [
+            NEW_SUBFILE_TYPE,
+            IMAGE_WIDTH,
+            PAGE_NUMBER,
+            IMAGE_LENGTH,
+            BITS_PER_SAMPLE,
+            COMPRESSION,
+            FILL_ORDER,
+            PHOTOMETRIC_INTERPRETATION,
+            STRIP_OFFSETS,
+            SAMPLES_PER_PIXEL,
+            ROWS_PER_STRIP,
+            STRIP_BYTE_COUNTS,
+            X_RESOLUTION,
+            Y_RESOLUTION,
+            PLANAR_CONFIGURATION,
+            RESOLUTION_UNIT,
+            PREDICTOR,
+            EXTRA_SAMPLES,
+            COLOR_MAP,
+            TILE_WIDTH,
+            TILE_LENGTH,
+            TILE_OFFSETS,
+            TILE_BYTE_COUNTS,
+            SUB_IFDS,
+            XMP,
+            COPYRIGHT,
+            IPTC_NAA,
+            EXIF_IFD,
+            ICC_PROFILE,
+            GPS_INFO,
+            INTEROPERABILITY_IFD,
+        ] {
+            assert!(is_known_tag(tag), "tag {tag} should be known");
+        }
+    }
+
+    #[test]
+    fn private_tags_are_unknown() {
+        // A private/maker tag and an arbitrary gap value are flagged.
+        assert!(!is_known_tag(0x9999));
+        assert!(!is_known_tag(50341)); // PrintImageMatching (proprietary)
+        assert!(!is_known_tag(700 + 1));
+    }
+}

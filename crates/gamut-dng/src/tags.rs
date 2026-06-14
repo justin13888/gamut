@@ -349,3 +349,230 @@ pub const JXL_DISTANCE: u16 = 52553;
 pub const JXL_EFFORT: u16 = 52554;
 /// `JXLDecodeSpeed` (52555, 0xCD4B) — the JPEG XL decode-speed tier (DNG 1.7).
 pub const JXL_DECODE_SPEED: u16 = 52555;
+
+/// Every tag this crate names — the source of truth for [`is_known_tag`].
+///
+/// Keep this in sync when adding a `pub const` above; [`tests::every_named_tag_is_known`] iterates
+/// it but cannot, by itself, prove a newly-added constant was included (Rust has no const
+/// reflection), so adding a tag here is part of adding the constant.
+const KNOWN_TAGS: &[u16] = &[
+    // Baseline TIFF 6.0 / TIFF-EP.
+    NEW_SUBFILE_TYPE,
+    IMAGE_WIDTH,
+    IMAGE_LENGTH,
+    BITS_PER_SAMPLE,
+    COMPRESSION,
+    PHOTOMETRIC_INTERPRETATION,
+    IMAGE_DESCRIPTION,
+    MAKE,
+    MODEL,
+    STRIP_OFFSETS,
+    ORIENTATION,
+    SAMPLES_PER_PIXEL,
+    ROWS_PER_STRIP,
+    STRIP_BYTE_COUNTS,
+    X_RESOLUTION,
+    Y_RESOLUTION,
+    PLANAR_CONFIGURATION,
+    RESOLUTION_UNIT,
+    SOFTWARE,
+    DATE_TIME,
+    ARTIST,
+    TILE_WIDTH,
+    TILE_LENGTH,
+    TILE_OFFSETS,
+    TILE_BYTE_COUNTS,
+    SUB_IFDS,
+    EXTRA_SAMPLES,
+    SAMPLE_FORMAT,
+    JPEG_TABLES,
+    XMP,
+    CFA_REPEAT_PATTERN_DIM,
+    CFA_PATTERN,
+    COPYRIGHT,
+    IPTC_NAA,
+    EXIF_IFD,
+    ICC_PROFILE,
+    GPS_INFO,
+    // EXIF sub-IFD tags.
+    EXPOSURE_TIME,
+    F_NUMBER,
+    ISO_SPEED_RATINGS,
+    EXIF_VERSION,
+    DATE_TIME_ORIGINAL,
+    FOCAL_LENGTH,
+    // DNG-private tags.
+    DNG_VERSION,
+    DNG_BACKWARD_VERSION,
+    UNIQUE_CAMERA_MODEL,
+    LOCALIZED_CAMERA_MODEL,
+    CFA_PLANE_COLOR,
+    CFA_LAYOUT,
+    LINEARIZATION_TABLE,
+    BLACK_LEVEL_REPEAT_DIM,
+    BLACK_LEVEL,
+    BLACK_LEVEL_DELTA_H,
+    BLACK_LEVEL_DELTA_V,
+    WHITE_LEVEL,
+    DEFAULT_SCALE,
+    DEFAULT_CROP_ORIGIN,
+    DEFAULT_CROP_SIZE,
+    COLOR_MATRIX1,
+    COLOR_MATRIX2,
+    CAMERA_CALIBRATION1,
+    CAMERA_CALIBRATION2,
+    REDUCTION_MATRIX1,
+    REDUCTION_MATRIX2,
+    ANALOG_BALANCE,
+    AS_SHOT_NEUTRAL,
+    AS_SHOT_WHITE_XY,
+    BASELINE_EXPOSURE,
+    BASELINE_NOISE,
+    BASELINE_SHARPNESS,
+    BAYER_GREEN_SPLIT,
+    LINEAR_RESPONSE_LIMIT,
+    CAMERA_SERIAL_NUMBER,
+    LENS_INFO,
+    CHROMA_BLUR_RADIUS,
+    ANTI_ALIAS_STRENGTH,
+    SHADOW_SCALE,
+    DNG_PRIVATE_DATA,
+    MAKER_NOTE_SAFETY,
+    CALIBRATION_ILLUMINANT1,
+    CALIBRATION_ILLUMINANT2,
+    BEST_QUALITY_SCALE,
+    RAW_DATA_UNIQUE_ID,
+    ORIGINAL_RAW_FILE_NAME,
+    ORIGINAL_RAW_FILE_DATA,
+    ACTIVE_AREA,
+    MASKED_AREAS,
+    AS_SHOT_ICC_PROFILE,
+    AS_SHOT_PRE_PROFILE_MATRIX,
+    CURRENT_ICC_PROFILE,
+    CURRENT_PRE_PROFILE_MATRIX,
+    COLORIMETRIC_REFERENCE,
+    CAMERA_CALIBRATION_SIGNATURE,
+    PROFILE_CALIBRATION_SIGNATURE,
+    EXTRA_CAMERA_PROFILES,
+    AS_SHOT_PROFILE_NAME,
+    NOISE_REDUCTION_APPLIED,
+    PROFILE_NAME,
+    PROFILE_HUE_SAT_MAP_DIMS,
+    PROFILE_HUE_SAT_MAP_DATA1,
+    PROFILE_HUE_SAT_MAP_DATA2,
+    PROFILE_TONE_CURVE,
+    PROFILE_EMBED_POLICY,
+    PROFILE_COPYRIGHT,
+    FORWARD_MATRIX1,
+    FORWARD_MATRIX2,
+    PREVIEW_APPLICATION_NAME,
+    PREVIEW_APPLICATION_VERSION,
+    PREVIEW_SETTINGS_NAME,
+    PREVIEW_SETTINGS_DIGEST,
+    PREVIEW_COLOR_SPACE,
+    PREVIEW_DATE_TIME,
+    RAW_IMAGE_DIGEST,
+    ORIGINAL_RAW_FILE_DIGEST,
+    SUB_TILE_BLOCK_SIZE,
+    ROW_INTERLEAVE_FACTOR,
+    PROFILE_LOOK_TABLE_DIMS,
+    PROFILE_LOOK_TABLE_DATA,
+    OPCODE_LIST1,
+    OPCODE_LIST2,
+    OPCODE_LIST3,
+    NOISE_PROFILE,
+    ORIGINAL_DEFAULT_FINAL_SIZE,
+    ORIGINAL_BEST_QUALITY_FINAL_SIZE,
+    ORIGINAL_DEFAULT_CROP_SIZE,
+    PROFILE_HUE_SAT_MAP_ENCODING,
+    PROFILE_LOOK_TABLE_ENCODING,
+    BASELINE_EXPOSURE_OFFSET,
+    DEFAULT_BLACK_RENDER,
+    NEW_RAW_IMAGE_DIGEST,
+    RAW_TO_PREVIEW_GAIN,
+    DEFAULT_USER_CROP,
+    // Depth-map tags.
+    DEPTH_FORMAT,
+    DEPTH_NEAR,
+    DEPTH_FAR,
+    DEPTH_UNITS,
+    DEPTH_MEASURE_TYPE,
+    ENHANCE_PARAMS,
+    // DNG 1.6 / 1.7 additions.
+    PROFILE_GAIN_TABLE_MAP,
+    SEMANTIC_NAME,
+    SEMANTIC_INSTANCE_ID,
+    CALIBRATION_ILLUMINANT3,
+    CAMERA_CALIBRATION3,
+    COLOR_MATRIX3,
+    FORWARD_MATRIX3,
+    ILLUMINANT_DATA1,
+    ILLUMINANT_DATA2,
+    ILLUMINANT_DATA3,
+    MASK_SUB_AREA,
+    PROFILE_HUE_SAT_MAP_DATA3,
+    REDUCTION_MATRIX3,
+    RGB_TABLES,
+    PROFILE_GAIN_TABLE_MAP2,
+    PROFILE_DYNAMIC_RANGE,
+    PROFILE_GROUP_NAME,
+    JXL_DISTANCE,
+    JXL_EFFORT,
+    JXL_DECODE_SPEED,
+];
+
+/// The 3×3 colour-calibration matrix tags whose value must be exactly nine `(S)RATIONAL`s — used by
+/// a deconstruct to flag a malformed matrix.
+pub const MATRIX_3X3_TAGS: &[u16] = &[
+    COLOR_MATRIX1,
+    COLOR_MATRIX2,
+    COLOR_MATRIX3,
+    CAMERA_CALIBRATION1,
+    CAMERA_CALIBRATION2,
+    CAMERA_CALIBRATION3,
+    FORWARD_MATRIX1,
+    FORWARD_MATRIX2,
+    FORWARD_MATRIX3,
+];
+
+/// Whether `tag` is one this crate recognises as part of DNG 1.7.1 — the baseline TIFF/EP tags, the
+/// EXIF tags it reads, and the DNG-private / depth / 1.6-1.7 tags — as opposed to a private or
+/// unknown tag a strict deconstruct should flag.
+///
+/// A handful of common baseline TIFF tags a DNG may carry but the codec does not name
+/// (`HostComputer`, `Min`/`MaxSampleValue`, `Predictor`) are also accepted so a valid file is not
+/// flagged for them.
+#[must_use]
+pub fn is_known_tag(tag: u16) -> bool {
+    KNOWN_TAGS.contains(&tag)
+        || matches!(
+            tag,
+            280 // MinSampleValue
+            | 281 // MaxSampleValue
+            | 316 // HostComputer
+            | 317 // Predictor
+            | 320 // ColorMap (palette previews)
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_named_tag_is_known() {
+        for &tag in KNOWN_TAGS {
+            assert!(is_known_tag(tag), "tag {tag} should be known");
+        }
+        // A couple of the matrix tags double as a spot-check that the list and accessors agree.
+        assert!(is_known_tag(COLOR_MATRIX1));
+        assert!(is_known_tag(JXL_DECODE_SPEED));
+    }
+
+    #[test]
+    fn private_and_unassigned_tags_are_unknown() {
+        assert!(!is_known_tag(0x9999));
+        assert!(!is_known_tag(50341)); // PrintImageMatching (proprietary)
+        assert!(!is_known_tag(1)); // not a DNG tag
+    }
+}

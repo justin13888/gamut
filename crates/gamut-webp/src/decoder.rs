@@ -2,7 +2,9 @@
 //!
 //! Container parsing and format routing are implemented (via [`gamut_riff`]). The lossless **VP8L**
 //! and lossy **VP8** bitstreams are decoded natively; an extended **VP8X** file is parsed and its
-//! inner bitstream decoded (its `ALPH` alpha chunk is applied in a later milestone).
+//! inner bitstream decoded. Decoding to [`Rgba8`](gamut_core::Rgba8) applies a lossy file's `ALPH`
+//! alpha chunk and preserves a VP8L stream's own alpha; decoding to [`Rgb8`](gamut_core::Rgb8)
+//! drops alpha.
 
 use gamut_color::ColorRange;
 use gamut_core::{DecodeImage, Dimensions, Error, ImageBuf, Result, Rgb8, Rgba8};
@@ -54,8 +56,8 @@ impl WebpDecoder {
                 }
                 WebpChunkId::Vp8x => {
                     // Validate the extended-format header, then fall through to the inner VP8/VP8L
-                    // bitstream chunk that follows. Alpha (the `ALPH` chunk gated by the VP8X alpha
-                    // flag) is decoded in a later milestone.
+                    // bitstream chunk that follows. This RGB path carries no alpha, so any `ALPH`
+                    // chunk is ignored here; the RGBA decoder applies it (see `decode_rgba8_into`).
                     gamut_riff::Vp8xHeader::from_payload(chunk.payload)?;
                     continue;
                 }
@@ -97,7 +99,6 @@ impl WebpDecoder {
                         None => vec![0xffu8; w * h],
                     };
                     let rgb = yuv.to_rgb8(ColorRange::Limited);
-                    out.reserve(w * h * 4);
                     for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
                         out.extend_from_slice(&[px[0], px[1], px[2], a]);
                     }
@@ -261,5 +262,41 @@ mod tests {
     fn rejects_non_riff_data() {
         let err: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(b"not a webp");
         assert!(matches!(err, Err(Error::InvalidInput(_))));
+    }
+
+    #[test]
+    fn decodes_lossless_container_to_rgba8() {
+        // A VP8L file decoded to RGBA carries the stream's own alpha (opaque here). Pins the VP8L arm
+        // of the RGBA decoder, which deleting would route to "no bitstream".
+        let file = solid_lossless_webp(2, 2, 0x12, 0x34, 0x56);
+        let got: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).unwrap();
+        assert_eq!(got.dimensions(), Dimensions { width: 2, height: 2 });
+        assert_eq!(
+            got.as_samples(),
+            [0x12, 0x34, 0x56, 0xff].repeat(4).as_slice()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_vp8x_header() {
+        // A VP8X chunk with a too-short payload (a valid one is 10 bytes) is malformed: the decoder
+        // must parse-and-reject it, not silently skip to the inner bitstream. Pins the VP8X arm of
+        // both the RGB and RGBA paths.
+        let inner = solid_lossless_webp(2, 2, 1, 2, 3);
+        let vp8l = RiffReader::new(&inner)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .payload
+            .to_vec();
+        let mut w = RiffWriter::new();
+        w.write_chunk(FourCc::VP8X, &[0u8; 4]);
+        w.write_chunk(FourCc::VP8L, &vp8l);
+        let file = w.finish();
+        let rgb: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
+        assert!(rgb.is_err(), "RGB decode must reject a malformed VP8X header");
+        let rgba: Result<ImageBuf<Rgba8>> = WebpDecoder::new().decode_image(&file);
+        assert!(rgba.is_err(), "RGBA decode must reject a malformed VP8X header");
     }
 }

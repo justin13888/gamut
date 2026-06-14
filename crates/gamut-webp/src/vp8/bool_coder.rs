@@ -1,8 +1,8 @@
 //! VP8 boolean entropy coder (RFC 6386 §7) and tree coding (§8).
 //!
 //! VP8 codes every header field and coefficient token with a binary arithmetic coder driven by
-//! 8-bit probabilities `p` (the represented probability of a `0` is `p/256`) — distinct from AV1's
-//! multi-symbol range coder in `gamut-bitstream`. [`BoolEncoder`] writes the compressed partitions
+//! 8-bit probabilities `p` (the represented probability of a `0` is `p/256`) — a binary arithmetic
+//! coder, distinct from AV1's multi-symbol range coder. [`BoolEncoder`] writes the compressed partitions
 //! and [`BoolDecoder`] reads them; the two are exact inverses, so a decode of any encode reproduces
 //! the original bools (the tier-1 round-trip oracle). The byte-exact agreement of this coder with
 //! libwebp is locked transitively once whole VP8 frames are cross-checked against libwebp (P7).
@@ -114,6 +114,7 @@ impl BoolEncoder {
     /// Encodes `value` as a signed `num_bits`-bit literal in the §7.3 `read_signed_literal` form: a
     /// sign flag followed by `num_bits - 1` magnitude bits (the `num_bits`-bit two's-complement of
     /// `value`, written high-order bit first). `value` must fit in `num_bits` two's-complement bits.
+    #[cfg(test)]
     pub fn put_signed_literal(&mut self, value: i32, num_bits: u32) {
         if num_bits == 0 {
             return;
@@ -173,12 +174,14 @@ impl BoolEncoder {
 
     /// Number of output bytes written so far (before [`finish`](Self::finish)).
     #[must_use]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.output.len()
     }
 
     /// Whether no output bytes have been written yet.
     #[must_use]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.output.is_empty()
     }
@@ -278,6 +281,7 @@ impl<'a> BoolDecoder<'a> {
 
     /// Decodes a signed `num_bits`-bit literal (RFC 6386 §7.3 `read_signed_literal`): a sign flag
     /// followed by `num_bits - 1` magnitude bits.
+    #[cfg(test)]
     pub fn get_signed_literal(&mut self, num_bits: u32) -> i32 {
         if num_bits == 0 {
             return 0;
@@ -312,6 +316,7 @@ impl<'a> BoolDecoder<'a> {
     /// untruncated stream never reads past its meaningful end by more than the coder's lookahead, so
     /// the codec layer can use this to detect a malformed or truncated partition.
     #[must_use]
+    #[cfg(test)]
     pub fn is_past_end(&self) -> bool {
         self.past_end
     }
@@ -370,6 +375,90 @@ mod tests {
     const YMODE_TREE: [i8; 8] = [0, 2, 4, 6, -1, -2, -3, -4];
     const KF_YMODE_TREE: [i8; 8] = [-4, 2, 4, 6, 0, -1, -2, -3];
     const UV_MODE_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
+
+    #[test]
+    fn add_carry_increments_last_non_ff_and_clears_trailing_ff() {
+        // Pin the encoder's carry propagation (`add_one_to_output`, §7.3) directly: the last non-0xff
+        // byte is incremented and trailing 0xff bytes are zeroed. Short differential streams rarely
+        // trigger a carry, so this is the only thing that exercises the loop body.
+        let mut enc = BoolEncoder::new();
+        enc.output = vec![0x12, 0xff, 0xff];
+        enc.add_carry();
+        assert_eq!(enc.output, [0x13, 0x00, 0x00]);
+        enc.output = vec![0x40, 0x41];
+        enc.add_carry();
+        assert_eq!(enc.output, [0x40, 0x42], "a carry with no trailing 0xff just bumps the last byte");
+        // All-0xff: the loop zeroes every byte and stops at index 0 (the `i > 0` bound); a `>= 0`
+        // bound would step past the start and panic, pinning the loop bound.
+        enc.output = vec![0xff, 0xff];
+        enc.add_carry();
+        assert_eq!(enc.output, [0x00, 0x00]);
+    }
+
+    #[test]
+    fn carry_detection_fires_on_renorm_and_flush() {
+        // White-box: the carry path only fires when `bottom`'s top bit is set during a
+        // renormalization shift (`bottom & (1 << 31)`) or at the flush (`v & (1 << (32 - c))`) —
+        // states synthetic streams rarely reach. Force them directly so a flipped detection shift,
+        // which would silently drop the carry, is caught.
+        let mut enc = BoolEncoder::new();
+        enc.output = vec![0x00];
+        enc.bottom = 1 << 31;
+        enc.range = 1; // < 128, so put_bool's renormalization runs and inspects bit 31
+        enc.bit_count = 8;
+        enc.put_bool(128, false);
+        assert_eq!(enc.output[0], 0x01, "renorm carry must reach the emitted byte");
+
+        let mut enc = BoolEncoder::new();
+        enc.output = vec![0x00];
+        enc.bottom = 1 << 24; // bit (32 - bit_count) for the flush carry check
+        enc.bit_count = 8;
+        assert_eq!(enc.finish()[0], 0x01, "flush carry must reach the emitted byte");
+    }
+
+    #[test]
+    fn round_trips_carry_heavy_stream_and_wide_literals() {
+        // A run of near-certain bools drives `bottom` past bit 31, exercising carry *detection* in
+        // put_bool and finish (a flipped shift there silently drops the carry); the literals reach the
+        // 32-bit boundary of the signed-literal mask. Any corrupted byte makes the independent decoder
+        // mismatch, so this kills the carry/shift/mask mutants the short round-trips miss.
+        let mut enc = BoolEncoder::new();
+        let mut bools = Vec::new();
+        // A long run of near-certain bools cycles `bottom` through the [2^23, 2^24) range many times,
+        // so a renormalization shift sets bit 31 and the carry path (`bottom & (1 << 31)`) actually
+        // fires — which a short stream never reaches.
+        for _ in 0..20000 {
+            enc.put_bool(255, true);
+            bools.push((255u8, true));
+        }
+        let mut rng = SplitMix64(0xfeed_face);
+        for _ in 0..2000 {
+            let p = (rng.bits(8) as u8).max(1);
+            let b = rng.bits(1) == 1;
+            enc.put_bool(p, b);
+            bools.push((p, b));
+        }
+        let lits: &[(u32, u32)] = &[(0xFFFF_FFFF, 32), (0, 0), (0xABCD, 16)];
+        for &(v, n) in lits {
+            enc.put_literal(v, n);
+        }
+        let signed: &[(i32, u32)] = &[(i32::MIN, 32), (i32::MAX, 32), (-1, 4), (7, 5)];
+        for &(v, n) in signed {
+            enc.put_signed_literal(v, n);
+        }
+        let bytes = enc.finish();
+
+        let mut dec = BoolDecoder::new(&bytes);
+        for (p, b) in bools {
+            assert_eq!(dec.get_bool(p), b, "bool mismatch");
+        }
+        for &(v, n) in lits {
+            assert_eq!(dec.get_literal(n), v, "literal {v:#x}/{n}");
+        }
+        for &(v, n) in signed {
+            assert_eq!(dec.get_signed_literal(n), v, "signed {v}/{n}");
+        }
+    }
 
     #[test]
     fn bool_roundtrip_across_probabilities() {
