@@ -169,4 +169,60 @@ exclude_re = [
     # transform is bijective) and real content never ties, so no non-contrived test can distinguish
     # them. (`< -> >` / `< -> ==` pick the *larger*/wrong encoding and are caught by the round-trip.)
     'replace < with <= in write_alph',
+    # gamut-webp VP8 header — behaviourally-equivalent bit packing/branches.
+    # write_uncompressed_chunk packs disjoint fields into the frame tag (`version<<1 | 1<<4 |
+    # size<<5`, each within its width) and the dimension words (`width | hscale<<14`, width ≤ 0x3FFF);
+    # read_uncompressed_chunk reassembles bytes at offsets 0/8/16. Disjoint operands ⇒ `|` == `^`.
+    'replace \| with \^ in write_uncompressed_chunk',
+    'replace \| with \^ in read_uncompressed_chunk',
+    # write_delta / write_segment_feature emit the sign bit `value < 0` only inside the `value != 0`
+    # branch, where `< 0` and `<= 0` agree. (The length/show-frame guards in read_uncompressed_chunk
+    # and the segment `!=` terms ARE killed by the new boundary/round-trip tests.)
+    'replace < with <= in write_delta',
+    'replace < with <= in write_segment_feature',
+    # gamut-webp VP8 frame — behaviourally-equivalent.
+    # frame_header sets `sharpness: 0`, identical to LoopFilterParams::default().sharpness, so deleting
+    # the field is byte-for-byte unchanged. (Deleting `simple`/`y_ac` IS caught by
+    # `frame_header_carries_quant_index_and_filter_type`.)
+    'delete field sharpness',
+    # split_token_partitions reassembles the 3-byte size from disjoint bytes (`s0 | s1<<8 | s2<<16`)
+    # ⇒ `|` == `^`. Its bits-16-23 byte (`s2<<16` read; `len>>16` write) is non-zero only for a single
+    # token partition > 64 KiB, which gamut never emits; for every reachable size that byte is 0, so
+    # `<<16`/`>>16` are identical (0). Col-anchored: the bits-8-15 shift on the same lines IS killed by
+    # `token_partitions_round_trip_bit_exact`, so it must stay tested.
+    'replace \| with \^ in split_token_partitions',
+    'frame\.rs:1173:79: replace << with >>',
+    'frame\.rs:1152:67: replace >> with <<',
+    # gamut-webp VP8 encoder — correctness-preserving free choices (NOT byte-identical). These mutate
+    # cost/decision *heuristics*, never the bitstream contract: they change *which* valid encoding is
+    # emitted, not its validity. The decoder reconstructs exactly what was written and the libwebp
+    # oracle confirms every variant round-trips, so no correctness test can distinguish them; pinning a
+    # specific choice would test an encoder heuristic (rate-distortion search is issue #32), not a spec
+    # requirement. Each function below feeds only an encoder decision:
+    #   mb_luma_mean — per-macroblock luma average, used only to choose a quantizer segment;
+    'in mb_luma_mean',
+    'replace mb_luma_mean -> u32 with',
+    #   block_sad — the prediction-cost proxy for mode selection;
+    'in block_sad',
+    #   select_luma_mode / select_chroma_mode — lowest-SAD whole-block mode pickers (any mode is legal);
+    'in select_luma_mode',
+    'replace select_luma_mode -> usize with',
+    'in select_chroma_mode',
+    'replace select_chroma_mode -> usize with',
+    #   SEGMENT_QUANT_DELTAS (frame.rs:46) — the encoder's chosen per-segment quantizer spread; any
+    #   spread is valid and is faithfully signalled. Line-anchored: a bare const, no enclosing fn name.
+    'frame\.rs:46:40: delete -',
+    'frame\.rs:46:45: delete -',
+    #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
+    #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
+    #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
+    'replace < with <= in encode_bpred_luma',
+    'replace \+= with \*= in encode_bpred_luma',
+    #   encode_frame_filtered decision heuristics (line-anchored so the structural mutants on other
+    #   operators of the same kind in this large function stay tested): the per-macroblock segment
+    #   assignment from luma mean (1030), the segment-map index it reads back (1050, self-consistent —
+    #   the same id is signalled), and the B_PRED-vs-whole-block SAD threshold (1071).
+    'frame\.rs:1030:53: replace / with',
+    'frame\.rs:1050:44: replace \* with /',
+    'frame\.rs:1071:59: replace < with <=',
 ]
