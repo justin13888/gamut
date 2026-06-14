@@ -372,9 +372,6 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-dependencies = [
- "powerfmt",
-]
 
 [[package]]
 name = "derive_arbitrary"
@@ -505,7 +502,7 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "gamut"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "gamut-av1",
  "gamut-av2",
@@ -532,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av1"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "dav1d-oracle",
  "divan",
@@ -544,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-av2"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -554,7 +551,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-avif"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "divan",
  "gamut-av1",
@@ -566,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-bitstream"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "divan",
  "gamut-core",
@@ -574,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "gamut",
@@ -586,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-color"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "divan",
  "gamut-core",
@@ -594,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "thiserror",
 ]
@@ -629,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-dsp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "divan",
  "gamut-core",
@@ -637,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-exif"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gamut-core",
  "gamut-ifd",
@@ -645,14 +642,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-ffi"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gamut",
 ]
 
 [[package]]
 name = "gamut-heic"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-color",
  "gamut-core",
@@ -661,14 +658,14 @@ dependencies = [
 
 [[package]]
 name = "gamut-icc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gamut-core",
 ]
 
 [[package]]
 name = "gamut-ifd"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "divan",
  "gamut-core",
@@ -676,7 +673,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-iptc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gamut-core",
  "gamut-xmp",
@@ -684,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-isobmff"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "divan",
  "gamut-bitstream",
@@ -693,7 +690,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-jxl"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -703,7 +700,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-metadata"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gamut-core",
  "gamut-exif",
@@ -723,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-riff"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "divan",
  "gamut-bitstream",
@@ -732,7 +729,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-tiff"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "divan",
  "gamut-bitstream",
@@ -745,7 +742,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-tonemap"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "divan",
  "gamut-color",
@@ -754,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-vvc"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gamut-bitstream",
  "gamut-color",
@@ -764,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-wasm"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gamut",
  "wasm-bindgen",
@@ -772,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-webp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "divan",
  "gamut-bitstream",
@@ -785,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-xmp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "gamut-core",
 ]
@@ -1476,9 +1473,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.47"
+version = "0.3.49"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
+checksum = "711a53c2d47bbd818258c498c8dbfe186a2526c631495cfe7e078567f86b8469"
 dependencies = [
  "deranged",
  "num-conv",
@@ -1489,9 +1486,9 @@ dependencies = [
 
 [[package]]
 name = "time-core"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
+checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "tracing"
@@ -1847,7 +1844,7 @@ dependencies = [
  "xz2",
  "zeroize",
  "zopfli",
- "zstd"
+ "zstd",
 ]
 
 [[package]]

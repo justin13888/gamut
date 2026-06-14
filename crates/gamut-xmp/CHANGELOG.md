@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/justin13888/gamut/compare/gamut-xmp-v0.1.1...gamut-xmp-v0.1.2) - 2026-06-14
+
+### Other
+
+- updated the following local packages: gamut-core
+
 ## [0.1.1](https://github.com/justin13888/gamut/compare/gamut-xmp-v0.1.0...gamut-xmp-v0.1.1) - 2026-06-12
 
 ### Other

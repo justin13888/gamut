@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/justin13888/gamut/compare/gamut-isobmff-v0.3.0...gamut-isobmff-v0.3.1) - 2026-06-14
+
+### Other
+
+- Merge pull request #151 from justin13888/feat/benchmarks
+- *(isobmff)* close mutation-testing gaps
+
 ## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-isobmff-v0.2.0...gamut-isobmff-v0.3.0) - 2026-06-12
 
 ### Added

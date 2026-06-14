@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/justin13888/gamut/compare/gamut-color-v0.3.0...gamut-color-v0.4.0) - 2026-06-14
+
+### Other
+
+- Merge branch 'master' into feat/gamut-tonemap-v1-188
+- *(color)* [**breaking**] source luminance constants from gamut-core, rename SDR->HDR reference white
+- Merge pull request #151 from justin13888/feat/benchmarks
+- *(color)* close mutation-testing gaps
+
 ## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-color-v0.2.0...gamut-color-v0.3.0) - 2026-06-12
 
 ### Added
