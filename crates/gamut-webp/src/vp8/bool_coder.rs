@@ -1,8 +1,8 @@
 //! VP8 boolean entropy coder (RFC 6386 §7) and tree coding (§8).
 //!
 //! VP8 codes every header field and coefficient token with a binary arithmetic coder driven by
-//! 8-bit probabilities `p` (the represented probability of a `0` is `p/256`) — distinct from AV1's
-//! multi-symbol range coder in `gamut-bitstream`. [`BoolEncoder`] writes the compressed partitions
+//! 8-bit probabilities `p` (the represented probability of a `0` is `p/256`) — a binary arithmetic
+//! coder, distinct from AV1's multi-symbol range coder. [`BoolEncoder`] writes the compressed partitions
 //! and [`BoolDecoder`] reads them; the two are exact inverses, so a decode of any encode reproduces
 //! the original bools (the tier-1 round-trip oracle). The byte-exact agreement of this coder with
 //! libwebp is locked transitively once whole VP8 frames are cross-checked against libwebp (P7).

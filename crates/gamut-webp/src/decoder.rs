@@ -2,7 +2,9 @@
 //!
 //! Container parsing and format routing are implemented (via [`gamut_riff`]). The lossless **VP8L**
 //! and lossy **VP8** bitstreams are decoded natively; an extended **VP8X** file is parsed and its
-//! inner bitstream decoded (its `ALPH` alpha chunk is applied in a later milestone).
+//! inner bitstream decoded. Decoding to [`Rgba8`](gamut_core::Rgba8) applies a lossy file's `ALPH`
+//! alpha chunk and preserves a VP8L stream's own alpha; decoding to [`Rgb8`](gamut_core::Rgb8)
+//! drops alpha.
 
 use gamut_color::ColorRange;
 use gamut_core::{DecodeImage, Dimensions, Error, ImageBuf, Result, Rgb8, Rgba8};
@@ -54,8 +56,8 @@ impl WebpDecoder {
                 }
                 WebpChunkId::Vp8x => {
                     // Validate the extended-format header, then fall through to the inner VP8/VP8L
-                    // bitstream chunk that follows. Alpha (the `ALPH` chunk gated by the VP8X alpha
-                    // flag) is decoded in a later milestone.
+                    // bitstream chunk that follows. This RGB path carries no alpha, so any `ALPH`
+                    // chunk is ignored here; the RGBA decoder applies it (see `decode_rgba8_into`).
                     gamut_riff::Vp8xHeader::from_payload(chunk.payload)?;
                     continue;
                 }
