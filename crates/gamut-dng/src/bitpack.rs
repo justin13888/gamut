@@ -97,12 +97,17 @@ mod tests {
     }
 
     #[test]
-    fn eight_bit_narrows_to_one_byte_each() {
-        let packed = pack(&[0x00, 0x7F, 0xFF], 8, 3, ByteOrder::LittleEndian);
-        assert_eq!(packed, vec![0x00, 0x7F, 0xFF]);
+    fn eight_bit_is_one_byte_per_sample_regardless_of_row_geometry() {
+        // The 8-bit fast path emits exactly one byte per sample and decodes one sample per byte,
+        // independent of `samples_per_row`/`rows` — unlike the general MSB path, which pads each row
+        // and drops a trailing partial row. A sample count that is *not* a multiple of the row width
+        // pins that distinction (the general path would drop the last value).
+        let samples = [0x00u16, 0x7F, 0xFF, 0x42, 0x10];
+        let packed = pack(&samples, 8, 2, ByteOrder::LittleEndian);
+        assert_eq!(packed, vec![0x00, 0x7F, 0xFF, 0x42, 0x10]);
         assert_eq!(
-            unpack(&packed, 8, 3, 1, ByteOrder::LittleEndian),
-            vec![0x00, 0x7F, 0xFF]
+            unpack(&packed, 8, 2, 2, ByteOrder::LittleEndian),
+            vec![0x00, 0x7F, 0xFF, 0x42, 0x10]
         );
     }
 }
