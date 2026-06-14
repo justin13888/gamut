@@ -4,6 +4,23 @@
 //! workspace builds on the [`EncodeImage`] / [`DecodeImage`] traits, the branded [`ImageRef`] /
 //! [`ImageBuf`] buffers, and the [`Error`] type defined here, so that callers get a single,
 //! consistent error surface regardless of format.
+//!
+//! # Scope and design notes
+//!
+//! The surface is deliberately small and frozen; the following are intentional decisions rather
+//! than omissions:
+//!
+//! - **Interleaved `u8` / `u16` layouts only.** [`Sample`] is sealed over `u8` and `u16`; planar
+//!   layouts and codec-side concerns such as coded bit depth live in `gamut-color`
+//!   (`gamut_color::Planar8`, `gamut_color::BitDepth`), not here.
+//! - **Open where growth is additive, sealed where it must not be.** [`Error`] and [`ColorModel`]
+//!   are `#[non_exhaustive]` so variants can be added without a breaking change, while [`Pixel`]
+//!   and [`Sample`] are sealed — the set of pixel layouts is closed and only this crate defines it.
+//! - **Static error messages.** [`Error::InvalidInput`] / [`Error::Unsupported`] carry `&'static
+//!   str`; dynamic context is deferred and can be added later as a new `#[non_exhaustive]` variant.
+//! - **The length invariant lives on the buffers, not on [`Dimensions`].** [`Dimensions`] is a plain
+//!   value type with public fields; non-emptiness and `len == width * height * channels` are
+//!   enforced once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs receive a known-good buffer.
 #![forbid(unsafe_code)]
 
 mod image;
