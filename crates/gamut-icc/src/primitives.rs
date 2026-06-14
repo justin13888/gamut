@@ -139,6 +139,45 @@ impl DateTime {
     }
 }
 
+/// A four-byte signature (ICC.1:2022 §4.12): a four-character code stored big-endian.
+///
+/// Used for the open-registry header fields — preferred CMM, primary platform, device
+/// manufacturer/model, profile creator — where the all-zero value means "unspecified", and for the
+/// `signatureType` tag element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Signature(pub [u8; 4]);
+
+impl Signature {
+    /// The all-zero signature, meaning "unspecified".
+    pub const ZERO: Signature = Signature([0; 4]);
+
+    /// The signature's four bytes as a big-endian `u32`.
+    #[must_use]
+    pub fn to_u32(self) -> u32 {
+        u32::from_be_bytes(self.0)
+    }
+
+    /// A signature from a big-endian `u32`.
+    #[must_use]
+    pub fn from_u32(value: u32) -> Self {
+        Self(value.to_be_bytes())
+    }
+}
+
+impl core::fmt::Display for Signature {
+    /// Renders printable bytes verbatim (e.g. `RGB `) and any others as `\xNN`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for &b in &self.0 {
+            if b.is_ascii_graphic() || b == b' ' {
+                write!(f, "{}", b as char)?;
+            } else {
+                write!(f, "\\x{b:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +245,19 @@ mod tests {
                 ..DateTime::ZERO
             }
             .is_zero()
+        );
+    }
+
+    #[test]
+    fn signature_u32_round_trip_and_display() {
+        let sig = Signature(*b"RGB ");
+        assert_eq!(sig.to_u32(), 0x5247_4220);
+        assert_eq!(Signature::from_u32(0x5247_4220), sig);
+        assert_eq!(sig.to_string(), "RGB ");
+        // Non-printable bytes render as escapes.
+        assert_eq!(
+            Signature([0, 1, b'A', 0xff]).to_string(),
+            "\\x00\\x01A\\xff"
         );
     }
 }

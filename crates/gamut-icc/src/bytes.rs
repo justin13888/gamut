@@ -1,0 +1,183 @@
+//! A minimal big-endian byte cursor for ICC parsing.
+//!
+//! ICC data is always big-endian and byte-aligned, so this needs neither a byte-order parameter
+//! (unlike `gamut-ifd`'s TIFF readers) nor the bit-level packing of `gamut-bitstream`. Every read is
+//! bounds-checked and returns [`Error::InvalidInput`] on overrun, keeping the parser panic-free
+//! under `#![forbid(unsafe_code)]`.
+
+use gamut_core::{Error, Result};
+
+use crate::primitives::{DateTime, S15Fixed16, Signature, XyzNumber};
+
+/// A forward-only big-endian reader over an ICC byte buffer.
+pub(crate) struct ByteReader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteReader<'a> {
+    /// A reader positioned at the start of `buf`.
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    /// Reads the next `n` bytes, advancing the cursor; errors if fewer than `n` remain.
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or(Error::InvalidInput("icc: length overflow"))?;
+        let slice = self
+            .buf
+            .get(self.pos..end)
+            .ok_or(Error::InvalidInput("icc: unexpected end of data"))?;
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let mut out = [0u8; N];
+        out.copy_from_slice(self.take(N)?);
+        Ok(out)
+    }
+
+    /// Reads `n` raw bytes.
+    pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        self.take(n)
+    }
+
+    /// Reads one byte.
+    pub(crate) fn u8(&mut self) -> Result<u8> {
+        Ok(self.array::<1>()?[0])
+    }
+
+    /// Reads a big-endian `u16`.
+    pub(crate) fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_be_bytes(self.array()?))
+    }
+
+    /// Reads a big-endian `u32`.
+    pub(crate) fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_be_bytes(self.array()?))
+    }
+
+    /// Reads a big-endian `u64`.
+    pub(crate) fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_be_bytes(self.array()?))
+    }
+
+    /// Reads a big-endian `i32`.
+    pub(crate) fn i32(&mut self) -> Result<i32> {
+        Ok(i32::from_be_bytes(self.array()?))
+    }
+
+    /// Reads a four-byte [`Signature`].
+    pub(crate) fn signature(&mut self) -> Result<Signature> {
+        Ok(Signature(self.array()?))
+    }
+
+    /// Reads an `s15Fixed16Number`.
+    pub(crate) fn s15fixed16(&mut self) -> Result<S15Fixed16> {
+        Ok(S15Fixed16(self.i32()?))
+    }
+
+    /// Reads an `XYZNumber` (three consecutive `s15Fixed16`).
+    pub(crate) fn xyz_number(&mut self) -> Result<XyzNumber> {
+        Ok(XyzNumber {
+            x: self.s15fixed16()?,
+            y: self.s15fixed16()?,
+            z: self.s15fixed16()?,
+        })
+    }
+
+    /// Reads a `dateTimeNumber` (six consecutive `u16`).
+    pub(crate) fn date_time(&mut self) -> Result<DateTime> {
+        Ok(DateTime {
+            year: self.u16()?,
+            month: self.u16()?,
+            day: self.u16()?,
+            hours: self.u16()?,
+            minutes: self.u16()?,
+            seconds: self.u16()?,
+        })
+    }
+
+    /// Advances the cursor by `n` bytes, erroring if fewer remain.
+    pub(crate) fn skip(&mut self, n: usize) -> Result<()> {
+        self.take(n).map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_big_endian_scalars_in_order() {
+        let buf = [
+            0x12, // u8
+            0x34, 0x56, // u16
+            0x78, 0x9a, 0xbc, 0xde, // u32
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // u64
+        ];
+        let mut r = ByteReader::new(&buf);
+        assert_eq!(r.u8().unwrap(), 0x12);
+        assert_eq!(r.u16().unwrap(), 0x3456);
+        assert_eq!(r.u32().unwrap(), 0x789a_bcde);
+        assert_eq!(r.u64().unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn reads_composite_icc_types() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"acsp"); // signature
+        buf.extend_from_slice(&0xFFFF_0000_u32.to_be_bytes()); // s15fixed16 == -1.0
+        for v in [1u16, 2, 3, 4, 5, 6] {
+            buf.extend_from_slice(&v.to_be_bytes()); // date-time
+        }
+        let mut r = ByteReader::new(&buf);
+        assert_eq!(r.signature().unwrap(), Signature(*b"acsp"));
+        assert_eq!(r.s15fixed16().unwrap().to_f64(), -1.0);
+        assert_eq!(
+            r.date_time().unwrap(),
+            DateTime {
+                year: 1,
+                month: 2,
+                day: 3,
+                hours: 4,
+                minutes: 5,
+                seconds: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn bytes_and_skip_advance_the_cursor() {
+        let buf = [10u8, 20, 30, 40, 50];
+        let mut r = ByteReader::new(&buf);
+        assert_eq!(r.bytes(2).unwrap(), &[10, 20]);
+        r.skip(1).unwrap();
+        assert_eq!(r.bytes(2).unwrap(), &[40, 50]);
+    }
+
+    #[test]
+    fn reads_past_end_error() {
+        let buf = [0u8; 3];
+        let mut r = ByteReader::new(&buf);
+        assert!(r.u32().is_err());
+        // A partial read does not advance the cursor past the failure point.
+        assert_eq!(r.u16().unwrap(), 0);
+    }
+
+    #[test]
+    fn xyz_number_decodes_three_components() {
+        let mut buf = Vec::new();
+        for raw in [0x0000_F6D6_i32, 0x0001_0000, 0x0000_D32D] {
+            buf.extend_from_slice(&raw.to_be_bytes());
+        }
+        let xyz = ByteReader::new(&buf).xyz_number().unwrap();
+        assert_eq!(xyz.x, S15Fixed16(0x0000_F6D6));
+        assert_eq!(xyz.y, S15Fixed16(0x0001_0000));
+        assert_eq!(xyz.z, S15Fixed16(0x0000_D32D));
+    }
+}
