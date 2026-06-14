@@ -11,35 +11,43 @@ mod error;
 mod input;
 
 use std::process::ExitCode;
+use std::sync::LazyLock;
 
 use clap::{Parser, Subcommand};
 
-/// Detailed version string for `-V`/`--version`: the package version plus build provenance
-/// (git commit, working-tree state, build profile, target triple, rustc, commit date, and
-/// build timestamp), all captured at compile time by `build.rs`. Useful for pinning down
-/// exactly which build a bug report came from.
-const LONG_VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    "\ncommit:  ",
-    env!("GAMUT_GIT_HASH"),
-    " (",
-    env!("GAMUT_GIT_DIRTY"),
-    ")",
-    "\nprofile: ",
-    env!("GAMUT_BUILD_PROFILE"),
-    "\ntarget:  ",
-    env!("GAMUT_BUILD_TARGET"),
-    "\nrustc:   ",
-    env!("GAMUT_RUSTC_VERSION"),
-    "\ncommit date: ",
-    env!("GAMUT_COMMIT_DATE"),
-    "\nbuilt:   ",
-    env!("GAMUT_BUILD_TIMESTAMP"),
-);
+/// Detailed version string for `-V`/`--version`: the CLI's package version, the resolved
+/// `gamut` library version (read from its `CARGO_PKG_VERSION` via [`gamut::VERSION`], not
+/// hardcoded), plus build provenance (git commit, working-tree state, build profile, target
+/// triple, rustc, commit date, and build timestamp) captured at compile time by `build.rs`.
+/// Useful for pinning down exactly which build a bug report came from.
+///
+/// Built lazily once because the library version is a `const` rather than a string literal, so
+/// the whole string can't be assembled by `concat!`.
+static LONG_VERSION: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{cli}\n\
+         gamut library: {lib}\n\
+         commit:        {hash} ({dirty})\n\
+         profile:       {profile}\n\
+         target:        {target}\n\
+         rustc:         {rustc}\n\
+         commit date:   {commit_date}\n\
+         built:         {built}",
+        cli = env!("CARGO_PKG_VERSION"),
+        lib = gamut::VERSION,
+        hash = env!("GAMUT_GIT_HASH"),
+        dirty = env!("GAMUT_GIT_DIRTY"),
+        profile = env!("GAMUT_BUILD_PROFILE"),
+        target = env!("GAMUT_BUILD_TARGET"),
+        rustc = env!("GAMUT_RUSTC_VERSION"),
+        commit_date = env!("GAMUT_COMMIT_DATE"),
+        built = env!("GAMUT_BUILD_TIMESTAMP"),
+    )
+});
 
 /// Sandbox CLI for the gamut codecs and primitives.
 #[derive(Parser)]
-#[command(name = "gamut", version = LONG_VERSION, about)]
+#[command(name = "gamut", version = LONG_VERSION.as_str(), about)]
 struct Cli {
     /// Increase log verbosity (`-v` = info, `-vv` = debug). `RUST_LOG` overrides this.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
