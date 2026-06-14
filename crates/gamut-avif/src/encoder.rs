@@ -8,6 +8,7 @@ use gamut_isobmff::{
 };
 
 use crate::config::{AvifConfig, AvifMode};
+use crate::transform::{Mirror, Rotation};
 
 /// The encoder's display-orientation transforms, applied by a reader at display time (the stored
 /// pixels are unchanged). Maps to the `irot`/`imir` item properties.
@@ -24,7 +25,7 @@ struct ImageTransform {
 /// 8-bit RGB in, mapped to AV1 identity-matrix 4:4:4 planes. Construct with [`AvifEncoder::new`]
 /// (lossless), [`AvifEncoder::lossless`], or [`AvifEncoder::lossy`], then encode via the
 /// [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) trait, taking a typed [`ImageRef`].
-/// [`AvifEncoder::with_rotation_ccw`] / [`AvifEncoder::with_mirror`] add `irot`/`imir`
+/// [`AvifEncoder::with_rotation`] / [`AvifEncoder::with_mirror`] add `irot`/`imir`
 /// display-orientation transforms.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AvifEncoder {
@@ -73,22 +74,20 @@ impl AvifEncoder {
         self.config
     }
 
-    /// Adds an `irot` display rotation of `quarter_turns × 90°` applied anti-clockwise (the value is
-    /// taken modulo 4, so `0` clears it). The stored pixels are unchanged — a reader rotates at
-    /// display time — so this records e.g. a camera's EXIF orientation without re-encoding. Returns
-    /// the updated encoder for chaining.
+    /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
+    /// so this captures e.g. a camera's EXIF orientation without re-encoding rotated samples).
+    /// [`Rotation::None`] writes no `irot`. Returns the updated encoder for chaining.
     #[must_use]
-    pub fn with_rotation_ccw(mut self, quarter_turns: u8) -> Self {
-        self.transform.rotation_ccw = quarter_turns % 4;
+    pub fn with_rotation(mut self, rotation: Rotation) -> Self {
+        self.transform.rotation_ccw = rotation.quarter_turns();
         self
     }
 
-    /// Adds an `imir` display mirror: `axis = 0` mirrors about a vertical axis (left↔right), `1`
-    /// about a horizontal axis (top↔bottom). The stored pixels are unchanged. Returns the updated
-    /// encoder for chaining.
+    /// Records an `imir` display [`Mirror`] applied by a reader (the stored pixels are unchanged).
+    /// Returns the updated encoder for chaining.
     #[must_use]
-    pub fn with_mirror(mut self, axis: u8) -> Self {
-        self.transform.mirror_axis = Some(axis & 1);
+    pub fn with_mirror(mut self, mirror: Mirror) -> Self {
+        self.transform.mirror_axis = Some(mirror.axis());
         self
     }
 }
@@ -355,32 +354,32 @@ mod tests {
     }
 
     #[test]
-    fn with_rotation_ccw_emits_irot_and_normalizes_mod_four() {
-        // A non-zero rotation emits an `irot` whose body byte is the angle. `irot` lives in `meta`,
-        // which precedes `mdat`, so the first occurrence is the property box (not stray OBU bytes).
-        let f = encode_with(AvifEncoder::new().with_rotation_ccw(1), 4, 4);
+    fn with_rotation_emits_irot_and_none_is_omitted() {
+        // A rotation emits an `irot` whose body byte is the angle. `irot` lives in `meta`, which
+        // precedes `mdat`, so the first occurrence is the property box (not stray OBU bytes).
+        let f = encode_with(AvifEncoder::new().with_rotation(Rotation::Ccw90), 4, 4);
         let p = f
             .windows(4)
             .position(|w| w == b"irot")
             .expect("irot present");
-        assert_eq!(f[p + 4] & 0x03, 1, "irot angle = 1");
-        // 4 ≡ 0 (mod 4) clears the rotation, so no `irot` is written.
-        let f0 = encode_with(AvifEncoder::new().with_rotation_ccw(4), 4, 4);
+        assert_eq!(f[p + 4] & 0x03, 1, "Ccw90 ⇒ irot angle = 1");
+        // Rotation::None writes no `irot`.
+        let f0 = encode_with(AvifEncoder::new().with_rotation(Rotation::None), 4, 4);
         assert!(
             !f0.windows(4).any(|w| w == b"irot"),
-            "rotation 4 ≡ 0 ⇒ no irot"
+            "Rotation::None ⇒ no irot"
         );
     }
 
     #[test]
     fn with_mirror_emits_imir_axis() {
-        for axis in [0u8, 1] {
-            let f = encode_with(AvifEncoder::new().with_mirror(axis), 4, 4);
+        for (mirror, axis) in [(Mirror::LeftRight, 0u8), (Mirror::TopBottom, 1)] {
+            let f = encode_with(AvifEncoder::new().with_mirror(mirror), 4, 4);
             let p = f
                 .windows(4)
                 .position(|w| w == b"imir")
                 .expect("imir present");
-            assert_eq!(f[p + 4] & 0x01, axis, "imir axis = {axis}");
+            assert_eq!(f[p + 4] & 0x01, axis, "{mirror:?} ⇒ imir axis = {axis}");
             assert!(!f.windows(4).any(|w| w == b"irot"), "mirror only ⇒ no irot");
         }
     }

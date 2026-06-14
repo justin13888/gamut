@@ -12,6 +12,8 @@
 
 mod config;
 mod encoder;
+mod transform;
 
 pub use config::{AvifConfig, AvifMode};
 pub use encoder::AvifEncoder;
+pub use transform::{Mirror, Rotation};

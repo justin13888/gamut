@@ -7,7 +7,7 @@
 //! installed. Building these tests therefore needs cmake/meson/ninja/nasm and the checked-out
 //! submodules (`git submodule update --init --recursive`).
 
-use gamut_avif::AvifEncoder;
+use gamut_avif::{AvifEncoder, Mirror, Rotation};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 
 /// Source RGB pattern (structure + variation to exercise nonzero coefficients).
@@ -143,14 +143,14 @@ fn orientation_transforms_roundtrip_via_libavif() {
     let (w, h) = (24u32, 16u32);
     let rgb = source_rgb(w, h);
     for (rot, mir) in [
-        (1u8, None),
-        (0u8, Some(1u8)),
-        (3u8, Some(0u8)),
-        (2u8, Some(1u8)),
+        (Rotation::Ccw90, None),
+        (Rotation::None, Some(Mirror::TopBottom)),
+        (Rotation::Ccw270, Some(Mirror::LeftRight)),
+        (Rotation::Ccw180, Some(Mirror::TopBottom)),
     ] {
-        let mut enc = AvifEncoder::new().with_rotation_ccw(rot);
-        if let Some(axis) = mir {
-            enc = enc.with_mirror(axis);
+        let mut enc = AvifEncoder::new().with_rotation(rot);
+        if let Some(mirror) = mir {
+            enc = enc.with_mirror(mirror);
         }
         let mut avif = Vec::new();
         enc.encode_image(
@@ -167,7 +167,7 @@ fn orientation_transforms_roundtrip_via_libavif() {
         .unwrap();
 
         let decoded = libavif_oracle::decode_avif(&avif)
-            .unwrap_or_else(|e| panic!("libavif rejected irot={rot} imir={mir:?}: {e}"));
+            .unwrap_or_else(|e| panic!("libavif rejected irot={rot:?} imir={mir:?}: {e}"));
         assert_eq!(
             (decoded.width, decoded.height),
             (w, h),
@@ -181,7 +181,7 @@ fn orientation_transforms_roundtrip_via_libavif() {
                 assert_eq!(
                     yp[i],
                     u16::from(g),
-                    "Y at ({x},{y}) irot={rot} imir={mir:?}"
+                    "Y at ({x},{y}) irot={rot:?} imir={mir:?}"
                 );
                 assert_eq!(up[i], u16::from(b));
                 assert_eq!(vp[i], u16::from(r));
