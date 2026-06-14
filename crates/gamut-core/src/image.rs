@@ -172,6 +172,18 @@ impl<P: Pixel> ImageBuf<P> {
         self.dims
     }
 
+    /// Image width in pixels.
+    #[must_use]
+    pub fn width(&self) -> u32 {
+        self.dims.width
+    }
+
+    /// Image height in pixels.
+    #[must_use]
+    pub fn height(&self) -> u32 {
+        self.dims.height
+    }
+
     /// The raw interleaved samples, row-major.
     #[must_use]
     pub fn as_samples(&self) -> &[P::Sample] {
@@ -285,6 +297,16 @@ mod tests {
         assert_eq!(buf.into_samples(), vec![7u8; 12]);
         // Wrong length rejected on the owned path too.
         assert!(ImageBuf::<Rgb8>::new(vec![0u8; 11], dims(2, 2)).is_err());
+    }
+
+    #[test]
+    fn width_height_report_each_dimension() {
+        // Non-square so a width<->height swap is observable; assert exact values, not just non-zero.
+        let buf = ImageBuf::<Rgb8>::zeroed(dims(4, 3)).unwrap();
+        assert_eq!(buf.width(), 4);
+        assert_eq!(buf.height(), 3);
+        assert_eq!(buf.width(), buf.dimensions().width);
+        assert_eq!(buf.height(), buf.dimensions().height);
     }
 
     #[test]
