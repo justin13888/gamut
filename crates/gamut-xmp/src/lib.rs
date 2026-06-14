@@ -35,12 +35,13 @@ pub mod error;
 pub mod model;
 pub mod namespace;
 pub mod packet;
-pub mod reader;
 pub mod writer;
+// The reader has no configuration — `XmpMeta::from_packet` is the entry point and auto-detects the
+// wrapper, encoding, and input form — so the module carries only that `impl` and stays private.
+mod reader;
 
 pub use error::{Result, XmpError};
 pub use model::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 pub use namespace::{Namespace, WellKnownNs};
 pub use packet::XmpPacket;
-pub use reader::XmpReader;
 pub use writer::XmpWriter;
