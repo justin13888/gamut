@@ -86,6 +86,7 @@ impl<'a> BitReader<'a> {
 
     /// Total number of bits consumed so far.
     #[must_use]
+    #[cfg(test)]
     pub fn bits_consumed(&self) -> usize {
         self.byte_pos * 8 - self.bits_in_acc as usize
     }
@@ -93,6 +94,7 @@ impl<'a> BitReader<'a> {
     /// Whether every bit of the input has been consumed (the trailing partial byte, if any, is
     /// treated as zero padding and is not counted as remaining data).
     #[must_use]
+    #[cfg(test)]
     pub fn is_exhausted(&self) -> bool {
         self.byte_pos >= self.data.len() && self.bits_in_acc == 0
     }
@@ -137,6 +139,7 @@ impl BitWriter {
 
     /// Number of bits written so far (including any pending partial byte).
     #[must_use]
+    #[cfg(test)]
     pub fn bit_len(&self) -> usize {
         self.buf.len() * 8 + self.bits_in_acc as usize
     }

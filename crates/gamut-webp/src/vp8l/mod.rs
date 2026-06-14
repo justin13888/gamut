@@ -9,19 +9,18 @@
 //! [`encoder::encode`] emits a bit-exact-lossless one. Each module cites the spec section it covers;
 //! the component breakdown is tracked in `../STATUS.md`.
 
-pub mod bit_io;
-pub mod color_cache;
+// Most users want [`WebpEncoder`](crate::WebpEncoder)/[`WebpDecoder`](crate::WebpDecoder); [`decoder`]
+// is the documented low-level entry point. The remaining spec-section modules it is assembled from
+// are crate-internal.
 pub mod decoder;
-pub mod encoder;
-pub mod header;
-pub mod lz77;
-pub mod prefix;
-pub mod transform;
 
-pub use bit_io::{BitReader, BitWriter};
-pub use color_cache::ColorCache;
-pub use header::{VP8L_SIGNATURE, Vp8lHeader};
-pub use transform::Vp8lTransform;
+pub(crate) mod bit_io;
+pub(crate) mod color_cache;
+pub(crate) mod encoder;
+pub(crate) mod header;
+pub(crate) mod lz77;
+pub(crate) mod prefix;
+pub(crate) mod transform;
 
 /// Ceiling division `⌈num / den⌉`, used to size sub-resolution images and bundled widths
 /// (the spec's `DIV_ROUND_UP`). Returns 0 when `den` is 0. All VP8L callers pass `num <= 16384`

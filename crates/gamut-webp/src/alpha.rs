@@ -17,7 +17,7 @@ use crate::vp8l::encoder::encode_image;
 
 /// Alpha filtering method (RFC 9649 §2.7.1 Figure 10, field `F`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlphaFilter {
+pub(crate) enum AlphaFilter {
     /// No filtering: the predictor is always 0, so residuals are the alpha values themselves.
     None,
     /// Horizontal: predict each value from the pixel to its left.
@@ -96,7 +96,7 @@ impl AlphaFilter {
 /// `(alpha − predictor) mod 256` (RFC 9649 §2.7.1). The predictor reads the original plane, which —
 /// because the transform is lossless — equals the values the decoder will have reconstructed.
 #[must_use]
-pub fn filter(plane: &[u8], width: usize, height: usize, method: AlphaFilter) -> Vec<u8> {
+pub(crate) fn filter(plane: &[u8], width: usize, height: usize, method: AlphaFilter) -> Vec<u8> {
     let mut out = vec![0u8; plane.len()];
     for y in 0..height {
         for x in 0..width {
@@ -110,7 +110,7 @@ pub fn filter(plane: &[u8], width: usize, height: usize, method: AlphaFilter) ->
 /// Inverts [`filter`]: reconstructs the alpha plane from `residuals`, predicting from the
 /// already-reconstructed pixels (`alpha = (predictor + residual) mod 256`).
 #[must_use]
-pub fn unfilter(residuals: &[u8], width: usize, height: usize, method: AlphaFilter) -> Vec<u8> {
+pub(crate) fn unfilter(residuals: &[u8], width: usize, height: usize, method: AlphaFilter) -> Vec<u8> {
     let mut plane = vec![0u8; residuals.len()];
     for y in 0..height {
         for x in 0..width {
@@ -126,7 +126,7 @@ pub fn unfilter(residuals: &[u8], width: usize, height: usize, method: AlphaFilt
 /// compressible" (the choice only affects size, never correctness). Treating residuals as signed
 /// (distance from 0 or 256) favors the smoothest predictor.
 #[must_use]
-pub fn choose_filter(plane: &[u8], width: usize, height: usize) -> AlphaFilter {
+pub(crate) fn choose_filter(plane: &[u8], width: usize, height: usize) -> AlphaFilter {
     [
         AlphaFilter::None,
         AlphaFilter::Horizontal,
@@ -146,7 +146,7 @@ pub fn choose_filter(plane: &[u8], width: usize, height: usize) -> AlphaFilter {
 /// Builds an `ALPH` chunk payload (RFC 9649 §2.7.1) for a **raw** (uncompressed) alpha plane: the
 /// header byte (`Rsv=0`, `P=0`, the filter method, `C=0`) followed by the filtered residuals.
 #[must_use]
-pub fn write_raw_alph(plane: &[u8], width: usize, height: usize) -> Vec<u8> {
+pub(crate) fn write_raw_alph(plane: &[u8], width: usize, height: usize) -> Vec<u8> {
     let method = choose_filter(plane, width, height);
     let mut out = Vec::with_capacity(1 + plane.len());
     out.push(method.code() << 2); // P = 0, C = 0 (no compression)

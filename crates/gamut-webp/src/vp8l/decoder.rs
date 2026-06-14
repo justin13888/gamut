@@ -48,7 +48,7 @@ pub fn decode(data: &[u8]) -> Result<(Dimensions, Vec<u32>)> {
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] for any malformed, truncated, or over-spec stream.
-pub fn decode_image(r: &mut BitReader<'_>, width: u32, height: u32) -> Result<Vec<u32>> {
+pub(crate) fn decode_image(r: &mut BitReader<'_>, width: u32, height: u32) -> Result<Vec<u32>> {
     // Read the transform chain (each type at most once), tracking the working width that
     // color-indexing shrinks for everything read after it (RFC 9649 §4).
     let mut transforms: Vec<Vp8lTransform> = Vec::new();
@@ -281,7 +281,7 @@ fn decode_image_data(
 }
 
 /// Converts a decoded ARGB buffer to interleaved 8-bit RGB, appending to `out`.
-pub fn argb_to_rgb8(argb: &[u32], out: &mut Vec<u8>) {
+pub(crate) fn argb_to_rgb8(argb: &[u32], out: &mut Vec<u8>) {
     for &p in argb {
         out.push((p >> 16) as u8);
         out.push((p >> 8) as u8);
@@ -291,7 +291,7 @@ pub fn argb_to_rgb8(argb: &[u32], out: &mut Vec<u8>) {
 
 /// Converts a decoded `0xAARRGGBB` ARGB buffer to interleaved 8-bit RGBA (keeping alpha), appending
 /// to `out`.
-pub fn argb_to_rgba8(argb: &[u32], out: &mut Vec<u8>) {
+pub(crate) fn argb_to_rgba8(argb: &[u32], out: &mut Vec<u8>) {
     for &p in argb {
         out.push((p >> 16) as u8); // R
         out.push((p >> 8) as u8); // G
@@ -338,6 +338,74 @@ mod tests {
             assert_eq!(pixels.len(), (width * height) as usize);
             assert!(pixels.iter().all(|&p| p == color));
         }
+    }
+
+    #[test]
+    fn green_symbol_at_length_code_base_is_a_length_code_not_a_literal() {
+        // RFC 9649 §5.2.2: green symbols 0..256 are literals; 256 (LENGTH_CODE_BASE) is the first
+        // LZ77 *length* code. A single-symbol green code that always yields 256 makes the very
+        // first pixel a backward reference, which is invalid before the image starts — a correct
+        // decoder rejects it. If the literal/length split were `<=` instead of `<`, symbol 256
+        // would be mis-decoded as a literal pixel and the stream would decode "successfully".
+        // (`write_simple_prefix_code` cannot encode symbol 256, hence the direct group build.)
+        use crate::vp8l::prefix::PrefixCode;
+        let single = |alphabet: usize, sym: usize| {
+            let mut lengths = vec![0u8; alphabet];
+            lengths[sym] = 1;
+            PrefixCode::from_code_lengths(&lengths).expect("single-symbol code")
+        };
+        let group = PrefixCodeGroup {
+            green: single(280, 256), // 256 literals + 24 length codes, no color cache
+            red: single(256, 0),
+            blue: single(256, 0),
+            alpha: single(256, 0),
+            distance: single(40, 0),
+        };
+        let huffman = HuffmanInfo {
+            entropy: Vec::new(),
+            xsize: 1,
+            bits: 0,
+            groups: vec![group],
+        };
+        let mut r = BitReader::new(&[]);
+        let result = decode_image_data(&mut r, 4, 1, 4, &mut None, &huffman);
+        assert!(
+            result.is_err(),
+            "green symbol 256 is the first length code; as pixel 0 it is a backward reference \
+             before image start and must be rejected, not decoded as a literal"
+        );
+    }
+
+    #[test]
+    fn a_single_prefix_group_bypasses_the_meta_huffman_image() {
+        // The `groups.len() > 1` guard lets a single-group image skip the per-pixel meta-Huffman
+        // lookup (RFC 9649 §5.2.2 / §6.2.3): with one group the decoder uses it directly. If the
+        // guard were `>= 1` it would consult the meta image even here and index a non-existent
+        // group. (A real reader only builds one group when there is no meta image, so this pins
+        // the guard by pairing the lone group with a deliberately out-of-range meta entry.)
+        use crate::vp8l::prefix::PrefixCode;
+        let single = |alphabet: usize, sym: usize| {
+            let mut lengths = vec![0u8; alphabet];
+            lengths[sym] = 1;
+            PrefixCode::from_code_lengths(&lengths).expect("single-symbol code")
+        };
+        let group = PrefixCodeGroup {
+            green: single(280, 0), // symbol 0 < 256 → a literal
+            red: single(256, 0),
+            blue: single(256, 0),
+            alpha: single(256, 0),
+            distance: single(40, 0),
+        };
+        let huffman = HuffmanInfo {
+            entropy: vec![1], // selects group index 1, which does not exist
+            xsize: 1,
+            bits: 0,
+            groups: vec![group],
+        };
+        let mut r = BitReader::new(&[]);
+        let pixels = decode_image_data(&mut r, 4, 1, 4, &mut None, &huffman)
+            .expect("a single group is used directly, ignoring the meta image");
+        assert_eq!(pixels, vec![make_argb(0, 0, 0, 0); 4]);
     }
 
     #[test]
