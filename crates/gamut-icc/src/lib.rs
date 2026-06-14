@@ -20,6 +20,7 @@ pub mod curve;
 pub mod header;
 pub mod lut;
 pub mod mluc;
+pub mod named_color;
 pub mod primitives;
 pub mod profile;
 pub mod reader;
@@ -33,6 +34,7 @@ pub use header::{
 };
 pub use lut::{Clut, ClutPrecision, Lut8, Lut16, LutAToB, LutBToA, Matrix3x3, Matrix3x4};
 pub use mluc::{Mluc, MlucRecord, TextDescription};
+pub use named_color::{NamedColor, NamedColor2};
 pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzNumber};
 pub use profile::IccProfile;
 pub use reader::IccReader;

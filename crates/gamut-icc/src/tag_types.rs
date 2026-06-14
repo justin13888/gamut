@@ -8,6 +8,7 @@ use crate::lut::{
     Lut8, Lut16, LutAToB, LutBToA, decode_lut_a_to_b, decode_lut_b_to_a, decode_lut8, decode_lut16,
 };
 use crate::mluc::{Mluc, TextDescription, decode_mluc, decode_text_description};
+use crate::named_color::{NamedColor2, decode_named_color2};
 use crate::primitives::{DateTime, S15Fixed16, Signature, XyzNumber};
 
 /// The decoded data of a tag element.
@@ -45,6 +46,8 @@ pub enum TagData {
     LutAToB(LutAToB),
     /// `mBA ` — the PCS-to-device lookup transform (`lutBToAType`).
     LutBToA(LutBToA),
+    /// `ncl2` — a named-colour palette (`namedColor2Type`).
+    NamedColor2(NamedColor2),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -78,6 +81,7 @@ pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
         b"mft2" => Ok(TagData::Lut16(decode_lut16(element)?)),
         b"mAB " => Ok(TagData::LutAToB(decode_lut_a_to_b(element)?)),
         b"mBA " => Ok(TagData::LutBToA(decode_lut_b_to_a(element)?)),
+        b"ncl2" => Ok(TagData::NamedColor2(decode_named_color2(element)?)),
         _ => Ok(TagData::Raw {
             type_sig,
             bytes: element.to_vec(),
