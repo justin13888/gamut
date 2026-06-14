@@ -1,14 +1,15 @@
 //! BT.601 YCbCr ↔ RGB conversion and 4:2:0 chroma subsampling for VP8 (WebP lossy).
 //!
 //! VP8 codes images as YCbCr 4:2:0 (`color_space = 0`, RFC 6386 §9.2; the WebP container references
-//! BT.601). The *signal range* is selectable via [`Bt601Range`]:
+//! BT.601). The *signal range* is selected with [`ColorRange`] — the same CICP range flag used in
+//! `colr` / AV1 headers, so callers carry one range type end to end:
 //!
-//! - [`Bt601Range::Limited`] — studio swing (Y ∈ `16..=235`, chroma ∈ `16..=240`). **This is what
+//! - [`ColorRange::Limited`] — studio swing (Y ∈ `16..=235`, chroma ∈ `16..=240`). **This is what
 //!   the WebP ecosystem uses**: libwebp's `cwebp`/`dwebp`, browsers, and every standard decoder
 //!   assume limited range, so WebP files must be encoded this way to render with correct colors. The
 //!   limited-range path reproduces libwebp's exact integer math (`src/dsp/yuv.h` `VP8RGBToY/U/V` and
 //!   `VP8YUVToR/G/B`), so gamut and libwebp agree per pixel.
-//! - [`Bt601Range::Full`] — full / "JFIF" swing (Y and chroma over the whole `0..=255` range), the
+//! - [`ColorRange::Full`] — full / "JFIF" swing (Y and chroma over the whole `0..=255` range), the
 //!   JPEG convention. Kept for callers that genuinely want full-range BT.601; it is **not** what a
 //!   WebP file should carry.
 //!
@@ -19,6 +20,7 @@
 
 use gamut_core::{Error, Result};
 
+use crate::cicp::ColorRange;
 use crate::clip_pixel8;
 
 /// Fixed-point fractional bits for the conversion coefficients.
@@ -33,17 +35,6 @@ const LUMA_BIAS_LIMITED: i32 = 16 << FIX;
 const FIX2: i32 = 6;
 /// In-range mask for libwebp's `VP8Clip8` fast path (`YUV_MASK2 = (256 << YUV_FIX2) - 1`).
 const MASK2: i32 = (256 << FIX2) - 1;
-
-/// The signal range of a BT.601 YCbCr encoding. See the [module docs](self) for which to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Bt601Range {
-    /// Full / "JFIF" range: luma and chroma span the entire `0..=255` byte range (the JPEG
-    /// convention). Not what a WebP file should carry.
-    Full,
-    /// Limited / "studio" range: luma in `16..=235`, chroma in `16..=240`. The range libwebp and the
-    /// WebP/VP8 ecosystem (browsers, `dwebp`, …) assume, so files encoded this way render correctly.
-    Limited,
-}
 
 /// libwebp's `MultHi` (`src/dsp/yuv.h`): the high bits of a fixed-point product, `(v * coeff) >> 8`.
 fn mult_hi(v: i32, coeff: i32) -> i32 {
@@ -61,12 +52,12 @@ fn vp8_clip8(v: i32) -> u8 {
     }
 }
 
-/// Converts one RGB triple to BT.601 YCbCr in the given [`Bt601Range`] (each component `0..=255`).
+/// Converts one RGB triple to BT.601 YCbCr in the given [`ColorRange`] (each component `0..=255`).
 #[must_use]
-pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: Bt601Range) -> (u8, u8, u8) {
+pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: ColorRange) -> (u8, u8, u8) {
     let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
     match range {
-        Bt601Range::Full => {
+        ColorRange::Full => {
             let y = (19595 * r + 38470 * g + 7471 * b + HALF) >> FIX;
             let cb = (-11059 * r - 21709 * g + 32768 * b + CHROMA_BIAS) >> FIX;
             let cr = (32768 * r - 27439 * g - 5329 * b + CHROMA_BIAS) >> FIX;
@@ -74,7 +65,7 @@ pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: Bt601Range) -> (u8, u8, u8) {
         }
         // libwebp's per-pixel coefficients (src/dsp/yuv.h `VP8RGBToY/U/V`): studio swing, +16 luma
         // offset; chroma uses the same `(128 << FIX) + HALF` bias as the full-range path.
-        Bt601Range::Limited => {
+        ColorRange::Limited => {
             let y = (16839 * r + 33059 * g + 6420 * b + LUMA_BIAS_LIMITED + HALF) >> FIX;
             let cb = (-9719 * r - 19081 * g + 28800 * b + CHROMA_BIAS) >> FIX;
             let cr = (28800 * r - 24116 * g - 4684 * b + CHROMA_BIAS) >> FIX;
@@ -83,11 +74,11 @@ pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: Bt601Range) -> (u8, u8, u8) {
     }
 }
 
-/// Converts one BT.601 YCbCr triple in the given [`Bt601Range`] back to RGB (each `0..=255`).
+/// Converts one BT.601 YCbCr triple in the given [`ColorRange`] back to RGB (each `0..=255`).
 #[must_use]
-pub fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8, range: Bt601Range) -> (u8, u8, u8) {
+pub fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8, range: ColorRange) -> (u8, u8, u8) {
     match range {
-        Bt601Range::Full => {
+        ColorRange::Full => {
             let y = i32::from(y);
             let cb = i32::from(cb) - 128;
             let cr = i32::from(cr) - 128;
@@ -98,7 +89,7 @@ pub fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8, range: Bt601Range) -> (u8, u8, u8) {
         }
         // libwebp's exact per-pixel inverse (src/dsp/yuv.h `VP8YUVToR/G/B`): the studio-swing offsets
         // are folded into the additive constants, so the raw 0..=255 samples feed straight in.
-        Bt601Range::Limited => {
+        ColorRange::Limited => {
             let (y, cb, cr) = (i32::from(y), i32::from(cb), i32::from(cr));
             let yy = mult_hi(y, 19077);
             let r = vp8_clip8(yy + mult_hi(cr, 26149) - 14234);
@@ -112,7 +103,7 @@ pub fn ycbcr_to_rgb(y: u8, cb: u8, cr: u8, range: Bt601Range) -> (u8, u8, u8) {
 /// A BT.601 YCbCr image in 4:2:0 layout: a `width × height` luma plane and two
 /// `chroma_width × chroma_height` chroma planes, all row-major 8-bit, where the chroma dimensions are
 /// `ceil(width / 2)` and `ceil(height / 2)`. The signal range is a property of the conversion
-/// ([`Bt601Range`]), not of the stored planes.
+/// ([`ColorRange`]), not of the stored planes.
 #[derive(Debug, Clone)]
 pub struct Yuv420 {
     width: u32,
@@ -157,13 +148,13 @@ impl Yuv420 {
         })
     }
 
-    /// Converts an interleaved 8-bit RGB image to YCbCr 4:2:0 in the given [`Bt601Range`],
+    /// Converts an interleaved 8-bit RGB image to YCbCr 4:2:0 in the given [`ColorRange`],
     /// box-averaging each 2×2 block of chroma (partial edge blocks average only the pixels that exist).
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, or either dimension is 0.
-    pub fn from_rgb8(rgb: &[u8], width: u32, height: u32, range: Bt601Range) -> Result<Self> {
+    pub fn from_rgb8(rgb: &[u8], width: u32, height: u32, range: ColorRange) -> Result<Self> {
         let (w, h) = (width as usize, height as usize);
         if width == 0 || height == 0 || rgb.len() != w * h * 3 {
             return Err(Error::InvalidInput(
@@ -211,10 +202,10 @@ impl Yuv420 {
         })
     }
 
-    /// Converts back to an interleaved 8-bit RGB image in the given [`Bt601Range`], nearest-replicating
+    /// Converts back to an interleaved 8-bit RGB image in the given [`ColorRange`], nearest-replicating
     /// each chroma sample across its 2×2 luma block.
     #[must_use]
-    pub fn to_rgb8(&self, range: Bt601Range) -> Vec<u8> {
+    pub fn to_rgb8(&self, range: ColorRange) -> Vec<u8> {
         let (w, h) = (self.width as usize, self.height as usize);
         let cw = Self::chroma_width(self.width) as usize;
         let mut out = vec![0u8; w * h * 3];
@@ -266,7 +257,7 @@ impl Yuv420 {
 mod tests {
     use super::*;
 
-    use Bt601Range::{Full, Limited};
+    use crate::cicp::ColorRange::{Full, Limited};
 
     #[test]
     fn full_range_color_anchors() {
