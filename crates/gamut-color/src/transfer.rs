@@ -26,6 +26,16 @@ pub const PQ_PEAK_NITS: f64 = 10_000.0;
 // --- sRGB (IEC 61966-2-1) --------------------------------------------------
 
 /// sRGB EOTF: gamma-encoded signal → linear light, on `[0, 1]`.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::srgb_eotf;
+/// assert_eq!(srgb_eotf(0.0), 0.0);
+/// assert!((srgb_eotf(1.0) - 1.0).abs() < 1e-12);
+/// // sRGB 0.5 is ~0.214 in linear light.
+/// assert!((srgb_eotf(0.5) - 0.214).abs() < 1e-3);
+/// ```
 #[must_use]
 pub fn srgb_eotf(x: f64) -> f64 {
     if x <= 0.04045 {

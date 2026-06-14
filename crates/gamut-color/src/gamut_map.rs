@@ -35,6 +35,18 @@ pub fn in_gamut(rgb: [f64; 3]) -> bool {
 /// Precondition: `lab[0]` (L) should be in `[0, 1]`.
 ///
 /// [`linear_rgb_to_oklab`]: crate::oklab::linear_rgb_to_oklab
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::gamut_map::{in_gamut, soft_gamut_clamp};
+/// use gamut_color::oklab::oklab_to_linear_srgb;
+/// // An over-saturated OKLab colour is pulled onto the sRGB gamut surface...
+/// let clamped = soft_gamut_clamp([0.5, 0.4, 0.0], 0.0);
+/// assert!(in_gamut(oklab_to_linear_srgb(clamped)));
+/// // ...while an already in-gamut colour is returned unchanged.
+/// assert_eq!(soft_gamut_clamp([0.5, 0.0, 0.0], 0.0), [0.5, 0.0, 0.0]);
+/// ```
 #[must_use]
 pub fn soft_gamut_clamp(lab: [f64; 3], l_blend: f64) -> [f64; 3] {
     if in_gamut(oklab_to_linear_srgb(lab)) {

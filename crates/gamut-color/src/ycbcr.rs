@@ -53,6 +53,14 @@ fn vp8_clip8(v: i32) -> u8 {
 }
 
 /// Converts one RGB triple to BT.601 YCbCr in the given [`ColorRange`] (each component `0..=255`).
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::{rgb_to_ycbcr, ColorRange};
+/// // Limited-range BT.601 (what WebP uses): black → luma 16, neutral chroma 128.
+/// assert_eq!(rgb_to_ycbcr(0, 0, 0, ColorRange::Limited), (16, 128, 128));
+/// ```
 #[must_use]
 pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: ColorRange) -> (u8, u8, u8) {
     let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
@@ -150,6 +158,16 @@ impl Yuv420 {
 
     /// Converts an interleaved 8-bit RGB image to YCbCr 4:2:0 in the given [`ColorRange`],
     /// box-averaging each 2×2 block of chroma (partial edge blocks average only the pixels that exist).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_color::{Yuv420, ColorRange};
+    /// let rgb = vec![128u8; 4 * 4 * 3]; // 4×4 flat gray
+    /// let yuv = Yuv420::from_rgb8(&rgb, 4, 4, ColorRange::Limited).expect("valid length");
+    /// assert_eq!(yuv.y().len(), 16); // full-resolution luma
+    /// assert_eq!(yuv.u().len(), 4); // 2×2-subsampled chroma
+    /// ```
     ///
     /// # Errors
     ///

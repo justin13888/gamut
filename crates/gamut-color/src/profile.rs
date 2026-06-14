@@ -57,6 +57,19 @@ impl SourceTransfer {
 }
 
 /// A source colour profile: a [`Gamut`] plus its encoder-exact [`SourceTransfer`].
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::SourceProfile;
+/// use gamut_color::cicp::{ColourPrimaries, TransferCharacteristics};
+/// let p = SourceProfile::SRGB;
+/// assert_eq!(p.colour_primaries(), Some(ColourPrimaries::Bt709));
+/// assert_eq!(p.transfer_characteristics(), Some(TransferCharacteristics::Srgb));
+/// // Convenience pipeline: gamma-encoded sRGB → OKLab.
+/// let lab = p.gamma_rgb_to_oklab([1.0, 1.0, 1.0]);
+/// assert!((lab[0] - 1.0).abs() < 1e-6);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceProfile {
     /// The colour-science gamut (selects the `M1` matrix / primaries).

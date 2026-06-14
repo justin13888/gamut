@@ -105,6 +105,17 @@ impl Gamut {
 }
 
 /// Convert linear RGB to OKLab using the source `gamut`'s `M1` matrix.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::Gamut;
+/// use gamut_color::oklab::linear_rgb_to_oklab;
+/// // White maps to L≈1 with near-zero chroma.
+/// let lab = linear_rgb_to_oklab([1.0, 1.0, 1.0], Gamut::Srgb);
+/// assert!((lab[0] - 1.0).abs() < 1e-6);
+/// assert!(lab[1].abs() < 1e-6 && lab[2].abs() < 1e-6);
+/// ```
 #[must_use]
 pub fn linear_rgb_to_oklab(rgb: [f64; 3], gamut: Gamut) -> [f64; 3] {
     let lms = matvec3(gamut.m1_matrix(), rgb);
