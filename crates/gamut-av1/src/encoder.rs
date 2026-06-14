@@ -283,6 +283,59 @@ mod tests {
     }
 
     #[test]
+    fn encoded_bitstream_is_stable() {
+        // The encoder's structural choices — block partition (should_split/decide_rect), palette
+        // (decide_palette/palette_cache/signal_palette_colors), per-superblock delta-q/lf
+        // (signal_delta_q/lf), skip (block_is_skippable), tx selection (select_tx_*), loop-restoration
+        // signalling (write_lr) — change the OBU bitstream but reconstruct bit-exactly, so the dav1d
+        // recon oracle in recon_dav1d.rs cannot see them. This snapshot pins an FNV-1a checksum of the
+        // OBU stream for a spread of content patterns, sizes and quantizers; any change to a
+        // (deterministic) encoder decision moves a checksum. The recon oracle proves these same streams
+        // decode correctly, so the pair certifies "deterministic AND correct", not just "deterministic".
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+        }
+        // Patterns exercise distinct decisions: gradient (detailed residual + range split), flat (every
+        // block skippable), palette (few luma colours + flat chroma), checker (max residual / golomb
+        // tails), bands (vertical structure → rectangular partitions).
+        let pat = |id: u8, x: u32, y: u32| -> [u8; 3] {
+            match id {
+                0 => [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8],
+                1 => [200, 100, 50],
+                2 => [(((x / 4 + y / 4) % 5) * 50) as u8, 128, 128],
+                3 => {
+                    let v = if (x + y).is_multiple_of(2) { 0 } else { 255 };
+                    [v, 255 - v, v]
+                }
+                _ => [((x / 8) * 40) as u8, 128, 128],
+            }
+        };
+        let cases: &[(u8, u32, u32, u8, u64)] = &[
+            (0, 40, 24, 0, 0x7734_889d_bb0f_3d10),
+            (1, 64, 64, 1, 0x555f_b439_5f54_0869),
+            (2, 32, 32, 40, 0xc137_a411_19d0_00fa),
+            (3, 48, 48, 16, 0x1f80_0ee1_459d_bc80),
+            (4, 64, 48, 90, 0x55c2_d41f_b10c_edac),
+            (0, 100, 80, 8, 0x9b7c_1ba3_3bd9_bdb0),
+            (0, 130, 70, 120, 0x381a_b126_b155_d441),
+            (2, 64, 64, 200, 0x6874_9d61_4529_698e),
+            (3, 96, 96, 60, 0x8ecd_b3b2_df5f_fc09),
+            (4, 128, 64, 30, 0xb755_5da2_fbd3_7636),
+        ];
+        for &(id, w, h, q, want) in cases {
+            let p = planes(w, h, |x, y| pat(id, x, y));
+            let obus = encode_still_intra(&p, q).unwrap().0.obus;
+            assert_eq!(
+                fnv1a(&obus),
+                want,
+                "bitstream changed for pat{id} {w}x{h} q{q}"
+            );
+        }
+    }
+
+    #[test]
     fn obu_stream_is_seq_then_frame() {
         let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
         let e = encode_still_lossless_identity(&p).unwrap();
