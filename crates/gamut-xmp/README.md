@@ -47,8 +47,9 @@ prefixes so you do not hand-write them.
 ## Status
 
 Implemented: parser + canonical serializer for the full XMP data model (simple / URI / structured /
-`Bag`·`Seq`·`Alt`, qualifiers, language alternatives) and the `<?xpacket?>` wrapper, tested against
-the spec's canonical examples and round-trip invariants. See [STATUS.md](STATUS.md).
+`Bag`·`Seq`·`Alt`, qualifiers, language alternatives) and the `<?xpacket?>` wrapper. Tested against
+the spec's canonical examples, round-trip invariants, and a differential cross-check with exiv2's
+bundled Adobe XMP Toolkit (XMPCore). See [STATUS.md](STATUS.md).
 
 ## License
 

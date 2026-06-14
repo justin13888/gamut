@@ -17,8 +17,10 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
 - **Encoding — UTF-8, no BOM.** Packets are read and written as UTF-8; a leading BOM is tolerated on
   read but never emitted. Part 1 §7.1 also allows UTF-16/32, reported as `XmpError::Encoding`.
 - **Conformance oracle — exiv2.** exiv2 bundles Adobe's XMPCore, so it backs both the "Adobe-SDK"
-  and "exiv2" checks; the differential gate lands in a follow-up PR (P6). Byte-exact correctness is
-  pinned independently by golden vectors transcribed from the Part 1 examples (`tests/golden.rs`).
+  and "exiv2" checks. The differential gate is `tests/oracle.rs`, against a vendored, statically
+  linked exiv2 + expat (`tooling/exiv2-oracle`, built from the `third_party/exiv2` + `third_party/
+  expat` submodules). Byte-exact correctness is pinned independently by golden vectors transcribed
+  from the Part 1 examples (`tests/golden.rs`).
 
 ## Phases
 
@@ -29,7 +31,7 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
 | P3 | Part 1 §6 | Structured values, `Bag`/`Seq`/`Alt` arrays, qualifiers, language alternatives | ✅ done |
 | P4 | Part 2 | Standard schema coverage (dc/xmp/xmpRights/xmpMM/photoshop/exif/tiff/…) | ✅ done |
 | P5 | Part 1 §7 | **Keystone** — canonical RDF/XML serialization + packet emit (writable padding) | ✅ done |
-| P6 | — | exiv2 differential conformance gate | ☐ follow-up PR |
+| P6 | — | exiv2 differential conformance gate | ✅ done |
 
 ## Known limitations
 
