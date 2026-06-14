@@ -354,6 +354,20 @@ fn profile_id_matches_lcms() {
     assert_eq!(id_ours.0, id_lcms);
 }
 
+/// The `IccReader` façade parses through both its lenient default and strict mode (lcms profiles
+/// are conformant, so strict succeeds too).
+#[test]
+fn reader_facade_parses() {
+    let bytes = lcms2_oracle::srgb().to_bytes();
+    assert!(gamut_icc::IccReader::new().parse(&bytes).is_ok());
+    assert!(
+        gamut_icc::IccReader::new()
+            .strict(true)
+            .parse(&bytes)
+            .is_ok()
+    );
+}
+
 /// Evaluates whichever tone-curve element a tag holds.
 fn eval_curve(data: &TagData, x: f64) -> f64 {
     match data {

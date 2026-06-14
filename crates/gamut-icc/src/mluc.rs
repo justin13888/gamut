@@ -308,4 +308,40 @@ mod tests {
         assert_eq!(desc.ascii, "A");
         assert_eq!(desc.unicode, "B");
     }
+
+    #[test]
+    fn mluc_round_trips_through_encode() {
+        let mluc = Mluc {
+            records: vec![
+                MlucRecord {
+                    language: *b"en",
+                    country: *b"US",
+                    text: "Hello".to_owned(),
+                },
+                MlucRecord {
+                    language: *b"de",
+                    country: *b"DE",
+                    text: "Hallo".to_owned(),
+                },
+            ],
+        };
+        let mut out = Vec::new();
+        encode_mluc(&mluc, &mut out);
+        assert_eq!(decode_mluc(&out).unwrap(), mluc);
+    }
+
+    #[test]
+    fn text_description_round_trips_through_encode() {
+        // Exercises the Unicode-present and Macintosh-present branches of the encoder.
+        let desc = TextDescription {
+            ascii: "Display".to_owned(),
+            unicode_language: 0x656e_5553,
+            unicode: "Display".to_owned(),
+            script_code: 0,
+            macintosh: vec![1, 2, 3],
+        };
+        let mut out = Vec::new();
+        encode_text_description(&desc, &mut out);
+        assert_eq!(decode_text_description(&out).unwrap(), desc);
+    }
 }

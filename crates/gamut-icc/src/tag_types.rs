@@ -356,4 +356,49 @@ mod tests {
         assert_eq!(type_sig, Signature::ZERO);
         assert_eq!(bytes, vec![1, 2]);
     }
+
+    #[test]
+    fn simple_elements_round_trip_through_encode() {
+        let cases = [
+            TagData::Xyz(vec![XyzNumber::from_f64([0.9642, 1.0, 0.8249])]),
+            TagData::Curve(Curve::Gamma(U8Fixed8(0x0233))),
+            TagData::ParametricCurve(ParametricCurve {
+                function_type: 0,
+                params: vec![S15Fixed16::from_f64(2.2)],
+            }),
+            TagData::Text("hello".to_owned()),
+            TagData::DateTime(DateTime {
+                year: 2026,
+                month: 6,
+                day: 14,
+                hours: 1,
+                minutes: 2,
+                seconds: 3,
+            }),
+            TagData::Signature(Signature(*b"prtr")),
+            TagData::S15Fixed16Array(vec![S15Fixed16::from_f64(1.0), S15Fixed16::from_f64(-0.5)]),
+            TagData::NamedColor2(crate::named_color::NamedColor2 {
+                vendor_flags: 0,
+                prefix: String::new(),
+                suffix: String::new(),
+                colors: Vec::new(),
+            }),
+        ];
+        for data in cases {
+            let mut out = Vec::new();
+            encode_tag(&data, &mut out);
+            assert_eq!(decode_tag(&out).unwrap(), data);
+        }
+    }
+
+    #[test]
+    fn raw_round_trips_through_encode() {
+        let data = TagData::Raw {
+            type_sig: Signature(*b"zzzz"),
+            bytes: b"zzzz\x00\x00\x00\x00payload".to_vec(),
+        };
+        let mut out = Vec::new();
+        encode_tag(&data, &mut out);
+        assert_eq!(decode_tag(&out).unwrap(), data);
+    }
 }

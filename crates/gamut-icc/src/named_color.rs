@@ -154,4 +154,28 @@ mod tests {
         e.extend_from_slice(&ascii_32("")); // suffix
         assert!(decode_named_color2(&e).is_err());
     }
+
+    #[test]
+    fn round_trips_through_encode() {
+        let named = NamedColor2 {
+            vendor_flags: 0x1234,
+            prefix: "pre".into(),
+            suffix: "suf".into(),
+            colors: vec![
+                NamedColor {
+                    name: "red".into(),
+                    pcs: [1, 2, 3],
+                    device: vec![10, 20],
+                },
+                NamedColor {
+                    name: "green".into(),
+                    pcs: [4, 5, 6],
+                    device: vec![30, 40],
+                },
+            ],
+        };
+        let mut out = Vec::new();
+        encode_named_color2(&named, &mut out);
+        assert_eq!(decode_named_color2(&out).unwrap(), named);
+    }
 }

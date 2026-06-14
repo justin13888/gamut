@@ -537,10 +537,15 @@ fn write_u16_slice(values: &[u16], out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curve::Curve;
+    use crate::curve::{Curve, ParametricCurve};
+    use crate::primitives::U8Fixed8;
 
     fn s15_be(v: f64) -> [u8; 4] {
         S15Fixed16::from_f64(v).0.to_be_bytes()
+    }
+
+    fn gamma_curve() -> CurveOrParametric {
+        CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200)))
     }
 
     #[test]
@@ -661,5 +666,121 @@ mod tests {
         assert_eq!(clut.samples.len(), 24);
         let matrix = lut.matrix.expect("matrix present");
         assert_eq!(matrix.offset[0], S15Fixed16::from_f64(0.1));
+    }
+
+    #[test]
+    fn lut8_round_trips() {
+        let lut = Lut8 {
+            input_channels: 1,
+            output_channels: 1,
+            grid_points: 2,
+            matrix: Matrix3x3 {
+                elements: [S15Fixed16::from_f64(1.0); 9],
+            },
+            input_table: vec![7u8; 256],
+            clut: vec![10, 20],
+            output_table: vec![9u8; 256],
+        };
+        let mut out = Vec::new();
+        encode_lut8(&lut, &mut out);
+        assert_eq!(decode_lut8(&out).unwrap(), lut);
+    }
+
+    #[test]
+    fn lut16_round_trips() {
+        let lut = Lut16 {
+            input_channels: 2,
+            output_channels: 3,
+            grid_points: 2,
+            matrix: Matrix3x3 {
+                elements: [S15Fixed16(0); 9],
+            },
+            input_table_entries: 2,
+            output_table_entries: 2,
+            input_table: vec![0u16; 4],
+            clut: (0..12u16).collect(),
+            output_table: vec![0u16; 6],
+        };
+        let mut out = Vec::new();
+        encode_lut16(&lut, &mut out);
+        assert_eq!(decode_lut16(&out).unwrap(), lut);
+    }
+
+    #[test]
+    fn lut_a_to_b_round_trips_every_stage() {
+        // All five stages present, with a 16-bit CLUT.
+        let lut = LutAToB {
+            input_channels: 3,
+            output_channels: 3,
+            a_curves: Some(vec![gamma_curve(), gamma_curve(), gamma_curve()]),
+            clut: Some(Clut {
+                grid_points: vec![2, 2, 2],
+                output_channels: 3,
+                precision: ClutPrecision::U16,
+                samples: (0..24u16).collect(),
+            }),
+            m_curves: Some(vec![gamma_curve(), gamma_curve(), gamma_curve()]),
+            matrix: Some(Matrix3x4 {
+                matrix: [S15Fixed16::from_f64(1.0); 9],
+                offset: [S15Fixed16::from_f64(0.5); 3],
+            }),
+            b_curves: vec![gamma_curve(), gamma_curve(), gamma_curve()],
+        };
+        let mut out = Vec::new();
+        encode_lut_a_to_b(&lut, &mut out);
+        assert_eq!(decode_lut_a_to_b(&out).unwrap(), lut);
+    }
+
+    #[test]
+    fn lut_b_to_a_round_trips_every_stage() {
+        // 3 input (PCS) → 4 output (device) channels; an 8-bit CLUT and parametric curves.
+        let param = || {
+            CurveOrParametric::Parametric(ParametricCurve {
+                function_type: 0,
+                params: vec![S15Fixed16::from_f64(2.0)],
+            })
+        };
+        let lut = LutBToA {
+            input_channels: 3,
+            output_channels: 4,
+            b_curves: vec![param(), param(), param()],
+            matrix: Some(Matrix3x4 {
+                matrix: [S15Fixed16(0); 9],
+                offset: [S15Fixed16(0); 3],
+            }),
+            m_curves: Some(vec![param(), param(), param()]),
+            clut: Some(Clut {
+                grid_points: vec![2, 2, 2],
+                output_channels: 4,
+                precision: ClutPrecision::U8,
+                samples: (0..32u16).collect(), // 2^3 nodes × 4 outputs
+            }),
+            a_curves: Some(vec![param(), param(), param(), param()]),
+        };
+        let mut out = Vec::new();
+        encode_lut_b_to_a(&lut, &mut out);
+        assert_eq!(decode_lut_b_to_a(&out).unwrap(), lut);
+    }
+
+    #[test]
+    fn rejects_invalid_clut_precision() {
+        // An mAB whose CLUT precision byte is neither 1 nor 2.
+        let mut e = b"mAB \x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&[3, 3, 0, 0]);
+        let offsets_at = e.len();
+        e.extend_from_slice(&[0u8; 20]);
+        let off_b = e.len();
+        for _ in 0..3 {
+            e.extend_from_slice(b"curv\x00\x00\x00\x00");
+            e.extend_from_slice(&0u32.to_be_bytes());
+        }
+        let off_clut = e.len();
+        e.extend_from_slice(&[2u8; 16]);
+        e.push(9); // invalid precision
+        e.extend_from_slice(&[0, 0, 0]);
+        e.extend_from_slice(&[0u8; 24]);
+        e[offsets_at..offsets_at + 4].copy_from_slice(&(off_b as u32).to_be_bytes());
+        e[offsets_at + 12..offsets_at + 16].copy_from_slice(&(off_clut as u32).to_be_bytes());
+        assert!(decode_lut_a_to_b(&e).is_err());
     }
 }

@@ -339,6 +339,15 @@ mod tests {
     }
 
     #[test]
+    fn parametric_unknown_function_type_is_identity() {
+        let curve = ParametricCurve {
+            function_type: 99,
+            params: Vec::new(),
+        };
+        assert_eq!(curve.eval(0.42), 0.42);
+    }
+
+    #[test]
     fn parametric_type4_has_offset_linear_toe() {
         // g=1, a=1, b=0, c=0.5, d=0.5, e=0.125, f=0.25 (exactly representable).
         let curve = ParametricCurve {
