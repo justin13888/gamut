@@ -64,7 +64,7 @@ gamut-dsp = { path = "crates/gamut-dsp", version = "0.2.1" }
 gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.1" }
 gamut-deflate = { path = "crates/gamut-deflate", version = "0.1.0" }
 gamut-png = { path = "crates/gamut-png", version = "0.1.0" }
-gamut-isobmff = { path = "crates/gamut-isobmff", version = "0.3.0" }
+gamut-isobmff = { path = "crates/gamut-isobmff", version = "1.0.0" }
 gamut-riff = { path = "crates/gamut-riff", version = "0.1.1" }
 gamut-av1 = { path = "crates/gamut-av1", version = "0.3.0" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.1" }
