@@ -18,6 +18,7 @@ mod bytes;
 
 pub mod curve;
 pub mod header;
+pub mod lut;
 pub mod mluc;
 pub mod primitives;
 pub mod profile;
@@ -26,10 +27,11 @@ pub mod tag_types;
 pub mod tags;
 pub mod writer;
 
-pub use curve::{Curve, ParametricCurve};
+pub use curve::{Curve, CurveOrParametric, ParametricCurve};
 pub use header::{
     ColorSpace, DeviceClass, ProfileHeader, ProfileId, ProfileVersion, RenderingIntent,
 };
+pub use lut::{Clut, ClutPrecision, Lut8, Lut16, LutAToB, LutBToA, Matrix3x3, Matrix3x4};
 pub use mluc::{Mluc, MlucRecord, TextDescription};
 pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzNumber};
 pub use profile::IccProfile;

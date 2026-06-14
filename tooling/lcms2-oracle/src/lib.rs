@@ -53,6 +53,8 @@ pub mod tag {
     pub const COPYRIGHT: u32 = sig(b"cprt");
     /// `chad` — chromatic-adaptation matrix.
     pub const CHROMATIC_ADAPTATION: u32 = sig(b"chad");
+    /// `A2B0` — the device-to-PCS lookup transform (perceptual).
+    pub const A_TO_B0: u32 = sig(b"A2B0");
 }
 
 /// A four-character colour-space / class signature as a big-endian `u32`, for comparing against the
@@ -163,6 +165,30 @@ pub fn lab4() -> Profile {
 pub fn lab2() -> Profile {
     // SAFETY: NULL white point selects D50; returns an owned handle.
     wrap(unsafe { sys::cmsCreateLab2Profile(ptr::null()) })
+}
+
+/// A CMYK ink-limiting device link (`cmsCreateInkLimitingDeviceLink`): a CLUT-bearing LUT profile,
+/// for exercising the `lut8`/`lut16` decoders (force v2 with [`Profile::set_version`]).
+#[must_use]
+pub fn cmyk_ink_limiting_devicelink(limit: f64) -> Profile {
+    let colorspace = u32::from_be_bytes(*b"CMYK") as sys::cmsColorSpaceSignature;
+    // SAFETY: constructor returns an owned handle.
+    wrap(unsafe { sys::cmsCreateInkLimitingDeviceLink(colorspace, limit) })
+}
+
+/// An RGB linearization device link (`cmsCreateLinearizationDeviceLink`) with identity curves, for
+/// exercising the `lutAToB` decoder in v4 profiles.
+#[must_use]
+pub fn rgb_linearization_devicelink() -> Profile {
+    let curves = [
+        ToneCurve::gamma(1.0),
+        ToneCurve::gamma(1.0),
+        ToneCurve::gamma(1.0),
+    ];
+    let mut raw = [curves[0].0, curves[1].0, curves[2].0];
+    let colorspace = u32::from_be_bytes(*b"RGB ") as sys::cmsColorSpaceSignature;
+    // SAFETY: the curve pointers outlive the call; lcms copies them into the profile.
+    wrap(unsafe { sys::cmsCreateLinearizationDeviceLink(colorspace, raw.as_mut_ptr()) })
 }
 
 impl Profile {

@@ -300,6 +300,49 @@ fn matrix_trc_profile_decodes_every_tag() {
     );
 }
 
+/// A v2 CMYK device link stores its transform as a `lut16` (`mft2`) `A2B0` tag, which decodes with
+/// the expected 4→4 channel geometry.
+#[test]
+fn v2_devicelink_decodes_as_lut() {
+    let profile = lcms2_oracle::cmyk_ink_limiting_devicelink(250.0);
+    profile.set_version(2.1);
+    let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
+    match parsed
+        .get(Signature::from_u32(tag::A_TO_B0))
+        .expect("A2B0 present")
+    {
+        TagData::Lut16(lut) => {
+            assert_eq!(lut.input_channels, 4);
+            assert_eq!(lut.output_channels, 4);
+        }
+        TagData::Lut8(lut) => {
+            assert_eq!(lut.input_channels, 4);
+            assert_eq!(lut.output_channels, 4);
+        }
+        other => panic!("expected a lut8/lut16 A2B0, got {other:?}"),
+    }
+}
+
+/// A v4 RGB device link stores its transform as a `lutAToB` (`mAB `). (Some lcms builds emit a
+/// `multiProcessElements` instead, which is intentionally not modelled and round-trips as Raw.)
+#[test]
+fn v4_devicelink_decodes_as_lut_a_to_b() {
+    let profile = lcms2_oracle::rgb_linearization_devicelink();
+    let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
+    match parsed
+        .get(Signature::from_u32(tag::A_TO_B0))
+        .expect("A2B0 present")
+    {
+        TagData::LutAToB(lut) => {
+            assert_eq!(lut.input_channels, 3);
+            assert_eq!(lut.output_channels, 3);
+            assert_eq!(lut.b_curves.len(), 3);
+        }
+        TagData::Raw { type_sig, .. } => assert_eq!(&type_sig.0, b"mpet"),
+        other => panic!("unexpected A2B0 element: {other:?}"),
+    }
+}
+
 /// Evaluates whichever tone-curve element a tag holds.
 fn eval_curve(data: &TagData, x: f64) -> f64 {
     match data {

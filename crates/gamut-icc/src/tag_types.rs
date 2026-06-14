@@ -3,9 +3,12 @@
 use gamut_core::{Error, Result};
 
 use crate::bytes::ByteReader;
-use crate::curve::{Curve, ParametricCurve};
+use crate::curve::{Curve, ParametricCurve, read_curve_body, read_parametric_body};
+use crate::lut::{
+    Lut8, Lut16, LutAToB, LutBToA, decode_lut_a_to_b, decode_lut_b_to_a, decode_lut8, decode_lut16,
+};
 use crate::mluc::{Mluc, TextDescription, decode_mluc, decode_text_description};
-use crate::primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, XyzNumber};
+use crate::primitives::{DateTime, S15Fixed16, Signature, XyzNumber};
 
 /// The decoded data of a tag element.
 ///
@@ -34,6 +37,14 @@ pub enum TagData {
     MultiLocalizedUnicode(Mluc),
     /// `desc` — the legacy v2 description element (`textDescriptionType`).
     TextDescription(TextDescription),
+    /// `mft1` — the legacy 8-bit lookup transform (`lut8Type`).
+    Lut8(Lut8),
+    /// `mft2` — the legacy 16-bit lookup transform (`lut16Type`).
+    Lut16(Lut16),
+    /// `mAB ` — the device-to-PCS lookup transform (`lutAToBType`).
+    LutAToB(LutAToB),
+    /// `mBA ` — the PCS-to-device lookup transform (`lutBToAType`).
+    LutBToA(LutBToA),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -63,6 +74,10 @@ pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
         b"sf32" => decode_s15fixed16_array(element),
         b"mluc" => Ok(TagData::MultiLocalizedUnicode(decode_mluc(element)?)),
         b"desc" => Ok(TagData::TextDescription(decode_text_description(element)?)),
+        b"mft1" => Ok(TagData::Lut8(decode_lut8(element)?)),
+        b"mft2" => Ok(TagData::Lut16(decode_lut16(element)?)),
+        b"mAB " => Ok(TagData::LutAToB(decode_lut_a_to_b(element)?)),
+        b"mBA " => Ok(TagData::LutBToA(decode_lut_b_to_a(element)?)),
         _ => Ok(TagData::Raw {
             type_sig,
             bytes: element.to_vec(),
@@ -90,37 +105,11 @@ fn decode_xyz(element: &[u8]) -> Result<TagData> {
 }
 
 fn decode_curve(element: &[u8]) -> Result<Curve> {
-    let mut r = ByteReader::at(element, 8)?;
-    let count = r.u32()? as usize;
-    Ok(match count {
-        0 => Curve::Identity,
-        1 => Curve::Gamma(U8Fixed8(r.u16()?)),
-        n => {
-            if n.checked_mul(2).is_none_or(|bytes| bytes > r.remaining()) {
-                return Err(Error::InvalidInput("icc: curve table exceeds element"));
-            }
-            let mut table = Vec::with_capacity(n);
-            for _ in 0..n {
-                table.push(r.u16()?);
-            }
-            Curve::Sampled(table)
-        }
-    })
+    read_curve_body(&mut ByteReader::at(element, 8)?)
 }
 
 fn decode_parametric(element: &[u8]) -> Result<ParametricCurve> {
-    let mut r = ByteReader::at(element, 8)?;
-    let function_type = r.u16()?;
-    r.skip(2)?; // reserved
-    let count = r.remaining() / 4;
-    let mut params = Vec::with_capacity(count);
-    for _ in 0..count {
-        params.push(r.s15fixed16()?);
-    }
-    Ok(ParametricCurve {
-        function_type,
-        params,
-    })
+    read_parametric_body(&mut ByteReader::at(element, 8)?)
 }
 
 fn decode_text(element: &[u8]) -> Result<TagData> {
@@ -156,6 +145,7 @@ fn decode_s15fixed16_array(element: &[u8]) -> Result<TagData> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitives::U8Fixed8;
 
     /// Builds an element: a four-byte type signature, four reserved bytes, then the payload.
     fn element(type_sig: &[u8; 4], payload: &[u8]) -> Vec<u8> {

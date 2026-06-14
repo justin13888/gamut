@@ -3,6 +3,9 @@
 //! Both model a 1-D function from `[0, 1]` to `[0, 1]`; [`Curve::eval`] / [`ParametricCurve::eval`]
 //! evaluate them, which is also the bridge for cross-checking against a reference CMM.
 
+use gamut_core::{Error, Result};
+
+use crate::bytes::ByteReader;
 use crate::primitives::{S15Fixed16, U8Fixed8};
 
 /// A one-dimensional tone curve (`curveType`, ICC.1:2022 §10.6).
@@ -119,6 +122,100 @@ impl ParametricCurve {
             _ => x,
         }
     }
+}
+
+/// Either kind of tone curve, as carried by the curve sets inside the LUT transform types.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CurveOrParametric {
+    /// A `curveType` curve.
+    Curve(Curve),
+    /// A `parametricCurveType` curve.
+    Parametric(ParametricCurve),
+}
+
+impl CurveOrParametric {
+    /// Evaluates the curve at `x` in `[0, 1]`.
+    #[must_use]
+    pub fn eval(&self, x: f64) -> f64 {
+        match self {
+            CurveOrParametric::Curve(curve) => curve.eval(x),
+            CurveOrParametric::Parametric(curve) => curve.eval(x),
+        }
+    }
+}
+
+/// The number of parameters a `parametricCurveType` function type carries (ICC.1:2022 §10.18).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for function types outside the defined range 0–4.
+pub(crate) fn parametric_param_count(function_type: u16) -> Result<usize> {
+    Ok(match function_type {
+        0 => 1,
+        1 => 3,
+        2 => 4,
+        3 => 5,
+        4 => 7,
+        _ => {
+            return Err(Error::InvalidInput(
+                "icc: unsupported parametric function type",
+            ));
+        }
+    })
+}
+
+/// Reads a `curveType` body (the count and entries) from `r`, positioned just after the element's
+/// type signature and reserved bytes.
+pub(crate) fn read_curve_body(r: &mut ByteReader<'_>) -> Result<Curve> {
+    let count = r.u32()? as usize;
+    Ok(match count {
+        0 => Curve::Identity,
+        1 => Curve::Gamma(U8Fixed8(r.u16()?)),
+        n => {
+            if n.checked_mul(2).is_none_or(|bytes| bytes > r.remaining()) {
+                return Err(Error::InvalidInput("icc: curve table exceeds element"));
+            }
+            let mut table = Vec::with_capacity(n);
+            for _ in 0..n {
+                table.push(r.u16()?);
+            }
+            Curve::Sampled(table)
+        }
+    })
+}
+
+/// Reads a `parametricCurveType` body (the function type and its parameters) from `r`, positioned
+/// just after the element's type signature and reserved bytes.
+pub(crate) fn read_parametric_body(r: &mut ByteReader<'_>) -> Result<ParametricCurve> {
+    let function_type = r.u16()?;
+    r.skip(2)?; // reserved
+    let count = parametric_param_count(function_type)?;
+    let mut params = Vec::with_capacity(count);
+    for _ in 0..count {
+        params.push(r.s15fixed16()?);
+    }
+    Ok(ParametricCurve {
+        function_type,
+        params,
+    })
+}
+
+/// Reads a complete embedded curve element (`curv` or `para`) from `r` and advances past its
+/// 4-byte-aligned end — the form curves take inside the LUT transform types.
+pub(crate) fn read_curve_element(r: &mut ByteReader<'_>) -> Result<CurveOrParametric> {
+    let type_sig = r.signature()?;
+    r.skip(4)?; // reserved
+    let curve = match &type_sig.0 {
+        b"curv" => CurveOrParametric::Curve(read_curve_body(r)?),
+        b"para" => CurveOrParametric::Parametric(read_parametric_body(r)?),
+        _ => {
+            return Err(Error::InvalidInput(
+                "icc: expected a curv/para curve element",
+            ));
+        }
+    };
+    r.align_to_4()?;
+    Ok(curve)
 }
 
 #[cfg(test)]

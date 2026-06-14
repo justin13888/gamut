@@ -34,6 +34,12 @@ impl<'a> ByteReader<'a> {
         self.buf.len() - self.pos
     }
 
+    /// Advances the cursor to the next 4-byte boundary, the alignment ICC uses between the curve
+    /// sub-elements packed inside a LUT transform.
+    pub(crate) fn align_to_4(&mut self) -> Result<()> {
+        self.skip(self.pos.next_multiple_of(4) - self.pos)
+    }
+
     /// Reads the next `n` bytes, advancing the cursor; errors if fewer than `n` remain.
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self
