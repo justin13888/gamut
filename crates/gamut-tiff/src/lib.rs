@@ -32,6 +32,7 @@
 
 pub mod compression;
 pub mod decoder;
+pub mod deconstruct;
 pub mod encoder;
 pub mod ifd;
 pub mod palette;
@@ -40,6 +41,7 @@ pub mod writer;
 
 pub use compression::Compression;
 pub use decoder::TiffDecoder;
+pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstruct};
 pub use encoder::TiffEncoder;
 pub use palette::Palette8;
 // The structural IFD core lives in gamut-ifd; re-export it so gamut-tiff's public API is unchanged.

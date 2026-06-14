@@ -33,6 +33,12 @@ pub(crate) enum CliError {
     #[error("unsupported output format: {0} (supported: 'avif', 'webp')")]
     UnsupportedOutput(String),
 
+    /// `gamut inspect` found the file was not fully accounted for (the strict/archival check
+    /// failed). The full report is printed to stdout first; this carries the summary rendered to
+    /// stderr that drives the non-zero exit code.
+    #[error("{0}")]
+    NotFullyAccounted(String),
+
     /// A command argument was malformed in a way clap could not catch.
     #[error("invalid argument: {0}")]
     Usage(String),

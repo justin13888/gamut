@@ -5,3 +5,4 @@ pub(crate) mod bitstream;
 pub(crate) mod color;
 pub(crate) mod convert;
 pub(crate) mod dsp;
+pub(crate) mod inspect;
