@@ -38,14 +38,31 @@ assert_eq!(charset.decode(&read.datasets[1].data)?, "sky");
 # Ok::<(), gamut_core::Error>(())
 ```
 
-`tag_info(record, dataset)` resolves a dataset's name and wire constraints. The modern IPTC Photo
-Metadata (Core/Extension) path over XMP (`PhotoMetadata`) and the IIM↔XMP `IimXmpReconciler` are
-in progress (issue #34).
+`tag_info(record, dataset)` resolves a dataset's name and wire constraints.
+
+The modern IPTC Photo Metadata path models Core fields as XMP properties (`PhotoMetadata`, with typed
+accessors for creator, location, rights, keywords, …), and `IimXmpReconciler` merges the two carriers
+into one view — `IptcReader::read` does this for you:
+
+```rust
+use gamut_iptc::{IimBlock, IimDataSet, IptcReader, ConflictPolicy};
+
+let iim = IimBlock { datasets: vec![
+    IimDataSet { record: 2, dataset: 90, data: b"Lyon".to_vec() }, // City
+] };
+// When IIM and XMP disagree, the policy decides; XMP wins by default.
+let merged = IptcReader::with_policy(ConflictPolicy::IimWins).read(Some(&iim), None);
+assert_eq!(merged.city(), Some("Lyon"));
+```
+
+`gamut-iptc` operates on the in-memory XMP property graph; parsing/serializing the XMP *packet bytes*
+is [`gamut-xmp`](../gamut-xmp)'s responsibility (issue #34). IPTC **Extension** structures are out of
+scope; the typed accessors cover IPTC **Core**.
 
 ## Status
 
-Legacy IIM + Photoshop IRB: **implemented**. Modern IPTC-over-XMP and reconciliation: in progress.
-See [STATUS.md](STATUS.md).
+Legacy IIM + Photoshop IRB, IPTC Core over XMP, and IIM↔XMP reconciliation: **implemented**. The
+differential exiv2 oracle and gamut-metadata facade wiring follow. See [STATUS.md](STATUS.md).
 
 ## License
 
