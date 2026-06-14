@@ -17,3 +17,7 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
+# RDF/XML lexing for the reader. An internal detail: no quick-xml type appears in this crate's
+# public API (see `XmpError`), so it does not constrain the crate's own SemVer.
+quick-xml.workspace = true
+thiserror.workspace = true
