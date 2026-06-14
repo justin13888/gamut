@@ -1,17 +1,20 @@
 //! The IPTC writer — the convenient entry point for encoding IPTC metadata.
 
 use gamut_core::Result;
+use gamut_xmp::XmpProperty;
 
 use crate::iim::IimBlock;
 use crate::irb::PhotoshopIrb;
+use crate::photo_metadata::PhotoMetadata;
 
 /// Writer for IPTC metadata.
 ///
-/// For the legacy carrier, [`IptcWriter::write_irb`] serializes IIM datasets into a Photoshop
-/// image-resource stream. To produce a bare IIM dataset stream use [`IimBlock::encode`] directly.
+/// - [`IptcWriter::write_irb`] serializes IIM datasets into a Photoshop `8BIM` resource stream.
+/// - [`IptcWriter::write_xmp_properties`] hands the IPTC properties back as XMP properties to merge
+///   into a packet (serialized by [`gamut_xmp`], issue #34).
 ///
-/// The modern IPTC Photo Metadata (Core/Extension) path, projecting back to XMP properties, is
-/// added in [`crate::photo_metadata`] (see issue #34).
+/// To project an IPTC view to the legacy IIM carrier, use
+/// [`IimXmpReconciler::to_iim`](crate::reconcile::IimXmpReconciler::to_iim) and then `write_irb`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IptcWriter;
 
@@ -32,6 +35,12 @@ impl IptcWriter {
     /// Returns an error if a dataset value is too large to serialize (see [`IimBlock::encode`]).
     pub fn write_irb(&self, block: &IimBlock) -> Result<Vec<u8>> {
         PhotoshopIrb::with_iptc(block.encode()?).encode()
+    }
+
+    /// Returns the IPTC Photo Metadata as XMP properties, ready to merge into an XMP packet.
+    #[must_use]
+    pub fn write_xmp_properties(&self, pm: &PhotoMetadata) -> Vec<XmpProperty> {
+        pm.to_xmp_properties()
     }
 }
 
@@ -69,7 +78,6 @@ mod tests {
 
     #[test]
     fn read_irb_without_iptc_resource_is_none() {
-        // A resource stream with only a non-IPTC block.
         let irb = PhotoshopIrb {
             blocks: vec![crate::irb::IrbBlock {
                 resource_id: 0x03ED,
@@ -79,5 +87,13 @@ mod tests {
         };
         let bytes = irb.encode().unwrap();
         assert_eq!(IptcReader::new().read_irb(&bytes).unwrap(), None);
+    }
+
+    #[test]
+    fn write_xmp_properties_returns_the_properties() {
+        let mut pm = PhotoMetadata::new();
+        pm.set_headline("Breaking news");
+        let props = IptcWriter::new().write_xmp_properties(&pm);
+        assert_eq!(props, pm.properties);
     }
 }

@@ -35,12 +35,31 @@
 //! # Ok::<(), gamut_core::Error>(())
 //! ```
 //!
+//! # Reconciling the two carriers
+//!
+//! [`IptcReader::read`] merges legacy IIM and modern XMP into one [`PhotoMetadata`] view with typed
+//! accessors:
+//!
+//! ```
+//! use gamut_iptc::{IimBlock, IimDataSet, IptcReader};
+//!
+//! let iim = IimBlock { datasets: vec![
+//!     IimDataSet { record: 2, dataset: 90, data: b"Lyon".to_vec() },  // City
+//!     IimDataSet { record: 2, dataset: 25, data: b"river".to_vec() }, // Keywords
+//! ] };
+//! let pm = IptcReader::new().read(Some(&iim), None);
+//! assert_eq!(pm.city(), Some("Lyon"));
+//! assert_eq!(pm.keywords(), ["river"]);
+//! ```
+//!
 //! # Scope
 //!
 //! gamut-iptc is the IPTC *semantics* layer. For the modern path it operates on an in-memory XMP
-//! property graph; parsing and serializing the XMP packet bytes is [`gamut_xmp`]'s responsibility.
-//! Exotic ISO 2022 character sets beyond Latin-1 and UTF-8 are reported as
-//! [`gamut_core::Error::Unsupported`] rather than mis-decoded (see [`charset`]).
+//! property graph ([`PhotoMetadata`] over [`gamut_xmp`]); parsing and serializing the XMP packet
+//! bytes is [`gamut_xmp`]'s responsibility (issue #34). Exotic ISO 2022 character sets beyond
+//! Latin-1 and UTF-8 are reported as [`gamut_core::Error::Unsupported`] rather than mis-decoded (see
+//! [`charset`]). IPTC **Extension** structures (image regions, artwork, licensors) are out of scope;
+//! the typed accessors cover IPTC **Core**.
 #![forbid(unsafe_code)]
 
 pub mod charset;
@@ -49,12 +68,15 @@ pub mod irb;
 pub mod photo_metadata;
 pub mod reader;
 pub mod reconcile;
+pub mod schema;
 pub mod writer;
+
+mod date;
 
 pub use charset::IimCharset;
 pub use iim::{IimBlock, IimDataSet, IimFieldKind, IimRecord, IimTagInfo, tag_info};
 pub use irb::{IrbBlock, PhotoshopIrb};
 pub use photo_metadata::PhotoMetadata;
 pub use reader::IptcReader;
-pub use reconcile::IimXmpReconciler;
+pub use reconcile::{ConflictPolicy, FieldConflict, IimXmpReconciler};
 pub use writer::IptcWriter;
