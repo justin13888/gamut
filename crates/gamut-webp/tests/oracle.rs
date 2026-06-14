@@ -395,6 +395,7 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
                 simple_filter: true,
                 segmented: true,
                 partitions: 4,
+                ..base
             },
         ),
     ];
@@ -488,6 +489,108 @@ fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
             assert_eq!(gamut.y(), lib.y.as_slice(), "Y at {w}x{h} q{quant_index}");
             assert_eq!(gamut.u(), lib.u.as_slice(), "U at {w}x{h} q{quant_index}");
             assert_eq!(gamut.v(), lib.v.as_slice(), "V at {w}x{h} q{quant_index}");
+        }
+    }
+}
+
+#[test]
+fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
+    // mb_lf_adjustments (RFC 6386 §9.4) are a decode path libwebp supports but cwebp never emits, so
+    // the only way to pin gamut's *application* of them against the reference is to emit them from
+    // gamut's encoder and require libwebp to decode the result identically to gamut's own decoder.
+    // (An internal encode→decode round-trip can't: the encoder and decoder share `apply_loop_filter`,
+    // so a bug there would cancel.) detailed_yuv forces B_PRED macroblocks, exercising the mode[0]
+    // (B_PRED) delta alongside ref_frame[0].
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::vp8::frame::{
+        EncodeOptions, LoopFilterDeltas, decode_frame, encode_frame, encode_frame_filtered,
+    };
+
+    let cases = [
+        LoopFilterDeltas {
+            ref_frame: [12, 0, 0, 0],
+            mode: [0; 4],
+        }, // intra ref-frame delta only
+        LoopFilterDeltas {
+            ref_frame: [0; 4],
+            mode: [10, 0, 0, 0],
+        }, // B_PRED mode delta only
+        LoopFilterDeltas {
+            ref_frame: [-20, 0, 0, 0],
+            mode: [0; 4],
+        }, // negative: clamps levels toward 0
+        LoopFilterDeltas {
+            ref_frame: [8, 0, 0, 0],
+            mode: [-12, 0, 0, 0],
+        },
+    ];
+
+    // Guard: the deltas must actually change libwebp's decoded output, else a silently-dropped delta
+    // would make the conformance assertions below vacuous.
+    {
+        let yuv = detailed_yuv(48, 48);
+        let base = write_simple_lossy(&encode_frame(&yuv, 16).0);
+        let with = write_simple_lossy(
+            &encode_frame_filtered(
+                &yuv,
+                16,
+                EncodeOptions {
+                    loop_filter_deltas: cases[0],
+                    ..Default::default()
+                },
+            )
+            .0,
+        );
+        assert_ne!(
+            libwebp_decode_yuv(&base).y,
+            libwebp_decode_yuv(&with).y,
+            "loop-filter deltas must change libwebp's decoded luma"
+        );
+    }
+
+    for deltas in cases {
+        for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33)] {
+            for &q in &[16u8, 48] {
+                let opts = EncodeOptions {
+                    loop_filter_deltas: deltas,
+                    ..Default::default()
+                };
+                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
+                let webp = write_simple_lossy(&payload);
+                let lib = libwebp_decode_yuv(&webp);
+                let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+                assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
+                assert_eq!(gamut.y(), lib.y.as_slice(), "Y {deltas:?} at {w}x{h} q{q}");
+                assert_eq!(gamut.u(), lib.u.as_slice(), "U {deltas:?} at {w}x{h} q{q}");
+                assert_eq!(gamut.v(), lib.v.as_slice(), "V {deltas:?} at {w}x{h} q{q}");
+            }
+        }
+    }
+}
+
+#[test]
+fn gamut_decodes_patched_vp8_profiles_like_libwebp() {
+    // VP8 profiles 1–3 (the 3-bit frame-tag version) are a decode path cwebp never emits. Patch the
+    // version field (bits 1–3 of byte 0) of a gamut key frame and require gamut and libwebp to decode
+    // it identically — pinning that the profile field does not alter intra key-frame reconstruction
+    // (the explicit filter-type bit governs), matching the reference rather than the RFC's prose.
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::vp8::frame::{decode_frame, encode_frame};
+
+    for &(w, h) in &[(32u32, 32u32), (49, 33)] {
+        let (payload, _) = encode_frame(&detailed_yuv(w, h), 24);
+        for version in 1u8..=3 {
+            let mut patched = payload.clone();
+            patched[0] = (patched[0] & !0b1110) | (version << 1);
+            let webp = write_simple_lossy(&patched);
+            let lib = libwebp_decode_yuv(&webp);
+            let gamut = decode_frame(&patched).expect("gamut decode").to_yuv420();
+            assert_eq!((lib.width, lib.height), (w, h), "dims v{version} {w}x{h}");
+            assert_eq!(gamut.y(), lib.y.as_slice(), "Y v{version} at {w}x{h}");
+            assert_eq!(gamut.u(), lib.u.as_slice(), "U v{version} at {w}x{h}");
+            assert_eq!(gamut.v(), lib.v.as_slice(), "V v{version} at {w}x{h}");
         }
     }
 }
