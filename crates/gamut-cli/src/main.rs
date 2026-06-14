@@ -62,6 +62,8 @@ struct Cli {
 enum Command {
     /// Decode an image (PNG/JPEG/PPM/WebP) and re-encode it as AVIF or WebP (gamut-avif/gamut-webp).
     Convert(commands::convert::ConvertArgs),
+    /// Strictly deconstruct a TIFF or DNG: account every byte and flag unknowns (gamut-tiff/gamut-dng).
+    Inspect(commands::inspect::InspectArgs),
     /// AV1 still-image operations (gamut-av1).
     #[command(subcommand)]
     Av1(commands::av1::Av1Command),
@@ -82,6 +84,7 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Command::Convert(args) => commands::convert::run(&args),
+        Command::Inspect(args) => commands::inspect::run(&args),
         Command::Av1(cmd) => commands::av1::run(&cmd),
         Command::Color(cmd) => commands::color::run(&cmd),
         Command::Dsp(cmd) => commands::dsp::run(&cmd),
