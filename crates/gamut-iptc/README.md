@@ -18,13 +18,34 @@ metadata. It is:
 
 ## Usage
 
-No public API yet — implementation pending (issue #34). The type declarations sketch the data model
-(`IimDataSet`/`IimRecord`/`IimTag`, `PhotoshopIrb`/`IrbBlock`, `PhotoMetadata`, `IimXmpReconciler`)
-plus the `IptcReader` / `IptcWriter` entry points.
+The legacy IIM carrier is implemented end to end — parse and serialize the Photoshop `8BIM`
+resource stream (`PhotoshopIrb`), the IIM dataset stream (`IimBlock` / `IimDataSet`), and decode
+text with the coded character set (`IimCharset`):
+
+```rust
+use gamut_iptc::{IimBlock, IimCharset, IimDataSet, IptcReader, IptcWriter};
+
+let block = IimBlock {
+    datasets: vec![
+        IimDataSet { record: 2, dataset: 0, data: vec![0, 4] },        // Record Version = 4
+        IimDataSet { record: 2, dataset: 25, data: b"sky".to_vec() },  // Keywords
+    ],
+};
+let irb = IptcWriter::new().write_irb(&block)?;                        // 8BIM 0x0404 resource
+let read = IptcReader::new().read_irb(&irb)?.expect("0x0404 present");
+let charset = IimCharset::detect(&read)?;                              // 1:90, default Latin-1
+assert_eq!(charset.decode(&read.datasets[1].data)?, "sky");
+# Ok::<(), gamut_core::Error>(())
+```
+
+`tag_info(record, dataset)` resolves a dataset's name and wire constraints. The modern IPTC Photo
+Metadata (Core/Extension) path over XMP (`PhotoMetadata`) and the IIM↔XMP `IimXmpReconciler` are
+in progress (issue #34).
 
 ## Status
 
-Scaffolding — **under active implementation** (issue #34). See [STATUS.md](STATUS.md).
+Legacy IIM + Photoshop IRB: **implemented**. Modern IPTC-over-XMP and reconciliation: in progress.
+See [STATUS.md](STATUS.md).
 
 ## License
 
