@@ -26,3 +26,8 @@ gamut-bitstream.workspace = true
 # libdav1d). Dev-only: the shipped library is C-free and needs no decoder. Building
 # these tests requires meson/ninja/nasm and the `third_party/dav1d` submodule.
 dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
+divan.workspace = true
+
+[[bench]]
+name = "encode"
+harness = false

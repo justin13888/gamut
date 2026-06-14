@@ -12,6 +12,10 @@ exclude = [
     "tooling/libtiff-oracle",
     "tooling/zlib-oracle",
     "tooling/libpng-oracle",
+    # Dev-only helper that builds a vendored nasm from a committed source tarball so the
+    # oracles above can assemble dav1d's x86 SIMD without a system nasm. Excluded for the
+    # same reason: a plain `cargo build` of the shipped crates must never compile it.
+    "tooling/nasm-vendor",
 ]
 
 [workspace.package]
@@ -45,6 +49,10 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 # in shipped code. Handwritten bindings (no bindgen/libclang); statically links bundled libwebp,
 # so the test build needs a C toolchain while the library itself stays C-free.
 libwebp-sys2 = "0.2"
+# Benchmark harness (issue #149). Dev-only: pulled in as a `dev-dependency` by each crate's
+# `[[bench]]` target, never by shipped code. Lightweight (few transitive deps) and reports
+# throughput counters; `just bench` runs the suite.
+divan = "0.1"
 
 # Internal crates. `path` is used for local builds so cross-crate edits resolve without a
 # crates.io round-trip; `version` is the requirement recorded in the published manifest.

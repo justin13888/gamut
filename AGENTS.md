@@ -62,7 +62,8 @@ The shipped crates are pure Rust, but the decoder cross-check tests link referen
 (dav1d, libavif, libtiff) built from the `third_party/` git submodules via the dev-only oracle
 crates in `tooling/`. Running the tests therefore needs the submodules checked out
 (`git submodule update --init --recursive`) and the build tools on `PATH` — CMake/Ninja/Meson
-come from mise; nasm and pkg-config are system packages (`apt-get install nasm pkg-config`).
+come from mise; pkg-config is the one system package (`apt-get install pkg-config`), and nasm
+(for dav1d's x86 SIMD) is built from a vendored source tarball by the oracle build scripts.
 No system-installed decoder binaries are used.
 
 ## Conventions

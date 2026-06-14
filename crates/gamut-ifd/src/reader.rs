@@ -228,4 +228,21 @@ mod tests {
     fn empty_input_errors() {
         assert!(read(&[]).is_err());
     }
+
+    #[test]
+    fn rejects_truncated_ifd() {
+        // Classic header with the first IFD at offset 8. The IFD declares one SHORT entry, but the
+        // file ends right after the entry's count field — no room for the entry's value/offset word
+        // or the next-IFD pointer. The `next_pos + offset_size > data.len()` guard must reject this;
+        // without it the unchecked inline-value slice would index past the end.
+        let data = [
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header: classic, first IFD @ 8
+            0x01, 0x00, // entry count = 1
+            0x00, 0x01, // tag 256
+            0x03, 0x00, // type 3 (SHORT)
+            0x01, 0x00, 0x00, 0x00, // value count = 1
+        ];
+        assert_eq!(data.len(), 18);
+        assert!(read(&data).is_err());
+    }
 }

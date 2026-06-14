@@ -28,3 +28,8 @@ libwebp-sys2.workspace = true
 # Used by the lossy oracle tests to build YUV inputs and wrap raw VP8 bitstreams.
 gamut-color.workspace = true
 gamut-riff.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "codec"
+harness = false

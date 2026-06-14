@@ -24,6 +24,20 @@ const EC_MIN_PROB: u32 = 4;
 /// CDFs are expressed on a 1 << 15 scale (AV1 §8.2.6: `cdf[N - 1] == 1 << 15`).
 const CDF_PROB_TOP: u32 = 1 << 15;
 
+/// The od_ec scaled sub-interval width `(r >> 8) * (f >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT)`
+/// shared by both branches of [`SymbolEncoder::encode_q15`] (AV1 §8.2.6). `f` is an inverse-CDF
+/// bracket in `[0, 1 << 15]` and `r` the current range. Factored out so this non-obvious od_ec
+/// term appears once instead of three times.
+///
+/// The `>> (7 - EC_PROB_SHIFT)` shift is `>> 1` (`EC_PROB_SHIFT == 6`); cargo-mutants' `- → /`
+/// mutation of it (`7 / 6 == 7 - 6 == 1`) is therefore equivalent and is excluded in
+/// `.cargo/mutants.toml`. Every other operator here is on the encode hot path and killed by the
+/// round-trip tests.
+#[inline]
+fn ec_partition(r: u32, f: u32) -> u32 {
+    ((r >> 8) * (f >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT)
+}
+
 /// Encoder for the AV1 symbol (range) coder.
 ///
 /// Feed symbols with [`SymbolEncoder::encode_symbol`] (CDF-coded) and equiprobable bits with
@@ -114,17 +128,14 @@ impl SymbolEncoder {
         debug_assert!(r >= CDF_PROB_TOP);
         let n = nsyms - 1;
         if fl < CDF_PROB_TOP {
-            let u = (((r >> 8) * (fl >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT))
-                + EC_MIN_PROB * (n - (s - 1));
-            let v =
-                (((r >> 8) * (fh >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT)) + EC_MIN_PROB * (n - s);
+            let u = ec_partition(r, fl) + EC_MIN_PROB * (n - (s - 1));
+            let v = ec_partition(r, fh) + EC_MIN_PROB * (n - s);
             debug_assert!(u <= r && v < u);
             low += u64::from(r - u);
             r = u - v;
         } else {
             // Symbol 0: the interval reaches the top, so `low` is unchanged.
-            let v =
-                (((r >> 8) * (fh >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT)) + EC_MIN_PROB * (n - s);
+            let v = ec_partition(r, fh) + EC_MIN_PROB * (n - s);
             debug_assert!(v < r);
             r -= v;
         }
@@ -538,5 +549,70 @@ mod tests {
         }
         assert_eq!(ecdfs, dcdfs);
         assert_eq!(ecounts, dcounts);
+    }
+
+    #[test]
+    fn zero_probability_leading_symbol_roundtrips() {
+        // A CDF whose first entry is 0 gives symbol 0 zero probability. Encoding a *later* symbol
+        // then drives `encode_q15`'s `fl == CDF_PROB_TOP` (else) branch with `s != 0` — the only
+        // path where the `EC_MIN_PROB * (n - s)` partition term is observable (an ordinary
+        // strictly-increasing CDF reaches that branch only at s == 0, where `n - s == n + s`).
+        // A wrong term perturbs the range by only `EC_MIN_PROB`-sized amounts per symbol, so encode
+        // a long stream: the encoder/decoder divergence compounds until a symbol misdecodes. This
+        // kills `n - s` → `n + s` (and `→ /`) in the else branch.
+        let cdf = [0u16, 16384, 32768];
+        let mut rng = Lcg(0x9e37_79b9_7f4a_7c15);
+        let stream: Vec<usize> = (0..4000).map(|_| 1 + rng.below(2) as usize).collect();
+        let mut enc = SymbolEncoder::new();
+        for &s in &stream {
+            enc.encode_symbol(s, &cdf);
+        }
+        let bytes = enc.finish();
+        let mut dec = SymbolDecoder::new(&bytes);
+        for (i, &s) in stream.iter().enumerate() {
+            assert_eq!(dec.read_symbol(&cdf), s, "event {i}");
+        }
+    }
+
+    #[test]
+    fn finish_emits_canonical_minimal_bytes() {
+        // The flush is deterministic: for a fixed bit stream `finish` must emit the exact od_ec
+        // minimal byte string a decoder consumes. These snapshots pin the arithmetic in `finish`
+        // that the round-trip tests alone cannot — a decoder tolerates trailing slack, so a
+        // wrong-but-still-decodable flush would otherwise survive. Each case is also decoded back,
+        // proving the bytes are correct rather than merely fixed. Input is bit `i` of PAT.
+        const PAT: u64 = 0xD2B4_F08C_3A91_67E5;
+        // n = 7/15/23/31 land on s == 8, where `s -= 8` → `/=` would emit an extra flush byte; the
+        // multi-byte cases pin the `(m + 1)` term of `e` against `+` → `-`/`*`.
+        let cases: &[(u32, &[u8])] = &[
+            (0, &[0x80]),
+            (1, &[0xc0]),
+            (7, &[0xa7]),
+            (8, &[0xa7, 0x80]),
+            (15, &[0xa7, 0xe1]),
+            (16, &[0xa7, 0xe0, 0x80]),
+            (23, &[0xa7, 0xe1, 0x07]),
+            (24, &[0xa7, 0xe1, 0x07, 0x80]),
+            (31, &[0xa7, 0xe1, 0x07, 0xc5]),
+            (32, &[0xa7, 0xe1, 0x07, 0xc5, 0x80]),
+            (40, &[0xa7, 0xe1, 0x07, 0xc4, 0xc7, 0x80]),
+            (48, &[0xa7, 0xe1, 0x07, 0xc4, 0xc6, 0xd2, 0x80]),
+        ];
+        for &(n, expected) in cases {
+            let mut enc = SymbolEncoder::new();
+            for i in 0..n {
+                enc.encode_literal(((PAT >> (i % 64)) & 1) as u32, 1);
+            }
+            let bytes = enc.finish();
+            assert_eq!(bytes, expected, "flush bytes for {n} bits");
+            let mut dec = SymbolDecoder::new(&bytes);
+            for i in 0..n {
+                assert_eq!(
+                    dec.read_literal(1),
+                    ((PAT >> (i % 64)) & 1) as u32,
+                    "decode bit {i} of {n}"
+                );
+            }
+        }
     }
 }

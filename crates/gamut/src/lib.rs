@@ -22,6 +22,13 @@
 //! to consume.
 #![forbid(unsafe_code)]
 
+/// The version of this `gamut` library crate, taken from its `Cargo.toml` at compile time.
+///
+/// Exposed so tooling (e.g. the `gamut` CLI's `-V` output) can report the resolved library
+/// version without hardcoding it. Because each workspace crate is versioned independently, this
+/// can differ from the version of the binary or consumer that links it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub use gamut_core as core;
 
 #[cfg(feature = "metadata")]

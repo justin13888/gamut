@@ -164,10 +164,30 @@ mod tests {
     }
 
     #[test]
+    fn reads_final_empty_payload_chunk() {
+        // A zero-payload final chunk leaves exactly CHUNK_HEADER_LEN bytes — the `<` boundary. It is
+        // a complete header, so it must be read (not rejected as "truncated").
+        let file = build(&[(FourCc::VP8L, &[])]);
+        let chunks: Vec<_> = RiffReader::new(&file)
+            .unwrap()
+            .map(|c| c.unwrap())
+            .collect();
+        assert_eq!(
+            chunks,
+            vec![Chunk {
+                fourcc: FourCc::VP8L,
+                payload: &[][..]
+            }]
+        );
+    }
+
+    #[test]
     fn errors_on_chunk_size_exceeding_data() {
         let mut file = build(&[(FourCc::VP8L, &[0; 4])]);
-        // Inflate the chunk's declared size beyond the bytes that follow it.
-        file[16..20].copy_from_slice(&0xffu32.to_le_bytes());
+        // The chunk has 4 payload bytes available; declare 5 — one past the end. This pins the
+        // `rest.len() - CHUNK_HEADER_LEN` available-bytes computation: a wrong sign would admit the
+        // chunk and slice the payload out of bounds.
+        file[16..20].copy_from_slice(&5u32.to_le_bytes());
         let mut reader = RiffReader::new(&file).unwrap();
         assert!(reader.next().unwrap().is_err());
         assert!(reader.next().is_none(), "iteration stops after an error");

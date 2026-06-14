@@ -239,12 +239,18 @@ mod tests {
             }
         }
         let img = ImageRef::<Rgb8>::new(&rgb, dims(3, 2)).unwrap();
-        assert_eq!(img.row(1).len(), 9);
+        // Assert row *contents*, not just length: `row(y)` length is `row_len` regardless of the
+        // start offset, so a mutated offset (e.g. `y * row_len` → `y / row_len`, which aliases
+        // row 0) is caught only by checking the actual samples.
+        assert_eq!(img.row(0), &[0, 0, 0xAA, 1, 0, 0xAA, 2, 0, 0xAA]);
+        assert_eq!(img.row(1), &[0, 1, 0xAA, 1, 1, 0xAA, 2, 1, 0xAA]);
         assert_eq!(img.pixel(2, 1), &[2, 1, 0xAA]);
         assert_eq!(img.pixel(0, 0), &[0, 0, 0xAA]);
+        // `rows()` must yield the same per-row samples in order (not merely two slices of length 9).
         let rows: Vec<_> = img.rows().collect();
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.len() == 9));
+        assert_eq!(rows[0], img.row(0));
+        assert_eq!(rows[1], img.row(1));
     }
 
     #[test]
