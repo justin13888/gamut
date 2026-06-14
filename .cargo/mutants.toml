@@ -138,6 +138,12 @@ exclude_re = [
     # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
     # *is* observable and is killed by a test at x = 0.5.)
     'replace < with <= in prophoto_rgb_eotf_standard',
+    # gamut-avif `AvifEncoder::lossless`: a named, intent-revealing alias for the default encoder
+    # (the default mode is already lossless), so its body *is* `Self::default()` and the
+    # `-> Default::default()` replacement is byte-identical — provably equivalent, unkillable. It
+    # exists to pair with `lossy()` and make the call site explicit; `new()` (also `Self::default()`)
+    # generates no such mutant. This is the only mutant the function produces.
+    'replace AvifEncoder::lossless -> Self with Default::default\(\)',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
     # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75 }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
