@@ -17,9 +17,9 @@ golden data.
 
 | Phase | Spec | Scope | Status |
 | ----- | ---- | ----- | ------ |
-| P1 | — | Scaffold: crate, workspace wiring, docs, region-free data-model skeleton | ✅ in progress |
-| P2 | Photoshop IRB | Parse the `8BIM` resource stream; locate the `0x0404` IIM resource | ☐ |
-| P3 | IIM 4.2 | IIM dataset model — Application record (2) descriptive fields | ☐ |
+| P1 | — | Scaffold: crate, workspace wiring, docs, region-free data-model skeleton | ✅ |
+| P2 | Photoshop IRB | Parse + serialize the `8BIM` resource stream; locate the `0x0404` IIM resource | ✅ |
+| P3 | IIM 4.2 | IIM dataset stream codec (standard + extended length), 1:90 charset (Latin-1/UTF-8), known-tag table | ✅ |
 | P4 | IPTC PMD | IPTC Core/Extension over XMP (via `gamut-xmp` typed properties) | ☐ |
 | P5 | IPTC mapping | **Keystone** — IIM ↔ XMP reconciliation (precedence + sync rules) | ☐ |
 | P6 | — | Writer round-trip for both carriers + exiv2/exiftool differential gate | ☐ |
