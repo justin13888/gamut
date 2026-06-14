@@ -643,6 +643,23 @@ mod tests {
     }
 
     #[test]
+    fn predict_modes_pin_exact_values() {
+        // Absolute outputs for every predictor mode (RFC 9649 §4.1) with fixed, channel-diverse
+        // neighbours. predict and its helpers (average2 for modes 5-10, select for 11, and
+        // clamp_add_subtract_full/half for 12-13) are shared by the forward and inverse passes, so a
+        // symmetric round-trip — and the `== average2(...)` style checks above — cannot catch a
+        // mutation in them; a position-weighted checksum over all 14 outputs does.
+        let l = make_argb(10, 200, 30, 40);
+        let t = make_argb(250, 60, 70, 200);
+        let tl = make_argb(90, 100, 110, 120);
+        let tr = make_argb(130, 20, 240, 16);
+        let sum: i128 = (0..14u8)
+            .map(|m| (i128::from(m) + 1) * i128::from(predict(m, l, t, tl, tr)))
+            .sum();
+        assert_eq!(sum, 227_728_720_966);
+    }
+
+    #[test]
     fn average2_rounds_down_per_channel() {
         let a = make_argb(10, 20, 30, 41);
         let b = make_argb(11, 21, 31, 40);

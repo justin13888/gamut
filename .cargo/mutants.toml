@@ -183,8 +183,9 @@ exclude_re = [
     # gamut-webp VP8 frame — behaviourally-equivalent.
     # frame_header sets `sharpness: 0`, identical to LoopFilterParams::default().sharpness, so deleting
     # the field is byte-for-byte unchanged. (Deleting `simple`/`y_ac` IS caught by
-    # `frame_header_carries_quant_index_and_filter_type`.)
-    'delete field sharpness',
+    # `frame_header_carries_quant_index_and_filter_type`.) Line-anchored: cargo-mutants matches
+    # field-deletion mutants by location, not by the "delete field …" description text.
+    'frame\.rs:299:13: delete field sharpness',
     # split_token_partitions reassembles the 3-byte size from disjoint bytes (`s0 | s1<<8 | s2<<16`)
     # ⇒ `|` == `^`. Its bits-16-23 byte (`s2<<16` read; `len>>16` write) is non-zero only for a single
     # token partition > 64 KiB, which gamut never emits; for every reachable size that byte is 0, so
@@ -225,4 +226,52 @@ exclude_re = [
     'frame\.rs:1030:53: replace / with',
     'frame\.rs:1050:44: replace \* with /',
     'frame\.rs:1071:59: replace < with <=',
+    # gamut-webp VP8L encoder — correctness-preserving free choices. The lossless encode->decode
+    # round-trip and the libwebp oracle BOTH run on these paths, so any mutant that produced an invalid
+    # prefix code, an out-of-range backward reference, or a residual the inverse transform cannot undo
+    # would fail them and is NOT among the survivors here. What remains are pure optimize-vs-optimize
+    # choices that change which valid stream is emitted (compression density, issue #31), not its
+    # validity — so no correctness test can distinguish them:
+    #   estimate_color_element / best_predictor_mode — least-squares colour coefficients and the
+    #   minimum-residual spatial predictor; any element/mode is reversible and is signalled per block;
+    'in estimate_color_element',
+    'replace estimate_color_element ->',
+    'in best_predictor_mode',
+    'replace best_predictor_mode ->',
+    #   residual_cost — a cheap entropy proxy used only to compare predictor modes;
+    'in residual_cost',
+    'replace residual_cost ->',
+    #   pick_cache_bits / assign_groups — the colour-cache size and the meta-Huffman block grouping
+    #   (both deferred-optimization knobs, issue #31; any choice is faithfully signalled);
+    'in pick_cache_bits',
+    'replace pick_cache_bits ->',
+    'in assign_groups',
+    'replace assign_groups ->',
+    #   huffman_pass — one length-limited Huffman construction pass; a suboptimal-but-valid tree only
+    #   costs bits (a malformed tree fails the round-trip and is caught);
+    'in huffman_pass',
+    #   BackwardRefs::{hash,find,insert} — the LZ77 hash-chain matcher. Per its own contract
+    #   (lz77.rs): "Correctness does not depend on the hash quality — matches are verified by
+    #   comparison — only compression does." find() returns `1 <= distance <= pos` matches it verified.
+    'in BackwardRefs::hash',
+    'replace BackwardRefs::hash ->',
+    'in BackwardRefs::find',
+    'in BackwardRefs::insert',
+    #   forward_color / forward_predictor / forward_color_indexing replaced wholesale — these apply the
+    #   *optional* §4 transforms; skipping a transform (the `-> vec![]`/`-> ()` body) emits a valid
+    #   untransformed stream. (Their per-pixel apply math is asymmetric with the inverse and IS caught
+    #   by the round-trip — only the whole-body "don't transform" replacement survives.)
+    'replace forward_color -> ',
+    'replace forward_predictor -> ',
+    'replace forward_color_indexing -> ',
+    # gamut-webp VP8L — behaviourally-equivalent.
+    #   make_argb packs four channels into disjoint byte lanes (`a<<24 | r<<16 | g<<8 | b`), and
+    #   reverse_bits ORs a single freshly-shifted bit into a vacated position — disjoint operands, so
+    #   `|` == `^`.
+    'replace \| with \^ in make_argb',
+    'replace \| with \^ in reverse_bits',
+    #   inverse_color's `if width == 0 || height == 0` is a defensive guard; for every real (≥1×1)
+    #   image both operands are false, so `||`→`&&` cannot change the result (same shape as the av1
+    #   loop_restore guard above).
+    'replace \|\| with && in inverse_color',
 ]
