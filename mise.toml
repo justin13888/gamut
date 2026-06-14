@@ -7,8 +7,10 @@
 #
 # Not managed here:
 #   * Rust   — pinned by rustup via rust-toolchain.toml.
-#   * nasm, pkg-config — system packages (apt/brew); they lack clean mise backends and
-#     are only needed to build the vendored dav1d/libavif cross-check oracles.
+#   * pkg-config — system package (apt/brew); lacks a clean mise backend and is only needed
+#     to build the vendored dav1d/libavif cross-check oracles.
+#   * nasm   — also lacks a clean mise backend, so the oracle build scripts build it from a
+#     committed source tarball (tooling/nasm-vendor); it is not a system dependency.
 
 [tools]
 # Dev workflow

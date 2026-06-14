@@ -120,6 +120,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags",
+ "cexpr",
+ "clang-sys",
+ "itertools",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex 1.3.0",
+ "syn",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,6 +265,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -276,6 +297,12 @@ name = "constant_time_eq"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
+
+[[package]]
+name = "condtype"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baf0a07a401f374238ab8e2f11a104d2851bf9ce711ec69804834de8af45c7af"
 
 [[package]]
 name = "cpufeatures"
@@ -330,7 +357,43 @@ dependencies = [
 name = "dav1d-oracle"
 version = "0.0.0"
 dependencies = [
- "bindgen",
+ "bindgen 0.71.1",
+ "nasm-vendor",
+]
+
+[[package]]
+name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
+]
+
+[[package]]
+name = "divan"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a405457ec78b8fe08b0e32b4a3570ab5dff6dd16eb9e76a5ee0a9d9cbd898933"
+dependencies = [
+ "cfg-if",
+ "clap",
+ "condtype",
+ "divan-macros",
+ "libc",
+ "regex-lite",
+]
+
+[[package]]
+name = "divan-macros"
+version = "0.1.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9556bc800956545d6420a640173e5ba7dfa82f38d3ea5a167eb555bc69ac3323"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -419,6 +482,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -471,6 +544,7 @@ name = "gamut-av1"
 version = "0.3.0"
 dependencies = [
  "dav1d-oracle",
+ "divan",
  "gamut-bitstream",
  "gamut-color",
  "gamut-core",
@@ -491,6 +565,7 @@ dependencies = [
 name = "gamut-avif"
 version = "0.3.0"
 dependencies = [
+ "divan",
  "gamut-av1",
  "gamut-color",
  "gamut-core",
@@ -502,6 +577,7 @@ dependencies = [
 name = "gamut-bitstream"
 version = "0.2.1"
 dependencies = [
+ "divan",
  "gamut-core",
 ]
 
@@ -522,6 +598,7 @@ name = "gamut-color"
 version = "0.3.0"
 dependencies = [
  "bitflags",
+ "divan",
  "gamut-core",
 ]
 
@@ -557,6 +634,7 @@ dependencies = [
 name = "gamut-dsp"
 version = "0.2.1"
 dependencies = [
+ "divan",
  "gamut-core",
 ]
 
@@ -595,6 +673,7 @@ dependencies = [
 name = "gamut-ifd"
 version = "0.1.1"
 dependencies = [
+ "divan",
  "gamut-core",
 ]
 
@@ -610,6 +689,7 @@ dependencies = [
 name = "gamut-isobmff"
 version = "0.3.0"
 dependencies = [
+ "divan",
  "gamut-bitstream",
  "gamut-core",
 ]
@@ -639,6 +719,7 @@ dependencies = [
 name = "gamut-riff"
 version = "0.1.1"
 dependencies = [
+ "divan",
  "gamut-bitstream",
  "gamut-core",
 ]
@@ -647,6 +728,7 @@ dependencies = [
 name = "gamut-tiff"
 version = "0.2.0"
 dependencies = [
+ "divan",
  "gamut-bitstream",
  "gamut-color",
  "gamut-core",
@@ -659,6 +741,7 @@ dependencies = [
 name = "gamut-tonemap"
 version = "0.1.2"
 dependencies = [
+ "divan",
  "gamut-core",
 ]
 
@@ -684,6 +767,7 @@ dependencies = [
 name = "gamut-webp"
 version = "0.2.0"
 dependencies = [
+ "divan",
  "gamut-bitstream",
  "gamut-color",
  "gamut-core",
@@ -707,20 +791,6 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
-]
-
-[[package]]
-name = "getrandom"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
-dependencies = [
- "cfg-if",
- "js-sys",
- "libc",
- "r-efi 5.3.0",
- "wasip2",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -871,7 +941,8 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 name = "libavif-oracle"
 version = "0.0.0"
 dependencies = [
- "bindgen",
+ "bindgen 0.72.1",
+ "nasm-vendor",
 ]
 
 [[package]]
@@ -894,7 +965,7 @@ dependencies = [
 name = "libtiff-oracle"
 version = "0.0.0"
 dependencies = [
- "bindgen",
+ "bindgen 0.71.1",
  "tempfile",
 ]
 
@@ -997,6 +1068,15 @@ checksum = "bb85c154ba489f01b25c0d36ae69a87e4a1c73a72631fc6c0eb6dde34a73e44b"
 dependencies = [
  "num-traits",
  "pxfm",
+]
+
+[[package]]
+name = "nasm-vendor"
+version = "0.0.0"
+dependencies = [
+ "lzma-rs",
+ "sha2",
+ "tar",
 ]
 
 [[package]]
@@ -1147,6 +1227,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1230,6 +1316,12 @@ name = "sha1"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -1287,6 +1379,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1295,6 +1398,16 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "once_cell",
+ "rustix",
+ "windows-sys",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
  "rustix",
  "windows-sys",
 ]
@@ -1692,6 +1805,16 @@ dependencies = [
  "zeroize",
  "zopfli",
  "zstd",
+] 
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]

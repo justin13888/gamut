@@ -1,0 +1,3445 @@
+{
+    "documentation_available_at": "https://iptc.org/std/photometadata/documentation/techreference",
+    "release_comment": "This TechReference release is the initial release of the standard version 2025.1, as of 2025-11-03. ",
+    "release_timestamp": "2025-11-04T09:58:40+00:00",
+    "ipmd_top": {
+        "altTextAccessibility": {
+            "name": "Alt Text (Accessibility)",
+            "label": "Alt Text (Accessibility)",
+            "helptext": "Enter text describing the appearance of the image from a visual perspective, focusing on details that are relevant to the purpose and meaning of the image",
+            "usernotes": "This property should not be confused with the IPTC property Headline, which is a brief synopsis or summary of the contents of the image. This property is required for conformance with the W3C Web Content Accessibility Guidelines (WCAG).",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp150",
+            "ugtopic": "gimgcont",
+            "specidx": "#alt-text-accessibility",
+            "datatype": "struct",
+            "dataformat": "AltLang",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpCore:AltTextAccessibility",
+            "etXMP": "XMP-iptcCore:AltTextAccessibility"
+        },
+        "cityName": {
+            "name": "City (legacy)",
+            "label": "City",
+            "helptext": "Enter the name of the city pictured in this image",
+            "usernotes": "This is a detail of a location with blurred semantics as it does not clearly indicate whether it is the location in the image or the location the photo was taken - which can be different. Two more concise properties are available in IPTC Extension with Location Created and Location Shown in the Image.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp170",
+            "ugtopic": "location",
+            "specidx": "#city-legacy",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:90",
+            "IIMname": "City",
+            "IIMmaxbytes": 32,
+            "XMPid": "photoshop:City",
+            "etXMP": "XMP-photoshop:City",
+            "etIIM": "IPTC:City"
+        },
+        "copyrightNotice": {
+            "name": "Copyright Notice",
+            "label": "Copyright Notice",
+            "helptext": "Enter a Notice on the current owner of the Copyright for this image, such as \u00a92008 Jane Doe",
+            "usernotes": "Copyright ownership can be expressed in a more controlled way using the PLUS fields \"Copyright Owner\", \"Copyright Owner ID\", \"Copyright Owner Name\" of the IPTC Extension. It is the user's responsibility to keep the values of the four fields in sync.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp200",
+            "ugtopic": "rights",
+            "specidx": "#copyright-notice",
+            "datatype": "struct",
+            "dataformat": "AltLang",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:116",
+            "IIMname": "Copyright Notice",
+            "IIMmaxbytes": 128,
+            "XMPid": "dc:rights",
+            "EXIFid": "33432",
+            "SCHEMAid": "https://schema.org/copyrightNotice",
+            "etXMP": "XMP-dc:Rights",
+            "etIIM": "IPTC:CopyrightNotice",
+            "etEXIF": "IFD0:Copyright"
+        },
+        "countryName": {
+            "name": "Country (legacy)",
+            "label": "Country",
+            "helptext": "Enter the name of the country pictured in this image",
+            "usernotes": "This is a detail of a location with blurred semantics as it does not clearly indicate whether it is the location in the image or the location the photo was taken - which can be different. Two more concise properties are available in IPTC Extension with Location Created and Location Shown in the Image.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp220",
+            "ugtopic": "location",
+            "specidx": "#country-legacy",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:101",
+            "IIMname": "Country/Primary Location Name",
+            "IIMmaxbytes": 64,
+            "XMPid": "photoshop:Country",
+            "etXMP": "XMP-photoshop:Country",
+            "etIIM": "IPTC:Country-PrimaryLocationName"
+        },
+        "countryCode": {
+            "name": "Country Code (legacy)",
+            "label": "ISO Country Code",
+            "helptext": "Enter the 2 or 3 letter ISO 3166 Country Code of the Country pictured in this image",
+            "usernotes": "This is a detail of a location with blurred semantics as it does not clearly indicate whether it is the location in the image or the location the photo was taken - which can be different. Two more concise properties are available in IPTC Extension with Location Created and Location Shown in the Image.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp230",
+            "ugtopic": "location",
+            "specidx": "#country-code-legacy",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:100",
+            "IIMname": "Country/Primary Location Code",
+            "IIMmaxbytes": 3,
+            "XMPid": "Iptc4xmpCore:CountryCode",
+            "etXMP": "XMP-iptcCore:CountryCode",
+            "etIIM": "IPTC:Country-PrimaryLocationCode"
+        },
+        "creatorNames": {
+            "name": "Creator",
+            "label": "Creator",
+            "helptext": "Enter the name of the person that created this image",
+            "usernotes": "The creator can be expressed in a more controlled way using the \"Image Creator\" of PLUS  in the IPTC Extension additionally. It is the user's responsibility to keep the values of the IPTC Core and the PLUS fields in sync.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp240",
+            "ugtopic": "rights",
+            "specidx": "#creator",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "IIMid": "2:80",
+            "IIMname": "By-line",
+            "IIMmaxbytes": 32,
+            "XMPid": "dc:creator",
+            "SCHEMAid": "https://schema.org/creator",
+            "etXMP": "XMP-dc:Creator",
+            "etIIM": "IPTC:By-line",
+            "etEXIF": "IFD0:Artist"
+        },
+        "creatorContactInfo": {
+            "name": "Creator's Contact Info",
+            "label": "Creator's Contact info",
+            "helptext": "",
+            "usernotes": "The IPTC Extension Licensor fields should be used instead of these Creator's Contact Info fields if you are using IPTC Extension fields. If the creator is also the licensor his or her contact information should be provided in the Licensor fields.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp250",
+            "ugtopic": "rights",
+            "specidx": "#creator's-contact-info",
+            "datatype": "struct",
+            "dataformat": "CreatorContactInfo",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpCore:CreatorContactInfo",
+            "etXMP": "XMP-iptcCore:CreatorContactInfo"
+        },
+        "jobtitle": {
+            "name": "Creator's jobtitle",
+            "label": "Creator's Jobtitle",
+            "helptext": "Enter the Job Title of the person listed in the Creator field",
+            "usernotes": "",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp260",
+            "ugtopic": "rights",
+            "specidx": "#creator's-jobtitle",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:85",
+            "IIMname": "By-line Title",
+            "IIMmaxbytes": 32,
+            "XMPid": "photoshop:AuthorsPosition",
+            "etXMP": "XMP-photoshop:AuthorsPosition",
+            "etIIM": "IPTC:By-lineTitle"
+        },
+        "creditLine": {
+            "name": "Credit Line",
+            "label": "Credit Line",
+            "helptext": "Enter who should be credited when this image is published",
+            "usernotes": "Note 1: For more formal identifications of the creator or the owner of the copyrights of this image other rights properties may be used. \nNote 2: This property was named \"Credit\" by the IIM metadata, then it was renamed to \"Provider\" in IPTC Core 1.0. In IPTC Core 1.1. it has been renamed to \"Credit Line\" as the field is used for this purpose by many users.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp270",
+            "ugtopic": "rights",
+            "specidx": "#credit-line",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:110",
+            "IIMname": "Credit",
+            "IIMmaxbytes": 32,
+            "XMPid": "photoshop:Credit",
+            "SCHEMAid": "https://schema.org/creditText",
+            "etXMP": "XMP-photoshop:Credit",
+            "etIIM": "IPTC:Credit"
+        },
+        "dateCreated": {
+            "name": "Date Created",
+            "label": "Date Created",
+            "helptext": "Enter the Date the image was taken",
+            "usernotes": "",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp300",
+            "ugtopic": "admin",
+            "specidx": "#date-created",
+            "datatype": "string",
+            "dataformat": "date-time",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:55",
+            "IIMname": "Date Created+2:60 Time Created",
+            "XMPid": "photoshop:DateCreated",
+            "EXIFid": "36867",
+            "SCHEMAid": "https://schema.org/dateCreated",
+            "etXMP": "XMP-photoshop:DateCreated",
+            "etIIM": "IPTC:DateCreated+IPTC:TimeCreated",
+            "etEXIF": "ExifIFD:DateTimeOriginal+ExifIFD:SubSecTimeOriginal+ExifIFD:OffsetTimeOriginal"
+        },
+        "description": {
+            "name": "Description",
+            "label": "Caption/Description",
+            "helptext": "Enter a \"caption\" describing the who, what, and why of what is happening in this image, this might include names of people, and/or their role in the action that is taking place within the image",
+            "usernotes": "",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp310",
+            "ugtopic": "gimgcont",
+            "specidx": "#description",
+            "datatype": "struct",
+            "dataformat": "AltLang",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:120",
+            "IIMname": "Caption/Abstract",
+            "IIMmaxbytes": 2000,
+            "XMPid": "dc:description",
+            "EXIFid": "270",
+            "SCHEMAid": "https://schema.org/caption",
+            "etXMP": "XMP-dc:Description",
+            "etIIM": "IPTC:Caption-Abstract",
+            "etEXIF": "IFD0:ImageDescription"
+        },
+        "captionWriter": {
+            "name": "Description Writer",
+            "label": "Caption/Description writer",
+            "helptext": "Enter the name of the person(s) involved in writing, editing or correcting the Description, Alt Text (Accessibility), or Extended Description (Accessibility) of the image, separated by commas",
+            "usernotes": "Multiple description writers can be given. May have to be separated by a comma in the user interface.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp320",
+            "ugtopic": "admin",
+            "specidx": "#description-writer",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:122",
+            "IIMname": "Writer/Editor",
+            "IIMmaxbytes": 32,
+            "XMPid": "photoshop:CaptionWriter",
+            "SCHEMAid": "https://schema.org/editor",
+            "etXMP": "XMP-photoshop:CaptionWriter",
+            "etIIM": "IPTC:Writer-Editor"
+        },
+        "extDescrAccessibility": {
+            "name": "Extended Description (Accessibility)",
+            "label": "Extended Description (Accessibility)",
+            "helptext": "Enter the text describing the appearance of an image from a visual perspective, focusing on relevant details that further describe the meaning and purpose of the image",
+            "usernotes": "This property should not be confused with the IPTC property Description/Caption, which is the who, what, when, where, why, how of an image. This property can be combined with Alt Text (Accessibility) if and when a brief description is not sufficient to convey the purpose and meaning of an image. It should not repeat the information in the Alt Text (Accessibility) property. It is required for conformance with the W3C Web Content Accessibility Guidelines (WCAG).",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp380",
+            "ugtopic": "gimgcont",
+            "specidx": "#extended-description-accessibility",
+            "datatype": "struct",
+            "dataformat": "AltLang",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpCore:ExtDescrAccessibility",
+            "etXMP": "XMP-iptcCore:ExtDescrAccessibility"
+        },
+        "headline": {
+            "name": "Headline",
+            "label": "Headline",
+            "helptext": "Enter a brief publishable synopsis or summary of the contents of the image",
+            "usernotes": "",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp400",
+            "ugtopic": "gimgcont",
+            "specidx": "#headline",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:105",
+            "IIMname": "Headline",
+            "IIMmaxbytes": 256,
+            "XMPid": "photoshop:Headline",
+            "SCHEMAid": "https://schema.org/headline",
+            "etXMP": "XMP-photoshop:Headline",
+            "etIIM": "IPTC:Headline"
+        },
+        "instructions": {
+            "name": "Instructions",
+            "label": "Instructions",
+            "helptext": "Enter information about embargoes, or other restrictions not covered by the Rights Usage field",
+            "usernotes": "The Instructions may include any of the following: embargoes (NewsMagazines OUT) and other restrictions not covered by the \"Rights Usage Terms\" field; information regarding the original means of capture (scanning notes, colourspace info) or other specific text information that the user may need for accurate reproduction; additional permissions required when publishing; credits for publishing if they exceed the IIM length of the credit field",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp470",
+            "ugtopic": "admin",
+            "specidx": "#instructions",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:40",
+            "IIMname": "Special Instruction",
+            "IIMmaxbytes": 256,
+            "XMPid": "photoshop:Instructions",
+            "etXMP": "XMP-photoshop:Instructions",
+            "etIIM": "IPTC:SpecialInstructions"
+        },
+        "intellectualGenre": {
+            "name": "Intellectual Genre (legacy)",
+            "label": "Intellectual genre",
+            "helptext": "Enter a term to describe the nature of the image in terms of its intellectual or journalistic characteristics",
+            "usernotes": "Note on \"legacy\": the Intellectual Genre can be expressed in a more controlled way using the \"Genre\" property of the IPTC Extension, IPTC recommends using it.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp480",
+            "ugtopic": "gimgcont",
+            "specidx": "#intellectual-genre-legacy",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:04",
+            "IIMname": "Object Attribute Reference",
+            "IIMmaxbytes": 64,
+            "XMPid": "Iptc4xmpCore:IntellectualGenre",
+            "etXMP": "XMP-iptcCore:IntellectualGenre",
+            "etIIM": "IPTC:ObjectAttributeReference"
+        },
+        "jobid": {
+            "name": "Job Id",
+            "label": "Job Identifier",
+            "helptext": "Enter a number or identifier needed for workflow control or tracking",
+            "usernotes": "",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp490",
+            "ugtopic": "admin",
+            "specidx": "#job-id",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:103",
+            "IIMname": "Original Transmission Reference",
+            "IIMmaxbytes": 32,
+            "XMPid": "photoshop:TransmissionReference",
+            "etXMP": "XMP-photoshop:TransmissionReference",
+            "etIIM": "IPTC:OriginalTransmissionReference"
+        },
+        "keywords": {
+            "name": "Keywords",
+            "label": "Keywords",
+            "helptext": "Enter any number of keywords, terms or phrases to express the subject and other aspects of the content of the image.",
+            "usernotes": "",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp500",
+            "ugtopic": "gimgcont",
+            "specidx": "#keywords",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "IIMid": "2:25",
+            "IIMname": "Keywords",
+            "IIMmaxbytes": 64,
+            "XMPid": "dc:subject",
+            "etXMP": "XMP-dc:Subject",
+            "etIIM": "IPTC:Keywords"
+        },
+        "provinceState": {
+            "name": "Province or State (legacy)",
+            "label": "Province/State",
+            "helptext": "Enter the name of the province or state pictured in this image",
+            "usernotes": "This is a detail of a location with blurred semantics as it does not clearly indicate whether it is the location in the image or the location the photo was taken - which can be different. Two more concise properties are available in IPTC Extension with Location Created and Location Shown in the Image.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp690",
+            "ugtopic": "location",
+            "specidx": "#province-or-state-legacy",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:95",
+            "IIMname": "Province/State",
+            "IIMmaxbytes": 32,
+            "XMPid": "photoshop:State",
+            "etXMP": "XMP-photoshop:State",
+            "etIIM": "IPTC:Province-State"
+        },
+        "usageTerms": {
+            "name": "Rights Usage Terms",
+            "label": "Rights Usage Terms",
+            "helptext": "Enter instructions on how this image can legally be used",
+            "usernotes": "Rights and licensing related properties of the IPTC Extension can be used in parallel to express the licensed usage in more controlled terms.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp700",
+            "ugtopic": "licensing",
+            "specidx": "#rights-usage-terms",
+            "datatype": "struct",
+            "dataformat": "AltLang",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "xmpRights:UsageTerms",
+            "etXMP": "XMP-xmpRights:UsageTerms"
+        },
+        "sceneCodes": {
+            "name": "Scene Code",
+            "label": "IPTC Scene Code",
+            "helptext": "Enter only the 6-digit codes from the IPTC Scene NewsCodes Controlled Vocabulary (see: http://cv.iptc.org/newscodes/scene)",
+            "usernotes": "",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp710",
+            "ugtopic": "gimgcont",
+            "specidx": "#scene-code",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpCore:Scene",
+            "etXMP": "XMP-iptcCore:Scene"
+        },
+        "source": {
+            "name": "Source (Supply Chain)",
+            "label": "Source (Supply Chain)",
+            "helptext": "Enter or edit the name of a person or party who has a role in the content supply chain, such as a person or entity from whom you received this image from",
+            "usernotes": "",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp720",
+            "ugtopic": "rights",
+            "specidx": "#source-supply-chain",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:115",
+            "IIMname": "Source",
+            "IIMmaxbytes": 32,
+            "XMPid": "photoshop:Source",
+            "etXMP": "XMP-photoshop:Source",
+            "etIIM": "IPTC:Source"
+        },
+        "subjectCodes": {
+            "name": "Subject Code (legacy)",
+            "label": "IPTC Subject Code",
+            "helptext": "Enter only the 8-digit codes from the IPTC Subject NewsCode Controlled Vocabulary (see: http://cv.iptc.org/newscodes/subjectcode)",
+            "usernotes": "Note on \"legacy\": The Subject Codes were retired by IPTC before 2010. For the classification of images use the IPTC Media Topics vocabulary now, see: http://cv.iptc.org/newscodes/mediatopic For the Media Topics  the CV Term About Image property must be used.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp730",
+            "ugtopic": "gimgcont",
+            "specidx": "#subject-code-legacy",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "IIMid": "2:12",
+            "IIMname": "Subject Reference",
+            "IIMmaxbytes": 236,
+            "XMPid": "Iptc4xmpCore:SubjectCode",
+            "etXMP": "XMP-iptcCore:SubjectCode",
+            "etIIM": "IPTC:SubjectReference"
+        },
+        "sublocationName": {
+            "name": "Sublocation (legacy)",
+            "label": "Sublocation",
+            "helptext": "Enter the name of the Sublocation pictured in this image",
+            "usernotes": "This is a detail of a location with blurred semantics as it does not clearly indicate whether it is the location in the image or the location the photo was taken - which can be different. Two more concise properties are available in IPTC Extension with Location Created and Location Shown in the Image.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp740",
+            "ugtopic": "location",
+            "specidx": "#sublocation-legacy",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:92",
+            "IIMname": "Sublocation",
+            "IIMmaxbytes": 32,
+            "XMPid": "Iptc4xmpCore:Location",
+            "etXMP": "XMP-iptcCore:Location",
+            "etIIM": "IPTC:Sub-location"
+        },
+        "title": {
+            "name": "Title",
+            "label": "Title",
+            "helptext": "Enter a short verbal and human readable name for the image, this may be the file name",
+            "usernotes": "Many use the Title field to store the filename of the image, though the field may be used in many ways. Formal identifiers are provided by the Digital Image Id, or the Registry Entry property of the IPTC Extension.",
+            "ipmdschema": "IptcCore",
+            "sortorder": "tlp750",
+            "ugtopic": "admin",
+            "specidx": "#title",
+            "datatype": "struct",
+            "dataformat": "AltLang",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "IIMid": "2:05",
+            "IIMname": "Object Name",
+            "IIMmaxbytes": 64,
+            "XMPid": "dc:title",
+            "etXMP": "XMP-dc:Title",
+            "etIIM": "IPTC:ObjectName"
+        },
+        "additionalModelInfo": {
+            "name": "Additional Model Information",
+            "label": "Additional model info",
+            "helptext": "Enter information like ethnicity or other details about the model(s) in this image",
+            "usernotes": "Use the Model Age field for the age of model(s).",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp100",
+            "ugtopic": "person",
+            "specidx": "#additional-model-information",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:AddlModelInfo",
+            "etXMP": "XMP-iptcExt:AdditionalModelInformation"
+        },
+        "aIPromptInformation": {
+            "name": "AI Prompt Information",
+            "label": "AI Prompt Information",
+            "helptext": "Enter the information given to the generative AI service as \u201cprompt(s)\u201d in order to generate this image.",
+            "usernotes": "This may include negative [excludes] and positive [includes] statements in the prompt.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp110",
+            "ugtopic": "admin",
+            "specidx": "#ai-prompt-information",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:AIPromptInformation",
+            "etXMP": "XMP-iptcExt:AIPromptInformation"
+        },
+        "aIPromptWriterNam": {
+            "name": "AI Prompt Writer Name",
+            "label": "AI Prompt Writer Name",
+            "helptext": "Enter the name of the person who wrote the prompt used for generating this image.",
+            "usernotes": "This person should not be considered as the image creator.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp120",
+            "ugtopic": "admin",
+            "specidx": "#ai-prompt-writer-name",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:AIPromptWriterName",
+            "etXMP": "XMP-iptcExt:AIPromptWriterName"
+        },
+        "aISystemUsed": {
+            "name": "AI System Used",
+            "label": "AI System Used",
+            "helptext": "Enter the name of the AI system and/or the model name used to generate this image.",
+            "usernotes": "For example, ChatGPT DALL-E, Google Gemini, ChatGPT.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp130",
+            "ugtopic": "admin",
+            "specidx": "#ai-system-used",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:AISystemUsed",
+            "etXMP": "XMP-iptcExt:AISystemUsed"
+        },
+        "aISystemVersionUsed": {
+            "name": "AI System Version Used",
+            "label": "AI System Version Used",
+            "helptext": "Enter the name or number of the version of the AI system used to generate this image.",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp140",
+            "ugtopic": "admin",
+            "specidx": "#ai-system-version-used",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:AISystemVersionUsed",
+            "etXMP": "XMP-iptcExt:AISystemVersionUsed"
+        },
+        "artworkOrObjects": {
+            "name": "Artwork or Object in the Image",
+            "label": "Artwork or object in the image",
+            "helptext": "Enter details about artwork or objects shown in this image",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp160",
+            "ugtopic": "othings",
+            "specidx": "#artwork-or-object-in-the-image",
+            "datatype": "struct",
+            "dataformat": "ArtworkOrObject",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:ArtworkOrObject",
+            "etXMP": "XMP-iptcExt:ArtworkOrObject"
+        },
+        "organisationInImageCodes": {
+            "name": "Code of Organisation Featured in the Image",
+            "label": "Code of featured Organisation",
+            "helptext": "Enter an identifier for the controlled vocabulary, then a colon, and finally the code from the vocabulary assigned to the organisation shown in this image (e.g. nasdaq:companyA)",
+            "usernotes": "For example a stock ticker symbol may be used.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp180",
+            "ugtopic": "othings",
+            "specidx": "#code-of-organisation-featured-in-the-image",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:OrganisationInImageCode",
+            "etXMP": "XMP-iptcExt:OrganisationInImageCode"
+        },
+        "contributors": {
+            "name": "Contributor",
+            "label": "Contributor",
+            "helptext": "Enter person(s) or party/parties or organisation(s) having contributed to making the image. An added role helps to refine the kind of contribution.",
+            "usernotes": "A distinction between contributor and creator should follow rights laws, contracts or common business rules.\nA vocabulary of roles of persons contributiong to an image should be based on industry wide practices such as https://cv.iptc.org/newscodes/contentprodpartyrole/",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp190",
+            "ugtopic": "rights",
+            "specidx": "#contributor",
+            "datatype": "struct",
+            "dataformat": "EntityWRole",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:Contributor",
+            "etXMP": "XMP-iptcExt:Contributor"
+        },
+        "copyrightOwners": {
+            "name": "Copyright Owner",
+            "label": "Copyright owner",
+            "helptext": "Enter the owner or owners of the copyright in the licensed image",
+            "usernotes": "Serves to identify the rights holder/s for the image. The Copyright Owner, Image Creator and Licensor may be the same or different entities.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp210",
+            "ugtopic": "rights",
+            "specidx": "#copyright-owner",
+            "datatype": "struct",
+            "dataformat": "CopyrightOwner",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "plus:CopyrightOwner",
+            "SCHEMAid": "https://schema.org/copyrightHolder",
+            "etXMP": "XMP-plus:CopyrightOwner"
+        },
+        "aboutCvTerms": {
+            "name": "CV-Term About Image",
+            "label": "CV-Term About Image",
+            "helptext": "Enter one or more topics, themes or entities the image is about, each one expressed by a term from a Controlled Vocabulary",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp280",
+            "ugtopic": "gimgcont",
+            "specidx": "#cv-term-about-image",
+            "datatype": "struct",
+            "dataformat": "CvTerm",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:AboutCvTerm",
+            "SCHEMAid": "https://schema.org/about",
+            "etXMP": "XMP-iptcExt:AboutCvTerm"
+        },
+        "dataMining": {
+            "name": "Data Mining",
+            "label": "Data Mining",
+            "helptext": "",
+            "usernotes": "Regional laws applying to an asset may prohibit, constrain, or allow data mining for certain purposes (such as search indexing or research), and may overrule the value selected for this property. Similarly, the absence of a prohibition does not indicate that the asset owner grants permission for data mining or any other use of an asset.   +\nThe prohibition \u201cProhibited except for search engine indexing\u201d only permits data mining by search engines available to the public to identify the URL for an asset and its associated data (for the purpose of assisting the public in navigating to the URL for the asset), and prohibits all other uses, such as AI/ML training.  +\nThe PLUS link:#other-constraints[Other Constraints] property is human readable. The IPTC properties link:#embedded-encoded-rights-expression[Embedded Encoded Rights Expression] and link:#linked-encoded-rights-expression[Linked Encoded Rights Expression] are machine readable.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp290",
+            "ugtopic": "rights",
+            "specidx": "#data-mining",
+            "datatype": "string",
+            "dataformat": "uri",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "plus:DataMining",
+            "etXMP": "XMP-plus:DataMining"
+        },
+        "digitalImageGuid": {
+            "name": "Digital Image GUID",
+            "label": "Digital Image Identifier",
+            "helptext": "If an ID already exists, don't change - otherwise enter a globally unique identifier for this digital image",
+            "usernotes": "The identifier will probably be generated by the technical means of an imaging device or software and should be applied to the digital image file as early as possible in its life cycle. This identifier does not identify any pictured content, particularly in case of a scan of non-digital images, only this digital representation.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp330",
+            "ugtopic": "admin",
+            "specidx": "#digital-image-guid",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:DigImageGUID",
+            "EXIFid": "42016",
+            "SCHEMAid": "https://schema.org/identifier",
+            "etXMP": "XMP-iptcExt:DigitalImageGUID",
+            "etEXIF": "ExifIFD:ImageUniqueID"
+        },
+        "digitalSourceType": {
+            "name": "Digital Source Type",
+            "label": "Type of source for this photo",
+            "helptext": "Select one of the values for identifying the type of the source of the digital image from the controlled vocabulary",
+            "usernotes": "Please check the Digital Source Type NewsCodes vocabulary, it was updated in 2022.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp340",
+            "ugtopic": "admin",
+            "specidx": "#digital-source-type",
+            "datatype": "string",
+            "dataformat": "uri",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:DigitalSourceType",
+            "etXMP": "XMP-iptcExt:DigitalSourceType"
+        },
+        "embdEncRightsExprs": {
+            "name": "Embedded Encoded Rights Expression",
+            "label": "Embedded Encoded Rights Expression",
+            "helptext": "Shows an encoded rights expression. These values cannot be changed by metadata panels",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp350",
+            "ugtopic": "licensing",
+            "specidx": "#embedded-encoded-rights-expression",
+            "datatype": "struct",
+            "dataformat": "EmbdEncRightsExpr",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:EmbdEncRightsExpr",
+            "etXMP": "XMP-iptcExt:EmbdEncRightsExpr"
+        },
+        "eventId": {
+            "name": "Event Identifier",
+            "label": "Event ID",
+            "helptext": "Enter one or more identifiers of the event where this image was taken",
+            "usernotes": "The URL/URI of a persistent calendar showing this event can be used.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp360",
+            "ugtopic": "othings",
+            "specidx": "#event-identifier",
+            "datatype": "string",
+            "dataformat": "uri",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:EventId",
+            "etXMP": "XMP-iptcExt:EventID"
+        },
+        "eventName": {
+            "name": "Event Name",
+            "label": "Event Name",
+            "helptext": "Enter the name or description of the event where this image was taken",
+            "usernotes": "Examples are: a press conference, dedication ceremony, etc. If this is a sub-event of a larger event both can be provided by the field: e.g. \"XXXIII Olympic Summer Games (Paris): opening ceremony\". Unplanned events could be named by this property too.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp370",
+            "ugtopic": "othings",
+            "specidx": "#event-name",
+            "datatype": "struct",
+            "dataformat": "AltLang",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:Event",
+            "etXMP": "XMP-iptcExt:Event"
+        },
+        "genres": {
+            "name": "Genre",
+            "label": "Genre",
+            "helptext": "",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp390",
+            "ugtopic": "gimgcont",
+            "specidx": "#genre",
+            "datatype": "struct",
+            "dataformat": "CvTerm",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:Genre",
+            "SCHEMAid": "https://schema.org/genre",
+            "etXMP": "XMP-iptcExt:Genre"
+        },
+        "imageCreators": {
+            "name": "Image Creator",
+            "label": "Image Creator",
+            "helptext": "Enter details about the creator or creators of this image",
+            "usernotes": "The creator can be additionally expressed in free-text using the IPTC Core Creator field. In many countries, the Image Creator must be attributed in association with any use of the image. The Image Creator, Copyright Owner, Image Supplier and Licensor may be the same or different entities.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp410",
+            "ugtopic": "rights",
+            "specidx": "#image-creator",
+            "datatype": "struct",
+            "dataformat": "ImageCreator",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "plus:ImageCreator",
+            "etXMP": "XMP-plus:ImageCreator"
+        },
+        "imageRating": {
+            "name": "Image Rating",
+            "label": "Rating",
+            "helptext": "",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp420",
+            "ugtopic": "gimgcont",
+            "specidx": "#image-rating",
+            "datatype": "number",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "xmp:Rating",
+            "SCHEMAid": "https://schema.org/contentRating",
+            "etXMP": "XMP-xmp:Rating"
+        },
+        "imageRegion": {
+            "name": "Image Region",
+            "label": "Image Region(s)",
+            "helptext": "",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp430",
+            "ugtopic": "imgreg",
+            "specidx": "#image-region",
+            "datatype": "struct",
+            "dataformat": "ImageRegion",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:ImageRegion",
+            "etXMP": "XMP-iptcExt:ImageRegion"
+        },
+        "registryEntries": {
+            "name": "Image Registry Entry",
+            "label": "Registry Entry",
+            "helptext": "Enter IDs for this image and the registry issuing the image ID",
+            "usernotes": "Typically an id from a registry is negotiated and applied after the creation of the digital image.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp440",
+            "ugtopic": "admin",
+            "specidx": "#image-registry-entry",
+            "datatype": "struct",
+            "dataformat": "RegistryEntry",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:RegistryId",
+            "etXMP": "XMP-iptcExt:RegistryID"
+        },
+        "suppliers": {
+            "name": "Image Supplier",
+            "label": "Image Supplier",
+            "helptext": "Enter the identifier for the most recent supplier of this image - note that this might not be the creator or owner of the image",
+            "usernotes": "For identifying the supplier either a well known and/or registered company name or a URL of the company's web site may be used. \nThis property succeeds the Provider property of IPTC Core 1.0 by its semantics as that Provider was renamed to Credit Line.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp450",
+            "ugtopic": "licensing",
+            "specidx": "#image-supplier",
+            "datatype": "struct",
+            "dataformat": "ImageSupplier",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "plus:ImageSupplier",
+            "SCHEMAid": "https://schema.org/provider",
+            "etXMP": "XMP-plus:ImageSupplier"
+        },
+        "imageSupplierImageId": {
+            "name": "Image Supplier Image ID",
+            "label": "Image Supplier Image Id",
+            "helptext": "Enter the unique identifier created by the image supplier",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp460",
+            "ugtopic": "licensing",
+            "specidx": "#image-supplier-image-id",
+            "datatype": "string",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "plus:ImageSupplierImageID",
+            "etXMP": "XMP-plus:ImageSupplierImageID"
+        },
+        "licensors": {
+            "name": "Licensor",
+            "label": "Licensor",
+            "helptext": "Enter the person or company that should be contacted for obtaining a license for this image",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp510",
+            "ugtopic": "licensing",
+            "specidx": "#licensor",
+            "datatype": "struct",
+            "dataformat": "Licensor",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "plus:Licensor",
+            "etXMP": "XMP-plus:Licensor"
+        },
+        "linkedEncRightsExprs": {
+            "name": "Linked  Encoded Rights Expression",
+            "label": "Linked Encoded Rights Expression",
+            "helptext": "Enter the details of a linked rights expression",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp520",
+            "ugtopic": "licensing",
+            "specidx": "#linked--encoded-rights-expression",
+            "datatype": "struct",
+            "dataformat": "LinkedEncRightsExpr",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:LinkedEncRightsExpr",
+            "etXMP": "XMP-iptcExt:LinkedEncRightsExpr"
+        },
+        "locationCreated": {
+            "name": "Location Created",
+            "label": "Location Created",
+            "helptext": "Enter the details about a location where this image was created",
+            "usernotes": "If the location in the image is different from the location the photo was taken the IPTC Extension property Location Shown in the Image should be used.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp530",
+            "ugtopic": "location",
+            "specidx": "#location-created",
+            "datatype": "struct",
+            "dataformat": "Location",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:LocationCreated",
+            "SCHEMAid": "https://schema.org/locationCreated",
+            "etXMP": "XMP-iptcExt:LocationCreated"
+        },
+        "locationsShown": {
+            "name": "Location Shown in the Image",
+            "label": "Location shown",
+            "helptext": "Enter the details about a location which is shown in this image",
+            "usernotes": "If the location the image was taken in is different from this location the property Location Created should be used too.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp540",
+            "ugtopic": "location",
+            "specidx": "#location-shown-in-the-image",
+            "datatype": "struct",
+            "dataformat": "Location",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:LocationShown",
+            "SCHEMAid": "https://schema.org/contentLocation",
+            "etXMP": "XMP-iptcExt:LocationShown"
+        },
+        "maxAvailHeight": {
+            "name": "Max Avail Height",
+            "label": "Maximum available height",
+            "helptext": "Enter the maximum available height in pixels of the original photo from which this photo has been derived by downsizing",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp550",
+            "ugtopic": "admin",
+            "specidx": "#max-avail-height",
+            "datatype": "number",
+            "dataformat": "integer",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:MaxAvailHeight",
+            "etXMP": "XMP-iptcExt:MaxAvailHeight"
+        },
+        "maxAvailWidth": {
+            "name": "Max Avail Width",
+            "label": "Maximum available width",
+            "helptext": "Enter the maximum available width in pixels of the original photo from which this photo has been derived by downsizing",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp560",
+            "ugtopic": "admin",
+            "specidx": "#max-avail-width",
+            "datatype": "number",
+            "dataformat": "integer",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:MaxAvailWidth",
+            "etXMP": "XMP-iptcExt:MaxAvailWidth"
+        },
+        "minorModelAgeDisclosure": {
+            "name": "Minor Model Age Disclosure",
+            "label": "Minor Model Age Disclosure",
+            "helptext": "Enter the age of the youngest model pictured in this image, at the time that this image was made",
+            "usernotes": "This age should not be displayed to the public on open web portals and the like. But it may be used by image repositories in a B2B enviroment.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp570",
+            "ugtopic": "person",
+            "specidx": "#minor-model-age-disclosure",
+            "datatype": "string",
+            "dataformat": "uri",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "plus:MinorModelAgeDisclosure",
+            "etXMP": "XMP-plus:MinorModelAgeDisclosure"
+        },
+        "modelAges": {
+            "name": "Model Age",
+            "label": "Model age",
+            "helptext": "Enter the age of the human model(s) at the time this image was made",
+            "usernotes": "The user should be aware of any legal implications of providing ages for young models. Ages below 18 years should not be included.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp580",
+            "ugtopic": "person",
+            "specidx": "#model-age",
+            "datatype": "number",
+            "dataformat": "integer",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:ModelAge",
+            "etXMP": "XMP-iptcExt:ModelAge"
+        },
+        "modelReleaseDocuments": {
+            "name": "Model Release Id",
+            "label": "Model Release Id",
+            "helptext": "Enter an identifier for each Model Release",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp590",
+            "ugtopic": "person",
+            "specidx": "#model-release-id",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "plus:ModelReleaseID",
+            "etXMP": "XMP-plus:ModelReleaseID"
+        },
+        "modelReleaseStatus": {
+            "name": "Model Release Status",
+            "label": "Model Release Status",
+            "helptext": "Select one of the values for summarising the availability and scope of model releases authorising usage of the likenesses of persons appearing in the photograph",
+            "usernotes": "It is recommended to apply the PLUS controlled value Unlimited Model Releases (MR-UMR) very carefully and to check the wording of the model release thoroughly before applying it.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp600",
+            "ugtopic": "person",
+            "specidx": "#model-release-status",
+            "datatype": "string",
+            "dataformat": "uri",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "plus:ModelReleaseStatus",
+            "etXMP": "XMP-plus:ModelReleaseStatus"
+        },
+        "organisationInImageNames": {
+            "name": "Name of Organisation Featured in the Image",
+            "label": "Name of featured Organisation",
+            "helptext": "Enter the name of the organisation which is featured by this image",
+            "usernotes": "May be supplemented by values from a controlled vocabulary in the Organisation Code field.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp610",
+            "ugtopic": "othings",
+            "specidx": "#name-of-organisation-featured-in-the-image",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:OrganisationInImageName",
+            "etXMP": "XMP-iptcExt:OrganisationInImageName"
+        },
+        "otherConstraints": {
+            "name": "Other Constraints",
+            "label": "Constraint",
+            "helptext": "",
+            "usernotes": "Constraints may limit the scope of usage allowed",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp620",
+            "ugtopic": "rights",
+            "specidx": "#other-constraints",
+            "datatype": "struct",
+            "dataformat": "AltLang",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "plus:OtherConstraints",
+            "etXMP": "XMP-plus:OtherConstraints"
+        },
+        "personInImageNames": {
+            "name": "Person Shown in the Image",
+            "label": "Person shown",
+            "helptext": "Enter the name of the person shown in this image",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp630",
+            "ugtopic": "person",
+            "specidx": "#person-shown-in-the-image",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:PersonInImage",
+            "etXMP": "XMP-iptcExt:PersonInImage"
+        },
+        "personsShown": {
+            "name": "Person Shown in the Image with Details",
+            "label": "Person Shown (Details)",
+            "helptext": "Enter details about person(s) shown in the image. It is not required to list all, just those details which can be recognized",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp640",
+            "ugtopic": "person",
+            "specidx": "#person-shown-in-the-image-with-details",
+            "datatype": "struct",
+            "dataformat": "PersonWDetails",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:PersonInImageWDetails",
+            "etXMP": "XMP-iptcExt:PersonInImageWDetails"
+        },
+        "productsShown": {
+            "name": "Product Shown in the Image",
+            "label": "Product Shown",
+            "helptext": "Enter details about a product shown in the image",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp660",
+            "ugtopic": "othings",
+            "specidx": "#product-shown-in-the-image",
+            "datatype": "struct",
+            "dataformat": "ProductWGtin",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "Iptc4xmpExt:ProductInImage",
+            "etXMP": "XMP-iptcExt:ProductInImage"
+        },
+        "propertyReleaseDocuments": {
+            "name": "Property Release Id",
+            "label": "Property Release Id",
+            "helptext": "Enter an identifier for each Property Release",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp670",
+            "ugtopic": "rights",
+            "specidx": "#property-release-id",
+            "datatype": "string",
+            "propoccurrence": "multi",
+            "isrequired": "0",
+            "XMPid": "plus:PropertyReleaseID",
+            "etXMP": "XMP-plus:PropertyReleaseID"
+        },
+        "propertyReleaseStatus": {
+            "name": "Property Release Status",
+            "label": "Property Release Status",
+            "helptext": "Select one of the values for summarising the availability and scope of property releases authorising usage of the properties appearing in the photograph",
+            "usernotes": "It is recommended to apply the value PR-UPR very carefully and to check the wording of the property release thoroughly before applying it.",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp680",
+            "ugtopic": "rights",
+            "specidx": "#property-release-status",
+            "datatype": "string",
+            "dataformat": "uri",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "plus:PropertyReleaseStatus",
+            "etXMP": "XMP-plus:PropertyReleaseStatus"
+        },
+        "webstatementRights": {
+            "name": "Web Statement of Rights",
+            "label": "Copyright Info URL",
+            "helptext": "",
+            "usernotes": "",
+            "ipmdschema": "IptcExt",
+            "sortorder": "tlp760",
+            "ugtopic": "rights",
+            "specidx": "#web-statement-of-rights",
+            "datatype": "string",
+            "dataformat": "uri",
+            "propoccurrence": "single",
+            "isrequired": "0",
+            "XMPid": "xmpRights:WebStatement",
+            "SCHEMAid": "https://schema.org/license",
+            "etXMP": "XMP-xmpRights:WebStatement"
+        }
+    },
+    "ipmd_struct": {
+        "CreatorContactInfo": {
+            "address": {
+                "name": "Address",
+                "label": "(Contact Info detail:) Address",
+                "helptext": "Enter Address for the person that created this image",
+                "usernotes": "",
+                "ipmdschema": "IptcCore",
+                "sortorder": "s0101",
+                "specidx": "#address",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpCore:CiAdrExtadr",
+                "etTag": "CiAdrExtadr"
+            },
+            "city": {
+                "name": "City",
+                "label": "(Contact Info detail:) City",
+                "helptext": "Enter the City for the address of the person that created this image",
+                "usernotes": "",
+                "ipmdschema": "IptcCore",
+                "sortorder": "s0102",
+                "specidx": "#city",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpCore:CiAdrCity",
+                "etTag": "CiAdrCity"
+            },
+            "country": {
+                "name": "Country",
+                "label": "(Contact Info detail:) Country",
+                "helptext": "Enter the Country name for the address of the person that created this image",
+                "usernotes": "",
+                "ipmdschema": "IptcCore",
+                "sortorder": "s0103",
+                "specidx": "#country",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpCore:CiAdrCtry",
+                "etTag": "CiAdrCtry"
+            },
+            "emailwork": {
+                "name": "Email address(es)",
+                "label": "(Contact Info detail:) Email(s)",
+                "helptext": "Enter the work Email address(es) for the person that created this image, such as name@domain.com",
+                "usernotes": "Multiple email addresses can be given. May have to be separated by a comma in the user interface.",
+                "ipmdschema": "IptcCore",
+                "sortorder": "s0104",
+                "specidx": "#email-addresses",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpCore:CiEmailWork",
+                "etTag": "CiEmailWork"
+            },
+            "phonework": {
+                "name": "Phone number(s)",
+                "label": "(Contact Info detail:) Phone(s)",
+                "helptext": "Enter the work Phone number(s) for the person that created this image, using the international format, such as +1 (123) 456789",
+                "usernotes": "Multiple numbers can be given. May have to be separated by a comma in the user interface.",
+                "ipmdschema": "IptcCore",
+                "sortorder": "s0105",
+                "specidx": "#phone-numbers",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpCore:CiTelWork",
+                "etTag": "CiTelWork"
+            },
+            "postalCode": {
+                "name": "Postal Code",
+                "label": "(Contact Info detail:) Postal Code",
+                "helptext": "Enter the Postal Code for the address of the person that created this image",
+                "usernotes": "",
+                "ipmdschema": "IptcCore",
+                "sortorder": "s0106",
+                "specidx": "#postal-code",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpCore:CiAdrPcode",
+                "etTag": "CiAdrPcode"
+            },
+            "region": {
+                "name": "State/Province",
+                "label": "(Contact Info detail:) State/Province",
+                "helptext": "Enter the State for the address of the person that created this image",
+                "usernotes": "",
+                "ipmdschema": "IptcCore",
+                "sortorder": "s0107",
+                "specidx": "#state/province",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpCore:CiAdrRegion",
+                "etTag": "CiAdrRegion"
+            },
+            "weburlwork": {
+                "name": "Web URL(s)",
+                "label": "(Contact Info detail:) Web URL(s)",
+                "helptext": "Enter the work Web URL(s) for the person that created this image, such as http://www.domain.com/",
+                "usernotes": "Multiple URL can be given. May have to be separated by a comma in the user interface.",
+                "ipmdschema": "IptcCore",
+                "sortorder": "s0108",
+                "specidx": "#web-urls",
+                "datatype": "string",
+                "dataformat": "url",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpCore:CiUrlWork",
+                "etTag": "CiUrlWork"
+            }
+        },
+        "ArtworkOrObject": {
+            "circaDateCreated": {
+                "name": "Circa Date Created",
+                "label": "Circa Date Created",
+                "helptext": "Enter the approximate date or range of dates associated with the creation and production of an artwork or object or its components",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0201",
+                "specidx": "#circa-date-created",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOCircaDateCreated",
+                "etTag": "AOCircaDateCreated"
+            },
+            "contentDescription": {
+                "name": "Content Description",
+                "label": "Content Description",
+                "helptext": "Describe the content depicted in the artwork or object in free-text",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0202",
+                "specidx": "#content-description",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOContentDescription",
+                "etTag": "AOContentDescription"
+            },
+            "contributionDescription": {
+                "name": "Contribution Description",
+                "label": "Contribution Description",
+                "helptext": "Describe any contributions made to the artwork or object as free-text. Include the type, date and location of contribution, and details about the contributor",
+                "usernotes": "Should include the type, date and location of contribution, and details about the contributor.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0203",
+                "specidx": "#contribution-description",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOContributionDescription",
+                "etTag": "AOContributionDescription"
+            },
+            "copyrightNotice": {
+                "name": "Copyright Notice",
+                "label": "(Artwork or Object detail:) Copyright notice",
+                "helptext": "Enter any necessary copyright notice for claiming the intellectual property for artwork or an object in this image",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0204",
+                "specidx": "#copyright-notice",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOCopyrightNotice",
+                "etTag": "AOCopyrightNotice"
+            },
+            "creatorNames": {
+                "name": "Creator",
+                "label": "(Artwork or Object detail:) Creator",
+                "helptext": "Enter the name of the artist who has created artwork or an object in this image",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0205",
+                "specidx": "#creator",
+                "datatype": "string",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOCreator",
+                "etTag": "AOCreator"
+            },
+            "creatorIdentifiers": {
+                "name": "Creator ID",
+                "label": "Creator ID",
+                "helptext": "Enter globally unique identifier(s) for the artist who has created artwork or an object e.g.\nissued by an online registry of persons or companies. Enter in the same sequence\nas the creator names.",
+                "usernotes": "Add the IDs in the same sequence as the Creator names",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0206",
+                "specidx": "#creator-id",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOCreatorId",
+                "etTag": "AOCreatorId"
+            },
+            "currentCopyrightOwnerIdentifier": {
+                "name": "Current Copyright Owner ID",
+                "label": "Current Copyright Owner ID",
+                "helptext": "Enter a globally unique identifier for the current\ncopyright owner e.g. issued by an online registry of persons or companies",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0207",
+                "specidx": "#current-copyright-owner-id",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOCurrentCopyrightOwnerId",
+                "etTag": "AOCurrentCopyrightOwnerId"
+            },
+            "currentCopyrightOwnerName": {
+                "name": "Current Copyright Owner Name",
+                "label": "Current Copyright Owner Name",
+                "helptext": "Enter the name of the current owner of the copyright of the artwork or object",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0208",
+                "specidx": "#current-copyright-owner-name",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOCurrentCopyrightOwnerName",
+                "etTag": "AOCurrentCopyrightOwnerName"
+            },
+            "currentLicensorIdentifier": {
+                "name": "Current Licensor ID",
+                "label": "Current Licensor ID",
+                "helptext": "Enter a globally unique identifier for the current licensor e.g. issued by an online registry of persons or companies",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0209",
+                "specidx": "#current-licensor-id",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOCurrentLicensorId",
+                "etTag": "AOCurrentLicensorId"
+            },
+            "currentLicensorName": {
+                "name": "Current Licensor Name",
+                "label": "Current Licensor Name",
+                "helptext": "Enter the name of the current licensor of the artwork or object",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0210",
+                "specidx": "#current-licensor-name",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOCurrentLicensorName",
+                "etTag": "AOCurrentLicensorName"
+            },
+            "dateCreated": {
+                "name": "Date Created",
+                "label": "(Artwork or Object detail:) Date created",
+                "helptext": "Enter the date and optionally the time when the artwork or object in this image was created",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0211",
+                "specidx": "#date-created",
+                "datatype": "string",
+                "dataformat": "date-time",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AODateCreated",
+                "etTag": "AODateCreated"
+            },
+            "physicalDescription": {
+                "name": "Physical Description",
+                "label": "Physical Description",
+                "helptext": "Describe the physical characteristics of the artwork or object as free-text, without referring to the subject depicted. Object type, materials-techniques and measurements may be described",
+                "usernotes": "Object type, materials-techniques and measurements may be described.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0212",
+                "specidx": "#physical-description",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOPhysicalDescription",
+                "etTag": "AOPhysicalDescription"
+            },
+            "source": {
+                "name": "Source",
+                "label": "(Artwork or Object detail:) Source",
+                "helptext": "Enter the name of the organisation or body holding and registering the artwork or object in this image for inventory purposes",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0213",
+                "specidx": "#source",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOSource",
+                "etTag": "AOSource"
+            },
+            "sourceInventoryNr": {
+                "name": "Source Inventory Number",
+                "label": "(Artwork or Object detail:) Source inventory number",
+                "helptext": "Enter the inventory number issued by the organisation or body holding and registering the artwork or object in this image",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0214",
+                "specidx": "#source-inventory-number",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOSourceInvNo",
+                "etTag": "AOSourceInvNo"
+            },
+            "sourceInventoryUrl": {
+                "name": "Source Inventory URL",
+                "label": "Source Inventory URL",
+                "helptext": "Enter a reference URL for the metadata record of the inventory maintained by the Source",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0215",
+                "specidx": "#source-inventory-url",
+                "datatype": "string",
+                "dataformat": "url",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOSourceInvURL",
+                "etTag": "AOSourceInvURL"
+            },
+            "stylePeriod": {
+                "name": "Style Period",
+                "label": "Style Period",
+                "helptext": "Enter the style, historical or artistic period, movement, group, or school whose characteristics are represented in the artwork or object",
+                "usernotes": "It is advised to take the terms from a Controlled Vocabulary.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0216",
+                "specidx": "#style-period",
+                "datatype": "string",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOStylePeriod",
+                "etTag": "AOStylePeriod"
+            },
+            "title": {
+                "name": "Title",
+                "label": "(Artwork or Object detail:) Title",
+                "helptext": "Enter the verbal and human readable name of the artwork or object in this image",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0217",
+                "specidx": "#title",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:AOTitle",
+                "etTag": "AOTitle"
+            }
+        },
+        "CvTerm": {
+            "cvId": {
+                "name": "CV-Term CV ID",
+                "label": "CV ID",
+                "helptext": "Enter the globally unique identifier of the Controlled Vocabulary which the term is from",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0301",
+                "specidx": "#cv-term-cv-id",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:CvId",
+                "etTag": "CvId"
+            },
+            "cvTermId": {
+                "name": "CV-Term ID",
+                "label": "Term ID",
+                "helptext": "Enter the globally unique identifier of the term from a Controlled Vocabulary",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0302",
+                "specidx": "#cv-term-id",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:CvTermId",
+                "etTag": "CvTermId"
+            },
+            "cvTermName": {
+                "name": "CV-Term name",
+                "label": "Name",
+                "helptext": "Enter the name of the term from a Controlled Vocabulary as free-text",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0303",
+                "specidx": "#cv-term-name",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:CvTermName",
+                "etTag": "CvTermName"
+            },
+            "cvTermRefinedAbout": {
+                "name": "Refined 'about' Relationship of the CV-Term",
+                "label": "Refined Aboutness",
+                "helptext": "Optionally enter a refinement of the 'about' relationship of the term with the content of the image. This must be a globally unique identifier from a Controlled Vocabulary",
+                "usernotes": "May be used to refine the generic about relationship.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0304",
+                "specidx": "#refined-'about'-relationship-of-the-cv-term",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:CvTermRefinedAbout",
+                "etTag": "CvTermRefinedAbout"
+            }
+        },
+        "EmbdEncRightsExpr": {
+            "encRightsExpr": {
+                "name": "Encoded Rights Expression",
+                "label": "Rights expression",
+                "helptext": "Shows an embedded rights expression using a rights expression language which is encoded as a string",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0401",
+                "specidx": "#encoded-rights-expression",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:EncRightsExpr",
+                "etTag": "EncRightsExpr"
+            },
+            "rightsExprEncType": {
+                "name": "Encoding type",
+                "label": "Encoding type",
+                "helptext": "Shows the encoding type of the rights expression by an IANA Media Type",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0402",
+                "specidx": "#encoding-type",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:RightsExprEncType",
+                "etTag": "RightsExprEncType"
+            },
+            "rightsExprLangId": {
+                "name": "Rights Expression Language ID",
+                "label": "Rights expression language ID",
+                "helptext": "Shows the identifier of the used Rights Expression Language",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0403",
+                "specidx": "#rights-expression-language-id",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:RightsExprLangId",
+                "etTag": "RightsExprLangId"
+            }
+        },
+        "Entity": {
+            "identifiers": {
+                "name": "Identifier",
+                "label": "Identifier",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0401",
+                "specidx": "#identifier",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "xmp:Identifier",
+                "etTag": "Identifier"
+            },
+            "name": {
+                "name": "Name",
+                "label": "Name",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0402",
+                "specidx": "#name",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:Name",
+                "etTag": "Name"
+            }
+        },
+        "EntityWRole": {
+            "identifiers": {
+                "name": "Identifier",
+                "label": "Identifier",
+                "helptext": "Enter globally unique identifier(s) of the entity or concept",
+                "usernotes": "This should be an identifier as it is used with semantic web technology.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s9201",
+                "specidx": "#identifier",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "xmp:Identifier",
+                "etTag": "Identifier"
+            },
+            "name": {
+                "name": "Name",
+                "label": "Name",
+                "helptext": "Enter the name of the entity or concept",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s9202",
+                "specidx": "#name",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:Name",
+                "etTag": "Name"
+            },
+            "role": {
+                "name": "Role",
+                "label": "Role",
+                "helptext": "Enter an identifier for the role the entity has regarding the {...software maker: apply name of metadata property here...} property.",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s9203",
+                "specidx": "#role",
+                "datatype": "string",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:Role",
+                "etTag": "Role"
+            }
+        },
+        "ImageRegion": {
+            "regionBoundary": {
+                "name": "Region Boundary",
+                "label": "Region Boundary",
+                "helptext": "",
+                "usernotes": "As option only a single point may be defined to express special characteristics of this point, or a line may be defined to express a divide inside the image.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0501",
+                "specidx": "#region-boundary",
+                "datatype": "struct",
+                "dataformat": "RegionBoundary",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:RegionBoundary",
+                "etTag": "RegionBoundary"
+            },
+            "rId": {
+                "name": "Region Identifier",
+                "label": "Identifier",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0502",
+                "specidx": "#region-identifier",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rId",
+                "etTag": "RId"
+            },
+            "name": {
+                "name": "Region Name",
+                "label": "Name",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0503",
+                "specidx": "#region-name",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:Name",
+                "etTag": "Name"
+            },
+            "rCtype": {
+                "name": "Region Content Type",
+                "label": "Content Type",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0504",
+                "specidx": "#region-content-type",
+                "datatype": "struct",
+                "dataformat": "Entity",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rCtype",
+                "etTag": "RCtype"
+            },
+            "rRole": {
+                "name": "Region Role",
+                "label": "Role",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0505",
+                "specidx": "#region-role",
+                "datatype": "struct",
+                "dataformat": "Entity",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rRole",
+                "etTag": "RRole"
+            },
+            "$anypmdproperty": {
+                "name": "Other Metadata Property",
+                "label": "{as defined for the used metadata property}",
+                "helptext": "",
+                "usernotes": "Metadata properties related to the region are typically ones used also for an image as a whole.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0506",
+                "specidx": "#other-metadata-property",
+                "datatype": "any",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "",
+                "etTag": ""
+            }
+        },
+        "RegionBoundary": {
+            "rbShape": {
+                "name": "Boundary Shape",
+                "label": "Shape",
+                "helptext": "",
+                "usernotes": "The applicable shapes are:\n\n* _rectangle_ = a rectangle as shape of the boundary, the shape of a square is included \n* _circle_ = a circle as the shape of the boundary \n* _polygon_ = any shape with edges, except a rectangle, including a single point (using 1 vertex) and a line (using 2 vertices). The edges between a vertex and the next one in the sequence set the shape, the last edge is the one from the last vertex in the sequence to the first vertex in the sequence.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0601",
+                "specidx": "#boundary-shape",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbShape",
+                "etTag": "RbShape"
+            },
+            "rbUnit": {
+                "name": "Boundary Measuring Unit",
+                "label": "Measuring Unit",
+                "helptext": "",
+                "usernotes": "The applicable units are: \n\n* _pixel_ = A pixel of a digital image setting an absolute value \n* _relative_ = Relative part of the size of an image along the x- or the y-axis. The range of the value is from 0 to 1 representing the proportion of the full size of an image along the x-axis or the y-axis.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0602",
+                "specidx": "#boundary-measuring-unit",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbUnit",
+                "etTag": "RbUnit"
+            },
+            "rbX": {
+                "name": "X-Axis Coordinate",
+                "label": "X-Axis Coordinate",
+                "helptext": "",
+                "usernotes": "Used only by the shapes _rectangle_ and _circle_. See also the User Notes of the link:#region-boundary-structure[Region Boundary structure]",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0603",
+                "specidx": "#x-axis-coordinate",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbX",
+                "etTag": "RbX"
+            },
+            "rbY": {
+                "name": "Y-Axis Coordinate",
+                "label": "Y-Axis Coordinate",
+                "helptext": "",
+                "usernotes": "Used only by the shapes _rectangle_ and _circle_. See also the User Notes of the link:#region-boundary-structure[Region Boundary structure]",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0604",
+                "specidx": "#y-axis-coordinate",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbY",
+                "etTag": "RbY"
+            },
+            "rbW": {
+                "name": "Rectangle Width",
+                "label": "Rectangle Width",
+                "helptext": "",
+                "usernotes": "Used only by the shape _rectangle_.See also the User Notes of the link:#region-boundary-structure[Region Boundary structure]",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0605",
+                "specidx": "#rectangle-width",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbW",
+                "etTag": "RbW"
+            },
+            "rbH": {
+                "name": "Rectangle Height",
+                "label": "Rectangle Height",
+                "helptext": "",
+                "usernotes": "Used only by the shape _rectangle_.See also the User Notes of the link:#region-boundary-structure[Region Boundary structure]",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0606",
+                "specidx": "#rectangle-height",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbH",
+                "etTag": "RbH"
+            },
+            "rbRx": {
+                "name": "Circle Radius",
+                "label": "Circle Radius",
+                "helptext": "",
+                "usernotes": "Used only by the shape _circle_. See also the User Notes of the link:#region-boundary-structure[Region Boundary structure]",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0607",
+                "specidx": "#circle-radius",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbRx",
+                "etTag": "RbRx"
+            },
+            "rbVertices": {
+                "name": "Polygon Vertices",
+                "label": "Polygon Vertices",
+                "helptext": "",
+                "usernotes": "Used only by the shape _polygon_. See also the User Notes of the link:#region-boundary-structure[Region Boundary structure]",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0608",
+                "specidx": "#polygon-vertices",
+                "datatype": "struct",
+                "dataformat": "RegionBoundaryPoint",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbVertices",
+                "etTag": "RbVertices"
+            }
+        },
+        "RegionBoundaryPoint": {
+            "rbX": {
+                "name": "X-Axis Coordinate",
+                "label": "X-Axis Coordinate",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0701",
+                "specidx": "#x-axis-coordinate",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbX",
+                "etTag": "RbX"
+            },
+            "rbY": {
+                "name": "Y-Axis Coordinate",
+                "label": "Y-Axis Coordinate",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0702",
+                "specidx": "#y-axis-coordinate",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:rbY",
+                "etTag": "RbY"
+            }
+        },
+        "LinkedEncRightsExpr": {
+            "linkedRightsExpr": {
+                "name": "Link to Encoded Rights Expression",
+                "label": "Link to Rights Expression",
+                "helptext": "Enter the link to a web resource representing an encoded rights expression",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0801",
+                "specidx": "#link-to-encoded-rights-expression",
+                "datatype": "string",
+                "dataformat": "url",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:LinkedRightsExpr",
+                "etTag": "LinkedRightsExpr"
+            },
+            "rightsExprEncType": {
+                "name": "Encoding type",
+                "label": "Encoding type",
+                "helptext": "Enter the encoding type of the rights expression by using an IANA Media Type",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0802",
+                "specidx": "#encoding-type",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:RightsExprEncType",
+                "etTag": "RightsExprEncType"
+            },
+            "rightsExprLangId": {
+                "name": "Rights Expression Language ID",
+                "label": "Rights Expression Language ID",
+                "helptext": "Enter the identifier of the used Rights Expression Language",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0803",
+                "specidx": "#rights-expression-language-id",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:RightsExprLangId",
+                "etTag": "RightsExprLangId"
+            }
+        },
+        "Location": {
+            "city": {
+                "name": "City",
+                "label": "(Location detail:) City",
+                "helptext": "Enter the name of the City",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0904",
+                "specidx": "#city",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:City",
+                "etTag": "City"
+            },
+            "countryCode": {
+                "name": "Country ISO-Code",
+                "label": "(Location detail:) Country ISO-Code",
+                "helptext": "Enter the 2 or 3 letter ISO 3166 Country Code of the Country",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0907",
+                "specidx": "#country-iso-code",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:CountryCode",
+                "etTag": "CountryCode"
+            },
+            "countryName": {
+                "name": "Country Name",
+                "label": "(Location detail:) Country Name",
+                "helptext": "Enter the name of the Country",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0906",
+                "specidx": "#country-name",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:CountryName",
+                "etTag": "CountryName"
+            },
+            "gpsAltitude": {
+                "name": "GPS-Altitude",
+                "label": "(Location detail:) GPS-Altitude",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0911",
+                "specidx": "#gps-altitude",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "exif:GPSAltitude",
+                "etTag": "GPSAltitude"
+            },
+            "gpsAltitudeRef": {
+                "name": "GPS-Altitude Reference",
+                "label": "(Location detail:) GPS-Altitude Ref",
+                "helptext": "",
+                "usernotes": "The WGS84 reference level is the surface of the mathematical representation of the earth's globe. At a specific location this level may be a few metres above of below the Mean Sea Level of an ocean or a sea.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0912",
+                "specidx": "#gps-altitude-reference",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "exif:GPSAltitudeRef",
+                "etTag": "GPSAltitudeRef"
+            },
+            "gpsLatitude": {
+                "name": "GPS-Latitude",
+                "label": "(Location detail:) GPS-Lattitude",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0914",
+                "specidx": "#gps-latitude",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "exif:GPSLatitude",
+                "etTag": "GPSLatitude"
+            },
+            "gpsLongitude": {
+                "name": "GPS-Longitude",
+                "label": "(Location detail:) GPS-Longitude",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0913",
+                "specidx": "#gps-longitude",
+                "datatype": "number",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "exif:GPSLongitude",
+                "etTag": "GPSLongitude"
+            },
+            "identifiers": {
+                "name": "Location Identifier",
+                "label": "Location ID",
+                "helptext": "Enter globally unique identifier(s) of the location",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0901",
+                "specidx": "#location-identifier",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:LocationId",
+                "etTag": "LocationId"
+            },
+            "name": {
+                "name": "Location Name",
+                "label": "(Location detail:) Location Name",
+                "helptext": "Enter a full name of the location",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0902",
+                "specidx": "#location-name",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:LocationName",
+                "etTag": "LocationName"
+            },
+            "provinceState": {
+                "name": "Province or State",
+                "label": "(Location detail:) Province/State",
+                "helptext": "Enter the name of the Province or State",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0905",
+                "specidx": "#province-or-state",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:ProvinceState",
+                "etTag": "ProvinceState"
+            },
+            "sublocation": {
+                "name": "Sublocation",
+                "label": "(Location detail:) Sublocation",
+                "helptext": "Enter the name of the Sublocation",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0903",
+                "specidx": "#sublocation",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:Sublocation",
+                "etTag": "Sublocation"
+            },
+            "worldRegion": {
+                "name": "World Region",
+                "label": "(Location detail:) World Region",
+                "helptext": "Enter the name of the World Region",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s0908",
+                "specidx": "#world-region",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:WorldRegion",
+                "etTag": "WorldRegion"
+            }
+        },
+        "PersonWDetails": {
+            "characteristics": {
+                "name": "Characteristics",
+                "label": "Characteristics",
+                "helptext": "Enter a property or trait of the person by selecting a term from a Controlled Vocabulary",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1004",
+                "specidx": "#characteristics",
+                "datatype": "struct",
+                "dataformat": "CvTerm",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:PersonCharacteristic",
+                "etTag": "PersonCharacteristic"
+            },
+            "description": {
+                "name": "Description",
+                "label": "Description",
+                "helptext": "Describes the person, any actions taken, emotional expressions shown, etc. as free-text",
+                "usernotes": "For example, you may include actions taken, emotional expressions shown and more.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1003",
+                "specidx": "#description",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:PersonDescription",
+                "etTag": "PersonDescription"
+            },
+            "identifiers": {
+                "name": "Identifier",
+                "label": "Identifier",
+                "helptext": "Enter globally unique identifier(s) for the person, such as those from WikiData or Freebase",
+                "usernotes": "This should be an identifier as it is used with semantic web technology.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1001",
+                "specidx": "#identifier",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:PersonId",
+                "etTag": "PersonId"
+            },
+            "name": {
+                "name": "Name",
+                "label": "Name",
+                "helptext": "Enter the name of the person",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1002",
+                "specidx": "#name",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:PersonName",
+                "etTag": "PersonName"
+            }
+        },
+        "ProductWGtin": {
+            "description": {
+                "name": "Description",
+                "label": "Description",
+                "helptext": "Enter a description of the product as free-text",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1104",
+                "specidx": "#description",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:ProductDescription",
+                "etTag": "ProductDescription"
+            },
+            "gtin": {
+                "name": "GTIN",
+                "label": "GTIN",
+                "helptext": "Enter the 14 digit Global Trade Item Number (GTIN) of the product as defined by GS1",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1101",
+                "specidx": "#gtin",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:ProductGTIN",
+                "etTag": "ProductGTIN"
+            },
+            "identifiers": {
+                "name": "Identifier",
+                "label": "Identifier",
+                "helptext": "Enter globally unique identifier(s) for the product, such as those from WikiData",
+                "usernotes": "This should be an identifier as it is used with semantic web technology.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1102",
+                "specidx": "#identifier",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "multi",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:ProductId",
+                "etTag": "ProductId"
+            },
+            "name": {
+                "name": "Name",
+                "label": "Name",
+                "helptext": "Enter the name of the product",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1103",
+                "specidx": "#name",
+                "datatype": "struct",
+                "dataformat": "AltLang",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:ProductName",
+                "etTag": "ProductName"
+            }
+        },
+        "RegistryEntry": {
+            "assetIdentifier": {
+                "name": "Item Id",
+                "label": "(Registry Entry detail:) Item Identifier",
+                "helptext": "Enter the unique identifier created by a registry and applied by the creator of the digital image. This value shall not be changed after being applied.",
+                "usernotes": "This identifier may be globally unique by itself, but it must be unique for the issuing registry at least.",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1202",
+                "specidx": "#item-id",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:RegItemId",
+                "etTag": "RegItemId"
+            },
+            "registryIdentifier": {
+                "name": "Organisation Id",
+                "label": "(Registry Entry detail:) Organisation Identifier",
+                "helptext": "Enter the identifier for the registry which issued the corresponding Registry Image ID",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1201",
+                "specidx": "#organisation-id",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:RegOrgId",
+                "etTag": "RegOrgId"
+            },
+            "role": {
+                "name": "Role",
+                "label": "(Registry Entry detail:) Role",
+                "helptext": "Enter an identifier of the role of this registry entry in the context of other entries.",
+                "usernotes": "",
+                "ipmdschema": "IptcExt",
+                "sortorder": "s1203",
+                "specidx": "#role",
+                "datatype": "string",
+                "dataformat": "uri",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "Iptc4xmpExt:RegEntryRole",
+                "etTag": "RegEntryRole"
+            }
+        },
+        "Licensor": {
+            "licensorId": {
+                "name": "Licensor ID",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3101",
+                "specidx": "#licensor-id",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorID",
+                "etTag": "LicensorID"
+            },
+            "licensorName": {
+                "name": "Licensor Name",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3102",
+                "specidx": "#licensor-name",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorName",
+                "etTag": "LicensorName"
+            },
+            "licensorAddress": {
+                "name": "Licensor Address",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3103",
+                "specidx": "#licensor-address",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorStreetAddress",
+                "etTag": "LicensorStreetAddress"
+            },
+            "licensorAddressDetail": {
+                "name": "Licensor Adress Detail",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3104",
+                "specidx": "#licensor-adress-detail",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorExtendedAddress",
+                "etTag": "LicensorExtendedAddress"
+            },
+            "licensorCity": {
+                "name": "Licensor City",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3105",
+                "specidx": "#licensor-city",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorCity",
+                "etTag": "LicensorCity"
+            },
+            "licensorStateProvince": {
+                "name": "Licensor State or Province",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3106",
+                "specidx": "#licensor-state-or-province",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorRegion",
+                "etTag": "LicensorRegion"
+            },
+            "licensorPostalCode": {
+                "name": "Licensor Postal Code",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3107",
+                "specidx": "#licensor-postal-code",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorPostalCode",
+                "etTag": "LicensorPostalCode"
+            },
+            "licensorCountryName": {
+                "name": "Licensor Country",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3108",
+                "specidx": "#licensor-country",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorCountry",
+                "etTag": "LicensorCountry"
+            },
+            "licensorTelephoneType1": {
+                "name": "Licensor Telephone Type 1",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3109",
+                "specidx": "#licensor-telephone-type-1",
+                "datatype": "string",
+                "dataformat": "url",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorTelephoneType1",
+                "etTag": "LicensorTelephoneType1"
+            },
+            "licensorTelephone1": {
+                "name": "Licensor Telephone 1",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3110",
+                "specidx": "#licensor-telephone-1",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorTelephone1",
+                "etTag": "LicensorTelephone1"
+            },
+            "licensorTelephoneType2": {
+                "name": "Licensor Telephone Type 2",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3111",
+                "specidx": "#licensor-telephone-type-2",
+                "datatype": "string",
+                "dataformat": "url",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorTelephoneType2",
+                "etTag": "LicensorTelephoneType2"
+            },
+            "licensorTelephone2": {
+                "name": "Licensor Telephone 2",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3112",
+                "specidx": "#licensor-telephone-2",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorTelephone2",
+                "etTag": "LicensorTelephone2"
+            },
+            "licensorEmail": {
+                "name": "Licensor Email",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3113",
+                "specidx": "#licensor-email",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorEmail",
+                "etTag": "LicensorEmail"
+            },
+            "licensorUrl": {
+                "name": "Licensor URL",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3114",
+                "specidx": "#licensor-url",
+                "datatype": "string",
+                "dataformat": "url",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:LicensorURL",
+                "SCHEMAid": "https://schema.org/acquireLicensePage",
+                "etTag": "LicensorURL"
+            }
+        },
+        "CopyrightOwner": {
+            "copyrightOwnerId": {
+                "name": "Copyright Owner ID",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3201",
+                "specidx": "#copyright-owner-id",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:CopyrightOwnerID",
+                "etTag": "CopyrightOwnerID"
+            },
+            "copyrightOwnerName": {
+                "name": "Copyright Owner Name",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3202",
+                "specidx": "#copyright-owner-name",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:CopyrightOwnerName",
+                "etTag": "CopyrightOwnerName"
+            }
+        },
+        "ImageCreator": {
+            "imageCreatorId": {
+                "name": "Image Creator ID",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3301",
+                "specidx": "#image-creator-id",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:ImageCreatorID",
+                "etTag": "ImageCreatorID"
+            },
+            "imageCreatorName": {
+                "name": "Image Creator Name",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3302",
+                "specidx": "#image-creator-name",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:ImageCreatorName",
+                "EXIFid": "315",
+                "etTag": "ImageCreatorName",
+                "etEXIF": "IFD0:Artist"
+            }
+        },
+        "ImageSupplier": {
+            "imageSupplierId": {
+                "name": "Image Supplier ID",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3401",
+                "specidx": "#image-supplier-id",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:ImageSupplierID",
+                "etTag": "ImageSupplierID"
+            },
+            "imageSupplierName": {
+                "name": "Image Supplier Name",
+                "label": "",
+                "helptext": "",
+                "usernotes": "",
+                "ipmdschema": "PLUS",
+                "sortorder": "s3402",
+                "specidx": "#image-supplier-name",
+                "datatype": "string",
+                "propoccurrence": "single",
+                "isrequired": "0",
+                "XMPid": "plus:ImageSupplierName",
+                "etTag": "ImageSupplierName"
+            }
+        },
+        "AltLang": {
+            "Note": "A special structure covering variants of a text in different languages.",
+            "BCP47langid_1": "Text in the human language corresponding to the BCP 47 language id",
+            "BCP47langid_toMany": "Text in the human language corresponding to the BCP 47 language id"
+        }
+    },
+    "et_topwithprefix": {
+        "XMP-iptcCore_AltTextAccessibility": {
+            "ipmdid": "altTextAccessibility"
+        },
+        "IPTC_City": {
+            "ipmdid": "cityName"
+        },
+        "XMP-photoshop_City": {
+            "ipmdid": "cityName"
+        },
+        "IFD0_Copyright": {
+            "ipmdid": "copyrightNotice"
+        },
+        "IPTC_CopyrightNotice": {
+            "ipmdid": "copyrightNotice"
+        },
+        "XMP-dc_Rights": {
+            "ipmdid": "copyrightNotice"
+        },
+        "IPTC_Country-PrimaryLocationName": {
+            "ipmdid": "countryName"
+        },
+        "XMP-photoshop_Country": {
+            "ipmdid": "countryName"
+        },
+        "IPTC_Country-PrimaryLocationCode": {
+            "ipmdid": "countryCode"
+        },
+        "XMP-iptcCore_CountryCode": {
+            "ipmdid": "countryCode"
+        },
+        "IFD0_Artist": {
+            "ipmdid": "creatorNames"
+        },
+        "IPTC_By-line": {
+            "ipmdid": "creatorNames"
+        },
+        "XMP-dc_Creator": {
+            "ipmdid": "creatorNames"
+        },
+        "XMP-iptcCore_CreatorContactInfo": {
+            "ipmdid": "creatorContactInfo"
+        },
+        "IPTC_By-lineTitle": {
+            "ipmdid": "jobtitle"
+        },
+        "XMP-photoshop_AuthorsPosition": {
+            "ipmdid": "jobtitle"
+        },
+        "IPTC_Credit": {
+            "ipmdid": "creditLine"
+        },
+        "XMP-photoshop_Credit": {
+            "ipmdid": "creditLine"
+        },
+        "ExifIFD_DateTimeOriginal+ExifIFD_SubSecTimeOriginal+ExifIFD_OffsetTimeOriginal": {
+            "ipmdid": "dateCreated"
+        },
+        "IPTC_DateCreated": {
+            "ipmdid": "dateCreated"
+        },
+        "IPTC_TimeCreated": {
+            "ipmdid": "dateCreated"
+        },
+        "XMP-photoshop_DateCreated": {
+            "ipmdid": "dateCreated"
+        },
+        "IFD0_ImageDescription": {
+            "ipmdid": "description"
+        },
+        "IPTC_Caption-Abstract": {
+            "ipmdid": "description"
+        },
+        "XMP-dc_Description": {
+            "ipmdid": "description"
+        },
+        "IPTC_Writer-Editor": {
+            "ipmdid": "captionWriter"
+        },
+        "XMP-photoshop_CaptionWriter": {
+            "ipmdid": "captionWriter"
+        },
+        "XMP-iptcCore_ExtDescrAccessibility": {
+            "ipmdid": "extDescrAccessibility"
+        },
+        "IPTC_Headline": {
+            "ipmdid": "headline"
+        },
+        "XMP-photoshop_Headline": {
+            "ipmdid": "headline"
+        },
+        "IPTC_SpecialInstructions": {
+            "ipmdid": "instructions"
+        },
+        "XMP-photoshop_Instructions": {
+            "ipmdid": "instructions"
+        },
+        "IPTC_ObjectAttributeReference": {
+            "ipmdid": "intellectualGenre"
+        },
+        "XMP-iptcCore_IntellectualGenre": {
+            "ipmdid": "intellectualGenre"
+        },
+        "IPTC_OriginalTransmissionReference": {
+            "ipmdid": "jobid"
+        },
+        "XMP-photoshop_TransmissionReference": {
+            "ipmdid": "jobid"
+        },
+        "IPTC_Keywords": {
+            "ipmdid": "keywords"
+        },
+        "XMP-dc_Subject": {
+            "ipmdid": "keywords"
+        },
+        "IPTC_Province-State": {
+            "ipmdid": "provinceState"
+        },
+        "XMP-photoshop_State": {
+            "ipmdid": "provinceState"
+        },
+        "XMP-xmpRights_UsageTerms": {
+            "ipmdid": "usageTerms"
+        },
+        "XMP-iptcCore_Scene": {
+            "ipmdid": "sceneCodes"
+        },
+        "IPTC_Source": {
+            "ipmdid": "source"
+        },
+        "XMP-photoshop_Source": {
+            "ipmdid": "source"
+        },
+        "IPTC_SubjectReference": {
+            "ipmdid": "subjectCodes"
+        },
+        "XMP-iptcCore_SubjectCode": {
+            "ipmdid": "subjectCodes"
+        },
+        "IPTC_Sub-location": {
+            "ipmdid": "sublocationName"
+        },
+        "XMP-iptcCore_Location": {
+            "ipmdid": "sublocationName"
+        },
+        "IPTC_ObjectName": {
+            "ipmdid": "title"
+        },
+        "XMP-dc_Title": {
+            "ipmdid": "title"
+        },
+        "XMP-iptcExt_AdditionalModelInformation": {
+            "ipmdid": "additionalModelInfo"
+        },
+        "XMP-iptcExt_AIPromptInformation": {
+            "ipmdid": "aIPromptInformation"
+        },
+        "XMP-iptcExt_AIPromptWriterName": {
+            "ipmdid": "aIPromptWriterNam"
+        },
+        "XMP-iptcExt_AISystemUsed": {
+            "ipmdid": "aISystemUsed"
+        },
+        "XMP-iptcExt_AISystemVersionUsed": {
+            "ipmdid": "aISystemVersionUsed"
+        },
+        "XMP-iptcExt_ArtworkOrObject": {
+            "ipmdid": "artworkOrObjects"
+        },
+        "XMP-iptcExt_OrganisationInImageCode": {
+            "ipmdid": "organisationInImageCodes"
+        },
+        "XMP-iptcExt_Contributor": {
+            "ipmdid": "contributors"
+        },
+        "XMP-plus_CopyrightOwner": {
+            "ipmdid": "copyrightOwners"
+        },
+        "XMP-iptcExt_AboutCvTerm": {
+            "ipmdid": "aboutCvTerms"
+        },
+        "XMP-plus_DataMining": {
+            "ipmdid": "dataMining"
+        },
+        "ExifIFD_ImageUniqueID": {
+            "ipmdid": "digitalImageGuid"
+        },
+        "XMP-iptcExt_DigitalImageGUID": {
+            "ipmdid": "digitalImageGuid"
+        },
+        "XMP-iptcExt_DigitalSourceType": {
+            "ipmdid": "digitalSourceType"
+        },
+        "XMP-iptcExt_EmbdEncRightsExpr": {
+            "ipmdid": "embdEncRightsExprs"
+        },
+        "XMP-iptcExt_EventID": {
+            "ipmdid": "eventId"
+        },
+        "XMP-iptcExt_Event": {
+            "ipmdid": "eventName"
+        },
+        "XMP-iptcExt_Genre": {
+            "ipmdid": "genres"
+        },
+        "XMP-plus_ImageCreator": {
+            "ipmdid": "imageCreators"
+        },
+        "XMP-xmp_Rating": {
+            "ipmdid": "imageRating"
+        },
+        "XMP-iptcExt_ImageRegion": {
+            "ipmdid": "imageRegion"
+        },
+        "XMP-iptcExt_RegistryID": {
+            "ipmdid": "registryEntries"
+        },
+        "XMP-plus_ImageSupplier": {
+            "ipmdid": "suppliers"
+        },
+        "XMP-plus_ImageSupplierImageID": {
+            "ipmdid": "imageSupplierImageId"
+        },
+        "XMP-plus_Licensor": {
+            "ipmdid": "licensors"
+        },
+        "XMP-iptcExt_LinkedEncRightsExpr": {
+            "ipmdid": "linkedEncRightsExprs"
+        },
+        "XMP-iptcExt_LocationCreated": {
+            "ipmdid": "locationCreated"
+        },
+        "XMP-iptcExt_LocationShown": {
+            "ipmdid": "locationsShown"
+        },
+        "XMP-iptcExt_MaxAvailHeight": {
+            "ipmdid": "maxAvailHeight"
+        },
+        "XMP-iptcExt_MaxAvailWidth": {
+            "ipmdid": "maxAvailWidth"
+        },
+        "XMP-plus_MinorModelAgeDisclosure": {
+            "ipmdid": "minorModelAgeDisclosure"
+        },
+        "XMP-iptcExt_ModelAge": {
+            "ipmdid": "modelAges"
+        },
+        "XMP-plus_ModelReleaseID": {
+            "ipmdid": "modelReleaseDocuments"
+        },
+        "XMP-plus_ModelReleaseStatus": {
+            "ipmdid": "modelReleaseStatus"
+        },
+        "XMP-iptcExt_OrganisationInImageName": {
+            "ipmdid": "organisationInImageNames"
+        },
+        "XMP-plus_OtherConstraints": {
+            "ipmdid": "otherConstraints"
+        },
+        "XMP-iptcExt_PersonInImage": {
+            "ipmdid": "personInImageNames"
+        },
+        "XMP-iptcExt_PersonInImageWDetails": {
+            "ipmdid": "personsShown"
+        },
+        "XMP-iptcExt_ProductInImage": {
+            "ipmdid": "productsShown"
+        },
+        "XMP-plus_PropertyReleaseID": {
+            "ipmdid": "propertyReleaseDocuments"
+        },
+        "XMP-plus_PropertyReleaseStatus": {
+            "ipmdid": "propertyReleaseStatus"
+        },
+        "XMP-xmpRights_WebStatement": {
+            "ipmdid": "webstatementRights"
+        },
+        "xCommenttwpfx01": "Presets of properties outside the IPTC PMD Standard",
+        "XMP-x_XMPToolkit": {
+            "label": "XMP Toolkit Version (XMP)|XMP",
+            "sortorder": "tp910x",
+            "output": "any"
+        },
+        "ExifTool_ExifToolVersion": {
+            "label": "Exiftool Version used by this system|NA (Exiftool Version)",
+            "sortorder": "tp810a",
+            "output": "any"
+        },
+        "System_FileName": {
+            "label": "File Name|NA (File Name)",
+            "sortorder": "tp920x",
+            "output": "none"
+        },
+        "xCommenttwpfx02": "END of static presets"
+    },
+    "et_topnoprefix": {
+        "AltTextAccessibility": {
+            "ipmdid": "altTextAccessibility"
+        },
+        "City": {
+            "ipmdid": "cityName"
+        },
+        "Copyright": {
+            "ipmdid": "copyrightNotice"
+        },
+        "CopyrightNotice": {
+            "ipmdid": "copyrightNotice"
+        },
+        "Rights": {
+            "ipmdid": "copyrightNotice"
+        },
+        "Country-PrimaryLocationName": {
+            "ipmdid": "countryName"
+        },
+        "Country": {
+            "ipmdid": "countryName"
+        },
+        "Country-PrimaryLocationCode": {
+            "ipmdid": "countryCode"
+        },
+        "CountryCode": {
+            "ipmdid": "countryCode"
+        },
+        "Artist": {
+            "ipmdid": "creatorNames"
+        },
+        "By-line": {
+            "ipmdid": "creatorNames"
+        },
+        "Creator": {
+            "ipmdid": "creatorNames"
+        },
+        "CreatorContactInfo": {
+            "ipmdid": "creatorContactInfo"
+        },
+        "By-lineTitle": {
+            "ipmdid": "jobtitle"
+        },
+        "AuthorsPosition": {
+            "ipmdid": "jobtitle"
+        },
+        "Credit": {
+            "ipmdid": "creditLine"
+        },
+        "DateTimeOriginal+ExifIFD": {
+            "ipmdid": "dateCreated"
+        },
+        "DateCreated": {
+            "ipmdid": "dateCreated"
+        },
+        "TimeCreated": {
+            "ipmdid": "dateCreated"
+        },
+        "ImageDescription": {
+            "ipmdid": "description"
+        },
+        "Caption-Abstract": {
+            "ipmdid": "description"
+        },
+        "Description": {
+            "ipmdid": "description"
+        },
+        "Writer-Editor": {
+            "ipmdid": "captionWriter"
+        },
+        "CaptionWriter": {
+            "ipmdid": "captionWriter"
+        },
+        "ExtDescrAccessibility": {
+            "ipmdid": "extDescrAccessibility"
+        },
+        "Headline": {
+            "ipmdid": "headline"
+        },
+        "SpecialInstructions": {
+            "ipmdid": "instructions"
+        },
+        "Instructions": {
+            "ipmdid": "instructions"
+        },
+        "ObjectAttributeReference": {
+            "ipmdid": "intellectualGenre"
+        },
+        "IntellectualGenre": {
+            "ipmdid": "intellectualGenre"
+        },
+        "OriginalTransmissionReference": {
+            "ipmdid": "jobid"
+        },
+        "TransmissionReference": {
+            "ipmdid": "jobid"
+        },
+        "Keywords": {
+            "ipmdid": "keywords"
+        },
+        "Subject": {
+            "ipmdid": "keywords"
+        },
+        "Province-State": {
+            "ipmdid": "provinceState"
+        },
+        "State": {
+            "ipmdid": "provinceState"
+        },
+        "UsageTerms": {
+            "ipmdid": "usageTerms"
+        },
+        "Scene": {
+            "ipmdid": "sceneCodes"
+        },
+        "Source": {
+            "ipmdid": "source"
+        },
+        "SubjectReference": {
+            "ipmdid": "subjectCodes"
+        },
+        "SubjectCode": {
+            "ipmdid": "subjectCodes"
+        },
+        "Sub-location": {
+            "ipmdid": "sublocationName"
+        },
+        "Location": {
+            "ipmdid": "sublocationName"
+        },
+        "ObjectName": {
+            "ipmdid": "title"
+        },
+        "Title": {
+            "ipmdid": "title"
+        },
+        "AdditionalModelInformation": {
+            "ipmdid": "additionalModelInfo"
+        },
+        "AIPromptInformation": {
+            "ipmdid": "aIPromptInformation"
+        },
+        "AIPromptWriterName": {
+            "ipmdid": "aIPromptWriterNam"
+        },
+        "AISystemUsed": {
+            "ipmdid": "aISystemUsed"
+        },
+        "AISystemVersionUsed": {
+            "ipmdid": "aISystemVersionUsed"
+        },
+        "ArtworkOrObject": {
+            "ipmdid": "artworkOrObjects"
+        },
+        "OrganisationInImageCode": {
+            "ipmdid": "organisationInImageCodes"
+        },
+        "Contributor": {
+            "ipmdid": "contributors"
+        },
+        "CopyrightOwner": {
+            "ipmdid": "copyrightOwners"
+        },
+        "AboutCvTerm": {
+            "ipmdid": "aboutCvTerms"
+        },
+        "DataMining": {
+            "ipmdid": "dataMining"
+        },
+        "ImageUniqueID": {
+            "ipmdid": "digitalImageGuid"
+        },
+        "DigitalImageGUID": {
+            "ipmdid": "digitalImageGuid"
+        },
+        "DigitalSourceType": {
+            "ipmdid": "digitalSourceType"
+        },
+        "EmbdEncRightsExpr": {
+            "ipmdid": "embdEncRightsExprs"
+        },
+        "EventID": {
+            "ipmdid": "eventId"
+        },
+        "Event": {
+            "ipmdid": "eventName"
+        },
+        "Genre": {
+            "ipmdid": "genres"
+        },
+        "ImageCreator": {
+            "ipmdid": "imageCreators"
+        },
+        "Rating": {
+            "ipmdid": "imageRating"
+        },
+        "ImageRegion": {
+            "ipmdid": "imageRegion"
+        },
+        "RegistryID": {
+            "ipmdid": "registryEntries"
+        },
+        "ImageSupplier": {
+            "ipmdid": "suppliers"
+        },
+        "ImageSupplierImageID": {
+            "ipmdid": "imageSupplierImageId"
+        },
+        "Licensor": {
+            "ipmdid": "licensors"
+        },
+        "LinkedEncRightsExpr": {
+            "ipmdid": "linkedEncRightsExprs"
+        },
+        "LocationCreated": {
+            "ipmdid": "locationCreated"
+        },
+        "LocationShown": {
+            "ipmdid": "locationsShown"
+        },
+        "MaxAvailHeight": {
+            "ipmdid": "maxAvailHeight"
+        },
+        "MaxAvailWidth": {
+            "ipmdid": "maxAvailWidth"
+        },
+        "MinorModelAgeDisclosure": {
+            "ipmdid": "minorModelAgeDisclosure"
+        },
+        "ModelAge": {
+            "ipmdid": "modelAges"
+        },
+        "ModelReleaseID": {
+            "ipmdid": "modelReleaseDocuments"
+        },
+        "ModelReleaseStatus": {
+            "ipmdid": "modelReleaseStatus"
+        },
+        "OrganisationInImageName": {
+            "ipmdid": "organisationInImageNames"
+        },
+        "OtherConstraints": {
+            "ipmdid": "otherConstraints"
+        },
+        "PersonInImage": {
+            "ipmdid": "personInImageNames"
+        },
+        "PersonInImageWDetails": {
+            "ipmdid": "personsShown"
+        },
+        "ProductInImage": {
+            "ipmdid": "productsShown"
+        },
+        "PropertyReleaseID": {
+            "ipmdid": "propertyReleaseDocuments"
+        },
+        "PropertyReleaseStatus": {
+            "ipmdid": "propertyReleaseStatus"
+        },
+        "WebStatement": {
+            "ipmdid": "webstatementRights"
+        }
+    },
+    "et_instructure": {
+        "CiAdrExtadr": {
+            "ipmdid": "address"
+        },
+        "CiAdrCity": {
+            "ipmdid": "city"
+        },
+        "CiAdrCtry": {
+            "ipmdid": "country"
+        },
+        "CiEmailWork": {
+            "ipmdid": "emailwork"
+        },
+        "CiTelWork": {
+            "ipmdid": "phonework"
+        },
+        "CiAdrPcode": {
+            "ipmdid": "postalCode"
+        },
+        "CiAdrRegion": {
+            "ipmdid": "region"
+        },
+        "CiUrlWork": {
+            "ipmdid": "weburlwork"
+        },
+        "AOCircaDateCreated": {
+            "ipmdid": "circaDateCreated"
+        },
+        "AOContentDescription": {
+            "ipmdid": "contentDescription"
+        },
+        "AOContributionDescription": {
+            "ipmdid": "contributionDescription"
+        },
+        "AOCopyrightNotice": {
+            "ipmdid": "copyrightNotice"
+        },
+        "AOCreator": {
+            "ipmdid": "creatorNames"
+        },
+        "AOCreatorId": {
+            "ipmdid": "creatorIdentifiers"
+        },
+        "AOCurrentCopyrightOwnerId": {
+            "ipmdid": "currentCopyrightOwnerIdentifier"
+        },
+        "AOCurrentCopyrightOwnerName": {
+            "ipmdid": "currentCopyrightOwnerName"
+        },
+        "AOCurrentLicensorId": {
+            "ipmdid": "currentLicensorIdentifier"
+        },
+        "AOCurrentLicensorName": {
+            "ipmdid": "currentLicensorName"
+        },
+        "AODateCreated": {
+            "ipmdid": "dateCreated"
+        },
+        "AOPhysicalDescription": {
+            "ipmdid": "physicalDescription"
+        },
+        "AOSource": {
+            "ipmdid": "source"
+        },
+        "AOSourceInvNo": {
+            "ipmdid": "sourceInventoryNr"
+        },
+        "AOSourceInvURL": {
+            "ipmdid": "sourceInventoryUrl"
+        },
+        "AOStylePeriod": {
+            "ipmdid": "stylePeriod"
+        },
+        "AOTitle": {
+            "ipmdid": "title"
+        },
+        "CvId": {
+            "ipmdid": "cvId"
+        },
+        "CvTermId": {
+            "ipmdid": "cvTermId"
+        },
+        "CvTermName": {
+            "ipmdid": "cvTermName"
+        },
+        "CvTermRefinedAbout": {
+            "ipmdid": "cvTermRefinedAbout"
+        },
+        "EncRightsExpr": {
+            "ipmdid": "encRightsExpr"
+        },
+        "RightsExprEncType": {
+            "ipmdid": "rightsExprEncType"
+        },
+        "RightsExprLangId": {
+            "ipmdid": "rightsExprLangId"
+        },
+        "Identifier": {
+            "ipmdid": "identifiers"
+        },
+        "Name": {
+            "ipmdid": "name"
+        },
+        "Role": {
+            "ipmdid": "role"
+        },
+        "RegionBoundary": {
+            "ipmdid": "regionBoundary"
+        },
+        "RId": {
+            "ipmdid": "rId"
+        },
+        "RCtype": {
+            "ipmdid": "rCtype"
+        },
+        "RRole": {
+            "ipmdid": "rRole"
+        },
+        "RbShape": {
+            "ipmdid": "rbShape"
+        },
+        "RbUnit": {
+            "ipmdid": "rbUnit"
+        },
+        "RbX": {
+            "ipmdid": "rbX"
+        },
+        "RbY": {
+            "ipmdid": "rbY"
+        },
+        "RbW": {
+            "ipmdid": "rbW"
+        },
+        "RbH": {
+            "ipmdid": "rbH"
+        },
+        "RbRx": {
+            "ipmdid": "rbRx"
+        },
+        "RbVertices": {
+            "ipmdid": "rbVertices"
+        },
+        "LinkedRightsExpr": {
+            "ipmdid": "linkedRightsExpr"
+        },
+        "City": {
+            "ipmdid": "city"
+        },
+        "CountryCode": {
+            "ipmdid": "countryCode"
+        },
+        "CountryName": {
+            "ipmdid": "countryName"
+        },
+        "GPSAltitude": {
+            "ipmdid": "gpsAltitude"
+        },
+        "GPSAltitudeRef": {
+            "ipmdid": "gpsAltitudeRef"
+        },
+        "GPSLatitude": {
+            "ipmdid": "gpsLatitude"
+        },
+        "GPSLongitude": {
+            "ipmdid": "gpsLongitude"
+        },
+        "LocationId": {
+            "ipmdid": "identifiers"
+        },
+        "LocationName": {
+            "ipmdid": "name"
+        },
+        "ProvinceState": {
+            "ipmdid": "provinceState"
+        },
+        "Sublocation": {
+            "ipmdid": "sublocation"
+        },
+        "WorldRegion": {
+            "ipmdid": "worldRegion"
+        },
+        "PersonCharacteristic": {
+            "ipmdid": "characteristics"
+        },
+        "PersonDescription": {
+            "ipmdid": "description"
+        },
+        "PersonId": {
+            "ipmdid": "identifiers"
+        },
+        "PersonName": {
+            "ipmdid": "name"
+        },
+        "ProductDescription": {
+            "ipmdid": "description"
+        },
+        "ProductGTIN": {
+            "ipmdid": "gtin"
+        },
+        "ProductId": {
+            "ipmdid": "identifiers"
+        },
+        "ProductName": {
+            "ipmdid": "name"
+        },
+        "RegItemId": {
+            "ipmdid": "assetIdentifier"
+        },
+        "RegOrgId": {
+            "ipmdid": "registryIdentifier"
+        },
+        "RegEntryRole": {
+            "ipmdid": "role"
+        },
+        "LicensorID": {
+            "ipmdid": "licensorId"
+        },
+        "LicensorName": {
+            "ipmdid": "licensorName"
+        },
+        "LicensorStreetAddress": {
+            "ipmdid": "licensorAddress"
+        },
+        "LicensorExtendedAddress": {
+            "ipmdid": "licensorAddressDetail"
+        },
+        "LicensorCity": {
+            "ipmdid": "licensorCity"
+        },
+        "LicensorRegion": {
+            "ipmdid": "licensorStateProvince"
+        },
+        "LicensorPostalCode": {
+            "ipmdid": "licensorPostalCode"
+        },
+        "LicensorCountry": {
+            "ipmdid": "licensorCountryName"
+        },
+        "LicensorTelephoneType1": {
+            "ipmdid": "licensorTelephoneType1"
+        },
+        "LicensorTelephone1": {
+            "ipmdid": "licensorTelephone1"
+        },
+        "LicensorTelephoneType2": {
+            "ipmdid": "licensorTelephoneType2"
+        },
+        "LicensorTelephone2": {
+            "ipmdid": "licensorTelephone2"
+        },
+        "LicensorEmail": {
+            "ipmdid": "licensorEmail"
+        },
+        "LicensorURL": {
+            "ipmdid": "licensorUrl"
+        },
+        "CopyrightOwnerID": {
+            "ipmdid": "copyrightOwnerId"
+        },
+        "CopyrightOwnerName": {
+            "ipmdid": "copyrightOwnerName"
+        },
+        "ImageCreatorID": {
+            "ipmdid": "imageCreatorId"
+        },
+        "Artist": {
+            "ipmdid": "imageCreatorName"
+        },
+        "ImageCreatorName": {
+            "ipmdid": "imageCreatorName"
+        },
+        "ImageSupplierID": {
+            "ipmdid": "imageSupplierId"
+        },
+        "ImageSupplierName": {
+            "ipmdid": "imageSupplierName"
+        }
+    }
+}

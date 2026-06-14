@@ -24,3 +24,10 @@ bigtiff = []
 
 [dependencies]
 gamut-core.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+
+[[bench]]
+name = "ifd"
+harness = false

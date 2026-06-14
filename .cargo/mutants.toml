@@ -26,3 +26,58 @@ exclude_globs = [
 # slow mutant on a loaded CI runner isn't misreported as a timeout, without burning minutes
 # per hang.
 minimum_test_timeout = 60
+
+# Provably-equivalent mutants: ones that cannot change observable behaviour, so no test can kill
+# them. They are excluded here (with the reason) rather than papered over with contrived tests.
+# Each regex is scoped to one function + operator so it can only match the intended mutant — never
+# a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
+# an entry.
+exclude_re = [
+    # gamut-bitstream `ec_partition`: its only `-` is the constant shift `7 - EC_PROB_SHIFT` (= 1,
+    # since EC_PROB_SHIFT = 6). The `- → /` mutation yields `7 / EC_PROB_SHIFT` = 1 — the identical
+    # value — so it is unkillable. (`- → +`/`*` give 13/42 and are caught by the round-trip tests.)
+    'replace - with / in ec_partition',
+    # gamut-bitstream `SymbolEncoder::finish`: `s = 10 + cnt`, and the encoder holds `cnt` in
+    # [-9, -1] (verified over 200k streams), so `s >= 1` always and the `if s > 0` flush guard is
+    # always taken. `> → >=` is therefore unobservable. (`> → ==`/`<` skip the loop and are caught.)
+    'replace > with >= in SymbolEncoder::finish',
+    # gamut-bitstream `SymbolEncoder::finish`: with `s <= 9` the flush loop runs at most twice, and
+    # the `n` it shifts is only consumed on an iteration that never executes, so `n >>= 8` is dead.
+    # `>>= → <<=` is unobservable. (The loop-bound and `e`/`n` init mutants stay live and are caught.)
+    'replace >>= with <<= in SymbolEncoder::finish',
+    # gamut-tiff `stored_total > MAX_IMAGE_BYTES` (decode_page_samples) and `tile_size > MAX_IMAGE_BYTES`
+    # (decode_tiles) are *allocation* guards: relaxing `>` to `==`/`>=` only changes whether a 64 MiB+
+    # buffer is reserved before the (still inevitable) decode error — the malformed file is rejected
+    # either way, so the Ok/Err outcome a functional test can see is unchanged. (`> -> <` flips the
+    # guard for every normal image and is caught.) These are the only `>` in either function.
+    'replace > with == in decode_page_samples',
+    'replace > with >= in decode_page_samples',
+    'replace > with == in decode_tiles',
+    'replace > with >= in decode_tiles',
+    # gamut-riff `Vp8xHeader::to_payload`: the feature-flag byte ORs five single bits each shifted to
+    # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
+    # gamut-riff `Vp8xHeader::from_payload`: the `le24` closure ORs three bytes at offsets 0/8/16
+    # (`b[0] | (b[1]<<8) | (b[2]<<16)`), again disjoint. Both functions' `| -> ^` are equivalent.
+    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
+    'replace \| with \^ in Vp8xHeader::to_payload',
+    'replace \| with \^ in Vp8xHeader::from_payload',
+    # gamut-ifd `Value::decode`: the DOUBLE assembly OR's a 32-bit low half with a 32-bit high half
+    # shifted up by 32 (`u64::from(a) | (u64::from(b) << 32)`). The operands occupy disjoint bits, so
+    # `|` is identical to `^`; both `| -> ^` mutations are equivalent.
+    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
+    'replace \| with \^ in Value::decode',
+    # gamut-dsp `adst_output_permute`: the index is `(d << 3) | (c << 2) | (b << 1) | a`, where each
+    # of a/b/c/d is a single bit (0 or 1) shifted to a distinct position, so the OR'd operands never
+    # share bits and `|` is identical to `^`. The three `| -> ^` mutations are therefore equivalent.
+    # (Regex: `\|`/`\^` escape the pipe/caret metacharacters.)
+    'replace \| with \^ in adst_output_permute',
+    # gamut-color `vp8_clip8`: the `else if v < 0` branch is reached only when `v` is out of range
+    # (`v == 0` takes the `v & !MASK2 == 0` fast path), so `v != 0` always holds there and `v < 0`
+    # is equivalent to `v <= 0`. (`v < 0 → v == 0` *is* observable and is killed by a test.)
+    'replace < with <= in vp8_clip8',
+    # gamut-color `prophoto_rgb_eotf_standard`: the ROMM toe `x/16` and the power curve `x^1.8` are
+    # equal at the x = 1/32 breakpoint (both 2^-9), so the curve is continuous and `x < 1/32` vs
+    # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
+    # *is* observable and is killed by a test at x = 0.5.)
+    'replace < with <= in prophoto_rgb_eotf_standard',
+]

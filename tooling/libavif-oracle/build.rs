@@ -26,10 +26,17 @@ fn main() {
     );
 
     // ---- Stage 1: build + install vendored dav1d into an OUT_DIR prefix. -------------------
+    // dav1d's meson does `find_program('nasm')` to assemble its x86 SIMD; `path` is the
+    // process PATH with a vendored nasm prepended (unchanged on non-x86). Only this stage
+    // needs it — the stage-2 cmake build of libavif has no nasm dependency (libavif's own
+    // asm is gated on the SVT/AVM codecs, which we disable).
+    let path = path_with_nasm();
+
     let dav1d_build = out_dir.join("dav1d-build");
     let dav1d_prefix = out_dir.join("dav1d-prefix");
     if !dav1d_build.join("build.ninja").exists() {
         run(Command::new("meson")
+            .env("PATH", &path)
             .arg("setup")
             .arg(&dav1d_build)
             .arg(&dav1d_src)
@@ -46,7 +53,9 @@ fn main() {
                 "-Denable_docs=false",
             ]));
     }
+    // `meson install` compiles the asm objects, so it also needs the vendored nasm on PATH.
     run(Command::new("meson")
+        .env("PATH", &path)
         .arg("install")
         .arg("-C")
         .arg(&dav1d_build));
@@ -111,10 +120,24 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-run when the vendored nasm tarball is swapped (e.g. a version bump).
+    println!("cargo:rerun-if-changed={}", nasm_vendor::tarball_path());
     println!(
         "cargo:rerun-if-changed={}",
         path_str(&avif_src.join("include/avif/avif.h"))
     );
+}
+
+/// The process `PATH` with the vendored nasm directory prepended, so meson's
+/// `find_program('nasm')` resolves to it. On arches/platforms where no vendored nasm is
+/// built (non-x86, non-Unix), returns the unchanged `PATH`.
+fn path_with_nasm() -> std::ffi::OsString {
+    let base = std::env::var_os("PATH").unwrap_or_default();
+    match nasm_vendor::ensure_nasm() {
+        Some(dir) => std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&base)))
+            .expect("join PATH with vendored nasm dir"),
+        None => base,
+    }
 }
 
 /// Reads a required build-time env var, panicking (this is a build script) if absent.

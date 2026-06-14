@@ -18,3 +18,10 @@ workspace = true
 [dependencies]
 gamut-core.workspace = true
 gamut-bitstream.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+
+[[bench]]
+name = "container"
+harness = false

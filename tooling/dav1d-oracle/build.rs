@@ -20,12 +20,18 @@ fn main() {
         src.display()
     );
 
+    // Build/locate a vendored nasm before configuring: dav1d's meson does
+    // `find_program('nasm')` to assemble its x86 SIMD. `path` is the process PATH with the
+    // vendored nasm prepended (unchanged on non-x86, where dav1d needs no nasm).
+    let path = path_with_nasm();
+
     let build_dir = out_dir.join("dav1d-build");
     // meson refuses to re-`setup` an already-configured directory; the presence of
     // `build.ninja` is its own marker that configuration succeeded, so on rebuilds we
     // skip straight to an incremental `ninja`.
     if !build_dir.join("build.ninja").exists() {
         run(Command::new("meson")
+            .env("PATH", &path)
             .arg("setup")
             .arg(&build_dir)
             .arg(&src)
@@ -37,7 +43,12 @@ fn main() {
                 "-Denable_docs=false",
             ]));
     }
-    run(Command::new("ninja").arg("-C").arg(&build_dir));
+    // meson bakes nasm's absolute path into `build.ninja` at configure time, so ninja
+    // does not strictly need the augmented PATH; pass it anyway for robust rebuilds.
+    run(Command::new("ninja")
+        .env("PATH", &path)
+        .arg("-C")
+        .arg(&build_dir));
 
     // Link the freshly built static archive (`<build>/src/libdav1d.a`).
     println!(
@@ -72,11 +83,25 @@ fn main() {
 
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-changed=build.rs");
+    // Re-run when the vendored nasm tarball is swapped (e.g. a version bump).
+    println!("cargo:rerun-if-changed={}", nasm_vendor::tarball_path());
     // Re-run when the submodule is bumped (its public version header moves).
     println!(
         "cargo:rerun-if-changed={}",
         path_str(&src.join("include/dav1d/version.h"))
     );
+}
+
+/// The process `PATH` with the vendored nasm directory prepended, so meson's
+/// `find_program('nasm')` resolves to it. On arches/platforms where no vendored nasm is
+/// built (non-x86, non-Unix), returns the unchanged `PATH`.
+fn path_with_nasm() -> std::ffi::OsString {
+    let base = std::env::var_os("PATH").unwrap_or_default();
+    match nasm_vendor::ensure_nasm() {
+        Some(dir) => std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&base)))
+            .expect("join PATH with vendored nasm dir"),
+        None => base,
+    }
 }
 
 /// Reads a required build-time env var, panicking (this is a build script) if absent.

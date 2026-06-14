@@ -275,6 +275,29 @@ mod tests {
     }
 
     #[test]
+    fn write_layout_is_tight() {
+        // The exact stream length pins the two-pass cursor math — `ifd_size`, the per-IFD advance,
+        // and the value-pool append — that a read->write->read round-trip can't see: the reader
+        // follows stored offsets, so a too-large IFD size or a wrong cursor step only inserts gaps
+        // it still parses back correctly.
+        let one = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd()],
+        });
+        assert_eq!(one.len(), 100);
+        let mut second = Ifd::new();
+        second.set(256, Value::Short(vec![1]));
+        second.set(257, Value::Short(vec![1]));
+        let two = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd(), second],
+        });
+        assert_eq!(two.len(), 130);
+    }
+
+    #[test]
     fn value_offsets_are_even() {
         // BitsPerSample (6 bytes) forces an out-of-line value; its offset must be word-aligned.
         let bytes = write(&TiffFile {
