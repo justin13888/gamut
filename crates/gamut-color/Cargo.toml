@@ -17,7 +17,6 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
-bitflags.workspace = true
 
 [dev-dependencies]
 divan.workspace = true

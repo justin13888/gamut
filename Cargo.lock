@@ -486,7 +486,6 @@ dependencies = [
 name = "gamut-color"
 version = "0.3.0"
 dependencies = [
- "bitflags",
  "divan",
  "gamut-core",
 ]
@@ -811,7 +810,7 @@ dependencies = [
 name = "libpng-oracle"
 version = "0.0.0"
 dependencies = [
- "bindgen",
+ "bindgen 0.71.1",
 ]
 
 [[package]]
@@ -1532,13 +1531,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zlib-oracle"
-version = "0.0.0"
-dependencies = [
- "bindgen",
-]
-
-[[package]]
 name = "xattr"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1546,6 +1538,13 @@ checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
  "rustix",
+]
+
+[[package]]
+name = "zlib-oracle"
+version = "0.0.0"
+dependencies = [
+ "bindgen 0.71.1",
 ]
 
 [[package]]
