@@ -7,7 +7,7 @@
 use divan::Bencher;
 use divan::counter::ItemsCount;
 use gamut_tonemap::ToneCurve;
-use gamut_tonemap::operators::{Clamp, Reinhard, ReinhardExtended};
+use gamut_tonemap::operators::{Aces, Clamp, Drago, Exposure, Hable, Reinhard, ReinhardExtended};
 
 fn main() {
     divan::main();
@@ -42,6 +42,42 @@ fn reinhard_extended(bencher: Bencher) {
 #[divan::bench]
 fn clamp(bencher: Bencher) {
     let curve = Clamp::new(1.0).unwrap();
+    bencher
+        .counter(ItemsCount::new(N))
+        .with_inputs(hdr_samples)
+        .bench_local_refs(|buf| curve.map_slice(buf));
+}
+
+#[divan::bench]
+fn exposure(bencher: Bencher) {
+    let curve = Exposure::new(0.6).unwrap();
+    bencher
+        .counter(ItemsCount::new(N))
+        .with_inputs(hdr_samples)
+        .bench_local_refs(|buf| curve.map_slice(buf));
+}
+
+#[divan::bench]
+fn aces(bencher: Bencher) {
+    let curve = Aces;
+    bencher
+        .counter(ItemsCount::new(N))
+        .with_inputs(hdr_samples)
+        .bench_local_refs(|buf| curve.map_slice(buf));
+}
+
+#[divan::bench]
+fn hable(bencher: Bencher) {
+    let curve = Hable::default();
+    bencher
+        .counter(ItemsCount::new(N))
+        .with_inputs(hdr_samples)
+        .bench_local_refs(|buf| curve.map_slice(buf));
+}
+
+#[divan::bench]
+fn drago(bencher: Bencher) {
+    let curve = Drago::new(20.0).unwrap();
     bencher
         .counter(ItemsCount::new(N))
         .with_inputs(hdr_samples)
