@@ -138,4 +138,23 @@ exclude_re = [
     # `x <= 1/32` choose between two identical values there — unobservable. (`1.0/32.0 → 1.0%32.0`
     # *is* observable and is killed by a test at x = 0.5.)
     'replace < with <= in prophoto_rgb_eotf_standard',
+    # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
+    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75 }`); replacing the body with the
+    # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
+    # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
+    'replace WebpEncoder::lossless -> Self with Default::default\(\)',
+    # gamut-webp `alpha::write_compressed_alph`: `0xff00_0000 | (u32::from(a) << 8)` ORs the opaque
+    # alpha byte (bits 24-31) with the green byte (bits 8-15); the operands are disjoint, so `|` == `^`.
+    'replace \| with \^ in write_compressed_alph',
+    # gamut-webp `transform::fwht4x4` negative-bias correction `x += i32::from(x < 0)`: the only value
+    # where `<` and `<=` disagree is x == 0, where the extra +1 is absorbed by the subsequent
+    # `(x + 3) >> 3` (both yield 0), so the four `< -> <=` mutations are unobservable. (The `+=`→`-=`,
+    # `<`→`>` and `<`→`==` mutants ARE killed: the `[0, -1, 0, …]` golden vector drives the column
+    # intermediates to ±4, where the correct and mutated roundings diverge.)
+    'replace < with <= in fwht4x4',
+    # gamut-webp `alpha::write_alph` returns the smaller of the raw and lossless encodings. At an exact
+    # size tie `<` keeps raw and `<=` would keep compressed, but both decode to identical alpha (the
+    # transform is bijective) and real content never ties, so no non-contrived test can distinguish
+    # them. (`< -> >` / `< -> ==` pick the *larger*/wrong encoding and are caught by the round-trip.)
+    'replace < with <= in write_alph',
 ]
