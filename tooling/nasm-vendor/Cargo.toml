@@ -1,0 +1,22 @@
+# Dev-only build helper: NOT a member of the gamut workspace (it is listed under
+# `[workspace].exclude` in the root manifest). It is consumed only as a path
+# `[build-dependencies]` of the dav1d / libavif oracle crates, which are themselves
+# excluded, so a plain `cargo build` of the shipped crates never compiles it. Because
+# it is excluded it cannot use `*.workspace = true` inheritance, so metadata is local.
+[package]
+name = "nasm-vendor"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only helper that builds a vendored nasm assembler from a committed release source tarball, so the dav1d/libavif oracles can assemble dav1d's x86 SIMD without a system-installed nasm."
+license = "MIT OR Apache-2.0"
+
+[lib]
+# The crate is consumed by build scripts; it has no doctests.
+doctest = false
+
+[dependencies]
+# Pure-Rust, no C dependencies — the whole point is to avoid extra system tooling.
+sha2 = "0.10"    # verify the committed tarball before building it
+tar = "0.4"      # untar the decompressed archive
+lzma-rs = "0.3"  # decode the exact upstream `.tar.xz` in pure Rust (no liblzma C dep)

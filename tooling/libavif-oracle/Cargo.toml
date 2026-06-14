@@ -19,3 +19,6 @@ doctest = false
 
 [build-dependencies]
 bindgen = "0.71"
+# Builds a vendored nasm from a committed source tarball so the stage-1 dav1d meson build
+# can assemble dav1d's x86 SIMD without a system nasm (no-op on non-x86 targets).
+nasm-vendor = { path = "../nasm-vendor" }
