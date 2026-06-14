@@ -20,6 +20,9 @@ gamut-core.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
+# Test-only: cross-check the Reinhard operator against gamut-color's bt2020_pq_to_sdr step. Not a
+# runtime dependency — a curve stays a pure f32->f32 map.
+gamut-color.workspace = true
 
 [[bench]]
 name = "tonemap"

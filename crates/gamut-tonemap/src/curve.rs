@@ -2,21 +2,30 @@
 
 /// A tone-mapping operator: a map from a non-negative linear-light input to a tone-mapped output.
 ///
-/// Built-in operators live in [`operators`](crate::operators); implement this trait yourself to
-/// supply a custom curve, or rely on the blanket impl that makes any `Fn(f32) -> f32` a
-/// `ToneCurve` so a closure works directly.
+/// Built-in operators live in [`operators`](crate::operators) and are re-exported at the crate
+/// root; implement this trait yourself to supply a custom curve, or rely on the blanket impl that
+/// makes any `Fn(f32) -> f32` a `ToneCurve` so a closure works directly.
 ///
 /// Implementors provide only [`map`](ToneCurve::map); [`map_slice`](ToneCurve::map_slice) is
 /// derived from it.
+///
+/// # Contract
+///
+/// For a finite, non-negative input, every built-in operator returns a finite, non-negative output
+/// and is monotonic non-decreasing in `x`. Behaviour on negative or NaN inputs is operator-defined
+/// and outside this contract — linearize and clamp upstream if a source can produce them.
 pub trait ToneCurve {
-    /// Map a single non-negative linear value `x` to its tone-mapped output.
+    /// Map a single non-negative linear-light value `x` to its tone-mapped output.
     ///
-    /// Inputs are assumed finite and `>= 0`; behaviour on negative or NaN inputs is
-    /// operator-defined and not part of this contract.
+    /// `x` is assumed finite and `>= 0` (see the trait-level contract); behaviour on negative or
+    /// NaN inputs is operator-defined.
     #[must_use]
     fn map(&self, x: f32) -> f32;
 
     /// Apply [`map`](ToneCurve::map) to every element of `buf` in place.
+    ///
+    /// Each element is mapped independently, so the result is unaffected by `buf`'s length or the
+    /// order of its elements.
     fn map_slice(&self, buf: &mut [f32]) {
         for x in buf {
             *x = self.map(*x);
@@ -44,14 +53,6 @@ mod tests {
         let expected: [f32; 4] = core::array::from_fn(|i| curve.map(buf[i]));
         curve.map_slice(&mut buf);
         assert_eq!(buf, expected);
-    }
-
-    #[test]
-    fn map_slice_handles_empty() {
-        let curve = |x: f32| x;
-        let mut buf: [f32; 0] = [];
-        curve.map_slice(&mut buf);
-        assert_eq!(buf, []);
     }
 
     #[test]

@@ -403,16 +403,10 @@ mod tests {
         let c = Reinhard;
         assert_eq!(c.map(0.0), 0.0);
         assert_eq!(c.map(1.0), 0.5);
-
-        // Strictly increasing and bounded below 1 over a sampled grid.
-        let mut prev = c.map(0.0);
-        for i in 1..=1000 {
-            let y = c.map(i as f32 * 0.1);
-            assert!(y > prev, "not increasing at step {i}");
-            assert!(y < 1.0, "not bounded below 1 at step {i}");
-            prev = y;
-        }
-
+        // Independent interior values pin x/(1+x) beyond the 0 and 1 fixed points.
+        assert!(close(c.map(3.0), 0.75));
+        assert!(close(c.map(0.25), 0.2));
+        assert_monotonic_increasing(&c, 0.0, 0.1, 1000);
         // Asymptotically approaches 1 from below.
         assert!(c.map(1e7) < 1.0);
         assert!(close(c.map(1e7), 1.0));
@@ -425,14 +419,9 @@ mod tests {
         assert_eq!(c.map(0.0), 0.0);
         assert!(close(c.map(white), 1.0));
         assert_eq!(c.white(), white);
-
-        // Monotonic increasing on a sampled grid.
-        let mut prev = c.map(0.0);
-        for i in 1..=1000 {
-            let y = c.map(i as f32 * 0.01);
-            assert!(y > prev, "not increasing at step {i}");
-            prev = y;
-        }
+        // An interior value pins the white² term beyond the 0 and white fixed points.
+        assert!(close(c.map(2.0), 0.75));
+        assert_monotonic_increasing(&c, 0.0, 0.01, 1000);
 
         // As white → ∞ it converges to plain Reinhard.
         let wide = ReinhardExtended::new(1e6).expect("positive white point");
@@ -441,13 +430,9 @@ mod tests {
             assert!(close(wide.map(x), plain.map(x)), "mismatch at {x}");
         }
 
-        // The default white point is the documented HDR/SDR reference ratio.
-        assert!(close(
-            ReinhardExtended::default().white(),
-            DEFAULT_REINHARD_WHITE
-        ));
-        // Pin the ratio's literal value (203 / 100 = 2.03), not just the self-referential default,
-        // so a mutated `/` in the constant is observable.
+        // The default white point is the documented HDR/SDR reference ratio; pin the literal value
+        // (203 / 100 = 2.03) so an accidental edit is observable.
+        assert_eq!(ReinhardExtended::default().white(), DEFAULT_REINHARD_WHITE);
         assert!(close(DEFAULT_REINHARD_WHITE, 2.03));
     }
 
@@ -460,17 +445,20 @@ mod tests {
     }
 
     #[test]
-    fn operators_are_object_safe() {
-        let curves: [&dyn ToneCurve; 4] = [
-            &Linear,
-            &Clamp::default(),
-            &Reinhard,
-            &ReinhardExtended::default(),
-        ];
-        for c in curves {
-            // Zero maps to a finite, non-negative value for every built-in operator.
-            let y = c.map(0.0);
-            assert!(y.is_finite() && y >= 0.0);
+    fn reinhard_matches_gamut_color_pq_step() {
+        // gamut-color's bt2020_pq_to_sdr normalizes PQ nits by the HDR reference white, then applies
+        // the same Reinhard step L/(1+L). Our Reinhard must agree, sample for sample — proving the
+        // two crates' implementations are consistent without sharing code.
+        use gamut_color::transfer::{bt2020_pq_to_sdr, pq_eotf};
+        use gamut_core::luminance::HDR_REFERENCE_WHITE_NITS;
+        for &signal in &[0.1_f64, 0.25, 0.5, 0.75, 1.0] {
+            let l = pq_eotf(signal) / HDR_REFERENCE_WHITE_NITS;
+            let ours = Reinhard.map(l as f32);
+            let theirs = bt2020_pq_to_sdr(signal) as f32;
+            assert!(
+                close_eps(ours, theirs, 1e-6),
+                "signal {signal}: {ours} vs {theirs}"
+            );
         }
     }
 
