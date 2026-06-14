@@ -1,0 +1,1644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>
+ACES Filmic Tone Mapping Curve | Krzysztof Narkowicz</title>
+<link rel="profile" href="https://gmpg.org/xfn/11" />
+<link rel="stylesheet" type="text/css" media="all" href="https://s0.wp.com/wp-content/themes/pub/twentyten/style.css?m=1659017451i&amp;ver=20190507" />
+<link rel="pingback" href="https://knarkowicz.wordpress.com/xmlrpc.php">
+<meta name='robots' content='max-image-preview:large' />
+<meta name="google-site-verification" content="GS1rn384m5Xh0Fmea_feMeNCWlbHAUPXn989-tqUrtg" />
+<link rel='dns-prefetch' href='//s0.wp.com' />
+<link rel='dns-prefetch' href='//widgets.wp.com' />
+<link rel='dns-prefetch' href='//wordpress.com' />
+<link rel="alternate" type="application/rss+xml" title="Krzysztof Narkowicz &raquo; Feed" href="https://knarkowicz.wordpress.com/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Krzysztof Narkowicz &raquo; Comments Feed" href="https://knarkowicz.wordpress.com/comments/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Krzysztof Narkowicz &raquo; ACES Filmic Tone Mapping&nbsp;Curve Comments Feed" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/feed/" />
+	<script type="text/javascript">
+		/* <![CDATA[ */
+		function addLoadEvent(func) {
+			var oldonload = window.onload;
+			if (typeof window.onload != 'function') {
+				window.onload = func;
+			} else {
+				window.onload = function () {
+					oldonload();
+					func();
+				}
+			}
+		}
+		/* ]]> */
+	</script>
+	<style id="wp-img-auto-sizes-contain-inline-css">
+img:is([sizes=auto i],[sizes^="auto," i]){contain-intrinsic-size:3000px 1500px}
+/*# sourceURL=wp-img-auto-sizes-contain-inline-css */
+</style>
+<link crossorigin='anonymous' rel='stylesheet' id='all-css-2-1' href='/_static/??/wp-content/mu-plugins/likes/jetpack-likes.css,/wp-content/blog-plugins/marketing-bar/css/marketing-bar.css?m=1761640963j&cssminify=yes' type='text/css' media='all' />
+<style id="wp-emoji-styles-inline-css">
+
+	img.wp-smiley, img.emoji {
+		display: inline !important;
+		border: none !important;
+		box-shadow: none !important;
+		height: 1em !important;
+		width: 1em !important;
+		margin: 0 0.07em !important;
+		vertical-align: -0.1em !important;
+		background: none !important;
+		padding: 0 !important;
+	}
+/*# sourceURL=wp-emoji-styles-inline-css */
+</style>
+<style id="wp-block-library-inline-css">
+:root{--wp-block-synced-color:#7a00df;--wp-block-synced-color--rgb:122,0,223;--wp-bound-block-color:var(--wp-block-synced-color);--wp-editor-canvas-background:#ddd;--wp-admin-theme-color:#007cba;--wp-admin-theme-color--rgb:0,124,186;--wp-admin-theme-color-darker-10:#006ba1;--wp-admin-theme-color-darker-10--rgb:0,107,160.5;--wp-admin-theme-color-darker-20:#005a87;--wp-admin-theme-color-darker-20--rgb:0,90,135;--wp-admin-border-width-focus:2px}@media (min-resolution:192dpi){:root{--wp-admin-border-width-focus:1.5px}}.wp-element-button{cursor:pointer}:root .has-very-light-gray-background-color{background-color:#eee}:root .has-very-dark-gray-background-color{background-color:#313131}:root .has-very-light-gray-color{color:#eee}:root .has-very-dark-gray-color{color:#313131}:root .has-vivid-green-cyan-to-vivid-cyan-blue-gradient-background{background:linear-gradient(135deg,#00d084,#0693e3)}:root .has-purple-crush-gradient-background{background:linear-gradient(135deg,#34e2e4,#4721fb 50%,#ab1dfe)}:root .has-hazy-dawn-gradient-background{background:linear-gradient(135deg,#faaca8,#dad0ec)}:root .has-subdued-olive-gradient-background{background:linear-gradient(135deg,#fafae1,#67a671)}:root .has-atomic-cream-gradient-background{background:linear-gradient(135deg,#fdd79a,#004a59)}:root .has-nightshade-gradient-background{background:linear-gradient(135deg,#330968,#31cdcf)}:root .has-midnight-gradient-background{background:linear-gradient(135deg,#020381,#2874fc)}:root{--wp--preset--font-size--normal:16px;--wp--preset--font-size--huge:42px}.has-regular-font-size{font-size:1em}.has-larger-font-size{font-size:2.625em}.has-normal-font-size{font-size:var(--wp--preset--font-size--normal)}.has-huge-font-size{font-size:var(--wp--preset--font-size--huge)}:root .has-text-align-center{text-align:center}:root .has-text-align-left{text-align:left}:root .has-text-align-right{text-align:right}.has-fit-text{white-space:nowrap!important}#end-resizable-editor-section{display:none}.aligncenter{clear:both}.items-justified-left{justify-content:flex-start}.items-justified-center{justify-content:center}.items-justified-right{justify-content:flex-end}.items-justified-space-between{justify-content:space-between}.screen-reader-text{word-wrap:normal!important;border:0;clip-path:inset(50%);height:1px;margin:-1px;overflow:hidden;padding:0;position:absolute;width:1px;word-break:normal!important}.screen-reader-text:focus{background-color:#ddd;clip-path:none;color:#444;display:block;font-size:1em;height:auto;left:5px;line-height:normal;padding:15px 23px 14px;text-decoration:none;top:5px;width:auto;z-index:100000}html :where(.has-border-color){border-style:solid}html :where([style*=border-color]){border-style:solid}html :where([style*=border-top-color]){border-top-style:solid}html :where([style*=border-right-color]){border-right-style:solid}html :where([style*=border-bottom-color]){border-bottom-style:solid}html :where([style*=border-left-color]){border-left-style:solid}html :where([style*=border-width]){border-style:solid}html :where([style*=border-top-width]){border-top-style:solid}html :where([style*=border-right-width]){border-right-style:solid}html :where([style*=border-bottom-width]){border-bottom-style:solid}html :where([style*=border-left-width]){border-left-style:solid}html :where(img[class*=wp-image-]){height:auto;max-width:100%}:where(figure){margin:0 0 1em}html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:var(--wp-admin--admin-bar--height,0px)}@media screen and (max-width:600px){html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:0px}}
+
+/*# sourceURL=/wp-content/plugins/gutenberg-core/v23.3.2/build/styles/block-library/common.min.css */
+</style>
+<style id="wp-block-tag-cloud-inline-css">
+.wp-block-tag-cloud{box-sizing:border-box}.wp-block-tag-cloud.aligncenter{justify-content:center;text-align:center}.wp-block-tag-cloud a{display:inline-block;margin-right:5px}.wp-block-tag-cloud span{display:inline-block;margin-left:5px;text-decoration:none}:root :where(.wp-block-tag-cloud.is-style-outline){display:flex;flex-wrap:wrap;gap:1ch}:root :where(.wp-block-tag-cloud.is-style-outline a){border:1px solid;font-size:unset!important;margin-right:0;padding:1ch 2ch;text-decoration:none!important}
+/*# sourceURL=/wp-content/plugins/gutenberg-core/v23.3.2/build/styles/block-library/tag-cloud/style.min.css */
+</style>
+<style id="wp-block-library-inline-css-extra">
+.has-text-align-justify {
+	text-align:justify;
+}
+.has-text-align-justify{text-align:justify;}
+/*# sourceURL=wp-block-library-inline-css */
+</style>
+
+<style id="classic-theme-styles-inline-css">
+.wp-block-button__link{background-color:#32373c;border-radius:9999px;box-shadow:none;color:#fff;font-size:1.125em;padding:calc(.667em + 2px) calc(1.333em + 2px);text-decoration:none}.wp-block-file__button{background:#32373c;color:#fff}.wp-block-accordion-heading{margin:0}.wp-block-accordion-heading__toggle{background-color:inherit!important;color:inherit!important}.wp-block-accordion-heading__toggle:not(:focus-visible){outline:none}.wp-block-accordion-heading__toggle:focus,.wp-block-accordion-heading__toggle:hover{background-color:inherit!important;border:none;box-shadow:none;color:inherit;padding:var(--wp--preset--spacing--20,1em) 0;text-decoration:none}.wp-block-accordion-heading__toggle:focus-visible{outline:auto;outline-offset:0}.wp-block-tab:not(.has-text-color){color:inherit!important}.wp-block-tab:not(.has-background){background-color:inherit!important}.wp-block-tab:focus,.wp-block-tab:hover{text-decoration:none}.wp-block-tab:focus-visible{outline:auto;outline-offset:0}
+/*# sourceURL=/wp-content/plugins/gutenberg-core/v23.3.2/build/styles/block-library/classic.min.css */
+</style>
+
+<link crossorigin='anonymous' rel='stylesheet' id='all-css-10-1' href='/_static/??/wp-content/mu-plugins/core-compat/wp-mediaelement.css,/wp-content/mu-plugins/wpcom-bbpress-premium-themes.css?m=1432920480j&cssminify=yes' type='text/css' media='all' />
+<style id="global-styles-inline-css">
+:root{--wp--preset--aspect-ratio--square: 1;--wp--preset--aspect-ratio--4-3: 4/3;--wp--preset--aspect-ratio--3-4: 3/4;--wp--preset--aspect-ratio--3-2: 3/2;--wp--preset--aspect-ratio--2-3: 2/3;--wp--preset--aspect-ratio--16-9: 16/9;--wp--preset--aspect-ratio--9-16: 9/16;--wp--preset--color--black: #000;--wp--preset--color--cyan-bluish-gray: #abb8c3;--wp--preset--color--white: #fff;--wp--preset--color--pale-pink: #f78da7;--wp--preset--color--vivid-red: #cf2e2e;--wp--preset--color--luminous-vivid-orange: #ff6900;--wp--preset--color--luminous-vivid-amber: #fcb900;--wp--preset--color--light-green-cyan: #7bdcb5;--wp--preset--color--vivid-green-cyan: #00d084;--wp--preset--color--pale-cyan-blue: #8ed1fc;--wp--preset--color--vivid-cyan-blue: #0693e3;--wp--preset--color--vivid-purple: #9b51e0;--wp--preset--color--blue: #0066cc;--wp--preset--color--medium-gray: #666;--wp--preset--color--light-gray: #f1f1f1;--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple: linear-gradient(135deg,rgb(6,147,227) 0%,rgb(155,81,224) 100%);--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan: linear-gradient(135deg,rgb(122,220,180) 0%,rgb(0,208,130) 100%);--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange: linear-gradient(135deg,rgb(252,185,0) 0%,rgb(255,105,0) 100%);--wp--preset--gradient--luminous-vivid-orange-to-vivid-red: linear-gradient(135deg,rgb(255,105,0) 0%,rgb(207,46,46) 100%);--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray: linear-gradient(135deg,rgb(238,238,238) 0%,rgb(169,184,195) 100%);--wp--preset--gradient--cool-to-warm-spectrum: linear-gradient(135deg,rgb(74,234,220) 0%,rgb(151,120,209) 20%,rgb(207,42,186) 40%,rgb(238,44,130) 60%,rgb(251,105,98) 80%,rgb(254,248,76) 100%);--wp--preset--gradient--blush-light-purple: linear-gradient(135deg,rgb(255,206,236) 0%,rgb(152,150,240) 100%);--wp--preset--gradient--blush-bordeaux: linear-gradient(135deg,rgb(254,205,165) 0%,rgb(254,45,45) 50%,rgb(107,0,62) 100%);--wp--preset--gradient--luminous-dusk: linear-gradient(135deg,rgb(255,203,112) 0%,rgb(199,81,192) 50%,rgb(65,88,208) 100%);--wp--preset--gradient--pale-ocean: linear-gradient(135deg,rgb(255,245,203) 0%,rgb(182,227,212) 50%,rgb(51,167,181) 100%);--wp--preset--gradient--electric-grass: linear-gradient(135deg,rgb(202,248,128) 0%,rgb(113,206,126) 100%);--wp--preset--gradient--midnight: linear-gradient(135deg,rgb(2,3,129) 0%,rgb(40,116,252) 100%);--wp--preset--font-size--small: 13px;--wp--preset--font-size--medium: 20px;--wp--preset--font-size--large: 36px;--wp--preset--font-size--x-large: 42px;--wp--preset--font-family--albert-sans: 'Albert Sans', sans-serif;--wp--preset--font-family--alegreya: Alegreya, serif;--wp--preset--font-family--arvo: Arvo, serif;--wp--preset--font-family--bodoni-moda: 'Bodoni Moda', serif;--wp--preset--font-family--bricolage-grotesque: 'Bricolage Grotesque', sans-serif;--wp--preset--font-family--cabin: Cabin, sans-serif;--wp--preset--font-family--chivo: Chivo, sans-serif;--wp--preset--font-family--commissioner: Commissioner, sans-serif;--wp--preset--font-family--cormorant: Cormorant, serif;--wp--preset--font-family--courier-prime: 'Courier Prime', monospace;--wp--preset--font-family--crimson-pro: 'Crimson Pro', serif;--wp--preset--font-family--dm-mono: 'DM Mono', monospace;--wp--preset--font-family--dm-sans: 'DM Sans', sans-serif;--wp--preset--font-family--dm-serif-display: 'DM Serif Display', serif;--wp--preset--font-family--domine: Domine, serif;--wp--preset--font-family--eb-garamond: 'EB Garamond', serif;--wp--preset--font-family--epilogue: Epilogue, sans-serif;--wp--preset--font-family--fahkwang: Fahkwang, sans-serif;--wp--preset--font-family--figtree: Figtree, sans-serif;--wp--preset--font-family--fira-sans: 'Fira Sans', sans-serif;--wp--preset--font-family--fjalla-one: 'Fjalla One', sans-serif;--wp--preset--font-family--fraunces: Fraunces, serif;--wp--preset--font-family--gabarito: Gabarito, system-ui;--wp--preset--font-family--ibm-plex-mono: 'IBM Plex Mono', monospace;--wp--preset--font-family--ibm-plex-sans: 'IBM Plex Sans', sans-serif;--wp--preset--font-family--ibarra-real-nova: 'Ibarra Real Nova', serif;--wp--preset--font-family--instrument-serif: 'Instrument Serif', serif;--wp--preset--font-family--inter: Inter, sans-serif;--wp--preset--font-family--josefin-sans: 'Josefin Sans', sans-serif;--wp--preset--font-family--jost: Jost, sans-serif;--wp--preset--font-family--libre-baskerville: 'Libre Baskerville', serif;--wp--preset--font-family--libre-franklin: 'Libre Franklin', sans-serif;--wp--preset--font-family--literata: Literata, serif;--wp--preset--font-family--lora: Lora, serif;--wp--preset--font-family--merriweather: Merriweather, serif;--wp--preset--font-family--montserrat: Montserrat, sans-serif;--wp--preset--font-family--newsreader: Newsreader, serif;--wp--preset--font-family--noto-sans-mono: 'Noto Sans Mono', sans-serif;--wp--preset--font-family--nunito: Nunito, sans-serif;--wp--preset--font-family--open-sans: 'Open Sans', sans-serif;--wp--preset--font-family--overpass: Overpass, sans-serif;--wp--preset--font-family--pt-serif: 'PT Serif', serif;--wp--preset--font-family--petrona: Petrona, serif;--wp--preset--font-family--piazzolla: Piazzolla, serif;--wp--preset--font-family--playfair-display: 'Playfair Display', serif;--wp--preset--font-family--plus-jakarta-sans: 'Plus Jakarta Sans', sans-serif;--wp--preset--font-family--poppins: Poppins, sans-serif;--wp--preset--font-family--raleway: Raleway, sans-serif;--wp--preset--font-family--roboto: Roboto, sans-serif;--wp--preset--font-family--roboto-slab: 'Roboto Slab', serif;--wp--preset--font-family--rubik: Rubik, sans-serif;--wp--preset--font-family--rufina: Rufina, serif;--wp--preset--font-family--sora: Sora, sans-serif;--wp--preset--font-family--source-sans-3: 'Source Sans 3', sans-serif;--wp--preset--font-family--source-serif-4: 'Source Serif 4', serif;--wp--preset--font-family--space-mono: 'Space Mono', monospace;--wp--preset--font-family--syne: Syne, sans-serif;--wp--preset--font-family--texturina: Texturina, serif;--wp--preset--font-family--urbanist: Urbanist, sans-serif;--wp--preset--font-family--work-sans: 'Work Sans', sans-serif;--wp--preset--spacing--20: 0.44rem;--wp--preset--spacing--30: 0.67rem;--wp--preset--spacing--40: 1rem;--wp--preset--spacing--50: 1.5rem;--wp--preset--spacing--60: 2.25rem;--wp--preset--spacing--70: 3.38rem;--wp--preset--spacing--80: 5.06rem;--wp--preset--shadow--natural: 6px 6px 9px rgba(0, 0, 0, 0.2);--wp--preset--shadow--deep: 12px 12px 50px rgba(0, 0, 0, 0.4);--wp--preset--shadow--sharp: 6px 6px 0px rgba(0, 0, 0, 0.2);--wp--preset--shadow--outlined: 6px 6px 0px -3px rgb(255, 255, 255), 6px 6px rgb(0, 0, 0);--wp--preset--shadow--crisp: 6px 6px 0px rgb(0, 0, 0);}.wp-block-button{--wp--preset--dimension--25: 25%;--wp--preset--dimension--50: 50%;--wp--preset--dimension--75: 75%;--wp--preset--dimension--100: 100%;}:where(body) { margin: 0; }:where(.is-layout-flex){gap: 0.5em;}:where(.is-layout-grid){gap: 0.5em;}body .is-layout-flex{display: flex;}.is-layout-flex{flex-wrap: wrap;align-items: center;}.is-layout-flex > :is(*, div){margin: 0;}body .is-layout-grid{display: grid;}.is-layout-grid > :is(*, div){margin: 0;}body{padding-top: 0px;padding-right: 0px;padding-bottom: 0px;padding-left: 0px;}:root :where(.wp-element-button, .wp-block-button__link){background-color: #32373c;border-width: 0;color: #fff;font-family: inherit;font-size: inherit;font-style: inherit;font-weight: inherit;letter-spacing: inherit;line-height: inherit;padding-top: calc(0.667em + 2px);padding-right: calc(1.333em + 2px);padding-bottom: calc(0.667em + 2px);padding-left: calc(1.333em + 2px);text-decoration: none;text-transform: inherit;}.has-black-color{color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-color{color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-color{color: var(--wp--preset--color--white) !important;}.has-pale-pink-color{color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-color{color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-color{color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-color{color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-color{color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-color{color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-color{color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-color{color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-color{color: var(--wp--preset--color--vivid-purple) !important;}.has-blue-color{color: var(--wp--preset--color--blue) !important;}.has-medium-gray-color{color: var(--wp--preset--color--medium-gray) !important;}.has-light-gray-color{color: var(--wp--preset--color--light-gray) !important;}.has-black-background-color{background-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-background-color{background-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-background-color{background-color: var(--wp--preset--color--white) !important;}.has-pale-pink-background-color{background-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-background-color{background-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-background-color{background-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-background-color{background-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-background-color{background-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-background-color{background-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-background-color{background-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-background-color{background-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-background-color{background-color: var(--wp--preset--color--vivid-purple) !important;}.has-blue-background-color{background-color: var(--wp--preset--color--blue) !important;}.has-medium-gray-background-color{background-color: var(--wp--preset--color--medium-gray) !important;}.has-light-gray-background-color{background-color: var(--wp--preset--color--light-gray) !important;}.has-black-border-color{border-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-border-color{border-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-border-color{border-color: var(--wp--preset--color--white) !important;}.has-pale-pink-border-color{border-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-border-color{border-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-border-color{border-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-border-color{border-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-border-color{border-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-border-color{border-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-border-color{border-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-border-color{border-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-border-color{border-color: var(--wp--preset--color--vivid-purple) !important;}.has-blue-border-color{border-color: var(--wp--preset--color--blue) !important;}.has-medium-gray-border-color{border-color: var(--wp--preset--color--medium-gray) !important;}.has-light-gray-border-color{border-color: var(--wp--preset--color--light-gray) !important;}.has-vivid-cyan-blue-to-vivid-purple-gradient-background{background: var(--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple) !important;}.has-light-green-cyan-to-vivid-green-cyan-gradient-background{background: var(--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan) !important;}.has-luminous-vivid-amber-to-luminous-vivid-orange-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange) !important;}.has-luminous-vivid-orange-to-vivid-red-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-orange-to-vivid-red) !important;}.has-very-light-gray-to-cyan-bluish-gray-gradient-background{background: var(--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray) !important;}.has-cool-to-warm-spectrum-gradient-background{background: var(--wp--preset--gradient--cool-to-warm-spectrum) !important;}.has-blush-light-purple-gradient-background{background: var(--wp--preset--gradient--blush-light-purple) !important;}.has-blush-bordeaux-gradient-background{background: var(--wp--preset--gradient--blush-bordeaux) !important;}.has-luminous-dusk-gradient-background{background: var(--wp--preset--gradient--luminous-dusk) !important;}.has-pale-ocean-gradient-background{background: var(--wp--preset--gradient--pale-ocean) !important;}.has-electric-grass-gradient-background{background: var(--wp--preset--gradient--electric-grass) !important;}.has-midnight-gradient-background{background: var(--wp--preset--gradient--midnight) !important;}.has-small-font-size{font-size: var(--wp--preset--font-size--small) !important;}.has-medium-font-size{font-size: var(--wp--preset--font-size--medium) !important;}.has-large-font-size{font-size: var(--wp--preset--font-size--large) !important;}.has-x-large-font-size{font-size: var(--wp--preset--font-size--x-large) !important;}.has-albert-sans-font-family{font-family: var(--wp--preset--font-family--albert-sans) !important;}.has-alegreya-font-family{font-family: var(--wp--preset--font-family--alegreya) !important;}.has-arvo-font-family{font-family: var(--wp--preset--font-family--arvo) !important;}.has-bodoni-moda-font-family{font-family: var(--wp--preset--font-family--bodoni-moda) !important;}.has-bricolage-grotesque-font-family{font-family: var(--wp--preset--font-family--bricolage-grotesque) !important;}.has-cabin-font-family{font-family: var(--wp--preset--font-family--cabin) !important;}.has-chivo-font-family{font-family: var(--wp--preset--font-family--chivo) !important;}.has-commissioner-font-family{font-family: var(--wp--preset--font-family--commissioner) !important;}.has-cormorant-font-family{font-family: var(--wp--preset--font-family--cormorant) !important;}.has-courier-prime-font-family{font-family: var(--wp--preset--font-family--courier-prime) !important;}.has-crimson-pro-font-family{font-family: var(--wp--preset--font-family--crimson-pro) !important;}.has-dm-mono-font-family{font-family: var(--wp--preset--font-family--dm-mono) !important;}.has-dm-sans-font-family{font-family: var(--wp--preset--font-family--dm-sans) !important;}.has-dm-serif-display-font-family{font-family: var(--wp--preset--font-family--dm-serif-display) !important;}.has-domine-font-family{font-family: var(--wp--preset--font-family--domine) !important;}.has-eb-garamond-font-family{font-family: var(--wp--preset--font-family--eb-garamond) !important;}.has-epilogue-font-family{font-family: var(--wp--preset--font-family--epilogue) !important;}.has-fahkwang-font-family{font-family: var(--wp--preset--font-family--fahkwang) !important;}.has-figtree-font-family{font-family: var(--wp--preset--font-family--figtree) !important;}.has-fira-sans-font-family{font-family: var(--wp--preset--font-family--fira-sans) !important;}.has-fjalla-one-font-family{font-family: var(--wp--preset--font-family--fjalla-one) !important;}.has-fraunces-font-family{font-family: var(--wp--preset--font-family--fraunces) !important;}.has-gabarito-font-family{font-family: var(--wp--preset--font-family--gabarito) !important;}.has-ibm-plex-mono-font-family{font-family: var(--wp--preset--font-family--ibm-plex-mono) !important;}.has-ibm-plex-sans-font-family{font-family: var(--wp--preset--font-family--ibm-plex-sans) !important;}.has-ibarra-real-nova-font-family{font-family: var(--wp--preset--font-family--ibarra-real-nova) !important;}.has-instrument-serif-font-family{font-family: var(--wp--preset--font-family--instrument-serif) !important;}.has-inter-font-family{font-family: var(--wp--preset--font-family--inter) !important;}.has-josefin-sans-font-family{font-family: var(--wp--preset--font-family--josefin-sans) !important;}.has-jost-font-family{font-family: var(--wp--preset--font-family--jost) !important;}.has-libre-baskerville-font-family{font-family: var(--wp--preset--font-family--libre-baskerville) !important;}.has-libre-franklin-font-family{font-family: var(--wp--preset--font-family--libre-franklin) !important;}.has-literata-font-family{font-family: var(--wp--preset--font-family--literata) !important;}.has-lora-font-family{font-family: var(--wp--preset--font-family--lora) !important;}.has-merriweather-font-family{font-family: var(--wp--preset--font-family--merriweather) !important;}.has-montserrat-font-family{font-family: var(--wp--preset--font-family--montserrat) !important;}.has-newsreader-font-family{font-family: var(--wp--preset--font-family--newsreader) !important;}.has-noto-sans-mono-font-family{font-family: var(--wp--preset--font-family--noto-sans-mono) !important;}.has-nunito-font-family{font-family: var(--wp--preset--font-family--nunito) !important;}.has-open-sans-font-family{font-family: var(--wp--preset--font-family--open-sans) !important;}.has-overpass-font-family{font-family: var(--wp--preset--font-family--overpass) !important;}.has-pt-serif-font-family{font-family: var(--wp--preset--font-family--pt-serif) !important;}.has-petrona-font-family{font-family: var(--wp--preset--font-family--petrona) !important;}.has-piazzolla-font-family{font-family: var(--wp--preset--font-family--piazzolla) !important;}.has-playfair-display-font-family{font-family: var(--wp--preset--font-family--playfair-display) !important;}.has-plus-jakarta-sans-font-family{font-family: var(--wp--preset--font-family--plus-jakarta-sans) !important;}.has-poppins-font-family{font-family: var(--wp--preset--font-family--poppins) !important;}.has-raleway-font-family{font-family: var(--wp--preset--font-family--raleway) !important;}.has-roboto-font-family{font-family: var(--wp--preset--font-family--roboto) !important;}.has-roboto-slab-font-family{font-family: var(--wp--preset--font-family--roboto-slab) !important;}.has-rubik-font-family{font-family: var(--wp--preset--font-family--rubik) !important;}.has-rufina-font-family{font-family: var(--wp--preset--font-family--rufina) !important;}.has-sora-font-family{font-family: var(--wp--preset--font-family--sora) !important;}.has-source-sans-3-font-family{font-family: var(--wp--preset--font-family--source-sans-3) !important;}.has-source-serif-4-font-family{font-family: var(--wp--preset--font-family--source-serif-4) !important;}.has-space-mono-font-family{font-family: var(--wp--preset--font-family--space-mono) !important;}.has-syne-font-family{font-family: var(--wp--preset--font-family--syne) !important;}.has-texturina-font-family{font-family: var(--wp--preset--font-family--texturina) !important;}.has-urbanist-font-family{font-family: var(--wp--preset--font-family--urbanist) !important;}.has-work-sans-font-family{font-family: var(--wp--preset--font-family--work-sans) !important;}
+/*# sourceURL=global-styles-inline-css */
+</style>
+
+<link crossorigin='anonymous' rel='stylesheet' id='all-css-12-1' href='/wp-content/mu-plugins/jetpack-mu-wpcom-plugin/moon/jetpack_vendor/automattic/jetpack-mu-wpcom/src/build/verbum-comments/verbum-comments.css?m=1777410324i&cssminify=yes' type='text/css' media='all' />
+<link rel='stylesheet' id='verbum-gutenberg-css-css' href='https://widgets.wp.com/verbum-block-editor/block-editor.css?ver=1771405207' media='all' />
+<link crossorigin='anonymous' rel='stylesheet' id='all-css-14-1' href='/_static/??-eJyNjuEKwjAMhF/IGgdO3A/xWbYSa1zblDWl7O2NCjoVxH+5L7nLQU3GchSMAqGY5IujmMFyCIqMpxFV5Q+yVrICgshC6s7P4bFYZMoZgyakMoBUBbNSGDzb8c/bLLNHU5P+/zIsCk+ooU5Hd2/7kr9MDtlolV6I45swJ9/TdLMew6HZNZtt27X77nIFFpJxPw==&cssminify=yes' type='text/css' media='all' />
+<style id="jetpack-global-styles-frontend-style-inline-css">
+:root { --font-headings: unset; --font-base: unset; --font-headings-default: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen-Sans,Ubuntu,Cantarell,"Helvetica Neue",sans-serif; --font-base-default: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen-Sans,Ubuntu,Cantarell,"Helvetica Neue",sans-serif;}
+/*# sourceURL=jetpack-global-styles-frontend-style-inline-css */
+</style>
+<link crossorigin='anonymous' rel='stylesheet' id='all-css-16-1' href='/_static/??-eJyNjcEKAjEMRH/IGlcqPYmfIt20tF3TpJiWxb/XFS/ixcswD4Y3sDaDwj1yhzpMo5EKKyyxN4+3D0MV2SIMigqa/T0GH8LjXQunParu4H/TtTDCPAoFUMHiyZAk0S/4cfYc6+s9W0gks6dtcKnnyTl7stPh6JYnG8BLYw==&cssminify=yes' type='text/css' media='all' />
+<script id="wpcom-actionbar-placeholder-js-extra">
+var actionbardata = {"siteID":"77263292","postID":"359","siteURL":"https://knarkowicz.wordpress.com","xhrURL":"https://knarkowicz.wordpress.com/wp-admin/admin-ajax.php","nonce":"60c8e27987","isLoggedIn":"","statusMessage":"","subsEmailDefault":"instantly","proxyScriptUrl":"https://s0.wp.com/wp-content/js/wpcom-proxy-request.js?m=1513050504i&amp;ver=20211021","shortlink":"https://wp.me/p5ebI8-5N","i18n":{"followedText":"New posts from this site will now appear in your \u003Ca href=\"https://wordpress.com/reader\"\u003EReader\u003C/a\u003E","foldBar":"Collapse this bar","unfoldBar":"Expand this bar","shortLinkCopied":"Shortlink copied to clipboard."}};
+//# sourceURL=wpcom-actionbar-placeholder-js-extra
+</script>
+<script id="jetpack-mu-wpcom-settings-js-before">
+var JETPACK_MU_WPCOM_SETTINGS = {"assetsUrl":"https://s0.wp.com/wp-content/mu-plugins/jetpack-mu-wpcom-plugin/moon/jetpack_vendor/automattic/jetpack-mu-wpcom/src/build/"};
+//# sourceURL=jetpack-mu-wpcom-settings-js-before
+</script>
+<script crossorigin='anonymous' type='text/javascript'  src='/wp-content/js/rlt-proxy.js?m=1720530689i'></script>
+<script id="rlt-proxy-js-after">
+	rltInitialize( {"token":null,"iframeOrigins":["https:\/\/widgets.wp.com"]} );
+//# sourceURL=rlt-proxy-js-after
+</script>
+<link rel="EditURI" type="application/rsd+xml" title="RSD" href="https://knarkowicz.wordpress.com/xmlrpc.php?rsd" />
+<meta name="generator" content="WordPress.com" />
+<link rel="canonical" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" />
+<link rel='shortlink' href='https://wp.me/p5ebI8-5N' />
+<link rel="alternate" type="application/json+oembed" href="https://public-api.wordpress.com/oembed/?format=json&amp;url=https%3A%2F%2Fknarkowicz.wordpress.com%2F2016%2F01%2F06%2Faces-filmic-tone-mapping-curve%2F&amp;for=wpcom-auto-discovery" /><link rel="alternate" type="application/xml+oembed" href="https://public-api.wordpress.com/oembed/?format=xml&amp;url=https%3A%2F%2Fknarkowicz.wordpress.com%2F2016%2F01%2F06%2Faces-filmic-tone-mapping-curve%2F&amp;for=wpcom-auto-discovery" />
+<!-- Jetpack Open Graph Tags -->
+<meta property="og:type" content="article" />
+<meta property="og:title" content="ACES Filmic Tone Mapping Curve" />
+<meta property="og:url" content="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" />
+<meta property="og:description" content="Careful mapping of HDR values to LDR is an important part of a modern game rendering pipeline. One of the goals of our new renderer was to replace Reinhard‘s tone mapping curve with some kind of a …" />
+<meta property="article:published_time" content="2016-01-06T13:37:51+00:00" />
+<meta property="article:modified_time" content="2022-08-19T14:43:19+00:00" />
+<meta property="og:site_name" content="Krzysztof Narkowicz" />
+<meta property="og:image" content="https://knarkowicz.wordpress.com/wp-content/uploads/2016/01/aces_film_curve.png" />
+<meta property="og:image:width" content="576" />
+<meta property="og:image:height" content="366" />
+<meta property="og:image:alt" content="ACES_film_curve" />
+<meta property="og:locale" content="en_US" />
+<meta property="fb:app_id" content="249643311490" />
+<meta property="article:publisher" content="https://www.facebook.com/WordPresscom" />
+<meta name="twitter:text:title" content="ACES Filmic Tone Mapping&nbsp;Curve" />
+<meta name="twitter:image" content="https://knarkowicz.wordpress.com/wp-content/uploads/2016/01/aces_film_curve.png?w=640" />
+<meta name="twitter:image:alt" content="ACES_film_curve" />
+<meta name="twitter:card" content="summary_large_image" />
+
+<!-- End Jetpack Open Graph Tags -->
+<link rel="shortcut icon" type="image/x-icon" href="https://s0.wp.com/i/favicon.ico?m=1713425267i" sizes="16x16 24x24 32x32 48x48" />
+<link rel="icon" type="image/x-icon" href="https://s0.wp.com/i/favicon.ico?m=1713425267i" sizes="16x16 24x24 32x32 48x48" />
+<link rel="apple-touch-icon" href="https://s0.wp.com/i/webclip.png?m=1713868326i" />
+<link rel='openid.server' href='https://knarkowicz.wordpress.com/?openidserver=1' />
+<link rel='openid.delegate' href='https://knarkowicz.wordpress.com/' />
+<link rel="search" type="application/opensearchdescription+xml" href="https://knarkowicz.wordpress.com/osd.xml" title="Krzysztof Narkowicz" />
+<link rel="search" type="application/opensearchdescription+xml" href="https://s1.wp.com/opensearch.xml" title="WordPress.com" />
+		<style type="text/css">
+			.recentcomments a {
+				display: inline !important;
+				padding: 0 !important;
+				margin: 0 !important;
+			}
+
+			table.recentcommentsavatartop img.avatar, table.recentcommentsavatarend img.avatar {
+				border: 0px;
+				margin: 0;
+			}
+
+			table.recentcommentsavatartop a, table.recentcommentsavatarend a {
+				border: 0px !important;
+				background-color: transparent !important;
+			}
+
+			td.recentcommentsavatarend, td.recentcommentsavatartop {
+				padding: 0px 0px 1px 0px;
+				margin: 0px;
+			}
+
+			td.recentcommentstextend {
+				border: none !important;
+				padding: 0px 0px 2px 10px;
+			}
+
+			.rtl td.recentcommentstextend {
+				padding: 0px 10px 2px 0px;
+			}
+
+			td.recentcommentstexttop {
+				border: none;
+				padding: 0px 0px 0px 10px;
+			}
+
+			.rtl td.recentcommentstexttop {
+				padding: 0px 10px 0px 0px;
+			}
+		</style>
+		<meta name="description" content="Careful mapping of HDR values to LDR is an important part of a modern game rendering pipeline. One of the goals of our new renderer was to replace Reinhard‘s tone mapping curve with some kind of a filmic tone mapping curve. We tried one from Ucharted 2&nbsp;and tried rolling our own, but weren’t happy with&hellip;" />
+<link crossorigin='anonymous' rel='stylesheet' id='all-css-0-4' href='/_static/??-eJyNjMEKgzAQBX9IfdUKOZV+iuh2KdFkN7gJ+X0pVM8eZxgGNbWkklkyYmlTKF8vhpVzmmn7M6KqYPJCWILSZrDqE+8dmTW4f4j6KYENNO9ajMMVneI3fMdX75wb+8dzGNcDKPY7Zw==&cssminify=yes' type='text/css' media='all' />
+
+</head>
+
+<body class="wp-singular post-template-default single single-post postid-359 single-format-standard custom-background wp-theme-pubtwentyten customizer-styles-applied single-author jetpack-reblog-enabled has-marketing-bar has-marketing-bar-theme-twenty-ten">
+<div id="wrapper" class="hfeed">
+	<div id="header">
+		<div id="masthead">
+			<div id="branding" role="banner">
+								<div id="site-title">
+					<span>
+						<a href="https://knarkowicz.wordpress.com/" title="Krzysztof Narkowicz" rel="home">Krzysztof Narkowicz</a>
+					</span>
+				</div>
+				<div id="site-description">Engine / Graphics Programmer</div>
+
+									<a class="home-link" href="https://knarkowicz.wordpress.com/" title="Krzysztof Narkowicz" rel="home">
+						<img src="https://knarkowicz.wordpress.com/wp-content/uploads/2014/10/cropped-fragment-sieci-ver-e_02.jpg" width="940" height="198" alt="" />
+					</a>
+								</div><!-- #branding -->
+
+			<div id="access" role="navigation">
+								<div class="skip-link screen-reader-text"><a href="#content" title="Skip to content">Skip to content</a></div>
+				<div class="menu"><ul>
+<li ><a href="https://knarkowicz.wordpress.com/">Home</a></li><li class="page_item page-item-459"><a href="https://knarkowicz.wordpress.com/publications/">Publications</a></li>
+<li class="page_item page-item-1"><a href="https://knarkowicz.wordpress.com/about/">About</a></li>
+</ul></div>
+			</div><!-- #access -->
+		</div><!-- #masthead -->
+	</div><!-- #header -->
+
+	<div id="main">
+
+		<div id="container">
+			<div id="content" role="main">
+
+			
+
+				<div id="nav-above" class="navigation">
+					<div class="nav-previous"><a href="https://knarkowicz.wordpress.com/2014/12/27/analytical-dfg-term-for-ibl/" rel="prev"><span class="meta-nav">&larr;</span> Analytical DFG Term for&nbsp;IBL</a></div>
+					<div class="nav-next"><a href="https://knarkowicz.wordpress.com/2016/01/09/automatic-exposure/" rel="next">Automatic Exposure <span class="meta-nav">&rarr;</span></a></div>
+				</div><!-- #nav-above -->
+
+				<div id="post-359" class="post-359 post type-post status-publish format-standard hentry category-uncategorized tag-graphics tag-post-processing">
+											<h2 class="entry-title"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" rel="bookmark">ACES Filmic Tone Mapping&nbsp;Curve</a></h2>					
+					<div class="entry-meta">
+						<span class="meta-prep meta-prep-author">Posted on</span> <a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" title="13:37" rel="bookmark"><span class="entry-date">January 6, 2016</span></a> <span class="meta-sep">by</span> <span class="author vcard"><a class="url fn n" href="https://knarkowicz.wordpress.com/author/knarkowicz/" title="View all posts by Krzysztof Narkowicz">Krzysztof Narkowicz</a></span>					</div><!-- .entry-meta -->
+
+					<div class="entry-content">
+						<p><span style="font-weight:400;">Careful mapping of HDR values to LDR is an important part of a modern game rendering pipeline. One of the goals of our new renderer was to replace Reinhard‘s tone mapping curve with some kind of <a href="http://www.slideshare.net/ozlael/hable-john-uncharted2-hdr-lighting/53">a filmic tone mapping curve</a></span><span style="font-weight:400;">. We tried <a href="http://filmicgames.com/archives/75">one from Ucharted 2</a></span><span style="font-weight:400;">&nbsp;and tried rolling our own, but weren’t happy with either of this solutions. Finally, we settled on the one from <a href="https://github.com/ampas/aces-dev">ACES</a>, which is&nbsp;</span><span style="font-weight:400;">currently a <a href="https://docs.unrealengine.com/latest/INT/Support/Builds/ReleaseNotes/2015/4_8/">default tone mapping curve in Unreal Engine 4</a>.</span></p>
+<p><span style="font-weight:400;">ACES color encoding system was designed for seamless working with color images regardless of input or output color space. It also features a carefully crafted filmic curve for displaying HDR images on LDR output devices. Full ACES integration is a bit of overkill for games, but we can just sample ODT( RRT( x ) ) transform and fit a simple curve to this data. We don’t even need to run any ACES code at all, as ACES provides <a href="https://github.com/ampas/aces-dev/tree/master/images">reference images for all transforms</a>. Although there is no linear RGB D65 ODT transform, but we can just use REC709 D65 and remove 2.4 gamma from it.</span></p>
+<p><span style="font-weight:400;">Curve was manually fitted (max fit error: 0.0138) to be more precise in the blacks &#8211; after all we will be applying some kind gamma afterwards. Additionally, data was pre-exposed, so 1 on input maps to ~0.8 on output and resulting image’s brightness is more consistent with the one without any tone mapping curve at all. For the original ACES curve just multiply input (x) by 0.6.</span></p>
+<p>Fitted curve&#8217;s&nbsp;HLSL source code (free to use under public domain CC0 or MIT license):</p>
+<pre class="brush: cpp; title: ; notranslate" title="">
+float3 ACESFilm(float3 x)
+{
+float a = 2.51f;
+float b = 0.03f;
+float c = 2.43f;
+float d = 0.59f;
+float e = 0.14f;
+return saturate((x*(a*x+b))/(x*(c*x+d)+e));
+}
+</pre>
+<p>Fitted curve plotted against source data&#8217;s sample points:</p>
+<p><img data-attachment-id="362" data-permalink="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/aces_film_curve/" data-orig-file="https://knarkowicz.wordpress.com/wp-content/uploads/2016/01/aces_film_curve.png" data-orig-size="576,366" data-comments-opened="1" data-image-meta="{&quot;aperture&quot;:&quot;0&quot;,&quot;credit&quot;:&quot;&quot;,&quot;camera&quot;:&quot;&quot;,&quot;caption&quot;:&quot;&quot;,&quot;created_timestamp&quot;:&quot;0&quot;,&quot;copyright&quot;:&quot;&quot;,&quot;focal_length&quot;:&quot;0&quot;,&quot;iso&quot;:&quot;0&quot;,&quot;shutter_speed&quot;:&quot;0&quot;,&quot;title&quot;:&quot;&quot;,&quot;orientation&quot;:&quot;0&quot;}" data-image-title="ACES_film_curve" data-image-description="" data-image-caption="" data-large-file="https://knarkowicz.wordpress.com/wp-content/uploads/2016/01/aces_film_curve.png?w=576" class="aligncenter size-full wp-image-362" src="https://knarkowicz.wordpress.com/wp-content/uploads/2016/01/aces_film_curve.png?w=640" alt="ACES_film_curve"   srcset="https://knarkowicz.wordpress.com/wp-content/uploads/2016/01/aces_film_curve.png 576w, https://knarkowicz.wordpress.com/wp-content/uploads/2016/01/aces_film_curve.png?w=150&amp;h=95 150w, https://knarkowicz.wordpress.com/wp-content/uploads/2016/01/aces_film_curve.png?w=300&amp;h=191 300w" sizes="(max-width: 576px) 100vw, 576px"></p>
+<p><strong>UPDATE:</strong> This is a very simple luminance only fit, which over saturates brights. This was actually something consistent with our art direction, but for a more realistic rendering you may want a more complex fit like <a href="https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl">this one</a> from&nbsp;Stephen Hill.</p>
+<div id="jp-post-flair" class="sharedaddy sd-like-enabled sd-sharing-enabled"><div class="sharedaddy sd-sharing-enabled"><div class="robots-nocontent sd-block sd-social sd-social-icon-text sd-sharing"><h3 class="sd-title">Share this:</h3><div class="sd-content"><ul><li class="share-twitter"><a rel="nofollow noopener noreferrer"
+				data-shared="sharing-twitter-359"
+				class="share-twitter sd-button share-icon"
+				href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?share=twitter"
+				target="_blank"
+				aria-labelledby="sharing-twitter-359"
+				>
+				<span id="sharing-twitter-359" hidden>Share on X (Opens in new window)</span>
+				<span>X</span>
+			</a></li><li class="share-facebook"><a rel="nofollow noopener noreferrer"
+				data-shared="sharing-facebook-359"
+				class="share-facebook sd-button share-icon"
+				href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?share=facebook"
+				target="_blank"
+				aria-labelledby="sharing-facebook-359"
+				>
+				<span id="sharing-facebook-359" hidden>Share on Facebook (Opens in new window)</span>
+				<span>Facebook</span>
+			</a></li><li class="share-end"></li></ul></div></div></div><div class='sharedaddy sd-block sd-like jetpack-likes-widget-wrapper jetpack-likes-widget-unloaded' id='like-post-wrapper-77263292-359-6a2e46b326e01' data-src='//widgets.wp.com/likes/index.html?ver=20260614#blog_id=77263292&amp;post_id=359&amp;origin=knarkowicz.wordpress.com&amp;obj_id=77263292-359-6a2e46b326e01' data-name='like-post-frame-77263292-359-6a2e46b326e01' data-title='Like or Reblog'><div class='likes-widget-placeholder post-likes-widget-placeholder' style='height: 55px;'><span class='button'><span>Like</span></span> <span class='loading'>Loading...</span></div><span class='sd-text-color'></span><a class='sd-link-color'></a></div></div>											</div><!-- .entry-content -->
+
+		
+						<div class="entry-utility">
+							This entry was posted in <a href="https://knarkowicz.wordpress.com/category/uncategorized/" rel="category tag">Uncategorized</a> and tagged <a href="https://knarkowicz.wordpress.com/tag/graphics/" rel="tag">Graphics</a>, <a href="https://knarkowicz.wordpress.com/tag/post-processing/" rel="tag">Post Processing</a>. Bookmark the <a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" title="Permalink to ACES Filmic Tone Mapping&nbsp;Curve" rel="bookmark">permalink</a>.													</div><!-- .entry-utility -->
+					</div><!-- #post-359 -->
+
+				<div id="nav-below" class="navigation">
+					<div class="nav-previous"><a href="https://knarkowicz.wordpress.com/2014/12/27/analytical-dfg-term-for-ibl/" rel="prev"><span class="meta-nav">&larr;</span> Analytical DFG Term for&nbsp;IBL</a></div>
+					<div class="nav-next"><a href="https://knarkowicz.wordpress.com/2016/01/09/automatic-exposure/" rel="next">Automatic Exposure <span class="meta-nav">&rarr;</span></a></div>
+				</div><!-- #nav-below -->
+
+				
+			<div id="comments">
+
+
+			<h3 id="comments-title">
+			38 Responses to <em>ACES Filmic Tone Mapping&nbsp;Curve</em>			</h3>
+
+
+			<ol class="commentlist">
+						<li class="comment byuser comment-author-opioidwp even thread-even depth-1" id="li-comment-120">
+		<div id="comment-120">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='opioidwp&#039;s avatar' src='https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' decoding='async' />				<cite class="fn"><a href="http://gravatar.com/opioidwp" class="url" rel="ugc external nofollow">opioidwp</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-120">
+				February 26, 2016 at 15:39</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Should this be used like the uncharted function (U()) like this: tonemapped = U(color) / U(White); or simply like tonemapped = KN(color); and done?</p>
+<p id="comment-like-120" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=120&#038;_wpnonce=acd0a88958" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-120" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=120#respond" data-commentid="120" data-postid="359" data-belowelement="comment-120" data-respondelement="respond" data-replyto="Reply to opioidwp" aria-label="Reply to opioidwp">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor odd alt depth-2" id="li-comment-121">
+		<div id="comment-121">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-121">
+				February 26, 2016 at 15:44</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Just tonemappedColor = ACESFilm( color ).</p>
+<p id="comment-like-121" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=121&#038;_wpnonce=8b8825dc3c" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-121" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=121#respond" data-commentid="121" data-postid="359" data-belowelement="comment-121" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-opioidwp even depth-3" id="li-comment-122">
+		<div id="comment-122">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='opioidwp&#039;s avatar' src='https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/de77896a3e8fdfd4e70ace481fcdbb30c0c15c47b35ebd603f3297bf2bc57437?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="http://gravatar.com/opioidwp" class="url" rel="ugc external nofollow">opioidwp</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-122">
+				February 26, 2016 at 18:52</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Thanks.<br />
+I assume, that the result will still be in linear space and need gamma correction. Correct?<br />
+I have not really informed myself about ACES yet, but in your use case, do you just control the image via exposure? Or can you chose a value that should map to white in the end?</p>
+<p id="comment-like-122" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=122&#038;_wpnonce=b79a43d0d6" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-122" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=122#respond" data-commentid="122" data-postid="359" data-belowelement="comment-122" data-respondelement="respond" data-replyto="Reply to opioidwp" aria-label="Reply to opioidwp">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor odd alt depth-4" id="li-comment-123">
+		<div id="comment-123">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-123">
+				February 26, 2016 at 20:17</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Yes, you need to multiply by exposure before the tone mapping and do the gamma correction after.</p>
+<p id="comment-like-123" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=123&#038;_wpnonce=4fd76b4085" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-123" class="comment-like-feedback">Liked by <a href="#" class="view-likers" data-like-count="1">1 person</a></span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=123#respond" data-commentid="123" data-postid="359" data-belowelement="comment-123" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+		<li class="comment even thread-odd thread-alt depth-1" id="li-comment-131">
+		<div id="comment-131">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='ProtonFactor&#039;s avatar' src='https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn">ProtonFactor</cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-131">
+				March 20, 2016 at 19:33</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Hey, I&#8217;m interested in running the ACES code to see how close your curve matches for myself (I like to verify data and modify it sometimes). But at the RTT function in the source code it says the colors should be in aces color space as input&#8230; Should I be using linear rgb as input for RTT? or is there a transform from linear to aces color space?</p>
+<p id="comment-like-131" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=131&#038;_wpnonce=800a89b352" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-131" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=131#respond" data-commentid="131" data-postid="359" data-belowelement="comment-131" data-respondelement="respond" data-replyto="Reply to ProtonFactor" aria-label="Reply to ProtonFactor">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor odd alt depth-2" id="li-comment-132">
+		<div id="comment-132">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-132">
+				March 20, 2016 at 20:42</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Yes, basically you can just use linear space RGB as input (ACES is RGB linear color space with a D60 white point). Keep in mind that my curve is shifted (pre-exposed), so it won&#8217;t match a by-the-book ACES curve.</p>
+<p id="comment-like-132" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=132&#038;_wpnonce=a0182e8040" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-132" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=132#respond" data-commentid="132" data-postid="359" data-belowelement="comment-132" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment even depth-3" id="li-comment-134">
+		<div id="comment-134">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='ProtonFactor&#039;s avatar' src='https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/452792fc7c67921bf7cb9037ecc2558a322f08c3aad3f70a0c4c590fff8d5589?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn">ProtonFactor</cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-134">
+				March 20, 2016 at 22:31</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Ah okay, thanks for the clarification. Duly noted about the shift, I&#8217;ll account for that. And also thanks for the post, it works really well by the way. My team would just like to be able to modify the curve without straying too far from the &#8220;ground truth&#8221; and hence we have to test it against the code. Anyway, thanks again.</p>
+<p id="comment-like-134" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=134&#038;_wpnonce=ac290bedd3" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-134" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=134#respond" data-commentid="134" data-postid="359" data-belowelement="comment-134" data-respondelement="respond" data-replyto="Reply to ProtonFactor" aria-label="Reply to ProtonFactor">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="https://knarkowicz.wordpress.com/2016/08/31/hdr-display-first-steps/" class="url" rel="ugc">HDR Display &#8211; First Steps | Krzysztof Narkowicz</a></p>
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://bartwronski.com/2016/09/01/dynamic-range-and-evs/" class="url" rel="ugc external nofollow">Image dynamic range | Bart Wronski</a></p>
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://www.klayge.org/2016/12/19/klayge-4-10%e4%b8%ad%e6%b8%b2%e6%9f%93%e7%9a%84%e6%94%b9%e8%bf%9b%ef%bc%88%e4%ba%8c%ef%bc%89%ef%bc%9atone-mapping/" class="url" rel="ugc external nofollow">KlayGE 4.10中渲染的改进（二）：Tone mapping - KlayGE游戏引擎</a></p>
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://tech-goat.com/2017/04/04/hdr-rendering-webgl/" class="url" rel="ugc external nofollow">HDR Rendering With WebGL - tech-goat.com</a></p>
+				</li><!-- #comment-## -->
+		<li class="comment odd alt thread-even depth-1" id="li-comment-388">
+		<div id="comment-388">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='jj99&#039;s avatar' src='https://0.gravatar.com/avatar/f1400a4d3c0438c5bf82f72a8b0d27c713162da2f4b99b9f93bada750c706444?s=40&#038;d=identicon&#038;r=G' srcset='https://0.gravatar.com/avatar/f1400a4d3c0438c5bf82f72a8b0d27c713162da2f4b99b9f93bada750c706444?s=40&#038;d=identicon&#038;r=G 1x, https://0.gravatar.com/avatar/f1400a4d3c0438c5bf82f72a8b0d27c713162da2f4b99b9f93bada750c706444?s=60&#038;d=identicon&#038;r=G 1.5x, https://0.gravatar.com/avatar/f1400a4d3c0438c5bf82f72a8b0d27c713162da2f4b99b9f93bada750c706444?s=80&#038;d=identicon&#038;r=G 2x, https://0.gravatar.com/avatar/f1400a4d3c0438c5bf82f72a8b0d27c713162da2f4b99b9f93bada750c706444?s=120&#038;d=identicon&#038;r=G 3x, https://0.gravatar.com/avatar/f1400a4d3c0438c5bf82f72a8b0d27c713162da2f4b99b9f93bada750c706444?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn">jj99</cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-388">
+				May 26, 2017 at 10:15</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>I&#8217;ve tried the Stephen Hill&#8217;s code, but it gave me quite different result (more saturated). Then I tried the ACES code in UE and it matches more closely your fitting. The UE code of course is even more complicated and not very suitable for use without baking to LUT.</p>
+<p id="comment-like-388" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=388&#038;_wpnonce=65e9bf7fff" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-388" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=388#respond" data-commentid="388" data-postid="359" data-belowelement="comment-388" data-respondelement="respond" data-replyto="Reply to jj99" aria-label="Reply to jj99">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor even depth-2" id="li-comment-391">
+		<div id="comment-391">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-391">
+				May 30, 2017 at 08:15</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>It should be visible in very bright pixels &#8211; in Stephen Hill&#8217;s fit they tend to loose their saturation. We are currently doing a more realistic game and I had to refit ACES, so it doesn&#8217;t saturate so much in those very bright pixels.</p>
+<p id="comment-like-391" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=391&#038;_wpnonce=f3d9e52bcc" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-391" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=391#respond" data-commentid="391" data-postid="359" data-belowelement="comment-391" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment odd alt depth-3" id="li-comment-406">
+		<div id="comment-406">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='David Clamage&#039;s avatar' src='https://2.gravatar.com/avatar/8be4688b0f3d188547e2ea6e034d0750364770d3387c6e4c05fab8f5b7512744?s=40&#038;d=identicon&#038;r=G' srcset='https://2.gravatar.com/avatar/8be4688b0f3d188547e2ea6e034d0750364770d3387c6e4c05fab8f5b7512744?s=40&#038;d=identicon&#038;r=G 1x, https://2.gravatar.com/avatar/8be4688b0f3d188547e2ea6e034d0750364770d3387c6e4c05fab8f5b7512744?s=60&#038;d=identicon&#038;r=G 1.5x, https://2.gravatar.com/avatar/8be4688b0f3d188547e2ea6e034d0750364770d3387c6e4c05fab8f5b7512744?s=80&#038;d=identicon&#038;r=G 2x, https://2.gravatar.com/avatar/8be4688b0f3d188547e2ea6e034d0750364770d3387c6e4c05fab8f5b7512744?s=120&#038;d=identicon&#038;r=G 3x, https://2.gravatar.com/avatar/8be4688b0f3d188547e2ea6e034d0750364770d3387c6e4c05fab8f5b7512744?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn">David Clamage</cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-406">
+				June 21, 2017 at 02:28</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Can you clarify if the input and output to your function are in linear or sRGB space? I noticed that Stephen Hill&#8217;s fit that you linked comments that there&#8217;s an sRGB-&gt;Linear and then Linear-&gt;sRGB conversion. Is there any function that goes linear-&gt;linear? I&#8217;d prefer to use the hardware sRGB conversion if possible.</p>
+<p id="comment-like-406" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=406&#038;_wpnonce=3f0734694c" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-406" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=406#respond" data-commentid="406" data-postid="359" data-belowelement="comment-406" data-respondelement="respond" data-replyto="Reply to David Clamage" aria-label="Reply to David Clamage">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor even depth-4" id="li-comment-407">
+		<div id="comment-407">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-407">
+				June 21, 2017 at 06:57</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Both in my fit and in linked snippet (Hill&#8217;s fit) inputs are linear RGB (BT709 primaries with a linear transfer function). Yes, mentioned comments refer to sRGB, but having sRGB input/ouput makes no sense on modern hardware and linked sample uses this fit as linear-&gt;AcesFitted()-&gt;linear. Clearly there is no linear-&gt;sRGB on input there and there is linear-&gt;sRGB on output (&#8220;output = LinearTosRGB(ACESFitted(color) * 1.8f);&#8221; <a href="https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ToneMapping.hlsl#L105" rel="nofollow ugc">https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ToneMapping.hlsl#L105</a>).</p>
+<p id="comment-like-407" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=407&#038;_wpnonce=660f73c26d" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-407" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=407#respond" data-commentid="407" data-postid="359" data-belowelement="comment-407" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment odd alt depth-5" id="li-comment-429">
+		<div id="comment-429">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Stephen Hill&#039;s avatar' src='https://2.gravatar.com/avatar/53c90e3c8806dbe4513611a10f64d3aaf2703e2752f23bf88e27ec22c5d55265?s=40&#038;d=identicon&#038;r=G' srcset='https://2.gravatar.com/avatar/53c90e3c8806dbe4513611a10f64d3aaf2703e2752f23bf88e27ec22c5d55265?s=40&#038;d=identicon&#038;r=G 1x, https://2.gravatar.com/avatar/53c90e3c8806dbe4513611a10f64d3aaf2703e2752f23bf88e27ec22c5d55265?s=60&#038;d=identicon&#038;r=G 1.5x, https://2.gravatar.com/avatar/53c90e3c8806dbe4513611a10f64d3aaf2703e2752f23bf88e27ec22c5d55265?s=80&#038;d=identicon&#038;r=G 2x, https://2.gravatar.com/avatar/53c90e3c8806dbe4513611a10f64d3aaf2703e2752f23bf88e27ec22c5d55265?s=120&#038;d=identicon&#038;r=G 3x, https://2.gravatar.com/avatar/53c90e3c8806dbe4513611a10f64d3aaf2703e2752f23bf88e27ec22c5d55265?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="http://blog.selfshadow.com" class="url" rel="ugc external nofollow">Stephen Hill</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-429">
+				July 8, 2017 at 18:12</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>To further clarify: &#8220;sRGB&#8221; in my code comments refers to the sRGB (or Rec709) colour gamut, not the display transform (which isn&#8217;t a linear transform, so can&#8217;t possibly be represented by a 3&#215;3 matrix!). The matrices are actually a concatenation of several separate transformations. For instance:</p>
+<p>// sRGB =&gt; XYZ =&gt; D65_2_D60 =&gt; AP1 =&gt; RRT_SAT</p>
+<p>Here we start by transforming RGB (in an assumed sRGB/Rec709 colour gamut) to CIE XYZ. Then a D65 to D60 chromatic adaptation transform is applied, since sRGB/Rec709 has a D65 white point, while ACES uses D60. Then we transform from XYZ back to RGB, but with a wider AP1 (ACEScg) gamut. Finally, the ACES RRT&#8217;s (slight) desaturation transform is applied.</p>
+<p id="comment-like-429" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=429&#038;_wpnonce=3f4aafd49e" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-429" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=429#respond" data-commentid="429" data-postid="359" data-belowelement="comment-429" data-respondelement="respond" data-replyto="Reply to Stephen Hill" aria-label="Reply to Stephen Hill">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				</li><!-- #comment-## -->
+		<li class="comment even depth-5" id="li-comment-15767">
+		<div id="comment-15767">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='nobody&#039;s avatar' src='https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=40&#038;d=identicon&#038;r=G' srcset='https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=40&#038;d=identicon&#038;r=G 1x, https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=60&#038;d=identicon&#038;r=G 1.5x, https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=80&#038;d=identicon&#038;r=G 2x, https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=120&#038;d=identicon&#038;r=G 3x, https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn">nobody</cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-15767">
+				August 1, 2021 at 17:52</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>&#8220;LinearTosRGB(ACESFitted(color) * 1.8f)&#8221;<br />
+Could someone explain the usage of that? I wonder how 1.8 was chosen? Is the factor really supposed to be applied to the LDR value instead of scaling the input (ie tweaking exposure)? I get very different visual results with the MJP/Hill formulation compared to this blog&#8217;s fit.</p>
+<p id="comment-like-15767" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=15767&#038;_wpnonce=4774ff62a0" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-15767" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=15767#respond" data-commentid="15767" data-postid="359" data-belowelement="comment-15767" data-respondelement="respond" data-replyto="Reply to nobody" aria-label="Reply to nobody">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor odd alt depth-6" id="li-comment-15768">
+		<div id="comment-15768">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-15768">
+				August 2, 2021 at 02:18</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Hi,</p>
+<p>I think it&#8217;s the similar concept as in my curve &#8211; some eyeballed scale value to make it more consistent with brightness from other tonemappers or when you don&#8217;t user any tonemapper. Basically to be able to A/B test your new curve without having to manually adjust the exposure.</p>
+<p id="comment-like-15768" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=15768&#038;_wpnonce=fe65cfdce8" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-15768" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=15768#respond" data-commentid="15768" data-postid="359" data-belowelement="comment-15768" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment even depth-7" id="li-comment-15770">
+		<div id="comment-15770">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='nobody&#039;s avatar' src='https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=40&#038;d=identicon&#038;r=G' srcset='https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=40&#038;d=identicon&#038;r=G 1x, https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=60&#038;d=identicon&#038;r=G 1.5x, https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=80&#038;d=identicon&#038;r=G 2x, https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=120&#038;d=identicon&#038;r=G 3x, https://2.gravatar.com/avatar/27935f7ba86fc126a57d8709b3dc2d64cccbec22aaf17f15d8146b6e8820a99f?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn">nobody</cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-15770">
+				August 2, 2021 at 20:01</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>I see, that makes sense. Thanks for the quick reply! Though I still find it a bit odd that it&#8217;s not ACESFitted(color * 1.8) instead. Current variant is effectively doing custom gamma correction (with gain of 1.8). Maybe it&#8217;s just an artistic choice.</p>
+<p id="comment-like-15770" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=15770&#038;_wpnonce=ee60d4d8cd" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-15770" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=15770#respond" data-commentid="15770" data-postid="359" data-belowelement="comment-15770" data-respondelement="respond" data-replyto="Reply to nobody" aria-label="Reply to nobody">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor odd alt depth-8" id="li-comment-15771">
+		<div id="comment-15771">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-15771">
+				August 3, 2021 at 00:56</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Try asking this question directly at the source: <a href="https://therealmjp.github.io/" rel="nofollow ugc">https://therealmjp.github.io/</a> . MattP is always super helpful.</p>
+<p id="comment-like-15771" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=15771&#038;_wpnonce=588297cbd5" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-15771" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=15771#respond" data-commentid="15771" data-postid="359" data-belowelement="comment-15771" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="https://ventspace.wordpress.com/2017/10/20/games-look-bad-part-1-hdr-and-tone-mapping/" class="url" rel="ugc external nofollow">Games Look Bad, Part 1: HDR and Tone Mapping | Promit&#039;s Ventspace</a></p>
+				</li><!-- #comment-## -->
+		<li class="comment byuser comment-author-matt77hias even thread-odd thread-alt depth-1" id="li-comment-564">
+		<div id="comment-564">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='matt77hias&#039;s avatar' src='https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=40&#038;d=identicon&#038;r=G' srcset='https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=40&#038;d=identicon&#038;r=G 1x, https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=60&#038;d=identicon&#038;r=G 1.5x, https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=80&#038;d=identicon&#038;r=G 2x, https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=120&#038;d=identicon&#038;r=G 3x, https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn">matt77hias</cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-564">
+				November 2, 2017 at 15:34</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>What do you use for the inverse tone mapping (i.e. lighting -&gt; tone mapping -&gt; AA -&gt; inverse tone mapping -&gt; Post Processing -&gt; tone mapping, adaption, gamma -&gt; back buffer)?</p>
+<p id="comment-like-564" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=564&#038;_wpnonce=0534f0867c" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-564" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=564#respond" data-commentid="564" data-postid="359" data-belowelement="comment-564" data-respondelement="respond" data-replyto="Reply to matt77hias" aria-label="Reply to matt77hias">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor odd alt depth-2" id="li-comment-565">
+		<div id="comment-565">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-565">
+				November 2, 2017 at 15:53</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Hi, I just use a different and simpler tone mapper for the first step (tone mapping-&gt;AA-&gt;inv tone mapping): <a href="https://gpuopen.com/optimized-reversible-tonemapper-for-resolve/" rel="nofollow ugc">https://gpuopen.com/optimized-reversible-tonemapper-for-resolve/</a></p>
+<p id="comment-like-565" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=565&#038;_wpnonce=2427271de7" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-565" class="comment-like-feedback">Liked by <a href="#" class="view-likers" data-like-count="1">1 person</a></span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=565#respond" data-commentid="565" data-postid="359" data-belowelement="comment-565" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-matt77hias even depth-3" id="li-comment-566">
+		<div id="comment-566">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='matt77hias&#039;s avatar' src='https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=40&#038;d=identicon&#038;r=G' srcset='https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=40&#038;d=identicon&#038;r=G 1x, https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=60&#038;d=identicon&#038;r=G 1.5x, https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=80&#038;d=identicon&#038;r=G 2x, https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=120&#038;d=identicon&#038;r=G 3x, https://0.gravatar.com/avatar/0e76fb7da2b01f0c9edf494f8fa8bea1172bf48a4bd13bd504ed644b0cd7db87?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn">matt77hias</cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-566">
+				November 2, 2017 at 16:04</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Thank you for the clarification 🙂</p>
+<p id="comment-like-566" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=566&#038;_wpnonce=26c3870ead" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-566" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=566#respond" data-commentid="566" data-postid="359" data-belowelement="comment-566" data-respondelement="respond" data-replyto="Reply to matt77hias" aria-label="Reply to matt77hias">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+		<li class="comment byuser comment-author-j4m3z0r odd alt thread-even depth-1" id="li-comment-589">
+		<div id="comment-589">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='j4m3z0r&#039;s avatar' src='https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=40&#038;d=identicon&#038;r=G' srcset='https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=40&#038;d=identicon&#038;r=G 1x, https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=60&#038;d=identicon&#038;r=G 1.5x, https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=80&#038;d=identicon&#038;r=G 2x, https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=120&#038;d=identicon&#038;r=G 3x, https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="http://j4m3z0r.wordpress.com" class="url" rel="ugc external nofollow">j4m3z0r</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-589">
+				November 29, 2017 at 23:32</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Hey, first up: thanks for this &#8212; really neat work!</p>
+<p>I was wondering if you could explain the reasoning behind the input range being from 0-10? I&#8217;ve been applying it to data from a camera RAW file, which is by convention normalized to a range of 0-1. Feeding that unit-scaled data directly into this function works ok, but the peak output is then about 0.8, which means we&#8217;re not using the top 20% of the output device&#8217;s dynamic range (well, ~10% after gamma correction). Similarly, stretching the input to a range of 0-10 effectively gives a much steeper curve, which doesn&#8217;t produce good results.</p>
+<p>For the time being I&#8217;m just scaling the curve by multiplying the output by 1.0 / ACESFilm(1.0). The result looks ok, but I&#8217;d really like to understand what&#8217;s going on and use the correct inputs. My current approach feels like a bit of a hack! 🙂</p>
+<p>Apologies if this is basic knowledge that I&#8217;ve missed &#8212; this has been my first experimentation with trying to get a more filmic look to my images, so there&#8217;s likely a lot of background I&#8217;m missing.</p>
+<p id="comment-like-589" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=589&#038;_wpnonce=8aaf2afbfc" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-589" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=589#respond" data-commentid="589" data-postid="359" data-belowelement="comment-589" data-respondelement="respond" data-replyto="Reply to j4m3z0r" aria-label="Reply to j4m3z0r">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor even depth-2" id="li-comment-590">
+		<div id="comment-590">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-590">
+				November 30, 2017 at 12:24</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>The basic idea is that 1 is ~paper white and the rest of the range is used for brighter pixels (e.g. specular highlights). This way we avoid clipping highlights. In practice for games exact values of input range don&#8217;t make a big difference, as dst = Tonemap( src * exposure ), where exposure is a custom factor to make image look right. If you care about exact units (e.g. for picture interchange), then you should use appropriate ACES transforms (camera X -&gt; ACES color space -&gt; sRGB). If it&#8217;s to make photos look nice then I think you would be better with some fancy software emulating classic analog films.</p>
+<p id="comment-like-590" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=590&#038;_wpnonce=591f117c78" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-590" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=590#respond" data-commentid="590" data-postid="359" data-belowelement="comment-590" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-j4m3z0r odd alt depth-3" id="li-comment-591">
+		<div id="comment-591">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='j4m3z0r&#039;s avatar' src='https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=40&#038;d=identicon&#038;r=G' srcset='https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=40&#038;d=identicon&#038;r=G 1x, https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=60&#038;d=identicon&#038;r=G 1.5x, https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=80&#038;d=identicon&#038;r=G 2x, https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=120&#038;d=identicon&#038;r=G 3x, https://0.gravatar.com/avatar/f54f54b77d808bdc68cae7d59fad1477f537b0e078a0278419ef505856e0e9b6?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="http://j4m3z0r.wordpress.com" class="url" rel="ugc external nofollow">j4m3z0r</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-591">
+				November 30, 2017 at 19:36</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Thanks for the speedy reply!</p>
+<p>The intent here is to write software to make photos look nice, and simulations of various film stock is in the pipeline, but you gotta start somewhere. In practice, using any kind of filmic tone-mapping at all seems to be the big win, but you&#8217;re correct that I&#8217;ll ultimately need to implement the full pipeline.</p>
+<p>Looking at the metadata on some test raw files, they actually encode a &#8220;Specular White Level&#8221; value, which for well-exposed shots is generally at around 15,000 (~0.9, since these are 16 bit unsigned values). So a better approximation is probably to treat that number as 1.0, and scale the input accordingly. That does mean that output pixels won&#8217;t ever hit full brightness in a well-exposed image, but that&#8217;s probably correct behavior: you want to reserve dynamic range on the output to give some kind of representation to images that are hugely over-exposed (which would have a lower Specular White Level, I expect).</p>
+<p>Thanks again!</p>
+<p id="comment-like-591" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=591&#038;_wpnonce=6a86af5a4d" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-591" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=591#respond" data-commentid="591" data-postid="359" data-belowelement="comment-591" data-respondelement="respond" data-replyto="Reply to j4m3z0r" aria-label="Reply to j4m3z0r">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://www.gleam.graphics/hdr-technique.html" class="url" rel="ugc external nofollow">HDR技术之tone mapping &#8211; gleam</a></p>
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://imaginaryblend.com/2018/08/05/tonemapping-on-mobile-unlit-material/" class="url" rel="ugc external nofollow">Tonemapping on mobile (unlit material) &#8211; Imaginary Blend</a></p>
+				</li><!-- #comment-## -->
+		<li class="comment even thread-odd thread-alt depth-1" id="li-comment-768">
+		<div id="comment-768">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Shih-Chin&#039;s avatar' src='https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=40&#038;d=identicon&#038;r=G' srcset='https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=40&#038;d=identicon&#038;r=G 1x, https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=60&#038;d=identicon&#038;r=G 1.5x, https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=80&#038;d=identicon&#038;r=G 2x, https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=120&#038;d=identicon&#038;r=G 3x, https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="http://shihchinw.github.io/" class="url" rel="ugc external nofollow">Shih-Chin</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-768">
+				August 6, 2018 at 08:44</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Hi, thanks for your sharing.</p>
+<p>I was wondering how to retrieve the data from OCT(RRT(x)) for numerical fitting, I&#8217;ve looked into the implementation of RRT.ctl and ODT.Academy.sRGB_D60sim_100nits_dim.ctl from<br />
+<a href="https://github.com/ampas/aces-dev/tree/master/transforms/ctl" rel="nofollow ugc">https://github.com/ampas/aces-dev/tree/master/transforms/ctl</a></p>
+<p>I generated a sampling sequence with following functions retrieved from those two ctl files:<br />
+i =&gt; [10^-5, 10^5]<br />
+float v = segmented_spline_c5_fwd(i);<br />
+v = segmented_spline_c9_fwd(v);<br />
+v = Y_2_linCV(v, CINEMA_WHITE, CINEMA_BLACK);<br />
+v = std::min(v, 1.0f) * SCALE;</p>
+<p>I found my sampling sequence are not close to your implementation (scaled input(x) by 0.6) and others&#8217;: <a href="https://drive.google.com/file/d/1sZziT-2S1sRKkmOPBLw6KhAykTeKfSmU/view?usp=sharing" rel="nofollow">figure</a></p>
+<p>There is a function &#8216;darkSurround_to_dimSurround&#8217; which applies gamma transform in xyY, did you also take into account this function? Could you please elaborate more about how did you retrieve the data of ODT(RRT(x))? Thanks in advance!</p>
+<p id="comment-like-768" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=768&#038;_wpnonce=530a27af4e" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-768" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=768#respond" data-commentid="768" data-postid="359" data-belowelement="comment-768" data-respondelement="respond" data-replyto="Reply to Shih-Chin" aria-label="Reply to Shih-Chin">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment byuser comment-author-knarkowicz bypostauthor odd alt depth-2" id="li-comment-769">
+		<div id="comment-769">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Krzysztof Narkowicz&#039;s avatar' src='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G' srcset='https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=40&#038;d=identicon&#038;r=G 1x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=60&#038;d=identicon&#038;r=G 1.5x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=80&#038;d=identicon&#038;r=G 2x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=120&#038;d=identicon&#038;r=G 3x, https://1.gravatar.com/avatar/d8f10f915bd6cc24e862795f38a68a6454b0b355544c36ead96a094031009319?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="https://knarkowicz.wordpress.com" class="url" rel="ugc">Krzysztof Narkowicz</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-769">
+				August 6, 2018 at 17:20</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Hello,</p>
+<p>The simplest way to retrieve that data is just to use reference images (<a href="https://github.com/ampas/aces-dev/tree/master/images" rel="nofollow ugc">https://github.com/ampas/aces-dev/tree/master/images</a>). This should be enough for simple fitting. For manual generation I don&#8217;t remember the details now, but here is a part of my source code which I used to generate fitting data (mostly code straight from ACES Github): <a href="https://gist.github.com/knarkowicz/96200ae2ddeb648d0e07446679627bf0" rel="nofollow ugc">https://gist.github.com/knarkowicz/96200ae2ddeb648d0e07446679627bf0</a></p>
+<p id="comment-like-769" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=769&#038;_wpnonce=c9fce3b8ef" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-769" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=769#respond" data-commentid="769" data-postid="359" data-belowelement="comment-769" data-respondelement="respond" data-replyto="Reply to Krzysztof Narkowicz" aria-label="Reply to Krzysztof Narkowicz">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				<ul class="children">
+		<li class="comment even depth-3" id="li-comment-770">
+		<div id="comment-770">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='Shih-Chin&#039;s avatar' src='https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=40&#038;d=identicon&#038;r=G' srcset='https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=40&#038;d=identicon&#038;r=G 1x, https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=60&#038;d=identicon&#038;r=G 1.5x, https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=80&#038;d=identicon&#038;r=G 2x, https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=120&#038;d=identicon&#038;r=G 3x, https://0.gravatar.com/avatar/f08d2959685f010c59e9e1c1aa1b3a25d9b094a85d6acf28feb5493b00a53ebc?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="http://shihchinw.github.io/" class="url" rel="ugc external nofollow">Shih-Chin</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-770">
+				August 7, 2018 at 02:29</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Thanks for your kindly reply, I will look into it. Thank you so much!</p>
+<p id="comment-like-770" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=770&#038;_wpnonce=af8ea6e270" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-770" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=770#respond" data-commentid="770" data-postid="359" data-belowelement="comment-770" data-respondelement="respond" data-replyto="Reply to Shih-Chin" aria-label="Reply to Shih-Chin">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+</ul><!-- .children -->
+</li><!-- #comment-## -->
+		<li class="comment byuser comment-author-netocg odd alt thread-even depth-1" id="li-comment-870">
+		<div id="comment-870">
+			<div class="comment-author vcard">
+				<img referrerpolicy="no-referrer" alt='netocg&#039;s avatar' src='https://0.gravatar.com/avatar/6a55eaf418b2c1ccf4364f5e6d1b968b36699bbc4dc44dd261ea054e8db27320?s=40&#038;d=identicon&#038;r=G' srcset='https://0.gravatar.com/avatar/6a55eaf418b2c1ccf4364f5e6d1b968b36699bbc4dc44dd261ea054e8db27320?s=40&#038;d=identicon&#038;r=G 1x, https://0.gravatar.com/avatar/6a55eaf418b2c1ccf4364f5e6d1b968b36699bbc4dc44dd261ea054e8db27320?s=60&#038;d=identicon&#038;r=G 1.5x, https://0.gravatar.com/avatar/6a55eaf418b2c1ccf4364f5e6d1b968b36699bbc4dc44dd261ea054e8db27320?s=80&#038;d=identicon&#038;r=G 2x, https://0.gravatar.com/avatar/6a55eaf418b2c1ccf4364f5e6d1b968b36699bbc4dc44dd261ea054e8db27320?s=120&#038;d=identicon&#038;r=G 3x, https://0.gravatar.com/avatar/6a55eaf418b2c1ccf4364f5e6d1b968b36699bbc4dc44dd261ea054e8db27320?s=160&#038;d=identicon&#038;r=G 4x' class='avatar avatar-40' height='40' width='40' loading='lazy' decoding='async' />				<cite class="fn"><a href="http://netocg.blogspot.com" class="url" rel="ugc external nofollow">netocg</a></cite> <span class="says">says:</span>			</div><!-- .comment-author .vcard -->
+
+				
+				
+			<div class="comment-meta commentmetadata"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comment-870">
+				November 5, 2018 at 20:14</a>			</div><!-- .comment-meta .commentmetadata -->
+
+			<div class="comment-body"><p>Hi,</p>
+<p>I have a few tone map Nuke script and one has a very similar formula that you are presenting.<br />
+In my free time I like to shoot images and mostly I capture 7 different exposures. I wonder if and hdr image done with camera could be toned mapped to have a better natural looking perception representation of what our eyes see by using your tone mapping formula?<br />
+If that so what settings you would adjust on the formula to fit the 7different levels of exposure data?</p>
+<p>Best regards,<br />
+Antonio.</p>
+<p id="comment-like-870" data-liked=comment-not-liked class="comment-likes comment-not-liked"><a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?like_comment=870&#038;_wpnonce=380f878480" class="comment-like-link needs-login" rel="nofollow" data-blog="77263292"><span>Like</span></a><span id="comment-like-count-870" class="comment-like-feedback">Like</span></p>
+</div>
+
+			<div class="reply">
+				<a rel="nofollow" class="comment-reply-link" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?replytocom=870#respond" data-commentid="870" data-postid="359" data-belowelement="comment-870" data-respondelement="respond" data-replyto="Reply to netocg" aria-label="Reply to netocg">Reply</a>			</div><!-- .reply -->
+		</div><!-- #comment-##  -->
+
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://52zju.cn/?p=588" class="url" rel="ugc external nofollow">Tone mapping进化论 &#8211; guodong&#039;s blog</a></p>
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://calvinatorrtech.art.blog/2019/12/31/unreal-shader-for-substance-designer/" class="url" rel="ugc external nofollow">Unreal Shader for Substance Designer &#8211; Calvin&#039;s Technical Art Blog</a></p>
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://leegoonz.blog/2020/03/17/post-processingsubstance-painter-color-profile/" class="url" rel="ugc external nofollow">Post Processing?Substance Painter Color Profile. &#8211; leegoonz technical art director</a></p>
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="http://blog.demofox.org/2020/06/06/casual-shadertoy-path-tracing-2-image-improvement-and-glossy-reflections/" class="url" rel="ugc external nofollow">Casual Shadertoy Path Tracing 2: Image Improvement and Glossy Reflections &laquo; The blog at the bottom of the sea</a></p>
+				</li><!-- #comment-## -->
+		<li class="post pingback">
+		<p>Pingback: <a href="https://blog.jp.uwa4d.com/2022/04/01/sdr%e3%81%a8hdr/" class="url" rel="ugc external nofollow">SDRとHDR</a></p>
+				</li><!-- #comment-## -->
+			</ol>
+
+
+	
+
+	<div id="respond" class="comment-respond">
+		<h3 id="reply-title" class="comment-reply-title">Leave a comment <small><a rel="nofollow" id="cancel-comment-reply-link" href="/2016/01/06/aces-filmic-tone-mapping-curve/#respond" style="display:none;">Cancel reply</a></small></h3><form action="https://knarkowicz.wordpress.com/wp-comments-post.php" method="post" id="commentform" class="comment-form">
+
+
+<div class="comment-form__verbum transparent"></div><div class="verbum-form-meta"><input type='hidden' name='comment_post_ID' value='359' id='comment_post_ID' />
+<input type='hidden' name='comment_parent' id='comment_parent' value='0' />
+
+			<input type="hidden" name="highlander_comment_nonce" id="highlander_comment_nonce" value="c0f0d7e090" />
+			<input type="hidden" name="verbum_show_subscription_modal" value="" /></div><p style="display: none;"><input type="hidden" id="akismet_comment_nonce" name="akismet_comment_nonce" value="5a195ce738" /></p><p style="display: none !important;" class="akismet-fields-container" data-prefix="ak_"><label>&#916;<textarea name="ak_hp_textarea" cols="45" rows="8" maxlength="100"></textarea></label><input type="hidden" id="ak_js_1" name="ak_js" value="129"/><script>
+document.getElementById( "ak_js_1" ).setAttribute( "value", ( new Date() ).getTime() );
+</script>
+</p></form>	</div><!-- #respond -->
+	
+</div><!-- #comments -->
+
+	
+			</div><!-- #content -->
+		</div><!-- #container -->
+
+
+		<div id="primary" class="widget-area" role="complementary">
+						<ul class="xoxo">
+
+
+		<li id="recent-posts-3" class="widget-container widget_recent_entries">
+		<h3 class="widget-title">Recent Posts</h3>
+		<ul>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2022/08/18/journey-to-lumen/">Journey to Lumen</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2019/08/11/comparing-microfacet-multiple-scattering-with-real-life-measurements/">Comparing Microfacet Multiple Scattering with Real-Life&nbsp;Measurements</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2019/08/11/biome-painter-populating-massive-worlds/">Biome Painter: Populating Massive&nbsp;Worlds</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2018/01/04/cloth-shading/">Cloth Shading</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2017/05/28/digital-dragons-2017/">Digital Dragons 2017</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2017/04/02/job-system-and-parallelfor/">Job System and&nbsp;ParallelFor</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2016/08/31/hdr-display-first-steps/">HDR Display &#8211; First&nbsp;Steps</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2016/01/09/automatic-exposure/">Automatic Exposure</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" aria-current="page">ACES Filmic Tone Mapping&nbsp;Curve</a>
+									</li>
+											<li>
+					<a href="https://knarkowicz.wordpress.com/2014/12/27/analytical-dfg-term-for-ibl/">Analytical DFG Term for&nbsp;IBL</a>
+									</li>
+					</ul>
+
+		</li><li id="block-2" class="widget-container widget_block widget_tag_cloud"><p class="wp-block-tag-cloud"><a href="https://knarkowicz.wordpress.com/tag/c/" class="tag-cloud-link tag-link-2426 tag-link-position-1" style="font-size: 16.024390243902pt;" aria-label="C++ (8 items)">C++</a>
+<a href="https://knarkowicz.wordpress.com/tag/cell/" class="tag-cloud-link tag-link-9716 tag-link-position-2" style="font-size: 8pt;" aria-label="CELL (2 items)">CELL</a>
+<a href="https://knarkowicz.wordpress.com/tag/conference/" class="tag-cloud-link tag-link-33525 tag-link-position-3" style="font-size: 8pt;" aria-label="Conference (2 items)">Conference</a>
+<a href="https://knarkowicz.wordpress.com/tag/global-illumination/" class="tag-cloud-link tag-link-567625 tag-link-position-4" style="font-size: 8pt;" aria-label="Global Illumination (2 items)">Global Illumination</a>
+<a href="https://knarkowicz.wordpress.com/tag/graphics/" class="tag-cloud-link tag-link-658 tag-link-position-5" style="font-size: 22pt;" aria-label="Graphics (19 items)">Graphics</a>
+<a href="https://knarkowicz.wordpress.com/tag/lighting/" class="tag-cloud-link tag-link-24623 tag-link-position-6" style="font-size: 14.317073170732pt;" aria-label="Lighting (6 items)">Lighting</a>
+<a href="https://knarkowicz.wordpress.com/tag/multithreading/" class="tag-cloud-link tag-link-338814 tag-link-position-7" style="font-size: 8pt;" aria-label="Multithreading (2 items)">Multithreading</a>
+<a href="https://knarkowicz.wordpress.com/tag/pbr/" class="tag-cloud-link tag-link-555228 tag-link-position-8" style="font-size: 11.756097560976pt;" aria-label="PBR (4 items)">PBR</a>
+<a href="https://knarkowicz.wordpress.com/tag/post-processing/" class="tag-cloud-link tag-link-20511 tag-link-position-9" style="font-size: 11.756097560976pt;" aria-label="Post Processing (4 items)">Post Processing</a>
+<a href="https://knarkowicz.wordpress.com/tag/shader/" class="tag-cloud-link tag-link-317095 tag-link-position-10" style="font-size: 10.048780487805pt;" aria-label="Shader (3 items)">Shader</a>
+<a href="https://knarkowicz.wordpress.com/tag/tools/" class="tag-cloud-link tag-link-1981 tag-link-position-11" style="font-size: 11.756097560976pt;" aria-label="Tools (4 items)">Tools</a></p></li><li id="twitter_timeline-3" class="widget-container widget_twitter_timeline"><h3 class="widget-title">Follow me on Twitter</h3><a class="twitter-timeline" data-width="225" data-height="400" data-theme="light" data-border-color="#e8e8e8" data-lang="EN" data-partner="jetpack" data-chrome="noheader nofooter noborders noscrollbar" href="https://twitter.com/knarkowicz" href="https://twitter.com/knarkowicz">My Tweets</a></li>			</ul>
+		</div><!-- #primary .widget-area -->
+
+	</div><!-- #main -->
+
+	<div id="footer" role="contentinfo">
+		<div id="colophon">
+
+
+
+			<div id="site-info">
+				<a href="https://knarkowicz.wordpress.com/" title="Krzysztof Narkowicz" rel="home">
+					Krzysztof Narkowicz				</a>
+							</div><!-- #site-info -->
+
+			<div id="site-generator">
+								<a href="https://wordpress.com/?ref=footer_blog" rel="nofollow">Blog at WordPress.com.</a>
+			</div><!-- #site-generator -->
+
+		</div><!-- #colophon -->
+	</div><!-- #footer -->
+
+</div><!-- #wrapper -->
+
+<!--  -->
+<script type="speculationrules">
+{"prefetch":[{"source":"document","where":{"and":[{"href_matches":"/*"},{"not":{"href_matches":["/wp-*.php","/wp-admin/*","/files/*","/wp-content/*","/wp-content/plugins/*","/wp-content/themes/pub/twentyten/*","/*\\?(.+)"]}},{"not":{"selector_matches":"a[rel~=\"nofollow\"]"}},{"not":{"selector_matches":".no-prefetch, .no-prefetch a"}}]},"eagerness":"conservative"}]}
+</script>
+<script id="grofiles-cards-js" src="//0.gravatar.com/js/hovercards/hovercards.min.js?ver=202624d1133547e8a1f2801609f51cef12522abe7f6647d869e9fbc974fe356a37e613"></script>
+<script id="wpgroho-js-extra">
+var WPGroHo = {"my_hash":""};
+//# sourceURL=wpgroho-js-extra
+</script>
+<script crossorigin='anonymous' type='text/javascript'  src='/wp-content/mu-plugins/gravatar-hovercards/wpgroho.js?m=1610363240i'></script>
+
+	<script>
+		// Initialize and attach hovercards to all gravatars
+		( function() {
+			function init() {
+				if ( typeof Gravatar === 'undefined' ) {
+					return;
+				}
+
+				if ( typeof Gravatar.init !== 'function' ) {
+					return;
+				}
+
+				Gravatar.profile_cb = function ( hash, id ) {
+					WPGroHo.syncProfileData( hash, id );
+				};
+
+				Gravatar.my_hash = WPGroHo.my_hash;
+				Gravatar.init(
+					'body',
+					'#wp-admin-bar-my-account',
+					{
+						i18n: {
+							'Edit your profile →': 'Edit your profile →',
+							'View profile →': 'View profile →',
+							'Contact': 'Contact',
+							'Send money': 'Send money',
+							'Sorry, we are unable to load this Gravatar profile.': 'Sorry, we are unable to load this Gravatar profile.',
+							'Gravatar not found.': 'Gravatar not found.',
+							'Too Many Requests.': 'Too Many Requests.',
+							'Internal Server Error.': 'Internal Server Error.',
+							'Is this you?': 'Is this you?',
+							'Claim your free profile.': 'Claim your free profile.',
+							'Email': 'Email',
+							'Home Phone': 'Home Phone',
+							'Work Phone': 'Work Phone',
+							'Cell Phone': 'Cell Phone',
+							'Contact Form': 'Contact Form',
+							'Calendar': 'Calendar',
+						},
+					}
+				);
+			}
+
+			if ( document.readyState !== 'loading' ) {
+				init();
+			} else {
+				document.addEventListener( 'DOMContentLoaded', init );
+			}
+		} )();
+	</script>
+
+		<div style="display:none">
+	<div class="grofile-hash-map-8ff265721698489afeb7ceb7d3afde6e">
+	</div>
+	<div class="grofile-hash-map-c8273065cdb45706d7305cc8f47af5d0">
+	</div>
+	<div class="grofile-hash-map-87a1f2562f9ba49cf7138b098a33e9cb">
+	</div>
+	<div class="grofile-hash-map-fbd858a1c205f8aa835b6cacc3356451">
+	</div>
+	<div class="grofile-hash-map-0b99e429d4585a4dcbe347cbba932fb5">
+	</div>
+	<div class="grofile-hash-map-7ed2e2124d40541dffa1ba7a9b1a9f33">
+	</div>
+	<div class="grofile-hash-map-9cfbd139c73360ee00e7531e3b6ffa52">
+	</div>
+	<div class="grofile-hash-map-ee017760fb073022ed2dc2faaf506516">
+	</div>
+	<div class="grofile-hash-map-0e1780e8e13ca221eea3410484cf3f1e">
+	</div>
+	<div class="grofile-hash-map-e56c38dec4c59f206109a5aaa31ba230">
+	</div>
+	<div class="grofile-hash-map-a0d858edcef74e7562347826c4cdce8d">
+	</div>
+	</div>
+		<div id="actionbar" dir="ltr" style="display: none;"
+			class="actnbr-pub-twentyten actnbr-has-follow actnbr-has-actions">
+		<ul>
+								<li class="actnbr-btn actnbr-hidden">
+						<a class="actnbr-action actnbr-actn-comment" href="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/#comments">
+							<svg class="gridicon gridicons-comment" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M12 16l-5 5v-5H5c-1.1 0-2-.9-2-2V5c0-1.1.9-2 2-2h14c1.1 0 2 .9 2 2v9c0 1.1-.9 2-2 2h-7z"/></g></svg>							<span>Comment						</span>
+						</a>
+					</li>
+									<li class="actnbr-btn actnbr-hidden">
+						<a class="actnbr-action actnbr-actn-reblog" href="">
+							<svg class="gridicon gridicons-reblog" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M22.086 9.914L20 7.828V18c0 1.105-.895 2-2 2h-7v-2h7V7.828l-2.086 2.086L14.5 8.5 19 4l4.5 4.5-1.414 1.414zM6 16.172V6h7V4H6c-1.105 0-2 .895-2 2v10.172l-2.086-2.086L.5 15.5 5 20l4.5-4.5-1.414-1.414L6 16.172z"/></g></svg><span>Reblog</span>
+						</a>
+					</li>
+									<li class="actnbr-btn actnbr-hidden">
+								<a class="actnbr-action actnbr-actn-follow " href="">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z"  fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+							<div class="actnbr-popover tip tip-top-left actnbr-notice" id="follow-bubble">
+							<div class="tip-arrow"></div>
+							<div class="tip-inner actnbr-follow-bubble">
+															<ul>
+											<li class="actnbr-sitename">
+			<a href="https://knarkowicz.wordpress.com">
+				<img loading='lazy' alt='' src='https://s0.wp.com/i/logo/wpcom-gray-white.png?m=1479929237i' srcset='https://s0.wp.com/i/logo/wpcom-gray-white.png 1x' class='avatar avatar-50' height='50' width='50' />				Krzysztof Narkowicz			</a>
+		</li>
+										<div class="actnbr-message no-display"></div>
+									<form method="post" action="https://subscribe.wordpress.com" accept-charset="utf-8" style="display: none;">
+																						<div class="actnbr-follow-count">Join 29 other subscribers</div>
+																					<div>
+										<input type="email" name="email" placeholder="Enter your email address" class="actnbr-email-field" aria-label="Enter your email address" />
+										</div>
+										<input type="hidden" name="action" value="subscribe" />
+										<input type="hidden" name="blog_id" value="77263292" />
+										<input type="hidden" name="source" value="https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" />
+										<input type="hidden" name="sub-type" value="actionbar-follow" />
+										<input type="hidden" id="_wpnonce" name="_wpnonce" value="6ee42d401c" />										<div class="actnbr-button-wrap">
+											<button type="submit" value="Sign me up">
+												Sign me up											</button>
+										</div>
+									</form>
+									<li class="actnbr-login-nudge">
+										<div>
+											Already have a WordPress.com account? <a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fknarkowicz.wordpress.com%2F2016%2F01%2F06%2Faces-filmic-tone-mapping-curve%2F&#038;signup_flow=account">Log in now.</a>										</div>
+									</li>
+								</ul>
+															</div>
+						</div>
+					</li>
+							<li class="actnbr-ellipsis actnbr-hidden">
+				<svg class="gridicon gridicons-ellipsis" height="24" width="24" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M7 12c0 1.104-.896 2-2 2s-2-.896-2-2 .896-2 2-2 2 .896 2 2zm12-2c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2zm-7 0c-1.104 0-2 .896-2 2s.896 2 2 2 2-.896 2-2-.896-2-2-2z"/></g></svg>				<div class="actnbr-popover tip tip-top-left actnbr-more">
+					<div class="tip-arrow"></div>
+					<div class="tip-inner">
+						<ul>
+								<li class="actnbr-sitename">
+			<a href="https://knarkowicz.wordpress.com">
+				<img loading='lazy' alt='' src='https://s0.wp.com/i/logo/wpcom-gray-white.png?m=1479929237i' srcset='https://s0.wp.com/i/logo/wpcom-gray-white.png 1x' class='avatar avatar-50' height='50' width='50' />				Krzysztof Narkowicz			</a>
+		</li>
+								<li class="actnbr-folded-follow">
+										<a class="actnbr-action actnbr-actn-follow " href="">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path clip-rule="evenodd" d="m4 4.5h12v6.5h1.5v-6.5-1.5h-1.5-12-1.5v1.5 10.5c0 1.1046.89543 2 2 2h7v-1.5h-7c-.27614 0-.5-.2239-.5-.5zm10.5 2h-9v1.5h9zm-5 3h-4v1.5h4zm3.5 1.5h-1v1h1zm-1-1.5h-1.5v1.5 1 1.5h1.5 1 1.5v-1.5-1-1.5h-1.5zm-2.5 2.5h-4v1.5h4zm6.5 1.25h1.5v2.25h2.25v1.5h-2.25v2.25h-1.5v-2.25h-2.25v-1.5h2.25z"  fill-rule="evenodd"></path></svg>
+			<span>Subscribe</span>
+		</a>
+		<a class="actnbr-action actnbr-actn-following  no-display" href="">
+			<svg class="gridicon" height="20" width="20" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path fill-rule="evenodd" clip-rule="evenodd" d="M16 4.5H4V15C4 15.2761 4.22386 15.5 4.5 15.5H11.5V17H4.5C3.39543 17 2.5 16.1046 2.5 15V4.5V3H4H16H17.5V4.5V12.5H16V4.5ZM5.5 6.5H14.5V8H5.5V6.5ZM5.5 9.5H9.5V11H5.5V9.5ZM12 11H13V12H12V11ZM10.5 9.5H12H13H14.5V11V12V13.5H13H12H10.5V12V11V9.5ZM5.5 12H9.5V13.5H5.5V12Z" fill="#008A20"></path><path class="following-icon-tick" d="M13.5 16L15.5 18L19 14.5" stroke="#008A20" stroke-width="1.5"></path></svg>
+			<span>Subscribed</span>
+		</a>
+								</li>
+														<li class="actnbr-signup"><a href="https://wordpress.com/start/">Sign up</a></li>
+							<li class="actnbr-login"><a href="https://wordpress.com/log-in?redirect_to=https%3A%2F%2Fknarkowicz.wordpress.com%2F2016%2F01%2F06%2Faces-filmic-tone-mapping-curve%2F&#038;signup_flow=account">Log in</a></li>
+																<li class="actnbr-shortlink">
+										<a href="https://wp.me/p5ebI8-5N">
+											<span class="actnbr-shortlink__text">Copy shortlink</span>
+											<span class="actnbr-shortlink__icon"><svg class="gridicon gridicons-checkmark" height="16" width="16" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><g><path d="M9 19.414l-6.707-6.707 1.414-1.414L9 16.586 20.293 5.293l1.414 1.414"/></g></svg></span>
+										</a>
+									</li>
+																<li class="flb-report">
+									<a href="https://wordpress.com/abuse/?report_url=https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/" target="_blank" rel="noopener noreferrer">
+										Report this content									</a>
+								</li>
+															<li class="actnbr-reader">
+									<a href="https://wordpress.com/reader/blogs/77263292/posts/359">
+										View post in Reader									</a>
+								</li>
+															<li class="actnbr-subs">
+									<a href="https://subscribe.wordpress.com/">Manage subscriptions</a>
+								</li>
+																<li class="actnbr-fold"><a href="">Collapse this bar</a></li>
+														</ul>
+					</div>
+				</div>
+			</li>
+		</ul>
+	</div>
+	
+<script>
+window.addEventListener( "DOMContentLoaded", function( event ) {
+	var link = document.createElement( "link" );
+	link.href = "/wp-content/mu-plugins/actionbar/actionbar.css?v=20250116";
+	link.type = "text/css";
+	link.rel = "stylesheet";
+	document.head.appendChild( link );
+
+	var script = document.createElement( "script" );
+	script.src = "/wp-content/mu-plugins/actionbar/actionbar.js?v=20250204";
+	document.body.appendChild( script );
+} );
+</script>
+
+			<div id="jp-carousel-loading-overlay">
+			<div id="jp-carousel-loading-wrapper">
+				<span id="jp-carousel-library-loading"><svg class="jetpack-spinner" width="40" height="40" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><circle cx="50" cy="50" r="46" fill="none" stroke="#ddd" stroke-width="8"/><path d="M 50 4 A 46 46 0 0 1 96 50" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="1.4s" from="0 50 50" to="360 50 50" repeatCount="indefinite"/></path></svg></span>
+			</div>
+		</div>
+		<div class="jp-carousel-overlay" style="display: none;">
+
+		<div class="jp-carousel-container">
+			<!-- The Carousel Swiper -->
+			<div
+				class="jp-carousel-wrap swiper jp-carousel-swiper-container jp-carousel-transitions"
+				itemscope
+				itemtype="https://schema.org/ImageGallery">
+				<div class="jp-carousel swiper-wrapper"></div>
+				<div class="jp-swiper-button-prev swiper-button-prev">
+					<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<mask id="maskPrev" mask-type="alpha" maskUnits="userSpaceOnUse" x="8" y="6" width="9" height="12">
+							<path d="M16.2072 16.59L11.6496 12L16.2072 7.41L14.8041 6L8.8335 12L14.8041 18L16.2072 16.59Z" fill="white"/>
+						</mask>
+						<g mask="url(#maskPrev)">
+							<rect x="0.579102" width="23.8823" height="24" fill="#FFFFFF"/>
+						</g>
+					</svg>
+				</div>
+				<div class="jp-swiper-button-next swiper-button-next">
+					<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+						<mask id="maskNext" mask-type="alpha" maskUnits="userSpaceOnUse" x="8" y="6" width="8" height="12">
+							<path d="M8.59814 16.59L13.1557 12L8.59814 7.41L10.0012 6L15.9718 12L10.0012 18L8.59814 16.59Z" fill="white"/>
+						</mask>
+						<g mask="url(#maskNext)">
+							<rect x="0.34375" width="23.8822" height="24" fill="#FFFFFF"/>
+						</g>
+					</svg>
+				</div>
+			</div>
+			<!-- The main close buton -->
+			<div class="jp-carousel-close-hint">
+				<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+					<mask id="maskClose" mask-type="alpha" maskUnits="userSpaceOnUse" x="5" y="5" width="15" height="14">
+						<path d="M19.3166 6.41L17.9135 5L12.3509 10.59L6.78834 5L5.38525 6.41L10.9478 12L5.38525 17.59L6.78834 19L12.3509 13.41L17.9135 19L19.3166 17.59L13.754 12L19.3166 6.41Z" fill="white"/>
+					</mask>
+					<g mask="url(#maskClose)">
+						<rect x="0.409668" width="23.8823" height="24" fill="#FFFFFF"/>
+					</g>
+				</svg>
+			</div>
+			<!-- Image info, comments and meta -->
+			<div class="jp-carousel-info">
+				<div class="jp-carousel-info-footer">
+					<div class="jp-carousel-pagination-container">
+						<div class="jp-swiper-pagination swiper-pagination"></div>
+						<div class="jp-carousel-pagination"></div>
+					</div>
+					<div class="jp-carousel-photo-title-container">
+						<h2 class="jp-carousel-photo-caption"></h2>
+					</div>
+					<div class="jp-carousel-photo-icons-container">
+						<a href="#" class="jp-carousel-icon-btn jp-carousel-icon-info" aria-label="Toggle photo metadata visibility">
+							<span class="jp-carousel-icon">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="maskInfo" mask-type="alpha" maskUnits="userSpaceOnUse" x="2" y="2" width="21" height="20">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M12.7537 2C7.26076 2 2.80273 6.48 2.80273 12C2.80273 17.52 7.26076 22 12.7537 22C18.2466 22 22.7046 17.52 22.7046 12C22.7046 6.48 18.2466 2 12.7537 2ZM11.7586 7V9H13.7488V7H11.7586ZM11.7586 11V17H13.7488V11H11.7586ZM4.79292 12C4.79292 16.41 8.36531 20 12.7537 20C17.142 20 20.7144 16.41 20.7144 12C20.7144 7.59 17.142 4 12.7537 4C8.36531 4 4.79292 7.59 4.79292 12Z" fill="white"/>
+									</mask>
+									<g mask="url(#maskInfo)">
+										<rect x="0.8125" width="23.8823" height="24" fill="#FFFFFF"/>
+									</g>
+								</svg>
+							</span>
+						</a>
+												<a href="#" class="jp-carousel-icon-btn jp-carousel-icon-comments" aria-label="Toggle photo comments visibility">
+							<span class="jp-carousel-icon">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="maskComments" mask-type="alpha" maskUnits="userSpaceOnUse" x="2" y="2" width="21" height="20">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M4.3271 2H20.2486C21.3432 2 22.2388 2.9 22.2388 4V16C22.2388 17.1 21.3432 18 20.2486 18H6.31729L2.33691 22V4C2.33691 2.9 3.2325 2 4.3271 2ZM6.31729 16H20.2486V4H4.3271V18L6.31729 16Z" fill="white"/>
+									</mask>
+									<g mask="url(#maskComments)">
+										<rect x="0.34668" width="23.8823" height="24" fill="#FFFFFF"/>
+									</g>
+								</svg>
+
+								<span class="jp-carousel-has-comments-indicator" aria-label="This image has comments."></span>
+							</span>
+						</a>
+											</div>
+				</div>
+				<div class="jp-carousel-info-extra">
+					<div class="jp-carousel-info-content-wrapper">
+						<div class="jp-carousel-photo-title-container">
+							<h2 class="jp-carousel-photo-title"></h2>
+						</div>
+						<div class="jp-carousel-comments-wrapper">
+															<div id="jp-carousel-comments-loading">
+									<span>Loading Comments...</span>
+								</div>
+								<div class="jp-carousel-comments"></div>
+								<div id="jp-carousel-comment-form-container">
+									<span id="jp-carousel-comment-form-spinner"><svg class="jetpack-spinner" width="20" height="20" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><circle cx="50" cy="50" r="46" fill="none" stroke="#ddd" stroke-width="8"/><path d="M 50 4 A 46 46 0 0 1 96 50" fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" dur="1.4s" from="0 50 50" to="360 50 50" repeatCount="indefinite"/></path></svg></span>
+									<div id="jp-carousel-comment-post-results"></div>
+																														<form id="jp-carousel-comment-form">
+												<label for="jp-carousel-comment-form-comment-field" class="screen-reader-text">Write a Comment...</label>
+												<textarea
+													name="comment"
+													class="jp-carousel-comment-form-field jp-carousel-comment-form-textarea"
+													id="jp-carousel-comment-form-comment-field"
+													placeholder="Write a Comment..."
+												></textarea>
+												<div id="jp-carousel-comment-form-submit-and-info-wrapper">
+													<div id="jp-carousel-comment-form-commenting-as">
+																													<fieldset>
+																<label for="jp-carousel-comment-form-email-field">Email (Required)</label>
+																<input type="text" name="email" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-email-field" />
+															</fieldset>
+															<fieldset>
+																<label for="jp-carousel-comment-form-author-field">Name (Required)</label>
+																<input type="text" name="author" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-author-field" />
+															</fieldset>
+															<fieldset>
+																<label for="jp-carousel-comment-form-url-field">Website</label>
+																<input type="text" name="url" class="jp-carousel-comment-form-field jp-carousel-comment-form-text-field" id="jp-carousel-comment-form-url-field" />
+															</fieldset>
+																											</div>
+													<input
+														type="submit"
+														name="submit"
+														class="jp-carousel-comment-form-button"
+														id="jp-carousel-comment-form-button-submit"
+														value="Post Comment" />
+												</div>
+											</form>
+																											</div>
+													</div>
+						<div class="jp-carousel-image-meta">
+							<div class="jp-carousel-title-and-caption">
+								<div class="jp-carousel-photo-info">
+									<h3 class="jp-carousel-caption" itemprop="caption description"></h3>
+								</div>
+
+								<div class="jp-carousel-photo-description"></div>
+							</div>
+							<ul class="jp-carousel-image-exif" style="display: none;"></ul>
+							<a class="jp-carousel-image-download" href="#" target="_blank" style="display: none;">
+								<svg width="25" height="24" viewBox="0 0 25 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+									<mask id="mask0" mask-type="alpha" maskUnits="userSpaceOnUse" x="3" y="3" width="19" height="18">
+										<path fill-rule="evenodd" clip-rule="evenodd" d="M5.84615 5V19H19.7775V12H21.7677V19C21.7677 20.1 20.8721 21 19.7775 21H5.84615C4.74159 21 3.85596 20.1 3.85596 19V5C3.85596 3.9 4.74159 3 5.84615 3H12.8118V5H5.84615ZM14.802 5V3H21.7677V10H19.7775V6.41L9.99569 16.24L8.59261 14.83L18.3744 5H14.802Z" fill="white"/>
+									</mask>
+									<g mask="url(#mask0)">
+										<rect x="0.870605" width="23.8823" height="24" fill="#FFFFFF"/>
+									</g>
+								</svg>
+								<span class="jp-carousel-download-text"></span>
+							</a>
+							<div class="jp-carousel-image-map" style="display: none;"></div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		</div>
+		
+	<script type="text/javascript">
+		window.WPCOM_sharing_counts = {"https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/":359};
+	</script>
+				<script crossorigin='anonymous' type='text/javascript'  src='/_static/??-eJzTLy/QTc7PK0nNK9EvyClNz8wr1i+uzCtJrMjITM/IAeKS1CJMEWP94uSizIISoOIM5/yiVL2sYh19yo1yKioFmldQADTOPtfW0MzQ1MTczNLYKAsAjy0/rA=='></script>
+<script type='text/javascript'>
+	(function(){
+		var corecss = document.createElement('link');
+		var themecss = document.createElement('link');
+		var corecssurl = "/wp-content/plugins/syntaxhighlighter/syntaxhighlighter3/styles/shCore.css?ver=3.0.9b";
+		if ( corecss.setAttribute ) {
+				corecss.setAttribute( "rel", "stylesheet" );
+				corecss.setAttribute( "type", "text/css" );
+				corecss.setAttribute( "href", corecssurl );
+		} else {
+				corecss.rel = "stylesheet";
+				corecss.href = corecssurl;
+		}
+		document.head.appendChild( corecss );
+		var themecssurl = "/wp-content/plugins/syntaxhighlighter/syntaxhighlighter3/styles/shThemeDefault.css?m=1363304414i&amp;ver=3.0.9b";
+		if ( themecss.setAttribute ) {
+				themecss.setAttribute( "rel", "stylesheet" );
+				themecss.setAttribute( "type", "text/css" );
+				themecss.setAttribute( "href", themecssurl );
+		} else {
+				themecss.rel = "stylesheet";
+				themecss.href = themecssurl;
+		}
+		document.head.appendChild( themecss );
+	})();
+	SyntaxHighlighter.config.strings.expandSource = '+ expand source';
+	SyntaxHighlighter.config.strings.help = '?';
+	SyntaxHighlighter.config.strings.alert = 'SyntaxHighlighter\n\n';
+	SyntaxHighlighter.config.strings.noBrush = 'Can\'t find brush for: ';
+	SyntaxHighlighter.config.strings.brushNotHtmlScript = 'Brush wasn\'t configured for html-script option: ';
+	SyntaxHighlighter.defaults['pad-line-numbers'] = false;
+	SyntaxHighlighter.defaults['toolbar'] = false;
+	SyntaxHighlighter.all();
+
+	// Infinite scroll support
+	document.addEventListener( 'is.post-load', function () {
+		SyntaxHighlighter.highlight();
+	} );
+</script>
+
+	<script type="text/javascript">
+		(function () {
+			var wpcom_reblog = {
+				source: 'toolbar',
+
+				toggle_reblog_box_flair: function (obj_id, post_id) {
+
+					// Go to site selector. This will redirect to their blog if they only have one.
+					const postEndpoint = `https://wordpress.com/post`;
+
+					// Ideally we would use the permalink here, but fortunately this will be replaced with the 
+					// post permalink in the editor.
+					const originalURL = `${ document.location.href }?page_id=${ post_id }`; 
+					
+					const url =
+						postEndpoint +
+						'?url=' +
+						encodeURIComponent( originalURL ) +
+						'&is_post_share=true' +
+						'&v=5';
+
+					const redirect = function () {
+						if (
+							! window.open( url, '_blank' )
+						) {
+							location.href = url;
+						}
+					};
+
+					if ( /Firefox/.test( navigator.userAgent ) ) {
+						setTimeout( redirect, 0 );
+					} else {
+						redirect();
+					}
+				},
+			};
+
+			window.wpcom_reblog = wpcom_reblog;
+		})();
+	</script>
+<script crossorigin='anonymous' type='text/javascript'  src='/_static/??/wp-content/mu-plugins/likes/queuehandler.js,/wp-includes/js/comment-reply.min.js?m=1743165756j'></script>
+<script id="wp-hooks-js" src="/wp-content/plugins/gutenberg-core/v23.3.2/build/scripts/hooks/index.min.js?m=1780625085i&#038;ver=7496969728ca0f95732d"></script>
+<script id="wp-i18n-js" src="/wp-content/plugins/gutenberg-core/v23.3.2/build/scripts/i18n/index.min.js?m=1780625085i&#038;ver=125448662852c5e18937"></script>
+<script id="wp-i18n-js-after">
+wp.i18n.setLocaleData( { 'text direction\u0004ltr': [ 'ltr' ] } );
+//# sourceURL=wp-i18n-js-after
+</script>
+<script id="verbum-settings-js-before">
+window.VerbumComments = {"Log in or provide your name and email to leave a reply.":"Log in or provide your name and email to leave a reply.","Log in or provide your name and email to leave a comment.":"Log in or provide your name and email to leave a comment.","Receive web and mobile notifications for posts on this site.":"Receive web and mobile notifications for posts on this site.","Name":"Name","Email (address never made public)":"Email (address never made public)","Website (optional)":"Website (optional)","Leave a reply. (log in optional)":"Leave a reply. (log in optional)","Leave a comment. (log in optional)":"Leave a comment. (log in optional)","Log in to leave a reply.":"Log in to leave a reply.","Log in to leave a comment.":"Log in to leave a comment.","Logged in via %s":"Logged in via %s","Log out":"Log out","Email":"Email","(Address never made public)":"(Address never made public)","Instantly":"Instantly","Daily":"Daily","Reply":"Reply","Comment":"Comment","WordPress":"WordPress","Weekly":"Weekly","Notify me of new posts":"Notify me of new posts","Email me new posts":"Email me new posts","Email me new comments":"Email me new comments","Cancel":"Cancel","Write a comment...":"Write a comment...","Write a reply...":"Write a reply...","Website":"Website","Optional":"Optional","We'll keep you in the loop!":"We'll keep you in the loop!","Loading your comment...":"Loading your comment...","Discover more from":"Discover more from Krzysztof Narkowicz","Subscribe now to keep reading and get access to the full archive.":"Subscribe now to keep reading and get access to the full archive.","Continue reading":"Continue reading","Never miss a beat!":"Never miss a beat!","Interested in getting blog post updates? Simply click the button below to stay in the loop!":"Interested in getting blog post updates? Simply click the button below to stay in the loop!","Enter your email address":"Enter your email address","Subscribe":"Subscribe","Comment sent successfully":"Comment sent successfully","Save my name, email, and website in this browser for the next time I comment.":"Save my name, email, and website in this browser for the next time I comment.","hovercardi18n":{"Edit your profile \u2192":"Edit your profile \u2192","View profile \u2192":"View profile \u2192","Contact":"Contact","Send money":"Send money","Gravatar not found.":"Gravatar not found.","This profile is private.":"This profile is private.","Too Many Requests.":"Too Many Requests.","Internal Server Error.":"Internal Server Error.","Sorry, we are unable to load this Gravatar profile.":"Sorry, we are unable to load this Gravatar profile."},"siteId":77263292,"postId":359,"mustLogIn":false,"requireNameEmail":true,"commentRegistration":false,"connectURL":"https://knarkowicz.wordpress.com/public.api/connect/?action=request\u0026from_comments=yes","logoutURL":"https://knarkowicz.wordpress.com/wp-login.php?action=logout\u0026_wpnonce=8c545453cc","homeURL":"https://knarkowicz.wordpress.com/","subscribeToBlog":true,"subscribeToComment":true,"isJetpackCommentsLoggedIn":false,"jetpackUsername":"","jetpackUserId":0,"jetpackSignature":"","jetpackAvatar":"https://0.gravatar.com/avatar/?s=96\u0026amp;d=identicon\u0026amp;r=G","enableBlocks":true,"enableSubscriptionModal":true,"currentLocale":"en","isJetpackComments":false,"allowedBlocks":["core/paragraph","core/list","core/code","core/list-item","core/quote","core/image","core/embed","core/quote","core/code"],"embedNonce":"994ba384d8","verbumBundleUrl":"/wp-content/mu-plugins/jetpack-mu-wpcom-plugin/moon/jetpack_vendor/automattic/jetpack-mu-wpcom/src/features/verbum-comments/dist/index.js","isRTL":false,"vbeCacheBuster":1771405207,"iframeUniqueId":0,"colorScheme":false}
+//# sourceURL=verbum-settings-js-before
+</script>
+<script data-wp-strategy="defer" defer id="verbum-dynamic-loader-js" src="/wp-content/mu-plugins/jetpack-mu-wpcom-plugin/moon/jetpack_vendor/automattic/jetpack-mu-wpcom/src/build/verbum-comments/assets/dynamic-loader.js?m=1772518873i&#038;minify=false&#038;ver=8b5296f9195db92c42e4"></script>
+<script id="comment-like-js-extra">
+var comment_like_text = {"loading":"Loading...","swipeUrl":"https://s0.wp.com/wp-content/mu-plugins/comment-likes/js/lib/swipe.js?m=1382645497i&amp;ver=20131008"};
+//# sourceURL=comment-like-js-extra
+</script>
+<script id="jetpack-carousel-js-extra">
+var jetpackSwiperLibraryPath = {"url":"/wp-content/mu-plugins/jetpack-plugin/moon/_inc/blocks/swiper.js"};
+var jetpackCarouselStrings = {"widths":[370,700,1000,1200,1400,2000],"is_logged_in":"","lang":"en","ajaxurl":"https://knarkowicz.wordpress.com/wp-admin/admin-ajax.php","nonce":"230f3ccd4b","display_exif":"1","display_comments":"1","single_image_gallery":"1","single_image_gallery_media_file":"","background_color":"black","comment":"Comment","post_comment":"Post Comment","write_comment":"Write a Comment...","loading_comments":"Loading Comments...","image_label":"Open image in full-screen.","download_original":"View full size \u003Cspan class=\"photo-size\"\u003E{0}\u003Cspan class=\"photo-size-times\"\u003E\u00d7\u003C/span\u003E{1}\u003C/span\u003E","no_comment_text":"Please be sure to submit some text with your comment.","no_comment_email":"Please provide an email address to comment.","no_comment_author":"Please provide your name to comment.","comment_post_error":"Sorry, but there was an error posting your comment. Please try again later.","comment_approved":"Your comment was approved.","comment_unapproved":"Your comment is in moderation.","camera":"Camera","aperture":"Aperture","shutter_speed":"Shutter Speed","focal_length":"Focal Length","copyright":"Copyright","comment_registration":"0","require_name_email":"1","login_url":"https://knarkowicz.wordpress.com/wp-login.php?redirect_to=https%3A%2F%2Fknarkowicz.wordpress.com%2F2016%2F01%2F06%2Faces-filmic-tone-mapping-curve%2F","blog_id":"77263292","meta_data":["camera","aperture","shutter_speed","focal_length","copyright"],"stats_query_args":"blog=77263292&v=wpcom&tz=0&user_id=0&subd=knarkowicz","is_public":"1"};
+//# sourceURL=jetpack-carousel-js-extra
+</script>
+<script id="sharing-js-js-extra">
+var sharing_js_options = {"lang":"en","counts":"1","is_stats_active":"1"};
+//# sourceURL=sharing-js-js-extra
+</script>
+<script id="jetpack-script-data-js-before">
+window.JetpackScriptData = {"site":{"host":"wpcom","is_wpcom_platform":true}};
+//# sourceURL=jetpack-script-data-js-before
+</script>
+<script crossorigin='anonymous' type='text/javascript'  src='/_static/??-eJydkNFqwzAMRX9ojltC6V7GPqVottYpsWRjyQ37+4U2CaOMMvomHeleieun4kIWQzHPzZXUziTqQ2aekUs0ovrhDnSDvvi/hQNagTC6GU1lFi0DzznLOjxdUGKuHpplBjMKmwxU0dR/NEpxgxoqFXMRDP5x+ffBE0lYzALU3BTTtreCjkke2MJIymiu73Y3uxV81utyfOYlm8gMqzNiTCT4wGN98xbnXft8HPoFFSPE+H0tSc5LDu/8tj++7g77w7Hvhx9gIMxe'></script>
+<script id="sharing-js-js-after">
+var windowOpen;
+			( function () {
+				function matches( el, sel ) {
+					return !! (
+						el.matches && el.matches( sel ) ||
+						el.msMatchesSelector && el.msMatchesSelector( sel )
+					);
+				}
+
+				document.body.addEventListener( 'click', function ( event ) {
+					if ( ! event.target ) {
+						return;
+					}
+
+					var el;
+					if ( matches( event.target, 'a.share-twitter' ) ) {
+						el = event.target;
+					} else if ( event.target.parentNode && matches( event.target.parentNode, 'a.share-twitter' ) ) {
+						el = event.target.parentNode;
+					}
+
+					if ( el ) {
+						event.preventDefault();
+
+						// If there's another sharing window open, close it.
+						if ( typeof windowOpen !== 'undefined' ) {
+							windowOpen.close();
+						}
+						windowOpen = window.open( el.getAttribute( 'href' ), 'wpcomtwitter', 'menubar=1,resizable=1,width=600,height=350' );
+						return false;
+					}
+				} );
+			} )();
+var windowOpen;
+			( function () {
+				function matches( el, sel ) {
+					return !! (
+						el.matches && el.matches( sel ) ||
+						el.msMatchesSelector && el.msMatchesSelector( sel )
+					);
+				}
+
+				document.body.addEventListener( 'click', function ( event ) {
+					if ( ! event.target ) {
+						return;
+					}
+
+					var el;
+					if ( matches( event.target, 'a.share-facebook' ) ) {
+						el = event.target;
+					} else if ( event.target.parentNode && matches( event.target.parentNode, 'a.share-facebook' ) ) {
+						el = event.target.parentNode;
+					}
+
+					if ( el ) {
+						event.preventDefault();
+
+						// If there's another sharing window open, close it.
+						if ( typeof windowOpen !== 'undefined' ) {
+							windowOpen.close();
+						}
+						windowOpen = window.open( el.getAttribute( 'href' ), 'wpcomfacebook', 'menubar=1,resizable=1,width=600,height=400' );
+						return false;
+					}
+				} );
+			} )();
+//# sourceURL=sharing-js-js-after
+</script>
+<script id="wp-emoji-settings" type="application/json">
+{"baseUrl":"https://s0.wp.com/wp-content/mu-plugins/wpcom-smileys/twemoji/2/72x72/","ext":".png","svgUrl":"https://s0.wp.com/wp-content/mu-plugins/wpcom-smileys/twemoji/2/svg/","svgExt":".svg","source":{"concatemoji":"/wp-includes/js/wp-emoji-release.min.js?m=1764078722i&ver=7.0-RC4-62382"}}
+</script>
+<script type="module">
+/*! This file is auto-generated */
+const a=JSON.parse(document.getElementById("wp-emoji-settings").textContent),o=(window._wpemojiSettings=a,"wpEmojiSettingsSupports"),s=["flag","emoji"];function i(e){try{var t={supportTests:e,timestamp:(new Date).valueOf()};sessionStorage.setItem(o,JSON.stringify(t))}catch(e){}}function c(e,t,n){e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(t,0,0);t=new Uint32Array(e.getImageData(0,0,e.canvas.width,e.canvas.height).data);e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(n,0,0);const a=new Uint32Array(e.getImageData(0,0,e.canvas.width,e.canvas.height).data);return t.every((e,t)=>e===a[t])}function p(e,t){e.clearRect(0,0,e.canvas.width,e.canvas.height),e.fillText(t,0,0);var n=e.getImageData(16,16,1,1);for(let e=0;e<n.data.length;e++)if(0!==n.data[e])return!1;return!0}function u(e,t,n,a){switch(t){case"flag":return n(e,"\ud83c\udff3\ufe0f\u200d\u26a7\ufe0f","\ud83c\udff3\ufe0f\u200b\u26a7\ufe0f")?!1:!n(e,"\ud83c\udde8\ud83c\uddf6","\ud83c\udde8\u200b\ud83c\uddf6")&&!n(e,"\ud83c\udff4\udb40\udc67\udb40\udc62\udb40\udc65\udb40\udc6e\udb40\udc67\udb40\udc7f","\ud83c\udff4\u200b\udb40\udc67\u200b\udb40\udc62\u200b\udb40\udc65\u200b\udb40\udc6e\u200b\udb40\udc67\u200b\udb40\udc7f");case"emoji":return!a(e,"\ud83e\u1fac8")}return!1}function f(e,t,n,a){let r;const o=(r="undefined"!=typeof WorkerGlobalScope&&self instanceof WorkerGlobalScope?new OffscreenCanvas(300,150):document.createElement("canvas")).getContext("2d",{willReadFrequently:!0}),s=(o.textBaseline="top",o.font="600 32px Arial",{});return e.forEach(e=>{s[e]=t(o,e,n,a)}),s}function r(e){var t=document.createElement("script");t.src=e,t.defer=!0,document.head.appendChild(t)}a.supports={everything:!0,everythingExceptFlag:!0},new Promise(t=>{let n=function(){try{var e=JSON.parse(sessionStorage.getItem(o));if("object"==typeof e&&"number"==typeof e.timestamp&&(new Date).valueOf()<e.timestamp+604800&&"object"==typeof e.supportTests)return e.supportTests}catch(e){}return null}();if(!n){if("undefined"!=typeof Worker&&"undefined"!=typeof OffscreenCanvas&&"undefined"!=typeof URL&&URL.createObjectURL&&"undefined"!=typeof Blob)try{var e="postMessage("+f.toString()+"("+[JSON.stringify(s),u.toString(),c.toString(),p.toString()].join(",")+"));",a=new Blob([e],{type:"text/javascript"});const r=new Worker(URL.createObjectURL(a),{name:"wpTestEmojiSupports"});return void(r.onmessage=e=>{i(n=e.data),r.terminate(),t(n)})}catch(e){}i(n=f(s,u,c,p))}t(n)}).then(e=>{for(const n in e)a.supports[n]=e[n],a.supports.everything=a.supports.everything&&a.supports[n],"flag"!==n&&(a.supports.everythingExceptFlag=a.supports.everythingExceptFlag&&a.supports[n]);var t;a.supports.everythingExceptFlag=a.supports.everythingExceptFlag&&!a.supports.flag,a.supports.everything||((t=a.source||{}).concatemoji?r(t.concatemoji):t.wpemoji&&t.twemoji&&(r(t.twemoji),r(t.wpemoji)))});
+//# sourceURL=/wp-includes/js/wp-emoji-loader.min.js
+</script>
+	<iframe src='https://widgets.wp.com/likes/master.html?ver=20260614#ver=20260614' scrolling='no' id='likes-master' name='likes-master' style='display:none;'></iframe>
+	<div id='likes-other-gravatars' role="dialog" aria-hidden="true" tabindex="-1"><div class="likes-text"><span>%d</span></div><ul class="wpl-avatars sd-like-gravatars"></ul></div>
+	<script src="//stats.wp.com/w.js?68" defer></script> <script type="text/javascript">
+_tkq = window._tkq || [];
+_stq = window._stq || [];
+_tkq.push(['storeContext', {'blog_id':'77263292','blog_tz':'0','user_lang':'en','blog_lang':'en','user_id':'0'}]);
+		// Prevent sending pageview tracking from WP-Admin pages.
+		_stq.push(['view', {'blog':'77263292','v':'wpcom','tz':'0','user_id':'0','post':'359','subd':'knarkowicz'}]);
+		_stq.push(['extra', {'crypt':'UE40eW5QN0p8M2Y/RE0/bU8yQkx3RTR3RmZTSndoTltKYUtEYz9mTHN3MlJ2cWh3ZmwzZGYubUxraS83bFJ8by9SUXlTXWIrWEkxPVlFYj9qdEh6bzFrUlYmZmtQQ1FxSFpJPywyMjBTTyZKPXBbdEFpclV4dkJmUXpSVD93eURmTXxCdnZaeC83R3c9ckxnRnA/OXNWfE40VT8la3Z5LV1XbUttem83Vn5LL105NTBmS3puWz0xVm1VZTFTV3FyNnRfS2c9STNHTXJLciZ0cElGJTJnPz1MR1RybllISHIlQm5ZTmI9cjhXQk9xZl9mWjUuXTd3RWRQS3NRR2I0c2JdMHEvYkFUNlEsdWFsMTUtSmZPeDI9OXgyLGMza1JydlczK21TMmRyNzVxTA=='}]);
+_stq.push([ 'clickTrackerInit', '77263292', '359' ]);
+</script>
+<noscript><img src="https://pixel.wp.com/b.gif?v=noscript" style="height:1px;width:1px;overflow:hidden;position:absolute;bottom:1px;" alt="" /></noscript>
+<meta id="bilmur" property="bilmur:data" content="" data-provider="wordpress.com" data-service="simple" data-site-tz="Etc/GMT-0" data-custom-props="{&quot;logged_in&quot;:&quot;0&quot;,&quot;wptheme&quot;:&quot;pub\/twentyten&quot;,&quot;wptheme_is_block&quot;:&quot;0&quot;}"  >
+		<script defer src="/wp-content/js/bilmur.min.js?i=17&amp;m=202624"></script> 	<div id="marketingbar" class="marketing-bar noskim  "><div class="marketing-bar-text">Design a site like this with WordPress.com</div><a class="marketing-bar-button" href="https://wordpress.com/start/?ref=marketing_bar">Get started</a><a class="marketing-bar-link" tabindex="-1" aria-label="Create your website at WordPress.com" href="https://wordpress.com/start/?ref=marketing_bar"></a></div>		<script type="text/javascript">
+			window._tkq = window._tkq || [];
+
+			window._tkq.push( [ 'recordEvent', 'wpcom_marketing_bar_impression', {"is_current_user_blog_owner":false} ] );
+
+			document.querySelectorAll( '#marketingbar > a' ).forEach( link => {
+				link.addEventListener( 'click', ( e ) => {
+					window._tkq.push( [ 'recordEvent', 'wpcom_marketing_bar_cta_click', {"is_current_user_blog_owner":false} ] );
+				} );
+			});
+		</script>
+<script>
+(function() {
+	'use strict';
+
+	const fetches = {};
+	const promises = {};
+	const urls = {
+		'wp-polyfill': '/wp-includes/js/dist/vendor/wp-polyfill.min.js?m=1775575011i&ver=3.15.0',
+		'verbum': '/wp-content/mu-plugins/jetpack-mu-wpcom-plugin/moon/jetpack_vendor/automattic/jetpack-mu-wpcom/src/build/verbum-comments/verbum-comments.js?m=1781023412i&minify=false&ver=5ff7b65e90017493fba3'
+	};
+	const loaders = {
+		'verbum': () => {
+			fetchExternalScript('wp-polyfill');
+			fetchExternalScript('verbum');
+			promises['wp-polyfill'] = promises['wp-polyfill'] || loadWPScript('wp-polyfill');
+			promises['verbum'] = promises['verbum'] || promises['wp-polyfill'].then( () => loadWPScript('verbum') );
+			return promises['verbum'];
+		},
+		
+	};
+	const scriptExtras = {
+		
+	};
+
+	window.WP_Enqueue_Dynamic_Script = {
+		loadScript: (handle) => {
+			if (!loaders[handle]) {
+				console.error('WP_Enqueue_Dynamic_Script: unregistered script `' + handle + '`.');
+			}
+			return loaders[handle]();
+		}
+	};
+
+	function fetchExternalScript(handle) {
+		if (!urls[handle]) {
+			return Promise.resolve();
+		}
+
+		fetches[handle] = fetches[handle] || fetch(urls[handle], { mode: 'no-cors' });
+		return fetches[handle];
+	}
+
+	function runExtraScript(handle, type, index) {
+		const id = 'wp-enqueue-dynamic-script:' + handle + ':' + type + ':' + (index + 1);
+		const template = document.getElementById(id);
+		if (!template) {
+			return Promise.reject();
+		}
+
+		const script = document.createElement( 'script' );
+		script.innerHTML = template.innerHTML;
+		document.body.appendChild( script );
+		return Promise.resolve();
+	}
+
+	function loadExternalScript(handle) {
+		if (!urls[handle]) {
+			return Promise.resolve();
+		}
+
+		return fetches[handle].then(() => {
+			return new Promise((resolve, reject) => {
+				const script = document.createElement('script');
+				script.onload = () => resolve();
+				script.onerror = (e) => reject(e);
+				script.src = urls[handle];
+				document.body.appendChild(script);
+			});
+		});
+	}
+
+	function loadExtra(handle, pos) {
+		const count = (scriptExtras[handle] && scriptExtras[handle][pos]) || 0;
+		let promise = Promise.resolve();
+
+		for (let i = 0; i < count; i++) {
+			promise = promise.then(() => runExtraScript(handle, pos, i));
+		}
+
+		return promise;
+	}
+
+	function loadWPScript(handle) {
+		// Core loads scripts in this order. See: https://github.com/WordPress/WordPress/blob/a59eb9d39c4fcba834b70c9e8dfd64feeec10ba6/wp-includes/class-wp-scripts.php#L428.
+		return loadExtra(handle, 'translations')
+			.then(() => loadExtra(handle, 'before'))
+			.then(() => loadExternalScript(handle))
+			.then(() => loadExtra(handle, 'after'));
+	}
+} )();
+</script>
+</body>
+</html>
+<!--
+	generated in 0.212 seconds
+	171657 bytes batcached for 300 seconds
+-->

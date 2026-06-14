@@ -34,6 +34,7 @@ constant they define is instead transcribed with its exact value in the tables b
 | `itu-r-bt709-6.pdf`      | ITU-R BT.709-6 — sRGB/BT.709 primaries & white point |
 | `itu-r-bt2020-2.pdf`     | ITU-R BT.2020-2 — BT.2020 primaries & white point |
 | `itu-r-bt2100-2.pdf`     | ITU-R BT.2100-2 — PQ/HLG systems (BT.2100-3 is now in force; `-2` is the edition cited below) |
+| `itu-r-bt2408-8.pdf`     | Report ITU-R BT.2408-8 (2024) — HDR Reference White (203 cd/m²) for HDR production |
 | `adobe-rgb-1998.pdf`     | Adobe RGB (1998) Color Image Encoding — primaries & γ (authentic Adobe file via the Internet Archive; Adobe's host no longer serves it) |
 | `romm-rgb.pdf`           | ROMM RGB / ProPhoto white paper — the free primary reference for ISO 22028-2's reference encoding |
 
@@ -100,6 +101,21 @@ Source: SMPTE ST 2084:2014; ITU-R BT.2100-2. Constants are exact dyadic rational
 Peak luminance `10000` cd/m². Inverse EOTF (E' → linear, normalized to [0,1]·10000 nits):
 `Y = ((max(E'^(1/m2) − c1, 0)) / (c2 − c3·E'^(1/m2)))^(1/m1)`.
 Note `c1 = c3 − c2 + 1`.
+
+---
+
+## HDR / SDR reference white — ITU-R BT.2408
+
+Source: Report ITU-R BT.2408-8 (2024) (`itu-r-bt2408-8.pdf`, verified 2026-06). **HDR Reference
+White = 203 cd/m²** — the nominal signal level of graphics / diffuse white in PQ and HLG
+production. (Earlier code mislabeled this "SDR reference white"; 203 is the *HDR* reference level.)
+The classic **SDR reference white is 100 cd/m²**; BT.2408 is the framework that maps SDR 100 %
+diffuse white onto HDR Reference White. PQ peak luminance is **10 000 cd/m²** (ST 2084, above).
+
+These three levels are defined once in `gamut_core::luminance` (`HDR_REFERENCE_WHITE_NITS = 203`,
+`SDR_REFERENCE_WHITE_NITS = 100`, `PQ_PEAK_NITS = 10000`) and shared by `gamut-color` (the BT.2020
+PQ→SDR path tone-maps relative to 203) and `gamut-tonemap` (`DEFAULT_REINHARD_WHITE = 203/100 =
+2.03`). The tone-curve operators are documented in `references/tonemap/README.md`.
 
 ---
 
