@@ -3,7 +3,7 @@
 //! `.icc` fixtures are committed; gamut-icc decodes the same bytes and the decoded values are
 //! asserted equal to what lcms2 reports.
 
-use gamut_icc::{IccProfile, ProfileHeader, S15Fixed16, Signature, TagData};
+use gamut_icc::{IccProfile, KnownTag, ProfileHeader, S15Fixed16, Signature, TagData};
 use lcms2_oracle::tag;
 
 /// The Rec.709/sRGB primaries and D65 white point, for synthesizing matrix/TRC profiles.
@@ -239,6 +239,65 @@ fn descriptions_match_lcms() {
         .read_mlu_ascii(tag::PROFILE_DESCRIPTION, b"en", b"US")
         .expect("lcms reads desc");
     assert_eq!(ours, theirs);
+}
+
+/// A complete matrix/TRC RGB profile decodes end to end: every tag a baseline display profile
+/// carries resolves to its modelled element type (none falls back to `Raw`), reached via the
+/// ergonomic [`KnownTag`] API.
+#[test]
+fn matrix_trc_profile_decodes_every_tag() {
+    let profile = lcms2_oracle::rgb_matrix_shaper(D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]);
+    let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
+    let get = |t: KnownTag| parsed.get(t.signature());
+
+    for t in [
+        KnownTag::MediaWhitePoint,
+        KnownTag::RedColorant,
+        KnownTag::GreenColorant,
+        KnownTag::BlueColorant,
+    ] {
+        assert!(
+            matches!(get(t), Some(TagData::Xyz(_))),
+            "{t:?} should be XYZ"
+        );
+    }
+    for t in [KnownTag::RedTrc, KnownTag::GreenTrc, KnownTag::BlueTrc] {
+        assert!(
+            matches!(
+                get(t),
+                Some(TagData::Curve(_) | TagData::ParametricCurve(_))
+            ),
+            "{t:?} should be a tone curve"
+        );
+    }
+    assert!(
+        matches!(get(KnownTag::ChromaticAdaptation), Some(TagData::S15Fixed16Array(v)) if v.len() == 9)
+    );
+    for t in [KnownTag::ProfileDescription, KnownTag::Copyright] {
+        assert!(
+            matches!(get(t), Some(TagData::MultiLocalizedUnicode(_))),
+            "{t:?} should be mluc"
+        );
+    }
+
+    // chromaticityType is intentionally not modelled; lcms emits a `chrm` tag here, and it is
+    // preserved verbatim as Raw — the honest-scope passthrough working on a real profile.
+    assert!(matches!(
+        get(KnownTag::Chromaticity),
+        Some(TagData::Raw { type_sig, .. }) if type_sig.0 == *b"chrm"
+    ));
+
+    // Every other tag the profile carries is a modelled (non-Raw) element.
+    let undecoded: Vec<String> = parsed
+        .tags
+        .iter()
+        .filter(|(sig, data)| matches!(data, TagData::Raw { .. }) && sig.0 != *b"chrm")
+        .map(|(sig, _)| sig.to_string())
+        .collect();
+    assert!(
+        undecoded.is_empty(),
+        "unexpected undecoded tags: {undecoded:?}"
+    );
 }
 
 /// Evaluates whichever tone-curve element a tag holds.

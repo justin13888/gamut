@@ -53,18 +53,27 @@ pub(crate) fn parse_tag_table(profile: &[u8]) -> Result<Vec<TagEntry>> {
     Ok(entries)
 }
 
-/// Well-known tag signatures a baseline profile carries (ICC.1:2022 §9).
+/// Well-known tag signatures (ICC.1:2022 §9), as an ergonomic catalogue with
+/// [`signature`](KnownTag::signature)/[`from_signature`](KnownTag::from_signature) conversions —
+/// e.g. `profile.get(KnownTag::MediaWhitePoint.signature())`.
 ///
-/// A convenience catalogue of the common tags; the parser accepts *any* signature, so this is not
-/// exhaustive and is not on the parse path.
+/// The parser accepts *any* signature, so this is a convenience set (not exhaustive) and is not on
+/// the parse path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum KnownTag {
-    /// `desc` — the profile description (`textDescriptionType` v2 / `multiLocalizedUnicodeType` v4).
+    /// `desc` — the profile description (`multiLocalizedUnicodeType` v4 / `textDescriptionType` v2).
     ProfileDescription,
     /// `cprt` — the copyright string.
     Copyright,
+    /// `dmnd` — the device manufacturer description.
+    DeviceManufacturerDesc,
+    /// `dmdd` — the device model description.
+    DeviceModelDesc,
     /// `wtpt` — the media white point (`XYZType`).
     MediaWhitePoint,
+    /// `bkpt` — the media black point (`XYZType`).
+    MediaBlackPoint,
     /// `rXYZ` — the red colorant column (`XYZType`).
     RedColorant,
     /// `gXYZ` — the green colorant column (`XYZType`).
@@ -77,12 +86,116 @@ pub enum KnownTag {
     GreenTrc,
     /// `bTRC` — the blue tone-response curve.
     BlueTrc,
+    /// `kTRC` — the grey tone-response curve.
+    GrayTrc,
     /// `A2B0` — the device-to-PCS lookup transform for the perceptual intent.
     AToB0,
+    /// `A2B1` — the device-to-PCS lookup transform for the media-relative colorimetric intent.
+    AToB1,
+    /// `A2B2` — the device-to-PCS lookup transform for the saturation intent.
+    AToB2,
     /// `B2A0` — the PCS-to-device lookup transform for the perceptual intent.
     BToA0,
+    /// `B2A1` — the PCS-to-device lookup transform for the media-relative colorimetric intent.
+    BToA1,
+    /// `B2A2` — the PCS-to-device lookup transform for the saturation intent.
+    BToA2,
+    /// `gamt` — the out-of-gamut lookup transform.
+    Gamut,
     /// `chad` — the chromatic-adaptation matrix (`s15Fixed16ArrayType`).
     ChromaticAdaptation,
+    /// `lumi` — the luminance (`XYZType`).
+    Luminance,
+    /// `chrm` — the chromaticity (`chromaticityType`).
+    Chromaticity,
+    /// `view` — the viewing conditions (`viewingConditionsType`).
+    ViewingConditions,
+    /// `meas` — the measurement conditions (`measurementType`).
+    Measurement,
+    /// `tech` — the device technology (`signatureType`).
+    Technology,
+    /// `targ` — the characterization target (`textType`).
+    CharTarget,
+    /// `cicp` — coding-independent code points (`cicpType`).
+    Cicp,
+}
+
+impl KnownTag {
+    /// Every catalogued tag, for enumeration.
+    pub const ALL: [KnownTag; 28] = [
+        KnownTag::ProfileDescription,
+        KnownTag::Copyright,
+        KnownTag::DeviceManufacturerDesc,
+        KnownTag::DeviceModelDesc,
+        KnownTag::MediaWhitePoint,
+        KnownTag::MediaBlackPoint,
+        KnownTag::RedColorant,
+        KnownTag::GreenColorant,
+        KnownTag::BlueColorant,
+        KnownTag::RedTrc,
+        KnownTag::GreenTrc,
+        KnownTag::BlueTrc,
+        KnownTag::GrayTrc,
+        KnownTag::AToB0,
+        KnownTag::AToB1,
+        KnownTag::AToB2,
+        KnownTag::BToA0,
+        KnownTag::BToA1,
+        KnownTag::BToA2,
+        KnownTag::Gamut,
+        KnownTag::ChromaticAdaptation,
+        KnownTag::Luminance,
+        KnownTag::Chromaticity,
+        KnownTag::ViewingConditions,
+        KnownTag::Measurement,
+        KnownTag::Technology,
+        KnownTag::CharTarget,
+        KnownTag::Cicp,
+    ];
+
+    /// The four-byte signature this tag is stored under.
+    #[must_use]
+    pub fn signature(self) -> Signature {
+        let code: &[u8; 4] = match self {
+            KnownTag::ProfileDescription => b"desc",
+            KnownTag::Copyright => b"cprt",
+            KnownTag::DeviceManufacturerDesc => b"dmnd",
+            KnownTag::DeviceModelDesc => b"dmdd",
+            KnownTag::MediaWhitePoint => b"wtpt",
+            KnownTag::MediaBlackPoint => b"bkpt",
+            KnownTag::RedColorant => b"rXYZ",
+            KnownTag::GreenColorant => b"gXYZ",
+            KnownTag::BlueColorant => b"bXYZ",
+            KnownTag::RedTrc => b"rTRC",
+            KnownTag::GreenTrc => b"gTRC",
+            KnownTag::BlueTrc => b"bTRC",
+            KnownTag::GrayTrc => b"kTRC",
+            KnownTag::AToB0 => b"A2B0",
+            KnownTag::AToB1 => b"A2B1",
+            KnownTag::AToB2 => b"A2B2",
+            KnownTag::BToA0 => b"B2A0",
+            KnownTag::BToA1 => b"B2A1",
+            KnownTag::BToA2 => b"B2A2",
+            KnownTag::Gamut => b"gamt",
+            KnownTag::ChromaticAdaptation => b"chad",
+            KnownTag::Luminance => b"lumi",
+            KnownTag::Chromaticity => b"chrm",
+            KnownTag::ViewingConditions => b"view",
+            KnownTag::Measurement => b"meas",
+            KnownTag::Technology => b"tech",
+            KnownTag::CharTarget => b"targ",
+            KnownTag::Cicp => b"cicp",
+        };
+        Signature(*code)
+    }
+
+    /// The catalogued tag for `signature`, if recognized.
+    #[must_use]
+    pub fn from_signature(signature: Signature) -> Option<KnownTag> {
+        KnownTag::ALL
+            .into_iter()
+            .find(|tag| tag.signature() == signature)
+    }
 }
 
 #[cfg(test)]
@@ -135,5 +248,13 @@ mod tests {
         let mut b = header_padding();
         b.extend_from_slice(&1u32.to_be_bytes()); // count 1, but no row follows
         assert!(parse_tag_table(&b).is_err());
+    }
+
+    #[test]
+    fn known_tag_signature_round_trip() {
+        for tag in KnownTag::ALL {
+            assert_eq!(KnownTag::from_signature(tag.signature()), Some(tag));
+        }
+        assert_eq!(KnownTag::from_signature(Signature(*b"zzzz")), None);
     }
 }
