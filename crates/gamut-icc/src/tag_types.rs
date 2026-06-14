@@ -4,6 +4,7 @@ use gamut_core::{Error, Result};
 
 use crate::bytes::ByteReader;
 use crate::curve::{Curve, ParametricCurve};
+use crate::mluc::{Mluc, TextDescription, decode_mluc, decode_text_description};
 use crate::primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, XyzNumber};
 
 /// The decoded data of a tag element.
@@ -29,6 +30,10 @@ pub enum TagData {
     Signature(Signature),
     /// `sf32` — an array of `s15Fixed16` numbers (`s15Fixed16ArrayType`, e.g. `chad`).
     S15Fixed16Array(Vec<S15Fixed16>),
+    /// `mluc` — language-tagged Unicode text (`multiLocalizedUnicodeType`), the v4 form of `desc`.
+    MultiLocalizedUnicode(Mluc),
+    /// `desc` — the legacy v2 description element (`textDescriptionType`).
+    TextDescription(TextDescription),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -56,6 +61,8 @@ pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
         b"dtim" => Ok(TagData::DateTime(decode_date_time(element)?)),
         b"sig " => Ok(TagData::Signature(decode_signature(element)?)),
         b"sf32" => decode_s15fixed16_array(element),
+        b"mluc" => Ok(TagData::MultiLocalizedUnicode(decode_mluc(element)?)),
+        b"desc" => Ok(TagData::TextDescription(decode_text_description(element)?)),
         _ => Ok(TagData::Raw {
             type_sig,
             bytes: element.to_vec(),

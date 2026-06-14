@@ -201,6 +201,46 @@ fn chad_decodes_as_s15fixed16_array() {
     assert_eq!(values.len(), 9);
 }
 
+/// The profile description decodes to the same text lcms reads back, in both the v4
+/// (`multiLocalizedUnicode`) and v2 (`textDescription`) representations.
+#[test]
+fn descriptions_match_lcms() {
+    // v4: 'desc' is a multiLocalizedUnicode element.
+    let profile = lcms2_oracle::srgb();
+    let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
+    let ours = match parsed
+        .get(Signature::from_u32(tag::PROFILE_DESCRIPTION))
+        .expect("desc present")
+    {
+        TagData::MultiLocalizedUnicode(mluc) => mluc
+            .text(b"en", b"US")
+            .or_else(|| mluc.first())
+            .expect("a description record")
+            .to_owned(),
+        other => panic!("expected mluc, got {other:?}"),
+    };
+    let theirs = profile
+        .read_mlu_ascii(tag::PROFILE_DESCRIPTION, b"en", b"US")
+        .expect("lcms reads desc");
+    assert_eq!(ours, theirs);
+
+    // v2: the same description is stored as a textDescription element.
+    let profile = lcms2_oracle::srgb();
+    profile.set_version(2.1);
+    let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
+    let ours = match parsed
+        .get(Signature::from_u32(tag::PROFILE_DESCRIPTION))
+        .expect("desc present")
+    {
+        TagData::TextDescription(desc) => desc.ascii.clone(),
+        other => panic!("expected textDescription, got {other:?}"),
+    };
+    let theirs = profile
+        .read_mlu_ascii(tag::PROFILE_DESCRIPTION, b"en", b"US")
+        .expect("lcms reads desc");
+    assert_eq!(ours, theirs);
+}
+
 /// Evaluates whichever tone-curve element a tag holds.
 fn eval_curve(data: &TagData, x: f64) -> f64 {
     match data {

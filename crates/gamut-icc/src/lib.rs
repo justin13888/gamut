@@ -18,6 +18,7 @@ mod bytes;
 
 pub mod curve;
 pub mod header;
+pub mod mluc;
 pub mod primitives;
 pub mod profile;
 pub mod reader;
@@ -29,6 +30,7 @@ pub use curve::{Curve, ParametricCurve};
 pub use header::{
     ColorSpace, DeviceClass, ProfileHeader, ProfileId, ProfileVersion, RenderingIntent,
 };
+pub use mluc::{Mluc, MlucRecord, TextDescription};
 pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzNumber};
 pub use profile::IccProfile;
 pub use reader::IccReader;
