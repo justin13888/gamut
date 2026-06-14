@@ -1,0 +1,23 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under `[workspace].exclude` in the
+# root manifest, pulled in only as a path `dev-dependency`). It statically links Little-CMS
+# (lcms2), built from the `third_party/lcms2` submodule with the `cc` crate. lcms2 is
+# dependency-free C99 (no zlib/jpeg), so the build is fully hermetic — no CMake, no system
+# libraries. Used by gamut-icc's differential cross-checks: it both *synthesizes* a corpus of valid
+# ICC profiles in memory and *inspects* the bytes gamut-icc re-serializes. See `build.rs`.
+[package]
+name = "lcms2-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: synthesizes and inspects ICC profiles with a vendored, statically-linked Little-CMS (lcms2) for gamut-icc's conformance cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares this crate as the sole provider of the native `lcms2` library.
+links = "lcms2"
+
+[lib]
+doctest = false
+
+[build-dependencies]
+cc = "1"
+bindgen = "0.72"

@@ -10,6 +10,7 @@ exclude = [
     "tooling/dav1d-oracle",
     "tooling/libavif-oracle",
     "tooling/libtiff-oracle",
+    "tooling/lcms2-oracle",
     "tooling/gamut-dng-oracle",
     "tooling/gamut-iptc-oracle",
     "tooling/zlib-oracle",
