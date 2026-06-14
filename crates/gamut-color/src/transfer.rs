@@ -16,12 +16,10 @@
 
 use crate::cicp::TransferCharacteristics;
 
-/// HDR reference white — the graphics / diffuse-white luminance (cd/m²), per ITU-R BT.2408. The
-/// BT.2020 PQ path tone-maps relative to this level. Named to match the same-value constant in the
-/// `gamut-tonemap` crate (this crate keeps an `f64` copy for its Tier-1 encoder-exact path).
-pub const HDR_REFERENCE_WHITE_NITS: f64 = 203.0;
-/// PQ peak luminance (cd/m²), per SMPTE ST 2084.
-pub const PQ_PEAK_NITS: f64 = 10_000.0;
+// The reference luminance levels are defined once in `gamut_core::luminance` (see
+// `references/color/README.md`) and re-exported here so existing `gamut_color::transfer::*` paths
+// keep resolving.
+pub use gamut_core::luminance::{HDR_REFERENCE_WHITE_NITS, PQ_PEAK_NITS};
 
 // --- sRGB (IEC 61966-2-1) --------------------------------------------------
 
@@ -110,12 +108,7 @@ pub fn pq_eotf(x: f64) -> f64 {
 }
 
 /// BT.2020 **encoder-exact** path: PQ inverse EOTF → nits → Reinhard tone map to
-/// SDR `[0, 1)` relative to the 203-nit reference white (`L / (1 + L)`).
-///
-/// The `L / (1 + L)` step is the basic Reinhard operator. For general-purpose tone-curve operators
-/// on linear light (Reinhard, extended Reinhard, …) see the separate `gamut-tonemap` crate; this is
-/// the `f64` curve baked into the BT.2020 transfer so a metrics tool can predict the encoder's exact
-/// output (`gamut-tonemap` is the `f32` general toolkit, this is the Tier-1 encoder-exact path).
+/// SDR `[0, 1)` relative to the BT.2408 HDR reference white (203 nits; `L / (1 + L)`).
 #[must_use]
 pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
     let l = pq_eotf(x) / HDR_REFERENCE_WHITE_NITS;

@@ -10,10 +10,11 @@
 //!
 //! - [`curve`] — the [`ToneCurve`] trait every operator implements, with an in-place slice helper
 //!   and a blanket impl so a plain `Fn(f32) -> f32` closure is itself a curve.
-//! - [`operators`] — the built-in curves: [`Reinhard`](operators::Reinhard) and
-//!   [`ReinhardExtended`](operators::ReinhardExtended), plus the [`Linear`](operators::Linear)
-//!   passthrough and [`Clamp`](operators::Clamp).
-//! - [`constants`] — reference white-luminance levels and per-operator parameter defaults.
+//! - [`operators`] — the built-in curves: [`Reinhard`] / [`ReinhardExtended`], the filmic [`Aces`]
+//!   and [`Hable`], [`Drago`] logarithmic mapping, [`Exposure`] pre-scaling, the [`Linear`]
+//!   passthrough, and [`Clamp`]. All are re-exported at the crate root.
+//! - [`constants`] — per-operator parameter defaults. (Absolute reference luminances in nits live
+//!   in [`gamut_core::luminance`].)
 //!
 //! # Inputs and the HDR-to-SDR pipeline
 //!
@@ -31,7 +32,7 @@
 //! # Example
 //!
 //! ```
-//! use gamut_tonemap::{ToneCurve, operators::ReinhardExtended};
+//! use gamut_tonemap::{ReinhardExtended, ToneCurve};
 //!
 //! let curve = ReinhardExtended::new(4.0)?; // linear white point = 4.0
 //! let display = curve.map(2.5);
@@ -51,3 +52,5 @@ pub mod operators;
 
 #[doc(inline)]
 pub use curve::ToneCurve;
+#[doc(inline)]
+pub use operators::{Aces, Clamp, Drago, Exposure, Hable, Linear, Reinhard, ReinhardExtended};

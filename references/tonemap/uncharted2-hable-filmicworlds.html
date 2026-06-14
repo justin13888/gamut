@@ -1,0 +1,362 @@
+<!doctype html>
+<!--[if lt IE 7]><html class="no-js lt-ie9 lt-ie8 lt-ie7" lang="en"> <![endif]-->
+<!--[if (IE 7)&!(IEMobile)]><html class="no-js lt-ie9 lt-ie8" lang="en"><![endif]-->
+<!--[if (IE 8)&!(IEMobile)]><html class="no-js lt-ie9" lang="en"><![endif]-->
+<!--[if gt IE 8]><!--> <html class="no-js" lang="en"><!--<![endif]-->
+<head>
+<meta charset="utf-8">
+<title>Filmic Tonemapping Operators &#8211; Filmic Worlds</title>
+<meta name="description" content="The most common questions that I get about my GDC talk have to do with the tonemapping operators.  In particular, I’ve always found that when I read through presentations for code snippets that I always miss something.  Those 2.2s can be tricky!  So this post is a quick reference for various operators that I talked about.  Also, I copied and pasted this code from my RenderMonkey scene so there may be typos.
+
+">
+<meta name="keywords" content="">
+
+
+<!-- Cross-Origin Isolation: enables SharedArrayBuffer + multi-threaded
+     WASM (incl. multi-threaded WebGPU compute pipelines). GitHub Pages
+     can't set COOP/COEP response headers, so this service worker
+     intercepts fetches and injects them. https://github.com/gzuidhof/coi-serviceworker -->
+<script src="/assets/js/coi-serviceworker.min.js"></script>
+
+<!-- Twitter Cards -->
+<meta name="twitter:title" content="Filmic Tonemapping Operators">
+<meta name="twitter:description" content="The most common questions that I get about my GDC talk have to do with the tonemapping operators.  In particular, I’ve always found that when I read through presentations for code snippets that I always miss something.  Those 2.2s can be tricky!  So this post is a quick reference for various operators that I talked about.  Also, I copied and pasted this code from my RenderMonkey scene so there may be typos.
+
+">
+<meta name="twitter:site" content="@@filmicworlds">
+<meta name="twitter:creator" content="@@filmicworlds">
+
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://filmicworlds.com/images/header_earth_crop.jpg">
+
+<!-- Open Graph -->
+<meta property="og:locale" content="en_US">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Filmic Tonemapping Operators">
+<meta property="og:description" content="The most common questions that I get about my GDC talk have to do with the tonemapping operators.  In particular, I’ve always found that when I read through presentations for code snippets that I always miss something.  Those 2.2s can be tricky!  So this post is a quick reference for various operators that I talked about.  Also, I copied and pasted this code from my RenderMonkey scene so there may be typos.
+
+">
+<meta property="og:url" content="https://filmicworlds.com/blog/filmic-tonemapping-operators/">
+<meta property="og:site_name" content="Filmic Worlds">
+
+
+
+
+
+<link rel="canonical" href="https://filmicworlds.com/blog/filmic-tonemapping-operators/">
+<link href="/feed.xml" type="application/atom+xml" rel="alternate" title="Filmic Worlds Feed">
+
+<!-- https://t.co/dKP3o1e -->
+<meta name="HandheldFriendly" content="True">
+<meta name="MobileOptimized" content="320">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<!-- For all browsers -->
+<link rel="stylesheet" href="/assets/css/main.css">
+<!-- Webfonts: Source Sans Pro, Source Code Pro, Volkhov via Google Fonts.
+     (Replaced use.edgefonts.net which Adobe sunset.) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Sans+Pro:ital,wght@0,200;0,300;0,400;0,600;0,700;0,900;1,200;1,300;1,400;1,600;1,700;1,900&family=Source+Code+Pro:wght@400;700&family=Volkhov&display=swap">
+
+<meta http-equiv="cleartype" content="on">
+
+<!-- HTML5 Shiv and Media Query Support -->
+<!--[if lt IE 9]>
+  <script src="/assets/js/vendor/html5shiv.min.js"></script>
+  <script src="/assets/js/vendor/respond.min.js"></script>
+<![endif]-->
+
+<!-- Modernizr -->
+<script src="/assets/js/vendor/modernizr-2.7.1.custom.min.js"></script>
+
+
+<!-- MathJax -->
+<script src="https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+
+
+<!-- Icons -->
+<!-- 16x16 -->
+<link rel="shortcut icon" href="/favicon.ico">
+<!-- 32x32 -->
+<link rel="shortcut icon" href="/favicon.png">
+<!-- 57x57 (precomposed) for iPhone 3GS, pre-2011 iPod Touch and older Android devices -->
+<link rel="apple-touch-icon-precomposed" href="/images/apple-touch-icon-precomposed.png">
+<!-- 72x72 (precomposed) for 1st generation iPad, iPad 2 and iPad mini -->
+<link rel="apple-touch-icon-precomposed" sizes="72x72" href="/images/apple-touch-icon-72x72-precomposed.png">
+<!-- 114x114 (precomposed) for iPhone 4, 4S, 5 and post-2011 iPod Touch -->
+<link rel="apple-touch-icon-precomposed" sizes="114x114" href="/images/apple-touch-icon-114x114-precomposed.png">
+<!-- 144x144 (precomposed) for iPad 3rd and 4th generation -->
+<link rel="apple-touch-icon-precomposed" sizes="144x144" href="/images/apple-touch-icon-144x144-precomposed.png">
+
+</head>
+
+<body id="post">
+
+<div class="navigation-wrapper">
+	<nav role="navigation" id="site-nav" class="animated drop">
+	    <ul>
+      
+		    
+		    <li><a href="/" >Home</a></li>
+		  
+		    
+		    <li><a href="/blog/" >Blog</a></li>
+		  
+		    
+		    <li><a href="/about/" >About</a></li>
+		  
+	    </ul>
+	</nav>
+</div><!-- /.navigation-wrapper -->
+
+<!--[if lt IE 9]><div class="upgrade"><strong><a href="http://whatbrowser.org/">Your browser is quite old!</strong> Why not upgrade to a different browser to better enjoy this site?</a></div><![endif]-->
+
+
+<header class="masthead">
+	
+		<div class="wrap">
+			<a href="/" class="site-logo" rel="home" title="Filmic Worlds"><img src="/images/site-logo.png" width="200" height="200" alt="Filmic Worlds logo" class="animated fadeInDown"></a>
+		</div>
+	
+</header><!-- /.masthead -->
+
+
+<div class="js-menu-screen menu-screen"></div>
+
+
+<div id="main" role="main">
+  <article class="hentry">
+
+    
+
+    
+      <img src="/images/header_earth_crop.jpg" class="entry-feature-image" alt="Filmic Tonemapping Operators"
+      >
+    
+    <div class="entry-wrapper">
+      <header class="entry-header">
+        <ul class="entry-tags">
+          
+        </ul>
+        
+          <h1 class="entry-title">Filmic Tonemapping Operators</h1>
+        
+      </header>
+      <footer class="entry-meta">
+        
+        
+          <img src="/images/bio-photo.jpg" class="bio-photo" alt="John Hable bio photo"></a>
+        
+        <span class="author vcard">By <span class="fn">John Hable</span></span>
+
+        
+        <span class="author vcard"><a href="http://www.twitter.com/@filmicworlds">@filmicworlds</a></span>
+        
+
+
+        <span class="entry-date date published"><time datetime="2010-05-05T00:04:00+00:00"><i class="fa fa-calendar-o"></i> May 05, 2010</time></span>
+        
+        
+        
+      </footer>
+      <div class="entry-content">
+        <p>The most common questions that I get about my GDC talk have to do with the tonemapping operators.  In particular, I’ve always found that when I read through presentations for code snippets that I always miss something.  Those 2.2s can be tricky!  So this post is a quick reference for various operators that I talked about.  Also, I copied and pasted this code from my RenderMonkey scene so there may be typos.</p>
+
+<p><br /></p>
+<div align="center">
+<img src="/old_fg/Images/FilmicTonemapping/Small/Habib-HP.jpg" />
+</div>
+
+<p>All of these examples use <a href="/old_fg/Downloads/FilmicTonemapping/Habib_House_Med.dds">this HDR image</a> of Habib’s killer condo.  Also, click any image for the high-res version.</p>
+
+<p>First off, there is good old linear.  All it does is read the linear data, do an exposure adjustment, and adjust for the monitor’s gamma of 2.2.</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">float4</span> <span class="nf">ps_main</span><span class="p">(</span> <span class="n">float2</span> <span class="n">texCoord</span>  <span class="o">:</span> <span class="n">TEXCOORD0</span> <span class="p">)</span> <span class="o">:</span> <span class="n">COLOR</span>
+<span class="p">{</span>
+   <span class="n">float3</span> <span class="n">texColor</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">Texture0</span><span class="p">,</span> <span class="n">texCoord</span> <span class="p">);</span>
+   <span class="n">texColor</span> <span class="o">*=</span> <span class="mi">16</span><span class="p">;</span>  <span class="c1">// Hardcoded Exposure Adjustment</span>
+   <span class="n">float3</span> <span class="n">retColor</span> <span class="o">=</span> <span class="n">pow</span><span class="p">(</span><span class="n">texColor</span><span class="p">,</span><span class="mi">1</span><span class="o">/</span><span class="mf">2.2</span><span class="p">);</span>
+   <span class="k">return</span> <span class="nf">float4</span><span class="p">(</span><span class="n">retColor</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<p>Pretty simple.  It looks like this.  Click for high-res.</p>
+
+<!--more-->
+
+<div align="center">
+<a href="/old_fg/Images/FilmicTonemapping/Large/Habib-Linear.jpg"><img src="/old_fg/Images/FilmicTonemapping/Small/Habib-Linear.jpg" /></a>
+</div>
+
+<p>Don’t forget the pow(1/2.2).  If you forget that step, it looks like this:</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">float4</span> <span class="nf">ps_main</span><span class="p">(</span> <span class="n">float2</span> <span class="n">texCoord</span>  <span class="o">:</span> <span class="n">TEXCOORD0</span> <span class="p">)</span> <span class="o">:</span> <span class="n">COLOR</span>
+<span class="p">{</span>
+   <span class="n">float3</span> <span class="n">texColor</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">Texture0</span><span class="p">,</span> <span class="n">texCoord</span> <span class="p">);</span>
+   <span class="n">texColor</span> <span class="o">*=</span> <span class="mi">16</span><span class="p">;</span>  <span class="c1">// Hardcoded Exposure Adjustment</span>
+   <span class="n">float3</span> <span class="n">retColor</span> <span class="o">=</span> <span class="n">texColor</span><span class="p">;</span>
+   <span class="k">return</span> <span class="nf">float4</span><span class="p">(</span><span class="n">retColor</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<div align="center">
+<a href="/old_fg/Images/FilmicTonemapping/Large/Habib-Bad-Gamma.jpg"><img src="/old_fg/Images/FilmicTonemapping/Small/Habib-Bad-Gamma.jpg" /></a>
+</div>
+
+<p>Next up is Reinhard.  There are many variations, bu I’ll do the simplest which is x/(1+x).  A common variation is to only do it on luminance.  Don’t forget the pow(1/2.2) at the end!</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">float4</span> <span class="nf">ps_main</span><span class="p">(</span> <span class="n">float2</span> <span class="n">texCoord</span>  <span class="o">:</span> <span class="n">TEXCOORD0</span> <span class="p">)</span> <span class="o">:</span> <span class="n">COLOR</span>
+<span class="p">{</span>
+   <span class="n">float3</span> <span class="n">texColor</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">Texture0</span><span class="p">,</span> <span class="n">texCoord</span> <span class="p">);</span>
+   <span class="n">texColor</span> <span class="o">*=</span> <span class="mi">16</span><span class="p">;</span>  <span class="c1">// Hardcoded Exposure Adjustment</span>
+   <span class="n">texColor</span> <span class="o">=</span> <span class="n">texColor</span><span class="o">/</span><span class="p">(</span><span class="mi">1</span><span class="o">+</span><span class="n">texColor</span><span class="p">);</span>
+   <span class="n">float3</span> <span class="n">retColor</span> <span class="o">=</span> <span class="n">pow</span><span class="p">(</span><span class="n">texColor</span><span class="p">,</span><span class="mi">1</span><span class="o">/</span><span class="mf">2.2</span><span class="p">);</span>
+   <span class="k">return</span> <span class="nf">float4</span><span class="p">(</span><span class="n">retColor</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<div align="center">
+<a href="/old_fg/Images/FilmicTonemapping/Large/Habib-Reinhard.jpg"><img src="/old_fg/Images/FilmicTonemapping/Small/Habib-Reinhard.jpg" /></a>
+</div>
+
+<p>Here it is with Haarm-Peter Duiker’s curve.  This version is very similar to the Cineon node in Digital Fusion.  The texture FilmLut refers to <a href="/old_fg/Downloads/FilmicTonemapping/FilmLut.tga">this TGA file</a>.  No pow(1/2.2) necessary.</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">float4</span> <span class="nf">ps_main</span><span class="p">(</span> <span class="n">float2</span> <span class="n">texCoord</span>  <span class="o">:</span> <span class="n">TEXCOORD0</span> <span class="p">)</span> <span class="o">:</span> <span class="n">COLOR</span>
+<span class="p">{</span>
+   <span class="n">float3</span> <span class="n">texColor</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">Texture0</span><span class="p">,</span> <span class="n">texCoord</span> <span class="p">);</span>
+   <span class="n">texColor</span> <span class="o">*=</span> <span class="mi">16</span><span class="p">;</span>  <span class="c1">// Hardcoded Exposure Adjustment</span>
+
+   <span class="n">float3</span> <span class="n">ld</span> <span class="o">=</span> <span class="mf">0.002</span><span class="p">;</span>
+   <span class="kt">float</span> <span class="n">linReference</span> <span class="o">=</span> <span class="mf">0.18</span><span class="p">;</span>
+   <span class="kt">float</span> <span class="n">logReference</span> <span class="o">=</span> <span class="mi">444</span><span class="p">;</span>
+   <span class="kt">float</span> <span class="n">logGamma</span> <span class="o">=</span> <span class="mf">0.45</span><span class="p">;</span>
+      
+   <span class="n">float3</span> <span class="n">LogColor</span><span class="p">;</span>
+   <span class="n">LogColor</span><span class="p">.</span><span class="n">rgb</span> <span class="o">=</span> <span class="p">(</span><span class="n">log10</span><span class="p">(</span><span class="mf">0.4</span><span class="o">*</span><span class="n">texColor</span><span class="p">.</span><span class="n">rgb</span><span class="o">/</span><span class="n">linReference</span><span class="p">)</span><span class="o">/</span><span class="n">ld</span><span class="o">*</span><span class="n">logGamma</span> <span class="o">+</span> <span class="n">logReference</span><span class="p">)</span><span class="o">/</span><span class="mf">1023.</span><span class="n">f</span><span class="p">;</span>
+   <span class="n">LogColor</span><span class="p">.</span><span class="n">rgb</span> <span class="o">=</span> <span class="n">saturate</span><span class="p">(</span><span class="n">LogColor</span><span class="p">.</span><span class="n">rgb</span><span class="p">);</span>
+      
+   <span class="kt">float</span> <span class="n">FilmLutWidth</span> <span class="o">=</span> <span class="mi">256</span><span class="p">;</span>
+   <span class="kt">float</span> <span class="n">Padding</span> <span class="o">=</span> <span class="mf">.5</span><span class="o">/</span><span class="n">FilmLutWidth</span><span class="p">;</span>
+      
+   <span class="c1">//  apply response lookup and color grading for target display</span>
+   <span class="n">float3</span> <span class="n">retColor</span><span class="p">;</span>
+   <span class="n">retColor</span><span class="p">.</span><span class="n">r</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">FilmLut</span><span class="p">,</span> <span class="n">float2</span><span class="p">(</span> <span class="n">lerp</span><span class="p">(</span><span class="n">Padding</span><span class="p">,</span><span class="mi">1</span><span class="o">-</span><span class="n">Padding</span><span class="p">,</span><span class="n">LogColor</span><span class="p">.</span><span class="n">r</span><span class="p">),</span> <span class="mf">.5</span><span class="p">)).</span><span class="n">r</span><span class="p">;</span>
+   <span class="n">retColor</span><span class="p">.</span><span class="n">g</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">FilmLut</span><span class="p">,</span> <span class="n">float2</span><span class="p">(</span> <span class="n">lerp</span><span class="p">(</span><span class="n">Padding</span><span class="p">,</span><span class="mi">1</span><span class="o">-</span><span class="n">Padding</span><span class="p">,</span><span class="n">LogColor</span><span class="p">.</span><span class="n">g</span><span class="p">),</span> <span class="mf">.5</span><span class="p">)).</span><span class="n">r</span><span class="p">;</span>
+   <span class="n">retColor</span><span class="p">.</span><span class="n">b</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">FilmLut</span><span class="p">,</span> <span class="n">float2</span><span class="p">(</span> <span class="n">lerp</span><span class="p">(</span><span class="n">Padding</span><span class="p">,</span><span class="mi">1</span><span class="o">-</span><span class="n">Padding</span><span class="p">,</span><span class="n">LogColor</span><span class="p">.</span><span class="n">b</span><span class="p">),</span> <span class="mf">.5</span><span class="p">)).</span><span class="n">r</span><span class="p">;</span>
+
+   <span class="k">return</span> <span class="nf">float4</span><span class="p">(</span><span class="n">retColor</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<div align="center">
+<a href="/old_fg/Images/FilmicTonemapping/Large/Habib-HP.jpg"><img src="/old_fg/Images/FilmicTonemapping/Small/Habib-HP.jpg" /></a>
+</div>
+
+<p>Next up is the optimized formula by Jim Hejl and Richard Burgess-Dawson.  I completely forgot about Richard in the GDC talk, but he shares the credit with Jim.  Sorry Richard!!  Note that you don’t need the pow(1/2.2) for this one either.</p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">float4</span> <span class="nf">ps_main</span><span class="p">(</span> <span class="n">float2</span> <span class="n">texCoord</span>  <span class="o">:</span> <span class="n">TEXCOORD0</span> <span class="p">)</span> <span class="o">:</span> <span class="n">COLOR</span>
+<span class="p">{</span>
+   <span class="n">float3</span> <span class="n">texColor</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">Texture0</span><span class="p">,</span> <span class="n">texCoord</span> <span class="p">);</span>
+   <span class="n">texColor</span> <span class="o">*=</span> <span class="mi">16</span><span class="p">;</span>  <span class="c1">// Hardcoded Exposure Adjustment</span>
+   <span class="n">float3</span> <span class="n">x</span> <span class="o">=</span> <span class="n">max</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span><span class="n">texColor</span><span class="o">-</span><span class="mf">0.004</span><span class="p">);</span>
+   <span class="n">float3</span> <span class="n">retColor</span> <span class="o">=</span> <span class="p">(</span><span class="n">x</span><span class="o">*</span><span class="p">(</span><span class="mf">6.2</span><span class="o">*</span><span class="n">x</span><span class="o">+</span><span class="mf">.5</span><span class="p">))</span><span class="o">/</span><span class="p">(</span><span class="n">x</span><span class="o">*</span><span class="p">(</span><span class="mf">6.2</span><span class="o">*</span><span class="n">x</span><span class="o">+</span><span class="mf">1.7</span><span class="p">)</span><span class="o">+</span><span class="mf">0.06</span><span class="p">);</span>
+   <span class="k">return</span> <span class="nf">float4</span><span class="p">(</span><span class="n">retColor</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<div align="center">
+<a href="/old_fg/Images/FilmicTonemapping/Large/Habib-Jim-Richard.jpg"><img src="/old_fg/Images/FilmicTonemapping/Small/Habib-Jim-Richard.jpg" /></a>
+</div>
+
+<p>Finally for the Uncharted 2 operator made by yours-truly.  For this image I changed the defaults slightly for A and B.</p>
+
+<p><b>Edit: Oops, in the previous version, I had the exposure bias outside the tonemapping function.  Now it is fixed, where it is inside the tonemapping function.</b></p>
+
+<div class="language-cpp highlighter-rouge"><div class="highlight"><pre class="highlight"><code>
+<span class="kt">float</span> <span class="n">A</span> <span class="o">=</span> <span class="mf">0.15</span><span class="p">;</span>
+<span class="kt">float</span> <span class="n">B</span> <span class="o">=</span> <span class="mf">0.50</span><span class="p">;</span>
+<span class="kt">float</span> <span class="n">C</span> <span class="o">=</span> <span class="mf">0.10</span><span class="p">;</span>
+<span class="kt">float</span> <span class="n">D</span> <span class="o">=</span> <span class="mf">0.20</span><span class="p">;</span>
+<span class="kt">float</span> <span class="n">E</span> <span class="o">=</span> <span class="mf">0.02</span><span class="p">;</span>
+<span class="kt">float</span> <span class="n">F</span> <span class="o">=</span> <span class="mf">0.30</span><span class="p">;</span>
+<span class="kt">float</span> <span class="n">W</span> <span class="o">=</span> <span class="mf">11.2</span><span class="p">;</span>
+
+<span class="n">float3</span> <span class="nf">Uncharted2Tonemap</span><span class="p">(</span><span class="n">float3</span> <span class="n">x</span><span class="p">)</span>
+<span class="p">{</span>
+   <span class="k">return</span> <span class="p">((</span><span class="n">x</span><span class="o">*</span><span class="p">(</span><span class="n">A</span><span class="o">*</span><span class="n">x</span><span class="o">+</span><span class="n">C</span><span class="o">*</span><span class="n">B</span><span class="p">)</span><span class="o">+</span><span class="n">D</span><span class="o">*</span><span class="n">E</span><span class="p">)</span><span class="o">/</span><span class="p">(</span><span class="n">x</span><span class="o">*</span><span class="p">(</span><span class="n">A</span><span class="o">*</span><span class="n">x</span><span class="o">+</span><span class="n">B</span><span class="p">)</span><span class="o">+</span><span class="n">D</span><span class="o">*</span><span class="n">F</span><span class="p">))</span><span class="o">-</span><span class="n">E</span><span class="o">/</span><span class="n">F</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">float4</span> <span class="n">ps_main</span><span class="p">(</span> <span class="n">float2</span> <span class="n">texCoord</span>  <span class="o">:</span> <span class="n">TEXCOORD0</span> <span class="p">)</span> <span class="o">:</span> <span class="n">COLOR</span>
+<span class="p">{</span>
+   <span class="n">float3</span> <span class="n">texColor</span> <span class="o">=</span> <span class="n">tex2D</span><span class="p">(</span><span class="n">Texture0</span><span class="p">,</span> <span class="n">texCoord</span> <span class="p">);</span>
+   <span class="n">texColor</span> <span class="o">*=</span> <span class="mi">16</span><span class="p">;</span>  <span class="c1">// Hardcoded Exposure Adjustment</span>
+
+   <span class="kt">float</span> <span class="n">ExposureBias</span> <span class="o">=</span> <span class="mf">2.0</span><span class="n">f</span><span class="p">;</span>
+   <span class="n">float3</span> <span class="n">curr</span> <span class="o">=</span> <span class="n">Uncharted2Tonemap</span><span class="p">(</span><span class="n">ExposureBias</span><span class="o">*</span><span class="n">texColor</span><span class="p">);</span>
+
+   <span class="n">float3</span> <span class="n">whiteScale</span> <span class="o">=</span> <span class="mf">1.0</span><span class="n">f</span><span class="o">/</span><span class="n">Uncharted2Tonemap</span><span class="p">(</span><span class="n">W</span><span class="p">);</span>
+   <span class="n">float3</span> <span class="n">color</span> <span class="o">=</span> <span class="n">curr</span><span class="o">*</span><span class="n">whiteScale</span><span class="p">;</span>
+      
+   <span class="n">float3</span> <span class="n">retColor</span> <span class="o">=</span> <span class="n">pow</span><span class="p">(</span><span class="n">color</span><span class="p">,</span><span class="mi">1</span><span class="o">/</span><span class="mf">2.2</span><span class="p">);</span>
+   <span class="k">return</span> <span class="n">float4</span><span class="p">(</span><span class="n">retColor</span><span class="p">,</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div></div>
+
+<div align="center">
+<a href="/old_fg/Images/FilmicTonemapping/Large/Habib-Uncharted2.jpg"><img src="/old_fg/Images/FilmicTonemapping/Small/Habib-Uncharted2.jpg" /></a>
+</div>
+
+<p>Hopefully, that should clear up most of the ambiguity about these operators.</p>
+
+
+      </div><!-- /.entry-content -->
+    </div><!-- /.entry-wrapper -->
+    <nav class="pagination" role="navigation">
+      
+        <a href="/blog/what-is-gamma/" class="btn" title="What is Gamma?">Previous</a>
+      
+      
+        <a href="/blog/why-reinhard-desaturates-your-blacks/" class="btn" title="Why Reinhard Desaturates Your Blacks">Next</a>
+      
+    </nav><!-- /.pagination -->
+  </article>
+</div><!-- /#main -->
+
+<div class="footer-wrapper">
+  <footer role="contentinfo" class="entry-wrapper">
+    
+
+<span>&copy; 2026 Visible Threshold, LLC<br> <img src="/images/contact_email_footer.png"> </span>
+<div class="social-icons">
+	<a href="https://twitter.com/@filmicworlds" title="John Hable on Twitter" target="_blank"><i class="fa fa-twitter-square fa-2x"></i></a>
+	
+	
+	
+	
+	
+	
+	
+	
+  
+	
+  <a href="/feed.xml" title="Atom/RSS feed"><i class="fa fa-rss-square fa-2x"></i></a>
+</div><!-- /.social-icons -->
+
+  </footer>
+</div><!-- /.footer-wrapper -->
+
+<script type="text/javascript">
+  var BASE_URL = 'https://filmicworlds.com';
+</script>
+
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
+<script>window.jQuery || document.write('<script src="/assets/js/vendor/jquery-1.9.1.min.js"><\/script>')</script>
+<script src="/assets/js/scripts.min.js"></script>
+
+
+
+
+</body>
+</html>

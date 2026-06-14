@@ -9,7 +9,8 @@ Part of the [gamut](../../README.md) workspace, this crate exists to provide ton
 
 - **Memory-safe.** `#![forbid(unsafe_code)]`; pure scalar `f32` math, no I/O.
 - **Clean-slate and self-contained.** Built-in operators are implemented directly from their
-  published definitions (Reinhard et al.), not wrapped from a C library.
+  published definitions (Reinhard et al.; ACES/Narkowicz; Hable; Drago et al.), transcribed in
+  [`references/tonemap`](../../references/tonemap/README.md), not wrapped from a C library.
 - **Layered on shared crates.** Built on [`gamut-core`](../gamut-core) and designed to slot between
   [`gamut-color`](../gamut-color)'s transfer-function handling and an SDR encoder.
 
@@ -34,11 +35,14 @@ Keeping the boundary here means a curve is just `f32 -> f32` and reusable outsid
 ## Usage
 
 ```rust
-use gamut_tonemap::{ToneCurve, operators::ReinhardExtended};
+use gamut_tonemap::{Aces, ReinhardExtended, ToneCurve};
 
 // Built-in operator with a white point (the linear value that maps to display white).
 let curve = ReinhardExtended::new(4.0)?;
 let display = curve.map(2.5);
+
+// Filmic operators are parameterless:
+let filmic = Aces.map(2.5);
 
 // Any closure is also a curve, applied in place over a slice.
 let gamma = |x: f32| x.powf(1.0 / 2.2);
@@ -48,15 +52,16 @@ gamma.map_slice(&mut linear);
 
 ## Status
 
-Available (0.1.1): the `ToneCurve` trait, the `Reinhard` / `ReinhardExtended` operators, the
-`Linear` passthrough and `Clamp`, plus reference constants. Reachable through the umbrella crate's
-`tonemap` feature.
+The `ToneCurve` trait (with a blanket impl for any `Fn(f32) -> f32`) and eight built-in operators —
+`Linear`, `Clamp`, `Exposure`, `Reinhard`, `ReinhardExtended`, `Aces`, `Hable`, and `Drago` — all
+re-exported at the crate root. Each is implemented clean-slate from the primary source documented in
+[`references/tonemap`](../../references/tonemap/README.md). Reachable through the umbrella crate's
+`tonemap` feature. See [STATUS.md](STATUS.md) for the full component map.
 
-## Roadmap
+## Deferred
 
-- Hable / Uncharted 2 filmic and an ACES fitted curve.
-- Drago logarithmic mapping and exposure pre-scaling.
-- Optional helpers that pair curves with `gamut-color` transfer functions for a turnkey HDR→SDR path.
+Planned but not yet implemented: a turnkey HDR→SDR helper pairing curves with `gamut-color` transfer
+functions, and curve-composition combinators. See [STATUS.md](STATUS.md).
 
 ## License
 

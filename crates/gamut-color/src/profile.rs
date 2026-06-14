@@ -17,7 +17,20 @@
 
 use crate::cicp::{ColourPrimaries, TransferCharacteristics};
 use crate::oklab::{Gamut, linear_rgb_to_oklab};
-use crate::transfer::{adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf};
+use crate::transfer::{
+    HDR_REFERENCE_WHITE_NITS, adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf,
+};
+
+/// A tone-mapping operator carried by a [`SourceProfile`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToneMap {
+    /// Reinhard `L / (1 + L)`, with `L` relative to `reference_white_nits`.
+    Reinhard {
+        /// Reference white luminance (cd/m²) the curve normalizes against — the BT.2408 HDR
+        /// reference white (203) for the BT.2020 PQ path.
+        reference_white_nits: f64,
+    },
+}
 
 /// The encoder-exact per-channel transfer a [`SourceProfile`] linearizes with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +65,17 @@ impl SourceTransfer {
             SourceTransfer::Srgb => Some(TransferCharacteristics::Srgb),
             SourceTransfer::Bt2020Pq => Some(TransferCharacteristics::Pq),
             SourceTransfer::AdobeRgb | SourceTransfer::ProPhotoRgb => None,
+        }
+    }
+
+    /// The tone map folded into this transfer, if any (only the PQ path).
+    #[must_use]
+    pub fn tonemap(self) -> Option<ToneMap> {
+        match self {
+            SourceTransfer::Bt2020Pq => Some(ToneMap::Reinhard {
+                reference_white_nits: HDR_REFERENCE_WHITE_NITS,
+            }),
+            _ => None,
         }
     }
 }

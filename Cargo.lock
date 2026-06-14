@@ -748,6 +748,7 @@ name = "gamut-tonemap"
 version = "0.1.2"
 dependencies = [
  "divan",
+ "gamut-color",
  "gamut-core",
 ]
 
