@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod image;
+pub mod luminance;
 mod pixel;
 
 pub use image::{ImageBuf, ImageRef};
