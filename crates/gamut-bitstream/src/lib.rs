@@ -9,14 +9,21 @@
 //! - [`SymbolEncoder`] — the AV1 multi-symbol arithmetic (range) coder, derived by inverting the
 //!   symbol *decoder* of AV1 §8.2. It is the entropy back-end for coded tile data.
 //!
+//! It also carries codec-agnostic bit-packing primitives:
+//!
+//! - [`pack_msb_rows`] / [`unpack_msb_rows`] — MSB-first packing of fixed-width integer samples into
+//!   byte-aligned rows, the sub-byte sample layout shared by the TIFF-family raw formats.
+//!
 //! The forward-looking ANS / Huffman coders named in the workspace plan (for AV2 / JPEG XL) are
 //! not implemented yet; they will join this crate behind their own modules.
 #![forbid(unsafe_code)]
 
 mod bitwriter;
 mod leb128;
+mod samplepack;
 mod symbol;
 
 pub use bitwriter::BitWriter;
 pub use leb128::{leb128_len, write_leb128};
+pub use samplepack::{pack_msb_rows, row_bytes, unpack_msb_rows};
 pub use symbol::SymbolEncoder;

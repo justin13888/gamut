@@ -1,0 +1,29 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under `[workspace].exclude` in the
+# root manifest, pulled in only as a path `dev-dependency`). It compiles the Adobe DNG SDK 1.7.1
+# headless from the ZIP at `references/dng/` (via the `cc` crate) and links it behind a small
+# `extern "C"` shim, so gamut-dng's conformance tests can validate their output against the
+# authoritative reference implementation.
+#
+# XMP is disabled (no Linux XMP toolkit ships), zlib is linked from the system, and the libjxl C
+# API — which DNG 1.7.1 wires in unconditionally — is satisfied by link-only stubs (the baseline
+# oracle never exercises JPEG XL DNGs). See `build.rs` for the full recipe.
+[package]
+name = "gamut-dng-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: validates DNG files with the headless-built Adobe DNG SDK 1.7.1 for gamut-dng's conformance cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares this crate as the sole provider of the native `dng_oracle` library.
+links = "dng_oracle"
+
+[lib]
+doctest = false
+
+[dependencies]
+tempfile = "3"
+
+[build-dependencies]
+cc = "1"
+zip = "2"
