@@ -282,7 +282,6 @@ fn decode_image_data(
 
 /// Converts a decoded ARGB buffer to interleaved 8-bit RGB, appending to `out`.
 pub fn argb_to_rgb8(argb: &[u32], out: &mut Vec<u8>) {
-    out.reserve(argb.len() * 3);
     for &p in argb {
         out.push((p >> 16) as u8);
         out.push((p >> 8) as u8);
@@ -293,7 +292,6 @@ pub fn argb_to_rgb8(argb: &[u32], out: &mut Vec<u8>) {
 /// Converts a decoded `0xAARRGGBB` ARGB buffer to interleaved 8-bit RGBA (keeping alpha), appending
 /// to `out`.
 pub fn argb_to_rgba8(argb: &[u32], out: &mut Vec<u8>) {
-    out.reserve(argb.len() * 4);
     for &p in argb {
         out.push((p >> 16) as u8); // R
         out.push((p >> 8) as u8); // G
