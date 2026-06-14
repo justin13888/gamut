@@ -343,6 +343,17 @@ fn v4_devicelink_decodes_as_lut_a_to_b() {
     }
 }
 
+/// The profile ID gamut-icc computes (§7.2.18 MD5) matches the one the reference CMM computes over
+/// the same serialized bytes.
+#[test]
+fn profile_id_matches_lcms() {
+    let profile = lcms2_oracle::srgb();
+    let id_lcms = profile.compute_md5_id(); // lcms computes and stores the ID
+    let bytes = profile.to_bytes(); // serialization now carries that ID in the header
+    let id_ours = IccProfile::compute_profile_id(&bytes);
+    assert_eq!(id_ours.0, id_lcms);
+}
+
 /// Evaluates whichever tone-curve element a tag holds.
 fn eval_curve(data: &TagData, x: f64) -> f64 {
     match data {
