@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 pub mod header;
+pub mod primitives;
 pub mod profile;
 pub mod reader;
 pub mod tag_types;
@@ -22,6 +23,7 @@ pub mod tags;
 pub mod writer;
 
 pub use header::{ColorSpace, DeviceClass, ProfileHeader, ProfileVersion, RenderingIntent};
+pub use primitives::{DateTime, S15Fixed16, U8Fixed8, U16Fixed16, XyzNumber};
 pub use profile::IccProfile;
 pub use reader::IccReader;
 pub use tag_types::TagType;
