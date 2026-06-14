@@ -274,4 +274,17 @@ mod tests {
             Some(ProfileEmbedPolicy::NoRestrictions)
         );
     }
+
+    #[test]
+    fn getters_return_the_stored_values() {
+        let m = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        // Distinctive, non-`[1, 1, 1]` values so a getter that returned a constant is caught.
+        let base =
+            CameraProfile::new("Cam", m, CalibrationIlluminant::D65, [0.5, 1.0, 0.6]).unwrap();
+        assert_eq!(base.as_shot_neutral(), &[0.5, 1.0, 0.6]);
+        assert_eq!(base.analog_balance(), None);
+
+        let balanced = base.with_analog_balance([0.4, 0.5, 0.6]);
+        assert_eq!(balanced.analog_balance(), Some(&[0.4, 0.5, 0.6]));
+    }
 }

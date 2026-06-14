@@ -177,4 +177,48 @@ mod tests {
         // R = avg(100,200,0,0)=75, G = avg(0,0,60,100)=40, B = 0.
         assert_eq!(rgb, vec![75, 40, 0]);
     }
+
+    /// Each 2x2 tile holds a distinct flat value, so the preview pixel for tile `(py, px)` reads that
+    /// value — pinning the `sy = py*rr + ty` / `sx = px*rc + tx` source indexing (white level 255
+    /// makes `scale8` the identity here).
+    #[test]
+    fn cfa_preview_indexes_each_tile_distinctly() {
+        let pattern = vec![
+            cfa_color::RED,
+            cfa_color::GREEN,
+            cfa_color::GREEN,
+            cfa_color::BLUE,
+        ];
+        #[rustfmt::skip]
+        let samples = vec![
+            10, 10, 20, 20,
+            10, 10, 20, 20,
+            30, 30, 40, 40,
+            30, 30, 40, 40,
+        ];
+        let raw =
+            RawImage::new_cfa(Dimensions::new(4, 4).unwrap(), 8, (2, 2), pattern, samples).unwrap();
+        let (dims, rgb) = raw_preview(&raw);
+        assert_eq!((dims.width, dims.height), (2, 2));
+        // Tiles map to [v, v, v]; distinct values catch any misindexing of rows/cols.
+        assert_eq!(rgb, vec![10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40]);
+    }
+
+    /// A single-plane linear image with one distinct value per 2x2 block pins both the block indexing
+    /// (`sy = py*2 + dy`, `sx = px*2 + dx`), the `width/2`/`height/2` downscale, and the
+    /// `chan = [0, 1.min(p-1), 2.min(p-1)]` plane clamp (a wrong clamp reads a non-existent plane).
+    #[test]
+    fn linear_preview_single_plane_indexes_each_block() {
+        #[rustfmt::skip]
+        let samples = vec![
+            10, 10, 20, 20,
+            10, 10, 20, 20,
+            30, 30, 40, 40,
+            30, 30, 40, 40,
+        ];
+        let raw = RawImage::new_linear_raw(Dimensions::new(4, 4).unwrap(), 8, 1, samples).unwrap();
+        let (dims, rgb) = raw_preview(&raw);
+        assert_eq!((dims.width, dims.height), (2, 2));
+        assert_eq!(rgb, vec![10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40]);
+    }
 }

@@ -384,3 +384,64 @@ fn illuminant(ifd: &Ifd, tag: u16) -> Option<CalibrationIlluminant> {
         .and_then(|c| u16::try_from(c).ok())
         .and_then(CalibrationIlluminant::from_code)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_raw_ifd_only_for_raw_photometry() {
+        let mut ifd = Ifd::new();
+        // An RGB preview IFD (PhotometricInterpretation = 2) is not a raw image.
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![2]));
+        assert!(!is_raw_ifd(&ifd));
+        // A CFA IFD (32803) is.
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+        assert!(is_raw_ifd(&ifd));
+        // A missing tag is not raw either.
+        assert!(!is_raw_ifd(&Ifd::new()));
+    }
+
+    #[test]
+    fn bytes_value_extracts_and_narrows() {
+        assert_eq!(
+            bytes_value(Some(&Value::Byte(vec![1, 2, 3]))),
+            Some(vec![1, 2, 3])
+        );
+        // A SHORT array is narrowed to bytes (used for SHORT-typed CFAPattern variants).
+        assert_eq!(
+            bytes_value(Some(&Value::Short(vec![0x12, 0x34]))),
+            Some(vec![0x12, 0x34])
+        );
+        assert_eq!(bytes_value(Some(&Value::Long(vec![1]))), None);
+        assert_eq!(bytes_value(None), None);
+    }
+
+    #[test]
+    fn decode_raw_image_rejects_lossless_jpeg_geometry_mismatch() {
+        // A 4x2, single-component lossless-JPEG strip...
+        let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
+        let jpeg = lossless_jpeg::encode(&samples, 4, 2, 1, 12);
+        // ...described by an IFD that claims a 2x2 image. The width disagrees while the component
+        // count matches, so only the `||` (not `&&`) reports the mismatch before the later
+        // sample-count check fires with a different error.
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![12]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![7])); // lossless JPEG
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803])); // CFA
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(
+            tags::STRIP_BYTE_COUNTS,
+            Value::Long(vec![jpeg.len() as u32]),
+        );
+
+        let err = decode_raw_image(&ifd, &jpeg, ByteOrder::LittleEndian).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("geometry")),
+            "expected a geometry-mismatch error, got {err:?}"
+        );
+    }
+}

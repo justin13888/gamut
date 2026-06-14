@@ -598,4 +598,42 @@ mod tests {
         }
         assert_eq!(PreviewColorSpace::from_code(5), None);
     }
+
+    #[test]
+    fn calibration_illuminant_round_trips_every_variant() {
+        for illum in [
+            CalibrationIlluminant::Unknown,
+            CalibrationIlluminant::Daylight,
+            CalibrationIlluminant::Fluorescent,
+            CalibrationIlluminant::Tungsten,
+            CalibrationIlluminant::Flash,
+            CalibrationIlluminant::FineWeather,
+            CalibrationIlluminant::CloudyWeather,
+            CalibrationIlluminant::Shade,
+            CalibrationIlluminant::DaylightFluorescent,
+            CalibrationIlluminant::DayWhiteFluorescent,
+            CalibrationIlluminant::CoolWhiteFluorescent,
+            CalibrationIlluminant::WhiteFluorescent,
+            CalibrationIlluminant::WarmWhiteFluorescent,
+            CalibrationIlluminant::StandardLightA,
+            CalibrationIlluminant::StandardLightB,
+            CalibrationIlluminant::StandardLightC,
+            CalibrationIlluminant::D55,
+            CalibrationIlluminant::D65,
+            CalibrationIlluminant::D75,
+            CalibrationIlluminant::D50,
+            CalibrationIlluminant::IsoStudioTungsten,
+            CalibrationIlluminant::Other,
+        ] {
+            assert_eq!(
+                CalibrationIlluminant::from_code(illum.code()),
+                Some(illum),
+                "{illum:?} (code {})",
+                illum.code()
+            );
+        }
+        // Codes between the named ones (e.g. 5..=8) and out-of-range values are unrecognised.
+        assert_eq!(CalibrationIlluminant::from_code(5), None);
+        assert_eq!(CalibrationIlluminant::from_code(100), None);
+    }
 }

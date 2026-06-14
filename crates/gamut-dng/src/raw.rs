@@ -335,4 +335,15 @@ mod tests {
         assert_eq!(raw.white_level(), 4095);
         assert_eq!(raw.active_area(), Some([0, 0, 2, 2]));
     }
+
+    #[test]
+    fn new_cfa_validates_repeat_dimensions() {
+        // A zero repeat dimension is rejected even though an empty pattern "matches" rows*cols = 0.
+        assert!(RawImage::new_cfa(dims(2, 2), 8, (0, 2), vec![], vec![0; 4]).is_err());
+        assert!(RawImage::new_cfa(dims(2, 2), 8, (2, 0), vec![], vec![0; 4]).is_err());
+        // A non-square repeat: the pattern length must be rows * cols (6), not rows + cols (5).
+        let pattern = vec![0u8, 1, 1, 2, 0, 1];
+        assert!(RawImage::new_cfa(dims(3, 2), 8, (2, 3), pattern, vec![0; 6]).is_ok());
+        assert!(RawImage::new_cfa(dims(3, 2), 8, (2, 3), vec![0; 5], vec![0; 6]).is_err());
+    }
 }

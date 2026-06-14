@@ -35,13 +35,17 @@ fn cfa_roundtrips_through_gamut() {
 
 #[test]
 fn linear_raw_roundtrips_through_gamut() {
-    let raw = common::sample_linear_raw(48, 36, 16);
-    let mut dng = Vec::new();
-    DngEncoder::new()
-        .encode(&raw, &common::sample_profile(), &mut dng)
-        .expect("encode");
-    let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    assert_eq!(decoded.raw, raw);
+    // Cover sub-byte depths too: with 3 planes the packed-row width is `width * planes`, so a wrong
+    // samples-per-row would mis-pack the (bit-packed) sub-byte cases.
+    for bits in [10u16, 12, 14, 16] {
+        let raw = common::sample_linear_raw(48, 36, bits);
+        let mut dng = Vec::new();
+        DngEncoder::new()
+            .encode(&raw, &common::sample_profile(), &mut dng)
+            .expect("encode");
+        let decoded = DngDecoder::new().decode(&dng).expect("decode");
+        assert_eq!(decoded.raw, raw, "{bits}-bit linear must round-trip");
+    }
 }
 
 #[test]
@@ -56,6 +60,10 @@ fn full_profile_roundtrips_optional_fields() {
     assert!(p.second_illuminant().is_some());
     assert!(p.forward_matrices().0.is_some());
     assert!(p.camera_calibration().0.is_some());
+    assert!(
+        p.analog_balance().is_some(),
+        "AnalogBalance must survive decode"
+    );
     assert_eq!(p.profile_name(), Some("gamut Standard"));
     assert!((p.baseline_exposure().unwrap() - 0.5).abs() < 1e-5);
 }

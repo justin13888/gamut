@@ -140,4 +140,64 @@ mod tests {
         );
         assert!(exif.get(tags::EXIF_VERSION).is_some());
     }
+
+    #[test]
+    fn exif_is_empty_only_when_every_field_is_unset() {
+        assert!(ExifMetadata::default().is_empty());
+        // Each field on its own makes the IFD worth writing — pins that every `&&` term contributes.
+        let singles = [
+            ExifMetadata {
+                exposure_time: Some((1, 250)),
+                ..Default::default()
+            },
+            ExifMetadata {
+                f_number: Some((28, 10)),
+                ..Default::default()
+            },
+            ExifMetadata {
+                iso_speed: Some(100),
+                ..Default::default()
+            },
+            ExifMetadata {
+                date_time_original: Some("2026:06:14 00:00:00".to_owned()),
+                ..Default::default()
+            },
+            ExifMetadata {
+                focal_length: Some((50, 1)),
+                ..Default::default()
+            },
+        ];
+        for (i, exif) in singles.iter().enumerate() {
+            assert!(!exif.is_empty(), "field {i} alone must be non-empty");
+        }
+    }
+
+    #[test]
+    fn dng_is_empty_only_when_every_block_is_unset() {
+        assert!(DngMetadata::default().is_empty());
+        let singles = [
+            DngMetadata {
+                exif: ExifMetadata {
+                    iso_speed: Some(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            DngMetadata {
+                xmp: Some(vec![1]),
+                ..Default::default()
+            },
+            DngMetadata {
+                iptc: Some(vec![1]),
+                ..Default::default()
+            },
+            DngMetadata {
+                icc: Some(vec![1]),
+                ..Default::default()
+            },
+        ];
+        for (i, meta) in singles.iter().enumerate() {
+            assert!(!meta.is_empty(), "block {i} alone must be non-empty");
+        }
+    }
 }

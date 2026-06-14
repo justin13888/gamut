@@ -109,3 +109,17 @@ pub(crate) fn write_cfa_dng(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::even;
+
+    #[test]
+    fn even_rounds_up_to_a_word_boundary() {
+        assert_eq!(even(0), 0);
+        assert_eq!(even(1), 2);
+        assert_eq!(even(2), 2);
+        assert_eq!(even(3), 4);
+        assert_eq!(even(4), 4);
+    }
+}

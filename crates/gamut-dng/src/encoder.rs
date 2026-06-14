@@ -522,4 +522,21 @@ mod tests {
                 .is_ok()
         );
     }
+
+    #[test]
+    fn count_value_switches_to_long_above_the_u16_boundary() {
+        assert_eq!(count_value(0), Value::Short(vec![0]));
+        assert_eq!(count_value(65535), Value::Short(vec![65535]));
+        assert_eq!(count_value(65536), Value::Long(vec![65536]));
+    }
+
+    #[test]
+    fn with_compression_preserves_other_builder_state() {
+        let enc = DngEncoder::new()
+            .with_big_tiff(true)
+            .with_compression(crate::values::Compression::Deflate);
+        assert!(enc.compression == crate::values::Compression::Deflate);
+        // A reset to `Default::default()` would clear big_tiff; the real setter must not.
+        assert!(enc.big_tiff, "with_compression must keep earlier settings");
+    }
 }
