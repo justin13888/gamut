@@ -457,6 +457,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "exiv2-oracle"
+version = "0.0.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -786,6 +793,7 @@ dependencies = [
 name = "gamut-xmp"
 version = "0.1.1"
 dependencies = [
+ "exiv2-oracle",
  "gamut-core",
  "quick-xml",
  "thiserror",

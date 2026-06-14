@@ -1,0 +1,143 @@
+//! Dev-only differential oracle around a vendored, statically-linked **exiv2** (with its bundled
+//! Adobe XMP Toolkit, XMPCore) and the **expat** it depends on.
+//!
+//! gamut-xmp must produce packets the authoritative reference engine reads, and must read what that
+//! engine writes. This crate wraps exiv2's in-memory XMP parser/serializer behind a small, safe
+//! API: [`validate`], [`roundtrip`], [`get_property`], and [`property_count`]. All `unsafe` FFI is
+//! confined to this crate; inputs are length-delimited byte slices, so no temporary files are used.
+
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int};
+
+unsafe extern "C" {
+    fn exiv2_xmp_validate(xmp: *const c_char, len: usize) -> c_int;
+    fn exiv2_xmp_roundtrip(
+        xmp: *const c_char,
+        len: usize,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn exiv2_xmp_get(
+        xmp: *const c_char,
+        len: usize,
+        key: *const c_char,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn exiv2_xmp_count(xmp: *const c_char, len: usize, out_count: *mut usize) -> c_int;
+    fn exiv2_free(p: *mut c_char);
+}
+
+/// Copies an output buffer the shim allocated into an owned `Vec`, then frees the C allocation.
+///
+/// # Safety
+///
+/// `buf` must be a non-null pointer to `len` bytes allocated by the shim (the success case of a
+/// `*_roundtrip`/`*_get` call).
+unsafe fn take_owned(buf: *mut c_char, len: usize) -> Vec<u8> {
+    let bytes = unsafe { std::slice::from_raw_parts(buf as *const u8, len) }.to_vec();
+    unsafe { exiv2_free(buf) };
+    bytes
+}
+
+/// Returns `Ok(())` if exiv2 parses `xmp` without error.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 rejects the packet.
+pub fn validate(xmp: &[u8]) -> Result<(), String> {
+    // SAFETY: `xmp` is a valid byte range; the shim copies it into a std::string.
+    let code = unsafe { exiv2_xmp_validate(xmp.as_ptr().cast(), xmp.len()) };
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(format!("exiv2 rejected the XMP packet (code {code})"))
+    }
+}
+
+/// Parses `xmp` with exiv2's XMPCore and re-serializes it, returning exiv2's canonical bytes.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 fails to parse or re-serialize the packet.
+pub fn roundtrip(xmp: &[u8]) -> Result<Vec<u8>, String> {
+    let mut buf: *mut c_char = std::ptr::null_mut();
+    let mut len: usize = 0;
+    // SAFETY: `xmp` is valid; `buf`/`len` are written only on success.
+    let code = unsafe { exiv2_xmp_roundtrip(xmp.as_ptr().cast(), xmp.len(), &mut buf, &mut len) };
+    if code != 0 || buf.is_null() {
+        return Err(format!("exiv2 round-trip failed (code {code})"));
+    }
+    // SAFETY: on success the shim returned an owned buffer of `len` bytes.
+    Ok(unsafe { take_owned(buf, len) })
+}
+
+/// Reads one property's serialized value by exiv2 key (e.g. `"Xmp.dc.format"`).
+///
+/// # Errors
+///
+/// Returns a message if the key contains a NUL byte, exiv2 cannot parse the packet, or the property
+/// is absent.
+pub fn get_property(xmp: &[u8], key: &str) -> Result<String, String> {
+    let ckey = CString::new(key).map_err(|e| e.to_string())?;
+    let mut buf: *mut c_char = std::ptr::null_mut();
+    let mut len: usize = 0;
+    // SAFETY: `xmp` and `ckey` are valid; `buf`/`len` are written only on success.
+    let code = unsafe {
+        exiv2_xmp_get(
+            xmp.as_ptr().cast(),
+            xmp.len(),
+            ckey.as_ptr(),
+            &mut buf,
+            &mut len,
+        )
+    };
+    if code != 0 || buf.is_null() {
+        return Err(format!("exiv2 could not read '{key}' (code {code})"));
+    }
+    // SAFETY: on success the shim returned an owned buffer of `len` bytes.
+    let bytes = unsafe { take_owned(buf, len) };
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+/// Returns the number of XMP properties exiv2 parses from `xmp`.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 cannot parse the packet.
+pub fn property_count(xmp: &[u8]) -> Result<usize, String> {
+    let mut count: usize = 0;
+    // SAFETY: `xmp` is valid; `count` is written only on success.
+    let code = unsafe { exiv2_xmp_count(xmp.as_ptr().cast(), xmp.len(), &mut count) };
+    if code == 0 {
+        Ok(count)
+    } else {
+        Err(format!("exiv2 could not count properties (code {code})"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF \
+        xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" \
+        xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><rdf:Description rdf:about=\"\">\
+        <dc:format>text/plain</dc:format></rdf:Description></rdf:RDF></x:xmpmeta>";
+
+    #[test]
+    fn reads_a_valid_packet() {
+        assert!(validate(SAMPLE.as_bytes()).is_ok());
+        assert_eq!(property_count(SAMPLE.as_bytes()).unwrap(), 1);
+        assert_eq!(
+            get_property(SAMPLE.as_bytes(), "Xmp.dc.format").unwrap(),
+            "text/plain"
+        );
+        assert!(!roundtrip(SAMPLE.as_bytes()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_non_xmp_bytes() {
+        assert!(validate(b"not xmp at all").is_err());
+    }
+}
