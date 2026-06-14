@@ -151,6 +151,68 @@ pub(crate) fn decode_text_description(element: &[u8]) -> Result<TextDescription>
     })
 }
 
+/// Writes a `multiLocalizedUnicodeType` element — the inverse of [`decode_mluc`]. Strings are laid
+/// out after the 12-byte record table; offsets are recomputed (so they need not match the input's).
+pub(crate) fn encode_mluc(mluc: &Mluc, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"mluc");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&(mluc.records.len() as u32).to_be_bytes());
+    out.extend_from_slice(&12u32.to_be_bytes()); // record size
+
+    let storage_start = 16 + mluc.records.len() * 12;
+    let mut storage = Vec::new();
+    let mut table = Vec::new();
+    for record in &mluc.records {
+        let utf16: Vec<u8> = record
+            .text
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        let offset = (storage_start + storage.len()) as u32;
+        table.push((record.language, record.country, utf16.len() as u32, offset));
+        storage.extend_from_slice(&utf16);
+    }
+    for (language, country, length, offset) in table {
+        out.extend_from_slice(&language);
+        out.extend_from_slice(&country);
+        out.extend_from_slice(&length.to_be_bytes());
+        out.extend_from_slice(&offset.to_be_bytes());
+    }
+    out.extend_from_slice(&storage);
+}
+
+/// Writes a `textDescriptionType` element — the inverse of [`decode_text_description`].
+pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"desc");
+    out.extend_from_slice(&[0; 4]);
+
+    let ascii = desc.ascii.as_bytes();
+    out.extend_from_slice(&((ascii.len() + 1) as u32).to_be_bytes());
+    out.extend_from_slice(ascii);
+    out.push(0); // ASCII NUL terminator
+
+    out.extend_from_slice(&desc.unicode_language.to_be_bytes());
+    if desc.unicode.is_empty() {
+        out.extend_from_slice(&0u32.to_be_bytes());
+    } else {
+        let utf16: Vec<u8> = desc
+            .unicode
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        out.extend_from_slice(&((utf16.len() / 2 + 1) as u32).to_be_bytes()); // units incl NUL
+        out.extend_from_slice(&utf16);
+        out.extend_from_slice(&[0, 0]); // UTF-16 NUL terminator
+    }
+
+    out.extend_from_slice(&desc.script_code.to_be_bytes());
+    out.push(desc.macintosh.len().min(67) as u8);
+    let mut mac = [0u8; 67];
+    let n = desc.macintosh.len().min(67);
+    mac[..n].copy_from_slice(&desc.macintosh[..n]);
+    out.extend_from_slice(&mac);
+}
+
 /// Decodes UTF-16BE bytes into a `String`, trimming any trailing NUL terminators.
 fn decode_utf16be(bytes: &[u8]) -> Result<String> {
     if !bytes.len().is_multiple_of(2) {

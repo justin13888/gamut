@@ -7,8 +7,8 @@
 
 use gamut_core::{Error, Result};
 
-use crate::bytes::ByteReader;
-use crate::curve::{CurveOrParametric, read_curve_element};
+use crate::bytes::{ByteReader, pad_to_4, push_s15fixed16};
+use crate::curve::{CurveOrParametric, read_curve_element, write_curve_element};
 use crate::primitives::S15Fixed16;
 
 /// The sample precision of a CLUT.
@@ -383,6 +383,155 @@ fn read_u16_vec(r: &mut ByteReader<'_>, count: usize) -> Result<Vec<u16>> {
         .chunks_exact(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect())
+}
+
+/// Writes a `lut8Type` element — the inverse of [`decode_lut8`].
+pub(crate) fn encode_lut8(lut: &Lut8, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"mft1");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[lut.input_channels, lut.output_channels, lut.grid_points, 0]);
+    write_matrix3x3(&lut.matrix, out);
+    out.extend_from_slice(&lut.input_table);
+    out.extend_from_slice(&lut.clut);
+    out.extend_from_slice(&lut.output_table);
+}
+
+/// Writes a `lut16Type` element — the inverse of [`decode_lut16`].
+pub(crate) fn encode_lut16(lut: &Lut16, out: &mut Vec<u8>) {
+    out.extend_from_slice(b"mft2");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[lut.input_channels, lut.output_channels, lut.grid_points, 0]);
+    write_matrix3x3(&lut.matrix, out);
+    out.extend_from_slice(&lut.input_table_entries.to_be_bytes());
+    out.extend_from_slice(&lut.output_table_entries.to_be_bytes());
+    write_u16_slice(&lut.input_table, out);
+    write_u16_slice(&lut.clut, out);
+    write_u16_slice(&lut.output_table, out);
+}
+
+/// Writes a `lutAToBType` element — the inverse of [`decode_lut_a_to_b`].
+pub(crate) fn encode_lut_a_to_b(lut: &LutAToB, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    let off_b = stage_offset(&body);
+    for curve in &lut.b_curves {
+        write_curve_element(curve, &mut body);
+    }
+    let off_matrix = write_optional_matrix(lut.matrix.as_ref(), &mut body);
+    let off_m = write_optional_curves(lut.m_curves.as_ref(), &mut body);
+    let off_clut = write_optional_clut(lut.clut.as_ref(), &mut body);
+    let off_a = write_optional_curves(lut.a_curves.as_ref(), &mut body);
+    write_mab(
+        b"mAB ",
+        lut.input_channels,
+        lut.output_channels,
+        [off_b, off_matrix, off_m, off_clut, off_a],
+        &body,
+        out,
+    );
+}
+
+/// Writes a `lutBToAType` element — the inverse of [`decode_lut_b_to_a`].
+pub(crate) fn encode_lut_b_to_a(lut: &LutBToA, out: &mut Vec<u8>) {
+    let mut body = Vec::new();
+    let off_b = stage_offset(&body);
+    for curve in &lut.b_curves {
+        write_curve_element(curve, &mut body);
+    }
+    let off_matrix = write_optional_matrix(lut.matrix.as_ref(), &mut body);
+    let off_m = write_optional_curves(lut.m_curves.as_ref(), &mut body);
+    let off_clut = write_optional_clut(lut.clut.as_ref(), &mut body);
+    let off_a = write_optional_curves(lut.a_curves.as_ref(), &mut body);
+    write_mab(
+        b"mBA ",
+        lut.input_channels,
+        lut.output_channels,
+        [off_b, off_matrix, off_m, off_clut, off_a],
+        &body,
+        out,
+    );
+}
+
+/// The byte length of the shared `mAB `/`mBA ` header (type+reserved, channels+reserved, five
+/// offsets); the offset a body stage lands at, relative to the element start.
+const MAB_HEADER_LEN: usize = 8 + 4 + 5 * 4;
+
+fn stage_offset(body: &[u8]) -> u32 {
+    (MAB_HEADER_LEN + body.len()) as u32
+}
+
+fn write_mab(
+    type_sig: &[u8; 4],
+    input_channels: u8,
+    output_channels: u8,
+    offsets: [u32; 5],
+    body: &[u8],
+    out: &mut Vec<u8>,
+) {
+    out.extend_from_slice(type_sig);
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&[input_channels, output_channels, 0, 0]);
+    for offset in offsets {
+        out.extend_from_slice(&offset.to_be_bytes());
+    }
+    out.extend_from_slice(body);
+}
+
+fn write_optional_matrix(matrix: Option<&Matrix3x4>, body: &mut Vec<u8>) -> u32 {
+    let Some(matrix) = matrix else { return 0 };
+    let offset = stage_offset(body);
+    for &m in &matrix.matrix {
+        push_s15fixed16(body, m);
+    }
+    for &o in &matrix.offset {
+        push_s15fixed16(body, o);
+    }
+    pad_to_4(body);
+    offset
+}
+
+fn write_optional_curves(curves: Option<&Vec<CurveOrParametric>>, body: &mut Vec<u8>) -> u32 {
+    let Some(curves) = curves else { return 0 };
+    let offset = stage_offset(body);
+    for curve in curves {
+        write_curve_element(curve, body);
+    }
+    offset
+}
+
+fn write_optional_clut(clut: Option<&Clut>, body: &mut Vec<u8>) -> u32 {
+    let Some(clut) = clut else { return 0 };
+    let offset = stage_offset(body);
+    let mut grid = [0u8; 16];
+    let n = clut.grid_points.len().min(16);
+    grid[..n].copy_from_slice(&clut.grid_points[..n]);
+    body.extend_from_slice(&grid);
+    body.push(match clut.precision {
+        ClutPrecision::U8 => 1,
+        ClutPrecision::U16 => 2,
+    });
+    body.extend_from_slice(&[0, 0, 0]); // reserved
+    match clut.precision {
+        ClutPrecision::U8 => {
+            for &s in &clut.samples {
+                body.push(s as u8);
+            }
+        }
+        ClutPrecision::U16 => write_u16_slice(&clut.samples, body),
+    }
+    pad_to_4(body);
+    offset
+}
+
+fn write_matrix3x3(matrix: &Matrix3x3, out: &mut Vec<u8>) {
+    for &element in &matrix.elements {
+        push_s15fixed16(out, element);
+    }
+}
+
+fn write_u16_slice(values: &[u16], out: &mut Vec<u8>) {
+    for &value in values {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
 }
 
 #[cfg(test)]

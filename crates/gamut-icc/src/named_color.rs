@@ -70,6 +70,35 @@ pub(crate) fn decode_named_color2(element: &[u8]) -> Result<NamedColor2> {
     })
 }
 
+/// Writes a `namedColor2Type` element — the inverse of [`decode_named_color2`].
+pub(crate) fn encode_named_color2(named: &NamedColor2, out: &mut Vec<u8>) {
+    let device_coords = named.colors.first().map_or(0, |c| c.device.len());
+    out.extend_from_slice(b"ncl2");
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&named.vendor_flags.to_be_bytes());
+    out.extend_from_slice(&(named.colors.len() as u32).to_be_bytes());
+    out.extend_from_slice(&(device_coords as u32).to_be_bytes());
+    write_ascii_32(out, &named.prefix);
+    write_ascii_32(out, &named.suffix);
+    for color in &named.colors {
+        write_ascii_32(out, &color.name);
+        for &p in &color.pcs {
+            out.extend_from_slice(&p.to_be_bytes());
+        }
+        for &d in &color.device {
+            out.extend_from_slice(&d.to_be_bytes());
+        }
+    }
+}
+
+/// Writes a 32-byte NUL-terminated 7-bit-ASCII field (truncating to leave room for the NUL).
+fn write_ascii_32(out: &mut Vec<u8>, text: &str) {
+    let mut field = [0u8; 32];
+    let n = text.len().min(31);
+    field[..n].copy_from_slice(&text.as_bytes()[..n]);
+    out.extend_from_slice(&field);
+}
+
 /// Reads a 32-byte NUL-terminated 7-bit-ASCII field.
 fn read_ascii_32(r: &mut ByteReader<'_>) -> Result<String> {
     let bytes = r.bytes(32)?;

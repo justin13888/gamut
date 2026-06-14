@@ -2,7 +2,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::bytes::ByteReader;
+use crate::bytes::{ByteReader, push_date_time, push_xyz_number};
 use crate::primitives::{DateTime, Signature, XyzNumber};
 
 /// The fixed 128-byte header that opens every ICC profile (ICC.1:2022 §7.2).
@@ -115,6 +115,31 @@ impl ProfileHeader {
             reserved,
         })
     }
+
+    /// Serializes the 128-byte header. The `size` field is written as stored; the profile writer
+    /// patches it to the final length and (optionally) stamps the recomputed profile ID.
+    pub(crate) fn write(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.size.to_be_bytes());
+        out.extend_from_slice(&self.preferred_cmm.0);
+        out.push(self.version.major);
+        out.push(self.version.minor_bugfix_byte());
+        out.extend_from_slice(&[0, 0]); // reserved version bytes
+        out.extend_from_slice(&self.device_class.to_signature().0);
+        out.extend_from_slice(&self.data_color_space.to_signature().0);
+        out.extend_from_slice(&self.pcs.to_signature().0);
+        push_date_time(out, self.created);
+        out.extend_from_slice(b"acsp");
+        out.extend_from_slice(&self.platform.0);
+        out.extend_from_slice(&self.flags.to_be_bytes());
+        out.extend_from_slice(&self.manufacturer.0);
+        out.extend_from_slice(&self.model.0);
+        out.extend_from_slice(&self.attributes.to_be_bytes());
+        out.extend_from_slice(&self.rendering_intent.to_u32().to_be_bytes());
+        push_xyz_number(out, self.pcs_illuminant);
+        out.extend_from_slice(&self.creator.0);
+        out.extend_from_slice(&self.profile_id.0);
+        out.extend_from_slice(&self.reserved);
+    }
 }
 
 /// An ICC profile format version, e.g. 4.4.0 or 2.1.0 (ICC.1:2022 §7.2.4).
@@ -136,6 +161,11 @@ impl ProfileVersion {
             minor: minor_bugfix >> 4,
             bugfix: minor_bugfix & 0x0F,
         }
+    }
+
+    /// Re-encodes the second version byte: minor in the high nibble, bug-fix in the low nibble.
+    fn minor_bugfix_byte(self) -> u8 {
+        ((self.minor & 0x0F) << 4) | (self.bugfix & 0x0F)
     }
 }
 

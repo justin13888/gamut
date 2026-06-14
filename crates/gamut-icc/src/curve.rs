@@ -5,7 +5,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::bytes::ByteReader;
+use crate::bytes::{ByteReader, pad_to_4, push_s15fixed16};
 use crate::primitives::{S15Fixed16, U8Fixed8};
 
 /// A one-dimensional tone curve (`curveType`, ICC.1:2022 §10.6).
@@ -216,6 +216,50 @@ pub(crate) fn read_curve_element(r: &mut ByteReader<'_>) -> Result<CurveOrParame
     };
     r.align_to_4()?;
     Ok(curve)
+}
+
+/// Writes a `curveType` body (count and entries) — the inverse of [`read_curve_body`].
+pub(crate) fn write_curve_body(curve: &Curve, out: &mut Vec<u8>) {
+    match curve {
+        Curve::Identity => out.extend_from_slice(&0u32.to_be_bytes()),
+        Curve::Gamma(gamma) => {
+            out.extend_from_slice(&1u32.to_be_bytes());
+            out.extend_from_slice(&gamma.0.to_be_bytes());
+        }
+        Curve::Sampled(table) => {
+            out.extend_from_slice(&(table.len() as u32).to_be_bytes());
+            for &entry in table {
+                out.extend_from_slice(&entry.to_be_bytes());
+            }
+        }
+    }
+}
+
+/// Writes a `parametricCurveType` body (function type and parameters).
+pub(crate) fn write_parametric_body(curve: &ParametricCurve, out: &mut Vec<u8>) {
+    out.extend_from_slice(&curve.function_type.to_be_bytes());
+    out.extend_from_slice(&[0, 0]); // reserved
+    for &param in &curve.params {
+        push_s15fixed16(out, param);
+    }
+}
+
+/// Writes a complete embedded curve element (`curv`/`para`), 4-byte aligned, as it appears inside a
+/// LUT transform — the inverse of [`read_curve_element`].
+pub(crate) fn write_curve_element(curve: &CurveOrParametric, out: &mut Vec<u8>) {
+    match curve {
+        CurveOrParametric::Curve(curve) => {
+            out.extend_from_slice(b"curv");
+            out.extend_from_slice(&[0; 4]);
+            write_curve_body(curve, out);
+        }
+        CurveOrParametric::Parametric(curve) => {
+            out.extend_from_slice(b"para");
+            out.extend_from_slice(&[0; 4]);
+            write_parametric_body(curve, out);
+        }
+    }
+    pad_to_4(out);
 }
 
 #[cfg(test)]

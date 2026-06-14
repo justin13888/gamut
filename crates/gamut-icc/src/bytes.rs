@@ -127,6 +127,37 @@ impl<'a> ByteReader<'a> {
     }
 }
 
+/// Zero-pads `out` up to the next 4-byte boundary (the alignment ICC uses between elements).
+pub(crate) fn pad_to_4(out: &mut Vec<u8>) {
+    out.resize(out.len().next_multiple_of(4), 0);
+}
+
+/// Appends an `s15Fixed16` big-endian.
+pub(crate) fn push_s15fixed16(out: &mut Vec<u8>, value: S15Fixed16) {
+    out.extend_from_slice(&value.0.to_be_bytes());
+}
+
+/// Appends an `XYZNumber` (three `s15Fixed16`).
+pub(crate) fn push_xyz_number(out: &mut Vec<u8>, value: XyzNumber) {
+    push_s15fixed16(out, value.x);
+    push_s15fixed16(out, value.y);
+    push_s15fixed16(out, value.z);
+}
+
+/// Appends a `dateTimeNumber` (six big-endian `u16`).
+pub(crate) fn push_date_time(out: &mut Vec<u8>, value: DateTime) {
+    for field in [
+        value.year,
+        value.month,
+        value.day,
+        value.hours,
+        value.minutes,
+        value.seconds,
+    ] {
+        out.extend_from_slice(&field.to_be_bytes());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

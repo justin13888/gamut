@@ -2,13 +2,20 @@
 
 use gamut_core::{Error, Result};
 
-use crate::bytes::ByteReader;
-use crate::curve::{Curve, ParametricCurve, read_curve_body, read_parametric_body};
+use crate::bytes::{ByteReader, push_date_time, push_s15fixed16, push_xyz_number};
+use crate::curve::{
+    Curve, ParametricCurve, read_curve_body, read_parametric_body, write_curve_body,
+    write_parametric_body,
+};
 use crate::lut::{
     Lut8, Lut16, LutAToB, LutBToA, decode_lut_a_to_b, decode_lut_b_to_a, decode_lut8, decode_lut16,
+    encode_lut_a_to_b, encode_lut_b_to_a, encode_lut8, encode_lut16,
 };
-use crate::mluc::{Mluc, TextDescription, decode_mluc, decode_text_description};
-use crate::named_color::{NamedColor2, decode_named_color2};
+use crate::mluc::{
+    Mluc, TextDescription, decode_mluc, decode_text_description, encode_mluc,
+    encode_text_description,
+};
+use crate::named_color::{NamedColor2, decode_named_color2, encode_named_color2};
 use crate::primitives::{DateTime, S15Fixed16, Signature, XyzNumber};
 
 /// The decoded data of a tag element.
@@ -144,6 +151,60 @@ fn decode_s15fixed16_array(element: &[u8]) -> Result<TagData> {
         values.push(r.s15fixed16()?);
     }
     Ok(TagData::S15Fixed16Array(values))
+}
+
+/// Serializes a tag element (its four-byte type signature, four reserved bytes, then payload) into
+/// `out` — the inverse of [`decode_tag`]. [`TagData::Raw`] re-emits its stored bytes verbatim.
+pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
+    match data {
+        TagData::Xyz(values) => {
+            element_header(out, b"XYZ ");
+            for &value in values {
+                push_xyz_number(out, value);
+            }
+        }
+        TagData::Curve(curve) => {
+            element_header(out, b"curv");
+            write_curve_body(curve, out);
+        }
+        TagData::ParametricCurve(curve) => {
+            element_header(out, b"para");
+            write_parametric_body(curve, out);
+        }
+        TagData::Text(text) => {
+            element_header(out, b"text");
+            out.extend_from_slice(text.as_bytes());
+            out.push(0); // NUL terminator
+        }
+        TagData::DateTime(date_time) => {
+            element_header(out, b"dtim");
+            push_date_time(out, *date_time);
+        }
+        TagData::Signature(signature) => {
+            element_header(out, b"sig ");
+            out.extend_from_slice(&signature.0);
+        }
+        TagData::S15Fixed16Array(values) => {
+            element_header(out, b"sf32");
+            for &value in values {
+                push_s15fixed16(out, value);
+            }
+        }
+        TagData::MultiLocalizedUnicode(mluc) => encode_mluc(mluc, out),
+        TagData::TextDescription(desc) => encode_text_description(desc, out),
+        TagData::Lut8(lut) => encode_lut8(lut, out),
+        TagData::Lut16(lut) => encode_lut16(lut, out),
+        TagData::LutAToB(lut) => encode_lut_a_to_b(lut, out),
+        TagData::LutBToA(lut) => encode_lut_b_to_a(lut, out),
+        TagData::NamedColor2(named) => encode_named_color2(named, out),
+        TagData::Raw { bytes, .. } => out.extend_from_slice(bytes),
+    }
+}
+
+/// Writes an element's four-byte type signature followed by its four reserved zero bytes.
+fn element_header(out: &mut Vec<u8>, type_sig: &[u8; 4]) {
+    out.extend_from_slice(type_sig);
+    out.extend_from_slice(&[0; 4]);
 }
 
 #[cfg(test)]

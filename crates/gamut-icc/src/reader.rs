@@ -1,8 +1,41 @@
 //! The ICC profile reader.
 
-/// Reader for an ICC profile blob.
+use gamut_core::Result;
+
+use crate::profile::IccProfile;
+
+/// Reader for an ICC profile, with parse options.
 ///
-/// Will parse the 128-byte [`crate::ProfileHeader`], the tag table, and each tag's element data
-/// (dispatched on its [`crate::TagData`] type) into an [`crate::IccProfile`]. Implementation
-/// pending (see issue #34).
-pub struct IccReader;
+/// `IccReader::new().parse(bytes)` is equivalent to [`IccProfile::parse`]. Enable
+/// [`strict`](IccReader::strict) to additionally reject non-conformant inputs that the lenient
+/// default tolerates (nonzero reserved header bytes; tags whose data overlaps the header or tag
+/// table).
+#[derive(Debug, Clone, Default)]
+pub struct IccReader {
+    strict: bool,
+}
+
+impl IccReader {
+    /// A reader with lenient parsing (the default).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets whether to reject non-conformant inputs in addition to malformed ones.
+    #[must_use]
+    pub fn strict(mut self, yes: bool) -> Self {
+        self.strict = yes;
+        self
+    }
+
+    /// Parses an ICC profile from its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`gamut_core::Error::InvalidInput`] if the profile is malformed, or — in strict mode
+    /// — non-conformant.
+    pub fn parse(&self, bytes: &[u8]) -> Result<IccProfile> {
+        IccProfile::parse_with(bytes, self.strict)
+    }
+}

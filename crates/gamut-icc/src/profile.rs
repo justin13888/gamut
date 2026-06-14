@@ -22,18 +22,43 @@ pub struct IccProfile {
 }
 
 impl IccProfile {
-    /// Parses a complete ICC profile from its bytes.
+    /// Parses a complete ICC profile from its bytes (lenient; see [`crate::IccReader`] for strict
+    /// parsing).
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if the header, the tag table, or any tag's element data is
     /// malformed or points outside the profile.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
+        Self::parse_with(bytes, false)
+    }
+
+    /// Serializes the profile to a fresh, spec-valid byte vector, preserving the header's stored
+    /// profile ID. Use [`crate::IccWriter`] to recompute the ID instead.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        crate::writer::write_profile(self, false)
+    }
+
+    /// The parse implementation shared by [`IccProfile::parse`] and [`crate::IccReader`]; `strict`
+    /// adds conformance checks the lenient default skips.
+    pub(crate) fn parse_with(bytes: &[u8], strict: bool) -> Result<Self> {
         let header = ProfileHeader::parse(bytes)?;
+        if strict && header.reserved.iter().any(|&b| b != 0) {
+            return Err(Error::InvalidInput(
+                "icc: nonzero reserved header bytes (strict)",
+            ));
+        }
         let entries = parse_tag_table(bytes)?;
+        let data_start = 128 + 4 + 12 * entries.len();
         let mut tags = Vec::with_capacity(entries.len());
         for entry in entries {
             let start = entry.offset as usize;
+            if strict && start < data_start {
+                return Err(Error::InvalidInput(
+                    "icc: tag data overlaps the header or tag table (strict)",
+                ));
+            }
             let end = start
                 .checked_add(entry.size as usize)
                 .ok_or(Error::InvalidInput("icc: tag size overflow"))?;
@@ -143,5 +168,25 @@ mod tests {
         let mut other = base.clone();
         other[40] = 0xFF; // primary platform
         assert_ne!(IccProfile::compute_profile_id(&other), id);
+    }
+
+    #[test]
+    fn strict_mode_rejects_nonzero_reserved_header_bytes() {
+        let mut b = header();
+        b.extend_from_slice(&0u32.to_be_bytes()); // empty tag table
+        b[100] = 1; // a reserved header byte (100..128)
+        assert!(IccProfile::parse(&b).is_ok()); // lenient tolerates it
+        assert!(IccProfile::parse_with(&b, true).is_err()); // strict rejects it
+    }
+
+    #[test]
+    fn strict_mode_rejects_tag_overlapping_the_table() {
+        let mut b = header();
+        b.extend_from_slice(&1u32.to_be_bytes()); // one tag
+        b.extend_from_slice(b"wtpt");
+        b.extend_from_slice(&8u32.to_be_bytes()); // offset 8 — inside the header
+        b.extend_from_slice(&12u32.to_be_bytes());
+        assert!(IccProfile::parse(&b).is_ok()); // lenient allows odd offsets
+        assert!(IccProfile::parse_with(&b, true).is_err()); // strict requires offsets past the table
     }
 }
