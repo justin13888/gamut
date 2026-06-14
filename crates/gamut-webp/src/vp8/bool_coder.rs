@@ -372,6 +372,69 @@ mod tests {
     const UV_MODE_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
 
     #[test]
+    fn add_carry_increments_last_non_ff_and_clears_trailing_ff() {
+        // Pin the encoder's carry propagation (`add_one_to_output`, §7.3) directly: the last non-0xff
+        // byte is incremented and trailing 0xff bytes are zeroed. Short differential streams rarely
+        // trigger a carry, so this is the only thing that exercises the loop body.
+        let mut enc = BoolEncoder::new();
+        enc.output = vec![0x12, 0xff, 0xff];
+        enc.add_carry();
+        assert_eq!(enc.output, [0x13, 0x00, 0x00]);
+        enc.output = vec![0x40, 0x41];
+        enc.add_carry();
+        assert_eq!(enc.output, [0x40, 0x42], "a carry with no trailing 0xff just bumps the last byte");
+        // All-0xff: the loop zeroes every byte and stops at index 0 (the `i > 0` bound); a `>= 0`
+        // bound would step past the start and panic, pinning the loop bound.
+        enc.output = vec![0xff, 0xff];
+        enc.add_carry();
+        assert_eq!(enc.output, [0x00, 0x00]);
+    }
+
+    #[test]
+    fn round_trips_carry_heavy_stream_and_wide_literals() {
+        // A run of near-certain bools drives `bottom` past bit 31, exercising carry *detection* in
+        // put_bool and finish (a flipped shift there silently drops the carry); the literals reach the
+        // 32-bit boundary of the signed-literal mask. Any corrupted byte makes the independent decoder
+        // mismatch, so this kills the carry/shift/mask mutants the short round-trips miss.
+        let mut enc = BoolEncoder::new();
+        let mut bools = Vec::new();
+        // A long run of near-certain bools cycles `bottom` through the [2^23, 2^24) range many times,
+        // so a renormalization shift sets bit 31 and the carry path (`bottom & (1 << 31)`) actually
+        // fires — which a short stream never reaches.
+        for _ in 0..20000 {
+            enc.put_bool(255, true);
+            bools.push((255u8, true));
+        }
+        let mut rng = SplitMix64(0xfeed_face);
+        for _ in 0..2000 {
+            let p = (rng.bits(8) as u8).max(1);
+            let b = rng.bits(1) == 1;
+            enc.put_bool(p, b);
+            bools.push((p, b));
+        }
+        let lits: &[(u32, u32)] = &[(0xFFFF_FFFF, 32), (0, 0), (0xABCD, 16)];
+        for &(v, n) in lits {
+            enc.put_literal(v, n);
+        }
+        let signed: &[(i32, u32)] = &[(i32::MIN, 32), (i32::MAX, 32), (-1, 4), (7, 5)];
+        for &(v, n) in signed {
+            enc.put_signed_literal(v, n);
+        }
+        let bytes = enc.finish();
+
+        let mut dec = BoolDecoder::new(&bytes);
+        for (p, b) in bools {
+            assert_eq!(dec.get_bool(p), b, "bool mismatch");
+        }
+        for &(v, n) in lits {
+            assert_eq!(dec.get_literal(n), v, "literal {v:#x}/{n}");
+        }
+        for &(v, n) in signed {
+            assert_eq!(dec.get_signed_literal(n), v, "signed {v}/{n}");
+        }
+    }
+
+    #[test]
     fn bool_roundtrip_across_probabilities() {
         // Encode a long pseudo-random bool stream at a spread of probabilities, then decode it back.
         let mut rng = SplitMix64(0x1234_5678);

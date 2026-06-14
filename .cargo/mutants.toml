@@ -152,6 +152,12 @@ exclude_re = [
     # `<`→`>` and `<`→`==` mutants ARE killed: the `[0, -1, 0, …]` golden vector drives the column
     # intermediates to ±4, where the correct and mutated roundings diverge.)
     'replace < with <= in fwht4x4',
+    # gamut-webp `BoolDecoder::get_literal`: `v = (v << 1) | u32::from(get_flag())` ORs a flag bit (0
+    # or 1) into a freshly-vacated low bit, so the operands are disjoint and `|` is identical to `^`.
+    'replace \| with \^ in BoolDecoder<.a>::get_literal',
+    # gamut-webp `loop_filter::s2u`: `(c(v) + 128) as u8`. `+ 128` and `- 128` differ by 256, which the
+    # `as u8` truncation discards, so the result is identical — the `+ -> -` mutation is unobservable.
+    'replace \+ with - in s2u',
     # gamut-webp `alpha::write_alph` returns the smaller of the raw and lossless encodings. At an exact
     # size tie `<` keeps raw and `<=` would keep compressed, but both decode to identical alpha (the
     # transform is bijective) and real content never ties, so no non-contrived test can distinguish
