@@ -95,6 +95,21 @@ pub trait EncodeImage<P: Pixel> {
     /// Returns [`Error::Unsupported`] if the requested encoder configuration is not implemented, or
     /// [`Error::InvalidInput`] if the image violates a format constraint (e.g. a dimension limit).
     fn encode_image(&self, image: ImageRef<'_, P>, out: &mut Vec<u8>) -> Result<usize>;
+
+    /// Encode `image` into a fresh [`Vec`], returning the encoded bytes.
+    ///
+    /// A convenience over [`EncodeImage::encode_image`] for callers that just want the bytes;
+    /// reach for `encode_image` with a reused `&mut Vec<u8>` when encoding many images and you want
+    /// to amortise the allocation.
+    ///
+    /// # Errors
+    ///
+    /// As [`EncodeImage::encode_image`].
+    fn encode_to_vec(&self, image: ImageRef<'_, P>) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.encode_image(image, &mut out)?;
+        Ok(out)
+    }
 }
 
 /// Decodes a compressed byte stream into an owned [`ImageBuf`] of pixel layout `P`.
@@ -224,6 +239,15 @@ mod trait_tests {
         }
     }
 
+    /// A codec that always fails, to exercise error propagation through provided methods.
+    struct Failing;
+
+    impl EncodeImage<Gray8> for Failing {
+        fn encode_image(&self, _image: ImageRef<'_, Gray8>, _out: &mut Vec<u8>) -> Result<usize> {
+            Err(Error::Unsupported("nope"))
+        }
+    }
+
     #[test]
     fn encode_image_appends_and_counts() {
         let img = ImageBuf::<Gray8>::new(vec![1, 2, 3, 4], Dimensions::new(2, 2).unwrap()).unwrap();
@@ -231,6 +255,24 @@ mod trait_tests {
         let n = Trivial.encode_image(img.as_ref(), &mut out).unwrap();
         assert_eq!(n, 4);
         assert_eq!(out, vec![0xFF, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn encode_to_vec_returns_fresh_exact_bytes() {
+        let img = ImageBuf::<Gray8>::new(vec![1, 2, 3, 4], Dimensions::new(2, 2).unwrap()).unwrap();
+        // A fresh Vec holding exactly the encoded bytes — no leading scratch, unlike encode_image
+        // which appends. Asserting exact contents kills an "Ok(Vec::new())" mutant.
+        assert_eq!(
+            Trivial.encode_to_vec(img.as_ref()).unwrap(),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn encode_to_vec_propagates_errors() {
+        let img = ImageBuf::<Gray8>::new(vec![0], Dimensions::new(1, 1).unwrap()).unwrap();
+        // The default must surface encode_image's error rather than swallow it into an empty Vec.
+        assert!(Failing.encode_to_vec(img.as_ref()).is_err());
     }
 
     #[test]
