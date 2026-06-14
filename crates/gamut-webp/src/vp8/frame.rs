@@ -9,7 +9,7 @@
 //! (luma-DC WHT) block; a `B_PRED` one codes luma DC inline (plane 3). The reconstruction is deblocked
 //! by the simple or normal loop filter as a final pass. Tokens may be split across 1/2/4/8 partitions
 //! by macroblock row, and all-zero macroblocks are coded as skipped. Per-macroblock loop-filter
-//! adjustments are the remaining VP8 header feature. STATUS.md section L.
+//! adjustments (RFC 6386 §9.4) shift each macroblock's filter level. STATUS.md section L.
 
 // The macroblock/block math indexes several fixed-size arrays in lock-step (and over partial ranges
 // like `1..16`), where explicit indices read closer to the spec than iterator adaptors.
@@ -28,6 +28,9 @@ use super::quant::{self, QuantFactors};
 use super::tokens::{self, CoeffProbs};
 use super::transform::{fdct4x4, fwht4x4, idct4x4, iwht4x4};
 
+/// Re-exported so the low-level frame API carries the loop-filter delta type next to [`EncodeOptions`].
+pub use super::header::LoopFilterDeltas;
+
 /// The whole-block prediction modes the encoder considers, in signaling order.
 const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
 
@@ -42,8 +45,8 @@ const MB_SEGMENT_TREE: &[i8] = &[2, 4, 0, -1, -2, -3];
 /// coarse spread so distinct macroblock regions get distinct quantizers (refinement is issue #32).
 const SEGMENT_QUANT_DELTAS: [i8; 4] = [-12, -4, 4, 12];
 
-/// Encoder feature toggles for a frame. Defaults to the normal loop filter, no segmentation, and a
-/// single token partition.
+/// Encoder feature toggles for a frame. Defaults to the normal loop filter, no segmentation, a
+/// single token partition, and no per-macroblock loop-filter deltas.
 #[derive(Clone, Copy)]
 pub struct EncodeOptions {
     /// Use the simple loop filter instead of the normal one.
@@ -52,6 +55,10 @@ pub struct EncodeOptions {
     pub segmented: bool,
     /// Number of DCT token partitions (1, 2, 4, or 8); macroblock rows are assigned round-robin.
     pub partitions: u8,
+    /// Per-macroblock loop-filter deltas (`mb_lf_adjustments`, RFC 6386 §9.4). For key frames the
+    /// intra `ref_frame[0]` delta shifts every macroblock's filter level and the `B_PRED` `mode[0]`
+    /// delta shifts 4×4-predicted ones; the default (all-zero) emits the disabled record.
+    pub loop_filter_deltas: LoopFilterDeltas,
 }
 
 impl Default for EncodeOptions {
@@ -60,6 +67,7 @@ impl Default for EncodeOptions {
             simple_filter: false,
             segmented: false,
             partitions: 1,
+            loop_filter_deltas: LoopFilterDeltas::default(),
         }
     }
 }
@@ -208,10 +216,27 @@ fn apply_loop_filter(
     seg: &Segmentation,
     segment_map: &[usize],
     filter_interior: &[bool],
+    is_bpred: &[bool],
 ) {
+    // A zero frame-level filter level disables the loop filter for the whole frame (RFC 6386 §9.4;
+    // matches libwebp's `filter_type = 0`), regardless of any per-segment or per-macroblock delta.
+    if lf.level == 0 {
+        return;
+    }
+    // Per-macroblock level: the segment-adjusted base plus the §9.4 deltas. Key frames are all-intra,
+    // so the intra reference-frame delta (`ref_frame[0]`) applies to every macroblock and the B_PRED
+    // mode delta (`mode[0]`) to 4×4-predicted ones; the sum is clamped to [0, 63].
     let mb_level: Vec<u8> = segment_map
         .iter()
-        .map(|&s| segment_filter_level(lf.level, seg, s))
+        .zip(is_bpred)
+        .map(|(&s, &bpred)| {
+            let mut level = i32::from(segment_filter_level(lf.level, seg, s));
+            level += i32::from(lf.deltas.ref_frame[0]);
+            if bpred {
+                level += i32::from(lf.deltas.mode[0]);
+            }
+            level.clamp(0, 63) as u8
+        })
         .collect();
     if mb_level.iter().all(|&l| l == 0) {
         return;
@@ -272,6 +297,7 @@ fn frame_header(width: u32, height: u32, quant_index: u8, simple_filter: bool) -
             simple: simple_filter,
             level: filter_level(quant_index),
             sharpness: 0,
+            ..Default::default()
         },
         token_partitions: 1,
         quant: QuantIndices {
@@ -984,6 +1010,7 @@ pub fn encode_frame_filtered(
         };
     }
     header.token_partitions = opts.partitions.max(1);
+    header.loop_filter.deltas = opts.loop_filter_deltas;
     let n = header.token_partitions as usize;
     let seg_qf = segment_quant_factors(&header);
     let mut recon = FrameBuffers::new(yuv.width(), yuv.height());
@@ -1015,6 +1042,7 @@ pub fn encode_frame_filtered(
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
     let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
     let mut filter_interior = vec![false; recon.mb_cols * recon.mb_rows];
+    let mut is_bpred_map = vec![false; recon.mb_cols * recon.mb_rows];
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
         let mut left_bmodes = [B_DC_PRED; 4];
@@ -1085,6 +1113,7 @@ pub fn encode_frame_filtered(
             reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
 
             filter_interior[mb_y * recon.mb_cols + mb_x] = use_bpred || mb_has_coeffs(&levels);
+            is_bpred_map[mb_y * recon.mb_cols + mb_x] = use_bpred;
             if skip {
                 clear_mb_context(&mut above[mb_x], &mut left, use_bpred);
             } else {
@@ -1108,6 +1137,7 @@ pub fn encode_frame_filtered(
         &header.segmentation,
         &segment_map,
         &filter_interior,
+        &is_bpred_map,
     );
 
     let part0 = modes.finish();
@@ -1158,19 +1188,26 @@ fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>>
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for a malformed stream or [`Error::Unsupported`] for features not
-/// yet implemented (per-macroblock loop-filter adjustments, …).
+/// Returns [`Error::InvalidInput`] for a malformed stream, or [`Error::Unsupported`] for an inter
+/// frame or an undefined bitstream version (> 3).
 pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let chunk = header::read_uncompressed_chunk(data)?;
     if chunk.width == 0 || chunk.height == 0 {
         return Err(Error::InvalidInput("VP8: zero frame dimension"));
+    }
+    // RFC 6386 §9.1: the 3-bit version selects decoding profiles 0–3; 4–7 are undefined, and libwebp
+    // rejects them, so we do too. Profiles 1–3 differ from 0 only in the inter-frame reconstruction
+    // filter and a loop-filter hint; for intra key frames the explicit filter-type bit governs, so
+    // 0–3 reconstruct identically here (pinned against libwebp in tests/oracle.rs).
+    if chunk.version > 3 {
+        return Err(Error::Unsupported("VP8: unsupported bitstream version"));
     }
     let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
     if part0_end > data.len() {
         return Err(Error::InvalidInput("VP8: first partition exceeds frame"));
     }
     let mut modes = BoolDecoder::new(&data[UNCOMPRESSED_CHUNK_LEN..part0_end]);
-    let (head, coeff_probs) = header::read_frame_header(&chunk, &mut modes)?;
+    let (head, coeff_probs) = header::read_frame_header(&chunk, &mut modes);
     let seg_qf = segment_quant_factors(&head);
     let n = head.token_partitions as usize;
     let mut residuals = split_token_partitions(&data[part0_end..], n)?;
@@ -1179,6 +1216,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let mut above = vec![EntropyCtx::default(); recon.mb_cols];
     let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
     let mut filter_interior = vec![false; recon.mb_cols * recon.mb_rows];
+    let mut is_bpred_map = vec![false; recon.mb_cols * recon.mb_rows];
     let mut segment_map = vec![0usize; recon.mb_cols * recon.mb_rows];
     for mb_y in 0..recon.mb_rows {
         let mut left = EntropyCtx::default();
@@ -1235,6 +1273,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
                 reconstruct_chroma(&mut recon.u, cstride, mb_x, mb_y, &u_pred, &levels.u, &qf);
                 reconstruct_chroma(&mut recon.v, cstride, mb_x, mb_y, &v_pred, &levels.v, &qf);
                 filter_interior[mb_y * recon.mb_cols + mb_x] = true; // B_PRED always filters interiors
+                is_bpred_map[mb_y * recon.mb_cols + mb_x] = true;
             } else {
                 let y_pred = predict_luma(&recon, mb_x, mb_y, y_mode);
                 if !skip {
@@ -1264,6 +1303,7 @@ pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
         &head.segmentation,
         &segment_map,
         &filter_interior,
+        &is_bpred_map,
     );
     Ok(recon)
 }
@@ -1322,7 +1362,7 @@ mod tests {
         let chunk = header::read_uncompressed_chunk(data).unwrap();
         let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
         let mut modes = BoolDecoder::new(&data[UNCOMPRESSED_CHUNK_LEN..part0_end]);
-        let (head, _) = header::read_frame_header(&chunk, &mut modes).unwrap();
+        let (head, _) = header::read_frame_header(&chunk, &mut modes);
         let mb_cols = (chunk.width as usize).div_ceil(16);
         let mb_rows = (chunk.height as usize).div_ceil(16);
         let mut above_bmodes = vec![[B_DC_PRED; 4]; mb_cols];
@@ -1434,6 +1474,7 @@ mod tests {
                     simple_filter: simple,
                     segmented: false,
                     partitions: 1,
+                    ..Default::default()
                 };
                 let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
                 let dec = decode_frame(&bits).expect("decode");
@@ -1455,6 +1496,7 @@ mod tests {
                 simple_filter: false,
                 segmented: true,
                 partitions: 1,
+                ..Default::default()
             };
             let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
             let dec = decode_frame(&bits).expect("decode");
@@ -1475,6 +1517,7 @@ mod tests {
                 simple_filter: false,
                 segmented: false,
                 partitions,
+                ..Default::default()
             };
             let (bits, recon) = encode_frame_filtered(&yuv, 30, opts);
             let dec = decode_frame(&bits).expect("decode");
@@ -1482,6 +1525,57 @@ mod tests {
             assert_eq!(enc.y(), dec.y(), "luma p{partitions}");
             assert_eq!(enc.u(), dec.u(), "u p{partitions}");
             assert_eq!(enc.v(), dec.v(), "v p{partitions}");
+        }
+    }
+
+    #[test]
+    fn loop_filter_deltas_reconstruct_bit_exact() {
+        // mb_lf_adjustments shift each macroblock's filter level; the encoder writes them into the
+        // header and applies them to its own reconstruction, so the native decoder must reproduce the
+        // same deblocked planes. detailed() forces B_PRED macroblocks, so the mode[0] (B_PRED) delta
+        // is genuinely exercised, not just ref_frame[0]. (The cross-check that this matches libwebp's
+        // own delta handling is the tier-3 oracle in tests/oracle.rs.)
+        for ref_d in [-16i8, 0, 12] {
+            for mode_d in [-8i8, 0, 10] {
+                for &q in &[20u8, 60] {
+                    let yuv = detailed(48, 32);
+                    let opts = EncodeOptions {
+                        loop_filter_deltas: LoopFilterDeltas {
+                            ref_frame: [ref_d, 0, 0, 0],
+                            mode: [mode_d, 0, 0, 0],
+                        },
+                        ..Default::default()
+                    };
+                    let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
+                    let dec = decode_frame(&bits).expect("decode");
+                    let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
+                    assert_eq!(enc.y(), dec.y(), "luma ref={ref_d} mode={mode_d} q{q}");
+                    assert_eq!(enc.u(), dec.u(), "u ref={ref_d} mode={mode_d} q{q}");
+                    assert_eq!(enc.v(), dec.v(), "v ref={ref_d} mode={mode_d} q{q}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decode_accepts_profiles_0_to_3_and_rejects_higher() {
+        // RFC 6386 §9.1: the frame-tag version selects profiles 0–3 (4–7 undefined). The version sits
+        // in bits 1–3 of byte 0; patching it must not change which (valid) frame decodes.
+        let yuv = pattern(32, 32);
+        let (bits, _) = encode_frame(&yuv, 40);
+        let patch_version = |v: u8| {
+            let mut p = bits.clone();
+            p[0] = (p[0] & !0b1110) | (v << 1);
+            p
+        };
+        for v in 0u8..=3 {
+            assert!(decode_frame(&patch_version(v)).is_ok(), "profile {v} must decode");
+        }
+        for v in 4u8..=7 {
+            assert!(
+                matches!(decode_frame(&patch_version(v)), Err(Error::Unsupported(_))),
+                "profile {v} must be rejected"
+            );
         }
     }
 
