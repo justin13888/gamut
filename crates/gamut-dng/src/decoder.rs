@@ -23,7 +23,9 @@ pub struct DecodedDng {
     pub raw: RawImage,
     /// The camera colour profile reconstructed from IFD 0.
     pub profile: CameraProfile,
-    /// The `DNGVersion` the file declares.
+    /// The `DNGVersion` the file declares, as its four dotted version octets in order — e.g. DNG
+    /// 1.7.1.0 is `[1, 7, 1, 0]`. Kept as four bytes (not a packed `u32`) so each component reads
+    /// directly and byte order never enters into it.
     pub dng_version: [u8; 4],
     /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
     pub metadata: DngMetadata,

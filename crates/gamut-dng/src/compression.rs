@@ -17,7 +17,10 @@ use crate::values::Compression;
 pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
     match scheme {
         Compression::Uncompressed => Ok(packed.to_vec()),
-        // Level 6 is zlib's default speed/ratio trade-off.
+        // Level 6 is zlib's default speed/ratio trade-off. `miniz_oxide` is a deliberate choice for
+        // now: it covers both encode *and* decode and is Adobe-DNG-SDK validated. The in-house
+        // `gamut-deflate` (on the unmerged `feat/png` branch) is encoder-only, so revisiting this is
+        // tracked for after that lands — see issue #196.
         Compression::Deflate => Ok(miniz_oxide::deflate::compress_to_vec_zlib(packed, 6)),
         _ => Err(Error::Unsupported(
             "DNG: this compression is not yet encodable",
