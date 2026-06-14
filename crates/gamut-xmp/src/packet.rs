@@ -111,11 +111,10 @@ fn strip_bom(bytes: &[u8]) -> Result<&[u8]> {
     if let Some(rest) = bytes.strip_prefix(&UTF8_BOM) {
         return Ok(rest);
     }
-    // UTF-16 BE (FE FF), UTF-16 LE / UTF-32 LE (FF FE …), UTF-32 BE (00 00 FE FF).
-    if bytes.starts_with(&[0xFE, 0xFF])
-        || bytes.starts_with(&[0xFF, 0xFE])
-        || bytes.starts_with(&[0x00, 0x00, 0xFE, 0xFF])
-    {
+    // Reject a UTF-16/32 byte-order mark: UTF-16 BE (FE FF), UTF-16 LE / UTF-32 LE (FF FE …),
+    // UTF-32 BE (00 00 FE FF). Only UTF-8 is supported.
+    let non_utf8_boms: [&[u8]; 3] = [&[0xFE, 0xFF], &[0xFF, 0xFE], &[0x00, 0x00, 0xFE, 0xFF]];
+    if non_utf8_boms.iter().any(|bom| bytes.starts_with(bom)) {
         return Err(XmpError::Encoding(
             "only UTF-8 packets are supported (UTF-16/32 byte-order mark found)",
         ));
@@ -184,8 +183,24 @@ mod tests {
 
     #[test]
     fn rejects_utf16_bom() {
+        // The BOM must be rejected by the BOM check specifically — not fall through to the generic
+        // "not valid UTF-8" path — so the message names the byte-order mark.
         let err = XmpPacket::scan(&[0xFE, 0xFF, 0x00, 0x3C]).unwrap_err();
-        assert!(matches!(err, XmpError::Encoding(_)));
+        assert!(
+            matches!(&err, XmpError::Encoding(m) if m.contains("byte-order mark")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn find_handles_edges() {
+        assert_eq!(find(b"xy<?xpacket", b"<?xpacket"), Some(2));
+        // An exact-length match must be found (guards the `>` length check).
+        assert_eq!(find(b"abc", b"abc"), Some(0));
+        // A needle longer than the haystack is absent.
+        assert_eq!(find(b"ab", b"abc"), None);
+        // An empty needle is never found (and must not panic on `windows(0)`).
+        assert_eq!(find(b"abc", b""), None);
     }
 
     #[test]

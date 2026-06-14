@@ -302,6 +302,37 @@ mod tests {
     use super::*;
 
     const DC: &str = "http://purl.org/dc/elements/1.1/";
+    const XMP: &str = "http://ns.adobe.com/xap/1.0/";
+
+    #[test]
+    fn get_matches_both_namespace_and_name() {
+        // Lookups must match the namespace AND the local name, not either alone.
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "title", "t");
+        meta.set_text(XMP, "creator", "c");
+        assert_eq!(meta.get_text(DC, "title"), Some("t"));
+        assert_eq!(meta.get_text(XMP, "creator"), Some("c"));
+        // Right namespace, wrong name (and vice versa) → no match.
+        assert!(meta.get(DC, "creator").is_none());
+        assert!(meta.get(XMP, "title").is_none());
+    }
+
+    #[test]
+    fn set_replaces_only_the_exact_property() {
+        // set() finds the existing property by namespace AND name; a partial match must not be
+        // overwritten.
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "title", "t");
+        meta.set_text(XMP, "creator", "c");
+        meta.set_text(DC, "creator", "x"); // shares ns with title, name with creator: neither
+        assert_eq!(
+            meta.properties.len(),
+            3,
+            "must add, not overwrite a partial match"
+        );
+        assert_eq!(meta.get_text(DC, "title"), Some("t"));
+        assert_eq!(meta.get_text(DC, "creator"), Some("x"));
+    }
 
     #[test]
     fn get_set_text_round_trips_and_replaces() {
@@ -379,6 +410,49 @@ mod tests {
         let mut meta = XmpMeta::new();
         meta.set_text(DC, "title", "plain");
         assert_eq!(meta.get_lang_alt(DC, "title", "x-default"), None);
+    }
+
+    #[test]
+    fn lang_requires_both_xml_namespace_and_lang_name() {
+        let xml_ns = "http://www.w3.org/XML/1998/namespace";
+        // The real xml:lang qualifier is recognized.
+        let tagged = XmpProperty {
+            namespace: DC.into(),
+            name: "x".into(),
+            value: XmpValue::Simple("v".into()),
+            qualifiers: vec![XmpProperty::new(
+                xml_ns,
+                "lang",
+                XmpValue::Simple("en".into()),
+            )],
+        };
+        assert_eq!(tagged.lang(), Some("en"));
+
+        // An XML-namespace qualifier with a different name is NOT a language tag.
+        let xml_space = XmpProperty {
+            namespace: DC.into(),
+            name: "x".into(),
+            value: XmpValue::Simple("v".into()),
+            qualifiers: vec![XmpProperty::new(
+                xml_ns,
+                "space",
+                XmpValue::Simple("preserve".into()),
+            )],
+        };
+        assert_eq!(xml_space.lang(), None);
+
+        // A `lang`-named qualifier in a different namespace is NOT a language tag either.
+        let other_lang = XmpProperty {
+            namespace: DC.into(),
+            name: "x".into(),
+            value: XmpValue::Simple("v".into()),
+            qualifiers: vec![XmpProperty::new(
+                DC,
+                "lang",
+                XmpValue::Simple("nope".into()),
+            )],
+        };
+        assert_eq!(other_lang.lang(), None);
     }
 
     #[test]

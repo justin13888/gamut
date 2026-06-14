@@ -180,16 +180,14 @@ fn resolve_entity(reference: &BytesRef) -> Result<String> {
         .map_err(|e| XmpError::Xml(e.to_string()))
 }
 
-/// Appends text to the innermost open element, merging with an adjacent text run.
+/// Appends a text run to the innermost open element. Consecutive runs (split by entity references)
+/// stay as separate nodes; [`text_content`] concatenates them, so the split is invisible.
 fn push_text(stack: &mut [Element], text: &str) {
     if text.is_empty() {
         return;
     }
     if let Some(elem) = stack.last_mut() {
-        match elem.children.last_mut() {
-            Some(Node::Text(existing)) => existing.push_str(text),
-            _ => elem.children.push(Node::Text(text.to_owned())),
-        }
+        elem.children.push(Node::Text(text.to_owned()));
     }
 }
 
@@ -637,7 +635,11 @@ mod tests {
             rdf("<dc:x><rdf:Bag><rdf:_1>a</rdf:_1></rdf:Bag></dc:x>").as_bytes(),
         )
         .unwrap_err();
-        assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
+        // The rdf:_n-specific diagnostic, not the generic "unexpected element" one.
+        assert!(
+            matches!(&err, XmpError::Prohibited(m) if m.contains("array item")),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -778,5 +780,56 @@ mod tests {
             XmpMeta::from_packet(rdf("<dc:x><rdf:Bag><foo:item/></rdf:Bag></dc:x>").as_bytes())
                 .unwrap_err();
         assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rdf_namespaced_non_li_uses_the_generic_message() {
+        // An rdf:-namespaced element that is neither rdf:li nor rdf:_n takes the generic branch,
+        // not the rdf:_n one — so the condition truly needs both "rdf namespace" AND "starts with
+        // '_'", not either alone.
+        let err =
+            XmpMeta::from_packet(rdf("<dc:x><rdf:Bag><rdf:foo/></rdf:Bag></dc:x>").as_bytes())
+                .unwrap_err();
+        let XmpError::Prohibited(msg) = &err else {
+            panic!("expected Prohibited, got {err:?}");
+        };
+        assert!(
+            msg.contains("in an rdf array"),
+            "expected the generic message: {msg}"
+        );
+        assert!(
+            !msg.contains("array item"),
+            "rdf:foo is not an rdf:_n item: {msg}"
+        );
+    }
+
+    #[test]
+    fn multiple_root_elements_are_rejected() {
+        // Two top-level rdf:RDF elements — only one root document is allowed.
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\"/><rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\"/>"
+        );
+        assert!(
+            matches!(XmpMeta::from_packet(xml.as_bytes()), Err(XmpError::Xml(_))),
+            "a second root element must be rejected, not silently replace the first"
+        );
+    }
+
+    #[test]
+    fn xmlns_declarations_are_not_treated_as_properties() {
+        // An xmlns declaration sitting on the Description must be skipped, not folded into a
+        // spurious property.
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\">\
+             <rdf:Description rdf:about=\"\" xmlns:unused=\"http://example.com/unused/\">\
+             <dc:format>text/plain</dc:format></rdf:Description></rdf:RDF>"
+        );
+        let meta = parse(&xml);
+        assert_eq!(
+            meta.properties.len(),
+            1,
+            "only dc:format, no xmlns property"
+        );
+        assert_eq!(meta.get_text(DC, "format"), Some("text/plain"));
     }
 }

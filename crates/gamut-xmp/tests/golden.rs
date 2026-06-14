@@ -6,6 +6,7 @@
 use gamut_xmp::{XmpMeta, XmpProperty, XmpValue, XmpWriter};
 
 const DC: &str = "http://purl.org/dc/elements/1.1/";
+const XMP: &str = "http://ns.adobe.com/xap/1.0/";
 const XMPTPG: &str = "http://ns.adobe.com/xap/1.0/t/pg/";
 const STDIM: &str = "http://ns.adobe.com/xap/1.0/sType/Dimensions#";
 
@@ -66,6 +67,38 @@ fn language_alternative_full_packet_read_only() {
 
     let packet = XmpWriter::new().writable(false).serialize(&meta);
     assert_eq!(String::from_utf8(packet).unwrap(), expected);
+}
+
+#[test]
+fn general_qualifier_canonical_body() {
+    // A value carrying a non-xml:lang qualifier serializes with the rdf:value form (Part 1 §7.8),
+    // nested deep enough that the indentation of each level is pinned exactly.
+    let meta = XmpMeta {
+        properties: vec![XmpProperty {
+            namespace: DC.into(),
+            name: "rights".into(),
+            value: simple("(c)"),
+            qualifiers: vec![XmpProperty::new(XMP, "owner", simple("Me"))],
+        }],
+    };
+
+    let expected = [
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">",
+        " <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\">",
+        "  <rdf:Description rdf:about=\"\">",
+        "   <dc:rights>",
+        "    <rdf:Description>",
+        "     <rdf:value>(c)</rdf:value>",
+        "     <xmp:owner>Me</xmp:owner>",
+        "    </rdf:Description>",
+        "   </dc:rights>",
+        "  </rdf:Description>",
+        " </rdf:RDF>",
+        "</x:xmpmeta>",
+    ]
+    .join("\n");
+
+    assert_eq!(meta.to_rdf(), expected);
 }
 
 #[test]

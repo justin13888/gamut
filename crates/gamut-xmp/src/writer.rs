@@ -130,9 +130,9 @@ impl XmpWriter {
         out.push_str(&self.serialize_body(meta));
         out.push('\n');
         if self.writable {
-            // Whitespace padding, a newline every 100 bytes for display (Part 1 §7.3.2).
-            for i in 0..self.padding {
-                out.push(if (i + 1) % 100 == 0 { '\n' } else { ' ' });
+            // Trailing whitespace so the packet can be edited in place (Part 1 §7.3.2).
+            for _ in 0..self.padding {
+                out.push(' ');
             }
             out.push('\n');
         }
@@ -619,15 +619,63 @@ mod tests {
 
     #[test]
     fn writable_writer_emits_requested_padding() {
-        let padded = XmpWriter::new()
-            .padding(2000)
-            .serialize(&XmpMeta::new())
-            .len();
         let bare = XmpWriter::new()
             .writable(false)
             .serialize(&XmpMeta::new())
             .len();
-        // The writable packet is larger by at least the requested padding.
-        assert!(padded >= bare + 2000, "padded {padded} vs bare {bare}");
+        let small = XmpWriter::new()
+            .padding(10)
+            .serialize(&XmpMeta::new())
+            .len();
+        let big = XmpWriter::new()
+            .padding(1000)
+            .serialize(&XmpMeta::new())
+            .len();
+        // Padding is applied verbatim: the size grows by exactly the requested byte count, so the
+        // builder must actually record the value (not reset to the default) and emit one space each.
+        assert_eq!(big - small, 990);
+        assert!(
+            small > bare,
+            "writable padding must add bytes over a read-only packet"
+        );
+    }
+
+    #[test]
+    fn non_lang_xml_qualifier_uses_the_general_qualifier_form() {
+        // xml:space is in the XML namespace but is NOT a language tag, so it must serialize as a
+        // general qualifier (the rdf:value form), never collapse into an xml:lang attribute.
+        let prop = XmpProperty {
+            namespace: DC.into(),
+            name: "rights".into(),
+            value: XmpValue::Simple("v".into()),
+            qualifiers: vec![XmpProperty::new(
+                "http://www.w3.org/XML/1998/namespace",
+                "space",
+                XmpValue::Simple("preserve".into()),
+            )],
+        };
+        let out = body(vec![prop]);
+        assert!(out.contains("<rdf:value>v</rdf:value>"), "got:\n{out}");
+        assert!(
+            out.contains("<xml:space>preserve</xml:space>"),
+            "got:\n{out}"
+        );
+        assert!(
+            !out.contains("xml:lang"),
+            "xml:space must not become a language: {out}"
+        );
+    }
+
+    #[test]
+    fn uri_attribute_value_is_escaped() {
+        let out = body(vec![XmpProperty::new(
+            XMP,
+            "BaseURL",
+            XmpValue::Uri("a&b<c>d".into()),
+        )]);
+        assert!(
+            out.contains("rdf:resource=\"a&amp;b&lt;c&gt;d\""),
+            "got:\n{out}"
+        );
     }
 }
