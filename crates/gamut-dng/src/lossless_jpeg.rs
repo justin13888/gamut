@@ -94,9 +94,10 @@ impl BitWriter {
     }
 
     fn finish(mut self) -> Vec<u8> {
+        // `put` drains whole bytes, so `nbits` is always in `0..8` here.
         if self.nbits > 0 {
             // Pad the final partial byte with 1-bits (JPEG convention).
-            self.put(0xFF, (8 - (self.nbits % 8)) as u8 % 8);
+            self.put(0xFF, 8 - self.nbits as u8);
         }
         self.out
     }
@@ -207,7 +208,8 @@ pub(crate) fn encode(
                 let (ssss, mantissa) = magnitude(diff);
                 let (code, len) = codes[ssss as usize];
                 writer.put(u32::from(code), len);
-                if ssss > 0 && ssss < 16 {
+                // Categories 0 and 16 carry no mantissa; only `1..16` has magnitude bits.
+                if ssss != 0 && ssss < 16 {
                     writer.put(mantissa, ssss);
                 }
             }
@@ -258,7 +260,8 @@ impl<'a> BitReader<'a> {
     fn receive(&mut self, count: u8) -> u32 {
         let mut v = 0u32;
         for _ in 0..count {
-            v = (v << 1) | self.next_bit();
+            // + (not |): v<<1 has a clear low bit, so | would be an equivalent (unkillable) mutant.
+            v = (v << 1) + self.next_bit();
         }
         v
     }
@@ -268,7 +271,8 @@ impl<'a> BitReader<'a> {
 fn decode_symbol(reader: &mut BitReader, codes: &[(u16, u8)]) -> Result<u8> {
     let mut code: u16 = 0;
     for len in 1..=16u8 {
-        code = (code << 1) | reader.next_bit() as u16;
+        // + (not |): code<<1 has a clear low bit, so | would be an equivalent (unkillable) mutant.
+        code = (code << 1) + reader.next_bit() as u16;
         for (sym, &(c, l)) in codes.iter().enumerate() {
             if l == len && c == code {
                 return Ok(sym as u8);
@@ -318,13 +322,13 @@ pub(crate) fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     let mut codes: Option<Vec<(u16, u8)>> = None;
 
     loop {
-        // Find the next marker.
-        while data.get(pos) != Some(&MARKER) {
-            pos = pos
-                .checked_add(1)
-                .filter(|&p| p < data.len())
-                .ok_or(Error::InvalidInput("DNG: lossless JPEG missing SOS"))?;
-        }
+        // Find the next marker: skip to the first `FF` at or after `pos`. `position` returns an
+        // offset strictly within `data[pos..]`, so there is no off-by-one bound to mutate.
+        let off = data[pos..]
+            .iter()
+            .position(|&b| b == MARKER)
+            .ok_or(Error::InvalidInput("DNG: lossless JPEG missing SOS"))?;
+        pos += off;
         while data.get(pos) == Some(&MARKER) {
             pos += 1;
         }
@@ -444,5 +448,182 @@ mod tests {
             roundtrip(8, 8, 3, precision); // linear RGB
             roundtrip(1, 1, 1, precision); // smallest
         }
+    }
+
+    /// Round-trips an explicit sample buffer (so we can hand-pick values that exercise the
+    /// Huffman category math: zero, small/large positive and negative DC differences, and the
+    /// full 16-bit extremes that drive `reduce`/`magnitude`/`extend`).
+    fn roundtrip_samples(samples: &[u16], width: usize, height: usize, components: usize) {
+        let encoded = encode(samples, width, height, components, 16);
+        let decoded = decode(&encoded).expect("decode");
+        assert_eq!(decoded.width, width);
+        assert_eq!(decoded.height, height);
+        assert_eq!(decoded.components, components);
+        assert_eq!(decoded.samples, samples);
+    }
+
+    #[test]
+    fn roundtrips_extreme_dc_differences() {
+        // A single row whose neighbour deltas hit the category boundaries (incl. wrap-around so
+        // `reduce` produces -32768 / 32767) and both signs of every magnitude.
+        let row: Vec<u16> = vec![
+            0, 65535, 0, 1, 0, 32768, 32767, 0, 2, 4, 8, 16, 256, 65280, 65535, 0,
+        ];
+        let len = row.len();
+        roundtrip_samples(&row, len, 1, 1);
+        // Same values down a single column (exercises the first-column "predict from above" path).
+        roundtrip_samples(&row, 1, len, 1);
+        // Two interleaved components with offset values (exercises per-component prediction).
+        let mut two = Vec::new();
+        for &v in &row {
+            two.push(v);
+            two.push(v ^ 0x8000);
+        }
+        roundtrip_samples(&two, len, 1, 2);
+    }
+
+    #[test]
+    fn reduce_wraps_at_exact_boundaries() {
+        // Inside the canonical range: unchanged (kills `< -32768` -> `<= -32768`,
+        // `> 32767` -> `>= 32767`).
+        assert_eq!(reduce(-32768), -32768);
+        assert_eq!(reduce(32767), 32767);
+        // Just outside: wraps by exactly 2^16 (kills `> 32767` -> `==`, and the subtraction
+        // operator mutants `-` -> `+` / `/`).
+        assert_eq!(reduce(32768), -32768);
+        assert_eq!(reduce(-32769), 32767);
+        assert_eq!(reduce(40000), 40000 - 65536);
+        assert_eq!(reduce(-40000), -40000 + 65536);
+    }
+
+    #[test]
+    fn magnitude_categories_are_exact() {
+        assert_eq!(magnitude(0), (0, 0));
+        // The T.81 special case: -32768 is category 16 with no mantissa. Deleting the unary `-`
+        // would make this `diff == 32768` (never reached) and fall through to (16, 0x7fff).
+        assert_eq!(magnitude(-32768), (16, 0));
+        // Positive: mantissa == diff; negative: one's-complement low bits (diff - 1).
+        assert_eq!(magnitude(1), (1, 1));
+        assert_eq!(magnitude(-1), (1, 0));
+        assert_eq!(magnitude(2), (2, 0b10));
+        assert_eq!(magnitude(-2), (2, 0b01));
+        assert_eq!(magnitude(32767), (15, 0x7fff));
+    }
+
+    #[test]
+    fn extend_reconstructs_category_16_as_min() {
+        // ssss == 16 reads no mantissa and must yield -32768 (kills the deleted unary `-`, which
+        // would return 32768; observable only here since the decoder folds both mod 2^16).
+        let mut reader = BitReader::new(&[]);
+        assert_eq!(extend(&mut reader, 16), -32768);
+        // ssss == 0 yields 0 with no bits consumed.
+        let mut reader = BitReader::new(&[]);
+        assert_eq!(extend(&mut reader, 0), 0);
+    }
+
+    #[test]
+    fn bit_writer_pads_only_a_partial_final_byte() {
+        // Exactly one full byte: finish must NOT append a padding byte (kills `nbits > 0`
+        // -> `nbits >= 0`, which would `put(0xff, 8)` and grow the output).
+        let mut w = BitWriter::new();
+        w.put(0b1010_1010, 8);
+        assert_eq!(w.finish(), vec![0b1010_1010]);
+        // A partial byte (3 bits) is padded with 1-bits up to one byte.
+        let mut w = BitWriter::new();
+        w.put(0b101, 3);
+        assert_eq!(w.finish(), vec![0b1011_1111]);
+        // Empty writer produces no bytes.
+        assert_eq!(BitWriter::new().finish(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn bit_reader_holds_position_at_a_real_marker() {
+        // `FF` followed by a non-`00` byte is a real marker (end of scan): the reader must leave
+        // it in place and feed `1`-bits forever (kills `pos -= 1` -> `+= 1` / `/= 1`, which would
+        // advance past the marker and start reading the following bytes).
+        let mut reader = BitReader::new(&[0xFF, 0xD9]);
+        for _ in 0..24 {
+            assert_eq!(reader.next_bit(), 1);
+        }
+        // A stuffed `FF 00` decodes to the data bits of `FF` then continues to the next byte.
+        let mut reader = BitReader::new(&[0xFF, 0x00, 0x00]);
+        for _ in 0..8 {
+            assert_eq!(reader.next_bit(), 1); // the FF
+        }
+        for _ in 0..8 {
+            assert_eq!(reader.next_bit(), 0); // the following 0x00
+        }
+    }
+
+    /// Builds a valid 1x1x1 stream, then lets the caller mutate it.
+    fn valid_stream() -> Vec<u8> {
+        encode(&[12345u16], 1, 1, 1, 16)
+    }
+
+    #[test]
+    fn decode_rejects_bad_header() {
+        // Too short / no SOI.
+        assert!(decode(&[]).is_err());
+        assert!(decode(&[MARKER, 0x00]).is_err());
+        // `< 2` -> `==`: a 1-byte `FF` must error, not index `data[1]` out of bounds.
+        assert!(decode(&[MARKER]).is_err());
+        // `< 2` -> `<=`: a bare SOI (len 2) must reach the marker loop and fail with "missing SOS",
+        // not the header's "not a JPEG" message.
+        match decode(&[MARKER, SOI]) {
+            Err(Error::InvalidInput(m)) => assert!(m.contains("missing SOS"), "got {m:?}"),
+            Err(other) => panic!("expected missing-SOS error, got {other:?}"),
+            Ok(_) => panic!("expected missing-SOS error, got Ok"),
+        }
+        // Corrupting only the SOI's `FF` (byte 0) must fail: the `||` chain has to OR the
+        // marker checks, not AND them (kills both `||` -> `&&` in the header guard).
+        let mut s = valid_stream();
+        s[0] = 0x00;
+        assert!(decode(&s).is_err());
+    }
+
+    #[test]
+    fn decode_skips_stray_bytes_and_unknown_segments() {
+        // A stray non-marker byte right after SOI must be scanned over to find SOF3 (kills
+        // `!= MARKER` -> `==`, and the scan filter `< data.len()` -> `==`/`>`).
+        let s = valid_stream();
+        let mut spliced = s[..2].to_vec();
+        spliced.push(0xAA);
+        spliced.extend_from_slice(&s[2..]);
+        let decoded = decode(&spliced).expect("decode past stray byte");
+        assert_eq!(decoded.samples, vec![12345u16]);
+
+        // An unknown marker segment (APP0-like) must be skipped by its length (kills the `_`-arm
+        // `pos += len` -> `-=` / `*=`).
+        let mut spliced = s[..2].to_vec();
+        spliced.extend_from_slice(&[MARKER, 0xE0, 0x00, 0x04, 0x00, 0x00]); // FF E0, len=4, 2 pad
+        spliced.extend_from_slice(&s[2..]);
+        let decoded = decode(&spliced).expect("decode past unknown segment");
+        assert_eq!(decoded.samples, vec![12345u16]);
+    }
+
+    #[test]
+    fn decode_rejects_eoi_before_sos() {
+        // An EOI marker encountered before SOS must error (kills `delete match arm EOI`, which
+        // would treat EOI as a skippable segment and then decode the spliced-in real markers).
+        let s = valid_stream();
+        let mut spliced = s[..2].to_vec();
+        spliced.extend_from_slice(&[MARKER, EOI, 0x00, 0x04, 0x00, 0x00]); // FF D9, len=4, 2 pad
+        spliced.extend_from_slice(&s[2..]);
+        assert!(decode(&spliced).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_zero_dimensions() {
+        // Patch the SOF3 width field (bytes 9..11 of a 1x1 stream) to zero. Each dimension is
+        // independently rejected (kills both `|| ` -> `&&` in the zero-dimension guard).
+        let mut s = valid_stream();
+        s[9] = 0;
+        s[10] = 0;
+        assert!(decode(&s).is_err());
+        // Likewise patch height (bytes 7..9) to zero.
+        let mut s = valid_stream();
+        s[7] = 0;
+        s[8] = 0;
+        assert!(decode(&s).is_err());
     }
 }
