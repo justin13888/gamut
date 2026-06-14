@@ -1,5 +1,9 @@
 # gamut task runner
 
+# List available commands (default)
+default:
+    @just --list
+
 # Format code
 format:
     cargo fmt --all
@@ -32,6 +36,7 @@ test:
 # crates' cross-check-oracle dev-dependencies, so it needs the submodules + C toolchain.
 # To pass Divan flags (e.g. `--sample-count 50`) target one harness directly, since the
 # per-crate libtest stubs reject them: `cargo bench -p gamut-webp --bench codec -- <flags>`.
+[doc("Run performance benchmarks (Divan; issue #149)")]
 bench:
     cargo bench --workspace
 
@@ -39,6 +44,7 @@ bench:
 # Bindings/binary crates (cli, wasm, ffi) and the dev-only `tooling/` oracles are
 # excluded — their entry points are not meaningfully unit-testable and would otherwise
 # skew the gate.
+[doc("Run tests with coverage (enforces 80% line coverage)")]
 coverage:
     cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi)|tooling)/' --fail-under-lines 80
 
@@ -61,5 +67,6 @@ versions:
 
 # Bump a single crate's version (level = major | minor | patch). Convenience/escape
 # hatch; routine bumps are automated by release-plz from conventional commits.
+[doc("Bump a single crate's version (level = major | minor | patch)")]
 bump crate level:
     cargo set-version -p {{crate}} --bump {{level}}
