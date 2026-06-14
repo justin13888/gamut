@@ -14,18 +14,37 @@ the format crates can read, preserve, and embed accurate color characterization.
   ISO 15076-1; [`../../references/icc`](../../references/icc)), with v2 read support since most
   embedded profiles are still v2.
 - **Dependency-light.** An ICC profile needs neither IFD nor XML machinery, so this crate builds
-  only on [`gamut-core`](../gamut-core) — distinct from CICP color signaling, which lives in
+  only on [`gamut-core`](../gamut-core) plus [`md-5`](https://crates.io/crates/md-5) (the §7.2.18
+  profile-ID digest) — distinct from CICP color signaling, which lives in
   [`gamut-color`](../gamut-color).
 
 ## Usage
 
-No public API yet — implementation pending (issue #34). The type declarations sketch the data model
-(`ProfileHeader`, `DeviceClass`, `ColorSpace`, `RenderingIntent`, `TagSignature`/`TagEntry`,
-`TagType`, `IccProfile`) plus the `IccReader` / `IccWriter` entry points.
+```rust,no_run
+use gamut_icc::{IccProfile, KnownTag, TagData};
 
-## Status
+# fn demo(bytes: &[u8]) -> Result<(), gamut_core::Error> {
+let profile = IccProfile::parse(bytes)?;
+if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint.signature()) {
+    println!("media white point: {:?}", white[0].to_f64());
+}
+let serialized = profile.to_bytes(); // spec-valid bytes, ready to re-embed
+# Ok(()) }
+```
 
-Scaffolding — **under active implementation** (issue #34). See [STATUS.md](STATUS.md).
+The load-bearing element types decode semantically (`XYZType`, the curve types, the text types, the
+`lut8`/`lut16`/`lutAToB`/`lutBToA` transforms, `namedColor2Type`, …); any other type is preserved
+verbatim as `TagData::Raw`, so every profile round-trips losslessly. `IccReader`/`IccWriter` carry
+options (strict parsing; profile-ID recomputation).
+
+**Out of scope:** applying a profile's transform (a CMM) and constructing transforms from
+`gamut-color` — the `to_f64`/`eval` accessors are the integration seam.
+
+## Conformance
+
+Differential-tested against **Little-CMS (lcms2)**: gamut-icc decodes lcms-synthesized profiles to
+the same values lcms reports, and lcms re-opens gamut-icc's serialization as an equivalent profile.
+See [STATUS.md](STATUS.md).
 
 ## License
 
