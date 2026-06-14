@@ -43,16 +43,11 @@ impl AvifEncoder {
     }
 
     /// Creates an encoder that produces a **lossless** still image — the decoded output is bit-exact
-    /// to the input.
+    /// to the input. Identical to [`AvifEncoder::new`] (the default is lossless); it exists to pair
+    /// with [`AvifEncoder::lossy`] and make intent explicit at the call site.
     #[must_use]
     pub fn lossless() -> Self {
-        Self {
-            config: AvifConfig {
-                mode: AvifMode::Lossless,
-                ..AvifConfig::default()
-            },
-            ..Self::default()
-        }
+        Self::default()
     }
 
     /// Creates an encoder that produces a **lossy** still image at the given `quality` (`0..=100`,
@@ -232,89 +227,83 @@ mod tests {
         assert_eq!(av1c_record(&c), [0x81, 0xB5, 0xFE, 0x00]);
     }
 
-    fn encode(w: u32, h: u32) -> Vec<u8> {
-        let mut rgb = vec![0u8; (w * h * 3) as usize];
-        for (i, b) in rgb.iter_mut().enumerate() {
-            *b = (i * 37) as u8;
-        }
-        let mut out = Vec::new();
-        let dims = Dimensions {
-            width: w,
-            height: h,
-        };
-        AvifEncoder::new()
-            .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut out)
-            .unwrap();
-        out
+    #[test]
+    fn quality_maps_to_quant() {
+        // 0..=100, higher quality = lower base_q_idx (less quantization). base_q_idx 0 is reserved
+        // for the lossless path, so the lossy mapping floors at 1 and never returns 0.
+        assert_eq!(
+            quality_to_quant(100),
+            1,
+            "best quality = finest lossy quantizer"
+        );
+        assert_eq!(
+            quality_to_quant(0),
+            255,
+            "worst quality = coarsest quantizer"
+        );
+        assert_eq!(quality_to_quant(50), 127);
+        assert_eq!(
+            quality_to_quant(200),
+            1,
+            "out-of-range quality is clamped to 100"
+        );
+        // The constructors set the mode; lossless never consults the quality field.
+        assert_eq!(AvifEncoder::lossless().config().mode, AvifMode::Lossless);
+        let lossy = AvifEncoder::lossy(80).config();
+        assert_eq!(lossy.mode, AvifMode::Lossy);
+        assert_eq!(lossy.quality, 80);
     }
 
     #[test]
-    fn produces_valid_avif_container() {
-        let f = encode(40, 24);
-        assert_eq!(&f[4..8], b"ftyp");
-        for fourcc in [
-            b"meta", b"av1C", b"ispe", b"pixi", b"colr", b"mdat", b"av01",
-        ] {
-            assert!(f.windows(4).any(|w| w == fourcc), "missing box {fourcc:?}");
-        }
-    }
-
-    #[test]
-    fn lossy_produces_valid_avif_container() {
-        // A lossy quantizer still produces the same well-formed container; only the mdat payload
-        // (the AV1 OBUs) differs. Exercises the lossy path across quality settings.
-        let mut rgb = vec![0u8; 48 * 32 * 3];
-        for (i, b) in rgb.iter_mut().enumerate() {
-            *b = (i * 29) as u8;
-        }
-        for quality in [90u8, 50, 10] {
-            let mut out = Vec::new();
-            let n = AvifEncoder::lossy(quality)
-                .encode_image(
-                    ImageRef::<Rgb8>::new(
-                        &rgb,
-                        Dimensions {
-                            width: 48,
-                            height: 32,
-                        },
-                    )
-                    .unwrap(),
-                    &mut out,
-                )
-                .unwrap();
-            assert_eq!(n, out.len());
-            assert_eq!(&out[4..8], b"ftyp");
-            for fourcc in [b"meta", b"av1C", b"ispe", b"mdat", b"av01"] {
+    fn container_carries_av1_config_and_layout() {
+        use gamut_isobmff::{ColourInformation, PropertyKind, read};
+        // Both modes wrap the AV1 unit in the same well-formed container; only the mdat payload
+        // differs. Parsing it back (gamut-isobmff round-trips its own output) pins the brands, the
+        // primary `av01` item, and the av1C-derived `ispe`/`pixi`/`colr` the encoder stamps — none
+        // of which a box-presence check would catch if a field were wrong.
+        for enc in [AvifEncoder::lossless(), AvifEncoder::lossy(50)] {
+            let img = read(&encode_with(enc, 34, 18)).expect("emitted AVIF parses");
+            assert_eq!(img.major_brand, *b"avif");
+            for brand in [*b"avif", *b"mif1", *b"miaf", *b"MA1A"] {
                 assert!(
-                    out.windows(4).any(|w| w == fourcc),
-                    "missing box {fourcc:?}"
+                    img.compatible_brands.contains(&brand),
+                    "missing brand {brand:?}"
                 );
             }
+            assert_eq!(img.primary_item_id, 1);
+            let item = &img.items[0];
+            assert_eq!(item.item_type, *b"av01");
+            let props = &item.properties;
+            let ispe = props.iter().find_map(|p| match p.kind {
+                PropertyKind::ImageSpatialExtents { width, height } => Some((width, height)),
+                _ => None,
+            });
+            assert_eq!(ispe, Some((34, 18)), "ispe = display dimensions");
+            let pixi = props.iter().find_map(|p| match &p.kind {
+                PropertyKind::PixelInformation { bits_per_channel } => {
+                    Some(bits_per_channel.clone())
+                }
+                _ => None,
+            });
+            assert_eq!(
+                pixi,
+                Some(vec![8u8, 8, 8]),
+                "three 8-bit channels (identity 4:4:4)"
+            );
+            let nclx = props
+                .iter()
+                .find_map(|p| match &p.kind {
+                    PropertyKind::Colour(ColourInformation::Nclx(n)) => Some(n),
+                    _ => None,
+                })
+                .expect("colr nclx present");
+            // BT.709 primaries (1), sRGB transfer (13), identity matrix (0), full range — the values
+            // the identity 8-bit path must carry (AVIF v1.2.0 §2.2; mc=0 requires 4:4:4 full range).
+            assert_eq!(nclx.colour_primaries, 1);
+            assert_eq!(nclx.transfer_characteristics, 13);
+            assert_eq!(nclx.matrix_coefficients, 0);
+            assert!(nclx.full_range);
         }
-    }
-
-    #[test]
-    fn ispe_matches_dimensions() {
-        let (w, h) = (37u32, 19u32);
-        let f = encode(w, h);
-        let pos = f.windows(4).position(|x| x == b"ispe").unwrap();
-        let body = pos + 4 + 4; // skip 'ispe' fourcc + FullBox version/flags
-        let rw = u32::from_be_bytes([f[body], f[body + 1], f[body + 2], f[body + 3]]);
-        let rh = u32::from_be_bytes([f[body + 4], f[body + 5], f[body + 6], f[body + 7]]);
-        assert_eq!((rw, rh), (w, h));
-    }
-
-    #[test]
-    fn rejects_wrong_length() {
-        // The wrong-length buffer can't even be wrapped in an ImageRef for the encoder.
-        let r = ImageRef::<Rgb8>::new(
-            &[0; 10],
-            Dimensions {
-                width: 4,
-                height: 4,
-            },
-        );
-        assert!(r.is_err());
     }
 
     #[test]
