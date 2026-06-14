@@ -27,7 +27,7 @@ struct ImageTransform {
 /// [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) trait, taking a typed [`ImageRef`].
 /// [`AvifEncoder::with_rotation`] / [`AvifEncoder::with_mirror`] add `irot`/`imir`
 /// display-orientation transforms.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct AvifEncoder {
     /// Lossless/lossy mode and the lossy quality factor.
     config: AvifConfig,
@@ -35,19 +35,34 @@ pub struct AvifEncoder {
     transform: ImageTransform,
 }
 
+impl Default for AvifEncoder {
+    /// The default encoder is **lossless** — defined as [`AvifEncoder::lossless`].
+    fn default() -> Self {
+        Self::lossless()
+    }
+}
+
 impl AvifEncoder {
-    /// Creates an encoder with the default configuration (lossless).
+    /// Creates an encoder with the default configuration; equivalent to [`AvifEncoder::lossless`].
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::lossless()
     }
 
     /// Creates an encoder that produces a **lossless** still image — the decoded output is bit-exact
-    /// to the input. Identical to [`AvifEncoder::new`] (the default is lossless); it exists to pair
-    /// with [`AvifEncoder::lossy`] and make intent explicit at the call site.
+    /// to the input. This is the default mode, so [`AvifEncoder::new`] and [`AvifEncoder::default`]
+    /// return the same encoder; it exists to pair with [`AvifEncoder::lossy`] and make intent
+    /// explicit at the call site.
     #[must_use]
     pub fn lossless() -> Self {
-        Self::default()
+        Self {
+            config: AvifConfig {
+                mode: AvifMode::Lossless,
+                // Quality is ignored in lossless mode; carry the config's default for `config()`.
+                ..AvifConfig::default()
+            },
+            transform: ImageTransform::default(),
+        }
     }
 
     /// Creates an encoder that produces a **lossy** still image at the given `quality` (`0..=100`,
@@ -59,7 +74,7 @@ impl AvifEncoder {
                 mode: AvifMode::Lossy,
                 quality,
             },
-            ..Self::default()
+            transform: ImageTransform::default(),
         }
     }
 
