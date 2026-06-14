@@ -144,8 +144,8 @@ Owner: `gamut-webp/src/vp8l/transform.rs`. Transforms are emitted in order and i
 
 ## F. VP8L bit I/O (RFC 9649 §3.3)
 
-Owner: `gamut-webp/src/vp8l/bit_io.rs`. **LSB-first**, diverging from `gamut-bitstream::BitWriter`
-(MSB-first `f(n)`); a candidate to graduate into `gamut-bitstream` if a second consumer appears.
+Owner: `gamut-webp/src/vp8l/bit_io.rs`. **LSB-first**, the opposite order to the MSB-first `f(n)`
+fields used by the AV1-family codecs — which is why it is implemented in-crate rather than shared.
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |

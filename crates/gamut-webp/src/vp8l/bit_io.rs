@@ -1,10 +1,9 @@
 //! VP8L bit I/O: an **LSB-first** bit stream (RFC 9649 §3.3).
 //!
-//! VP8L reads values least-significant-bit-first within each byte, which is the opposite order to
-//! [`gamut_bitstream::BitWriter`](https://docs.rs/gamut-bitstream)'s MSB-first `f(n)` fields. The
-//! reader ([`BitReader`], `ReadBits(n)`) and the matching writer ([`BitWriter`]) land here at
-//! milestone M0; if a second consumer (e.g. a future JPEG/JXL path) needs LSB-first bit I/O, this is
-//! a candidate to graduate into `gamut-bitstream`. Tracked in `../STATUS.md` section F.
+//! VP8L reads values least-significant-bit-first within each byte — the opposite order to the
+//! MSB-first `f(n)` fields used by the AV1-family codecs. That incompatibility is why this LSB-first
+//! reader ([`BitReader`], `ReadBits(n)`) and writer ([`BitWriter`]) are implemented in-crate rather
+//! than reusing a shared bit-stream primitive. Tracked in `../STATUS.md` section F.
 //!
 //! Per the spec, "the bytes are read in the natural order of the stream ... and bits of each byte
 //! are read in least-significant-bit-first order. When multiple bits are read at the same time, the
