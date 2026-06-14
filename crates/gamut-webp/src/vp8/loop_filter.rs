@@ -478,6 +478,37 @@ mod tests {
     }
 
     #[test]
+    fn simple_filter_reads_the_interior_flag_at_the_macroblock_index() {
+        // A 2×2 macroblock grid where only the bottom-left macroblock (flat index 2) flags
+        // interior filtering. Reading the flag at a wrong index (`mb_y / mb_cols` instead of
+        // `mb_y * mb_cols`) would read index 0 (= false) for that macroblock and skip its
+        // interior subblock edges — invisible when the flags are uniform.
+        let stride = 32; // two macroblock columns
+        let mut plane = vec![100u8; stride * 32]; // two macroblock rows
+        // A step of 10 at the x=4 interior subblock edge, present in both left-column
+        // macroblocks; only the bottom-left one is flagged to filter it. Equal on both sides of
+        // the y=16 macroblock edge, so that edge stays flat and cannot perturb the assertion.
+        for y in 0..32 {
+            for x in 0..4 {
+                plane[y * stride + x] = 110;
+            }
+        }
+        let before = plane.clone();
+        simple_filter_luma(&mut plane, stride, 2, 2, &[20; 4], 0, &[false, false, true, false]);
+        assert_ne!(
+            plane[20 * stride + 3],
+            before[20 * stride + 3],
+            "the bottom-left macroblock's interior subblock edge must filter when its own flag \
+             (index 2, not 0) is set"
+        );
+        assert_eq!(
+            plane[4 * stride + 3],
+            before[4 * stride + 3],
+            "the top-left macroblock's interior flag (index 0) is unset, so its edge is untouched"
+        );
+    }
+
+    #[test]
     fn zero_level_is_a_no_op() {
         let mut plane: Vec<u8> = (0..16 * 16).map(|i| (i % 256) as u8).collect();
         let before = plane.clone();
