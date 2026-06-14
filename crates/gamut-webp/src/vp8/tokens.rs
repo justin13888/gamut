@@ -14,35 +14,6 @@
 
 use super::bool_coder::{BoolDecoder, BoolEncoder, Prob, Tree};
 
-/// A VP8 coefficient token (RFC 6386 §13.2). The discriminants are the token-tree leaf values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Token {
-    /// Literal coefficient magnitude 0.
-    Zero = 0,
-    /// Literal coefficient magnitude 1.
-    One = 1,
-    /// Literal coefficient magnitude 2.
-    Two = 2,
-    /// Literal coefficient magnitude 3.
-    Three = 3,
-    /// Literal coefficient magnitude 4.
-    Four = 4,
-    /// Category 1: magnitude 5-6 (1 extra bit).
-    Category1 = 5,
-    /// Category 2: magnitude 7-10 (2 extra bits).
-    Category2 = 6,
-    /// Category 3: magnitude 11-18 (3 extra bits).
-    Category3 = 7,
-    /// Category 4: magnitude 19-34 (4 extra bits).
-    Category4 = 8,
-    /// Category 5: magnitude 35-66 (5 extra bits).
-    Category5 = 9,
-    /// Category 6: magnitude 67-2048 (11 extra bits).
-    Category6 = 10,
-    /// End of block: all remaining coefficients in scan order are zero.
-    EndOfBlock = 11,
-}
-
 /// Token-tree leaf value for an explicit zero coefficient (`DCT_0`).
 const DCT_0: usize = 0;
 /// Token-tree leaf value of the first extra-bits category (`dct_cat1`).

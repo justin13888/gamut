@@ -114,6 +114,7 @@ impl BoolEncoder {
     /// Encodes `value` as a signed `num_bits`-bit literal in the §7.3 `read_signed_literal` form: a
     /// sign flag followed by `num_bits - 1` magnitude bits (the `num_bits`-bit two's-complement of
     /// `value`, written high-order bit first). `value` must fit in `num_bits` two's-complement bits.
+    #[cfg(test)]
     pub fn put_signed_literal(&mut self, value: i32, num_bits: u32) {
         if num_bits == 0 {
             return;
@@ -173,12 +174,14 @@ impl BoolEncoder {
 
     /// Number of output bytes written so far (before [`finish`](Self::finish)).
     #[must_use]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.output.len()
     }
 
     /// Whether no output bytes have been written yet.
     #[must_use]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.output.is_empty()
     }
@@ -278,6 +281,7 @@ impl<'a> BoolDecoder<'a> {
 
     /// Decodes a signed `num_bits`-bit literal (RFC 6386 §7.3 `read_signed_literal`): a sign flag
     /// followed by `num_bits - 1` magnitude bits.
+    #[cfg(test)]
     pub fn get_signed_literal(&mut self, num_bits: u32) -> i32 {
         if num_bits == 0 {
             return 0;
@@ -312,6 +316,7 @@ impl<'a> BoolDecoder<'a> {
     /// untruncated stream never reads past its meaningful end by more than the coder's lookahead, so
     /// the codec layer can use this to detect a malformed or truncated partition.
     #[must_use]
+    #[cfg(test)]
     pub fn is_past_end(&self) -> bool {
         self.past_end
     }
@@ -388,6 +393,27 @@ mod tests {
         enc.output = vec![0xff, 0xff];
         enc.add_carry();
         assert_eq!(enc.output, [0x00, 0x00]);
+    }
+
+    #[test]
+    fn carry_detection_fires_on_renorm_and_flush() {
+        // White-box: the carry path only fires when `bottom`'s top bit is set during a
+        // renormalization shift (`bottom & (1 << 31)`) or at the flush (`v & (1 << (32 - c))`) —
+        // states synthetic streams rarely reach. Force them directly so a flipped detection shift,
+        // which would silently drop the carry, is caught.
+        let mut enc = BoolEncoder::new();
+        enc.output = vec![0x00];
+        enc.bottom = 1 << 31;
+        enc.range = 1; // < 128, so put_bool's renormalization runs and inspects bit 31
+        enc.bit_count = 8;
+        enc.put_bool(128, false);
+        assert_eq!(enc.output[0], 0x01, "renorm carry must reach the emitted byte");
+
+        let mut enc = BoolEncoder::new();
+        enc.output = vec![0x00];
+        enc.bottom = 1 << 24; // bit (32 - bit_count) for the flush carry check
+        enc.bit_count = 8;
+        assert_eq!(enc.finish()[0], 0x01, "flush carry must reach the emitted byte");
     }
 
     #[test]

@@ -459,9 +459,12 @@ mod tests {
         // the bottom row's inter-macroblock top edge — invisible when the level is uniform.
         let stride = 32; // two macroblock columns
         let mut plane = vec![0u8; stride * 32]; // two macroblock rows
+        // A step of 40 across the row-1 top edge: its filter difference (100) sits between the
+        // halved and doubled macroblock-edge limits, so it is filtered only with the correct `* 2`
+        // (pinning that constant too), and only if the row's own level (40) is read.
         for y in 0..32 {
             for x in 0..stride {
-                plane[y * stride + x] = if y < 16 { 100 } else { 116 };
+                plane[y * stride + x] = if y < 16 { 100 } else { 140 };
             }
         }
         let before = plane.clone();

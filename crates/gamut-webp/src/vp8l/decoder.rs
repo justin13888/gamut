@@ -48,7 +48,7 @@ pub fn decode(data: &[u8]) -> Result<(Dimensions, Vec<u32>)> {
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] for any malformed, truncated, or over-spec stream.
-pub fn decode_image(r: &mut BitReader<'_>, width: u32, height: u32) -> Result<Vec<u32>> {
+pub(crate) fn decode_image(r: &mut BitReader<'_>, width: u32, height: u32) -> Result<Vec<u32>> {
     // Read the transform chain (each type at most once), tracking the working width that
     // color-indexing shrinks for everything read after it (RFC 9649 §4).
     let mut transforms: Vec<Vp8lTransform> = Vec::new();
@@ -281,7 +281,7 @@ fn decode_image_data(
 }
 
 /// Converts a decoded ARGB buffer to interleaved 8-bit RGB, appending to `out`.
-pub fn argb_to_rgb8(argb: &[u32], out: &mut Vec<u8>) {
+pub(crate) fn argb_to_rgb8(argb: &[u32], out: &mut Vec<u8>) {
     for &p in argb {
         out.push((p >> 16) as u8);
         out.push((p >> 8) as u8);
@@ -291,7 +291,7 @@ pub fn argb_to_rgb8(argb: &[u32], out: &mut Vec<u8>) {
 
 /// Converts a decoded `0xAARRGGBB` ARGB buffer to interleaved 8-bit RGBA (keeping alpha), appending
 /// to `out`.
-pub fn argb_to_rgba8(argb: &[u32], out: &mut Vec<u8>) {
+pub(crate) fn argb_to_rgba8(argb: &[u32], out: &mut Vec<u8>) {
     for &p in argb {
         out.push((p >> 16) as u8); // R
         out.push((p >> 8) as u8); // G

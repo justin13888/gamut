@@ -511,6 +511,7 @@ pub fn write_normal_prefix_code(w: &mut BitWriter, lengths: &[u8]) {
 /// Writes a prefix code for 1 or 2 symbols using the *simple code length code* (RFC 9649 §3.7.2).
 /// Each listed symbol is given code length 1. `symbols` must hold 1 or 2 entries; extra entries are
 /// ignored.
+#[cfg(test)]
 pub fn write_simple_prefix_code(w: &mut BitWriter, symbols: &[u16]) {
     w.write_bits(1, 1); // 1 = simple code length code.
     let num_symbols = symbols.len().clamp(1, 2);
