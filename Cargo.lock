@@ -457,6 +457,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "exiv2-oracle"
+version = "0.0.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -679,7 +686,15 @@ name = "gamut-iptc"
 version = "0.1.1"
 dependencies = [
  "gamut-core",
+ "gamut-iptc-oracle",
  "gamut-xmp",
+]
+
+[[package]]
+name = "gamut-iptc-oracle"
+version = "0.0.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -774,7 +789,6 @@ name = "gamut-webp"
 version = "0.2.0"
 dependencies = [
  "divan",
- "gamut-bitstream",
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
@@ -786,7 +800,10 @@ dependencies = [
 name = "gamut-xmp"
 version = "0.1.1"
 dependencies = [
+ "exiv2-oracle",
  "gamut-core",
+ "quick-xml",
+ "thiserror",
 ]
 
 [[package]]
@@ -1208,6 +1225,15 @@ name = "pxfm"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
+
+[[package]]
+name = "quick-xml"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "quote"
@@ -1846,7 +1872,7 @@ dependencies = [
  "xz2",
  "zeroize",
  "zopfli",
- "zstd"
+ "zstd",
 ]
 
 [[package]]

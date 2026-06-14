@@ -1,0 +1,23 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under `[workspace].exclude` in the
+# root manifest, pulled in only as a path `dev-dependency`). It statically links exiv2 (built from
+# the `third_party/exiv2` submodule with XMP/PNG and all optional features disabled, so the build is
+# hermetic — no Expat, no zlib, no network) behind a small `extern "C"` shim. exiv2 is the
+# authoritative reference for the legacy IPTC-IIM binary carrier; gamut-iptc's differential tests
+# validate their IIM dataset stream and Photoshop IRB handling against it. The IPTC-in-XMP leg needs
+# exiv2's XMP toolkit (Expat) and is left to the gamut-xmp oracle.
+[package]
+name = "gamut-iptc-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: validates IPTC-IIM/IRB with a vendored, statically-linked exiv2 for gamut-iptc's conformance cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares this crate as the sole provider of the native exiv2 oracle library.
+links = "gamut_iptc_oracle"
+
+[lib]
+doctest = false
+
+[build-dependencies]
+cc = "1"

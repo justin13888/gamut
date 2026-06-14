@@ -11,6 +11,7 @@ exclude = [
     "tooling/libavif-oracle",
     "tooling/libtiff-oracle",
     "tooling/gamut-dng-oracle",
+    "tooling/gamut-iptc-oracle",
     "tooling/zlib-oracle",
     "tooling/libpng-oracle",
     # Dev-only helper that builds a vendored nasm from a committed source tarball so the
