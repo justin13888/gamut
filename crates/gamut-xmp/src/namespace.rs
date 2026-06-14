@@ -60,6 +60,20 @@ pub enum WellKnownNs {
     Iptc4XmpExt,
     /// `crs` — Camera Raw settings.
     CameraRaw,
+    /// `xmpidq` — the qualifier schema for `xmpMM` identifiers (Part 1 §8.7).
+    XmpIdentifier,
+    /// `xmpBJ` — the Basic Job Ticket schema (Part 2 §2.3).
+    XmpJobTicket,
+    /// `xmpTPg` — the Paged-Text schema (Part 2 §2.4).
+    XmpPagedText,
+    /// `xmpDM` — the Dynamic Media schema (Part 2 §2.5).
+    XmpDynamicMedia,
+    /// `pdf` — the Adobe PDF schema (Part 2 §3.1).
+    Pdf,
+    /// `stDim` — the Dimensions structure type (used by, e.g., `xmpTPg:MaxPageSize`).
+    Dimensions,
+    /// `stRef` — the ResourceRef structure type (used by `xmpMM` references).
+    ResourceRef,
 }
 
 impl WellKnownNs {
@@ -75,6 +89,13 @@ impl WellKnownNs {
         WellKnownNs::Iptc4XmpCore,
         WellKnownNs::Iptc4XmpExt,
         WellKnownNs::CameraRaw,
+        WellKnownNs::XmpIdentifier,
+        WellKnownNs::XmpJobTicket,
+        WellKnownNs::XmpPagedText,
+        WellKnownNs::XmpDynamicMedia,
+        WellKnownNs::Pdf,
+        WellKnownNs::Dimensions,
+        WellKnownNs::ResourceRef,
     ];
 
     /// The schema's namespace URI — its canonical identity.
@@ -95,6 +116,13 @@ impl WellKnownNs {
             WellKnownNs::Iptc4XmpCore => "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/",
             WellKnownNs::Iptc4XmpExt => "http://iptc.org/std/Iptc4xmpExt/2008-02-29/",
             WellKnownNs::CameraRaw => "http://ns.adobe.com/camera-raw-settings/1.0/",
+            WellKnownNs::XmpIdentifier => "http://ns.adobe.com/xmp/Identifier/qual/1.0/",
+            WellKnownNs::XmpJobTicket => "http://ns.adobe.com/xap/1.0/bj/",
+            WellKnownNs::XmpPagedText => "http://ns.adobe.com/xap/1.0/t/pg/",
+            WellKnownNs::XmpDynamicMedia => "http://ns.adobe.com/xmp/1.0/DynamicMedia/",
+            WellKnownNs::Pdf => "http://ns.adobe.com/pdf/1.3/",
+            WellKnownNs::Dimensions => "http://ns.adobe.com/xap/1.0/sType/Dimensions#",
+            WellKnownNs::ResourceRef => "http://ns.adobe.com/xap/1.0/sType/ResourceRef#",
         }
     }
 
@@ -113,6 +141,13 @@ impl WellKnownNs {
             WellKnownNs::Iptc4XmpCore => "Iptc4xmpCore",
             WellKnownNs::Iptc4XmpExt => "Iptc4xmpExt",
             WellKnownNs::CameraRaw => "crs",
+            WellKnownNs::XmpIdentifier => "xmpidq",
+            WellKnownNs::XmpJobTicket => "xmpBJ",
+            WellKnownNs::XmpPagedText => "xmpTPg",
+            WellKnownNs::XmpDynamicMedia => "xmpDM",
+            WellKnownNs::Pdf => "pdf",
+            WellKnownNs::Dimensions => "stDim",
+            WellKnownNs::ResourceRef => "stRef",
         }
     }
 
@@ -134,6 +169,9 @@ mod tests {
         assert_eq!(WellKnownNs::DublinCore.prefix(), "dc");
         assert_eq!(WellKnownNs::Xmp.uri(), "http://ns.adobe.com/xap/1.0/");
         assert_eq!(WellKnownNs::Iptc4XmpCore.prefix(), "Iptc4xmpCore");
+        assert_eq!(WellKnownNs::XmpDynamicMedia.uri(), "http://ns.adobe.com/xmp/1.0/DynamicMedia/");
+        assert_eq!(WellKnownNs::Dimensions.prefix(), "stDim");
+        assert_eq!(WellKnownNs::Pdf.uri(), "http://ns.adobe.com/pdf/1.3/");
 
         for &ns in WellKnownNs::ALL {
             assert_eq!(WellKnownNs::from_uri(ns.uri()), Some(ns));
