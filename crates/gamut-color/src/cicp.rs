@@ -86,6 +86,9 @@ impl TransferCharacteristics {
 }
 
 /// Sample value range (CICP `VideoFullRangeFlag`; AV1 `color_range`).
+///
+/// Besides signalling the range in a `colr` / AV1 header, this is the range selector for the
+/// RGB ↔ YCbCr conversions in [`crate::ycbcr`] — so one type carries the choice end to end.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorRange {

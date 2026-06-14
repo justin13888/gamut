@@ -16,7 +16,7 @@ the Rust ecosystem lacks a strong, feature-complete implementation.
 Dependency edges (a crate depends on those to its right):
 
 - **gamut** -- umbrella; optional deps on the format crates, gated by features (`avif`,
-  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `metadata`, `all`). `default = []`. The `primitives`
+  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `metadata`, `all`). `default = []`. The `primitives`
   feature additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling, and the
   `metadata` feature re-exports the image-metadata primitives; `all` includes both.
 - **gamut-core** -- `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`. No
@@ -34,6 +34,11 @@ Dependency edges (a crate depends on those to its right):
 - **gamut-tiff** -- natively still-image TIFF 6.0; its IFD/tag container is the shared **gamut-ifd**
   primitive (with the `bigtiff` feature), not isobmff/riff. Adds the codec — pixel modes plus its
   compressions (None/PackBits/LZW/CCITT/JPEG). ← ifd, core, color, dsp, bitstream.
+- **gamut-dng** -- DNG (Adobe Digital Negative) 1.7.1 raw encoder + decoder (issue #109), a TIFF/EP
+  profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw photometry,
+  uncompressed/Deflate/lossless-JPEG, the colour-calibration profile, and EXIF/XMP/ICC metadata.
+  Conformance-gated against the headless-built **Adobe DNG SDK** (`tooling/gamut-dng-oracle`).
+  ← ifd, bitstream, core. (MSB-first sub-byte sample packing reuses `gamut-bitstream`; `miniz_oxide` for Deflate.)
 - **gamut-cli** (binary named `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib). ← gamut.
   `gamut-cli` is the sandbox that exercises the implemented features: it decodes input via the
   third-party `image` crate (PNG/JPEG/PPM) but encodes only with gamut crates, and exposes the

@@ -10,6 +10,7 @@ exclude = [
     "tooling/dav1d-oracle",
     "tooling/libavif-oracle",
     "tooling/libtiff-oracle",
+    "tooling/gamut-dng-oracle",
     "tooling/zlib-oracle",
     "tooling/libpng-oracle",
     # Dev-only helper that builds a vendored nasm from a committed source tarball so the
@@ -83,6 +84,8 @@ gamut-iptc = { path = "crates/gamut-iptc", version = "0.1.1" }
 gamut-metadata = { path = "crates/gamut-metadata", version = "0.1.1" }
 # Self-contained TIFF 6.0 codec (issue #107).
 gamut-tiff = { path = "crates/gamut-tiff", version = "0.2.0" }
+# DNG raw-image codec (issue #109): a TIFF/EP profile built on gamut-ifd.
+gamut-dng = { path = "crates/gamut-dng", version = "0.1.0" }
 gamut = { path = "crates/gamut", version = "0.3.0" }
 
 [profile.release]

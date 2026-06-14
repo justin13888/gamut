@@ -57,6 +57,8 @@ pub use gamut_av1 as av1;
 pub use gamut_av2 as av2;
 #[cfg(feature = "avif")]
 pub use gamut_avif as avif;
+#[cfg(feature = "dng")]
+pub use gamut_dng as dng;
 #[cfg(feature = "heic")]
 pub use gamut_heic as heic;
 #[cfg(feature = "jxl")]

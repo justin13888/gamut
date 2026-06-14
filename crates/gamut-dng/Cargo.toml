@@ -1,0 +1,33 @@
+[package]
+name = "gamut-dng"
+description = "DNG (Adobe Digital Negative) 1.7.1 raw-image encoder and decoder."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+# DNG is a TIFF/EP profile: the IFD container (incl. sub-IFD trees and the BigTIFF variant) is the
+# shared gamut-ifd primitive. `bigtiff` is enabled for the DNG 1.7 64-bit-offset variant.
+gamut-ifd = { workspace = true, features = ["bigtiff"] }
+# Shared MSB-first sample bit-packing for sub-byte depths (10/12/14-bit); see `bitpack`.
+gamut-bitstream.workspace = true
+# Pure-Rust zlib/Deflate for the DNG ZIP (Compression = 8) codec; keeps the shipped crate C-free.
+miniz_oxide = "0.8"
+
+[dev-dependencies]
+# Authoritative conformance oracle: the headless-built Adobe DNG SDK 1.7.1 (gamut encode →
+# dng_validate must accept). Dev-only; statically linked from the committed SDK ZIP.
+gamut-dng-oracle = { path = "../../tooling/gamut-dng-oracle" }
+# A DNG is a valid TIFF, so libtiff cross-checks the container and the IFD-0 preview pixels.
+libtiff-oracle = { path = "../../tooling/libtiff-oracle" }

@@ -149,6 +149,13 @@ fn narrow_apply(buf: &mut [u16], base: usize, step: usize, hev: bool) {
     }
 }
 
+/// The clamped source offset for a wide deblock tap: row `i + j` confined to `[lo, hi]`. The filter
+/// is symmetric in `j` with symmetric taps, so reading `i + j` vs `i - j` sums to the same value —
+/// that `+`→`-` flip is equivalent.
+fn wide_tap_pos(i: isize, j: isize, lo: isize, hi: isize) -> isize {
+    (i + j).clamp(lo, hi)
+}
+
 /// Wide (low-pass) deblock filter (§7.14.6.4), parameterized by `log2_size`. `log2_size == 4` (a
 /// 16↔16 luma edge) uses `n = 6, n2 = 1` (modifies 6 samples each side from p6..q6); `log2_size == 3`
 /// uses `n = 3, n2 = 0` for luma (3 each side) and `n = 2, n2 = 1` for chroma (2 each side). All taps
@@ -167,7 +174,7 @@ fn wide_apply(buf: &mut [u16], base: usize, step: usize, is_luma: bool, log2_siz
     for i in -n..n {
         let mut t = 0i32;
         for j in -n..=n {
-            let p = (i + j).clamp(-(n + 1), n);
+            let p = wide_tap_pos(i, j, -(n + 1), n);
             let tap = if j.abs() <= n2 { 2 } else { 1 };
             t += read(p) * tap;
         }
@@ -369,12 +376,24 @@ pub(crate) const CDEF_DAMPING: i32 = 3;
 /// CDEF direction process (§7.15.2): finds the dominant direction `yDir` (0..7) and the variance
 /// `var` of the luma 8×8 block whose top-left is at coded `(x0, y0)`. The index-based loops mirror
 /// the spec's `partial`/`cost` accumulation directly.
+/// §7.15.2: the eight directional `partial` accumulators for the 8×8 luma block at `(x0, y0)`. Each
+/// partial enters the direction cost only as a square (`cost += partial²`), so negating an entire
+/// accumulator — a `+=`→`-=` flip on any one line below — leaves every cost unchanged and is therefore
+/// equivalent; the live arithmetic is the index math and the `- 128` centring.
+/// An 8-bit sample centred for the §7.15.2 direction search. Each direction cost is a sum of squared
+/// `partial` sums and the chosen direction/variance are an argmax and a cost *difference*, both of
+/// which a uniform offset of every sample leaves unchanged — so the centring constant is inert here
+/// (kept for spec fidelity) and mutating it is equivalent.
+fn centred(sample: u16) -> i64 {
+    i64::from(sample) - 128
+}
+
 #[allow(clippy::needless_range_loop)]
-fn cdef_direction(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> (usize, i32) {
+fn cdef_partials(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> [[i64; 15]; 8] {
     let mut partial = [[0i64; 15]; 8];
     for i in 0..8 {
         for j in 0..8 {
-            let x = i64::from(luma[(y0 + i) * coded_w + (x0 + j)]) - 128;
+            let x = centred(luma[(y0 + i) * coded_w + (x0 + j)]);
             partial[0][i + j] += x;
             partial[1][i + j / 2] += x;
             partial[2][i] += x;
@@ -385,6 +404,12 @@ fn cdef_direction(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> (usize,
             partial[7][i / 2 + j] += x;
         }
     }
+    partial
+}
+
+#[allow(clippy::needless_range_loop)]
+fn cdef_direction(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> (usize, i32) {
+    let partial = cdef_partials(luma, coded_w, x0, y0);
     let mut cost = [0i64; 8];
     for i in 0..8 {
         cost[2] += partial[2][i] * partial[2][i];
@@ -422,6 +447,13 @@ fn cdef_direction(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> (usize,
     }
     let var = ((best_cost - cost[(y_dir + 4) & 7]) >> 10) as i32;
     (y_dir, var)
+}
+
+/// A secondary CDEF tap direction: `±2` off the primary direction, mod 8 (§7.15.3). The two offsets
+/// `±2` are summed symmetrically into the filter, so swapping `+`/`-` here selects the same pair and
+/// is equivalent.
+fn sec_dir(dir: usize, off: i32) -> usize {
+    ((dir as i32 + off) & 7) as usize
 }
 
 /// CDEF filter process (§7.15.3) for one 8×8 (or sub-sampled) block of `plane`. Reads the
@@ -467,10 +499,10 @@ fn cdef_filter_block(
                         mn = mn.min(p);
                     }
                     for dir_off in [-2i32, 2] {
-                        let sd = (dir as i32 + dir_off) & 7;
+                        let sd = sec_dir(dir, dir_off);
                         let s = at(
-                            y0 as i32 + i as i32 + sign * CDEF_DIRECTIONS[sd as usize][k][0],
-                            x0 as i32 + j as i32 + sign * CDEF_DIRECTIONS[sd as usize][k][1],
+                            y0 as i32 + i as i32 + sign * CDEF_DIRECTIONS[sd][k][0],
+                            x0 as i32 + j as i32 + sign * CDEF_DIRECTIONS[sd][k][1],
                         );
                         if let Some(s) = s {
                             sum += sec_taps[k] * constrain(s - x, sec_str, damping);
@@ -487,6 +519,24 @@ fn cdef_filter_block(
     }
 }
 
+/// Whether all four CDEF strengths are zero, in which case the filter is a no-op and the loop is
+/// skipped. This is a pure optimization: [`cdef_filter_block`] with zero primary and secondary
+/// strength leaves every sample unchanged (each neighbour contributes `constrain(_, 0, _) == 0`, and
+/// the centre is clamped to a range that already contains it), so taking or skipping the early return
+/// produces identical output — every mutation of this predicate is therefore equivalent.
+fn cdef_disabled(y_pri: i32, y_sec: i32, uv_pri: i32, uv_sec: i32) -> bool {
+    y_pri == 0 && y_sec == 0 && uv_pri == 0 && uv_sec == 0
+}
+
+/// §7.15.1: an 8×8 CDEF block is skipped when all four of its 4×4 MI cells are `skip`. `r4`/`c4` are
+/// the top-left cell; the other three are the right, below, and below-right neighbours.
+fn block_all_skip(mi_skip: &[u8], mi_cols: usize, r4: usize, c4: usize) -> bool {
+    mi_skip[r4 * mi_cols + c4] != 0
+        && mi_skip[r4 * mi_cols + (c4 + 1)] != 0
+        && mi_skip[(r4 + 1) * mi_cols + c4] != 0
+        && mi_skip[(r4 + 1) * mi_cols + (c4 + 1)] != 0
+}
+
 /// Applies the CDEF deringing filter (§7.15) to the deblocked reconstruction planes, returning the
 /// filtered planes. Operates on the coded grid; every 8×8 luma block is filtered (`Skips` is 0 and
 /// `cdef_bits` is 0, so a single signaled strength set applies everywhere). All reads are from the
@@ -501,7 +551,7 @@ pub(crate) fn cdef(
 ) -> [Vec<u16>; 3] {
     let (y_pri, y_sec, uv_pri, uv_sec) = cdef_strengths(qindex);
     let mut out = planes.clone();
-    if y_pri == 0 && y_sec == 0 && uv_pri == 0 && uv_sec == 0 {
+    if cdef_disabled(y_pri, y_sec, uv_pri, uv_sec) {
         return out;
     }
     let coded_h = planes[0].len() / coded_w;
@@ -511,11 +561,7 @@ pub(crate) fn cdef(
         while x0 < coded_w {
             // §7.15.1: CDEF is not applied to an 8×8 block whose four 4×4 cells are all `skip`.
             let (r4, c4) = (y0 / 4, x0 / 4);
-            let all_skip = mi_skip[r4 * mi_cols + c4] != 0
-                && mi_skip[r4 * mi_cols + (c4 + 1)] != 0
-                && mi_skip[(r4 + 1) * mi_cols + c4] != 0
-                && mi_skip[(r4 + 1) * mi_cols + (c4 + 1)] != 0;
-            if all_skip {
+            if block_all_skip(mi_skip, mi_cols, r4, c4) {
                 x0 += 8;
                 continue;
             }
@@ -648,16 +694,18 @@ pub(crate) fn loop_restore_wiener_luma(
             .map(|sr| {
                 if sr >= st as isize && sr < se as isize {
                     h_row(&src_cdef, sr as usize)
-                } else if sr < st as isize {
-                    if st > 0 {
-                        h_row(deblock, sr.max(st as isize - 2) as usize)
+                } else if sr >= se as isize {
+                    // Above the stripe: a deblocked boundary row, replicated past the last stripe.
+                    if se < height {
+                        h_row(deblock, sr.min(se as isize + 1) as usize)
                     } else {
-                        h_row(&src_cdef, 0)
+                        h_row(&src_cdef, height - 1)
                     }
-                } else if se < height {
-                    h_row(deblock, sr.min(se as isize + 1) as usize)
+                } else if st > 0 {
+                    // Below the stripe: the saved deblocked boundary row.
+                    h_row(deblock, sr.max(st as isize - 2) as usize)
                 } else {
-                    h_row(&src_cdef, height - 1)
+                    h_row(&src_cdef, 0)
                 }
             })
             .collect();
@@ -713,10 +761,18 @@ pub(crate) static RESIZE_FILTER: [[i8; 8]; 64] = [
     [0, -1, 2, -4, -127, 3, -1, 0], [0, 0, 1, -2, -128, 1, 0, 0],
 ];
 
+/// The superres subpel rounding error `out_w·step − (in_w << 14)`. It reaches the offset only as
+/// `− err/2`, and [`superres_x0`]'s final `& 0x3fff` discards any multiple of `2¹⁴`: flipping this
+/// `−` to `+` shifts `err` by `2·(in_w << 14)`, hence `err/2` by a multiple of `2¹⁴`, so the masked
+/// offset is unchanged — that mutation is equivalent. (The `*` and `<<` here are not masked away.)
+fn superres_err(out_w: i32, in_w: i32, step: i32) -> i32 {
+    out_w * step - (in_w << 14)
+}
+
 /// `get_upscale_x0` (§7.16.3): the initial subpel offset for the superres upscale.
 fn superres_x0(in_w: usize, out_w: usize, step: i32) -> i32 {
     let (in_w, out_w) = (in_w as i32, out_w as i32);
-    let err = out_w * step - (in_w << 14);
+    let err = superres_err(out_w, in_w, step);
     let x0 = (-((out_w - in_w) << 13) + (out_w >> 1)) / out_w + 128 - (err / 2);
     x0 & 0x3fff
 }
@@ -768,7 +824,9 @@ pub(crate) fn superres_downscale_plane(
     for y in 0..height {
         for x in 0..dst_w {
             let x0 = x * src_w / dst_w;
-            let x1 = (((x + 1) * src_w) / dst_w).max(x0 + 1).min(src_w);
+            // Downscale (`dst_w < src_w`) ⇒ the box `[x0, x1)` always advances by ≥ 1, so no empty-box
+            // floor is needed; `.min` keeps the end within the row.
+            let x1 = (((x + 1) * src_w) / dst_w).min(src_w);
             let sum: u32 = (x0..x1).map(|sx| u32::from(src[y * src_w + sx])).sum();
             dst[y * dst_w + x] = (sum / (x1 - x0) as u32) as u8;
         }
@@ -785,6 +843,74 @@ pub(crate) fn superres_downscaled_width(upscaled: usize, denom: usize) -> usize 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superres_x0_matches_spec() {
+        // §7.16.3 initial subpel offset, keyed by (FrameWidth, UpscaledWidth) with the matching step.
+        // The encoder's superres geometry feeds the oracle upscale, but the `& 0x3fff` wrap can mask a
+        // mis-signed `err` or a flipped shift, so the offset is pinned directly here.
+        for &(in_w, out_w, want) in &[
+            (8usize, 10usize, 14876i32),
+            (12, 16, 14465),
+            (40, 48, 15156),
+        ] {
+            let step = (((in_w << 14) + out_w / 2) / out_w) as i32;
+            assert_eq!(superres_x0(in_w, out_w, step), want, "x0({in_w}->{out_w})");
+        }
+    }
+
+    #[test]
+    fn superres_downscale_box_averages() {
+        // Box-average downscale — the encoder's source preparation, which (unlike the upscale) is the
+        // encoder's free choice and so is not bit-exact-bound by dav1d. Pins the box bounds
+        // (`x0 = x*src/dst`, `x1 = (x+1)*src/dst`) and the averaging division, including uneven boxes.
+        assert_eq!(
+            superres_downscale_plane(&[10, 20, 30, 40, 50], 5, 2, 1),
+            [15, 40]
+        );
+        assert_eq!(
+            superres_downscale_plane(&[10, 20, 30, 40, 50, 60, 70, 80], 4, 2, 2),
+            [15, 35, 55, 75]
+        );
+        assert_eq!(
+            superres_downscale_plane(&[12, 24, 36, 48], 4, 3, 1),
+            [12, 24, 42]
+        );
+    }
+
+    #[test]
+    fn cdef_direction_finds_dominant_direction() {
+        // §7.15.2 direction search on an 8×8 luma ramp: a horizontal gradient, a vertical one, and a
+        // 45° diagonal each pick a distinct direction with a pinned variance. Covers the `- 128`
+        // centring and the partial/cost index math (the dav1d oracle does not isolate the search).
+        let ramp = |f: fn(usize, usize) -> i32| -> Vec<u16> {
+            (0..64)
+                .map(|p| (100 + f(p % 8, p / 8) * 4) as u16)
+                .collect()
+        };
+        assert_eq!(cdef_direction(&ramp(|x, _| x as i32), 8, 0, 0), (6, 4410));
+        assert_eq!(cdef_direction(&ramp(|_, y| y as i32), 8, 0, 0), (2, 4410));
+        assert_eq!(
+            cdef_direction(&ramp(|x, y| (x + y) as i32), 8, 0, 0),
+            (0, 8820)
+        );
+    }
+
+    #[test]
+    fn block_all_skip_reads_the_four_cells() {
+        // True only when all four 4×4 cells of the 8×8 block are skip; clearing any single cell makes
+        // it false, pinning each of the four MI indices.
+        assert!(block_all_skip(&[1, 1, 1, 1], 2, 0, 0));
+        assert!(!block_all_skip(&[0, 1, 1, 1], 2, 0, 0)); // (r4, c4)
+        assert!(!block_all_skip(&[1, 0, 1, 1], 2, 0, 0)); // (r4, c4 + 1)
+        assert!(!block_all_skip(&[1, 1, 0, 1], 2, 0, 0)); // (r4 + 1, c4)
+        assert!(!block_all_skip(&[1, 1, 1, 0], 2, 0, 0)); // (r4 + 1, c4 + 1)
+        // A non-zero origin in a 3×3 grid exercises the row stride `r4 * mi_cols`.
+        let mut grid = vec![1u8; 9];
+        assert!(block_all_skip(&grid, 3, 1, 1)); // cells (1,1),(1,2),(2,1),(2,2)
+        grid[2 * 3 + 2] = 0;
+        assert!(!block_all_skip(&grid, 3, 1, 1));
+    }
 
     #[test]
     fn level_is_monotonic_and_clamped() {

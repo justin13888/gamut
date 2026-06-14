@@ -27,10 +27,15 @@ read/write code paths byte-for-byte.
 | P2 | §2 | Header + single-IFD reader: II/MM byte order, magic, entry decode for all 12 field types | ✅ done |
 | P3 | §2 | Value resolution: inline (≤ offset width) vs out-of-line offsets; multi-IFD chains (`next` links) | ✅ done |
 | P4 | §2 | **Keystone** — writer with two-pass offset layout + back-patching; read→write→read round-trip | ✅ done |
-| P5 | §2 | Sub-IFD pointers + nested directories (the Exif/GPS/Interop offset-tag pattern EXIF needs) | ☐ (EXIF, #34) |
+| P5 | §2 | Sub-IFD pointers + nested directories (the SubIFDs/Exif/GPS offset-tag pattern) | ◑ writer + `read_ifd_at` (#109) |
 | P6 | §2 | Robustness: offset-loop / overlap / truncation guards ✅; fuzz corpus ☐ | ◑ partial |
 | P7 | — | libtiff/exiv2 differential oracle gate (gamut-tiff's libtiff oracle covers the shared paths) | ◑ via codec |
 | P8 | — | BigTIFF (8-byte offsets/counts, `Long8`/`SLong8`/`Ifd8`) — gated `bigtiff` feature, additive | ✅ done |
 
-Remaining work (P5, the P6 fuzz corpus, a dedicated exiv2 oracle) belongs to the EXIF campaign
-(issue #34), which layers the `Exif\0\0` marker and sub-IFD traversal on top of this core.
+P5's **write** side landed with the DNG codec (issue #109): [`write`](src/writer.rs) lays out the
+whole IFD *tree* — [`Ifd::set_sub_ifd`](src/entry.rs) attaches children under a pointer tag
+(`SubIFDs`/`ExifIFD`/…), the writer places them and synthesises the offset-array field — and
+[`read_ifd_at`](src/reader.rs) re-parses a child at a given offset. The generic [`read`] still leaves
+a pointer tag as a plain integer value (it cannot know which `LONG` tags are offsets), so automatic
+sub-IFD *traversal* on read — plus the P6 fuzz corpus and a dedicated exiv2 oracle — remains for the
+EXIF campaign (issue #34), which layers the `Exif\0\0` marker on top of this core.

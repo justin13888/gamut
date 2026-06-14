@@ -49,11 +49,26 @@ MyEncoder
 
 ## Status
 
-Stable foundation. The trait surface ([`EncodeImage`], [`DecodeImage`]), the branded [`ImageRef`] /
-[`ImageBuf`] buffers and [`Pixel`] markers, [`Dimensions`], [`Result`], and the
-[`Error`] variants (`InvalidInput`, `Unsupported`) are in place and used across the implemented M0
-path. New `Error` variants and image-buffer helpers are added here as later milestones need them; the
-`#[non_exhaustive]` enum keeps that additive.
+Stable foundation with a frozen public surface: the [`EncodeImage`] / [`DecodeImage`] traits, the
+branded [`ImageRef`] / [`ImageBuf`] buffers and [`Pixel`] markers, [`Dimensions`], [`Result`], and
+the [`Error`] variants (`InvalidInput`, `Unsupported`). Every codec in the workspace is built on it.
+
+The surface is intentionally minimal. The following are deliberate design decisions, not gaps:
+
+- **Interleaved `u8` / `u16` layouts only.** [`Sample`] is sealed over `u8` and `u16`. Planar
+  layouts and coded bit depth are codec concerns and live in `gamut-color` (`Planar8`, `BitDepth`),
+  which builds on these types.
+- **Open vs. sealed.** [`Error`] and `ColorModel` are `#[non_exhaustive]`, so new variants — for
+  example a future dynamic-context error — land additively. [`Pixel`] / [`Sample`] are sealed: the
+  set of supported pixel layouts is closed and defined only here.
+- **Static error messages.** Error payloads are `&'static str`; richer dynamic context is deferred
+  and addable later behind `#[non_exhaustive]` without breaking callers.
+- **The length invariant lives on the buffers.** [`Dimensions`] is a plain value type; non-emptiness
+  and `len == width * height * channels` are validated once, at [`ImageRef::new`] / [`ImageBuf::new`],
+  so codecs never re-check.
+
+Additive growth (new `Error`/`ColorModel` variants, more buffer helpers) stays backward-compatible;
+removing or changing existing items would not.
 
 ## License
 

@@ -1,7 +1,8 @@
 # gamut-color
 
 `gamut-color` holds the color primitives the gamut codecs share: pixel formats, bit depths, chroma
-subsampling, the CICP code points carried in nclx / AV1 sequence headers, and planar pixel buffers.
+subsampling, the CICP code points carried in nclx / AV1 sequence headers, planar pixel buffers, and
+the `f64` colour-science layer (transfer functions, OKLab, gamut mapping, source profiles).
 
 ## Goals
 
@@ -17,6 +18,11 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
   HDR — see [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md)) extend without reshaping the types.
 - **Match the spec code points exactly.** CICP values mirror the H.273 / AV1 sequence-header code
   points so they round-trip through `av1C`/`colr` and AV1 headers unchanged.
+- **Provide the colour science.** The `transfer` (encoder-exact EOTFs), `oklab` (per-gamut OKLab
+  transforms), `matrix` (RGB↔XYZ via Bradford adaptation), `gamut_map` (hue-preserving soft clamp),
+  and `profile` (source bundles) modules. This math is **Tier-1** (correctness only): it uses `std`
+  `f64`, so it is not bit-reproducible across platforms — see
+  [`references/color/README.md`](../../references/color/README.md).
 - **Stay memory-safe.** `#![forbid(unsafe_code)]`.
 
 ## Usage
@@ -36,10 +42,12 @@ let _y = planes.plane(0); // luma plane
 ## Status
 
 M0 exercises the 8-bit RGB ↔ identity 4:4:4 conversion ([`Planar8::from_rgb8_identity`] /
-[`Planar8::to_rgb8_identity`]) plus the CICP tables the AVIF `colr` box needs. The remaining
-formats, bit depths, and subsamplings are modeled in the type system but not yet wired into an
-encode path; they land with the milestones tracked in
-[`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md).
+[`Planar8::to_rgb8_identity`]) plus the CICP tables the AVIF `colr` box needs, the BT.601 YCbCr 4:2:0
+path (WebP), and the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto
+gamuts. The remaining formats, bit depths, subsamplings, and non-identity matrix coefficients are
+modeled in the type system but not yet wired into an encode path; they land with the milestones
+tracked in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md). See the crate docs ("Implemented vs.
+modeled") for the precise split.
 
 ## License
 
