@@ -522,6 +522,7 @@ dependencies = [
  "gamut-iptc",
  "gamut-jxl",
  "gamut-metadata",
+ "gamut-png",
  "gamut-tiff",
  "gamut-tonemap",
  "gamut-vvc",
@@ -587,7 +588,6 @@ dependencies = [
 name = "gamut-color"
 version = "0.3.0"
 dependencies = [
- "bitflags",
  "divan",
  "gamut-core",
 ]
@@ -597,7 +597,13 @@ name = "gamut-core"
 version = "0.2.0"
 dependencies = [
  "thiserror",
- "tracing",
+]
+
+[[package]]
+name = "gamut-deflate"
+version = "0.1.0"
+dependencies = [
+ "zlib-oracle",
 ]
 
 [[package]]
@@ -704,6 +710,15 @@ dependencies = [
  "gamut-icc",
  "gamut-iptc",
  "gamut-xmp",
+]
+
+[[package]]
+name = "gamut-png"
+version = "0.1.0"
+dependencies = [
+ "gamut-core",
+ "gamut-deflate",
+ "libpng-oracle",
 ]
 
 [[package]]
@@ -964,6 +979,13 @@ checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
 dependencies = [
  "cfg-if",
  "windows-link",
+]
+
+[[package]]
+name = "libpng-oracle"
+version = "0.0.0"
+dependencies = [
+ "bindgen 0.71.1",
 ]
 
 [[package]]
@@ -1824,7 +1846,14 @@ dependencies = [
  "xz2",
  "zeroize",
  "zopfli",
- "zstd",
+ "zstd"
+]
+
+[[package]]
+name = "zlib-oracle"
+version = "0.0.0"
+dependencies = [
+ "bindgen 0.71.1",
 ]
 
 [[package]]

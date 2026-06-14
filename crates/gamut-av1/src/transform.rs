@@ -467,4 +467,76 @@ mod tests {
         assert_eq!(TxSize::Tx32x64.dq_denom(), 4);
         assert_eq!(TxSize::Tx8x8.dq_denom(), 1);
     }
+
+    #[test]
+    fn inverse_transform_zeros_coeffs_outside_kept_32x32() {
+        // A 64-point transform codes only its top-left 32×32 coefficients (§7.13.3); any coefficient
+        // at row or column index ≥ 32 must be dropped. Placing energy at exactly (row 32, col 0) and
+        // (row 0, col 32) — one step past the boundary on each axis — must reconstruct to all-zero.
+        // This pins the `i < 32 && j < 32` guard: an off-by-one (`<` → `<=`) or `&&` → `||` would
+        // read that coefficient and leak it into the output.
+        let tx = TxSize::Tx64x64;
+        let (w, h) = (tx.width(), tx.height());
+        for &(r, c) in &[(32usize, 0usize), (0, 32)] {
+            let mut coeff = vec![0i32; w * h];
+            coeff[r * w + c] = 1 << 18; // large, so any leak is unmistakable
+            let out = inverse_transform_2d(&coeff, tx, TxType::DctDct, 8);
+            assert!(
+                out.iter().all(|&v| v == 0),
+                "coeff at (row {r}, col {c}) past the 32×32 boundary leaked into the reconstruction",
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_transform_intermediate_clamp_is_pinned() {
+        // Between the row and column passes the inverse clamps to the spec's intermediate range
+        // (`colClampRange = max(bitDepth + 6, 16)`, magnitude `1 << (range - 1)`, §7.13.3). Driving
+        // the row pass with maximum-magnitude dequantized coefficients pushes its output past that
+        // range so the clamp engages. The golden is taken at 12-bit — the highest AV1 depth, the one
+        // where `bitDepth + 6` clears the 16 floor so the `max(.., 16)` and the `range - 1` shift are
+        // both live — pinning `colClampRange`, the `1 << (range - 1)` limit, and its `lim - 1` upper
+        // bound. `sum`/`wsum` are full-reconstruction checksums (`wsum` position-weighted, so a change
+        // at any single coefficient moves it). Values verified to shift under every clamp mutation.
+        let bit_depth = 12u32;
+        let amp = 1i32 << (7 + bit_depth); // dequant clamp magnitude at this depth (quant.rs)
+        let cases = [
+            (TxSize::Tx64x64, 0u32, 391_287i64, 763_543_869i64),
+            (TxSize::Tx64x64, 1, 391_327, 839_599_092),
+            (TxSize::Tx32x32, 0, 53_781, 28_040_091),
+            (TxSize::Tx32x32, 1, 53_751, 27_072_964),
+        ];
+        for (tx, pat, want_sum, want_wsum) in cases {
+            let (w, h) = (tx.width(), tx.height());
+            // Coefficients at the dequant clamp magnitude, restricted to the kept 32×32; `scale`
+            // halves them for the linearity probe below.
+            let coeff = |scale: i32| -> Vec<i32> {
+                (0..w * h)
+                    .map(|p| {
+                        let (x, y) = (p % w, p / w);
+                        if x >= 32 || y >= 32 {
+                            0
+                        } else if pat == 0 || (x + y) % 2 == 0 {
+                            (amp - 1) / scale
+                        } else {
+                            -amp / scale
+                        }
+                    })
+                    .collect()
+            };
+            let out = inverse_transform_2d(&coeff(1), tx, TxType::DctDct, bit_depth);
+            // The clamp must actually engage, or the golden would not exercise it: full-scale is
+            // non-linear vs half-scale (saturation breaks `f(2x) = 2·f(x)`).
+            let half = inverse_transform_2d(&coeff(2), tx, TxType::DctDct, bit_depth);
+            assert!(
+                out.iter().zip(&half).any(|(&a, &b)| a != 2 * b),
+                "{tx:?} pat{pat}: intermediate clamp never engaged",
+            );
+            let sum: i64 = out.iter().map(|&v| i64::from(v)).sum();
+            let wsum = out.iter().enumerate().fold(0i64, |acc, (i, &v)| {
+                acc.wrapping_add(i64::from(v).wrapping_mul(i as i64 + 1))
+            });
+            assert_eq!((sum, wsum), (want_sum, want_wsum), "{tx:?} pat{pat}");
+        }
+    }
 }

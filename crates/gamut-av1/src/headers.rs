@@ -96,8 +96,10 @@ fn tile_log2(blk_size: u32, target: u32) -> u32 {
 
 /// Appends an OBU (header byte, `obu_has_size_field = 1`, LEB128 size, payload) to `out`.
 pub(crate) fn write_obu(out: &mut Vec<u8>, obu_type: u8, payload: &[u8]) {
-    // obu_forbidden_bit=0, obu_type, obu_extension_flag=0, obu_has_size_field=1, reserved=0.
-    out.push((obu_type << 3) | 0b10);
+    // obu_forbidden_bit=0, obu_type, obu_extension_flag=0, obu_has_size_field=1, reserved=0. The
+    // type occupies bits 6..3 and the flag is bit 1, so `+` equals `|`/`^` here but, unlike them,
+    // leaves no equivalent bit-op mutant (a dropped/altered flag changes the byte).
+    out.push((obu_type << 3) + 0b10);
     write_leb128(out, payload.len() as u64);
     out.extend_from_slice(payload);
 }

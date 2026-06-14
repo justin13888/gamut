@@ -265,6 +265,76 @@ mod tests {
         out
     }
 
+    /// Returns the payload bytes of the first OBU (the sequence header) — its header byte and
+    /// LEB128 size prefix stripped.
+    fn seq_header_payload(d: &[u8]) -> &[u8] {
+        let mut i = 1; // skip the OBU header byte
+        let (mut size, mut shift) = (0usize, 0);
+        loop {
+            let b = d[i];
+            i += 1;
+            size |= usize::from(b & 0x7f) << shift;
+            shift += 7;
+            if b & 0x80 == 0 {
+                break;
+            }
+        }
+        &d[i..i + size]
+    }
+
+    #[test]
+    fn encoded_bitstream_is_stable() {
+        // The encoder's structural choices — block partition (should_split/decide_rect), palette
+        // (decide_palette/palette_cache/signal_palette_colors), per-superblock delta-q/lf
+        // (signal_delta_q/lf), skip (block_is_skippable), tx selection (select_tx_*), loop-restoration
+        // signalling (write_lr) — change the OBU bitstream but reconstruct bit-exactly, so the dav1d
+        // recon oracle in recon_dav1d.rs cannot see them. This snapshot pins an FNV-1a checksum of the
+        // OBU stream for a spread of content patterns, sizes and quantizers; any change to a
+        // (deterministic) encoder decision moves a checksum. The recon oracle proves these same streams
+        // decode correctly, so the pair certifies "deterministic AND correct", not just "deterministic".
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+        }
+        // Patterns exercise distinct decisions: gradient (detailed residual + range split), flat (every
+        // block skippable), palette (few luma colours + flat chroma), checker (max residual / golomb
+        // tails), bands (vertical structure → rectangular partitions).
+        let pat = |id: u8, x: u32, y: u32| -> [u8; 3] {
+            match id {
+                0 => [(x * 7 + y) as u8, (x ^ (y * 3)) as u8, (x + y * 5) as u8],
+                1 => [200, 100, 50],
+                2 => [(((x / 4 + y / 4) % 5) * 50) as u8, 128, 128],
+                3 => {
+                    let v = if (x + y).is_multiple_of(2) { 0 } else { 255 };
+                    [v, 255 - v, v]
+                }
+                _ => [((x / 8) * 40) as u8, 128, 128],
+            }
+        };
+        let cases: &[(u8, u32, u32, u8, u64)] = &[
+            (0, 40, 24, 0, 0x7734_889d_bb0f_3d10),
+            (1, 64, 64, 1, 0x555f_b439_5f54_0869),
+            (2, 32, 32, 40, 0xc137_a411_19d0_00fa),
+            (3, 48, 48, 16, 0x1f80_0ee1_459d_bc80),
+            (4, 64, 48, 90, 0x55c2_d41f_b10c_edac),
+            (0, 100, 80, 8, 0x9b7c_1ba3_3bd9_bdb0),
+            (0, 130, 70, 120, 0x381a_b126_b155_d441),
+            (2, 64, 64, 200, 0x6874_9d61_4529_698e),
+            (3, 96, 96, 60, 0x8ecd_b3b2_df5f_fc09),
+            (4, 128, 64, 30, 0xb755_5da2_fbd3_7636),
+        ];
+        for &(id, w, h, q, want) in cases {
+            let p = planes(w, h, |x, y| pat(id, x, y));
+            let obus = encode_still_intra(&p, q).unwrap().0.obus;
+            assert_eq!(
+                fnv1a(&obus),
+                want,
+                "bitstream changed for pat{id} {w}x{h} q{q}"
+            );
+        }
+    }
+
     #[test]
     fn obu_stream_is_seq_then_frame() {
         let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
@@ -326,8 +396,34 @@ mod tests {
 
     #[test]
     fn rejects_zero_dimension() {
-        let p = Planar8::from_rgb8_identity(&[], 0, 0).unwrap();
-        assert!(encode_still_lossless_identity(&p).is_err());
+        // Each axis is rejected independently: a 0×0, a 0×4 and a 4×0 image must all fail with the
+        // guard's own message. The mixed cases (exactly one zero) are what force the guard to be an
+        // `||` — under `&&` a 0×4 slips through to fault deeper in the encoder.
+        for (w, h) in [(0, 0), (0, 4), (4, 0)] {
+            let p = Planar8::from_rgb8_identity(&[], w, h).unwrap();
+            match encode_still_intra(&p, 0) {
+                Err(Error::InvalidInput(msg)) => {
+                    assert_eq!(msg, "image has a zero dimension", "{w}x{h}");
+                }
+                other => panic!("{w}x{h}: expected zero-dimension InvalidInput, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn lossless_sequence_header_clears_lossy_flags() {
+        // `encode_with` passes `qindex > 0` as the sequence header's `lossy` flag, which gates
+        // enable_filter_intra/cdef/restoration. At qindex 0 (lossless) those bits must be 0; at a
+        // lossy qindex they are 1. Same image and no superres, so the sequence-header payload differs
+        // *only* by that flag — distinguishing `qindex > 0` from an always-true `qindex >= 0`.
+        let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
+        let (lossless, _) = encode_still_intra(&p, 0).unwrap();
+        let (lossy, _) = encode_still_intra(&p, 8).unwrap();
+        assert_ne!(
+            seq_header_payload(&lossless.obus),
+            seq_header_payload(&lossy.obus),
+            "lossless and lossy sequence headers must differ in the lossy flags",
+        );
     }
 
     #[test]

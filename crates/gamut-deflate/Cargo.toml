@@ -1,0 +1,22 @@
+[package]
+name = "gamut-deflate"
+description = "Pure-Rust DEFLATE (RFC 1951) and zlib (RFC 1950) encoder, tuned for space efficiency."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Differential cross-check oracle: a vendored, statically-linked zlib (built from the
+# `third_party/zlib` submodule). Dev-only and excluded from the workspace. gamut ships no
+# inflater, so zlib is the reference that proves the encoder's output decodes correctly.
+zlib-oracle = { path = "../../tooling/zlib-oracle" }

@@ -9,7 +9,7 @@ use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
 use gamut_color::oklab::{Gamut, linear_rgb_to_oklab};
 use gamut_color::transfer::srgb_eotf;
-use gamut_color::{Bt601Range, Yuv420};
+use gamut_color::{ColorRange, Yuv420};
 
 fn main() {
     divan::main();
@@ -40,16 +40,16 @@ fn pixels() -> usize {
 fn rgb_to_yuv420(bencher: Bencher) {
     let rgb = gradient_rgb();
     bencher.counter(ItemsCount::new(pixels())).bench_local(|| {
-        Yuv420::from_rgb8(black_box(&rgb), SIDE, SIDE, Bt601Range::Limited).unwrap()
+        Yuv420::from_rgb8(black_box(&rgb), SIDE, SIDE, ColorRange::Limited).unwrap()
     });
 }
 
 #[divan::bench]
 fn yuv420_to_rgb(bencher: Bencher) {
-    let yuv = Yuv420::from_rgb8(&gradient_rgb(), SIDE, SIDE, Bt601Range::Limited).unwrap();
+    let yuv = Yuv420::from_rgb8(&gradient_rgb(), SIDE, SIDE, ColorRange::Limited).unwrap();
     bencher
         .counter(ItemsCount::new(pixels()))
-        .bench_local(|| black_box(&yuv).to_rgb8(Bt601Range::Limited));
+        .bench_local(|| black_box(&yuv).to_rgb8(ColorRange::Limited));
 }
 
 #[divan::bench]

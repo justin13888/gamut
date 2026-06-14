@@ -4679,6 +4679,13 @@ pub static COEFF_BASE_64X64: [[[[u16; 4]; 42]; 2]; 4] = [
     ],
 ];
 
+/// The number of up-right anti-diagonals in a `w × h` block: `d` ranges over `0..w+h-1`. Pulled out
+/// so its arithmetic (whose larger/equal mutations are equivalent — diagonals past the last are empty)
+/// is excludable without masking the live coefficient-index math in [`default_scan`].
+fn diagonal_count(w: usize, h: usize) -> usize {
+    w + h - 1
+}
+
 /// Generates the `Default_Scan` order for a `w × h` transform (§9.2): the up-right diagonal scan in
 /// gamut's row-major (`row * w + col`) coefficient layout. Even anti-diagonals are walked bottom→top,
 /// odd ones top→bottom — the rule that reproduces the hand-written square `DEFAULT_SCAN_*` tables, so
@@ -4687,14 +4694,20 @@ pub static COEFF_BASE_64X64: [[[[u16; 4]; 42]; 2]; 4] = [
 #[must_use]
 pub fn default_scan(w: usize, h: usize) -> Vec<usize> {
     let mut scan = Vec::with_capacity(w * h);
-    for d in 0..(w + h - 1) {
+    for d in 0..diagonal_count(w, h) {
         let i_lo = d.saturating_sub(w - 1);
         let i_hi = d.min(h - 1);
         // Within each anti-diagonal the row index walks one direction. A square block alternates
         // (the boustrophedon pattern of the hand tables); a wide block (`w > h`) always descends and a
         // tall block always ascends — the orientation that matches dav1d's rectangular scan tables
-        // once transposed into gamut's row-major coefficient layout.
-        let descending = if w == h { d % 2 == 0 } else { w > h };
+        // once transposed into gamut's row-major coefficient layout. (Matching on the ordering rather
+        // than `w > h` keeps the wide/tall split out of the reach of a `>`→`>=` flip the `w == h`
+        // guard would make equivalent.)
+        let descending = match w.cmp(&h) {
+            core::cmp::Ordering::Equal => d % 2 == 0,
+            core::cmp::Ordering::Greater => true,
+            core::cmp::Ordering::Less => false,
+        };
         if descending {
             for i in (i_lo..=i_hi).rev() {
                 scan.push(i * w + (d - i));
@@ -4800,6 +4813,36 @@ mod scan_tests {
         assert_eq!(default_scan(8, 8), DEFAULT_SCAN_8X8);
         assert_eq!(default_scan(16, 16), DEFAULT_SCAN_16X16);
         assert_eq!(default_scan(32, 32), DEFAULT_SCAN_32X32);
+    }
+
+    #[test]
+    fn default_scan_pins_rectangular_order() {
+        // The square tables alternate the walk direction per anti-diagonal (boustrophedon); a wide
+        // block (`w > h`) walks every diagonal top→bottom (descending row index), a tall block
+        // (`w < h`) bottom→top. These pin that orientation — `default_scan_reproduces_square_tables`
+        // only covers `w == h`, where the permutation test leaves the rectangular direction free.
+        assert_eq!(
+            default_scan(8, 4),
+            [
+                0, 8, 1, 16, 9, 2, 24, 17, 10, 3, 25, 18, 11, 4, 26, 19, 12, 5, 27, 20, 13, 6, 28,
+                21, 14, 7, 29, 22, 15, 30, 23, 31,
+            ],
+        );
+        assert_eq!(
+            default_scan(4, 8),
+            [
+                0, 1, 4, 2, 5, 8, 3, 6, 9, 12, 7, 10, 13, 16, 11, 14, 17, 20, 15, 18, 21, 24, 19,
+                22, 25, 28, 23, 26, 29, 27, 30, 31,
+            ],
+        );
+    }
+
+    #[test]
+    fn palette_color_context_matches_spec() {
+        // §9.3 `Palette_Color_Context`: the four `-1` slots are color-context hashes that never
+        // occur. Pinning the whole table fixes those sentinels (a dropped sign would read as a live
+        // context 1) as well as the live 0/4/3/2/1 mapping `palette_color_context` indexes.
+        assert_eq!(PALETTE_COLOR_CONTEXT, [-1, -1, 0, -1, -1, 4, 3, 2, 1]);
     }
 
     #[test]

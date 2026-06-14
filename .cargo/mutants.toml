@@ -33,6 +33,64 @@ minimum_test_timeout = 60
 # a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
 # an entry.
 exclude_re = [
+    # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
+    # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
+    # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.
+    'replace < with <= in dequant',
+    # gamut-av1 cdf::diagonal_count — `w + h - 1` is the anti-diagonal count; diagonals at index
+    # `≥ w+h-1` are empty (`i_lo > i_hi`), so any bound that is larger or equal walks the same
+    # non-empty diagonals and yields an identical scan. All three operator mutations only enlarge
+    # (or keep) the bound, hence equivalent; a *smaller* bound (not generated here) would differ.
+    'replace \+ with \* in diagonal_count',
+    'replace - with \+ in diagonal_count',
+    'replace - with / in diagonal_count',
+    # gamut-av1 filter — equivalents in the in-loop filters (the dav1d oracle pins everything else).
+    # constrain: `sign = if diff < 0`, but the magnitude is 0 at `diff == 0` (the only value `<`/`<=`
+    # disagree on), so `±0` makes the result identical (same shape as quant::dequant).
+    'replace < with <= in constrain',
+    # cdef_direction: `while i < 8` steps `i` by 2 from 1, so it only takes odd values and never
+    # equals 8 — `<` and `<=` stop at the same place.
+    'replace < with <= in cdef_direction',
+    # cdef_partials: each directional `partial` enters the cost only as a square, so negating a whole
+    # accumulator (any `+=`→`-=`) leaves every `cost += partial²` unchanged. (The `*=`, index math and
+    # `- 128` centring mutants are *not* excluded — `cdef_direction_finds_dominant_direction` kills them.)
+    'replace \+= with -= in cdef_partials',
+    # cdef_disabled: an all-zero-strength CDEF is the identity filter, so the early-return it guards is
+    # a pure optimization — taking it or running the (identity) loop produces the same output, making
+    # every mutation of the predicate, and the `-> false` body, unobservable. (`-> true` skips real
+    # filtering and is caught by `cdef_leaves_flat_unchanged_but_filters_structure`.)
+    'replace == with != in cdef_disabled',
+    'replace && with \|\| in cdef_disabled',
+    'replace cdef_disabled -> bool with false',
+    # sec_dir: the two secondary directions `±2` off the primary are summed symmetrically, so `dir+off`
+    # vs `dir-off` selects the same pair. (`&`→`|`/`^` and the body mutants change the direction set and
+    # are caught by the dav1d cdef oracle.)
+    'replace \+ with - in sec_dir',
+    # wide_tap_pos: the wide deblock filter is symmetric in `j` with symmetric taps, so reading row
+    # `i+j` vs `i-j` sums identically. (`+`→`*` and the body are caught by the deblock oracle.)
+    'replace \+ with - in wide_tap_pos',
+    # loop_restore_wiener_luma: `if width == 0 || height == 0` is a defensive guard, but the encoder
+    # never calls it with a zero dimension and a zero-sized plane is a no-op anyway, so `||`→`&&` (both
+    # branches false for the real `≥1` dimensions) cannot change the output.
+    'replace \|\| with && in loop_restore_wiener_luma',
+    # centred: the §7.15.2 direction search is invariant to a uniform sample offset (each direction
+    # cost is a sum of squared partials; the chosen direction is an argmax and the variance a cost
+    # *difference*), so flipping the centring `- 128` to `+ 128` cannot change the result. (Verified: the
+    # cdef_direction test passes under the mutant for ramp/edge/sparse inputs. `- with /` is NOT masked
+    # and is caught.)
+    'replace - with \+ in centred',
+    # superres_err: see the doc comment — `err` reaches the offset only as `-err/2` and the `& 0x3fff`
+    # discards the `2¹⁴`-multiple that `-`→`+` introduces. (The `*`/`<<`/`/` mutants are not masked.)
+    'replace - with \+ in superres_err',
+    # gamut-av1 tile — equivalents in the entropy/segment helpers (the snapshot + round-trip tests pin
+    # everything observable). last_ref: `max - 1` is the largest valid segment ref; a ref is always
+    # `< max`, so widening the threshold is never reached and the general neg_interleave path maps
+    # `r == max-1` identically.
+    'replace - with \+ in last_ref',
+    'replace - with / in last_ref',
+    # recenter: `if v > 2*ref` — at `v == 2*ref` the else branch yields `2*(v-ref) == 2*ref`, exactly the
+    # value the `>=` mutant would return from the `v` branch, so the boundary is a continuity point.
+    'replace > with >= in recenter',
     # gamut-bitstream `ec_partition`: its only `-` is the constant shift `7 - EC_PROB_SHIFT` (= 1,
     # since EC_PROB_SHIFT = 6). The `- → /` mutation yields `7 / EC_PROB_SHIFT` = 1 — the identical
     # value — so it is unkillable. (`- → +`/`*` give 13/42 and are caught by the round-trip tests.)
