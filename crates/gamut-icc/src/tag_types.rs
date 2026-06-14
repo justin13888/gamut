@@ -1,37 +1,67 @@
-//! The element types a tag's data can take.
+//! The decoded element data a tag can hold (ICC.1:2022 §10).
 
-/// The type of a tag's element data, identified by the four-byte type signature at the start of the
-/// element (ICC.1:2022 §10). Representative subset; the full set is filled in during implementation.
+use gamut_core::Result;
+
+use crate::primitives::Signature;
+
+/// The decoded data of a tag element.
 ///
-/// The **keystone** of the crate is the multi-dimensional transform types — `lutAToB`/`lutBToA`
-/// (`mAB `/`mBA `) and the legacy `lut8`/`lut16` — which carry the matrix/curve/CLUT pipeline that
-/// drives device↔PCS conversion.
-pub enum TagType {
-    /// `XYZ ` — one or more CIE XYZ triplets (`XYZType`).
-    Xyz,
-    /// `curv` — a one-dimensional tone curve, sampled or an identity/gamma (`curveType`).
-    Curve,
-    /// `para` — a parametric tone curve (`parametricCurveType`).
-    ParametricCurve,
-    /// `text` — 7-bit ASCII text (`textType`).
-    Text,
-    /// `mluc` — language-tagged Unicode text (`multiLocalizedUnicodeType`).
-    MultiLocalizedUnicode,
-    /// `sig ` — a four-byte signature value (`signatureType`).
-    Signature,
-    /// `dtim` — a date-time (`dateTimeType`).
-    DateTime,
-    /// `sf32` — an array of s15Fixed16 numbers (`s15Fixed16ArrayType`, e.g. `chad`).
-    S15Fixed16Array,
-    /// `mft1` — the legacy 8-bit lookup transform (`lut8Type`).
-    Lut8,
-    /// `mft2` — the legacy 16-bit lookup transform (`lut16Type`).
-    Lut16,
-    /// `mAB ` — the device-to-PCS transform (`lutAToBType`: A-curves, CLUT, M-curves, matrix,
-    /// B-curves).
-    LutAToB,
-    /// `mBA ` — the PCS-to-device transform (`lutBToAType`).
-    LutBToA,
-    /// `ncl2` — a named-color list (`namedColor2Type`).
-    NamedColor2,
+/// Each variant models one ICC element type. [`TagData::Raw`] carries any element type gamut-icc
+/// does not decode semantically — verbatim — so every tag round-trips byte-for-byte regardless of
+/// whether it is modelled. The enum is `#[non_exhaustive]`: variants are added as more element
+/// types gain semantic decoders.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum TagData {
+    /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
+    /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
+    /// exactly on serialization.
+    Raw {
+        /// The element's four-byte type signature (the first four bytes of `bytes`).
+        type_sig: Signature,
+        /// The complete element bytes.
+        bytes: Vec<u8>,
+    },
+}
+
+/// Decodes one tag element from its bytes; the element begins with its four-byte type signature
+/// followed by four reserved bytes (ICC.1:2022 §10).
+///
+/// Every element is currently preserved as [`TagData::Raw`]; semantic decoders for the modelled
+/// element types are layered on in later phases, falling back to `Raw` for the rest.
+pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
+    let type_sig = element_type_signature(element);
+    Ok(TagData::Raw {
+        type_sig,
+        bytes: element.to_vec(),
+    })
+}
+
+/// The element's four-byte type signature, or [`Signature::ZERO`] for an element shorter than four
+/// bytes (a malformed element the caller still round-trips verbatim).
+fn element_type_signature(element: &[u8]) -> Signature {
+    match element.get(..4) {
+        Some(s) => Signature([s[0], s[1], s[2], s[3]]),
+        None => Signature::ZERO,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_element_is_preserved_as_raw() {
+        let element = b"zzzz\x00\x00\x00\x00payload".to_vec();
+        let TagData::Raw { type_sig, bytes } = decode_tag(&element).unwrap();
+        assert_eq!(type_sig, Signature(*b"zzzz"));
+        assert_eq!(bytes, element); // byte-for-byte verbatim
+    }
+
+    #[test]
+    fn short_element_has_zero_type_signature() {
+        let TagData::Raw { type_sig, bytes } = decode_tag(&[1, 2]).unwrap();
+        assert_eq!(type_sig, Signature::ZERO);
+        assert_eq!(bytes, vec![1, 2]);
+    }
 }

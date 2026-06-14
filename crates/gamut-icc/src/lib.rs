@@ -30,6 +30,6 @@ pub use header::{
 pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzNumber};
 pub use profile::IccProfile;
 pub use reader::IccReader;
-pub use tag_types::TagType;
-pub use tags::{KnownTag, TagEntry, TagSignature};
+pub use tag_types::TagData;
+pub use tags::KnownTag;
 pub use writer::IccWriter;

@@ -3,7 +3,7 @@
 //! `.icc` fixtures are committed; gamut-icc decodes the same bytes and the decoded values are
 //! asserted equal to what lcms2 reports.
 
-use gamut_icc::{ProfileHeader, S15Fixed16};
+use gamut_icc::{IccProfile, ProfileHeader, S15Fixed16, TagData};
 
 /// The header's PCS illuminant (ICC.1:2022 §7.2.16) is mandated to be D50; lcms2 writes exactly
 /// that. Decoding those three `s15Fixed16` fields from a real lcms2-produced profile exercises the
@@ -88,4 +88,33 @@ fn parses_v2_profile_version() {
     let h = ProfileHeader::parse(&bytes).unwrap();
     assert_eq!(h.version.major, 2);
     assert_eq!(h.version.minor, 1);
+}
+
+/// gamut-icc finds exactly the tags the reference CMM reports, and decodes each (currently as `Raw`
+/// with its type signature matching the element's leading four bytes).
+#[test]
+fn tag_set_matches_lcms() {
+    let profiles = [
+        ("srgb", lcms2_oracle::srgb()),
+        ("gray", lcms2_oracle::gray([0.3127, 0.3290], 2.2)),
+        ("lab4", lcms2_oracle::lab4()),
+    ];
+    for (label, profile) in profiles {
+        let bytes = profile.to_bytes();
+        let parsed = IccProfile::parse(&bytes).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+
+        let mut got: Vec<u32> = parsed.tags.iter().map(|(s, _)| s.to_u32()).collect();
+        let mut want: Vec<u32> = (0..profile.tag_count())
+            .map(|i| profile.tag_signature(i))
+            .collect();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want, "{label}: tag signature set");
+
+        for (_, data) in &parsed.tags {
+            if let TagData::Raw { type_sig, bytes } = data {
+                assert_eq!(&type_sig.0, &bytes[0..4], "{label}: raw type signature");
+            }
+        }
+    }
 }

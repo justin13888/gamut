@@ -21,6 +21,14 @@ impl<'a> ByteReader<'a> {
         Self { buf, pos: 0 }
     }
 
+    /// A reader positioned at absolute byte `offset` into `buf` (for offset-indexed tag elements).
+    pub(crate) fn at(buf: &'a [u8], offset: usize) -> Result<Self> {
+        if offset > buf.len() {
+            return Err(Error::InvalidInput("icc: offset past end of profile"));
+        }
+        Ok(Self { buf, pos: offset })
+    }
+
     /// Reads the next `n` bytes, advancing the cursor; errors if fewer than `n` remain.
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         let end = self
@@ -179,5 +187,13 @@ mod tests {
         assert_eq!(xyz.x, S15Fixed16(0x0000_F6D6));
         assert_eq!(xyz.y, S15Fixed16(0x0001_0000));
         assert_eq!(xyz.z, S15Fixed16(0x0000_D32D));
+    }
+
+    #[test]
+    fn at_offset_positions_and_bounds_checks() {
+        let buf = [0u8, 0, 0xAB, 0xCD];
+        assert_eq!(ByteReader::at(&buf, 2).unwrap().u16().unwrap(), 0xABCD);
+        assert!(ByteReader::at(&buf, 5).is_err()); // offset past end
+        assert!(ByteReader::at(&buf, 4).unwrap().u8().is_err()); // at end, nothing to read
     }
 }

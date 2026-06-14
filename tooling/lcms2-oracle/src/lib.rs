@@ -262,6 +262,21 @@ impl Profile {
         self.profile_id()
     }
 
+    /// The number of tags the profile carries (`cmsGetTagCount`).
+    #[must_use]
+    pub fn tag_count(&self) -> usize {
+        // SAFETY: `raw` is a live handle; a negative count would signal an error.
+        let n = unsafe { sys::cmsGetTagCount(self.raw) };
+        n.max(0) as usize
+    }
+
+    /// The signature of the `n`-th tag as a big-endian `u32` (`cmsGetTagSignature`).
+    #[must_use]
+    pub fn tag_signature(&self, n: usize) -> u32 {
+        // SAFETY: `raw` is live; `n` is bounded by `tag_count` at the call sites.
+        unsafe { sys::cmsGetTagSignature(self.raw, n as u32) as u32 }
+    }
+
     /// Read an `XYZType` tag as `[X, Y, Z]`, via `cmsReadTag`. `None` if the tag is absent.
     #[must_use]
     pub fn read_xyz(&self, tag: u32) -> Option<[f64; 3]> {
