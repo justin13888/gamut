@@ -243,7 +243,7 @@ Owner: `gamut-webp/src/vp8/loop_filter.rs`.
 | filter geometry: MB + subblock edges, raster order | RFC 6386 §15.1 | ✅ | M2 |
 | simple filter | §15.2 | ✅ | M2 |
 | normal filter (with high-edge-variance test) | §15.3 | ✅ | M2 |
-| per-MB control-parameter derivation (level, limits, segments) | §15.4 | ✅ | M2 |
+| per-MB control-parameter derivation (level, limits, segments, mb_lf ref/mode deltas) | §15.4 | ✅ | M2 |
 
 ## N. Color / pixel formats
 

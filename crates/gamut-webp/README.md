@@ -34,8 +34,8 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
 - **VP8L lossless** — `WebpEncoder::lossless` emits a conformant bit-exact stream; `WebpDecoder`
   decodes any conformant VP8L stream.
 - **VP8 lossy** — `WebpEncoder::lossy(quality)` runs the full intra key-frame codec (DC/V/H/TM and
-  per-4×4 B_PRED prediction, the simple and normal loop filters, segmentation, token partitions, and
-  skip); `WebpDecoder` decodes any conformant key frame.
+  per-4×4 B_PRED prediction, the simple and normal loop filters with per-macroblock deltas,
+  segmentation, token partitions, and skip); `WebpDecoder` decodes any conformant key frame.
 - **Alpha** — `EncodeImage<Rgba8>` / `DecodeImage<Rgba8>`. A transparent lossy image uses the extended
   (`VP8X`) format with an `ALPH` chunk (raw or lossless); an opaque one stays a simple file.
 
