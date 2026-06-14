@@ -4,6 +4,23 @@
 //! workspace builds on the [`EncodeImage`] / [`DecodeImage`] traits, the branded [`ImageRef`] /
 //! [`ImageBuf`] buffers, and the [`Error`] type defined here, so that callers get a single,
 //! consistent error surface regardless of format.
+//!
+//! # Scope and design notes
+//!
+//! The surface is deliberately small and frozen; the following are intentional decisions rather
+//! than omissions:
+//!
+//! - **Interleaved `u8` / `u16` layouts only.** [`Sample`] is sealed over `u8` and `u16`; planar
+//!   layouts and codec-side concerns such as coded bit depth live in `gamut-color`
+//!   (`gamut_color::Planar8`, `gamut_color::BitDepth`), not here.
+//! - **Open where growth is additive, sealed where it must not be.** [`Error`] and [`ColorModel`]
+//!   are `#[non_exhaustive]` so variants can be added without a breaking change, while [`Pixel`]
+//!   and [`Sample`] are sealed — the set of pixel layouts is closed and only this crate defines it.
+//! - **Static error messages.** [`Error::InvalidInput`] / [`Error::Unsupported`] carry `&'static
+//!   str`; dynamic context is deferred and can be added later as a new `#[non_exhaustive]` variant.
+//! - **The length invariant lives on the buffers, not on [`Dimensions`].** [`Dimensions`] is a plain
+//!   value type with public fields; non-emptiness and `len == width * height * channels` are
+//!   enforced once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs receive a known-good buffer.
 #![forbid(unsafe_code)]
 
 mod image;
@@ -95,6 +112,21 @@ pub trait EncodeImage<P: Pixel> {
     /// Returns [`Error::Unsupported`] if the requested encoder configuration is not implemented, or
     /// [`Error::InvalidInput`] if the image violates a format constraint (e.g. a dimension limit).
     fn encode_image(&self, image: ImageRef<'_, P>, out: &mut Vec<u8>) -> Result<usize>;
+
+    /// Encode `image` into a fresh [`Vec`], returning the encoded bytes.
+    ///
+    /// A convenience over [`EncodeImage::encode_image`] for callers that just want the bytes;
+    /// reach for `encode_image` with a reused `&mut Vec<u8>` when encoding many images and you want
+    /// to amortise the allocation.
+    ///
+    /// # Errors
+    ///
+    /// As [`EncodeImage::encode_image`].
+    fn encode_to_vec(&self, image: ImageRef<'_, P>) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.encode_image(image, &mut out)?;
+        Ok(out)
+    }
 }
 
 /// Decodes a compressed byte stream into an owned [`ImageBuf`] of pixel layout `P`.
@@ -112,10 +144,12 @@ pub trait DecodeImage<P: Pixel> {
     /// a feature that is not implemented or cannot be presented as `P`.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<P>>;
 
-    /// Decode `data` into `dst`, reusing its allocation where possible.
+    /// Decode `data` into `dst`, reusing its allocation when possible.
     ///
-    /// The default forwards to [`DecodeImage::decode_image`]; a codec may override it to refill
-    /// `dst`'s backing storage in place across repeated calls.
+    /// The default implementation always replaces the buffer (`*dst = self.decode_image(data)?`). A
+    /// codec may override it to reuse `dst`'s sample storage — via [`ImageBuf::as_mut_samples`] —
+    /// across repeated calls whose decoded dimensions match `dst`'s, falling back to replacement
+    /// otherwise. Either way `dst` holds the decoded image on success.
     ///
     /// # Errors
     ///
@@ -222,6 +256,15 @@ mod trait_tests {
         }
     }
 
+    /// A codec that always fails, to exercise error propagation through provided methods.
+    struct Failing;
+
+    impl EncodeImage<Gray8> for Failing {
+        fn encode_image(&self, _image: ImageRef<'_, Gray8>, _out: &mut Vec<u8>) -> Result<usize> {
+            Err(Error::Unsupported("nope"))
+        }
+    }
+
     #[test]
     fn encode_image_appends_and_counts() {
         let img = ImageBuf::<Gray8>::new(vec![1, 2, 3, 4], Dimensions::new(2, 2).unwrap()).unwrap();
@@ -229,6 +272,24 @@ mod trait_tests {
         let n = Trivial.encode_image(img.as_ref(), &mut out).unwrap();
         assert_eq!(n, 4);
         assert_eq!(out, vec![0xFF, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn encode_to_vec_returns_fresh_exact_bytes() {
+        let img = ImageBuf::<Gray8>::new(vec![1, 2, 3, 4], Dimensions::new(2, 2).unwrap()).unwrap();
+        // A fresh Vec holding exactly the encoded bytes — no leading scratch, unlike encode_image
+        // which appends. Asserting exact contents kills an "Ok(Vec::new())" mutant.
+        assert_eq!(
+            Trivial.encode_to_vec(img.as_ref()).unwrap(),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn encode_to_vec_propagates_errors() {
+        let img = ImageBuf::<Gray8>::new(vec![0], Dimensions::new(1, 1).unwrap()).unwrap();
+        // The default must surface encode_image's error rather than swallow it into an empty Vec.
+        assert!(Failing.encode_to_vec(img.as_ref()).is_err());
     }
 
     #[test]

@@ -496,7 +496,6 @@ name = "gamut-core"
 version = "0.2.0"
 dependencies = [
  "thiserror",
- "tracing",
 ]
 
 [[package]]
