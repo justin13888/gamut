@@ -192,12 +192,9 @@ mod tests {
     #[test]
     fn matches_chromahash_gamma_pipeline_vectors() {
         let cases: &[([f64; 3], [f64; 3])] = &[
-            // gamma_red_srgb (sRGB EOTF of 1/0 is 1/0, so equals linear red).
-            (
-                [1.0, 0.0, 0.0],
-                [0.6279553606145517, 0.224863061065974, 0.12584629853073515],
-            ),
-            // gamma_mid_srgb.
+            // gamma_mid_srgb: a genuine EOTF point (eotf(0.5) ≈ 0.214), so this exercises the
+            // gamma → linear → OKLab composition. (A gamma_red [1,0,0] case is omitted: sRGB EOTF is
+            // the identity at 0 and 1, so it collapses to oklab's linear [1,0,0] vector.)
             (
                 [0.5, 0.5, 0.5],
                 [

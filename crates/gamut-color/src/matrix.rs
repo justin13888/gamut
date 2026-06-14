@@ -126,20 +126,26 @@ mod tests {
         assert!((xyz[0] - 0.3127 / 0.3290).abs() < 1e-15);
     }
 
+    /// External oracle: Bruce Lindbloom's published linear-sRGB → XYZ (D65) matrix
+    /// (<http://www.brucelindbloom.com/Eqn_RGB_XYZ_Matrix.html>) is an independent computation of
+    /// the same Lindbloom construction. Our matrix must reproduce it (to within the crate's 4-place
+    /// chromaticity rounding vs Lindbloom's 5-place white point). This subsumes a white-point check:
+    /// `M·(1,1,1)` equals the D65 tristimulus only if the columns are scaled correctly.
     #[test]
-    fn srgb_rgb_to_xyz_maps_white() {
-        // The RGB→XYZ matrix times (1,1,1) reproduces the D65 white tristimulus.
+    fn srgb_rgb_to_xyz_matches_lindbloom() {
+        const LINDBLOOM_SRGB_D65: [[f64; 3]; 3] = [
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041],
+        ];
         let m = rgb_to_xyz_matrix(&SRGB_PRIMARIES, D65).expect("non-degenerate");
-        let w = matvec3(&m, [1.0, 1.0, 1.0]);
-        let d65 = xy_to_xyz(D65[0], D65[1]);
-        for i in 0..3 {
-            assert!(
-                (w[i] - d65[i]).abs() < 1e-12,
-                "white[{i}]: {} vs {}",
-                w[i],
-                d65[i]
-            );
+        let mut err = 0.0_f64;
+        for (row, lrow) in m.iter().zip(LINDBLOOM_SRGB_D65.iter()) {
+            for (&v, &l) in row.iter().zip(lrow.iter()) {
+                err = err.max((v - l).abs());
+            }
         }
+        assert!(err < 5e-4, "sRGB→XYZ vs Lindbloom max err = {err}");
     }
 
     #[test]
@@ -151,6 +157,27 @@ mod tests {
                 assert!((v - want).abs() < 1e-12, "[{i}][{j}] = {v}");
             }
         }
+    }
+
+    /// External oracle: Lindbloom's published Bradford D65→D50 adaptation matrix
+    /// (<http://www.brucelindbloom.com/Eqn_ChromAdapt.html>) — an independent computation of the
+    /// same CAT. `bradford_adapt(D65, D50)` must reproduce it (to within the crate's 4-place
+    /// chromaticity rounding); a wrong cone matrix or a flipped src/dst direction is off by >0.05.
+    #[test]
+    fn bradford_d65_to_d50_matches_lindbloom() {
+        const LINDBLOOM_D65_TO_D50: [[f64; 3]; 3] = [
+            [1.0478112, 0.0228866, -0.0501270],
+            [0.0295424, 0.9904844, -0.0170491],
+            [-0.0092345, 0.0150436, 0.7521316],
+        ];
+        let m = bradford_adapt(D65, D50).expect("invertible");
+        let mut err = 0.0_f64;
+        for (row, lrow) in m.iter().zip(LINDBLOOM_D65_TO_D50.iter()) {
+            for (&v, &l) in row.iter().zip(lrow.iter()) {
+                err = err.max((v - l).abs());
+            }
+        }
+        assert!(err < 5e-4, "Bradford D65→D50 vs Lindbloom max err = {err}");
     }
 
     /// The whole point of this module: the literal `M1_*` tables in `oklab` must

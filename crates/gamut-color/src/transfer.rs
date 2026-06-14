@@ -239,10 +239,32 @@ mod tests {
         }
     }
 
+    /// Independent oracle for [`pq_eotf`]: the BT.2100 Table 4 *forward* PQ OETF (luminance →
+    /// signal) is a different formula arrangement than the inverse `pq_eotf` implements, so
+    /// composing them must recover the input. A transcription slip in the inverse (swapped
+    /// `c2`/`c3`, a wrong reciprocal) would break the round-trip even though both share the
+    /// constants. (`bt2020_pq_full_signal_near_one` was dropped: the reference-formula test above
+    /// already pins `bt2020_pq_to_sdr(1.0)` exactly.)
     #[test]
-    fn bt2020_pq_full_signal_near_one() {
-        let max = bt2020_pq_to_sdr(1.0);
-        assert!(max > 0.9 && max < 1.0, "PQ(1.0) → {max}");
+    fn pq_eotf_inverts_bt2100_forward_oetf() {
+        // E' = ((c1 + c2·Y^m1) / (1 + c3·Y^m1))^m2, with Y = L / 10000.
+        fn pq_oetf(nits: f64) -> f64 {
+            const M1: f64 = 0.1593017578125;
+            const M2: f64 = 78.84375;
+            const C1: f64 = 0.8359375;
+            const C2: f64 = 18.8515625;
+            const C3: f64 = 18.6875;
+            let yp = (nits / PQ_PEAK_NITS).powf(M1);
+            ((C1 + C2 * yp) / (1.0 + C3 * yp)).powf(M2)
+        }
+        for &nits in &[0.0, 1.0, 10.0, 100.0, 203.0, 1000.0, 4000.0, 10000.0] {
+            let back = pq_eotf(pq_oetf(nits));
+            let tol = 1e-9 * nits.max(1.0);
+            assert!(
+                (back - nits).abs() <= tol,
+                "pq round-trip at {nits} nits → {back}"
+            );
+        }
     }
 
     #[test]
