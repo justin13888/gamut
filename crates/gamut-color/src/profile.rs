@@ -1,32 +1,23 @@
 //! Source-profile bundle: ties a colour-science [`Gamut`] together with its
-//! encoder-exact transfer (and tone map) and projects them back onto gamut's
-//! independent CICP axes.
+//! encoder-exact transfer and projects them back onto gamut's independent CICP
+//! axes.
 //!
-//! gamut models primaries, transfer, and tone mapping as *separate* CICP axes,
-//! but an upstream like chromahash treats a single `Gamut` as a fixed bundle —
-//! e.g. `Bt2020` means "BT.2020 primaries **and** PQ **and** Reinhard@203". A
-//! [`SourceProfile`] is that bundle: it carries the `(gamut, transfer)` pair, the
-//! convenience gamma-RGB → OKLab pipeline, and accessors that decompose it into
-//! [`ColourPrimaries`] / [`TransferCharacteristics`] / [`ToneMap`].
+//! gamut models primaries and transfer as *separate* CICP axes, but an upstream
+//! like chromahash treats a single `Gamut` as a fixed bundle — e.g. `Bt2020`
+//! means "BT.2020 primaries **and** PQ **and** Reinhard@203". A [`SourceProfile`]
+//! is that bundle: it carries the `(gamut, transfer)` pair, the convenience
+//! gamma-RGB → OKLab pipeline, and accessors that decompose it into
+//! [`ColourPrimaries`] / [`TransferCharacteristics`].
 //!
-//! Chromatic adaptation needs no field here — it is already baked into the
-//! per-gamut `M1` matrix (ProPhoto's D50→D65; see [`crate::matrix`]).
+//! The HDR (BT.2020 PQ) path folds its Reinhard tone map into the encoder-exact
+//! transfer (see [`crate::transfer::bt2020_pq_to_sdr`]); the general-purpose
+//! tone-curve toolkit is the separate `gamut-tonemap` crate. Chromatic adaptation
+//! needs no field here — it is already baked into the per-gamut `M1` matrix
+//! (ProPhoto's D50→D65; see [`crate::matrix`]).
 
 use crate::cicp::{ColourPrimaries, TransferCharacteristics};
 use crate::oklab::{Gamut, linear_rgb_to_oklab};
-use crate::transfer::{
-    SDR_REFERENCE_WHITE_NITS, adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf,
-};
-
-/// A tone-mapping operator carried by a [`SourceProfile`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ToneMap {
-    /// Reinhard `L / (1 + L)`, with `L` relative to `reference_white_nits`.
-    Reinhard {
-        /// SDR reference white luminance (cd/m²).
-        reference_white_nits: f64,
-    },
-}
+use crate::transfer::{adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf};
 
 /// The encoder-exact per-channel transfer a [`SourceProfile`] linearizes with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,17 +52,6 @@ impl SourceTransfer {
             SourceTransfer::Srgb => Some(TransferCharacteristics::Srgb),
             SourceTransfer::Bt2020Pq => Some(TransferCharacteristics::Pq),
             SourceTransfer::AdobeRgb | SourceTransfer::ProPhotoRgb => None,
-        }
-    }
-
-    /// The tone map folded into this transfer, if any (only the PQ path).
-    #[must_use]
-    pub fn tonemap(self) -> Option<ToneMap> {
-        match self {
-            SourceTransfer::Bt2020Pq => Some(ToneMap::Reinhard {
-                reference_white_nits: SDR_REFERENCE_WHITE_NITS,
-            }),
-            _ => None,
         }
     }
 }
@@ -131,12 +111,6 @@ impl SourceProfile {
         self.transfer.cicp()
     }
 
-    /// The tone map this profile applies, if any.
-    #[must_use]
-    pub fn tonemap(self) -> Option<ToneMap> {
-        self.transfer.tonemap()
-    }
-
     /// Linearize one gamma-encoded channel with this profile's transfer.
     #[must_use]
     pub fn eotf(self, x: f64) -> f64 {
@@ -164,23 +138,18 @@ mod tests {
             p.transfer_characteristics(),
             Some(TransferCharacteristics::Srgb)
         );
-        assert_eq!(p.tonemap(), None);
     }
 
     #[test]
-    fn bt2020_bundles_primaries_pq_and_reinhard() {
+    fn bt2020_decomposes_to_primaries_and_pq() {
         let p = SourceProfile::BT2020;
         assert_eq!(p.colour_primaries(), Some(ColourPrimaries::Bt2020));
         assert_eq!(
             p.transfer_characteristics(),
             Some(TransferCharacteristics::Pq)
         );
-        assert_eq!(
-            p.tonemap(),
-            Some(ToneMap::Reinhard {
-                reference_white_nits: 203.0
-            })
-        );
+        // The Reinhard tone map folded into the BT.2020 transfer is exercised by
+        // `eotf_is_encoder_exact_per_gamut` (eotf == bt2020_pq_to_sdr).
     }
 
     #[test]
@@ -188,7 +157,6 @@ mod tests {
         for p in [SourceProfile::ADOBE_RGB, SourceProfile::PROPHOTO_RGB] {
             assert_eq!(p.colour_primaries(), None);
             assert_eq!(p.transfer_characteristics(), None);
-            assert_eq!(p.tonemap(), None);
         }
         // Display P3 reuses the sRGB transfer but its own primaries.
         assert_eq!(
