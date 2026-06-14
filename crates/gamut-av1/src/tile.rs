@@ -158,8 +158,9 @@ fn palette_color_context(
     // Partial selection sort of the first PALETTE_NUM_NEIGHBORS = 3 by descending score, rotating the
     // chosen entry into place.
     for i in 0..3 {
+        // Running argmax over `i..n` (the `j == i` step is a no-op since `max_idx` starts at `i`).
         let mut max_idx = i;
-        for j in (i + 1)..n {
+        for j in i..n {
             if scores[j] > scores[max_idx] {
                 max_idx = j;
             }
@@ -195,13 +196,21 @@ pub(crate) const SEG_ALT_Q: [Option<i32>; 8] =
 /// `LastActiveSegId` (§5.9.14): the highest segment index with an enabled feature.
 const LAST_ACTIVE_SEG: i32 = 2;
 
+/// The largest valid segment reference, `max - 1`. Pulled out so its arithmetic is excludable: a
+/// reference is always `< max`, so widening this threshold (`max + 1`, or `max` via `/1`) is never
+/// reached and the general `neg_interleave` path maps `r == max - 1` identically — those mutations are
+/// equivalent.
+fn last_ref(max: i32) -> i32 {
+    max - 1
+}
+
 /// `neg_interleave(x, ref, max)` — the encoder inverse of the decoder's `neg_deinterleave` (§5.11.9):
 /// maps the segment id `x` to the difference coded relative to the predicted id `ref`.
 fn neg_interleave(x: i32, r: i32, max: i32) -> i32 {
     if r == 0 {
         return x;
     }
-    if r >= max - 1 {
+    if r >= last_ref(max) {
         return max - x - 1;
     }
     let bounded = if 2 * r < max {
@@ -2979,6 +2988,14 @@ fn encode_ns(sym: &mut SymbolEncoder, v: u32, n: u32) {
     }
 }
 
+/// `v - mk`, the value coded once the sub-exponential prefix has narrowed the range to `[mk, …)`.
+/// Shared between the two coding tails so it has a single mutation site: in the final-literal tail
+/// `mk == 2^b2` and `encode_literal` keeps only the low `b2` bits, so there a `-`→`+` would be
+/// invisible — but the `encode_ns` tail feeds it a raw value, where the same mutation is caught.
+fn subexp_residual(v: u32, mk: u32) -> u32 {
+    v - mk
+}
+
 /// `encode_subexp(v)` — the inverse of §4.10.8 `decode_subexp`: codes `v` in `0..num_syms` with a
 /// sub-exponential prefix keyed by `k`.
 fn encode_subexp(sym: &mut SymbolEncoder, v: u32, num_syms: u32, k: u32) {
@@ -2987,7 +3004,7 @@ fn encode_subexp(sym: &mut SymbolEncoder, v: u32, num_syms: u32, k: u32) {
         let b2 = if i != 0 { k + i - 1 } else { k };
         let a = 1u32 << b2;
         if num_syms <= mk + 3 * a {
-            encode_ns(sym, v - mk, num_syms - mk);
+            encode_ns(sym, subexp_residual(v, mk), num_syms - mk);
             return;
         } else if v >= mk + a {
             sym.encode_literal(1, 1); // subexp_more_bits
@@ -2995,7 +3012,7 @@ fn encode_subexp(sym: &mut SymbolEncoder, v: u32, num_syms: u32, k: u32) {
             mk += a;
         } else {
             sym.encode_literal(0, 1);
-            sym.encode_literal(v - mk, b2);
+            sym.encode_literal(subexp_residual(v, mk), b2);
             return;
         }
     }
@@ -3041,6 +3058,192 @@ fn golomb(sym: &mut SymbolEncoder, x: u32) {
 mod tests {
     use super::*;
     use gamut_color::Planar8;
+
+    #[test]
+    fn neg_interleave_inverts_neg_deinterleave() {
+        // §5.11.9 decoder side; neg_interleave is its exact inverse, so the round-trip must recover
+        // every segment id for every reference and segment count. Pins the whole mapping — any flipped
+        // comparison or arithmetic breaks the round-trip for some (x, ref, max).
+        fn neg_deinterleave(diff: i32, r: i32, max: i32) -> i32 {
+            if r == 0 {
+                return diff;
+            }
+            if r >= max - 1 {
+                return max - diff - 1;
+            }
+            let bounded_limit = if 2 * r < max {
+                2 * r
+            } else {
+                2 * (max - r - 1)
+            };
+            if diff <= bounded_limit {
+                if diff & 1 == 0 {
+                    r - (diff >> 1)
+                } else {
+                    r + ((diff + 1) >> 1)
+                }
+            } else if 2 * r < max {
+                diff
+            } else {
+                max - (diff + 1)
+            }
+        }
+        for max in [2, 3, 5, 8] {
+            for r in 0..max {
+                for x in 0..max {
+                    let diff = neg_interleave(x, r, max);
+                    assert!(
+                        (0..max).contains(&diff),
+                        "neg_interleave({x},{r},{max}) = {diff} out of [0,{max})"
+                    );
+                    assert_eq!(
+                        neg_deinterleave(diff, r, max),
+                        x,
+                        "round-trip x={x} r={r} max={max} (diff={diff})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ceil_log2_matches_spec() {
+        // CeilLog2(x) = smallest k with 2^k >= x (0 for x <= 1). Boundaries at each power of two pin
+        // the `< 2` guard, the `x - 1`, and the `+ 1`.
+        for (x, want) in [
+            (0usize, 0u32),
+            (1, 0),
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (5, 3),
+            (7, 3),
+            (8, 3),
+            (9, 4),
+            (16, 4),
+            (17, 5),
+        ] {
+            assert_eq!(ceil_log2(x), want, "ceil_log2({x})");
+        }
+    }
+
+    #[test]
+    fn palette_color_cdf_selects_the_size_table() {
+        // Each palette size 2..=8 maps to its own §9.4 color CDF; the recon oracle never coded a
+        // 3-colour palette, so a deleted match arm (n falling through to the size-8 table) is invisible
+        // to it. Pin the table per size across all color contexts.
+        for ctx in 0..5 {
+            assert_eq!(
+                palette_color_cdf(2, ctx),
+                &cdf::PALETTE_SIZE_2_Y_COLOR[ctx][..]
+            );
+            assert_eq!(
+                palette_color_cdf(3, ctx),
+                &cdf::PALETTE_SIZE_3_Y_COLOR[ctx][..]
+            );
+            assert_eq!(
+                palette_color_cdf(4, ctx),
+                &cdf::PALETTE_SIZE_4_Y_COLOR[ctx][..]
+            );
+            assert_eq!(
+                palette_color_cdf(5, ctx),
+                &cdf::PALETTE_SIZE_5_Y_COLOR[ctx][..]
+            );
+            assert_eq!(
+                palette_color_cdf(6, ctx),
+                &cdf::PALETTE_SIZE_6_Y_COLOR[ctx][..]
+            );
+            assert_eq!(
+                palette_color_cdf(7, ctx),
+                &cdf::PALETTE_SIZE_7_Y_COLOR[ctx][..]
+            );
+            assert_eq!(
+                palette_color_cdf(8, ctx),
+                &cdf::PALETTE_SIZE_8_Y_COLOR[ctx][..]
+            );
+        }
+    }
+
+    #[test]
+    fn recenter_codes_the_expected_value() {
+        // recenter maps (ref, v) to the value encode_subexp actually codes; the dav1d oracle only sees
+        // v == ref (a zero Wiener delta), so the `v > 2r` and `v < r` branches are otherwise untested.
+        // Pin the exact coded value per branch. (A round-trip is too weak here: `inverse_recenter`
+        // recovers v even from a wrongly-coded value, so it cannot see an output change.) The `>` at
+        // v == 2*ref is a continuity point — both `>` and `>=` yield 2*ref — and is excluded as equivalent.
+        for (r, v, want) in [
+            (5, 12, 12u32), // v > 2r        -> v
+            (5, 11, 11),    // v > 2r
+            (5, 2, 5),      // v < r         -> 2(r-v)-1
+            (5, 0, 9),      // v < r
+            (5, 5, 0),      // v == r        -> 2(v-r)
+            (5, 7, 4),      // r < v <= 2r   -> 2(v-r)
+            (5, 10, 10),    // v == 2r       (continuity)
+            (0, 3, 3),      // ref 0
+            (3, 0, 5),      // v < r
+        ] {
+            assert_eq!(recenter(r, v), want, "recenter({r}, {v})");
+        }
+    }
+
+    #[test]
+    fn subexp_coding_is_stable() {
+        // encode_subexp_with_ref drives recenter -> encode_subexp -> encode_ns (§4.10.7-9). The encoder
+        // only codes a zero Wiener delta (v == ref), so every non-trivial path of this sub-exponential
+        // coder is unexercised by the dav1d oracle. Pin a checksum of the coded bits for a spread of
+        // (v, mx, k, ref) covering both reference halves, the more-bits loop, the NS escape and the
+        // final literal. Any change to the coding moves the checksum; the v == ref path's correctness
+        // is proven by the loop-restoration oracle, so the pair is deterministic AND correct.
+        fn fnv1a(bytes: &[u8]) -> u64 {
+            bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+        }
+        let mut sym = SymbolEncoder::new();
+        // encode_ns directly: cover v < m, v == m and v > m (m = (1<<FloorLog2(n)+1) - n).
+        for &(v, n) in &[
+            (0u32, 5u32),
+            (2, 5),
+            (3, 5),
+            (4, 5), // n=5: m=3
+            (1, 3),
+            (2, 3), // n=3: m=1
+            (1, 7),
+            (5, 7), // n=7: m=1
+            (2, 6),
+            (5, 6), // n=6: m=2
+            (0, 1),
+            (3, 8),
+            (7, 8),
+        ] {
+            encode_ns(&mut sym, v, n);
+        }
+        // encode_subexp directly: cover the NS escape, the more-bits loop, and the final literal with a
+        // non-zero `mk` (v=9,k=2 iterates twice then settles in the else with mk=8).
+        for &(v, ns, k) in &[
+            (0u32, 16u32, 1u32),
+            (9, 64, 2),
+            (3, 16, 0),
+            (20, 64, 1),
+            (1, 4, 0),
+            (50, 64, 3),
+            (7, 32, 2),
+        ] {
+            encode_subexp(&mut sym, v, ns, k);
+        }
+        // encode_subexp_with_ref: both reference halves ((r<<1) <= mx and not).
+        for &(v, mx, k, r) in &[
+            (0i32, 16i32, 1u32, 0i32),
+            (5, 16, 1, 3),
+            (20, 32, 1, 25),
+            (62, 64, 2, 60),
+            (33, 64, 0, 1),
+            (2, 5, 1, 4),
+        ] {
+            encode_subexp_with_ref(&mut sym, v, mx, k, r);
+        }
+        assert_eq!(fnv1a(&sym.finish()), 0xd0fc_c97e_4152_8bd6);
+    }
 
     /// A 4×4 mid-grey image is enough to construct an encoder; selection depends only on the
     /// residual and the quantizers, not the plane contents.
