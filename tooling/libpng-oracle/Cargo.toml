@@ -1,0 +1,24 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under
+# `[workspace].exclude` in the root manifest, pulled in only as a path
+# `dev-dependency`). It statically links libpng (built from the `third_party/libpng`
+# submodule) against a statically-built zlib (`third_party/zlib`), and exposes a
+# reference PNG decoder + max-compression encoder for gamut-png's conformance
+# cross-checks. gamut ships no PNG decoder, so libpng is how the encoder is proven.
+#
+# Declares `links = "png"` (not "z"): it bundles its own static zlib internally, so it
+# does not conflict with `zlib-oracle` (which owns `links = "z"`) in the workspace graph.
+[package]
+name = "libpng-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: decodes/encodes PNG with a vendored, statically-linked libpng for gamut-png's conformance cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+links = "png"
+
+[lib]
+doctest = false
+
+[build-dependencies]
+bindgen = "0.71"

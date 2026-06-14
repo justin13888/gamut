@@ -1,0 +1,27 @@
+[package]
+name = "gamut-png"
+description = "Research-grade, space-efficient PNG (Portable Network Graphics) image encoder."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+# DEFLATE/zlib compression for the IDAT datastream (and zTXt/iCCP later).
+gamut-deflate.workspace = true
+
+[dev-dependencies]
+# Differential cross-check oracle: a vendored, statically-linked libpng (built from the
+# `third_party/libpng` submodule). Dev-only and excluded from the workspace. gamut ships no PNG
+# decoder, so libpng is the reference that proves the encoder's output decodes to the same pixels.
+libpng-oracle = { path = "../../tooling/libpng-oracle" }

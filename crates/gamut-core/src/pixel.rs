@@ -116,12 +116,18 @@ define_pixels! {
     /// 8-bit CMYK: four interleaved ink bytes per pixel. Distinct from [`Rgba8`] despite the shared
     /// channel count.
     Cmyk8 => u8, 4, ColorModel::Cmyk;
+    /// 8-bit grayscale + alpha: two interleaved bytes per pixel (luminance, then unassociated
+    /// alpha). The PNG "greyscale with alpha" colour type.
+    GrayAlpha8 => u8, 2, ColorModel::GrayAlpha;
     /// 16-bit grayscale: one `u16` luminance sample per pixel (high-bit-depth).
     Gray16 => u16, 1, ColorModel::Gray;
     /// 16-bit RGB: three interleaved `u16` samples per pixel (high-bit-depth).
     Rgb16 => u16, 3, ColorModel::Rgb;
     /// 16-bit RGBA: four interleaved `u16` samples per pixel (high-bit-depth).
     Rgba16 => u16, 4, ColorModel::Rgba;
+    /// 16-bit grayscale + alpha: two interleaved `u16` samples per pixel (luminance, then
+    /// unassociated alpha; high-bit-depth).
+    GrayAlpha16 => u16, 2, ColorModel::GrayAlpha;
 }
 
 #[cfg(test)]
@@ -148,9 +154,16 @@ mod tests {
         assert_eq!(Rgba8::MODEL, ColorModel::Rgba);
         assert_eq!((Cmyk8::CHANNELS, Cmyk8::BYTES_PER_PIXEL), (4, 4));
         assert_eq!(Cmyk8::MODEL, ColorModel::Cmyk);
+        assert_eq!((GrayAlpha8::CHANNELS, GrayAlpha8::BYTES_PER_PIXEL), (2, 2));
+        assert_eq!(GrayAlpha8::MODEL, ColorModel::GrayAlpha);
         assert_eq!((Gray16::CHANNELS, Gray16::BYTES_PER_PIXEL), (1, 2));
         assert_eq!((Rgb16::CHANNELS, Rgb16::BYTES_PER_PIXEL), (3, 6));
         assert_eq!((Rgba16::CHANNELS, Rgba16::BYTES_PER_PIXEL), (4, 8));
+        assert_eq!(
+            (GrayAlpha16::CHANNELS, GrayAlpha16::BYTES_PER_PIXEL),
+            (2, 4)
+        );
+        assert_eq!(GrayAlpha16::MODEL, ColorModel::GrayAlpha);
     }
 
     #[test]
