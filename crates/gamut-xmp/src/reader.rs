@@ -506,6 +506,7 @@ mod tests {
 
     const DC: &str = "http://purl.org/dc/elements/1.1/";
     const XMP: &str = "http://ns.adobe.com/xap/1.0/";
+    const FOO: &str = "http://example.com/foo/";
 
     fn parse(xml: &str) -> XmpMeta {
         XmpMeta::from_packet(xml.as_bytes()).expect("parse")
@@ -514,7 +515,8 @@ mod tests {
     /// Wraps a body in a minimal `rdf:RDF` with the namespaces the tests use.
     fn rdf(body: &str) -> String {
         format!(
-            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\" xmlns:xmp=\"{XMP}\">\
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\" xmlns:xmp=\"{XMP}\" \
+             xmlns:foo=\"{FOO}\">\
              <rdf:Description rdf:about=\"\">{body}</rdf:Description></rdf:RDF>"
         )
     }
@@ -674,5 +676,107 @@ mod tests {
             XmpMeta::from_packet(b"<rdf:RDF><rdf:Description/></rdf:RDF>"),
             Err(XmpError::UnknownPrefix(_))
         ));
+    }
+
+    #[test]
+    fn cdata_content_is_read_literally() {
+        let meta = parse(&rdf("<dc:format><![CDATA[a < b & c]]></dc:format>"));
+        assert_eq!(meta.get_text(DC, "format"), Some("a < b & c"));
+    }
+
+    #[test]
+    fn rdf_value_attribute_is_a_simple_value() {
+        // emptyPropertyElt with rdf:value (Annex C.2.12 rule 1).
+        let meta = parse(&rdf("<dc:format rdf:value=\"text/plain\"/>"));
+        assert_eq!(meta.get_text(DC, "format"), Some("text/plain"));
+    }
+
+    #[test]
+    fn empty_element_with_data_attributes_is_a_structure() {
+        // emptyPropertyElt with field attributes (Annex C.2.12 rule 4).
+        let meta = parse(&rdf("<xmp:Thumb foo:w=\"9\" foo:h=\"6\"/>"));
+        let XmpValue::Structured(fields) = &meta.get(XMP, "Thumb").unwrap().value else {
+            panic!("expected struct");
+        };
+        assert_eq!(fields.len(), 2);
+        assert!(
+            fields
+                .iter()
+                .any(|f| f.name == "w" && f.text() == Some("9"))
+        );
+    }
+
+    #[test]
+    fn typed_node_becomes_struct_with_rdf_type_qualifier() {
+        // An arbitrarily-named node where rdf:Description is expected (Part 1 §7.9.2.5).
+        let meta = parse(&rdf(
+            "<xmp:Thumb><foo:Image><foo:w>9</foo:w></foo:Image></xmp:Thumb>",
+        ));
+        let prop = meta.get(XMP, "Thumb").unwrap();
+        let XmpValue::Structured(fields) = &prop.value else {
+            panic!("expected struct");
+        };
+        assert_eq!(fields[0].name, "w");
+        // The type's URI is the typed node's expanded name.
+        assert_eq!(prop.qualifiers.len(), 1);
+        assert_eq!(prop.qualifiers[0].namespace, RDF_NAMESPACE);
+        assert_eq!(prop.qualifiers[0].name, "type");
+        assert_eq!(
+            prop.qualifiers[0].value,
+            XmpValue::Uri(format!("{FOO}Image"))
+        );
+    }
+
+    #[test]
+    fn property_without_a_namespace_is_rejected() {
+        // An unprefixed property element (no default namespace) has no namespace URI.
+        let err = XmpMeta::from_packet(
+            format!(
+                "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\"><rdf:Description rdf:about=\"\">\
+                 <plain>x</plain></rdf:Description></rdf:RDF>"
+            )
+            .as_bytes(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn multiple_child_elements_are_rejected() {
+        let err =
+            XmpMeta::from_packet(rdf("<dc:x><foo:a/><foo:b/></dc:x>").as_bytes()).unwrap_err();
+        assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn top_level_typed_node_is_rejected() {
+        // rdf:RDF must contain rdf:Description, not a bare typed node (Part 1 §7.9.2.5).
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:foo=\"{FOO}\"><foo:Thing/></rdf:RDF>"
+        );
+        let err = XmpMeta::from_packet(xml.as_bytes()).unwrap_err();
+        assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rdf_value_carrying_a_qualifier_is_rejected() {
+        // rdf:value must not carry xml:lang or nested qualifiers (Part 1 §7.8).
+        let err = XmpMeta::from_packet(
+            rdf(
+                "<dc:x><rdf:Description><rdf:value xml:lang=\"en\">v</rdf:value>\
+                 </rdf:Description></dc:x>",
+            )
+            .as_bytes(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn non_li_element_in_an_array_is_rejected() {
+        let err =
+            XmpMeta::from_packet(rdf("<dc:x><rdf:Bag><foo:item/></rdf:Bag></dc:x>").as_bytes())
+                .unwrap_err();
+        assert!(matches!(err, XmpError::Prohibited(_)), "got {err:?}");
     }
 }
