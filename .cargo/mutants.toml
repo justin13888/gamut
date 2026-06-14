@@ -43,4 +43,42 @@ exclude_re = [
     'replace \+ with \* in diagonal_count',
     'replace - with \+ in diagonal_count',
     'replace - with / in diagonal_count',
+    # gamut-av1 filter — equivalents in the in-loop filters (the dav1d oracle pins everything else).
+    # constrain: `sign = if diff < 0`, but the magnitude is 0 at `diff == 0` (the only value `<`/`<=`
+    # disagree on), so `±0` makes the result identical (same shape as quant::dequant).
+    'replace < with <= in constrain',
+    # cdef_direction: `while i < 8` steps `i` by 2 from 1, so it only takes odd values and never
+    # equals 8 — `<` and `<=` stop at the same place.
+    'replace < with <= in cdef_direction',
+    # cdef_partials: each directional `partial` enters the cost only as a square, so negating a whole
+    # accumulator (any `+=`→`-=`) leaves every `cost += partial²` unchanged. (The `*=`, index math and
+    # `- 128` centring mutants are *not* excluded — `cdef_direction_finds_dominant_direction` kills them.)
+    'replace \+= with -= in cdef_partials',
+    # cdef_disabled: an all-zero-strength CDEF is the identity filter, so the early-return it guards is
+    # a pure optimization — taking it or running the (identity) loop produces the same output, making
+    # every mutation of the predicate, and the `-> false` body, unobservable. (`-> true` skips real
+    # filtering and is caught by `cdef_leaves_flat_unchanged_but_filters_structure`.)
+    'replace == with != in cdef_disabled',
+    'replace && with \|\| in cdef_disabled',
+    'replace cdef_disabled -> bool with false',
+    # sec_dir: the two secondary directions `±2` off the primary are summed symmetrically, so `dir+off`
+    # vs `dir-off` selects the same pair. (`&`→`|`/`^` and the body mutants change the direction set and
+    # are caught by the dav1d cdef oracle.)
+    'replace \+ with - in sec_dir',
+    # wide_tap_pos: the wide deblock filter is symmetric in `j` with symmetric taps, so reading row
+    # `i+j` vs `i-j` sums identically. (`+`→`*` and the body are caught by the deblock oracle.)
+    'replace \+ with - in wide_tap_pos',
+    # loop_restore_wiener_luma: `if width == 0 || height == 0` is a defensive guard, but the encoder
+    # never calls it with a zero dimension and a zero-sized plane is a no-op anyway, so `||`→`&&` (both
+    # branches false for the real `≥1` dimensions) cannot change the output.
+    'replace \|\| with && in loop_restore_wiener_luma',
+    # centred: the §7.15.2 direction search is invariant to a uniform sample offset (each direction
+    # cost is a sum of squared partials; the chosen direction is an argmax and the variance a cost
+    # *difference*), so flipping the centring `- 128` to `+ 128` cannot change the result. (Verified: the
+    # cdef_direction test passes under the mutant for ramp/edge/sparse inputs. `- with /` is NOT masked
+    # and is caught.)
+    'replace - with \+ in centred',
+    # superres_err: see the doc comment — `err` reaches the offset only as `-err/2` and the `& 0x3fff`
+    # discards the `2¹⁴`-multiple that `-`→`+` introduces. (The `*`/`<<`/`/` mutants are not masked.)
+    'replace - with \+ in superres_err',
 ]
