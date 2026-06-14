@@ -181,11 +181,10 @@ exclude_re = [
     'replace < with <= in write_delta',
     'replace < with <= in write_segment_feature',
     # gamut-webp VP8 frame — behaviourally-equivalent.
-    # frame_header sets `sharpness: 0`, identical to LoopFilterParams::default().sharpness, so deleting
-    # the field is byte-for-byte unchanged. (Deleting `simple`/`y_ac` IS caught by
-    # `frame_header_carries_quant_index_and_filter_type`.) Line-anchored: cargo-mutants matches
-    # field-deletion mutants by location, not by the "delete field …" description text.
-    'frame\.rs:299:13: delete field sharpness',
+    # (frame_header's LoopFilterParams literal is fully explicit — no `..Default::default()` — so a
+    # `sharpness: 0` field deletion is a missing-field compile error: an *unviable* mutant rather than
+    # an un-excludable equivalent survivor. cargo-mutants cannot match field deletions via exclude_re,
+    # so the explicit literal is the clean way to retire that mutant.)
     # split_token_partitions reassembles the 3-byte size from disjoint bytes (`s0 | s1<<8 | s2<<16`)
     # ⇒ `|` == `^`. Its bits-16-23 byte (`s2<<16` read; `len>>16` write) is non-zero only for a single
     # token partition > 64 KiB, which gamut never emits; for every reachable size that byte is 0, so
@@ -335,9 +334,6 @@ exclude_re = [
     'transform\.rs:462:49: replace << with >>',
     'transform\.rs:463:51: replace << with >>',
     'transform\.rs:464:29: replace << with >>',
-    # gamut-webp VP8 frame — sharpness field-deletion (equivalent: sharpness=0=Default). Location-only
-    # anchor: cargo-mutants matches field-deletion mutants by location, not the description text.
-    'frame\.rs:299:13:',
     # gamut-webp VP8L prefix/predictor — equivalents confirmed by deep analysis.
     # from_code_lengths: `[0; MAX_CODE_LENGTH + 2]` only sizes a scratch array; `+ 2`->`* 2` makes it
     # larger, and the extra entries are never indexed (offsets[len+1], len<=MAX), so output is identical.

@@ -297,7 +297,7 @@ fn frame_header(width: u32, height: u32, quant_index: u8, simple_filter: bool) -
             simple: simple_filter,
             level: filter_level(quant_index),
             sharpness: 0,
-            ..Default::default()
+            deltas: LoopFilterDeltas::default(),
         },
         token_partitions: 1,
         quant: QuantIndices {
