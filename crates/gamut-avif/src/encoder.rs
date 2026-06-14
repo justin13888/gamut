@@ -1,9 +1,21 @@
 //! The AVIF still-image encoder: RGB → identity planes → AV1 temporal unit → ISOBMFF container.
 
-use gamut_av1::{EncodedStill, encode_still_intra, encode_still_lossless_identity};
+use gamut_av1::{Av1StillConfig, EncodedStill, encode_still_intra, encode_still_lossless_identity};
 use gamut_color::Planar8;
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
-use gamut_isobmff::{Av1cConfig, AvifStillImage, ImageTransform, NclxColr, write_avif_still};
+use gamut_isobmff::{
+    ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind, write,
+};
+
+/// The encoder's display-orientation transforms, applied by a reader at display time (the stored
+/// pixels are unchanged). Maps to the `irot`/`imir` item properties.
+#[derive(Debug, Clone, Copy, Default)]
+struct ImageTransform {
+    /// `irot` rotation in 90° steps (`0..=3`), anti-clockwise. `0` writes no `irot`.
+    rotation_ccw: u8,
+    /// `imir` mirror axis: `Some(0)` vertical (left↔right), `Some(1)` horizontal (top↔bottom).
+    mirror_axis: Option<u8>,
+}
 
 /// Encodes images to AVIF still images.
 ///
@@ -55,39 +67,87 @@ impl AvifEncoder {
     }
 }
 
+/// The 4-byte `AV1CodecConfigurationRecord` body (empty `configOBUs`) stamped into the `av1C`
+/// property (AV1-ISOBMFF v1.3.0 §2.3.3/§2.3.4). Every field mirrors the AV1 sequence header.
+fn av1c_record(c: &Av1StillConfig) -> [u8; 4] {
+    [
+        0x81, // marker = 1, version = 1
+        (c.seq_profile << 5) + (c.seq_level_idx_0 & 0x1f),
+        (c.seq_tier_0 << 7)
+            + (u8::from(c.high_bitdepth) << 6)
+            + (u8::from(c.twelve_bit) << 5)
+            + (u8::from(c.monochrome) << 4)
+            + (c.chroma_subsampling_x << 3)
+            + (c.chroma_subsampling_y << 2)
+            + (c.chroma_sample_position & 0x3),
+        0x00, // reserved(3)=0, initial_presentation_delay_present(1)=0, reserved(4)=0
+    ]
+}
+
 /// Wraps the encoded AV1 temporal unit in the AVIF container, stamping `av1C`/`colr`/`ispe`/`pixi`
 /// from the AV1 configuration so the cross-box consistency requirements hold by construction
 /// (AVIF v1.2.0 §2.2, AV1-ISOBMFF v1.3.0 §2.3.4).
 fn build_avif(still: &EncodedStill, dims: Dimensions, transform: ImageTransform) -> Vec<u8> {
     let c = &still.config;
-    let av1c = Av1cConfig {
-        seq_profile: c.seq_profile,
-        seq_level_idx_0: c.seq_level_idx_0,
-        seq_tier_0: c.seq_tier_0,
-        high_bitdepth: c.high_bitdepth,
-        twelve_bit: c.twelve_bit,
-        monochrome: c.monochrome,
-        chroma_subsampling_x: c.chroma_subsampling_x,
-        chroma_subsampling_y: c.chroma_subsampling_y,
-        chroma_sample_position: c.chroma_sample_position,
+    // av1C is essential; ispe/pixi/colr are descriptive. Order fixes the ipco/ipma indices.
+    let mut properties = vec![
+        Property {
+            essential: true,
+            kind: PropertyKind::CodecConfiguration {
+                kind: *b"av1C",
+                data: av1c_record(c).to_vec(),
+            },
+        },
+        Property {
+            essential: false,
+            kind: PropertyKind::ImageSpatialExtents {
+                width: dims.width,
+                height: dims.height,
+            },
+        },
+        Property {
+            essential: false,
+            kind: PropertyKind::PixelInformation {
+                bits_per_channel: vec![8, 8, 8],
+            },
+        },
+        Property {
+            essential: false,
+            kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+                colour_primaries: c.color_primaries,
+                transfer_characteristics: c.transfer_characteristics,
+                matrix_coefficients: c.matrix_coefficients,
+                full_range: c.full_range,
+            })),
+        },
+    ];
+    // Transformative properties are essential (MIAF §7.3.6.7); applied irot-then-imir.
+    if transform.rotation_ccw != 0 {
+        properties.push(Property {
+            essential: true,
+            kind: PropertyKind::Rotation(transform.rotation_ccw),
+        });
+    }
+    if let Some(axis) = transform.mirror_axis {
+        properties.push(Property {
+            essential: true,
+            kind: PropertyKind::Mirror(axis),
+        });
+    }
+    let image = IsoBmffImage {
+        major_brand: *b"avif",
+        minor_version: 0,
+        compatible_brands: vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
+        primary_item_id: 1,
+        items: vec![Item {
+            id: 1,
+            item_type: *b"av01",
+            name: String::new(),
+            properties,
+            payload: still.obus.clone(),
+        }],
     };
-    let nclx = NclxColr {
-        colour_primaries: c.color_primaries,
-        transfer_characteristics: c.transfer_characteristics,
-        matrix_coefficients: c.matrix_coefficients,
-        full_range: c.full_range,
-    };
-    let image = AvifStillImage {
-        width: dims.width,
-        height: dims.height,
-        bit_depth: 8,
-        num_channels: 3,
-        av1c,
-        nclx,
-        transform,
-        item_data: &still.obus,
-    };
-    write_avif_still(&image)
+    write(&image)
 }
 
 impl EncodeImage<Rgb8> for AvifEncoder {
@@ -109,6 +169,32 @@ impl EncodeImage<Rgb8> for AvifEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn av1c_record_encodes_every_field() {
+        // Distinct, non-zero values in every field so each shift, mask, and `+` is observable (a
+        // zero term would hide its operator: `0 + x == 0 - x`, `0 << n == 0 >> n`).
+        let c = Av1StillConfig {
+            seq_profile: 5,        // 0b101
+            seq_level_idx_0: 0x15, // 0b10101
+            seq_tier_0: 1,
+            high_bitdepth: true,
+            twelve_bit: true,
+            monochrome: true,
+            chroma_subsampling_x: 1,
+            chroma_subsampling_y: 1,
+            chroma_sample_position: 2, // 0b10
+            // colr fields are irrelevant to av1C but needed to build the config.
+            color_primaries: 2,
+            transfer_characteristics: 3,
+            matrix_coefficients: 5,
+            full_range: true,
+        };
+        // marker/version 0x81; (seq_profile<<5)+(level&0x1f) = 0xA0+0x15 = 0xB5; the flags byte sets
+        // tier/high_bitdepth/twelve_bit/monochrome/subsampling_x/_y plus chroma position 2:
+        // 0x80+0x40+0x20+0x10+0x08+0x04+0x02 = 0xFE; trailing reserved 0x00.
+        assert_eq!(av1c_record(&c), [0x81, 0xB5, 0xFE, 0x00]);
+    }
 
     fn encode(w: u32, h: u32) -> Vec<u8> {
         let mut rgb = vec![0u8; (w * h * 3) as usize];
