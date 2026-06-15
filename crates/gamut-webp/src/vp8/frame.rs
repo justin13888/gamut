@@ -297,7 +297,7 @@ fn frame_header(width: u32, height: u32, quant_index: u8, simple_filter: bool) -
             simple: simple_filter,
             level: filter_level(quant_index),
             sharpness: 0,
-            ..Default::default()
+            deltas: LoopFilterDeltas::default(),
         },
         token_partitions: 1,
         quant: QuantIndices {
@@ -1585,5 +1585,178 @@ mod tests {
         let (mut bitstream, _) = encode_frame(&yuv, 40);
         bitstream.truncate(UNCOMPRESSED_CHUNK_LEN + 1);
         let _ = decode_frame(&bitstream);
+    }
+
+    /// Position-weighted checksum: changes if any value *or* its index changes, so it pins both the
+    /// magnitudes and the layout of a coefficient block in a single comparison.
+    fn weighted_checksum(values: impl IntoIterator<Item = i16>) -> i64 {
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| (i as i64 + 1) * i64::from(v))
+            .sum()
+    }
+
+    #[test]
+    fn quantize_luma_pins_transform_and_quantization() {
+        // A fixed source macroblock and (varying) prediction, quantized at a known factor. fdct +
+        // fwht + per-band quantize are deterministic, so the exact Y2/AC levels pin the sub-block
+        // indexing (`i % 4`, `i / 4`), the block and prediction read offsets, and the residual
+        // subtraction — none of which a symmetric encode→decode round-trip can catch.
+        let mut src = [0u8; 1024]; // a 32×32 plane, so a non-zero macroblock position is exercised
+        for (i, s) in src.iter_mut().enumerate() {
+            *s = ((i * 13 + 7) % 251) as u8;
+        }
+        let mut pred = [0u8; 256];
+        for (i, p) in pred.iter_mut().enumerate() {
+            *p = ((i * 7 + 17) % 251) as u8;
+        }
+        let qf = QuantFactors::new(16, &QuantIndices::default());
+        let mut levels = MbLevels::default();
+        // Quantize macroblock (1, 1) so the `mb_x * 16` and `mb_y * 16` read offsets are non-zero.
+        quantize_luma(&src, 32, 1, 1, &pred, &qf, &mut levels);
+        assert_eq!(weighted_checksum(levels.y2), 707);
+        assert_eq!(weighted_checksum(levels.y.into_iter().flatten()), -22284);
+    }
+
+    #[test]
+    fn quantize_chroma_pins_transform_and_quantization() {
+        // Same idea for the four chroma sub-blocks: the exact levels pin the prediction read offset.
+        let mut src = [0u8; 64];
+        for (i, s) in src.iter_mut().enumerate() {
+            *s = ((i * 11 + 5) % 251) as u8;
+        }
+        let mut pred = [0u8; 64];
+        for (i, p) in pred.iter_mut().enumerate() {
+            *p = ((i * 5 + 3) % 251) as u8;
+        }
+        let qf = QuantFactors::new(16, &QuantIndices::default());
+        let levels = quantize_chroma(&src, 8, 0, 0, &pred, &qf);
+        assert_eq!(weighted_checksum(levels.into_iter().flatten()), -1085);
+    }
+
+    #[test]
+    fn encode_bpred_luma_pins_residual() {
+        // The per-subblock residual (source minus the chosen submode prediction) feeds these levels;
+        // flipping the subtraction to addition changes the coefficients.
+        let mut recon = FrameBuffers::new(16, 16);
+        let mut src = [0u8; 256];
+        for (i, s) in src.iter_mut().enumerate() {
+            *s = ((i * 11 + 3) % 251) as u8;
+        }
+        let qf = QuantFactors::new(12, &QuantIndices::default());
+        let (_, levels, _) = encode_bpred_luma(&mut recon, &src, 16, 0, 0, &qf, &[0; 4]);
+        assert_eq!(weighted_checksum(levels.into_iter().flatten()), -3083);
+    }
+
+    #[test]
+    fn segment_filter_level_applies_signed_delta() {
+        // Delta mode: the per-segment level is `base + filter_strength`, clamped to [0, 63]. A
+        // negative delta must lower the level (pins the `+`, which flipped to `-` would raise it).
+        let seg = Segmentation {
+            enabled: true,
+            abs_delta: false,
+            filter_strength: [10, -10, 0, 40],
+            ..Default::default()
+        };
+        assert_eq!(segment_filter_level(30, &seg, 0), 40);
+        assert_eq!(segment_filter_level(30, &seg, 1), 20);
+        assert_eq!(segment_filter_level(30, &seg, 3), 63);
+        // Absolute mode and the disabled fast path.
+        let abs = Segmentation {
+            enabled: true,
+            abs_delta: true,
+            filter_strength: [25, 0, 0, 0],
+            ..Default::default()
+        };
+        assert_eq!(segment_filter_level(30, &abs, 0), 25);
+        assert_eq!(segment_filter_level(30, &Segmentation::default(), 0), 30);
+    }
+
+    #[test]
+    fn frame_header_carries_quant_index_and_filter_type() {
+        // The minimal key-frame header must carry the requested base quantizer and filter type:
+        // deleting either struct field would silently fall back to the default (y_ac 0 / normal).
+        let simple = frame_header(176, 144, 100, true);
+        assert_eq!(simple.quant.y_ac, 100, "base quantizer index must be stored");
+        assert!(simple.loop_filter.simple, "the simple-filter request must be stored");
+        assert!(
+            !frame_header(176, 144, 100, false).loop_filter.simple,
+            "a normal-filter request must not set the simple flag"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_zero_dimension() {
+        let yuv = pattern(16, 16);
+        let (mut bits, _) = encode_frame(&yuv, 40);
+        // Clear the 14-bit width field (low 6 bits live in byte 7) while leaving height non-zero, so
+        // only the `width == 0` half of the guard fires: `||` flipped to `&&` would let it through.
+        bits[6] = 0;
+        bits[7] &= 0xC0;
+        assert!(matches!(decode_frame(&bits), Err(Error::InvalidInput(_))));
+    }
+
+    #[test]
+    fn split_token_partitions_size_table_boundary() {
+        // Exactly the size-table length (3 bytes for n = 2) with a zero first size is valid: two
+        // empty partitions. `<` widened to `<=` would wrongly reject it as truncated.
+        assert!(split_token_partitions(&[0, 0, 0], 2).is_ok());
+        // One byte short of the size table is truncated and must be rejected; `<` narrowed to `==`
+        // would skip the bounds check.
+        assert!(split_token_partitions(&[0, 0], 2).is_err());
+    }
+
+
+    #[test]
+    fn interior_edges_filter_on_coefficients_not_only_bpred() {
+        // A gentle quadratic bowl: smooth enough that whole-block prediction is chosen (not B_PRED)
+        // yet curved enough to leave a residual, so macroblocks carry coefficients. The §15.1 rule
+        // then filters their interior subblock edges (`use_bpred || mb_has_coeffs`); `||` flipped to
+        // `&&` would skip it for these non-B_PRED macroblocks, desyncing the encoder reconstruction
+        // from the decoder. (A strong filter level — q = 40 — makes the divergence observable.)
+        let (w, h) = (32u32, 32u32);
+        let y: Vec<u8> = (0..(w * h) as usize)
+            .map(|i| {
+                let (x, yy) = (i % w as usize, i / w as usize);
+                (128 + (x * x + yy * yy) / 64) as u8
+            })
+            .collect();
+        let (cw, ch) = (
+            Yuv420::chroma_width(w) as usize,
+            Yuv420::chroma_height(h) as usize,
+        );
+        let yuv = Yuv420::new(w, h, y, vec![128; cw * ch], vec![128; cw * ch]).unwrap();
+        let (bits, recon) = encode_frame_filtered(&yuv, 40, EncodeOptions::default());
+        let dec = decode_frame(&bits).expect("decode");
+        assert_eq!(recon.to_yuv420().y(), dec.to_yuv420().y());
+    }
+
+    #[test]
+    fn decode_accepts_exact_fit_with_empty_token_partition() {
+        // A flat image quantizes to all-skip macroblocks, so the single token partition carries no
+        // tokens. Truncating the stream to exactly the end of the first partition leaves zero
+        // token-partition bytes — part0_end == data.len(). The `part0_end > data.len()` guard must
+        // accept this exact fit; `>=` would reject the valid (if minimal) stream.
+        let (w, h) = (16u32, 16u32);
+        let (cw, ch) = (
+            Yuv420::chroma_width(w) as usize,
+            Yuv420::chroma_height(h) as usize,
+        );
+        let yuv = Yuv420::new(
+            w,
+            h,
+            vec![128; (w * h) as usize],
+            vec![128; cw * ch],
+            vec![128; cw * ch],
+        )
+        .unwrap();
+        let (bits, _) = encode_frame(&yuv, 127); // coarsest quantizer → every macroblock skips
+        let chunk = header::read_uncompressed_chunk(&bits).expect("chunk");
+        let end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
+        assert!(
+            decode_frame(&bits[..end]).is_ok(),
+            "a stream ending exactly at the first partition (no token bytes) must decode"
+        );
     }
 }

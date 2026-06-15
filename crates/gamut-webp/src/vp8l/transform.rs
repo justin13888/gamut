@@ -643,6 +643,62 @@ mod tests {
     }
 
     #[test]
+    fn predict_modes_pin_exact_values() {
+        // Absolute outputs for every predictor mode (RFC 9649 §4.1) with fixed, channel-diverse
+        // neighbours. predict and its helpers (average2 for modes 5-10, select for 11, and
+        // clamp_add_subtract_full/half for 12-13) are shared by the forward and inverse passes, so a
+        // symmetric round-trip — and the `== average2(...)` style checks above — cannot catch a
+        // mutation in them; a position-weighted checksum over all 14 outputs does.
+        let l = make_argb(10, 200, 30, 40);
+        let t = make_argb(250, 60, 70, 200);
+        let tl = make_argb(90, 100, 110, 120);
+        let tr = make_argb(130, 20, 240, 16);
+        let sum: i128 = (0..14u8)
+            .map(|m| (i128::from(m) + 1) * i128::from(predict(m, l, t, tl, tr)))
+            .sum();
+        assert_eq!(sum, 227_728_720_966);
+    }
+
+    #[test]
+    fn predicted_value_pins_borders_and_metric() {
+        // predicted_value owns the border rules (top-left / top / left / rightmost-column TR-wrap) and
+        // routes interior pixels through predict. Checking a small image at every (x, y) for a
+        // top-right-using mode (3) and the Select mode (11) pins the TR-wrap arithmetic
+        // `x + 1 < width` and Select's `a - b` distance metric — both shared by the forward and
+        // inverse passes, so neither a symmetric round-trip nor the mode-only predict golden catches.
+        let w = 4usize;
+        let img: Vec<u32> = (0..16)
+            .map(|i| {
+                make_argb(
+                    i as u8,
+                    (i * 17) as u8,
+                    (i * 7 + 3) as u8,
+                    255u8.wrapping_sub((i * 11) as u8),
+                )
+            })
+            .collect();
+        let sum: i128 = (0..16usize)
+            .flat_map(|i| [3u8, 11].into_iter().map(move |m| (i, m)))
+            .map(|(i, m)| {
+                let (x, y) = (i % w, i / w);
+                (i as i128 + 1) * (i128::from(m) + 1) * i128::from(predicted_value(&img, w, x, y, m))
+            })
+            .sum();
+        assert_eq!(sum, 381_797_375_768);
+    }
+
+    #[test]
+    fn select_predictor_uses_manhattan_distance() {
+        // Select returns whichever of l/t is closer (Manhattan) to the gradient l + t - tl. These
+        // cases are crafted (equal non-alpha channels, so the alpha term decides) so the spec metric
+        // `a - b` picks one neighbour while a mutated `a + b` / `a / b` would pick the other — pinning
+        // select's per-channel distance arithmetic, which is shared by the forward and inverse passes.
+        let g = |a: u8| make_argb(a, 128, 128, 128);
+        assert_eq!(select(g(10), g(200), g(100)), g(200)); // `+` would pick g(10)
+        assert_eq!(select(g(10), g(100), g(95)), g(10)); // `/` would pick g(100)
+    }
+
+    #[test]
     fn average2_rounds_down_per_channel() {
         let a = make_argb(10, 20, 30, 41);
         let b = make_argb(11, 21, 31, 40);

@@ -301,7 +301,38 @@ impl BackwardRefs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vp8l::bit_io::BitWriter;
+    use crate::vp8l::bit_io::{BitReader, BitWriter};
+
+    #[test]
+    fn distance_code_table_matches_spec() {
+        // The 2D distance-offset table (RFC 9649 §4.4) is a fixed spec constant shared by encode and
+        // decode, so a corrupted entry round-trips internally — only an absolute check (this, plus the
+        // libwebp oracle where exercised) catches it. A position-weighted checksum over every code's
+        // pixel distance pins all 120 (xoffset, yoffset) entries at once.
+        let sum: i64 = (1..=130u32)
+            .map(|c| i64::from(c) * i64::from(distance_code_to_pixel_distance(c, 256)))
+            .sum();
+        assert_eq!(sum, 8_327_819);
+    }
+
+    #[test]
+    fn lz77_value_prefix_round_trips_and_bounds() {
+        // value_to_prefix is the exact inverse of read_lz77_value (§5.2.2). Splitting a value, writing
+        // its extra bits, then reading it back must recover it across small and large magnitudes — any
+        // asymmetric mutation of the offset/shift math in either function breaks the identity.
+        for v in [1u32, 2, 4, 5, 6, 7, 8, 15, 16, 17, 31, 100, 1000, 65_535, 1 << 20] {
+            let (prefix, extra_bits, extra) = value_to_prefix(v);
+            let mut w = BitWriter::new();
+            w.write_bits(extra, u32::from(extra_bits));
+            let bytes = w.finish();
+            let mut r = BitReader::new(&bytes);
+            assert_eq!(read_lz77_value(&mut r, u32::from(prefix)).unwrap(), v, "value {v}");
+        }
+        // The extra-bits bound: prefix 50 implies exactly 24 extra bits (accepted); 52 implies 25
+        // (rejected). Pins `extra_bits > 24` against `>=` / `==`.
+        assert!(read_lz77_value(&mut BitReader::new(&[0u8; 4]), 50).is_ok());
+        assert!(read_lz77_value(&mut BitReader::new(&[0u8; 4]), 52).is_err());
+    }
 
     #[test]
     fn distance_map_has_120_entries() {

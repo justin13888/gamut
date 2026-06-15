@@ -159,6 +159,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn finish_does_not_append_a_byte_when_byte_aligned() {
+        // After writing a whole number of bytes, bits_in_acc == 0, so finish must NOT push a trailing
+        // (zero) byte. `bits_in_acc > 0` widened to `>= 0` would append a spurious 0x00.
+        let mut w = BitWriter::new();
+        w.write_bits(0xAB, 8); // exactly one byte -> bits_in_acc returns to 0
+        assert_eq!(w.finish(), vec![0xAB]);
+    }
+
+    #[test]
     fn reads_lsb_first_within_a_byte() {
         // 0b1011_0010 = 0xB2. LSB-first the bits are 0,1,0,0,1,1,0,1.
         let mut r = BitReader::new(&[0xB2]);

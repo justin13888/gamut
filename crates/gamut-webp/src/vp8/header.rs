@@ -659,4 +659,64 @@ mod tests {
         let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes));
         assert_eq!(decoded.segmentation, header.segmentation);
     }
+
+    #[test]
+    fn read_uncompressed_chunk_length_boundaries() {
+        // Three bytes are enough to read the frame tag, so the key-frame check fires and an inter
+        // frame is rejected as `Unsupported`; `data.len() < 3` widened to `<= 3` would instead
+        // reject it as a truncated tag (`InvalidInput`) before the tag is ever examined.
+        assert!(matches!(
+            read_uncompressed_chunk(&[0x01, 0x00, 0x00]),
+            Err(Error::Unsupported(_))
+        ));
+        // Exactly `UNCOMPRESSED_CHUNK_LEN` (10) bytes is a complete minimal key-frame chunk; the
+        // `data.len() < 10` guard widened to `<= 10` would reject this valid input.
+        let minimal = [0x00, 0, 0, 0x9d, 0x01, 0x2a, 16, 0, 16, 0];
+        let chunk = read_uncompressed_chunk(&minimal).expect("a 10-byte chunk is complete");
+        assert_eq!((chunk.width, chunk.height), (16, 16));
+    }
+
+    #[test]
+    fn show_frame_flag_is_decoded() {
+        // `write_uncompressed_chunk` always sets show_frame (tag bit 4); a round-trip must read it
+        // back true — pinning the `>> 4` shift and `!= 0` test (`<< 4` / `== 0` would clear it).
+        let mut stream = Vec::new();
+        write_uncompressed_chunk(&sample_header(), 0, &mut stream);
+        assert!(read_uncompressed_chunk(&stream).expect("chunk").show_frame);
+        // A frame tag with bit 4 clear must decode to show_frame = false — pinning the `& 1` mask
+        // against `| 1` / `^ 1`, which would force the bit set.
+        let no_show = [0x00, 0, 0, 0x9d, 0x01, 0x2a, 16, 0, 16, 0];
+        assert!(!read_uncompressed_chunk(&no_show).expect("chunk").show_frame);
+    }
+
+    #[test]
+    fn segmentation_filter_strength_only_round_trips() {
+        // The quantizer deltas are zero but the filter-strength deltas are not, so whether the
+        // feature-data block is written hinges on the `filter_strength != [0; 4]` term; `!=` flipped
+        // to `==` would skip the block and silently drop the filter deltas.
+        let mut header = sample_header();
+        header.segmentation = Segmentation {
+            enabled: true,
+            update_map: false,
+            abs_delta: false,
+            quantizer: [0; 4],
+            filter_strength: [3, -6, 9, -12],
+            tree_probs: [255; 3],
+        };
+        let chunk = UncompressedChunk {
+            is_key_frame: true,
+            version: 0,
+            show_frame: true,
+            first_partition_size: 0,
+            width: header.width,
+            height: header.height,
+            horizontal_scale: 0,
+            vertical_scale: 0,
+        };
+        let mut enc = BoolEncoder::new();
+        write_frame_header(&mut enc, &header);
+        let bytes = enc.finish();
+        let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes));
+        assert_eq!(decoded.segmentation, header.segmentation);
+    }
 }
