@@ -44,6 +44,13 @@ Dependency edges (a crate depends on those to its right):
   third-party `image` crate (PNG/JPEG/PPM) but encodes only with gamut crates, and exposes the
   `primitives` re-exports as inspection subcommands.
 
+## Code correctness
+
+- Correctness: Crate should follow implement the specifications it claims to follow, thoroughly test implementation against oracle. Mutant testing should pass using only non-redundant, high-value tests; exclusions should be done only with strictly strong justification.
+- Specification as source of truth: All implementation and tests must be based on the official specifications (in `references/`) and oracle (that is claimed in the crate documentation).
+- Design and documentation: Crate exposes public API that is designed to be usable by users without reading documentation, and documented for features not planned or deferred.
+- No duplication: Maximally depends on other `gamut` dependencies where appropriate and trusted external code dependencies where approved by maintainers.
+
 ## Reference
 
 All codec implementations must follow the official specs that should be attached in `references/`
