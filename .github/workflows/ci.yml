@@ -25,6 +25,12 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           install_args: cmake ninja meson
+      - name: Clear pre-installed Rust toolchain
+        # The runner image bakes in a `stable` toolchain that rustup can leave "partially
+        # installed"; dtolnay/rust-toolchain then does an in-place reinstall that aborts with
+        # `detected conflict: 'bin/cargo-fmt'` (CI run 28500539585). Removing it first makes
+        # the install below start from a clean slate. Idempotent: a no-op if it is absent.
+        run: rustup toolchain uninstall stable || true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -49,6 +55,9 @@ jobs:
       - uses: jdx/mise-action@v4
         with:
           install_args: cmake ninja meson aqua:taiki-e/cargo-llvm-cov
+      - name: Clear pre-installed Rust toolchain
+        # Same rustup `bin/cargo-fmt` conflict guard as the check job above.
+        run: rustup toolchain uninstall stable || true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
