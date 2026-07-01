@@ -15,6 +15,8 @@
 //! [`IccProfile::parse`] decodes a profile and [`IccProfile::to_bytes`] re-serializes it; look tags
 //! up with [`IccProfile::get`], optionally via the [`KnownTag`] catalogue. [`IccReader`] and
 //! [`IccWriter`] carry options (strict parsing; profile-ID recomputation).
+//! [`IccProfile::validate`] reports any ICC.1:2022 §8 required tags missing for the profile's
+//! device class.
 //!
 //! ```no_run
 //! use gamut_icc::{IccProfile, KnownTag, TagData};
@@ -60,6 +62,7 @@ pub mod reader;
 pub mod sequence;
 pub mod tag_types;
 pub mod tags;
+pub mod validate;
 pub mod writer;
 
 pub use cicp::Cicp;
@@ -83,4 +86,5 @@ pub use sequence::{
 };
 pub use tag_types::TagData;
 pub use tags::KnownTag;
+pub use validate::Conformance;
 pub use writer::IccWriter;
