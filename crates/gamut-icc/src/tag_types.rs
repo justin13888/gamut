@@ -3,13 +3,19 @@
 use gamut_core::{Error, Result};
 
 use crate::bytes::{ByteReader, push_date_time, push_s15fixed16, push_xyz_number};
+use crate::cicp::{Cicp, decode_cicp, encode_cicp};
 use crate::curve::{
     Curve, ParametricCurve, read_curve_body, read_parametric_body, write_curve_body,
     write_parametric_body,
 };
+use crate::data::{DataElement, decode_data, encode_data};
 use crate::lut::{
     Lut8, Lut16, LutAToB, LutBToA, decode_lut_a_to_b, decode_lut_b_to_a, decode_lut8, decode_lut16,
     encode_lut_a_to_b, encode_lut_b_to_a, encode_lut8, encode_lut16,
+};
+use crate::measurement::{
+    Chromaticity, Measurement, ViewingConditions, decode_chromaticity, decode_measurement,
+    decode_viewing_conditions, encode_chromaticity, encode_measurement, encode_viewing_conditions,
 };
 use crate::mluc::{
     Mluc, TextDescription, decode_mluc, decode_text_description, encode_mluc,
@@ -55,6 +61,16 @@ pub enum TagData {
     LutBToA(LutBToA),
     /// `ncl2` — a named-colour palette (`namedColor2Type`).
     NamedColor2(NamedColor2),
+    /// `chrm` — phosphor/colorant CIE xy chromaticities (`chromaticityType`).
+    Chromaticity(Chromaticity),
+    /// `cicp` — coding-independent code points for video signalling (`cicpType`).
+    Cicp(Cicp),
+    /// `meas` — measurement conditions (`measurementType`).
+    Measurement(Measurement),
+    /// `view` — viewing conditions (`viewingConditionsType`).
+    ViewingConditions(ViewingConditions),
+    /// `data` — ASCII or binary data (`dataType`).
+    Data(DataElement),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -89,6 +105,13 @@ pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
         b"mAB " => Ok(TagData::LutAToB(decode_lut_a_to_b(element)?)),
         b"mBA " => Ok(TagData::LutBToA(decode_lut_b_to_a(element)?)),
         b"ncl2" => Ok(TagData::NamedColor2(decode_named_color2(element)?)),
+        b"chrm" => Ok(TagData::Chromaticity(decode_chromaticity(element)?)),
+        b"cicp" => Ok(TagData::Cicp(decode_cicp(element)?)),
+        b"meas" => Ok(TagData::Measurement(decode_measurement(element)?)),
+        b"view" => Ok(TagData::ViewingConditions(decode_viewing_conditions(
+            element,
+        )?)),
+        b"data" => Ok(TagData::Data(decode_data(element)?)),
         _ => Ok(TagData::Raw {
             type_sig,
             bytes: element.to_vec(),
@@ -197,6 +220,11 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
         TagData::LutAToB(lut) => encode_lut_a_to_b(lut, out),
         TagData::LutBToA(lut) => encode_lut_b_to_a(lut, out),
         TagData::NamedColor2(named) => encode_named_color2(named, out),
+        TagData::Chromaticity(chrm) => encode_chromaticity(chrm, out),
+        TagData::Cicp(cicp) => encode_cicp(cicp, out),
+        TagData::Measurement(meas) => encode_measurement(meas, out),
+        TagData::ViewingConditions(view) => encode_viewing_conditions(view, out),
+        TagData::Data(data) => encode_data(data, out),
         TagData::Raw { bytes, .. } => out.extend_from_slice(bytes),
     }
 }
@@ -393,6 +421,36 @@ mod tests {
                 prefix: String::new(),
                 suffix: String::new(),
                 colors: Vec::new(),
+            }),
+            TagData::Chromaticity(Chromaticity {
+                colorant_type: 1,
+                channels: vec![
+                    [crate::primitives::U16Fixed16::from_f64(0.64); 2],
+                    [crate::primitives::U16Fixed16::from_f64(0.30); 2],
+                    [crate::primitives::U16Fixed16::from_f64(0.15); 2],
+                ],
+            }),
+            TagData::Cicp(Cicp {
+                colour_primaries: 9,
+                transfer_characteristics: 16,
+                matrix_coefficients: 0,
+                video_full_range_flag: 1,
+            }),
+            TagData::Measurement(Measurement {
+                observer: 1,
+                backing: XyzNumber::from_f64([0.0, 0.0, 0.0]),
+                geometry: 1,
+                flare: crate::primitives::U16Fixed16::from_f64(0.0),
+                illuminant: 1,
+            }),
+            TagData::ViewingConditions(ViewingConditions {
+                illuminant: XyzNumber::from_f64([19.0, 20.0, 21.0]),
+                surround: XyzNumber::from_f64([0.4, 0.4, 0.4]),
+                illuminant_type: 1,
+            }),
+            TagData::Data(DataElement {
+                flag: 1,
+                data: vec![1, 2, 3, 4],
             }),
         ];
         for data in cases {

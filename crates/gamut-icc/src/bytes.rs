@@ -7,7 +7,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::primitives::{DateTime, S15Fixed16, Signature, XyzNumber};
+use crate::primitives::{DateTime, S15Fixed16, Signature, U16Fixed16, XyzNumber};
 
 /// A forward-only big-endian reader over an ICC byte buffer.
 pub(crate) struct ByteReader<'a> {
@@ -100,6 +100,11 @@ impl<'a> ByteReader<'a> {
         Ok(S15Fixed16(self.i32()?))
     }
 
+    /// Reads a `u16Fixed16Number`.
+    pub(crate) fn u16fixed16(&mut self) -> Result<U16Fixed16> {
+        Ok(U16Fixed16(self.u32()?))
+    }
+
     /// Reads an `XYZNumber` (three consecutive `s15Fixed16`).
     pub(crate) fn xyz_number(&mut self) -> Result<XyzNumber> {
         Ok(XyzNumber {
@@ -134,6 +139,11 @@ pub(crate) fn pad_to_4(out: &mut Vec<u8>) {
 
 /// Appends an `s15Fixed16` big-endian.
 pub(crate) fn push_s15fixed16(out: &mut Vec<u8>, value: S15Fixed16) {
+    out.extend_from_slice(&value.0.to_be_bytes());
+}
+
+/// Appends a `u16Fixed16` big-endian.
+pub(crate) fn push_u16fixed16(out: &mut Vec<u8>, value: U16Fixed16) {
     out.extend_from_slice(&value.0.to_be_bytes());
 }
 

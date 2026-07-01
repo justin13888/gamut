@@ -90,3 +90,18 @@ samples normalize as `value / 255` (lut8) or `value / 65535` (lut16).
 B-curves; `lutBToAType` (`mBA `, PCS→device) reverses this: B-curves → matrix → M-curves → CLUT →
 A-curves. Every stage but the B-curves is optional, signalled by a zero offset in the element
 header; sub-elements are 4-byte aligned.
+
+### Measurement & signalling elements
+
+- `chromaticityType` (`chrm`, §10.2): a `u16` channel count, a `u16` phosphor/colorant type
+  (Table 31: `0` explicit, `1`–`6` = BT.709-2 / SMPTE RP145 / EBU 3213-E / P22 / P3 / BT.2020), then
+  one `u16Fixed16` `(x, y)` pair per channel.
+- `cicpType` (`cicp`, §10.3): four `uInt8` ITU-T H.273 (ISO/IEC 23091-2) code points —
+  `ColourPrimaries`, `TransferCharacteristics`, `MatrixCoefficients` (0 for RGB/XYZ),
+  `VideoFullRangeFlag`. gamut-icc stores the raw code points; interpretation lives in `gamut-color`.
+- `measurementType` (`meas`, §10.14): standard-observer code (Table 50) · backing `XYZNumber` ·
+  geometry code (Table 51) · flare `u16Fixed16` (Table 52) · standard-illuminant code (Table 53).
+- `viewingConditionsType` (`view`, §10.30): illuminant `XYZNumber` · surround `XYZNumber` ·
+  illuminant-type code (shared with `measurementType`), all in un-normalized cd/m² CIEXYZ.
+- `dataType` (`data`, §10.7): a `uInt32` flag (`0` ASCII / `1` binary) followed by
+  `element size − 12` payload bytes, preserved verbatim.

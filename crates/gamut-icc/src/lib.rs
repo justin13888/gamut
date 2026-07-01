@@ -44,9 +44,12 @@
 
 mod bytes;
 
+pub mod cicp;
 pub mod curve;
+pub mod data;
 pub mod header;
 pub mod lut;
+pub mod measurement;
 pub mod mluc;
 pub mod named_color;
 pub mod primitives;
@@ -56,11 +59,14 @@ pub mod tag_types;
 pub mod tags;
 pub mod writer;
 
+pub use cicp::Cicp;
 pub use curve::{Curve, CurveOrParametric, ParametricCurve};
+pub use data::DataElement;
 pub use header::{
     ColorSpace, DeviceClass, ProfileHeader, ProfileId, ProfileVersion, RenderingIntent,
 };
 pub use lut::{Clut, ClutPrecision, Lut8, Lut16, LutAToB, LutBToA, Matrix3x3, Matrix3x4};
+pub use measurement::{Chromaticity, Measurement, ViewingConditions};
 pub use mluc::{Mluc, MlucRecord, TextDescription};
 pub use named_color::{NamedColor, NamedColor2};
 pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzNumber};
