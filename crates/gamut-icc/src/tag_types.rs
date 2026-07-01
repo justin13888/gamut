@@ -2,8 +2,12 @@
 
 use gamut_core::{Error, Result};
 
-use crate::bytes::{ByteReader, push_date_time, push_s15fixed16, push_xyz_number};
+use crate::bytes::{ByteReader, push_date_time, push_s15fixed16, push_u16fixed16, push_xyz_number};
 use crate::cicp::{Cicp, decode_cicp, encode_cicp};
+use crate::colorant::{
+    ColorantOrder, ColorantTable, decode_colorant_order, decode_colorant_table,
+    encode_colorant_order, encode_colorant_table,
+};
 use crate::curve::{
     Curve, ParametricCurve, read_curve_body, read_parametric_body, write_curve_body,
     write_parametric_body,
@@ -22,7 +26,7 @@ use crate::mluc::{
     encode_text_description,
 };
 use crate::named_color::{NamedColor2, decode_named_color2, encode_named_color2};
-use crate::primitives::{DateTime, S15Fixed16, Signature, XyzNumber};
+use crate::primitives::{DateTime, S15Fixed16, Signature, U16Fixed16, XyzNumber};
 
 /// The decoded data of a tag element.
 ///
@@ -71,6 +75,20 @@ pub enum TagData {
     ViewingConditions(ViewingConditions),
     /// `data` — ASCII or binary data (`dataType`).
     Data(DataElement),
+    /// `clro` — the colorant laydown order (`colorantOrderType`).
+    ColorantOrder(ColorantOrder),
+    /// `clrt` — colorant names and PCS values (`colorantTableType`).
+    ColorantTable(ColorantTable),
+    /// `uf32` — an array of `u16Fixed16` numbers (`u16Fixed16ArrayType`).
+    U16Fixed16Array(Vec<U16Fixed16>),
+    /// `ui08` — an array of `uInt8` numbers (`uInt8ArrayType`).
+    UInt8Array(Vec<u8>),
+    /// `ui16` — an array of `uInt16` numbers (`uInt16ArrayType`).
+    UInt16Array(Vec<u16>),
+    /// `ui32` — an array of `uInt32` numbers (`uInt32ArrayType`).
+    UInt32Array(Vec<u32>),
+    /// `ui64` — an array of `uInt64` numbers (`uInt64ArrayType`).
+    UInt64Array(Vec<u64>),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -112,6 +130,13 @@ pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
             element,
         )?)),
         b"data" => Ok(TagData::Data(decode_data(element)?)),
+        b"clro" => Ok(TagData::ColorantOrder(decode_colorant_order(element)?)),
+        b"clrt" => Ok(TagData::ColorantTable(decode_colorant_table(element)?)),
+        b"uf32" => decode_u16fixed16_array(element),
+        b"ui08" => decode_uint8_array(element),
+        b"ui16" => decode_uint16_array(element),
+        b"ui32" => decode_uint32_array(element),
+        b"ui64" => decode_uint64_array(element),
         _ => Ok(TagData::Raw {
             type_sig,
             bytes: element.to_vec(),
@@ -176,6 +201,52 @@ fn decode_s15fixed16_array(element: &[u8]) -> Result<TagData> {
     Ok(TagData::S15Fixed16Array(values))
 }
 
+fn decode_u16fixed16_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 4;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.u16fixed16()?);
+    }
+    Ok(TagData::U16Fixed16Array(values))
+}
+
+fn decode_uint8_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let n = r.remaining();
+    Ok(TagData::UInt8Array(r.bytes(n)?.to_vec()))
+}
+
+fn decode_uint16_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 2;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.u16()?);
+    }
+    Ok(TagData::UInt16Array(values))
+}
+
+fn decode_uint32_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 4;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.u32()?);
+    }
+    Ok(TagData::UInt32Array(values))
+}
+
+fn decode_uint64_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 8;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.u64()?);
+    }
+    Ok(TagData::UInt64Array(values))
+}
+
 /// Serializes a tag element (its four-byte type signature, four reserved bytes, then payload) into
 /// `out` — the inverse of [`decode_tag`]. [`TagData::Raw`] re-emits its stored bytes verbatim.
 pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
@@ -225,6 +296,36 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
         TagData::Measurement(meas) => encode_measurement(meas, out),
         TagData::ViewingConditions(view) => encode_viewing_conditions(view, out),
         TagData::Data(data) => encode_data(data, out),
+        TagData::ColorantOrder(clro) => encode_colorant_order(clro, out),
+        TagData::ColorantTable(clrt) => encode_colorant_table(clrt, out),
+        TagData::U16Fixed16Array(values) => {
+            element_header(out, b"uf32");
+            for &value in values {
+                push_u16fixed16(out, value);
+            }
+        }
+        TagData::UInt8Array(values) => {
+            element_header(out, b"ui08");
+            out.extend_from_slice(values);
+        }
+        TagData::UInt16Array(values) => {
+            element_header(out, b"ui16");
+            for &value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        TagData::UInt32Array(values) => {
+            element_header(out, b"ui32");
+            for &value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        TagData::UInt64Array(values) => {
+            element_header(out, b"ui64");
+            for &value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
         TagData::Raw { bytes, .. } => out.extend_from_slice(bytes),
     }
 }
@@ -452,6 +553,20 @@ mod tests {
                 flag: 1,
                 data: vec![1, 2, 3, 4],
             }),
+            TagData::ColorantOrder(ColorantOrder {
+                order: vec![3, 0, 1, 2],
+            }),
+            TagData::ColorantTable(ColorantTable {
+                colorants: vec![crate::colorant::Colorant {
+                    name: "Black".to_owned(),
+                    pcs: [0, 0, 0],
+                }],
+            }),
+            TagData::U16Fixed16Array(vec![U16Fixed16::from_f64(1.0), U16Fixed16::from_f64(2.5)]),
+            TagData::UInt8Array(vec![0, 1, 2, 255]),
+            TagData::UInt16Array(vec![0, 0x1234, 0xFFFF]),
+            TagData::UInt32Array(vec![0, 0x1234_5678, 0xFFFF_FFFF]),
+            TagData::UInt64Array(vec![0, 0xFFFF_FFFF_FFFF_FFFF]),
         ];
         for data in cases {
             let mut out = Vec::new();

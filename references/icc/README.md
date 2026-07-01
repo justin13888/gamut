@@ -105,3 +105,14 @@ header; sub-elements are 4-byte aligned.
   illuminant-type code (shared with `measurementType`), all in un-normalized cd/m² CIEXYZ.
 - `dataType` (`data`, §10.7): a `uInt32` flag (`0` ASCII / `1` binary) followed by
   `element size − 12` payload bytes, preserved verbatim.
+
+### Colorant & array elements
+
+- `colorantOrderType` (`clro`, §10.4): a `uInt32` count, then that many `uInt8` colorant numbers in
+  laydown order. `colorantTableType` (`clrt`, §10.5): a `uInt32` count, then per colorant a 32-byte
+  NUL-terminated 7-bit-ASCII name and three `uInt16` PCS values.
+- The generic array types decode into vectors sized from the tag length (`(size − 8) / width`):
+  `u16Fixed16ArrayType` (`uf32`, §10.25) · `uInt8ArrayType` (`ui08`, §10.29) ·
+  `uInt16ArrayType` (`ui16`, §10.26) · `uInt32ArrayType` (`ui32`, §10.27) ·
+  `uInt64ArrayType` (`ui64`, §10.28) — the `s15Fixed16ArrayType` (`sf32`, §10.22, used by `chad`)
+  already had a decoder.

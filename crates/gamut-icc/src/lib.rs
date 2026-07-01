@@ -45,6 +45,7 @@
 mod bytes;
 
 pub mod cicp;
+pub mod colorant;
 pub mod curve;
 pub mod data;
 pub mod header;
@@ -60,6 +61,7 @@ pub mod tags;
 pub mod writer;
 
 pub use cicp::Cicp;
+pub use colorant::{Colorant, ColorantOrder, ColorantTable};
 pub use curve::{Curve, CurveOrParametric, ParametricCurve};
 pub use data::DataElement;
 pub use header::{
