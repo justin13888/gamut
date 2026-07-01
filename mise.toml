@@ -3,7 +3,7 @@
 # Bootstrap after cloning:
 #   mise trust && mise install
 # Activate mise in your shell (e.g. `eval "$(mise activate zsh)"`) so these land on
-# PATH — the git hooks (lefthook) and the mise tasks below invoke them directly.
+# PATH — the git hooks (hk) and the mise tasks below invoke them directly.
 #
 # Not managed here:
 #   * Rust   — pinned by rustup via rust-toolchain.toml.
@@ -14,7 +14,7 @@
 
 [tools]
 # Dev workflow
-lefthook                      = "2.1.9"
+hk                            = "1.48.0"  # git hook runner (jdx); config in hk.pkl, `hk install` registers hooks
 jq                            = "1.8.1"
 "cargo:convco"                = "0.6.4"   # conventional-commit linter (built from source: its release assets are named convco-{ubuntu,deb,macos}.zip, which the ubi/github backend can't match, and there's no macOS-arm64 asset)
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"   # coverage (taiki-e prebuilt binary)
@@ -47,6 +47,13 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 [tasks.lint-fix]
 description = "Lint and auto-fix"
 run = "cargo clippy --workspace --fix --allow-dirty --allow-staged"
+
+# Fast lint for the pre-push hook: default features, lib/bin targets only, so it
+# does NOT compile the `--all-targets`/`--all-features` cross-check oracle dev-deps
+# (the vendored C codecs). The full `lint` above is the gate CI runs.
+[tasks.lint-quick]
+description = "Fast Clippy check (default features; no C-oracle build) for the pre-push hook"
+run = "cargo clippy --workspace -- -D warnings"
 
 [tasks.check-commits]
 description = "Check this branch's commits follow Conventional Commits (convco)"

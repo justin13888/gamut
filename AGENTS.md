@@ -57,7 +57,7 @@ All codec implementations must follow the official specs that should be attached
 
 ## Validation
 
-Dev tooling (lefthook, convco, cargo-llvm-cov, CMake/Ninja/Meson, …) is provisioned by
+Dev tooling (hk, convco, cargo-llvm-cov, CMake/Ninja/Meson, …) is provisioned by
 [mise](https://mise.jdx.dev): run `mise install` and activate mise in your shell. The former
 `just` recipes are now mise tasks — `mise tasks` lists them. Validate changes:
 
@@ -98,6 +98,6 @@ and releases do not guarantee version consistency across crates. Only `version` 
 all other metadata (`edition`, `rust-version`/MSRV, license, repository) is workspace-owned
 and inherited via `*.workspace = true`. Version bumps, per-crate changelogs, and crates.io
 publishing are automated by release-plz from conventional-commit history — write conventional
-commit messages (enforced by convco via the `commit-msg`/`pre-push` git hooks and the CI PR
+commit messages (enforced by convco via the `commit-msg` git hook and the CI PR
 check) and do not hand-edit versions for routine changes. `mise run versions` lists every
 crate's current version; `mise run bump <crate> <level>` is a manual escape hatch.

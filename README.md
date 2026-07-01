@@ -132,7 +132,7 @@ All cargo metadata except per-crate `version` is centralized in the root
   see [Minimum Supported Rust Version](#minimum-supported-rust-version) for the lower bound
 - [mise](https://mise.jdx.dev) -- provisions the rest of the dev tooling from `mise.toml`
   (and the dev tasks — run `mise tasks` to list them, `mise run <task>` to invoke):
-  [Lefthook](https://github.com/evilmartians/lefthook) (git hooks),
+  [hk](https://hk.jdx.dev) (git hooks),
   [convco](https://convco.github.io) (conventional-commit linter),
   [jq](https://jqlang.github.io/jq/),
   [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (coverage),
@@ -161,7 +161,7 @@ git submodule update --init --recursive
 
 # Dev tooling + git hooks (see Prerequisites; also needs system pkg-config).
 mise trust && mise install
-lefthook install
+hk install
 
 cargo build --workspace
 cargo test --workspace
@@ -199,13 +199,15 @@ Policy:
 
 ## Git Hooks
 
-This project uses [Lefthook](https://github.com/evilmartians/lefthook) (provisioned by mise);
-run `lefthook install` once after `mise install` to register the hooks. The `commit-msg` hook
-rejects messages that aren't [Conventional Commits](https://www.conventionalcommits.org)
-(policy in `.convco`). Pre-commit hooks auto-fix formatting and linting on staged files.
-Pre-push hooks re-check the branch's commit messages and run format checks, lint checks, tests,
-and a coverage gate. The hooks call mise-managed tools (convco, cargo-llvm-cov), so keep mise
-activated in your shell.
+This project uses [hk](https://hk.jdx.dev) (provisioned by mise); run `hk install` once after
+`mise install` to register the hooks (config in `hk.pkl`). The `commit-msg` hook rejects
+messages that aren't [Conventional Commits](https://www.conventionalcommits.org) (policy in
+`.convco`) — enforcement happens when the commit is created, so a bad message can't slip through
+to a `--no-verify` push. The `pre-commit` hook auto-fixes formatting and linting on the staged
+snapshot (unstaged work is stashed first, then restored). The `pre-push` hook is a deliberately
+fast static gate — a formatting check and a quick Clippy pass — while the heavier full-feature
+Clippy, tests, and coverage run in CI, so the local hooks stay fast enough not to be bypassed.
+The hook steps delegate to the shared `mise run` tasks, so keep mise activated in your shell.
 
 ## CI/CD
 
