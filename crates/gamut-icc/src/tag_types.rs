@@ -27,6 +27,11 @@ use crate::mluc::{
 };
 use crate::named_color::{NamedColor2, decode_named_color2, encode_named_color2};
 use crate::primitives::{DateTime, S15Fixed16, Signature, U16Fixed16, XyzNumber};
+use crate::sequence::{
+    ProfileSequenceDesc, ProfileSequenceIdentifier, ResponseCurveSet16,
+    decode_profile_sequence_desc, decode_profile_sequence_identifier, decode_response_curve_set16,
+    encode_profile_sequence_desc, encode_profile_sequence_identifier, encode_response_curve_set16,
+};
 
 /// The decoded data of a tag element.
 ///
@@ -89,6 +94,12 @@ pub enum TagData {
     UInt32Array(Vec<u32>),
     /// `ui64` — an array of `uInt64` numbers (`uInt64ArrayType`).
     UInt64Array(Vec<u64>),
+    /// `pseq` — the component-profile sequence description (`profileSequenceDescType`).
+    ProfileSequenceDesc(ProfileSequenceDesc),
+    /// `psid` — the component-profile sequence identifiers (`profileSequenceIdentifierType`).
+    ProfileSequenceIdentifier(ProfileSequenceIdentifier),
+    /// `rcs2` — per-channel reference responses (`responseCurveSet16Type`).
+    ResponseCurveSet16(ResponseCurveSet16),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -137,6 +148,15 @@ pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
         b"ui16" => decode_uint16_array(element),
         b"ui32" => decode_uint32_array(element),
         b"ui64" => decode_uint64_array(element),
+        b"pseq" => Ok(TagData::ProfileSequenceDesc(decode_profile_sequence_desc(
+            element,
+        )?)),
+        b"psid" => Ok(TagData::ProfileSequenceIdentifier(
+            decode_profile_sequence_identifier(element)?,
+        )),
+        b"rcs2" => Ok(TagData::ResponseCurveSet16(decode_response_curve_set16(
+            element,
+        )?)),
         _ => Ok(TagData::Raw {
             type_sig,
             bytes: element.to_vec(),
@@ -326,6 +346,9 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
                 out.extend_from_slice(&value.to_be_bytes());
             }
         }
+        TagData::ProfileSequenceDesc(pseq) => encode_profile_sequence_desc(pseq, out),
+        TagData::ProfileSequenceIdentifier(psid) => encode_profile_sequence_identifier(psid, out),
+        TagData::ResponseCurveSet16(rcs) => encode_response_curve_set16(rcs, out),
         TagData::Raw { bytes, .. } => out.extend_from_slice(bytes),
     }
 }
@@ -567,6 +590,26 @@ mod tests {
             TagData::UInt16Array(vec![0, 0x1234, 0xFFFF]),
             TagData::UInt32Array(vec![0, 0x1234_5678, 0xFFFF_FFFF]),
             TagData::UInt64Array(vec![0, 0xFFFF_FFFF_FFFF_FFFF]),
+            TagData::ProfileSequenceDesc(ProfileSequenceDesc {
+                entries: vec![crate::sequence::ProfileDescription {
+                    device_manufacturer: Signature(*b"APPL"),
+                    device_model: Signature::ZERO,
+                    attributes: 0,
+                    technology: Signature::ZERO,
+                    manufacturer_desc: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                    model_desc: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                }],
+            }),
+            TagData::ProfileSequenceIdentifier(ProfileSequenceIdentifier {
+                entries: vec![crate::sequence::ProfileIdentifier {
+                    profile_id: crate::header::ProfileId([7; 16]),
+                    description: Mluc::default(),
+                }],
+            }),
+            TagData::ResponseCurveSet16(ResponseCurveSet16 {
+                channels: 0,
+                curves: Vec::new(),
+            }),
         ];
         for data in cases {
             let mut out = Vec::new();

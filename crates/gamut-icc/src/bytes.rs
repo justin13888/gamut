@@ -34,6 +34,11 @@ impl<'a> ByteReader<'a> {
         self.buf.len() - self.pos
     }
 
+    /// The current absolute byte offset into the buffer (for slicing variable-length sub-elements).
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
     /// Advances the cursor to the next 4-byte boundary, the alignment ICC uses between the curve
     /// sub-elements packed inside a LUT transform.
     pub(crate) fn align_to_4(&mut self) -> Result<()> {

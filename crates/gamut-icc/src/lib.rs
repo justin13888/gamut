@@ -56,6 +56,7 @@ pub mod named_color;
 pub mod primitives;
 pub mod profile;
 pub mod reader;
+pub mod sequence;
 pub mod tag_types;
 pub mod tags;
 pub mod writer;
@@ -74,6 +75,10 @@ pub use named_color::{NamedColor, NamedColor2};
 pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzNumber};
 pub use profile::IccProfile;
 pub use reader::IccReader;
+pub use sequence::{
+    DescriptionText, ProfileDescription, ProfileIdentifier, ProfileSequenceDesc,
+    ProfileSequenceIdentifier, Response16, ResponseCurve, ResponseCurveSet16,
+};
 pub use tag_types::TagData;
 pub use tags::KnownTag;
 pub use writer::IccWriter;

@@ -116,3 +116,17 @@ header; sub-elements are 4-byte aligned.
   `uInt16ArrayType` (`ui16`, §10.26) · `uInt32ArrayType` (`ui32`, §10.27) ·
   `uInt64ArrayType` (`ui64`, §10.28) — the `s15Fixed16ArrayType` (`sf32`, §10.22, used by `chad`)
   already had a decoder.
+
+### Profile-sequence & response-curve elements
+
+- `profileSequenceDescType` (`pseq`, §10.19): a `uInt32` count, then per entry the component
+  profile's manufacturer/model/attributes/technology followed by two **self-delimiting** embedded
+  descriptions (`multiLocalizedUnicodeType` in v4, `textDescriptionType` in v2). They carry no length
+  prefix, so each is walked by recomputing its own serialized length from its internal tables.
+- `profileSequenceIdentifierType` (`psid`, §10.20): a `uInt32` count, an 8-byte `(offset, size)`
+  positions table, then 4-byte-aligned structures of a 16-byte profile ID + an embedded
+  `multiLocalizedUnicodeType`. Offsets are relative to the element start.
+- `responseCurveSet16Type` (`rcs2`, §10.21): `uInt16` channel count `n` and measurement-type count
+  `m`, an `m`-entry `uInt32` offset table, then per measurement type a curve structure — a
+  measurement-unit signature, `n` per-channel `uInt32` counts, `n` PCSXYZ `XYZNumber`s, then the
+  `response16Number` arrays (a `uInt16` device code, a reserved `uInt16`, and an `s15Fixed16` value).
