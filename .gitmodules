@@ -22,3 +22,6 @@
 [submodule "third_party/lcms2"]
 	path = third_party/lcms2
 	url = https://github.com/mm2/Little-CMS
+[submodule "third_party/aom"]
+	path = third_party/aom
+	url = https://aomedia.googlesource.com/aom

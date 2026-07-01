@@ -22,9 +22,11 @@ gamut-dsp.workspace = true
 gamut-bitstream.workspace = true
 
 [dev-dependencies]
-# dav1d as the bit-exact reconstruction oracle (FFI to a vendored, statically-linked
-# libdav1d). Dev-only: the shipped library is C-free and needs no decoder. Building
-# these tests requires meson/ninja/nasm and the `third_party/dav1d` submodule.
+# libaom (the AV1 reference codec) as the primary, definitive reconstruction oracle, and
+# dav1d as an independent corroborating decoder — both FFI to vendored, statically-linked C
+# libraries. Dev-only: the shipped library is C-free and needs no decoder. Building these
+# tests requires cmake/meson/ninja/nasm and the `third_party/{aom,dav1d}` submodules.
+aom-oracle = { path = "../../tooling/aom-oracle" }
 dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
 divan.workspace = true
 

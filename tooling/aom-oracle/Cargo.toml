@@ -1,0 +1,30 @@
+# Dev-only oracle: NOT a member of the gamut workspace (it is listed under
+# `[workspace].exclude` in the root manifest and pulled in only as a path
+# `dev-dependency`). Keeping it out of the workspace means a plain `cargo build`
+# of the shipped crates never invokes cmake/ninja or links libaom — the C
+# toolchain is required only when building the cross-check tests. Because it is
+# excluded, it cannot use `*.workspace = true` inheritance, so metadata is local.
+[package]
+name = "aom-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: decodes (and, for the future gamut decoder, reference-encodes) AV1 with a vendored, statically-linked libaom — the AV1 reference codec — for gamut's bit-exact cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares that this crate provides the native `aom` library, so Cargo links it
+# exactly once and rejects a second crate claiming the same native lib.
+links = "aom"
+
+[lib]
+# The crate exposes a hand-written safe wrapper; there are no doctests to run.
+doctest = false
+
+[build-dependencies]
+bindgen = "0.72"
+# Compiles the tiny `shim.c` that turns libaom's `aom_codec_{dec,enc}_init` *macros*
+# (which inject an ABI-version constant bindgen cannot emit) into real linkable functions.
+cc = "1"
+# Builds a vendored nasm from a committed source tarball so cmake can assemble libaom's
+# x86 SIMD without a system nasm (no-op on non-x86 targets). See its crate docs.
+nasm-vendor = { path = "../nasm-vendor" }

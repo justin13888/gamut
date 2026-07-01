@@ -29,7 +29,9 @@
 //! animation. **Supported:** 8-bit RGB input; **lossless** (the default, decoded output bit-exact to
 //! the input) and **lossy** ([`AvifEncoder::lossy`], `quality` `0..=100`) AV1 intra coding at
 //! identity-matrix 4:4:4; and `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
-//! [`AvifEncoder::with_mirror`]). Output is validated against `libavif`/`dav1d` as decoder oracles.
+//! [`AvifEncoder::with_mirror`]). Output is validated end-to-end against `libavif` (its dav1d-backed
+//! reference container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the
+//! AV1 reference codec — and `dav1d` via [`gamut_av1`].
 //!
 //! **Deferred** (tracked row-by-row against the specs in `STATUS.md`): alpha / RGBA, 10/12-bit and
 //! 4:2:0/4:2:2, non-identity colour matrices and ICC / Exif / XMP, HDR (PQ/HLG), `grid` derivation

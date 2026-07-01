@@ -1,12 +1,13 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# Dev-only differential oracles that statically link vendored C decoders (libdav1d,
+# Dev-only differential oracles that statically link vendored C codecs (libaom, libdav1d,
 # libavif) from `third_party/` submodules. Excluded from the workspace so a plain
 # `cargo build` of the shipped crates never needs a C toolchain — they are pulled in
 # only as path `dev-dependencies` when building the cross-check tests. See their
 # manifests under `tooling/`.
 exclude = [
+    "tooling/aom-oracle",
     "tooling/dav1d-oracle",
     "tooling/libavif-oracle",
     "tooling/libtiff-oracle",
@@ -17,8 +18,8 @@ exclude = [
     "tooling/libpng-oracle",
     "tooling/exiv2-oracle",
     # Dev-only helper that builds a vendored nasm from a committed source tarball so the
-    # oracles above can assemble dav1d's x86 SIMD without a system nasm. Excluded for the
-    # same reason: a plain `cargo build` of the shipped crates must never compile it.
+    # oracles above can assemble the aom/dav1d x86 SIMD without a system nasm. Excluded for
+    # the same reason: a plain `cargo build` of the shipped crates must never compile it.
     "tooling/nasm-vendor",
 ]
 
