@@ -33,6 +33,13 @@ pub(crate) enum CliError {
     #[error("unsupported output format: {0} (supported: 'avif', 'webp')")]
     UnsupportedOutput(String),
 
+    /// `gamut icc` found no embedded ICC profile in the input container.
+    #[error("no embedded ICC profile found in {path}")]
+    NoIccProfile {
+        /// The input file.
+        path: PathBuf,
+    },
+
     /// `gamut inspect` found the file was not fully accounted for (the strict/archival check
     /// failed). The full report is printed to stdout first; this carries the summary rendered to
     /// stderr that drives the non-zero exit code.

@@ -64,6 +64,8 @@ enum Command {
     Convert(commands::convert::ConvertArgs),
     /// Strictly deconstruct a TIFF or DNG: account every byte and flag unknowns (gamut-tiff/gamut-dng).
     Inspect(commands::inspect::InspectArgs),
+    /// Extract and inspect the embedded ICC colour profile of an image (gamut-icc).
+    Icc(commands::icc::IccArgs),
     /// AV1 still-image operations (gamut-av1).
     #[command(subcommand)]
     Av1(commands::av1::Av1Command),
@@ -85,6 +87,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Convert(args) => commands::convert::run(&args),
         Command::Inspect(args) => commands::inspect::run(&args),
+        Command::Icc(args) => commands::icc::run(&args),
         Command::Av1(cmd) => commands::av1::run(&cmd),
         Command::Color(cmd) => commands::color::run(&cmd),
         Command::Dsp(cmd) => commands::dsp::run(&cmd),
