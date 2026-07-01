@@ -1,14 +1,19 @@
 //! Bit-exact reconstruction cross-check for the lossy intra path (P6 keystone).
 //!
 //! The encoder maintains a reconstruction buffer that must equal, sample for sample, what a
-//! conformant decoder produces. This test encodes a lossy still, decodes the raw AV1 OBU stream
-//! (a Section-5 low-overhead stream — each OBU carries its size) with the real `dav1d` decoder, and
-//! asserts the decoded planes equal the encoder's exported reconstruction byte-for-byte.
+//! conformant decoder produces. Each case encodes a still, then decodes the raw AV1 OBU stream
+//! (a Section-5 low-overhead stream — each OBU carries its size) with **two independent reference
+//! decoders** and asserts both reproduce the encoder's exported reconstruction byte-for-byte:
 //!
-//! `dav1d` is linked in from the `third_party/dav1d` submodule via the `dav1d-oracle`
-//! dev-dependency, so the check is hermetic and always runs — it never depends on a `dav1d` binary
-//! being installed on the host. Building these tests therefore needs meson/ninja/nasm and the
-//! checked-out submodule (`git submodule update --init --recursive`).
+//! - **libaom** — the AV1 *reference* codec — is the primary, definitive conformance oracle.
+//! - **dav1d** corroborates as an independent second decoder (and is libavif's backend in the
+//!   AVIF container cross-check elsewhere). Two independent decoders agreeing is a strictly
+//!   stronger signal than either alone.
+//!
+//! Both are linked in from `third_party/` submodules via the `aom-oracle` / `dav1d-oracle`
+//! dev-dependencies, so the check is hermetic and always runs — it never depends on a system
+//! decoder binary. Building these tests therefore needs cmake/meson/ninja/nasm and the checked-out
+//! submodules (`git submodule update --init --recursive`).
 
 use gamut_av1::encode_still_intra;
 use gamut_color::Planar8;
@@ -25,42 +30,62 @@ fn planes(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
     Planar8::from_rgb8_identity(&rgb, w, h).unwrap()
 }
 
-/// Encodes `planes` at `qindex`, decodes the OBU stream with dav1d, and asserts the decoded planes
-/// equal the encoder's reconstruction.
+/// Encodes `planes` at `qindex`, then decodes the OBU stream with both reference decoders and
+/// asserts each reproduces the encoder's reconstruction byte-for-byte.
 fn check(planes: &Planar8, qindex: u8) {
     let (still, recon) = encode_still_intra(planes, qindex).unwrap();
     let (w, h) = (recon.width as usize, recon.height as usize);
 
-    // A standalone Section-5 OBU stream for dav1d needs a temporal-delimiter OBU first (AVIF omits
-    // it inside the container). TD = obu_type 2, has_size_field, empty payload.
+    // A standalone Section-5 OBU stream needs a temporal-delimiter OBU first (AVIF omits it inside
+    // the container). TD = obu_type 2, has_size_field, empty payload.
     let mut stream = vec![0x12u8, 0x00];
     stream.extend_from_slice(&still.obus);
 
-    let decoded = dav1d_oracle::decode_obu(&stream)
-        .unwrap_or_else(|e| panic!("dav1d decode failed for {w}x{h} q{qindex}: {e}"));
-    assert_eq!(
-        (decoded.width as usize, decoded.height as usize),
-        (w, h),
-        "decoded dimensions differ from reconstruction for {w}x{h} q{qindex}"
-    );
-
-    for (p, (dec, enc)) in decoded.planes.iter().zip(&recon.planes).enumerate() {
-        if dec != enc && std::env::var("GAMUT_DBG").is_ok() {
-            let k = dec
-                .iter()
-                .zip(enc.iter())
-                .position(|(d, e)| d != e)
-                .unwrap();
-            eprintln!(
-                "DIFF p{p} idx{k} dec={} enc={} [{w}x{h} q{qindex}]",
-                dec[k], enc[k]
+    // Assert one decoder's output equals the encoder's reconstruction.
+    let assert_match = |decoder: &str, dw: usize, dh: usize, dplanes: &[Vec<u16>]| {
+        assert_eq!(
+            (dw, dh),
+            (w, h),
+            "{decoder}: decoded dimensions differ from reconstruction for {w}x{h} q{qindex}"
+        );
+        for (p, (dec, enc)) in dplanes.iter().zip(&recon.planes).enumerate() {
+            if dec != enc && std::env::var("GAMUT_DBG").is_ok() {
+                let k = dec
+                    .iter()
+                    .zip(enc.iter())
+                    .position(|(d, e)| d != e)
+                    .unwrap();
+                eprintln!(
+                    "DIFF {decoder} p{p} idx{k} dec={} enc={} [{w}x{h} q{qindex}]",
+                    dec[k], enc[k]
+                );
+            }
+            assert_eq!(
+                dec, enc,
+                "{decoder}: plane {p} mismatch (decoder vs encoder reconstruction) for {w}x{h} q{qindex}"
             );
         }
-        assert_eq!(
-            dec, enc,
-            "plane {p} mismatch (decoder vs encoder reconstruction) for {w}x{h} q{qindex}"
-        );
-    }
+    };
+
+    // libaom — the AV1 reference codec — is the primary, definitive conformance oracle.
+    let aom = aom_oracle::decode_av1(&stream)
+        .unwrap_or_else(|e| panic!("libaom decode failed for {w}x{h} q{qindex}: {e}"));
+    assert_match(
+        "libaom",
+        aom.width as usize,
+        aom.height as usize,
+        &aom.planes,
+    );
+
+    // dav1d corroborates as an independent second decoder.
+    let dav1d = dav1d_oracle::decode_obu(&stream)
+        .unwrap_or_else(|e| panic!("dav1d decode failed for {w}x{h} q{qindex}: {e}"));
+    assert_match(
+        "dav1d",
+        dav1d.width as usize,
+        dav1d.height as usize,
+        &dav1d.planes,
+    );
 }
 
 #[test]

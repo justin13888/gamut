@@ -19,8 +19,10 @@ encoding** that is:
   is auditable and forkable. Modules mirror the spec: `headers` = OBU framing + sequence/frame
   headers (§5.3/§5.5/§5.9), `tile` = partition/prediction/coefficient coding (§5.11), `cdf` =
   default CDF + scan + context tables (§9.2/§9.4/§8.3.2).
-- **Decoder-verified.** Output is checked bit-exact against real decoders (`dav1d`, `libavif`),
-  linked from vendored `third_party/` submodules — never from system-installed binaries.
+- **Verified against the AV1 reference codec.** Output is checked bit-exact against real decoders —
+  `libaom` (the AOMedia reference codec, the definitive oracle) and `dav1d` — linked from vendored
+  `third_party/` submodules, never from system-installed binaries. See
+  [`references/av1`](../../references/av1/README.md).
 - **Buildable anywhere `cargo` is.** No C, no nasm — cross-compiles cleanly (wasm32, aarch64, musl).
 
 It builds on [`gamut-color`](../gamut-color) (pixel formats / CICP), [`gamut-dsp`](../gamut-dsp)

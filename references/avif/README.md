@@ -50,5 +50,8 @@ vendored **libavif** (with a **dav1d** backend, from `third_party/libavif` + `th
 `tooling/libavif-oracle`) parse the container and decode it, and checks the result — bit-exact to the
 source for lossless, bit-exact to the AV1 reconstruction for lossy, and that `irot`/`imir` are
 accepted as essential properties. The container layout is pinned independently by `gamut-isobmff`'s
-`read(&write) == img` round-trip and by `gamut-avif`'s own parse-back unit tests. No
-system-installed decoder is used.
+`read(&write) == img` round-trip and by `gamut-avif`'s own parse-back unit tests.
+
+The wrapped **AV1 bitstream** is validated one layer down by `gamut-av1` against **libaom** — the AV1
+reference codec, the definitive oracle — with `dav1d` corroborating (see
+[`references/av1`](../av1/README.md)). No system-installed codec is used at any layer.
