@@ -130,3 +130,11 @@ header; sub-elements are 4-byte aligned.
   `m`, an `m`-entry `uInt32` offset table, then per measurement type a curve structure — a
   measurement-unit signature, `n` per-channel `uInt32` counts, `n` PCSXYZ `XYZNumber`s, then the
   `response16Number` arrays (a `uInt16` device code, a reserved `uInt16`, and an `s15Fixed16` value).
+
+### Metadata dictionary
+
+- `dictType` (`dict`, §10.9): a `uInt32` record count and a `uInt32` record size (16/24/32), then the
+  fixed-size records, then a 4-byte-aligned storage area. Each record holds `(offset, size)` pairs
+  (relative to the element start) for a required UTF-16BE name, an optional UTF-16BE value, and —
+  when the record size allows — optional `multiLocalizedUnicodeType` display-name and display-value
+  elements. A zero offset marks an absent item.

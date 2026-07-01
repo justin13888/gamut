@@ -13,6 +13,7 @@ use crate::curve::{
     write_parametric_body,
 };
 use crate::data::{DataElement, decode_data, encode_data};
+use crate::dict::{Dict, decode_dict, encode_dict};
 use crate::lut::{
     Lut8, Lut16, LutAToB, LutBToA, decode_lut_a_to_b, decode_lut_b_to_a, decode_lut8, decode_lut16,
     encode_lut_a_to_b, encode_lut_b_to_a, encode_lut8, encode_lut16,
@@ -100,6 +101,8 @@ pub enum TagData {
     ProfileSequenceIdentifier(ProfileSequenceIdentifier),
     /// `rcs2` — per-channel reference responses (`responseCurveSet16Type`).
     ResponseCurveSet16(ResponseCurveSet16),
+    /// `dict` — a metadata name→value dictionary (`dictType`).
+    Dict(Dict),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -157,6 +160,7 @@ pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
         b"rcs2" => Ok(TagData::ResponseCurveSet16(decode_response_curve_set16(
             element,
         )?)),
+        b"dict" => Ok(TagData::Dict(decode_dict(element)?)),
         _ => Ok(TagData::Raw {
             type_sig,
             bytes: element.to_vec(),
@@ -349,6 +353,7 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
         TagData::ProfileSequenceDesc(pseq) => encode_profile_sequence_desc(pseq, out),
         TagData::ProfileSequenceIdentifier(psid) => encode_profile_sequence_identifier(psid, out),
         TagData::ResponseCurveSet16(rcs) => encode_response_curve_set16(rcs, out),
+        TagData::Dict(dict) => encode_dict(dict, out),
         TagData::Raw { bytes, .. } => out.extend_from_slice(bytes),
     }
 }
@@ -609,6 +614,14 @@ mod tests {
             TagData::ResponseCurveSet16(ResponseCurveSet16 {
                 channels: 0,
                 curves: Vec::new(),
+            }),
+            TagData::Dict(crate::dict::Dict {
+                entries: vec![crate::dict::DictEntry {
+                    name: "k".to_owned(),
+                    value: Some("v".to_owned()),
+                    display_name: None,
+                    display_value: None,
+                }],
             }),
         ];
         for data in cases {

@@ -48,6 +48,7 @@ pub mod cicp;
 pub mod colorant;
 pub mod curve;
 pub mod data;
+pub mod dict;
 pub mod header;
 pub mod lut;
 pub mod measurement;
@@ -65,6 +66,7 @@ pub use cicp::Cicp;
 pub use colorant::{Colorant, ColorantOrder, ColorantTable};
 pub use curve::{Curve, CurveOrParametric, ParametricCurve};
 pub use data::DataElement;
+pub use dict::{Dict, DictEntry};
 pub use header::{
     ColorSpace, DeviceClass, ProfileHeader, ProfileId, ProfileVersion, RenderingIntent,
 };
