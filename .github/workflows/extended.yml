@@ -1,0 +1,54 @@
+name: Extended
+
+# Extended, dependency-heavier portability checks that back the README's cross-compile and MSRV
+# claims. Deliberately NOT run on pull_request: they compile the whole shipped library surface
+# across several targets/toolchains. They run post-merge on master and can be started by hand on
+# any branch (Actions → Extended → Run workflow), so contributors gate locally with
+# `mise run check-cross <triple>` / `mise run check-msrv` before merging.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  cross:
+    name: Cross-compile (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1:1 with the README's "wasm32 / aarch64 / musl" cross-compile claims.
+        target:
+          - wasm32-unknown-unknown
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v5
+        # No submodules: the check is pure Rust (`cargo check`, no test targets), so it never
+        # builds the vendored C oracles under third_party/.
+      - uses: jdx/mise-action@v4
+        with:
+          # Only put `mise` on PATH; do NOT build every [tools] entry (convco/cargo-mutants/
+          # cmake/ninja/meson) from source — this job needs none of them, just rustup + cargo.
+          install: false
+      - name: Clear pre-installed Rust toolchain
+        # Same rustup `bin/cargo-fmt` reinstall-conflict guard as ci.yml's check job.
+        run: rustup toolchain uninstall stable || true
+      - uses: dtolnay/rust-toolchain@stable
+        # Target install is owned by the `check-cross` mise task (`rustup target add`), so local
+        # and CI run the exact same command.
+      - name: Cross-compile check
+        run: mise run check-cross ${{ matrix.target }}
+
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v4
+        with:
+          install: false
+      - name: MSRV compile check
+        # The task reads the MSRV from Cargo.toml, asserts the README documents it, installs that
+        # toolchain, and `cargo +<msrv> check`s the libraries. No version is hardcoded here.
+        run: mise run check-msrv

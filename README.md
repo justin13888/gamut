@@ -23,7 +23,9 @@ implementation wins.
 - **Builds anywhere `cargo` does.** No autotools, no CMake, no nasm/yasm, no vendored C, no
   FFI boundary to audit. `cargo build` cross-compiles cleanly to wasm32, aarch64, and musl
   targets that libaom makes miserable — one toolchain, reproducible builds, no system-library
-  version skew.
+  version skew. CI proves it each merge: the [Extended workflow](.github/workflows/extended.yml)
+  `cargo check`s the library surface for `wasm32-unknown-unknown`, `aarch64-unknown-linux-gnu`,
+  and `x86_64-unknown-linux-musl`.
 
 - **WASM as a first-class target, not an afterthought.** The C codecs run through Emscripten
   come out large, slow to instantiate, and awkward to tree-shake. A native Rust → wasm build
@@ -178,14 +180,20 @@ cargo test --workspace
 | `mise run lint-fix`  | Lint and auto-fix                        |
 | `mise run check-commits` | Check commits are Conventional Commits |
 | `mise run coverage`  | Run tests with coverage (min 80%)        |
+| `mise run check-cross <triple>` | Cross-compile-check the libs for a target (extended CI; master/manual) |
+| `mise run check-msrv` | Check the libs compile on the documented MSRV (extended CI; master/manual) |
 | `mise run versions`  | List every crate's version               |
 | `mise run bump <crate> <level>` | Bump one crate (`major`\|`minor`\|`patch`) |
 
 ## Minimum Supported Rust Version (MSRV)
 
-The MSRV is **Rust 1.88** (stable), built against **edition 2024**. This is the lowest
-version CI is expected to support, and it is declared once in the root `[workspace.package]`
-(`rust-version = "1.88"`); every crate inherits it via `rust-version.workspace = true`.
+The MSRV is **Rust 1.88** (stable), built against **edition 2024**. This is the lowest version we
+support, declared once as the machine value in the root `[workspace.package]`
+(`rust-version = "1.88"`) and inherited by every crate via `rust-version.workspace = true`; this
+section is its authoritative documentation. CI enforces both: the
+[Extended workflow](.github/workflows/extended.yml)'s MSRV job compiles the libraries on that
+toolchain and fails unless this README documents the version declared in `Cargo.toml`, so the
+field and the docs can never drift.
 
 Policy:
 
