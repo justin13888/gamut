@@ -2,21 +2,37 @@
 
 use gamut_core::{Error, Result};
 
-use crate::bytes::{ByteReader, push_date_time, push_s15fixed16, push_xyz_number};
+use crate::bytes::{ByteReader, push_date_time, push_s15fixed16, push_u16fixed16, push_xyz_number};
+use crate::cicp::{Cicp, decode_cicp, encode_cicp};
+use crate::colorant::{
+    ColorantOrder, ColorantTable, decode_colorant_order, decode_colorant_table,
+    encode_colorant_order, encode_colorant_table,
+};
 use crate::curve::{
     Curve, ParametricCurve, read_curve_body, read_parametric_body, write_curve_body,
     write_parametric_body,
 };
+use crate::data::{DataElement, decode_data, encode_data};
+use crate::dict::{Dict, decode_dict, encode_dict};
 use crate::lut::{
     Lut8, Lut16, LutAToB, LutBToA, decode_lut_a_to_b, decode_lut_b_to_a, decode_lut8, decode_lut16,
     encode_lut_a_to_b, encode_lut_b_to_a, encode_lut8, encode_lut16,
+};
+use crate::measurement::{
+    Chromaticity, Measurement, ViewingConditions, decode_chromaticity, decode_measurement,
+    decode_viewing_conditions, encode_chromaticity, encode_measurement, encode_viewing_conditions,
 };
 use crate::mluc::{
     Mluc, TextDescription, decode_mluc, decode_text_description, encode_mluc,
     encode_text_description,
 };
 use crate::named_color::{NamedColor2, decode_named_color2, encode_named_color2};
-use crate::primitives::{DateTime, S15Fixed16, Signature, XyzNumber};
+use crate::primitives::{DateTime, S15Fixed16, Signature, U16Fixed16, XyzNumber};
+use crate::sequence::{
+    ProfileSequenceDesc, ProfileSequenceIdentifier, ResponseCurveSet16,
+    decode_profile_sequence_desc, decode_profile_sequence_identifier, decode_response_curve_set16,
+    encode_profile_sequence_desc, encode_profile_sequence_identifier, encode_response_curve_set16,
+};
 
 /// The decoded data of a tag element.
 ///
@@ -55,6 +71,38 @@ pub enum TagData {
     LutBToA(LutBToA),
     /// `ncl2` — a named-colour palette (`namedColor2Type`).
     NamedColor2(NamedColor2),
+    /// `chrm` — phosphor/colorant CIE xy chromaticities (`chromaticityType`).
+    Chromaticity(Chromaticity),
+    /// `cicp` — coding-independent code points for video signalling (`cicpType`).
+    Cicp(Cicp),
+    /// `meas` — measurement conditions (`measurementType`).
+    Measurement(Measurement),
+    /// `view` — viewing conditions (`viewingConditionsType`).
+    ViewingConditions(ViewingConditions),
+    /// `data` — ASCII or binary data (`dataType`).
+    Data(DataElement),
+    /// `clro` — the colorant laydown order (`colorantOrderType`).
+    ColorantOrder(ColorantOrder),
+    /// `clrt` — colorant names and PCS values (`colorantTableType`).
+    ColorantTable(ColorantTable),
+    /// `uf32` — an array of `u16Fixed16` numbers (`u16Fixed16ArrayType`).
+    U16Fixed16Array(Vec<U16Fixed16>),
+    /// `ui08` — an array of `uInt8` numbers (`uInt8ArrayType`).
+    UInt8Array(Vec<u8>),
+    /// `ui16` — an array of `uInt16` numbers (`uInt16ArrayType`).
+    UInt16Array(Vec<u16>),
+    /// `ui32` — an array of `uInt32` numbers (`uInt32ArrayType`).
+    UInt32Array(Vec<u32>),
+    /// `ui64` — an array of `uInt64` numbers (`uInt64ArrayType`).
+    UInt64Array(Vec<u64>),
+    /// `pseq` — the component-profile sequence description (`profileSequenceDescType`).
+    ProfileSequenceDesc(ProfileSequenceDesc),
+    /// `psid` — the component-profile sequence identifiers (`profileSequenceIdentifierType`).
+    ProfileSequenceIdentifier(ProfileSequenceIdentifier),
+    /// `rcs2` — per-channel reference responses (`responseCurveSet16Type`).
+    ResponseCurveSet16(ResponseCurveSet16),
+    /// `dict` — a metadata name→value dictionary (`dictType`).
+    Dict(Dict),
     /// An element gamut-icc does not model semantically: the complete element bytes verbatim,
     /// including the leading four-byte type signature and its four reserved bytes. Re-emitted
     /// exactly on serialization.
@@ -89,6 +137,30 @@ pub(crate) fn decode_tag(element: &[u8]) -> Result<TagData> {
         b"mAB " => Ok(TagData::LutAToB(decode_lut_a_to_b(element)?)),
         b"mBA " => Ok(TagData::LutBToA(decode_lut_b_to_a(element)?)),
         b"ncl2" => Ok(TagData::NamedColor2(decode_named_color2(element)?)),
+        b"chrm" => Ok(TagData::Chromaticity(decode_chromaticity(element)?)),
+        b"cicp" => Ok(TagData::Cicp(decode_cicp(element)?)),
+        b"meas" => Ok(TagData::Measurement(decode_measurement(element)?)),
+        b"view" => Ok(TagData::ViewingConditions(decode_viewing_conditions(
+            element,
+        )?)),
+        b"data" => Ok(TagData::Data(decode_data(element)?)),
+        b"clro" => Ok(TagData::ColorantOrder(decode_colorant_order(element)?)),
+        b"clrt" => Ok(TagData::ColorantTable(decode_colorant_table(element)?)),
+        b"uf32" => decode_u16fixed16_array(element),
+        b"ui08" => decode_uint8_array(element),
+        b"ui16" => decode_uint16_array(element),
+        b"ui32" => decode_uint32_array(element),
+        b"ui64" => decode_uint64_array(element),
+        b"pseq" => Ok(TagData::ProfileSequenceDesc(decode_profile_sequence_desc(
+            element,
+        )?)),
+        b"psid" => Ok(TagData::ProfileSequenceIdentifier(
+            decode_profile_sequence_identifier(element)?,
+        )),
+        b"rcs2" => Ok(TagData::ResponseCurveSet16(decode_response_curve_set16(
+            element,
+        )?)),
+        b"dict" => Ok(TagData::Dict(decode_dict(element)?)),
         _ => Ok(TagData::Raw {
             type_sig,
             bytes: element.to_vec(),
@@ -153,6 +225,52 @@ fn decode_s15fixed16_array(element: &[u8]) -> Result<TagData> {
     Ok(TagData::S15Fixed16Array(values))
 }
 
+fn decode_u16fixed16_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 4;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.u16fixed16()?);
+    }
+    Ok(TagData::U16Fixed16Array(values))
+}
+
+fn decode_uint8_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let n = r.remaining();
+    Ok(TagData::UInt8Array(r.bytes(n)?.to_vec()))
+}
+
+fn decode_uint16_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 2;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.u16()?);
+    }
+    Ok(TagData::UInt16Array(values))
+}
+
+fn decode_uint32_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 4;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.u32()?);
+    }
+    Ok(TagData::UInt32Array(values))
+}
+
+fn decode_uint64_array(element: &[u8]) -> Result<TagData> {
+    let mut r = ByteReader::at(element, 8)?;
+    let count = r.remaining() / 8;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(r.u64()?);
+    }
+    Ok(TagData::UInt64Array(values))
+}
+
 /// Serializes a tag element (its four-byte type signature, four reserved bytes, then payload) into
 /// `out` — the inverse of [`decode_tag`]. [`TagData::Raw`] re-emits its stored bytes verbatim.
 pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
@@ -197,6 +315,45 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
         TagData::LutAToB(lut) => encode_lut_a_to_b(lut, out),
         TagData::LutBToA(lut) => encode_lut_b_to_a(lut, out),
         TagData::NamedColor2(named) => encode_named_color2(named, out),
+        TagData::Chromaticity(chrm) => encode_chromaticity(chrm, out),
+        TagData::Cicp(cicp) => encode_cicp(cicp, out),
+        TagData::Measurement(meas) => encode_measurement(meas, out),
+        TagData::ViewingConditions(view) => encode_viewing_conditions(view, out),
+        TagData::Data(data) => encode_data(data, out),
+        TagData::ColorantOrder(clro) => encode_colorant_order(clro, out),
+        TagData::ColorantTable(clrt) => encode_colorant_table(clrt, out),
+        TagData::U16Fixed16Array(values) => {
+            element_header(out, b"uf32");
+            for &value in values {
+                push_u16fixed16(out, value);
+            }
+        }
+        TagData::UInt8Array(values) => {
+            element_header(out, b"ui08");
+            out.extend_from_slice(values);
+        }
+        TagData::UInt16Array(values) => {
+            element_header(out, b"ui16");
+            for &value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        TagData::UInt32Array(values) => {
+            element_header(out, b"ui32");
+            for &value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        TagData::UInt64Array(values) => {
+            element_header(out, b"ui64");
+            for &value in values {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        TagData::ProfileSequenceDesc(pseq) => encode_profile_sequence_desc(pseq, out),
+        TagData::ProfileSequenceIdentifier(psid) => encode_profile_sequence_identifier(psid, out),
+        TagData::ResponseCurveSet16(rcs) => encode_response_curve_set16(rcs, out),
+        TagData::Dict(dict) => encode_dict(dict, out),
         TagData::Raw { bytes, .. } => out.extend_from_slice(bytes),
     }
 }
@@ -393,6 +550,78 @@ mod tests {
                 prefix: String::new(),
                 suffix: String::new(),
                 colors: Vec::new(),
+            }),
+            TagData::Chromaticity(Chromaticity {
+                colorant_type: 1,
+                channels: vec![
+                    [crate::primitives::U16Fixed16::from_f64(0.64); 2],
+                    [crate::primitives::U16Fixed16::from_f64(0.30); 2],
+                    [crate::primitives::U16Fixed16::from_f64(0.15); 2],
+                ],
+            }),
+            TagData::Cicp(Cicp {
+                colour_primaries: 9,
+                transfer_characteristics: 16,
+                matrix_coefficients: 0,
+                video_full_range_flag: 1,
+            }),
+            TagData::Measurement(Measurement {
+                observer: 1,
+                backing: XyzNumber::from_f64([0.0, 0.0, 0.0]),
+                geometry: 1,
+                flare: crate::primitives::U16Fixed16::from_f64(0.0),
+                illuminant: 1,
+            }),
+            TagData::ViewingConditions(ViewingConditions {
+                illuminant: XyzNumber::from_f64([19.0, 20.0, 21.0]),
+                surround: XyzNumber::from_f64([0.4, 0.4, 0.4]),
+                illuminant_type: 1,
+            }),
+            TagData::Data(DataElement {
+                flag: 1,
+                data: vec![1, 2, 3, 4],
+            }),
+            TagData::ColorantOrder(ColorantOrder {
+                order: vec![3, 0, 1, 2],
+            }),
+            TagData::ColorantTable(ColorantTable {
+                colorants: vec![crate::colorant::Colorant {
+                    name: "Black".to_owned(),
+                    pcs: [0, 0, 0],
+                }],
+            }),
+            TagData::U16Fixed16Array(vec![U16Fixed16::from_f64(1.0), U16Fixed16::from_f64(2.5)]),
+            TagData::UInt8Array(vec![0, 1, 2, 255]),
+            TagData::UInt16Array(vec![0, 0x1234, 0xFFFF]),
+            TagData::UInt32Array(vec![0, 0x1234_5678, 0xFFFF_FFFF]),
+            TagData::UInt64Array(vec![0, 0xFFFF_FFFF_FFFF_FFFF]),
+            TagData::ProfileSequenceDesc(ProfileSequenceDesc {
+                entries: vec![crate::sequence::ProfileDescription {
+                    device_manufacturer: Signature(*b"APPL"),
+                    device_model: Signature::ZERO,
+                    attributes: 0,
+                    technology: Signature::ZERO,
+                    manufacturer_desc: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                    model_desc: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                }],
+            }),
+            TagData::ProfileSequenceIdentifier(ProfileSequenceIdentifier {
+                entries: vec![crate::sequence::ProfileIdentifier {
+                    profile_id: crate::header::ProfileId([7; 16]),
+                    description: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                }],
+            }),
+            TagData::ResponseCurveSet16(ResponseCurveSet16 {
+                channels: 0,
+                curves: Vec::new(),
+            }),
+            TagData::Dict(crate::dict::Dict {
+                entries: vec![crate::dict::DictEntry {
+                    name: "k".to_owned(),
+                    value: Some("v".to_owned()),
+                    display_name: None,
+                    display_value: None,
+                }],
             }),
         ];
         for data in cases {

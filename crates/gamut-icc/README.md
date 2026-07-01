@@ -32,18 +32,33 @@ let serialized = profile.to_bytes(); // spec-valid bytes, ready to re-embed
 # Ok(()) }
 ```
 
-The load-bearing element types decode semantically (`XYZType`, the curve types, the text types, the
-`lut8`/`lut16`/`lutAToB`/`lutBToA` transforms, `namedColor2Type`, …); any other type is preserved
-verbatim as `TagData::Raw`, so every profile round-trips losslessly. `IccReader`/`IccWriter` carry
-options (strict parsing; profile-ID recomputation).
+**Every ICC.1:2022 §10 element type decodes semantically** — the `XYZType`, curve, and text types;
+the `lut8`/`lut16`/`lutAToB`/`lutBToA` transforms; `namedColor2Type`; the measurement/signalling
+types (`chromaticityType`, `cicpType`, `measurementType`, `viewingConditionsType`, `dataType`); the
+colorant and generic array types; and the profile-sequence, response-curve, and dictionary types.
+Only genuinely unmodelled types (e.g. iccMAX's `multiProcessElementsType`) fall back to
+`TagData::Raw`, which round-trips byte-for-byte. `IccProfile::validate` additionally reports the §8
+required tags a profile is missing for its device class, and `IccReader`/`IccWriter` carry options
+(strict parsing; profile-ID recomputation).
 
 **Out of scope:** applying a profile's transform (a CMM) and constructing transforms from
-`gamut-color` — the `to_f64`/`eval` accessors are the integration seam.
+`gamut-color` — the `to_f64`/`eval` accessors are the integration seam — and **iccMAX** (`ICC.2`), a
+separate next-generation format (see [`../../references/icc`](../../references/icc)).
+
+## Inspecting real profiles
+
+The workspace CLI extracts and inspects the profile embedded in a real photo:
+
+```console
+$ gamut icc DSC_0001.JPG        # camera JPEG (APP2), PNG (iCCP), TIFF/DNG (tag 34675),
+$ gamut icc --verify-id sRGB.icc  # or a standalone .icc profile
+```
 
 ## Conformance
 
 Differential-tested against **Little-CMS (lcms2)**: gamut-icc decodes lcms-synthesized profiles to
-the same values lcms reports, and lcms re-opens gamut-icc's serialization as an equivalent profile.
+the same values lcms reports (including the measurement/viewing/cicp tags and real device-link
+`pseq`/`psid` sequences), and lcms re-opens gamut-icc's serialization as an equivalent profile.
 See [STATUS.md](STATUS.md).
 
 ## License

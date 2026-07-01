@@ -1,6 +1,7 @@
 # ICC profiles (International Color Consortium)
 
-Reference specifications for the `gamut-icc` crate.
+Reference specifications for the `gamut-icc` crate. The ICC publishes every current and superseded
+edition, freely, from its specification index: <https://www.color.org/specification/index.xalter>.
 
 ## Authoritative editions (vendored)
 
@@ -15,6 +16,26 @@ Reference specifications for the `gamut-icc` crate.
 
 An ICC profile is a self-describing binary blob: a 128-byte header, a tag table, and tag element
 data — independent of any IFD/XML structure, so `gamut-icc` depends only on `gamut-core`.
+
+## Not implemented — iccMAX (ICC.2:2019)
+
+`ICC.2:2019` (**iccMAX**, profile version 5) — <https://www.color.org/specification/ICC.2-2019.pdf>
+— is **out of scope** and deliberately not implemented. iccMAX is not an extension or superset of
+the ICC.1 profile format vendored here; it is a **separate, parallel** next-generation format aimed
+at spectral and high-end colour workflows, introducing a distinct v5 header, a spectral PCS,
+`multiProcessElementsType` with a programmable calculator element, and roughly twenty new tag types.
+
+Two facts make it the wrong target for this crate:
+
+- **The real-world profiles `gamut-icc` exists to read are all ICC.1 v2/v4.** Every profile embedded
+  in a camera JPEG, a PNG `iCCP` chunk, a TIFF/DNG, or a WebP/AVIF is an ICC.1 profile; iccMAX is
+  confined to specialist pipelines and is essentially never seen in image files.
+- **Our conformance oracle cannot validate it.** The vendored oracle is Little-CMS (lcms2), which
+  implements ICC.1 only. iccMAX has its own separate reference engine (the ICC's `RefIccMAX` /
+  `DemoIccMAX` project), which is not vendored here.
+
+Should iccMAX support ever be warranted it would be a separate effort with its own reference engine,
+not a change to the ICC.1 parser documented below.
 
 ## Conformance
 
@@ -69,3 +90,51 @@ samples normalize as `value / 255` (lut8) or `value / 65535` (lut16).
 B-curves; `lutBToAType` (`mBA `, PCS→device) reverses this: B-curves → matrix → M-curves → CLUT →
 A-curves. Every stage but the B-curves is optional, signalled by a zero offset in the element
 header; sub-elements are 4-byte aligned.
+
+### Measurement & signalling elements
+
+- `chromaticityType` (`chrm`, §10.2): a `u16` channel count, a `u16` phosphor/colorant type
+  (Table 31: `0` explicit, `1`–`6` = BT.709-2 / SMPTE RP145 / EBU 3213-E / P22 / P3 / BT.2020), then
+  one `u16Fixed16` `(x, y)` pair per channel.
+- `cicpType` (`cicp`, §10.3): four `uInt8` ITU-T H.273 (ISO/IEC 23091-2) code points —
+  `ColourPrimaries`, `TransferCharacteristics`, `MatrixCoefficients` (0 for RGB/XYZ),
+  `VideoFullRangeFlag`. gamut-icc stores the raw code points; interpretation lives in `gamut-color`.
+- `measurementType` (`meas`, §10.14): standard-observer code (Table 50) · backing `XYZNumber` ·
+  geometry code (Table 51) · flare `u16Fixed16` (Table 52) · standard-illuminant code (Table 53).
+- `viewingConditionsType` (`view`, §10.30): illuminant `XYZNumber` · surround `XYZNumber` ·
+  illuminant-type code (shared with `measurementType`), all in un-normalized cd/m² CIEXYZ.
+- `dataType` (`data`, §10.7): a `uInt32` flag (`0` ASCII / `1` binary) followed by
+  `element size − 12` payload bytes, preserved verbatim.
+
+### Colorant & array elements
+
+- `colorantOrderType` (`clro`, §10.4): a `uInt32` count, then that many `uInt8` colorant numbers in
+  laydown order. `colorantTableType` (`clrt`, §10.5): a `uInt32` count, then per colorant a 32-byte
+  NUL-terminated 7-bit-ASCII name and three `uInt16` PCS values.
+- The generic array types decode into vectors sized from the tag length (`(size − 8) / width`):
+  `u16Fixed16ArrayType` (`uf32`, §10.25) · `uInt8ArrayType` (`ui08`, §10.29) ·
+  `uInt16ArrayType` (`ui16`, §10.26) · `uInt32ArrayType` (`ui32`, §10.27) ·
+  `uInt64ArrayType` (`ui64`, §10.28) — the `s15Fixed16ArrayType` (`sf32`, §10.22, used by `chad`)
+  already had a decoder.
+
+### Profile-sequence & response-curve elements
+
+- `profileSequenceDescType` (`pseq`, §10.19): a `uInt32` count, then per entry the component
+  profile's manufacturer/model/attributes/technology followed by two **self-delimiting** embedded
+  descriptions (`multiLocalizedUnicodeType` in v4, `textDescriptionType` in v2). They carry no length
+  prefix, so each is walked by recomputing its own serialized length from its internal tables.
+- `profileSequenceIdentifierType` (`psid`, §10.20): a `uInt32` count, an 8-byte `(offset, size)`
+  positions table, then 4-byte-aligned structures of a 16-byte profile ID + an embedded
+  `multiLocalizedUnicodeType`. Offsets are relative to the element start.
+- `responseCurveSet16Type` (`rcs2`, §10.21): `uInt16` channel count `n` and measurement-type count
+  `m`, an `m`-entry `uInt32` offset table, then per measurement type a curve structure — a
+  measurement-unit signature, `n` per-channel `uInt32` counts, `n` PCSXYZ `XYZNumber`s, then the
+  `response16Number` arrays (a `uInt16` device code, a reserved `uInt16`, and an `s15Fixed16` value).
+
+### Metadata dictionary
+
+- `dictType` (`dict`, §10.9): a `uInt32` record count and a `uInt32` record size (16/24/32), then the
+  fixed-size records, then a 4-byte-aligned storage area. Each record holds `(offset, size)` pairs
+  (relative to the element start) for a required UTF-16BE name, an optional UTF-16BE value, and —
+  when the record size allows — optional `multiLocalizedUnicodeType` display-name and display-value
+  elements. A zero offset marks an absent item.

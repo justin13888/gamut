@@ -280,18 +280,17 @@ fn matrix_trc_profile_decodes_every_tag() {
         );
     }
 
-    // chromaticityType is intentionally not modelled; lcms emits a `chrm` tag here, and it is
-    // preserved verbatim as Raw — the honest-scope passthrough working on a real profile.
+    // chromaticityType decodes semantically: lcms writes three phosphor channels here.
     assert!(matches!(
         get(KnownTag::Chromaticity),
-        Some(TagData::Raw { type_sig, .. }) if type_sig.0 == *b"chrm"
+        Some(TagData::Chromaticity(chrm)) if chrm.channels.len() == 3
     ));
 
-    // Every other tag the profile carries is a modelled (non-Raw) element.
+    // Every tag the profile carries is now a modelled (non-Raw) element.
     let undecoded: Vec<String> = parsed
         .tags
         .iter()
-        .filter(|(sig, data)| matches!(data, TagData::Raw { .. }) && sig.0 != *b"chrm")
+        .filter(|(_, data)| matches!(data, TagData::Raw { .. }))
         .map(|(sig, _)| sig.to_string())
         .collect();
     assert!(
@@ -386,4 +385,92 @@ fn eval_curve(data: &TagData, x: f64) -> f64 {
         TagData::ParametricCurve(curve) => curve.eval(x),
         other => panic!("expected a tone curve, got {other:?}"),
     }
+}
+
+/// A `measurementType` tag written by lcms2 decodes to the same fields in gamut-icc — an independent
+/// check of the §10.14 field layout (observer, backing, geometry, flare, illuminant).
+#[test]
+fn measurement_tag_matches_lcms() {
+    let bytes = lcms2_oracle::measurement(1, [0.72, 0.75, 0.62], 1, 0.01, 1).to_bytes();
+    let profile = IccProfile::parse(&bytes).expect("parse lcms measurement profile");
+    let Some(TagData::Measurement(meas)) = profile.get(Signature(*b"meas")) else {
+        panic!("expected a decoded measurement tag");
+    };
+    assert_eq!(meas.observer, 1); // CIE 1931
+    assert_eq!(meas.geometry, 1); // 0°:45°/45°:0°
+    assert_eq!(meas.illuminant, 1); // D50
+    assert!(
+        (meas.flare.to_f64() - 0.01).abs() < 1.0e-3,
+        "flare = {}",
+        meas.flare.to_f64()
+    );
+    let backing = meas.backing.to_f64();
+    assert!(
+        (backing[1] - 0.75).abs() < 1.0e-3,
+        "backing Y = {}",
+        backing[1]
+    );
+}
+
+/// A `viewingConditionsType` tag written by lcms2 decodes to the same illuminant/surround/type
+/// (§10.30).
+#[test]
+fn viewing_conditions_tag_matches_lcms() {
+    let bytes = lcms2_oracle::viewing_conditions([19.0, 20.0, 21.0], [3.0, 3.5, 4.0], 1).to_bytes();
+    let profile = IccProfile::parse(&bytes).expect("parse lcms viewing profile");
+    let Some(TagData::ViewingConditions(view)) = profile.get(Signature(*b"view")) else {
+        panic!("expected a decoded viewingConditions tag");
+    };
+    let illuminant = view.illuminant.to_f64();
+    let surround = view.surround.to_f64();
+    assert!(
+        (illuminant[0] - 19.0).abs() < 1.0e-2,
+        "illuminant = {illuminant:?}"
+    );
+    assert!(
+        (surround[2] - 4.0).abs() < 1.0e-2,
+        "surround = {surround:?}"
+    );
+    assert_eq!(view.illuminant_type, 1);
+}
+
+/// A `cicpType` tag written by lcms2 decodes to the same four H.273 code points (§10.3).
+#[test]
+fn cicp_tag_matches_lcms() {
+    // 9-16-0-1 — PQ Rec.2100 full-range R'G'B'.
+    let bytes = lcms2_oracle::cicp(9, 16, 0, 1).to_bytes();
+    let profile = IccProfile::parse(&bytes).expect("parse lcms cicp profile");
+    let Some(TagData::Cicp(cicp)) = profile.get(Signature(*b"cicp")) else {
+        panic!("expected a decoded cicp tag");
+    };
+    assert_eq!(cicp.colour_primaries, 9);
+    assert_eq!(cicp.transfer_characteristics, 16);
+    assert_eq!(cicp.matrix_coefficients, 0);
+    assert_eq!(cicp.video_full_range_flag, 1);
+}
+
+/// A v2 device link written by lcms2 carries `profileSequenceDescType` and
+/// `profileSequenceIdentifierType` tags whose descriptions are the legacy `textDescriptionType`;
+/// gamut-icc decodes both (walking the 4-byte-aligned embedded descriptions) rather than failing.
+#[test]
+fn devicelink_sequence_tags_decode() {
+    let profile = lcms2_oracle::cmyk_ink_limiting_devicelink(250.0);
+    profile.set_version(2.1);
+    let parsed = IccProfile::parse(&profile.to_bytes()).expect("parse lcms v2 device link");
+
+    let Some(TagData::ProfileSequenceDesc(pseq)) = parsed.get(Signature(*b"pseq")) else {
+        panic!("expected a decoded profileSequenceDesc tag");
+    };
+    assert!(
+        !pseq.entries.is_empty(),
+        "pseq should have at least one entry"
+    );
+
+    let Some(TagData::ProfileSequenceIdentifier(psid)) = parsed.get(Signature(*b"psid")) else {
+        panic!("expected a decoded profileSequenceIdentifier tag");
+    };
+    assert!(
+        !psid.entries.is_empty(),
+        "psid should have at least one entry"
+    );
 }

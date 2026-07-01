@@ -151,6 +151,52 @@ pub(crate) fn decode_text_description(element: &[u8]) -> Result<TextDescription>
     })
 }
 
+/// The serialized byte length of the `multiLocalizedUnicodeType` element at the start of `bytes`.
+///
+/// `profileSequenceDescType` embeds these descriptions back-to-back with no length prefix, so the
+/// end of one must be computed from its own record table: the furthest of the table end and every
+/// record's `offset + length` (offsets are relative to the element start; strings follow the table).
+pub(crate) fn mluc_len(bytes: &[u8]) -> Result<usize> {
+    let mut r = ByteReader::at(bytes, 8)?;
+    let count = r.u32()? as usize;
+    let record_size = r.u32()? as usize;
+    if record_size < 12 {
+        return Err(Error::InvalidInput("icc: mluc record size too small"));
+    }
+    let table_end = count
+        .checked_mul(record_size)
+        .and_then(|n| n.checked_add(16))
+        .ok_or(Error::InvalidInput("icc: mluc record table overflow"))?;
+    let mut end = table_end;
+    for i in 0..count {
+        // Each record: language(2) + country(2) + length(4) + offset(4); read the last two.
+        let mut rr = ByteReader::at(bytes, 16 + i * record_size + 4)?;
+        let length = rr.u32()? as usize;
+        let offset = rr.u32()? as usize;
+        let extent = offset
+            .checked_add(length)
+            .ok_or(Error::InvalidInput("icc: mluc string overflow"))?;
+        end = end.max(extent);
+    }
+    Ok(end)
+}
+
+/// The serialized byte length of the `textDescriptionType` element at the start of `bytes` (the v2
+/// counterpart of [`mluc_len`], for descriptions embedded in `profileSequenceDescType`).
+pub(crate) fn text_description_len(bytes: &[u8]) -> Result<usize> {
+    let ascii_count = ByteReader::at(bytes, 8)?.u32()? as usize;
+    // The Unicode count sits after the ASCII block and the 4-byte Unicode language code.
+    let unicode_count = ByteReader::at(bytes, 16 + ascii_count)?.u32()? as usize;
+    // 8 (header) + 4 + ascii + 4 + 4 + 2·unicode + 2 (script) + 1 (mac count) + 67 (mac buffer).
+    let unicode_bytes = unicode_count
+        .checked_mul(2)
+        .ok_or(Error::InvalidInput("icc: textDescription unicode overflow"))?;
+    90usize
+        .checked_add(ascii_count)
+        .and_then(|n| n.checked_add(unicode_bytes))
+        .ok_or(Error::InvalidInput("icc: textDescription length overflow"))
+}
+
 /// Writes a `multiLocalizedUnicodeType` element — the inverse of [`decode_mluc`]. Strings are laid
 /// out after the 12-byte record table; offsets are recomputed (so they need not match the input's).
 pub(crate) fn encode_mluc(mluc: &Mluc, out: &mut Vec<u8>) {
@@ -354,6 +400,38 @@ mod tests {
         e.extend_from_slice(&[5u8; 67]);
         let desc = decode_text_description(&e).unwrap();
         assert_eq!(desc.macintosh.len(), 67);
+    }
+
+    #[test]
+    fn mluc_len_matches_encoded_length_even_with_trailing_bytes() {
+        let mluc = Mluc {
+            records: vec![MlucRecord {
+                language: *b"en",
+                country: *b"US",
+                text: "Hello".to_owned(),
+            }],
+        };
+        let mut bytes = Vec::new();
+        encode_mluc(&mluc, &mut bytes);
+        let encoded_len = bytes.len();
+        bytes.extend_from_slice(b"TRAILING DATA"); // as if another element followed
+        assert_eq!(mluc_len(&bytes).unwrap(), encoded_len);
+    }
+
+    #[test]
+    fn text_description_len_matches_encoded_length() {
+        let desc = TextDescription {
+            ascii: "Model".to_owned(),
+            unicode_language: 0,
+            unicode: "Model".to_owned(),
+            script_code: 0,
+            macintosh: Vec::new(),
+        };
+        let mut bytes = Vec::new();
+        encode_text_description(&desc, &mut bytes);
+        let encoded_len = bytes.len();
+        bytes.extend_from_slice(&[0xAB; 8]);
+        assert_eq!(text_description_len(&bytes).unwrap(), encoded_len);
     }
 
     #[test]

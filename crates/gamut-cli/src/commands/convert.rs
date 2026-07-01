@@ -22,14 +22,14 @@ pub(crate) struct ConvertArgs {
     /// Output format. Defaults to the output file's extension.
     #[arg(long, value_enum)]
     format: Option<OutputFormat>,
-    /// AV1 quantizer (`base_q_idx`): 0 is lossless (default), 1–255 is lossy intra (higher = more
-    /// quantization, smaller files).
+    /// AVIF mode selector: `0` keeps the lossless default; any nonzero value selects lossy AVIF at
+    /// `--quality` (the encoder now takes a `0..=100` quality rather than a raw `base_q_idx`).
     #[arg(long, default_value_t = 0)]
     qindex: u8,
-    /// Encode lossy (WebP VP8 intra) instead of lossless. Ignored for AVIF (use `--qindex`).
+    /// Encode lossy (WebP VP8 intra) instead of lossless. For AVIF, select lossy with `--qindex`.
     #[arg(long)]
     lossy: bool,
-    /// Lossy WebP quality, 0–100 (higher is better but larger). Only used with `--lossy`.
+    /// Lossy quality, 0–100 (higher is better but larger). Used with WebP `--lossy` and lossy AVIF.
     #[arg(long, default_value_t = 75)]
     quality: u8,
     /// Compress TIFF output with PackBits run-length encoding instead of storing it uncompressed.
@@ -64,9 +64,14 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 bytes = rgb.len(),
                 "decoded input"
             );
-            AvifEncoder::new()
-                .with_qindex(args.qindex)
-                .encode_image(ImageRef::<Rgb8>::new(&rgb, dims)?, &mut out)?;
+            // `AvifEncoder` migrated from a raw `base_q_idx` to a lossless()/lossy(quality) model;
+            // qindex 0 keeps the lossless default, any nonzero value selects lossy at --quality.
+            let encoder = if args.qindex == 0 {
+                AvifEncoder::lossless()
+            } else {
+                AvifEncoder::lossy(args.quality)
+            };
+            encoder.encode_image(ImageRef::<Rgb8>::new(&rgb, dims)?, &mut out)?;
             (rgb.len(), dims)
         }
         OutputFormat::Webp => {

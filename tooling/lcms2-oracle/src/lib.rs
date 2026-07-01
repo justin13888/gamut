@@ -191,6 +191,108 @@ pub fn rgb_linearization_devicelink() -> Profile {
     wrap(unsafe { sys::cmsCreateLinearizationDeviceLink(colorspace, raw.as_mut_ptr()) })
 }
 
+/// A blank RGB→XYZ display profile placeholder, ready for a single tag to be written and the whole
+/// serialized — the base for the [`measurement`]/[`viewing_conditions`]/[`cicp`] cross-checks. The
+/// class/space fields are set so `gamut-icc` (which validates them) accepts the header.
+fn placeholder() -> sys::cmsHPROFILE {
+    // SAFETY: null context selects the global context; returns an owned handle (asserted non-null).
+    let raw = unsafe { sys::cmsCreateProfilePlaceholder(ptr::null_mut()) };
+    assert!(!raw.is_null(), "cmsCreateProfilePlaceholder returned null");
+    // SAFETY: `raw` is a live handle; each setter takes a signature as its enum-typed u32.
+    unsafe {
+        sys::cmsSetProfileVersion(raw, 4.3);
+        sys::cmsSetDeviceClass(raw, fourcc(b"mntr") as sys::cmsProfileClassSignature);
+        sys::cmsSetColorSpace(raw, fourcc(b"RGB ") as sys::cmsColorSpaceSignature);
+        sys::cmsSetPCS(raw, fourcc(b"XYZ ") as sys::cmsColorSpaceSignature);
+    }
+    raw
+}
+
+/// Writes `data` under tag `code` and returns the owned profile (`cmsWriteTag`).
+fn with_tag(raw: sys::cmsHPROFILE, code: &[u8; 4], data: *const std::ffi::c_void) -> Profile {
+    // SAFETY: `raw` is live; `data` points at a valid struct of the type lcms expects for `code`,
+    // which lcms serializes immediately during the call.
+    let ok = unsafe { sys::cmsWriteTag(raw, fourcc(code) as sys::cmsTagSignature, data) };
+    assert!(
+        ok != 0,
+        "cmsWriteTag failed for {:?}",
+        core::str::from_utf8(code)
+    );
+    wrap(raw)
+}
+
+/// A profile carrying one `measurementType` tag (`meas`) with the given fields, for cross-checking
+/// the `gamut-icc` decoder against lcms2's own serialization.
+#[must_use]
+pub fn measurement(
+    observer: u32,
+    backing: [f64; 3],
+    geometry: u32,
+    flare: f64,
+    illuminant: u32,
+) -> Profile {
+    let cond = sys::cmsICCMeasurementConditions {
+        Observer: observer,
+        Backing: sys::cmsCIEXYZ {
+            X: backing[0],
+            Y: backing[1],
+            Z: backing[2],
+        },
+        Geometry: geometry,
+        Flare: flare,
+        IlluminantType: illuminant,
+    };
+    with_tag(
+        placeholder(),
+        b"meas",
+        (&cond as *const sys::cmsICCMeasurementConditions).cast(),
+    )
+}
+
+/// A profile carrying one `viewingConditionsType` tag (`view`) with the given un-normalized CIEXYZ
+/// illuminant/surround and illuminant type.
+#[must_use]
+pub fn viewing_conditions(
+    illuminant: [f64; 3],
+    surround: [f64; 3],
+    illuminant_type: u32,
+) -> Profile {
+    let cond = sys::cmsICCViewingConditions {
+        IlluminantXYZ: sys::cmsCIEXYZ {
+            X: illuminant[0],
+            Y: illuminant[1],
+            Z: illuminant[2],
+        },
+        SurroundXYZ: sys::cmsCIEXYZ {
+            X: surround[0],
+            Y: surround[1],
+            Z: surround[2],
+        },
+        IlluminantType: illuminant_type,
+    };
+    with_tag(
+        placeholder(),
+        b"view",
+        (&cond as *const sys::cmsICCViewingConditions).cast(),
+    )
+}
+
+/// A profile carrying one `cicpType` tag (`cicp`) with the given four H.273 code points.
+#[must_use]
+pub fn cicp(primaries: u8, transfer: u8, matrix: u8, full_range: u8) -> Profile {
+    let signal = sys::cmsVideoSignalType {
+        ColourPrimaries: primaries,
+        TransferCharacteristics: transfer,
+        MatrixCoefficients: matrix,
+        VideoFullRangeFlag: full_range,
+    };
+    with_tag(
+        placeholder(),
+        b"cicp",
+        (&signal as *const sys::cmsVideoSignalType).cast(),
+    )
+}
+
 impl Profile {
     /// Force the encoded profile version (e.g. `2.1`, `4.3`), so synthesis can emit legacy v2
     /// layouts (`textDescriptionType`, v2 LUTs) for the cross-checks.
