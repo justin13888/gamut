@@ -58,8 +58,9 @@ pub(crate) fn unpack(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gamut_bitstream::row_bytes;
+
+    use super::*;
 
     fn roundtrip(bits: u16, spr: usize, rows: usize, order: ByteOrder) {
         let max = ((1u32 << bits) - 1) as u16;

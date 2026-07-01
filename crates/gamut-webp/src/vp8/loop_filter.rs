@@ -494,7 +494,15 @@ mod tests {
             }
         }
         let before = plane.clone();
-        simple_filter_luma(&mut plane, stride, 2, 2, &[20; 4], 0, &[false, false, true, false]);
+        simple_filter_luma(
+            &mut plane,
+            stride,
+            2,
+            2,
+            &[20; 4],
+            0,
+            &[false, false, true, false],
+        );
         assert_ne!(
             plane[20 * stride + 3],
             before[20 * stride + 3],

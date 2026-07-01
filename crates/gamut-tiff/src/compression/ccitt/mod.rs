@@ -9,11 +9,10 @@
 mod g4;
 mod tables;
 
-pub use g4::{g4_decode_strip, g4_encode_strip};
-
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+pub use g4::{g4_decode_strip, g4_encode_strip};
 use gamut_bitstream::BitWriter;
 use gamut_core::{Error, Result};
 

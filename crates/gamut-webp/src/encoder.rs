@@ -155,8 +155,9 @@ impl EncodeImage<Rgba8> for WebpEncoder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gamut_core::{DecodeImage, ImageBuf};
+
+    use super::*;
 
     fn dims(w: u32, h: u32) -> Dimensions {
         Dimensions {
@@ -297,7 +298,10 @@ mod tests {
             .collect();
         let mut file = Vec::new();
         WebpEncoder::lossy(60)
-            .encode_image(ImageRef::<Rgba8>::new(&rgba, dims(16, 16)).unwrap(), &mut file)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims(16, 16)).unwrap(),
+                &mut file,
+            )
             .expect("encode");
         let vp8x = RiffReader::new(&file)
             .unwrap()

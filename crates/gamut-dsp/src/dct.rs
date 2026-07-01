@@ -263,8 +263,9 @@ pub fn forward_dct(t: &mut [i64], n: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::f64::consts::PI;
+
+    use super::*;
 
     /// Small deterministic LCG (reproducible, no `rand` dependency), matching `wht.rs`.
     struct Lcg(u64);

@@ -274,7 +274,6 @@ impl Yuv420 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::cicp::ColorRange::{Full, Limited};
 
     #[test]

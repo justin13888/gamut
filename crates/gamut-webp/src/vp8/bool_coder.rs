@@ -387,7 +387,11 @@ mod tests {
         assert_eq!(enc.output, [0x13, 0x00, 0x00]);
         enc.output = vec![0x40, 0x41];
         enc.add_carry();
-        assert_eq!(enc.output, [0x40, 0x42], "a carry with no trailing 0xff just bumps the last byte");
+        assert_eq!(
+            enc.output,
+            [0x40, 0x42],
+            "a carry with no trailing 0xff just bumps the last byte"
+        );
         // All-0xff: the loop zeroes every byte and stops at index 0 (the `i > 0` bound); a `>= 0`
         // bound would step past the start and panic, pinning the loop bound.
         enc.output = vec![0xff, 0xff];
@@ -407,13 +411,20 @@ mod tests {
         enc.range = 1; // < 128, so put_bool's renormalization runs and inspects bit 31
         enc.bit_count = 8;
         enc.put_bool(128, false);
-        assert_eq!(enc.output[0], 0x01, "renorm carry must reach the emitted byte");
+        assert_eq!(
+            enc.output[0], 0x01,
+            "renorm carry must reach the emitted byte"
+        );
 
         let mut enc = BoolEncoder::new();
         enc.output = vec![0x00];
         enc.bottom = 1 << 24; // bit (32 - bit_count) for the flush carry check
         enc.bit_count = 8;
-        assert_eq!(enc.finish()[0], 0x01, "flush carry must reach the emitted byte");
+        assert_eq!(
+            enc.finish()[0],
+            0x01,
+            "flush carry must reach the emitted byte"
+        );
     }
 
     #[test]

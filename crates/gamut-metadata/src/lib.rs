@@ -21,12 +21,11 @@ pub mod metadata;
 pub mod source;
 
 // Re-export the per-format crates so consumers reach everything through one entry point.
+pub use embed::MetadataEmbedder;
+pub use extract::MetadataExtractor;
 pub use gamut_exif as exif;
 pub use gamut_icc as icc;
 pub use gamut_iptc as iptc;
 pub use gamut_xmp as xmp;
-
-pub use embed::MetadataEmbedder;
-pub use extract::MetadataExtractor;
 pub use metadata::Metadata;
 pub use source::MetadataBlock;

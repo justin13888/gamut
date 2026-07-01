@@ -1,12 +1,12 @@
 //! The TIFF decoder.
 
 use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result, Rgb8, Rgba8};
+use gamut_ifd::{Ifd, read};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
 use crate::ifd::PhotometricInterpretation;
 use crate::palette::Palette8;
 use crate::tags;
-use gamut_ifd::{Ifd, read};
 
 /// Decoder for baseline TIFF images.
 ///
@@ -466,10 +466,11 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::encoder::TiffEncoder;
     use gamut_core::{EncodeImage, ImageRef};
     use gamut_ifd::ByteOrder;
+
+    use super::*;
+    use crate::encoder::TiffEncoder;
 
     #[test]
     fn rejects_truncated_file() {

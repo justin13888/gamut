@@ -29,40 +29,35 @@
 /// can differ from the version of the binary or consumer that links it.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub use gamut_core as core;
-
-#[cfg(feature = "metadata")]
-pub use gamut_exif as exif;
-#[cfg(feature = "metadata")]
-pub use gamut_icc as icc;
-#[cfg(feature = "metadata")]
-pub use gamut_ifd as ifd;
-#[cfg(feature = "metadata")]
-pub use gamut_iptc as iptc;
-#[cfg(feature = "metadata")]
-pub use gamut_metadata as metadata;
-#[cfg(feature = "metadata")]
-pub use gamut_xmp as xmp;
-
-#[cfg(feature = "primitives")]
-pub use gamut_bitstream as bitstream;
-#[cfg(feature = "primitives")]
-pub use gamut_color as color;
-#[cfg(feature = "primitives")]
-pub use gamut_dsp as dsp;
-
 #[cfg(feature = "av1")]
 pub use gamut_av1 as av1;
 #[cfg(feature = "av2")]
 pub use gamut_av2 as av2;
 #[cfg(feature = "avif")]
 pub use gamut_avif as avif;
+#[cfg(feature = "primitives")]
+pub use gamut_bitstream as bitstream;
+#[cfg(feature = "primitives")]
+pub use gamut_color as color;
+pub use gamut_core as core;
 #[cfg(feature = "dng")]
 pub use gamut_dng as dng;
+#[cfg(feature = "primitives")]
+pub use gamut_dsp as dsp;
+#[cfg(feature = "metadata")]
+pub use gamut_exif as exif;
 #[cfg(feature = "heic")]
 pub use gamut_heic as heic;
+#[cfg(feature = "metadata")]
+pub use gamut_icc as icc;
+#[cfg(feature = "metadata")]
+pub use gamut_ifd as ifd;
+#[cfg(feature = "metadata")]
+pub use gamut_iptc as iptc;
 #[cfg(feature = "jxl")]
 pub use gamut_jxl as jxl;
+#[cfg(feature = "metadata")]
+pub use gamut_metadata as metadata;
 #[cfg(feature = "png")]
 pub use gamut_png as png;
 #[cfg(feature = "tiff")]
@@ -73,3 +68,5 @@ pub use gamut_tonemap as tonemap;
 pub use gamut_vvc as vvc;
 #[cfg(feature = "webp")]
 pub use gamut_webp as webp;
+#[cfg(feature = "metadata")]
+pub use gamut_xmp as xmp;

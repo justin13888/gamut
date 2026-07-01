@@ -85,9 +85,10 @@ fn is_webp(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gamut::core::{EncodeImage, ImageRef};
     use gamut::webp::WebpEncoder;
+
+    use super::*;
 
     /// Encodes `rgba` as a lossless (so bit-exact) WebP file for the round-trip tests.
     fn lossless_webp(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {

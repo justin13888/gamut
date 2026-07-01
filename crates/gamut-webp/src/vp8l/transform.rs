@@ -681,7 +681,9 @@ mod tests {
             .flat_map(|i| [3u8, 11].into_iter().map(move |m| (i, m)))
             .map(|(i, m)| {
                 let (x, y) = (i % w, i / w);
-                (i as i128 + 1) * (i128::from(m) + 1) * i128::from(predicted_value(&img, w, x, y, m))
+                (i as i128 + 1)
+                    * (i128::from(m) + 1)
+                    * i128::from(predicted_value(&img, w, x, y, m))
             })
             .sum();
         assert_eq!(sum, 381_797_375_768);

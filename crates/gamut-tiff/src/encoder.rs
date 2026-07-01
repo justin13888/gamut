@@ -3,12 +3,12 @@
 use gamut_core::{
     Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, ImageRef, Indexed8, Result, Rgb8, Rgba8,
 };
+use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::palette::Palette8;
 use crate::{tags, writer};
-use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
 /// The on-disk sample layout of an image, shared by the 8-bit and bilevel encode paths.
 struct SampleLayout {

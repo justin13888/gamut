@@ -374,11 +374,12 @@ fn count_value(n: u32) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::Dimensions;
+    use gamut_ifd::read_ifd_at;
+
     use super::*;
     use crate::raw::cfa_color;
     use crate::values::CalibrationIlluminant;
-    use gamut_core::Dimensions;
-    use gamut_ifd::read_ifd_at;
 
     fn sample_profile() -> CameraProfile {
         // A plausible XYZ->camera matrix and white balance; values are illustrative.

@@ -68,9 +68,10 @@ impl IptcReader {
 
 #[cfg(test)]
 mod tests {
+    use gamut_xmp::{XmpProperty, XmpValue};
+
     use super::*;
     use crate::iim::IimDataSet;
-    use gamut_xmp::{XmpProperty, XmpValue};
 
     #[test]
     fn read_irb_propagates_resource_stream_errors() {
