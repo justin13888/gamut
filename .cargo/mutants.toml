@@ -198,8 +198,8 @@ exclude_re = [
     # `<<16`/`>>16` are identical (0). Col-anchored: the bits-8-15 shift on the same lines IS killed by
     # `token_partitions_round_trip_bit_exact`, so it must stay tested.
     'replace \| with \^ in split_token_partitions',
-    'frame\.rs:1173:79: replace << with >>',
-    'frame\.rs:1152:67: replace >> with <<',
+    'frame\.rs:1172:79: replace << with >>',
+    'frame\.rs:1151:67: replace >> with <<',
     # gamut-webp VP8 encoder — correctness-preserving free choices (NOT byte-identical). These mutate
     # cost/decision *heuristics*, never the bitstream contract: they change *which* valid encoding is
     # emitted, not its validity. The decoder reconstructs exactly what was written and the libwebp
@@ -216,10 +216,10 @@ exclude_re = [
     'replace select_luma_mode -> usize with',
     'in select_chroma_mode',
     'replace select_chroma_mode -> usize with',
-    #   SEGMENT_QUANT_DELTAS (frame.rs:46) — the encoder's chosen per-segment quantizer spread; any
+    #   SEGMENT_QUANT_DELTAS (frame.rs:45) — the encoder's chosen per-segment quantizer spread; any
     #   spread is valid and is faithfully signalled. Line-anchored: a bare const, no enclosing fn name.
-    'frame\.rs:46:40: delete -',
-    'frame\.rs:46:45: delete -',
+    'frame\.rs:45:40: delete -',
+    'frame\.rs:45:45: delete -',
     #   encode_bpred_luma — the submode tie-break (`sad < best`) and the running prediction-cost
     #   accumulator (`total_sad +=`, used only for the B_PRED-vs-whole-block decision); both pick
     #   among valid encodings. (The residual subtraction `-` IS pinned by `encode_bpred_luma_pins_residual`.)
@@ -227,11 +227,11 @@ exclude_re = [
     'replace \+= with \*= in encode_bpred_luma',
     #   encode_frame_filtered decision heuristics (line-anchored so the structural mutants on other
     #   operators of the same kind in this large function stay tested): the per-macroblock segment
-    #   assignment from luma mean (1030), the segment-map index it reads back (1050, self-consistent —
-    #   the same id is signalled), and the B_PRED-vs-whole-block SAD threshold (1071).
-    'frame\.rs:1030:53: replace / with',
-    'frame\.rs:1050:44: replace \* with /',
-    'frame\.rs:1071:59: replace < with <=',
+    #   assignment from luma mean (1029), the segment-map index it reads back (1049, self-consistent —
+    #   the same id is signalled), and the B_PRED-vs-whole-block SAD threshold (1070).
+    'frame\.rs:1029:53: replace / with',
+    'frame\.rs:1049:44: replace \* with /',
+    'frame\.rs:1070:59: replace < with <=',
     # gamut-webp VP8L encoder — correctness-preserving free choices. The lossless encode->decode
     # round-trip and the libwebp oracle BOTH run on these paths, so any mutant that produced an invalid
     # prefix code, an out-of-range backward reference, or a residual the inverse transform cannot undo
