@@ -14,12 +14,12 @@
 //! a bit-reproducible substrate. Inputs are assumed in `[0, 1]`; the curves are
 //! evaluated as written (no clamping) so they stay faithful to the reference.
 
-use crate::cicp::TransferCharacteristics;
-
 // The reference luminance levels are defined once in `gamut_core::luminance` (see
 // `references/color/README.md`) and re-exported here so existing `gamut_color::transfer::*` paths
 // keep resolving.
 pub use gamut_core::luminance::{HDR_REFERENCE_WHITE_NITS, PQ_PEAK_NITS};
+
+use crate::cicp::TransferCharacteristics;
 
 // --- sRGB (IEC 61966-2-1) --------------------------------------------------
 

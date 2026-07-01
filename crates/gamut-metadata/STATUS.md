@@ -4,7 +4,7 @@ Part of the **image metadata primitives** campaign (GitHub issue #34). The facad
 [`gamut-exif`](../gamut-exif), [`gamut-xmp`](../gamut-xmp), [`gamut-icc`](../gamut-icc), and
 [`gamut-iptc`](../gamut-iptc). Delivered as small, individually-reviewable PRs onto the
 `feat/metadata-primitives` integration branch; each PR is independently green
-(`just test`/`lint`/`format-check`/`coverage` ≥ 80%).
+(`mise run test`/`lint`/`fmt-check`/`coverage` ≥ 80%).
 
 **Keystone:** **lossless cross-carrier round-trip** — extract → embed must reproduce the metadata a
 container can re-write faithfully, including reconciling data that appears in more than one standard.

@@ -402,11 +402,12 @@ impl TiffDecoder {
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+    use gamut_ifd::Value;
+
     use super::*;
     use crate::encoder::TiffEncoder;
     use crate::writer::{write_image, write_multipage};
-    use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
-    use gamut_ifd::Value;
 
     /// Total bytes left in interior gaps — for a tightly-written file this is only word-alignment
     /// padding (at most one byte before the strip data).

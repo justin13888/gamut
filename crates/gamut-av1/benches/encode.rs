@@ -3,7 +3,7 @@
 //! Intentionally tight: lossless intra throughput plus a `qindex` sweep that exposes the
 //! quantizer (speed/quality) tradeoff for the lossy path. Counters report source-pixel bytes
 //! per second. AV1 intra at full 4:4:4 is the heaviest encoder in the workspace, so the test
-//! image is deliberately small. Run with `cargo bench -p gamut-av1` (or `just bench`).
+//! image is deliberately small. Run with `cargo bench -p gamut-av1` (or `mise run bench`).
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};

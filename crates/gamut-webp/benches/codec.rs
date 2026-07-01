@@ -3,7 +3,7 @@
 //! Intentionally tight: VP8L (lossless) and VP8 (lossy) encode throughput, a lossy
 //! quality sweep that exposes the speed/quality tradeoff, and the matching decode paths.
 //! Counters report bytes of *source* pixels per second so figures are comparable across
-//! codecs. Run with `cargo bench -p gamut-webp` (or `just bench`).
+//! codecs. Run with `cargo bench -p gamut-webp` (or `mise run bench`).
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};

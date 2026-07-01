@@ -4,7 +4,7 @@ Part of the **image metadata primitives** campaign (GitHub issue #34). Implement
 metadata (`references/iptc`) in both forms — legacy IIM and IPTC Core/Extension over XMP — building
 the XMP path on [`gamut-xmp`](../gamut-xmp). Delivered as a stack of small, individually-reviewable
 PRs onto the `feat/metadata-primitives` integration branch; each PR is independently green
-(`just test`/`lint`/`format-check`/`coverage` ≥ 80%).
+(`mise run test`/`lint`/`fmt-check`/`coverage` ≥ 80%).
 
 **Keystone:** **IIM ↔ XMP reconciliation** — an image may carry the same datum in legacy IIM, in
 IPTC-Core XMP, or in both with conflicting values; applying the IPTC mapping guidelines'

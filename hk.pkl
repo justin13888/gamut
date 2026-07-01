@@ -1,0 +1,60 @@
+/// gamut git hooks, managed by hk (https://hk.jdx.dev) — provisioned by mise.
+///
+/// Run `hk install` once (after `mise install`) to register the hooks. The steps
+/// deliberately delegate to the shared mise tasks (`mise run fmt`, `lint`, …) so the
+/// exact fmt/clippy commands have a single source of truth with CI.
+///
+/// Hook layout (see README "Git Hooks"):
+///   pre-commit  auto-fix formatting + lint on the staged snapshot, then re-stage
+///   commit-msg  enforce Conventional Commits AT COMMIT TIME (policy in .convco)
+///   pre-push    fast static gate (format + fast lint); heavy checks live in CI
+amends "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0#/Config.pkl"
+
+// One definition per concern, reused across hooks so check/fix never drift.
+// The commands ignore hk's {{files}} and run the whole workspace: on pre-commit hk
+// stashes unstaged work first (`stash`), so `--all` only touches the staged snapshot.
+local fmt = new Step {
+    glob = List("**/*.rs")
+    check = "mise run fmt-check"
+    fix = "mise run fmt"
+}
+local clippy = new Step {
+    glob = List("**/*.rs")
+    // Fast, default-feature clippy — does not build the C-oracle dev-deps. CI runs
+    // the full `mise run lint` (--all-targets --all-features).
+    check = "mise run lint-quick"
+    fix = "mise run lint-fix"
+}
+
+hooks {
+    // Auto-fix on the staged snapshot and re-stage the results. `stash = "git"`
+    // hides unstaged edits during the run so fixes/staging can't pick them up.
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps {
+            ["fmt"] = fmt
+            ["clippy"] = clippy
+        }
+    }
+
+    // Conventional-commit enforcement lives HERE — a bad message is rejected when the
+    // commit is created, not deferred to pre-push where `--no-verify` invites bypass.
+    ["commit-msg"] {
+        steps {
+            ["convco"] = new Step {
+                check = "convco check --from-stdin --strip < {{commit_msg_file}}"
+            }
+        }
+    }
+
+    // Fast static gate (check mode): confirm the tree is formatted and lint-clean
+    // without rebuilding the vendored C codecs. Tests/coverage/full-feature clippy
+    // run in CI, so this hook stays fast enough not to get bypassed.
+    ["pre-push"] {
+        steps {
+            ["fmt"] = fmt
+            ["clippy"] = clippy
+        }
+    }
+}

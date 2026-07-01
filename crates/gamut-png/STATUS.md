@@ -1,7 +1,7 @@
 # gamut-png — PNG encoder status
 
 Tracking GitHub issue #24: a research-grade, space-efficient PNG **encoder**, on par with the best
-PNG encoders. Delivered as small, individually green phases (each `just test`/`lint`/`format-check`/
+PNG encoders. Delivered as small, individually green phases (each `mise run test`/`lint`/`fmt-check`/
 `coverage` ≥80%).
 
 **Keystone:** the signature → IHDR → IDAT → IEND pipeline with filter-None 8-bit RGB (P2) — once

@@ -4,7 +4,7 @@ Part of the **image metadata primitives** campaign (GitHub issue #34). Implement
 (`references/exif`, Exif 3.0 / CIPA DC-008) on top of the shared [`gamut-ifd`](../gamut-ifd)
 TIFF/IFD core. Delivered as a stack of small, individually-reviewable PRs onto the
 `feat/metadata-primitives` integration branch; each PR is independently green
-(`just test`/`lint`/`format-check`/`coverage` ≥ 80%).
+(`mise run test`/`lint`/`fmt-check`/`coverage` ≥ 80%).
 
 **Keystone:** the **writer round-trip** — re-emitting a valid `Exif\0\0` + TIFF blob through
 `gamut-ifd`'s offset-patching writer with the Exif/GPS/Interop sub-IFD pointers, thumbnail, and

@@ -3,7 +3,7 @@
 # Bootstrap after cloning:
 #   mise trust && mise install
 # Activate mise in your shell (e.g. `eval "$(mise activate zsh)"`) so these land on
-# PATH — the git hooks (lefthook) and `just` recipes invoke them directly.
+# PATH — the git hooks (hk) and the mise tasks below invoke them directly.
 #
 # Not managed here:
 #   * Rust   — pinned by rustup via rust-toolchain.toml.
@@ -14,15 +14,106 @@
 
 [tools]
 # Dev workflow
-just                          = "1.52.0"
-lefthook                      = "2.1.9"
+hk                            = "1.48.0"  # git hook runner (jdx); config in hk.pkl, `hk install` registers hooks
 jq                            = "1.8.1"
 "cargo:convco"                = "0.6.4"   # conventional-commit linter (built from source: its release assets are named convco-{ubuntu,deb,macos}.zip, which the ubi/github backend can't match, and there's no macOS-arm64 asset)
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"   # coverage (taiki-e prebuilt binary)
-"cargo:cargo-edit"            = "0.13.11" # `cargo set-version` for `just bump` (compiled from source)
+"cargo:cargo-edit"            = "0.13.11" # `cargo set-version` for `mise run bump` (compiled from source)
 "cargo:cargo-mutants"         = "27.1.0"
 
 # Native build deps for the cross-check tests (build vendored dav1d/libavif from third_party/)
 cmake                         = "4.3.3"
 ninja                         = "1.13.2"
 meson                         = "1.11.1"  # pipx backend — needs a python3 on PATH
+
+# ── Dev tasks (ported from the former justfile) ──────────────────────────────
+# Run with `mise run <task>` (or `mise <task>`); list them with `mise tasks`.
+# The fmt/lint/test/coverage tasks are the single source of truth for those
+# commands: the git hooks and CI both invoke them, so there is one canonical
+# invocation and local/CI can never drift apart.
+
+# Ensure a nightly rustfmt is available. The merge-resilient import options in rustfmt.toml
+# (imports_granularity/group_imports) are nightly-only, so fmt runs on nightly while the rest
+# of the workspace stays on the pinned stable toolchain. `rustup component add` succeeds when
+# nightly is already installed and errors otherwise, falling through to a minimal install —
+# so this self-heals both locally and in CI, and `mise run fmt` "just works" on a fresh clone.
+[tasks.ensure-nightly-rustfmt]
+hide = true
+run = "rustup component add rustfmt --toolchain nightly 2>/dev/null || rustup toolchain install nightly --profile minimal --component rustfmt"
+
+[tasks.fmt]
+description = "Format code (nightly rustfmt; merge-resilient imports)"
+depends = ["ensure-nightly-rustfmt"]
+run = "cargo +nightly fmt --all"
+
+[tasks.fmt-check]
+description = "Check formatting without modifying (nightly rustfmt)"
+depends = ["ensure-nightly-rustfmt"]
+run = "cargo +nightly fmt --all --check"
+
+[tasks.lint]
+description = "Lint with Clippy (warnings as errors)"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.lint-fix]
+description = "Lint and auto-fix"
+run = "cargo clippy --workspace --fix --allow-dirty --allow-staged"
+
+# Fast lint for the pre-push hook: default features, lib/bin targets only, so it
+# does NOT compile the `--all-targets`/`--all-features` cross-check oracle dev-deps
+# (the vendored C codecs). The full `lint` above is the gate CI runs.
+[tasks.lint-quick]
+description = "Fast Clippy check (default features; no C-oracle build) for the pre-push hook"
+run = "cargo clippy --workspace -- -D warnings"
+
+[tasks.check-commits]
+description = "Check this branch's commits follow Conventional Commits (convco)"
+run = 'convco check "$(git merge-base origin/master HEAD)..HEAD"'
+
+[tasks.install-cli]
+description = "Install the gamut CLI binary"
+run = "cargo install --path crates/gamut-cli"
+
+[tasks.test]
+description = "Run tests (workspace, all features)"
+run = "cargo test --workspace --all-features"
+
+# Divan; issue #149. Like `test`, this builds the codec crates' cross-check-oracle
+# dev-dependencies, so it needs the submodules + C toolchain. To pass Divan flags
+# (e.g. `--sample-count 50`) target one harness directly, since the per-crate
+# libtest stubs reject them: `cargo bench -p gamut-webp --bench codec -- <flags>`.
+[tasks.bench]
+description = "Run performance benchmarks (Divan; issue #149)"
+run = "cargo bench --workspace"
+
+# Bindings/binary crates (cli, wasm, ffi) and the dev-only `tooling/` oracles are
+# excluded — their entry points are not meaningfully unit-testable and would
+# otherwise skew the gate.
+[tasks.coverage]
+description = "Run tests with coverage (enforces 80% line coverage)"
+run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi)|tooling)/' --fail-under-lines 80"
+
+[tasks.mutants]
+description = "Mutation testing, whole workspace; slow (needs submodules + C toolchain)"
+run = "cargo mutants"
+
+[tasks.mutants-diff]
+description = "Mutation testing of only the code changed vs master; fast (mirrors PR CI)"
+run = [
+    "git diff origin/master...HEAD > target/mutants.diff",
+    "cargo mutants --in-diff target/mutants.diff",
+]
+
+[tasks.mutants-crate]
+description = "Mutation testing of one crate, e.g. `mise run mutants-crate gamut-bitstream`"
+run = "cargo mutants -p {{arg(name='crate')}}"
+
+[tasks.versions]
+description = "List every workspace crate and its version"
+run = '''cargo metadata --no-deps --format-version 1 | jq -r '.packages | sort_by(.name)[] | "\(.name) \(.version)"' '''
+
+# Convenience/escape hatch; routine bumps are automated by release-plz from
+# conventional commits.
+[tasks.bump]
+description = "Bump a crate's version (level = major | minor | patch)"
+run = "cargo set-version -p {{arg(name='crate')}} --bump {{arg(name='level')}}"

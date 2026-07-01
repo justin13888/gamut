@@ -1,10 +1,11 @@
 //! Top-level: turn 4:4:4 identity planes into the AV1 temporal unit for an AVIF still image.
 
-use crate::headers::{self, Av1StillConfig};
-use crate::tile::FrameEncoder;
 use gamut_color::cicp::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_color::{BitDepth, Planar8};
 use gamut_core::{Error, Result};
+
+use crate::headers::{self, Av1StillConfig};
+use crate::tile::FrameEncoder;
 
 /// The encoded AV1 temporal unit (sequence-header OBU + frame OBU) for one still image, plus the
 /// configuration values `gamut-avif` must mirror into the `av1C` and `colr` boxes.
@@ -219,8 +220,9 @@ fn crop<T: Copy>(plane: &[T], width: u32, src_stride: u32, height: u32) -> Vec<T
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gamut_color::Planar8;
+
+    use super::*;
 
     /// Builds identity planes from an RGB generator.
     fn planes(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {

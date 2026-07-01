@@ -209,8 +209,9 @@ pub fn flip_in_place(t: &mut [i64], len: usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::f64::consts::PI;
+
+    use super::*;
 
     struct Lcg(u64);
     impl Lcg {

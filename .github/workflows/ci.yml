@@ -9,6 +9,12 @@ jobs:
   check:
     name: Format, Lint & Test
     runs-on: ubuntu-latest
+    env:
+      # Run the same mise tasks CI and the git hooks share, but keep this job lean:
+      # without this, `mise run` would build every mise.toml tool (convco, cargo-edit,
+      # cargo-mutants, …) from source before each task. This job only needs the native
+      # build tools installed below plus the rustup toolchain, so skip that install.
+      MISE_TASK_RUN_AUTO_INSTALL: false
     steps:
       - uses: actions/checkout@v5
         with:
@@ -22,12 +28,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # fmt/lint/test go through the shared mise tasks (single source of truth with the
+      # git hooks). `mise run fmt-check` self-installs the nightly rustfmt it needs.
       - name: Format check
-        run: cargo fmt --all --check
+        run: mise run fmt-check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: mise run lint
       - name: Test
-        run: cargo test --workspace --all-features
+        run: mise run test
 
   coverage:
     name: Coverage

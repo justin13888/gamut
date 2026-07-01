@@ -110,7 +110,12 @@ pub(crate) fn filter(plane: &[u8], width: usize, height: usize, method: AlphaFil
 /// Inverts [`filter`]: reconstructs the alpha plane from `residuals`, predicting from the
 /// already-reconstructed pixels (`alpha = (predictor + residual) mod 256`).
 #[must_use]
-pub(crate) fn unfilter(residuals: &[u8], width: usize, height: usize, method: AlphaFilter) -> Vec<u8> {
+pub(crate) fn unfilter(
+    residuals: &[u8],
+    width: usize,
+    height: usize,
+    method: AlphaFilter,
+) -> Vec<u8> {
     let mut plane = vec![0u8; residuals.len()];
     for y in 0..height {
         for x in 0..width {
@@ -314,10 +319,22 @@ mod tests {
         // Absolute residuals for a known 2×2 plane pin the predictor arithmetic, which the
         // filter↔unfilter round-trip cannot (a buggy predictor cancels in both directions).
         let plane = [100u8, 150, 120, 200]; // row-major, width 2
-        assert_eq!(filter(&plane, 2, 2, AlphaFilter::None), [100, 150, 120, 200]);
-        assert_eq!(filter(&plane, 2, 2, AlphaFilter::Horizontal), [100, 50, 20, 80]);
-        assert_eq!(filter(&plane, 2, 2, AlphaFilter::Vertical), [100, 50, 20, 50]);
-        assert_eq!(filter(&plane, 2, 2, AlphaFilter::Gradient), [100, 50, 20, 30]);
+        assert_eq!(
+            filter(&plane, 2, 2, AlphaFilter::None),
+            [100, 150, 120, 200]
+        );
+        assert_eq!(
+            filter(&plane, 2, 2, AlphaFilter::Horizontal),
+            [100, 50, 20, 80]
+        );
+        assert_eq!(
+            filter(&plane, 2, 2, AlphaFilter::Vertical),
+            [100, 50, 20, 50]
+        );
+        assert_eq!(
+            filter(&plane, 2, 2, AlphaFilter::Gradient),
+            [100, 50, 20, 30]
+        );
     }
 
     #[test]

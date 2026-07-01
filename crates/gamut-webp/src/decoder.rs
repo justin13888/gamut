@@ -129,11 +129,12 @@ impl DecodeImage<Rgba8> for WebpDecoder {
 
 #[cfg(test)]
 mod tests {
+    use gamut_riff::{FourCc, RiffWriter, write_simple_lossless, write_simple_lossy};
+
     use super::*;
     use crate::vp8l::bit_io::BitWriter;
     use crate::vp8l::header::Vp8lHeader;
     use crate::vp8l::prefix::write_simple_prefix_code;
-    use gamut_riff::{FourCc, RiffWriter, write_simple_lossless, write_simple_lossy};
 
     /// Builds a simple-lossless WebP file holding a solid-color `width`×`height` VP8L image.
     fn solid_lossless_webp(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
@@ -270,7 +271,13 @@ mod tests {
         // of the RGBA decoder, which deleting would route to "no bitstream".
         let file = solid_lossless_webp(2, 2, 0x12, 0x34, 0x56);
         let got: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).unwrap();
-        assert_eq!(got.dimensions(), Dimensions { width: 2, height: 2 });
+        assert_eq!(
+            got.dimensions(),
+            Dimensions {
+                width: 2,
+                height: 2
+            }
+        );
         assert_eq!(
             got.as_samples(),
             [0x12, 0x34, 0x56, 0xff].repeat(4).as_slice()
@@ -295,8 +302,14 @@ mod tests {
         w.write_chunk(FourCc::VP8L, &vp8l);
         let file = w.finish();
         let rgb: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
-        assert!(rgb.is_err(), "RGB decode must reject a malformed VP8X header");
+        assert!(
+            rgb.is_err(),
+            "RGB decode must reject a malformed VP8X header"
+        );
         let rgba: Result<ImageBuf<Rgba8>> = WebpDecoder::new().decode_image(&file);
-        assert!(rgba.is_err(), "RGBA decode must reject a malformed VP8X header");
+        assert!(
+            rgba.is_err(),
+            "RGBA decode must reject a malformed VP8X header"
+        );
     }
 }

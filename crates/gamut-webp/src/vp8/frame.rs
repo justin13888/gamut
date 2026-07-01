@@ -19,6 +19,8 @@ use gamut_color::{Yuv420, clip_pixel8};
 use gamut_core::{Error, Result};
 
 use super::bool_coder::{BoolDecoder, BoolEncoder};
+/// Re-exported so the low-level frame API carries the loop-filter delta type next to [`EncodeOptions`].
+pub use super::header::LoopFilterDeltas;
 use super::header::{
     self, LoopFilterParams, QuantIndices, Segmentation, UNCOMPRESSED_CHUNK_LEN, Vp8FrameHeader,
 };
@@ -27,9 +29,6 @@ use super::prediction::{self, B_DC_PRED, B_PRED, DC_PRED, H_PRED, NUM_BMODES, TM
 use super::quant::{self, QuantFactors};
 use super::tokens::{self, CoeffProbs};
 use super::transform::{fdct4x4, fwht4x4, idct4x4, iwht4x4};
-
-/// Re-exported so the low-level frame API carries the loop-filter delta type next to [`EncodeOptions`].
-pub use super::header::LoopFilterDeltas;
 
 /// The whole-block prediction modes the encoder considers, in signaling order.
 const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
@@ -1569,7 +1568,10 @@ mod tests {
             p
         };
         for v in 0u8..=3 {
-            assert!(decode_frame(&patch_version(v)).is_ok(), "profile {v} must decode");
+            assert!(
+                decode_frame(&patch_version(v)).is_ok(),
+                "profile {v} must decode"
+            );
         }
         for v in 4u8..=7 {
             assert!(
@@ -1678,8 +1680,14 @@ mod tests {
         // The minimal key-frame header must carry the requested base quantizer and filter type:
         // deleting either struct field would silently fall back to the default (y_ac 0 / normal).
         let simple = frame_header(176, 144, 100, true);
-        assert_eq!(simple.quant.y_ac, 100, "base quantizer index must be stored");
-        assert!(simple.loop_filter.simple, "the simple-filter request must be stored");
+        assert_eq!(
+            simple.quant.y_ac, 100,
+            "base quantizer index must be stored"
+        );
+        assert!(
+            simple.loop_filter.simple,
+            "the simple-filter request must be stored"
+        );
         assert!(
             !frame_header(176, 144, 100, false).loop_filter.simple,
             "a normal-filter request must not set the simple flag"
@@ -1706,7 +1714,6 @@ mod tests {
         // would skip the bounds check.
         assert!(split_token_partitions(&[0, 0], 2).is_err());
     }
-
 
     #[test]
     fn interior_edges_filter_on_coefficients_not_only_bpred() {

@@ -12,10 +12,9 @@ use crate::ancillary::{Ancillary, PhysicalUnit, SrgbIntent};
 use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
 use crate::filter::{self, FilterStrategy, FilterType};
-use crate::ihdr;
-use crate::pack;
 use crate::palette::PngPalette;
 use crate::reduce::{self, Reduced};
+use crate::{ihdr, pack};
 
 /// IDAT payload cap. A decoder concatenates consecutive IDATs, so the split is transparent; a
 /// large-ish cap keeps the 12-byte per-chunk overhead negligible.
@@ -492,8 +491,9 @@ impl EncodeImage<GrayAlpha16> for PngEncoder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gamut_core::Dimensions;
+
+    use super::*;
 
     #[test]
     fn emits_signature_ihdr_idat_iend() {

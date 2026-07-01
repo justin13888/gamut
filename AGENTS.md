@@ -57,17 +57,17 @@ All codec implementations must follow the official specs that should be attached
 
 ## Validation
 
-Dev tooling (just, lefthook, convco, cargo-llvm-cov, CMake/Ninja/Meson, …) is provisioned by
-[mise](https://mise.jdx.dev): run `mise install` and activate mise in your shell. Validate
-changes:
+Dev tooling (hk, convco, cargo-llvm-cov, CMake/Ninja/Meson, …) is provisioned by
+[mise](https://mise.jdx.dev): run `mise install` and activate mise in your shell. The former
+`just` recipes are now mise tasks — `mise tasks` lists them. Validate changes:
 
 ```bash
-just test            # correctness
-just format-check    # formatting
-just lint            # lint (Clippy, warnings as errors)
-just coverage        # coverage (minimum 80%)
-just mutants         # mutation testing (run `mise install` once; heavier — needs submodules + C toolchain)
-just check-commits   # commit messages are Conventional Commits
+mise run test          # correctness
+mise run fmt-check     # formatting (nightly rustfmt for merge-resilient imports; auto-installed)
+mise run lint          # lint (Clippy, warnings as errors)
+mise run coverage      # coverage (minimum 80%)
+mise run mutants       # mutation testing (run `mise install` once; heavier — needs submodules + C toolchain)
+mise run check-commits # commit messages are Conventional Commits
 ```
 
 The shipped crates are pure Rust, but the cross-check tests link reference codecs
@@ -98,6 +98,6 @@ and releases do not guarantee version consistency across crates. Only `version` 
 all other metadata (`edition`, `rust-version`/MSRV, license, repository) is workspace-owned
 and inherited via `*.workspace = true`. Version bumps, per-crate changelogs, and crates.io
 publishing are automated by release-plz from conventional-commit history — write conventional
-commit messages (enforced by convco via the `commit-msg`/`pre-push` git hooks and the CI PR
-check) and do not hand-edit versions for routine changes. `just versions` lists every
-crate's current version; `just bump <crate> <level>` is a manual escape hatch.
+commit messages (enforced by convco via the `commit-msg` git hook and the CI PR
+check) and do not hand-edit versions for routine changes. `mise run versions` lists every
+crate's current version; `mise run bump <crate> <level>` is a manual escape hatch.

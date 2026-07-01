@@ -130,17 +130,17 @@ All cargo metadata except per-crate `version` is centralized in the root
 
 - [Rust (rustup)](https://rustup.rs) -- toolchain (channel pinned via `rust-toolchain.toml`);
   see [Minimum Supported Rust Version](#minimum-supported-rust-version) for the lower bound
-- [mise](https://mise.jdx.dev) -- provisions the rest of the dev tooling from `mise.toml`:
-  [just](https://github.com/casey/just) (command runner),
-  [Lefthook](https://github.com/evilmartians/lefthook) (git hooks),
+- [mise](https://mise.jdx.dev) -- provisions the rest of the dev tooling from `mise.toml`
+  (and the dev tasks — run `mise tasks` to list them, `mise run <task>` to invoke):
+  [hk](https://hk.jdx.dev) (git hooks),
   [convco](https://convco.github.io) (conventional-commit linter),
   [jq](https://jqlang.github.io/jq/),
   [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov) (coverage),
-  [cargo-edit](https://github.com/killercup/cargo-edit) (`cargo set-version` for `just bump`),
+  [cargo-edit](https://github.com/killercup/cargo-edit) (`cargo set-version` for `mise run bump`),
   and the C build tools [CMake](https://cmake.org), [Ninja](https://ninja-build.org) and
   [Meson](https://mesonbuild.com). After cloning, run `mise trust && mise install`, then
   activate mise in your shell (e.g. `eval "$(mise activate zsh)"`) so these land on `PATH` —
-  the git hooks and `just` recipes invoke them directly.
+  the git hooks and mise tasks invoke them directly.
 
 Building the **shipped crates** needs only the Rust toolchain — they are pure Rust with no C
 dependencies. Building the **cross-check tests** additionally needs a C toolchain plus
@@ -161,7 +161,7 @@ git submodule update --init --recursive
 
 # Dev tooling + git hooks (see Prerequisites; also needs system pkg-config).
 mise trust && mise install
-lefthook install
+hk install
 
 cargo build --workspace
 cargo test --workspace
@@ -172,14 +172,14 @@ cargo test --workspace
 | Command          | Description                              |
 | ---------------- | ---------------------------------------- |
 | `cargo build --workspace` | Build all crates                |
-| `just test`      | Run tests (workspace, all features)      |
-| `just format`    | Format code                              |
-| `just lint`      | Lint with Clippy (warnings as errors)    |
-| `just lint-fix`  | Lint and auto-fix                        |
-| `just check-commits` | Check commits are Conventional Commits |
-| `just coverage`  | Run tests with coverage (min 80%)        |
-| `just versions`  | List every crate's version               |
-| `just bump <crate> <level>` | Bump one crate (`major`\|`minor`\|`patch`) |
+| `mise run test`      | Run tests (workspace, all features)      |
+| `mise run fmt`       | Format code (nightly rustfmt, auto-installed) |
+| `mise run lint`      | Lint with Clippy (warnings as errors)    |
+| `mise run lint-fix`  | Lint and auto-fix                        |
+| `mise run check-commits` | Check commits are Conventional Commits |
+| `mise run coverage`  | Run tests with coverage (min 80%)        |
+| `mise run versions`  | List every crate's version               |
+| `mise run bump <crate> <level>` | Bump one crate (`major`\|`minor`\|`patch`) |
 
 ## Minimum Supported Rust Version (MSRV)
 
@@ -192,6 +192,10 @@ Policy:
 - The MSRV is the floor we test and publish against, not necessarily the newest toolchain.
   Day-to-day development tracks the latest `stable` (pinned to the `stable` channel in
   `rust-toolchain.toml`).
+- Formatting is the one exception: `mise run fmt` runs **nightly** rustfmt for the
+  merge-resilient import options (`imports_granularity`/`group_imports`), auto-installing the
+  nightly toolchain on first use. Nothing is *compiled* on nightly — only formatted — so it
+  never affects the MSRV, Clippy, tests, or the shipped build, which all stay on stable.
 - Raising the MSRV is a deliberate, semver-relevant change: bump `rust-version` in the root
   `Cargo.toml` and note it here. Pre-1.0, an MSRV bump rides a minor release.
 - Edition (`2024`) is likewise centralized in `[workspace.package]` and inherited by every
@@ -199,13 +203,15 @@ Policy:
 
 ## Git Hooks
 
-This project uses [Lefthook](https://github.com/evilmartians/lefthook) (provisioned by mise);
-run `lefthook install` once after `mise install` to register the hooks. The `commit-msg` hook
-rejects messages that aren't [Conventional Commits](https://www.conventionalcommits.org)
-(policy in `.convco`). Pre-commit hooks auto-fix formatting and linting on staged files.
-Pre-push hooks re-check the branch's commit messages and run format checks, lint checks, tests,
-and a coverage gate. The hooks call mise-managed tools (convco, cargo-llvm-cov), so keep mise
-activated in your shell.
+This project uses [hk](https://hk.jdx.dev) (provisioned by mise); run `hk install` once after
+`mise install` to register the hooks (config in `hk.pkl`). The `commit-msg` hook rejects
+messages that aren't [Conventional Commits](https://www.conventionalcommits.org) (policy in
+`.convco`) — enforcement happens when the commit is created, so a bad message can't slip through
+to a `--no-verify` push. The `pre-commit` hook auto-fixes formatting and linting on the staged
+snapshot (unstaged work is stashed first, then restored). The `pre-push` hook is a deliberately
+fast static gate — a formatting check and a quick Clippy pass — while the heavier full-feature
+Clippy, tests, and coverage run in CI, so the local hooks stay fast enough not to be bypassed.
+The hook steps delegate to the shared `mise run` tasks, so keep mise activated in your shell.
 
 ## CI/CD
 
@@ -219,7 +225,7 @@ This project uses [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) 
 LLVM-based code coverage. CI enforces a minimum of 80% line coverage.
 
 ```bash
-just coverage
+mise run coverage
 ```
 
 The bindings/binary crates (`gamut-cli`, `gamut-wasm`, `gamut-ffi`) are excluded from the
@@ -246,7 +252,7 @@ conventional-commit history, computes its next version, and updates dependents' 
 as needed. Each crate keeps its own `CHANGELOG.md` and is tagged and GitHub-released as
 `<crate>-v<version>` (e.g. `gamut-core-v0.2.0`) — there is no single repo-wide version tag,
 so the umbrella `gamut` crate's version serves as the headline "project" version. Run
-`just versions` to see every crate's current version at a glance.
+`mise run versions` to see every crate's current version at a glance.
 
 Because release-plz keys versions and changelogs off commit messages, those messages are
 enforced as [Conventional Commits](https://www.conventionalcommits.org) — by the git hooks

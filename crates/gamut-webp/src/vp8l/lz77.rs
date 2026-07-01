@@ -320,13 +320,33 @@ mod tests {
         // value_to_prefix is the exact inverse of read_lz77_value (§5.2.2). Splitting a value, writing
         // its extra bits, then reading it back must recover it across small and large magnitudes — any
         // asymmetric mutation of the offset/shift math in either function breaks the identity.
-        for v in [1u32, 2, 4, 5, 6, 7, 8, 15, 16, 17, 31, 100, 1000, 65_535, 1 << 20] {
+        for v in [
+            1u32,
+            2,
+            4,
+            5,
+            6,
+            7,
+            8,
+            15,
+            16,
+            17,
+            31,
+            100,
+            1000,
+            65_535,
+            1 << 20,
+        ] {
             let (prefix, extra_bits, extra) = value_to_prefix(v);
             let mut w = BitWriter::new();
             w.write_bits(extra, u32::from(extra_bits));
             let bytes = w.finish();
             let mut r = BitReader::new(&bytes);
-            assert_eq!(read_lz77_value(&mut r, u32::from(prefix)).unwrap(), v, "value {v}");
+            assert_eq!(
+                read_lz77_value(&mut r, u32::from(prefix)).unwrap(),
+                v,
+                "value {v}"
+            );
         }
         // The extra-bits bound: prefix 50 implies exactly 24 extra bits (accepted); 52 implies 25
         // (rejected). Pins `extra_bits > 24` against `>=` / `==`.

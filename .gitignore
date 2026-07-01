@@ -22,6 +22,9 @@ tooling/*/Cargo.lock
 # Coverage artifacts
 lcov.info
 
+# hk (git hook runner): per-developer, uncommitted hook overrides
+hk.local.pkl
+
 # === macOS ===
 # General
 .DS_Store

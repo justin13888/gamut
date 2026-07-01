@@ -102,7 +102,12 @@ fn libwebp_decodes_gamut_lossless_to_source() {
             ("pattern", pattern_rgba(w, h)),
             ("photo", photo_like_rgba(w, h, 0x9a1c)),
         ] {
-            assert_gamut_encode_libwebp_decode(&rgba_to_rgb(&rgba), w, h, &format!("{label} {w}x{h}"));
+            assert_gamut_encode_libwebp_decode(
+                &rgba_to_rgb(&rgba),
+                w,
+                h,
+                &format!("{label} {w}x{h}"),
+            );
         }
     }
 }

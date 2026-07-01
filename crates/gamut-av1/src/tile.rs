@@ -24,12 +24,13 @@
 //! The frame is coded on the MI-unit grid (`mi_cols*4 × mi_rows*4`, dimensions rounded up to a
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
 
-use crate::cdf;
-use crate::quant::{ac_q, dc_q, dequant, quantize};
-use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{Planar8, clip_pixel};
 use gamut_dsp::round2_signed;
+
+use crate::cdf;
+use crate::quant::{ac_q, dc_q, dequant, quantize};
+use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 
 /// `NUM_BASE_LEVELS` (§3).
 const NUM_BASE_LEVELS: i32 = 2;
@@ -3056,8 +3057,9 @@ fn golomb(sym: &mut SymbolEncoder, x: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use gamut_color::Planar8;
+
+    use super::*;
 
     #[test]
     fn neg_interleave_inverts_neg_deinterleave() {

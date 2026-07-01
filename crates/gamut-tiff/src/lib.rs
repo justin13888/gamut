@@ -43,8 +43,8 @@ pub use compression::Compression;
 pub use decoder::TiffDecoder;
 pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstruct};
 pub use encoder::TiffEncoder;
-pub use palette::Palette8;
 // The structural IFD core lives in gamut-ifd; re-export it so gamut-tiff's public API is unchanged.
 pub use gamut_ifd::{ByteOrder, Field, FieldType, Ifd, TiffFile, Value, Variant, read, write};
 pub use ifd::{PhotometricInterpretation, Predictor};
+pub use palette::Palette8;
 pub use writer::{write_image, write_image_tiled, write_multipage};

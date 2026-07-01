@@ -2,7 +2,7 @@
 
 Tracking GitHub issue #24 (PNG): a pure-Rust, space-efficient DEFLATE (RFC 1951) + zlib (RFC 1950)
 **encoder**, the compression primitive `gamut-png` builds on. Delivered as small, individually green
-phases (each `just test`/`lint`/`format-check`/`coverage` ≥80%).
+phases (each `mise run test`/`lint`/`fmt-check`/`coverage` ≥80%).
 
 **Keystone:** the bit-exact stored/fixed-Huffman + zlib-framing path (P-D2) — once that round-trips
 through the reference inflater, every later phase swaps in a smarter block coder or parse behind the
