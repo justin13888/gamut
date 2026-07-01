@@ -32,13 +32,24 @@ meson                         = "1.11.1"  # pipx backend — needs a python3 on 
 # commands: the git hooks and CI both invoke them, so there is one canonical
 # invocation and local/CI can never drift apart.
 
+# Ensure a nightly rustfmt is available. The merge-resilient import options in rustfmt.toml
+# (imports_granularity/group_imports) are nightly-only, so fmt runs on nightly while the rest
+# of the workspace stays on the pinned stable toolchain. `rustup component add` succeeds when
+# nightly is already installed and errors otherwise, falling through to a minimal install —
+# so this self-heals both locally and in CI, and `mise run fmt` "just works" on a fresh clone.
+[tasks.ensure-nightly-rustfmt]
+hide = true
+run = "rustup component add rustfmt --toolchain nightly 2>/dev/null || rustup toolchain install nightly --profile minimal --component rustfmt"
+
 [tasks.fmt]
-description = "Format code"
-run = "cargo fmt --all"
+description = "Format code (nightly rustfmt; merge-resilient imports)"
+depends = ["ensure-nightly-rustfmt"]
+run = "cargo +nightly fmt --all"
 
 [tasks.fmt-check]
-description = "Check formatting without modifying"
-run = "cargo fmt --all --check"
+description = "Check formatting without modifying (nightly rustfmt)"
+depends = ["ensure-nightly-rustfmt"]
+run = "cargo +nightly fmt --all --check"
 
 [tasks.lint]
 description = "Lint with Clippy (warnings as errors)"

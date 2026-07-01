@@ -1,1 +1,13 @@
 edition = "2024"
+
+# Merge-resilient import formatting. `imports_granularity`/`group_imports` are nightly-only
+# rustfmt options (hence `unstable_features`), so the `fmt`/`fmt-check` mise tasks run
+# `cargo +nightly fmt`; everything else stays on the pinned stable toolchain.
+#
+# Why: imports are the most conflict-prone lines in a Rust file. Collapsing each module to a
+# single `use` (Module) and sorting into fixed std/external/crate groups (StdExternalCrate)
+# gives every import block one canonical form, so parallel branches that touch imports
+# converge on merge instead of colliding.
+unstable_features = true
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"

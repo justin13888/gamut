@@ -173,7 +173,7 @@ cargo test --workspace
 | ---------------- | ---------------------------------------- |
 | `cargo build --workspace` | Build all crates                |
 | `mise run test`      | Run tests (workspace, all features)      |
-| `mise run fmt`       | Format code                              |
+| `mise run fmt`       | Format code (nightly rustfmt, auto-installed) |
 | `mise run lint`      | Lint with Clippy (warnings as errors)    |
 | `mise run lint-fix`  | Lint and auto-fix                        |
 | `mise run check-commits` | Check commits are Conventional Commits |
@@ -192,6 +192,10 @@ Policy:
 - The MSRV is the floor we test and publish against, not necessarily the newest toolchain.
   Day-to-day development tracks the latest `stable` (pinned to the `stable` channel in
   `rust-toolchain.toml`).
+- Formatting is the one exception: `mise run fmt` runs **nightly** rustfmt for the
+  merge-resilient import options (`imports_granularity`/`group_imports`), auto-installing the
+  nightly toolchain on first use. Nothing is *compiled* on nightly — only formatted — so it
+  never affects the MSRV, Clippy, tests, or the shipped build, which all stay on stable.
 - Raising the MSRV is a deliberate, semver-relevant change: bump `rust-version` in the root
   `Cargo.toml` and note it here. Pre-1.0, an MSRV bump rides a minor release.
 - Edition (`2024`) is likewise centralized in `[workspace.package]` and inherited by every

@@ -63,7 +63,7 @@ Dev tooling (hk, convco, cargo-llvm-cov, CMake/Ninja/Meson, …) is provisioned 
 
 ```bash
 mise run test          # correctness
-mise run fmt-check     # formatting
+mise run fmt-check     # formatting (nightly rustfmt for merge-resilient imports; auto-installed)
 mise run lint          # lint (Clippy, warnings as errors)
 mise run coverage      # coverage (minimum 80%)
 mise run mutants       # mutation testing (run `mise install` once; heavier — needs submodules + C toolchain)
