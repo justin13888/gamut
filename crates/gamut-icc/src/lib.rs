@@ -34,14 +34,12 @@
 //!
 //! # Scope
 //!
-//! The load-bearing element types are decoded semantically: `XYZType`, `curveType`,
-//! `parametricCurveType`, `textType` / `multiLocalizedUnicodeType` / `textDescriptionType`,
-//! `dateTimeType`, `signatureType`, `s15Fixed16ArrayType`, the LUT transforms
-//! (`lut8`/`lut16`/`lutAToB`/`lutBToA`) and `namedColor2Type`. Any other element type is preserved
-//! verbatim as [`TagData::Raw`], so every profile round-trips losslessly regardless of what it
-//! carries. Applying a profile's transform (a CMM), and building transforms from
+//! Every ICC.1:2022 §10 element type is decoded semantically (see [`TagData`]). Any element type not
+//! defined in §10 — iccMAX's `multiProcessElementsType`, or private/unregistered types — is
+//! preserved verbatim as [`TagData::Raw`], so every profile round-trips losslessly regardless of
+//! what it carries. Applying a profile's transform (a CMM), and building transforms from
 //! [`gamut_color`](https://docs.rs/gamut-color), are out of scope — the `to_f64`/`eval` accessors
-//! are the seam for that.
+//! are the seam for that — as is **iccMAX** (`ICC.2`), a separate next-generation profile format.
 #![forbid(unsafe_code)]
 
 mod bytes;

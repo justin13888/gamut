@@ -23,15 +23,22 @@ serialization as an equivalent profile.
 | P6 | §7 | Writer/serialize + round-trip; `size` and profile-ID (MD5) recomputation | ✅ |
 | P7 | — | v2 legacy quirks (`textDescriptionType`) | ✅ |
 | P8 | — | lcms2 differential oracle gate | ✅ |
+| P9 | §10 | **Full §10 coverage** — every remaining element type decoded (see below) | ✅ |
+| P10 | §8 | Profile-class conformance validation (`IccProfile::validate`) | ✅ |
 
 ## Modelled element types
 
-Decoded semantically: `XYZType`, `curveType`, `parametricCurveType` (function types 0–4), `textType`,
-`multiLocalizedUnicodeType`, `textDescriptionType` (v2), `dateTimeType`, `signatureType`,
-`s15Fixed16ArrayType`, `lut8Type`, `lut16Type`, `lutAToBType`, `lutBToAType`, `namedColor2Type`.
+**Every ICC.1:2022 §10 element type is decoded semantically:** `XYZType`, `curveType`,
+`parametricCurveType` (function types 0–4), `textType`, `multiLocalizedUnicodeType`,
+`textDescriptionType` (v2), `dateTimeType`, `signatureType`, `s15Fixed16ArrayType`, `lut8Type`,
+`lut16Type`, `lutAToBType`, `lutBToAType`, `namedColor2Type`, `chromaticityType`, `cicpType`,
+`measurementType`, `viewingConditionsType`, `dataType`, `colorantOrderType`, `colorantTableType`,
+`u16Fixed16ArrayType`, `uInt8/16/32/64ArrayType`, `profileSequenceDescType`,
+`profileSequenceIdentifierType`, `responseCurveSet16Type`, and `dictType`.
 
-Every other element type is preserved verbatim as `TagData::Raw` and round-trips byte-for-byte, so
-no profile is rejected for carrying an unmodelled tag.
+Any element type *not* defined in ICC.1:2022 §10 (e.g. iccMAX's `multiProcessElementsType`, or
+private/unregistered types) is preserved verbatim as `TagData::Raw` and round-trips byte-for-byte,
+so no profile is rejected for carrying an unmodelled tag.
 
 ## Deferred
 
@@ -40,8 +47,9 @@ no profile is rejected for carrying an unmodelled tag.
   as the seam.
 - **`gamut-color` integration**: building runnable transforms (matrix/TRC → pipeline, `chad`
   application) belongs in `gamut-color` (dependency direction `gamut-color → gamut-icc`), not here.
-- **Secondary element types** (`chromaticityType`, `measurementType`, `viewingConditionsType`,
-  `multiProcessElementsType`, …): preserved as `Raw` rather than decoded.
+- **`multiProcessElementsType`** (`mpet`, and the `D2Bx`/`B2Dx` transform tags that use it): the
+  v4/iccMAX general-purpose processing pipeline is preserved as `Raw` rather than decoded. Every
+  other §10 element type is now modelled (see above).
 - **iccMAX (`ICC.2:2019`, profile version 5)**: out of scope. iccMAX is a separate, parallel
   next-generation format (spectral PCS, `multiProcessElementsType`, ~20 new tag types), *not* an
   extension of the ICC.1 format this crate targets; the real-world profiles embedded in images are
