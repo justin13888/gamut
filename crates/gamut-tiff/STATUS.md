@@ -2,7 +2,7 @@
 
 Tracking GitHub issue #107: implement the **full TIFF 6.0 standard** (`references/tiff/tiff6.pdf`,
 §1–23). Delivered as a stack of small, individually-reviewable PRs (P1–P19) onto the `feat/tiff`
-integration branch; each PR is independently green (`just test`/`lint`/`format-check`/`coverage`
+integration branch; each PR is independently green (`mise run test`/`lint`/`fmt-check`/`coverage`
 ≥80%) and mergeable on its own.
 
 **Keystone:** TIFF has no prediction/transform machinery — the hard part is the container

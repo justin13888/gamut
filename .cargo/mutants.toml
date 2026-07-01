@@ -1,9 +1,9 @@
 # cargo-mutants configuration — https://mutants.rs
-# Run via `just mutants` (full workspace) or `just mutants-diff` (changed code only).
+# Run via `mise run mutants` (full workspace) or `mise run mutants-diff` (changed code only).
 # The tool is installed by mise; see `mise.toml`.
 
 # Build & test with all features so the dav1d/libavif/libwebp differential "oracle" tests
-# run — they are the strongest signal for the encoder crates. Mirrors `just test`
+# run — they are the strongest signal for the encoder crates. Mirrors `mise run test`
 # (cargo test --workspace --all-features); mutants in gamut-av1/avif/webp therefore need the
 # C toolchain + the third_party/ git submodules checked out.
 all_features = true
@@ -12,7 +12,7 @@ all_features = true
 # aren't unit-tested, and `tooling/` holds the differential *reference decoders* (dav1d/libavif) —
 # the test oracle, not the system under test, so mutating it is meaningless (and its high-bit-depth
 # FFI paths are only exercised once the encoder emits them). This matches the coverage gate, which
-# excludes the same set (justfile `coverage`, --ignore-filename-regex). Stub crates
+# excludes the same set (the `coverage` mise task, --ignore-filename-regex). Stub crates
 # (av2/jxl/vvc/heic) contain no function bodies and generate no mutants, so they need no entry here.
 exclude_globs = [
     "crates/gamut-cli/**",

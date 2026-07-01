@@ -5,7 +5,7 @@ Tracking GitHub issue #109: implement a feature-complete **DNG (Digital Negative
 so the container spine is the shared `gamut-ifd` primitive; this crate adds the DNG-specific tags,
 raw photometry, compression, colour calibration, and metadata on top. Delivered as a stack of
 small, individually-green phases (P1–P19) on the `feat/dng` branch; each is green
-(`just test`/`lint`/`format-check`/`coverage` ≥80%).
+(`mise run test`/`lint`/`fmt-check`/`coverage` ≥80%).
 
 **Keystone:** DNG's defining structure is an IFD *tree* — IFD0 (a preview/thumbnail) points, via
 the `SubIFDs` tag (330), at the full-resolution raw image in a **sub-IFD**, with EXIF in another

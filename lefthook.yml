@@ -32,4 +32,4 @@ pre-push:
     test:
       run: cargo test --workspace --all-features
     coverage:
-      run: just coverage
+      run: mise run coverage
