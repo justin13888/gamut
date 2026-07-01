@@ -67,6 +67,8 @@ mise run fmt-check     # formatting (nightly rustfmt for merge-resilient imports
 mise run lint          # lint (Clippy, warnings as errors)
 mise run coverage      # coverage (minimum 80%)
 mise run mutants       # mutation testing (run `mise install` once; heavier — needs submodules + C toolchain)
+mise run check-cross <triple> # cross-compile check (wasm32/aarch64/musl); extended CI, master/manual
+mise run check-msrv    # compile on the documented MSRV; extended CI, master/manual
 mise run check-commits # commit messages are Conventional Commits
 ```
 
