@@ -1,6 +1,6 @@
 //! The modern IPTC Photo Metadata (Core + Extension), expressed over XMP.
 
-use gamut_xmp::{XmpArray, XmpMeta, XmpProperty, XmpValue};
+use gamut_xmp::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
 use crate::schema::{IPTC_NAMESPACES, XmpField, XmpShape, ns};
 
@@ -89,22 +89,25 @@ impl PhotoMetadata {
     /// Reads the `x-default` (first) alternative of a language-alternative property.
     pub(crate) fn lang_alt(&self, ns: &str, name: &str) -> Option<&str> {
         match &self.find(ns, name)?.value {
-            XmpValue::Array(XmpArray::Alt(items)) => items.iter().find_map(simple_str),
+            XmpValue::Array(XmpArray::Alt(items)) => {
+                items.iter().find_map(|item| simple_str(&item.value))
+            }
             XmpValue::Simple(s) => Some(s),
             _ => None,
         }
     }
 
     pub(crate) fn set_lang_alt(&mut self, ns: &str, name: &str, value: &str) {
-        let alt = XmpArray::Alt(vec![XmpValue::Simple(value.to_owned())]);
+        let alt = XmpArray::Alt(vec![XmpItem::new(XmpValue::Simple(value.to_owned()))]);
         self.upsert(ns, name, XmpValue::Array(alt));
     }
 
     pub(crate) fn list(&self, ns: &str, name: &str) -> Vec<&str> {
         match self.find(ns, name).map(|p| &p.value) {
-            Some(XmpValue::Array(XmpArray::Bag(items) | XmpArray::Seq(items))) => {
-                items.iter().filter_map(simple_str).collect()
-            }
+            Some(XmpValue::Array(XmpArray::Bag(items) | XmpArray::Seq(items))) => items
+                .iter()
+                .filter_map(|item| simple_str(&item.value))
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -112,7 +115,7 @@ impl PhotoMetadata {
     pub(crate) fn set_list(&mut self, ns: &str, name: &str, ordered: bool, values: &[&str]) {
         let items = values
             .iter()
-            .map(|s| XmpValue::Simple((*s).to_owned()))
+            .map(|s| XmpItem::new(XmpValue::Simple((*s).to_owned())))
             .collect();
         let array = if ordered {
             XmpArray::Seq(items)
@@ -325,8 +328,8 @@ mod tests {
         assert_eq!(pm.caption(), Some("A sunset"));
         // A multi-alternative Alt array reads its first (x-default) item.
         pm.properties[0].value = XmpValue::Array(XmpArray::Alt(vec![
-            XmpValue::Simple("x-default text".to_owned()),
-            XmpValue::Simple("French text".to_owned()),
+            XmpItem::new(XmpValue::Simple("x-default text".to_owned())),
+            XmpItem::new(XmpValue::Simple("French text".to_owned())),
         ]));
         assert_eq!(pm.caption(), Some("x-default text"));
         // A plain Simple value (non-conformant but seen in the wild) is also accepted.
