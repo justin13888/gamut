@@ -1,6 +1,7 @@
 # ICC profiles (International Color Consortium)
 
-Reference specifications for the `gamut-icc` crate.
+Reference specifications for the `gamut-icc` crate. The ICC publishes every current and superseded
+edition, freely, from its specification index: <https://www.color.org/specification/index.xalter>.
 
 ## Authoritative editions (vendored)
 
@@ -15,6 +16,26 @@ Reference specifications for the `gamut-icc` crate.
 
 An ICC profile is a self-describing binary blob: a 128-byte header, a tag table, and tag element
 data — independent of any IFD/XML structure, so `gamut-icc` depends only on `gamut-core`.
+
+## Not implemented — iccMAX (ICC.2:2019)
+
+`ICC.2:2019` (**iccMAX**, profile version 5) — <https://www.color.org/specification/ICC.2-2019.pdf>
+— is **out of scope** and deliberately not implemented. iccMAX is not an extension or superset of
+the ICC.1 profile format vendored here; it is a **separate, parallel** next-generation format aimed
+at spectral and high-end colour workflows, introducing a distinct v5 header, a spectral PCS,
+`multiProcessElementsType` with a programmable calculator element, and roughly twenty new tag types.
+
+Two facts make it the wrong target for this crate:
+
+- **The real-world profiles `gamut-icc` exists to read are all ICC.1 v2/v4.** Every profile embedded
+  in a camera JPEG, a PNG `iCCP` chunk, a TIFF/DNG, or a WebP/AVIF is an ICC.1 profile; iccMAX is
+  confined to specialist pipelines and is essentially never seen in image files.
+- **Our conformance oracle cannot validate it.** The vendored oracle is Little-CMS (lcms2), which
+  implements ICC.1 only. iccMAX has its own separate reference engine (the ICC's `RefIccMAX` /
+  `DemoIccMAX` project), which is not vendored here.
+
+Should iccMAX support ever be warranted it would be a separate effort with its own reference engine,
+not a change to the ICC.1 parser documented below.
 
 ## Conformance
 

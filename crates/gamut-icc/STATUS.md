@@ -42,3 +42,8 @@ no profile is rejected for carrying an unmodelled tag.
   application) belongs in `gamut-color` (dependency direction `gamut-color → gamut-icc`), not here.
 - **Secondary element types** (`chromaticityType`, `measurementType`, `viewingConditionsType`,
   `multiProcessElementsType`, …): preserved as `Raw` rather than decoded.
+- **iccMAX (`ICC.2:2019`, profile version 5)**: out of scope. iccMAX is a separate, parallel
+  next-generation format (spectral PCS, `multiProcessElementsType`, ~20 new tag types), *not* an
+  extension of the ICC.1 format this crate targets; the real-world profiles embedded in images are
+  all ICC.1 v2/v4, and the lcms2 oracle does not implement iccMAX. See
+  [`references/icc/README.md`](../../references/icc/README.md).
