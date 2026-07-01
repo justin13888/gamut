@@ -32,14 +32,17 @@ pub struct ProfileHeader {
     /// Primary platform signature (offset 40, e.g. `APPL`/`MSFT`), or [`Signature::ZERO`].
     pub platform: Signature,
     /// Profile flags (offset 44): bit 0 = embedded, bit 1 = cannot be used independently; the
-    /// upper half is CMM-private. Stored raw.
+    /// upper half is CMM-private. Stored raw; decode the ICC-defined bits with
+    /// [`ProfileHeader::is_embedded`] and [`ProfileHeader::cannot_be_used_independently`].
     pub flags: u32,
     /// Device manufacturer signature (offset 48), or [`Signature::ZERO`].
     pub manufacturer: Signature,
     /// Device model signature (offset 52), or [`Signature::ZERO`].
     pub model: Signature,
     /// Device attributes (offset 56): reflective/transparency, glossy/matte, polarity, colour/BW
-    /// in the low bits; the upper half is vendor-specific. Stored raw.
+    /// in the low bits; the upper half is vendor-specific. Stored raw; decode the ICC-defined bits
+    /// with [`ProfileHeader::is_transparency`], [`ProfileHeader::is_matte`],
+    /// [`ProfileHeader::is_negative_polarity`], and [`ProfileHeader::is_black_and_white`].
     pub attributes: u64,
     /// Default rendering intent (offset 64).
     pub rendering_intent: RenderingIntent,
@@ -114,6 +117,48 @@ impl ProfileHeader {
             profile_id: ProfileId(profile_id),
             reserved,
         })
+    }
+
+    /// Whether the profile-flags field marks this profile as embedded in a file
+    /// (§7.2.11 Table 21, bit 0).
+    #[must_use]
+    pub fn is_embedded(&self) -> bool {
+        self.flags & (1 << 0) != 0
+    }
+
+    /// Whether the profile-flags field marks this profile as unusable independently of the embedded
+    /// colour data (§7.2.11 Table 21, bit 1).
+    #[must_use]
+    pub fn cannot_be_used_independently(&self) -> bool {
+        self.flags & (1 << 1) != 0
+    }
+
+    /// Whether the device-attributes field marks the media as transparency rather than reflective
+    /// (§7.2.14 Table 22, bit 0).
+    #[must_use]
+    pub fn is_transparency(&self) -> bool {
+        self.attributes & (1 << 0) != 0
+    }
+
+    /// Whether the device-attributes field marks the media as matte rather than glossy
+    /// (§7.2.14 Table 22, bit 1).
+    #[must_use]
+    pub fn is_matte(&self) -> bool {
+        self.attributes & (1 << 1) != 0
+    }
+
+    /// Whether the device-attributes field marks the media polarity as negative rather than positive
+    /// (§7.2.14 Table 22, bit 2).
+    #[must_use]
+    pub fn is_negative_polarity(&self) -> bool {
+        self.attributes & (1 << 2) != 0
+    }
+
+    /// Whether the device-attributes field marks the media as black-and-white rather than colour
+    /// (§7.2.14 Table 22, bit 3).
+    #[must_use]
+    pub fn is_black_and_white(&self) -> bool {
+        self.attributes & (1 << 3) != 0
     }
 
     /// Serializes the 128-byte header. The `size` field is written as stored; the profile writer
@@ -455,6 +500,35 @@ mod tests {
             ProfileId([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
         );
         assert_eq!(h.reserved, [0u8; 28]);
+    }
+
+    #[test]
+    fn decodes_flag_and_attribute_bits() {
+        let mut h = ProfileHeader::parse(&sample_header()).unwrap();
+
+        // Profile-flags bits 0 and 1, isolated so each pins its own bit position.
+        h.flags = 0b01;
+        assert!(h.is_embedded() && !h.cannot_be_used_independently());
+        h.flags = 0b10;
+        assert!(!h.is_embedded() && h.cannot_be_used_independently());
+
+        // Device-attributes bits 0–3, isolated one at a time.
+        h.attributes = 0b0001;
+        assert!(h.is_transparency());
+        assert!(!h.is_matte() && !h.is_negative_polarity() && !h.is_black_and_white());
+        h.attributes = 0b0010;
+        assert!(h.is_matte() && !h.is_transparency());
+        h.attributes = 0b0100;
+        assert!(h.is_negative_polarity() && !h.is_matte());
+        h.attributes = 0b1000;
+        assert!(h.is_black_and_white() && !h.is_negative_polarity());
+        h.attributes = 0;
+        assert!(
+            !h.is_transparency()
+                && !h.is_matte()
+                && !h.is_negative_polarity()
+                && !h.is_black_and_white()
+        );
     }
 
     #[test]
