@@ -78,7 +78,8 @@ pub(crate) fn decode_profile_sequence_desc(element: &[u8]) -> Result<ProfileSequ
     Ok(ProfileSequenceDesc { entries })
 }
 
-/// Decodes the embedded description at the reader's current position and advances past it.
+/// Decodes the embedded description at the reader's current position and advances past it, including
+/// the 4-byte alignment padding writers place between descriptions.
 fn decode_next_description(element: &[u8], r: &mut ByteReader) -> Result<DescriptionText> {
     let rest = element
         .get(r.pos()..)
@@ -87,17 +88,26 @@ fn decode_next_description(element: &[u8], r: &mut ByteReader) -> Result<Descrip
     let slice = rest
         .get(..len)
         .ok_or(Error::InvalidInput("icc: pseq description out of bounds"))?;
-    let desc = match &first_four(slice)? {
-        b"mluc" => DescriptionText::Mluc(decode_mluc(slice)?),
-        b"desc" => DescriptionText::TextDescription(decode_text_description(slice)?),
-        _ => {
-            return Err(Error::InvalidInput(
-                "icc: pseq description is not mluc/desc",
-            ));
-        }
-    };
-    r.skip(len)?;
+    let desc = decode_embedded_description(slice)?;
+    // Descriptions are padded to a 4-byte boundary; advance past the padding, but never beyond the
+    // element (a writer may leave the final description unpadded).
+    r.skip(len.next_multiple_of(4).min(rest.len()))?;
     Ok(desc)
+}
+
+/// Decodes an embedded description in either the v4 `multiLocalizedUnicodeType` or the v2
+/// `textDescriptionType` form (both appear in `pseq`/`psid` depending on the source profile version;
+/// trailing bytes beyond the description are ignored).
+fn decode_embedded_description(bytes: &[u8]) -> Result<DescriptionText> {
+    match &first_four(bytes)? {
+        b"mluc" => Ok(DescriptionText::Mluc(decode_mluc(bytes)?)),
+        b"desc" => Ok(DescriptionText::TextDescription(decode_text_description(
+            bytes,
+        )?)),
+        _ => Err(Error::InvalidInput(
+            "icc: embedded description is not mluc/desc",
+        )),
+    }
 }
 
 /// The serialized length of the embedded description (mluc or textDescription) at `bytes`.
@@ -106,7 +116,7 @@ fn description_len(bytes: &[u8]) -> Result<usize> {
         b"mluc" => mluc_len(bytes),
         b"desc" => text_description_len(bytes),
         _ => Err(Error::InvalidInput(
-            "icc: pseq description is not mluc/desc",
+            "icc: embedded description is not mluc/desc",
         )),
     }
 }
@@ -134,24 +144,27 @@ pub(crate) fn encode_profile_sequence_desc(pseq: &ProfileSequenceDesc, out: &mut
     }
 }
 
-/// Serializes an embedded description in its original mluc/textDescription form.
+/// Serializes an embedded description in its original mluc/textDescription form, padded to a 4-byte
+/// boundary (as reference writers align the descriptions embedded in `pseq`).
 fn encode_description(desc: &DescriptionText, out: &mut Vec<u8>) {
     match desc {
         DescriptionText::Mluc(mluc) => encode_mluc(mluc, out),
         DescriptionText::TextDescription(text) => encode_text_description(text, out),
     }
+    pad_to_4(out);
 }
 
 // ---- profileSequenceIdentifierType (§10.20) --------------------------------------------------
 
 /// One entry of a [`ProfileSequenceIdentifier`] (§10.20 Table 72): a component profile's ID and its
-/// description (always a `multiLocalizedUnicodeType`, per §10.20.3).
+/// description. §10.20.3 specifies a `multiLocalizedUnicodeType`, but v2-era writers embed a
+/// `textDescriptionType`, so both forms are accepted (as in `pseq`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileIdentifier {
     /// The component profile's ID (its header profile ID, or a computed/zero ID).
     pub profile_id: ProfileId,
     /// The component profile's description.
-    pub description: Mluc,
+    pub description: DescriptionText,
 }
 
 /// A `profileSequenceIdentifierType` element (§10.20): identifiers for the profiles used in a
@@ -202,7 +215,7 @@ pub(crate) fn decode_profile_sequence_identifier(
             .ok_or(Error::InvalidInput("icc: psid structure out of bounds"))?;
         let mut id = [0u8; PROFILE_ID_LEN];
         id.copy_from_slice(&structure[..PROFILE_ID_LEN]);
-        let description = decode_mluc(&structure[PROFILE_ID_LEN..])?;
+        let description = decode_embedded_description(&structure[PROFILE_ID_LEN..])?;
         entries.push(ProfileIdentifier {
             profile_id: ProfileId(id),
             description,
@@ -230,7 +243,7 @@ pub(crate) fn encode_profile_sequence_identifier(
         let offset = (structures_start + structures.len()) as u32;
         let start = structures.len();
         structures.extend_from_slice(&entry.profile_id.0);
-        encode_mluc(&entry.description, &mut structures);
+        encode_description(&entry.description, &mut structures);
         let size = (structures.len() - start) as u32;
         table.push((offset, size));
     }
@@ -438,13 +451,17 @@ mod tests {
     fn profile_sequence_identifier_round_trips_through_encode() {
         let psid = ProfileSequenceIdentifier {
             entries: vec![
+                // Mix the two description forms so both round-trip through psid.
                 ProfileIdentifier {
                     profile_id: ProfileId([1; 16]),
-                    description: en_us("First"),
+                    description: DescriptionText::Mluc(en_us("First")),
                 },
                 ProfileIdentifier {
                     profile_id: ProfileId([2; 16]),
-                    description: en_us("Second"),
+                    description: DescriptionText::TextDescription(TextDescription {
+                        ascii: "Second".to_owned(),
+                        ..TextDescription::default()
+                    }),
                 },
             ],
         };

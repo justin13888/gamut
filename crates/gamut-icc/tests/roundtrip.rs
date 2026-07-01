@@ -102,19 +102,26 @@ fn lcms_accepts_our_serialization() {
     }
 }
 
-/// An unmodelled tag (here the `chrm` chromaticityType in a matrix profile) is re-emitted
-/// byte-for-byte through a round-trip.
+/// An unmodelled tag (here a `multiProcessElementsType` element, which is out of scope) is
+/// re-emitted byte-for-byte through a round-trip.
 #[test]
 fn raw_tags_round_trip_byte_exact() {
-    let bytes = lcms2_oracle::rgb_matrix_shaper(D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]).to_bytes();
-    let parsed = IccProfile::parse(&bytes).unwrap();
-    let raw = |profile: &IccProfile| match profile.get(Signature(*b"chrm")) {
-        Some(TagData::Raw { bytes, .. }) => bytes.clone(),
-        other => panic!("expected a Raw chrm tag, got {other:?}"),
-    };
-    let before = raw(&parsed);
-    let after = raw(&IccProfile::parse(&parsed.to_bytes()).unwrap());
-    assert_eq!(before, after);
+    // Start from a real profile, then inject an element of a type gamut-icc does not decode.
+    let mut parsed = IccProfile::parse(&lcms2_oracle::srgb().to_bytes()).unwrap();
+    let element = b"mpet\x00\x00\x00\x00opaque multiProcessElements payload".to_vec();
+    parsed.tags.push((
+        Signature(*b"mpet"),
+        TagData::Raw {
+            type_sig: Signature(*b"mpet"),
+            bytes: element.clone(),
+        },
+    ));
+
+    let reparsed = IccProfile::parse(&parsed.to_bytes()).unwrap();
+    match reparsed.get(Signature(*b"mpet")) {
+        Some(TagData::Raw { bytes, .. }) => assert_eq!(*bytes, element),
+        other => panic!("expected a Raw mpet tag, got {other:?}"),
+    }
 }
 
 /// `IccWriter::recompute_profile_id` stamps a non-zero, self-consistent MD5 ID into the output.

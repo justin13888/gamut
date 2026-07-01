@@ -608,7 +608,7 @@ mod tests {
             TagData::ProfileSequenceIdentifier(ProfileSequenceIdentifier {
                 entries: vec![crate::sequence::ProfileIdentifier {
                     profile_id: crate::header::ProfileId([7; 16]),
-                    description: Mluc::default(),
+                    description: crate::sequence::DescriptionText::Mluc(Mluc::default()),
                 }],
             }),
             TagData::ResponseCurveSet16(ResponseCurveSet16 {
