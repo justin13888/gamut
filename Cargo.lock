@@ -681,7 +681,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-icc"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "gamut-core",
  "lcms2-oracle",
