@@ -82,6 +82,14 @@ pub struct XyzNumber {
 }
 
 impl XyzNumber {
+    /// The D50 illuminant at the exact raw encoding the header mandates for the PCS illuminant
+    /// (ICC.1:2022 §7.2.16): `(0x0000_F6D6, 0x0001_0000, 0x0000_D32D)` ≈ (0.9642, 1.0, 0.8249).
+    pub const D50: XyzNumber = XyzNumber {
+        x: S15Fixed16(0x0000_F6D6),
+        y: S15Fixed16(0x0001_0000),
+        z: S15Fixed16(0x0000_D32D),
+    };
+
     /// `[X, Y, Z]` as `f64` — the bridge to floating-point colour math.
     #[must_use]
     pub fn to_f64(self) -> [f64; 3] {

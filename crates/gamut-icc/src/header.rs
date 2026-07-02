@@ -60,6 +60,41 @@ pub struct ProfileHeader {
 }
 
 impl ProfileHeader {
+    /// A header with spec-valid defaults for a newly built profile: version 4.4.0, an XYZ PCS, the
+    /// perceptual rendering intent, the mandated D50 PCS illuminant (§7.2.16), and every
+    /// open-registry field unset ([`Signature::ZERO`] / zero).
+    ///
+    /// The writer computes the `size` field and emits the `acsp` magic itself, so
+    /// `ProfileHeader::new` plus [`crate::IccProfile::to_bytes`] yields spec-valid bytes with no
+    /// further setup. Special cases — a DeviceLink's device-space PCS, a v2 target, a creation
+    /// timestamp — adjust the public fields directly.
+    #[must_use]
+    pub fn new(device_class: DeviceClass, data_color_space: ColorSpace) -> Self {
+        Self {
+            size: 0,
+            preferred_cmm: Signature::ZERO,
+            version: ProfileVersion {
+                major: 4,
+                minor: 4,
+                bugfix: 0,
+            },
+            device_class,
+            data_color_space,
+            pcs: ColorSpace::Xyz,
+            created: DateTime::ZERO,
+            platform: Signature::ZERO,
+            flags: 0,
+            manufacturer: Signature::ZERO,
+            model: Signature::ZERO,
+            attributes: 0,
+            rendering_intent: RenderingIntent::Perceptual,
+            pcs_illuminant: XyzNumber::D50,
+            creator: Signature::ZERO,
+            profile_id: ProfileId::ZERO,
+            reserved: [0; 28],
+        }
+    }
+
     /// Parses the 128-byte header from the start of an ICC profile.
     ///
     /// # Errors

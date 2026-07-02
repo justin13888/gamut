@@ -4,7 +4,10 @@
 //! accept gamut-icc's serialization as an equivalent profile — the conformance gate the crate
 //! documents. The corpus is synthesized by lcms in memory (no committed binary fixtures).
 
-use gamut_icc::{IccProfile, IccWriter, ProfileId, Signature, TagData};
+use gamut_icc::{
+    ColorSpace, DeviceClass, IccProfile, IccReader, IccWriter, ProfileHeader, ProfileId, Signature,
+    TagData, XyzNumber,
+};
 
 const D65: [f64; 2] = [0.3127, 0.3290];
 const REC709_PRIMARIES: [[f64; 2]; 3] = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]];
@@ -129,6 +132,26 @@ fn raw_tags_round_trip_byte_exact() {
         Some(TagData::Raw { bytes, .. }) => assert_eq!(*bytes, element),
         other => panic!("expected a Raw mpet tag, got {other:?}"),
     }
+}
+
+/// A profile built from scratch — `ProfileHeader::new` plus a white-point tag — serializes to
+/// spec-valid bytes that a *strict* re-parse accepts and decodes to the same model.
+#[test]
+fn from_scratch_profile_round_trips_strictly() {
+    let profile = IccProfile {
+        header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
+        tags: vec![(Signature(*b"wtpt"), TagData::Xyz(vec![XyzNumber::D50]))],
+    };
+    let bytes = profile.to_bytes().expect("a fresh header must serialize");
+    let reparsed = IccReader::new()
+        .strict(true)
+        .parse(&bytes)
+        .expect("strict parse of a from-scratch profile");
+
+    assert_eq!(reparsed.tags, profile.tags);
+    let mut expected = profile.header.clone();
+    expected.size = u32::try_from(bytes.len()).unwrap(); // the writer patches the size field
+    assert_eq!(reparsed.header, expected);
 }
 
 /// A hand-built duplicate tag signature is rejected on write, mirroring the parser's §7.3 check —

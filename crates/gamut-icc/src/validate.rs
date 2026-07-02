@@ -213,35 +213,14 @@ impl IccProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::header::{ProfileHeader, ProfileId, ProfileVersion, RenderingIntent};
-    use crate::primitives::{DateTime, XyzNumber};
+    use crate::header::ProfileHeader;
     use crate::tag_types::TagData;
 
     /// A header for `class`/`data` space with otherwise-neutral fields.
     fn header(class: DeviceClass, data: ColorSpace, pcs: ColorSpace) -> ProfileHeader {
-        ProfileHeader {
-            size: 0,
-            preferred_cmm: Signature::ZERO,
-            version: ProfileVersion {
-                major: 4,
-                minor: 4,
-                bugfix: 0,
-            },
-            device_class: class,
-            data_color_space: data,
-            pcs,
-            created: DateTime::ZERO,
-            platform: Signature::ZERO,
-            flags: 0,
-            manufacturer: Signature::ZERO,
-            model: Signature::ZERO,
-            attributes: 0,
-            rendering_intent: RenderingIntent::Perceptual,
-            pcs_illuminant: XyzNumber::from_f64([0.9642, 1.0, 0.8249]),
-            creator: Signature::ZERO,
-            profile_id: ProfileId::ZERO,
-            reserved: [0; 28],
-        }
+        let mut h = ProfileHeader::new(class, data);
+        h.pcs = pcs;
+        h
     }
 
     /// A profile of `class`/`data`→`pcs` carrying (empty) tags for each of `tags`.
