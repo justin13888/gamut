@@ -43,25 +43,24 @@
 #![forbid(unsafe_code)]
 
 mod bytes;
-
-pub mod cicp;
-pub mod colorant;
-pub mod curve;
-pub mod data;
-pub mod dict;
-pub mod header;
-pub mod lut;
-pub mod measurement;
-pub mod mluc;
-pub mod named_color;
-pub mod primitives;
-pub mod profile;
-pub mod reader;
-pub mod sequence;
-pub mod tag_types;
-pub mod tags;
-pub mod validate;
-pub mod writer;
+mod cicp;
+mod colorant;
+mod curve;
+mod data;
+mod dict;
+mod header;
+mod lut;
+mod measurement;
+mod mluc;
+mod named_color;
+mod primitives;
+mod profile;
+mod reader;
+mod sequence;
+mod tag_types;
+mod tags;
+mod validate;
+mod writer;
 
 pub use cicp::Cicp;
 pub use colorant::{Colorant, ColorantOrder, ColorantTable};
