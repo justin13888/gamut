@@ -4,7 +4,7 @@
 //! accept gamut-icc's serialization as an equivalent profile — the conformance gate the crate
 //! documents. The corpus is synthesized by lcms in memory (no committed binary fixtures).
 
-use gamut_icc::{IccProfile, IccWriter, Signature, TagData};
+use gamut_icc::{IccProfile, IccWriter, ProfileId, Signature, TagData};
 
 const D65: [f64; 2] = [0.3127, 0.3290];
 const REC709_PRIMARIES: [[f64; 2]; 3] = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]];
@@ -132,5 +132,5 @@ fn writer_recomputes_profile_id() {
 
     let stamped: [u8; 16] = out[84..100].try_into().unwrap();
     assert_ne!(stamped, [0u8; 16], "the ID should be set");
-    assert_eq!(stamped, IccProfile::compute_profile_id(&out).0);
+    assert_eq!(stamped, ProfileId::compute(&out).0);
 }

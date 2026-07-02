@@ -3,7 +3,7 @@
 //! `.icc` fixtures are committed; gamut-icc decodes the same bytes and the decoded values are
 //! asserted equal to what lcms2 reports.
 
-use gamut_icc::{IccProfile, KnownTag, ProfileHeader, S15Fixed16, Signature, TagData};
+use gamut_icc::{IccProfile, KnownTag, ProfileHeader, ProfileId, S15Fixed16, Signature, TagData};
 use lcms2_oracle::tag;
 
 /// The Rec.709/sRGB primaries and D65 white point, for synthesizing matrix/TRC profiles.
@@ -351,7 +351,7 @@ fn profile_id_matches_lcms() {
     let profile = lcms2_oracle::srgb();
     let id_lcms = profile.compute_md5_id(); // lcms computes and stores the ID
     let bytes = profile.to_bytes(); // serialization now carries that ID in the header
-    let id_ours = IccProfile::compute_profile_id(&bytes);
+    let id_ours = ProfileId::compute(&bytes);
     assert_eq!(id_ours.0, id_lcms);
 }
 

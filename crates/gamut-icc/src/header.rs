@@ -1,6 +1,7 @@
 //! The 128-byte ICC profile header (ICC.1:2022 §7.2).
 
 use gamut_core::{Error, Result};
+use md5::{Digest, Md5};
 
 use crate::bytes::{ByteReader, push_date_time, push_xyz_number};
 use crate::primitives::{DateTime, Signature, XyzNumber};
@@ -216,6 +217,13 @@ impl ProfileVersion {
     }
 }
 
+impl core::fmt::Display for ProfileVersion {
+    /// `major.minor.bugfix`, e.g. `4.4.0`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.bugfix)
+    }
+}
+
 /// The profile/device class (ICC.1:2022 §7.2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceClass {
@@ -422,6 +430,30 @@ impl ProfileId {
     pub fn is_zero(self) -> bool {
         self.0 == [0; 16]
     }
+
+    /// Computes the profile ID (ICC.1:2022 §7.2.18): the MD5 of a fully serialized profile with
+    /// the profile-flags (bytes 44–47), rendering-intent (64–67) and profile-ID (84–99) fields
+    /// zeroed first, as the spec requires.
+    #[must_use]
+    pub fn compute(profile_bytes: &[u8]) -> ProfileId {
+        let mut buf = profile_bytes.to_vec();
+        for range in [44..48usize, 64..68, 84..100] {
+            if let Some(field) = buf.get_mut(range) {
+                field.fill(0);
+            }
+        }
+        ProfileId(Md5::digest(&buf).into())
+    }
+}
+
+impl core::fmt::Display for ProfileId {
+    /// The 16 ID bytes as 32 lowercase hex digits.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -598,6 +630,43 @@ mod tests {
         let mut id = ProfileId::ZERO;
         id.0[7] = 1;
         assert!(!id.is_zero());
+    }
+
+    #[test]
+    fn profile_id_excludes_the_zeroed_fields() {
+        let mut base = sample_header();
+        base.extend_from_slice(&0u32.to_be_bytes()); // an empty tag table completes the profile
+        let id = ProfileId::compute(&base);
+
+        // The flags (44), rendering-intent (64) and profile-ID (84–99) regions are zeroed first,
+        // so changing a byte in any of them leaves the ID unchanged.
+        for offset in [44usize, 64, 90] {
+            let mut poked = base.clone();
+            poked[offset] = 0xFF;
+            assert_eq!(
+                ProfileId::compute(&poked),
+                id,
+                "offset {offset} should be excluded from the ID"
+            );
+        }
+        // A byte outside those regions does change the ID.
+        let mut other = base.clone();
+        other[40] = 0xFF; // primary platform
+        assert_ne!(ProfileId::compute(&other), id);
+    }
+
+    #[test]
+    fn display_renders_version_and_id() {
+        let version = ProfileVersion {
+            major: 4,
+            minor: 4,
+            bugfix: 0,
+        };
+        assert_eq!(version.to_string(), "4.4.0");
+        let mut id = ProfileId::ZERO;
+        id.0[0] = 0xAB;
+        id.0[15] = 0x01;
+        assert_eq!(id.to_string(), "ab000000000000000000000000000001");
     }
 
     #[test]

@@ -1,9 +1,8 @@
 //! The parsed ICC profile: its header and decoded tags.
 
 use gamut_core::{Error, Result};
-use md5::{Digest, Md5};
 
-use crate::header::{ProfileHeader, ProfileId};
+use crate::header::ProfileHeader;
 use crate::primitives::Signature;
 use crate::tag_types::{TagData, decode_tag};
 use crate::tags::{parse_tag_table, tag_table_end};
@@ -82,20 +81,6 @@ impl IccProfile {
             .find(|(s, _)| *s == signature)
             .map(|(_, data)| data)
     }
-
-    /// Computes the profile ID (ICC.1:2022 §7.2.18): the MD5 of a fully serialized profile with the
-    /// profile-flags (bytes 44–47), rendering-intent (64–67) and profile-ID (84–99) fields zeroed
-    /// first, as the spec requires.
-    #[must_use]
-    pub fn compute_profile_id(profile_bytes: &[u8]) -> ProfileId {
-        let mut buf = profile_bytes.to_vec();
-        for range in [44..48usize, 64..68, 84..100] {
-            if let Some(field) = buf.get_mut(range) {
-                field.fill(0);
-            }
-        }
-        ProfileId(Md5::digest(&buf).into())
-    }
 }
 
 #[cfg(test)]
@@ -159,29 +144,6 @@ mod tests {
         b.extend_from_slice(&0u32.to_be_bytes()); // zero tags
         let profile = IccProfile::parse(&b).unwrap();
         assert!(profile.tags.is_empty());
-    }
-
-    #[test]
-    fn profile_id_excludes_the_zeroed_fields() {
-        let mut base = header();
-        base.extend_from_slice(&0u32.to_be_bytes()); // empty tag table → 132 bytes
-        let id = IccProfile::compute_profile_id(&base);
-
-        // The flags (44), rendering-intent (64) and profile-ID (84–99) regions are zeroed first, so
-        // changing a byte in any of them leaves the ID unchanged.
-        for offset in [44usize, 64, 90] {
-            let mut poked = base.clone();
-            poked[offset] = 0xFF;
-            assert_eq!(
-                IccProfile::compute_profile_id(&poked),
-                id,
-                "offset {offset} should be excluded from the ID"
-            );
-        }
-        // A byte outside those regions does change the ID.
-        let mut other = base.clone();
-        other[40] = 0xFF; // primary platform
-        assert_ne!(IccProfile::compute_profile_id(&other), id);
     }
 
     #[test]

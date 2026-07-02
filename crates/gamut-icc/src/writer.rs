@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use crate::bytes::pad_to_4;
+use crate::header::ProfileId;
 use crate::primitives::Signature;
 use crate::profile::IccProfile;
 use crate::tag_types::encode_tag;
@@ -89,7 +90,7 @@ pub(crate) fn write_profile(profile: &IccProfile, recompute_id: bool) -> Vec<u8>
     let total = out.len() as u32;
     out[0..4].copy_from_slice(&total.to_be_bytes());
     if recompute_id {
-        let id = IccProfile::compute_profile_id(&out);
+        let id = ProfileId::compute(&out);
         out[84..100].copy_from_slice(&id.0);
     }
     out
