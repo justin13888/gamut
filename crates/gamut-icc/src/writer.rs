@@ -1,6 +1,8 @@
 //! The ICC profile writer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use gamut_core::{Error, Result};
 
 use crate::bytes::pad_to_4;
 use crate::header::ProfileId;
@@ -34,8 +36,13 @@ impl IccWriter {
     }
 
     /// Serializes `profile` to a fresh, spec-valid byte vector.
-    #[must_use]
-    pub fn write(&self, profile: &IccProfile) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the model violates an invariant serialization relies on
+    /// — a duplicate tag signature, or tag data whose shape contradicts its declared counts (see
+    /// [`IccProfile::to_bytes`]). A profile produced by parsing always serializes.
+    pub fn write(&self, profile: &IccProfile) -> Result<Vec<u8>> {
         write_profile(profile, self.recompute_profile_id)
     }
 }
@@ -43,17 +50,21 @@ impl IccWriter {
 /// Two-pass serialization (ICC.1:2022 §7): encode each element, lay out the header, the tag table,
 /// and the 4-byte-aligned element data (sharing byte-identical elements), then patch the size and
 /// optionally the profile ID.
-pub(crate) fn write_profile(profile: &IccProfile, recompute_id: bool) -> Vec<u8> {
+pub(crate) fn write_profile(profile: &IccProfile, recompute_id: bool) -> Result<Vec<u8>> {
+    // The parser rejects duplicate tag signatures (§7.3), so serializing them would produce a
+    // profile that cannot be re-read; catch the hand-built case here.
+    let mut seen_sigs = HashSet::with_capacity(profile.tags.len());
+    if !profile.tags.iter().all(|(sig, _)| seen_sigs.insert(sig.0)) {
+        return Err(Error::InvalidInput("icc: duplicate tag signature"));
+    }
+
     // Pass 1: encode every tag element.
-    let elements: Vec<(Signature, Vec<u8>)> = profile
-        .tags
-        .iter()
-        .map(|(sig, data)| {
-            let mut bytes = Vec::new();
-            encode_tag(data, &mut bytes);
-            (*sig, bytes)
-        })
-        .collect();
+    let mut elements: Vec<(Signature, Vec<u8>)> = Vec::with_capacity(profile.tags.len());
+    for (sig, data) in &profile.tags {
+        let mut bytes = Vec::new();
+        encode_tag(data, &mut bytes)?;
+        elements.push((*sig, bytes));
+    }
 
     // Pass 2: place element data after the header and tag table, 4-byte aligned, de-duplicating
     // byte-identical elements (as real writers share e.g. the three `*TRC` curves).
@@ -93,5 +104,5 @@ pub(crate) fn write_profile(profile: &IccProfile, recompute_id: bool) -> Vec<u8>
         let id = ProfileId::compute(&out);
         out[84..100].copy_from_slice(&id.0);
     }
-    out
+    Ok(out)
 }

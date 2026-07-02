@@ -228,11 +228,25 @@ pub(crate) fn encode_mluc(mluc: &Mluc, out: &mut Vec<u8>) {
 }
 
 /// Writes a `textDescriptionType` element — the inverse of [`decode_text_description`].
-pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>) {
+///
+/// Rejects a non-ASCII or interior-NUL `ascii` field (the decoder requires 7-bit ASCII and stops
+/// at the first NUL) and a Macintosh ScriptCode form longer than its fixed 67-byte buffer, rather
+/// than truncating either.
+pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>) -> Result<()> {
+    let ascii = desc.ascii.as_bytes();
+    if !desc.ascii.is_ascii() || ascii.contains(&0) {
+        return Err(Error::InvalidInput(
+            "icc: textDescription ASCII form must be NUL-free ASCII",
+        ));
+    }
+    if desc.macintosh.len() > 67 {
+        return Err(Error::InvalidInput(
+            "icc: textDescription ScriptCode form exceeds its 67-byte field",
+        ));
+    }
     out.extend_from_slice(b"desc");
     out.extend_from_slice(&[0; 4]);
 
-    let ascii = desc.ascii.as_bytes();
     out.extend_from_slice(&((ascii.len() + 1) as u32).to_be_bytes());
     out.extend_from_slice(ascii);
     out.push(0); // ASCII NUL terminator
@@ -252,11 +266,11 @@ pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>)
     }
 
     out.extend_from_slice(&desc.script_code.to_be_bytes());
-    out.push(desc.macintosh.len().min(67) as u8);
+    out.push(desc.macintosh.len() as u8);
     let mut mac = [0u8; 67];
-    let n = desc.macintosh.len().min(67);
-    mac[..n].copy_from_slice(&desc.macintosh[..n]);
+    mac[..desc.macintosh.len()].copy_from_slice(&desc.macintosh);
     out.extend_from_slice(&mac);
+    Ok(())
 }
 
 /// Decodes UTF-16BE bytes into a `String`, trimming any trailing NUL terminators.
@@ -428,10 +442,39 @@ mod tests {
             macintosh: Vec::new(),
         };
         let mut bytes = Vec::new();
-        encode_text_description(&desc, &mut bytes);
+        encode_text_description(&desc, &mut bytes).unwrap();
         let encoded_len = bytes.len();
         bytes.extend_from_slice(&[0xAB; 8]);
         assert_eq!(text_description_len(&bytes).unwrap(), encoded_len);
+    }
+
+    #[test]
+    fn encode_text_description_validates_its_fixed_fields() {
+        let mut out = Vec::new();
+        // The ASCII form must survive the decoder's 7-bit check and NUL scan.
+        let non_ascii = TextDescription {
+            ascii: "Größe".to_owned(),
+            ..TextDescription::default()
+        };
+        assert!(encode_text_description(&non_ascii, &mut out).is_err());
+        let interior_nul = TextDescription {
+            ascii: "a\0b".to_owned(),
+            ..TextDescription::default()
+        };
+        assert!(encode_text_description(&interior_nul, &mut out).is_err());
+        // The ScriptCode buffer is a fixed 67 bytes; a longer form must error, not truncate.
+        let long_mac = TextDescription {
+            macintosh: vec![1; 68],
+            ..TextDescription::default()
+        };
+        assert!(encode_text_description(&long_mac, &mut out).is_err());
+        let max_mac = TextDescription {
+            macintosh: vec![1; 67],
+            ..TextDescription::default()
+        };
+        let mut out = Vec::new();
+        encode_text_description(&max_mac, &mut out).unwrap();
+        assert_eq!(decode_text_description(&out).unwrap(), max_mac);
     }
 
     #[test]
@@ -445,7 +488,7 @@ mod tests {
             macintosh: vec![1, 2, 3],
         };
         let mut out = Vec::new();
-        encode_text_description(&desc, &mut out);
+        encode_text_description(&desc, &mut out).unwrap();
         assert_eq!(decode_text_description(&out).unwrap(), desc);
     }
 }

@@ -386,7 +386,25 @@ fn read_u16_vec(r: &mut ByteReader<'_>, count: usize) -> Result<Vec<u16>> {
 }
 
 /// Writes a `lut8Type` element — the inverse of [`decode_lut8`].
-pub(crate) fn encode_lut8(lut: &Lut8, out: &mut Vec<u8>) {
+///
+/// Rejects table or CLUT vectors whose lengths disagree with the declared channel counts and grid
+/// (the decoder sizes everything from those counts, so a mismatch would re-decode shifted).
+pub(crate) fn encode_lut8(lut: &Lut8, out: &mut Vec<u8>) -> Result<()> {
+    if lut.input_table.len() != table_len(lut.input_channels, 256)? {
+        return Err(Error::InvalidInput(
+            "icc: lut8 input-table length does not match its channel count",
+        ));
+    }
+    if lut.clut.len() != clut_len(lut.grid_points, lut.input_channels, lut.output_channels)? {
+        return Err(Error::InvalidInput(
+            "icc: lut8 CLUT length does not match its grid and channels",
+        ));
+    }
+    if lut.output_table.len() != table_len(lut.output_channels, 256)? {
+        return Err(Error::InvalidInput(
+            "icc: lut8 output-table length does not match its channel count",
+        ));
+    }
     out.extend_from_slice(b"mft1");
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&[lut.input_channels, lut.output_channels, lut.grid_points, 0]);
@@ -394,10 +412,29 @@ pub(crate) fn encode_lut8(lut: &Lut8, out: &mut Vec<u8>) {
     out.extend_from_slice(&lut.input_table);
     out.extend_from_slice(&lut.clut);
     out.extend_from_slice(&lut.output_table);
+    Ok(())
 }
 
 /// Writes a `lut16Type` element — the inverse of [`decode_lut16`].
-pub(crate) fn encode_lut16(lut: &Lut16, out: &mut Vec<u8>) {
+///
+/// Rejects table or CLUT vectors whose lengths disagree with the declared channel counts, table
+/// entry counts, and grid.
+pub(crate) fn encode_lut16(lut: &Lut16, out: &mut Vec<u8>) -> Result<()> {
+    if lut.input_table.len() != table_len(lut.input_channels, lut.input_table_entries.into())? {
+        return Err(Error::InvalidInput(
+            "icc: lut16 input-table length does not match its channels and entry count",
+        ));
+    }
+    if lut.clut.len() != clut_len(lut.grid_points, lut.input_channels, lut.output_channels)? {
+        return Err(Error::InvalidInput(
+            "icc: lut16 CLUT length does not match its grid and channels",
+        ));
+    }
+    if lut.output_table.len() != table_len(lut.output_channels, lut.output_table_entries.into())? {
+        return Err(Error::InvalidInput(
+            "icc: lut16 output-table length does not match its channels and entry count",
+        ));
+    }
     out.extend_from_slice(b"mft2");
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&[lut.input_channels, lut.output_channels, lut.grid_points, 0]);
@@ -407,19 +444,39 @@ pub(crate) fn encode_lut16(lut: &Lut16, out: &mut Vec<u8>) {
     write_u16_slice(&lut.input_table, out);
     write_u16_slice(&lut.clut, out);
     write_u16_slice(&lut.output_table, out);
+    Ok(())
 }
 
 /// Writes a `lutAToBType` element — the inverse of [`decode_lut_a_to_b`].
-pub(crate) fn encode_lut_a_to_b(lut: &LutAToB, out: &mut Vec<u8>) {
+///
+/// Rejects curve sets and a CLUT whose shapes disagree with the declared channel counts
+/// (§10.12: A-curves and the CLUT grid follow the input channels; M- and B-curves the output).
+pub(crate) fn encode_lut_a_to_b(lut: &LutAToB, out: &mut Vec<u8>) -> Result<()> {
+    check_curve_count(
+        &lut.b_curves,
+        lut.output_channels,
+        "icc: lutAToB B-curve count does not match its output channels",
+    )?;
+    check_optional_curve_count(
+        lut.m_curves.as_ref(),
+        lut.output_channels,
+        "icc: lutAToB M-curve count does not match its output channels",
+    )?;
+    check_optional_curve_count(
+        lut.a_curves.as_ref(),
+        lut.input_channels,
+        "icc: lutAToB A-curve count does not match its input channels",
+    )?;
+    check_clut_channels(lut.clut.as_ref(), lut.input_channels, lut.output_channels)?;
     let mut body = Vec::new();
     let off_b = stage_offset(&body);
     for curve in &lut.b_curves {
-        write_curve_element(curve, &mut body);
+        write_curve_element(curve, &mut body)?;
     }
     let off_matrix = write_optional_matrix(lut.matrix.as_ref(), &mut body);
-    let off_m = write_optional_curves(lut.m_curves.as_ref(), &mut body);
-    let off_clut = write_optional_clut(lut.clut.as_ref(), &mut body);
-    let off_a = write_optional_curves(lut.a_curves.as_ref(), &mut body);
+    let off_m = write_optional_curves(lut.m_curves.as_ref(), &mut body)?;
+    let off_clut = write_optional_clut(lut.clut.as_ref(), &mut body)?;
+    let off_a = write_optional_curves(lut.a_curves.as_ref(), &mut body)?;
     write_mab(
         b"mAB ",
         lut.input_channels,
@@ -428,19 +485,39 @@ pub(crate) fn encode_lut_a_to_b(lut: &LutAToB, out: &mut Vec<u8>) {
         &body,
         out,
     );
+    Ok(())
 }
 
 /// Writes a `lutBToAType` element — the inverse of [`decode_lut_b_to_a`].
-pub(crate) fn encode_lut_b_to_a(lut: &LutBToA, out: &mut Vec<u8>) {
+///
+/// Rejects curve sets and a CLUT whose shapes disagree with the declared channel counts
+/// (§10.13: B- and M-curves and the CLUT grid follow the input channels; A-curves the output).
+pub(crate) fn encode_lut_b_to_a(lut: &LutBToA, out: &mut Vec<u8>) -> Result<()> {
+    check_curve_count(
+        &lut.b_curves,
+        lut.input_channels,
+        "icc: lutBToA B-curve count does not match its input channels",
+    )?;
+    check_optional_curve_count(
+        lut.m_curves.as_ref(),
+        lut.input_channels,
+        "icc: lutBToA M-curve count does not match its input channels",
+    )?;
+    check_optional_curve_count(
+        lut.a_curves.as_ref(),
+        lut.output_channels,
+        "icc: lutBToA A-curve count does not match its output channels",
+    )?;
+    check_clut_channels(lut.clut.as_ref(), lut.input_channels, lut.output_channels)?;
     let mut body = Vec::new();
     let off_b = stage_offset(&body);
     for curve in &lut.b_curves {
-        write_curve_element(curve, &mut body);
+        write_curve_element(curve, &mut body)?;
     }
     let off_matrix = write_optional_matrix(lut.matrix.as_ref(), &mut body);
-    let off_m = write_optional_curves(lut.m_curves.as_ref(), &mut body);
-    let off_clut = write_optional_clut(lut.clut.as_ref(), &mut body);
-    let off_a = write_optional_curves(lut.a_curves.as_ref(), &mut body);
+    let off_m = write_optional_curves(lut.m_curves.as_ref(), &mut body)?;
+    let off_clut = write_optional_clut(lut.clut.as_ref(), &mut body)?;
+    let off_a = write_optional_curves(lut.a_curves.as_ref(), &mut body)?;
     write_mab(
         b"mBA ",
         lut.input_channels,
@@ -449,6 +526,48 @@ pub(crate) fn encode_lut_b_to_a(lut: &LutBToA, out: &mut Vec<u8>) {
         &body,
         out,
     );
+    Ok(())
+}
+
+/// Checks a required curve set against its declared channel count, failing with `mismatch`.
+fn check_curve_count(
+    curves: &[CurveOrParametric],
+    channels: u8,
+    mismatch: &'static str,
+) -> Result<()> {
+    if curves.len() != channels as usize {
+        return Err(Error::InvalidInput(mismatch));
+    }
+    Ok(())
+}
+
+/// Checks an optional curve set against its declared channel count, failing with `mismatch`.
+fn check_optional_curve_count(
+    curves: Option<&Vec<CurveOrParametric>>,
+    channels: u8,
+    mismatch: &'static str,
+) -> Result<()> {
+    match curves {
+        Some(curves) => check_curve_count(curves, channels, mismatch),
+        None => Ok(()),
+    }
+}
+
+/// Checks an optional CLUT's grid dimensionality and output channels against the transform's
+/// declared channel counts (the decoder derives both from the `mAB `/`mBA ` header).
+fn check_clut_channels(clut: Option<&Clut>, input: u8, output: u8) -> Result<()> {
+    let Some(clut) = clut else { return Ok(()) };
+    if clut.grid_points.len() != input as usize {
+        return Err(Error::InvalidInput(
+            "icc: CLUT grid dimensions do not match the transform's input channels",
+        ));
+    }
+    if clut.output_channels != output {
+        return Err(Error::InvalidInput(
+            "icc: CLUT output channels do not match the transform's output channels",
+        ));
+    }
+    Ok(())
 }
 
 /// The byte length of the shared `mAB `/`mBA ` header (type+reserved, channels+reserved, five
@@ -489,21 +608,43 @@ fn write_optional_matrix(matrix: Option<&Matrix3x4>, body: &mut Vec<u8>) -> u32 
     offset
 }
 
-fn write_optional_curves(curves: Option<&Vec<CurveOrParametric>>, body: &mut Vec<u8>) -> u32 {
-    let Some(curves) = curves else { return 0 };
+fn write_optional_curves(
+    curves: Option<&Vec<CurveOrParametric>>,
+    body: &mut Vec<u8>,
+) -> Result<u32> {
+    let Some(curves) = curves else { return Ok(0) };
     let offset = stage_offset(body);
     for curve in curves {
-        write_curve_element(curve, body);
+        write_curve_element(curve, body)?;
     }
-    offset
+    Ok(offset)
 }
 
-fn write_optional_clut(clut: Option<&Clut>, body: &mut Vec<u8>) -> u32 {
-    let Some(clut) = clut else { return 0 };
+/// Writes a CLUT stage, validating the model against the on-disk geometry: at most 16 grid
+/// dimensions (the fixed field size), a sample count of `∏grid_points × output_channels` (what the
+/// decoder will read back), and — for [`ClutPrecision::U8`] — samples that fit in a byte (anything
+/// larger would otherwise truncate silently).
+fn write_optional_clut(clut: Option<&Clut>, body: &mut Vec<u8>) -> Result<u32> {
+    let Some(clut) = clut else { return Ok(0) };
+    if clut.grid_points.len() > 16 {
+        return Err(Error::InvalidInput(
+            "icc: CLUT has more than 16 grid dimensions",
+        ));
+    }
+    let expected = grid_node_count(&clut.grid_points)?
+        .checked_mul(clut.output_channels as usize)
+        .ok_or(Error::InvalidInput("icc: CLUT sample count overflow"))?;
+    if clut.samples.len() != expected {
+        return Err(Error::InvalidInput(
+            "icc: CLUT sample count does not match its grid and output channels",
+        ));
+    }
+    if clut.precision == ClutPrecision::U8 && clut.samples.iter().any(|&s| s > 255) {
+        return Err(Error::InvalidInput("icc: 8-bit CLUT sample exceeds 255"));
+    }
     let offset = stage_offset(body);
     let mut grid = [0u8; 16];
-    let n = clut.grid_points.len().min(16);
-    grid[..n].copy_from_slice(&clut.grid_points[..n]);
+    grid[..clut.grid_points.len()].copy_from_slice(&clut.grid_points);
     body.extend_from_slice(&grid);
     body.push(match clut.precision {
         ClutPrecision::U8 => 1,
@@ -519,7 +660,7 @@ fn write_optional_clut(clut: Option<&Clut>, body: &mut Vec<u8>) -> u32 {
         ClutPrecision::U16 => write_u16_slice(&clut.samples, body),
     }
     pad_to_4(body);
-    offset
+    Ok(offset)
 }
 
 fn write_matrix3x3(matrix: &Matrix3x3, out: &mut Vec<u8>) {
@@ -682,7 +823,7 @@ mod tests {
             output_table: vec![9u8; 256],
         };
         let mut out = Vec::new();
-        encode_lut8(&lut, &mut out);
+        encode_lut8(&lut, &mut out).unwrap();
         assert_eq!(decode_lut8(&out).unwrap(), lut);
     }
 
@@ -702,7 +843,7 @@ mod tests {
             output_table: vec![0u16; 6],
         };
         let mut out = Vec::new();
-        encode_lut16(&lut, &mut out);
+        encode_lut16(&lut, &mut out).unwrap();
         assert_eq!(decode_lut16(&out).unwrap(), lut);
     }
 
@@ -727,7 +868,7 @@ mod tests {
             b_curves: vec![gamma_curve(), gamma_curve(), gamma_curve()],
         };
         let mut out = Vec::new();
-        encode_lut_a_to_b(&lut, &mut out);
+        encode_lut_a_to_b(&lut, &mut out).unwrap();
         assert_eq!(decode_lut_a_to_b(&out).unwrap(), lut);
     }
 
@@ -758,8 +899,201 @@ mod tests {
             a_curves: Some(vec![param(), param(), param(), param()]),
         };
         let mut out = Vec::new();
-        encode_lut_b_to_a(&lut, &mut out);
+        encode_lut_b_to_a(&lut, &mut out).unwrap();
         assert_eq!(decode_lut_b_to_a(&out).unwrap(), lut);
+    }
+
+    /// A structurally valid 1→1 [`Lut8`] the shape-rejection tests perturb one field of.
+    fn valid_lut8() -> Lut8 {
+        Lut8 {
+            input_channels: 1,
+            output_channels: 1,
+            grid_points: 2,
+            matrix: Matrix3x3 {
+                elements: [S15Fixed16(0); 9],
+            },
+            input_table: vec![0u8; 256],
+            clut: vec![0, 1],
+            output_table: vec![0u8; 256],
+        }
+    }
+
+    #[test]
+    fn encode_lut8_rejects_mismatched_table_lengths() {
+        let mut out = Vec::new();
+        let mut bad = valid_lut8();
+        bad.input_table.pop(); // 255 entries for one channel
+        assert!(encode_lut8(&bad, &mut out).is_err());
+
+        let mut bad = valid_lut8();
+        bad.clut.push(9); // 3 samples for a 2-node × 1-output grid
+        assert!(encode_lut8(&bad, &mut out).is_err());
+
+        let mut bad = valid_lut8();
+        bad.output_table.pop();
+        assert!(encode_lut8(&bad, &mut out).is_err());
+    }
+
+    /// A structurally valid 2→3 [`Lut16`] the shape-rejection tests perturb one field of.
+    fn valid_lut16() -> Lut16 {
+        Lut16 {
+            input_channels: 2,
+            output_channels: 3,
+            grid_points: 2,
+            matrix: Matrix3x3 {
+                elements: [S15Fixed16(0); 9],
+            },
+            input_table_entries: 2,
+            output_table_entries: 2,
+            input_table: vec![0u16; 4],
+            clut: (0..12u16).collect(),
+            output_table: vec![0u16; 6],
+        }
+    }
+
+    #[test]
+    fn encode_lut16_rejects_mismatched_table_lengths() {
+        let mut out = Vec::new();
+        let mut bad = valid_lut16();
+        bad.input_table.pop(); // 3 entries for 2 channels × 2 per table
+        assert!(encode_lut16(&bad, &mut out).is_err());
+
+        let mut bad = valid_lut16();
+        bad.clut.pop(); // 11 samples for 2² nodes × 3 outputs
+        assert!(encode_lut16(&bad, &mut out).is_err());
+
+        let mut bad = valid_lut16();
+        bad.output_table.push(0); // 7 entries for 3 channels × 2 per table
+        assert!(encode_lut16(&bad, &mut out).is_err());
+    }
+
+    /// A structurally valid 3→3 [`LutAToB`] with every stage present.
+    fn valid_lut_a_to_b() -> LutAToB {
+        LutAToB {
+            input_channels: 3,
+            output_channels: 3,
+            a_curves: Some(vec![gamma_curve(), gamma_curve(), gamma_curve()]),
+            clut: Some(Clut {
+                grid_points: vec![2, 2, 2],
+                output_channels: 3,
+                precision: ClutPrecision::U16,
+                samples: (0..24u16).collect(),
+            }),
+            m_curves: Some(vec![gamma_curve(), gamma_curve(), gamma_curve()]),
+            matrix: None,
+            b_curves: vec![gamma_curve(), gamma_curve(), gamma_curve()],
+        }
+    }
+
+    #[test]
+    fn encode_lut_a_to_b_rejects_mismatched_curve_counts() {
+        let mut out = Vec::new();
+        let mut bad = valid_lut_a_to_b();
+        bad.b_curves.pop(); // 2 B-curves for 3 output channels
+        assert!(encode_lut_a_to_b(&bad, &mut out).is_err());
+
+        let mut bad = valid_lut_a_to_b();
+        bad.m_curves = Some(vec![gamma_curve()]); // 1 M-curve for 3 output channels
+        assert!(encode_lut_a_to_b(&bad, &mut out).is_err());
+
+        let mut bad = valid_lut_a_to_b();
+        bad.a_curves = Some(vec![gamma_curve()]); // 1 A-curve for 3 input channels
+        assert!(encode_lut_a_to_b(&bad, &mut out).is_err());
+    }
+
+    #[test]
+    fn encode_lut_a_to_b_rejects_mismatched_clut_shape() {
+        let mut out = Vec::new();
+        let mut bad = valid_lut_a_to_b();
+        if let Some(clut) = &mut bad.clut {
+            clut.grid_points = vec![2, 2]; // 2 grid dimensions for 3 input channels
+            clut.samples = (0..12u16).collect(); // internally consistent, wrong dimensionality
+        }
+        assert!(encode_lut_a_to_b(&bad, &mut out).is_err());
+
+        let mut bad = valid_lut_a_to_b();
+        if let Some(clut) = &mut bad.clut {
+            clut.output_channels = 2; // 2 CLUT outputs for 3 transform outputs
+            clut.samples = (0..16u16).collect();
+        }
+        assert!(encode_lut_a_to_b(&bad, &mut out).is_err());
+    }
+
+    #[test]
+    fn encode_lut_b_to_a_rejects_mismatched_curve_counts() {
+        // 3 (PCS) → 4 (device): B- and M-curves follow the input count, A-curves the output count,
+        // so each perturbation below also catches an input/output swap in the checks.
+        let valid = || LutBToA {
+            input_channels: 3,
+            output_channels: 4,
+            b_curves: vec![gamma_curve(), gamma_curve(), gamma_curve()],
+            matrix: None,
+            m_curves: Some(vec![gamma_curve(), gamma_curve(), gamma_curve()]),
+            clut: Some(Clut {
+                grid_points: vec![2, 2, 2],
+                output_channels: 4,
+                precision: ClutPrecision::U16,
+                samples: (0..32u16).collect(),
+            }),
+            a_curves: Some(vec![
+                gamma_curve(),
+                gamma_curve(),
+                gamma_curve(),
+                gamma_curve(),
+            ]),
+        };
+        let mut out = Vec::new();
+        assert!(encode_lut_b_to_a(&valid(), &mut out).is_ok());
+
+        let mut bad = valid();
+        bad.b_curves.push(gamma_curve()); // 4 B-curves for 3 input channels
+        assert!(encode_lut_b_to_a(&bad, &mut out).is_err());
+
+        let mut bad = valid();
+        bad.m_curves = Some(vec![gamma_curve(); 4]); // 4 M-curves for 3 input channels
+        assert!(encode_lut_b_to_a(&bad, &mut out).is_err());
+
+        let mut bad = valid();
+        bad.a_curves = Some(vec![gamma_curve(); 3]); // 3 A-curves for 4 output channels
+        assert!(encode_lut_b_to_a(&bad, &mut out).is_err());
+    }
+
+    #[test]
+    fn write_clut_rejects_bad_geometry_and_overflowing_samples() {
+        // More than 16 grid dimensions cannot fit the fixed field (17 input channels would also
+        // be rejected upstream, but the CLUT check must hold on its own).
+        let mut body = Vec::new();
+        let too_many_dims = Clut {
+            grid_points: vec![1; 17],
+            output_channels: 1,
+            precision: ClutPrecision::U8,
+            samples: vec![0],
+        };
+        assert!(write_optional_clut(Some(&too_many_dims), &mut body).is_err());
+
+        // Sample count disagreeing with the grid geometry.
+        let wrong_count = Clut {
+            grid_points: vec![2, 2],
+            output_channels: 3,
+            precision: ClutPrecision::U16,
+            samples: vec![0; 11], // 2² × 3 = 12 expected
+        };
+        assert!(write_optional_clut(Some(&wrong_count), &mut body).is_err());
+
+        // An 8-bit CLUT sample that does not fit a byte must error, not truncate.
+        let overflowing = Clut {
+            grid_points: vec![2],
+            output_channels: 1,
+            precision: ClutPrecision::U8,
+            samples: vec![255, 256],
+        };
+        assert!(write_optional_clut(Some(&overflowing), &mut body).is_err());
+        // The same samples at 16-bit precision are fine.
+        let sixteen_bit = Clut {
+            precision: ClutPrecision::U16,
+            ..overflowing
+        };
+        assert!(write_optional_clut(Some(&sixteen_bit), &mut body).is_ok());
     }
 
     #[test]
@@ -810,7 +1144,7 @@ mod tests {
             a_curves: None,
         };
         let mut out = Vec::new();
-        encode_lut_b_to_a(&lut, &mut out);
+        encode_lut_b_to_a(&lut, &mut out).unwrap();
         assert_eq!(decode_lut_b_to_a(&out).unwrap(), lut);
     }
 }

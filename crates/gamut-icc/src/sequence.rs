@@ -130,7 +130,10 @@ fn first_four(bytes: &[u8]) -> Result<[u8; 4]> {
 }
 
 /// Serializes a `profileSequenceDescType` element (the inverse of [`decode_profile_sequence_desc`]).
-pub(crate) fn encode_profile_sequence_desc(pseq: &ProfileSequenceDesc, out: &mut Vec<u8>) {
+pub(crate) fn encode_profile_sequence_desc(
+    pseq: &ProfileSequenceDesc,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     out.extend_from_slice(b"pseq");
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&(pseq.entries.len() as u32).to_be_bytes());
@@ -139,19 +142,21 @@ pub(crate) fn encode_profile_sequence_desc(pseq: &ProfileSequenceDesc, out: &mut
         out.extend_from_slice(&entry.device_model.0);
         out.extend_from_slice(&entry.attributes.to_be_bytes());
         out.extend_from_slice(&entry.technology.0);
-        encode_description(&entry.manufacturer_desc, out);
-        encode_description(&entry.model_desc, out);
+        encode_description(&entry.manufacturer_desc, out)?;
+        encode_description(&entry.model_desc, out)?;
     }
+    Ok(())
 }
 
 /// Serializes an embedded description in its original mluc/textDescription form, padded to a 4-byte
 /// boundary (as reference writers align the descriptions embedded in `pseq`).
-fn encode_description(desc: &DescriptionText, out: &mut Vec<u8>) {
+fn encode_description(desc: &DescriptionText, out: &mut Vec<u8>) -> Result<()> {
     match desc {
         DescriptionText::Mluc(mluc) => encode_mluc(mluc, out),
-        DescriptionText::TextDescription(text) => encode_text_description(text, out),
+        DescriptionText::TextDescription(text) => encode_text_description(text, out)?,
     }
     pad_to_4(out);
+    Ok(())
 }
 
 // ---- profileSequenceIdentifierType (§10.20) --------------------------------------------------
@@ -229,7 +234,7 @@ pub(crate) fn decode_profile_sequence_identifier(
 pub(crate) fn encode_profile_sequence_identifier(
     psid: &ProfileSequenceIdentifier,
     out: &mut Vec<u8>,
-) {
+) -> Result<()> {
     out.extend_from_slice(b"psid");
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&(psid.entries.len() as u32).to_be_bytes());
@@ -243,7 +248,7 @@ pub(crate) fn encode_profile_sequence_identifier(
         let offset = (structures_start + structures.len()) as u32;
         let start = structures.len();
         structures.extend_from_slice(&entry.profile_id.0);
-        encode_description(&entry.description, &mut structures);
+        encode_description(&entry.description, &mut structures)?;
         let size = (structures.len() - start) as u32;
         table.push((offset, size));
     }
@@ -252,6 +257,7 @@ pub(crate) fn encode_profile_sequence_identifier(
         out.extend_from_slice(&size.to_be_bytes());
     }
     out.extend_from_slice(&structures);
+    Ok(())
 }
 
 // ---- responseCurveSet16Type (§10.21) ---------------------------------------------------------
@@ -348,7 +354,27 @@ fn decode_response_curve(element: &[u8], offset: usize, n: usize) -> Result<Resp
 }
 
 /// Serializes a `responseCurveSet16Type` element (the inverse of [`decode_response_curve_set16`]).
-pub(crate) fn encode_response_curve_set16(rcs: &ResponseCurveSet16, out: &mut Vec<u8>) {
+///
+/// Every curve's `pcs_values` and `responses` must match the set's channel count — the decoder
+/// sizes both from it, so a mismatch would re-decode shifted — and the measurement-type count must
+/// fit its on-disk `uInt16`.
+pub(crate) fn encode_response_curve_set16(
+    rcs: &ResponseCurveSet16,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    if u16::try_from(rcs.curves.len()).is_err() {
+        return Err(Error::InvalidInput(
+            "icc: rcs2 has more than 65535 measurement types",
+        ));
+    }
+    let n = rcs.channels as usize;
+    for curve in &rcs.curves {
+        if curve.pcs_values.len() != n || curve.responses.len() != n {
+            return Err(Error::InvalidInput(
+                "icc: rcs2 curve shape does not match the channel count",
+            ));
+        }
+    }
     out.extend_from_slice(b"rcs2");
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&rcs.channels.to_be_bytes());
@@ -365,6 +391,7 @@ pub(crate) fn encode_response_curve_set16(rcs: &ResponseCurveSet16, out: &mut Ve
         out.extend_from_slice(&offset.to_be_bytes());
     }
     out.extend_from_slice(&structures);
+    Ok(())
 }
 
 /// Serializes one response curve structure.
@@ -432,7 +459,7 @@ mod tests {
     fn profile_sequence_desc_round_trips_through_encode() {
         let pseq = sample_pseq();
         let mut out = Vec::new();
-        encode_profile_sequence_desc(&pseq, &mut out);
+        encode_profile_sequence_desc(&pseq, &mut out).unwrap();
         assert_eq!(decode_profile_sequence_desc(&out).unwrap(), pseq);
     }
 
@@ -440,7 +467,7 @@ mod tests {
     fn profile_sequence_desc_count_and_fields_decode() {
         let pseq = sample_pseq();
         let mut out = Vec::new();
-        encode_profile_sequence_desc(&pseq, &mut out);
+        encode_profile_sequence_desc(&pseq, &mut out).unwrap();
         let decoded = decode_profile_sequence_desc(&out).unwrap();
         assert_eq!(decoded.entries.len(), 2);
         assert_eq!(decoded.entries[0].device_manufacturer, Signature(*b"APPL"));
@@ -466,7 +493,7 @@ mod tests {
             ],
         };
         let mut out = Vec::new();
-        encode_profile_sequence_identifier(&psid, &mut out);
+        encode_profile_sequence_identifier(&psid, &mut out).unwrap();
         assert_eq!(decode_profile_sequence_identifier(&out).unwrap(), psid);
     }
 
@@ -499,8 +526,54 @@ mod tests {
             }],
         };
         let mut out = Vec::new();
-        encode_response_curve_set16(&rcs, &mut out);
+        encode_response_curve_set16(&rcs, &mut out).unwrap();
         assert_eq!(decode_response_curve_set16(&out).unwrap(), rcs);
+    }
+
+    #[test]
+    fn encode_response_curve_set16_rejects_mismatched_curve_shapes() {
+        let curve = |pcs: usize, arrays: usize| ResponseCurve {
+            measurement_unit: Signature(*b"StaA"),
+            pcs_values: vec![XyzNumber::from_f64([0.5, 0.5, 0.5]); pcs],
+            responses: vec![Vec::new(); arrays],
+        };
+        let mut out = Vec::new();
+        // One PCS value for two declared channels.
+        let bad_pcs = ResponseCurveSet16 {
+            channels: 2,
+            curves: vec![curve(1, 2)],
+        };
+        assert!(encode_response_curve_set16(&bad_pcs, &mut out).is_err());
+        // One response array for two declared channels.
+        let bad_responses = ResponseCurveSet16 {
+            channels: 2,
+            curves: vec![curve(2, 1)],
+        };
+        assert!(encode_response_curve_set16(&bad_responses, &mut out).is_err());
+        let ok = ResponseCurveSet16 {
+            channels: 2,
+            curves: vec![curve(2, 2)],
+        };
+        assert!(encode_response_curve_set16(&ok, &mut out).is_ok());
+    }
+
+    #[test]
+    fn encode_response_curve_set16_rejects_measurement_count_overflow() {
+        // The measurement-type count is an on-disk uInt16; 65536 zero-channel curves are cheap to
+        // build but cannot be represented.
+        let rcs = ResponseCurveSet16 {
+            channels: 0,
+            curves: vec![
+                ResponseCurve {
+                    measurement_unit: Signature::ZERO,
+                    pcs_values: Vec::new(),
+                    responses: Vec::new(),
+                };
+                65536
+            ],
+        };
+        let mut out = Vec::new();
+        assert!(encode_response_curve_set16(&rcs, &mut out).is_err());
     }
 
     #[test]
@@ -528,7 +601,7 @@ mod tests {
             ],
         };
         let mut out = Vec::new();
-        encode_response_curve_set16(&rcs, &mut out);
+        encode_response_curve_set16(&rcs, &mut out).unwrap();
         let decoded = decode_response_curve_set16(&out).unwrap();
         assert_eq!(decoded.curves.len(), 2);
         assert_eq!(decoded.curves[0].measurement_unit, Signature(*b"StaA"));

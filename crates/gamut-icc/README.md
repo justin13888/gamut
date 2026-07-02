@@ -28,7 +28,7 @@ let profile = IccProfile::parse(bytes)?;
 if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint) {
     println!("media white point: {:?}", white[0].to_f64());
 }
-let serialized = profile.to_bytes(); // spec-valid bytes, ready to re-embed
+let serialized = profile.to_bytes()?; // spec-valid bytes, ready to re-embed
 # Ok(()) }
 ```
 
