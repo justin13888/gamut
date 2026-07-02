@@ -40,6 +40,26 @@
 //! what it carries. Applying a profile's transform (a CMM), and building transforms from
 //! [`gamut_color`](https://docs.rs/gamut-color), are out of scope — the `to_f64`/`eval` accessors
 //! are the seam for that — as is **iccMAX** (`ICC.2`), a separate next-generation profile format.
+//!
+//! # Stability
+//!
+//! The v1 surface follows a few deliberate policies:
+//!
+//! - **Plain-data model.** The tag structs expose public fields and are *not* `#[non_exhaustive]`:
+//!   they mirror layouts ICC.1:2022 froze, so they will not grow fields. The two open sets —
+//!   [`TagData`] (new semantic decoders) and [`KnownTag`] (catalogue entries) — are
+//!   `#[non_exhaustive]` and grow additively.
+//! - **Exhaustive enums mirror closed spec registries**: [`DeviceClass`] (§7.2.5), [`ColorSpace`]
+//!   (§7.2.6, with [`ColorSpace::NColor`] covering the xCLR family), [`RenderingIntent`]
+//!   (§7.2.15), [`ClutPrecision`], [`Curve`] (the three count-selected §10.6 encodings),
+//!   [`CurveOrParametric`] and [`EmbeddedDescription`] (the only element types those slots admit).
+//! - **The `tags` vec is the model.** [`IccProfile::tags`] keeps file order (the byte-fidelity
+//!   contract for re-serialization); duplicate signatures are rejected at parse *and* write;
+//!   [`IccProfile::get`] is a linear first-match scan, sized for the dozens of tags real profiles
+//!   carry.
+//! - **Writes are validated.** Serialization returns `Err` for hand-built data that violates an
+//!   invariant the decoder establishes, instead of emitting a corrupt profile; a parsed profile
+//!   always serializes. The format's `u32` sizes and offsets cap a serialized profile at 4 GiB.
 #![forbid(unsafe_code)]
 
 mod bytes;

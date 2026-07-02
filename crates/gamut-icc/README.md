@@ -39,7 +39,10 @@ colorant and generic array types; and the profile-sequence, response-curve, and 
 Only genuinely unmodelled types (e.g. iccMAX's `multiProcessElementsType`) fall back to
 `TagData::Raw`, which round-trips byte-for-byte. `IccProfile::validate` additionally reports the §8
 required tags a profile is missing for its device class, and `IccReader`/`IccWriter` carry options
-(strict parsing; profile-ID recomputation).
+(strict parsing; profile-ID recomputation). To build a profile from scratch,
+`ProfileHeader::new(device_class, color_space)` supplies spec-valid header defaults; serialization
+validates the model and rejects data that would produce a corrupt profile (a *parsed* profile
+always re-serializes).
 
 **Out of scope:** applying a profile's transform (a CMM) and constructing transforms from
 `gamut-color` — the `to_f64`/`eval` accessors are the integration seam — and **iccMAX** (`ICC.2`), a
