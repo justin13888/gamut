@@ -620,7 +620,10 @@ dependencies = [
 name = "gamut-deflate"
 version = "0.1.0"
 dependencies = [
+ "divan",
+ "miniz_oxide",
  "zlib-oracle",
+ "zopfli",
 ]
 
 [[package]]

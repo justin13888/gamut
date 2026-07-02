@@ -88,9 +88,11 @@ fn zlib_stream_round_trips_via_zlib() {
 }
 
 #[test]
-fn competitive_with_zlib_level_9() {
-    // Dynamic Huffman + lazy matching should land within a few percent of zlib's maximum level
-    // (and usually beat it) while still inflating exactly. The optimal-parse phase widens the gap.
+fn best_beats_zlib_9() {
+    // The crate's reason to exist, enforced as a contract: `Level::Best` must produce a stream *no
+    // larger* than zlib at its maximum level (not merely "within a few percent"), and more effort
+    // must never lose to less — all while still inflating exactly. Regressing the ratio fails the
+    // build. `Default` trades a little ratio for speed, so it is only held within 2% of zlib-9.
     let inputs: Vec<(&str, Vec<u8>)> = vec![
         (
             "text",
@@ -111,22 +113,170 @@ fn competitive_with_zlib_level_9() {
     ];
     for (name, data) in &inputs {
         let z9 = zlib_oracle::compress(data, 9).unwrap();
-        for level in [Level::Default, Level::Best] {
-            let mut out = Vec::new();
-            DeflateEncoder::new()
-                .with_level(level)
-                .zlib_compress(data, &mut out);
+
+        let mut default_out = Vec::new();
+        DeflateEncoder::new()
+            .with_level(Level::Default)
+            .zlib_compress(data, &mut default_out);
+        let mut best_out = Vec::new();
+        DeflateEncoder::new()
+            .with_level(Level::Best)
+            .zlib_compress(data, &mut best_out);
+
+        // Both still round-trip through the reference inflater.
+        assert_eq!(
+            zlib_oracle::inflate_zlib(&default_out).unwrap(),
+            *data,
+            "{name} Default: round-trip"
+        );
+        assert_eq!(
+            zlib_oracle::inflate_zlib(&best_out).unwrap(),
+            *data,
+            "{name} Best: round-trip"
+        );
+
+        // The ratio contract.
+        assert!(
+            best_out.len() <= z9.len(),
+            "{name}: Best {} must be <= zlib-9 {}",
+            best_out.len(),
+            z9.len()
+        );
+        assert!(
+            best_out.len() <= default_out.len(),
+            "{name}: Best {} must be <= Default {}",
+            best_out.len(),
+            default_out.len()
+        );
+        assert!(
+            default_out.len() <= z9.len() + z9.len() / 50,
+            "{name}: Default {} should stay within 2% of zlib-9 {}",
+            default_out.len(),
+            z9.len()
+        );
+    }
+}
+
+/// Deterministic `xorshift64*` PRNG — keeps the fuzz-style sweep reproducible without a dev-dep.
+struct Rng(u64);
+
+impl Rng {
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    /// Uniform value in `0..n` (returns 0 when `n == 0`).
+    fn range(&mut self, n: usize) -> usize {
+        if n == 0 {
+            0
+        } else {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+}
+
+/// Builds an input of `size` bytes with a randomly chosen alphabet, injecting runs so the LZ77
+/// matcher and back-reference paths are exercised alongside literals.
+fn generate(rng: &mut Rng, size: usize) -> Vec<u8> {
+    let alphabet = [1usize, 2, 4, 16, 64, 256][rng.range(6)];
+    let mut v = Vec::with_capacity(size);
+    while v.len() < size {
+        if alphabet > 1 && rng.range(4) == 0 {
+            // A run of one byte — creates matches the parser can back-reference.
+            let run = 1 + rng.range(64);
+            let b = rng.range(alphabet) as u8;
+            for _ in 0..run {
+                if v.len() >= size {
+                    break;
+                }
+                v.push(b);
+            }
+        } else {
+            v.push(rng.range(alphabet) as u8);
+        }
+    }
+    v
+}
+
+/// Every level, on a wide sweep of sizes and byte distributions (plus exact spec boundaries), must
+/// round-trip byte-exact through the reference inflater for both the raw and zlib framings — and
+/// never panic. This is the crate's robustness net.
+#[test]
+fn randomized_round_trip() {
+    let mut rng = Rng(0x1234_5678_9ABC_DEF0);
+    // Spec-significant small sizes first, then a spread of pseudo-random sizes. Sizes stay modest so
+    // the debug-profile optimal parse (`Level::Best`) is cheap over many cases; larger inputs at
+    // every level are covered by the corpus round-trips (incl. the 70 KiB multi-block case).
+    let boundaries = [0usize, 1, 2, 3, 4, 257, 258, 259];
+    for case in 0..130usize {
+        let size = if case < boundaries.len() {
+            boundaries[case]
+        } else {
+            rng.range(1500)
+        };
+        let data = generate(&mut rng, size);
+        for &level in LEVELS {
+            let enc = DeflateEncoder::new().with_level(level);
+
+            let mut raw = Vec::new();
+            enc.compress(&data, &mut raw);
             assert_eq!(
-                zlib_oracle::inflate_zlib(&out).unwrap(),
-                *data,
-                "{name} {level:?}: round-trip"
+                zlib_oracle::inflate_raw(&raw).unwrap(),
+                data,
+                "raw case {case} {level:?} size {size}"
             );
-            assert!(
-                out.len() <= z9.len() + z9.len() / 20,
-                "{name} {level:?}: gamut {} should be within 5% of zlib-9 {}",
-                out.len(),
-                z9.len()
+
+            let mut zl = Vec::new();
+            enc.zlib_compress(&data, &mut zl);
+            assert_eq!(
+                zlib_oracle::inflate_zlib(&zl).unwrap(),
+                data,
+                "zlib case {case} {level:?} size {size}"
             );
         }
+    }
+}
+
+/// End-to-end coverage of the two size-dependent edges: the 65 535-byte stored-block `LEN` split
+/// (level-independent, so exercised through the fast levels) and the 1 MiB optimal-parse limit
+/// (just above it, `Level::Best` falls back to lazy matching — the branch tested here).
+#[test]
+fn large_and_boundary_round_trip() {
+    let mut rng = Rng(0xDEAD_BEEF_CAFE_0001);
+
+    // Stored-block splitting at and around the 16-bit `LEN` ceiling.
+    for &size in &[65_535usize, 65_536, 70_000] {
+        let data = generate(&mut rng, size);
+        for &level in &[Level::Store, Level::Fast, Level::Default] {
+            let mut zl = Vec::new();
+            DeflateEncoder::new()
+                .with_level(level)
+                .zlib_compress(&data, &mut zl);
+            assert_eq!(
+                zlib_oracle::inflate_zlib(&zl).unwrap(),
+                data,
+                "{level:?} size {size}"
+            );
+        }
+    }
+
+    // Just past the optimal-parse limit: `Level::Best` must still round-trip via the lazy fallback.
+    let big = generate(&mut rng, (1 << 20) + 1);
+    for &level in &[Level::Default, Level::Best] {
+        let mut zl = Vec::new();
+        DeflateEncoder::new()
+            .with_level(level)
+            .zlib_compress(&big, &mut zl);
+        assert_eq!(
+            zlib_oracle::inflate_zlib(&zl).unwrap(),
+            big,
+            "{level:?} size {}",
+            big.len()
+        );
     }
 }

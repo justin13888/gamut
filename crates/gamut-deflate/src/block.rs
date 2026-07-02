@@ -1,5 +1,5 @@
-//! DEFLATE block writers. Stored (uncompressed) and fixed-Huffman blocks are implemented here;
-//! dynamic Huffman lands in a later phase.
+//! DEFLATE block writers. Stored (uncompressed) and fixed-Huffman blocks live here; dynamic-Huffman
+//! blocks (single and split) live in the `dynamic` module.
 //!
 //! Each public helper returns a complete, byte-aligned DEFLATE body (`BFINAL` set) so the encoder
 //! can build a few candidates and keep the smallest.

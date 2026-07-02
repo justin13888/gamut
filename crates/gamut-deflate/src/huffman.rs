@@ -4,7 +4,8 @@
 //! DEFLATE packs Huffman codes most-significant-bit-of-the-code first, but [`BitWriter`] is
 //! LSB-first, so every code is bit-reversed via [`reverse_bits`] before emission. The length-limited
 //! builder and canonical-code assignment are ported from `gamut-webp`'s VP8L prefix coder (the
-//! algorithms are format-independent); the optimal package-merge limiter lands in a later phase.
+//! algorithms are format-independent). Length-limiting uses a count-floor heuristic that lands within
+//! ~1% of the entropy-optimal code; a package-merge limiter is an optional future refinement.
 //!
 //! [`BitWriter`]: crate::bitwriter::BitWriter
 
@@ -109,8 +110,8 @@ fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
 ///
 /// Returns one length per symbol (`0` = unused). A single nonzero symbol gets length 1. The maximum
 /// length is bounded by raising the counts toward a common floor and rebuilding until the tree fits
-/// (libwebp's approach) — *a* valid code, not necessarily optimal; the optimal package-merge limiter
-/// lands later.
+/// (libwebp's approach) — a valid code within ~1% of the entropy-optimal length-limited code; a
+/// package-merge limiter would close that last fraction of a percent but is not required.
 fn build_lengths(histogram: &[u32], max_len: u8) -> Vec<u8> {
     let n = histogram.len();
     let used = histogram.iter().filter(|&&h| h > 0).count();

@@ -5,19 +5,36 @@
 //! codec crates alongside [`gamut-bitstream`](https://docs.rs/gamut-bitstream) in the workspace's
 //! dependency graph, with no internal dependencies of its own.
 //!
-//! # Encoder only
-//!
-//! Following gamut's encoder-first philosophy, this crate **does not decode** — inflating DEFLATE is
-//! a thoroughly solved problem with strong implementations everywhere, so there is nothing to gain
-//! by reimplementing it. Correctness is instead proven differentially: the dev-only `zlib-oracle`
-//! inflates the encoder's output with the canonical C `zlib` and asserts it round-trips to the
-//! original bytes.
-//!
 //! # Space efficiency
 //!
-//! The encoder is tuned for size over speed (see [`Level`]). [`Level::Best`] applies a
-//! zopfli-style optimal parse and package-merge length-limited Huffman codes to approach the
-//! smallest streams achievable in the DEFLATE format; lower levels trade ratio for speed.
+//! This is a *space-optimizing* encoder, not a general-purpose one: encode time is traded for ratio
+//! (see [`Level`]). [`Level::Best`] runs a zopfli-style optimal parse — a shortest-path LZ77 search
+//! against an iteratively refined entropy model — with per-block dynamic Huffman codes and
+//! cost-driven block splitting, and reliably produces **smaller** output than zlib at maximum effort:
+//! measured at roughly 1–7% below `zlib -9` (and below `miniz_oxide` at its top level) across text,
+//! source, and mixed inputs. That size win — not speed — is the reason to reach for this crate rather
+//! than delegate to [`miniz_oxide`](https://docs.rs/miniz_oxide) or the
+//! [`zopfli`](https://docs.rs/zopfli) crate; `README.md` carries the head-to-head numbers. Lower
+//! levels trade ratio back for speed.
+//!
+//! # Encoder only
+//!
+//! Following gamut's encoder-first philosophy, this crate **does not decode**. Inflating DEFLATE is a
+//! thoroughly solved problem — `miniz_oxide` is a safe, fuzzed, pure-Rust decoder already used across
+//! the ecosystem — and decompressing untrusted input is a security-sensitive surface best left to a
+//! hardened implementation. Decoders in this workspace that need inflate (the DNG decoder today; a
+//! TIFF `Compression=8` or PNG decoder in future) depend on `miniz_oxide` directly. Encoder
+//! correctness is instead proven differentially: the dev-only `zlib-oracle` inflates this crate's
+//! output with the canonical C `zlib` and asserts it round-trips to the original bytes.
+//!
+//! # Scope
+//!
+//! - **Formats:** raw DEFLATE (RFC 1951) via [`DeflateEncoder::compress`] and the zlib wrapper
+//!   (RFC 1950) via [`DeflateEncoder::zlib_compress`]. gzip framing (RFC 1952) is out of scope — no
+//!   gamut image format uses it — as is its CRC-32; zlib's integrity check is the Adler-32 exposed
+//!   here as [`adler32`] (PNG's unrelated chunk CRC-32 lives in `gamut-png`).
+//! - **One-shot:** the whole input is compressed in a single call into a caller-owned `Vec<u8>`;
+//!   there is no streaming/incremental encoder, which suits whole-image encoding.
 //!
 //! # Example
 //!

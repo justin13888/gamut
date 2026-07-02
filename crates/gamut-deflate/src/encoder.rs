@@ -21,8 +21,8 @@ pub enum Level {
     /// Balanced default: lazy matching with per-block dynamic Huffman codes.
     #[default]
     Default,
-    /// Smallest output: a zopfli-style optimal parse with package-merge length-limited codes.
-    /// Slowest; intended for write-once assets where size dominates.
+    /// Smallest output: a zopfli-style optimal parse with per-block dynamic Huffman codes and
+    /// cost-driven block splitting. Slowest; intended for write-once assets where size dominates.
     Best,
 }
 
@@ -79,7 +79,7 @@ impl DeflateEncoder {
             // The uncompressed floor.
             Level::Store => block::stored(data),
             // LZ77 parse, then keep the smallest of stored / fixed-Huffman / dynamic-Huffman.
-            // Per-block splitting and the optimal parse build on this in later phases.
+            // `Best` additionally runs the optimal parse and splits into multiple dynamic blocks.
             Level::Fast | Level::Default | Level::Best => {
                 let chain = self.max_chain();
                 let tokens = if matches!(self.level, Level::Best) {
