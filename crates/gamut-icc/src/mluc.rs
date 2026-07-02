@@ -417,6 +417,50 @@ mod tests {
     }
 
     #[test]
+    fn mluc_len_walks_oversized_records() {
+        // A 16-byte record layout (record_size above the 12-byte minimum) is legal — only sizes
+        // *below* 12 are malformed — and both the length walker and the decoder handle the
+        // record's extra bytes.
+        let mut e = b"mluc\x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&1u32.to_be_bytes()); // record count
+        e.extend_from_slice(&16u32.to_be_bytes()); // record size 16
+        let hi = utf16be("Hi");
+        let storage = 16 + 16; // header + one 16-byte record
+        e.extend_from_slice(b"enUS");
+        e.extend_from_slice(&(hi.len() as u32).to_be_bytes());
+        e.extend_from_slice(&(storage as u32).to_be_bytes());
+        e.extend_from_slice(&[0u8; 4]); // the record's 4 extra bytes
+        e.extend_from_slice(&hi);
+        assert_eq!(mluc_len(&e).unwrap(), e.len());
+        assert_eq!(decode_mluc(&e).unwrap().text(b"en", b"US"), Some("Hi"));
+    }
+
+    #[test]
+    fn mluc_len_uses_every_record_position() {
+        // Two records whose SECOND string extends furthest: a walker that misreads the second
+        // record's table position (16 + i·record_size + 4) computes the wrong end.
+        let mluc = Mluc {
+            records: vec![
+                MlucRecord {
+                    language: *b"en",
+                    country: *b"US",
+                    text: "Hi".to_owned(),
+                },
+                MlucRecord {
+                    language: *b"de",
+                    country: *b"DE",
+                    text: "Guten Morgen".to_owned(),
+                },
+            ],
+        };
+        let mut bytes = Vec::new();
+        encode_mluc(&mluc, &mut bytes);
+        let encoded_len = bytes.len();
+        bytes.extend_from_slice(b"TRAILING");
+        assert_eq!(mluc_len(&bytes).unwrap(), encoded_len);
+    }
+
+    #[test]
     fn mluc_len_matches_encoded_length_even_with_trailing_bytes() {
         let mluc = Mluc {
             records: vec![MlucRecord {

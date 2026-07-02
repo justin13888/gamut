@@ -129,6 +129,8 @@ pub(crate) fn encode_viewing_conditions(view: &ViewingConditions, out: &mut Vec<
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::Error;
+
     use super::*;
     use crate::primitives::S15Fixed16;
 
@@ -139,6 +141,37 @@ mod tests {
         e.extend_from_slice(&[0; 4]);
         e.extend_from_slice(payload);
         e
+    }
+
+    #[test]
+    fn chromaticity_decode_bounds_are_exact() {
+        // A single channel exactly filling the element must decode: the bound is channels × 8
+        // bytes, so any arithmetic drift (e.g. `1 + 8 = 9`) would falsely reject this fit.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u16.to_be_bytes()); // channel count
+        payload.extend_from_slice(&0u16.to_be_bytes()); // colorant type
+        payload.extend_from_slice(&U16Fixed16::from_f64(0.64).0.to_be_bytes());
+        payload.extend_from_slice(&U16Fixed16::from_f64(0.33).0.to_be_bytes());
+        let chrm = decode_chromaticity(&element(b"chrm", &payload)).unwrap();
+        assert_eq!(chrm.channels.len(), 1);
+
+        // Trailing slack is tolerated (the guard rejects only data that exceeds the element).
+        let mut padded = payload.clone();
+        padded.extend_from_slice(&[0xAB; 8]);
+        assert!(decode_chromaticity(&element(b"chrm", &padded)).is_ok());
+
+        // A truncated element is caught by the size guard itself (channels × 8, not fewer), so
+        // the guard's message is reported, not a later read error.
+        let mut truncated = Vec::new();
+        truncated.extend_from_slice(&3u16.to_be_bytes());
+        truncated.extend_from_slice(&0u16.to_be_bytes());
+        truncated.extend_from_slice(&[0u8; 20]); // 20 < 3 × 8
+        match decode_chromaticity(&element(b"chrm", &truncated)) {
+            Err(Error::InvalidInput(msg)) => {
+                assert_eq!(msg, "icc: chromaticity channels exceed element");
+            }
+            other => panic!("expected the size-guard error, got {other:?}"),
+        }
     }
 
     #[test]

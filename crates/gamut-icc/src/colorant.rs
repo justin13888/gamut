@@ -158,6 +158,33 @@ mod tests {
     }
 
     #[test]
+    fn colorant_table_decode_bounds_are_exact() {
+        // Trailing bytes after the colorant records are tolerated (the guard rejects only a table
+        // that *exceeds* the element).
+        let mut payload = 1u32.to_be_bytes().to_vec();
+        let mut name = [0u8; 32];
+        name[..4].copy_from_slice(b"Cyan");
+        payload.extend_from_slice(&name);
+        for v in [10u16, 20, 30] {
+            payload.extend_from_slice(&v.to_be_bytes());
+        }
+        payload.extend_from_slice(&[0xAB; 8]); // trailing slack
+        assert!(decode_colorant_table(&element(b"clrt", &payload)).is_ok());
+
+        // A truncated element is caught by the size guard itself — each colorant needs the full
+        // 38 bytes (32-byte name + three u16), so the guard's message is reported, not a later
+        // read error.
+        let mut payload = 1u32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[0u8; 30]); // 30 < 38, but more than a name-only miscount
+        match decode_colorant_table(&element(b"clrt", &payload)) {
+            Err(Error::InvalidInput(msg)) => {
+                assert_eq!(msg, "icc: colorant table exceeds element");
+            }
+            other => panic!("expected the size-guard error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn encode_validates_colorant_names() {
         let with_name = |name: &str| ColorantTable {
             colorants: vec![Colorant {

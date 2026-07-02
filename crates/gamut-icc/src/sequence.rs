@@ -475,6 +475,46 @@ mod tests {
     }
 
     #[test]
+    fn empty_psid_decodes_at_exact_length() {
+        // Zero entries: the positions table ends exactly at the element's 12 bytes — the bound
+        // rejects only a table *exceeding* the element, so the exact fit is valid.
+        let e = b"psid\x00\x00\x00\x00\x00\x00\x00\x00".to_vec();
+        let psid = decode_profile_sequence_identifier(&e).unwrap();
+        assert!(psid.entries.is_empty());
+    }
+
+    #[test]
+    fn psid_structure_size_guard_pins_the_profile_id_boundary() {
+        // A structure smaller than the 16-byte profile ID hits the size guard (and must not
+        // panic on the ID slice)…
+        let mut e = b"psid\x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&1u32.to_be_bytes());
+        e.extend_from_slice(&20u32.to_be_bytes()); // offset
+        e.extend_from_slice(&8u32.to_be_bytes()); // size 8 < 16
+        e.extend_from_slice(&[0u8; 8]);
+        match decode_profile_sequence_identifier(&e) {
+            Err(Error::InvalidInput(msg)) => {
+                assert_eq!(msg, "icc: psid structure smaller than a profile ID");
+            }
+            other => panic!("expected the size-guard error, got {other:?}"),
+        }
+
+        // …while exactly 16 bytes passes the guard (it holds a complete profile ID) and fails
+        // later for lacking any description bytes.
+        let mut e = b"psid\x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&1u32.to_be_bytes());
+        e.extend_from_slice(&20u32.to_be_bytes());
+        e.extend_from_slice(&16u32.to_be_bytes()); // size exactly 16
+        e.extend_from_slice(&[7u8; 16]);
+        match decode_profile_sequence_identifier(&e) {
+            Err(Error::InvalidInput(msg)) => {
+                assert_eq!(msg, "icc: element too short for signature");
+            }
+            other => panic!("expected the missing-description error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn profile_sequence_identifier_round_trips_through_encode() {
         let psid = ProfileSequenceIdentifier {
             entries: vec![

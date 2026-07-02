@@ -319,6 +319,48 @@ mod tests {
     }
 
     #[test]
+    fn nearest_model_prefers_the_first_on_a_tie() {
+        // One tag missing from each Input model (A2B0 / bTRC / kTRC): a three-way tie, which
+        // reports the first-listed model (N-component LUT-based) as nearest.
+        let p = profile(
+            DeviceClass::Input,
+            ColorSpace::Rgb,
+            ColorSpace::Xyz,
+            &[
+                b"desc", b"cprt", b"wtpt", b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC",
+            ],
+        );
+        let issues = p.validate();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].missing, vec![Signature(*b"A2B0")]);
+    }
+
+    #[test]
+    fn device_link_with_xclr_colorant_tables_conforms() {
+        // xCLR data and PCS spaces with both colorant tables present: fully conformant — the
+        // clrt/clot requirements fire only on absence.
+        let with = profile(
+            DeviceClass::DeviceLink,
+            ColorSpace::NColor(4),
+            ColorSpace::NColor(4),
+            &[b"desc", b"cprt", b"pseq", b"A2B0", b"clrt", b"clot"],
+        );
+        assert!(with.validate().is_empty());
+
+        // Without them, both conditional requirements are reported.
+        let without = profile(
+            DeviceClass::DeviceLink,
+            ColorSpace::NColor(4),
+            ColorSpace::NColor(4),
+            &[b"desc", b"cprt", b"pseq", b"A2B0"],
+        );
+        let issues = without.validate();
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].missing, vec![Signature(*b"clrt")]);
+        assert_eq!(issues[1].missing, vec![Signature(*b"clot")]);
+    }
+
+    #[test]
     fn xclr_output_profile_requires_colorant_table() {
         let tags: &[&[u8; 4]] = &[
             b"desc", b"cprt", b"wtpt", b"A2B0", b"A2B1", b"A2B2", b"B2A0", b"B2A1", b"B2A2",

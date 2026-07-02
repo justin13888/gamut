@@ -208,6 +208,43 @@ mod tests {
     use super::*;
     use crate::mluc::MlucRecord;
 
+    #[test]
+    fn dict_with_exactly_sized_record_table_decodes() {
+        // One 16-byte record filling the element exactly (the name offset points back into the
+        // reserved header bytes): the table bound rejects only a table *exceeding* the element,
+        // so an exact fit is valid.
+        let mut e = b"dict\x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&1u32.to_be_bytes()); // record count
+        e.extend_from_slice(&16u32.to_be_bytes()); // record size
+        e.extend_from_slice(&4u32.to_be_bytes()); // name offset → the reserved bytes
+        e.extend_from_slice(&2u32.to_be_bytes()); // name size (one UTF-16 unit)
+        e.extend_from_slice(&0u32.to_be_bytes()); // value offset: absent
+        e.extend_from_slice(&0u32.to_be_bytes()); // value size
+        assert_eq!(e.len(), 32); // 16 + 1 × 16 == element length
+        let dict = decode_dict(&e).unwrap();
+        assert_eq!(dict.entries.len(), 1);
+        assert_eq!(dict.entries[0].value, None);
+    }
+
+    #[test]
+    fn dict_display_marker_decodes_as_absent() {
+        // §10.9: a display item with a nonzero offset and zero size marks "present but not for
+        // display"; gamut-icc folds it to absent (the documented leniency) instead of erroring.
+        let mut e = b"dict\x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&1u32.to_be_bytes()); // record count
+        e.extend_from_slice(&24u32.to_be_bytes()); // record size (with display names)
+        e.extend_from_slice(&40u32.to_be_bytes()); // name offset → storage after the table
+        e.extend_from_slice(&2u32.to_be_bytes()); // name size
+        e.extend_from_slice(&0u32.to_be_bytes()); // value offset: absent
+        e.extend_from_slice(&0u32.to_be_bytes()); // value size
+        e.extend_from_slice(&40u32.to_be_bytes()); // display-name offset: nonzero…
+        e.extend_from_slice(&0u32.to_be_bytes()); // …with zero size: the marker
+        e.extend_from_slice(&[0x00, 0x6B]); // "k"
+        let dict = decode_dict(&e).unwrap();
+        assert_eq!(dict.entries[0].name, "k");
+        assert_eq!(dict.entries[0].display_name, None);
+    }
+
     fn en_us(text: &str) -> Mluc {
         Mluc {
             records: vec![MlucRecord {

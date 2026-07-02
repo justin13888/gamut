@@ -1104,6 +1104,16 @@ mod tests {
             ..overflowing
         };
         assert!(write_optional_clut(Some(&sixteen_bit), &mut body).is_ok());
+
+        // 255 is the largest valid 8-bit sample: the guard fires strictly above it, so a
+        // boundary-valued CLUT must encode.
+        let boundary = Clut {
+            grid_points: vec![2],
+            output_channels: 1,
+            precision: ClutPrecision::U8,
+            samples: vec![0, 255],
+        };
+        assert!(write_optional_clut(Some(&boundary), &mut body).is_ok());
     }
 
     #[test]
