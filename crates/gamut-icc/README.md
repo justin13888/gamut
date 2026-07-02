@@ -25,7 +25,7 @@ use gamut_icc::{IccProfile, KnownTag, TagData};
 
 # fn demo(bytes: &[u8]) -> Result<(), gamut_core::Error> {
 let profile = IccProfile::parse(bytes)?;
-if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint.signature()) {
+if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint) {
     println!("media white point: {:?}", white[0].to_f64());
 }
 let serialized = profile.to_bytes(); // spec-valid bytes, ready to re-embed

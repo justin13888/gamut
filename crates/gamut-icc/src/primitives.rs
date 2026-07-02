@@ -164,6 +164,13 @@ impl Signature {
     }
 }
 
+impl From<[u8; 4]> for Signature {
+    /// Wraps four bytes as a signature — `Signature::from(*b"wtpt")`.
+    fn from(bytes: [u8; 4]) -> Self {
+        Self(bytes)
+    }
+}
+
 impl core::fmt::Display for Signature {
     /// Renders printable bytes verbatim (e.g. `RGB `) and any others as `\xNN`.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

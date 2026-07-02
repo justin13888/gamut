@@ -248,7 +248,7 @@ fn descriptions_match_lcms() {
 fn matrix_trc_profile_decodes_every_tag() {
     let profile = lcms2_oracle::rgb_matrix_shaper(D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]);
     let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
-    let get = |t: KnownTag| parsed.get(t.signature());
+    let get = |t: KnownTag| parsed.get(t);
 
     for t in [
         KnownTag::MediaWhitePoint,

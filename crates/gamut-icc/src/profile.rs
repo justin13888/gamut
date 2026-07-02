@@ -70,9 +70,13 @@ impl IccProfile {
         Ok(Self { header, tags })
     }
 
-    /// The decoded data of the tag with the given `signature`, if present.
+    /// The decoded data of the tag with the given signature, if present.
+    ///
+    /// Accepts anything convertible to a [`Signature`] — a [`crate::KnownTag`], four bytes
+    /// (`profile.get(*b"wtpt")`), or a `Signature` itself.
     #[must_use]
-    pub fn get(&self, signature: Signature) -> Option<&TagData> {
+    pub fn get(&self, signature: impl Into<Signature>) -> Option<&TagData> {
+        let signature = signature.into();
         self.tags
             .iter()
             .find(|(s, _)| *s == signature)
