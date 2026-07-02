@@ -4,6 +4,11 @@
 //! These carry the matrix → curves → CLUT → curves pipeline that maps a device colour space to and
 //! from the PCS. gamut-icc decodes their structure faithfully (it does not itself apply the
 //! transform); raw lookup samples are preserved as integers so the elements round-trip exactly.
+//!
+//! One deliberate leniency: §10.12.1/§10.13.1 permit only certain stage *combinations* in an
+//! `mAB `/`mBA ` element (B alone; M+matrix+B; A+CLUT+B; all five). gamut-icc accepts and re-emits
+//! *any* combination a profile signals through its stage offsets (only the B-curves are required),
+//! so real-world profiles that bend this rule still round-trip losslessly.
 
 use gamut_core::{Error, Result};
 
@@ -32,7 +37,7 @@ impl ClutPrecision {
 }
 
 /// A colour lookup table: a regular grid of output samples indexed by the input channels
-/// (`lutAToBType`/`lutBToAType` CLUT, ICC.1:2022 §10.12.5).
+/// (`lutAToBType`/`lutBToAType` CLUT, ICC.1:2022 §10.12.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clut {
     /// Grid points per input dimension (`len` == the transform's input-channel count).
@@ -53,7 +58,7 @@ pub struct Matrix3x3 {
     pub elements: [S15Fixed16; 9],
 }
 
-/// The `lutAToBType`/`lutBToAType` matrix stage (ICC.1:2022 §10.12.4): the augmented 3×4 affine
+/// The `lutAToBType`/`lutBToAType` matrix stage (ICC.1:2022 §10.12.5): the augmented 3×4 affine
 /// transform `[A | b]` the spec stores as twelve `s15Fixed16` parameters `e1..e12`.
 ///
 /// `e1..e9` are the row-major 3×3 linear part ([`matrix`](Self::matrix)) and `e10..e12` the
@@ -67,7 +72,7 @@ pub struct Matrix3x4 {
     pub offset: [S15Fixed16; 3],
 }
 
-/// A `lut8Type` element (`mft1`, ICC.1:2022 §10.10): matrix → input tables → CLUT → output tables,
+/// A `lut8Type` element (`mft1`, ICC.1:2022 §10.11): matrix → input tables → CLUT → output tables,
 /// with 8-bit tables and CLUT and a uniform grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lut8 {
@@ -87,7 +92,7 @@ pub struct Lut8 {
     pub output_table: Vec<u8>,
 }
 
-/// A `lut16Type` element (`mft2`, ICC.1:2022 §10.11): like [`Lut8`] but with 16-bit tables and CLUT
+/// A `lut16Type` element (`mft2`, ICC.1:2022 §10.10): like [`Lut8`] but with 16-bit tables and CLUT
 /// and a variable per-table entry count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Lut16 {

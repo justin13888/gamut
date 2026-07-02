@@ -49,7 +49,7 @@ impl U16Fixed16 {
     }
 }
 
-/// A `u8Fixed8Number` (ICC.1:2022 §4.5): an unsigned 8.8 fixed-point value stored big-endian as a
+/// A `u8Fixed8Number` (ICC.1:2022 §4.9): an unsigned 8.8 fixed-point value stored big-endian as a
 /// `u16`. The numeric value is `raw / 256`. Used by the single-entry `curveType` gamma encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct U8Fixed8(pub u16);
@@ -147,11 +147,12 @@ impl DateTime {
     }
 }
 
-/// A four-byte signature (ICC.1:2022 §4.12): a four-character code stored big-endian.
+/// A four-byte signature: the four-character code (7-bit ASCII, ICC.1:2022 §4.15) that identifies
+/// tags (§7.3), element types (§10), and registry values throughout the format.
 ///
 /// Used for the open-registry header fields — preferred CMM, primary platform, device
 /// manufacturer/model, profile creator — where the all-zero value means "unspecified", and for the
-/// `signatureType` tag element.
+/// `signatureType` tag element (§10.23).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Signature(pub [u8; 4]);
 

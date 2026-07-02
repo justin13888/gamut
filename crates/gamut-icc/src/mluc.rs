@@ -1,5 +1,5 @@
 //! Language-tagged text elements: `multiLocalizedUnicodeType` (v4) and the legacy
-//! `textDescriptionType` (v2) (ICC.1:2022 §10.13; ICC.1:2001-04 §6.5.17).
+//! `textDescriptionType` (v2) (ICC.1:2022 §10.15; ICC.1:2001-04 §6.5.17).
 
 use gamut_core::{Error, Result};
 
@@ -17,7 +17,7 @@ pub struct MlucRecord {
     pub text: String,
 }
 
-/// A `multiLocalizedUnicodeType` element (ICC.1:2022 §10.13): one or more localized strings, the v4
+/// A `multiLocalizedUnicodeType` element (ICC.1:2022 §10.15): one or more localized strings, the v4
 /// representation of `desc`, `cprt`, and similar text tags.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Mluc {
