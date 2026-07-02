@@ -623,14 +623,14 @@ mod tests {
                     device_model: Signature::ZERO,
                     attributes: 0,
                     technology: Signature::ZERO,
-                    manufacturer_desc: crate::sequence::DescriptionText::Mluc(Mluc::default()),
-                    model_desc: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                    manufacturer_desc: crate::sequence::EmbeddedDescription::Mluc(Mluc::default()),
+                    model_desc: crate::sequence::EmbeddedDescription::Mluc(Mluc::default()),
                 }],
             }),
             TagData::ProfileSequenceIdentifier(ProfileSequenceIdentifier {
                 entries: vec![crate::sequence::ProfileIdentifier {
                     profile_id: crate::header::ProfileId([7; 16]),
-                    description: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                    description: crate::sequence::EmbeddedDescription::Mluc(Mluc::default()),
                 }],
             }),
             TagData::ResponseCurveSet16(ResponseCurveSet16 {

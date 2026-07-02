@@ -53,12 +53,17 @@ pub struct Matrix3x3 {
     pub elements: [S15Fixed16; 9],
 }
 
-/// A 3×3 matrix with a 3-element offset (`lutAToBType`/`lutBToAType` matrix, ICC.1:2022 §10.12.4).
+/// The `lutAToBType`/`lutBToAType` matrix stage (ICC.1:2022 §10.12.4): the augmented 3×4 affine
+/// transform `[A | b]` the spec stores as twelve `s15Fixed16` parameters `e1..e12`.
+///
+/// `e1..e9` are the row-major 3×3 linear part ([`matrix`](Self::matrix)) and `e10..e12` the
+/// per-channel offsets ([`offset`](Self::offset)); the stage computes
+/// `out_i = Σ_j A[i][j]·in_j + b_i`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Matrix3x4 {
-    /// The nine matrix elements, row-major.
+    /// The nine linear-part elements `e1..e9`, row-major.
     pub matrix: [S15Fixed16; 9],
-    /// The three output offsets.
+    /// The three offsets `e10..e12`, one per output channel.
     pub offset: [S15Fixed16; 3],
 }
 

@@ -21,7 +21,7 @@ use crate::primitives::{S15Fixed16, Signature, XyzNumber};
 /// the legacy `textDescriptionType` in v2 profiles. The form is preserved so the element
 /// round-trips.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DescriptionText {
+pub enum EmbeddedDescription {
     /// A v4 `multiLocalizedUnicodeType` description.
     Mluc(Mluc),
     /// A v2 `textDescriptionType` description.
@@ -41,9 +41,9 @@ pub struct ProfileDescription {
     /// The component profile's device technology signature (`0` if it had no `technologyTag`).
     pub technology: Signature,
     /// The component profile's `deviceMfgDescTag` (a placeholder empty description if it was absent).
-    pub manufacturer_desc: DescriptionText,
+    pub manufacturer_desc: EmbeddedDescription,
     /// The component profile's `deviceModelDescTag`.
-    pub model_desc: DescriptionText,
+    pub model_desc: EmbeddedDescription,
 }
 
 /// A `profileSequenceDescType` element (§10.19): the ordered sequence of component-profile
@@ -80,7 +80,7 @@ pub(crate) fn decode_profile_sequence_desc(element: &[u8]) -> Result<ProfileSequ
 
 /// Decodes the embedded description at the reader's current position and advances past it, including
 /// the 4-byte alignment padding writers place between descriptions.
-fn decode_next_description(element: &[u8], r: &mut ByteReader) -> Result<DescriptionText> {
+fn decode_next_description(element: &[u8], r: &mut ByteReader) -> Result<EmbeddedDescription> {
     let rest = element
         .get(r.pos()..)
         .ok_or(Error::InvalidInput("icc: pseq truncated"))?;
@@ -98,12 +98,12 @@ fn decode_next_description(element: &[u8], r: &mut ByteReader) -> Result<Descrip
 /// Decodes an embedded description in either the v4 `multiLocalizedUnicodeType` or the v2
 /// `textDescriptionType` form (both appear in `pseq`/`psid` depending on the source profile version;
 /// trailing bytes beyond the description are ignored).
-fn decode_embedded_description(bytes: &[u8]) -> Result<DescriptionText> {
+fn decode_embedded_description(bytes: &[u8]) -> Result<EmbeddedDescription> {
     match &first_four(bytes)? {
-        b"mluc" => Ok(DescriptionText::Mluc(decode_mluc(bytes)?)),
-        b"desc" => Ok(DescriptionText::TextDescription(decode_text_description(
-            bytes,
-        )?)),
+        b"mluc" => Ok(EmbeddedDescription::Mluc(decode_mluc(bytes)?)),
+        b"desc" => Ok(EmbeddedDescription::TextDescription(
+            decode_text_description(bytes)?,
+        )),
         _ => Err(Error::InvalidInput(
             "icc: embedded description is not mluc/desc",
         )),
@@ -150,10 +150,10 @@ pub(crate) fn encode_profile_sequence_desc(
 
 /// Serializes an embedded description in its original mluc/textDescription form, padded to a 4-byte
 /// boundary (as reference writers align the descriptions embedded in `pseq`).
-fn encode_description(desc: &DescriptionText, out: &mut Vec<u8>) -> Result<()> {
+fn encode_description(desc: &EmbeddedDescription, out: &mut Vec<u8>) -> Result<()> {
     match desc {
-        DescriptionText::Mluc(mluc) => encode_mluc(mluc, out),
-        DescriptionText::TextDescription(text) => encode_text_description(text, out)?,
+        EmbeddedDescription::Mluc(mluc) => encode_mluc(mluc, out),
+        EmbeddedDescription::TextDescription(text) => encode_text_description(text, out)?,
     }
     pad_to_4(out);
     Ok(())
@@ -169,7 +169,7 @@ pub struct ProfileIdentifier {
     /// The component profile's ID (its header profile ID, or a computed/zero ID).
     pub profile_id: ProfileId,
     /// The component profile's description.
-    pub description: DescriptionText,
+    pub description: EmbeddedDescription,
 }
 
 /// A `profileSequenceIdentifierType` element (§10.20): identifiers for the profiles used in a
@@ -437,8 +437,8 @@ mod tests {
                     technology: Signature(*b"CRT "),
                     // A v4 (mluc) manufacturer description and a v2 (desc) model description, so the
                     // round-trip exercises both embedded forms and the length walker.
-                    manufacturer_desc: DescriptionText::Mluc(en_us("Widgets Inc")),
-                    model_desc: DescriptionText::TextDescription(TextDescription {
+                    manufacturer_desc: EmbeddedDescription::Mluc(en_us("Widgets Inc")),
+                    model_desc: EmbeddedDescription::TextDescription(TextDescription {
                         ascii: "Model One".to_owned(),
                         ..TextDescription::default()
                     }),
@@ -448,8 +448,8 @@ mod tests {
                     device_model: Signature::ZERO,
                     attributes: 0x0000_0001_0000_0002,
                     technology: Signature::ZERO,
-                    manufacturer_desc: DescriptionText::Mluc(Mluc::default()), // placeholder
-                    model_desc: DescriptionText::Mluc(en_us("Final")),
+                    manufacturer_desc: EmbeddedDescription::Mluc(Mluc::default()), // placeholder
+                    model_desc: EmbeddedDescription::Mluc(en_us("Final")),
                 },
             ],
         }
@@ -481,11 +481,11 @@ mod tests {
                 // Mix the two description forms so both round-trip through psid.
                 ProfileIdentifier {
                     profile_id: ProfileId([1; 16]),
-                    description: DescriptionText::Mluc(en_us("First")),
+                    description: EmbeddedDescription::Mluc(en_us("First")),
                 },
                 ProfileIdentifier {
                     profile_id: ProfileId([2; 16]),
-                    description: DescriptionText::TextDescription(TextDescription {
+                    description: EmbeddedDescription::TextDescription(TextDescription {
                         ascii: "Second".to_owned(),
                         ..TextDescription::default()
                     }),

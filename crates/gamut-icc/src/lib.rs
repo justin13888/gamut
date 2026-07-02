@@ -78,7 +78,7 @@ pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzN
 pub use profile::IccProfile;
 pub use reader::IccReader;
 pub use sequence::{
-    DescriptionText, ProfileDescription, ProfileIdentifier, ProfileSequenceDesc,
+    EmbeddedDescription, ProfileDescription, ProfileIdentifier, ProfileSequenceDesc,
     ProfileSequenceIdentifier, Response16, ResponseCurve, ResponseCurveSet16,
 };
 pub use tag_types::TagData;

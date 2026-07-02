@@ -146,9 +146,7 @@ pub(crate) fn parametric_param_count(function_type: u16) -> Result<usize> {
         3 => 5,
         4 => 7,
         _ => {
-            return Err(Error::InvalidInput(
-                "icc: unsupported parametric function type",
-            ));
+            return Err(Error::InvalidInput("icc: invalid parametric function type"));
         }
     })
 }
