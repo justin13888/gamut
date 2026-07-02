@@ -5,8 +5,8 @@
 //! depends on the hash; candidates are always verified by byte comparison. The hash only affects how
 //! many real matches are found, i.e. the ratio.
 //!
-//! This phase emits a greedy parse (take the longest match at each position). Lazy matching and the
-//! zopfli-style optimal parse build on the same matcher in later phases.
+//! `parse` offers greedy (`Level::Fast`) and lazy (`Level::Default`) matching; `parse_optimal` adds
+//! the zopfli-style shortest-path parse (`Level::Best`). All three share this one match finder.
 
 use crate::huffman::CanonicalCode;
 use crate::symbols::{self, MAX_DISTANCE, MAX_MATCH, MIN_MATCH};

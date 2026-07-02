@@ -20,3 +20,14 @@ workspace = true
 # `third_party/zlib` submodule). Dev-only and excluded from the workspace. gamut ships no
 # inflater, so zlib is the reference that proves the encoder's output decodes correctly.
 zlib-oracle = { path = "../../tooling/zlib-oracle" }
+# Benchmark baselines only (dev-only — no effect on the crate's zero runtime dependencies):
+# `miniz_oxide` is the pure-Rust encoder behind `flate2`/the `png` crate (the fast/general tier)
+# and `zopfli` is the state-of-the-art space-optimal encoder (the tier `Level::Best` competes
+# with). The benches assert `Level::Best` earns its keep against both.
+divan.workspace = true
+miniz_oxide = "0.8"
+zopfli = "0.8"
+
+[[bench]]
+name = "compression"
+harness = false
