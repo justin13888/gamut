@@ -59,18 +59,22 @@ fn header_fields_match_lcms() {
         let bytes = profile.to_bytes();
         let h = ProfileHeader::parse(&bytes).unwrap_or_else(|e| panic!("{label}: {e:?}"));
         assert_eq!(
-            h.device_class.to_signature().to_u32(),
+            u32::from(Signature::from(h.device_class)),
             profile.device_class(),
             "{label}: device class"
         );
         assert_eq!(
-            h.data_color_space.to_signature().to_u32(),
+            u32::from(Signature::from(h.data_color_space)),
             profile.color_space(),
             "{label}: data colour space"
         );
-        assert_eq!(h.pcs.to_signature().to_u32(), profile.pcs(), "{label}: pcs");
         assert_eq!(
-            h.rendering_intent.to_u32(),
+            u32::from(Signature::from(h.pcs)),
+            profile.pcs(),
+            "{label}: pcs"
+        );
+        assert_eq!(
+            u32::from(h.rendering_intent),
             profile.rendering_intent(),
             "{label}: rendering intent"
         );
@@ -108,7 +112,7 @@ fn tag_set_matches_lcms() {
         let bytes = profile.to_bytes();
         let parsed = IccProfile::parse(&bytes).unwrap_or_else(|e| panic!("{label}: {e:?}"));
 
-        let mut got: Vec<u32> = parsed.tags.iter().map(|(s, _)| s.to_u32()).collect();
+        let mut got: Vec<u32> = parsed.tags.iter().map(|(s, _)| u32::from(*s)).collect();
         let mut want: Vec<u32> = (0..profile.tag_count())
             .map(|i| profile.tag_signature(i))
             .collect();
@@ -135,9 +139,7 @@ fn xyz_tags_match_lcms() {
         tag::GREEN_COLORANT,
         tag::BLUE_COLORANT,
     ] {
-        let data = parsed
-            .get(Signature::from_u32(tagsig))
-            .expect("tag present");
+        let data = parsed.get(Signature::from(tagsig)).expect("tag present");
         let TagData::Xyz(values) = data else {
             panic!("expected XYZ for {tagsig:#010x}");
         };
@@ -168,7 +170,7 @@ fn tone_curves_match_lcms() {
     for (label, profile) in cases {
         let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
         let data = parsed
-            .get(Signature::from_u32(tag::RED_TRC))
+            .get(Signature::from(tag::RED_TRC))
             .expect("rTRC present");
         for i in 0..=16 {
             let x = f64::from(i) / 16.0;
@@ -193,7 +195,7 @@ fn chad_decodes_as_s15fixed16_array() {
     let profile = lcms2_oracle::rgb_matrix_shaper(D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]);
     let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
     let data = parsed
-        .get(Signature::from_u32(tag::CHROMATIC_ADAPTATION))
+        .get(Signature::from(tag::CHROMATIC_ADAPTATION))
         .expect("chad present");
     let TagData::S15Fixed16Array(values) = data else {
         panic!("expected sf32 chad");
@@ -209,7 +211,7 @@ fn descriptions_match_lcms() {
     let profile = lcms2_oracle::srgb();
     let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
     let ours = match parsed
-        .get(Signature::from_u32(tag::PROFILE_DESCRIPTION))
+        .get(Signature::from(tag::PROFILE_DESCRIPTION))
         .expect("desc present")
     {
         TagData::MultiLocalizedUnicode(mluc) => mluc
@@ -229,7 +231,7 @@ fn descriptions_match_lcms() {
     profile.set_version(2.1);
     let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
     let ours = match parsed
-        .get(Signature::from_u32(tag::PROFILE_DESCRIPTION))
+        .get(Signature::from(tag::PROFILE_DESCRIPTION))
         .expect("desc present")
     {
         TagData::TextDescription(desc) => desc.ascii.clone(),
@@ -307,7 +309,7 @@ fn v2_devicelink_decodes_as_lut() {
     profile.set_version(2.1);
     let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
     match parsed
-        .get(Signature::from_u32(tag::A_TO_B0))
+        .get(Signature::from(tag::A_TO_B0))
         .expect("A2B0 present")
     {
         TagData::Lut16(lut) => {
@@ -329,7 +331,7 @@ fn v4_devicelink_decodes_as_lut_a_to_b() {
     let profile = lcms2_oracle::rgb_linearization_devicelink();
     let parsed = IccProfile::parse(&profile.to_bytes()).unwrap();
     match parsed
-        .get(Signature::from_u32(tag::A_TO_B0))
+        .get(Signature::from(tag::A_TO_B0))
         .expect("A2B0 present")
     {
         TagData::LutAToB(lut) => {

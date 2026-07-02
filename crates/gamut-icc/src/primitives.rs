@@ -150,24 +150,26 @@ pub struct Signature(pub [u8; 4]);
 impl Signature {
     /// The all-zero signature, meaning "unspecified".
     pub const ZERO: Signature = Signature([0; 4]);
-
-    /// The signature's four bytes as a big-endian `u32`.
-    #[must_use]
-    pub fn to_u32(self) -> u32 {
-        u32::from_be_bytes(self.0)
-    }
-
-    /// A signature from a big-endian `u32`.
-    #[must_use]
-    pub fn from_u32(value: u32) -> Self {
-        Self(value.to_be_bytes())
-    }
 }
 
 impl From<[u8; 4]> for Signature {
     /// Wraps four bytes as a signature — `Signature::from(*b"wtpt")`.
     fn from(bytes: [u8; 4]) -> Self {
         Self(bytes)
+    }
+}
+
+impl From<u32> for Signature {
+    /// A signature from a big-endian `u32`.
+    fn from(value: u32) -> Self {
+        Self(value.to_be_bytes())
+    }
+}
+
+impl From<Signature> for u32 {
+    /// The signature's four bytes as a big-endian `u32`.
+    fn from(sig: Signature) -> u32 {
+        u32::from_be_bytes(sig.0)
     }
 }
 
@@ -258,8 +260,8 @@ mod tests {
     #[test]
     fn signature_u32_round_trip_and_display() {
         let sig = Signature(*b"RGB ");
-        assert_eq!(sig.to_u32(), 0x5247_4220);
-        assert_eq!(Signature::from_u32(0x5247_4220), sig);
+        assert_eq!(u32::from(sig), 0x5247_4220);
+        assert_eq!(Signature::from(0x5247_4220u32), sig);
         assert_eq!(sig.to_string(), "RGB ");
         // Non-printable bytes render as escapes.
         assert_eq!(

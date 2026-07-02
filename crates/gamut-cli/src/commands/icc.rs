@@ -144,8 +144,11 @@ fn print_report(path: &Path, format: Format, blob: &[u8], profile: &IccProfile, 
         h.version.major, h.version.minor, h.version.bugfix
     );
     println!("  device class:     {}", device_class_name(h.device_class));
-    println!("  data space:       {}", h.data_color_space.to_signature());
-    println!("  pcs:              {}", h.pcs.to_signature());
+    println!(
+        "  data space:       {}",
+        Signature::from(h.data_color_space)
+    );
+    println!("  pcs:              {}", Signature::from(h.pcs));
     println!(
         "  pcs illuminant:   {}",
         illuminant_summary(h.pcs_illuminant.to_f64())
@@ -271,7 +274,7 @@ fn device_class_name(class: DeviceClass) -> String {
         DeviceClass::Abstract => "Abstract",
         DeviceClass::NamedColor => "NamedColor",
     };
-    format!("{name} ({})", class.to_signature())
+    format!("{name} ({})", Signature::from(class))
 }
 
 /// The display name of a rendering intent.
