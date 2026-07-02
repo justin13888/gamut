@@ -108,7 +108,7 @@ pub struct Lut16 {
 
 /// A `lutAToBType` element (`mAB `, ICC.1:2022 §10.12): the device→PCS pipeline
 /// A-curves → CLUT → M-curves → matrix → B-curves. Every stage but the B-curves is optional.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LutAToB {
     /// Input (device) channel count.
     pub input_channels: u8,
@@ -128,7 +128,7 @@ pub struct LutAToB {
 
 /// A `lutBToAType` element (`mBA `, ICC.1:2022 §10.13): the PCS→device pipeline
 /// B-curves → matrix → M-curves → CLUT → A-curves. Every stage but the B-curves is optional.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LutBToA {
     /// Input (PCS) channel count.
     pub input_channels: u8,

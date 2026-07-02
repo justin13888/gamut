@@ -41,7 +41,7 @@ use crate::sequence::{
 /// whether it is modelled. The enum is `#[non_exhaustive]`: variants are added as more element
 /// types gain semantic decoders.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TagData {
     /// `XYZ ` — one or more CIE XYZ triplets (`XYZType`); colorant, white/black point, luminance.
     Xyz(Vec<XyzNumber>),

@@ -13,7 +13,7 @@ use crate::tags::{parse_tag_table, tag_table_end};
 /// Parse with [`IccProfile::parse`]; look up a tag with [`IccProfile::get`]. The on-disk tag table
 /// (byte offsets and sizes) is an encoding detail reconstructed by the serializer, so it is not part
 /// of this model — callers manipulate decoded data, not offsets.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IccProfile {
     /// The 128-byte profile header.
     pub header: ProfileHeader,
@@ -107,6 +107,16 @@ mod tests {
         b[20..24].copy_from_slice(b"XYZ "); // PCS
         b[36..40].copy_from_slice(b"acsp"); // magic
         b // rendering intent at 64 is 0 (perceptual)
+    }
+
+    #[test]
+    fn model_stays_eq() {
+        // Compile-time guard: every TagData payload is integer-backed, so the whole model is `Eq`.
+        // A future variant carrying an `f64` would silently strip `Eq` from `TagData`, `IccProfile`
+        // and everything between; fail here instead so the loss is a deliberate decision.
+        fn assert_eq_capable<T: Eq>() {}
+        assert_eq_capable::<TagData>();
+        assert_eq_capable::<IccProfile>();
     }
 
     #[test]

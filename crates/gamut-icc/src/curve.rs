@@ -114,7 +114,7 @@ impl ParametricCurve {
 }
 
 /// Either kind of tone curve, as carried by the curve sets inside the LUT transform types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CurveOrParametric {
     /// A `curveType` curve.
     Curve(Curve),
