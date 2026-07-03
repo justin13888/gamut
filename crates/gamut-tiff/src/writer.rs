@@ -7,21 +7,12 @@
 //! them. `variant` selects classic TIFF or BigTIFF throughout.
 
 use gamut_core::Result;
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
+use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, align_word, write};
 
-/// Rounds `n` up to the next even (word) boundary, matching the value-pool alignment
-/// [`gamut_ifd::write`] uses, so block data begins on a word boundary.
+/// Rounds `n` up to the next even (word) boundary — [`gamut_ifd::write`]'s documented value-pool
+/// alignment — so block data begins on a word boundary.
 fn even(n: usize) -> usize {
-    n + (n & 1)
-}
-
-/// Builds a strip/tile-offset field value of the right type for `variant`: `LONG` for classic
-/// TIFF, `LONG8` for BigTIFF (whose offsets may exceed 4 GiB).
-fn offset_value(variant: Variant, offsets: Vec<u64>) -> Value {
-    match variant {
-        Variant::Classic => Value::Long(offsets.iter().map(|&o| o as u32).collect()),
-        Variant::Big => Value::Long8(offsets),
-    }
+    align_word(n as u64) as usize
 }
 
 /// Serialises a single-IFD strip TIFF image: the supplied directory plus its strip data,
@@ -99,11 +90,11 @@ pub fn write_multipage(
             ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(counts));
             ifd.set(
                 tags::STRIP_OFFSETS,
-                offset_value(variant, vec![0; strips.len()]),
+                Value::offset_array(variant, &vec![0; strips.len()])?,
             );
-            ifd
+            Ok(ifd)
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
     let base = even(
         write(&TiffFile {
@@ -122,7 +113,7 @@ pub fn write_multipage(
             offsets.push(cursor as u64);
             cursor += s.len();
         }
-        ifd.set(tags::STRIP_OFFSETS, offset_value(variant, offsets));
+        ifd.set(tags::STRIP_OFFSETS, Value::offset_array(variant, &offsets)?);
     }
 
     let mut out = write(&TiffFile {
@@ -155,7 +146,10 @@ fn write_blocks(
     ifd.set(bytecount_tag, Value::Long(counts));
     // A correctly-sized, correctly-typed placeholder so the directory layout (and thus the data
     // base) is final; the offset *content* does not affect the layout, only its values do.
-    ifd.set(offset_tag, offset_value(variant, vec![0; blocks.len()]));
+    ifd.set(
+        offset_tag,
+        Value::offset_array(variant, &vec![0; blocks.len()])?,
+    );
 
     // Writing the directory alone yields exactly the header + IFD + value pool, so its length is
     // where the block data begins (rounded up to a word boundary).
@@ -173,7 +167,7 @@ fn write_blocks(
         offsets.push(cursor as u64);
         cursor += s.len();
     }
-    ifd.set(offset_tag, offset_value(variant, offsets));
+    ifd.set(offset_tag, Value::offset_array(variant, &offsets)?);
 
     let mut out = write(&TiffFile {
         order,
