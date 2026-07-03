@@ -91,7 +91,7 @@ gamut-tonemap = { path = "crates/gamut-tonemap", version = "0.1.2" }
 gamut-ifd = { path = "crates/gamut-ifd", version = "0.1.1" }
 gamut-icc = { path = "crates/gamut-icc", version = "0.1.1" }
 gamut-xmp = { path = "crates/gamut-xmp", version = "0.1.1" }
-gamut-exif = { path = "crates/gamut-exif", version = "0.1.1" }
+gamut-exif = { path = "crates/gamut-exif", version = "1.0.0" }
 gamut-iptc = { path = "crates/gamut-iptc", version = "0.1.1" }
 gamut-metadata = { path = "crates/gamut-metadata", version = "0.1.1" }
 # Self-contained TIFF 6.0 codec (issue #107).

@@ -350,6 +350,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn typed_accessors_read_their_tags() {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_tag(ExifTag::Make, Value::Ascii("Canon".into()));
+        exif.set_tag(ExifTag::Model, Value::Ascii("R5".into()));
+        exif.set_tag(ExifTag::Software, Value::Ascii("gamut".into()));
+        exif.set_tag(ExifTag::Orientation, Value::Short(vec![6]));
+        exif.set_tag(
+            ExifTag::DateTimeOriginal,
+            Value::Ascii("2024:06:14 09:30:00".into()),
+        );
+        exif.set_tag(ExifTag::ExposureTime, Value::Rational(vec![(1, 500)]));
+        exif.set_tag(ExifTag::FNumber, Value::Rational(vec![(40, 10)]));
+        exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![800]));
+        exif.set_tag(ExifTag::FocalLength, Value::Rational(vec![(85, 1)]));
+        exif.set_tag(ExifTag::LensModel, Value::Utf8("RF85mm F1.2".into()));
+
+        assert_eq!(exif.make(), Some("Canon"));
+        assert_eq!(exif.model(), Some("R5"));
+        assert_eq!(exif.software(), Some("gamut"));
+        assert_eq!(exif.orientation(), Some(6));
+        assert_eq!(exif.datetime_original(), Some("2024:06:14 09:30:00"));
+        assert_eq!(exif.exposure_time(), Some(Rational { num: 1, den: 500 }));
+        assert_eq!(exif.f_number(), Some(Rational { num: 40, den: 10 }));
+        assert_eq!(exif.iso(), Some(800));
+        assert_eq!(exif.focal_length(), Some(Rational { num: 85, den: 1 }));
+        assert_eq!(exif.lens_model(), Some("RF85mm F1.2"));
+
+        // Absent tags read back as None.
+        let empty = Exif::new(ByteOrder::LittleEndian);
+        assert_eq!(empty.make(), None);
+        assert_eq!(empty.orientation(), None);
+        assert_eq!(empty.f_number(), None);
+        assert_eq!(empty.iso(), None);
+        assert_eq!(empty.gps(), None);
+        assert_eq!(empty.maker_note(), None);
+    }
+
+    #[test]
+    fn sub_ifd_setters_and_mut_accessors() {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+
+        let mut e = Ifd::new();
+        e.set(ExifTag::FNumber.tag_id(), Value::Rational(vec![(28, 10)]));
+        exif.set_exif_ifd(e);
+        assert!(exif.exif_ifd().is_some());
+
+        // interop_ifd / interop_ifd_mut / set_interop_ifd
+        assert!(exif.interop_ifd().is_none());
+        exif.interop_ifd_mut().set(
+            ExifTag::InteroperabilityIndex.tag_id(),
+            Value::Ascii("R98".into()),
+        );
+        assert!(exif.interop_ifd().is_some());
+        let mut interop = Ifd::new();
+        interop.set(
+            ExifTag::InteroperabilityIndex.tag_id(),
+            Value::Ascii("THM".into()),
+        );
+        exif.set_interop_ifd(interop);
+        assert_eq!(
+            exif.get(IfdKind::Interop, ExifTag::InteroperabilityIndex.tag_id()),
+            Some(&Value::Ascii("THM".into()))
+        );
+
+        // gps_ifd_mut vivifies
+        exif.gps_ifd_mut().set(
+            ExifTag::GpsVersionId.tag_id(),
+            Value::Byte(vec![2, 3, 0, 0]),
+        );
+        assert!(exif.gps_ifd().is_some());
+
+        // thumbnail set / clear
+        exif.set_thumbnail(vec![0xFF, 0xD8, 0xFF, 0xD9]);
+        assert!(exif.thumbnail().is_some());
+        exif.clear_thumbnail();
+        assert!(exif.thumbnail().is_none());
+        assert!(exif.thumbnail_bytes().is_none());
+    }
+
+    #[test]
     fn new_starts_empty_with_the_given_order() {
         let exif = Exif::new(ByteOrder::BigEndian);
         assert_eq!(exif.byte_order(), ByteOrder::BigEndian);

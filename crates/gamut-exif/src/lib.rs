@@ -11,6 +11,23 @@
 //! — re-exported here rather than duplicated — and the directories are [`gamut_ifd::Ifd`]s reached
 //! through [`Exif`]'s accessors. Tags and semantics follow **Exif 3.0** (CIPA DC-008;
 //! `references/exif`), with Exif 2.32 retained for legacy tag compatibility.
+//!
+//! [`Exif::parse`] reads a blob and [`Exif::to_bytes`] re-serialises it (preserving the byte order);
+//! read tags with the typed accessors or the [`ExifTag`] catalogue.
+//!
+//! ```
+//! use gamut_exif::{ByteOrder, Exif, ExifTag, Value};
+//!
+//! let mut exif = Exif::new(ByteOrder::LittleEndian);
+//! exif.set_tag(ExifTag::Make, Value::Ascii("gamut".into()));
+//! exif.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
+//!
+//! let bytes = exif.to_bytes(); // Exif\0\0 + TIFF, ready to embed
+//! let parsed = Exif::parse(&bytes)?;
+//! assert_eq!(parsed.make(), Some("gamut"));
+//! assert_eq!(parsed.f_number().and_then(|r| r.to_f64()), Some(2.8));
+//! # Ok::<(), gamut_exif::ExifError>(())
+//! ```
 #![forbid(unsafe_code)]
 
 pub mod error;
