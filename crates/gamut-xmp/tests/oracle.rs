@@ -7,7 +7,9 @@
 //!
 //! Requires the `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain.
 
-use gamut_xmp::{WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
+use gamut_xmp::{
+    Namespace, WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue, XmpWriter,
+};
 
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const DC: &str = "http://purl.org/dc/elements/1.1/";
@@ -104,6 +106,23 @@ fn every_well_known_namespace_survives_xmpcore() {
             "property in {ns:?} must survive the reference engine"
         );
     }
+}
+
+#[test]
+fn registered_prefix_packet_is_valid_for_xmpcore() {
+    // A packet serialized under a registered custom prefix is real XMP to the reference engine,
+    // and the property survives its round-trip.
+    let custom = "http://example.com/vocab/";
+    let mut meta = XmpMeta::new();
+    meta.set_text(custom, "kind", "demo");
+    let packet = XmpWriter::new()
+        .with_namespace(Namespace::new(custom, "vocab"))
+        .serialize(&meta);
+
+    exiv2_oracle::validate(&packet).expect("exiv2 must accept a registered-prefix packet");
+    let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
+    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    assert_eq!(parsed.get_text(custom, "kind"), Some("demo"));
 }
 
 #[test]

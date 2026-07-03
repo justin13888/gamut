@@ -61,6 +61,6 @@ mod reader;
 
 pub use error::{Result, XmpError};
 pub use model::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
-pub use namespace::{Namespace, WellKnownNs};
+pub use namespace::{Namespace, RDF_NAMESPACE, WellKnownNs, XML_NAMESPACE, XMPMETA_NAMESPACE};
 pub use packet::XmpPacket;
 pub use writer::XmpWriter;
