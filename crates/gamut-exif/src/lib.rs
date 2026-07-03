@@ -15,6 +15,7 @@
 
 pub mod error;
 pub mod exif;
+pub mod gps;
 pub mod reader;
 pub mod tag;
 pub mod value;
@@ -25,6 +26,7 @@ pub mod writer;
 pub use error::{ExifError, Result};
 pub use exif::Exif;
 pub use gamut_ifd::{ByteOrder, Ifd, Value};
+pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
 pub use reader::ExifReader;
 pub use tag::{ExifTag, IfdKind};
 pub use value::{Rational, SRational, as_text};

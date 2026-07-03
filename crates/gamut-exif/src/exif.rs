@@ -2,6 +2,7 @@
 
 use gamut_ifd::{ByteOrder, Ifd, Value};
 
+use crate::gps::GpsInfo;
 use crate::tag::{ExifTag, IfdKind};
 use crate::value::{Rational, as_text};
 
@@ -250,6 +251,13 @@ impl Exif {
     #[must_use]
     pub fn lens_model(&self) -> Option<&str> {
         self.get_tag(ExifTag::LensModel).and_then(as_text)
+    }
+
+    /// The GPS position as a typed [`GpsInfo`], or `None` if there is no GPS sub-IFD or it holds no
+    /// positioning tags. The full GPS directory is always available via [`gps_ifd`](Self::gps_ifd).
+    #[must_use]
+    pub fn gps(&self) -> Option<GpsInfo> {
+        GpsInfo::from_ifd(self.gps_ifd()?)
     }
 
     /// The directory for `kind`, if present.
