@@ -18,7 +18,7 @@
 //! as issue #32, not a correctness one. This conversion is deliberately *not* on the VP8 codec's
 //! bit-exact path (the codec operates on YCbCr planes directly); it backs the public RGB API.
 
-use gamut_core::{Error, Result};
+use gamut_core::{Dimensions, Error, Result};
 
 use crate::cicp::ColorRange;
 use crate::clip_pixel8;
@@ -138,9 +138,14 @@ impl Yuv420 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any plane length does not match the dimensions.
+    /// Returns [`Error::InvalidInput`] if any plane length does not match the dimensions, or if
+    /// the luma sample count overflows `usize`.
     pub fn new(width: u32, height: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>) -> Result<Self> {
-        let luma = width as usize * height as usize;
+        let luma = Dimensions { width, height }
+            .num_pixels()
+            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+        // Cannot overflow: each chroma plane has at most as many samples as the luma plane
+        // (`ceil(d / 2) <= d` for d >= 1, and 0 for d == 0), and `luma` just fit `usize`.
         let chroma = Self::chroma_width(width) as usize * Self::chroma_height(height) as usize;
         if y.len() != luma || u.len() != chroma || v.len() != chroma {
             return Err(Error::InvalidInput(
@@ -171,14 +176,18 @@ impl Yuv420 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, or either dimension is 0.
+    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, if that product
+    /// overflows `usize`, or if either dimension is 0.
     pub fn from_rgb8(rgb: &[u8], width: u32, height: u32, range: ColorRange) -> Result<Self> {
-        let (w, h) = (width as usize, height as usize);
-        if width == 0 || height == 0 || rgb.len() != w * h * 3 {
+        let samples = Dimensions::new(width, height)?
+            .sample_count(3)
+            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+        if rgb.len() != samples {
             return Err(Error::InvalidInput(
                 "rgb buffer length does not match dimensions",
             ));
         }
+        let (w, h) = (width as usize, height as usize);
         // Full-resolution luma, plus full-resolution chroma we then average down.
         let mut y = vec![0u8; w * h];
         let mut cb_full = vec![0u8; w * h];
@@ -410,6 +419,14 @@ mod tests {
     fn rejects_bad_rgb_length() {
         assert!(Yuv420::from_rgb8(&[0, 1, 2, 3], 1, 1, Limited).is_err());
         assert!(Yuv420::from_rgb8(&[], 0, 1, Limited).is_err());
+    }
+
+    #[test]
+    fn rejects_overflowing_dimensions() {
+        // Near-max dimensions must yield Err, not an overflow panic (debug) or a wrapped length
+        // check (32-bit release): width * height * 3 exceeds usize even on 64-bit targets.
+        assert!(Yuv420::from_rgb8(&[], u32::MAX, u32::MAX, Limited).is_err());
+        assert!(Yuv420::new(u32::MAX, u32::MAX, vec![], vec![], vec![]).is_err());
     }
 
     #[test]

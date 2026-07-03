@@ -1,6 +1,6 @@
 //! Planar 8-bit image buffers and the identity (`mc = 0`) RGB ↔ plane mapping.
 
-use gamut_core::{Error, ImageRef, Result, Rgb8};
+use gamut_core::{Dimensions, Error, ImageRef, Result, Rgb8};
 
 /// Maps an interleaved RGB buffer (`n` pixels) to identity GBR planes (`Y=G, U=B, V=R`).
 fn rgb_to_gbr_planes(rgb: &[u8], n: usize) -> [Vec<u8>; 3] {
@@ -43,10 +43,13 @@ impl Planar8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`.
+    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, or if that product
+    /// overflows `usize`.
     pub fn from_rgb8_identity(rgb: &[u8], width: u32, height: u32) -> Result<Self> {
-        let n = width as usize * height as usize;
-        if rgb.len() != n * 3 {
+        let n = Dimensions { width, height }
+            .num_pixels()
+            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+        if n.checked_mul(3) != Some(rgb.len()) {
             return Err(Error::InvalidInput(
                 "rgb buffer length != width * height * 3",
             ));
@@ -64,6 +67,8 @@ impl Planar8 {
     #[must_use]
     pub fn from_rgb8_identity_view(img: ImageRef<'_, Rgb8>) -> Self {
         let (width, height) = (img.width(), img.height());
+        // No overflow check needed: `ImageRef` already validated that width * height * 3 fits
+        // `usize` (it equals the sample slice's length).
         let n = width as usize * height as usize;
         Self {
             width,
@@ -77,9 +82,12 @@ impl Planar8 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any plane's length is not `width * height`.
+    /// Returns [`Error::InvalidInput`] if any plane's length is not `width * height`, or if that
+    /// product overflows `usize`.
     pub fn from_planes(width: u32, height: u32, planes: [Vec<u8>; 3]) -> Result<Self> {
-        let n = width as usize * height as usize;
+        let n = Dimensions { width, height }
+            .num_pixels()
+            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
         if planes.iter().any(|p| p.len() != n) {
             return Err(Error::InvalidInput("plane length != width * height"));
         }
@@ -165,6 +173,14 @@ mod tests {
         // 3 / 2 = 1) or an inverted `!=` length check would reject these correctly-sized planes.
         assert!(Planar8::from_planes(3, 2, [vec![0; 6], vec![0; 6], vec![0; 5]]).is_err());
         assert!(Planar8::from_planes(3, 2, [vec![0; 5], vec![0; 6], vec![0; 6]]).is_err());
+    }
+
+    #[test]
+    fn rejects_overflowing_dimensions() {
+        // Near-max dimensions must yield Err, not an overflow panic (debug) or a wrapped length
+        // check (32-bit release): width * height * 3 exceeds usize even on 64-bit targets.
+        assert!(Planar8::from_rgb8_identity(&[], u32::MAX, u32::MAX).is_err());
+        assert!(Planar8::from_planes(u32::MAX, u32::MAX, [vec![], vec![], vec![]]).is_err());
     }
 
     #[test]
