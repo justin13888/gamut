@@ -25,7 +25,7 @@
 //! flip is reconstruction bookkeeping in the 2-D assembly (`gamut-av1`'s `TxType::flip_ud` /
 //! `TxType::flip_lr`), sharing this 1-D ADST.
 
-use crate::butterfly::{b, h};
+use crate::av1::butterfly::{b, h};
 use crate::math::round2;
 
 const SINPI_1_9: i64 = 1321;

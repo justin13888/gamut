@@ -8,7 +8,7 @@
 //! with the center index representing exactly `0.0`. The top code (`2^bits − 1`)
 //! is never written, removing the zero bias so zeroed coefficients decode exactly.
 //!
-//! Tier-1 determinism: `mu_compress` / `mu_expand` use `std` `f64::ln` / `f64::powf`,
+//! Tier-1 determinism: `compress` / `expand` use `std` `f64::ln` / `f64::powf`,
 //! so results match chromahash's deterministic substrate within a small tolerance,
 //! not bit-for-bit.
 
@@ -35,15 +35,15 @@ fn max_index(bits: u32) -> Result<u32> {
 /// µ-law compress a `value` in `[-1, 1]` to a companded value in `[-1, 1]`.
 /// `value` is clamped to `[-1, 1]`. Precondition: `mu > 0`.
 #[must_use]
-pub fn mu_compress(value: f64, mu: f64) -> f64 {
+pub fn compress(value: f64, mu: f64) -> f64 {
     let v = value.clamp(-1.0, 1.0);
     v.signum() * (1.0 + mu * v.abs()).ln() / (1.0 + mu).ln()
 }
 
 /// µ-law expand a companded value in `[-1, 1]` back to `[-1, 1]` — the inverse of
-/// [`mu_compress`]. Precondition: `mu > 0`.
+/// [`compress`]. Precondition: `mu > 0`.
 #[must_use]
-pub fn mu_expand(compressed: f64, mu: f64) -> f64 {
+pub fn expand(compressed: f64, mu: f64) -> f64 {
     compressed.signum() * ((1.0 + mu).powf(compressed.abs()) - 1.0) / mu
 }
 
@@ -52,24 +52,24 @@ pub fn mu_expand(compressed: f64, mu: f64) -> f64 {
 ///
 /// # Errors
 /// Returns [`Error::InvalidInput`] if `bits` is not in `2..=31`.
-pub fn mu_quantize(value: f64, bits: u32, mu: f64) -> Result<u32> {
+pub fn quantize(value: f64, bits: u32, mu: f64) -> Result<u32> {
     let max_idx = max_index(bits)?;
-    let compressed = mu_compress(value, mu);
+    let compressed = compress(value, mu);
     let idx = round_half_away_from_zero((compressed + 1.0) / 2.0 * f64::from(max_idx));
     Ok((idx as i64).clamp(0, i64::from(max_idx)) as u32)
 }
 
 /// Dequantize an integer `index` back to a value in `[-1, 1]` through µ-law — the
-/// inverse of [`mu_quantize`]. The never-written top code clamps down to
+/// inverse of [`quantize`]. The never-written top code clamps down to
 /// `2^bits−2` for robustness.
 ///
 /// # Errors
 /// Returns [`Error::InvalidInput`] if `bits` is not in `2..=31`.
-pub fn mu_dequantize(index: u32, bits: u32, mu: f64) -> Result<f64> {
+pub fn dequantize(index: u32, bits: u32, mu: f64) -> Result<f64> {
     let max_idx = max_index(bits)?;
     let index = index.min(max_idx);
     let compressed = f64::from(index) / f64::from(max_idx) * 2.0 - 1.0;
-    Ok(mu_expand(compressed, mu))
+    Ok(expand(compressed, mu))
 }
 
 #[cfg(test)]
@@ -81,24 +81,24 @@ mod tests {
     #[test]
     fn compress_expand_roundtrip() {
         for &v in &[-1.0, -0.5, 0.0, 0.5, 1.0] {
-            let rt = mu_expand(mu_compress(v, MU), MU);
+            let rt = expand(compress(v, MU), MU);
             assert!((rt - v).abs() < 1e-12, "roundtrip at {v}: {rt}");
         }
     }
 
     #[test]
     fn compressed_endpoints() {
-        assert!((mu_compress(1.0, MU) - 1.0).abs() < 1e-12);
-        assert!((mu_compress(-1.0, MU) + 1.0).abs() < 1e-12);
-        assert!(mu_compress(0.0, MU).abs() < 1e-12);
+        assert!((compress(1.0, MU) - 1.0).abs() < 1e-12);
+        assert!((compress(-1.0, MU) + 1.0).abs() < 1e-12);
+        assert!(compress(0.0, MU).abs() < 1e-12);
     }
 
     #[test]
     fn zero_quantizes_to_center_and_back_exactly() {
         for bits in [4u32, 5, 6] {
             let center = (1u32 << (bits - 1)) - 1;
-            assert_eq!(mu_quantize(0.0, bits, MU).unwrap(), center, "bits={bits}");
-            assert_eq!(mu_dequantize(center, bits, MU).unwrap(), 0.0, "bits={bits}");
+            assert_eq!(quantize(0.0, bits, MU).unwrap(), center, "bits={bits}");
+            assert_eq!(dequantize(center, bits, MU).unwrap(), 0.0, "bits={bits}");
         }
     }
 
@@ -106,8 +106,8 @@ mod tests {
     fn extremes_quantize_to_bounds() {
         for bits in [4u32, 5, 6] {
             let max_idx = (1u32 << bits) - 2;
-            assert_eq!(mu_quantize(-1.0, bits, MU).unwrap(), 0);
-            assert_eq!(mu_quantize(1.0, bits, MU).unwrap(), max_idx);
+            assert_eq!(quantize(-1.0, bits, MU).unwrap(), 0);
+            assert_eq!(quantize(1.0, bits, MU).unwrap(), max_idx);
         }
     }
 
@@ -116,8 +116,8 @@ mod tests {
         for bits in [4u32, 5, 6] {
             let top = (1u32 << bits) - 1;
             assert_eq!(
-                mu_dequantize(top, bits, MU).unwrap(),
-                mu_dequantize(top - 1, bits, MU).unwrap()
+                dequantize(top, bits, MU).unwrap(),
+                dequantize(top - 1, bits, MU).unwrap()
             );
         }
     }
@@ -127,8 +127,8 @@ mod tests {
         for bits in [4u32, 5, 6] {
             let center = (1u32 << (bits - 1)) - 1;
             for &v in &[0.1, 0.3, 0.7] {
-                let qp = mu_quantize(v, bits, MU).unwrap();
-                let qn = mu_quantize(-v, bits, MU).unwrap();
+                let qp = quantize(v, bits, MU).unwrap();
+                let qn = quantize(-v, bits, MU).unwrap();
                 assert_eq!(qp - center, center - qn, "±{v} at bits={bits}");
             }
         }
@@ -136,9 +136,9 @@ mod tests {
 
     #[test]
     fn invalid_bit_width_errors() {
-        assert!(mu_quantize(0.5, 1, MU).is_err());
-        assert!(mu_quantize(0.5, 32, MU).is_err());
-        assert!(mu_dequantize(0, 0, MU).is_err());
+        assert!(quantize(0.5, 1, MU).is_err());
+        assert!(quantize(0.5, 32, MU).is_err());
+        assert!(dequantize(0, 0, MU).is_err());
     }
 
     #[test]
@@ -270,12 +270,12 @@ mod tests {
         ];
         for c in &cases {
             assert!(
-                (mu_compress(c.value, c.mu) - c.compressed).abs() < 1e-9,
+                (compress(c.value, c.mu) - c.compressed).abs() < 1e-9,
                 "compress {}",
                 c.value
             );
             assert!(
-                (mu_expand(c.compressed, c.mu) - c.expanded).abs() < 1e-9,
+                (expand(c.compressed, c.mu) - c.expanded).abs() < 1e-9,
                 "expand {}",
                 c.value
             );
@@ -284,7 +284,7 @@ mod tests {
             // and chromahash's deterministic `ln` rounds to the adjacent level.
             // Tier-1 therefore agrees on the index within ±1; the exact center /
             // bound / symmetry behavior is pinned by the structural tests above.
-            let q = mu_quantize(c.value, c.bits, c.mu).unwrap();
+            let q = quantize(c.value, c.bits, c.mu).unwrap();
             assert!(
                 (i64::from(q) - i64::from(c.quantized)).abs() <= 1,
                 "quantize {}: {q} vs {}",
@@ -292,7 +292,7 @@ mod tests {
                 c.quantized
             );
             assert!(
-                (mu_dequantize(c.quantized, c.bits, c.mu).unwrap() - c.dequantized).abs() < 1e-9,
+                (dequantize(c.quantized, c.bits, c.mu).unwrap() - c.dequantized).abs() < 1e-9,
                 "dequantize {}",
                 c.value
             );

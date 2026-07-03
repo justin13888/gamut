@@ -26,7 +26,7 @@
 
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{Planar8, clip_pixel};
-use gamut_dsp::round2_signed;
+use gamut_dsp::math::round2_signed;
 
 use crate::cdf;
 use crate::quant::{ac_q, dc_q, dequant, quantize};
@@ -1528,7 +1528,7 @@ impl<'a> FrameEncoder<'a> {
                     res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - pred[i * 4 + j];
                 }
             }
-            let quant = gamut_dsp::fwht4x4(&res);
+            let quant = gamut_dsp::av1::forward_wht4x4(&res);
             self.code_coeffs(
                 plane,
                 sx >> 2,

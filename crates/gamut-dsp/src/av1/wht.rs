@@ -10,9 +10,9 @@
 //!    `* 4` dequant, recovering `Quant` before the butterfly (AV1 §7.13.3).
 //! 3. Column pass: 1-D inverse WHT with `shift = 0` on each column → residual.
 //!
-//! [`iwht4x4`] reproduces that decoder reconstruct exactly (it is the oracle for the dav1d
-//! cross-check). [`fwht4x4`] is the encoder forward transform: the algebraic inverse, so
-//! `iwht4x4(fwht4x4(residual)) == residual` for every input. Because the `* 4` / `>> 2` cancel,
+//! [`inverse_wht4x4`] reproduces that decoder reconstruct exactly (it is the oracle for the dav1d
+//! cross-check). [`forward_wht4x4`] is the encoder forward transform: the algebraic inverse, so
+//! `inverse_wht4x4(forward_wht4x4(residual)) == residual` for every input. Because the `* 4` / `>> 2` cancel,
 //! the encoder emits the forward-transform output as the coded coefficients with no extra scaling.
 
 /// 1-D inverse Walsh–Hadamard transform, in place over `t` (AV1 §7.13.2.10).
@@ -52,9 +52,9 @@ fn iwht_1d_inverse(o: [i64; 4]) -> [i64; 4] {
 /// coefficients to be entropy-coded.
 ///
 /// The decoder applies a row inverse-WHT then a column inverse-WHT; this inverts that pipeline by
-/// applying the inverse butterfly to columns then rows. `iwht4x4(fwht4x4(r)) == r` for all `r`.
+/// applying the inverse butterfly to columns then rows. `inverse_wht4x4(forward_wht4x4(r)) == r` for all `r`.
 #[must_use]
-pub fn fwht4x4(residual: &[i32; 16]) -> [i32; 16] {
+pub fn forward_wht4x4(residual: &[i32; 16]) -> [i32; 16] {
     // Undo the decoder's column pass: inverse butterfly down each column.
     let mut m = [[0i64; 4]; 4];
     for j in 0..4 {
@@ -84,7 +84,7 @@ pub fn fwht4x4(residual: &[i32; 16]) -> [i32; 16] {
 /// (shift 0) inverse WHT, and returns the residual. Bit-exact with the AV1 decoder for an 8-bit
 /// `base_q_idx == 0` block (AV1 §7.12.3, §7.13.3, §7.13.2.10).
 #[must_use]
-pub fn iwht4x4(quant: &[i32; 16]) -> [i32; 16] {
+pub fn inverse_wht4x4(quant: &[i32; 16]) -> [i32; 16] {
     // Row pass with shift = 2 over Dequant = Quant * 4; the >> 2 cancels the * 4.
     let mut m = [[0i64; 4]; 4];
     for i in 0..4 {
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn roundtrip_zero() {
         let r = [0i32; 16];
-        assert_eq!(iwht4x4(&fwht4x4(&r)), r);
+        assert_eq!(inverse_wht4x4(&forward_wht4x4(&r)), r);
     }
 
     #[test]
@@ -144,14 +144,14 @@ mod tests {
             let col = idx % 4;
             *v = if (row + col) % 2 == 0 { 255 } else { -255 };
         }
-        let q = fwht4x4(&r);
+        let q = forward_wht4x4(&r);
         for &c in &q {
             assert!(
                 c * 4 >= -32768 && c * 4 <= 32767,
                 "coeff {c} would clamp on dequant"
             );
         }
-        assert_eq!(iwht4x4(&q), r);
+        assert_eq!(inverse_wht4x4(&q), r);
     }
 
     #[test]
@@ -162,7 +162,7 @@ mod tests {
             for v in &mut r {
                 *v = rng.residual();
             }
-            assert_eq!(iwht4x4(&fwht4x4(&r)), r);
+            assert_eq!(inverse_wht4x4(&forward_wht4x4(&r)), r);
         }
     }
 
@@ -170,7 +170,7 @@ mod tests {
     fn dc_only_residual() {
         // A flat residual transforms to a single DC coefficient and back.
         let r = [7i32; 16];
-        let q = fwht4x4(&r);
-        assert_eq!(iwht4x4(&q), r);
+        let q = forward_wht4x4(&r);
+        assert_eq!(inverse_wht4x4(&q), r);
     }
 }

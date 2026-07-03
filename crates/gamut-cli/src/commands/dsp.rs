@@ -1,7 +1,7 @@
 //! `gamut dsp` — the lossless 4×4 Walsh–Hadamard transform (gamut-dsp).
 
 use clap::Subcommand;
-use gamut::dsp::{fwht4x4, iwht4x4};
+use gamut::dsp::av1::{forward_wht4x4, inverse_wht4x4};
 
 use crate::error::CliError;
 
@@ -33,11 +33,11 @@ fn wht(values: &[i32], inverse: bool) -> Result<(), CliError> {
     })?;
 
     let (transformed, roundtrip) = if inverse {
-        let coeffs = iwht4x4(&block);
-        (coeffs, fwht4x4(&coeffs))
+        let coeffs = inverse_wht4x4(&block);
+        (coeffs, forward_wht4x4(&coeffs))
     } else {
-        let coeffs = fwht4x4(&block);
-        (coeffs, iwht4x4(&coeffs))
+        let coeffs = forward_wht4x4(&block);
+        (coeffs, inverse_wht4x4(&coeffs))
     };
 
     let label = if inverse { "inverse" } else { "forward" };
