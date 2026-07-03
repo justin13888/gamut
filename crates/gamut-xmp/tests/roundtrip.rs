@@ -94,6 +94,23 @@ fn canonical_graph_survives_packet_roundtrip() {
 }
 
 #[test]
+fn control_characters_survive_roundtrip() {
+    // XML 1.0 normalizes a literal CR in text (to LF) and literal TAB/LF/CR in attribute values
+    // (to spaces) on every parse, so the serializer must emit them as character references or the
+    // fixed point silently corrupts data. Exercises both sinks: element text (Simple) and an
+    // attribute value (Uri → rdf:resource).
+    let mut meta = XmpMeta::new();
+    meta.set_text(DC, "description", "line1\r\nline2\ttab\rbare");
+    meta.set(XmpProperty::new(
+        XMP,
+        "BaseURL",
+        XmpValue::Uri("http://example.com/a\tb\nc\rd".into()),
+    ));
+    let parsed = XmpMeta::from_packet(&meta.to_packet()).expect("reparse");
+    assert_eq!(parsed, meta);
+}
+
+#[test]
 fn equivalent_input_forms_parse_to_the_same_graph() {
     // Element form vs. attribute form for a simple property (Part 1 §7.9.2.2).
     let element = format!(

@@ -87,13 +87,16 @@ pub(crate) fn split_packet(bytes: &[u8]) -> Result<SplitPacket<'_>> {
     };
     let body_start = header + rel + 2;
 
-    // The trailer is the next "<?xpacket" after the body. Its only `w` is in `end="w"`
-    // (a read-only trailer says `end="r"`), so a byte check distinguishes writable from read-only.
+    // The trailer is the next "<?xpacket" after the body; the packet is writable only when its
+    // `end` attribute says so (`end="w"` in either quote style, Part 1 §7.3.2) — an unrelated `w`
+    // byte elsewhere in the instruction must not count.
     let (body_end, writable) = match find(&bytes[body_start..], b"<?xpacket") {
         Some(rel) => {
             let trailer = body_start + rel;
             let trailer_end = find(&bytes[trailer..], b"?>").map_or(bytes.len(), |e| trailer + e);
-            (trailer, find(&bytes[trailer..trailer_end], b"w").is_some())
+            let pi = &bytes[trailer..trailer_end];
+            let writable = find(pi, b"end=\"w\"").is_some() || find(pi, b"end='w'").is_some();
+            (trailer, writable)
         }
         None => (bytes.len(), false),
     };
@@ -225,6 +228,14 @@ mod tests {
         assert!(XmpPacket::scan(writable.as_bytes()).unwrap().writable);
         let read_only = "<?xpacket begin='' id='x'?><rdf:RDF/><?xpacket end='r'?>";
         assert!(!XmpPacket::scan(read_only.as_bytes()).unwrap().writable);
+    }
+
+    #[test]
+    fn unrelated_w_byte_in_the_trailer_is_not_writable() {
+        // Writability comes from the end attribute alone — a stray `w` elsewhere in the
+        // instruction (here in a nonstandard extra attribute) must not flip it.
+        let s = "<?xpacket begin=\"\" id=\"x\"?><rdf:RDF/><?xpacket end=\"r\" note=\"w\"?>";
+        assert!(!XmpPacket::scan(s.as_bytes()).unwrap().writable);
     }
 
     #[test]

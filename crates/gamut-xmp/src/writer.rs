@@ -421,18 +421,28 @@ fn indent(out: &mut String, level: usize) {
 }
 
 /// Appends `text` with the markup-significant characters escaped (Part 1 §7.5; never CDATA).
+///
+/// A carriage return is escaped as `&#xD;` — XML 1.0 line-ending normalization would otherwise
+/// rewrite it to a line feed on the next parse, breaking the parse∘serialize fixed point (the
+/// canonical-XML rule; XMPCore escapes the same way).
 fn push_escaped_text(out: &mut String, text: &str) {
     for c in text.chars() {
         match c {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#xD;"),
             _ => out.push(c),
         }
     }
 }
 
-/// Appends an attribute value with markup characters and the double quote escaped.
+/// Appends an attribute value with markup characters, the double quote, and whitespace control
+/// characters escaped.
+///
+/// Tab, line feed, and carriage return are escaped as character references — XML 1.0
+/// attribute-value normalization folds the literal characters to spaces on the next parse, which
+/// would corrupt the value (the canonical-XML rule; XMPCore escapes the same way).
 fn push_escaped_attr(out: &mut String, text: &str) {
     for c in text.chars() {
         match c {
@@ -440,6 +450,9 @@ fn push_escaped_attr(out: &mut String, text: &str) {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
+            '\t' => out.push_str("&#x9;"),
+            '\n' => out.push_str("&#xA;"),
+            '\r' => out.push_str("&#xD;"),
             _ => out.push(c),
         }
     }
@@ -663,6 +676,25 @@ mod tests {
         assert!(
             !out.contains("xml:lang"),
             "xml:space must not become a language: {out}"
+        );
+    }
+
+    #[test]
+    fn control_characters_are_escaped_as_character_references() {
+        // CR in text, and TAB/LF/CR in attribute values, must leave as character references —
+        // a literal CR is normalized to LF (text) and literal TAB/LF/CR to spaces (attributes)
+        // by any conformant XML parse, silently corrupting the value.
+        let out = body(vec![
+            XmpProperty::new(DC, "description", XmpValue::Simple("a\rb\nc\td".into())),
+            XmpProperty::new(XMP, "BaseURL", XmpValue::Uri("u\tv\nw\rx".into())),
+        ]);
+        assert!(
+            out.contains("<dc:description>a&#xD;b\nc\td</dc:description>"),
+            "text escapes CR only (LF and TAB are literal-safe in text): {out}"
+        );
+        assert!(
+            out.contains("rdf:resource=\"u&#x9;v&#xA;w&#xD;x\""),
+            "attributes escape TAB, LF, and CR: {out}"
         );
     }
 
