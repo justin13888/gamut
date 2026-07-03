@@ -126,8 +126,11 @@ impl Default for ReinhardExtended {
 
 impl ToneCurve for ReinhardExtended {
     fn map(&self, x: f32) -> f32 {
-        let numerator = x * (1.0 + x / (self.white * self.white));
-        numerator / (1.0 + x)
+        // Factored form of Eq (4): the direct `x * (1 + x/white²) / (1 + x)` overflows its
+        // numerator for huge x even when the exact value fits f32; `x / (1 + x)` is bounded by 1,
+        // so this order only saturates when the exact value genuinely exceeds f32 range. See
+        // references/tonemap/README.md.
+        (x / (1.0 + x)) * (1.0 + x / (self.white * self.white))
     }
 }
 
@@ -200,6 +203,11 @@ impl ToneCurve for Aces {
         const C: f32 = 2.43;
         const D: f32 = 0.59;
         const E: f32 = 0.14;
+        // The unclamped rational is >= 1 for every x >= 7.2417 (see references/tonemap/README.md
+        // for the derivation), so under the saturate, evaluating at min(x, 8) is exact — and it
+        // keeps the quadratics from overflowing to inf/inf = NaN for x beyond ~1e19. An argument
+        // clamp rather than an early return so the hot loop stays branchless.
+        let x = x.min(8.0);
         ((x * (A * x + B)) / (x * (C * x + D) + E)).clamp(0.0, 1.0)
     }
 }
@@ -212,8 +220,14 @@ const HABLE_D: f32 = 0.20; // toe strength
 const HABLE_E: f32 = 0.02; // toe numerator
 const HABLE_F: f32 = 0.30; // toe denominator
 
+/// Largest argument `hable_partial` evaluates directly. Beyond it the curve sits within one f32
+/// ULP of its horizontal asymptote (see references/tonemap/README.md), while the unguarded
+/// quadratics would overflow to inf/inf = NaN near ~1.5e19 — so clamping is sub-ULP-exact.
+const HABLE_EVAL_MAX: f32 = 1e18;
+
 /// The un-normalized Uncharted 2 partial curve `partial(x)` (see [`Hable`]).
 fn hable_partial(x: f32) -> f32 {
+    let x = x.min(HABLE_EVAL_MAX);
     ((x * (HABLE_A * x + HABLE_C * HABLE_B) + HABLE_D * HABLE_E)
         / (x * (HABLE_A * x + HABLE_B) + HABLE_D * HABLE_F))
         - HABLE_E / HABLE_F
@@ -536,6 +550,38 @@ mod tests {
         let c2 = c.with_bias(0.5).expect("bias in (0,1)");
         assert_eq!(c2.bias(), 0.5);
         assert!(close_eps(c2.map(c2.world_max()), 1.0, 1e-5));
+    }
+
+    #[test]
+    fn operators_never_return_nan_at_f32_extremes() {
+        // The trait contract's never-NaN clause, probed where the naive math would overflow to
+        // inf/inf = NaN (Aces and Hable near 1e19+ without their guards). Outputs may legitimately
+        // saturate to +inf where the exact value exceeds f32 range (e.g. Exposure), but never NaN,
+        // never negative. Drago at 1e20 is deliberately far beyond world_max — out-of-domain, so
+        // only the never-NaN/non-negative clauses apply there.
+        let curves: [&dyn ToneCurve; 8] = [
+            &Linear,
+            &Clamp::default(),
+            &Exposure::new(2.0).expect("valid gain"),
+            &Reinhard,
+            &ReinhardExtended::default(),
+            &Aces,
+            &Hable::default(),
+            &Drago::new(100.0).expect("valid world max"),
+        ];
+        for (i, curve) in curves.iter().enumerate() {
+            for x in [0.0, 1e20, f32::MAX] {
+                let y = curve.map(x);
+                assert!(!y.is_nan(), "curve {i} returned NaN at {x}");
+                assert!(y >= 0.0, "curve {i} returned {y} at {x}");
+            }
+        }
+        // Exact values pin the guards themselves — a deleted or boundary-shifted guard survives
+        // the NaN checks alone: the unclamped Aces rational is >= 1 for every x >= 7.2417, and
+        // Hable evaluates at its clamp bound for any larger input.
+        assert_eq!(Aces.map(1e20), 1.0);
+        let h = Hable::default();
+        assert_eq!(h.map(f32::MAX), h.map(1e18));
     }
 
     #[test]

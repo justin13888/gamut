@@ -65,6 +65,13 @@ reverts to Eq (3).
 SDR diffuse white (100 cd/m²). Golden: `Reinhard.map(1)=0.5`, `map(3)=0.75`;
 `ReinhardExtended{4}.map(4)=1.0`, `map(2)=0.75`.
 
+**Evaluation note — factored form.** Eq (4) is evaluated as `(L / (1 + L)) · (1 + L / L_white²)`,
+algebraically identical to the printed form. The direct numerator `L · (1 + L / L_white²)` can
+overflow f32 for huge `L` even when the exact result fits (e.g. `L = f32::MAX`, `L_white = 2.03`:
+exact `≈ 8×10³⁷`); the factored first term is bounded by 1, so the product only saturates to `+∞`
+when the exact value genuinely exceeds f32 range. Every golden above is bit-identical under either
+form.
+
 > Note: Reinhard's key-value pre-scale (Eq 1–2, `L = (a/L̄_w)·L_w`, an exposure/auto-exposure step)
 > is **not** part of these operators — `gamut-tonemap` models it with the composable `Exposure`
 > operator (below) so each curve stays a pure `f32 → f32` map.
@@ -103,6 +110,14 @@ curve). The input is assumed pre-exposed (so `1 → ≈0.8`); apply `Exposure::n
 the original ACES curve. Golden: `map(0)=0`, `map(0.5)≈0.616307`, `map(1)≈0.803797`, `map(1e6)→1`
 (saturates; the unclamped limit is `a/c ≈ 1.033`).
 
+**Evaluation note — saturation clamp.** The unclamped rational is `≥ 1` exactly when
+`numerator − denominator = (a−c)·x² + (b−d)·x − e = 0.08x² − 0.56x − 0.14 ≥ 0`, i.e. for
+`x ≥ (0.56 + √(0.56² + 4·0.08·0.14)) / (2·0.08) ≈ 7.2417`. Under `saturate`, every such input maps
+to exactly `1.0`, so the implementation evaluates the rational at `min(x, 8)` — branchless, keeping
+the per-sample loop vectorizable — with ample margin: the unclamped value at `x = 8` is `≈ 1.0031`,
+thousands of f32 ULPs above 1, so the saturate still lands on exactly `1.0`. Without the argument
+clamp both quadratics overflow f32 for `x ≳ 2×10¹⁹`, yielding `inf/inf = NaN`.
+
 ---
 
 ## Hable / Uncharted 2 filmic (2010)
@@ -124,6 +139,13 @@ applied an exposure bias of 2.0 (`curr = partial(2·x)`) — modelled here by co
 `Exposure::new(2.0)` — and a final `pow(·, 1/2.2)` display re-encode, which belongs to the target
 transfer function (`gamut-color`), not the tone curve. Default `W = DEFAULT_HABLE_WHITE = 11.2`.
 Golden (`W = 11.2`): `map(0)=0`, `map(1)≈0.304300`, `map(4)≈0.713240`, `map(11.2)=1`.
+
+**Evaluation note — argument clamp.** `partial` clamps its argument to `10¹⁸` before evaluating.
+Expanding the rational, `partial(x) = (1 − E/F) − ((B − C·B)/A)/x + O(1/x²) ≈ 0.93̅ − 3/x`, so at
+`x = 10¹⁸` the curve sits `3×10⁻¹⁸` below its horizontal asymptote — some ten orders of magnitude
+inside one f32 ULP (`≈ 6×10⁻⁸` at `0.93`); `partial(10¹⁸)` and `partial(9×10¹⁸)` are bit-identical
+in f32. Without the clamp the quadratics overflow to `inf/inf = NaN` for `x ≳ 1.5×10¹⁹`. Clamping
+inside `partial` also covers the `partial(W)` normalizer for absurdly large white points.
 
 > Hable later (2017, "Filmic Tonemapping with Piecewise Power Curves") proposed a different,
 > piecewise operator; the curve above is the original 2010 Uncharted 2 operator.
