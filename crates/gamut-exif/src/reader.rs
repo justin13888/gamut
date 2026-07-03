@@ -9,17 +9,9 @@
 use gamut_ifd::{ByteOrder, Ifd, Variant};
 
 use crate::error::{ExifError, Result};
-use crate::exif::Exif;
-
-/// The 6-byte identifier that precedes the TIFF stream in a JPEG `APP1` EXIF segment.
-const MARKER: &[u8] = b"Exif\x00\x00";
-
-/// `ExifIFD` pointer (0th IFD → Exif sub-IFD), Exif 3.0 §4.6.3.
-const EXIF_IFD_POINTER: u16 = 0x8769;
-/// `GPSInfo` pointer (0th IFD → GPS sub-IFD).
-const GPS_IFD_POINTER: u16 = 0x8825;
-/// `Interoperability` pointer (Exif sub-IFD → Interop sub-IFD).
-const INTEROP_IFD_POINTER: u16 = 0xA005;
+use crate::exif::{
+    EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER, without_tags,
+};
 
 /// Reads an EXIF blob into an [`Exif`], with options for how the parse is bounded.
 ///
@@ -114,25 +106,13 @@ impl ExifReader {
         let Some(offset) = parent.get_u32(ptr) else {
             return Ok(None);
         };
-        *parent = without_tag(parent, ptr);
+        *parent = without_tags(parent, &[ptr]);
         match gamut_ifd::read_ifd_at(tiff, u64::from(offset), order, variant) {
             Ok(ifd) => Ok(Some(ifd)),
             Err(_) if !self.strict => Ok(None),
             Err(_) => Err(ExifError::InvalidIfd(name)),
         }
     }
-}
-
-/// Returns a copy of `ifd` without field `tag`. The container exposes no in-place removal, and the
-/// only tags stripped here are the handful of pointer tags, so rebuilding is cheap.
-fn without_tag(ifd: &Ifd, tag: u16) -> Ifd {
-    let mut out = Ifd::new();
-    for field in ifd.fields() {
-        if field.tag != tag {
-            out.set(field.tag, field.value.clone());
-        }
-    }
-    out
 }
 
 #[cfg(test)]

@@ -5,6 +5,15 @@ use gamut_ifd::{ByteOrder, Ifd, Value};
 use crate::tag::{ExifTag, IfdKind};
 use crate::value::{Rational, as_text};
 
+/// The 6-byte identifier that precedes the TIFF stream in a JPEG `APP1` EXIF segment.
+pub(crate) const MARKER: &[u8] = b"Exif\x00\x00";
+/// `ExifIFD` pointer (0th IFD → Exif sub-IFD), Exif 3.0 §4.6.3.
+pub(crate) const EXIF_IFD_POINTER: u16 = 0x8769;
+/// `GPSInfo` pointer (0th IFD → GPS sub-IFD).
+pub(crate) const GPS_IFD_POINTER: u16 = 0x8825;
+/// `Interoperability` pointer (Exif sub-IFD → Interop sub-IFD).
+pub(crate) const INTEROP_IFD_POINTER: u16 = 0xA005;
+
 /// A parsed EXIF blob — the directories of the TIFF stream that follows the optional `Exif\0\0`
 /// marker.
 ///
@@ -74,6 +83,16 @@ impl Exif {
     /// Returns an [`ExifError`](crate::ExifError) if the TIFF stream is malformed.
     pub fn parse(bytes: &[u8]) -> crate::Result<Self> {
         crate::ExifReader::new().parse(bytes)
+    }
+
+    /// Serialises this EXIF blob to a valid `Exif\0\0` + TIFF stream with default options.
+    ///
+    /// Preserves the source byte order and re-synthesises the Exif/GPS/Interop pointer tags. For a
+    /// bare TIFF stream (PNG `eXIf` / WebP `EXIF`) or a byte-order override, use
+    /// [`ExifWriter`](crate::ExifWriter).
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        crate::ExifWriter::new().write(self)
     }
 
     /// The byte order of the underlying TIFF stream (preserved for round-tripping).
@@ -262,6 +281,20 @@ fn first_rational(value: &Value) -> Option<Rational> {
         Value::Rational(rs) => rs.first().copied().map(Rational::from),
         _ => None,
     }
+}
+
+/// Returns a copy of `ifd` with every field in `tags` removed.
+///
+/// [`gamut_ifd::Ifd`] exposes no in-place removal; the reader uses this to drop pointer tags after
+/// following them, and the writer to drop any hand-set pointer tags before re-synthesising them.
+pub(crate) fn without_tags(ifd: &Ifd, tags: &[u16]) -> Ifd {
+    let mut out = Ifd::new();
+    for field in ifd.fields() {
+        if !tags.contains(&field.tag) {
+            out.set(field.tag, field.value.clone());
+        }
+    }
+    out
 }
 
 #[cfg(test)]

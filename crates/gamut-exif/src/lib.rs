@@ -18,6 +18,7 @@ pub mod exif;
 pub mod reader;
 pub mod tag;
 pub mod value;
+pub mod writer;
 
 // EXIF is a TIFF profile: reuse the container's value and directory types directly rather than
 // wrapping them in a parallel model.
@@ -27,3 +28,4 @@ pub use gamut_ifd::{ByteOrder, Ifd, Value};
 pub use reader::ExifReader;
 pub use tag::{ExifTag, IfdKind};
 pub use value::{Rational, SRational, as_text};
+pub use writer::ExifWriter;
