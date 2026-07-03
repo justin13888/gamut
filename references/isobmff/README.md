@@ -32,7 +32,18 @@ Conformance is instead verified against:
 
 ## Box set implemented
 
-`ftyp` · `meta` (FullBox v0) · `hdlr` (`pict`) · `pitm` v0 · `iloc` v0 (single extent,
-`construction_method` 0) · `iinf` v0 + `infe` v2 · `iprp` = `ipco` + `ipma` v0 · the properties
-`ispe`, `pixi`, `colr` (`nclx`), `irot`, `imir`, plus opaque codec-configuration (`av1C`) · `mdat`.
-Deferred boxes are listed in [`crates/gamut-isobmff/STATUS.md`](../../crates/gamut-isobmff/STATUS.md).
+Written (normalised to the smallest still-image versions): `ftyp` · `meta` (FullBox v0) · `hdlr`
+(`pict`) · `pitm` v0 · `iloc` v0 (single extent, `construction_method` 0) · `iinf` v0 + `infe` v2
+(incl. `mime` content type/encoding and the hidden flag) · `iref` v0
+(`auxl`/`cdsc`/`dimg`/`thmb`/`prem`, …) · `iprp` = `ipco` + `ipma` v0 (8- or 16-bit associations) ·
+`grpl` (`EntityToGroupBox` v0) · the properties `ispe`, `pixi`, `colr` (`nclx`/`rICC`/`prof`),
+`irot`, `imir`, `clap`, `pasp`, `auxC`, `clli`, plus opaque codec-configuration
+(`av1C`/`hvcC`/`vvcC`) · `mdat`.
+
+Additionally read (the foreign-encoder repertoire, normalised into the same model): `iloc` v1/v2 —
+`construction_method` 1 (`idat`), base offsets, 0/4/8-byte fields, multi-extent concatenation —
+plus `pitm` v1, `iinf` v1, `infe` v3, `iref` v1, and `ipma` v1. Hand-authored spec fixtures
+(`crates/gamut-isobmff/tests/foreign.rs`) pin these layouts independently of the writer.
+
+Deferred and out-of-scope boxes are listed in
+[`crates/gamut-isobmff/STATUS.md`](../../crates/gamut-isobmff/STATUS.md).
