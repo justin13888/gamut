@@ -23,11 +23,24 @@ fn expected_len<P: Pixel>(dims: Dimensions) -> Result<usize> {
         .ok_or(Error::InvalidInput("image dimensions overflow usize"))
 }
 
+/// Checks the length invariant `data_len == width * height * P::CHANNELS` (with non-empty,
+/// non-overflowing `dims`). The single source of truth both buffer constructors call, so the
+/// rejection messages never drift between the borrowed and owned paths.
+fn validate_len<P: Pixel>(data_len: usize, dims: Dimensions) -> Result<()> {
+    if data_len != expected_len::<P>(dims)? {
+        return Err(Error::InvalidInput(
+            "image buffer length does not match dimensions",
+        ));
+    }
+    Ok(())
+}
+
 /// A borrowed, length-validated view of an interleaved image of pixel type `P`.
 ///
 /// Cheap to copy (a slice + [`Dimensions`] + a zero-sized marker). Construct one at an API boundary
 /// with [`ImageRef::new`]; pass it to an [`crate::EncodeImage`] implementation.
 #[derive(Debug, Clone, Copy)]
+#[must_use]
 pub struct ImageRef<'a, P: Pixel> {
     data: &'a [P::Sample],
     dims: Dimensions,
@@ -43,12 +56,7 @@ impl<'a, P: Pixel> ImageRef<'a, P> {
     /// Returns [`Error::InvalidInput`] if `dims` is zero-sized, if `width * height * channels`
     /// overflows `usize`, or if `data.len()` does not equal that product.
     pub fn new(data: &'a [P::Sample], dims: Dimensions) -> Result<Self> {
-        let want = expected_len::<P>(dims)?;
-        if data.len() != want {
-            return Err(Error::InvalidInput(
-                "image buffer length does not match dimensions",
-            ));
-        }
+        validate_len::<P>(data.len(), dims)?;
         Ok(Self {
             data,
             dims,
@@ -144,8 +152,8 @@ impl<P: Pixel> ImageBuf<P> {
     /// Returns [`Error::InvalidInput`] if `dims` is zero-sized, if the sample count overflows
     /// `usize`, or if `data.len()` does not equal `width * height * P::CHANNELS`.
     pub fn new(data: Vec<P::Sample>, dims: Dimensions) -> Result<Self> {
-        // Reuse the single source of truth for the length invariant.
-        ImageRef::<P>::new(&data, dims)?;
+        // Same length invariant as `ImageRef::new`, without building a throwaway borrowed view.
+        validate_len::<P>(data.len(), dims)?;
         Ok(Self {
             data,
             dims,
@@ -168,7 +176,6 @@ impl<P: Pixel> ImageBuf<P> {
     }
 
     /// Borrows this image as an [`ImageRef`]. Infallible — the invariant already holds.
-    #[must_use]
     pub fn as_ref(&self) -> ImageRef<'_, P> {
         ImageRef {
             data: &self.data,

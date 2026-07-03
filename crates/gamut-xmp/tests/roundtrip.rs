@@ -4,7 +4,7 @@
 //! the canonical form is a fixed point of parse∘serialize, a canonical graph survives a packet
 //! round-trip unchanged, and the equivalent RDF/XML input forms XMP allows all parse to one graph.
 
-use gamut_xmp::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
+use gamut_xmp::{Namespace, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue, XmpWriter};
 
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const DC: &str = "http://purl.org/dc/elements/1.1/";
@@ -91,6 +91,42 @@ fn canonical_graph_survives_packet_roundtrip() {
     let packet = meta.to_packet();
     let parsed = XmpMeta::from_packet(&packet).expect("parse packet");
     assert_eq!(parsed, meta);
+}
+
+#[test]
+fn control_characters_survive_roundtrip() {
+    // XML 1.0 normalizes a literal CR in text (to LF) and literal TAB/LF/CR in attribute values
+    // (to spaces) on every parse, so the serializer must emit them as character references or the
+    // fixed point silently corrupts data. Exercises both sinks: element text (Simple) and an
+    // attribute value (Uri → rdf:resource).
+    let mut meta = XmpMeta::new();
+    meta.set_text(DC, "description", "line1\r\nline2\ttab\rbare");
+    meta.set(XmpProperty::new(
+        XMP,
+        "BaseURL",
+        XmpValue::Uri("http://example.com/a\tb\nc\rd".into()),
+    ));
+    let parsed = XmpMeta::from_packet(&meta.to_packet()).expect("reparse");
+    assert_eq!(parsed, meta);
+}
+
+#[test]
+fn registered_prefix_is_not_semantic() {
+    // A prefix registered on the writer changes only the serialization cosmetics: parsing the
+    // output yields exactly the same graph as parsing the default (synthesized-prefix) output.
+    let mut meta = XmpMeta::new();
+    meta.set_text("http://example.com/vocab/", "kind", "demo");
+    meta.set_text(DC, "format", "text/plain");
+
+    let registered = XmpWriter::new()
+        .with_namespace(Namespace::new("http://example.com/vocab/", "vocab"))
+        .serialize(&meta);
+    let parsed = XmpMeta::from_packet(&registered).expect("parse registered-prefix packet");
+    assert_eq!(parsed, meta);
+    assert_eq!(
+        parsed,
+        XmpMeta::from_packet(&meta.to_packet()).expect("default")
+    );
 }
 
 #[test]
