@@ -229,7 +229,7 @@ mod tests {
         xmp.set_city("Oslo");
         let pm = merge(ConflictPolicy::IimWins, Some(&iim), Some(&xmp)).unwrap();
         assert_eq!(pm.city(), Some("Oslo"));
-        assert_eq!(pm.properties.len(), 1);
+        assert_eq!(pm.xmp.properties.len(), 1);
     }
 
     #[test]

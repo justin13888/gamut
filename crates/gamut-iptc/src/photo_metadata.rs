@@ -19,15 +19,8 @@ use crate::schema::{IPTC_NAMESPACES, XmpField, XmpShape, ns};
 /// `dc:rights`, `dc:description`) are read and written as their `x-default` alternative.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhotoMetadata {
-    /// The IPTC Core/Extension properties, as XMP properties in the IPTC namespaces.
-    pub properties: Vec<XmpProperty>,
-}
-
-fn simple_str(value: &XmpValue) -> Option<&str> {
-    match value {
-        XmpValue::Simple(s) => Some(s),
-        _ => None,
-    }
+    /// The IPTC Core/Extension properties, as an XMP property graph in the IPTC namespaces.
+    pub xmp: XmpMeta,
 }
 
 impl PhotoMetadata {
@@ -42,12 +35,14 @@ impl PhotoMetadata {
     #[must_use]
     pub fn from_xmp(meta: &XmpMeta) -> Self {
         Self {
-            properties: meta
-                .properties
-                .iter()
-                .filter(|p| IPTC_NAMESPACES.contains(&p.namespace.as_str()))
-                .cloned()
-                .collect(),
+            xmp: XmpMeta {
+                properties: meta
+                    .properties
+                    .iter()
+                    .filter(|p| IPTC_NAMESPACES.contains(&p.namespace.as_str()))
+                    .cloned()
+                    .collect(),
+            },
         }
     }
 
@@ -84,50 +79,42 @@ impl PhotoMetadata {
     }
 
     pub(crate) fn simple(&self, ns: &str, name: &str) -> Option<&str> {
-        simple_str(&self.find(ns, name)?.value)
+        self.xmp.get_text(ns, name)
     }
 
     pub(crate) fn set_simple(&mut self, ns: &str, name: &str, value: &str) {
-        self.upsert(ns, name, XmpValue::Simple(value.to_owned()));
+        self.xmp.set_text(ns, name, value);
     }
 
-    /// Reads the `x-default` (first) alternative of a language-alternative property.
+    /// Reads the first alternative of a language-alternative property, tolerating a plain simple
+    /// value (non-conformant but seen in the wild).
     pub(crate) fn lang_alt(&self, ns: &str, name: &str) -> Option<&str> {
-        match &self.find(ns, name)?.value {
-            XmpValue::Array(XmpArray::Alt(items)) => {
-                items.iter().find_map(|item| simple_str(&item.value))
-            }
-            XmpValue::Simple(s) => Some(s),
-            _ => None,
+        match &self.xmp.get(ns, name)?.value {
+            XmpValue::Array(XmpArray::Alt(items)) => items.iter().find_map(XmpItem::text),
+            value => value.text(),
         }
     }
 
     pub(crate) fn set_lang_alt(&mut self, ns: &str, name: &str, value: &str) {
-        let alt = XmpArray::Alt(vec![XmpItem::new(XmpValue::Simple(value.to_owned()))]);
-        self.upsert(ns, name, XmpValue::Array(alt));
+        self.xmp.set_lang_alt(ns, name, "x-default", value);
     }
 
     pub(crate) fn list(&self, ns: &str, name: &str) -> Vec<&str> {
-        match self.find(ns, name).map(|p| &p.value) {
-            Some(XmpValue::Array(XmpArray::Bag(items) | XmpArray::Seq(items))) => items
-                .iter()
-                .filter_map(|item| simple_str(&item.value))
-                .collect(),
+        match self.xmp.get_array(ns, name) {
+            Some(array @ (XmpArray::Bag(_) | XmpArray::Seq(_))) => array.texts().collect(),
             _ => Vec::new(),
         }
     }
 
     pub(crate) fn set_list(&mut self, ns: &str, name: &str, ordered: bool, values: &[&str]) {
-        let items = values
-            .iter()
-            .map(|s| XmpItem::new(XmpValue::Simple((*s).to_owned())))
-            .collect();
+        let items = values.iter().map(|s| XmpItem::simple(*s)).collect();
         let array = if ordered {
             XmpArray::Seq(items)
         } else {
             XmpArray::Bag(items)
         };
-        self.upsert(ns, name, XmpValue::Array(array));
+        self.xmp
+            .set(XmpProperty::new(ns, name, XmpValue::Array(array)));
     }
 
     /// Reads a field's value(s) by its schema identity, as owned strings (empty if absent).
@@ -532,7 +519,7 @@ mod tests {
         // Setting again replaces rather than duplicating.
         pm.set_city("Lyon");
         assert_eq!(pm.city(), Some("Lyon"));
-        assert_eq!(pm.properties.len(), 1);
+        assert_eq!(pm.xmp.properties.len(), 1);
     }
 
     #[test]
@@ -541,13 +528,13 @@ mod tests {
         pm.set_caption("A sunset");
         assert_eq!(pm.caption(), Some("A sunset"));
         // A multi-alternative Alt array reads its first (x-default) item.
-        pm.properties[0].value = XmpValue::Array(XmpArray::Alt(vec![
+        pm.xmp.properties[0].value = XmpValue::Array(XmpArray::Alt(vec![
             XmpItem::new(XmpValue::Simple("x-default text".to_owned())),
             XmpItem::new(XmpValue::Simple("French text".to_owned())),
         ]));
         assert_eq!(pm.caption(), Some("x-default text"));
         // A plain Simple value (non-conformant but seen in the wild) is also accepted.
-        pm.properties[0].value = XmpValue::Simple("plain".to_owned());
+        pm.xmp.properties[0].value = XmpValue::Simple("plain".to_owned());
         assert_eq!(pm.caption(), Some("plain"));
     }
 
@@ -559,9 +546,9 @@ mod tests {
         assert_eq!(pm.keywords(), vec!["sky", "sea"]);
         assert_eq!(pm.creators(), vec!["Ansel", "Dorothea"]);
         // dc:subject is a Bag, dc:creator a Seq.
-        let subject = pm.find(ns::DC, "subject").unwrap();
+        let subject = pm.xmp.get(ns::DC, "subject").unwrap();
         assert!(matches!(subject.value, XmpValue::Array(XmpArray::Bag(_))));
-        let creator = pm.find(ns::DC, "creator").unwrap();
+        let creator = pm.xmp.get(ns::DC, "creator").unwrap();
         assert!(matches!(creator.value, XmpValue::Array(XmpArray::Seq(_))));
     }
 
@@ -584,7 +571,7 @@ mod tests {
             ],
         };
         let pm = PhotoMetadata::from_xmp(&meta);
-        assert_eq!(pm.properties.len(), 1);
+        assert_eq!(pm.xmp.properties.len(), 1);
         assert_eq!(pm.city(), Some("Berlin"));
         // Round-trips back out as an XMP graph.
         assert_eq!(pm.to_xmp().properties, pm.properties);
@@ -620,12 +607,12 @@ mod tests {
 
         // set_field must store the RDF container kind that matches the shape.
         assert!(matches!(
-            pm.find(ns::DC, "subject").unwrap().value,
+            pm.xmp.get(ns::DC, "subject").unwrap().value,
             XmpValue::Array(XmpArray::Bag(_))
         ));
         pm.set_field(&f(ns::DC, "creator", XmpShape::Seq), &["x"]);
         assert!(matches!(
-            pm.find(ns::DC, "creator").unwrap().value,
+            pm.xmp.get(ns::DC, "creator").unwrap().value,
             XmpValue::Array(XmpArray::Seq(_))
         ));
     }

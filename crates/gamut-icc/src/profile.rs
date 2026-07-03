@@ -1,9 +1,8 @@
 //! The parsed ICC profile: its header and decoded tags.
 
 use gamut_core::{Error, Result};
-use md5::{Digest, Md5};
 
-use crate::header::{ProfileHeader, ProfileId};
+use crate::header::ProfileHeader;
 use crate::primitives::Signature;
 use crate::tag_types::{TagData, decode_tag};
 use crate::tags::{parse_tag_table, tag_table_end};
@@ -13,7 +12,7 @@ use crate::tags::{parse_tag_table, tag_table_end};
 /// Parse with [`IccProfile::parse`]; look up a tag with [`IccProfile::get`]. The on-disk tag table
 /// (byte offsets and sizes) is an encoding detail reconstructed by the serializer, so it is not part
 /// of this model — callers manipulate decoded data, not offsets.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IccProfile {
     /// The 128-byte profile header.
     pub header: ProfileHeader,
@@ -35,8 +34,16 @@ impl IccProfile {
 
     /// Serializes the profile to a fresh, spec-valid byte vector, preserving the header's stored
     /// profile ID. Use [`crate::IccWriter`] to recompute the ID instead.
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the model violates an invariant serialization relies on:
+    /// a duplicate tag signature, LUT tables or curve sets whose lengths contradict their declared
+    /// channel counts, an 8-bit CLUT sample over 255, an over-long fixed-width name field, or
+    /// non-ASCII text in an ASCII element. These are only reachable with hand-built data — the
+    /// decoder establishes every such invariant, so a profile produced by [`IccProfile::parse`]
+    /// always serializes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         crate::writer::write_profile(self, false)
     }
 
@@ -70,27 +77,17 @@ impl IccProfile {
         Ok(Self { header, tags })
     }
 
-    /// The decoded data of the tag with the given `signature`, if present.
+    /// The decoded data of the tag with the given signature, if present.
+    ///
+    /// Accepts anything convertible to a [`Signature`] — a [`crate::KnownTag`], four bytes
+    /// (`profile.get(*b"wtpt")`), or a `Signature` itself.
     #[must_use]
-    pub fn get(&self, signature: Signature) -> Option<&TagData> {
+    pub fn get(&self, signature: impl Into<Signature>) -> Option<&TagData> {
+        let signature = signature.into();
         self.tags
             .iter()
             .find(|(s, _)| *s == signature)
             .map(|(_, data)| data)
-    }
-
-    /// Computes the profile ID (ICC.1:2022 §7.2.18): the MD5 of a fully serialized profile with the
-    /// profile-flags (bytes 44–47), rendering-intent (64–67) and profile-ID (84–99) fields zeroed
-    /// first, as the spec requires.
-    #[must_use]
-    pub fn compute_profile_id(profile_bytes: &[u8]) -> ProfileId {
-        let mut buf = profile_bytes.to_vec();
-        for range in [44..48usize, 64..68, 84..100] {
-            if let Some(field) = buf.get_mut(range) {
-                field.fill(0);
-            }
-        }
-        ProfileId(Md5::digest(&buf).into())
     }
 }
 
@@ -107,6 +104,16 @@ mod tests {
         b[20..24].copy_from_slice(b"XYZ "); // PCS
         b[36..40].copy_from_slice(b"acsp"); // magic
         b // rendering intent at 64 is 0 (perceptual)
+    }
+
+    #[test]
+    fn model_stays_eq() {
+        // Compile-time guard: every TagData payload is integer-backed, so the whole model is `Eq`.
+        // A future variant carrying an `f64` would silently strip `Eq` from `TagData`, `IccProfile`
+        // and everything between; fail here instead so the loss is a deliberate decision.
+        fn assert_eq_capable<T: Eq>() {}
+        assert_eq_capable::<TagData>();
+        assert_eq_capable::<IccProfile>();
     }
 
     #[test]
@@ -145,29 +152,6 @@ mod tests {
         b.extend_from_slice(&0u32.to_be_bytes()); // zero tags
         let profile = IccProfile::parse(&b).unwrap();
         assert!(profile.tags.is_empty());
-    }
-
-    #[test]
-    fn profile_id_excludes_the_zeroed_fields() {
-        let mut base = header();
-        base.extend_from_slice(&0u32.to_be_bytes()); // empty tag table → 132 bytes
-        let id = IccProfile::compute_profile_id(&base);
-
-        // The flags (44), rendering-intent (64) and profile-ID (84–99) regions are zeroed first, so
-        // changing a byte in any of them leaves the ID unchanged.
-        for offset in [44usize, 64, 90] {
-            let mut poked = base.clone();
-            poked[offset] = 0xFF;
-            assert_eq!(
-                IccProfile::compute_profile_id(&poked),
-                id,
-                "offset {offset} should be excluded from the ID"
-            );
-        }
-        // A byte outside those regions does change the ID.
-        let mut other = base.clone();
-        other[40] = 0xFF; // primary platform
-        assert_ne!(IccProfile::compute_profile_id(&other), id);
     }
 
     #[test]

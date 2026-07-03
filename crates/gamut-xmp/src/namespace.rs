@@ -10,6 +10,10 @@ pub const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
 pub const XMPMETA_NAMESPACE: &str = "adobe:ns:meta/";
 
 /// An XML namespace: the URI that scopes property names, and its conventional prefix.
+///
+/// The URI is the identity; the prefix is a serialization preference. Register one on
+/// [`crate::XmpWriter::with_namespace`] to control the prefix a schema serializes under (a
+/// [`WellKnownNs`] converts directly via `From`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Namespace {
     /// The namespace URI (the canonical identity of the schema).
@@ -27,11 +31,12 @@ impl Namespace {
             prefix: prefix.into(),
         }
     }
+}
 
-    /// The namespace for a standard schema, with its conventional prefix.
-    #[must_use]
-    pub fn well_known(ns: WellKnownNs) -> Self {
-        Self::new(ns.uri(), ns.prefix())
+impl From<WellKnownNs> for Namespace {
+    /// The standard schema's namespace with its conventional prefix.
+    fn from(ns: WellKnownNs) -> Self {
+        Namespace::new(ns.uri(), ns.prefix())
     }
 }
 
@@ -201,8 +206,8 @@ mod tests {
     }
 
     #[test]
-    fn namespace_well_known_carries_uri_and_prefix() {
-        let ns = Namespace::well_known(WellKnownNs::Photoshop);
+    fn namespace_from_well_known_carries_uri_and_prefix() {
+        let ns = Namespace::from(WellKnownNs::Photoshop);
         assert_eq!(ns.uri, "http://ns.adobe.com/photoshop/1.0/");
         assert_eq!(ns.prefix, "photoshop");
     }

@@ -114,7 +114,7 @@ impl ParametricCurve {
 }
 
 /// Either kind of tone curve, as carried by the curve sets inside the LUT transform types.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CurveOrParametric {
     /// A `curveType` curve.
     Curve(Curve),
@@ -146,9 +146,7 @@ pub(crate) fn parametric_param_count(function_type: u16) -> Result<usize> {
         3 => 5,
         4 => 7,
         _ => {
-            return Err(Error::InvalidInput(
-                "icc: unsupported parametric function type",
-            ));
+            return Err(Error::InvalidInput("icc: invalid parametric function type"));
         }
     })
 }
@@ -208,7 +206,10 @@ pub(crate) fn read_curve_element(r: &mut ByteReader<'_>) -> Result<CurveOrParame
 }
 
 /// Writes a `curveType` body (count and entries) — the inverse of [`read_curve_body`].
-pub(crate) fn write_curve_body(curve: &Curve, out: &mut Vec<u8>) {
+///
+/// Rejects a [`Curve::Sampled`] table with fewer than two entries: the on-disk count field is what
+/// selects the encoding, so a shorter table would silently re-decode as the identity or a gamma.
+pub(crate) fn write_curve_body(curve: &Curve, out: &mut Vec<u8>) -> Result<()> {
     match curve {
         Curve::Identity => out.extend_from_slice(&0u32.to_be_bytes()),
         Curve::Gamma(gamma) => {
@@ -216,39 +217,55 @@ pub(crate) fn write_curve_body(curve: &Curve, out: &mut Vec<u8>) {
             out.extend_from_slice(&gamma.0.to_be_bytes());
         }
         Curve::Sampled(table) => {
+            if table.len() < 2 {
+                return Err(Error::InvalidInput(
+                    "icc: sampled curve needs at least two entries",
+                ));
+            }
             out.extend_from_slice(&(table.len() as u32).to_be_bytes());
             for &entry in table {
                 out.extend_from_slice(&entry.to_be_bytes());
             }
         }
     }
+    Ok(())
 }
 
 /// Writes a `parametricCurveType` body (function type and parameters).
-pub(crate) fn write_parametric_body(curve: &ParametricCurve, out: &mut Vec<u8>) {
+///
+/// Rejects a parameter count that does not match the function type (the decoder derives the count
+/// from the type, so a mismatch would re-decode as different parameters).
+pub(crate) fn write_parametric_body(curve: &ParametricCurve, out: &mut Vec<u8>) -> Result<()> {
+    if curve.params.len() != parametric_param_count(curve.function_type)? {
+        return Err(Error::InvalidInput(
+            "icc: parametric parameter count does not match the function type",
+        ));
+    }
     out.extend_from_slice(&curve.function_type.to_be_bytes());
     out.extend_from_slice(&[0, 0]); // reserved
     for &param in &curve.params {
         push_s15fixed16(out, param);
     }
+    Ok(())
 }
 
 /// Writes a complete embedded curve element (`curv`/`para`), 4-byte aligned, as it appears inside a
 /// LUT transform — the inverse of [`read_curve_element`].
-pub(crate) fn write_curve_element(curve: &CurveOrParametric, out: &mut Vec<u8>) {
+pub(crate) fn write_curve_element(curve: &CurveOrParametric, out: &mut Vec<u8>) -> Result<()> {
     match curve {
         CurveOrParametric::Curve(curve) => {
             out.extend_from_slice(b"curv");
             out.extend_from_slice(&[0; 4]);
-            write_curve_body(curve, out);
+            write_curve_body(curve, out)?;
         }
         CurveOrParametric::Parametric(curve) => {
             out.extend_from_slice(b"para");
             out.extend_from_slice(&[0; 4]);
-            write_parametric_body(curve, out);
+            write_parametric_body(curve, out)?;
         }
     }
     pad_to_4(out);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -357,6 +374,38 @@ mod tests {
         assert!(close(curve.eval(0.75), 0.8125)); // (a·x + b)^g
         assert!(close(curve.eval(0.25), 0.125)); // c·x
         assert!(close(curve.eval(0.5), 0.5625)); // at the threshold x == d, the power segment applies
+    }
+
+    #[test]
+    fn write_rejects_sampled_table_shorter_than_two() {
+        // Counts 0 and 1 select the identity/gamma encodings on disk, so writing them from a
+        // Sampled table would corrupt the model; two entries is the smallest real table.
+        let mut out = Vec::new();
+        assert!(write_curve_body(&Curve::Sampled(vec![]), &mut out).is_err());
+        assert!(write_curve_body(&Curve::Sampled(vec![100]), &mut out).is_err());
+        assert!(write_curve_body(&Curve::Sampled(vec![100, 200]), &mut out).is_ok());
+    }
+
+    #[test]
+    fn write_rejects_parametric_param_count_mismatch() {
+        let mut out = Vec::new();
+        // Type 0 takes exactly one parameter.
+        let too_many = ParametricCurve {
+            function_type: 0,
+            params: vec![s15(2.0), s15(1.0)],
+        };
+        assert!(write_parametric_body(&too_many, &mut out).is_err());
+        // An undefined function type is rejected outright.
+        let unknown = ParametricCurve {
+            function_type: 9,
+            params: vec![s15(2.0)],
+        };
+        assert!(write_parametric_body(&unknown, &mut out).is_err());
+        let valid = ParametricCurve {
+            function_type: 0,
+            params: vec![s15(2.0)],
+        };
+        assert!(write_parametric_body(&valid, &mut out).is_ok());
     }
 
     #[test]

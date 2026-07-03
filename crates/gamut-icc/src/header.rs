@@ -1,6 +1,7 @@
 //! The 128-byte ICC profile header (ICC.1:2022 §7.2).
 
 use gamut_core::{Error, Result};
+use md5::{Digest, Md5};
 
 use crate::bytes::{ByteReader, push_date_time, push_xyz_number};
 use crate::primitives::{DateTime, Signature, XyzNumber};
@@ -59,6 +60,41 @@ pub struct ProfileHeader {
 }
 
 impl ProfileHeader {
+    /// A header with spec-valid defaults for a newly built profile: version 4.4.0, an XYZ PCS, the
+    /// perceptual rendering intent, the mandated D50 PCS illuminant (§7.2.16), and every
+    /// open-registry field unset ([`Signature::ZERO`] / zero).
+    ///
+    /// The writer computes the `size` field and emits the `acsp` magic itself, so
+    /// `ProfileHeader::new` plus [`crate::IccProfile::to_bytes`] yields spec-valid bytes with no
+    /// further setup. Special cases — a DeviceLink's device-space PCS, a v2 target, a creation
+    /// timestamp — adjust the public fields directly.
+    #[must_use]
+    pub fn new(device_class: DeviceClass, data_color_space: ColorSpace) -> Self {
+        Self {
+            size: 0,
+            preferred_cmm: Signature::ZERO,
+            version: ProfileVersion {
+                major: 4,
+                minor: 4,
+                bugfix: 0,
+            },
+            device_class,
+            data_color_space,
+            pcs: ColorSpace::Xyz,
+            created: DateTime::ZERO,
+            platform: Signature::ZERO,
+            flags: 0,
+            manufacturer: Signature::ZERO,
+            model: Signature::ZERO,
+            attributes: 0,
+            rendering_intent: RenderingIntent::Perceptual,
+            pcs_illuminant: XyzNumber::D50,
+            creator: Signature::ZERO,
+            profile_id: ProfileId::ZERO,
+            reserved: [0; 28],
+        }
+    }
+
     /// Parses the 128-byte header from the start of an ICC profile.
     ///
     /// # Errors
@@ -79,9 +115,9 @@ impl ProfileHeader {
         let minor_bugfix = r.u8()?;
         r.skip(2)?; // the two reserved version bytes
         let version = ProfileVersion::from_bytes(major, minor_bugfix);
-        let device_class = DeviceClass::from_signature(r.signature()?)?;
-        let data_color_space = ColorSpace::from_signature(r.signature()?)?;
-        let pcs = ColorSpace::from_signature(r.signature()?)?;
+        let device_class = DeviceClass::try_from(r.signature()?)?;
+        let data_color_space = ColorSpace::try_from(r.signature()?)?;
+        let pcs = ColorSpace::try_from(r.signature()?)?;
         let created = r.date_time()?;
         if r.signature()? != Signature(*b"acsp") {
             return Err(Error::InvalidInput("icc: missing 'acsp' profile signature"));
@@ -91,7 +127,7 @@ impl ProfileHeader {
         let manufacturer = r.signature()?;
         let model = r.signature()?;
         let attributes = r.u64()?;
-        let rendering_intent = RenderingIntent::from_u32(r.u32()?)?;
+        let rendering_intent = RenderingIntent::try_from(r.u32()?)?;
         let pcs_illuminant = r.xyz_number()?;
         let creator = r.signature()?;
         let mut profile_id = [0u8; 16];
@@ -169,9 +205,9 @@ impl ProfileHeader {
         out.push(self.version.major);
         out.push(self.version.minor_bugfix_byte());
         out.extend_from_slice(&[0, 0]); // reserved version bytes
-        out.extend_from_slice(&self.device_class.to_signature().0);
-        out.extend_from_slice(&self.data_color_space.to_signature().0);
-        out.extend_from_slice(&self.pcs.to_signature().0);
+        out.extend_from_slice(&Signature::from(self.device_class).0);
+        out.extend_from_slice(&Signature::from(self.data_color_space).0);
+        out.extend_from_slice(&Signature::from(self.pcs).0);
         push_date_time(out, self.created);
         out.extend_from_slice(b"acsp");
         out.extend_from_slice(&self.platform.0);
@@ -179,7 +215,7 @@ impl ProfileHeader {
         out.extend_from_slice(&self.manufacturer.0);
         out.extend_from_slice(&self.model.0);
         out.extend_from_slice(&self.attributes.to_be_bytes());
-        out.extend_from_slice(&self.rendering_intent.to_u32().to_be_bytes());
+        out.extend_from_slice(&u32::from(self.rendering_intent).to_be_bytes());
         push_xyz_number(out, self.pcs_illuminant);
         out.extend_from_slice(&self.creator.0);
         out.extend_from_slice(&self.profile_id.0);
@@ -216,6 +252,13 @@ impl ProfileVersion {
     }
 }
 
+impl core::fmt::Display for ProfileVersion {
+    /// `major.minor.bugfix`, e.g. `4.4.0`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.bugfix)
+    }
+}
+
 /// The profile/device class (ICC.1:2022 §7.2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DeviceClass {
@@ -235,13 +278,15 @@ pub enum DeviceClass {
     NamedColor,
 }
 
-impl DeviceClass {
+impl TryFrom<Signature> for DeviceClass {
+    type Error = Error;
+
     /// Maps a class signature to its variant.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if the signature is not one of the seven defined classes.
-    pub fn from_signature(sig: Signature) -> Result<Self> {
+    fn try_from(sig: Signature) -> Result<Self> {
         Ok(match &sig.0 {
             b"scnr" => Self::Input,
             b"mntr" => Self::Display,
@@ -253,18 +298,19 @@ impl DeviceClass {
             _ => return Err(Error::InvalidInput("icc: unknown device class")),
         })
     }
+}
 
-    /// The four-byte signature for this class.
-    #[must_use]
-    pub fn to_signature(self) -> Signature {
-        Signature(match self {
-            Self::Input => *b"scnr",
-            Self::Display => *b"mntr",
-            Self::Output => *b"prtr",
-            Self::DeviceLink => *b"link",
-            Self::ColorSpace => *b"spac",
-            Self::Abstract => *b"abst",
-            Self::NamedColor => *b"nmcl",
+impl From<DeviceClass> for Signature {
+    /// The four-byte signature for the class.
+    fn from(class: DeviceClass) -> Signature {
+        Signature(match class {
+            DeviceClass::Input => *b"scnr",
+            DeviceClass::Display => *b"mntr",
+            DeviceClass::Output => *b"prtr",
+            DeviceClass::DeviceLink => *b"link",
+            DeviceClass::ColorSpace => *b"spac",
+            DeviceClass::Abstract => *b"abst",
+            DeviceClass::NamedColor => *b"nmcl",
         })
     }
 }
@@ -298,14 +344,16 @@ pub enum ColorSpace {
     NColor(u8),
 }
 
-impl ColorSpace {
+impl TryFrom<Signature> for ColorSpace {
+    type Error = Error;
+
     /// Maps a colour-space signature to its variant.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if the signature is neither a defined space nor a valid
     /// `nCLR` (2–15 colorants).
-    pub fn from_signature(sig: Signature) -> Result<Self> {
+    fn try_from(sig: Signature) -> Result<Self> {
         let s = &sig.0;
         Ok(match s {
             b"XYZ " => Self::Xyz,
@@ -330,23 +378,24 @@ impl ColorSpace {
             _ => return Err(Error::InvalidInput("icc: unknown colour space")),
         })
     }
+}
 
-    /// The four-byte signature for this colour space.
-    #[must_use]
-    pub fn to_signature(self) -> Signature {
-        match self {
-            Self::Xyz => Signature(*b"XYZ "),
-            Self::Lab => Signature(*b"Lab "),
-            Self::Luv => Signature(*b"Luv "),
-            Self::YCbCr => Signature(*b"YCbr"),
-            Self::Yxy => Signature(*b"Yxy "),
-            Self::Rgb => Signature(*b"RGB "),
-            Self::Gray => Signature(*b"GRAY"),
-            Self::Hsv => Signature(*b"HSV "),
-            Self::Hls => Signature(*b"HLS "),
-            Self::Cmyk => Signature(*b"CMYK"),
-            Self::Cmy => Signature(*b"CMY "),
-            Self::NColor(n) => {
+impl From<ColorSpace> for Signature {
+    /// The four-byte signature for the colour space.
+    fn from(space: ColorSpace) -> Signature {
+        match space {
+            ColorSpace::Xyz => Signature(*b"XYZ "),
+            ColorSpace::Lab => Signature(*b"Lab "),
+            ColorSpace::Luv => Signature(*b"Luv "),
+            ColorSpace::YCbCr => Signature(*b"YCbr"),
+            ColorSpace::Yxy => Signature(*b"Yxy "),
+            ColorSpace::Rgb => Signature(*b"RGB "),
+            ColorSpace::Gray => Signature(*b"GRAY"),
+            ColorSpace::Hsv => Signature(*b"HSV "),
+            ColorSpace::Hls => Signature(*b"HLS "),
+            ColorSpace::Cmyk => Signature(*b"CMYK"),
+            ColorSpace::Cmy => Signature(*b"CMY "),
+            ColorSpace::NColor(n) => {
                 let d = if n < 10 {
                     b'0'.wrapping_add(n)
                 } else {
@@ -371,13 +420,15 @@ pub enum RenderingIntent {
     IccAbsoluteColorimetric,
 }
 
-impl RenderingIntent {
+impl TryFrom<u32> for RenderingIntent {
+    type Error = Error;
+
     /// Maps the header's rendering-intent word to its variant.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] for values outside 0–3 (the upper 16 bits must be zero).
-    pub fn from_u32(value: u32) -> Result<Self> {
+    fn try_from(value: u32) -> Result<Self> {
         Ok(match value {
             0 => Self::Perceptual,
             1 => Self::MediaRelativeColorimetric,
@@ -386,15 +437,16 @@ impl RenderingIntent {
             _ => return Err(Error::InvalidInput("icc: invalid rendering intent")),
         })
     }
+}
 
-    /// The rendering-intent word for this variant.
-    #[must_use]
-    pub fn to_u32(self) -> u32 {
-        match self {
-            Self::Perceptual => 0,
-            Self::MediaRelativeColorimetric => 1,
-            Self::Saturation => 2,
-            Self::IccAbsoluteColorimetric => 3,
+impl From<RenderingIntent> for u32 {
+    /// The rendering-intent word for the variant.
+    fn from(intent: RenderingIntent) -> u32 {
+        match intent {
+            RenderingIntent::Perceptual => 0,
+            RenderingIntent::MediaRelativeColorimetric => 1,
+            RenderingIntent::Saturation => 2,
+            RenderingIntent::IccAbsoluteColorimetric => 3,
         }
     }
 }
@@ -412,6 +464,30 @@ impl ProfileId {
     #[must_use]
     pub fn is_zero(self) -> bool {
         self.0 == [0; 16]
+    }
+
+    /// Computes the profile ID (ICC.1:2022 §7.2.18): the MD5 of a fully serialized profile with
+    /// the profile-flags (bytes 44–47), rendering-intent (64–67) and profile-ID (84–99) fields
+    /// zeroed first, as the spec requires.
+    #[must_use]
+    pub fn compute(profile_bytes: &[u8]) -> ProfileId {
+        let mut buf = profile_bytes.to_vec();
+        for range in [44..48usize, 64..68, 84..100] {
+            if let Some(field) = buf.get_mut(range) {
+                field.fill(0);
+            }
+        }
+        ProfileId(Md5::digest(&buf).into())
+    }
+}
+
+impl core::fmt::Display for ProfileId {
+    /// The 16 ID bytes as 32 lowercase hex digits.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        for b in self.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
     }
 }
 
@@ -543,7 +619,7 @@ mod tests {
             DeviceClass::NamedColor,
         ] {
             assert_eq!(
-                DeviceClass::from_signature(class.to_signature()).unwrap(),
+                DeviceClass::try_from(Signature::from(class)).unwrap(),
                 class
             );
         }
@@ -566,20 +642,17 @@ mod tests {
         ];
         spaces.extend((2..=15).map(ColorSpace::NColor));
         for space in spaces {
-            assert_eq!(
-                ColorSpace::from_signature(space.to_signature()).unwrap(),
-                space
-            );
+            assert_eq!(ColorSpace::try_from(Signature::from(space)).unwrap(), space);
         }
         // Spot-check the nCLR signature encoding (decimal digit and hex letter).
-        assert_eq!(ColorSpace::NColor(3).to_signature(), Signature(*b"3CLR"));
-        assert_eq!(ColorSpace::NColor(10).to_signature(), Signature(*b"ACLR"));
+        assert_eq!(Signature::from(ColorSpace::NColor(3)), Signature(*b"3CLR"));
+        assert_eq!(Signature::from(ColorSpace::NColor(10)), Signature(*b"ACLR"));
 
         // Signatures that resemble `nCLR` but break exactly one of the `_CLR` constraints must be
         // rejected (each pins one conjunct of the recognition guard).
         for bad in [b"3xLR", b"3CxR", b"3CLx", b"3zzz", b"1CLR"] {
             assert!(
-                ColorSpace::from_signature(Signature(*bad)).is_err(),
+                ColorSpace::try_from(Signature(*bad)).is_err(),
                 "{:?} should be rejected",
                 core::str::from_utf8(bad).unwrap()
             );
@@ -592,6 +665,43 @@ mod tests {
         let mut id = ProfileId::ZERO;
         id.0[7] = 1;
         assert!(!id.is_zero());
+    }
+
+    #[test]
+    fn profile_id_excludes_the_zeroed_fields() {
+        let mut base = sample_header();
+        base.extend_from_slice(&0u32.to_be_bytes()); // an empty tag table completes the profile
+        let id = ProfileId::compute(&base);
+
+        // The flags (44), rendering-intent (64) and profile-ID (84–99) regions are zeroed first,
+        // so changing a byte in any of them leaves the ID unchanged.
+        for offset in [44usize, 64, 90] {
+            let mut poked = base.clone();
+            poked[offset] = 0xFF;
+            assert_eq!(
+                ProfileId::compute(&poked),
+                id,
+                "offset {offset} should be excluded from the ID"
+            );
+        }
+        // A byte outside those regions does change the ID.
+        let mut other = base.clone();
+        other[40] = 0xFF; // primary platform
+        assert_ne!(ProfileId::compute(&other), id);
+    }
+
+    #[test]
+    fn display_renders_version_and_id() {
+        let version = ProfileVersion {
+            major: 4,
+            minor: 4,
+            bugfix: 0,
+        };
+        assert_eq!(version.to_string(), "4.4.0");
+        let mut id = ProfileId::ZERO;
+        id.0[0] = 0xAB;
+        id.0[15] = 0x01;
+        assert_eq!(id.to_string(), "ab000000000000000000000000000001");
     }
 
     #[test]
@@ -618,9 +728,9 @@ mod tests {
     #[test]
     fn rendering_intent_round_trip_and_range() {
         for value in 0..=3 {
-            assert_eq!(RenderingIntent::from_u32(value).unwrap().to_u32(), value);
+            assert_eq!(u32::from(RenderingIntent::try_from(value).unwrap()), value);
         }
-        assert!(RenderingIntent::from_u32(4).is_err());
+        assert!(RenderingIntent::try_from(4u32).is_err());
     }
 
     #[test]

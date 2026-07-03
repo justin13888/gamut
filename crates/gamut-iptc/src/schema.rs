@@ -9,17 +9,22 @@
 
 /// XMP namespace URIs used by IPTC Photo Metadata (verified against the IPTC Photo Metadata
 /// Standard 2025.1).
+///
+/// The URIs come from the shared [`gamut_xmp::WellKnownNs`] registry rather than being
+/// re-declared; the tests pin them against the standard's literal strings.
 pub mod ns {
+    use gamut_xmp::WellKnownNs;
+
     /// Dublin Core — `dc:` (title, creator, description, subject, rights).
-    pub const DC: &str = "http://purl.org/dc/elements/1.1/";
+    pub const DC: &str = WellKnownNs::DublinCore.uri();
     /// Adobe Photoshop — `photoshop:` (City, Country, Headline, Credit, …).
-    pub const PHOTOSHOP: &str = "http://ns.adobe.com/photoshop/1.0/";
+    pub const PHOTOSHOP: &str = WellKnownNs::Photoshop.uri();
     /// XMP Rights Management — `xmpRights:` (UsageTerms, WebStatement).
-    pub const XMP_RIGHTS: &str = "http://ns.adobe.com/xap/1.0/rights/";
+    pub const XMP_RIGHTS: &str = WellKnownNs::XmpRights.uri();
     /// IPTC Photo Metadata Core — `Iptc4xmpCore:`.
-    pub const IPTC_CORE: &str = "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/";
+    pub const IPTC_CORE: &str = WellKnownNs::Iptc4XmpCore.uri();
     /// IPTC Photo Metadata Extension — `Iptc4xmpExt:`.
-    pub const IPTC_EXT: &str = "http://iptc.org/std/Iptc4xmpExt/2008-02-29/";
+    pub const IPTC_EXT: &str = WellKnownNs::Iptc4XmpExt.uri();
 }
 
 /// The namespaces gamut treats as IPTC-relevant when extracting [`crate::PhotoMetadata`] from a full
@@ -216,5 +221,17 @@ mod tests {
         for row in FIELD_MAP {
             assert!(IPTC_NAMESPACES.contains(&row.xmp.ns));
         }
+    }
+
+    #[test]
+    fn namespace_uris_match_the_iptc_standard() {
+        // The consts are derived from gamut_xmp::WellKnownNs; pin them against the literal
+        // strings of the IPTC Photo Metadata Standard 2025.1 so a change in the shared registry
+        // cannot silently retarget the IPTC schema.
+        assert_eq!(ns::DC, "http://purl.org/dc/elements/1.1/");
+        assert_eq!(ns::PHOTOSHOP, "http://ns.adobe.com/photoshop/1.0/");
+        assert_eq!(ns::XMP_RIGHTS, "http://ns.adobe.com/xap/1.0/rights/");
+        assert_eq!(ns::IPTC_CORE, "http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/");
+        assert_eq!(ns::IPTC_EXT, "http://iptc.org/std/Iptc4xmpExt/2008-02-29/");
     }
 }
