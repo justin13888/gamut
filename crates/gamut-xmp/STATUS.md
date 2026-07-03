@@ -1,7 +1,8 @@
 # gamut-xmp — XMP implementation status
 
-Part of the **image metadata primitives** campaign (GitHub issue #34). Implements XMP
-(`references/xmp`, Adobe XMP Parts 1–3 = ISO 16684) as an RDF/XML parser + canonical serializer.
+**v1 stabilization: GitHub issue #189** (grown out of the image metadata primitives campaign,
+issue #34). Implements XMP (`references/xmp`, Adobe XMP Parts 1–3 = ISO 16684) as an RDF/XML
+parser + canonical serializer.
 
 **Keystone:** **canonical RDF/XML serialization** (Adobe XMP Part 1 §7). RDF admits many
 serializations of the same graph; the canonical form fixes element-vs-attribute encoding, namespace
@@ -32,9 +33,26 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
 | P4 | Part 2 | Standard schema coverage (dc/xmp/xmpRights/xmpMM/photoshop/exif/tiff/…) | ✅ done |
 | P5 | Part 1 §7 | **Keystone** — canonical RDF/XML serialization + packet emit (writable padding) | ✅ done |
 | P6 | — | exiv2 differential conformance gate | ✅ done |
+| P7 | Parts 1–3 | **v1 stabilization** (issue #189) — API finalization (`XmpPacket::parse` composition, `XmpWriter::with_namespace` prefix registration, model conveniences), conformance audit (control-character escaping fix, trailer `end=` matching, edge-case pins), gamut-iptc dogfood migration, docs | ✅ done |
 
-## Known limitations
+## Intentional skips (audited for v1)
 
-- A default `xml:lang` declared on an `rdf:Description` (Part 1 §7.8) is not propagated to the
-  properties it scopes; per-property/per-item `xml:lang` is fully supported.
-- Only UTF-8 packets are read/written (see the encoding decision above).
+Each item was re-verified against the spec during the v1 audit (issue #189) and skipped
+deliberately:
+
+- **Default `xml:lang` scoping (Part 1 §7.8 / XML 1.0):** an `xml:lang` on `rdf:Description` is
+  not propagated to the properties it scopes. Adobe XMPCore does not materialize it either —
+  parity is pinned by `tests/oracle.rs::default_xml_lang_on_description_matches_reference`.
+  Per-property and per-item `xml:lang` are fully supported.
+- **UTF-16/32 packets (Part 1 §7.1):** rejected with a typed `XmpError::Encoding` (see the
+  encoding decision above). Read support would be purely additive later.
+- **`rdf:ID` / `rdf:nodeID` / `xml:base`, and `rdf:about` values (Part 1 §7.9):** ignored on read
+  — RDF reification/base machinery XMP does not use; pinned by reader tests.
+- **xpacket `begin` attribute:** written empty (`begin=""`), one of the two forms §7.3.2 allows;
+  the reader accepts Adobe's U+FEFF form.
+- **Part 3 per-container embedding and JPEG ExtendedXMP:** owned by the format crates; this crate
+  supplies wrapper-optional parse, bare-body serialization, and the writable/padding envelope.
+- **Per-schema value validation (Part 2):** values are uninterpreted text; `WellKnownNs` is a
+  namespace registry, not a validator.
+- **Deferred additive API** (post-1.0, no consumer today): an opt-in `XmpMeta::validate()`, and
+  nested-structure field lookup.

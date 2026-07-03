@@ -42,6 +42,10 @@
 //! - **Reads more than it writes.** The parser accepts the broad RDF/XML input XMP permits (Part 1
 //!   Annex C / §7.9 — attribute or element form, `rdf:parseType="Resource"`, abbreviations); the
 //!   serializer emits one fixed canonical form.
+//! - **Transparent graph.** The model types expose public fields — the graph is data. The
+//!   accessors maintain the canonical invariants (unique names, unique `Alt` languages,
+//!   `x-default` first); direct field mutation can bypass them, and the infallible writer
+//!   serializes what the graph says without validating (see [`model`]).
 //! - **UTF-8.** Packets are read and written as UTF-8 (a leading byte-order mark is tolerated on
 //!   read but not emitted). Part 1 §7.1 also allows UTF-16/32, which are reported as unsupported.
 //! - **`quick-xml` is internal.** The XML lexer is an implementation detail and does not appear in

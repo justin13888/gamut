@@ -7,6 +7,20 @@
 //!
 //! The accessors on [`XmpMeta`] (`get_text`, `set_text`, `get_lang_alt`, `set_lang_alt`, …) cover
 //! the common cases without walking the tree by hand; the public fields stay available for the rest.
+//!
+//! # Invariant contract
+//!
+//! The graph is transparent data — every field is public, nothing is enforced by construction.
+//! Three invariants make a graph *canonical*:
+//!
+//! - at most one top-level property per (namespace, name) — maintained by [`XmpMeta::set`];
+//! - unique `xml:lang` per `rdf:Alt` (Part 1 §8.2.2.4) — rejected on parse
+//!   ([`crate::XmpError::DuplicateLang`]) and maintained by [`XmpMeta::set_lang_alt`];
+//! - the `"x-default"` alternative first — maintained by [`XmpMeta::set_lang_alt`].
+//!
+//! Mutating the public fields directly can build a non-canonical graph; the writer is infallible
+//! and serializes such a graph as-is — well-formed XML of exactly what the graph says — without
+//! validating or silently repairing it.
 
 use crate::namespace::XML_NAMESPACE;
 
