@@ -5,6 +5,7 @@ use gamut_icc::IccProfile;
 use gamut_iptc::PhotoMetadata;
 use gamut_xmp::XmpMeta;
 
+use crate::embed::{EncodedMetadata, MetadataEmbedder};
 use crate::error::Result;
 use crate::extract::MetadataExtractor;
 use crate::source::MetadataBlock;
@@ -51,6 +52,17 @@ impl Metadata {
     /// As [`MetadataExtractor::extract`].
     pub fn from_blocks(blocks: &[MetadataBlock<'_>]) -> Result<Self> {
         MetadataExtractor::new().extract(blocks)
+    }
+
+    /// Serializes this model back to per-carrier byte blocks, using default options. A convenience for
+    /// [`MetadataEmbedder::new().embed(self)`](MetadataEmbedder::embed); use [`MetadataEmbedder`]
+    /// directly to also emit the legacy IPTC-IIM block.
+    ///
+    /// # Errors
+    ///
+    /// As [`MetadataEmbedder::embed`].
+    pub fn encode(&self) -> Result<EncodedMetadata> {
+        MetadataEmbedder::new().embed(self)
     }
 
     /// The IPTC Photo Metadata view over [`xmp`](Self::xmp), or `None` when no XMP is present or the

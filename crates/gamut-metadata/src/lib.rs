@@ -22,7 +22,7 @@ pub mod metadata;
 pub mod source;
 
 // Re-export the per-format crates so consumers reach everything through one entry point.
-pub use embed::MetadataEmbedder;
+pub use embed::{EncodedMetadata, MetadataEmbedder};
 pub use error::{MetadataError, Result};
 pub use extract::MetadataExtractor;
 pub use gamut_exif as exif;
