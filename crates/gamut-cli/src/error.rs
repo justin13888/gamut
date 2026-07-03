@@ -29,6 +29,10 @@ pub(crate) enum CliError {
     #[error(transparent)]
     Codec(#[from] gamut::core::Error),
 
+    /// The `gamut-icc` parser rejected an embedded or standalone ICC profile.
+    #[error(transparent)]
+    Icc(#[from] gamut::icc::IccError),
+
     /// The requested output format is not (yet) supported by the CLI.
     #[error("unsupported output format: {0} (supported: 'avif', 'webp')")]
     UnsupportedOutput(String),
