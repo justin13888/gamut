@@ -80,6 +80,20 @@ impl XmpArray {
             XmpArray::Bag(i) | XmpArray::Seq(i) | XmpArray::Alt(i) => i,
         }
     }
+
+    /// A mutable reference to the array's items, regardless of kind.
+    #[must_use]
+    pub fn items_mut(&mut self) -> &mut Vec<XmpItem> {
+        match self {
+            XmpArray::Bag(i) | XmpArray::Seq(i) | XmpArray::Alt(i) => i,
+        }
+    }
+
+    /// The simple text of each item in order, skipping items whose value is not simple — the
+    /// common read for a `Bag`/`Seq` of keywords or creators.
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        self.items().iter().filter_map(XmpItem::text)
+    }
 }
 
 /// One item of an [`XmpArray`]: a value plus any qualifiers on that item.
@@ -128,6 +142,12 @@ impl XmpItem {
             value,
             qualifiers: Vec::new(),
         }
+    }
+
+    /// Creates a plain text item — the shape of an `rdf:Bag`/`rdf:Seq` entry.
+    #[must_use]
+    pub fn simple(text: impl Into<String>) -> Self {
+        Self::new(XmpValue::Simple(text.into()))
     }
 
     /// Creates a text item tagged with an `xml:lang` qualifier — the shape of a language
@@ -207,6 +227,15 @@ impl XmpMeta {
         self.get(namespace, name)?.text()
     }
 
+    /// The array value of a top-level property, or `None` if it is absent or not an array.
+    #[must_use]
+    pub fn get_array(&self, namespace: &str, name: &str) -> Option<&XmpArray> {
+        match &self.get(namespace, name)?.value {
+            XmpValue::Array(array) => Some(array),
+            _ => None,
+        }
+    }
+
     /// The text of a language alternative (a `dc:title`-style `rdf:Alt`, Part 1 §8.2.2.4) for the
     /// given language tag, or `None` if the property is absent, not a language alternative, or has
     /// no matching item.
@@ -233,6 +262,16 @@ impl XmpMeta {
         } else {
             self.properties.push(property);
         }
+    }
+
+    /// Removes the top-level property with the given namespace URI and local name, returning it
+    /// if it was present.
+    pub fn remove(&mut self, namespace: &str, name: &str) -> Option<XmpProperty> {
+        let index = self
+            .properties
+            .iter()
+            .position(|p| p.namespace == namespace && p.name == name)?;
+        Some(self.properties.remove(index))
     }
 
     /// Sets a simple text property, replacing any existing property of the same name.
@@ -458,6 +497,81 @@ mod tests {
     #[test]
     fn default_value_is_empty_simple() {
         assert_eq!(XmpValue::default(), XmpValue::Simple(String::new()));
+    }
+
+    #[test]
+    fn get_array_matches_only_arrays() {
+        let mut meta = XmpMeta::new();
+        meta.set(XmpProperty::new(
+            DC,
+            "subject",
+            XmpValue::Array(XmpArray::Bag(vec![XmpItem::simple("kw")])),
+        ));
+        meta.set_text(DC, "format", "text/plain");
+        assert!(matches!(
+            meta.get_array(DC, "subject"),
+            Some(XmpArray::Bag(_))
+        ));
+        assert_eq!(
+            meta.get_array(DC, "format"),
+            None,
+            "simple value is not an array"
+        );
+        assert_eq!(meta.get_array(DC, "absent"), None);
+    }
+
+    #[test]
+    fn remove_takes_out_only_the_exact_property() {
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "title", "t");
+        meta.set_text(DC, "creator", "c");
+        meta.set_text(XMP, "title", "x");
+
+        // Partial matches (same ns, other name / same name, other ns) must survive.
+        let removed = meta.remove(DC, "title").expect("present");
+        assert_eq!(removed.text(), Some("t"));
+        assert_eq!(meta.properties.len(), 2);
+        assert_eq!(meta.get_text(DC, "creator"), Some("c"));
+        assert_eq!(meta.get_text(XMP, "title"), Some("x"));
+
+        // A second removal finds nothing.
+        assert!(meta.remove(DC, "title").is_none());
+    }
+
+    #[test]
+    fn texts_skips_non_simple_items_in_order() {
+        let array = XmpArray::Seq(vec![
+            XmpItem::simple("a"),
+            XmpItem::new(XmpValue::Structured(vec![])),
+            XmpItem::simple("b"),
+        ]);
+        assert_eq!(array.texts().collect::<Vec<_>>(), ["a", "b"]);
+    }
+
+    #[test]
+    fn items_mut_covers_every_kind_and_preserves_it() {
+        for (mut array, want) in [
+            (XmpArray::Bag(vec![]), "Bag"),
+            (XmpArray::Seq(vec![]), "Seq"),
+            (XmpArray::Alt(vec![]), "Alt"),
+        ] {
+            array.items_mut().push(XmpItem::simple("x"));
+            assert_eq!(array.items().len(), 1);
+            let kind = match array {
+                XmpArray::Bag(_) => "Bag",
+                XmpArray::Seq(_) => "Seq",
+                XmpArray::Alt(_) => "Alt",
+            };
+            assert_eq!(kind, want, "mutation must not change the array kind");
+        }
+    }
+
+    #[test]
+    fn simple_item_is_plain_and_unqualified() {
+        let item = XmpItem::simple("kw");
+        assert_eq!(item.value, XmpValue::Simple("kw".into()));
+        assert!(item.qualifiers.is_empty());
+        assert_eq!(item.lang(), None);
     }
 
     #[test]
