@@ -24,3 +24,6 @@ gamut-xmp.workspace = true
 # Dev-only and excluded from the workspace, so a plain build of gamut-iptc needs no C++ toolchain;
 # the cross-check tests need the third_party/exiv2 submodule + CMake/Ninja. See its manifest.
 gamut-iptc-oracle = { path = "../../tooling/gamut-iptc-oracle" }
+# Reads the vendored IPTC machine-readable tech reference in tests/techreference.rs, pinning the
+# hand-transcribed schema/tag tables to the spec.
+serde_json.workspace = true

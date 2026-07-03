@@ -703,6 +703,7 @@ dependencies = [
  "gamut-core",
  "gamut-iptc-oracle",
  "gamut-xmp",
+ "serde_json",
 ]
 
 [[package]]
