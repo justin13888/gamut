@@ -138,6 +138,14 @@ impl ExifReader {
             }
             _ => None,
         };
+        // The JPEGInterchangeFormat offset is structural — the bytes are captured above and the
+        // writer re-synthesises the offset — so drop it from the stored directory (mirroring how the
+        // sub-IFD pointer tags are stripped), leaving a value the model can't carry stale.
+        let ifd = if jpeg.is_some() {
+            without_tags(&ifd, &[ExifTag::JpegInterchangeFormat.tag_id()])
+        } else {
+            ifd
+        };
         Ok(Thumbnail::from_parts(ifd, jpeg))
     }
 }

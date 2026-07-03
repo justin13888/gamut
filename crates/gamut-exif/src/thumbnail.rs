@@ -24,8 +24,11 @@ impl Thumbnail {
     }
 
     /// Builds a JPEG thumbnail from its compressed bytes, synthesising the 1st IFD tags
-    /// (`Compression` = 6, `JPEGInterchangeFormatLength`, and a placeholder
-    /// `JPEGInterchangeFormat` offset the writer patches).
+    /// (`Compression` = 6 and `JPEGInterchangeFormatLength`).
+    ///
+    /// The `JPEGInterchangeFormat` offset is *not* stored — it is structural (the bytes are held
+    /// separately) and the writer synthesises it, so the model never carries a value that changes on
+    /// every re-layout.
     #[must_use]
     pub fn from_jpeg(jpeg: Vec<u8>) -> Self {
         let mut ifd = Ifd::new();
@@ -33,10 +36,6 @@ impl Thumbnail {
         ifd.set(
             ExifTag::JpegInterchangeFormatLength.tag_id(),
             Value::Long(vec![jpeg.len() as u32]),
-        );
-        ifd.set(
-            ExifTag::JpegInterchangeFormat.tag_id(),
-            Value::Long(vec![0]),
         );
         Self {
             ifd,
