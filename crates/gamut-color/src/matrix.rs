@@ -50,7 +50,7 @@ fn gamut_chromaticities(gamut: Gamut) -> ([[f64; 2]; 3], [f64; 2]) {
 }
 
 /// Convert a CIE 1931 chromaticity `(x, y)` to tristimulus `XYZ` at unit `Y`.
-/// Precondition: `y != 0`.
+/// Precondition: `y != 0` (a zero `y` yields non-finite components).
 #[must_use]
 pub fn xy_to_xyz(x: f64, y: f64) -> [f64; 3] {
     [x / y, 1.0, (1.0 - x - y) / y]

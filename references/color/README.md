@@ -40,7 +40,7 @@ constant they define is instead transcribed with its exact value in the tables b
 
 ## Not vendored (paywalled — values transcribed inline below)
 
-- **SMPTE ST 2084:2014** (PQ inverse EOTF) and **SMPTE EG 432-1** (DCI-P3 with D65) — SMPTE, paywalled.
+- **SMPTE ST 2084:2014** (PQ EOTF) and **SMPTE EG 432-1** (DCI-P3 with D65) — SMPTE, paywalled.
 - **IEC 61966-2-1** (sRGB transfer functions) — IEC, paywalled.
 - **ISO 22028-2** (ROMM/ProPhoto reference colour encoding) — ISO, paywalled; the ROMM RGB white paper
   above is the freely-published primary reference for the same primaries and encoding.
@@ -86,7 +86,7 @@ are listed in `gamut-color/src/oklab.rs`; they are verified against the derivati
 
 ---
 
-## PQ — SMPTE ST 2084 / ITU-R BT.2100 inverse EOTF
+## PQ — SMPTE ST 2084 / ITU-R BT.2100 EOTF
 
 Source: SMPTE ST 2084:2014; ITU-R BT.2100-2. Constants are exact dyadic rationals:
 
@@ -98,7 +98,8 @@ Source: SMPTE ST 2084:2014; ITU-R BT.2100-2. Constants are exact dyadic rational
 | c2    | `18.8515625`     | `(2413/4096) · 32`  |
 | c3    | `18.6875`        | `(2392/4096) · 32`  |
 
-Peak luminance `10000` cd/m². Inverse EOTF (E' → linear, normalized to [0,1]·10000 nits):
+Peak luminance `10000` cd/m². EOTF (E' → linear, normalized to [0,1]·10000 nits — signal → light
+is the EOTF per ST 2084; the encode direction is the *inverse* EOTF):
 `Y = ((max(E'^(1/m2) − c1, 0)) / (c2 − c3·E'^(1/m2)))^(1/m1)`.
 Note `c1 = c3 − c2 + 1`.
 

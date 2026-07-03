@@ -31,7 +31,7 @@ pub enum SourceTransfer {
     AdobeRgb,
     /// ProPhoto RGB, pure `x^1.8`.
     ProPhotoRgb,
-    /// BT.2020 PQ inverse EOTF → nits → Reinhard@203 (tone-mapped to SDR).
+    /// BT.2020 PQ EOTF → nits → Reinhard@203 (tone-mapped to SDR).
     Bt2020Pq,
 }
 

@@ -41,6 +41,9 @@ impl Planar8 {
     /// assert_eq!(planes.to_rgb8_identity(), rgb); // round-trips
     /// ```
     ///
+    /// Zero dimensions are allowed (an empty buffer): rejecting empty images is the encoder's
+    /// decision, made at its own boundary.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, or if that product
@@ -125,6 +128,11 @@ impl Planar8 {
     }
 
     /// The row-major samples of plane `index` (`0 = Y/G, 1 = U/B, 2 = V/R`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= 3`, like slice indexing — an out-of-range plane index is a
+    /// programmer error, not a data error.
     #[must_use]
     pub fn plane(&self, index: usize) -> &[u8] {
         &self.planes[index]

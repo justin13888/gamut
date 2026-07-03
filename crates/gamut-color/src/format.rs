@@ -30,6 +30,8 @@ impl BitDepth {
 
     /// The [`BitDepth`] for `bits` (8, 10, or 12), or `None` for any other value. The inverse of
     /// [`BitDepth::bits`], for turning a codec's raw integer bit depth back into the typed form.
+    /// Takes `u32` because that is what codec headers and reconstruction paths carry;
+    /// [`BitDepth::bits`] returns the exact `u8`.
     #[must_use]
     pub fn from_bits(bits: u32) -> Option<Self> {
         match bits {

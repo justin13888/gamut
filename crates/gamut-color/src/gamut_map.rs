@@ -32,7 +32,9 @@ pub fn in_gamut(rgb: [f64; 3]) -> bool {
 /// of gamut the colour was (`l_blend = 0` keeps `L` fixed).
 ///
 /// `lab` matches the `[L, a, b]` layout returned by [`linear_rgb_to_oklab`].
-/// Precondition: `lab[0]` (L) should be in `[0, 1]`.
+/// Preconditions: `lab[0]` (L) and `l_blend` should be in `[0, 1]` — outside that, the
+/// achromatic anchor itself may be out of gamut and the bisection bracket no longer holds.
+/// NaN channels propagate to the output (a non-finite colour is never reported in gamut).
 ///
 /// [`linear_rgb_to_oklab`]: crate::oklab::linear_rgb_to_oklab
 ///

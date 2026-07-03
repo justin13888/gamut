@@ -5,6 +5,10 @@
 //! [`MatrixCoefficients::code_point`] (and the siblings) is just the discriminant. M0 uses
 //! `MatrixCoefficients::Identity`, `ColourPrimaries::Bt709`, `TransferCharacteristics::Srgb`, and
 //! `ColorRange::Full`; the remaining named values are included for M2/M4 extension.
+//!
+//! Naming follows each identifier's source spec: the H.273 types keep the spec's British
+//! spelling ([`ColourPrimaries`], as published), while AV1-derived names use the AV1 spec's
+//! American spelling ([`ColorRange`], after `color_range`).
 
 /// Matrix coefficients (CICP `MatrixCoefficients`). `Identity` (0) carries RGB directly with no
 /// colour transform and requires 4:4:4 — the basis for lossless RGB AVIF.
@@ -20,7 +24,8 @@ pub enum MatrixCoefficients {
     Bt709 = 1,
     /// Unspecified. (Code point 2.)
     Unspecified = 2,
-    /// BT.601 / BT.470 System B,G. (Code point 6.)
+    /// BT.601 / SMPTE 170M — KR=0.299, KB=0.114. (Code point 6; BT.470 System B,G is
+    /// point 5, with identical coefficients.)
     Bt601 = 6,
     /// YCgCo. (Code point 8.)
     YCgCo = 8,
@@ -56,6 +61,7 @@ impl MatrixCoefficients {
 /// Colour primaries (CICP `ColourPrimaries`).
 ///
 /// `#[non_exhaustive]`: H.273 defines further code points, added here as milestones need them.
+#[doc(alias = "ColorPrimaries")]
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
