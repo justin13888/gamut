@@ -46,6 +46,10 @@ assert_eq!(read(&bytes).unwrap(), file);
 Tag *numbers* are passed literally — tag *semantics* live in the consuming codec (e.g. `gamut-tiff`'s
 `tags` module), not in this structural core.
 
+Beyond the twelve TIFF 6.0 field types, `FieldType::Utf8` (`Value::Utf8`, on-disk code `129`) carries
+the Exif 3.0 UTF-8 string type (CIPA DC-008 §4.6.2) — like `Ascii` but NUL-terminated UTF-8, so
+internationalised EXIF text round-trips. It is always available (not gated behind `bigtiff`).
+
 ### BigTIFF
 
 The `bigtiff` cargo feature adds BigTIFF (`references/tiff/bigtiff.html`): the `Variant::Big`
