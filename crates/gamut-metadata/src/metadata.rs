@@ -5,6 +5,10 @@ use gamut_icc::IccProfile;
 use gamut_iptc::PhotoMetadata;
 use gamut_xmp::XmpMeta;
 
+use crate::error::Result;
+use crate::extract::MetadataExtractor;
+use crate::source::MetadataBlock;
+
 /// All of an image's metadata, unified across the carriers a container holds.
 ///
 /// There is exactly **one field per genuinely distinct serialization** a still-image container
@@ -38,6 +42,17 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    /// Extracts a unified model from already-located container metadata blocks, using default
+    /// options. A convenience for [`MetadataExtractor::new().extract(blocks)`](MetadataExtractor::extract);
+    /// use [`MetadataExtractor`] directly to choose an IPTC [`ConflictPolicy`](crate::ConflictPolicy).
+    ///
+    /// # Errors
+    ///
+    /// As [`MetadataExtractor::extract`].
+    pub fn from_blocks(blocks: &[MetadataBlock<'_>]) -> Result<Self> {
+        MetadataExtractor::new().extract(blocks)
+    }
+
     /// The IPTC Photo Metadata view over [`xmp`](Self::xmp), or `None` when no XMP is present or the
     /// XMP carries no IPTC-namespace properties.
     ///
