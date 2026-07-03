@@ -1,48 +1,98 @@
 //! The typed ISOBMFF/HEIF still-image box tree.
 //!
 //! These structs model the *structure* of a single-image ISOBMFF file — its `ftyp` brands and the
-//! `meta` image items with their properties and payloads — and never the coded bitstream itself,
-//! which stays opaque (carried as [`PropertyKind::CodecConfiguration`] and [`Item::payload`]). This
-//! is the codec-agnostic layer both AVIF (`av01`/`av1C`) and HEIC (`hvc1`/`hvcC`) build on.
+//! `meta` image items with their properties, references, and payloads — and never the coded
+//! bitstream itself, which stays opaque (carried as [`PropertyKind::CodecConfiguration`] and
+//! [`Item::payload`]). This is the codec-agnostic layer both AVIF (`av01`/`av1C`) and HEIC
+//! (`hvc1`/`hvcC`) build on.
 //!
 //! [`crate::write`] serialises an [`IsoBmffImage`]; [`crate::read`] parses one back. The model is
 //! normalised so the two are inverse for files this crate writes: it stores each item's resolved
-//! [`payload`](Item::payload) (not raw `iloc` offsets) and its per-item [`properties`](Item::properties)
-//! list (not raw `ipco` indices), so `read(&write(&img)) == img`.
+//! [`payload`](Item::payload) (not raw `iloc` offsets or `idat`/`mdat` placement), its per-item
+//! [`properties`](Item::properties) list (not raw `ipco` indices), and its outgoing
+//! [`references`](Item::references) (not the file-level `iref` table), so
+//! `read(&write(&img)?) == img`.
 
 /// A parsed or constructed ISOBMFF still-image file: its `ftyp` brands, the id of the primary
-/// (displayed) item, and the image items.
+/// (displayed) item, the image items, and the entity groups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IsoBmffImage {
-    /// The `ftyp` major brand (e.g. `*b"avif"`).
+    /// The `ftyp` major brand (e.g. `*b"avif"`, `*b"heic"`).
     pub major_brand: [u8; 4],
     /// The `ftyp` minor version (typically `0`).
     pub minor_version: u32,
     /// The `ftyp` compatible brands, in file order (e.g. `avif`/`mif1`/`miaf`/`MA1A`).
     pub compatible_brands: Vec<[u8; 4]>,
-    /// The `pitm` primary item id — the image a reader displays.
-    pub primary_item_id: u16,
-    /// The image items, in file order. The first/primary item is the coded image; further items
-    /// are auxiliaries (e.g. a future alpha plane).
+    /// The `pitm` primary item id — the image a reader displays. [`crate::write`] requires it to
+    /// name one of [`items`](Self::items).
+    pub primary_item_id: u32,
+    /// The image items, in `iinf` order: the coded image(s) plus any auxiliaries (alpha plane,
+    /// thumbnail, Exif/XMP metadata, derivation such as `grid`).
     pub items: Vec<Item>,
+    /// The `grpl` entity groups (e.g. `altr` alternatives), in file order; usually empty. An empty
+    /// list round-trips as an absent `grpl` box.
+    pub groups: Vec<EntityGroup>,
 }
 
-/// One image item: its id, four-character type, optional name, the properties associated with it
-/// (in association order), and its payload bytes.
+/// One image item: its `infe` identity, the properties associated with it, its outgoing item
+/// references, and its payload bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
-    /// The item id, unique within the file and referenced by `pitm`/`iloc`/`iinf`/`ipma`.
-    pub id: u16,
-    /// The item type four-character code (e.g. `*b"av01"` for an AV1 image, `*b"hvc1"` for HEVC).
+    /// The item id, unique within the file and referenced by `pitm`/`iloc`/`iinf`/`ipma`/`iref`.
+    /// [`crate::read`] accepts the full 32-bit range (`infe` v3 / `iloc` v2); [`crate::write`]
+    /// normalises to the 16-bit box versions and rejects ids above `u16::MAX` — a still image
+    /// never approaches that.
+    pub id: u32,
+    /// The item type four-character code (e.g. `*b"av01"` for an AV1 image, `*b"hvc1"` for HEVC,
+    /// `*b"Exif"` for Exif metadata, `*b"mime"` for XMP, `*b"grid"` for a derived grid).
     pub item_type: [u8; 4],
-    /// The item name (`infe` `item_name`), usually empty. Must be valid UTF-8 with no interior NUL.
+    /// The item name (`infe` `item_name`), usually empty. Must have no interior NUL.
     pub name: String,
-    /// The item's properties, in `ipma` association order. The codec configuration is conventionally
-    /// first and `essential`.
+    /// The `infe` MIME content type — required iff [`item_type`](Self::item_type) is `mime`
+    /// (e.g. `application/rdf+xml` for XMP).
+    pub content_type: Option<String>,
+    /// The `infe` MIME content encoding (e.g. `deflate`), only meaningful with
+    /// [`content_type`](Self::content_type). `None` and an absent field are equivalent; an empty
+    /// string does not round-trip.
+    pub content_encoding: Option<String>,
+    /// The `infe` hidden flag (`flags & 1`): the item is not intended for standalone display
+    /// (e.g. `grid` tiles).
+    pub hidden: bool,
+    /// The item's outgoing `iref` references (this item is the `from_item`), in file order — e.g.
+    /// `auxl` from an alpha item to its master, `cdsc` from Exif/XMP to the described image,
+    /// `dimg` from a `grid` item to its tiles, `thmb` from a thumbnail to its master.
+    pub references: Vec<ItemReference>,
+    /// The item's properties, in `ipma` association order. The codec configuration is
+    /// conventionally first and `essential`.
     pub properties: Vec<Property>,
-    /// The item's payload — for the primary image, the coded bitstream placed in `mdat` (e.g. the AV1
-    /// temporal unit). Opaque to this crate.
+    /// The item's payload with `iloc` placement resolved: the coded bitstream for an image item
+    /// (e.g. the AV1 temporal unit), the `ImageGrid` struct for a `grid` item, the Exif block for
+    /// an `Exif` item. Opaque to this crate. [`crate::read`] concatenates multi-extent payloads
+    /// and resolves `idat`-stored data; [`crate::write`] always places payloads in `mdat` as a
+    /// single extent.
     pub payload: Vec<u8>,
+}
+
+/// One `iref` entry: a typed reference from the owning [`Item`] to other items
+/// (ISO/IEC 14496-12 `SingleItemTypeReferenceBox`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemReference {
+    /// The reference type four-character code (`auxl`, `cdsc`, `dimg`, `thmb`, `prem`, …).
+    pub reference_type: [u8; 4],
+    /// The referenced item ids, in order. Not resolved or validated against
+    /// [`IsoBmffImage::items`] — dangling ids are the consumer's concern.
+    pub to_item_ids: Vec<u32>,
+}
+
+/// One `grpl` entity group (ISO/IEC 14496-12 `EntityToGroupBox`), e.g. `altr` alternatives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityGroup {
+    /// The grouping type four-character code (e.g. `*b"altr"`).
+    pub group_type: [u8; 4],
+    /// The group id — shares the id space with item ids per the spec (not policed here).
+    pub group_id: u32,
+    /// The grouped entity (item) ids, in order.
+    pub entity_ids: Vec<u32>,
 }
 
 /// An item property together with whether a reader must understand it to render the item
@@ -56,9 +106,14 @@ pub struct Property {
     pub kind: PropertyKind,
 }
 
-/// An item property box (`ipco` child). Recognised HEIF properties are modelled structurally; any
-/// other property box (including a codec configuration) is carried verbatim so it round-trips.
+/// An item property box (`ipco` child). The HEIF still-image properties are modelled structurally;
+/// any other property box (including a codec configuration) is carried verbatim so it round-trips.
+///
+/// Non-exhaustive: a property currently carried as [`Other`](Self::Other) (e.g. `mdcv`, `cclv`,
+/// `amve`) may gain a typed variant in a future minor release, so match with a wildcard arm and do
+/// not rely on a specific box type staying inside `Other`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PropertyKind {
     /// `ispe` image spatial extents — the stored image dimensions (ISO/IEC 23008-12 §6.5.3).
     ImageSpatialExtents {
@@ -80,6 +135,51 @@ pub enum PropertyKind {
     /// `imir` image mirror — axis `0` (vertical, left↔right) or `1` (horizontal, top↔bottom)
     /// (ISO/IEC 23008-12 §6.5.12).
     Mirror(u8),
+    /// `clap` clean aperture — the displayed crop as fractional width/height/centre-offsets
+    /// (ISO/IEC 14496-12 §12.1.4). Fields are the raw unsigned 32-bit box values; the offset
+    /// numerators are interpreted as two's-complement signed by consumers (MIAF §7.3.6.7).
+    CleanAperture {
+        /// Clean-aperture width numerator.
+        width_n: u32,
+        /// Clean-aperture width denominator.
+        width_d: u32,
+        /// Clean-aperture height numerator.
+        height_n: u32,
+        /// Clean-aperture height denominator.
+        height_d: u32,
+        /// Horizontal centre-offset numerator (signed, stored as the raw two's-complement bits).
+        horiz_off_n: u32,
+        /// Horizontal centre-offset denominator.
+        horiz_off_d: u32,
+        /// Vertical centre-offset numerator (signed, stored as the raw two's-complement bits).
+        vert_off_n: u32,
+        /// Vertical centre-offset denominator.
+        vert_off_d: u32,
+    },
+    /// `pasp` pixel aspect ratio — `h_spacing:v_spacing` (ISO/IEC 14496-12 §12.1.4).
+    PixelAspectRatio {
+        /// Relative horizontal pixel spacing.
+        h_spacing: u32,
+        /// Relative vertical pixel spacing.
+        v_spacing: u32,
+    },
+    /// `auxC` auxiliary type — what an auxiliary (non-displayed) image is, e.g.
+    /// `urn:mpeg:mpegB:cicp:systems:auxiliary:alpha` for an alpha plane
+    /// (ISO/IEC 23008-12 §6.5.8; MIAF §7.3.5).
+    AuxiliaryType {
+        /// The aux type URN. Must have no interior NUL.
+        aux_type: String,
+        /// Format-specific subtype bytes following the URN, usually empty.
+        aux_subtype: Vec<u8>,
+    },
+    /// `clli` content light level — HDR `MaxCLL`/`MaxPALL` in cd/m² (ISO/IEC 14496-12;
+    /// semantics from the HEVC SEI, ISO/IEC 23008-2 §D.3.35).
+    ContentLightLevel {
+        /// Maximum content light level (`MaxCLL`).
+        max_content_light_level: u16,
+        /// Maximum picture average light level (`MaxPALL`).
+        max_pic_average_light_level: u16,
+    },
     /// A codec configuration property (e.g. `av1C`, `hvcC`) carried as opaque bytes — the container
     /// never interprets the coded-format record. `kind` is the box type; `data` is its body.
     CodecConfiguration {
@@ -98,12 +198,21 @@ pub enum PropertyKind {
     },
 }
 
-/// The contents of a `colr` box. Only the `nclx` (CICP code points) form is modelled; an ICC
-/// profile (`rICC`/`prof`) round-trips as [`PropertyKind::Other`] until a consumer needs it.
+/// The contents of a `colr` box (ISO/IEC 14496-12 §12.1.5): CICP code points (`nclx`) or an
+/// embedded ICC profile (`rICC`/`prof`). An unknown `colour_type` round-trips as
+/// [`PropertyKind::Other`].
+///
+/// Non-exhaustive: future `colour_type`s may gain variants in a minor release.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ColourInformation {
     /// `nclx` on-screen colour: CICP code points plus the full-range flag.
     Nclx(NclxColr),
+    /// `rICC` — a restricted ICC profile (input or display class, ISO 15076-1), carried opaquely;
+    /// parse it with `gamut-icc`.
+    RestrictedIcc(Vec<u8>),
+    /// `prof` — an unrestricted ICC profile, carried opaquely; parse it with `gamut-icc`.
+    UnrestrictedIcc(Vec<u8>),
 }
 
 /// The `nclx` colour information written into a `colr` box (CICP code points, ITU-T H.273). For an

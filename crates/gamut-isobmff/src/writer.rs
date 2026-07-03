@@ -5,20 +5,36 @@
 //! reserves those 4-byte slots while emitting `meta` and patches them after `mdat` is placed (the
 //! analogue of `gamut-ifd`'s two-pass offset layout). Box byte layouts follow ISO/IEC 14496-12
 //! (ISOBMFF) and ISO/IEC 23008-12 (HEIF); see `references/isobmff`.
+//!
+//! The writer *normalises*: it always emits the smallest still-image box versions (`pitm` v0,
+//! `iloc` v0 single-extent into `mdat`, `infe` v2, `iref` v0), which is why [`write`] validates up
+//! front that the model fits them — see [`validate`].
+
+use gamut_core::{Error, Result};
 
 use crate::boxes::BoxBuilder;
-use crate::model::{ColourInformation, IsoBmffImage, Item, PropertyKind};
+use crate::model::{ColourInformation, EntityGroup, IsoBmffImage, Item, PropertyKind};
 
 /// Serialises `image` into a complete ISOBMFF file (`ftyp` + `meta` + `mdat`).
 ///
-/// Offsets and lengths are written as 32-bit fields, so the file (and each item payload) must be
-/// below 4 GiB — always true for a still image. [`read`](crate::read)`(&write(&image))` reproduces
-/// `image` for any value this crate can construct.
-#[must_use]
-pub fn write(image: &IsoBmffImage) -> Vec<u8> {
+/// [`read`](crate::read)`(&write(&image)?)` reproduces `image` for any value this function
+/// accepts.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for a model that cannot round-trip: a `primary_item_id` naming
+/// no item, duplicate item ids, an interior NUL in a name/content-type/encoding/aux-type string,
+/// an empty `content_encoding`, a `content_type` on a non-`mime` item (or a `mime` item without
+/// one), or an out-of-range `Rotation`/`Mirror` value. Returns [`Error::Unsupported`] for a model
+/// that does not fit the still-image box versions this crate writes: item ids above `u16::MAX`,
+/// `uri ` items, more than 255 properties or 65 535 reference targets per item, more than 32 767
+/// distinct properties, more than 65 535 items, or a payload/file at 4 GiB or beyond.
+#[must_use = "the serialised file is returned, not written anywhere"]
+pub fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
+    validate(image)?;
     let mut bb = BoxBuilder::new();
     write_ftyp(&mut bb, image);
-    let extent_slots = write_meta(&mut bb, image);
+    let extent_slots = write_meta(&mut bb, image)?;
 
     let mdat_start = bb.begin_box(b"mdat");
     let mut payload_positions = Vec::with_capacity(image.items.len());
@@ -29,9 +45,108 @@ pub fn write(image: &IsoBmffImage) -> Vec<u8> {
     bb.end_box(mdat_start);
 
     for (slot, pos) in extent_slots.into_iter().zip(payload_positions) {
-        bb.patch_u32(slot, pos as u32);
+        let pos = u32::try_from(pos)
+            .map_err(|_| Error::Unsupported("ISOBMFF: file at or beyond 4 GiB"))?;
+        bb.patch_u32(slot, pos);
     }
-    bb.into_vec()
+    Ok(bb.into_vec())
+}
+
+/// Rejects models that cannot round-trip or that do not fit the normalised still-image box
+/// versions [`write`] emits (see the [`write`] error docs for the full list).
+fn validate(image: &IsoBmffImage) -> Result<()> {
+    if !image.items.iter().any(|i| i.id == image.primary_item_id) {
+        return Err(Error::InvalidInput(
+            "ISOBMFF: primary_item_id names no item",
+        ));
+    }
+    if image.items.len() > usize::from(u16::MAX) {
+        return Err(Error::Unsupported("ISOBMFF: more than 65535 items"));
+    }
+    for (n, item) in image.items.iter().enumerate() {
+        if image.items[..n].iter().any(|prev| prev.id == item.id) {
+            return Err(Error::InvalidInput("ISOBMFF: duplicate item id"));
+        }
+        validate_item(item)?;
+    }
+    Ok(())
+}
+
+fn validate_item(item: &Item) -> Result<()> {
+    if u16::try_from(item.id).is_err() {
+        return Err(Error::Unsupported(
+            "ISOBMFF: item id above u16::MAX (still-image writer emits 16-bit boxes)",
+        ));
+    }
+    if item.item_type == *b"uri " {
+        return Err(Error::Unsupported("ISOBMFF: uri items not modelled"));
+    }
+    if (item.item_type == *b"mime") != item.content_type.is_some() {
+        return Err(Error::InvalidInput(
+            "ISOBMFF: content_type is required for mime items and forbidden otherwise",
+        ));
+    }
+    if item.content_encoding.is_some() && item.content_type.is_none() {
+        return Err(Error::InvalidInput(
+            "ISOBMFF: content_encoding requires a content_type",
+        ));
+    }
+    if item.content_encoding.as_deref() == Some("") {
+        return Err(Error::InvalidInput(
+            "ISOBMFF: empty content_encoding does not round-trip (use None)",
+        ));
+    }
+    for s in [
+        Some(item.name.as_str()),
+        item.content_type.as_deref(),
+        item.content_encoding.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if s.as_bytes().contains(&0) {
+            return Err(Error::InvalidInput("ISOBMFF: interior NUL in item string"));
+        }
+    }
+    if u32::try_from(item.payload.len()).is_err() {
+        return Err(Error::Unsupported("ISOBMFF: payload at or beyond 4 GiB"));
+    }
+    if item.properties.len() > usize::from(u8::MAX) {
+        return Err(Error::Unsupported(
+            "ISOBMFF: more than 255 properties on one item",
+        ));
+    }
+    for property in &item.properties {
+        match &property.kind {
+            PropertyKind::Rotation(angle) if *angle > 3 => {
+                return Err(Error::InvalidInput("ISOBMFF: irot angle above 3"));
+            }
+            PropertyKind::Mirror(axis) if *axis > 1 => {
+                return Err(Error::InvalidInput("ISOBMFF: imir axis above 1"));
+            }
+            PropertyKind::AuxiliaryType { aux_type, .. } if aux_type.as_bytes().contains(&0) => {
+                return Err(Error::InvalidInput("ISOBMFF: interior NUL in auxC type"));
+            }
+            _ => {}
+        }
+    }
+    for reference in &item.references {
+        if reference.to_item_ids.len() > usize::from(u16::MAX) {
+            return Err(Error::Unsupported(
+                "ISOBMFF: more than 65535 targets in one reference",
+            ));
+        }
+        if reference
+            .to_item_ids
+            .iter()
+            .any(|&id| u16::try_from(id).is_err())
+        {
+            return Err(Error::Unsupported(
+                "ISOBMFF: referenced item id above u16::MAX",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `ftyp`: major brand, minor version, and the compatible-brand list.
@@ -47,16 +162,18 @@ fn write_ftyp(bb: &mut BoxBuilder, image: &IsoBmffImage) {
 
 /// `meta` (FullBox v0) and its children; returns each item's reserved `iloc` `extent_offset` slot
 /// in item order.
-fn write_meta(bb: &mut BoxBuilder, image: &IsoBmffImage) -> Vec<usize> {
+fn write_meta(bb: &mut BoxBuilder, image: &IsoBmffImage) -> Result<Vec<usize>> {
     let start = bb.begin_box(b"meta");
     bb.full_box(0, 0);
     write_hdlr(bb);
-    write_pitm(bb, image.primary_item_id);
+    write_pitm(bb, image.primary_item_id as u16);
     let extent_slots = write_iloc(bb, &image.items);
     write_iinf(bb, &image.items);
-    write_iprp(bb, &image.items);
+    write_iref(bb, &image.items);
+    write_iprp(bb, &image.items)?;
+    write_grpl(bb, &image.groups);
     bb.end_box(start);
-    extent_slots
+    Ok(extent_slots)
 }
 
 /// `hdlr`: handler_type `pict` (HEIF image-item handler).
@@ -90,7 +207,7 @@ fn write_iloc(bb: &mut BoxBuilder, items: &[Item]) -> Vec<usize> {
     bb.u16(items.len() as u16); // item_count
     let mut slots = Vec::with_capacity(items.len());
     for item in items {
-        bb.u16(item.id); // item_ID
+        bb.u16(item.id as u16); // item_ID
         bb.u16(0); // data_reference_index (0 = this file)
         // base_offset: 0 bytes (base_offset_size == 0)
         bb.u16(1); // extent_count
@@ -108,19 +225,69 @@ fn write_iinf(bb: &mut BoxBuilder, items: &[Item]) {
     bb.u16(items.len() as u16); // entry_count
     for item in items {
         let infe = bb.begin_box(b"infe");
-        bb.full_box(2, 0); // version 2, flags 0 (visible item)
-        bb.u16(item.id); // item_ID
+        bb.full_box(2, u32::from(item.hidden)); // version 2; flags & 1 = hidden
+        bb.u16(item.id as u16); // item_ID
         bb.u16(0); // item_protection_index
         bb.bytes(&item.item_type); // item_type
         bb.bytes(item.name.as_bytes()); // item_name
         bb.u8(0); // item_name null terminator
+        if let Some(content_type) = &item.content_type {
+            bb.bytes(content_type.as_bytes());
+            bb.u8(0);
+            if let Some(content_encoding) = &item.content_encoding {
+                bb.bytes(content_encoding.as_bytes());
+                bb.u8(0);
+            }
+        }
         bb.end_box(infe);
     }
     bb.end_box(start);
 }
 
+/// `iref` v0: one `SingleItemTypeReferenceBox` per item reference, in item then reference order.
+/// Omitted entirely when no item has references (an empty `iref` does not round-trip).
+fn write_iref(bb: &mut BoxBuilder, items: &[Item]) {
+    if items.iter().all(|i| i.references.is_empty()) {
+        return;
+    }
+    let start = bb.begin_box(b"iref");
+    bb.full_box(0, 0);
+    for item in items {
+        for reference in &item.references {
+            let single = bb.begin_box(&reference.reference_type);
+            bb.u16(item.id as u16); // from_item_ID
+            bb.u16(reference.to_item_ids.len() as u16); // reference_count
+            for &to in &reference.to_item_ids {
+                bb.u16(to as u16);
+            }
+            bb.end_box(single);
+        }
+    }
+    bb.end_box(start);
+}
+
+/// `grpl`: one `EntityToGroupBox` (FullBox v0, box type = grouping type) per group. Omitted when
+/// there are no groups.
+fn write_grpl(bb: &mut BoxBuilder, groups: &[EntityGroup]) {
+    if groups.is_empty() {
+        return;
+    }
+    let start = bb.begin_box(b"grpl");
+    for group in groups {
+        let entity = bb.begin_box(&group.group_type);
+        bb.full_box(0, 0);
+        bb.u32(group.group_id);
+        bb.u32(group.entity_ids.len() as u32); // num_entities_in_group
+        for &id in &group.entity_ids {
+            bb.u32(id);
+        }
+        bb.end_box(entity);
+    }
+    bb.end_box(start);
+}
+
 /// `iprp` = a shared `ipco` (deduplicated property boxes) + `ipma` associating them with each item.
-fn write_iprp(bb: &mut BoxBuilder, items: &[Item]) {
+fn write_iprp(bb: &mut BoxBuilder, items: &[Item]) -> Result<()> {
     // Build the shared ipco pool, deduplicating by serialized bytes. The essential flag is an ipma
     // concern (it is not part of the property box), so two items may share a property at different
     // essentiality. `assoc[i]` is item i's associations as `(1-based pool index, essential)`.
@@ -141,6 +308,11 @@ fn write_iprp(bb: &mut BoxBuilder, items: &[Item]) {
         }
         assoc.push(row);
     }
+    if pool.len() > 0x7fff {
+        return Err(Error::Unsupported(
+            "ISOBMFF: more than 32767 distinct properties",
+        ));
+    }
 
     let start = bb.begin_box(b"iprp");
     let ipco = bb.begin_box(b"ipco");
@@ -150,29 +322,33 @@ fn write_iprp(bb: &mut BoxBuilder, items: &[Item]) {
     bb.end_box(ipco);
     write_ipma(bb, items, &assoc);
     bb.end_box(start);
+    Ok(())
 }
 
 /// `ipma` v0: each item id → its `(property_index, essential)` associations, in association order.
 ///
-/// `flags = 0` makes each association a single byte `essential(1) | index(7)`; this crate only emits
-/// the v0 single-byte form, which holds while every property index ≤ 127 (HEIF still images use a
-/// handful of properties, so this always holds).
+/// While every pool index fits 7 bits (`≤ 127`, the common case) each association is a single byte
+/// `essential(1) | index(7)` with `flags = 0`; otherwise `flags = 1` selects the two-byte
+/// `essential(1) | index(15)` form. The pool size is pre-validated to fit 15 bits.
 fn write_ipma(bb: &mut BoxBuilder, items: &[Item], assoc: &[Vec<(usize, bool)>]) {
+    let wide = assoc.iter().flatten().any(|&(index, _)| index > 0x7f);
     let start = bb.begin_box(b"ipma");
-    bb.full_box(0, 0);
+    bb.full_box(0, u32::from(wide)); // flags & 1 selects 16-bit property indices
     bb.u32(items.len() as u32); // entry_count
     for (item, row) in items.iter().zip(assoc) {
-        bb.u16(item.id);
-        debug_assert!(row.len() <= usize::from(u8::MAX));
-        bb.u8(row.len() as u8); // association_count
+        bb.u16(item.id as u16);
+        bb.u8(row.len() as u8); // association_count (≤ 255, pre-validated)
         for &(index, essential) in row {
-            debug_assert!(index <= 0x7f, "ipma v0 holds at most 127 properties");
-            // The essential flag is bit 7; the property index (≤ 127) occupies bits 0..6. Written as
-            // an addition rather than `0x80 | index` so the operator is mutation-observable (OR/XOR/
-            // ADD all coincide for the disjoint bit 7, which would otherwise leave an equivalent
-            // mutant).
-            let byte = index as u8;
-            bb.u8(if essential { byte + 0x80 } else { byte });
+            // The essential flag is the top bit; the index occupies the rest. Written as an
+            // addition rather than `|` so the operator is mutation-observable (OR/XOR/ADD all
+            // coincide for the disjoint top bit, which would otherwise leave an equivalent mutant).
+            if wide {
+                let word = index as u16;
+                bb.u16(if essential { word + 0x8000 } else { word });
+            } else {
+                let byte = index as u8;
+                bb.u8(if essential { byte + 0x80 } else { byte });
+            }
         }
     }
     bb.end_box(start);
@@ -193,7 +369,6 @@ fn serialize_property(kind: &PropertyKind) -> Vec<u8> {
         PropertyKind::PixelInformation { bits_per_channel } => {
             let start = bb.begin_box(b"pixi");
             bb.full_box(0, 0);
-            debug_assert!(bits_per_channel.len() <= usize::from(u8::MAX));
             bb.u8(bits_per_channel.len() as u8);
             for &bits in bits_per_channel {
                 bb.u8(bits);
@@ -209,14 +384,80 @@ fn serialize_property(kind: &PropertyKind) -> Vec<u8> {
             bb.u8(u8::from(c.full_range) << 7); // full_range_flag in bit 7, reserved = 0
             bb.end_box(start);
         }
+        PropertyKind::Colour(ColourInformation::RestrictedIcc(profile)) => {
+            let start = bb.begin_box(b"colr");
+            bb.bytes(b"rICC");
+            bb.bytes(profile);
+            bb.end_box(start);
+        }
+        PropertyKind::Colour(ColourInformation::UnrestrictedIcc(profile)) => {
+            let start = bb.begin_box(b"colr");
+            bb.bytes(b"prof");
+            bb.bytes(profile);
+            bb.end_box(start);
+        }
         PropertyKind::Rotation(angle) => {
             let start = bb.begin_box(b"irot");
-            bb.u8(angle & 0x03); // reserved(6) | angle(2)
+            bb.u8(*angle); // reserved(6) | angle(2); range pre-validated
             bb.end_box(start);
         }
         PropertyKind::Mirror(axis) => {
             let start = bb.begin_box(b"imir");
-            bb.u8(axis & 0x01); // reserved(7) | axis(1)
+            bb.u8(*axis); // reserved(7) | axis(1); range pre-validated
+            bb.end_box(start);
+        }
+        PropertyKind::CleanAperture {
+            width_n,
+            width_d,
+            height_n,
+            height_d,
+            horiz_off_n,
+            horiz_off_d,
+            vert_off_n,
+            vert_off_d,
+        } => {
+            let start = bb.begin_box(b"clap");
+            for value in [
+                width_n,
+                width_d,
+                height_n,
+                height_d,
+                horiz_off_n,
+                horiz_off_d,
+                vert_off_n,
+                vert_off_d,
+            ] {
+                bb.u32(*value);
+            }
+            bb.end_box(start);
+        }
+        PropertyKind::PixelAspectRatio {
+            h_spacing,
+            v_spacing,
+        } => {
+            let start = bb.begin_box(b"pasp");
+            bb.u32(*h_spacing);
+            bb.u32(*v_spacing);
+            bb.end_box(start);
+        }
+        PropertyKind::AuxiliaryType {
+            aux_type,
+            aux_subtype,
+        } => {
+            let start = bb.begin_box(b"auxC");
+            bb.full_box(0, 0);
+            bb.bytes(aux_type.as_bytes());
+            bb.u8(0); // aux_type null terminator
+            bb.bytes(aux_subtype);
+            bb.end_box(start);
+        }
+        PropertyKind::ContentLightLevel {
+            max_content_light_level,
+            max_pic_average_light_level,
+        } => {
+            let start = bb.begin_box(b"clli");
+            bb.u16(*max_content_light_level);
+            bb.u16(*max_pic_average_light_level);
             bb.end_box(start);
         }
         PropertyKind::CodecConfiguration { kind, data } | PropertyKind::Other { kind, data } => {
