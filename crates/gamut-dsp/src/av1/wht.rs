@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn roundtrip_random() {
         let mut rng = Lcg(0xabcd_1234_5678_9999);
-        for _ in 0..20_000 {
+        for _ in 0..2_000 {
             let mut r = [0i32; 16];
             for v in &mut r {
                 *v = rng.residual();

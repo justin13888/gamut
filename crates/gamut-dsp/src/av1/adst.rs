@@ -319,16 +319,61 @@ mod tests {
     }
 
     #[test]
+    fn inverse_adst_exact_values() {
+        // The proportional float oracle pins the inverse only up to one global scale; these
+        // snapshots pin the bit-exact outputs. The n = 2 impulse is hand-verifiable against the
+        // spec: the response to 4096·e₀ is the SINPI/9 column itself — x0 = SINPI_1_9·t0,
+        // x1 = SINPI_2_9·t0, x2 = SINPI_3_9·t0, x3 = (SINPI_1_9 + SINPI_2_9)·t0 = SINPI_4_9·t0,
+        // each exactly de-scaled by round2(·, 12). The n = 3/4 goldens are generated from this
+        // implementation (proportionally oracle-pinned above; bit-exactly dav1d-pinned through
+        // the 2-D pipeline).
+        let mut t = [4096i64, 0, 0, 0];
+        inverse_adst(&mut t, 2, 16);
+        assert_eq!(t, [SINPI_1_9, SINPI_2_9, SINPI_3_9, SINPI_4_9]);
+        let mut t = [100i64, -50, 25, -12];
+        inverse_adst(&mut t, 2, 16);
+        assert_eq!(t, [7, 23, 51, 153]);
+        let mut t = [200i64, -100, 50, -25, 12, -6, 3, -1];
+        inverse_adst(&mut t, 3, 16);
+        assert_eq!(t, [4, 13, 27, 44, 72, 127, 229, 370]);
+        let mut t: Vec<i64> = (0..16i64).map(|k| ((k * 37) % 201) - 100).collect();
+        inverse_adst(&mut t, 4, 16);
+        assert_eq!(
+            t,
+            [
+                -38, -15, 50, -173, 2, -491, -129, 153, -76, -93, -87, -237, 30, 105, -139, -95
+            ]
+        );
+    }
+
+    #[test]
+    fn intermediate_clamp_range_is_wired_through() {
+        // Adversarial: the oracle tests keep the Hadamard clamp inactive, so nothing else fails
+        // if `r` were ignored. Saturating coefficients must produce different outputs at a narrow
+        // versus a wide clamp range.
+        let mut narrow = [1i64 << 19; 16];
+        inverse_adst(&mut narrow, 4, 8);
+        let mut wide = [1i64 << 19; 16];
+        inverse_adst(&mut wide, 4, 20);
+        assert_ne!(narrow, wide, "the r clamp should saturate at r = 8");
+    }
+
+    #[test]
     fn forward_adst_exact_values() {
         // As with forward_dct, the proportional round-trip pins forward_adst only up to scale, so the
         // `UNIT` impulse scale and the `acc += m_inv * x` accumulation (negate / zero / `* -> +`) need
         // exact snapshots. Correctness is established by the proportional inverse-vs-naive test.
+        // The n = 3 case additionally pins the size-8 basis (n = 2 alone would let a
+        // size-dependent bug through).
         let mut t = [100i64, 100, 100, 100];
         forward_adst(&mut t, 2);
         assert_eq!(t, [267, 82, 40, 17]);
         let mut t = [200i64, -100, 50, -25];
         forward_adst(&mut t, 2);
         assert_eq!(t, [22, 102, 162, 263]);
+        let mut t = [200i64, -100, 50, -25, 12, -6, 3, -1];
+        forward_adst(&mut t, 3);
+        assert_eq!(t, [4, 14, 26, 44, 72, 127, 229, 370]);
     }
 
     #[test]

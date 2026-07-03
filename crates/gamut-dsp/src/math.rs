@@ -104,6 +104,24 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "n must be >= 1")]
+    fn round2_signed_zero_shift_panics() {
+        let _ = round2_signed(1, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "den must be > 0")]
+    fn round_div_nearest_zero_den_panics() {
+        let _ = round_div_nearest(1, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "den must be > 0")]
+    fn round_div_nearest_negative_den_panics() {
+        let _ = round_div_nearest(1, -4);
+    }
+
+    #[test]
     fn round_div_nearest_ties_away_from_zero() {
         assert_eq!(round_div_nearest(10, 4), 3); // 2.5 -> 3
         assert_eq!(round_div_nearest(-10, 4), -3); // -2.5 -> -3

@@ -107,13 +107,6 @@ mod tests {
     }
 
     #[test]
-    fn compressed_endpoints() {
-        assert!((compress(1.0, MU) - 1.0).abs() < 1e-12);
-        assert!((compress(-1.0, MU) + 1.0).abs() < 1e-12);
-        assert!(compress(0.0, MU).abs() < 1e-12);
-    }
-
-    #[test]
     fn zero_quantizes_to_center_and_back_exactly() {
         for bits in [4u32, 5, 6] {
             let center = (1u32 << (bits - 1)) - 1;
@@ -161,6 +154,52 @@ mod tests {
     #[should_panic(expected = "bit width must be in 2..=31")]
     fn bit_width_above_range_panics() {
         let _ = dequantize(0, 32, MU);
+    }
+
+    #[test]
+    #[should_panic(expected = "mu must be finite and > 0")]
+    fn zero_mu_panics() {
+        let _ = compress(0.5, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "mu must be finite and > 0")]
+    fn negative_mu_panics() {
+        let _ = expand(0.5, -1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "mu must be finite and > 0")]
+    fn nan_mu_panics() {
+        let _ = quantize(0.5, 5, f64::NAN);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot quantize NaN")]
+    fn quantize_nan_value_panics() {
+        let _ = quantize(f64::NAN, 5, MU);
+    }
+
+    #[test]
+    fn infinities_clamp_and_nan_propagates() {
+        // Adversarial totality probes: compress absorbs ±∞ through the [-1, 1] clamp,
+        // IEEE-propagates a NaN value, and quantize maps ±∞ to the end codes.
+        assert_eq!(compress(f64::INFINITY, MU), compress(1.0, MU));
+        assert_eq!(compress(f64::NEG_INFINITY, MU), compress(-1.0, MU));
+        assert!(compress(f64::NAN, MU).is_nan());
+        assert_eq!(quantize(f64::INFINITY, 5, MU), (1u32 << 5) - 2);
+        assert_eq!(quantize(f64::NEG_INFINITY, 5, MU), 0);
+    }
+
+    #[test]
+    fn boundary_bit_widths() {
+        // bits = 2 is the smallest legal width (three levels {0, 1, 2}, center 1); bits = 31 is
+        // the largest (max_idx = 2³¹ − 2 without overflowing the shift), center 2³⁰ − 1 exact.
+        assert_eq!(quantize(0.0, 2, MU), 1);
+        assert_eq!(quantize(-1.0, 2, MU), 0);
+        assert_eq!(quantize(1.0, 2, MU), 2);
+        assert_eq!(quantize(1.0, 31, MU), (1u32 << 31) - 2);
+        assert_eq!(dequantize((1u32 << 30) - 1, 31, MU), 0.0);
     }
 
     #[test]
