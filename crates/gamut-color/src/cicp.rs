@@ -34,6 +34,23 @@ impl MatrixCoefficients {
     pub fn code_point(self) -> u16 {
         self as u16
     }
+
+    /// The [`MatrixCoefficients`] for `code_point`, or `None` for any point not modeled here (a
+    /// later minor release may turn a `None` into `Some`). The inverse of
+    /// [`MatrixCoefficients::code_point`], for typing a value parsed from a `colr` box or AV1
+    /// header.
+    #[must_use]
+    pub fn from_code_point(code_point: u16) -> Option<Self> {
+        match code_point {
+            0 => Some(MatrixCoefficients::Identity),
+            1 => Some(MatrixCoefficients::Bt709),
+            2 => Some(MatrixCoefficients::Unspecified),
+            6 => Some(MatrixCoefficients::Bt601),
+            8 => Some(MatrixCoefficients::YCgCo),
+            9 => Some(MatrixCoefficients::Bt2020Ncl),
+            _ => None,
+        }
+    }
 }
 
 /// Colour primaries (CICP `ColourPrimaries`).
@@ -62,6 +79,22 @@ impl ColourPrimaries {
     #[must_use]
     pub fn code_point(self) -> u16 {
         self as u16
+    }
+
+    /// The [`ColourPrimaries`] for `code_point`, or `None` for any point not modeled here (a
+    /// later minor release may turn a `None` into `Some`). The inverse of
+    /// [`ColourPrimaries::code_point`].
+    #[must_use]
+    pub fn from_code_point(code_point: u16) -> Option<Self> {
+        match code_point {
+            1 => Some(ColourPrimaries::Bt709),
+            2 => Some(ColourPrimaries::Unspecified),
+            5 => Some(ColourPrimaries::Bt601Pal),
+            6 => Some(ColourPrimaries::Smpte170m),
+            9 => Some(ColourPrimaries::Bt2020),
+            12 => Some(ColourPrimaries::DisplayP3),
+            _ => None,
+        }
     }
 }
 
@@ -92,6 +125,22 @@ impl TransferCharacteristics {
     pub fn code_point(self) -> u16 {
         self as u16
     }
+
+    /// The [`TransferCharacteristics`] for `code_point`, or `None` for any point not modeled here
+    /// (a later minor release may turn a `None` into `Some`). The inverse of
+    /// [`TransferCharacteristics::code_point`].
+    #[must_use]
+    pub fn from_code_point(code_point: u16) -> Option<Self> {
+        match code_point {
+            1 => Some(TransferCharacteristics::Bt709),
+            2 => Some(TransferCharacteristics::Unspecified),
+            13 => Some(TransferCharacteristics::Srgb),
+            14 => Some(TransferCharacteristics::Bt2020_10),
+            16 => Some(TransferCharacteristics::Pq),
+            18 => Some(TransferCharacteristics::Hlg),
+            _ => None,
+        }
+    }
 }
 
 /// Sample value range (CICP `VideoFullRangeFlag`; AV1 `color_range`).
@@ -116,6 +165,17 @@ impl ColorRange {
     pub fn flag(self) -> u8 {
         self as u8
     }
+
+    /// The [`ColorRange`] for `flag` (0 or 1), or `None` for any other value. The inverse of
+    /// [`ColorRange::flag`].
+    #[must_use]
+    pub fn from_flag(flag: u8) -> Option<Self> {
+        match flag {
+            0 => Some(ColorRange::Limited),
+            1 => Some(ColorRange::Full),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -135,5 +195,50 @@ mod tests {
         assert_eq!(TransferCharacteristics::Pq.code_point(), 16);
         assert_eq!(ColorRange::Full.flag(), 1);
         assert_eq!(ColorRange::Limited.flag(), 0);
+    }
+
+    #[test]
+    fn code_point_inverses_round_trip() {
+        use ColourPrimaries as Cp;
+        use MatrixCoefficients as Mc;
+        use TransferCharacteristics as Tc;
+        for mc in [
+            Mc::Identity,
+            Mc::Bt709,
+            Mc::Unspecified,
+            Mc::Bt601,
+            Mc::YCgCo,
+            Mc::Bt2020Ncl,
+        ] {
+            assert_eq!(Mc::from_code_point(mc.code_point()), Some(mc));
+        }
+        for cp in [
+            Cp::Bt709,
+            Cp::Unspecified,
+            Cp::Bt601Pal,
+            Cp::Smpte170m,
+            Cp::Bt2020,
+            Cp::DisplayP3,
+        ] {
+            assert_eq!(Cp::from_code_point(cp.code_point()), Some(cp));
+        }
+        for tc in [
+            Tc::Bt709,
+            Tc::Unspecified,
+            Tc::Srgb,
+            Tc::Bt2020_10,
+            Tc::Pq,
+            Tc::Hlg,
+        ] {
+            assert_eq!(Tc::from_code_point(tc.code_point()), Some(tc));
+        }
+        for range in [ColorRange::Limited, ColorRange::Full] {
+            assert_eq!(ColorRange::from_flag(range.flag()), Some(range));
+        }
+        // Unmodeled points map to None (3 = "reserved" / not modeled in every table).
+        assert_eq!(Mc::from_code_point(3), None);
+        assert_eq!(Cp::from_code_point(3), None);
+        assert_eq!(Tc::from_code_point(3), None);
+        assert_eq!(ColorRange::from_flag(2), None);
     }
 }
