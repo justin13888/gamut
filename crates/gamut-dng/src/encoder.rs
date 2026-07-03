@@ -176,7 +176,7 @@ impl DngEncoder {
             &preview_blocks,
             raw_ifd,
             &raw_blocks,
-        );
+        )?;
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }

@@ -133,7 +133,8 @@ fn white_is_zero_is_inverted_on_decode() {
         Variant::Classic,
         &ifd,
         &[vec![0u8, 255u8]],
-    );
+    )
+    .expect("write");
 
     let got: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
     assert_eq!(got.as_samples(), &[255, 0]);

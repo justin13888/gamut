@@ -125,9 +125,16 @@ fn read_ifd_inner(
         Variant::Big => u64_at(data, offset, order)?,
     } as usize;
     let entries_start = offset + variant.count_size();
-    let next_pos = entries_start + count * entry_size;
+    // Checked: a hostile 8-byte BigTIFF count can overflow `count * entry_size` (classic counts
+    // are capped at u16 and cannot).
+    let next_pos = count
+        .checked_mul(entry_size)
+        .and_then(|n| entries_start.checked_add(n))
+        .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
     // Bound the directory to the file so a corrupt count fails fast rather than allocating.
-    let body_end = next_pos + variant.offset_size();
+    let body_end = next_pos
+        .checked_add(variant.offset_size())
+        .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
     if body_end > data.len() {
         return Err(Error::InvalidInput("TIFF: IFD extends past end of file"));
     }
@@ -246,15 +253,16 @@ fn read_chain(
     }
     let mut ifds = Vec::new();
     let mut offset = first as usize;
-    let mut seen = Vec::new();
+    // A hash set keeps the loop guard O(1) per link: a hostile chain can be MAX_IFDS long, and a
+    // linear scan per link would make it quadratic.
+    let mut seen = std::collections::HashSet::new();
     while offset != 0 {
-        if seen.contains(&offset) {
+        if !seen.insert(offset) {
             return Err(Error::InvalidInput("TIFF: IFD chain loops"));
         }
         if ifds.len() >= MAX_IFDS {
             return Err(Error::InvalidInput("TIFF: too many IFDs"));
         }
-        seen.push(offset);
         let (ifd, next) = read_ifd_inner(
             data,
             offset,
@@ -284,6 +292,91 @@ fn read_chain(
 /// chain loops, or a field value is truncated.
 pub fn read(data: &[u8]) -> Result<TiffFile> {
     read_chain(data, None, None)
+}
+
+/// An upper bound on the sub-IFD nesting depth [`read_tree`] follows, bounding hostile pointer
+/// graphs. The deepest legitimate trees (a DNG raw sub-IFD, or EXIF's Exif → Interop chain) are
+/// three levels.
+const MAX_SUBIFD_DEPTH: usize = 16;
+
+/// The file offsets a sub-IFD pointer value carries: a `LONG` array (TIFF 6.0 §2), or the 64-bit
+/// `LONG8`/`IFD8` forms BigTIFF writers use. Any other type is not a pointer.
+fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
+    match value {
+        Value::Long(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+        #[cfg(feature = "bigtiff")]
+        Value::Long8(v) | Value::Ifd8(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// Like [`read`], but additionally follows the given sub-IFD **pointer tags**, reconstructing the
+/// directory tree that [`write`](crate::write) flattens: each pointer field is replaced by a
+/// [`sub_ifds`](Ifd::sub_ifds) group holding its parsed children, recursively.
+///
+/// The caller names the pointer tags because the structure alone cannot: which `LONG` tags hold
+/// directory offsets is tag *semantics* (e.g. `SubIFDs` 330, `ExifIFD` 34665, `GPSInfo` 34853,
+/// `Interoperability` 40965), which lives in the consuming codec. A named tag whose value is not
+/// an offset array (`LONG`, or BigTIFF `LONG8`/`IFD8`) is left in place as a regular field.
+///
+/// This is [`write`](crate::write)'s inverse: `read_tree(&write(&file)?, tags)? == file` for any
+/// tree whose pointer tags are all named in `tags`. For per-pointer control (e.g. tolerating a
+/// malformed child), follow pointers manually with [`read_ifd_at`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] under the same conditions as [`read`], or if the pointer graph
+/// is not a tree: a repeated or self-referential child offset, or nesting deeper than 16 levels.
+pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
+    let mut file = read(data)?;
+    let mut visited: Vec<u64> = Vec::new();
+    for ifd in &mut file.ifds {
+        resolve_pointers(
+            data,
+            ifd,
+            pointer_tags,
+            file.order,
+            file.variant,
+            &mut visited,
+            1,
+        )?;
+    }
+    Ok(file)
+}
+
+/// Follows each of `tags` in `ifd` (and, recursively, in the children), replacing the pointer
+/// field with a parsed sub-IFD group. `visited` spans the whole walk so a hostile pointer graph
+/// (a cycle, or two pointers claiming one directory) fails instead of looping.
+fn resolve_pointers(
+    data: &[u8],
+    ifd: &mut Ifd,
+    tags: &[u16],
+    order: ByteOrder,
+    variant: Variant,
+    visited: &mut Vec<u64>,
+    depth: usize,
+) -> Result<()> {
+    if depth > MAX_SUBIFD_DEPTH {
+        return Err(Error::InvalidInput("TIFF: sub-IFD tree too deep"));
+    }
+    for &tag in tags {
+        let Some(offsets) = ifd.get(tag).and_then(pointer_offsets) else {
+            continue;
+        };
+        let mut children = Vec::with_capacity(offsets.len());
+        for off in offsets {
+            if visited.contains(&off) {
+                return Err(Error::InvalidInput("TIFF: sub-IFD pointer loop"));
+            }
+            visited.push(off);
+            let mut child = read_ifd_at(data, off, order, variant)?;
+            resolve_pointers(data, &mut child, tags, order, variant, visited, depth + 1)?;
+            children.push(child);
+        }
+        ifd.remove(tag);
+        ifd.set_sub_ifd(tag, children);
+    }
+    Ok(())
 }
 
 /// Like [`read`] but threads byte-range accounting through the whole top-level walk: it marks the
@@ -387,7 +480,7 @@ mod tests {
             variant: Variant::Classic,
             ifds: vec![even_value_ifd()],
         };
-        let bytes = crate::write(&file);
+        let bytes = crate::write(&file).expect("write");
         let mut cov = Coverage::new(bytes.len() as u64);
         let mut unknown = Vec::new();
         let parsed = read_with_coverage(&bytes, &mut cov, &mut unknown).expect("read");
@@ -426,6 +519,127 @@ mod tests {
         assert!(cov.finish().is_fully_covered());
     }
 
+    /// The keystone symmetry: `read_tree` is `write`'s inverse over a nested sub-IFD tree — the
+    /// pointer fields disappear, the children come back in place, and the whole `TiffFile`
+    /// compares equal.
+    fn read_tree_inverts_write(order: ByteOrder, variant: Variant) {
+        let mut grandchild = Ifd::new();
+        grandchild.set(33434, Value::Rational(vec![(1, 200)])); // ExposureTime
+        let mut raw_a = Ifd::new();
+        raw_a.set(256, Value::Short(vec![16]));
+        raw_a.set_sub_ifd(34665, vec![grandchild]);
+        let mut raw_b = Ifd::new();
+        raw_b.set(256, Value::Short(vec![8]));
+        let mut root = Ifd::new();
+        root.set(256, Value::Short(vec![640]));
+        root.set(258, Value::Short(vec![8, 8, 8])); // out of line
+        root.set_sub_ifd(330, vec![raw_a, raw_b]);
+        let file = TiffFile {
+            order,
+            variant,
+            ifds: vec![root],
+        };
+        let bytes = crate::write(&file).expect("write");
+        let tree = read_tree(&bytes, &[330, 34665]).expect("read_tree");
+        assert_eq!(tree, file);
+        // The pointer tags were consumed into sub_ifds, not left as stale offset fields.
+        assert_eq!(tree.ifds[0].get(330), None);
+    }
+
+    #[test]
+    fn read_tree_inverts_write_classic_both_orders() {
+        read_tree_inverts_write(ByteOrder::LittleEndian, Variant::Classic);
+        read_tree_inverts_write(ByteOrder::BigEndian, Variant::Classic);
+    }
+
+    #[cfg(feature = "bigtiff")]
+    #[test]
+    fn read_tree_inverts_write_bigtiff() {
+        read_tree_inverts_write(ByteOrder::LittleEndian, Variant::Big);
+    }
+
+    /// A named pointer tag whose value is not an offset array is left alone as a regular field
+    /// (the type check TIFF 6.0 §2 asks of readers), and unnamed `LONG` tags are never followed.
+    #[test]
+    fn read_tree_leaves_non_pointer_values_in_place() {
+        let mut root = Ifd::new();
+        root.set(330, Value::Ascii("not a pointer".to_owned()));
+        root.set(700, Value::Long(vec![8])); // a plausible offset, but not a named pointer tag
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![root.clone()],
+        };
+        let bytes = crate::write(&file).expect("write");
+        let tree = read_tree(&bytes, &[330]).expect("read_tree");
+        assert_eq!(tree.ifds[0], root);
+    }
+
+    /// Adversarial: a sub-IFD pointer aimed at its own directory must terminate with a typed
+    /// error (the visited set), not recurse forever.
+    #[test]
+    fn read_tree_rejects_self_pointing_sub_ifd() {
+        // Root IFD at 8 with one LONG field, tag 330, whose value is a child offset — pointing
+        // at offset 26, which is a directory whose own tag-330 pointer points back at 26.
+        let data = [
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD @ 8
+            0x01, 0x00, // IFD0: entry count = 1
+            0x4a, 0x01, // tag 330
+            0x04, 0x00, // type 4 (LONG)
+            0x01, 0x00, 0x00, 0x00, // count = 1
+            0x1a, 0x00, 0x00, 0x00, // offset 26 (the child directory)
+            0x00, 0x00, 0x00, 0x00, // next IFD = 0
+            0x01, 0x00, // child @ 26: entry count = 1
+            0x4a, 0x01, // tag 330
+            0x04, 0x00, // type 4 (LONG)
+            0x01, 0x00, 0x00, 0x00, // count = 1
+            0x1a, 0x00, 0x00, 0x00, // offset 26 — itself
+            0x00, 0x00, 0x00, 0x00, // next IFD = 0
+        ];
+        assert!(read(&data).is_ok()); // the flat reader is untouched by the cycle
+        assert!(read_tree(&data, &[330]).is_err());
+    }
+
+    /// A tree at exactly the depth cap parses — pinning the guard's boundary against the
+    /// depth-bomb rejection below.
+    #[test]
+    fn read_tree_allows_exactly_max_depth() {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![1]));
+        // 15 nestings put the deepest directory at depth 16 (the root is depth 1).
+        for _ in 0..15 {
+            let mut parent = Ifd::new();
+            parent.set_sub_ifd(330, vec![ifd]);
+            ifd = parent;
+        }
+        let bytes = crate::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        assert!(read_tree(&bytes, &[330]).is_ok());
+    }
+
+    /// Adversarial: nesting past the depth cap is a typed error, not a stack overflow.
+    #[test]
+    fn read_tree_rejects_depth_bomb() {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![1]));
+        for _ in 0..17 {
+            let mut parent = Ifd::new();
+            parent.set_sub_ifd(330, vec![ifd]);
+            ifd = parent;
+        }
+        let bytes = crate::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        assert!(read_tree(&bytes, &[330]).is_err());
+    }
+
     #[test]
     fn read_ifd_at_with_coverage_accounts_a_subifd() {
         // Root + one sub-IFD, each with an even-length out-of-line value: accounting the root chain
@@ -441,7 +655,8 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![root],
-        });
+        })
+        .expect("write");
 
         let mut cov = Coverage::new(bytes.len() as u64);
         let mut unknown = Vec::new();

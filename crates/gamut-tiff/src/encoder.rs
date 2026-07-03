@@ -177,7 +177,7 @@ impl TiffEncoder {
             return self.encode_tiled(packed, dims, layout, extra_fields, tw, tl, out);
         }
         let (ifd, strips) = self.build_strip_image(packed, dims, layout, extra_fields)?;
-        let bytes = writer::write_image(self.order, self.variant(), &ifd, &strips);
+        let bytes = writer::write_image(self.order, self.variant(), &ifd, &strips)?;
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }
@@ -285,7 +285,7 @@ impl TiffEncoder {
                 &extra,
             )?);
         }
-        let bytes = writer::write_multipage(self.order, self.variant(), &images);
+        let bytes = writer::write_multipage(self.order, self.variant(), &images)?;
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }
@@ -416,7 +416,7 @@ impl TiffEncoder {
             ifd.set(*tag, value.clone());
         }
 
-        let bytes = writer::write_image_tiled(self.order, self.variant(), &ifd, &tiles);
+        let bytes = writer::write_image_tiled(self.order, self.variant(), &ifd, &tiles)?;
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }

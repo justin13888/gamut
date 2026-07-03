@@ -98,8 +98,9 @@ pub struct Field {
 /// full-resolution raw image IFD(s); `ExifIFD` (34665) and `GPSInfo` (34853) point at the EXIF and
 /// GPS sub-directories. [`write`](crate::write) lays the children out and synthesises the pointer
 /// field, patching it with their absolute offset(s). The generic [`read`](crate::read) does **not**
-/// follow these — it cannot know which arbitrary `LONG` tags are offsets — so a decoder reads the
-/// offset value(s) and re-parses each child with [`read_ifd_at`](crate::read_ifd_at).
+/// follow these — it cannot know which arbitrary `LONG` tags are offsets — so a decoder names the
+/// pointer tags to [`read_tree`](crate::read_tree) (which rebuilds the groups exactly as written),
+/// or follows a pointer by hand with [`read_ifd_at`](crate::read_ifd_at).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubIfd {
     /// The pointer tag (e.g. `330` for `SubIFDs`).
@@ -164,7 +165,23 @@ impl Ifd {
         }
     }
 
-    /// Returns the directory's sub-IFD pointers (see [`SubIfd`]).
+    /// Removes `tag`, returning its value if it was present.
+    ///
+    /// This is how a consumer strips a field it has represented elsewhere — e.g. a sub-IFD
+    /// pointer tag it followed on read, which must not survive as a stale offset when the
+    /// directory is re-written (the writer synthesises pointer fields from
+    /// [`sub_ifds`](Self::sub_ifds)).
+    pub fn remove(&mut self, tag: u16) -> Option<Value> {
+        self.fields
+            .binary_search_by_key(&tag, |f| f.tag)
+            .ok()
+            .map(|i| self.fields.remove(i).value)
+    }
+
+    /// Returns the directory's sub-IFD pointer groups (see [`SubIfd`]), sorted by ascending
+    /// pointer tag — one group per tag, like [`fields`](Self::fields), so a reconstructed tree
+    /// ([`read_tree`](crate::read_tree)) compares equal to the one that was written regardless of
+    /// attachment order.
     #[must_use]
     pub fn sub_ifds(&self) -> &[SubIfd] {
         &self.sub_ifds
@@ -176,20 +193,23 @@ impl Ifd {
     /// The pointer field (a `LONG`/`LONG8` array of the children's offsets) is synthesised by the
     /// writer, so `tag` must **not** also be [`set`](Self::set) as a regular field.
     pub fn set_sub_ifd(&mut self, tag: u16, ifds: Vec<Ifd>) {
-        match self.sub_ifds.iter_mut().find(|s| s.tag == tag) {
-            Some(s) => s.ifds = ifds,
-            None => self.sub_ifds.push(SubIfd { tag, ifds }),
+        match self.sub_ifds.binary_search_by_key(&tag, |s| s.tag) {
+            Ok(i) => self.sub_ifds[i].ifds = ifds,
+            Err(i) => self.sub_ifds.insert(i, SubIfd { tag, ifds }),
         }
     }
 
     /// Appends a single child directory to pointer `tag`, creating the group if it does not exist.
     pub fn add_sub_ifd(&mut self, tag: u16, ifd: Ifd) {
-        match self.sub_ifds.iter_mut().find(|s| s.tag == tag) {
-            Some(s) => s.ifds.push(ifd),
-            None => self.sub_ifds.push(SubIfd {
-                tag,
-                ifds: vec![ifd],
-            }),
+        match self.sub_ifds.binary_search_by_key(&tag, |s| s.tag) {
+            Ok(i) => self.sub_ifds[i].ifds.push(ifd),
+            Err(i) => self.sub_ifds.insert(
+                i,
+                SubIfd {
+                    tag,
+                    ifds: vec![ifd],
+                },
+            ),
         }
     }
 }
@@ -237,6 +257,21 @@ mod tests {
     }
 
     #[test]
+    fn remove_returns_value_and_keeps_order() {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![4]));
+        ifd.set(257, Value::Short(vec![3]));
+        ifd.set(259, Value::Short(vec![1]));
+        assert_eq!(ifd.remove(257), Some(Value::Short(vec![3])));
+        assert_eq!(ifd.remove(257), None); // second removal misses
+        assert_eq!(ifd.get(257), None);
+        // The remaining fields keep the sorted invariant (a later set still lands mid-list).
+        ifd.set(258, Value::Short(vec![8]));
+        let order: Vec<u16> = ifd.fields().iter().map(|f| f.tag).collect();
+        assert_eq!(order, vec![256, 258, 259]);
+    }
+
+    #[test]
     fn get_u32_vec_reads_arrays_and_misses() {
         let mut ifd = Ifd::new();
         ifd.set(258, Value::Short(vec![8, 8, 8]));
@@ -248,12 +283,15 @@ mod tests {
     #[test]
     fn add_sub_ifd_accumulates_per_tag() {
         let mut ifd = Ifd::new();
-        ifd.add_sub_ifd(330, Ifd::new());
-        ifd.add_sub_ifd(330, Ifd::new());
+        // Attach out of tag order: the groups must come back sorted (canonical form, so a
+        // reconstructed tree compares equal regardless of attachment order).
         ifd.add_sub_ifd(34665, Ifd::new());
+        ifd.add_sub_ifd(330, Ifd::new());
+        ifd.add_sub_ifd(330, Ifd::new());
         // One group per distinct tag (not one per call), and tag 330 holds both children.
         assert_eq!(ifd.sub_ifds.len(), 2);
-        assert_eq!(ifd.sub_ifds.iter().filter(|s| s.tag == 330).count(), 1);
+        let order: Vec<u16> = ifd.sub_ifds().iter().map(|s| s.tag).collect();
+        assert_eq!(order, vec![330, 34665]);
         assert_eq!(
             ifd.sub_ifds
                 .iter()
@@ -263,6 +301,5 @@ mod tests {
                 .len(),
             2
         );
-        assert!(ifd.sub_ifds.iter().any(|s| s.tag == 34665));
     }
 }

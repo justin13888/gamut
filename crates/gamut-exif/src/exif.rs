@@ -92,8 +92,12 @@ impl Exif {
     /// Preserves the source byte order and re-synthesises the Exif/GPS/Interop pointer tags. For a
     /// bare TIFF stream (PNG `eXIf` / WebP `EXIF`) or a byte-order override, use
     /// [`ExifWriter`](crate::ExifWriter).
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExifError::Ifd`](crate::ExifError::Ifd) if the model is not representable in
+    /// classic-TIFF widths (see [`ExifWriter::write`](crate::ExifWriter::write)).
+    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
         crate::ExifWriter::new().write(self)
     }
 
@@ -329,20 +333,6 @@ fn first_rational(value: &Value) -> Option<Rational> {
         Value::Rational(rs) => rs.first().copied().map(Rational::from),
         _ => None,
     }
-}
-
-/// Returns a copy of `ifd` with every field in `tags` removed.
-///
-/// [`gamut_ifd::Ifd`] exposes no in-place removal; the reader uses this to drop pointer tags after
-/// following them, and the writer to drop any hand-set pointer tags before re-synthesising them.
-pub(crate) fn without_tags(ifd: &Ifd, tags: &[u16]) -> Ifd {
-    let mut out = Ifd::new();
-    for field in ifd.fields() {
-        if !tags.contains(&field.tag) {
-            out.set(field.tag, field.value.clone());
-        }
-    }
-    out
 }
 
 #[cfg(test)]

@@ -111,11 +111,6 @@ impl Coverage {
         }
     }
 
-    /// Records a [`Range`] (convenience wrapper over [`mark`](Self::mark)).
-    pub fn mark_range(&mut self, r: Range) {
-        self.mark(r.start, r.len);
-    }
-
     /// Sorts and merges the marked ranges into a [`CoverageReport`] of gaps, overlaps, trailing
     /// bytes, and the total covered byte count.
     #[must_use]
@@ -294,6 +289,35 @@ mod tests {
         // The in-bounds portion [8,10) still counts.
         assert_eq!(r.covered_bytes, 7);
         assert!(!r.is_fully_covered());
+    }
+
+    /// `start == file_len` is the mark-clamp boundary: nothing is in bounds, so the report shows
+    /// the whole file as trailing — not a phantom zero-length range that would misreport the
+    /// uncovered span as an interior gap.
+    #[test]
+    fn mark_at_exactly_file_end_is_out_of_bounds_only() {
+        let r = report(10, &[(10, 4)]);
+        assert_eq!(r.out_of_bounds, vec![Range { start: 10, len: 4 }]);
+        assert_eq!(r.covered_bytes, 0);
+        assert!(r.gaps.is_empty());
+        assert_eq!(r.trailing, Some(Range { start: 0, len: 10 }));
+    }
+
+    /// Overlap and adjacency merges away from offset 0, with exact covered/gap/trailing spans —
+    /// `new_end - last.start` and `new_end + last.start` coincide when `last.start == 0`, so a
+    /// non-zero start is what actually pins the merge arithmetic.
+    #[test]
+    fn merges_away_from_origin_have_exact_extents() {
+        let r = report(20, &[(5, 6), (8, 6)]); // overlap on [8, 11)
+        assert_eq!(r.overlaps.len(), 1);
+        assert_eq!(r.covered_bytes, 9); // [5, 14)
+        assert_eq!(r.gaps, vec![Range { start: 0, len: 5 }]);
+        assert_eq!(r.trailing, Some(Range { start: 14, len: 6 }));
+
+        let r = report(20, &[(5, 5), (10, 5)]); // adjacent at 10
+        assert!(r.overlaps.is_empty());
+        assert_eq!(r.covered_bytes, 10); // [5, 15)
+        assert_eq!(r.trailing, Some(Range { start: 15, len: 5 }));
     }
 
     #[test]
