@@ -613,6 +613,25 @@ mod tests {
     }
 
     #[test]
+    fn default_lang_on_description_is_ignored() {
+        // A default xml:lang on rdf:Description is not propagated to the properties it scopes.
+        // Adobe XMPCore behaves the same (pinned against the oracle in tests/oracle.rs); the
+        // intentional skip is documented in STATUS.md.
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\">\
+             <rdf:Description rdf:about=\"\" xml:lang=\"fr\">\
+             <dc:format>text/plain</dc:format></rdf:Description></rdf:RDF>"
+        );
+        let meta = parse(&xml);
+        let prop = meta.get(DC, "format").unwrap();
+        assert_eq!(prop.text(), Some("text/plain"));
+        assert!(
+            prop.qualifiers.is_empty(),
+            "no inherited xml:lang qualifier"
+        );
+    }
+
+    #[test]
     fn finds_rdf_inside_xmpmeta_wrapper() {
         let meta = parse(&format!(
             "<x:xmpmeta xmlns:x=\"{XMPMETA_NAMESPACE}\">{}</x:xmpmeta>",
@@ -627,6 +646,56 @@ mod tests {
             XmpMeta::from_packet(rdf("<dc:x rdf:parseType=\"Literal\"><b/></dc:x>").as_bytes())
                 .unwrap_err();
         assert!(matches!(err, XmpError::UnsupportedForm(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_parse_type_collection() {
+        // parseType="Collection" shares a branch with "Literal" but must surface its own name in
+        // the diagnostic (Part 1 §7.9 allows only "Resource").
+        let err = XmpMeta::from_packet(rdf("<dc:x rdf:parseType=\"Collection\"/>").as_bytes())
+            .unwrap_err();
+        assert!(
+            matches!(&err, XmpError::UnsupportedForm(m) if m.contains("Collection")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rdf_id_nodeid_and_xml_base_are_ignored() {
+        // The permissive read skips rdf:ID/rdf:nodeID/xml:base (RDF reification and base-URI
+        // machinery XMP does not use) rather than folding them into data — the documented posture.
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\">\
+             <rdf:Description rdf:about=\"\" rdf:ID=\"n1\" rdf:nodeID=\"n2\" \
+             xml:base=\"http://example.com/\">\
+             <dc:format rdf:ID=\"n3\">text/plain</dc:format>\
+             </rdf:Description></rdf:RDF>"
+        );
+        let meta = parse(&xml);
+        assert_eq!(meta.properties.len(), 1, "no spurious properties");
+        let prop = meta.get(DC, "format").unwrap();
+        assert_eq!(prop.text(), Some("text/plain"));
+        assert!(
+            prop.qualifiers.is_empty(),
+            "rdf:ID must not become a qualifier: {:?}",
+            prop.qualifiers
+        );
+    }
+
+    #[test]
+    fn multiple_descriptions_merge_into_one_graph() {
+        // Part 1 §7.4: rdf:RDF may hold several rdf:Description elements about the same
+        // resource; their properties form one graph.
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\" xmlns:xmp=\"{XMP}\">\
+             <rdf:Description rdf:about=\"\"><dc:format>text/plain</dc:format></rdf:Description>\
+             <rdf:Description rdf:about=\"\"><xmp:Rating>3</xmp:Rating></rdf:Description>\
+             </rdf:RDF>"
+        );
+        let meta = parse(&xml);
+        assert_eq!(meta.properties.len(), 2);
+        assert_eq!(meta.get_text(DC, "format"), Some("text/plain"));
+        assert_eq!(meta.get_text(XMP, "Rating"), Some("3"));
     }
 
     #[test]

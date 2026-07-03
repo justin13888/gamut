@@ -193,6 +193,60 @@ mod tests {
     }
 
     #[test]
+    fn rejects_utf16_le_and_utf32_be_boms() {
+        // Part 1 §7.1 also permits UTF-16 LE and UTF-32; every non-UTF-8 mark takes the
+        // BOM-specific rejection.
+        for bom in [&[0xFF, 0xFE][..], &[0x00, 0x00, 0xFE, 0xFF][..]] {
+            let mut bytes = bom.to_vec();
+            bytes.extend_from_slice(b"<rdf:RDF/>");
+            let err = XmpPacket::scan(&bytes).unwrap_err();
+            assert!(
+                matches!(&err, XmpError::Encoding(m) if m.contains("byte-order mark")),
+                "BOM {bom:02X?} must be rejected as a byte-order mark, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn utf32_le_bom_is_rejected_via_its_utf16_le_prefix() {
+        // UTF-32 LE (FF FE 00 00) begins with the UTF-16 LE mark, so the two-byte check
+        // catches it — pinned so the four-byte mark never slips through as "valid UTF-8".
+        let err = XmpPacket::scan(&[0xFF, 0xFE, 0x00, 0x00, b'<']).unwrap_err();
+        assert!(
+            matches!(&err, XmpError::Encoding(m) if m.contains("byte-order mark")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn single_quoted_trailer_is_detected() {
+        // §7.3.2 examples use double quotes, but XML permits either style.
+        let writable = "<?xpacket begin='' id='x'?><rdf:RDF/><?xpacket end='w'?>";
+        assert!(XmpPacket::scan(writable.as_bytes()).unwrap().writable);
+        let read_only = "<?xpacket begin='' id='x'?><rdf:RDF/><?xpacket end='r'?>";
+        assert!(!XmpPacket::scan(read_only.as_bytes()).unwrap().writable);
+    }
+
+    #[test]
+    fn header_without_trailer_is_read_only() {
+        // A truncated wrapper (header but no trailer) still yields the body, as read-only.
+        let pkt = XmpPacket::scan(b"<?xpacket begin=\"\" id=\"x\"?><rdf:RDF/>").unwrap();
+        assert_eq!(pkt.body, "<rdf:RDF/>");
+        assert!(!pkt.writable);
+    }
+
+    #[test]
+    fn accepts_bom_character_in_the_begin_attribute() {
+        // §7.3.2 recommends begin="\u{FEFF}" — packets from Adobe tools carry the BOM character
+        // inside the attribute value, which must not confuse body extraction.
+        let s = "<?xpacket begin=\"\u{FEFF}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\
+                 <rdf:RDF/><?xpacket end=\"r\"?>";
+        let pkt = XmpPacket::scan(s.as_bytes()).unwrap();
+        assert_eq!(pkt.body, "<rdf:RDF/>");
+        assert!(!pkt.writable);
+    }
+
+    #[test]
     fn find_handles_edges() {
         assert_eq!(find(b"xy<?xpacket", b"<?xpacket"), Some(2));
         // An exact-length match must be found (guards the `>` length check).

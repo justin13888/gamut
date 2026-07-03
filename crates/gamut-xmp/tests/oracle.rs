@@ -7,8 +7,9 @@
 //!
 //! Requires the `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain.
 
-use gamut_xmp::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
+use gamut_xmp::{WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 
+const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const DC: &str = "http://purl.org/dc/elements/1.1/";
 const XMP: &str = "http://ns.adobe.com/xap/1.0/";
 
@@ -75,4 +76,76 @@ fn empty_packet_round_trips_through_exiv2() {
     // A property-less packet is still valid XMP the toolkit accepts.
     let packet = XmpMeta::new().to_packet();
     exiv2_oracle::validate(&packet).expect("exiv2 must accept an empty packet");
+}
+
+#[test]
+fn every_well_known_namespace_survives_xmpcore() {
+    // One property in each WellKnownNs, its value naming the expected prefix. XMPCore's own
+    // schema registry then vouches for every URI string — a typo in any URI would surface as a
+    // rejected packet or a lost property (the unit tests can only assert the strings against
+    // themselves).
+    let mut meta = XmpMeta::new();
+    for ns in WellKnownNs::ALL {
+        meta.set(XmpProperty::new(
+            ns.uri(),
+            "GamutCheck",
+            XmpValue::Simple(ns.prefix().to_owned()),
+        ));
+    }
+    let packet = meta.to_packet();
+    exiv2_oracle::validate(&packet).expect("exiv2 must accept all standard namespaces");
+
+    let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
+    let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    for ns in WellKnownNs::ALL {
+        assert_eq!(
+            parsed.get_text(ns.uri(), "GamutCheck"),
+            Some(ns.prefix()),
+            "property in {ns:?} must survive the reference engine"
+        );
+    }
+}
+
+#[test]
+fn default_xml_lang_on_description_matches_reference() {
+    // Part 1 §7.8 notes xml:lang scopes per XML 1.0, but Adobe XMPCore does not materialize a
+    // Description-level default onto the properties it scopes — and neither does gamut. The
+    // parity is pinned here; the intentional skip is documented in README/STATUS.
+    let xml = format!(
+        "<rdf:RDF xmlns:rdf=\"{RDF}\" xmlns:dc=\"{DC}\">\
+         <rdf:Description rdf:about=\"\" xml:lang=\"fr\">\
+         <dc:format>text/plain</dc:format>\
+         <dc:coverage xml:lang=\"de\">hier</dc:coverage>\
+         </rdf:Description></rdf:RDF>"
+    );
+
+    // gamut reads dc:format unqualified…
+    let gamut = XmpMeta::from_packet(xml.as_bytes()).expect("gamut parses the packet");
+    let prop = gamut.get(DC, "format").expect("dc:format");
+    assert_eq!(prop.text(), Some("text/plain"));
+    assert!(
+        prop.qualifiers.is_empty(),
+        "no inherited xml:lang qualifier"
+    );
+
+    // …and so does the reference engine: its reserialization carries no per-property lang.
+    let out = exiv2_oracle::roundtrip(xml.as_bytes()).expect("exiv2 round-trip");
+    let reference = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    let ref_prop = reference.get(DC, "format").expect("dc:format via exiv2");
+    assert_eq!(ref_prop.text(), Some("text/plain"));
+    assert!(
+        ref_prop.qualifiers.is_empty(),
+        "XMPCore must not have materialized the default lang: {:?}",
+        ref_prop.qualifiers
+    );
+
+    // An explicit per-property xml:lang is preserved by both.
+    assert_eq!(
+        gamut.get(DC, "coverage").and_then(XmpProperty::lang),
+        Some("de")
+    );
+    assert_eq!(
+        reference.get(DC, "coverage").and_then(XmpProperty::lang),
+        Some("de")
+    );
 }
