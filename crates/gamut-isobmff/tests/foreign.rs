@@ -38,22 +38,25 @@ fn iprp_one_ispe_v0(item_id: u16) -> Vec<u8> {
 
 #[test]
 fn iloc_v1_idat_multi_extent_with_base_offset() {
-    // iloc v1: construction_method 1 (idat), base_offset_size 4, two extents concatenated.
+    // iloc v1: construction_method 1 (idat), base_offset_size 4, index_size 4 (the per-extent
+    // extent_index precedes each offset and must be skipped), two extents concatenated.
     // idat body: ..XYZ..ABCD — base_offset 2, extents (0,3) and (5,4) → payload "XYZABCD".
     let iloc = full(
         b"iloc",
         1,
         0,
         &cat(&[
-            &[0x44u8, 0x40][..], // offset_size 4 | length_size 4, base_offset_size 4 | index 0
+            &[0x44u8, 0x44][..], // offset_size 4 | length_size 4, base_offset_size 4 | index 4
             &1u16.to_be_bytes(), // item_count
             &1u16.to_be_bytes(), // item_ID
             &1u16.to_be_bytes(), // reserved(12) | construction_method(4) = 1 (idat)
             &0u16.to_be_bytes(), // data_reference_index
             &2u32.to_be_bytes(), // base_offset
             &2u16.to_be_bytes(), // extent_count
+            &1u32.to_be_bytes(), // extent 0 extent_index
             &0u32.to_be_bytes(), // extent 0 offset
             &3u32.to_be_bytes(), // extent 0 length
+            &2u32.to_be_bytes(), // extent 1 extent_index
             &5u32.to_be_bytes(), // extent 1 offset
             &4u32.to_be_bytes(), // extent 1 length
         ]),

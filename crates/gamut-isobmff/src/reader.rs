@@ -9,6 +9,8 @@
 //! `mdat`/`idat` placement, multi-extent payloads (concatenated), `pitm` v0/v1, `infe` v2/v3,
 //! `iref` v0/v1, and `ipma` v0/v1 with 8- or 16-bit indices. See `references/isobmff`.
 
+use std::collections::{HashMap, HashSet};
+
 use gamut_core::{Error, Result};
 
 use crate::boxes::BoxReader;
@@ -59,23 +61,38 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     let meta_body = meta_body.ok_or(Error::InvalidInput("ISOBMFF: missing meta"))?;
     let meta = parse_meta(meta_body)?;
 
+    // Index iloc/ipma/iref by item id up front (first iloc/ipma entry wins; references keep file
+    // order) — id joins must not be quadratic on a hostile file with tens of thousands of entries.
+    let mut iloc_by_id = HashMap::with_capacity(meta.iloc.len());
+    for entry in &meta.iloc {
+        iloc_by_id.entry(entry.id).or_insert(entry);
+    }
+    let mut ipma_by_id = HashMap::with_capacity(meta.ipma.len());
+    for (id, row) in &meta.ipma {
+        ipma_by_id.entry(*id).or_insert(row);
+    }
+    let mut iref_by_from: HashMap<u32, Vec<ItemReference>> = HashMap::new();
+    for (from, reference) in meta.iref {
+        iref_by_from.entry(from).or_default().push(reference);
+    }
+    let item_ids: HashSet<u32> = meta.infe.iter().map(|i| i.id).collect();
+    if iref_by_from.keys().any(|from| !item_ids.contains(from)) {
+        return Err(Error::InvalidInput("ISOBMFF: iref from unknown item"));
+    }
+
     // Assemble items. `budget` caps the total resolved payload at the input size so overlapping
     // extents in a hostile file cannot amplify a small input into a huge allocation.
     let mut budget = data.len();
     let mut items = Vec::with_capacity(meta.infe.len());
     for infe in &meta.infe {
-        let payload = match meta.iloc.iter().find(|e| e.id == infe.id) {
+        let payload = match iloc_by_id.get(&infe.id) {
             // No iloc entry: an item with no data (e.g. a derived `iden` item).
             None => Vec::new(),
             Some(entry) => resolve_payload(entry, data, meta.idat, &mut budget)?,
         };
 
         // No ipma entry: an item with no properties (e.g. an Exif/XMP metadata item).
-        let assoc = meta
-            .ipma
-            .iter()
-            .find(|(id, _)| *id == infe.id)
-            .map_or(&[][..], |(_, row)| row);
+        let assoc = ipma_by_id.get(&infe.id).map_or(&[][..], |row| &row[..]);
         let mut properties = Vec::with_capacity(assoc.len());
         for &(index, essential) in assoc {
             let i = usize::from(index);
@@ -90,12 +107,7 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
             });
         }
 
-        let references = meta
-            .iref
-            .iter()
-            .filter(|(from, _)| *from == infe.id)
-            .map(|(_, reference)| reference.clone())
-            .collect();
+        let references = iref_by_from.remove(&infe.id).unwrap_or_default();
 
         items.push(Item {
             id: infe.id,
@@ -109,14 +121,6 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
             payload,
         });
     }
-    if meta
-        .iref
-        .iter()
-        .any(|(from, _)| !meta.infe.iter().any(|i| i.id == *from))
-    {
-        return Err(Error::InvalidInput("ISOBMFF: iref from unknown item"));
-    }
-
     Ok(IsoBmffImage {
         major_brand,
         minor_version,

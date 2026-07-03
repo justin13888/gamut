@@ -242,18 +242,33 @@ fn ipma_marks_transforms_essential() {
 #[test]
 fn ipma_switches_to_16bit_entries_above_127_pool_slots() {
     // 128 distinct properties: index 128 no longer fits 7 bits, so flags&1 must select the
-    // two-byte essential|index form for the whole box.
-    let mut it = item(1, *b"av01", vec![0; 4]);
-    it.properties = (0..128u8)
-        .map(|n| Property {
-            essential: n == 0, // only the first association carries the essential bit
-            kind: PropertyKind::Other {
-                kind: *b"unkn",
-                data: vec![n],
-            },
-        })
-        .collect();
-    let f = write(&image(vec![it])).unwrap();
+    // two-byte essential|index form for the whole box — while at exactly 127 the single-byte
+    // form must still be used (the boundary is the normalisation contract, not a free choice).
+    let props = |n: u8| -> Vec<Property> {
+        (0..n)
+            .map(|n| Property {
+                essential: n == 0, // only the first association carries the essential bit
+                kind: PropertyKind::Other {
+                    kind: *b"unkn",
+                    data: vec![n],
+                },
+            })
+            .collect()
+    };
+
+    let mut narrow = item(1, *b"av01", vec![0; 4]);
+    narrow.properties = props(127);
+    let f = write(&image(vec![narrow])).unwrap();
+    let ipma = box_body(&f, b"ipma");
+    assert_eq!(
+        ipma[3], 0,
+        "flags: 127 slots still fit the single-byte form"
+    );
+    assert_eq!(&ipma[11..13], &[0x81, 2], "essential|index bytes");
+
+    let mut wide = item(1, *b"av01", vec![0; 4]);
+    wide.properties = props(128);
+    let f = write(&image(vec![wide])).unwrap();
     let ipma = box_body(&f, b"ipma");
     assert_eq!(ipma[3], 1, "flags & 1: 16-bit association form");
     assert_eq!(ipma[10], 128, "association_count");

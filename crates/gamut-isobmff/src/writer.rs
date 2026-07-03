@@ -60,7 +60,7 @@ fn validate(image: &IsoBmffImage) -> Result<()> {
             "ISOBMFF: primary_item_id names no item",
         ));
     }
-    if image.items.len() > usize::from(u16::MAX) {
+    if u16::try_from(image.items.len()).is_err() {
         return Err(Error::Unsupported("ISOBMFF: more than 65535 items"));
     }
     for (n, item) in image.items.iter().enumerate() {
@@ -111,7 +111,7 @@ fn validate_item(item: &Item) -> Result<()> {
     if u32::try_from(item.payload.len()).is_err() {
         return Err(Error::Unsupported("ISOBMFF: payload at or beyond 4 GiB"));
     }
-    if item.properties.len() > usize::from(u8::MAX) {
+    if u8::try_from(item.properties.len()).is_err() {
         return Err(Error::Unsupported(
             "ISOBMFF: more than 255 properties on one item",
         ));
@@ -131,7 +131,7 @@ fn validate_item(item: &Item) -> Result<()> {
         }
     }
     for reference in &item.references {
-        if reference.to_item_ids.len() > usize::from(u16::MAX) {
+        if u16::try_from(reference.to_item_ids.len()).is_err() {
             return Err(Error::Unsupported(
                 "ISOBMFF: more than 65535 targets in one reference",
             ));
@@ -308,7 +308,8 @@ fn write_iprp(bb: &mut BoxBuilder, items: &[Item]) -> Result<()> {
         }
         assoc.push(row);
     }
-    if pool.len() > 0x7fff {
+    // The widest ipma association form has a 15-bit index, i.e. i16::MAX slots.
+    if i16::try_from(pool.len()).is_err() {
         return Err(Error::Unsupported(
             "ISOBMFF: more than 32767 distinct properties",
         ));
