@@ -9,7 +9,7 @@ use gamut_core::{Error, Result};
 
 use crate::charset::IimCharset;
 use crate::date;
-use crate::iim::{IimBlock, IimDataSet, tag_info};
+use crate::iim::{IimBlock, IimDataSet, IimTagInfo};
 use crate::photo_metadata::PhotoMetadata;
 use crate::schema::{FieldMap, MAP, XmpShape};
 
@@ -185,7 +185,7 @@ fn read_iim_field(iim: &IimBlock, row: &FieldMap, charset: IimCharset) -> Vec<St
 
 /// Appends a dataset, rejecting a value that exceeds the dataset's maximum octet length.
 fn push_dataset(out: &mut Vec<IimDataSet>, record: u8, dataset: u8, data: Vec<u8>) -> Result<()> {
-    if let Some(info) = tag_info(record, dataset)
+    if let Some(info) = IimTagInfo::lookup(record, dataset)
         && data.len() > usize::from(info.max_octets)
     {
         return Err(Error::InvalidInput(

@@ -74,7 +74,7 @@ pub mod writer;
 mod date;
 
 pub use charset::IimCharset;
-pub use iim::{IimBlock, IimDataSet, IimFieldKind, IimRecord, IimTagInfo, tag_info};
+pub use iim::{IimBlock, IimDataSet, IimFieldKind, IimTagInfo};
 pub use irb::{IrbBlock, PhotoshopIrb};
 pub use photo_metadata::PhotoMetadata;
 pub use reader::IptcReader;

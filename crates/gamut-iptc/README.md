@@ -38,7 +38,7 @@ assert_eq!(charset.decode(&read.datasets[1].data)?, "sky");
 # Ok::<(), gamut_core::Error>(())
 ```
 
-`tag_info(record, dataset)` resolves a dataset's name and wire constraints.
+`IimTagInfo::lookup(record, dataset)` resolves a dataset's name and wire constraints.
 
 The modern IPTC Photo Metadata path models Core fields as XMP properties (`PhotoMetadata`, with typed
 accessors for creator, location, rights, keywords, …), and `IimXmpReconciler` merges the two carriers

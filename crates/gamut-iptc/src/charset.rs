@@ -16,7 +16,11 @@ use gamut_core::{Error, Result};
 use crate::iim::IimBlock;
 
 /// The coded character set an IIM text value is encoded in.
+///
+/// Marked `#[non_exhaustive]`: supporting a further ISO 2022 designation later must not be a
+/// breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IimCharset {
     /// ISO-8859-1 (Latin-1) — gamut's reading of the spec default when dataset 1:90 is absent.
     Latin1,
