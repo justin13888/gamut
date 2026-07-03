@@ -3,6 +3,7 @@
 use gamut_ifd::{ByteOrder, Ifd, Value};
 
 use crate::gps::GpsInfo;
+use crate::maker_note::{MakerNote, MakerNoteVendor};
 use crate::tag::{ExifTag, IfdKind};
 use crate::thumbnail::Thumbnail;
 use crate::value::{Rational, as_text};
@@ -280,6 +281,20 @@ impl Exif {
     #[must_use]
     pub fn gps(&self) -> Option<GpsInfo> {
         GpsInfo::from_ifd(self.gps_ifd()?)
+    }
+
+    /// The `MakerNote` block as its opaque bytes plus the vendor detected from `Make`, or `None` if
+    /// absent. v1 does not decode the block; see [`MakerNote`] for the round-trip caveat.
+    #[must_use]
+    pub fn maker_note(&self) -> Option<MakerNote> {
+        let bytes = match self.get_tag(ExifTag::MakerNote)? {
+            Value::Undefined(bytes) => bytes.clone(),
+            _ => return None,
+        };
+        Some(MakerNote {
+            vendor: MakerNoteVendor::detect(self.make()),
+            bytes,
+        })
     }
 
     /// The directory for `kind`, if present.

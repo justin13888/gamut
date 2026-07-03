@@ -280,6 +280,21 @@ mod tests {
     }
 
     #[test]
+    fn maker_note_bytes_survive_round_trip_verbatim() {
+        // A MakerNote long enough to be stored out of line; its bytes must be byte-exact after a
+        // round-trip even though v1 does not decode or rebase its internal offsets.
+        let blob: Vec<u8> = (0..64u16).map(|b| b as u8).collect();
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_tag(ExifTag::Make, Value::Ascii("NIKON CORPORATION".into()));
+        exif.set_tag(ExifTag::MakerNote, Value::Undefined(blob.clone()));
+
+        let parsed = Exif::parse(&exif.to_bytes()).expect("parse");
+        let maker = parsed.maker_note().expect("maker note present");
+        assert_eq!(maker.bytes, blob, "MakerNote bytes preserved verbatim");
+        assert_eq!(maker.vendor, crate::MakerNoteVendor::Nikon);
+    }
+
+    #[test]
     fn hand_set_pointer_tags_do_not_corrupt_layout() {
         // A caller wrongly writes a raw ExifIFD pointer field; the writer must drop it and
         // synthesise the real one from the typed sub-IFD.
