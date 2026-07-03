@@ -1,24 +1,208 @@
 //! The parsed EXIF model: the IFD chain that makes up an EXIF blob.
 
-use gamut_ifd::{ByteOrder, Ifd};
+use gamut_ifd::{ByteOrder, Ifd, Value};
 
-/// A parsed EXIF blob — the directories of the TIFF stream that follows the `Exif\0\0` marker.
+use crate::tag::IfdKind;
+
+/// A parsed EXIF blob — the directories of the TIFF stream that follows the optional `Exif\0\0`
+/// marker.
 ///
-/// The 0th IFD holds the primary-image tags and the pointer tags that reach the Exif/GPS/Interop
-/// sub-IFDs; the 1st IFD holds the thumbnail. The byte order is preserved so a re-serialized blob
-/// can match the source's endianness. This scaffold models the structural skeleton over
-/// [`gamut_ifd::Ifd`]; typed per-tag accessors are added during implementation.
+/// The 0th IFD (`image`) holds the primary-image tags and the pointer tags that reach the
+/// Exif/GPS/Interop sub-IFDs; the 1st IFD holds the thumbnail. The byte order is preserved so a
+/// re-serialised blob can match the source's endianness.
+///
+/// Read a blob with [`Exif::parse`] and re-emit it with [`Exif::to_bytes`]; build one from scratch
+/// with [`Exif::new`]. Fields are private so the representation can evolve without breaking the 1.0
+/// API — reach the directories through the accessors, which hand back the underlying
+/// [`gamut_ifd::Ifd`] that consumers already speak.
+///
+/// The pointer tags — `ExifIFD` (`0x8769`), `GPSInfo` (`0x8825`), and `Interoperability`
+/// (`0xA005`) — are **managed by the crate**: the writer synthesises them from the typed sub-IFDs,
+/// so set the sub-IFDs (e.g. [`set_exif_ifd`](Self::set_exif_ifd)), never the pointer fields.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Exif {
+    order: ByteOrder,
+    image: Ifd,
+    exif: Option<Ifd>,
+    gps: Option<Ifd>,
+    interop: Option<Ifd>,
+    // Becomes a richer `Thumbnail` (metadata IFD + JPEG bytes) once thumbnail support lands.
+    thumbnail: Option<Ifd>,
+}
+
+impl Exif {
+    /// Creates an EXIF blob with an empty 0th IFD and the given byte order.
+    #[must_use]
+    pub fn new(order: ByteOrder) -> Self {
+        Self {
+            order,
+            image: Ifd::new(),
+            exif: None,
+            gps: None,
+            interop: None,
+            thumbnail: None,
+        }
+    }
+
     /// The byte order of the underlying TIFF stream (preserved for round-tripping).
-    pub byte_order: ByteOrder,
+    #[must_use]
+    pub fn byte_order(&self) -> ByteOrder {
+        self.order
+    }
+
     /// The 0th IFD — primary-image / TIFF tags.
-    pub image: Ifd,
+    #[must_use]
+    pub fn image(&self) -> &Ifd {
+        &self.image
+    }
+
+    /// The 0th IFD, mutably.
+    pub fn image_mut(&mut self) -> &mut Ifd {
+        &mut self.image
+    }
+
     /// The Exif sub-IFD (capture parameters), if present.
-    pub exif: Option<Ifd>,
+    #[must_use]
+    pub fn exif_ifd(&self) -> Option<&Ifd> {
+        self.exif.as_ref()
+    }
+
+    /// The Exif sub-IFD, mutably, creating an empty one if absent.
+    pub fn exif_ifd_mut(&mut self) -> &mut Ifd {
+        self.exif.get_or_insert_with(Ifd::new)
+    }
+
     /// The GPS sub-IFD, if present.
-    pub gps: Option<Ifd>,
+    #[must_use]
+    pub fn gps_ifd(&self) -> Option<&Ifd> {
+        self.gps.as_ref()
+    }
+
+    /// The GPS sub-IFD, mutably, creating an empty one if absent.
+    pub fn gps_ifd_mut(&mut self) -> &mut Ifd {
+        self.gps.get_or_insert_with(Ifd::new)
+    }
+
     /// The Interoperability sub-IFD, if present.
-    pub interop: Option<Ifd>,
+    #[must_use]
+    pub fn interop_ifd(&self) -> Option<&Ifd> {
+        self.interop.as_ref()
+    }
+
+    /// The Interoperability sub-IFD, mutably, creating an empty one if absent.
+    pub fn interop_ifd_mut(&mut self) -> &mut Ifd {
+        self.interop.get_or_insert_with(Ifd::new)
+    }
+
     /// The 1st IFD — the embedded thumbnail's directory, if present.
-    pub thumbnail: Option<Ifd>,
+    #[must_use]
+    pub fn thumbnail_ifd(&self) -> Option<&Ifd> {
+        self.thumbnail.as_ref()
+    }
+
+    /// Replaces the Exif sub-IFD.
+    pub fn set_exif_ifd(&mut self, ifd: Ifd) {
+        self.exif = Some(ifd);
+    }
+
+    /// Replaces the GPS sub-IFD.
+    pub fn set_gps_ifd(&mut self, ifd: Ifd) {
+        self.gps = Some(ifd);
+    }
+
+    /// Replaces the Interoperability sub-IFD.
+    pub fn set_interop_ifd(&mut self, ifd: Ifd) {
+        self.interop = Some(ifd);
+    }
+
+    /// Returns the value of `tag` in directory `ifd`, or `None` if that directory or tag is absent.
+    #[must_use]
+    pub fn get(&self, ifd: IfdKind, tag: u16) -> Option<&Value> {
+        self.directory(ifd).and_then(|d| d.get(tag))
+    }
+
+    /// Sets `tag` to `value` in directory `ifd`, creating the sub-IFD if it does not yet exist.
+    pub fn set(&mut self, ifd: IfdKind, tag: u16, value: Value) {
+        self.directory_mut(ifd).set(tag, value);
+    }
+
+    /// The directory for `kind`, if present.
+    fn directory(&self, kind: IfdKind) -> Option<&Ifd> {
+        match kind {
+            IfdKind::Image => Some(&self.image),
+            IfdKind::Exif => self.exif.as_ref(),
+            IfdKind::Gps => self.gps.as_ref(),
+            IfdKind::Interop => self.interop.as_ref(),
+            IfdKind::Thumbnail => self.thumbnail.as_ref(),
+        }
+    }
+
+    /// The directory for `kind`, creating (vivifying) it if absent.
+    fn directory_mut(&mut self, kind: IfdKind) -> &mut Ifd {
+        match kind {
+            IfdKind::Image => &mut self.image,
+            IfdKind::Exif => self.exif.get_or_insert_with(Ifd::new),
+            IfdKind::Gps => self.gps.get_or_insert_with(Ifd::new),
+            IfdKind::Interop => self.interop.get_or_insert_with(Ifd::new),
+            IfdKind::Thumbnail => self.thumbnail.get_or_insert_with(Ifd::new),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_starts_empty_with_the_given_order() {
+        let exif = Exif::new(ByteOrder::BigEndian);
+        assert_eq!(exif.byte_order(), ByteOrder::BigEndian);
+        assert!(exif.image().fields().is_empty());
+        assert!(exif.exif_ifd().is_none());
+        assert!(exif.gps_ifd().is_none());
+        assert!(exif.interop_ifd().is_none());
+        assert!(exif.thumbnail_ifd().is_none());
+    }
+
+    #[test]
+    fn set_vivifies_sub_ifds_and_get_reads_back() {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set(IfdKind::Image, 0x010F, Value::Ascii("NIKON".into()));
+        exif.set(IfdKind::Exif, 0x8827, Value::Short(vec![400]));
+        exif.set(IfdKind::Gps, 0x0000, Value::Byte(vec![2, 3, 0, 0]));
+
+        assert_eq!(
+            exif.get(IfdKind::Image, 0x010F),
+            Some(&Value::Ascii("NIKON".into()))
+        );
+        assert_eq!(
+            exif.get(IfdKind::Exif, 0x8827),
+            Some(&Value::Short(vec![400]))
+        );
+        // The Exif and GPS sub-IFDs were created on first write.
+        assert!(exif.exif_ifd().is_some());
+        assert!(exif.gps_ifd().is_some());
+        // Absent directory / tag both read back as None.
+        assert_eq!(exif.get(IfdKind::Interop, 0x0001), None);
+        assert_eq!(exif.get(IfdKind::Image, 0x0100), None);
+    }
+
+    #[test]
+    fn mut_accessors_vivify_and_set_replaces() {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.exif_ifd_mut()
+            .set(0x9000, Value::Undefined(b"0300".to_vec()));
+        assert_eq!(
+            exif.get(IfdKind::Exif, 0x9000),
+            Some(&Value::Undefined(b"0300".to_vec()))
+        );
+
+        let mut replacement = Ifd::new();
+        replacement.set(0x0001, Value::Byte(vec![b'N']));
+        exif.set_gps_ifd(replacement);
+        assert_eq!(
+            exif.get(IfdKind::Gps, 0x0001),
+            Some(&Value::Byte(vec![b'N']))
+        );
+    }
 }

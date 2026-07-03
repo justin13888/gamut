@@ -18,3 +18,4 @@ workspace = true
 [dependencies]
 gamut-core.workspace = true
 gamut-ifd.workspace = true
+thiserror.workspace = true
