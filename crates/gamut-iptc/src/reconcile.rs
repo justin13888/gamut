@@ -19,16 +19,21 @@ use crate::schema::{FieldMap, MAP, XmpShape};
 ///
 /// XMP-only properties are preserved. For each mapped field present in IIM, the value is adopted
 /// when XMP lacks it, kept when both agree, and otherwise resolved by `policy`.
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] if the block's `1:90` designates a charset gamut does not
+/// support — gamut never guess-decodes.
 pub(crate) fn merge(
     policy: ConflictPolicy,
     iim: Option<&IimBlock>,
     xmp: Option<&PhotoMetadata>,
-) -> PhotoMetadata {
+) -> Result<PhotoMetadata> {
     let mut out = xmp.cloned().unwrap_or_default();
     let Some(iim) = iim else {
-        return out;
+        return Ok(out);
     };
-    let charset = IimCharset::detect(iim).unwrap_or(IimCharset::Latin1);
+    let charset = IimCharset::detect(iim)?;
     for row in MAP {
         let iim_vals = read_iim_field(iim, row, charset);
         if iim_vals.is_empty() {
@@ -42,7 +47,7 @@ pub(crate) fn merge(
         }
         // else: XMP present and (equal, or XmpWins) -> keep what's already in `out`.
     }
-    out
+    Ok(out)
 }
 
 /// Projects a unified [`PhotoMetadata`] to an IIM block, encoding text with `charset`.
@@ -52,8 +57,9 @@ pub(crate) fn merge(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if a value cannot be encoded in `charset` or exceeds the
-/// dataset's maximum octet length — gamut never silently truncates.
+/// Returns [`Error::InvalidInput`] if a value cannot be encoded in `charset`, exceeds the
+/// dataset's maximum octet length, or (for `photoshop:DateCreated`) is not an IIM-expressible
+/// ISO-8601 date-time — gamut never silently truncates or drops on write.
 pub(crate) fn project(pm: &PhotoMetadata, charset: IimCharset) -> Result<IimBlock> {
     let mut fields = Vec::new();
     for row in MAP {
@@ -62,11 +68,12 @@ pub(crate) fn project(pm: &PhotoMetadata, charset: IimCharset) -> Result<IimBloc
             continue;
         }
         if row.xmp.shape == XmpShape::DateTime {
-            if let Some((date, time)) = date::iso_to_iim(&vals[0]) {
-                push_dataset(&mut fields, 2, 55, date)?;
-                if let Some(time) = time {
-                    push_dataset(&mut fields, 2, 60, time)?;
-                }
+            let (date, time) = date::iso_to_iim(&vals[0]).ok_or(Error::InvalidInput(
+                "IPTC IIM: DateCreated is not an IIM-expressible ISO-8601 date-time",
+            ))?;
+            push_dataset(&mut fields, 2, 55, date)?;
+            if let Some(time) = time {
+                push_dataset(&mut fields, 2, 60, time)?;
             }
         } else {
             let (record, dataset) = row.iim[0];
@@ -96,8 +103,13 @@ pub(crate) fn project(pm: &PhotoMetadata, charset: IimCharset) -> Result<IimBloc
 }
 
 /// Reports the mapped fields on which the two carriers disagree (both present, differing values).
-pub(crate) fn conflicts(iim: &IimBlock, xmp: &PhotoMetadata) -> Vec<FieldConflict> {
-    let charset = IimCharset::detect(iim).unwrap_or(IimCharset::Latin1);
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] if the block's `1:90` designates a charset gamut does not
+/// support.
+pub(crate) fn conflicts(iim: &IimBlock, xmp: &PhotoMetadata) -> Result<Vec<FieldConflict>> {
+    let charset = IimCharset::detect(iim)?;
     let mut out = Vec::new();
     for row in MAP {
         let iim_vals = read_iim_field(iim, row, charset);
@@ -110,10 +122,13 @@ pub(crate) fn conflicts(iim: &IimBlock, xmp: &PhotoMetadata) -> Vec<FieldConflic
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// Reads a mapped field's value(s) from the IIM block, decoded with `charset`.
+///
+/// Per-value leniency: an individual dataset value that fails to decode in the (supported)
+/// charset is treated as absent, so one corrupt value cannot destroy access to the rest.
 fn read_iim_field(iim: &IimBlock, row: &FieldMap, charset: IimCharset) -> Vec<String> {
     if row.xmp.shape == XmpShape::DateTime {
         let find = |dataset| {
@@ -175,7 +190,7 @@ mod tests {
         let iim = IimBlock {
             datasets: vec![ds(2, 90, b"Paris"), ds(2, 25, b"sky"), ds(2, 25, b"sea")],
         };
-        let pm = merge(ConflictPolicy::default(), Some(&iim), None);
+        let pm = merge(ConflictPolicy::default(), Some(&iim), None).unwrap();
         assert_eq!(pm.city(), Some("Paris"));
         assert_eq!(pm.keywords(), vec!["sky", "sea"]);
     }
@@ -185,7 +200,7 @@ mod tests {
         let mut xmp = PhotoMetadata::new();
         xmp.set_city("Berlin");
         xmp.set_usage_terms("CC-BY"); // XMP-only field is preserved
-        let pm = merge(ConflictPolicy::default(), None, Some(&xmp));
+        let pm = merge(ConflictPolicy::default(), None, Some(&xmp)).unwrap();
         assert_eq!(pm, xmp);
     }
 
@@ -197,10 +212,10 @@ mod tests {
         let mut xmp = PhotoMetadata::new();
         xmp.set_city("Paris");
 
-        let xmp_wins = merge(ConflictPolicy::XmpWins, Some(&iim), Some(&xmp));
+        let xmp_wins = merge(ConflictPolicy::XmpWins, Some(&iim), Some(&xmp)).unwrap();
         assert_eq!(xmp_wins.city(), Some("Paris"));
 
-        let iim_wins = merge(ConflictPolicy::IimWins, Some(&iim), Some(&xmp));
+        let iim_wins = merge(ConflictPolicy::IimWins, Some(&iim), Some(&xmp)).unwrap();
         assert_eq!(iim_wins.city(), Some("Lyon"));
     }
 
@@ -211,7 +226,7 @@ mod tests {
         };
         let mut xmp = PhotoMetadata::new();
         xmp.set_city("Oslo");
-        let pm = merge(ConflictPolicy::IimWins, Some(&iim), Some(&xmp));
+        let pm = merge(ConflictPolicy::IimWins, Some(&iim), Some(&xmp)).unwrap();
         assert_eq!(pm.city(), Some("Oslo"));
         assert_eq!(pm.properties.len(), 1);
     }
@@ -228,7 +243,7 @@ mod tests {
         assert!(block.datasets.contains(&ds(2, 55, b"19900127")));
         assert!(block.datasets.contains(&ds(2, 60, b"133015+0100")));
         // ...and back the other way.
-        let merged = merge(ConflictPolicy::default(), Some(&block), None);
+        let merged = merge(ConflictPolicy::default(), Some(&block), None).unwrap();
         assert_eq!(
             merged.simple(crate::schema::ns::PHOTOSHOP, "DateCreated"),
             Some("1990-01-27T13:30:15+01:00")
@@ -243,7 +258,7 @@ mod tests {
         let mut xmp = PhotoMetadata::new();
         xmp.set_city("Paris"); // conflicts
         xmp.set_country("France"); // agrees
-        let found = conflicts(&iim, &xmp);
+        let found = conflicts(&iim, &xmp).unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].field, "City");
         assert_eq!(found[0].iim, vec!["Lyon"]);

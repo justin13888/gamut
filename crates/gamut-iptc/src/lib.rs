@@ -48,10 +48,21 @@
 //!     IimDataSet { record: 2, dataset: 90, data: b"Lyon".to_vec() },  // City
 //!     IimDataSet { record: 2, dataset: 25, data: b"river".to_vec() }, // Keywords
 //! ] };
-//! let pm = IptcReader::new().read(Some(&iim), None);
+//! let pm = IptcReader::new().read(Some(&iim), None)?;
 //! assert_eq!(pm.city(), Some("Lyon"));
 //! assert_eq!(pm.keywords(), ["river"]);
+//! # Ok::<(), gamut_core::Error>(())
 //! ```
+//!
+//! # Error contract
+//!
+//! **Strict write, honest read.** Writing never silently truncates or drops: a value that cannot
+//! be encoded in the writer's charset, exceeds its dataset's maximum octet length, or (for
+//! `photoshop:DateCreated`) is not an IIM-expressible ISO-8601 date-time is a hard
+//! [`gamut_core::Error::InvalidInput`]. Reading never guesses: a `1:90` coded-character-set
+//! designation gamut does not support is a hard [`gamut_core::Error::Unsupported`], not a Latin-1
+//! fallback. Within a supported charset, an individual dataset value that fails to decode is
+//! treated as absent — one corrupt value must not destroy access to the rest.
 //!
 //! # Scope
 //!

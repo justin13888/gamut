@@ -84,16 +84,26 @@ impl IptcReader {
 
     /// Merges whichever carriers are supplied into one unified [`PhotoMetadata`] view, applying the
     /// reader's conflict policy.
-    #[must_use]
-    pub fn read(&self, iim: Option<&IimBlock>, xmp: Option<&XmpMeta>) -> PhotoMetadata {
+    ///
+    /// Within a supported charset, an individual dataset value that fails to decode is treated as
+    /// absent — one corrupt value must not destroy access to the rest.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`gamut_core::Error::Unsupported`] if the block's `1:90` designates a coded
+    /// character set gamut does not support — gamut never guess-decodes (see [`crate::charset`]).
+    pub fn read(&self, iim: Option<&IimBlock>, xmp: Option<&XmpMeta>) -> Result<PhotoMetadata> {
         let pm = xmp.map(PhotoMetadata::from_xmp);
         reconcile::merge(self.policy, iim, pm.as_ref())
     }
 
     /// Reports the mapped fields on which the two carriers disagree (both present, differing
     /// values), without resolving them.
-    #[must_use]
-    pub fn conflicts(&self, iim: &IimBlock, xmp: &XmpMeta) -> Vec<FieldConflict> {
+    ///
+    /// # Errors
+    ///
+    /// As [`IptcReader::read`].
+    pub fn conflicts(&self, iim: &IimBlock, xmp: &XmpMeta) -> Result<Vec<FieldConflict>> {
         reconcile::conflicts(iim, &PhotoMetadata::from_xmp(xmp))
     }
 }
@@ -139,13 +149,17 @@ mod tests {
         let meta = xmp_with_city("Tokyo");
         // Default policy keeps XMP; IimWins prefers the legacy value.
         assert_eq!(
-            IptcReader::new().read(Some(&iim), Some(&meta)).city(),
+            IptcReader::new()
+                .read(Some(&iim), Some(&meta))
+                .unwrap()
+                .city(),
             Some("Tokyo")
         );
         assert_eq!(
             IptcReader::new()
                 .policy(ConflictPolicy::IimWins)
                 .read(Some(&iim), Some(&meta))
+                .unwrap()
                 .city(),
             Some("Kyoto")
         );
@@ -160,7 +174,9 @@ mod tests {
                 data: b"Kyoto".to_vec(),
             }],
         };
-        let conflicts = IptcReader::new().conflicts(&iim, &xmp_with_city("Tokyo"));
+        let conflicts = IptcReader::new()
+            .conflicts(&iim, &xmp_with_city("Tokyo"))
+            .unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].field, "City");
         assert_eq!(conflicts[0].iim, vec!["Kyoto"]);
@@ -169,7 +185,46 @@ mod tests {
         assert!(
             IptcReader::new()
                 .conflicts(&iim, &xmp_with_city("Kyoto"))
+                .unwrap()
                 .is_empty()
+        );
+    }
+
+    /// A block whose 1:90 designates an ISO 2022 charset gamut does not support.
+    fn exotic_charset_block() -> IimBlock {
+        IimBlock {
+            datasets: vec![
+                IimDataSet {
+                    record: 1,
+                    dataset: 90,
+                    // ESC % @ — "back to ISO 646/4873", not the UTF-8 designation.
+                    data: vec![0x1B, 0x25, 0x40],
+                },
+                IimDataSet {
+                    record: 2,
+                    dataset: 90,
+                    data: b"Kyoto".to_vec(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn read_rejects_unsupported_charset() {
+        // An unknown 1:90 must surface as Unsupported, never fall back to guess-decoding.
+        assert!(
+            IptcReader::new()
+                .read(Some(&exotic_charset_block()), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn conflicts_rejects_unsupported_charset() {
+        assert!(
+            IptcReader::new()
+                .conflicts(&exotic_charset_block(), &xmp_with_city("Tokyo"))
+                .is_err()
         );
     }
 }

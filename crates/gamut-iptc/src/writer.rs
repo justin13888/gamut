@@ -158,9 +158,31 @@ mod tests {
         pm.set_keywords(&["sky", "sea"]);
         let bytes = IptcWriter::new().write_irb(&pm).unwrap().unwrap();
         let block = IptcReader::new().read_irb(&bytes).unwrap().unwrap();
-        let read = IptcReader::new().read(Some(&block), None);
+        let read = IptcReader::new().read(Some(&block), None).unwrap();
         assert_eq!(read.city(), Some("Lyon"));
         assert_eq!(read.keywords(), vec!["sky", "sea"]);
+    }
+
+    #[test]
+    fn write_iim_rejects_unparseable_date_created() {
+        // Strict write: an un-projectable DateCreated is an error, never a silent drop.
+        let mut pm = PhotoMetadata::new();
+        pm.set_simple(crate::schema::ns::PHOTOSHOP, "DateCreated", "yesterday");
+        assert!(IptcWriter::new().write_iim(&pm).is_err());
+
+        // A missing-seconds time is not IIM-expressible either (2:60 is HHMMSS±HHMM).
+        pm.set_simple(
+            crate::schema::ns::PHOTOSHOP,
+            "DateCreated",
+            "2024-06-15T12:00",
+        );
+        assert!(IptcWriter::new().write_iim(&pm).is_err());
+
+        // ...while a plain date, a partial date, and a full date-time all project fine.
+        for ok in ["2024-06-15", "2024", "2024-06-15T12:00:00Z"] {
+            pm.set_simple(crate::schema::ns::PHOTOSHOP, "DateCreated", ok);
+            assert!(IptcWriter::new().write_iim(&pm).is_ok(), "{ok}");
+        }
     }
 
     #[test]
