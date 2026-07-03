@@ -55,9 +55,9 @@ pub use extract::MetadataExtractor;
 pub use gamut_exif as exif;
 pub use gamut_icc as icc;
 pub use gamut_iptc as iptc;
-pub use gamut_xmp as xmp;
 // Surface the IPTC reconciliation knobs at the facade level so callers configure extraction without
 // reaching into the `iptc` submodule.
 pub use gamut_iptc::{ConflictPolicy, FieldConflict};
+pub use gamut_xmp as xmp;
 pub use metadata::Metadata;
 pub use source::MetadataBlock;

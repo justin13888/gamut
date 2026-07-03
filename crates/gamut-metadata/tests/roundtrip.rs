@@ -193,7 +193,10 @@ fn embed_serializes_only_present_carriers() {
     assert_eq!(enc.iptc_iim, None);
 
     // A wholly empty model produces no blocks at all.
-    assert_eq!(Metadata::default().encode().unwrap(), EncodedMetadata::default());
+    assert_eq!(
+        Metadata::default().encode().unwrap(),
+        EncodedMetadata::default()
+    );
 }
 
 #[test]
@@ -215,7 +218,10 @@ fn embed_iim_request_without_iptc_produces_no_block() {
     let meta = MetadataExtractor::new()
         .extract(&[MetadataBlock::Exif(&exif)])
         .unwrap();
-    let enc = MetadataEmbedder::new().emit_iptc_iim(true).embed(&meta).unwrap();
+    let enc = MetadataEmbedder::new()
+        .emit_iptc_iim(true)
+        .embed(&meta)
+        .unwrap();
     assert!(enc.iptc_iim.is_none());
 }
 
@@ -227,7 +233,13 @@ fn embed_emits_legacy_iim_only_on_request() {
         .unwrap();
 
     // Default: IPTC rides inside XMP; no separate legacy block.
-    assert!(MetadataEmbedder::new().embed(&meta).unwrap().iptc_iim.is_none());
+    assert!(
+        MetadataEmbedder::new()
+            .embed(&meta)
+            .unwrap()
+            .iptc_iim
+            .is_none()
+    );
 
     // Opt-in: the legacy IIM block is produced (in the chosen charset) and re-parses to the City.
     let enc = MetadataEmbedder::new()
