@@ -28,6 +28,12 @@ the milestone that motivates a row — indicative sequencing, not a contract:
 
 ## A. Container / file format (ISOBMFF · HEIF · MIAF · AVIF · AV1-ISOBMFF)
 
+The box machinery for every non-M6 row below already ships in
+[`gamut-isobmff` v1](../gamut-isobmff/STATUS.md) (`iref`/`auxC`/`prem`, ICC `colr`, Exif/`mime`
+items, `clap`/`pasp`/`clli`, `grid`+`dimg`, `idat`, `iloc` v1/v2 on read); a ☐ here means the
+*codec-side wiring* (encoding the aux plane, stamping the property, exposing the API) is pending —
+adding it needs no container change.
+
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | `ftyp`: major `avif`, compat `avif`/`mif1`/`miaf`/`MA1A` | AVIF §6,§8.3 | ✅ | M0 |
