@@ -19,7 +19,7 @@ fn public_api_roundtrips_a_directory() {
                 variant,
                 ifds: vec![ifd.clone()],
             };
-            let bytes = write(&file);
+            let bytes = write(&file).expect("write");
             let parsed = read(&bytes).expect("read back");
             assert_eq!(parsed, file);
             assert_eq!(parsed.variant, variant);

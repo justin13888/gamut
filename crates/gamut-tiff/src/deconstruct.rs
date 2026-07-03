@@ -466,7 +466,8 @@ mod tests {
             Variant::Classic,
             &ifd,
             &[vec![0u8; 4]],
-        );
+        )
+        .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert_clean_coverage(&report); // the unknown tag's bytes are still covered
         assert!(
@@ -489,7 +490,8 @@ mod tests {
             Variant::Classic,
             &ifd,
             &[vec![0u8; 4]],
-        );
+        )
+        .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert!(
             report.anomalies.iter().any(|a| matches!(
@@ -512,7 +514,8 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![ifd],
-        });
+        })
+        .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert!(
             report.anomalies.iter().any(|a| matches!(
@@ -532,7 +535,8 @@ mod tests {
             (image_ifd(), vec![vec![0u8; 4]]),
             (image_ifd(), vec![vec![1u8; 4]]),
         ];
-        let bytes = write_multipage(ByteOrder::LittleEndian, Variant::Classic, &pages);
+        let bytes =
+            write_multipage(ByteOrder::LittleEndian, Variant::Classic, &pages).expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert_clean_coverage(&report);
         assert!(report.unknown_tags.is_empty(), "{report:?}");
@@ -553,7 +557,8 @@ mod tests {
             Variant::Classic,
             &ifd,
             &[vec![0u8; 4]],
-        );
+        )
+        .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert_clean_coverage(&report);
         assert!(report.unknown_tags.is_empty(), "{report:?}");
@@ -570,7 +575,8 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![ifd],
-        });
+        })
+        .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
         assert!(
             report.anomalies.iter().any(|a| matches!(

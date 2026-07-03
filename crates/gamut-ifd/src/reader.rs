@@ -387,7 +387,7 @@ mod tests {
             variant: Variant::Classic,
             ifds: vec![even_value_ifd()],
         };
-        let bytes = crate::write(&file);
+        let bytes = crate::write(&file).expect("write");
         let mut cov = Coverage::new(bytes.len() as u64);
         let mut unknown = Vec::new();
         let parsed = read_with_coverage(&bytes, &mut cov, &mut unknown).expect("read");
@@ -441,7 +441,8 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![root],
-        });
+        })
+        .expect("write");
 
         let mut cov = Coverage::new(bytes.len() as u64);
         let mut unknown = Vec::new();

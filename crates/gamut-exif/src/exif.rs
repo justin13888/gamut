@@ -92,8 +92,12 @@ impl Exif {
     /// Preserves the source byte order and re-synthesises the Exif/GPS/Interop pointer tags. For a
     /// bare TIFF stream (PNG `eXIf` / WebP `EXIF`) or a byte-order override, use
     /// [`ExifWriter`](crate::ExifWriter).
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExifError::Ifd`](crate::ExifError::Ifd) if the model is not representable in
+    /// classic-TIFF widths (see [`ExifWriter::write`](crate::ExifWriter::write)).
+    pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
         crate::ExifWriter::new().write(self)
     }
 

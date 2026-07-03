@@ -65,18 +65,24 @@ fn check_fixture(name: &str, actual: &[u8]) {
 
 #[test]
 fn marker_form_matches_golden() {
-    check_fixture("golden_marker_le.bin", &golden_model().to_bytes());
+    check_fixture(
+        "golden_marker_le.bin",
+        &golden_model().to_bytes().expect("write"),
+    );
 }
 
 #[test]
 fn bare_form_matches_golden() {
-    let bare = ExifWriter::new().marker(false).write(&golden_model());
+    let bare = ExifWriter::new()
+        .marker(false)
+        .write(&golden_model())
+        .expect("write");
     check_fixture("golden_bare_le.bin", &bare);
 }
 
 #[test]
 fn golden_bytes_round_trip_with_utf8_and_thumbnail() {
-    let bytes = golden_model().to_bytes();
+    let bytes = golden_model().to_bytes().expect("write");
     let parsed = Exif::parse(&bytes).expect("parse golden");
     assert_eq!(parsed, golden_model());
     // The Exif 3.0 UTF-8 field and the JPEG thumbnail survive.

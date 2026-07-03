@@ -9,6 +9,7 @@
 
 use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
 
+use crate::error::Result;
 use crate::exif::{
     EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER, without_tags,
 };
@@ -58,19 +59,24 @@ impl ExifWriter {
     }
 
     /// Serialises `exif` to bytes.
-    #[must_use]
-    pub fn write(&self, exif: &Exif) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExifError::Ifd`](crate::ExifError::Ifd) if the model is not representable in
+    /// classic-TIFF widths (a directory of more than `u16::MAX` entries, or a stream past the
+    /// 4 GiB offset limit) — far beyond what any EXIF carrier accepts.
+    pub fn write(&self, exif: &Exif) -> Result<Vec<u8>> {
         let order = self.byte_order.unwrap_or_else(|| exif.byte_order());
         let image = build_image(exif);
-        let tiff = write_with_thumbnail(order, image, exif.thumbnail());
+        let tiff = write_with_thumbnail(order, image, exif.thumbnail())?;
 
-        if self.marker {
+        Ok(if self.marker {
             let mut out = MARKER.to_vec();
             out.extend(tiff);
             out
         } else {
             tiff
-        }
+        })
     }
 }
 
@@ -107,12 +113,16 @@ fn build_image(exif: &Exif) -> Ifd {
 /// (an inline `LONG`, so the layout and total length are unchanged), then append the JPEG. An
 /// uncompressed strip thumbnail's directory is preserved but its pixel bytes are **not** re-embedded
 /// (a documented v1 limitation).
-fn write_with_thumbnail(order: ByteOrder, image: Ifd, thumbnail: Option<&Thumbnail>) -> Vec<u8> {
+fn write_with_thumbnail(
+    order: ByteOrder,
+    image: Ifd,
+    thumbnail: Option<&Thumbnail>,
+) -> Result<Vec<u8>> {
     let Some(thumb) = thumbnail else {
-        return write(&tiff_file(order, vec![image]));
+        return Ok(write(&tiff_file(order, vec![image]))?);
     };
     let Some(jpeg) = thumb.jpeg() else {
-        return write(&tiff_file(order, vec![image, thumb.ifd().clone()]));
+        return Ok(write(&tiff_file(order, vec![image, thumb.ifd().clone()]))?);
     };
 
     let mut thumb_ifd = thumb.ifd().clone();
@@ -126,7 +136,7 @@ fn write_with_thumbnail(order: ByteOrder, image: Ifd, thumbnail: Option<&Thumbna
     );
 
     // Pass 1: lay out the directories to learn where the JPEG will start (word-aligned).
-    let planned = write(&tiff_file(order, vec![image.clone(), thumb_ifd.clone()]));
+    let planned = write(&tiff_file(order, vec![image.clone(), thumb_ifd.clone()]))?;
     let jpeg_offset = even(planned.len());
 
     // Pass 2: patch the now-known offset. Changing an inline LONG moves nothing, so the byte length
@@ -135,11 +145,11 @@ fn write_with_thumbnail(order: ByteOrder, image: Ifd, thumbnail: Option<&Thumbna
         ExifTag::JpegInterchangeFormat.tag_id(),
         Value::Long(vec![jpeg_offset as u32]),
     );
-    let mut bytes = write(&tiff_file(order, vec![image, thumb_ifd]));
+    let mut bytes = write(&tiff_file(order, vec![image, thumb_ifd]))?;
     debug_assert_eq!(jpeg_offset, even(bytes.len()));
     bytes.resize(jpeg_offset, 0);
     bytes.extend_from_slice(jpeg);
-    bytes
+    Ok(bytes)
 }
 
 /// A classic-TIFF [`TiffFile`] in `order`.
@@ -186,7 +196,7 @@ mod tests {
 
     fn assert_round_trips(order: ByteOrder) {
         let original = sample(order);
-        let bytes = original.to_bytes();
+        let bytes = original.to_bytes().expect("write");
         let parsed = Exif::parse(&bytes).expect("round-trip parse");
         assert_eq!(parsed, original, "value-level round-trip in {order:?}");
         assert_eq!(parsed.byte_order(), order, "byte order preserved");
@@ -201,9 +211,9 @@ mod tests {
     #[test]
     fn emits_and_omits_the_marker() {
         let exif = sample(ByteOrder::LittleEndian);
-        let with = ExifWriter::new().write(&exif);
+        let with = ExifWriter::new().write(&exif).expect("write");
         assert_eq!(&with[..6], MARKER);
-        let bare = ExifWriter::new().marker(false).write(&exif);
+        let bare = ExifWriter::new().marker(false).write(&exif).expect("write");
         assert_ne!(&bare[..2], MARKER);
         // A bare stream begins with the TIFF byte-order mark and re-parses.
         assert_eq!(&bare[..2], b"II");
@@ -215,7 +225,8 @@ mod tests {
         let exif = sample(ByteOrder::LittleEndian);
         let be = ExifWriter::new()
             .byte_order(ByteOrder::BigEndian)
-            .write(&exif);
+            .write(&exif)
+            .expect("write");
         let parsed = Exif::parse(&be).expect("parse");
         assert_eq!(parsed.byte_order(), ByteOrder::BigEndian);
         // Values are unchanged despite the re-encoding.
@@ -242,11 +253,12 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![image, thumb],
-        });
+        })
+        .expect("write");
 
         let parsed = Exif::parse(&blob).expect("parse");
         assert!(parsed.thumbnail_ifd().is_some());
-        let reparsed = Exif::parse(&parsed.to_bytes()).expect("re-parse");
+        let reparsed = Exif::parse(&parsed.to_bytes().expect("write")).expect("re-parse");
         assert_eq!(
             reparsed, parsed,
             "thumbnail directory survives the round-trip"
@@ -270,7 +282,7 @@ mod tests {
             let mut exif = sample(ByteOrder::LittleEndian);
             exif.set_thumbnail(jpeg.clone());
 
-            let parsed = Exif::parse(&exif.to_bytes()).expect("round-trip parse");
+            let parsed = Exif::parse(&exif.to_bytes().expect("write")).expect("round-trip parse");
             assert_eq!(parsed.thumbnail_bytes(), Some(jpeg.as_slice()));
             assert_eq!(parsed.thumbnail().and_then(Thumbnail::compression), Some(6));
             // The rest of the model survives alongside the thumbnail.
@@ -288,7 +300,7 @@ mod tests {
         exif.set_tag(ExifTag::Make, Value::Ascii("NIKON CORPORATION".into()));
         exif.set_tag(ExifTag::MakerNote, Value::Undefined(blob.clone()));
 
-        let parsed = Exif::parse(&exif.to_bytes()).expect("parse");
+        let parsed = Exif::parse(&exif.to_bytes().expect("write")).expect("parse");
         let maker = parsed.maker_note().expect("maker note present");
         assert_eq!(maker.bytes, blob, "MakerNote bytes preserved verbatim");
         assert_eq!(maker.vendor, crate::MakerNoteVendor::Nikon);
@@ -304,7 +316,7 @@ mod tests {
         exif.image_mut()
             .set(EXIF_IFD_POINTER, Value::Long(vec![0xDEAD]));
 
-        let parsed = Exif::parse(&exif.to_bytes()).expect("parse");
+        let parsed = Exif::parse(&exif.to_bytes().expect("write")).expect("parse");
         assert_eq!(
             parsed.f_number(),
             Some(crate::Rational { num: 28, den: 10 })

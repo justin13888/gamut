@@ -6,6 +6,7 @@
 //! fills in the `StripOffsets`/`StripByteCounts` (or `TileOffsets`/`TileByteCounts`) that point at
 //! them. `variant` selects classic TIFF or BigTIFF throughout.
 
+use gamut_core::Result;
 use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
 
 /// Rounds `n` up to the next even (word) boundary, matching the value-pool alignment
@@ -26,8 +27,17 @@ fn offset_value(variant: Variant, offsets: Vec<u64>) -> Value {
 /// Serialises a single-IFD strip TIFF image: the supplied directory plus its strip data,
 /// referenced by `StripOffsets`/`StripByteCounts`. The strips are written verbatim, so the caller
 /// is responsible for any per-strip compression. `variant` selects classic TIFF or BigTIFF.
-#[must_use]
-pub fn write_image(order: ByteOrder, variant: Variant, ifd: &Ifd, strips: &[Vec<u8>]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns an error if the stream is not representable in the selected variant's widths (see
+/// [`gamut_ifd::write`]).
+pub fn write_image(
+    order: ByteOrder,
+    variant: Variant,
+    ifd: &Ifd,
+    strips: &[Vec<u8>],
+) -> Result<Vec<u8>> {
     write_blocks(
         order,
         variant,
@@ -41,13 +51,17 @@ pub fn write_image(order: ByteOrder, variant: Variant, ifd: &Ifd, strips: &[Vec<
 /// Serialises a single-IFD tiled TIFF image: the directory plus its tile data, referenced by
 /// `TileOffsets`/`TileByteCounts`. The caller supplies the `TileWidth`/`TileLength` fields and any
 /// per-tile compression. `variant` selects classic TIFF or BigTIFF.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error if the stream is not representable in the selected variant's widths (see
+/// [`gamut_ifd::write`]).
 pub fn write_image_tiled(
     order: ByteOrder,
     variant: Variant,
     ifd: &Ifd,
     tiles: &[Vec<u8>],
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     write_blocks(
         order,
         variant,
@@ -62,12 +76,16 @@ pub fn write_image_tiled(
 /// next-IFD pointers — plus all pages' strip data in a shared region after the directories. Each
 /// page is `(directory, strips)`; `StripOffsets`/`StripByteCounts` are filled in here. `variant`
 /// selects classic TIFF or BigTIFF.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error if the stream is not representable in the selected variant's widths (see
+/// [`gamut_ifd::write`]).
 pub fn write_multipage(
     order: ByteOrder,
     variant: Variant,
     pages: &[(Ifd, Vec<Vec<u8>>)],
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     use crate::tags;
 
     // Give each directory its byte counts and a correctly-sized StripOffsets placeholder so the
@@ -92,7 +110,7 @@ pub fn write_multipage(
             order,
             variant,
             ifds: ifds.clone(),
-        })
+        })?
         .len(),
     );
 
@@ -111,14 +129,14 @@ pub fn write_multipage(
         order,
         variant,
         ifds,
-    });
+    })?;
     out.resize(base, 0);
     for (_, strips) in pages {
         for s in strips {
             out.extend_from_slice(s);
         }
     }
-    out
+    Ok(out)
 }
 
 /// Lays out a directory plus a list of data blocks, recording each block's length under
@@ -131,7 +149,7 @@ fn write_blocks(
     blocks: &[Vec<u8>],
     offset_tag: u16,
     bytecount_tag: u16,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let counts: Vec<u32> = blocks.iter().map(|s| s.len() as u32).collect();
     let mut ifd = ifd.clone();
     ifd.set(bytecount_tag, Value::Long(counts));
@@ -146,7 +164,7 @@ fn write_blocks(
             order,
             variant,
             ifds: vec![ifd.clone()],
-        })
+        })?
         .len(),
     );
     let mut offsets = Vec::with_capacity(blocks.len());
@@ -161,10 +179,10 @@ fn write_blocks(
         order,
         variant,
         ifds: vec![ifd],
-    });
+    })?;
     out.resize(base, 0); // pad to the even base (a no-op unless the value pool ended odd)
     for s in blocks {
         out.extend_from_slice(s);
     }
-    out
+    Ok(out)
 }

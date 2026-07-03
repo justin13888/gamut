@@ -39,7 +39,7 @@ let mut ifd = Ifd::new();
 ifd.set(256, Value::Short(vec![640])); // ImageWidth
 ifd.set(257, Value::Short(vec![480])); // ImageLength
 let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
-let bytes = write(&file);
+let bytes = write(&file).unwrap();
 assert_eq!(read(&bytes).unwrap(), file);
 ```
 

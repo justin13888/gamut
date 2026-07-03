@@ -7,6 +7,7 @@
 //! it, fills in the `StripOffsets`/`StripByteCounts` (or tile equivalents), and writes again. The
 //! re-write is byte-stable because only the *values* of the offset fields change, not their sizes.
 
+use gamut_core::Result;
 use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
 
 use crate::tags;
@@ -64,7 +65,6 @@ fn place_blocks(cursor: &mut usize, image: &ImageBlocks, ifd: &mut Ifd, variant:
 ///
 /// `ifd0` and `raw_ifd` supply every field *except* the offset/byte-count pair, which this fills
 /// in. The preview data is laid out first, then the raw data, both after the directory tree.
-#[must_use]
 pub(crate) fn write_cfa_dng(
     order: ByteOrder,
     variant: Variant,
@@ -72,7 +72,7 @@ pub(crate) fn write_cfa_dng(
     preview: &ImageBlocks,
     mut raw_ifd: Ifd,
     raw: &ImageBlocks,
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     // Install correctly-sized placeholders so the directory tree's byte layout is final.
     preview.install_placeholders(&mut ifd0, variant);
     raw.install_placeholders(&mut raw_ifd, variant);
@@ -85,7 +85,7 @@ pub(crate) fn write_cfa_dng(
             order,
             variant,
             ifds: vec![ifd0.clone()],
-        })
+        })?
         .len(),
     );
 
@@ -99,7 +99,7 @@ pub(crate) fn write_cfa_dng(
         order,
         variant,
         ifds: vec![ifd0],
-    });
+    })?;
     out.resize(base, 0); // pad to the even base (a no-op unless the value pool ended odd)
     for block in &preview.blocks {
         out.extend_from_slice(block);
@@ -107,7 +107,7 @@ pub(crate) fn write_cfa_dng(
     for block in &raw.blocks {
         out.extend_from_slice(block);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

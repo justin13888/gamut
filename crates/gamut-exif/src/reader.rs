@@ -186,7 +186,8 @@ mod tests {
             order,
             variant: Variant::Classic,
             ifds: vec![image, thumb],
-        });
+        })
+        .expect("write");
         if with_marker {
             let mut out = MARKER.to_vec();
             out.extend(bytes);
@@ -263,7 +264,8 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![image],
-        });
+        })
+        .expect("write");
 
         // Lenient: the bad pointer is dropped, the rest survives.
         let lenient = ExifReader::new().parse(&bytes).expect("lenient parse");

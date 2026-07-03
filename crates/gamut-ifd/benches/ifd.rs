@@ -48,13 +48,13 @@ fn sample_file() -> TiffFile {
 fn write_ifd(bencher: Bencher) {
     let file = sample_file();
     bencher
-        .counter(BytesCount::new(write(&file).len()))
-        .bench_local(|| write(black_box(&file)));
+        .counter(BytesCount::new(write(&file).expect("write").len()))
+        .bench_local(|| write(black_box(&file)).expect("write"));
 }
 
 #[divan::bench]
 fn read_ifd(bencher: Bencher) {
-    let bytes = write(&sample_file());
+    let bytes = write(&sample_file()).expect("write");
     bencher
         .counter(BytesCount::new(bytes.len()))
         .bench_local(|| read(black_box(&bytes)).unwrap());
