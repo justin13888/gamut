@@ -8,22 +8,14 @@
 //! re-write is byte-stable because only the *values* of the offset fields change, not their sizes.
 
 use gamut_core::Result;
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
+use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, align_word, write};
 
 use crate::tags;
 
-/// Rounds `n` up to the next even (word) boundary, matching [`gamut_ifd::write`]'s value-pool
-/// alignment so block data begins on a word boundary.
+/// Rounds `n` up to the next even (word) boundary — [`gamut_ifd::write`]'s documented value-pool
+/// alignment — so block data begins on a word boundary.
 fn even(n: usize) -> usize {
-    n + (n & 1)
-}
-
-/// Builds an offset-array field of the right type for `variant`: `LONG` classic, `LONG8` BigTIFF.
-fn offset_value(variant: Variant, offsets: Vec<u64>) -> Value {
-    match variant {
-        Variant::Classic => Value::Long(offsets.iter().map(|&o| o as u32).collect()),
-        Variant::Big => Value::Long8(offsets),
-    }
+    align_word(n as u64) as usize
 }
 
 /// One image's data blocks (strips or tiles) plus the tags that reference them.
@@ -39,25 +31,32 @@ pub(crate) struct ImageBlocks {
 impl ImageBlocks {
     /// Stores the byte counts and a correctly-typed placeholder offset array into `ifd`, so the
     /// directory layout is final before the real offsets are known.
-    fn install_placeholders(&self, ifd: &mut Ifd, variant: Variant) {
+    fn install_placeholders(&self, ifd: &mut Ifd, variant: Variant) -> Result<()> {
         let counts: Vec<u32> = self.blocks.iter().map(|b| b.len() as u32).collect();
         ifd.set(self.bytecount_tag, Value::Long(counts));
         ifd.set(
             self.offset_tag,
-            offset_value(variant, vec![0; self.blocks.len()]),
+            Value::offset_array(variant, &vec![0; self.blocks.len()])?,
         );
+        Ok(())
     }
 }
 
 /// Assigns each block in `image` a file offset starting at `*cursor`, advancing it past the data,
 /// and records the offsets under the image's offset tag in `ifd`.
-fn place_blocks(cursor: &mut usize, image: &ImageBlocks, ifd: &mut Ifd, variant: Variant) {
+fn place_blocks(
+    cursor: &mut usize,
+    image: &ImageBlocks,
+    ifd: &mut Ifd,
+    variant: Variant,
+) -> Result<()> {
     let mut offsets = Vec::with_capacity(image.blocks.len());
     for block in &image.blocks {
         offsets.push(*cursor as u64);
         *cursor += block.len();
     }
-    ifd.set(image.offset_tag, offset_value(variant, offsets));
+    ifd.set(image.offset_tag, Value::offset_array(variant, &offsets)?);
+    Ok(())
 }
 
 /// Serialises a DNG whose IFD 0 carries `preview` image data and whose single raw sub-IFD
@@ -74,8 +73,8 @@ pub(crate) fn write_cfa_dng(
     raw: &ImageBlocks,
 ) -> Result<Vec<u8>> {
     // Install correctly-sized placeholders so the directory tree's byte layout is final.
-    preview.install_placeholders(&mut ifd0, variant);
-    raw.install_placeholders(&mut raw_ifd, variant);
+    preview.install_placeholders(&mut ifd0, variant)?;
+    raw.install_placeholders(&mut raw_ifd, variant)?;
     ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw_ifd.clone()]);
 
     // Writing the tree alone yields header + IFDs + value pool, so its length is where the image
@@ -91,8 +90,8 @@ pub(crate) fn write_cfa_dng(
 
     // Lay the preview strips out first, then the raw strips, recording the real offsets.
     let mut cursor = base;
-    place_blocks(&mut cursor, preview, &mut ifd0, variant);
-    place_blocks(&mut cursor, raw, &mut raw_ifd, variant);
+    place_blocks(&mut cursor, preview, &mut ifd0, variant)?;
+    place_blocks(&mut cursor, raw, &mut raw_ifd, variant)?;
     ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw_ifd]);
 
     let mut out = write(&TiffFile {
@@ -108,18 +107,4 @@ pub(crate) fn write_cfa_dng(
         out.extend_from_slice(block);
     }
     Ok(out)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::even;
-
-    #[test]
-    fn even_rounds_up_to_a_word_boundary() {
-        assert_eq!(even(0), 0);
-        assert_eq!(even(1), 2);
-        assert_eq!(even(2), 2);
-        assert_eq!(even(3), 4);
-        assert_eq!(even(4), 4);
-    }
 }
