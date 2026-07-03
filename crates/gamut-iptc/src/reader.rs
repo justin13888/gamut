@@ -1,8 +1,8 @@
 //! The IPTC reader — the read-side entry point: decode the legacy carrier and merge carriers.
 
-use gamut_core::Result;
 use gamut_xmp::XmpMeta;
 
+use crate::error::Result;
 use crate::iim::IimBlock;
 use crate::irb::PhotoshopIrb;
 use crate::photo_metadata::PhotoMetadata;
@@ -73,7 +73,7 @@ impl IptcReader {
     ///
     /// # Errors
     ///
-    /// Returns [`gamut_core::Error::InvalidInput`] if the resource stream or the IIM datasets are
+    /// Returns [`crate::IptcError::Malformed`] if the resource stream or the IIM datasets are
     /// malformed (see [`PhotoshopIrb::parse`] and [`IimBlock::parse`]).
     pub fn read_irb(&self, irb: &[u8]) -> Result<Option<IimBlock>> {
         PhotoshopIrb::parse(irb)?
@@ -90,7 +90,7 @@ impl IptcReader {
     ///
     /// # Errors
     ///
-    /// Returns [`gamut_core::Error::Unsupported`] if the block's `1:90` designates a coded
+    /// Returns [`crate::IptcError::Unsupported`] if the block's `1:90` designates a coded
     /// character set gamut does not support — gamut never guess-decodes (see [`crate::charset`]).
     pub fn read(&self, iim: Option<&IimBlock>, xmp: Option<&XmpMeta>) -> Result<PhotoMetadata> {
         let pm = xmp.map(PhotoMetadata::from_xmp);

@@ -18,6 +18,7 @@ workspace = true
 [dependencies]
 gamut-core.workspace = true
 gamut-xmp.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 # Differential oracle: a vendored, statically-linked exiv2 (the reference for legacy IPTC-IIM/IRB).
