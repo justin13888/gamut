@@ -13,7 +13,7 @@ use crate::date;
 use crate::iim::{IimBlock, IimDataSet, IimTagInfo};
 use crate::photo_metadata::PhotoMetadata;
 use crate::reader::{ConflictPolicy, FieldConflict};
-use crate::schema::{FieldMap, MAP, XmpShape};
+use crate::schema::{FIELD_MAP, FieldMap, XmpShape};
 
 /// Merges whichever carriers are present into one unified [`PhotoMetadata`] (XMP) view.
 ///
@@ -34,16 +34,17 @@ pub(crate) fn merge(
         return Ok(out);
     };
     let charset = IimCharset::detect(iim)?;
-    for row in MAP {
+    for row in FIELD_MAP {
         let iim_vals = read_iim_field(iim, row, charset);
         if iim_vals.is_empty() {
             continue;
         }
         let xmp_vals = out.get_field(&row.xmp);
-        if xmp_vals.is_empty() {
-            out.set_field(&row.xmp, &iim_vals); // IIM-only: adopt it
-        } else if xmp_vals != iim_vals && policy == ConflictPolicy::IimWins {
-            out.set_field(&row.xmp, &iim_vals); // conflict, IIM wins
+        let adopt = xmp_vals.is_empty() // IIM-only: adopt it
+            || (xmp_vals != iim_vals && policy == ConflictPolicy::IimWins); // conflict, IIM wins
+        if adopt {
+            let iim_refs: Vec<&str> = iim_vals.iter().map(String::as_str).collect();
+            out.set_field(&row.xmp, &iim_refs);
         }
         // else: XMP present and (equal, or XmpWins) -> keep what's already in `out`.
     }
@@ -62,7 +63,7 @@ pub(crate) fn merge(
 /// ISO-8601 date-time — gamut never silently truncates or drops on write.
 pub(crate) fn project(pm: &PhotoMetadata, charset: IimCharset) -> Result<IimBlock> {
     let mut fields = Vec::new();
-    for row in MAP {
+    for row in FIELD_MAP {
         let vals = pm.get_field(&row.xmp);
         if vals.is_empty() {
             continue;
@@ -111,7 +112,7 @@ pub(crate) fn project(pm: &PhotoMetadata, charset: IimCharset) -> Result<IimBloc
 pub(crate) fn conflicts(iim: &IimBlock, xmp: &PhotoMetadata) -> Result<Vec<FieldConflict>> {
     let charset = IimCharset::detect(iim)?;
     let mut out = Vec::new();
-    for row in MAP {
+    for row in FIELD_MAP {
         let iim_vals = read_iim_field(iim, row, charset);
         let xmp_vals = xmp.get_field(&row.xmp);
         if !iim_vals.is_empty() && !xmp_vals.is_empty() && iim_vals != xmp_vals {

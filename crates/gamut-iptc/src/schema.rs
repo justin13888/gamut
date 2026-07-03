@@ -23,8 +23,8 @@ pub mod ns {
 }
 
 /// The namespaces gamut treats as IPTC-relevant when extracting [`crate::PhotoMetadata`] from a full
-/// XMP graph.
-pub(crate) const IPTC_NAMESPACES: &[&str] = &[
+/// XMP graph (see [`crate::PhotoMetadata::from_xmp`]).
+pub const IPTC_NAMESPACES: &[&str] = &[
     ns::DC,
     ns::PHOTOSHOP,
     ns::XMP_RIGHTS,
@@ -83,7 +83,23 @@ const fn field(ns: &'static str, name: &'static str, shape: XmpShape) -> XmpFiel
 /// Each entry pairs the IIM dataset(s) with the XMP property and its shape. `2:04`/`2:85` are
 /// repeatable on the IIM wire but map to single XMP properties (gamut reconciles the first value);
 /// `2:55`+`2:60` together form the `photoshop:DateCreated` date-time.
-pub(crate) const MAP: &[FieldMap] = &[
+///
+/// Together with [`crate::PhotoMetadata::get_field`]/[`set_field`](crate::PhotoMetadata::set_field)
+/// this enables generic, table-driven access to every mapped field:
+///
+/// ```
+/// use gamut_iptc::{PhotoMetadata, schema::FIELD_MAP};
+///
+/// let mut pm = PhotoMetadata::new();
+/// pm.set_city("Lyon");
+/// let present: Vec<&str> = FIELD_MAP
+///     .iter()
+///     .filter(|row| !pm.get_field(&row.xmp).is_empty())
+///     .map(|row| row.xmp.name)
+///     .collect();
+/// assert_eq!(present, ["City"]);
+/// ```
+pub const FIELD_MAP: &[FieldMap] = &[
     FieldMap {
         iim: &[(2, 4)],
         xmp: field(ns::IPTC_CORE, "IntellectualGenre", SimpleText),
@@ -173,7 +189,7 @@ mod tests {
     #[test]
     fn every_mapped_iim_dataset_has_tag_info() {
         // The map and the IIM known-tag table must agree on which datasets are modelled.
-        for row in MAP {
+        for row in FIELD_MAP {
             for &(record, dataset) in row.iim {
                 assert!(
                     crate::iim::IimTagInfo::lookup(record, dataset).is_some(),
@@ -185,7 +201,7 @@ mod tests {
 
     #[test]
     fn datetime_is_the_only_two_dataset_row() {
-        for row in MAP {
+        for row in FIELD_MAP {
             let expected = if row.xmp.shape == XmpShape::DateTime {
                 2
             } else {
@@ -197,7 +213,7 @@ mod tests {
 
     #[test]
     fn known_namespaces_are_iptc_relevant() {
-        for row in MAP {
+        for row in FIELD_MAP {
             assert!(IPTC_NAMESPACES.contains(&row.xmp.ns));
         }
     }

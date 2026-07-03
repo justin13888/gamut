@@ -86,6 +86,13 @@ mod date;
 mod reconcile;
 
 pub use charset::IimCharset;
+/// The XMP value model this crate's API speaks ([`XmpMeta`](gamut_xmp::XmpMeta),
+/// [`XmpProperty`](gamut_xmp::XmpProperty), …).
+///
+/// [`gamut_xmp`] is a **public dependency**: [`PhotoMetadata`] holds its property graph and the
+/// reader/writer take and return its types. This re-export names the exact matching version, so a
+/// consumer never has to pin `gamut-xmp` separately.
+pub use gamut_xmp as xmp;
 pub use iim::{IimBlock, IimDataSet, IimFieldKind, IimTagInfo};
 pub use irb::{IrbBlock, PhotoshopIrb};
 pub use photo_metadata::PhotoMetadata;

@@ -14,7 +14,7 @@ use crate::schema::{IPTC_NAMESPACES, XmpField, XmpShape, ns};
 /// gamut-iptc operates on this in-memory graph; parsing/serializing the XMP *packet bytes* is
 /// [`gamut_xmp`]'s responsibility (see issue #34). Language-alternative fields (`dc:title`,
 /// `dc:rights`, `dc:description`) are read and written as their `x-default` alternative.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PhotoMetadata {
     /// The IPTC Core/Extension properties, as XMP properties in the IPTC namespaces.
     pub properties: Vec<XmpProperty>,
@@ -127,9 +127,14 @@ impl PhotoMetadata {
         self.upsert(ns, name, XmpValue::Array(array));
     }
 
-    /// Reads a mapped field's value(s) as owned strings (empty if absent). Scalar shapes yield zero
-    /// or one element; used by [`crate::reconcile`].
-    pub(crate) fn get_field(&self, field: &XmpField) -> Vec<String> {
+    /// Reads a field's value(s) by its schema identity, as owned strings (empty if absent).
+    ///
+    /// Scalar shapes ([`XmpShape::SimpleText`], [`XmpShape::LangAlt`], [`XmpShape::DateTime`])
+    /// yield zero or one element; array shapes yield every item. Together with
+    /// [`crate::schema::FIELD_MAP`] this gives generic, table-driven access to every mapped field
+    /// without a typed accessor per field.
+    #[must_use]
+    pub fn get_field(&self, field: &XmpField) -> Vec<String> {
         match field.shape {
             XmpShape::SimpleText | XmpShape::DateTime => self
                 .simple(field.ns, field.name)
@@ -147,9 +152,12 @@ impl PhotoMetadata {
         }
     }
 
-    /// Writes a mapped field from owned strings; used by [`crate::reconcile`]. Scalar shapes take the
-    /// first value; a value list that is empty leaves the property unset.
-    pub(crate) fn set_field(&mut self, field: &XmpField, values: &[String]) {
+    /// Writes a field's value(s) by its schema identity, storing the RDF container kind the shape
+    /// prescribes.
+    ///
+    /// Scalar shapes take the first value; an empty value list leaves the property unset. The
+    /// counterpart of [`PhotoMetadata::get_field`].
+    pub fn set_field(&mut self, field: &XmpField, values: &[&str]) {
         match field.shape {
             XmpShape::SimpleText | XmpShape::DateTime => {
                 if let Some(v) = values.first() {
@@ -162,8 +170,7 @@ impl PhotoMetadata {
                 }
             }
             XmpShape::Bag | XmpShape::Seq => {
-                let refs: Vec<&str> = values.iter().map(String::as_str).collect();
-                self.set_list(field.ns, field.name, field.shape == XmpShape::Seq, &refs);
+                self.set_list(field.ns, field.name, field.shape == XmpShape::Seq, values);
             }
         }
     }
@@ -383,15 +390,9 @@ mod tests {
     fn get_set_field_round_trip_by_shape() {
         let f = |ns: &'static str, name: &'static str, shape| XmpField { ns, name, shape };
         let mut pm = PhotoMetadata::new();
-        pm.set_field(
-            &f(ns::PHOTOSHOP, "Headline", XmpShape::SimpleText),
-            &["H".to_owned()],
-        );
-        pm.set_field(&f(ns::DC, "rights", XmpShape::LangAlt), &["(c)".to_owned()]);
-        pm.set_field(
-            &f(ns::DC, "subject", XmpShape::Bag),
-            &["a".to_owned(), "b".to_owned()],
-        );
+        pm.set_field(&f(ns::PHOTOSHOP, "Headline", XmpShape::SimpleText), &["H"]);
+        pm.set_field(&f(ns::DC, "rights", XmpShape::LangAlt), &["(c)"]);
+        pm.set_field(&f(ns::DC, "subject", XmpShape::Bag), &["a", "b"]);
         assert_eq!(
             pm.get_field(&f(ns::PHOTOSHOP, "Headline", XmpShape::SimpleText)),
             vec!["H"]
@@ -417,7 +418,7 @@ mod tests {
             pm.find(ns::DC, "subject").unwrap().value,
             XmpValue::Array(XmpArray::Bag(_))
         ));
-        pm.set_field(&f(ns::DC, "creator", XmpShape::Seq), &["x".to_owned()]);
+        pm.set_field(&f(ns::DC, "creator", XmpShape::Seq), &["x"]);
         assert!(matches!(
             pm.find(ns::DC, "creator").unwrap().value,
             XmpValue::Array(XmpArray::Seq(_))
