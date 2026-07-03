@@ -177,7 +177,10 @@ impl Ifd {
             .map(|i| self.fields.remove(i).value)
     }
 
-    /// Returns the directory's sub-IFD pointers (see [`SubIfd`]).
+    /// Returns the directory's sub-IFD pointer groups (see [`SubIfd`]), sorted by ascending
+    /// pointer tag — one group per tag, like [`fields`](Self::fields), so a reconstructed tree
+    /// ([`read_tree`](crate::read_tree)) compares equal to the one that was written regardless of
+    /// attachment order.
     #[must_use]
     pub fn sub_ifds(&self) -> &[SubIfd] {
         &self.sub_ifds
@@ -189,20 +192,23 @@ impl Ifd {
     /// The pointer field (a `LONG`/`LONG8` array of the children's offsets) is synthesised by the
     /// writer, so `tag` must **not** also be [`set`](Self::set) as a regular field.
     pub fn set_sub_ifd(&mut self, tag: u16, ifds: Vec<Ifd>) {
-        match self.sub_ifds.iter_mut().find(|s| s.tag == tag) {
-            Some(s) => s.ifds = ifds,
-            None => self.sub_ifds.push(SubIfd { tag, ifds }),
+        match self.sub_ifds.binary_search_by_key(&tag, |s| s.tag) {
+            Ok(i) => self.sub_ifds[i].ifds = ifds,
+            Err(i) => self.sub_ifds.insert(i, SubIfd { tag, ifds }),
         }
     }
 
     /// Appends a single child directory to pointer `tag`, creating the group if it does not exist.
     pub fn add_sub_ifd(&mut self, tag: u16, ifd: Ifd) {
-        match self.sub_ifds.iter_mut().find(|s| s.tag == tag) {
-            Some(s) => s.ifds.push(ifd),
-            None => self.sub_ifds.push(SubIfd {
-                tag,
-                ifds: vec![ifd],
-            }),
+        match self.sub_ifds.binary_search_by_key(&tag, |s| s.tag) {
+            Ok(i) => self.sub_ifds[i].ifds.push(ifd),
+            Err(i) => self.sub_ifds.insert(
+                i,
+                SubIfd {
+                    tag,
+                    ifds: vec![ifd],
+                },
+            ),
         }
     }
 }
@@ -276,12 +282,15 @@ mod tests {
     #[test]
     fn add_sub_ifd_accumulates_per_tag() {
         let mut ifd = Ifd::new();
-        ifd.add_sub_ifd(330, Ifd::new());
-        ifd.add_sub_ifd(330, Ifd::new());
+        // Attach out of tag order: the groups must come back sorted (canonical form, so a
+        // reconstructed tree compares equal regardless of attachment order).
         ifd.add_sub_ifd(34665, Ifd::new());
+        ifd.add_sub_ifd(330, Ifd::new());
+        ifd.add_sub_ifd(330, Ifd::new());
         // One group per distinct tag (not one per call), and tag 330 holds both children.
         assert_eq!(ifd.sub_ifds.len(), 2);
-        assert_eq!(ifd.sub_ifds.iter().filter(|s| s.tag == 330).count(), 1);
+        let order: Vec<u16> = ifd.sub_ifds().iter().map(|s| s.tag).collect();
+        assert_eq!(order, vec![330, 34665]);
         assert_eq!(
             ifd.sub_ifds
                 .iter()
@@ -291,6 +300,5 @@ mod tests {
                 .len(),
             2
         );
-        assert!(ifd.sub_ifds.iter().any(|s| s.tag == 34665));
     }
 }

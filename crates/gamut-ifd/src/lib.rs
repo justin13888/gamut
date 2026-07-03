@@ -45,7 +45,8 @@ pub use byte_order::ByteOrder;
 pub use coverage::{Coverage, CoverageReport, Overlap, Range, UnknownField};
 pub use entry::{Field, Ifd, SubIfd, Variant};
 pub use reader::{
-    TiffFile, read, read_header, read_ifd_at, read_ifd_at_with_coverage, read_with_coverage,
+    TiffFile, read, read_header, read_ifd_at, read_ifd_at_with_coverage, read_tree,
+    read_with_coverage,
 };
 pub use types::FieldType;
 pub use value::Value;
