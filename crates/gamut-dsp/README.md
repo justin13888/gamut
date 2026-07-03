@@ -15,8 +15,6 @@ The surface is one module per spec family, plus the shared integer vocabulary:
 - **`math`** — the cross-codec integer primitives: the AV1 §4.7 rounding/clamp operations
   (`round2`, `round2_signed`, `clip3` — names every codec spec defines equivalents of) and the
   forward-quantize rounding shared by the AV1 and VP8 encoders (`round_div_nearest`).
-- **`mulaw`** — µ-law companding and odd-level quantization
-  (see [`references/color`](../../references/color)).
 
 ## Goals
 
@@ -46,10 +44,6 @@ assert_eq!(inverse_wht4x4(&coeffs), residual);
 
 // The shared forward-quantize rounding divides to the nearest level, ties away from zero.
 assert_eq!(round_div_nearest(-10, 4), -3);
-
-// µ-law quantization: the center index of the odd level count is exactly 0.0, both ways.
-assert_eq!(gamut_dsp::mulaw::quantize(0.0, 5, 5.0), 15);
-assert_eq!(gamut_dsp::mulaw::dequantize(15, 5, 5.0), 0.0);
 ```
 
 ## Status

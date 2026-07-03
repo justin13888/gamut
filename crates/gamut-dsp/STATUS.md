@@ -24,7 +24,6 @@ never collide with an existing name.
 | `av1::inverse_identity` / `av1::forward_identity` | same shape, `n ∈ 2..=5`; pure per-element √2-step scaling | frozen |
 | `av1::forward_wht4x4` / `av1::inverse_wht4x4` | complete 2-D 4×4 lossless block pair over by-value `[i32; 16]`; exact algebraic round-trip | frozen |
 | `math::round2` `math::round2_signed` `math::clip3` `math::round_div_nearest` | scalar integer ops: AV1 §4.7 rounding/clamp plus the AV1+VP8 forward-quantize rounding | frozen; new fns are additive |
-| `mulaw::compress` `mulaw::expand` `mulaw::quantize` `mulaw::dequantize` | `f64` µ-law companding and odd-level quantization (`2^bits − 1` levels, exact zero center) | frozen; companding siblings (e.g. A-law) are additive |
 
 Adding modules or functions stays backward-compatible; removing or reshaping any of the above
 would not.
@@ -41,9 +40,6 @@ would not.
   gamut-core's documented indexing panics, not error handling. Arithmetic-headroom limits are
   documented per function and guarded by Rust's debug overflow checks; `round2`, the hottest
   primitive (twice per butterfly), has no semantic precondition and deliberately gains no branch.
-- **Zero dependencies.** Dropping `gamut_core::Result` from `mulaw` (its only import) made the
-  crate dependency-free — a permanent property worth advertising, and re-adding a dependency
-  later is semver-compatible if a kernel ever needs one.
 - **`n: u32` size exponents, not a size enum.** The three kernel families accept different ranges
   (`2..=6` / `2..=4` / `2..=5`), so a single enum cannot make misuse unrepresentable, and
   per-family enums would push fallible conversions into `gamut-av1`'s log2-arithmetic call sites
@@ -76,8 +72,6 @@ would not.
   const tables plus a test regenerating them from the inverse (locking the coupling
   mutation-testably); internal, justified by the divan bench when it lands.
 - **SIMD variants** behind the frozen signatures, where the benches show a win.
-- **µ-law's first consumer** — chromahash-style perceptual coefficient coding (issue #37); an
-  A-law sibling lands in `mulaw` if ever needed.
 
 ## Validation
 
@@ -85,8 +79,7 @@ Backed by inline unit tests per kernel — independent naive float oracles (prop
 transcription is pinned against DCT-III / DST-VII / DST-IV directly), exact golden snapshots in
 *both* directions (a uniform scale or rounding regression cannot hide in the proportional
 oracle), adversarial clamp-saturation probes proving the `r` range is wired through the
-butterflies, ±2¹⁹/±4095 headroom probes under debug overflow checks, and the 11 chromahash
-golden vectors for `mulaw` — plus `tests/surface.rs`, which drives all 16 public functions
+butterflies, ±2¹⁹/±4095 headroom probes under debug overflow checks — plus `tests/surface.rs`, which drives all 16 public functions
 through their `gamut_dsp::module::item` paths only, and the compiled crate-root doctest.
 Bit-exactness of the inverse kernels against dav1d/libaom lands transitively through the 2-D
 pipeline's conformance suites in `gamut-av1`/`gamut-avif`. The divan bench harness

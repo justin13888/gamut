@@ -7,7 +7,6 @@ use gamut_dsp::av1::{
     inverse_identity, inverse_wht4x4,
 };
 use gamut_dsp::math::{clip3, round_div_nearest, round2, round2_signed};
-use gamut_dsp::mulaw;
 
 /// Assert `got` is proportional to `want` with a positive scale, within `tol` per entry.
 fn assert_proportional(got: &[i64], want: &[i64], tol: f64, ctx: &str) {
@@ -69,12 +68,4 @@ fn math_primitives_answer_exactly() {
     assert_eq!(round2_signed(-7, 1), -4);
     assert_eq!(clip3(0, 255, 300), 255);
     assert_eq!(round_div_nearest(-10, 4), -3);
-}
-
-#[test]
-fn mulaw_center_is_exact() {
-    assert_eq!(mulaw::quantize(0.0, 5, 5.0), 15);
-    assert_eq!(mulaw::dequantize(15, 5, 5.0), 0.0);
-    let rt = mulaw::expand(mulaw::compress(0.5, 5.0), 5.0);
-    assert!((rt - 0.5).abs() < 1e-12);
 }
