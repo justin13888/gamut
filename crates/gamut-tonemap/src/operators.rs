@@ -21,6 +21,7 @@ use crate::curve::ToneCurve;
 pub struct Linear;
 
 impl ToneCurve for Linear {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         x
     }
@@ -66,6 +67,7 @@ impl Default for Clamp {
 }
 
 impl ToneCurve for Clamp {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         x.clamp(0.0, self.max)
     }
@@ -79,6 +81,7 @@ impl ToneCurve for Clamp {
 pub struct Reinhard;
 
 impl ToneCurve for Reinhard {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         x / (1.0 + x)
     }
@@ -92,6 +95,8 @@ impl ToneCurve for Reinhard {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReinhardExtended {
     white: f32,
+    /// `white * white`, the divisor `map` uses — validated normal at construction.
+    white_sq: f32,
 }
 
 impl ReinhardExtended {
@@ -99,14 +104,23 @@ impl ReinhardExtended {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `white` is not finite or is not strictly positive.
+    /// Returns [`Error::InvalidInput`] if `white` is not finite, is not strictly positive, or if
+    /// `white * white` is not a normal f32 — squares that underflow (white ≲ 1.1e-19) would make
+    /// `map` divide by zero or a subnormal, and squares that overflow (white ≳ 1.8e19) would break
+    /// the `map(white) == 1` fixed point.
     pub fn new(white: f32) -> Result<Self> {
         if !white.is_finite() || white <= 0.0 {
             return Err(Error::InvalidInput(
                 "Reinhard white point must be finite and greater than zero",
             ));
         }
-        Ok(Self { white })
+        let white_sq = white * white;
+        if !white_sq.is_normal() {
+            return Err(Error::InvalidInput(
+                "Reinhard white point squared must be a normal f32 (white roughly within [1.1e-19, 1.8e19])",
+            ));
+        }
+        Ok(Self { white, white_sq })
     }
 
     /// The white point: the linear input that maps to display white (`1.0`).
@@ -120,17 +134,19 @@ impl Default for ReinhardExtended {
     fn default() -> Self {
         Self {
             white: DEFAULT_REINHARD_WHITE,
+            white_sq: DEFAULT_REINHARD_WHITE * DEFAULT_REINHARD_WHITE,
         }
     }
 }
 
 impl ToneCurve for ReinhardExtended {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         // Factored form of Eq (4): the direct `x * (1 + x/white²) / (1 + x)` overflows its
         // numerator for huge x even when the exact value fits f32; `x / (1 + x)` is bounded by 1,
         // so this order only saturates when the exact value genuinely exceeds f32 range. See
         // references/tonemap/README.md.
-        (x / (1.0 + x)) * (1.0 + x / (self.white * self.white))
+        (x / (1.0 + x)) * (1.0 + x / self.white_sq)
     }
 }
 
@@ -179,6 +195,7 @@ impl Exposure {
 }
 
 impl ToneCurve for Exposure {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         x * self.scale
     }
@@ -196,6 +213,7 @@ impl ToneCurve for Exposure {
 pub struct Aces;
 
 impl ToneCurve for Aces {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         // Narkowicz 2016 coefficients (see references/tonemap/README.md).
         const A: f32 = 2.51;
@@ -243,6 +261,9 @@ fn hable_partial(x: f32) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hable {
     white: f32,
+    /// `hable_partial(white)`, the normalizing divisor `map` uses. Always positive: `partial` is
+    /// increasing and its value at 0 is a positive f32 residual (see `references/tonemap`).
+    partial_white: f32,
 }
 
 impl Hable {
@@ -257,7 +278,10 @@ impl Hable {
                 "Hable white point must be finite and greater than zero",
             ));
         }
-        Ok(Self { white })
+        Ok(Self {
+            white,
+            partial_white: hable_partial(white),
+        })
     }
 
     /// The linear white point: the input that maps to display white (`1.0`).
@@ -271,13 +295,17 @@ impl Default for Hable {
     fn default() -> Self {
         Self {
             white: DEFAULT_HABLE_WHITE,
+            partial_white: hable_partial(DEFAULT_HABLE_WHITE),
         }
     }
 }
 
 impl ToneCurve for Hable {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
-        hable_partial(x) / hable_partial(self.white)
+        // `map(white) == 1.0` stays exact: `hable_partial(white)` here reproduces the stored
+        // divisor bit-for-bit, and t / t == 1.0.
+        hable_partial(x) / self.partial_white
     }
 }
 
@@ -295,6 +323,11 @@ const DRAGO_LDMAX_NITS: f32 = 100.0;
 pub struct Drago {
     world_max: f32,
     bias: f32,
+    /// The Eq. (3) bias exponent `ln(bias) / ln(0.5)` — recomputed whenever `bias` changes.
+    exponent: f32,
+    /// The Eq. (4) prefactor `(Ldmax · 0.01) / log10(world_max + 1)` — validated finite and
+    /// positive at construction (a too-small `world_max` makes the `log10` collapse to zero).
+    scale: f32,
 }
 
 impl Drago {
@@ -303,21 +336,31 @@ impl Drago {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `world_max` is not finite or is not strictly positive.
+    /// Returns [`Error::InvalidInput`] if `world_max` is not finite or is not strictly positive,
+    /// or if it is so small (≲ 6e-8) that `world_max + 1` rounds to `1.0` in f32, collapsing the
+    /// curve's `log10(world_max + 1)` normalizer to zero.
     pub fn new(world_max: f32) -> Result<Self> {
         if !world_max.is_finite() || world_max <= 0.0 {
             return Err(Error::InvalidInput(
                 "Drago world_max must be finite and greater than zero",
             ));
         }
+        let scale = (DRAGO_LDMAX_NITS * 0.01) / (world_max + 1.0).log10();
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(Error::InvalidInput(
+                "Drago world_max must be large enough that log10(world_max + 1) is positive in f32",
+            ));
+        }
         Ok(Self {
             world_max,
             bias: DEFAULT_DRAGO_BIAS,
+            exponent: Self::bias_exponent(DEFAULT_DRAGO_BIAS),
+            scale,
         })
     }
 
-    /// Set the bias, which steers contrast in dark vs. bright regions; the paper's useful range is
-    /// `(0, 1)`, default `0.85`.
+    /// Set the bias, which steers contrast in dark vs. bright regions; any value in the open
+    /// interval `(0, 1)` is accepted, the paper's useful range is `[0.5, 1.0]`, default `0.85`.
     ///
     /// # Errors
     ///
@@ -329,7 +372,16 @@ impl Drago {
                 "Drago bias must be finite and in the open interval (0, 1)",
             ));
         }
-        Ok(Self { bias, ..self })
+        Ok(Self {
+            bias,
+            exponent: Self::bias_exponent(bias),
+            ..self
+        })
+    }
+
+    /// The Eq. (3) bias exponent `ln(bias) / ln(0.5)` (see `references/tonemap/README.md`).
+    fn bias_exponent(bias: f32) -> f32 {
+        bias.ln() / 0.5_f32.ln()
     }
 
     /// The scene's maximum luminance.
@@ -346,13 +398,13 @@ impl Drago {
 }
 
 impl ToneCurve for Drago {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         // Drago et al. 2003 Eq. (4) with the Eq. (3) bias (see references/tonemap/README.md).
-        let exponent = self.bias.ln() / 0.5_f32.ln();
-        let ratio = (x / self.world_max).powf(exponent);
+        // `exponent` and `scale` are hoisted to construction — same expressions, identical values.
+        let ratio = (x / self.world_max).powf(self.exponent);
         let denom = (2.0 + ratio * 8.0).ln();
-        let scale = (DRAGO_LDMAX_NITS * 0.01) / (self.world_max + 1.0).log10();
-        scale * (x + 1.0).ln() / denom
+        self.scale * (x + 1.0).ln() / denom
     }
 }
 
@@ -456,6 +508,12 @@ mod tests {
         assert!(ReinhardExtended::new(-2.0).is_err());
         assert!(ReinhardExtended::new(f32::NAN).is_err());
         assert!(ReinhardExtended::new(f32::INFINITY).is_err());
+        // Degenerate whites whose square leaves the normal f32 range: underflow to zero (map
+        // would divide by 0), subnormal (map overflows at moderate x), and overflow to infinity
+        // (map(white) would no longer be 1).
+        assert!(ReinhardExtended::new(1e-25).is_err());
+        assert!(ReinhardExtended::new(1e-20).is_err());
+        assert!(ReinhardExtended::new(1e30).is_err());
     }
 
     #[test]
@@ -550,6 +608,11 @@ mod tests {
         let c2 = c.with_bias(0.5).expect("bias in (0,1)");
         assert_eq!(c2.bias(), 0.5);
         assert!(close_eps(c2.map(c2.world_max()), 1.0, 1e-5));
+        // Interior golden through with_bias: map(10) = ln(11)/ln(2.8)/log10(101) ≈ 1.161946 (see
+        // references/tonemap/README.md; > 1 is expected for bias < 0.7). The fixed points above
+        // are bias-exponent-insensitive (1^e = 1, and map(0) = 0 for any exponent), so only this
+        // value catches with_bias failing to recompute the hoisted exponent.
+        assert!(close_eps(c2.map(10.0), 1.161_946, 1e-4));
     }
 
     #[test]
@@ -590,6 +653,10 @@ mod tests {
         assert!(Drago::new(-1.0).is_err());
         assert!(Drago::new(f32::NAN).is_err());
         assert!(Drago::new(f32::INFINITY).is_err());
+        // world_max so small that (world_max + 1) rounds to 1.0 in f32, collapsing the log10
+        // normalizer to zero (map(0) would be inf · 0 = NaN); f32::MAX stays constructible.
+        assert!(Drago::new(1e-8).is_err());
+        assert!(Drago::new(f32::MAX).is_ok());
         let c = Drago::new(100.0).expect("valid world max");
         assert!(c.with_bias(0.0).is_err());
         assert!(c.with_bias(1.0).is_err());

@@ -72,6 +72,11 @@ exact `≈ 8×10³⁷`); the factored first term is bounded by 1, so the product
 when the exact value genuinely exceeds f32 range. Every golden above is bit-identical under either
 form.
 
+**Construction domain.** `L_white²` (the divisor) must be a normal f32, i.e. `L_white` roughly
+within `[1.1×10⁻¹⁹, 1.8×10¹⁹]`: a square that underflows to zero or subnormal makes the division
+blow up at moderate `L`, and one that overflows to `∞` silently breaks the `map(L_white) = 1`
+fixed point.
+
 > Note: Reinhard's key-value pre-scale (Eq 1–2, `L = (a/L̄_w)·L_w`, an exposure/auto-exposure step)
 > is **not** part of these operators — `gamut-tonemap` models it with the composable `Exposure`
 > operator (below) so each curve stays a pure `f32 → f32` map.
@@ -178,7 +183,16 @@ L_d = (L_dmax · 0.01) / log10(L_wmax + 1)  ·  log(L_w + 1) / log( 2 + ((L_w / 
   `log10(L_wmax + 1)` normalization is base-specific.
 
 Fixed points: `map(0) = 0` and `map(L_wmax) = 1`. Golden (`L_wmax = 100`, `b = 0.85`):
-`map(10) ≈ 0.630858`.
+`map(10) ≈ 0.630858`. Golden through `with_bias` (`L_wmax = 100`, `b = 0.5`, making the bias
+exponent exactly 1): `map(10) = ln(11) / ln(2 + (10/100)·8) / log10(101) = ln(11) / ln(2.8) /
+log10(101) ≈ 1.161946` (> 1 as expected for `b < 0.7`).
+
+**Construction domain.** `world_max` must be large enough that `world_max + 1 > 1` in f32
+(`world_max ≳ 6×10⁻⁸`); below that the `log10(L_wmax + 1)` normalizer collapses to zero and Eq (4)
+degenerates (`map(0)` would evaluate `inf · 0 = NaN`). The bias exponent and the normalizing
+prefactor are computed once at construction (identical expressions, identical f32 values — pure
+hoisting). Inputs are meaningful on the paper's domain `[0, L_wmax]`; outside it the curve stays
+finite and non-NaN but is no longer a faithful reading of the model.
 
 ---
 
