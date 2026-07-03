@@ -21,3 +21,4 @@ gamut-exif.workspace = true
 gamut-xmp.workspace = true
 gamut-icc.workspace = true
 gamut-iptc.workspace = true
+thiserror.workspace = true
