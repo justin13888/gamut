@@ -1,10 +1,12 @@
 //! Dev-only differential oracle around a vendored, statically-linked **exiv2** (with its bundled
 //! Adobe XMP Toolkit, XMPCore) and the **expat** it depends on.
 //!
-//! gamut-xmp must produce packets the authoritative reference engine reads, and must read what that
-//! engine writes. This crate wraps exiv2's in-memory XMP parser/serializer behind a small, safe
-//! API: [`validate`], [`roundtrip`], [`get_property`], and [`property_count`]. All `unsafe` FFI is
-//! confined to this crate; inputs are length-delimited byte slices, so no temporary files are used.
+//! gamut-xmp and gamut-exif must produce data the authoritative reference engine reads, and must
+//! read what that engine writes. This crate wraps exiv2's in-memory parsers/serializers behind a
+//! small, safe API: [`validate`], [`roundtrip`], [`get_property`], and [`property_count`] for XMP;
+//! [`exif_count`], [`exif_get`], and [`exif_roundtrip`] for EXIF (a bare TIFF stream, no
+//! `Exif\0\0` marker). All `unsafe` FFI is confined to this crate; inputs are length-delimited byte
+//! slices, so no temporary files are used.
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
@@ -25,6 +27,20 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> c_int;
     fn exiv2_xmp_count(xmp: *const c_char, len: usize, out_count: *mut usize) -> c_int;
+    fn exiv2_exif_count(data: *const c_char, len: usize, out_count: *mut usize) -> c_int;
+    fn exiv2_exif_get(
+        data: *const c_char,
+        len: usize,
+        key: *const c_char,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn exiv2_exif_roundtrip(
+        data: *const c_char,
+        len: usize,
+        out_buf: *mut *mut c_char,
+        out_len: *mut usize,
+    ) -> c_int;
     fn exiv2_free(p: *mut c_char);
 }
 
@@ -114,6 +130,70 @@ pub fn property_count(xmp: &[u8]) -> Result<usize, String> {
     } else {
         Err(format!("exiv2 could not count properties (code {code})"))
     }
+}
+
+/// Returns the number of EXIF tags exiv2 parses from a bare TIFF stream `data`.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 rejects the stream.
+pub fn exif_count(data: &[u8]) -> Result<usize, String> {
+    let mut count: usize = 0;
+    // SAFETY: `data` is a valid byte range; `count` is written only on success.
+    let code = unsafe { exiv2_exif_count(data.as_ptr().cast(), data.len(), &mut count) };
+    if code == 0 {
+        Ok(count)
+    } else {
+        Err(format!(
+            "exiv2 could not decode the EXIF stream (code {code})"
+        ))
+    }
+}
+
+/// Reads one EXIF tag's serialized value by exiv2 key (e.g. `"Exif.Image.Make"`).
+///
+/// # Errors
+///
+/// Returns a message if the key contains a NUL byte, exiv2 cannot decode the stream, or the tag is
+/// absent.
+pub fn exif_get(data: &[u8], key: &str) -> Result<String, String> {
+    let ckey = CString::new(key).map_err(|e| e.to_string())?;
+    let mut buf: *mut c_char = std::ptr::null_mut();
+    let mut len: usize = 0;
+    // SAFETY: `data` and `ckey` are valid; `buf`/`len` are written only on success.
+    let code = unsafe {
+        exiv2_exif_get(
+            data.as_ptr().cast(),
+            data.len(),
+            ckey.as_ptr(),
+            &mut buf,
+            &mut len,
+        )
+    };
+    if code != 0 || buf.is_null() {
+        return Err(format!("exiv2 could not read '{key}' (code {code})"));
+    }
+    // SAFETY: on success the shim returned an owned buffer of `len` bytes.
+    let bytes = unsafe { take_owned(buf, len) };
+    String::from_utf8(bytes).map_err(|e| e.to_string())
+}
+
+/// Decodes then re-encodes the EXIF stream via exiv2, returning its canonical bare TIFF bytes.
+///
+/// # Errors
+///
+/// Returns a message if exiv2 fails to decode or re-encode the stream.
+pub fn exif_roundtrip(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut buf: *mut c_char = std::ptr::null_mut();
+    let mut len: usize = 0;
+    // SAFETY: `data` is valid; `buf`/`len` are written only on success.
+    let code =
+        unsafe { exiv2_exif_roundtrip(data.as_ptr().cast(), data.len(), &mut buf, &mut len) };
+    if code != 0 || buf.is_null() {
+        return Err(format!("exiv2 EXIF round-trip failed (code {code})"));
+    }
+    // SAFETY: on success the shim returned an owned buffer of `len` bytes.
+    Ok(unsafe { take_owned(buf, len) })
 }
 
 #[cfg(test)]

@@ -659,8 +659,10 @@ dependencies = [
 name = "gamut-exif"
 version = "0.1.1"
 dependencies = [
+ "exiv2-oracle",
  "gamut-core",
  "gamut-ifd",
+ "thiserror",
 ]
 
 [[package]]
