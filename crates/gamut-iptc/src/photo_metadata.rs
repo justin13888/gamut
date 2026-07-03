@@ -7,9 +7,12 @@ use crate::schema::{IPTC_NAMESPACES, XmpField, XmpShape, ns};
 /// IPTC Photo Metadata (Core + Extension), the modern standard.
 ///
 /// These properties are defined *as* XMP (in the `dc:`/`photoshop:`/`Iptc4xmpCore:` namespaces), so
-/// the model is carried as a [`gamut_xmp`] property graph rather than a parallel type hierarchy.
-/// Typed accessors cover the well-known Core fields; arbitrary IPTC properties remain accessible
-/// through [`PhotoMetadata::xmp`].
+/// the model is carried as [`gamut_xmp`] properties rather than a parallel type hierarchy. Typed
+/// accessors cover every scalar/list Core field; the structured `Iptc4xmpCore:CreatorContactInfo`
+/// and the Extension structures remain accessible (and round-trip losslessly) through
+/// [`PhotoMetadata::xmp`], and every IIM-mapped field also through
+/// [`PhotoMetadata::get_field`]/[`set_field`](PhotoMetadata::set_field) with
+/// [`crate::schema::FIELD_MAP`].
 ///
 /// gamut-iptc operates on this in-memory graph; parsing/serializing the XMP *packet bytes* is
 /// [`gamut_xmp`]'s responsibility (see issue #34). Language-alternative fields (`dc:title`,
@@ -43,11 +46,11 @@ impl PhotoMetadata {
         }
     }
 
-    /// The IPTC properties as XMP properties, ready to merge into an [`XmpMeta`] for serialization
-    /// by [`gamut_xmp`].
+    /// The IPTC properties as an XMP graph, ready for serialization by [`gamut_xmp`] (or merging
+    /// into a larger graph). The symmetric inverse of [`PhotoMetadata::from_xmp`].
     #[must_use]
-    pub fn to_xmp_properties(&self) -> Vec<XmpProperty> {
-        self.xmp.properties.clone()
+    pub fn to_xmp(&self) -> XmpMeta {
+        self.xmp.clone()
     }
 
     pub(crate) fn simple(&self, ns: &str, name: &str) -> Option<&str> {
@@ -89,9 +92,14 @@ impl PhotoMetadata {
             .set(XmpProperty::new(ns, name, XmpValue::Array(array)));
     }
 
-    /// Reads a mapped field's value(s) as owned strings (empty if absent). Scalar shapes yield zero
-    /// or one element; used by [`crate::reconcile`].
-    pub(crate) fn get_field(&self, field: &XmpField) -> Vec<String> {
+    /// Reads a field's value(s) by its schema identity, as owned strings (empty if absent).
+    ///
+    /// Scalar shapes ([`XmpShape::SimpleText`], [`XmpShape::LangAlt`], [`XmpShape::DateTime`])
+    /// yield zero or one element; array shapes yield every item. Together with
+    /// [`crate::schema::FIELD_MAP`] this gives generic, table-driven access to every mapped field
+    /// without a typed accessor per field.
+    #[must_use]
+    pub fn get_field(&self, field: &XmpField) -> Vec<String> {
         match field.shape {
             XmpShape::SimpleText | XmpShape::DateTime => self
                 .simple(field.ns, field.name)
@@ -109,9 +117,12 @@ impl PhotoMetadata {
         }
     }
 
-    /// Writes a mapped field from owned strings; used by [`crate::reconcile`]. Scalar shapes take the
-    /// first value; a value list that is empty leaves the property unset.
-    pub(crate) fn set_field(&mut self, field: &XmpField, values: &[String]) {
+    /// Writes a field's value(s) by its schema identity, storing the RDF container kind the shape
+    /// prescribes.
+    ///
+    /// Scalar shapes take the first value; an empty value list leaves the property unset. The
+    /// counterpart of [`PhotoMetadata::get_field`].
+    pub fn set_field(&mut self, field: &XmpField, values: &[&str]) {
         match field.shape {
             XmpShape::SimpleText | XmpShape::DateTime => {
                 if let Some(v) = values.first() {
@@ -124,8 +135,7 @@ impl PhotoMetadata {
                 }
             }
             XmpShape::Bag | XmpShape::Seq => {
-                let refs: Vec<&str> = values.iter().map(String::as_str).collect();
-                self.set_list(field.ns, field.name, field.shape == XmpShape::Seq, &refs);
+                self.set_list(field.ns, field.name, field.shape == XmpShape::Seq, values);
             }
         }
     }
@@ -232,6 +242,160 @@ impl PhotoMetadata {
     pub fn set_usage_terms(&mut self, value: &str) {
         self.set_lang_alt(ns::XMP_RIGHTS, "UsageTerms", value);
     }
+
+    /// The intellectual genre (`Iptc4xmpCore:IntellectualGenre`).
+    #[must_use]
+    pub fn intellectual_genre(&self) -> Option<&str> {
+        self.simple(ns::IPTC_CORE, "IntellectualGenre")
+    }
+    /// Sets the intellectual genre (`Iptc4xmpCore:IntellectualGenre`).
+    pub fn set_intellectual_genre(&mut self, value: &str) {
+        self.set_simple(ns::IPTC_CORE, "IntellectualGenre", value);
+    }
+
+    /// The special instructions (`photoshop:Instructions`).
+    #[must_use]
+    pub fn instructions(&self) -> Option<&str> {
+        self.simple(ns::PHOTOSHOP, "Instructions")
+    }
+    /// Sets the special instructions (`photoshop:Instructions`).
+    pub fn set_instructions(&mut self, value: &str) {
+        self.set_simple(ns::PHOTOSHOP, "Instructions", value);
+    }
+
+    /// The creation date-time as an ISO-8601 string (`photoshop:DateCreated`).
+    #[must_use]
+    pub fn date_created(&self) -> Option<&str> {
+        self.simple(ns::PHOTOSHOP, "DateCreated")
+    }
+    /// Sets the creation date-time (`photoshop:DateCreated`).
+    ///
+    /// The value is stored verbatim — XMP legally carries ISO-8601 forms IIM cannot express (e.g.
+    /// fractional seconds). Validation happens at IIM projection:
+    /// [`IptcWriter::write_iim`](crate::writer::IptcWriter::write_iim) rejects a value it cannot
+    /// split into the `2:55`/`2:60` datasets.
+    pub fn set_date_created(&mut self, iso: &str) {
+        self.set_simple(ns::PHOTOSHOP, "DateCreated", iso);
+    }
+
+    /// The creator's job title (`photoshop:AuthorsPosition`).
+    #[must_use]
+    pub fn authors_position(&self) -> Option<&str> {
+        self.simple(ns::PHOTOSHOP, "AuthorsPosition")
+    }
+    /// Sets the creator's job title (`photoshop:AuthorsPosition`).
+    pub fn set_authors_position(&mut self, value: &str) {
+        self.set_simple(ns::PHOTOSHOP, "AuthorsPosition", value);
+    }
+
+    /// The sublocation within a city (`Iptc4xmpCore:Location`).
+    ///
+    /// Named `sublocation` after the IIM dataset (2:92 Sub-location) to avoid confusion with the
+    /// IPTC Extension's structured location properties.
+    #[must_use]
+    pub fn sublocation(&self) -> Option<&str> {
+        self.simple(ns::IPTC_CORE, "Location")
+    }
+    /// Sets the sublocation within a city (`Iptc4xmpCore:Location`).
+    pub fn set_sublocation(&mut self, value: &str) {
+        self.set_simple(ns::IPTC_CORE, "Location", value);
+    }
+
+    /// The province or state (`photoshop:State`).
+    #[must_use]
+    pub fn state(&self) -> Option<&str> {
+        self.simple(ns::PHOTOSHOP, "State")
+    }
+    /// Sets the province or state (`photoshop:State`).
+    pub fn set_state(&mut self, value: &str) {
+        self.set_simple(ns::PHOTOSHOP, "State", value);
+    }
+
+    /// The job identifier / original transmission reference (`photoshop:TransmissionReference`).
+    #[must_use]
+    pub fn transmission_reference(&self) -> Option<&str> {
+        self.simple(ns::PHOTOSHOP, "TransmissionReference")
+    }
+    /// Sets the job identifier / original transmission reference
+    /// (`photoshop:TransmissionReference`).
+    pub fn set_transmission_reference(&mut self, value: &str) {
+        self.set_simple(ns::PHOTOSHOP, "TransmissionReference", value);
+    }
+
+    /// The credit line (`photoshop:Credit`).
+    #[must_use]
+    pub fn credit(&self) -> Option<&str> {
+        self.simple(ns::PHOTOSHOP, "Credit")
+    }
+    /// Sets the credit line (`photoshop:Credit`).
+    pub fn set_credit(&mut self, value: &str) {
+        self.set_simple(ns::PHOTOSHOP, "Credit", value);
+    }
+
+    /// The source of the image (`photoshop:Source`).
+    #[must_use]
+    pub fn source(&self) -> Option<&str> {
+        self.simple(ns::PHOTOSHOP, "Source")
+    }
+    /// Sets the source of the image (`photoshop:Source`).
+    pub fn set_source(&mut self, value: &str) {
+        self.set_simple(ns::PHOTOSHOP, "Source", value);
+    }
+
+    /// The caption writer/editor (`photoshop:CaptionWriter`).
+    #[must_use]
+    pub fn caption_writer(&self) -> Option<&str> {
+        self.simple(ns::PHOTOSHOP, "CaptionWriter")
+    }
+    /// Sets the caption writer/editor (`photoshop:CaptionWriter`).
+    pub fn set_caption_writer(&mut self, value: &str) {
+        self.set_simple(ns::PHOTOSHOP, "CaptionWriter", value);
+    }
+
+    /// The subject codes from the IPTC Subject NewsCodes vocabulary (`Iptc4xmpCore:SubjectCode`).
+    #[must_use]
+    pub fn subject_codes(&self) -> Vec<&str> {
+        self.list(ns::IPTC_CORE, "SubjectCode")
+    }
+    /// Sets the subject codes (`Iptc4xmpCore:SubjectCode`, an unordered bag).
+    pub fn set_subject_codes(&mut self, codes: &[&str]) {
+        self.set_list(ns::IPTC_CORE, "SubjectCode", false, codes);
+    }
+
+    /// The scene codes from the IPTC Scene NewsCodes vocabulary (`Iptc4xmpCore:Scene`). This is an
+    /// XMP-only field with no IIM equivalent.
+    #[must_use]
+    pub fn scene_codes(&self) -> Vec<&str> {
+        self.list(ns::IPTC_CORE, "Scene")
+    }
+    /// Sets the scene codes (`Iptc4xmpCore:Scene`, an unordered bag).
+    pub fn set_scene_codes(&mut self, codes: &[&str]) {
+        self.set_list(ns::IPTC_CORE, "Scene", false, codes);
+    }
+
+    /// The accessibility alt text, `x-default` alternative (`Iptc4xmpCore:AltTextAccessibility`).
+    /// This is an XMP-only field with no IIM equivalent.
+    #[must_use]
+    pub fn alt_text_accessibility(&self) -> Option<&str> {
+        self.lang_alt(ns::IPTC_CORE, "AltTextAccessibility")
+    }
+    /// Sets the accessibility alt text `x-default` alternative
+    /// (`Iptc4xmpCore:AltTextAccessibility`).
+    pub fn set_alt_text_accessibility(&mut self, value: &str) {
+        self.set_lang_alt(ns::IPTC_CORE, "AltTextAccessibility", value);
+    }
+
+    /// The extended accessibility description, `x-default` alternative
+    /// (`Iptc4xmpCore:ExtDescrAccessibility`). This is an XMP-only field with no IIM equivalent.
+    #[must_use]
+    pub fn extended_description_accessibility(&self) -> Option<&str> {
+        self.lang_alt(ns::IPTC_CORE, "ExtDescrAccessibility")
+    }
+    /// Sets the extended accessibility description `x-default` alternative
+    /// (`Iptc4xmpCore:ExtDescrAccessibility`).
+    pub fn set_extended_description_accessibility(&mut self, value: &str) {
+        self.set_lang_alt(ns::IPTC_CORE, "ExtDescrAccessibility", value);
+    }
 }
 
 #[cfg(test)]
@@ -252,6 +416,20 @@ mod tests {
         pm.set_usage_terms("CC-BY");
         pm.set_keywords(&["sky", "sea"]);
         pm.set_creators(&["Ansel"]);
+        pm.set_intellectual_genre("Documentary");
+        pm.set_instructions("Embargoed until Friday");
+        pm.set_date_created("2024-06-15T12:00:00Z");
+        pm.set_authors_position("Staff Photographer");
+        pm.set_sublocation("Rive Gauche");
+        pm.set_state("Île-de-France");
+        pm.set_transmission_reference("JOB-42");
+        pm.set_credit("Agence gamut");
+        pm.set_source("gamut wire");
+        pm.set_caption_writer("Ed");
+        pm.set_subject_codes(&["15054000"]);
+        pm.set_scene_codes(&["011900"]);
+        pm.set_alt_text_accessibility("A sunset over the Seine");
+        pm.set_extended_description_accessibility("A long red sunset over the Seine, from a bank");
 
         assert_eq!(pm.headline(), Some("Breaking"));
         assert_eq!(pm.city(), Some("Paris"));
@@ -263,14 +441,48 @@ mod tests {
         assert_eq!(pm.usage_terms(), Some("CC-BY"));
         assert_eq!(pm.keywords(), vec!["sky", "sea"]);
         assert_eq!(pm.creators(), vec!["Ansel"]);
+        assert_eq!(pm.intellectual_genre(), Some("Documentary"));
+        assert_eq!(pm.instructions(), Some("Embargoed until Friday"));
+        assert_eq!(pm.date_created(), Some("2024-06-15T12:00:00Z"));
+        assert_eq!(pm.authors_position(), Some("Staff Photographer"));
+        assert_eq!(pm.sublocation(), Some("Rive Gauche"));
+        assert_eq!(pm.state(), Some("Île-de-France"));
+        assert_eq!(pm.transmission_reference(), Some("JOB-42"));
+        assert_eq!(pm.credit(), Some("Agence gamut"));
+        assert_eq!(pm.source(), Some("gamut wire"));
+        assert_eq!(pm.caption_writer(), Some("Ed"));
+        assert_eq!(pm.subject_codes(), vec!["15054000"]);
+        assert_eq!(pm.scene_codes(), vec!["011900"]);
+        assert_eq!(pm.alt_text_accessibility(), Some("A sunset over the Seine"));
+        assert_eq!(
+            pm.extended_description_accessibility(),
+            Some("A long red sunset over the Seine, from a bank")
+        );
 
-        // Each accessor targets a distinct property — ten fields, ten properties.
-        assert_eq!(pm.xmp.properties.len(), 10);
-        // Spot-check the namespaces/names so an accessor can't silently target the wrong property.
+        // Each accessor targets a distinct property — 24 fields, 24 properties.
+        assert_eq!(pm.xmp.properties.len(), 24);
+        // Spot-check namespaces/names so an accessor can't silently target the wrong property.
         assert!(pm.xmp.get(ns::PHOTOSHOP, "Headline").is_some());
+        assert!(pm.xmp.get(ns::PHOTOSHOP, "DateCreated").is_some());
         assert!(pm.xmp.get(ns::IPTC_CORE, "CountryCode").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "IntellectualGenre").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "Location").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "SubjectCode").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "Scene").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "AltTextAccessibility").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "ExtDescrAccessibility").is_some());
         assert!(pm.xmp.get(ns::DC, "rights").is_some());
         assert!(pm.xmp.get(ns::XMP_RIGHTS, "UsageTerms").is_some());
+
+        // Every IIM-mapped field is settable through its typed accessor: the 20-row FIELD_MAP
+        // must see a value for each of its rows.
+        for row in crate::schema::FIELD_MAP {
+            assert!(
+                !pm.get_field(&row.xmp).is_empty(),
+                "no typed accessor populated {}",
+                row.xmp.name
+            );
+        }
     }
 
     #[test]
@@ -336,23 +548,18 @@ mod tests {
         let pm = PhotoMetadata::from_xmp(&meta);
         assert_eq!(pm.xmp.properties.len(), 1);
         assert_eq!(pm.city(), Some("Berlin"));
-        // Round-trips back out as XMP properties.
-        assert_eq!(pm.to_xmp_properties(), pm.xmp.properties);
+        // Round-trips back out as an XMP graph.
+        assert_eq!(pm.to_xmp().properties, pm.xmp.properties);
+        assert_eq!(PhotoMetadata::from_xmp(&pm.to_xmp()), pm);
     }
 
     #[test]
     fn get_set_field_round_trip_by_shape() {
         let f = |ns: &'static str, name: &'static str, shape| XmpField { ns, name, shape };
         let mut pm = PhotoMetadata::new();
-        pm.set_field(
-            &f(ns::PHOTOSHOP, "Headline", XmpShape::SimpleText),
-            &["H".to_owned()],
-        );
-        pm.set_field(&f(ns::DC, "rights", XmpShape::LangAlt), &["(c)".to_owned()]);
-        pm.set_field(
-            &f(ns::DC, "subject", XmpShape::Bag),
-            &["a".to_owned(), "b".to_owned()],
-        );
+        pm.set_field(&f(ns::PHOTOSHOP, "Headline", XmpShape::SimpleText), &["H"]);
+        pm.set_field(&f(ns::DC, "rights", XmpShape::LangAlt), &["(c)"]);
+        pm.set_field(&f(ns::DC, "subject", XmpShape::Bag), &["a", "b"]);
         assert_eq!(
             pm.get_field(&f(ns::PHOTOSHOP, "Headline", XmpShape::SimpleText)),
             vec!["H"]
@@ -378,7 +585,7 @@ mod tests {
             pm.xmp.get(ns::DC, "subject").unwrap().value,
             XmpValue::Array(XmpArray::Bag(_))
         ));
-        pm.set_field(&f(ns::DC, "creator", XmpShape::Seq), &["x".to_owned()]);
+        pm.set_field(&f(ns::DC, "creator", XmpShape::Seq), &["x"]);
         assert!(matches!(
             pm.xmp.get(ns::DC, "creator").unwrap().value,
             XmpValue::Array(XmpArray::Seq(_))

@@ -1,46 +1,87 @@
-//! The IPTC writer — the convenient entry point for encoding IPTC metadata.
+//! The IPTC writer — the write-side entry point: project the unified view to the legacy carrier.
 
 use gamut_core::Result;
-use gamut_xmp::XmpProperty;
 
+use crate::charset::IimCharset;
 use crate::iim::IimBlock;
 use crate::irb::PhotoshopIrb;
 use crate::photo_metadata::PhotoMetadata;
+use crate::reconcile;
 
 /// Writer for IPTC metadata.
 ///
-/// - [`IptcWriter::write_irb`] serializes IIM datasets into a Photoshop `8BIM` resource stream.
-/// - [`IptcWriter::write_xmp_properties`] hands the IPTC properties back as XMP properties to merge
-///   into a packet (serialized by [`gamut_xmp`], issue #34).
+/// Projects a [`PhotoMetadata`] view to the legacy IIM carrier, encoding text with the writer's
+/// [`IimCharset`]:
 ///
-/// To project an IPTC view to the legacy IIM carrier, use
-/// [`IimXmpReconciler::to_iim`](crate::reconcile::IimXmpReconciler::to_iim) and then `write_irb`.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct IptcWriter;
+/// - [`IptcWriter::write_iim`] produces the IIM datasets (with the mandatory `2:00` Record Version
+///   and, for UTF-8, the `1:90` coded-character-set escape).
+/// - [`IptcWriter::write_irb`] additionally wraps them in a Photoshop image-resource (`8BIM`)
+///   stream holding a single `0x0404` resource — the inverse of
+///   [`IptcReader::read_irb`](crate::reader::IptcReader::read_irb).
+///
+/// The modern carrier needs no writer: [`PhotoMetadata::to_xmp`] hands the properties back as an
+/// XMP graph for [`gamut_xmp`] to serialize (issue #34). To serialize a hand-built [`IimBlock`]
+/// instead of a view, use the primitives directly:
+/// `PhotoshopIrb::with_iptc(block.encode()?).encode()`.
+///
+/// The default charset is UTF-8: every value is encodable, at the cost of the `1:90` escape.
+/// Choose [`IimCharset::Latin1`] for maximum legacy-consumer compatibility; the writer then
+/// rejects values outside Latin-1 rather than mis-encode them.
+#[derive(Debug, Clone, Copy)]
+pub struct IptcWriter {
+    charset: IimCharset,
+}
+
+impl Default for IptcWriter {
+    fn default() -> Self {
+        Self {
+            charset: IimCharset::Utf8,
+        }
+    }
+}
 
 impl IptcWriter {
-    /// Creates a new writer.
+    /// Creates a writer with the default charset ([`IimCharset::Utf8`]).
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
-    /// Serializes IIM datasets into a Photoshop image-resource (`8BIM`) stream holding a single
-    /// `0x0404` resource.
+    /// Sets the charset used to encode IIM text values and returns the writer.
+    #[must_use]
+    pub fn charset(mut self, charset: IimCharset) -> Self {
+        self.charset = charset;
+        self
+    }
+
+    /// Projects the view's mapped fields to an IIM block.
     ///
-    /// The output round-trips through [`IptcReader::read_irb`](crate::reader::IptcReader::read_irb).
+    /// Emits the mandatory `2:00` Record Version and, for UTF-8, the `1:90` coded-character-set
+    /// escape, when any mapped field is present; an empty view yields an empty block.
     ///
     /// # Errors
     ///
-    /// Returns an error if a dataset value is too large to serialize (see [`IimBlock::encode`]).
-    pub fn write_irb(&self, block: &IimBlock) -> Result<Vec<u8>> {
-        PhotoshopIrb::with_iptc(block.encode()?).encode()
+    /// Returns [`gamut_core::Error::InvalidInput`] if a value cannot be encoded in the writer's
+    /// charset or exceeds the dataset's maximum octet length — gamut never silently truncates.
+    pub fn write_iim(&self, pm: &PhotoMetadata) -> Result<IimBlock> {
+        reconcile::project(pm, self.charset)
     }
 
-    /// Returns the IPTC Photo Metadata as XMP properties, ready to merge into an XMP packet.
-    #[must_use]
-    pub fn write_xmp_properties(&self, pm: &PhotoMetadata) -> Vec<XmpProperty> {
-        pm.to_xmp_properties()
+    /// Projects the view to a Photoshop image-resource (`8BIM`) stream holding a single `0x0404`
+    /// resource.
+    ///
+    /// Returns `Ok(None)` when no mapped field is present — there is nothing to embed, and an
+    /// empty `0x0404` resource would be noise.
+    ///
+    /// # Errors
+    ///
+    /// As [`IptcWriter::write_iim`].
+    pub fn write_irb(&self, pm: &PhotoMetadata) -> Result<Option<Vec<u8>>> {
+        let block = self.write_iim(pm)?;
+        if block.datasets.is_empty() {
+            return Ok(None);
+        }
+        PhotoshopIrb::with_iptc(block.encode()?).encode().map(Some)
     }
 }
 
@@ -50,50 +91,105 @@ mod tests {
     use crate::iim::IimDataSet;
     use crate::reader::IptcReader;
 
-    #[test]
-    fn write_irb_roundtrips_through_read_irb() {
-        let block = IimBlock {
-            datasets: vec![
-                IimDataSet {
-                    record: 2,
-                    dataset: 0,
-                    data: vec![0x00, 0x04],
-                },
-                IimDataSet {
-                    record: 2,
-                    dataset: 25,
-                    data: b"sky".to_vec(),
-                },
-                IimDataSet {
-                    record: 2,
-                    dataset: 25,
-                    data: b"sea".to_vec(),
-                },
-            ],
-        };
-        let bytes = IptcWriter::new().write_irb(&block).unwrap();
-        let read = IptcReader::new().read_irb(&bytes).unwrap();
-        assert_eq!(read, Some(block));
+    fn ds(record: u8, dataset: u8, data: &[u8]) -> IimDataSet {
+        IimDataSet {
+            record,
+            dataset,
+            data: data.to_vec(),
+        }
     }
 
     #[test]
-    fn read_irb_without_iptc_resource_is_none() {
-        let irb = PhotoshopIrb {
-            blocks: vec![crate::irb::IrbBlock {
-                resource_id: 0x03ED,
-                name: String::new(),
-                data: vec![1, 2, 3, 4],
-            }],
-        };
-        let bytes = irb.encode().unwrap();
-        assert_eq!(IptcReader::new().read_irb(&bytes).unwrap(), None);
-    }
-
-    #[test]
-    fn write_xmp_properties_returns_the_properties() {
+    fn write_iim_emits_version_and_fields() {
         let mut pm = PhotoMetadata::new();
-        pm.set_headline("Breaking news");
-        let props = IptcWriter::new().write_xmp_properties(&pm);
-        assert_eq!(props, pm.xmp.properties);
+        pm.set_city("Paris");
+        pm.set_keywords(&["sky", "sea"]);
+        let block = IptcWriter::new()
+            .charset(IimCharset::Latin1)
+            .write_iim(&pm)
+            .unwrap();
+        assert!(block.datasets.contains(&ds(2, 0, &[0, 4]))); // Record Version
+        assert!(block.datasets.contains(&ds(2, 90, b"Paris")));
+        assert_eq!(
+            block.datasets.iter().filter(|d| d.dataset == 25).count(),
+            2 // one dataset per keyword
+        );
+    }
+
+    #[test]
+    fn write_iim_utf8_escape_only_when_needed() {
+        let mut pm = PhotoMetadata::new();
+        pm.set_city("Köln");
+        // The default charset is UTF-8, so the 1:90 escape leads the block.
+        let utf8 = IptcWriter::new().write_iim(&pm).unwrap();
+        assert_eq!(utf8.datasets[0], ds(1, 90, &IimCharset::UTF8_ESCAPE));
+        // An empty view emits nothing at all — not even the version/escape.
+        let empty = IptcWriter::new().write_iim(&PhotoMetadata::new()).unwrap();
+        assert!(empty.datasets.is_empty());
+    }
+
+    #[test]
+    fn write_iim_rejects_overlong_and_unencodable_values() {
+        let mut too_long = PhotoMetadata::new();
+        too_long.set_city(&"x".repeat(33)); // City max is 32 octets
+        assert!(
+            IptcWriter::new()
+                .charset(IimCharset::Latin1)
+                .write_iim(&too_long)
+                .is_err()
+        );
+
+        let mut non_latin1 = PhotoMetadata::new();
+        non_latin1.set_headline("€"); // U+20AC is not Latin-1
+        assert!(
+            IptcWriter::new()
+                .charset(IimCharset::Latin1)
+                .write_iim(&non_latin1)
+                .is_err()
+        );
+        // ...but the default UTF-8 charset encodes it fine.
+        assert!(IptcWriter::new().write_iim(&non_latin1).is_ok());
+    }
+
+    #[test]
+    fn write_irb_roundtrips_through_the_reader() {
+        let mut pm = PhotoMetadata::new();
+        pm.set_city("Lyon");
+        pm.set_keywords(&["sky", "sea"]);
+        let bytes = IptcWriter::new().write_irb(&pm).unwrap().unwrap();
+        let block = IptcReader::new().read_irb(&bytes).unwrap().unwrap();
+        let read = IptcReader::new().read(Some(&block), None).unwrap();
+        assert_eq!(read.city(), Some("Lyon"));
+        assert_eq!(read.keywords(), vec!["sky", "sea"]);
+    }
+
+    #[test]
+    fn write_iim_rejects_unparseable_date_created() {
+        // Strict write: an un-projectable DateCreated is an error, never a silent drop.
+        let mut pm = PhotoMetadata::new();
+        pm.set_simple(crate::schema::ns::PHOTOSHOP, "DateCreated", "yesterday");
+        assert!(IptcWriter::new().write_iim(&pm).is_err());
+
+        // A missing-seconds time is not IIM-expressible either (2:60 is HHMMSS±HHMM).
+        pm.set_simple(
+            crate::schema::ns::PHOTOSHOP,
+            "DateCreated",
+            "2024-06-15T12:00",
+        );
+        assert!(IptcWriter::new().write_iim(&pm).is_err());
+
+        // ...while a plain date, a partial date, and a full date-time all project fine.
+        for ok in ["2024-06-15", "2024", "2024-06-15T12:00:00Z"] {
+            pm.set_simple(crate::schema::ns::PHOTOSHOP, "DateCreated", ok);
+            assert!(IptcWriter::new().write_iim(&pm).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn write_irb_empty_view_is_none() {
+        assert_eq!(
+            IptcWriter::new().write_irb(&PhotoMetadata::new()).unwrap(),
+            None
+        );
     }
 }

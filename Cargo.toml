@@ -66,6 +66,10 @@ libwebp-sys2 = "0.2"
 # `[[bench]]` target, never by shipped code. Lightweight (few transitive deps) and reports
 # throughput counters; `mise run bench` runs the suite.
 divan = "0.1"
+# JSON reader for conformance drift-guard tests only: gamut-iptc pins its hand-transcribed
+# IIM↔XMP tables to the vendored IPTC machine-readable tech reference at test time. Dev-only,
+# untyped `Value` API (no serde derives) — never a dependency of shipped code.
+serde_json = "1"
 
 # Internal crates. `path` is used for local builds so cross-crate edits resolve without a
 # crates.io round-trip; `version` is the requirement recorded in the published manifest.
@@ -92,7 +96,7 @@ gamut-ifd = { path = "crates/gamut-ifd", version = "0.1.1" }
 gamut-icc = { path = "crates/gamut-icc", version = "1.0.0" }
 gamut-xmp = { path = "crates/gamut-xmp", version = "1.0.0" }
 gamut-exif = { path = "crates/gamut-exif", version = "0.1.1" }
-gamut-iptc = { path = "crates/gamut-iptc", version = "0.1.1" }
+gamut-iptc = { path = "crates/gamut-iptc", version = "1.0.0" }
 gamut-metadata = { path = "crates/gamut-metadata", version = "0.1.1" }
 # Self-contained TIFF 6.0 codec (issue #107).
 gamut-tiff = { path = "crates/gamut-tiff", version = "0.2.0" }
