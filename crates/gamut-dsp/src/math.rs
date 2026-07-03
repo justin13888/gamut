@@ -7,6 +7,10 @@
 //! shared by the AV1 and VP8 forward quantizers.
 
 /// `Round2(x, n)` (AV1 §4.7): rounding right shift, `x` for `n == 0` (arithmetic `>>`, ties up).
+///
+/// Total over its documented domain: `n` must be `< 64` and `x` must have headroom for the
+/// `1 << (n - 1)` rounding bias; violations are arithmetic overflow (caught by Rust's debug
+/// checks), not a checked precondition — this is the hottest primitive in the crate.
 #[must_use]
 pub fn round2(x: i64, n: u32) -> i64 {
     if n == 0 { x } else { (x + (1 << (n - 1))) >> n }
@@ -15,9 +19,15 @@ pub fn round2(x: i64, n: u32) -> i64 {
 /// `Round2Signed(x, n)` (AV1 §4.7): symmetric rounding right shift — rounds the magnitude and
 /// keeps the sign (ties away from zero), unlike [`round2`] which ties toward `+∞`.
 ///
-/// Requires `n >= 1` (the rounding bias is `1 << (n - 1)`).
+/// `x` must have headroom for the `1 << (n - 1)` rounding bias (its magnitude, plus the bias,
+/// must fit `i32`); violations are arithmetic overflow, caught by Rust's debug checks.
+///
+/// # Panics
+/// Panics if `n == 0` (the rounding bias is `1 << (n - 1)`; the spec only invokes
+/// `Round2Signed` with `n >= 1`).
 #[must_use]
 pub fn round2_signed(x: i32, n: u32) -> i32 {
+    assert!(n >= 1, "round2_signed: n must be >= 1");
     if x >= 0 {
         (x + (1 << (n - 1))) >> n
     } else {
@@ -26,15 +36,26 @@ pub fn round2_signed(x: i32, n: u32) -> i32 {
 }
 
 /// `Clip3(low, high, x)` (AV1 §4.7): clamp `x` to the inclusive range `[low, high]`.
+///
+/// # Panics
+/// Panics if `low > high` (via [`i64::clamp`]).
 #[must_use]
 pub fn clip3(low: i64, high: i64, x: i64) -> i64 {
     x.clamp(low, high)
 }
 
 /// Rounds `num / den` to the nearest integer, ties away from zero — the encoder forward-quantize
-/// step shared by AV1 and VP8 (`level ≈ coeff / q`). Requires `den > 0`.
+/// step shared by AV1 and VP8 (`level ≈ coeff / q`).
+///
+/// `num` must have headroom for the `den / 2` rounding bias (its magnitude, plus the bias, must
+/// fit `i32`); violations are arithmetic overflow, caught by Rust's debug checks.
+///
+/// # Panics
+/// Panics if `den <= 0` (a quantizer step is strictly positive; a negative `den` would silently
+/// flip the rounding direction).
 #[must_use]
 pub fn round_div_nearest(num: i32, den: i32) -> i32 {
+    assert!(den > 0, "round_div_nearest: den must be > 0");
     let half = den / 2;
     if num >= 0 {
         (num + half) / den
