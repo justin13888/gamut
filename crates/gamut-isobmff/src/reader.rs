@@ -347,9 +347,7 @@ fn parse_iloc(body: &[u8]) -> Result<Vec<IlocEntry>> {
         let extent_count = r.u16()?;
         let mut extents = Vec::new();
         for _ in 0..extent_count {
-            if index_size > 0 {
-                let _extent_index = read_sized(&mut r, index_size)?;
-            }
+            let _extent_index = read_sized(&mut r, index_size)?; // no-op when index_size == 0
             let offset = read_sized(&mut r, offset_size)?;
             let length = read_sized(&mut r, length_size)?;
             extents.push((offset, length));
