@@ -2,7 +2,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::bytes::ByteReader;
+use crate::bytes::{ByteReader, push_ascii_32};
 
 /// The 32-byte fixed field a colorant name occupies (NUL-terminated 7-bit ASCII, §10.5 Table 34).
 const COLORANT_NAME_LEN: usize = 32;
@@ -78,21 +78,19 @@ fn decode_colorant_name(field: &[u8]) -> Result<String> {
     Ok(used.iter().map(|&b| b as char).collect())
 }
 
-/// Serializes a `colorantTableType` element (the inverse of [`decode_colorant_table`]).
-pub(crate) fn encode_colorant_table(clrt: &ColorantTable, out: &mut Vec<u8>) {
+/// Serializes a `colorantTableType` element (the inverse of [`decode_colorant_table`]); colorant
+/// names are validated against their 32-byte ASCII fields rather than truncated.
+pub(crate) fn encode_colorant_table(clrt: &ColorantTable, out: &mut Vec<u8>) -> Result<()> {
     out.extend_from_slice(b"clrt");
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&(clrt.colorants.len() as u32).to_be_bytes());
     for colorant in &clrt.colorants {
-        let mut field = [0u8; COLORANT_NAME_LEN];
-        let name = colorant.name.as_bytes();
-        let n = name.len().min(COLORANT_NAME_LEN);
-        field[..n].copy_from_slice(&name[..n]);
-        out.extend_from_slice(&field);
+        push_ascii_32(out, &colorant.name)?;
         for component in colorant.pcs {
             out.extend_from_slice(&component.to_be_bytes());
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -155,8 +153,53 @@ mod tests {
             ],
         };
         let mut out = Vec::new();
-        encode_colorant_table(&clrt, &mut out);
+        encode_colorant_table(&clrt, &mut out).unwrap();
         assert_eq!(decode_colorant_table(&out).unwrap(), clrt);
+    }
+
+    #[test]
+    fn colorant_table_decode_bounds_are_exact() {
+        // Trailing bytes after the colorant records are tolerated (the guard rejects only a table
+        // that *exceeds* the element).
+        let mut payload = 1u32.to_be_bytes().to_vec();
+        let mut name = [0u8; 32];
+        name[..4].copy_from_slice(b"Cyan");
+        payload.extend_from_slice(&name);
+        for v in [10u16, 20, 30] {
+            payload.extend_from_slice(&v.to_be_bytes());
+        }
+        payload.extend_from_slice(&[0xAB; 8]); // trailing slack
+        assert!(decode_colorant_table(&element(b"clrt", &payload)).is_ok());
+
+        // A truncated element is caught by the size guard itself — each colorant needs the full
+        // 38 bytes (32-byte name + three u16), so the guard's message is reported, not a later
+        // read error.
+        let mut payload = 1u32.to_be_bytes().to_vec();
+        payload.extend_from_slice(&[0u8; 30]); // 30 < 38, but more than a name-only miscount
+        match decode_colorant_table(&element(b"clrt", &payload)) {
+            Err(Error::InvalidInput(msg)) => {
+                assert_eq!(msg, "icc: colorant table exceeds element");
+            }
+            other => panic!("expected the size-guard error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encode_validates_colorant_names() {
+        let with_name = |name: &str| ColorantTable {
+            colorants: vec![Colorant {
+                name: name.to_owned(),
+                pcs: [0, 0, 0],
+            }],
+        };
+        let mut out = Vec::new();
+        assert!(encode_colorant_table(&with_name(&"x".repeat(33)), &mut out).is_err());
+        assert!(encode_colorant_table(&with_name("Grün"), &mut out).is_err());
+        // A 32-byte name exactly fills the field and round-trips unchanged.
+        let max = with_name(&"x".repeat(32));
+        let mut out = Vec::new();
+        encode_colorant_table(&max, &mut out).unwrap();
+        assert_eq!(decode_colorant_table(&out).unwrap(), max);
     }
 
     #[test]

@@ -145,6 +145,12 @@ exclude_re = [
     # All three `| -> ^` mutations are therefore equivalent. (The `<<`, `>`, and `==`/`>=` mutations
     # in this function are observable and killed by the extended-descriptor tests.)
     'replace \| with \^ in IimBlock::parse',
+    # gamut-icc ProfileHeader::{is_embedded,is_transparency} test bit 0 of their field via
+    # `flags & (1 << 0)`: a zero-distance shift is the identity in both directions
+    # (`1 << 0` == `1 >> 0` == 1), so the mutation is provably equivalent. (The bit-1/2/3
+    # accessors' shifts ARE killed by `decodes_flag_and_attribute_bits`.)
+    'replace << with >> in ProfileHeader::is_embedded',
+    'replace << with >> in ProfileHeader::is_transparency',
     # gamut-avif `AvifEncoder::lossless`: a named, intent-revealing alias for the default encoder
     # (the default mode is already lossless), so its body *is* `Self::default()` and the
     # `-> Default::default()` replacement is byte-identical — provably equivalent, unkillable. It

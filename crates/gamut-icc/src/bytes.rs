@@ -159,6 +159,28 @@ pub(crate) fn push_xyz_number(out: &mut Vec<u8>, value: XyzNumber) {
     push_s15fixed16(out, value.z);
 }
 
+/// Appends a 32-byte NUL-padded 7-bit-ASCII name field (the colorant/named-colour name encoding,
+/// §10.5/§10.17), validating instead of truncating.
+///
+/// Rejects non-ASCII text, interior NULs (the decoder stops at the first NUL, so they cannot
+/// round-trip), and names longer than the field. A name of exactly 32 bytes fills the field with no
+/// terminator — non-conformant, but what the lenient decoder accepts, so such profiles round-trip.
+pub(crate) fn push_ascii_32(out: &mut Vec<u8>, text: &str) -> Result<()> {
+    let bytes = text.as_bytes();
+    if !text.is_ascii() || bytes.contains(&0) {
+        return Err(Error::InvalidInput(
+            "icc: name field must be NUL-free ASCII",
+        ));
+    }
+    if bytes.len() > 32 {
+        return Err(Error::InvalidInput("icc: name exceeds its 32-byte field"));
+    }
+    let mut field = [0u8; 32];
+    field[..bytes.len()].copy_from_slice(bytes);
+    out.extend_from_slice(&field);
+    Ok(())
+}
+
 /// Appends a `dateTimeNumber` (six big-endian `u16`).
 pub(crate) fn push_date_time(out: &mut Vec<u8>, value: DateTime) {
     for field in [

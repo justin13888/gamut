@@ -53,7 +53,7 @@ multi-byte values are big-endian.
 | ---- | ------- | ----- |
 | `s15Fixed16Number` (§4.6) | signed `i32` | `raw / 65536` (e.g. `0x0001_0000` = 1.0, `0xFFFF_0000` = -1.0) |
 | `u16Fixed16Number` (§4.7) | unsigned `u32` | `raw / 65536` |
-| `u8Fixed8Number` (§4.5) | unsigned `u16` | `raw / 256` |
+| `u8Fixed8Number` (§4.9) | unsigned `u16` | `raw / 256` |
 
 `XYZNumber` (§4.14) is three `s15Fixed16`; the header PCS illuminant is the D50 value
 `(0.9642, 1.0, 0.8249) ≈ (0x0000_F6D6, 0x0001_0000, 0x0000_D32D)`. `dateTimeNumber` (§4.2) is six

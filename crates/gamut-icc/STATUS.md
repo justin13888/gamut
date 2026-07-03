@@ -25,6 +25,7 @@ serialization as an equivalent profile.
 | P8 | — | lcms2 differential oracle gate | ✅ |
 | P9 | §10 | **Full §10 coverage** — every remaining element type decoded (see below) | ✅ |
 | P10 | §8 | Profile-class conformance validation (`IccProfile::validate`) | ✅ |
+| P11 | — | **v1 stabilization** (issue #180): API-surface hardening (private modules, `Eq` model, std conversion traits, validated fallible writes, `ProfileHeader::new`) + spec-citation audit | ✅ |
 
 ## Modelled element types
 
@@ -40,11 +41,18 @@ Any element type *not* defined in ICC.1:2022 §10 (e.g. iccMAX's `multiProcessEl
 private/unregistered types) is preserved verbatim as `TagData::Raw` and round-trips byte-for-byte,
 so no profile is rejected for carrying an unmodelled tag.
 
-## Deferred
+## Deferred / intentional leniencies
 
 - **Applying transforms** (a CMM): gamut-icc parses and serializes profiles; evaluating a profile's
   device↔PCS conversion is out of scope. Curve/`XYZ`/matrix values expose `to_f64`/`eval` accessors
   as the seam.
+- **`dictType` "present but not for display" marker** (§10.9): a display name/value with a nonzero
+  offset and zero size decodes as absent, so that marker does not round-trip distinctly (the
+  empty-vs-absent distinction for *value strings* **is** preserved). Documented in `src/dict.rs`.
+- **`mAB `/`mBA ` stage combinations** (§10.12.1/§10.13.1): the spec permits only certain stage
+  combinations (B alone; M+matrix+B; A+CLUT+B; all five). gamut-icc accepts and re-emits *any*
+  combination a profile signals (only the B-curves are required), so non-conformant real-world
+  profiles still round-trip losslessly.
 - **`gamut-color` integration**: building runnable transforms (matrix/TRC → pipeline, `chad`
   application) belongs in `gamut-color` (dependency direction `gamut-color → gamut-icc`), not here.
 - **`multiProcessElementsType`** (`mpet`, and the `D2Bx`/`B2Dx` transform tags that use it): the

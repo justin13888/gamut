@@ -2,7 +2,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::bytes::ByteReader;
+use crate::bytes::{ByteReader, push_ascii_32};
 
 /// One entry of a [`NamedColor2`]: a colour's root name plus its PCS and device coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,17 +71,26 @@ pub(crate) fn decode_named_color2(element: &[u8]) -> Result<NamedColor2> {
 }
 
 /// Writes a `namedColor2Type` element — the inverse of [`decode_named_color2`].
-pub(crate) fn encode_named_color2(named: &NamedColor2, out: &mut Vec<u8>) {
+///
+/// The element's single device-coordinate count applies to every colour, so a list with ragged
+/// `device` vectors is rejected (it would re-decode with the wrong coordinates); names are
+/// validated against their 32-byte ASCII fields rather than truncated.
+pub(crate) fn encode_named_color2(named: &NamedColor2, out: &mut Vec<u8>) -> Result<()> {
     let device_coords = named.colors.first().map_or(0, |c| c.device.len());
+    if named.colors.iter().any(|c| c.device.len() != device_coords) {
+        return Err(Error::InvalidInput(
+            "icc: named colours have differing device-coordinate counts",
+        ));
+    }
     out.extend_from_slice(b"ncl2");
     out.extend_from_slice(&[0; 4]);
     out.extend_from_slice(&named.vendor_flags.to_be_bytes());
     out.extend_from_slice(&(named.colors.len() as u32).to_be_bytes());
     out.extend_from_slice(&(device_coords as u32).to_be_bytes());
-    write_ascii_32(out, &named.prefix);
-    write_ascii_32(out, &named.suffix);
+    push_ascii_32(out, &named.prefix)?;
+    push_ascii_32(out, &named.suffix)?;
     for color in &named.colors {
-        write_ascii_32(out, &color.name);
+        push_ascii_32(out, &color.name)?;
         for &p in &color.pcs {
             out.extend_from_slice(&p.to_be_bytes());
         }
@@ -89,14 +98,7 @@ pub(crate) fn encode_named_color2(named: &NamedColor2, out: &mut Vec<u8>) {
             out.extend_from_slice(&d.to_be_bytes());
         }
     }
-}
-
-/// Writes a 32-byte NUL-terminated 7-bit-ASCII field (truncating to leave room for the NUL).
-fn write_ascii_32(out: &mut Vec<u8>, text: &str) {
-    let mut field = [0u8; 32];
-    let n = text.len().min(31);
-    field[..n].copy_from_slice(&text.as_bytes()[..n]);
-    out.extend_from_slice(&field);
+    Ok(())
 }
 
 /// Reads a 32-byte NUL-terminated 7-bit-ASCII field.
@@ -156,6 +158,55 @@ mod tests {
     }
 
     #[test]
+    fn encode_rejects_ragged_device_coordinates() {
+        // The element's single device-coordinate count applies to every colour.
+        let named = NamedColor2 {
+            vendor_flags: 0,
+            prefix: String::new(),
+            suffix: String::new(),
+            colors: vec![
+                NamedColor {
+                    name: "red".into(),
+                    pcs: [1, 2, 3],
+                    device: vec![10, 20],
+                },
+                NamedColor {
+                    name: "green".into(),
+                    pcs: [4, 5, 6],
+                    device: vec![30], // one coordinate short
+                },
+            ],
+        };
+        let mut out = Vec::new();
+        assert!(encode_named_color2(&named, &mut out).is_err());
+    }
+
+    #[test]
+    fn encode_validates_names_against_their_32_byte_field() {
+        let with_name = |name: &str| NamedColor2 {
+            vendor_flags: 0,
+            prefix: String::new(),
+            suffix: String::new(),
+            colors: vec![NamedColor {
+                name: name.into(),
+                pcs: [0, 0, 0],
+                device: Vec::new(),
+            }],
+        };
+        let mut out = Vec::new();
+        // 33 bytes cannot fit; erroring beats the old silent truncation.
+        assert!(encode_named_color2(&with_name(&"x".repeat(33)), &mut out).is_err());
+        // Non-ASCII names would fail to re-decode.
+        assert!(encode_named_color2(&with_name("café"), &mut out).is_err());
+        // Exactly 32 bytes fills the field with no NUL — what the lenient decoder accepts — and
+        // must round-trip rather than losing its last character.
+        let max = with_name(&"x".repeat(32));
+        let mut out = Vec::new();
+        encode_named_color2(&max, &mut out).unwrap();
+        assert_eq!(decode_named_color2(&out).unwrap(), max);
+    }
+
+    #[test]
     fn round_trips_through_encode() {
         let named = NamedColor2 {
             vendor_flags: 0x1234,
@@ -175,7 +226,7 @@ mod tests {
             ],
         };
         let mut out = Vec::new();
-        encode_named_color2(&named, &mut out);
+        encode_named_color2(&named, &mut out).unwrap();
         assert_eq!(decode_named_color2(&out).unwrap(), named);
     }
 }

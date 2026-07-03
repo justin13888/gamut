@@ -25,10 +25,10 @@ use gamut_icc::{IccProfile, KnownTag, TagData};
 
 # fn demo(bytes: &[u8]) -> Result<(), gamut_core::Error> {
 let profile = IccProfile::parse(bytes)?;
-if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint.signature()) {
+if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint) {
     println!("media white point: {:?}", white[0].to_f64());
 }
-let serialized = profile.to_bytes(); // spec-valid bytes, ready to re-embed
+let serialized = profile.to_bytes()?; // spec-valid bytes, ready to re-embed
 # Ok(()) }
 ```
 
@@ -39,7 +39,10 @@ colorant and generic array types; and the profile-sequence, response-curve, and 
 Only genuinely unmodelled types (e.g. iccMAX's `multiProcessElementsType`) fall back to
 `TagData::Raw`, which round-trips byte-for-byte. `IccProfile::validate` additionally reports the §8
 required tags a profile is missing for its device class, and `IccReader`/`IccWriter` carry options
-(strict parsing; profile-ID recomputation).
+(strict parsing; profile-ID recomputation). To build a profile from scratch,
+`ProfileHeader::new(device_class, color_space)` supplies spec-valid header defaults; serialization
+validates the model and rejects data that would produce a corrupt profile (a *parsed* profile
+always re-serializes).
 
 **Out of scope:** applying a profile's transform (a CMM) and constructing transforms from
 `gamut-color` — the `to_f64`/`eval` accessors are the integration seam — and **iccMAX** (`ICC.2`), a

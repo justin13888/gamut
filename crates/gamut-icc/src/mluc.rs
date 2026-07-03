@@ -1,5 +1,5 @@
 //! Language-tagged text elements: `multiLocalizedUnicodeType` (v4) and the legacy
-//! `textDescriptionType` (v2) (ICC.1:2022 §10.13; ICC.1:2001-04 §6.5.17).
+//! `textDescriptionType` (v2) (ICC.1:2022 §10.15; ICC.1:2001-04 §6.5.17).
 
 use gamut_core::{Error, Result};
 
@@ -17,7 +17,7 @@ pub struct MlucRecord {
     pub text: String,
 }
 
-/// A `multiLocalizedUnicodeType` element (ICC.1:2022 §10.13): one or more localized strings, the v4
+/// A `multiLocalizedUnicodeType` element (ICC.1:2022 §10.15): one or more localized strings, the v4
 /// representation of `desc`, `cprt`, and similar text tags.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Mluc {
@@ -228,11 +228,25 @@ pub(crate) fn encode_mluc(mluc: &Mluc, out: &mut Vec<u8>) {
 }
 
 /// Writes a `textDescriptionType` element — the inverse of [`decode_text_description`].
-pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>) {
+///
+/// Rejects a non-ASCII or interior-NUL `ascii` field (the decoder requires 7-bit ASCII and stops
+/// at the first NUL) and a Macintosh ScriptCode form longer than its fixed 67-byte buffer, rather
+/// than truncating either.
+pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>) -> Result<()> {
+    let ascii = desc.ascii.as_bytes();
+    if !desc.ascii.is_ascii() || ascii.contains(&0) {
+        return Err(Error::InvalidInput(
+            "icc: textDescription ASCII form must be NUL-free ASCII",
+        ));
+    }
+    if desc.macintosh.len() > 67 {
+        return Err(Error::InvalidInput(
+            "icc: textDescription ScriptCode form exceeds its 67-byte field",
+        ));
+    }
     out.extend_from_slice(b"desc");
     out.extend_from_slice(&[0; 4]);
 
-    let ascii = desc.ascii.as_bytes();
     out.extend_from_slice(&((ascii.len() + 1) as u32).to_be_bytes());
     out.extend_from_slice(ascii);
     out.push(0); // ASCII NUL terminator
@@ -252,11 +266,11 @@ pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>)
     }
 
     out.extend_from_slice(&desc.script_code.to_be_bytes());
-    out.push(desc.macintosh.len().min(67) as u8);
+    out.push(desc.macintosh.len() as u8);
     let mut mac = [0u8; 67];
-    let n = desc.macintosh.len().min(67);
-    mac[..n].copy_from_slice(&desc.macintosh[..n]);
+    mac[..desc.macintosh.len()].copy_from_slice(&desc.macintosh);
     out.extend_from_slice(&mac);
+    Ok(())
 }
 
 /// Decodes UTF-16BE bytes into a `String`, trimming any trailing NUL terminators.
@@ -403,6 +417,50 @@ mod tests {
     }
 
     #[test]
+    fn mluc_len_walks_oversized_records() {
+        // A 16-byte record layout (record_size above the 12-byte minimum) is legal — only sizes
+        // *below* 12 are malformed — and both the length walker and the decoder handle the
+        // record's extra bytes.
+        let mut e = b"mluc\x00\x00\x00\x00".to_vec();
+        e.extend_from_slice(&1u32.to_be_bytes()); // record count
+        e.extend_from_slice(&16u32.to_be_bytes()); // record size 16
+        let hi = utf16be("Hi");
+        let storage = 16 + 16; // header + one 16-byte record
+        e.extend_from_slice(b"enUS");
+        e.extend_from_slice(&(hi.len() as u32).to_be_bytes());
+        e.extend_from_slice(&(storage as u32).to_be_bytes());
+        e.extend_from_slice(&[0u8; 4]); // the record's 4 extra bytes
+        e.extend_from_slice(&hi);
+        assert_eq!(mluc_len(&e).unwrap(), e.len());
+        assert_eq!(decode_mluc(&e).unwrap().text(b"en", b"US"), Some("Hi"));
+    }
+
+    #[test]
+    fn mluc_len_uses_every_record_position() {
+        // Two records whose SECOND string extends furthest: a walker that misreads the second
+        // record's table position (16 + i·record_size + 4) computes the wrong end.
+        let mluc = Mluc {
+            records: vec![
+                MlucRecord {
+                    language: *b"en",
+                    country: *b"US",
+                    text: "Hi".to_owned(),
+                },
+                MlucRecord {
+                    language: *b"de",
+                    country: *b"DE",
+                    text: "Guten Morgen".to_owned(),
+                },
+            ],
+        };
+        let mut bytes = Vec::new();
+        encode_mluc(&mluc, &mut bytes);
+        let encoded_len = bytes.len();
+        bytes.extend_from_slice(b"TRAILING");
+        assert_eq!(mluc_len(&bytes).unwrap(), encoded_len);
+    }
+
+    #[test]
     fn mluc_len_matches_encoded_length_even_with_trailing_bytes() {
         let mluc = Mluc {
             records: vec![MlucRecord {
@@ -428,10 +486,39 @@ mod tests {
             macintosh: Vec::new(),
         };
         let mut bytes = Vec::new();
-        encode_text_description(&desc, &mut bytes);
+        encode_text_description(&desc, &mut bytes).unwrap();
         let encoded_len = bytes.len();
         bytes.extend_from_slice(&[0xAB; 8]);
         assert_eq!(text_description_len(&bytes).unwrap(), encoded_len);
+    }
+
+    #[test]
+    fn encode_text_description_validates_its_fixed_fields() {
+        let mut out = Vec::new();
+        // The ASCII form must survive the decoder's 7-bit check and NUL scan.
+        let non_ascii = TextDescription {
+            ascii: "Größe".to_owned(),
+            ..TextDescription::default()
+        };
+        assert!(encode_text_description(&non_ascii, &mut out).is_err());
+        let interior_nul = TextDescription {
+            ascii: "a\0b".to_owned(),
+            ..TextDescription::default()
+        };
+        assert!(encode_text_description(&interior_nul, &mut out).is_err());
+        // The ScriptCode buffer is a fixed 67 bytes; a longer form must error, not truncate.
+        let long_mac = TextDescription {
+            macintosh: vec![1; 68],
+            ..TextDescription::default()
+        };
+        assert!(encode_text_description(&long_mac, &mut out).is_err());
+        let max_mac = TextDescription {
+            macintosh: vec![1; 67],
+            ..TextDescription::default()
+        };
+        let mut out = Vec::new();
+        encode_text_description(&max_mac, &mut out).unwrap();
+        assert_eq!(decode_text_description(&out).unwrap(), max_mac);
     }
 
     #[test]
@@ -445,7 +532,7 @@ mod tests {
             macintosh: vec![1, 2, 3],
         };
         let mut out = Vec::new();
-        encode_text_description(&desc, &mut out);
+        encode_text_description(&desc, &mut out).unwrap();
         assert_eq!(decode_text_description(&out).unwrap(), desc);
     }
 }
