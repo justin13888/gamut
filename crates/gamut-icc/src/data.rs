@@ -1,8 +1,7 @@
 //! `dataType` (ICC.1:2022 §10.7): a container for either 7-bit ASCII or transparent binary bytes.
 
-use gamut_core::Result;
-
 use crate::bytes::ByteReader;
+use crate::error::Result;
 
 /// A `dataType` element (§10.7): a flag distinguishing ASCII from binary, followed by the payload.
 ///

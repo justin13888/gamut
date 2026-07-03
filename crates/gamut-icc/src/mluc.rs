@@ -1,9 +1,8 @@
 //! Language-tagged text elements: `multiLocalizedUnicodeType` (v4) and the legacy
 //! `textDescriptionType` (v2) (ICC.1:2022 §10.15; ICC.1:2001-04 §6.5.17).
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::ByteReader;
+use crate::error::{IccError, Result};
 
 /// One localized string in a [`Mluc`]: an ISO 639 language code, an ISO 3166 country code, and the
 /// text.
@@ -68,7 +67,7 @@ pub(crate) fn decode_mluc(element: &[u8]) -> Result<Mluc> {
     let count = r.u32()? as usize;
     let record_size = r.u32()? as usize;
     if record_size < 12 {
-        return Err(Error::InvalidInput("icc: mluc record size too small"));
+        return Err(IccError::Malformed("icc: mluc record size too small"));
     }
     // Bound the record table against the element before allocating.
     let table_fits = count
@@ -76,7 +75,7 @@ pub(crate) fn decode_mluc(element: &[u8]) -> Result<Mluc> {
         .and_then(|n| n.checked_add(16))
         .is_some_and(|end| end <= element.len());
     if !table_fits {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: mluc record table exceeds element",
         ));
     }
@@ -97,10 +96,10 @@ pub(crate) fn decode_mluc(element: &[u8]) -> Result<Mluc> {
     for (language, country, length, offset) in metas {
         let end = offset
             .checked_add(length)
-            .ok_or(Error::InvalidInput("icc: mluc string overflow"))?;
+            .ok_or(IccError::Malformed("icc: mluc string overflow"))?;
         let bytes = element
             .get(offset..end)
-            .ok_or(Error::InvalidInput("icc: mluc string out of bounds"))?;
+            .ok_or(IccError::Malformed("icc: mluc string out of bounds"))?;
         records.push(MlucRecord {
             language,
             country,
@@ -117,7 +116,7 @@ pub(crate) fn decode_text_description(element: &[u8]) -> Result<TextDescription>
     let ascii_count = r.u32()? as usize;
     let ascii_bytes = r.bytes(ascii_count)?;
     if !ascii_bytes.is_ascii() {
-        return Err(Error::InvalidInput("icc: non-ASCII textDescription"));
+        return Err(IccError::Malformed("icc: non-ASCII textDescription"));
     }
     let end = ascii_bytes
         .iter()
@@ -129,14 +128,14 @@ pub(crate) fn decode_text_description(element: &[u8]) -> Result<TextDescription>
     let unicode_count = r.u32()? as usize; // number of UTF-16 code units, including the NUL
     let unicode_byte_len = unicode_count
         .checked_mul(2)
-        .ok_or(Error::InvalidInput("icc: textDescription unicode overflow"))?;
+        .ok_or(IccError::Malformed("icc: textDescription unicode overflow"))?;
     let unicode = decode_utf16be(r.bytes(unicode_byte_len)?)?;
 
     let script_code = r.u16()?;
     let mac_count = r.u8()? as usize;
     let mac_buffer = r.bytes(67)?;
     if mac_count > mac_buffer.len() {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: textDescription ScriptCode count too large",
         ));
     }
@@ -161,12 +160,12 @@ pub(crate) fn mluc_len(bytes: &[u8]) -> Result<usize> {
     let count = r.u32()? as usize;
     let record_size = r.u32()? as usize;
     if record_size < 12 {
-        return Err(Error::InvalidInput("icc: mluc record size too small"));
+        return Err(IccError::Malformed("icc: mluc record size too small"));
     }
     let table_end = count
         .checked_mul(record_size)
         .and_then(|n| n.checked_add(16))
-        .ok_or(Error::InvalidInput("icc: mluc record table overflow"))?;
+        .ok_or(IccError::Malformed("icc: mluc record table overflow"))?;
     let mut end = table_end;
     for i in 0..count {
         // Each record: language(2) + country(2) + length(4) + offset(4); read the last two.
@@ -175,7 +174,7 @@ pub(crate) fn mluc_len(bytes: &[u8]) -> Result<usize> {
         let offset = rr.u32()? as usize;
         let extent = offset
             .checked_add(length)
-            .ok_or(Error::InvalidInput("icc: mluc string overflow"))?;
+            .ok_or(IccError::Malformed("icc: mluc string overflow"))?;
         end = end.max(extent);
     }
     Ok(end)
@@ -190,11 +189,11 @@ pub(crate) fn text_description_len(bytes: &[u8]) -> Result<usize> {
     // 8 (header) + 4 + ascii + 4 + 4 + 2·unicode + 2 (script) + 1 (mac count) + 67 (mac buffer).
     let unicode_bytes = unicode_count
         .checked_mul(2)
-        .ok_or(Error::InvalidInput("icc: textDescription unicode overflow"))?;
+        .ok_or(IccError::Malformed("icc: textDescription unicode overflow"))?;
     90usize
         .checked_add(ascii_count)
         .and_then(|n| n.checked_add(unicode_bytes))
-        .ok_or(Error::InvalidInput("icc: textDescription length overflow"))
+        .ok_or(IccError::Malformed("icc: textDescription length overflow"))
 }
 
 /// Writes a `multiLocalizedUnicodeType` element — the inverse of [`decode_mluc`]. Strings are laid
@@ -235,12 +234,12 @@ pub(crate) fn encode_mluc(mluc: &Mluc, out: &mut Vec<u8>) {
 pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>) -> Result<()> {
     let ascii = desc.ascii.as_bytes();
     if !desc.ascii.is_ascii() || ascii.contains(&0) {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: textDescription ASCII form must be NUL-free ASCII",
         ));
     }
     if desc.macintosh.len() > 67 {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: textDescription ScriptCode form exceeds its 67-byte field",
         ));
     }
@@ -276,14 +275,14 @@ pub(crate) fn encode_text_description(desc: &TextDescription, out: &mut Vec<u8>)
 /// Decodes UTF-16BE bytes into a `String`, trimming any trailing NUL terminators.
 fn decode_utf16be(bytes: &[u8]) -> Result<String> {
     if !bytes.len().is_multiple_of(2) {
-        return Err(Error::InvalidInput("icc: odd-length UTF-16 string"));
+        return Err(IccError::Malformed("icc: odd-length UTF-16 string"));
     }
     let units = bytes
         .chunks_exact(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]));
     let mut text = String::new();
     for unit in char::decode_utf16(units) {
-        text.push(unit.map_err(|_| Error::InvalidInput("icc: invalid UTF-16 string"))?);
+        text.push(unit.map_err(|_| IccError::Malformed("icc: invalid UTF-16 string"))?);
     }
     while text.ends_with('\0') {
         text.pop();

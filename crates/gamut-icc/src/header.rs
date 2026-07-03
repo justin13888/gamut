@@ -1,9 +1,9 @@
 //! The 128-byte ICC profile header (ICC.1:2022 §7.2).
 
-use gamut_core::{Error, Result};
 use md5::{Digest, Md5};
 
 use crate::bytes::{ByteReader, push_date_time, push_xyz_number};
+use crate::error::{IccError, Result};
 use crate::primitives::{DateTime, Signature, XyzNumber};
 
 /// The fixed 128-byte header that opens every ICC profile (ICC.1:2022 §7.2).
@@ -99,12 +99,12 @@ impl ProfileHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `bytes` is shorter than 128 bytes, the `acsp` signature
+    /// Returns [`IccError::Malformed`] if `bytes` is shorter than 128 bytes, the `acsp` signature
     /// is missing, or a closed-registry field (device class, colour space, rendering intent) holds
     /// an unrecognized value.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 128 {
-            return Err(Error::InvalidInput(
+            return Err(IccError::Malformed(
                 "icc: profile shorter than 128-byte header",
             ));
         }
@@ -120,7 +120,7 @@ impl ProfileHeader {
         let pcs = ColorSpace::try_from(r.signature()?)?;
         let created = r.date_time()?;
         if r.signature()? != Signature(*b"acsp") {
-            return Err(Error::InvalidInput("icc: missing 'acsp' profile signature"));
+            return Err(IccError::Malformed("icc: missing 'acsp' profile signature"));
         }
         let platform = r.signature()?;
         let flags = r.u32()?;
@@ -279,13 +279,13 @@ pub enum DeviceClass {
 }
 
 impl TryFrom<Signature> for DeviceClass {
-    type Error = Error;
+    type Error = IccError;
 
     /// Maps a class signature to its variant.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the signature is not one of the seven defined classes.
+    /// Returns [`IccError::Malformed`] if the signature is not one of the seven defined classes.
     fn try_from(sig: Signature) -> Result<Self> {
         Ok(match &sig.0 {
             b"scnr" => Self::Input,
@@ -295,7 +295,7 @@ impl TryFrom<Signature> for DeviceClass {
             b"spac" => Self::ColorSpace,
             b"abst" => Self::Abstract,
             b"nmcl" => Self::NamedColor,
-            _ => return Err(Error::InvalidInput("icc: unknown device class")),
+            _ => return Err(IccError::Malformed("icc: unknown device class")),
         })
     }
 }
@@ -345,13 +345,13 @@ pub enum ColorSpace {
 }
 
 impl TryFrom<Signature> for ColorSpace {
-    type Error = Error;
+    type Error = IccError;
 
     /// Maps a colour-space signature to its variant.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the signature is neither a defined space nor a valid
+    /// Returns [`IccError::Malformed`] if the signature is neither a defined space nor a valid
     /// `nCLR` (2–15 colorants).
     fn try_from(sig: Signature) -> Result<Self> {
         let s = &sig.0;
@@ -371,11 +371,11 @@ impl TryFrom<Signature> for ColorSpace {
                 let n = match s[0] {
                     d @ b'2'..=b'9' => d - b'0',
                     d @ b'A'..=b'F' => d - b'A' + 10,
-                    _ => return Err(Error::InvalidInput("icc: unknown colour space")),
+                    _ => return Err(IccError::Malformed("icc: unknown colour space")),
                 };
                 Self::NColor(n)
             }
-            _ => return Err(Error::InvalidInput("icc: unknown colour space")),
+            _ => return Err(IccError::Malformed("icc: unknown colour space")),
         })
     }
 }
@@ -421,20 +421,20 @@ pub enum RenderingIntent {
 }
 
 impl TryFrom<u32> for RenderingIntent {
-    type Error = Error;
+    type Error = IccError;
 
     /// Maps the header's rendering-intent word to its variant.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for values outside 0–3 (the upper 16 bits must be zero).
+    /// Returns [`IccError::Malformed`] for values outside 0–3 (the upper 16 bits must be zero).
     fn try_from(value: u32) -> Result<Self> {
         Ok(match value {
             0 => Self::Perceptual,
             1 => Self::MediaRelativeColorimetric,
             2 => Self::Saturation,
             3 => Self::IccAbsoluteColorimetric,
-            _ => return Err(Error::InvalidInput("icc: invalid rendering intent")),
+            _ => return Err(IccError::Malformed("icc: invalid rendering intent")),
         })
     }
 }

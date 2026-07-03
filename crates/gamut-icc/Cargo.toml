@@ -18,6 +18,7 @@ workspace = true
 [dependencies]
 gamut-core.workspace = true
 md-5.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 # Differential oracle: a vendored, statically-linked Little-CMS (lcms2). Dev-only and excluded

@@ -10,10 +10,9 @@
 //! *any* combination a profile signals through its stage offsets (only the B-curves are required),
 //! so real-world profiles that bend this rule still round-trip losslessly.
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::{ByteReader, pad_to_4, push_s15fixed16};
 use crate::curve::{CurveOrParametric, read_curve_element, write_curve_element};
+use crate::error::{IccError, Result};
 use crate::primitives::S15Fixed16;
 
 /// The sample precision of a CLUT.
@@ -222,7 +221,7 @@ pub(crate) fn decode_lut_a_to_b(element: &[u8]) -> Result<LutAToB> {
     let i = input_channels as usize;
     let o = output_channels as usize;
     if off_b == 0 {
-        return Err(Error::InvalidInput("icc: lutAToB missing B-curves"));
+        return Err(IccError::Malformed("icc: lutAToB missing B-curves"));
     }
     Ok(LutAToB {
         input_channels,
@@ -242,7 +241,7 @@ pub(crate) fn decode_lut_b_to_a(element: &[u8]) -> Result<LutBToA> {
     let i = input_channels as usize;
     let o = output_channels as usize;
     if off_b == 0 {
-        return Err(Error::InvalidInput("icc: lutBToA missing B-curves"));
+        return Err(IccError::Malformed("icc: lutBToA missing B-curves"));
     }
     Ok(LutBToA {
         input_channels,
@@ -330,19 +329,19 @@ fn read_optional_clut(
         return Ok(None);
     }
     if input_channels as usize > 16 {
-        return Err(Error::InvalidInput("icc: CLUT input channels exceed 16"));
+        return Err(IccError::Malformed("icc: CLUT input channels exceed 16"));
     }
     let mut r = ByteReader::at(element, offset)?;
     let grid_points = r.bytes(16)?[..input_channels as usize].to_vec();
     let precision = match r.u8()? {
         1 => ClutPrecision::U8,
         2 => ClutPrecision::U16,
-        _ => return Err(Error::InvalidInput("icc: invalid CLUT precision")),
+        _ => return Err(IccError::Malformed("icc: invalid CLUT precision")),
     };
     r.skip(3)?; // reserved
     let sample_count = grid_node_count(&grid_points)?
         .checked_mul(output_channels as usize)
-        .ok_or(Error::InvalidInput("icc: CLUT sample count overflow"))?;
+        .ok_or(IccError::Malformed("icc: CLUT sample count overflow"))?;
     let samples = match precision {
         ClutPrecision::U8 => r
             .bytes(sample_count)?
@@ -363,14 +362,14 @@ fn read_optional_clut(
 fn table_len(channels: u8, entries: usize) -> Result<usize> {
     (channels as usize)
         .checked_mul(entries)
-        .ok_or(Error::InvalidInput("icc: LUT table size overflow"))
+        .ok_or(IccError::Malformed("icc: LUT table size overflow"))
 }
 
 /// `grid_points^input_channels * output_channels`, checked.
 fn clut_len(grid_points: u8, input_channels: u8, output_channels: u8) -> Result<usize> {
     grid_node_count(&vec![grid_points; input_channels as usize])?
         .checked_mul(output_channels as usize)
-        .ok_or(Error::InvalidInput("icc: CLUT size overflow"))
+        .ok_or(IccError::Malformed("icc: CLUT size overflow"))
 }
 
 /// The product of the per-dimension grid points (the number of CLUT nodes), checked.
@@ -379,7 +378,7 @@ fn grid_node_count(grid_points: &[u8]) -> Result<usize> {
     for &g in grid_points {
         nodes = nodes
             .checked_mul(g as usize)
-            .ok_or(Error::InvalidInput("icc: CLUT grid overflow"))?;
+            .ok_or(IccError::Malformed("icc: CLUT grid overflow"))?;
     }
     Ok(nodes)
 }
@@ -387,7 +386,7 @@ fn grid_node_count(grid_points: &[u8]) -> Result<usize> {
 fn read_u16_vec(r: &mut ByteReader<'_>, count: usize) -> Result<Vec<u16>> {
     let byte_len = count
         .checked_mul(2)
-        .ok_or(Error::InvalidInput("icc: LUT size overflow"))?;
+        .ok_or(IccError::Malformed("icc: LUT size overflow"))?;
     let bytes = r.bytes(byte_len)?;
     Ok(bytes
         .chunks_exact(2)
@@ -401,17 +400,17 @@ fn read_u16_vec(r: &mut ByteReader<'_>, count: usize) -> Result<Vec<u16>> {
 /// (the decoder sizes everything from those counts, so a mismatch would re-decode shifted).
 pub(crate) fn encode_lut8(lut: &Lut8, out: &mut Vec<u8>) -> Result<()> {
     if lut.input_table.len() != table_len(lut.input_channels, 256)? {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: lut8 input-table length does not match its channel count",
         ));
     }
     if lut.clut.len() != clut_len(lut.grid_points, lut.input_channels, lut.output_channels)? {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: lut8 CLUT length does not match its grid and channels",
         ));
     }
     if lut.output_table.len() != table_len(lut.output_channels, 256)? {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: lut8 output-table length does not match its channel count",
         ));
     }
@@ -431,17 +430,17 @@ pub(crate) fn encode_lut8(lut: &Lut8, out: &mut Vec<u8>) -> Result<()> {
 /// entry counts, and grid.
 pub(crate) fn encode_lut16(lut: &Lut16, out: &mut Vec<u8>) -> Result<()> {
     if lut.input_table.len() != table_len(lut.input_channels, lut.input_table_entries.into())? {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: lut16 input-table length does not match its channels and entry count",
         ));
     }
     if lut.clut.len() != clut_len(lut.grid_points, lut.input_channels, lut.output_channels)? {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: lut16 CLUT length does not match its grid and channels",
         ));
     }
     if lut.output_table.len() != table_len(lut.output_channels, lut.output_table_entries.into())? {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: lut16 output-table length does not match its channels and entry count",
         ));
     }
@@ -546,7 +545,7 @@ fn check_curve_count(
     mismatch: &'static str,
 ) -> Result<()> {
     if curves.len() != channels as usize {
-        return Err(Error::InvalidInput(mismatch));
+        return Err(IccError::Malformed(mismatch));
     }
     Ok(())
 }
@@ -568,12 +567,12 @@ fn check_optional_curve_count(
 fn check_clut_channels(clut: Option<&Clut>, input: u8, output: u8) -> Result<()> {
     let Some(clut) = clut else { return Ok(()) };
     if clut.grid_points.len() != input as usize {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: CLUT grid dimensions do not match the transform's input channels",
         ));
     }
     if clut.output_channels != output {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: CLUT output channels do not match the transform's output channels",
         ));
     }
@@ -637,20 +636,20 @@ fn write_optional_curves(
 fn write_optional_clut(clut: Option<&Clut>, body: &mut Vec<u8>) -> Result<u32> {
     let Some(clut) = clut else { return Ok(0) };
     if clut.grid_points.len() > 16 {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: CLUT has more than 16 grid dimensions",
         ));
     }
     let expected = grid_node_count(&clut.grid_points)?
         .checked_mul(clut.output_channels as usize)
-        .ok_or(Error::InvalidInput("icc: CLUT sample count overflow"))?;
+        .ok_or(IccError::Malformed("icc: CLUT sample count overflow"))?;
     if clut.samples.len() != expected {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: CLUT sample count does not match its grid and output channels",
         ));
     }
     if clut.precision == ClutPrecision::U8 && clut.samples.iter().any(|&s| s > 255) {
-        return Err(Error::InvalidInput("icc: 8-bit CLUT sample exceeds 255"));
+        return Err(IccError::Malformed("icc: 8-bit CLUT sample exceeds 255"));
     }
     let offset = stage_offset(body);
     let mut grid = [0u8; 16];

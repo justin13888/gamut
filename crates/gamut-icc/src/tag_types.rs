@@ -1,7 +1,5 @@
 //! The decoded element data a tag can hold (ICC.1:2022 §10).
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::{ByteReader, push_date_time, push_s15fixed16, push_u16fixed16, push_xyz_number};
 use crate::cicp::{Cicp, decode_cicp, encode_cicp};
 use crate::colorant::{
@@ -14,6 +12,7 @@ use crate::curve::{
 };
 use crate::data::{DataElement, decode_data, encode_data};
 use crate::dict::{Dict, decode_dict, encode_dict};
+use crate::error::{IccError, Result};
 use crate::lut::{
     Lut8, Lut16, LutAToB, LutBToA, decode_lut_a_to_b, decode_lut_b_to_a, decode_lut8, decode_lut16,
     encode_lut_a_to_b, encode_lut_b_to_a, encode_lut8, encode_lut16,
@@ -200,7 +199,7 @@ fn decode_text(element: &[u8]) -> Result<TagData> {
     let n = r.remaining();
     let raw = r.bytes(n)?;
     if !raw.is_ascii() {
-        return Err(Error::InvalidInput("icc: non-ASCII textType"));
+        return Err(IccError::Malformed("icc: non-ASCII textType"));
     }
     let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     let text: String = raw[..end].iter().map(|&b| b as char).collect();
@@ -276,7 +275,7 @@ fn decode_uint64_array(element: &[u8]) -> Result<TagData> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for a hand-built model that violates an invariant the decoder
+/// Returns [`IccError::Malformed`] for a hand-built model that violates an invariant the decoder
 /// establishes (mismatched LUT shapes, over-long fixed fields, non-ASCII text, …) — data that
 /// would serialize to a corrupt or lossy element. Values produced by `decode_tag` always encode.
 pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) -> Result<()> {
@@ -297,7 +296,7 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) -> Result<()> {
         }
         TagData::Text(text) => {
             if !text.is_ascii() || text.as_bytes().contains(&0) {
-                return Err(Error::InvalidInput("icc: textType must be NUL-free ASCII"));
+                return Err(IccError::Malformed("icc: textType must be NUL-free ASCII"));
             }
             element_header(out, b"text");
             out.extend_from_slice(text.as_bytes());
@@ -370,7 +369,7 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) -> Result<()> {
             // decoding would surface that signature, not the stored one, so a mismatch is rejected
             // rather than silently "renaming" the element on a round-trip.
             if *type_sig != element_type_signature(bytes) {
-                return Err(Error::InvalidInput(
+                return Err(IccError::Malformed(
                     "icc: raw element bytes do not start with its type signature",
                 ));
             }
