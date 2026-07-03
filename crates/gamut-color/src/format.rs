@@ -6,7 +6,11 @@
 //! the subsampled variants reserved for M2 (see `gamut-avif/STATUS.md`).
 
 /// Bits per sample of a coded plane.
+///
+/// `#[non_exhaustive]`: models the AV1 profile depths today; other codecs may add depths (e.g.
+/// 16-bit) later.
 #[repr(u8)]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BitDepth {
     /// 8 bits per sample.
@@ -38,6 +42,10 @@ impl BitDepth {
 }
 
 /// Chroma subsampling of the coded planes (AV1 `subsampling_x` / `subsampling_y`, §5.5.2).
+///
+/// `#[non_exhaustive]`: models the AV1 layouts today; other codecs may add layouts (e.g. TIFF's
+/// 4:1:1) later.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChromaSubsampling {
     /// 4:4:4 — full-resolution chroma (`subsampling_x = subsampling_y = 0`). Required for identity.

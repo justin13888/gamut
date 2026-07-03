@@ -20,6 +20,9 @@ use crate::oklab::{Gamut, linear_rgb_to_oklab};
 use crate::transfer::{adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf};
 
 /// The encoder-exact per-channel transfer a [`SourceProfile`] linearizes with.
+///
+/// `#[non_exhaustive]`: more transfers (HLG is the named next candidate) may be added later.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceTransfer {
     /// sRGB EOTF (IEC 61966-2-1).

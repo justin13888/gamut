@@ -75,7 +75,10 @@ pub const M1_INV_SRGB: [[f64; 3]; 3] = [
 /// Adobe RGB and ProPhoto RGB have no CICP primaries code point. See
 /// [`crate::profile`] for the mapping onto CICP axes.
 ///
+/// `#[non_exhaustive]`: more gamuts (with their derived `M1` matrices) may be added later.
+///
 /// [`ColourPrimaries`]: crate::cicp::ColourPrimaries
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Gamut {
     /// sRGB / BT.709 primaries, D65.

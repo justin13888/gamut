@@ -8,7 +8,10 @@
 
 /// Matrix coefficients (CICP `MatrixCoefficients`). `Identity` (0) carries RGB directly with no
 /// colour transform and requires 4:4:4 — the basis for lossless RGB AVIF.
+///
+/// `#[non_exhaustive]`: H.273 defines further code points, added here as milestones need them.
 #[repr(u16)]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatrixCoefficients {
     /// Identity (RGB / "GBR"); no luma–chroma transform. Requires 4:4:4. (Code point 0.)
@@ -19,10 +22,10 @@ pub enum MatrixCoefficients {
     Unspecified = 2,
     /// BT.601 / BT.470 System B,G. (Code point 6.)
     Bt601 = 6,
-    /// BT.2020 non-constant luminance. (Code point 9.)
-    Bt2020Ncl = 9,
     /// YCgCo. (Code point 8.)
     YCgCo = 8,
+    /// BT.2020 non-constant luminance. (Code point 9.)
+    Bt2020Ncl = 9,
 }
 
 impl MatrixCoefficients {
@@ -34,7 +37,10 @@ impl MatrixCoefficients {
 }
 
 /// Colour primaries (CICP `ColourPrimaries`).
+///
+/// `#[non_exhaustive]`: H.273 defines further code points, added here as milestones need them.
 #[repr(u16)]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColourPrimaries {
     /// BT.709 (also sRGB primaries). (Code point 1.)
@@ -60,7 +66,10 @@ impl ColourPrimaries {
 }
 
 /// Transfer characteristics (CICP `TransferCharacteristics`).
+///
+/// `#[non_exhaustive]`: H.273 defines further code points, added here as milestones need them.
 #[repr(u16)]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransferCharacteristics {
     /// BT.709. (Code point 1.)
@@ -89,6 +98,9 @@ impl TransferCharacteristics {
 ///
 /// Besides signalling the range in a `colr` / AV1 header, this is the range selector for the
 /// RGB ↔ YCbCr conversions in [`crate::ycbcr`] — so one type carries the choice end to end.
+///
+/// Deliberately exhaustive (unlike the code-point enums): the flag is a spec-complete single bit,
+/// so consumers can match it exhaustively forever.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorRange {
