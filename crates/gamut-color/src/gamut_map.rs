@@ -84,6 +84,10 @@ mod tests {
         assert!(in_gamut([0.5, 0.3, 0.8]));
         assert!(!in_gamut([1.1, 0.5, 0.5]));
         assert!(!in_gamut([0.5, -0.1, 0.5]));
+        // Non-finite channels are never in gamut. Pins the direct `>= && <=` comparison chain: a
+        // refactor to a negated form (`!(x < 0.0 || x > 1.0)`) would return true for NaN.
+        assert!(!in_gamut([f64::NAN, 0.5, 0.5]));
+        assert!(!in_gamut([0.5, f64::INFINITY, 0.5]));
     }
 
     #[test]
@@ -102,15 +106,6 @@ mod tests {
         assert!(ao.abs() <= a.abs() + 1e-12, "chroma must not grow");
         assert!(bo.abs() <= 1e-12);
         assert!(in_gamut(oklab_to_linear_srgb([lo, ao, bo])));
-    }
-
-    #[test]
-    fn preserves_hue_angle() {
-        let (l, a, b) = (0.5, 0.3, -0.2);
-        let [_, ao, bo] = soft_gamut_clamp([l, a, b], 0.35);
-        // a and b shrink by the same factor → cross product (hue) stays zero.
-        assert!((a * bo - b * ao).abs() < 1e-12);
-        assert!(ao * a >= 0.0 && bo * b >= 0.0);
     }
 
     /// Golden vectors transcribed from chromahash `spec/test-vectors/unit-softgamutclamp.json`

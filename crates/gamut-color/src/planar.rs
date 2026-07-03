@@ -136,16 +136,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rgb_identity_plane_order() {
-        // One pixel (R=10, G=20, B=30): Y=G=20, U=B=30, V=R=10.
+    fn rgb_identity_round_trips_with_gbr_order() {
+        // One pixel (R=10, G=20, B=30) pins the plane order directly: Y=G=20, U=B=30, V=R=10. The
+        // round-trip alone is order-agnostic (a consistent from/to swap would still pass), and the
+        // GBR convention is the module's whole point.
         let p = Planar8::from_rgb8_identity(&[10, 20, 30], 1, 1).unwrap();
         assert_eq!(p.plane(0), &[20]);
         assert_eq!(p.plane(1), &[30]);
         assert_eq!(p.plane(2), &[10]);
-    }
 
-    #[test]
-    fn rgb_roundtrip() {
         let rgb: Vec<u8> = (0..=200u8).cycle().take(2 * 3 * 3).collect(); // 3x2 image
         let p = Planar8::from_rgb8_identity(&rgb, 3, 2).unwrap();
         assert_eq!(p.width(), 3);

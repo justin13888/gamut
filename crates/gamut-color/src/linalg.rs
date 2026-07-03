@@ -59,32 +59,10 @@ pub(crate) fn mat_inv_3x3(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn matvec3_identity() {
-        let i = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        assert_eq!(matvec3(&i, [3.0, 4.0, 5.0]), [3.0, 4.0, 5.0]);
-    }
-
-    #[test]
-    fn mat_mul3_identity() {
-        let i = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-        let m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0]];
-        assert_eq!(mat_mul3(&i, &m), m);
-    }
-
-    #[test]
-    fn mat_inv_3x3_roundtrip() {
-        let m = [[1.0, 2.0, 3.0], [0.0, 1.0, 4.0], [5.0, 6.0, 0.0]];
-        let inv = mat_inv_3x3(&m).expect("non-singular");
-        let prod = mat_mul3(&m, &inv);
-        for (i, row) in prod.iter().enumerate() {
-            for (j, &v) in row.iter().enumerate() {
-                let want = if i == j { 1.0 } else { 0.0 };
-                assert!((v - want).abs() < 1e-12);
-            }
-        }
-    }
-
+    // The dense-input arithmetic of matvec3 / mat_mul3 / mat_inv_3x3 is pinned by this module's
+    // consumers: the Lindbloom oracles and the M1 derivation check in `matrix`, and the chromahash
+    // golden vectors in `oklab`, run every product term through published values. Only the
+    // singular-determinant guard has no other coverage.
     #[test]
     fn mat_inv_3x3_singular_is_none() {
         // Two identical rows ⇒ determinant 0.

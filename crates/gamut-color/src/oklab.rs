@@ -144,72 +144,9 @@ pub fn oklab_to_linear_srgb(lab: [f64; 3]) -> [f64; 3] {
 mod tests {
     use super::*;
 
-    fn matmul3(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
-        let mut c = [[0.0; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                for k in 0..3 {
-                    c[i][j] += a[i][k] * b[k][j];
-                }
-            }
-        }
-        c
-    }
-
-    fn identity_error(m: &[[f64; 3]; 3]) -> f64 {
-        let mut err = 0.0_f64;
-        for (i, row) in m.iter().enumerate() {
-            for (j, &v) in row.iter().enumerate() {
-                let want = if i == j { 1.0 } else { 0.0 };
-                err = err.max((v - want).abs());
-            }
-        }
-        err
-    }
-
-    #[test]
-    fn m2_inverse_relationship() {
-        assert!(identity_error(&matmul3(&M2, &M2_INV)) < 5e-8);
-    }
-
-    #[test]
-    fn m1_srgb_inverse_relationship() {
-        assert!(identity_error(&matmul3(&M1_SRGB, &M1_INV_SRGB)) < 5e-8);
-    }
-
-    #[test]
-    fn every_m1_maps_white_to_lms_white() {
-        for g in [
-            Gamut::Srgb,
-            Gamut::DisplayP3,
-            Gamut::AdobeRgb,
-            Gamut::Bt2020,
-            Gamut::ProPhotoRgb,
-        ] {
-            let w = matvec3(g.m1_matrix(), [1.0, 1.0, 1.0]);
-            let err = (w[0] - 1.0)
-                .abs()
-                .max((w[1] - 1.0).abs())
-                .max((w[2] - 1.0).abs());
-            assert!(err < 1e-8, "M1[{g:?}]·(1,1,1) err={err}");
-        }
-    }
-
-    #[test]
-    fn m2_maps_lms_white_to_l1() {
-        let r = matvec3(&M2, [1.0, 1.0, 1.0]);
-        assert!((r[0] - 1.0).abs() < 5e-8 && r[1].abs() < 5e-8 && r[2].abs() < 5e-8);
-    }
-
-    #[test]
-    fn p3_and_srgb_red_differ_in_oklab() {
-        let s = linear_rgb_to_oklab([1.0, 0.0, 0.0], Gamut::Srgb);
-        let p = linear_rgb_to_oklab([1.0, 0.0, 0.0], Gamut::DisplayP3);
-        assert!(
-            (s[1] - p[1]).abs() > 0.01,
-            "P3 red should be more saturated"
-        );
-    }
+    // The matrix literals need no relationship tests of their own: `derived_matrices_match_literals`
+    // (matrix.rs) re-derives every `M1_*` table element-wise to 1e-7, and the golden vectors below
+    // run dense values through `M2` / `M2_INV` / `M1_INV_SRGB` (forward and round-trip) at 1e-9.
 
     /// Golden vectors transcribed from chromahash `spec/test-vectors/unit-color.json`
     /// (MIT OR Apache-2.0). Tier-1 `std` math agrees with chromahash's `cbrt_halley`

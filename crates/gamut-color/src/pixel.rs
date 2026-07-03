@@ -36,21 +36,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clip_pixel8_saturates() {
-        assert_eq!(clip_pixel8(-1), 0);
-        assert_eq!(clip_pixel8(-1000), 0);
-        assert_eq!(clip_pixel8(0), 0);
-        assert_eq!(clip_pixel8(128), 128);
-        assert_eq!(clip_pixel8(255), 255);
-        assert_eq!(clip_pixel8(1000), 255);
-    }
-
-    #[test]
     fn clip_pixel_saturates_per_bit_depth() {
-        // 8-bit agrees with clip_pixel8; 10/12-bit use the wider ceilings.
-        for &(x, expect8) in &[(-5, 0u16), (0, 0), (200, 200), (255, 255), (5000, 255)] {
+        // 8-bit: clip_pixel8 saturates at 0/255, and clip_pixel(x, 8) agrees with it exactly;
+        // 10/12-bit use the wider ceilings.
+        for &(x, expect8) in &[
+            (-1000, 0u16),
+            (-1, 0),
+            (0, 0),
+            (128, 128),
+            (200, 200),
+            (255, 255),
+            (1000, 255),
+        ] {
+            assert_eq!(u16::from(clip_pixel8(x)), expect8);
             assert_eq!(clip_pixel(x, 8), expect8);
-            assert_eq!(clip_pixel(x, 8), u16::from(clip_pixel8(x)));
         }
         assert_eq!(clip_pixel(1023, 10), 1023);
         assert_eq!(clip_pixel(2000, 10), 1023); // saturates at 2^10 - 1

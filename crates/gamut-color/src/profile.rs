@@ -147,38 +147,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn srgb_decomposes_to_cicp_axes() {
-        let p = SourceProfile::SRGB;
-        assert_eq!(p.colour_primaries(), Some(ColourPrimaries::Bt709));
-        assert_eq!(
-            p.transfer_characteristics(),
-            Some(TransferCharacteristics::Srgb)
-        );
-    }
-
-    #[test]
-    fn bt2020_decomposes_to_primaries_and_pq() {
-        let p = SourceProfile::BT2020;
-        assert_eq!(p.colour_primaries(), Some(ColourPrimaries::Bt2020));
-        assert_eq!(
-            p.transfer_characteristics(),
-            Some(TransferCharacteristics::Pq)
-        );
-        // The Reinhard tone map folded into the BT.2020 transfer is exercised by
-        // `eotf_is_encoder_exact_per_gamut` (eotf == bt2020_pq_to_sdr).
-    }
-
-    #[test]
-    fn adobe_and_prophoto_have_no_cicp_code_points() {
-        for p in [SourceProfile::ADOBE_RGB, SourceProfile::PROPHOTO_RGB] {
-            assert_eq!(p.colour_primaries(), None);
-            assert_eq!(p.transfer_characteristics(), None);
+    fn profiles_decompose_to_cicp_axes() {
+        // Every named profile projects onto both CICP axes: Adobe RGB and ProPhoto have no code
+        // points, and Display P3 reuses the sRGB transfer with its own primaries. (The Reinhard
+        // tone map folded into the BT.2020 transfer is exercised by
+        // `eotf_is_encoder_exact_per_gamut`.)
+        use ColourPrimaries as Cp;
+        use TransferCharacteristics as Tc;
+        let cases: &[(SourceProfile, Option<Cp>, Option<Tc>)] = &[
+            (SourceProfile::SRGB, Some(Cp::Bt709), Some(Tc::Srgb)),
+            (
+                SourceProfile::DISPLAY_P3,
+                Some(Cp::DisplayP3),
+                Some(Tc::Srgb),
+            ),
+            (SourceProfile::ADOBE_RGB, None, None),
+            (SourceProfile::BT2020, Some(Cp::Bt2020), Some(Tc::Pq)),
+            (SourceProfile::PROPHOTO_RGB, None, None),
+        ];
+        for &(p, primaries, transfer) in cases {
+            assert_eq!(p.colour_primaries(), primaries, "{:?} primaries", p.gamut);
+            assert_eq!(
+                p.transfer_characteristics(),
+                transfer,
+                "{:?} transfer",
+                p.gamut
+            );
         }
-        // Display P3 reuses the sRGB transfer but its own primaries.
-        assert_eq!(
-            SourceProfile::DISPLAY_P3.colour_primaries(),
-            Some(ColourPrimaries::DisplayP3)
-        );
     }
 
     #[test]

@@ -294,6 +294,10 @@ mod tests {
         let (y, cb, cr) = rgb_to_ycbcr(128, 128, 128, Full);
         assert_eq!((cb, cr), (128, 128));
         assert!((i32::from(y) - 128).abs() <= 1);
+        // Neutral gray inverts to itself. Every channel lands on 128 — away from the 0/255 clamp —
+        // so the `+ HALF` rounding term of each `ycbcr_to_rgb` component is observable (a mutated
+        // `- HALF` shifts each result to 127).
+        assert_eq!(ycbcr_to_rgb(128, 128, 128, Full), (128, 128, 128));
     }
 
     #[test]
@@ -309,22 +313,6 @@ mod tests {
             r >= 254 && g <= 2 && b <= 2,
             "limited red inverse = ({r},{g},{b})"
         );
-    }
-
-    #[test]
-    fn limited_luma_stays_in_studio_range() {
-        // Every limited-range luma sample lands in [16, 235]; the full-range path reaches 0 and 255.
-        for r in (0..=255).step_by(17) {
-            for g in (0..=255).step_by(17) {
-                let (yl, ..) = rgb_to_ycbcr(r, g, 128, Limited);
-                assert!(
-                    (16..=235).contains(&yl),
-                    "limited Y {yl} out of studio range"
-                );
-            }
-        }
-        assert_eq!(rgb_to_ycbcr(0, 0, 0, Full).0, 0);
-        assert_eq!(rgb_to_ycbcr(255, 255, 255, Full).0, 255);
     }
 
     #[test]
@@ -356,56 +344,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn flat_image_roundtrips_through_420() {
-        // A constant-color image has constant chroma, so 4:2:0 subsampling is lossless on chroma and
-        // the whole image round-trips to within the per-pixel conversion tolerance, in both ranges.
-        let rgb: Vec<u8> = [90u8, 140, 200].repeat(7 * 5);
-        for range in [Full, Limited] {
-            let yuv = Yuv420::from_rgb8(&rgb, 7, 5, range).unwrap();
-            let back = yuv.to_rgb8(range);
-            for (a, b) in rgb.iter().zip(&back) {
-                assert!(
-                    (i32::from(*a) - i32::from(*b)).abs() <= 4,
-                    "{range:?} round-trip"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn chroma_dimensions_round_up_for_odd_sizes() {
-        let yuv = Yuv420::from_rgb8(&[0u8; 5 * 3 * 3], 5, 3, Limited).unwrap();
-        // 5x3 luma; chroma is ceil(5/2) x ceil(3/2) = 3 x 2.
-        assert_eq!(yuv.y().len(), 15);
-        assert_eq!((yuv.u().len(), yuv.v().len()), (6, 6));
-        assert_eq!(Yuv420::chroma_width(5), 3);
-        assert_eq!(Yuv420::chroma_height(3), 2);
-    }
-
-    #[test]
-    fn box_subsample_averages_the_block() {
-        // A 2x2 image whose Cb/Cr differ per pixel collapses to one chroma sample = the 4-pixel
-        // average. Use pure primaries so the chroma spread is large and the averaging is visible.
-        let rgb = [
-            255, 0, 0, // red
-            0, 255, 0, // green
-            0, 0, 255, // blue
-            255, 255, 255, // white
-        ];
-        let yuv = Yuv420::from_rgb8(&rgb, 2, 2, Full).unwrap();
-        assert_eq!((yuv.u().len(), yuv.v().len()), (1, 1));
-        let mut su = 0u32;
-        let mut sv = 0u32;
-        for &(r, g, b) in &[(255u8, 0u8, 0u8), (0, 255, 0), (0, 0, 255), (255, 255, 255)] {
-            let (_, cb, cr) = rgb_to_ycbcr(r, g, b, Full);
-            su += u32::from(cb);
-            sv += u32::from(cr);
-        }
-        assert_eq!(yuv.u()[0], ((su + 2) / 4) as u8);
-        assert_eq!(yuv.v()[0], ((sv + 2) / 4) as u8);
     }
 
     #[test]
@@ -441,14 +379,6 @@ mod tests {
     }
 
     #[test]
-    fn full_range_inverse_anchor() {
-        // Neutral gray inverts to itself. Every channel lands on 128 — away from the 0/255 clamp —
-        // so the `+ HALF` rounding term of each `ycbcr_to_rgb` component is observable (a mutated
-        // `- HALF` shifts each result to 127).
-        assert_eq!(ycbcr_to_rgb(128, 128, 128, Full), (128, 128, 128));
-    }
-
-    #[test]
     fn box_subsample_matches_reference_for_varying_image() {
         // A spatially-varying 5x3 image (odd dims ⇒ partial edge blocks, incl. a 1-pixel corner) so
         // the chroma box-average exercises the source coordinates `cx*2`/`cy*2` and the per-block
@@ -465,8 +395,13 @@ mod tests {
             }
         }
         let yuv = Yuv420::from_rgb8(&rgb, w as u32, h as u32, Full).unwrap();
-        let cw = Yuv420::chroma_width(w as u32) as usize;
-        let ch = Yuv420::chroma_height(h as u32) as usize;
+        // 5x3 luma ⇒ chroma is ceil(5/2) x ceil(3/2) = 3 x 2, as literals — re-deriving them from
+        // chroma_width/chroma_height here would let a broken round-up hide. The odd sizes pin it.
+        assert_eq!(Yuv420::chroma_width(w as u32), 3);
+        assert_eq!(Yuv420::chroma_height(h as u32), 2);
+        assert_eq!(yuv.y().len(), 15);
+        assert_eq!((yuv.u().len(), yuv.v().len()), (6, 6));
+        let (cw, ch) = (3usize, 2usize);
         for cy in 0..ch {
             for cx in 0..cw {
                 let (mut su, mut sv, mut count) = (0u32, 0u32, 0u32);

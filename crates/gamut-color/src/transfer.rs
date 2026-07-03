@@ -199,16 +199,9 @@ mod tests {
         assert!((prophoto_rgb_eotf_standard(0.5) - 0.5_f64.powf(1.8)).abs() < 1e-15);
     }
 
-    #[test]
-    fn pq_eotf_endpoints() {
-        assert_eq!(pq_eotf(0.0), 0.0);
-        // Full PQ signal decodes to peak luminance.
-        assert!(
-            (pq_eotf(1.0) - PQ_PEAK_NITS).abs() < 1e-6,
-            "{}",
-            pq_eotf(1.0)
-        );
-    }
+    // `pq_eotf`'s endpoints need no dedicated test: `bt2020_pq_to_sdr_matches_reference_formula`
+    // pins x = 0 and 1 at 1e-12 through the composed curve, and the BT.2100 inversion below pins
+    // the 0- and 10000-nit anchors independently.
 
     #[test]
     fn bt2020_pq_to_sdr_matches_reference_formula() {
