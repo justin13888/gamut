@@ -66,8 +66,8 @@ pub struct Item {
     /// conventionally first and `essential`.
     pub properties: Vec<Property>,
     /// The item's payload with `iloc` placement resolved: the coded bitstream for an image item
-    /// (e.g. the AV1 temporal unit), the `ImageGrid` struct for a `grid` item, the Exif block for
-    /// an `Exif` item. Opaque to this crate. [`crate::read`] concatenates multi-extent payloads
+    /// (e.g. the AV1 temporal unit), the [`ImageGrid`](crate::ImageGrid) struct for a `grid` item,
+    /// the Exif block for an `Exif` item. Opaque to this crate. [`crate::read`] concatenates multi-extent payloads
     /// and resolves `idat`-stored data; [`crate::write`] always places payloads in `mdat` as a
     /// single extent.
     pub payload: Vec<u8>,

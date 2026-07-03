@@ -48,10 +48,12 @@
 #![forbid(unsafe_code)]
 
 mod boxes;
+mod grid;
 mod model;
 mod reader;
 mod writer;
 
+pub use grid::ImageGrid;
 pub use model::{
     ColourInformation, EntityGroup, IsoBmffImage, Item, ItemReference, NclxColr, Property,
     PropertyKind,

@@ -37,12 +37,15 @@ files.
 | P5 | — | Robustness: truncation/overrun/size/index guards ✅; counts never trusted for allocation ✅; total payload capped at input size (anti amplification) ✅; spec fixtures independent of the writer ✅; fuzz corpus ☐ | ◑ partial |
 | P6 | — | Differential oracle: libavif/dav1d parses the container and reproduces pixels (via `gamut-avif/tests/decode_roundtrip.rs`) | ✅ via codec |
 
+## Payload helpers
+
+- **`ImageGrid`** (23008-12 §6.6.2.3.2) — `ImageGrid::parse`/`to_bytes` types the `grid`
+  derived-image payload (tile rows/columns + assembled output size). A `grid` item's `dimg`
+  references and payload bytes already round-trip through the box model; this helper types the
+  payload geometry for consumers, while the tile payloads stay opaque. Additive (semver-minor).
+
 ## Deferred (planned, additive — no model reshape)
 
-- **Typed `ImageGrid` payload helper** (23008-12 §6.6.2.3.2). A `grid` item already round-trips —
-  `dimg` references plus the opaque payload — but parsing/building the rows/columns/output-size
-  struct is left to the consumer until `gamut-avif`/`gamut-heic` M5 needs it. Lands as a new free
-  function + struct (semver-minor).
 - **Typed `mdcv`/`cclv`/`amve`/`reve`/`ndwt` HDR properties.** Carried verbatim as
   `PropertyKind::Other` (exactly what libavif does — it types only `clli`, which we also type).
   No vendored primary source pins their field layouts yet; `PropertyKind` is `#[non_exhaustive]`

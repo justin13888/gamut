@@ -45,5 +45,23 @@ Additionally read (the foreign-encoder repertoire, normalised into the same mode
 plus `pitm` v1, `iinf` v1, `infe` v3, `iref` v1, and `ipma` v1. Hand-authored spec fixtures
 (`crates/gamut-isobmff/tests/foreign.rs`) pin these layouts independently of the writer.
 
+## Derived-image payloads
+
+The `grid` derived image (23008-12 §6.6.2.3.2) assembles a tile matrix into one larger image; the
+tiles are the items its `dimg` reference lists (row-major), and its item payload is an `ImageGrid`
+struct — not a box:
+
+```
+version          u8   (= 0)
+flags            u8   (bit 0 selects the output-dimension width)
+rows_minus_one   u8   (tile rows − 1;    rows    = 1..=256)
+columns_minus_one u8  (tile columns − 1; columns = 1..=256)
+output_width     u(FieldLength)   FieldLength = ((flags & 1) + 1) * 16  → 16- or 32-bit
+output_height    u(FieldLength)
+```
+
+`ImageGrid::parse`/`to_bytes` type this geometry; the tile payloads referenced by `dimg` stay
+opaque to the container.
+
 Deferred and out-of-scope boxes are listed in
 [`crates/gamut-isobmff/STATUS.md`](../../crates/gamut-isobmff/STATUS.md).
