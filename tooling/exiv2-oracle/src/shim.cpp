@@ -100,6 +100,55 @@ int exiv2_xmp_count(const char* xmp, size_t len, size_t* out_count) {
     }
 }
 
+// ---- EXIF: a bare TIFF stream (no "Exif\0\0" marker), via Exiv2::ExifParser. -------------------
+
+// Decodes a TIFF-format EXIF buffer and writes the number of tags exiv2 read to `*out_count`.
+int exiv2_exif_count(const char* data, size_t len, size_t* out_count) {
+    try {
+        Exiv2::ExifData exifData;
+        Exiv2::ExifParser::decode(
+            exifData, reinterpret_cast<const Exiv2::byte*>(data), len);
+        *out_count = static_cast<size_t>(exifData.count());
+        return 0;
+    } catch (...) {
+        return 1;
+    }
+}
+
+// Reads one tag's serialized value by exiv2 key (e.g. "Exif.Image.Make"); returns 4 if absent.
+int exiv2_exif_get(const char* data, size_t len, const char* key, char** out_buf, size_t* out_len) {
+    try {
+        Exiv2::ExifData exifData;
+        Exiv2::ExifParser::decode(
+            exifData, reinterpret_cast<const Exiv2::byte*>(data), len);
+        auto pos = exifData.findKey(Exiv2::ExifKey(key));
+        if (pos == exifData.end()) {
+            return 4;
+        }
+        *out_buf = dup_bytes(pos->toString(), out_len);
+        return *out_buf != nullptr ? 0 : 3;
+    } catch (...) {
+        return 1;
+    }
+}
+
+// Decodes then re-encodes the EXIF buffer via exiv2, returning its canonical TIFF bytes in
+// `*out_buf` (a fresh bare TIFF stream in the decoded byte order).
+int exiv2_exif_roundtrip(const char* data, size_t len, char** out_buf, size_t* out_len) {
+    try {
+        Exiv2::ExifData exifData;
+        Exiv2::ByteOrder order = Exiv2::ExifParser::decode(
+            exifData, reinterpret_cast<const Exiv2::byte*>(data), len);
+        Exiv2::Blob blob;
+        Exiv2::ExifParser::encode(blob, nullptr, 0, order, exifData);
+        std::string bytes(reinterpret_cast<const char*>(blob.data()), blob.size());
+        *out_buf = dup_bytes(bytes, out_len);
+        return *out_buf != nullptr ? 0 : 3;
+    } catch (...) {
+        return 1;
+    }
+}
+
 void exiv2_free(char* p) {
     std::free(p);
 }

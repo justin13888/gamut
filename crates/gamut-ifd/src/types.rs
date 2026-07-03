@@ -3,7 +3,8 @@
 /// The type of a tag's value, stored as the 2-byte `Type` of an IFD entry (TIFF 6.0 §2).
 ///
 /// The discriminants match the on-disk codes (`Byte` is `1`, `Short` is `3`, `Rational` is `5`,
-/// …). The first twelve are the TIFF 6.0 field types; the BigTIFF 64-bit additions
+/// …). The first twelve are the TIFF 6.0 field types; `Utf8` (code `129`) is the Exif 3.0
+/// addition for internationalised text. The BigTIFF 64-bit additions
 /// (`Long8`/`SLong8`/`Ifd8`, codes `16`–`18`) appear only when the `bigtiff` feature is enabled,
 /// so the set stays additive and a classic-only build treats those codes as unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,9 @@ pub enum FieldType {
     Float,
     /// `12` — a 64-bit IEEE double-precision float.
     Double,
+    /// `129` — a UTF-8 string (Exif 3.0 / CIPA DC-008 §4.6.2); NUL-terminated. Like `Ascii`, but
+    /// the bytes are explicitly UTF-8 rather than 7-bit ASCII, so non-ASCII text round-trips.
+    Utf8,
     /// `16` — a 64-bit unsigned integer (BigTIFF; `references/tiff/bigtiff.html`).
     #[cfg(feature = "bigtiff")]
     Long8,
@@ -63,6 +67,7 @@ impl FieldType {
             10 => FieldType::SRational,
             11 => FieldType::Float,
             12 => FieldType::Double,
+            129 => FieldType::Utf8,
             #[cfg(feature = "bigtiff")]
             16 => FieldType::Long8,
             #[cfg(feature = "bigtiff")]
@@ -89,6 +94,7 @@ impl FieldType {
             FieldType::SRational => 10,
             FieldType::Float => 11,
             FieldType::Double => 12,
+            FieldType::Utf8 => 129,
             #[cfg(feature = "bigtiff")]
             FieldType::Long8 => 16,
             #[cfg(feature = "bigtiff")]
@@ -102,7 +108,11 @@ impl FieldType {
     #[must_use]
     pub fn size(self) -> usize {
         match self {
-            FieldType::Byte | FieldType::Ascii | FieldType::SByte | FieldType::Undefined => 1,
+            FieldType::Byte
+            | FieldType::Ascii
+            | FieldType::SByte
+            | FieldType::Undefined
+            | FieldType::Utf8 => 1,
             FieldType::Short | FieldType::SShort => 2,
             FieldType::Long | FieldType::SLong | FieldType::Float => 4,
             FieldType::Rational | FieldType::SRational | FieldType::Double => 8,
@@ -126,6 +136,12 @@ mod tests {
         assert_eq!(FieldType::from_code(13), None);
         assert_eq!(FieldType::Rational.size(), 8);
         assert_eq!(FieldType::Short.size(), 2);
+        // Exif 3.0 UTF-8 (code 129): a one-byte-per-element string type, decoded even in a
+        // classic-only build (it is not gated behind `bigtiff`).
+        assert_eq!(FieldType::from_code(129), Some(FieldType::Utf8));
+        assert_eq!(FieldType::Utf8.code(), 129);
+        assert_eq!(FieldType::Utf8.size(), 1);
+        assert_eq!(FieldType::from_code(128), None);
     }
 
     #[cfg(feature = "bigtiff")]

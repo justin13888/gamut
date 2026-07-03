@@ -38,6 +38,9 @@ pub enum Value {
     Float(Vec<f32>),
     /// `DOUBLE` — IEEE double-precision floats.
     Double(Vec<f64>),
+    /// `UTF8` — a NUL-terminated UTF-8 string (Exif 3.0 / CIPA DC-008; the terminator is not stored
+    /// here). Like [`Value::Ascii`] but the field's on-disk type is `129`, preserving non-ASCII text.
+    Utf8(String),
     /// `LONG8` — BigTIFF 64-bit unsigned integers.
     #[cfg(feature = "bigtiff")]
     Long8(Vec<u64>),
@@ -66,6 +69,7 @@ impl Value {
             Value::SRational(_) => FieldType::SRational,
             Value::Float(_) => FieldType::Float,
             Value::Double(_) => FieldType::Double,
+            Value::Utf8(_) => FieldType::Utf8,
             #[cfg(feature = "bigtiff")]
             Value::Long8(_) => FieldType::Long8,
             #[cfg(feature = "bigtiff")]
@@ -75,13 +79,14 @@ impl Value {
         }
     }
 
-    /// The `Count` of this value: the number of elements, or for `ASCII` the number of bytes
+    /// The `Count` of this value: the number of elements, or for `ASCII`/`UTF8` the number of bytes
     /// including the terminating NUL.
     #[must_use]
     pub fn count(&self) -> usize {
         match self {
             Value::Byte(v) | Value::Undefined(v) => v.len(),
-            Value::Ascii(s) => s.len() + 1,
+            // ASCII and UTF-8 both count the trailing NUL (Exif 3.0 / CIPA DC-008).
+            Value::Ascii(s) | Value::Utf8(s) => s.len() + 1,
             Value::Short(v) => v.len(),
             Value::Long(v) => v.len(),
             Value::Rational(v) => v.len(),
@@ -146,7 +151,8 @@ impl Value {
         let mut out = Vec::with_capacity(self.byte_len());
         match self {
             Value::Byte(v) | Value::Undefined(v) => out.extend_from_slice(v),
-            Value::Ascii(s) => {
+            // ASCII and UTF-8 serialise identically: the string bytes then a NUL terminator.
+            Value::Ascii(s) | Value::Utf8(s) => {
                 out.extend_from_slice(s.as_bytes());
                 out.push(0);
             }
@@ -257,6 +263,12 @@ impl Value {
                     .map_err(|_| Error::InvalidInput("TIFF: non-UTF-8 ASCII field"))?;
                 Value::Ascii(s.to_owned())
             }
+            FieldType::Utf8 => {
+                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+                let s = core::str::from_utf8(&bytes[..end])
+                    .map_err(|_| Error::InvalidInput("TIFF: invalid UTF-8 field"))?;
+                Value::Utf8(s.to_owned())
+            }
             FieldType::Short => Value::Short(u16s(bytes)),
             FieldType::SShort => Value::SShort(u16s(bytes).into_iter().map(|x| x as i16).collect()),
             FieldType::Long => Value::Long(u32s(bytes)),
@@ -315,6 +327,8 @@ mod tests {
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
             value_roundtrip(Value::Byte(vec![1, 2, 3]), order);
             value_roundtrip(Value::Ascii("gamut".to_owned()), order);
+            // Exif 3.0 UTF-8 (type 129): non-ASCII text must survive a decode/encode round-trip.
+            value_roundtrip(Value::Utf8("café — 日本語".to_owned()), order);
             value_roundtrip(Value::Short(vec![256, 257, 0xFFFF]), order);
             value_roundtrip(Value::Long(vec![0xDEAD_BEEF, 7]), order);
             value_roundtrip(Value::Rational(vec![(300, 1), (72, 1)]), order);
@@ -342,6 +356,9 @@ mod tests {
         // `count` / `byte_len` are otherwise only an internal `Vec::with_capacity` hint and a
         // round-trip-tolerated length, so pin them directly. ASCII counts the trailing NUL.
         assert_eq!(Value::Ascii("gamut".into()).count(), 6);
+        // UTF-8 counts bytes + NUL: "é" is two UTF-8 bytes, so "café" is 5 bytes + 1 NUL.
+        assert_eq!(Value::Utf8("café".into()).count(), 6);
+        assert_eq!(Value::Utf8("café".into()).byte_len(), 6);
         assert_eq!(Value::Short(vec![1, 2, 3]).count(), 3);
         assert_eq!(Value::Short(vec![1, 2, 3]).byte_len(), 6); // 3 * 2
         assert_eq!(Value::Ascii("ab".into()).byte_len(), 3); // 3 * 1

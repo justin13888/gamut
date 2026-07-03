@@ -1,7 +1,7 @@
 [package]
 name = "gamut-exif"
 description = "EXIF (Exif 3.0 / CIPA DC-008) image metadata parser and serializer, built on the shared TIFF/IFD core."
-version = "0.1.1"
+version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -18,3 +18,10 @@ workspace = true
 [dependencies]
 gamut-core.workspace = true
 gamut-ifd.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Differential conformance oracle: a vendored, statically-linked exiv2 exercising its EXIF
+# parser/serializer. Requires the third_party/exiv2 + third_party/expat submodules and a C++
+# toolchain; see tooling/exiv2-oracle.
+exiv2-oracle = { path = "../../tooling/exiv2-oracle" }
