@@ -27,3 +27,8 @@ gamut-iptc-oracle = { path = "../../tooling/gamut-iptc-oracle" }
 # Reads the vendored IPTC machine-readable tech reference in tests/techreference.rs, pinning the
 # hand-transcribed schema/tag tables to the spec.
 serde_json.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "iptc"
+harness = false

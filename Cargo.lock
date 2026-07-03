@@ -700,6 +700,7 @@ dependencies = [
 name = "gamut-iptc"
 version = "0.1.1"
 dependencies = [
+ "divan",
  "gamut-core",
  "gamut-iptc-oracle",
  "gamut-xmp",
