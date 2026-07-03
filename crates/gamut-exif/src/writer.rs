@@ -7,12 +7,10 @@
 //! IFD — so the round-trip `parse → write → parse` reproduces the directories with the source byte
 //! order preserved.
 
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
+use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, align_word, write};
 
 use crate::error::Result;
-use crate::exif::{
-    EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER, without_tags,
-};
+use crate::exif::{EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER};
 use crate::tag::ExifTag;
 use crate::thumbnail::Thumbnail;
 
@@ -85,9 +83,8 @@ impl ExifWriter {
 /// pointer offsets. An Interop directory implies an Exif directory to hold its pointer.
 fn build_image(exif: &Exif) -> Ifd {
     let exif_sub = if exif.exif_ifd().is_some() || exif.interop_ifd().is_some() {
-        let mut e = exif
-            .exif_ifd()
-            .map_or_else(Ifd::new, |e| without_tags(e, &[INTEROP_IFD_POINTER]));
+        let mut e = exif.exif_ifd().cloned().unwrap_or_default();
+        e.remove(INTEROP_IFD_POINTER);
         if let Some(interop) = exif.interop_ifd() {
             e.set_sub_ifd(INTEROP_IFD_POINTER, vec![interop.clone()]);
         }
@@ -96,7 +93,9 @@ fn build_image(exif: &Exif) -> Ifd {
         None
     };
 
-    let mut image = without_tags(exif.image(), &[EXIF_IFD_POINTER, GPS_IFD_POINTER]);
+    let mut image = exif.image().clone();
+    image.remove(EXIF_IFD_POINTER);
+    image.remove(GPS_IFD_POINTER);
     if let Some(e) = exif_sub {
         image.set_sub_ifd(EXIF_IFD_POINTER, vec![e]);
     }
@@ -137,7 +136,7 @@ fn write_with_thumbnail(
 
     // Pass 1: lay out the directories to learn where the JPEG will start (word-aligned).
     let planned = write(&tiff_file(order, vec![image.clone(), thumb_ifd.clone()]))?;
-    let jpeg_offset = even(planned.len());
+    let jpeg_offset = align_word(planned.len() as u64) as usize;
 
     // Pass 2: patch the now-known offset. Changing an inline LONG moves nothing, so the byte length
     // is identical to pass 1 and `jpeg_offset` still points just past the directories.
@@ -146,7 +145,7 @@ fn write_with_thumbnail(
         Value::Long(vec![jpeg_offset as u32]),
     );
     let mut bytes = write(&tiff_file(order, vec![image, thumb_ifd]))?;
-    debug_assert_eq!(jpeg_offset, even(bytes.len()));
+    debug_assert_eq!(jpeg_offset, align_word(bytes.len() as u64) as usize);
     bytes.resize(jpeg_offset, 0);
     bytes.extend_from_slice(jpeg);
     Ok(bytes)
@@ -159,11 +158,6 @@ fn tiff_file(order: ByteOrder, ifds: Vec<Ifd>) -> TiffFile {
         variant: Variant::Classic,
         ifds,
     }
-}
-
-/// Rounds `n` up to the next even (word) boundary, matching [`gamut_ifd::write`]'s value alignment.
-fn even(n: usize) -> usize {
-    n + (n & 1)
 }
 
 #[cfg(test)]

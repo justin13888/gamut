@@ -335,20 +335,6 @@ fn first_rational(value: &Value) -> Option<Rational> {
     }
 }
 
-/// Returns a copy of `ifd` with every field in `tags` removed.
-///
-/// [`gamut_ifd::Ifd`] exposes no in-place removal; the reader uses this to drop pointer tags after
-/// following them, and the writer to drop any hand-set pointer tags before re-synthesising them.
-pub(crate) fn without_tags(ifd: &Ifd, tags: &[u16]) -> Ifd {
-    let mut out = Ifd::new();
-    for field in ifd.fields() {
-        if !tags.contains(&field.tag) {
-            out.set(field.tag, field.value.clone());
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

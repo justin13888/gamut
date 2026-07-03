@@ -9,9 +9,7 @@
 use gamut_ifd::{ByteOrder, Ifd, Variant};
 
 use crate::error::{ExifError, Result};
-use crate::exif::{
-    EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER, without_tags,
-};
+use crate::exif::{EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER};
 use crate::tag::ExifTag;
 use crate::thumbnail::Thumbnail;
 
@@ -111,7 +109,7 @@ impl ExifReader {
         let Some(offset) = parent.get_u32(ptr) else {
             return Ok(None);
         };
-        *parent = without_tags(parent, &[ptr]);
+        parent.remove(ptr);
         match gamut_ifd::read_ifd_at(tiff, u64::from(offset), order, variant) {
             Ok(ifd) => Ok(Some(ifd)),
             Err(_) if !self.strict => Ok(None),
@@ -141,11 +139,10 @@ impl ExifReader {
         // The JPEGInterchangeFormat offset is structural — the bytes are captured above and the
         // writer re-synthesises the offset — so drop it from the stored directory (mirroring how the
         // sub-IFD pointer tags are stripped), leaving a value the model can't carry stale.
-        let ifd = if jpeg.is_some() {
-            without_tags(&ifd, &[ExifTag::JpegInterchangeFormat.tag_id()])
-        } else {
-            ifd
-        };
+        let mut ifd = ifd;
+        if jpeg.is_some() {
+            ifd.remove(ExifTag::JpegInterchangeFormat.tag_id());
+        }
         Ok(Thumbnail::from_parts(ifd, jpeg))
     }
 }
