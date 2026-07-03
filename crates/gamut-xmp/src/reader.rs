@@ -18,7 +18,7 @@ use quick_xml::name::{LocalName, QName, ResolveResult};
 use crate::error::{Result, XmpError};
 use crate::model::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
 use crate::namespace::{RDF_NAMESPACE, XML_NAMESPACE, XMPMETA_NAMESPACE};
-use crate::packet::split_packet;
+use crate::packet::XmpPacket;
 
 impl XmpMeta {
     /// Parses an XMP packet into a property graph.
@@ -27,15 +27,47 @@ impl XmpMeta {
     /// chunk, an AVIF `mime` item, a JPEG `APP1` payload, or a bare `rdf:RDF` / `x:xmpmeta` body),
     /// tolerating a leading UTF-8 byte-order mark.
     ///
+    /// This is exactly [`XmpPacket::scan`] followed by [`XmpPacket::parse`]; scan first instead
+    /// when the envelope matters (its writability and padding drive in-place editing).
+    ///
     /// # Errors
     ///
-    /// Returns an [`XmpError`] if the bytes are not UTF-8, the XML is malformed, there is no
+    /// Returns an [`XmpError`] if the bytes are not valid UTF-8 (or begin with a UTF-16/32
+    /// byte-order mark — only UTF-8 packets are supported), the XML is malformed, there is no
     /// `rdf:RDF` element, or the RDF/XML uses a construct XMP does not permit.
     pub fn from_packet(bytes: &[u8]) -> Result<XmpMeta> {
-        let split = split_packet(bytes)?;
-        let xml = core::str::from_utf8(split.inner)
-            .map_err(|_| XmpError::Encoding("packet is not valid UTF-8"))?;
-        interpret(&build_tree(xml)?)
+        XmpPacket::scan(bytes)?.parse()
+    }
+}
+
+impl XmpPacket {
+    /// Parses this packet's RDF/XML body into a property graph.
+    ///
+    /// # Examples
+    ///
+    /// Inspect the envelope, then edit in place, preserving the packet's writability and padding:
+    ///
+    /// ```
+    /// use gamut_xmp::{WellKnownNs, XmpPacket, XmpWriter};
+    ///
+    /// # let original = gamut_xmp::XmpMeta::new().to_packet();
+    /// let packet = XmpPacket::scan(&original)?;
+    /// let mut meta = packet.parse()?;
+    /// meta.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
+    /// let rewritten = XmpWriter::new()
+    ///     .writable(packet.writable)
+    ///     .padding(packet.padding)
+    ///     .serialize(&meta);
+    /// # assert!(!rewritten.is_empty());
+    /// # Ok::<(), gamut_xmp::XmpError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`XmpError`] if the body is malformed XML, has no `rdf:RDF` element, or uses an
+    /// RDF/XML construct XMP does not permit.
+    pub fn parse(&self) -> Result<XmpMeta> {
+        interpret(&build_tree(&self.body)?)
     }
 }
 
@@ -84,7 +116,11 @@ fn build_tree(xml: &str) -> Result<Element> {
     let mut root: Option<Element> = None;
 
     loop {
-        match reader.read_event().map_err(xml_error)? {
+        let event = reader.read_event().map_err(xml_error)?;
+        if matches!(event, Event::Eof) {
+            break;
+        }
+        match event {
             Event::Start(e) => stack.push(start_element(&reader, &e)?),
             Event::End(_) => {
                 let done = stack
@@ -107,8 +143,8 @@ fn build_tree(xml: &str) -> Result<Element> {
                 push_text(&mut stack, &text);
             }
             Event::GeneralRef(r) => push_text(&mut stack, &resolve_entity(&r)?),
-            Event::Eof => break,
-            // Declaration, processing instructions, comments, and DOCTYPE carry no XMP data.
+            // Declaration, processing instructions, comments, and DOCTYPE carry no XMP data
+            // (Eof exited above).
             _ => {}
         }
     }
@@ -613,6 +649,25 @@ mod tests {
     }
 
     #[test]
+    fn default_lang_on_description_is_ignored() {
+        // A default xml:lang on rdf:Description is not propagated to the properties it scopes.
+        // Adobe XMPCore behaves the same (pinned against the oracle in tests/oracle.rs); the
+        // intentional skip is documented in STATUS.md.
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\">\
+             <rdf:Description rdf:about=\"\" xml:lang=\"fr\">\
+             <dc:format>text/plain</dc:format></rdf:Description></rdf:RDF>"
+        );
+        let meta = parse(&xml);
+        let prop = meta.get(DC, "format").unwrap();
+        assert_eq!(prop.text(), Some("text/plain"));
+        assert!(
+            prop.qualifiers.is_empty(),
+            "no inherited xml:lang qualifier"
+        );
+    }
+
+    #[test]
     fn finds_rdf_inside_xmpmeta_wrapper() {
         let meta = parse(&format!(
             "<x:xmpmeta xmlns:x=\"{XMPMETA_NAMESPACE}\">{}</x:xmpmeta>",
@@ -627,6 +682,56 @@ mod tests {
             XmpMeta::from_packet(rdf("<dc:x rdf:parseType=\"Literal\"><b/></dc:x>").as_bytes())
                 .unwrap_err();
         assert!(matches!(err, XmpError::UnsupportedForm(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_parse_type_collection() {
+        // parseType="Collection" shares a branch with "Literal" but must surface its own name in
+        // the diagnostic (Part 1 §7.9 allows only "Resource").
+        let err = XmpMeta::from_packet(rdf("<dc:x rdf:parseType=\"Collection\"/>").as_bytes())
+            .unwrap_err();
+        assert!(
+            matches!(&err, XmpError::UnsupportedForm(m) if m.contains("Collection")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rdf_id_nodeid_and_xml_base_are_ignored() {
+        // The permissive read skips rdf:ID/rdf:nodeID/xml:base (RDF reification and base-URI
+        // machinery XMP does not use) rather than folding them into data — the documented posture.
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\">\
+             <rdf:Description rdf:about=\"\" rdf:ID=\"n1\" rdf:nodeID=\"n2\" \
+             xml:base=\"http://example.com/\">\
+             <dc:format rdf:ID=\"n3\">text/plain</dc:format>\
+             </rdf:Description></rdf:RDF>"
+        );
+        let meta = parse(&xml);
+        assert_eq!(meta.properties.len(), 1, "no spurious properties");
+        let prop = meta.get(DC, "format").unwrap();
+        assert_eq!(prop.text(), Some("text/plain"));
+        assert!(
+            prop.qualifiers.is_empty(),
+            "rdf:ID must not become a qualifier: {:?}",
+            prop.qualifiers
+        );
+    }
+
+    #[test]
+    fn multiple_descriptions_merge_into_one_graph() {
+        // Part 1 §7.4: rdf:RDF may hold several rdf:Description elements about the same
+        // resource; their properties form one graph.
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{RDF_NAMESPACE}\" xmlns:dc=\"{DC}\" xmlns:xmp=\"{XMP}\">\
+             <rdf:Description rdf:about=\"\"><dc:format>text/plain</dc:format></rdf:Description>\
+             <rdf:Description rdf:about=\"\"><xmp:Rating>3</xmp:Rating></rdf:Description>\
+             </rdf:RDF>"
+        );
+        let meta = parse(&xml);
+        assert_eq!(meta.properties.len(), 2);
+        assert_eq!(meta.get_text(DC, "format"), Some("text/plain"));
+        assert_eq!(meta.get_text(XMP, "Rating"), Some("3"));
     }
 
     #[test]
@@ -813,6 +918,31 @@ mod tests {
             matches!(XmpMeta::from_packet(xml.as_bytes()), Err(XmpError::Xml(_))),
             "a second root element must be rejected, not silently replace the first"
         );
+    }
+
+    #[test]
+    fn packet_parse_composes_with_scan() {
+        // from_packet ≡ scan ∘ parse; the two-step form additionally exposes the envelope.
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "format", "text/plain");
+        let bytes = meta.to_packet();
+
+        let packet = XmpPacket::scan(&bytes).expect("scan");
+        assert!(packet.writable, "default writer output is writable");
+        assert_eq!(
+            packet.parse().expect("parse"),
+            XmpMeta::from_packet(&bytes).expect("from_packet")
+        );
+    }
+
+    #[test]
+    fn packet_parse_reports_body_errors() {
+        let packet = XmpPacket {
+            body: "<html></html>".into(),
+            writable: false,
+            padding: 0,
+        };
+        assert!(matches!(packet.parse(), Err(XmpError::MissingRdf)));
     }
 
     #[test]

@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-xmp"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "exiv2-oracle",
  "gamut-core",

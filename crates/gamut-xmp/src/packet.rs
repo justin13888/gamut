@@ -2,8 +2,10 @@
 //!
 //! An embedded XMP packet is the RDF/XML body bracketed by `<?xpacket?>` processing instructions:
 //! `<?xpacket begin="…" id="…"?>` … body … optional whitespace padding … `<?xpacket end='r'|'w'?>`.
-//! [`XmpPacket::scan`] recovers the body and the `writable`/`padding` details from raw bytes; the
-//! reader uses the same logic (via [`split_packet`]) to feed the body to the XML parser.
+//! [`XmpPacket::scan`] recovers the body and the `writable`/`padding` details from raw bytes, and
+//! [`XmpPacket::parse`] turns the body into a graph — [`crate::XmpMeta::from_packet`] is exactly
+//! that composition. Scanning first is how an in-place editor honors the envelope: parse, modify,
+//! then re-serialize with the original `writable`/`padding` on a [`crate::XmpWriter`].
 
 use crate::error::{Result, XmpError};
 
@@ -15,7 +17,9 @@ const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 /// XMP is embedded as an `<?xpacket begin=… id=…?>` processing instruction, the `x:xmpmeta` /
 /// `rdf:RDF` body, then `<?xpacket end='r'|'w'?>`. A writable (`'w'`) packet carries trailing
 /// whitespace padding so it can be edited in place without rewriting the whole file. Build one from
-/// bytes with [`XmpPacket::scan`]; produce one from a graph with [`crate::XmpMeta::to_packet`].
+/// bytes with [`XmpPacket::scan`], parse its body into a graph with [`XmpPacket::parse`], and
+/// produce packet bytes from a graph with [`crate::XmpMeta::to_packet`] or a configured
+/// [`crate::XmpWriter`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmpPacket {
     /// The RDF/XML body between the opening and closing `xpacket` instructions, with surrounding
@@ -53,14 +57,14 @@ impl XmpPacket {
 }
 
 /// The result of locating the body inside a packet's wrapper.
-pub(crate) struct SplitPacket<'a> {
+struct SplitPacket<'a> {
     /// The RDF/XML body bytes (between the wrapper instructions, or the whole input if unwrapped),
     /// still including any surrounding whitespace — the XML parser ignores it.
-    pub(crate) inner: &'a [u8],
+    inner: &'a [u8],
     /// Whether the trailer requested in-place writability (`end='w'`).
-    pub(crate) writable: bool,
+    writable: bool,
     /// Count of trailing whitespace bytes in `inner` (the in-place edit padding).
-    pub(crate) padding: usize,
+    padding: usize,
 }
 
 /// Strips a leading byte-order mark, rejecting non-UTF-8 ones, then locates the packet body.
@@ -69,7 +73,7 @@ pub(crate) struct SplitPacket<'a> {
 ///
 /// Returns [`XmpError::Encoding`] for a UTF-16/UTF-32 byte-order mark (Part 1 §7.1: only UTF-8 is
 /// implemented).
-pub(crate) fn split_packet(bytes: &[u8]) -> Result<SplitPacket<'_>> {
+fn split_packet(bytes: &[u8]) -> Result<SplitPacket<'_>> {
     let bytes = strip_bom(bytes)?;
 
     let Some(header) = find(bytes, b"<?xpacket") else {
@@ -87,13 +91,16 @@ pub(crate) fn split_packet(bytes: &[u8]) -> Result<SplitPacket<'_>> {
     };
     let body_start = header + rel + 2;
 
-    // The trailer is the next "<?xpacket" after the body. Its only `w` is in `end="w"`
-    // (a read-only trailer says `end="r"`), so a byte check distinguishes writable from read-only.
+    // The trailer is the next "<?xpacket" after the body; the packet is writable only when its
+    // `end` attribute says so (`end="w"` in either quote style, Part 1 §7.3.2) — an unrelated `w`
+    // byte elsewhere in the instruction must not count.
     let (body_end, writable) = match find(&bytes[body_start..], b"<?xpacket") {
         Some(rel) => {
             let trailer = body_start + rel;
             let trailer_end = find(&bytes[trailer..], b"?>").map_or(bytes.len(), |e| trailer + e);
-            (trailer, find(&bytes[trailer..trailer_end], b"w").is_some())
+            let pi = &bytes[trailer..trailer_end];
+            let writable = find(pi, b"end=\"w\"").is_some() || find(pi, b"end='w'").is_some();
+            (trailer, writable)
         }
         None => (bytes.len(), false),
     };
@@ -190,6 +197,68 @@ mod tests {
             matches!(&err, XmpError::Encoding(m) if m.contains("byte-order mark")),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn rejects_utf16_le_and_utf32_be_boms() {
+        // Part 1 §7.1 also permits UTF-16 LE and UTF-32; every non-UTF-8 mark takes the
+        // BOM-specific rejection.
+        for bom in [&[0xFF, 0xFE][..], &[0x00, 0x00, 0xFE, 0xFF][..]] {
+            let mut bytes = bom.to_vec();
+            bytes.extend_from_slice(b"<rdf:RDF/>");
+            let err = XmpPacket::scan(&bytes).unwrap_err();
+            assert!(
+                matches!(&err, XmpError::Encoding(m) if m.contains("byte-order mark")),
+                "BOM {bom:02X?} must be rejected as a byte-order mark, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn utf32_le_bom_is_rejected_via_its_utf16_le_prefix() {
+        // UTF-32 LE (FF FE 00 00) begins with the UTF-16 LE mark, so the two-byte check
+        // catches it — pinned so the four-byte mark never slips through as "valid UTF-8".
+        let err = XmpPacket::scan(&[0xFF, 0xFE, 0x00, 0x00, b'<']).unwrap_err();
+        assert!(
+            matches!(&err, XmpError::Encoding(m) if m.contains("byte-order mark")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn single_quoted_trailer_is_detected() {
+        // §7.3.2 examples use double quotes, but XML permits either style.
+        let writable = "<?xpacket begin='' id='x'?><rdf:RDF/><?xpacket end='w'?>";
+        assert!(XmpPacket::scan(writable.as_bytes()).unwrap().writable);
+        let read_only = "<?xpacket begin='' id='x'?><rdf:RDF/><?xpacket end='r'?>";
+        assert!(!XmpPacket::scan(read_only.as_bytes()).unwrap().writable);
+    }
+
+    #[test]
+    fn unrelated_w_byte_in_the_trailer_is_not_writable() {
+        // Writability comes from the end attribute alone — a stray `w` elsewhere in the
+        // instruction (here in a nonstandard extra attribute) must not flip it.
+        let s = "<?xpacket begin=\"\" id=\"x\"?><rdf:RDF/><?xpacket end=\"r\" note=\"w\"?>";
+        assert!(!XmpPacket::scan(s.as_bytes()).unwrap().writable);
+    }
+
+    #[test]
+    fn header_without_trailer_is_read_only() {
+        // A truncated wrapper (header but no trailer) still yields the body, as read-only.
+        let pkt = XmpPacket::scan(b"<?xpacket begin=\"\" id=\"x\"?><rdf:RDF/>").unwrap();
+        assert_eq!(pkt.body, "<rdf:RDF/>");
+        assert!(!pkt.writable);
+    }
+
+    #[test]
+    fn accepts_bom_character_in_the_begin_attribute() {
+        // §7.3.2 recommends begin="\u{FEFF}" — packets from Adobe tools carry the BOM character
+        // inside the attribute value, which must not confuse body extraction.
+        let s = "<?xpacket begin=\"\u{FEFF}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\
+                 <rdf:RDF/><?xpacket end=\"r\"?>";
+        let pkt = XmpPacket::scan(s.as_bytes()).unwrap();
+        assert_eq!(pkt.body, "<rdf:RDF/>");
+        assert!(!pkt.writable);
     }
 
     #[test]

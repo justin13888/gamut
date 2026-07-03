@@ -257,7 +257,7 @@ mod tests {
         let pm =
             IimXmpReconciler::with_policy(ConflictPolicy::IimWins).merge(Some(&iim), Some(&xmp));
         assert_eq!(pm.city(), Some("Oslo"));
-        assert_eq!(pm.properties.len(), 1);
+        assert_eq!(pm.xmp.properties.len(), 1);
     }
 
     #[test]

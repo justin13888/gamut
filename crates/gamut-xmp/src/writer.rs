@@ -9,14 +9,15 @@
 //!   `rdf:parseType="Resource"`, or `rdf:_n` items);
 //! - `xml:lang` as an attribute, other qualifiers via the `rdf:value` form (§7.8);
 //! - all `xmlns` declarations on `rdf:RDF`, ordered `rdf` first then alphabetically by prefix, with
-//!   unknown namespaces given stable `ns1`, `ns2`, … prefixes;
+//!   unknown namespaces given stable `ns1`, `ns2`, … prefixes unless a preferred prefix is
+//!   registered via [`XmpWriter::with_namespace`];
 //! - one-space-per-level indentation, UTF-8, no byte-order mark.
 //!
 //! [`XmpMeta::to_packet`] / [`XmpMeta::to_rdf`] are the shortcuts; [`XmpWriter`] exposes the knobs
-//! (the `x:xmpmeta` wrapper, writability, and padding).
+//! (the `x:xmpmeta` wrapper, writability, padding, and namespace prefixes).
 
 use crate::model::{XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue};
-use crate::namespace::{RDF_NAMESPACE, WellKnownNs, XML_NAMESPACE, XMPMETA_NAMESPACE};
+use crate::namespace::{Namespace, RDF_NAMESPACE, WellKnownNs, XML_NAMESPACE, XMPMETA_NAMESPACE};
 
 /// The fixed packet identifier Adobe specifies for the `<?xpacket?>` header (Part 1 §7.3.2).
 const XPACKET_ID: &str = "W5M0MpCehiHzreSzNTczkc9d";
@@ -37,6 +38,8 @@ pub struct XmpWriter {
     writable: bool,
     /// Trailing padding for a writable packet, in bytes.
     padding: usize,
+    /// Registered namespace prefixes, in registration order (a later registration wins).
+    namespaces: Vec<Namespace>,
 }
 
 impl Default for XmpWriter {
@@ -45,6 +48,7 @@ impl Default for XmpWriter {
             wrap_xmpmeta: true,
             writable: true,
             padding: DEFAULT_PADDING,
+            namespaces: Vec::new(),
         }
     }
 }
@@ -78,10 +82,39 @@ impl XmpWriter {
         self
     }
 
+    /// Registers a preferred serialization prefix for a namespace URI.
+    ///
+    /// By default a namespace outside [`WellKnownNs`] gets a synthesized `ns1`, `ns2`, … prefix;
+    /// a registration overrides that choice, and may also override a well-known prefix. A
+    /// registered namespace is only declared when the graph actually uses it.
+    ///
+    /// The writer stays infallible, so a registration that cannot be honored is skipped instead
+    /// of failing: for the same URI the last registration wins, and a prefix is unusable when it
+    /// is the reserved `rdf` or `xml`, matches the synthesized pattern `ns<digits>` (reserved so
+    /// synthesis can never collide), is not a simple XML name (an ASCII letter or `_`, then ASCII
+    /// letters, digits, `-`, `_`, or `.`), or is already assigned to a different URI in the same
+    /// document. Prefixes are serialization cosmetics — the parsed graph is identical either way.
+    ///
+    /// ```
+    /// use gamut_xmp::{Namespace, XmpMeta, XmpWriter};
+    ///
+    /// let mut meta = XmpMeta::new();
+    /// meta.set_text("http://example.com/vocab/", "kind", "demo");
+    /// let rdf = XmpWriter::new()
+    ///     .with_namespace(Namespace::new("http://example.com/vocab/", "vocab"))
+    ///     .serialize_body(&meta);
+    /// assert!(rdf.contains("<vocab:kind>demo</vocab:kind>"));
+    /// ```
+    #[must_use]
+    pub fn with_namespace(mut self, namespace: impl Into<Namespace>) -> Self {
+        self.namespaces.push(namespace.into());
+        self
+    }
+
     /// Serializes the canonical RDF/XML body (no `<?xpacket?>` wrapper).
     #[must_use]
     pub fn serialize_body(&self, meta: &XmpMeta) -> String {
-        let ns = NsMap::gather(meta);
+        let ns = NsMap::gather(meta, &self.namespaces);
         let mut out = String::new();
 
         let rdf_level = if self.wrap_xmpmeta {
@@ -162,17 +195,24 @@ impl XmpMeta {
 // Namespace gathering and prefix assignment.
 // ---------------------------------------------------------------------------------------------------
 
-/// Maps the data namespaces used in a graph to serialization prefixes (well-known, else `nsN`).
-struct NsMap {
+/// Maps the data namespaces used in a graph to serialization prefixes (registered, else
+/// well-known, else `nsN`).
+struct NsMap<'a> {
     /// `(uri, prefix)` for each data namespace, in first-encounter order.
     entries: Vec<(String, String)>,
+    /// Prefixes registered on the writer, consulted before the well-known table.
+    registered: &'a [Namespace],
+    /// How many synthesized `nsN` prefixes have been handed out.
+    synthesized: usize,
 }
 
-impl NsMap {
+impl<'a> NsMap<'a> {
     /// Walks `meta`, collecting every data namespace and assigning it a prefix.
-    fn gather(meta: &XmpMeta) -> NsMap {
+    fn gather(meta: &XmpMeta, registered: &'a [Namespace]) -> NsMap<'a> {
         let mut map = NsMap {
             entries: Vec::new(),
+            registered,
+            synthesized: 0,
         };
         for property in &meta.properties {
             map.visit_property(property);
@@ -209,6 +249,10 @@ impl NsMap {
 
     /// Records a namespace URI, assigning it a prefix. `rdf:` and `xml:` are handled implicitly and
     /// never enter the map.
+    ///
+    /// Resolution order: the last usable registration for the URI, then the well-known table, then
+    /// a synthesized `nsN`. Each tier is skipped when its prefix is already assigned to a different
+    /// URI, so the document always stays well-formed.
     fn add(&mut self, uri: &str) {
         if uri == RDF_NAMESPACE || uri == XML_NAMESPACE {
             return;
@@ -216,18 +260,33 @@ impl NsMap {
         if self.entries.iter().any(|(u, _)| u == uri) {
             return;
         }
-        let prefix = WellKnownNs::from_uri(uri).map_or_else(
-            || {
-                let n = self
-                    .entries
-                    .iter()
-                    .filter(|(u, _)| WellKnownNs::from_uri(u).is_none())
-                    .count();
-                format!("ns{}", n + 1)
-            },
-            |well_known| well_known.prefix().to_owned(),
-        );
+        let registered = self
+            .registered
+            .iter()
+            .rev()
+            .find(|ns| ns.uri == uri)
+            .map(|ns| ns.prefix.clone())
+            .filter(|p| is_usable_prefix(p) && !self.prefix_taken(p));
+        let prefix = registered
+            .or_else(|| {
+                WellKnownNs::from_uri(uri)
+                    .map(|well_known| well_known.prefix().to_owned())
+                    .filter(|p| !self.prefix_taken(p))
+            })
+            .unwrap_or_else(|| self.next_synthesized());
         self.entries.push((uri.to_owned(), prefix));
+    }
+
+    /// Whether a prefix is already assigned to some URI in this document.
+    fn prefix_taken(&self, prefix: &str) -> bool {
+        self.entries.iter().any(|(_, p)| p == prefix)
+    }
+
+    /// The next synthesized prefix (`ns1`, `ns2`, …). Never collides: the `ns<digits>` pattern is
+    /// reserved (unusable for registrations) and no well-known prefix matches it.
+    fn next_synthesized(&mut self) -> String {
+        self.synthesized += 1;
+        format!("ns{}", self.synthesized)
     }
 
     /// The serialization prefix for a namespace URI.
@@ -405,6 +464,29 @@ fn is_lang(qualifier: &XmpProperty) -> bool {
     qualifier.namespace == XML_NAMESPACE && qualifier.name == "lang"
 }
 
+/// Whether a registered prefix can be used in serialization: `rdf` and `xml` are reserved, the
+/// `ns<digits>` pattern is reserved for synthesized prefixes (so synthesis can never collide),
+/// and the prefix must be a simple XML name (an ASCII letter or `_`, then ASCII letters, digits,
+/// `-`, `_`, or `.`) so the emitted document stays well-formed.
+fn is_usable_prefix(prefix: &str) -> bool {
+    if prefix == "rdf" || prefix == "xml" || is_synthesized_pattern(prefix) {
+        return false;
+    }
+    let mut chars = prefix.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Whether a prefix matches the reserved synthesized pattern `ns<digits>`.
+fn is_synthesized_pattern(prefix: &str) -> bool {
+    prefix
+        .strip_prefix("ns")
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+}
+
 /// The `xml:lang` value among a qualifier list, if any.
 fn lang_of(qualifiers: &[XmpProperty]) -> Option<&str> {
     qualifiers
@@ -421,18 +503,28 @@ fn indent(out: &mut String, level: usize) {
 }
 
 /// Appends `text` with the markup-significant characters escaped (Part 1 §7.5; never CDATA).
+///
+/// A carriage return is escaped as `&#xD;` — XML 1.0 line-ending normalization would otherwise
+/// rewrite it to a line feed on the next parse, breaking the parse∘serialize fixed point (the
+/// canonical-XML rule; XMPCore escapes the same way).
 fn push_escaped_text(out: &mut String, text: &str) {
     for c in text.chars() {
         match c {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#xD;"),
             _ => out.push(c),
         }
     }
 }
 
-/// Appends an attribute value with markup characters and the double quote escaped.
+/// Appends an attribute value with markup characters, the double quote, and whitespace control
+/// characters escaped.
+///
+/// Tab, line feed, and carriage return are escaped as character references — XML 1.0
+/// attribute-value normalization folds the literal characters to spaces on the next parse, which
+/// would corrupt the value (the canonical-XML rule; XMPCore escapes the same way).
 fn push_escaped_attr(out: &mut String, text: &str) {
     for c in text.chars() {
         match c {
@@ -440,6 +532,9 @@ fn push_escaped_attr(out: &mut String, text: &str) {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
+            '\t' => out.push_str("&#x9;"),
+            '\n' => out.push_str("&#xA;"),
+            '\r' => out.push_str("&#xD;"),
             _ => out.push(c),
         }
     }
@@ -663,6 +758,187 @@ mod tests {
         assert!(
             !out.contains("xml:lang"),
             "xml:space must not become a language: {out}"
+        );
+    }
+
+    #[test]
+    fn registered_namespace_replaces_the_synthesized_prefix() {
+        let mut meta = XmpMeta::new();
+        meta.set_text("http://example.com/vocab/", "kind", "demo");
+        let out = XmpWriter::new()
+            .wrap_xmpmeta(false)
+            .with_namespace(Namespace::new("http://example.com/vocab/", "vocab"))
+            .serialize_body(&meta);
+        assert!(
+            out.contains("xmlns:vocab=\"http://example.com/vocab/\""),
+            "got:\n{out}"
+        );
+        assert!(out.contains("<vocab:kind>demo</vocab:kind>"), "got:\n{out}");
+        assert!(
+            !out.contains("ns1"),
+            "no synthesized prefix once registered: {out}"
+        );
+    }
+
+    #[test]
+    fn registered_namespace_overrides_a_well_known_prefix() {
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "format", "text/plain");
+        let out = XmpWriter::new()
+            .wrap_xmpmeta(false)
+            .with_namespace(Namespace::new(DC, "dublin"))
+            .serialize_body(&meta);
+        assert!(
+            out.contains("<dublin:format>text/plain</dublin:format>"),
+            "got:\n{out}"
+        );
+        assert!(
+            !out.contains("xmlns:dc="),
+            "the well-known prefix is overridden: {out}"
+        );
+    }
+
+    #[test]
+    fn last_registration_for_a_uri_wins() {
+        let mut meta = XmpMeta::new();
+        meta.set_text("http://example.com/vocab/", "kind", "demo");
+        let out = XmpWriter::new()
+            .wrap_xmpmeta(false)
+            .with_namespace(Namespace::new("http://example.com/vocab/", "one"))
+            .with_namespace(Namespace::new("http://example.com/vocab/", "two"))
+            .serialize_body(&meta);
+        assert!(out.contains("<two:kind>"), "got:\n{out}");
+        assert!(!out.contains("one:"), "got:\n{out}");
+    }
+
+    #[test]
+    fn reserved_and_malformed_prefixes_are_ignored() {
+        // rdf/xml and the synthesized ns<digits> pattern are reserved; an empty or non-XML-name
+        // prefix would break well-formedness. Each unusable registration falls back to the
+        // synthesized tier.
+        for bad in [
+            "rdf",
+            "xml",
+            "ns1",
+            "ns42",
+            "",
+            "has space",
+            "1digit",
+            "a:b",
+        ] {
+            let mut meta = XmpMeta::new();
+            meta.set_text("http://example.com/vocab/", "kind", "demo");
+            let out = XmpWriter::new()
+                .wrap_xmpmeta(false)
+                .with_namespace(Namespace::new("http://example.com/vocab/", bad))
+                .serialize_body(&meta);
+            assert!(
+                out.contains("<ns1:kind>demo</ns1:kind>"),
+                "prefix {bad:?} must be ignored, got:\n{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn colliding_registration_is_ignored() {
+        // The registered prefix `dc` is already assigned to Dublin Core (encountered first), so
+        // the second URI falls back to a synthesized prefix instead of emitting a duplicate.
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "format", "text/plain");
+        meta.set_text("http://example.com/vocab/", "kind", "demo");
+        let out = XmpWriter::new()
+            .wrap_xmpmeta(false)
+            .with_namespace(Namespace::new("http://example.com/vocab/", "dc"))
+            .serialize_body(&meta);
+        assert!(out.contains("<dc:format>"), "got:\n{out}");
+        assert!(out.contains("<ns1:kind>"), "got:\n{out}");
+    }
+
+    #[test]
+    fn well_known_prefix_dodges_a_registration_that_took_it() {
+        // The registration claims `dc` for a custom URI (encountered first); Dublin Core then
+        // cannot use its conventional prefix and falls back to a synthesized one.
+        let mut meta = XmpMeta::new();
+        meta.set_text("http://example.com/vocab/", "kind", "demo");
+        meta.set_text(DC, "format", "text/plain");
+        let out = XmpWriter::new()
+            .wrap_xmpmeta(false)
+            .with_namespace(Namespace::new("http://example.com/vocab/", "dc"))
+            .serialize_body(&meta);
+        assert!(out.contains("<dc:kind>demo</dc:kind>"), "got:\n{out}");
+        assert!(
+            out.contains("<ns1:format>text/plain</ns1:format>"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn unused_registration_is_not_declared() {
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "format", "text/plain");
+        let out = XmpWriter::new()
+            .wrap_xmpmeta(false)
+            .with_namespace(Namespace::new("http://example.com/vocab/", "vocab"))
+            .serialize_body(&meta);
+        assert!(
+            !out.contains("vocab"),
+            "unused namespaces stay undeclared: {out}"
+        );
+    }
+
+    #[test]
+    fn synthesized_pattern_prefixes_are_reserved() {
+        // ns<digits> is reserved for the synthesizer, so a registration claiming ns7 is ignored
+        // and numbering stays sequential — synthesized names can never collide by construction.
+        // A prefix merely *starting* with ns ("nsx") is not reserved.
+        let mut meta = XmpMeta::new();
+        meta.set_text("http://example.com/a/", "x", "1");
+        meta.set_text("http://example.com/b/", "y", "2");
+        let out = XmpWriter::new()
+            .wrap_xmpmeta(false)
+            .with_namespace(Namespace::new("http://example.com/a/", "ns7"))
+            .with_namespace(Namespace::new("http://example.com/b/", "nsx"))
+            .serialize_body(&meta);
+        assert!(
+            out.contains("<ns1:x>1</ns1:x>"),
+            "ns7 must be ignored, got:\n{out}"
+        );
+        assert!(
+            out.contains("<nsx:y>2</nsx:y>"),
+            "nsx is a legal prefix, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn well_known_ns_registers_directly() {
+        // `impl From<WellKnownNs> for Namespace` lets a standard schema pass straight in;
+        // registering its conventional prefix is a no-op on the output.
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "format", "text/plain");
+        let registered = XmpWriter::new()
+            .wrap_xmpmeta(false)
+            .with_namespace(WellKnownNs::DublinCore)
+            .serialize_body(&meta);
+        let plain = XmpWriter::new().wrap_xmpmeta(false).serialize_body(&meta);
+        assert_eq!(registered, plain);
+    }
+
+    #[test]
+    fn control_characters_are_escaped_as_character_references() {
+        // CR in text, and TAB/LF/CR in attribute values, must leave as character references —
+        // a literal CR is normalized to LF (text) and literal TAB/LF/CR to spaces (attributes)
+        // by any conformant XML parse, silently corrupting the value.
+        let out = body(vec![
+            XmpProperty::new(DC, "description", XmpValue::Simple("a\rb\nc\td".into())),
+            XmpProperty::new(XMP, "BaseURL", XmpValue::Uri("u\tv\nw\rx".into())),
+        ]);
+        assert!(
+            out.contains("<dc:description>a&#xD;b\nc\td</dc:description>"),
+            "text escapes CR only (LF and TAB are literal-safe in text): {out}"
+        );
+        assert!(
+            out.contains("rdf:resource=\"u&#x9;v&#xA;w&#xD;x\""),
+            "attributes escape TAB, LF, and CR: {out}"
         );
     }
 
