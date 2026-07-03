@@ -116,7 +116,11 @@ fn build_tree(xml: &str) -> Result<Element> {
     let mut root: Option<Element> = None;
 
     loop {
-        match reader.read_event().map_err(xml_error)? {
+        let event = reader.read_event().map_err(xml_error)?;
+        if matches!(event, Event::Eof) {
+            break;
+        }
+        match event {
             Event::Start(e) => stack.push(start_element(&reader, &e)?),
             Event::End(_) => {
                 let done = stack
@@ -139,8 +143,8 @@ fn build_tree(xml: &str) -> Result<Element> {
                 push_text(&mut stack, &text);
             }
             Event::GeneralRef(r) => push_text(&mut stack, &resolve_entity(&r)?),
-            Event::Eof => break,
-            // Declaration, processing instructions, comments, and DOCTYPE carry no XMP data.
+            // Declaration, processing instructions, comments, and DOCTYPE carry no XMP data
+            // (Eof exited above).
             _ => {}
         }
     }
