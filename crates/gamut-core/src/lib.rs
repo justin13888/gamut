@@ -21,6 +21,33 @@
 //! - **The length invariant lives on the buffers, not on [`Dimensions`].** [`Dimensions`] is a plain
 //!   value type with public fields; non-emptiness and `len == width * height * channels` are
 //!   enforced once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs receive a known-good buffer.
+//!
+//! # Example
+//!
+//! Drive any codec through the shared [`EncodeImage`] trait, handing it a branded, already-validated
+//! [`ImageRef`]:
+//!
+//! ```
+//! use gamut_core::{Dimensions, EncodeImage, ImageRef, Pixel, Result, Rgb8};
+//!
+//! // A toy encoder; a real codec would compress `image.as_samples()` instead of copying it.
+//! struct RawEncoder;
+//! impl EncodeImage<Rgb8> for RawEncoder {
+//!     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
+//!         let start = out.len();
+//!         out.extend_from_slice(image.as_samples()); // input is pre-validated by `ImageRef::new`
+//!         Ok(out.len() - start)
+//!     }
+//! }
+//!
+//! let dims = Dimensions::new(2, 2).unwrap();
+//! let pixels = vec![0u8; dims.sample_count(Rgb8::CHANNELS).unwrap()];
+//! let image = ImageRef::<Rgb8>::new(&pixels, dims).unwrap();
+//!
+//! let mut out = Vec::new();
+//! let written = RawEncoder.encode_image(image, &mut out).unwrap();
+//! assert_eq!(written, 2 * 2 * 3);
+//! ```
 #![forbid(unsafe_code)]
 
 mod image;
