@@ -181,8 +181,9 @@ impl Exposure {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `2^stops` is not a finite, strictly positive gain (i.e.
-    /// `stops` is NaN or large enough to overflow).
+    /// Returns [`Error::InvalidInput`] if `2^stops` is not a finite, strictly positive gain: when
+    /// `stops` is NaN, large enough that the gain overflows to infinity (≥ 128), or negative
+    /// enough that it underflows to zero (≲ −150).
     pub fn from_stops(stops: f32) -> Result<Self> {
         Self::new(stops.exp2())
     }
@@ -317,8 +318,10 @@ const DRAGO_LDMAX_NITS: f32 = 100.0;
 ///
 /// Needs the scene's maximum luminance, so there is no `Default`. `map(0) == 0` and
 /// `map(world_max) == 1`. For `bias < 0.7` the output may exceed `1.0` (the display clamps to
-/// `Ldmax`); `map` is a faithful, clamp-free transcription of the paper's Eq. (4). See
-/// `references/tonemap/README.md`.
+/// `Ldmax`); `map` is a faithful, clamp-free transcription of the paper's Eq. (4). Inputs are
+/// meaningful on the paper's domain `[0, world_max]` — far beyond it the output stays finite,
+/// non-negative, and non-NaN, but the curve no longer tracks the model (monotonicity is only
+/// promised on the domain). See `references/tonemap/README.md`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Drago {
     world_max: f32,
