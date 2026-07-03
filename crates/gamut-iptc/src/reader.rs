@@ -1,4 +1,4 @@
-//! The IPTC reader — the convenient entry point for decoding IPTC metadata.
+//! The IPTC reader — the read-side entry point: decode the legacy carrier and merge carriers.
 
 use gamut_core::Result;
 use gamut_xmp::XmpMeta;
@@ -6,16 +6,47 @@ use gamut_xmp::XmpMeta;
 use crate::iim::IimBlock;
 use crate::irb::PhotoshopIrb;
 use crate::photo_metadata::PhotoMetadata;
-use crate::reconcile::{ConflictPolicy, IimXmpReconciler};
+use crate::reconcile;
+
+/// Which carrier wins when both hold a mapped field with differing values.
+///
+/// The IPTC guidelines call for keeping the carriers in sync but prescribe no single winner;
+/// this policy is gamut's explicit knob. Marked `#[non_exhaustive]`: finer-grained policies may
+/// be added post-1.0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ConflictPolicy {
+    /// The modern XMP value wins (the default; XMP is the authoritative modern carrier, matching
+    /// exiv2/exiftool de-facto behaviour).
+    #[default]
+    XmpWins,
+    /// The legacy IIM value wins.
+    IimWins,
+}
+
+/// A per-field disagreement between the two carriers, reported by [`IptcReader::conflicts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FieldConflict {
+    /// The XMP property name of the field in conflict (e.g. `City`).
+    pub field: &'static str,
+    /// The value(s) read from the IIM carrier.
+    pub iim: Vec<String>,
+    /// The value(s) read from the XMP carrier.
+    pub xmp: Vec<String>,
+}
 
 /// Reader for IPTC metadata.
 ///
 /// - [`IptcReader::read_irb`] / [`IimBlock::parse`] decode the legacy IIM carrier.
-/// - [`IptcReader::read_xmp`] interprets a parsed XMP graph as IPTC Photo Metadata.
-/// - [`IptcReader::read`] merges whichever carriers are present into one view, applying the reader's
-///   [`ConflictPolicy`].
+/// - [`IptcReader::read`] merges whichever carriers are present into one [`PhotoMetadata`] view,
+///   applying the reader's [`ConflictPolicy`]: XMP-only properties are preserved, an IIM-only
+///   mapped field is adopted, and a disagreement is resolved by the policy.
+/// - [`IptcReader::conflicts`] reports the disagreements without resolving them.
 ///
-/// Obtaining an [`XmpMeta`] from raw XMP packet bytes is [`gamut_xmp`]'s responsibility (issue #34).
+/// Reader inputs are the *carriers* ([`IimBlock`], [`XmpMeta`]); [`PhotoMetadata`] is the unified
+/// output. Obtaining an [`XmpMeta`] from raw XMP packet bytes is [`gamut_xmp`]'s responsibility
+/// (issue #34); interpreting a graph you already hold is [`PhotoMetadata::from_xmp`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct IptcReader {
     policy: ConflictPolicy,
@@ -28,10 +59,11 @@ impl IptcReader {
         Self::default()
     }
 
-    /// Creates a reader with an explicit conflict policy for [`IptcReader::read`].
+    /// Sets the conflict policy applied by [`IptcReader::read`] and returns the reader.
     #[must_use]
-    pub fn with_policy(policy: ConflictPolicy) -> Self {
-        Self { policy }
+    pub fn policy(mut self, policy: ConflictPolicy) -> Self {
+        self.policy = policy;
+        self
     }
 
     /// Parses a Photoshop image-resource (`8BIM`) stream and decodes the legacy IPTC-IIM datasets
@@ -50,19 +82,19 @@ impl IptcReader {
             .transpose()
     }
 
-    /// Interprets an already-parsed XMP graph as IPTC Photo Metadata (the `dc:`/`photoshop:`/
-    /// `Iptc4xmp*:` properties).
-    #[must_use]
-    pub fn read_xmp(&self, meta: &XmpMeta) -> PhotoMetadata {
-        PhotoMetadata::from_xmp(meta)
-    }
-
     /// Merges whichever carriers are supplied into one unified [`PhotoMetadata`] view, applying the
     /// reader's conflict policy.
     #[must_use]
     pub fn read(&self, iim: Option<&IimBlock>, xmp: Option<&XmpMeta>) -> PhotoMetadata {
         let pm = xmp.map(PhotoMetadata::from_xmp);
-        IimXmpReconciler::with_policy(self.policy).merge(iim, pm.as_ref())
+        reconcile::merge(self.policy, iim, pm.as_ref())
+    }
+
+    /// Reports the mapped fields on which the two carriers disagree (both present, differing
+    /// values), without resolving them.
+    #[must_use]
+    pub fn conflicts(&self, iim: &IimBlock, xmp: &XmpMeta) -> Vec<FieldConflict> {
+        reconcile::conflicts(iim, &PhotoMetadata::from_xmp(xmp))
     }
 }
 
@@ -96,12 +128,6 @@ mod tests {
     }
 
     #[test]
-    fn read_xmp_extracts_photo_metadata() {
-        let meta = xmp_with_city("Tokyo");
-        assert_eq!(IptcReader::new().read_xmp(&meta).city(), Some("Tokyo"));
-    }
-
-    #[test]
     fn read_merges_with_policy() {
         let iim = IimBlock {
             datasets: vec![IimDataSet {
@@ -117,10 +143,33 @@ mod tests {
             Some("Tokyo")
         );
         assert_eq!(
-            IptcReader::with_policy(ConflictPolicy::IimWins)
+            IptcReader::new()
+                .policy(ConflictPolicy::IimWins)
                 .read(Some(&iim), Some(&meta))
                 .city(),
             Some("Kyoto")
+        );
+    }
+
+    #[test]
+    fn conflicts_reports_carrier_disagreements() {
+        let iim = IimBlock {
+            datasets: vec![IimDataSet {
+                record: 2,
+                dataset: 90,
+                data: b"Kyoto".to_vec(),
+            }],
+        };
+        let conflicts = IptcReader::new().conflicts(&iim, &xmp_with_city("Tokyo"));
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].field, "City");
+        assert_eq!(conflicts[0].iim, vec!["Kyoto"]);
+        assert_eq!(conflicts[0].xmp, vec!["Tokyo"]);
+        // Agreeing carriers report nothing.
+        assert!(
+            IptcReader::new()
+                .conflicts(&iim, &xmp_with_city("Kyoto"))
+                .is_empty()
         );
     }
 }

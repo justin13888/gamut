@@ -23,7 +23,7 @@ resource stream (`PhotoshopIrb`), the IIM dataset stream (`IimBlock` / `IimDataS
 text with the coded character set (`IimCharset`):
 
 ```rust
-use gamut_iptc::{IimBlock, IimCharset, IimDataSet, IptcReader, IptcWriter};
+use gamut_iptc::{IimBlock, IimCharset, IimDataSet, IptcReader, PhotoshopIrb};
 
 let block = IimBlock {
     datasets: vec![
@@ -31,7 +31,7 @@ let block = IimBlock {
         IimDataSet { record: 2, dataset: 25, data: b"sky".to_vec() },  // Keywords
     ],
 };
-let irb = IptcWriter::new().write_irb(&block)?;                        // 8BIM 0x0404 resource
+let irb = PhotoshopIrb::with_iptc(block.encode()?).encode()?;          // 8BIM 0x0404 resource
 let read = IptcReader::new().read_irb(&irb)?.expect("0x0404 present");
 let charset = IimCharset::detect(&read)?;                              // 1:90, default Latin-1
 assert_eq!(charset.decode(&read.datasets[1].data)?, "sky");
@@ -41,18 +41,22 @@ assert_eq!(charset.decode(&read.datasets[1].data)?, "sky");
 `IimTagInfo::lookup(record, dataset)` resolves a dataset's name and wire constraints.
 
 The modern IPTC Photo Metadata path models Core fields as XMP properties (`PhotoMetadata`, with typed
-accessors for creator, location, rights, keywords, …), and `IimXmpReconciler` merges the two carriers
-into one view — `IptcReader::read` does this for you:
+accessors for creator, location, rights, keywords, …). `IptcReader::read` merges the two carriers
+into one view, and `IptcWriter` projects a view back to the legacy carrier:
 
 ```rust
-use gamut_iptc::{IimBlock, IimDataSet, IptcReader, ConflictPolicy};
+use gamut_iptc::{IimBlock, IimDataSet, IptcReader, IptcWriter, ConflictPolicy};
 
 let iim = IimBlock { datasets: vec![
     IimDataSet { record: 2, dataset: 90, data: b"Lyon".to_vec() }, // City
 ] };
 // When IIM and XMP disagree, the policy decides; XMP wins by default.
-let merged = IptcReader::with_policy(ConflictPolicy::IimWins).read(Some(&iim), None);
+let merged = IptcReader::new().policy(ConflictPolicy::IimWins).read(Some(&iim), None);
 assert_eq!(merged.city(), Some("Lyon"));
+
+// ...and back: PhotoMetadata -> 8BIM resource stream (None if there is nothing to embed).
+let irb = IptcWriter::new().write_irb(&merged)?.expect("City is present");
+# Ok::<(), gamut_core::Error>(())
 ```
 
 `gamut-iptc` operates on the in-memory XMP property graph; parsing/serializing the XMP *packet bytes*

@@ -48,11 +48,13 @@ impl PhotoMetadata {
         }
     }
 
-    /// The IPTC properties as XMP properties, ready to merge into an [`XmpMeta`] for serialization
-    /// by [`gamut_xmp`].
+    /// The IPTC properties as an XMP graph, ready for serialization by [`gamut_xmp`] (or merging
+    /// into a larger graph). The symmetric inverse of [`PhotoMetadata::from_xmp`].
     #[must_use]
-    pub fn to_xmp_properties(&self) -> Vec<XmpProperty> {
-        self.properties.clone()
+    pub fn to_xmp(&self) -> XmpMeta {
+        XmpMeta {
+            properties: self.properties.clone(),
+        }
     }
 
     fn find(&self, ns: &str, name: &str) -> Option<&XmpProperty> {
@@ -372,8 +374,9 @@ mod tests {
         let pm = PhotoMetadata::from_xmp(&meta);
         assert_eq!(pm.properties.len(), 1);
         assert_eq!(pm.city(), Some("Berlin"));
-        // Round-trips back out as XMP properties.
-        assert_eq!(pm.to_xmp_properties(), pm.properties);
+        // Round-trips back out as an XMP graph.
+        assert_eq!(pm.to_xmp().properties, pm.properties);
+        assert_eq!(PhotoMetadata::from_xmp(&pm.to_xmp()), pm);
     }
 
     #[test]

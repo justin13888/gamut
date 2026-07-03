@@ -10,14 +10,15 @@
 //!   Modelled in [`photo_metadata`] on top of [`gamut_xmp`]'s property graph.
 //!
 //! The two overlap heavily; reconciling them (which value wins when both carry the same datum) is
-//! the crate's keystone, in [`reconcile`].
+//! the crate's keystone, surfaced through [`IptcReader::read`] (merge, with a [`ConflictPolicy`])
+//! and [`IptcWriter::write_iim`] (projection back to IIM).
 //!
 //! Standards: **IPTC-IIM 4.2** and the **IPTC Photo Metadata Standard** (`references/iptc`).
 //!
 //! # Reading and writing legacy IIM
 //!
 //! ```
-//! use gamut_iptc::{IimBlock, IimCharset, IimDataSet, IptcReader, IptcWriter};
+//! use gamut_iptc::{IimBlock, IimCharset, IimDataSet, IptcReader, PhotoshopIrb};
 //!
 //! // Build some descriptive datasets and serialize them into an 8BIM resource stream.
 //! let block = IimBlock {
@@ -26,7 +27,7 @@
 //!         IimDataSet { record: 2, dataset: 25, data: b"sky".to_vec() }, // Keywords
 //!     ],
 //! };
-//! let irb = IptcWriter::new().write_irb(&block)?;
+//! let irb = PhotoshopIrb::with_iptc(block.encode()?).encode()?;
 //!
 //! // Read it back and decode a text value with the stream's charset.
 //! let parsed = IptcReader::new().read_irb(&irb)?.expect("0x0404 resource present");
@@ -67,16 +68,15 @@ pub mod iim;
 pub mod irb;
 pub mod photo_metadata;
 pub mod reader;
-pub mod reconcile;
 pub mod schema;
 pub mod writer;
 
 mod date;
+mod reconcile;
 
 pub use charset::IimCharset;
 pub use iim::{IimBlock, IimDataSet, IimFieldKind, IimTagInfo};
 pub use irb::{IrbBlock, PhotoshopIrb};
 pub use photo_metadata::PhotoMetadata;
-pub use reader::IptcReader;
-pub use reconcile::{ConflictPolicy, FieldConflict, IimXmpReconciler};
+pub use reader::{ConflictPolicy, FieldConflict, IptcReader};
 pub use writer::IptcWriter;
