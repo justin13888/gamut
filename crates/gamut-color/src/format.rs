@@ -6,7 +6,11 @@
 //! the subsampled variants reserved for M2 (see `gamut-avif/STATUS.md`).
 
 /// Bits per sample of a coded plane.
+///
+/// `#[non_exhaustive]`: models the AV1 profile depths today; other codecs may add depths (e.g.
+/// 16-bit) later.
 #[repr(u8)]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BitDepth {
     /// 8 bits per sample.
@@ -26,6 +30,8 @@ impl BitDepth {
 
     /// The [`BitDepth`] for `bits` (8, 10, or 12), or `None` for any other value. The inverse of
     /// [`BitDepth::bits`], for turning a codec's raw integer bit depth back into the typed form.
+    /// Takes `u32` because that is what codec headers and reconstruction paths carry;
+    /// [`BitDepth::bits`] returns the exact `u8`.
     #[must_use]
     pub fn from_bits(bits: u32) -> Option<Self> {
         match bits {
@@ -38,6 +44,10 @@ impl BitDepth {
 }
 
 /// Chroma subsampling of the coded planes (AV1 `subsampling_x` / `subsampling_y`, §5.5.2).
+///
+/// `#[non_exhaustive]`: models the AV1 layouts today; other codecs may add layouts (e.g. TIFF's
+/// 4:1:1) later.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChromaSubsampling {
     /// 4:4:4 — full-resolution chroma (`subsampling_x = subsampling_y = 0`). Required for identity.
@@ -51,13 +61,15 @@ pub enum ChromaSubsampling {
 }
 
 impl ChromaSubsampling {
-    /// Returns `(subsampling_x, subsampling_y)` as the AV1 sequence-header flags.
+    /// Returns `(subsampling_x, subsampling_y)` as the AV1 sequence-header flags. Monochrome is
+    /// signalled by `mono_chrome`, which fixes both flags to 1 (AV1 §6.4.2), not by a subsampling
+    /// combination of its own.
     #[must_use]
     pub fn subsampling(self) -> (u8, u8) {
         match self {
-            ChromaSubsampling::Cs444 | ChromaSubsampling::Cs400 => (0, 0),
+            ChromaSubsampling::Cs444 => (0, 0),
             ChromaSubsampling::Cs422 => (1, 0),
-            ChromaSubsampling::Cs420 => (1, 1),
+            ChromaSubsampling::Cs420 | ChromaSubsampling::Cs400 => (1, 1),
         }
     }
 }
@@ -84,5 +96,7 @@ mod tests {
         assert_eq!(ChromaSubsampling::Cs444.subsampling(), (0, 0));
         assert_eq!(ChromaSubsampling::Cs420.subsampling(), (1, 1));
         assert_eq!(ChromaSubsampling::Cs422.subsampling(), (1, 0));
+        // Monochrome carries subsampling_x = subsampling_y = 1 (AV1 §6.4.2).
+        assert_eq!(ChromaSubsampling::Cs400.subsampling(), (1, 1));
     }
 }

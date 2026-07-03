@@ -41,13 +41,15 @@ let _y = planes.plane(0); // luma plane
 
 ## Status
 
-M0 exercises the 8-bit RGB ↔ identity 4:4:4 conversion ([`Planar8::from_rgb8_identity`] /
-[`Planar8::to_rgb8_identity`]) plus the CICP tables the AVIF `colr` box needs, the BT.601 YCbCr 4:2:0
-path (WebP), and the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto
-gamuts. The remaining formats, bit depths, subsamplings, and non-identity matrix coefficients are
-modeled in the type system but not yet wired into an encode path; they land with the milestones
-tracked in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md). See the crate docs ("Implemented vs.
-modeled") for the precise split.
+Released as **v1** (issue #179); see [`STATUS.md`](STATUS.md) for the phase history, the frozen
+API policies, and the deferrals. Implemented today: 8-bit RGB ↔ identity 4:4:4 conversion
+([`Planar8::from_rgb8_identity`] / [`Planar8::to_rgb8_identity`]), the CICP tables the AVIF
+`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP), and the `f64` colour science for the sRGB,
+Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts. The remaining bit depths, subsamplings, and
+non-identity matrix coefficients are modeled in the type system (`#[non_exhaustive]` enums, so
+extension is non-breaking) and land with the milestones tracked in
+[`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md). See the crate docs ("Implemented vs. modeled")
+for the precise split.
 
 ## License
 

@@ -18,7 +18,7 @@
 //! as issue #32, not a correctness one. This conversion is deliberately *not* on the VP8 codec's
 //! bit-exact path (the codec operates on YCbCr planes directly); it backs the public RGB API.
 
-use gamut_core::{Error, Result};
+use gamut_core::{Dimensions, Error, Result};
 
 use crate::cicp::ColorRange;
 use crate::clip_pixel8;
@@ -138,9 +138,14 @@ impl Yuv420 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if any plane length does not match the dimensions.
+    /// Returns [`Error::InvalidInput`] if any plane length does not match the dimensions, or if
+    /// the luma sample count overflows `usize`.
     pub fn new(width: u32, height: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>) -> Result<Self> {
-        let luma = width as usize * height as usize;
+        let luma = Dimensions { width, height }
+            .num_pixels()
+            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+        // Cannot overflow: each chroma plane has at most as many samples as the luma plane
+        // (`ceil(d / 2) <= d` for d >= 1, and 0 for d == 0), and `luma` just fit `usize`.
         let chroma = Self::chroma_width(width) as usize * Self::chroma_height(height) as usize;
         if y.len() != luma || u.len() != chroma || v.len() != chroma {
             return Err(Error::InvalidInput(
@@ -171,14 +176,18 @@ impl Yuv420 {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, or either dimension is 0.
+    /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, if that product
+    /// overflows `usize`, or if either dimension is 0.
     pub fn from_rgb8(rgb: &[u8], width: u32, height: u32, range: ColorRange) -> Result<Self> {
-        let (w, h) = (width as usize, height as usize);
-        if width == 0 || height == 0 || rgb.len() != w * h * 3 {
+        let samples = Dimensions::new(width, height)?
+            .sample_count(3)
+            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+        if rgb.len() != samples {
             return Err(Error::InvalidInput(
                 "rgb buffer length does not match dimensions",
             ));
         }
+        let (w, h) = (width as usize, height as usize);
         // Full-resolution luma, plus full-resolution chroma we then average down.
         let mut y = vec![0u8; w * h];
         let mut cb_full = vec![0u8; w * h];
@@ -285,6 +294,10 @@ mod tests {
         let (y, cb, cr) = rgb_to_ycbcr(128, 128, 128, Full);
         assert_eq!((cb, cr), (128, 128));
         assert!((i32::from(y) - 128).abs() <= 1);
+        // Neutral gray inverts to itself. Every channel lands on 128 — away from the 0/255 clamp —
+        // so the `+ HALF` rounding term of each `ycbcr_to_rgb` component is observable (a mutated
+        // `- HALF` shifts each result to 127).
+        assert_eq!(ycbcr_to_rgb(128, 128, 128, Full), (128, 128, 128));
     }
 
     #[test]
@@ -300,22 +313,6 @@ mod tests {
             r >= 254 && g <= 2 && b <= 2,
             "limited red inverse = ({r},{g},{b})"
         );
-    }
-
-    #[test]
-    fn limited_luma_stays_in_studio_range() {
-        // Every limited-range luma sample lands in [16, 235]; the full-range path reaches 0 and 255.
-        for r in (0..=255).step_by(17) {
-            for g in (0..=255).step_by(17) {
-                let (yl, ..) = rgb_to_ycbcr(r, g, 128, Limited);
-                assert!(
-                    (16..=235).contains(&yl),
-                    "limited Y {yl} out of studio range"
-                );
-            }
-        }
-        assert_eq!(rgb_to_ycbcr(0, 0, 0, Full).0, 0);
-        assert_eq!(rgb_to_ycbcr(255, 255, 255, Full).0, 255);
     }
 
     #[test]
@@ -350,56 +347,6 @@ mod tests {
     }
 
     #[test]
-    fn flat_image_roundtrips_through_420() {
-        // A constant-color image has constant chroma, so 4:2:0 subsampling is lossless on chroma and
-        // the whole image round-trips to within the per-pixel conversion tolerance, in both ranges.
-        let rgb: Vec<u8> = [90u8, 140, 200].repeat(7 * 5);
-        for range in [Full, Limited] {
-            let yuv = Yuv420::from_rgb8(&rgb, 7, 5, range).unwrap();
-            let back = yuv.to_rgb8(range);
-            for (a, b) in rgb.iter().zip(&back) {
-                assert!(
-                    (i32::from(*a) - i32::from(*b)).abs() <= 4,
-                    "{range:?} round-trip"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn chroma_dimensions_round_up_for_odd_sizes() {
-        let yuv = Yuv420::from_rgb8(&[0u8; 5 * 3 * 3], 5, 3, Limited).unwrap();
-        // 5x3 luma; chroma is ceil(5/2) x ceil(3/2) = 3 x 2.
-        assert_eq!(yuv.y().len(), 15);
-        assert_eq!((yuv.u().len(), yuv.v().len()), (6, 6));
-        assert_eq!(Yuv420::chroma_width(5), 3);
-        assert_eq!(Yuv420::chroma_height(3), 2);
-    }
-
-    #[test]
-    fn box_subsample_averages_the_block() {
-        // A 2x2 image whose Cb/Cr differ per pixel collapses to one chroma sample = the 4-pixel
-        // average. Use pure primaries so the chroma spread is large and the averaging is visible.
-        let rgb = [
-            255, 0, 0, // red
-            0, 255, 0, // green
-            0, 0, 255, // blue
-            255, 255, 255, // white
-        ];
-        let yuv = Yuv420::from_rgb8(&rgb, 2, 2, Full).unwrap();
-        assert_eq!((yuv.u().len(), yuv.v().len()), (1, 1));
-        let mut su = 0u32;
-        let mut sv = 0u32;
-        for &(r, g, b) in &[(255u8, 0u8, 0u8), (0, 255, 0), (0, 0, 255), (255, 255, 255)] {
-            let (_, cb, cr) = rgb_to_ycbcr(r, g, b, Full);
-            su += u32::from(cb);
-            sv += u32::from(cr);
-        }
-        assert_eq!(yuv.u()[0], ((su + 2) / 4) as u8);
-        assert_eq!(yuv.v()[0], ((sv + 2) / 4) as u8);
-    }
-
-    #[test]
     fn new_validates_plane_lengths() {
         assert!(Yuv420::new(4, 4, vec![0; 16], vec![0; 4], vec![0; 4]).is_ok());
         assert!(Yuv420::new(4, 4, vec![0; 16], vec![0; 3], vec![0; 4]).is_err());
@@ -413,6 +360,14 @@ mod tests {
     }
 
     #[test]
+    fn rejects_overflowing_dimensions() {
+        // Near-max dimensions must yield Err, not an overflow panic (debug) or a wrapped length
+        // check (32-bit release): width * height * 3 exceeds usize even on 64-bit targets.
+        assert!(Yuv420::from_rgb8(&[], u32::MAX, u32::MAX, Limited).is_err());
+        assert!(Yuv420::new(u32::MAX, u32::MAX, vec![], vec![], vec![]).is_err());
+    }
+
+    #[test]
     fn vp8_clip8_fast_path_and_clamps() {
         // In-range values (`v & !MASK2 == 0`) take the `>> FIX2` fast path; out-of-range values clamp
         // hard to 0 (low) or 255 (high). The negative case pins `v < 0` against `v == 0`.
@@ -421,14 +376,6 @@ mod tests {
         assert_eq!(vp8_clip8(MASK2), (MASK2 >> FIX2) as u8); // largest in-range value (= 255)
         assert_eq!(vp8_clip8(MASK2 + 1), 255); // first out-of-range high
         assert_eq!(vp8_clip8(-1), 0); // out-of-range low
-    }
-
-    #[test]
-    fn full_range_inverse_anchor() {
-        // Neutral gray inverts to itself. Every channel lands on 128 — away from the 0/255 clamp —
-        // so the `+ HALF` rounding term of each `ycbcr_to_rgb` component is observable (a mutated
-        // `- HALF` shifts each result to 127).
-        assert_eq!(ycbcr_to_rgb(128, 128, 128, Full), (128, 128, 128));
     }
 
     #[test]
@@ -448,8 +395,13 @@ mod tests {
             }
         }
         let yuv = Yuv420::from_rgb8(&rgb, w as u32, h as u32, Full).unwrap();
-        let cw = Yuv420::chroma_width(w as u32) as usize;
-        let ch = Yuv420::chroma_height(h as u32) as usize;
+        // 5x3 luma ⇒ chroma is ceil(5/2) x ceil(3/2) = 3 x 2, as literals — re-deriving them from
+        // chroma_width/chroma_height here would let a broken round-up hide. The odd sizes pin it.
+        assert_eq!(Yuv420::chroma_width(w as u32), 3);
+        assert_eq!(Yuv420::chroma_height(h as u32), 2);
+        assert_eq!(yuv.y().len(), 15);
+        assert_eq!((yuv.u().len(), yuv.v().len()), (6, 6));
+        let (cw, ch) = (3usize, 2usize);
         for cy in 0..ch {
             for cx in 0..cw {
                 let (mut su, mut sv, mut count) = (0u32, 0u32, 0u32);

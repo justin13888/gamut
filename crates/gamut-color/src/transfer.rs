@@ -7,7 +7,7 @@
 //! * **encoder-exact** — what the encoder actually applied, so a metrics tool
 //!   predicts the same bitstream: Adobe RGB is pure `x^2.2` (not the standard
 //!   `x^2.19921875`), ProPhoto RGB is pure `x^1.8` (no linear toe), and the
-//!   BT.2020 path is PQ inverse-EOTF → nits → Reinhard@203 (tone-mapped to SDR).
+//!   BT.2020 path is PQ EOTF → nits → Reinhard@203 (tone-mapped to SDR).
 //! * **standard** — the textbook curve, reachable via the `*_standard` helpers.
 //!
 //! Determinism is **Tier-1** (correctness only): these use `std` `f64::powf`, not
@@ -88,8 +88,9 @@ pub fn prophoto_rgb_eotf_standard(x: f64) -> f64 {
 
 // --- BT.2020 PQ (SMPTE ST 2084 / ITU-R BT.2100) ----------------------------
 
-/// PQ (ST 2084) inverse EOTF: gamma-encoded signal → **absolute luminance in
-/// cd/m² (nits)**, in `[0, 10000]`. This is the standards-pure curve, with no
+/// PQ (ST 2084) EOTF: gamma-encoded signal → **absolute luminance in
+/// cd/m² (nits)**, in `[0, 10000]`. (ST 2084 defines the EOTF in this signal → light
+/// direction; the encode direction is its inverse.) This is the standards-pure curve, with no
 /// tone mapping. Use [`bt2020_pq_to_sdr`] for the encoder-exact BT.2020 path.
 #[must_use]
 pub fn pq_eotf(x: f64) -> f64 {
@@ -107,7 +108,7 @@ pub fn pq_eotf(x: f64) -> f64 {
     y_normalized * PQ_PEAK_NITS
 }
 
-/// BT.2020 **encoder-exact** path: PQ inverse EOTF → nits → Reinhard tone map to
+/// BT.2020 **encoder-exact** path: PQ EOTF → nits → Reinhard tone map to
 /// SDR `[0, 1)` relative to the BT.2408 HDR reference white (203 nits; `L / (1 + L)`).
 #[must_use]
 pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
@@ -199,16 +200,9 @@ mod tests {
         assert!((prophoto_rgb_eotf_standard(0.5) - 0.5_f64.powf(1.8)).abs() < 1e-15);
     }
 
-    #[test]
-    fn pq_eotf_endpoints() {
-        assert_eq!(pq_eotf(0.0), 0.0);
-        // Full PQ signal decodes to peak luminance.
-        assert!(
-            (pq_eotf(1.0) - PQ_PEAK_NITS).abs() < 1e-6,
-            "{}",
-            pq_eotf(1.0)
-        );
-    }
+    // `pq_eotf`'s endpoints need no dedicated test: `bt2020_pq_to_sdr_matches_reference_formula`
+    // pins x = 0 and 1 at 1e-12 through the composed curve, and the BT.2100 inversion below pins
+    // the 0- and 10000-nit anchors independently.
 
     #[test]
     fn bt2020_pq_to_sdr_matches_reference_formula() {
