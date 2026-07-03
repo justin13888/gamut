@@ -2,8 +2,10 @@
 //!
 //! An embedded XMP packet is the RDF/XML body bracketed by `<?xpacket?>` processing instructions:
 //! `<?xpacket begin="…" id="…"?>` … body … optional whitespace padding … `<?xpacket end='r'|'w'?>`.
-//! [`XmpPacket::scan`] recovers the body and the `writable`/`padding` details from raw bytes; the
-//! reader uses the same logic (via [`split_packet`]) to feed the body to the XML parser.
+//! [`XmpPacket::scan`] recovers the body and the `writable`/`padding` details from raw bytes, and
+//! [`XmpPacket::parse`] turns the body into a graph — [`crate::XmpMeta::from_packet`] is exactly
+//! that composition. Scanning first is how an in-place editor honors the envelope: parse, modify,
+//! then re-serialize with the original `writable`/`padding` on a [`crate::XmpWriter`].
 
 use crate::error::{Result, XmpError};
 
@@ -15,7 +17,9 @@ const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 /// XMP is embedded as an `<?xpacket begin=… id=…?>` processing instruction, the `x:xmpmeta` /
 /// `rdf:RDF` body, then `<?xpacket end='r'|'w'?>`. A writable (`'w'`) packet carries trailing
 /// whitespace padding so it can be edited in place without rewriting the whole file. Build one from
-/// bytes with [`XmpPacket::scan`]; produce one from a graph with [`crate::XmpMeta::to_packet`].
+/// bytes with [`XmpPacket::scan`], parse its body into a graph with [`XmpPacket::parse`], and
+/// produce packet bytes from a graph with [`crate::XmpMeta::to_packet`] or a configured
+/// [`crate::XmpWriter`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct XmpPacket {
     /// The RDF/XML body between the opening and closing `xpacket` instructions, with surrounding
@@ -53,14 +57,14 @@ impl XmpPacket {
 }
 
 /// The result of locating the body inside a packet's wrapper.
-pub(crate) struct SplitPacket<'a> {
+struct SplitPacket<'a> {
     /// The RDF/XML body bytes (between the wrapper instructions, or the whole input if unwrapped),
     /// still including any surrounding whitespace — the XML parser ignores it.
-    pub(crate) inner: &'a [u8],
+    inner: &'a [u8],
     /// Whether the trailer requested in-place writability (`end='w'`).
-    pub(crate) writable: bool,
+    writable: bool,
     /// Count of trailing whitespace bytes in `inner` (the in-place edit padding).
-    pub(crate) padding: usize,
+    padding: usize,
 }
 
 /// Strips a leading byte-order mark, rejecting non-UTF-8 ones, then locates the packet body.
@@ -69,7 +73,7 @@ pub(crate) struct SplitPacket<'a> {
 ///
 /// Returns [`XmpError::Encoding`] for a UTF-16/UTF-32 byte-order mark (Part 1 §7.1: only UTF-8 is
 /// implemented).
-pub(crate) fn split_packet(bytes: &[u8]) -> Result<SplitPacket<'_>> {
+fn split_packet(bytes: &[u8]) -> Result<SplitPacket<'_>> {
     let bytes = strip_bom(bytes)?;
 
     let Some(header) = find(bytes, b"<?xpacket") else {
