@@ -83,3 +83,48 @@ impl Metadata {
         self.exif.is_none() && self.xmp.is_none() && self.icc.is_none()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use gamut_xmp::WellKnownNs;
+
+    use super::*;
+
+    fn xmp_with(namespace: &str, name: &str, value: &str) -> XmpMeta {
+        let mut xmp = XmpMeta::new();
+        xmp.set_text(namespace, name, value);
+        xmp
+    }
+
+    #[test]
+    fn iptc_lens_reflects_only_iptc_namespaces() {
+        // An IPTC namespace (photoshop:City) surfaces through the lens...
+        let iptc = Metadata {
+            xmp: Some(xmp_with(WellKnownNs::Photoshop.uri(), "City", "Oslo")),
+            ..Default::default()
+        };
+        assert_eq!(iptc.iptc().unwrap().city(), Some("Oslo"));
+
+        // ...a non-IPTC namespace (xmp:CreatorTool) does not.
+        let non_iptc = Metadata {
+            xmp: Some(xmp_with(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut")),
+            ..Default::default()
+        };
+        assert!(non_iptc.iptc().is_none());
+
+        // No XMP at all → no IPTC view.
+        assert!(Metadata::default().iptc().is_none());
+    }
+
+    #[test]
+    fn is_empty_tracks_field_presence() {
+        assert!(Metadata::default().is_empty());
+        assert!(
+            !Metadata {
+                xmp: Some(XmpMeta::new()),
+                ..Default::default()
+            }
+            .is_empty()
+        );
+    }
+}

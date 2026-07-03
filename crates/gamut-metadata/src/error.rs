@@ -30,3 +30,33 @@ pub enum MetadataError {
 
 /// A [`Result`](core::result::Result) whose error is [`MetadataError`].
 pub type Result<T> = core::result::Result<T, MetadataError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_names_the_failing_carrier() {
+        assert!(
+            MetadataError::Icc(gamut_core::Error::InvalidInput("bad"))
+                .to_string()
+                .starts_with("ICC:")
+        );
+        assert!(
+            MetadataError::Iptc(gamut_core::Error::Unsupported("charset"))
+                .to_string()
+                .starts_with("IPTC:")
+        );
+    }
+
+    #[test]
+    fn leaf_errors_convert_into_named_variants() {
+        let exif: MetadataError = ExifError::BadByteOrder.into();
+        assert!(matches!(exif, MetadataError::Exif(_)));
+        assert!(exif.to_string().starts_with("EXIF:"));
+
+        let xmp: MetadataError = XmpError::MissingRdf.into();
+        assert!(matches!(xmp, MetadataError::Xmp(_)));
+        assert!(xmp.to_string().starts_with("XMP:"));
+    }
+}
