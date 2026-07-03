@@ -5,7 +5,7 @@ use gamut_icc::IccProfile;
 use gamut_iptc::{IimCharset, IptcWriter};
 use gamut_xmp::XmpMeta;
 
-use crate::error::{MetadataError, Result};
+use crate::error::Result;
 use crate::metadata::Metadata;
 
 /// The per-carrier byte blocks produced by [`MetadataEmbedder::embed`] — the owned inverse of the
@@ -94,19 +94,15 @@ impl MetadataEmbedder {
     ///
     /// # Errors
     ///
-    /// Returns a [`MetadataError`] naming the carrier whose serialization failed — [`MetadataError::Icc`]
-    /// for an ICC profile that violates an invariant, or [`MetadataError::Iptc`] when
+    /// Returns a [`MetadataError`](crate::MetadataError) naming the carrier whose serialization
+    /// failed — [`MetadataError::Icc`](crate::MetadataError::Icc) for an ICC profile that violates
+    /// an invariant, or [`MetadataError::Iptc`](crate::MetadataError::Iptc) when
     /// [`emit_iptc_iim`](Self::emit_iptc_iim) is set and an IPTC value cannot be expressed in the
     /// chosen IIM charset.
     pub fn embed(&self, meta: &Metadata) -> Result<EncodedMetadata> {
         let exif = meta.exif.as_ref().map(Exif::to_bytes);
         let xmp = meta.xmp.as_ref().map(XmpMeta::to_packet);
-        let icc = meta
-            .icc
-            .as_ref()
-            .map(IccProfile::to_bytes)
-            .transpose()
-            .map_err(MetadataError::Icc)?;
+        let icc = meta.icc.as_ref().map(IccProfile::to_bytes).transpose()?;
         let iptc_iim = if self.emit_iptc_iim {
             self.encode_iim(meta)?
         } else {
@@ -126,13 +122,10 @@ impl MetadataEmbedder {
         let Some(pm) = meta.iptc() else {
             return Ok(None);
         };
-        let block = IptcWriter::new()
-            .charset(self.iim_charset)
-            .write_iim(&pm)
-            .map_err(MetadataError::Iptc)?;
+        let block = IptcWriter::new().charset(self.iim_charset).write_iim(&pm)?;
         if block.datasets.is_empty() {
             return Ok(None);
         }
-        block.encode().map(Some).map_err(MetadataError::Iptc)
+        Ok(Some(block.encode()?))
     }
 }

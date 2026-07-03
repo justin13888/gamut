@@ -5,7 +5,7 @@ use gamut_icc::IccProfile;
 use gamut_iptc::{ConflictPolicy, FieldConflict, IimBlock, IptcReader};
 use gamut_xmp::XmpMeta;
 
-use crate::error::{MetadataError, Result};
+use crate::error::Result;
 use crate::metadata::Metadata;
 use crate::source::MetadataBlock;
 
@@ -58,7 +58,7 @@ impl MetadataExtractor {
     ///
     /// # Errors
     ///
-    /// Returns a [`MetadataError`] naming the carrier whose parse failed.
+    /// Returns a [`MetadataError`](crate::MetadataError) naming the carrier whose parse failed.
     pub fn extract(&self, blocks: &[MetadataBlock<'_>]) -> Result<Metadata> {
         let mut exif_bytes = None;
         let mut xmp_bytes = None;
@@ -74,19 +74,15 @@ impl MetadataExtractor {
         }
 
         let exif = exif_bytes.map(Exif::parse).transpose()?;
-        let icc = icc_bytes
-            .map(IccProfile::parse)
-            .transpose()
-            .map_err(MetadataError::Icc)?;
+        let icc = icc_bytes.map(IccProfile::parse).transpose()?;
         let mut xmp = xmp_bytes.map(XmpMeta::from_packet).transpose()?;
 
         // Reconcile the legacy IIM carrier into the XMP graph — the single home for IPTC data.
         if let Some(iim) = iim_bytes {
-            let iim = IimBlock::parse(iim).map_err(MetadataError::Iptc)?;
+            let iim = IimBlock::parse(iim)?;
             let reconciled = IptcReader::new()
                 .policy(self.policy)
-                .read(Some(&iim), xmp.as_ref())
-                .map_err(MetadataError::Iptc)?;
+                .read(Some(&iim), xmp.as_ref())?;
             let graph = xmp.get_or_insert_with(XmpMeta::new);
             for property in reconciled.to_xmp().properties {
                 graph.set(property);
@@ -123,11 +119,10 @@ impl MetadataExtractor {
         let (Some(iim), Some(xmp)) = (iim_bytes, xmp_bytes) else {
             return Ok(Vec::new());
         };
-        let iim = IimBlock::parse(iim).map_err(MetadataError::Iptc)?;
+        let iim = IimBlock::parse(iim)?;
         let xmp = XmpMeta::from_packet(xmp)?;
-        IptcReader::new()
+        Ok(IptcReader::new()
             .policy(self.policy)
-            .conflicts(&iim, &xmp)
-            .map_err(MetadataError::Iptc)
+            .conflicts(&iim, &xmp)?)
     }
 }

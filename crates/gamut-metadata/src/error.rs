@@ -1,14 +1,15 @@
 //! The facade's error type.
 
 use gamut_exif::ExifError;
+use gamut_icc::IccError;
+use gamut_iptc::IptcError;
 use gamut_xmp::XmpError;
 
 /// An error from extracting a unified [`Metadata`](crate::Metadata) or embedding it back to blocks.
 ///
-/// Each variant names the standard whose parser or serializer failed, preserving the underlying
-/// error's detail. EXIF and XMP expose their own rich error enums (forwarded here); ICC and IPTC both
-/// surface [`gamut_core::Error`], kept in distinct variants so the failing carrier is always
-/// identifiable.
+/// Each variant names the standard whose parser or serializer failed and forwards that carrier's
+/// own error enum ([`ExifError`], [`XmpError`], [`IccError`], [`IptcError`]), preserving its detail.
+/// The variants are kept distinct so the failing carrier is always identifiable.
 ///
 /// Marked `#[non_exhaustive]` so a new carrier can add a variant without a breaking change.
 #[derive(Debug, thiserror::Error)]
@@ -22,10 +23,10 @@ pub enum MetadataError {
     Xmp(#[from] XmpError),
     /// Parsing or serializing the ICC profile failed.
     #[error("ICC: {0}")]
-    Icc(gamut_core::Error),
+    Icc(#[from] IccError),
     /// Decoding the legacy IPTC-IIM carrier, or projecting IPTC back to it, failed.
     #[error("IPTC: {0}")]
-    Iptc(gamut_core::Error),
+    Iptc(#[from] IptcError),
 }
 
 /// A [`Result`](core::result::Result) whose error is [`MetadataError`].
@@ -38,12 +39,12 @@ mod tests {
     #[test]
     fn display_names_the_failing_carrier() {
         assert!(
-            MetadataError::Icc(gamut_core::Error::InvalidInput("bad"))
+            MetadataError::Icc(IccError::Malformed("bad"))
                 .to_string()
                 .starts_with("ICC:")
         );
         assert!(
-            MetadataError::Iptc(gamut_core::Error::Unsupported("charset"))
+            MetadataError::Iptc(IptcError::Unsupported("charset"))
                 .to_string()
                 .starts_with("IPTC:")
         );
@@ -58,5 +59,13 @@ mod tests {
         let xmp: MetadataError = XmpError::MissingRdf.into();
         assert!(matches!(xmp, MetadataError::Xmp(_)));
         assert!(xmp.to_string().starts_with("XMP:"));
+
+        let icc: MetadataError = IccError::Malformed("bad").into();
+        assert!(matches!(icc, MetadataError::Icc(_)));
+        assert!(icc.to_string().starts_with("ICC:"));
+
+        let iptc: MetadataError = IptcError::Malformed("bad").into();
+        assert!(matches!(iptc, MetadataError::Iptc(_)));
+        assert!(iptc.to_string().starts_with("IPTC:"));
     }
 }

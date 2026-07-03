@@ -16,7 +16,6 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-gamut-core.workspace = true
 gamut-exif.workspace = true
 gamut-xmp.workspace = true
 gamut-icc.workspace = true
