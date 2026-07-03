@@ -90,10 +90,10 @@ impl XmpWriter {
     ///
     /// The writer stays infallible, so a registration that cannot be honored is skipped instead
     /// of failing: for the same URI the last registration wins, and a prefix is unusable when it
-    /// is the reserved `rdf` or `xml`, is not a simple XML name (an ASCII letter or `_`, then
-    /// ASCII letters, digits, `-`, `_`, or `.`), or is already assigned to a different URI in the
-    /// same document. Prefixes are serialization cosmetics — the parsed graph is identical either
-    /// way.
+    /// is the reserved `rdf` or `xml`, matches the synthesized pattern `ns<digits>` (reserved so
+    /// synthesis can never collide), is not a simple XML name (an ASCII letter or `_`, then ASCII
+    /// letters, digits, `-`, `_`, or `.`), or is already assigned to a different URI in the same
+    /// document. Prefixes are serialization cosmetics — the parsed graph is identical either way.
     ///
     /// ```
     /// use gamut_xmp::{Namespace, XmpMeta, XmpWriter};
@@ -282,15 +282,11 @@ impl<'a> NsMap<'a> {
         self.entries.iter().any(|(_, p)| p == prefix)
     }
 
-    /// The next free synthesized prefix (`ns1`, `ns2`, …), skipping any a registration took.
+    /// The next synthesized prefix (`ns1`, `ns2`, …). Never collides: the `ns<digits>` pattern is
+    /// reserved (unusable for registrations) and no well-known prefix matches it.
     fn next_synthesized(&mut self) -> String {
-        loop {
-            self.synthesized += 1;
-            let prefix = format!("ns{}", self.synthesized);
-            if !self.prefix_taken(&prefix) {
-                return prefix;
-            }
-        }
+        self.synthesized += 1;
+        format!("ns{}", self.synthesized)
     }
 
     /// The serialization prefix for a namespace URI.
@@ -468,11 +464,12 @@ fn is_lang(qualifier: &XmpProperty) -> bool {
     qualifier.namespace == XML_NAMESPACE && qualifier.name == "lang"
 }
 
-/// Whether a registered prefix can be used in serialization: `rdf` and `xml` are reserved, and
-/// the prefix must be a simple XML name (an ASCII letter or `_`, then ASCII letters, digits,
+/// Whether a registered prefix can be used in serialization: `rdf` and `xml` are reserved, the
+/// `ns<digits>` pattern is reserved for synthesized prefixes (so synthesis can never collide),
+/// and the prefix must be a simple XML name (an ASCII letter or `_`, then ASCII letters, digits,
 /// `-`, `_`, or `.`) so the emitted document stays well-formed.
 fn is_usable_prefix(prefix: &str) -> bool {
-    if prefix == "rdf" || prefix == "xml" {
+    if prefix == "rdf" || prefix == "xml" || is_synthesized_pattern(prefix) {
         return false;
     }
     let mut chars = prefix.chars();
@@ -481,6 +478,13 @@ fn is_usable_prefix(prefix: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Whether a prefix matches the reserved synthesized pattern `ns<digits>`.
+fn is_synthesized_pattern(prefix: &str) -> bool {
+    prefix
+        .strip_prefix("ns")
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The `xml:lang` value among a qualifier list, if any.
@@ -809,9 +813,19 @@ mod tests {
 
     #[test]
     fn reserved_and_malformed_prefixes_are_ignored() {
-        // rdf/xml are reserved; an empty or non-XML-name prefix would break well-formedness.
-        // Each unusable registration falls back to the synthesized tier.
-        for bad in ["rdf", "xml", "", "has space", "1digit", "a:b"] {
+        // rdf/xml and the synthesized ns<digits> pattern are reserved; an empty or non-XML-name
+        // prefix would break well-formedness. Each unusable registration falls back to the
+        // synthesized tier.
+        for bad in [
+            "rdf",
+            "xml",
+            "ns1",
+            "ns42",
+            "",
+            "has space",
+            "1digit",
+            "a:b",
+        ] {
             let mut meta = XmpMeta::new();
             meta.set_text("http://example.com/vocab/", "kind", "demo");
             let out = XmpWriter::new()
@@ -873,18 +887,26 @@ mod tests {
     }
 
     #[test]
-    fn synthesized_numbering_skips_a_prefix_a_registration_took() {
-        // `ns1` is claimed by a registration; the next unknown namespace synthesizes `ns2`
-        // rather than colliding.
+    fn synthesized_pattern_prefixes_are_reserved() {
+        // ns<digits> is reserved for the synthesizer, so a registration claiming ns7 is ignored
+        // and numbering stays sequential — synthesized names can never collide by construction.
+        // A prefix merely *starting* with ns ("nsx") is not reserved.
         let mut meta = XmpMeta::new();
         meta.set_text("http://example.com/a/", "x", "1");
         meta.set_text("http://example.com/b/", "y", "2");
         let out = XmpWriter::new()
             .wrap_xmpmeta(false)
-            .with_namespace(Namespace::new("http://example.com/a/", "ns1"))
+            .with_namespace(Namespace::new("http://example.com/a/", "ns7"))
+            .with_namespace(Namespace::new("http://example.com/b/", "nsx"))
             .serialize_body(&meta);
-        assert!(out.contains("<ns1:x>1</ns1:x>"), "got:\n{out}");
-        assert!(out.contains("<ns2:y>2</ns2:y>"), "got:\n{out}");
+        assert!(
+            out.contains("<ns1:x>1</ns1:x>"),
+            "ns7 must be ignored, got:\n{out}"
+        );
+        assert!(
+            out.contains("<nsx:y>2</nsx:y>"),
+            "nsx is a legal prefix, got:\n{out}"
+        );
     }
 
     #[test]
