@@ -65,6 +65,28 @@ assert_eq!(read(&bytes)?, img);
 See [`gamut-avif`](../gamut-avif) for the full encode path that drives this crate (it builds the
 `av1C` record and the AVIF brand set, then calls `write`).
 
+## Inspect and re-mux from the CLI
+
+The `gamut` CLI (with the `isobmff` feature, on in `all`) exercises this crate's whole read/write
+surface on real files — no working codec required, since the coded bitstream is opaque:
+
+```console
+# parse a still-image .avif/.heic and print its box structure (brands, items, properties,
+# references, grid geometry, entity groups)
+$ gamut isobmff inspect image.avif
+
+# re-serialise a container (normalised box versions, single-extent mdat); the coded payload is
+# preserved verbatim, so a real decoder re-decodes the result to identical pixels
+$ gamut isobmff remux image.avif out.avif
+
+# build a synthetic container exercising every modelled box, property, reference and group
+$ gamut isobmff build demo.avif
+```
+
+`inspect`/`remux` accept the foreign-encoder repertoire below; out-of-scope structures — image
+sequences (`moov`/`trak`), `largesize`/size-0 boxes — and malformed input are rejected with a typed
+error rather than mis-parsed (this crate is `#![forbid(unsafe_code)]` and bounds-checks every read).
+
 ## Status
 
 Models the HEIF still-image box set: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc`/`iinf`/`iref`/`iprp`/

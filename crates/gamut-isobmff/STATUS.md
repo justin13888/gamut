@@ -37,6 +37,20 @@ files.
 | P5 | — | Robustness: truncation/overrun/size/index guards ✅; counts never trusted for allocation ✅; total payload capped at input size (anti amplification) ✅; spec fixtures independent of the writer ✅; fuzz corpus ☐ | ◑ partial |
 | P6 | — | Differential oracle: libavif/dav1d parses the container and reproduces pixels (via `gamut-avif/tests/decode_roundtrip.rs`) | ✅ via codec |
 
+## Demonstration surface
+
+The read/write spine is exercised end-to-end — without a working codec, since the coded bitstream
+is opaque — by the `gamut isobmff` CLI (`inspect`/`remux`/`build`) and two oracle tests:
+
+- **`inspect`** parses real third-party `.avif`/`.heic` and prints the box structure; across the
+  libavif conformance corpus it reads every still image, rejecting only out-of-scope constructs
+  (image sequences, `largesize`/size-0 boxes) and malformed input with a typed error.
+- **`remux`** re-serialises a container and re-parses it, verifying `read(&write) == model` on
+  foreign files; `gamut-avif/tests/remux_roundtrip.rs` additionally confirms libavif decodes the
+  re-muxed container to **pixel-identical** output (the coded payload survives verbatim).
+- **`build`** constructs a synthetic container covering every modelled box, property, reference,
+  and entity group.
+
 ## Payload helpers
 
 - **`ImageGrid`** (23008-12 §6.6.2.3.2) — `ImageGrid::parse`/`to_bytes` types the `grid`
