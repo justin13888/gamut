@@ -16,9 +16,11 @@ the Rust ecosystem lacks a strong, feature-complete implementation.
 Dependency edges (a crate depends on those to its right):
 
 - **gamut** -- umbrella; optional deps on the format crates, gated by features (`avif`,
-  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `metadata`, `all`). `default = []`. The `primitives`
-  feature additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling, and the
-  `metadata` feature re-exports the image-metadata primitives; `all` includes both.
+  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `isobmff`, `metadata`, `all`). `default = []`. The `primitives`
+  feature additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling, the
+  `isobmff` feature re-exports the ISOBMFF/HEIF still-image container primitive (the box tree shared
+  by avif/heic), and the `metadata` feature re-exports the image-metadata primitives; `all` includes
+  all of these.
 - **gamut-core** -- `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`. No
   internal deps; everything else depends on it.
 - **gamut-color** / **gamut-dsp** / **gamut-bitstream** -- shared primitives. ← core.
