@@ -12,7 +12,7 @@
 //! rate-distortion layer. The per-pass normalization shifts that make the 2-D round trip unit-gain
 //! live in the 2-D process (AV1 §7.13.3), implemented separately.
 
-use crate::butterfly::{b, brev, cos128, h};
+use crate::av1::butterfly::{b, brev, cos128, h};
 use crate::math::round2;
 
 /// In-place 1-D inverse DCT of the length-`2^n` array `t` (`2 ≤ n ≤ 6`), per AV1 §7.13.2.3.
@@ -421,6 +421,76 @@ mod tests {
         // would carry a different one).
         let mut t = [0i64; 3];
         inverse_dct(&mut t, 2, 16);
+    }
+
+    #[test]
+    fn inverse_dct_exact_values() {
+        // The proportional float oracle pins the inverse only up to one global scale, so a uniform
+        // scale or rounding regression would survive it. These snapshots pin the bit-exact outputs.
+        // Provenance: generated from this implementation, which the naive DCT-III oracle above pins
+        // proportionally and the 2-D pipeline's dav1d cross-check pins bit-exactly.
+        let mut t = [100i64, -50, 25, -12];
+        inverse_dct(&mut t, 2, 16);
+        assert_eq!(t, [37, 45, 61, 139]);
+        let mut t = [200i64, -100, 50, -25, 12, -6, 3, -1];
+        inverse_dct(&mut t, 3, 16);
+        assert_eq!(t, [75, 77, 84, 93, 113, 150, 221, 319]);
+        let mut t: Vec<i64> = (0..64i64).map(|k| ((k * 37) % 201) - 100).collect();
+        inverse_dct(&mut t, 6, 16);
+        assert_eq!(
+            t,
+            [
+                -79, -191, -222, 38, -111, -129, -1, -66, -215, 199, -349, -312, -426, -41, -47,
+                -215, -108, -47, -364, 10, -427, -263, -1277, -295, 1328, -228, 407, 25, 164, -53,
+                281, -190, 246, 105, -335, -268, -195, 105, -78, -110, 83, -135, -83, 39, -270,
+                -304, -709, 476, 279, -97, 265, 2, 64, 83, 149, -149, 496, -245, -371, -251, -66,
+                70, -159, 23
+            ]
+        );
+    }
+
+    #[test]
+    fn intermediate_clamp_range_is_wired_through() {
+        // Adversarial: no other test fails if `r` were ignored — the oracle tests keep the clamp
+        // inactive by construction. Saturating coefficients at a narrow r must change the output
+        // versus a wide r, and the narrow output pins the clamp bounds themselves.
+        let mut narrow = [1i64 << 19; 8];
+        inverse_dct(&mut narrow, 3, 8);
+        let mut wide = [1i64 << 19; 8];
+        inverse_dct(&mut wide, 3, 20);
+        assert_ne!(narrow, wide, "the r clamp should saturate at r = 8");
+        assert_eq!(narrow, [127, -128, 127, -1, 127, 127, 53, 0]);
+    }
+
+    #[test]
+    fn max_magnitude_input_has_headroom() {
+        // Adversarial: ±2^19 coefficients through the deepest kernel. The real assertion is the
+        // debug build's overflow checks (i64 headroom); the sentinel entries guard the run.
+        let mut t: Vec<i64> = (0..64i64)
+            .map(|k| if k % 2 == 0 { 1 << 19 } else { -(1 << 19) })
+            .collect();
+        inverse_dct(&mut t, 6, 16);
+        assert_eq!(&t[..4], [-1, -1, 30917, -1]);
+    }
+
+    #[test]
+    fn forward_dct_max_residual_has_headroom() {
+        // Adversarial: alternating ±4095 (the 12-bit worst case) drives the O(n²) accumulator to
+        // its ≈2^30 peak at n = 6 with the energy at the top of the spectrum; the exact golden
+        // pins the extremes, debug overflow checks pin the headroom.
+        let mut t: Vec<i64> = (0..64i64)
+            .map(|k| if k % 2 == 0 { 4095 } else { -4095 })
+            .collect();
+        forward_dct(&mut t, 6);
+        assert_eq!(
+            t,
+            [
+                0, 4089, 0, 4109, 0, 4125, 0, 4153, 0, 4197, 0, 4249, 0, 4317, 0, 4389, 0, 4477, 0,
+                4589, 0, 4709, 0, 4849, 0, 5005, 0, 5189, 0, 5413, 0, 5653, 0, 5933, 0, 6268, 0,
+                6656, 0, 7116, 0, 7652, 0, 8304, 0, 9108, 0, 10104, 0, 11375, 0, 13051, 0, 15354,
+                0, 18685, 0, 23948, 0, 33454, 0, 55664, 0, 166865
+            ]
+        );
     }
 
     #[test]

@@ -513,7 +513,7 @@ fn cdef_filter_block(
                 }
             }
             // `(8 + sum - (sum < 0)) >> 4` is `Round2Signed(sum, 4)` (round to nearest, ties toward 0).
-            let v = x + gamut_dsp::round2_signed(sum, 4);
+            let v = x + gamut_dsp::math::round2_signed(sum, 4);
             output[(y0 + i) * coded_w + (x0 + j)] = v.clamp(mn, mx) as u16;
         }
     }

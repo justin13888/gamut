@@ -1,33 +1,42 @@
-//! Shared digital signal processing routines for the gamut codecs.
+//! Shared digital signal processing kernels for the gamut codecs.
 //!
-//! Provides the AV1 1-D transform kernels:
-//! - the lossless 4×4 Walsh–Hadamard pair ([`fwht4x4`] / [`iwht4x4`], AV1 §7.13.2.10),
-//! - the discrete cosine transform pair ([`forward_dct`] / [`inverse_dct`], AV1 §7.13.2.2–.3),
-//! - the asymmetric discrete sine pair ([`forward_adst`] / [`inverse_adst`], AV1 §7.13.2.4–.9 —
-//!   DST-VII at size 4, DST-IV at 8/16), with the FLIPADST flip ([`flip_in_place`]), and
-//! - the identity transforms ([`forward_identity`] / [`inverse_identity`], AV1 §7.13.2.11–.15).
+//! The crate is one module per spec family, plus the shared integer vocabulary:
+//! - [`av1`] — the AV1 §7.13.2 transform kernels: the 1-D DCT / ADST / identity kernels and the
+//!   lossless 4×4 Walsh–Hadamard block pair,
+//! - [`math`] — the small cross-codec integer arithmetic primitives: the AV1 §4.7 rounding and
+//!   clamp operations and the forward-quantize rounding shared by the AV1 and VP8 encoders, and
+//! - [`mulaw`] — µ-law companding and odd-level quantization.
 //!
-//! The 2-D assembly that selects per `PlaneTxType` and applies the per-pass normalization shifts
-//! (AV1 §7.13.3) is tracked in `gamut-avif/STATUS.md`.
+//! Nothing lives at the crate root, so future spec families (JPEG, JPEG XL, AV2, …) land as new
+//! sibling modules without ever colliding with an existing name.
 //!
-//! Alongside the transforms, [`mod@math`] exposes the small AV1 §4.7 integer arithmetic
-//! primitives ([`round2`], [`round2_signed`], [`clip3`]) and the shared forward-quantize
-//! rounding ([`round_div_nearest`]) that the codec crates build on, and [`mod@mulaw`] adds
-//! µ-law companding/quantization ([`mu_compress`] / [`mu_expand`] / [`mu_quantize`] /
-//! [`mu_dequantize`]).
+//! # Contract
+//!
+//! Every function is pure, total, deterministic math on caller-provided values — no
+//! allocation, no dependencies, `#![forbid(unsafe_code)]`, and no `Result`s: nothing here is
+//! data-dependent fallible. Semantic preconditions on configuration parameters (`n`, `r`,
+//! `bits`, `mu`, `den` — encoder configuration, never untrusted data) are asserts documented
+//! under `# Panics`; arithmetic headroom limits are documented per function and guarded by
+//! Rust's debug overflow checks.
+//!
+//! ```
+//! use gamut_dsp::av1::{forward_wht4x4, inverse_wht4x4};
+//! use gamut_dsp::math::round_div_nearest;
+//!
+//! // The lossless 4×4 Walsh–Hadamard pair round-trips exactly.
+//! let residual = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+//! let coeffs = forward_wht4x4(&residual);
+//! assert_eq!(inverse_wht4x4(&coeffs), residual);
+//!
+//! // The shared forward-quantize rounding divides to the nearest level, ties away from zero.
+//! assert_eq!(round_div_nearest(-10, 4), -3);
+//!
+//! // µ-law quantization: the center index of the odd level count is exactly 0.0, both ways.
+//! assert_eq!(gamut_dsp::mulaw::quantize(0.0, 5, 5.0), 15);
+//! assert_eq!(gamut_dsp::mulaw::dequantize(15, 5, 5.0), 0.0);
+//! ```
 #![forbid(unsafe_code)]
 
-mod adst;
-mod butterfly;
-mod dct;
-mod identity;
-mod math;
-mod mulaw;
-mod wht;
-
-pub use adst::{flip_in_place, forward_adst, inverse_adst};
-pub use dct::{forward_dct, inverse_dct};
-pub use identity::{forward_identity, inverse_identity};
-pub use math::{clip3, round_div_nearest, round2, round2_signed};
-pub use mulaw::{mu_compress, mu_dequantize, mu_expand, mu_quantize};
-pub use wht::{fwht4x4, iwht4x4};
+pub mod av1;
+pub mod math;
+pub mod mulaw;
