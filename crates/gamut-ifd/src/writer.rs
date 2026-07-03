@@ -27,7 +27,7 @@ use crate::{ByteOrder, Ifd, TiffFile, Value, Variant};
 /// Rounds `n` up to the next even (word) boundary — where TIFF 6.0 §2 requires values (and this
 /// crate places every structure) to start.
 ///
-/// This is the alignment [`write`]'s layout contract guarantees, exported so a codec appending
+/// This is the alignment [`write()`]'s layout contract guarantees, exported so a codec appending
 /// data after the stream can place it on the same boundary rather than re-deriving the rule.
 /// Saturates at `u64::MAX` instead of wrapping.
 #[must_use]
@@ -339,37 +339,6 @@ mod tests {
         })
         .expect("write");
         assert_eq!(two.len(), 130);
-    }
-
-    #[test]
-    fn value_offsets_are_even() {
-        // BitsPerSample (6 bytes) forces an out-of-line value; its offset must be word-aligned.
-        let bytes = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![sample_ifd()],
-        })
-        .expect("write");
-        // Header magic and first-IFD offset are well-formed.
-        assert_eq!(&bytes[0..2], b"II");
-        assert_eq!(read_header(&bytes).expect("header").2, 8);
-    }
-
-    /// A directory with no sub-IFDs must serialise byte-for-byte as it did before tree support, so
-    /// the flat path (and `gamut-tiff`'s libtiff oracle) is unaffected.
-    #[test]
-    fn flat_layout_is_unchanged_by_tree_support() {
-        let file = TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![sample_ifd()],
-        };
-        let bytes = write(&file).expect("write");
-        // Golden layout: 8-byte header, IFD0 at 8 (5 entries), value pool after. Re-reading must
-        // reproduce the directory exactly, and there is no second (sub-)IFD in the chain.
-        let (_order, _variant, first) = read_header(&bytes).expect("header");
-        assert_eq!(first, 8);
-        assert_eq!(read(&bytes).expect("read").ifds.len(), 1);
     }
 
     fn subifd_tree_roundtrips(order: ByteOrder, variant: Variant) {

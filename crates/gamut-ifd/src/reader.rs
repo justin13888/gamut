@@ -253,15 +253,16 @@ fn read_chain(
     }
     let mut ifds = Vec::new();
     let mut offset = first as usize;
-    let mut seen = Vec::new();
+    // A hash set keeps the loop guard O(1) per link: a hostile chain can be MAX_IFDS long, and a
+    // linear scan per link would make it quadratic.
+    let mut seen = std::collections::HashSet::new();
     while offset != 0 {
-        if seen.contains(&offset) {
+        if !seen.insert(offset) {
             return Err(Error::InvalidInput("TIFF: IFD chain loops"));
         }
         if ifds.len() >= MAX_IFDS {
             return Err(Error::InvalidInput("TIFF: too many IFDs"));
         }
-        seen.push(offset);
         let (ifd, next) = read_ifd_inner(
             data,
             offset,

@@ -98,8 +98,9 @@ pub struct Field {
 /// full-resolution raw image IFD(s); `ExifIFD` (34665) and `GPSInfo` (34853) point at the EXIF and
 /// GPS sub-directories. [`write`](crate::write) lays the children out and synthesises the pointer
 /// field, patching it with their absolute offset(s). The generic [`read`](crate::read) does **not**
-/// follow these — it cannot know which arbitrary `LONG` tags are offsets — so a decoder reads the
-/// offset value(s) and re-parses each child with [`read_ifd_at`](crate::read_ifd_at).
+/// follow these — it cannot know which arbitrary `LONG` tags are offsets — so a decoder names the
+/// pointer tags to [`read_tree`](crate::read_tree) (which rebuilds the groups exactly as written),
+/// or follows a pointer by hand with [`read_ifd_at`](crate::read_ifd_at).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubIfd {
     /// The pointer tag (e.g. `330` for `SubIFDs`).
