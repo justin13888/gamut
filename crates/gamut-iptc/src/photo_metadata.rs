@@ -10,7 +10,7 @@ use crate::schema::{IPTC_NAMESPACES, XmpField, XmpShape, ns};
 /// the model is carried as [`gamut_xmp`] properties rather than a parallel type hierarchy. Typed
 /// accessors cover every scalar/list Core field; the structured `Iptc4xmpCore:CreatorContactInfo`
 /// and the Extension structures remain accessible (and round-trip losslessly) through
-/// [`PhotoMetadata::properties`], and every IIM-mapped field also through
+/// [`PhotoMetadata::xmp`], and every IIM-mapped field also through
 /// [`PhotoMetadata::get_field`]/[`set_field`](PhotoMetadata::set_field) with
 /// [`crate::schema::FIELD_MAP`].
 ///
@@ -50,32 +50,7 @@ impl PhotoMetadata {
     /// into a larger graph). The symmetric inverse of [`PhotoMetadata::from_xmp`].
     #[must_use]
     pub fn to_xmp(&self) -> XmpMeta {
-        XmpMeta {
-            properties: self.properties.clone(),
-        }
-    }
-
-    fn find(&self, ns: &str, name: &str) -> Option<&XmpProperty> {
-        self.properties
-            .iter()
-            .find(|p| p.namespace == ns && p.name == name)
-    }
-
-    fn upsert(&mut self, ns: &str, name: &str, value: XmpValue) {
-        if let Some(p) = self
-            .properties
-            .iter_mut()
-            .find(|p| p.namespace == ns && p.name == name)
-        {
-            p.value = value;
-        } else {
-            self.properties.push(XmpProperty {
-                namespace: ns.to_owned(),
-                name: name.to_owned(),
-                value,
-                qualifiers: Vec::new(),
-            });
-        }
+        self.xmp.clone()
     }
 
     pub(crate) fn simple(&self, ns: &str, name: &str) -> Option<&str> {
@@ -485,19 +460,19 @@ mod tests {
         );
 
         // Each accessor targets a distinct property — 24 fields, 24 properties.
-        assert_eq!(pm.properties.len(), 24);
+        assert_eq!(pm.xmp.properties.len(), 24);
         // Spot-check namespaces/names so an accessor can't silently target the wrong property.
-        assert!(pm.find(ns::PHOTOSHOP, "Headline").is_some());
-        assert!(pm.find(ns::PHOTOSHOP, "DateCreated").is_some());
-        assert!(pm.find(ns::IPTC_CORE, "CountryCode").is_some());
-        assert!(pm.find(ns::IPTC_CORE, "IntellectualGenre").is_some());
-        assert!(pm.find(ns::IPTC_CORE, "Location").is_some());
-        assert!(pm.find(ns::IPTC_CORE, "SubjectCode").is_some());
-        assert!(pm.find(ns::IPTC_CORE, "Scene").is_some());
-        assert!(pm.find(ns::IPTC_CORE, "AltTextAccessibility").is_some());
-        assert!(pm.find(ns::IPTC_CORE, "ExtDescrAccessibility").is_some());
-        assert!(pm.find(ns::DC, "rights").is_some());
-        assert!(pm.find(ns::XMP_RIGHTS, "UsageTerms").is_some());
+        assert!(pm.xmp.get(ns::PHOTOSHOP, "Headline").is_some());
+        assert!(pm.xmp.get(ns::PHOTOSHOP, "DateCreated").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "CountryCode").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "IntellectualGenre").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "Location").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "SubjectCode").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "Scene").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "AltTextAccessibility").is_some());
+        assert!(pm.xmp.get(ns::IPTC_CORE, "ExtDescrAccessibility").is_some());
+        assert!(pm.xmp.get(ns::DC, "rights").is_some());
+        assert!(pm.xmp.get(ns::XMP_RIGHTS, "UsageTerms").is_some());
 
         // Every IIM-mapped field is settable through its typed accessor: the 20-row FIELD_MAP
         // must see a value for each of its rows.
@@ -574,7 +549,7 @@ mod tests {
         assert_eq!(pm.xmp.properties.len(), 1);
         assert_eq!(pm.city(), Some("Berlin"));
         // Round-trips back out as an XMP graph.
-        assert_eq!(pm.to_xmp().properties, pm.properties);
+        assert_eq!(pm.to_xmp().properties, pm.xmp.properties);
         assert_eq!(PhotoMetadata::from_xmp(&pm.to_xmp()), pm);
     }
 

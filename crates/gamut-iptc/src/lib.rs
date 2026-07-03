@@ -73,7 +73,7 @@
 //! [`gamut_core::Error::Unsupported`] rather than mis-decoded (see [`charset`]). The typed
 //! accessors cover every scalar/list IPTC **Core** property; the structured
 //! `Iptc4xmpCore:CreatorContactInfo` and the IPTC **Extension** structures (image regions,
-//! artwork, licensors) have no typed model and pass through [`PhotoMetadata::properties`] as raw
+//! artwork, licensors) have no typed model and pass through [`PhotoMetadata::xmp`] as raw
 //! values. Scalar-shaped IIM datasets that repeat on the wire (`2:04`, `2:85`) reconcile their
 //! first value only; IIM records 3–9 have no named tags — both still round-trip byte-exact. See
 //! `STATUS.md` for the full v1 deferral list.

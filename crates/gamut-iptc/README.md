@@ -85,7 +85,7 @@ The v1 contract, stated precisely:
 - **Typed accessors cover every scalar/list IPTC Core property.** The structured
   `Iptc4xmpCore:CreatorContactInfo` and all IPTC **Extension** structures (image regions, artwork,
   licensors, …) have no typed model — they still round-trip losslessly as raw properties in
-  `PhotoMetadata::properties`, reachable via `get_field`/`set_field` where mapped.
+  `PhotoMetadata::xmp`, reachable via `get_field`/`set_field` where mapped.
 - **Strict write, honest read.** Writing never silently truncates or drops: unencodable text,
   overlong values (octet limits are enforced on write only; overlong wire values are preserved on
   read), and an IIM-inexpressible `photoshop:DateCreated` are hard errors. Reading never guesses: a

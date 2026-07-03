@@ -37,7 +37,7 @@ Intentional, documented skips — none lose data on round-trip:
 
 - **IPTC Extension structures** (image regions, artwork/object, licensors, locations shown, …) and
   the structured `Iptc4xmpCore:CreatorContactInfo`: no typed model. They pass through
-  `PhotoMetadata::properties` as raw `gamut-xmp` values untouched.
+  `PhotoMetadata::xmp` as raw `gamut-xmp` values untouched.
 - **Exotic ISO 2022 character sets**: dataset 1:90 designations other than the spec default
   (decoded as Latin-1, the exiv2/ExifTool de-facto reading of ISO 646 IRV) and UTF-8 (`ESC % G`)
   are reported as `Error::Unsupported`, never mis-decoded.
