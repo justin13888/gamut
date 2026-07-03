@@ -41,7 +41,7 @@ use crate::sequence::{
 /// whether it is modelled. The enum is `#[non_exhaustive]`: variants are added as more element
 /// types gain semantic decoders.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TagData {
     /// `XYZ ` — one or more CIE XYZ triplets (`XYZType`); colorant, white/black point, luminance.
     Xyz(Vec<XyzNumber>),
@@ -273,7 +273,13 @@ fn decode_uint64_array(element: &[u8]) -> Result<TagData> {
 
 /// Serializes a tag element (its four-byte type signature, four reserved bytes, then payload) into
 /// `out` — the inverse of [`decode_tag`]. [`TagData::Raw`] re-emits its stored bytes verbatim.
-pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for a hand-built model that violates an invariant the decoder
+/// establishes (mismatched LUT shapes, over-long fixed fields, non-ASCII text, …) — data that
+/// would serialize to a corrupt or lossy element. Values produced by `decode_tag` always encode.
+pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) -> Result<()> {
     match data {
         TagData::Xyz(values) => {
             element_header(out, b"XYZ ");
@@ -283,13 +289,16 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
         }
         TagData::Curve(curve) => {
             element_header(out, b"curv");
-            write_curve_body(curve, out);
+            write_curve_body(curve, out)?;
         }
         TagData::ParametricCurve(curve) => {
             element_header(out, b"para");
-            write_parametric_body(curve, out);
+            write_parametric_body(curve, out)?;
         }
         TagData::Text(text) => {
+            if !text.is_ascii() || text.as_bytes().contains(&0) {
+                return Err(Error::InvalidInput("icc: textType must be NUL-free ASCII"));
+            }
             element_header(out, b"text");
             out.extend_from_slice(text.as_bytes());
             out.push(0); // NUL terminator
@@ -309,19 +318,19 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
             }
         }
         TagData::MultiLocalizedUnicode(mluc) => encode_mluc(mluc, out),
-        TagData::TextDescription(desc) => encode_text_description(desc, out),
-        TagData::Lut8(lut) => encode_lut8(lut, out),
-        TagData::Lut16(lut) => encode_lut16(lut, out),
-        TagData::LutAToB(lut) => encode_lut_a_to_b(lut, out),
-        TagData::LutBToA(lut) => encode_lut_b_to_a(lut, out),
-        TagData::NamedColor2(named) => encode_named_color2(named, out),
+        TagData::TextDescription(desc) => encode_text_description(desc, out)?,
+        TagData::Lut8(lut) => encode_lut8(lut, out)?,
+        TagData::Lut16(lut) => encode_lut16(lut, out)?,
+        TagData::LutAToB(lut) => encode_lut_a_to_b(lut, out)?,
+        TagData::LutBToA(lut) => encode_lut_b_to_a(lut, out)?,
+        TagData::NamedColor2(named) => encode_named_color2(named, out)?,
         TagData::Chromaticity(chrm) => encode_chromaticity(chrm, out),
         TagData::Cicp(cicp) => encode_cicp(cicp, out),
         TagData::Measurement(meas) => encode_measurement(meas, out),
         TagData::ViewingConditions(view) => encode_viewing_conditions(view, out),
         TagData::Data(data) => encode_data(data, out),
         TagData::ColorantOrder(clro) => encode_colorant_order(clro, out),
-        TagData::ColorantTable(clrt) => encode_colorant_table(clrt, out),
+        TagData::ColorantTable(clrt) => encode_colorant_table(clrt, out)?,
         TagData::U16Fixed16Array(values) => {
             element_header(out, b"uf32");
             for &value in values {
@@ -350,12 +359,25 @@ pub(crate) fn encode_tag(data: &TagData, out: &mut Vec<u8>) {
                 out.extend_from_slice(&value.to_be_bytes());
             }
         }
-        TagData::ProfileSequenceDesc(pseq) => encode_profile_sequence_desc(pseq, out),
-        TagData::ProfileSequenceIdentifier(psid) => encode_profile_sequence_identifier(psid, out),
-        TagData::ResponseCurveSet16(rcs) => encode_response_curve_set16(rcs, out),
+        TagData::ProfileSequenceDesc(pseq) => encode_profile_sequence_desc(pseq, out)?,
+        TagData::ProfileSequenceIdentifier(psid) => {
+            encode_profile_sequence_identifier(psid, out)?;
+        }
+        TagData::ResponseCurveSet16(rcs) => encode_response_curve_set16(rcs, out)?,
         TagData::Dict(dict) => encode_dict(dict, out),
-        TagData::Raw { bytes, .. } => out.extend_from_slice(bytes),
+        TagData::Raw { type_sig, bytes } => {
+            // `bytes` is the complete element, so its first four bytes are its type signature;
+            // decoding would surface that signature, not the stored one, so a mismatch is rejected
+            // rather than silently "renaming" the element on a round-trip.
+            if *type_sig != element_type_signature(bytes) {
+                return Err(Error::InvalidInput(
+                    "icc: raw element bytes do not start with its type signature",
+                ));
+            }
+            out.extend_from_slice(bytes);
+        }
     }
+    Ok(())
 }
 
 /// Writes an element's four-byte type signature followed by its four reserved zero bytes.
@@ -601,14 +623,14 @@ mod tests {
                     device_model: Signature::ZERO,
                     attributes: 0,
                     technology: Signature::ZERO,
-                    manufacturer_desc: crate::sequence::DescriptionText::Mluc(Mluc::default()),
-                    model_desc: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                    manufacturer_desc: crate::sequence::EmbeddedDescription::Mluc(Mluc::default()),
+                    model_desc: crate::sequence::EmbeddedDescription::Mluc(Mluc::default()),
                 }],
             }),
             TagData::ProfileSequenceIdentifier(ProfileSequenceIdentifier {
                 entries: vec![crate::sequence::ProfileIdentifier {
                     profile_id: crate::header::ProfileId([7; 16]),
-                    description: crate::sequence::DescriptionText::Mluc(Mluc::default()),
+                    description: crate::sequence::EmbeddedDescription::Mluc(Mluc::default()),
                 }],
             }),
             TagData::ResponseCurveSet16(ResponseCurveSet16 {
@@ -626,9 +648,41 @@ mod tests {
         ];
         for data in cases {
             let mut out = Vec::new();
-            encode_tag(&data, &mut out);
+            encode_tag(&data, &mut out).unwrap();
             assert_eq!(decode_tag(&out).unwrap(), data);
         }
+    }
+
+    #[test]
+    fn encode_rejects_text_the_decoder_would_not_return() {
+        let mut out = Vec::new();
+        // decode_text requires 7-bit ASCII…
+        assert!(encode_tag(&TagData::Text("héllo".to_owned()), &mut out).is_err());
+        // …and stops at the first NUL, so an interior NUL cannot round-trip.
+        assert!(encode_tag(&TagData::Text("a\0b".to_owned()), &mut out).is_err());
+    }
+
+    #[test]
+    fn encode_rejects_raw_with_mismatched_signature() {
+        // The stored bytes begin with the element's real signature; a disagreeing `type_sig`
+        // would silently "rename" the tag on a round-trip.
+        let mismatched = TagData::Raw {
+            type_sig: Signature(*b"aaaa"),
+            bytes: b"zzzz\x00\x00\x00\x00payload".to_vec(),
+        };
+        let mut out = Vec::new();
+        assert!(encode_tag(&mismatched, &mut out).is_err());
+        // A short element carries no signature, which decode reports as ZERO.
+        let short_ok = TagData::Raw {
+            type_sig: Signature::ZERO,
+            bytes: vec![1, 2],
+        };
+        assert!(encode_tag(&short_ok, &mut out).is_ok());
+        let short_bad = TagData::Raw {
+            type_sig: Signature(*b"zzzz"),
+            bytes: vec![1, 2],
+        };
+        assert!(encode_tag(&short_bad, &mut out).is_err());
     }
 
     #[test]
@@ -638,7 +692,7 @@ mod tests {
             bytes: b"zzzz\x00\x00\x00\x00payload".to_vec(),
         };
         let mut out = Vec::new();
-        encode_tag(&data, &mut out);
+        encode_tag(&data, &mut out).unwrap();
         assert_eq!(decode_tag(&out).unwrap(), data);
     }
 
@@ -667,7 +721,7 @@ mod tests {
         });
         for data in [lut8, mba] {
             let mut out = Vec::new();
-            encode_tag(&data, &mut out);
+            encode_tag(&data, &mut out).unwrap();
             assert_eq!(decode_tag(&out).unwrap(), data);
         }
     }

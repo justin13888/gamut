@@ -94,6 +94,6 @@ mod tests {
         let mut pm = PhotoMetadata::new();
         pm.set_headline("Breaking news");
         let props = IptcWriter::new().write_xmp_properties(&pm);
-        assert_eq!(props, pm.properties);
+        assert_eq!(props, pm.xmp.properties);
     }
 }

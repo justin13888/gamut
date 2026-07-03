@@ -60,9 +60,9 @@ pub(crate) fn parse_tag_table(profile: &[u8]) -> Result<Vec<TagEntry>> {
     Ok(entries)
 }
 
-/// Well-known tag signatures (ICC.1:2022 §9), as an ergonomic catalogue with
-/// [`signature`](KnownTag::signature)/[`from_signature`](KnownTag::from_signature) conversions —
-/// e.g. `profile.get(KnownTag::MediaWhitePoint.signature())`.
+/// Well-known tag signatures (ICC.1:2022 §9), as an ergonomic catalogue — a `KnownTag` converts
+/// into its [`Signature`] (so `profile.get(KnownTag::MediaWhitePoint)` works directly), and
+/// [`from_signature`](KnownTag::from_signature) looks a signature up in the catalogue.
 ///
 /// The parser accepts *any* signature, so this is a convenience set (not exhaustive) and is not on
 /// the parse path.
@@ -128,8 +128,9 @@ pub enum KnownTag {
 }
 
 impl KnownTag {
-    /// Every catalogued tag, for enumeration.
-    pub const ALL: [KnownTag; 28] = [
+    /// Every catalogued tag, for enumeration. A slice, so the catalogue can grow (the enum is
+    /// `#[non_exhaustive]`) without the constant's type changing.
+    pub const ALL: &'static [KnownTag] = &[
         KnownTag::ProfileDescription,
         KnownTag::Copyright,
         KnownTag::DeviceManufacturerDesc,
@@ -160,10 +161,20 @@ impl KnownTag {
         KnownTag::Cicp,
     ];
 
-    /// The four-byte signature this tag is stored under.
+    /// The catalogued tag for `signature`, if recognized.
     #[must_use]
-    pub fn signature(self) -> Signature {
-        let code: &[u8; 4] = match self {
+    pub fn from_signature(signature: Signature) -> Option<KnownTag> {
+        KnownTag::ALL
+            .iter()
+            .copied()
+            .find(|&tag| Signature::from(tag) == signature)
+    }
+}
+
+impl From<KnownTag> for Signature {
+    /// The four-byte signature the tag is stored under.
+    fn from(tag: KnownTag) -> Signature {
+        let code: &[u8; 4] = match tag {
             KnownTag::ProfileDescription => b"desc",
             KnownTag::Copyright => b"cprt",
             KnownTag::DeviceManufacturerDesc => b"dmnd",
@@ -194,14 +205,6 @@ impl KnownTag {
             KnownTag::Cicp => b"cicp",
         };
         Signature(*code)
-    }
-
-    /// The catalogued tag for `signature`, if recognized.
-    #[must_use]
-    pub fn from_signature(signature: Signature) -> Option<KnownTag> {
-        KnownTag::ALL
-            .into_iter()
-            .find(|tag| tag.signature() == signature)
     }
 }
 
@@ -259,8 +262,8 @@ mod tests {
 
     #[test]
     fn known_tag_signature_round_trip() {
-        for tag in KnownTag::ALL {
-            assert_eq!(KnownTag::from_signature(tag.signature()), Some(tag));
+        for &tag in KnownTag::ALL {
+            assert_eq!(KnownTag::from_signature(Signature::from(tag)), Some(tag));
         }
         assert_eq!(KnownTag::from_signature(Signature(*b"zzzz")), None);
     }

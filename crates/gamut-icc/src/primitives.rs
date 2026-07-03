@@ -49,7 +49,7 @@ impl U16Fixed16 {
     }
 }
 
-/// A `u8Fixed8Number` (ICC.1:2022 §4.5): an unsigned 8.8 fixed-point value stored big-endian as a
+/// A `u8Fixed8Number` (ICC.1:2022 §4.9): an unsigned 8.8 fixed-point value stored big-endian as a
 /// `u16`. The numeric value is `raw / 256`. Used by the single-entry `curveType` gamma encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct U8Fixed8(pub u16);
@@ -82,6 +82,14 @@ pub struct XyzNumber {
 }
 
 impl XyzNumber {
+    /// The D50 illuminant at the exact raw encoding the header mandates for the PCS illuminant
+    /// (ICC.1:2022 §7.2.16): `(0x0000_F6D6, 0x0001_0000, 0x0000_D32D)` ≈ (0.9642, 1.0, 0.8249).
+    pub const D50: XyzNumber = XyzNumber {
+        x: S15Fixed16(0x0000_F6D6),
+        y: S15Fixed16(0x0001_0000),
+        z: S15Fixed16(0x0000_D32D),
+    };
+
     /// `[X, Y, Z]` as `f64` — the bridge to floating-point colour math.
     #[must_use]
     pub fn to_f64(self) -> [f64; 3] {
@@ -139,28 +147,38 @@ impl DateTime {
     }
 }
 
-/// A four-byte signature (ICC.1:2022 §4.12): a four-character code stored big-endian.
+/// A four-byte signature: the four-character code (7-bit ASCII, ICC.1:2022 §4.15) that identifies
+/// tags (§7.3), element types (§10), and registry values throughout the format.
 ///
 /// Used for the open-registry header fields — preferred CMM, primary platform, device
 /// manufacturer/model, profile creator — where the all-zero value means "unspecified", and for the
-/// `signatureType` tag element.
+/// `signatureType` tag element (§10.23).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Signature(pub [u8; 4]);
 
 impl Signature {
     /// The all-zero signature, meaning "unspecified".
     pub const ZERO: Signature = Signature([0; 4]);
+}
 
-    /// The signature's four bytes as a big-endian `u32`.
-    #[must_use]
-    pub fn to_u32(self) -> u32 {
-        u32::from_be_bytes(self.0)
+impl From<[u8; 4]> for Signature {
+    /// Wraps four bytes as a signature — `Signature::from(*b"wtpt")`.
+    fn from(bytes: [u8; 4]) -> Self {
+        Self(bytes)
     }
+}
 
+impl From<u32> for Signature {
     /// A signature from a big-endian `u32`.
-    #[must_use]
-    pub fn from_u32(value: u32) -> Self {
+    fn from(value: u32) -> Self {
         Self(value.to_be_bytes())
+    }
+}
+
+impl From<Signature> for u32 {
+    /// The signature's four bytes as a big-endian `u32`.
+    fn from(sig: Signature) -> u32 {
+        u32::from_be_bytes(sig.0)
     }
 }
 
@@ -251,8 +269,8 @@ mod tests {
     #[test]
     fn signature_u32_round_trip_and_display() {
         let sig = Signature(*b"RGB ");
-        assert_eq!(sig.to_u32(), 0x5247_4220);
-        assert_eq!(Signature::from_u32(0x5247_4220), sig);
+        assert_eq!(u32::from(sig), 0x5247_4220);
+        assert_eq!(Signature::from(0x5247_4220u32), sig);
         assert_eq!(sig.to_string(), "RGB ");
         // Non-printable bytes render as escapes.
         assert_eq!(

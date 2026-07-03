@@ -23,10 +23,10 @@
 //!
 //! # fn demo(bytes: &[u8]) -> Result<(), gamut_core::Error> {
 //! let profile = IccProfile::parse(bytes)?;
-//! if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint.signature()) {
+//! if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint) {
 //!     println!("media white point: {:?}", white[0].to_f64());
 //! }
-//! let serialized = profile.to_bytes(); // spec-valid bytes, ready to re-embed
+//! let serialized = profile.to_bytes()?; // spec-valid bytes, ready to re-embed
 //! # let _ = serialized;
 //! # Ok(())
 //! # }
@@ -40,28 +40,47 @@
 //! what it carries. Applying a profile's transform (a CMM), and building transforms from
 //! [`gamut_color`](https://docs.rs/gamut-color), are out of scope — the `to_f64`/`eval` accessors
 //! are the seam for that — as is **iccMAX** (`ICC.2`), a separate next-generation profile format.
+//!
+//! # Stability
+//!
+//! The v1 surface follows a few deliberate policies:
+//!
+//! - **Plain-data model.** The tag structs expose public fields and are *not* `#[non_exhaustive]`:
+//!   they mirror layouts ICC.1:2022 froze, so they will not grow fields. The two open sets —
+//!   [`TagData`] (new semantic decoders) and [`KnownTag`] (catalogue entries) — are
+//!   `#[non_exhaustive]` and grow additively.
+//! - **Exhaustive enums mirror closed spec registries**: [`DeviceClass`] (§7.2.5), [`ColorSpace`]
+//!   (§7.2.6, with [`ColorSpace::NColor`] covering the xCLR family), [`RenderingIntent`]
+//!   (§7.2.15), [`ClutPrecision`], [`Curve`] (the three count-selected §10.6 encodings),
+//!   [`CurveOrParametric`] and [`EmbeddedDescription`] (the only element types those slots admit).
+//! - **The `tags` vec is the model.** [`IccProfile::tags`] keeps file order (the byte-fidelity
+//!   contract for re-serialization); duplicate signatures are rejected at parse *and* write;
+//!   [`IccProfile::get`] is a linear first-match scan, sized for the dozens of tags real profiles
+//!   carry.
+//! - **Writes are validated.** Serialization returns `Err` for hand-built data that violates an
+//!   invariant the decoder establishes, instead of emitting a corrupt profile; a parsed profile
+//!   always serializes. The format's `u32` sizes and offsets cap a serialized profile at 4 GiB.
 #![forbid(unsafe_code)]
 
 mod bytes;
-
-pub mod cicp;
-pub mod colorant;
-pub mod curve;
-pub mod data;
-pub mod dict;
-pub mod header;
-pub mod lut;
-pub mod measurement;
-pub mod mluc;
-pub mod named_color;
-pub mod primitives;
-pub mod profile;
-pub mod reader;
-pub mod sequence;
-pub mod tag_types;
-pub mod tags;
-pub mod validate;
-pub mod writer;
+mod cicp;
+mod colorant;
+mod curve;
+mod data;
+mod dict;
+mod header;
+mod lut;
+mod measurement;
+mod mluc;
+mod named_color;
+mod primitives;
+mod profile;
+mod reader;
+mod sequence;
+mod tag_types;
+mod tags;
+mod validate;
+mod writer;
 
 pub use cicp::Cicp;
 pub use colorant::{Colorant, ColorantOrder, ColorantTable};
@@ -79,7 +98,7 @@ pub use primitives::{DateTime, S15Fixed16, Signature, U8Fixed8, U16Fixed16, XyzN
 pub use profile::IccProfile;
 pub use reader::IccReader;
 pub use sequence::{
-    DescriptionText, ProfileDescription, ProfileIdentifier, ProfileSequenceDesc,
+    EmbeddedDescription, ProfileDescription, ProfileIdentifier, ProfileSequenceDesc,
     ProfileSequenceIdentifier, Response16, ResponseCurve, ResponseCurveSet16,
 };
 pub use tag_types::TagData;

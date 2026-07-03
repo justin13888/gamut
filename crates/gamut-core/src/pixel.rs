@@ -17,21 +17,16 @@ mod sample_sealed {
 ///
 /// Sealed — only `u8` and `u16` implement it. The supertrait bounds are chosen so that `P::Sample`
 /// transitively gives buffer types everything they need (copy, zero-fill via `Default`, ordering)
-/// without callers repeating `where P::Sample: …` clauses.
+/// without callers repeating `where P::Sample: …` clauses. The storage width is available as
+/// `size_of::<Self>()`; a stream's *coded* bit depth (e.g. 10 or 12) is a separate codec concern
+/// carried elsewhere (see `gamut_color::BitDepth`).
 pub trait Sample:
     sample_sealed::Sealed + Copy + Default + Ord + core::fmt::Debug + 'static
 {
-    /// Bits the primitive stores (8 or 16). Distinct from a stream's *coded* bit depth (e.g. 10 or
-    /// 12), which is a codec concern carried separately (see `gamut_color::BitDepth`).
-    const STORAGE_BITS: u32;
 }
 
-impl Sample for u8 {
-    const STORAGE_BITS: u32 = 8;
-}
-impl Sample for u16 {
-    const STORAGE_BITS: u32 = 16;
-}
+impl Sample for u8 {}
+impl Sample for u16 {}
 
 /// The colour interpretation of a pixel's channels.
 ///
@@ -133,12 +128,6 @@ define_pixels! {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sample_storage_bits() {
-        assert_eq!(<u8 as Sample>::STORAGE_BITS, 8);
-        assert_eq!(<u16 as Sample>::STORAGE_BITS, 16);
-    }
 
     #[test]
     fn pixel_layout_constants() {

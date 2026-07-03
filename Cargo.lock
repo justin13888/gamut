@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-core"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "thiserror",
 ]
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-icc"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "gamut-core",
  "lcms2-oracle",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-xmp"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "exiv2-oracle",
  "gamut-core",

@@ -115,7 +115,7 @@ format.
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
 | `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | scaffolding (impl in progress, #34)    |
 | `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on gamut-ifd        | scaffolding (impl in progress, #34)    |
-| `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | scaffolding (impl in progress, #34)    |
+| `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (v1, #180)                      |
 | `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | scaffolding (impl in progress, #34)    |
 | `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | scaffolding (impl in progress, #34)    |
 | `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | scaffolding (impl in progress, #34)    |

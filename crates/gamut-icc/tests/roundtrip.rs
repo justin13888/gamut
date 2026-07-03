@@ -4,7 +4,10 @@
 //! accept gamut-icc's serialization as an equivalent profile — the conformance gate the crate
 //! documents. The corpus is synthesized by lcms in memory (no committed binary fixtures).
 
-use gamut_icc::{IccProfile, IccWriter, Signature, TagData};
+use gamut_icc::{
+    ColorSpace, DeviceClass, IccProfile, IccReader, IccWriter, ProfileHeader, ProfileId, Signature,
+    TagData, XyzNumber,
+};
 
 const D65: [f64; 2] = [0.3127, 0.3290];
 const REC709_PRIMARIES: [[f64; 2]; 3] = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]];
@@ -30,12 +33,19 @@ fn corpus() -> Vec<(&'static str, Vec<u8>)> {
 
 /// Parsing, re-serializing, and re-parsing preserves the decoded model: the tags are identical and
 /// the header matches (apart from the `size` field, which a re-layout may legitimately change).
+///
+/// The `to_bytes` expectations double as the fallible-write contract across the whole corpus: the
+/// decoder establishes every invariant serialization checks, so a *parsed* profile never fails to
+/// serialize.
 #[test]
 fn round_trip_preserves_the_model() {
     for (label, bytes) in corpus() {
         let parsed = IccProfile::parse(&bytes).unwrap_or_else(|e| panic!("{label}: {e:?}"));
-        let reparsed = IccProfile::parse(&parsed.to_bytes())
-            .unwrap_or_else(|e| panic!("{label} reparse: {e:?}"));
+        let serialized = parsed
+            .to_bytes()
+            .unwrap_or_else(|e| panic!("{label}: a parsed profile must serialize: {e:?}"));
+        let reparsed =
+            IccProfile::parse(&serialized).unwrap_or_else(|e| panic!("{label} reparse: {e:?}"));
 
         assert_eq!(parsed.tags, reparsed.tags, "{label}: tags changed");
 
@@ -52,7 +62,7 @@ fn round_trip_preserves_the_model() {
 #[test]
 fn serialization_is_well_formed() {
     for (label, bytes) in corpus() {
-        let out = IccProfile::parse(&bytes).unwrap().to_bytes();
+        let out = IccProfile::parse(&bytes).unwrap().to_bytes().unwrap();
         let size = u32::from_be_bytes([out[0], out[1], out[2], out[3]]) as usize;
         assert_eq!(size, out.len(), "{label}: size field");
         assert!(out.len().is_multiple_of(4), "{label}: 4-byte aligned");
@@ -79,7 +89,7 @@ fn serialization_is_well_formed() {
 fn lcms_accepts_our_serialization() {
     for (label, bytes) in corpus() {
         let original = lcms2_oracle::Profile::from_bytes(&bytes).expect("lcms reads the original");
-        let reserialized = IccProfile::parse(&bytes).unwrap().to_bytes();
+        let reserialized = IccProfile::parse(&bytes).unwrap().to_bytes().unwrap();
         let reopened = lcms2_oracle::Profile::from_bytes(&reserialized)
             .unwrap_or_else(|| panic!("{label}: lcms rejected our serialization"));
 
@@ -117,20 +127,53 @@ fn raw_tags_round_trip_byte_exact() {
         },
     ));
 
-    let reparsed = IccProfile::parse(&parsed.to_bytes()).unwrap();
+    let reparsed = IccProfile::parse(&parsed.to_bytes().unwrap()).unwrap();
     match reparsed.get(Signature(*b"mpet")) {
         Some(TagData::Raw { bytes, .. }) => assert_eq!(*bytes, element),
         other => panic!("expected a Raw mpet tag, got {other:?}"),
     }
 }
 
+/// A profile built from scratch — `ProfileHeader::new` plus a white-point tag — serializes to
+/// spec-valid bytes that a *strict* re-parse accepts and decodes to the same model.
+#[test]
+fn from_scratch_profile_round_trips_strictly() {
+    let profile = IccProfile {
+        header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
+        tags: vec![(Signature(*b"wtpt"), TagData::Xyz(vec![XyzNumber::D50]))],
+    };
+    let bytes = profile.to_bytes().expect("a fresh header must serialize");
+    let reparsed = IccReader::new()
+        .strict(true)
+        .parse(&bytes)
+        .expect("strict parse of a from-scratch profile");
+
+    assert_eq!(reparsed.tags, profile.tags);
+    let mut expected = profile.header.clone();
+    expected.size = u32::try_from(bytes.len()).unwrap(); // the writer patches the size field
+    assert_eq!(reparsed.header, expected);
+}
+
+/// A hand-built duplicate tag signature is rejected on write, mirroring the parser's §7.3 check —
+/// serializing it would produce a profile that cannot be re-read.
+#[test]
+fn duplicate_tags_are_rejected_on_write() {
+    let mut parsed = IccProfile::parse(&lcms2_oracle::srgb().to_bytes()).unwrap();
+    let (sig, data) = parsed.tags[0].clone();
+    parsed.tags.push((sig, data));
+    assert!(parsed.to_bytes().is_err());
+}
+
 /// `IccWriter::recompute_profile_id` stamps a non-zero, self-consistent MD5 ID into the output.
 #[test]
 fn writer_recomputes_profile_id() {
     let parsed = IccProfile::parse(&lcms2_oracle::srgb().to_bytes()).unwrap();
-    let out = IccWriter::new().recompute_profile_id(true).write(&parsed);
+    let out = IccWriter::new()
+        .recompute_profile_id(true)
+        .write(&parsed)
+        .unwrap();
 
     let stamped: [u8; 16] = out[84..100].try_into().unwrap();
     assert_ne!(stamped, [0u8; 16], "the ID should be set");
-    assert_eq!(stamped, IccProfile::compute_profile_id(&out).0);
+    assert_eq!(stamped, ProfileId::compute(&out).0);
 }

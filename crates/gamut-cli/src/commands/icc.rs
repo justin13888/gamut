@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use gamut::icc::{
-    DeviceClass, IccProfile, IccReader, KnownTag, ProfileHeader, RenderingIntent, Signature,
-    TagData,
+    DeviceClass, IccProfile, IccReader, KnownTag, ProfileHeader, ProfileId, RenderingIntent,
+    Signature, TagData,
 };
 use image::ImageDecoder;
 
@@ -139,13 +139,13 @@ fn print_report(path: &Path, format: Format, blob: &[u8], profile: &IccProfile, 
         format_name(format),
         blob.len()
     );
-    println!(
-        "  version:          {}.{}.{}",
-        h.version.major, h.version.minor, h.version.bugfix
-    );
+    println!("  version:          {}", h.version);
     println!("  device class:     {}", device_class_name(h.device_class));
-    println!("  data space:       {}", h.data_color_space.to_signature());
-    println!("  pcs:              {}", h.pcs.to_signature());
+    println!(
+        "  data space:       {}",
+        Signature::from(h.data_color_space)
+    );
+    println!("  pcs:              {}", Signature::from(h.pcs));
     println!(
         "  pcs illuminant:   {}",
         illuminant_summary(h.pcs_illuminant.to_f64())
@@ -271,7 +271,7 @@ fn device_class_name(class: DeviceClass) -> String {
         DeviceClass::Abstract => "Abstract",
         DeviceClass::NamedColor => "NamedColor",
     };
-    format!("{name} ({})", class.to_signature())
+    format!("{name} ({})", Signature::from(class))
 }
 
 /// The display name of a rendering intent.
@@ -337,9 +337,12 @@ fn profile_id_summary(h: &ProfileHeader, blob: &[u8]) -> String {
     if h.profile_id.is_zero() {
         return "not set".to_owned();
     }
-    let hex: String = h.profile_id.0.iter().map(|b| format!("{b:02x}")).collect();
-    let matches = IccProfile::compute_profile_id(blob) == h.profile_id;
-    format!("{hex} (matches recomputed MD5: {})", yes_no(matches))
+    let matches = ProfileId::compute(blob) == h.profile_id;
+    format!(
+        "{} (matches recomputed MD5: {})",
+        h.profile_id,
+        yes_no(matches)
+    )
 }
 
 /// The display name of a container format.

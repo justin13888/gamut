@@ -10,6 +10,17 @@
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+/// Exiv2's `XmpParser` (Adobe XMPCore underneath) keeps global state and is documented as not
+/// thread-safe; every FFI call is serialized behind this lock so parallel `cargo test` threads
+/// cannot race it into spurious parse failures.
+static XMP_LOCK: Mutex<()> = Mutex::new(());
+
+/// Acquires the XMPCore serialization lock, ignoring poisoning (the lock guards no Rust data).
+fn lock() -> MutexGuard<'static, ()> {
+    XMP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 unsafe extern "C" {
     fn exiv2_xmp_validate(xmp: *const c_char, len: usize) -> c_int;
@@ -62,6 +73,7 @@ unsafe fn take_owned(buf: *mut c_char, len: usize) -> Vec<u8> {
 ///
 /// Returns a message if exiv2 rejects the packet.
 pub fn validate(xmp: &[u8]) -> Result<(), String> {
+    let _guard = lock();
     // SAFETY: `xmp` is a valid byte range; the shim copies it into a std::string.
     let code = unsafe { exiv2_xmp_validate(xmp.as_ptr().cast(), xmp.len()) };
     if code == 0 {
@@ -77,6 +89,7 @@ pub fn validate(xmp: &[u8]) -> Result<(), String> {
 ///
 /// Returns a message if exiv2 fails to parse or re-serialize the packet.
 pub fn roundtrip(xmp: &[u8]) -> Result<Vec<u8>, String> {
+    let _guard = lock();
     let mut buf: *mut c_char = std::ptr::null_mut();
     let mut len: usize = 0;
     // SAFETY: `xmp` is valid; `buf`/`len` are written only on success.
@@ -95,6 +108,7 @@ pub fn roundtrip(xmp: &[u8]) -> Result<Vec<u8>, String> {
 /// Returns a message if the key contains a NUL byte, exiv2 cannot parse the packet, or the property
 /// is absent.
 pub fn get_property(xmp: &[u8], key: &str) -> Result<String, String> {
+    let _guard = lock();
     let ckey = CString::new(key).map_err(|e| e.to_string())?;
     let mut buf: *mut c_char = std::ptr::null_mut();
     let mut len: usize = 0;
@@ -122,6 +136,7 @@ pub fn get_property(xmp: &[u8], key: &str) -> Result<String, String> {
 ///
 /// Returns a message if exiv2 cannot parse the packet.
 pub fn property_count(xmp: &[u8]) -> Result<usize, String> {
+    let _guard = lock();
     let mut count: usize = 0;
     // SAFETY: `xmp` is valid; `count` is written only on success.
     let code = unsafe { exiv2_xmp_count(xmp.as_ptr().cast(), xmp.len(), &mut count) };
