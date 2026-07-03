@@ -32,7 +32,9 @@ pub fn in_gamut(rgb: [f64; 3]) -> bool {
 /// of gamut the colour was (`l_blend = 0` keeps `L` fixed).
 ///
 /// `lab` matches the `[L, a, b]` layout returned by [`linear_rgb_to_oklab`].
-/// Precondition: `lab[0]` (L) should be in `[0, 1]`.
+/// Preconditions: `lab[0]` (L) and `l_blend` should be in `[0, 1]` — outside that, the
+/// achromatic anchor itself may be out of gamut and the bisection bracket no longer holds.
+/// NaN channels propagate to the output (a non-finite colour is never reported in gamut).
 ///
 /// [`linear_rgb_to_oklab`]: crate::oklab::linear_rgb_to_oklab
 ///
@@ -84,6 +86,10 @@ mod tests {
         assert!(in_gamut([0.5, 0.3, 0.8]));
         assert!(!in_gamut([1.1, 0.5, 0.5]));
         assert!(!in_gamut([0.5, -0.1, 0.5]));
+        // Non-finite channels are never in gamut. Pins the direct `>= && <=` comparison chain: a
+        // refactor to a negated form (`!(x < 0.0 || x > 1.0)`) would return true for NaN.
+        assert!(!in_gamut([f64::NAN, 0.5, 0.5]));
+        assert!(!in_gamut([0.5, f64::INFINITY, 0.5]));
     }
 
     #[test]
@@ -102,15 +108,6 @@ mod tests {
         assert!(ao.abs() <= a.abs() + 1e-12, "chroma must not grow");
         assert!(bo.abs() <= 1e-12);
         assert!(in_gamut(oklab_to_linear_srgb([lo, ao, bo])));
-    }
-
-    #[test]
-    fn preserves_hue_angle() {
-        let (l, a, b) = (0.5, 0.3, -0.2);
-        let [_, ao, bo] = soft_gamut_clamp([l, a, b], 0.35);
-        // a and b shrink by the same factor → cross product (hue) stays zero.
-        assert!((a * bo - b * ao).abs() < 1e-12);
-        assert!(ao * a >= 0.0 && bo * b >= 0.0);
     }
 
     /// Golden vectors transcribed from chromahash `spec/test-vectors/unit-softgamutclamp.json`

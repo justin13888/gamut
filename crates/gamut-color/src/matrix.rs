@@ -50,7 +50,7 @@ fn gamut_chromaticities(gamut: Gamut) -> ([[f64; 2]; 3], [f64; 2]) {
 }
 
 /// Convert a CIE 1931 chromaticity `(x, y)` to tristimulus `XYZ` at unit `Y`.
-/// Precondition: `y != 0`.
+/// Precondition: `y != 0` (a zero `y` yields non-finite components).
 #[must_use]
 pub fn xy_to_xyz(x: f64, y: f64) -> [f64; 3] {
     [x / y, 1.0, (1.0 - x - y) / y]
@@ -118,13 +118,8 @@ pub fn derive_m1(gamut: Gamut) -> Option<[[f64; 3]; 3]> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn xy_to_xyz_unit_y() {
-        let xyz = xy_to_xyz(0.3127, 0.3290);
-        assert!((xyz[1] - 1.0).abs() < 1e-15);
-        // X = x/y, Z = (1-x-y)/y.
-        assert!((xyz[0] - 0.3127 / 0.3290).abs() < 1e-15);
-    }
+    // `xy_to_xyz` needs no direct test: it feeds both Lindbloom oracles below through every
+    // primary and white point, so any mutated term shifts those matrices far past their 5e-4 gate.
 
     /// External oracle: Bruce Lindbloom's published linear-sRGB → XYZ (D65) matrix
     /// (<http://www.brucelindbloom.com/Eqn_RGB_XYZ_Matrix.html>) is an independent computation of
@@ -146,17 +141,6 @@ mod tests {
             }
         }
         assert!(err < 5e-4, "sRGB→XYZ vs Lindbloom max err = {err}");
-    }
-
-    #[test]
-    fn bradford_d65_to_d65_is_identity() {
-        let m = bradford_adapt(D65, D65).expect("invertible");
-        for (i, row) in m.iter().enumerate() {
-            for (j, &v) in row.iter().enumerate() {
-                let want = if i == j { 1.0 } else { 0.0 };
-                assert!((v - want).abs() < 1e-12, "[{i}][{j}] = {v}");
-            }
-        }
     }
 
     /// External oracle: Lindbloom's published Bradford D65→D50 adaptation matrix

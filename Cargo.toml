@@ -76,8 +76,8 @@ serde_json = "1"
 # Versions are independent per crate — release-plz rewrites these requirements automatically
 # when a dependency's version bumps.
 gamut-core = { path = "crates/gamut-core", version = "1.0.0" }
-gamut-color = { path = "crates/gamut-color", version = "0.3.0" }
-gamut-dsp = { path = "crates/gamut-dsp", version = "0.2.1" }
+gamut-color = { path = "crates/gamut-color", version = "1.0.0" }
+gamut-dsp = { path = "crates/gamut-dsp", version = "1.0.0" }
 gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.1" }
 gamut-deflate = { path = "crates/gamut-deflate", version = "0.1.0" }
 gamut-png = { path = "crates/gamut-png", version = "0.1.0" }

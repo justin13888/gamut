@@ -17,22 +17,12 @@
 
 use crate::cicp::{ColourPrimaries, TransferCharacteristics};
 use crate::oklab::{Gamut, linear_rgb_to_oklab};
-use crate::transfer::{
-    HDR_REFERENCE_WHITE_NITS, adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf,
-};
-
-/// A tone-mapping operator carried by a [`SourceProfile`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ToneMap {
-    /// Reinhard `L / (1 + L)`, with `L` relative to `reference_white_nits`.
-    Reinhard {
-        /// Reference white luminance (cd/m²) the curve normalizes against — the BT.2408 HDR
-        /// reference white (203) for the BT.2020 PQ path.
-        reference_white_nits: f64,
-    },
-}
+use crate::transfer::{adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf};
 
 /// The encoder-exact per-channel transfer a [`SourceProfile`] linearizes with.
+///
+/// `#[non_exhaustive]`: more transfers (HLG is the named next candidate) may be added later.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceTransfer {
     /// sRGB EOTF (IEC 61966-2-1).
@@ -41,7 +31,7 @@ pub enum SourceTransfer {
     AdobeRgb,
     /// ProPhoto RGB, pure `x^1.8`.
     ProPhotoRgb,
-    /// BT.2020 PQ inverse EOTF → nits → Reinhard@203 (tone-mapped to SDR).
+    /// BT.2020 PQ EOTF → nits → Reinhard@203 (tone-mapped to SDR).
     Bt2020Pq,
 }
 
@@ -60,22 +50,11 @@ impl SourceTransfer {
     /// The CICP [`TransferCharacteristics`] code point, when one exists. Adobe
     /// RGB and ProPhoto RGB have no CICP transfer code point.
     #[must_use]
-    pub fn cicp(self) -> Option<TransferCharacteristics> {
+    pub fn transfer_characteristics(self) -> Option<TransferCharacteristics> {
         match self {
             SourceTransfer::Srgb => Some(TransferCharacteristics::Srgb),
             SourceTransfer::Bt2020Pq => Some(TransferCharacteristics::Pq),
             SourceTransfer::AdobeRgb | SourceTransfer::ProPhotoRgb => None,
-        }
-    }
-
-    /// The tone map folded into this transfer, if any (only the PQ path).
-    #[must_use]
-    pub fn tonemap(self) -> Option<ToneMap> {
-        match self {
-            SourceTransfer::Bt2020Pq => Some(ToneMap::Reinhard {
-                reference_white_nits: HDR_REFERENCE_WHITE_NITS,
-            }),
-            _ => None,
         }
     }
 }
@@ -145,7 +124,7 @@ impl SourceProfile {
     /// The CICP [`TransferCharacteristics`] code point, when one exists.
     #[must_use]
     pub fn transfer_characteristics(self) -> Option<TransferCharacteristics> {
-        self.transfer.cicp()
+        self.transfer.transfer_characteristics()
     }
 
     /// Linearize one gamma-encoded channel with this profile's transfer.
@@ -168,38 +147,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn srgb_decomposes_to_cicp_axes() {
-        let p = SourceProfile::SRGB;
-        assert_eq!(p.colour_primaries(), Some(ColourPrimaries::Bt709));
-        assert_eq!(
-            p.transfer_characteristics(),
-            Some(TransferCharacteristics::Srgb)
-        );
-    }
-
-    #[test]
-    fn bt2020_decomposes_to_primaries_and_pq() {
-        let p = SourceProfile::BT2020;
-        assert_eq!(p.colour_primaries(), Some(ColourPrimaries::Bt2020));
-        assert_eq!(
-            p.transfer_characteristics(),
-            Some(TransferCharacteristics::Pq)
-        );
-        // The Reinhard tone map folded into the BT.2020 transfer is exercised by
-        // `eotf_is_encoder_exact_per_gamut` (eotf == bt2020_pq_to_sdr).
-    }
-
-    #[test]
-    fn adobe_and_prophoto_have_no_cicp_code_points() {
-        for p in [SourceProfile::ADOBE_RGB, SourceProfile::PROPHOTO_RGB] {
-            assert_eq!(p.colour_primaries(), None);
-            assert_eq!(p.transfer_characteristics(), None);
+    fn profiles_decompose_to_cicp_axes() {
+        // Every named profile projects onto both CICP axes: Adobe RGB and ProPhoto have no code
+        // points, and Display P3 reuses the sRGB transfer with its own primaries. (The Reinhard
+        // tone map folded into the BT.2020 transfer is exercised by
+        // `eotf_is_encoder_exact_per_gamut`.)
+        use ColourPrimaries as Cp;
+        use TransferCharacteristics as Tc;
+        let cases: &[(SourceProfile, Option<Cp>, Option<Tc>)] = &[
+            (SourceProfile::SRGB, Some(Cp::Bt709), Some(Tc::Srgb)),
+            (
+                SourceProfile::DISPLAY_P3,
+                Some(Cp::DisplayP3),
+                Some(Tc::Srgb),
+            ),
+            (SourceProfile::ADOBE_RGB, None, None),
+            (SourceProfile::BT2020, Some(Cp::Bt2020), Some(Tc::Pq)),
+            (SourceProfile::PROPHOTO_RGB, None, None),
+        ];
+        for &(p, primaries, transfer) in cases {
+            assert_eq!(p.colour_primaries(), primaries, "{:?} primaries", p.gamut);
+            assert_eq!(
+                p.transfer_characteristics(),
+                transfer,
+                "{:?} transfer",
+                p.gamut
+            );
         }
-        // Display P3 reuses the sRGB transfer but its own primaries.
-        assert_eq!(
-            SourceProfile::DISPLAY_P3.colour_primaries(),
-            Some(ColourPrimaries::DisplayP3)
-        );
     }
 
     #[test]
