@@ -3,6 +3,7 @@
 use gamut_ifd::{ByteOrder, Ifd, Value};
 
 use crate::tag::{ExifTag, IfdKind};
+use crate::value::{Rational, as_text};
 
 /// A parsed EXIF blob — the directories of the TIFF stream that follows the optional `Exif\0\0`
 /// marker.
@@ -42,6 +43,37 @@ impl Exif {
             interop: None,
             thumbnail: None,
         }
+    }
+
+    /// Assembles an [`Exif`] from already-parsed directories (used by the reader).
+    pub(crate) fn from_parts(
+        order: ByteOrder,
+        image: Ifd,
+        exif: Option<Ifd>,
+        gps: Option<Ifd>,
+        interop: Option<Ifd>,
+        thumbnail: Option<Ifd>,
+    ) -> Self {
+        Self {
+            order,
+            image,
+            exif,
+            gps,
+            interop,
+            thumbnail,
+        }
+    }
+
+    /// Parses an EXIF blob (with or without the `Exif\0\0` marker) with default options.
+    ///
+    /// Equivalent to [`ExifReader::new().parse(bytes)`](crate::ExifReader::parse). For control over
+    /// marker handling or strictness, use [`ExifReader`](crate::ExifReader) directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`ExifError`](crate::ExifError) if the TIFF stream is malformed.
+    pub fn parse(bytes: &[u8]) -> crate::Result<Self> {
+        crate::ExifReader::new().parse(bytes)
     }
 
     /// The byte order of the underlying TIFF stream (preserved for round-tripping).
@@ -138,6 +170,69 @@ impl Exif {
         self.set(tag.ifd(), tag.tag_id(), value);
     }
 
+    /// The camera manufacturer (`Make`, 0th IFD).
+    #[must_use]
+    pub fn make(&self) -> Option<&str> {
+        self.get_tag(ExifTag::Make).and_then(as_text)
+    }
+
+    /// The camera model (`Model`, 0th IFD).
+    #[must_use]
+    pub fn model(&self) -> Option<&str> {
+        self.get_tag(ExifTag::Model).and_then(as_text)
+    }
+
+    /// The creating software (`Software`, 0th IFD).
+    #[must_use]
+    pub fn software(&self) -> Option<&str> {
+        self.get_tag(ExifTag::Software).and_then(as_text)
+    }
+
+    /// The image orientation (`Orientation`, 0th IFD): 1–8 per the TIFF/Exif convention.
+    #[must_use]
+    pub fn orientation(&self) -> Option<u16> {
+        self.get_tag(ExifTag::Orientation)
+            .and_then(Value::as_u32)
+            .and_then(|v| u16::try_from(v).ok())
+    }
+
+    /// The capture time (`DateTimeOriginal`, Exif IFD), as its raw `YYYY:MM:DD HH:MM:SS` string.
+    #[must_use]
+    pub fn datetime_original(&self) -> Option<&str> {
+        self.get_tag(ExifTag::DateTimeOriginal).and_then(as_text)
+    }
+
+    /// The exposure time in seconds (`ExposureTime`, Exif IFD).
+    #[must_use]
+    pub fn exposure_time(&self) -> Option<Rational> {
+        self.get_tag(ExifTag::ExposureTime).and_then(first_rational)
+    }
+
+    /// The lens f-number (`FNumber`, Exif IFD).
+    #[must_use]
+    pub fn f_number(&self) -> Option<Rational> {
+        self.get_tag(ExifTag::FNumber).and_then(first_rational)
+    }
+
+    /// The ISO sensitivity (`PhotographicSensitivity`, Exif IFD).
+    #[must_use]
+    pub fn iso(&self) -> Option<u32> {
+        self.get_tag(ExifTag::PhotographicSensitivity)
+            .and_then(Value::as_u32)
+    }
+
+    /// The focal length in millimetres (`FocalLength`, Exif IFD).
+    #[must_use]
+    pub fn focal_length(&self) -> Option<Rational> {
+        self.get_tag(ExifTag::FocalLength).and_then(first_rational)
+    }
+
+    /// The lens model (`LensModel`, Exif IFD).
+    #[must_use]
+    pub fn lens_model(&self) -> Option<&str> {
+        self.get_tag(ExifTag::LensModel).and_then(as_text)
+    }
+
     /// The directory for `kind`, if present.
     fn directory(&self, kind: IfdKind) -> Option<&Ifd> {
         match kind {
@@ -158,6 +253,14 @@ impl Exif {
             IfdKind::Interop => self.interop.get_or_insert_with(Ifd::new),
             IfdKind::Thumbnail => self.thumbnail.get_or_insert_with(Ifd::new),
         }
+    }
+}
+
+/// Extracts the first element of a `RATIONAL` value as a [`Rational`], or `None` for other types.
+fn first_rational(value: &Value) -> Option<Rational> {
+    match value {
+        Value::Rational(rs) => rs.first().copied().map(Rational::from),
+        _ => None,
     }
 }
 
