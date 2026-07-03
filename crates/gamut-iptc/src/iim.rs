@@ -71,6 +71,8 @@ const KNOWN_TAGS: &[IimTagInfo] = &[
     IimTagInfo { record: 1, dataset: 90, name: "Coded Character Set", repeatable: false, max_octets: 32, kind: Binary },
     // Application record (2).
     IimTagInfo { record: 2, dataset: 0, name: "Record Version", repeatable: false, max_octets: 2, kind: Binary },
+    // 68 per the IIM 4.2 wire form (3-digit reference number + ':' + up to 64 octets of text); the
+    // PMD tech-reference JSON's IIMmaxbytes records 64 (text only) — see tests/techreference.rs.
     IimTagInfo { record: 2, dataset: 4, name: "Object Attribute Reference", repeatable: true, max_octets: 68, kind: Graphic },
     IimTagInfo { record: 2, dataset: 5, name: "Object Name", repeatable: false, max_octets: 64, kind: Graphic },
     IimTagInfo { record: 2, dataset: 12, name: "Subject Reference", repeatable: true, max_octets: 236, kind: Graphic },

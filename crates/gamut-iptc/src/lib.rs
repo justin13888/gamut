@@ -67,11 +67,16 @@
 //! # Scope
 //!
 //! gamut-iptc is the IPTC *semantics* layer. For the modern path it operates on an in-memory XMP
-//! property graph ([`PhotoMetadata`] over [`gamut_xmp`]); parsing and serializing the XMP packet
-//! bytes is [`gamut_xmp`]'s responsibility (issue #34). Exotic ISO 2022 character sets beyond
-//! Latin-1 and UTF-8 are reported as [`gamut_core::Error::Unsupported`] rather than mis-decoded (see
-//! [`charset`]). IPTC **Extension** structures (image regions, artwork, licensors) are out of scope;
-//! the typed accessors cover IPTC **Core**.
+//! property graph ([`PhotoMetadata`] over [`gamut_xmp`], a public dependency re-exported as
+//! [`xmp`]); parsing and serializing the XMP packet bytes is [`gamut_xmp`]'s responsibility (issue
+//! #34). Exotic ISO 2022 character sets beyond Latin-1 and UTF-8 are reported as
+//! [`gamut_core::Error::Unsupported`] rather than mis-decoded (see [`charset`]). The typed
+//! accessors cover every scalar/list IPTC **Core** property; the structured
+//! `Iptc4xmpCore:CreatorContactInfo` and the IPTC **Extension** structures (image regions,
+//! artwork, licensors) have no typed model and pass through [`PhotoMetadata::properties`] as raw
+//! values. Scalar-shaped IIM datasets that repeat on the wire (`2:04`, `2:85`) reconcile their
+//! first value only; IIM records 3–9 have no named tags — both still round-trip byte-exact. See
+//! `STATUS.md` for the full v1 deferral list.
 #![forbid(unsafe_code)]
 
 pub mod charset;

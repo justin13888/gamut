@@ -8,8 +8,11 @@ use crate::schema::{IPTC_NAMESPACES, XmpField, XmpShape, ns};
 ///
 /// These properties are defined *as* XMP (in the `dc:`/`photoshop:`/`Iptc4xmpCore:` namespaces), so
 /// the model is carried as [`gamut_xmp`] properties rather than a parallel type hierarchy. Typed
-/// accessors cover the well-known Core fields; arbitrary IPTC properties remain accessible through
-/// [`PhotoMetadata::properties`].
+/// accessors cover every scalar/list Core field; the structured `Iptc4xmpCore:CreatorContactInfo`
+/// and the Extension structures remain accessible (and round-trip losslessly) through
+/// [`PhotoMetadata::properties`], and every IIM-mapped field also through
+/// [`PhotoMetadata::get_field`]/[`set_field`](PhotoMetadata::set_field) with
+/// [`crate::schema::FIELD_MAP`].
 ///
 /// gamut-iptc operates on this in-memory graph; parsing/serializing the XMP *packet bytes* is
 /// [`gamut_xmp`]'s responsibility (see issue #34). Language-alternative fields (`dc:title`,
