@@ -51,13 +51,15 @@ pub enum ChromaSubsampling {
 }
 
 impl ChromaSubsampling {
-    /// Returns `(subsampling_x, subsampling_y)` as the AV1 sequence-header flags.
+    /// Returns `(subsampling_x, subsampling_y)` as the AV1 sequence-header flags. Monochrome is
+    /// signalled by `mono_chrome`, which fixes both flags to 1 (AV1 §6.4.2), not by a subsampling
+    /// combination of its own.
     #[must_use]
     pub fn subsampling(self) -> (u8, u8) {
         match self {
-            ChromaSubsampling::Cs444 | ChromaSubsampling::Cs400 => (0, 0),
+            ChromaSubsampling::Cs444 => (0, 0),
             ChromaSubsampling::Cs422 => (1, 0),
-            ChromaSubsampling::Cs420 => (1, 1),
+            ChromaSubsampling::Cs420 | ChromaSubsampling::Cs400 => (1, 1),
         }
     }
 }
@@ -84,5 +86,7 @@ mod tests {
         assert_eq!(ChromaSubsampling::Cs444.subsampling(), (0, 0));
         assert_eq!(ChromaSubsampling::Cs420.subsampling(), (1, 1));
         assert_eq!(ChromaSubsampling::Cs422.subsampling(), (1, 0));
+        // Monochrome carries subsampling_x = subsampling_y = 1 (AV1 §6.4.2).
+        assert_eq!(ChromaSubsampling::Cs400.subsampling(), (1, 1));
     }
 }
