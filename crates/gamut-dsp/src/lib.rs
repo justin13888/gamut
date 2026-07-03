@@ -4,7 +4,7 @@
 //! - the lossless 4×4 Walsh–Hadamard pair ([`fwht4x4`] / [`iwht4x4`], AV1 §7.13.2.10),
 //! - the discrete cosine transform pair ([`forward_dct`] / [`inverse_dct`], AV1 §7.13.2.2–.3),
 //! - the asymmetric discrete sine pair ([`forward_adst`] / [`inverse_adst`], AV1 §7.13.2.4–.9 —
-//!   DST-VII at size 4, DST-IV at 8/16), with the FLIPADST flip ([`flip_in_place`]), and
+//!   DST-VII at size 4, DST-IV at 8/16), and
 //! - the identity transforms ([`forward_identity`] / [`inverse_identity`], AV1 §7.13.2.11–.15).
 //!
 //! The 2-D assembly that selects per `PlaneTxType` and applies the per-pass normalization shifts
@@ -25,7 +25,7 @@ mod math;
 mod mulaw;
 mod wht;
 
-pub use adst::{flip_in_place, forward_adst, inverse_adst};
+pub use adst::{forward_adst, inverse_adst};
 pub use dct::{forward_dct, inverse_dct};
 pub use identity::{forward_identity, inverse_identity};
 pub use math::{clip3, round_div_nearest, round2, round2_signed};

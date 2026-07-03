@@ -22,7 +22,8 @@
 //! absolute scale is reconciled by the 2-D process (AV1 §7.13.3).
 //!
 //! FLIPADST is not a separate transform: it is the ADST applied to a flipped sample order, so the
-//! flip ([`flip_in_place`]) is bookkeeping handled by the 2-D assembly, sharing this 1-D ADST.
+//! flip is reconstruction bookkeeping in the 2-D assembly (`gamut-av1`'s `TxType::flip_ud` /
+//! `TxType::flip_lr`), sharing this 1-D ADST.
 
 use crate::butterfly::{b, h};
 use crate::math::round2;
@@ -201,12 +202,6 @@ pub fn forward_adst(t: &mut [i64], n: u32) {
     t[..len].copy_from_slice(&out[..len]);
 }
 
-/// Reverse the first `len` elements of `t` in place — the FLIPADST sample-order flip (AV1 §7.13.3
-/// applies this around the shared inverse ADST for the FLIPADST transform variants).
-pub fn flip_in_place(t: &mut [i64], len: usize) {
-    t[..len].reverse();
-}
-
 #[cfg(test)]
 mod tests {
     use std::f64::consts::PI;
@@ -321,13 +316,6 @@ mod tests {
                 "input permute n={n}"
             );
         }
-    }
-
-    #[test]
-    fn flip_reverses_samples() {
-        let mut t = [1i64, 2, 3, 4, 99];
-        flip_in_place(&mut t, 4);
-        assert_eq!(t, [4, 3, 2, 1, 99]);
     }
 
     #[test]
