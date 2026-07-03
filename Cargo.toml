@@ -71,7 +71,7 @@ divan = "0.1"
 # crates.io round-trip; `version` is the requirement recorded in the published manifest.
 # Versions are independent per crate — release-plz rewrites these requirements automatically
 # when a dependency's version bumps.
-gamut-core = { path = "crates/gamut-core", version = "0.2.0" }
+gamut-core = { path = "crates/gamut-core", version = "1.0.0" }
 gamut-color = { path = "crates/gamut-color", version = "0.3.0" }
 gamut-dsp = { path = "crates/gamut-dsp", version = "0.2.1" }
 gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.1" }
