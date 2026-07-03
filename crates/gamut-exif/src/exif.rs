@@ -2,7 +2,7 @@
 
 use gamut_ifd::{ByteOrder, Ifd, Value};
 
-use crate::tag::IfdKind;
+use crate::tag::{ExifTag, IfdKind};
 
 /// A parsed EXIF blob — the directories of the TIFF stream that follows the optional `Exif\0\0`
 /// marker.
@@ -126,6 +126,18 @@ impl Exif {
         self.directory_mut(ifd).set(tag, value);
     }
 
+    /// Returns the value of a catalogued [`ExifTag`], looked up in its home directory.
+    #[must_use]
+    pub fn get_tag(&self, tag: ExifTag) -> Option<&Value> {
+        self.get(tag.ifd(), tag.tag_id())
+    }
+
+    /// Sets a catalogued [`ExifTag`] to `value` in its home directory, creating the sub-IFD if
+    /// needed.
+    pub fn set_tag(&mut self, tag: ExifTag, value: Value) {
+        self.set(tag.ifd(), tag.tag_id(), value);
+    }
+
     /// The directory for `kind`, if present.
     fn directory(&self, kind: IfdKind) -> Option<&Ifd> {
         match kind {
@@ -204,5 +216,28 @@ mod tests {
             exif.get(IfdKind::Gps, 0x0001),
             Some(&Value::Byte(vec![b'N']))
         );
+    }
+
+    #[test]
+    fn set_tag_and_get_tag_route_by_home_ifd() {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_tag(ExifTag::Make, Value::Ascii("Canon".into()));
+        exif.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
+
+        // Make lives in the 0th IFD; FNumber in the Exif sub-IFD.
+        assert_eq!(
+            exif.get_tag(ExifTag::Make),
+            Some(&Value::Ascii("Canon".into()))
+        );
+        assert_eq!(
+            exif.get(IfdKind::Image, 0x010F),
+            Some(&Value::Ascii("Canon".into()))
+        );
+        assert_eq!(
+            exif.get_tag(ExifTag::FNumber),
+            Some(&Value::Rational(vec![(28, 10)]))
+        );
+        assert!(exif.exif_ifd().is_some());
+        assert_eq!(exif.get_tag(ExifTag::Model), None);
     }
 }

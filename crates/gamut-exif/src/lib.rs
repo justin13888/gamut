@@ -23,5 +23,5 @@ pub mod value;
 pub use error::{ExifError, Result};
 pub use exif::Exif;
 pub use gamut_ifd::{ByteOrder, Ifd, Value};
-pub use tag::IfdKind;
+pub use tag::{ExifTag, IfdKind};
 pub use value::{Rational, SRational, as_text};
