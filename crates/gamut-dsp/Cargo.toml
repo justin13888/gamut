@@ -1,6 +1,6 @@
 [package]
 name = "gamut-dsp"
-description = "Shared SIMD-optimized DSP routines (DCT, wavelet transforms, quantization, filtering) for gamut codecs."
+description = "Shared fixed-point DSP kernels for the gamut codecs: bit-exact AV1 transform kernels (DCT/ADST/identity/WHT), cross-codec integer rounding/clamp math, and µ-law companding."
 version = "0.2.1"
 edition.workspace = true
 rust-version.workspace = true
