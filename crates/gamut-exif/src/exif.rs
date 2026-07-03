@@ -4,6 +4,7 @@ use gamut_ifd::{ByteOrder, Ifd, Value};
 
 use crate::gps::GpsInfo;
 use crate::tag::{ExifTag, IfdKind};
+use crate::thumbnail::Thumbnail;
 use crate::value::{Rational, as_text};
 
 /// The 6-byte identifier that precedes the TIFF stream in a JPEG `APP1` EXIF segment.
@@ -37,8 +38,7 @@ pub struct Exif {
     exif: Option<Ifd>,
     gps: Option<Ifd>,
     interop: Option<Ifd>,
-    // Becomes a richer `Thumbnail` (metadata IFD + JPEG bytes) once thumbnail support lands.
-    thumbnail: Option<Ifd>,
+    thumbnail: Option<Thumbnail>,
 }
 
 impl Exif {
@@ -62,7 +62,7 @@ impl Exif {
         exif: Option<Ifd>,
         gps: Option<Ifd>,
         interop: Option<Ifd>,
-        thumbnail: Option<Ifd>,
+        thumbnail: Option<Thumbnail>,
     ) -> Self {
         Self {
             order,
@@ -146,10 +146,32 @@ impl Exif {
         self.interop.get_or_insert_with(Ifd::new)
     }
 
+    /// The embedded thumbnail (1st IFD), if present.
+    #[must_use]
+    pub fn thumbnail(&self) -> Option<&Thumbnail> {
+        self.thumbnail.as_ref()
+    }
+
     /// The 1st IFD — the embedded thumbnail's directory, if present.
     #[must_use]
     pub fn thumbnail_ifd(&self) -> Option<&Ifd> {
-        self.thumbnail.as_ref()
+        self.thumbnail.as_ref().map(Thumbnail::ifd)
+    }
+
+    /// The embedded JPEG thumbnail's compressed bytes, if there is a JPEG thumbnail.
+    #[must_use]
+    pub fn thumbnail_bytes(&self) -> Option<&[u8]> {
+        self.thumbnail.as_ref().and_then(Thumbnail::jpeg)
+    }
+
+    /// Sets (or replaces) the embedded thumbnail to a JPEG image.
+    pub fn set_thumbnail(&mut self, jpeg: Vec<u8>) {
+        self.thumbnail = Some(Thumbnail::from_jpeg(jpeg));
+    }
+
+    /// Removes the embedded thumbnail, if any.
+    pub fn clear_thumbnail(&mut self) {
+        self.thumbnail = None;
     }
 
     /// Replaces the Exif sub-IFD.
@@ -267,7 +289,7 @@ impl Exif {
             IfdKind::Exif => self.exif.as_ref(),
             IfdKind::Gps => self.gps.as_ref(),
             IfdKind::Interop => self.interop.as_ref(),
-            IfdKind::Thumbnail => self.thumbnail.as_ref(),
+            IfdKind::Thumbnail => self.thumbnail.as_ref().map(Thumbnail::ifd),
         }
     }
 
@@ -278,7 +300,10 @@ impl Exif {
             IfdKind::Exif => self.exif.get_or_insert_with(Ifd::new),
             IfdKind::Gps => self.gps.get_or_insert_with(Ifd::new),
             IfdKind::Interop => self.interop.get_or_insert_with(Ifd::new),
-            IfdKind::Thumbnail => self.thumbnail.get_or_insert_with(Ifd::new),
+            IfdKind::Thumbnail => self
+                .thumbnail
+                .get_or_insert_with(|| Thumbnail::from_parts(Ifd::new(), None))
+                .ifd_mut(),
         }
     }
 }

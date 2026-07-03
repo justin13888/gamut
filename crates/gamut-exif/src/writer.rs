@@ -7,11 +7,13 @@
 //! IFD — so the round-trip `parse → write → parse` reproduces the directories with the source byte
 //! order preserved.
 
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Variant, write};
+use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
 
 use crate::exif::{
     EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER, without_tags,
 };
+use crate::tag::ExifTag;
+use crate::thumbnail::Thumbnail;
 
 /// Serialises an [`Exif`] back to an EXIF blob, with options for the marker and byte order.
 ///
@@ -59,50 +61,99 @@ impl ExifWriter {
     #[must_use]
     pub fn write(&self, exif: &Exif) -> Vec<u8> {
         let order = self.byte_order.unwrap_or_else(|| exif.byte_order());
-
-        // Build the Exif sub-IFD, nesting the Interoperability sub-IFD under its pointer tag. An
-        // Interop directory implies an Exif directory to hold its pointer, so vivify one if needed.
-        let exif_sub = if exif.exif_ifd().is_some() || exif.interop_ifd().is_some() {
-            let mut e = exif
-                .exif_ifd()
-                .map_or_else(Ifd::new, |e| without_tags(e, &[INTEROP_IFD_POINTER]));
-            if let Some(interop) = exif.interop_ifd() {
-                e.set_sub_ifd(INTEROP_IFD_POINTER, vec![interop.clone()]);
-            }
-            Some(e)
-        } else {
-            None
-        };
-
-        // Rebuild the 0th IFD, dropping any hand-set pointer tags and re-attaching the sub-IFDs so
-        // gamut_ifd::write synthesises correct pointer offsets.
-        let mut image = without_tags(exif.image(), &[EXIF_IFD_POINTER, GPS_IFD_POINTER]);
-        if let Some(e) = exif_sub {
-            image.set_sub_ifd(EXIF_IFD_POINTER, vec![e]);
-        }
-        if let Some(gps) = exif.gps_ifd() {
-            image.set_sub_ifd(GPS_IFD_POINTER, vec![gps.clone()]);
-        }
-
-        let mut ifds = vec![image];
-        if let Some(thumb) = exif.thumbnail_ifd() {
-            ifds.push(thumb.clone());
-        }
-
-        let bytes = write(&TiffFile {
-            order,
-            variant: Variant::Classic,
-            ifds,
-        });
+        let image = build_image(exif);
+        let tiff = write_with_thumbnail(order, image, exif.thumbnail());
 
         if self.marker {
             let mut out = MARKER.to_vec();
-            out.extend(bytes);
+            out.extend(tiff);
             out
         } else {
-            bytes
+            tiff
         }
     }
+}
+
+/// Rebuilds the 0th IFD: drops any hand-set pointer tags and re-attaches the Exif/GPS sub-IFDs (the
+/// Exif sub-IFD itself nesting the Interop sub-IFD) so [`gamut_ifd::write`] synthesises correct
+/// pointer offsets. An Interop directory implies an Exif directory to hold its pointer.
+fn build_image(exif: &Exif) -> Ifd {
+    let exif_sub = if exif.exif_ifd().is_some() || exif.interop_ifd().is_some() {
+        let mut e = exif
+            .exif_ifd()
+            .map_or_else(Ifd::new, |e| without_tags(e, &[INTEROP_IFD_POINTER]));
+        if let Some(interop) = exif.interop_ifd() {
+            e.set_sub_ifd(INTEROP_IFD_POINTER, vec![interop.clone()]);
+        }
+        Some(e)
+    } else {
+        None
+    };
+
+    let mut image = without_tags(exif.image(), &[EXIF_IFD_POINTER, GPS_IFD_POINTER]);
+    if let Some(e) = exif_sub {
+        image.set_sub_ifd(EXIF_IFD_POINTER, vec![e]);
+    }
+    if let Some(gps) = exif.gps_ifd() {
+        image.set_sub_ifd(GPS_IFD_POINTER, vec![gps.clone()]);
+    }
+    image
+}
+
+/// Serialises the TIFF stream, chaining the thumbnail as the 1st IFD.
+///
+/// A JPEG thumbnail is re-embedded with a deterministic double-write: lay out the directories with a
+/// placeholder `JPEGInterchangeFormat` offset to learn where the bytes will land, patch the offset
+/// (an inline `LONG`, so the layout and total length are unchanged), then append the JPEG. An
+/// uncompressed strip thumbnail's directory is preserved but its pixel bytes are **not** re-embedded
+/// (a documented v1 limitation).
+fn write_with_thumbnail(order: ByteOrder, image: Ifd, thumbnail: Option<&Thumbnail>) -> Vec<u8> {
+    let Some(thumb) = thumbnail else {
+        return write(&tiff_file(order, vec![image]));
+    };
+    let Some(jpeg) = thumb.jpeg() else {
+        return write(&tiff_file(order, vec![image, thumb.ifd().clone()]));
+    };
+
+    let mut thumb_ifd = thumb.ifd().clone();
+    thumb_ifd.set(
+        ExifTag::JpegInterchangeFormatLength.tag_id(),
+        Value::Long(vec![jpeg.len() as u32]),
+    );
+    thumb_ifd.set(
+        ExifTag::JpegInterchangeFormat.tag_id(),
+        Value::Long(vec![0]),
+    );
+
+    // Pass 1: lay out the directories to learn where the JPEG will start (word-aligned).
+    let planned = write(&tiff_file(order, vec![image.clone(), thumb_ifd.clone()]));
+    let jpeg_offset = even(planned.len());
+
+    // Pass 2: patch the now-known offset. Changing an inline LONG moves nothing, so the byte length
+    // is identical to pass 1 and `jpeg_offset` still points just past the directories.
+    thumb_ifd.set(
+        ExifTag::JpegInterchangeFormat.tag_id(),
+        Value::Long(vec![jpeg_offset as u32]),
+    );
+    let mut bytes = write(&tiff_file(order, vec![image, thumb_ifd]));
+    debug_assert_eq!(jpeg_offset, even(bytes.len()));
+    bytes.resize(jpeg_offset, 0);
+    bytes.extend_from_slice(jpeg);
+    bytes
+}
+
+/// A classic-TIFF [`TiffFile`] in `order`.
+fn tiff_file(order: ByteOrder, ifds: Vec<Ifd>) -> TiffFile {
+    TiffFile {
+        order,
+        variant: Variant::Classic,
+        ifds,
+    }
+}
+
+/// Rounds `n` up to the next even (word) boundary, matching [`gamut_ifd::write`]'s value alignment.
+fn even(n: usize) -> usize {
+    n + (n & 1)
 }
 
 #[cfg(test)]
@@ -206,6 +257,26 @@ mod tests {
                 .and_then(|t| t.get_u32(ExifTag::Compression.tag_id())),
             Some(6)
         );
+    }
+
+    #[test]
+    fn re_embeds_a_jpeg_thumbnail_round_trip() {
+        // Two JPEG lengths, one even and one odd, to exercise the word-alignment padding before the
+        // appended bytes.
+        for jpeg in [
+            vec![0xFFu8, 0xD8, 0xFF, 0xD9],       // 4 bytes (even)
+            vec![0xFFu8, 0xD8, 0xFF, 0xE0, 0xD9], // 5 bytes (odd)
+        ] {
+            let mut exif = sample(ByteOrder::LittleEndian);
+            exif.set_thumbnail(jpeg.clone());
+
+            let parsed = Exif::parse(&exif.to_bytes()).expect("round-trip parse");
+            assert_eq!(parsed.thumbnail_bytes(), Some(jpeg.as_slice()));
+            assert_eq!(parsed.thumbnail().and_then(Thumbnail::compression), Some(6));
+            // The rest of the model survives alongside the thumbnail.
+            assert_eq!(parsed.make(), exif.make());
+            assert_eq!(parsed.f_number(), exif.f_number());
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod exif;
 pub mod gps;
 pub mod reader;
 pub mod tag;
+pub mod thumbnail;
 pub mod value;
 pub mod writer;
 
@@ -29,5 +30,6 @@ pub use gamut_ifd::{ByteOrder, Ifd, Value};
 pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
 pub use reader::ExifReader;
 pub use tag::{ExifTag, IfdKind};
+pub use thumbnail::Thumbnail;
 pub use value::{Rational, SRational, as_text};
 pub use writer::ExifWriter;

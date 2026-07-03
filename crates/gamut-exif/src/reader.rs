@@ -12,6 +12,8 @@ use crate::error::{ExifError, Result};
 use crate::exif::{
     EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER, without_tags,
 };
+use crate::tag::ExifTag;
+use crate::thumbnail::Thumbnail;
 
 /// Reads an EXIF blob into an [`Exif`], with options for how the parse is bounded.
 ///
@@ -69,7 +71,10 @@ impl ExifReader {
         let mut ifds = file.ifds.into_iter();
         let mut image = ifds.next().ok_or(ExifError::Truncated)?;
         // The next-IFD chain's second entry is the thumbnail directory (1st IFD), if any.
-        let thumbnail = ifds.next();
+        let thumbnail = match ifds.next() {
+            Some(ifd) => Some(self.read_thumbnail(ifd, tiff)?),
+            None => None,
+        };
 
         let exif = self.follow(&mut image, tiff, order, variant, EXIF_IFD_POINTER, "Exif")?;
         let gps = self.follow(&mut image, tiff, order, variant, GPS_IFD_POINTER, "GPS")?;
@@ -112,6 +117,28 @@ impl ExifReader {
             Err(_) if !self.strict => Ok(None),
             Err(_) => Err(ExifError::InvalidIfd(name)),
         }
+    }
+
+    /// Builds a [`Thumbnail`] from the 1st IFD, slicing out its JPEG bytes (from the
+    /// `JPEGInterchangeFormat` offset / length) when present. In lenient mode an out-of-bounds
+    /// JPEG range yields a thumbnail without bytes; in strict mode it errors.
+    fn read_thumbnail(&self, ifd: Ifd, tiff: &[u8]) -> Result<Thumbnail> {
+        let offset = ifd.get_u32(ExifTag::JpegInterchangeFormat.tag_id());
+        let length = ifd.get_u32(ExifTag::JpegInterchangeFormatLength.tag_id());
+        let jpeg = match (offset, length) {
+            (Some(offset), Some(length)) => {
+                let range = (offset as usize).checked_add(length as usize);
+                match range.and_then(|end| tiff.get(offset as usize..end)) {
+                    Some(bytes) => Some(bytes.to_vec()),
+                    None if self.strict => {
+                        return Err(ExifError::BadThumbnail("JPEG offset out of bounds"));
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        Ok(Thumbnail::from_parts(ifd, jpeg))
     }
 }
 
