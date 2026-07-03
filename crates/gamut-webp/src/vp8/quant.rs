@@ -10,7 +10,7 @@
 //! `0..=127`) is the dixie `dequant_init` reference (§20.4). Dequant products are stored as 16-bit
 //! signed integers, as the spec mandates. Tracked in `../STATUS.md` section L.
 
-use gamut_dsp::round_div_nearest;
+use gamut_dsp::math::round_div_nearest;
 
 use super::header::QuantIndices;
 

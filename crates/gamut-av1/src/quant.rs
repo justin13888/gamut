@@ -12,7 +12,7 @@
 
 mod tables;
 
-use gamut_dsp::round_div_nearest;
+use gamut_dsp::math::round_div_nearest;
 use tables::{AC_QLOOKUP, DC_QLOOKUP};
 
 /// Map a bit depth (8, 10, or 12) to the quantizer-table row index `(BitDepth - 8) >> 1`.
