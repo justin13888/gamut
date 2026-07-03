@@ -150,6 +150,45 @@ impl Value {
         }
     }
 
+    /// Borrows a string value (`ASCII` or `UTF8`).
+    ///
+    /// A multi-string field keeps its interior `\0` separators — split on `'\0'` to enumerate
+    /// the strings.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Ascii(s) | Value::Utf8(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Borrows a raw byte value (`BYTE` or `UNDEFINED`).
+    #[must_use]
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Byte(v) | Value::Undefined(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Borrows the (numerator, denominator) pairs of a `RATIONAL` value.
+    #[must_use]
+    pub fn as_rationals(&self) -> Option<&[(u32, u32)]> {
+        match self {
+            Value::Rational(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Borrows the (numerator, denominator) pairs of an `SRATIONAL` value.
+    #[must_use]
+    pub fn as_srationals(&self) -> Option<&[(i32, i32)]> {
+        match self {
+            Value::SRational(v) => Some(v),
+            _ => None,
+        }
+    }
+
     /// Serialises the value's elements to bytes in `order` (without any inline/offset padding).
     #[must_use]
     pub fn encode(&self, order: ByteOrder) -> Vec<u8> {
@@ -414,6 +453,27 @@ mod tests {
     fn decode_rejects_truncated_value() {
         // A LONG needs 4 bytes; only 2 are supplied.
         assert!(Value::decode(FieldType::Long, 1, &[0, 0], ByteOrder::LittleEndian).is_err());
+    }
+
+    /// Each typed accessor borrows exactly its own variants and rejects the rest.
+    #[test]
+    fn typed_accessors_hit_and_miss() {
+        assert_eq!(Value::Ascii("a\0b".into()).as_str(), Some("a\0b"));
+        assert_eq!(Value::Utf8("é".into()).as_str(), Some("é"));
+        assert_eq!(Value::Short(vec![1]).as_str(), None);
+        assert_eq!(Value::Byte(vec![1, 2]).as_bytes(), Some(&[1u8, 2][..]));
+        assert_eq!(Value::Undefined(vec![7]).as_bytes(), Some(&[7u8][..]));
+        assert_eq!(Value::Ascii("x".into()).as_bytes(), None);
+        assert_eq!(
+            Value::Rational(vec![(1, 2)]).as_rationals(),
+            Some(&[(1u32, 2u32)][..])
+        );
+        assert_eq!(Value::SRational(vec![(-1, 2)]).as_rationals(), None);
+        assert_eq!(
+            Value::SRational(vec![(-1, 2)]).as_srationals(),
+            Some(&[(-1i32, 2i32)][..])
+        );
+        assert_eq!(Value::Rational(vec![(1, 2)]).as_srationals(), None);
     }
 
     /// ASCII decode strips exactly one terminating NUL: multi-string fields and NUL padding are

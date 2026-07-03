@@ -164,6 +164,19 @@ impl Ifd {
         }
     }
 
+    /// Removes `tag`, returning its value if it was present.
+    ///
+    /// This is how a consumer strips a field it has represented elsewhere — e.g. a sub-IFD
+    /// pointer tag it followed on read, which must not survive as a stale offset when the
+    /// directory is re-written (the writer synthesises pointer fields from
+    /// [`sub_ifds`](Self::sub_ifds)).
+    pub fn remove(&mut self, tag: u16) -> Option<Value> {
+        self.fields
+            .binary_search_by_key(&tag, |f| f.tag)
+            .ok()
+            .map(|i| self.fields.remove(i).value)
+    }
+
     /// Returns the directory's sub-IFD pointers (see [`SubIfd`]).
     #[must_use]
     pub fn sub_ifds(&self) -> &[SubIfd] {
@@ -234,6 +247,21 @@ mod tests {
         ifd.set(256, Value::Short(vec![8]));
         assert_eq!(ifd.get_u32(256), Some(8));
         assert_eq!(ifd.fields().len(), 3);
+    }
+
+    #[test]
+    fn remove_returns_value_and_keeps_order() {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![4]));
+        ifd.set(257, Value::Short(vec![3]));
+        ifd.set(259, Value::Short(vec![1]));
+        assert_eq!(ifd.remove(257), Some(Value::Short(vec![3])));
+        assert_eq!(ifd.remove(257), None); // second removal misses
+        assert_eq!(ifd.get(257), None);
+        // The remaining fields keep the sorted invariant (a later set still lands mid-list).
+        ifd.set(258, Value::Short(vec![8]));
+        let order: Vec<u16> = ifd.fields().iter().map(|f| f.tag).collect();
+        assert_eq!(order, vec![256, 258, 259]);
     }
 
     #[test]
