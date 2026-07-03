@@ -125,9 +125,16 @@ fn read_ifd_inner(
         Variant::Big => u64_at(data, offset, order)?,
     } as usize;
     let entries_start = offset + variant.count_size();
-    let next_pos = entries_start + count * entry_size;
+    // Checked: a hostile 8-byte BigTIFF count can overflow `count * entry_size` (classic counts
+    // are capped at u16 and cannot).
+    let next_pos = count
+        .checked_mul(entry_size)
+        .and_then(|n| entries_start.checked_add(n))
+        .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
     // Bound the directory to the file so a corrupt count fails fast rather than allocating.
-    let body_end = next_pos + variant.offset_size();
+    let body_end = next_pos
+        .checked_add(variant.offset_size())
+        .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
     if body_end > data.len() {
         return Err(Error::InvalidInput("TIFF: IFD extends past end of file"));
     }
