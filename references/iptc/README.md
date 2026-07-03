@@ -14,7 +14,13 @@ Reference specifications for the `gamut-iptc` crate.
   specification page: <https://www.iptc.org/std/photometadata/specification/IPTC-PhotoMetadata>.
 - `iptc-pmd-techreference_2025.1.json` — the IPTC's **machine-readable technical reference** for the
   PMD standard, which doubles as the authoritative **IIM ↔ XMP mapping**: each property records its
-  IIM dataset, XMP path, and reconciliation rule (the merge `gamut-iptc` implements).
+  IIM dataset id/name/max-bytes and its XMP path (the `ipmd_top` entries carrying an `IIMid`). It
+  contains **no per-property reconciliation rule** — the merge precedence (`ConflictPolicy`,
+  XMP-wins default matching exiv2/ExifTool de-facto behaviour) is `gamut-iptc`'s own design. The
+  crate's transcribed tables are pinned to this file by
+  [`gamut-iptc/tests/techreference.rs`](../../crates/gamut-iptc/tests/techreference.rs); note the
+  one place it disagrees with `iim-4.2.pdf` (2:04 max length: 64 text-only octets here vs the
+  68-octet wire form there — the crate follows the PDF).
 
 ## Conformance
 

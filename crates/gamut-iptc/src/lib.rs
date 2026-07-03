@@ -10,14 +10,15 @@
 //!   Modelled in [`photo_metadata`] on top of [`gamut_xmp`]'s property graph.
 //!
 //! The two overlap heavily; reconciling them (which value wins when both carry the same datum) is
-//! the crate's keystone, in [`reconcile`].
+//! the crate's keystone, surfaced through [`IptcReader::read`] (merge, with a [`ConflictPolicy`])
+//! and [`IptcWriter::write_iim`] (projection back to IIM).
 //!
 //! Standards: **IPTC-IIM 4.2** and the **IPTC Photo Metadata Standard** (`references/iptc`).
 //!
 //! # Reading and writing legacy IIM
 //!
 //! ```
-//! use gamut_iptc::{IimBlock, IimCharset, IimDataSet, IptcReader, IptcWriter};
+//! use gamut_iptc::{IimBlock, IimCharset, IimDataSet, IptcReader, PhotoshopIrb};
 //!
 //! // Build some descriptive datasets and serialize them into an 8BIM resource stream.
 //! let block = IimBlock {
@@ -26,7 +27,7 @@
 //!         IimDataSet { record: 2, dataset: 25, data: b"sky".to_vec() }, // Keywords
 //!     ],
 //! };
-//! let irb = IptcWriter::new().write_irb(&block)?;
+//! let irb = PhotoshopIrb::with_iptc(block.encode()?).encode()?;
 //!
 //! // Read it back and decode a text value with the stream's charset.
 //! let parsed = IptcReader::new().read_irb(&irb)?.expect("0x0404 resource present");
@@ -47,19 +48,35 @@
 //!     IimDataSet { record: 2, dataset: 90, data: b"Lyon".to_vec() },  // City
 //!     IimDataSet { record: 2, dataset: 25, data: b"river".to_vec() }, // Keywords
 //! ] };
-//! let pm = IptcReader::new().read(Some(&iim), None);
+//! let pm = IptcReader::new().read(Some(&iim), None)?;
 //! assert_eq!(pm.city(), Some("Lyon"));
 //! assert_eq!(pm.keywords(), ["river"]);
+//! # Ok::<(), gamut_core::Error>(())
 //! ```
+//!
+//! # Error contract
+//!
+//! **Strict write, honest read.** Writing never silently truncates or drops: a value that cannot
+//! be encoded in the writer's charset, exceeds its dataset's maximum octet length, or (for
+//! `photoshop:DateCreated`) is not an IIM-expressible ISO-8601 date-time is a hard
+//! [`gamut_core::Error::InvalidInput`]. Reading never guesses: a `1:90` coded-character-set
+//! designation gamut does not support is a hard [`gamut_core::Error::Unsupported`], not a Latin-1
+//! fallback. Within a supported charset, an individual dataset value that fails to decode is
+//! treated as absent — one corrupt value must not destroy access to the rest.
 //!
 //! # Scope
 //!
 //! gamut-iptc is the IPTC *semantics* layer. For the modern path it operates on an in-memory XMP
-//! property graph ([`PhotoMetadata`] over [`gamut_xmp`]); parsing and serializing the XMP packet
-//! bytes is [`gamut_xmp`]'s responsibility (issue #34). Exotic ISO 2022 character sets beyond
-//! Latin-1 and UTF-8 are reported as [`gamut_core::Error::Unsupported`] rather than mis-decoded (see
-//! [`charset`]). IPTC **Extension** structures (image regions, artwork, licensors) are out of scope;
-//! the typed accessors cover IPTC **Core**.
+//! property graph ([`PhotoMetadata`] over [`gamut_xmp`], a public dependency re-exported as
+//! [`xmp`]); parsing and serializing the XMP packet bytes is [`gamut_xmp`]'s responsibility (issue
+//! #34). Exotic ISO 2022 character sets beyond Latin-1 and UTF-8 are reported as
+//! [`gamut_core::Error::Unsupported`] rather than mis-decoded (see [`charset`]). The typed
+//! accessors cover every scalar/list IPTC **Core** property; the structured
+//! `Iptc4xmpCore:CreatorContactInfo` and the IPTC **Extension** structures (image regions,
+//! artwork, licensors) have no typed model and pass through [`PhotoMetadata::xmp`] as raw
+//! values. Scalar-shaped IIM datasets that repeat on the wire (`2:04`, `2:85`) reconcile their
+//! first value only; IIM records 3–9 have no named tags — both still round-trip byte-exact. See
+//! `STATUS.md` for the full v1 deferral list.
 #![forbid(unsafe_code)]
 
 pub mod charset;
@@ -67,16 +84,22 @@ pub mod iim;
 pub mod irb;
 pub mod photo_metadata;
 pub mod reader;
-pub mod reconcile;
 pub mod schema;
 pub mod writer;
 
 mod date;
+mod reconcile;
 
 pub use charset::IimCharset;
-pub use iim::{IimBlock, IimDataSet, IimFieldKind, IimRecord, IimTagInfo, tag_info};
+/// The XMP value model this crate's API speaks ([`XmpMeta`](gamut_xmp::XmpMeta),
+/// [`XmpProperty`](gamut_xmp::XmpProperty), …).
+///
+/// [`gamut_xmp`] is a **public dependency**: [`PhotoMetadata`] holds its property graph and the
+/// reader/writer take and return its types. This re-export names the exact matching version, so a
+/// consumer never has to pin `gamut-xmp` separately.
+pub use gamut_xmp as xmp;
+pub use iim::{IimBlock, IimDataSet, IimFieldKind, IimTagInfo};
 pub use irb::{IrbBlock, PhotoshopIrb};
 pub use photo_metadata::PhotoMetadata;
-pub use reader::IptcReader;
-pub use reconcile::{ConflictPolicy, FieldConflict, IimXmpReconciler};
+pub use reader::{ConflictPolicy, FieldConflict, IptcReader};
 pub use writer::IptcWriter;

@@ -4,8 +4,8 @@
 //! 2025.1). This module pins the namespace URIs and the authoritative mapping between legacy IIM
 //! datasets and their XMP properties, derived from the IPTC machine-readable technical reference
 //! (`references/iptc/iptc-pmd-techreference_2025.1.json`, the `ipmd_top` entries that carry an
-//! `IIMid`). The map drives [`crate::reconcile`]; the per-dataset octet limits are not duplicated
-//! here — they come from [`crate::iim::tag_info`].
+//! `IIMid`). The map drives the IIM↔XMP reconciliation; the per-dataset octet limits are not
+//! duplicated here — they come from [`crate::iim::IimTagInfo::lookup`].
 
 /// XMP namespace URIs used by IPTC Photo Metadata (verified against the IPTC Photo Metadata
 /// Standard 2025.1).
@@ -28,8 +28,8 @@ pub mod ns {
 }
 
 /// The namespaces gamut treats as IPTC-relevant when extracting [`crate::PhotoMetadata`] from a full
-/// XMP graph.
-pub(crate) const IPTC_NAMESPACES: &[&str] = &[
+/// XMP graph (see [`crate::PhotoMetadata::from_xmp`]).
+pub const IPTC_NAMESPACES: &[&str] = &[
     ns::DC,
     ns::PHOTOSHOP,
     ns::XMP_RIGHTS,
@@ -38,7 +38,10 @@ pub(crate) const IPTC_NAMESPACES: &[&str] = &[
 ];
 
 /// How an IPTC field is shaped as an XMP value.
+///
+/// Marked `#[non_exhaustive]`: IPTC Extension structures may need further shapes post-1.0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum XmpShape {
     /// A simple text property (e.g. `photoshop:City`).
     SimpleText,
@@ -85,7 +88,23 @@ const fn field(ns: &'static str, name: &'static str, shape: XmpShape) -> XmpFiel
 /// Each entry pairs the IIM dataset(s) with the XMP property and its shape. `2:04`/`2:85` are
 /// repeatable on the IIM wire but map to single XMP properties (gamut reconciles the first value);
 /// `2:55`+`2:60` together form the `photoshop:DateCreated` date-time.
-pub(crate) const MAP: &[FieldMap] = &[
+///
+/// Together with [`crate::PhotoMetadata::get_field`]/[`set_field`](crate::PhotoMetadata::set_field)
+/// this enables generic, table-driven access to every mapped field:
+///
+/// ```
+/// use gamut_iptc::{PhotoMetadata, schema::FIELD_MAP};
+///
+/// let mut pm = PhotoMetadata::new();
+/// pm.set_city("Lyon");
+/// let present: Vec<&str> = FIELD_MAP
+///     .iter()
+///     .filter(|row| !pm.get_field(&row.xmp).is_empty())
+///     .map(|row| row.xmp.name)
+///     .collect();
+/// assert_eq!(present, ["City"]);
+/// ```
+pub const FIELD_MAP: &[FieldMap] = &[
     FieldMap {
         iim: &[(2, 4)],
         xmp: field(ns::IPTC_CORE, "IntellectualGenre", SimpleText),
@@ -175,10 +194,10 @@ mod tests {
     #[test]
     fn every_mapped_iim_dataset_has_tag_info() {
         // The map and the IIM known-tag table must agree on which datasets are modelled.
-        for row in MAP {
+        for row in FIELD_MAP {
             for &(record, dataset) in row.iim {
                 assert!(
-                    crate::iim::tag_info(record, dataset).is_some(),
+                    crate::iim::IimTagInfo::lookup(record, dataset).is_some(),
                     "{record}:{dataset} is mapped but missing from the IIM tag table"
                 );
             }
@@ -187,7 +206,7 @@ mod tests {
 
     #[test]
     fn datetime_is_the_only_two_dataset_row() {
-        for row in MAP {
+        for row in FIELD_MAP {
             let expected = if row.xmp.shape == XmpShape::DateTime {
                 2
             } else {
@@ -199,7 +218,7 @@ mod tests {
 
     #[test]
     fn known_namespaces_are_iptc_relevant() {
-        for row in MAP {
+        for row in FIELD_MAP {
             assert!(IPTC_NAMESPACES.contains(&row.xmp.ns));
         }
     }

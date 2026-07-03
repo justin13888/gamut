@@ -4,7 +4,7 @@
 //!
 //! Needs the `third_party/exiv2` submodule and a C++ toolchain + CMake/Ninja (see the oracle crate).
 
-use gamut_iptc::{IimBlock, IimDataSet, IptcWriter};
+use gamut_iptc::{IimBlock, IimDataSet, PhotoshopIrb};
 
 fn ds(record: u8, dataset: u8, data: &[u8]) -> IimDataSet {
     IimDataSet {
@@ -75,7 +75,9 @@ fn gamut_reads_exiv2_reencoded_stream() {
 #[test]
 fn gamut_irb_payload_matches_exiv2_locate() {
     let block = fixture();
-    let irb = IptcWriter::new().write_irb(&block).unwrap();
+    let irb = PhotoshopIrb::with_iptc(block.encode().unwrap())
+        .encode()
+        .unwrap();
 
     let payload = gamut_iptc_oracle::locate_iptc_irb(&irb).expect("exiv2 locates the 0x0404 IRB");
     assert_eq!(payload, block.encode().unwrap());

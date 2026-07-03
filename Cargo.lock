@@ -700,11 +700,13 @@ dependencies = [
 
 [[package]]
 name = "gamut-iptc"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
+ "divan",
  "gamut-core",
  "gamut-iptc-oracle",
  "gamut-xmp",
+ "serde_json",
 ]
 
 [[package]]

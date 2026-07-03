@@ -22,54 +22,6 @@ const EXTENDED_FLAG: u8 = 0x80;
 /// The largest value length expressible in the standard (16-bit) length form (IPTC-IIM 4.2 §1.4(d)).
 const STANDARD_MAX_LEN: usize = 0x7FFF;
 
-/// An IIM record — the top-level grouping a dataset belongs to (IPTC-IIM 4.2 §1.1).
-///
-/// Records are identified on the wire by [`IimDataSet::record`] (a raw octet); this enum names the
-/// records gamut models. The Application record (2) carries the descriptive photo metadata; the
-/// others are envelope/administrative. Additional application records (3–6) and any future records
-/// still round-trip as raw [`IimDataSet`]s but have no named variant here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IimRecord {
-    /// Record 1 — the Envelope record (routing/format metadata).
-    Envelope,
-    /// Record 2 — the Application record (the descriptive photo metadata).
-    Application,
-    /// Record 7 — the Pre-ObjectData Descriptor record.
-    PreObjectData,
-    /// Record 8 — the ObjectData record.
-    ObjectData,
-    /// Record 9 — the Post-ObjectData Descriptor record.
-    PostObjectData,
-}
-
-impl IimRecord {
-    /// The on-the-wire record number for this record.
-    #[must_use]
-    pub fn number(self) -> u8 {
-        match self {
-            IimRecord::Envelope => 1,
-            IimRecord::Application => 2,
-            IimRecord::PreObjectData => 7,
-            IimRecord::ObjectData => 8,
-            IimRecord::PostObjectData => 9,
-        }
-    }
-
-    /// The record for a wire record number, or `None` for a record gamut does not name (e.g. the
-    /// additional application records 3–6).
-    #[must_use]
-    pub fn from_number(number: u8) -> Option<Self> {
-        match number {
-            1 => Some(IimRecord::Envelope),
-            2 => Some(IimRecord::Application),
-            7 => Some(IimRecord::PreObjectData),
-            8 => Some(IimRecord::ObjectData),
-            9 => Some(IimRecord::PostObjectData),
-            _ => None,
-        }
-    }
-}
-
 /// The kind of value a known IIM dataset carries, which decides how its octets are interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IimFieldKind {
@@ -85,8 +37,8 @@ pub enum IimFieldKind {
 
 /// Static metadata for a known IIM dataset: its name and the wire constraints from the spec.
 ///
-/// Look one up with [`tag_info`]. Unknown datasets have no entry and still round-trip as raw
-/// [`IimDataSet`]s. The constraints (`repeatable`, `max_octets`) are taken from the IPTC-IIM 4.2
+/// Look one up with [`IimTagInfo::lookup`]. Unknown datasets have no entry and still round-trip as
+/// raw [`IimDataSet`]s. The constraints (`repeatable`, `max_octets`) are taken from the IPTC-IIM 4.2
 /// dataset definitions; `max_octets` is the value-field octet maximum, not a character count
 /// (IPTC-IIM 4.2 Ch. 2 §1.12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +71,8 @@ const KNOWN_TAGS: &[IimTagInfo] = &[
     IimTagInfo { record: 1, dataset: 90, name: "Coded Character Set", repeatable: false, max_octets: 32, kind: Binary },
     // Application record (2).
     IimTagInfo { record: 2, dataset: 0, name: "Record Version", repeatable: false, max_octets: 2, kind: Binary },
+    // 68 per the IIM 4.2 wire form (3-digit reference number + ':' + up to 64 octets of text); the
+    // PMD tech-reference JSON's IIMmaxbytes records 64 (text only) — see tests/techreference.rs.
     IimTagInfo { record: 2, dataset: 4, name: "Object Attribute Reference", repeatable: true, max_octets: 68, kind: Graphic },
     IimTagInfo { record: 2, dataset: 5, name: "Object Name", repeatable: false, max_octets: 64, kind: Graphic },
     IimTagInfo { record: 2, dataset: 12, name: "Subject Reference", repeatable: true, max_octets: 236, kind: Graphic },
@@ -142,18 +96,22 @@ const KNOWN_TAGS: &[IimTagInfo] = &[
     IimTagInfo { record: 2, dataset: 122, name: "Writer/Editor", repeatable: true, max_octets: 32, kind: Graphic },
 ];
 
-/// The static metadata for the dataset `record:dataset`, or `None` if gamut does not model it.
-///
-/// ```
-/// let info = gamut_iptc::tag_info(2, 25).expect("Keywords is a known dataset");
-/// assert_eq!(info.name, "Keywords");
-/// assert!(info.repeatable);
-/// ```
-#[must_use]
-pub fn tag_info(record: u8, dataset: u8) -> Option<&'static IimTagInfo> {
-    KNOWN_TAGS
-        .iter()
-        .find(|t| t.record == record && t.dataset == dataset)
+impl IimTagInfo {
+    /// The static metadata for the dataset `record:dataset`, or `None` if gamut does not model it.
+    ///
+    /// ```
+    /// use gamut_iptc::IimTagInfo;
+    ///
+    /// let info = IimTagInfo::lookup(2, 25).expect("Keywords is a known dataset");
+    /// assert_eq!(info.name, "Keywords");
+    /// assert!(info.repeatable);
+    /// ```
+    #[must_use]
+    pub fn lookup(record: u8, dataset: u8) -> Option<&'static IimTagInfo> {
+        KNOWN_TAGS
+            .iter()
+            .find(|t| t.record == record && t.dataset == dataset)
+    }
 }
 
 /// One IIM dataset: a `(record, dataset)` tag and its raw value octets (IPTC-IIM 4.2 §1.4).
@@ -161,7 +119,8 @@ pub fn tag_info(record: u8, dataset: u8) -> Option<&'static IimTagInfo> {
 /// The value is kept as raw octets; decode text values with [`crate::charset`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IimDataSet {
-    /// The record number this dataset belongs to (see [`IimRecord`]).
+    /// The record number this dataset belongs to (IPTC-IIM 4.2 §1.1: 1 = Envelope, 2 = Application;
+    /// records 3–9 round-trip as raw datasets).
     pub record: u8,
     /// The dataset number within the record.
     pub dataset: u8,
@@ -173,7 +132,7 @@ impl IimDataSet {
     /// The static metadata for this dataset, or `None` if gamut does not model it.
     #[must_use]
     pub fn info(&self) -> Option<&'static IimTagInfo> {
-        tag_info(self.record, self.dataset)
+        IimTagInfo::lookup(self.record, self.dataset)
     }
 
     /// The dataset's human-readable name, or `None` if gamut does not model it.
@@ -311,38 +270,21 @@ mod tests {
     }
 
     #[test]
-    fn record_number_roundtrips() {
-        for r in [
-            IimRecord::Envelope,
-            IimRecord::Application,
-            IimRecord::PreObjectData,
-            IimRecord::ObjectData,
-            IimRecord::PostObjectData,
-        ] {
-            assert_eq!(IimRecord::from_number(r.number()), Some(r));
-        }
-        assert_eq!(IimRecord::Application.number(), 2);
-        // Additional application records (3–6) are unnamed.
-        assert_eq!(IimRecord::from_number(3), None);
-        assert_eq!(IimRecord::from_number(0), None);
-    }
-
-    #[test]
     fn tag_info_lookup_and_dataset_helpers() {
-        let kw = tag_info(2, 25).unwrap();
+        let kw = IimTagInfo::lookup(2, 25).unwrap();
         assert_eq!(kw.name, "Keywords");
         assert!(kw.repeatable);
         assert_eq!(kw.max_octets, 64);
         assert_eq!(kw.kind, IimFieldKind::Graphic);
 
-        assert_eq!(tag_info(2, 0).unwrap().kind, IimFieldKind::Binary);
-        assert_eq!(tag_info(2, 55).unwrap().kind, IimFieldKind::Date);
-        assert_eq!(tag_info(2, 60).unwrap().kind, IimFieldKind::Time);
-        assert!(!tag_info(2, 90).unwrap().repeatable);
+        assert_eq!(IimTagInfo::lookup(2, 0).unwrap().kind, IimFieldKind::Binary);
+        assert_eq!(IimTagInfo::lookup(2, 55).unwrap().kind, IimFieldKind::Date);
+        assert_eq!(IimTagInfo::lookup(2, 60).unwrap().kind, IimFieldKind::Time);
+        assert!(!IimTagInfo::lookup(2, 90).unwrap().repeatable);
         // 2:04 maps to a single XMP property but is repeatable on the IIM wire.
-        assert!(tag_info(2, 4).unwrap().repeatable);
-        assert_eq!(tag_info(2, 4).unwrap().max_octets, 68);
-        assert!(tag_info(9, 99).is_none());
+        assert!(IimTagInfo::lookup(2, 4).unwrap().repeatable);
+        assert_eq!(IimTagInfo::lookup(2, 4).unwrap().max_octets, 68);
+        assert!(IimTagInfo::lookup(9, 99).is_none());
 
         let set = ds(2, 25, b"sky");
         assert_eq!(set.name(), Some("Keywords"));
