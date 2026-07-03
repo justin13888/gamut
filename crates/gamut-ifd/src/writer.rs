@@ -24,9 +24,20 @@ use gamut_core::{Error, Result};
 
 use crate::{ByteOrder, Ifd, TiffFile, Value, Variant};
 
+/// Rounds `n` up to the next even (word) boundary — where TIFF 6.0 §2 requires values (and this
+/// crate places every structure) to start.
+///
+/// This is the alignment [`write`]'s layout contract guarantees, exported so a codec appending
+/// data after the stream can place it on the same boundary rather than re-deriving the rule.
+/// Saturates at `u64::MAX` instead of wrapping.
+#[must_use]
+pub const fn align_word(n: u64) -> u64 {
+    n.saturating_add(n & 1)
+}
+
 /// Rounds `n` up to the next even (word) boundary, as required for value offsets.
 fn even(n: usize) -> usize {
-    n + (n & 1)
+    align_word(n as u64) as usize
 }
 
 /// A field value to emit: either borrowed from the directory, or a sub-IFD pointer-offset array the
@@ -81,15 +92,6 @@ fn push_node<'a>(ifd: &'a Ifd, nodes: &mut Vec<Node<'a>>) -> usize {
     idx
 }
 
-/// Builds a pointer field value (a child-offset array) of the right type for `variant`.
-fn pointer_value(variant: Variant, offsets: Vec<u64>) -> Value {
-    match variant {
-        Variant::Classic => Value::Long(offsets.iter().map(|&o| o as u32).collect()),
-        #[cfg(feature = "bigtiff")]
-        Variant::Big => Value::Long8(offsets),
-    }
-}
-
 /// Writes an offset-sized integer (`u32` classic / `u64` BigTIFF) at `pos`, used for every file
 /// offset and the per-field value count, which share the offset width.
 fn put_offset(out: &mut [u8], pos: usize, v: u64, order: ByteOrder, variant: Variant) {
@@ -115,7 +117,7 @@ fn put_offset(out: &mut [u8], pos: usize, v: u64, order: ByteOrder, variant: Var
 ///
 /// - **Alignment** — the header, every directory, and every out-of-line value are placed on an
 ///   even (word) boundary, as TIFF 6.0 §2 requires of value offsets. (The stream's final byte may
-///   land on an odd length; round an append position up to the next even offset.)
+///   land on an odd length; round an append position up with [`align_word`].)
 /// - **Structural determinism** — the position of every structure, and the total length, is a
 ///   pure function of the *structure*: the variant, the sub-IFD tree shape, the tag order, and
 ///   each value's byte length. Value contents never move the layout, so writing with
@@ -168,8 +170,11 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
             entries.push((field.tag, FieldRef::Real(&field.value)));
         }
         for (tag, children) in &node.pointers {
-            let offsets = children.iter().map(|&ci| nodes[ci].offset).collect();
-            entries.push((*tag, FieldRef::Synth(pointer_value(variant, offsets))));
+            let offsets: Vec<u64> = children.iter().map(|&ci| nodes[ci].offset).collect();
+            entries.push((
+                *tag,
+                FieldRef::Synth(Value::offset_array(variant, &offsets)?),
+            ));
         }
         entries.sort_by_key(|(tag, _)| *tag);
         entries_per_node.push(entries);
@@ -534,6 +539,16 @@ mod tests {
             "value pool not tightly packed: {} bytes",
             bytes.len()
         );
+    }
+
+    /// `align_word` is the exported form of the writer's alignment rule: identity on even,
+    /// round-up on odd, saturating at the top of `u64`.
+    #[test]
+    fn align_word_rounds_up_to_even() {
+        assert_eq!(align_word(0), 0);
+        assert_eq!(align_word(7), 8);
+        assert_eq!(align_word(8), 8);
+        assert_eq!(align_word(u64::MAX), u64::MAX);
     }
 
     /// A directory of `u16::MAX + 1` entries, one past the classic 2-byte entry count.

@@ -3,6 +3,7 @@
 use gamut_core::{Error, Result};
 
 use crate::byte_order::ByteOrder;
+use crate::entry::Variant;
 use crate::types::FieldType;
 
 /// The decoded value(s) of one IFD entry, one variant per [`crate::FieldType`].
@@ -147,6 +148,33 @@ impl Value {
             #[cfg(feature = "bigtiff")]
             Value::Long8(v) | Value::Ifd8(v) => v.iter().map(|&x| u32::try_from(x).ok()).collect(),
             _ => None,
+        }
+    }
+
+    /// Builds an offset-array value of the width `variant` stores offsets in: `LONG` for classic
+    /// TIFF, `LONG8` for BigTIFF.
+    ///
+    /// This is the type a field whose value locates file data must carry — a sub-IFD pointer
+    /// (`SubIFDs`, `ExifIFD`), or `StripOffsets`/`TileOffsets` in the codecs layered on this
+    /// crate — so its width follows the container's offset width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `variant` is classic and an offset exceeds `u32::MAX`
+    /// (classic TIFF cannot address past 4 GiB).
+    pub fn offset_array(variant: Variant, offsets: &[u64]) -> Result<Value> {
+        match variant {
+            Variant::Classic => offsets
+                .iter()
+                .map(|&o| {
+                    u32::try_from(o).map_err(|_| {
+                        Error::InvalidInput("TIFF: offset exceeds the 4 GiB classic-TIFF limit")
+                    })
+                })
+                .collect::<Result<Vec<u32>>>()
+                .map(Value::Long),
+            #[cfg(feature = "bigtiff")]
+            Variant::Big => Ok(Value::Long8(offsets.to_vec())),
         }
     }
 
@@ -453,6 +481,22 @@ mod tests {
     fn decode_rejects_truncated_value() {
         // A LONG needs 4 bytes; only 2 are supplied.
         assert!(Value::decode(FieldType::Long, 1, &[0, 0], ByteOrder::LittleEndian).is_err());
+    }
+
+    /// `offset_array` follows the variant's offset width, and classic construction is a typed
+    /// error — not a truncation — past the 4 GiB limit.
+    #[test]
+    fn offset_array_matches_variant_width() {
+        assert_eq!(
+            Value::offset_array(Variant::Classic, &[8, 1024]).expect("classic"),
+            Value::Long(vec![8, 1024])
+        );
+        assert!(Value::offset_array(Variant::Classic, &[u64::from(u32::MAX) + 1]).is_err());
+        #[cfg(feature = "bigtiff")]
+        assert_eq!(
+            Value::offset_array(Variant::Big, &[0x1_0000_0000]).expect("bigtiff"),
+            Value::Long8(vec![0x1_0000_0000])
+        );
     }
 
     /// Each typed accessor borrows exactly its own variants and rejects the rest.

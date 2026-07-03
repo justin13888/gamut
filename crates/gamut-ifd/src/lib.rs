@@ -49,4 +49,4 @@ pub use reader::{
 };
 pub use types::FieldType;
 pub use value::Value;
-pub use writer::write;
+pub use writer::{align_word, write};
