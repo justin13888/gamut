@@ -92,6 +92,15 @@ fn push_node<'a>(ifd: &'a Ifd, nodes: &mut Vec<Node<'a>>) -> usize {
     idx
 }
 
+/// Whether a layout of `len` bytes has outgrown `variant`'s offset width — possible only for
+/// classic TIFF's 32-bit offsets (an in-memory BigTIFF stream cannot reach 2^64).
+///
+/// A pure predicate so the 4 GiB boundary is unit-testable with plain integers; exercising it
+/// through [`write()`] would need a >4 GiB allocation.
+fn layout_overflows(variant: Variant, len: u64) -> bool {
+    variant == Variant::Classic && len > u64::from(u32::MAX)
+}
+
 /// Writes an offset-sized integer (`u32` classic / `u64` BigTIFF) at `pos`, used for every file
 /// offset and the per-field value count, which share the offset width.
 fn put_offset(out: &mut [u8], pos: usize, v: u64, order: ByteOrder, variant: Variant) {
@@ -202,7 +211,7 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
     // The layout is final; every offset word is a position below `cursor`, so one total-length
     // check proves every classic 32-bit offset (and value count, which is at most a byte length)
     // fits without truncation.
-    if variant == Variant::Classic && cursor as u64 > u64::from(u32::MAX) {
+    if layout_overflows(variant, cursor as u64) {
         return Err(Error::InvalidInput(
             "TIFF: layout exceeds the 4 GiB classic-TIFF offset limit",
         ));
@@ -518,6 +527,37 @@ mod tests {
         assert_eq!(align_word(7), 8);
         assert_eq!(align_word(8), 8);
         assert_eq!(align_word(u64::MAX), u64::MAX);
+    }
+
+    /// The 4 GiB guard's boundary, on the pure predicate (a >4 GiB allocation is not testable):
+    /// the largest classic offset is representable; one past it is not; BigTIFF never overflows.
+    #[test]
+    fn layout_overflow_boundary() {
+        assert!(!layout_overflows(Variant::Classic, 100));
+        assert!(!layout_overflows(Variant::Classic, u64::from(u32::MAX)));
+        assert!(layout_overflows(Variant::Classic, u64::from(u32::MAX) + 1));
+        #[cfg(feature = "bigtiff")]
+        assert!(!layout_overflows(Variant::Big, u64::from(u32::MAX) + 1));
+    }
+
+    /// Exactly `u16::MAX` entries — the largest classic-representable directory — must write
+    /// (pinning the entry-count guard's boundary, with the rejection test just below).
+    #[test]
+    fn classic_write_accepts_a_full_directory() {
+        let mut ifd = Ifd::new();
+        for tag in 0..u16::MAX {
+            ifd.set(tag, Value::Short(vec![0]));
+        }
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        assert_eq!(
+            read(&bytes).expect("read").ifds[0].fields().len(),
+            usize::from(u16::MAX)
+        );
     }
 
     /// A directory of `u16::MAX + 1` entries, one past the classic 2-byte entry count.

@@ -600,6 +600,27 @@ mod tests {
         assert!(read_tree(&data, &[330]).is_err());
     }
 
+    /// A tree at exactly the depth cap parses — pinning the guard's boundary against the
+    /// depth-bomb rejection below.
+    #[test]
+    fn read_tree_allows_exactly_max_depth() {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![1]));
+        // 15 nestings put the deepest directory at depth 16 (the root is depth 1).
+        for _ in 0..15 {
+            let mut parent = Ifd::new();
+            parent.set_sub_ifd(330, vec![ifd]);
+            ifd = parent;
+        }
+        let bytes = crate::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        assert!(read_tree(&bytes, &[330]).is_ok());
+    }
+
     /// Adversarial: nesting past the depth cap is a typed error, not a stack overflow.
     #[test]
     fn read_tree_rejects_depth_bomb() {
