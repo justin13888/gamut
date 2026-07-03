@@ -4,7 +4,7 @@
 //! This crate owns the *container*, not the codec: it models the box tree of a single-image ISOBMFF
 //! file (`ftyp` + a `meta` box of image items + `mdat`) and leaves the coded bitstream opaque
 //! ([`PropertyKind::CodecConfiguration`] for the `av1C`/`hvcC` record, [`Item::payload`] for the
-//! samples). [`write`] serialises an [`IsoBmffImage`]; [`read`] parses one back. The two are
+//! samples). [`write()`] serialises an [`IsoBmffImage`]; [`read`] parses one back. The two are
 //! inverse for any file this crate writes (`read(&write(&img)?) == img`).
 //!
 //! It is image-first: the modelled surface is the HEIF still-image set — `ftyp`, `meta` with
