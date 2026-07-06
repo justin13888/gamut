@@ -7,13 +7,14 @@
 /// segment. The facade stays container-agnostic: it never parses boxes or chunks, only these
 /// payloads. (IPTC Core/Extension arrives inside an [`MetadataBlock::Xmp`] payload; the separate
 /// [`MetadataBlock::IptcIim`] is the legacy binary form from a Photoshop IRB.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetadataBlock<'a> {
-    /// An EXIF blob (`Exif\0\0` + TIFF stream).
+    /// An EXIF blob (`Exif\0\0` + TIFF stream, or a bare TIFF stream).
     Exif(&'a [u8]),
     /// An XMP packet (RDF/XML).
     Xmp(&'a [u8]),
     /// An ICC profile blob.
     Icc(&'a [u8]),
-    /// A legacy IPTC-IIM dataset stream (e.g. the `0x0404` Photoshop image resource).
+    /// A legacy IPTC-IIM dataset stream (e.g. the `0x0404` Photoshop image resource's payload).
     IptcIim(&'a [u8]),
 }

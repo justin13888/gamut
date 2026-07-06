@@ -6,9 +6,8 @@
 //! [`gamut_color`](https://docs.rs/gamut-color), so this type deliberately adds no colour-science
 //! dependency.
 
-use gamut_core::Result;
-
 use crate::bytes::ByteReader;
+use crate::error::Result;
 
 /// A `cicpType` element (§10.3): the four H.273 code points identifying a video signal type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,8 +1,7 @@
 //! Colorant elements: `colorantOrderType` (ICC.1:2022 §10.4) and `colorantTableType` (§10.5).
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::{ByteReader, push_ascii_32};
+use crate::error::{IccError, Result};
 
 /// The 32-byte fixed field a colorant name occupies (NUL-terminated 7-bit ASCII, §10.5 Table 34).
 const COLORANT_NAME_LEN: usize = 32;
@@ -57,7 +56,7 @@ pub(crate) fn decode_colorant_table(element: &[u8]) -> Result<ColorantTable> {
         .checked_mul(COLORANT_NAME_LEN + 6)
         .is_none_or(|n| n > r.remaining())
     {
-        return Err(Error::InvalidInput("icc: colorant table exceeds element"));
+        return Err(IccError::Malformed("icc: colorant table exceeds element"));
     }
     let mut colorants = Vec::with_capacity(count);
     for _ in 0..count {
@@ -73,7 +72,7 @@ fn decode_colorant_name(field: &[u8]) -> Result<String> {
     let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
     let used = &field[..end];
     if !used.is_ascii() {
-        return Err(Error::InvalidInput("icc: non-ASCII colorant name"));
+        return Err(IccError::Malformed("icc: non-ASCII colorant name"));
     }
     Ok(used.iter().map(|&b| b as char).collect())
 }
@@ -177,7 +176,7 @@ mod tests {
         let mut payload = 1u32.to_be_bytes().to_vec();
         payload.extend_from_slice(&[0u8; 30]); // 30 < 38, but more than a name-only miscount
         match decode_colorant_table(&element(b"clrt", &payload)) {
-            Err(Error::InvalidInput(msg)) => {
+            Err(IccError::Malformed(msg)) => {
                 assert_eq!(msg, "icc: colorant table exceeds element");
             }
             other => panic!("expected the size-guard error, got {other:?}"),

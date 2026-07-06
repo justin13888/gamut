@@ -11,7 +11,7 @@
 //! in [`crate::charset`]. Values are kept as raw octets in [`IimDataSet::data`] so that any dataset
 //! — known or not, text or binary — round-trips losslessly (IPTC-IIM 4.2 Ch. 4 §1.3).
 
-use gamut_core::{Error, Result};
+use crate::error::{IptcError, Result};
 
 /// The IIM tag marker octet (`0x1C`) that introduces every dataset (IPTC-IIM 4.2 §1.5(b)(ii)).
 const TAG_MARKER: u8 = 0x1C;
@@ -161,27 +161,27 @@ impl IimBlock {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the stream is truncated or a dataset is not introduced by
-    /// the `0x1C` marker, and [`Error::Unsupported`] for an extended length too large to address.
+    /// Returns [`IptcError::Malformed`] if the stream is truncated or a dataset is not introduced by
+    /// the `0x1C` marker, and [`IptcError::Unsupported`] for an extended length too large to address.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut datasets = Vec::new();
         let mut pos = 0usize;
         while pos < data.len() {
             if data[pos] != TAG_MARKER {
-                return Err(Error::InvalidInput("IPTC IIM: expected 0x1C tag marker"));
+                return Err(IptcError::Malformed("IPTC IIM: expected 0x1C tag marker"));
             }
             let record = *data
                 .get(pos + 1)
-                .ok_or(Error::InvalidInput("IPTC IIM: truncated dataset tag"))?;
+                .ok_or(IptcError::Malformed("IPTC IIM: truncated dataset tag"))?;
             let dataset = *data
                 .get(pos + 2)
-                .ok_or(Error::InvalidInput("IPTC IIM: truncated dataset tag"))?;
+                .ok_or(IptcError::Malformed("IPTC IIM: truncated dataset tag"))?;
             let len_hi = *data
                 .get(pos + 3)
-                .ok_or(Error::InvalidInput("IPTC IIM: truncated dataset tag"))?;
+                .ok_or(IptcError::Malformed("IPTC IIM: truncated dataset tag"))?;
             let len_lo = *data
                 .get(pos + 4)
-                .ok_or(Error::InvalidInput("IPTC IIM: truncated dataset tag"))?;
+                .ok_or(IptcError::Malformed("IPTC IIM: truncated dataset tag"))?;
 
             let (value_start, value_len): (usize, u64) = if len_hi & EXTENDED_FLAG == 0 {
                 // Standard form: octets 4–5 are the value length (≤ 32767).
@@ -191,14 +191,14 @@ impl IimBlock {
                 // big-endian value-length field that follows.
                 let k = (usize::from(len_hi & !EXTENDED_FLAG) << 8) | usize::from(len_lo);
                 if k == 0 || k > 8 {
-                    return Err(Error::Unsupported(
+                    return Err(IptcError::Unsupported(
                         "IPTC IIM: unsupported extended length descriptor size",
                     ));
                 }
                 let count_end = pos + 5 + k;
                 let count = data
                     .get(pos + 5..count_end)
-                    .ok_or(Error::InvalidInput("IPTC IIM: truncated extended length"))?;
+                    .ok_or(IptcError::Malformed("IPTC IIM: truncated extended length"))?;
                 let mut len = 0u64;
                 for &b in count {
                     len = (len << 8) | u64::from(b);
@@ -211,7 +211,7 @@ impl IimBlock {
             let value_end = (value_start as u64)
                 .checked_add(value_len)
                 .filter(|&end| end <= data.len() as u64)
-                .ok_or(Error::InvalidInput("IPTC IIM: truncated dataset value"))?
+                .ok_or(IptcError::Malformed("IPTC IIM: truncated dataset value"))?
                 as usize;
             datasets.push(IimDataSet {
                 record,
@@ -231,7 +231,7 @@ impl IimBlock {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if a value exceeds the 4 GiB the extended form can encode.
+    /// Returns [`IptcError::Unsupported`] if a value exceeds the 4 GiB the extended form can encode.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut out = Vec::new();
         for ds in &self.datasets {
@@ -244,7 +244,7 @@ impl IimBlock {
                 out.push((len & 0xFF) as u8);
             } else {
                 let len = u32::try_from(len).map_err(|_| {
-                    Error::Unsupported("IPTC IIM: dataset value too large to serialize")
+                    IptcError::Unsupported("IPTC IIM: dataset value too large to serialize")
                 })?;
                 // Extended form with a four-octet count: octets 4–5 encode k = 4 with the flag set.
                 out.push(EXTENDED_FLAG);

@@ -5,9 +5,8 @@
 //! elements per entry (walked with [`crate::mluc::mluc_len`]), while `psid` and `rcs2` index their
 //! variable-length sub-structures through explicit offset tables relative to the element start.
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::{ByteReader, pad_to_4, push_s15fixed16, push_xyz_number};
+use crate::error::{IccError, Result};
 use crate::header::ProfileId;
 use crate::mluc::{
     Mluc, TextDescription, decode_mluc, decode_text_description, encode_mluc,
@@ -83,11 +82,11 @@ pub(crate) fn decode_profile_sequence_desc(element: &[u8]) -> Result<ProfileSequ
 fn decode_next_description(element: &[u8], r: &mut ByteReader) -> Result<EmbeddedDescription> {
     let rest = element
         .get(r.pos()..)
-        .ok_or(Error::InvalidInput("icc: pseq truncated"))?;
+        .ok_or(IccError::Malformed("icc: pseq truncated"))?;
     let len = description_len(rest)?;
     let slice = rest
         .get(..len)
-        .ok_or(Error::InvalidInput("icc: pseq description out of bounds"))?;
+        .ok_or(IccError::Malformed("icc: pseq description out of bounds"))?;
     let desc = decode_embedded_description(slice)?;
     // Descriptions are padded to a 4-byte boundary; advance past the padding, but never beyond the
     // element (a writer may leave the final description unpadded).
@@ -104,7 +103,7 @@ fn decode_embedded_description(bytes: &[u8]) -> Result<EmbeddedDescription> {
         b"desc" => Ok(EmbeddedDescription::TextDescription(
             decode_text_description(bytes)?,
         )),
-        _ => Err(Error::InvalidInput(
+        _ => Err(IccError::Malformed(
             "icc: embedded description is not mluc/desc",
         )),
     }
@@ -115,7 +114,7 @@ fn description_len(bytes: &[u8]) -> Result<usize> {
     match &first_four(bytes)? {
         b"mluc" => mluc_len(bytes),
         b"desc" => text_description_len(bytes),
-        _ => Err(Error::InvalidInput(
+        _ => Err(IccError::Malformed(
             "icc: embedded description is not mluc/desc",
         )),
     }
@@ -125,7 +124,7 @@ fn description_len(bytes: &[u8]) -> Result<usize> {
 fn first_four(bytes: &[u8]) -> Result<[u8; 4]> {
     let s = bytes
         .get(..4)
-        .ok_or(Error::InvalidInput("icc: element too short for signature"))?;
+        .ok_or(IccError::Malformed("icc: element too short for signature"))?;
     Ok([s[0], s[1], s[2], s[3]])
 }
 
@@ -195,7 +194,7 @@ pub(crate) fn decode_profile_sequence_identifier(
         .and_then(|n| n.checked_add(12))
         .is_none_or(|end| end > element.len())
     {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: psid positions table exceeds element",
         ));
     }
@@ -208,16 +207,16 @@ pub(crate) fn decode_profile_sequence_identifier(
     let mut entries = Vec::with_capacity(count);
     for (offset, size) in positions {
         if size < PROFILE_ID_LEN {
-            return Err(Error::InvalidInput(
+            return Err(IccError::Malformed(
                 "icc: psid structure smaller than a profile ID",
             ));
         }
         let end = offset
             .checked_add(size)
-            .ok_or(Error::InvalidInput("icc: psid structure overflow"))?;
+            .ok_or(IccError::Malformed("icc: psid structure overflow"))?;
         let structure = element
             .get(offset..end)
-            .ok_or(Error::InvalidInput("icc: psid structure out of bounds"))?;
+            .ok_or(IccError::Malformed("icc: psid structure out of bounds"))?;
         let mut id = [0u8; PROFILE_ID_LEN];
         id.copy_from_slice(&structure[..PROFILE_ID_LEN]);
         let description = decode_embedded_description(&structure[PROFILE_ID_LEN..])?;
@@ -330,7 +329,7 @@ fn decode_response_curve(element: &[u8], offset: usize, n: usize) -> Result<Resp
             .checked_mul(8)
             .is_none_or(|bytes| bytes > r.remaining())
         {
-            return Err(Error::InvalidInput(
+            return Err(IccError::Malformed(
                 "icc: rcs2 response array exceeds element",
             ));
         }
@@ -363,14 +362,14 @@ pub(crate) fn encode_response_curve_set16(
     out: &mut Vec<u8>,
 ) -> Result<()> {
     if u16::try_from(rcs.curves.len()).is_err() {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: rcs2 has more than 65535 measurement types",
         ));
     }
     let n = rcs.channels as usize;
     for curve in &rcs.curves {
         if curve.pcs_values.len() != n || curve.responses.len() != n {
-            return Err(Error::InvalidInput(
+            return Err(IccError::Malformed(
                 "icc: rcs2 curve shape does not match the channel count",
             ));
         }
@@ -493,7 +492,7 @@ mod tests {
         e.extend_from_slice(&8u32.to_be_bytes()); // size 8 < 16
         e.extend_from_slice(&[0u8; 8]);
         match decode_profile_sequence_identifier(&e) {
-            Err(Error::InvalidInput(msg)) => {
+            Err(IccError::Malformed(msg)) => {
                 assert_eq!(msg, "icc: psid structure smaller than a profile ID");
             }
             other => panic!("expected the size-guard error, got {other:?}"),
@@ -507,7 +506,7 @@ mod tests {
         e.extend_from_slice(&16u32.to_be_bytes()); // size exactly 16
         e.extend_from_slice(&[7u8; 16]);
         match decode_profile_sequence_identifier(&e) {
-            Err(Error::InvalidInput(msg)) => {
+            Err(IccError::Malformed(msg)) => {
                 assert_eq!(msg, "icc: element too short for signature");
             }
             other => panic!("expected the missing-description error, got {other:?}"),

@@ -687,6 +687,7 @@ dependencies = [
  "gamut-core",
  "lcms2-oracle",
  "md-5",
+ "thiserror",
 ]
 
 [[package]]
@@ -706,6 +707,7 @@ dependencies = [
  "gamut-iptc-oracle",
  "gamut-xmp",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -735,13 +737,13 @@ dependencies = [
 
 [[package]]
 name = "gamut-metadata"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
- "gamut-core",
  "gamut-exif",
  "gamut-icc",
  "gamut-iptc",
  "gamut-xmp",
+ "thiserror",
 ]
 
 [[package]]

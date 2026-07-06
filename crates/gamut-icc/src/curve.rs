@@ -3,9 +3,8 @@
 //! Both model a 1-D function from `[0, 1]` to `[0, 1]`; [`Curve::eval`] / [`ParametricCurve::eval`]
 //! evaluate them, which is also the bridge for cross-checking against a reference CMM.
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::{ByteReader, pad_to_4, push_s15fixed16};
+use crate::error::{IccError, Result};
 use crate::primitives::{S15Fixed16, U8Fixed8};
 
 /// A one-dimensional tone curve (`curveType`, ICC.1:2022 §10.6).
@@ -137,7 +136,7 @@ impl CurveOrParametric {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] for function types outside the defined range 0–4.
+/// Returns [`IccError::Malformed`] for function types outside the defined range 0–4.
 pub(crate) fn parametric_param_count(function_type: u16) -> Result<usize> {
     Ok(match function_type {
         0 => 1,
@@ -146,7 +145,7 @@ pub(crate) fn parametric_param_count(function_type: u16) -> Result<usize> {
         3 => 5,
         4 => 7,
         _ => {
-            return Err(Error::InvalidInput("icc: invalid parametric function type"));
+            return Err(IccError::Malformed("icc: invalid parametric function type"));
         }
     })
 }
@@ -160,7 +159,7 @@ pub(crate) fn read_curve_body(r: &mut ByteReader<'_>) -> Result<Curve> {
         1 => Curve::Gamma(U8Fixed8(r.u16()?)),
         n => {
             if n.checked_mul(2).is_none_or(|bytes| bytes > r.remaining()) {
-                return Err(Error::InvalidInput("icc: curve table exceeds element"));
+                return Err(IccError::Malformed("icc: curve table exceeds element"));
             }
             let mut table = Vec::with_capacity(n);
             for _ in 0..n {
@@ -196,7 +195,7 @@ pub(crate) fn read_curve_element(r: &mut ByteReader<'_>) -> Result<CurveOrParame
         b"curv" => CurveOrParametric::Curve(read_curve_body(r)?),
         b"para" => CurveOrParametric::Parametric(read_parametric_body(r)?),
         _ => {
-            return Err(Error::InvalidInput(
+            return Err(IccError::Malformed(
                 "icc: expected a curv/para curve element",
             ));
         }
@@ -218,7 +217,7 @@ pub(crate) fn write_curve_body(curve: &Curve, out: &mut Vec<u8>) -> Result<()> {
         }
         Curve::Sampled(table) => {
             if table.len() < 2 {
-                return Err(Error::InvalidInput(
+                return Err(IccError::Malformed(
                     "icc: sampled curve needs at least two entries",
                 ));
             }
@@ -237,7 +236,7 @@ pub(crate) fn write_curve_body(curve: &Curve, out: &mut Vec<u8>) -> Result<()> {
 /// from the type, so a mismatch would re-decode as different parameters).
 pub(crate) fn write_parametric_body(curve: &ParametricCurve, out: &mut Vec<u8>) -> Result<()> {
     if curve.params.len() != parametric_param_count(curve.function_type)? {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: parametric parameter count does not match the function type",
         ));
     }

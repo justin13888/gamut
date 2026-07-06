@@ -33,7 +33,7 @@
 //! let parsed = IptcReader::new().read_irb(&irb)?.expect("0x0404 resource present");
 //! let charset = IimCharset::detect(&parsed)?;
 //! assert_eq!(charset.decode(&parsed.datasets[1].data)?, "sky");
-//! # Ok::<(), gamut_core::Error>(())
+//! # Ok::<(), gamut_iptc::IptcError>(())
 //! ```
 //!
 //! # Reconciling the two carriers
@@ -51,7 +51,7 @@
 //! let pm = IptcReader::new().read(Some(&iim), None)?;
 //! assert_eq!(pm.city(), Some("Lyon"));
 //! assert_eq!(pm.keywords(), ["river"]);
-//! # Ok::<(), gamut_core::Error>(())
+//! # Ok::<(), gamut_iptc::IptcError>(())
 //! ```
 //!
 //! # Error contract
@@ -59,8 +59,8 @@
 //! **Strict write, honest read.** Writing never silently truncates or drops: a value that cannot
 //! be encoded in the writer's charset, exceeds its dataset's maximum octet length, or (for
 //! `photoshop:DateCreated`) is not an IIM-expressible ISO-8601 date-time is a hard
-//! [`gamut_core::Error::InvalidInput`]. Reading never guesses: a `1:90` coded-character-set
-//! designation gamut does not support is a hard [`gamut_core::Error::Unsupported`], not a Latin-1
+//! [`crate::IptcError::Malformed`]. Reading never guesses: a `1:90` coded-character-set
+//! designation gamut does not support is a hard [`crate::IptcError::Unsupported`], not a Latin-1
 //! fallback. Within a supported charset, an individual dataset value that fails to decode is
 //! treated as absent — one corrupt value must not destroy access to the rest.
 //!
@@ -70,7 +70,7 @@
 //! property graph ([`PhotoMetadata`] over [`gamut_xmp`], a public dependency re-exported as
 //! [`xmp`]); parsing and serializing the XMP packet bytes is [`gamut_xmp`]'s responsibility (issue
 //! #34). Exotic ISO 2022 character sets beyond Latin-1 and UTF-8 are reported as
-//! [`gamut_core::Error::Unsupported`] rather than mis-decoded (see [`charset`]). The typed
+//! [`crate::IptcError::Unsupported`] rather than mis-decoded (see [`charset`]). The typed
 //! accessors cover every scalar/list IPTC **Core** property; the structured
 //! `Iptc4xmpCore:CreatorContactInfo` and the IPTC **Extension** structures (image regions,
 //! artwork, licensors) have no typed model and pass through [`PhotoMetadata::xmp`] as raw
@@ -88,9 +88,11 @@ pub mod schema;
 pub mod writer;
 
 mod date;
+mod error;
 mod reconcile;
 
 pub use charset::IimCharset;
+pub use error::{IptcError, Result};
 /// The XMP value model this crate's API speaks ([`XmpMeta`](gamut_xmp::XmpMeta),
 /// [`XmpProperty`](gamut_xmp::XmpProperty), …).
 ///

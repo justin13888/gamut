@@ -2,9 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::pad_to_4;
+use crate::error::{IccError, Result};
 use crate::header::ProfileId;
 use crate::primitives::Signature;
 use crate::profile::IccProfile;
@@ -39,7 +38,7 @@ impl IccWriter {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the model violates an invariant serialization relies on
+    /// Returns [`IccError::Malformed`] if the model violates an invariant serialization relies on
     /// — a duplicate tag signature, or tag data whose shape contradicts its declared counts (see
     /// [`IccProfile::to_bytes`]). A profile produced by parsing always serializes.
     pub fn write(&self, profile: &IccProfile) -> Result<Vec<u8>> {
@@ -55,7 +54,7 @@ pub(crate) fn write_profile(profile: &IccProfile, recompute_id: bool) -> Result<
     // profile that cannot be re-read; catch the hand-built case here.
     let mut seen_sigs = HashSet::with_capacity(profile.tags.len());
     if !profile.tags.iter().all(|(sig, _)| seen_sigs.insert(sig.0)) {
-        return Err(Error::InvalidInput("icc: duplicate tag signature"));
+        return Err(IccError::Malformed("icc: duplicate tag signature"));
     }
 
     // Pass 1: encode every tag element.

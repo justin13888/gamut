@@ -13,9 +13,8 @@
 //! parses and serializes the block stream; the JPEG `APP13` `Photoshop 3.0\0` wrapper that carries
 //! it in a file is the container's concern, not this crate's.
 
-use gamut_core::{Error, Result};
-
 use crate::charset::{decode_latin1, encode_latin1};
+use crate::error::{IptcError, Result};
 
 /// The four-octet signature that introduces every image-resource block.
 const SIGNATURE: &[u8; 4] = b"8BIM";
@@ -70,7 +69,7 @@ impl PhotoshopIrb {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if a block signature is not `8BIM` or the stream is
+    /// Returns [`IptcError::Malformed`] if a block signature is not `8BIM` or the stream is
     /// truncated.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let mut blocks = Vec::new();
@@ -78,44 +77,44 @@ impl PhotoshopIrb {
         while pos < data.len() {
             let sig = data
                 .get(pos..pos + 4)
-                .ok_or(Error::InvalidInput("IPTC IRB: truncated block signature"))?;
+                .ok_or(IptcError::Malformed("IPTC IRB: truncated block signature"))?;
             if sig != SIGNATURE {
-                return Err(Error::InvalidInput("IPTC IRB: bad 8BIM block signature"));
+                return Err(IptcError::Malformed("IPTC IRB: bad 8BIM block signature"));
             }
             let id = data
                 .get(pos + 4..pos + 6)
-                .ok_or(Error::InvalidInput("IPTC IRB: truncated resource id"))?;
+                .ok_or(IptcError::Malformed("IPTC IRB: truncated resource id"))?;
             let resource_id = u16::from_be_bytes([id[0], id[1]]);
 
             let name_len = usize::from(
                 *data
                     .get(pos + 6)
-                    .ok_or(Error::InvalidInput("IPTC IRB: truncated resource name"))?,
+                    .ok_or(IptcError::Malformed("IPTC IRB: truncated resource name"))?,
             );
             let name_start = pos + 7;
             let name_end = name_start
                 .checked_add(name_len)
-                .ok_or(Error::InvalidInput("IPTC IRB: name length overflow"))?;
+                .ok_or(IptcError::Malformed("IPTC IRB: name length overflow"))?;
             let name_bytes = data
                 .get(name_start..name_end)
-                .ok_or(Error::InvalidInput("IPTC IRB: truncated resource name"))?;
+                .ok_or(IptcError::Malformed("IPTC IRB: truncated resource name"))?;
             let name = decode_latin1(name_bytes);
             // The name field (length octet + name octets) is padded to an even length.
             let size_start = name_end + (1 + name_len) % 2;
 
             let size_bytes = data
                 .get(size_start..size_start + 4)
-                .ok_or(Error::InvalidInput("IPTC IRB: truncated resource size"))?;
+                .ok_or(IptcError::Malformed("IPTC IRB: truncated resource size"))?;
             let size =
                 u32::from_be_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]])
                     as usize;
             let data_start = size_start + 4;
             let data_end = data_start
                 .checked_add(size)
-                .ok_or(Error::InvalidInput("IPTC IRB: size overflow"))?;
+                .ok_or(IptcError::Malformed("IPTC IRB: size overflow"))?;
             let block_data = data
                 .get(data_start..data_end)
-                .ok_or(Error::InvalidInput("IPTC IRB: truncated resource data"))?;
+                .ok_or(IptcError::Malformed("IPTC IRB: truncated resource data"))?;
             blocks.push(IrbBlock {
                 resource_id,
                 name,
@@ -138,7 +137,7 @@ impl PhotoshopIrb {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if a resource name exceeds 255 octets, is not representable
+    /// Returns [`IptcError::Malformed`] if a resource name exceeds 255 octets, is not representable
     /// in Latin-1, or a resource's data exceeds the 4 GiB the length field can encode.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let mut out = Vec::new();
@@ -148,7 +147,7 @@ impl PhotoshopIrb {
 
             let name_bytes = encode_latin1(&b.name)?;
             let name_len = u8::try_from(name_bytes.len())
-                .map_err(|_| Error::InvalidInput("IPTC IRB: resource name too long"))?;
+                .map_err(|_| IptcError::Malformed("IPTC IRB: resource name too long"))?;
             out.push(name_len);
             out.extend_from_slice(&name_bytes);
             if (1 + name_bytes.len()) % 2 == 1 {
@@ -156,7 +155,7 @@ impl PhotoshopIrb {
             }
 
             let size = u32::try_from(b.data.len())
-                .map_err(|_| Error::InvalidInput("IPTC IRB: resource data too large"))?;
+                .map_err(|_| IptcError::Malformed("IPTC IRB: resource data too large"))?;
             out.extend_from_slice(&size.to_be_bytes());
             out.extend_from_slice(&b.data);
             if b.data.len() % 2 == 1 {

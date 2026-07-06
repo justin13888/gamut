@@ -1,8 +1,7 @@
 //! The IPTC writer — the write-side entry point: project the unified view to the legacy carrier.
 
-use gamut_core::Result;
-
 use crate::charset::IimCharset;
+use crate::error::Result;
 use crate::iim::IimBlock;
 use crate::irb::PhotoshopIrb;
 use crate::photo_metadata::PhotoMetadata;
@@ -61,7 +60,7 @@ impl IptcWriter {
     ///
     /// # Errors
     ///
-    /// Returns [`gamut_core::Error::InvalidInput`] if a value cannot be encoded in the writer's
+    /// Returns [`crate::IptcError::Malformed`] if a value cannot be encoded in the writer's
     /// charset or exceeds the dataset's maximum octet length — gamut never silently truncates.
     pub fn write_iim(&self, pm: &PhotoMetadata) -> Result<IimBlock> {
         reconcile::project(pm, self.charset)

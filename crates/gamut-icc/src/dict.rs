@@ -10,9 +10,8 @@
 //! not for display" (a nonzero offset with a zero size, §10.9) is decoded as absent — the one dict
 //! nuance gamut-icc does not round-trip distinctly.
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::{ByteReader, pad_to_4};
+use crate::error::{IccError, Result};
 use crate::mluc::{Mluc, decode_mluc, encode_mluc};
 
 /// One name→value record of a [`Dict`] (§10.9 Table 39).
@@ -41,7 +40,7 @@ pub(crate) fn decode_dict(element: &[u8]) -> Result<Dict> {
     let count = r.u32()? as usize;
     let record_size = r.u32()? as usize;
     if !matches!(record_size, 16 | 24 | 32) {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: dict record size not 16, 24, or 32",
         ));
     }
@@ -51,7 +50,7 @@ pub(crate) fn decode_dict(element: &[u8]) -> Result<Dict> {
         .and_then(|n| n.checked_add(16))
         .is_none_or(|end| end > element.len())
     {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: dict record table exceeds element",
         ));
     }
@@ -59,7 +58,7 @@ pub(crate) fn decode_dict(element: &[u8]) -> Result<Dict> {
     for i in 0..count {
         let mut rr = ByteReader::at(element, 16 + i * record_size)?;
         let name = decode_string(element, rr.u32()? as usize, rr.u32()? as usize)?.ok_or(
-            Error::InvalidInput("icc: dict record without a name string"),
+            IccError::Malformed("icc: dict record without a name string"),
         )?;
         let value = decode_string(element, rr.u32()? as usize, rr.u32()? as usize)?;
         let display_name = if record_size >= 24 {
@@ -89,10 +88,10 @@ fn decode_string(element: &[u8], offset: usize, size: usize) -> Result<Option<St
     }
     let end = offset
         .checked_add(size)
-        .ok_or(Error::InvalidInput("icc: dict string overflow"))?;
+        .ok_or(IccError::Malformed("icc: dict string overflow"))?;
     let bytes = element
         .get(offset..end)
-        .ok_or(Error::InvalidInput("icc: dict string out of bounds"))?;
+        .ok_or(IccError::Malformed("icc: dict string out of bounds"))?;
     Ok(Some(decode_utf16be(bytes)?))
 }
 
@@ -104,8 +103,8 @@ fn decode_display(element: &[u8], offset: usize, size: usize) -> Result<Option<M
     }
     let end = offset
         .checked_add(size)
-        .ok_or(Error::InvalidInput("icc: dict display element overflow"))?;
-    let bytes = element.get(offset..end).ok_or(Error::InvalidInput(
+        .ok_or(IccError::Malformed("icc: dict display element overflow"))?;
+    let bytes = element.get(offset..end).ok_or(IccError::Malformed(
         "icc: dict display element out of bounds",
     ))?;
     Ok(Some(decode_mluc(bytes)?))
@@ -115,14 +114,14 @@ fn decode_display(element: &[u8], offset: usize, size: usize) -> Result<Option<M
 /// trimmed).
 fn decode_utf16be(bytes: &[u8]) -> Result<String> {
     if !bytes.len().is_multiple_of(2) {
-        return Err(Error::InvalidInput("icc: odd-length UTF-16 dict string"));
+        return Err(IccError::Malformed("icc: odd-length UTF-16 dict string"));
     }
     let units = bytes
         .chunks_exact(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]));
     let mut text = String::new();
     for unit in char::decode_utf16(units) {
-        text.push(unit.map_err(|_| Error::InvalidInput("icc: invalid UTF-16 dict string"))?);
+        text.push(unit.map_err(|_| IccError::Malformed("icc: invalid UTF-16 dict string"))?);
     }
     Ok(text)
 }

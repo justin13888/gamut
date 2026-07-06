@@ -2,11 +2,10 @@
 //!
 //! ICC data is always big-endian and byte-aligned, so this needs neither a byte-order parameter
 //! (unlike `gamut-ifd`'s TIFF readers) nor the bit-level packing of `gamut-bitstream`. Every read is
-//! bounds-checked and returns [`Error::InvalidInput`] on overrun, keeping the parser panic-free
+//! bounds-checked and returns [`IccError::Malformed`] on overrun, keeping the parser panic-free
 //! under `#![forbid(unsafe_code)]`.
 
-use gamut_core::{Error, Result};
-
+use crate::error::{IccError, Result};
 use crate::primitives::{DateTime, S15Fixed16, Signature, U16Fixed16, XyzNumber};
 
 /// A forward-only big-endian reader over an ICC byte buffer.
@@ -24,7 +23,7 @@ impl<'a> ByteReader<'a> {
     /// A reader positioned at absolute byte `offset` into `buf` (for offset-indexed tag elements).
     pub(crate) fn at(buf: &'a [u8], offset: usize) -> Result<Self> {
         if offset > buf.len() {
-            return Err(Error::InvalidInput("icc: offset past end of profile"));
+            return Err(IccError::Malformed("icc: offset past end of profile"));
         }
         Ok(Self { buf, pos: offset })
     }
@@ -50,11 +49,11 @@ impl<'a> ByteReader<'a> {
         let end = self
             .pos
             .checked_add(n)
-            .ok_or(Error::InvalidInput("icc: length overflow"))?;
+            .ok_or(IccError::Malformed("icc: length overflow"))?;
         let slice = self
             .buf
             .get(self.pos..end)
-            .ok_or(Error::InvalidInput("icc: unexpected end of data"))?;
+            .ok_or(IccError::Malformed("icc: unexpected end of data"))?;
         self.pos = end;
         Ok(slice)
     }
@@ -168,12 +167,12 @@ pub(crate) fn push_xyz_number(out: &mut Vec<u8>, value: XyzNumber) {
 pub(crate) fn push_ascii_32(out: &mut Vec<u8>, text: &str) -> Result<()> {
     let bytes = text.as_bytes();
     if !text.is_ascii() || bytes.contains(&0) {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: name field must be NUL-free ASCII",
         ));
     }
     if bytes.len() > 32 {
-        return Err(Error::InvalidInput("icc: name exceeds its 32-byte field"));
+        return Err(IccError::Malformed("icc: name exceeds its 32-byte field"));
     }
     let mut field = [0u8; 32];
     field[..bytes.len()].copy_from_slice(bytes);

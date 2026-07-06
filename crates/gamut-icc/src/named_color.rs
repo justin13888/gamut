@@ -1,8 +1,7 @@
 //! The named-colour element type `namedColor2Type` (ICC.1:2022 §10.17).
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::{ByteReader, push_ascii_32};
+use crate::error::{IccError, Result};
 
 /// One entry of a [`NamedColor2`]: a colour's root name plus its PCS and device coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,12 +41,12 @@ pub(crate) fn decode_named_color2(element: &[u8]) -> Result<NamedColor2> {
     let entry_size = device_coords
         .checked_mul(2)
         .and_then(|n| n.checked_add(38)) // 32-byte name + three PCS u16
-        .ok_or(Error::InvalidInput("icc: named-colour entry overflow"))?;
+        .ok_or(IccError::Malformed("icc: named-colour entry overflow"))?;
     let records_fit = count
         .checked_mul(entry_size)
         .is_some_and(|n| n <= r.remaining());
     if !records_fit {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: named-colour list exceeds element",
         ));
     }
@@ -78,7 +77,7 @@ pub(crate) fn decode_named_color2(element: &[u8]) -> Result<NamedColor2> {
 pub(crate) fn encode_named_color2(named: &NamedColor2, out: &mut Vec<u8>) -> Result<()> {
     let device_coords = named.colors.first().map_or(0, |c| c.device.len());
     if named.colors.iter().any(|c| c.device.len() != device_coords) {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: named colours have differing device-coordinate counts",
         ));
     }
@@ -105,7 +104,7 @@ pub(crate) fn encode_named_color2(named: &NamedColor2, out: &mut Vec<u8>) -> Res
 fn read_ascii_32(r: &mut ByteReader<'_>) -> Result<String> {
     let bytes = r.bytes(32)?;
     if !bytes.is_ascii() {
-        return Err(Error::InvalidInput("icc: non-ASCII named-colour string"));
+        return Err(IccError::Malformed("icc: non-ASCII named-colour string"));
     }
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     Ok(bytes[..end].iter().map(|&b| b as char).collect())

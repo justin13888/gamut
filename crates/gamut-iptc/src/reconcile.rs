@@ -6,10 +6,9 @@
 //! authoritative field table in [`crate::schema`]. It is surfaced through
 //! [`crate::reader::IptcReader`] (merge, conflicts) and [`crate::writer::IptcWriter`] (project).
 
-use gamut_core::{Error, Result};
-
 use crate::charset::IimCharset;
 use crate::date;
+use crate::error::{IptcError, Result};
 use crate::iim::{IimBlock, IimDataSet, IimTagInfo};
 use crate::photo_metadata::PhotoMetadata;
 use crate::reader::{ConflictPolicy, FieldConflict};
@@ -22,7 +21,7 @@ use crate::schema::{FIELD_MAP, FieldMap, XmpShape};
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] if the block's `1:90` designates a charset gamut does not
+/// Returns [`IptcError::Unsupported`] if the block's `1:90` designates a charset gamut does not
 /// support — gamut never guess-decodes.
 pub(crate) fn merge(
     policy: ConflictPolicy,
@@ -58,7 +57,7 @@ pub(crate) fn merge(
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] if a value cannot be encoded in `charset`, exceeds the
+/// Returns [`IptcError::Malformed`] if a value cannot be encoded in `charset`, exceeds the
 /// dataset's maximum octet length, or (for `photoshop:DateCreated`) is not an IIM-expressible
 /// ISO-8601 date-time — gamut never silently truncates or drops on write.
 pub(crate) fn project(pm: &PhotoMetadata, charset: IimCharset) -> Result<IimBlock> {
@@ -69,7 +68,7 @@ pub(crate) fn project(pm: &PhotoMetadata, charset: IimCharset) -> Result<IimBloc
             continue;
         }
         if row.xmp.shape == XmpShape::DateTime {
-            let (date, time) = date::iso_to_iim(&vals[0]).ok_or(Error::InvalidInput(
+            let (date, time) = date::iso_to_iim(&vals[0]).ok_or(IptcError::Malformed(
                 "IPTC IIM: DateCreated is not an IIM-expressible ISO-8601 date-time",
             ))?;
             push_dataset(&mut fields, 2, 55, date)?;
@@ -107,7 +106,7 @@ pub(crate) fn project(pm: &PhotoMetadata, charset: IimCharset) -> Result<IimBloc
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unsupported`] if the block's `1:90` designates a charset gamut does not
+/// Returns [`IptcError::Unsupported`] if the block's `1:90` designates a charset gamut does not
 /// support.
 pub(crate) fn conflicts(iim: &IimBlock, xmp: &PhotoMetadata) -> Result<Vec<FieldConflict>> {
     let charset = IimCharset::detect(iim)?;
@@ -162,7 +161,7 @@ fn push_dataset(out: &mut Vec<IimDataSet>, record: u8, dataset: u8, data: Vec<u8
     if let Some(info) = IimTagInfo::lookup(record, dataset)
         && data.len() > usize::from(info.max_octets)
     {
-        return Err(Error::InvalidInput(
+        return Err(IptcError::Malformed(
             "IPTC IIM: value exceeds the dataset's maximum length",
         ));
     }

@@ -2,9 +2,8 @@
 
 use std::collections::HashSet;
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::ByteReader;
+use crate::error::{IccError, Result};
 use crate::primitives::Signature;
 
 /// One row of the on-disk tag table (ICC.1:2022 §7.3): a tag signature plus the byte offset and
@@ -38,16 +37,16 @@ pub(crate) fn parse_tag_table(profile: &[u8]) -> Result<Vec<TagEntry>> {
     let table_end = count
         .checked_mul(12)
         .and_then(|n| n.checked_add(132))
-        .ok_or(Error::InvalidInput("icc: tag count overflow"))?;
+        .ok_or(IccError::Malformed("icc: tag count overflow"))?;
     if table_end > profile.len() {
-        return Err(Error::InvalidInput("icc: tag table exceeds profile"));
+        return Err(IccError::Malformed("icc: tag table exceeds profile"));
     }
     let mut entries = Vec::with_capacity(count);
     let mut seen = HashSet::with_capacity(count);
     for _ in 0..count {
         let signature = r.signature()?;
         if !seen.insert(signature.0) {
-            return Err(Error::InvalidInput("icc: duplicate tag signature"));
+            return Err(IccError::Malformed("icc: duplicate tag signature"));
         }
         let offset = r.u32()?;
         let size = r.u32()?;

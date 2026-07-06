@@ -1,7 +1,6 @@
 //! The parsed ICC profile: its header and decoded tags.
 
-use gamut_core::{Error, Result};
-
+use crate::error::{IccError, Result};
 use crate::header::ProfileHeader;
 use crate::primitives::Signature;
 use crate::tag_types::{TagData, decode_tag};
@@ -26,7 +25,7 @@ impl IccProfile {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the header, the tag table, or any tag's element data is
+    /// Returns [`IccError::Malformed`] if the header, the tag table, or any tag's element data is
     /// malformed or points outside the profile.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         Self::parse_with(bytes, false)
@@ -37,7 +36,7 @@ impl IccProfile {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the model violates an invariant serialization relies on:
+    /// Returns [`IccError::Malformed`] if the model violates an invariant serialization relies on:
     /// a duplicate tag signature, LUT tables or curve sets whose lengths contradict their declared
     /// channel counts, an 8-bit CLUT sample over 255, an over-long fixed-width name field, or
     /// non-ASCII text in an ASCII element. These are only reachable with hand-built data — the
@@ -52,7 +51,7 @@ impl IccProfile {
     pub(crate) fn parse_with(bytes: &[u8], strict: bool) -> Result<Self> {
         let header = ProfileHeader::parse(bytes)?;
         if strict && header.reserved.iter().any(|&b| b != 0) {
-            return Err(Error::InvalidInput(
+            return Err(IccError::Malformed(
                 "icc: nonzero reserved header bytes (strict)",
             ));
         }
@@ -62,16 +61,16 @@ impl IccProfile {
         for entry in entries {
             let start = entry.offset as usize;
             if strict && start < data_start {
-                return Err(Error::InvalidInput(
+                return Err(IccError::Malformed(
                     "icc: tag data overlaps the header or tag table (strict)",
                 ));
             }
             let end = start
                 .checked_add(entry.size as usize)
-                .ok_or(Error::InvalidInput("icc: tag size overflow"))?;
+                .ok_or(IccError::Malformed("icc: tag size overflow"))?;
             let element = bytes
                 .get(start..end)
-                .ok_or(Error::InvalidInput("icc: tag data out of bounds"))?;
+                .ok_or(IccError::Malformed("icc: tag data out of bounds"))?;
             tags.push((entry.signature, decode_tag(element)?));
         }
         Ok(Self { header, tags })
