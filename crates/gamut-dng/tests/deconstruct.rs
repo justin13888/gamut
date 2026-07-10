@@ -100,7 +100,8 @@ fn unknown_private_tag_is_flagged() {
         order: ByteOrder::LittleEndian,
         variant: Variant::Classic,
         ifds: vec![ifd0],
-    });
+    })
+    .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
         report.unknown_tags.iter().any(|u| u.tag == 0x9999),
@@ -122,7 +123,8 @@ fn unknown_compression_code_is_flagged() {
         order: ByteOrder::LittleEndian,
         variant: Variant::Classic,
         ifds: vec![ifd0],
-    });
+    })
+    .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
         report.anomalies.iter().any(|a| matches!(
@@ -145,7 +147,8 @@ fn malformed_color_matrix_is_flagged() {
         order: ByteOrder::LittleEndian,
         variant: Variant::Classic,
         ifds: vec![ifd0],
-    });
+    })
+    .expect("write");
     let report = deconstruct(&bytes).expect("deconstruct");
     assert!(
         report.anomalies.iter().any(|a| matches!(

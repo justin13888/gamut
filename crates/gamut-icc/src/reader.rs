@@ -1,7 +1,6 @@
 //! The ICC profile reader.
 
-use gamut_core::Result;
-
+use crate::error::Result;
 use crate::profile::IccProfile;
 
 /// Reader for an ICC profile, with parse options.
@@ -33,8 +32,8 @@ impl IccReader {
     ///
     /// # Errors
     ///
-    /// Returns [`gamut_core::Error::InvalidInput`] if the profile is malformed, or — in strict mode
-    /// — non-conformant.
+    /// Returns [`IccError::Malformed`](crate::IccError::Malformed) if the profile is malformed, or
+    /// — in strict mode — non-conformant.
     pub fn parse(&self, bytes: &[u8]) -> Result<IccProfile> {
         IccProfile::parse_with(bytes, self.strict)
     }

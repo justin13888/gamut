@@ -1,8 +1,8 @@
 # gamut
 
-> Project Status: Early development. Do not use it for anything serious!
+> Project Status: Early development. Achieving full specs compliance across modern formats (AVIF, JXL, WebP, DNG) but no guarantees on API stability yet.
 
-A collection of space-efficient image encoding libraries, organized as a Cargo workspace.
+Memory-safe, specs-compliant, quality-optimized image primitives.
 
 ## Why gamut?
 

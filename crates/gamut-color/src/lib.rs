@@ -19,7 +19,7 @@
 //! and grouped under its module. For convenience the crate root additionally re-exports the items
 //! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`],
 //! [`Planar8`] / [`Yuv420`], the [`clip_pixel`] / [`rgb_to_ycbcr`] helpers, and the colour-science
-//! entry types [`Gamut`] and [`SourceProfile`].
+//! entry types [`Gamut`] and [`SourceProfile`] / [`SourceTransfer`].
 //!
 //! # Implemented vs. modeled
 //!
@@ -54,5 +54,5 @@ pub use format::{BitDepth, ChromaSubsampling};
 pub use oklab::Gamut;
 pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
-pub use profile::SourceProfile;
+pub use profile::{SourceProfile, SourceTransfer};
 pub use ycbcr::{Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};

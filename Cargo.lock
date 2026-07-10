@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-color"
-version = "0.3.0"
+version = "1.0.0"
 dependencies = [
  "divan",
  "gamut-core",
@@ -650,10 +650,9 @@ dependencies = [
 
 [[package]]
 name = "gamut-dsp"
-version = "0.2.1"
+version = "1.0.0"
 dependencies = [
  "divan",
- "gamut-core",
 ]
 
 [[package]]
@@ -689,11 +688,12 @@ dependencies = [
  "gamut-core",
  "lcms2-oracle",
  "md-5",
+ "thiserror",
 ]
 
 [[package]]
 name = "gamut-ifd"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "divan",
  "gamut-core",
@@ -708,6 +708,7 @@ dependencies = [
  "gamut-iptc-oracle",
  "gamut-xmp",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -737,13 +738,13 @@ dependencies = [
 
 [[package]]
 name = "gamut-metadata"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
- "gamut-core",
  "gamut-exif",
  "gamut-icc",
  "gamut-iptc",
  "gamut-xmp",
+ "thiserror",
 ]
 
 [[package]]
@@ -779,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "gamut-tonemap"
-version = "0.1.2"
+version = "1.0.0"
 dependencies = [
  "divan",
  "gamut-color",

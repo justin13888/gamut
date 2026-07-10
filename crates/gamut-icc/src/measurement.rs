@@ -6,9 +6,8 @@
 //! or future code still decodes and round-trips losslessly; §10.14 Tables 50/51/53 give the defined
 //! values.
 
-use gamut_core::{Error, Result};
-
 use crate::bytes::{ByteReader, push_u16fixed16, push_xyz_number};
+use crate::error::{IccError, Result};
 use crate::primitives::{U16Fixed16, XyzNumber};
 
 /// A `chromaticityType` element (§10.2): the CIE `xy` chromaticities of a display's phosphors or a
@@ -30,7 +29,7 @@ pub(crate) fn decode_chromaticity(element: &[u8]) -> Result<Chromaticity> {
     let colorant_type = r.u16()?;
     // Bound the channel data (8 bytes per channel) against the element before allocating.
     if channel_count * 8 > r.remaining() {
-        return Err(Error::InvalidInput(
+        return Err(IccError::Malformed(
             "icc: chromaticity channels exceed element",
         ));
     }
@@ -129,9 +128,8 @@ pub(crate) fn encode_viewing_conditions(view: &ViewingConditions, out: &mut Vec<
 
 #[cfg(test)]
 mod tests {
-    use gamut_core::Error;
-
     use super::*;
+    use crate::error::IccError;
     use crate::primitives::S15Fixed16;
 
     /// Builds an element: a four-byte type signature, four reserved bytes, then the payload.
@@ -167,7 +165,7 @@ mod tests {
         truncated.extend_from_slice(&0u16.to_be_bytes());
         truncated.extend_from_slice(&[0u8; 20]); // 20 < 3 × 8
         match decode_chromaticity(&element(b"chrm", &truncated)) {
-            Err(Error::InvalidInput(msg)) => {
+            Err(IccError::Malformed(msg)) => {
                 assert_eq!(msg, "icc: chromaticity channels exceed element");
             }
             other => panic!("expected the size-guard error, got {other:?}"),

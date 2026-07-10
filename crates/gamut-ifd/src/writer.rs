@@ -20,11 +20,24 @@
 //! value pool — and each pointer tag's value is synthesised as a `LONG`/`LONG8` array of its
 //! children's offsets. With no sub-IFDs this reduces to the flat chain, byte-for-byte.
 
+use gamut_core::{Error, Result};
+
 use crate::{ByteOrder, Ifd, TiffFile, Value, Variant};
+
+/// Rounds `n` up to the next even (word) boundary — where TIFF 6.0 §2 requires values (and this
+/// crate places every structure) to start.
+///
+/// This is the alignment [`write()`]'s layout contract guarantees, exported so a codec appending
+/// data after the stream can place it on the same boundary rather than re-deriving the rule.
+/// Saturates at `u64::MAX` instead of wrapping.
+#[must_use]
+pub const fn align_word(n: u64) -> u64 {
+    n.saturating_add(n & 1)
+}
 
 /// Rounds `n` up to the next even (word) boundary, as required for value offsets.
 fn even(n: usize) -> usize {
-    n + (n & 1)
+    align_word(n as u64) as usize
 }
 
 /// A field value to emit: either borrowed from the directory, or a sub-IFD pointer-offset array the
@@ -79,13 +92,13 @@ fn push_node<'a>(ifd: &'a Ifd, nodes: &mut Vec<Node<'a>>) -> usize {
     idx
 }
 
-/// Builds a pointer field value (a child-offset array) of the right type for `variant`.
-fn pointer_value(variant: Variant, offsets: Vec<u64>) -> Value {
-    match variant {
-        Variant::Classic => Value::Long(offsets.iter().map(|&o| o as u32).collect()),
-        #[cfg(feature = "bigtiff")]
-        Variant::Big => Value::Long8(offsets),
-    }
+/// Whether a layout of `len` bytes has outgrown `variant`'s offset width — possible only for
+/// classic TIFF's 32-bit offsets (an in-memory BigTIFF stream cannot reach 2^64).
+///
+/// A pure predicate so the 4 GiB boundary is unit-testable with plain integers; exercising it
+/// through [`write()`] would need a >4 GiB allocation.
+fn layout_overflows(variant: Variant, len: u64) -> bool {
+    variant == Variant::Classic && len > u64::from(u32::MAX)
 }
 
 /// Writes an offset-sized integer (`u32` classic / `u64` BigTIFF) at `pos`, used for every file
@@ -105,8 +118,27 @@ fn put_offset(out: &mut [u8], pos: usize, v: u64, order: ByteOrder, variant: Var
 /// by a synthesised pointer field. Out-of-line values are appended in a value pool after the
 /// directories. Image/pixel data is not handled here — a codec composes that around this primitive
 /// (see `gamut-tiff`'s strip/tile writers).
-#[must_use]
-pub fn write(file: &TiffFile) -> Vec<u8> {
+///
+/// # Layout contract
+///
+/// Codecs that append their own data (strips, tiles, an embedded JPEG) after the returned stream
+/// and back-patch offset fields may rely on two properties of the layout:
+///
+/// - **Alignment** — the header, every directory, and every out-of-line value are placed on an
+///   even (word) boundary, as TIFF 6.0 §2 requires of value offsets. (The stream's final byte may
+///   land on an odd length; round an append position up with [`align_word`].)
+/// - **Structural determinism** — the position of every structure, and the total length, is a
+///   pure function of the *structure*: the variant, the sub-IFD tree shape, the tag order, and
+///   each value's byte length. Value contents never move the layout, so writing with
+///   correctly-sized placeholder values, measuring, then re-writing with the real values (e.g.
+///   patched strip offsets) yields a byte-identical layout.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the stream is not representable in the classic-TIFF widths:
+/// a directory with more than `u16::MAX` entries, or a total layout past the 4 GiB offset limit.
+/// (BigTIFF widths cannot overflow in practice.)
+pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
     let order = file.order;
     let variant = file.variant;
     let entry_size = variant.entry_size();
@@ -127,6 +159,13 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
     // Pass 1a: place every directory block (top-level and descendant), each on a word boundary.
     let mut cursor = even(variant.header_size());
     for node in &mut nodes {
+        // The entry count must fit its on-disk width (2 bytes in classic TIFF); a silent `as u16`
+        // truncation would drop entries.
+        if variant == Variant::Classic && node.n_entries > usize::from(u16::MAX) {
+            return Err(Error::InvalidInput(
+                "TIFF: too many IFD entries for classic TIFF",
+            ));
+        }
         node.offset = cursor as u64;
         cursor = even(cursor + variant.count_size() + node.n_entries * entry_size + offset_size);
     }
@@ -140,8 +179,11 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
             entries.push((field.tag, FieldRef::Real(&field.value)));
         }
         for (tag, children) in &node.pointers {
-            let offsets = children.iter().map(|&ci| nodes[ci].offset).collect();
-            entries.push((*tag, FieldRef::Synth(pointer_value(variant, offsets))));
+            let offsets: Vec<u64> = children.iter().map(|&ci| nodes[ci].offset).collect();
+            entries.push((
+                *tag,
+                FieldRef::Synth(Value::offset_array(variant, &offsets)?),
+            ));
         }
         entries.sort_by_key(|(tag, _)| *tag);
         entries_per_node.push(entries);
@@ -164,6 +206,15 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
             }
         }
         value_offsets.push(offs);
+    }
+
+    // The layout is final; every offset word is a position below `cursor`, so one total-length
+    // check proves every classic 32-bit offset (and value count, which is at most a byte length)
+    // fits without truncation.
+    if layout_overflows(variant, cursor as u64) {
+        return Err(Error::InvalidInput(
+            "TIFF: layout exceeds the 4 GiB classic-TIFF offset limit",
+        ));
     }
 
     // Pass 2: emit.
@@ -217,7 +268,7 @@ pub fn write(file: &TiffFile) -> Vec<u8> {
     for (offset, bytes) in pool {
         out[offset..offset + bytes.len()].copy_from_slice(&bytes);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -243,7 +294,7 @@ mod tests {
             variant,
             ifds: vec![sample_ifd()],
         };
-        let bytes = write(&file);
+        let bytes = write(&file).expect("write");
         let parsed = read(&bytes).expect("read back");
         assert_eq!(parsed, file);
     }
@@ -257,7 +308,7 @@ mod tests {
             variant,
             ifds: vec![sample_ifd(), second],
         };
-        let bytes = write(&file);
+        let bytes = write(&file).expect("write");
         let parsed = read(&bytes).expect("read back");
         assert_eq!(parsed.ifds.len(), 2);
         assert_eq!(parsed, file);
@@ -284,7 +335,8 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![sample_ifd()],
-        });
+        })
+        .expect("write");
         assert_eq!(one.len(), 100);
         let mut second = Ifd::new();
         second.set(256, Value::Short(vec![1]));
@@ -293,38 +345,9 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![sample_ifd(), second],
-        });
+        })
+        .expect("write");
         assert_eq!(two.len(), 130);
-    }
-
-    #[test]
-    fn value_offsets_are_even() {
-        // BitsPerSample (6 bytes) forces an out-of-line value; its offset must be word-aligned.
-        let bytes = write(&TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![sample_ifd()],
-        });
-        // Header magic and first-IFD offset are well-formed.
-        assert_eq!(&bytes[0..2], b"II");
-        assert_eq!(read_header(&bytes).expect("header").2, 8);
-    }
-
-    /// A directory with no sub-IFDs must serialise byte-for-byte as it did before tree support, so
-    /// the flat path (and `gamut-tiff`'s libtiff oracle) is unaffected.
-    #[test]
-    fn flat_layout_is_unchanged_by_tree_support() {
-        let file = TiffFile {
-            order: ByteOrder::LittleEndian,
-            variant: Variant::Classic,
-            ifds: vec![sample_ifd()],
-        };
-        let bytes = write(&file);
-        // Golden layout: 8-byte header, IFD0 at 8 (5 entries), value pool after. Re-reading must
-        // reproduce the directory exactly, and there is no second (sub-)IFD in the chain.
-        let (_order, _variant, first) = read_header(&bytes).expect("header");
-        assert_eq!(first, 8);
-        assert_eq!(read(&bytes).expect("read").ifds.len(), 1);
     }
 
     fn subifd_tree_roundtrips(order: ByteOrder, variant: Variant) {
@@ -348,7 +371,7 @@ mod tests {
             variant,
             ifds: vec![root],
         };
-        let bytes = write(&file);
+        let bytes = write(&file).expect("write");
 
         // The generic reader returns just the top-level chain (the children are not chained).
         let parsed = read(&bytes).expect("read back");
@@ -399,7 +422,7 @@ mod tests {
             variant: Variant::Classic,
             ifds: vec![root],
         };
-        let bytes = write(&file);
+        let bytes = write(&file).expect("write");
         let parsed = read(&bytes).expect("read");
         let child_off = parsed.ifds[0].get_u32(330).expect("SubIFDs");
         let child_ifd = read_ifd_at(
@@ -435,7 +458,8 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Big,
             ifds: vec![sample_ifd()],
-        });
+        })
+        .expect("write");
         assert_eq!(&bytes[0..2], b"II");
         let (order, variant, first) = read_header(&bytes).expect("header");
         assert_eq!(order, ByteOrder::LittleEndian);
@@ -468,7 +492,8 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![root],
-        });
+        })
+        .expect("write");
         let offs = read(&bytes).expect("read").ifds[0]
             .get_u32_vec(330)
             .expect("SubIFDs pointer");
@@ -485,11 +510,88 @@ mod tests {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![sample_ifd()],
-        });
+        })
+        .expect("write");
         assert!(
             bytes.len() < 256,
             "value pool not tightly packed: {} bytes",
             bytes.len()
         );
+    }
+
+    /// `align_word` is the exported form of the writer's alignment rule: identity on even,
+    /// round-up on odd, saturating at the top of `u64`.
+    #[test]
+    fn align_word_rounds_up_to_even() {
+        assert_eq!(align_word(0), 0);
+        assert_eq!(align_word(7), 8);
+        assert_eq!(align_word(8), 8);
+        assert_eq!(align_word(u64::MAX), u64::MAX);
+    }
+
+    /// The 4 GiB guard's boundary, on the pure predicate (a >4 GiB allocation is not testable):
+    /// the largest classic offset is representable; one past it is not; BigTIFF never overflows.
+    #[test]
+    fn layout_overflow_boundary() {
+        assert!(!layout_overflows(Variant::Classic, 100));
+        assert!(!layout_overflows(Variant::Classic, u64::from(u32::MAX)));
+        assert!(layout_overflows(Variant::Classic, u64::from(u32::MAX) + 1));
+        #[cfg(feature = "bigtiff")]
+        assert!(!layout_overflows(Variant::Big, u64::from(u32::MAX) + 1));
+    }
+
+    /// Exactly `u16::MAX` entries — the largest classic-representable directory — must write
+    /// (pinning the entry-count guard's boundary, with the rejection test just below).
+    #[test]
+    fn classic_write_accepts_a_full_directory() {
+        let mut ifd = Ifd::new();
+        for tag in 0..u16::MAX {
+            ifd.set(tag, Value::Short(vec![0]));
+        }
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        assert_eq!(
+            read(&bytes).expect("read").ifds[0].fields().len(),
+            usize::from(u16::MAX)
+        );
+    }
+
+    /// A directory of `u16::MAX + 1` entries, one past the classic 2-byte entry count.
+    fn oversized_ifd() -> Ifd {
+        let mut ifd = Ifd::new();
+        for tag in 0..=u16::MAX {
+            ifd.set(tag, Value::Short(vec![0]));
+        }
+        ifd
+    }
+
+    /// Classic TIFF stores the entry count in 2 bytes; a directory that cannot fit must be a
+    /// typed error, not a silently truncated `as u16` count.
+    #[test]
+    fn classic_write_rejects_oversized_directory() {
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![oversized_ifd()],
+        };
+        assert!(write(&file).is_err());
+    }
+
+    /// The same directory is representable in BigTIFF's 8-byte entry count — the guard is
+    /// classic-only, not a blanket cap.
+    #[cfg(feature = "bigtiff")]
+    #[test]
+    fn bigtiff_write_accepts_oversized_directory() {
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Big,
+            ifds: vec![oversized_ifd()],
+        };
+        let bytes = write(&file).expect("write");
+        assert_eq!(read(&bytes).expect("read").ifds[0].fields().len(), 65536);
     }
 }

@@ -21,7 +21,7 @@
 //! ```no_run
 //! use gamut_icc::{IccProfile, KnownTag, TagData};
 //!
-//! # fn demo(bytes: &[u8]) -> Result<(), gamut_core::Error> {
+//! # fn demo(bytes: &[u8]) -> Result<(), gamut_icc::IccError> {
 //! let profile = IccProfile::parse(bytes)?;
 //! if let Some(TagData::Xyz(white)) = profile.get(KnownTag::MediaWhitePoint) {
 //!     println!("media white point: {:?}", white[0].to_f64());
@@ -68,6 +68,7 @@ mod colorant;
 mod curve;
 mod data;
 mod dict;
+mod error;
 mod header;
 mod lut;
 mod measurement;
@@ -87,6 +88,7 @@ pub use colorant::{Colorant, ColorantOrder, ColorantTable};
 pub use curve::{Curve, CurveOrParametric, ParametricCurve};
 pub use data::DataElement;
 pub use dict::{Dict, DictEntry};
+pub use error::{IccError, Result};
 pub use header::{
     ColorSpace, DeviceClass, ProfileHeader, ProfileId, ProfileVersion, RenderingIntent,
 };

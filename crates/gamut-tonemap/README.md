@@ -56,7 +56,8 @@ The `ToneCurve` trait (with a blanket impl for any `Fn(f32) -> f32`) and eight b
 `Linear`, `Clamp`, `Exposure`, `Reinhard`, `ReinhardExtended`, `Aces`, `Hable`, and `Drago` — all
 re-exported at the crate root. Each is implemented clean-slate from the primary source documented in
 [`references/tonemap`](../../references/tonemap/README.md). Reachable through the umbrella crate's
-`tonemap` feature. See [STATUS.md](STATUS.md) for the full component map.
+`tonemap` feature. The public surface is **frozen at v1** (issue #188); see [STATUS.md](STATUS.md)
+for the surface table and settled design decisions.
 
 ## Deferred
 

@@ -11,8 +11,11 @@
 //! compression, or photometry, which stay in the codec.
 //!
 //! Structure follows **TIFF 6.0** (`references/tiff/tiff6.pdf`, Adobe/Aldus, Final — June 3 1992,
-//! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write`] serialises one
+//! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write()`] serialises one
 //! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
+//! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags), and the
+//! `*_with_coverage` readers thread byte-range accounting ([`Coverage`]) for strict archival
+//! decoding.
 //!
 //! ## BigTIFF
 //!
@@ -28,25 +31,26 @@
 //! ifd.set(256, Value::Short(vec![640])); // ImageWidth
 //! ifd.set(257, Value::Short(vec![480])); // ImageLength
 //! let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
-//! let bytes = write(&file);
+//! let bytes = write(&file).unwrap();
 //! assert_eq!(read(&bytes).unwrap(), file);
 //! ```
 #![forbid(unsafe_code)]
 
-pub mod byte_order;
-pub mod coverage;
-pub mod entry;
-pub mod reader;
-pub mod types;
-pub mod value;
-pub mod writer;
+mod byte_order;
+mod coverage;
+mod entry;
+mod reader;
+mod types;
+mod value;
+mod writer;
 
 pub use byte_order::ByteOrder;
 pub use coverage::{Coverage, CoverageReport, Overlap, Range, UnknownField};
 pub use entry::{Field, Ifd, SubIfd, Variant};
 pub use reader::{
-    TiffFile, read, read_header, read_ifd_at, read_ifd_at_with_coverage, read_with_coverage,
+    TiffFile, read, read_header, read_ifd_at, read_ifd_at_with_coverage, read_tree,
+    read_with_coverage,
 };
 pub use types::FieldType;
 pub use value::Value;
-pub use writer::write;
+pub use writer::{align_word, write};

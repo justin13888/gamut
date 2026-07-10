@@ -13,10 +13,10 @@
 //! left/right flips are applied at reconstruction (AV1 §7.12.3), exposed via [`TxType::flip_ud`] /
 //! [`TxType::flip_lr`].
 
-use gamut_dsp::{
-    clip3, forward_adst, forward_dct, forward_identity, inverse_adst, inverse_dct,
-    inverse_identity, round2,
+use gamut_dsp::av1::{
+    forward_adst, forward_dct, forward_identity, inverse_adst, inverse_dct, inverse_identity,
 };
+use gamut_dsp::math::{clip3, round2};
 
 /// The 19 AV1 transform sizes (`TX_SIZES_ALL`), in spec order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

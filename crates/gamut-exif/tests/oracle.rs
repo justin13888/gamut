@@ -27,7 +27,7 @@ fn sample() -> Exif {
 
 /// The bare TIFF stream (no `Exif\0\0` marker) that exiv2's `ExifParser` consumes.
 fn bare(exif: &Exif) -> Vec<u8> {
-    ExifWriter::new().marker(false).write(exif)
+    ExifWriter::new().marker(false).write(exif).expect("write")
 }
 
 #[test]

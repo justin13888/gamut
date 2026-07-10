@@ -29,22 +29,41 @@ this crate as a near-zero-diff refactor (issue #107), and now consumes it instea
 ## Usage
 
 `read` / `read_header` parse a stream into a [`TiffFile`] (`ByteOrder` + `Variant` + a `Vec<Ifd>`);
-`write` serialises one back, handling the two-pass offset layout. Each `Ifd` is a tag-sorted set of
-`Field`s, each holding a typed [`Value`]; `FieldType` carries the on-disk type codes.
+`write` serialises one back, handling the two-pass offset layout (it is fallible: a stream that
+does not fit classic TIFF's 2-byte entry counts or 4 GiB offsets is a typed error, never a silent
+truncation). Each `Ifd` is a tag-sorted set of `Field`s, each holding a typed [`Value`];
+`FieldType` carries the on-disk type codes.
+
+An `Ifd` may also carry **sub-IFD trees** — child directories under a pointer tag (`SubIFDs`,
+`ExifIFD`, …) attached with `set_sub_ifd`. `write` lays the whole tree out and synthesises the
+pointer fields; `read_tree` is its inverse, following the pointer tags you name (with depth and
+cycle guards) and rebuilding the same tree. `read_ifd_at` remains the per-pointer escape hatch for
+lenient decoders.
 
 ```rust
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, write};
+use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read_tree, write};
 
+let mut exif = Ifd::new();
+exif.set(33434, Value::Rational(vec![(1, 250)])); // ExposureTime
 let mut ifd = Ifd::new();
 ifd.set(256, Value::Short(vec![640])); // ImageWidth
 ifd.set(257, Value::Short(vec![480])); // ImageLength
+ifd.set_sub_ifd(34665, vec![exif]); // ExifIFD pointer
 let file = TiffFile { order: ByteOrder::LittleEndian, variant: Variant::Classic, ifds: vec![ifd] };
-let bytes = write(&file);
-assert_eq!(read(&bytes).unwrap(), file);
+let bytes = write(&file).unwrap();
+assert_eq!(read_tree(&bytes, &[34665]).unwrap(), file); // write's inverse
 ```
 
 Tag *numbers* are passed literally — tag *semantics* live in the consuming codec (e.g. `gamut-tiff`'s
-`tags` module), not in this structural core.
+`tags` module), not in this structural core. That is also why `read_tree` takes the pointer tags:
+which `LONG` tags hold directory offsets is semantics the structure alone cannot know.
+
+Codecs that append image data after the stream (strips, tiles, an embedded JPEG) build on `write`'s
+documented **layout contract**: every structure sits on an even word boundary (`align_word` is the
+rule) and the layout is a pure function of structure sizes, so writing with correctly-sized
+placeholders, measuring, patching (`Value::offset_array` builds the variant-width offset arrays),
+and re-writing is byte-stable. The `*_with_coverage` readers additionally account every byte range
+consumed (`Coverage`) for strict archival "deconstruct" decoding.
 
 Beyond the twelve TIFF 6.0 field types, `FieldType::Utf8` (`Value::Utf8`, on-disk code `129`) carries
 the Exif 3.0 UTF-8 string type (CIPA DC-008 §4.6.2) — like `Ascii` but NUL-terminated UTF-8, so
@@ -58,8 +77,11 @@ and off by default — classic-only consumers (EXIF) stay lean; `gamut-tiff` ena
 
 ## Status
 
-Structural core implemented (issue #107). The EXIF-specific layers (sub-IFD traversal, fuzz corpus)
-remain under issue #34. See [STATUS.md](STATUS.md).
+**v1 — surface frozen** (issue #181): the structural core (issue #107), sub-IFD tree read/write,
+byte-range coverage accounting, and a malformed-input robustness corpus. The shared read/write
+paths are differentially gated through the consuming codecs' oracles — `gamut-tiff` vs **libtiff**
+(byte-level container round-trips) and `gamut-exif` vs **exiv2** (bare TIFF streams through the
+same IFD machinery). See [STATUS.md](STATUS.md).
 
 ## License
 

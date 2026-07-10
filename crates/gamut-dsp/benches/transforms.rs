@@ -7,7 +7,9 @@
 
 use divan::counter::ItemsCount;
 use divan::{Bencher, black_box};
-use gamut_dsp::{forward_adst, forward_dct, fwht4x4, inverse_adst, inverse_dct, iwht4x4};
+use gamut_dsp::av1::{
+    forward_adst, forward_dct, forward_wht4x4, inverse_adst, inverse_dct, inverse_wht4x4,
+};
 
 fn main() {
     divan::main();
@@ -68,7 +70,7 @@ fn forward_wht_4x4(bencher: Bencher) {
     }
     bencher
         .counter(ItemsCount::new(16usize))
-        .bench_local(|| fwht4x4(black_box(&block)));
+        .bench_local(|| forward_wht4x4(black_box(&block)));
 }
 
 #[divan::bench]
@@ -77,8 +79,8 @@ fn inverse_wht_4x4(bencher: Bencher) {
     for (i, v) in residual.iter_mut().enumerate() {
         *v = ((i as i32 * 37 + 5) % 255) - 127;
     }
-    let quant = fwht4x4(&residual);
+    let quant = forward_wht4x4(&residual);
     bencher
         .counter(ItemsCount::new(16usize))
-        .bench_local(|| iwht4x4(black_box(&quant)));
+        .bench_local(|| inverse_wht4x4(black_box(&quant)));
 }

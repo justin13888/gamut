@@ -97,15 +97,49 @@ mod tests {
 
     #[test]
     fn inverse_scales_match_spec_constants() {
-        let mut t = [4i64, -8, 12, 16, 0, 0, 0, 0];
-        inverse_identity(&mut t[..4], 2);
-        assert_eq!(t[0], round2(4 * 5793, 12));
         let mut t8 = [3i64; 8];
         inverse_identity(&mut t8, 3);
         assert!(t8.iter().all(|&v| v == 6));
         let mut t32 = [5i64; 32];
         inverse_identity(&mut t32, 5);
         assert!(t32.iter().all(|&v| v == 20));
+    }
+
+    #[test]
+    fn exact_values_pin_scales_and_rounding() {
+        // Literal expected outputs (not recomputed through round2) pin the 5793/11586/2896/1448
+        // spec constants and round2's ties-toward-+∞ on negative inputs: ±(4096, 4095)·√2 lands
+        // on the 5793/-5792 asymmetry, and the n = 4 ramps cross zero so every negative arm
+        // rounds. Goldens generated from this implementation (round-trip-pinned above).
+        let mut t = [4096i64, -4095, 3, -3];
+        inverse_identity(&mut t, 2);
+        assert_eq!(t, [5793, -5792, 4, -4]);
+        let mut t: Vec<i64> = (0..16i64).map(|k| k - 8).collect();
+        inverse_identity(&mut t, 4);
+        assert_eq!(
+            t,
+            [
+                -23, -20, -17, -14, -11, -8, -6, -3, 0, 3, 6, 8, 11, 14, 17, 20
+            ]
+        );
+        let mut t = [4096i64, -4095, 3, -3];
+        forward_identity(&mut t, 2);
+        assert_eq!(t, [2896, -2895, 2, -2]);
+        let mut t: Vec<i64> = (0..16i64).map(|k| (k - 8) * 100 + 3).collect();
+        forward_identity(&mut t, 4);
+        assert_eq!(
+            t,
+            [
+                -282, -246, -211, -176, -140, -105, -70, -34, 1, 36, 72, 107, 142, 178, 213, 249
+            ]
+        );
+        // The power-of-two forward arms round through round2(·, 1) / round2(·, 2), ties up.
+        let mut t = [7i64, -7, 4, -4, 1, -1, 0, 5];
+        forward_identity(&mut t, 3);
+        assert_eq!(t, [4, -3, 2, -2, 1, 0, 0, 3]);
+        let mut t: Vec<i64> = [6i64, -6, 10, -10].repeat(8);
+        forward_identity(&mut t, 5);
+        assert_eq!(t, [2i64, -1, 3, -2].repeat(8));
     }
 
     #[test]

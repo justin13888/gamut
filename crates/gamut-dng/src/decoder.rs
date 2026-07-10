@@ -104,10 +104,7 @@ fn decode_exif(exif: &Ifd) -> ExifMetadata {
 
 /// Extracts the first `(numerator, denominator)` of an unsigned `RATIONAL` value.
 fn rational_pair(value: Option<&Value>) -> Option<(u32, u32)> {
-    match value? {
-        Value::Rational(r) => r.first().copied(),
-        _ => None,
-    }
+    value?.as_rationals()?.first().copied()
 }
 
 /// Whether `ifd` holds a raw image (`PhotometricInterpretation` is CFA or LinearRaw).
@@ -341,31 +338,35 @@ fn read_version(ifd0: &Ifd) -> Result<[u8; 4]> {
     Ok(version)
 }
 
-/// Extracts a `BYTE`/`UNDEFINED` value's bytes (or a `SHORT` array narrowed to bytes).
+/// Extracts a `BYTE`/`UNDEFINED` value's bytes (or a `SHORT` array narrowed to bytes, used for
+/// SHORT-typed `CFAPattern` variants — a DNG-specific reading `Value::as_bytes` rightly refuses).
 fn bytes_value(value: Option<&Value>) -> Option<Vec<u8>> {
-    match value? {
-        Value::Byte(v) | Value::Undefined(v) => Some(v.clone()),
+    let value = value?;
+    if let Some(b) = value.as_bytes() {
+        return Some(b.to_vec());
+    }
+    match value {
         Value::Short(v) => Some(v.iter().map(|&x| x as u8).collect()),
         _ => None,
     }
 }
 
-/// Extracts an `ASCII` value.
+/// Extracts an `ASCII` (or Exif 3.0 `UTF8`) string value.
 fn ascii_value(value: Option<&Value>) -> Option<String> {
-    match value? {
-        Value::Ascii(s) => Some(s.clone()),
-        _ => None,
-    }
+    value?.as_str().map(ToOwned::to_owned)
 }
 
-/// Converts a `RATIONAL`/`SRATIONAL` value to `f64`s.
+/// Converts a `RATIONAL`/`SRATIONAL` value to `f64`s, mapping a zero denominator to `0.0` (the
+/// numeric policy is this codec's, not the container's).
 fn f64_vec(value: Option<&Value>) -> Option<Vec<f64>> {
     let ratio = |n: f64, d: f64| if d == 0.0 { 0.0 } else { n / d };
-    match value? {
-        Value::Rational(r) => Some(r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect()),
-        Value::SRational(r) => Some(r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect()),
-        _ => None,
+    let value = value?;
+    if let Some(r) = value.as_rationals() {
+        return Some(r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect());
     }
+    value
+        .as_srationals()
+        .map(|r| r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect())
 }
 
 /// Reads a 9-element `(S)RATIONAL` matrix tag as `[f64; 9]`.

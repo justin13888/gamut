@@ -21,6 +21,7 @@ use crate::curve::ToneCurve;
 pub struct Linear;
 
 impl ToneCurve for Linear {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         x
     }
@@ -66,6 +67,7 @@ impl Default for Clamp {
 }
 
 impl ToneCurve for Clamp {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         x.clamp(0.0, self.max)
     }
@@ -79,6 +81,7 @@ impl ToneCurve for Clamp {
 pub struct Reinhard;
 
 impl ToneCurve for Reinhard {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         x / (1.0 + x)
     }
@@ -92,6 +95,8 @@ impl ToneCurve for Reinhard {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReinhardExtended {
     white: f32,
+    /// `white * white`, the divisor `map` uses — validated normal at construction.
+    white_sq: f32,
 }
 
 impl ReinhardExtended {
@@ -99,14 +104,23 @@ impl ReinhardExtended {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `white` is not finite or is not strictly positive.
+    /// Returns [`Error::InvalidInput`] if `white` is not finite, is not strictly positive, or if
+    /// `white * white` is not a normal f32 — squares that underflow (white ≲ 1.1e-19) would make
+    /// `map` divide by zero or a subnormal, and squares that overflow (white ≳ 1.8e19) would break
+    /// the `map(white) == 1` fixed point.
     pub fn new(white: f32) -> Result<Self> {
         if !white.is_finite() || white <= 0.0 {
             return Err(Error::InvalidInput(
                 "Reinhard white point must be finite and greater than zero",
             ));
         }
-        Ok(Self { white })
+        let white_sq = white * white;
+        if !white_sq.is_normal() {
+            return Err(Error::InvalidInput(
+                "Reinhard white point squared must be a normal f32 (white roughly within [1.1e-19, 1.8e19])",
+            ));
+        }
+        Ok(Self { white, white_sq })
     }
 
     /// The white point: the linear input that maps to display white (`1.0`).
@@ -120,14 +134,19 @@ impl Default for ReinhardExtended {
     fn default() -> Self {
         Self {
             white: DEFAULT_REINHARD_WHITE,
+            white_sq: DEFAULT_REINHARD_WHITE * DEFAULT_REINHARD_WHITE,
         }
     }
 }
 
 impl ToneCurve for ReinhardExtended {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
-        let numerator = x * (1.0 + x / (self.white * self.white));
-        numerator / (1.0 + x)
+        // Factored form of Eq (4): the direct `x * (1 + x/white²) / (1 + x)` overflows its
+        // numerator for huge x even when the exact value fits f32; `x / (1 + x)` is bounded by 1,
+        // so this order only saturates when the exact value genuinely exceeds f32 range. See
+        // references/tonemap/README.md.
+        (x / (1.0 + x)) * (1.0 + x / self.white_sq)
     }
 }
 
@@ -162,8 +181,9 @@ impl Exposure {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `2^stops` is not a finite, strictly positive gain (i.e.
-    /// `stops` is NaN or large enough to overflow).
+    /// Returns [`Error::InvalidInput`] if `2^stops` is not a finite, strictly positive gain: when
+    /// `stops` is NaN, large enough that the gain overflows to infinity (≥ 128), or negative
+    /// enough that it underflows to zero (≲ −150).
     pub fn from_stops(stops: f32) -> Result<Self> {
         Self::new(stops.exp2())
     }
@@ -176,6 +196,7 @@ impl Exposure {
 }
 
 impl ToneCurve for Exposure {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         x * self.scale
     }
@@ -193,6 +214,7 @@ impl ToneCurve for Exposure {
 pub struct Aces;
 
 impl ToneCurve for Aces {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         // Narkowicz 2016 coefficients (see references/tonemap/README.md).
         const A: f32 = 2.51;
@@ -200,6 +222,11 @@ impl ToneCurve for Aces {
         const C: f32 = 2.43;
         const D: f32 = 0.59;
         const E: f32 = 0.14;
+        // The unclamped rational is >= 1 for every x >= 7.2417 (see references/tonemap/README.md
+        // for the derivation), so under the saturate, evaluating at min(x, 8) is exact — and it
+        // keeps the quadratics from overflowing to inf/inf = NaN for x beyond ~1e19. An argument
+        // clamp rather than an early return so the hot loop stays branchless.
+        let x = x.min(8.0);
         ((x * (A * x + B)) / (x * (C * x + D) + E)).clamp(0.0, 1.0)
     }
 }
@@ -212,8 +239,14 @@ const HABLE_D: f32 = 0.20; // toe strength
 const HABLE_E: f32 = 0.02; // toe numerator
 const HABLE_F: f32 = 0.30; // toe denominator
 
+/// Largest argument `hable_partial` evaluates directly. Beyond it the curve sits within one f32
+/// ULP of its horizontal asymptote (see references/tonemap/README.md), while the unguarded
+/// quadratics would overflow to inf/inf = NaN near ~1.5e19 — so clamping is sub-ULP-exact.
+const HABLE_EVAL_MAX: f32 = 1e18;
+
 /// The un-normalized Uncharted 2 partial curve `partial(x)` (see [`Hable`]).
 fn hable_partial(x: f32) -> f32 {
+    let x = x.min(HABLE_EVAL_MAX);
     ((x * (HABLE_A * x + HABLE_C * HABLE_B) + HABLE_D * HABLE_E)
         / (x * (HABLE_A * x + HABLE_B) + HABLE_D * HABLE_F))
         - HABLE_E / HABLE_F
@@ -229,6 +262,9 @@ fn hable_partial(x: f32) -> f32 {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hable {
     white: f32,
+    /// `hable_partial(white)`, the normalizing divisor `map` uses. Always positive: `partial` is
+    /// increasing and its value at 0 is a positive f32 residual (see `references/tonemap`).
+    partial_white: f32,
 }
 
 impl Hable {
@@ -243,7 +279,10 @@ impl Hable {
                 "Hable white point must be finite and greater than zero",
             ));
         }
-        Ok(Self { white })
+        Ok(Self {
+            white,
+            partial_white: hable_partial(white),
+        })
     }
 
     /// The linear white point: the input that maps to display white (`1.0`).
@@ -257,13 +296,17 @@ impl Default for Hable {
     fn default() -> Self {
         Self {
             white: DEFAULT_HABLE_WHITE,
+            partial_white: hable_partial(DEFAULT_HABLE_WHITE),
         }
     }
 }
 
 impl ToneCurve for Hable {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
-        hable_partial(x) / hable_partial(self.white)
+        // `map(white) == 1.0` stays exact: `hable_partial(white)` here reproduces the stored
+        // divisor bit-for-bit, and t / t == 1.0.
+        hable_partial(x) / self.partial_white
     }
 }
 
@@ -275,12 +318,19 @@ const DRAGO_LDMAX_NITS: f32 = 100.0;
 ///
 /// Needs the scene's maximum luminance, so there is no `Default`. `map(0) == 0` and
 /// `map(world_max) == 1`. For `bias < 0.7` the output may exceed `1.0` (the display clamps to
-/// `Ldmax`); `map` is a faithful, clamp-free transcription of the paper's Eq. (4). See
-/// `references/tonemap/README.md`.
+/// `Ldmax`); `map` is a faithful, clamp-free transcription of the paper's Eq. (4). Inputs are
+/// meaningful on the paper's domain `[0, world_max]` — far beyond it the output stays finite,
+/// non-negative, and non-NaN, but the curve no longer tracks the model (monotonicity is only
+/// promised on the domain). See `references/tonemap/README.md`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Drago {
     world_max: f32,
     bias: f32,
+    /// The Eq. (3) bias exponent `ln(bias) / ln(0.5)` — recomputed whenever `bias` changes.
+    exponent: f32,
+    /// The Eq. (4) prefactor `(Ldmax · 0.01) / log10(world_max + 1)` — validated finite and
+    /// positive at construction (a too-small `world_max` makes the `log10` collapse to zero).
+    scale: f32,
 }
 
 impl Drago {
@@ -289,21 +339,31 @@ impl Drago {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `world_max` is not finite or is not strictly positive.
+    /// Returns [`Error::InvalidInput`] if `world_max` is not finite or is not strictly positive,
+    /// or if it is so small (≲ 6e-8) that `world_max + 1` rounds to `1.0` in f32, collapsing the
+    /// curve's `log10(world_max + 1)` normalizer to zero.
     pub fn new(world_max: f32) -> Result<Self> {
         if !world_max.is_finite() || world_max <= 0.0 {
             return Err(Error::InvalidInput(
                 "Drago world_max must be finite and greater than zero",
             ));
         }
+        let scale = (DRAGO_LDMAX_NITS * 0.01) / (world_max + 1.0).log10();
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(Error::InvalidInput(
+                "Drago world_max must be large enough that log10(world_max + 1) is positive in f32",
+            ));
+        }
         Ok(Self {
             world_max,
             bias: DEFAULT_DRAGO_BIAS,
+            exponent: Self::bias_exponent(DEFAULT_DRAGO_BIAS),
+            scale,
         })
     }
 
-    /// Set the bias, which steers contrast in dark vs. bright regions; the paper's useful range is
-    /// `(0, 1)`, default `0.85`.
+    /// Set the bias, which steers contrast in dark vs. bright regions; any value in the open
+    /// interval `(0, 1)` is accepted, the paper's useful range is `[0.5, 1.0]`, default `0.85`.
     ///
     /// # Errors
     ///
@@ -315,7 +375,16 @@ impl Drago {
                 "Drago bias must be finite and in the open interval (0, 1)",
             ));
         }
-        Ok(Self { bias, ..self })
+        Ok(Self {
+            bias,
+            exponent: Self::bias_exponent(bias),
+            ..self
+        })
+    }
+
+    /// The Eq. (3) bias exponent `ln(bias) / ln(0.5)` (see `references/tonemap/README.md`).
+    fn bias_exponent(bias: f32) -> f32 {
+        bias.ln() / 0.5_f32.ln()
     }
 
     /// The scene's maximum luminance.
@@ -332,13 +401,13 @@ impl Drago {
 }
 
 impl ToneCurve for Drago {
+    #[inline]
     fn map(&self, x: f32) -> f32 {
         // Drago et al. 2003 Eq. (4) with the Eq. (3) bias (see references/tonemap/README.md).
-        let exponent = self.bias.ln() / 0.5_f32.ln();
-        let ratio = (x / self.world_max).powf(exponent);
+        // `exponent` and `scale` are hoisted to construction — same expressions, identical values.
+        let ratio = (x / self.world_max).powf(self.exponent);
         let denom = (2.0 + ratio * 8.0).ln();
-        let scale = (DRAGO_LDMAX_NITS * 0.01) / (self.world_max + 1.0).log10();
-        scale * (x + 1.0).ln() / denom
+        self.scale * (x + 1.0).ln() / denom
     }
 }
 
@@ -442,6 +511,12 @@ mod tests {
         assert!(ReinhardExtended::new(-2.0).is_err());
         assert!(ReinhardExtended::new(f32::NAN).is_err());
         assert!(ReinhardExtended::new(f32::INFINITY).is_err());
+        // Degenerate whites whose square leaves the normal f32 range: underflow to zero (map
+        // would divide by 0), subnormal (map overflows at moderate x), and overflow to infinity
+        // (map(white) would no longer be 1).
+        assert!(ReinhardExtended::new(1e-25).is_err());
+        assert!(ReinhardExtended::new(1e-20).is_err());
+        assert!(ReinhardExtended::new(1e30).is_err());
     }
 
     #[test]
@@ -536,6 +611,43 @@ mod tests {
         let c2 = c.with_bias(0.5).expect("bias in (0,1)");
         assert_eq!(c2.bias(), 0.5);
         assert!(close_eps(c2.map(c2.world_max()), 1.0, 1e-5));
+        // Interior golden through with_bias: map(10) = ln(11)/ln(2.8)/log10(101) ≈ 1.161946 (see
+        // references/tonemap/README.md; > 1 is expected for bias < 0.7). The fixed points above
+        // are bias-exponent-insensitive (1^e = 1, and map(0) = 0 for any exponent), so only this
+        // value catches with_bias failing to recompute the hoisted exponent.
+        assert!(close_eps(c2.map(10.0), 1.161_946, 1e-4));
+    }
+
+    #[test]
+    fn operators_never_return_nan_at_f32_extremes() {
+        // The trait contract's never-NaN clause, probed where the naive math would overflow to
+        // inf/inf = NaN (Aces and Hable near 1e19+ without their guards). Outputs may legitimately
+        // saturate to +inf where the exact value exceeds f32 range (e.g. Exposure), but never NaN,
+        // never negative. Drago at 1e20 is deliberately far beyond world_max — out-of-domain, so
+        // only the never-NaN/non-negative clauses apply there.
+        let curves: [&dyn ToneCurve; 8] = [
+            &Linear,
+            &Clamp::default(),
+            &Exposure::new(2.0).expect("valid gain"),
+            &Reinhard,
+            &ReinhardExtended::default(),
+            &Aces,
+            &Hable::default(),
+            &Drago::new(100.0).expect("valid world max"),
+        ];
+        for (i, curve) in curves.iter().enumerate() {
+            for x in [0.0, 1e20, f32::MAX] {
+                let y = curve.map(x);
+                assert!(!y.is_nan(), "curve {i} returned NaN at {x}");
+                assert!(y >= 0.0, "curve {i} returned {y} at {x}");
+            }
+        }
+        // Exact values pin the guards themselves — a deleted or boundary-shifted guard survives
+        // the NaN checks alone: the unclamped Aces rational is >= 1 for every x >= 7.2417, and
+        // Hable evaluates at its clamp bound for any larger input.
+        assert_eq!(Aces.map(1e20), 1.0);
+        let h = Hable::default();
+        assert_eq!(h.map(f32::MAX), h.map(1e18));
     }
 
     #[test]
@@ -544,6 +656,10 @@ mod tests {
         assert!(Drago::new(-1.0).is_err());
         assert!(Drago::new(f32::NAN).is_err());
         assert!(Drago::new(f32::INFINITY).is_err());
+        // world_max so small that (world_max + 1) rounds to 1.0 in f32, collapsing the log10
+        // normalizer to zero (map(0) would be inf · 0 = NaN); f32::MAX stays constructible.
+        assert!(Drago::new(1e-8).is_err());
+        assert!(Drago::new(f32::MAX).is_ok());
         let c = Drago::new(100.0).expect("valid world max");
         assert!(c.with_bias(0.0).is_err());
         assert!(c.with_bias(1.0).is_err());

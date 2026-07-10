@@ -7,12 +7,11 @@
 //! that default as ISO-8859-1 (Latin-1): Latin-1 is the de-facto reading used by exiv2/exiftool, and
 //! it is a strict superset of ISO 646 IRV, so it never rejects a valid default-set value.
 //!
-//! Any other (exotic) ISO 2022 designation is reported as [`Error::Unsupported`] rather than
+//! Any other (exotic) ISO 2022 designation is reported as [`IptcError::Unsupported`] rather than
 //! silently mis-decoded. The UTF-8 escape octets are documented in the IPTC-NAA Code Library
 //! (IPTC-IIM 4.2 Appendix C); gamut matches the canonical `ESC % G` sequence.
 
-use gamut_core::{Error, Result};
-
+use crate::error::{IptcError, Result};
 use crate::iim::IimBlock;
 
 /// The coded character set an IIM text value is encoded in.
@@ -39,7 +38,7 @@ impl IimCharset {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] if 1:90 designates any other ISO 2022 character set.
+    /// Returns [`IptcError::Unsupported`] if 1:90 designates any other ISO 2022 character set.
     pub fn detect(block: &IimBlock) -> Result<Self> {
         match block
             .datasets
@@ -49,7 +48,7 @@ impl IimCharset {
             None => Ok(IimCharset::Latin1),
             Some(d) if d.data.is_empty() => Ok(IimCharset::Latin1),
             Some(d) if d.data.as_slice() == Self::UTF8_ESCAPE => Ok(IimCharset::Utf8),
-            Some(_) => Err(Error::Unsupported(
+            Some(_) => Err(IptcError::Unsupported(
                 "IPTC IIM: unsupported coded character set in 1:90",
             )),
         }
@@ -59,14 +58,14 @@ impl IimCharset {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for [`IimCharset::Utf8`] octets that are not valid UTF-8.
+    /// Returns [`IptcError::Malformed`] for [`IimCharset::Utf8`] octets that are not valid UTF-8.
     /// Latin-1 decoding is infallible.
     pub fn decode(self, bytes: &[u8]) -> Result<String> {
         match self {
             IimCharset::Latin1 => Ok(decode_latin1(bytes)),
             IimCharset::Utf8 => core::str::from_utf8(bytes)
                 .map(str::to_owned)
-                .map_err(|_| Error::InvalidInput("IPTC IIM: invalid UTF-8 text value")),
+                .map_err(|_| IptcError::Malformed("IPTC IIM: invalid UTF-8 text value")),
         }
     }
 
@@ -74,7 +73,7 @@ impl IimCharset {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if encoding as [`IimCharset::Latin1`] and the text contains a
+    /// Returns [`IptcError::Malformed`] if encoding as [`IimCharset::Latin1`] and the text contains a
     /// character beyond U+00FF (callers should select [`IimCharset::Utf8`] for such text).
     pub fn encode(self, text: &str) -> Result<Vec<u8>> {
         match self {
@@ -106,7 +105,7 @@ pub(crate) fn encode_latin1(text: &str) -> Result<Vec<u8>> {
     text.chars()
         .map(|c| {
             u8::try_from(c as u32)
-                .map_err(|_| Error::InvalidInput("IPTC: text not representable in Latin-1"))
+                .map_err(|_| IptcError::Malformed("IPTC: text not representable in Latin-1"))
         })
         .collect()
 }

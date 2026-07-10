@@ -3,6 +3,7 @@
 use gamut_core::{Error, Result};
 
 use crate::byte_order::ByteOrder;
+use crate::entry::Variant;
 use crate::types::FieldType;
 
 /// The decoded value(s) of one IFD entry, one variant per [`crate::FieldType`].
@@ -17,6 +18,10 @@ pub enum Value {
     /// `BYTE` — unsigned 8-bit integers.
     Byte(Vec<u8>),
     /// `ASCII` — a NUL-terminated 7-bit ASCII string (the terminator is not stored here).
+    ///
+    /// A field may hold multiple NUL-separated strings (TIFF 6.0 §2); they are kept as one
+    /// `String` with interior `\0` separators (`"a\0b"` is the two strings `a` and `b`), so the
+    /// on-disk bytes round-trip exactly.
     Ascii(String),
     /// `SHORT` — unsigned 16-bit integers.
     Short(Vec<u16>),
@@ -39,7 +44,8 @@ pub enum Value {
     /// `DOUBLE` — IEEE double-precision floats.
     Double(Vec<f64>),
     /// `UTF8` — a NUL-terminated UTF-8 string (Exif 3.0 / CIPA DC-008; the terminator is not stored
-    /// here). Like [`Value::Ascii`] but the field's on-disk type is `129`, preserving non-ASCII text.
+    /// here). Like [`Value::Ascii`] but the field's on-disk type is `129`, preserving non-ASCII
+    /// text — including its multi-string form with interior `\0` separators.
     Utf8(String),
     /// `LONG8` — BigTIFF 64-bit unsigned integers.
     #[cfg(feature = "bigtiff")]
@@ -141,6 +147,72 @@ impl Value {
             Value::Long(v) => Some(v.clone()),
             #[cfg(feature = "bigtiff")]
             Value::Long8(v) | Value::Ifd8(v) => v.iter().map(|&x| u32::try_from(x).ok()).collect(),
+            _ => None,
+        }
+    }
+
+    /// Builds an offset-array value of the width `variant` stores offsets in: `LONG` for classic
+    /// TIFF, `LONG8` for BigTIFF.
+    ///
+    /// This is the type a field whose value locates file data must carry — a sub-IFD pointer
+    /// (`SubIFDs`, `ExifIFD`), or `StripOffsets`/`TileOffsets` in the codecs layered on this
+    /// crate — so its width follows the container's offset width.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `variant` is classic and an offset exceeds `u32::MAX`
+    /// (classic TIFF cannot address past 4 GiB).
+    pub fn offset_array(variant: Variant, offsets: &[u64]) -> Result<Value> {
+        match variant {
+            Variant::Classic => offsets
+                .iter()
+                .map(|&o| {
+                    u32::try_from(o).map_err(|_| {
+                        Error::InvalidInput("TIFF: offset exceeds the 4 GiB classic-TIFF limit")
+                    })
+                })
+                .collect::<Result<Vec<u32>>>()
+                .map(Value::Long),
+            #[cfg(feature = "bigtiff")]
+            Variant::Big => Ok(Value::Long8(offsets.to_vec())),
+        }
+    }
+
+    /// Borrows a string value (`ASCII` or `UTF8`).
+    ///
+    /// A multi-string field keeps its interior `\0` separators — split on `'\0'` to enumerate
+    /// the strings.
+    #[must_use]
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Ascii(s) | Value::Utf8(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Borrows a raw byte value (`BYTE` or `UNDEFINED`).
+    #[must_use]
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Byte(v) | Value::Undefined(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Borrows the (numerator, denominator) pairs of a `RATIONAL` value.
+    #[must_use]
+    pub fn as_rationals(&self) -> Option<&[(u32, u32)]> {
+        match self {
+            Value::Rational(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Borrows the (numerator, denominator) pairs of an `SRATIONAL` value.
+    #[must_use]
+    pub fn as_srationals(&self) -> Option<&[(i32, i32)]> {
+        match self {
+            Value::SRational(v) => Some(v),
             _ => None,
         }
     }
@@ -258,14 +330,17 @@ impl Value {
             FieldType::Undefined => Value::Undefined(bytes.to_vec()),
             FieldType::SByte => Value::SByte(bytes.iter().map(|&x| x as i8).collect()),
             FieldType::Ascii => {
-                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                let s = core::str::from_utf8(&bytes[..end])
+                // Strip exactly the terminating NUL (leniently absent in out-of-spec files) and
+                // keep everything before it: an ASCII field may hold *multiple* NUL-separated
+                // strings (TIFF 6.0 §2), so interior NULs are data, not terminators.
+                let body = bytes.strip_suffix(&[0]).unwrap_or(bytes);
+                let s = core::str::from_utf8(body)
                     .map_err(|_| Error::InvalidInput("TIFF: non-UTF-8 ASCII field"))?;
                 Value::Ascii(s.to_owned())
             }
             FieldType::Utf8 => {
-                let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-                let s = core::str::from_utf8(&bytes[..end])
+                let body = bytes.strip_suffix(&[0]).unwrap_or(bytes);
+                let s = core::str::from_utf8(body)
                     .map_err(|_| Error::InvalidInput("TIFF: invalid UTF-8 field"))?;
                 Value::Utf8(s.to_owned())
             }
@@ -327,6 +402,8 @@ mod tests {
         for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
             value_roundtrip(Value::Byte(vec![1, 2, 3]), order);
             value_roundtrip(Value::Ascii("gamut".to_owned()), order);
+            // Multi-string ASCII (TIFF 6.0 §2): interior NULs separate strings and are data.
+            value_roundtrip(Value::Ascii("first\0second".to_owned()), order);
             // Exif 3.0 UTF-8 (type 129): non-ASCII text must survive a decode/encode round-trip.
             value_roundtrip(Value::Utf8("café — 日本語".to_owned()), order);
             value_roundtrip(Value::Short(vec![256, 257, 0xFFFF]), order);
@@ -404,5 +481,58 @@ mod tests {
     fn decode_rejects_truncated_value() {
         // A LONG needs 4 bytes; only 2 are supplied.
         assert!(Value::decode(FieldType::Long, 1, &[0, 0], ByteOrder::LittleEndian).is_err());
+    }
+
+    /// `offset_array` follows the variant's offset width, and classic construction is a typed
+    /// error — not a truncation — past the 4 GiB limit.
+    #[test]
+    fn offset_array_matches_variant_width() {
+        assert_eq!(
+            Value::offset_array(Variant::Classic, &[8, 1024]).expect("classic"),
+            Value::Long(vec![8, 1024])
+        );
+        assert!(Value::offset_array(Variant::Classic, &[u64::from(u32::MAX) + 1]).is_err());
+        #[cfg(feature = "bigtiff")]
+        assert_eq!(
+            Value::offset_array(Variant::Big, &[0x1_0000_0000]).expect("bigtiff"),
+            Value::Long8(vec![0x1_0000_0000])
+        );
+    }
+
+    /// Each typed accessor borrows exactly its own variants and rejects the rest.
+    #[test]
+    fn typed_accessors_hit_and_miss() {
+        assert_eq!(Value::Ascii("a\0b".into()).as_str(), Some("a\0b"));
+        assert_eq!(Value::Utf8("é".into()).as_str(), Some("é"));
+        assert_eq!(Value::Short(vec![1]).as_str(), None);
+        assert_eq!(Value::Byte(vec![1, 2]).as_bytes(), Some(&[1u8, 2][..]));
+        assert_eq!(Value::Undefined(vec![7]).as_bytes(), Some(&[7u8][..]));
+        assert_eq!(Value::Ascii("x".into()).as_bytes(), None);
+        assert_eq!(
+            Value::Rational(vec![(1, 2)]).as_rationals(),
+            Some(&[(1u32, 2u32)][..])
+        );
+        assert_eq!(Value::SRational(vec![(-1, 2)]).as_rationals(), None);
+        assert_eq!(
+            Value::SRational(vec![(-1, 2)]).as_srationals(),
+            Some(&[(-1i32, 2i32)][..])
+        );
+        assert_eq!(Value::Rational(vec![(1, 2)]).as_srationals(), None);
+    }
+
+    /// ASCII decode strips exactly one terminating NUL: multi-string fields and NUL padding are
+    /// preserved as data (dropping everything after the first NUL would silently lose them), and
+    /// an out-of-spec missing terminator is tolerated.
+    #[test]
+    fn ascii_decode_preserves_interior_nuls() {
+        let order = ByteOrder::LittleEndian;
+        let multi = Value::decode(FieldType::Ascii, 4, b"a\0b\0", order).expect("multi-string");
+        assert_eq!(multi, Value::Ascii("a\0b".to_owned()));
+        let padded = Value::decode(FieldType::Ascii, 4, b"a\0\0\0", order).expect("padded");
+        assert_eq!(padded, Value::Ascii("a\0\0".to_owned()));
+        let unterminated = Value::decode(FieldType::Ascii, 2, b"ab", order).expect("lenient");
+        assert_eq!(unterminated, Value::Ascii("ab".to_owned()));
+        // Non-UTF-8 bytes anywhere in the field are a typed error, not a panic or silent drop.
+        assert!(Value::decode(FieldType::Ascii, 3, b"a\0\xFF", order).is_err());
     }
 }
