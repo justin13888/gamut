@@ -536,6 +536,7 @@ dependencies = [
  "gamut-icc",
  "gamut-ifd",
  "gamut-iptc",
+ "gamut-isobmff",
  "gamut-jxl",
  "gamut-metadata",
  "gamut-png",

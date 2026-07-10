@@ -1,54 +1,27 @@
-//! Parser robustness: malformed or out-of-scope inputs must yield a typed error, never a panic.
+//! Parser robustness: malformed, hostile, or out-of-scope inputs must yield a typed error, never
+//! a panic or a runaway allocation.
 
-use gamut_isobmff::{
-    ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind, read, write,
+mod common;
+
+use common::{
+    av01_item, bx, cat, empty_iprp, ftyp, full, hdlr, iinf_v0, image, infe_v2, meta, pitm_v0,
 };
+use gamut_isobmff::read;
 
-/// A valid single-item AVIF-style file to corrupt.
+/// A valid single-item AVIF-style file (written by this crate) to corrupt in place.
 fn valid() -> Vec<u8> {
-    let item = Item {
-        id: 1,
-        item_type: *b"av01",
-        name: String::new(),
-        properties: vec![
-            Property {
-                essential: true,
-                kind: PropertyKind::CodecConfiguration {
-                    kind: *b"av1C",
-                    data: vec![0x81, 0x20, 0x0c, 0x00],
-                },
-            },
-            Property {
-                essential: false,
-                kind: PropertyKind::ImageSpatialExtents {
-                    width: 16,
-                    height: 16,
-                },
-            },
-            Property {
-                essential: false,
-                kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
-                    colour_primaries: 1,
-                    transfer_characteristics: 13,
-                    matrix_coefficients: 0,
-                    full_range: true,
-                })),
-            },
-        ],
-        payload: vec![0xAB; 8],
-    };
-    write(&IsoBmffImage {
-        major_brand: *b"avif",
-        minor_version: 0,
-        compatible_brands: vec![*b"avif", *b"mif1"],
-        primary_item_id: 1,
-        items: vec![item],
-    })
+    gamut_isobmff::write(&image(vec![av01_item(1, vec![0xAB; 8])])).unwrap()
 }
 
 /// Absolute position of the first occurrence of `fourcc`.
 fn find(buf: &[u8], fourcc: &[u8; 4]) -> usize {
     buf.windows(4).position(|w| w == fourcc).unwrap()
+}
+
+#[track_caller]
+fn assert_read_fails(data: &[u8], expected: &str) {
+    let e = read(data).unwrap_err().to_string();
+    assert!(e.contains(expected), "expected {expected:?} in {e:?}");
 }
 
 #[test]
@@ -58,8 +31,7 @@ fn valid_file_reads_back() {
 
 #[test]
 fn empty_input_errors() {
-    let e = read(&[]).unwrap_err();
-    assert!(e.to_string().contains("missing ftyp"), "{e}");
+    assert_read_fails(&[], "missing ftyp");
 }
 
 #[test]
@@ -69,40 +41,41 @@ fn truncated_box_header_errors() {
 
 #[test]
 fn box_size_below_header_errors() {
-    let e = read(&[0, 0, 0, 4, b'f', b't', b'y', b'p']).unwrap_err();
-    assert!(e.to_string().contains("size smaller than header"), "{e}");
+    assert_read_fails(
+        &[0, 0, 0, 4, b'f', b't', b'y', b'p'],
+        "size smaller than header",
+    );
 }
 
 #[test]
 fn missing_meta_errors() {
-    // ftyp (no brands) + empty mdat, no meta.
-    let buf = [
-        0, 0, 0, 16, b'f', b't', b'y', b'p', b'a', b'v', b'i', b'f', 0, 0, 0, 0, // ftyp
-        0, 0, 0, 8, b'm', b'd', b'a', b't', // mdat
-    ];
-    let e = read(&buf).unwrap_err();
-    assert!(e.to_string().contains("missing meta"), "{e}");
+    assert_read_fails(&ftyp(), "missing meta");
 }
 
 #[test]
-fn missing_mdat_errors() {
+fn missing_mdat_box_is_tolerated() {
+    // Payload extents are absolute file offsets; the mdat framing itself carries no information,
+    // so a file whose mdat was renamed to a free box still resolves.
     let mut f = valid();
     let p = find(&f, b"mdat");
-    f[p..p + 4].copy_from_slice(b"free"); // rename mdat → an ignored box
-    let e = read(&f).unwrap_err();
-    assert!(e.to_string().contains("missing mdat"), "{e}");
+    f[p..p + 4].copy_from_slice(b"free");
+    assert_eq!(read(&f).unwrap().items[0].payload, vec![0xAB; 8]);
 }
 
 #[test]
 fn tracks_are_unsupported() {
-    let e = read(&[0, 0, 0, 8, b'm', b'o', b'o', b'v']).unwrap_err();
-    assert!(e.to_string().contains("sequences"), "{e}");
+    assert_read_fails(&[0, 0, 0, 8, b'm', b'o', b'o', b'v'], "sequences");
 }
 
 #[test]
 fn largesize_is_unsupported() {
-    let e = read(&[0, 0, 0, 1, b'm', b'd', b'a', b't']).unwrap_err();
-    assert!(e.to_string().contains("largesize"), "{e}");
+    assert_read_fails(&[0, 0, 0, 1, b'm', b'd', b'a', b't'], "largesize");
+}
+
+#[test]
+fn open_ended_box_is_unsupported() {
+    // A top-level box with size 0 (extends to EOF) is rejected — this crate never writes one.
+    assert_read_fails(&[0, 0, 0, 0, b'f', b't', b'y', b'p'], "open-ended");
 }
 
 #[test]
@@ -111,34 +84,28 @@ fn iloc_extent_out_of_bounds_errors() {
     let p = find(&f, b"iloc");
     // extent_offset is at body offset 14 → absolute p + 4 + 14.
     f[p + 18..p + 22].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
-    let e = read(&f).unwrap_err();
-    assert!(e.to_string().contains("extent out of bounds"), "{e}");
+    assert_read_fails(&f, "extent out of bounds");
+}
+
+#[test]
+fn external_data_reference_is_unsupported() {
+    let mut f = valid();
+    let p = find(&f, b"iloc");
+    // data_reference_index is at body offset 10 → absolute p + 4 + 10.
+    f[p + 14..p + 16].copy_from_slice(&[0, 1]);
+    assert_read_fails(&f, "external data reference");
 }
 
 #[test]
 fn ipma_property_index_out_of_range_errors() {
-    let mut f = valid();
-    let p = find(&f, b"ipma");
-    // First association byte is at body offset 11 → absolute p + 4 + 11.
-    f[p + 15] = 0x7f; // index 127, far beyond the 3 properties
-    let e = read(&f).unwrap_err();
-    assert!(e.to_string().contains("index out of range"), "{e}");
-}
-
-#[test]
-fn ipma_property_index_zero_errors() {
-    let mut f = valid();
-    let p = find(&f, b"ipma");
-    f[p + 15] = 0x00; // index 0 is invalid (1-based)
-    let e = read(&f).unwrap_err();
-    assert!(e.to_string().contains("index out of range"), "{e}");
-}
-
-#[test]
-fn open_ended_box_is_unsupported() {
-    // A top-level box with size 0 (extends to EOF) is rejected — this crate never writes one.
-    let e = read(&[0, 0, 0, 0, b'f', b't', b'y', b'p']).unwrap_err();
-    assert!(e.to_string().contains("open-ended"), "{e}");
+    for bad in [0x7f, 0x00] {
+        // Index 127 is far beyond the 4 properties; index 0 is invalid (1-based).
+        let mut f = valid();
+        let p = find(&f, b"ipma");
+        // The first association byte is at body offset 11 → absolute p + 4 + 11.
+        f[p + 15] = bad;
+        assert_read_fails(&f, "index out of range");
+    }
 }
 
 #[test]
@@ -146,16 +113,168 @@ fn non_picture_handler_is_unsupported() {
     let mut f = valid();
     let p = find(&f, b"pict"); // the hdlr handler_type
     f[p..p + 4].copy_from_slice(b"vide");
-    let e = read(&f).unwrap_err();
-    assert!(e.to_string().contains("non-picture handler"), "{e}");
+    assert_read_fails(&f, "non-picture handler");
 }
 
 #[test]
-fn ipma_16bit_indices_are_unsupported() {
+fn missing_hdlr_errors() {
     let mut f = valid();
-    let p = find(&f, b"ipma");
-    // ipma body = version(1) + flags(3); the low flags byte is at body offset 3 (absolute p+4+3).
-    f[p + 7] |= 1; // flags & 1 ⇒ 16-bit property indices
-    let e = read(&f).unwrap_err();
-    assert!(e.to_string().contains("16-bit property indices"), "{e}");
+    let p = find(&f, b"hdlr");
+    f[p..p + 4].copy_from_slice(b"xxxx"); // now an ignored unknown meta child
+    assert_read_fails(&f, "missing hdlr");
+}
+
+#[test]
+fn protected_items_are_unsupported() {
+    let mut f = valid();
+    let p = find(&f, b"infe");
+    // item_protection_index is at body offset 6 → absolute p + 4 + 6.
+    f[p + 10..p + 12].copy_from_slice(&[0, 1]);
+    assert_read_fails(&f, "protected item");
+}
+
+#[test]
+fn uri_items_are_unsupported() {
+    let mut f = valid();
+    let p = find(&f, b"infe");
+    // item_type is at body offset 8 → absolute p + 4 + 8.
+    f[p + 12..p + 16].copy_from_slice(b"uri ");
+    assert_read_fails(&f, "uri items");
+}
+
+#[test]
+fn overlapping_extents_cannot_amplify_the_input() {
+    // Hostile multi-extent iloc: 3 extents that each cover (almost) the whole file would resolve
+    // to ~3× the input. The reader caps the total resolved payload at the file size.
+    let file_covering_extent = cat(&[&0u32.to_be_bytes()[..], &300u32.to_be_bytes()[..]]);
+    let iloc = full(
+        b"iloc",
+        0,
+        0,
+        &cat(&[
+            &[0x44u8, 0x00][..], // offset_size 4, length_size 4, base 0
+            &1u16.to_be_bytes(), // item_count
+            &1u16.to_be_bytes(), // item_ID
+            &0u16.to_be_bytes(), // data_reference_index
+            &3u16.to_be_bytes(), // extent_count
+            &file_covering_extent,
+            &file_covering_extent,
+            &file_covering_extent,
+        ]),
+    );
+    let m = meta(&[
+        hdlr(),
+        pitm_v0(1),
+        iloc,
+        iinf_v0(&[infe_v2(1, b"av01")]),
+        empty_iprp(),
+    ]);
+    // Pad with an mdat so a 300-byte extent at offset 0 is in bounds but 3 of them exceed the file.
+    let f = cat(&[ftyp(), m, bx(b"mdat", &[0x55; 400])]);
+    assert_read_fails(&f, "extents exceed the file size");
+}
+
+#[test]
+fn construction_method_2_is_unsupported() {
+    // iloc v1 with construction_method 2 (item offsets) — structurally valid, out of scope.
+    let iloc = full(
+        b"iloc",
+        1,
+        0,
+        &cat(&[
+            &[0x44u8, 0x00][..],
+            &1u16.to_be_bytes(), // item_count
+            &1u16.to_be_bytes(), // item_ID
+            &2u16.to_be_bytes(), // reserved(12) | construction_method(4) = 2
+            &0u16.to_be_bytes(), // data_reference_index
+            &1u16.to_be_bytes(), // extent_count
+            &0u32.to_be_bytes(),
+            &0u32.to_be_bytes(),
+        ]),
+    );
+    let m = meta(&[
+        hdlr(),
+        pitm_v0(1),
+        iloc,
+        iinf_v0(&[infe_v2(1, b"av01")]),
+        empty_iprp(),
+    ]);
+    assert_read_fails(&cat(&[ftyp(), m]), "construction_method 2");
+}
+
+#[test]
+fn idat_reference_without_idat_errors() {
+    // iloc v1, construction_method 1, but the meta carries no idat box.
+    let iloc = full(
+        b"iloc",
+        1,
+        0,
+        &cat(&[
+            &[0x44u8, 0x00][..],
+            &1u16.to_be_bytes(),
+            &1u16.to_be_bytes(),
+            &1u16.to_be_bytes(), // construction_method 1 (idat)
+            &0u16.to_be_bytes(),
+            &1u16.to_be_bytes(),
+            &0u32.to_be_bytes(),
+            &4u32.to_be_bytes(),
+        ]),
+    );
+    let m = meta(&[
+        hdlr(),
+        pitm_v0(1),
+        iloc,
+        iinf_v0(&[infe_v2(1, b"av01")]),
+        empty_iprp(),
+    ]);
+    assert_read_fails(&cat(&[ftyp(), m]), "idat but meta has none");
+}
+
+#[test]
+fn iref_from_unknown_item_errors() {
+    let iref = full(
+        b"iref",
+        0,
+        0,
+        &bx(
+            b"cdsc",
+            &cat(&[
+                &99u16.to_be_bytes()[..], // from_item_ID: no such item
+                &1u16.to_be_bytes(),      // reference_count
+                &1u16.to_be_bytes(),
+            ]),
+        ),
+    );
+    let m = meta(&[
+        hdlr(),
+        pitm_v0(1),
+        iinf_v0(&[infe_v2(1, b"av01")]),
+        iref,
+        empty_iprp(),
+    ]);
+    assert_read_fails(&cat(&[ftyp(), m]), "iref from unknown item");
+}
+
+#[test]
+fn mime_infe_missing_content_type_errors() {
+    let bad_infe = full(
+        b"infe",
+        2,
+        0,
+        &cat(&[&1u16.to_be_bytes()[..], &[0, 0], b"mime", &[0]]), // name only, no content_type
+    );
+    let m = meta(&[hdlr(), pitm_v0(1), iinf_v0(&[bad_infe]), empty_iprp()]);
+    assert_read_fails(&cat(&[ftyp(), m]), "missing content_type");
+}
+
+#[test]
+fn iloc_field_size_must_be_0_4_or_8() {
+    let iloc = full(
+        b"iloc",
+        0,
+        0,
+        &cat(&[&[0x34u8, 0x00][..], &0u16.to_be_bytes()]),
+    );
+    let m = meta(&[hdlr(), pitm_v0(1), iinf_v0(&[]), iloc, empty_iprp()]);
+    assert_read_fails(&cat(&[ftyp(), m]), "field size not 0/4/8");
 }

@@ -7,3 +7,4 @@ pub(crate) mod convert;
 pub(crate) mod dsp;
 pub(crate) mod icc;
 pub(crate) mod inspect;
+pub(crate) mod isobmff;

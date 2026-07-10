@@ -20,6 +20,10 @@
 //! TIFF/IFD container core (`ifd`) plus, as they land, the per-format crates (`exif`/`xmp`/`icc`/
 //! `iptc`) and the `metadata` facade that unifies them — for tooling and for the container crates
 //! to consume.
+//!
+//! The `isobmff` feature re-exports the ISOBMFF/HEIF still-image container primitive (`isobmff`) —
+//! the box tree shared by the AVIF and HEIC codecs — so tooling can read and write containers
+//! directly, independently of the codecs that fill them.
 #![forbid(unsafe_code)]
 
 /// The version of this `gamut` library crate, taken from its `Cargo.toml` at compile time.
@@ -54,6 +58,8 @@ pub use gamut_icc as icc;
 pub use gamut_ifd as ifd;
 #[cfg(feature = "metadata")]
 pub use gamut_iptc as iptc;
+#[cfg(feature = "isobmff")]
+pub use gamut_isobmff as isobmff;
 #[cfg(feature = "jxl")]
 pub use gamut_jxl as jxl;
 #[cfg(feature = "metadata")]

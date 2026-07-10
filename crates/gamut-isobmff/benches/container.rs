@@ -26,6 +26,10 @@ fn write_still(bencher: Bencher, payload: usize) {
             id: 1,
             item_type: *b"av01",
             name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            references: vec![],
             properties: vec![
                 Property {
                     essential: true,
@@ -59,8 +63,9 @@ fn write_still(bencher: Bencher, payload: usize) {
             ],
             payload: vec![0xA5u8; payload],
         }],
+        groups: vec![],
     };
     bencher
         .counter(BytesCount::new(payload))
-        .bench_local(|| write(black_box(&img)));
+        .bench_local(|| write(black_box(&img)).unwrap());
 }

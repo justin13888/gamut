@@ -138,6 +138,14 @@ impl<'a> BoxReader<'a> {
         Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    /// Reads a big-endian `u64`.
+    pub(crate) fn u64(&mut self) -> Result<u64> {
+        let b = self.take(8)?;
+        Ok(u64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    }
+
     /// Reads a four-character code.
     pub(crate) fn fourcc(&mut self) -> Result<[u8; 4]> {
         let b = self.take(4)?;

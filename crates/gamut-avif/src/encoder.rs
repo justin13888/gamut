@@ -122,7 +122,11 @@ fn av1c_record(c: &Av1StillConfig) -> [u8; 4] {
 /// Wraps the encoded AV1 temporal unit in the AVIF container, stamping `av1C`/`colr`/`ispe`/`pixi`
 /// from the AV1 configuration so the cross-box consistency requirements hold by construction
 /// (AVIF v1.2.0 §2.2, AV1-ISOBMFF v1.3.0 §2.3.4).
-fn build_avif(still: &EncodedStill, dims: Dimensions, transform: ImageTransform) -> Vec<u8> {
+fn build_avif(
+    still: &EncodedStill,
+    dims: Dimensions,
+    transform: ImageTransform,
+) -> Result<Vec<u8>> {
     let c = &still.config;
     // av1C is essential; ispe/pixi/colr are descriptive. Order fixes the ipco/ipma indices.
     let mut properties = vec![
@@ -178,9 +182,14 @@ fn build_avif(still: &EncodedStill, dims: Dimensions, transform: ImageTransform)
             id: 1,
             item_type: *b"av01",
             name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            references: vec![],
             properties,
             payload: still.obus.clone(),
         }],
+        groups: vec![],
     };
     write(&image)
 }
@@ -206,7 +215,7 @@ impl EncodeImage<Rgb8> for AvifEncoder {
             AvifMode::Lossy => quality_to_quant(self.config.quality),
         };
         let still = encode_still_intra(&planes, base_q_idx)?.0;
-        let file = build_avif(&still, dims, self.transform);
+        let file = build_avif(&still, dims, self.transform)?;
         out.extend_from_slice(&file);
         Ok(file.len())
     }
