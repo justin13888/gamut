@@ -73,10 +73,11 @@ jobs:
           install: false
       - uses: mymindstorm/setup-emsdk@v14
         with:
-          # Matches the emsdk rustc's prebuilt wasm32-unknown-emscripten std is built with
-          # (rust-lang/rust PR #131533), keeping the C++ and Rust halves of the ABI in lockstep.
-          # Bump together with the toolchain if the target's std ever moves to a newer emsdk.
-          version: 3.1.68
+          # rustc's own CI builds this target's std with `emsdk install latest`, so any recent
+          # emsdk matches; too-old emsdks fail at link time (3.1.68's wasm-opt predates the
+          # `--enable-bulk-memory-opt` flag rustc 1.97 emits). 6.0.2 is the verified pin — bump
+          # it together with toolchain updates rather than floating `latest` in CI.
+          version: 6.0.2
           actions-cache-folder: emsdk-cache
       - name: Clear pre-installed Rust toolchain
         # Same rustup `bin/cargo-fmt` reinstall-conflict guard as ci.yml's check job.

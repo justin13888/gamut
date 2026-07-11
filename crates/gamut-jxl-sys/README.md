@@ -46,7 +46,12 @@ does this crate — but only for the Rust target that shares emscripten's toolch
   targets) with `JPEGXL_ENABLE_WASM_THREADS=OFF`, and links `jxl`/`jxl_cms`/`hwy`/`brotli*`
   statically. Requires an installed and activated emsdk (`emcc` on `PATH`); rustc performs the
   final link through `emcc`, which supplies libc++. `GAMUT_JXL_SYS_LIBJXL_DIR` overrides where the
-  vendored libjxl tree is found (useful for `cargo vendor` layouts).
+  vendored libjxl tree is found (useful for `cargo vendor` layouts). Two link-time notes for
+  consumers: use a **recent emsdk** (rustc's CI builds this target's std with `emsdk install
+  latest`; old emsdks fail at link — 3.1.68's wasm-opt predates flags rustc 1.97 emits), and link
+  final binaries with **`-C link-arg=-sALLOW_MEMORY_GROWTH=1`** — rustc's default emscripten link
+  uses a fixed 16 MiB heap with `-sABORTING_MALLOC=0`, so large libjxl allocations (e.g. brotli in
+  the JPEG-recompression path) would otherwise get a NULL malloc and kill the process.
 - **`wasm32-unknown-unknown`** (the wasm-bindgen/browser target) — **not possible**: no C/C++
   toolchain emits archives for that ABI (no C runtime, no libc++), so there is nothing a build
   system could do differently. The build skips the native step unconditionally there, and

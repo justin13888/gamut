@@ -37,12 +37,15 @@
 //! # WebAssembly
 //!
 //! On **`wasm32-unknown-emscripten`** the build drives the same vendored libjxl through the emsdk
-//! toolchain (requires `emcc` on `PATH`; libjxl officially supports wasm via emscripten), so the
-//! full encoder works there. On every other `wasm32` target (`wasm32-unknown-unknown`,
-//! `wasm32-wasip*`) the native build is skipped unconditionally: no C/C++ toolchain can produce
-//! archives linkable into those ABIs — an upstream toolchain boundary, not a build-system gap —
-//! and `gamut-jxl` compiles its encoder out there. `GAMUT_JXL_SYS_LIBJXL_DIR` overrides where the
-//! emscripten lane finds the vendored libjxl source (for `cargo vendor` layouts).
+//! toolchain (requires a recent `emcc` on `PATH`; libjxl officially supports wasm via
+//! emscripten), so the full encoder works there. Final binaries should link with
+//! `-C link-arg=-sALLOW_MEMORY_GROWTH=1`: rustc's default fixed 16 MiB emscripten heap (with
+//! `-sABORTING_MALLOC=0`) is too small for libjxl's larger allocations. On every other `wasm32`
+//! target (`wasm32-unknown-unknown`, `wasm32-wasip*`) the native build is skipped
+//! unconditionally: no C/C++ toolchain can produce archives linkable into those ABIs — an
+//! upstream toolchain boundary, not a build-system gap — and `gamut-jxl` compiles its encoder out
+//! there. `GAMUT_JXL_SYS_LIBJXL_DIR` overrides where the emscripten lane finds the vendored
+//! libjxl source (for `cargo vendor` layouts).
 //!
 //! # Licensing
 //!

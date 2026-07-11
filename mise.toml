@@ -82,14 +82,20 @@ GAMUT_JXL_SYS_SKIP_NATIVE=1 cargo check --workspace --exclude gamut-cli --all-fe
 
 # The JPEG XL wasm *test* lane: unlike `check-cross` this genuinely builds libjxl with the emsdk
 # toolchain and runs the full gamut-jxl differential suite (pure-Rust jxl-rs decode vs the
-# wasm-built libjxl oracle) under node. Needs an installed AND activated emsdk (`emcc` on PATH) —
-# pin the emsdk that matches rustc's prebuilt std for the target (3.1.68, per rust-lang/rust
-# PR #131533) to keep the ABIs in lockstep; CI uses mymindstorm/setup-emsdk with that pin.
+# wasm-built libjxl oracle) under node. Needs an installed AND activated emsdk (`emcc` on PATH).
+# emsdk version: a recent release is required — rustc's own CI builds the target's std with
+# `emsdk install latest`, and old emsdks fail at link time (e.g. 3.1.68's wasm-opt predates the
+# `--enable-bulk-memory-opt` feature flag rustc 1.97 emits). CI pins 6.0.2 (verified); bump it
+# together with toolchain updates.
+# -sALLOW_MEMORY_GROWTH=1: rustc's default emscripten link uses a fixed 16 MiB heap and passes
+# -sABORTING_MALLOC=0, so a large libjxl allocation (brotli in the jbrd path) gets a NULL malloc
+# and kills the process; growable memory is how libjxl's own wasm builds run.
 [tasks.test-jxl-wasm]
 description = "Build and run the JPEG XL crates' tests on wasm32-unknown-emscripten (needs emsdk's emcc + node on PATH)"
 run = """
 command -v emcc >/dev/null || { echo "emcc not found: install and activate emsdk first (https://emscripten.org)"; exit 1; }
 rustup target add wasm32-unknown-emscripten
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUSTFLAGS="-C link-arg=-sALLOW_MEMORY_GROWTH=1" \
 CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUNNER=node \
 cargo test -p gamut-jxl-sys -p gamut-jxl --all-features --target wasm32-unknown-emscripten
 """
