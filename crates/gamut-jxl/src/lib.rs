@@ -29,9 +29,34 @@
 //! image back as grayscale. Requires the `decode` feature (on by default; available everywhere,
 //! `wasm32` included).
 //!
+//! # Example: lossless round-trip
+//!
+//! With the default features (`encode` + `decode`), a lossless stream decodes back bit-exact. The
+//! example needs both codec halves, so it is compiled and run only where they are present — the
+//! `cargo test --doc` environment on a non-`wasm32` host:
+//!
+//! ```
+//! use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
+//! use gamut_jxl::{JxlDecoder, JxlEncoder};
+//!
+//! // A 4×4 8-bit RGB test image.
+//! let dims = Dimensions { width: 4, height: 4 };
+//! let pixels: Vec<u8> = (0..4 * 4 * 3).map(|i| i as u8).collect();
+//! let image = ImageRef::<Rgb8>::new(&pixels, dims)?;
+//!
+//! // Lossless encode, then decode straight back to the same layout.
+//! let stream = JxlEncoder::lossless().encode_to_vec(image)?;
+//! let decoded: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(&stream)?;
+//!
+//! // Lossless output is bit-exact to the input.
+//! assert_eq!(decoded.dimensions(), dims);
+//! assert_eq!(decoded.as_samples(), pixels.as_slice());
+//! # Ok::<(), gamut_core::Error>(())
+//! ```
+//!
 //! # Safety and portability
 //!
-//! The crate is `#![deny(unsafe_code)]`; all `unsafe` is confined to the single [`ffi`] module that
+//! The crate is `#![deny(unsafe_code)]`; all `unsafe` is confined to the single `ffi` module that
 //! drives libjxl (hence `deny` rather than `forbid`). The decoder is 100% safe Rust. Because the
 //! native libjxl build is unavailable on `wasm32`, the encoder is compiled in only for
 //! `all(feature = "encode", not(target_arch = "wasm32"))`; the decoder has no such restriction, so

@@ -25,7 +25,10 @@ implementation wins.
   targets that libaom makes miserable — one toolchain, reproducible builds, no system-library
   version skew. CI proves it each merge: the [Extended workflow](.github/workflows/extended.yml)
   `cargo check`s the library surface for `wasm32-unknown-unknown`, `aarch64-unknown-linux-gnu`,
-  and `x86_64-unknown-linux-musl`.
+  and `x86_64-unknown-linux-musl`. The one deliberate exception is `gamut-jxl`'s optional
+  `encode` feature, which statically builds the libjxl reference encoder (cmake + a C++ toolchain
+  at build time) — a maintainer-approved departure documented in that crate; its pure-Rust
+  `decode` feature keeps JPEG XL C-free and `wasm32`-clean.
 
 - **WASM as a first-class target, not an afterthought.** The C codecs run through Emscripten
   come out large, slow to instantiate, and awkward to tree-shake. A native Rust → wasm build
@@ -34,8 +37,10 @@ implementation wins.
   blob.
 
 - **A genuinely clean license story.** gamut deliberately targets royalty-free formats and
-  ships under MIT OR Apache-2.0 — no GPL/LGPL reach, no vendored-code license soup, no
-  static-linking exceptions to reason about. Patent-unencumbered formats deserve
+  ships under MIT OR Apache-2.0 — no GPL/LGPL reach. The lone static-linking case is
+  `gamut-jxl`'s optional `encode` feature (the BSD-3-Clause libjxl reference encoder plus its
+  permissively-licensed bundled libraries — highway, brotli, skcms); every other codec, and a
+  decode-only JPEG XL build, links no C at all. Patent-unencumbered formats deserve
   permissively-licensed code to match.
 
 - **Encoder-first, size-first — the gap the Rust ecosystem actually has.** Most Rust imaging
@@ -62,9 +67,11 @@ In 2026, `gamut` started when there were no robust, well-tested Rust implementat
 ### Scope
 
 The initial focus is **AVIF, WebP, and JPEG** — the formats with the best
-size-versus-compatibility tradeoff today. JPEG XL is intentionally out of scope for now (it
-is better served by a dedicated effort). The other format crates in the tree (HEIC, VVC,
-AV2, JXL) are scaffolding, and may move or be dropped as the focus sharpens. **TIFF 6.0**
+size-versus-compatibility tradeoff today. **JPEG XL** (`gamut-jxl`) is now implemented as an
+encoder + decoder (issue #243) — uniquely, by wrapping the format's reference implementations
+(libjxl for encode, the pure-Rust jxl-rs for decode) rather than clean-slate, a deliberate
+maintainer decision documented in that crate. The other format crates in the tree (HEIC, VVC,
+AV2) are scaffolding, and may move or be dropped as the focus sharpens. **TIFF 6.0**
 (`gamut-tiff`) is newly scaffolded and under active implementation (issue #107) as a
 royalty-free, natively still-image format — a good long-term fit for the image-first focus.
 
@@ -109,7 +116,8 @@ format.
 | `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF   | implemented lossless and lossy (alpha) |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
 | `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                | stabilizing with gamut-av1             |
-| `gamut-jxl`       | JPEG XL encoder/decoder                                                | placeholder                            |
+| `gamut-jxl`       | JPEG XL encoder (libjxl wrap) + decoder (pure-Rust jxl-rs)             | encoder + decoder (v1, #243)           |
+| `gamut-jxl-sys`   | Static libjxl 0.12.0 FFI declarations — native core of gamut-jxl encode | encoder backend (v1, #243)             |
 | `gamut-webp`      | WebP (intra-frame VP8/VP8L) encoder/decoder                            | implemented VP8 + VP8L (+alpha)        |
 | `gamut-heic`      | HEIC/HEIF still-image (HEVC intra) encoder/decoder                     | placeholder                            |
 | `gamut-vvc`       | VVC (H.266) still-image (intra) encoder/decoder                        | placeholder                            |
@@ -145,7 +153,11 @@ All cargo metadata except per-crate `version` is centralized in the root
   the git hooks and mise tasks invoke them directly.
 
 Building the **shipped crates** needs only the Rust toolchain — they are pure Rust with no C
-dependencies. Building the **cross-check tests** additionally needs a C toolchain plus
+dependencies, with one deliberate exception: `gamut-jxl`'s optional `encode` feature statically
+builds the libjxl reference encoder via `gamut-jxl-sys`, which needs **cmake and a C++ toolchain**
+at build time (a maintainer-approved departure for JPEG XL; its `decode` feature stays pure Rust,
+and `wasm32` gets a decode-only JXL). Building the **cross-check tests** additionally needs a C
+toolchain plus
 pkg-config — the one build dep that stays a system package (CMake, Ninja and Meson come from
 mise; [nasm](https://www.nasm.us), needed to assemble the aom/dav1d x86 SIMD, is built from a
 vendored source tarball by the oracle build scripts, so it is not a system dependency). Those

@@ -28,7 +28,15 @@ Dependency edges (a crate depends on those to its right):
   operators) for HDR→SDR pipelines; sits between `gamut-color`'s transfer functions (linearize)
   and the target SDR re-encode. ← core.
 - **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core, bitstream.
-- **gamut-av1** / **gamut-av2** / **gamut-jxl** / **gamut-vvc** -- codecs. ← core, color, dsp, bitstream.
+- **gamut-av1** / **gamut-av2** / **gamut-vvc** -- codecs. ← core, color, dsp, bitstream.
+- **gamut-jxl** -- JPEG XL codec, uniquely a **wrapper** over the format's reference implementations
+  rather than clean-slate (maintainer-approved departure from the pure-Rust rule, issue #243): encode
+  wraps **libjxl 0.12.0** (statically, via `gamut-jxl-sys`; target-gated **off wasm32**), decode wraps
+  the pure-Rust external `jxl` crate (jxl-rs). ← core, gamut-jxl-sys (encode, non-wasm), external `jxl`.
+- **gamut-jxl-sys** -- declarations-only (no fn bodies) `-sys` crate that statically builds and links
+  **libjxl 0.12.0** via the BSD-3-Clause `jpegxl-src` (`links = "jxl"`); the native backend for
+  gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only); build honors
+  `GAMUT_JXL_SYS_SKIP_NATIVE=1` to skip cmake for check-only (cross/MSRV) jobs.
 - **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff. **gamut-heic** ← isobmff, core, color.
 - **gamut-ifd** -- TIFF/IFD container core (byte order, field types, IFD read/write); a low-level
   container primitive (sibling to bitstream), shared by the `gamut-tiff` codec (issue #107) and EXIF
@@ -77,7 +85,10 @@ mise run check-msrv    # compile on the documented MSRV; extended CI, master/man
 mise run check-commits # commit messages are Conventional Commits
 ```
 
-The shipped crates are pure Rust, but the cross-check tests link reference codecs
+The shipped crates are pure Rust — with one deliberate, maintainer-approved exception:
+`gamut-jxl`'s `encode` feature statically builds the libjxl reference encoder (cmake + a C++
+toolchain at build time; `wasm32` gets a decode-only JXL) via the `gamut-jxl-sys` crate. Beyond
+that, the cross-check tests link reference codecs
 (libaom, dav1d, libavif, libtiff) built from the `third_party/` git submodules via the dev-only
 oracle crates in `tooling/`. libaom — the AV1 reference codec — is the definitive AVIF/AV1
 oracle; see [`references/av1`](references/av1/README.md). Running the tests therefore needs the
