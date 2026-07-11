@@ -34,6 +34,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Cache target/ and the cargo registry: gamut-jxl-sys's cold libjxl cmake build is ~3-6 min,
+      # and the vendored C oracles are expensive too. Precedent: mutants.yml. (Same as the coverage job.)
+      - uses: Swatinem/rust-cache@v2
       # fmt/lint/test go through the shared mise tasks (single source of truth with the
       # git hooks). `mise run fmt-check` self-installs the nightly rustfmt it needs.
       - name: Format check
@@ -61,10 +64,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+      # Cache target/ and the cargo registry (gamut-jxl-sys's cold libjxl cmake build is ~3-6 min).
+      # Precedent: mutants.yml. (Same as the check job.)
+      - uses: Swatinem/rust-cache@v2
       - name: Generate coverage report
         run: >-
           cargo llvm-cov --workspace --all-features
-          --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi)|tooling)/'
+          --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi|jxl-sys)|tooling)/'
           --lcov --output-path lcov.info --fail-under-lines 80
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only

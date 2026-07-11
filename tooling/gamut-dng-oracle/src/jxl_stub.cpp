@@ -9,6 +9,13 @@
 // C linkage means the linker resolves these by name alone; the trivial signatures below need not
 // match the real libjxl prototypes (the functions are never invoked). If the SDK is updated and
 // references a new symbol, the linker will name it and it can be added here.
+//
+// HAZARD: these define the same C symbols (JxlDecoderCreate, JxlEncoderProcessOutput, …) that the
+// real libjxl in the shipped `gamut-jxl-sys` crate exports. This oracle is a dev-only crate for
+// gamut-dng and never links gamut-jxl, so today there is no conflict. But if gamut-dng ever depends
+// on gamut-jxl (or a single test binary links both this oracle and gamut-jxl-sys), these stubs would
+// clash with the genuine libjxl symbols — a duplicate-definition link error. Gate them behind a cfg
+// or drop them in favour of the real libjxl if that day comes.
 
 extern "C" {
 

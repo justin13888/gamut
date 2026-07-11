@@ -18,6 +18,12 @@ exclude_globs = [
     "crates/gamut-cli/**",
     "crates/gamut-wasm/**",
     "crates/gamut-ffi/**",
+    # gamut-jxl-sys is declarations-only (hand-written `#[repr(C)]` types + `unsafe extern "C"`
+    # signatures for libjxl, no function bodies), so it produces no meaningful mutants; its
+    # correctness is a faithful transcription pinned by the `tests/version.rs` drift guard, not
+    # behaviour cargo-mutants can exercise. Excluded like the binding/binary crates (matches the
+    # coverage gate's --ignore-filename-regex).
+    "crates/gamut-jxl-sys/**",
     "tooling/**",
 ]
 

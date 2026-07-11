@@ -1,0 +1,31 @@
+[package]
+name = "gamut-jxl-sys"
+description = "Static build of and hand-written FFI declarations for the reference libjxl, powering gamut-jxl's JPEG XL encoder."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+# Declares that this crate provides the native `jxl` library, so Cargo links it exactly once and
+# rejects a second crate claiming the same native lib. This crate is the sole native-jxl provider in
+# the workspace; the name collides with the third-party `jpegxl-sys` crate if a downstream user pulls
+# in both — documented in README.md.
+links = "jxl"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+# BSD-3-Clause. Vendors the full libjxl v0.12.0 source (including highway, brotli and skcms) inside
+# the published package and performs a hermetic, static-only cmake build entirely under `OUT_DIR`
+# (bundled skcms, no lcms2). Pinned *exactly* because `src/*.rs` transcribes the vendored libjxl's
+# headers field-for-field: a drift would silently break the ABI — any bump must re-verify every
+# declaration (the tests/version.rs pin fails loudly otherwise). Requires Rust 1.92, which is the
+# workspace MSRV (the MSRV was raised to 1.92 for exactly this and the jxl decoder crate). See
+# README.md for the licensing notice and the GAMUT_JXL_SYS_SKIP_NATIVE escape hatch.
+jpegxl-src = "=0.12.0"

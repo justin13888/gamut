@@ -3,9 +3,12 @@ resolver = "3"
 members = ["crates/*"]
 # Dev-only differential oracles that statically link vendored C codecs (libaom, libdav1d,
 # libavif) from `third_party/` submodules. Excluded from the workspace so a plain
-# `cargo build` of the shipped crates never needs a C toolchain — they are pulled in
+# `cargo build` of the shipped crates does not build them — they are pulled in
 # only as path `dev-dependencies` when building the cross-check tests. See their
 # manifests under `tooling/`.
+# NB: the shipped crates are otherwise pure Rust with one exception — `gamut-jxl-sys` (a workspace
+# member) statically builds libjxl via cmake, so a workspace `cargo build`/`test` needs cmake + a
+# C++ toolchain (skippable for `cargo check` with GAMUT_JXL_SYS_SKIP_NATIVE=1; see its README).
 exclude = [
     "tooling/aom-oracle",
     "tooling/dav1d-oracle",
@@ -87,6 +90,9 @@ gamut-av1 = { path = "crates/gamut-av1", version = "0.3.0" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.1" }
 gamut-avif = { path = "crates/gamut-avif", version = "0.3.0" }
 gamut-jxl = { path = "crates/gamut-jxl", version = "0.2.0" }
+# Static libjxl build + hand-written FFI for gamut-jxl's encoder. Unlike every other shipped crate,
+# building this one runs cmake to compile libjxl (see its README); `links = "jxl"`.
+gamut-jxl-sys = { path = "crates/gamut-jxl-sys", version = "0.1.0" }
 gamut-webp = { path = "crates/gamut-webp", version = "0.2.0" }
 gamut-heic = { path = "crates/gamut-heic", version = "0.2.0" }
 gamut-vvc = { path = "crates/gamut-vvc", version = "0.2.0" }
