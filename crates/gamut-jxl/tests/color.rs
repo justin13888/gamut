@@ -242,6 +242,35 @@ fn truncated_icc_is_rejected() {
 }
 
 #[test]
+fn decoder_surfaces_the_embedded_icc_profile() {
+    let icc = srgb_icc();
+    let jxl = encode_rgb8(ColorSpec::Icc(icc.clone()));
+    let embedded = JxlDecoder::new()
+        .embedded_icc_profile(&jxl)
+        .expect("metadata parse failed")
+        .expect("an ICC stream must surface its profile");
+    assert_eq!(
+        embedded, icc,
+        "surfaced ICC bytes must match what was attached"
+    );
+}
+
+#[test]
+fn decoder_reports_no_embedded_icc_for_structured_encodings() {
+    // Structured encodings (sRGB, PQ, ...) carry no profile bytes: `None`, not a synthesized ICC.
+    for color in [ColorSpec::Srgb, ColorSpec::Pq] {
+        let jxl = encode_rgb8(color.clone());
+        assert_eq!(
+            JxlDecoder::new()
+                .embedded_icc_profile(&jxl)
+                .expect("metadata parse failed"),
+            None,
+            "{color:?} must not report an embedded ICC profile"
+        );
+    }
+}
+
+#[test]
 fn lossy_pq_encodes_and_decodes() {
     // Lossy (XYB) with an HDR transfer signalled: libjxl converts through its built-in CMS on
     // encode, and jxl-rs renders back to the embedded PQ encoding on decode.
