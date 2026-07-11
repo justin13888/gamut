@@ -25,9 +25,13 @@ Two independent halves, each gated behind its own Cargo feature:
   decoder, BSD-3-Clause). It needs no C toolchain and compiles for every target, `wasm32`
   included.
 
-The two are wired so the crate degrades gracefully by target: the encoder is compiled in only for
-`all(feature = "encode", not(target_arch = "wasm32"))`, so on `wasm32` the crate builds as a
-**decode-only** codec with zero cmake in the build graph.
+The two are wired so the crate degrades gracefully by target: the encoder is compiled in for
+`all(feature = "encode", any(not(target_arch = "wasm32"), target_os = "emscripten"))`. On
+**`wasm32-unknown-emscripten`** the full encoder works — libjxl officially supports wasm via
+emscripten, and `gamut-jxl-sys` builds it with the emsdk toolchain. On **`wasm32-unknown-unknown`**
+(the wasm-bindgen/browser target) the crate builds as a **decode-only** codec with zero cmake in
+the build graph — an upstream toolchain boundary (no C/C++ compiler targets that ABI), not a gamut
+workaround.
 
 ## Why a wrapper
 
@@ -103,8 +107,8 @@ libjxl's bit-exact JPEG-reconstruction (jbrd) path; it currently returns `Unsupp
 
 | Feature  | Default | What it pulls in | Toolchain / targets |
 | -------- | ------- | ---------------- | ------------------- |
-| `encode` | yes | `gamut-jxl-sys` → static **libjxl 0.12.0** FFI | needs **cmake + a C++ toolchain**; target-gated **off `wasm32`** (inert there, not a build error) |
-| `decode` | yes | the pure-Rust `jxl` crate (jxl-rs) | pure safe Rust; builds **everywhere**, `wasm32` included |
+| `encode` | yes | `gamut-jxl-sys` → static **libjxl 0.12.0** FFI | needs **cmake + a C++ toolchain** (emsdk on `wasm32-unknown-emscripten`); inert — not a build error — on other `wasm32` targets |
+| `decode` | yes | the pure-Rust `jxl` crate (jxl-rs) | pure safe Rust; builds **everywhere**, every `wasm32` target included |
 
 For a C-toolchain-free build — a pure-Rust decoder, e.g. for `wasm32` or CI without cmake — depend
 with `default-features = false, features = ["decode"]`. On `wasm32` the encoder is compiled out

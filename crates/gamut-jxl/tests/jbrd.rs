@@ -11,7 +11,11 @@
 //!
 //! Uses both codec halves (gamut encodes with libjxl, decodes with jxl-rs); compiled only when both
 //! are available.
-#![cfg(all(feature = "encode", feature = "decode", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "encode",
+    feature = "decode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 
 mod common;
 

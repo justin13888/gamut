@@ -9,7 +9,11 @@
 //! `oracle.rs`/`roundtrip.rs` are referenced there, not duplicated here.
 //!
 //! Uses both codec halves and the libjxl oracle, so it is compiled only when both are available.
-#![cfg(all(feature = "encode", feature = "decode", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "encode",
+    feature = "decode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 
 mod common;
 

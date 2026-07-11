@@ -9,7 +9,9 @@ crate [README](README.md#why-a-wrapper).
 **Architecture:** encode wraps **libjxl v0.12.0** (statically linked via
 [`gamut-jxl-sys`](../gamut-jxl-sys); source vendored by the BSD-3-Clause `jpegxl-src = "=0.12.0"`,
 bundled skcms, no lcms2); decode wraps the pure-Rust [`jxl` crate v0.4.3](https://crates.io/crates/jxl)
-(jxl-rs). The encoder is target-gated off `wasm32`, where the crate becomes decode-only.
+(jxl-rs). The encoder is available on all targets except `wasm32` without emscripten:
+`wasm32-unknown-emscripten` links the emsdk-built libjxl (full encoder), while
+`wasm32-unknown-unknown`/`wasm32-wasip*` are decode-only — no C/C++ toolchain targets those ABIs.
 
 **Oracle:** libjxl v0.12.0 is both the encode core and the decode **oracle** — the same static
 archive exposes a decode surface (via `gamut-jxl-sys`) that the differential tests cross-check the

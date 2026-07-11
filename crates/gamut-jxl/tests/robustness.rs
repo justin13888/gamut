@@ -7,7 +7,7 @@
 //!
 //! The file itself needs only the decoder, so it is gated on `decode`; the parts that first *produce*
 //! a valid stream to mangle need the libjxl-backed encoder and so are gated additionally on
-//! `all(feature = "encode", not(target_arch = "wasm32"))`, exactly like the other differential tests.
+//! `all(feature = "encode", any(not(target_arch = "wasm32"), target_os = "emscripten"))`, exactly like the other differential tests.
 #![cfg(feature = "decode")]
 
 use gamut_core::{DecodeImage, Error, Rgba8};
@@ -15,7 +15,10 @@ use gamut_jxl::JxlDecoder;
 
 // Only the stream-producing corpus needs the shared helpers (and the libjxl-backed encoder they use),
 // so the module is pulled in under the same gate. `mod common;` here resolves to `tests/common/mod.rs`.
-#[cfg(all(feature = "encode", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 mod common;
 
 /// Decodes `data` as `Rgba8` — the widest natural request, so the internal conversion paths (alpha
@@ -68,7 +71,10 @@ fn signatures_followed_by_garbage_error() {
 
 /// The stream-producing corpus: everything that first encodes a real JPEG XL stream (via libjxl) and
 /// then feeds a mangled version of it to the decoder.
-#[cfg(all(feature = "encode", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 mod with_streams {
     use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8};
     use gamut_jxl::{Container, Effort, JxlEncoder};

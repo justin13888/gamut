@@ -8,7 +8,10 @@
 //! The module has two independently feature-gated halves: [`map_encoder_error`] (libjxl statuses,
 //! `encode`) and [`map_decode_error`] (jxl-rs errors, `decode`).
 
-#[cfg(all(feature = "encode", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 mod encode {
     use gamut_core::Error;
     use gamut_jxl_sys::encode::JxlEncoderError;
@@ -104,7 +107,10 @@ mod encode {
     }
 }
 
-#[cfg(all(feature = "encode", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 pub(crate) use encode::map_encoder_error;
 
 #[cfg(feature = "decode")]

@@ -9,7 +9,11 @@
 //! - signalling [`Orientation::Identity`] is byte-identical to not signalling anything.
 //!
 //! Uses both codec halves; compiled only when both are available.
-#![cfg(all(feature = "encode", feature = "decode", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "encode",
+    feature = "decode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 
 mod common;
 
