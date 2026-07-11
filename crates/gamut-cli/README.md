@@ -35,8 +35,15 @@ gamut convert input.png output.avif
 gamut convert input.png output.webp
 gamut convert input.png output.webp --lossy --quality 80
 
-# Read WebP back and transcode it — decoded by gamut's own WebP decoder, no third-party lib.
+# Encode JPEG XL: lossless by default, or lossy with --jxl-distance (~1.0 = visually lossless).
+# --jxl-effort 1..=10 tunes speed vs density; --jxl-container emits the ISO BMFF .jxl box format.
+gamut convert input.png output.jxl
+gamut convert input.png output.jxl --jxl-distance 1.0 --jxl-effort 7
+gamut convert input.png output.jxl --jxl-container
+
+# Read WebP or JPEG XL back and transcode it — decoded by gamut's own decoders, no third-party lib.
 gamut convert output.webp roundtrip.avif
+gamut convert output.jxl roundtrip.png
 
 # Encode a raw AV1 OBU temporal unit you can hand to a decoder.
 gamut av1 encode input.ppm output.obu
@@ -59,25 +66,28 @@ gamut -vv convert input.jpg output.avif
 
 The sandbox exposes:
 
-- `convert` — decode PNG/JPEG/PPM/WebP and encode to a gamut codec:
+- `convert` — decode PNG/JPEG/PPM/WebP/JXL and encode to a gamut codec:
   - **AVIF** — lossless (default) or lossy intra via `--qindex` (8-bit RGB).
   - **WebP** — lossless VP8L (default) or lossy VP8 via `--lossy --quality`, with transparency
     preserved; emits a simple file when fully opaque and an extended (`VP8X`/`ALPH`) file otherwise.
+  - **JPEG XL** — lossless (default) or lossy via `--jxl-distance`, with `--jxl-effort` (1–10) and
+    `--jxl-container` (ISO BMFF); transparency preserved. Encoded via libjxl; the `.jxl` input path
+    decodes through the pure-Rust jxl-rs backend.
 - `av1 encode` — raw AV1 OBU still images from 8-bit RGB input.
 - `color list`, `dsp wht`, `bitstream leb128` — inspection of the shared primitives.
 
 Output is always encoded by gamut crates. Input decoding uses the `image` crate for PNG/JPEG/PPM,
-while **WebP input is decoded by gamut's own decoder** — so a WebP round-trip (`png → webp → avif`)
-runs entirely in-tool. AVIF/AV1 output still has no in-workspace decoder, so verify it externally
-(`avifdec` / `dav1d`). `avif` and `webp` are the supported output formats; `convert` reports a clear
-error for anything else.
+while **WebP and JPEG XL input are decoded by gamut's own decoders** — so a WebP or JXL round-trip
+(`png → webp → avif`, `png → jxl → png`) runs entirely in-tool. AVIF/AV1 output still has no
+in-workspace decoder, so verify it externally (`avifdec` / `dav1d`). `avif`, `webp`, `tiff`, `png`,
+and `jxl` are the supported output formats; `convert` reports a clear error for anything else.
 
 ## Roadmap
 
 As the codecs grow, so does the sandbox: an in-tool AVIF/AV1 decode path once a gamut AV1 decoder
-exists (WebP already decodes), an explicit `info`/decode-to-pixels command, more output formats as
-`gamut-jxl`/etc. fill in, and a subcommand for each new primitive (e.g. the `gamut-bitstream` symbol
-coder).
+exists (WebP and JPEG XL already decode), an explicit `info`/decode-to-pixels command, more output
+formats as the codecs fill in, and a subcommand for each new primitive (e.g. the `gamut-bitstream`
+symbol coder).
 
 ## License
 

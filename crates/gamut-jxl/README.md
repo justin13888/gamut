@@ -1,37 +1,150 @@
 # gamut-jxl
 
-`gamut-jxl` is a pure-Rust JPEG XL (JXL) image encoder.
+`gamut-jxl` is a memory-safe **JPEG XL (JXL) encoder and decoder**: give it pixels, get a `.jxl`
+stream; give it a `.jxl` stream, get pixels back.
 
-## Goals
+It is the one crate in the [gamut](../../README.md) workspace that is **not** a clean-slate,
+pure-Rust codec. JPEG XL is a large, evolving ISO/IEC 18181 standard with no reference-quality Rust
+*encoder*, so gamut-jxl is a thin, safe layer over the format's own reference implementations —
+libjxl for encode, jxl-rs for decode — rather than a from-scratch bitstream implementation. The
+departure is deliberate and maintainer-confirmed; see [Why a wrapper](#why-a-wrapper) below.
 
-Part of the [gamut](../../README.md) workspace, this crate exists to provide JPEG XL **encoding**
-that is:
+## Architecture
 
-- **Memory-safe on hostile input.** `#![forbid(unsafe_code)]`.
-- **Clean-slate from the spec.** Implemented directly from the JPEG XL specification (see
-  [`../../references/`](../../references)) rather than wrapping libjxl.
-- **Layered on shared crates.** It will build on [`gamut-color`](../gamut-color),
-  [`gamut-dsp`](../gamut-dsp), and [`gamut-bitstream`](../gamut-bitstream) (which will grow the ANS
-  entropy coder JXL needs).
-- **Permissively licensed**, matching the royalty-free JPEG XL format.
+Two independent halves, each gated behind its own Cargo feature:
 
-Note: JPEG XL is intentionally **out of scope for now** — the workspace's initial focus is AVIF,
-WebP, and JPEG (see the workspace README's "Scope"). This crate is scaffolding and may move or be
-dropped; a dedicated effort is likely a better home for a full JXL encoder.
+- **Encode — the reference libjxl.** The `encode` feature wraps **libjxl v0.12.0**, the ISO/IEC
+  18181 reference implementation (C++, BSD-3-Clause), statically linked through the
+  [`gamut-jxl-sys`](../gamut-jxl-sys) `-sys` crate. libjxl's source is vendored and cmake-built by
+  the BSD-3-Clause [`jpegxl-src`](https://crates.io/crates/jpegxl-src) crate (pinned `=0.12.0`),
+  which bundles highway, brotli and **skcms** — so there is no lcms2 and no dynamic codec
+  dependency beyond the platform C++ runtime (`libstdc++`/`libc++`). Building `encode` therefore
+  needs **cmake and a C++ toolchain** at build time.
+- **Decode — pure Rust.** The `decode` feature wraps the pure-Rust
+  [`jxl` crate v0.4.3](https://crates.io/crates/jxl) (jxl-rs, the libjxl organisation's Rust
+  decoder, BSD-3-Clause). It needs no C toolchain and compiles for every target, `wasm32`
+  included.
+
+The two are wired so the crate degrades gracefully by target: the encoder is compiled in only for
+`all(feature = "encode", not(target_arch = "wasm32"))`, so on `wasm32` the crate builds as a
+**decode-only** codec with zero cmake in the build graph.
+
+## Why a wrapper
+
+Every other gamut codec is implemented clean-slate from its spec, precisely so the encode/parse
+path is auditable, forkable, and free of C. gamut-jxl departs from that on a maintainer decision
+(issue [#243](https://github.com/justin13888/gamut/issues/243)) for reasons specific to JPEG XL:
+
+- **A conformant JXL encoder is a multi-year effort.** VarDCT, Modular, the ANS/context-modelling
+  entropy stack, XYB, splines/patches/noise — reproducing libjxl's rate/quality at reference
+  fidelity is not a near-term clean-slate target.
+- **libjxl is the ground truth.** It *is* the ISO/IEC 18181 reference implementation, so wrapping
+  it is the only spec-faithful encode path — and it is BSD-3-Clause, matching gamut's permissive
+  posture (unlike the GPL-3.0 `jpegxl-sys`/`jpegxl-rs` crates, which is why gamut ships its own
+  `-sys` layer).
+- **Safety matters most where untrusted data enters.** The *decoder* is the hostile-input surface —
+  it chews on attacker-controlled bytes — and jxl-rs keeps that path 100% safe Rust. The encoder
+  operates on the caller's own pixels, a far smaller attack surface, so accepting a vetted C++
+  reference there is the right trade.
+
+## Safety
+
+The crate is `#![deny(unsafe_code)]` (not `forbid`, because the FFI needs a single exception): all
+`unsafe` is confined to the one `ffi` module that drives libjxl through `gamut-jxl-sys`, which is
+itself declarations-only (`#[repr(C)]` types and `extern "C"` signatures, no bodies). The **decoder
+path contains no `unsafe` at all** — it is pure safe Rust end to end. So the surface that ingests
+untrusted `.jxl` bytes has the memory-corruption bug class deleted, and the FFI that touches
+libjxl is a small, reviewable island.
 
 ## Usage
 
-No public API yet — implementation pending. It will follow the same shape as
-[`gamut-avif`](../gamut-avif): an encoder type implementing [`gamut_core::EncodeImage`], reachable
-through the umbrella crate's `jxl` feature.
+Encode a lossless stream (the default), decode it straight back:
+
+```rust
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
+use gamut_jxl::{JxlDecoder, JxlEncoder};
+
+let dims = Dimensions { width: 64, height: 64 };
+let pixels: Vec<u8> = vec![0; (64 * 64 * 3) as usize]; // 8-bit interleaved RGB
+let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("buffer length matches dimensions");
+
+// Lossless by default; the decoded image is bit-exact to the input.
+let stream = JxlEncoder::lossless().encode_to_vec(image).expect("encode");
+let decoded: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(&stream).expect("decode");
+assert_eq!(decoded.as_samples(), pixels.as_slice());
+```
+
+Encode a lossy stream with a chosen effort and ISO BMFF container framing:
+
+```rust
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_jxl::{Container, Distance, Effort, JxlEncoder};
+
+let dims = Dimensions { width: 64, height: 64 };
+let pixels = vec![0u8; (64 * 64 * 3) as usize];
+let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("buffer length matches dimensions");
+
+// `Distance::new` validates the Butteraugli target; 1.0 is "visually lossless".
+let encoder = JxlEncoder::lossy(Distance::new(1.0).expect("valid distance"))
+    .with_effort(Effort::Squirrel)       // libjxl effort 1..=10 (default = Squirrel, 7)
+    .with_container(Container::IsoBmff);  // .jxl box framing (default = bare Codestream)
+let stream = encoder.encode_to_vec(image).expect("encode");
+```
+
+`JxlEncoder` implements [`gamut_core::EncodeImage`] and `JxlDecoder` implements
+[`gamut_core::DecodeImage`] for exactly eight pixel layouts — 8- and 16-bit **Gray**, **GrayAlpha**,
+**RGB** and **RGBA** — so handing either an unsupported layout is a compile error. `lossy` takes a
+validated [`Distance`] in `(0.0, 25.0]` (`0.0`, libjxl's lossless sentinel, is deliberately rejected
+so lossless stays a distinct constructor). The `recompress_jpeg` method reserves the API slot for
+libjxl's bit-exact JPEG-reconstruction (jbrd) path; it currently returns `Unsupported` (see
+[STATUS.md](STATUS.md)).
+
+## Features
+
+| Feature  | Default | What it pulls in | Toolchain / targets |
+| -------- | ------- | ---------------- | ------------------- |
+| `encode` | yes | `gamut-jxl-sys` → static **libjxl 0.12.0** FFI | needs **cmake + a C++ toolchain**; target-gated **off `wasm32`** (inert there, not a build error) |
+| `decode` | yes | the pure-Rust `jxl` crate (jxl-rs) | pure safe Rust; builds **everywhere**, `wasm32` included |
+
+For a C-toolchain-free build — a pure-Rust decoder, e.g. for `wasm32` or CI without cmake — depend
+with `default-features = false, features = ["decode"]`. On `wasm32` the encoder is compiled out
+automatically even with `encode` enabled, so the umbrella `gamut` crate's `jxl` feature yields a
+decode-only JXL there by construction.
+
+## Decode policies
+
+The decoder converts between the stream's natural layout and the requested one where that is
+lossless — grayscale expands to RGB, a missing alpha channel is padded opaque, a present-but-unwanted
+alpha is dropped. It refuses to *guess*, returning `Error::Unsupported` rather than fabricating data:
+
+- **Animation** — rejected (gamut is image-first; this is a deliberate policy, additive to relax).
+- **Premultiplied (associated) alpha** — rejected (no un-premultiply is performed).
+- **Colour-as-grayscale** — a colour stream cannot be decoded into a grayscale layout (no luminance
+  is invented).
+
+Oversized streams are bounded by a pixel limit; truncated or malformed input returns a typed
+`Error`, never a panic.
+
+## MSRV
+
+Rust **1.92**, workspace-wide (inherited via `rust-version.workspace = true`; see the root
+[README](../../README.md#minimum-supported-rust-version-msrv)).
+
+## Licensing
+
+gamut-jxl's own source is **MIT OR Apache-2.0** (the workspace default). Building the `encode`
+feature statically links libjxl and its bundled libraries, each under its own permissive licence —
+**libjxl** (BSD-3-Clause), **highway** (Apache-2.0), **brotli** (MIT), **skcms** (BSD-3-Clause) —
+plus the platform C++ runtime. The `decode` feature adds the BSD-3-Clause `jxl` crate. Redistributing
+a binary that links the encoder therefore means honouring those upstream notices; the details live in
+[`gamut-jxl-sys/README.md`](../gamut-jxl-sys/README.md#licensing). A decode-only build
+(`default-features = false, features = ["decode"]`) links no C.
 
 ## Status
 
-Placeholder — implementation pending.
-
-## Roadmap
-
-- Out of scope for the current milestones; revisit once the focus formats (AVIF/WebP/JPEG) mature.
+The v1 surface — supported pixel layouts, lossless/lossy modes, container framing, the differential
+oracle regime, and the full deferred/out-of-scope ledger (including the jxl-rs spec-coverage
+analysis mandated by issue #243) — is dispositioned row by row in [STATUS.md](STATUS.md).
 
 ## License
 

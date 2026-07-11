@@ -74,7 +74,9 @@ run = "cargo clippy --workspace -- -D warnings"
 description = "Cross-compile-check the shipped libraries for a target triple, e.g. `mise run check-cross wasm32-unknown-unknown`"
 run = """
 rustup target add {{arg(name='target')}}
-cargo check --workspace --exclude gamut-cli --all-features --target {{arg(name='target')}}
+# GAMUT_JXL_SYS_SKIP_NATIVE=1: skip gamut-jxl-sys's libjxl cmake build (no cross C++ toolchain here);
+# safe because `cargo check` compiles but never links.
+GAMUT_JXL_SYS_SKIP_NATIVE=1 cargo check --workspace --exclude gamut-cli --all-features --target {{arg(name='target')}}
 """
 
 # The MSRV lives once as the machine value in the root Cargo.toml (`rust-version`); the README is the
@@ -87,7 +89,9 @@ msrv="$(sed -nE 's/^rust-version = "([^"]+)".*/\\1/p' Cargo.toml)"
 test -n "$msrv" || { echo "could not read rust-version from Cargo.toml"; exit 1; }
 grep -qF "$msrv" README.md || { echo "README.md does not document MSRV $msrv"; exit 1; }
 rustup toolchain install "$msrv" --profile minimal
-cargo +"$msrv" check --workspace --exclude gamut-cli --all-features
+# GAMUT_JXL_SYS_SKIP_NATIVE=1: skip gamut-jxl-sys's libjxl cmake build; safe because `cargo check`
+# compiles but never links.
+GAMUT_JXL_SYS_SKIP_NATIVE=1 cargo +"$msrv" check --workspace --exclude gamut-cli --all-features
 """
 
 [tasks.check-commits]
@@ -110,12 +114,12 @@ run = "cargo test --workspace --all-features"
 description = "Run performance benchmarks (Divan; issue #149)"
 run = "cargo bench --workspace"
 
-# Bindings/binary crates (cli, wasm, ffi) and the dev-only `tooling/` oracles are
-# excluded — their entry points are not meaningfully unit-testable and would
-# otherwise skew the gate.
+# Bindings/binary crates (cli, wasm, ffi), the declarations-only `gamut-jxl-sys` FFI crate, and the
+# dev-only `tooling/` oracles are excluded — their entry points are not meaningfully unit-testable
+# (jxl-sys has no function bodies at all) and would otherwise skew the gate.
 [tasks.coverage]
 description = "Run tests with coverage (enforces 80% line coverage)"
-run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi)|tooling)/' --fail-under-lines 80"
+run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi|jxl-sys)|tooling)/' --fail-under-lines 80"
 
 [tasks.mutants]
 description = "Mutation testing, whole workspace; slow (needs submodules + C toolchain)"

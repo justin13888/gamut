@@ -3,9 +3,12 @@ resolver = "3"
 members = ["crates/*"]
 # Dev-only differential oracles that statically link vendored C codecs (libaom, libdav1d,
 # libavif) from `third_party/` submodules. Excluded from the workspace so a plain
-# `cargo build` of the shipped crates never needs a C toolchain — they are pulled in
+# `cargo build` of the shipped crates does not build them — they are pulled in
 # only as path `dev-dependencies` when building the cross-check tests. See their
 # manifests under `tooling/`.
+# NB: the shipped crates are otherwise pure Rust with one exception — `gamut-jxl-sys` (a workspace
+# member) statically builds libjxl via cmake, so a workspace `cargo build`/`test` needs cmake + a
+# C++ toolchain (skippable for `cargo check` with GAMUT_JXL_SYS_SKIP_NATIVE=1; see its README).
 exclude = [
     "tooling/aom-oracle",
     "tooling/dav1d-oracle",
@@ -26,7 +29,7 @@ exclude = [
 [workspace.package]
 # No shared `version`: each crate is versioned independently (see README "Versioning").
 edition = "2024"
-rust-version = "1.88" # MSRV; see README "Minimum Supported Rust Version"
+rust-version = "1.92" # MSRV; see README "Minimum Supported Rust Version"
 authors = ["Justin Chung"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/justin13888/gamut"
@@ -58,6 +61,12 @@ wasm-bindgen = "0.2"
 # Decode-only: gamut-cli reads PNG/JPEG/PPM inputs; all encoding stays in gamut crates.
 # `default-features = false` drops image's own avif/webp decoders and rayon.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "pnm"] }
+# Pure-Rust JPEG XL decoder (jxl-rs) from the libjxl org, BSD-3-Clause. gamut-jxl's decode path
+# wraps it (the crate has no encoder — that is libjxl via gamut-jxl-sys). The default `all-simd`
+# feature is OFF because it enables `avx512`, whose intrinsics need Rust 1.89+ and x86-only
+# nightly-adjacent paths; the listed per-arch features are cfg-gated internally and safe to enable
+# on every target (including wasm32, where they compile out).
+jxl = { version = "0.4.3", default-features = false, features = ["sse42", "avx", "neon"] }
 # libwebp FFI — used ONLY as a dev-dependency oracle in gamut-webp's differential tests, never
 # in shipped code. Handwritten bindings (no bindgen/libclang); statically links bundled libwebp,
 # so the test build needs a C toolchain while the library itself stays C-free.
@@ -87,6 +96,9 @@ gamut-av1 = { path = "crates/gamut-av1", version = "0.3.0" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.1" }
 gamut-avif = { path = "crates/gamut-avif", version = "1.0.0" }
 gamut-jxl = { path = "crates/gamut-jxl", version = "0.2.0" }
+# Static libjxl build + hand-written FFI for gamut-jxl's encoder. Unlike every other shipped crate,
+# building this one runs cmake to compile libjxl (see its README); `links = "jxl"`.
+gamut-jxl-sys = { path = "crates/gamut-jxl-sys", version = "0.1.0" }
 gamut-webp = { path = "crates/gamut-webp", version = "0.2.0" }
 gamut-heic = { path = "crates/gamut-heic", version = "0.2.0" }
 gamut-vvc = { path = "crates/gamut-vvc", version = "0.2.0" }

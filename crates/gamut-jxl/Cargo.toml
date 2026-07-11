@@ -17,6 +17,30 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
-gamut-color.workspace = true
-gamut-dsp.workspace = true
-gamut-bitstream.workspace = true
+
+# The pure-Rust JPEG XL decoder (jxl-rs). Not target-gated: it is 100% safe Rust and compiles for
+# every target, wasm32 included, so the `decode` feature works even where the native encoder cannot
+# build.
+jxl = { workspace = true, optional = true }
+
+# The libjxl-backed encoder. Target-conditional optional dep (the `getrandom` pattern): on wasm32
+# the native cmake/libjxl build is unavailable, so the dep — and therefore the whole encoder — is
+# compiled out there, leaving the crate to grow a pure-Rust decoder for that target.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+gamut-jxl-sys = { workspace = true, optional = true }
+
+# The oracle for the encoder tests: the same static libjxl archive also exposes a decode surface,
+# which the integration tests use to read encoded streams back. Unavailable on wasm32 for the same
+# reason as the dep above.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+gamut-jxl-sys.workspace = true
+
+[features]
+default = ["decode", "encode"]
+# Wraps the reference libjxl (via `gamut-jxl-sys`) to encode JPEG XL. On wasm32 the underlying
+# target-conditional dep is absent, so enabling `encode` is inert there (it pulls in nothing and
+# gates out the encoder modules) rather than a build error.
+encode = ["dep:gamut-jxl-sys"]
+# The pure-Rust JPEG XL decoder wrapping the `jxl` crate (jxl-rs). Pure safe Rust with no native
+# build, so — unlike `encode` — it is available on every target, wasm32 included.
+decode = ["dep:jxl"]
