@@ -74,9 +74,24 @@ run = "cargo clippy --workspace -- -D warnings"
 description = "Cross-compile-check the shipped libraries for a target triple, e.g. `mise run check-cross wasm32-unknown-unknown`"
 run = """
 rustup target add {{arg(name='target')}}
-# GAMUT_JXL_SYS_SKIP_NATIVE=1: skip gamut-jxl-sys's libjxl cmake build (no cross C++ toolchain here);
-# safe because `cargo check` compiles but never links.
+# GAMUT_JXL_SYS_SKIP_NATIVE=1: skip gamut-jxl-sys's libjxl cmake build (no cross C++ toolchain for
+# aarch64/musl here, and no emsdk for the wasm32-unknown-emscripten check row); safe because
+# `cargo check` compiles but never links. wasm32-unknown-unknown skips the native build on its own.
 GAMUT_JXL_SYS_SKIP_NATIVE=1 cargo check --workspace --exclude gamut-cli --all-features --target {{arg(name='target')}}
+"""
+
+# The JPEG XL wasm *test* lane: unlike `check-cross` this genuinely builds libjxl with the emsdk
+# toolchain and runs the full gamut-jxl differential suite (pure-Rust jxl-rs decode vs the
+# wasm-built libjxl oracle) under node. Needs an installed AND activated emsdk (`emcc` on PATH) —
+# pin the emsdk that matches rustc's prebuilt std for the target (3.1.68, per rust-lang/rust
+# PR #131533) to keep the ABIs in lockstep; CI uses mymindstorm/setup-emsdk with that pin.
+[tasks.test-jxl-wasm]
+description = "Build and run the JPEG XL crates' tests on wasm32-unknown-emscripten (needs emsdk's emcc + node on PATH)"
+run = """
+command -v emcc >/dev/null || { echo "emcc not found: install and activate emsdk first (https://emscripten.org)"; exit 1; }
+rustup target add wasm32-unknown-emscripten
+CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_RUNNER=node \
+cargo test -p gamut-jxl-sys -p gamut-jxl --all-features --target wasm32-unknown-emscripten
 """
 
 # The MSRV lives once as the machine value in the root Cargo.toml (`rust-version`); the README is the
