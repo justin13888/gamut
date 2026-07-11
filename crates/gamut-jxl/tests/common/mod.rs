@@ -151,6 +151,75 @@ pub fn decode(data: &[u8]) -> Decoded {
     }
 }
 
+/// Reconstructs the original JPEG codestream from a JPEG XL container carrying `jbrd`
+/// reconstruction metadata, using the reference libjxl decoder.
+///
+/// Drives the `JPEG_RECONSTRUCTION` event: once libjxl reports the reconstruction data, a JPEG
+/// output buffer is attached and grown on `JPEG_NEED_MORE_OUTPUT` until decoding completes; the
+/// written prefix is returned.
+///
+/// # Panics
+///
+/// Panics (with a descriptive message) on any decoder error, or if the stream carries no JPEG
+/// reconstruction data — appropriate for a test oracle.
+pub fn reconstruct_jpeg(data: &[u8]) -> Vec<u8> {
+    let handle = unsafe { dec::JxlDecoderCreate(core::ptr::null()) };
+    assert!(!handle.is_null(), "JxlDecoderCreate returned null");
+    let decoder = Decoder(handle);
+
+    let events = dec::JxlDecoderStatus::JPEG_RECONSTRUCTION.0 | dec::JxlDecoderStatus::FULL_IMAGE.0;
+    let st = unsafe { dec::JxlDecoderSubscribeEvents(decoder.0, events) };
+    assert_eq!(st, dec::JxlDecoderStatus::SUCCESS, "SubscribeEvents failed");
+    let st = unsafe { dec::JxlDecoderSetInput(decoder.0, data.as_ptr(), data.len()) };
+    assert_eq!(st, dec::JxlDecoderStatus::SUCCESS, "SetInput failed");
+    unsafe { dec::JxlDecoderCloseInput(decoder.0) };
+
+    let mut jpeg = vec![0u8; 64 * 1024];
+    let mut buffer_set = false;
+
+    loop {
+        let status = unsafe { dec::JxlDecoderProcessInput(decoder.0) };
+        if status == dec::JxlDecoderStatus::SUCCESS {
+            break;
+        } else if status == dec::JxlDecoderStatus::JPEG_RECONSTRUCTION {
+            let st =
+                unsafe { dec::JxlDecoderSetJPEGBuffer(decoder.0, jpeg.as_mut_ptr(), jpeg.len()) };
+            assert_eq!(st, dec::JxlDecoderStatus::SUCCESS, "SetJPEGBuffer failed");
+            buffer_set = true;
+        } else if status == dec::JxlDecoderStatus::JPEG_NEED_MORE_OUTPUT {
+            // Grow: release to learn how much of the buffer is still unwritten, then re-attach
+            // the enlarged buffer's unwritten tail.
+            let unwritten = unsafe { dec::JxlDecoderReleaseJPEGBuffer(decoder.0) };
+            let written = jpeg.len() - unwritten;
+            jpeg.resize(jpeg.len() * 2, 0);
+            let st = unsafe {
+                dec::JxlDecoderSetJPEGBuffer(
+                    decoder.0,
+                    jpeg.as_mut_ptr().add(written),
+                    jpeg.len() - written,
+                )
+            };
+            assert_eq!(
+                st,
+                dec::JxlDecoderStatus::SUCCESS,
+                "SetJPEGBuffer (regrow) failed"
+            );
+        } else if status == dec::JxlDecoderStatus::FULL_IMAGE {
+            // The reconstructed JPEG is fully written; keep processing to reach SUCCESS.
+        } else {
+            panic!("unexpected decoder status during JPEG reconstruction: {status:?}");
+        }
+    }
+
+    assert!(
+        buffer_set,
+        "stream carried no JPEG reconstruction (jbrd) data"
+    );
+    let unwritten = unsafe { dec::JxlDecoderReleaseJPEGBuffer(decoder.0) };
+    jpeg.truncate(jpeg.len() - unwritten);
+    jpeg
+}
+
 /// RAII owner of a libjxl encoder handle.
 struct Encoder(*mut enc::JxlEncoder);
 

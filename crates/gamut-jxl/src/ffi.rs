@@ -242,8 +242,78 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
     // SAFETY: `enc.0` is valid; no further frames or boxes will be added.
     unsafe { sys_enc::JxlEncoderCloseInput(enc.0) };
 
-    // Drain the encoder, appending into `out`. `out` may already hold caller data, so every offset
-    // is relative to its current length and we truncate to the exact produced size each round.
+    drain(&enc, out)
+}
+
+/// Losslessly transcodes a complete JPEG codestream into a JPEG XL container with JPEG
+/// reconstruction metadata (the `jbrd` box), appending to `out` and returning the number of bytes
+/// appended.
+///
+/// The output is always ISO BMFF container framing: `JxlEncoderStoreJPEGMetadata` requires the
+/// container to carry the `jbrd` box, so the caller's [`crate::Container`] choice does not apply
+/// here. Image parameters (dimensions, bit depth, colour encoding) are implied by libjxl from the
+/// JPEG itself; only the configured [`crate::Effort`] is forwarded.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] on an empty or rejected JPEG codestream (progressive features
+/// libjxl cannot represent reversibly surface as the JBRD-specific [`Error::Unsupported`]), and
+/// [`Error::Unsupported`] if reconstruction metadata cannot represent the input.
+pub(crate) fn recompress(cfg: &JxlEncoder, jpeg: &[u8], out: &mut Vec<u8>) -> Result<usize> {
+    if jpeg.is_empty() {
+        return Err(Error::InvalidInput("JXL: empty JPEG input"));
+    }
+
+    // SAFETY: null memory manager selects libjxl's default allocator (documented in the sys crate).
+    let handle = unsafe { sys_enc::JxlEncoderCreate(core::ptr::null()) };
+    if handle.is_null() {
+        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+    }
+    let enc = Encoder(handle);
+
+    // Reconstruction metadata lives in a `jbrd` container box, so container framing is mandatory
+    // on this path; set it explicitly rather than relying on libjxl forcing it implicitly.
+    // SAFETY: `enc.0` is a valid, freshly created encoder; no output has been produced.
+    enc.check(unsafe { sys_enc::JxlEncoderUseContainer(enc.0, sys_ty::JxlBool::TRUE) })?;
+    // SAFETY: as above; must be set before encoding starts.
+    enc.check(unsafe { sys_enc::JxlEncoderStoreJPEGMetadata(enc.0, sys_ty::JxlBool::TRUE) })?;
+
+    // Frame settings are owned by the encoder (freed on destroy), so they need no separate RAII.
+    // SAFETY: `enc.0` is valid; a null source means "copy from defaults".
+    let frame_settings =
+        unsafe { sys_enc::JxlEncoderFrameSettingsCreate(enc.0, core::ptr::null()) };
+    if frame_settings.is_null() {
+        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+    }
+
+    // SAFETY: `frame_settings` is valid; EFFORT takes an integer level in `1..=10`.
+    enc.check(unsafe {
+        sys_enc::JxlEncoderFrameSettingsSetOption(
+            frame_settings,
+            sys_enc::JxlEncoderFrameSettingId::EFFORT,
+            i64::from(cfg.effort().level()),
+        )
+    })?;
+
+    // Basic info and colour encoding are implied from the JPEG frame by libjxl.
+    // SAFETY: `frame_settings` is valid; `jpeg` points to `jpeg.len()` readable bytes, copied
+    // internally.
+    enc.check(unsafe {
+        sys_enc::JxlEncoderAddJPEGFrame(frame_settings, jpeg.as_ptr(), jpeg.len())
+    })?;
+
+    // SAFETY: `enc.0` is valid; no further frames or boxes will be added.
+    unsafe { sys_enc::JxlEncoderCloseInput(enc.0) };
+
+    drain(&enc, out)
+}
+
+/// Drains all pending encoder output into `out`, appending after the current contents and
+/// returning the number of bytes appended.
+///
+/// `out` may already hold caller data, so every offset is relative to its length on entry, and on
+/// any error the buffer is truncated back to exactly that length.
+fn drain(enc: &Encoder, out: &mut Vec<u8>) -> Result<usize> {
     let start = out.len();
     let mut chunk = OUTPUT_CHUNK_INIT;
     loop {

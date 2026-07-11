@@ -114,22 +114,23 @@ impl JxlEncoder {
         self.mode
     }
 
-    /// Losslessly transcodes an existing JPEG bitstream into JPEG XL (the "jbrd" recompression path),
-    /// appending to `out` and returning the number of bytes written.
+    /// Losslessly transcodes an existing JPEG bitstream into JPEG XL (the "jbrd" recompression
+    /// path), appending to `out` and returning the number of bytes written.
     ///
-    /// This is the API slot for libjxl's JPEG-reconstruction feature, which reversibly re-packs a
-    /// baseline JPEG's coefficients so the original `.jpg` can be reconstructed bit-for-bit. It is
-    /// **not yet implemented**; the method exists so the eventual encoder gains it without a breaking
-    /// signature change. See `STATUS.md` for the deferral rationale.
+    /// libjxl reversibly re-packs the JPEG's DCT coefficients and stores reconstruction metadata
+    /// (the `jbrd` box), so the original `.jpg` can later be reconstructed bit-for-bit while the
+    /// stream also decodes as ordinary JPEG XL pixels. Because that metadata lives in a container
+    /// box, the output is **always ISO BMFF container framing** — the configured [`Container`] does
+    /// not apply here. The transcode is inherently lossless, so the lossless/lossy mode and
+    /// [`Distance`] do not apply either; only the configured [`Effort`] is honoured.
     ///
     /// # Errors
     ///
-    /// Always returns [`gamut_core::Error::Unsupported`] in this version.
+    /// Returns [`gamut_core::Error::InvalidInput`] on an empty or malformed JPEG codestream, and
+    /// [`gamut_core::Error::Unsupported`] if the JPEG uses features whose reconstruction metadata
+    /// libjxl cannot represent.
     pub fn recompress_jpeg(&self, jpeg: &[u8], out: &mut Vec<u8>) -> Result<usize> {
-        let _ = (jpeg, out);
-        Err(gamut_core::Error::Unsupported(
-            "JXL: JPEG bitstream recompression is not yet implemented",
-        ))
+        ffi::recompress(self, jpeg, out)
     }
 }
 
@@ -213,13 +214,16 @@ mod tests {
     }
 
     #[test]
-    fn recompress_jpeg_is_unsupported() {
+    fn recompress_jpeg_rejects_empty_input() {
         let mut out = Vec::new();
         let err = JxlEncoder::new()
-            .recompress_jpeg(&[0xFF, 0xD8, 0xFF], &mut out)
+            .recompress_jpeg(&[], &mut out)
             .unwrap_err();
-        assert!(matches!(err, gamut_core::Error::Unsupported(_)));
-        // No output was produced on the unsupported path.
+        assert!(matches!(
+            err,
+            gamut_core::Error::InvalidInput("JXL: empty JPEG input")
+        ));
+        // No output was produced on the rejected path.
         assert!(out.is_empty());
     }
 }
