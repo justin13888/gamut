@@ -88,7 +88,7 @@ gamut-isobmff = { path = "crates/gamut-isobmff", version = "1.0.0" }
 gamut-riff = { path = "crates/gamut-riff", version = "0.1.1" }
 gamut-av1 = { path = "crates/gamut-av1", version = "0.3.0" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.1" }
-gamut-avif = { path = "crates/gamut-avif", version = "0.3.0" }
+gamut-avif = { path = "crates/gamut-avif", version = "1.0.0" }
 gamut-jxl = { path = "crates/gamut-jxl", version = "0.2.0" }
 # Static libjxl build + hand-written FFI for gamut-jxl's encoder. Unlike every other shipped crate,
 # building this one runs cmake to compile libjxl (see its README); `links = "jxl"`.

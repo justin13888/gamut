@@ -51,16 +51,20 @@ std::fs::write("out.avif", &avif).unwrap();
 
 ## Status
 
-The encoder produces **lossless** (the default, milestone **M0**) and **lossy** (milestone **M1**,
-via `AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 identity-matrix 4:4:4 and
-wrapped as a single `av01` item. Lossless output is bit-exact to the input; lossy trades fidelity
-for size on a `0..=100` quality scale (higher = closer to the source). `irot`/`imir` display
-orientation is supported. Output is verified against real decoders (`libavif`, `dav1d`), linked from
-vendored `third_party/` submodules rather than system-installed binaries.
+**v1 surface.** The encoder produces **lossless** (the default) and **lossy**
+(`AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 identity-matrix 4:4:4 and
+wrapped as a single `av01` item in a conformant MIAF/AVIF container. Lossless output is bit-exact
+to the input; lossy trades fidelity for size on a `0..=100` quality scale (higher = closer to the
+source; the `quality → base_q_idx` mapping and its silent clamp above 100 are a frozen v1
+contract, defined in [`references/avif`](../../references/avif/README.md)). `irot`/`imir` display
+orientation is supported. Output is verified against real decoders (`libavif`, `dav1d`, `libaom`),
+linked from vendored `third_party/` submodules rather than system-installed binaries.
 
-Everything beyond — alpha, HDR/wide-gamut, 10/12-bit and 4:2:0/4:2:2, ICC/Exif/XMP metadata, image
-sequences, an AVIF decoder, and the rest of the AV1/AVIF surface — is tracked, row by row against
-the relevant specs, in [STATUS.md](STATUS.md).
+Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
+specs: **deferred, planned** features (alpha, HDR/wide-gamut, 10/12-bit and 4:2:0/4:2:2,
+ICC/Exif/XMP metadata, gain maps, layered/progressive images, an AVIF decoder, …) all land
+semver-minor on the frozen v1 surface, while image sequences/tracks and AV1 inter coding are
+**permanently out of scope** per the image-first workspace charter.
 
 ## License
 

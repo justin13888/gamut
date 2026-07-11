@@ -33,9 +33,15 @@
 //! reference container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the
 //! AV1 reference codec — and `dav1d` via [`gamut_av1`].
 //!
-//! **Deferred** (tracked row-by-row against the specs in `STATUS.md`): alpha / RGBA, 10/12-bit and
-//! 4:2:0/4:2:2, non-identity colour matrices and ICC / Exif / XMP, HDR (PQ/HLG), `grid` derivation
-//! and other container transforms, image sequences, and an AVIF **decoder**.
+//! **Deferred, planned** (tracked row-by-row against the specs in `STATUS.md`, whose disposition
+//! ledger is the authority): alpha / RGBA, 10/12-bit and 4:2:0/4:2:2, non-identity colour matrices
+//! and ICC / Exif / XMP, HDR (PQ/HLG and the HDR metadata properties), `grid` / `tmap` (gain-map) /
+//! `sato` derivations and the remaining container transforms, layered/progressive still images,
+//! encoder speed / rate control, and an AVIF **decoder**. All of these land semver-minor — the v1
+//! surface is designed so no deferred feature reshapes it.
+//!
+//! **Permanently out of scope** (workspace charter — gamut is image-first): image sequences and
+//! tracks (the `avis`/`avio` brands) and AV1 inter-frame coding.
 #![forbid(unsafe_code)]
 
 mod config;

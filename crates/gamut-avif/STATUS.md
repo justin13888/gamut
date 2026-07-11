@@ -6,11 +6,12 @@ ISOBMFF; 23008-12 HEIF; 23000-22 MIAF; ITU-T H.273 CICP). Rows are **technical c
 user features. This is the map for extension: each module's doc comment cites the same spec
 sections, and a row flips ☐→✅ (with the module cross-reference) when it ships.
 
-**Status:** ✅ = implemented · ☐ = planned. A ✅ cell may carry a qualifier when the row is only
-partially covered. M0 is complete and **most of M1 (lossy intra) has landed**; the **M** column is
-the milestone that motivates a row — indicative sequencing, not a contract:
+**Status:** ✅ = implemented · ☐ = deferred (planned, additive) · **OOS** = permanently out of
+scope. A ✅ cell may carry a qualifier when the row is only partially covered. The **M** column is
+historical sequencing provenance (the milestone that motivated a row — M0 is complete, most of M1
+has landed), `D` where a deferred row has no milestone, `OOS` where the disposition is final:
 
-- **M0** — MVP (current): lossless intra, identity `mc=0`, 4:4:4, 8-bit, full range, single tile,
+- **M0** — MVP: lossless intra, identity `mc=0`, 4:4:4, 8-bit, full range, single tile,
   64×64 superblocks, `DC_PRED`, forced `TX_4X4` Walsh–Hadamard, static default CDFs
   (`disable_cdf_update = 1`). Verified bit-exact against vendored `libavif`/`dav1d`.
 - **M1** — Lossy intra: forward DCT/ADST + quantization + RD/rate control, CDF adaptation, full
@@ -22,13 +23,43 @@ the milestone that motivates a row — indicative sequencing, not a contract:
 - **M4** — Color & metadata: ICC profiles, Exif/XMP items, HDR (PQ/HLG, `mdcv`/`clli`), film grain.
 - **M5** — Container transforms & derivation: `irot`/`imir`/`clap`/`pasp`, `grid`/overlay,
   thumbnails, `idat`, `iloc` v1/v2.
-- **M6** — Image sequences: `avis` brand, ISOBMFF tracks, full AV1 inter-coding machinery.
-  **Out of scope** for this image-first crate (no inter-frame/motion/sequence coding per the
-  workspace charter); rows are listed for completeness only.
+
+## Scope & dispositions (v1)
+
+**Implemented (v1.0).** Lossless (decoded output bit-exact to the input) and lossy AV1 intra
+encoding of 8-bit RGB at identity-matrix 4:4:4 full range, wrapped as a conformant MIAF/AVIF
+`av01` item — brands `avif`/`mif1`/`miaf`/`MA1A`, the AVIF §9.1.1 minimum box set, cross-box
+consistency (`av1C`↔sequence header, `pixi`, `colr`, `ispe`) by construction — with `irot`/`imir`
+display orientation. Output is validated end-to-end against `libavif` (dav1d backend); the wrapped
+AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `dav1d` via
+`gamut-av1`. Evidence per section: A and K rows are pinned by this crate's parse-back unit tests,
+doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
+and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
+
+**Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit, 4:2:0/4:2:2,
+monochrome, limited range, `MA1B`); alpha and depth auxiliary items; ICC / Exif / XMP; HDR
+(PQ/HLG transfer, `mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain); container derivations
+(`grid`, thumbnails, `idat`, `iloc` v1/v2 emission, `pasp`/`clap`); layered/progressive still
+images (`a1op`/`a1lx`/`lsel`, multi-operating-point sequence header); `tmap` tone-map (gain-map)
+derived items; `sato` sample transforms (bit depths beyond 12); `cmin`/`cmex` camera matrices;
+`altr`/`ster` entity groups; encoder speed and rate control; the **AVIF decoder** (planned —
+pure-Rust AVIF decode is a real ecosystem gap; `libaom`'s reference *encoder* is already staged as
+the future decoder's oracle, see [`references/av1`](../../references/av1/README.md)); and
+CLI/wasm/ffi wiring. **Additivity guarantee:** each lands semver-minor — a new builder method on
+the (non-`Copy`) `AvifEncoder`, a new field on the `#[non_exhaustive]` `AvifConfig`, a new
+`AvifMode` variant, or a new crate item — never a reshape of the v1 surface.
+
+**Permanently out of scope (workspace charter: image-first, no inter-frame/motion/sequence
+coding).** Image sequences and tracks — the `avis` and `avio` brands (AVIF §3, §6.3),
+`moov`/`trak`/`mdia`/`stbl` and `av01` sample entries — and the AV1 inter-coding machinery
+(section I below; INTRA_ONLY/INTER/SWITCH frame types, global motion, inter/MV entropy contexts,
+and the timing_info/decoder_model sequence-header fields that only sequences use). Also
+`dinf`/`dref` external data references (a still image is self-contained), mirroring the finalized
+[`gamut-isobmff` ledger](../gamut-isobmff/STATUS.md).
 
 ## A. Container / file format (ISOBMFF · HEIF · MIAF · AVIF · AV1-ISOBMFF)
 
-The box machinery for every non-M6 row below already ships in
+The box machinery for every non-OOS row below already ships in
 [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md) (`iref`/`auxC`/`prem`, ICC `colr`, Exif/`mime`
 items, `clap`/`pasp`/`clli`, `grid`+`dimg`, `idat`, `iloc` v1/v2 on read); a ☐ here means the
 *codec-side wiring* (encoding the aux plane, stamping the property, exposing the API) is pending —
@@ -38,7 +69,8 @@ adding it needs no container change.
 | --- | --- | --- | --- |
 | `ftyp`: major `avif`, compat `avif`/`mif1`/`miaf`/`MA1A` | AVIF §6,§8.3 | ✅ | M0 |
 | `MA1B` baseline brand (Main profile, ≤L5.1, 4:2:0) | AVIF §8.2 | ☐ | M2 |
-| `avis` brand (image sequences) | AVIF §7 | ☐ | M6 |
+| `avis` brand (image sequences) | AVIF §3,§6.3 | OOS | OOS |
+| `avio` brand (intra-only image sequences) | AVIF §6.3 | OOS | OOS |
 | `meta` (FullBox v0) container | 14496-12 | ✅ | M0 |
 | `hdlr` handler_type=`pict` | 23008-12 | ✅ | M0 |
 | `pitm` primary item id | 14496-12 | ✅ | M0 |
@@ -54,15 +86,23 @@ adding it needs no container change.
 | `pasp` pixel aspect ratio | 14496-12 | ☐ | M5 |
 | `clap` clean aperture | 23008-12 | ☐ | M5 |
 | `irot` rotation / `imir` mirror | 23008-12 | ✅ (essential transform properties; `AvifEncoder::with_rotation`/`with_mirror`) | M5 |
-| `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4 | ☐ | M3 |
+| `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4.1 | ☐ | M3 |
+| depth auxiliary image item (`urn:…:auxiliary:depth`) | AVIF §4.1 | ☐ | M3 |
 | `prem` premultiplied-alpha association | AVIF §4 | ☐ | M3 |
 | `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ☐ | M3/M5 |
 | `grid` derived item + `dimg` refs (tiled mosaic) | 23008-12; MIAF | ☐ | M5 |
+| `tmap` tone-map derived item (gain maps) + `altr` grouping with the base item | AVIF §4.2.2 | ☐ | D |
+| `sato` sample-transform derived item (bit-depth extension beyond 12) | AVIF §4.2.3, App. A | ☐ | D |
+| `altr` alternatives entity group | AVIF §5.1; §9.1.2 | ☐ | D |
+| `ster` stereo-pair entity group | AVIF §5.2; §9.1.2 | ☐ | D |
+| `cclv`/`amve`/`reve`/`ndwt` HDR item properties (carried opaque by `gamut-isobmff` until typed) | AVIF §9.1.2 | ☐ | M4 |
+| `cmin`/`cmex` camera intrinsic/extrinsic matrices | AVIF §9.1.2 (HEIF) | ☐ | D |
 | `idat` inline item data | 14496-12 | ☐ | M5 |
 | `thmb` thumbnail item | 23008-12 | ☐ | M5 |
-| Exif / XMP metadata items + `cdsc` ref | AVIF §3; 23008-12 | ☐ | M4 |
-| `a1op` operating-point sel / `a1lx` layered index / `lsel` layer sel | AVIF §2.2 | ☐ | M6 |
-| sequence tracks: `moov`/`trak`/`mdia`/`stbl`, `av01` sample entry, `av1C` in `stsd` | 14496-12; AV1-ISOBMFF §3 | ☐ | M6 |
+| Exif / XMP metadata items + `cdsc` ref | AVIF §9.1.2; 23008-12 | ☐ | M4 |
+| `a1op` operating-point sel / `a1lx` layered index / `lsel` layer sel (layered/progressive stills) | AVIF §2.3 | ☐ | D |
+| `dinf`/`dref` external data references | AVIF §9.1.2 | OOS | OOS |
+| sequence tracks: `moov`/`trak`/`mdia`/`stbl`, `av01` sample entry, `av1C` in `stsd` | 14496-12; AV1-ISOBMFF §3 | OOS | OOS |
 | `mdat` payload = AV1 temporal unit OBUs | AV1-ISOBMFF §2.4 | ✅ | M0 |
 | cross-box consistency (av1C↔seq-hdr, `pixi`, `colr` range, `ispe` dims) | AVIF §2.2/§2.3.4 | ✅ | M0 |
 
@@ -81,7 +121,8 @@ adding it needs no container change.
 | seq_profile=1 (High) | Annex A §10.2; §6.4.1 | ✅ | M0 |
 | seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ☐ | M2 |
 | `still_picture`=1, `reduced_still_picture_header`=1 | §5.5 | ✅ | M0 |
-| full seq header: timing_info, decoder_model_info, multiple operating points | §5.5.1-.5.5.5 | ☐ | M6 |
+| full seq header: multiple operating points (layered stills) | §5.5.1-.5.5.5 | ☐ | D |
+| full seq header: timing_info, decoder_model_info (sequences only) | §5.5.1-.5.5.5 | OOS | OOS |
 | `frame_id_numbers_present` | §5.5 | ☐ | — |
 | `use_128x128_superblock` | §5.5 | ☐ | M1 |
 | `enable_filter_intra` (1 on lossy, 0 on lossless) / `enable_intra_edge_filter`=0 | §5.5 | ✅ | M0/M1 |
@@ -89,7 +130,7 @@ adding it needs no container change.
 | color_config: mc=0 identity, 4:4:4, high_bitdepth=0, full range | §5.5.2 | ✅ | M0 |
 | color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ☐ | M2 |
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
-| INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | ☐ | M6 |
+| INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
 | `disable_cdf_update`=1 (static CDFs) | §5.9.2 | ✅ | M0 |
 | `disable_cdf_update`=0 + frame-end CDF update | §5.9.2,§7.7 | ☐ | M1 |
 | frame_size / render_size (no override, no superres) | §5.9.5/.6 | ✅ | M0 |
@@ -105,7 +146,7 @@ adding it needs no container change.
 | TX_MODE_SELECT / TX_MODE_LARGEST | §5.9.21 | ✅ (TX_MODE_SELECT, lossy intra) | M1 |
 | `reduced_tx_set`=1 | §5.9.2 | ✅ | M0 |
 | frame_reference_mode / skip_mode_params (intra → off) | §5.9.22/.23 | ✅ (off) | M0 |
-| global_motion_params | §5.9.24 | ☐ | M6 |
+| global_motion_params | §5.9.24 | OOS | OOS |
 | film_grain_params | §5.9.30 | ☐ | M4 |
 
 ## C. AV1 — tiling, partition, block / mode info
@@ -144,7 +185,7 @@ adding it needs no container change.
 | inverse DCT 4/8/16/32/64 + forward DCT | §7.13.2.2/.3 | ✅ (4/8/16/32/64, used through TX_64X64) | M1 |
 | inverse ADST4/8/16 (+FLIPADST) + forward | §7.13.2.4-.9 | ✅ (ADST 4/8/16 fwd+inv, emitted via TX_SET_INTRA_2; FLIPADST reconstruct path present, unused under `reduced_tx_set=1`) | M1 |
 | identity transform 4/8/16/32 (IDTX / V_ / H_) | §7.13.2.11-.15 | ✅ (IDTX emitted via TX_SET_INTRA_2; V_/H_ axis variants present in dispatch, unused under `reduced_tx_set=1`) | M1 |
-| 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ✅ (normative `inverse_transform_2d`; intra `TX_SET_INTRA_2`/`TX_SET_DCTONLY`; inter sets M6) | M1 |
+| 2D inverse transform + tx_type sets, `get_tx_set` | §7.13.3,§5.11.47/.48 | ✅ (normative `inverse_transform_2d`; intra `TX_SET_INTRA_2`/`TX_SET_DCTONLY`; inter sets OOS) | M1 |
 | variable tx size / `txfm_split` | §5.11.15-.17 | ✅ (TX_MODE_SELECT, square `tx_depth` 0..2; rectangular `txfm_split` deferred) | M1 |
 | encoder forward transform + tx-type/size RD search | (encoder) | ✅ (`forward_transform_2d` + heuristic tx-type/tx-size search; true RD deferred) | M1 |
 
@@ -165,7 +206,7 @@ adding it needs no container change.
 | `encode_literal` (equiprobable `read_bool` inverse) | §8.2.3/.5 | ✅ | M0 |
 | static default CDFs: Partition, Skip, IntraFrameYMode, UvMode(±CfL) | §9.4 | ✅ | M0 |
 | coeff CDFs (qctx0, TX_4X4): TxbSkip/EobPt16/EobExtra/CoeffBaseEob/CoeffBase/CoeffBr/DcSign | §9.4 | ✅ | M0 |
-| full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ✅ (intra: coeff CDFs all used tx sizes × qctx 0–3, mode/partition/palette; inter/MV deferred M6) | M1/M6 |
+| full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ✅ (intra: coeff CDFs all used tx sizes × qctx 0–3, mode/partition/palette; inter/MV OOS) | M1/OOS |
 | CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ☐ | M1 |
 | `coeffs()` TX_4X4: txb_skip/eob/base/br/sign/dc_sign/golomb | §5.11.39 | ✅ | M0 |
 | `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8 + 16×16 + 32×32 + 64×64, 32×32/64×64 DCT-only) | M1 |
@@ -182,14 +223,14 @@ adding it needs no container change.
 | superres horizontal upscaling (8-tap polyphase, LR after upscale) | §5.9.8,§7.16 | ✅ (opt-in via `encode_still_intra_superres`) | M1 |
 | film grain synthesis | §5.9.30,§7.18.3 | ☐ | M4 |
 
-## I. AV1 — inter coding (image sequences `avis` only; AVIF still image is intra-only)
+## I. AV1 — inter coding (permanently out of scope: sequences-only machinery, per the charter)
 
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
-| reference frame buffers, ref_frame_idx, order hint | §5.9,§7.20/.21 | ☐ | M6 |
-| MV prediction (find_mv_stack), MV/MVD coding | §7.10,§5.11.25-.34 | ☐ | M6 |
-| inter prediction: single/compound, OBMC, warped, wedge, masked | §7.11.3 | ☐ | M6 |
-| skip_mode, ref_frame_mvs, global motion, motion-field estimation | §5.9.22/.24,§7.9 | ☐ | M6 |
+| reference frame buffers, ref_frame_idx, order hint | §5.9,§7.20/.21 | OOS | OOS |
+| MV prediction (find_mv_stack), MV/MVD coding | §7.10,§5.11.25-.34 | OOS | OOS |
+| inter prediction: single/compound, OBMC, warped, wedge, masked | §7.11.3 | OOS | OOS |
+| skip_mode, ref_frame_mvs, global motion, motion-field estimation | §5.9.22/.24,§7.9 | OOS | OOS |
 
 ## J. Color / CICP / HDR / metadata
 
@@ -212,5 +253,16 @@ adding it needs no container change.
 | RGBA8 input + alpha-plane extraction | gamut-color/avif | ☐ | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ☐ | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
-| `gamut_core::Decoder` (AVIF → pixels) | gamut-avif | ☐ | future |
-| CLI / wasm / ffi wiring for AVIF | gamut-{cli,wasm,ffi} | ☐ | future |
+| `gamut_core::Decoder` (AVIF → pixels; planned — `libaom`'s reference encoder is staged as its oracle) | gamut-avif | ☐ | D |
+| CLI / wasm / ffi wiring for AVIF | gamut-{cli,wasm,ffi} | ☐ | D |
+
+## The v1 guarantee
+
+`gamut-avif` 1.0 promises: every emitted file is a conformant MIAF/AVIF still image (brands
+`avif`/`mif1`/`miaf`/`MA1A`, the AVIF §9.1.1 minimum box set, cross-box consistency between
+`av1C`, the AV1 sequence header, `pixi`, `colr`, and `ispe` by construction); lossless mode
+round-trips bit-exact through a conformant decoder; the `quality → base_q_idx` mapping is frozen
+(defined in [`references/avif`](../../references/avif/README.md), including the silent clamp of
+`quality > 100`); and the output is continuously validated against `libavif`+`dav1d` at the
+container level and `libaom`+`dav1d` at the bitstream level. Every deferred row lands additively —
+the v1 public surface is never reshaped.
