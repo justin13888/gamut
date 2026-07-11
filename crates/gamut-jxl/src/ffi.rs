@@ -169,6 +169,8 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
         0
     };
     info.alpha_exponent_bits = 0;
+    // The display orientation, as an EXIF 1..=8 value; the samples stay in coded order.
+    info.orientation = sys_ty::JxlOrientation(cfg.orientation().exif_value().into());
     // Lossless must retain the original (non-XYB) profile; lossy re-encodes through XYB.
     info.uses_original_profile = match cfg.mode() {
         Mode::Lossless => sys_ty::JxlBool::TRUE,

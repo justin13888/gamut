@@ -9,7 +9,7 @@ use gamut_core::{
     Rgba16,
 };
 
-use crate::config::{ColorSpec, Container, Distance, Effort, Mode};
+use crate::config::{ColorSpec, Container, Distance, Effort, Mode, Orientation};
 use crate::ffi::{self, FrameSpec, Samples};
 
 /// A JPEG XL encoder backed by the reference libjxl.
@@ -33,6 +33,8 @@ pub struct JxlEncoder {
     container: Container,
     /// The colour interpretation signalled for the pixel samples.
     color: ColorSpec,
+    /// The display orientation signalled for the coded samples.
+    orientation: Orientation,
 }
 
 impl Default for JxlEncoder {
@@ -59,6 +61,7 @@ impl JxlEncoder {
             effort: Effort::default(),
             container: Container::default(),
             color: ColorSpec::default(),
+            orientation: Orientation::default(),
         }
     }
 
@@ -71,6 +74,7 @@ impl JxlEncoder {
             effort: Effort::default(),
             container: Container::default(),
             color: ColorSpec::default(),
+            orientation: Orientation::default(),
         }
     }
 
@@ -98,6 +102,17 @@ impl JxlEncoder {
     #[must_use]
     pub fn with_color(mut self, color: ColorSpec) -> Self {
         self.color = color;
+        self
+    }
+
+    /// Sets the display [`Orientation`] signalled for the coded samples ([`Orientation::Identity`]
+    /// by default). Returns the updated encoder for chaining.
+    ///
+    /// Orientation is metadata: the samples are stored exactly as given, and decoders apply the
+    /// transform on output (the transposing variants swap the displayed width and height).
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = orientation;
         self
     }
 
@@ -132,6 +147,12 @@ impl JxlEncoder {
     #[must_use]
     pub fn color(&self) -> &ColorSpec {
         &self.color
+    }
+
+    /// The configured [`Orientation`].
+    #[must_use]
+    pub fn orientation(&self) -> Orientation {
+        self.orientation
     }
 
     /// The internal lossless/lossy mode, for the FFI driver.

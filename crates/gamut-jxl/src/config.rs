@@ -139,6 +139,80 @@ pub enum Container {
     IsoBmff,
 }
 
+/// The display orientation the encoder signals for the coded samples, matching the eight EXIF
+/// orientation values.
+///
+/// Orientation is metadata: the encoder stores the caller's samples exactly as given (in coded
+/// order) and decoders apply the transform on output. The four transposing variants
+/// ([`Orientation::Transpose`], [`Orientation::Rotate90Cw`], [`Orientation::AntiTranspose`],
+/// [`Orientation::Rotate90Ccw`]) swap the displayed width and height relative to the coded
+/// dimensions. The default is [`Orientation::Identity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Orientation {
+    /// No transform (EXIF 1); the default.
+    #[default]
+    Identity,
+    /// Mirror horizontally (EXIF 2).
+    FlipHorizontal,
+    /// Rotate 180 degrees (EXIF 3).
+    Rotate180,
+    /// Mirror vertically (EXIF 4).
+    FlipVertical,
+    /// Transpose: mirror across the main diagonal (EXIF 5). Swaps displayed width/height.
+    Transpose,
+    /// Rotate 90 degrees clockwise (EXIF 6). Swaps displayed width/height.
+    Rotate90Cw,
+    /// Anti-transpose: mirror across the anti-diagonal (EXIF 7). Swaps displayed width/height.
+    AntiTranspose,
+    /// Rotate 90 degrees counter-clockwise (EXIF 8). Swaps displayed width/height.
+    Rotate90Ccw,
+}
+
+impl Orientation {
+    /// The EXIF orientation value (`1..=8`) this variant signals.
+    #[must_use]
+    pub fn exif_value(self) -> u8 {
+        match self {
+            Self::Identity => 1,
+            Self::FlipHorizontal => 2,
+            Self::Rotate180 => 3,
+            Self::FlipVertical => 4,
+            Self::Transpose => 5,
+            Self::Rotate90Cw => 6,
+            Self::AntiTranspose => 7,
+            Self::Rotate90Ccw => 8,
+        }
+    }
+
+    /// The [`Orientation`] for an EXIF orientation value, or `None` if `value` is outside `1..=8`.
+    ///
+    /// The inverse of [`Orientation::exif_value`]; handy for forwarding EXIF metadata.
+    #[must_use]
+    pub fn from_exif_value(value: u8) -> Option<Self> {
+        Some(match value {
+            1 => Self::Identity,
+            2 => Self::FlipHorizontal,
+            3 => Self::Rotate180,
+            4 => Self::FlipVertical,
+            5 => Self::Transpose,
+            6 => Self::Rotate90Cw,
+            7 => Self::AntiTranspose,
+            8 => Self::Rotate90Ccw,
+            _ => return None,
+        })
+    }
+
+    /// Whether this orientation swaps the displayed width and height relative to the coded
+    /// dimensions (the four diagonal/rotating transforms, EXIF `5..=8`).
+    #[must_use]
+    pub fn transposes(self) -> bool {
+        matches!(
+            self,
+            Self::Transpose | Self::Rotate90Cw | Self::AntiTranspose | Self::Rotate90Ccw
+        )
+    }
+}
+
 /// The colour interpretation the encoder signals for the pixel samples.
 ///
 /// JPEG XL separates the coded samples from their colour meaning: the encoder never converts the
@@ -285,6 +359,48 @@ mod tests {
     #[test]
     fn color_spec_default_is_srgb() {
         assert_eq!(ColorSpec::default(), ColorSpec::Srgb);
+    }
+
+    #[test]
+    fn orientation_exif_value_round_trips_over_full_range() {
+        let all = [
+            Orientation::Identity,
+            Orientation::FlipHorizontal,
+            Orientation::Rotate180,
+            Orientation::FlipVertical,
+            Orientation::Transpose,
+            Orientation::Rotate90Cw,
+            Orientation::AntiTranspose,
+            Orientation::Rotate90Ccw,
+        ];
+        for (i, o) in all.into_iter().enumerate() {
+            let value = (i + 1) as u8;
+            assert_eq!(o.exif_value(), value, "{o:?} exif value");
+            assert_eq!(Orientation::from_exif_value(value), Some(o));
+        }
+        for value in 1..=8u8 {
+            assert_eq!(
+                Orientation::from_exif_value(value).unwrap().exif_value(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn orientation_from_exif_rejects_out_of_range() {
+        assert_eq!(Orientation::from_exif_value(0), None);
+        assert_eq!(Orientation::from_exif_value(9), None);
+        assert_eq!(Orientation::from_exif_value(255), None);
+    }
+
+    #[test]
+    fn orientation_default_is_identity_and_transposing_set_is_exact() {
+        assert_eq!(Orientation::default(), Orientation::Identity);
+        // Exactly EXIF 5..=8 transpose; 1..=4 do not.
+        for value in 1..=8u8 {
+            let o = Orientation::from_exif_value(value).unwrap();
+            assert_eq!(o.transposes(), value >= 5, "{o:?}");
+        }
     }
 
     /// A minimal 128-byte "profile": all zeros except the data colour space signature.

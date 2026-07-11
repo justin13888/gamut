@@ -83,7 +83,7 @@ mod error;
 mod ffi;
 
 #[cfg(all(feature = "encode", not(target_arch = "wasm32")))]
-pub use config::{ColorSpec, Container, Distance, Effort};
+pub use config::{ColorSpec, Container, Distance, Effort, Orientation};
 #[cfg(feature = "decode")]
 pub use decoder::JxlDecoder;
 #[cfg(all(feature = "encode", not(target_arch = "wasm32")))]
