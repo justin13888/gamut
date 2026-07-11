@@ -61,6 +61,12 @@ wasm-bindgen = "0.2"
 # Decode-only: gamut-cli reads PNG/JPEG/PPM inputs; all encoding stays in gamut crates.
 # `default-features = false` drops image's own avif/webp decoders and rayon.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "pnm"] }
+# Pure-Rust JPEG XL decoder (jxl-rs) from the libjxl org, BSD-3-Clause. gamut-jxl's decode path
+# wraps it (the crate has no encoder — that is libjxl via gamut-jxl-sys). The default `all-simd`
+# feature is OFF because it enables `avx512`, whose intrinsics need Rust 1.89+ and x86-only
+# nightly-adjacent paths; the listed per-arch features are cfg-gated internally and safe to enable
+# on every target (including wasm32, where they compile out).
+jxl = { version = "0.4.3", default-features = false, features = ["sse42", "avx", "neon"] }
 # libwebp FFI — used ONLY as a dev-dependency oracle in gamut-webp's differential tests, never
 # in shipped code. Handwritten bindings (no bindgen/libclang); statically links bundled libwebp,
 # so the test build needs a C toolchain while the library itself stays C-free.

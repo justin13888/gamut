@@ -10,7 +10,7 @@
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
 
-use gamut_jxl_sys::{decode as dec, types as ty};
+use gamut_jxl_sys::{decode as dec, encode as enc, types as ty};
 
 /// Decoded sample storage, matching the encoded bit depth.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +149,117 @@ pub fn decode(data: &[u8]) -> Decoded {
         num_channels,
         samples,
     }
+}
+
+/// RAII owner of a libjxl encoder handle.
+struct Encoder(*mut enc::JxlEncoder);
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        unsafe { enc::JxlEncoderDestroy(self.0) };
+    }
+}
+
+/// Encodes an **animated** RGB8 JPEG XL codestream directly with the reference libjxl encoder: it
+/// sets `have_animation` in the basic info and appends two frames. gamut's own encoder never does
+/// this (it is image-first), so this test-only helper is the sole way to obtain an animated stream
+/// to prove the decoder rejects it.
+///
+/// Returns the encoded bytes. Panics on any encoder error (appropriate for a test helper).
+pub fn encode_animated_rgb8(width: u32, height: u32, frames: &[Vec<u8>]) -> Vec<u8> {
+    assert!(!frames.is_empty(), "need at least one frame");
+    let handle = unsafe { enc::JxlEncoderCreate(core::ptr::null()) };
+    assert!(!handle.is_null(), "JxlEncoderCreate returned null");
+    let encoder = Encoder(handle);
+
+    // Basic info with animation enabled.
+    let mut info = MaybeUninit::<ty::JxlBasicInfo>::zeroed();
+    let mut info = unsafe {
+        enc::JxlEncoderInitBasicInfo(info.as_mut_ptr());
+        info.assume_init()
+    };
+    info.xsize = width;
+    info.ysize = height;
+    info.bits_per_sample = 8;
+    info.exponent_bits_per_sample = 0;
+    info.num_color_channels = 3;
+    info.num_extra_channels = 0;
+    info.alpha_bits = 0;
+    info.uses_original_profile = ty::JxlBool::TRUE;
+    info.have_animation = ty::JxlBool::TRUE;
+    info.animation = ty::JxlAnimationHeader {
+        tps_numerator: 1,
+        tps_denominator: 1,
+        num_loops: 0,
+        have_timecodes: ty::JxlBool::FALSE,
+    };
+    let st = unsafe { enc::JxlEncoderSetBasicInfo(encoder.0, &info) };
+    assert_eq!(st, enc::JxlEncoderStatus::SUCCESS, "SetBasicInfo failed");
+
+    let mut color = MaybeUninit::<ty::JxlColorEncoding>::zeroed();
+    let color = unsafe {
+        enc::JxlColorEncodingSetToSRGB(color.as_mut_ptr(), ty::JxlBool::FALSE);
+        color.assume_init()
+    };
+    let st = unsafe { enc::JxlEncoderSetColorEncoding(encoder.0, &color) };
+    assert_eq!(
+        st,
+        enc::JxlEncoderStatus::SUCCESS,
+        "SetColorEncoding failed"
+    );
+
+    let frame_settings =
+        unsafe { enc::JxlEncoderFrameSettingsCreate(encoder.0, core::ptr::null()) };
+    assert!(
+        !frame_settings.is_null(),
+        "FrameSettingsCreate returned null"
+    );
+    let st = unsafe { enc::JxlEncoderSetFrameLossless(frame_settings, ty::JxlBool::TRUE) };
+    assert_eq!(
+        st,
+        enc::JxlEncoderStatus::SUCCESS,
+        "SetFrameLossless failed"
+    );
+
+    let format = ty::JxlPixelFormat {
+        num_channels: 3,
+        data_type: ty::JxlDataType::UINT8,
+        endianness: ty::JxlEndianness::NATIVE,
+        align: 0,
+    };
+    let expected = width as usize * height as usize * 3;
+    for frame in frames {
+        assert_eq!(frame.len(), expected, "frame length mismatch");
+        let st = unsafe {
+            enc::JxlEncoderAddImageFrame(
+                frame_settings,
+                &format,
+                frame.as_ptr().cast::<c_void>(),
+                frame.len(),
+            )
+        };
+        assert_eq!(st, enc::JxlEncoderStatus::SUCCESS, "AddImageFrame failed");
+    }
+    unsafe { enc::JxlEncoderCloseInput(encoder.0) };
+
+    let mut out = vec![0u8; 64 * 1024];
+    let mut produced = 0usize;
+    loop {
+        let mut next_out = unsafe { out.as_mut_ptr().add(produced) };
+        let mut avail_out = out.len() - produced;
+        let status =
+            unsafe { enc::JxlEncoderProcessOutput(encoder.0, &mut next_out, &mut avail_out) };
+        produced = out.len() - avail_out;
+        match status {
+            enc::JxlEncoderStatus::SUCCESS => break,
+            enc::JxlEncoderStatus::NEED_MORE_OUTPUT => {
+                out.resize(out.len() * 2, 0);
+            }
+            other => panic!("animated encode ProcessOutput failed: {other:?}"),
+        }
+    }
+    out.truncate(produced);
+    out
 }
 
 /// Peak signal-to-noise ratio in dB over two equal-length `u8` sample sets, treating them as a flat

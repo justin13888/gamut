@@ -1,5 +1,6 @@
 //! Byte-signature and `EncodeImage`-contract tests for the JPEG XL encoder: the two container
 //! framings emit the correct magic, and encoding appends rather than replaces.
+#![cfg(all(feature = "encode", not(target_arch = "wasm32")))]
 
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
 use gamut_jxl::{Container, JxlEncoder};
