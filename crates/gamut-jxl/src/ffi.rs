@@ -13,7 +13,7 @@ use core::ffi::c_void;
 use gamut_core::{Dimensions, Error, Result};
 use gamut_jxl_sys::{encode as sys_enc, types as sys_ty};
 
-use crate::config::Mode;
+use crate::config::{ColorSpec, Mode, validate_icc};
 use crate::encoder::JxlEncoder;
 use crate::error::map_encoder_error;
 
@@ -177,23 +177,9 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
     // SAFETY: `enc.0` is valid; `info` is fully initialised and copied internally.
     enc.check(unsafe { sys_enc::JxlEncoderSetBasicInfo(enc.0, &info) })?;
 
-    // Colour encoding: sRGB, gray or colour to match the channel count.
-    let is_gray = if spec.num_color_channels == 1 {
-        sys_ty::JxlBool::TRUE
-    } else {
-        sys_ty::JxlBool::FALSE
-    };
-    // Zeroed for the same soundness reason as the basic info above: all-zero is a valid bit
-    // pattern for every field, so no field's initialisation depends on the C call's coverage.
-    let mut color = core::mem::MaybeUninit::<sys_ty::JxlColorEncoding>::zeroed();
-    // SAFETY: the storage is zeroed (a valid value), and `JxlColorEncodingSetToSRGB` then writes
-    // the sRGB profile through the pointer.
-    let color = unsafe {
-        sys_enc::JxlColorEncodingSetToSRGB(color.as_mut_ptr(), is_gray);
-        color.assume_init()
-    };
-    // SAFETY: `enc.0` is valid; `color` is fully initialised and copied internally.
-    enc.check(unsafe { sys_enc::JxlEncoderSetColorEncoding(enc.0, &color) })?;
+    // Colour signalling: the configured ColorSpec, gray or colour to match the channel count. Must
+    // follow SetBasicInfo.
+    set_color(&enc, cfg.color(), spec.num_color_channels == 1)?;
 
     // Frame settings are owned by the encoder (freed on destroy), so they need no separate RAII.
     // SAFETY: `enc.0` is valid; a null source means "copy from defaults".
@@ -306,6 +292,70 @@ pub(crate) fn recompress(cfg: &JxlEncoder, jpeg: &[u8], out: &mut Vec<u8>) -> Re
     unsafe { sys_enc::JxlEncoderCloseInput(enc.0) };
 
     drain(&enc, out)
+}
+
+/// Signals the frame's colour interpretation to libjxl: a structured encoding for the built-in
+/// [`ColorSpec`] variants, or the verbatim ICC profile bytes for [`ColorSpec::Icc`]. Must be called
+/// after `JxlEncoderSetBasicInfo`.
+fn set_color(enc: &Encoder, spec: &ColorSpec, gray: bool) -> Result<()> {
+    let is_gray = if gray {
+        sys_ty::JxlBool::TRUE
+    } else {
+        sys_ty::JxlBool::FALSE
+    };
+
+    let color = match spec {
+        ColorSpec::Srgb | ColorSpec::LinearSrgb => {
+            // Zeroed for soundness: all-zero is a valid bit pattern for every field, so no field's
+            // initialisation depends on the C call's coverage.
+            let mut color = core::mem::MaybeUninit::<sys_ty::JxlColorEncoding>::zeroed();
+            // SAFETY: the storage is zeroed (a valid value), and the libjxl helper then writes the
+            // requested sRGB/linear-sRGB profile through the pointer.
+            unsafe {
+                if *spec == ColorSpec::Srgb {
+                    sys_enc::JxlColorEncodingSetToSRGB(color.as_mut_ptr(), is_gray);
+                } else {
+                    sys_enc::JxlColorEncodingSetToLinearSRGB(color.as_mut_ptr(), is_gray);
+                }
+                color.assume_init()
+            }
+        }
+        ColorSpec::Pq | ColorSpec::Hlg => {
+            // BT.2100: D65 white point, BT.2100 primaries (ignored for gray), and the PQ or HLG
+            // transfer function. Built by hand — libjxl has no SetTo* helper for HDR encodings.
+            sys_ty::JxlColorEncoding {
+                color_space: if gray {
+                    sys_ty::JxlColorSpace::GRAY
+                } else {
+                    sys_ty::JxlColorSpace::RGB
+                },
+                white_point: sys_ty::JxlWhitePoint::D65,
+                white_point_xy: [0.0; 2],
+                primaries: sys_ty::JxlPrimaries::BT2100,
+                primaries_red_xy: [0.0; 2],
+                primaries_green_xy: [0.0; 2],
+                primaries_blue_xy: [0.0; 2],
+                transfer_function: if *spec == ColorSpec::Pq {
+                    sys_ty::JxlTransferFunction::PQ
+                } else {
+                    sys_ty::JxlTransferFunction::HLG
+                },
+                gamma: 0.0,
+                rendering_intent: sys_ty::JxlRenderingIntent::RELATIVE,
+            }
+        }
+        ColorSpec::Icc(icc) => {
+            validate_icc(icc, gray)?;
+            // SAFETY: `enc.0` is valid; `icc` points to `icc.len()` readable bytes, copied
+            // internally.
+            return enc.check(unsafe {
+                sys_enc::JxlEncoderSetICCProfile(enc.0, icc.as_ptr(), icc.len())
+            });
+        }
+    };
+
+    // SAFETY: `enc.0` is valid; `color` is fully initialised and copied internally.
+    enc.check(unsafe { sys_enc::JxlEncoderSetColorEncoding(enc.0, &color) })
 }
 
 /// Drains all pending encoder output into `out`, appending after the current contents and

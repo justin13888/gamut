@@ -1,6 +1,6 @@
 //! Encoder configuration: the [`Effort`] speed/density dial, the validated lossy [`Distance`]
-//! newtype, the output [`Container`] selector, and the internal [`Mode`] that makes a
-//! lossless-with-a-distance state unrepresentable.
+//! newtype, the output [`Container`] selector, the [`ColorSpec`] colour signalling, and the
+//! internal [`Mode`] that makes a lossless-with-a-distance state unrepresentable.
 
 use gamut_core::{Error, Result};
 
@@ -139,6 +139,59 @@ pub enum Container {
     IsoBmff,
 }
 
+/// The colour interpretation the encoder signals for the pixel samples.
+///
+/// JPEG XL separates the coded samples from their colour meaning: the encoder never converts the
+/// caller's pixels between colour spaces, it *signals* how they are to be interpreted. The default
+/// is [`ColorSpec::Srgb`], matching how 8/16-bit integer buffers are conventionally produced.
+///
+/// - [`ColorSpec::Srgb`] — standard sRGB (IEC 61966-2-1): sRGB primaries, D65, the sRGB transfer
+///   curve. Gray images signal the same transfer curve with luminance-only samples.
+/// - [`ColorSpec::LinearSrgb`] — sRGB primaries and D65 with a **linear** transfer function, for
+///   samples that are already linear light.
+/// - [`ColorSpec::Pq`] — Rec. ITU-R BT.2100 with the SMPTE ST 2084 (PQ) transfer function, the
+///   HDR10-style encoding for absolute-luminance HDR samples (typically 16-bit).
+/// - [`ColorSpec::Hlg`] — Rec. ITU-R BT.2100 with the Hybrid Log-Gamma transfer function, the
+///   scene-referred broadcast HDR encoding.
+/// - [`ColorSpec::Icc`] — an embedded ICC profile carried verbatim in the codestream. The profile's
+///   data colour space must match the image (`RGB ` for 3-channel, `GRAY` for 1-channel layouts);
+///   this is validated when encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ColorSpec {
+    /// Standard (gamma-encoded) sRGB; the default.
+    #[default]
+    Srgb,
+    /// sRGB primaries and white point with a linear transfer function.
+    LinearSrgb,
+    /// Rec. BT.2100 primaries with the SMPTE ST 2084 (PQ) transfer function.
+    Pq,
+    /// Rec. BT.2100 primaries with the Hybrid Log-Gamma (HLG) transfer function.
+    Hlg,
+    /// An embedded ICC profile, stored verbatim in the codestream.
+    Icc(Vec<u8>),
+}
+
+/// Validates that an ICC profile is plausibly attachable to an image with the given colour family:
+/// long enough to carry a header, and with a data colour space signature (header bytes 16..20)
+/// matching grayscale (`GRAY`) vs colour (`RGB `).
+///
+/// This is a cheap structural pre-check so an obvious mismatch is a clear typed error before the
+/// bytes reach libjxl; full profile validation remains libjxl's job.
+pub(crate) fn validate_icc(icc: &[u8], is_gray: bool) -> Result<()> {
+    // The fixed ICC header is 128 bytes; anything shorter cannot be a profile at all.
+    if icc.len() < 128 {
+        return Err(Error::InvalidInput("JXL: ICC profile is too short"));
+    }
+    let space = &icc[16..20];
+    let expected: &[u8; 4] = if is_gray { b"GRAY" } else { b"RGB " };
+    if space != expected {
+        return Err(Error::InvalidInput(
+            "JXL: ICC profile color space does not match the image layout",
+        ));
+    }
+    Ok(())
+}
+
 /// The encoder's lossless-vs-lossy state.
 ///
 /// Kept private so that the invalid combination — lossless *and* a distance — is unrepresentable:
@@ -227,5 +280,39 @@ mod tests {
     #[test]
     fn container_default_is_codestream() {
         assert_eq!(Container::default(), Container::Codestream);
+    }
+
+    #[test]
+    fn color_spec_default_is_srgb() {
+        assert_eq!(ColorSpec::default(), ColorSpec::Srgb);
+    }
+
+    /// A minimal 128-byte "profile": all zeros except the data colour space signature.
+    fn fake_icc(space: &[u8; 4]) -> Vec<u8> {
+        let mut icc = vec![0u8; 128];
+        icc[16..20].copy_from_slice(space);
+        icc
+    }
+
+    #[test]
+    fn validate_icc_accepts_matching_color_spaces() {
+        assert!(validate_icc(&fake_icc(b"RGB "), false).is_ok());
+        assert!(validate_icc(&fake_icc(b"GRAY"), true).is_ok());
+    }
+
+    #[test]
+    fn validate_icc_rejects_mismatched_color_spaces() {
+        // An RGB profile on a grayscale image and vice versa are both structural mismatches.
+        assert!(validate_icc(&fake_icc(b"RGB "), true).is_err());
+        assert!(validate_icc(&fake_icc(b"GRAY"), false).is_err());
+        // CMYK profiles are never attachable to gamut-jxl's layouts.
+        assert!(validate_icc(&fake_icc(b"CMYK"), false).is_err());
+    }
+
+    #[test]
+    fn validate_icc_rejects_short_profiles() {
+        assert!(validate_icc(&[], false).is_err());
+        assert!(validate_icc(&[0u8; 127], false).is_err());
+        assert!(validate_icc(&[0u8; 20], true).is_err());
     }
 }

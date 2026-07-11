@@ -9,7 +9,7 @@ use gamut_core::{
     Rgba16,
 };
 
-use crate::config::{Container, Distance, Effort, Mode};
+use crate::config::{ColorSpec, Container, Distance, Effort, Mode};
 use crate::ffi::{self, FrameSpec, Samples};
 
 /// A JPEG XL encoder backed by the reference libjxl.
@@ -20,7 +20,10 @@ use crate::ffi::{self, FrameSpec, Samples};
 /// output [`Container`] with the `with_*` builders. Encode through the
 /// [`EncodeImage`](gamut_core::EncodeImage) trait, which appends the JPEG XL stream to the caller's
 /// buffer.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// The type is `Clone` but deliberately not `Copy`: a [`ColorSpec::Icc`] configuration owns the
+/// profile bytes.
+#[derive(Debug, Clone, PartialEq)]
 pub struct JxlEncoder {
     /// Lossless, or lossy at a validated distance.
     mode: Mode,
@@ -28,6 +31,8 @@ pub struct JxlEncoder {
     effort: Effort,
     /// Codestream vs. ISO BMFF container framing.
     container: Container,
+    /// The colour interpretation signalled for the pixel samples.
+    color: ColorSpec,
 }
 
 impl Default for JxlEncoder {
@@ -53,6 +58,7 @@ impl JxlEncoder {
             mode: Mode::Lossless,
             effort: Effort::default(),
             container: Container::default(),
+            color: ColorSpec::default(),
         }
     }
 
@@ -64,6 +70,7 @@ impl JxlEncoder {
             mode: Mode::Lossy(distance),
             effort: Effort::default(),
             container: Container::default(),
+            color: ColorSpec::default(),
         }
     }
 
@@ -79,6 +86,18 @@ impl JxlEncoder {
     #[must_use]
     pub fn with_container(mut self, container: Container) -> Self {
         self.container = container;
+        self
+    }
+
+    /// Sets the [`ColorSpec`] signalled for the pixel samples (sRGB by default). Returns the
+    /// updated encoder for chaining.
+    ///
+    /// The encoder never converts pixels between colour spaces — this only declares how the
+    /// caller's samples are to be interpreted. An [`ColorSpec::Icc`] profile is validated against
+    /// the image's colour family when encoding.
+    #[must_use]
+    pub fn with_color(mut self, color: ColorSpec) -> Self {
+        self.color = color;
         self
     }
 
@@ -107,6 +126,12 @@ impl JxlEncoder {
     #[must_use]
     pub fn container(&self) -> Container {
         self.container
+    }
+
+    /// The configured [`ColorSpec`].
+    #[must_use]
+    pub fn color(&self) -> &ColorSpec {
+        &self.color
     }
 
     /// The internal lossless/lossy mode, for the FFI driver.

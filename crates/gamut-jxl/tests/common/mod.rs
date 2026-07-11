@@ -220,6 +220,88 @@ pub fn reconstruct_jpeg(data: &[u8]) -> Vec<u8> {
     jpeg
 }
 
+/// Runs a libjxl decoder up to the `COLOR_ENCODING` event and hands the live decoder to `read`.
+///
+/// Shared driver for the colour-profile oracle queries below.
+fn with_color_encoding_event<T>(data: &[u8], read: impl FnOnce(*mut dec::JxlDecoder) -> T) -> T {
+    let handle = unsafe { dec::JxlDecoderCreate(core::ptr::null()) };
+    assert!(!handle.is_null(), "JxlDecoderCreate returned null");
+    let decoder = Decoder(handle);
+
+    let st = unsafe {
+        dec::JxlDecoderSubscribeEvents(decoder.0, dec::JxlDecoderStatus::COLOR_ENCODING.0)
+    };
+    assert_eq!(st, dec::JxlDecoderStatus::SUCCESS, "SubscribeEvents failed");
+    let st = unsafe { dec::JxlDecoderSetInput(decoder.0, data.as_ptr(), data.len()) };
+    assert_eq!(st, dec::JxlDecoderStatus::SUCCESS, "SetInput failed");
+    unsafe { dec::JxlDecoderCloseInput(decoder.0) };
+
+    loop {
+        let status = unsafe { dec::JxlDecoderProcessInput(decoder.0) };
+        if status == dec::JxlDecoderStatus::COLOR_ENCODING {
+            return read(decoder.0);
+        }
+        assert!(
+            status != dec::JxlDecoderStatus::SUCCESS && status != dec::JxlDecoderStatus::ERROR,
+            "decoder finished without a COLOR_ENCODING event: {status:?}"
+        );
+    }
+}
+
+/// Reads the **structured** colour encoding libjxl reports for the stream's original profile, or
+/// `None` if the stream carries only an ICC profile (libjxl returns an error status then).
+///
+/// # Panics
+///
+/// Panics if the stream cannot be decoded to the colour-encoding event.
+pub fn encoded_color_profile(data: &[u8]) -> Option<ty::JxlColorEncoding> {
+    with_color_encoding_event(data, |dec| {
+        let mut color = MaybeUninit::<ty::JxlColorEncoding>::zeroed();
+        let st = unsafe {
+            dec::JxlDecoderGetColorAsEncodedProfile(
+                dec,
+                dec::JxlColorProfileTarget::ORIGINAL,
+                color.as_mut_ptr(),
+            )
+        };
+        (st == dec::JxlDecoderStatus::SUCCESS).then(|| unsafe { color.assume_init() })
+    })
+}
+
+/// Reads the ICC profile libjxl reports for the stream's original colour profile — the exact
+/// attached bytes when the stream embeds one, or a profile synthesized from the structured
+/// encoding otherwise. Returns `None` if libjxl cannot produce one.
+///
+/// # Panics
+///
+/// Panics if the stream cannot be decoded to the colour-encoding event.
+pub fn icc_profile(data: &[u8]) -> Option<Vec<u8>> {
+    with_color_encoding_event(data, |dec| {
+        let mut size = 0usize;
+        let st = unsafe {
+            dec::JxlDecoderGetICCProfileSize(dec, dec::JxlColorProfileTarget::ORIGINAL, &mut size)
+        };
+        if st != dec::JxlDecoderStatus::SUCCESS {
+            return None;
+        }
+        let mut icc = vec![0u8; size];
+        let st = unsafe {
+            dec::JxlDecoderGetColorAsICCProfile(
+                dec,
+                dec::JxlColorProfileTarget::ORIGINAL,
+                icc.as_mut_ptr(),
+                icc.len(),
+            )
+        };
+        assert_eq!(
+            st,
+            dec::JxlDecoderStatus::SUCCESS,
+            "GetColorAsICCProfile failed after a successful size query"
+        );
+        Some(icc)
+    })
+}
+
 /// RAII owner of a libjxl encoder handle.
 struct Encoder(*mut enc::JxlEncoder);
 
