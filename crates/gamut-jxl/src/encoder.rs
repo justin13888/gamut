@@ -35,6 +35,10 @@ pub struct JxlEncoder {
     color: ColorSpec,
     /// The display orientation signalled for the coded samples.
     orientation: Orientation,
+    /// Raw EXIF payload for an `Exif` container box, if any.
+    exif: Option<Vec<u8>>,
+    /// XMP (XML) payload for an `xml ` container box, if any.
+    xmp: Option<Vec<u8>>,
 }
 
 impl Default for JxlEncoder {
@@ -62,6 +66,8 @@ impl JxlEncoder {
             container: Container::default(),
             color: ColorSpec::default(),
             orientation: Orientation::default(),
+            exif: None,
+            xmp: None,
         }
     }
 
@@ -75,6 +81,8 @@ impl JxlEncoder {
             container: Container::default(),
             color: ColorSpec::default(),
             orientation: Orientation::default(),
+            exif: None,
+            xmp: None,
         }
     }
 
@@ -113,6 +121,30 @@ impl JxlEncoder {
     #[must_use]
     pub fn with_orientation(mut self, orientation: Orientation) -> Self {
         self.orientation = orientation;
+        self
+    }
+
+    /// Attaches a raw EXIF payload, stored as an `Exif` box in the ISO BMFF container. Returns the
+    /// updated encoder for chaining.
+    ///
+    /// `exif` is the TIFF-structured EXIF data itself (starting with the `II`/`MM` byte-order
+    /// mark); the 4-byte tiff-header offset the `Exif` box format requires is prepended
+    /// automatically. Because metadata lives in container boxes, encoding requires
+    /// [`Container::IsoBmff`] — combining metadata with [`Container::Codestream`] is a typed error
+    /// rather than a silent framing change.
+    #[must_use]
+    pub fn with_exif(mut self, exif: &[u8]) -> Self {
+        self.exif = Some(exif.to_vec());
+        self
+    }
+
+    /// Attaches an XMP (XML) packet, stored as an `xml ` box in the ISO BMFF container. Returns
+    /// the updated encoder for chaining.
+    ///
+    /// As with [`JxlEncoder::with_exif`], encoding then requires [`Container::IsoBmff`].
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: &str) -> Self {
+        self.xmp = Some(xmp.as_bytes().to_vec());
         self
     }
 
@@ -155,6 +187,18 @@ impl JxlEncoder {
         self.orientation
     }
 
+    /// The attached raw EXIF payload, if any.
+    #[must_use]
+    pub fn exif(&self) -> Option<&[u8]> {
+        self.exif.as_deref()
+    }
+
+    /// The attached XMP packet bytes, if any.
+    #[must_use]
+    pub fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
     /// The internal lossless/lossy mode, for the FFI driver.
     pub(crate) fn mode(&self) -> Mode {
         self.mode
@@ -168,7 +212,10 @@ impl JxlEncoder {
     /// stream also decodes as ordinary JPEG XL pixels. Because that metadata lives in a container
     /// box, the output is **always ISO BMFF container framing** — the configured [`Container`] does
     /// not apply here. The transcode is inherently lossless, so the lossless/lossy mode and
-    /// [`Distance`] do not apply either; only the configured [`Effort`] is honoured.
+    /// [`Distance`] do not apply either; only the configured [`Effort`] is honoured. Metadata
+    /// attached with [`JxlEncoder::with_exif`]/[`JxlEncoder::with_xmp`] is **not** applied on this
+    /// path: libjxl already carries the JPEG's own EXIF/XMP into the container automatically, and
+    /// duplicating those boxes would corrupt the reconstruction metadata's byte accounting.
     ///
     /// # Errors
     ///

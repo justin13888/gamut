@@ -98,6 +98,19 @@ const OUTPUT_CHUNK_MAX: usize = 64 * 1024 * 1024;
 /// any libjxl error whose detail maps to invalid input; [`Error::Unsupported`] if libjxl reports the
 /// configuration is unsupported.
 pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -> Result<usize> {
+    // Metadata boxes only exist in the ISO BMFF container. Rejecting the combination up front
+    // keeps the configured framing authoritative instead of letting libjxl silently force the
+    // container on.
+    let has_boxes = cfg.exif().is_some() || cfg.xmp().is_some();
+    if has_boxes && cfg.container() != crate::Container::IsoBmff {
+        return Err(Error::InvalidInput(
+            "JXL: Exif/XMP metadata requires the ISO BMFF container",
+        ));
+    }
+    if cfg.exif().is_some_and(<[u8]>::is_empty) || cfg.xmp().is_some_and(<[u8]>::is_empty) {
+        return Err(Error::InvalidInput("JXL: empty metadata payload"));
+    }
+
     let alpha_channels = u32::from(spec.has_alpha);
     let total_channels = spec.num_color_channels + alpha_channels;
     let bytes_per_sample = (spec.bits_per_sample / 8) as usize;
@@ -145,6 +158,11 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
     };
     // SAFETY: `enc.0` is a valid, freshly created encoder; no output has been produced.
     enc.check(unsafe { sys_enc::JxlEncoderUseContainer(enc.0, use_container) })?;
+
+    if has_boxes {
+        // SAFETY: `enc.0` is valid and no output has been produced yet.
+        enc.check(unsafe { sys_enc::JxlEncoderUseBoxes(enc.0) })?;
+    }
 
     // Basic info: initialise to defaults, then set only the fields we control.
     // Start from zeroed storage: all-zero is a valid bit pattern for every field of this POD
@@ -227,10 +245,40 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
         sys_enc::JxlEncoderAddImageFrame(frame_settings, &format, buffer, byte_len)
     })?;
 
+    // Metadata boxes, appended after the frame. The `Exif` box format requires a 4-byte
+    // big-endian offset to the tiff header before the payload; gamut takes the raw EXIF data and
+    // prepends the standard zero offset itself. XMP goes verbatim into an `xml ` box. Neither is
+    // Brotli-compressed (`compress_box = FALSE`): the bytes must stay byte-exact for tests and
+    // external readers that do not implement `brob` unwrapping.
+    if let Some(exif) = cfg.exif() {
+        let mut payload = Vec::with_capacity(4 + exif.len());
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(exif);
+        add_box(&enc, b"Exif", &payload)?;
+    }
+    if let Some(xmp) = cfg.xmp() {
+        add_box(&enc, b"xml ", xmp)?;
+    }
+
     // SAFETY: `enc.0` is valid; no further frames or boxes will be added.
     unsafe { sys_enc::JxlEncoderCloseInput(enc.0) };
 
     drain(&enc, out)
+}
+
+/// Adds one uncompressed metadata box of the given 4-byte type to the container output.
+fn add_box(enc: &Encoder, box_type: &[u8; 4], contents: &[u8]) -> Result<()> {
+    // SAFETY: `enc.0` is valid with `JxlEncoderUseBoxes` enabled; `box_type` points to exactly 4
+    // readable bytes and `contents` to `contents.len()` readable bytes, both copied internally.
+    enc.check(unsafe {
+        sys_enc::JxlEncoderAddBox(
+            enc.0,
+            box_type.as_ptr().cast::<core::ffi::c_char>(),
+            contents.as_ptr(),
+            contents.len(),
+            sys_ty::JxlBool::FALSE,
+        )
+    })
 }
 
 /// Losslessly transcodes a complete JPEG codestream into a JPEG XL container with JPEG
