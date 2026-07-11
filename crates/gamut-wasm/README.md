@@ -28,6 +28,16 @@ await init();
 const avifBytes = encodeAvif(rgba, width, height);
 ```
 
+## JPEG XL note
+
+gamut-wasm targets `wasm32-unknown-unknown` (the wasm-bindgen ABI). On that target JPEG XL is
+**decode-only**: gamut-jxl's decoder is pure Rust (jxl-rs) and works everywhere, but its encoder
+wraps the C++ libjxl reference implementation, and no C/C++ toolchain emits archives linkable into
+`wasm32-unknown-unknown` — an upstream toolchain boundary, not a build-system gap. Consumers who
+need JXL *encode* in WebAssembly can build for **`wasm32-unknown-emscripten`** and use `gamut-jxl`
+directly (its `gamut-jxl-sys` builds libjxl with the emsdk toolchain there); browser-bundle JXL
+encode would require a pure-Rust JPEG XL encoder, which does not exist yet (jxl-rs ships none).
+
 ## Status
 
 Placeholder — implementation pending.

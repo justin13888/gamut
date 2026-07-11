@@ -95,13 +95,39 @@ let encoder = JxlEncoder::lossy(Distance::new(1.0).expect("valid distance"))
 let stream = encoder.encode_to_vec(image).expect("encode");
 ```
 
+Signal colour, orientation, and metadata (the encoder never converts pixels — it declares how they
+are to be interpreted), or losslessly re-pack an existing JPEG:
+
+```rust
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb16};
+use gamut_jxl::{ColorSpec, Container, JxlEncoder, Orientation};
+
+let dims = Dimensions { width: 64, height: 64 };
+let pixels = vec![0u16; (64 * 64 * 3) as usize];
+let image = ImageRef::<Rgb16>::new(&pixels, dims).expect("buffer length matches dimensions");
+
+// HDR-coded u16 samples signalled as BT.2100 PQ, displayed rotated, with an XMP packet.
+let encoder = JxlEncoder::lossless()
+    .with_color(ColorSpec::Pq)                   // also: LinearSrgb, Hlg, Icc(profile bytes)
+    .with_orientation(Orientation::Rotate90Cw)   // the eight EXIF orientations
+    .with_container(Container::IsoBmff)          // metadata boxes need the container
+    .with_xmp(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#);
+let stream = encoder.encode_to_vec(image).expect("encode");
+
+// jbrd: reversibly transcode a JPEG — the original .jpg is reconstructible bit-for-bit.
+let jpeg: &[u8] = include_bytes!("tests/fixtures/tiny_baseline.jpg");
+let mut jxl = Vec::new();
+JxlEncoder::new().recompress_jpeg(jpeg, &mut jxl).expect("recompress");
+```
+
 `JxlEncoder` implements [`gamut_core::EncodeImage`] and `JxlDecoder` implements
 [`gamut_core::DecodeImage`] for exactly eight pixel layouts — 8- and 16-bit **Gray**, **GrayAlpha**,
 **RGB** and **RGBA** — so handing either an unsupported layout is a compile error. `lossy` takes a
 validated [`Distance`] in `(0.0, 25.0]` (`0.0`, libjxl's lossless sentinel, is deliberately rejected
-so lossless stays a distinct constructor). The `recompress_jpeg` method reserves the API slot for
-libjxl's bit-exact JPEG-reconstruction (jbrd) path; it currently returns `Unsupported` (see
-[STATUS.md](STATUS.md)).
+so lossless stays a distinct constructor). On the decode side,
+`JxlDecoder::embedded_icc_profile` surfaces the exact ICC bytes a stream embeds (`None` for
+structured encodings like sRGB/PQ) without decoding pixels; pixel decoding applies no colour
+transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
 
 ## Features
 

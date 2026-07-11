@@ -24,11 +24,13 @@ implementation wins.
   FFI boundary to audit. `cargo build` cross-compiles cleanly to wasm32, aarch64, and musl
   targets that libaom makes miserable — one toolchain, reproducible builds, no system-library
   version skew. CI proves it each merge: the [Extended workflow](.github/workflows/extended.yml)
-  `cargo check`s the library surface for `wasm32-unknown-unknown`, `aarch64-unknown-linux-gnu`,
-  and `x86_64-unknown-linux-musl`. The one deliberate exception is `gamut-jxl`'s optional
-  `encode` feature, which statically builds the libjxl reference encoder (cmake + a C++ toolchain
-  at build time) — a maintainer-approved departure documented in that crate; its pure-Rust
-  `decode` feature keeps JPEG XL C-free and `wasm32`-clean.
+  `cargo check`s the library surface for `wasm32-unknown-unknown`, `wasm32-unknown-emscripten`,
+  `aarch64-unknown-linux-gnu`, and `x86_64-unknown-linux-musl`. The one deliberate exception is
+  `gamut-jxl`'s optional `encode` feature, which statically builds the libjxl reference encoder
+  (cmake + a C++ toolchain at build time; the emsdk toolchain on `wasm32-unknown-emscripten`,
+  where a dedicated Extended lane runs the full JXL test suite under node) — a
+  maintainer-approved departure documented in that crate; its pure-Rust `decode` feature keeps
+  JPEG XL C-free and available on every `wasm32` target.
 
 - **WASM as a first-class target, not an afterthought.** The C codecs run through Emscripten
   come out large, slow to instantiate, and awkward to tree-shake. A native Rust → wasm build
@@ -155,8 +157,10 @@ All cargo metadata except per-crate `version` is centralized in the root
 Building the **shipped crates** needs only the Rust toolchain — they are pure Rust with no C
 dependencies, with one deliberate exception: `gamut-jxl`'s optional `encode` feature statically
 builds the libjxl reference encoder via `gamut-jxl-sys`, which needs **cmake and a C++ toolchain**
-at build time (a maintainer-approved departure for JPEG XL; its `decode` feature stays pure Rust,
-and `wasm32` gets a decode-only JXL). Building the **cross-check tests** additionally needs a C
+at build time (a maintainer-approved departure for JPEG XL; its `decode` feature stays pure Rust;
+`wasm32-unknown-emscripten` gets the full encoder via the emsdk toolchain, while
+`wasm32-unknown-unknown` gets a decode-only JXL — no C++ toolchain targets that ABI). Building the
+**cross-check tests** additionally needs a C
 toolchain plus
 pkg-config — the one build dep that stays a system package (CMake, Ninja and Meson come from
 mise; [nasm](https://www.nasm.us), needed to assemble the aom/dav1d x86 SIMD, is built from a

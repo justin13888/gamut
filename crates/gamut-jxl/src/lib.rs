@@ -16,9 +16,13 @@
 //! # Encoding
 //!
 //! Build a [`JxlEncoder`] — [`JxlEncoder::lossless`] (the default) or [`JxlEncoder::lossy`] with a
-//! validated [`Distance`] — tune it with [`JxlEncoder::with_effort`] and
-//! [`JxlEncoder::with_container`], then encode any of the eight supported pixel layouts (8/16-bit
-//! grayscale, gray+alpha, RGB, RGBA) through the [`EncodeImage`](gamut_core::EncodeImage) trait.
+//! validated [`Distance`] — tune it with the chainable builders ([`JxlEncoder::with_effort`],
+//! [`JxlEncoder::with_container`], [`JxlEncoder::with_color`] for sRGB/linear/PQ/HLG/ICC
+//! signalling, [`JxlEncoder::with_orientation`], and [`JxlEncoder::with_exif`] /
+//! [`JxlEncoder::with_xmp`] for container metadata boxes), then encode any of the eight supported
+//! pixel layouts (8/16-bit grayscale, gray+alpha, RGB, RGBA) through the
+//! [`EncodeImage`](gamut_core::EncodeImage) trait. [`JxlEncoder::recompress_jpeg`] losslessly
+//! re-packs an existing JPEG so the original is reconstructible bit-for-bit (jbrd).
 //! Requires the `encode` feature (on by default; a no-op on `wasm32` targets other than
 //! emscripten — see below).
 //!
