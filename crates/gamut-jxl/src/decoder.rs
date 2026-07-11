@@ -76,6 +76,18 @@ impl RawFrame {
     }
 }
 
+/// Whether a decoded output buffer holding `bytes_per_sample`-wide samples needs a 2-byte-aligned
+/// base address.
+///
+/// jxl-rs's interleaved 16-bit output fast path reinterprets the byte buffer as `&mut [u16]` only
+/// when it is 2-byte aligned, and **silently writes nothing** into an unaligned buffer (it returns a
+/// zero written-length), so a decoded 16-bit image would come back as all-zero garbage. 8-bit output
+/// is written byte-wise and has no alignment requirement. Hence exactly the 2-byte sample width needs
+/// alignment. Factored out so the decision is unit-tested rather than buried in a call argument.
+fn needs_row_alignment(bytes_per_sample: usize) -> bool {
+    bytes_per_sample == 2
+}
+
 /// Allocates a zeroed byte buffer of `total` bytes and returns it with an offset into it such that
 /// `buf[offset..]` begins at an even address when `align2` is set.
 ///
@@ -188,7 +200,7 @@ fn decode_raw<S: ConvSample>(
     let total = bytes_per_row
         .checked_mul(height as usize)
         .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
-    let (mut backing, offset) = aligned_backing(total, S::BYTES == 2);
+    let (mut backing, offset) = aligned_backing(total, needs_row_alignment(S::BYTES));
 
     // WithImageInfo -> WithFrameInfo: parse the frame header.
     let decoder = match decoder.process(&mut input).map_err(map_decode_error)? {
@@ -350,6 +362,14 @@ mod tests {
     #[test]
     fn new_and_default_are_equal() {
         assert_eq!(JxlDecoder::new(), JxlDecoder::default());
+    }
+
+    #[test]
+    fn needs_row_alignment_only_for_two_byte_samples() {
+        // 16-bit (2-byte) output must be aligned; 8-bit (1-byte) must not force alignment. This pins
+        // the decision that guards jxl-rs's alignment-sensitive interleaved-u16 fast path.
+        assert!(!needs_row_alignment(1), "8-bit needs no alignment");
+        assert!(needs_row_alignment(2), "16-bit needs 2-byte alignment");
     }
 
     #[test]

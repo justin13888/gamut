@@ -84,9 +84,16 @@ mod encode {
             ));
         }
 
-        // API_USAGE is intentionally not exercised here: it fires a `debug_assert!` that would
-        // panic under `cfg(debug_assertions)` (the default test profile). Its release-mode mapping
-        // is covered by inspection; asserting it would require a release-profile test harness.
+        // API_USAGE fires a `debug_assert!` (an internal API-ordering bug in this crate). Under a
+        // debug build that panics, so it is pinned with a `should_panic` test — which also kills the
+        // "delete the API_USAGE arm" mutant, since deleting it drops the assertion. Gated to debug
+        // builds because the assertion (and thus the panic) is compiled out under `--release`.
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic = "internal encoder API misuse"]
+        fn api_usage_debug_asserts() {
+            let _ = map_encoder_error(JxlEncoderError::API_USAGE);
+        }
     }
 }
 
@@ -223,9 +230,16 @@ mod decode {
             ));
         }
 
-        // `WrongBufferCount` / `InvalidOutputBufferSize` are intentionally not exercised here: they
-        // fire a `debug_assert!` that would panic under the default (debug) test profile. Their
-        // release-mode mapping is covered by inspection.
+        // `WrongBufferCount` / `InvalidOutputBufferSize` fire a `debug_assert!` (an internal
+        // buffer-sizing bug in this crate's own decoder driver). As with the encoder half, the debug
+        // panic is pinned with a `should_panic` test — which also kills the "delete this arm" mutant.
+        // Gated to debug builds because the assertion is compiled out under `--release`.
+        #[cfg(debug_assertions)]
+        #[test]
+        #[should_panic = "internal decoder buffer mismatch"]
+        fn wrong_buffer_count_debug_asserts() {
+            let _ = map_decode_error(JxlError::WrongBufferCount(1, 2));
+        }
     }
 }
 

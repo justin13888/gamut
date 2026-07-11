@@ -377,4 +377,35 @@ exclude_re = [
     # histogram with <=3 distinct code-length symbols, which the length-limited builder never produces
     # for a real alphabet, so it is unreachable.
     'prefix\.rs:497:28: replace > with',
+    # gamut-jxl (issue #243) — the crate wraps libjxl (encode) and jxl-rs (decode); these are the
+    # only survivors, all in the unsafe `ffi.rs` glue and all unobservable through the public API.
+    # `<impl Drop for Encoder>::drop`: its sole effect is `JxlEncoderDestroy`, freeing the libjxl
+    # handle. Skipping it leaks the encoder but changes no produced byte and no Ok/Err outcome, so no
+    # behavioural test can observe it (a leak checker is out of scope) — unobservable ⇒ unkillable.
+    'replace <impl Drop for Encoder>::drop with \(\)',
+    # `Encoder::check` maps a libjxl setup status to a `Result`, returning `Ok(())` on SUCCESS. gamut
+    # validates every parameter it forwards *before* the FFI — dimensions > 0 (`Dimensions`), distance
+    # ∈ (0,25] (`Distance`), effort ∈ 1..=10 (`Effort`), and a fixed set of supported pixel formats —
+    # and libjxl's setters accept all of them, so in every reachable state the checked status IS
+    # SUCCESS and `check` already returns `Ok(())`. Replacing the whole body with `Ok(())` is therefore
+    # indistinguishable on every reachable path (the error path is defensive, like the av1/tiff
+    # zero-dimension and allocation guards above); the error-detail mapping it would otherwise invoke
+    # is unit-tested directly in `error.rs`. Even under the mutant a real mid-sequence libjxl failure
+    # still surfaces: the ProcessOutput ERROR arm reads `JxlEncoderGetError` directly, bypassing
+    # `check`.
+    'replace Encoder::check -> Result<\(\)> with Ok\(\(\)\)',
+    # ProcessOutput buffer-growth *reservation* constants: `OUTPUT_CHUNK_INIT = 64 * 1024` and
+    # `OUTPUT_CHUNK_MAX = 64 * 1024 * 1024`. These size the `Vec` reservation the encoded stream is
+    # drained into; libjxl only requires `avail_out >= 32`, and the produced bytes are identical for
+    # any chunk schedule that keeps making progress. Each *excluded* mutation keeps the constant well
+    # above 32 (INIT `* → +` = 1088; the MAX `* → +`/`* → /` mutants stay ≥ 65 536), so the drain loop
+    # still terminates with byte-identical output — a free choice, unobservable. The `* → /` mutants
+    # that instead drive a constant to 0 (INIT → 0, and the MAX *first* factor `64 / 1024` → 0) make
+    # the loop spin on 0-byte reservations and ARE caught (via timeout) by
+    # `multi_chunk_output_drain_roundtrips_bit_exact`, which also catches deleting the
+    # `NEED_MORE_OUTPUT` arm — so those are deliberately NOT excluded here.
+    'gamut-jxl/src/ffi\.rs:84:37: replace \* with \+',
+    'gamut-jxl/src/ffi\.rs:87:36: replace \* with \+',
+    'gamut-jxl/src/ffi\.rs:87:43: replace \* with \+',
+    'gamut-jxl/src/ffi\.rs:87:43: replace \* with /',
 ]

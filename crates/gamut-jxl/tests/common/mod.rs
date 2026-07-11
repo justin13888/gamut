@@ -262,6 +262,46 @@ pub fn encode_animated_rgb8(width: u32, height: u32, frames: &[Vec<u8>]) -> Vec<
     out
 }
 
+/// A deterministic per-sample value in `0..=max`, non-flat so lossless is meaningfully exercised.
+///
+/// A low-frequency gradient plus a coarse `(x/8) ^ (y/8)` block texture and a per-channel offset. The
+/// canonical generator shared by the differential test files; the 16-bit spread (`× 251`) fills the
+/// wider range without aliasing the 8-bit pattern.
+pub fn raw(x: u32, y: u32, c: u32, max: u32) -> u32 {
+    let gradient = x.wrapping_mul(4).wrapping_add(y.wrapping_mul(3));
+    let texture = ((x / 8) ^ (y / 8)).wrapping_mul(5);
+    let channel = c.wrapping_mul(37);
+    let base = gradient.wrapping_add(texture).wrapping_add(channel);
+    let scale = if max > 0xFF { 251 } else { 1 };
+    base.wrapping_mul(scale) & max
+}
+
+/// Generates `w × h` interleaved 8-bit samples with `ch` channels using [`raw`].
+pub fn gen_u8(w: u32, h: u32, ch: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(w as usize * h as usize * ch);
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..ch as u32 {
+                v.push(raw(x, y, c, 0xFF) as u8);
+            }
+        }
+    }
+    v
+}
+
+/// Generates `w × h` interleaved 16-bit samples with `ch` channels using [`raw`].
+pub fn gen_u16(w: u32, h: u32, ch: usize) -> Vec<u16> {
+    let mut v = Vec::with_capacity(w as usize * h as usize * ch);
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..ch as u32 {
+                v.push(raw(x, y, c, 0xFFFF) as u16);
+            }
+        }
+    }
+    v
+}
+
 /// Peak signal-to-noise ratio in dB over two equal-length `u8` sample sets, treating them as a flat
 /// signal in `0..=255`. Returns `f64::INFINITY` when identical.
 pub fn psnr_u8(a: &[u8], b: &[u8]) -> f64 {
