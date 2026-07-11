@@ -42,24 +42,9 @@ pub struct JxlEncoder {
 }
 
 impl Default for JxlEncoder {
-    /// The default encoder is **lossless** — identical to [`JxlEncoder::lossless`].
+    /// The default encoder is **lossless** — identical to [`JxlEncoder::lossless`], which (with
+    /// [`JxlEncoder::new`]) is an intent-revealing alias for this canonical construction.
     fn default() -> Self {
-        Self::lossless()
-    }
-}
-
-impl JxlEncoder {
-    /// Creates an encoder with the default configuration; equivalent to [`JxlEncoder::lossless`].
-    #[must_use]
-    pub fn new() -> Self {
-        Self::lossless()
-    }
-
-    /// Creates an encoder that produces a **lossless** stream — the decoded image is bit-exact to the
-    /// input. This is the default mode, so [`JxlEncoder::new`] and [`JxlEncoder::default`] return the
-    /// same encoder; it exists to pair with [`JxlEncoder::lossy`] and make intent explicit.
-    #[must_use]
-    pub fn lossless() -> Self {
         Self {
             mode: Mode::Lossless,
             effort: Effort::default(),
@@ -70,6 +55,22 @@ impl JxlEncoder {
             xmp: None,
         }
     }
+}
+
+impl JxlEncoder {
+    /// Creates an encoder with the default configuration; equivalent to [`JxlEncoder::lossless`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates an encoder that produces a **lossless** stream — the decoded image is bit-exact to the
+    /// input. This is the default mode, so [`JxlEncoder::new`] and [`JxlEncoder::default`] return the
+    /// same encoder; it exists to pair with [`JxlEncoder::lossy`] and make intent explicit.
+    #[must_use]
+    pub fn lossless() -> Self {
+        Self::default()
+    }
 
     /// Creates an encoder that produces a **lossy** stream at the given Butteraugli [`Distance`]
     /// (`1.0` = visually lossless; larger = smaller file, lower quality).
@@ -77,12 +78,7 @@ impl JxlEncoder {
     pub fn lossy(distance: Distance) -> Self {
         Self {
             mode: Mode::Lossy(distance),
-            effort: Effort::default(),
-            container: Container::default(),
-            color: ColorSpec::default(),
-            orientation: Orientation::default(),
-            exif: None,
-            xmp: None,
+            ..Self::default()
         }
     }
 

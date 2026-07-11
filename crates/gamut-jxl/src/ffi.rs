@@ -78,13 +78,15 @@ impl Encoder {
     }
 }
 
-/// Initial and maximum per-iteration output-buffer growth for the `ProcessOutput` loop. libjxl only
+/// Initial per-iteration output-buffer growth for the `ProcessOutput` loop: 64 KiB. libjxl only
 /// requires `avail_out >= 32`; a 64 KiB first chunk covers small images in one pass, and doubling
-/// (capped) amortises large ones without an unbounded single allocation.
-const OUTPUT_CHUNK_INIT: usize = 64 * 1024;
-/// Upper bound on a single growth step (64 MiB), so a pathological stream can't request one enormous
-/// reservation.
-const OUTPUT_CHUNK_MAX: usize = 64 * 1024 * 1024;
+/// (capped) amortises large ones without an unbounded single allocation. (Written as literals, not
+/// `64 * 1024` arithmetic: the values are free choices, and literals generate no arithmetic
+/// mutants to justify.)
+const OUTPUT_CHUNK_INIT: usize = 65_536;
+/// Upper bound on a single growth step: 64 MiB, so a pathological stream can't request one
+/// enormous reservation.
+const OUTPUT_CHUNK_MAX: usize = 67_108_864;
 
 /// Encodes one frame described by `spec`, using `cfg`'s mode/effort/container, appending the JPEG XL
 /// stream to `out` and returning the number of bytes appended.

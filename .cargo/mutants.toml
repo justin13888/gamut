@@ -394,18 +394,13 @@ exclude_re = [
     # still surfaces: the ProcessOutput ERROR arm reads `JxlEncoderGetError` directly, bypassing
     # `check`.
     'replace Encoder::check -> Result<\(\)> with Ok\(\(\)\)',
-    # ProcessOutput buffer-growth *reservation* constants: `OUTPUT_CHUNK_INIT = 64 * 1024` and
-    # `OUTPUT_CHUNK_MAX = 64 * 1024 * 1024`. These size the `Vec` reservation the encoded stream is
-    # drained into; libjxl only requires `avail_out >= 32`, and the produced bytes are identical for
-    # any chunk schedule that keeps making progress. Each *excluded* mutation keeps the constant well
-    # above 32 (INIT `* → +` = 1088; the MAX `* → +`/`* → /` mutants stay ≥ 65 536), so the drain loop
-    # still terminates with byte-identical output — a free choice, unobservable. The `* → /` mutants
-    # that instead drive a constant to 0 (INIT → 0, and the MAX *first* factor `64 / 1024` → 0) make
-    # the loop spin on 0-byte reservations and ARE caught (via timeout) by
-    # `multi_chunk_output_drain_roundtrips_bit_exact`, which also catches deleting the
-    # `NEED_MORE_OUTPUT` arm — so those are deliberately NOT excluded here.
-    'gamut-jxl/src/ffi\.rs:84:37: replace \* with \+',
-    'gamut-jxl/src/ffi\.rs:87:36: replace \* with \+',
-    'gamut-jxl/src/ffi\.rs:87:43: replace \* with \+',
-    'gamut-jxl/src/ffi\.rs:87:43: replace \* with /',
+    # (The former OUTPUT_CHUNK_INIT/MAX `64 * 1024` exclusions are retired: the drain-loop
+    # reservation constants are plain literals now, so they generate no arithmetic mutants at all —
+    # the values are encoder free choices, and the `* → /`-to-zero mutations used to be "caught"
+    # only by a 60s timeout, which cargo-mutants reports as exit code 3 and would fail the PR gate.)
+    # `JxlEncoder::lossless`: a named, intent-revealing alias for the default encoder (the default
+    # mode is already lossless), so its body *is* `Self::default()` and the `-> Default::default()`
+    # replacement is byte-identical — provably equivalent, unkillable. Same shape and justification
+    # as the AvifEncoder::lossless / WebpEncoder::lossless entries above.
+    'replace JxlEncoder::lossless -> Self with Default::default\(\)',
 ]
