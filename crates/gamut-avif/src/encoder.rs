@@ -27,7 +27,7 @@ struct ImageTransform {
 /// [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) trait, taking a typed [`ImageRef`].
 /// [`AvifEncoder::with_rotation`] / [`AvifEncoder::with_mirror`] add `irot`/`imir`
 /// display-orientation transforms.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AvifEncoder {
     /// Lossless/lossy mode and the lossy quality factor.
     config: AvifConfig,
@@ -78,10 +78,10 @@ impl AvifEncoder {
         }
     }
 
-    /// Returns the encoder's configuration.
+    /// Returns a snapshot of the encoder's configuration.
     #[must_use]
     pub fn config(&self) -> AvifConfig {
-        self.config
+        self.config.clone()
     }
 
     /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
