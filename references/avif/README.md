@@ -31,7 +31,8 @@ The only numeric mapping `gamut-avif` itself defines (everything else is delegat
 `0..=100` `quality` factor → the AV1 `base_q_idx` passed to `gamut-av1`. There is no single
 standard for this — libaom/libavif map a quality/`cq-level` to the quantizer through encoder-internal
 tables — so gamut defines its own simple, monotonic mapping (finer, metric- or size-targeting rate
-control is future work, tracked in `STATUS.md`):
+control is future work, tracked in `STATUS.md`). This mapping — including the silent clamp of
+`quality > 100` to `100` — is a **frozen `gamut-avif` v1 contract**:
 
 ```text
 lossless()  ->  base_q_idx = 0          # AV1 CodedLossless (Walsh–Hadamard); bit-exact
