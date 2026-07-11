@@ -34,6 +34,16 @@
 //! links) for cross-compile / MSRV verification boxes that lack cmake or a cross C++ toolchain. Do
 //! not set it for builds that actually link (tests, binaries).
 //!
+//! # WebAssembly
+//!
+//! On **`wasm32-unknown-emscripten`** the build drives the same vendored libjxl through the emsdk
+//! toolchain (requires `emcc` on `PATH`; libjxl officially supports wasm via emscripten), so the
+//! full encoder works there. On every other `wasm32` target (`wasm32-unknown-unknown`,
+//! `wasm32-wasip*`) the native build is skipped unconditionally: no C/C++ toolchain can produce
+//! archives linkable into those ABIs — an upstream toolchain boundary, not a build-system gap —
+//! and `gamut-jxl` compiles its encoder out there. `GAMUT_JXL_SYS_LIBJXL_DIR` overrides where the
+//! emscripten lane finds the vendored libjxl source (for `cargo vendor` layouts).
+//!
 //! # Licensing
 //!
 //! This crate statically links libjxl and its bundled third-party libraries under a mix of

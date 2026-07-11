@@ -754,6 +754,7 @@ dependencies = [
 name = "gamut-jxl-sys"
 version = "0.1.0"
 dependencies = [
+ "cmake",
  "jpegxl-src",
 ]
 
