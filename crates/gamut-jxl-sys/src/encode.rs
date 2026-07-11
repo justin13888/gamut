@@ -217,6 +217,22 @@ unsafe extern "C" {
         size: usize,
     ) -> JxlEncoderStatus;
 
+    /// Sets the complete JPEG codestream to transcode for the next frame
+    /// (`JxlEncoderAddJPEGFrame`). If [`JxlEncoderSetBasicInfo`]/[`JxlEncoderSetColorEncoding`] have
+    /// not been called, they are implied from the JPEG parameters. With
+    /// [`JxlEncoderStoreJPEGMetadata`] enabled and a single JPEG frame added, the original JPEG
+    /// codestream becomes losslessly reconstructible from the output.
+    ///
+    /// # Safety
+    ///
+    /// `frame_settings` must be valid. `buffer` must point to at least `size` readable bytes forming
+    /// the JPEG codestream; the contents are copied internally.
+    pub fn JxlEncoderAddJPEGFrame(
+        frame_settings: *const JxlEncoderFrameSettings,
+        buffer: *const u8,
+        size: usize,
+    ) -> JxlEncoderStatus;
+
     /// Closes all input to the encoder, signalling that no further frames or boxes will be added
     /// (`JxlEncoderCloseInput`). Must be called before the final [`JxlEncoderProcessOutput`].
     ///
@@ -255,6 +271,48 @@ unsafe extern "C" {
     /// `enc` must be a valid encoder and no output must have been produced yet.
     pub fn JxlEncoderUseContainer(enc: *mut JxlEncoder, use_container: JxlBool)
     -> JxlEncoderStatus;
+
+    /// Configures the encoder to store JPEG reconstruction metadata (the `jbrd` box) in the
+    /// container, making the added JPEG frame losslessly reconstructible
+    /// (`JxlEncoderStoreJPEGMetadata`). Must be set before encoding starts; implies container
+    /// output.
+    ///
+    /// # Safety
+    ///
+    /// `enc` must be a valid encoder and no output must have been produced yet.
+    pub fn JxlEncoderStoreJPEGMetadata(
+        enc: *mut JxlEncoder,
+        store_jpeg_metadata: JxlBool,
+    ) -> JxlEncoderStatus;
+
+    /// Declares that metadata boxes will be added with [`JxlEncoderAddBox`]
+    /// (`JxlEncoderUseBoxes`). Must be called before the first [`JxlEncoderProcessOutput`]; forces
+    /// container output.
+    ///
+    /// # Safety
+    ///
+    /// `enc` must be a valid encoder and no output must have been produced yet.
+    pub fn JxlEncoderUseBoxes(enc: *mut JxlEncoder) -> JxlEncoderStatus;
+
+    /// Adds an ISO BMFF metadata box (e.g. `"Exif"`, `"xml "`) to the container
+    /// (`JxlEncoderAddBox`). Requires a prior [`JxlEncoderUseBoxes`]. With `compress_box` set the
+    /// box is stored Brotli-compressed as a `brob` box.
+    ///
+    /// In C the `JxlBoxType` parameter is a `char[4]` array, which decays to a `char` pointer at
+    /// the ABI level; it is declared here as `*const c_char` pointing to exactly 4 bytes.
+    ///
+    /// # Safety
+    ///
+    /// `enc` must be a valid encoder. `box_type` must point to at least 4 readable bytes (the box
+    /// type, not NUL-terminated). `contents` must point to at least `size` readable bytes; the
+    /// contents are copied internally.
+    pub fn JxlEncoderAddBox(
+        enc: *mut JxlEncoder,
+        box_type: *const core::ffi::c_char,
+        contents: *const u8,
+        size: usize,
+        compress_box: JxlBool,
+    ) -> JxlEncoderStatus;
 
     /// Fills a [`JxlColorEncoding`] with the sRGB profile, gray or color (`JxlColorEncodingSetToSRGB`).
     ///
