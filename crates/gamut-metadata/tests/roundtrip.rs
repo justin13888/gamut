@@ -15,7 +15,7 @@ use gamut_metadata::{
 fn exif_bytes() -> Vec<u8> {
     let mut exif = Exif::new(ByteOrder::LittleEndian);
     exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
-    exif.to_bytes()
+    exif.to_bytes().expect("a one-tag EXIF blob serializes")
 }
 
 fn icc_bytes() -> Vec<u8> {

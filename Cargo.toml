@@ -85,7 +85,7 @@ gamut-isobmff = { path = "crates/gamut-isobmff", version = "1.0.0" }
 gamut-riff = { path = "crates/gamut-riff", version = "0.1.1" }
 gamut-av1 = { path = "crates/gamut-av1", version = "0.3.0" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.1" }
-gamut-avif = { path = "crates/gamut-avif", version = "0.3.0" }
+gamut-avif = { path = "crates/gamut-avif", version = "1.0.0" }
 gamut-jxl = { path = "crates/gamut-jxl", version = "0.2.0" }
 gamut-webp = { path = "crates/gamut-webp", version = "0.2.0" }
 gamut-heic = { path = "crates/gamut-heic", version = "0.2.0" }
