@@ -739,10 +739,8 @@ dependencies = [
 name = "gamut-jxl"
 version = "0.2.0"
 dependencies = [
- "gamut-bitstream",
- "gamut-color",
  "gamut-core",
- "gamut-dsp",
+ "gamut-jxl-sys",
 ]
 
 [[package]]

@@ -1,0 +1,278 @@
+//! The single `unsafe` module: a thin, RAII-wrapped driver over the reference libjxl encoder
+//! (`gamut_jxl_sys::encode`).
+//!
+//! Everything that touches a raw pointer lives here, behind `#![allow(unsafe_code)]`, so the rest of
+//! `gamut-jxl` stays under the crate-wide `#![deny(unsafe_code)]`. The public entry point is
+//! [`encode`]: it takes a fully-described [`FrameSpec`] plus the caller's [`JxlEncoder`] config,
+//! runs libjxl's create → configure → add-frame → process-output sequence with **every** status
+//! checked, and appends the encoded stream to the caller's buffer.
+#![allow(unsafe_code)]
+
+use core::ffi::c_void;
+
+use gamut_core::{Dimensions, Error, Result};
+use gamut_jxl_sys::{encode as sys_enc, types as sys_ty};
+
+use crate::config::Mode;
+use crate::encoder::JxlEncoder;
+use crate::error::map_encoder_error;
+
+/// The interleaved sample buffer for a frame, tagged with its storage width.
+///
+/// libjxl consumes the samples as raw bytes with a declared [`sys_ty::JxlDataType`]; the `U16` bytes
+/// cross the boundary in **native** endianness (see [`encode`]), matching the `&[u16]`'s in-memory
+/// representation exactly.
+pub(crate) enum Samples<'a> {
+    /// 8-bit samples, one byte each.
+    U8(&'a [u8]),
+    /// 16-bit samples, two native-endian bytes each.
+    U16(&'a [u16]),
+}
+
+/// A complete description of the single frame to encode.
+///
+/// Built by the [`crate::encoder`] `EncodeImage` impls from a validated `ImageRef`, so the fields are
+/// mutually consistent by construction: `samples.len()` is exactly
+/// `width * height * (num_color_channels + has_alpha as u32)`, and `bits_per_sample` matches the
+/// `Samples` variant (8 ⇒ `U8`, 16 ⇒ `U16`).
+pub(crate) struct FrameSpec<'a> {
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Coded bit depth per sample: 8 or 16.
+    pub bits_per_sample: u32,
+    /// Number of colour channels: 1 (grayscale) or 3 (RGB). Excludes alpha.
+    pub num_color_channels: u32,
+    /// Whether an interleaved alpha channel follows the colour channels.
+    pub has_alpha: bool,
+    /// The interleaved samples, row-major.
+    pub samples: Samples<'a>,
+}
+
+/// RAII owner of a libjxl encoder handle. [`Drop`] frees it (and, with it, every frame-settings
+/// object libjxl created for it), so an early `?` return can never leak the encoder.
+struct Encoder(*mut sys_enc::JxlEncoder);
+
+impl Drop for Encoder {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a non-null handle returned by `JxlEncoderCreate` (checked in `encode`),
+        // owned solely by this wrapper and not yet destroyed; `Drop` runs exactly once.
+        unsafe { sys_enc::JxlEncoderDestroy(self.0) };
+    }
+}
+
+impl Encoder {
+    /// Translates a libjxl status into a `Result`, reading the detailed error on failure.
+    ///
+    /// Used for the setup calls, none of which return `NEED_MORE_OUTPUT`; any non-`SUCCESS` status is
+    /// therefore an `ERROR`, whose detail comes from `JxlEncoderGetError`.
+    fn check(&self, status: sys_enc::JxlEncoderStatus) -> Result<()> {
+        if status == sys_enc::JxlEncoderStatus::SUCCESS {
+            Ok(())
+        } else {
+            // SAFETY: `self.0` is a valid, live encoder handle.
+            let err = unsafe { sys_enc::JxlEncoderGetError(self.0) };
+            Err(map_encoder_error(err))
+        }
+    }
+}
+
+/// Initial and maximum per-iteration output-buffer growth for the `ProcessOutput` loop. libjxl only
+/// requires `avail_out >= 32`; a 64 KiB first chunk covers small images in one pass, and doubling
+/// (capped) amortises large ones without an unbounded single allocation.
+const OUTPUT_CHUNK_INIT: usize = 64 * 1024;
+/// Upper bound on a single growth step (64 MiB), so a pathological stream can't request one enormous
+/// reservation.
+const OUTPUT_CHUNK_MAX: usize = 64 * 1024 * 1024;
+
+/// Encodes one frame described by `spec`, using `cfg`'s mode/effort/container, appending the JPEG XL
+/// stream to `out` and returning the number of bytes appended.
+///
+/// The caller's `ImageRef` already guarantees `spec.samples` has the right length, so this does not
+/// re-validate it; it does defensively check that the frame's byte size does not overflow `usize`.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] on a null encoder/frame-settings handle, a byte-size overflow, or
+/// any libjxl error whose detail maps to invalid input; [`Error::Unsupported`] if libjxl reports the
+/// configuration is unsupported.
+pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -> Result<usize> {
+    let alpha_channels = u32::from(spec.has_alpha);
+    let total_channels = spec.num_color_channels + alpha_channels;
+    let bytes_per_sample = (spec.bits_per_sample / 8) as usize;
+
+    // Defensive overflow guard on the raw frame byte count. `ImageRef::new` validated the *sample*
+    // length against the dimensions, but the FFI hands libjxl a byte length; compute it through the
+    // same checked `Dimensions` arithmetic so an overflow is a typed error, never a wrap.
+    let dims = Dimensions {
+        width: spec.width,
+        height: spec.height,
+    };
+    let num_samples = dims
+        .sample_count(total_channels as usize)
+        .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
+    let byte_len = num_samples
+        .checked_mul(bytes_per_sample)
+        .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
+
+    // The sample buffer pointer + data type. u16 crosses as native-endian bytes: the `&[u16]` is
+    // already stored in native byte order and 2-byte aligned, and `JxlPixelFormat`'s NATIVE
+    // endianness tells libjxl to read it exactly that way, so the reinterpretation is lossless.
+    let (buffer, data_type) = match spec.samples {
+        Samples::U8(s) => {
+            debug_assert_eq!(s.len(), num_samples);
+            (s.as_ptr().cast::<c_void>(), sys_ty::JxlDataType::UINT8)
+        }
+        Samples::U16(s) => {
+            debug_assert_eq!(s.len(), num_samples);
+            (s.as_ptr().cast::<c_void>(), sys_ty::JxlDataType::UINT16)
+        }
+    };
+
+    // SAFETY: null memory manager selects libjxl's default allocator (documented in the sys crate).
+    let handle = unsafe { sys_enc::JxlEncoderCreate(core::ptr::null()) };
+    if handle.is_null() {
+        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+    }
+    let enc = Encoder(handle);
+
+    // Container framing. Must be set before any output is produced.
+    let use_container = if cfg.container() == crate::Container::IsoBmff {
+        sys_ty::JxlBool::TRUE
+    } else {
+        sys_ty::JxlBool::FALSE
+    };
+    // SAFETY: `enc.0` is a valid, freshly created encoder; no output has been produced.
+    enc.check(unsafe { sys_enc::JxlEncoderUseContainer(enc.0, use_container) })?;
+
+    // Basic info: initialise to defaults, then set only the fields we control.
+    // Start from zeroed storage: all-zero is a valid bit pattern for every field of this POD
+    // struct, so `assume_init` is sound even if a future libjxl leaves some field unwritten — our
+    // soundness must not depend on the C library's internal memset behaviour.
+    let mut info = core::mem::MaybeUninit::<sys_ty::JxlBasicInfo>::zeroed();
+    // SAFETY: the storage is zeroed (a valid value), and `JxlEncoderInitBasicInfo` then writes the
+    // libjxl defaults through the pointer.
+    let mut info = unsafe {
+        sys_enc::JxlEncoderInitBasicInfo(info.as_mut_ptr());
+        info.assume_init()
+    };
+    info.xsize = spec.width;
+    info.ysize = spec.height;
+    info.bits_per_sample = spec.bits_per_sample;
+    info.exponent_bits_per_sample = 0;
+    info.num_color_channels = spec.num_color_channels;
+    info.num_extra_channels = alpha_channels;
+    info.alpha_bits = if spec.has_alpha {
+        spec.bits_per_sample
+    } else {
+        0
+    };
+    info.alpha_exponent_bits = 0;
+    // Lossless must retain the original (non-XYB) profile; lossy re-encodes through XYB.
+    info.uses_original_profile = match cfg.mode() {
+        Mode::Lossless => sys_ty::JxlBool::TRUE,
+        Mode::Lossy(_) => sys_ty::JxlBool::FALSE,
+    };
+    // SAFETY: `enc.0` is valid; `info` is fully initialised and copied internally.
+    enc.check(unsafe { sys_enc::JxlEncoderSetBasicInfo(enc.0, &info) })?;
+
+    // Colour encoding: sRGB, gray or colour to match the channel count.
+    let is_gray = if spec.num_color_channels == 1 {
+        sys_ty::JxlBool::TRUE
+    } else {
+        sys_ty::JxlBool::FALSE
+    };
+    // Zeroed for the same soundness reason as the basic info above: all-zero is a valid bit
+    // pattern for every field, so no field's initialisation depends on the C call's coverage.
+    let mut color = core::mem::MaybeUninit::<sys_ty::JxlColorEncoding>::zeroed();
+    // SAFETY: the storage is zeroed (a valid value), and `JxlColorEncodingSetToSRGB` then writes
+    // the sRGB profile through the pointer.
+    let color = unsafe {
+        sys_enc::JxlColorEncodingSetToSRGB(color.as_mut_ptr(), is_gray);
+        color.assume_init()
+    };
+    // SAFETY: `enc.0` is valid; `color` is fully initialised and copied internally.
+    enc.check(unsafe { sys_enc::JxlEncoderSetColorEncoding(enc.0, &color) })?;
+
+    // Frame settings are owned by the encoder (freed on destroy), so they need no separate RAII.
+    // SAFETY: `enc.0` is valid; a null source means "copy from defaults".
+    let frame_settings =
+        unsafe { sys_enc::JxlEncoderFrameSettingsCreate(enc.0, core::ptr::null()) };
+    if frame_settings.is_null() {
+        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+    }
+
+    match cfg.mode() {
+        Mode::Lossless => {
+            // SAFETY: `frame_settings` is a valid pointer for the live encoder.
+            enc.check(unsafe {
+                sys_enc::JxlEncoderSetFrameLossless(frame_settings, sys_ty::JxlBool::TRUE)
+            })?;
+        }
+        Mode::Lossy(distance) => {
+            // SAFETY: as above.
+            enc.check(unsafe {
+                sys_enc::JxlEncoderSetFrameDistance(frame_settings, distance.get())
+            })?;
+        }
+    }
+
+    // SAFETY: `frame_settings` is valid; EFFORT takes an integer level in `1..=10`.
+    enc.check(unsafe {
+        sys_enc::JxlEncoderFrameSettingsSetOption(
+            frame_settings,
+            sys_enc::JxlEncoderFrameSettingId::EFFORT,
+            i64::from(cfg.effort().level()),
+        )
+    })?;
+
+    let format = sys_ty::JxlPixelFormat {
+        num_channels: total_channels,
+        data_type,
+        endianness: sys_ty::JxlEndianness::NATIVE,
+        align: 0,
+    };
+    // SAFETY: `frame_settings` is valid; `format` matches the basic-info dimensions; `buffer` points
+    // to `byte_len` readable bytes (the caller's validated sample slice, reinterpreted as bytes).
+    enc.check(unsafe {
+        sys_enc::JxlEncoderAddImageFrame(frame_settings, &format, buffer, byte_len)
+    })?;
+
+    // SAFETY: `enc.0` is valid; no further frames or boxes will be added.
+    unsafe { sys_enc::JxlEncoderCloseInput(enc.0) };
+
+    // Drain the encoder, appending into `out`. `out` may already hold caller data, so every offset
+    // is relative to its current length and we truncate to the exact produced size each round.
+    let start = out.len();
+    let mut chunk = OUTPUT_CHUNK_INIT;
+    loop {
+        let offset = out.len();
+        out.resize(offset + chunk, 0);
+        // Take the pointer *after* the resize, which may have reallocated the buffer.
+        // SAFETY: `offset <= out.len()`, so the pointer is in-bounds of the live allocation.
+        let mut next_out = unsafe { out.as_mut_ptr().add(offset) };
+        let mut avail_out = chunk;
+        // SAFETY: `enc.0` is valid; `next_out`/`avail_out` describe a writable region of `chunk`
+        // (>= 32) bytes and are updated in place.
+        let status =
+            unsafe { sys_enc::JxlEncoderProcessOutput(enc.0, &mut next_out, &mut avail_out) };
+        let produced = chunk - avail_out;
+        out.truncate(offset + produced);
+        match status {
+            sys_enc::JxlEncoderStatus::SUCCESS => break,
+            sys_enc::JxlEncoderStatus::NEED_MORE_OUTPUT => {
+                chunk = chunk.saturating_mul(2).min(OUTPUT_CHUNK_MAX);
+            }
+            // ERROR (or any unexpected status): surface the detailed encoder error.
+            _ => {
+                // SAFETY: `enc.0` is a valid, live encoder handle.
+                let err = unsafe { sys_enc::JxlEncoderGetError(enc.0) };
+                out.truncate(start);
+                return Err(map_encoder_error(err));
+            }
+        }
+    }
+
+    Ok(out.len() - start)
+}
