@@ -187,9 +187,9 @@ cargo test --workspace
 
 ## Minimum Supported Rust Version (MSRV)
 
-The MSRV is **Rust 1.88** (stable), built against **edition 2024**. This is the lowest version we
+The MSRV is **Rust 1.92** (stable), built against **edition 2024**. This is the lowest version we
 support, declared once as the machine value in the root `[workspace.package]`
-(`rust-version = "1.88"`) and inherited by every crate via `rust-version.workspace = true`; this
+(`rust-version = "1.92"`) and inherited by every crate via `rust-version.workspace = true`; this
 section is its authoritative documentation. CI enforces both: the
 [Extended workflow](.github/workflows/extended.yml)'s MSRV job compiles the libraries on that
 toolchain and fails unless this README documents the version declared in `Cargo.toml`, so the

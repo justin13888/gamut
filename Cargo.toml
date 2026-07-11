@@ -26,7 +26,7 @@ exclude = [
 [workspace.package]
 # No shared `version`: each crate is versioned independently (see README "Versioning").
 edition = "2024"
-rust-version = "1.88" # MSRV; see README "Minimum Supported Rust Version"
+rust-version = "1.92" # MSRV; see README "Minimum Supported Rust Version"
 authors = ["Justin Chung"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/justin13888/gamut"
