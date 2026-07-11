@@ -95,12 +95,14 @@ impl MetadataEmbedder {
     /// # Errors
     ///
     /// Returns a [`MetadataError`](crate::MetadataError) naming the carrier whose serialization
-    /// failed — [`MetadataError::Icc`](crate::MetadataError::Icc) for an ICC profile that violates
+    /// failed — [`MetadataError::Exif`](crate::MetadataError::Exif) for an EXIF model not
+    /// representable in classic-TIFF widths,
+    /// [`MetadataError::Icc`](crate::MetadataError::Icc) for an ICC profile that violates
     /// an invariant, or [`MetadataError::Iptc`](crate::MetadataError::Iptc) when
     /// [`emit_iptc_iim`](Self::emit_iptc_iim) is set and an IPTC value cannot be expressed in the
     /// chosen IIM charset.
     pub fn embed(&self, meta: &Metadata) -> Result<EncodedMetadata> {
-        let exif = meta.exif.as_ref().map(Exif::to_bytes);
+        let exif = meta.exif.as_ref().map(Exif::to_bytes).transpose()?;
         let xmp = meta.xmp.as_ref().map(XmpMeta::to_packet);
         let icc = meta.icc.as_ref().map(IccProfile::to_bytes).transpose()?;
         let iptc_iim = if self.emit_iptc_iim {
