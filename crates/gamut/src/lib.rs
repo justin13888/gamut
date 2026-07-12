@@ -60,6 +60,8 @@ pub use gamut_ifd as ifd;
 pub use gamut_iptc as iptc;
 #[cfg(feature = "isobmff")]
 pub use gamut_isobmff as isobmff;
+#[cfg(feature = "jpeg")]
+pub use gamut_jpeg as jpeg;
 #[cfg(feature = "jxl")]
 pub use gamut_jxl as jxl;
 #[cfg(feature = "metadata")]

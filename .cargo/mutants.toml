@@ -403,4 +403,9 @@ exclude_re = [
     # replacement is byte-identical — provably equivalent, unkillable. Same shape and justification
     # as the AvifEncoder::lossless / WebpEncoder::lossless entries above.
     'replace JxlEncoder::lossless -> Self with Default::default\(\)',
+    # gamut-jpeg quant::quality_scale — `if q < 50 { 5000 / q } else { 200 - 2 * q }` (the frozen
+    # IJG quality mapping). The mapping is continuous at the branch point: at q == 50 — the only
+    # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
+    # the same scale and no input can distinguish the mutant: equivalent.
+    'replace < with <= in quality_scale',
 ]

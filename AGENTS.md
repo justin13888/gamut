@@ -16,7 +16,7 @@ the Rust ecosystem lacks a strong, feature-complete implementation.
 Dependency edges (a crate depends on those to its right):
 
 - **gamut** -- umbrella; optional deps on the format crates, gated by features (`avif`,
-  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `isobmff`, `metadata`, `all`). `default = []`. The `primitives`
+  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `png`, `jpeg`, `isobmff`, `metadata`, `all`). `default = []`. The `primitives`
   feature additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling, the
   `isobmff` feature re-exports the ISOBMFF/HEIF still-image container primitive (the box tree shared
   by avif/heic), the `metadata` feature re-exports the image-metadata primitives, and the `tonemap` feature re-exports
@@ -37,6 +37,10 @@ Dependency edges (a crate depends on those to its right):
   **libjxl 0.12.0** via the BSD-3-Clause `jpegxl-src` (`links = "jxl"`); the native backend for
   gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only); build honors
   `GAMUT_JXL_SYS_SKIP_NATIVE=1` to skip cmake for check-only (cross/MSRV) jobs.
+- **gamut-jpeg** -- JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec (issue #28): baseline sequential
+  DCT Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF), with the sequential/progressive
+  decoder and progressive encoder phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only).
+  ← core, color, dsp.
 - **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff. **gamut-heic** ← isobmff, core, color.
 - **gamut-ifd** -- TIFF/IFD container core (byte order, field types, IFD read/write); a low-level
   container primitive (sibling to bitstream), shared by the `gamut-tiff` codec (issue #107) and EXIF

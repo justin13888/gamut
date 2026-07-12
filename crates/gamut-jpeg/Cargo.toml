@@ -1,0 +1,23 @@
+[package]
+name = "gamut-jpeg"
+description = "Spec-compliant JPEG (ISO/IEC 10918 / ITU-T T.81) still-image codec."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+gamut-core.workspace = true
+# Full-range (JFIF) BT.601 RGB→YCbCr conversion (T.871 §7).
+gamut-color.workspace = true
+# The §A.3.3 forward DCT kernel and the §A.3.4 round-to-nearest quantizer divide.
+gamut-dsp.workspace = true

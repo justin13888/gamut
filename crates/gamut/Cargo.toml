@@ -29,6 +29,7 @@ gamut-av2 = { workspace = true, optional = true }
 gamut-tiff = { workspace = true, optional = true }
 gamut-dng = { workspace = true, optional = true }
 gamut-png = { workspace = true, optional = true }
+gamut-jpeg = { workspace = true, optional = true }
 
 # Optional container primitive: the ISOBMFF/HEIF still-image box tree shared by avif/heic,
 # re-exported behind the `isobmff` feature so tooling can read/write containers directly.
@@ -63,6 +64,7 @@ av2 = ["dep:gamut-av2"]
 tiff = ["dep:gamut-tiff"]
 dng = ["dep:gamut-dng"]
 png = ["dep:gamut-png"]
+jpeg = ["dep:gamut-jpeg"]
 # Re-export the ISOBMFF/HEIF still-image container primitive for tooling.
 isobmff = ["dep:gamut-isobmff"]
 # Re-export the shared building blocks (`color`/`dsp`/`bitstream`) for tooling.
@@ -87,6 +89,7 @@ all = [
     "tiff",
     "dng",
     "png",
+    "jpeg",
     "isobmff",
     "metadata",
     "primitives",

@@ -552,6 +552,7 @@ dependencies = [
  "gamut-ifd",
  "gamut-iptc",
  "gamut-isobmff",
+ "gamut-jpeg",
  "gamut-jxl",
  "gamut-metadata",
  "gamut-png",
@@ -739,6 +740,15 @@ version = "1.0.0"
 dependencies = [
  "divan",
  "gamut-core",
+]
+
+[[package]]
+name = "gamut-jpeg"
+version = "0.1.0"
+dependencies = [
+ "gamut-color",
+ "gamut-core",
+ "gamut-dsp",
 ]
 
 [[package]]
