@@ -228,8 +228,9 @@ by the `auxC` `AuxiliaryTypeProperty`, whose `aux_type` is a null-terminated URN
 Apple's HEICs use the `hevc:2015` URNs for basic alpha/depth, plus proprietary
 `urn:com:apple:photo:…:aux:…` URNs (e.g. `…portraiteffectsmatte`, `…hdrgainmap`) for
 computational-photography auxiliaries — treat any unrecognised `aux_type` as an opaque, non-displayed
-plane. **`prem`** is an item reference (premultiplied → master), not a property: it signals that the
-master's colour values are already premultiplied by the associated alpha auxiliary.
+plane. **`prem`** is an item reference (from the premultiplied colour item *to* its alpha auxiliary
+item, 23008-12; libheif/libavif agree on this direction), not a property: it signals that the colour
+item's values are already premultiplied by that alpha auxiliary.
 
 ### 7. Brands (`ftyp`)
 

@@ -1,6 +1,6 @@
 [package]
 name = "gamut-heic"
-description = "HEIC/HEIF image encoder and decoder (HEVC intra frames in an ISOBMFF container)."
+description = "HEIC/HEIF still-image container decoder (HEVC intra items in an ISOBMFF container) with a pluggable codestream-decoder hook."
 version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
