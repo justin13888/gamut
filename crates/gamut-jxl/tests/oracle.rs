@@ -11,7 +11,11 @@
 //!
 //! Uses both codec halves (gamut encodes with libjxl, decodes with jxl-rs); compiled only when both
 //! are available.
-#![cfg(all(feature = "encode", feature = "decode", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "encode",
+    feature = "decode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 
 mod common;
 
@@ -338,6 +342,51 @@ fn lossy_decoders_agree_and_are_psnr_bounded_8bit() {
     assert!(
         psnr_oracle >= 35.0,
         "oracle PSNR {psnr_oracle:.2} dB below 35 dB"
+    );
+}
+
+#[test]
+fn lossy_distance_sweep_agrees_and_orders_sizes() {
+    // Across the documented distance sweep {0.5, 1.0, 3.0}: both decoders stay within the ±2
+    // 8-bit agreement bound at every distance, and a larger distance yields a smaller (or equal,
+    // for adjacent points on small images) stream, strictly smaller across the extremes.
+    let (w, h) = (64, 100);
+    let dims = Dimensions::new(w, h).unwrap();
+    let px = gen_smooth_u8(w, h, Rgb8::CHANNELS);
+    let img = ImageRef::<Rgb8>::new(&px, dims).unwrap();
+
+    let mut sizes = Vec::new();
+    for distance in [0.5f32, 1.0, 3.0] {
+        let bytes = JxlEncoder::lossy(Distance::new(distance).unwrap())
+            .encode_to_vec(img)
+            .unwrap();
+
+        let gamut: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(&bytes).unwrap();
+        let oracle = decode(&bytes);
+        let DecodedSamples::U8(oracle) = oracle.samples else {
+            panic!("expected u8 oracle samples at distance {distance}");
+        };
+        let max_diff = gamut
+            .as_samples()
+            .iter()
+            .zip(&oracle)
+            .map(|(&a, &b)| a.abs_diff(b))
+            .max()
+            .unwrap();
+        assert!(
+            max_diff <= 2,
+            "decoders disagree by {max_diff} at distance {distance}"
+        );
+        sizes.push(bytes.len());
+    }
+
+    assert!(
+        sizes[0] >= sizes[1] && sizes[1] >= sizes[2],
+        "sizes must be non-increasing across the sweep: {sizes:?}"
+    );
+    assert!(
+        sizes[0] > sizes[2],
+        "distance 3.0 must compress strictly harder than 0.5: {sizes:?}"
     );
 }
 

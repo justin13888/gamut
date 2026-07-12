@@ -25,9 +25,13 @@ Two independent halves, each gated behind its own Cargo feature:
   decoder, BSD-3-Clause). It needs no C toolchain and compiles for every target, `wasm32`
   included.
 
-The two are wired so the crate degrades gracefully by target: the encoder is compiled in only for
-`all(feature = "encode", not(target_arch = "wasm32"))`, so on `wasm32` the crate builds as a
-**decode-only** codec with zero cmake in the build graph.
+The two are wired so the crate degrades gracefully by target: the encoder is compiled in for
+`all(feature = "encode", any(not(target_arch = "wasm32"), target_os = "emscripten"))`. On
+**`wasm32-unknown-emscripten`** the full encoder works — libjxl officially supports wasm via
+emscripten, and `gamut-jxl-sys` builds it with the emsdk toolchain. On **`wasm32-unknown-unknown`**
+(the wasm-bindgen/browser target) the crate builds as a **decode-only** codec with zero cmake in
+the build graph — an upstream toolchain boundary (no C/C++ compiler targets that ABI), not a gamut
+workaround.
 
 ## Why a wrapper
 
@@ -91,20 +95,46 @@ let encoder = JxlEncoder::lossy(Distance::new(1.0).expect("valid distance"))
 let stream = encoder.encode_to_vec(image).expect("encode");
 ```
 
+Signal colour, orientation, and metadata (the encoder never converts pixels — it declares how they
+are to be interpreted), or losslessly re-pack an existing JPEG:
+
+```rust
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb16};
+use gamut_jxl::{ColorSpec, Container, JxlEncoder, Orientation};
+
+let dims = Dimensions { width: 64, height: 64 };
+let pixels = vec![0u16; (64 * 64 * 3) as usize];
+let image = ImageRef::<Rgb16>::new(&pixels, dims).expect("buffer length matches dimensions");
+
+// HDR-coded u16 samples signalled as BT.2100 PQ, displayed rotated, with an XMP packet.
+let encoder = JxlEncoder::lossless()
+    .with_color(ColorSpec::Pq)                   // also: LinearSrgb, Hlg, Icc(profile bytes)
+    .with_orientation(Orientation::Rotate90Cw)   // the eight EXIF orientations
+    .with_container(Container::IsoBmff)          // metadata boxes need the container
+    .with_xmp(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#);
+let stream = encoder.encode_to_vec(image).expect("encode");
+
+// jbrd: reversibly transcode a JPEG — the original .jpg is reconstructible bit-for-bit.
+let jpeg: &[u8] = include_bytes!("tests/fixtures/tiny_baseline.jpg");
+let mut jxl = Vec::new();
+JxlEncoder::new().recompress_jpeg(jpeg, &mut jxl).expect("recompress");
+```
+
 `JxlEncoder` implements [`gamut_core::EncodeImage`] and `JxlDecoder` implements
 [`gamut_core::DecodeImage`] for exactly eight pixel layouts — 8- and 16-bit **Gray**, **GrayAlpha**,
 **RGB** and **RGBA** — so handing either an unsupported layout is a compile error. `lossy` takes a
 validated [`Distance`] in `(0.0, 25.0]` (`0.0`, libjxl's lossless sentinel, is deliberately rejected
-so lossless stays a distinct constructor). The `recompress_jpeg` method reserves the API slot for
-libjxl's bit-exact JPEG-reconstruction (jbrd) path; it currently returns `Unsupported` (see
-[STATUS.md](STATUS.md)).
+so lossless stays a distinct constructor). On the decode side,
+`JxlDecoder::embedded_icc_profile` surfaces the exact ICC bytes a stream embeds (`None` for
+structured encodings like sRGB/PQ) without decoding pixels; pixel decoding applies no colour
+transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
 
 ## Features
 
 | Feature  | Default | What it pulls in | Toolchain / targets |
 | -------- | ------- | ---------------- | ------------------- |
-| `encode` | yes | `gamut-jxl-sys` → static **libjxl 0.12.0** FFI | needs **cmake + a C++ toolchain**; target-gated **off `wasm32`** (inert there, not a build error) |
-| `decode` | yes | the pure-Rust `jxl` crate (jxl-rs) | pure safe Rust; builds **everywhere**, `wasm32` included |
+| `encode` | yes | `gamut-jxl-sys` → static **libjxl 0.12.0** FFI | needs **cmake + a C++ toolchain** (emsdk on `wasm32-unknown-emscripten`); inert — not a build error — on other `wasm32` targets |
+| `decode` | yes | the pure-Rust `jxl` crate (jxl-rs) | pure safe Rust; builds **everywhere**, every `wasm32` target included |
 
 For a C-toolchain-free build — a pure-Rust decoder, e.g. for `wasm32` or CI without cmake — depend
 with `default-features = false, features = ["decode"]`. On `wasm32` the encoder is compiled out

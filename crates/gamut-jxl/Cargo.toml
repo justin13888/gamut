@@ -23,23 +23,26 @@ gamut-core.workspace = true
 # build.
 jxl = { workspace = true, optional = true }
 
-# The libjxl-backed encoder. Target-conditional optional dep (the `getrandom` pattern): on wasm32
-# the native cmake/libjxl build is unavailable, so the dep — and therefore the whole encoder — is
-# compiled out there, leaving the crate to grow a pure-Rust decoder for that target.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The libjxl-backed encoder. Target-conditional optional dep (the `getrandom` pattern), present on
+# every encoder-capable target: everything except wasm32 *without* emscripten. On
+# `wasm32-unknown-emscripten` gamut-jxl-sys builds libjxl with the emsdk toolchain, so the full
+# encoder works there; on `wasm32-unknown-unknown`/`wasm32-wasip*` no C++ toolchain targets the ABI,
+# so the dep — and therefore the whole encoder — is compiled out (decode-only). The same condition
+# guards every encoder `#[cfg]` in src/ and tests/.
+[target.'cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))'.dependencies]
 gamut-jxl-sys = { workspace = true, optional = true }
 
 # The oracle for the encoder tests: the same static libjxl archive also exposes a decode surface,
-# which the integration tests use to read encoded streams back. Unavailable on wasm32 for the same
-# reason as the dep above.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# which the integration tests use to read encoded streams back. Available exactly where the encoder
+# is (see above), including emscripten — the wasm test lane runs the full differential suite.
+[target.'cfg(any(not(target_arch = "wasm32"), target_os = "emscripten"))'.dev-dependencies]
 gamut-jxl-sys.workspace = true
 
 [features]
 default = ["decode", "encode"]
-# Wraps the reference libjxl (via `gamut-jxl-sys`) to encode JPEG XL. On wasm32 the underlying
-# target-conditional dep is absent, so enabling `encode` is inert there (it pulls in nothing and
-# gates out the encoder modules) rather than a build error.
+# Wraps the reference libjxl (via `gamut-jxl-sys`) to encode JPEG XL. On wasm32 targets other than
+# emscripten the underlying target-conditional dep is absent, so enabling `encode` is inert there
+# (it pulls in nothing and gates out the encoder modules) rather than a build error.
 encode = ["dep:gamut-jxl-sys"]
 # The pure-Rust JPEG XL decoder wrapping the `jxl` crate (jxl-rs). Pure safe Rust with no native
 # build, so — unlike `encode` — it is available on every target, wasm32 included.

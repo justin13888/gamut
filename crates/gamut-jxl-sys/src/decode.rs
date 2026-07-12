@@ -11,7 +11,7 @@
 
 use core::ffi::{c_int, c_void};
 
-use crate::types::{JxlBasicInfo, JxlMemoryManager, JxlPixelFormat};
+use crate::types::{JxlBasicInfo, JxlColorEncoding, JxlMemoryManager, JxlPixelFormat};
 
 /// Opaque decoder instance (`JxlDecoder`). Created by [`JxlDecoderCreate`]
 /// and destroyed by [`JxlDecoderDestroy`].
@@ -55,10 +55,33 @@ impl JxlDecoderStatus {
     /// The decoder requests an output buffer for the full-resolution image
     /// (`JXL_DEC_NEED_IMAGE_OUT_BUFFER`).
     pub const NEED_IMAGE_OUT_BUFFER: Self = Self(5);
+    /// The JPEG reconstruction buffer is too small; call [`JxlDecoderSetJPEGBuffer`] again with a
+    /// larger buffer (`JXL_DEC_JPEG_NEED_MORE_OUTPUT`).
+    pub const JPEG_NEED_MORE_OUTPUT: Self = Self(6);
     /// Basic information (dimensions, extra channels) is available (`JXL_DEC_BASIC_INFO`).
     pub const BASIC_INFO: Self = Self(0x40);
+    /// Color-encoding or ICC-profile information is available (`JXL_DEC_COLOR_ENCODING`).
+    pub const COLOR_ENCODING: Self = Self(0x100);
     /// A full frame has been decoded (`JXL_DEC_FULL_IMAGE`).
     pub const FULL_IMAGE: Self = Self(0x1000);
+    /// JPEG reconstruction data has been decoded; a JPEG buffer may now be set with
+    /// [`JxlDecoderSetJPEGBuffer`] (`JXL_DEC_JPEG_RECONSTRUCTION`).
+    pub const JPEG_RECONSTRUCTION: Self = Self(0x2000);
+}
+
+/// Selects which color profile to query: the codestream metadata's original profile, or the
+/// profile of the pixel data the decoder outputs (`JxlColorProfileTarget`, `jxl/decode.h`). The
+/// two coincide when `uses_original_profile` is set in the basic info. The underlying C enum is
+/// `int`.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JxlColorProfileTarget(pub c_int);
+
+impl JxlColorProfileTarget {
+    /// The color profile of the original image, from the metadata (`JXL_COLOR_PROFILE_TARGET_ORIGINAL`).
+    pub const ORIGINAL: Self = Self(0);
+    /// The color profile of the pixel data the decoder outputs (`JXL_COLOR_PROFILE_TARGET_DATA`).
+    pub const DATA: Self = Self(1);
 }
 
 unsafe extern "C" {
@@ -183,6 +206,67 @@ unsafe extern "C" {
         dec: *mut JxlDecoder,
         format: *const JxlPixelFormat,
         buffer: *mut c_void,
+        size: usize,
+    ) -> JxlDecoderStatus;
+
+    /// Sets the buffer the reconstructed JPEG codestream is written into after a
+    /// [`JxlDecoderStatus::JPEG_RECONSTRUCTION`] event (`JxlDecoderSetJPEGBuffer`).
+    ///
+    /// # Safety
+    ///
+    /// `dec` must be valid. `data` must point to at least `size` writable bytes that stay alive
+    /// until [`JxlDecoderReleaseJPEGBuffer`] or the end of decoding.
+    pub fn JxlDecoderSetJPEGBuffer(
+        dec: *mut JxlDecoder,
+        data: *mut u8,
+        size: usize,
+    ) -> JxlDecoderStatus;
+
+    /// Releases the buffer set with [`JxlDecoderSetJPEGBuffer`], returning the number of bytes at
+    /// its end that were not yet written (`JxlDecoderReleaseJPEGBuffer`).
+    ///
+    /// # Safety
+    ///
+    /// `dec` must be a valid decoder.
+    pub fn JxlDecoderReleaseJPEGBuffer(dec: *mut JxlDecoder) -> usize;
+
+    /// Copies the color profile as encoded structured data into `color_encoding`, if the
+    /// codestream carries one (`JxlDecoderGetColorAsEncodedProfile`). Returns an error status when
+    /// only an ICC profile is attached ([`JxlDecoderGetICCProfileSize`] applies then).
+    ///
+    /// # Safety
+    ///
+    /// `dec` must be valid. `color_encoding` must be null or point to writable storage for a
+    /// [`JxlColorEncoding`].
+    pub fn JxlDecoderGetColorAsEncodedProfile(
+        dec: *const JxlDecoder,
+        target: JxlColorProfileTarget,
+        color_encoding: *mut JxlColorEncoding,
+    ) -> JxlDecoderStatus;
+
+    /// Writes the byte size of the ICC profile that [`JxlDecoderGetColorAsICCProfile`] would
+    /// return into `*size`, if one is available (`JxlDecoderGetICCProfileSize`).
+    ///
+    /// # Safety
+    ///
+    /// `dec` must be valid. `size` must be null or point to a writable `usize`.
+    pub fn JxlDecoderGetICCProfileSize(
+        dec: *const JxlDecoder,
+        target: JxlColorProfileTarget,
+        size: *mut usize,
+    ) -> JxlDecoderStatus;
+
+    /// Copies the ICC profile (attached, or synthesized from the encoded structured data) into
+    /// `icc_profile` (`JxlDecoderGetColorAsICCProfile`).
+    ///
+    /// # Safety
+    ///
+    /// `dec` must be valid. `icc_profile` must point to at least `size` writable bytes, where
+    /// `size` is at least the value reported by [`JxlDecoderGetICCProfileSize`].
+    pub fn JxlDecoderGetColorAsICCProfile(
+        dec: *const JxlDecoder,
+        target: JxlColorProfileTarget,
+        icc_profile: *mut u8,
         size: usize,
     ) -> JxlDecoderStatus;
 }

@@ -65,7 +65,7 @@ fn decoder_create_and_destroy() {
 fn every_declared_symbol_resolves() {
     use gamut_jxl_sys::{decode, encode};
     let symbols: &[(&str, *const ())] = &[
-        // encode.rs (19)
+        // encode.rs (23)
         ("JxlEncoderVersion", encode::JxlEncoderVersion as *const ()),
         ("JxlEncoderCreate", encode::JxlEncoderCreate as *const ()),
         ("JxlEncoderReset", encode::JxlEncoderReset as *const ()),
@@ -107,6 +107,10 @@ fn every_declared_symbol_resolves() {
             encode::JxlEncoderAddImageFrame as *const (),
         ),
         (
+            "JxlEncoderAddJPEGFrame",
+            encode::JxlEncoderAddJPEGFrame as *const (),
+        ),
+        (
             "JxlEncoderCloseInput",
             encode::JxlEncoderCloseInput as *const (),
         ),
@@ -123,6 +127,15 @@ fn every_declared_symbol_resolves() {
             encode::JxlEncoderUseContainer as *const (),
         ),
         (
+            "JxlEncoderStoreJPEGMetadata",
+            encode::JxlEncoderStoreJPEGMetadata as *const (),
+        ),
+        (
+            "JxlEncoderUseBoxes",
+            encode::JxlEncoderUseBoxes as *const (),
+        ),
+        ("JxlEncoderAddBox", encode::JxlEncoderAddBox as *const ()),
+        (
             "JxlColorEncodingSetToSRGB",
             encode::JxlColorEncodingSetToSRGB as *const (),
         ),
@@ -130,7 +143,7 @@ fn every_declared_symbol_resolves() {
             "JxlColorEncodingSetToLinearSRGB",
             encode::JxlColorEncodingSetToLinearSRGB as *const (),
         ),
-        // decode.rs (13)
+        // decode.rs (18)
         ("JxlDecoderVersion", decode::JxlDecoderVersion as *const ()),
         ("JxlSignatureCheck", decode::JxlSignatureCheck as *const ()),
         ("JxlDecoderCreate", decode::JxlDecoderCreate as *const ()),
@@ -167,6 +180,26 @@ fn every_declared_symbol_resolves() {
         (
             "JxlDecoderSetImageOutBuffer",
             decode::JxlDecoderSetImageOutBuffer as *const (),
+        ),
+        (
+            "JxlDecoderSetJPEGBuffer",
+            decode::JxlDecoderSetJPEGBuffer as *const (),
+        ),
+        (
+            "JxlDecoderReleaseJPEGBuffer",
+            decode::JxlDecoderReleaseJPEGBuffer as *const (),
+        ),
+        (
+            "JxlDecoderGetColorAsEncodedProfile",
+            decode::JxlDecoderGetColorAsEncodedProfile as *const (),
+        ),
+        (
+            "JxlDecoderGetICCProfileSize",
+            decode::JxlDecoderGetICCProfileSize as *const (),
+        ),
+        (
+            "JxlDecoderGetColorAsICCProfile",
+            decode::JxlDecoderGetColorAsICCProfile as *const (),
         ),
     ];
     for (name, addr) in symbols {

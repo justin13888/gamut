@@ -17,9 +17,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1:1 with the README's "wasm32 / aarch64 / musl" cross-compile claims.
+        # 1:1 with the README's "wasm32 / aarch64 / musl" cross-compile claims, plus the
+        # emscripten row: a pure `cargo check` (SKIP_NATIVE, no emsdk) that catches rot in the
+        # encoder's `any(not(wasm32), emscripten)` cfg gates; the real emsdk build+test runs in
+        # the `wasm-encoder` job below.
         target:
           - wasm32-unknown-unknown
+          - wasm32-unknown-emscripten
           - aarch64-unknown-linux-gnu
           - x86_64-unknown-linux-musl
     steps:
@@ -52,3 +56,35 @@ jobs:
         # The task reads the MSRV from Cargo.toml, asserts the README documents it, installs that
         # toolchain, and `cargo +<msrv> check`s the libraries. No version is hardcoded here.
         run: mise run check-msrv
+
+  # The JPEG XL encoder on WebAssembly, for real: builds libjxl with the emsdk toolchain and runs
+  # the gamut-jxl-sys + gamut-jxl test suites (including the libjxl-oracle differential tests) on
+  # wasm32-unknown-emscripten under node. Backs the README claim that JXL encode works on the
+  # emscripten target; wasm32-unknown-unknown stays decode-only (no C/C++ toolchain targets it).
+  wasm-encoder:
+    name: JXL encoder on wasm32-unknown-emscripten
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        # No submodules: only libjxl (vendored by the jpegxl-src crate) is built here, never the
+        # third_party/ C oracles.
+      - uses: jdx/mise-action@v4
+        with:
+          install: false
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          # rustc's own CI builds this target's std with `emsdk install latest`, so any recent
+          # emsdk matches; too-old emsdks fail at link time (3.1.68's wasm-opt predates the
+          # `--enable-bulk-memory-opt` flag rustc 1.97 emits). 6.0.2 is the verified pin — bump
+          # it together with toolchain updates rather than floating `latest` in CI.
+          version: 6.0.2
+          actions-cache-folder: emsdk-cache
+      - name: Clear pre-installed Rust toolchain
+        # Same rustup `bin/cargo-fmt` reinstall-conflict guard as ci.yml's check job.
+        run: rustup toolchain uninstall stable || true
+      - uses: dtolnay/rust-toolchain@stable
+      # Cache the emscripten libjxl cmake build (~3-6 min cold) exactly like ci.yml caches the
+      # native one.
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and run the JXL tests under node
+        run: mise run test-jxl-wasm

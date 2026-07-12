@@ -13,7 +13,7 @@ use core::ffi::c_void;
 use gamut_core::{Dimensions, Error, Result};
 use gamut_jxl_sys::{encode as sys_enc, types as sys_ty};
 
-use crate::config::Mode;
+use crate::config::{ColorSpec, Mode, validate_icc};
 use crate::encoder::JxlEncoder;
 use crate::error::map_encoder_error;
 
@@ -78,13 +78,15 @@ impl Encoder {
     }
 }
 
-/// Initial and maximum per-iteration output-buffer growth for the `ProcessOutput` loop. libjxl only
+/// Initial per-iteration output-buffer growth for the `ProcessOutput` loop: 64 KiB. libjxl only
 /// requires `avail_out >= 32`; a 64 KiB first chunk covers small images in one pass, and doubling
-/// (capped) amortises large ones without an unbounded single allocation.
-const OUTPUT_CHUNK_INIT: usize = 64 * 1024;
-/// Upper bound on a single growth step (64 MiB), so a pathological stream can't request one enormous
-/// reservation.
-const OUTPUT_CHUNK_MAX: usize = 64 * 1024 * 1024;
+/// (capped) amortises large ones without an unbounded single allocation. (Written as literals, not
+/// `64 * 1024` arithmetic: the values are free choices, and literals generate no arithmetic
+/// mutants to justify.)
+const OUTPUT_CHUNK_INIT: usize = 65_536;
+/// Upper bound on a single growth step: 64 MiB, so a pathological stream can't request one
+/// enormous reservation.
+const OUTPUT_CHUNK_MAX: usize = 67_108_864;
 
 /// Encodes one frame described by `spec`, using `cfg`'s mode/effort/container, appending the JPEG XL
 /// stream to `out` and returning the number of bytes appended.
@@ -98,6 +100,19 @@ const OUTPUT_CHUNK_MAX: usize = 64 * 1024 * 1024;
 /// any libjxl error whose detail maps to invalid input; [`Error::Unsupported`] if libjxl reports the
 /// configuration is unsupported.
 pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -> Result<usize> {
+    // Metadata boxes only exist in the ISO BMFF container. Rejecting the combination up front
+    // keeps the configured framing authoritative instead of letting libjxl silently force the
+    // container on.
+    let has_boxes = cfg.exif().is_some() || cfg.xmp().is_some();
+    if has_boxes && cfg.container() != crate::Container::IsoBmff {
+        return Err(Error::InvalidInput(
+            "JXL: Exif/XMP metadata requires the ISO BMFF container",
+        ));
+    }
+    if cfg.exif().is_some_and(<[u8]>::is_empty) || cfg.xmp().is_some_and(<[u8]>::is_empty) {
+        return Err(Error::InvalidInput("JXL: empty metadata payload"));
+    }
+
     let alpha_channels = u32::from(spec.has_alpha);
     let total_channels = spec.num_color_channels + alpha_channels;
     let bytes_per_sample = (spec.bits_per_sample / 8) as usize;
@@ -146,6 +161,11 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
     // SAFETY: `enc.0` is a valid, freshly created encoder; no output has been produced.
     enc.check(unsafe { sys_enc::JxlEncoderUseContainer(enc.0, use_container) })?;
 
+    if has_boxes {
+        // SAFETY: `enc.0` is valid and no output has been produced yet.
+        enc.check(unsafe { sys_enc::JxlEncoderUseBoxes(enc.0) })?;
+    }
+
     // Basic info: initialise to defaults, then set only the fields we control.
     // Start from zeroed storage: all-zero is a valid bit pattern for every field of this POD
     // struct, so `assume_init` is sound even if a future libjxl leaves some field unwritten — our
@@ -169,6 +189,8 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
         0
     };
     info.alpha_exponent_bits = 0;
+    // The display orientation, as an EXIF 1..=8 value; the samples stay in coded order.
+    info.orientation = sys_ty::JxlOrientation(cfg.orientation().exif_value().into());
     // Lossless must retain the original (non-XYB) profile; lossy re-encodes through XYB.
     info.uses_original_profile = match cfg.mode() {
         Mode::Lossless => sys_ty::JxlBool::TRUE,
@@ -177,23 +199,9 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
     // SAFETY: `enc.0` is valid; `info` is fully initialised and copied internally.
     enc.check(unsafe { sys_enc::JxlEncoderSetBasicInfo(enc.0, &info) })?;
 
-    // Colour encoding: sRGB, gray or colour to match the channel count.
-    let is_gray = if spec.num_color_channels == 1 {
-        sys_ty::JxlBool::TRUE
-    } else {
-        sys_ty::JxlBool::FALSE
-    };
-    // Zeroed for the same soundness reason as the basic info above: all-zero is a valid bit
-    // pattern for every field, so no field's initialisation depends on the C call's coverage.
-    let mut color = core::mem::MaybeUninit::<sys_ty::JxlColorEncoding>::zeroed();
-    // SAFETY: the storage is zeroed (a valid value), and `JxlColorEncodingSetToSRGB` then writes
-    // the sRGB profile through the pointer.
-    let color = unsafe {
-        sys_enc::JxlColorEncodingSetToSRGB(color.as_mut_ptr(), is_gray);
-        color.assume_init()
-    };
-    // SAFETY: `enc.0` is valid; `color` is fully initialised and copied internally.
-    enc.check(unsafe { sys_enc::JxlEncoderSetColorEncoding(enc.0, &color) })?;
+    // Colour signalling: the configured ColorSpec, gray or colour to match the channel count. Must
+    // follow SetBasicInfo.
+    set_color(&enc, cfg.color(), spec.num_color_channels == 1)?;
 
     // Frame settings are owned by the encoder (freed on destroy), so they need no separate RAII.
     // SAFETY: `enc.0` is valid; a null source means "copy from defaults".
@@ -239,11 +247,175 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
         sys_enc::JxlEncoderAddImageFrame(frame_settings, &format, buffer, byte_len)
     })?;
 
+    // Metadata boxes, appended after the frame. The `Exif` box format requires a 4-byte
+    // big-endian offset to the tiff header before the payload; gamut takes the raw EXIF data and
+    // prepends the standard zero offset itself. XMP goes verbatim into an `xml ` box. Neither is
+    // Brotli-compressed (`compress_box = FALSE`): the bytes must stay byte-exact for tests and
+    // external readers that do not implement `brob` unwrapping.
+    if let Some(exif) = cfg.exif() {
+        let mut payload = Vec::with_capacity(4 + exif.len());
+        payload.extend_from_slice(&[0, 0, 0, 0]);
+        payload.extend_from_slice(exif);
+        add_box(&enc, b"Exif", &payload)?;
+    }
+    if let Some(xmp) = cfg.xmp() {
+        add_box(&enc, b"xml ", xmp)?;
+    }
+
     // SAFETY: `enc.0` is valid; no further frames or boxes will be added.
     unsafe { sys_enc::JxlEncoderCloseInput(enc.0) };
 
-    // Drain the encoder, appending into `out`. `out` may already hold caller data, so every offset
-    // is relative to its current length and we truncate to the exact produced size each round.
+    drain(&enc, out)
+}
+
+/// Adds one uncompressed metadata box of the given 4-byte type to the container output.
+fn add_box(enc: &Encoder, box_type: &[u8; 4], contents: &[u8]) -> Result<()> {
+    // SAFETY: `enc.0` is valid with `JxlEncoderUseBoxes` enabled; `box_type` points to exactly 4
+    // readable bytes and `contents` to `contents.len()` readable bytes, both copied internally.
+    enc.check(unsafe {
+        sys_enc::JxlEncoderAddBox(
+            enc.0,
+            box_type.as_ptr().cast::<core::ffi::c_char>(),
+            contents.as_ptr(),
+            contents.len(),
+            sys_ty::JxlBool::FALSE,
+        )
+    })
+}
+
+/// Losslessly transcodes a complete JPEG codestream into a JPEG XL container with JPEG
+/// reconstruction metadata (the `jbrd` box), appending to `out` and returning the number of bytes
+/// appended.
+///
+/// The output is always ISO BMFF container framing: `JxlEncoderStoreJPEGMetadata` requires the
+/// container to carry the `jbrd` box, so the caller's [`crate::Container`] choice does not apply
+/// here. Image parameters (dimensions, bit depth, colour encoding) are implied by libjxl from the
+/// JPEG itself; only the configured [`crate::Effort`] is forwarded.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] on an empty or rejected JPEG codestream (progressive features
+/// libjxl cannot represent reversibly surface as the JBRD-specific [`Error::Unsupported`]), and
+/// [`Error::Unsupported`] if reconstruction metadata cannot represent the input.
+pub(crate) fn recompress(cfg: &JxlEncoder, jpeg: &[u8], out: &mut Vec<u8>) -> Result<usize> {
+    if jpeg.is_empty() {
+        return Err(Error::InvalidInput("JXL: empty JPEG input"));
+    }
+
+    // SAFETY: null memory manager selects libjxl's default allocator (documented in the sys crate).
+    let handle = unsafe { sys_enc::JxlEncoderCreate(core::ptr::null()) };
+    if handle.is_null() {
+        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+    }
+    let enc = Encoder(handle);
+
+    // Reconstruction metadata lives in a `jbrd` container box, so container framing is mandatory
+    // on this path; set it explicitly rather than relying on libjxl forcing it implicitly.
+    // SAFETY: `enc.0` is a valid, freshly created encoder; no output has been produced.
+    enc.check(unsafe { sys_enc::JxlEncoderUseContainer(enc.0, sys_ty::JxlBool::TRUE) })?;
+    // SAFETY: as above; must be set before encoding starts.
+    enc.check(unsafe { sys_enc::JxlEncoderStoreJPEGMetadata(enc.0, sys_ty::JxlBool::TRUE) })?;
+
+    // Frame settings are owned by the encoder (freed on destroy), so they need no separate RAII.
+    // SAFETY: `enc.0` is valid; a null source means "copy from defaults".
+    let frame_settings =
+        unsafe { sys_enc::JxlEncoderFrameSettingsCreate(enc.0, core::ptr::null()) };
+    if frame_settings.is_null() {
+        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+    }
+
+    // SAFETY: `frame_settings` is valid; EFFORT takes an integer level in `1..=10`.
+    enc.check(unsafe {
+        sys_enc::JxlEncoderFrameSettingsSetOption(
+            frame_settings,
+            sys_enc::JxlEncoderFrameSettingId::EFFORT,
+            i64::from(cfg.effort().level()),
+        )
+    })?;
+
+    // Basic info and colour encoding are implied from the JPEG frame by libjxl.
+    // SAFETY: `frame_settings` is valid; `jpeg` points to `jpeg.len()` readable bytes, copied
+    // internally.
+    enc.check(unsafe {
+        sys_enc::JxlEncoderAddJPEGFrame(frame_settings, jpeg.as_ptr(), jpeg.len())
+    })?;
+
+    // SAFETY: `enc.0` is valid; no further frames or boxes will be added.
+    unsafe { sys_enc::JxlEncoderCloseInput(enc.0) };
+
+    drain(&enc, out)
+}
+
+/// Signals the frame's colour interpretation to libjxl: a structured encoding for the built-in
+/// [`ColorSpec`] variants, or the verbatim ICC profile bytes for [`ColorSpec::Icc`]. Must be called
+/// after `JxlEncoderSetBasicInfo`.
+fn set_color(enc: &Encoder, spec: &ColorSpec, gray: bool) -> Result<()> {
+    let is_gray = if gray {
+        sys_ty::JxlBool::TRUE
+    } else {
+        sys_ty::JxlBool::FALSE
+    };
+
+    let color = match spec {
+        ColorSpec::Srgb | ColorSpec::LinearSrgb => {
+            // Zeroed for soundness: all-zero is a valid bit pattern for every field, so no field's
+            // initialisation depends on the C call's coverage.
+            let mut color = core::mem::MaybeUninit::<sys_ty::JxlColorEncoding>::zeroed();
+            // SAFETY: the storage is zeroed (a valid value), and the libjxl helper then writes the
+            // requested sRGB/linear-sRGB profile through the pointer.
+            unsafe {
+                if *spec == ColorSpec::Srgb {
+                    sys_enc::JxlColorEncodingSetToSRGB(color.as_mut_ptr(), is_gray);
+                } else {
+                    sys_enc::JxlColorEncodingSetToLinearSRGB(color.as_mut_ptr(), is_gray);
+                }
+                color.assume_init()
+            }
+        }
+        ColorSpec::Pq | ColorSpec::Hlg => {
+            // BT.2100: D65 white point, BT.2100 primaries (ignored for gray), and the PQ or HLG
+            // transfer function. Built by hand — libjxl has no SetTo* helper for HDR encodings.
+            sys_ty::JxlColorEncoding {
+                color_space: if gray {
+                    sys_ty::JxlColorSpace::GRAY
+                } else {
+                    sys_ty::JxlColorSpace::RGB
+                },
+                white_point: sys_ty::JxlWhitePoint::D65,
+                white_point_xy: [0.0; 2],
+                primaries: sys_ty::JxlPrimaries::BT2100,
+                primaries_red_xy: [0.0; 2],
+                primaries_green_xy: [0.0; 2],
+                primaries_blue_xy: [0.0; 2],
+                transfer_function: if *spec == ColorSpec::Pq {
+                    sys_ty::JxlTransferFunction::PQ
+                } else {
+                    sys_ty::JxlTransferFunction::HLG
+                },
+                gamma: 0.0,
+                rendering_intent: sys_ty::JxlRenderingIntent::RELATIVE,
+            }
+        }
+        ColorSpec::Icc(icc) => {
+            validate_icc(icc, gray)?;
+            // SAFETY: `enc.0` is valid; `icc` points to `icc.len()` readable bytes, copied
+            // internally.
+            return enc.check(unsafe {
+                sys_enc::JxlEncoderSetICCProfile(enc.0, icc.as_ptr(), icc.len())
+            });
+        }
+    };
+
+    // SAFETY: `enc.0` is valid; `color` is fully initialised and copied internally.
+    enc.check(unsafe { sys_enc::JxlEncoderSetColorEncoding(enc.0, &color) })
+}
+
+/// Drains all pending encoder output into `out`, appending after the current contents and
+/// returning the number of bytes appended.
+///
+/// `out` may already hold caller data, so every offset is relative to its length on entry, and on
+/// any error the buffer is truncated back to exactly that length.
+fn drain(enc: &Encoder, out: &mut Vec<u8>) -> Result<usize> {
     let start = out.len();
     let mut chunk = OUTPUT_CHUNK_INIT;
     loop {

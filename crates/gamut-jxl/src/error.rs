@@ -8,7 +8,10 @@
 //! The module has two independently feature-gated halves: [`map_encoder_error`] (libjxl statuses,
 //! `encode`) and [`map_decode_error`] (jxl-rs errors, `decode`).
 
-#[cfg(all(feature = "encode", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 mod encode {
     use gamut_core::Error;
     use gamut_jxl_sys::encode::JxlEncoderError;
@@ -32,8 +35,12 @@ mod encode {
                 debug_assert!(false, "JXL: internal encoder API misuse (bug in gamut-jxl)");
                 Error::InvalidInput("JXL: internal encoder API misuse (bug in gamut-jxl)")
             }
-            // JBRD (JPEG-reconstruction) can't arise on the pixel-frame path, GENERIC is the
-            // catch-all, and any future/unknown code is handled conservatively.
+            // JPEG-reconstruction metadata could not represent the input on the jbrd
+            // recompression path (e.g. exotic progressive scan scripts).
+            JxlEncoderError::JBRD => {
+                Error::Unsupported("JXL: JPEG reconstruction metadata cannot represent this JPEG")
+            }
+            // GENERIC is the catch-all, and any future/unknown code is handled conservatively.
             _ => Error::InvalidInput("JXL: encoding failed"),
         }
     }
@@ -67,17 +74,20 @@ mod encode {
         }
 
         #[test]
+        fn jbrd_maps_to_unsupported() {
+            assert!(matches!(
+                map_encoder_error(JxlEncoderError::JBRD),
+                Error::Unsupported("JXL: JPEG reconstruction metadata cannot represent this JPEG")
+            ));
+        }
+
+        #[test]
         fn generic_and_unknown_map_to_generic_failure() {
             assert!(matches!(
                 map_encoder_error(JxlEncoderError::GENERIC),
                 Error::InvalidInput("JXL: encoding failed")
             ));
-            // JBRD and any unlisted code (ABI-representable via the transparent newtype) fall
-            // through.
-            assert!(matches!(
-                map_encoder_error(JxlEncoderError::JBRD),
-                Error::InvalidInput("JXL: encoding failed")
-            ));
+            // Any unlisted code (ABI-representable via the transparent newtype) falls through.
             assert!(matches!(
                 map_encoder_error(JxlEncoderError(9999)),
                 Error::InvalidInput("JXL: encoding failed")
@@ -97,7 +107,10 @@ mod encode {
     }
 }
 
-#[cfg(all(feature = "encode", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 pub(crate) use encode::map_encoder_error;
 
 #[cfg(feature = "decode")]

@@ -1,6 +1,6 @@
 //! Encoder configuration: the [`Effort`] speed/density dial, the validated lossy [`Distance`]
-//! newtype, the output [`Container`] selector, and the internal [`Mode`] that makes a
-//! lossless-with-a-distance state unrepresentable.
+//! newtype, the output [`Container`] selector, the [`ColorSpec`] colour signalling, and the
+//! internal [`Mode`] that makes a lossless-with-a-distance state unrepresentable.
 
 use gamut_core::{Error, Result};
 
@@ -139,6 +139,133 @@ pub enum Container {
     IsoBmff,
 }
 
+/// The display orientation the encoder signals for the coded samples, matching the eight EXIF
+/// orientation values.
+///
+/// Orientation is metadata: the encoder stores the caller's samples exactly as given (in coded
+/// order) and decoders apply the transform on output. The four transposing variants
+/// ([`Orientation::Transpose`], [`Orientation::Rotate90Cw`], [`Orientation::AntiTranspose`],
+/// [`Orientation::Rotate90Ccw`]) swap the displayed width and height relative to the coded
+/// dimensions. The default is [`Orientation::Identity`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Orientation {
+    /// No transform (EXIF 1); the default.
+    #[default]
+    Identity,
+    /// Mirror horizontally (EXIF 2).
+    FlipHorizontal,
+    /// Rotate 180 degrees (EXIF 3).
+    Rotate180,
+    /// Mirror vertically (EXIF 4).
+    FlipVertical,
+    /// Transpose: mirror across the main diagonal (EXIF 5). Swaps displayed width/height.
+    Transpose,
+    /// Rotate 90 degrees clockwise (EXIF 6). Swaps displayed width/height.
+    Rotate90Cw,
+    /// Anti-transpose: mirror across the anti-diagonal (EXIF 7). Swaps displayed width/height.
+    AntiTranspose,
+    /// Rotate 90 degrees counter-clockwise (EXIF 8). Swaps displayed width/height.
+    Rotate90Ccw,
+}
+
+impl Orientation {
+    /// The EXIF orientation value (`1..=8`) this variant signals.
+    #[must_use]
+    pub fn exif_value(self) -> u8 {
+        match self {
+            Self::Identity => 1,
+            Self::FlipHorizontal => 2,
+            Self::Rotate180 => 3,
+            Self::FlipVertical => 4,
+            Self::Transpose => 5,
+            Self::Rotate90Cw => 6,
+            Self::AntiTranspose => 7,
+            Self::Rotate90Ccw => 8,
+        }
+    }
+
+    /// The [`Orientation`] for an EXIF orientation value, or `None` if `value` is outside `1..=8`.
+    ///
+    /// The inverse of [`Orientation::exif_value`]; handy for forwarding EXIF metadata.
+    #[must_use]
+    pub fn from_exif_value(value: u8) -> Option<Self> {
+        Some(match value {
+            1 => Self::Identity,
+            2 => Self::FlipHorizontal,
+            3 => Self::Rotate180,
+            4 => Self::FlipVertical,
+            5 => Self::Transpose,
+            6 => Self::Rotate90Cw,
+            7 => Self::AntiTranspose,
+            8 => Self::Rotate90Ccw,
+            _ => return None,
+        })
+    }
+
+    /// Whether this orientation swaps the displayed width and height relative to the coded
+    /// dimensions (the four diagonal/rotating transforms, EXIF `5..=8`).
+    #[must_use]
+    pub fn transposes(self) -> bool {
+        matches!(
+            self,
+            Self::Transpose | Self::Rotate90Cw | Self::AntiTranspose | Self::Rotate90Ccw
+        )
+    }
+}
+
+/// The colour interpretation the encoder signals for the pixel samples.
+///
+/// JPEG XL separates the coded samples from their colour meaning: the encoder never converts the
+/// caller's pixels between colour spaces, it *signals* how they are to be interpreted. The default
+/// is [`ColorSpec::Srgb`], matching how 8/16-bit integer buffers are conventionally produced.
+///
+/// - [`ColorSpec::Srgb`] — standard sRGB (IEC 61966-2-1): sRGB primaries, D65, the sRGB transfer
+///   curve. Gray images signal the same transfer curve with luminance-only samples.
+/// - [`ColorSpec::LinearSrgb`] — sRGB primaries and D65 with a **linear** transfer function, for
+///   samples that are already linear light.
+/// - [`ColorSpec::Pq`] — Rec. ITU-R BT.2100 with the SMPTE ST 2084 (PQ) transfer function, the
+///   HDR10-style encoding for absolute-luminance HDR samples (typically 16-bit).
+/// - [`ColorSpec::Hlg`] — Rec. ITU-R BT.2100 with the Hybrid Log-Gamma transfer function, the
+///   scene-referred broadcast HDR encoding.
+/// - [`ColorSpec::Icc`] — an embedded ICC profile carried verbatim in the codestream. The profile's
+///   data colour space must match the image (`RGB ` for 3-channel, `GRAY` for 1-channel layouts);
+///   this is validated when encoding.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ColorSpec {
+    /// Standard (gamma-encoded) sRGB; the default.
+    #[default]
+    Srgb,
+    /// sRGB primaries and white point with a linear transfer function.
+    LinearSrgb,
+    /// Rec. BT.2100 primaries with the SMPTE ST 2084 (PQ) transfer function.
+    Pq,
+    /// Rec. BT.2100 primaries with the Hybrid Log-Gamma (HLG) transfer function.
+    Hlg,
+    /// An embedded ICC profile, stored verbatim in the codestream.
+    Icc(Vec<u8>),
+}
+
+/// Validates that an ICC profile is plausibly attachable to an image with the given colour family:
+/// long enough to carry a header, and with a data colour space signature (header bytes 16..20)
+/// matching grayscale (`GRAY`) vs colour (`RGB `).
+///
+/// This is a cheap structural pre-check so an obvious mismatch is a clear typed error before the
+/// bytes reach libjxl; full profile validation remains libjxl's job.
+pub(crate) fn validate_icc(icc: &[u8], is_gray: bool) -> Result<()> {
+    // The fixed ICC header is 128 bytes; anything shorter cannot be a profile at all.
+    if icc.len() < 128 {
+        return Err(Error::InvalidInput("JXL: ICC profile is too short"));
+    }
+    let space = &icc[16..20];
+    let expected: &[u8; 4] = if is_gray { b"GRAY" } else { b"RGB " };
+    if space != expected {
+        return Err(Error::InvalidInput(
+            "JXL: ICC profile color space does not match the image layout",
+        ));
+    }
+    Ok(())
+}
+
 /// The encoder's lossless-vs-lossy state.
 ///
 /// Kept private so that the invalid combination — lossless *and* a distance — is unrepresentable:
@@ -227,5 +354,81 @@ mod tests {
     #[test]
     fn container_default_is_codestream() {
         assert_eq!(Container::default(), Container::Codestream);
+    }
+
+    #[test]
+    fn color_spec_default_is_srgb() {
+        assert_eq!(ColorSpec::default(), ColorSpec::Srgb);
+    }
+
+    #[test]
+    fn orientation_exif_value_round_trips_over_full_range() {
+        let all = [
+            Orientation::Identity,
+            Orientation::FlipHorizontal,
+            Orientation::Rotate180,
+            Orientation::FlipVertical,
+            Orientation::Transpose,
+            Orientation::Rotate90Cw,
+            Orientation::AntiTranspose,
+            Orientation::Rotate90Ccw,
+        ];
+        for (i, o) in all.into_iter().enumerate() {
+            let value = (i + 1) as u8;
+            assert_eq!(o.exif_value(), value, "{o:?} exif value");
+            assert_eq!(Orientation::from_exif_value(value), Some(o));
+        }
+        for value in 1..=8u8 {
+            assert_eq!(
+                Orientation::from_exif_value(value).unwrap().exif_value(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn orientation_from_exif_rejects_out_of_range() {
+        assert_eq!(Orientation::from_exif_value(0), None);
+        assert_eq!(Orientation::from_exif_value(9), None);
+        assert_eq!(Orientation::from_exif_value(255), None);
+    }
+
+    #[test]
+    fn orientation_default_is_identity_and_transposing_set_is_exact() {
+        assert_eq!(Orientation::default(), Orientation::Identity);
+        // Exactly EXIF 5..=8 transpose; 1..=4 do not.
+        for value in 1..=8u8 {
+            let o = Orientation::from_exif_value(value).unwrap();
+            assert_eq!(o.transposes(), value >= 5, "{o:?}");
+        }
+    }
+
+    /// A minimal 128-byte "profile": all zeros except the data colour space signature.
+    fn fake_icc(space: &[u8; 4]) -> Vec<u8> {
+        let mut icc = vec![0u8; 128];
+        icc[16..20].copy_from_slice(space);
+        icc
+    }
+
+    #[test]
+    fn validate_icc_accepts_matching_color_spaces() {
+        assert!(validate_icc(&fake_icc(b"RGB "), false).is_ok());
+        assert!(validate_icc(&fake_icc(b"GRAY"), true).is_ok());
+    }
+
+    #[test]
+    fn validate_icc_rejects_mismatched_color_spaces() {
+        // An RGB profile on a grayscale image and vice versa are both structural mismatches.
+        assert!(validate_icc(&fake_icc(b"RGB "), true).is_err());
+        assert!(validate_icc(&fake_icc(b"GRAY"), false).is_err());
+        // CMYK profiles are never attachable to gamut-jxl's layouts.
+        assert!(validate_icc(&fake_icc(b"CMYK"), false).is_err());
+    }
+
+    #[test]
+    fn validate_icc_rejects_short_profiles() {
+        assert!(validate_icc(&[], false).is_err());
+        assert!(validate_icc(&[0u8; 127], false).is_err());
+        assert!(validate_icc(&[0u8; 20], true).is_err());
     }
 }

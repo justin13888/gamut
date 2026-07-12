@@ -9,7 +9,7 @@ use gamut_core::{
     Rgba16,
 };
 
-use crate::config::{Container, Distance, Effort, Mode};
+use crate::config::{ColorSpec, Container, Distance, Effort, Mode, Orientation};
 use crate::ffi::{self, FrameSpec, Samples};
 
 /// A JPEG XL encoder backed by the reference libjxl.
@@ -20,7 +20,10 @@ use crate::ffi::{self, FrameSpec, Samples};
 /// output [`Container`] with the `with_*` builders. Encode through the
 /// [`EncodeImage`](gamut_core::EncodeImage) trait, which appends the JPEG XL stream to the caller's
 /// buffer.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// The type is `Clone` but deliberately not `Copy`: a [`ColorSpec::Icc`] configuration owns the
+/// profile bytes.
+#[derive(Debug, Clone, PartialEq)]
 pub struct JxlEncoder {
     /// Lossless, or lossy at a validated distance.
     mode: Mode,
@@ -28,12 +31,29 @@ pub struct JxlEncoder {
     effort: Effort,
     /// Codestream vs. ISO BMFF container framing.
     container: Container,
+    /// The colour interpretation signalled for the pixel samples.
+    color: ColorSpec,
+    /// The display orientation signalled for the coded samples.
+    orientation: Orientation,
+    /// Raw EXIF payload for an `Exif` container box, if any.
+    exif: Option<Vec<u8>>,
+    /// XMP (XML) payload for an `xml ` container box, if any.
+    xmp: Option<Vec<u8>>,
 }
 
 impl Default for JxlEncoder {
-    /// The default encoder is **lossless** — identical to [`JxlEncoder::lossless`].
+    /// The default encoder is **lossless** — identical to [`JxlEncoder::lossless`], which (with
+    /// [`JxlEncoder::new`]) is an intent-revealing alias for this canonical construction.
     fn default() -> Self {
-        Self::lossless()
+        Self {
+            mode: Mode::Lossless,
+            effort: Effort::default(),
+            container: Container::default(),
+            color: ColorSpec::default(),
+            orientation: Orientation::default(),
+            exif: None,
+            xmp: None,
+        }
     }
 }
 
@@ -41,7 +61,7 @@ impl JxlEncoder {
     /// Creates an encoder with the default configuration; equivalent to [`JxlEncoder::lossless`].
     #[must_use]
     pub fn new() -> Self {
-        Self::lossless()
+        Self::default()
     }
 
     /// Creates an encoder that produces a **lossless** stream — the decoded image is bit-exact to the
@@ -49,11 +69,7 @@ impl JxlEncoder {
     /// same encoder; it exists to pair with [`JxlEncoder::lossy`] and make intent explicit.
     #[must_use]
     pub fn lossless() -> Self {
-        Self {
-            mode: Mode::Lossless,
-            effort: Effort::default(),
-            container: Container::default(),
-        }
+        Self::default()
     }
 
     /// Creates an encoder that produces a **lossy** stream at the given Butteraugli [`Distance`]
@@ -62,8 +78,7 @@ impl JxlEncoder {
     pub fn lossy(distance: Distance) -> Self {
         Self {
             mode: Mode::Lossy(distance),
-            effort: Effort::default(),
-            container: Container::default(),
+            ..Self::default()
         }
     }
 
@@ -79,6 +94,53 @@ impl JxlEncoder {
     #[must_use]
     pub fn with_container(mut self, container: Container) -> Self {
         self.container = container;
+        self
+    }
+
+    /// Sets the [`ColorSpec`] signalled for the pixel samples (sRGB by default). Returns the
+    /// updated encoder for chaining.
+    ///
+    /// The encoder never converts pixels between colour spaces — this only declares how the
+    /// caller's samples are to be interpreted. An [`ColorSpec::Icc`] profile is validated against
+    /// the image's colour family when encoding.
+    #[must_use]
+    pub fn with_color(mut self, color: ColorSpec) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Sets the display [`Orientation`] signalled for the coded samples ([`Orientation::Identity`]
+    /// by default). Returns the updated encoder for chaining.
+    ///
+    /// Orientation is metadata: the samples are stored exactly as given, and decoders apply the
+    /// transform on output (the transposing variants swap the displayed width and height).
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: Orientation) -> Self {
+        self.orientation = orientation;
+        self
+    }
+
+    /// Attaches a raw EXIF payload, stored as an `Exif` box in the ISO BMFF container. Returns the
+    /// updated encoder for chaining.
+    ///
+    /// `exif` is the TIFF-structured EXIF data itself (starting with the `II`/`MM` byte-order
+    /// mark); the 4-byte tiff-header offset the `Exif` box format requires is prepended
+    /// automatically. Because metadata lives in container boxes, encoding requires
+    /// [`Container::IsoBmff`] — combining metadata with [`Container::Codestream`] is a typed error
+    /// rather than a silent framing change.
+    #[must_use]
+    pub fn with_exif(mut self, exif: &[u8]) -> Self {
+        self.exif = Some(exif.to_vec());
+        self
+    }
+
+    /// Attaches an XMP (XML) packet, stored as an `xml ` box in the ISO BMFF container. Returns
+    /// the updated encoder for chaining.
+    ///
+    /// As with [`JxlEncoder::with_exif`], encoding then requires [`Container::IsoBmff`].
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: &str) -> Self {
+        self.xmp = Some(xmp.as_bytes().to_vec());
         self
     }
 
@@ -109,27 +171,55 @@ impl JxlEncoder {
         self.container
     }
 
+    /// The configured [`ColorSpec`].
+    #[must_use]
+    pub fn color(&self) -> &ColorSpec {
+        &self.color
+    }
+
+    /// The configured [`Orientation`].
+    #[must_use]
+    pub fn orientation(&self) -> Orientation {
+        self.orientation
+    }
+
+    /// The attached raw EXIF payload, if any.
+    #[must_use]
+    pub fn exif(&self) -> Option<&[u8]> {
+        self.exif.as_deref()
+    }
+
+    /// The attached XMP packet bytes, if any.
+    #[must_use]
+    pub fn xmp(&self) -> Option<&[u8]> {
+        self.xmp.as_deref()
+    }
+
     /// The internal lossless/lossy mode, for the FFI driver.
     pub(crate) fn mode(&self) -> Mode {
         self.mode
     }
 
-    /// Losslessly transcodes an existing JPEG bitstream into JPEG XL (the "jbrd" recompression path),
-    /// appending to `out` and returning the number of bytes written.
+    /// Losslessly transcodes an existing JPEG bitstream into JPEG XL (the "jbrd" recompression
+    /// path), appending to `out` and returning the number of bytes written.
     ///
-    /// This is the API slot for libjxl's JPEG-reconstruction feature, which reversibly re-packs a
-    /// baseline JPEG's coefficients so the original `.jpg` can be reconstructed bit-for-bit. It is
-    /// **not yet implemented**; the method exists so the eventual encoder gains it without a breaking
-    /// signature change. See `STATUS.md` for the deferral rationale.
+    /// libjxl reversibly re-packs the JPEG's DCT coefficients and stores reconstruction metadata
+    /// (the `jbrd` box), so the original `.jpg` can later be reconstructed bit-for-bit while the
+    /// stream also decodes as ordinary JPEG XL pixels. Because that metadata lives in a container
+    /// box, the output is **always ISO BMFF container framing** — the configured [`Container`] does
+    /// not apply here. The transcode is inherently lossless, so the lossless/lossy mode and
+    /// [`Distance`] do not apply either; only the configured [`Effort`] is honoured. Metadata
+    /// attached with [`JxlEncoder::with_exif`]/[`JxlEncoder::with_xmp`] is **not** applied on this
+    /// path: libjxl already carries the JPEG's own EXIF/XMP into the container automatically, and
+    /// duplicating those boxes would corrupt the reconstruction metadata's byte accounting.
     ///
     /// # Errors
     ///
-    /// Always returns [`gamut_core::Error::Unsupported`] in this version.
+    /// Returns [`gamut_core::Error::InvalidInput`] on an empty or malformed JPEG codestream, and
+    /// [`gamut_core::Error::Unsupported`] if the JPEG uses features whose reconstruction metadata
+    /// libjxl cannot represent.
     pub fn recompress_jpeg(&self, jpeg: &[u8], out: &mut Vec<u8>) -> Result<usize> {
-        let _ = (jpeg, out);
-        Err(gamut_core::Error::Unsupported(
-            "JXL: JPEG bitstream recompression is not yet implemented",
-        ))
+        ffi::recompress(self, jpeg, out)
     }
 }
 
@@ -213,13 +303,16 @@ mod tests {
     }
 
     #[test]
-    fn recompress_jpeg_is_unsupported() {
+    fn recompress_jpeg_rejects_empty_input() {
         let mut out = Vec::new();
         let err = JxlEncoder::new()
-            .recompress_jpeg(&[0xFF, 0xD8, 0xFF], &mut out)
+            .recompress_jpeg(&[], &mut out)
             .unwrap_err();
-        assert!(matches!(err, gamut_core::Error::Unsupported(_)));
-        // No output was produced on the unsupported path.
+        assert!(matches!(
+            err,
+            gamut_core::Error::InvalidInput("JXL: empty JPEG input")
+        ));
+        // No output was produced on the rejected path.
         assert!(out.is_empty());
     }
 }

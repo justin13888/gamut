@@ -4,7 +4,11 @@
 //!
 //! These exercise the encoder and decoder as a pair, so they need both codec halves; the module is
 //! compiled only when both are available (i.e. off `wasm32`, with default features).
-#![cfg(all(feature = "encode", feature = "decode", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "encode",
+    feature = "decode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 
 use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,

@@ -9,7 +9,9 @@ crate [README](README.md#why-a-wrapper).
 **Architecture:** encode wraps **libjxl v0.12.0** (statically linked via
 [`gamut-jxl-sys`](../gamut-jxl-sys); source vendored by the BSD-3-Clause `jpegxl-src = "=0.12.0"`,
 bundled skcms, no lcms2); decode wraps the pure-Rust [`jxl` crate v0.4.3](https://crates.io/crates/jxl)
-(jxl-rs). The encoder is target-gated off `wasm32`, where the crate becomes decode-only.
+(jxl-rs). The encoder is available on all targets except `wasm32` without emscripten:
+`wasm32-unknown-emscripten` links the emsdk-built libjxl (full encoder), while
+`wasm32-unknown-unknown`/`wasm32-wasip*` are decode-only — no C/C++ toolchain targets those ABIs.
 
 **Oracle:** libjxl v0.12.0 is both the encode core and the decode **oracle** — the same static
 archive exposes a decode surface (via `gamut-jxl-sys`) that the differential tests cross-check the
@@ -25,13 +27,25 @@ on a hand-written golden bitstream.
   `SetFrameDistance`. `Distance` is a validated newtype over the half-open `(0.0, 25.0]`; `1.0` is
   "visually lossless" and the default. `0.0` (libjxl's lossless sentinel) is rejected so the two
   modes stay structurally distinct.
+- **JPEG recompression (jbrd).** `JxlEncoder::recompress_jpeg` losslessly transcodes a JPEG
+  codestream via `AddJPEGFrame` + `StoreJPEGMetadata`; the original `.jpg` is reconstructible
+  **bit-for-bit** (proven against the libjxl oracle) and the stream still decodes as ordinary
+  pixels. Output is always container-framed (the `jbrd` box requires it); only `Effort` applies.
 - **Effort dial.** `Effort` `Lightning..=Glacier`, mapping libjxl effort `1..=10` (default
   `Squirrel` = 7). Level 11 ("tectonic plate") is expert-gated and out of scope.
 - **Pixel layouts.** 8- and 16-bit **Gray / GrayAlpha / RGB / RGBA** (eight `EncodeImage` /
   `DecodeImage` impls); 16-bit samples handed to libjxl as native-endian bytes.
 - **Container framing.** Bare codestream (default, signature `FF 0A`) and the ISO BMFF `.jxl`
   container (`Container`).
-- **Colour signalling.** sRGB (`JxlColorEncodingSetToSRGB`, gray or colour).
+- **Colour signalling (`ColorSpec`).** sRGB (default), linear sRGB, **PQ** and **HLG** (BT.2100/D65
+  structured encodings, HDR-coded `u16` samples), and a verbatim embedded **ICC profile**
+  (`SetICCProfile`, with a structural gray/RGB pre-check). Signalling only — the encoder never
+  converts pixels. The decoder surfaces embedded ICC bytes via `JxlDecoder::embedded_icc_profile`.
+- **Orientation.** `Orientation` (all eight EXIF values) via `with_orientation`; metadata-only
+  (samples stay in coded order, decoders apply the transform).
+- **Exif / XMP container boxes.** `with_exif` (raw EXIF; the 4-byte tiff-offset prefix is added
+  automatically) and `with_xmp`, written as uncompressed `Exif` / `xml ` boxes; requires
+  `Container::IsoBmff` (a typed error otherwise).
 - **Full pixel decode (jxl-rs).** Decodes the entire ISO/IEC 18181-1 pixel surface jxl-rs
   covers — VarDCT and Modular (RCT/palette/squeeze), XYB, splines/patches/noise/spot colours,
   progressive-encoded streams, and both `jxlc`/`jxlp` container framings — reshaping to the
@@ -39,28 +53,34 @@ on a hand-written golden bitstream.
 - **Decode policies.** Pixel-limit bound (`1 << 28` samples); truncated → `InvalidInput`; animation,
   premultiplied (associated) alpha, and colour-as-grayscale each → `Unsupported` (deliberate refusals
   to guess, additive to relax later).
+- **WebAssembly.** Decode on every `wasm32` target; **encode on `wasm32-unknown-emscripten`**
+  (emsdk-built libjxl, full differential suite in the extended-CI wasm lane).
+  `wasm32-unknown-unknown` stays decode-only — a toolchain boundary, not a workaround.
 
 ## Deferred (planned; additive — semver-minor, no surface reshape)
 
 Each is a self-contained follow-up that plugs into the existing wrapper; the one-line note says what
 unlocks it.
 
-- **JPEG recompression (jbrd).** `JxlEncoder::recompress_jpeg` is the reserved API slot; it returns
-  `Unsupported` today. Unlocks with libjxl's `AddJPEGFrame` + the container `jbrd` box (encode side is
-  available in libjxl 0.12.0; jxl-rs reconstruction is still in-flight — see the ledger below).
-- **Custom colour (ICC / CICP) and HDR.** Only sRGB is signalled today. Needs ICC-blob / CICP plumbing
-  through `SetColorEncoding` (encode) and a colour-management transform on decode (PQ/HLG transfer,
-  intensity target); jxl-rs currently returns its ICC/CMS paths as `Unsupported` here.
+- **Decode-side colour management (CMS transforms).** The decoder returns samples in the stream's
+  own colour encoding and surfaces embedded ICC bytes, but applies no ICC transform and no HDR→SDR
+  tone mapping (PQ/HLG intensity handling); unlocks with a CMS/tone-mapping stage (see
+  `gamut-tonemap`) once jxl-rs's HDR render stages settle (ledger below).
+- **JPEG reconstruction on decode.** gamut writes `jbrd` streams whose original JPEG the *libjxl*
+  decoder reconstructs bit-for-bit; a pure-Rust reconstruction API is blocked on jxl-rs shipping
+  its `jpeg-reconstruction` feature (ledger below).
+- **Reading Exif / XMP boxes back on decode.** gamut writes the boxes; surfacing them from incoming
+  streams is blocked on jxl-rs exposing box contents (ledger below) and ties into the
+  `gamut-metadata` facade (issue #34) for typed parsing.
 - **Premultiplied (associated) alpha decode.** Rejected today; unlocks with an un-premultiply step in
-  `convert`.
+  `convert` (deliberately deferred: an integer un-premultiply is an approximate inverse — alpha = 0
+  is unrecoverable — so it belongs behind an explicit opt-in, not a silent default).
 - **Progressive encode control.** No passes / group-order / responsive knobs are exposed; unlocks with
   the corresponding `FrameSettingsSetOption` calls plus a config surface.
 - **Extra channels beyond alpha.** Depth, thermal, spot, and other extra channels are ignored on
   decode and unsupported on encode; unlocks with a typed extra-channel model.
 - **Effort 11 ("tectonic plate").** Expert-gated behind `JxlEncoderAllowExpertOptions`; the `Effort`
-  enum caps at 10 by design.
-- **Exif / XMP container metadata.** No metadata boxes are written or surfaced; unlocks with the future
-  `gamut-metadata` integration (issue #34) writing `Exif`/`xml ` boxes into the ISO BMFF container.
+  enum caps at 10 by design (also: adding a variant to the exhaustive public enum is semver-major).
 - **Streaming / partial decode API.** The decoder consumes a whole buffer per call; a chunked/streaming
   entry point is a separate additive surface.
 - **libjxl 0.12.x tracking.** The pin is exact (`jpegxl-src = "=0.12.0"` → libjxl 0.12.0). Bumps are
@@ -91,10 +111,14 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   it lands with [libjxl/jxl-rs#590](https://github.com/libjxl/jxl-rs/pull/590) (open PR, behind a
   `jpeg-reconstruction` flag, disabled by default). Separately,
   [#513](https://github.com/libjxl/jxl-rs/issues/513) requests using the JXL decoder to decode
-  *legacy* JPEG files (a distinct feature; open). gamut's `recompress_jpeg` slot stays deferred
-  regardless.
+  *legacy* JPEG files (a distinct feature; open). gamut's `recompress_jpeg` **encode** side ships
+  (libjxl-backed, oracle-verified bit-exact reconstruction); a pure-Rust *decode-side*
+  reconstruction API stays blocked on the upstream release. jxl-rs decodes the *pixels* of jbrd
+  streams today (covered by tests).
 - **HDR tone-mapping render stage.** Tracked as a WIP item on the render-stage tracking bug
-  [#58](https://github.com/libjxl/jxl-rs/issues/58) — one reason custom-colour/HDR decode is deferred.
+  [#58](https://github.com/libjxl/jxl-rs/issues/58). gamut's tests confirm jxl-rs renders lossy
+  XYB back to the embedded PQ encoding, but HDR→SDR tone mapping and general CMS transforms remain
+  the reason decode-side colour *management* is deferred.
 - **Progressive / preview corners.** Unimplemented progressive types incl. preview frames and
   LfFrame-with-alpha ([#730](https://github.com/libjxl/jxl-rs/issues/730)); `flush_pixels` bugs
   ([#783](https://github.com/libjxl/jxl-rs/issues/783),
@@ -103,7 +127,7 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   streams, so it does not exercise these flush/partial paths.
 - **Container Exif / XMP metadata not exposed.** jxl-rs does not surface the `Exif`/`xml ` box bytes
   ([#674](https://github.com/libjxl/jxl-rs/issues/674)) — the upstream half of gamut's deferred
-  metadata work.
+  *read-back* support (gamut's encoder writes the boxes today).
 - **CMYK.** Parsed but not presentable (see Out of scope).
 
 ## Oracle & test regime
@@ -124,9 +148,20 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   16-bit, alpha, grayscale, gray+alpha) plus a large hostile-input corpus (empty,
   short prefixes, systematic truncations, garbage bodies, and bit-flips across the first 256 bytes,
   and the pixel-limit trigger): every case returns a typed `Err`, never a panic.
-- **Orientation — not yet exercised.** The gamut encoder emits identity orientation only, and decode
-  follows jxl-rs's display-oriented `basic_info.size`; non-identity orientations (rotated/mirrored
-  streams from foreign encoders) are not yet covered by the test suite.
+- **jbrd — bit-exact reconstruction.** The vendored baseline-JPEG fixture recompresses and the
+  libjxl oracle reconstructs the **original JPEG bytes exactly**; the stream's pixels also decode
+  within the lossy agreement bound in both decoders; malformed/truncated JPEG inputs are typed
+  errors that restore the output buffer.
+- **Colour — signal pinned via oracle.** Every `ColorSpec` variant's structured encoding is read
+  back field-by-field through `JxlDecoderGetColorAsEncodedProfile`; attached ICC bytes round-trip
+  byte-exactly (and suppress the structured encoding); lossless stays bit-exact under every
+  built-in spec; lossy XYB+PQ decodes back in the PQ domain at a sane PSNR.
+- **Orientation — all eight exercised.** gamut and the oracle decode every EXIF orientation
+  bit-identically (display-oriented); the four transposing values swap dimensions; Rotate180 is
+  pinned by hand-reversal; explicit Identity is byte-identical to the default stream.
+- **Metadata boxes.** Exact `Exif` (tiff-offset prefix included) and `xml ` box payloads pinned by
+  a raw box scan; pixels stay bit-exact with boxes present; Codestream+metadata and empty payloads
+  are typed errors.
 - **Signatures / conversions.** Codestream vs. container signature bytes and the
   gray→RGB / RGBA→RGB / RGB→gray-rejection conversion contracts are pinned.
 - **Mutants:** zero unjustified survivors; the only `exclude_re` entries carry strong justifications

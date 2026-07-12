@@ -11,8 +11,8 @@ use gamut_core::{
 };
 use jxl::api::states::Initialized;
 use jxl::api::{
-    Endianness, JxlColorType, JxlDataFormat, JxlDecoder as JxlRsDecoder, JxlDecoderOptions,
-    JxlOutputBuffer, JxlPixelFormat, ProcessingResult,
+    Endianness, JxlColorProfile, JxlColorType, JxlDataFormat, JxlDecoder as JxlRsDecoder,
+    JxlDecoderOptions, JxlOutputBuffer, JxlPixelFormat, ProcessingResult,
 };
 use jxl::headers::extra_channels::ExtraChannel;
 
@@ -48,6 +48,38 @@ impl JxlDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self { _private: () }
+    }
+
+    /// Returns the ICC profile **embedded** in the stream's metadata, or `None` when the stream
+    /// signals its colour as a structured (enumerated) encoding — sRGB, PQ, HLG, and friends —
+    /// instead of carrying profile bytes.
+    ///
+    /// Only the stream's headers are parsed; no pixels are decoded. The returned bytes are exactly
+    /// the attached profile (what [`crate::ColorSpec::Icc`] set at encode time, when the stream was
+    /// produced by gamut). This is a metadata accessor: the pixel-decoding paths still return
+    /// samples in the stream's own colour encoding, without applying any ICC transform.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the data is not a decodable JPEG XL stream or is
+    /// truncated before the colour metadata.
+    pub fn embedded_icc_profile(&self, data: &[u8]) -> Result<Option<Vec<u8>>> {
+        // `JxlDecoderOptions` is `#[non_exhaustive]`; build from `Default` and set what we use.
+        let mut options = JxlDecoderOptions::default();
+        options.pixel_limit = Some(PIXEL_LIMIT);
+        let mut input: &[u8] = data;
+
+        // Initialized -> WithImageInfo: parse the file headers, which include the colour profile.
+        let decoder = JxlRsDecoder::<Initialized>::new(options);
+        let decoder = match decoder.process(&mut input).map_err(map_decode_error)? {
+            ProcessingResult::Complete { result } => result,
+            ProcessingResult::NeedsMoreInput { .. } => return Err(truncated()),
+        };
+
+        match decoder.embedded_color_profile() {
+            JxlColorProfile::Icc(bytes) => Ok(Some(bytes.clone())),
+            JxlColorProfile::Simple(_) => Ok(None),
+        }
     }
 }
 
@@ -392,6 +424,16 @@ mod tests {
     #[test]
     fn truncated_is_invalid_input() {
         assert!(matches!(truncated(), Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn embedded_icc_profile_errors_on_junk() {
+        // The metadata accessor applies the same typed-error policy as pixel decoding.
+        let dec = JxlDecoder::new();
+        assert!(dec.embedded_icc_profile(&[]).is_err());
+        assert!(dec.embedded_icc_profile(&[0x00, 0x01, 0x02, 0x03]).is_err());
+        // A bare signature with nothing behind it is truncated, not panicking.
+        assert!(dec.embedded_icc_profile(&[0xFF, 0x0A]).is_err());
     }
 
     #[test]

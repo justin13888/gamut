@@ -29,3 +29,10 @@ workspace = true
 # workspace MSRV (the MSRV was raised to 1.92 for exactly this and the jxl decoder crate). See
 # README.md for the licensing notice and the GAMUT_JXL_SYS_SKIP_NATIVE escape hatch.
 jpegxl-src = "=0.12.0"
+# Drives the wasm32-unknown-emscripten libjxl build directly (jpegxl-src's build() is native-only:
+# it hardcodes the host C++ runtime link and cannot disable the wasm pthread flags). Already a
+# transitive dependency of jpegxl-src, so this adds no new code to the build graph. The cmake crate
+# auto-wraps configure/build in `emcmake`/`emmake` for *-emscripten targets. Build-dependencies
+# select on the HOST, so this stays unconditional; the emscripten path is taken at runtime in
+# build.rs based on the target.
+cmake = "0.1.54"
