@@ -8,8 +8,9 @@ components**, not user features. gamut is **decode-only** for HEIF — there is 
 **Status:** ✅ = implemented · ☐ = deferred (planned, additive, in a named later slice)
 · **OOS** = permanently out of scope. The **Slice** column names the delivery: **S1** = the container
 parsing + byte accounting + role-typed view slice (issue #238); **S2** = the `hvcC` record +
-NAL demux/classification slice (delivered — `src/hvcc.rs`, `src/nal.rs`); **S3** = the decoder trait +
-HEVC-intra pixel pipeline slice; **S4** = the libheif differential-oracle slice.
+NAL demux/classification slice (delivered — `src/hvcc.rs`, `src/nal.rs`); **S3** = the pluggable
+decoder trait + derivation/colour/transform pipeline slice (delivered — `src/decode.rs`); **S4** =
+the libheif differential-oracle slice.
 
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
@@ -33,8 +34,18 @@ classify each NAL unit (§3); `HevcConfig::validate_still_payload` enforces the 
 constraint and `HevcConfig::annex_b` emits a start-coded stream for a downstream decoder. Still
 parsing/classification only — the RBSP payloads stay opaque (decode is S3 / issue #18).
 
-**Deferred (planned, additive).** The decoder trait + HEVC-intra pixel pipeline and the libheif
-oracle (rows below). Each lands additively — new crate items or new `#[non_exhaustive]` variants —
+**Implemented (S3).** `HevcDecoder` (`src/decode.rs`) is the pluggable HEVC-intra codestream hook —
+object-safe and byte-slice-shaped for FFI adaptation — that a caller implements over a platform
+decoder. Around it, `HeifImage::decode_item_planar` resolves item derivation (coded → hook;
+`iden` → source; `grid` → plane-domain tile assembly + crop, checked arithmetic, depth-/cycle-limited)
+to a raw `DecodedFrame`, and `HeifImage::decode_item_rgba8` / `decode_primary_rgba8` add colour
+conversion, nearest-neighbour chroma upsampling, alpha-auxiliary merge, `iovl` source-over
+compositing, and the `clap`/`irot`/`imir` transforms (applied in `ipma` order) to yield an
+`ImageBuf<Rgba8>`. The pipeline validates the still-image IRAP constraint before the hook is called;
+it never itself decodes the HEVC RBSP (that is the caller's hook, issue #18 for a native Rust impl).
+
+**Deferred (planned, additive).** The wider colour surface on the RGBA convenience path (rows below)
+and the libheif oracle. Each lands additively — new crate items or new `#[non_exhaustive]` variants —
 never a reshape of the shipped surface.
 
 **Permanently out of scope** (workspace charter: image-first, no inter-frame/motion/sequence
@@ -77,7 +88,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Derived-image sources (`dimg`), `grid` payload + tile-count validation, `iovl` payload | 23008-12 §6.6.2; `references/heif` §4 | ✅ | S1 |
 | `iden` identity derived item recognised (kind); source via `dimg` | 23008-12 §6.6.2.1 | ✅ | S1 |
 | Entity groups + `altr` alternatives lens | 14496-12; MIAF | ✅ | S1 |
-| Decoded Exif/XMP bytes → `gamut-exif`/`gamut-xmp` (payload exposed opaque here) | 23008-12 §A | ☐ | S3 |
+| Decoded Exif/XMP bytes → `gamut-exif`/`gamut-xmp` (payload exposed opaque here) | 23008-12 §A | ☐ | later |
 | Protected / `uri ` items; external data references | 23008-12 | OOS | OOS |
 
 ## C. HEVC configuration & NAL layer (14496-15 · H.265)
@@ -90,16 +101,25 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Annex-B conversion for a downstream decoder — `HevcConfig::annex_b` (`src/hvcc.rs`) | 14496-15 §8.3.2 | ✅ | S2 |
 | L-HEVC multi-layer decode (`heim`/`heis` beyond base layer) | 14496-15 | OOS | OOS |
 
-## D. Pixel decode & API (H.265 intra · gamut-core) — deferred
+## D. Pixel decode & API (H.265 intra · gamut-core)
 
 | Component | Spec | Status | Slice |
 | --- | --- | --- | --- |
-| `gamut_core::DecodeImage` impl (pluggable codestream-decoder hook) | gamut-core; #238 | ☐ | S3 |
-| HEVC-intra reconstruction (slice/CTU/transform/intra-pred/in-loop filters) | H.265 (ITU-T) | ☐ | S3 |
-| `grid`/`iovl`/`iden` derived-image compositing to pixels | 23008-12 §6.6.2 | ☐ | S3 |
-| Transformative-property application (`clap`→`irot`→`imir`) to output pixels | 23008-12 §7; MIAF | ☐ | S3 |
+| Pluggable codestream-decoder hook — `HevcDecoder` trait + `DecodedFrame` contract (`src/decode.rs`), object-safe & FFI-adaptable | #238 | ✅ | S3 |
+| Planar decode surface `decode_item_planar` (coded → hook; still-IRAP validated first) | 14496-15; H.265 | ✅ | S3 |
+| `grid`/`iden` derived-image assembly to planes (`iovl` on the RGBA surface); cycle-/depth-limited, checked | 23008-12 §6.6.2 | ✅ | S3 |
+| RGBA presentation surface `decode_item_rgba8`/`decode_primary_rgba8` (colour + alpha + transforms) | 23008-12; H.273 | ✅ | S3 |
+| Colour conversion: BT.601 (matrix 5/6) via `gamut-color`, identity (0) GBR, monochrome; missing-`colr` default BT.601 limited | H.273; MIAF | ✅ | S3 |
+| Nearest-neighbour co-sited chroma upsampling (4:2:0 / 4:2:2 → 4:4:4) | 23008-12 | ✅ | S3 |
+| Alpha-auxiliary merge (dims-checked, bit-depth-scaled); `prem` surfaced, not un-premultiplied | 23008-12 §6 | ✅ | S3 |
+| Transformative-property application (`clap`/`irot`/`imir`) in `ipma` order to output pixels | 23008-12 §7; 14496-12 §12.1.4; MIAF | ✅ | S3 |
+| `iovl` source-over compositing onto a filled canvas (signed offsets, clipping) | 23008-12 §6.6.2.4 | ✅ | S3 |
+| HEVC-intra reconstruction (slice/CTU/transform/intra-pred/in-loop filters) — delegated to the caller's `HevcDecoder` | H.265 (ITU-T) | ☐ | user / #18 |
+| >8-bit RGBA presentation (pending `gamut-color` high-bit-depth RGB) | H.273 | ☐ | later |
+| BT.709 / BT.2020 matrices on the RGBA surface (pending `gamut-color`) | H.273 | ☐ | later |
+| Depth-map auxiliary presentation | 23008-12 §6.5.8 | ☐ | later |
 | HEVC inter coding (motion, reference frames, sequences) | H.265 | OOS | OOS |
-| CLI / wasm / ffi wiring | gamut-{cli,wasm,ffi} | ☐ | S3 |
+| CLI / wasm / ffi wiring | gamut-{cli,wasm,ffi} | ☐ | later |
 
 ## E. Conformance oracle — deferred
 

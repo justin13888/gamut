@@ -188,6 +188,48 @@ impl<'a> HeifContainer<'a> {
     pub fn unknown_meta_boxes(&self) -> &[UnknownBox<'a>] {
         &self.unknown_meta_boxes
     }
+
+    /// Decodes an item to a raw planar [`DecodedFrame`](crate::DecodedFrame) via `decoder`.
+    /// Convenience forwarding to
+    /// [`HeifImage::decode_item_planar`](crate::HeifImage::decode_item_planar).
+    ///
+    /// # Errors
+    ///
+    /// As [`HeifImage::decode_item_planar`](crate::HeifImage::decode_item_planar).
+    pub fn decode_item_planar(
+        &self,
+        id: u32,
+        decoder: &mut dyn crate::HevcDecoder,
+    ) -> Result<crate::DecodedFrame> {
+        self.image.decode_item_planar(id, decoder)
+    }
+
+    /// Decodes an item to a presentation-ready `ImageBuf<Rgba8>` via `decoder`. Convenience
+    /// forwarding to [`HeifImage::decode_item_rgba8`](crate::HeifImage::decode_item_rgba8).
+    ///
+    /// # Errors
+    ///
+    /// As [`HeifImage::decode_item_rgba8`](crate::HeifImage::decode_item_rgba8).
+    pub fn decode_item_rgba8(
+        &self,
+        id: u32,
+        decoder: &mut dyn crate::HevcDecoder,
+    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
+        self.image.decode_item_rgba8(id, decoder)
+    }
+
+    /// Decodes the primary item to a presentation-ready `ImageBuf<Rgba8>` via `decoder`. Convenience
+    /// forwarding to [`HeifImage::decode_primary_rgba8`](crate::HeifImage::decode_primary_rgba8).
+    ///
+    /// # Errors
+    ///
+    /// As [`HeifImage::decode_primary_rgba8`](crate::HeifImage::decode_primary_rgba8).
+    pub fn decode_primary_rgba8(
+        &self,
+        decoder: &mut dyn crate::HevcDecoder,
+    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
+        self.image.decode_primary_rgba8(decoder)
+    }
 }
 
 /// Walks the top-level boxes into a contiguous, gap-free segment list covering `0..data.len()`,

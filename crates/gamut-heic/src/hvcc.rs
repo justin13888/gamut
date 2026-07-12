@@ -12,16 +12,38 @@ use crate::nal::{NalHeader, NalUnitType, iter_nal_units};
 
 /// The chroma sampling format, from `chroma_format_idc` (`references/heif` §1: 0 = mono, 1 = 4:2:0,
 /// 2 = 4:2:2, 3 = 4:4:4).
+///
+/// `#[repr(u8)]` with explicit discriminants equal to `chroma_format_idc` (0..=3), so the value is
+/// stable across the FFI boundary a platform decoder crosses (issue #238's C-compatibility goal):
+/// a `-sys` shim can pass the raw discriminant without a translation table.
+#[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChromaFormat {
     /// Monochrome (`chroma_format_idc` 0): a single luma plane, no chroma.
-    Monochrome,
+    Monochrome = 0,
     /// 4:2:0 (`chroma_format_idc` 1): chroma sub-sampled by two horizontally and vertically.
-    Yuv420,
+    Yuv420 = 1,
     /// 4:2:2 (`chroma_format_idc` 2): chroma sub-sampled by two horizontally.
-    Yuv422,
+    Yuv422 = 2,
     /// 4:4:4 (`chroma_format_idc` 3): full-resolution chroma.
-    Yuv444,
+    Yuv444 = 3,
+}
+
+impl ChromaFormat {
+    /// The dimensions of each chroma (Cb/Cr) plane for a luma plane of `width` × `height`, using
+    /// **ceiling** division on the subsampled axes so an odd luma dimension keeps the half-covering
+    /// edge sample: 4:2:0 ⇒ `(ceil(width/2), ceil(height/2))`, 4:2:2 ⇒ `(ceil(width/2), height)`,
+    /// 4:4:4 ⇒ `(width, height)`. [`Monochrome`](Self::Monochrome) has no chroma, so it returns
+    /// `(0, 0)`.
+    #[must_use]
+    pub fn chroma_dimensions(self, width: u32, height: u32) -> (u32, u32) {
+        match self {
+            ChromaFormat::Monochrome => (0, 0),
+            ChromaFormat::Yuv420 => (width.div_ceil(2), height.div_ceil(2)),
+            ChromaFormat::Yuv422 => (width.div_ceil(2), height),
+            ChromaFormat::Yuv444 => (width, height),
+        }
+    }
 }
 
 /// One parameter-set array of a [`HevcConfig`] (`references/heif` §1): all NAL units sharing a
