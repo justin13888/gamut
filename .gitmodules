@@ -25,3 +25,12 @@
 [submodule "third_party/aom"]
 	path = third_party/aom
 	url = https://aomedia.googlesource.com/aom
+[submodule "third_party/libde265"]
+	path = third_party/libde265
+	url = https://github.com/strukturag/libde265
+[submodule "third_party/kvazaar"]
+	path = third_party/kvazaar
+	url = https://github.com/ultravideo/kvazaar
+[submodule "third_party/libheif"]
+	path = third_party/libheif
+	url = https://github.com/strukturag/libheif
