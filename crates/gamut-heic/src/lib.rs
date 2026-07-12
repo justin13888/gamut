@@ -1,10 +1,11 @@
 //! HEIC/HEIF still-image **container decoder** — HEVC intra image items in an ISOBMFF container.
 //!
-//! This crate is decode-side and, in this slice (issue #238), covers the **container layer** only:
-//! it parses a HEIF/HEIC file into a byte-exact representation and a role-typed semantic view. It
-//! does **not** encode HEIF (gamut is decode-only for this format, see `references/heif`), and it
-//! does not yet touch the coded bitstream — `hvcC` record parsing, NAL demux, and HEVC-intra pixel
-//! decoding are later slices.
+//! This crate is decode-side and, for issue #238, covers the **container and NAL layers**: it parses
+//! a HEIF/HEIC file into a byte-exact representation and a role-typed semantic view, decodes the
+//! `hvcC` HEVCDecoderConfigurationRecord into a typed [`HevcConfig`], and splits/classifies the coded
+//! item payload into NAL units. It does **not** encode HEIF (gamut is decode-only for this format,
+//! see `references/heif`), and it does not interpret the coded RBSP payloads — HEVC-intra pixel
+//! decoding is a later slice (issue #18).
 //!
 //! # Two layers
 //!
@@ -24,12 +25,21 @@
 //! The box tree itself is the shared [`gamut_isobmff`] primitive (`ftyp`/`meta`/`iloc`/`iinf`/…);
 //! this crate layers the HEIF still-image profile and the byte-accounting guarantee on top.
 //!
+//! # HEVC configuration & NAL layer
+//!
+//! [`HevcConfig::parse`] decodes an `hvcC` record ([`references/heif`](../heif) §1) into typed
+//! profile/tier/level, chroma/bit-depth, and the parameter-set [`arrays`](HevcConfig::arrays);
+//! [`HeifItem::hevc_config`] reaches it from a coded item. [`iter_nal_units`] splits a length-prefixed
+//! `hvc1`/`hev1` payload (§2), [`NalHeader::parse`] reads the two-byte NAL header and
+//! [`NalUnitType`] classifies it (§3), [`HevcConfig::validate_still_payload`] enforces the still-image
+//! IRAP constraint, and [`HevcConfig::annex_b`] converts a payload to a start-coded NAL stream for a
+//! downstream decoder.
+//!
 //! # Deferred to later slices
 //!
-//! Typed `hvcC` HEVCDecoderConfigurationRecord parsing and NAL-unit demux/classification; the
-//! [`gamut_core::DecodeImage`] implementation and the HEVC-intra pixel pipeline; and the libheif
-//! differential oracle. Image *sequences* (`msf1`/`hevc`/`hevx` tracks) are permanently out of
-//! scope (gamut is image-first). See this crate's `STATUS.md`.
+//! The [`gamut_core::DecodeImage`] implementation and the HEVC-intra pixel pipeline (RBSP/slice/CTU
+//! decoding), and the libheif differential oracle. Image *sequences* (`msf1`/`hevc`/`hevx` tracks)
+//! are permanently out of scope (gamut is image-first). See this crate's `STATUS.md`.
 //!
 //! # Example
 //!
@@ -74,10 +84,14 @@
 #![forbid(unsafe_code)]
 
 mod container;
+mod hvcc;
 mod image;
+mod nal;
 
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
+pub use hvcc::{ChromaFormat, HevcConfig, NalArray};
 pub use image::{
     CleanAperture, ContentLightLevel, HeifImage, HeifItem, ItemKind, PixelAspectRatio,
     TransformativeProperty,
 };
+pub use nal::{NalHeader, NalUnitIter, NalUnitType, iter_nal_units};

@@ -5,11 +5,11 @@ spec (ISO/IEC 23008-12 HEIF; ISO/IEC 23000-22 MIAF; ISO/IEC 14496-12 ISOBMFF; IS
 file format; ITU-T H.265 | ISO/IEC 23008-2 HEVC; ITU-T H.273 CICP). Rows are **technical
 components**, not user features. gamut is **decode-only** for HEIF — there is no encoder row.
 
-**Status:** ✅ = implemented (this slice) · ☐ = deferred (planned, additive, in a named later slice)
-· **OOS** = permanently out of scope. The **Slice** column names the delivery: **S1** = this slice
-(container parsing + byte accounting + role-typed view, issue #238); **S2** = the `hvcC` record +
-NAL demux/classification slice; **S3** = the decoder trait + HEVC-intra pixel pipeline slice; **S4**
-= the libheif differential-oracle slice.
+**Status:** ✅ = implemented · ☐ = deferred (planned, additive, in a named later slice)
+· **OOS** = permanently out of scope. The **Slice** column names the delivery: **S1** = the container
+parsing + byte accounting + role-typed view slice (issue #238); **S2** = the `hvcC` record +
+NAL demux/classification slice (delivered — `src/hvcc.rs`, `src/nal.rs`); **S3** = the decoder trait +
+HEVC-intra pixel pipeline slice; **S4** = the libheif differential-oracle slice.
 
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
@@ -26,9 +26,16 @@ semantic view over the primary still-image stream (brands, validated primary, it
 properties, and the thumbnail/auxiliary/metadata/derivation relationship lenses). The coded
 bitstream stays opaque.
 
-**Deferred (planned, additive).** The typed `hvcC` record, NAL demux/classification, the decoder
-trait + HEVC-intra pixel pipeline, and the libheif oracle (rows below). Each lands additively — new
-crate items or new `#[non_exhaustive]` variants — never a reshape of the S1 surface.
+**Implemented (S2).** `HevcConfig::parse` decodes the `hvcC` HEVCDecoderConfigurationRecord (§1) into
+typed fields plus the parameter-set arrays, reached from a coded item via `HeifItem::hevc_config`;
+`iter_nal_units` splits a length-prefixed `hvc1`/`hev1` payload (§2); `NalUnitType`/`NalHeader`
+classify each NAL unit (§3); `HevcConfig::validate_still_payload` enforces the still-image IRAP
+constraint and `HevcConfig::annex_b` emits a start-coded stream for a downstream decoder. Still
+parsing/classification only — the RBSP payloads stay opaque (decode is S3 / issue #18).
+
+**Deferred (planned, additive).** The decoder trait + HEVC-intra pixel pipeline and the libheif
+oracle (rows below). Each lands additively — new crate items or new `#[non_exhaustive]` variants —
+never a reshape of the shipped surface.
 
 **Permanently out of scope** (workspace charter: image-first, no inter-frame/motion/sequence
 coding). Image sequences and tracks — the `msf1`/`hevc`/`hevx` brands, `moov`/`trak`/`mdia`/`stbl`
@@ -73,14 +80,14 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Decoded Exif/XMP bytes → `gamut-exif`/`gamut-xmp` (payload exposed opaque here) | 23008-12 §A | ☐ | S3 |
 | Protected / `uri ` items; external data references | 23008-12 | OOS | OOS |
 
-## C. HEVC configuration & NAL layer (14496-15 · H.265) — deferred
+## C. HEVC configuration & NAL layer (14496-15 · H.265)
 
 | Component | Spec | Status | Slice |
 | --- | --- | --- | --- |
-| Typed `hvcC` HEVCDecoderConfigurationRecord parse (profile/tier/level, arrays) | 14496-15 §8.3.3.1; `references/heif` §1 | ☐ | S2 |
-| Item payload → length-prefixed NAL unit split (`lengthSizeMinusOne`) | 14496-15 §8.3.2; `references/heif` §2 | ☐ | S2 |
-| NAL unit header classify (VPS/SPS/PPS/SEI/IRAP) + still-image IRAP constraint | H.265 §7.3.1.2; `references/heif` §3 | ☐ | S2 |
-| Annex-B conversion for a downstream decoder | 14496-15 §8.3.2 | ☐ | S2 |
+| Typed `hvcC` HEVCDecoderConfigurationRecord parse (profile/tier/level, arrays) — `HevcConfig::parse` (`src/hvcc.rs`), reached via `HeifItem::hevc_config` | 14496-15 §8.3.3.1; `references/heif` §1 | ✅ | S2 |
+| Item payload → length-prefixed NAL unit split (`lengthSizeMinusOne`) — `iter_nal_units`/`NalUnitIter` (`src/nal.rs`) | 14496-15 §8.3.2; `references/heif` §2 | ✅ | S2 |
+| NAL unit header classify (VPS/SPS/PPS/SEI/IRAP) + still-image IRAP constraint — `NalUnitType`/`NalHeader` (`src/nal.rs`), `HevcConfig::validate_still_payload` | H.265 §7.3.1.2; `references/heif` §3 | ✅ | S2 |
+| Annex-B conversion for a downstream decoder — `HevcConfig::annex_b` (`src/hvcc.rs`) | 14496-15 §8.3.2 | ✅ | S2 |
 | L-HEVC multi-layer decode (`heim`/`heis` beyond base layer) | 14496-15 | OOS | OOS |
 
 ## D. Pixel decode & API (H.265 intra · gamut-core) — deferred

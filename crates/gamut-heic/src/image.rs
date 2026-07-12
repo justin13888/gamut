@@ -13,6 +13,8 @@ use gamut_isobmff::{
     ColourInformation, EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, PropertyKind,
 };
 
+use crate::hvcc::HevcConfig;
+
 /// The `aux_type` URNs that mark an auxiliary image as an **alpha** plane (ISO/IEC 23008-12 §6.5.8;
 /// MIAF §7.3.5 / CICP). See `references/heif` §6.
 const ALPHA_AUX_URNS: [&str; 2] = [
@@ -433,14 +435,27 @@ impl<'a> HeifItem<'a> {
     }
 
     /// The raw codec-configuration record as `(box type, body)` — the `hvcC`/`av1C` bytes, kept
-    /// opaque here (the typed `hvcC` parse is a later slice). `None` if the item has no codec
-    /// configuration.
+    /// opaque. `None` if the item has no codec configuration. For the typed HEVC record use
+    /// [`hevc_config`](Self::hevc_config).
     #[must_use]
     pub fn codec_configuration(&self) -> Option<(&'a [u8; 4], &'a [u8])> {
         self.inner.properties.iter().find_map(|p| match &p.kind {
             PropertyKind::CodecConfiguration { kind, data } => Some((kind, data.as_slice())),
             _ => None,
         })
+    }
+
+    /// The typed `hvcC` HEVCDecoderConfigurationRecord ([`HevcConfig`]), if the item carries one.
+    ///
+    /// Returns `None` when the item has no `hvcC` codec configuration (it has none, or its codec
+    /// configuration is a non-HEVC one such as `av1C`), and `Some(Err(..))` when an `hvcC` record is
+    /// present but malformed — keeping "absent" distinct from "malformed". See
+    /// [`HevcConfig::parse`] (`references/heif` §1).
+    #[must_use]
+    pub fn hevc_config(&self) -> Option<Result<HevcConfig>> {
+        self.codec_configuration()
+            .filter(|(kind, _)| *kind == b"hvcC")
+            .map(|(_, data)| HevcConfig::parse(data))
     }
 
     /// The item's transformative properties (`clap`/`irot`/`imir`) in `ipma` association order — the
@@ -555,7 +570,8 @@ impl<'a> HeifItem<'a> {
 pub enum ItemKind {
     /// A coded image item carrying compressed pixels via its codec configuration and payload. The
     /// four-character `codec` distinguishes HEVC (`hvc1`/`hev1`) from other codecs a HEIF file may
-    /// carry (`av01`, …); use [`is_hevc`](Self::is_hevc).
+    /// carry (`av01`, …); use [`is_hevc`](Self::is_hevc). For an HEVC item, the typed configuration
+    /// is available via [`HeifItem::hevc_config`](crate::HeifItem::hevc_config).
     CodedImage {
         /// The coded-image item type (`*b"hvc1"`, `*b"hev1"`, `*b"av01"`, …).
         codec: [u8; 4],
