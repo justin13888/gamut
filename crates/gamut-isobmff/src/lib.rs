@@ -18,6 +18,14 @@
 //! see this crate's `STATUS.md` for the deferred/out-of-scope ledger. Box byte layouts follow
 //! ISO/IEC 14496-12 (ISOBMFF) and ISO/IEC 23008-12 (HEIF); see `references/isobmff`.
 //!
+//! [`read`] models only the *primary* still-image stream. It is tolerant of real-world "motion
+//! photo" files that append a second, foreign stream (a Samsung MP4 starting with a second `ftyp`
+//! and its own `moov`, a Google `mpvd` box, or a trailing non-ISOBMFF vendor blob): the top-level
+//! walk stops cleanly at a second `ftyp` and at any malformed trailing box once `ftyp`+`meta` have
+//! been seen, so the semantic model covers the primary image and nothing else. Mapping every byte
+//! of the remainder to a box or trailer is a byte-accounting consumer's job (`gamut-heic`), for
+//! which the box-walk primitives [`BoxReader`] and [`RawBox`] are re-exported.
+//!
 //! ```
 //! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, read, write};
 //!
@@ -50,13 +58,16 @@
 mod boxes;
 mod grid;
 mod model;
+mod overlay;
 mod reader;
 mod writer;
 
+pub use boxes::{BoxReader, RawBox};
 pub use grid::ImageGrid;
 pub use model::{
     ColourInformation, EntityGroup, IsoBmffImage, Item, ItemReference, NclxColr, Property,
     PropertyKind,
 };
+pub use overlay::ImageOverlay;
 pub use reader::read;
 pub use writer::write;

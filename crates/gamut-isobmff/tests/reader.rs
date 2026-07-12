@@ -278,3 +278,93 @@ fn iloc_field_size_must_be_0_4_or_8() {
     let m = meta(&[hdlr(), pitm_v0(1), iinf_v0(&[]), iloc, empty_iprp()]);
     assert_read_fails(&cat(&[ftyp(), m]), "field size not 0/4/8");
 }
+
+// ---- motion-photo tolerance (issue #238) ---------------------------------------------------
+
+/// A second top-level `ftyp` with a distinct major brand.
+fn second_ftyp() -> Vec<u8> {
+    bx(b"ftyp", b"heic\x00\x00\x00\x00")
+}
+
+#[test]
+fn appended_motion_photo_stream_is_ignored() {
+    // A Samsung-style motion photo: the valid still image, then a *second* ftyp, a foreign moov,
+    // and trailing garbage. The primary-stream walk stops at the second ftyp, so the model is
+    // byte-for-byte identical to the bare file — the moov is never seen (and never rejected).
+    let bare = valid();
+    let mut motion = bare.clone();
+    motion.extend_from_slice(&second_ftyp());
+    motion.extend_from_slice(&bx(b"moov", &[0u8; 16])); // would be Unsupported if walked
+    motion.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // non-box garbage
+    assert_eq!(read(&motion).unwrap(), read(&bare).unwrap());
+}
+
+#[test]
+fn trailing_non_box_garbage_is_tolerated() {
+    // A trailing vendor blob that is not a box (e.g. a Samsung SEF trailer): once ftyp+meta are
+    // seen, a malformed top-level box stops the walk cleanly instead of erroring.
+    let bare = valid();
+    let mut f = bare.clone();
+    f.extend_from_slice(b"SEFT\x00\x01\x02\x03trailing-junk");
+    assert_eq!(read(&f).unwrap(), read(&bare).unwrap());
+}
+
+#[test]
+fn malformed_box_before_meta_still_errors() {
+    // A truncated box between ftyp and meta: ftyp is seen but meta is not, so the error propagates.
+    let truncated = [0x00, 0x00, 0x00, 0xFF, b'j', b'u', b'n', b'k']; // claims 255 bytes, has 0
+    assert!(read(&cat(&[ftyp(), truncated.to_vec()])).is_err());
+}
+
+#[test]
+fn primary_stream_moov_is_still_unsupported() {
+    // A `moov` in the primary stream (no preceding second ftyp) stays rejected — genuine image
+    // sequences are out of scope.
+    assert_read_fails(&cat(&[ftyp(), bx(b"moov", &[0u8; 16])]), "sequences");
+}
+
+#[test]
+fn first_ftyp_wins_over_appended_ftyp() {
+    // The appended stream's ftyp has a different major brand; the primary brand must be unchanged.
+    let mut f = valid();
+    f.extend_from_slice(&second_ftyp()); // major brand heic
+    let model = read(&f).unwrap();
+    assert_eq!(&model.major_brand, b"avif", "first (primary) ftyp wins");
+}
+
+#[test]
+fn iloc_extent_into_appended_region_still_resolves() {
+    // Hand-author a file whose single item's payload lives *after* a second ftyp (in the appended
+    // region). Payload resolution addresses the full buffer, so the absolute extent still resolves.
+    let payload = [0x11u8, 0x22, 0x33, 0x44];
+    let iloc = full(
+        b"iloc",
+        0,
+        0,
+        &cat(&[
+            &[0x44u8, 0x00][..],                   // offset_size 4, length_size 4, base 0
+            &1u16.to_be_bytes(),                   // item_count
+            &1u16.to_be_bytes(),                   // item_ID
+            &0u16.to_be_bytes(),                   // data_reference_index
+            &1u16.to_be_bytes(),                   // extent_count
+            &0u32.to_be_bytes(),                   // extent_offset (patched below)
+            &(payload.len() as u32).to_be_bytes(), // extent_length
+        ]),
+    );
+    let m = meta(&[
+        hdlr(),
+        pitm_v0(1),
+        iloc,
+        iinf_v0(&[infe_v2(1, b"av01")]),
+        empty_iprp(),
+    ]);
+    let mut f = cat(&[ftyp(), m, second_ftyp()]);
+    let payload_abs = f.len();
+    f.extend_from_slice(&payload); // appended after the second ftyp
+    // Patch the iloc extent_offset (body offset 14 → absolute find("iloc") + 4 + 14) to point at it.
+    let ep = find(&f, b"iloc") + 18;
+    f[ep..ep + 4].copy_from_slice(&(payload_abs as u32).to_be_bytes());
+
+    let model = read(&f).unwrap();
+    assert_eq!(model.items[0].payload, payload.to_vec());
+}
