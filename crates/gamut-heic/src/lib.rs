@@ -48,11 +48,17 @@
 //! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). See the [`HevcDecoder`] docs for the FFI rationale and
 //! the exact colour policy.
 //!
+//! # Conformance
+//!
+//! The whole pipeline is checked differentially against **libheif + libde265** — plugged into the
+//! [`HevcDecoder`] seam — over gamut-authored fixtures generated at test time
+//! (`tests/conformance.rs`, the dev-only `tooling/libheif-oracle`; see `references/heif` "Oracle").
+//!
 //! # Deferred to later slices
 //!
-//! Wiring the decoded Exif/XMP bytes through `gamut-exif`/`gamut-xmp`, and the libheif differential
-//! oracle. Image *sequences* (`msf1`/`hevc`/`hevx` tracks) are permanently out of scope (gamut is
-//! image-first). See this crate's `STATUS.md`.
+//! Wiring the decoded Exif/XMP bytes through `gamut-exif`/`gamut-xmp`. Image *sequences*
+//! (`msf1`/`hevc`/`hevx` tracks) are permanently out of scope (gamut is image-first). See this
+//! crate's `STATUS.md`.
 //!
 //! # Example
 //!

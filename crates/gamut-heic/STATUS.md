@@ -10,7 +10,8 @@ components**, not user features. gamut is **decode-only** for HEIF — there is 
 parsing + byte accounting + role-typed view slice (issue #238); **S2** = the `hvcC` record +
 NAL demux/classification slice (delivered — `src/hvcc.rs`, `src/nal.rs`); **S3** = the pluggable
 decoder trait + derivation/colour/transform pipeline slice (delivered — `src/decode.rs`); **S4** =
-the libheif differential-oracle slice.
+the libheif differential-oracle slice (delivered — `tests/conformance.rs` over the
+`tooling/libheif-oracle` dev-dependency).
 
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
@@ -44,9 +45,17 @@ compositing, and the `clap`/`irot`/`imir` transforms (applied in `ipma` order) t
 `ImageBuf<Rgba8>`. The pipeline validates the still-image IRAP constraint before the hook is called;
 it never itself decodes the HEVC RBSP (that is the caller's hook, issue #18 for a native Rust impl).
 
-**Deferred (planned, additive).** The wider colour surface on the RGBA convenience path (rows below)
-and the libheif oracle. Each lands additively — new crate items or new `#[non_exhaustive]` variants —
-never a reshape of the shipped surface.
+**Implemented (S4).** `tests/conformance.rs` is the libheif differential suite: a `De265Decoder`
+plugs the reference HEVC decoder (libde265, via the dev-only `tooling/libheif-oracle` crate) into the
+crate's `HevcDecoder` seam, and gamut-authored fixtures generated at test time (libheif + kvazaar,
+no committed binaries) are cross-checked against libheif — container structure vs `introspect`,
+presentation pixels vs `decode_primary_rgba` (tight bound), planar samples bit-exact vs a direct
+`decode_hevc_intra`, orientation (`irot`) direction, motion-photo byte accounting, and hvcC/YUV
+coherence. See the `references/heif` "Oracle" section.
+
+**Deferred (planned, additive).** The wider colour surface on the RGBA convenience path (rows below).
+Each lands additively — new crate items or new `#[non_exhaustive]` variants — never a reshape of the
+shipped surface.
 
 **Permanently out of scope** (workspace charter: image-first, no inter-frame/motion/sequence
 coding). Image sequences and tracks — the `msf1`/`hevc`/`hevx` brands, `moov`/`trak`/`mdia`/`stbl`
@@ -121,12 +130,17 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | HEVC inter coding (motion, reference frames, sequences) | H.265 | OOS | OOS |
 | CLI / wasm / ffi wiring | gamut-{cli,wasm,ffi} | ☐ | later |
 
-## E. Conformance oracle — deferred
+## E. Conformance oracle
 
 | Component | Spec | Status | Slice |
 | --- | --- | --- | --- |
-| libheif (libde265) differential parse + decode oracle (`tooling/…-oracle` over a `third_party/` submodule) | `references/heif` "Oracle" | ☐ | S4 |
-| Nokia HEIF reference software as a secondary fixture source | `references/heif` "Oracle" | ☐ | S4 |
+| libheif (libde265) differential parse + decode oracle (`tooling/libheif-oracle` over the `third_party/{libheif,libde265,kvazaar}` submodules) — `tests/conformance.rs` | `references/heif` "Oracle" | ✅ | S4 |
+| `De265Decoder`: the reference HEVC decoder plugged into the `HevcDecoder` seam (container plumbing proven bit-exact against a direct `decode_hevc_intra`) | #238; `references/heif` §§1–3 | ✅ | S4 |
+| Structure conformance: `HeifContainer::parse` vs libheif `introspect` (primary id, item ids+types, ispe dims, alpha, thumbnails, Exif/XMP bytes incl. the `exif_tiff_header_offset`) | 23008-12; `references/heif` §9 | ✅ | S4 |
+| Presentation-pixel conformance vs libheif `decode_primary_rgba` (tight measured bound; alpha exact) + orientation `irot`/`imir` direction | 23008-12 §7; H.273 | ✅ | S4 |
+| Motion-photo overlay: appended `mpvd` / second-`ftyp` / trailer decode identically to the pristine still (byte accounting) | `references/heif` §8 | ✅ | S4 |
+| Nokia HEIF reference software as a secondary fixture source | `references/heif` "Oracle" | ☐ | later |
+| Real multi-tile `grid` differential (libheif+kvazaar do not auto-emit grids; the oracle API exposes no grid knob — synthetic grid-assembly unit tests cover the path) | 23008-12 §6.6.2.2 | ☐ | later |
 
 ## The S1 guarantee
 

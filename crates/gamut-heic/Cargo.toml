@@ -19,3 +19,11 @@ workspace = true
 gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-isobmff.workspace = true
+
+[dev-dependencies]
+# libheif (+ libde265 decode, kvazaar encode) as the differential-conformance oracle: FFI to a
+# vendored, statically-linked HEIF stack built from the `third_party/{libheif,libde265,kvazaar}`
+# submodules. Dev-only: the shipped library is pure Rust and C-free. Building these tests requires
+# cmake/ninja and a C/C++ toolchain plus the checked-out submodules
+# (`git submodule update --init --recursive`).
+libheif-oracle = { path = "../../tooling/libheif-oracle" }

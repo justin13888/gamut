@@ -59,12 +59,27 @@ if let Some(appended) = container.appended_stream() { /* opaque motion-photo MP4
 
 Reachable through the umbrella crate's `heic` feature.
 
+## Conformance
+
+Correctness is verified differentially against **libheif + libde265** — the de-facto ISO/IEC
+23008-12 reference reader — via the dev-only [`tooling/libheif-oracle`](../../tooling/libheif-oracle)
+crate (`crates/gamut-heic/tests/conformance.rs`). Fixtures are generated **at test time** with
+libheif + kvazaar (`encode_rgba_to_heic`), so no binary fixtures are committed. The suite plugs the
+reference HEVC decoder into the crate's pluggable `HevcDecoder` seam (`De265Decoder`) and cross-checks
+container structure (vs libheif's introspection), presentation pixels (vs libheif's RGBA decode, a
+tight measured bound), planar samples (bit-exact vs a direct libde265 decode — proving the NAL
+split/config delivery), `irot` orientation direction, motion-photo byte accounting, and hvcC↔YUV
+coherence. This is a **dev-only** path: the shipped library stays pure Rust and C-free. Running the
+tests needs the `third_party/{libheif,libde265,kvazaar}` submodules checked out
+(`git submodule update --init --recursive`) and cmake/ninja + a C/C++ toolchain on `PATH`; the three
+C libraries build from source on the first run. See [`references/heif`](../../references/heif/README.md)
+("Oracle").
+
 ## Status
 
-Container-parsing / byte-accounting / role layer implemented (issue #238). The typed `hvcC` record
-+ NAL demux, the `gamut_core::DecodeImage` pixel pipeline, and the libheif differential oracle are
-deferred to later slices. Encoding is **not** provided. See [`STATUS.md`](STATUS.md) for the full
-component ledger.
+Container-parsing / byte-accounting / role layer, the typed `hvcC` record + NAL demux, the pluggable
+`HevcDecoder` decode pipeline, and the libheif differential oracle are all implemented (issue #238).
+Encoding is **not** provided. See [`STATUS.md`](STATUS.md) for the full component ledger.
 
 ## License
 

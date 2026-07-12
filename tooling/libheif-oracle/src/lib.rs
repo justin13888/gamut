@@ -581,6 +581,27 @@ pub struct EncodeOpts {
     pub xmp: Option<Vec<u8>>,
     /// EXIF-style orientation `1..=8` written as `irot`/`imir` (`0` or `1` ⇒ normal, no transform).
     pub orientation: u8,
+    /// If set, write an explicit `nclx` colour profile (a `colr` box) with these CICP code points
+    /// and range, and use it as the RGB→YCbCr conversion target. When `None` (the default) libheif
+    /// omits `colr` entirely and falls back to full-range sRGB internally — so a reader whose
+    /// colr-*less* default differs (e.g. limited-range BT.601) decodes the pixels differently. A
+    /// container-conformance suite that compares presentation pixels therefore wants an explicit
+    /// `colr` so both readers agree on the colour policy.
+    pub nclx: Option<NclxProfile>,
+}
+
+/// A CICP `nclx` colour profile ([`EncodeOpts::nclx`]) — the four code points libheif writes into a
+/// `colr` box and uses as its RGB→YCbCr conversion target.
+#[derive(Debug, Clone, Copy)]
+pub struct NclxProfile {
+    /// `colour_primaries` CICP code point (e.g. 1 = BT.709, 2 = unspecified).
+    pub colour_primaries: u8,
+    /// `transfer_characteristics` CICP code point (e.g. 13 = sRGB/IEC 61966-2-1).
+    pub transfer_characteristics: u8,
+    /// `matrix_coefficients` CICP code point (e.g. 6 = BT.601, 5 = BT.470BG, 0 = identity/GBR).
+    pub matrix_coefficients: u8,
+    /// `full_range_flag`: `true` = full (PC) range, `false` = limited (studio) range.
+    pub full_range: bool,
 }
 
 /// Encodes an interleaved 8-bit RGBA image to a HEIC byte stream with libheif + kvazaar.
@@ -703,18 +724,37 @@ unsafe fn encode_body(
             let _ = sys::heif_encoder_set_lossy_quality(encoder, i32::from(opts.quality));
         }
 
-        // ---- Encoding options (alpha + orientation). ----
+        // ---- Encoding options (alpha + orientation + optional nclx colr). ----
         let options = sys::heif_encoding_options_alloc();
+        // An optional heap-allocated nclx profile; written into `colr` and used as the conversion
+        // target. Kept alive until after encoding and freed in `cleanup`.
+        let mut nclx_ptr: *mut sys::heif_color_profile_nclx = ptr::null_mut();
         if !options.is_null() {
             (*options).save_alpha_channel = u8::from(opts.with_alpha);
             if opts.orientation >= 2 && opts.orientation <= 8 {
                 (*options).image_orientation = u32::from(opts.orientation);
+            }
+            if let Some(nclx) = opts.nclx {
+                nclx_ptr = sys::heif_nclx_color_profile_alloc();
+                if !nclx_ptr.is_null() {
+                    (*nclx_ptr).color_primaries =
+                        u32::from(nclx.colour_primaries) as sys::heif_color_primaries;
+                    (*nclx_ptr).transfer_characteristics = u32::from(nclx.transfer_characteristics)
+                        as sys::heif_transfer_characteristics;
+                    (*nclx_ptr).matrix_coefficients =
+                        u32::from(nclx.matrix_coefficients) as sys::heif_matrix_coefficients;
+                    (*nclx_ptr).full_range_flag = u8::from(nclx.full_range);
+                    (*options).output_nclx_profile = nclx_ptr;
+                }
             }
         }
 
         let cleanup = |img: *mut sys::heif_image,
                        encoder: *mut sys::heif_encoder,
                        options: *mut sys::heif_encoding_options| {
+            if !nclx_ptr.is_null() {
+                sys::heif_nclx_color_profile_free(nclx_ptr);
+            }
             if !options.is_null() {
                 sys::heif_encoding_options_free(options);
             }
