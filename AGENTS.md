@@ -37,7 +37,12 @@ Dependency edges (a crate depends on those to its right):
   **libjxl 0.12.0** via the BSD-3-Clause `jpegxl-src` (`links = "jxl"`); the native backend for
   gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only); build honors
   `GAMUT_JXL_SYS_SKIP_NATIVE=1` to skip cmake for check-only (cross/MSRV) jobs.
-- **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff. **gamut-heic** ← isobmff, core, color.
+- **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff.
+- **gamut-heic** -- decode-only HEIF/HEIC container (issue #238): full-fidelity byte-accounting
+  parse (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
+  `hvcC`/NAL layer, and a pluggable `HevcDecoder` hook for platform HEVC decoders — the HEVC
+  bitstream decode itself is issue #18. Differential oracle: libheif+libde265 (+kvazaar fixture
+  generation), dev-only via `tooling/libheif-oracle`. ← isobmff, core, color.
 - **gamut-ifd** -- TIFF/IFD container core (byte order, field types, IFD read/write); a low-level
   container primitive (sibling to bitstream), shared by the `gamut-tiff` codec (issue #107) and EXIF
   metadata. ← core. Its optional `bigtiff` feature adds the 64-bit BigTIFF variant. The per-format

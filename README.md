@@ -86,7 +86,7 @@ goal is de-facto, fully-featured implementations (for EXIF, exiftool-class tag c
 video codec, gamut implements only the intra-frame, still-image subset those formats use — no
 inter-frame prediction, no motion compensation, no video sequences. The video-named codec
 crates (`gamut-av1`, `gamut-av2`, `gamut-vvc`, and HEVC-based `gamut-heic`) are still-image
-encoders, not video codecs, and gamut will not grow video primitives. This extends to
+codecs, not video codecs, and gamut will not grow video primitives. This extends to
 container-level multi-frame sequences: WebP animation (`ANIM`/`ANMF`) is out of scope even
 though each frame is an independent keyframe — only single still images are supported.
 
