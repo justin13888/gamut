@@ -997,6 +997,11 @@ fn ten_bit_frame_is_planar_only() {
 // ---- alpha -----------------------------------------------------------------------------------
 
 fn alpha_aux(id: u32, master: u32, base: u8, w: u32, h: u32) -> Item {
+    alpha_aux_bd(id, master, base, w, h, 8)
+}
+
+/// An alpha auxiliary at an explicit bit depth (monochrome), for testing the >8-bit rescale.
+fn alpha_aux_bd(id: u32, master: u32, base: u8, w: u32, h: u32, bd: u8) -> Item {
     let auxc = Property {
         essential: false,
         kind: PropertyKind::AuxiliaryType {
@@ -1010,7 +1015,52 @@ fn alpha_aux(id: u32, master: u32, base: u8, w: u32, h: u32) -> Item {
             reference_type: *b"auxl",
             to_item_ids: vec![master],
         }],
-        ..coded_item(id, 0, 8, base, w, h, vec![auxc])
+        ..coded_item(id, 0, bd, base, w, h, vec![auxc])
+    }
+}
+
+#[test]
+fn alpha_dimension_mismatch_one_axis_at_a_time() {
+    // A width-only (and separately height-only) mismatch must still be rejected: the alpha-dimension
+    // guard ORs the two axis checks, so an `||`->`&&` mutation (which would require *both* axes to
+    // differ) is caught by a single-axis mismatch.
+    let master = || coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)]);
+    for bad in [alpha_aux(2, 1, 77, 3, 2), alpha_aux(2, 1, 77, 2, 3)] {
+        let bytes = file(1, vec![master(), bad]);
+        let container = HeifContainer::parse(&bytes).unwrap();
+        assert!(matches!(
+            container.image().decode_item_rgba8(1, &mut Mock::default()),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+}
+
+#[test]
+fn alpha_nine_bit_rescale_is_golden() {
+    // A 9-bit alpha auxiliary exercises the depth-rescale arithmetic `(s*255 + max/2) / max` with
+    // `max = 511` — where an 8-bit auxiliary is the identity and masks every operator. The samples
+    // (255, 258, 272, 275 from the mock gradient) are chosen so every operator mutation provably
+    // diverges; in particular `max` itself must be exactly `(1 << 9) - 1 = 511`: with the `- -> /`
+    // mutant (`max = 512`) sample 258 yields 66046/512 = 128, and with `- -> +` (`max = 513`)
+    // 66046/513 = 128 — both off the correct (65790 + 255)/511 = 129. The round-half term is pinned
+    // too: `/ -> %` (`max % 2 = 1`) turns sample 272 into 69361/511 = 135 instead of 136.
+    let master = coded_item(1, 3, 8, 33, 2, 2, vec![colr(0, true)]);
+    let alpha = alpha_aux_bd(2, 1, 255, 2, 2, 9);
+    let bytes = file(1, vec![master, alpha]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let rgba = container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap();
+    let base = identity_base_rgba(33, 2, 2);
+    // Expected 8-bit alpha = (s*255 + 255) / 511 for s = ey(255, x, y, 9) = [255, 258, 272, 275].
+    let want_alpha = [127u8, 129, 136, 137];
+    for i in 0..4usize {
+        assert_eq!(
+            &rgba.as_samples()[i * 4..i * 4 + 3],
+            &base[i * 4..i * 4 + 3]
+        );
+        assert_eq!(rgba.as_samples()[i * 4 + 3], want_alpha[i], "alpha px {i}");
     }
 }
 
@@ -1258,4 +1308,272 @@ fn derivation_depth_is_bounded() {
             .decode_item_planar(1, &mut Mock::default())
             .is_ok()
     );
+}
+
+// ---- grid: output-dimension guard & the monochrome/colour split ------------------------------
+
+/// A hidden 4:4:4 colour tile of the given base at 2x2.
+fn color_tile(id: u32, base: u8) -> Item {
+    Item {
+        hidden: true,
+        ..coded_item(id, 3, 8, base, 2, 2, vec![])
+    }
+}
+
+#[test]
+fn grid_exact_fit_colour_assembles_all_planes() {
+    // A 1x2 grid of 2x2 4:4:4 tiles whose output *exactly* fills the 4x2 tiled canvas. Two facets are
+    // pinned: (1) the output-vs-canvas comparisons are `>` (strict) — an exact fit must be accepted,
+    // killing the `> -> ==`/`>=` mutants; (2) a *colour* grid takes the non-monochrome assembly
+    // branch, so the `chroma == Monochrome` test's `== -> !=` inversion (which would drop the chroma
+    // planes and fail `DecodedFrame::new`) is caught by asserting exact Cb/Cr samples.
+    let grid = grid_item(1, 1, 2, 4, 2, &[2, 3]);
+    let bytes = file(1, vec![grid, color_tile(2, 10), color_tile(3, 40)]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let frame = container
+        .image()
+        .decode_item_planar(1, &mut Mock::default())
+        .unwrap();
+
+    assert_eq!((frame.width(), frame.height()), (4, 2));
+    assert_eq!(frame.chroma(), ChromaFormat::Yuv444);
+    for oy in 0..2u32 {
+        for ox in 0..4u32 {
+            let base = if ox < 2 { 10 } else { 40 };
+            let (ix, iy) = (ox % 2, oy);
+            let i = (oy * 4 + ox) as usize;
+            assert_eq!(frame.y()[i], ey(base, ix, iy, 8), "y ({ox},{oy})");
+            assert_eq!(frame.cb()[i], ecb(base, ix, iy, 8), "cb ({ox},{oy})");
+            assert_eq!(frame.cr()[i], ecr(base, ix, iy, 8), "cr ({ox},{oy})");
+        }
+    }
+}
+
+#[test]
+fn grid_output_dimension_guard_rejects_each_violation_individually() {
+    // One violated condition at a time for `ow == 0 || oh == 0 || ow > cw || oh > ch` on a 1x2 grid
+    // of 2x2 tiles (canvas 4x2), always asserting the guard's *own* message. Because `&&` binds
+    // tighter than `||`, each `|| -> &&` mutation fuses one adjacent pair (`a || (b && c) || d`, …),
+    // so only a fixture violating exactly that one condition exposes it — the degenerate grid then
+    // slips past to a later, different ("zero-sized image") error or an out-of-range tile index.
+    for (ow, oh) in [(0u32, 2u32), (4, 0), (5, 2), (4, 3)] {
+        let grid = grid_item(1, 1, 2, ow, oh, &[2, 3]);
+        let bytes = file(1, vec![grid, mono_tile(2, 10), mono_tile(3, 40)]);
+        let container = HeifContainer::parse(&bytes).unwrap();
+        let err = container
+            .image()
+            .decode_item_planar(1, &mut Mock::default())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("output dimensions exceed"),
+            "({ow},{oh}): unexpected error: {err}"
+        );
+    }
+}
+
+// ---- overlay: empty-canvas guard -------------------------------------------------------------
+
+#[test]
+fn overlay_zero_height_canvas_is_rejected_by_its_own_guard() {
+    // An overlay canvas with a zero height: the `ow != 0 && oh != 0` guard must reject it. The
+    // `&& -> ||` mutant lets the degenerate canvas through, failing later with a different
+    // ("zero-sized image") error — so the exact guard message pins it.
+    let src = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 10, 2, 2, vec![colr(0, true)])
+    };
+    let ov = Item {
+        references: vec![dimg(&[2])],
+        payload: ImageOverlay {
+            canvas_fill_value: [0; 4],
+            output_width: 4,
+            output_height: 0,
+            offsets: vec![(0, 0)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    let bytes = file(1, vec![ov, src]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let err = container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("overlay canvas is empty"),
+        "unexpected error: {err}"
+    );
+}
+
+// ---- colour: 4:4:4 chroma indexing -----------------------------------------------------------
+
+#[test]
+fn bt601_444_uses_full_chroma_resolution() {
+    // A 4:4:4 BT.601 frame: the chroma column index must be `x` (not `x / 2`). Deleting the `Yuv444`
+    // match arm falls through to the subsampled `x / 2`, reading the wrong Cb/Cr column — caught by a
+    // golden that varies the chroma across adjacent columns.
+    let item = coded_item(1, 3, 8, 15, 3, 2, vec![colr(6, false)]);
+    let bytes = file(1, vec![item]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let rgba = container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap();
+    for y in 0..2u32 {
+        for x in 0..3u32 {
+            let yv = ey(15, x, y, 8) as u8;
+            let cb = ecb(15, x, y, 8) as u8; // 4:4:4: chroma index == luma index
+            let cr = ecr(15, x, y, 8) as u8;
+            let (r, g, b) = ycbcr_to_rgb(yv, cb, cr, ColorRange::Limited);
+            let o = ((y * 3 + x) * 4) as usize;
+            assert_eq!(&rgba.as_samples()[o..o + 4], &[r, g, b, 255], "({x},{y})");
+        }
+    }
+}
+
+// ---- clap: per-denominator guards, integer division, and offset arithmetic -------------------
+
+/// Decodes a 4x2 identity image carrying a single `clap`, returning the (expected-`Err`) error.
+fn clap_error(clap_prop: Property) -> Error {
+    let item = coded_item(1, 3, 8, 0, 4, 2, vec![colr(0, true), clap_prop]);
+    let bytes = file(1, vec![item]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap_err()
+}
+
+#[test]
+fn clap_guard_messages_pin_each_disjunction() {
+    // Each `clap` validation guard ORs several conditions; a single failing condition must fire that
+    // guard's *own* message. Relaxing any `||` to `&&` lets the input slip to a later guard with a
+    // different message, so asserting the exact message kills the `||` mutants one guard at a time.
+    let neg = |v: i32| v as u32;
+
+    // Zero denominators, one at a time (width_d / height_d / horiz_off_d / vert_off_d): each must
+    // fire the zero-denominator guard's own message. Because `&&` binds tighter than `||`, each
+    // `|| -> &&` mutation fuses one adjacent pair of the four-way disjunction, so only the fixture
+    // zeroing exactly that denominator exposes it — the input then slips to the integer-value guard
+    // (a different message) or into a division-by-zero panic in `clap_offset`.
+    for zeroed in [
+        clap(2, 0, 2, 1, 0, 1, 0, 1),
+        clap(2, 1, 2, 0, 0, 1, 0, 1),
+        clap(2, 1, 2, 1, 0, 0, 0, 1),
+        clap(2, 1, 2, 1, 0, 1, 0, 0),
+    ] {
+        let e = clap_error(zeroed);
+        assert!(e.to_string().contains("zero denominator"), "{e}");
+    }
+
+    // Non-integer width only (3/2): the integer-value guard.
+    let e = clap_error(clap(3, 2, 2, 1, 0, 1, 0, 1));
+    assert!(e.to_string().contains("width/height is not integer"), "{e}");
+
+    // Zero-sized crop (width_n = 0): the zero-crop guard.
+    let e = clap_error(clap(0, 1, 2, 1, 0, 1, 0, 1));
+    assert!(e.to_string().contains("zero-sized crop"), "{e}");
+
+    // Negative left only (horizOff = -2 ⇒ left = -1): the out-of-bounds guard's `left < 0 || top < 0`
+    // disjunction. Under `&&` the negative left slips through and the crop indexes out of bounds.
+    let e = clap_error(clap(2, 1, 2, 1, neg(-2), 1, 0, 1));
+    assert!(e.to_string().contains("outside the image"), "{e}");
+
+    // Height overshoot only (top = 1, crop_h = 2 on a 2-tall image ⇒ top + crop_h = 3 > 2): pins the
+    // `top + crop_h` addition (the `+ -> -`/`*` mutants) and the final `|| top+crop_h>h` term.
+    let e = clap_error(clap(2, 1, 2, 1, neg(-1), 1, 1, 1));
+    assert!(e.to_string().contains("outside the image"), "{e}");
+}
+
+#[test]
+fn clap_fractional_denominators_crop_is_golden() {
+    // width_n/width_d = 4/2 and height_n/height_d = 4/2 both reduce to a 2x2 crop at (1, 0). The
+    // `/ -> *` mutants on the crop-size divisions blow the crop past the image, so the exact cropped
+    // pixels pin both integer divisions.
+    let base = identity_base_rgba(91, 4, 2);
+    let want = ref_crop(&base, 4, 1, 0, 2, 2);
+    let (got, gw, gh) = decode_rgba_with_props(91, 4, 2, vec![clap(4, 2, 4, 2, 0, 1, 0, 1)]);
+    assert_eq!((gw, gh), (2, 2));
+    assert_eq!(got, want);
+}
+
+#[test]
+fn clap_offset_denominator_is_golden() {
+    // A horizontal offset with denominator 2 (horizOff = 0/2) still centres the 2x2 crop at left = 1.
+    // The offset numerator `(dim - crop) * off_d` and the denominator `2 * off_d` both multiply by
+    // off_d; the `* -> /` mutants make the offset non-integer or out of bounds, so the exact crop
+    // pins both multiplications.
+    let base = identity_base_rgba(92, 4, 2);
+    let want = ref_crop(&base, 4, 1, 0, 2, 2);
+    let (got, gw, gh) = decode_rgba_with_props(92, 4, 2, vec![clap(2, 1, 2, 1, 0, 2, 0, 1)]);
+    assert_eq!((gw, gh), (2, 2));
+    assert_eq!(got, want);
+}
+
+// ---- overlay compositing: the fully-transparent branch and source-over rounding --------------
+
+#[test]
+fn composite_over_fully_transparent_pixel_clears_in_place() {
+    // A transparent source pixel over a transparent (but non-black) canvas produces a fully
+    // transparent output pixel, taking the `out_a == 0` fast path that writes `canvas[di..di+4]`.
+    // The `+ -> -`/`*` mutants on that slice bound write to the wrong pixel (or panic), so pinning
+    // the cleared pixel — and that its neighbour is untouched — kills them.
+    let src = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 167, 2, 1, vec![colr(0, true)])
+    };
+    // Alpha auxiliary base 253 ⇒ alpha (0,0) = 253, alpha (1,0) = (253 + 3) & 0xFF = 0.
+    let src_alpha = alpha_aux(3, 2, 253, 2, 1);
+    let ov = Item {
+        references: vec![dimg(&[2])],
+        payload: ImageOverlay {
+            canvas_fill_value: [0x0A00, 0x1400, 0x1E00, 0x0000], // (10, 20, 30, 0) after >> 8
+            output_width: 2,
+            output_height: 1,
+            offsets: vec![(0, 0)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    let bytes = file(1, vec![ov, src, src_alpha]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let got = container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap();
+    // Canvas pixel (1,0) is the transparent source pixel over the transparent fill ⇒ cleared.
+    assert_eq!(&got.as_samples()[4..8], &[0, 0, 0, 0]);
+}
+
+#[test]
+fn composite_over_source_over_rounding_is_golden() {
+    // A semi-transparent (alpha 128) source over an opaque black canvas. The channel blend
+    // `(num + out_a/2) / out_a` rounds half up; dropping the half (`out_a / 2 -> out_a % 2`) shifts
+    // every channel down by one. The exact blended pixel pins the rounding.
+    let src = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 167, 1, 1, vec![colr(0, true)]) // identity ⇒ [R=1, G=167, B=207]
+    };
+    let src_alpha = alpha_aux(3, 2, 128, 1, 1); // alpha 128
+    let ov = Item {
+        references: vec![dimg(&[2])],
+        payload: ImageOverlay {
+            canvas_fill_value: [0, 0, 0, 0xFF00], // opaque black
+            output_width: 1,
+            output_height: 1,
+            offsets: vec![(0, 0)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    let bytes = file(1, vec![ov, src, src_alpha]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let got = container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap();
+    assert_eq!(got.as_samples(), &[1, 84, 104, 255]);
 }

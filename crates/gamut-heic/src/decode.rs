@@ -705,12 +705,11 @@ fn apply_alpha(rgba: &mut [u8], w: usize, h: usize, alpha: &DecodedFrame) -> Res
     }
     let max = (1u32 << alpha.bit_depth) - 1;
     for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+        // Scale the sample from its native bit depth to 8-bit, round-to-nearest. Depth 8 needs no
+        // special case: `(s * 255 + 127) / 255 == s` for every `s` in `0..=255`, so this general
+        // rescale is already the identity there.
         let s = u32::from(alpha.y[i]);
-        px[3] = if alpha.bit_depth == 8 {
-            s as u8
-        } else {
-            ((s * 255 + max / 2) / max) as u8
-        };
+        px[3] = ((s * 255 + max / 2) / max) as u8;
     }
     Ok(())
 }
@@ -729,7 +728,10 @@ fn apply_transforms(
     for tp in props {
         match tp {
             TransformativeProperty::Rotation(turns) => {
-                for _ in 0..(turns % 4) {
+                // `turns` is 0..=3 by construction — the isobmff `irot` parser masks the angle field
+                // with `& 0x03` — so each unit is exactly one 90° anti-clockwise rotation and no
+                // modulo normalisation is needed here.
+                for _ in 0..turns {
                     let rotated = rotate90_ccw(&cur, cw, ch);
                     cur = rotated.0;
                     cw = rotated.1;

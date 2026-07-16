@@ -311,9 +311,24 @@ fn trailing_non_box_garbage_is_tolerated() {
 
 #[test]
 fn malformed_box_before_meta_still_errors() {
-    // A truncated box between ftyp and meta: ftyp is seen but meta is not, so the error propagates.
+    // A truncated box between ftyp and meta: ftyp is seen but meta is not, so the *walk* error
+    // propagates verbatim. Asserting the exact box-walk message (not just `is_err`) pins the
+    // tolerance guard `ftyp.is_some() && meta_body.is_some()`: relaxing `&&` to `||` would break the
+    // walk cleanly and surface "missing meta" instead — a different error.
     let truncated = [0x00, 0x00, 0x00, 0xFF, b'j', b'u', b'n', b'k']; // claims 255 bytes, has 0
-    assert!(read(&cat(&[ftyp(), truncated.to_vec()])).is_err());
+    assert_read_fails(&cat(&[ftyp(), truncated.to_vec()]), "unexpected end of box");
+}
+
+#[test]
+fn malformed_box_after_meta_without_ftyp_still_errors() {
+    // The mirror of the above: `meta` is seen but `ftyp` is not. The truncated trailing box must
+    // still propagate the walk error — the `&&` tolerance guard requires *both* required boxes, so
+    // the `||` mutant (which would surface "missing ftyp") is killed by asserting the walk message.
+    let truncated = [0x00, 0x00, 0x00, 0xFF, b'j', b'u', b'n', b'k']; // claims 255 bytes, has 0
+    assert_read_fails(
+        &cat(&[meta(&[]), truncated.to_vec()]),
+        "unexpected end of box",
+    );
 }
 
 #[test]

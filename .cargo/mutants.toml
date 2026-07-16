@@ -410,4 +410,32 @@ exclude_re = [
     # replacement is byte-identical — provably equivalent, unkillable. Same shape and justification
     # as the AvifEncoder::lossless / WebpEncoder::lossless entries above.
     'replace JxlEncoder::lossless -> Self with Default::default\(\)',
+    # gamut-heic (issue #238) — behaviourally-equivalent survivors.
+    # `Reader::u48` (hvcc.rs) assembles a 48-bit big-endian value byte-by-byte via
+    # `(acc << 8) | u64::from(byte)`: the running accumulator is shifted up 8 bits before each OR, so
+    # its low 8 bits are always zero and never overlap the freshly-read byte (0..=255). Disjoint
+    # operands ⇒ `|` is identical to `^`; the `| -> ^` mutant is provably equivalent (same shape as
+    # the gamut-ifd `Value::decode` / gamut-iptc `IimBlock::parse` byte-assembly entries above).
+    'replace \| with \^ in Reader<.a>::u48',
+    # `NalHeader::parse` (nal.rs) packs `nuh_layer_id` from two disjoint bit fields:
+    # `(u16::from(b0 & 0x01) << 5) | u16::from(b1 >> 3)`. The left operand contributes only bit 5
+    # (0 or 32); the right only bits 0..=4 (`b1 >> 3` is 0..=31). The operands never share a bit, so
+    # `| -> ^` is equivalent.
+    'replace \| with \^ in NalHeader::parse',
+    # `NalUnitIter::next` (nal.rs) accumulates a big-endian length prefix via
+    # `(acc << 8) | usize::from(b)`: identical disjoint-byte shape as `Reader::u48`, so `| -> ^` is
+    # equivalent.
+    'replace \| with \^ in <impl Iterator for NalUnitIter<.a>>::next',
+    # `walk_segments` (container.rs) is reached only from `HeifContainer::parse`, and only *after*
+    # `gamut_isobmff::read(data)?` has already succeeded — which requires both `ftyp` and `meta` to
+    # have been parsed. `walk_segments` replays the identical `BoxReader` walk, so by the time it
+    # reaches its malformed-box arm (the only place the `seen_ftyp && seen_meta` guard runs) both
+    # flags are necessarily true (had a malformed box preceded either, `read` itself would have
+    # errored and `parse` would never call `walk_segments`). With both operands always true at that
+    # point, `&&` and `||` are indistinguishable — the mutant is equivalent. Line-anchored (like the
+    # frame.rs entries above) because the *other* `&&` in the same function — the second-`ftyp`
+    # appended-stream detection at container.rs:253 — is observable and stays killed by the
+    # accounting tests. (The analogous tolerance guard in `read`, which *is* reachable with only one
+    # box seen, is killed by the exact-message tests in gamut-isobmff `tests/reader.rs`.)
+    'container\.rs:283:30: replace && with \|\|',
 ]

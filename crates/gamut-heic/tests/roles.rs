@@ -6,7 +6,9 @@ mod common;
 
 use common::{auxc, clean_file, hvc1_item, hvcc, iref, ispe, item};
 use gamut_heic::{HeifContainer, HeifItem, ItemKind};
-use gamut_isobmff::{ImageGrid, ImageOverlay, Item, Property, PropertyKind};
+use gamut_isobmff::{
+    EntityGroup, ImageGrid, ImageOverlay, IsoBmffImage, Item, Property, PropertyKind, write,
+};
 
 const ALPHA_URN: &str = "urn:mpeg:hevc:2015:auxid:1";
 const DEPTH_URN: &str = "urn:mpeg:hevc:2015:auxid:2";
@@ -101,6 +103,70 @@ fn relationship_lenses_resolve_exact_items() {
     assert_eq!(img.exif().map(|i| i.id()), Some(5));
     assert_eq!(img.xmp().map(|i| i.id()), Some(6));
     assert_eq!(ids(img.derivation_sources(7)), vec![8, 9, 10, 11]);
+
+    // The Exif metadata item is not a coded image (pins `ItemKind::is_coded_image` against `-> true`).
+    assert!(matches!(img.item(5).unwrap().kind(), ItemKind::Exif));
+    assert!(!img.item(5).unwrap().kind().is_coded_image());
+}
+
+#[test]
+fn brands_groups_and_alternatives_pin_exact_values() {
+    // A file with an explicit major/compatible brand set and two entity groups — one `altr`, one
+    // non-`altr` (`ster`) — pins `major_brand`/`compatible_brands`/`groups`/`alternatives` against
+    // their body-replacement mutants, and the `== b"altr"` filter against its `!=` inversion (which
+    // would return the `ster` group instead of the `altr` one).
+    let model = IsoBmffImage {
+        major_brand: *b"heic",
+        minor_version: 0,
+        compatible_brands: vec![*b"mif1", *b"heic"],
+        primary_item_id: 1,
+        items: vec![
+            hvc1_item(1, vec![1, 2, 3, 4]),
+            Item {
+                hidden: true,
+                ..hvc1_item(2, vec![5, 6])
+            },
+        ],
+        groups: vec![
+            EntityGroup {
+                group_type: *b"ster",
+                group_id: 7,
+                entity_ids: vec![1, 2],
+            },
+            EntityGroup {
+                group_type: *b"altr",
+                group_id: 8,
+                entity_ids: vec![2, 1],
+            },
+        ],
+    };
+    let data = write(&model).unwrap();
+    let c = HeifContainer::parse(&data).unwrap();
+    let img = c.image();
+
+    assert_eq!(img.major_brand(), *b"heic");
+    assert_eq!(img.compatible_brands(), &[*b"mif1", *b"heic"][..]);
+    assert_eq!(img.groups(), model.groups.as_slice());
+
+    let alts = img.alternatives();
+    assert_eq!(alts.len(), 1);
+    assert_eq!(alts[0].group_type, *b"altr");
+    assert_eq!(alts[0].group_id, 8);
+    assert_eq!(alts[0].entity_ids, vec![2, 1]);
+}
+
+#[test]
+fn alpha_auxiliary_requires_an_alpha_urn() {
+    // A master whose *only* auxiliary is a depth map must have no alpha auxiliary. This pins
+    // `is_alpha_urn` against its `-> true` replacement, which would misreport the depth aux as alpha.
+    let master = hvc1_item(1, vec![1, 2, 3, 4]);
+    let depth = aux_item(2, 1, DEPTH_URN);
+    let data = clean_file(1, vec![master, depth]);
+    let c = HeifContainer::parse(&data).unwrap();
+    let img = c.image();
+
+    assert_eq!(img.depth_auxiliary_of(1).map(|i| i.id()), Some(2));
+    assert!(img.alpha_auxiliary_of(1).is_none());
 }
 
 #[test]

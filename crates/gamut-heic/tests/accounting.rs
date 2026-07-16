@@ -48,6 +48,12 @@ fn clean_file_is_all_boxes() {
             .iter()
             .all(|s| matches!(s.kind, SegmentKind::Box { .. }))
     );
+
+    // `data()` returns the exact input buffer it was parsed from (pins the accessor against the
+    // `Vec::leak(..)` replacements). Compare by contents *and* pointer identity — it borrows `data`.
+    assert_eq!(c.data(), data.as_slice());
+    assert_eq!(c.data().as_ptr(), data.as_ptr());
+    assert_eq!(c.data().len(), data.len());
 }
 
 #[test]

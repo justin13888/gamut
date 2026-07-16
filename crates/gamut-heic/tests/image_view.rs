@@ -282,3 +282,58 @@ fn ispe_essential() -> Property {
         },
     )
 }
+
+#[test]
+fn rotation_and_mirror_accessors_pin_exact_values() {
+    // Item 1 carries irot=3 and imir=1; item 2 carries imir=0; item 3 carries neither. The exact
+    // values (not `is_some`) pin the accessors against the `None`/`Some(0)`/`Some(1)` and
+    // match-arm-deletion mutants: irot(3) differs from every replacement, and the two mirror axes
+    // together rule out both `Some(0)` and `Some(1)`.
+    let with_both = Item {
+        properties: vec![
+            hvcc(vec![1]),
+            prop(true, PropertyKind::Rotation(3)),
+            prop(true, PropertyKind::Mirror(1)),
+        ],
+        ..item(1, *b"hvc1", vec![1])
+    };
+    let mirror_axis0 = Item {
+        hidden: true,
+        properties: vec![hvcc(vec![1]), prop(true, PropertyKind::Mirror(0))],
+        ..item(2, *b"hvc1", vec![2])
+    };
+    let neither = Item {
+        hidden: true,
+        properties: vec![hvcc(vec![1])],
+        ..item(3, *b"hvc1", vec![3])
+    };
+    let data = clean_file(1, vec![with_both, mirror_axis0, neither]);
+    let c = HeifContainer::parse(&data).unwrap();
+    let img = c.image();
+
+    assert_eq!(img.item(1).unwrap().rotation(), Some(3));
+    assert_eq!(img.item(1).unwrap().mirror(), Some(1));
+    assert_eq!(img.item(2).unwrap().mirror(), Some(0));
+    assert_eq!(img.item(2).unwrap().rotation(), None);
+    assert_eq!(img.item(3).unwrap().rotation(), None);
+    assert_eq!(img.item(3).unwrap().mirror(), None);
+}
+
+#[test]
+fn unknown_item_type_is_not_classified_as_coded() {
+    // An unrecognised four-cc must classify as `Unknown`, not `CodedImage`. This pins the `kind`
+    // match guard (`is_coded_image_type(ty)`) and the `is_coded_image_type` helper against their
+    // `-> true` replacements, which would misclassify it as a coded image.
+    let unknown = Item {
+        hidden: true,
+        properties: vec![hvcc(vec![1])],
+        ..item(2, *b"zzzz", vec![9])
+    };
+    let data = clean_file(1, vec![hvc1_item(1, vec![1, 2, 3, 4]), unknown]);
+    let c = HeifContainer::parse(&data).unwrap();
+    let it = c.image().item(2).unwrap();
+    assert_eq!(it.kind(), ItemKind::Unknown(*b"zzzz"));
+    assert!(!it.kind().is_coded_image());
+    // The coded classifier remains true for a real coded item (the positive direction).
+    assert!(c.image().item(1).unwrap().kind().is_coded_image());
+}
