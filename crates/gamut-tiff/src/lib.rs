@@ -8,44 +8,75 @@
 //! is the shared [`gamut_ifd`](https://crates.io/crates/gamut-ifd) primitive (also the basis for
 //! EXIF); this crate adds the codec on top and re-exports the structural types from its root so its
 //! public API is unchanged. It further layers on the shared primitives: [`gamut_core`] (traits /
-//! errors), [`gamut_color`] (photometric & pixel formats, incl. palette / CMYK / YCbCr /
-//! CIE L\*a\*b\*), and [`gamut_bitstream`] (LZW and CCITT bit coding). The [`gamut_dsp`] edge is
-//! declared for the future JPEG-in-TIFF DCT kernels (`gamut_dsp::jpeg`); the differencing
-//! predictor is TIFF-specific and lives in this crate's [`compression`] module.
+//! errors / typed pixel formats) and [`gamut_bitstream`] (LZW and CCITT bit coding). The
+//! differencing predictor is TIFF-specific and lives in this crate;
+//! the deferred colour-space work (YCbCr, CIE L\*a\*b\*) and JPEG-in-TIFF will bring back the
+//! `gamut-color` and `gamut-dsp` edges additively when they land (see `STATUS.md`).
 //!
 //! The encoder and decoder are reachable through the umbrella crate's `tiff` feature. Everything
 //! is implemented clean-slate from the TIFF 6.0 specification (`references/tiff/tiff6.pdf`,
 //! Adobe/Aldus, Final — June 3 1992) and the BigTIFF extension (`references/tiff/bigtiff.html`)
 //! rather than wrapping libtiff.
 //!
-//! Implementation in progress (see issue #107). The codec layer ([`ifd`] photometric/predictor
-//! semantics, [`writer`] strip/tile/multi-page layout over [`gamut_ifd::write`], [`tags`],
-//! [`compression`]) and the baseline pixel path are in place: [`TiffEncoder`] writes 8-bit
-//! grayscale/RGB/RGBA/CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles) —
-//! uncompressed, PackBits, LZW, or (for bilevel) Modified Huffman / Group 4 fax — and
-//! [`TiffDecoder`] reads them back. Encoding takes a typed [`gamut_core::ImageRef`] via the
-//! per-format [`gamut_core::EncodeImage`] impls, and decoding returns a [`gamut_core::ImageBuf`] via
-//! [`gamut_core::DecodeImage`]. Both the classic 32-bit container and
-//! **BigTIFF** (magic `43`, 64-bit offsets, for files past 4 GiB) are written and read: opt into
-//! BigTIFF with [`TiffEncoder::with_big_tiff`], and the decoder detects the variant from the
-//! header. The remaining compression schemes and colour modes land in subsequent phases.
+//! The v1 surface (built in issue #107, frozen in issue #187): [`TiffEncoder`] writes 8-bit
+//! grayscale/RGB/RGBA/CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles,
+//! single- or multi-page) — uncompressed, PackBits, LZW (optionally with the
+//! horizontal-differencing [`Predictor`]), or (for bilevel) Modified Huffman / Group 4 fax —
+//! and [`TiffDecoder`] reads them all back. Encoding takes a typed [`gamut_core::ImageRef`] via
+//! the per-format [`gamut_core::EncodeImage`] impls, and decoding returns a
+//! [`gamut_core::ImageBuf`] via [`gamut_core::DecodeImage`]. Both the classic 32-bit container
+//! and **BigTIFF** (magic `43`, 64-bit offsets, for files past 4 GiB) are written and read: opt
+//! into BigTIFF with [`TiffEncoder::with_big_tiff`]; the decoder detects the variant from the
+//! header. The strict [`deconstruct`] walk additionally accounts every input byte and flags
+//! unknown tags and codes for archival triage. Every lossless path is pinned pixel-exact in both
+//! directions against libtiff; the deferred colour modes and compression schemes (YCbCr,
+//! CIE L\*a\*b\*, JPEG-in-TIFF, …) land additively — see `STATUS.md` for the scope ledger.
+//!
+//! ```
+//! use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
+//! use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
+//!
+//! let dims = Dimensions { width: 2, height: 2 };
+//! let pixels = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+//! let image = ImageRef::<Rgb8>::new(&pixels, dims)?;
+//!
+//! let mut tiff = Vec::new();
+//! TiffEncoder::new()
+//!     .with_compression(Compression::PackBits)
+//!     .encode_image(image, &mut tiff)?;
+//!
+//! let decoded: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff)?;
+//! assert_eq!(decoded.as_samples(), &pixels[..]);
+//! # Ok::<(), gamut_core::Error>(())
+//! ```
 #![forbid(unsafe_code)]
 
-pub mod compression;
-pub mod decoder;
-pub mod deconstruct;
-pub mod encoder;
-pub mod ifd;
-pub mod palette;
+// Single canonical paths (the gamut-ifd v1 precedent): the implementation modules are private
+// and the public surface is the crate-root re-export list below. `tags` is the one deliberate
+// exception — a namespaced constants module, mirroring `gamut_ifd::tags`.
 pub mod tags;
-pub mod writer;
+
+mod compression;
+mod decoder;
+mod deconstruct;
+mod encoder;
+mod ifd;
+mod palette;
+mod writer;
 
 pub use compression::Compression;
 pub use decoder::TiffDecoder;
 pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstruct};
 pub use encoder::TiffEncoder;
-// The structural IFD core lives in gamut-ifd; re-export it so gamut-tiff's public API is unchanged.
-pub use gamut_ifd::{ByteOrder, Field, FieldType, Ifd, TiffFile, Value, Variant, read, write};
+// The structural IFD core lives in gamut-ifd; re-export the types a gamut-tiff user can touch —
+// the read/write spine plus every type reachable from this crate's own public items
+// (`DeconstructReport` exposes `CoverageReport`/`UnknownField`, `CoverageReport` exposes
+// `Range`/`Overlap`, and `Ifd`'s accessors return `SubIfd`) — so no direct gamut-ifd dependency
+// is ever needed to name them.
+pub use gamut_ifd::{
+    ByteOrder, CoverageReport, Field, FieldType, Ifd, Overlap, Range, SubIfd, TiffFile,
+    UnknownField, Value, Variant, read, write,
+};
 pub use ifd::{PhotometricInterpretation, Predictor};
 pub use palette::Palette8;
 pub use writer::{write_image, write_image_tiled, write_multipage};

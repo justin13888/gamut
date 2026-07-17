@@ -10,7 +10,11 @@
 //! the container structure.
 
 /// How pixel samples map to colour, stored in the `PhotometricInterpretation` tag (262).
+///
+/// The set is non-exhaustive: TIFF extensions define further interpretations (LogL, LogLuv,
+/// the TIFF/EP CFA and LinearRaw values, …), so variants may be added without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PhotometricInterpretation {
     /// `0` — bilevel/grayscale where `0` is white and the maximum value is black.
     WhiteIsZero,
@@ -30,11 +34,15 @@ pub enum PhotometricInterpretation {
     CieLab,
 }
 
-impl PhotometricInterpretation {
-    /// Returns the interpretation for an on-disk tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u32) -> Option<Self> {
-        Some(match code {
+impl TryFrom<u32> for PhotometricInterpretation {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk `PhotometricInterpretation` tag value (tag 262) to its interpretation.
+    ///
+    /// Code `7` is unassigned in TIFF 6.0 (it sits between `YCbCr = 6` and `CieLab = 8`);
+    /// it and every other unrecognised code fail with [`gamut_core::Error::Unsupported`].
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        Ok(match code {
             0 => PhotometricInterpretation::WhiteIsZero,
             1 => PhotometricInterpretation::BlackIsZero,
             2 => PhotometricInterpretation::Rgb,
@@ -43,14 +51,19 @@ impl PhotometricInterpretation {
             5 => PhotometricInterpretation::Cmyk,
             6 => PhotometricInterpretation::YCbCr,
             8 => PhotometricInterpretation::CieLab,
-            _ => return None,
+            _ => {
+                return Err(gamut_core::Error::Unsupported(
+                    "TIFF: unrecognised PhotometricInterpretation tag value",
+                ));
+            }
         })
     }
+}
 
-    /// Returns the on-disk tag value.
-    #[must_use]
-    pub fn code(self) -> u16 {
-        match self {
+impl From<PhotometricInterpretation> for u16 {
+    /// Returns the on-disk tag value (the `SHORT` written to tag 262).
+    fn from(photometric: PhotometricInterpretation) -> Self {
+        match photometric {
             PhotometricInterpretation::WhiteIsZero => 0,
             PhotometricInterpretation::BlackIsZero => 1,
             PhotometricInterpretation::Rgb => 2,
@@ -65,7 +78,12 @@ impl PhotometricInterpretation {
 
 /// The prediction scheme applied before compression, stored in the `Predictor` tag (317,
 /// TIFF 6.0 §14).
+///
+/// The set is non-exhaustive: the TIFF Technical Notes define predictor `3` (floating-point
+/// horizontal differencing, deferred with float-sample support), so variants may be added
+/// without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Predictor {
     /// `1` — no prediction.
     #[default]
@@ -75,6 +93,37 @@ pub enum Predictor {
     HorizontalDifferencing,
 }
 
+impl TryFrom<u32> for Predictor {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk `Predictor` tag value (tag 317) to its scheme.
+    ///
+    /// The TIFF Technical Notes also define `3` (floating-point horizontal differencing); it is
+    /// deferred with the float-sample work (see `STATUS.md`) and, like every other unrecognised
+    /// code, fails with [`gamut_core::Error::Unsupported`].
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        Ok(match code {
+            1 => Predictor::None,
+            2 => Predictor::HorizontalDifferencing,
+            _ => {
+                return Err(gamut_core::Error::Unsupported(
+                    "TIFF: unrecognised Predictor tag value",
+                ));
+            }
+        })
+    }
+}
+
+impl From<Predictor> for u16 {
+    /// Returns the on-disk tag value (the `SHORT` written to tag 317).
+    fn from(predictor: Predictor) -> Self {
+        match predictor {
+            Predictor::None => 1,
+            Predictor::HorizontalDifferencing => 2,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,18 +131,27 @@ mod tests {
     #[test]
     fn photometric_codes_round_trip() {
         // Every recognised PhotometricInterpretation code maps back to itself; note `7` is
-        // unused (skipped between Cmyk=5/YCbCr=6 and CieLab=8) and unknown codes return None.
+        // unassigned (skipped between YCbCr=6 and CieLab=8) and unknown codes are rejected.
         for code in [0u32, 1, 2, 3, 4, 5, 6, 8] {
-            let p = PhotometricInterpretation::from_code(code).expect("known photometric");
-            assert_eq!(u32::from(p.code()), code);
+            let p = PhotometricInterpretation::try_from(code).expect("known photometric");
+            assert_eq!(u32::from(u16::from(p)), code);
         }
-        assert_eq!(PhotometricInterpretation::from_code(7), None);
-        assert_eq!(PhotometricInterpretation::from_code(9), None);
+        assert!(PhotometricInterpretation::try_from(7).is_err());
+        assert!(PhotometricInterpretation::try_from(9).is_err());
     }
 
     #[test]
-    fn predictor_defaults_to_none() {
+    fn predictor_codes_round_trip() {
         assert_eq!(Predictor::default(), Predictor::None);
-        assert_ne!(Predictor::None, Predictor::HorizontalDifferencing);
+        for (p, code) in [
+            (Predictor::None, 1u16),
+            (Predictor::HorizontalDifferencing, 2),
+        ] {
+            assert_eq!(u16::from(p), code);
+            assert_eq!(Predictor::try_from(u32::from(code)).unwrap(), p);
+        }
+        // Predictor 3 (floating-point differencing) is deferred with float samples.
+        assert!(Predictor::try_from(0).is_err());
+        assert!(Predictor::try_from(3).is_err());
     }
 }

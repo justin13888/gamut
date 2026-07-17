@@ -41,16 +41,70 @@ lossy → MAE/PSNR tolerance.
 | P18 | §22     | JPEG-in-TIFF (Compression=7) — deferrable tail | ⏳ deferred |
 | P19 | —       | Finalization: decoder robustness corpus + docs | ✅ done |
 
-## Deferred to follow-up campaigns
+## Scope & dispositions (v1)
 
-These TIFF 6.0 extensions are not yet implemented. Each is a self-contained follow-up that plugs
-into the existing strip/tile pipeline and the libtiff oracle the same way every codec above did:
+**Implemented (v1.0).** The full strip/tile serialization spine (two-pass absolute-offset layout,
+II/MM, classic + BigTIFF), single- and multi-page documents, the 8-bit colour modes
+(grayscale/RGB/RGBA/CMYK/palette) plus 1-bit bilevel, the compression schemes
+None/PackBits/LZW (+ horizontal-differencing predictor)/Modified Huffman/Group 4 fax, and the
+strict byte-accounting `deconstruct`. Evidence: every lossless path is pinned **pixel-exact in
+both directions against libtiff** (`tests/oracle.rs` and the per-scheme differential suites over
+`tooling/libtiff-oracle`), the decoder is fuzz-hardened over a byte-flip robustness corpus
+(`tests/robustness.rs`), and the container spine is additionally covered by `gamut-ifd`'s own v1
+oracle suite.
+
+**Deferred (planned, additive).** Each plugs into the existing strip/tile pipeline and libtiff
+oracle the way every codec above did:
 
 - **YCbCr (§21, P15)** and **CIE L\*a\*b\* / RGB colorimetry (§20, §23, P16)** — need colour-space
   conversions in `gamut-color` matched bit-close to libtiff's integer math (cf. the WebP
   full-vs-limited-range trap), plus chroma subsampling for YCbCr.
-- **JPEG-in-TIFF (§22, P18)** — a full baseline JPEG DCT codec (the largest single piece); implement
-  TN2 "new-style" `Compression = 7`. Needs a `libjpeg`-enabled libtiff oracle build.
+- **New-style JPEG-in-TIFF (§22 as redefined by TIFF Technical Note 2, `Compression = 7`, P18)** —
+  the DCT codec itself now exists in the workspace (`gamut-jpeg`, issue #28); the remaining work
+  is the TN2 `JPEGTables`/strip wiring and a `libjpeg`-enabled libtiff oracle build.
 - **Smaller deferrals:** CCITT Group 3 2-D / T.4 EOL framing (Group 3 1-D = the Modified Huffman of
-  P8); `PlanarConfiguration = 2`; 16-bit / IEEE-float samples (§19); 4-bit grayscale; halftone
-  hints (§17); document-storage metadata tags (§12 beyond `PageNumber`).
+  P8); `PlanarConfiguration = 2`; 16-bit / IEEE-float samples (§19) with the TN floating-point
+  predictor 3; 4-bit grayscale; halftone hints (§17); document-storage metadata tags (§12 beyond
+  `PageNumber`).
+
+**Additivity guarantee:** each deferred row lands semver-minor — a new variant on a
+`#[non_exhaustive]` enum (`Compression`, `PhotometricInterpretation`, `Predictor`), a new builder
+method, or a new crate item — never a reshape of the frozen v1 surface.
+
+**Permanently out of scope.** Old-style JPEG (`Compression = 6`, the original §22 scheme):
+deprecated and unimplementable-as-specified per TIFF Technical Note 2, which replaced it wholesale
+with `Compression = 7`. The `Compression::OldJpeg` variant exists only so the on-disk code
+round-trips through `deconstruct`; neither encode nor decode will be implemented (maintainer
+decision, issue #187).
+
+## v1 surface (issue #187)
+
+The API was frozen after a full-surface review; the additions and breaks:
+
+- **Single canonical paths** — the implementation modules are private; the surface is the
+  crate-root re-export list (plus [`tags`](src/tags.rs), the one *named* module, mirroring
+  `gamut_ifd::tags`). The per-scheme strip codecs (LZW/PackBits/CCITT/predictor) are
+  crate-internal: every scheme is reachable through `Compression` on the encoder/decoder.
+- **std conversions** — `Compression::{from_code, code}` and
+  `PhotometricInterpretation::{from_code, code}` became `TryFrom<u32>` / `From<_> for u16`
+  (the gamut-icc/gamut-isobmff precedent); `Predictor`, which had no conversions (inline `1|2`
+  literals), gains the same symmetric pair.
+- **`#[non_exhaustive]`** on the open code sets (`Compression`, `PhotometricInterpretation`,
+  `Predictor`) and the grow-prone deconstruct types (`Severity`, `Anomaly` + its variants,
+  `UnknownTag`, `DeconstructReport`), so new codes/categories/fields land semver-minor.
+- **Complete re-export closure** — `CoverageReport`, `UnknownField`, `Range`, `Overlap`, and
+  `SubIfd` join the `gamut_ifd` re-exports: every type reachable from this crate's public items
+  is nameable without a direct gamut-ifd dependency.
+- **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
+  on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
+  diagnostics whose wording is not contractual.
+- **Dormant dependencies dropped** — `gamut-color` and `gamut-dsp` were declared but unused; they
+  return additively with the colour-space and JPEG-in-TIFF work above.
+
+## The v1 guarantee
+
+`gamut-tiff` 1.0 promises: every emitted file is a well-formed TIFF 6.0 (or BigTIFF) whose
+structure the strict `deconstruct` fully accounts; every lossless path round-trips pixel-exact and
+is continuously validated in both directions against libtiff; the on-disk code↔enum mappings
+(`Compression`, `PhotometricInterpretation`, `Predictor`) are frozen contracts; and every deferred
+row above lands additively — the v1 public surface is never reshaped.

@@ -4,7 +4,7 @@ use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result,
 use gamut_ifd::{Ifd, read};
 
 use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
-use crate::ifd::PhotometricInterpretation;
+use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::palette::Palette8;
 use crate::tags;
 
@@ -177,8 +177,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         return Err(Error::InvalidInput("TIFF: zero-sized image"));
     }
 
-    let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))
-        .ok_or(Error::Unsupported("TIFF: unknown compression"))?;
+    let compression = Compression::try_from(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))?;
     if !matches!(
         compression,
         Compression::None
@@ -215,23 +214,17 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             "TIFF: CCITT coding requires a bilevel image",
         ));
     }
-    let use_predictor = match ifd.get_u32(tags::PREDICTOR).unwrap_or(1) {
-        1 => false,
-        2 => true,
-        _ => return Err(Error::Unsupported("TIFF: unknown predictor")),
-    };
+    let use_predictor = Predictor::try_from(ifd.get_u32(tags::PREDICTOR).unwrap_or(1))?
+        == Predictor::HorizontalDifferencing;
     if use_predictor && bps != 8 {
         return Err(Error::Unsupported("TIFF: predictor requires 8-bit samples"));
     }
 
-    let photometric = PhotometricInterpretation::from_code(require_u32(
+    let photometric = PhotometricInterpretation::try_from(require_u32(
         ifd,
         tags::PHOTOMETRIC_INTERPRETATION,
         "TIFF: missing PhotometricInterpretation",
-    )?)
-    .ok_or(Error::Unsupported(
-        "TIFF: unknown photometric interpretation",
-    ))?;
+    )?)?;
     // How stored samples become the decoded output (TIFF 6.0 §8 PhotometricInterpretation).
     let mode = match (spp, bps, photometric) {
         (1, 1 | 8, PhotometricInterpretation::WhiteIsZero) => Mode::Gray {

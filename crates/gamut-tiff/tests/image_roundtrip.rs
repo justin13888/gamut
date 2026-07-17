@@ -1,8 +1,7 @@
 //! End-to-end pixel round-trips for the uncompressed baseline path (P3, the keystone).
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_tiff::writer::write_image;
-use gamut_tiff::{ByteOrder, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags};
+use gamut_tiff::{ByteOrder, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags, write_image};
 
 const SIZES: &[(u32, u32)] = &[
     (1, 1),
