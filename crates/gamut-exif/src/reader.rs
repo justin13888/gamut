@@ -6,12 +6,26 @@
 //! cannot know which `LONG`s are offsets), so this reader chases those pointers explicitly and
 //! removes them, representing each sub-IFD structurally on [`Exif`] instead.
 
-use gamut_ifd::{ByteOrder, Ifd, Variant};
+use gamut_ifd::{ByteOrder, Ifd, IfdReader, Variant, tags as ifd_tags};
 
 use crate::error::{ExifError, Result};
 use crate::exif::{EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER};
 use crate::tag::ExifTag;
 use crate::thumbnail::Thumbnail;
+
+/// The absolute offset of the Exif sub-IFD's out-of-line `MakerNote` value in `tiff`, or `None`
+/// if the note is absent or inline.
+fn maker_note_offset(
+    tiff: &[u8],
+    exif_ifd_at: u64,
+    order: ByteOrder,
+    variant: Variant,
+) -> Option<u64> {
+    let mut reader = IfdReader::with_layout(tiff, order, variant);
+    let raw = reader.read_ifd(exif_ifd_at).ok()?;
+    let entry = raw.entry(ifd_tags::MAKER_NOTE)?;
+    reader.value_offset(entry)
+}
 
 /// Reads an EXIF blob into an [`Exif`], with options for how the parse is bounded.
 ///
@@ -74,8 +88,15 @@ impl ExifReader {
             None => None,
         };
 
+        // The Exif sub-IFD's own offset, captured before `follow` strips the pointer: the
+        // maker-note pin needs the note value's absolute source position.
+        let exif_ifd_at = image.get_u32(EXIF_IFD_POINTER).map(u64::from);
         let exif = self.follow(&mut image, tiff, order, variant, EXIF_IFD_POINTER, "Exif")?;
         let gps = self.follow(&mut image, tiff, order, variant, GPS_IFD_POINTER, "GPS")?;
+        let maker_note_at = match (&exif, exif_ifd_at) {
+            (Some(_), Some(at)) => maker_note_offset(tiff, at, order, variant),
+            _ => None,
+        };
 
         // The Interoperability directory is reached from *inside* the Exif sub-IFD, not the 0th IFD.
         let (exif, interop) = match exif {
@@ -88,7 +109,13 @@ impl ExifReader {
         };
 
         Ok(Exif::from_parts(
-            order, image, exif, gps, interop, thumbnail,
+            order,
+            image,
+            exif,
+            gps,
+            interop,
+            thumbnail,
+            maker_note_at,
         ))
     }
 
