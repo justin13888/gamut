@@ -28,3 +28,7 @@ gamut-dsp.workspace = true
 # canonical reference codec that proves the encoder's output decodes to the same pixels and the
 # decoder reproduces what libjpeg-turbo decodes.
 libjpeg-oracle = { path = "../../tooling/libjpeg-oracle" }
+# Interop proof for the APP1/APP2 metadata surface: bytes read by `metadata()` feed the facade's
+# `MetadataBlock`s, and `EncodedMetadata` output feeds the `with_*` embed builders. Dev-only by
+# design — the runtime API stays raw bytes, keeping the codec ← metadata layering acyclic.
+gamut-metadata.workspace = true

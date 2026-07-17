@@ -29,6 +29,37 @@ unsafe extern "C" {
         out_pixels: *mut *mut u8,
         out_len: *mut usize,
     ) -> c_int;
+    fn oracle_jpeg_read_icc(
+        data: *const u8,
+        len: usize,
+        out: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> c_int;
+    fn oracle_jpeg_read_app1(
+        data: *const u8,
+        len: usize,
+        out: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn oracle_jpeg_encode_meta(
+        pixels: *const u8,
+        width: c_uint,
+        height: c_uint,
+        gray: c_int,
+        quality: c_int,
+        h_samp: c_int,
+        v_samp: c_int,
+        progressive: c_int,
+        restart_interval: c_uint,
+        optimize_coding: c_int,
+        app1: *const u8,
+        app1_len: usize,
+        icc: *const u8,
+        icc_len: usize,
+        out: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn oracle_jpeg_encode(
         pixels: *const u8,
@@ -230,6 +261,107 @@ pub fn encode(
             c_int::from(params.progressive),
             c_uint::from(params.restart_interval),
             c_int::from(params.optimize_coding),
+            &raw mut out_ptr,
+            &raw mut out_len,
+        )
+    };
+
+    if rc == 0 {
+        Ok(unsafe { take_owned(out_ptr, out_len) })
+    } else {
+        Err("libjpeg-oracle: libjpeg-turbo failed to encode the image".to_string())
+    }
+}
+
+/// Reads the ICC profile of a JPEG via libjpeg-turbo's `jpeg_read_icc_profile` (the reference
+/// reassembly of the APP2 `ICC_PROFILE` chunk sequence). `Ok(None)` when the stream carries none.
+///
+/// # Errors
+///
+/// Returns an error message if libjpeg-turbo rejects the stream.
+pub fn read_icc_profile(data: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut ptr: *mut u8 = std::ptr::null_mut();
+    let mut len: usize = 0;
+    // SAFETY: `data` is a valid slice and the out-params are valid pointers. On success with a
+    // profile present the shim sets `ptr`/`len` to a malloc'd buffer `take_owned` copies + frees.
+    let rc = unsafe { oracle_jpeg_read_icc(data.as_ptr(), data.len(), &raw mut ptr, &raw mut len) };
+    match rc {
+        0 if ptr.is_null() => Ok(None),
+        0 => Ok(Some(unsafe { take_owned(ptr, len) })),
+        _ => Err("libjpeg-oracle: libjpeg-turbo rejected the JPEG stream".to_string()),
+    }
+}
+
+/// Returns the raw payload of the first APP1 marker segment (e.g. `"Exif\0\0"` + TIFF), or
+/// `Ok(None)` when the stream carries no APP1.
+///
+/// # Errors
+///
+/// Returns an error message if libjpeg-turbo rejects the stream or allocation fails.
+pub fn read_first_app1(data: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut ptr: *mut u8 = std::ptr::null_mut();
+    let mut len: usize = 0;
+    // SAFETY: as for `read_icc_profile`; the shim malloc's the copied marker payload.
+    let rc =
+        unsafe { oracle_jpeg_read_app1(data.as_ptr(), data.len(), &raw mut ptr, &raw mut len) };
+    match rc {
+        0 if ptr.is_null() => Ok(None),
+        0 => Ok(Some(unsafe { take_owned(ptr, len) })),
+        2 => Err("libjpeg-oracle: allocation failed while reading APP1".to_string()),
+        _ => Err("libjpeg-oracle: libjpeg-turbo rejected the JPEG stream".to_string()),
+    }
+}
+
+/// [`encode`] plus embedded metadata: an optional raw APP1 payload (written verbatim via
+/// `jpeg_write_marker`) and an optional ICC profile (written via `jpeg_write_icc_profile`, the
+/// reference producer of the APP2 `ICC_PROFILE` chunk sequence).
+///
+/// # Errors
+///
+/// Returns an error message if the input is too small for the given dimensions, or if
+/// libjpeg-turbo reports an encoding error.
+pub fn encode_with_metadata(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    params: &EncodeParams,
+    app1: Option<&[u8]>,
+    icc: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
+    let channels = if params.gray { 1usize } else { 3usize };
+    let needed = width as usize * height as usize * channels;
+    if pixels.len() < needed {
+        return Err(format!(
+            "libjpeg-oracle: pixel buffer holds {} bytes, need {needed} for {width}x{height}x{channels}",
+            pixels.len()
+        ));
+    }
+
+    let (h_samp, v_samp) = params.subsampling.factors();
+    let (app1_ptr, app1_len) = app1.map_or((std::ptr::null(), 0), |b| (b.as_ptr(), b.len()));
+    let (icc_ptr, icc_len) = icc.map_or((std::ptr::null(), 0), |b| (b.as_ptr(), b.len()));
+    let mut out_ptr: *mut u8 = std::ptr::null_mut();
+    let mut out_len: usize = 0;
+
+    // SAFETY: `pixels` covers `needed` bytes (checked above); the metadata pointers are either
+    // null (absent) or cover their stated lengths; out-params are valid pointers. On success the
+    // shim sets `out_ptr`/`out_len` to a malloc'd buffer copied + freed by `take_owned`.
+    let rc = unsafe {
+        oracle_jpeg_encode_meta(
+            pixels.as_ptr(),
+            width,
+            height,
+            c_int::from(params.gray),
+            params.quality,
+            h_samp,
+            v_samp,
+            c_int::from(params.progressive),
+            c_uint::from(params.restart_interval),
+            c_int::from(params.optimize_coding),
+            app1_ptr,
+            app1_len,
+            icc_ptr,
+            icc_len,
             &raw mut out_ptr,
             &raw mut out_len,
         )

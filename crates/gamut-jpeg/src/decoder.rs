@@ -182,6 +182,34 @@ pub fn info(data: &[u8]) -> Result<JpegInfo> {
 /// metadata crates parse (and [`gamut-metadata`](https://crates.io/crates/gamut-metadata)'s
 /// `MetadataBlock` borrows) directly. Marked `#[non_exhaustive]` so carriers (e.g. APP13 IPTC) can
 /// be added without a breaking change.
+///
+/// # Example: feeding the `gamut-metadata` facade
+///
+/// The payloads borrow straight into the facade's blocks — no re-framing needed:
+///
+/// ```
+/// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+/// use gamut_jpeg::JpegEncoder;
+/// use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
+/// use gamut_metadata::{Metadata, MetadataBlock};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let icc = IccProfile {
+///     header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
+///     tags: Vec::new(),
+/// }
+/// .to_bytes()?;
+/// let pixels = vec![0u8; 64];
+/// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
+/// let jpeg = JpegEncoder::new().with_icc_profile(&icc).encode_to_vec(image)?;
+///
+/// let meta = gamut_jpeg::metadata(&jpeg)?;
+/// let blocks: Vec<MetadataBlock> = meta.icc.as_deref().map(MetadataBlock::Icc).into_iter().collect();
+/// let typed = Metadata::from_blocks(&blocks)?;
+/// assert!(typed.icc.is_some());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct JpegMetadata {

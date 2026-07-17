@@ -366,6 +366,138 @@ fn oversized_and_empty_metadata_is_rejected_before_writing() {
 }
 
 #[test]
+fn oracle_reads_back_gamut_written_icc_byte_exact() {
+    // libjpeg-turbo's jpeg_read_icc_profile is the reference reassembly of the APP2 chunk
+    // sequence: a multi-chunk profile written by gamut must come back byte-identical.
+    let pixels = vec![90u8; 64];
+    let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    for len in [300usize, 65519, 200_000] {
+        let profile = fake_profile(len);
+        let jpeg = JpegEncoder::new()
+            .with_icc_profile(&profile)
+            .encode_to_vec(ImageRef::<Gray8>::new(&pixels, image.dimensions()).unwrap())
+            .unwrap();
+        let read = libjpeg_oracle::read_icc_profile(&jpeg)
+            .expect("oracle accepts the stream")
+            .expect("oracle finds the profile");
+        assert_eq!(read, profile, "profile len {len}");
+    }
+}
+
+#[test]
+fn gamut_reads_back_oracle_written_icc_byte_exact() {
+    // The reverse direction: jpeg_write_icc_profile is the reference producer of the chunk
+    // framing, and metadata() must reassemble it identically — including a multi-chunk profile.
+    let pixels: Vec<u8> = (0..64u32 * 64 * 3).map(|i| (i % 251) as u8).collect();
+    for len in [128usize, 100_000] {
+        let profile = fake_profile(len);
+        let jpeg = libjpeg_oracle::encode_with_metadata(
+            &pixels,
+            64,
+            64,
+            &libjpeg_oracle::EncodeParams::default(),
+            None,
+            Some(&profile),
+        )
+        .expect("oracle encodes");
+        assert_eq!(
+            metadata(&jpeg).unwrap().icc,
+            Some(profile),
+            "profile len {len}"
+        );
+    }
+}
+
+#[test]
+fn exif_interop_matches_the_oracle_marker_capture() {
+    // gamut → oracle: the APP1 payload libjpeg-turbo captures is the signature + the TIFF stream.
+    let tiff = b"II\x2A\x00\x08\x00\x00\x00\x00\x00".to_vec();
+    let pixels = vec![50u8; 64];
+    let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_exif(&tiff)
+        .encode_to_vec(image)
+        .unwrap();
+    let mut expected = b"Exif\0\0".to_vec();
+    expected.extend_from_slice(&tiff);
+    assert_eq!(
+        libjpeg_oracle::read_first_app1(&jpeg).unwrap(),
+        Some(expected.clone())
+    );
+
+    // oracle → gamut: an APP1 written verbatim by jpeg_write_marker reads back stripped.
+    let pixels3: Vec<u8> = vec![70u8; 16 * 16 * 3];
+    let jpeg = libjpeg_oracle::encode_with_metadata(
+        &pixels3,
+        16,
+        16,
+        &libjpeg_oracle::EncodeParams::default(),
+        Some(&expected),
+        None,
+    )
+    .expect("oracle encodes");
+    assert_eq!(metadata(&jpeg).unwrap().exif, Some(tiff));
+}
+
+#[test]
+fn facade_round_trip_through_a_jpeg_stream() {
+    // The gamut-metadata hookup this crate's raw-bytes surface is designed for: typed metadata →
+    // EncodedMetadata → with_* builders → JPEG → metadata() → MetadataBlocks → equal typed model.
+    use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+    use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
+    use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
+    use gamut_metadata::{Metadata, MetadataBlock};
+
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
+    let mut xmp = XmpMeta::new();
+    xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
+    let icc = IccProfile {
+        header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
+        tags: Vec::new(),
+    };
+    let typed = Metadata {
+        exif: Some(exif),
+        xmp: Some(xmp),
+        icc: Some(icc),
+    };
+
+    // Embed: EncodedMetadata's fields feed the builders directly (the exif block's "Exif\0\0"
+    // prefix is recognized and not doubled).
+    let enc = typed.encode().unwrap();
+    let pixels = vec![128u8; 64];
+    let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_exif(enc.exif.as_deref().unwrap())
+        .with_xmp(enc.xmp.as_deref().unwrap())
+        .with_icc_profile(enc.icc.as_deref().unwrap())
+        .encode_to_vec(image)
+        .unwrap();
+
+    // Extract: metadata()'s stripped payloads are exactly what MetadataBlock borrows. The JPEG
+    // carriage must be lossless: parsing the read-back bytes equals parsing the embedded bytes
+    // directly (the constructed model itself differs only in serialization-filled header fields).
+    let read = metadata(&jpeg).unwrap();
+    let blocks = [
+        MetadataBlock::Exif(read.exif.as_deref().unwrap()),
+        MetadataBlock::Xmp(read.xmp.as_deref().unwrap()),
+        MetadataBlock::Icc(read.icc.as_deref().unwrap()),
+    ];
+    let through_jpeg = Metadata::from_blocks(&blocks).unwrap();
+    let direct = Metadata::from_blocks(&[
+        MetadataBlock::Exif(enc.exif.as_deref().unwrap()),
+        MetadataBlock::Xmp(enc.xmp.as_deref().unwrap()),
+        MetadataBlock::Icc(enc.icc.as_deref().unwrap()),
+    ])
+    .unwrap();
+    assert_eq!(through_jpeg, direct);
+    assert_eq!(
+        through_jpeg.exif.as_ref().and_then(|e| e.make()),
+        Some("gamut")
+    );
+}
+
+#[test]
 fn malformed_streams_are_rejected() {
     // Missing SOI.
     assert!(matches!(
