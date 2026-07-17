@@ -1665,3 +1665,19 @@ fn primary_rgba_decodes_the_primary_item() {
         .unwrap();
     assert_eq!(rgba.as_samples(), &identity_base_rgba(42, 2, 2)[..]);
 }
+
+#[test]
+fn unspecified_matrix_falls_back_to_bt601() {
+    // CICP matrix 2 (unspecified) is treated exactly as BT.601 — libavif's fallback — so the two
+    // decode identically; real-world AVIFs commonly stamp CICP 2/2/2.
+    let decode = |matrix: u16| {
+        let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(matrix, true)]);
+        let bytes = file(1, vec![item]);
+        AvifContainer::parse(&bytes)
+            .unwrap()
+            .decode_item_rgba8(1, &mut Mock::default())
+            .unwrap()
+            .into_samples()
+    };
+    assert_eq!(decode(2), decode(6));
+}

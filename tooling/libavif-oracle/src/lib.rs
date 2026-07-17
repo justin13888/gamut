@@ -200,6 +200,9 @@ unsafe fn introspect_inner(avif: &[u8]) -> Result<AvifStructure, String> {
         if decoder.is_null() {
             return Err("avifDecoderCreate returned null".into());
         }
+        // Match libavif's own test posture for its corpus: several committed fixtures
+        // deliberately violate strict checks (missing alpha ispe, non-strict clap).
+        (*decoder).strictFlags = sys::AVIF_STRICT_DISABLED;
         let out = (|| {
             let result = sys::avifDecoderSetIOMemory(decoder, avif.as_ptr(), avif.len());
             if result != sys::AVIF_RESULT_OK {
@@ -281,6 +284,8 @@ unsafe fn decode_rgba_inner(avif: &[u8]) -> Result<(u32, u32, Vec<u8>), String> 
             sys::avifDecoderDestroy(decoder);
             return Err("avifImageCreateEmpty returned null".into());
         }
+        // See `introspect`: the corpus includes deliberately non-strict fixtures.
+        (*decoder).strictFlags = sys::AVIF_STRICT_DISABLED;
 
         let result = sys::avifDecoderReadMemory(decoder, image, avif.as_ptr(), avif.len());
         let out = if result == sys::AVIF_RESULT_OK {

@@ -292,6 +292,8 @@ impl AvifImage {
     ///   encoder emits, so gamut-encoded AVIFs always decode here (lossless ones bit-exactly).
     /// - **nclx matrix 6 / 5 (BT.601)** — via [`gamut_color::ycbcr_to_rgb`], with the nclx
     ///   `full_range` flag selecting [`ColorRange`].
+    /// - **nclx matrix 2 (unspecified)** — treated as BT.601, matching libavif's fallback for
+    ///   unspecified matrix coefficients (real-world AVIFs commonly stamp CICP 2/2/2).
     /// - **Monochrome** — luma replicated to gray, range-expanded for limited range.
     /// - **Missing `colr`** — defaults to **BT.601, limited range** (justification below).
     /// - Anything else — BT.709/2020, an ICC-only `colr`, or a `bit_depth > 8` frame — is
@@ -669,8 +671,9 @@ fn frame_to_rgba(item: &AvifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
                 px.copy_from_slice(&[frame.cr[i] as u8, frame.y[i] as u8, frame.cb[i] as u8, 255]);
             }
         }
-        // BT.601 (matrix 6) and BT.470 System B,G (matrix 5) share coefficients.
-        5 | 6 => {
+        // BT.601 (matrix 6) and BT.470 System B,G (matrix 5) share coefficients; unspecified
+        // (matrix 2) falls back to them, matching libavif.
+        2 | 5 | 6 => {
             let (cw, _) = frame.chroma.chroma_dimensions(frame.width, frame.height);
             let cw = cw as usize;
             for y in 0..h {
@@ -697,7 +700,7 @@ fn frame_to_rgba(item: &AvifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
         }
         _ => {
             return Err(Error::Unsupported(
-                "AVIF: only BT.601 (matrix 5/6), identity (0), and monochrome are supported on the RGBA surface",
+                "AVIF: only BT.601 (matrix 2/5/6), identity (0), and monochrome are supported on the RGBA surface",
             ));
         }
     }
