@@ -15,6 +15,14 @@ jobs:
       # cargo-mutants, …) from source before each task. This job only needs the native
       # build tools installed below plus the rustup toolchain, so skip that install.
       MISE_TASK_RUN_AUTO_INSTALL: false
+      # The vendored C++ oracles (DNG SDK, exiv2, libheif, libjpeg-turbo, libjxl, …) build via
+      # `cmake --build --parallel`, which takes every core and does not join cargo's jobserver.
+      # Cargo runs those build scripts concurrently, so the compiler count is jobs × cores, not
+      # jobs: enough concurrent cc1plus (~0.5-1.5 GB per C++ TU) to exhaust the 16 GB runner and
+      # get the step SIGKILLed with no diagnostic (exit 137; exit 143 when it lands as SIGTERM).
+      # `--all-features --all-targets` builds every oracle at once, so this job is the worst case.
+      # Capping the outer factor bounds peak memory; the inner `--parallel` still uses the cores.
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v5
         with:
@@ -49,6 +57,10 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    env:
+      # Same jobs × cores OOM as the check job above: this one also builds every C++ oracle
+      # (`--workspace --all-features`), and instrumented builds are heavier still.
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v5
         with:
