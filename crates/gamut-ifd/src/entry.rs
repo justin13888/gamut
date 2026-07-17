@@ -201,6 +201,16 @@ impl Ifd {
         &self.sub_ifds
     }
 
+    /// Returns the sub-IFD groups mutably — how a tree-preserving rewrite edits child
+    /// directories in place.
+    ///
+    /// The groups must stay sorted by ascending pointer tag (the [`sub_ifds`](Self::sub_ifds)
+    /// invariant): edit each group's [`ifds`](SubIfd::ifds), not its `tag` — change a group's
+    /// tag by removing and re-attaching it with [`set_sub_ifd`](Self::set_sub_ifd).
+    pub fn sub_ifds_mut(&mut self) -> &mut [SubIfd] {
+        &mut self.sub_ifds
+    }
+
     /// Attaches `ifds` as the child directories of pointer `tag`, replacing any existing group for
     /// that tag.
     ///
