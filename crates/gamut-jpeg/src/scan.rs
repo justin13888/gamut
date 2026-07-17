@@ -1,11 +1,22 @@
-//! Entropy-scan decoding (T.81 Annex F §F.2): the byte-destuffing bit reader (§F.2.2.5), the
-//! canonical `DECODE`/`RECEIVE`/`EXTEND` procedures (Figures F.16, F.12), and the MCU walk that
-//! reconstructs each component's sample plane (§A.2). Restart processing follows §E.2.5.
+//! Entropy-scan decoding (T.81 Annex F §F.2 and Annex G §G.2): the byte-destuffing bit reader
+//! (§F.2.2.5), the canonical `DECODE`/`RECEIVE`/`EXTEND` procedures (Figures F.16, F.12), the
+//! sequential MCU walk that reconstructs each component's sample plane (§A.2), and the progressive
+//! DCT decoder (§G.2) that accumulates DCT coefficients across scans. Restart processing follows
+//! §E.2.5.
 //!
 //! Decoding is deliberately generous: every read is bounds-checked and every table lookup is
 //! fallible, so malformed input yields a typed [`Error`] and never a panic. The only hard limits are
 //! the spec's own — a Huffman code longer than 16 bits, a DC magnitude category above 11 (8-bit), or
 //! an AC coefficient index past 63 — each of which is a validation error.
+//!
+//! # Progressive coefficient model (§G.1.1)
+//!
+//! A progressive (SOF2) frame is coded as many scans, each carrying one *band* of the zig-zag
+//! sequence at one *successive-approximation* precision. The decoder therefore cannot reconstruct a
+//! block from a single scan; instead each frame component owns a full `i32` DCT-coefficient buffer
+//! ([`ProgComp`]) at block granularity that the scans fill incrementally. Only after **all** scans
+//! (at EOI) is each component dequantized (§A.3.4), inverse-transformed (§A.3.3) and level-shifted
+//! (§A.3.1) — once — through the same [`write_block`] tail the sequential path uses.
 
 use gamut_core::{Error, Result};
 use gamut_dsp::jpeg::idct8x8;
@@ -322,16 +333,24 @@ impl Ctx<'_> {
             k += 1;
         }
         // Inverse DCT, level shift and clamp (§A.3.1).
-        idct8x8(&mut zz);
-        self.plane.ensure_rows((by + 1) * 8);
-        let stride = self.plane.stride;
-        for row in 0..8 {
-            let dst = (by * 8 + row) * stride + bx * 8;
-            for col in 0..8 {
-                self.plane.data[dst + col] = (zz[row * 8 + col] + 128).clamp(0, 255) as u8;
-            }
-        }
+        write_block(&mut zz, &mut self.plane, bx, by);
         Ok(())
+    }
+}
+
+/// Inverse-transforms a dequantized natural-order block `zz`, level-shifts (+128) and clamps each
+/// sample to `0..=255`, and writes the 8×8 result into `plane` at block position `(bx, by)`
+/// (§A.3.1). The single reconstruction tail shared by the sequential ([`Ctx::decode_block`]) and
+/// progressive ([`ProgComp::into_plane`]) paths, so both produce byte-identical samples.
+fn write_block(zz: &mut [i32; 64], plane: &mut Plane, bx: usize, by: usize) {
+    idct8x8(zz);
+    plane.ensure_rows((by + 1) * 8);
+    let stride = plane.stride;
+    for row in 0..8 {
+        let dst = (by * 8 + row) * stride + bx * 8;
+        for col in 0..8 {
+            plane.data[dst + col] = (zz[row * 8 + col] + 128).clamp(0, 255) as u8;
+        }
     }
 }
 
@@ -455,6 +474,463 @@ pub fn decode_scan(
         planes,
         marker_offset,
     })
+}
+
+// ================================================================================================
+// Progressive DCT decoding (T.81 Annex G).
+// ================================================================================================
+
+/// One frame component's progressive DCT-coefficient accumulator (§G.1.1). It owns the component's
+/// entire block grid of natural-order coefficients, filled incrementally by the progressive scans
+/// and dequantized + inverse-transformed only once, at frame completion, by [`Self::into_plane`].
+pub struct ProgComp {
+    /// Horizontal sampling factor `Hi` (carried through to the reconstructed [`Plane`]).
+    h: u8,
+    /// Vertical sampling factor `Vi`.
+    v: u8,
+    /// Width of the component's block grid in blocks, `ceil(comp_w / 8)` (§A.2.2).
+    bw: usize,
+    /// Height of the component's block grid in blocks, `ceil(comp_h / 8)`.
+    bh: usize,
+    /// `bw · bh` contiguous 64-coefficient blocks in natural (raster) order, zero-initialised.
+    coeffs: Vec<i32>,
+    /// The dequantization table, bound at the component's **first** scan (§B.2.4.1) and thereafter
+    /// immune to DQT redefinition, mirroring the reference decoder's latch.
+    quant: [u16; 64],
+    /// Whether [`Self::quant`] has been bound yet.
+    quant_bound: bool,
+    /// Per zig-zag position, the successive-approximation bit position `Al` of the most recent scan
+    /// that coded it, or `None` if never coded — the band bookkeeping (§G.1.1.1) that rejects
+    /// out-of-order and overlapping scans.
+    coded_al: [Option<u8>; 64],
+}
+
+impl ProgComp {
+    /// Allocates an all-zero coefficient buffer for a component with the given sampling factors and
+    /// block-grid dimensions.
+    #[must_use]
+    pub fn new(h: u8, v: u8, bw: usize, bh: usize) -> Self {
+        Self {
+            h,
+            v,
+            bw,
+            bh,
+            coeffs: vec![0i32; bw * bh * 64],
+            quant: [0u16; 64],
+            quant_bound: false,
+            coded_al: [None; 64],
+        }
+    }
+
+    /// Whether the component's DC first pass has been delivered (§G.1.1.1.1 requires it before any
+    /// AC scan, and the partial-render policy requires it before reconstruction).
+    #[must_use]
+    pub fn has_dc(&self) -> bool {
+        self.coded_al[0].is_some()
+    }
+
+    /// The natural-order coefficients of block `(bx, by)`.
+    fn block_mut(&mut self, bx: usize, by: usize) -> &mut [i32] {
+        let off = (by * self.bw + bx) * 64;
+        &mut self.coeffs[off..off + 64]
+    }
+
+    /// Dequantizes (§A.3.4), inverse-transforms (§A.3.3) and level-shifts (§A.3.1) every block into
+    /// a reconstructed sample [`Plane`] — the once-only progressive reconstruction at EOI.
+    #[must_use]
+    pub fn into_plane(self) -> Plane {
+        let stride = self.bw * 8;
+        let mut plane = Plane {
+            data: vec![0u8; stride * self.bh * 8],
+            stride,
+            h: self.h,
+            v: self.v,
+        };
+        for by in 0..self.bh {
+            for bx in 0..self.bw {
+                let off = (by * self.bw + bx) * 64;
+                let mut zz = [0i32; 64];
+                for (i, cell) in zz.iter_mut().enumerate() {
+                    *cell = self.coeffs[off + i].wrapping_mul(i32::from(self.quant[i]));
+                }
+                write_block(&mut zz, &mut plane, bx, by);
+            }
+        }
+        plane
+    }
+}
+
+/// Verifies the scan's band ordering against each component's history and updates it (§G.1.1.1).
+/// A first pass (`Ah = 0`) requires every band position to be previously uncoded; a refinement
+/// (`Ah ≠ 0`) requires every position to have been coded at exactly `Al = Ah` in a prior scan; an AC
+/// scan additionally requires the component's DC first pass to have already happened (§G.1.1.1.1).
+fn validate_progression(scan: &ScanHeader, comps: &mut [ProgComp]) -> Result<()> {
+    let (ss, se) = (usize::from(scan.ss), usize::from(scan.se));
+    for sc in &scan.components {
+        let c = &mut comps[sc.frame_index];
+        let (lo, hi) = if ss == 0 { (0, 0) } else { (ss, se) };
+        if ss != 0 && !c.has_dc() {
+            return Err(Error::InvalidInput(
+                "JPEG: progressive AC scan before the component's DC scan",
+            ));
+        }
+        for k in lo..=hi {
+            match (scan.ah, c.coded_al[k]) {
+                // First pass of a band: the position must not have been coded yet (no overlap).
+                (0, None) => {}
+                (0, Some(_)) => {
+                    return Err(Error::InvalidInput(
+                        "JPEG: progressive band coded twice at the first pass (overlap)",
+                    ));
+                }
+                // Refinement: the position's history must be exactly Ah (its previous Al).
+                (ah, Some(prev)) if prev == ah => {}
+                (_, _) => {
+                    return Err(Error::InvalidInput(
+                        "JPEG: progressive refinement without a matching first pass",
+                    ));
+                }
+            }
+        }
+        for slot in c.coded_al[lo..=hi].iter_mut() {
+            *slot = Some(scan.al);
+        }
+    }
+    Ok(())
+}
+
+/// A resolved scan component for the progressive entropy loop: its frame index, sampling factors,
+/// and whichever entropy table the scan's band requires (DC for `Ss = 0`, AC otherwise).
+struct ProgSc<'a> {
+    frame_index: usize,
+    h: usize,
+    v: usize,
+    dc: Option<&'a DecTable>,
+    ac: Option<&'a DecTable>,
+}
+
+/// Decodes one progressive scan's entropy data starting at byte `start`, accumulating coefficients
+/// into `comps` (§G.2). Returns the byte offset of the marker that terminates the entropy data.
+///
+/// The scan carries one band `[Ss..=Se]` at successive-approximation precision `(Ah, Al)` (validated
+/// by [`crate::syntax::parse_sos`] for progressive). DC scans (`Ss = 0`) may interleave up to four
+/// components; AC scans (`Ss ≥ 1`) are single-component (§B.2.3). First passes (`Ah = 0`) Huffman-code
+/// the band scaled by the point transform `2^Al` (§A.4); refinements (`Ah ≠ 0`) append correction /
+/// newly-nonzero bits (§G.1.2.3). At each restart boundary the DC predictors and the EOB run counter
+/// are reset (§E.2.5, §G.1.2.2).
+///
+/// # Errors
+///
+/// [`Error::InvalidInput`] for an undefined referenced table, an out-of-order or overlapping scan,
+/// a corrupt Huffman code, an out-of-band coefficient index, a bad restart sequence, or a truncated
+/// stream.
+pub fn decode_progressive_scan(
+    data: &[u8],
+    start: usize,
+    frame: &Frame,
+    scan: &ScanHeader,
+    tables: &Tables,
+    comps: &mut [ProgComp],
+) -> Result<usize> {
+    let (ss, se) = (usize::from(scan.ss), usize::from(scan.se));
+    let (ah, al) = (scan.ah, scan.al);
+    let interleaved = scan.interleaved();
+
+    // Bind each scan component's quantization table at its first reference (§B.2.4.1), then check
+    // and update the band-progression bookkeeping.
+    for sc in &scan.components {
+        let c = &mut comps[sc.frame_index];
+        if !c.quant_bound {
+            let fc = &frame.components[sc.frame_index];
+            c.quant = tables.quant[usize::from(fc.tq)]
+                .ok_or(Error::InvalidInput("JPEG: scan uses undefined quant table"))?;
+            c.quant_bound = true;
+        }
+    }
+    validate_progression(scan, comps)?;
+
+    // Resolve the entropy table each scan component needs for this band.
+    let mut scs: Vec<ProgSc> = Vec::with_capacity(scan.components.len());
+    for sc in &scan.components {
+        let fc = &frame.components[sc.frame_index];
+        let dc = if ss == 0 {
+            Some(
+                tables.dc[usize::from(sc.td)]
+                    .as_ref()
+                    .ok_or(Error::InvalidInput("JPEG: scan uses undefined DC table"))?,
+            )
+        } else {
+            None
+        };
+        let ac = if ss == 0 {
+            None
+        } else {
+            Some(
+                tables.ac[usize::from(sc.ta)]
+                    .as_ref()
+                    .ok_or(Error::InvalidInput("JPEG: scan uses undefined AC table"))?,
+            )
+        };
+        scs.push(ProgSc {
+            frame_index: sc.frame_index,
+            h: usize::from(fc.h),
+            v: usize::from(fc.v),
+            dc,
+            ac,
+        });
+    }
+
+    // MCU grid: interleaved (DC) scans use the padded whole-image MCU grid; a non-interleaved scan
+    // (AC, or a single-component DC scan) walks the component's own block grid, one block per MCU
+    // (§A.2.2).
+    let (mcus_x, mcus_y) = if interleaved {
+        let hmax = usize::from(frame.hmax());
+        let vmax = usize::from(frame.vmax());
+        (
+            usize::from(frame.x).div_ceil(8 * hmax),
+            usize::from(frame.y).div_ceil(8 * vmax),
+        )
+    } else {
+        (comps[scs[0].frame_index].bw, comps[scs[0].frame_index].bh)
+    };
+
+    let mut reader = BitReader::new(data, start);
+    let restart = usize::from(tables.restart_interval);
+    let mut preds = vec![0i32; scs.len()];
+    let mut eobrun = 0u32;
+    let mut mcus_done = 0usize;
+    let mut expected_rst = 0u8;
+
+    for my in 0..mcus_y {
+        for mx in 0..mcus_x {
+            if restart != 0 && mcus_done != 0 && mcus_done.is_multiple_of(restart) {
+                reader.take_restart(expected_rst)?;
+                expected_rst = (expected_rst + 1) & 7;
+                preds.fill(0);
+                eobrun = 0; // the EOB run does not cross a restart boundary (§G.1.2.2)
+            }
+            for (si, sc) in scs.iter().enumerate() {
+                if ss == 0 {
+                    // DC band: one block per (Hi, Vi) sub-position in an interleaved MCU, else one.
+                    let (nh, nv) = if interleaved { (sc.h, sc.v) } else { (1, 1) };
+                    for by in 0..nv {
+                        for bx in 0..nh {
+                            let (bcol, brow) = if interleaved {
+                                (mx * sc.h + bx, my * sc.v + by)
+                            } else {
+                                (mx, my)
+                            };
+                            let c = &mut comps[sc.frame_index];
+                            // Padding blocks in a partial rightmost/bottom MCU are decoded (to keep
+                            // the entropy stream and DC predictor in sync) but not stored (§A.2.2).
+                            let real = bcol < c.bw && brow < c.bh;
+                            if ah == 0 {
+                                let t = decode_symbol(sc.dc.unwrap(), &mut reader)?;
+                                if t > 11 {
+                                    return Err(Error::InvalidInput(
+                                        "JPEG: DC magnitude category > 11",
+                                    ));
+                                }
+                                let diff = if t == 0 {
+                                    0
+                                } else {
+                                    extend(reader.read_bits(u32::from(t))?, t)
+                                };
+                                preds[si] = preds[si].wrapping_add(diff);
+                                if real {
+                                    // First pass: scale by the point transform 2^Al (§A.4, §G.1.2.1).
+                                    c.block_mut(bcol, brow)[0] = preds[si] << al;
+                                }
+                            } else {
+                                // Refinement: append the next lower bit of the DC coefficient (§G.1.2.3).
+                                let bit = reader.read_bit()?;
+                                if real && bit != 0 {
+                                    c.block_mut(bcol, brow)[0] |= 1i32 << al;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // AC band: single component, one block per MCU (non-interleaved).
+                    let c = &mut comps[sc.frame_index];
+                    let block = c.block_mut(mx, my);
+                    if ah == 0 {
+                        decode_ac_first(
+                            &mut reader,
+                            block,
+                            ss,
+                            se,
+                            al,
+                            sc.ac.unwrap(),
+                            &mut eobrun,
+                        )?;
+                    } else {
+                        decode_ac_refine(
+                            &mut reader,
+                            block,
+                            ss,
+                            se,
+                            al,
+                            sc.ac.unwrap(),
+                            &mut eobrun,
+                        )?;
+                    }
+                }
+            }
+            mcus_done += 1;
+        }
+    }
+
+    let (_marker, marker_offset) = reader.end_marker()?;
+    Ok(marker_offset)
+}
+
+/// Decodes one block's AC band in a first-pass progressive scan (`Ah = 0`, §G.1.2.2, Figure G.3
+/// mirrored for decode). Coefficients are Huffman run/size coded within `[Ss..=Se]` and scaled by
+/// the point transform `2^Al` (§A.4); `EOBRUN` counts whole all-zero-band blocks and persists across
+/// blocks within the restart interval.
+fn decode_ac_first(
+    r: &mut BitReader,
+    block: &mut [i32],
+    ss: usize,
+    se: usize,
+    al: u8,
+    ac: &DecTable,
+    eobrun: &mut u32,
+) -> Result<()> {
+    // This block is inside a still-running EOB run: it is entirely zero in this band.
+    if *eobrun > 0 {
+        *eobrun -= 1;
+        return Ok(());
+    }
+    let mut k = ss;
+    while k <= se {
+        let rs = decode_symbol(ac, r)?;
+        let run = usize::from(rs >> 4);
+        let size = rs & 0x0F;
+        if size == 0 {
+            if run != 15 {
+                // EOBn: run length is 2^run plus `run` appended bits; this block is the first of
+                // the run, so decrement once (§G.1.2.2, Table G.1).
+                *eobrun = 1u32 << run;
+                if run != 0 {
+                    *eobrun += r.read_bits(run as u32)?;
+                }
+                *eobrun -= 1;
+                return Ok(());
+            }
+            k += 16; // ZRL: sixteen zero coefficients
+        } else {
+            k += run;
+            if k > se {
+                return Err(Error::InvalidInput(
+                    "JPEG: progressive AC run past band end",
+                ));
+            }
+            let coeff = extend(r.read_bits(u32::from(size))?, size);
+            block[ZIGZAG[k]] = coeff << al;
+            k += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Decodes one block's AC band in a successive-approximation refinement scan (`Ah ≠ 0`, §G.1.2.3 /
+/// §G.2.2). For every coefficient with a non-zero history a correction bit is read (a 1-bit adds one
+/// to the scaled magnitude); newly non-zero coefficients (`SSSS = 1`) are inserted per the run/size
+/// symbols; EOB-run blocks still consume correction bits for their non-zero-history coefficients.
+fn decode_ac_refine(
+    r: &mut BitReader,
+    block: &mut [i32],
+    ss: usize,
+    se: usize,
+    al: u8,
+    ac: &DecTable,
+    eobrun: &mut u32,
+) -> Result<()> {
+    let p1: i32 = 1i32 << al; // +1 in the bit position being refined
+    let m1: i32 = -1i32 << al; // −1 in the bit position being refined
+    let mut k = ss;
+    if *eobrun == 0 {
+        while k <= se {
+            let rs = decode_symbol(ac, r)?;
+            let mut run = i32::from(rs >> 4);
+            let size = rs & 0x0F;
+            let mut new_val = 0i32;
+            if size != 0 {
+                // In a refinement scan a newly non-zero coefficient always has magnitude 1; the one
+                // appended bit is its sign (1 → positive, 0 → negative) (§G.1.2.3 rule a).
+                if size != 1 {
+                    return Err(Error::InvalidInput(
+                        "JPEG: progressive AC refinement coefficient size ≠ 1",
+                    ));
+                }
+                new_val = if r.read_bit()? != 0 { p1 } else { m1 };
+            } else if run != 15 {
+                // EOBn: the rest of this block (and following blocks) is handled by the EOB tail.
+                *eobrun = 1u32 << run;
+                if run != 0 {
+                    *eobrun += r.read_bits(run as u32)?;
+                }
+                break;
+            }
+            // else run == 15 (ZRL): skip sixteen zero-history coefficients, new_val stays 0.
+
+            // Advance over the band, appending a correction bit to each non-zero-history coefficient
+            // and counting down `run` zero-history coefficients to the target insertion position.
+            loop {
+                let nat = ZIGZAG[k];
+                if block[nat] != 0 {
+                    if r.read_bit()? != 0 {
+                        block[nat] = refine(block[nat], p1, m1);
+                    }
+                } else {
+                    run -= 1;
+                    if run < 0 {
+                        break; // reached the target zero-history coefficient
+                    }
+                }
+                k += 1;
+                if k > se {
+                    break;
+                }
+            }
+            if new_val != 0 {
+                if k > se {
+                    return Err(Error::InvalidInput(
+                        "JPEG: progressive AC refinement past band end",
+                    ));
+                }
+                block[ZIGZAG[k]] = new_val;
+            }
+            k += 1;
+        }
+    }
+    if *eobrun > 0 {
+        // A block within an EOB run: no new coefficients, but non-zero-history coefficients in the
+        // remaining band still receive their correction bits (§G.1.2.3).
+        while k <= se {
+            let nat = ZIGZAG[k];
+            if block[nat] != 0 && r.read_bit()? != 0 {
+                block[nat] = refine(block[nat], p1, m1);
+            }
+            k += 1;
+        }
+        *eobrun -= 1;
+    }
+    Ok(())
+}
+
+/// Applies one successive-approximation correction bit to a non-zero coefficient (§G.1.2.3): the
+/// scaled magnitude increases by one bit — `+p1` for a positive coefficient, `+m1` (= `−p1`) for a
+/// negative one. The refined bit position is always previously zero (the prior scan coded bit
+/// `Ah = Al + 1` and above), so no guard against a double-set is needed.
+fn refine(coeff: i32, p1: i32, m1: i32) -> i32 {
+    if coeff > 0 {
+        coeff.wrapping_add(p1)
+    } else {
+        coeff.wrapping_add(m1)
+    }
 }
 
 #[cfg(test)]

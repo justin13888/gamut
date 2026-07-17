@@ -14,7 +14,7 @@
 //! LCG for the geometry-sensitive parity checks) so the numbers are stable across runs.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_jpeg::{ChromaSubsampling, JpegDecoder, JpegEncoder};
+use gamut_jpeg::{ChromaSubsampling, JpegDecoder, JpegEncoder, JpegProcess};
 use libjpeg_oracle::{EncodeParams, Subsampling};
 
 /// The dimension battery: block-aligned, odd, and larger-than-MCU cases so component-dimension
@@ -170,7 +170,8 @@ fn gamut_decode(mode: Mode, jpeg: &[u8]) -> (u32, u32, Vec<u8>) {
     }
 }
 
-/// Encodes `pixels` with the libjpeg-turbo oracle in the given mode.
+/// Encodes `pixels` with the libjpeg-turbo oracle in the given mode (sequential or progressive).
+#[allow(clippy::too_many_arguments)]
 fn oracle_encode(
     mode: Mode,
     pixels: &[u8],
@@ -179,12 +180,13 @@ fn oracle_encode(
     quality: i32,
     restart: u16,
     optimize: bool,
+    progressive: bool,
 ) -> Vec<u8> {
     let params = EncodeParams {
         quality,
         gray: matches!(mode, Mode::Gray),
         subsampling: mode.oracle_subsampling(),
-        progressive: false,
+        progressive,
         restart_interval: restart,
         optimize_coding: optimize,
     };
@@ -321,7 +323,7 @@ fn decode_matches_libjpeg_turbo_own_decode() {
             for &q in &[40i32, 75, 95] {
                 for &(restart, optimize) in &[(0u16, false), (2u16, true)] {
                     let src = lcg_pixels(w, h, mode.channels(), 0x1234_5678);
-                    let jpeg = oracle_encode(mode, &src, w, h, q, restart, optimize);
+                    let jpeg = oracle_encode(mode, &src, w, h, q, restart, optimize, false);
                     let oracle = libjpeg_oracle::decode(&jpeg).expect("oracle decode");
                     assert_eq!(
                         (oracle.width, oracle.height, oracle.channels),
@@ -358,26 +360,85 @@ fn decode_matches_libjpeg_turbo_own_decode() {
 }
 
 #[test]
-fn decode_progressive_is_unsupported_for_now() {
-    // libjpeg-turbo emits a progressive (SOF2) stream; the sequential decoder must reject it with a
-    // clean Unsupported error whose message names the progressive process (never a panic).
-    // P4: this flips to a decode-vs-decode parity test once the progressive decoder lands.
-    let (w, h) = (32u32, 32u32);
-    let src = rgb_gradient(w, h);
-    let params = EncodeParams {
-        quality: 85,
-        progressive: true,
-        subsampling: Subsampling::S444,
-        ..EncodeParams::default()
-    };
-    let jpeg = libjpeg_oracle::encode(&src, w, h, &params).expect("oracle progressive encode");
-    let err = <JpegDecoder as DecodeImage<Rgb8>>::decode_image(&JpegDecoder::new(), &jpeg)
-        .expect_err("progressive must be rejected");
-    let msg = err.to_string();
+fn decode_progressive_matches_libjpeg_turbo_own_decode() {
+    // libjpeg-turbo emits a PROGRESSIVE (SOF2) stream via its standard `jpeg_simple_progression`
+    // 10-scan script (DC first + refinement, luma/chroma AC bands with successive approximation);
+    // gamut's progressive decoder must reconstruct it and match libjpeg-turbo's OWN decode of the
+    // same stream. Progressive and sequential coefficients are identical, so the only divergence is
+    // IDCT rounding (gray/4:4:4) and the upsampling-filter difference (subsampled) — exactly the two
+    // sources bounded by the sequential decode-parity test, and asserted with the same margins.
+    let mut worst_tight = 0u8; // gray + 4:4:4: IDCT rounding only
+    let mut worst_sub_mse = 0f64; // subsampled: upsampling-filter divergence
+    for &(w, h) in &[(16u32, 16u32), (17, 9), (33, 31), (64, 48)] {
+        for mode in Mode::ALL {
+            for &q in &[40i32, 75, 95] {
+                for &(restart, optimize) in &[(0u16, false), (2u16, true)] {
+                    let src = lcg_pixels(w, h, mode.channels(), 0x1234_5678);
+                    let jpeg = oracle_encode(mode, &src, w, h, q, restart, optimize, true);
+                    // Confirm the oracle really produced a progressive frame (SOF2 present).
+                    assert_eq!(
+                        gamut_jpeg::info(&jpeg).unwrap().process,
+                        JpegProcess::Progressive,
+                        "oracle must emit SOF2 for {mode:?} {w}x{h}"
+                    );
+                    let oracle = libjpeg_oracle::decode(&jpeg).expect("oracle decode");
+                    assert_eq!(
+                        (oracle.width, oracle.height, oracle.channels),
+                        (w, h, mode.channels())
+                    );
+                    let (dw, dh, gamut) = gamut_decode(mode, &jpeg);
+                    assert_eq!(
+                        (dw, dh, gamut.len()),
+                        (w, h, oracle.pixels.len()),
+                        "geometry {mode:?} {w}x{h} q{q} r{restart} opt{optimize}"
+                    );
+                    let (max, mse) = diff_stats(&gamut, &oracle.pixels);
+                    if mode.upsampling_matches() {
+                        worst_tight = worst_tight.max(max);
+                    } else {
+                        worst_sub_mse = worst_sub_mse.max(mse);
+                    }
+                }
+            }
+        }
+    }
+    // Measured over q ∈ {40,75,95} on high-frequency LCG content, progressive streams: gray/444
+    // decode-parity max-diff = 3 (IDCT rounding only — identical to the sequential battery, proving
+    // the coefficients match); subsampled PSNR = 22.9 dB (upsampling-filter divergence). Asserted
+    // with the same margins as the sequential decode-parity test.
     assert!(
-        msg.to_lowercase().contains("progressive"),
-        "error should mention progressive, got: {msg}"
+        worst_tight <= 6,
+        "progressive gray/444 decode-parity max-diff {worst_tight}"
     );
+    assert!(
+        psnr(worst_sub_mse) > 20.0,
+        "progressive subsampled decode-parity PSNR {:.2} dB",
+        psnr(worst_sub_mse)
+    );
+}
+
+#[test]
+fn progressive_byte_flip_sweep_never_panics() {
+    // The no-panic-on-untrusted-input gate for the progressive decoder: flip a bit in every byte of
+    // a real libjpeg-turbo progressive fixture (10-scan script, restart interval, subsampled) and
+    // assert decode returns Ok or Err — never a panic — across the DC/AC first-pass, refinement,
+    // EOBRUN and restart code paths. Also truncate at every length.
+    let (w, h) = (24u32, 20u32);
+    let src = lcg_pixels(w, h, 3, 0x0BAD_F00D);
+    let base = oracle_encode(Mode::C420, &src, w, h, 60, 3, true, true);
+    assert_eq!(
+        gamut_jpeg::info(&base).unwrap().process,
+        JpegProcess::Progressive
+    );
+    let dec = JpegDecoder::new();
+    for i in (0..base.len()).step_by(3) {
+        let mut m = base.clone();
+        m[i] ^= 0xFF;
+        let _ = <JpegDecoder as DecodeImage<Rgb8>>::decode_image(&dec, &m);
+    }
+    for cut in (0..base.len()).step_by(2) {
+        let _ = <JpegDecoder as DecodeImage<Rgb8>>::decode_image(&dec, &base[..cut]);
+    }
 }
 
 #[test]

@@ -214,11 +214,12 @@ fn malformed_streams_are_rejected_not_panicked() {
     // Segment length 0 and 1 right after SOI (marker 0xE0 APP0 with bogus length).
     assert!(d(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x00]).is_err(), "len 0");
     assert!(d(&[0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01]).is_err(), "len 1");
-    // SOF2 (progressive) is a clean Unsupported, not a panic.
+    // A baseline stream relabelled SOF2 (progressive) has a baseline SOS (Se=63) that fails the
+    // progressive DC-scan validation — a clean error, not a panic.
     let mut prog = full.clone();
     let sof = prog.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
     prog[sof + 1] = 0xC2;
-    assert!(d(&prog).is_err(), "progressive unsupported");
+    assert!(d(&prog).is_err(), "mislabelled progressive rejected");
 }
 
 #[test]

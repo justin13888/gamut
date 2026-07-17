@@ -1,12 +1,28 @@
-//! The sequential DCT Huffman decoder: [`JpegDecoder`] and the marker-loop driver.
+//! The DCT Huffman decoder: [`JpegDecoder`] and the marker-loop driver.
 //!
-//! Decoding is where the codec is generous (T.81 Annex F §F.2 and Annex A §A.2): it accepts any
-//! spec-valid baseline (SOF0) or extended-sequential (SOF1) 8-bit stream, resolves the colour space
-//! from the JFIF/Adobe application segments, and rejects malformed input with a typed [`Error`]
-//! rather than panicking. The pipeline is: walk the marker segments (SOI → tables → frame → scans →
-//! EOI, [`crate::syntax`]); decode each scan's entropy data into per-component sample planes
-//! ([`crate::scan`]); upsample the chroma planes to full resolution by sample replication; and
-//! colour-convert to the requested pixel layout.
+//! Decoding is where the codec is generous (T.81 Annex F §F.2, Annex G §G.2, Annex A §A.2): it
+//! accepts any spec-valid baseline (SOF0), extended-sequential (SOF1) **or progressive (SOF2)** 8-bit
+//! stream, resolves the colour space from the JFIF/Adobe application segments, and rejects malformed
+//! input with a typed [`Error`] rather than panicking. The pipeline is: walk the marker segments
+//! (SOI → tables → frame → scans → EOI, [`crate::syntax`]); decode each scan's entropy data into
+//! per-component sample planes ([`crate::scan`]); upsample the chroma planes to full resolution by
+//! sample replication; and colour-convert to the requested pixel layout.
+//!
+//! # Progressive frames (SOF2)
+//!
+//! A progressive frame is coded as many scans, each carrying one band of the zig-zag sequence at one
+//! successive-approximation precision. The driver detects SOF2, allocates one coefficient
+//! accumulator per component ([`crate::scan::ProgComp`]), routes every scan through the progressive
+//! entropy decoder, and reconstructs all components once at EOI. Two policy choices (both documented
+//! in `STATUS.md`):
+//!
+//! - **Deferred height (Y = 0 / DNL) is rejected** as [`Error::Unsupported`]: the coefficient
+//!   buffers must be sized to the full block grid before the first scan, and no real encoder (nor
+//!   the libjpeg-turbo oracle) emits a `Y = 0` progressive frame.
+//! - **Partial streams render generously** (matching libjpeg): a frame that ends before every band
+//!   is complete still reconstructs from the coefficients delivered so far, provided every component
+//!   received its DC first pass — otherwise the frame has no baseline and is rejected as
+//!   [`Error::InvalidInput`].
 //!
 //! # Colour interpretation
 //!
@@ -33,7 +49,7 @@ use gamut_color::{ColorRange, ycbcr_to_rgb};
 use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result, Rgb8};
 
 use crate::marker::code;
-use crate::scan::{Plane, decode_scan};
+use crate::scan::{Plane, ProgComp, decode_progressive_scan, decode_scan};
 use crate::syntax::{
     ColorInfo, Frame, Tables, parse_app0, parse_app14, parse_dht, parse_dnl, parse_dqt, parse_dri,
     parse_sof, parse_sos,
@@ -286,6 +302,10 @@ impl JpegDecoder {
         let mut color = ColorInfo::default();
         let mut frame: Option<Frame> = None;
         let mut planes: Vec<Option<Plane>> = Vec::new();
+        // Progressive (SOF2) state: one coefficient accumulator per component, filled across scans
+        // and reconstructed once at EOI. Empty for a sequential frame.
+        let mut progressive = false;
+        let mut prog: Vec<ProgComp> = Vec::new();
 
         loop {
             let (marker, after) = read_marker(data, pos)?;
@@ -302,9 +322,23 @@ impl JpegDecoder {
                     pos = next;
                 }
                 code::SOF2 => {
-                    return Err(Error::Unsupported(
-                        "JPEG: progressive DCT (SOF2) decode not yet supported",
-                    ));
+                    if frame.is_some() {
+                        return Err(Error::InvalidInput("JPEG: duplicate frame header"));
+                    }
+                    let (payload, next) = read_segment(data, after)?;
+                    let f = parse_sof(payload)?;
+                    if f.y == 0 {
+                        // A Y=0 (DNL-deferred height) progressive frame is rejected: the
+                        // coefficient buffers must be sized to the full block grid before the first
+                        // scan, and libjpeg-turbo never emits one. See STATUS.md.
+                        return Err(Error::Unsupported(
+                            "JPEG: progressive frame with deferred height (Y=0/DNL) not supported",
+                        ));
+                    }
+                    prog = build_prog_comps(&f);
+                    progressive = true;
+                    frame = Some(f);
+                    pos = next;
                 }
                 code::SOF3 => {
                     return Err(Error::Unsupported(
@@ -339,19 +373,23 @@ impl JpegDecoder {
                         .as_ref()
                         .ok_or(Error::InvalidInput("JPEG: SOS before SOF"))?;
                     let (payload, next) = read_segment(data, after)?;
-                    let scan = parse_sos(payload, f)?;
-                    for sc in &scan.components {
-                        if planes[sc.frame_index].is_some() {
-                            return Err(Error::InvalidInput(
-                                "JPEG: component coded by more than one scan",
-                            ));
+                    let scan = parse_sos(payload, f, progressive)?;
+                    if progressive {
+                        pos = decode_progressive_scan(data, next, f, &scan, &tables, &mut prog)?;
+                    } else {
+                        for sc in &scan.components {
+                            if planes[sc.frame_index].is_some() {
+                                return Err(Error::InvalidInput(
+                                    "JPEG: component coded by more than one scan",
+                                ));
+                            }
                         }
+                        let result = decode_scan(data, next, f, &scan, &tables)?;
+                        for (ci, plane) in result.planes {
+                            planes[ci] = Some(plane);
+                        }
+                        pos = result.marker_offset;
                     }
-                    let result = decode_scan(data, next, f, &scan, &tables)?;
-                    for (ci, plane) in result.planes {
-                        planes[ci] = Some(plane);
-                    }
-                    pos = result.marker_offset;
                 }
                 code::DNL => {
                     let (payload, next) = read_segment(data, after)?;
@@ -387,8 +425,53 @@ impl JpegDecoder {
             }
         }
 
-        assemble(frame, planes, color)
+        if progressive {
+            assemble_progressive(frame, prog, color)
+        } else {
+            assemble(frame, planes, color)
+        }
     }
+}
+
+/// Allocates one progressive coefficient accumulator per frame component, sized to the component's
+/// own block grid `ceil(comp_w/8) × ceil(comp_h/8)` (§A.2.2). The height is known (Y ≠ 0 is enforced
+/// for progressive frames), so the grid is fixed before the first scan.
+fn build_prog_comps(frame: &Frame) -> Vec<ProgComp> {
+    let hmax = usize::from(frame.hmax());
+    let vmax = usize::from(frame.vmax());
+    let x = usize::from(frame.x);
+    let y = usize::from(frame.y);
+    frame
+        .components
+        .iter()
+        .map(|c| {
+            let comp_w = (x * usize::from(c.h)).div_ceil(hmax);
+            let comp_h = (y * usize::from(c.v)).div_ceil(vmax);
+            ProgComp::new(c.h, c.v, comp_w.div_ceil(8), comp_h.div_ceil(8))
+        })
+        .collect()
+}
+
+/// Finalizes a progressive decode: enforces the partial-render policy (every component must have
+/// received its DC first pass, §G.1.1.1.1), reconstructs each component's sample plane once
+/// (dequantize + IDCT + level shift), and reuses [`assemble`] to crop and package the image.
+fn assemble_progressive(
+    frame: Option<Frame>,
+    comps: Vec<ProgComp>,
+    color: ColorInfo,
+) -> Result<DecodedImage> {
+    let frame = frame.ok_or(Error::InvalidInput("JPEG: no frame header"))?;
+    for c in &comps {
+        // Partial-render policy: an incomplete stream renders whatever bands arrived, but every
+        // component must at least have its DC scan or the image has no baseline to show.
+        if !c.has_dc() {
+            return Err(Error::InvalidInput(
+                "JPEG: progressive frame missing a component's DC scan",
+            ));
+        }
+    }
+    let planes = comps.into_iter().map(|c| Some(c.into_plane())).collect();
+    assemble(Some(frame), planes, color)
 }
 
 /// Finalizes a decode: validates the frame is complete, crops each component to its valid region,
@@ -1202,8 +1285,11 @@ mod tests {
             JpegProcess::ExtendedSequential
         );
         assert_eq!(info(&flip(0xC2)).unwrap().process, JpegProcess::Progressive);
-        // The unsupported processes decode to a specific `Unsupported` error (not merely any error).
-        for code in [0xC2u8, 0xC3, 0xC5, 0xC9, 0xCC, 0xCF] {
+        // The unsupported processes (lossless, hierarchical, arithmetic) decode to a specific
+        // `Unsupported` error (not merely any error). SOF2 (0xC2) is now a supported process, so it
+        // is excluded here: a baseline SOS under a SOF2 header fails the progressive DC-scan check
+        // (Se ≠ 0) as InvalidInput, exercised by the progressive-validation tests instead.
+        for code in [0xC3u8, 0xC5, 0xC9, 0xCC, 0xCF] {
             let m = flip(code);
             assert!(
                 matches!(
@@ -1613,6 +1699,850 @@ mod tests {
             .decode_image(&ycbcr420_20x12(false))
             .unwrap();
         assert_eq!(a.dimensions(), gamut_core::Dimensions::new(20, 12).unwrap());
+        assert_eq!(a, b);
+    }
+
+    // --- Progressive (SOF2) hand-built streams -------------------------------------------------
+    //
+    // These build progressive byte streams from the crate's writers plus small test-only entropy
+    // emitters that mirror the T.81 Annex G encoding procedures (Figures G.3/G.4/G.6 for the AC
+    // first pass, Figure G.7 for AC refinement, §G.1.2.1/§G.1.2.3 for DC). They pin the progressive
+    // decoder against independently computed expectations and against the sequential twin, ground
+    // the successive-approximation and EOBRUN edge cases the oracle battery cannot isolate, and
+    // exercise the scan-ordering validation corpus.
+
+    /// Writes a SOF2 (progressive) frame header — the SOF0 writer with the marker code swapped.
+    fn write_sof2(out: &mut Vec<u8>, w: u16, h: u16, comps: &[(u8, u8, u8, u8)]) {
+        let mut seg = Vec::new();
+        marker::write_sof0(&mut seg, w, h, comps);
+        seg[1] = marker::code::SOF2;
+        out.extend_from_slice(&seg);
+    }
+
+    /// Writes a progressive SOS header carrying the band `[Ss..=Se]` and precision `(Ah, Al)`.
+    fn write_sos_prog(out: &mut Vec<u8>, comps: &[(u8, u8, u8)], ss: u8, se: u8, ah: u8, al: u8) {
+        marker::write_segment_header(out, marker::code::SOS, 6 + 2 * comps.len());
+        out.push(comps.len() as u8);
+        for &(cs, td, ta) in comps {
+            out.push(cs);
+            out.push(marker::pack_nibbles(td, ta));
+        }
+        out.push(ss);
+        out.push(se);
+        out.push(marker::pack_nibbles(ah, al));
+    }
+
+    /// DC first pass (§G.1.2.1): DPCM of the point-transformed DC (arithmetic-shift-right by `al`,
+    /// §A.4), coded with the DC Huffman table.
+    fn pg_dc_first(w: &mut BitWriter, blocks: &[[i32; 64]], al: u8, dc: &EncTable, pred: &mut i32) {
+        for blk in blocks {
+            let dcv = blk[0] >> al;
+            let diff = dcv - *pred;
+            *pred = dcv;
+            let cat = magcat(diff);
+            let (c, l) = dc.lookup(cat).unwrap();
+            w.write_bits(c, l);
+            w.write_bits(addbits(diff, cat), cat);
+        }
+    }
+
+    /// DC refinement (§G.1.2.3): one raw bit per block — the next lower bit of the DC coefficient.
+    fn pg_dc_refine(w: &mut BitWriter, blocks: &[[i32; 64]], al: u8) {
+        for blk in blocks {
+            w.write_bits(((blk[0] >> al) & 1) as u16, 1);
+        }
+    }
+
+    /// The size (appended-bit count) of an EOB run and its symbol, then flush it (Figure G.4).
+    fn pg_flush_eobrun(w: &mut BitWriter, eobrun: &mut u32, ac: &EncTable) {
+        if *eobrun == 0 {
+            return;
+        }
+        let e = *eobrun;
+        let n = 31 - e.leading_zeros(); // EOBSIZE = floor(log2(run))
+        let (c, l) = ac.lookup((n as u8) << 4).unwrap();
+        w.write_bits(c, l);
+        if n > 0 {
+            w.write_bits((e & ((1u32 << n) - 1)) as u16, n as u8);
+        }
+        *eobrun = 0;
+    }
+
+    /// AC first pass over one scan's blocks (§G.1.2.2, Figure G.3): run/size symbols within the band
+    /// `[ss..=se]` on the point-transformed (integer-divide-by-2^al) coefficients, with EOB runs
+    /// accumulated across blocks.
+    fn pg_ac_first(
+        w: &mut BitWriter,
+        blocks: &[[i32; 64]],
+        ss: usize,
+        se: usize,
+        al: u8,
+        ac: &EncTable,
+    ) {
+        let mut eobrun = 0u32;
+        for blk in blocks {
+            let mut run = 0usize;
+            for k in ss..=se {
+                let coef = blk[ZIGZAG[k]];
+                // Point transform: integer divide by 2^al, rounding toward zero (§A.4).
+                let v = if coef < 0 {
+                    -((-coef) >> al)
+                } else {
+                    coef >> al
+                };
+                if v == 0 {
+                    run += 1;
+                    continue;
+                }
+                pg_flush_eobrun(w, &mut eobrun, ac);
+                while run >= 16 {
+                    let (c, l) = ac.lookup(0xF0).unwrap();
+                    w.write_bits(c, l);
+                    run -= 16;
+                }
+                let cat = magcat(v);
+                let (c, l) = ac.lookup(((run as u8) << 4) | cat).unwrap();
+                w.write_bits(c, l);
+                w.write_bits(addbits(v, cat), cat);
+                run = 0;
+            }
+            if run > 0 {
+                eobrun += 1;
+            }
+        }
+        pg_flush_eobrun(w, &mut eobrun, ac);
+    }
+
+    /// AC refinement over one scan's blocks (§G.1.2.3, Figure G.7 — the libjpeg-faithful buffered
+    /// correction-bit encoder). Correction bits for non-zero-history coefficients are buffered and
+    /// appended after the associated ZRL / newly-nonzero symbol or the trailing EOB run.
+    fn pg_ac_refine(
+        w: &mut BitWriter,
+        blocks: &[[i32; 64]],
+        ss: usize,
+        se: usize,
+        al: u8,
+        ac: &EncTable,
+    ) {
+        let mut eobrun = 0u32;
+        let mut be: Vec<u16> = Vec::new(); // buffered correction bits for pending EOB-run blocks
+        for blk in blocks {
+            // Point-transformed absolute values and the EOB (last newly-nonzero) index.
+            let mut absv = [0i32; 64];
+            let mut eob = 0usize;
+            for k in ss..=se {
+                let t = blk[ZIGZAG[k]].abs() >> al;
+                absv[k] = t;
+                if t == 1 {
+                    eob = k;
+                }
+            }
+            let mut run = 0usize;
+            let mut br: Vec<u16> = Vec::new(); // this block's pending correction bits
+            for k in ss..=se {
+                let t = absv[k];
+                if t == 0 {
+                    run += 1;
+                    continue;
+                }
+                while run > 15 && k <= eob {
+                    pg_flush_eobrun(w, &mut eobrun, ac);
+                    for &b in &be {
+                        w.write_bits(b, 1);
+                    }
+                    be.clear();
+                    let (c, l) = ac.lookup(0xF0).unwrap();
+                    w.write_bits(c, l);
+                    run -= 16;
+                    for &b in &br {
+                        w.write_bits(b, 1);
+                    }
+                    br.clear();
+                }
+                if t > 1 {
+                    // Non-zero-history coefficient: buffer its correction bit (bit al of |coef|).
+                    br.push((t & 1) as u16);
+                    continue;
+                }
+                // Newly non-zero coefficient (|value| == 1 at this precision).
+                pg_flush_eobrun(w, &mut eobrun, ac);
+                for &b in &be {
+                    w.write_bits(b, 1);
+                }
+                be.clear();
+                let (c, l) = ac.lookup(((run as u8) << 4) | 1).unwrap();
+                w.write_bits(c, l);
+                w.write_bits(u16::from(blk[ZIGZAG[k]] > 0), 1); // sign: 1 = positive
+                for &b in &br {
+                    w.write_bits(b, 1);
+                }
+                br.clear();
+                run = 0;
+            }
+            if run > 0 || !br.is_empty() {
+                eobrun += 1;
+                be.extend_from_slice(&br);
+            }
+        }
+        pg_flush_eobrun(w, &mut eobrun, ac);
+        for &b in &be {
+            w.write_bits(b, 1);
+        }
+    }
+
+    /// Flushes a `BitWriter` body and appends it to `jpeg`.
+    fn append_entropy(jpeg: &mut Vec<u8>, build: impl FnOnce(&mut BitWriter)) {
+        let mut body = Vec::new();
+        let mut w = BitWriter::new(&mut body);
+        build(&mut w);
+        w.flush();
+        jpeg.extend_from_slice(&body);
+    }
+
+    /// A custom AC Huffman table carrying the EOBn run codes (`0x10` = EOB1, `0x20` = EOB2) that the
+    /// Annex K "typical" tables omit — needed to hand-code EOB runs longer than one block. Eight
+    /// symbols, all length-3 (a complete code): EOB0/1/2, run/size 0x01/0x02/0x03/0x12, and ZRL.
+    const PROG_AC: huffman::TableSpec = huffman::TableSpec {
+        bits: [0, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        values: &[0x00, 0x01, 0x02, 0x03, 0x10, 0x12, 0x20, 0xF0],
+    };
+
+    /// A single-component (gray) progressive stream prefix: SOI, DQT, SOF2, DHT (std luma DC + the
+    /// given AC table in destination 0).
+    fn prog_gray_prefix_ac(quant: &[u8; 64], x: u16, y: u16, ac: &huffman::TableSpec) -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        marker::write_marker(&mut jpeg, marker::code::SOI);
+        quant::emit_dqt(&mut jpeg, &[(0, quant)]);
+        write_sof2(&mut jpeg, x, y, &[(1, 1, 1, 0)]);
+        huffman::emit_dht(&mut jpeg, &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, ac)]);
+        jpeg
+    }
+
+    /// The common case: a prefix using the standard luma AC table.
+    fn prog_gray_prefix(quant: &[u8; 64], x: u16, y: u16) -> Vec<u8> {
+        prog_gray_prefix_ac(quant, x, y, &huffman::STD_LUMA_AC)
+    }
+
+    /// A single-component (gray) SEQUENTIAL twin over the same coefficient blocks (block column,
+    /// top to bottom) — the reference every progressive stream must match exactly.
+    fn seq_gray(quant: &[u8; 64], x: u16, y: u16, blocks: &[[i32; 64]]) -> Vec<u8> {
+        let (ldc, lac, ..) = std_enc();
+        let mut jpeg = Vec::new();
+        marker::write_marker(&mut jpeg, marker::code::SOI);
+        quant::emit_dqt(&mut jpeg, &[(0, quant)]);
+        marker::write_sof0(&mut jpeg, x, y, &[(1, 1, 1, 0)]);
+        huffman::emit_dht(
+            &mut jpeg,
+            &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
+        );
+        marker::write_sos(&mut jpeg, &[(1, 0, 0)]);
+        let order: Vec<(usize, [i32; 64])> = blocks.iter().map(|b| (0usize, *b)).collect();
+        jpeg.extend_from_slice(&entropy(&order, &[(ldc, lac)]));
+        marker::write_marker(&mut jpeg, marker::code::EOI);
+        jpeg
+    }
+
+    fn decode_gray(jpeg: &[u8]) -> Vec<u8> {
+        let out: ImageBuf<Gray8> = JpegDecoder::new().decode_image(jpeg).unwrap();
+        out.as_samples().to_vec()
+    }
+
+    #[test]
+    fn progressive_dc_then_ac_first_matches_sequential() {
+        // Spectral selection with no successive approximation (Al = 0): a DC-only scan followed by
+        // one full AC-band scan reconstructs the exact pixels of the equivalent single-scan
+        // sequential file. Pins the coefficient accumulation, the DC/AC scan split, and the EOB0
+        // block terminator.
+        let quant = quant::LUMINANCE;
+        let mut c = [0i32; 64];
+        c[0] = 5;
+        c[ZIGZAG[1]] = -3;
+        c[ZIGZAG[5]] = 2;
+        c[ZIGZAG[20]] = 1;
+        let (ldc, lac, ..) = std_enc();
+
+        let mut prog = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| pg_dc_first(w, &[c], 0, &ldc, &mut pred));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 1, 63, 0, 0);
+        append_entropy(&mut prog, |w| pg_ac_first(w, &[c], 1, 63, 0, &lac));
+        marker::write_marker(&mut prog, marker::code::EOI);
+
+        assert_eq!(
+            decode_gray(&prog),
+            decode_gray(&seq_gray(&quant, 8, 8, &[c]))
+        );
+    }
+
+    #[test]
+    fn progressive_successive_approximation_matches_full_precision() {
+        // A full successive-approximation progression (DC first Al=1 + DC refine Al=0, AC first
+        // Al=1 + AC refine Al=0) must reconstruct the exact same block as the full-precision
+        // sequential twin. Coefficients are chosen to exercise every refinement path: an even AC
+        // (correction bit 0), an odd AC ≥ 2 (correction bit 1), a magnitude-1 AC (newly nonzero in
+        // the refinement scan), and a negative AC.
+        let quant = [1u8; 64];
+        let mut c = [0i32; 64];
+        c[0] = 5; // odd DC
+        c[ZIGZAG[1]] = 4; // even, |>>1| = 2 → correction bit 0
+        c[ZIGZAG[2]] = 5; // odd ≥ 2 → correction bit 1
+        c[ZIGZAG[3]] = 1; // magnitude 1 → newly nonzero in the Al=0 refinement
+        c[ZIGZAG[4]] = -3; // odd negative → correction bit 1, sign preserved
+        let (ldc, lac, ..) = std_enc();
+
+        let mut prog = prog_gray_prefix(&quant, 8, 8);
+        // DC first (Al = 1) then DC refine (Al = 0).
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 0, 1);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| pg_dc_first(w, &[c], 1, &ldc, &mut pred));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 1, 0);
+        append_entropy(&mut prog, |w| pg_dc_refine(w, &[c], 0));
+        // AC first (Al = 1) then AC refine (Al = 0).
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 1, 63, 0, 1);
+        append_entropy(&mut prog, |w| pg_ac_first(w, &[c], 1, 63, 1, &lac));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 1, 63, 1, 0);
+        append_entropy(&mut prog, |w| pg_ac_refine(w, &[c], 1, 63, 0, &lac));
+        marker::write_marker(&mut prog, marker::code::EOI);
+
+        assert_eq!(
+            decode_gray(&prog),
+            decode_gray(&seq_gray(&quant, 8, 8, &[c]))
+        );
+    }
+
+    #[test]
+    fn progressive_eobrun_spans_multiple_blocks() {
+        // Three blocks whose AC bands are entirely zero, then a fourth with a nonzero AC: the first
+        // pass must encode an EOB run of 3 (EOB1 + one appended bit) that the decoder unwinds across
+        // the three all-zero blocks before decoding the fourth. Matches the sequential twin exactly.
+        let quant = quant::LUMINANCE;
+        let blocks = [flat(10), flat(-20), flat(30), {
+            let mut b = flat(-5);
+            b[ZIGZAG[1]] = 4; // a nonzero AC in the fourth block flushes the EOB run
+            b
+        }];
+        let (ldc, ..) = std_enc();
+        let pac = EncTable::from_spec(&PROG_AC);
+
+        let mut prog = prog_gray_prefix_ac(&quant, 8, 32, &PROG_AC);
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| pg_dc_first(w, &blocks, 0, &ldc, &mut pred));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 1, 63, 0, 0);
+        append_entropy(&mut prog, |w| pg_ac_first(w, &blocks, 1, 63, 0, &pac));
+        marker::write_marker(&mut prog, marker::code::EOI);
+
+        assert_eq!(
+            decode_gray(&prog),
+            decode_gray(&seq_gray(&quant, 8, 32, &blocks))
+        );
+    }
+
+    #[test]
+    fn progressive_ac_scan_restart_resets_eobrun() {
+        // A four-block AC scan with restart interval 2 (an RST between blocks 1 and 2). Blocks 0/1
+        // have zero AC (an EOB run flushed at the interval end); block 2 opens the next interval
+        // with a nonzero AC. Decoding must match the sequential twin — exercising restart-marker
+        // consumption, DC-predictor reset, and the EOBRUN reset at the interval boundary.
+        let quant = quant::LUMINANCE;
+        let blocks = [
+            flat(6),
+            flat(-6),
+            {
+                let mut b = flat(12);
+                b[ZIGZAG[2]] = 3;
+                b
+            },
+            flat(9),
+        ];
+        let (ldc, ..) = std_enc();
+        let pac = EncTable::from_spec(&PROG_AC);
+
+        let mut prog = prog_gray_prefix_ac(&quant, 8, 32, &PROG_AC);
+        marker::write_dri(&mut prog, 2);
+        // DC scan, restart every 2 MCUs: predictor resets at the interval boundary.
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| {
+            pg_dc_first(w, &blocks[..2], 0, &ldc, &mut pred)
+        });
+        marker::write_marker(&mut prog, marker::code::RST0);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| {
+            pg_dc_first(w, &blocks[2..], 0, &ldc, &mut pred)
+        });
+        // AC scan, same restart interval: each interval's EOB run is flushed independently.
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 1, 63, 0, 0);
+        append_entropy(&mut prog, |w| pg_ac_first(w, &blocks[..2], 1, 63, 0, &pac));
+        marker::write_marker(&mut prog, marker::code::RST0);
+        append_entropy(&mut prog, |w| pg_ac_first(w, &blocks[2..], 1, 63, 0, &pac));
+        marker::write_marker(&mut prog, marker::code::EOI);
+
+        // Sequential twin also uses restart interval 2 (identical coefficients, DC reset per RST).
+        assert_eq!(
+            decode_gray(&prog),
+            decode_gray(&seq_gray_restart(&quant, 8, 32, &blocks, 2))
+        );
+    }
+
+    /// A gray sequential twin with a restart interval (one block per MCU column).
+    fn seq_gray_restart(
+        quant: &[u8; 64],
+        x: u16,
+        y: u16,
+        blocks: &[[i32; 64]],
+        ri: u16,
+    ) -> Vec<u8> {
+        let (ldc, lac, ..) = std_enc();
+        let mut jpeg = Vec::new();
+        marker::write_marker(&mut jpeg, marker::code::SOI);
+        quant::emit_dqt(&mut jpeg, &[(0, quant)]);
+        marker::write_sof0(&mut jpeg, x, y, &[(1, 1, 1, 0)]);
+        huffman::emit_dht(
+            &mut jpeg,
+            &[(0, 0, &huffman::STD_LUMA_DC), (1, 0, &huffman::STD_LUMA_AC)],
+        );
+        marker::write_dri(&mut jpeg, ri);
+        marker::write_sos(&mut jpeg, &[(1, 0, 0)]);
+        let mut rst = 0u8;
+        for (i, chunk) in blocks.chunks(usize::from(ri)).enumerate() {
+            if i > 0 {
+                marker::write_marker(&mut jpeg, marker::code::RST0 + (rst & 7));
+                rst += 1;
+            }
+            let order: Vec<(usize, [i32; 64])> = chunk.iter().map(|b| (0usize, *b)).collect();
+            jpeg.extend_from_slice(&entropy(&order, &[(ldc.clone(), lac.clone())]));
+        }
+        marker::write_marker(&mut jpeg, marker::code::EOI);
+        jpeg
+    }
+
+    /// One scan descriptor for [`prog_scans`]: `(components, (ss, se, ah, al), entropy_body)`.
+    type ScanDesc<'a> = (&'a [(u8, u8, u8)], (u8, u8, u8, u8), Vec<u8>);
+
+    /// Assembles a minimal progressive gray stream from raw scan descriptors for the validation
+    /// corpus.
+    fn prog_scans(quant: &[u8; 64], x: u16, y: u16, scans: &[ScanDesc]) -> Vec<u8> {
+        let mut jpeg = prog_gray_prefix(quant, x, y);
+        for (comps, (ss, se, ah, al), body) in scans {
+            write_sos_prog(&mut jpeg, comps, *ss, *se, *ah, *al);
+            jpeg.extend_from_slice(body);
+        }
+        marker::write_marker(&mut jpeg, marker::code::EOI);
+        jpeg
+    }
+
+    /// The entropy body of a single-block gray DC first scan (used to satisfy the DC-precedes-AC
+    /// rule in the validation corpus).
+    fn dc_first_body(dc: i32) -> Vec<u8> {
+        let (ldc, ..) = std_enc();
+        let mut body = Vec::new();
+        let mut w = BitWriter::new(&mut body);
+        let mut pred = 0;
+        pg_dc_first(&mut w, &[flat(dc)], 0, &ldc, &mut pred);
+        w.flush();
+        body
+    }
+
+    #[test]
+    fn progressive_scan_ordering_is_validated() {
+        let quant = quant::LUMINANCE;
+        let d =
+            |b: &[u8]| <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), b);
+
+        // An AC scan before any DC scan of the component → InvalidInput (§G.1.1.1.1).
+        let ac_before_dc = prog_scans(&quant, 8, 8, &[(&[(1, 0, 0)], (1, 63, 0, 0), Vec::new())]);
+        assert!(matches!(d(&ac_before_dc), Err(Error::InvalidInput(_))));
+
+        // A refinement scan of a band whose first pass never happened → InvalidInput. DC first, then
+        // an AC *refinement* (Ah=1, Al=0) with no AC first pass.
+        let refine_first = prog_scans(
+            &quant,
+            8,
+            8,
+            &[
+                (&[(1, 0, 0)], (0, 0, 0, 0), dc_first_body(3)),
+                (&[(1, 0, 0)], (1, 63, 1, 0), Vec::new()),
+            ],
+        );
+        assert!(matches!(d(&refine_first), Err(Error::InvalidInput(_))));
+
+        // The same band coded twice at the first pass (overlap) → InvalidInput. DC first, AC band
+        // [1..5] first pass, then AC band [3..8] first pass overlapping at 3..5.
+        let overlap = prog_scans(
+            &quant,
+            8,
+            8,
+            &[
+                (&[(1, 0, 0)], (0, 0, 0, 0), dc_first_body(3)),
+                (&[(1, 0, 0)], (1, 5, 0, 0), ac_eob_body()),
+                (&[(1, 0, 0)], (3, 8, 0, 0), ac_eob_body()),
+            ],
+        );
+        assert!(matches!(d(&overlap), Err(Error::InvalidInput(_))));
+
+        // A multi-component AC scan (Ns = 2) is rejected at header parse (§B.2.3).
+        let multi_ac = {
+            let mut j = prog_gray_prefix(&quant, 8, 8);
+            write_sos_prog(&mut j, &[(1, 0, 0), (1, 0, 0)], 1, 63, 0, 0);
+            marker::write_marker(&mut j, marker::code::EOI);
+            j
+        };
+        assert!(matches!(d(&multi_ac), Err(Error::InvalidInput(_))));
+
+        // EOI after a DC-only scan leaves the frame renderable (partial-render policy): decode Ok.
+        let dc_only = prog_scans(
+            &quant,
+            8,
+            8,
+            &[(&[(1, 0, 0)], (0, 0, 0, 0), dc_first_body(4))],
+        );
+        assert!(d(&dc_only).is_ok());
+    }
+
+    /// A single-block AC first-pass entropy body that codes an immediate EOB (empty band).
+    fn ac_eob_body() -> Vec<u8> {
+        let (_, lac, ..) = std_enc();
+        let mut body = Vec::new();
+        let mut w = BitWriter::new(&mut body);
+        pg_ac_first(&mut w, &[flat(0)], 1, 63, 0, &lac);
+        w.flush();
+        body
+    }
+
+    #[test]
+    fn progressive_missing_dc_component_is_rejected() {
+        // A three-component progressive frame where only two components receive a DC scan: the third
+        // never gets a baseline, so the partial-render policy rejects the frame as InvalidInput.
+        let (ldc, ..) = std_enc();
+        let quant = [1u8; 64];
+        let mut jpeg = Vec::new();
+        marker::write_marker(&mut jpeg, marker::code::SOI);
+        quant::emit_dqt(&mut jpeg, &[(0, &quant)]);
+        write_sof2(&mut jpeg, 8, 8, &[(1, 1, 1, 0), (2, 1, 1, 0), (3, 1, 1, 0)]);
+        huffman::emit_dht(&mut jpeg, &[(0, 0, &huffman::STD_LUMA_DC)]);
+        // Interleaved DC scan over only components 1 and 2 (component 3 omitted).
+        write_sos_prog(&mut jpeg, &[(1, 0, 0), (2, 0, 0)], 0, 0, 0, 0);
+        append_entropy(&mut jpeg, |w| {
+            let mut pred = [0i32; 2];
+            pg_dc_first(w, &[flat(3)], 0, &ldc, &mut pred[0]);
+            pg_dc_first(w, &[flat(4)], 0, &ldc, &mut pred[1]);
+        });
+        marker::write_marker(&mut jpeg, marker::code::EOI);
+        assert!(matches!(
+            <JpegDecoder as DecodeImage<Rgb8>>::decode_image(&JpegDecoder::new(), &jpeg),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn progressive_zero_height_is_unsupported() {
+        // A Y=0 (DNL-deferred height) progressive frame is a clean Unsupported error (see STATUS.md
+        // — the coefficient buffers need the full block grid before the first scan), never a panic.
+        let quant = [1u8; 64];
+        let mut jpeg = Vec::new();
+        marker::write_marker(&mut jpeg, marker::code::SOI);
+        quant::emit_dqt(&mut jpeg, &[(0, &quant)]);
+        write_sof2(&mut jpeg, 8, 0, &[(1, 1, 1, 0)]);
+        huffman::emit_dht(&mut jpeg, &[(0, 0, &huffman::STD_LUMA_DC)]);
+        write_sos_prog(&mut jpeg, &[(1, 0, 0)], 0, 0, 0, 0);
+        marker::write_marker(&mut jpeg, marker::code::EOI);
+        assert!(matches!(
+            <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &jpeg),
+            Err(Error::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn progressive_truncated_mid_scan_errors_without_panic() {
+        // Truncating a progressive stream inside the AC scan's entropy data must yield an Err (the
+        // bit reader hits EOF with no terminating marker), never a panic.
+        let quant = quant::LUMINANCE;
+        let mut c = [0i32; 64];
+        c[0] = 7;
+        c[ZIGZAG[1]] = 5;
+        let (ldc, lac, ..) = std_enc();
+        let mut prog = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| pg_dc_first(w, &[c], 0, &ldc, &mut pred));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 1, 63, 0, 0);
+        append_entropy(&mut prog, |w| pg_ac_first(w, &[c], 1, 63, 0, &lac));
+        // Drop the final EOI and the last entropy byte.
+        let truncated = &prog[..prog.len() - 3];
+        assert!(
+            <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), truncated)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn progressive_dc_category_11_is_accepted() {
+        // A DC first-pass difference of category 11 (the largest legal 8-bit DC category) must pass
+        // the `t > 11` guard — pinning the boundary (a `>=` mutant would reject it). DC 1024 · step 8
+        // → 8192, IDCT flat → 1024, +128 → clamps to 255.
+        let quant = dc8_quant();
+        let (ldc, ..) = std_enc();
+        let mut prog = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| {
+            pg_dc_first(w, &[flat(1024)], 0, &ldc, &mut pred)
+        });
+        marker::write_marker(&mut prog, marker::code::EOI);
+        assert!(decode_gray(&prog).iter().all(|&v| v == 255));
+    }
+
+    #[test]
+    fn progressive_ac_first_run_at_and_past_band_end() {
+        // In an AC band [1..=5], a run/size symbol whose run lands the index exactly on Se (0x41 =
+        // run 4, size 1, from k=1 → k=5) is legal and places a coefficient; a run that overshoots
+        // (0xF1 = run 15 → k=16 > 5) is rejected. Together these pin `k > se` at its boundary.
+        let quant = quant::LUMINANCE;
+        let (ldc, lac, ..) = std_enc();
+        let mut ok = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut ok, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut ok, |w| pg_dc_first(w, &[flat(3)], 0, &ldc, &mut pred));
+        write_sos_prog(&mut ok, &[(1, 0, 0)], 1, 5, 0, 0);
+        append_entropy(&mut ok, |w| {
+            // Symbol 0x41 (run 4, size 1) then a magnitude bit → coefficient at k = Se = 5.
+            let (c, l) = lac.lookup(0x41).unwrap();
+            w.write_bits(c, l);
+            w.write_bits(1, 1);
+            // EOB0 terminates the block.
+            let (c, l) = lac.lookup(0x00).unwrap();
+            w.write_bits(c, l);
+        });
+        marker::write_marker(&mut ok, marker::code::EOI);
+        assert!(
+            <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &ok).is_ok()
+        );
+
+        // Overshoot: 0xF1 (run 15) from k = 1 pushes the index to 16 > Se = 5.
+        let mut bad = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut bad, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut bad, |w| pg_dc_first(w, &[flat(3)], 0, &ldc, &mut pred));
+        write_sos_prog(&mut bad, &[(1, 0, 0)], 1, 5, 0, 0);
+        append_entropy(&mut bad, |w| {
+            let (c, l) = lac.lookup(0xF1).unwrap();
+            w.write_bits(c, l);
+            w.write_bits(1, 1);
+        });
+        marker::write_marker(&mut bad, marker::code::EOI);
+        assert!(matches!(
+            <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &bad),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn progressive_refinement_history_must_match() {
+        // A band's first pass at Al = 2 followed by a refinement claiming Ah = 1 (history mismatch:
+        // the band was coded at Al = 2, not 1) must be rejected — pinning the `prev == ah` history
+        // guard (a `true` mutant would accept any prior precision). The DC scan precedes so the AC
+        // ordering rule is satisfied; the AC first/refine bodies are empty bands (immediate EOB).
+        let quant = quant::LUMINANCE;
+        let (ldc, lac, ..) = std_enc();
+        let mut jpeg = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut jpeg, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut jpeg, |w| {
+            pg_dc_first(w, &[flat(3)], 0, &ldc, &mut pred)
+        });
+        // AC first pass of band [1..=5] at Al = 2 (empty band → EOB0). coded_al[1..=5] = Some(2).
+        write_sos_prog(&mut jpeg, &[(1, 0, 0)], 1, 5, 0, 2);
+        append_entropy(&mut jpeg, |w| pg_ac_first(w, &[flat(3)], 1, 5, 2, &lac));
+        // AC refinement of the same band with Ah = 1 (≠ the stored Al = 2), Al = 0.
+        write_sos_prog(&mut jpeg, &[(1, 0, 0)], 1, 5, 1, 0);
+        append_entropy(&mut jpeg, |w| pg_ac_refine(w, &[flat(3)], 1, 5, 0, &lac));
+        marker::write_marker(&mut jpeg, marker::code::EOI);
+        assert!(matches!(
+            <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &jpeg),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn progressive_dc_three_level_refinement_matches_sequential() {
+        // A three-scan DC successive approximation (first Al=2, refine Al=1, refine Al=0) on DC = 7
+        // (binary 111). The Al=1 refinement bit sets `1 << 1`, pinning the DC-refine shift (a `>>`
+        // mutant sets nothing there and loses the bit, reconstructing 5 not 7). The DC step of 8
+        // scales the difference above the IDCT-rounding floor so the wrong value is visible.
+        let quant = dc8_quant();
+        let c = flat(7);
+        let (ldc, ..) = std_enc();
+        let mut prog = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 0, 2);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| pg_dc_first(w, &[c], 2, &ldc, &mut pred));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 2, 1);
+        append_entropy(&mut prog, |w| pg_dc_refine(w, &[c], 1));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 1, 0);
+        append_entropy(&mut prog, |w| pg_dc_refine(w, &[c], 0));
+        marker::write_marker(&mut prog, marker::code::EOI);
+        assert_eq!(
+            decode_gray(&prog),
+            decode_gray(&seq_gray(&quant, 8, 8, &[c]))
+        );
+    }
+
+    #[test]
+    fn progressive_ac_refine_newly_nonzero_at_band_end() {
+        // A single-coefficient band [Ss=Se=1]: the coefficient (magnitude 1) is zero at the first
+        // pass (Al=1) and becomes newly-nonzero in the refinement (Al=0), inserted at k == Se. Pins
+        // the `k > se` insertion guard at its boundary (a `>=` mutant would reject the valid insert).
+        let quant = [1u8; 64];
+        let mut c = flat(4);
+        c[ZIGZAG[1]] = 1; // magnitude-1 AC at the single band position
+        let (ldc, lac, ..) = std_enc();
+        let mut prog = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut prog, |w| pg_dc_first(w, &[c], 0, &ldc, &mut pred));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 1, 1, 0, 1);
+        append_entropy(&mut prog, |w| pg_ac_first(w, &[c], 1, 1, 1, &lac));
+        write_sos_prog(&mut prog, &[(1, 0, 0)], 1, 1, 1, 0);
+        append_entropy(&mut prog, |w| pg_ac_refine(w, &[c], 1, 1, 0, &lac));
+        marker::write_marker(&mut prog, marker::code::EOI);
+        assert_eq!(
+            decode_gray(&prog),
+            decode_gray(&seq_gray(&quant, 8, 8, &[c]))
+        );
+    }
+
+    #[test]
+    fn progressive_ac_refine_run_past_band_end_is_rejected() {
+        // A refinement whose newly-nonzero symbol cannot find its target zero within the band (both
+        // band positions are non-zero history, so the advance loop reaches k > Se without a target)
+        // must be rejected. This pins the `k > se` break in the advance loop (line ~894): a `>=`
+        // mutant would break one position early and silently insert the coefficient over the last
+        // history coefficient instead of erroring.
+        let quant = quant::LUMINANCE;
+        let (ldc, lac, ..) = std_enc();
+        let mut c = flat(3);
+        c[ZIGZAG[1]] = 4; // both band positions non-zero at the first pass (history coefficients)
+        c[ZIGZAG[2]] = 4;
+        let mut jpeg = prog_gray_prefix(&quant, 8, 8);
+        write_sos_prog(&mut jpeg, &[(1, 0, 0)], 0, 0, 0, 0);
+        let mut pred = 0;
+        append_entropy(&mut jpeg, |w| pg_dc_first(w, &[c], 0, &ldc, &mut pred));
+        write_sos_prog(&mut jpeg, &[(1, 0, 0)], 1, 2, 0, 1);
+        append_entropy(&mut jpeg, |w| pg_ac_first(w, &[c], 1, 2, 1, &lac));
+        // Hand-built refinement: a newly-nonzero symbol (run 0, size 1) with a positive sign, then
+        // correction bits for the two history coefficients. The advance loop walks both, never finds
+        // a target zero, and runs past Se = 2.
+        write_sos_prog(&mut jpeg, &[(1, 0, 0)], 1, 2, 1, 0);
+        append_entropy(&mut jpeg, |w| {
+            let (code, len) = lac.lookup(0x01).unwrap();
+            w.write_bits(code, len);
+            w.write_bits(1, 1); // sign: positive
+            w.write_bits(1, 1); // correction bit for k = 1
+            w.write_bits(1, 1); // correction bit for k = 2
+        });
+        marker::write_marker(&mut jpeg, marker::code::EOI);
+        assert!(matches!(
+            <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &jpeg),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn progressive_interleaved_dc_matches_sequential_420() {
+        // A 32×32 4:2:0 frame (luma 2×2, chroma 1×1) = 2×2 MCUs, DC-only, coded as an interleaved
+        // progressive DC scan and as the sequential twin. The multiple MCUs with sampling factors > 1
+        // pin the interleaved block-position arithmetic `mx·Hi` / `my·Vi` (a `/` mutant collapses
+        // distinct blocks onto each other). DC-only renders under the partial-render policy.
+        let luma_dc = |bx: usize, by: usize| bx as i32 * 3 + by as i32 * 5 - 7;
+        let cb_dc = |bx: usize, by: usize| bx as i32 - by as i32 * 2 + 1;
+        let cr_dc = |bx: usize, by: usize| by as i32 - bx as i32 + 2;
+        let (ldc, lac, cdc, cac) = std_enc();
+
+        // Progressive: SOI, DQT (one table for all), SOF2, DHT (luma+chroma DC), interleaved DC scan.
+        let mut prog = Vec::new();
+        marker::write_marker(&mut prog, marker::code::SOI);
+        marker::write_app0_jfif(&mut prog, marker::DensityUnit::AspectRatio, 1, 1);
+        quant::emit_dqt(&mut prog, &[(0, &[1u8; 64])]);
+        write_sof2(
+            &mut prog,
+            32,
+            32,
+            &[(1, 2, 2, 0), (2, 1, 1, 0), (3, 1, 1, 0)],
+        );
+        huffman::emit_dht(
+            &mut prog,
+            &[
+                (0, 0, &huffman::STD_LUMA_DC),
+                (0, 1, &huffman::STD_CHROMA_DC),
+            ],
+        );
+        write_sos_prog(&mut prog, &[(1, 0, 0), (2, 1, 1), (3, 1, 1)], 0, 0, 0, 0);
+        append_entropy(&mut prog, |w| {
+            let mut pred = [0i32; 3];
+            for my in 0..2 {
+                for mx in 0..2 {
+                    for by in 0..2 {
+                        for bx in 0..2 {
+                            pg_dc_first(
+                                w,
+                                &[flat(luma_dc(mx * 2 + bx, my * 2 + by))],
+                                0,
+                                &ldc,
+                                &mut pred[0],
+                            );
+                        }
+                    }
+                    pg_dc_first(w, &[flat(cb_dc(mx, my))], 0, &cdc, &mut pred[1]);
+                    pg_dc_first(w, &[flat(cr_dc(mx, my))], 0, &cdc, &mut pred[2]);
+                }
+            }
+        });
+        marker::write_marker(&mut prog, marker::code::EOI);
+
+        // Sequential 4:2:0 twin: same MCU order, one interleaved baseline scan of flat blocks.
+        let mut seq = Vec::new();
+        marker::write_marker(&mut seq, marker::code::SOI);
+        marker::write_app0_jfif(&mut seq, marker::DensityUnit::AspectRatio, 1, 1);
+        quant::emit_dqt(&mut seq, &[(0, &[1u8; 64])]);
+        marker::write_sof0(
+            &mut seq,
+            32,
+            32,
+            &[(1, 2, 2, 0), (2, 1, 1, 0), (3, 1, 1, 0)],
+        );
+        huffman::emit_dht(
+            &mut seq,
+            &[
+                (0, 0, &huffman::STD_LUMA_DC),
+                (1, 0, &huffman::STD_LUMA_AC),
+                (0, 1, &huffman::STD_CHROMA_DC),
+                (1, 1, &huffman::STD_CHROMA_AC),
+            ],
+        );
+        marker::write_sos(&mut seq, &[(1, 0, 0), (2, 1, 1), (3, 1, 1)]);
+        let mut order = Vec::new();
+        for my in 0..2 {
+            for mx in 0..2 {
+                for by in 0..2 {
+                    for bx in 0..2 {
+                        order.push((0usize, flat(luma_dc(mx * 2 + bx, my * 2 + by))));
+                    }
+                }
+                order.push((1usize, flat(cb_dc(mx, my))));
+                order.push((2usize, flat(cr_dc(mx, my))));
+            }
+        }
+        seq.extend_from_slice(&entropy(
+            &order,
+            &[(ldc, lac), (cdc.clone(), cac.clone()), (cdc, cac)],
+        ));
+        marker::write_marker(&mut seq, marker::code::EOI);
+
+        let a: ImageBuf<Rgb8> = JpegDecoder::new().decode_image(&prog).unwrap();
+        let b: ImageBuf<Rgb8> = JpegDecoder::new().decode_image(&seq).unwrap();
+        assert_eq!(a.dimensions(), gamut_core::Dimensions::new(32, 32).unwrap());
         assert_eq!(a, b);
     }
 }

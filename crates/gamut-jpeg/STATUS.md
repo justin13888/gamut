@@ -17,8 +17,16 @@ software** (`references/jpeg`, ISO/IEC 10918-7) for spec-exact behaviour. The ga
 directions in `tests/oracle.rs`: **encode** (gamut encodes → libjpeg-turbo decodes → matches source
 within tolerance) and **decode** (libjpeg-turbo encodes → gamut decodes → matches libjpeg-turbo's
 own decode of the same stream, gray/4:4:4 within **3 codes** of IDCT rounding, subsampled bounded by
-the documented replication-vs-fancy upsampling divergence). Before P2 the encoder was additionally
-pinned by byte-exact micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker.
+the documented replication-vs-fancy upsampling divergence). The decode gate runs the **sequential**
+battery and, from P4, the **progressive** one (libjpeg-turbo's standard 10-scan `jpeg_simple_progression`
+script across gray/colour × 4:4:4/4:2:2/4:2:0 × q{40,75,95} × restart{0,2} × optimize{off,on}); the
+progressive parity numbers are **identical** to the sequential ones (gray/4:4:4 max-diff **3**,
+subsampled PSNR **22.9 dB**), confirming the progressive coefficients match exactly — only the shared
+IDCT/upsampling remains as a source of divergence. Before P2 the encoder was additionally pinned by
+byte-exact micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker; the
+progressive decoder adds hand-built minimal streams (DC-then-AC, a successive-approximation pair, an
+EOBRUN-spanning case, a DC refinement) checked against sequential twins, plus a scan-ordering
+validation corpus.
 
 ## Scope ledger
 
@@ -47,10 +55,25 @@ pinned by byte-exact micro-goldens hand-derived from T.81 Annex F/K and a struct
 
 **Decoder-specific notes:**
 
-- **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a frame with
-  `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0` frame's height
-  then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and ignored. The
-  encoder never emits `Y = 0` (it always knows its height and writes it in SOF0).
+- **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a *sequential*
+  frame with `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0`
+  frame's height then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and
+  ignored. The encoder never emits `Y = 0` (it always knows its height and writes it in SOF0).
+- **Progressive + `Y = 0` (deferred height) is rejected as `Unsupported`.** The progressive
+  coefficient buffers are sized to each component's full block grid before the first scan, so a
+  height deferred to a trailing DNL cannot be accommodated without a two-pass scan or dynamically
+  growing every component's buffer across all scans — a disproportionate complication for a case the
+  libjpeg-turbo oracle (and real-world encoders) never emit. A DNL inside a `Y ≠ 0` progressive
+  frame is advisory and ignored, as for sequential.
+- **Partial progressive streams render generously** (the libjpeg convention). A progressive frame
+  that ends (EOI) before every band is complete is reconstructed from the coefficients delivered so
+  far — missing AC bands stay zero, incomplete refinements stay at their coarser approximation —
+  **provided every component received its DC first pass** (§G.1.1.1.1); otherwise the frame has no
+  baseline and is rejected as `InvalidInput`. A stream truncated mid-scan (EOF with no terminating
+  marker) is an `InvalidInput` error, never a panic.
+- **Progressive quantization-table binding (§B.2.4.1).** Each component latches its dequantization
+  table at its **first** scan; a later DQT redefinition of that destination does not retroactively
+  change an already-latched component, matching the reference decoder.
 - **Upsampling filter.** Subsampled chroma is upsampled by **sample replication** (nearest); T.81
   leaves the reconstruction filter open (§A.2 NOTE), so this is the decoder's documented free choice.
 - **Trailing bytes after EOI** are ignored (the libjpeg convention).
@@ -64,6 +87,6 @@ pinned by byte-exact micro-goldens hand-derived from T.81 Annex F/K and a struct
 | P1 | T.81 Annex A/B/C/F/K; T.871 | **Keystone:** scaffold + workspace wiring; marker/syntax layer; baseline SOF0 Huffman **encoder** (gray + YCbCr 4:4:4/4:2:2/4:2:0), Annex K tables, quality scaling, restart intervals, JFIF | ✅ done |
 | P2 | T.81 Annex A/B/C/F; T.871; TN #5116 | Sequential SOF0/SOF1 8-bit Huffman **decoder**: full marker/table parsing (DQT 8/16-bit, DHT with Annex C validation, DRI, DNL, APP0/APP14), interleaved + non-interleaved multi-scan entropy decode (§F.2), restart processing, gray/YCbCr/RGB/CMYK/YCCK colour, sample-replication upsampling, `info()` | ✅ done |
 | P3 | T.83 / oracle | libjpeg-turbo differential oracle (vendored, dev-only) + round-trip gate (`tests/oracle.rs`, both directions) | ✅ done |
-| P4 | T.81 §G | Progressive SOF2 **decode** (spectral selection + successive approximation) | ⏳ pending |
+| P4 | T.81 §G | Progressive SOF2 **decode**: spectral selection + successive approximation — per-component i32 coefficient accumulators filled across scans (interleaved DC + single-component AC), first-pass Huffman + EOBn runs (§G.1.2.2), DC/AC successive-approximation refinement (§G.1.2.3), point transform (§A.4), scan-band ordering validation (§G.1.1.1), restarts, dequant+IDCT once at EOI reusing the sequential reconstruction tail | ✅ done |
 | P5 | T.81 §G | Progressive SOF2 **encode** | ⏳ pending |
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14, CLI `gamut convert → .jpg`, umbrella `jpeg` feature audit | ⏳ pending |

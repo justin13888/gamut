@@ -114,11 +114,22 @@ pub struct ScanComponent {
     pub ta: u8,
 }
 
-/// A parsed scan header (SOS, §B.2.3). Baseline/sequential scans fix `Ss=0`, `Se=63`, `Ah=Al=0`.
+/// A parsed scan header (SOS, §B.2.3). Baseline/sequential scans fix `Ss=0`, `Se=63`, `Ah=Al=0`;
+/// progressive scans carry the spectral-selection band `[Ss..=Se]` and the successive-approximation
+/// bit positions `Ah`/`Al` (§G.1.1).
 #[derive(Debug, Clone)]
 pub struct ScanHeader {
     /// The scan's components in interleave order.
     pub components: Vec<ScanComponent>,
+    /// Start of spectral selection `Ss` (the first coded zig-zag index; `0` for a DC scan).
+    pub ss: u8,
+    /// End of spectral selection `Se` (the last coded zig-zag index; `0` when `Ss = 0`).
+    pub se: u8,
+    /// Successive-approximation bit position high `Ah` (`0` for a band's first scan; else the `Al`
+    /// of the preceding scan of that band).
+    pub ah: u8,
+    /// Successive-approximation bit position low `Al` (the point transform applied before coding).
+    pub al: u8,
 }
 
 impl ScanHeader {
@@ -318,14 +329,18 @@ pub fn parse_sof(payload: &[u8]) -> Result<Frame> {
 }
 
 /// Parses a SOS scan header (§B.2.3, Table B.3) against `frame`, resolving each `Csj` to a frame
-/// component index and validating the baseline spectral-selection fields.
+/// component index and validating the spectral-selection fields for the frame's process. When
+/// `progressive` is false (sequential SOF0/SOF1) the fields are pinned to `Ss=0`, `Se=63`,
+/// `Ah=Al=0`; when true (SOF2) the progressive band/precision constraints of §B.2.3 and §G.1.1 are
+/// enforced instead.
 ///
 /// # Errors
 ///
 /// [`Error::InvalidInput`] for a bad component count, an unknown or duplicated component selector,
-/// an out-of-range table destination, a non-baseline spectral field (`Ss≠0`/`Se≠63`/`Ah≠0`/`Al≠0`),
-/// an interleaved sampling sum `> 10`, or a length mismatch.
-pub fn parse_sos(payload: &[u8], frame: &Frame) -> Result<ScanHeader> {
+/// an out-of-range table destination, an interleaved sampling sum `> 10`, a length mismatch, or a
+/// spectral-selection field outside the range Table B.3 allows for the process (including a
+/// multi-component AC scan or a mismatched `Ah`/`Al` in the progressive case).
+pub fn parse_sos(payload: &[u8], frame: &Frame, progressive: bool) -> Result<ScanHeader> {
     let mut r = Reader::new(payload);
     let ns = r.u8("JPEG: truncated SOS")?;
     if ns == 0 || ns > 4 {
@@ -365,13 +380,17 @@ pub fn parse_sos(payload: &[u8], frame: &Frame) -> Result<ScanHeader> {
     let ss = r.u8("JPEG: truncated SOS")?;
     let se = r.u8("JPEG: truncated SOS")?;
     let ah_al = r.u8("JPEG: truncated SOS")?;
-    if ss != 0 || se != 63 || ah_al != 0 {
+    let ah = ah_al >> 4;
+    let al = ah_al & 0x0F;
+    if r.remaining() != 0 {
+        return Err(Error::InvalidInput("JPEG: SOS length mismatch"));
+    }
+    if progressive {
+        validate_progressive_spectral(ss, se, ah, al, components.len())?;
+    } else if ss != 0 || se != 63 || ah_al != 0 {
         return Err(Error::InvalidInput(
             "JPEG: non-baseline spectral selection (progressive scan)",
         ));
-    }
-    if r.remaining() != 0 {
-        return Err(Error::InvalidInput("JPEG: SOS length mismatch"));
     }
     // Interleaved sum(Hi·Vi) ≤ 10 (§A.2.2). A single-component scan is exempt.
     if components.len() > 1 {
@@ -388,7 +407,50 @@ pub fn parse_sos(payload: &[u8], frame: &Frame) -> Result<ScanHeader> {
             ));
         }
     }
-    Ok(ScanHeader { components })
+    Ok(ScanHeader {
+        components,
+        ss,
+        se,
+        ah,
+        al,
+    })
+}
+
+/// Validates the spectral-selection / successive-approximation fields of a progressive scan header
+/// (§B.2.3, Table B.3, and §G.1.1.1). Mirrors the reference decoder's checks:
+///
+/// - a DC scan (`Ss = 0`) must set `Se = 0`;
+/// - an AC scan (`Ss ≥ 1`) must have `Ss ≤ Se ≤ 63` and be single-component (`Ns = 1`);
+/// - a refinement scan (`Ah ≠ 0`) must have `Al = Ah − 1`;
+/// - `Al ≤ 13`.
+fn validate_progressive_spectral(ss: u8, se: u8, ah: u8, al: u8, ns: usize) -> Result<()> {
+    if ss == 0 {
+        if se != 0 {
+            return Err(Error::InvalidInput(
+                "JPEG: progressive DC scan must set Se = 0",
+            ));
+        }
+    } else {
+        if ss > se || se > 63 {
+            return Err(Error::InvalidInput(
+                "JPEG: progressive AC band out of Ss ≤ Se ≤ 63",
+            ));
+        }
+        if ns != 1 {
+            return Err(Error::InvalidInput(
+                "JPEG: progressive AC scan must be single-component",
+            ));
+        }
+    }
+    if ah != 0 && al != ah - 1 {
+        return Err(Error::InvalidInput(
+            "JPEG: progressive refinement requires Al = Ah − 1",
+        ));
+    }
+    if al > 13 {
+        return Err(Error::InvalidInput("JPEG: progressive Al > 13"));
+    }
+    Ok(())
 }
 
 /// Reads the JFIF marker from an APP0 payload, setting [`ColorInfo::jfif`] when the `"JFIF\0"`
@@ -490,23 +552,54 @@ mod tests {
         let frame = frame_3comp();
         // Ns=3, (1,0x00)(2,0x11)(3,0x11), Ss=0 Se=63 Ah|Al=0.
         let payload = vec![3, 1, 0x00, 2, 0x11, 3, 0x11, 0, 63, 0];
-        let scan = parse_sos(&payload, &frame).unwrap();
+        let scan = parse_sos(&payload, &frame, false).unwrap();
         assert_eq!(scan.components.len(), 3);
         assert_eq!(scan.components[0].frame_index, 0);
         assert_eq!(scan.components[1].td, 1);
         assert!(scan.interleaved());
+        assert_eq!((scan.ss, scan.se, scan.ah, scan.al), (0, 63, 0, 0));
         // Each of Ss, Se, Ah/Al out of its baseline value is independently rejected (pinning all
         // three `||` terms of the spectral-selection check): Ss=1, Se=62, Ah|Al=0x10.
-        assert!(parse_sos(&[1, 1, 0x00, 1, 63, 0], &frame).is_err());
-        assert!(parse_sos(&[1, 1, 0x00, 0, 62, 0], &frame).is_err());
-        assert!(parse_sos(&[1, 1, 0x00, 0, 63, 0x10], &frame).is_err());
+        assert!(parse_sos(&[1, 1, 0x00, 1, 63, 0], &frame, false).is_err());
+        assert!(parse_sos(&[1, 1, 0x00, 0, 62, 0], &frame, false).is_err());
+        assert!(parse_sos(&[1, 1, 0x00, 0, 63, 0x10], &frame, false).is_err());
         // Unknown component selector 9.
         let unknown = vec![1, 9, 0x00, 0, 63, 0];
-        assert!(parse_sos(&unknown, &frame).is_err());
+        assert!(parse_sos(&unknown, &frame, false).is_err());
         // A DC table selector out of range (Td=4) is rejected even when Ta is valid (pinning both
         // sides of the `Td>=4 || Ta>=4` check).
-        assert!(parse_sos(&[1, 1, 0x40, 0, 63, 0], &frame).is_err());
-        assert!(parse_sos(&[1, 1, 0x04, 0, 63, 0], &frame).is_err());
+        assert!(parse_sos(&[1, 1, 0x40, 0, 63, 0], &frame, false).is_err());
+        assert!(parse_sos(&[1, 1, 0x04, 0, 63, 0], &frame, false).is_err());
+    }
+
+    #[test]
+    fn sos_progressive_spectral_validation() {
+        let frame = frame_3comp();
+        // A progressive DC first scan: interleaved, Ss=0 Se=0 Ah=0 Al=1 (point transform).
+        let dc = parse_sos(&[3, 1, 0x00, 2, 0x11, 3, 0x11, 0, 0, 0x01], &frame, true).unwrap();
+        assert_eq!((dc.ss, dc.se, dc.ah, dc.al), (0, 0, 0, 1));
+        // A single-component AC band Ss=1 Se=5, first pass Al=2.
+        let ac = parse_sos(&[1, 1, 0x00, 1, 5, 0x02], &frame, true).unwrap();
+        assert_eq!((ac.ss, ac.se, ac.ah, ac.al), (1, 5, 0, 2));
+        // An AC refinement Ah=2 Al=1 (Al = Ah − 1) is accepted.
+        assert!(parse_sos(&[1, 1, 0x00, 1, 5, 0x21], &frame, true).is_ok());
+        // A single-coefficient AC band Ss = Se is legal — pins `ss > se` at its boundary (a `>=` or
+        // `==` mutant would reject the equal case).
+        assert!(parse_sos(&[1, 1, 0x00, 3, 3, 0x00], &frame, true).is_ok());
+        // Se > 63 is rejected.
+        assert!(parse_sos(&[1, 1, 0x00, 1, 64, 0x00], &frame, true).is_err());
+        // A DC scan with Se ≠ 0 is rejected (footnote c: Se = 0 when Ss = 0).
+        assert!(parse_sos(&[1, 1, 0x00, 0, 63, 0], &frame, true).is_err());
+        // An AC scan with Se < Ss is rejected.
+        assert!(parse_sos(&[1, 1, 0x00, 5, 1, 0], &frame, true).is_err());
+        // An AC scan with more than one component is rejected (§B.2.3/G.1.1.1.1).
+        assert!(parse_sos(&[2, 1, 0x00, 2, 0x00, 1, 5, 0], &frame, true).is_err());
+        // A refinement whose Ah ≠ Al + 1 is rejected: Ah=2, Al=0.
+        assert!(parse_sos(&[1, 1, 0x00, 1, 5, 0x20], &frame, true).is_err());
+        // Al = 14 (> 13) is rejected.
+        assert!(parse_sos(&[1, 1, 0x00, 1, 5, 0x0E], &frame, true).is_err());
+        // Al = 13 is the accepted boundary.
+        assert!(parse_sos(&[1, 1, 0x00, 1, 5, 0x0D], &frame, true).is_ok());
     }
 
     #[test]
@@ -532,7 +625,7 @@ mod tests {
             ..frame_3comp()
         };
         let payload = vec![2, 1, 0x00, 2, 0x00, 0, 63, 0];
-        assert!(parse_sos(&payload, &frame).is_err());
+        assert!(parse_sos(&payload, &frame, false).is_err());
     }
 
     #[test]
@@ -570,7 +663,7 @@ mod tests {
             ],
         };
         let payload = vec![4, 1, 0x00, 2, 0x00, 3, 0x00, 4, 0x00, 0, 63, 0];
-        let scan = parse_sos(&payload, &frame).unwrap();
+        let scan = parse_sos(&payload, &frame, false).unwrap();
         assert_eq!(scan.components.len(), 4);
     }
 
@@ -588,7 +681,7 @@ mod tests {
                 tq: 0,
             }],
         };
-        let scan = parse_sos(&[1, 1, 0x00, 0, 63, 0], &frame).unwrap();
+        let scan = parse_sos(&[1, 1, 0x00, 0, 63, 0], &frame, false).unwrap();
         assert_eq!(scan.components.len(), 1);
         assert!(!scan.interleaved());
     }
