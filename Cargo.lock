@@ -750,6 +750,7 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
+ "gamut-metadata",
  "libjpeg-oracle",
 ]
 
