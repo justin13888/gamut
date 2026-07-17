@@ -164,6 +164,10 @@ pub struct SubImage {
     pub data: SubImageData,
     /// Semantic-mask tags, when this is a semantic mask (or carries the tags).
     pub semantic: Option<SemanticMaskInfo>,
+    /// Every field of this image's IFD the pipeline does not model, verbatim, in tag order.
+    /// Empty for an image stored in IFD 0 itself (those extras are
+    /// [`DecodedDng::ifd0_extra`](crate::DecodedDng::ifd0_extra)).
+    pub extra_tags: Vec<crate::decoder::RawTag>,
 }
 
 impl SubImage {

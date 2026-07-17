@@ -117,6 +117,32 @@ fn adobe_gain_map_samples_parse_typed_and_reserialise_byte_exact() {
     }
 }
 
+/// Adobe's ImageSequenceInfo (09–11) and ImageStats (12–13) samples decode, and those DNG 1.7
+/// tags — which have no typed surface yet — appear verbatim in the extras with typed values
+/// (issue #109's "all metadata explicitly represented, even if unexpected").
+#[test]
+fn adobe_sequence_and_stats_samples_surface_untyped_tags() {
+    for (name, tag) in [
+        ("09_ImageSequenceInfo_1_of_3.dng", 52548u16),
+        ("10_ImageSequenceInfo_2_of_3.dng", 52548),
+        ("11_ImageSequenceInfo_3_of_3.dng", 52548),
+        ("12_ImageStats_WeightedAverage.dng", 52550),
+        ("13_ImageStats_Several.dng", 52550),
+    ] {
+        let bytes = gamut_dng_oracle::sample_file(name).expect("sample DNG present");
+        let decoded = DngDecoder::new().decode(&bytes).expect("decode");
+        let extra = decoded
+            .ifd0_extra
+            .iter()
+            .find(|t| t.tag == tag)
+            .unwrap_or_else(|| panic!("{name}: tag {tag} must surface in ifd0_extra"));
+        assert!(
+            matches!(&extra.value, gamut_dng::Value::Undefined(b) if !b.is_empty()),
+            "{name}: tag {tag} carries its typed UNDEFINED payload"
+        );
+    }
+}
+
 /// The JXL samples carry a declared DNG 1.7 version.
 #[test]
 fn adobe_jxl_sample_declares_dng_17() {

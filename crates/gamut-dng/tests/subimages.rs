@@ -64,6 +64,13 @@ fn build_masked_dng() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     );
     ifd0.set(gamut_dng::tags::STRIP_OFFSETS, Value::Long(vec![0]));
     ifd0.set(gamut_dng::tags::STRIP_BYTE_COUNTS, Value::Long(vec![16]));
+    // Unmodelled content the decoder must surface verbatim: a private maker tag and a known but
+    // untyped DNG tag.
+    ifd0.set(0x9999, Value::Ascii("maker secret".into()));
+    ifd0.set(
+        gamut_dng::tags::BASELINE_SHARPNESS,
+        Value::Rational(vec![(3, 2)]),
+    );
 
     // A 2x2 8-bit mask IFD; per-variant tags are set below.
     let mask_base = {
@@ -88,6 +95,7 @@ fn build_masked_dng() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     };
 
     let mut valid = mask_base.clone();
+    valid.set(0x9AAA, Value::Short(vec![7, 8])); // private tag on the mask IFD
     valid.set(
         gamut_dng::tags::SEMANTIC_NAME,
         Value::Ascii("Person".into()),
@@ -176,10 +184,19 @@ fn semantic_masks_decode_with_typed_info() {
         (1, 1, 4, 4)
     );
 
-    // Mask 2: the out-of-bounds MaskSubArea is ignored, the rest survives.
-    let s2 = decoded.sub_images[1].semantic.as_ref().expect("semantic");
+    // Mask 2: the out-of-bounds MaskSubArea is ignored, the rest survives — and the rejected
+    // value still surfaces verbatim in the extras instead of vanishing.
+    let m2 = &decoded.sub_images[1];
+    let s2 = m2.semantic.as_ref().expect("semantic");
     assert_eq!(s2.name.as_deref(), Some("Sky"));
     assert_eq!(s2.sub_area, None, "invalid MaskSubArea must be ignored");
+    assert_eq!(
+        m2.extra_tags,
+        vec![gamut_dng::RawTag {
+            tag: gamut_dng::tags::MASK_SUB_AREA,
+            value: gamut_dng::Value::Long(vec![4, 4, 4, 4]),
+        }]
+    );
 
     // Mask 3: undecodable compression — the chunk is carried verbatim, not dropped.
     let m3 = &decoded.sub_images[2];
@@ -191,6 +208,40 @@ fn semantic_masks_decode_with_typed_info() {
         }
     );
     assert!(m3.semantic.is_some(), "kind alone attaches (default) info");
+
+    // Unmodelled tags surface verbatim, with their typed values, exactly once.
+    assert_eq!(
+        decoded.ifd0_extra.iter().map(|t| t.tag).collect::<Vec<_>>(),
+        vec![0x9999, gamut_dng::tags::BASELINE_SHARPNESS],
+        "IFD 0 extras: the private maker tag and the untyped DNG tag (tag order), nothing else"
+    );
+    assert_eq!(
+        decoded.ifd0_extra[0].value,
+        gamut_dng::Value::Ascii("maker secret".into())
+    );
+    assert_eq!(
+        decoded.ifd0_extra[1].value,
+        gamut_dng::Value::Rational(vec![(3, 2)])
+    );
+    // The raw lives in IFD 0 here, so raw_extra is folded into ifd0_extra.
+    assert!(decoded.raw_extra.is_empty());
+    // The valid mask's private tag lands on that sub-image alone.
+    assert_eq!(
+        m1.extra_tags,
+        vec![gamut_dng::RawTag {
+            tag: 0x9AAA,
+            value: gamut_dng::Value::Short(vec![7, 8]),
+        }]
+    );
+    // For an undecoded image the layout tags the decode pipeline never consumed stay visible —
+    // a consumer of the verbatim chunks needs them.
+    assert_eq!(
+        decoded.sub_images[2].extra_tags,
+        vec![gamut_dng::RawTag {
+            tag: gamut_dng::tags::ROWS_PER_STRIP,
+            value: Value::Short(vec![2]),
+        }]
+    );
 }
 
 /// Every encoder output carries its RGB preview in IFD 0 — now surfaced as a decoded sub-image.

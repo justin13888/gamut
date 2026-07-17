@@ -58,12 +58,13 @@ mod writer;
 
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
 // not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
-pub use decoder::{DecodedDng, DngDecoder};
+pub use decoder::{DecodedDng, DngDecoder, RawTag};
 pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstruct};
 pub use encoder::DngEncoder;
 pub use gain_map::{GainValues, ProfileGainTableMap};
 pub use gamut_core::{Dimensions, Error, Result};
-pub use gamut_ifd::ByteOrder;
+// `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum.
+pub use gamut_ifd::{ByteOrder, Value};
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
 pub use lossless_jpeg::LosslessJpeg;
