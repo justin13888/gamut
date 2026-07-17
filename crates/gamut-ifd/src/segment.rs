@@ -166,6 +166,31 @@ impl SegmentMap {
         self.claims.push((Range { start, len }, kind, provenance));
     }
 
+    /// Absorbs the claims of a map built over a [`Rebased`](crate::Rebased) view, shifting every
+    /// offset (ranges and the offsets inside [`SpanKind`]) by `base` so they land at physical
+    /// positions — how an embedded IFD stream's walk (a maker note, a DNG camera profile) joins
+    /// the whole-file map.
+    pub(crate) fn merge_shifted(&mut self, other: SegmentMap, base: u64) {
+        for (range, kind, provenance) in other.claims {
+            let kind = match kind {
+                SpanKind::IfdBody { ifd } => SpanKind::IfdBody { ifd: ifd + base },
+                SpanKind::Value { ifd, tag } => SpanKind::Value {
+                    ifd: ifd + base,
+                    tag,
+                },
+                other => other,
+            };
+            self.claims.push((
+                Range {
+                    start: range.start.saturating_add(base),
+                    len: range.len,
+                },
+                kind,
+                provenance,
+            ));
+        }
+    }
+
     /// Resolves the claims into a [`SegmentReport`]: the typed segments, everything
     /// unclassified, identical-extent sharing, partial-overlap conflicts, and out-of-bounds
     /// claims — cross-checked against `reads` (the physical read ledger) when supplied.

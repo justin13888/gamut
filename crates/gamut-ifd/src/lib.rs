@@ -83,7 +83,8 @@ mod value;
 mod writer;
 
 pub use audit::{
-    Audit, AuditFinding, AuditSpec, SkipReason, StandardAuditSpec, audit, standard_data_extents,
+    Audit, AuditFinding, AuditSpec, Auditor, SkipReason, StandardAuditSpec, audit,
+    standard_data_extents,
 };
 pub use byte_order::ByteOrder;
 pub use entry::{Field, Ifd, SubIfd, Variant};

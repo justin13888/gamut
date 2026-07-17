@@ -147,47 +147,149 @@ pub struct Audit {
 /// ledger, claims every structure and declared data extent, classifies padding from the actual
 /// bytes, and cross-checks the dual-ledger invariants.
 ///
+/// This is the one-shot form of [`Auditor`] — use the latter when a codec must also account
+/// structures the generic walk cannot know (embedded IFD streams, codec-private blocks).
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] only when the container is unreadable (bad header,
 /// unreadable top-level chain) — the same conditions as [`read`](crate::read) — or
 /// [`Error::Io`] on a transport failure. File defects inside sub-IFDs are findings, not errors.
 pub fn audit<S: ReadAt>(source: S, spec: &dyn AuditSpec) -> Result<Audit> {
-    let mut tracked = Tracked::new(source);
-    let file_len = tracked.len()?;
-    let mut map = SegmentMap::new(file_len);
-    let mut findings = Vec::new();
-
-    let mut file = {
-        let mut reader = IfdReader::open(&mut tracked)?;
-        let mut file = reader.read_file_audited(&mut map)?;
-        let mut visited: Vec<u64> = Vec::new();
-        for (page, ifd) in file.ifds.iter_mut().enumerate() {
-            declare_extents(spec, ifd, &mut map);
-            follow_subifds(
-                &mut reader,
-                &mut map,
-                spec,
-                ifd,
-                &mut visited,
-                page,
-                1,
-                &mut findings,
-            )?;
-        }
-        file
-    };
-
-    let mut report = map.finish(Some(tracked.ledger()));
-    report.classify_padding(&mut tracked)?;
-    // Canonicalise the resolved tree the way `read_tree` does (sorted groups via set_sub_ifd —
-    // already guaranteed) so `audit(...).file == read_tree(...)` for clean files.
-    file.ifds.shrink_to_fit();
+    let mut auditor = Auditor::new(source)?;
+    let file = auditor.walk(spec)?;
+    let (report, findings) = auditor.finish()?;
     Ok(Audit {
         file,
         report,
         findings,
     })
+}
+
+/// An in-progress byte-completeness audit, for codecs that must account structures the generic
+/// walk cannot know.
+///
+/// The one-shot [`audit`] covers TIFF-family structure; a codec with **embedded IFD streams**
+/// (a DNG camera profile, a vendor maker note) or private binary blocks drives the pieces
+/// itself: [`walk`](Self::walk) the main structure, [`claim`](Self::claim) extra ranges or
+/// [`walk_embedded`](Self::walk_embedded) rebased directory chains, then
+/// [`finish`](Self::finish) into the dual-ledger-checked report.
+#[derive(Debug)]
+pub struct Auditor<S> {
+    tracked: Tracked<S>,
+    map: SegmentMap,
+    findings: Vec<AuditFinding>,
+}
+
+impl<S: ReadAt> Auditor<S> {
+    /// Starts an audit over `source`, wrapping it in a [`Tracked`] read ledger.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the source's length cannot be determined.
+    pub fn new(source: S) -> Result<Self> {
+        let mut tracked = Tracked::new(source);
+        let file_len = tracked.len()?;
+        Ok(Self {
+            tracked,
+            map: SegmentMap::new(file_len),
+            findings: Vec::new(),
+        })
+    }
+
+    /// Walks the main structure — header, top-level chain, the spec's sub-IFD graph, and its
+    /// declared data extents — returning the resolved tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] when the container is unreadable, like
+    /// [`read`](crate::read); sub-IFD defects become findings.
+    pub fn walk(&mut self, spec: &dyn AuditSpec) -> Result<TiffFile> {
+        let mut reader = IfdReader::open(&mut self.tracked)?;
+        let mut file = reader.read_file_audited(&mut self.map)?;
+        let mut visited: Vec<u64> = Vec::new();
+        for (page, ifd) in file.ifds.iter_mut().enumerate() {
+            declare_extents(spec, ifd, &mut self.map);
+            follow_subifds(
+                &mut reader,
+                &mut self.map,
+                spec,
+                ifd,
+                &mut visited,
+                page,
+                1,
+                &mut self.findings,
+            )?;
+        }
+        Ok(file)
+    }
+
+    /// Reads bytes through the tracked source — how a codec sniffs an embedded structure's
+    /// header. The read lands in the ledger, so it must be matched by a [`claim`](Self::claim).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the range lies outside the source, or [`Error::Io`]
+    /// on a transport failure.
+    pub fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        self.tracked.read_exact_at(offset, buf)
+    }
+
+    /// Claims an extra byte range the codec knows structurally (a private header, a
+    /// codec-specific block).
+    pub fn claim(&mut self, start: u64, len: u64, kind: SpanKind, provenance: Claim) {
+        self.map.claim(start, len, kind, provenance);
+    }
+
+    /// Records a lenient file-level finding alongside the walk's own.
+    pub fn record(&mut self, finding: AuditFinding) {
+        self.findings.push(finding);
+    }
+
+    /// Walks a **bare directory chain embedded at `base`** — a stream whose internal offsets
+    /// are relative to its own start (a DNG camera profile after its 8-byte header, a vendor
+    /// maker-note mini-IFD) — claiming every directory body and value at its physical position.
+    /// `first_ifd` is the chain's first directory offset *within* the stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the embedded chain is unreadable, loops, or runs away
+    /// — the caller decides whether that is a finding or an error.
+    pub fn walk_embedded(
+        &mut self,
+        base: u64,
+        first_ifd: u64,
+        order: crate::ByteOrder,
+        variant: crate::Variant,
+    ) -> Result<Vec<Ifd>> {
+        let mut view = (&mut self.tracked).rebased(base);
+        let logical_len = view.len()?;
+        let mut sub = SegmentMap::new(logical_len);
+        let mut reader = IfdReader::with_layout(&mut view, order, variant);
+        let mut guard = crate::reader::ChainGuard::new();
+        let mut ifds = Vec::new();
+        let mut offset = first_ifd;
+        while offset != 0 {
+            guard.admit(offset)?;
+            let (ifd, next) = reader.read_ifd_at_audited(offset, &mut sub)?;
+            ifds.push(ifd);
+            offset = next;
+        }
+        self.map.merge_shifted(sub, base);
+        Ok(ifds)
+    }
+
+    /// Finishes the audit: cross-checks the read ledger against the claims, classifies padding
+    /// from the actual bytes, and returns the report with the accumulated findings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Io`] if the source fails while padding candidates are inspected.
+    pub fn finish(mut self) -> Result<(SegmentReport, Vec<AuditFinding>)> {
+        let mut report = self.map.finish(Some(self.tracked.ledger()));
+        report.classify_padding(&mut self.tracked)?;
+        Ok((report, self.findings))
+    }
 }
 
 /// Claims every data extent the spec locates in `ifd`, as [`Claim::Declared`].
