@@ -149,46 +149,57 @@ pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
 /// plain reader — no allocations, no marks — so the [`read`]/[`read_ifd_at`] hot path is unchanged.
 fn read_ifd_inner(
     data: &[u8],
-    offset: usize,
+    offset: u64,
     order: ByteOrder,
     variant: Variant,
     mut cov: Option<&mut Coverage>,
     mut unknown: Option<&mut Vec<UnknownField>>,
 ) -> Result<(Ifd, u64)> {
+    let len = data.len() as u64;
+    // Widths and bounds stay u64 until a comparison against `len` proves the `usize` conversion
+    // lossless, mirroring the streaming reader: on a 32-bit target a hostile 64-bit BigTIFF
+    // offset or count would otherwise truncate in an `as usize` cast and silently misparse
+    // in-bounds bytes instead of erroring.
+    if offset > len {
+        return Err(Error::InvalidInput("TIFF: IFD extends past end of file"));
+    }
     let entry_size = variant.entry_size();
     let inline = variant.inline_threshold();
     // The entry count is the only field whose width differs from the offset width (2 vs 8).
     let count = match variant {
-        Variant::Classic => u64::from(u16_at(data, offset, order)?),
+        Variant::Classic => u64::from(u16_at(data, offset as usize, order)?),
         #[cfg(feature = "bigtiff")]
-        Variant::Big => u64_at(data, offset, order)?,
-    } as usize;
-    let entries_start = offset + variant.count_size();
+        Variant::Big => u64_at(data, offset as usize, order)?,
+    };
+    // `offset <= len <= isize::MAX`, so adding the count width cannot overflow.
+    let entries_start = offset + variant.count_size() as u64;
     // Checked: a hostile 8-byte BigTIFF count can overflow `count * entry_size` (classic counts
     // are capped at u16 and cannot).
     let next_pos = count
-        .checked_mul(entry_size)
+        .checked_mul(entry_size as u64)
         .and_then(|n| entries_start.checked_add(n))
         .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
     // Bound the directory to the file so a corrupt count fails fast rather than allocating.
     let body_end = next_pos
-        .checked_add(variant.offset_size())
+        .checked_add(variant.offset_size() as u64)
         .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
-    if body_end > data.len() {
+    if body_end > len {
         return Err(Error::InvalidInput("TIFF: IFD extends past end of file"));
     }
     // The directory body — count field, all entry records (inline values included), and the
     // next-IFD pointer — is one contiguous span; out-of-line values are marked per entry below.
     if let Some(c) = cov.as_deref_mut() {
-        c.mark(offset as u64, (body_end - offset) as u64);
+        c.mark(offset, body_end - offset);
     }
+    // The whole body fits `data`, so every interior position below fits `usize`.
+    let entries_start = entries_start as usize;
     let mut ifd = Ifd::new();
-    for i in 0..count {
+    for i in 0..count as usize {
         let pos = entries_start + i * entry_size;
         let tag = u16_at(data, pos, order)?;
         let type_code = u16_at(data, pos + 2, order)?;
         // The value count and the value/offset field both follow the offset width.
-        let value_count = offset_at(data, pos + 4, order, variant)? as usize;
+        let value_count = offset_at(data, pos + 4, order, variant)?;
         let value_pos = pos + 4 + variant.offset_size();
         // Per spec, readers skip fields with an unexpected (unknown) field type; a deconstruct
         // records the skipped entry so the dropped field (and any out-of-line bytes it would have
@@ -196,38 +207,51 @@ fn read_ifd_inner(
         let Some(ty) = FieldType::from_code(type_code) else {
             if let Some(u) = unknown.as_deref_mut() {
                 u.push(UnknownField {
-                    ifd_offset: offset as u64,
+                    ifd_offset: offset,
                     tag,
                     type_code,
-                    count: value_count as u64,
+                    count: value_count,
                     entry_offset: pos as u64,
                 });
             }
             continue;
         };
         let byte_len = value_count
-            .checked_mul(ty.size())
+            .checked_mul(ty.size() as u64)
             .ok_or(Error::InvalidInput("TIFF: field length overflow"))?;
-        let value = if byte_len <= inline {
-            Value::decode(ty, value_count, &data[value_pos..value_pos + inline], order)?
+        let value = if byte_len <= inline as u64 {
+            // `value_count <= byte_len <= inline` (`ty.size() >= 1`), so the cast is lossless.
+            Value::decode(
+                ty,
+                value_count as usize,
+                &data[value_pos..value_pos + inline],
+                order,
+            )?
         } else {
-            let voff = offset_at(data, value_pos, order, variant)? as usize;
-            let bytes = data
-                .get(voff..)
-                .ok_or(Error::InvalidInput("TIFF: value offset out of bounds"))?;
-            let value = Value::decode(ty, value_count, bytes, order)?;
+            let voff = offset_at(data, value_pos, order, variant)?;
+            // The two-error distinction the streaming path makes: an offset past the end is one
+            // thing, a value that starts in bounds but runs past the end is another.
+            if voff > len {
+                return Err(Error::InvalidInput("TIFF: value offset out of bounds"));
+            }
+            if voff.checked_add(byte_len).is_none_or(|end| end > len) {
+                return Err(Error::InvalidInput("TIFF: field value out of bounds"));
+            }
+            // `voff <= len` and `value_count <= byte_len <= len`, so both casts are lossless.
+            let value = Value::decode(ty, value_count as usize, &data[voff as usize..], order)?;
             // Mark the on-disk span (`value_count * ty.size()`, padding included) — not the decoded
             // value's `byte_len`, which for ASCII stops at the first NUL and would leave the
             // padding looking like a gap.
             if let Some(c) = cov.as_deref_mut() {
-                c.mark(voff as u64, byte_len as u64);
+                c.mark(voff, byte_len);
             }
             value
         };
         // A duplicate tag keeps the last occurrence; `set` maintains sort order.
         ifd.set(tag, value);
     }
-    let next = offset_at(data, next_pos, order, variant)?;
+    // `next_pos < body_end <= len`, so the cast is lossless.
+    let next = offset_at(data, next_pos as usize, order, variant)?;
     Ok((ifd, next))
 }
 
@@ -244,7 +268,7 @@ fn read_ifd_inner(
 /// Returns [`Error::InvalidInput`] if the directory at `offset` is out of bounds or a field value
 /// is truncated.
 pub fn read_ifd_at(data: &[u8], offset: u64, order: ByteOrder, variant: Variant) -> Result<Ifd> {
-    read_ifd_inner(data, offset as usize, order, variant, None, None).map(|(ifd, _next)| ifd)
+    read_ifd_inner(data, offset, order, variant, None, None).map(|(ifd, _next)| ifd)
 }
 
 /// Like [`read_ifd_at`] but threads byte-range accounting: it marks the IFD body and every
@@ -267,14 +291,7 @@ pub fn read_ifd_at_with_coverage(
     cov: &mut Coverage,
     unknown: &mut Vec<UnknownField>,
 ) -> Result<(Ifd, u64)> {
-    read_ifd_inner(
-        data,
-        offset as usize,
-        order,
-        variant,
-        Some(cov),
-        Some(unknown),
-    )
+    read_ifd_inner(data, offset, order, variant, Some(cov), Some(unknown))
 }
 
 /// Walks a TIFF/IFD stream's header and top-level IFD chain, optionally accounting bytes.
@@ -291,10 +308,10 @@ fn read_chain(
         c.mark(0, variant.header_size() as u64);
     }
     let mut ifds = Vec::new();
-    let mut offset = first as usize;
+    let mut offset = first;
     let mut guard = ChainGuard::new();
     while offset != 0 {
-        guard.admit(offset as u64)?;
+        guard.admit(offset)?;
         let (ifd, next) = read_ifd_inner(
             data,
             offset,
@@ -304,7 +321,7 @@ fn read_chain(
             unknown.as_deref_mut(),
         )?;
         ifds.push(ifd);
-        offset = next as usize;
+        offset = next;
     }
     if ifds.is_empty() {
         return Err(Error::InvalidInput("TIFF: file has no IFD"));
