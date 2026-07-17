@@ -40,6 +40,7 @@ mod byte_order;
 mod coverage;
 mod entry;
 mod reader;
+mod source;
 mod types;
 mod value;
 mod writer;
@@ -51,6 +52,7 @@ pub use reader::{
     TiffFile, read, read_header, read_ifd_at, read_ifd_at_with_coverage, read_tree,
     read_with_coverage,
 };
+pub use source::{ReadAt, Rebased, StreamSource};
 pub use types::FieldType;
 pub use value::Value;
 pub use writer::{align_word, write};
