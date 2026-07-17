@@ -7,10 +7,13 @@
 //! Over a multi-hundred-MB camera file the parse therefore touches kilobytes — the header, the
 //! directories on the path a decoder actually follows, and the values it actually reads.
 //!
-//! The hostile-input guards are the ones the slice readers use, shared where the logic is
-//! subtle (the chain loop/length guard, the sub-IFD depth/cycle guards) and mirrored where the
-//! data flow genuinely differs (the directory-body walk); `tests/robustness.rs` drives both
-//! paths over the same corpus and requires them to agree.
+//! This module is **the** parser: the slice functions ([`read`](crate::read),
+//! [`read_ifd_at`](crate::read_ifd_at), [`read_tree`](crate::read_tree)) are thin wrappers over
+//! an `IfdReader<&[u8]>`, so there is exactly one directory-body walk and one set of
+//! hostile-input guards (the chain loop/length guard, the sub-IFD depth/cycle guards) —
+//! byte-accounting or robustness rules cannot drift between two copies.
+//! `tests/robustness.rs` still drives both entry points over the hostile corpus as a
+//! regression gate on the wrappers.
 
 use gamut_core::{Error, Result};
 
@@ -104,12 +107,22 @@ impl<S: ReadAt> IfdReader<S> {
     /// Returns [`Error::InvalidInput`] if the header is not valid, or [`Error::Io`] if the
     /// source fails.
     pub fn open(mut source: S) -> Result<Self> {
-        // The header is at most 16 bytes (BigTIFF); fetch what exists and let `read_header`
-        // apply exactly the slice-path validation (including too-short rejection).
+        // Read exactly the 8-byte classic header first; only a BigTIFF magic (43, in either
+        // byte order) needs the rest of its 16-byte header. Fetching precisely what the parse
+        // consumes keeps a tracked read ledger byte-exact — a blanket 16-byte probe would
+        // "read" 8 bytes of a classic file's first directory that no structure claims.
         let len = source.len()?;
-        let head_len = len.min(16) as usize;
         let mut head = [0u8; 16];
-        source.read_exact_at(0, &mut head[..head_len])?;
+        let first8 = len.min(8) as usize;
+        source.read_exact_at(0, &mut head[..first8])?;
+        let big = first8 == 8 && (head[2..4] == [0x2b, 0x00] || head[2..4] == [0x00, 0x2b]);
+        let head_len = if big {
+            let rest = (len.min(16) as usize) - 8;
+            source.read_exact_at(8, &mut head[8..8 + rest])?;
+            8 + rest
+        } else {
+            first8
+        };
         let (order, variant, first) = read_header(&head[..head_len])?;
         Ok(Self {
             source,

@@ -2,10 +2,10 @@
 //! parser-exploit surface — so hostile input must yield a typed error or a valid parse, never a
 //! panic, a hang, or unbounded allocation (STATUS P6).
 //!
-//! Every input is also driven through the streaming [`IfdReader`] and the two paths must
-//! *agree* — both parse to equal files, or both fail. This differential layer is what makes the
-//! streaming reader's parallel directory-body walk safe under mutation testing: a behavioral
-//! mutant in either copy breaks agreement somewhere in the corpus.
+//! Every input is also driven through the streaming [`IfdReader`] and the two entry points must
+//! *agree* — both parse to equal files, or both fail. The slice functions are thin wrappers over
+//! the streaming engine (one parser), so this differential layer is now a regression gate on the
+//! wrappers themselves staying faithful.
 
 use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree, write};
 
