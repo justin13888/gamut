@@ -14,22 +14,7 @@
 //! reads, then layers format-specific tag knowledge (known vs unknown tags, out-of-spec codes)
 //! on top of the structural report this produces.
 
-/// A half-open byte range `[start, start + len)` within a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Range {
-    /// The offset of the first byte.
-    pub start: u64,
-    /// The number of bytes.
-    pub len: u64,
-}
-
-impl Range {
-    /// The offset one past the last byte (`start + len`, saturating).
-    #[must_use]
-    pub fn end(self) -> u64 {
-        self.start.saturating_add(self.len)
-    }
-}
+use crate::segment::Range;
 
 /// Two marked ranges that share at least one byte — a structure claiming bytes another already
 /// claimed, which an archival validator treats as out-of-spec.

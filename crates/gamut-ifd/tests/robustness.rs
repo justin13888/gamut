@@ -7,7 +7,9 @@
 //! the streaming engine (one parser), so this differential layer is now a regression gate on the
 //! wrappers themselves staying faithful.
 
-use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree, write};
+use gamut_ifd::{
+    ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_audited, read_tree, write,
+};
 
 /// Sub-IFD pointer tags a DNG/EXIF-shaped consumer would follow.
 const POINTER_TAGS: &[u16] = &[330, 34665, 34853];
@@ -53,6 +55,20 @@ fn survives(data: &[u8]) {
         (Ok(a), Ok(b)) => assert_eq!(a, b, "tree parse disagreement"),
         (Err(_), Err(_)) => {}
         _ => panic!("tree readers disagree: slice {slice_tree:?} vs stream {stream_tree:?}"),
+    }
+    // The dual-ledger differential invariant (issue #263): whenever a parse succeeds, every
+    // byte the parser physically read is inside a structural claim, and every Parsed claim was
+    // physically read. Over the whole hostile corpus, a parser that eats bytes it does not
+    // declare — or declares bytes it never touched — is caught here mechanically.
+    if let Ok((_, report)) = read_audited(data) {
+        assert!(
+            report.unclaimed_reads.is_empty(),
+            "parser read bytes it never claimed: {report:?}"
+        );
+        assert!(
+            report.unread_claims.is_empty(),
+            "parser claimed bytes it never read: {report:?}"
+        );
     }
 }
 

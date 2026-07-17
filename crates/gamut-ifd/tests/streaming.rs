@@ -5,8 +5,8 @@
 
 use gamut_core::Result;
 use gamut_ifd::{
-    ByteOrder, Coverage, Ifd, IfdReader, ReadAt, StreamSource, TiffFile, Value, Variant, read,
-    read_tree, read_with_coverage, tags, write,
+    ByteOrder, Coverage, Ifd, IfdReader, ReadAt, SegmentMap, SpanKind, StreamSource, TiffFile,
+    Tracked, Value, Variant, read, read_tree, read_with_coverage, tags, write,
 };
 
 /// A flat single-IFD file, a two-IFD chain, and a nested sub-IFD tree — the shapes the
@@ -140,6 +140,57 @@ fn streaming_coverage_reports_equal_slice_reports() {
             assert_eq!(stream_file, slice_file);
             assert_eq!(unknown, slice_unknown);
             assert_eq!(cov.finish(), slice_cov.finish());
+        }
+    }
+}
+
+/// The full audited walk over every fixture: typed claims + tracked reads, sub-IFDs followed
+/// like a codec would, padding classified from the actual bytes — ending in a report where
+/// **every byte of the file is classified** and both dual-ledger invariants hold.
+#[test]
+fn audited_read_classifies_every_byte_of_written_files() {
+    for (order, variant) in orders_and_variants() {
+        for file in fixture_files(order, variant) {
+            let bytes = write(&file).expect("write");
+            let mut tracked = Tracked::new(&bytes[..]);
+            let mut map = SegmentMap::new(bytes.len() as u64);
+            let mut reader = IfdReader::open(&mut tracked).expect("open");
+            let parsed = reader.read_file_audited(&mut map).expect("read_file");
+            assert_eq!(parsed, read(&bytes).expect("slice parity"));
+
+            // Follow the sub-IFD pointer graph the way a codec's audit would.
+            let mut pending: Vec<u64> = Vec::new();
+            let collect = |ifd: &Ifd, pending: &mut Vec<u64>| {
+                for &tag in tags::STANDARD_POINTER_TAGS {
+                    if let Some(offs) = ifd.get_u64_vec(tag) {
+                        pending.extend(offs);
+                    }
+                }
+            };
+            for ifd in &parsed.ifds {
+                collect(ifd, &mut pending);
+            }
+            while let Some(off) = pending.pop() {
+                let (child, next) = reader.read_ifd_at_audited(off, &mut map).expect("child");
+                assert_eq!(next, 0);
+                collect(&child, &mut pending);
+            }
+            drop(reader);
+
+            let mut report = map.finish(Some(tracked.ledger()));
+            report
+                .classify_padding(&mut (&bytes[..]))
+                .expect("classify_padding");
+            assert!(report.is_fully_classified(), "report: {report:?}");
+            // The typed view partitions the file: header first, and kinds as expected.
+            assert_eq!(report.segments[0].kind, SpanKind::Header);
+            assert!(
+                report
+                    .segments
+                    .iter()
+                    .all(|s| !matches!(s.kind, SpanKind::Data(_))),
+                "no Data extents were declared in this structural walk"
+            );
         }
     }
 }

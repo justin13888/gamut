@@ -285,6 +285,26 @@ pub fn read_with_coverage(
     crate::IfdReader::open(data)?.read_file_with_coverage(cov, unknown)
 }
 
+/// Like [`read`], but returns a dual-ledger-checked [`SegmentReport`](crate::SegmentReport)
+/// alongside the parse: the whole file is read through a [`Tracked`](crate::Tracked) source,
+/// the parser's typed claims are collected into a [`SegmentMap`](crate::SegmentMap), and the
+/// two are cross-checked — so the report *proves* what the parse touched.
+///
+/// This audits the header and the **top-level chain** only; sub-IFDs a codec follows, its
+/// strip/tile data extents, and padding classification are the codec-level audit's job (each
+/// sub-IFD via [`IfdReader::read_ifd_at_audited`](crate::IfdReader::read_ifd_at_audited) over
+/// the same map).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] under the same conditions as [`read`].
+pub fn read_audited(data: &[u8]) -> Result<(TiffFile, crate::SegmentReport)> {
+    let mut tracked = crate::Tracked::new(data);
+    let mut map = crate::SegmentMap::new(data.len() as u64);
+    let file = crate::IfdReader::open(&mut tracked)?.read_file_audited(&mut map)?;
+    Ok((file, map.finish(Some(tracked.ledger()))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

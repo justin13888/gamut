@@ -70,22 +70,28 @@ mod byte_order;
 mod coverage;
 mod entry;
 mod reader;
+mod segment;
 mod source;
 mod stream;
 pub mod tags;
+mod track;
 mod types;
 mod value;
 mod writer;
 
 pub use byte_order::ByteOrder;
-pub use coverage::{Coverage, CoverageReport, Overlap, Range, UnknownField};
+pub use coverage::{Coverage, CoverageReport, Overlap, UnknownField};
 pub use entry::{Field, Ifd, SubIfd, Variant};
 pub use reader::{
-    TiffFile, read, read_header, read_ifd_at, read_ifd_at_with_coverage, read_tree,
+    TiffFile, read, read_audited, read_header, read_ifd_at, read_ifd_at_with_coverage, read_tree,
     read_with_coverage,
+};
+pub use segment::{
+    Claim, Conflict, DataLabel, Range, Segment, SegmentMap, SegmentReport, SharedSpan, SpanKind,
 };
 pub use source::{ReadAt, Rebased, StreamSource};
 pub use stream::{IfdChain, IfdReader, RawEntry, RawIfd};
+pub use track::{ReadLedger, Tracked};
 pub use types::FieldType;
 pub use value::{UnknownValue, Value};
 pub use writer::{align_word, write};
