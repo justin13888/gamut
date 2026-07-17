@@ -10,13 +10,18 @@
 #include "dng_host.h"
 #include "dng_image.h"
 #include "dng_info.h"
+#include "dng_lossless_jpeg.h"
 #include "dng_negative.h"
 #include "dng_pixel_buffer.h"
 #include "dng_rect.h"
+#include "dng_simd_type.h"
+#include "dng_stream.h"
 #include "dng_tag_types.h"
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 namespace {
 
@@ -154,5 +159,53 @@ extern "C" int gdng_read_linear(const char *path, uint32_t *out_w, uint32_t *out
   }
 }
 
-// Releases a buffer returned by `gdng_read_raw` / `gdng_read_linear`.
+namespace {
+
+// Collects the rows DecodeLosslessJPEG spools (native-endian interleaved uint16).
+class buffer_spooler : public dng_spooler {
+public:
+  std::vector<uint8_t> bytes;
+  void Spool(const void *data, uint32 count) override {
+    const uint8_t *p = static_cast<const uint8_t *>(data);
+    bytes.insert(bytes.end(), p, p + count);
+  }
+};
+
+} // namespace
+
+// Decodes a bare lossless-JPEG (SOF3) stream with the SDK's own codec
+// (`DecodeLosslessJPEG<Scalar>`), the reference for gamut-dng's process-14 decoder. The caller
+// supplies the expected sample count (width * height * components) as the decode-size bound; the
+// interleaved `uint16` samples land in a freshly `malloc`d buffer released with `gdng_free`.
+// Returns `dng_error_none` on success or the SDK error code.
+extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t expected_samples,
+                                         uint16_t **out_data, size_t *out_len) {
+  *out_data = nullptr;
+  *out_len = 0;
+  try {
+    dng_stream stream(data, static_cast<uint32>(len));
+    buffer_spooler spooler;
+    uint32 byte_count = static_cast<uint32>(expected_samples * sizeof(uint16_t));
+    DecodeLosslessJPEG<Scalar>(stream, spooler, byte_count, byte_count, false,
+                               static_cast<uint64>(len));
+    if (spooler.bytes.size() != byte_count) {
+      return dng_error_bad_format;
+    }
+    uint16_t *buffer = static_cast<uint16_t *>(malloc(byte_count));
+    if (buffer == nullptr) {
+      return dng_error_memory;
+    }
+    memcpy(buffer, spooler.bytes.data(), byte_count);
+    *out_data = buffer;
+    *out_len = expected_samples;
+    return dng_error_none;
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+}
+
+// Releases a buffer returned by `gdng_read_raw` / `gdng_read_linear` /
+// `gdng_decode_lossless_jpeg`.
 extern "C" void gdng_free(uint16_t *data) { free(data); }
