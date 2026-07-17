@@ -156,7 +156,7 @@ impl DngEncoder {
         {
             ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
         }
-        let raw_ifd = build_raw_ifd(raw, self.compression);
+        let raw_ifd = build_raw_ifd(raw, self.compression)?;
 
         let preview_blocks = ImageBlocks {
             offset_tag: tags::STRIP_OFFSETS,
@@ -305,8 +305,14 @@ fn color_plane_count(raw: &RawImage) -> usize {
 }
 
 /// Builds the raw sub-IFD: the image-data tags, the photometry-specific tags (CFA pattern, or
-/// `LinearRaw` planes), and the black/white levels. The strip offsets are filled in by the writer.
-fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Ifd {
+/// `LinearRaw` planes), and the level model. The strip offsets are filled in by the writer.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the level model cannot be stored: a delta vector whose
+/// length doesn't match the active area, a non-integral white level, or a level outside the
+/// tag's representable range.
+fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Result<Ifd> {
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
     let spp = raw.samples_per_pixel();
@@ -347,9 +353,43 @@ fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Ifd {
             );
         }
     }
-    ifd.set(tags::BLACK_LEVEL_REPEAT_DIM, Value::Short(vec![1, 1]));
-    ifd.set(tags::BLACK_LEVEL, count_value(raw.black_level()));
-    ifd.set(tags::WHITE_LEVEL, count_value(raw.white_level()));
+    let levels = raw.levels();
+    let (rows, cols) = levels.black_repeat();
+    ifd.set(tags::BLACK_LEVEL_REPEAT_DIM, Value::Short(vec![rows, cols]));
+    ifd.set(tags::BLACK_LEVEL, black_level_value(levels.black())?);
+    ifd.set(tags::WHITE_LEVEL, white_level_value(levels.white())?);
+
+    // Delta lengths are tied to the active-area geometry (one per column/row, DNG 1.7.1
+    // pp. 28-29), which defaults to the full image when the tag is absent.
+    let (aa_width, aa_height) = match raw.active_area() {
+        Some([top, left, bottom, right]) => (
+            right.saturating_sub(left) as usize,
+            bottom.saturating_sub(top) as usize,
+        ),
+        None => (dims.width as usize, dims.height as usize),
+    };
+    if let Some(deltas) = levels.black_delta_h() {
+        if deltas.len() != aa_width {
+            return Err(Error::InvalidInput(
+                "DNG: BlackLevelDeltaH needs one value per active-area column",
+            ));
+        }
+        ifd.set(tags::BLACK_LEVEL_DELTA_H, delta_value(deltas)?);
+    }
+    if let Some(deltas) = levels.black_delta_v() {
+        if deltas.len() != aa_height {
+            return Err(Error::InvalidInput(
+                "DNG: BlackLevelDeltaV needs one value per active-area row",
+            ));
+        }
+        ifd.set(tags::BLACK_LEVEL_DELTA_V, delta_value(deltas)?);
+    }
+    if !raw.masked_areas().is_empty() {
+        ifd.set(
+            tags::MASKED_AREAS,
+            Value::Long(raw.masked_areas().iter().flatten().copied().collect()),
+        );
+    }
     if let Some([t, l, b, r]) = raw.active_area() {
         ifd.set(tags::ACTIVE_AREA, Value::Long(vec![t, l, b, r]));
     }
@@ -360,7 +400,68 @@ fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Ifd {
         );
         ifd.set(tags::DEFAULT_CROP_SIZE, Value::Long(vec![size[0], size[1]]));
     }
-    ifd
+    Ok(ifd)
+}
+
+/// The fixed denominator for fractional levels/deltas: `1 / 65536` steps represent any sub-16-bit
+/// fractional level exactly enough for sensor calibration, and keep the numerator of any value
+/// below `65536` inside `u32` (and any delta within `±32768` inside `i32`). Fractional values are
+/// quantized to this grid when stored.
+const LEVEL_DEN: u32 = 65536;
+
+/// Stores a `BlackLevel` pattern: `SHORT`/`LONG` when every value is integral, else `RATIONAL`
+/// on the [`LEVEL_DEN`] grid (the three types the tag allows, DNG 1.7.1 p. 28).
+fn black_level_value(values: &[f64]) -> Result<Value> {
+    let integral = values.iter().all(|v| v.fract() == 0.0);
+    if integral && values.iter().all(|v| *v <= f64::from(u16::MAX)) {
+        Ok(Value::Short(values.iter().map(|&v| v as u16).collect()))
+    } else if integral && values.iter().all(|v| *v <= f64::from(u32::MAX)) {
+        Ok(Value::Long(values.iter().map(|&v| v as u32).collect()))
+    } else if values.iter().all(|v| *v < f64::from(LEVEL_DEN)) {
+        Ok(Value::Rational(
+            values
+                .iter()
+                .map(|&v| ((v * f64::from(LEVEL_DEN)).round() as u32, LEVEL_DEN))
+                .collect(),
+        ))
+    } else {
+        Err(Error::InvalidInput(
+            "DNG: fractional black levels must be below 65536",
+        ))
+    }
+}
+
+/// Stores `BlackLevelDeltaH`/`BlackLevelDeltaV` as `SRATIONAL`s on the [`LEVEL_DEN`] grid.
+fn delta_value(deltas: &[f64]) -> Result<Value> {
+    if deltas.iter().any(|v| !v.is_finite() || v.abs() >= 32768.0) {
+        return Err(Error::InvalidInput(
+            "DNG: black-level deltas must be finite and within +/-32768",
+        ));
+    }
+    Ok(Value::SRational(
+        deltas
+            .iter()
+            .map(|&v| ((v * f64::from(LEVEL_DEN)).round() as i32, LEVEL_DEN as i32))
+            .collect(),
+    ))
+}
+
+/// Stores the per-plane `WhiteLevel`, which has no `RATIONAL` form (DNG 1.7.1 p. 29): values must
+/// be integers, stored `SHORT` when they all fit, else `LONG`.
+fn white_level_value(values: &[f64]) -> Result<Value> {
+    if values
+        .iter()
+        .any(|v| v.fract() != 0.0 || *v > f64::from(u32::MAX))
+    {
+        return Err(Error::InvalidInput(
+            "DNG: white levels must be integers storable as SHORT or LONG",
+        ));
+    }
+    if values.iter().all(|v| *v <= f64::from(u16::MAX)) {
+        Ok(Value::Short(values.iter().map(|&v| v as u16).collect()))
+    } else {
+        Ok(Value::Long(values.iter().map(|&v| v as u32).collect()))
+    }
 }
 
 /// Stores a dimension/count as `SHORT` when it fits, else `LONG` (both valid per TIFF 6.0 §2).
@@ -413,8 +514,10 @@ mod tests {
             samples,
         )
         .unwrap()
-        .with_black_level(8)
-        .with_white_level(u32::from(max))
+        .with_black_level(8.0)
+        .unwrap()
+        .with_white_level(f64::from(max))
+        .unwrap()
         .with_active_area([0, 0, h, w])
     }
 
@@ -468,7 +571,10 @@ mod tests {
             raw_ifd.get(tags::CFA_PATTERN),
             Some(&Value::Byte(vec![0, 1, 1, 2]))
         );
-        assert_eq!(raw_ifd.get_u32(tags::WHITE_LEVEL), Some(raw.white_level()));
+        assert_eq!(
+            raw_ifd.get_u32(tags::WHITE_LEVEL),
+            Some(raw.levels().white()[0] as u32)
+        );
         assert_eq!(raw_ifd.get_u32(tags::BLACK_LEVEL), Some(8));
 
         // The raw strip bytes deserialize back to the original mosaic.

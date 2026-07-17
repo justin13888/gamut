@@ -3,6 +3,7 @@
 
 use gamut_core::{Dimensions, Error, Result};
 
+use crate::levels::RawLevels;
 use crate::values::CfaLayout;
 
 /// CFA colour codes, as stored in the `CFAPattern` tag (DNG spec / TIFF-EP).
@@ -50,7 +51,8 @@ pub enum RawPhotometry {
 ///
 /// Samples are unsigned integers, row-major, `width * height * samples_per_pixel` long — one per
 /// pixel for a [`Cfa`](RawPhotometry::Cfa) mosaic, `planes` interleaved per pixel for
-/// [`LinearRaw`](RawPhotometry::LinearRaw). Black/white levels bound the linear range.
+/// [`LinearRaw`](RawPhotometry::LinearRaw). The [`RawLevels`] model bounds the linear range
+/// (black-level pattern + deltas, per-plane white, optional linearization table).
 ///
 /// Built with [`RawImage::new_cfa`] or [`RawImage::new_linear_raw`] (which validate the buffer and
 /// pattern) and refined with the `with_*` setters.
@@ -59,8 +61,8 @@ pub struct RawImage {
     dims: Dimensions,
     bits_per_sample: u16,
     samples_per_pixel: u16,
-    black_level: u32,
-    white_level: u32,
+    levels: RawLevels,
+    masked_areas: Vec<[u32; 4]>,
     active_area: Option<[u32; 4]>,
     default_crop: Option<([u32; 2], [u32; 2])>,
     photometry: RawPhotometry,
@@ -97,8 +99,8 @@ impl RawImage {
             dims,
             bits_per_sample,
             samples_per_pixel: 1,
-            black_level: 0,
-            white_level: white_level_default(bits_per_sample),
+            levels: RawLevels::uniform(1, 0.0, white_level_default(bits_per_sample))?,
+            masked_areas: Vec::new(),
             active_area: None,
             default_crop: None,
             photometry: RawPhotometry::Cfa {
@@ -136,8 +138,8 @@ impl RawImage {
             dims,
             bits_per_sample,
             samples_per_pixel: planes,
-            black_level: 0,
-            white_level: white_level_default(bits_per_sample),
+            levels: RawLevels::uniform(planes, 0.0, white_level_default(bits_per_sample))?,
+            masked_areas: Vec::new(),
             active_area: None,
             default_crop: None,
             photometry: RawPhotometry::LinearRaw { planes },
@@ -145,17 +147,80 @@ impl RawImage {
         })
     }
 
-    /// Sets the black level (the zero-light encoding value). Returns `self` for chaining.
-    #[must_use]
-    pub fn with_black_level(mut self, black_level: u32) -> Self {
-        self.black_level = black_level;
-        self
+    /// Replaces the level model (black pattern + deltas, per-plane white, linearization table).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `levels` describes a different number of sample planes
+    /// than this image has.
+    pub fn with_levels(mut self, levels: RawLevels) -> Result<Self> {
+        if levels.samples_per_pixel() != self.samples_per_pixel {
+            return Err(Error::InvalidInput(
+                "DNG: levels plane count must match the image's samples per pixel",
+            ));
+        }
+        self.levels = levels;
+        Ok(self)
     }
 
-    /// Sets the white level (the saturated encoding value). Returns `self` for chaining.
+    /// Sets a uniform black level (the zero-light encoding value) across every pattern cell and
+    /// plane, resetting any black pattern or deltas but keeping the white levels and
+    /// linearization table.
+    ///
+    /// For per-cell/per-plane black levels use [`RawLevels`] with [`Self::with_levels`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `black_level` is negative or not finite.
+    pub fn with_black_level(mut self, black_level: f64) -> Result<Self> {
+        let spp = usize::from(self.samples_per_pixel);
+        let mut levels = RawLevels::new(
+            self.samples_per_pixel,
+            (1, 1),
+            vec![black_level; spp],
+            self.levels.white().to_vec(),
+        )?;
+        if let Some(table) = self.levels.linearization_table() {
+            levels = levels.with_linearization_table(table.to_vec());
+        }
+        self.levels = levels;
+        Ok(self)
+    }
+
+    /// Sets a uniform white level (the saturated encoding value) for every plane, keeping the
+    /// rest of the level model.
+    ///
+    /// For per-plane white levels use [`RawLevels`] with [`Self::with_levels`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `white_level` is not finite and positive.
+    pub fn with_white_level(mut self, white_level: f64) -> Result<Self> {
+        let spp = usize::from(self.samples_per_pixel);
+        let mut levels = RawLevels::new(
+            self.samples_per_pixel,
+            self.levels.black_repeat(),
+            self.levels.black().to_vec(),
+            vec![white_level; spp],
+        )?;
+        if let Some(dh) = self.levels.black_delta_h() {
+            levels = levels.with_black_delta_h(dh.to_vec());
+        }
+        if let Some(dv) = self.levels.black_delta_v() {
+            levels = levels.with_black_delta_v(dv.to_vec());
+        }
+        if let Some(table) = self.levels.linearization_table() {
+            levels = levels.with_linearization_table(table.to_vec());
+        }
+        self.levels = levels;
+        Ok(self)
+    }
+
+    /// Sets the `MaskedAreas` rectangles `[top, left, bottom, right]` — fully-masked sensor
+    /// regions a processor may use to estimate black levels. Returns `self` for chaining.
     #[must_use]
-    pub fn with_white_level(mut self, white_level: u32) -> Self {
-        self.white_level = white_level;
+    pub fn with_masked_areas(mut self, areas: Vec<[u32; 4]>) -> Self {
+        self.masked_areas = areas;
         self
     }
 
@@ -212,16 +277,16 @@ impl RawImage {
         self.samples_per_pixel
     }
 
-    /// The black level (zero-light encoding value).
+    /// The level model: the black pattern (+ deltas), per-plane white, and linearization table.
     #[must_use]
-    pub fn black_level(&self) -> u32 {
-        self.black_level
+    pub fn levels(&self) -> &RawLevels {
+        &self.levels
     }
 
-    /// The white level (saturated encoding value).
+    /// The `MaskedAreas` rectangles `[top, left, bottom, right]` (empty when none are declared).
     #[must_use]
-    pub fn white_level(&self) -> u32 {
-        self.white_level
+    pub fn masked_areas(&self) -> &[[u32; 4]] {
+        &self.masked_areas
     }
 
     /// The active-area rectangle `[top, left, bottom, right]`, if set.
@@ -274,8 +339,8 @@ fn check_sample_count(dims: Dimensions, spp: u16, samples: &[u16]) -> Result<()>
 }
 
 /// The default white level for `bits` bits per sample: `2^bits - 1`.
-fn white_level_default(bits: u16) -> u32 {
-    (1u32 << bits) - 1
+fn white_level_default(bits: u16) -> f64 {
+    f64::from((1u32 << bits) - 1)
 }
 
 #[cfg(test)]
@@ -301,9 +366,11 @@ mod tests {
             vec![0u16; 16],
         )
         .expect("valid");
-        assert_eq!(raw.white_level(), 65535);
+        assert_eq!(raw.levels().white(), &[65535.0]);
+        assert_eq!(raw.levels().black(), &[0.0]);
         assert_eq!(raw.samples_per_pixel(), 1);
         assert!(matches!(raw.photometry(), RawPhotometry::Cfa { .. }));
+        assert!(raw.masked_areas().is_empty());
     }
 
     #[test]
@@ -327,13 +394,47 @@ mod tests {
     fn setters_chain() {
         let raw = RawImage::new_cfa(dims(2, 2), 12, (2, 2), vec![0, 1, 1, 2], vec![0; 4])
             .unwrap()
-            .with_black_level(64)
-            .with_white_level(4095)
+            .with_black_level(64.0)
+            .unwrap()
+            .with_white_level(4095.0)
+            .unwrap()
             .with_active_area([0, 0, 2, 2])
+            .with_masked_areas(vec![[0, 0, 2, 1]])
             .with_cfa_layout(CfaLayout::Rectangular);
-        assert_eq!(raw.black_level(), 64);
-        assert_eq!(raw.white_level(), 4095);
+        assert_eq!(raw.levels().black(), &[64.0]);
+        assert_eq!(raw.levels().white(), &[4095.0]);
         assert_eq!(raw.active_area(), Some([0, 0, 2, 2]));
+        assert_eq!(raw.masked_areas(), &[[0, 0, 2, 1]]);
+        // Invalid uniform levels are rejected, not silently ignored.
+        assert!(raw.clone().with_black_level(-1.0).is_err());
+        assert!(raw.clone().with_white_level(0.0).is_err());
+    }
+
+    #[test]
+    fn with_levels_validates_plane_count_and_keeps_model_pieces() {
+        let raw = RawImage::new_linear_raw(dims(2, 2), 12, 3, vec![0; 12]).unwrap();
+        // A 2-plane model cannot attach to a 3-plane image.
+        let two_plane = RawLevels::uniform(2, 0.0, 4095.0).unwrap();
+        assert!(raw.clone().with_levels(two_plane).is_err());
+        // A full 3-plane model round-trips through the getter.
+        let levels = RawLevels::new(3, (1, 1), vec![1.0, 2.0, 3.0], vec![100.0, 200.0, 300.0])
+            .unwrap()
+            .with_black_delta_v(vec![0.5, -0.5])
+            .with_linearization_table(vec![0, 2, 4]);
+        let raw = raw.with_levels(levels.clone()).unwrap();
+        assert_eq!(raw.levels(), &levels);
+        // Uniform white reset keeps the black pattern, deltas, and table.
+        let raw = raw.with_white_level(4000.0).unwrap();
+        assert_eq!(raw.levels().black(), &[1.0, 2.0, 3.0]);
+        assert_eq!(raw.levels().black_delta_v(), Some(&[0.5, -0.5][..]));
+        assert_eq!(raw.levels().linearization_table(), Some(&[0, 2, 4][..]));
+        assert_eq!(raw.levels().white(), &[4000.0, 4000.0, 4000.0]);
+        // Uniform black reset drops the pattern/deltas but keeps white and the table.
+        let raw = raw.with_black_level(8.0).unwrap();
+        assert_eq!(raw.levels().black_repeat(), (1, 1));
+        assert_eq!(raw.levels().black(), &[8.0, 8.0, 8.0]);
+        assert_eq!(raw.levels().black_delta_v(), None);
+        assert_eq!(raw.levels().linearization_table(), Some(&[0, 2, 4][..]));
     }
 
     #[test]

@@ -30,8 +30,10 @@ pub fn sample_raw(width: u32, height: u32, bits: u16) -> RawImage {
         samples,
     )
     .expect("valid raw")
-    .with_black_level(0)
-    .with_white_level(max)
+    .with_black_level(0.0)
+    .expect("valid black level")
+    .with_white_level(f64::from(max))
+    .expect("valid white level")
     .with_active_area([0, 0, height, width])
     .with_default_crop([0, 0], [width, height])
 }
@@ -49,7 +51,8 @@ pub fn sample_linear_raw(width: u32, height: u32, bits: u16) -> RawImage {
         .collect();
     RawImage::new_linear_raw(Dimensions::new(width, height).unwrap(), bits, 3, samples)
         .expect("valid linear raw")
-        .with_white_level(max)
+        .with_white_level(f64::from(max))
+        .expect("valid white level")
         .with_active_area([0, 0, height, width])
 }
 

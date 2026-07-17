@@ -8,6 +8,7 @@
 use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant, read, read_ifd_at};
 
+use crate::levels::RawLevels;
 use crate::metadata::{DngMetadata, ExifMetadata};
 use crate::profile::CameraProfile;
 use crate::raw::RawImage;
@@ -229,14 +230,12 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
         _ => return Err(Error::Unsupported("DNG: photometry is not a raw image")),
     };
 
-    if let Some(black) = ifd.get_u32(tags::BLACK_LEVEL) {
-        raw = raw.with_black_level(black);
-    }
-    if let Some(white) = ifd.get_u32(tags::WHITE_LEVEL) {
-        raw = raw.with_white_level(white);
-    }
-    if let Some(area) = ifd.get_u32_vec(tags::ACTIVE_AREA).filter(|v| v.len() == 4) {
-        raw = raw.with_active_area([area[0], area[1], area[2], area[3]]);
+    let active_area = ifd
+        .get_u32_vec(tags::ACTIVE_AREA)
+        .filter(|v| v.len() == 4)
+        .map(|v| [v[0], v[1], v[2], v[3]]);
+    if let Some(area) = active_area {
+        raw = raw.with_active_area(area);
     }
     if let (Some(origin), Some(size)) = (
         ifd.get_u32_vec(tags::DEFAULT_CROP_ORIGIN)
@@ -246,7 +245,144 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
     ) {
         raw = raw.with_default_crop([origin[0], origin[1]], [size[0], size[1]]);
     }
+    raw = raw.with_levels(decode_levels(ifd, spp as u16, bits, dims, active_area)?)?;
+    if let Some(areas) = decode_masked_areas(ifd)? {
+        raw = raw.with_masked_areas(areas);
+    }
     Ok(raw)
+}
+
+/// Reads the level family — `BlackLevelRepeatDim`/`BlackLevel` (+ the `DeltaH`/`DeltaV`
+/// refinements) and the per-plane `WhiteLevel` — from a raw IFD (DNG 1.7.1 pp. 27–29).
+///
+/// A single-value `BlackLevel`/`WhiteLevel` broadcasts to every cell/plane (common writer
+/// shorthand, and what pre-pattern gamut-dng emitted); any other count mismatch is an error.
+/// Delta counts must match the active area (defaulting to the full image), mirroring the DNG SDK.
+fn decode_levels(
+    ifd: &Ifd,
+    spp: u16,
+    bits: u16,
+    dims: Dimensions,
+    active_area: Option<[u32; 4]>,
+) -> Result<RawLevels> {
+    let repeat = match ifd.get_u32_vec(tags::BLACK_LEVEL_REPEAT_DIM) {
+        Some(v) if v.len() == 2 => {
+            let rows = u16::try_from(v[0]).ok().filter(|r| *r > 0);
+            let cols = u16::try_from(v[1]).ok().filter(|c| *c > 0);
+            match (rows, cols) {
+                (Some(rows), Some(cols)) => (rows, cols),
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "DNG: BlackLevelRepeatDim dimensions must be non-zero",
+                    ));
+                }
+            }
+        }
+        Some(_) => {
+            return Err(Error::InvalidInput(
+                "DNG: BlackLevelRepeatDim needs two values (rows, cols)",
+            ));
+        }
+        None => (1, 1),
+    };
+
+    let cells = usize::from(repeat.0) * usize::from(repeat.1) * usize::from(spp);
+    let black = match ifd.get(tags::BLACK_LEVEL) {
+        None => vec![0.0; cells],
+        Some(value) => {
+            let v = unsigned_f64s(value).ok_or(Error::InvalidInput(
+                "DNG: BlackLevel must be SHORT, LONG, or RATIONAL",
+            ))?;
+            if v.len() == cells {
+                v
+            } else if v.len() == 1 {
+                vec![v[0]; cells]
+            } else {
+                return Err(Error::InvalidInput(
+                    "DNG: BlackLevel count must be repeat rows * cols * samples per pixel",
+                ));
+            }
+        }
+    };
+
+    let white = match ifd.get_u32_vec(tags::WHITE_LEVEL) {
+        None => vec![f64::from((1u32 << bits) - 1); usize::from(spp)],
+        Some(v) if v.len() == usize::from(spp) => v.into_iter().map(f64::from).collect(),
+        Some(v) if v.len() == 1 => vec![f64::from(v[0]); usize::from(spp)],
+        Some(_) => {
+            return Err(Error::InvalidInput(
+                "DNG: WhiteLevel needs one value per sample plane",
+            ));
+        }
+    };
+
+    let mut levels = RawLevels::new(spp, repeat, black, white)?;
+
+    let (aa_width, aa_height) = active_area_size(dims, active_area);
+    if let Some(deltas) = decode_deltas(ifd, tags::BLACK_LEVEL_DELTA_H, aa_width, "column")? {
+        levels = levels.with_black_delta_h(deltas);
+    }
+    if let Some(deltas) = decode_deltas(ifd, tags::BLACK_LEVEL_DELTA_V, aa_height, "row")? {
+        levels = levels.with_black_delta_v(deltas);
+    }
+    Ok(levels)
+}
+
+/// Reads a `BlackLevelDeltaH`/`BlackLevelDeltaV` tag, requiring `expected` values (one per
+/// active-area column/row — the SDK enforces the same).
+fn decode_deltas(
+    ifd: &Ifd,
+    tag: u16,
+    expected: usize,
+    axis: &'static str,
+) -> Result<Option<Vec<f64>>> {
+    let Some(value) = ifd.get(tag) else {
+        return Ok(None);
+    };
+    let deltas: Vec<f64> = value
+        .as_srationals()
+        .ok_or(Error::InvalidInput(
+            "DNG: black-level deltas must be SRATIONAL",
+        ))?
+        .iter()
+        .map(|&(n, d)| ratio(f64::from(n), f64::from(d)))
+        .collect();
+    if deltas.len() != expected {
+        return Err(Error::InvalidInput(match axis {
+            "column" => "DNG: BlackLevelDeltaH needs one value per active-area column",
+            _ => "DNG: BlackLevelDeltaV needs one value per active-area row",
+        }));
+    }
+    Ok(Some(deltas))
+}
+
+/// The active-area `(width, height)`, defaulting to the full image when the tag is absent.
+fn active_area_size(dims: Dimensions, active_area: Option<[u32; 4]>) -> (usize, usize) {
+    match active_area {
+        Some([top, left, bottom, right]) => (
+            right.saturating_sub(left) as usize,
+            bottom.saturating_sub(top) as usize,
+        ),
+        None => (dims.width as usize, dims.height as usize),
+    }
+}
+
+/// Reads `MaskedAreas` as `[top, left, bottom, right]` rectangles (count must be a positive
+/// multiple of four, DNG 1.7.1 p. 44).
+fn decode_masked_areas(ifd: &Ifd) -> Result<Option<Vec<[u32; 4]>>> {
+    let Some(flat) = ifd.get_u32_vec(tags::MASKED_AREAS) else {
+        return Ok(None);
+    };
+    if flat.is_empty() || flat.len() % 4 != 0 {
+        return Err(Error::InvalidInput(
+            "DNG: MaskedAreas count must be a positive multiple of four",
+        ));
+    }
+    Ok(Some(
+        flat.chunks_exact(4)
+            .map(|r| [r[0], r[1], r[2], r[3]])
+            .collect(),
+    ))
 }
 
 /// Returns the IFD's strips as raw byte slices (in order), to be decompressed per the scheme.
@@ -356,10 +492,14 @@ fn ascii_value(value: Option<&Value>) -> Option<String> {
     value?.as_str().map(ToOwned::to_owned)
 }
 
-/// Converts a `RATIONAL`/`SRATIONAL` value to `f64`s, mapping a zero denominator to `0.0` (the
-/// numeric policy is this codec's, not the container's).
+/// Divides a rational's parts, mapping a zero denominator to `0.0` (the numeric policy is this
+/// codec's, not the container's).
+fn ratio(n: f64, d: f64) -> f64 {
+    if d == 0.0 { 0.0 } else { n / d }
+}
+
+/// Converts a `RATIONAL`/`SRATIONAL` value to `f64`s.
 fn f64_vec(value: Option<&Value>) -> Option<Vec<f64>> {
-    let ratio = |n: f64, d: f64| if d == 0.0 { 0.0 } else { n / d };
     let value = value?;
     if let Some(r) = value.as_rationals() {
         return Some(r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect());
@@ -367,6 +507,17 @@ fn f64_vec(value: Option<&Value>) -> Option<Vec<f64>> {
     value
         .as_srationals()
         .map(|r| r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect())
+}
+
+/// Converts an unsigned numeric value — `SHORT`, `LONG`, or `RATIONAL`, the three types the
+/// `BlackLevel` tag allows (DNG 1.7.1 p. 28) — to `f64`s.
+fn unsigned_f64s(value: &Value) -> Option<Vec<f64>> {
+    match value {
+        Value::Short(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+        Value::Long(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+        Value::Rational(r) => Some(r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect()),
+        _ => None,
+    }
 }
 
 /// Reads a 9-element `(S)RATIONAL` matrix tag as `[f64; 9]`.

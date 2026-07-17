@@ -33,6 +33,7 @@
 pub mod decoder;
 pub mod deconstruct;
 pub mod encoder;
+pub mod levels;
 pub mod metadata;
 pub mod profile;
 pub mod raw;
@@ -52,6 +53,7 @@ pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstr
 pub use encoder::DngEncoder;
 pub use gamut_core::{Dimensions, Error, Result};
 pub use gamut_ifd::ByteOrder;
+pub use levels::RawLevels;
 pub use metadata::{DngMetadata, ExifMetadata};
 pub use profile::CameraProfile;
 pub use raw::RawImage;

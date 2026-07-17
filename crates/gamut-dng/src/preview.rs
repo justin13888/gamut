@@ -30,6 +30,22 @@ fn scale8(value: u32, black: u32, range: u32) -> u8 {
     scaled.min(255) as u8
 }
 
+/// A `(black, range)` pair for basic 8-bit preview scaling of `plane`: the plane's minimum
+/// pattern black (deltas ignored — this is a thumbnail, not the Chapter-5 mapping) and its
+/// white-to-black range, rounded to integers.
+fn plane_scale(raw: &RawImage, plane: usize) -> (u32, u32) {
+    let levels = raw.levels();
+    let spp = usize::from(levels.samples_per_pixel());
+    let black = levels
+        .black()
+        .iter()
+        .skip(plane)
+        .step_by(spp)
+        .fold(f64::INFINITY, |acc, &b| acc.min(b)) as u32;
+    let white = levels.white()[plane] as u32;
+    (black, white.saturating_sub(black).max(1))
+}
+
 /// Collapses each CFA repeat tile into one RGB pixel by averaging each colour's sensels.
 fn cfa_preview(raw: &RawImage, repeat: (u16, u16), pattern: &[u8]) -> (Dimensions, Vec<u8>) {
     let w = raw.dimensions().width as usize;
@@ -38,8 +54,8 @@ fn cfa_preview(raw: &RawImage, repeat: (u16, u16), pattern: &[u8]) -> (Dimension
     let samples = raw.samples();
     let pw = (w / rc).max(1);
     let ph = (h / rr).max(1);
-    let black = raw.black_level();
-    let range = raw.white_level().saturating_sub(black).max(1);
+    // One plane per mosaic sensel; the single-plane scale serves all preview channels.
+    let (black, range) = plane_scale(raw, 0);
 
     let mut out = Vec::with_capacity(pw * ph * 3);
     for py in 0..ph {
@@ -89,15 +105,15 @@ fn linear_preview(raw: &RawImage, planes: u16) -> (Dimensions, Vec<u8>) {
     let samples = raw.samples();
     let pw = (w / 2).max(1);
     let ph = (h / 2).max(1);
-    let black = raw.black_level();
-    let range = raw.white_level().saturating_sub(black).max(1);
-    // Map preview R/G/B to source planes (the first three, clamped for <3-plane images).
+    // Map preview R/G/B to source planes (the first three, clamped for <3-plane images), each
+    // scaled by its own plane's levels.
     let chan = [0usize, 1.min(p - 1), 2.min(p - 1)];
+    let scales = chan.map(|plane| plane_scale(raw, plane));
 
     let mut out = Vec::with_capacity(pw * ph * 3);
     for py in 0..ph {
         for px in 0..pw {
-            for &plane in &chan {
+            for (&plane, &(black, range)) in chan.iter().zip(&scales) {
                 let mut sum = 0u64;
                 let mut count = 0u64;
                 for dy in 0..2 {

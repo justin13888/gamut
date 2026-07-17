@@ -207,6 +207,131 @@ fn metadata_embeds_and_roundtrips() {
 }
 
 #[test]
+fn level_family_roundtrips_and_validates() {
+    use gamut_dng::RawLevels;
+    // A 2x2 black pattern with four distinct RATIONAL-exact values (multiples of 1/65536),
+    // asymmetric per-column/per-row deltas, masked areas, and an active area that is a proper
+    // subset of the sensor (12x8 active window inside 16x12).
+    let levels = RawLevels::new(1, (2, 2), vec![62.25, 63.0, 64.5, 65.75], vec![4095.0])
+        .unwrap()
+        .with_black_delta_h((0..12).map(|c| f64::from(c) * 0.25 - 1.0).collect())
+        .with_black_delta_v((0..8).map(|r| 0.5 - f64::from(r) * 0.125).collect());
+    let raw = common::sample_raw(16, 12, 12)
+        .with_active_area([2, 3, 10, 15])
+        // The default crop is relative to the active area and must fit inside it.
+        .with_default_crop([0, 0], [12, 8])
+        .with_levels(levels.clone())
+        .unwrap()
+        .with_masked_areas(vec![[0, 0, 2, 16], [2, 0, 10, 3]]);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+
+    // gamut reconstructs the whole model bit-exactly (the fixture values sit on the 1/65536
+    // storage grid, so the RATIONAL round-trip is exact).
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.raw.levels(), &levels);
+    assert_eq!(decoded.raw.masked_areas(), &[[0, 0, 2, 16], [2, 0, 10, 3]]);
+    assert_eq!(decoded.raw, raw);
+
+    // The Adobe SDK accepts the pattern + delta + masked-area write.
+    gamut_dng_oracle::validate_dng(&dng)
+        .expect("Adobe DNG SDK must accept the full black-level family");
+}
+
+#[test]
+fn per_plane_white_levels_roundtrip() {
+    use gamut_dng::RawLevels;
+    // LinearRaw with three distinct per-plane whites and per-plane blacks (repeat 1x1, so the
+    // black pattern is one value per plane).
+    let levels = RawLevels::new(
+        3,
+        (1, 1),
+        vec![16.0, 32.0, 48.0],
+        vec![4000.0, 4050.0, 4095.0],
+    )
+    .unwrap();
+    let raw = common::sample_linear_raw(24, 18, 12)
+        .with_levels(levels.clone())
+        .unwrap();
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.raw.levels(), &levels);
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept per-plane levels");
+}
+
+#[test]
+fn single_value_black_and_white_levels_broadcast_on_decode() {
+    // Writers (including pre-pattern gamut-dng) may store BlackLevel/WhiteLevel with count 1
+    // even when SamplesPerPixel > 1; the decoder broadcasts the value to every cell/plane.
+    use gamut_ifd::{ByteOrder, TiffFile, Value, Variant, read, read_ifd_at, write};
+
+    let raw = common::sample_linear_raw(8, 6, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+
+    // Rewrite the raw sub-IFD's levels as count-1 tags via the IFD layer.
+    let file = read(&dng).expect("parse");
+    let ifd0 = &file.ifds[0];
+    let raw_off = ifd0
+        .get_u32(gamut_dng::tags::SUB_IFDS)
+        .expect("SubIFDs pointer");
+    let mut raw_ifd = read_ifd_at(&dng, raw_off.into(), file.order, file.variant).expect("raw IFD");
+    raw_ifd.set(gamut_dng::tags::BLACK_LEVEL, Value::Short(vec![7]));
+    raw_ifd.set(gamut_dng::tags::WHITE_LEVEL, Value::Long(vec![60000]));
+    raw_ifd.set(
+        gamut_dng::tags::BLACK_LEVEL_REPEAT_DIM,
+        Value::Short(vec![1, 1]),
+    );
+    // Re-emit a minimal single-IFD file holding just the raw image (strip data inline).
+    let strip_off = raw_ifd
+        .get_u32_vec(gamut_dng::tags::STRIP_OFFSETS)
+        .expect("offsets")[0] as usize;
+    let strip_len = raw_ifd
+        .get_u32_vec(gamut_dng::tags::STRIP_BYTE_COUNTS)
+        .expect("counts")[0] as usize;
+    let strip = dng[strip_off..strip_off + strip_len].to_vec();
+    let mut rebuilt_ifd = raw_ifd.clone();
+    // Required IFD0-side tags for the decoder's profile/version path.
+    for &tag in &[
+        gamut_dng::tags::DNG_VERSION,
+        gamut_dng::tags::UNIQUE_CAMERA_MODEL,
+        gamut_dng::tags::COLOR_MATRIX1,
+        gamut_dng::tags::CALIBRATION_ILLUMINANT1,
+        gamut_dng::tags::AS_SHOT_NEUTRAL,
+    ] {
+        if let Some(v) = ifd0.get(tag) {
+            rebuilt_ifd.set(tag, v.clone());
+        }
+    }
+    // Place the strip immediately after the written IFD structure (two-pass: size, then emit).
+    let single = |ifd: gamut_ifd::Ifd| TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd],
+    };
+    let mut rebuilt = write(&single(rebuilt_ifd.clone())).expect("write");
+    let data_at = rebuilt.len() as u32;
+    rebuilt_ifd.set(gamut_dng::tags::STRIP_OFFSETS, Value::Long(vec![data_at]));
+    rebuilt_ifd.set(
+        gamut_dng::tags::STRIP_BYTE_COUNTS,
+        Value::Long(vec![strip.len() as u32]),
+    );
+    rebuilt = write(&single(rebuilt_ifd)).expect("rewrite");
+    rebuilt.extend_from_slice(&strip);
+
+    let decoded = DngDecoder::new().decode(&rebuilt).expect("decode");
+    assert_eq!(decoded.raw.levels().black(), &[7.0, 7.0, 7.0]);
+    assert_eq!(decoded.raw.levels().white(), &[60000.0, 60000.0, 60000.0]);
+}
+
+#[test]
 fn decoder_rejects_garbage() {
     assert!(DngDecoder::new().decode(b"not a dng").is_err());
     assert!(DngDecoder::new().decode(&[]).is_err());
