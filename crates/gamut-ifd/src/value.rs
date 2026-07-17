@@ -151,6 +151,38 @@ impl Value {
         }
     }
 
+    /// Coerces a single unsigned-integer value (`BYTE`, `SHORT`, `LONG`, or — with `bigtiff` —
+    /// `LONG8`/`IFD8`) to `u64`, without any width clamp.
+    ///
+    /// This is the coercion a **BigTIFF-scale** consumer needs: [`Value::as_u32`] rejects a
+    /// `LONG8`/`IFD8` past `u32::MAX`, which a >4 GiB file's strip offsets and sub-IFD pointers
+    /// legitimately exceed.
+    #[must_use]
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Byte(v) if v.len() == 1 => Some(u64::from(v[0])),
+            Value::Short(v) if v.len() == 1 => Some(u64::from(v[0])),
+            Value::Long(v) if v.len() == 1 => Some(u64::from(v[0])),
+            #[cfg(feature = "bigtiff")]
+            Value::Long8(v) | Value::Ifd8(v) if v.len() == 1 => Some(v[0]),
+            _ => None,
+        }
+    }
+
+    /// Coerces an array of unsigned integers (`BYTE`, `SHORT`, `LONG`, or — with `bigtiff` —
+    /// `LONG8`/`IFD8`) to `Vec<u64>`, without any width clamp (see [`Value::as_u64`]).
+    #[must_use]
+    pub fn as_u64_vec(&self) -> Option<Vec<u64>> {
+        match self {
+            Value::Byte(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+            Value::Short(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+            Value::Long(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+            #[cfg(feature = "bigtiff")]
+            Value::Long8(v) | Value::Ifd8(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
     /// Builds an offset-array value of the width `variant` stores offsets in: `LONG` for classic
     /// TIFF, `LONG8` for BigTIFF.
     ///
@@ -475,6 +507,40 @@ mod tests {
         // A multi-element (but in-range) value still isn't a scalar — pins the `v.len() == 1` guard
         // rather than the out-of-range path above.
         assert_eq!(Value::Long8(vec![1, 2]).as_u32(), None);
+    }
+
+    /// `as_u64`/`as_u64_vec` accept every unsigned-integer type with no width clamp — a
+    /// `LONG8` past `u32::MAX` (a >4 GiB BigTIFF strip offset) coerces where `as_u32` refuses.
+    #[test]
+    fn u64_coercion_is_unclamped() {
+        assert_eq!(Value::Byte(vec![5]).as_u64(), Some(5));
+        assert_eq!(Value::Short(vec![300]).as_u64(), Some(300));
+        assert_eq!(Value::Long(vec![70000]).as_u64(), Some(70000));
+        // Multi-element values are not scalars, for each accepted type.
+        assert_eq!(Value::Byte(vec![1, 2]).as_u64(), None);
+        assert_eq!(Value::Short(vec![1, 2]).as_u64(), None);
+        assert_eq!(Value::Long(vec![1, 2]).as_u64(), None);
+        assert_eq!(Value::Ascii("x".into()).as_u64(), None);
+        assert_eq!(Value::Byte(vec![1, 2, 3]).as_u64_vec(), Some(vec![1, 2, 3]));
+        assert_eq!(
+            Value::Short(vec![1, 2, 3]).as_u64_vec(),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(Value::Long(vec![7, 8]).as_u64_vec(), Some(vec![7, 8]));
+        assert_eq!(Value::Ascii("x".into()).as_u64_vec(), None);
+        #[cfg(feature = "bigtiff")]
+        {
+            // The whole point: values past u32::MAX coerce instead of failing.
+            assert_eq!(
+                Value::Long8(vec![0x1_2345_6789]).as_u64(),
+                Some(0x1_2345_6789)
+            );
+            assert_eq!(
+                Value::Ifd8(vec![8, 0x1_0000_0000]).as_u64_vec(),
+                Some(vec![8, 0x1_0000_0000])
+            );
+            assert_eq!(Value::Long8(vec![1, 2]).as_u64(), None);
+        }
     }
 
     #[test]

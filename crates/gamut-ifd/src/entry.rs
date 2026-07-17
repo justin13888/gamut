@@ -157,6 +157,20 @@ impl Ifd {
         self.get(tag).and_then(Value::as_u32_vec)
     }
 
+    /// Returns `tag` coerced to a single `u64`, without any width clamp (see [`Value::as_u64`]) —
+    /// the form BigTIFF-scale offsets need.
+    #[must_use]
+    pub fn get_u64(&self, tag: u16) -> Option<u64> {
+        self.get(tag).and_then(Value::as_u64)
+    }
+
+    /// Returns `tag` coerced to a `Vec<u64>`, without any width clamp (see
+    /// [`Value::as_u64_vec`]).
+    #[must_use]
+    pub fn get_u64_vec(&self, tag: u16) -> Option<Vec<u64>> {
+        self.get(tag).and_then(Value::as_u64_vec)
+    }
+
     /// Inserts or replaces the value of `tag`, keeping the fields sorted.
     pub fn set(&mut self, tag: u16, value: Value) {
         match self.fields.binary_search_by_key(&tag, |f| f.tag) {
@@ -278,6 +292,17 @@ mod tests {
         assert_eq!(ifd.get_u32_vec(258), Some(vec![8, 8, 8]));
         // Absent tag is None (distinguishes the real coercion from a constant Some/None).
         assert_eq!(ifd.get_u32_vec(999), None);
+    }
+
+    #[test]
+    fn get_u64_reads_scalars_and_arrays() {
+        let mut ifd = Ifd::new();
+        ifd.set(273, Value::Long(vec![64, 128]));
+        ifd.set(279, Value::Long(vec![100]));
+        assert_eq!(ifd.get_u64(279), Some(100));
+        assert_eq!(ifd.get_u64_vec(273), Some(vec![64, 128]));
+        assert_eq!(ifd.get_u64(999), None);
+        assert_eq!(ifd.get_u64_vec(999), None);
     }
 
     #[test]
