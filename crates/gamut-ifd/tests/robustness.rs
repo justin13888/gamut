@@ -7,7 +7,10 @@
 //! streaming reader's parallel directory-body walk safe under mutation testing: a behavioral
 //! mutant in either copy breaks agreement somewhere in the corpus.
 
-use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree, write};
+use gamut_ifd::{
+    ByteOrder, Coverage, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree,
+    read_with_coverage, write,
+};
 
 /// Sub-IFD pointer tags a DNG/EXIF-shaped consumer would follow.
 const POINTER_TAGS: &[u16] = &[330, 34665, 34853];
@@ -123,6 +126,48 @@ fn single_byte_overwrites_do_not_panic() {
             survives(&data);
         }
     }
+}
+
+/// Overlapping records are *report-not-reject* (issue #262): TIFF legitimately allows two
+/// structures to share storage, so the parse must succeed — the opt-in [`Coverage`] accounting
+/// is where the overlap surfaces. This is the adversarial end-to-end check of that contract:
+/// an out-of-line value whose offset points back into the file header.
+#[test]
+fn overlapping_value_offset_parses_and_surfaces_in_coverage() {
+    let data: &[u8] = &[
+        b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD at 8
+        0x01, 0x00, // entry count = 1
+        0x02, 0x01, // tag 258
+        0x03, 0x00, // type SHORT
+        0x03, 0x00, 0x00, 0x00, // count = 3 (6 bytes, forced out of line)
+        0x00, 0x00, 0x00, 0x00, // value offset = 0 — the value span [0, 6) is the header
+        0x00, 0x00, 0x00, 0x00, // next IFD = 0
+    ];
+    // Both readers parse it, agree, and decode the header bytes as the value.
+    let file = read(data).expect("overlap parses");
+    let streamed = IfdReader::open(data)
+        .and_then(|mut r| r.read_file())
+        .expect("overlap parses (streaming)");
+    assert_eq!(file, streamed);
+    assert_eq!(
+        file.ifds[0].get(258),
+        Some(&Value::Short(vec![0x4949, 0x002A, 0x0008]))
+    );
+    // The overlap is not silent: byte accounting flags it, on both paths identically.
+    let mut cov = Coverage::new(data.len() as u64);
+    let mut unknown = Vec::new();
+    read_with_coverage(data, &mut cov, &mut unknown).expect("coverage parse");
+    let report = cov.finish();
+    assert_eq!(report.overlaps.len(), 1, "header/value overlap flagged");
+    assert!(!report.is_fully_covered());
+    assert_eq!(report.covered_bytes, data.len() as u64); // every byte reached, one twice
+    assert!(report.gaps.is_empty() && report.trailing.is_none());
+    let mut stream_cov = Coverage::new(data.len() as u64);
+    let mut stream_unknown = Vec::new();
+    IfdReader::open(data)
+        .and_then(|mut r| r.read_file_with_coverage(&mut stream_cov, &mut stream_unknown))
+        .expect("streaming coverage parse");
+    assert_eq!(stream_cov.finish(), report);
 }
 
 /// A classic-TIFF stream of `n` chained zero-entry directories (6 bytes each), hand-emitted —
