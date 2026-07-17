@@ -1,8 +1,9 @@
 //! Integration tests for the APP1/APP2 metadata surface: `metadata()` extraction of EXIF, XMP, and
-//! multi-segment ICC payloads, the ICC chunk-consistency error corpus, and the skip rules for
-//! foreign or continuation segments.
+//! multi-segment ICC payloads, the ICC chunk-consistency error corpus, the skip rules for foreign
+//! or continuation segments, and the encoder's `with_exif`/`with_xmp`/`with_icc_profile`
+//! embedding (round-trips, chunk framing at the 65519-byte boundaries, size caps, segment order).
 
-use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef};
+use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, Rgb8};
 use gamut_jpeg::{JpegEncoder, JpegMetadata, metadata};
 
 /// Encodes a minimal valid grayscale JPEG to splice APP segments into.
@@ -192,6 +193,176 @@ fn metadata_stops_at_the_scan() {
     let mut after = base.clone();
     after.extend_from_slice(&seg);
     assert_eq!(metadata(&after).unwrap(), JpegMetadata::default());
+}
+
+/// Collects `(marker, payload)` for every marker segment up to (excluding) the first SOS.
+fn segments(jpeg: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    assert_eq!(&jpeg[..2], [0xFF, 0xD8], "missing SOI");
+    let mut pos = 2;
+    let mut out = Vec::new();
+    loop {
+        assert_eq!(jpeg[pos], 0xFF, "expected a marker at {pos}");
+        let marker = jpeg[pos + 1];
+        if marker == 0xDA {
+            return out;
+        }
+        let len = usize::from(u16::from_be_bytes([jpeg[pos + 2], jpeg[pos + 3]]));
+        out.push((marker, jpeg[pos + 4..pos + 2 + len].to_vec()));
+        pos += 2 + len;
+    }
+}
+
+/// A distinct-content pseudo-profile so chunk reordering or boundary slips change the bytes.
+fn fake_profile(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+#[test]
+fn encoded_metadata_round_trips() {
+    // All three payloads on one colour stream, read back byte-exact through metadata().
+    let tiff = b"II\x2A\x00\x08\x00\x00\x00\x00\x00".to_vec();
+    let xmp = b"<?xpacket begin=\"\"?><x:xmpmeta/><?xpacket end=\"w\"?>".to_vec();
+    let icc = fake_profile(300);
+    let pixels = vec![200u8; 8 * 8 * 3];
+    let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_exif(&tiff)
+        .with_xmp(&xmp)
+        .with_icc_profile(&icc)
+        .encode_to_vec(image)
+        .unwrap();
+    let meta = metadata(&jpeg).unwrap();
+    assert_eq!(meta.exif, Some(tiff));
+    assert_eq!(meta.xmp, Some(xmp));
+    assert_eq!(meta.icc, Some(icc));
+}
+
+#[test]
+fn progressive_streams_carry_the_same_metadata() {
+    let tiff = b"MM\x00\x2A\x00\x00\x00\x08".to_vec();
+    let icc = fake_profile(64);
+    let pixels = vec![10u8; 64];
+    let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_progressive(true)
+        .with_exif(&tiff)
+        .with_icc_profile(&icc)
+        .encode_to_vec(image)
+        .unwrap();
+    let meta = metadata(&jpeg).unwrap();
+    assert_eq!(meta.exif, Some(tiff));
+    assert_eq!(meta.icc, Some(icc));
+}
+
+#[test]
+fn prefixed_exif_input_is_not_double_prefixed() {
+    // with_exif accepts a blob already carrying the "Exif\0\0" signature; the reader must get the
+    // bare TIFF stream back either way.
+    let tiff = b"II\x2A\x00\x08\x00\x00\x00".to_vec();
+    let mut prefixed = b"Exif\0\0".to_vec();
+    prefixed.extend_from_slice(&tiff);
+    let pixels = vec![0u8; 64];
+    let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_exif(&prefixed)
+        .encode_to_vec(image)
+        .unwrap();
+    assert_eq!(metadata(&jpeg).unwrap().exif, Some(tiff));
+}
+
+#[test]
+fn icc_chunking_at_the_segment_boundaries() {
+    // 65519 profile bytes fill exactly one APP2 chunk; one more byte forces a second; ~200 KB
+    // takes four. Indices are 1-based and every chunk repeats the shared count.
+    let pixels = vec![128u8; 64];
+    let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    for (len, want_chunks) in [(65519usize, 1usize), (65520, 2), (200_000, 4)] {
+        let profile = fake_profile(len);
+        let jpeg = JpegEncoder::new()
+            .with_icc_profile(&profile)
+            .encode_to_vec(ImageRef::<Gray8>::new(&pixels, image.dimensions()).unwrap())
+            .unwrap();
+        let app2: Vec<_> = segments(&jpeg)
+            .into_iter()
+            .filter(|(m, _)| *m == 0xE2)
+            .collect();
+        assert_eq!(app2.len(), want_chunks, "profile len {len}");
+        for (i, (_, payload)) in app2.iter().enumerate() {
+            assert!(payload.starts_with(b"ICC_PROFILE\0"));
+            assert_eq!(payload[12], i as u8 + 1, "1-based chunk index");
+            assert_eq!(payload[13], want_chunks as u8, "shared chunk count");
+            // Every chunk but the last is full.
+            let data_len = payload.len() - 14;
+            if i + 1 < want_chunks {
+                assert_eq!(data_len, 65519);
+            }
+        }
+        assert_eq!(metadata(&jpeg).unwrap().icc, Some(profile));
+    }
+}
+
+#[test]
+fn metadata_segments_are_ordered_app0_exif_xmp_icc_before_tables() {
+    let pixels = vec![1u8; 64];
+    let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_exif(b"II\x2A\x00")
+        .with_xmp(b"<x/>")
+        .with_icc_profile(&fake_profile(16))
+        .encode_to_vec(image)
+        .unwrap();
+    let markers: Vec<u8> = segments(&jpeg).iter().map(|(m, _)| *m).collect();
+    // JFIF APP0 first (T.871), then EXIF APP1, XMP APP1, ICC APP2, then the DQT tables.
+    assert_eq!(&markers[..4], &[0xE0, 0xE1, 0xE1, 0xE2]);
+    assert_eq!(markers[4], 0xDB);
+}
+
+#[test]
+fn oversized_and_empty_metadata_is_rejected_before_writing() {
+    let pixels = vec![0u8; 64];
+    let image = || ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
+    // EXIF is a single APP1: 65527 TIFF bytes fit, 65528 do not.
+    let mut out = Vec::new();
+    assert!(
+        JpegEncoder::new()
+            .with_exif(&vec![0u8; 65_527])
+            .encode_image(image(), &mut out)
+            .is_ok()
+    );
+    let mut rejected = Vec::new();
+    assert!(matches!(
+        JpegEncoder::new()
+            .with_exif(&vec![0u8; 65_528])
+            .encode_image(image(), &mut rejected),
+        Err(Error::InvalidInput(_))
+    ));
+    // XMP beyond the 65502-byte StandardXMP cap needs ExtendedXMP, which is unsupported.
+    assert!(matches!(
+        JpegEncoder::new()
+            .with_xmp(&vec![b' '; 65_503])
+            .encode_image(image(), &mut rejected),
+        Err(Error::Unsupported(_))
+    ));
+    // ICC beyond 255 chunks cannot be indexed by the one-byte count.
+    assert!(matches!(
+        JpegEncoder::new()
+            .with_icc_profile(&vec![0u8; 255 * 65_519 + 1])
+            .encode_image(image(), &mut rejected),
+        Err(Error::InvalidInput(_))
+    ));
+    // Empty payloads are meaningless and rejected.
+    for enc in [
+        JpegEncoder::new().with_exif(b""),
+        JpegEncoder::new().with_xmp(b""),
+        JpegEncoder::new().with_icc_profile(b""),
+    ] {
+        assert!(matches!(
+            enc.encode_image(image(), &mut rejected),
+            Err(Error::InvalidInput(_))
+        ));
+    }
+    // A failed encode writes nothing.
+    assert!(rejected.is_empty());
 }
 
 #[test]

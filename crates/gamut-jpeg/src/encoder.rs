@@ -14,7 +14,7 @@ use crate::bitwriter::BitWriter;
 use crate::huffman::{self, EncTable, TableSpec};
 use crate::marker::{self, DensityUnit};
 use crate::zigzag::ZIGZAG;
-use crate::{progressive, quant};
+use crate::{appmeta, progressive, quant};
 
 /// The largest image dimension the frame header can encode: the SOF0 `X`/`Y` fields are 16-bit
 /// (§B.2.2, Table B.2).
@@ -83,6 +83,9 @@ pub struct JpegEncoder {
     x_density: u16,
     y_density: u16,
     progressive: bool,
+    exif: Option<Vec<u8>>,
+    xmp: Option<Vec<u8>>,
+    icc: Option<Vec<u8>>,
 }
 
 impl Default for JpegEncoder {
@@ -104,6 +107,9 @@ impl JpegEncoder {
             x_density: 1,
             y_density: 1,
             progressive: false,
+            exif: None,
+            xmp: None,
+            icc: None,
         }
     }
 
@@ -159,6 +165,39 @@ impl JpegEncoder {
         self
     }
 
+    /// Embeds EXIF metadata as an APP1 segment (`"Exif\0\0"` + TIFF stream, Exif 3.0 §4.7.2).
+    ///
+    /// `exif` is the TIFF stream beginning `II`/`MM` — e.g. `gamut-exif` output; a blob already
+    /// carrying the `"Exif\0\0"` signature is accepted and not double-prefixed, so bytes read by
+    /// [`crate::metadata`] round-trip verbatim. Must fit the single APP1 segment (at most 65527
+    /// bytes), checked at encode time.
+    #[must_use]
+    pub fn with_exif(mut self, exif: &[u8]) -> Self {
+        let tiff = exif.strip_prefix(appmeta::EXIF_SIG).unwrap_or(exif);
+        self.exif = Some(tiff.to_vec());
+        self
+    }
+
+    /// Embeds an XMP `xpacket` as an APP1 segment (XMP Part 3 §1.1.3).
+    ///
+    /// Takes bytes rather than `&str` because a packet may open with a BOM. The packet must fit
+    /// the single StandardXMP segment (at most 65502 bytes, the spec-stated cap), checked at
+    /// encode time; the ExtendedXMP continuation scheme is not supported.
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: &[u8]) -> Self {
+        self.xmp = Some(xmp.to_vec());
+        self
+    }
+
+    /// Embeds an ICC profile across one or more APP2 `ICC_PROFILE` segments (ICC.1:2001-04
+    /// Annex B.4): 65519-byte chunks carrying a 1-based index and the total count, so up to
+    /// 16 707 345 profile bytes (255 chunks), checked at encode time.
+    #[must_use]
+    pub fn with_icc_profile(mut self, profile: &[u8]) -> Self {
+        self.icc = Some(profile.to_vec());
+        self
+    }
+
     /// The scaled luminance quantization table (natural order) for the configured quality.
     fn luma_quant(&self) -> [u8; 64] {
         quant::scale(&quant::LUMINANCE, self.quality)
@@ -178,10 +217,59 @@ impl JpegEncoder {
         Ok((dims.width as u16, dims.height as u16))
     }
 
-    /// Writes the leading markers common to every stream: SOI, JFIF APP0, and the DQT segment.
+    /// Rejects metadata payloads the APPn framing cannot carry (the caps in [`crate::appmeta`]),
+    /// so [`Self::write_prologue`] stays infallible and no bytes are written before the check.
+    fn check_metadata(&self) -> Result<()> {
+        if let Some(exif) = &self.exif {
+            if exif.is_empty() {
+                return Err(Error::InvalidInput("JPEG: empty EXIF payload"));
+            }
+            if exif.len() > appmeta::MAX_EXIF {
+                return Err(Error::InvalidInput("JPEG: EXIF exceeds one APP1 segment"));
+            }
+        }
+        if let Some(xmp) = &self.xmp {
+            if xmp.is_empty() {
+                return Err(Error::InvalidInput("JPEG: empty XMP payload"));
+            }
+            if xmp.len() > appmeta::MAX_XMP {
+                return Err(Error::Unsupported(
+                    "JPEG: XMP exceeds one APP1 segment (ExtendedXMP not supported)",
+                ));
+            }
+        }
+        if let Some(icc) = &self.icc {
+            if icc.is_empty() {
+                return Err(Error::InvalidInput("JPEG: empty ICC profile"));
+            }
+            if icc.len() > appmeta::MAX_ICC {
+                return Err(Error::InvalidInput(
+                    "JPEG: ICC profile exceeds 255 APP2 segments",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Writes the leading markers common to every stream: SOI, JFIF APP0, the configured metadata
+    /// APP segments, and the DQT segment.
+    ///
+    /// JFIF mandates its APP0 first while Exif 3.0 §4.7.2.1 wants its APP1 immediately after SOI,
+    /// and neither spec references the other; APP0 then APP1 is the libjpeg-family convention that
+    /// XMP Part 3 §1.1.3 records readers must accept. EXIF, XMP, then ICC — all before the first
+    /// SOF, as XMP Part 3 requires.
     fn write_prologue(&self, out: &mut Vec<u8>, quant_tables: &[(u8, &[u8; 64])]) {
         marker::write_marker(out, marker::code::SOI);
         marker::write_app0_jfif(out, self.density_unit, self.x_density, self.y_density);
+        if let Some(exif) = &self.exif {
+            appmeta::write_app1_exif(out, exif);
+        }
+        if let Some(xmp) = &self.xmp {
+            appmeta::write_app1_xmp(out, xmp);
+        }
+        if let Some(icc) = &self.icc {
+            appmeta::write_app2_icc(out, icc);
+        }
         quant::emit_dqt(out, quant_tables);
     }
 }
@@ -400,6 +488,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
     /// to a one-component image; a JFIF APP0 segment is still written.
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
         let (width, height) = Self::check_dimensions(image.dimensions())?;
+        self.check_metadata()?;
         let start = out.len();
 
         let plane = Plane {
@@ -458,6 +547,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
     /// [`ChromaSubsampling`].
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         let (width, height) = Self::check_dimensions(image.dimensions())?;
+        self.check_metadata()?;
         let start = out.len();
         let (w, h) = (usize::from(width), usize::from(height));
 
@@ -607,6 +697,7 @@ mod tests {
         assert_eq!(d.density_unit, DensityUnit::AspectRatio);
         assert_eq!((d.x_density, d.y_density), (1, 1));
         assert!(!d.progressive);
+        assert_eq!((&d.exif, &d.xmp, &d.icc), (&None, &None, &None));
     }
 
     #[test]

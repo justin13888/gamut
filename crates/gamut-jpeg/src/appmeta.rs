@@ -16,6 +16,8 @@
 
 use gamut_core::{Error, Result};
 
+use crate::marker::{code, write_segment_header};
+
 /// APP1 EXIF signature (Exif 3.0 §4.7.2.3): `"Exif"` plus two NUL padding bytes.
 pub(crate) const EXIF_SIG: &[u8] = b"Exif\0\0";
 
@@ -25,6 +27,53 @@ pub(crate) const XMP_SIG: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 
 /// APP2 ICC signature (ICC.1:2001-04 Annex B.4), followed by the chunk index and count bytes.
 pub(crate) const ICC_SIG: &[u8] = b"ICC_PROFILE\0";
+
+/// Largest APPn payload: the two-byte segment length counts itself (T.81 §B.1.1.4).
+const MAX_APP_PAYLOAD: usize = 65533;
+
+/// Largest EXIF TIFF stream embeddable in the single APP1 segment.
+pub(crate) const MAX_EXIF: usize = MAX_APP_PAYLOAD - EXIF_SIG.len();
+
+/// Largest StandardXMP packet: XMP Part 3 §1.1.3 states 65502 explicitly (a stricter bound than
+/// the segment arithmetic allows); packets beyond it need the deferred ExtendedXMP scheme.
+pub(crate) const MAX_XMP: usize = 65502;
+
+/// Profile bytes per ICC chunk: the APP2 payload less the signature, index, and count bytes.
+pub(crate) const ICC_CHUNK: usize = MAX_APP_PAYLOAD - ICC_SIG.len() - 2;
+
+/// Largest embeddable ICC profile: 255 chunks (the count is one byte) of [`ICC_CHUNK`] bytes,
+/// i.e. 16 707 345 bytes (ICC.1:2001-04 Annex B.4).
+pub(crate) const MAX_ICC: usize = 255 * ICC_CHUNK;
+
+/// Appends the APP1 EXIF segment (Exif 3.0 §4.7.2): signature plus the TIFF stream. The caller
+/// pre-validates `tiff.len() <= MAX_EXIF`.
+pub(crate) fn write_app1_exif(out: &mut Vec<u8>, tiff: &[u8]) {
+    write_segment_header(out, code::APP1, 2 + EXIF_SIG.len() + tiff.len());
+    out.extend_from_slice(EXIF_SIG);
+    out.extend_from_slice(tiff);
+}
+
+/// Appends the APP1 XMP segment (XMP Part 3 §1.1.3): the namespace URI plus the `xpacket`. The
+/// caller pre-validates `xpacket.len() <= MAX_XMP`.
+pub(crate) fn write_app1_xmp(out: &mut Vec<u8>, xpacket: &[u8]) {
+    write_segment_header(out, code::APP1, 2 + XMP_SIG.len() + xpacket.len());
+    out.extend_from_slice(XMP_SIG);
+    out.extend_from_slice(xpacket);
+}
+
+/// Appends the profile as APP2 `ICC_PROFILE` segments (ICC.1:2001-04 Annex B.4): [`ICC_CHUNK`]-byte
+/// chunks, each carrying its 1-based index and the shared total count. The caller pre-validates
+/// `1 <= profile.len() <= MAX_ICC`, which bounds the count to the one-byte field.
+pub(crate) fn write_app2_icc(out: &mut Vec<u8>, profile: &[u8]) {
+    let count = profile.len().div_ceil(ICC_CHUNK) as u8;
+    for (i, chunk) in profile.chunks(ICC_CHUNK).enumerate() {
+        write_segment_header(out, code::APP2, 2 + ICC_SIG.len() + 2 + chunk.len());
+        out.extend_from_slice(ICC_SIG);
+        out.push(i as u8 + 1);
+        out.push(count);
+        out.extend_from_slice(chunk);
+    }
+}
 
 /// Returns the TIFF stream of an APP1 EXIF payload, or `None` if the signature does not match.
 pub(crate) fn exif_payload(payload: &[u8]) -> Option<&[u8]> {
