@@ -27,6 +27,7 @@ pub mod cfa_color {
 }
 
 /// How a raw image's samples map to colour.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawPhotometry {
     /// A colour-filter-array (mosaic) image: one sample per pixel, its colour given by the

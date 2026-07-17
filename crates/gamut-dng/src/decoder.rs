@@ -104,6 +104,7 @@ impl<'a> TrackedIfd<'a> {
 }
 
 /// A decoded DNG: the raw sensor image, the camera colour profile, and the declared DNG version.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct DecodedDng {
     /// The raw sensor image (CFA mosaic or linear), with its photometry and levels.

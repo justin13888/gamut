@@ -27,6 +27,7 @@ use crate::values::{Compression, PhotometricInterpretation};
 const MAX_SUBIFD_DEPTH: usize = 16;
 
 /// How serious a reported [`Anomaly`] is.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     /// Out of spec but often benign.
@@ -37,6 +38,7 @@ pub enum Severity {
 
 /// A tag a valid DNG would not be expected to carry — recognised structurally but not part of the
 /// DNG 1.7.1 tag set (see [`tags::is_known_tag`]).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownTag {
     /// The page (top-level IFD index) the tag was found in.
@@ -50,6 +52,7 @@ pub struct UnknownTag {
 }
 
 /// A recognised but out-of-spec or unparsable element a deconstruct flags.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Anomaly {
     /// A tag whose value uses a code this crate does not recognise (e.g. an unknown `Compression`).
@@ -84,6 +87,7 @@ pub enum Anomaly {
 }
 
 /// The result of a strict deconstruct: byte-range accounting plus DNG-specific findings.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct DeconstructReport {
     /// Which file bytes were accounted for, and the gaps/overlaps/trailing that were not.

@@ -17,6 +17,7 @@ use crate::raw::RawImage;
 /// Values are clipped to `[0.0, 1.0]`. The spec makes low clipping optional ("may be clipped",
 /// preserving negatives can help some noise-reduction pipelines); this implementation clips both
 /// ends, matching the Adobe SDK's default-host stage-2 image.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinearImage {
     /// Active-area width in pixels.

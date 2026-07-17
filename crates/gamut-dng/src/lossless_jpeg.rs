@@ -20,6 +20,7 @@
 use gamut_core::{Error, Result};
 
 /// A decoded lossless-JPEG frame.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LosslessJpeg {
     /// Samples per line.
