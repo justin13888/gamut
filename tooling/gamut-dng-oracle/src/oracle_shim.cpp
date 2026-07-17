@@ -10,13 +10,18 @@
 #include "dng_host.h"
 #include "dng_image.h"
 #include "dng_info.h"
+#include "dng_lossless_jpeg.h"
 #include "dng_negative.h"
 #include "dng_pixel_buffer.h"
 #include "dng_rect.h"
+#include "dng_simd_type.h"
+#include "dng_stream.h"
 #include "dng_tag_types.h"
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 namespace {
 
@@ -33,6 +38,44 @@ dng_error_code read_negative(const char *path, dng_host &host, dng_info &info,
   negative->Parse(host, stream, info);
   negative->PostParse(host, stream, info);
   negative->ReadStage1Image(host, stream, info);
+  return dng_error_none;
+}
+
+// Copies a 16-bit-typed `dng_image` into a freshly `malloc`d interleaved `uint16` buffer,
+// filling the out-parameters. Returns `dng_error_none` on success.
+dng_error_code copy_short_image(const dng_image *image, uint32_t *out_w, uint32_t *out_h,
+                                uint32_t *out_planes, uint16_t **out_data, size_t *out_len) {
+  if (image == nullptr) {
+    return dng_error_unknown;
+  }
+  if (image->PixelType() != ttShort) {
+    return dng_error_unsupported_dng;
+  }
+  dng_rect bounds = image->Bounds();
+  uint32 w = static_cast<uint32>(bounds.r - bounds.l);
+  uint32 h = static_cast<uint32>(bounds.b - bounds.t);
+  uint32 planes = image->Planes();
+  size_t count = static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(planes);
+  uint16_t *buffer = static_cast<uint16_t *>(malloc(count * sizeof(uint16_t)));
+  if (buffer == nullptr) {
+    return dng_error_memory;
+  }
+  dng_pixel_buffer pb;
+  pb.fArea = bounds;
+  pb.fPlane = 0;
+  pb.fPlanes = planes;
+  pb.fRowStep = static_cast<int32>(static_cast<size_t>(w) * planes);
+  pb.fColStep = static_cast<int32>(planes);
+  pb.fPlaneStep = 1;
+  pb.fPixelType = ttShort;
+  pb.fPixelSize = static_cast<uint32>(sizeof(uint16_t));
+  pb.fData = buffer;
+  image->Get(pb);
+  *out_w = w;
+  *out_h = h;
+  *out_planes = planes;
+  *out_data = buffer;
+  *out_len = count;
   return dng_error_none;
 }
 
@@ -78,38 +121,83 @@ extern "C" int gdng_read_raw(const char *path, uint32_t *out_w, uint32_t *out_h,
     if (rc != dng_error_none) {
       return rc;
     }
-    const dng_image *image = negative->Stage1Image();
-    if (image == nullptr) {
-      return dng_error_unknown;
+    return copy_short_image(negative->Stage1Image(), out_w, out_h, out_planes, out_data, out_len);
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+}
+
+// Reads the DNG at `path` and returns its stage-2 (linearized) image — the SDK's application of
+// the spec's Chapter-5 "Mapping Raw Values to Linear Reference Values": linearization table,
+// black subtraction (pattern + deltas), rescale, clip. The buffer is active-area-sized,
+// interleaved `uint16` where 0..65535 encodes linear 0.0..1.0 (the default host preserves no
+// black levels, so 0 is black). Caller frees with `gdng_free`. Returns `dng_error_none` on
+// success or the SDK error code.
+extern "C" int gdng_read_linear(const char *path, uint32_t *out_w, uint32_t *out_h,
+                                uint32_t *out_planes, uint16_t **out_data, size_t *out_len) {
+  *out_data = nullptr;
+  *out_w = 0;
+  *out_h = 0;
+  *out_planes = 0;
+  *out_len = 0;
+  try {
+    dng_host host;
+    dng_info info;
+    AutoPtr<dng_negative> negative;
+    dng_error_code rc = read_negative(path, host, info, negative);
+    if (rc != dng_error_none) {
+      return rc;
     }
-    if (image->PixelType() != ttShort) {
-      return dng_error_unsupported_dng;
+    negative->BuildStage2Image(host);
+    return copy_short_image(negative->Stage2Image(), out_w, out_h, out_planes, out_data, out_len);
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+}
+
+namespace {
+
+// Collects the rows DecodeLosslessJPEG spools (native-endian interleaved uint16).
+class buffer_spooler : public dng_spooler {
+public:
+  std::vector<uint8_t> bytes;
+  void Spool(const void *data, uint32 count) override {
+    const uint8_t *p = static_cast<const uint8_t *>(data);
+    bytes.insert(bytes.end(), p, p + count);
+  }
+};
+
+} // namespace
+
+// Decodes a bare lossless-JPEG (SOF3) stream with the SDK's own codec
+// (`DecodeLosslessJPEG<Scalar>`), the reference for gamut-dng's process-14 decoder. The caller
+// supplies the expected sample count (width * height * components) as the decode-size bound; the
+// interleaved `uint16` samples land in a freshly `malloc`d buffer released with `gdng_free`.
+// Returns `dng_error_none` on success or the SDK error code.
+extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t expected_samples,
+                                         uint16_t **out_data, size_t *out_len) {
+  *out_data = nullptr;
+  *out_len = 0;
+  try {
+    dng_stream stream(data, static_cast<uint32>(len));
+    buffer_spooler spooler;
+    uint32 byte_count = static_cast<uint32>(expected_samples * sizeof(uint16_t));
+    DecodeLosslessJPEG<Scalar>(stream, spooler, byte_count, byte_count, false,
+                               static_cast<uint64>(len));
+    if (spooler.bytes.size() != byte_count) {
+      return dng_error_bad_format;
     }
-    dng_rect bounds = image->Bounds();
-    uint32 w = static_cast<uint32>(bounds.r - bounds.l);
-    uint32 h = static_cast<uint32>(bounds.b - bounds.t);
-    uint32 planes = image->Planes();
-    size_t count = static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(planes);
-    uint16_t *buffer = static_cast<uint16_t *>(malloc(count * sizeof(uint16_t)));
+    uint16_t *buffer = static_cast<uint16_t *>(malloc(byte_count));
     if (buffer == nullptr) {
       return dng_error_memory;
     }
-    dng_pixel_buffer pb;
-    pb.fArea = bounds;
-    pb.fPlane = 0;
-    pb.fPlanes = planes;
-    pb.fRowStep = static_cast<int32>(static_cast<size_t>(w) * planes);
-    pb.fColStep = static_cast<int32>(planes);
-    pb.fPlaneStep = 1;
-    pb.fPixelType = ttShort;
-    pb.fPixelSize = static_cast<uint32>(sizeof(uint16_t));
-    pb.fData = buffer;
-    image->Get(pb);
-    *out_w = w;
-    *out_h = h;
-    *out_planes = planes;
+    memcpy(buffer, spooler.bytes.data(), byte_count);
     *out_data = buffer;
-    *out_len = count;
+    *out_len = expected_samples;
     return dng_error_none;
   } catch (const dng_exception &except) {
     return except.ErrorCode();
@@ -118,5 +206,6 @@ extern "C" int gdng_read_raw(const char *path, uint32_t *out_w, uint32_t *out_h,
   }
 }
 
-// Releases a buffer returned by `gdng_read_raw`.
+// Releases a buffer returned by `gdng_read_raw` / `gdng_read_linear` /
+// `gdng_decode_lossless_jpeg`.
 extern "C" void gdng_free(uint16_t *data) { free(data); }

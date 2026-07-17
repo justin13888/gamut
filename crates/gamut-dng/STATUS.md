@@ -35,17 +35,27 @@ encode→decode round-trips guard every lossless path.
 | P6  | —       | Adobe oracle gate on: gamut-encode → `dng_validate`; libtiff IFD-0 cross-check | ✅ done |
 | P7  | Ch4     | `LinearRaw` photometric (demosaiced RGB), samples-per-pixel / photometric handling | ✅ done |
 | P8  | Ch6     | Colour & calibration: ColorMatrix1/2, CameraCalibration, ForwardMatrix, illuminants, AnalogBalance, BaselineExposure, profile name/policy + `CameraProfile` API | ✅ done |
-| P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). LinearizationTable / MaskedAreas / BlackLevelDelta deferred | ✅ done |
+| P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). Completed by #253: the full spec level model (`RawLevels`: BlackLevelRepeatDim pattern, RATIONAL blacks, DeltaH/V, per-plane WhiteLevel, LinearizationTable, MaskedAreas) and the chapter-5 mapping itself (`RawImage::to_linear`, gated ±1 LSB against the Adobe SDK's stage-2 image) | ✅ done |
 | P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
 | P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe | ✅ done |
 | P12 | Ch4     | Deflate/ZIP (8) encode+decode (`miniz_oxide`, zlib format) — CFA + LinearRaw, Adobe-validated | ✅ done |
-| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3, predictor-1, Huffman) — CFA + LinearRaw, Adobe decodes pixel-exact | ✅ done |
+| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope (predictors 1–7, point transform, per-component tables, restarts; SDK-differential) and published the `lossless_jpeg` module | ✅ done |
 | P14 | Ch2     | Tiled raw layout (`TileOffsets`/`TileByteCounts`) | ⏳ deferred |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
 | P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated | ✅ done |
 | P17 | Ch2     | Digests: MD5 `NewRawImageDigest`/`RawImageDigest`/`RawDataUniqueID` | ⏳ deferred |
-| P18 | Ch7     | `OpcodeList1/2/3` container + standard opcode library | ⏳ deferred |
+| P18 | Ch7     | `OpcodeList1/2/3` container + standard opcode library. Container done via #253: typed `OpcodeList`/`Opcode` parse + pass-through write + `DNGBackwardVersion` raising; the standard opcode *processing* library remains deferred | ◑ partial |
 | P19 | —       | Finalization: docs + top-to-bottom API review (CLI N/A — DNG needs raw sensor input, not the CLI's processed PNG/JPEG inputs) | ✅ done |
+
+## Bridge surface for external RAW pipelines (issue #253)
+
+Downstream raw *processors* (e.g. rawshift) consume gamut-dng's decode as their DNG front end and
+run their own develop pipeline on top. #253 completed the standard-compliant surface they bridge
+to: the typed `RawLevels` model (P9), the chapter-5 `RawImage::to_linear` mapping (stage-2
+oracle-gated, so downstreams call it instead of reimplementing the spec), typed opcode-list
+containers (P18, processing still ours to do later), and the hardened, now-public
+`lossless_jpeg` module. Opaque tag blobs are deliberately **not** exposed — the crate parses
+spec structures into typed values and writes them back.
 
 ## Deferred to follow-up campaigns
 
@@ -61,13 +71,16 @@ Adobe + libtiff oracles the same way every phase above does:
 - **Raw digests** (P17) — `NewRawImageDigest`/`RawImageDigest` must bit-match the SDK's internal
   MD5-over-image algorithm; verifying that needs a `qDNGValidate=1` oracle build (the current build
   suppresses digest-mismatch reporting). `RawDataUniqueID` is an opaque MD5 the SDK does not verify.
-- **JPEG XL compression** (`Compression = 52546`, DNG 1.7) — depends on a working `gamut-jxl`
-  encoder; the oracle already links/stubs libjxl so it can read Adobe's JXL sample DNGs.
+- **JPEG XL compression** (`Compression = 52546`, DNG 1.7) — **planned**: decode depends on the
+  tiled layout (P14) landing first (real JXL DNGs, e.g. ProRAW-adjacent files, are tiled) plus a
+  `gamut-jxl` decode path; encode additionally needs the `gamut-jxl` (libjxl) encoder. The oracle
+  already links/stubs libjxl so it can read Adobe's JXL sample DNGs.
 - **Lossy JPEG** (`Compression = 34892`) — skipped as low-value; needs a baseline DCT codec
   (`gamut-tiff` likewise deferred JPEG-in-TIFF).
-- **The opcode lists** (P18) — the `OpcodeList1/2/3` container plus the standard opcode library:
+- **The standard opcode processing library** (P18) — executing the parsed opcodes:
   `WarpRectilinear`/`WarpFisheye`, `FixVignetteRadial`, `FixBadPixelsConstant`/`List`, `TrimBounds`,
-  `MapTable`/`MapPolynomial`, `GainMap`, `DeltaPerRow`/`Col`, `ScalePerRow`/`Col`.
+  `MapTable`/`MapPolynomial`, `GainMap`, `DeltaPerRow`/`Col`, `ScalePerRow`/`Col`,
+  `WarpRectilinear2`. The container/typed lists already round-trip (#253).
 - **Advanced image types** — transparency masks, depth maps, semantic masks, and the enhanced
   image (`NewSubFileType` 4/8/16/0x10004); `ProfileGainTableMap`, `RGBTables`, `ImageStats`,
   `ImageSequenceInfo`, C2PA manifest.
