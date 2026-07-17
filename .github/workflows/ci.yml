@@ -51,6 +51,8 @@ jobs:
         run: mise run fmt-check
       - name: Clippy
         run: mise run lint
+      - name: gamut-ffi feature sync
+        run: mise run check-ffi-features
       - name: Test
         run: mise run test
 
