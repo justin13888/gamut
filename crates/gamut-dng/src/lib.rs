@@ -46,6 +46,7 @@ pub mod metadata;
 pub mod opcode;
 pub mod profile;
 pub mod raw;
+pub mod subimage;
 pub mod tags;
 pub mod values;
 
@@ -70,6 +71,9 @@ pub use metadata::{DngMetadata, ExifMetadata};
 pub use opcode::{Opcode, OpcodeList};
 pub use profile::CameraProfile;
 pub use raw::RawImage;
+pub use subimage::{
+    DepthInfo, MaskSubArea, SemanticMaskInfo, SubImage, SubImageData, SubImageKind,
+};
 pub use values::{
     CalibrationIlluminant, CfaLayout, Compression, PhotometricInterpretation, Predictor,
     PreviewColorSpace, ProfileEmbedPolicy, SampleFormat,
