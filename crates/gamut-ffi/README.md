@@ -15,7 +15,16 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
   here — but only for the `extern "C"` layer (raw pointers, lengths); the safe Rust core underneath
   keeps its `#![forbid(unsafe_code)]` guarantees.
 
-This crate builds as both a `cdylib` and a `staticlib`, and will ship a generated C header.
+This crate builds as both a `cdylib` and a `staticlib`, and will ship a generated C header. It is
+the **single C-distribution crate** of the workspace: its feature table strictly mirrors the
+`gamut` umbrella's (enforced by `mise run check-ffi-features`) and doubles as the packaging
+matrix — the fat release library is a `--features all` build, and slim per-format variants are
+builds of this same crate with a feature subset, not separate crates. Static consumers of the
+fat `staticlib` get dead-code elimination at their final link.
+
+The C API conventions — naming, opaque handles, buffer/error/ownership contracts, panic policy,
+and how the Rust traits map across the boundary — are specified in [DESIGN.md](DESIGN.md)
+(issue #242).
 
 ## Usage
 
@@ -29,17 +38,13 @@ uint8_t *out = NULL;
 size_t out_len = 0;
 int rc = gamut_encode_avif(rgb, width, height, &out, &out_len);
 /* ... use out[0..out_len] ... */
-gamut_free(out, out_len);
+gamut_bytes_free(out, out_len);
 ```
 
 ## Status
 
-Placeholder — implementation pending.
-
-## Roadmap
-
-- `extern "C"` entry points for the implemented encoders (AVIF first) with explicit allocation/free.
-- A generated C header (e.g. via `cbindgen`) and packaging as `cdylib`/`staticlib`.
+Placeholder — the design contract ([DESIGN.md](DESIGN.md)) and the feature table are in place;
+the `extern "C"` surface is the per-crate conversion work tracked in issue #242.
 
 ## License
 

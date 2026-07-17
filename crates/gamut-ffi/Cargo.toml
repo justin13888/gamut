@@ -19,4 +19,44 @@ workspace = true
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
-gamut = { workspace = true, features = ["all"] }
+gamut = { workspace = true }
+
+# Strictly mirrors the `gamut` umbrella's feature table (enforced by `mise run
+# check-ffi-features`): every feature forwards the same-named gamut feature, so gamut-ffi built
+# with feature set F compiles exactly gamut with F. This table is also the C-artifact packaging
+# matrix — the fat release library is a `--features all` build of this crate, and slim
+# per-format variants are just builds with a feature subset (see DESIGN.md).
+[features]
+default = []
+avif = ["gamut/avif"]
+jxl = ["gamut/jxl"]
+webp = ["gamut/webp"]
+heic = ["gamut/heic"]
+vvc = ["gamut/vvc"]
+av1 = ["gamut/av1"]
+av2 = ["gamut/av2"]
+tiff = ["gamut/tiff"]
+dng = ["gamut/dng"]
+png = ["gamut/png"]
+jpeg = ["gamut/jpeg"]
+isobmff = ["gamut/isobmff"]
+primitives = ["gamut/primitives"]
+tonemap = ["gamut/tonemap"]
+metadata = ["gamut/metadata"]
+all = [
+    "avif",
+    "jxl",
+    "webp",
+    "heic",
+    "vvc",
+    "av1",
+    "av2",
+    "tiff",
+    "dng",
+    "png",
+    "jpeg",
+    "isobmff",
+    "metadata",
+    "primitives",
+    "tonemap",
+]
