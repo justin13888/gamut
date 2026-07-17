@@ -18,6 +18,7 @@ use gamut_core::{
     Indexed8, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
+use crate::adam7;
 use crate::chunk::ChunkReader;
 use crate::color::ColorType;
 use crate::filter::{self, FilterType};
@@ -248,16 +249,15 @@ impl PngDecoder {
         if native_bytes > self.max_image_bytes {
             return Err(Error::Unsupported("PNG: image exceeds the size limit"));
         }
-        expected_stream_len(header).ok_or(Error::InvalidInput("PNG: image dimensions overflow"))
+        adam7::expected_stream_len(header)
+            .ok_or(Error::InvalidInput("PNG: image dimensions overflow"))
     }
 
-    /// Runs the shared pipeline: parse → validate PLTE/tRNS → inflate → defilter → unpack.
+    /// Runs the shared pipeline: parse → validate PLTE/tRNS → inflate → per-pass defilter,
+    /// unpack, and (for Adam7) recomposition.
     fn decode_native(&self, data: &[u8]) -> Result<NativeImage> {
         let parsed = self.parse_stream(data)?;
         let header = parsed.header;
-        if header.interlaced {
-            return Err(Error::Unsupported("PNG: Adam7 decode lands in a later phase"));
-        }
         let (palette, trns_key) = validate_plte_and_trns(&header, parsed.plte, parsed.trns)?;
 
         let expected = self.check_limits(&header)?;
@@ -266,21 +266,17 @@ impl PngDecoder {
             return Err(Error::InvalidInput("PNG: IDAT is shorter than the image"));
         }
 
-        let (width, height) = (header.width as usize, header.height as usize);
-        let row_bytes = packed_row_bytes(header.width, header.bits_per_pixel())
-            .ok_or(Error::InvalidInput("PNG: image dimensions overflow"))?;
-        let bpp = filter_stride(&header);
-        let packed = unfilter_stream(&stream, row_bytes, height, bpp)?;
-
         let samples = match header.bit_depth {
-            16 => NativeSamples::B16(
+            16 => NativeSamples::B16(decode_canvas(&stream, &header, |packed, _, _| {
                 packed
                     .chunks_exact(2)
                     .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
-                    .collect(),
-            ),
-            8 => NativeSamples::B8(packed),
-            depth => NativeSamples::B8(pack::unpack_scanlines(&packed, width, height, depth)),
+                    .collect()
+            })?),
+            8 => NativeSamples::B8(decode_canvas(&stream, &header, |packed, _, _| packed)?),
+            depth => NativeSamples::B8(decode_canvas(&stream, &header, |packed, pw, ph| {
+                pack::unpack_scanlines(&packed, pw, ph, depth)
+            })?),
         };
         // §11.2.2: every pixel of an indexed image must reference an existing palette entry
         // (indexed depths are at most 8, so the samples are always the byte variant).
@@ -391,11 +387,44 @@ fn filter_stride(header: &Ihdr) -> usize {
     (header.bits_per_pixel() / 8).max(1)
 }
 
-/// The exact byte length of the filtered scanline stream: per scanline, one filter-type byte
-/// plus the packed row (§7.2/§7.3). `None` on arithmetic overflow.
-fn expected_stream_len(header: &Ihdr) -> Option<usize> {
-    let row = packed_row_bytes(header.width, header.bits_per_pixel())?;
-    (header.height as usize).checked_mul(row.checked_add(1)?)
+/// Defilters, unpacks (via `to_samples`), and scatters every (reduced) image of the filtered
+/// scanline stream onto a full-size canvas. Non-interlaced images run the same loop with a
+/// single full-frame pass. `stream` is exactly [`adam7::expected_stream_len`] bytes.
+fn decode_canvas<S: Copy + Default>(
+    stream: &[u8],
+    header: &Ihdr,
+    to_samples: impl Fn(Vec<u8>, usize, usize) -> Vec<S>,
+) -> Result<Vec<S>> {
+    let overflow = || Error::InvalidInput("PNG: image dimensions overflow");
+    let (width, height) = (header.width as usize, header.height as usize);
+    let channels = header.color.channels();
+    let canvas_len = width
+        .checked_mul(height)
+        .and_then(|px| px.checked_mul(channels))
+        .ok_or_else(overflow)?;
+    let mut canvas = vec![S::default(); canvas_len];
+    let stride = filter_stride(header);
+    let mut rest = stream;
+    for pass in adam7::passes_for(header.interlaced) {
+        let (pass_width, pass_height) = adam7::pass_dimensions(pass, header.width, header.height);
+        if pass_width == 0 || pass_height == 0 {
+            continue; // absent from the stream, filter bytes included (§7.3)
+        }
+        let (pass_width, pass_height) = (pass_width as usize, pass_height as usize);
+        let row_bytes = packed_row_bytes(pass_width as u32, header.bits_per_pixel())
+            .ok_or_else(overflow)?;
+        let pass_len = pass_height
+            .checked_mul(row_bytes + 1)
+            .ok_or_else(overflow)?;
+        let (segment, remaining) = rest
+            .split_at_checked(pass_len)
+            .ok_or(Error::InvalidInput("PNG: IDAT is shorter than the image"))?;
+        rest = remaining;
+        let packed = unfilter_stream(segment, row_bytes, pass_height, stride)?;
+        let samples = to_samples(packed, pass_width, pass_height);
+        adam7::scatter(&mut canvas, width, pass, &samples, pass_width, channels);
+    }
+    Ok(canvas)
 }
 
 /// Defilters a scanline stream (`height` rows of `1 + row_bytes` bytes) into packed raw rows
@@ -860,6 +889,63 @@ mod tests {
             .flat_map(|&idx| rgb[usize::from(idx)])
             .collect();
         assert_eq!(decoded.as_samples(), expected);
+    }
+
+    /// Hand-assembles a PNG from raw parts (the encoder cannot write interlaced files).
+    fn build_png(width: u32, height: u32, bit_depth: u8, interlace: u8, stream: &[u8]) -> Vec<u8> {
+        let mut png = crate::chunk::SIGNATURE.to_vec();
+        let mut ihdr_data = [0u8; 13];
+        ihdr_data[0..4].copy_from_slice(&width.to_be_bytes());
+        ihdr_data[4..8].copy_from_slice(&height.to_be_bytes());
+        ihdr_data[8] = bit_depth;
+        ihdr_data[9] = 0; // greyscale
+        ihdr_data[12] = interlace;
+        crate::chunk::write_chunk(&mut png, *b"IHDR", &ihdr_data);
+        let mut idat = Vec::new();
+        gamut_deflate::DeflateEncoder::new().zlib_compress(stream, &mut idat);
+        crate::chunk::write_chunk(&mut png, *b"IDAT", &idat);
+        crate::chunk::write_chunk(&mut png, *b"IEND", &[]);
+        png
+    }
+
+    #[test]
+    fn adam7_golden_3x3() {
+        // A 3×3 grey8 image with values 1..=9 row-major transmits as five non-empty passes:
+        // pass 1 → (0,0); pass 4 → (2,0); pass 5 → (0,2),(2,2); pass 6 → (1,0),(1,2);
+        // pass 7 → (0,1),(1,1),(2,1). Every scanline carries a filter-type byte (None here).
+        let stream = [
+            0, 1, // pass 1
+            0, 3, // pass 4
+            0, 7, 9, // pass 5
+            0, 2, 0, 8, // pass 6 (two 1-pixel rows)
+            0, 4, 5, 6, // pass 7
+        ];
+        let png = build_png(3, 3, 8, 1, &stream);
+        let img: ImageBuf<Gray8> = PngDecoder::new().decode_image(&png).unwrap();
+        assert_eq!(img.as_samples(), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn adam7_passes_defilter_independently() {
+        // An Up filter in the first row of a *later* pass must reference that pass's zero row,
+        // not the previous pass's last row: pass 7 row filtered Up from zero reconstructs as-is.
+        let stream = [
+            0, 1, // pass 1
+            0, 3, // pass 4
+            1, 7, 2, // pass 5: Sub -> 7, 9
+            2, 2, 2, 6, // pass 6: two rows, Up chains 2 then 8
+            2, 4, 5, 6, // pass 7: Up over the pass's own zero row
+        ];
+        let png = build_png(3, 3, 8, 1, &stream);
+        let img: ImageBuf<Gray8> = PngDecoder::new().decode_image(&png).unwrap();
+        assert_eq!(img.as_samples(), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn adam7_1x1_has_a_single_pass_pixel() {
+        let png = build_png(1, 1, 8, 1, &[0, 42]);
+        let img: ImageBuf<Gray8> = PngDecoder::new().decode_image(&png).unwrap();
+        assert_eq!(img.as_samples(), [42]);
     }
 
     #[test]

@@ -27,6 +27,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod adam7;
 mod ancillary;
 mod chunk;
 mod color;
