@@ -1,13 +1,14 @@
-//! `gamut inspect` — strict "deconstruct" of a TIFF or DNG (issue #197).
+//! `gamut inspect` — strict "deconstruct" of a TIFF or DNG (issues #197/#263).
 //!
-//! Walks the entire container, accounts every byte, and flags anything unrecognised (unknown
-//! tags, unknown field types, out-of-spec codes, unaccounted bytes). Prints a report to stdout and
-//! exits non-zero when the file is not fully accounted for — usable as an archival CI gate.
+//! Walks the entire container, classifies every byte into typed segments, and flags anything
+//! unrecognised (unknown tags, unknown field types, out-of-spec codes, unclassified bytes).
+//! Prints a report to stdout and exits non-zero when the file is not fully accounted for —
+//! usable as an archival CI gate.
 
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
-use gamut::ifd::{CoverageReport, UnknownField};
+use gamut::ifd::SegmentReport;
 
 use crate::error::CliError;
 
@@ -38,11 +39,11 @@ pub(crate) enum Format {
 
 /// A format-agnostic view of a deconstruct report, for printing.
 struct Summary {
-    coverage: CoverageReport,
-    unknown_fields: Vec<UnknownField>,
+    segments: SegmentReport,
+    unknown_fields: Vec<String>,
     unknown_tags: Vec<String>,
     anomalies: Vec<String>,
-    fully_covered: bool,
+    fully_classified: bool,
     fully_accounted: bool,
 }
 
@@ -66,9 +67,9 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
         Ok(())
     } else {
         Err(CliError::NotFullyAccounted(format!(
-            "{}: not fully accounted — {} unaccounted byte(s), {} unknown tag(s), {} unknown field type(s), {} anomaly/ies",
+            "{}: not fully accounted — {} unclassified byte(s), {} unknown tag(s), {} unknown field type(s), {} anomaly/ies",
             args.input.display(),
-            summary.coverage.unaccounted_bytes(),
+            summary.segments.unclassified_bytes(),
             summary.unknown_tags.len(),
             summary.unknown_fields.len(),
             summary.anomalies.len(),
@@ -92,8 +93,18 @@ fn sniff(data: &[u8]) -> Format {
 /// Collapses a TIFF report into the printable [`Summary`].
 fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
     use gamut::tiff::Anomaly;
-    let fully_covered = report.is_fully_covered();
+    let fully_classified = report.is_fully_classified();
     let fully_accounted = report.is_fully_accounted();
+    let unknown_fields = report
+        .unknown_fields
+        .iter()
+        .map(|u| {
+            format!(
+                "page {} tag {:#06x} type {} (count {})",
+                u.page, u.tag, u.type_code, u.count
+            )
+        })
+        .collect();
     let unknown_tags = report
         .unknown_tags
         .iter()
@@ -135,11 +146,11 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
         })
         .collect();
     Summary {
-        coverage: report.coverage,
-        unknown_fields: report.unknown_fields,
+        segments: report.segments,
+        unknown_fields,
         unknown_tags,
         anomalies,
-        fully_covered,
+        fully_classified,
         fully_accounted,
     }
 }
@@ -147,8 +158,18 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
 /// Collapses a DNG report into the printable [`Summary`].
 fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
     use gamut::dng::Anomaly;
-    let fully_covered = report.is_fully_covered();
+    let fully_classified = report.is_fully_classified();
     let fully_accounted = report.is_fully_accounted();
+    let unknown_fields = report
+        .unknown_fields
+        .iter()
+        .map(|u| {
+            format!(
+                "page {} tag {:#06x} type {} (count {})",
+                u.page, u.tag, u.type_code, u.count
+            )
+        })
+        .collect();
     let unknown_tags = report
         .unknown_tags
         .iter()
@@ -168,27 +189,33 @@ fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
                 tag,
                 code,
                 detail,
+                ..
             } => {
                 format!("[error] page {page}: {detail} (tag {tag:#06x}, code {code})")
             }
-            Anomaly::UnparsableTag { page, tag, detail } => {
+            Anomaly::UnparsableTag {
+                page, tag, detail, ..
+            } => {
                 format!("[error] page {page}: {detail} (tag {tag:#06x})")
             }
             Anomaly::Structure {
                 page,
                 detail,
                 severity,
+                ..
             } => {
                 format!("[{}] page {page}: {detail}", severity_label_dng(*severity))
             }
+            // `Anomaly` is non-exhaustive; render future categories generically.
+            other => format!("[error] {other:?}"),
         })
         .collect();
     Summary {
-        coverage: report.coverage,
-        unknown_fields: report.unknown_fields,
+        segments: report.segments,
+        unknown_fields,
         unknown_tags,
         anomalies,
-        fully_covered,
+        fully_classified,
         fully_accounted,
     }
 }
@@ -208,70 +235,78 @@ fn severity_label_dng(severity: gamut::dng::Severity) -> &'static str {
     match severity {
         gamut::dng::Severity::Warning => "warning",
         gamut::dng::Severity::Error => "error",
+        // `Severity` is non-exhaustive; treat future levels as errors (the conservative label).
+        _ => "error",
     }
 }
 
 /// Prints the human-readable report to stdout.
 fn print_summary(path: &std::path::Path, format: Format, s: &Summary) {
-    let cov = &s.coverage;
-    let pct = if cov.file_len == 0 {
+    let seg = &s.segments;
+    let classified = seg.file_len - seg.unclassified_bytes();
+    let pct = if seg.file_len == 0 {
         100.0
     } else {
-        cov.covered_bytes as f64 / cov.file_len as f64 * 100.0
+        classified as f64 / seg.file_len as f64 * 100.0
     };
     println!("inspecting {} as {}", path.display(), format_name(format));
     println!(
-        "  covered:      {} / {} bytes ({pct:.1}%)",
-        cov.covered_bytes, cov.file_len
+        "  classified:    {classified} / {} bytes ({pct:.1}%) across {} segment(s)",
+        seg.file_len,
+        seg.segments.len()
     );
-    println!("  unaccounted:  {} bytes", cov.unaccounted_bytes());
+    println!("  unclassified:  {} bytes", seg.unclassified_bytes());
 
-    if let Some(t) = &cov.trailing {
-        println!("  trailing:     {} bytes at offset {}", t.len, t.start);
-    }
     print_ranges(
-        "gaps",
-        &cov.gaps
+        "unclassified ranges",
+        &seg.unclassified
             .iter()
             .map(|g| (g.start, g.len))
             .collect::<Vec<_>>(),
     );
-    if !cov.overlaps.is_empty() {
-        println!("  overlaps:     {}", cov.overlaps.len());
-        for o in cov.overlaps.iter().take(MAX_LIST) {
+    if !seg.conflicts.is_empty() {
+        println!("  conflicts:     {}", seg.conflicts.len());
+        for c in seg.conflicts.iter().take(MAX_LIST) {
             println!(
                 "    - [{}, {}) overlaps [{}, {})",
-                o.b.start,
-                o.b.end(),
-                o.a.start,
-                o.a.end()
+                c.b.range.start,
+                c.b.range.end(),
+                c.a.range.start,
+                c.a.range.end()
             );
         }
     }
+    if !seg.shared.is_empty() {
+        println!("  shared values: {} (legal TIFF sharing)", seg.shared.len());
+    }
     print_ranges(
-        "out-of-bounds",
-        &cov.out_of_bounds
+        "out-of-bounds claims",
+        &seg.out_of_bounds
+            .iter()
+            .map(|o| (o.range.start, o.range.len))
+            .collect::<Vec<_>>(),
+    );
+    // The dual-ledger parser cross-check: non-empty lists here are gamut bugs, not file defects.
+    print_ranges(
+        "unclaimed reads (parser defect)",
+        &seg.unclaimed_reads
             .iter()
             .map(|r| (r.start, r.len))
             .collect::<Vec<_>>(),
     );
-
-    print_lines(
-        "unknown field types",
-        &s.unknown_fields
+    print_ranges(
+        "unread claims (parser defect)",
+        &seg.unread_claims
             .iter()
-            .map(|u| {
-                format!(
-                    "tag {:#06x} type {} (count {}) at ifd offset {}",
-                    u.tag, u.type_code, u.count, u.ifd_offset
-                )
-            })
+            .map(|c| (c.range.start, c.range.len))
             .collect::<Vec<_>>(),
     );
+
+    print_lines("unknown field types", &s.unknown_fields);
     print_lines("unknown tags", &s.unknown_tags);
     print_lines("anomalies", &s.anomalies);
 
-    println!("  fully covered:    {}", yes_no(s.fully_covered));
+    println!("  fully classified: {}", yes_no(s.fully_classified));
     println!("  fully accounted:  {}", yes_no(s.fully_accounted));
 }
 

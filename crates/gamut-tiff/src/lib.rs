@@ -66,16 +66,18 @@ mod writer;
 
 pub use compression::Compression;
 pub use decoder::TiffDecoder;
-pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstruct};
+pub use deconstruct::{
+    Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
+};
 pub use encoder::TiffEncoder;
 // The structural IFD core lives in gamut-ifd; re-export the types a gamut-tiff user can touch —
 // the read/write spine plus every type reachable from this crate's own public items
-// (`DeconstructReport` exposes `CoverageReport`/`UnknownField`, `CoverageReport` exposes
-// `Range`/`Overlap`, and `Ifd`'s accessors return `SubIfd`) — so no direct gamut-ifd dependency
-// is ever needed to name them.
+// (`DeconstructReport` exposes `SegmentReport`, which exposes `Segment`/`SpanKind`/`DataLabel`/
+// `Range`/`Conflict`/`SharedSpan`; `Value::Unknown` carries `UnknownValue`; and `Ifd`'s
+// accessors return `SubIfd`) — so no direct gamut-ifd dependency is ever needed to name them.
 pub use gamut_ifd::{
-    ByteOrder, CoverageReport, Field, FieldType, Ifd, Overlap, Range, SubIfd, TiffFile,
-    UnknownField, Value, Variant, read, write,
+    ByteOrder, Conflict, DataLabel, Field, FieldType, Ifd, Range, Segment, SegmentReport,
+    SharedSpan, SpanKind, SubIfd, TiffFile, UnknownValue, Value, Variant, read, write,
 };
 pub use ifd::{PhotometricInterpretation, Predictor};
 pub use palette::Palette8;

@@ -84,6 +84,20 @@ pub fn standard_data_extents(ifd: &Ifd, sink: &mut dyn FnMut(u64, u64, DataLabel
     }
 }
 
+/// Why a sub-IFD pointer target was skipped.
+///
+/// `#[non_exhaustive]`: further reasons can be added without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SkipReason {
+    /// The target could not be parsed as a directory.
+    Unparseable,
+    /// The target offset was already visited — a pointer cycle.
+    Cycle,
+    /// The target lies beyond the nesting depth guard.
+    TooDeep,
+}
+
 /// A lenient observation the audit walk made about the *file* (as opposed to the byte-level
 /// verdicts in the [`SegmentReport`]).
 ///
@@ -91,18 +105,23 @@ pub fn standard_data_extents(ifd: &Ifd, sink: &mut dyn FnMut(u64, u64, DataLabel
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AuditFinding {
-    /// A sub-IFD pointer target that could not be followed: unparseable, revisited (a cycle),
-    /// or nested beyond the depth guard. Its bytes stay unclassified.
+    /// A sub-IFD pointer target that could not be followed; its bytes stay unclassified.
     SkippedSubIfd {
+        /// The top-level page the pointer was reached from.
+        page: usize,
         /// The pointer tag that named the target.
         tag: u16,
         /// The target offset.
         offset: u64,
+        /// Why the target was skipped.
+        reason: SkipReason,
     },
     /// A followed sub-IFD carried a non-zero next-IFD link — out of spec for the standard
     /// pointer tags. The chained directory was followed, accounted, and appended to the same
     /// pointer group.
     ChainedSubIfd {
+        /// The top-level page the pointer was reached from.
+        page: usize,
         /// The pointer tag whose target carried the chain.
         tag: u16,
         /// The directory whose next-IFD link was non-zero.
@@ -143,7 +162,7 @@ pub fn audit<S: ReadAt>(source: S, spec: &dyn AuditSpec) -> Result<Audit> {
         let mut reader = IfdReader::open(&mut tracked)?;
         let mut file = reader.read_file_audited(&mut map)?;
         let mut visited: Vec<u64> = Vec::new();
-        for ifd in &mut file.ifds {
+        for (page, ifd) in file.ifds.iter_mut().enumerate() {
             declare_extents(spec, ifd, &mut map);
             follow_subifds(
                 &mut reader,
@@ -151,6 +170,7 @@ pub fn audit<S: ReadAt>(source: S, spec: &dyn AuditSpec) -> Result<Audit> {
                 spec,
                 ifd,
                 &mut visited,
+                page,
                 1,
                 &mut findings,
             )?;
@@ -181,12 +201,17 @@ fn declare_extents(spec: &dyn AuditSpec, ifd: &Ifd, map: &mut SegmentMap) {
 /// (its extents declared, its own pointers followed recursively); an unparseable, cyclic, or
 /// too-deep target becomes a [`AuditFinding::SkippedSubIfd`]; a non-zero next-IFD link on a
 /// target is followed as [`AuditFinding::ChainedSubIfd`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal recursive walk threading its full context"
+)]
 fn follow_subifds<S: ReadAt>(
     reader: &mut IfdReader<S>,
     map: &mut SegmentMap,
     spec: &dyn AuditSpec,
     ifd: &mut Ifd,
     visited: &mut Vec<u64>,
+    page: usize,
     depth: usize,
     findings: &mut Vec<AuditFinding>,
 ) -> Result<()> {
@@ -198,8 +223,20 @@ fn follow_subifds<S: ReadAt>(
         for head in offsets {
             let mut offset = head;
             while offset != 0 {
-                if depth + 1 > MAX_SUBIFD_DEPTH || visited.contains(&offset) {
-                    findings.push(AuditFinding::SkippedSubIfd { tag, offset });
+                let refusal = if depth + 1 > MAX_SUBIFD_DEPTH {
+                    Some(SkipReason::TooDeep)
+                } else if visited.contains(&offset) {
+                    Some(SkipReason::Cycle)
+                } else {
+                    None
+                };
+                if let Some(reason) = refusal {
+                    findings.push(AuditFinding::SkippedSubIfd {
+                        page,
+                        tag,
+                        offset,
+                        reason,
+                    });
                     break;
                 }
                 visited.push(offset);
@@ -208,15 +245,29 @@ fn follow_subifds<S: ReadAt>(
                     // Transport failures abort the audit; file defects are findings.
                     Err(e @ Error::Io(_)) => return Err(e),
                     Err(_) => {
-                        findings.push(AuditFinding::SkippedSubIfd { tag, offset });
+                        findings.push(AuditFinding::SkippedSubIfd {
+                            page,
+                            tag,
+                            offset,
+                            reason: SkipReason::Unparseable,
+                        });
                         break;
                     }
                 };
                 declare_extents(spec, &child, map);
-                follow_subifds(reader, map, spec, &mut child, visited, depth + 1, findings)?;
+                follow_subifds(
+                    reader,
+                    map,
+                    spec,
+                    &mut child,
+                    visited,
+                    page,
+                    depth + 1,
+                    findings,
+                )?;
                 children.push(child);
                 if next != 0 {
-                    findings.push(AuditFinding::ChainedSubIfd { tag, offset });
+                    findings.push(AuditFinding::ChainedSubIfd { page, tag, offset });
                 }
                 offset = next;
             }
@@ -297,8 +348,10 @@ mod tests {
         assert_eq!(
             out.findings,
             vec![AuditFinding::SkippedSubIfd {
+                page: 0,
                 tag: tags::SUB_IFDS,
                 offset: 0xFFFF,
+                reason: SkipReason::Unparseable,
             }]
         );
         // The stale pointer stays in place as a field (nothing was resolved).
@@ -324,8 +377,10 @@ mod tests {
         assert_eq!(
             out.findings,
             vec![AuditFinding::SkippedSubIfd {
+                page: 0,
                 tag: tags::SUB_IFDS,
                 offset: 26,
+                reason: SkipReason::Cycle,
             }]
         );
         // The child itself was parsed and accounted before the cycle was refused.
@@ -354,6 +409,7 @@ mod tests {
         assert_eq!(
             out.findings,
             vec![AuditFinding::ChainedSubIfd {
+                page: 0,
                 tag: tags::SUB_IFDS,
                 offset: 26,
             }]

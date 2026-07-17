@@ -1,30 +1,26 @@
-//! Strict "deconstruct" decoding: walk the whole TIFF and prove every byte was accounted for.
+//! Strict "deconstruct" decoding: walk the whole TIFF and prove every byte is classified.
 //!
 //! Ordinary decoding reads the strips/tiles and tags it needs and ignores the rest. For archival
-//! / critical use [`deconstruct`] walks the entire container — the header, every page IFD and
-//! image sub-IFD, every strip/tile byte range, and the Exif/GPS metadata sub-IFDs — marking each
-//! consumed byte into a [`gamut_ifd::Coverage`] and layering TIFF tag knowledge on top. The
-//! resulting [`DeconstructReport`] surfaces unaccounted bytes (gaps / trailing / overlaps),
-//! unknown field types, unknown/private tags, and out-of-spec codes instead of silently dropping
-//! them.
+//! / critical use [`deconstruct`] drives the shared structural auditor ([`gamut_ifd::audit`],
+//! issue #263) over the entire container — the header, every page IFD and image sub-IFD, every
+//! strip/tile/free/embedded-JPEG byte range, and the Exif/GPS metadata sub-IFDs — then layers
+//! TIFF tag knowledge on top. The resulting [`DeconstructReport`] carries the byte-level
+//! [`SegmentReport`] (every byte typed, or precisely what was not — including the dual-ledger
+//! parser cross-check) plus unknown field types, unknown/private tags, and out-of-spec codes.
 //!
-//! It is **collect-and-report, not fail-fast**: it runs the same structural walk the decoder
-//! does and returns a report for the caller to judge; it errors only when the container itself is
-//! unreadable (a malformed header or a truncated IFD), exactly as [`gamut_ifd::read`] would.
+//! It is **collect-and-report, not fail-fast**: it errors only when the container itself is
+//! unreadable (a malformed header or a truncated top-level chain), exactly as
+//! [`gamut_ifd::read`] would.
 
 use gamut_core::{ImageBuf, Result, Rgb8};
 use gamut_ifd::{
-    ByteOrder, Coverage, CoverageReport, Ifd, UnknownField, Variant, read_ifd_at_with_coverage,
-    read_with_coverage,
+    AuditFinding, Ifd, SegmentReport, SkipReason, StandardAuditSpec, Value, audit as ifd_audit,
 };
 
 use crate::compression::Compression;
 use crate::decoder::TiffDecoder;
 use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::tags;
-
-/// An upper bound on sub-IFD nesting, guarding the recursive walk against malformed/looping trees.
-const MAX_SUBIFD_DEPTH: usize = 16;
 
 /// How serious a reported [`Anomaly`] is.
 ///
@@ -54,6 +50,24 @@ pub struct UnknownTag {
     /// so that field types this crate does not recognise are still representable.
     pub field_type: u16,
     /// The tag's value count.
+    pub count: u64,
+}
+
+/// An IFD entry whose field-type code is unrecognised. The entry is **preserved verbatim** in
+/// the parse (as a [`gamut_ifd::Value::Unknown`]) — reported here because its out-of-line
+/// payload, if any, is unsizable and therefore unclassifiable.
+///
+/// Non-exhaustive: fields may be added as the deconstruct grows more precise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UnknownFieldType {
+    /// The page (top-level IFD index) the entry was found in.
+    pub page: usize,
+    /// The entry's tag.
+    pub tag: u16,
+    /// The unrecognised on-disk field-type code.
+    pub type_code: u16,
+    /// The entry's declared value count (untrusted — the element size is unknown).
     pub count: u64,
 }
 
@@ -99,16 +113,18 @@ pub enum Anomaly {
     },
 }
 
-/// The result of a strict deconstruct: byte-range accounting plus TIFF-specific findings.
+/// The result of a strict deconstruct: byte-level classification plus TIFF-specific findings.
 ///
 /// Non-exhaustive: report categories may be added without a breaking change.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct DeconstructReport {
-    /// Which file bytes were accounted for, and the gaps/overlaps/trailing that were not.
-    pub coverage: CoverageReport,
-    /// IFD entries whose field-type code was unrecognised (and thus skipped by the reader).
-    pub unknown_fields: Vec<UnknownField>,
+    /// The byte-level verdict: every byte of the file typed ([`SegmentReport::segments`]), or
+    /// precisely what was not — unclassified ranges, conflicts, out-of-bounds claims, and the
+    /// dual-ledger parser cross-check.
+    pub segments: SegmentReport,
+    /// IFD entries whose field-type code was unrecognised (preserved verbatim in the parse).
+    pub unknown_fields: Vec<UnknownFieldType>,
     /// Tags not part of the recognised TIFF tag set.
     pub unknown_tags: Vec<UnknownTag>,
     /// Recognised-but-out-of-spec codes, unparsable tags, and structural problems.
@@ -116,86 +132,89 @@ pub struct DeconstructReport {
 }
 
 impl DeconstructReport {
-    /// Whether every byte of the file was accounted for exactly once (delegates to
-    /// [`CoverageReport::is_fully_covered`]). Independent of whether every tag/code was recognised.
+    /// Whether every byte of the file maps to exactly one typed segment (delegates to
+    /// [`SegmentReport::is_fully_classified`] — zero tolerance, alignment padding included).
+    /// Independent of whether every tag/code was recognised.
     #[must_use]
-    pub fn is_fully_covered(&self) -> bool {
-        self.coverage.is_fully_covered()
+    pub fn is_fully_classified(&self) -> bool {
+        self.segments.is_fully_classified()
     }
 
-    /// Whether the file is pristine for archival: fully covered, with no unknown field types, no
-    /// unknown tags, and no anomalies.
+    /// Whether the file is pristine for archival: fully classified, with no unknown field
+    /// types, no unknown tags, and no anomalies.
     #[must_use]
     pub fn is_fully_accounted(&self) -> bool {
-        self.coverage.is_fully_covered()
+        self.segments.is_fully_classified()
             && self.unknown_fields.is_empty()
             && self.unknown_tags.is_empty()
             && self.anomalies.is_empty()
     }
 }
 
-/// Walks `data` and returns a [`DeconstructReport`] accounting every byte.
+/// Walks `data` and returns a [`DeconstructReport`] classifying every byte.
 ///
 /// # Errors
 ///
 /// Returns [`gamut_core::Error::InvalidInput`] only when the container is unreadable (bad header,
 /// truncated/looping IFD chain) — the same conditions under which [`gamut_ifd::read`] fails.
-/// Unknown tags, unknown field types, out-of-spec codes, and unaccounted bytes are reported, not
+/// Unknown tags, unknown field types, out-of-spec codes, and unclassified bytes are reported, not
 /// errored.
 pub fn deconstruct(data: &[u8]) -> Result<DeconstructReport> {
-    let mut cov = Coverage::new(data.len() as u64);
-    let mut unknown_fields = Vec::new();
-    let file = read_with_coverage(data, &mut cov, &mut unknown_fields)?;
-    let mut d = Deconstructor {
-        data,
-        order: file.order,
-        variant: file.variant,
-        cov,
-        unknown_fields,
-        unknown_tags: Vec::new(),
-        anomalies: Vec::new(),
-        visited: Vec::new(),
-    };
-    for (page, ifd) in file.ifds.iter().enumerate() {
-        d.account_image_ifd(ifd, page, 0);
+    // The standard audit spec covers everything TIFF 6.0 locates structurally: the pointer tags
+    // (SubIFDs/Exif/GPS/Interop) and the data extents (strips, tiles, free ranges, embedded
+    // JPEG) — all u64-native.
+    let audit = ifd_audit(data, &StandardAuditSpec)?;
+    let mut findings = Findings::default();
+    for (page, ifd) in audit.file.ifds.iter().enumerate() {
+        findings.check_image_ifd(ifd, page);
     }
-    let coverage = d.cov.finish();
+    findings.map_audit_findings(&audit.findings);
     Ok(DeconstructReport {
-        coverage,
-        unknown_fields: d.unknown_fields,
-        unknown_tags: d.unknown_tags,
-        anomalies: d.anomalies,
+        segments: audit.report,
+        unknown_fields: findings.unknown_fields,
+        unknown_tags: findings.unknown_tags,
+        anomalies: findings.anomalies,
     })
 }
 
-/// Accumulates the byte-range accounting and TIFF findings while walking the IFD tree.
-struct Deconstructor<'a> {
-    data: &'a [u8],
-    order: ByteOrder,
-    variant: Variant,
-    cov: Coverage,
-    unknown_fields: Vec<UnknownField>,
+/// Accumulates the TIFF-level findings over the audited tree.
+#[derive(Default)]
+struct Findings {
+    unknown_fields: Vec<UnknownFieldType>,
     unknown_tags: Vec<UnknownTag>,
     anomalies: Vec<Anomaly>,
-    /// Sub-IFD offsets already visited, to break cycles across the whole tree.
-    visited: Vec<u64>,
 }
 
-impl Deconstructor<'_> {
-    /// Accounts an image IFD (a page or an image sub-IFD): its tags, codes, pixel data, and the
-    /// image / metadata sub-IFDs it points at.
-    fn account_image_ifd(&mut self, ifd: &Ifd, page: usize, depth: usize) {
+impl Findings {
+    /// Checks an image IFD (a page or an image sub-IFD): its tags, codes, and pixel-structure
+    /// coherence, then its image sub-IFDs. Metadata sub-IFDs (Exif/GPS/Interop) belong to a
+    /// separate tag namespace, so they are followed (their bytes are already classified by the
+    /// audit) but not tag-checked.
+    fn check_image_ifd(&mut self, ifd: &Ifd, page: usize) {
         self.check_tags(ifd, page);
         self.check_codes(ifd, page);
-        self.account_pixels(ifd, page);
-        self.follow_image_subifds(ifd, page, depth);
-        self.follow_metadata(ifd, page, depth);
+        self.check_pixel_structure(ifd, page);
+        for group in ifd.sub_ifds() {
+            if group.tag == tags::SUB_IFDS {
+                for child in &group.ifds {
+                    self.check_image_ifd(child, page);
+                }
+            }
+        }
     }
 
-    /// Flags every field whose tag is not part of the recognised TIFF tag set.
+    /// Flags unknown-type entries (preserved verbatim by the parse) and every field whose tag
+    /// is not part of the recognised TIFF tag set.
     fn check_tags(&mut self, ifd: &Ifd, page: usize) {
         for field in ifd.fields() {
-            if !tags::is_known_tag(field.tag) {
+            if let Value::Unknown(u) = &field.value {
+                self.unknown_fields.push(UnknownFieldType {
+                    page,
+                    tag: field.tag,
+                    type_code: u.type_code(),
+                    count: u.count(),
+                });
+            } else if !tags::is_known_tag(field.tag) {
                 self.unknown_tags.push(UnknownTag {
                     page,
                     tag: field.tag,
@@ -241,10 +260,12 @@ impl Deconstructor<'_> {
         }
     }
 
-    /// Marks the byte ranges of an image IFD's strips or tiles.
-    fn account_pixels(&mut self, ifd: &Ifd, page: usize) {
+    /// Checks the pixel-data structure: the strip/tile extents themselves are claimed by the
+    /// audit; this validates their *coherence* (pair present, lengths matching) and flags an
+    /// image IFD with no pixel data at all.
+    fn check_pixel_structure(&mut self, ifd: &Ifd, page: usize) {
         if ifd.get(tags::TILE_WIDTH).is_some() || ifd.get(tags::TILE_OFFSETS).is_some() {
-            self.account_ranges(
+            self.check_pair(
                 ifd,
                 page,
                 tags::TILE_OFFSETS,
@@ -253,7 +274,7 @@ impl Deconstructor<'_> {
                 "TIFF: tiled image missing TileOffsets/TileByteCounts",
             );
         } else if ifd.get(tags::STRIP_OFFSETS).is_some() {
-            self.account_ranges(
+            self.check_pair(
                 ifd,
                 page,
                 tags::STRIP_OFFSETS,
@@ -270,8 +291,8 @@ impl Deconstructor<'_> {
         }
     }
 
-    /// Marks each `(offset, byte_count)` pair of a strip/tile array, flagging length mismatches.
-    fn account_ranges(
+    /// Validates an `(offsets, byte counts)` tag pair, u64-native.
+    fn check_pair(
         &mut self,
         ifd: &Ifd,
         page: usize,
@@ -280,7 +301,7 @@ impl Deconstructor<'_> {
         mismatch: &'static str,
         missing: &'static str,
     ) {
-        let (Some(offsets), Some(counts)) = (ifd.get_u32_vec(off_tag), ifd.get_u32_vec(cnt_tag))
+        let (Some(offsets), Some(counts)) = (ifd.get_u64_vec(off_tag), ifd.get_u64_vec(cnt_tag))
         else {
             self.anomalies.push(Anomaly::Structure {
                 page,
@@ -296,101 +317,40 @@ impl Deconstructor<'_> {
                 severity: Severity::Error,
             });
         }
-        for (&off, &cnt) in offsets.iter().zip(&counts) {
-            self.cov.mark(u64::from(off), u64::from(cnt));
-        }
     }
 
-    /// Follows the `SubIFDs` (330) pointers, accounting each child as another image IFD.
-    fn follow_image_subifds(&mut self, ifd: &Ifd, page: usize, depth: usize) {
-        let Some(offsets) = ifd.get_u32_vec(tags::SUB_IFDS) else {
-            return;
-        };
-        for off in offsets {
-            let off = u64::from(off);
-            if !self.guard(off, page, depth + 1) {
-                continue;
-            }
-            if let Some(sub) = self.read_sub(off, page) {
-                self.account_image_ifd(&sub, page, depth + 1);
-            }
-        }
-    }
-
-    /// Follows the Exif (34665) and GPS (34853) sub-IFD pointers, accounting their bytes (their
-    /// tags belong to a separate namespace, so they are not tag-checked here).
-    fn follow_metadata(&mut self, ifd: &Ifd, page: usize, depth: usize) {
-        for tag in [tags::EXIF_IFD, tags::GPS_INFO] {
-            if let Some(off) = ifd.get_u32(tag) {
-                self.account_meta_tree(u64::from(off), page, depth + 1);
-            }
-        }
-    }
-
-    /// Accounts a metadata sub-IFD and any nested Interoperability sub-IFD.
-    fn account_meta_tree(&mut self, offset: u64, page: usize, depth: usize) {
-        if !self.guard(offset, page, depth) {
-            return;
-        }
-        let Some(sub) = self.read_sub(offset, page) else {
-            return;
-        };
-        if let Some(off) = sub.get_u32(tags::INTEROPERABILITY_IFD) {
-            self.account_meta_tree(u64::from(off), page, depth + 1);
-        }
-    }
-
-    /// Parses (and accounts the bytes of) a sub-IFD at `offset`, recording an anomaly if it cannot
-    /// be parsed.
-    fn read_sub(&mut self, offset: u64, page: usize) -> Option<Ifd> {
-        let (data, order, variant) = (self.data, self.order, self.variant);
-        match read_ifd_at_with_coverage(
-            data,
-            offset,
-            order,
-            variant,
-            &mut self.cov,
-            &mut self.unknown_fields,
-        ) {
-            Ok((ifd, _next)) => Some(ifd),
-            Err(_) => {
-                self.anomalies.push(Anomaly::Structure {
-                    page,
-                    detail: "TIFF: sub-IFD could not be parsed",
-                    severity: Severity::Error,
-                });
-                None
+    /// Maps the audit walk's lenient findings onto this crate's anomaly taxonomy.
+    fn map_audit_findings(&mut self, findings: &[AuditFinding]) {
+        for finding in findings {
+            match *finding {
+                AuditFinding::SkippedSubIfd { page, reason, .. } => {
+                    self.anomalies.push(Anomaly::Structure {
+                        page,
+                        detail: match reason {
+                            SkipReason::Cycle => "TIFF: sub-IFD offset revisited (possible cycle)",
+                            SkipReason::TooDeep => "TIFF: sub-IFD nesting too deep",
+                            _ => "TIFF: sub-IFD could not be parsed",
+                        },
+                        severity: Severity::Error,
+                    });
+                }
+                AuditFinding::ChainedSubIfd { page, .. } => {
+                    self.anomalies.push(Anomaly::Structure {
+                        page,
+                        detail: "TIFF: sub-IFD carries a next-IFD chain",
+                        severity: Severity::Warning,
+                    });
+                }
+                // The finding taxonomy may grow; unrecognised findings are not anomalies.
+                _ => {}
             }
         }
-    }
-
-    /// Returns whether a sub-IFD at `offset` may be followed, recording an anomaly (and refusing)
-    /// on excessive depth or a revisited offset (cycle).
-    fn guard(&mut self, offset: u64, page: usize, depth: usize) -> bool {
-        if depth > MAX_SUBIFD_DEPTH {
-            self.anomalies.push(Anomaly::Structure {
-                page,
-                detail: "TIFF: sub-IFD nesting too deep",
-                severity: Severity::Error,
-            });
-            return false;
-        }
-        if self.visited.contains(&offset) {
-            self.anomalies.push(Anomaly::Structure {
-                page,
-                detail: "TIFF: sub-IFD offset revisited (possible cycle)",
-                severity: Severity::Error,
-            });
-            return false;
-        }
-        self.visited.push(offset);
-        true
     }
 }
 
 impl TiffDecoder {
-    /// Strictly deconstructs `data`, returning a [`DeconstructReport`] that accounts every byte and
-    /// flags anything unrecognised — without decoding pixels.
+    /// Strictly deconstructs `data`, returning a [`DeconstructReport`] that classifies every
+    /// byte and flags anything unrecognised — without decoding pixels.
     ///
     /// # Errors
     ///
@@ -422,25 +382,20 @@ impl TiffDecoder {
 #[cfg(test)]
 mod tests {
     use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
-    use gamut_ifd::Value;
+    use gamut_ifd::{ByteOrder, Value, Variant};
 
     use super::*;
     use crate::encoder::TiffEncoder;
     use crate::writer::{write_image, write_multipage};
 
-    /// Total bytes left in interior gaps — for a tightly-written file this is only word-alignment
-    /// padding (at most one byte before the strip data).
-    fn total_gap_bytes(r: &DeconstructReport) -> u64 {
-        r.coverage.gaps.iter().map(|g| g.len).sum()
-    }
-
-    /// Asserts the structural walk explained the whole file bar word-alignment padding.
+    /// Asserts the structural walk classified the whole file — zero tolerance: alignment
+    /// padding must come back as typed `Padding` segments, not tolerated gaps.
     fn assert_clean_coverage(r: &DeconstructReport) {
-        assert!(r.coverage.overlaps.is_empty(), "overlaps: {r:?}");
-        assert!(r.coverage.out_of_bounds.is_empty(), "out of bounds: {r:?}");
-        assert!(r.coverage.trailing.is_none(), "trailing: {r:?}");
+        assert!(
+            r.segments.is_fully_classified(),
+            "not fully classified: {r:?}"
+        );
         assert!(r.unknown_fields.is_empty(), "unknown fields: {r:?}");
-        assert!(total_gap_bytes(r) <= 2, "alignment gap too large: {r:?}");
     }
 
     /// A minimal 2×2 8-bit BlackIsZero grayscale image IFD (the strip tags are filled in by the
@@ -473,6 +428,7 @@ mod tests {
             assert_clean_coverage(&report);
             assert!(report.unknown_tags.is_empty(), "{report:?}");
             assert!(report.anomalies.is_empty(), "{report:?}");
+            assert!(report.is_fully_accounted(), "{report:?}");
         }
     }
 
@@ -488,7 +444,7 @@ mod tests {
         )
         .expect("write");
         let report = deconstruct(&bytes).expect("deconstruct");
-        assert_clean_coverage(&report); // the unknown tag's bytes are still covered
+        assert_clean_coverage(&report); // the unknown tag's bytes are still classified
         assert!(
             report
                 .unknown_tags
@@ -496,7 +452,29 @@ mod tests {
                 .any(|u| u.tag == 0x9999 && u.page == 0),
             "{report:?}"
         );
-        // Unknown tags fail the strict verdict but not the byte-coverage one.
+        // Unknown tags fail the strict verdict but not the byte-classification one.
+        assert!(!report.is_fully_accounted());
+    }
+
+    #[test]
+    fn flags_unknown_field_type_entry() {
+        // An entry with an unrecognised field-type code (0xF0): preserved verbatim by the parse,
+        // reported here — and, its (hypothetical) out-of-line payload being unsizable, the file
+        // still classifies fully because this word is inline-plausible garbage pointing nowhere.
+        let mut bytes = write_image(
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+            &image_ifd(),
+            &[vec![0u8; 4]],
+        )
+        .expect("write");
+        // Patch the first entry's type code (bytes 10..12 hold IFD0's first entry tag; type at
+        // +2). Locate the first entry: header(8) + count(2) => entry at 10, type at 12.
+        bytes[12] = 0xF0;
+        bytes[13] = 0x00;
+        let report = deconstruct(&bytes).expect("deconstruct");
+        assert_eq!(report.unknown_fields.len(), 1, "{report:?}");
+        assert_eq!(report.unknown_fields[0].type_code, 0xF0);
         assert!(!report.is_fully_accounted());
     }
 
@@ -546,6 +524,27 @@ mod tests {
             )),
             "{report:?}"
         );
+    }
+
+    /// Two entries legitimately sharing one out-of-line value (TIFF permits it) is informational
+    /// sharing, not an overlap conflict.
+    #[test]
+    fn shared_out_of_line_value_is_not_a_conflict() {
+        // Hand-build: two LONG[2] entries whose value offsets both point at the same 8 bytes.
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+            0x02, 0x00, // 2 entries
+            0x10, 0x27, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00, 0x26, 0x00, 0x00,
+            0x00, // tag 10000 LONG[2] @ 38
+            0x11, 0x27, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00, 0x26, 0x00, 0x00,
+            0x00, // tag 10001 LONG[2] @ 38 (shared)
+            0x00, 0x00, 0x00, 0x00, // next = 0
+            0x2a, 0x00, 0x00, 0x00, 0x2b, 0x00, 0x00, 0x00, // the shared value @ 38
+        ];
+        let report = deconstruct(data).expect("deconstruct");
+        assert!(report.segments.conflicts.is_empty(), "{report:?}");
+        assert_eq!(report.segments.shared.len(), 1, "{report:?}");
+        assert!(report.segments.is_fully_classified(), "{report:?}");
     }
 
     #[test]
