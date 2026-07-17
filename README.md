@@ -130,6 +130,8 @@ format.
 | `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | scaffolding (impl in progress, #34)    |
 | `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | scaffolding (impl in progress, #34)    |
 | `gamut-tiff`      | TIFF 6.0 encoder/decoder — self-contained (own IFD/tag container)      | baseline + extensions (YCbCr/Lab/JPEG WIP) |
+| `gamut-deflate`   | DEFLATE/zlib encoder (zopfli-class) — the compression under gamut-png  | encoder (decoding stays on miniz_oxide) |
+| `gamut-png`       | PNG (W3C 3rd edition) encoder + spec-compliant decoder                 | encoder (#24) + decoder (#249)         |
 | `gamut-cli`       | `gamut` CLI sandbox: encode AVIF + inspect the shared primitives       | ready for use                          |
 | `gamut-wasm`      | WebAssembly bindings                                                   | placeholder                            |
 | `gamut-ffi`       | C-compatible FFI bindings                                              | placeholder                            |

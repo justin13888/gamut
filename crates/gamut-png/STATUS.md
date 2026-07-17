@@ -1,18 +1,23 @@
-# gamut-png — PNG encoder status
+# gamut-png — PNG codec status
 
-Tracking GitHub issue #24: a research-grade, space-efficient PNG **encoder**, on par with the best
-PNG encoders. Delivered as small, individually green phases (each `mise run test`/`lint`/`fmt-check`/
-`coverage` ≥80%).
+Tracking GitHub issues #24 (encoder) and #249 (decoder): a research-grade, space-efficient PNG
+**encoder** on par with the best PNG encoders, and a spec-compliant **decoder** for the rawshift
+migration off `zune-png`. Delivered as small, individually green phases (each
+`mise run test`/`lint`/`fmt-check`/`coverage` ≥80%).
 
 **Keystone:** the signature → IHDR → IDAT → IEND pipeline with filter-None 8-bit RGB (P2) — once
 libpng decodes that pixel-exact, each later phase swaps in another colour type, a filter, or a
 space optimisation behind the same chunk spine and CRC.
 
 **Oracle:** differential vs **libpng** (`tooling/libpng-oracle` + `third_party/libpng`, dev-only
-FFI). gamut ships no PNG decoder, so the gate is: libpng decodes the encoder's output → pixel-exact
-with the source; output size is benchmarked against libpng at maximum compression.
+FFI), in both directions: libpng decodes the encoder's output → pixel-exact with the source, and a
+libpng reference-encode entry point generates the decoder's conformance fixtures (interlaced,
+sub-byte, forced-filter, metadata-laden) that gamut-png and libpng must decode identically. Output
+size is benchmarked against libpng at maximum compression.
 
-**Out of scope:** decoding (issue #24), Adam7 interlacing, animation/APNG (gamut is image-first).
+**Out of scope:** Adam7 *encoding*, animation/APNG (gamut is image-first; the decoder reads an
+APNG's default image). Format-agnostic lossy pixel conversion (16→8-bit, alpha dropping) is
+deferred to a shared gamut-core facility rather than per-format decode paths.
 
 ## Phases
 
@@ -28,3 +33,14 @@ with the source; output size is benchmarked against libpng at maximum compressio
 | P8 | §11.3 | Metadata: eXIf, iCCP (deflate-compressed), iTXt-XMP (raw-bytes setters) | ✅ done |
 | P9 | §4.5 | **Space opt:** lossless palette/gray/alpha-drop reduction (size-estimate chosen) + brute-force filter strategy | ✅ done |
 | P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ✅ done |
+
+## Decoder phases (issue #249)
+
+| Phase | Spec | Scope | Status |
+| ----- | ---- | ----- | ------ |
+| D1 | §5, §11.2.1 | libpng-oracle reference *encode* entry point (fixture generator); chunk-stream parser + CRC policy; IHDR validation | ✅ done |
+| D2 | §9, §10 | `PngDecoder` + decode limits (dimensions, byte budget); bounded zlib inflation (`miniz_oxide`); scanline defilter; non-interlaced typed `DecodeImage` matrix (lossless widening) | ✅ done |
+| D3 | §11.2.2/§11.3.1 | Palette + tRNS: `PngPalette::from_chunks`, index range checks, `DecodeImage<Indexed8>`, RGB(A) expansion, colour keys | ✅ done |
+| D4 | §8.1, §13.10 | Adam7 de-interlacing (per-pass defilter/unpack, empty passes, checked stream-length sum) | ✅ done |
+| D5 | §11.3 | Rich `decode()` → `DecodedPng`: raw eXIf/iCCP/XMP/text payloads (MetadataBlock-ready), parsed gAMA/cHRM/sRGB/cICP, metadata inflation budget | ✅ done |
+| D6 | — | libpng differential conformance suite over generated fixtures; malformed-input rejection corpus; mutation-gap closure | ✅ done |

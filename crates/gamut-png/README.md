@@ -1,43 +1,63 @@
 # gamut-png
 
-`gamut-png` is a pure-Rust, research-grade, space-efficient **PNG encoder**.
+`gamut-png` is a pure-Rust, research-grade **PNG codec**: a space-efficient encoder and a
+spec-compliant decoder.
 
 ## Goals
 
-Part of the [gamut](../../README.md) workspace, this crate writes PNG (Portable Network Graphics,
-W3C 3rd edition) images that are:
+Part of the [gamut](../../README.md) workspace, this crate reads and writes PNG (Portable Network
+Graphics, W3C 3rd edition) images:
 
-- **Encoder-only.** PNG decoding is a solved problem, so — per gamut's encoder-first philosophy and
-  issue #24 — this crate does not decode. Correctness is proven differentially against a vendored
-  libpng (see Validation).
-- **Space-efficient.** Built on [`gamut-deflate`](../gamut-deflate)'s zopfli-class compression, with
-  adaptive scanline filtering and lossless bit-depth/palette reduction, targeting output sizes on par
-  with the best PNG encoders. Encode time is a secondary concern at higher levels.
+- **Space-efficient encoding** (issue #24). Built on [`gamut-deflate`](../gamut-deflate)'s
+  zopfli-class compression, with adaptive scanline filtering and lossless bit-depth/palette
+  reduction, targeting output sizes on par with the best PNG encoders. Encode time is a secondary
+  concern at higher levels.
+- **Spec-compliant decoding** (issue #249). Every colour type and bit depth, Adam7 interlacing,
+  all five filters, and ancillary metadata surfaced as raw payloads (eXIf, inflated iCCP, XMP,
+  tEXt/zTXt/iTXt) ready for `gamut_metadata::MetadataBlock`, plus parsed gAMA/cHRM/sRGB/cICP
+  values. Hostile input is bounded: configurable dimension caps and byte budgets guard every
+  allocation, and zlib bombs (IDAT or metadata) fail cleanly. Inflation uses `miniz_oxide`, the
+  workspace's blessed decode-side inflate.
 - **Memory-safe.** `#![forbid(unsafe_code)]`.
 
 ## Usage
 
 ```rust
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut_png::PngEncoder;
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
+use gamut_png::{PngDecoder, PngEncoder};
 
 let image = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h)?)?;
 let mut png = Vec::new();
 PngEncoder::new().encode_image(image, &mut png)?;
+
+// Typed decode: lossless widening only (e.g. greyscale or palette as RGBA).
+let decoded: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&png)?;
+
+// Rich decode: native layout + palette/tRNS + raw metadata payloads.
+let rich = PngDecoder::new().with_max_dimensions(8192, 8192).decode(&png)?;
 ```
+
+The typed `DecodeImage<P>` implementations accept any file `P` can hold **losslessly** — palette
+and tRNS expand to RGB(A), greyscale replicates into RGB, an opaque alpha channel can be added,
+sub-byte greys scale exactly to 8 bits — and refuse lossy requests (16-bit files as 8-bit
+layouts, dropping alpha or transparency) with `Error::Unsupported`. Format-agnostic *lossy*
+pixel conversion is deliberately out of scope here and belongs in a shared gamut-core facility.
 
 ## Status
 
 Built incrementally; each phase is conformance-checked against libpng (see [STATUS.md](STATUS.md)).
-Scope: all five colour types, bit depths 1/2/4/8/16, palette, the five scanline filters, lossless
-reductions, the standard colour/text ancillary chunks, and embedded metadata (eXIf/iCCP/iTXt).
-Out of scope: decoding, Adam7 interlacing, and animation (APNG).
+Encoder scope: all five colour types, bit depths 1/2/4/8/16, palette, the five scanline filters,
+lossless reductions, the standard colour/text ancillary chunks, and embedded metadata
+(eXIf/iCCP/iTXt). Decoder scope: everything above plus Adam7 **decoding** and decode limits.
+Out of scope: Adam7 *encoding* and animation (APNG decodes as its default image).
 
 ## Validation
 
-A differential oracle (`tooling/libpng-oracle`, a vendored static libpng) decodes the encoder's
-output; the recovered pixels must match the source exactly, and output size is benchmarked against
-libpng at maximum compression.
+A differential oracle (`tooling/libpng-oracle`, a vendored static libpng) proves both directions:
+libpng decodes the encoder's output pixel-exact, and a libpng *reference encoder* generates the
+decoder's conformance fixtures (interlaced, sub-byte, forced-filter, metadata-laden) which both
+decoders must read identically — no vendored image corpus. A hand-crafted malformed-input corpus
+pins the rejection policy, and output size is benchmarked against libpng at maximum compression.
 
 ## License
 

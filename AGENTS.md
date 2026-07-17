@@ -43,6 +43,16 @@ Dependency edges (a crate depends on those to its right):
   `hvcC`/NAL layer, and a pluggable `HevcDecoder` hook for platform HEVC decoders — the HEVC
   bitstream decode itself is issue #18. Differential oracle: libheif+libde265 (+kvazaar fixture
   generation), dev-only via `tooling/libheif-oracle`. ← isobmff, core, color.
+- **gamut-deflate** -- pure-Rust DEFLATE/zlib **encoder** (zopfli-class), the compression under
+  gamut-png; deliberately encoder-only — workspace decoders inflate via `miniz_oxide` (see the
+  crate docs). ← core.
+- **gamut-png** -- PNG codec (3rd edition, W3C): space-efficient encoder (issue #24) and
+  spec-compliant decoder (issue #249) — all colour types and bit depths, Adam7 *decoding*, all
+  filters, decode limits for hostile input, and ancillary metadata surfaced as raw
+  `MetadataBlock`-ready payloads (eXIf/iCCP/XMP/text) plus parsed gAMA/cHRM/sRGB/cICP. APNG out
+  of scope (decodes as the default image). Differential oracle in both directions: libpng via
+  `tooling/libpng-oracle`, which also *generates* the decoder's conformance fixtures. ← core,
+  deflate (+ `miniz_oxide` for inflate).
 - **gamut-ifd** -- TIFF/IFD container core (byte order, field types, IFD read/write); a low-level
   container primitive (sibling to bitstream), shared by the `gamut-tiff` codec (issue #107) and EXIF
   metadata. ← core. Its optional `bigtiff` feature adds the 64-bit BigTIFF variant. The per-format
