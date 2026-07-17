@@ -6,7 +6,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::{ByteOrder, Coverage, Ifd, UnknownField, Value, Variant};
+use crate::{ByteOrder, Ifd, Value, Variant};
 
 /// A parsed TIFF/IFD stream: its byte order, container variant, and the chain of Image File
 /// Directories.
@@ -154,30 +154,6 @@ pub fn read_ifd_at(data: &[u8], offset: u64, order: ByteOrder, variant: Variant)
     reader.decode_ifd(&raw)
 }
 
-/// Like [`read_ifd_at`] but threads byte-range accounting: it marks the IFD body and every
-/// out-of-line value into `cov`, records any unknown-field-type entries into `unknown`, and
-/// returns the next-IFD offset alongside the directory.
-///
-/// A codec uses this to account a sub-IFD it reaches by following a pointer tag (a DNG raw
-/// sub-IFD, `ExifIFD`, `GPSInfo`, …); the enclosing file's header and top-level chain are
-/// accounted by [`read_with_coverage`].
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidInput`] if the directory at `offset` is out of bounds or a field value
-/// is truncated.
-pub fn read_ifd_at_with_coverage(
-    data: &[u8],
-    offset: u64,
-    order: ByteOrder,
-    variant: Variant,
-    cov: &mut Coverage,
-    unknown: &mut Vec<UnknownField>,
-) -> Result<(Ifd, u64)> {
-    crate::IfdReader::with_layout(data, order, variant)
-        .read_ifd_at_with_coverage(offset, cov, unknown)
-}
-
 /// Parses a TIFF/IFD stream: the header followed by the whole IFD chain.
 ///
 /// This is a thin wrapper over the streaming engine ([`IfdReader`](crate::IfdReader)) — there is
@@ -264,25 +240,6 @@ pub(crate) fn resolve_pointers_with(
         ifd.set_sub_ifd(tag, children);
     }
     Ok(())
-}
-
-/// Like [`read`] but threads byte-range accounting through the whole top-level walk: it marks the
-/// header and every IFD body / out-of-line value into `cov`, and records any unknown-field-type
-/// entries into `unknown`.
-///
-/// This accounts the header and the top-level IFD chain; a codec accounts each sub-IFD it follows
-/// with [`read_ifd_at_with_coverage`] and marks its own strip/tile byte ranges, then
-/// [`finish`](Coverage::finish)es `cov` into the [`CoverageReport`](crate::CoverageReport).
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidInput`] under the same conditions as [`read`].
-pub fn read_with_coverage(
-    data: &[u8],
-    cov: &mut Coverage,
-    unknown: &mut Vec<UnknownField>,
-) -> Result<TiffFile> {
-    crate::IfdReader::open(data)?.read_file_with_coverage(cov, unknown)
 }
 
 /// Like [`read`], but returns a dual-ledger-checked [`SegmentReport`](crate::SegmentReport)
@@ -381,30 +338,36 @@ mod tests {
     }
 
     #[test]
-    fn read_with_coverage_accounts_a_written_file() {
+    fn read_audited_classifies_a_written_file() {
         let file = TiffFile {
             order: ByteOrder::LittleEndian,
             variant: Variant::Classic,
             ifds: vec![even_value_ifd()],
         };
         let bytes = crate::write(&file).expect("write");
-        let mut cov = Coverage::new(bytes.len() as u64);
-        let mut unknown = Vec::new();
-        let parsed = read_with_coverage(&bytes, &mut cov, &mut unknown).expect("read");
-        // The coverage reader returns exactly what the plain reader would.
+        let (parsed, report) = read_audited(&bytes).expect("read");
+        // The audited reader returns exactly what the plain reader would.
         assert_eq!(parsed, file);
-        assert!(unknown.is_empty());
-        let report = cov.finish();
-        assert!(report.is_fully_covered(), "report: {report:?}");
-        assert_eq!(report.covered_bytes, bytes.len() as u64);
+        assert!(report.is_fully_classified(), "report: {report:?}");
+        // The typed view: one header, one directory body, two out-of-line values.
+        use crate::SpanKind;
+        assert_eq!(report.segments[0].kind, SpanKind::Header);
+        assert_eq!(report.segments[1].kind, SpanKind::IfdBody { ifd: 8 });
+        assert_eq!(
+            report
+                .segments
+                .iter()
+                .filter(|s| matches!(s.kind, SpanKind::Value { .. }))
+                .count(),
+            2
+        );
     }
 
     #[test]
-    fn unknown_field_type_is_preserved_and_recorded_under_coverage() {
+    fn unknown_field_type_is_preserved_verbatim() {
         // One IFD entry with an unrecognised field-type code (0xF0). The readers preserve the
-        // entry verbatim as a `Value::Unknown` (nothing is dropped on a rewrite), the coverage
-        // reader additionally records it, and the 12-byte entry is part of the IFD body, so the
-        // file stays fully covered.
+        // entry verbatim as a `Value::Unknown` (nothing is dropped on a rewrite); the 12-byte
+        // entry is part of the IFD body, so the file stays fully classified.
         let data = [
             b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD @ 8
             0x01, 0x00, // entry count = 1
@@ -414,9 +377,7 @@ mod tests {
             0xde, 0xad, 0xbe, 0xef, // value/offset word (opaque)
             0x00, 0x00, 0x00, 0x00, // next IFD = 0
         ];
-        let mut cov = Coverage::new(data.len() as u64);
-        let mut unknown = Vec::new();
-        let parsed = read_with_coverage(&data, &mut cov, &mut unknown).expect("read");
+        let (parsed, report) = read_audited(&data).expect("read");
         // The entry is preserved, not skipped: the raw record survives in the Ifd.
         assert_eq!(parsed.ifds[0].fields().len(), 1);
         let Some(Value::Unknown(u)) = parsed.ifds[0].get(0x9999) else {
@@ -427,15 +388,9 @@ mod tests {
         assert_eq!(u.word(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(u.order(), ByteOrder::LittleEndian);
         assert_eq!(u.variant(), Variant::Classic);
-        // The plain reader agrees (preservation is not a coverage-path special case).
+        // The plain reader agrees (preservation is not an audit-path special case).
         assert_eq!(read(&data).expect("plain read"), parsed);
-        assert_eq!(unknown.len(), 1);
-        assert_eq!(unknown[0].tag, 0x9999);
-        assert_eq!(unknown[0].type_code, 0xF0);
-        assert_eq!(unknown[0].ifd_offset, 8);
-        assert_eq!(unknown[0].entry_offset, 10);
-        assert_eq!(unknown[0].count, 1);
-        assert!(cov.finish().is_fully_covered());
+        assert!(report.is_fully_classified(), "report: {report:?}");
     }
 
     /// The keystone symmetry: `read_tree` is `write`'s inverse over a nested sub-IFD tree — the
@@ -595,9 +550,9 @@ mod tests {
     }
 
     #[test]
-    fn read_ifd_at_with_coverage_accounts_a_subifd() {
-        // Root + one sub-IFD, each with an even-length out-of-line value: accounting the root chain
-        // and then the child via the pointer must leave no byte unclaimed.
+    fn read_ifd_at_audited_accounts_a_subifd() {
+        // Root + one sub-IFD, each with an even-length out-of-line value: claiming the root
+        // chain and then the child via the pointer must leave no byte unclassified.
         let mut child = Ifd::new();
         child.set(256, Value::Short(vec![16]));
         child.set(258, Value::Short(vec![8, 8, 8])); // 6 bytes -> out of line
@@ -612,22 +567,15 @@ mod tests {
         })
         .expect("write");
 
-        let mut cov = Coverage::new(bytes.len() as u64);
-        let mut unknown = Vec::new();
-        let parsed = read_with_coverage(&bytes, &mut cov, &mut unknown).expect("root");
+        let mut map = crate::SegmentMap::new(bytes.len() as u64);
+        let mut reader = crate::IfdReader::open(&bytes[..]).expect("open");
+        let parsed = reader.read_file_audited(&mut map).expect("root");
         let child_off = parsed.ifds[0].get_u32(330).expect("SubIFDs pointer");
-        let (_child, next) = read_ifd_at_with_coverage(
-            &bytes,
-            child_off.into(),
-            ByteOrder::LittleEndian,
-            Variant::Classic,
-            &mut cov,
-            &mut unknown,
-        )
-        .expect("child");
+        let (_child, next) = reader
+            .read_ifd_at_audited(child_off.into(), &mut map)
+            .expect("child");
         assert_eq!(next, 0);
-        assert!(unknown.is_empty());
-        let report = cov.finish();
-        assert!(report.is_fully_covered(), "report: {report:?}");
+        let report = map.finish(None);
+        assert!(report.is_fully_classified(), "report: {report:?}");
     }
 }

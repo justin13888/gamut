@@ -5,8 +5,8 @@
 
 use gamut_core::Result;
 use gamut_ifd::{
-    ByteOrder, Coverage, Ifd, IfdReader, ReadAt, SegmentMap, SpanKind, StreamSource, TiffFile,
-    Tracked, Value, Variant, read, read_tree, read_with_coverage, tags, write,
+    ByteOrder, Ifd, IfdReader, ReadAt, SegmentMap, SpanKind, StreamSource, TiffFile, Tracked,
+    Value, Variant, read, read_tree, tags, write,
 };
 
 /// A flat single-IFD file, a two-IFD chain, and a nested sub-IFD tree — the shapes the
@@ -113,33 +113,6 @@ fn streaming_equals_slice_across_source_shapes() {
                     .expect("read_tree"),
                 tree
             );
-        }
-    }
-}
-
-/// Coverage parity: the streaming accounting produces the identical report and unknown list the
-/// slice accounting does, over every fixture.
-#[test]
-fn streaming_coverage_reports_equal_slice_reports() {
-    for (order, variant) in orders_and_variants() {
-        for file in fixture_files(order, variant) {
-            let bytes = write(&file).expect("write");
-
-            let mut slice_cov = Coverage::new(bytes.len() as u64);
-            let mut slice_unknown = Vec::new();
-            let slice_file = read_with_coverage(&bytes, &mut slice_cov, &mut slice_unknown)
-                .expect("slice coverage read");
-
-            let mut reader = IfdReader::open(&bytes[..]).expect("open");
-            let mut cov = Coverage::new(bytes.len() as u64);
-            let mut unknown = Vec::new();
-            let stream_file = reader
-                .read_file_with_coverage(&mut cov, &mut unknown)
-                .expect("stream coverage read");
-
-            assert_eq!(stream_file, slice_file);
-            assert_eq!(unknown, slice_unknown);
-            assert_eq!(cov.finish(), slice_cov.finish());
         }
     }
 }

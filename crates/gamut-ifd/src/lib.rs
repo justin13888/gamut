@@ -14,8 +14,11 @@
 //! §2). [`read`] / [`read_header`] parse a stream into a [`TiffFile`]; [`write()`] serialises one
 //! back, laying out the IFD chain and out-of-line value pool with the two-pass offset machinery.
 //! [`read_tree`] is `write`'s inverse over sub-IFD trees (given the pointer tags — the
-//! well-known structural ones live in [`tags`]), and the `*_with_coverage` readers thread
-//! byte-range accounting ([`Coverage`]) for strict archival decoding.
+//! well-known structural ones live in [`tags`]). For strict archival decoding, [`audit`]
+//! classifies **every byte** of a stream into typed segments ([`SegmentReport`]) under a
+//! dual-ledger cross-check: a [`Tracked`] source records what the parse physically read, and
+//! the claims must match — byte accounting as a machine-checked proof, not a promise
+//! (issue #263).
 //!
 //! ## Streaming
 //!
@@ -68,7 +71,6 @@
 
 mod audit;
 mod byte_order;
-mod coverage;
 mod entry;
 mod reader;
 mod segment;
@@ -84,12 +86,8 @@ pub use audit::{
     Audit, AuditFinding, AuditSpec, SkipReason, StandardAuditSpec, audit, standard_data_extents,
 };
 pub use byte_order::ByteOrder;
-pub use coverage::{Coverage, CoverageReport, Overlap, UnknownField};
 pub use entry::{Field, Ifd, SubIfd, Variant};
-pub use reader::{
-    TiffFile, read, read_audited, read_header, read_ifd_at, read_ifd_at_with_coverage, read_tree,
-    read_with_coverage,
-};
+pub use reader::{TiffFile, read, read_audited, read_header, read_ifd_at, read_tree};
 pub use segment::{
     Claim, Conflict, DataLabel, Range, Segment, SegmentMap, SegmentReport, SharedSpan, SpanKind,
 };

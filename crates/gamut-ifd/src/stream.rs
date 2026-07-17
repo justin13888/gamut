@@ -20,85 +20,7 @@ use gamut_core::{Error, Result};
 use crate::reader::{ChainGuard, offset_at, read_header, resolve_pointers_with, u16_at};
 use crate::segment::{Claim, SegmentMap, SpanKind};
 use crate::value::UnknownValue;
-use crate::{ByteOrder, Coverage, FieldType, Ifd, ReadAt, TiffFile, UnknownField, Value, Variant};
-
-/// Where the parse's byte accounting goes: the legacy anonymous [`Coverage`] marks (plus the
-/// unknown-entry diagnostics list), or the typed [`SegmentMap`] claims. One enum keeps every
-/// accounting rule in a single place — the parser calls these hooks, and each mode interprets
-/// them.
-enum Sink<'a> {
-    /// The legacy coverage accounting: anonymous marks + `UnknownField` diagnostics.
-    Coverage {
-        /// The byte-range accumulator.
-        cov: &'a mut Coverage,
-        /// The unknown-field-type diagnostics sink.
-        unknown: &'a mut Vec<UnknownField>,
-    },
-    /// The typed segment-map accounting.
-    Segments(&'a mut SegmentMap),
-}
-
-impl Sink<'_> {
-    /// The image file header was consumed.
-    fn header(&mut self, variant: Variant) {
-        match self {
-            Sink::Coverage { cov, .. } => cov.mark(0, variant.header_size() as u64),
-            Sink::Segments(map) => map.claim(
-                0,
-                variant.header_size() as u64,
-                SpanKind::Header,
-                Claim::Parsed,
-            ),
-        }
-    }
-
-    /// A directory body (count field + entries + next pointer) at `offset` was consumed.
-    fn body(&mut self, offset: u64, len: u64) {
-        match self {
-            Sink::Coverage { cov, .. } => cov.mark(offset, len),
-            Sink::Segments(map) => {
-                map.claim(
-                    offset,
-                    len,
-                    SpanKind::IfdBody { ifd: offset },
-                    Claim::Parsed,
-                );
-            }
-        }
-    }
-
-    /// An unknown-field-type entry was preserved (its record sits inside the body span).
-    fn unknown_entry(&mut self, ifd_offset: u64, entry: &RawEntry) {
-        match self {
-            Sink::Coverage { unknown, .. } => unknown.push(UnknownField {
-                ifd_offset,
-                tag: entry.tag,
-                type_code: entry.type_code,
-                count: entry.count,
-                entry_offset: entry.offset,
-            }),
-            // The entry lives on in the decoded `Ifd` as a `Value::Unknown`; there is nothing
-            // extra to claim (its unsizable payload deliberately stays unclaimed).
-            Sink::Segments(_) => {}
-        }
-    }
-
-    /// An out-of-line value span of entry `tag` in the directory at `ifd_offset` was consumed.
-    fn value_span(&mut self, ifd_offset: u64, tag: u16, start: u64, len: u64) {
-        match self {
-            Sink::Coverage { cov, .. } => cov.mark(start, len),
-            Sink::Segments(map) => map.claim(
-                start,
-                len,
-                SpanKind::Value {
-                    ifd: ifd_offset,
-                    tag,
-                },
-                Claim::Parsed,
-            ),
-        }
-    }
-}
+use crate::{ByteOrder, FieldType, Ifd, ReadAt, TiffFile, Value, Variant};
 
 /// A lazy, streaming IFD reader: walks TIFF structure through positioned reads on a [`ReadAt`]
 /// source instead of requiring the whole file as a slice.
@@ -419,22 +341,6 @@ impl<S: ReadAt> IfdReader<S> {
         Ok(file)
     }
 
-    /// Like [`read_file`](Self::read_file) but threads byte-range accounting, mirroring
-    /// [`read_with_coverage`](crate::read_with_coverage): the header and every directory body /
-    /// out-of-line value are [`mark`](Coverage::mark)ed into `cov`, and unknown-field-type
-    /// entries are recorded into `unknown`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] under the same conditions as [`read_file`](Self::read_file).
-    pub fn read_file_with_coverage(
-        &mut self,
-        cov: &mut Coverage,
-        unknown: &mut Vec<UnknownField>,
-    ) -> Result<TiffFile> {
-        self.read_chain(Some(&mut Sink::Coverage { cov, unknown }))
-    }
-
     /// Like [`read_file`](Self::read_file) but records **typed** byte-range claims into `map`:
     /// the header, every directory body, and every out-of-line value span, each tagged with a
     /// [`SpanKind`] and [`Claim::Parsed`].
@@ -446,7 +352,7 @@ impl<S: ReadAt> IfdReader<S> {
     ///
     /// Returns [`Error::InvalidInput`] under the same conditions as [`read_file`](Self::read_file).
     pub fn read_file_audited(&mut self, map: &mut SegmentMap) -> Result<TiffFile> {
-        self.read_chain(Some(&mut Sink::Segments(map)))
+        self.read_chain(Some(map))
     }
 
     /// Like `read_ifd` + `decode_ifd` with typed byte-range claims into `map`, mirroring
@@ -459,27 +365,7 @@ impl<S: ReadAt> IfdReader<S> {
     /// truncated, or [`Error::Io`] if the source fails.
     pub fn read_ifd_at_audited(&mut self, offset: u64, map: &mut SegmentMap) -> Result<(Ifd, u64)> {
         let raw = self.read_ifd(offset)?;
-        let ifd = self.decode_ifd_inner(&raw, Some(&mut Sink::Segments(map)))?;
-        Ok((ifd, raw.next))
-    }
-
-    /// Like `read_ifd` + `decode_ifd` with byte-range accounting, mirroring
-    /// [`read_ifd_at_with_coverage`](crate::read_ifd_at_with_coverage): marks the directory
-    /// body and every out-of-line value, records unknown-field-type entries, and returns the
-    /// next-IFD offset alongside the decoded directory.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] if the directory or a value is out of bounds or
-    /// truncated, or [`Error::Io`] if the source fails.
-    pub fn read_ifd_at_with_coverage(
-        &mut self,
-        offset: u64,
-        cov: &mut Coverage,
-        unknown: &mut Vec<UnknownField>,
-    ) -> Result<(Ifd, u64)> {
-        let raw = self.read_ifd(offset)?;
-        let ifd = self.decode_ifd_inner(&raw, Some(&mut Sink::Coverage { cov, unknown }))?;
+        let ifd = self.decode_ifd_inner(&raw, Some(map))?;
         Ok((ifd, raw.next))
     }
 
@@ -495,11 +381,16 @@ impl<S: ReadAt> IfdReader<S> {
         self.source
     }
 
-    /// The eager top-level walk behind [`read_file`](Self::read_file) and its accounting
-    /// variants (header, per-directory body/value spans, unknown-entry hook — all via [`Sink`]).
-    fn read_chain(&mut self, mut sink: Option<&mut Sink>) -> Result<TiffFile> {
-        if let Some(s) = sink.as_deref_mut() {
-            s.header(self.variant);
+    /// The eager top-level walk behind [`read_file`](Self::read_file) and its audited variant
+    /// (header, per-directory body, and value-span claims).
+    fn read_chain(&mut self, mut map: Option<&mut SegmentMap>) -> Result<TiffFile> {
+        if let Some(m) = map.as_deref_mut() {
+            m.claim(
+                0,
+                self.variant.header_size() as u64,
+                SpanKind::Header,
+                Claim::Parsed,
+            );
         }
         let mut ifds = Vec::new();
         let mut guard = ChainGuard::new();
@@ -507,7 +398,7 @@ impl<S: ReadAt> IfdReader<S> {
         while offset != 0 {
             guard.admit(offset)?;
             let raw = self.read_ifd(offset)?;
-            let ifd = self.decode_ifd_inner(&raw, sink.as_deref_mut())?;
+            let ifd = self.decode_ifd_inner(&raw, map.as_deref_mut())?;
             ifds.push(ifd);
             offset = raw.next;
         }
@@ -521,42 +412,45 @@ impl<S: ReadAt> IfdReader<S> {
         })
     }
 
-    /// Decodes `raw`'s entries with optional byte-range accounting: unknown types preserved
-    /// verbatim (and reported to the sink), last duplicate wins, out-of-line spans accounted
-    /// only after a successful decode.
-    fn decode_ifd_inner(&mut self, raw: &RawIfd, mut sink: Option<&mut Sink>) -> Result<Ifd> {
-        if let Some(s) = sink.as_deref_mut() {
+    /// Decodes `raw`'s entries with optional byte-range claims: unknown types preserved
+    /// verbatim (their record sits inside the body claim; their unsizable payload deliberately
+    /// stays unclaimed), last duplicate wins, out-of-line spans claimed only after a successful
+    /// decode.
+    fn decode_ifd_inner(&mut self, raw: &RawIfd, mut map: Option<&mut SegmentMap>) -> Result<Ifd> {
+        if let Some(m) = map.as_deref_mut() {
             // The directory body — count field, entry records (inline values included), and the
             // next-IFD pointer — is one contiguous span, exactly as `read_ifd` fetched it.
             let body = self.variant.count_size() as u64
                 + raw.entries.len() as u64 * self.variant.entry_size() as u64
                 + self.variant.offset_size() as u64;
-            s.body(raw.offset, body);
+            m.claim(
+                raw.offset,
+                body,
+                SpanKind::IfdBody { ifd: raw.offset },
+                Claim::Parsed,
+            );
         }
         let mut ifd = Ifd::new();
         for entry in &raw.entries {
             let Some(ty) = entry.field_type() else {
-                if let Some(s) = sink.as_deref_mut() {
-                    s.unknown_entry(raw.offset, entry);
-                }
                 ifd.set(entry.tag, Value::Unknown(self.unknown_value(entry)?));
                 continue;
             };
-            let value = self.fetch_value(entry, ty, raw.offset, sink.as_deref_mut())?;
+            let value = self.fetch_value(entry, ty, raw.offset, map.as_deref_mut())?;
             ifd.set(entry.tag, value);
         }
         Ok(ifd)
     }
 
     /// Fetches and decodes one entry's value: inline straight from the raw word, out of line
-    /// via a bounds-checked positioned read. With a sink, the out-of-line on-disk span
-    /// (`count * type size`, padding included) is accounted after a successful decode.
+    /// via a bounds-checked positioned read. With a map, the out-of-line on-disk span
+    /// (`count * type size`, padding included) is claimed after a successful decode.
     fn fetch_value(
         &mut self,
         entry: &RawEntry,
         ty: FieldType,
         ifd_offset: u64,
-        sink: Option<&mut Sink>,
+        map: Option<&mut SegmentMap>,
     ) -> Result<Value> {
         let count = usize::try_from(entry.count)
             .map_err(|_| Error::InvalidInput("TIFF: field length overflow"))?;
@@ -586,8 +480,16 @@ impl<S: ReadAt> IfdReader<S> {
         let mut bytes = vec![0u8; byte_len];
         self.source.read_exact_at(voff, &mut bytes)?;
         let value = Value::decode(ty, count, &bytes, self.order)?;
-        if let Some(s) = sink {
-            s.value_span(ifd_offset, entry.tag, voff, byte_len as u64);
+        if let Some(m) = map {
+            m.claim(
+                voff,
+                byte_len as u64,
+                SpanKind::Value {
+                    ifd: ifd_offset,
+                    tag: entry.tag,
+                },
+                Claim::Parsed,
+            );
         }
         Ok(value)
     }
@@ -644,7 +546,7 @@ impl<S: ReadAt> Iterator for IfdChain<'_, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{read, read_with_coverage, write};
+    use crate::{read, write};
 
     fn classic_le(ifds: Vec<Ifd>) -> Vec<u8> {
         write(&TiffFile {
@@ -796,18 +698,14 @@ mod tests {
         assert_eq!(u.type_code(), 0xF0);
         assert_eq!(u.count(), 2);
         assert_eq!(u.word(), &[0x2a, 0x00, 0x00, 0x00]);
-        // Decode preserves the unknown entry too, recording it under coverage.
+        // Decode preserves the unknown entry too, and the audited read stays fully
+        // classified: the entry record sits inside the directory-body claim.
         assert_eq!(r.decode_ifd(&raw).expect("decode").fields().len(), 1);
-        let mut cov = Coverage::new(data.len() as u64);
-        let mut unknown = Vec::new();
-        let file = r
-            .read_file_with_coverage(&mut cov, &mut unknown)
-            .expect("read_file");
+        let mut map = SegmentMap::new(data.len() as u64);
+        let file = r.read_file_audited(&mut map).expect("read_file");
         assert_eq!(file.ifds[0].get(0x9999), Some(&Value::Unknown(u)));
-        assert_eq!(unknown.len(), 1);
-        assert_eq!(unknown[0].tag, 0x9999);
-        assert_eq!(unknown[0].entry_offset, 10);
-        assert!(cov.finish().is_fully_covered());
+        let report = map.finish(None);
+        assert!(report.is_fully_classified(), "report: {report:?}");
     }
 
     /// A duplicate tag: the raw directory preserves both occurrences ([`RawIfd::entry`] finds
@@ -958,9 +856,10 @@ mod tests {
         assert!(r.read_tree(&[330]).is_err());
     }
 
-    /// Streaming coverage equals slice coverage on a fully-accountable file.
+    /// The audited streaming walk classifies a whole written tree (root chain + a followed
+    /// sub-IFD) with no unclassified bytes.
     #[test]
-    fn coverage_parity_with_the_slice_reader() {
+    fn audited_walk_fully_classifies_a_tree() {
         let mut child = Ifd::new();
         child.set(256, Value::Short(vec![16]));
         child.set(258, Value::Short(vec![8, 8, 8]));
@@ -970,36 +869,16 @@ mod tests {
         root.set_sub_ifd(330, vec![child]);
         let bytes = classic_le(vec![root]);
 
-        let mut slice_cov = Coverage::new(bytes.len() as u64);
-        let mut slice_unknown = Vec::new();
-        let slice_file =
-            read_with_coverage(&bytes, &mut slice_cov, &mut slice_unknown).expect("slice");
-        let child_off = u64::from(slice_file.ifds[0].get_u32(330).expect("pointer"));
-        crate::read_ifd_at_with_coverage(
-            &bytes,
-            child_off,
-            ByteOrder::LittleEndian,
-            Variant::Classic,
-            &mut slice_cov,
-            &mut slice_unknown,
-        )
-        .expect("slice child");
-
         let mut r = IfdReader::open(&bytes[..]).expect("open");
-        let mut cov = Coverage::new(bytes.len() as u64);
-        let mut unknown = Vec::new();
-        let file = r
-            .read_file_with_coverage(&mut cov, &mut unknown)
-            .expect("stream");
-        assert_eq!(file, slice_file);
+        let mut map = SegmentMap::new(bytes.len() as u64);
+        let file = r.read_file_audited(&mut map).expect("read_file");
+        let child_off = u64::from(file.ifds[0].get_u32(330).expect("pointer"));
         let (_, next) = r
-            .read_ifd_at_with_coverage(child_off, &mut cov, &mut unknown)
+            .read_ifd_at_audited(child_off, &mut map)
             .expect("stream child");
         assert_eq!(next, 0);
-        assert!(unknown.is_empty());
-        let report = cov.finish();
-        assert!(report.is_fully_covered(), "report: {report:?}");
-        assert_eq!(report.covered_bytes, bytes.len() as u64);
+        let report = map.finish(None);
+        assert!(report.is_fully_classified(), "report: {report:?}");
     }
 
     #[test]
