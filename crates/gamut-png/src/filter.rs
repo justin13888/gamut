@@ -36,6 +36,21 @@ pub enum FilterStrategy {
     BruteForce,
 }
 
+impl FilterType {
+    /// The filter type for a scanline's leading filter byte, or `None` for an undefined code
+    /// (PNG §9.1 defines exactly 0–4 for filter method 0).
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(FilterType::None),
+            1 => Some(FilterType::Sub),
+            2 => Some(FilterType::Up),
+            3 => Some(FilterType::Average),
+            4 => Some(FilterType::Paeth),
+            _ => None,
+        }
+    }
+}
+
 /// The Paeth predictor (PNG §9.4): chooses whichever of `a` (left), `b` (above), `c` (above-left)
 /// is closest to `a + b - c`, with the spec's exact tie-break order.
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
@@ -70,6 +85,26 @@ fn filter_row(filter: FilterType, cur: &[u8], prev: &[u8], bpp: usize, out: &mut
             FilterType::Paeth => cur[i].wrapping_sub(paeth(a, b, c)),
         };
         out.push(residual);
+    }
+}
+
+/// Reconstructs one scanline in place from its filtered bytes (PNG §9.2–§9.4, the decoder's
+/// inverse of [`filter_row`]): `row` holds the filtered bytes on entry and the raw bytes on exit.
+/// `prev` is the *raw* previous scanline of the same (reduced) image — all zero for the first row —
+/// and `bpp` is the filter stride in bytes (≥ 1). In-place works because reconstruction consumes
+/// left-to-right: `row[i - bpp]` is already raw when `row[i]` needs it.
+pub(crate) fn unfilter_row(filter: FilterType, row: &mut [u8], prev: &[u8], bpp: usize) {
+    for i in 0..row.len() {
+        let a = if i >= bpp { row[i - bpp] } else { 0 };
+        let b = prev[i];
+        let c = if i >= bpp { prev[i - bpp] } else { 0 };
+        row[i] = match filter {
+            FilterType::None => row[i],
+            FilterType::Sub => row[i].wrapping_add(a),
+            FilterType::Up => row[i].wrapping_add(b),
+            FilterType::Average => row[i].wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8),
+            FilterType::Paeth => row[i].wrapping_add(paeth(a, b, c)),
+        };
     }
 }
 
@@ -140,24 +175,10 @@ fn choose_min_sum_abs(cur: &[u8], prev: &[u8], bpp: usize, scratch: &mut Vec<u8>
 mod tests {
     use super::*;
 
-    /// Reconstructs a scanline from its filtered form (the decoder's inverse), to prove each filter
-    /// is exactly invertible.
+    /// Reconstructs a scanline from its filtered form via the production [`unfilter_row`].
     fn reconstruct(filter: FilterType, filt: &[u8], prev: &[u8], bpp: usize) -> Vec<u8> {
-        let mut cur = vec![0u8; filt.len()];
-        for i in 0..filt.len() {
-            let a = if i >= bpp { cur[i - bpp] } else { 0 };
-            let b = prev[i];
-            let c = if i >= bpp { prev[i - bpp] } else { 0 };
-            cur[i] = match filter {
-                FilterType::None => filt[i],
-                FilterType::Sub => filt[i].wrapping_add(a),
-                FilterType::Up => filt[i].wrapping_add(b),
-                FilterType::Average => {
-                    filt[i].wrapping_add(((u16::from(a) + u16::from(b)) / 2) as u8)
-                }
-                FilterType::Paeth => filt[i].wrapping_add(paeth(a, b, c)),
-            };
-        }
+        let mut cur = filt.to_vec();
+        unfilter_row(filter, &mut cur, prev, bpp);
         cur
     }
 
@@ -199,6 +220,41 @@ mod tests {
         assert_eq!(paeth(100, 90, 80), 100); // p=110 -> a (|10| vs |20| vs |30|)
         assert_eq!(paeth(0, 0, 0), 0);
         assert_eq!(paeth(255, 0, 0), 255); // p=255 -> a
+    }
+
+    #[test]
+    fn paeth_tie_breaks_exactly_per_spec() {
+        // The observable tie is pb == pc < pa, where the spec's order picks b over c: with
+        // c = (2a + b) / 3, pb = pc = |a-b|/3 while pa = 2|a-b|/3.
+        assert_eq!(paeth(0, 9, 3), 9); // pa=6, pb=pc=3 -> b (a "<" mutant would pick c)
+        assert_eq!(paeth(90, 0, 60), 0); // pa=60, pb=pc=30 -> b
+        // pa == pb with distinct a and b forces pc = 0, so c wins outright.
+        assert_eq!(paeth(10, 30, 20), 20); // p=20: pa=pb=10, pc=0 -> c
+        assert_eq!(paeth(100, 60, 80), 80); // p=80: pa=pb=20, pc=0 -> c
+    }
+
+    #[test]
+    fn unfilter_golden_vectors() {
+        // Hand-computed reconstructions with non-trivial predecessors (bpp = 2).
+        let prev = [10u8, 20, 30, 40, 50, 60];
+        let mut sub = [1u8, 2, 3, 4, 5, 6];
+        unfilter_row(FilterType::Sub, &mut sub, &prev, 2);
+        assert_eq!(sub, [1, 2, 4, 6, 9, 12]);
+        let mut up = [1u8, 2, 3, 4, 5, 6];
+        unfilter_row(FilterType::Up, &mut up, &prev, 2);
+        assert_eq!(up, [11, 22, 33, 44, 55, 66]);
+        // Average: floor((a + b) / 2) with u16 widening; first pixel has a = 0.
+        let mut avg = [1u8, 2, 3, 4, 5, 6];
+        unfilter_row(FilterType::Average, &mut avg, &prev, 2);
+        // x0: 1+10/2=6, 2+20/2=12; x1: 3+(6+30)/2=21, 4+(12+40)/2=30; x2: 5+(21+50)/2=40, 6+(30+60)/2=51
+        assert_eq!(avg, [6, 12, 21, 30, 40, 51]);
+        // Average overflow: a + b = 255 + 255 must widen, not wrap, before halving.
+        let mut wide = [0u8, 0];
+        unfilter_row(FilterType::Average, &mut wide, &[255, 255], 2);
+        let mut wide2 = [1u8, 255];
+        unfilter_row(FilterType::Average, &mut wide2, &[255, 255], 1);
+        assert_eq!(wide, [127, 127]); // floor(255/2) twice (a = 0 for the first pixel)
+        assert_eq!(wide2, [128, 190]); // 1+floor(255/2)=128, then 255+floor((128+255)/2)=255+191 wraps to 190
     }
 
     #[test]
