@@ -134,6 +134,47 @@ fn adobe_validates_and_decodes_tiled_dngs_exactly() {
     }
 }
 
+/// `NewRawImageDigest` (tag 51111) must bit-match the SDK's own `FindNewRawImageDigest` — the
+/// definitive gate on the digest-tile grid, planar little-endian serialisation, and the
+/// byte-mode (≤ 256-entry linearization table) branch. The multi-tile case (300x280 > 256)
+/// exercises clipped edge tiles.
+#[test]
+fn new_raw_image_digest_matches_adobe() {
+    let table: Vec<u16> = (0..256u32).map(|v| (v * 257) as u16).collect();
+    let cases = [
+        ("single-tile CFA", common::sample_raw(64, 48, 16)),
+        ("multi-tile CFA", common::sample_raw(300, 280, 16)),
+        ("LinearRaw 3-plane", common::sample_linear_raw(48, 36, 16)),
+        (
+            "byte-mode (small linearization table)",
+            common::sample_raw(32, 24, 8)
+                .with_levels(
+                    gamut_dng::RawLevels::uniform(1, 0.0, 255.0)
+                        .expect("levels")
+                        .with_linearization_table(table),
+                )
+                .expect("levels"),
+        ),
+    ];
+    for (what, raw) in cases {
+        let mut dng = Vec::new();
+        DngEncoder::new()
+            .encode(&raw, &common::sample_profile(), &mut dng)
+            .expect("encode");
+        let adobe = gamut_dng_oracle::new_raw_image_digest(&dng).expect("adobe digest");
+        assert_eq!(
+            raw.new_raw_image_digest(),
+            adobe,
+            "{what}: digest must bit-match the SDK"
+        );
+        // The stored tag round-trips through decode, and validate (which runs the SDK's
+        // ValidateRawImageDigest over the written tag) accepts the file.
+        let decoded = DngDecoder::new().decode(&dng).expect("decode");
+        assert_eq!(decoded.new_raw_image_digest, Some(adobe));
+        gamut_dng_oracle::validate_dng(&dng).expect("validate with digest");
+    }
+}
+
 /// Encodes `raw`, re-decodes it, and requires gamut's `to_linear` to match the Adobe SDK's
 /// stage-2 image within ±1 of the 16-bit encoding (`round(linear * 65535)`) per sample.
 ///

@@ -52,7 +52,9 @@ pub mod values;
 
 mod bitpack;
 mod compression;
+mod digest;
 mod jxl;
+mod md5;
 mod preview;
 mod writer;
 

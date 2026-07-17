@@ -128,6 +128,9 @@ pub struct DecodedDng {
     pub depth_info: Option<DepthInfo>,
     /// The `DNGBackwardVersion` the file declares, if present.
     pub backward_version: Option<[u8; 4]>,
+    /// The stored `NewRawImageDigest` (51111), if present — as written, not recomputed. Compare
+    /// against [`RawImage::new_raw_image_digest`] to verify raw-data integrity.
+    pub new_raw_image_digest: Option<[u8; 16]>,
     /// Every IFD 0 field the pipeline does not model, verbatim — proprietary maker tags
     /// included — in tag order. Nothing in the file is silently dropped; `deconstruct` remains
     /// the byte-accounting *diagnostic* view of the same principle.
@@ -188,6 +191,8 @@ impl DngDecoder {
             }
             v
         });
+        let new_raw_image_digest = bytes_value(ifd0.get(tags::NEW_RAW_IMAGE_DIGEST))
+            .and_then(|b| <[u8; 16]>::try_from(b).ok());
         let (metadata, exif_extra) = decode_metadata(ifd0, data, order, variant);
         let gain_table_map = decode_gain_map(raw_ifd, tags::PROFILE_GAIN_TABLE_MAP, order)?;
         let gain_table_map2 = decode_gain_map(ifd0, tags::PROFILE_GAIN_TABLE_MAP2, order)?;
@@ -228,6 +233,7 @@ impl DngDecoder {
             sub_images,
             depth_info,
             backward_version,
+            new_raw_image_digest,
             ifd0_extra,
             raw_extra,
             exif_extra,

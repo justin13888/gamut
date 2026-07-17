@@ -247,6 +247,12 @@ impl DngEncoder {
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
         let mut ifd0 = self.build_ifd0(profile, preview_dims, backward_version_for(self, raw))?;
+        // The raw-data integrity digest (P17). `gdng_validate` runs ValidateRawImageDigest, so
+        // every oracle-gated test enforces this value against the SDK's own computation.
+        ifd0.set(
+            tags::NEW_RAW_IMAGE_DIGEST,
+            Value::Byte(crate::digest::new_raw_image_digest(raw).to_vec()),
+        );
         // Embed metadata: XMP/IPTC/ICC blocks go in IFD 0; EXIF becomes an `ExifIFD` sub-IFD.
         if !self.metadata.is_empty()
             && let Some(exif) = self.metadata.apply(&mut ifd0)

@@ -378,6 +378,19 @@ impl RawImage {
     pub fn to_linear(&self) -> Result<LinearImage> {
         crate::linearize::linearize(self)
     }
+
+    /// Computes this image's **`NewRawImageDigest`** (tag 51111): the Adobe SDK's
+    /// MD5-over-raw-image algorithm — a 256×256 digest-tile grid, per-tile planar little-endian
+    /// serialisation (bytes when a ≤ 256-entry linearization table is present), and a final MD5
+    /// over the tile digests — reproduced bit-exactly and differentially gated against the SDK.
+    ///
+    /// The encoder writes this digest into every file; compare it against a decoded file's
+    /// [`DecodedDng::new_raw_image_digest`](crate::DecodedDng::new_raw_image_digest) to verify
+    /// raw-data integrity.
+    #[must_use]
+    pub fn new_raw_image_digest(&self) -> [u8; 16] {
+        crate::digest::new_raw_image_digest(self)
+    }
 }
 
 /// Validates a bit depth is in the storable range.
