@@ -315,6 +315,19 @@ mod tests {
         assert_eq!(ifd.get_u64_vec(999), None);
     }
 
+    /// `sub_ifds_mut` exposes the real groups (not a detached view): an in-place child edit is
+    /// visible through the shared accessors.
+    #[test]
+    fn sub_ifds_mut_edits_children_in_place() {
+        let mut ifd = Ifd::new();
+        let mut child = Ifd::new();
+        child.set(256, Value::Short(vec![1]));
+        ifd.set_sub_ifd(330, vec![child]);
+        assert_eq!(ifd.sub_ifds_mut().len(), 1);
+        ifd.sub_ifds_mut()[0].ifds[0].set(256, Value::Short(vec![9]));
+        assert_eq!(ifd.sub_ifds()[0].ifds[0].get_u32(256), Some(9));
+    }
+
     #[test]
     fn add_sub_ifd_accumulates_per_tag() {
         let mut ifd = Ifd::new();

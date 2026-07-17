@@ -221,13 +221,20 @@ impl DngRewrite {
                 bytes.extend_from_slice(block);
             }
         }
-        if self.variant == Variant::Classic && bytes.len() as u64 > u64::from(u32::MAX) {
+        if stream_overflows(self.variant, bytes.len() as u64) {
             return Err(Error::InvalidInput(
                 "DNG: layout exceeds the 4 GiB classic-TIFF offset limit",
             ));
         }
         Ok(RewrittenDng { bytes, maker_note })
     }
+}
+
+/// Whether the final stream (directories + appended payloads) outgrew classic TIFF's 32-bit
+/// offsets. A pure predicate so the 4 GiB boundary is unit-testable without a 4 GiB allocation
+/// (mirroring `gamut_ifd`'s `layout_overflows`).
+fn stream_overflows(variant: Variant, len: u64) -> bool {
+    variant == Variant::Classic && len > u64::from(u32::MAX)
 }
 
 /// One directory's payload blocks (strips, tiles, or an embedded JPEG), copied verbatim.
@@ -331,6 +338,21 @@ fn tree_has_tag(file: &TiffFile, tag: u16) -> bool {
                 .any(|child| ifd_has(child, tag))
     }
     file.ifds.iter().any(|ifd| ifd_has(ifd, tag))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 4 GiB boundary, on the pure predicate: the largest classic length is representable,
+    /// one past it is not, and BigTIFF never overflows.
+    #[test]
+    fn stream_overflow_boundary() {
+        assert!(!stream_overflows(Variant::Classic, 100));
+        assert!(!stream_overflows(Variant::Classic, u64::from(u32::MAX)));
+        assert!(stream_overflows(Variant::Classic, u64::from(u32::MAX) + 1));
+        assert!(!stream_overflows(Variant::Big, u64::from(u32::MAX) + 1));
+    }
 }
 
 /// Finds the original absolute offset of the Exif sub-IFD's out-of-line `MakerNote` value

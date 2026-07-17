@@ -434,6 +434,8 @@ mod tests {
 
     #[test]
     fn full_contiguous_claims_classify_cleanly() {
+        let map = SegmentMap::new(10);
+        assert_eq!(map.file_len(), 10);
         let r = report(10, &[(0, 4), (4, 6)]);
         assert!(r.is_fully_classified());
         assert_eq!(r.segments.len(), 2);
@@ -486,6 +488,54 @@ mod tests {
         assert!(r.is_fully_classified());
     }
 
+    /// Overlap and adjacency union-extension away from offset 0, with exact unclassified
+    /// extents — `new_end - last.start` and `new_end + last.start` coincide when
+    /// `last.start == 0`, so a non-zero start is what actually pins the merge arithmetic.
+    #[test]
+    fn merges_away_from_origin_have_exact_extents() {
+        let r = report(20, &[(5, 6), (8, 6)]); // overlap on [8, 11)
+        assert_eq!(r.conflicts.len(), 1);
+        assert_eq!(
+            r.unclassified,
+            vec![Range { start: 0, len: 5 }, Range { start: 14, len: 6 }]
+        );
+
+        let r = report(20, &[(5, 5), (10, 5)]); // adjacent at 10
+        assert!(r.conflicts.is_empty());
+        assert_eq!(
+            r.unclassified,
+            vec![Range { start: 0, len: 5 }, Range { start: 15, len: 5 }]
+        );
+    }
+
+    /// The conflict names the actual overlapped segment, not merely the union so far.
+    #[test]
+    fn conflict_names_the_overlapped_segment() {
+        // (6, 2) overlaps the *second* segment (4, 4); the union-so-far is [0, 8), so a wrong
+        // pick is distinguishable.
+        let r = report(10, &[(0, 4), (4, 4), (6, 2)]);
+        assert_eq!(r.conflicts.len(), 1);
+        assert_eq!(r.conflicts[0].a.range, Range { start: 4, len: 4 });
+        assert_eq!(r.conflicts[0].b.range, Range { start: 6, len: 2 });
+    }
+
+    /// Two *distinct* shared extents produce two separate `SharedSpan`s, each accumulating only
+    /// its own claimants.
+    #[test]
+    fn distinct_shared_spans_stay_separate() {
+        let mut map = SegmentMap::new(8);
+        for tag in [1u16, 2] {
+            map.claim(0, 4, SpanKind::Value { ifd: 0, tag }, Claim::Parsed);
+        }
+        for tag in [3u16, 4] {
+            map.claim(4, 4, SpanKind::Value { ifd: 0, tag }, Claim::Parsed);
+        }
+        let r = map.finish(None);
+        assert_eq!(r.shared.len(), 2, "{:?}", r.shared);
+        assert!(r.shared.iter().all(|s| s.kinds.len() == 2));
+        assert!(r.is_fully_classified());
+    }
+
     #[test]
     fn partial_overlap_is_a_conflict() {
         let r = report(10, &[(0, 6), (4, 6)]);
@@ -509,9 +559,27 @@ mod tests {
         let r = report(10, &[(0, 8), (8, 6)]);
         assert_eq!(r.out_of_bounds.len(), 1);
         assert_eq!(r.out_of_bounds[0].range, Range { start: 8, len: 6 });
-        // The in-bounds portion [8, 10) still counts toward classification.
+        // The in-bounds portion [8, 10) still counts toward classification — clamped exactly.
         assert!(r.unclassified.is_empty());
+        assert!(
+            r.segments.contains(&Segment {
+                range: Range { start: 8, len: 2 },
+                kind: seg(8, 6),
+            }),
+            "{:?}",
+            r.segments
+        );
         assert!(!r.is_fully_classified());
+    }
+
+    /// A claim starting exactly at the file end has no in-bounds part: no phantom zero-length
+    /// segment appears, and the whole file stays unclassified.
+    #[test]
+    fn claim_at_exactly_file_end_is_out_of_bounds_only() {
+        let r = report(10, &[(10, 4)]);
+        assert_eq!(r.out_of_bounds.len(), 1);
+        assert!(r.segments.is_empty(), "{:?}", r.segments);
+        assert_eq!(r.unclassified, vec![Range { start: 0, len: 10 }]);
     }
 
     #[test]

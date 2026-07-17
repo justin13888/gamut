@@ -220,6 +220,16 @@ mod tests {
         assert_eq!(ledger.spans().len(), 1);
     }
 
+    /// A read ending exactly where an existing span begins is adjacency and must coalesce —
+    /// pinning the disjoint-insert boundary from the *before* side.
+    #[test]
+    fn record_adjacent_before_an_existing_span_coalesces() {
+        let mut ledger = ReadLedger::new();
+        ledger.record(10, 5); // [10, 15)
+        ledger.record(6, 4); // [6, 10) — ends exactly at the span's start
+        assert_eq!(ledger.spans(), spans(&[(6, 9)]));
+    }
+
     #[test]
     fn record_bridging_multiple_spans_coalesces_them() {
         let mut ledger = ReadLedger::new();
@@ -256,6 +266,17 @@ mod tests {
         assert!(unclaimed.is_empty());
         // No claims at all: everything read is unclaimed.
         assert_eq!(ledger.subtract(&[]), spans(&[(0, 10), (20, 5)]));
+    }
+
+    /// Claim normalisation merges away from offset 0 with exact extents (`new_end - last.start`
+    /// degenerates when `last.start == 0`), and the merged length bounds the subtraction.
+    #[test]
+    fn subtract_normalises_overlapping_claims_away_from_origin() {
+        let mut ledger = ReadLedger::new();
+        ledger.record(0, 40);
+        // Overlapping claims [10, 20) + [15, 25) normalise to [10, 25).
+        let unclaimed = ledger.subtract(&spans(&[(10, 10), (15, 10)]));
+        assert_eq!(unclaimed, spans(&[(0, 10), (25, 15)]));
     }
 
     #[test]

@@ -551,4 +551,128 @@ mod tests {
         assert!(audit(&b"not a tiff"[..], &StandardAuditSpec).is_err());
         assert!(audit(&b""[..], &StandardAuditSpec).is_err());
     }
+
+    /// The composable pieces: `read_at` returns the real bytes (and its read must be matched by
+    /// a claim), `claim` classifies a codec-private block, and `record` lands in the findings.
+    #[test]
+    fn auditor_pieces_compose_for_codec_known_structures() {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![640]));
+        let mut bytes = classic_le(vec![ifd]);
+        let block_at = bytes.len() as u64;
+        bytes.extend_from_slice(&[0xAB; 6]);
+
+        let mut auditor = Auditor::new(&bytes[..]).expect("new");
+        auditor.walk(&StandardAuditSpec).expect("walk");
+        let mut buf = [0u8; 6];
+        auditor.read_at(block_at, &mut buf).expect("read_at");
+        assert_eq!(buf, [0xAB; 6], "read_at returns the physical bytes");
+        auditor.claim(
+            block_at,
+            6,
+            SpanKind::Data(DataLabel::Other("private block")),
+            crate::Claim::Parsed,
+        );
+        let noted = AuditFinding::ChainedSubIfd {
+            page: 0,
+            tag: 1,
+            offset: 2,
+        };
+        auditor.record(noted);
+        let (report, findings) = auditor.finish().expect("finish");
+        assert!(report.is_fully_classified(), "report: {report:?}");
+        assert_eq!(findings, vec![noted]);
+    }
+
+    /// `walk_embedded` parses a rebased chain (both directories, real values) and its claims
+    /// land at **physical** offsets in the shared map.
+    #[test]
+    fn walk_embedded_claims_at_physical_offsets() {
+        let mut a = Ifd::new();
+        a.set(256, Value::Short(vec![7]));
+        a.set(270, Value::Ascii("vendor mode".to_owned())); // out of line within the stream
+        let mut b = Ifd::new();
+        b.set(256, Value::Short(vec![9]));
+        let note = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![a, b],
+        })
+        .expect("write note");
+        let base = 1000u64;
+        let mut outer = vec![0u8; base as usize];
+        outer.extend_from_slice(&note);
+
+        let mut auditor = Auditor::new(&outer[..]).expect("new");
+        let ifds = auditor
+            .walk_embedded(base, 8, ByteOrder::LittleEndian, Variant::Classic)
+            .expect("walk_embedded");
+        assert_eq!(ifds.len(), 2, "the whole chain is walked");
+        assert_eq!(ifds[0].get_u32(256), Some(7));
+        assert_eq!(ifds[1].get_u32(256), Some(9));
+        // Cover the wrapper bytes so the classification verdict isolates the embedded claims.
+        auditor.claim(
+            0,
+            base,
+            SpanKind::Data(DataLabel::Other("prefix")),
+            crate::Claim::Declared,
+        );
+        auditor.claim(
+            base,
+            8,
+            SpanKind::Data(DataLabel::Other("embedded header")),
+            crate::Claim::Declared,
+        );
+        let (report, _) = auditor.finish().expect("finish");
+        assert!(report.is_fully_classified(), "report: {report:?}");
+        // The embedded directory bodies sit at base + 8 (and chained after), physically —
+        // and the out-of-line value claim is shifted the same way, its owning-IFD diagnostic
+        // included.
+        assert!(
+            report
+                .segments
+                .iter()
+                .any(|s| s.kind == SpanKind::IfdBody { ifd: base + 8 }
+                    && s.range.start == base + 8),
+            "physical claim positions: {report:?}"
+        );
+        assert!(
+            report.segments.iter().any(|s| s.kind
+                == SpanKind::Value {
+                    ifd: base + 8,
+                    tag: 270,
+                }
+                && s.range.start > base),
+            "physical value claim: {report:?}"
+        );
+    }
+
+    /// The sub-IFD depth guard's boundary is exact: a 16-level tree walks clean, a 17-level
+    /// tree skips exactly its deepest directory.
+    #[test]
+    fn depth_guard_boundary_is_exact() {
+        let nested = |levels: usize| {
+            let mut ifd = Ifd::new();
+            ifd.set(256, Value::Short(vec![1]));
+            for _ in 0..levels - 1 {
+                let mut parent = Ifd::new();
+                parent.set_sub_ifd(tags::SUB_IFDS, vec![ifd]);
+                ifd = parent;
+            }
+            classic_le(vec![ifd])
+        };
+        let at_cap = audit(&nested(16)[..], &StandardAuditSpec).expect("audit");
+        assert!(at_cap.findings.is_empty(), "{:?}", at_cap.findings);
+        assert!(at_cap.report.is_fully_classified());
+
+        let over = audit(&nested(17)[..], &StandardAuditSpec).expect("audit");
+        assert_eq!(over.findings.len(), 1, "{:?}", over.findings);
+        assert!(matches!(
+            over.findings[0],
+            AuditFinding::SkippedSubIfd {
+                reason: SkipReason::TooDeep,
+                ..
+            }
+        ));
+    }
 }

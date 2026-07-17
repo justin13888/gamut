@@ -367,6 +367,45 @@ fn first_rational(value: &Value) -> Option<Rational> {
 mod tests {
     use super::*;
 
+    /// The manual `PartialEq` compares every *content* field (each must independently break
+    /// equality) while ignoring the recorded maker-note source offset (provenance).
+    #[test]
+    fn equality_covers_each_content_field_and_ignores_provenance() {
+        let base = Exif::new(ByteOrder::LittleEndian);
+        assert_eq!(base, base.clone());
+
+        // Each content field flips inequality on its own.
+        let order = Exif::new(ByteOrder::BigEndian);
+        assert_ne!(base, order);
+        let mut image = base.clone();
+        image.set_tag(ExifTag::Make, Value::Ascii("Canon".into()));
+        assert_ne!(base, image);
+        let mut exif_ifd = base.clone();
+        exif_ifd.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
+        assert_ne!(base, exif_ifd);
+        let mut gps = base.clone();
+        gps.set_tag(ExifTag::GpsVersionId, Value::Byte(vec![2, 3, 0, 0]));
+        assert_ne!(base, gps);
+        let mut interop = base.clone();
+        interop.set_tag(ExifTag::InteroperabilityIndex, Value::Ascii("R98".into()));
+        assert_ne!(base, interop);
+        let mut thumb = base.clone();
+        thumb.set_thumbnail(vec![0xFF, 0xD8, 0xFF, 0xD9]);
+        assert_ne!(base, thumb);
+
+        // Provenance is ignored: a parsed model equals a from-scratch model with the same
+        // content even though only the former records a maker-note offset.
+        let mut with_note = Exif::new(ByteOrder::LittleEndian);
+        with_note.set_tag(
+            ExifTag::MakerNote,
+            Value::Undefined((0..32u8).collect::<Vec<u8>>()),
+        );
+        let parsed = Exif::parse(&with_note.to_bytes().expect("write")).expect("parse");
+        assert!(parsed.maker_note_offset().is_some());
+        assert!(with_note.maker_note_offset().is_none());
+        assert_eq!(parsed, with_note);
+    }
+
     #[test]
     fn typed_accessors_read_their_tags() {
         let mut exif = Exif::new(ByteOrder::LittleEndian);

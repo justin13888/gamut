@@ -87,6 +87,41 @@ fn vendor_and_unknown_material_survives_a_rewrite() {
     );
 }
 
+/// An unsatisfiable pin (the directory region outgrew the note's old offset) falls back to
+/// relocation — reported as such, with the note's bytes still exact.
+#[test]
+fn unsatisfiable_pin_relocates_with_bytes_intact() {
+    let note: Vec<u8> = (100..164u8).collect();
+    let base = {
+        let mut r = DngRewrite::open(&sample_dng()).expect("open");
+        let mut exif = Ifd::new();
+        exif.set(ifd_tags::MAKER_NOTE, Value::Undefined(note.clone()));
+        r.file_mut().ifds[0].set_sub_ifd(ifd_tags::EXIF_IFD, vec![exif]);
+        r.write().expect("write").bytes
+    };
+
+    let mut r = DngRewrite::open(&base).expect("reopen");
+    // Balloon IFD 0 far past the note's old position so the pin cannot be honored.
+    for tag in 0x8100..0x8400u16 {
+        r.file_mut().ifds[0].set(tag, Value::Long(vec![u32::from(tag)]));
+    }
+    let out = r.write().expect("write");
+    assert_eq!(out.maker_note, MakerNotePreservation::Relocated);
+    let reread = DngRewrite::open(&out.bytes).expect("reopen");
+    let exif_group = reread.file().ifds[0]
+        .sub_ifds()
+        .iter()
+        .find(|g| g.tag == ifd_tags::EXIF_IFD)
+        .expect("exif sub-IFD");
+    assert_eq!(
+        exif_group.ifds[0]
+            .get(ifd_tags::MAKER_NOTE)
+            .and_then(Value::as_bytes),
+        Some(&note[..]),
+        "bytes exact despite relocation"
+    );
+}
+
 #[test]
 fn maker_note_pins_at_its_original_offset_across_an_edit() {
     // Build a DNG carrying a maker note: rewrite the sample, adding an Exif sub-IFD with a
