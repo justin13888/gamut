@@ -1309,6 +1309,50 @@ mod tests {
         assert_eq!(raw.samples(), &samples[..]);
     }
 
+    /// The `SubIFDs` walk is depth-capped: a 10-deep nested chain yields exactly
+    /// `MAX_SUBIFD_DEPTH` IFDs (the cap stops recursion, not collection of the capped node).
+    #[test]
+    fn walk_ifds_caps_hostile_nesting_depth() {
+        // Innermost first: each level wraps the previous as its SubIFDs child.
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        for _ in 0..9 {
+            let mut parent = Ifd::new();
+            parent.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+            parent.set_sub_ifd(tags::SUB_IFDS, vec![ifd]);
+            ifd = parent;
+        }
+        let bytes = gamut_ifd::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        let file = read(&bytes).expect("read");
+        assert_eq!(walk_ifds(&file, &bytes).len(), MAX_SUBIFD_DEPTH);
+    }
+
+    /// With several raw-photometry IFDs, the main image (`NewSubFileType` 0) wins even when a
+    /// reduced-resolution raw appears first.
+    #[test]
+    fn select_raw_ifd_prefers_the_main_image() {
+        let raw_ifd = |nsft: u32, width: u16| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![nsft]));
+            ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+            ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![width]));
+            ifd
+        };
+        // A reduced-resolution raw (type 1) first, the main raw (type 0) second.
+        let ifds = vec![raw_ifd(1, 2), raw_ifd(0, 4)];
+        assert_eq!(select_raw_ifd(&ifds).unwrap(), 1);
+        // With no type-0 raw at all, the first raw IFD is the fallback.
+        let ifds = vec![raw_ifd(1, 2), raw_ifd(1, 4)];
+        assert_eq!(select_raw_ifd(&ifds).unwrap(), 0);
+        // No raw photometry anywhere is an error.
+        assert!(select_raw_ifd(&[Ifd::new()]).is_err());
+    }
+
     #[test]
     fn decode_depth_info_reads_when_present() {
         let mut ifd = Ifd::new();
