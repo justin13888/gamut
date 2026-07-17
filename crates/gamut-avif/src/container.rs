@@ -208,6 +208,34 @@ impl<'a> AvifContainer<'a> {
     ) -> Result<crate::DecodedFrame> {
         self.image.decode_item_planar(id, decoder)
     }
+
+    /// Decodes an item to a presentation-ready `ImageBuf<Rgba8>` via `decoder`. Convenience
+    /// forwarding to [`AvifImage::decode_item_rgba8`](crate::AvifImage::decode_item_rgba8).
+    ///
+    /// # Errors
+    ///
+    /// As [`AvifImage::decode_item_rgba8`](crate::AvifImage::decode_item_rgba8).
+    pub fn decode_item_rgba8(
+        &self,
+        id: u32,
+        decoder: &mut dyn crate::Av1StillDecoder,
+    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
+        self.image.decode_item_rgba8(id, decoder)
+    }
+
+    /// Decodes the primary item to a presentation-ready `ImageBuf<Rgba8>` via `decoder`.
+    /// Convenience forwarding to
+    /// [`AvifImage::decode_primary_rgba8`](crate::AvifImage::decode_primary_rgba8).
+    ///
+    /// # Errors
+    ///
+    /// As [`AvifImage::decode_primary_rgba8`](crate::AvifImage::decode_primary_rgba8).
+    pub fn decode_primary_rgba8(
+        &self,
+        decoder: &mut dyn crate::Av1StillDecoder,
+    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
+        self.image.decode_primary_rgba8(decoder)
+    }
 }
 
 /// Walks the top-level boxes into a contiguous, gap-free segment list covering `0..data.len()`,

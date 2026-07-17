@@ -36,19 +36,29 @@
 //! - **`&mut self`.** A stateful platform decoder (reused contexts, GPU handles) fits behind
 //!   `&mut self`; a pure function fits too.
 //!
-//! # The planar surface
+//! # Two presentation surfaces
 //!
-//! [`AvifImage::decode_item_planar`] is the **raw** surface. It resolves an item through its
-//! derivation (coded → decoder; `iden` → source; `grid` → tile assembly in the plane domain) and
-//! returns the decoder's [`DecodedFrame`] untouched by colour or transforms. Everything a caller
-//! could want is here, at full bit depth and native chroma; the caller drives colour/transforms
-//! with the [`AvifItem`](crate::AvifItem) property accessors. `iovl` compositing is *not* on this
-//! surface (it is defined over RGBA) — it returns [`Error::Unsupported`].
+//! - [`AvifImage::decode_item_planar`] — the **raw** surface. It resolves an item through its
+//!   derivation (coded → decoder; `iden` → source; `grid` → tile assembly in the plane domain)
+//!   and returns the decoder's [`DecodedFrame`] untouched by colour or transforms. Everything a
+//!   caller could want is here, at full bit depth and native chroma; the caller drives
+//!   colour/transforms with the [`AvifItem`](crate::AvifItem) property accessors — the surface a
+//!   consumer with its own colour pipeline (rawshift) uses. `iovl` compositing is *not* on this
+//!   surface (it is defined over RGBA) — it returns [`Error::Unsupported`], directing callers to
+//!   the RGBA path.
+//! - [`AvifImage::decode_item_rgba8`] / [`AvifImage::decode_primary_rgba8`] — the
+//!   **presentation** surface. It planar-decodes (or `iovl`-composites), converts colour, merges
+//!   the alpha auxiliary, and applies the item's transformative properties in `ipma` order. It
+//!   intentionally supports only the common 8-bit still-image colour cases (see
+//!   [`AvifImage::decode_item_rgba8`]); anything outside them is [`Error::Unsupported`] on *this*
+//!   surface while the planar surface still delivers the samples.
 
-use gamut_core::{Dimensions, Error, Result};
+use gamut_color::{ColorRange, ycbcr_to_rgb};
+use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8};
+use gamut_isobmff::ColourInformation;
 
 use crate::av1c::{Av1Config, ChromaFormat};
-use crate::image::{AvifImage, AvifItem, ItemKind};
+use crate::image::{AvifImage, AvifItem, CleanAperture, ItemKind, TransformativeProperty};
 
 /// The maximum derivation-reference nesting depth. A derived item (`grid`/`iden`/`iovl`) may
 /// reference other derived items; this bounds the recursion so a deep (or, together with the
@@ -269,6 +279,78 @@ impl AvifImage {
         self.decode_planar_inner(id, decoder, &mut stack)
     }
 
+    /// Decodes an item to a presentation-ready [`ImageBuf<Rgba8>`]: planar decode (or `iovl`
+    /// compositing), colour conversion, alpha-auxiliary merge, then the item's transformative
+    /// properties applied in `ipma` order.
+    ///
+    /// **Colour policy (8-bit only).** This convenience surface supports the common still-image
+    /// cases; anything else is [`Error::Unsupported`] *here* while
+    /// [`decode_item_planar`](Self::decode_item_planar) still delivers the samples:
+    ///
+    /// - **nclx matrix 0 (identity / GBR)** — requires 4:4:4; samples are mapped directly
+    ///   (`R=Cr, G=Y, B=Cb`) with no range expansion. This is the configuration the crate's own
+    ///   encoder emits, so gamut-encoded AVIFs always decode here (lossless ones bit-exactly).
+    /// - **nclx matrix 6 / 5 (BT.601)** — via [`gamut_color::ycbcr_to_rgb`], with the nclx
+    ///   `full_range` flag selecting [`ColorRange`].
+    /// - **Monochrome** — luma replicated to gray, range-expanded for limited range.
+    /// - **Missing `colr`** — defaults to **BT.601, limited range** (justification below).
+    /// - Anything else — BT.709/2020, an ICC-only `colr`, or a `bit_depth > 8` frame — is
+    ///   [`Error::Unsupported`].
+    ///
+    /// The missing-`colr` default is BT.601 limited range, matching the posture `gamut-heic`
+    /// documents for HEIF. AVIF technically defers an absent `colr` to the AV1 sequence header's
+    /// `color_config`, which this container layer deliberately does not parse — a caller needing
+    /// seq-header-driven colour works from the planar surface (the divergence is intentional and
+    /// pinned by the conformance suite, which uses explicit-`colr` fixtures for pixel
+    /// comparisons).
+    ///
+    /// **Chroma upsampling** is nearest-neighbour, co-sited (4:2:0 / 4:2:2 → 4:4:4) — the
+    /// deliberate space/time tradeoff for a container-layer presentation helper; a caller wanting
+    /// a better resampler works from the planar surface.
+    ///
+    /// **Alpha.** The item's alpha auxiliary (if any) is decoded through the same planar path and
+    /// must match the master's **pre-transform** dimensions; its **luma plane** supplies the
+    /// alpha samples, scaled from its bit depth to 8-bit. Unlike the HEIF surface, a
+    /// non-monochrome alpha auxiliary is accepted (its chroma planes are ignored): real-world
+    /// AVIF alpha items are routinely coded 4:2:0/4:4:4 with meaningless chroma, and libavif
+    /// likewise reads only the Y plane. An absent alpha is opaque (255). Premultiplication is
+    /// **not** undone — query [`AvifImage::is_premultiplied`] and un-premultiply yourself if
+    /// needed (an [`Rgba8`] buffer cannot carry the flag).
+    ///
+    /// **Transforms** are applied to the interleaved RGBA in `ipma` order (ISO/IEC 23008-12 §7):
+    /// even when the order violates the MIAF constraint (check with
+    /// [`AvifItem::is_miaf_transform_ordered`](crate::AvifItem::is_miaf_transform_ordered)) they
+    /// are applied as listed. `clap` crops per ISO/IEC 14496-12 §12.1.4, `irot` rotates
+    /// anti-clockwise, `imir` mirrors about the vertical (axis 0) or horizontal (axis 1) axis.
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_planar`](Self::decode_item_planar), plus [`Error::Unsupported`] for an
+    /// unsupported colour configuration and [`Error::InvalidInput`] for a mismatched alpha
+    /// auxiliary or an out-of-range/non-integer `clap`.
+    pub fn decode_item_rgba8(
+        &self,
+        id: u32,
+        decoder: &mut dyn Av1StillDecoder,
+    ) -> Result<ImageBuf<Rgba8>> {
+        let mut stack = Vec::new();
+        self.decode_rgba_inner(id, decoder, &mut stack)
+    }
+
+    /// Decodes the primary item to a presentation-ready [`ImageBuf<Rgba8>`].
+    ///
+    /// Equivalent to [`decode_item_rgba8`](Self::decode_item_rgba8) on the primary item id.
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba8`](Self::decode_item_rgba8).
+    pub fn decode_primary_rgba8(
+        &self,
+        decoder: &mut dyn Av1StillDecoder,
+    ) -> Result<ImageBuf<Rgba8>> {
+        self.decode_item_rgba8(self.as_isobmff().primary_item_id, decoder)
+    }
+
     // ---- planar pipeline ---------------------------------------------------------------------
 
     fn decode_planar_inner(
@@ -408,6 +490,85 @@ impl AvifImage {
         };
         DecodedFrame::new(ow, oh, bit_depth, chroma, y, cb, cr)
     }
+
+    // ---- RGBA pipeline -----------------------------------------------------------------------
+
+    fn decode_rgba_inner(
+        &self,
+        id: u32,
+        decoder: &mut dyn Av1StillDecoder,
+        stack: &mut Vec<u32>,
+    ) -> Result<ImageBuf<Rgba8>> {
+        let item = self
+            .item(id)
+            .ok_or(Error::InvalidInput("AVIF: item id names no item"))?;
+        if item.has_unsupported_essential_property() {
+            return Err(Error::Unsupported(
+                "AVIF: item has an unrecognised essential property",
+            ));
+        }
+
+        let (rgba, w, h) = if matches!(item.kind(), ItemKind::Overlay) {
+            enter_derivation(stack, id)?;
+            let composited = self.composite_overlay(id, item, decoder, stack);
+            stack.pop();
+            composited?
+        } else {
+            // The planar path applies its own cycle/depth guard for `id`.
+            let frame = self.decode_planar_inner(id, decoder, stack)?;
+            let mut rgba = frame_to_rgba(&item, &frame)?;
+            let (w, h) = (frame.width, frame.height);
+            if let Some(alpha) = self.alpha_auxiliary_of(id) {
+                let alpha_frame = self.decode_planar_inner(alpha.id(), decoder, stack)?;
+                apply_alpha(&mut rgba, w as usize, h as usize, &alpha_frame)?;
+            }
+            (rgba, w, h)
+        };
+
+        let (rgba, w, h) = apply_transforms(item.transformative_properties(), rgba, w, h)?;
+        ImageBuf::<Rgba8>::new(rgba, Dimensions::new(w, h)?)
+    }
+
+    fn composite_overlay(
+        &self,
+        id: u32,
+        item: AvifItem<'_>,
+        decoder: &mut dyn Av1StillDecoder,
+        stack: &mut Vec<u32>,
+    ) -> Result<(Vec<u8>, u32, u32)> {
+        // `overlay` validates the payload holds exactly one offset per `dimg` reference.
+        let overlay = self.overlay(id)?;
+        let (ow, oh) = (overlay.output_width, overlay.output_height);
+        let len = (ow as usize)
+            .checked_mul(oh as usize)
+            .and_then(|p| p.checked_mul(4))
+            .filter(|_| ow != 0 && oh != 0)
+            .ok_or(Error::InvalidInput(
+                "AVIF: overlay canvas is empty or too large",
+            ))?;
+        // Fill: 16-bit canvas samples scaled to 8-bit by >> 8.
+        let fill = [
+            (overlay.canvas_fill_value[0] >> 8) as u8,
+            (overlay.canvas_fill_value[1] >> 8) as u8,
+            (overlay.canvas_fill_value[2] >> 8) as u8,
+            (overlay.canvas_fill_value[3] >> 8) as u8,
+        ];
+        let mut canvas = vec![0u8; len];
+        for px in canvas.chunks_exact_mut(4) {
+            px.copy_from_slice(&fill);
+        }
+        for (&input_id, &(dx, dy)) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
+            let src = self.decode_rgba_inner(input_id, decoder, stack)?;
+            composite_over(
+                &mut canvas,
+                (ow, oh),
+                src.as_samples(),
+                (src.width(), src.height()),
+                (dx, dy),
+            );
+        }
+        Ok((canvas, ow, oh))
+    }
 }
 
 // ---- derivation recursion guard --------------------------------------------------------------
@@ -450,4 +611,338 @@ fn assemble_plane(
         }
     }
     out
+}
+
+// ---- colour conversion -----------------------------------------------------------------------
+
+/// The presentation matrix coefficients and signal range for an item: its nclx `colr`, or the
+/// documented BT.601-limited default when absent.
+fn colour_params(item: &AvifItem<'_>) -> Result<(u16, ColorRange)> {
+    match item.colour() {
+        // Default when no `colr`: BT.601 (matrix 6), limited range — see `decode_item_rgba8`.
+        None => Ok((6, ColorRange::Limited)),
+        Some(ColourInformation::Nclx(nclx)) => {
+            let range = if nclx.full_range {
+                ColorRange::Full
+            } else {
+                ColorRange::Limited
+            };
+            Ok((nclx.matrix_coefficients, range))
+        }
+        Some(_) => Err(Error::Unsupported(
+            "AVIF: ICC-profile colr is not supported on the RGBA surface (use the planar surface)",
+        )),
+    }
+}
+
+/// Converts a planar [`DecodedFrame`] to an interleaved 8-bit RGBA buffer (opaque alpha),
+/// applying this crate's colour policy (see [`AvifImage::decode_item_rgba8`]).
+fn frame_to_rgba(item: &AvifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
+    if frame.bit_depth != 8 {
+        return Err(Error::Unsupported(
+            "AVIF: >8-bit RGBA presentation is not yet supported (use the planar surface)",
+        ));
+    }
+    let (matrix, range) = colour_params(item)?;
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let mut out = vec![0u8; w * h * 4];
+
+    if frame.chroma == ChromaFormat::Monochrome {
+        for (i, px) in out.chunks_exact_mut(4).enumerate() {
+            let g = expand_gray8(frame.y[i], range);
+            px.copy_from_slice(&[g, g, g, 255]);
+        }
+        return Ok(out);
+    }
+
+    match matrix {
+        // Identity / GBR (mc = 0): plane order Y=G, Cb=B, Cr=R; requires 4:4:4, no range
+        // expansion. The configuration gamut-avif's own encoder emits.
+        0 => {
+            if frame.chroma != ChromaFormat::Yuv444 {
+                return Err(Error::Unsupported(
+                    "AVIF: identity matrix (mc = 0) requires 4:4:4 chroma",
+                ));
+            }
+            for (i, px) in out.chunks_exact_mut(4).enumerate() {
+                px.copy_from_slice(&[frame.cr[i] as u8, frame.y[i] as u8, frame.cb[i] as u8, 255]);
+            }
+        }
+        // BT.601 (matrix 6) and BT.470 System B,G (matrix 5) share coefficients.
+        5 | 6 => {
+            let (cw, _) = frame.chroma.chroma_dimensions(frame.width, frame.height);
+            let cw = cw as usize;
+            for y in 0..h {
+                let cy = match frame.chroma {
+                    ChromaFormat::Yuv420 => y / 2,
+                    _ => y,
+                };
+                for x in 0..w {
+                    let cx = match frame.chroma {
+                        ChromaFormat::Yuv444 => x,
+                        _ => x / 2,
+                    };
+                    let ci = cy * cw + cx;
+                    let (r, g, b) = ycbcr_to_rgb(
+                        frame.y[y * w + x] as u8,
+                        frame.cb[ci] as u8,
+                        frame.cr[ci] as u8,
+                        range,
+                    );
+                    let o = (y * w + x) * 4;
+                    out[o..o + 4].copy_from_slice(&[r, g, b, 255]);
+                }
+            }
+        }
+        _ => {
+            return Err(Error::Unsupported(
+                "AVIF: only BT.601 (matrix 5/6), identity (0), and monochrome are supported on the RGBA surface",
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Expands one 8-bit monochrome luma sample to a display gray value: identity for full range, and
+/// the studio-swing expansion `(y - 16) · 255 / 219` (rounded, clamped) for limited range.
+fn expand_gray8(y: u16, range: ColorRange) -> u8 {
+    match range {
+        ColorRange::Full => y.min(255) as u8,
+        ColorRange::Limited => {
+            let expanded = ((i32::from(y) - 16) * 255 + 109) / 219;
+            expanded.clamp(0, 255) as u8
+        }
+    }
+}
+
+/// Merges an alpha auxiliary into the RGBA buffer's alpha channel.
+///
+/// Only the auxiliary's **luma plane** is read: unlike the HEIF surface, a non-monochrome alpha
+/// item is accepted (real-world AVIF alpha auxiliaries are routinely coded 4:2:0/4:4:4 with
+/// meaningless chroma, and libavif likewise reads only Y). The dimensions must match the master's
+/// pre-transform dimensions; samples are rescaled from their native bit depth to 8-bit,
+/// round-to-nearest.
+fn apply_alpha(rgba: &mut [u8], w: usize, h: usize, alpha: &DecodedFrame) -> Result<()> {
+    if alpha.width as usize != w || alpha.height as usize != h {
+        return Err(Error::InvalidInput(
+            "AVIF: alpha auxiliary dimensions do not match the master image",
+        ));
+    }
+    let max = (1u32 << alpha.bit_depth) - 1;
+    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+        // Scale the sample from its native bit depth to 8-bit, round-to-nearest. Depth 8 needs no
+        // special case: `(s * 255 + 127) / 255 == s` for every `s` in `0..=255`, so this general
+        // rescale is already the identity there.
+        let s = u32::from(alpha.y[i]);
+        px[3] = ((s * 255 + max / 2) / max) as u8;
+    }
+    Ok(())
+}
+
+// ---- transformative properties (on interleaved RGBA8) ----------------------------------------
+
+/// Applies transformative properties to an interleaved RGBA buffer in `ipma` (list) order,
+/// returning the transformed buffer and its dimensions.
+fn apply_transforms(
+    props: Vec<TransformativeProperty>,
+    rgba: Vec<u8>,
+    w: u32,
+    h: u32,
+) -> Result<(Vec<u8>, u32, u32)> {
+    let (mut cur, mut cw, mut ch) = (rgba, w, h);
+    for tp in props {
+        match tp {
+            TransformativeProperty::Rotation(turns) => {
+                // `turns` is 0..=3 by construction — the isobmff `irot` parser masks the angle
+                // field with `& 0x03` — so each unit is exactly one 90° anti-clockwise rotation
+                // and no modulo normalisation is needed here.
+                for _ in 0..turns {
+                    let rotated = rotate90_ccw(&cur, cw, ch);
+                    cur = rotated.0;
+                    cw = rotated.1;
+                    ch = rotated.2;
+                }
+            }
+            TransformativeProperty::Mirror(axis) => {
+                cur = mirror(&cur, cw, ch, axis);
+            }
+            TransformativeProperty::CleanAperture(clap) => {
+                let cropped = crop_clap(&cur, cw, ch, &clap)?;
+                cur = cropped.0;
+                cw = cropped.1;
+                ch = cropped.2;
+            }
+        }
+    }
+    Ok((cur, cw, ch))
+}
+
+/// Rotates an interleaved RGBA buffer 90° anti-clockwise: output `(ox, oy)` reads input
+/// `(w - 1 - oy, ox)`, giving output dimensions `(h, w)`.
+fn rotate90_ccw(src: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+    let (wu, hu) = (w as usize, h as usize);
+    let (nw, nh) = (hu, wu);
+    let mut out = vec![0u8; nw * nh * 4];
+    for oy in 0..nh {
+        for ox in 0..nw {
+            let (sx, sy) = (wu - 1 - oy, ox);
+            let si = (sy * wu + sx) * 4;
+            let oi = (oy * nw + ox) * 4;
+            out[oi..oi + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    (out, h, w)
+}
+
+/// Mirrors an interleaved RGBA buffer about the vertical (`axis = 0`, left↔right) or horizontal
+/// (`axis = 1`, top↔bottom) axis; dimensions are unchanged. Any other `axis` value is treated as
+/// axis 0 (the `imir` field is a single bit).
+fn mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
+    let (wu, hu) = (w as usize, h as usize);
+    let mut out = vec![0u8; wu * hu * 4];
+    for y in 0..hu {
+        for x in 0..wu {
+            let (sx, sy) = if axis == 1 {
+                (x, hu - 1 - y)
+            } else {
+                (wu - 1 - x, y)
+            };
+            let si = (sy * wu + sx) * 4;
+            let oi = (y * wu + x) * 4;
+            out[oi..oi + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    out
+}
+
+/// Crops an interleaved RGBA buffer to its `clap` clean aperture (ISO/IEC 14496-12 §12.1.4).
+///
+/// The clean aperture is a `cleanApertureWidth × cleanApertureHeight` rectangle centred at
+/// `((w - 1)/2 + horizOff, (h - 1)/2 + vertOff)`, so its top-left corner is
+/// `left = (w - cleanApertureWidth)/2 + horizOff` and
+/// `top = (h - cleanApertureHeight)/2 + vertOff` (the width/height and offset centre terms
+/// combine exactly, matching libavif's integer clap conversion). The crop must be integer-valued
+/// and lie fully inside the image; otherwise it is rejected.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if any denominator is zero, if the width/height or the
+/// computed top-left corner is not integer-valued, or if the crop window falls outside the image.
+fn crop_clap(src: &[u8], w: u32, h: u32, clap: &CleanAperture) -> Result<(Vec<u8>, u32, u32)> {
+    if clap.width_d == 0 || clap.height_d == 0 || clap.horiz_off_d == 0 || clap.vert_off_d == 0 {
+        return Err(Error::InvalidInput("AVIF: clap has a zero denominator"));
+    }
+    if !clap.width_n.is_multiple_of(clap.width_d) || !clap.height_n.is_multiple_of(clap.height_d) {
+        return Err(Error::InvalidInput(
+            "AVIF: clap width/height is not integer-valued",
+        ));
+    }
+    let crop_w = clap.width_n / clap.width_d;
+    let crop_h = clap.height_n / clap.height_d;
+    if crop_w == 0 || crop_h == 0 {
+        return Err(Error::InvalidInput("AVIF: clap has a zero-sized crop"));
+    }
+    let left = clap_offset(
+        i64::from(w),
+        i64::from(crop_w),
+        clap.horiz_off_n,
+        clap.horiz_off_d,
+    )?;
+    let top = clap_offset(
+        i64::from(h),
+        i64::from(crop_h),
+        clap.vert_off_n,
+        clap.vert_off_d,
+    )?;
+    if left < 0
+        || top < 0
+        || left + i64::from(crop_w) > i64::from(w)
+        || top + i64::from(crop_h) > i64::from(h)
+    {
+        return Err(Error::InvalidInput(
+            "AVIF: clap crop window lies outside the image",
+        ));
+    }
+
+    let (wu, left, top) = (w as usize, left as usize, top as usize);
+    let (cw, chh) = (crop_w as usize, crop_h as usize);
+    let mut out = vec![0u8; cw * chh * 4];
+    for y in 0..chh {
+        for x in 0..cw {
+            let si = ((top + y) * wu + (left + x)) * 4;
+            let oi = (y * cw + x) * 4;
+            out[oi..oi + 4].copy_from_slice(&src[si..si + 4]);
+        }
+    }
+    Ok((out, crop_w, crop_h))
+}
+
+/// The integer top-left offset of a clean-aperture crop along one axis:
+/// `left = (dim - crop)/2 + off_n/off_d`, evaluated exactly as
+/// `((dim - crop)·off_d + 2·off_n) / (2·off_d)`. `off_n` is signed (two's-complement bits);
+/// `off_d` is a positive denominator.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the offset is not integer-valued.
+fn clap_offset(dim: i64, crop: i64, off_n: u32, off_d: u32) -> Result<i64> {
+    let num = (dim - crop) * i64::from(off_d) + 2 * i64::from(off_n as i32);
+    let den = 2 * i64::from(off_d);
+    if num % den != 0 {
+        return Err(Error::InvalidInput(
+            "AVIF: clap offset is not integer-valued",
+        ));
+    }
+    Ok(num / den)
+}
+
+// ---- overlay compositing ---------------------------------------------------------------------
+
+/// Composites a source RGBA image over the canvas at signed offset `(dx, dy)`, clipping to the
+/// canvas, with unassociated-alpha source-over blending.
+///
+/// Source-over in integer math (`sa`/`da` the source/destination alpha, `sc`/`dc` a channel):
+/// `out_a = sa + round(da·(255 - sa)/255)`, and each channel
+/// `out_c = round((sc·sa + round(dc·da·(255 - sa)/255)) / out_a)`, or a fully transparent pixel
+/// when `out_a = 0`. Rounding is round-half-up (`+ half`).
+fn composite_over(
+    canvas: &mut [u8],
+    canvas_dims: (u32, u32),
+    src: &[u8],
+    src_dims: (u32, u32),
+    offset: (i32, i32),
+) {
+    let (cw, ch) = canvas_dims;
+    let (sw, sh) = src_dims;
+    let (dx, dy) = offset;
+    for sy in 0..sh as i64 {
+        let y = i64::from(dy) + sy;
+        if y < 0 || y >= i64::from(ch) {
+            continue;
+        }
+        for sx in 0..sw as i64 {
+            let x = i64::from(dx) + sx;
+            if x < 0 || x >= i64::from(cw) {
+                continue;
+            }
+            let si = ((sy * i64::from(sw) + sx) * 4) as usize;
+            let di = ((y * i64::from(cw) + x) * 4) as usize;
+            let sa = u32::from(src[si + 3]);
+            let inv = 255 - sa;
+            let da = u32::from(canvas[di + 3]);
+            let da_contrib = (da * inv + 127) / 255;
+            let out_a = sa + da_contrib;
+            if out_a == 0 {
+                canvas[di..di + 4].copy_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            for c in 0..3 {
+                let sc = u32::from(src[si + c]);
+                let dc = u32::from(canvas[di + c]);
+                let num = sc * sa + (dc * da * inv + 127) / 255;
+                canvas[di + c] = ((num + out_a / 2) / out_a).min(255) as u8;
+            }
+            canvas[di + 3] = out_a as u8;
+        }
+    }
 }
