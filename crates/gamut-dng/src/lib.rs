@@ -20,10 +20,15 @@
 //!
 //! Reference: the **DNG 1.7.1.0 specification** (`references/dng/DNG_Spec_1_7_1_0.pdf`), validated
 //! against the **Adobe DNG SDK 1.7.1** as the authoritative oracle. The crate is **encoder-first**
-//! with a matching raw decoder (sample unpacking + decompression + tag parsing); full demosaicing
-//! and colour rendering are a raw *processor's* job and stay out of scope. See `STATUS.md` for the
-//! per-feature implementation status and the deferred tail (JPEG XL, lossy JPEG, the standard
-//! opcode library, masks/depth maps).
+//! with a matching raw decoder (sample unpacking + decompression + tag parsing): decode returns
+//! the *stored* sensor values, with the spec's chapter-5 raw-to-linear mapping available as the
+//! explicit opt-in [`RawImage::to_linear`] (linearization table, black pattern + deltas, rescale
+//! — differentially gated against the SDK's stage-2 image). The level model is the typed
+//! [`RawLevels`]; opcode lists are typed [`OpcodeList`] containers; and the SOF3 codec is the
+//! public [`lossless_jpeg`] module. Full demosaicing and colour rendering are a raw *processor's*
+//! job and stay out of scope. See `STATUS.md` for the per-feature implementation status and the
+//! deferred tail (tiles, JPEG XL, lossy JPEG, the standard opcode *processing* library,
+//! masks/depth maps).
 //!
 //! Memory-safe on hostile input: `#![forbid(unsafe_code)]` — like TIFF, DNG's offset-driven
 //! structure is a classic parser-exploit surface, so the decoder is built to resist malformed
