@@ -46,6 +46,22 @@ minimum_test_timeout = 60
 # a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
 # an entry.
 exclude_re = [
+    # gamut-ifd track::subtract — the claim-normalisation details are unobservable through the
+    # two-pointer walk. `r.len > 0` → `>=` only admits zero-length claims, which the walk's
+    # skip loop (`r.end() <= pos`) discards before they can cover anything; and disabling the
+    # merge guard leaves the claims as a sorted-but-overlapping list the walk consumes
+    # identically (each arm advances `pos` monotonically over the union). Both equivalent; the
+    # merge *arithmetic* is NOT excluded (killed by
+    # `subtract_normalises_overlapping_claims_away_from_origin`).
+    'replace > with >= in ReadLedger::subtract',
+    'replace match guard r\.start <= last\.end\(\) with false in ReadLedger::subtract',
+    # gamut-dng rewrite::write — the pin-fallback match guard. With `pin == None` the guard is
+    # the only difference between "return the error" and "retry the identical un-pinned write
+    # and return its (identical) error": `write_with` is deterministic in its inputs, so forcing
+    # the guard true merely repeats the failing call before propagating the same error.
+    # Equivalent; the guard-false direction (pin errors must fall back, not propagate) is killed
+    # by `unsatisfiable_pin_relocates_with_bytes_intact`.
+    'replace match guard pin\.is_some\(\) with true in DngRewrite::write',
     # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
     # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
     # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.

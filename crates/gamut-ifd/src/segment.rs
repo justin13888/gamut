@@ -238,11 +238,14 @@ impl SegmentMap {
             }
             if let Some(last) = covered.last_mut() {
                 if range.start < last.end() {
-                    // Partial overlap: out-of-spec double-claim.
+                    // Partial overlap: out-of-spec double-claim. Sorted iteration guarantees
+                    // every earlier segment starts at or before `range.start` (so it always
+                    // begins before `range` ends); overlap is purely whether it reaches
+                    // strictly past `range.start`.
                     let a = segments
                         .iter()
                         .rev()
-                        .find(|s| s.range.end() > range.start && s.range.start < range.end())
+                        .find(|s| s.range.end() > range.start)
                         .copied()
                         .unwrap_or(Segment {
                             range: *last,
@@ -519,6 +522,18 @@ mod tests {
         assert_eq!(r.conflicts[0].b.range, Range { start: 6, len: 2 });
     }
 
+    /// The conflict skips an adjacent (non-overlapping) later segment and names the earlier
+    /// segment that actually reaches past the newcomer's start.
+    #[test]
+    fn conflict_skips_an_adjacent_red_herring() {
+        // (6, 2) nests in (0, 10); then (8, 4) overlaps (0, 10) — but (6, 2), the most recent
+        // segment, merely *touches* offset 8 and must not be named.
+        let r = report(20, &[(0, 10), (6, 2), (8, 4)]);
+        assert_eq!(r.conflicts.len(), 2);
+        assert_eq!(r.conflicts[1].b.range, Range { start: 8, len: 4 });
+        assert_eq!(r.conflicts[1].a.range, Range { start: 0, len: 10 });
+    }
+
     /// Two *distinct* shared extents produce two separate `SharedSpan`s, each accumulating only
     /// its own claimants.
     #[test]
@@ -712,6 +727,26 @@ mod tests {
         let mut src = long_tail;
         r.classify_padding(&mut src).expect("classify");
         assert_eq!(r.unclassified, vec![Range { start: 4, len: 2 }]);
+    }
+
+    /// The degenerate whole-file case: a 1-byte all-zero file with no claims classifies as a
+    /// single at-EOF padding byte — and the chunked zero-scan must start from the range's own
+    /// offset (a scan anchored anywhere else divides by zero or misreads here).
+    #[test]
+    fn classify_padding_handles_a_zero_claim_file() {
+        let data: &[u8] = &[0];
+        let mut r = SegmentMap::new(1).finish(None);
+        assert_eq!(r.unclassified, vec![Range { start: 0, len: 1 }]);
+        let mut src = data;
+        r.classify_padding(&mut src).expect("classify");
+        assert!(r.is_fully_classified(), "report: {r:?}");
+        assert_eq!(
+            r.segments,
+            vec![Segment {
+                range: Range { start: 0, len: 1 },
+                kind: SpanKind::Padding,
+            }]
+        );
     }
 
     /// A multi-byte all-zero interior gap ending on a word boundary before a segment *is*
