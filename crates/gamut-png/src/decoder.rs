@@ -15,7 +15,7 @@
 
 use gamut_core::{
     Bilevel, DecodeImage, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,
-    Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Indexed8, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
 use crate::chunk::ChunkReader;
@@ -24,6 +24,7 @@ use crate::filter::{self, FilterType};
 use crate::ihdr::{self, Ihdr};
 use crate::inflate;
 use crate::pack;
+use crate::palette::PngPalette;
 
 /// Default cap on the decoded sample buffer: 64 MiB, a 4096×4096 RGBA8 image.
 const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
@@ -126,6 +127,7 @@ enum NativeSamples {
 struct NativeImage {
     header: Ihdr,
     samples: NativeSamples,
+    palette: Option<PngPalette>,
     trns_key: Option<TransparencyKey>,
 }
 
@@ -256,10 +258,7 @@ impl PngDecoder {
         if header.interlaced {
             return Err(Error::Unsupported("PNG: Adam7 decode lands in a later phase"));
         }
-        if header.color == ColorType::Indexed {
-            return Err(Error::Unsupported("PNG: indexed decode lands in a later phase"));
-        }
-        let trns_key = validate_plte_and_trns(&header, parsed.plte, parsed.trns)?;
+        let (palette, trns_key) = validate_plte_and_trns(&header, parsed.plte, parsed.trns)?;
 
         let expected = self.check_limits(&header)?;
         let stream = inflate::inflate_zlib(&parsed.idat, expected)?;
@@ -283,21 +282,30 @@ impl PngDecoder {
             8 => NativeSamples::B8(packed),
             depth => NativeSamples::B8(pack::unpack_scanlines(&packed, width, height, depth)),
         };
+        // §11.2.2: every pixel of an indexed image must reference an existing palette entry
+        // (indexed depths are at most 8, so the samples are always the byte variant).
+        if let (Some(palette), NativeSamples::B8(indices)) = (&palette, &samples)
+            && indices.iter().any(|&idx| usize::from(idx) >= palette.len())
+        {
+            return Err(Error::InvalidInput("PNG: palette index out of range"));
+        }
         Ok(NativeImage {
             header,
             samples,
+            palette,
             trns_key,
         })
     }
 }
 
 /// Validates PLTE presence/shape and tRNS shape against the colour type (§11.2.2, §11.3.1.1),
-/// returning the parsed colour key for greyscale/truecolour images.
+/// returning the palette for indexed images and the parsed colour key for greyscale/truecolour
+/// images.
 fn validate_plte_and_trns(
     header: &Ihdr,
     plte: Option<&[u8]>,
     trns: Option<&[u8]>,
-) -> Result<Option<TransparencyKey>> {
+) -> Result<(Option<PngPalette>, Option<TransparencyKey>)> {
     if let Some(plte) = plte {
         match header.color {
             ColorType::Grayscale | ColorType::GrayscaleAlpha => {
@@ -307,40 +315,58 @@ fn validate_plte_and_trns(
             }
             // For truecolour it is a suggested quantisation palette (§11.2.2): shape-checked,
             // then ignored.
-            ColorType::Truecolor | ColorType::TruecolorAlpha | ColorType::Indexed => {
+            ColorType::Truecolor | ColorType::TruecolorAlpha => {
                 let entries = plte.len() / 3;
-                if plte.len() % 3 != 0 || !(1..=256).contains(&entries) {
+                if !plte.len().is_multiple_of(3) || !(1..=256).contains(&entries) {
                     return Err(Error::InvalidInput("PNG: malformed PLTE payload"));
                 }
             }
+            ColorType::Indexed => {}
         }
     }
-    let Some(trns) = trns else { return Ok(None) };
-    match header.color {
+    if header.color == ColorType::Indexed {
+        let plte = plte.ok_or(Error::InvalidInput(
+            "PNG: an indexed image requires a PLTE chunk",
+        ))?;
+        let palette = PngPalette::from_chunks(plte, trns)?;
+        // §11.2.2: the palette must not have more entries than the bit depth can reference.
+        if palette.len() > 1 << header.bit_depth {
+            return Err(Error::InvalidInput(
+                "PNG: palette larger than the bit depth can reference",
+            ));
+        }
+        return Ok((Some(palette), None));
+    }
+    let Some(trns) = trns else {
+        return Ok((None, None));
+    };
+    let key = match header.color {
         ColorType::Grayscale => {
             let bytes: &[u8; 2] = trns
                 .try_into()
                 .map_err(|_| Error::InvalidInput("PNG: malformed tRNS payload"))?;
-            let key = u16::from_be_bytes(*bytes) & depth_mask(header.bit_depth);
-            Ok(Some(TransparencyKey::Gray(key)))
+            TransparencyKey::Gray(u16::from_be_bytes(*bytes) & depth_mask(header.bit_depth))
         }
         ColorType::Truecolor => {
             let bytes: &[u8; 6] = trns
                 .try_into()
                 .map_err(|_| Error::InvalidInput("PNG: malformed tRNS payload"))?;
             let mask = depth_mask(header.bit_depth);
-            Ok(Some(TransparencyKey::Rgb(
+            TransparencyKey::Rgb(
                 u16::from_be_bytes([bytes[0], bytes[1]]) & mask,
                 u16::from_be_bytes([bytes[2], bytes[3]]) & mask,
                 u16::from_be_bytes([bytes[4], bytes[5]]) & mask,
-            )))
+            )
         }
-        // Indexed tRNS folds into the palette (handled with palette decode).
-        ColorType::Indexed => Ok(None),
-        ColorType::GrayscaleAlpha | ColorType::TruecolorAlpha => Err(Error::InvalidInput(
-            "PNG: tRNS is forbidden for colour types with alpha",
-        )),
-    }
+        // Indexed images returned above (their tRNS folds into the palette).
+        ColorType::Indexed => return Ok((None, None)),
+        ColorType::GrayscaleAlpha | ColorType::TruecolorAlpha => {
+            return Err(Error::InvalidInput(
+                "PNG: tRNS is forbidden for colour types with alpha",
+            ));
+        }
+    };
+    Ok((None, Some(key)))
 }
 
 /// The native-range mask for a colour key: §11.3.1.1 stores keys as 2-byte values but only the
@@ -503,6 +529,13 @@ impl DecodeImage<Rgb8> for PngDecoder {
                     .flat_map(|&gray| [gray * scale; 3])
                     .collect()
             }
+            ColorType::Indexed => {
+                let palette = native
+                    .palette
+                    .filter(|palette| !palette.has_transparency())
+                    .ok_or(LOSSY)?;
+                expand_palette(&native8(native.samples)?, &palette, false)
+            }
             _ => return Err(LOSSY),
         };
         ImageBuf::new(out, dims(&native.header)?)
@@ -550,10 +583,44 @@ impl DecodeImage<Rgba8> for PngDecoder {
                     })
                     .collect()
             }
+            ColorType::Indexed => {
+                let palette = native.palette.ok_or(LOSSY)?;
+                expand_palette(&native8(native.samples)?, &palette, true)
+            }
             _ => return Err(LOSSY),
         };
         ImageBuf::new(out, dims(&native.header)?)
     }
+}
+
+impl DecodeImage<Indexed8> for PngDecoder {
+    /// Accepts indexed images at any bit depth, returning the bare palette indices (sub-byte
+    /// indices are widened to one byte but never scaled — §13.12 rescaling does not apply to
+    /// indices). The palette itself is carried by [`PngDecoder::decode`].
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Indexed8>> {
+        let native = self.decode_native(data)?;
+        if native.header.color != ColorType::Indexed {
+            return Err(LOSSY);
+        }
+        ImageBuf::new(native8(native.samples)?, dims(&native.header)?)
+    }
+}
+
+/// Expands validated palette indices to RGB or RGBA bytes. Indices were range-checked during
+/// decode, so lookups cannot fail; a defensive default keeps the path panic-free regardless.
+fn expand_palette(indices: &[u8], palette: &PngPalette, with_alpha: bool) -> Vec<u8> {
+    let channels = if with_alpha { 4 } else { 3 };
+    let mut out = Vec::with_capacity(indices.len() * channels);
+    for &index in indices {
+        let [red, green, blue] = palette.rgb(index).unwrap_or_default();
+        out.push(red);
+        out.push(green);
+        out.push(blue);
+        if with_alpha {
+            out.push(palette.alpha(index).unwrap_or(255));
+        }
+    }
+    out
 }
 
 impl DecodeImage<Gray16> for PngDecoder {
@@ -730,6 +797,69 @@ mod tests {
         // But it widens losslessly to 16-bit RGB.
         let rgb: ImageBuf<Rgb16> = PngDecoder::new().decode_image(&png).unwrap();
         assert_eq!(rgb.as_samples(), vec![0u16; 12]);
+    }
+
+    #[test]
+    fn indexed_round_trips_at_every_depth() {
+        use gamut_core::Indexed8 as Idx;
+        for entries in [2usize, 4, 16, 200] {
+            let rgb: Vec<[u8; 3]> = (0..entries)
+                .map(|i| [i as u8, (i * 3) as u8, 255 - i as u8])
+                .collect();
+            let palette = PngPalette::with_transparency(&rgb, &[10, 250]).unwrap();
+            let (w, h) = (13u32, 9u32);
+            let indices: Vec<u8> = (0..(w * h) as usize).map(|i| (i % entries) as u8).collect();
+            let mut png = Vec::new();
+            PngEncoder::new()
+                .encode_indexed8(
+                    ImageRef::<Idx>::new(&indices, Dimensions::new(w, h).unwrap()).unwrap(),
+                    &palette,
+                    &mut png,
+                )
+                .unwrap();
+
+            // Indices come back exactly, whatever sub-byte depth the encoder picked.
+            let decoded: ImageBuf<Idx> = PngDecoder::new().decode_image(&png).unwrap();
+            assert_eq!(decoded.as_samples(), indices, "{entries} entries");
+
+            // RGBA expansion resolves palette colours and tRNS alpha.
+            let rgba: ImageBuf<Rgba8> = PngDecoder::new().decode_image(&png).unwrap();
+            let expected: Vec<u8> = indices
+                .iter()
+                .flat_map(|&idx| {
+                    let [r, g, b] = rgb[usize::from(idx)];
+                    let a = [10u8, 250].get(usize::from(idx)).copied().unwrap_or(255);
+                    [r, g, b, a]
+                })
+                .collect();
+            assert_eq!(rgba.as_samples(), expected, "{entries} entries");
+
+            // RGB refuses the transparent palette (lossy), Rgb16 refuses outright.
+            assert!(DecodeImage::<Rgb8>::decode_image(&PngDecoder::new(), &png).is_err());
+            assert!(DecodeImage::<Rgb16>::decode_image(&PngDecoder::new(), &png).is_err());
+        }
+    }
+
+    #[test]
+    fn opaque_indexed_expands_to_rgb() {
+        use gamut_core::Indexed8 as Idx;
+        let rgb = [[1u8, 2, 3], [4, 5, 6], [7, 8, 9]];
+        let palette = PngPalette::new(&rgb).unwrap();
+        let indices = [0u8, 1, 2, 1, 0, 2];
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .encode_indexed8(
+                ImageRef::<Idx>::new(&indices, Dimensions::new(3, 2).unwrap()).unwrap(),
+                &palette,
+                &mut png,
+            )
+            .unwrap();
+        let decoded: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&png).unwrap();
+        let expected: Vec<u8> = indices
+            .iter()
+            .flat_map(|&idx| rgb[usize::from(idx)])
+            .collect();
+        assert_eq!(decoded.as_samples(), expected);
     }
 
     #[test]

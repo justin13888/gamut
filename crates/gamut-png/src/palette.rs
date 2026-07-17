@@ -46,10 +46,51 @@ impl PngPalette {
         })
     }
 
+    /// Builds a palette from raw `PLTE` and optional `tRNS` chunk payloads (§11.2.2, §11.3.1.1).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the PLTE payload is not a whole number of RGB triples,
+    /// holds zero or more than 256 entries, or has fewer entries than the tRNS payload.
+    pub(crate) fn from_chunks(plte: &[u8], trns: Option<&[u8]>) -> Result<Self> {
+        if !plte.len().is_multiple_of(3) {
+            return Err(Error::InvalidInput(
+                "PNG: PLTE payload must be a whole number of RGB triples",
+            ));
+        }
+        let rgb: Vec<[u8; 3]> = plte
+            .chunks_exact(3)
+            .map(|entry| [entry[0], entry[1], entry[2]])
+            .collect();
+        Self::with_transparency(&rgb, trns.unwrap_or_default())
+    }
+
     /// The number of palette entries (1–256).
     #[must_use]
     pub fn len(&self) -> usize {
         self.rgb.len()
+    }
+
+    /// The RGB triple of entry `index`, or `None` if the index is out of range.
+    #[must_use]
+    pub fn rgb(&self, index: u8) -> Option<[u8; 3]> {
+        self.rgb.get(usize::from(index)).copied()
+    }
+
+    /// The alpha of entry `index` (255 for entries beyond the tRNS values), or `None` if the
+    /// index is out of range.
+    #[must_use]
+    pub fn alpha(&self, index: u8) -> Option<u8> {
+        if usize::from(index) >= self.rgb.len() {
+            return None;
+        }
+        Some(self.alpha.get(usize::from(index)).copied().unwrap_or(255))
+    }
+
+    /// Whether any entry is not fully opaque (i.e. the palette carries transparency).
+    #[must_use]
+    pub fn has_transparency(&self) -> bool {
+        self.alpha.iter().any(|&alpha| alpha != 255)
     }
 
     /// Always `false` — a palette has at least one entry (kept for API completeness).
@@ -93,5 +134,30 @@ mod tests {
         assert_eq!(p.trns(), Some(&[0u8][..]));
         let opaque = PngPalette::new(&[[7, 8, 9]]).unwrap();
         assert_eq!(opaque.trns(), None);
+    }
+
+    #[test]
+    fn from_chunks_round_trips_serialisation() {
+        let original = PngPalette::with_transparency(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], &[0, 128])
+            .unwrap();
+        let parsed = PngPalette::from_chunks(&original.plte(), original.trns()).unwrap();
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed.rgb(0), Some([1, 2, 3]));
+        assert_eq!(parsed.rgb(2), Some([7, 8, 9]));
+        assert_eq!(parsed.rgb(3), None);
+        assert_eq!(parsed.alpha(0), Some(0));
+        assert_eq!(parsed.alpha(1), Some(128));
+        assert_eq!(parsed.alpha(2), Some(255)); // beyond tRNS: opaque
+        assert_eq!(parsed.alpha(3), None);
+        assert!(parsed.has_transparency());
+        assert!(!PngPalette::new(&[[0, 0, 0]]).unwrap().has_transparency());
+    }
+
+    #[test]
+    fn from_chunks_rejects_malformed_payloads() {
+        assert!(PngPalette::from_chunks(&[1, 2, 3, 4], None).is_err()); // not a triple multiple
+        assert!(PngPalette::from_chunks(&[], None).is_err()); // zero entries
+        assert!(PngPalette::from_chunks(&[0; 771], None).is_err()); // 257 entries
+        assert!(PngPalette::from_chunks(&[1, 2, 3], Some(&[0, 0])).is_err()); // tRNS too long
     }
 }
