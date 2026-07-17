@@ -318,6 +318,18 @@ fn decode_levels(
 
     let mut levels = RawLevels::new(spp, repeat, black, white)?;
 
+    if let Some(value) = ifd.get(tags::LINEARIZATION_TABLE) {
+        let Value::Short(table) = value else {
+            return Err(Error::InvalidInput("DNG: LinearizationTable must be SHORT"));
+        };
+        if table.is_empty() {
+            return Err(Error::InvalidInput(
+                "DNG: LinearizationTable must not be empty",
+            ));
+        }
+        levels = levels.with_linearization_table(table.clone());
+    }
+
     let (aa_width, aa_height) = active_area_size(dims, active_area);
     if let Some(deltas) = decode_deltas(ifd, tags::BLACK_LEVEL_DELTA_H, aa_width, "column")? {
         levels = levels.with_black_delta_h(deltas);

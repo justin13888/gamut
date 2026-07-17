@@ -241,6 +241,34 @@ fn level_family_roundtrips_and_validates() {
 }
 
 #[test]
+fn linearization_table_roundtrips_and_validates() {
+    use gamut_dng::RawLevels;
+    // A 12-bit CFA whose stored values pass through a square-law lookup table before black
+    // subtraction. The table has 4096 entries (one per stored code).
+    let table: Vec<u16> = (0..4096u32)
+        .map(|v| ((v * v) >> 8).min(65535) as u16)
+        .collect();
+    let levels = RawLevels::uniform(1, 64.0, 65535.0)
+        .unwrap()
+        .with_linearization_table(table.clone());
+    let raw = common::sample_raw(16, 12, 12)
+        .with_levels(levels.clone())
+        .unwrap();
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(
+        decoded.raw.levels().linearization_table(),
+        Some(table.as_slice())
+    );
+    assert_eq!(decoded.raw, raw);
+    gamut_dng_oracle::validate_dng(&dng)
+        .expect("Adobe DNG SDK must accept a LinearizationTable DNG");
+}
+
+#[test]
 fn per_plane_white_levels_roundtrip() {
     use gamut_dng::RawLevels;
     // LinearRaw with three distinct per-plane whites and per-plane blacks (repeat 1x1, so the

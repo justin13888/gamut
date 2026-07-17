@@ -358,6 +358,14 @@ fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Result<Ifd> {
     ifd.set(tags::BLACK_LEVEL_REPEAT_DIM, Value::Short(vec![rows, cols]));
     ifd.set(tags::BLACK_LEVEL, black_level_value(levels.black())?);
     ifd.set(tags::WHITE_LEVEL, white_level_value(levels.white())?);
+    if let Some(table) = levels.linearization_table() {
+        if table.is_empty() {
+            return Err(Error::InvalidInput(
+                "DNG: LinearizationTable must not be empty",
+            ));
+        }
+        ifd.set(tags::LINEARIZATION_TABLE, Value::Short(table.to_vec()));
+    }
 
     // Delta lengths are tied to the active-area geometry (one per column/row, DNG 1.7.1
     // pp. 28-29), which defaults to the full image when the tag is absent.
