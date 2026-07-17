@@ -34,7 +34,9 @@ pub(crate) enum CliError {
     Icc(#[from] gamut::icc::IccError),
 
     /// The requested output format is not (yet) supported by the CLI.
-    #[error("unsupported output format: {0} (supported: 'avif', 'webp', 'tiff', 'png', 'jxl')")]
+    #[error(
+        "unsupported output format: {0} (supported: 'avif', 'webp', 'tiff', 'png', 'jxl', 'jpg'/'jpeg')"
+    )]
     UnsupportedOutput(String),
 
     /// `gamut icc` found no embedded ICC profile in the input container.

@@ -15,7 +15,9 @@ edition, freely, from its specification index: <https://www.color.org/specificat
   <https://www.color.org/icc_specs2.xalter>.
 
 An ICC profile is a self-describing binary blob: a 128-byte header, a tag table, and tag element
-data — independent of any IFD/XML structure, so `gamut-icc` depends only on `gamut-core`.
+data — independent of any IFD/XML structure, so `gamut-icc` depends only on `gamut-core`. The JPEG
+`APP2` `ICC_PROFILE` multi-segment carriage (ICC.1:2001-04 Annex B.4) is implemented by
+`gamut-jpeg` — see [`../jpeg`](../jpeg/README.md#appn-metadata-embedding-exif--xmp--icc).
 
 ## Not implemented — iccMAX (ICC.2:2019)
 

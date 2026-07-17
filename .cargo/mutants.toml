@@ -410,6 +410,96 @@ exclude_re = [
     # replacement is byte-identical — provably equivalent, unkillable. Same shape and justification
     # as the AvifEncoder::lossless / WebpEncoder::lossless entries above.
     'replace JxlEncoder::lossless -> Self with Default::default\(\)',
+    # gamut-jpeg quant::quality_scale — `if q < 50 { 5000 / q } else { 200 - 2 * q }` (the frozen
+    # IJG quality mapping). The mapping is continuous at the branch point: at q == 50 — the only
+    # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
+    # the same scale and no input can distinguish the mutant: equivalent.
+    'replace < with <= in quality_scale',
+    # gamut-jpeg decoder DecodedImage::sample — the upsampling clamps `.min(comp_w - 1)` /
+    # `.min(comp_h - 1)` are defence-in-depth that provably never engage: `px ≤ X−1` (the present
+    # loops) gives `cx = ⌊px·h/hmax⌋ ≤ ⌊(X·h−1)/hmax⌋ ≤ ⌈X·h/hmax⌉−1 = comp_w−1` (h ≥ 1, h ≤ hmax;
+    # likewise for cy), so both mutations only ENLARGE a bound the no-op clamp never reaches —
+    # equivalent. The clamp itself stays, per the never-panic-on-untrusted-input policy.
+    'replace - with \+ in DecodedImage::sample',
+    'replace - with / in DecodedImage::sample',
+    # gamut-jpeg entropy-reader hang-on-mutation timeouts (unkillable by any finite test). Each
+    # mutation turns an inherently-terminating advance loop into a non-terminating one: no test can
+    # observe a decoded result because execution never returns, so cargo-mutants can only ever report
+    # a TIMEOUT (exit 3, gate-failing) — never a catchable behavioural escape. Line/column-anchored so
+    # each regex matches EXACTLY its hang mutant and leaves the sibling arithmetic mutants (which DO
+    # terminate and ARE caught) in the survey. These are the byte/bit cursor's own accounting; the
+    # correct advance is exercised end-to-end by the decode battery.
+    #
+    # BitReader::fetch — the destuffing byte cursor. `self.pos += 1` (97, 108) mutated to `*= 1`
+    # leaves `pos` pinned (pos ≥ 1 is invariant once decoding), so `end_marker`/`take_restart`'s
+    # `loop { fetch }` re-reads the same byte forever; `-=` (97, 103, 108) walks `pos` backwards and
+    # never reaches the terminating marker/EOF. (`103 *=` scales `pos += 2` forward, so it DOES reach
+    # EOF and is caught — deliberately not excluded here.)
+    "scan\\.rs:108:26: replace \\+= with (\\*|-)= in BitReader",
+    "scan\\.rs:114:30: replace \\+= with -= in BitReader",
+    "scan\\.rs:119:30: replace \\+= with (\\*|-)= in BitReader",
+    # BitReader::ensure — `self.bit_count += 8` in the *marker-padding* arm (134) mutated to `*= 8`
+    # keeps the count at 0 (0·8 = 0) while `fetch` returns `Marker` without advancing, so
+    # `while bit_count < n` spins forever. (The data arm at 130 advances `pos` to EOF and terminates,
+    # and `134 -=` underflows into an error — both caught, both left in the survey.)
+    "scan\\.rs:145:36: replace \\+= with \\*= in BitReader",
+    # BitReader::read_bits — `self.bit_count -= n` mutated to `+= n` makes the buffered-bit count
+    # grow without bound so `ensure` never refills and the reader never advances to a marker: the
+    # decode does not terminate. (`read_bit`'s own `-= 1` at 157 is a distinct, caught mutant.)
+    "replace -= with \\+= in BitReader<'a>::read_bits",
+    # decode_symbol / decode_block stubbed to a constant consume no entropy bits; for a Y=0 (DNL)
+    # frame the row count is unknown and the MCU loop runs until `at_data_end` — which never fires
+    # because nothing is ever consumed — so the loop never terminates. (For a Y-known frame the same
+    # stub yields wrong pixels and is caught, but the Y=0 tests hang first, forcing a TIMEOUT.)
+    'replace decode_symbol -> Result<u8> with Ok\(0\)',
+    "replace Ctx<'_>::decode_block -> Result<\\(\\)> with Ok\\(\\(\\)\\)",
+    # syntax::Reader::u8 — the segment cursor. `self.pos += 1` mutated to `*= 1` pins `pos`, so the
+    # `while r.remaining() > 0` table loops in parse_dqt/parse_dht never make progress and never
+    # terminate. (The `-=` sibling walks `pos` backwards into an out-of-range read that errors, and is
+    # caught — only the non-terminating `*=` is excluded.)
+    "replace \\+= with \\*= in Reader<'a>::u8",
+    # gamut-jpeg progressive AC refinement (decode_ac_refine) — the coefficient cursor `k += 1` in the
+    # do-while advance loop (893) and the EOB-run correction-bit tail loop (917). Mutated to `*= 1` it
+    # pins `k` (k ≥ Ss ≥ 1, so k·1 = k) and the `while k <= se` loop spins forever — non-terminating,
+    # reportable only as a TIMEOUT, never a catchable behavioural escape. Line/col-anchored so each
+    # matches exactly its hang mutant; the `-=` siblings walk `k` backwards into a usize underflow that
+    # panics and ARE caught. Same shape as the sequential BitReader/Reader hang exclusions above.
+    "scan\\.rs:893:19: replace \\+= with \\*= in decode_ac_refine",
+    "scan\\.rs:917:15: replace \\+= with \\*= in decode_ac_refine",
+    # gamut-jpeg `refine` (§G.1.2.3 correction) sign test `if coeff > 0`: `refine` is only ever called
+    # on a NON-zero coefficient — both call sites guard `block[nat] != 0` before calling it — so the
+    # only value at which `>` and `>=` disagree (coeff == 0) is unreachable, making `> -> >=` provably
+    # equivalent. (`> -> <` and `> -> ==` flip the correction direction for real inputs and ARE caught
+    # by the successive-approximation test's positive and negative AC coefficients.)
+    "replace > with >= in refine",
+    # gamut-jpeg progressive encoder (`ProgCoder::ac_refine`, §G.1.2.3) — two provably-non-observable
+    # mutants, line/column-anchored so each matches EXACTLY its mutant and leaves the sibling operators
+    # (the abs==0 run test, the abs>1 history test, the ZRL/EOB boundaries) in the survey.
+    #
+    # 488:41 `self.raw_bit(u8::from(coeff > 0))` — the newly-nonzero coefficient's sign bit. This arm
+    # is reached only when `abs == 1`, i.e. `|coeff| >> al == 1`, which forces `coeff != 0`; `coeff > 0`
+    # and `coeff >= 0` therefore agree on every value that reaches it. (`> -> <`/`> -> ==` flip the sign
+    # for real inputs and ARE caught by `ac_refine_sign_and_eob_fold_round_trip`'s negative coefficient.)
+    # gamut-jpeg `build_optimal_table` (Annex K.2 length limiting) — the borrow-length search
+    # `let mut j = i - 2; while bits[j] == 0 { j -= 1; }` walks down to the longest shorter length that
+    # still has a code. Mutating the `j -= 1` step turns this terminating descent into a non-terminating
+    # loop: `-= -> /=` pins `j` (`j / 1 == j`) so `while bits[j] == 0` spins forever once it enters, and
+    # `-= -> +=` walks `j` upward into the length whose redistribution nets zero change to `bits[i]`, so
+    # the enclosing `while bits[i] > 0` never makes progress. Neither can be observed as a decoded
+    # result (execution never returns) — cargo-mutants can only ever report a TIMEOUT, never a catchable
+    # behavioural escape. Line/column-anchored so each matches EXACTLY its hang mutant; the redistribution
+    # arithmetic (`bits[i] -= 2`, `bits[i-1] += 1`, …) and the `i - 2` start ARE caught by the exact-BITS
+    # golden in `optimal_skewed_frequencies_force_16_bit_limiting`. Same shape as the scan.rs cursor hangs.
+    'huffman\.rs:365:19: replace -= with (\+|/)= in build_optimal_table',
+    'progressive\.rs:488:41: replace > with >=',
+    # 454:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
+    # that becomes newly-nonzero this scan. It gates ONLY whether a >15 run of zero-history coefficients
+    # ending at an *already-nonzero* coefficient is coded as a ZRL or folded into the EOB run — a free
+    # choice in EOB/ZRL segmentation (§G.1.2.3): both are valid codings of the identical coefficients,
+    # and the decoder reconstructs the same values from either, so no decode-parity test can distinguish
+    # `== 1` from `!= 1`. (The `abs == 0` and `abs > 1` branch tests, which DO change coefficients, are
+    # caught — this line:col anchor leaves them in the survey.)
+    'progressive\.rs:454:55: replace == with !=',
     # gamut-heic (issue #238) — behaviourally-equivalent survivors.
     # `Reader::u48` (hvcc.rs) assembles a 48-bit big-endian value byte-by-byte via
     # `(acc << 8) | u64::from(byte)`: the running accumulator is shifted up 8 bits before each OR, so

@@ -1,0 +1,153 @@
+# gamut-jpeg — JPEG-1 codec status
+
+Tracking GitHub issue #28: a spec-compliant JPEG-1 (ISO/IEC 10918-1 | ITU-T T.81) still-image
+**encoder + decoder**. Delivered as small, individually green phases (each `mise run test`/`lint`/
+`fmt-check`/`coverage` ≥80%).
+
+**Keystone:** the SOI → APP0(JFIF) → DQT → SOF0 → DHT → SOS → entropy → EOI pipeline with the
+baseline sequential DCT Huffman encoder (P1) — libjpeg-turbo now decodes that to the source pixels
+within the lossy tolerance (measured across the P3 battery: gray/4:4:4 within **11 codes** at
+q ∈ {50,75,90}, **5** at q90; subsampled **> 30 dB** PSNR, **> 34 dB** at q90), and each later phase
+adds a process (progressive) or a direction (decode) behind the same marker spine, entropy coder,
+and table machinery.
+
+**Oracle:** differential vs **libjpeg-turbo** (a vendored, dev-only static build of 3.2.0 in
+`tooling/libjpeg-oracle`, landed in P3), cross-checked against the vendored **T.873 reference
+software** (`references/jpeg`, ISO/IEC 10918-7) for spec-exact behaviour. The gate runs both
+directions in `tests/oracle.rs`: **encode** (gamut encodes → libjpeg-turbo decodes → matches source
+within tolerance) and **decode** (libjpeg-turbo encodes → gamut decodes → matches libjpeg-turbo's
+own decode of the same stream, gray/4:4:4 within **3 codes** of IDCT rounding, subsampled bounded by
+the documented replication-vs-fancy upsampling divergence). The decode gate runs the **sequential**
+battery and, from P4, the **progressive** one (libjpeg-turbo's standard 10-scan `jpeg_simple_progression`
+script across gray/colour × 4:4:4/4:2:2/4:2:0 × q{40,75,95} × restart{0,2} × optimize{off,on}); the
+progressive parity numbers are **identical** to the sequential ones (gray/4:4:4 max-diff **3**,
+subsampled PSNR **22.9 dB**), confirming the progressive coefficients match exactly — only the shared
+IDCT/upsampling remains as a source of divergence. From P5 the **encode** gate adds a **progressive
+exactness** direction (`tests/oracle.rs`): gamut's SOF2 stream and its baseline stream of the same
+image carry the same quantized coefficients, so libjpeg-turbo's decode of each must be **byte-for-byte
+identical** — asserted as exact equality (not a tolerance) across the dims × mode × q{40,75,95} ×
+restart{0,2} battery. gamut's **own** decoder is held to the same exact bar (`tests/progressive.rs`):
+`decode(progressive) == decode(baseline)`. Before P2 the encoder was additionally pinned by byte-exact
+micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker; the progressive decoder
+adds hand-built minimal streams (DC-then-AC, a successive-approximation pair, an EOBRUN-spanning case,
+a DC refinement) checked against sequential twins, plus a scan-ordering validation corpus; the
+progressive encoder adds direct §G.1.2 entropy-model unit tests (ZRL boundary, point transform, DC
+refinement bit, AC-refinement sign/EOB fold), an exact Annex K.2 optimal-table golden, and a
+progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run presence).
+
+## Scope ledger
+
+**In scope** (issue #28, across the phases below):
+
+- Baseline sequential DCT, Huffman, 8-bit (SOF0) **encode** — grayscale + YCbCr 4:4:4/4:2:2/4:2:0,
+  JFIF interchange format (this phase).
+- Sequential DCT, Huffman, 8-bit (SOF0 baseline / SOF1 extended) **decode**.
+- Progressive DCT, Huffman (SOF2) **decode and encode** (spectral selection + successive
+  approximation).
+- Restart markers (DRI/RSTn).
+- Colour-space handling: JFIF (APP0) and Adobe (APP14) transform flags; CMYK / YCCK **decode**.
+- APP-segment metadata (P7): APP1 EXIF + XMP and multi-segment APP2 `ICC_PROFILE`, **read**
+  (`metadata()`) and **write** (`with_exif`/`with_xmp`/`with_icc_profile`), raw-bytes payloads that
+  feed `gamut-metadata`'s `MetadataBlock` directly (proven by a dev-only interop test; the runtime
+  dependency edge stays jpeg ← core, color, dsp).
+
+**Deferred / out of scope** (documented, with reasons):
+
+- **12-bit precision (P=12).** Baseline is 8-bit only; 12-bit sample precision is an extended-DCT
+  feature with little real-world corpus. The DCT kernel (`gamut-dsp`) already handles it, so this is
+  additive later if demand appears.
+- **Arithmetic coding (SOF9/SOF10, DAC).** Patent-era, near-absent in the wild; Huffman covers all
+  practical JPEG-1. Not planned.
+- **Lossless process (SOF3).** The predictive lossless mode is unrelated to the DCT pipeline;
+  `gamut-dng` covers the only in-workspace consumer (lossless-JPEG inside DNG). Not planned here.
+- **Hierarchical mode (SOF5–7, DHP, EXP).** No real-world still-image corpus. Not planned.
+- **SPIFF and other T.84 extensions; T.872 printing conventions.** Niche container/printing layers
+  atop the codec, tracked in `references/jpeg` but not implemented.
+- **ExtendedXMP (XMP Part 3 §1.1.3.1).** An XMP packet exceeding the single-APP1 StandardXMP cap
+  (65502 bytes, spec-stated) is rejected at encode as `Unsupported`, and ExtendedXMP continuation
+  segments (the `xmp/extension/` GUID scheme) are skipped on read. The GUID/MD5 chunking is a
+  separate mini-protocol with near-zero write-side demand — real packets are ~2 KB (the spec's own
+  observation); additive later if demand appears.
+- **APP13 IPTC-IIM (Photoshop 3.0 PSIR).** The legacy IPTC carrier; modern IPTC rides inside XMP
+  (which `gamut-metadata` models as the single home). `JpegMetadata` is `#[non_exhaustive]` so the
+  carrier can be added without a breaking change.
+- **CLI metadata passthrough.** `gamut convert` decodes its input via the third-party `image`
+  crate, which discards APP segments before gamut ever sees them; a passthrough needs source-side
+  extraction and belongs to a broader CLI metadata story, not issue #28.
+
+**Decoder-specific notes:**
+
+- **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a *sequential*
+  frame with `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0`
+  frame's height then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and
+  ignored. The encoder never emits `Y = 0` (it always knows its height and writes it in SOF0).
+- **Progressive + `Y = 0` (deferred height) is rejected as `Unsupported`.** The progressive
+  coefficient buffers are sized to each component's full block grid before the first scan, so a
+  height deferred to a trailing DNL cannot be accommodated without a two-pass scan or dynamically
+  growing every component's buffer across all scans — a disproportionate complication for a case the
+  libjpeg-turbo oracle (and real-world encoders) never emit. A DNL inside a `Y ≠ 0` progressive
+  frame is advisory and ignored, as for sequential.
+- **Partial progressive streams render generously** (the libjpeg convention). A progressive frame
+  that ends (EOI) before every band is complete is reconstructed from the coefficients delivered so
+  far — missing AC bands stay zero, incomplete refinements stay at their coarser approximation —
+  **provided every component received its DC first pass** (§G.1.1.1.1); otherwise the frame has no
+  baseline and is rejected as `InvalidInput`. A stream truncated mid-scan (EOF with no terminating
+  marker) is an `InvalidInput` error, never a panic.
+- **Progressive quantization-table binding (§B.2.4.1).** Each component latches its dequantization
+  table at its **first** scan; a later DQT redefinition of that destination does not retroactively
+  change an already-latched component, matching the reference decoder.
+- **Upsampling filter.** Subsampled chroma is upsampled by **sample replication** (nearest); T.81
+  leaves the reconstruction filter open (§A.2 NOTE), so this is the decoder's documented free choice.
+- **Trailing bytes after EOI** are ignored (the libjpeg convention).
+- **CMYK is presented verbatim** (no Adobe inversion); **YCCK** applies the inverse YCbCr transform to
+  the first three channels with `K` passed through (Adobe TN #5116).
+- **`metadata()` stops at the first SOS** (or EOI). The APP1/APP2 metadata conventions place their
+  segments before the scan data (XMP Part 3 §1.1.3 requires placement before the first SOF, with
+  reader tolerance up to SOS), so no entropy decoding ever runs; segments after the scan are
+  unreachable by design.
+- **Duplicate EXIF/XMP APP1: first wins** (the libjpeg-family convention). ICC APP2 chunks are
+  reassembled by their 1-based index regardless of segment order; an inconsistent chunk sequence
+  (index/count out of range, duplicate, mismatched, or missing chunks) is `InvalidInput`.
+- **`decode_image_into` reuses the destination.** When the decoded dimensions match the
+  destination's, the presentation stage writes into its existing sample storage (no allocation);
+  otherwise the buffer is replaced. Error paths fire before any byte is written.
+
+**Encoder-specific notes:**
+
+- **Progressive scan script (frozen).** The progressive encoder ([`JpegEncoder::with_progressive`])
+  emits libjpeg's `jpeg_simple_progression` script verbatim (transcribed from libjpeg-turbo's
+  `jcparam.c`), SemVer-frozen: **grayscale** is 6 scans — DC `Al=1`; luma AC `1–5` `Al=2`; luma AC
+  `6–63` `Al=2`; AC refine `Ah=2 Al=1`; DC refine `Ah=1 Al=0`; AC refine `Ah=1 Al=0` — and **YCbCr**
+  is the 10-scan colour variant: interleaved DC `Al=1`; Y AC `1–5` `Al=2`; Cr AC `1–63` `Al=1`;
+  Cb AC `1–63` `Al=1`; Y AC `6–63` `Al=2`; Y AC refine `Ah=2 Al=1`; interleaved DC refine `Ah=1 Al=0`;
+  Cr, Cb, then Y AC refine `Ah=1 Al=0` (Cr before Cb, exactly as libjpeg orders them).
+- **Optimized per-scan Huffman tables (Annex K.2).** The standard Annex K AC tables cannot code a
+  progressive AC scan (the `EOBn` run/size bytes are absent), so — like libjpeg, which forces
+  `optimize_coding` for progressive — each scan builds its own table(s) from its symbol frequencies
+  (a two-pass gather/emit design) via the §K.2 procedure (reserved all-ones pseudo-symbol; 16-bit
+  length-limiting). Baseline encoding is unaffected and stays byte-identical to before (standard
+  tables). Each scan uses one optimized table at destination 0 for its class (a documented free
+  choice; a DC-refinement scan carries no table); this changes only compression density, never the
+  decoded coefficients, which are identical to the baseline encoding of the same input.
+- **EOBRUN cap / correction-bit buffering.** The EOB-run accumulator is forced out at its 15-bit
+  maximum (`0x7FFF`, §G.1.2.2); successive-approximation correction bits (§G.1.2.3) are buffered in a
+  growable vector and emitted after the `EOBn`/run-size/ZRL symbol they attach to, so the reference's
+  fixed-buffer overflow flush is unnecessary.
+- **Metadata segment order: APP0, then EXIF APP1, XMP APP1, ICC APP2, before DQT/SOF.** JFIF
+  mandates its APP0 first while Exif 3.0 §4.7.2.1 wants its APP1 immediately after SOI and neither
+  spec references the other; APP0-then-APP1 is the libjpeg-family convention that XMP Part 3
+  §1.1.3 records readers must accept. Sizes are validated before any bytes are written (EXIF
+  ≤ 65527, XMP ≤ 65502, ICC ≤ 255 × 65519 with 1-based chunk indices; empty payloads rejected).
+  The framing constants are pinned in `references/jpeg/README.md`.
+
+## Phases
+
+| Phase | Spec | Scope | Status |
+| ----- | ---- | ----- | ------ |
+| P1 | T.81 Annex A/B/C/F/K; T.871 | **Keystone:** scaffold + workspace wiring; marker/syntax layer; baseline SOF0 Huffman **encoder** (gray + YCbCr 4:4:4/4:2:2/4:2:0), Annex K tables, quality scaling, restart intervals, JFIF | ✅ done |
+| P2 | T.81 Annex A/B/C/F; T.871; TN #5116 | Sequential SOF0/SOF1 8-bit Huffman **decoder**: full marker/table parsing (DQT 8/16-bit, DHT with Annex C validation, DRI, DNL, APP0/APP14), interleaved + non-interleaved multi-scan entropy decode (§F.2), restart processing, gray/YCbCr/RGB/CMYK/YCCK colour, sample-replication upsampling, `info()` | ✅ done |
+| P3 | T.83 / oracle | libjpeg-turbo differential oracle (vendored, dev-only) + round-trip gate (`tests/oracle.rs`, both directions) | ✅ done |
+| P4 | T.81 §G | Progressive SOF2 **decode**: spectral selection + successive approximation — per-component i32 coefficient accumulators filled across scans (interleaved DC + single-component AC), first-pass Huffman + EOBn runs (§G.1.2.2), DC/AC successive-approximation refinement (§G.1.2.3), point transform (§A.4), scan-band ordering validation (§G.1.1.1), restarts, dequant+IDCT once at EOI reusing the sequential reconstruction tail | ✅ done |
+| P5 | T.81 §G, §K.2 | Progressive SOF2 **encode**: `JpegEncoder::with_progressive(bool)` — the frozen `jpeg_simple_progression` scan script (6-scan gray / 10-scan YCbCr), coefficients materialized once via the shared gather→FDCT→quantize path, two-pass optimized per-scan Huffman tables (Annex K.2, all-ones-reserved, 16-bit length-limited), DC/AC first-pass + successive-approximation refinement with EOBRUN accumulation and the §G.1.2.3 deferred correction-bit protocol, restarts | ✅ done |
+| P6 | — | Hardening: CMYK/YCCK + Adobe APP14 (landed with P2), CLI `gamut convert → .jpg` (`--quality`/`--jpeg-subsampling`/`--jpeg-restart-interval`/`--jpeg-progressive`), umbrella `jpeg` feature audit, facade mutants scoping, full-workspace gate re-run | ✅ done |
+| P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |

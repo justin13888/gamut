@@ -78,6 +78,37 @@ Technical Note #5116** (`APP14` colour-transform marker) — see *Adobe `APP14` 
   two reference codebases (`reference A`, `reference B`); it is the normative behavioural oracle for the
   core codec.
 
+## APPn metadata embedding (EXIF / XMP / ICC)
+
+`gamut-jpeg` reads and writes the three de-facto metadata payloads carried in JPEG application
+segments. T.81 defines only the `APPn` marker syntax (§B.2.4.6: a 2-byte length that includes
+itself, so **at most 65533 payload bytes** per segment); the payload conventions come from the
+metadata standards themselves, vendored in the sibling directories:
+
+| Segment | Signature (NUL included) | Payload | Governing spec (vendored) |
+| --- | --- | --- | --- |
+| `APP1` | `"Exif\0\0"` (6 bytes) | TIFF stream (`II`/`MM` …), ≤ 65527 bytes; a single segment recorded immediately after SOI | **Exif 3.0** §4.7.2, [`../exif`](../exif/README.md) |
+| `APP1` | `"http://ns.adobe.com/xap/1.0/\0"` (29 bytes) | one XMP `xpacket`, ≤ **65502** bytes (spec-stated cap); placed before the first SOF | **XMP Part 3** §1.1.3, [`../xmp`](../xmp/README.md) |
+| `APP2` | `"ICC_PROFILE\0"` (12 bytes) + chunk index (1 byte, **1-based**) + chunk count (1 byte) | ≤ 65519 profile bytes per chunk; all chunks carry the same count, so ≤ 255 chunks ⇒ max profile 16,707,345 bytes | **ICC.1:2001-04** Annex B.4, [`../icc`](../icc/README.md) |
+
+Notes pinned from the vendored texts:
+
+- **JFIF/Exif coexistence** — both JFIF (T.871) and Exif (DC-008 §4.7.2.1) claim the segment
+  slot immediately after SOI, and neither references the other. XMP Part 3 §1.1.3 records the
+  observed convention: readers must accept an Exif `APP1` *following* the JFIF `APP0`/`JFXX`
+  segments, which is the libjpeg-family order (`APP0`, then `APP1`) that `gamut-jpeg` emits.
+- **ExtendedXMP** (XMP Part 3 §1.1.3.1) — an XMP packet larger than the single-segment cap is
+  split into a StandardXMP packet plus `APP1` segments signed
+  `"http://ns.adobe.com/xmp/extension/\0"` carrying a 32-byte GUID (MD5 of the full extended
+  serialization), a 4-byte total length, and a 4-byte offset, cross-linked via
+  `xmpNote:HasExtendedXMP`. This is a separate mini-protocol; `gamut-jpeg` defers it (see the
+  crate `STATUS.md`) and skips such segments on read.
+- **ICC multi-segment reassembly** — chunk indices count from 1; every chunk must repeat the
+  same total count, and T.81 does not guarantee segment order, so readers reassemble by index
+  rather than appearance order.
+- ICC.1:2022 replaced its Annex B embedding text with a reference to ICC Technical Note 10-21;
+  the normative-in-practice wire format is unchanged from the vendored ICC.1:2001-04 Annex B.4.
+
 ## Not vendored (paywalled / cross-checked via oracle)
 
 - **ISO/IEC 10918-2 (ITU-T T.83) — Compliance testing** — the conformance test-data part. Not freely

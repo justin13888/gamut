@@ -16,7 +16,8 @@ builds on).
   2.2–2.32). Source: <https://www.cipa.jp/std/documents/e/DC-X008-Translation-2019-E.pdf>.
 
 Exif's structure **is** a constrained profile of TIFF: an `Exif\0\0` marker followed by a TIFF
-stream (byte-order header + IFD chain). The 0th/1st IFDs plus the Exif, GPS, and Interoperability
+stream (byte-order header + IFD chain). The JPEG `APP1` carriage of that blob (DC-008 §4.7.2) is
+implemented by `gamut-jpeg` — see [`../jpeg`](../jpeg/README.md#appn-metadata-embedding-exif--xmp--icc). The 0th/1st IFDs plus the Exif, GPS, and Interoperability
 sub-IFDs are all parsed through the shared [`gamut-ifd`](../../crates/gamut-ifd) primitive, whose
 structural reference is **TIFF 6.0** (see [`../tiff`](../tiff)).
 

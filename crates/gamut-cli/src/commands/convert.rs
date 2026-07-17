@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 use gamut::avif::AvifEncoder;
 use gamut::core::{EncodeImage, ImageRef, Rgb8, Rgba8};
+use gamut::jpeg::{ChromaSubsampling as JpegChroma, JpegEncoder};
 use gamut::jxl::{
     Container as JxlContainer, Distance as JxlDistance, Effort as JxlEffort, JxlEncoder,
 };
@@ -33,9 +34,22 @@ pub(crate) struct ConvertArgs {
     /// Encode lossy (WebP VP8 intra) instead of lossless. For AVIF, select lossy with `--qindex`.
     #[arg(long)]
     lossy: bool,
-    /// Lossy quality, 0–100 (higher is better but larger). Used with WebP `--lossy` and lossy AVIF.
+    /// Lossy quality, 0–100 (higher is better but larger). Used with WebP `--lossy`, lossy AVIF,
+    /// and JPEG (which is always lossy).
     #[arg(long, default_value_t = 75)]
     quality: u8,
+    /// JPEG chroma subsampling for colour input: `444` (none), `422` (halve horizontally), or `420`
+    /// (halve both, the default). Ignored for other output formats and for grayscale.
+    #[arg(long = "jpeg-subsampling", value_enum, default_value = "420")]
+    jpeg_subsampling: JpegSubsampling,
+    /// JPEG restart interval in MCUs: insert an RSTn marker every N MCUs so a decoder can resync
+    /// (`0`, the default, disables restarts). Ignored for other output formats.
+    #[arg(long = "jpeg-restart-interval", default_value_t = 0)]
+    jpeg_restart_interval: u16,
+    /// Encode JPEG output progressively (SOF2, spectral-band scans with successive approximation)
+    /// instead of baseline sequential. Ignored for other output formats.
+    #[arg(long = "jpeg-progressive")]
+    jpeg_progressive: bool,
     /// Compress TIFF output with PackBits run-length encoding instead of storing it uncompressed.
     #[arg(long)]
     packbits: bool,
@@ -67,6 +81,33 @@ pub(crate) enum OutputFormat {
     Png,
     /// JPEG XL — lossless by default, or lossy at `--jxl-distance`; transparency preserved.
     Jxl,
+    /// JPEG (JPEG-1 baseline) — always lossy at `--quality`, YCbCr with `--jpeg-subsampling`.
+    Jpeg,
+}
+
+/// Chroma subsampling for JPEG YCbCr output.
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum JpegSubsampling {
+    /// 4:4:4 — no chroma subsampling (full-resolution Cb/Cr).
+    #[value(name = "444")]
+    S444,
+    /// 4:2:2 — halve chroma horizontally.
+    #[value(name = "422")]
+    S422,
+    /// 4:2:0 — halve chroma both horizontally and vertically.
+    #[value(name = "420")]
+    S420,
+}
+
+impl JpegSubsampling {
+    /// Maps the CLI choice onto the codec's [`JpegChroma`] enum.
+    fn to_codec(self) -> JpegChroma {
+        match self {
+            JpegSubsampling::S444 => JpegChroma::Ycbcr444,
+            JpegSubsampling::S422 => JpegChroma::Ycbcr422,
+            JpegSubsampling::S420 => JpegChroma::Ycbcr420,
+        }
+    }
 }
 
 /// Runs the `convert` command: decode the input, encode it, and report the result.
@@ -174,6 +215,30 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 .encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)
         }
+        OutputFormat::Jpeg => {
+            // JPEG has no alpha channel, so decode to RGB like the AVIF/TIFF paths; the input
+            // pipeline does not distinguish grayscale, so colour is always encoded as YCbCr.
+            let (rgb, dims) = decode_rgb8(&args.input)?;
+            tracing::info!(
+                width = dims.width,
+                height = dims.height,
+                bytes = rgb.len(),
+                "decoded input"
+            );
+            // JPEG-1 is inherently lossy; `--quality` (default 75) drives the quantization tables,
+            // `--jpeg-subsampling` (default 4:2:0) the chroma resolution, and `--jpeg-progressive`
+            // selects the SOF2 progressive process. A restart interval of 0 disables restarts, so
+            // only apply a nonzero one.
+            let mut encoder = JpegEncoder::new()
+                .with_quality(args.quality)
+                .with_subsampling(args.jpeg_subsampling.to_codec())
+                .with_progressive(args.jpeg_progressive);
+            if args.jpeg_restart_interval != 0 {
+                encoder = encoder.with_restart_interval(args.jpeg_restart_interval);
+            }
+            encoder.encode_image(ImageRef::<Rgb8>::new(&rgb, dims)?, &mut out)?;
+            (rgb.len(), dims)
+        }
     };
     tracing::info!(bytes = out.len(), lossy = args.lossy, "encoded output");
 
@@ -214,6 +279,7 @@ fn resolve_format(args: &ConvertArgs) -> Result<OutputFormat, CliError> {
         Some("tiff" | "tif") => Ok(OutputFormat::Tiff),
         Some("png") => Ok(OutputFormat::Png),
         Some("jxl") => Ok(OutputFormat::Jxl),
+        Some("jpg" | "jpeg") => Ok(OutputFormat::Jpeg),
         Some(other) => Err(CliError::UnsupportedOutput(other.to_string())),
         None => Err(CliError::UnsupportedOutput("<none>".to_string())),
     }

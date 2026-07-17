@@ -1,0 +1,146 @@
+//! Quantization tables: the T.81 Annex K.1 base tables and the IJG quality→scale mapping.
+//!
+//! [`LUMINANCE`] and [`CHROMINANCE`] are the Annex K.1 / K.2 example tables verbatim, in **natural**
+//! (row-major) order. [`scale`] applies the de-facto-standard IJG/libjpeg quality mapping to a base
+//! table, and [`emit_dqt`] serializes the scaled tables into a DQT marker segment (§B.2.4.1) in
+//! zig-zag order.
+//!
+//! # Frozen quality contract
+//!
+//! For a given `quality` the scaled table bytes are **SemVer-frozen**: the mapping is
+//! `scale = if q < 50 { 5000 / q } else { 200 - 2·q }`, then each base entry becomes
+//! `clamp((base·scale + 50) / 100, 1, 255)` (§A.3.4 requires 8-bit `Q` values in `1..=255` for
+//! baseline `Pq = 0`). Quality 50 reproduces the Annex K tables exactly; quality 100 collapses every
+//! entry to 1 (`scale = 0` → `(0 + 50)/100 = 0`, clamped up to 1). Changing these bytes for a fixed
+//! `(quality, subsampling)` is a breaking change.
+
+use crate::marker::{self, code};
+use crate::zigzag::ZIGZAG;
+
+/// T.81 Table K.1 — the example **luminance** quantization table, natural (row-major) order.
+///
+/// Suitable, per Annex K, for 8-bit luminance components; used for the Y component and for
+/// grayscale images.
+pub const LUMINANCE: [u8; 64] = [
+    16, 11, 10, 16, 24, 40, 51, 61, //
+    12, 12, 14, 19, 26, 58, 60, 55, //
+    14, 13, 16, 24, 40, 57, 69, 56, //
+    14, 17, 22, 29, 51, 87, 80, 62, //
+    18, 22, 37, 56, 68, 109, 103, 77, //
+    24, 35, 55, 64, 81, 104, 113, 92, //
+    49, 64, 78, 87, 103, 121, 120, 101, //
+    72, 92, 95, 98, 112, 100, 103, 99, //
+];
+
+/// T.81 Table K.2 — the example **chrominance** quantization table, natural (row-major) order.
+///
+/// Suitable, per Annex K, for 8-bit chrominance (Cb/Cr) components.
+pub const CHROMINANCE: [u8; 64] = [
+    17, 18, 24, 47, 99, 99, 99, 99, //
+    18, 21, 26, 66, 99, 99, 99, 99, //
+    24, 26, 56, 99, 99, 99, 99, 99, //
+    47, 66, 99, 99, 99, 99, 99, 99, //
+    99, 99, 99, 99, 99, 99, 99, 99, //
+    99, 99, 99, 99, 99, 99, 99, 99, //
+    99, 99, 99, 99, 99, 99, 99, 99, //
+    99, 99, 99, 99, 99, 99, 99, 99, //
+];
+
+/// The IJG quality→scale percentage for `quality` in `1..=100`: `5000/q` below 50, `200 − 2·q`
+/// at 50 and above. A larger scale means coarser quantization (smaller files, lower fidelity).
+fn quality_scale(quality: u8) -> u32 {
+    let q = u32::from(quality);
+    if q < 50 { 5000 / q } else { 200 - 2 * q }
+}
+
+/// Scales a base quantization table for `quality` (`1..=100`) per the frozen contract above,
+/// clamping each entry to the baseline 8-bit range `1..=255`.
+#[must_use]
+pub fn scale(base: &[u8; 64], quality: u8) -> [u8; 64] {
+    let s = quality_scale(quality);
+    let mut out = [0u8; 64];
+    for (dst, &b) in out.iter_mut().zip(base.iter()) {
+        // (b·scale + 50) / 100 rounds to nearest; clamp into the 8-bit Pq=0 range.
+        let v = (u32::from(b) * s + 50) / 100;
+        *dst = v.clamp(1, 255) as u8;
+    }
+    out
+}
+
+/// Appends a DQT marker segment (§B.2.4.1) carrying `tables`, each an `(id, values)` pair whose
+/// `values` are in **natural** order and are re-emitted in zig-zag order. Baseline precision
+/// (`Pq = 0`, one byte per value) is always used.
+pub fn emit_dqt(out: &mut Vec<u8>, tables: &[(u8, &[u8; 64])]) {
+    // Lq = 2 length bytes + per table (1 precision/id byte + 64 value bytes).
+    let len = 2 + tables.len() * (1 + 64);
+    marker::write_segment_header(out, code::DQT, len);
+    for &(id, values) in tables {
+        // Pq (high nibble) = 0 for 8-bit; Tq (low nibble) = destination id.
+        out.push(id & 0x0F);
+        for &k in &ZIGZAG {
+            out.push(values[k]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quality_50_is_the_annex_k_tables_verbatim() {
+        // Quality 50 has scale 100, so (b·100 + 50)/100 == b for every entry: the mapping's fixed
+        // point is exactly the Annex K base tables. Spot-checking a few would let a scale-mapping
+        // mutant hide, so assert the whole 64 for both tables.
+        assert_eq!(scale(&LUMINANCE, 50), LUMINANCE);
+        assert_eq!(scale(&CHROMINANCE, 50), CHROMINANCE);
+    }
+
+    #[test]
+    fn quality_100_collapses_to_all_ones() {
+        // scale(100) = 200 - 200 = 0 → (0 + 50)/100 = 0 → clamped up to the minimum legal 1.
+        assert_eq!(scale(&LUMINANCE, 100), [1u8; 64]);
+        assert_eq!(scale(&CHROMINANCE, 100), [1u8; 64]);
+    }
+
+    #[test]
+    fn quality_1_saturates_high() {
+        // scale(1) = 5000 → luminance[0]=16 → (16·5000 + 50)/100 = 800 → clamped down to 255.
+        let q1 = scale(&LUMINANCE, 1);
+        assert_eq!(q1[0], 255);
+        assert!(q1.iter().all(|&v| v == 255), "coarsest quality saturates");
+    }
+
+    #[test]
+    fn hand_computed_scaled_entries() {
+        // q=75: scale = 200 - 150 = 50. luminance[0]=16 → (16·50 + 50)/100 = (800+50)/100 = 8.
+        // luminance[5]=40 → (40·50 + 50)/100 = 20. Pins the round-to-nearest numerator (the +50).
+        let q75 = scale(&LUMINANCE, 75);
+        assert_eq!(q75[0], 8);
+        assert_eq!(q75[5], 20);
+        // q=25: scale = 5000/25 = 200. luminance[0]=16 → (16·200 + 50)/100 = (3200+50)/100 = 32.
+        // chrominance[0]=17 → (17·200 + 50)/100 = (3400+50)/100 = 34.
+        assert_eq!(scale(&LUMINANCE, 25)[0], 32);
+        assert_eq!(scale(&CHROMINANCE, 25)[0], 34);
+    }
+
+    #[test]
+    fn dqt_emits_length_id_and_zigzag_order() {
+        // One luminance table at destination 0. Length = 2 + (1 + 64) = 67; the precision/id byte is
+        // 0x00 (Pq=0, Tq=0); the first two payload values are the zig-zag lead of the table —
+        // natural[0]=16 then natural[1]=11 (ZIGZAG[1]==1), proving zig-zag (not raster) emission.
+        let mut out = Vec::new();
+        emit_dqt(&mut out, &[(0, &LUMINANCE)]);
+        assert_eq!(&out[..2], &[0xFF, 0xDB]); // DQT marker
+        assert_eq!(&out[2..4], &[0x00, 67]); // Lq = 67
+        assert_eq!(out[4], 0x00); // Pq=0, Tq=0
+        assert_eq!(out[5], 16); // ZIGZAG[0] -> natural 0 = 16
+        assert_eq!(out[6], 11); // ZIGZAG[1] -> natural 1 = 11
+        assert_eq!(out.len(), 2 + 67);
+        // Two tables (colour): length = 2 + 2·65 = 132, and the second table's id nibble is 1.
+        let mut c = Vec::new();
+        emit_dqt(&mut c, &[(0, &LUMINANCE), (1, &CHROMINANCE)]);
+        assert_eq!(&c[2..4], &[0x00, 132]);
+        assert_eq!(c[4 + 65], 0x01); // second precision/id byte: Tq=1
+    }
+}
