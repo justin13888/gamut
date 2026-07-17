@@ -227,11 +227,11 @@ impl TiffEncoder {
         );
         ifd.set(
             tags::COMPRESSION,
-            Value::Short(vec![self.compression.code()]),
+            Value::Short(vec![u16::from(self.compression)]),
         );
         ifd.set(
             tags::PHOTOMETRIC_INTERPRETATION,
-            Value::Short(vec![layout.photometric.code()]),
+            Value::Short(vec![u16::from(layout.photometric)]),
         );
         ifd.set(
             tags::SAMPLES_PER_PIXEL,
@@ -242,7 +242,10 @@ impl TiffEncoder {
         ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
         if predicting {
-            ifd.set(tags::PREDICTOR, Value::Short(vec![2]));
+            ifd.set(
+                tags::PREDICTOR,
+                Value::Short(vec![u16::from(self.predictor)]),
+            );
         }
         for (tag, value) in extra_fields {
             ifd.set(*tag, value.clone());
@@ -400,11 +403,11 @@ impl TiffEncoder {
         );
         ifd.set(
             tags::COMPRESSION,
-            Value::Short(vec![self.compression.code()]),
+            Value::Short(vec![u16::from(self.compression)]),
         );
         ifd.set(
             tags::PHOTOMETRIC_INTERPRETATION,
-            Value::Short(vec![layout.photometric.code()]),
+            Value::Short(vec![u16::from(layout.photometric)]),
         );
         ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp as u16]));
         ifd.set(tags::TILE_WIDTH, dim_value(tile_w));

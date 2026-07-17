@@ -35,11 +35,15 @@ pub enum Compression {
     PackBits,
 }
 
-impl Compression {
-    /// Returns the scheme for an on-disk `Compression` tag value, or `None` if unrecognised.
-    #[must_use]
-    pub fn from_code(code: u32) -> Option<Self> {
-        Some(match code {
+impl TryFrom<u32> for Compression {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk `Compression` tag value (tag 259) to its scheme.
+    ///
+    /// The legacy Adobe Deflate code `32946` maps to [`Compression::Deflate`] like the
+    /// standardised `8`. Unrecognised codes fail with [`gamut_core::Error::Unsupported`].
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        Ok(match code {
             1 => Compression::None,
             2 => Compression::CcittRle,
             3 => Compression::CcittGroup3Fax,
@@ -49,14 +53,19 @@ impl Compression {
             7 => Compression::Jpeg,
             8 | 32946 => Compression::Deflate,
             32773 => Compression::PackBits,
-            _ => return None,
+            _ => {
+                return Err(gamut_core::Error::Unsupported(
+                    "TIFF: unrecognised Compression tag value",
+                ));
+            }
         })
     }
+}
 
-    /// Returns the on-disk `Compression` tag value.
-    #[must_use]
-    pub fn code(self) -> u16 {
-        match self {
+impl From<Compression> for u16 {
+    /// Returns the on-disk `Compression` tag value (the `SHORT` written to tag 259).
+    fn from(compression: Compression) -> Self {
+        match compression {
             Compression::None => 1,
             Compression::CcittRle => 2,
             Compression::CcittGroup3Fax => 3,
@@ -76,20 +85,25 @@ mod tests {
 
     #[test]
     fn compression_codes_round_trip() {
-        for c in [
-            Compression::None,
-            Compression::CcittRle,
-            Compression::CcittGroup3Fax,
-            Compression::CcittGroup4Fax,
-            Compression::Lzw,
-            Compression::OldJpeg,
-            Compression::Jpeg,
-            Compression::Deflate,
-            Compression::PackBits,
+        // Both conversion directions agree, per on-disk code (TIFF 6.0 §7 Compression values).
+        for (c, code) in [
+            (Compression::None, 1u16),
+            (Compression::CcittRle, 2),
+            (Compression::CcittGroup3Fax, 3),
+            (Compression::CcittGroup4Fax, 4),
+            (Compression::Lzw, 5),
+            (Compression::OldJpeg, 6),
+            (Compression::Jpeg, 7),
+            (Compression::Deflate, 8),
+            (Compression::PackBits, 32773),
         ] {
-            assert_eq!(Compression::from_code(u32::from(c.code())), Some(c));
+            assert_eq!(u16::from(c), code);
+            assert_eq!(Compression::try_from(u32::from(code)).unwrap(), c);
         }
-        assert_eq!(Compression::from_code(32946), Some(Compression::Deflate));
-        assert_eq!(Compression::from_code(99), None);
+        // The legacy Adobe Deflate code is an accepted read-side alias.
+        assert_eq!(Compression::try_from(32946).unwrap(), Compression::Deflate);
+        for bad in [0u32, 9, 99, 32774] {
+            assert!(Compression::try_from(bad).is_err());
+        }
     }
 }

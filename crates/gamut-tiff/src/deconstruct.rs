@@ -20,7 +20,7 @@ use gamut_ifd::{
 
 use crate::compression::Compression;
 use crate::decoder::TiffDecoder;
-use crate::ifd::PhotometricInterpretation;
+use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::tags;
 
 /// An upper bound on sub-IFD nesting, guarding the recursive walk against malformed/looping trees.
@@ -191,7 +191,7 @@ impl Deconstructor<'_> {
     /// crate does not recognise.
     fn check_codes(&mut self, ifd: &Ifd, page: usize) {
         if let Some(code) = ifd.get_u32(tags::COMPRESSION)
-            && Compression::from_code(code).is_none()
+            && Compression::try_from(code).is_err()
         {
             self.anomalies.push(Anomaly::UnknownCode {
                 page,
@@ -201,7 +201,7 @@ impl Deconstructor<'_> {
             });
         }
         if let Some(code) = ifd.get_u32(tags::PHOTOMETRIC_INTERPRETATION)
-            && PhotometricInterpretation::from_code(code).is_none()
+            && PhotometricInterpretation::try_from(code).is_err()
         {
             self.anomalies.push(Anomaly::UnknownCode {
                 page,
@@ -211,7 +211,7 @@ impl Deconstructor<'_> {
             });
         }
         if let Some(code) = ifd.get_u32(tags::PREDICTOR)
-            && !matches!(code, 1 | 2)
+            && Predictor::try_from(code).is_err()
         {
             self.anomalies.push(Anomaly::UnknownCode {
                 page,
