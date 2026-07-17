@@ -86,8 +86,13 @@ fn list() {
     print_pixel::<Cmyk8>("Cmyk8");
 
     println!("bit depths:");
-    for bd in [BitDepth::Eight, BitDepth::Ten, BitDepth::Twelve] {
-        println!("  {bd:?}: {} bits", bd.bits());
+    for bd in [
+        BitDepth::Eight,
+        BitDepth::Ten,
+        BitDepth::Twelve,
+        BitDepth::Sixteen,
+    ] {
+        println!("  {bd:?}: {} bits (max {})", bd.bits(), bd.max_value());
     }
 
     println!("chroma subsampling (subsampling_x, subsampling_y):");
