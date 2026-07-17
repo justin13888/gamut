@@ -20,7 +20,7 @@ use crate::{bitpack, compression, lossless_jpeg, preview, tags};
 #[derive(Debug, Clone)]
 pub struct DngEncoder {
     order: ByteOrder,
-    dng_version: [u8; 4],
+    dng_version: Option<[u8; 4]>,
     backward_version: [u8; 4],
     big_tiff: bool,
     compression: Compression,
@@ -36,9 +36,11 @@ impl Default for DngEncoder {
     fn default() -> Self {
         Self {
             order: ByteOrder::LittleEndian,
-            // 1.4.0.0 covers the baseline feature set; the backward version (oldest reader that can
-            // parse the file) is the widely-supported 1.1.0.0.
-            dng_version: [1, 4, 0, 0],
+            // None = computed from the features used at encode time (see
+            // `required_dng_version`); the backward version (oldest reader that can parse the
+            // file) starts at the widely-supported 1.1.0.0 and is raised per the spec's
+            // compatibility rules.
+            dng_version: None,
             backward_version: [1, 1, 0, 0],
             big_tiff: false,
             compression: Compression::Uncompressed,
@@ -67,10 +69,13 @@ impl DngEncoder {
         self
     }
 
-    /// Returns a copy of this encoder that declares the given `DNGVersion` (e.g. `[1, 4, 0, 0]`).
+    /// Returns a copy of this encoder that declares the given `DNGVersion` (e.g. `[1, 4, 0, 0]`)
+    /// verbatim, overriding the default: the minimal version covering the features actually
+    /// written (JPEG XL / `ProfileGainTableMap2` → 1.7.0.0, `ProfileGainTableMap` / the
+    /// spectral illuminant → 1.6.0.0, opcodes → their defining version, else 1.4.0.0).
     #[must_use]
     pub fn with_dng_version(mut self, version: [u8; 4]) -> Self {
-        self.dng_version = version;
+        self.dng_version = Some(version);
         self
     }
 
@@ -246,7 +251,19 @@ impl DngEncoder {
         };
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
-        let mut ifd0 = self.build_ifd0(profile, preview_dims, backward_version_for(self, raw))?;
+        // Effective versions: the backward version per the compatibility rules, and (unless
+        // overridden) the minimal DNGVersion covering the features used — never below the
+        // backward version, which a reader is entitled to assume.
+        let backward_version = backward_version_for(self, raw, profile);
+        let dng_version = self.dng_version.unwrap_or_else(|| {
+            let required = required_dng_version(self, raw, profile);
+            if backward_version > required {
+                backward_version
+            } else {
+                required
+            }
+        });
+        let mut ifd0 = self.build_ifd0(profile, preview_dims, dng_version, backward_version)?;
         // The raw-data integrity digest (P17). `gdng_validate` runs ValidateRawImageDigest, so
         // every oracle-gated test enforces this value against the SDK's own computation.
         ifd0.set(
@@ -298,6 +315,7 @@ impl DngEncoder {
         &self,
         profile: &CameraProfile,
         preview_dims: gamut_core::Dimensions,
+        dng_version: [u8; 4],
         backward_version: [u8; 4],
     ) -> Result<Ifd> {
         let mut ifd = Ifd::new();
@@ -327,7 +345,7 @@ impl DngEncoder {
         );
 
         // DNG identity + colour profile.
-        ifd.set(tags::DNG_VERSION, Value::Byte(self.dng_version.to_vec()));
+        ifd.set(tags::DNG_VERSION, Value::Byte(dng_version.to_vec()));
         ifd.set(
             tags::DNG_BACKWARD_VERSION,
             Value::Byte(backward_version.to_vec()),
@@ -414,17 +432,74 @@ impl DngEncoder {
 
 /// The effective `DNGBackwardVersion`: the configured version, raised to the spec version of
 /// every **non-optional** opcode the raw carries (DNG 1.7.1 Compatibility Issue 7, p. 124 — a
-/// reader that must execute an opcode needs at least the DNG version that defined it). The four
-/// version octets compare lexicographically, which matches dotted-version ordering.
-fn backward_version_for(encoder: &DngEncoder, raw: &RawImage) -> [u8; 4] {
+/// reader that must execute an opcode needs at least the DNG version that defined it). The same
+/// applies to features a reader cannot skip: JPEG XL raw compression requires a 1.7 reader
+/// (Compatibility Issue 18), Deflate/lossy-JPEG a 1.4 reader (Issues 10/11), and the
+/// spectral-data illuminant (255) a 1.6 reader (Issue 17). Optional content — gain-table maps,
+/// masks, depth — deliberately does *not* raise it (Issues 12–15/20). The four version octets
+/// compare lexicographically, which matches dotted-version ordering.
+fn backward_version_for(encoder: &DngEncoder, raw: &RawImage, profile: &CameraProfile) -> [u8; 4] {
     let mut version = encoder.backward_version;
+    let raise = |v: [u8; 4], version: &mut [u8; 4]| {
+        if v > *version {
+            *version = v;
+        }
+    };
     let lists = [raw.opcode_list1(), raw.opcode_list2(), raw.opcode_list3()];
     for opcode in lists.iter().flat_map(|l| l.opcodes()) {
-        if !opcode.is_optional() && opcode.spec_version > version {
-            version = opcode.spec_version;
+        if !opcode.is_optional() {
+            raise(opcode.spec_version, &mut version);
         }
     }
+    match encoder.compression {
+        Compression::JpegXl => raise([1, 7, 0, 0], &mut version),
+        Compression::Deflate | Compression::LossyJpeg => raise([1, 4, 0, 0], &mut version),
+        _ => {}
+    }
+    if uses_spectral_illuminant(profile) {
+        raise([1, 6, 0, 0], &mut version);
+    }
     version
+}
+
+/// The minimal `DNGVersion` covering everything this encode writes, used when no explicit
+/// version is configured. The floor is 1.4.0.0 (the crate's baseline feature set); JPEG XL and
+/// `ProfileGainTableMap2` need 1.7, `ProfileGainTableMap` and illuminant 255 need 1.6, and any
+/// opcode (optional included — `DNGVersion` declares what the file *uses*, unlike the backward
+/// version) needs its defining version. BigTIFF is independent of the DNG version (spec,
+/// "64-bit Format").
+fn required_dng_version(encoder: &DngEncoder, raw: &RawImage, profile: &CameraProfile) -> [u8; 4] {
+    let mut version = [1, 4, 0, 0];
+    let raise = |v: [u8; 4], version: &mut [u8; 4]| {
+        if v > *version {
+            *version = v;
+        }
+    };
+    if encoder.compression == Compression::JpegXl {
+        raise([1, 7, 0, 0], &mut version);
+    }
+    if encoder.gain_table_map.is_some() {
+        raise([1, 6, 0, 0], &mut version);
+    }
+    if encoder.gain_table_map2.is_some() {
+        raise([1, 7, 0, 0], &mut version);
+    }
+    if uses_spectral_illuminant(profile) {
+        raise([1, 6, 0, 0], &mut version);
+    }
+    let lists = [raw.opcode_list1(), raw.opcode_list2(), raw.opcode_list3()];
+    for opcode in lists.iter().flat_map(|l| l.opcodes()) {
+        raise(opcode.spec_version, &mut version);
+    }
+    version
+}
+
+/// Whether the profile uses the spectral-data illuminant (`CalibrationIlluminant` 255, DNG 1.6).
+fn uses_spectral_illuminant(profile: &CameraProfile) -> bool {
+    profile.calibration_illuminant1().code() == 255
+        || profile
+            .second_illuminant()
+            .is_some_and(|(_, illuminant)| illuminant.code() == 255)
 }
 
 impl DngEncoder {
@@ -950,6 +1025,116 @@ mod tests {
         );
         // The preview stays stripped.
         assert!(file.ifds[0].get(tags::STRIP_OFFSETS).is_some());
+    }
+
+    /// Encodes with `enc` and returns the written `(DNGVersion, DNGBackwardVersion)`.
+    fn versions_of(enc: DngEncoder, raw: &RawImage, profile: &CameraProfile) -> ([u8; 4], [u8; 4]) {
+        let mut out = Vec::new();
+        enc.encode(raw, profile, &mut out).expect("encode");
+        let file = gamut_ifd::read(&out).expect("parse");
+        let get = |tag: u16| -> [u8; 4] {
+            let Some(Value::Byte(b)) = file.ifds[0].get(tag) else {
+                panic!("version tag {tag} missing");
+            };
+            [b[0], b[1], b[2], b[3]]
+        };
+        (get(tags::DNG_VERSION), get(tags::DNG_BACKWARD_VERSION))
+    }
+
+    /// The exact version table per the spec's compatibility rules — asserted as literal
+    /// `[u8; 4]` values so no symmetric transform can hide a wrong raise.
+    #[test]
+    fn version_computation_follows_the_compatibility_rules() {
+        let raw = sample_raw(16, 16, 16);
+        let profile = sample_profile();
+
+        // Baseline floor.
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw, &profile),
+            ([1, 4, 0, 0], [1, 1, 0, 0])
+        );
+        // Deflate raises the backward version to 1.4 (Compatibility Issue 10).
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_compression(crate::values::Compression::Deflate),
+                &raw,
+                &profile
+            ),
+            ([1, 4, 0, 0], [1, 4, 0, 0])
+        );
+        // Gain-table maps raise DNGVersion (1.6 / 1.7) but never the backward version
+        // (Issues 15/20).
+        let map = ProfileGainTableMap {
+            points_v: 1,
+            points_h: 1,
+            spacing_v: 1.0,
+            spacing_h: 1.0,
+            origin_v: 0.0,
+            origin_h: 0.0,
+            points_n: 2,
+            input_weights: [0.2; 5],
+            gamma: 1.0,
+            gain_min: 0.0,
+            gain_max: 0.0,
+            gains: crate::gain_map::GainValues::F32(vec![1.0, 2.0]),
+        };
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_gain_table_map(map.clone()),
+                &raw,
+                &profile
+            ),
+            ([1, 6, 0, 0], [1, 1, 0, 0])
+        );
+        let mut map2 = map;
+        map2.gains = crate::gain_map::GainValues::U8(vec![0, 255]);
+        map2.gain_min = 0.5;
+        map2.gain_max = 2.0;
+        assert_eq!(
+            versions_of(DngEncoder::new().with_gain_table_map2(map2), &raw, &profile),
+            ([1, 7, 0, 0], [1, 1, 0, 0])
+        );
+        // An *optional* opcode raises DNGVersion (the file uses it) but not the backward
+        // version; a non-optional one raises both (Issue 7).
+        let opcode = |flags: u32| crate::opcode::Opcode {
+            id: crate::opcode::opcode_id::TRIM_BOUNDS,
+            spec_version: [1, 5, 0, 0],
+            flags,
+            parameters: vec![0; 16],
+        };
+        let mut optional = crate::opcode::OpcodeList::default();
+        optional.push(opcode(crate::opcode::Opcode::FLAG_OPTIONAL));
+        let raw_optional = sample_raw(16, 16, 16).with_opcode_list2(optional);
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw_optional, &profile),
+            ([1, 5, 0, 0], [1, 1, 0, 0])
+        );
+        let mut required = crate::opcode::OpcodeList::default();
+        required.push(opcode(0));
+        let raw_required = sample_raw(16, 16, 16).with_opcode_list2(required);
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw_required, &profile),
+            ([1, 5, 0, 0], [1, 5, 0, 0])
+        );
+        // An explicit override is written verbatim.
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_dng_version([1, 3, 0, 0]),
+                &raw,
+                &profile
+            ),
+            ([1, 3, 0, 0], [1, 1, 0, 0])
+        );
+        // JPEG XL requires a 1.7 reader: both versions raise (Issue 18).
+        #[cfg(feature = "jxl-encode")]
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_compression(crate::values::Compression::JpegXl),
+                &raw,
+                &profile
+            ),
+            ([1, 7, 0, 0], [1, 7, 0, 0])
+        );
     }
 
     #[test]

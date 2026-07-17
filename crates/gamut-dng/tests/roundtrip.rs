@@ -259,6 +259,66 @@ fn gain_table_maps_roundtrip_and_validate() {
     assert_eq!(decoded.gain_table_map2.as_ref(), Some(&v2));
 }
 
+/// The **Apple ProRAW shape**, end to end: a linear (demosaiced) 3-plane raw, tiled, JPEG XL
+/// compressed, with a LinearizationTable, per-plane levels, and a ProfileGainTableMap2 — the
+/// exact ingredient list of a ProRAW-with-JXL DNG. The encoder must auto-declare DNG 1.7, the
+/// file must round-trip bit-exact through gamut, and the Adobe SDK must validate it, read
+/// identical pixels, and agree on the raw digest.
+#[test]
+fn proraw_shaped_dng_roundtrips_and_validates() {
+    use gamut_dng::{Compression, GainValues, ProfileGainTableMap, RawLevels};
+    let table: Vec<u16> = (0..4096u32).map(|v| (v * 16).min(65535) as u16).collect();
+    let levels = RawLevels::new(
+        3,
+        (1, 1),
+        vec![0.0, 16.0, 32.0],
+        vec![65535.0, 65500.0, 65535.0],
+    )
+    .expect("levels")
+    .with_linearization_table(table);
+    let raw = common::sample_linear_raw(96, 72, 16)
+        .with_levels(levels)
+        .expect("levels");
+    let map2 = ProfileGainTableMap {
+        points_v: 2,
+        points_h: 2,
+        spacing_v: 0.5,
+        spacing_h: 0.5,
+        origin_v: 0.0,
+        origin_h: 0.0,
+        points_n: 3,
+        input_weights: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0, 0.0],
+        gamma: 1.0,
+        gain_min: 0.5,
+        gain_max: 2.0,
+        gains: GainValues::U16((0..12u16).map(|i| i * 5000).collect()),
+    };
+
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_compression(Compression::JpegXl)
+        .with_tiling(32, 32)
+        .with_gain_table_map2(map2.clone())
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+
+    // No version was configured: JPEG XL must auto-raise both versions to 1.7.0.0.
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.dng_version, [1, 7, 0, 0]);
+    assert_eq!(decoded.backward_version, Some([1, 7, 0, 0]));
+    assert_eq!(decoded.raw, raw, "ProRAW shape must round-trip bit-exact");
+    assert_eq!(decoded.gain_table_map2.as_ref(), Some(&map2));
+
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept the ProRAW-shaped DNG");
+    let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+    assert_eq!(adobe.samples, raw.samples(), "Adobe stage-1 must match");
+    assert_eq!(
+        gamut_dng_oracle::new_raw_image_digest(&dng).expect("adobe digest"),
+        raw.new_raw_image_digest(),
+        "raw digest must bit-match the SDK"
+    );
+}
+
 #[test]
 fn tiled_bigtiff_roundtrips_and_validates() {
     let raw = common::sample_raw(48, 32, 12);
