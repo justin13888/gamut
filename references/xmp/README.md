@@ -21,6 +21,9 @@ Reference specifications for the `gamut-xmp` crate.
   **ISO 16684-2:2014** (Part 2: Description of XMP schemas using RELAX NG) — the formal ISO standard,
   paywalled. The Adobe Parts 1–3 above are the technically-equivalent free text used in their place.
 
+Part 3's JPEG carriage (the `APP1` namespace-URI segment, §1.1.3) is implemented by `gamut-jpeg` —
+see [`../jpeg`](../jpeg/README.md#appn-metadata-embedding-exif--xmp--icc).
+
 XMP is RDF/XML wrapped in an `<?xpacket?>` processing instruction. `gamut-xmp` models the property
 graph (simple / structured / `Bag`·`Seq`·`Alt` arrays, qualifiers, language alternatives) and the
 canonical RDF/XML serialization.
