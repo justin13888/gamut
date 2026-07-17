@@ -56,7 +56,36 @@ assert_eq!(read_tree(&bytes, &[34665]).unwrap(), file); // write's inverse
 
 Tag *numbers* are passed literally — tag *semantics* live in the consuming codec (e.g. `gamut-tiff`'s
 `tags` module), not in this structural core. That is also why `read_tree` takes the pointer tags:
-which `LONG` tags hold directory offsets is semantics the structure alone cannot know.
+which `LONG` tags hold directory offsets is semantics the structure alone cannot know. The one
+principled exception is the [`tags`] module: the handful of **structural pointer tags**
+(`SubIFDs`, `ExifIFD`, `GPSInfo`, `InteroperabilityIFD`, plus the `MakerNote` blob carrier) name
+the directory graph itself, so they live here (`tags::STANDARD_POINTER_TAGS` is the ready-made
+`read_tree` set) instead of being re-declared by every consumer.
+
+### Streaming (RAW-grade) parsing
+
+A multi-hundred-MB camera file should not need to be in memory to have its kilobytes of
+directory structure read (issue #252). The `ReadAt` trait abstracts positioned reads —
+implemented by `&[u8]`, by `StreamSource` (any `Read + Seek`, e.g. a `File`), and by `Rebased`
+(an offset-shifted view: the primitive for maker-note mini-IFDs, whose internal offsets are
+relative to the note start or the TIFF header, and for TIFF streams embedded inside another
+container). `IfdReader` walks structure lazily on top: `read_ifd` fetches one directory body
+and leaves each entry **raw** (tag, type code, count, and the value/offset word verbatim);
+`value` fetches and decodes a single value on demand; `ifds()` iterates the top-level chain;
+`read_file` / `read_tree` / the `*_with_coverage` methods are the eager slice APIs' equivalents
+and produce identical results (the robustness corpus drives both paths and requires agreement).
+
+```rust
+use gamut_ifd::{IfdReader, StreamSource, tags};
+
+let file = std::fs::File::open("shot.nef")?; // 300 MB of RAW; only KBs get read
+let mut reader = IfdReader::open(StreamSource::new(file))?;
+let raw = reader.read_ifd(reader.first_ifd_offset())?; // one directory body
+if let Some(entry) = raw.entry(tags::SUB_IFDS) {
+    let raw_ifd_offsets = reader.value(entry)?; // this value's bytes only
+}
+let whole_tree = reader.read_tree(tags::STANDARD_POINTER_TAGS)?; // == read_tree on the full bytes
+```
 
 Codecs that append image data after the stream (strips, tiles, an embedded JPEG) build on `write`'s
 documented **layout contract**: every structure sits on an even word boundary (`align_word` is the
