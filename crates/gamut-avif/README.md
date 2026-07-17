@@ -1,11 +1,14 @@
 # gamut-avif
 
-`gamut-avif` is a pure-Rust, memory-safe AVIF encoder that wraps AV1 intra-frame bitstreams in an
-ISOBMFF/MIAF container.
+`gamut-avif` is a pure-Rust, memory-safe AVIF encoder — and AVIF **container decoder** — that
+wraps AV1 intra-frame bitstreams in an ISOBMFF/MIAF container.
 
-This is the high-level crate most users want: give it pixels, get a complete `.avif` file. It is
-orchestration only — [`gamut-av1`](../gamut-av1) does the AV1 coding and
-[`gamut-isobmff`](../gamut-isobmff) writes the container.
+This is the high-level crate most users want: give it pixels, get a complete `.avif` file — or
+give it a `.avif` file and a codestream decoder, get pixels. It is orchestration only —
+[`gamut-av1`](../gamut-av1) does the AV1 coding and [`gamut-isobmff`](../gamut-isobmff)
+reads/writes the container; on the decode side the AV1 codestream itself is supplied through the
+pluggable `Av1StillDecoder` seam (a platform hardware decoder, dav1d, …) until the workspace's
+pure-Rust AV1 decoder lands.
 
 ## Goals
 
@@ -49,6 +52,13 @@ std::fs::write("out.avif", &avif).unwrap();
 `AvifEncoder` implements [`gamut_core::EncodeImage<Rgb8>`], so the input is a typed
 [`gamut_core::ImageRef`] and handing it an unsupported pixel layout is a compile error.
 
+Decoding (issue #250): `AvifContainer::parse` gives a byte-accounting view plus the role-typed
+`AvifImage` lens (primary item, alpha/depth auxiliaries, thumbnails, Exif/XMP, grid/overlay,
+typed `av1C` and OBU layers); `decode_item_planar` hands each coded item's `Av1Config` + OBU
+payload to your `Av1StillDecoder` and reassembles the result, while `decode_primary_rgba8` adds
+colour conversion, alpha merge, and the `clap`/`irot`/`imir` transforms. See the crate docs for a
+worked example.
+
 ## Status
 
 **v1 surface.** The encoder produces **lossless** (the default) and **lossy**
@@ -60,11 +70,19 @@ contract, defined in [`references/avif`](../../references/avif/README.md)). `iro
 orientation is supported. Output is verified against real decoders (`libavif`, `dav1d`, `libaom`),
 linked from vendored `third_party/` submodules rather than system-installed binaries.
 
+**Decode surface.** The container read + codestream handoff (issue #250, mirroring what
+`gamut-heic` ships for HEIF): byte-accounting parse, the full item/property/derivation model, the
+typed `av1C`/OBU layer with the AVIF still-image payload validation, planar decode with
+grid/identity reassembly, and an 8-bit RGBA presentation path (identity/BT.601/monochrome colour,
+alpha merge, overlay compositing, `clap`/`irot`/`imir`). Validated differentially against
+libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
+
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
-specs: **deferred, planned** features (alpha, HDR/wide-gamut, 10/12-bit and 4:2:0/4:2:2,
-ICC/Exif/XMP metadata, gain maps, layered/progressive images, an AVIF decoder, …) all land
-semver-minor on the frozen v1 surface, while image sequences/tracks and AV1 inter coding are
-**permanently out of scope** per the image-first workspace charter.
+specs: **deferred, planned** features (alpha/HDR/wide-gamut *encoding*, 10/12-bit and
+4:2:0/4:2:2, ICC/Exif/XMP emission, gain maps, layered/progressive images, the pure-Rust AV1
+codestream decoder, the decoder backend registry, …) all land semver-minor on the frozen v1
+surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per
+the image-first workspace charter.
 
 ## License
 

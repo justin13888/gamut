@@ -1,6 +1,6 @@
 [package]
 name = "gamut-avif"
-description = "Pure-Rust AVIF still-image encoder — lossless and lossy AV1 intra frames in an ISOBMFF/MIAF container (the full .avif format)."
+description = "Pure-Rust AVIF still-image encoder and container decoder — lossless and lossy AV1 intra frames in an ISOBMFF/MIAF container, with a pluggable AV1 codestream-decoder hook."
 version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true

@@ -13,7 +13,12 @@ it.
   `gamut-av1` cite its section numbers (§5.x/§7.x/§8.x/§9.x).
 - **AV1 Codec ISO Media File Format Binding v1.3.0** — [`av1-isobmff/`](./av1-isobmff). The `av01`
   item type and the `AV1CodecConfigurationRecord` (§2.3) that `gamut-avif` stamps into the `av1C`
-  property; the temporal-unit payload rules (§2.4) for the `mdat`.
+  property; the temporal-unit payload rules (§2.4) for the `mdat`. Since issue #250 the record is
+  also **read** (`gamut_avif::Av1Config`, §2.3.3 field-for-field with reserved bits ignored and
+  the §2.3.4 `configOBUs` size-field SHALL enforced), and item payloads are enumerated
+  container-side as OBUs (`gamut_avif::iter_obus`: the low-overhead syntax of AV1 §5.3 with the
+  §4.10.5 `leb128()` bounds — padded encodings accepted — and the §2.4 rule that only the final
+  OBU may omit its size field).
 
 ## Oracle — libaom (the AV1 reference codec)
 

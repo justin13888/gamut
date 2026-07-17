@@ -1,13 +1,97 @@
-//! AVIF (AV1 Image File Format) encoder — AV1 intra-frame bitstreams wrapped in an ISOBMFF/MIAF
-//! container.
+//! AVIF (AV1 Image File Format) encoder and **container decoder** — AV1 intra-frame bitstreams
+//! wrapped in an ISOBMFF/MIAF container.
 //!
-//! The public surface is [`AvifEncoder`], which implements [`gamut_core::EncodeImage<Rgb8>`], so the
-//! input is a typed [`ImageRef`](gamut_core::ImageRef) and handing it an unsupported pixel layout is
-//! a compile error. The crate is orchestration only: [`gamut_color`] maps pixels to identity-matrix
-//! 4:4:4 planes, [`gamut_av1`] encodes the AV1 temporal unit, and [`gamut_isobmff`] writes the
-//! container.
+//! The encode surface is [`AvifEncoder`], which implements [`gamut_core::EncodeImage<Rgb8>`], so
+//! the input is a typed [`ImageRef`](gamut_core::ImageRef) and handing it an unsupported pixel
+//! layout is a compile error. The crate is orchestration only: [`gamut_color`] maps pixels to
+//! identity-matrix 4:4:4 planes, [`gamut_av1`] encodes the AV1 temporal unit, and
+//! [`gamut_isobmff`] writes the container.
+//!
+//! # The decode surface (issue #250)
+//!
+//! The read side mirrors the surface [`gamut-heic`](https://docs.rs/gamut-heic) established for
+//! HEIF: the crate decodes the **container** — and everything around the coded picture — in pure
+//! Rust, while the AV1 codestream itself is decoded by a pluggable [`Av1StillDecoder`] the caller
+//! supplies (a platform hardware decoder, dav1d, …). Two layers:
+//!
+//! - [`AvifContainer`] — the **total, byte-accounting** representation: every input byte maps to
+//!   exactly one [`Segment`] (box / appended motion-photo stream / trailer), and unconsumed
+//!   `meta` boxes surface as [`UnknownBox`]es — it is structurally impossible to ignore bits.
+//! - [`AvifImage`] / [`AvifItem`] — the **role-typed semantic view** over
+//!   [`gamut_isobmff::IsoBmffImage`]: the validated primary item, alpha/depth auxiliaries,
+//!   thumbnails, Exif/XMP payloads, grid/overlay derivations, and typed properties including the
+//!   [`Av1Config`] `av1C` record ([`AvifItem::av1_config`]) and the OBU layer
+//!   ([`iter_obus`]/[`ObuType`]).
+//!
+//! Around the seam, [`AvifImage::decode_item_planar`] resolves item derivation (`grid`/`iden`)
+//! and returns the decoder's raw planar [`DecodedFrame`] — the surface for callers with their own
+//! colour pipeline — while [`AvifImage::decode_item_rgba8`] /
+//! [`AvifImage::decode_primary_rgba8`] add colour conversion, alpha merge, `iovl` compositing,
+//! and the `clap`/`irot`/`imir` transforms for a presentation-ready
+//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). The whole pipeline is validated differentially
+//! against **libavif + dav1d** (`tests/conformance.rs`).
 //!
 //! # Examples
+//!
+//! Parse an AVIF file and decode it through a caller-supplied [`Av1StillDecoder`]. The stub here
+//! returns a solid-gray monochrome frame; a real decoder wraps a platform AV1 decoder (dav1d,
+//! VideoToolbox, VAAPI, MediaCodec, …), typically bridging the config + payload into one stream
+//! with [`Av1Config::full_stream`].
+//!
+//! ```
+//! use gamut_avif::{Av1Config, Av1StillDecoder, AvifContainer, ChromaFormat, DecodedFrame};
+//! use gamut_core::Result;
+//! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, write};
+//!
+//! // A stub AV1 decoder: ignores the codestream and returns a 2x2 solid-gray monochrome frame.
+//! struct GrayStub;
+//! impl Av1StillDecoder for GrayStub {
+//!     fn decode_still(&mut self, _config: &Av1Config, _payload: &[u8]) -> Result<DecodedFrame> {
+//!         DecodedFrame::new(2, 2, 8, ChromaFormat::Monochrome, vec![128; 4], vec![], vec![])
+//!     }
+//! }
+//!
+//! // A minimal AV1 still: one av01 item with a monochrome av1C and a conforming payload
+//! // (a reduced-still-picture sequence header OBU + a frame OBU).
+//! let img = IsoBmffImage {
+//!     major_brand: *b"avif",
+//!     minor_version: 0,
+//!     compatible_brands: vec![*b"avif", *b"mif1", *b"miaf"],
+//!     primary_item_id: 1,
+//!     items: vec![Item {
+//!         id: 1,
+//!         item_type: *b"av01",
+//!         name: String::new(),
+//!         content_type: None,
+//!         content_encoding: None,
+//!         hidden: false,
+//!         references: vec![],
+//!         properties: vec![Property {
+//!             essential: true,
+//!             kind: PropertyKind::CodecConfiguration {
+//!                 kind: *b"av1C",
+//!                 // marker+version; profile 0; monochrome, subsampling (1,1)
+//!                 data: vec![0x81, 0x00, 0x1C, 0x00],
+//!             },
+//!         }],
+//!         // seq header OBU (reduced_still_picture_header = 1) + frame OBU.
+//!         payload: vec![0x0A, 0x01, 0x18, 0x32, 0x03, 0xAA, 0xBB, 0xCC],
+//!     }],
+//!     groups: vec![],
+//! };
+//! let bytes = write(&img).unwrap();
+//!
+//! let container = AvifContainer::parse(&bytes).unwrap();
+//! assert!(container.image().is_av1_still());
+//! assert_eq!(container.image().primary_item().id(), 1);
+//!
+//! // Decode the primary image to RGBA through the stub decoder.
+//! let rgba = container.decode_primary_rgba8(&mut GrayStub).unwrap();
+//! assert_eq!((rgba.width(), rgba.height()), (2, 2));
+//! assert_eq!(rgba.as_samples()[3], 255); // opaque (no alpha auxiliary)
+//! ```
+//!
+//! Encoding:
 //!
 //! ```
 //! use gamut_avif::AvifEncoder;
@@ -28,16 +112,20 @@
 //! gamut is image-first, so only the still-image (intra) subset of AV1 is in scope — no sequences or
 //! animation. **Supported:** 8-bit RGB input; **lossless** (the default, decoded output bit-exact to
 //! the input) and **lossy** ([`AvifEncoder::lossy`], `quality` `0..=100`) AV1 intra coding at
-//! identity-matrix 4:4:4; and `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
-//! [`AvifEncoder::with_mirror`]). Output is validated end-to-end against `libavif` (its dav1d-backed
-//! reference container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the
-//! AV1 reference codec — and `dav1d` via [`gamut_av1`].
+//! identity-matrix 4:4:4; `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
+//! [`AvifEncoder::with_mirror`]); and the **container decode surface** above (full read of items,
+//! properties, derivations, and metadata; planar and 8-bit RGBA presentation around a caller
+//! decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
+//! container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the AV1
+//! reference codec — and `dav1d` via [`gamut_av1`].
 //!
 //! **Deferred, planned** (tracked row-by-row against the specs in `STATUS.md`, whose disposition
-//! ledger is the authority): alpha / RGBA, 10/12-bit and 4:2:0/4:2:2, non-identity colour matrices
-//! and ICC / Exif / XMP, HDR (PQ/HLG and the HDR metadata properties), `grid` / `tmap` (gain-map) /
-//! `sato` derivations and the remaining container transforms, layered/progressive still images,
-//! encoder speed / rate control, and an AVIF **decoder**. All of these land semver-minor — the v1
+//! ledger is the authority): alpha / RGBA *encoding*, 10/12-bit and 4:2:0/4:2:2, non-identity
+//! colour matrices and ICC / Exif / XMP emission, HDR (PQ/HLG and the HDR metadata properties),
+//! `grid` / `tmap` (gain-map) / `sato` derivations and the remaining container transforms on the
+//! encode side, layered/progressive still images, encoder speed / rate control, the pure-Rust AV1
+//! codestream **decoder** (which will make [`Av1StillDecoder`] optional), and the decoder backend
+//! registry / `gamut-codec-abi` adapter around the seam. All of these land semver-minor — the v1
 //! surface is designed so no deferred feature reshapes it.
 //!
 //! **Permanently out of scope** (workspace charter — gamut is image-first): image sequences and
