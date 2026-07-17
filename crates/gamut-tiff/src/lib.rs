@@ -8,10 +8,10 @@
 //! is the shared [`gamut_ifd`](https://crates.io/crates/gamut-ifd) primitive (also the basis for
 //! EXIF); this crate adds the codec on top and re-exports the structural types from its root so its
 //! public API is unchanged. It further layers on the shared primitives: [`gamut_core`] (traits /
-//! errors), [`gamut_color`] (photometric & pixel formats, incl. palette / CMYK / YCbCr /
-//! CIE L\*a\*b\*), and [`gamut_bitstream`] (LZW and CCITT bit coding). The [`gamut_dsp`] edge is
-//! declared for the future JPEG-in-TIFF DCT kernels (`gamut_dsp::jpeg`); the differencing
-//! predictor is TIFF-specific and lives in this crate's [`compression`] module.
+//! errors / typed pixel formats) and [`gamut_bitstream`] (LZW and CCITT bit coding). The
+//! differencing predictor is TIFF-specific and lives in this crate's [`compression`] module;
+//! the deferred colour-space work (YCbCr, CIE L\*a\*b\*) and JPEG-in-TIFF will bring back the
+//! `gamut-color` and `gamut-dsp` edges additively when they land (see `STATUS.md`).
 //!
 //! The encoder and decoder are reachable through the umbrella crate's `tiff` feature. Everything
 //! is implemented clean-slate from the TIFF 6.0 specification (`references/tiff/tiff6.pdf`,

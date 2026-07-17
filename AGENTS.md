@@ -55,7 +55,8 @@ Dependency edges (a crate depends on those to its right):
   feature (issue #34); the format crates will consume the facade for embedded metadata.
 - **gamut-tiff** -- natively still-image TIFF 6.0; its IFD/tag container is the shared **gamut-ifd**
   primitive (with the `bigtiff` feature), not isobmff/riff. Adds the codec — pixel modes plus its
-  compressions (None/PackBits/LZW/CCITT/JPEG). ← ifd, core, color, dsp, bitstream.
+  compressions (None/PackBits/LZW/CCITT; JPEG-in-TIFF deferred, will re-add color/dsp edges).
+  ← ifd, core, bitstream.
 - **gamut-dng** -- DNG (Adobe Digital Negative) 1.7.1 raw encoder + decoder (issue #109), a TIFF/EP
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw photometry,
   uncompressed/Deflate/lossless-JPEG, the colour-calibration profile, and EXIF/XMP/ICC metadata.

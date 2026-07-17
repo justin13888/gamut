@@ -17,8 +17,6 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
-gamut-color.workspace = true
-gamut-dsp.workspace = true
 gamut-bitstream.workspace = true
 # The IFD container core (byte order, field types, IFD chain, two-pass offset writer). `bigtiff`
 # enables the 64-bit BigTIFF variant the codec writes/reads.
