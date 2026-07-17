@@ -5,7 +5,9 @@
 //! so a layout mismatch — handing CMYK bytes to an RGBA encoder, or grayscale luminance where
 //! palette indices are expected — is a compile error rather than a runtime length check. The markers
 //! carry no data; they exist only to select an encoder/decoder impl and to expose the layout
-//! constants ([`Pixel::CHANNELS`], [`Pixel::MODEL`], [`Pixel::BYTES_PER_PIXEL`]).
+//! constants ([`Pixel::CHANNELS`], [`Pixel::MODEL`], [`Pixel::BYTES_PER_PIXEL`]). The
+//! [`PixelFormat`] tag is the runtime mirror of that closed marker set for boundaries that
+//! dispatch dynamically (FFI, plugin registries).
 
 mod sample_sealed {
     pub trait Sealed {}
@@ -53,6 +55,115 @@ pub enum ColorModel {
     Indexed,
 }
 
+/// Runtime tag for the closed set of [`Pixel`] marker types — one variant per marker.
+///
+/// The FFI/dispatch mirror of the compile-time `Pixel` matrix (issue #242): where the type
+/// system selects a codec impl through the marker type, a boundary that only has runtime
+/// information (a C caller, a plugin registry) selects the same layout by tag and dispatches to
+/// the monomorphized impl. [`PixelFormat::ALL`] enumerates the matrix for tooling that generates
+/// such dispatch.
+///
+/// Discriminants are explicit and permanent — they are C ABI values; new variants append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u32)]
+pub enum PixelFormat {
+    /// Tag for [`Gray8`].
+    Gray8 = 0,
+    /// Tag for [`Bilevel`].
+    Bilevel = 1,
+    /// Tag for [`Indexed8`].
+    Indexed8 = 2,
+    /// Tag for [`Rgb8`].
+    Rgb8 = 3,
+    /// Tag for [`Rgba8`].
+    Rgba8 = 4,
+    /// Tag for [`Cmyk8`].
+    Cmyk8 = 5,
+    /// Tag for [`GrayAlpha8`].
+    GrayAlpha8 = 6,
+    /// Tag for [`Gray16`].
+    Gray16 = 7,
+    /// Tag for [`Rgb16`].
+    Rgb16 = 8,
+    /// Tag for [`Rgba16`].
+    Rgba16 = 9,
+    /// Tag for [`GrayAlpha16`].
+    GrayAlpha16 = 10,
+}
+
+impl PixelFormat {
+    /// Every pixel format, in discriminant order — the full codec × layout monomorphization
+    /// matrix for tooling that enumerates it (each entry is some marker's [`Pixel::FORMAT`]).
+    pub const ALL: [PixelFormat; 11] = [
+        PixelFormat::Gray8,
+        PixelFormat::Bilevel,
+        PixelFormat::Indexed8,
+        PixelFormat::Rgb8,
+        PixelFormat::Rgba8,
+        PixelFormat::Cmyk8,
+        PixelFormat::GrayAlpha8,
+        PixelFormat::Gray16,
+        PixelFormat::Rgb16,
+        PixelFormat::Rgba16,
+        PixelFormat::GrayAlpha16,
+    ];
+
+    /// Samples per pixel; the runtime mirror of [`Pixel::CHANNELS`].
+    #[must_use]
+    pub const fn channels(self) -> usize {
+        match self {
+            PixelFormat::Gray8
+            | PixelFormat::Bilevel
+            | PixelFormat::Indexed8
+            | PixelFormat::Gray16 => 1,
+            PixelFormat::GrayAlpha8 | PixelFormat::GrayAlpha16 => 2,
+            PixelFormat::Rgb8 | PixelFormat::Rgb16 => 3,
+            PixelFormat::Rgba8 | PixelFormat::Cmyk8 | PixelFormat::Rgba16 => 4,
+        }
+    }
+
+    /// The colour interpretation of the samples; the runtime mirror of [`Pixel::MODEL`].
+    #[must_use]
+    pub const fn color_model(self) -> ColorModel {
+        match self {
+            PixelFormat::Gray8 | PixelFormat::Gray16 => ColorModel::Gray,
+            PixelFormat::Bilevel => ColorModel::Bilevel,
+            PixelFormat::Indexed8 => ColorModel::Indexed,
+            PixelFormat::Rgb8 | PixelFormat::Rgb16 => ColorModel::Rgb,
+            PixelFormat::Rgba8 | PixelFormat::Rgba16 => ColorModel::Rgba,
+            PixelFormat::Cmyk8 => ColorModel::Cmyk,
+            PixelFormat::GrayAlpha8 | PixelFormat::GrayAlpha16 => ColorModel::GrayAlpha,
+        }
+    }
+
+    /// Bytes per sample of the storage primitive (`1` for `u8` layouts, `2` for `u16`); the
+    /// runtime mirror of `size_of::<`[`Pixel::Sample`]`>()`.
+    #[must_use]
+    pub const fn bytes_per_sample(self) -> usize {
+        match self {
+            PixelFormat::Gray8
+            | PixelFormat::Bilevel
+            | PixelFormat::Indexed8
+            | PixelFormat::Rgb8
+            | PixelFormat::Rgba8
+            | PixelFormat::Cmyk8
+            | PixelFormat::GrayAlpha8 => 1,
+            PixelFormat::Gray16
+            | PixelFormat::Rgb16
+            | PixelFormat::Rgba16
+            | PixelFormat::GrayAlpha16 => 2,
+        }
+    }
+
+    /// Bytes one pixel occupies in an interleaved buffer; the runtime mirror of
+    /// [`Pixel::BYTES_PER_PIXEL`].
+    #[must_use]
+    pub const fn bytes_per_pixel(self) -> usize {
+        self.channels() * self.bytes_per_sample()
+    }
+}
+
 mod pixel_sealed {
     pub trait Sealed {}
 }
@@ -66,6 +177,8 @@ mod pixel_sealed {
 pub trait Pixel: pixel_sealed::Sealed + Copy + 'static {
     /// The storage primitive of each sample (`u8` or `u16`).
     type Sample: Sample;
+    /// The runtime tag identifying this layout (see [`PixelFormat`]).
+    const FORMAT: PixelFormat;
     /// Samples per pixel.
     const CHANNELS: usize;
     /// The colour interpretation of those samples.
@@ -88,6 +201,7 @@ macro_rules! define_pixels {
             impl pixel_sealed::Sealed for $name {}
             impl Pixel for $name {
                 type Sample = $sample;
+                const FORMAT: PixelFormat = PixelFormat::$name;
                 const CHANNELS: usize = $channels;
                 const MODEL: ColorModel = $model;
             }
@@ -153,6 +267,78 @@ mod tests {
             (2, 4)
         );
         assert_eq!(GrayAlpha16::MODEL, ColorModel::GrayAlpha);
+    }
+
+    /// `P::FORMAT`'s runtime accessors must agree with `P`'s compile-time constants. The 11
+    /// markers vary in every dimension, so any constant-replacement mutant in an accessor is
+    /// killed by at least one instantiation.
+    fn assert_format_matches<P: Pixel>() {
+        assert_eq!(P::FORMAT.channels(), P::CHANNELS);
+        assert_eq!(P::FORMAT.color_model(), P::MODEL);
+        assert_eq!(P::FORMAT.bytes_per_pixel(), P::BYTES_PER_PIXEL);
+        assert_eq!(
+            P::FORMAT.bytes_per_sample(),
+            core::mem::size_of::<P::Sample>()
+        );
+    }
+
+    #[test]
+    fn pixel_format_mirrors_marker_constants() {
+        assert_format_matches::<Gray8>();
+        assert_format_matches::<Bilevel>();
+        assert_format_matches::<Indexed8>();
+        assert_format_matches::<Rgb8>();
+        assert_format_matches::<Rgba8>();
+        assert_format_matches::<Cmyk8>();
+        assert_format_matches::<GrayAlpha8>();
+        assert_format_matches::<Gray16>();
+        assert_format_matches::<Rgb16>();
+        assert_format_matches::<Rgba16>();
+        assert_format_matches::<GrayAlpha16>();
+    }
+
+    #[test]
+    fn pixel_format_all_is_the_distinct_marker_set() {
+        let formats = [
+            Gray8::FORMAT,
+            Bilevel::FORMAT,
+            Indexed8::FORMAT,
+            Rgb8::FORMAT,
+            Rgba8::FORMAT,
+            Cmyk8::FORMAT,
+            GrayAlpha8::FORMAT,
+            Gray16::FORMAT,
+            Rgb16::FORMAT,
+            Rgba16::FORMAT,
+            GrayAlpha16::FORMAT,
+        ];
+        assert_eq!(PixelFormat::ALL, formats);
+        for (i, a) in PixelFormat::ALL.iter().enumerate() {
+            for b in &PixelFormat::ALL[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn pixel_format_discriminants_are_locked() {
+        // C ABI values — permanent, append-only. A change here is an ABI break, not a refactor.
+        let expected: [(PixelFormat, u32); 11] = [
+            (PixelFormat::Gray8, 0),
+            (PixelFormat::Bilevel, 1),
+            (PixelFormat::Indexed8, 2),
+            (PixelFormat::Rgb8, 3),
+            (PixelFormat::Rgba8, 4),
+            (PixelFormat::Cmyk8, 5),
+            (PixelFormat::GrayAlpha8, 6),
+            (PixelFormat::Gray16, 7),
+            (PixelFormat::Rgb16, 8),
+            (PixelFormat::Rgba16, 9),
+            (PixelFormat::GrayAlpha16, 10),
+        ];
+        for (format, value) in expected {
+            assert_eq!(format as u32, value);
+        }
     }
 
     #[test]
