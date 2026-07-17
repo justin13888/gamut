@@ -67,6 +67,14 @@ pub struct AdobeRaw {
     pub samples: Vec<u16>,
 }
 
+/// The directory of the SDK's own `sample_files/*.dng` conformance corpus, extracted from the
+/// committed ZIP at build time — real Adobe-authored DNGs (JXL, ProfileGainTableMap, ImageStats,
+/// ImageSequenceInfo, HDR/SDR profiles) for differential and byte-completeness testing.
+#[must_use]
+pub fn sample_files_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("OUT_DIR")).join("dng_sdk_extracted/dng_sdk_1_7_1/sample_files")
+}
+
 /// Validates `bytes` as a DNG with the Adobe DNG SDK.
 ///
 /// Returns `Ok(())` if the SDK parses the directories, builds a negative, and reads the raw image

@@ -350,6 +350,21 @@ pub const JXL_EFFORT: u16 = 52554;
 /// `JXLDecodeSpeed` (52555, 0xCD4B) — the JPEG XL decode-speed tier (DNG 1.7).
 pub const JXL_DECODE_SPEED: u16 = 52555;
 
+/// `YCbCrCoefficients` (529, 0x0211) — RGB↔YCbCr transform coefficients of a YCbCr preview
+/// (TIFF 6.0 §21; Adobe's own DNG samples carry YCbCr previews).
+pub const YCBCR_COEFFICIENTS: u16 = 529;
+
+/// `YCbCrSubSampling` (530, 0x0212) — chroma subsampling of a YCbCr preview (TIFF 6.0 §21).
+pub const YCBCR_SUB_SAMPLING: u16 = 530;
+
+/// `YCbCrPositioning` (531, 0x0213) — chroma sample positioning of a YCbCr preview
+/// (TIFF 6.0 §21).
+pub const YCBCR_POSITIONING: u16 = 531;
+
+/// `ReferenceBlackWhite` (532, 0x0214) — headroom/footroom reference values of a YCbCr preview
+/// (TIFF 6.0 §21).
+pub const REFERENCE_BLACK_WHITE: u16 = 532;
+
 /// Every tag this crate names — the source of truth for [`is_known_tag`].
 ///
 /// Keep this in sync when adding a `pub const` above; [`tests::every_named_tag_is_known`] iterates
@@ -385,6 +400,10 @@ const KNOWN_TAGS: &[u16] = &[
     SUB_IFDS,
     EXTRA_SAMPLES,
     SAMPLE_FORMAT,
+    YCBCR_COEFFICIENTS,
+    YCBCR_SUB_SAMPLING,
+    YCBCR_POSITIONING,
+    REFERENCE_BLACK_WHITE,
     JPEG_TABLES,
     XMP,
     CFA_REPEAT_PATTERN_DIM,

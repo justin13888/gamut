@@ -14,14 +14,19 @@
 //! unreadable, exactly as [`gamut_ifd::read`] would; everything else is reported for the caller
 //! to judge.
 
-use gamut_core::Result;
+use gamut_core::{Error, Result};
 use gamut_ifd::{
-    AuditFinding, Ifd, SegmentReport, SkipReason, StandardAuditSpec, Value, audit as ifd_audit,
+    AuditFinding, Auditor, ByteOrder, Claim, DataLabel, Ifd, SegmentReport, SkipReason, SpanKind,
+    StandardAuditSpec, Value, Variant,
 };
 
 use crate::decoder::{DecodedDng, DngDecoder};
 use crate::tags;
 use crate::values::{Compression, PhotometricInterpretation};
+
+/// The magic number of an embedded DNG camera-profile stream (the `.dcp` form): the two bytes
+/// after the byte-order mark, `0x4352` (`"RC"` little-endian) where a TIFF header carries `42`.
+const CAMERA_PROFILE_MAGIC: u16 = 0x4352;
 
 /// How serious a reported [`Anomaly`] is.
 ///
@@ -160,17 +165,22 @@ impl DeconstructReport {
 /// Unknown tags, unknown field types, out-of-spec codes, malformed matrices, and unclassified
 /// bytes are reported, not errored.
 pub fn deconstruct(data: &[u8]) -> Result<DeconstructReport> {
-    // The standard audit spec covers everything DNG locates structurally: the pointer tags
-    // (SubIFDs/Exif/GPS/Interop) and the data extents (strips, tiles, free ranges, embedded
-    // JPEG) — u64-native, so BigTIFF DNGs past 4 GiB account correctly.
-    let audit = ifd_audit(data, &StandardAuditSpec)?;
+    // The standard audit spec covers everything DNG locates through plain TIFF structure: the
+    // pointer tags (SubIFDs/Exif/GPS/Interop) and the data extents (strips, tiles, free ranges,
+    // embedded JPEG) — u64-native, so BigTIFF DNGs past 4 GiB account correctly. DNG's one
+    // extra structural carrier — `ExtraCameraProfiles`, pointing at *embedded camera-profile
+    // streams* rather than plain sub-IFDs — is walked below.
+    let mut auditor = Auditor::new(data)?;
+    let file = auditor.walk(&StandardAuditSpec)?;
     let mut findings = Findings::default();
-    for (page, ifd) in audit.file.ifds.iter().enumerate() {
+    for (page, ifd) in file.ifds.iter().enumerate() {
         findings.check_image_ifd(ifd, page);
+        findings.audit_camera_profiles(&mut auditor, ifd, page);
     }
-    findings.map_audit_findings(&audit.findings);
+    let (segments, audit_findings) = auditor.finish()?;
+    findings.map_audit_findings(&audit_findings);
     Ok(DeconstructReport {
-        segments: audit.report,
+        segments,
         unknown_fields: findings.unknown_fields,
         unknown_tags: findings.unknown_tags,
         anomalies: findings.anomalies,
@@ -306,6 +316,36 @@ impl Findings {
         }
     }
 
+    /// Walks the embedded camera-profile streams `ExtraCameraProfiles` (50933) points at.
+    ///
+    /// Each target is a `.dcp`-form stream — a byte-order mark, the profile magic `0x4352`
+    /// where a TIFF header carries `42`, and a first-IFD offset, followed by a directory whose
+    /// internal offsets are relative to the **stream start** — so it is audited as an embedded
+    /// rebased chain, its bytes claimed at their physical positions. An unreadable target is an
+    /// anomaly; its bytes stay unclassified (the honest verdict).
+    fn audit_camera_profiles(&mut self, auditor: &mut Auditor<&[u8]>, ifd: &Ifd, page: usize) {
+        let Some(offsets) = ifd.get_u64_vec(tags::EXTRA_CAMERA_PROFILES) else {
+            return;
+        };
+        for base in offsets {
+            match audit_camera_profile(auditor, base) {
+                Ok(profile_ifds) => {
+                    // Profile IFDs carry DNG profile tags (ColorMatrix1, ProfileName, …): run
+                    // the tag and matrix checks, but no pixel-structure expectations.
+                    for profile in &profile_ifds {
+                        self.check_tags(profile, page);
+                        self.check_matrices(profile, page);
+                    }
+                }
+                Err(_) => self.anomalies.push(Anomaly::Structure {
+                    page,
+                    detail: "DNG: extra camera profile could not be parsed",
+                    severity: Severity::Error,
+                }),
+            }
+        }
+    }
+
     /// Validates an `(offsets, byte counts)` tag pair, u64-native.
     fn check_pair(
         &mut self,
@@ -361,6 +401,33 @@ impl Findings {
             }
         }
     }
+}
+
+/// Parses (and claims) one embedded camera-profile stream at `base`: its 8-byte header, then
+/// its rebased directory chain.
+fn audit_camera_profile(auditor: &mut Auditor<&[u8]>, base: u64) -> Result<Vec<Ifd>> {
+    let mut head = [0u8; 8];
+    auditor.read_at(base, &mut head)?;
+    let order = match [head[0], head[1]] {
+        [0x49, 0x49] => ByteOrder::LittleEndian,
+        [0x4D, 0x4D] => ByteOrder::BigEndian,
+        _ => {
+            return Err(Error::InvalidInput(
+                "DNG: bad camera-profile byte-order mark",
+            ));
+        }
+    };
+    if order.u16([head[2], head[3]]) != CAMERA_PROFILE_MAGIC {
+        return Err(Error::InvalidInput("DNG: bad camera-profile magic"));
+    }
+    let first = u64::from(order.u32([head[4], head[5], head[6], head[7]]));
+    auditor.claim(
+        base,
+        8,
+        SpanKind::Data(DataLabel::Other("camera-profile header")),
+        Claim::Parsed,
+    );
+    auditor.walk_embedded(base, first, order, Variant::Classic)
 }
 
 impl DngDecoder {
