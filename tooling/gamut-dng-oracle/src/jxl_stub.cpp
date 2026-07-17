@@ -1,21 +1,16 @@
-// Link-only stubs for the libjxl C API that the Adobe DNG SDK 1.7.1 references.
+// Link-only stubs for the libjxl C API that the Adobe DNG SDK 1.7.1 references — compiled ONLY in
+// the `GAMUT_JXL_SYS_SKIP_NATIVE=1` check-only mode (see build.rs). The normal build links the
+// real libjxl 0.12.0 via the `gamut-jxl-sys` dependency instead, and compiling these there would
+// collide with the genuine symbols (duplicate definitions).
 //
 // In 1.7.1 JPEG XL is wired into the SDK unconditionally (the `qDNGSupportJXL` switch was removed),
 // so `dng_jxl.cpp` and the writer/reader translation units reference these symbols even when no
-// JPEG XL image is ever touched. gamut-dng's baseline oracle validates only uncompressed /
-// lossless-JPEG / Deflate DNGs, so none of these are ever *called* — they exist solely so the
-// archive links without a real libjxl.
+// JPEG XL image is ever touched. Skip-native environments only `cargo check` (nothing links), so
+// none of these are ever called.
 //
 // C linkage means the linker resolves these by name alone; the trivial signatures below need not
 // match the real libjxl prototypes (the functions are never invoked). If the SDK is updated and
 // references a new symbol, the linker will name it and it can be added here.
-//
-// HAZARD: these define the same C symbols (JxlDecoderCreate, JxlEncoderProcessOutput, …) that the
-// real libjxl in the shipped `gamut-jxl-sys` crate exports. This oracle is a dev-only crate for
-// gamut-dng and never links gamut-jxl, so today there is no conflict. But if gamut-dng ever depends
-// on gamut-jxl (or a single test binary links both this oracle and gamut-jxl-sys), these stubs would
-// clash with the genuine libjxl symbols — a duplicate-definition link error. Gate them behind a cfg
-// or drop them in favour of the real libjxl if that day comes.
 
 extern "C" {
 

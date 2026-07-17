@@ -7,6 +7,7 @@
 #include "dng_errors.h"
 #include "dng_exceptions.h"
 #include "dng_file_stream.h"
+#include "dng_fingerprint.h"
 #include "dng_host.h"
 #include "dng_image.h"
 #include "dng_info.h"
@@ -157,6 +158,30 @@ extern "C" int gdng_read_linear(const char *path, uint32_t *out_w, uint32_t *out
   } catch (...) {
     return dng_error_unknown;
   }
+}
+
+// Computes the SDK's `NewRawImageDigest` (the MD5-over-raw-image algorithm of
+// `dng_negative::FindNewRawImageDigest`) for the DNG at `path`, writing the 16 digest bytes to
+// `out_digest`. This is the reference for gamut-dng's own digest writer. Returns `dng_error_none`
+// on success or the SDK error code.
+extern "C" int gdng_new_raw_image_digest(const char *path, uint8_t *out_digest) {
+  try {
+    dng_host host;
+    dng_info info;
+    AutoPtr<dng_negative> negative;
+    dng_error_code rc = read_negative(path, host, info, negative);
+    if (rc != dng_error_none) {
+      return rc;
+    }
+    negative->FindNewRawImageDigest(host);
+    const dng_fingerprint &digest = negative->NewRawImageDigest();
+    memcpy(out_digest, digest.Data(), 16);
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+  return dng_error_none;
 }
 
 namespace {

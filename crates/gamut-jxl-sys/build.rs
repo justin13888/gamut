@@ -52,10 +52,37 @@ fn main() {
             );
         }
         // emscripten: build the same vendored libjxl with the emsdk toolchain.
-        ("wasm32", "emscripten") => build_emscripten(),
+        ("wasm32", "emscripten") => {
+            build_emscripten();
+            emit_include_metadata();
+        }
         // Everything else: the stock native build.
-        _ => jpegxl_src::build(),
+        _ => {
+            jpegxl_src::build();
+            emit_include_metadata();
+        }
     }
+}
+
+/// Publishes the installed libjxl headers to dependent build scripts as `DEP_JXL_INCLUDE`
+/// (`links = "jxl"` + `cargo:include=`), so a crate compiling C/C++ against this exact libjxl —
+/// e.g. the dev-only Adobe DNG SDK oracle — uses matching headers rather than a vendored copy.
+///
+/// The cmake install prefix is this build script's `OUT_DIR` (both `jpegxl_src::build()` and
+/// [`build_emscripten`] install there), so the headers land under `OUT_DIR/include`.
+fn emit_include_metadata() {
+    let include = std::path::PathBuf::from(env("OUT_DIR")).join("include");
+    assert!(
+        include.join("jxl").join("decode.h").exists(),
+        "libjxl build did not install headers under {}",
+        include.display()
+    );
+    println!("cargo:include={}", include.display());
+}
+
+/// Reads a required build-time env var, panicking (this is a build script) if absent.
+fn env(key: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| panic!("missing build env var {key}"))
 }
 
 /// Builds the vendored libjxl for `wasm32-unknown-emscripten` and emits its link directives.
