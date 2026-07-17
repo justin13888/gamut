@@ -30,7 +30,9 @@
 //!   [`MatrixCoefficients::Identity`]) planes; the CICP code-point tables; BT.601 YCbCr 4:2:0
 //!   ([`ycbcr`]); and the `f64` colour science ([`transfer`], [`oklab`], [`matrix`], [`gamut_map`],
 //!   [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
-//! - **Modeled but deferred:** 10/12-bit ([`BitDepth::Ten`] / [`BitDepth::Twelve`]); the subsampled
+//! - **Modeled but deferred:** 10/12-bit ([`BitDepth::Ten`] / [`BitDepth::Twelve`], awaiting AV1
+//!   encode wiring — distinct from [`BitDepth::Sixteen`], which is outside the AV1 profile set
+//!   entirely and exists for the 16-bit still-image pipelines that share these types); the subsampled
 //!   formats ([`ChromaSubsampling::Cs422`] / `Cs420` / `Cs400`); the non-identity matrix coefficients
 //!   ([`MatrixCoefficients::Bt709`] / `Bt601` / `Bt2020Ncl` / `YCgCo`); and the HLG / BT.709 transfer
 //!   curves ([`eotf_for`](transfer::eotf_for) returns `None` for these). These land with the

@@ -51,6 +51,13 @@ anchors plus the JFIF/BT.601 full-range anchors. Determinism is **Tier-1** (corr
 
 - **10/12-bit encode wiring** — `BitDepth::Ten`/`Twelve` are modeled; the AV1 reconstruction
   accepts them but no encode path produces them yet (gamut-avif M2).
+- **16-bit is modeled, not an AV1 depth** — `BitDepth::Sixteen` (issue #260) is not deferred AV1
+  wiring like `Ten`/`Twelve`: AV1 tops out at 12 and never produces it. It exists for the 16-bit
+  interleaved still-image pipelines (PNG/TIFF/JXL/DNG) that consume this vocabulary. `clip_pixel`
+  accepts it; no gamut encode path emits it. Depths outside the fixed 8/10/12/16 set (RAW's
+  14-bit, TIFF's `1..=16`) are deliberately **not** enum variants — those formats carry a
+  free-form integer depth (`gamut-dng`'s `bits_per_sample`, validated `1..=16`), a domain an enum
+  cannot model.
 - **Subsampled coded planes** — `Cs422`/`Cs420`/`Cs400` wiring into AV1 (M2); today 4:2:0
   exists only in the WebP/VP8 `Yuv420` path.
 - **Non-identity `MatrixCoefficients`** (BT.709, BT.2020 NCL, YCgCo) — modeled, land with M2/M4.
