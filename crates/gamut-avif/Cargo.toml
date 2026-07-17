@@ -27,6 +27,9 @@ gamut-isobmff.workspace = true
 # Building these tests requires cmake/meson/ninja/nasm and the `third_party/libavif`
 # + `third_party/dav1d` submodules.
 libavif-oracle = { path = "../../tooling/libavif-oracle" }
+# dav1d directly (raw OBU stream in, planes out) implements the conformance suite's
+# Av1StillDecoder bridge — the exact seam a platform decoder plugs into.
+dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
 divan.workspace = true
 
 [[bench]]
