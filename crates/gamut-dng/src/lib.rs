@@ -38,6 +38,7 @@
 pub mod decoder;
 pub mod deconstruct;
 pub mod encoder;
+pub mod gain_map;
 pub mod levels;
 pub mod linearize;
 pub mod lossless_jpeg;
@@ -59,6 +60,7 @@ mod writer;
 pub use decoder::{DecodedDng, DngDecoder};
 pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstruct};
 pub use encoder::DngEncoder;
+pub use gain_map::{GainValues, ProfileGainTableMap};
 pub use gamut_core::{Dimensions, Error, Result};
 pub use gamut_ifd::ByteOrder;
 pub use levels::RawLevels;

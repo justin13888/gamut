@@ -3,6 +3,7 @@
 use gamut_core::{Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
+use crate::gain_map::ProfileGainTableMap;
 use crate::metadata::DngMetadata;
 use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
@@ -26,6 +27,8 @@ pub struct DngEncoder {
     tiling: Option<(u32, u32)>,
     jxl_distance: f32,
     jxl_effort: u8,
+    gain_table_map: Option<ProfileGainTableMap>,
+    gain_table_map2: Option<ProfileGainTableMap>,
     metadata: DngMetadata,
 }
 
@@ -43,6 +46,8 @@ impl Default for DngEncoder {
             // JPEG XL defaults: lossless (distance 0.0) at libjxl's default effort (7, squirrel).
             jxl_distance: 0.0,
             jxl_effort: 7,
+            gain_table_map: None,
+            gain_table_map2: None,
             metadata: DngMetadata::default(),
         }
     }
@@ -139,6 +144,24 @@ impl DngEncoder {
         self
     }
 
+    /// Returns a copy of this encoder that embeds `map` as the raw IFD's `ProfileGainTableMap`
+    /// (52525, DNG 1.6). The v1 tag stores 32-bit float gains with no gamma — encoding fails
+    /// with a typed error if `map` uses v2-only content.
+    #[must_use]
+    pub fn with_gain_table_map(mut self, map: ProfileGainTableMap) -> Self {
+        self.gain_table_map = Some(map);
+        self
+    }
+
+    /// Returns a copy of this encoder that embeds `map` as IFD 0's `ProfileGainTableMap2`
+    /// (52544, DNG 1.7), the extended form with gamma and integer gain storage. When both maps
+    /// are embedded, readers apply only this one (DNG 1.7.1 p. 88).
+    #[must_use]
+    pub fn with_gain_table_map2(mut self, map: ProfileGainTableMap) -> Self {
+        self.gain_table_map2 = Some(map);
+        self
+    }
+
     /// Returns a copy of this encoder that embeds `metadata` (EXIF sub-IFD + XMP/IPTC/ICC blocks).
     #[must_use]
     pub fn with_metadata(mut self, metadata: DngMetadata) -> Self {
@@ -223,7 +246,7 @@ impl DngEncoder {
         };
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
-        let mut ifd0 = self.build_ifd0(profile, preview_dims, backward_version_for(self, raw));
+        let mut ifd0 = self.build_ifd0(profile, preview_dims, backward_version_for(self, raw))?;
         // Embed metadata: XMP/IPTC/ICC blocks go in IFD 0; EXIF becomes an `ExifIFD` sub-IFD.
         if !self.metadata.is_empty()
             && let Some(exif) = self.metadata.apply(&mut ifd0)
@@ -270,7 +293,7 @@ impl DngEncoder {
         profile: &CameraProfile,
         preview_dims: gamut_core::Dimensions,
         backward_version: [u8; 4],
-    ) -> Ifd {
+    ) -> Result<Ifd> {
         let mut ifd = Ifd::new();
         // Preview image (a reduced-resolution RGB thumbnail).
         ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
@@ -372,7 +395,14 @@ impl DngEncoder {
         if let Some(policy) = profile.profile_embed_policy() {
             ifd.set(tags::PROFILE_EMBED_POLICY, Value::Long(vec![policy.code()]));
         }
-        ifd
+        // The extended gain-table map lives in IFD 0 (its v1 sibling lives in the raw IFD).
+        if let Some(map) = &self.gain_table_map2 {
+            ifd.set(
+                tags::PROFILE_GAIN_TABLE_MAP2,
+                Value::Undefined(map.to_bytes_v2(self.order)?),
+            );
+        }
+        Ok(ifd)
     }
 }
 
@@ -513,6 +543,13 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
         ifd.set(
             tags::JXL_EFFORT,
             Value::Long(vec![u32::from(encoder.jxl_effort)]),
+        );
+    }
+    // The v1 gain-table map lives in the raw IFD (its v2 sibling lives in IFD 0).
+    if let Some(map) = &encoder.gain_table_map {
+        ifd.set(
+            tags::PROFILE_GAIN_TABLE_MAP,
+            Value::Undefined(map.to_bytes_v1(encoder.order)?),
         );
     }
     ifd.set(

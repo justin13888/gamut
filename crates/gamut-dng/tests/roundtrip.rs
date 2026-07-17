@@ -221,6 +221,44 @@ fn lossy_jxl_validates_and_decoders_agree() {
     assert_eq!(raw_ifd.get_u32(52554), Some(5), "JXLEffort");
 }
 
+/// Gain-table maps embed, validate against the SDK, and round-trip typed through gamut.
+#[test]
+fn gain_table_maps_roundtrip_and_validate() {
+    use gamut_dng::{GainValues, ProfileGainTableMap};
+    let v1 = ProfileGainTableMap {
+        points_v: 2,
+        points_h: 3,
+        spacing_v: 0.5,
+        spacing_h: 1.0 / 3.0,
+        origin_v: 0.0,
+        origin_h: 0.0,
+        points_n: 4,
+        input_weights: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0, 0.0],
+        gamma: 1.0,
+        gain_min: 0.0,
+        gain_max: 0.0,
+        gains: GainValues::F32((0..24).map(|i| 1.0 + f32::from(i as u8) * 0.05).collect()),
+    };
+    let mut v2 = v1.clone();
+    v2.gamma = 2.0;
+    v2.gain_min = 0.7;
+    v2.gain_max = 2.3;
+    v2.gains = GainValues::U16((0..24u16).map(|i| i * 2500).collect());
+
+    let raw = common::sample_raw(32, 24, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_dng_version([1, 7, 0, 0])
+        .with_gain_table_map(v1.clone())
+        .with_gain_table_map2(v2.clone())
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept gain-table maps");
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.gain_table_map.as_ref(), Some(&v1));
+    assert_eq!(decoded.gain_table_map2.as_ref(), Some(&v2));
+}
+
 #[test]
 fn tiled_bigtiff_roundtrips_and_validates() {
     let raw = common::sample_raw(48, 32, 12);

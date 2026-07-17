@@ -65,6 +65,58 @@ fn rejects_adobe_jxl_float_sample_cleanly() {
     );
 }
 
+/// Adobe's gain-table-map samples (05–08) cover every gain `DataType`. Each must parse into the
+/// typed model with the expected representation, and re-serialise **byte-exactly** — the
+/// strongest possible layout gate (any field-order, width, or byte-order slip changes the
+/// bytes). Note 08: float32 gains are v1-representable, and Adobe indeed stored that one as the
+/// older ProfileGainTableMap (52525) tag.
+#[test]
+fn adobe_gain_map_samples_parse_typed_and_reserialise_byte_exact() {
+    use gamut_dng::GainValues;
+    type TypeCheck = fn(&GainValues) -> bool;
+    let cases: [(&str, TypeCheck); 4] = [
+        ("05_PGTM2_unsigned8.dng", |g| matches!(g, GainValues::U8(_))),
+        ("06_PGTM2_unsigned16.dng", |g| {
+            matches!(g, GainValues::U16(_))
+        }),
+        ("07_PGTM2_float16.dng", |g| matches!(g, GainValues::F16(_))),
+        ("08_PGTM2_float32.dng", |g| matches!(g, GainValues::F32(_))),
+    ];
+    for (name, is_expected_type) in cases {
+        let bytes = gamut_dng_oracle::sample_file(name).expect("sample DNG present");
+        let decoded = DngDecoder::new().decode(&bytes).expect("decode");
+        let (map, tag, v2) = match (&decoded.gain_table_map2, &decoded.gain_table_map) {
+            (Some(map), _) => (map, 52544u16, true),
+            (None, Some(map)) => (map, 52525u16, false),
+            (None, None) => panic!("{name}: a gain-table map must be surfaced"),
+        };
+        assert!(is_expected_type(&map.gains), "{name}: wrong gain data type");
+        assert_eq!(
+            map.gains.len() as u32,
+            map.points_v * map.points_h * map.points_n,
+            "{name}: gain count"
+        );
+
+        // Byte-exact against the original tag payload (these samples keep the raw image in
+        // IFD 0 itself, so both tags are found there).
+        let file = gamut_ifd::read(&bytes).expect("parse");
+        let payload = file.ifds[0]
+            .get(tag)
+            .and_then(gamut_ifd::Value::as_bytes)
+            .expect("gain-map tag present");
+        let serialised = if v2 {
+            map.to_bytes_v2(file.order)
+        } else {
+            map.to_bytes_v1(file.order)
+        }
+        .expect("serialise");
+        assert_eq!(
+            serialised, payload,
+            "{name}: re-serialisation must be byte-exact"
+        );
+    }
+}
+
 /// The JXL samples carry a declared DNG 1.7 version.
 #[test]
 fn adobe_jxl_sample_declares_dng_17() {

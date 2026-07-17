@@ -8,6 +8,7 @@
 use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
 
+use crate::gain_map::ProfileGainTableMap;
 use crate::levels::RawLevels;
 use crate::metadata::{DngMetadata, ExifMetadata};
 use crate::opcode::OpcodeList;
@@ -31,6 +32,11 @@ pub struct DecodedDng {
     pub dng_version: [u8; 4],
     /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
     pub metadata: DngMetadata,
+    /// The raw IFD's `ProfileGainTableMap` (52525), if present.
+    pub gain_table_map: Option<ProfileGainTableMap>,
+    /// IFD 0's `ProfileGainTableMap2` (52544), if present. When both maps are present, this one
+    /// supersedes [`gain_table_map`](Self::gain_table_map) for rendering (DNG 1.7.1 p. 88).
+    pub gain_table_map2: Option<ProfileGainTableMap>,
 }
 
 /// Decoder for DNG (Adobe Digital Negative) raw images.
@@ -66,12 +72,16 @@ impl DngDecoder {
         let profile = decode_profile(ifd0)?;
         let dng_version = read_version(ifd0)?;
         let metadata = decode_metadata(ifd0, data, order, variant);
+        let gain_table_map = decode_gain_map(&raw_ifd, tags::PROFILE_GAIN_TABLE_MAP, order)?;
+        let gain_table_map2 = decode_gain_map(ifd0, tags::PROFILE_GAIN_TABLE_MAP2, order)?;
 
         Ok(DecodedDng {
             raw,
             profile,
             dng_version,
             metadata,
+            gain_table_map,
+            gain_table_map2,
         })
     }
 }
@@ -284,6 +294,24 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
         raw = raw.with_opcode_list3(list);
     }
     Ok(raw)
+}
+
+/// Reads a `ProfileGainTableMap`/`ProfileGainTableMap2` tag (UNDEFINED bytes, file byte order)
+/// into its typed model; the tag number selects the version's layout. A malformed map is an
+/// error, not silently dropped.
+fn decode_gain_map(ifd: &Ifd, tag: u16, order: ByteOrder) -> Result<Option<ProfileGainTableMap>> {
+    let Some(value) = ifd.get(tag) else {
+        return Ok(None);
+    };
+    let bytes = value.as_bytes().ok_or(Error::InvalidInput(
+        "DNG: gain-table maps must be UNDEFINED byte data",
+    ))?;
+    let map = if tag == tags::PROFILE_GAIN_TABLE_MAP {
+        ProfileGainTableMap::parse_v1(bytes, order)?
+    } else {
+        ProfileGainTableMap::parse_v2(bytes, order)?
+    };
+    Ok(Some(map))
 }
 
 /// Reads an `OpcodeList1/2/3` tag (UNDEFINED bytes) into a typed [`OpcodeList`]. The container
