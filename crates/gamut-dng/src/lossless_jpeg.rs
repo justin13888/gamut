@@ -1336,4 +1336,91 @@ mod tests {
         without[second_dest] = 0x02;
         assert!(decode(&without).is_err());
     }
+    /// Differential conformance: the Adobe DNG SDK's own lossless-JPEG codec
+    /// (`DecodeLosslessJPEG<Scalar>`, via `gamut_dng_oracle::decode_lossless_jpeg`) must decode
+    /// the same streams to the same samples. This breaks the builder/decoder symmetry of the
+    /// unit tests above: the SDK derives its predictions independently, so a boundary-rule or
+    /// predictor bug on our side cannot cancel out.
+    mod sdk_differential {
+        use super::super::*;
+        use super::{HUFFVAL_REV, StreamBuilder, test_samples};
+
+        fn assert_sdk_agrees(stream: &[u8], expected: &[u16], what: &str) {
+            let ours = decode(stream).unwrap_or_else(|e| panic!("{what}: gamut decode: {e:?}"));
+            assert_eq!(ours.samples, expected, "{what}: gamut decode");
+            let theirs = gamut_dng_oracle::decode_lossless_jpeg(stream, expected.len())
+                .unwrap_or_else(|e| panic!("{what}: SDK decode: {e}"));
+            assert_eq!(ours.samples, theirs, "{what}: gamut vs SDK");
+        }
+
+        #[test]
+        fn sdk_matches_our_encoder_output() {
+            for &(w, h, c, precision) in &[
+                (17usize, 9usize, 1usize, 12u16),
+                (8, 8, 3, 16),
+                (5, 4, 2, 8),
+            ] {
+                let samples = test_samples(w, h, c, precision);
+                let stream = encode(&samples, w, h, c, precision).expect("encode");
+                assert_sdk_agrees(&stream, &samples, "encoder output");
+            }
+        }
+
+        #[test]
+        fn sdk_matches_every_predictor() {
+            for predictor in 1..=7u8 {
+                let samples = test_samples(9, 7, 1, 12);
+                let stream = StreamBuilder::simple(12, predictor, 1).build(&samples, 9, 7);
+                assert_sdk_agrees(&stream, &samples, &format!("predictor {predictor}"));
+            }
+        }
+
+        #[test]
+        fn sdk_matches_the_point_transform() {
+            // The SDK's bare codec spools the *downshifted* values (its Pt upshift happens in
+            // dng_read_image, above the codec); our decode returns them upshifted per §H.2.3.
+            // So the comparison is on the downshifted domain: ours >> Pt == SDK.
+            for &pt in &[1u16, 4] {
+                let samples = test_samples(8, 5, 1, 12);
+                let mut builder = StreamBuilder::simple(12, 4, 1);
+                builder.pt = pt;
+                let stream = builder.build(&samples, 8, 5);
+                let ours = decode(&stream).expect("gamut decode");
+                let expected: Vec<u16> = samples.iter().map(|&s| (s >> pt) << pt).collect();
+                assert_eq!(ours.samples, expected, "Pt {pt}: gamut decode");
+                let theirs = gamut_dng_oracle::decode_lossless_jpeg(&stream, expected.len())
+                    .expect("SDK decode");
+                let ours_down: Vec<u16> = ours.samples.iter().map(|&s| s >> pt).collect();
+                assert_eq!(ours_down, theirs, "Pt {pt}: gamut (downshifted) vs SDK");
+            }
+        }
+
+        #[test]
+        fn sdk_matches_row_aligned_restarts() {
+            // The SDK supports whole-row restart intervals only (restartInRows = Ri / width), so the
+            // differential fixtures stay row-aligned; general intervals are covered by the internal
+            // round-trip tests.
+            for rows_per_interval in [1usize, 2] {
+                let samples = test_samples(6, 6, 1, 12);
+                let mut builder = StreamBuilder::simple(12, 5, 1);
+                builder.restart_interval = 6 * rows_per_interval;
+                let stream = builder.build(&samples, 6, 6);
+                assert_sdk_agrees(
+                    &stream,
+                    &samples,
+                    &format!("restart every {rows_per_interval} row(s)"),
+                );
+            }
+        }
+
+        #[test]
+        fn sdk_matches_per_component_tables() {
+            let samples = test_samples(6, 4, 2, 12);
+            let mut builder = StreamBuilder::simple(12, 1, 2);
+            builder.tables = vec![(0, HUFFVAL.to_vec()), (1, HUFFVAL_REV.to_vec())];
+            builder.table_ids = vec![0, 1];
+            let stream = builder.build(&samples, 6, 4);
+            assert_sdk_agrees(&stream, &samples, "per-component tables");
+        }
+    }
 }
