@@ -17,6 +17,8 @@
 //! - **ITU-T T.871 | ISO/IEC 10918-5** — JFIF: the APP0 segment (§10.1) and the full-range BT.601
 //!   YCbCr conversion (§7).
 //! - **Adobe Technical Note #5116** — the APP14 "Adobe" colour-transform marker (RGB / YCbCr / YCCK).
+//! - **Exif 3.0 §4.7.2, XMP Part 3 §1.1.3, ICC.1:2001-04 Annex B.4** — the APP1 EXIF/XMP and
+//!   multi-segment APP2 `ICC_PROFILE` metadata conventions (see `references/jpeg`).
 //!
 //! # Scope
 //!
@@ -31,10 +33,17 @@
 //! any spec-valid sequential **or progressive** stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via
 //! the JFIF APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral selection and
 //! successive approximation, restart intervals, and (for sequential frames) DNL-defined heights —
-//! presenting it as `Rgb8`, `Gray8`, or `Cmyk8`.
+//! presenting it as `Rgb8`, `Gray8`, or `Cmyk8` (with [`gamut_core::DecodeImage::decode_image_into`]
+//! reusing the destination's allocation when dimensions match).
 //!
-//! Out of scope (see `STATUS.md`): 12-bit precision, arithmetic coding, and the lossless and
-//! hierarchical processes, and the SPIFF/T.84/T.872 layers.
+//! Embedded **APP-segment metadata** ships both ways: [`metadata`] reads APP1 EXIF, APP1 XMP, and
+//! multi-segment APP2 `ICC_PROFILE` payloads without decoding pixels, and
+//! [`JpegEncoder::with_exif`] / [`JpegEncoder::with_xmp`] / [`JpegEncoder::with_icc_profile`]
+//! embed them. The payloads are raw bytes in exactly the form the `gamut-metadata` facade's
+//! `MetadataBlock` borrows.
+//!
+//! Out of scope (see `STATUS.md`): 12-bit precision, arithmetic coding, the lossless and
+//! hierarchical processes, the SPIFF/T.84/T.872 layers, ExtendedXMP, and APP13 IPTC-IIM.
 //!
 //! # Oracle
 //!

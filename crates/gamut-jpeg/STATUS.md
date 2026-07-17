@@ -46,6 +46,10 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   approximation).
 - Restart markers (DRI/RSTn).
 - Colour-space handling: JFIF (APP0) and Adobe (APP14) transform flags; CMYK / YCCK **decode**.
+- APP-segment metadata (P7): APP1 EXIF + XMP and multi-segment APP2 `ICC_PROFILE`, **read**
+  (`metadata()`) and **write** (`with_exif`/`with_xmp`/`with_icc_profile`), raw-bytes payloads that
+  feed `gamut-metadata`'s `MetadataBlock` directly (proven by a dev-only interop test; the runtime
+  dependency edge stays jpeg ← core, color, dsp).
 
 **Deferred / out of scope** (documented, with reasons):
 
@@ -59,6 +63,17 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **Hierarchical mode (SOF5–7, DHP, EXP).** No real-world still-image corpus. Not planned.
 - **SPIFF and other T.84 extensions; T.872 printing conventions.** Niche container/printing layers
   atop the codec, tracked in `references/jpeg` but not implemented.
+- **ExtendedXMP (XMP Part 3 §1.1.3.1).** An XMP packet exceeding the single-APP1 StandardXMP cap
+  (65502 bytes, spec-stated) is rejected at encode as `Unsupported`, and ExtendedXMP continuation
+  segments (the `xmp/extension/` GUID scheme) are skipped on read. The GUID/MD5 chunking is a
+  separate mini-protocol with near-zero write-side demand — real packets are ~2 KB (the spec's own
+  observation); additive later if demand appears.
+- **APP13 IPTC-IIM (Photoshop 3.0 PSIR).** The legacy IPTC carrier; modern IPTC rides inside XMP
+  (which `gamut-metadata` models as the single home). `JpegMetadata` is `#[non_exhaustive]` so the
+  carrier can be added without a breaking change.
+- **CLI metadata passthrough.** `gamut convert` decodes its input via the third-party `image`
+  crate, which discards APP segments before gamut ever sees them; a passthrough needs source-side
+  extraction and belongs to a broader CLI metadata story, not issue #28.
 
 **Decoder-specific notes:**
 
@@ -86,6 +101,16 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **Trailing bytes after EOI** are ignored (the libjpeg convention).
 - **CMYK is presented verbatim** (no Adobe inversion); **YCCK** applies the inverse YCbCr transform to
   the first three channels with `K` passed through (Adobe TN #5116).
+- **`metadata()` stops at the first SOS** (or EOI). The APP1/APP2 metadata conventions place their
+  segments before the scan data (XMP Part 3 §1.1.3 requires placement before the first SOF, with
+  reader tolerance up to SOS), so no entropy decoding ever runs; segments after the scan are
+  unreachable by design.
+- **Duplicate EXIF/XMP APP1: first wins** (the libjpeg-family convention). ICC APP2 chunks are
+  reassembled by their 1-based index regardless of segment order; an inconsistent chunk sequence
+  (index/count out of range, duplicate, mismatched, or missing chunks) is `InvalidInput`.
+- **`decode_image_into` reuses the destination.** When the decoded dimensions match the
+  destination's, the presentation stage writes into its existing sample storage (no allocation);
+  otherwise the buffer is replaced. Error paths fire before any byte is written.
 
 **Encoder-specific notes:**
 
@@ -108,6 +133,12 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   maximum (`0x7FFF`, §G.1.2.2); successive-approximation correction bits (§G.1.2.3) are buffered in a
   growable vector and emitted after the `EOBn`/run-size/ZRL symbol they attach to, so the reference's
   fixed-buffer overflow flush is unnecessary.
+- **Metadata segment order: APP0, then EXIF APP1, XMP APP1, ICC APP2, before DQT/SOF.** JFIF
+  mandates its APP0 first while Exif 3.0 §4.7.2.1 wants its APP1 immediately after SOI and neither
+  spec references the other; APP0-then-APP1 is the libjpeg-family convention that XMP Part 3
+  §1.1.3 records readers must accept. Sizes are validated before any bytes are written (EXIF
+  ≤ 65527, XMP ≤ 65502, ICC ≤ 255 × 65519 with 1-based chunk indices; empty payloads rejected).
+  The framing constants are pinned in `references/jpeg/README.md`.
 
 ## Phases
 
@@ -119,3 +150,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P4 | T.81 §G | Progressive SOF2 **decode**: spectral selection + successive approximation — per-component i32 coefficient accumulators filled across scans (interleaved DC + single-component AC), first-pass Huffman + EOBn runs (§G.1.2.2), DC/AC successive-approximation refinement (§G.1.2.3), point transform (§A.4), scan-band ordering validation (§G.1.1.1), restarts, dequant+IDCT once at EOI reusing the sequential reconstruction tail | ✅ done |
 | P5 | T.81 §G, §K.2 | Progressive SOF2 **encode**: `JpegEncoder::with_progressive(bool)` — the frozen `jpeg_simple_progression` scan script (6-scan gray / 10-scan YCbCr), coefficients materialized once via the shared gather→FDCT→quantize path, two-pass optimized per-scan Huffman tables (Annex K.2, all-ones-reserved, 16-bit length-limited), DC/AC first-pass + successive-approximation refinement with EOBRUN accumulation and the §G.1.2.3 deferred correction-bit protocol, restarts | ✅ done |
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14 (landed with P2), CLI `gamut convert → .jpg` (`--quality`/`--jpeg-subsampling`/`--jpeg-restart-interval`/`--jpeg-progressive`), umbrella `jpeg` feature audit, facade mutants scoping, full-workspace gate re-run | ✅ done |
+| P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |

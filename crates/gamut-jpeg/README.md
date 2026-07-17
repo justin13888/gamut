@@ -49,6 +49,28 @@ let info = gamut_jpeg::info(jpeg)?; // dimensions / components / process, withou
 # }
 ```
 
+Read and write embedded APP-segment metadata — APP1 EXIF, APP1 XMP, and multi-segment APP2 ICC
+(the payloads are raw bytes in exactly the form `gamut-metadata`'s `MetadataBlock` borrows):
+
+```rust
+use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+use gamut_jpeg::JpegEncoder;
+
+# fn demo(tiff: &[u8], icc: &[u8]) -> Result<(), gamut_core::Error> {
+let pixels = vec![0u8; 64];
+let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
+let jpeg = JpegEncoder::new()
+    .with_exif(tiff)          // "Exif\0\0" + TIFF APP1 (Exif 3.0 §4.7.2)
+    .with_icc_profile(icc)    // APP2 ICC_PROFILE chunks (ICC.1 Annex B.4)
+    .encode_to_vec(image)?;
+
+let meta = gamut_jpeg::metadata(&jpeg)?; // header-only walk, no pixel decode
+assert_eq!(meta.exif.as_deref(), Some(tiff));
+assert_eq!(meta.icc.as_deref(), Some(icc));
+# Ok(())
+# }
+```
+
 ## Status
 
 Built incrementally; each phase is conformance-checked against libjpeg-turbo (see
@@ -65,9 +87,15 @@ approximation, restart intervals, and (for sequential frames) DNL-defined height
 on malformed input. Progressive frames with a deferred (`Y = 0` / DNL) height are rejected as
 unsupported, and a partial progressive stream renders what it has (matching libjpeg).
 
+Embedded metadata ships both ways (P7): `metadata()` reads APP1 EXIF, APP1 XMP, and multi-segment
+APP2 `ICC_PROFILE` payloads without decoding pixels, and the encoder embeds them via
+`with_exif`/`with_xmp`/`with_icc_profile` — validated against libjpeg-turbo's own
+`jpeg_read_icc_profile`/`jpeg_write_icc_profile` in both directions. `decode_image_into` reuses
+the destination's allocation when dimensions match.
+
 Out of scope (documented in [STATUS.md](STATUS.md)): 12-bit precision, arithmetic coding
-(SOF9/10), lossless (SOF3), hierarchical (SOF5–7), SPIFF/T.84 extensions, and T.872 printing
-conventions.
+(SOF9/10), lossless (SOF3), hierarchical (SOF5–7), SPIFF/T.84 extensions, T.872 printing
+conventions, ExtendedXMP continuation segments, and APP13 IPTC-IIM.
 
 ## Validation
 
