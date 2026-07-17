@@ -60,7 +60,7 @@ struct Cli {
 /// Top-level subcommands, each grouped by the crate it exercises.
 #[derive(Subcommand)]
 enum Command {
-    /// Decode an image (PNG/JPEG/PPM/WebP) and re-encode it as AVIF or WebP (gamut-avif/gamut-webp).
+    /// Decode an image (PNG/JPEG/PPM/WebP/JXL) and re-encode it as AVIF/WebP/TIFF/PNG/JXL/JPEG.
     Convert(commands::convert::ConvertArgs),
     /// Strictly deconstruct a TIFF or DNG: account every byte and flag unknowns (gamut-tiff/gamut-dng).
     Inspect(commands::inspect::InspectArgs),
