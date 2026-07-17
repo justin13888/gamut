@@ -123,8 +123,10 @@ pub struct AdobeRaw {
 
 /// Validates `bytes` as a DNG with the Adobe DNG SDK.
 ///
-/// Returns `Ok(())` if the SDK parses the directories, builds a negative, and reads the raw image
-/// without error; otherwise `Err` with the SDK error code.
+/// Returns `Ok(())` if the SDK parses the directories, builds a negative, reads the raw image
+/// without error, **and** any stored `RawImageDigest`/`NewRawImageDigest` matches the image data
+/// (the SDK records a mismatch as "damaged", surfaced here as error code 1); otherwise `Err`
+/// with the error code.
 ///
 /// # Errors
 ///

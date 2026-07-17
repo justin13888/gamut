@@ -45,6 +45,11 @@ fn assert_matches_adobe(name: &str) {
 #[test]
 fn decodes_adobe_jxl_linear_raw_integer_sample() {
     assert_matches_adobe("01_jxl_linear_raw_integer.dng");
+    // Adobe's own file also passes the digest-enforcing validation (its stored
+    // NewRawImageDigest is the lossy-compressed chunk digest the SDK recomputes).
+    let bytes =
+        gamut_dng_oracle::sample_file("01_jxl_linear_raw_integer.dng").expect("sample present");
+    gamut_dng_oracle::validate_dng(&bytes).expect("Adobe sample must validate digest-clean");
 }
 
 #[test]

@@ -145,15 +145,25 @@ fn new_raw_image_digest_matches_adobe() {
         ("single-tile CFA", common::sample_raw(64, 48, 16)),
         ("multi-tile CFA", common::sample_raw(300, 280, 16)),
         ("LinearRaw 3-plane", common::sample_linear_raw(48, 36, 16)),
+        ("byte-mode (8-bit image)", common::sample_raw(32, 24, 8)),
         (
-            "byte-mode (small linearization table)",
-            common::sample_raw(32, 24, 8)
-                .with_levels(
-                    gamut_dng::RawLevels::uniform(1, 0.0, 255.0)
-                        .expect("levels")
-                        .with_linearization_table(table),
-                )
-                .expect("levels"),
+            "byte-mode (12-bit with a small linearization table)",
+            // Deeper than 8 bits, so *only* the <= 256-entry-table rule can select byte mode;
+            // sample values stay below 256 so the 8-bit narrowing is lossless on both sides.
+            RawImage::new_cfa(
+                gamut_dng::Dimensions::new(32, 24).expect("dims"),
+                12,
+                (2, 2),
+                vec![0, 1, 1, 2],
+                (0..32u16 * 24).map(|i| i % 251).collect(),
+            )
+            .expect("raw")
+            .with_levels(
+                gamut_dng::RawLevels::uniform(1, 0.0, 4095.0)
+                    .expect("levels")
+                    .with_linearization_table(table),
+            )
+            .expect("levels"),
         ),
     ];
     for (what, raw) in cases {
@@ -173,6 +183,29 @@ fn new_raw_image_digest_matches_adobe() {
         assert_eq!(decoded.new_raw_image_digest, Some(adobe));
         gamut_dng_oracle::validate_dng(&dng).expect("validate with digest");
     }
+}
+
+/// The digest gate is genuine: corrupting one byte of the raw data after the digest was written
+/// must make the SDK reject the file as damaged (and shift the recomputed digest).
+#[test]
+fn adobe_rejects_a_corrupted_raw_digest() {
+    let raw = common::sample_raw(64, 48, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let good_digest = gamut_dng_oracle::new_raw_image_digest(&dng).expect("digest");
+    // Flip one bit of the last raw byte (the raw strips are laid out after the preview, at the
+    // end of the file), leaving the stored digest stale.
+    let last = dng.len() - 1;
+    dng[last] ^= 0x01;
+    let err = gamut_dng_oracle::validate_dng(&dng).expect_err("stale digest must reject");
+    assert!(err.contains("(error code 1)"), "{err}");
+    // And the SDK's recomputed digest moves with the data.
+    assert_ne!(
+        gamut_dng_oracle::new_raw_image_digest(&dng).expect("digest"),
+        good_digest
+    );
 }
 
 /// Encodes `raw`, re-decodes it, and requires gamut's `to_linear` to match the Adobe SDK's

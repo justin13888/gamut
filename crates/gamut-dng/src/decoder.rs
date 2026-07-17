@@ -1500,6 +1500,32 @@ mod tests {
         );
     }
 
+    /// Interleaved *multi-plane* data moves whole pixels: the per-pixel sample pairs stay
+    /// together under the column shuffle (a `spp` slip in the flat indexing would tear them).
+    #[test]
+    fn interleave_moves_whole_pixels_across_planes() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![2]));
+        ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![1]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![8]));
+        ifd.set(tags::COLUMN_INTERLEAVE_FACTOR, Value::Short(vec![2]));
+        // Stored pixel pairs in field order [c0, c2 | c1, c3], two samples each.
+        let stored = [10u8, 11, 30, 31, 20, 21, 40, 41];
+        let got = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &stored,
+            ByteOrder::LittleEndian,
+            4,
+            1,
+            2,
+            8,
+        )
+        .expect("decode");
+        assert_eq!(got, vec![10, 11, 20, 21, 30, 31, 40, 41]);
+    }
+
     /// A factor equal to the axis length is valid (the SDK allows `1..=axis`); one past it is
     /// not. Factor-per-column de-interleaving is the identity, which pins the boundary exactly.
     #[test]

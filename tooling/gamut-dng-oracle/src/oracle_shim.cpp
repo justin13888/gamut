@@ -82,8 +82,14 @@ dng_error_code copy_short_image(const dng_image *image, uint32_t *out_w, uint32_
 
 } // namespace
 
+// The code gdng_validate returns when the SDK marks the negative damaged (a stored
+// RawImageDigest/NewRawImageDigest that does not match the image data). The SDK's non-validate
+// build records this via SetIsDamaged rather than throwing, so it must be surfaced explicitly.
+#define GDNG_ERROR_DAMAGED 1
+
 // Validates the DNG at `path`, returning `dng_error_none` (0) if the Adobe SDK parses and reads it
-// without error, or the SDK error code otherwise.
+// without error and any stored raw digest matches the image data; `GDNG_ERROR_DAMAGED` on a digest
+// mismatch; or the SDK error code otherwise.
 extern "C" int gdng_validate(const char *path) {
   try {
     dng_host host;
@@ -94,6 +100,9 @@ extern "C" int gdng_validate(const char *path) {
       return rc;
     }
     negative->ValidateRawImageDigest(host);
+    if (negative->IsDamaged()) {
+      return GDNG_ERROR_DAMAGED;
+    }
   } catch (const dng_exception &except) {
     return except.ErrorCode();
   } catch (...) {
@@ -173,6 +182,10 @@ extern "C" int gdng_new_raw_image_digest(const char *path, uint8_t *out_digest) 
     if (rc != dng_error_none) {
       return rc;
     }
+    // A digest parsed from the file itself must not short-circuit the computation —
+    // FindNewRawImageDigest is a no-op when the negative already carries one, which would turn
+    // this differential oracle into a comparison of the caller's value with itself.
+    negative->ClearRawImageDigest();
     negative->FindNewRawImageDigest(host);
     const dng_fingerprint &digest = negative->NewRawImageDigest();
     memcpy(out_digest, digest.Data(), 16);

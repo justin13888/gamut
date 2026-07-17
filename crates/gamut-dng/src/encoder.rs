@@ -265,11 +265,15 @@ impl DngEncoder {
         });
         let mut ifd0 = self.build_ifd0(profile, preview_dims, dng_version, backward_version)?;
         // The raw-data integrity digest (P17). `gdng_validate` runs ValidateRawImageDigest, so
-        // every oracle-gated test enforces this value against the SDK's own computation.
-        ifd0.set(
-            tags::NEW_RAW_IMAGE_DIGEST,
-            Value::Byte(crate::digest::new_raw_image_digest(raw).to_vec()),
-        );
+        // every oracle-gated test enforces this value against the SDK's own computation. For
+        // lossy-compressed storage (JPEG XL) the digest covers the compressed chunks; for
+        // everything else, the raw samples.
+        let digest = if self.compression == Compression::JpegXl {
+            crate::digest::lossy_compressed_digest(&raw_data)
+        } else {
+            crate::digest::new_raw_image_digest(raw)
+        };
+        ifd0.set(tags::NEW_RAW_IMAGE_DIGEST, Value::Byte(digest.to_vec()));
         // Embed metadata: XMP/IPTC/ICC blocks go in IFD 0; EXIF becomes an `ExifIFD` sub-IFD.
         if !self.metadata.is_empty()
             && let Some(exif) = self.metadata.apply(&mut ifd0)

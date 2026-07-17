@@ -7,9 +7,16 @@
 //! 1. The image is covered by a grid of **digest tiles** whose unit cell is
 //!    `min(256, height) × min(256, width)`; edge tiles are clipped to the image, not padded.
 //! 2. Each tile's samples are serialised **planar** (all of plane 0's tile pixels row-major,
-//!    then plane 1, …) as little-endian `u16` — or as single bytes when a `LinearizationTable`
-//!    with ≤ 256 entries is present (the SDK stores such data 8-bit) — and MD5-hashed.
+//!    then plane 1, …) as little-endian `u16` — or as single bytes when the image is 8-bit or
+//!    shallower (the SDK's raw image is byte-typed then) or a `LinearizationTable` with ≤ 256
+//!    entries is present (the SDK stores such data 8-bit) — and MD5-hashed.
 //! 3. The final digest is the MD5 of the tile digests concatenated in row-major tile order.
+//!
+//! **Lossy-compressed storage** (JPEG XL 52546, lossy JPEG 34892) digests differently: the SDK
+//! routes such images through `dng_lossy_compressed_image::FindDigest`, which hashes each
+//! **compressed chunk** (strip/tile bytes, in offset order) and then MD5s the concatenated
+//! per-chunk digests — see [`lossy_compressed_digest`]. `ValidateRawImageDigest` compares a
+//! lossy-compressed file's stored tag against that value, so the encoder writes it for JPEG XL.
 //!
 //! The SDK folds a raw transparency mask into the digest when one exists; gamut-dng never
 //! writes one, so that branch is not modelled.
@@ -25,11 +32,13 @@ pub(crate) fn new_raw_image_digest(raw: &RawImage) -> [u8; 16] {
     let spp = usize::from(raw.samples_per_pixel());
     let samples = raw.samples();
 
-    // With a <= 256-entry linearization table the SDK digests the data as bytes.
-    let byte_mode = raw
-        .levels()
-        .linearization_table()
-        .is_some_and(|table| table.len() <= 256);
+    // The SDK digests as bytes whenever its raw image is byte-typed: an image of 8 bits or
+    // fewer, or 16-bit data whose <= 256-entry linearization table proves it fits in 8 bits.
+    let byte_mode = raw.bits_per_sample() <= 8
+        || raw
+            .levels()
+            .linearization_table()
+            .is_some_and(|table| table.len() <= 256);
 
     let cell_w = width.min(256);
     let cell_h = height.min(256);
@@ -65,11 +74,39 @@ pub(crate) fn new_raw_image_digest(raw: &RawImage) -> [u8; 16] {
     md5(&tile_digests)
 }
 
+/// Computes the `NewRawImageDigest` of a **lossy-compressed** image from its stored chunks
+/// (the SDK's `dng_lossy_compressed_image::FindDigest`): MD5 per compressed chunk, then MD5
+/// over the concatenated chunk digests in offset order.
+#[must_use]
+pub(crate) fn lossy_compressed_digest(chunks: &[Vec<u8>]) -> [u8; 16] {
+    let mut chunk_digests = Vec::new();
+    for chunk in chunks {
+        chunk_digests.extend_from_slice(&md5(chunk));
+    }
+    md5(&chunk_digests)
+}
+
 #[cfg(test)]
 mod tests {
     use gamut_core::Dimensions;
 
     use super::*;
+
+    /// The lossy-compressed digest is md5 over the concatenated per-chunk md5s, in chunk order.
+    #[test]
+    fn lossy_compressed_digest_hashes_chunk_digests() {
+        let chunks = vec![vec![1u8, 2, 3], vec![4u8, 5]];
+        let mut concat = Vec::new();
+        concat.extend_from_slice(&md5(&chunks[0]));
+        concat.extend_from_slice(&md5(&chunks[1]));
+        assert_eq!(lossy_compressed_digest(&chunks), md5(&concat));
+        // Chunk order matters.
+        let swapped = vec![chunks[1].clone(), chunks[0].clone()];
+        assert_ne!(
+            lossy_compressed_digest(&swapped),
+            lossy_compressed_digest(&chunks)
+        );
+    }
 
     fn raw(width: u32, height: u32, spp: u16) -> RawImage {
         let n = width as usize * height as usize * usize::from(spp);
@@ -122,33 +159,52 @@ mod tests {
         assert_ne!(new_raw_image_digest(&raw), md5(&md5(&interleaved)));
     }
 
-    /// A <= 256-entry linearization table switches the serialisation to bytes.
+    /// Byte-mode selection: an image of 8 bits or fewer digests bytes, and so does a deeper
+    /// image once a <= 256-entry linearization table proves its values fit 8 bits — while the
+    /// same deep image without the table digests u16.
     #[test]
-    fn small_linearization_table_digests_bytes() {
+    fn byte_mode_follows_depth_and_table() {
         let samples: Vec<u16> = (0..12).map(|i| i * 20).collect();
-        let base = RawImage::new_cfa(
+        let eight_bit = RawImage::new_cfa(
             Dimensions::new(4, 3).unwrap(),
             8,
+            (2, 2),
+            vec![0, 1, 1, 2],
+            samples.clone(),
+        )
+        .unwrap();
+        let twelve_bit = RawImage::new_cfa(
+            Dimensions::new(4, 3).unwrap(),
+            12,
             (2, 2),
             vec![0, 1, 1, 2],
             samples,
         )
         .unwrap();
         let table: Vec<u16> = (0..256).map(|v| v * 257).collect();
-        let with_table = base
+        let twelve_with_table = twelve_bit
             .clone()
             .with_levels(
-                crate::levels::RawLevels::uniform(1, 0.0, 255.0)
+                crate::levels::RawLevels::uniform(1, 0.0, 4095.0)
                     .unwrap()
                     .with_linearization_table(table),
             )
             .unwrap();
-        let bytes: Vec<u8> = with_table.samples().iter().map(|&s| s as u8).collect();
-        assert_eq!(new_raw_image_digest(&with_table), md5(&md5(&bytes)));
+
+        let byte_digest = {
+            let bytes: Vec<u8> = eight_bit.samples().iter().map(|&s| s as u8).collect();
+            md5(&md5(&bytes))
+        };
+        assert_eq!(new_raw_image_digest(&eight_bit), byte_digest);
+        assert_eq!(
+            new_raw_image_digest(&twelve_with_table),
+            byte_digest,
+            "the small table selects byte mode at any depth"
+        );
         assert_ne!(
-            new_raw_image_digest(&with_table),
-            new_raw_image_digest(&base),
-            "the byte-mode digest must differ from the u16 digest"
+            new_raw_image_digest(&twelve_bit),
+            byte_digest,
+            "without the table, a 12-bit image digests u16"
         );
     }
 }
