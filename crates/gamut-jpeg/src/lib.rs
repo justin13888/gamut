@@ -33,8 +33,10 @@
 //! # Oracle
 //!
 //! Correctness is proven differentially against **libjpeg-turbo** (a vendored, dev-only static
-//! build, landing with the decoder phase), cross-checked against the vendored **T.873 reference
-//! software**. Until the decoder lands, the encoder is pinned by byte-exact micro-goldens derived
+//! build; see `tests/oracle.rs`), cross-checked against the vendored **T.873 reference software**.
+//! The gate runs both directions: gamut encodes → libjpeg-turbo decodes → matches the source within
+//! the lossy tolerance, and libjpeg-turbo encodes → gamut decodes → matches libjpeg-turbo's own
+//! decode of the same stream. The encoder is additionally pinned by byte-exact micro-goldens derived
 //! from T.81 Annex F/K and a structural stream walker.
 //!
 //! # Example

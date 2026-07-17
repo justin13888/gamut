@@ -21,3 +21,10 @@ gamut-core.workspace = true
 gamut-color.workspace = true
 # The §A.3.3 forward DCT kernel and the §A.3.4 round-to-nearest quantizer divide.
 gamut-dsp.workspace = true
+
+[dev-dependencies]
+# Differential cross-check oracle: a vendored, statically-linked libjpeg-turbo 3.2.0 (built from the
+# `third_party/libjpeg-turbo` submodule). Dev-only and excluded from the workspace. It is the
+# canonical reference codec that proves the encoder's output decodes to the same pixels and the
+# decoder reproduces what libjpeg-turbo decodes.
+libjpeg-oracle = { path = "../../tooling/libjpeg-oracle" }

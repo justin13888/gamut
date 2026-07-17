@@ -25,3 +25,6 @@
 [submodule "third_party/aom"]
 	path = third_party/aom
 	url = https://aomedia.googlesource.com/aom
+[submodule "third_party/libjpeg-turbo"]
+	path = third_party/libjpeg-turbo
+	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git

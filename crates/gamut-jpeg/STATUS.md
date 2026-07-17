@@ -5,16 +5,20 @@ Tracking GitHub issue #28: a spec-compliant JPEG-1 (ISO/IEC 10918-1 | ITU-T T.81
 `fmt-check`/`coverage` ≥80%).
 
 **Keystone:** the SOI → APP0(JFIF) → DQT → SOF0 → DHT → SOS → entropy → EOI pipeline with the
-baseline sequential DCT Huffman encoder (P1) — once libjpeg-turbo decodes that to the source pixels
-(within the lossy tolerance), each later phase adds a process (progressive) or a direction (decode)
-behind the same marker spine, entropy coder, and table machinery.
+baseline sequential DCT Huffman encoder (P1) — libjpeg-turbo now decodes that to the source pixels
+within the lossy tolerance (measured across the P3 battery: gray/4:4:4 within **11 codes** at
+q ∈ {50,75,90}, **5** at q90; subsampled **> 30 dB** PSNR, **> 34 dB** at q90), and each later phase
+adds a process (progressive) or a direction (decode) behind the same marker spine, entropy coder,
+and table machinery.
 
-**Oracle:** differential vs **libjpeg-turbo** (a vendored, dev-only static build, landing in P3),
-cross-checked against the vendored **T.873 reference software** (`references/jpeg`, ISO/IEC 10918-7)
-for spec-exact behaviour. gamut ships no JPEG decoder yet, so until P2 the encoder is pinned by
-byte-exact micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker; P3 adds
-the round-trip gate (libjpeg-turbo decodes the encoder's output → matches source within tolerance,
-and gamut's decoder decodes libjpeg-turbo's output).
+**Oracle:** differential vs **libjpeg-turbo** (a vendored, dev-only static build of 3.2.0 in
+`tooling/libjpeg-oracle`, landed in P3), cross-checked against the vendored **T.873 reference
+software** (`references/jpeg`, ISO/IEC 10918-7) for spec-exact behaviour. The gate runs both
+directions in `tests/oracle.rs`: **encode** (gamut encodes → libjpeg-turbo decodes → matches source
+within tolerance) and **decode** (libjpeg-turbo encodes → gamut decodes → matches libjpeg-turbo's
+own decode of the same stream, gray/4:4:4 within **3 codes** of IDCT rounding, subsampled bounded by
+the documented replication-vs-fancy upsampling divergence). Before P2 the encoder was additionally
+pinned by byte-exact micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker.
 
 ## Scope ledger
 
@@ -59,7 +63,7 @@ and gamut's decoder decodes libjpeg-turbo's output).
 | ----- | ---- | ----- | ------ |
 | P1 | T.81 Annex A/B/C/F/K; T.871 | **Keystone:** scaffold + workspace wiring; marker/syntax layer; baseline SOF0 Huffman **encoder** (gray + YCbCr 4:4:4/4:2:2/4:2:0), Annex K tables, quality scaling, restart intervals, JFIF | ✅ done |
 | P2 | T.81 Annex A/B/C/F; T.871; TN #5116 | Sequential SOF0/SOF1 8-bit Huffman **decoder**: full marker/table parsing (DQT 8/16-bit, DHT with Annex C validation, DRI, DNL, APP0/APP14), interleaved + non-interleaved multi-scan entropy decode (§F.2), restart processing, gray/YCbCr/RGB/CMYK/YCCK colour, sample-replication upsampling, `info()` | ✅ done |
-| P3 | T.83 / oracle | libjpeg-turbo differential oracle (vendored, dev-only) + round-trip gate | ⏳ pending |
+| P3 | T.83 / oracle | libjpeg-turbo differential oracle (vendored, dev-only) + round-trip gate (`tests/oracle.rs`, both directions) | ✅ done |
 | P4 | T.81 §G | Progressive SOF2 **decode** (spectral selection + successive approximation) | ⏳ pending |
 | P5 | T.81 §G | Progressive SOF2 **encode** | ⏳ pending |
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14, CLI `gamut convert → .jpg`, umbrella `jpeg` feature audit | ⏳ pending |

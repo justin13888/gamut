@@ -66,9 +66,19 @@ conventions.
 
 ## Validation
 
-A differential oracle (a vendored, dev-only libjpeg-turbo, landing with the decoder phase) decodes
-the encoder's output; the recovered pixels must match within the format's lossy tolerance, and the
-byte stream is cross-checked against the vendored T.873 reference software for spec-exact behaviour.
+A live differential gate (`tests/oracle.rs`) cross-checks against a vendored, dev-only
+**libjpeg-turbo 3.2.0** static build (`tooling/libjpeg-oracle`) in both directions:
+
+- **Encode** — gamut encodes, libjpeg-turbo decodes; the recovered pixels match the source within
+  the format's lossy tolerance (measured: gray/4:4:4 within a few codes, subsampled above a PSNR
+  floor). This proves gamut emits spec-valid streams the canonical reference decoder reads back.
+- **Decode** — libjpeg-turbo encodes (including non-standard optimized Huffman tables and restart
+  markers), gamut decodes and matches libjpeg-turbo's own decode of the same stream, isolating
+  entropy/dequant/IDCT correctness from lossy encode error.
+
+The byte stream is additionally cross-checked against the vendored T.873 reference software for
+spec-exact behaviour. Running the gate builds the C oracle, so the tests need the
+`third_party/libjpeg-turbo` submodule checked out and a C toolchain on `PATH`.
 
 ## License
 

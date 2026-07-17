@@ -1,0 +1,28 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under
+# `[workspace].exclude` in the root manifest, pulled in only as a path
+# `dev-dependency`). It statically links libjpeg-turbo (built from the
+# `third_party/libjpeg-turbo` submodule, pinned to tag 3.2.0) and exposes a
+# reference JPEG encoder + decoder for gamut-jpeg's differential cross-checks.
+#
+# libjpeg reports fatal errors via the classic setjmp/longjmp dance, which cannot
+# be driven from Rust, so the whole encode/decode surface lives behind the small
+# `extern "C"` shim in `src/shim.c` (compiled with the `cc` crate) — mirroring the
+# exiv2/iptc/dng oracles, which likewise put the C API behind a shim rather than
+# raw bindgen. The shim owns the setjmp guard and reports failure via return codes.
+#
+# Declares this crate as the sole provider of the native `jpeg` library.
+[package]
+name = "libjpeg-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: encodes/decodes JPEG with a vendored, statically-linked libjpeg-turbo for gamut-jpeg's conformance cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+links = "jpeg"
+
+[lib]
+doctest = false
+
+[build-dependencies]
+cc = "1"
