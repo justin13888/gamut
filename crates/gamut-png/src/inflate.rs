@@ -44,8 +44,18 @@ mod tests {
         let payload = vec![0u8; 4096];
         let mut zlib = Vec::new();
         DeflateEncoder::new().zlib_compress(&payload, &mut zlib);
-        // The stream is valid but inflates past the cap: that must be the cap error, not success.
-        assert!(inflate_zlib(&zlib, payload.len() - 1).is_err());
+        // The stream is valid but inflates past the cap: that must be the *cap* error — the
+        // distinction from plain corruption matters because a decoder reports a bomb, not a
+        // damaged file.
+        match inflate_zlib(&zlib, payload.len() - 1) {
+            Err(Error::InvalidInput(msg)) => {
+                assert!(
+                    msg.contains("inflates past"),
+                    "cap-specific message, got {msg:?}"
+                );
+            }
+            other => panic!("expected the cap error, got {other:?}"),
+        }
         assert!(inflate_zlib(&zlib, payload.len()).is_ok());
     }
 

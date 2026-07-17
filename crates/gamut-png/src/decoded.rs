@@ -444,16 +444,83 @@ mod tests {
 
     #[test]
     fn once_only_chunks_keep_the_first() {
+        let iccp_a: Vec<u8> = [b"a\0\0".to_vec(), deflated(b"profile-a")].concat();
+        let iccp_b: Vec<u8> = [b"b\0\0".to_vec(), deflated(b"profile-b")].concat();
+        let chrm_a: Vec<u8> = (1u32..=8).flat_map(|v| v.to_be_bytes()).collect();
+        let chrm_b: Vec<u8> = (11u32..=18).flat_map(|v| v.to_be_bytes()).collect();
         let meta = collect(
             &[
                 (*b"gAMA", &45455u32.to_be_bytes()),
                 (*b"gAMA", &10000u32.to_be_bytes()),
                 (*b"eXIf", b"II*\0first"),
                 (*b"eXIf", b"II*\0second"),
+                (*b"iCCP", &iccp_a),
+                (*b"iCCP", &iccp_b),
+                (*b"cHRM", &chrm_a),
+                (*b"cHRM", &chrm_b),
+                (*b"sRGB", &[0]),
+                (*b"sRGB", &[3]),
+                (*b"cICP", &[9, 16, 0, 1]),
+                (*b"cICP", &[1, 13, 0, 0]),
             ],
             1024,
         );
         assert_eq!(meta.gamma, Some(45455));
         assert_eq!(meta.exif.as_deref(), Some(&b"II*\0first"[..]));
+        let icc = meta.icc_profile.unwrap();
+        assert_eq!(
+            (icc.name.as_str(), icc.profile.as_slice()),
+            ("a", &b"profile-a"[..])
+        );
+        assert_eq!(meta.chromaticities.unwrap().white, (1, 2));
+        assert_eq!(meta.srgb, Some(SrgbIntent::Perceptual));
+        assert_eq!(meta.cicp.unwrap().color_primaries, 9);
+    }
+
+    #[test]
+    fn chrm_coordinates_map_position_for_position() {
+        // Every byte distinct, so any index-arithmetic slip changes some coordinate.
+        let payload: Vec<u8> = (0u8..32).collect();
+        let meta = collect(&[(*b"cHRM", &payload)], 0);
+        let chrm = meta.chromaticities.unwrap();
+        assert_eq!(chrm.white, (0x0001_0203, 0x0405_0607));
+        assert_eq!(chrm.red, (0x0809_0A0B, 0x0C0D_0E0F));
+        assert_eq!(chrm.green, (0x1011_1213, 0x1415_1617));
+        assert_eq!(chrm.blue, (0x1819_1A1B, 0x1C1D_1E1F));
+    }
+
+    #[test]
+    fn keyword_length_boundary_is_79_bytes() {
+        let mut ok = vec![b'k'; 79];
+        ok.push(0);
+        ok.extend_from_slice(b"body");
+        let meta = collect(&[(*b"tEXt", &ok)], 0);
+        assert_eq!(meta.texts.len(), 1, "79-byte keyword accepted");
+        assert_eq!(meta.texts[0].keyword.len(), 79);
+        let mut too_long = vec![b'k'; 80];
+        too_long.push(0);
+        too_long.extend_from_slice(b"body");
+        let meta = collect(&[(*b"tEXt", &too_long)], 0);
+        assert!(meta.texts.is_empty(), "80-byte keyword skipped");
+    }
+
+    #[test]
+    fn metadata_budget_decrements_by_inflated_size() {
+        // Two 400-byte payloads under a 1000-byte budget must BOTH survive — the budget shrinks
+        // by what was actually inflated, nothing more aggressive.
+        let body = vec![b'a'; 400];
+        let one: Vec<u8> = [b"One\0\0".to_vec(), deflated(&body)].concat();
+        let two: Vec<u8> = [b"Two\0\0".to_vec(), deflated(&body)].concat();
+        let meta = collect(&[(*b"zTXt", &one), (*b"zTXt", &two)], 1000);
+        assert_eq!(meta.texts.len(), 2);
+    }
+
+    #[test]
+    fn compressed_itxt_with_unknown_method_is_skipped() {
+        // Compression flag 1 with method 1: undefined, so the chunk is skipped even though the
+        // trailing bytes happen to be a perfectly valid zlib stream.
+        let itxt: Vec<u8> = [b"Key\0\x01\x01\0\0".to_vec(), deflated(b"valid stream")].concat();
+        let meta = collect(&[(*b"iTXt", &itxt)], 1024);
+        assert!(meta.texts.is_empty());
     }
 }

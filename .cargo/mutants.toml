@@ -438,4 +438,13 @@ exclude_re = [
     # accounting tests. (The analogous tolerance guard in `read`, which *is* reachable with only one
     # box seen, is killed by the exact-message tests in gamut-isobmff `tests/reader.rs`.)
     'container\.rs:283:30: replace && with \|\|',
+    # gamut-png typed decoders (decoder.rs) — every `DecodeImage<P>` match arm pairs a colour-type
+    # pattern with a bit-depth guard, and the arm body begins by extracting exactly that depth's
+    # sample variant (`native8`/`native16`). Forcing a depth guard to *true* only admits files of
+    # the other depth, whose extraction fails with the very same `LOSSY` `Unsupported` error the
+    # default arm returns — no input distinguishes the mutant. Scoped to the guard-to-true shape
+    # only: the `with false` and comparison-operator variants of the same guards change which valid
+    # files decode and are killed by the typed-widening tests (sub-byte grey scaling, colour keys,
+    # GrayAlpha16→Rgba16).
+    'replace match guard native\.header\.bit_depth (==|<=) (8|16) with true in <impl DecodeImage<.+> for PngDecoder>::decode_image',
 ]

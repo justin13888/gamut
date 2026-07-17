@@ -985,8 +985,16 @@ mod tests {
         assert_eq!(decoded.as_samples(), expected);
     }
 
-    /// Hand-assembles a PNG from raw parts (the encoder cannot write interlaced files).
-    fn build_png(width: u32, height: u32, bit_depth: u8, interlace: u8, stream: &[u8]) -> Vec<u8> {
+    /// Hand-assembles a greyscale PNG from raw parts (the encoder cannot write interlaced files
+    /// or greyscale/truecolour tRNS colour keys).
+    fn build_gray_png(
+        width: u32,
+        height: u32,
+        bit_depth: u8,
+        interlace: u8,
+        trns_key: Option<u16>,
+        stream: &[u8],
+    ) -> Vec<u8> {
         let mut png = crate::chunk::SIGNATURE.to_vec();
         let mut ihdr_data = [0u8; 13];
         ihdr_data[0..4].copy_from_slice(&width.to_be_bytes());
@@ -995,11 +1003,18 @@ mod tests {
         ihdr_data[9] = 0; // greyscale
         ihdr_data[12] = interlace;
         crate::chunk::write_chunk(&mut png, *b"IHDR", &ihdr_data);
+        if let Some(key) = trns_key {
+            crate::chunk::write_chunk(&mut png, *b"tRNS", &key.to_be_bytes());
+        }
         let mut idat = Vec::new();
         gamut_deflate::DeflateEncoder::new().zlib_compress(stream, &mut idat);
         crate::chunk::write_chunk(&mut png, *b"IDAT", &idat);
         crate::chunk::write_chunk(&mut png, *b"IEND", &[]);
         png
+    }
+
+    fn build_png(width: u32, height: u32, bit_depth: u8, interlace: u8, stream: &[u8]) -> Vec<u8> {
+        build_gray_png(width, height, bit_depth, interlace, None, stream)
     }
 
     #[test]
@@ -1040,6 +1055,117 @@ mod tests {
         let png = build_png(1, 1, 8, 1, &[0, 42]);
         let img: ImageBuf<Gray8> = PngDecoder::new().decode_image(&png).unwrap();
         assert_eq!(img.as_samples(), [42]);
+    }
+
+    #[test]
+    fn sub_byte_gray_scales_exactly_in_every_typed_widening() {
+        // 4-bit grey 3×2 with samples 1,2,3 / 4,5,15 (scale ×17); packed rows 0x12 0x30 / 0x45 0xF0.
+        let png = build_png(3, 2, 4, 0, &[0, 0x12, 0x30, 0, 0x45, 0xF0]);
+        let values = [1u8, 2, 3, 4, 5, 15];
+        let gray: ImageBuf<Gray8> = PngDecoder::new().decode_image(&png).unwrap();
+        let scaled: Vec<u8> = values.iter().map(|&v| v * 17).collect();
+        assert_eq!(gray.as_samples(), scaled);
+        let rgb: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&png).unwrap();
+        let replicated: Vec<u8> = values.iter().flat_map(|&v| [v * 17; 3]).collect();
+        assert_eq!(rgb.as_samples(), replicated);
+        let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&png).unwrap();
+        let opaque: Vec<u8> = values.iter().flat_map(|&v| [v * 17, 255]).collect();
+        assert_eq!(ga.as_samples(), opaque);
+    }
+
+    #[test]
+    fn gray8_colour_key_resolves_in_grayalpha8_and_refusals_hold() {
+        // 8-bit grey 3×1 with samples 7, 8, 7 and colour key 7.
+        let png = build_gray_png(3, 1, 8, 0, Some(7), &[0, 7, 8, 7]);
+        let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&png).unwrap();
+        assert_eq!(ga.as_samples(), [7, 0, 8, 255, 7, 0]);
+        // Alpha-less layouts refuse the keyed file (dropping transparency is lossy).
+        assert!(DecodeImage::<Gray8>::decode_image(&PngDecoder::new(), &png).is_err());
+        assert!(DecodeImage::<Rgb8>::decode_image(&PngDecoder::new(), &png).is_err());
+        assert!(DecodeImage::<Bilevel>::decode_image(&PngDecoder::new(), &png).is_err());
+    }
+
+    #[test]
+    fn bilevel_requires_exactly_1bit_keyless_gray() {
+        // Depth is the only violation: 8-bit grey must NOT present as Bilevel.
+        let gray8 = build_png(2, 1, 8, 0, &[0, 1, 0]);
+        assert!(DecodeImage::<Bilevel>::decode_image(&PngDecoder::new(), &gray8).is_err());
+        // Transparency is the only violation: keyed 1-bit grey must NOT present as Bilevel...
+        let keyed = build_gray_png(2, 1, 1, 0, Some(0), &[0, 0x80]);
+        assert!(DecodeImage::<Bilevel>::decode_image(&PngDecoder::new(), &keyed).is_err());
+        // ...while the keyless twin decodes to 0/1 samples.
+        let plain = build_png(2, 1, 1, 0, &[0, 0x80]);
+        let img: ImageBuf<Bilevel> = PngDecoder::new().decode_image(&plain).unwrap();
+        assert_eq!(img.as_samples(), [1, 0]);
+    }
+
+    #[test]
+    fn gray16_colour_key_resolves_in_16bit_widenings() {
+        // 16-bit grey 3×1 with samples 7, 8, 7 and colour key 7.
+        let png = build_gray_png(3, 1, 16, 0, Some(7), &[0, 0, 7, 0, 8, 0, 7]);
+        // The keyed file refuses alpha-less Gray16/Rgb16.
+        assert!(DecodeImage::<Gray16>::decode_image(&PngDecoder::new(), &png).is_err());
+        assert!(DecodeImage::<Rgb16>::decode_image(&PngDecoder::new(), &png).is_err());
+        // GrayAlpha16 and Rgba16 resolve the key to alpha zero, exactly on matching pixels.
+        let ga: ImageBuf<GrayAlpha16> = PngDecoder::new().decode_image(&png).unwrap();
+        assert_eq!(ga.as_samples(), [7, 0, 8, u16::MAX, 7, 0]);
+        let rgba: ImageBuf<Rgba16> = PngDecoder::new().decode_image(&png).unwrap();
+        assert_eq!(
+            rgba.as_samples(),
+            [7, 7, 7, 0, 8, 8, 8, u16::MAX, 7, 7, 7, 0]
+        );
+        // The keyless twin widens opaque.
+        let plain = build_png(2, 1, 16, 0, &[0, 0, 9, 1, 4]);
+        let rgba: ImageBuf<Rgba16> = PngDecoder::new().decode_image(&plain).unwrap();
+        assert_eq!(
+            rgba.as_samples(),
+            [9, 9, 9, u16::MAX, 260, 260, 260, u16::MAX]
+        );
+    }
+
+    #[test]
+    fn grayalpha16_widens_to_rgba16() {
+        let src: Vec<u16> = vec![100, 200, 300, 400];
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .encode_image(
+                ImageRef::<GrayAlpha16>::new(&src, Dimensions::new(2, 1).unwrap()).unwrap(),
+                &mut png,
+            )
+            .unwrap();
+        let rgba: ImageBuf<Rgba16> = PngDecoder::new().decode_image(&png).unwrap();
+        assert_eq!(rgba.as_samples(), [100, 100, 100, 200, 300, 300, 300, 400]);
+    }
+
+    #[test]
+    fn suggested_palette_on_truecolor_is_shape_checked_then_ignored() {
+        let src = [1u8, 2, 3, 4, 5, 6];
+        let stream = [0u8, 1, 2, 3, 4, 5, 6];
+        let build = |plte: &[u8]| {
+            let mut png = crate::chunk::SIGNATURE.to_vec();
+            let mut ihdr_data = [0u8; 13];
+            ihdr_data[0..4].copy_from_slice(&2u32.to_be_bytes());
+            ihdr_data[4..8].copy_from_slice(&1u32.to_be_bytes());
+            ihdr_data[8] = 8;
+            ihdr_data[9] = 2; // truecolour
+            crate::chunk::write_chunk(&mut png, *b"IHDR", &ihdr_data);
+            crate::chunk::write_chunk(&mut png, *b"PLTE", plte);
+            let mut idat = Vec::new();
+            gamut_deflate::DeflateEncoder::new().zlib_compress(&stream, &mut idat);
+            crate::chunk::write_chunk(&mut png, *b"IDAT", &idat);
+            crate::chunk::write_chunk(&mut png, *b"IEND", &[]);
+            png
+        };
+        // A valid 86-entry suggested palette is accepted and ignored (86 entries also pins the
+        // `len / 3` arithmetic: neither `%` nor `*` lands in 1..=256).
+        let suggested: Vec<u8> = (0..258).map(|i| i as u8).collect();
+        let img: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&build(&suggested)).unwrap();
+        assert_eq!(img.as_samples(), src);
+        // Shape violations are still rejected.
+        assert!(
+            DecodeImage::<Rgb8>::decode_image(&PngDecoder::new(), &build(&[1, 2, 3, 4])).is_err()
+        );
+        assert!(DecodeImage::<Rgb8>::decode_image(&PngDecoder::new(), &build(&[0; 771])).is_err());
     }
 
     #[test]
