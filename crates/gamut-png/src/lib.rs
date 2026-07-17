@@ -32,6 +32,7 @@ mod ancillary;
 mod chunk;
 mod color;
 mod crc32;
+mod decoded;
 mod decoder;
 mod encoder;
 mod filter;
@@ -43,6 +44,7 @@ mod reduce;
 
 pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use color::ColorType;
+pub use decoded::{Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, TextChunk};
 pub use decoder::{PngDecoder, TransparencyKey};
 pub use encoder::PngEncoder;
 pub use filter::{FilterStrategy, FilterType};

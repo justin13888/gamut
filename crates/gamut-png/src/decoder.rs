@@ -18,14 +18,13 @@ use gamut_core::{
     Indexed8, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
-use crate::adam7;
 use crate::chunk::ChunkReader;
 use crate::color::ColorType;
+use crate::decoded::{self, DecodedPng, PngHeader, PngImage};
 use crate::filter::{self, FilterType};
 use crate::ihdr::{self, Ihdr};
-use crate::inflate;
-use crate::pack;
 use crate::palette::PngPalette;
+use crate::{adam7, inflate, pack};
 
 /// Default cap on the decoded sample buffer: 64 MiB, a 4096×4096 RGBA8 image.
 const DEFAULT_MAX_IMAGE_BYTES: usize = 64 << 20;
@@ -115,6 +114,8 @@ struct Parsed<'a> {
     trns: Option<&'a [u8]>,
     /// All IDAT payloads, concatenated (§5.6 requires them consecutive).
     idat: Vec<u8>,
+    /// Metadata-bearing ancillary chunks in file order (populated only when requested).
+    ancillary: Vec<([u8; 4], &'a [u8])>,
 }
 
 /// Decoded samples in the file's native value range: one byte per sample for depths ≤ 8
@@ -134,7 +135,9 @@ struct NativeImage {
 
 impl PngDecoder {
     /// Walks the chunk stream, enforcing criticality, CRC, and ordering rules (§5.4–§5.6).
-    fn parse_stream<'a>(&self, data: &'a [u8]) -> Result<Parsed<'a>> {
+    /// With `want_metadata`, the metadata-bearing ancillary chunks are collected for the rich
+    /// decode path (the typed path skips them, so their payloads are never even copied).
+    fn parse_stream<'a>(&self, data: &'a [u8], want_metadata: bool) -> Result<Parsed<'a>> {
         let mut reader = ChunkReader::new(data)?;
         let first = reader
             .next_chunk()?
@@ -150,6 +153,7 @@ impl PngDecoder {
         let mut plte: Option<&[u8]> = None;
         let mut trns: Option<&[u8]> = None;
         let mut idat = Vec::new();
+        let mut ancillary = Vec::new();
         let mut seen_idat = false;
         let mut idat_done = false;
         let mut seen_iend = false;
@@ -207,8 +211,27 @@ impl PngDecoder {
                     }
                 }
                 _ if chunk.is_ancillary() => {
-                    // Unknown or metadata-bearing ancillary chunks do not affect the pixels;
-                    // they are collected (when requested) by the rich decode path.
+                    // Ancillary chunks do not affect the pixels. Metadata-bearing ones are
+                    // collected for the rich decode path (CRC-verified only, §13.1); anything
+                    // else — including APNG's acTL/fcTL/fdAT — is skipped, so an animated PNG
+                    // decodes as its default image.
+                    if want_metadata
+                        && chunk.crc_ok
+                        && matches!(
+                            &chunk.chunk_type,
+                            b"eXIf"
+                                | b"iCCP"
+                                | b"gAMA"
+                                | b"cHRM"
+                                | b"sRGB"
+                                | b"cICP"
+                                | b"tEXt"
+                                | b"zTXt"
+                                | b"iTXt"
+                        )
+                    {
+                        ancillary.push((chunk.chunk_type, chunk.data));
+                    }
                 }
                 _ => {
                     // §5.4/§13.2: a chunk that is critical but unknown means the image cannot
@@ -228,6 +251,7 @@ impl PngDecoder {
             plte,
             trns,
             idat,
+            ancillary,
         })
     }
 
@@ -253,10 +277,53 @@ impl PngDecoder {
             .ok_or(Error::InvalidInput("PNG: image dimensions overflow"))
     }
 
-    /// Runs the shared pipeline: parse → validate PLTE/tRNS → inflate → per-pass defilter,
-    /// unpack, and (for Adam7) recomposition.
+    /// Decodes a PNG into its native layout together with the ancillary metadata — the rich
+    /// counterpart of the typed [`DecodeImage`] implementations, and the only way to reach the
+    /// palette of an indexed image, the tRNS colour key, and the raw metadata payloads
+    /// (eXIf/ICC/XMP/text, plus parsed gAMA/cHRM/sRGB/cICP values).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for a malformed file and [`Error::Unsupported`] for one
+    /// exceeding the decoder's limits or using an unknown critical chunk. Malformed *metadata*
+    /// payloads are not errors: the affected chunk is skipped (§13.1) and its field stays empty.
+    pub fn decode(&self, data: &[u8]) -> Result<DecodedPng> {
+        let parsed = self.parse_stream(data, true)?;
+        let meta = decoded::collect(&parsed.ancillary, self.max_metadata_bytes);
+        let native = self.decode_parsed(&parsed)?;
+        let header = PngHeader {
+            width: native.header.width,
+            height: native.header.height,
+            bit_depth: native.header.bit_depth,
+            color_type: native.header.color,
+            interlaced: native.header.interlaced,
+        };
+        let image = native_image(&native.header, native.samples)?;
+        Ok(DecodedPng {
+            header,
+            image,
+            palette: native.palette,
+            transparency: native.trns_key,
+            exif: meta.exif,
+            icc_profile: meta.icc_profile,
+            xmp: meta.xmp,
+            texts: meta.texts,
+            gamma: meta.gamma,
+            chromaticities: meta.chromaticities,
+            srgb: meta.srgb,
+            cicp: meta.cicp,
+        })
+    }
+
+    /// Runs the typed pipeline: parse (without metadata) → decode.
     fn decode_native(&self, data: &[u8]) -> Result<NativeImage> {
-        let parsed = self.parse_stream(data)?;
+        let parsed = self.parse_stream(data, false)?;
+        self.decode_parsed(&parsed)
+    }
+
+    /// Runs the shared pipeline: validate PLTE/tRNS → inflate → per-pass defilter, unpack, and
+    /// (for Adam7) recomposition.
+    fn decode_parsed(&self, parsed: &Parsed<'_>) -> Result<NativeImage> {
         let header = parsed.header;
         let (palette, trns_key) = validate_plte_and_trns(&header, parsed.plte, parsed.trns)?;
 
@@ -411,8 +478,8 @@ fn decode_canvas<S: Copy + Default>(
             continue; // absent from the stream, filter bytes included (§7.3)
         }
         let (pass_width, pass_height) = (pass_width as usize, pass_height as usize);
-        let row_bytes = packed_row_bytes(pass_width as u32, header.bits_per_pixel())
-            .ok_or_else(overflow)?;
+        let row_bytes =
+            packed_row_bytes(pass_width as u32, header.bits_per_pixel()).ok_or_else(overflow)?;
         let pass_len = pass_height
             .checked_mul(row_bytes + 1)
             .ok_or_else(overflow)?;
@@ -448,6 +515,47 @@ fn unfilter_stream(stream: &[u8], row_bytes: usize, height: usize, bpp: usize) -
         filter::unfilter_row(filter, cur, prev, bpp);
     }
     Ok(out)
+}
+
+/// Wraps decoded native samples as the matching [`PngImage`] variant: sub-byte greyscale is
+/// scaled to [`Gray8`] (§13.12), sub-byte indices are widened unscaled, 16-bit is native `u16`.
+fn native_image(header: &Ihdr, samples: NativeSamples) -> Result<PngImage> {
+    let dims = dims(header)?;
+    Ok(match (header.color, samples) {
+        (ColorType::Grayscale, NativeSamples::B8(mut gray)) => {
+            let scale = gray8_scale(header.bit_depth);
+            for value in &mut gray {
+                *value *= scale;
+            }
+            PngImage::Gray8(ImageBuf::new(gray, dims)?)
+        }
+        (ColorType::Grayscale, NativeSamples::B16(gray)) => {
+            PngImage::Gray16(ImageBuf::new(gray, dims)?)
+        }
+        (ColorType::GrayscaleAlpha, NativeSamples::B8(v)) => {
+            PngImage::GrayAlpha8(ImageBuf::new(v, dims)?)
+        }
+        (ColorType::GrayscaleAlpha, NativeSamples::B16(v)) => {
+            PngImage::GrayAlpha16(ImageBuf::new(v, dims)?)
+        }
+        (ColorType::Truecolor, NativeSamples::B8(v)) => PngImage::Rgb8(ImageBuf::new(v, dims)?),
+        (ColorType::Truecolor, NativeSamples::B16(v)) => PngImage::Rgb16(ImageBuf::new(v, dims)?),
+        (ColorType::TruecolorAlpha, NativeSamples::B8(v)) => {
+            PngImage::Rgba8(ImageBuf::new(v, dims)?)
+        }
+        (ColorType::TruecolorAlpha, NativeSamples::B16(v)) => {
+            PngImage::Rgba16(ImageBuf::new(v, dims)?)
+        }
+        (ColorType::Indexed, NativeSamples::B8(indices)) => {
+            PngImage::Indexed8(ImageBuf::new(indices, dims)?)
+        }
+        // Indexed depths are at most 8 (Table 12), so 16-bit indexed samples cannot exist.
+        (ColorType::Indexed, NativeSamples::B16(_)) => {
+            return Err(Error::InvalidInput(
+                "PNG: bit depth not allowed for the colour type",
+            ));
+        }
+    })
 }
 
 /// The exact §13.12 factor presenting a sub-byte grey sample at 8 bits: 255 / (2^depth − 1).
@@ -522,9 +630,7 @@ impl DecodeImage<GrayAlpha8> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<GrayAlpha8>> {
         let native = self.decode_native(data)?;
         let out = match native.header.color {
-            ColorType::GrayscaleAlpha if native.header.bit_depth == 8 => {
-                native8(native.samples)?
-            }
+            ColorType::GrayscaleAlpha if native.header.bit_depth == 8 => native8(native.samples)?,
             ColorType::Grayscale if native.header.bit_depth <= 8 => {
                 let key = gray_key(native.trns_key);
                 let scale = gray8_scale(native.header.bit_depth);
@@ -577,9 +683,7 @@ impl DecodeImage<Rgba8> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
         let native = self.decode_native(data)?;
         let out = match native.header.color {
-            ColorType::TruecolorAlpha if native.header.bit_depth == 8 => {
-                native8(native.samples)?
-            }
+            ColorType::TruecolorAlpha if native.header.bit_depth == 8 => native8(native.samples)?,
             ColorType::Truecolor if native.header.bit_depth == 8 => {
                 let key = native.trns_key;
                 native8(native.samples)?
@@ -595,12 +699,10 @@ impl DecodeImage<Rgba8> for PngDecoder {
                     })
                     .collect()
             }
-            ColorType::GrayscaleAlpha if native.header.bit_depth == 8 => {
-                native8(native.samples)?
-                    .chunks_exact(2)
-                    .flat_map(|px| [px[0], px[0], px[0], px[1]])
-                    .collect()
-            }
+            ColorType::GrayscaleAlpha if native.header.bit_depth == 8 => native8(native.samples)?
+                .chunks_exact(2)
+                .flat_map(|px| [px[0], px[0], px[0], px[1]])
+                .collect(),
             ColorType::Grayscale if native.header.bit_depth <= 8 => {
                 let key = gray_key(native.trns_key);
                 let scale = gray8_scale(native.header.bit_depth);
@@ -668,9 +770,7 @@ impl DecodeImage<GrayAlpha16> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<GrayAlpha16>> {
         let native = self.decode_native(data)?;
         let out = match native.header.color {
-            ColorType::GrayscaleAlpha if native.header.bit_depth == 16 => {
-                native16(native.samples)?
-            }
+            ColorType::GrayscaleAlpha if native.header.bit_depth == 16 => native16(native.samples)?,
             ColorType::Grayscale if native.header.bit_depth == 16 => {
                 let key = gray_key(native.trns_key);
                 native16(native.samples)?
@@ -709,26 +809,21 @@ impl DecodeImage<Rgba16> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba16>> {
         let native = self.decode_native(data)?;
         let out = match native.header.color {
-            ColorType::TruecolorAlpha if native.header.bit_depth == 16 => {
-                native16(native.samples)?
-            }
+            ColorType::TruecolorAlpha if native.header.bit_depth == 16 => native16(native.samples)?,
             ColorType::Truecolor if native.header.bit_depth == 16 => {
                 let key = native.trns_key;
                 native16(native.samples)?
                     .chunks_exact(3)
                     .flat_map(|px| {
-                        let transparent =
-                            key == Some(TransparencyKey::Rgb(px[0], px[1], px[2]));
+                        let transparent = key == Some(TransparencyKey::Rgb(px[0], px[1], px[2]));
                         [px[0], px[1], px[2], alpha16(!transparent)]
                     })
                     .collect()
             }
-            ColorType::GrayscaleAlpha if native.header.bit_depth == 16 => {
-                native16(native.samples)?
-                    .chunks_exact(2)
-                    .flat_map(|px| [px[0], px[0], px[0], px[1]])
-                    .collect()
-            }
+            ColorType::GrayscaleAlpha if native.header.bit_depth == 16 => native16(native.samples)?
+                .chunks_exact(2)
+                .flat_map(|px| [px[0], px[0], px[0], px[1]])
+                .collect(),
             ColorType::Grayscale if native.header.bit_depth == 16 => {
                 let key = gray_key(native.trns_key);
                 native16(native.samples)?
@@ -764,9 +859,8 @@ fn alpha16(opaque: bool) -> u16 {
 mod tests {
     use gamut_core::{EncodeImage, ImageRef};
 
-    use crate::PngEncoder;
-
     use super::*;
+    use crate::PngEncoder;
 
     fn rgb_png(w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
         let src: Vec<u8> = (0..(w * h * 3) as usize)
@@ -946,6 +1040,94 @@ mod tests {
         let png = build_png(1, 1, 8, 1, &[0, 42]);
         let img: ImageBuf<Gray8> = PngDecoder::new().decode_image(&png).unwrap();
         assert_eq!(img.as_samples(), [42]);
+    }
+
+    #[test]
+    fn rich_decode_surfaces_metadata_and_native_image() {
+        use crate::SrgbIntent;
+        use crate::decoded::PngImage;
+
+        let (w, h) = (6u32, 4u32);
+        let src: Vec<u8> = (0..(w * h * 3) as usize).map(|i| i as u8).collect();
+        let exif = [0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00];
+        let xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>";
+        let comment = "zlib-compressed comment body";
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_gamma(1.0 / 2.2)
+            .with_srgb(SrgbIntent::Perceptual)
+            .with_chromaticities((0.3127, 0.3290), (0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
+            .with_exif(&exif)
+            .with_icc_profile("prof", b"not-a-real-profile-but-bytes")
+            .with_xmp(xmp)
+            .with_text("Title", "gamut")
+            .with_compressed_text("Comment", comment)
+            .encode_image(
+                ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
+                &mut png,
+            )
+            .unwrap();
+
+        let decoded = PngDecoder::new().decode(&png).unwrap();
+        assert_eq!((decoded.header.width, decoded.header.height), (w, h));
+        assert_eq!(decoded.header.color_type, ColorType::Truecolor);
+        assert_eq!(decoded.header.bit_depth, 8);
+        assert!(!decoded.header.interlaced);
+        match &decoded.image {
+            PngImage::Rgb8(img) => assert_eq!(img.as_samples(), src),
+            other => panic!("expected Rgb8, got {other:?}"),
+        }
+        assert_eq!(decoded.gamma, Some(45455));
+        assert_eq!(decoded.srgb, Some(SrgbIntent::Perceptual));
+        let chrm = decoded.chromaticities.unwrap();
+        assert_eq!(chrm.white, (31270, 32900));
+        assert_eq!(chrm.blue, (15000, 6000));
+        assert_eq!(decoded.exif.as_deref(), Some(&exif[..]));
+        let icc = decoded.icc_profile.unwrap();
+        assert_eq!(icc.name, "prof");
+        assert_eq!(icc.profile, b"not-a-real-profile-but-bytes");
+        assert_eq!(decoded.xmp.as_deref(), Some(xmp.as_bytes()));
+        assert_eq!(decoded.texts.len(), 2);
+        assert_eq!(
+            (
+                decoded.texts[0].keyword.as_str(),
+                decoded.texts[0].text.as_str()
+            ),
+            ("Title", "gamut")
+        );
+        assert_eq!(decoded.texts[1].text, comment);
+        assert!(decoded.palette.is_none());
+        assert!(decoded.transparency.is_none());
+        assert!(decoded.cicp.is_none());
+    }
+
+    #[test]
+    fn rich_decode_carries_palette_and_indices() {
+        use gamut_core::Indexed8 as Idx;
+
+        use crate::decoded::PngImage;
+
+        let rgb = [[9u8, 8, 7], [1, 2, 3]];
+        let palette = PngPalette::with_transparency(&rgb, &[128]).unwrap();
+        let indices = [0u8, 1, 1, 0];
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .encode_indexed8(
+                ImageRef::<Idx>::new(&indices, Dimensions::new(2, 2).unwrap()).unwrap(),
+                &palette,
+                &mut png,
+            )
+            .unwrap();
+        let decoded = PngDecoder::new().decode(&png).unwrap();
+        assert_eq!(decoded.header.color_type, ColorType::Indexed);
+        match &decoded.image {
+            PngImage::Indexed8(img) => assert_eq!(img.as_samples(), indices),
+            other => panic!("expected Indexed8, got {other:?}"),
+        }
+        let carried = decoded.palette.unwrap();
+        assert_eq!(carried.rgb(0), Some([9, 8, 7]));
+        assert_eq!(carried.alpha(0), Some(128));
+        assert_eq!(carried.alpha(1), Some(255));
     }
 
     #[test]

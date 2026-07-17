@@ -138,8 +138,8 @@ mod tests {
 
     #[test]
     fn from_chunks_round_trips_serialisation() {
-        let original = PngPalette::with_transparency(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], &[0, 128])
-            .unwrap();
+        let original =
+            PngPalette::with_transparency(&[[1, 2, 3], [4, 5, 6], [7, 8, 9]], &[0, 128]).unwrap();
         let parsed = PngPalette::from_chunks(&original.plte(), original.trns()).unwrap();
         assert_eq!(parsed.len(), 3);
         assert_eq!(parsed.rgb(0), Some([1, 2, 3]));

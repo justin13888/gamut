@@ -99,7 +99,10 @@ mod tests {
             unpack_scanlines(&[0b11_10_01_00], 4, 1, 2),
             vec![0b11, 0b10, 0b01, 0b00]
         );
-        assert_eq!(unpack_scanlines(&[0xA5, 0xF0], 3, 1, 4), vec![0xA, 0x5, 0xF]);
+        assert_eq!(
+            unpack_scanlines(&[0xA5, 0xF0], 3, 1, 4),
+            vec![0xA, 0x5, 0xF]
+        );
         // Padding bits are dropped, per row.
         assert_eq!(
             unpack_scanlines(&[0b1110_0000, 0b1010_0000], 3, 2, 1),

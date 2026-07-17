@@ -61,8 +61,8 @@ pub(crate) fn parse(data: &[u8]) -> Result<Ihdr> {
         return Err(Error::InvalidInput("PNG: dimension exceeds 2^31 - 1"));
     }
     let bit_depth = data[8];
-    let color = ColorType::from_code(data[9])
-        .ok_or(Error::InvalidInput("PNG: undefined colour type"))?;
+    let color =
+        ColorType::from_code(data[9]).ok_or(Error::InvalidInput("PNG: undefined colour type"))?;
     if !color.allows_bit_depth(bit_depth) {
         return Err(Error::InvalidInput(
             "PNG: bit depth not allowed for the colour type",

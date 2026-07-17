@@ -22,17 +22,57 @@ pub(crate) struct Pass {
 
 /// The seven Adam7 passes, in transmission order (§8.1).
 pub(crate) const PASSES: [Pass; 7] = [
-    Pass { x0: 0, y0: 0, dx: 8, dy: 8 },
-    Pass { x0: 4, y0: 0, dx: 8, dy: 8 },
-    Pass { x0: 0, y0: 4, dx: 4, dy: 8 },
-    Pass { x0: 2, y0: 0, dx: 4, dy: 4 },
-    Pass { x0: 0, y0: 2, dx: 2, dy: 4 },
-    Pass { x0: 1, y0: 0, dx: 2, dy: 2 },
-    Pass { x0: 0, y0: 1, dx: 1, dy: 2 },
+    Pass {
+        x0: 0,
+        y0: 0,
+        dx: 8,
+        dy: 8,
+    },
+    Pass {
+        x0: 4,
+        y0: 0,
+        dx: 8,
+        dy: 8,
+    },
+    Pass {
+        x0: 0,
+        y0: 4,
+        dx: 4,
+        dy: 8,
+    },
+    Pass {
+        x0: 2,
+        y0: 0,
+        dx: 4,
+        dy: 4,
+    },
+    Pass {
+        x0: 0,
+        y0: 2,
+        dx: 2,
+        dy: 4,
+    },
+    Pass {
+        x0: 1,
+        y0: 0,
+        dx: 2,
+        dy: 2,
+    },
+    Pass {
+        x0: 0,
+        y0: 1,
+        dx: 1,
+        dy: 2,
+    },
 ];
 
 /// The trivial single "pass" of a non-interlaced image, so both modes share one pipeline.
-pub(crate) const SEQUENTIAL: [Pass; 1] = [Pass { x0: 0, y0: 0, dx: 1, dy: 1 }];
+pub(crate) const SEQUENTIAL: [Pass; 1] = [Pass {
+    x0: 0,
+    y0: 0,
+    dx: 1,
+    dy: 1,
+}];
 
 /// The pass list for an image's interlace mode.
 pub(crate) fn passes_for(interlaced: bool) -> &'static [Pass] {
@@ -93,9 +133,8 @@ pub(crate) fn scatter<S: Copy>(
 
 #[cfg(test)]
 mod tests {
-    use crate::color::ColorType;
-
     use super::*;
+    use crate::color::ColorType;
 
     fn header(width: u32, height: u32, bit_depth: u8, interlaced: bool) -> Ihdr {
         Ihdr {
@@ -185,7 +224,14 @@ mod tests {
         assert_eq!(canvas, [0, 7, 0, 9, 0, 0, 0, 0]);
         // Two-channel scatter keeps channel adjacency.
         let mut canvas2 = [0u16; 8];
-        scatter(&mut canvas2, 2, &SEQUENTIAL[0], &[1, 2, 3, 4, 5, 6, 7, 8], 2, 2);
+        scatter(
+            &mut canvas2,
+            2,
+            &SEQUENTIAL[0],
+            &[1, 2, 3, 4, 5, 6, 7, 8],
+            2,
+            2,
+        );
         assert_eq!(canvas2, [1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }
