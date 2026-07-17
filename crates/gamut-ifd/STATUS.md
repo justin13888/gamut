@@ -33,6 +33,7 @@ read/write code paths byte-for-byte.
 | P7 | — | libtiff/exiv2 differential oracle gate (via the consuming codecs — see below) | ✅ via codecs |
 | P8 | — | BigTIFF (8-byte offsets/counts, `Long8`/`SLong8`/`Ifd8`) — gated `bigtiff` feature, additive | ✅ done |
 | P9 | §2 | RAW-grade streaming: `ReadAt` sources (slice / `Read + Seek` / rebased), lazy `IfdReader`, structural `tags` | ✅ done (#252) |
+| P10 | §2 | **Byte completeness** (2.0 reshape): lossless `Value::Unknown` model, one-parser collapse, dual-ledger `Tracked`+`SegmentMap` audit, writer-declared padding + pinned spans | ✅ done (#263) |
 
 P5's **write** side landed with the DNG codec (issue #109): [`write`](src/writer.rs) lays out the
 whole IFD *tree* — [`Ifd::set_sub_ifd`](src/entry.rs) attaches children under a pointer tag
@@ -91,10 +92,58 @@ shape. P9 adds the streaming layer **additively** — the frozen v1 slice surfac
   name the directory graph itself.
 
 The guard story: the chain loop/length guard (`ChainGuard`) and the sub-IFD depth/cycle guards
-(`resolve_pointers_with`) are *shared* with the slice path; the directory-body walk is mirrored
-(the data flows differ — decode-in-loop vs raw capture), and `tests/robustness.rs` runs the whole
-hostile corpus through both paths asserting **agreement**, so a mutant in either copy dies. The
+(`resolve_pointers_with`) are *shared* with the slice path; since P10 the slice functions are
+thin wrappers over the streaming engine (**one parser**), and `tests/robustness.rs` keeps
+driving both entry points over the hostile corpus as a regression gate on the wrappers. The
 streaming path is u64-native end to end (no `as usize` truncation of hostile 64-bit widths).
 Layout requirement 3 of #252 (deterministic write offsets) was already the P4 keystone contract;
 `tests/streaming.rs` pins the rest of the capability surface (three source shapes × orders ×
-variants, coverage parity, the ≤64-read-bytes laziness contract, the maker-note pattern).
+variants, audited-walk classification, the ≤64-read-bytes laziness contract, the maker-note
+pattern).
+
+## P10 — byte completeness (issue #263, the 2.0 reshape)
+
+Issue #263 gates rawshift's TIFF/DNG migration: its parser explicitly accounts for every byte,
+and this crate had to be verified — and where verification failed, fixed **structurally** — to
+match. The audit found three architectural flaws, each closed by construction rather than by
+convention:
+
+- **The model was lossy.** Unknown field-type entries were skipped at read, so a read → write
+  cycle silently dropped them. Now `Value::Unknown` preserves the whole entry record verbatim
+  (type code, declared count, raw value/offset word in its captured byte order); the writer
+  re-emits it bit-exactly and refuses the one impossible operation (transcoding the opaque word
+  across a byte order/variant change). `FieldType::Ifd` (classic 13, TIFF TechNote 1) joined
+  the known set. `tests/fidelity.rs` pins the whole matrix.
+- **Accounting was opt-in.** Coverage marks were manual calls nothing tied to the parse. Now
+  accounting is **dual-ledger**: a `Tracked` source records every byte physically read, the
+  parser makes typed `SegmentMap` claims (`SpanKind` × `Parsed`/`Declared`), and `finish`
+  cross-checks the two — a parse path that reads without claiming, or claims without reading,
+  is caught mechanically (`unclaimed_reads`/`unread_claims`; the robustness corpus asserts the
+  invariant on every successful parse). `audit`/`Auditor` drive the whole-tree walk, with
+  `walk_embedded` for rebased embedded streams (DNG camera profiles, maker-note mini-IFDs).
+- **Padding was tolerated, not classified.** Consumers allowed "≤ N gap bytes". Now `write_with`
+  returns a map declaring every emitted byte (padding included, fully classified by
+  construction), the audit reclassifies only byte-inspected plausible zero-fill, and
+  `SegmentReport::is_fully_classified` is a zero-tolerance verdict. `write_with` also **pins**
+  named values at exact absolute offsets — the maker-note preservation primitive.
+
+### Intentional drops (the complete ledger)
+
+1. **Unknown-type out-of-line payloads.** An unknown field type's element size is unknowable,
+   so if its value/offset word was an offset, the pointed-at bytes cannot be sized, fetched, or
+   relocated. The entry record round-trips verbatim; the payload bytes surface as unclassified
+   in an audit (the honest signal), and after a relocating rewrite the word may dangle.
+2. **Layout re-canonicalisation.** `write` produces a canonical layout (word-aligned, tag-sorted,
+   tight value pool): original offsets, entry order, and padding of arbitrary *input* are not
+   reproduced — `read(write(f)) == f` and the audit closed loop are the contract, not whole-file
+   byte identity of foreign input. Pinned spans (`WriteOptions::pinned`) are the per-value
+   escape hatch.
+3. **Cross-order/variant transcoding of unknown-type values is refused** (a typed error), since
+   the opaque word's meaning cannot be re-encoded.
+
+Dependency evaluation (the issue asked): binrw/deku (declarative sequential parsers) cannot
+express the runtime-endian offset *graph* with hostile-input guards; zerocopy's endianness is a
+type parameter where TIFF's is runtime data; winnow/nom model streams, not random access;
+`rangemap` would replace only the ~120-line interval coalescer while the bespoke semantics
+(claim provenance, sharing dedupe, conflict kinds) still need wrapping. The crate stays
+zero-dependency; the guarantee comes from the dual-ledger architecture, not a parser library.

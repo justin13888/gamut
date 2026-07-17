@@ -30,6 +30,11 @@
 //! deferred tail (tiles, JPEG XL, lossy JPEG, the standard opcode *processing* library,
 //! masks/depth maps).
 //!
+//! For archival use, [`deconstruct`] classifies **every byte** of a DNG into typed segments
+//! (dual-ledger checked, issue #263), and [`DngRewrite`] is the preserving edit path: the whole
+//! tree opens losslessly, pixel payloads are carried byte-for-byte, and the `MakerNote` byte
+//! range is pinned at its original offset.
+//!
 //! Memory-safe on hostile input: `#![forbid(unsafe_code)]` — like TIFF, DNG's offset-driven
 //! structure is a classic parser-exploit surface, so the decoder is built to resist malformed
 //! IFDs, offset loops, and truncation.

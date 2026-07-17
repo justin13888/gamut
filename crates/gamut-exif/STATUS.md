@@ -27,9 +27,10 @@ fixtures** (`tests/fixtures/`, regenerate with `GAMUT_REGEN_GOLDEN=1`).
 
 ## Intentionally deferred (additive under the `#[non_exhaustive]` surface)
 
-- **Per-vendor MakerNote decoding** (Canon/Nikon/Sony/…). v1 preserves the block verbatim and
-  detects the vendor from `Make`, but does not decode or rebase its internal offsets — so re-serialising
-  a MakerNote guarantees value-level, not byte-level, fidelity (documented on `MakerNote`).
+- **Per-vendor MakerNote decoding** (Canon/Nikon/Sony/…). The crate preserves the block verbatim
+  — and, since issue #263, pins its byte range at the source offset on rewrites so
+  vendor-absolute internal offsets stay valid — and detects the vendor from `Make`, but does not
+  decode the block (documented on `MakerNote`).
 - **exiftool-parity tag breadth** beyond the standard dictionary. Unknown and MakerNote tags still
   round-trip losslessly because the raw `gamut_ifd::Ifd` is retained.
 - **Uncompressed strip-based thumbnails** are read (as their directory) but not re-embedded; JPEG
