@@ -4,6 +4,7 @@
 use gamut_core::{Dimensions, Error, Result};
 
 use crate::levels::RawLevels;
+use crate::linearize::LinearImage;
 use crate::values::CfaLayout;
 
 /// CFA colour codes, as stored in the `CFAPattern` tag (DNG spec / TIFF-EP).
@@ -311,6 +312,24 @@ impl RawImage {
     #[must_use]
     pub fn samples(&self) -> &[u16] {
         &self.samples
+    }
+
+    /// Maps the stored sensor values to **linear reference values** — the DNG 1.7.1 Chapter-5
+    /// pipeline: linearization-table lookup, black subtraction (pattern anchored at the active
+    /// area, plus the per-column/per-row deltas), rescaling so the white level maps to `1.0`,
+    /// and clipping to `[0.0, 1.0]`.
+    ///
+    /// The output is the **active-area crop** (the same geometry as the Adobe SDK's stage-2
+    /// image, against which this mapping is differentially tested). Demosaicing and colour
+    /// rendering remain out of scope — a CFA input stays a mosaic, just linearized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the active area is empty or out of bounds, a delta
+    /// vector doesn't match the active area, the linearization table is empty, or a plane's
+    /// white level does not exceed its maximum computed black level.
+    pub fn to_linear(&self) -> Result<LinearImage> {
+        crate::linearize::linearize(self)
     }
 }
 
