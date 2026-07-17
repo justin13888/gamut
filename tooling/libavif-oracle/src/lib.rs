@@ -8,7 +8,13 @@
 //! decoder produced (no RGB color conversion), mirroring the old `avifdec` Y4M path. The C libraries
 //! are built from the `third_party/libavif` and `third_party/dav1d` git submodules by `build.rs`.
 //!
-//! All `unsafe` FFI is confined here behind a single safe entry point, [`decode_avif`].
+//! For the container **decode** surface (issue #250) two further entry points serve the
+//! differential conformance suite: [`introspect`] parses the container without decoding pixels
+//! (structure, CICP, transforms, metadata payloads), and [`decode_rgba`] returns libavif's own
+//! RGBA8 presentation of the primary image (its colour conversion and alpha merge), the oracle for
+//! `gamut_avif::AvifImage::decode_primary_rgba8`.
+//!
+//! All `unsafe` FFI is confined here behind these safe entry points.
 
 #![allow(non_upper_case_globals, non_camel_case_types, non_snake_case)]
 
@@ -136,6 +142,196 @@ unsafe fn copy_plane(
         }
     }
     out
+}
+
+/// The structural facts libavif reports for an AVIF file after `avifDecoderParse` — no pixel
+/// decode involved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvifStructure {
+    /// Primary image width in pixels.
+    pub width: u32,
+    /// Primary image height in pixels.
+    pub height: u32,
+    /// Bits per component.
+    pub depth: u8,
+    /// The raw `avifPixelFormat` value (1 = 4:4:4, 2 = 4:2:2, 3 = 4:2:0, 4 = monochrome).
+    pub yuv_format: u32,
+    /// Whether the YUV signal is full range.
+    pub full_range: bool,
+    /// CICP `colour_primaries`.
+    pub color_primaries: u16,
+    /// CICP `transfer_characteristics`.
+    pub transfer_characteristics: u16,
+    /// CICP `matrix_coefficients`.
+    pub matrix_coefficients: u16,
+    /// Whether an alpha plane (alpha auxiliary item) is present.
+    pub alpha_present: bool,
+    /// The `irot` angle (anti-clockwise quarter turns), when the transform is present.
+    pub irot_angle: Option<u8>,
+    /// The `imir` axis, when the transform is present.
+    pub imir_axis: Option<u8>,
+    /// The `clap` box values `[widthN, widthD, heightN, heightD, horizOffN, horizOffD, vertOffN,
+    /// vertOffD]`, when the transform is present.
+    pub clap: Option<[u32; 8]>,
+    /// The ICC profile payload (empty if none).
+    pub icc: Vec<u8>,
+    /// The Exif payload as stored (empty if none). libavif strips the 4-byte
+    /// `exif_tiff_header_offset` prefix, exposing the TIFF stream directly.
+    pub exif: Vec<u8>,
+    /// The XMP packet (empty if none).
+    pub xmp: Vec<u8>,
+}
+
+/// Parses an AVIF file's container structure with libavif — `avifDecoderParse` only, no pixel
+/// decode — and reports the primary image's structural facts.
+///
+/// # Errors
+///
+/// Returns a message (including libavif's own result string) if the container cannot be parsed.
+pub fn introspect(avif: &[u8]) -> Result<AvifStructure, String> {
+    // SAFETY: the decoder handle is created and destroyed in a matched pair on every return path;
+    // the input pointer stays valid for the call's duration and libavif copies what it keeps.
+    unsafe { introspect_inner(avif) }
+}
+
+unsafe fn introspect_inner(avif: &[u8]) -> Result<AvifStructure, String> {
+    unsafe {
+        let decoder = sys::avifDecoderCreate();
+        if decoder.is_null() {
+            return Err("avifDecoderCreate returned null".into());
+        }
+        let out = (|| {
+            let result = sys::avifDecoderSetIOMemory(decoder, avif.as_ptr(), avif.len());
+            if result != sys::AVIF_RESULT_OK {
+                return Err(format!(
+                    "avifDecoderSetIOMemory failed: {}",
+                    result_str(result)
+                ));
+            }
+            let result = sys::avifDecoderParse(decoder);
+            if result != sys::AVIF_RESULT_OK {
+                return Err(format!("avifDecoderParse failed: {}", result_str(result)));
+            }
+            let image = &*(*decoder).image;
+            let flags = image.transformFlags;
+            let clap = &image.clap;
+            Ok(AvifStructure {
+                width: image.width,
+                height: image.height,
+                depth: image.depth as u8,
+                yuv_format: image.yuvFormat as u32,
+                full_range: image.yuvRange == sys::AVIF_RANGE_FULL,
+                color_primaries: image.colorPrimaries,
+                transfer_characteristics: image.transferCharacteristics,
+                matrix_coefficients: image.matrixCoefficients,
+                alpha_present: (*decoder).alphaPresent != 0,
+                irot_angle: (flags & sys::AVIF_TRANSFORM_IROT != 0).then_some(image.irot.angle),
+                imir_axis: (flags & sys::AVIF_TRANSFORM_IMIR != 0).then_some(image.imir.axis),
+                clap: (flags & sys::AVIF_TRANSFORM_CLAP != 0).then_some([
+                    clap.widthN,
+                    clap.widthD,
+                    clap.heightN,
+                    clap.heightD,
+                    clap.horizOffN,
+                    clap.horizOffD,
+                    clap.vertOffN,
+                    clap.vertOffD,
+                ]),
+                icc: rw_data(&image.icc),
+                exif: rw_data(&image.exif),
+                xmp: rw_data(&image.xmp),
+            })
+        })();
+        sys::avifDecoderDestroy(decoder);
+        out
+    }
+}
+
+/// Copies an `avifRWData` payload into an owned `Vec` (empty for a null/zero-length payload).
+unsafe fn rw_data(data: &sys::avifRWData) -> Vec<u8> {
+    if data.data.is_null() || data.size == 0 {
+        return Vec::new();
+    }
+    // SAFETY: libavif guarantees `data` addresses `size` bytes for the decoder's lifetime.
+    unsafe { std::slice::from_raw_parts(data.data, data.size).to_vec() }
+}
+
+/// Decodes the primary image of an AVIF file to libavif's own interleaved RGBA8 presentation —
+/// colour conversion (`avifImageYUVToRGB`) and alpha merge included, `irot`/`imir`/`clap` **not**
+/// applied (libavif leaves transforms to the caller). Returns `(width, height, rgba)`.
+///
+/// # Errors
+///
+/// Returns a message (including libavif's own result string) if the file cannot be parsed,
+/// decoded, or converted.
+pub fn decode_rgba(avif: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    // SAFETY: decoder/image handles and the RGB pixel allocation are created and released in
+    // matched pairs on every return path.
+    unsafe { decode_rgba_inner(avif) }
+}
+
+unsafe fn decode_rgba_inner(avif: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
+    unsafe {
+        let decoder = sys::avifDecoderCreate();
+        if decoder.is_null() {
+            return Err("avifDecoderCreate returned null".into());
+        }
+        let image = sys::avifImageCreateEmpty();
+        if image.is_null() {
+            sys::avifDecoderDestroy(decoder);
+            return Err("avifImageCreateEmpty returned null".into());
+        }
+
+        let result = sys::avifDecoderReadMemory(decoder, image, avif.as_ptr(), avif.len());
+        let out = if result == sys::AVIF_RESULT_OK {
+            to_rgba(&*image)
+        } else {
+            Err(format!(
+                "avifDecoderReadMemory failed: {}",
+                result_str(result)
+            ))
+        };
+
+        sys::avifImageDestroy(image);
+        sys::avifDecoderDestroy(decoder);
+        out
+    }
+}
+
+/// Converts a decoded `avifImage` to tightly packed RGBA8 via `avifImageYUVToRGB`.
+unsafe fn to_rgba(image: &sys::avifImage) -> Result<(u32, u32, Vec<u8>), String> {
+    // SAFETY: `rgb` is initialized by `avifRGBImageSetDefaults`; its pixel buffer is allocated by
+    // `avifRGBImageAllocatePixels` and freed on every path after the copy.
+    unsafe {
+        let mut rgb: sys::avifRGBImage = std::mem::zeroed();
+        sys::avifRGBImageSetDefaults(&mut rgb, image);
+        rgb.format = sys::AVIF_RGB_FORMAT_RGBA;
+        rgb.depth = 8;
+        // Nearest-neighbour chroma upsampling, matching gamut-avif's documented RGBA policy, so a
+        // pixel diff against it isolates real conversion errors instead of resampler choice.
+        rgb.chromaUpsampling = sys::AVIF_CHROMA_UPSAMPLING_NEAREST;
+        let result = sys::avifRGBImageAllocatePixels(&mut rgb);
+        if result != sys::AVIF_RESULT_OK {
+            return Err(format!(
+                "avifRGBImageAllocatePixels failed: {}",
+                result_str(result)
+            ));
+        }
+        let result = sys::avifImageYUVToRGB(image, &mut rgb);
+        let out = if result == sys::AVIF_RESULT_OK {
+            let (w, h) = (rgb.width as usize, rgb.height as usize);
+            let mut pixels = vec![0u8; w * h * 4];
+            for row in 0..h {
+                let src = rgb.pixels.add(rgb.rowBytes as usize * row);
+                std::ptr::copy_nonoverlapping(src, pixels[row * w * 4..].as_mut_ptr(), w * 4);
+            }
+            Ok((rgb.width, rgb.height, pixels))
+        } else {
+            Err(format!("avifImageYUVToRGB failed: {}", result_str(result)))
+        };
+        sys::avifRGBImageFreePixels(&mut rgb);
+        out
+    }
 }
 
 /// libavif's human-readable string for a result code.
