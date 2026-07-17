@@ -46,13 +46,20 @@
 
 mod av1c;
 mod config;
+mod container;
 mod encoder;
+mod image;
 mod obu;
 mod transform;
 
 pub use av1c::{Av1Config, ChromaFormat};
 pub use config::{AvifConfig, AvifMode};
+pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use encoder::AvifEncoder;
 pub use gamut_core::Dimensions;
+pub use image::{
+    AvifImage, AvifItem, CleanAperture, ContentLightLevel, ItemKind, PixelAspectRatio,
+    TransformativeProperty,
+};
 pub use obu::{Obu, ObuHeader, ObuIter, ObuType, iter_obus};
 pub use transform::{Mirror, Rotation};
