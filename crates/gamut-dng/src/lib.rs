@@ -36,6 +36,7 @@ pub mod encoder;
 pub mod levels;
 pub mod linearize;
 pub mod metadata;
+pub mod opcode;
 pub mod profile;
 pub mod raw;
 pub mod tags;
@@ -57,6 +58,7 @@ pub use gamut_ifd::ByteOrder;
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
 pub use metadata::{DngMetadata, ExifMetadata};
+pub use opcode::{Opcode, OpcodeList};
 pub use profile::CameraProfile;
 pub use raw::RawImage;
 pub use values::{

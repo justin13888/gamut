@@ -5,6 +5,7 @@ use gamut_core::{Dimensions, Error, Result};
 
 use crate::levels::RawLevels;
 use crate::linearize::LinearImage;
+use crate::opcode::OpcodeList;
 use crate::values::CfaLayout;
 
 /// CFA colour codes, as stored in the `CFAPattern` tag (DNG spec / TIFF-EP).
@@ -64,6 +65,7 @@ pub struct RawImage {
     samples_per_pixel: u16,
     levels: RawLevels,
     masked_areas: Vec<[u32; 4]>,
+    opcode_lists: [OpcodeList; 3],
     active_area: Option<[u32; 4]>,
     default_crop: Option<([u32; 2], [u32; 2])>,
     photometry: RawPhotometry,
@@ -102,6 +104,7 @@ impl RawImage {
             samples_per_pixel: 1,
             levels: RawLevels::uniform(1, 0.0, white_level_default(bits_per_sample))?,
             masked_areas: Vec::new(),
+            opcode_lists: [OpcodeList::new(), OpcodeList::new(), OpcodeList::new()],
             active_area: None,
             default_crop: None,
             photometry: RawPhotometry::Cfa {
@@ -141,6 +144,7 @@ impl RawImage {
             samples_per_pixel: planes,
             levels: RawLevels::uniform(planes, 0.0, white_level_default(bits_per_sample))?,
             masked_areas: Vec::new(),
+            opcode_lists: [OpcodeList::new(), OpcodeList::new(), OpcodeList::new()],
             active_area: None,
             default_crop: None,
             photometry: RawPhotometry::LinearRaw { planes },
@@ -225,6 +229,29 @@ impl RawImage {
         self
     }
 
+    /// Sets `OpcodeList1` — opcodes applied to the **stored** raw data, before linearization.
+    /// Returns `self` for chaining.
+    #[must_use]
+    pub fn with_opcode_list1(mut self, list: OpcodeList) -> Self {
+        self.opcode_lists[0] = list;
+        self
+    }
+
+    /// Sets `OpcodeList2` — opcodes applied after the raw-to-linear mapping. Returns `self` for
+    /// chaining.
+    #[must_use]
+    pub fn with_opcode_list2(mut self, list: OpcodeList) -> Self {
+        self.opcode_lists[1] = list;
+        self
+    }
+
+    /// Sets `OpcodeList3` — opcodes applied after demosaicing. Returns `self` for chaining.
+    #[must_use]
+    pub fn with_opcode_list3(mut self, list: OpcodeList) -> Self {
+        self.opcode_lists[2] = list;
+        self
+    }
+
     /// Sets the active-area rectangle `[top, left, bottom, right]` (the region holding image data,
     /// excluding masked/border pixels). Returns `self` for chaining.
     #[must_use]
@@ -288,6 +315,26 @@ impl RawImage {
     #[must_use]
     pub fn masked_areas(&self) -> &[[u32; 4]] {
         &self.masked_areas
+    }
+
+    /// `OpcodeList1`: opcodes applied to the stored raw data (empty when absent). This crate
+    /// parses and round-trips the container; *applying* opcodes is the caller's job for now
+    /// (`STATUS.md` P18).
+    #[must_use]
+    pub fn opcode_list1(&self) -> &OpcodeList {
+        &self.opcode_lists[0]
+    }
+
+    /// `OpcodeList2`: opcodes applied after the raw-to-linear mapping (empty when absent).
+    #[must_use]
+    pub fn opcode_list2(&self) -> &OpcodeList {
+        &self.opcode_lists[1]
+    }
+
+    /// `OpcodeList3`: opcodes applied after demosaicing (empty when absent).
+    #[must_use]
+    pub fn opcode_list3(&self) -> &OpcodeList {
+        &self.opcode_lists[2]
     }
 
     /// The active-area rectangle `[top, left, bottom, right]`, if set.

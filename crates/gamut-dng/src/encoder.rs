@@ -64,6 +64,11 @@ impl DngEncoder {
 
     /// Returns a copy of this encoder that declares the given `DNGBackwardVersion` — the oldest DNG
     /// version a reader needs to fully parse the file.
+    ///
+    /// If the raw image carries a **non-optional** opcode introduced by a newer DNG version, the
+    /// written tag is automatically raised to that opcode's version: a writer must not declare a
+    /// backward version below the DNG version of any non-optional opcode present (DNG 1.7.1
+    /// Compatibility Issue 7, p. 124).
     #[must_use]
     pub fn with_backward_version(mut self, version: [u8; 4]) -> Self {
         self.backward_version = version;
@@ -149,7 +154,7 @@ impl DngEncoder {
         };
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
-        let mut ifd0 = self.build_ifd0(profile, preview_dims);
+        let mut ifd0 = self.build_ifd0(profile, preview_dims, backward_version_for(self, raw));
         // Embed metadata: XMP/IPTC/ICC blocks go in IFD 0; EXIF becomes an `ExifIFD` sub-IFD.
         if !self.metadata.is_empty()
             && let Some(exif) = self.metadata.apply(&mut ifd0)
@@ -183,8 +188,13 @@ impl DngEncoder {
 
     /// Builds IFD 0: the RGB preview's image tags plus the DNG version, camera identity, and the
     /// colour-calibration profile. The `SubIFDs` pointer and strip offsets are filled in by the
-    /// writer.
-    fn build_ifd0(&self, profile: &CameraProfile, preview_dims: gamut_core::Dimensions) -> Ifd {
+    /// writer. `backward_version` is the effective (possibly opcode-raised) `DNGBackwardVersion`.
+    fn build_ifd0(
+        &self,
+        profile: &CameraProfile,
+        preview_dims: gamut_core::Dimensions,
+        backward_version: [u8; 4],
+    ) -> Ifd {
         let mut ifd = Ifd::new();
         // Preview image (a reduced-resolution RGB thumbnail).
         ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
@@ -215,7 +225,7 @@ impl DngEncoder {
         ifd.set(tags::DNG_VERSION, Value::Byte(self.dng_version.to_vec()));
         ifd.set(
             tags::DNG_BACKWARD_VERSION,
-            Value::Byte(self.backward_version.to_vec()),
+            Value::Byte(backward_version.to_vec()),
         );
         ifd.set(
             tags::UNIQUE_CAMERA_MODEL,
@@ -288,6 +298,21 @@ impl DngEncoder {
         }
         ifd
     }
+}
+
+/// The effective `DNGBackwardVersion`: the configured version, raised to the spec version of
+/// every **non-optional** opcode the raw carries (DNG 1.7.1 Compatibility Issue 7, p. 124 — a
+/// reader that must execute an opcode needs at least the DNG version that defined it). The four
+/// version octets compare lexicographically, which matches dotted-version ordering.
+fn backward_version_for(encoder: &DngEncoder, raw: &RawImage) -> [u8; 4] {
+    let mut version = encoder.backward_version;
+    let lists = [raw.opcode_list1(), raw.opcode_list2(), raw.opcode_list3()];
+    for opcode in lists.iter().flat_map(|l| l.opcodes()) {
+        if !opcode.is_optional() && opcode.spec_version > version {
+            version = opcode.spec_version;
+        }
+    }
+    version
 }
 
 /// Builds an `SRATIONAL` value from a row-major `3 × 3` colour/calibration matrix.
@@ -397,6 +422,15 @@ fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Result<Ifd> {
             tags::MASKED_AREAS,
             Value::Long(raw.masked_areas().iter().flatten().copied().collect()),
         );
+    }
+    for (tag, list) in [
+        (tags::OPCODE_LIST1, raw.opcode_list1()),
+        (tags::OPCODE_LIST2, raw.opcode_list2()),
+        (tags::OPCODE_LIST3, raw.opcode_list3()),
+    ] {
+        if !list.is_empty() {
+            ifd.set(tag, Value::Undefined(list.to_bytes()));
+        }
     }
     if let Some([t, l, b, r]) = raw.active_area() {
         ifd.set(tags::ACTIVE_AREA, Value::Long(vec![t, l, b, r]));

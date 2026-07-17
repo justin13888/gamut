@@ -10,6 +10,7 @@ use gamut_ifd::{ByteOrder, Ifd, Value, Variant, read, read_ifd_at};
 
 use crate::levels::RawLevels;
 use crate::metadata::{DngMetadata, ExifMetadata};
+use crate::opcode::OpcodeList;
 use crate::profile::CameraProfile;
 use crate::raw::RawImage;
 use crate::values::{
@@ -249,7 +250,29 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
     if let Some(areas) = decode_masked_areas(ifd)? {
         raw = raw.with_masked_areas(areas);
     }
+    if let Some(list) = decode_opcode_list(ifd, tags::OPCODE_LIST1)? {
+        raw = raw.with_opcode_list1(list);
+    }
+    if let Some(list) = decode_opcode_list(ifd, tags::OPCODE_LIST2)? {
+        raw = raw.with_opcode_list2(list);
+    }
+    if let Some(list) = decode_opcode_list(ifd, tags::OPCODE_LIST3)? {
+        raw = raw.with_opcode_list3(list);
+    }
     Ok(raw)
+}
+
+/// Reads an `OpcodeList1/2/3` tag (UNDEFINED bytes) into a typed [`OpcodeList`]. The container
+/// is big-endian regardless of the file's byte order (DNG 1.7.1 p. 105); a malformed container
+/// is an error, not silently dropped.
+fn decode_opcode_list(ifd: &Ifd, tag: u16) -> Result<Option<OpcodeList>> {
+    let Some(value) = ifd.get(tag) else {
+        return Ok(None);
+    };
+    let bytes = value.as_bytes().ok_or(Error::InvalidInput(
+        "DNG: opcode lists must be UNDEFINED byte data",
+    ))?;
+    Ok(Some(OpcodeList::parse(bytes)?))
 }
 
 /// Reads the level family — `BlackLevelRepeatDim`/`BlackLevel` (+ the `DeltaH`/`DeltaV`

@@ -293,6 +293,89 @@ fn per_plane_white_levels_roundtrip() {
 }
 
 #[test]
+fn opcode_lists_roundtrip_and_validate() {
+    use gamut_dng::{Opcode, OpcodeList};
+    // Vendor-private (unknown) opcode IDs with the optional flag: the SDK parses known IDs'
+    // parameter payloads strictly, but wraps unknown optional opcodes and carries them through —
+    // exactly the pass-through contract this container test is about.
+    let mut list1 = OpcodeList::new();
+    list1.push(Opcode {
+        id: 0xC000_0001,
+        spec_version: [1, 3, 0, 0],
+        flags: Opcode::FLAG_OPTIONAL,
+        parameters: vec![1, 2, 3, 4],
+    });
+    let mut list3 = OpcodeList::new();
+    list3.push(Opcode {
+        id: 0xC000_0002,
+        spec_version: [1, 3, 0, 0],
+        flags: Opcode::FLAG_OPTIONAL | Opcode::FLAG_PREVIEW_SKIP,
+        parameters: vec![0xDE, 0xAD],
+    });
+    let raw = common::sample_raw(16, 12, 16)
+        .with_opcode_list1(list1.clone())
+        .with_opcode_list3(list3.clone());
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.raw.opcode_list1(), &list1);
+    assert!(decoded.raw.opcode_list2().is_empty());
+    assert_eq!(decoded.raw.opcode_list3(), &list3);
+    assert_eq!(decoded.raw, raw);
+
+    // The Adobe SDK accepts the file (the opcodes are flagged optional, so an SDK that chose to
+    // execute them may skip these synthetic payloads).
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept opcode lists");
+}
+
+#[test]
+fn non_optional_opcodes_raise_the_backward_version() {
+    use gamut_dng::{Opcode, OpcodeList};
+    let mut list2 = OpcodeList::new();
+    list2.push(Opcode {
+        id: gamut_dng::opcode::opcode_id::WARP_RECTILINEAR_2,
+        spec_version: [1, 6, 0, 0],
+        flags: 0, // non-optional: a reader must execute it, so it needs DNG >= 1.6
+        parameters: vec![],
+    });
+    let raw = common::sample_raw(16, 12, 16).with_opcode_list2(list2);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_dng_version([1, 6, 0, 0])
+        .with_backward_version([1, 1, 0, 0]) // too low: must be raised to 1.6.0.0
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let file = gamut_ifd::read(&dng).expect("parse");
+    assert_eq!(
+        file.ifds[0].get(gamut_dng::tags::DNG_BACKWARD_VERSION),
+        Some(&gamut_ifd::Value::Byte(vec![1, 6, 0, 0])),
+        "DNGBackwardVersion must be raised to the non-optional opcode's version"
+    );
+    // An optional opcode of the same version must NOT raise it.
+    let mut optional = OpcodeList::new();
+    optional.push(Opcode {
+        id: gamut_dng::opcode::opcode_id::WARP_RECTILINEAR_2,
+        spec_version: [1, 6, 0, 0],
+        flags: Opcode::FLAG_OPTIONAL,
+        parameters: vec![],
+    });
+    let raw = common::sample_raw(16, 12, 16).with_opcode_list2(optional);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_backward_version([1, 1, 0, 0])
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let file = gamut_ifd::read(&dng).expect("parse");
+    assert_eq!(
+        file.ifds[0].get(gamut_dng::tags::DNG_BACKWARD_VERSION),
+        Some(&gamut_ifd::Value::Byte(vec![1, 1, 0, 0]))
+    );
+}
+
+#[test]
 fn single_value_black_and_white_levels_broadcast_on_decode() {
     // Writers (including pre-pattern gamut-dng) may store BlackLevel/WhiteLevel with count 1
     // even when SamplesPerPixel > 1; the decoder broadcasts the value to every cell/plane.
