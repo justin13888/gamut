@@ -23,8 +23,42 @@ pub struct TiffFile {
 /// An upper bound on the number of IFDs followed, to bound malformed/looping chains.
 const MAX_IFDS: usize = 1 << 16;
 
+/// Guards a top-level next-IFD walk against loops and runaway length, shared by the slice
+/// reader ([`read`]) and the streaming reader ([`IfdChain`](crate::IfdChain)) so the two paths
+/// cannot drift.
+///
+/// A hash set keeps the loop guard O(1) per link: a hostile chain can be [`MAX_IFDS`] long, and
+/// a linear scan per link would make it quadratic.
+#[derive(Debug)]
+pub(crate) struct ChainGuard {
+    seen: std::collections::HashSet<u64>,
+    count: usize,
+}
+
+impl ChainGuard {
+    pub(crate) fn new() -> Self {
+        Self {
+            seen: std::collections::HashSet::new(),
+            count: 0,
+        }
+    }
+
+    /// Admits the next directory offset into the walk, or rejects a repeated offset (a loop) or
+    /// the [`MAX_IFDS`] + 1'th directory (runaway length).
+    pub(crate) fn admit(&mut self, offset: u64) -> Result<()> {
+        if !self.seen.insert(offset) {
+            return Err(Error::InvalidInput("TIFF: IFD chain loops"));
+        }
+        if self.count >= MAX_IFDS {
+            return Err(Error::InvalidInput("TIFF: too many IFDs"));
+        }
+        self.count += 1;
+        Ok(())
+    }
+}
+
 /// Reads a 16-bit value at `pos` in `order`, bounds-checked.
-fn u16_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u16> {
+pub(crate) fn u16_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u16> {
     let b = data
         .get(pos..pos + 2)
         .ok_or(Error::InvalidInput("TIFF: truncated 16-bit field"))?;
@@ -32,7 +66,7 @@ fn u16_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u16> {
 }
 
 /// Reads a 32-bit value at `pos` in `order`, bounds-checked.
-fn u32_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u32> {
+pub(crate) fn u32_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u32> {
     let b = data
         .get(pos..pos + 4)
         .ok_or(Error::InvalidInput("TIFF: truncated 32-bit field"))?;
@@ -41,7 +75,7 @@ fn u32_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u32> {
 
 /// Reads a 64-bit value at `pos` in `order`, bounds-checked (BigTIFF offsets/counts).
 #[cfg(feature = "bigtiff")]
-fn u64_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u64> {
+pub(crate) fn u64_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u64> {
     let b = data
         .get(pos..pos + 8)
         .ok_or(Error::InvalidInput("TIFF: truncated 64-bit field"))?;
@@ -51,7 +85,12 @@ fn u64_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u64> {
 /// Reads an offset-sized field at `pos` (a `u32` in classic TIFF, a `u64` in BigTIFF) as `u64`.
 ///
 /// Used for every file offset and for the per-field value count, which share the offset width.
-fn offset_at(data: &[u8], pos: usize, order: ByteOrder, variant: Variant) -> Result<u64> {
+pub(crate) fn offset_at(
+    data: &[u8],
+    pos: usize,
+    order: ByteOrder,
+    variant: Variant,
+) -> Result<u64> {
     match variant {
         Variant::Classic => Ok(u64::from(u32_at(data, pos, order)?)),
         #[cfg(feature = "bigtiff")]
@@ -253,16 +292,9 @@ fn read_chain(
     }
     let mut ifds = Vec::new();
     let mut offset = first as usize;
-    // A hash set keeps the loop guard O(1) per link: a hostile chain can be MAX_IFDS long, and a
-    // linear scan per link would make it quadratic.
-    let mut seen = std::collections::HashSet::new();
+    let mut guard = ChainGuard::new();
     while offset != 0 {
-        if !seen.insert(offset) {
-            return Err(Error::InvalidInput("TIFF: IFD chain loops"));
-        }
-        if ifds.len() >= MAX_IFDS {
-            return Err(Error::InvalidInput("TIFF: too many IFDs"));
-        }
+        guard.admit(offset as u64)?;
         let (ifd, next) = read_ifd_inner(
             data,
             offset,
@@ -329,17 +361,11 @@ fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
 /// is not a tree: a repeated or self-referential child offset, or nesting deeper than 16 levels.
 pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
     let mut file = read(data)?;
+    let (order, variant) = (file.order, file.variant);
     let mut visited: Vec<u64> = Vec::new();
+    let mut fetch = |off: u64| read_ifd_at(data, off, order, variant);
     for ifd in &mut file.ifds {
-        resolve_pointers(
-            data,
-            ifd,
-            pointer_tags,
-            file.order,
-            file.variant,
-            &mut visited,
-            1,
-        )?;
+        resolve_pointers_with(&mut fetch, ifd, pointer_tags, &mut visited, 1)?;
     }
     Ok(file)
 }
@@ -347,12 +373,14 @@ pub fn read_tree(data: &[u8], pointer_tags: &[u16]) -> Result<TiffFile> {
 /// Follows each of `tags` in `ifd` (and, recursively, in the children), replacing the pointer
 /// field with a parsed sub-IFD group. `visited` spans the whole walk so a hostile pointer graph
 /// (a cycle, or two pointers claiming one directory) fails instead of looping.
-fn resolve_pointers(
-    data: &[u8],
+///
+/// `fetch` parses the directory at an offset — a closure over [`read_ifd_at`] for the slice
+/// path, or over [`IfdReader::read_ifd`](crate::IfdReader::read_ifd) for the streaming path —
+/// so the depth and cycle guards exist exactly once.
+pub(crate) fn resolve_pointers_with(
+    fetch: &mut dyn FnMut(u64) -> Result<Ifd>,
     ifd: &mut Ifd,
     tags: &[u16],
-    order: ByteOrder,
-    variant: Variant,
     visited: &mut Vec<u64>,
     depth: usize,
 ) -> Result<()> {
@@ -369,8 +397,8 @@ fn resolve_pointers(
                 return Err(Error::InvalidInput("TIFF: sub-IFD pointer loop"));
             }
             visited.push(off);
-            let mut child = read_ifd_at(data, off, order, variant)?;
-            resolve_pointers(data, &mut child, tags, order, variant, visited, depth + 1)?;
+            let mut child = fetch(off)?;
+            resolve_pointers_with(fetch, &mut child, tags, visited, depth + 1)?;
             children.push(child);
         }
         ifd.remove(tag);

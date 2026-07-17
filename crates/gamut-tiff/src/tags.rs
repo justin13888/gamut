@@ -51,7 +51,7 @@ pub const TILE_OFFSETS: u16 = 324;
 /// `TileByteCounts` (325) — the number of (compressed) bytes in each tile.
 pub const TILE_BYTE_COUNTS: u16 = 325;
 /// `SubIFDs` (330) — offsets of child image IFDs (reduced-resolution / page / mask subfiles).
-pub const SUB_IFDS: u16 = 330;
+pub const SUB_IFDS: u16 = gamut_ifd::tags::SUB_IFDS;
 /// `XMP` (700) — an XMP metadata packet, stored as a byte array.
 pub const XMP: u16 = 700;
 /// `Copyright` (33432) — the copyright notice.
@@ -59,13 +59,13 @@ pub const COPYRIGHT: u16 = 33432;
 /// `IPTC` (33723) — an IPTC/NAA metadata block.
 pub const IPTC_NAA: u16 = 33723;
 /// `ExifIFD` (34665) — the offset of the Exif private sub-IFD.
-pub const EXIF_IFD: u16 = 34665;
+pub const EXIF_IFD: u16 = gamut_ifd::tags::EXIF_IFD;
 /// `ICCProfile` (34675) — an embedded ICC colour profile.
 pub const ICC_PROFILE: u16 = 34675;
 /// `GPSInfo` (34853) — the offset of the GPS private sub-IFD.
-pub const GPS_INFO: u16 = 34853;
+pub const GPS_INFO: u16 = gamut_ifd::tags::GPS_INFO;
 /// `InteroperabilityIFD` (40965) — the offset of the Exif Interoperability sub-IFD.
-pub const INTEROPERABILITY_IFD: u16 = 40965;
+pub const INTEROPERABILITY_IFD: u16 = gamut_ifd::tags::INTEROPERABILITY_IFD;
 
 /// Whether `tag` is one this crate recognises as part of TIFF 6.0 — the baseline reference (§8)
 /// plus the Part 2 still-image extension tags — as opposed to a private or unknown tag a strict

@@ -18,6 +18,9 @@
 //!   and [`Sample`] are sealed — the set of pixel layouts is closed and only this crate defines it.
 //! - **Static error messages.** [`Error::InvalidInput`] / [`Error::Unsupported`] carry `&'static
 //!   str`; dynamic context is deferred and can be added later as a new `#[non_exhaustive]` variant.
+//!   [`Error::Io`] is the one dynamic exception: it wraps the underlying [`std::io::Error`] so a
+//!   transport failure (a disk read error while parsing from a stream-backed source) stays
+//!   distinguishable from malformed input.
 //! - **The length invariant lives on the buffers, not on [`Dimensions`].** [`Dimensions`] is a plain
 //!   value type with public fields; non-emptiness and `len == width * height * channels` are
 //!   enforced once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs receive a known-good buffer.
@@ -73,6 +76,13 @@ pub enum Error {
     /// The requested format, profile, or feature is not yet supported.
     #[error("unsupported: {0}")]
     Unsupported(&'static str),
+    /// An underlying I/O operation failed while reading from a stream-backed source.
+    ///
+    /// Distinct from [`Error::InvalidInput`]: this reports the *transport* failing (a disk
+    /// error, an interrupted read), not the bytes being malformed, so batch pipelines can retry
+    /// or surface it instead of misclassifying the file as corrupt.
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Convenience result type for gamut operations.
@@ -202,6 +212,15 @@ mod tests {
         };
         assert_eq!(d.width, 1920);
         assert_eq!(d.height, 1080);
+    }
+
+    #[test]
+    fn io_error_converts_and_displays() {
+        // `#[from]` gives the `?`-friendly conversion; the Display must surface the source.
+        let io = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short read");
+        let err: Error = io.into();
+        assert!(matches!(err, Error::Io(_)));
+        assert!(err.to_string().contains("short read"));
     }
 
     #[test]

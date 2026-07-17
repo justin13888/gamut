@@ -1,8 +1,13 @@
 //! Robustness corpus: the `#![forbid(unsafe_code)]` reader is offset-driven — a classic
 //! parser-exploit surface — so hostile input must yield a typed error or a valid parse, never a
 //! panic, a hang, or unbounded allocation (STATUS P6).
+//!
+//! Every input is also driven through the streaming [`IfdReader`] and the two paths must
+//! *agree* — both parse to equal files, or both fail. This differential layer is what makes the
+//! streaming reader's parallel directory-body walk safe under mutation testing: a behavioral
+//! mutant in either copy breaks agreement somewhere in the corpus.
 
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_tree, write};
+use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree, write};
 
 /// Sub-IFD pointer tags a DNG/EXIF-shaped consumer would follow.
 const POINTER_TAGS: &[u16] = &[330, 34665, 34853];
@@ -31,10 +36,24 @@ fn valid_stream(variant: Variant) -> Vec<u8> {
     .expect("write")
 }
 
-/// Both readers must survive `data` without panicking; the parse may succeed or fail.
+/// All readers must survive `data` without panicking; the parse may succeed or fail, but the
+/// slice and streaming paths must agree (equal files, or both errors — the *messages* may
+/// differ, since bounds failures legitimately phrase differently across the two data flows).
 fn survives(data: &[u8]) {
-    let _ = read(data);
-    let _ = read_tree(data, POINTER_TAGS);
+    let slice = read(data);
+    let stream = IfdReader::open(data).and_then(|mut r| r.read_file());
+    match (&slice, &stream) {
+        (Ok(a), Ok(b)) => assert_eq!(a, b, "flat parse disagreement"),
+        (Err(_), Err(_)) => {}
+        _ => panic!("flat readers disagree: slice {slice:?} vs stream {stream:?}"),
+    }
+    let slice_tree = read_tree(data, POINTER_TAGS);
+    let stream_tree = IfdReader::open(data).and_then(|mut r| r.read_tree(POINTER_TAGS));
+    match (&slice_tree, &stream_tree) {
+        (Ok(a), Ok(b)) => assert_eq!(a, b, "tree parse disagreement"),
+        (Err(_), Err(_)) => {}
+        _ => panic!("tree readers disagree: slice {slice_tree:?} vs stream {stream_tree:?}"),
+    }
 }
 
 #[test]
@@ -104,6 +123,44 @@ fn single_byte_overwrites_do_not_panic() {
             survives(&data);
         }
     }
+}
+
+/// A classic-TIFF stream of `n` chained zero-entry directories (6 bytes each), hand-emitted —
+/// `write` links real directories the same way, but building 65 537 `Ifd`s through it is slower
+/// than emitting the 6-byte records directly.
+fn chain_of(n: usize) -> Vec<u8> {
+    let mut data = vec![b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00];
+    for i in 0..n {
+        data.extend_from_slice(&[0x00, 0x00]); // entry count = 0
+        let next = if i + 1 == n {
+            0
+        } else {
+            8 + (i as u32 + 1) * 6
+        };
+        data.extend_from_slice(&next.to_le_bytes());
+    }
+    data
+}
+
+/// The chain-length guard boundary: exactly `MAX_IFDS` (65 536) directories parse; one more is
+/// a typed error, not a runaway walk — on both readers.
+#[test]
+fn chain_length_cap_is_exact() {
+    let at_cap = chain_of(1 << 16);
+    assert_eq!(read(&at_cap).expect("at cap").ifds.len(), 1 << 16);
+    let over = chain_of((1 << 16) + 1);
+    assert!(read(&over).is_err());
+    let stream_over = IfdReader::open(&over[..]).and_then(|mut r| r.read_file());
+    assert!(stream_over.is_err());
+    // The streaming iterator surfaces the same bound lazily: 65 536 Ok items, then one Err.
+    let mut reader = IfdReader::open(&over[..]).expect("open");
+    let mut chain = reader.ifds();
+    assert_eq!(
+        chain.by_ref().take(1 << 16).filter(Result::is_ok).count(),
+        1 << 16
+    );
+    assert!(chain.next().expect("cap error").is_err());
+    assert!(chain.next().is_none());
 }
 
 #[cfg(feature = "bigtiff")]

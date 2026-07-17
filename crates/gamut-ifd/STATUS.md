@@ -32,6 +32,7 @@ read/write code paths byte-for-byte.
 | P6 | §2 | Robustness: offset-loop / overlap / truncation guards + malformed-input corpus | ✅ done (#181) |
 | P7 | — | libtiff/exiv2 differential oracle gate (via the consuming codecs — see below) | ✅ via codecs |
 | P8 | — | BigTIFF (8-byte offsets/counts, `Long8`/`SLong8`/`Ifd8`) — gated `bigtiff` feature, additive | ✅ done |
+| P9 | §2 | RAW-grade streaming: `ReadAt` sources (slice / `Read + Seek` / rebased), lazy `IfdReader`, structural `tags` | ✅ done (#252) |
 
 P5's **write** side landed with the DNG codec (issue #109): [`write`](src/writer.rs) lays out the
 whole IFD *tree* — [`Ifd::set_sub_ifd`](src/entry.rs) attaches children under a pointer tag
@@ -66,4 +67,34 @@ The API was frozen after a full-surface review; the additions and breaks:
 - **`read_tree`** — write's inverse over sub-IFD trees; sub-IFD groups are tag-sorted (canonical).
 - **`Ifd::remove`**, **`Value::as_str`/`as_bytes`/`as_rationals`/`as_srationals`**,
   **`Value::offset_array`**, **`align_word`** — the pieces every consumer had hand-rolled.
-- **Single canonical paths** — modules are private; the surface is the crate-root re-export list.
+- **Single canonical paths** — modules are private; the surface is the crate-root re-export list
+  (plus, since P9, the [`tags`](src/tags.rs) module — the one *named* module, holding the
+  structural pointer-tag constants).
+
+## P9 — RAW-grade streaming (issue #252)
+
+Downstream RAW decoding (rawshift's ARW/CR2/NEF/DNG engines) parses multi-hundred-MB camera
+files whose IFD structure is kilobytes; loading the file to hand `read` a slice is the wrong
+shape. P9 adds the streaming layer **additively** — the frozen v1 slice surface is untouched:
+
+- [`ReadAt`](src/source.rs) — positioned exact reads + length; implemented by `&[u8]`,
+  `StreamSource<R: Read + Seek>`, and `Rebased<S>` (the offset-shifting adapter maker-note
+  mini-IFDs and embedded TIFF blocks need). Transport failures surface as the new
+  `gamut_core::Error::Io`; a stream that ends early stays `InvalidInput`, like a short slice.
+- [`IfdReader`](src/stream.rs) — lazy walker: `read_ifd` fetches one directory body into raw
+  entries (value/offset words verbatim, in file byte order); `value` fetches/decodes one value
+  on demand, span-checked against the source length *before* allocating; `ifds()` iterates the
+  chain; `read_file` / `read_tree` / the coverage methods mirror the slice APIs exactly.
+- [`tags`](src/tags.rs) — the structural pointer tags (`SubIFDs`, `ExifIFD`, `GPSInfo`,
+  `InteroperabilityIFD`; `MakerNote` as the named-but-not-followable blob carrier), deduplicating
+  the three consumers' copies. The one sanctioned exception to "no tag semantics": these tags
+  name the directory graph itself.
+
+The guard story: the chain loop/length guard (`ChainGuard`) and the sub-IFD depth/cycle guards
+(`resolve_pointers_with`) are *shared* with the slice path; the directory-body walk is mirrored
+(the data flows differ — decode-in-loop vs raw capture), and `tests/robustness.rs` runs the whole
+hostile corpus through both paths asserting **agreement**, so a mutant in either copy dies. The
+streaming path is u64-native end to end (no `as usize` truncation of hostile 64-bit widths).
+Layout requirement 3 of #252 (deterministic write offsets) was already the P4 keystone contract;
+`tests/streaming.rs` pins the rest of the capability surface (three source shapes × orders ×
+variants, coverage parity, the ≤64-read-bytes laziness contract, the maker-note pattern).

@@ -11,11 +11,11 @@ use crate::value::{Rational, as_text};
 /// The 6-byte identifier that precedes the TIFF stream in a JPEG `APP1` EXIF segment.
 pub(crate) const MARKER: &[u8] = b"Exif\x00\x00";
 /// `ExifIFD` pointer (0th IFD → Exif sub-IFD), Exif 3.0 §4.6.3.
-pub(crate) const EXIF_IFD_POINTER: u16 = 0x8769;
+pub(crate) const EXIF_IFD_POINTER: u16 = gamut_ifd::tags::EXIF_IFD;
 /// `GPSInfo` pointer (0th IFD → GPS sub-IFD).
-pub(crate) const GPS_IFD_POINTER: u16 = 0x8825;
+pub(crate) const GPS_IFD_POINTER: u16 = gamut_ifd::tags::GPS_INFO;
 /// `Interoperability` pointer (Exif sub-IFD → Interop sub-IFD).
-pub(crate) const INTEROP_IFD_POINTER: u16 = 0xA005;
+pub(crate) const INTEROP_IFD_POINTER: u16 = gamut_ifd::tags::INTEROPERABILITY_IFD;
 
 /// A parsed EXIF blob — the directories of the TIFF stream that follows the optional `Exif\0\0`
 /// marker.
