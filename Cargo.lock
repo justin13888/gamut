@@ -777,6 +777,7 @@ dependencies = [
  "gamut-core",
  "gamut-deflate",
  "libpng-oracle",
+ "miniz_oxide",
 ]
 
 [[package]]

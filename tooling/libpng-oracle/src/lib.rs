@@ -270,7 +270,10 @@ pub fn encode(
         "pixel buffer does not match {width}x{height} colour type {color_type} depth {bit_depth}"
     );
     if color_type == COLOR_PALETTE {
-        assert!(opts.palette.is_some(), "palette images need EncodeOpts::palette");
+        assert!(
+            opts.palette.is_some(),
+            "palette images need EncodeOpts::palette"
+        );
     }
 
     unsafe {
