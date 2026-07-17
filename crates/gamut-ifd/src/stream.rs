@@ -600,6 +600,9 @@ mod tests {
         let bytes = classic_le(vec![ifd]);
         let mut r = IfdReader::open(&bytes[..]).expect("open");
         let raw = r.read_ifd(8).expect("read_ifd");
+        // Entry records are 12 bytes apart, from entries_start = 8 (IFD offset) + 2 (count).
+        assert_eq!(raw.entries[0].offset, 10);
+        assert_eq!(raw.entries[1].offset, 22);
         let at_threshold = raw.entry(256).expect("256").clone();
         let past_threshold = raw.entry(258).expect("258").clone();
         assert_eq!(r.value_offset(&at_threshold), None);
@@ -783,6 +786,14 @@ mod tests {
         match r_off.value(&entry) {
             Err(Error::InvalidInput(msg)) => assert_eq!(msg, "TIFF: value offset out of bounds"),
             other => panic!("expected offset error, got {other:?}"),
+        }
+        // The boundary between the two: an offset exactly at EOF is an *empty* value span, not
+        // an out-of-bounds offset — the slice path's `data.get(voff..)` semantics.
+        let at_end = &bytes[..voff as usize];
+        let mut r_end = IfdReader::open(at_end).expect("open");
+        match r_end.value(&entry) {
+            Err(Error::InvalidInput(msg)) => assert_eq!(msg, "TIFF: field value out of bounds"),
+            other => panic!("expected truncated-value error, got {other:?}"),
         }
     }
 
