@@ -199,7 +199,7 @@ const MAX_SUBIFD_DEPTH: usize = 16;
 /// The file offsets a sub-IFD pointer value carries: a `LONG` array (TIFF 6.0 §2), the typed
 /// `IFD` (13) form of TIFF Technical Note 1, or the 64-bit `LONG8`/`IFD8` forms BigTIFF writers
 /// use. Any other type is not a pointer.
-fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
+pub(crate) fn pointer_offsets(value: &Value) -> Option<Vec<u64>> {
     match value {
         Value::Long(v) | Value::Ifd(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
         #[cfg(feature = "bigtiff")]

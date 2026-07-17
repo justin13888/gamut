@@ -66,6 +66,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod audit;
 mod byte_order;
 mod coverage;
 mod entry;
@@ -79,6 +80,7 @@ mod types;
 mod value;
 mod writer;
 
+pub use audit::{Audit, AuditFinding, AuditSpec, StandardAuditSpec, audit, standard_data_extents};
 pub use byte_order::ByteOrder;
 pub use coverage::{Coverage, CoverageReport, Overlap, UnknownField};
 pub use entry::{Field, Ifd, SubIfd, Variant};
