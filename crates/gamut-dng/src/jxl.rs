@@ -98,3 +98,31 @@ pub(crate) fn encode_chunk(
     }
     Ok(out)
 }
+
+#[cfg(all(
+    test,
+    feature = "jxl-encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
+mod tests {
+    use super::*;
+
+    /// A stray alpha channel invalidates a raw chunk on its own, even when the colour channel
+    /// count matches `SamplesPerPixel` (the spec allows exactly 1 or 3 planes, no alpha).
+    #[test]
+    fn decode_chunk_rejects_alpha_streams() {
+        use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgba16};
+        use gamut_jxl::JxlEncoder;
+        let dims = Dimensions::new(2, 2).unwrap();
+        let px: Vec<u16> = (0..16u16).map(|i| i * 4096).collect();
+        let mut bytes = Vec::new();
+        JxlEncoder::lossless()
+            .encode_image(ImageRef::<Rgba16>::new(&px, dims).unwrap(), &mut bytes)
+            .unwrap();
+        let err = decode_chunk(&bytes, 2, 2, 3).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("channel")),
+            "{err:?}"
+        );
+    }
+}

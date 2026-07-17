@@ -46,6 +46,18 @@ minimum_test_timeout = 60
 # a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
 # an entry.
 exclude_re = [
+    # gamut-dng decode_image_data — `factor > 1` gates the deinterleave call; at `factor == 1`
+    # the field mapping is the identity (each field offset collapses to src == dst), so calling
+    # it anyway changes nothing observable: `>=` is equivalent. The *stricter* mutations
+    # (`==`/`<`, generated separately) skip a real factor-2 deinterleave and are killed by the
+    # single-axis interleave goldens.
+    'replace > with >= in decode_image_data',
+    # gamut-dng version computation — `if v > *version { *version = v }` (and the analogous
+    # `if backward_version > required` pick in encode): at equality both branches produce the
+    # same version value, so `>=` cannot change the written tag: equivalent.
+    'replace > with >= in backward_version_for',
+    'replace > with >= in required_dng_version',
+    'replace > with >= in DngEncoder::encode',
     # gamut-av1 quant::dequant — `sign = if dq < 0 { -1 } else { 1 }`. The sign multiplies
     # `(|dq| & 0xFF_FFFF) / dq_denom`, which is 0 exactly when `dq == 0`, the only value where
     # `<` and `<=` disagree. `±0 == 0`, so the reconstruction is identical: equivalent.

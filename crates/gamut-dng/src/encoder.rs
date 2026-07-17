@@ -517,25 +517,31 @@ impl DngEncoder {
     ) -> Result<Vec<u8>> {
         match self.compression {
             Compression::LosslessJpeg => lossless_jpeg::encode(samples, cols, rows, spp, bits),
-            #[cfg(all(
-                feature = "jxl-encode",
-                any(not(target_arch = "wasm32"), target_os = "emscripten")
-            ))]
-            Compression::JpegXl => crate::jxl::encode_chunk(
-                samples,
-                cols,
-                rows,
-                spp,
-                self.jxl_distance,
-                self.jxl_effort,
-            ),
-            #[cfg(not(all(
-                feature = "jxl-encode",
-                any(not(target_arch = "wasm32"), target_os = "emscripten")
-            )))]
-            Compression::JpegXl => Err(Error::Unsupported(
-                "DNG: JPEG XL encoding requires the `jxl-encode` feature (non-wasm)",
-            )),
+            Compression::JpegXl => {
+                #[cfg(all(
+                    feature = "jxl-encode",
+                    any(not(target_arch = "wasm32"), target_os = "emscripten")
+                ))]
+                {
+                    crate::jxl::encode_chunk(
+                        samples,
+                        cols,
+                        rows,
+                        spp,
+                        self.jxl_distance,
+                        self.jxl_effort,
+                    )
+                }
+                #[cfg(not(all(
+                    feature = "jxl-encode",
+                    any(not(target_arch = "wasm32"), target_os = "emscripten")
+                )))]
+                {
+                    Err(Error::Unsupported(
+                        "DNG: JPEG XL encoding requires the `jxl-encode` feature (non-wasm)",
+                    ))
+                }
+            }
             _ => {
                 let packed = bitpack::pack(samples, bits, cols * spp, self.order);
                 compression::compress(self.compression, &packed)
@@ -1124,6 +1130,36 @@ mod tests {
                 &profile
             ),
             ([1, 3, 0, 0], [1, 1, 0, 0])
+        );
+        // An explicit backward version above the auto floor lifts DNGVersion with it (a reader
+        // may assume DNGVersion >= DNGBackwardVersion).
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_backward_version([1, 6, 0, 0]),
+                &raw,
+                &profile
+            ),
+            ([1, 6, 0, 0], [1, 6, 0, 0])
+        );
+        // The spectral-data illuminant (255) needs a 1.6 reader — as the first illuminant...
+        let m = [0.9, -0.2, -0.1, -0.4, 1.3, 0.1, 0.0, -0.2, 0.9];
+        let spectral1 = CameraProfile::new(
+            "gamut SpectralCam",
+            m,
+            crate::values::CalibrationIlluminant::Other,
+            [0.5, 1.0, 0.6],
+        )
+        .expect("profile");
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw, &spectral1),
+            ([1, 6, 0, 0], [1, 6, 0, 0])
+        );
+        // ...and equally when only the *second* illuminant is spectral.
+        let spectral2 =
+            sample_profile().with_second_illuminant(m, crate::values::CalibrationIlluminant::Other);
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw, &spectral2),
+            ([1, 6, 0, 0], [1, 6, 0, 0])
         );
         // JPEG XL requires a 1.7 reader: both versions raise (Issue 18).
         #[cfg(feature = "jxl-encode")]

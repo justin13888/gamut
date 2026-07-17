@@ -36,8 +36,10 @@ pub(crate) fn new_raw_image_digest(raw: &RawImage) -> [u8; 16] {
     let across = width.div_ceil(cell_w);
     let down = height.div_ceil(cell_h);
 
-    let mut tile_digests = Vec::with_capacity(across * down * 16);
-    let mut tile_bytes = Vec::with_capacity(cell_w * cell_h * spp * 2);
+    // No capacity hints: `tile_bytes` reaches steady-state capacity after the first tile (it is
+    // reused via `clear`), and hint arithmetic would only breed unkillable capacity mutants.
+    let mut tile_digests = Vec::new();
+    let mut tile_bytes = Vec::new();
     for tile_row in 0..down {
         for tile_col in 0..across {
             let x0 = tile_col * cell_w;

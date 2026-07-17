@@ -174,6 +174,10 @@ fn semantic_masks_decode_with_typed_info() {
     let m1 = &decoded.sub_images[0];
     assert_eq!(m1.kind, SubImageKind::SemanticMask);
     assert_eq!(m1.photometric, 52527);
+    assert_eq!(
+        m1.interpretation(),
+        Some(gamut_dng::PhotometricInterpretation::PhotometricMask)
+    );
     assert_eq!(m1.data, SubImageData::Decoded(mask_samples.clone()));
     let s1 = m1.semantic.as_ref().expect("semantic info");
     assert_eq!(s1.name.as_deref(), Some("Person"));

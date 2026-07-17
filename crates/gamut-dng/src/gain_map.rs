@@ -62,15 +62,6 @@ impl GainValues {
             GainValues::F32(_) => 3,
         }
     }
-
-    /// Bytes per stored entry.
-    fn entry_size(&self) -> usize {
-        match self {
-            GainValues::U8(_) => 1,
-            GainValues::U16(_) | GainValues::F16(_) => 2,
-            GainValues::F32(_) => 4,
-        }
-    }
 }
 
 /// A parsed `ProfileGainTableMap`/`ProfileGainTableMap2` payload (see the module docs).
@@ -267,7 +258,7 @@ impl ProfileGainTableMap {
             ));
         }
         let mut w = Writer {
-            out: Vec::with_capacity(64 + 4 * count),
+            out: Vec::new(),
             order,
         };
         self.write_header(&mut w);
@@ -297,7 +288,7 @@ impl ProfileGainTableMap {
             ));
         }
         let mut w = Writer {
-            out: Vec::with_capacity(80 + self.gains.entry_size() * count),
+            out: Vec::new(),
             order,
         };
         self.write_header(&mut w);
@@ -570,6 +561,79 @@ mod tests {
         // Float storage returns the value directly.
         let f = sample_map(GainValues::F32(vec![1.0, 1.5, 2.0, 0.5]));
         assert_eq!(f.gain_at(0, 1, 1), Some(0.5));
+    }
+
+    #[test]
+    fn gain_values_len_and_emptiness() {
+        assert!(GainValues::F32(vec![]).is_empty());
+        assert!(!GainValues::U8(vec![1]).is_empty());
+        assert_eq!(GainValues::U16(vec![1, 2, 3]).len(), 3);
+        assert_eq!(GainValues::F16(vec![]).len(), 0);
+    }
+
+    /// `0.0` is a valid (non-negative) gain — only negatives and non-finites reject.
+    #[test]
+    fn parse_v1_accepts_a_zero_gain() {
+        let map = sample_map(GainValues::F32(vec![0.0, 1.0, 2.0, 3.0]));
+        let bytes = map.to_bytes_v1(ByteOrder::LittleEndian).unwrap();
+        let parsed = ProfileGainTableMap::parse_v1(&bytes, ByteOrder::LittleEndian).unwrap();
+        assert_eq!(parsed.gains, GainValues::F32(vec![0.0, 1.0, 2.0, 3.0]));
+    }
+
+    /// Every axis of the zero-dimension check rejects on its own — even with a matching (empty)
+    /// gain vector, where a weakened check would happily serialise an 80-byte husk.
+    #[test]
+    fn zero_dimension_maps_do_not_serialise() {
+        for (v, h, n) in [(0u32, 1u32, 1u32), (1, 0, 1), (1, 1, 0)] {
+            let mut map = sample_map(GainValues::F32(vec![]));
+            map.points_v = v;
+            map.points_h = h;
+            map.points_n = n;
+            assert!(
+                map.to_bytes_v1(ByteOrder::LittleEndian).is_err(),
+                "{v},{h},{n}"
+            );
+            assert!(
+                map.to_bytes_v2(ByteOrder::LittleEndian).is_err(),
+                "{v},{h},{n}"
+            );
+        }
+    }
+
+    /// The 16-bit integer branch of `gain_at` (the 8-bit branch is covered separately): exact
+    /// range endpoints plus interior codes pin the `min + (code / 65535) * (max - min)` formula
+    /// against every operator mutation.
+    #[test]
+    fn gain_at_u16_codes_decode_through_the_range_exactly() {
+        let mut map = sample_map(GainValues::U16(vec![0, 65535, 13107, 26214]));
+        map.gain_min = 0.7;
+        map.gain_max = 2.3;
+        assert_eq!(map.gain_at(0, 0, 0), Some(0.7));
+        assert_eq!(map.gain_at(0, 0, 1), Some(2.3));
+        // Codes 13107 and 26214 are exactly 0.2 and 0.4 of the range.
+        let g = map.gain_at(0, 1, 0).unwrap();
+        assert!((g - (0.7 + 0.2 * 1.6)).abs() < 1e-4, "{g}");
+        let g = map.gain_at(0, 1, 1).unwrap();
+        assert!((g - (0.7 + 0.4 * 1.6)).abs() < 1e-4, "{g}");
+    }
+
+    /// A grid with `points_v > 1` pins the `(v * points_h + h) * points_n + n` indexing, and an
+    /// out-of-range `h` whose flat index still lands inside the vector must miss on the
+    /// *coordinate* check, not the slice lookup.
+    #[test]
+    fn gain_at_indexes_the_v_major_grid() {
+        let mut map = sample_map(GainValues::F32(vec![1.0, 2.0, 3.0, 4.0]));
+        map.points_v = 2;
+        map.points_h = 2;
+        map.points_n = 1;
+        assert_eq!(map.gain_at(0, 0, 0), Some(1.0));
+        assert_eq!(map.gain_at(0, 1, 0), Some(2.0));
+        assert_eq!(map.gain_at(1, 0, 0), Some(3.0));
+        assert_eq!(map.gain_at(1, 1, 0), Some(4.0));
+        // h = 2 is out of range, though its flat index (2) is not.
+        assert_eq!(map.gain_at(0, 2, 0), None);
+        // n = 1 is out of range likewise (flat index 1).
+        assert_eq!(map.gain_at(0, 0, 1), None);
     }
 
     #[test]

@@ -761,6 +761,7 @@ fn decode_masked_areas(ifd: &TrackedIfd) -> Result<Option<Vec<[u32; 4]>>> {
 }
 
 /// How an IFD's image data is chunked: TIFF row-band strips, or the DNG 1.7 tile grid.
+#[derive(Debug)]
 enum ChunkGrid {
     /// `StripOffsets`/`StripByteCounts` row bands of `rows_per_strip` rows (fewer for the last).
     Strips { rows_per_strip: usize },
@@ -1351,6 +1352,205 @@ mod tests {
         assert_eq!(select_raw_ifd(&ifds).unwrap(), 0);
         // No raw photometry anywhere is an error.
         assert!(select_raw_ifd(&[Ifd::new()]).is_err());
+    }
+
+    /// `MaskSubArea` validity pairs top with the mask *height* and left with the mask *width*
+    /// (the SDK's reading; the spec's inequality text transposes the axes), each axis rejecting
+    /// on its own. Boundary values distinguish the additions from any other arithmetic.
+    #[test]
+    fn mask_sub_area_validation_pairs_axes_exactly() {
+        let dims = Dimensions::new(2, 2).unwrap(); // a 2x2 stored mask
+        let area_of = |vals: Vec<u32>| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::SEMANTIC_NAME, Value::Ascii("m".into()));
+            ifd.set(tags::MASK_SUB_AREA, Value::Long(vals));
+            semantic_mask_info(&TrackedIfd::new(&ifd), dims).and_then(|s| s.sub_area)
+        };
+        // top + height against H_full, exactly at the boundary (3 + 2 == 5).
+        assert!(area_of(vec![3, 0, 4, 5]).is_some());
+        assert!(area_of(vec![4, 0, 4, 5]).is_none());
+        // left + width against W_full, exactly at the boundary (3 + 2 == 5).
+        assert!(area_of(vec![0, 3, 5, 4]).is_some());
+        assert!(area_of(vec![0, 4, 5, 4]).is_none());
+        // One failing axis alone invalidates (top overflows, left fits).
+        assert!(area_of(vec![3, 0, 4, 4]).is_none());
+        // A tall, narrow full mask fits a 2x2 crop — the transposed pairing would reject it.
+        assert!(area_of(vec![0, 0, 2, 6]).is_some());
+    }
+
+    #[test]
+    fn chunk_grid_rejects_zero_tile_dimensions() {
+        for (tw, th) in [(0u16, 2u16), (2, 0)] {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::TILE_WIDTH, Value::Short(vec![tw]));
+            ifd.set(tags::TILE_LENGTH, Value::Short(vec![th]));
+            ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0]));
+            ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4]));
+            let err = chunk_grid(&TrackedIfd::new(&ifd), 4, 4).unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidInput(m) if m.contains("non-zero")),
+                "({tw}, {th}): {err:?}"
+            );
+        }
+    }
+
+    /// Either tile tag alone classifies the IFD as tiled — the resulting error must come from
+    /// the *tile* family, not from a strips fallback complaining about StripOffsets.
+    #[test]
+    fn either_tile_tag_alone_classifies_as_tiled() {
+        // Geometry present, offsets missing.
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::TILE_WIDTH, Value::Short(vec![16]));
+        ifd.set(tags::TILE_LENGTH, Value::Short(vec![16]));
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &[],
+            ByteOrder::LittleEndian,
+            16,
+            16,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("Tile")),
+            "{err:?}"
+        );
+        // Offsets present, geometry missing.
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4]));
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &[0; 4],
+            ByteOrder::LittleEndian,
+            16,
+            16,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("TileWidth")),
+            "{err:?}"
+        );
+    }
+
+    /// Height 4 at RowsPerStrip 2 needs exactly two strips; a third must fail with the
+    /// strip-count error (not a generic truncation), pinning the remaining-rows bookkeeping.
+    #[test]
+    fn decode_image_data_rejects_surplus_strips() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![2]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0, 8, 16]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![8, 8, 8]));
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &[0u8; 24],
+            ByteOrder::LittleEndian,
+            4,
+            4,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("more strips")),
+            "{err:?}"
+        );
+    }
+
+    /// Single-axis interleaving (the Adobe Bayer sample sets *both* factors, so it cannot
+    /// distinguish the two conditions): each factor alone must trigger the de-interleave.
+    #[test]
+    fn single_axis_interleave_deinterleaves() {
+        let image = |tag: u16, w: u16, h: u16, data: &[u8]| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+            ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![h]));
+            ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+            ifd.set(
+                tags::STRIP_BYTE_COUNTS,
+                Value::Long(vec![u32::from(w) * u32::from(h)]),
+            );
+            ifd.set(tag, Value::Short(vec![2]));
+            decode_image_data(
+                &TrackedIfd::new(&ifd),
+                data,
+                ByteOrder::LittleEndian,
+                u32::from(w),
+                u32::from(h),
+                1,
+                8,
+            )
+            .expect("decode")
+        };
+        // Row-only: a 1-wide, 4-tall image stores its rows as [r0, r2 | r1, r3].
+        assert_eq!(
+            image(tags::ROW_INTERLEAVE_FACTOR, 1, 4, &[10, 30, 20, 40]),
+            vec![10, 20, 30, 40]
+        );
+        // Column-only: a 4-wide, 1-tall image stores its columns as [c0, c2 | c1, c3].
+        assert_eq!(
+            image(tags::COLUMN_INTERLEAVE_FACTOR, 4, 1, &[10, 30, 20, 40]),
+            vec![10, 20, 30, 40]
+        );
+    }
+
+    /// A factor equal to the axis length is valid (the SDK allows `1..=axis`); one past it is
+    /// not. Factor-per-column de-interleaving is the identity, which pins the boundary exactly.
+    #[test]
+    fn interleave_factor_accepts_the_full_axis() {
+        let decode_with_factor = |factor: u16| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+            ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![1]));
+            ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+            ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![4]));
+            ifd.set(tags::COLUMN_INTERLEAVE_FACTOR, Value::Short(vec![factor]));
+            decode_image_data(
+                &TrackedIfd::new(&ifd),
+                &[1, 2, 3, 4],
+                ByteOrder::LittleEndian,
+                4,
+                1,
+                1,
+                8,
+            )
+        };
+        assert_eq!(
+            decode_with_factor(4).expect("factor == width"),
+            vec![1, 2, 3, 4]
+        );
+        assert!(decode_with_factor(5).is_err());
+    }
+
+    /// A truncated tile is a typed error before assembly could index out of range.
+    #[test]
+    fn truncated_tile_data_is_a_typed_error_not_a_panic() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::TILE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::TILE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![2])); // 2 of the 4 needed bytes
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &[0u8; 2],
+            ByteOrder::LittleEndian,
+            2,
+            2,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("truncated")),
+            "{err:?}"
+        );
     }
 
     #[test]
