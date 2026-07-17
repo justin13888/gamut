@@ -64,7 +64,7 @@ pub const TILE_OFFSETS: u16 = 324;
 /// `TileByteCounts` (325, 0x0145) — the number of (compressed) bytes in each tile.
 pub const TILE_BYTE_COUNTS: u16 = 325;
 /// `SubIFDs` (330, 0x014A) — offsets of child IFDs (DNG points this at the raw image IFD(s)).
-pub const SUB_IFDS: u16 = 330;
+pub const SUB_IFDS: u16 = gamut_ifd::tags::SUB_IFDS;
 /// `ExtraSamples` (338, 0x0152) — the meaning of each component beyond the photometric ones.
 pub const EXTRA_SAMPLES: u16 = 338;
 /// `SampleFormat` (339, 0x0153) — how each sample is encoded (unsigned/signed int, float).
@@ -82,11 +82,11 @@ pub const COPYRIGHT: u16 = 33432;
 /// `IPTC/NAA` (33723, 0x83BB) — embedded IPTC-IIM metadata.
 pub const IPTC_NAA: u16 = 33723;
 /// `ExifIFD` (34665, 0x8769) — offset of the EXIF sub-IFD.
-pub const EXIF_IFD: u16 = 34665;
+pub const EXIF_IFD: u16 = gamut_ifd::tags::EXIF_IFD;
 /// `ICCProfile` (34675, 0x8773) — an embedded ICC colour profile.
 pub const ICC_PROFILE: u16 = 34675;
 /// `GPSInfo` (34853, 0x8825) — offset of the GPS sub-IFD.
-pub const GPS_INFO: u16 = 34853;
+pub const GPS_INFO: u16 = gamut_ifd::tags::GPS_INFO;
 
 // ---------------------------------------------------------------------------------------------
 // EXIF sub-IFD tags (a constrained TIFF IFD reached through `ExifIFD`).
