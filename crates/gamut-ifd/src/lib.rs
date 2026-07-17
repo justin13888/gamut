@@ -41,6 +41,7 @@ mod coverage;
 mod entry;
 mod reader;
 mod source;
+mod stream;
 mod types;
 mod value;
 mod writer;
@@ -53,6 +54,7 @@ pub use reader::{
     read_with_coverage,
 };
 pub use source::{ReadAt, Rebased, StreamSource};
+pub use stream::{IfdChain, IfdReader, RawEntry, RawIfd};
 pub use types::FieldType;
 pub use value::Value;
 pub use writer::{align_word, write};

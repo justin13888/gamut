@@ -29,6 +29,7 @@ const MAX_IFDS: usize = 1 << 16;
 ///
 /// A hash set keeps the loop guard O(1) per link: a hostile chain can be [`MAX_IFDS`] long, and
 /// a linear scan per link would make it quadratic.
+#[derive(Debug)]
 pub(crate) struct ChainGuard {
     seen: std::collections::HashSet<u64>,
     count: usize,
@@ -84,7 +85,12 @@ pub(crate) fn u64_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u64> {
 /// Reads an offset-sized field at `pos` (a `u32` in classic TIFF, a `u64` in BigTIFF) as `u64`.
 ///
 /// Used for every file offset and for the per-field value count, which share the offset width.
-pub(crate) fn offset_at(data: &[u8], pos: usize, order: ByteOrder, variant: Variant) -> Result<u64> {
+pub(crate) fn offset_at(
+    data: &[u8],
+    pos: usize,
+    order: ByteOrder,
+    variant: Variant,
+) -> Result<u64> {
     match variant {
         Variant::Classic => Ok(u64::from(u32_at(data, pos, order)?)),
         #[cfg(feature = "bigtiff")]
