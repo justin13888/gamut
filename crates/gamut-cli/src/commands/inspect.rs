@@ -181,6 +181,8 @@ fn summarize_dng(report: gamut::dng::DeconstructReport) -> Summary {
             } => {
                 format!("[{}] page {page}: {detail}", severity_label_dng(*severity))
             }
+            // `Anomaly` is non-exhaustive; render future kinds generically rather than lose them.
+            other => format!("[error] {other:?}"),
         })
         .collect();
     Summary {
@@ -208,6 +210,8 @@ fn severity_label_dng(severity: gamut::dng::Severity) -> &'static str {
     match severity {
         gamut::dng::Severity::Warning => "warning",
         gamut::dng::Severity::Error => "error",
+        // `Severity` is non-exhaustive; treat future levels as errors (the conservative label).
+        _ => "error",
     }
 }
 

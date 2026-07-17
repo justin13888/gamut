@@ -157,6 +157,14 @@ impl Ifd {
         self.get(tag).and_then(Value::as_u32_vec)
     }
 
+    /// Returns `tag` coerced to a `Vec<u64>` (accepting `BYTE`/`SHORT`/`LONG`, and — with
+    /// `bigtiff` — `LONG8`/`IFD8`), never truncating. The reading for offset/byte-count fields;
+    /// see [`Value::as_u64_vec`].
+    #[must_use]
+    pub fn get_u64_vec(&self, tag: u16) -> Option<Vec<u64>> {
+        self.get(tag).and_then(Value::as_u64_vec)
+    }
+
     /// Inserts or replaces the value of `tag`, keeping the fields sorted.
     pub fn set(&mut self, tag: u16, value: Value) {
         match self.fields.binary_search_by_key(&tag, |f| f.tag) {
@@ -278,6 +286,14 @@ mod tests {
         assert_eq!(ifd.get_u32_vec(258), Some(vec![8, 8, 8]));
         // Absent tag is None (distinguishes the real coercion from a constant Some/None).
         assert_eq!(ifd.get_u32_vec(999), None);
+    }
+
+    #[test]
+    fn get_u64_vec_reads_arrays_and_misses() {
+        let mut ifd = Ifd::new();
+        ifd.set(324, Value::Long(vec![8, 4096]));
+        assert_eq!(ifd.get_u64_vec(324), Some(vec![8, 4096]));
+        assert_eq!(ifd.get_u64_vec(999), None);
     }
 
     #[test]

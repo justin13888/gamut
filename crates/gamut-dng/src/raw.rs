@@ -27,6 +27,7 @@ pub mod cfa_color {
 }
 
 /// How a raw image's samples map to colour.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawPhotometry {
     /// A colour-filter-array (mosaic) image: one sample per pixel, its colour given by the
@@ -377,6 +378,23 @@ impl RawImage {
     /// white level does not exceed its maximum computed black level.
     pub fn to_linear(&self) -> Result<LinearImage> {
         crate::linearize::linearize(self)
+    }
+
+    /// Computes this image's **`NewRawImageDigest`** (tag 51111) in the raw-sample domain: the
+    /// Adobe SDK's MD5-over-raw-image algorithm — a 256×256 digest-tile grid, per-tile planar
+    /// little-endian serialisation (bytes for images of ≤ 8 bits or with a ≤ 256-entry
+    /// linearization table), and a final MD5 over the tile digests — reproduced bit-exactly and
+    /// differentially gated against the SDK.
+    ///
+    /// The encoder writes this digest into files with lossless storage; compare it against a
+    /// decoded file's
+    /// [`DecodedDng::new_raw_image_digest`](crate::DecodedDng::new_raw_image_digest) to verify
+    /// raw-data integrity. **Lossy-compressed** storage (JPEG XL, lossy JPEG) instead digests
+    /// the compressed chunks (the SDK's `dng_lossy_compressed_image::FindDigest`), so for such
+    /// files the stored tag will not equal this sample-domain value.
+    #[must_use]
+    pub fn new_raw_image_digest(&self) -> [u8; 16] {
+        crate::digest::new_raw_image_digest(self)
     }
 }
 

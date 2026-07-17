@@ -7,6 +7,12 @@
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
+use std::path::{Path, PathBuf};
+
+// Never called from Rust, but required in the dependency graph: it statically builds and links
+// the real libjxl the SDK's JPEG XL reader calls, and publishes the matching header path to
+// build.rs (`links = "jxl"`).
+use gamut_jxl_sys as _;
 
 unsafe extern "C" {
     /// Returns `0` if the Adobe DNG SDK validates the DNG at `path`, else its error code.
@@ -47,9 +53,57 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> c_int;
 
+    /// Computes the SDK's `NewRawImageDigest` for the DNG at `path` into `out_digest` (16 bytes);
+    /// `0` on success, else the SDK error code.
+    fn gdng_new_raw_image_digest(path: *const c_char, out_digest: *mut u8) -> c_int;
+
     /// Releases a buffer returned by [`gdng_read_raw`] / [`gdng_read_linear`] /
     /// [`gdng_decode_lossless_jpeg`].
     fn gdng_free(data: *mut u16);
+}
+
+/// The directory of Adobe's official sample DNGs shipped inside the SDK ZIP (extracted at build
+/// time) — JPEG XL raws, ProfileGainTableMap2 variants, ImageSequenceInfo/ImageStats carriers.
+#[must_use]
+pub fn sample_files_dir() -> &'static Path {
+    Path::new(env!("GDNG_SAMPLE_FILES_DIR"))
+}
+
+/// Reads one of Adobe's sample DNGs by file name (e.g. `"01_jxl_linear_raw_integer.dng"`).
+///
+/// # Errors
+///
+/// Returns an error message if the file cannot be read.
+pub fn sample_file(name: &str) -> Result<Vec<u8>, String> {
+    let path: PathBuf = sample_files_dir().join(name);
+    std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// Computes the Adobe SDK's **`NewRawImageDigest`** — its MD5-over-raw-image algorithm
+/// (`dng_negative::FindNewRawImageDigest`) — for `bytes`, the reference for gamut-dng's digest
+/// writer.
+///
+/// # Errors
+///
+/// Returns an error message if the bytes cannot be written to a temporary file or the SDK cannot
+/// read the file (with its numeric error code).
+pub fn new_raw_image_digest(bytes: &[u8]) -> Result<[u8; 16], String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("oracle.dng");
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let cpath =
+        CString::new(path.to_str().ok_or("non-UTF-8 temp path")?).map_err(|e| e.to_string())?;
+    let mut digest = [0u8; 16];
+    // SAFETY: `cpath` is a valid NUL-terminated path; `digest` provides the 16 writable bytes the
+    // entry point fills.
+    let code = unsafe { gdng_new_raw_image_digest(cpath.as_ptr(), digest.as_mut_ptr()) };
+    if code == 0 {
+        Ok(digest)
+    } else {
+        Err(format!(
+            "Adobe DNG SDK could not compute NewRawImageDigest (error code {code})"
+        ))
+    }
 }
 
 /// A 16-bit image as the Adobe DNG SDK reads it: interleaved samples and their geometry — the
@@ -69,8 +123,10 @@ pub struct AdobeRaw {
 
 /// Validates `bytes` as a DNG with the Adobe DNG SDK.
 ///
-/// Returns `Ok(())` if the SDK parses the directories, builds a negative, and reads the raw image
-/// without error; otherwise `Err` with the SDK error code.
+/// Returns `Ok(())` if the SDK parses the directories, builds a negative, reads the raw image
+/// without error, **and** any stored `RawImageDigest`/`NewRawImageDigest` matches the image data
+/// (the SDK records a mismatch as "damaged", surfaced here as error code 1); otherwise `Err`
+/// with the error code.
 ///
 /// # Errors
 ///
@@ -217,5 +273,30 @@ mod tests {
         assert!(validate_dng(b"this is not a DNG file").is_err());
         assert!(read_raw_dng(b"this is not a DNG file").is_err());
         assert!(decode_lossless_jpeg(b"not a JPEG", 4).is_err());
+        assert!(new_raw_image_digest(b"this is not a DNG file").is_err());
+    }
+
+    /// The linked libjxl is real (not the check-only stubs): the SDK decodes Adobe's own
+    /// JPEG-XL-compressed sample DNG to actual pixels.
+    #[test]
+    fn decodes_adobe_jxl_sample_via_real_libjxl() {
+        let bytes = sample_file("01_jxl_linear_raw_integer.dng").expect("sample DNG present");
+        let raw = read_raw_dng(&bytes).expect("JXL DNG must decode through real libjxl");
+        assert!(raw.width > 0 && raw.height > 0);
+        assert_eq!(raw.planes, 3, "linear-raw sample has 3 planes");
+        assert!(
+            raw.samples.iter().any(|&s| s != 0),
+            "stub libjxl would leave the image all-zero"
+        );
+    }
+
+    /// The digest entry point computes a stable, non-trivial MD5 for a real file.
+    #[test]
+    fn computes_new_raw_image_digest_for_sample() {
+        let bytes = sample_file("05_PGTM2_unsigned8.dng").expect("sample DNG present");
+        let digest = new_raw_image_digest(&bytes).expect("digest");
+        assert_ne!(digest, [0u8; 16]);
+        // Deterministic across calls.
+        assert_eq!(digest, new_raw_image_digest(&bytes).expect("digest again"));
     }
 }

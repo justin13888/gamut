@@ -17,6 +17,7 @@ use crate::raw::RawImage;
 /// Values are clipped to `[0.0, 1.0]`. The spec makes low clipping optional ("may be clipped",
 /// preserving negatives can help some noise-reduction pipelines); this implementation clips both
 /// ends, matching the Adobe SDK's default-host stage-2 image.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinearImage {
     /// Active-area width in pixels.
@@ -133,7 +134,8 @@ pub(crate) fn linearize(raw: &RawImage) -> Result<LinearImage> {
                     Some(t) => f64::from(t[usize::from(stored).min(t.len() - 1)]),
                     None => f64::from(stored),
                 };
-                let black = levels.black_at(r, c, plane) + dh + dv;
+                // `plane < spp` by loop construction, so the lookup cannot miss.
+                let black = levels.black_at(r, c, plane).unwrap_or(0.0) + dh + dv;
                 let value = (linearized - black) * scale[plane];
                 out.push(value.clamp(0.0, 1.0) as f32);
             }

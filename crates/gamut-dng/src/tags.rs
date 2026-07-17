@@ -339,6 +339,13 @@ pub const REDUCTION_MATRIX3: u16 = 52538;
 pub const RGB_TABLES: u16 = 52543;
 /// `ProfileGainTableMap2` (52544, 0xCD40) — the revised profile gain-table map (DNG 1.7).
 pub const PROFILE_GAIN_TABLE_MAP2: u16 = 52544;
+/// `ColumnInterleaveFactor` (52547, 0xCD43) — column interleaving of the stored image data
+/// (DNG 1.7.1).
+pub const COLUMN_INTERLEAVE_FACTOR: u16 = 52547;
+/// `ImageSequenceInfo` (52548, 0xCD44) — membership of a burst/bracket image sequence (DNG 1.7).
+pub const IMAGE_SEQUENCE_INFO: u16 = 52548;
+/// `ImageStats` (52550, 0xCD46) — pre-computed image statistics (DNG 1.7).
+pub const IMAGE_STATS: u16 = 52550;
 /// `ProfileDynamicRange` (52551, 0xCD47) — whether the profile targets SDR or HDR (DNG 1.7).
 pub const PROFILE_DYNAMIC_RANGE: u16 = 52551;
 /// `ProfileGroupName` (52552, 0xCD48) — the group name shared by related profiles (DNG 1.7).
@@ -514,6 +521,9 @@ const KNOWN_TAGS: &[u16] = &[
     REDUCTION_MATRIX3,
     RGB_TABLES,
     PROFILE_GAIN_TABLE_MAP2,
+    COLUMN_INTERLEAVE_FACTOR,
+    IMAGE_SEQUENCE_INFO,
+    IMAGE_STATS,
     PROFILE_DYNAMIC_RANGE,
     PROFILE_GROUP_NAME,
     JXL_DISTANCE,

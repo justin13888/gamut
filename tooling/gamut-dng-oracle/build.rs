@@ -11,8 +11,15 @@
 //!   excluded and replaced by the no-op `src/dng_xmp_sdk_stub.cpp`. The XMP files/doc-ops layers
 //!   are off.
 //! - **libjpeg** — off (`qDNGUseLibJPEG=0`); lossless JPEG is the SDK's own codec.
-//! - **libjxl** — wired in unconditionally by 1.7.1; satisfied by the link-only stubs in
-//!   `src/jxl_stub.cpp` (plus generated export-header stubs; see [`write_jxl_export_stubs`]).
+//! - **libjxl** — wired in unconditionally by 1.7.1; satisfied by the **real libjxl 0.12.0** that
+//!   the `gamut-jxl-sys` dependency statically builds. The SDK is compiled against that exact
+//!   build's installed headers (`DEP_JXL_INCLUDE`, published by gamut-jxl-sys's `links = "jxl"`
+//!   metadata), and `links = "jxl"` guarantees a single libjxl copy per binary even when a test
+//!   executable also links gamut-jxl's encoder — so the oracle genuinely decodes JPEG XL DNGs.
+//!   Under `GAMUT_JXL_SYS_SKIP_NATIVE=1` (check-only environments without cmake) gamut-jxl-sys
+//!   builds nothing; the SDK then compiles against its vendored libjxl headers with the link-only
+//!   stubs in `src/jxl_stub.cpp` — that mode compiles but must never run JXL-touching tests
+//!   (nothing links in check-only environments anyway).
 //!
 //! Only the system `zlib` (`-lz`) is genuinely required, since the SDK includes `zlib.h`
 //! unconditionally for its Deflate and big-table paths.
@@ -65,17 +72,30 @@ fn main() {
         source.display()
     );
 
-    // libjxl's public headers `#include` CMake-generated export-macro headers that are not in the
-    // source tree; provide empty-macro stubs (static build, no symbol visibility decoration).
+    // libjxl's public headers `#include` CMake-generated export-macro headers; the gamut-jxl-sys
+    // install tree has the real generated ones, but the SDK's vendored source tree does not, so
+    // empty-macro stubs back both modes (static build, no symbol visibility decoration).
     let jxl_shim = out.join("jxl_shim");
     write_jxl_export_stubs(&jxl_shim.join("jxl"));
 
-    // ---- Compile the SDK + shim + libjxl stubs into one static archive. -------------------------
+    // The libjxl headers to compile the SDK against: the exact installed headers of the
+    // gamut-jxl-sys static build when it ran (`DEP_JXL_INCLUDE`), else — check-only skip-native
+    // mode — the SDK's vendored copy, with `src/jxl_stub.cpp` satisfying the link.
+    let real_libjxl = std::env::var_os("DEP_JXL_INCLUDE").map(PathBuf::from);
+
+    // ---- Compile the SDK + shim (+ libjxl stubs in skip-native mode) into one archive. ----------
     let mut build = cc::Build::new();
     build.cpp(true).std("c++17");
     build.include(&source);
+    match &real_libjxl {
+        Some(include) => {
+            build.include(include);
+        }
+        None => {
+            build.include(&jxl_include);
+        }
+    }
     build.include(&jxl_shim);
-    build.include(&jxl_include);
     // Headless Linux, little-endian. XMP is *enabled* (so `dng_metadata`/`dng_xmp` stay complete
     // and the SDK source compiles cleanly) but its toolkit bridge is the no-op
     // `src/dng_xmp_sdk_stub.cpp`; the XMP files/doc-ops layers are off (nothing references them).
@@ -118,12 +138,23 @@ fn main() {
     );
 
     build.file(manifest.join("src/oracle_shim.cpp"));
-    build.file(manifest.join("src/jxl_stub.cpp"));
+    // With the real libjxl linked (via gamut-jxl-sys), the stubs must NOT be compiled — they
+    // would collide with the genuine symbols. They exist solely for the check-only skip-native
+    // mode.
+    if real_libjxl.is_none() {
+        build.file(manifest.join("src/jxl_stub.cpp"));
+    }
     build.file(manifest.join("src/dng_xmp_sdk_stub.cpp"));
     build.compile("dng_oracle");
 
     // The SDK includes <zlib.h> unconditionally (Deflate + big-table compression); link system z.
     println!("cargo:rustc-link-lib=dylib=z");
+
+    // The Adobe sample DNGs shipped in the SDK ZIP, for decode-conformance tests.
+    println!(
+        "cargo:rustc-env=GDNG_SAMPLE_FILES_DIR={}",
+        base.join("sample_files").display()
+    );
 
     println!("cargo:rerun-if-changed=src/oracle_shim.cpp");
     println!("cargo:rerun-if-changed=src/jxl_stub.cpp");

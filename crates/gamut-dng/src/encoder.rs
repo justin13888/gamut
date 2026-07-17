@@ -3,6 +3,7 @@
 use gamut_core::{Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
+use crate::gain_map::ProfileGainTableMap;
 use crate::metadata::DngMetadata;
 use crate::profile::{CameraProfile, srational, urational};
 use crate::raw::{RawImage, RawPhotometry};
@@ -19,10 +20,15 @@ use crate::{bitpack, compression, lossless_jpeg, preview, tags};
 #[derive(Debug, Clone)]
 pub struct DngEncoder {
     order: ByteOrder,
-    dng_version: [u8; 4],
+    dng_version: Option<[u8; 4]>,
     backward_version: [u8; 4],
     big_tiff: bool,
     compression: Compression,
+    tiling: Option<(u32, u32)>,
+    jxl_distance: f32,
+    jxl_effort: u8,
+    gain_table_map: Option<ProfileGainTableMap>,
+    gain_table_map2: Option<ProfileGainTableMap>,
     metadata: DngMetadata,
 }
 
@@ -30,12 +36,20 @@ impl Default for DngEncoder {
     fn default() -> Self {
         Self {
             order: ByteOrder::LittleEndian,
-            // 1.4.0.0 covers the baseline feature set; the backward version (oldest reader that can
-            // parse the file) is the widely-supported 1.1.0.0.
-            dng_version: [1, 4, 0, 0],
+            // None = computed from the features used at encode time (see
+            // `required_dng_version`); the backward version (oldest reader that can parse the
+            // file) starts at the widely-supported 1.1.0.0 and is raised per the spec's
+            // compatibility rules.
+            dng_version: None,
             backward_version: [1, 1, 0, 0],
             big_tiff: false,
             compression: Compression::Uncompressed,
+            tiling: None,
+            // JPEG XL defaults: lossless (distance 0.0) at libjxl's default effort (7, squirrel).
+            jxl_distance: 0.0,
+            jxl_effort: 7,
+            gain_table_map: None,
+            gain_table_map2: None,
             metadata: DngMetadata::default(),
         }
     }
@@ -55,10 +69,13 @@ impl DngEncoder {
         self
     }
 
-    /// Returns a copy of this encoder that declares the given `DNGVersion` (e.g. `[1, 4, 0, 0]`).
+    /// Returns a copy of this encoder that declares the given `DNGVersion` (e.g. `[1, 4, 0, 0]`)
+    /// verbatim, overriding the default: the minimal version covering the features actually
+    /// written (JPEG XL / `ProfileGainTableMap2` → 1.7.0.0, `ProfileGainTableMap` / the
+    /// spectral illuminant → 1.6.0.0, opcodes → their defining version, else 1.4.0.0).
     #[must_use]
     pub fn with_dng_version(mut self, version: [u8; 4]) -> Self {
-        self.dng_version = version;
+        self.dng_version = Some(version);
         self
     }
 
@@ -89,12 +106,64 @@ impl DngEncoder {
 
     /// Returns a copy of this encoder that compresses the raw image with `compression`.
     ///
-    /// [`Uncompressed`](Compression::Uncompressed) and [`Deflate`](Compression::Deflate) are
-    /// supported; lossless JPEG and JPEG XL are added in later phases. The preview is always
-    /// stored uncompressed.
+    /// [`Uncompressed`](Compression::Uncompressed), [`Deflate`](Compression::Deflate) (8/16-bit),
+    /// [`LosslessJpeg`](Compression::LosslessJpeg), and — with the `jxl-encode` cargo feature —
+    /// [`JpegXl`](Compression::JpegXl) (full-range 16-bit samples) are supported. The preview is
+    /// always stored uncompressed.
     #[must_use]
     pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Returns a copy of this encoder that encodes JPEG XL at the given Butteraugli `distance` —
+    /// `0.0` (the default) is lossless; larger values are lossy (1.0 ≈ visually lossless). The
+    /// written raw IFD records it in the `JXLDistance` tag. Only meaningful with
+    /// [`Compression::JpegXl`].
+    #[must_use]
+    pub fn with_jxl_distance(mut self, distance: f32) -> Self {
+        self.jxl_distance = distance;
+        self
+    }
+
+    /// Returns a copy of this encoder that encodes JPEG XL at the given libjxl effort level
+    /// (`1..=10`; default 7). The written raw IFD records it in the `JXLEffort` tag. Only
+    /// meaningful with [`Compression::JpegXl`].
+    #[must_use]
+    pub fn with_jxl_effort(mut self, effort: u8) -> Self {
+        self.jxl_effort = effort;
+        self
+    }
+
+    /// Returns a copy of this encoder that stores the raw image as a `tile_width × tile_height`
+    /// tile grid (`TileOffsets`/`TileByteCounts`) instead of strips.
+    ///
+    /// Tile dimensions must be positive multiples of 16 (TIFF 6.0 §15); edge tiles are stored
+    /// full-size with zero padding, which decoders crop. The tiled layout is how real-world
+    /// large raws (e.g. Apple ProRAW) are stored, and it bounds a reader's per-chunk working
+    /// set; for small images the per-tile padding overhead usually outweighs that. The preview
+    /// stays stripped.
+    #[must_use]
+    pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
+        self.tiling = Some((tile_width, tile_height));
+        self
+    }
+
+    /// Returns a copy of this encoder that embeds `map` as the raw IFD's `ProfileGainTableMap`
+    /// (52525, DNG 1.6). The v1 tag stores 32-bit float gains with no gamma — encoding fails
+    /// with a typed error if `map` uses v2-only content.
+    #[must_use]
+    pub fn with_gain_table_map(mut self, map: ProfileGainTableMap) -> Self {
+        self.gain_table_map = Some(map);
+        self
+    }
+
+    /// Returns a copy of this encoder that embeds `map` as IFD 0's `ProfileGainTableMap2`
+    /// (52544, DNG 1.7), the extended form with gamma and integer gain storage. When both maps
+    /// are embedded, readers apply only this one (DNG 1.7.1 p. 88).
+    #[must_use]
+    pub fn with_gain_table_map2(mut self, map: ProfileGainTableMap) -> Self {
+        self.gain_table_map2 = Some(map);
         self
     }
 
@@ -137,41 +206,98 @@ impl DngEncoder {
             ));
         }
         let bits = raw.bits_per_sample();
+        // Deflate compresses the *packed* byte stream, and the DNG SDK's reader only accepts it
+        // at whole-byte integer depths (8/16/32-bit; dng_read_image::CanReadTile) — a sub-byte
+        // deflate raw would be a file the reference reader cannot decode.
+        if self.compression == Compression::Deflate && !matches!(bits, 8 | 16) {
+            return Err(Error::Unsupported(
+                "DNG: Deflate compression requires 8- or 16-bit samples",
+            ));
+        }
+        // JPEG XL image data is full-range 16-bit in the DNG ecosystem (readers decode it at
+        // pixel-format depth; Apple ProRAW pairs a 10-bit codestream with WhiteLevel 65535).
+        // Encoding N-bit code values directly would produce a file the reference SDK decodes
+        // scaled — misrendering against the written levels — so sub-16-bit input is rejected:
+        // scale the code values and levels to 16-bit first.
+        if self.compression == Compression::JpegXl && bits != 16 {
+            return Err(Error::Unsupported(
+                "DNG: JPEG XL compression requires full-range 16-bit samples",
+            ));
+        }
         let (width, height) = (
             raw.dimensions().width as usize,
             raw.dimensions().height as usize,
         );
         let spp = usize::from(raw.samples_per_pixel());
-        let samples_per_row = width * spp;
 
-        // Lossless JPEG codes samples directly; the byte-oriented schemes compress the packed
-        // stream.
-        let raw_strip = if self.compression == Compression::LosslessJpeg {
-            lossless_jpeg::encode(raw.samples(), width, height, spp, bits)?
-        } else {
-            let packed = bitpack::pack(raw.samples(), bits, samples_per_row, self.order);
-            compression::compress(self.compression, &packed)?
+        let raw_data = match self.tiling {
+            None => vec![self.encode_chunk(raw.samples(), width, height, spp, bits)?],
+            Some((tile_width, tile_height)) => {
+                if tile_width == 0
+                    || tile_height == 0
+                    || tile_width % 16 != 0
+                    || tile_height % 16 != 0
+                {
+                    return Err(Error::InvalidInput(
+                        "DNG: tile dimensions must be positive multiples of 16",
+                    ));
+                }
+                let (tw, th) = (tile_width as usize, tile_height as usize);
+                tile_samples(raw.samples(), width, height, spp, tw, th)
+                    .iter()
+                    .map(|tile| self.encode_chunk(tile, tw, th, spp, bits))
+                    .collect::<Result<Vec<_>>>()?
+            }
         };
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
-        let mut ifd0 = self.build_ifd0(profile, preview_dims, backward_version_for(self, raw));
+        // Effective versions: the backward version per the compatibility rules, and (unless
+        // overridden) the minimal DNGVersion covering the features used — never below the
+        // backward version, which a reader is entitled to assume.
+        let backward_version = backward_version_for(self, raw, profile);
+        let dng_version = self.dng_version.unwrap_or_else(|| {
+            let required = required_dng_version(self, raw, profile);
+            if backward_version > required {
+                backward_version
+            } else {
+                required
+            }
+        });
+        let mut ifd0 = self.build_ifd0(profile, preview_dims, dng_version, backward_version)?;
+        // The raw-data integrity digest (P17). `gdng_validate` runs ValidateRawImageDigest, so
+        // every oracle-gated test enforces this value against the SDK's own computation. For
+        // lossy-compressed storage (JPEG XL) the digest covers the compressed chunks; for
+        // everything else, the raw samples.
+        let digest = if self.compression == Compression::JpegXl {
+            crate::digest::lossy_compressed_digest(&raw_data)
+        } else {
+            crate::digest::new_raw_image_digest(raw)
+        };
+        ifd0.set(tags::NEW_RAW_IMAGE_DIGEST, Value::Byte(digest.to_vec()));
         // Embed metadata: XMP/IPTC/ICC blocks go in IFD 0; EXIF becomes an `ExifIFD` sub-IFD.
         if !self.metadata.is_empty()
             && let Some(exif) = self.metadata.apply(&mut ifd0)
         {
             ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
         }
-        let raw_ifd = build_raw_ifd(raw, self.compression)?;
+        let raw_ifd = build_raw_ifd(self, raw)?;
 
         let preview_blocks = ImageBlocks {
             offset_tag: tags::STRIP_OFFSETS,
             bytecount_tag: tags::STRIP_BYTE_COUNTS,
             blocks: vec![preview_rgb],
         };
-        let raw_blocks = ImageBlocks {
-            offset_tag: tags::STRIP_OFFSETS,
-            bytecount_tag: tags::STRIP_BYTE_COUNTS,
-            blocks: vec![raw_strip],
+        let raw_blocks = match self.tiling {
+            None => ImageBlocks {
+                offset_tag: tags::STRIP_OFFSETS,
+                bytecount_tag: tags::STRIP_BYTE_COUNTS,
+                blocks: raw_data,
+            },
+            Some(_) => ImageBlocks {
+                offset_tag: tags::TILE_OFFSETS,
+                bytecount_tag: tags::TILE_BYTE_COUNTS,
+                blocks: raw_data,
+            },
         };
 
         let bytes = write_cfa_dng(
@@ -193,8 +319,9 @@ impl DngEncoder {
         &self,
         profile: &CameraProfile,
         preview_dims: gamut_core::Dimensions,
+        dng_version: [u8; 4],
         backward_version: [u8; 4],
-    ) -> Ifd {
+    ) -> Result<Ifd> {
         let mut ifd = Ifd::new();
         // Preview image (a reduced-resolution RGB thumbnail).
         ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![1]));
@@ -222,7 +349,7 @@ impl DngEncoder {
         );
 
         // DNG identity + colour profile.
-        ifd.set(tags::DNG_VERSION, Value::Byte(self.dng_version.to_vec()));
+        ifd.set(tags::DNG_VERSION, Value::Byte(dng_version.to_vec()));
         ifd.set(
             tags::DNG_BACKWARD_VERSION,
             Value::Byte(backward_version.to_vec()),
@@ -296,23 +423,164 @@ impl DngEncoder {
         if let Some(policy) = profile.profile_embed_policy() {
             ifd.set(tags::PROFILE_EMBED_POLICY, Value::Long(vec![policy.code()]));
         }
-        ifd
+        // The extended gain-table map lives in IFD 0 (its v1 sibling lives in the raw IFD).
+        if let Some(map) = &self.gain_table_map2 {
+            ifd.set(
+                tags::PROFILE_GAIN_TABLE_MAP2,
+                Value::Undefined(map.to_bytes_v2(self.order)?),
+            );
+        }
+        Ok(ifd)
     }
 }
 
 /// The effective `DNGBackwardVersion`: the configured version, raised to the spec version of
 /// every **non-optional** opcode the raw carries (DNG 1.7.1 Compatibility Issue 7, p. 124 — a
-/// reader that must execute an opcode needs at least the DNG version that defined it). The four
-/// version octets compare lexicographically, which matches dotted-version ordering.
-fn backward_version_for(encoder: &DngEncoder, raw: &RawImage) -> [u8; 4] {
+/// reader that must execute an opcode needs at least the DNG version that defined it). The same
+/// applies to features a reader cannot skip: JPEG XL raw compression requires a 1.7 reader
+/// (Compatibility Issue 18), Deflate/lossy-JPEG a 1.4 reader (Issues 10/11), and the
+/// spectral-data illuminant (255) a 1.6 reader (Issue 17). Optional content — gain-table maps,
+/// masks, depth — deliberately does *not* raise it (Issues 12–15/20). The four version octets
+/// compare lexicographically, which matches dotted-version ordering.
+fn backward_version_for(encoder: &DngEncoder, raw: &RawImage, profile: &CameraProfile) -> [u8; 4] {
     let mut version = encoder.backward_version;
+    let raise = |v: [u8; 4], version: &mut [u8; 4]| {
+        if v > *version {
+            *version = v;
+        }
+    };
     let lists = [raw.opcode_list1(), raw.opcode_list2(), raw.opcode_list3()];
     for opcode in lists.iter().flat_map(|l| l.opcodes()) {
-        if !opcode.is_optional() && opcode.spec_version > version {
-            version = opcode.spec_version;
+        if !opcode.is_optional() {
+            raise(opcode.spec_version, &mut version);
         }
     }
+    match encoder.compression {
+        Compression::JpegXl => raise([1, 7, 0, 0], &mut version),
+        Compression::Deflate | Compression::LossyJpeg => raise([1, 4, 0, 0], &mut version),
+        _ => {}
+    }
+    if uses_spectral_illuminant(profile) {
+        raise([1, 6, 0, 0], &mut version);
+    }
     version
+}
+
+/// The minimal `DNGVersion` covering everything this encode writes, used when no explicit
+/// version is configured. The floor is 1.4.0.0 (the crate's baseline feature set); JPEG XL and
+/// `ProfileGainTableMap2` need 1.7, `ProfileGainTableMap` and illuminant 255 need 1.6, and any
+/// opcode (optional included — `DNGVersion` declares what the file *uses*, unlike the backward
+/// version) needs its defining version. BigTIFF is independent of the DNG version (spec,
+/// "64-bit Format").
+fn required_dng_version(encoder: &DngEncoder, raw: &RawImage, profile: &CameraProfile) -> [u8; 4] {
+    let mut version = [1, 4, 0, 0];
+    let raise = |v: [u8; 4], version: &mut [u8; 4]| {
+        if v > *version {
+            *version = v;
+        }
+    };
+    if encoder.compression == Compression::JpegXl {
+        raise([1, 7, 0, 0], &mut version);
+    }
+    if encoder.gain_table_map.is_some() {
+        raise([1, 6, 0, 0], &mut version);
+    }
+    if encoder.gain_table_map2.is_some() {
+        raise([1, 7, 0, 0], &mut version);
+    }
+    if uses_spectral_illuminant(profile) {
+        raise([1, 6, 0, 0], &mut version);
+    }
+    let lists = [raw.opcode_list1(), raw.opcode_list2(), raw.opcode_list3()];
+    for opcode in lists.iter().flat_map(|l| l.opcodes()) {
+        raise(opcode.spec_version, &mut version);
+    }
+    version
+}
+
+/// Whether the profile uses the spectral-data illuminant (`CalibrationIlluminant` 255, DNG 1.6).
+fn uses_spectral_illuminant(profile: &CameraProfile) -> bool {
+    profile.calibration_illuminant1().code() == 255
+        || profile
+            .second_illuminant()
+            .is_some_and(|(_, illuminant)| illuminant.code() == 255)
+}
+
+impl DngEncoder {
+    /// Encodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each.
+    /// Lossless JPEG and JPEG XL code samples directly; the byte-oriented schemes pack then
+    /// compress. Rows are byte-aligned per chunk (each chunk is an independent sample stream),
+    /// which is exactly how the decoder consumes them.
+    fn encode_chunk(
+        &self,
+        samples: &[u16],
+        cols: usize,
+        rows: usize,
+        spp: usize,
+        bits: u16,
+    ) -> Result<Vec<u8>> {
+        match self.compression {
+            Compression::LosslessJpeg => lossless_jpeg::encode(samples, cols, rows, spp, bits),
+            Compression::JpegXl => {
+                #[cfg(all(
+                    feature = "jxl-encode",
+                    any(not(target_arch = "wasm32"), target_os = "emscripten")
+                ))]
+                {
+                    crate::jxl::encode_chunk(
+                        samples,
+                        cols,
+                        rows,
+                        spp,
+                        self.jxl_distance,
+                        self.jxl_effort,
+                    )
+                }
+                #[cfg(not(all(
+                    feature = "jxl-encode",
+                    any(not(target_arch = "wasm32"), target_os = "emscripten")
+                )))]
+                {
+                    Err(Error::Unsupported(
+                        "DNG: JPEG XL encoding requires the `jxl-encode` feature (non-wasm)",
+                    ))
+                }
+            }
+            _ => {
+                let packed = bitpack::pack(samples, bits, cols * spp, self.order);
+                compression::compress(self.compression, &packed)
+            }
+        }
+    }
+}
+
+/// Splits an image into full-size `tw × th` sample tiles in row-major tile order, zero-padding
+/// edge tiles (TIFF 6.0 §15: every stored tile has the same dimensions).
+fn tile_samples(
+    samples: &[u16],
+    width: usize,
+    height: usize,
+    spp: usize,
+    tw: usize,
+    th: usize,
+) -> Vec<Vec<u16>> {
+    let (across, down) = (width.div_ceil(tw), height.div_ceil(th));
+    let mut tiles = Vec::with_capacity(across * down);
+    for ty in 0..down {
+        for tx in 0..across {
+            let mut tile = vec![0u16; tw * th * spp];
+            let (x0, y0) = (tx * tw, ty * th);
+            let copy_cols = tw.min(width - x0);
+            for r in 0..th.min(height - y0) {
+                let src = ((y0 + r) * width + x0) * spp;
+                let dst = r * tw * spp;
+                tile[dst..dst + copy_cols * spp]
+                    .copy_from_slice(&samples[src..src + copy_cols * spp]);
+            }
+            tiles.push(tile);
+        }
+    }
+    tiles
 }
 
 /// Builds an `SRATIONAL` value from a row-major `3 × 3` colour/calibration matrix.
@@ -337,7 +605,8 @@ fn color_plane_count(raw: &RawImage) -> usize {
 /// Returns [`Error::InvalidInput`] if the level model cannot be stored: a delta vector whose
 /// length doesn't match the active area, a non-integral white level, or a level outside the
 /// tag's representable range.
-fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Result<Ifd> {
+fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
+    let compression = encoder.compression;
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
     let spp = raw.samples_per_pixel();
@@ -350,8 +619,37 @@ fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Result<Ifd> {
     );
     ifd.set(tags::COMPRESSION, Value::Short(vec![compression.code()]));
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
-    ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height));
-    ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![1; usize::from(spp)])); // unsigned integer
+    // A tiled image carries the tile geometry; a stripped one carries RowsPerStrip (a strip/tile
+    // IFD must not mix the two families).
+    match encoder.tiling {
+        Some((tile_width, tile_height)) => {
+            ifd.set(tags::TILE_WIDTH, count_value(tile_width));
+            ifd.set(tags::TILE_LENGTH, count_value(tile_height));
+        }
+        None => ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height)),
+    }
+    // JPEG XL records its encode parameters (optional tags; DNG 1.7.1 pp. 97-98).
+    if compression == Compression::JpegXl {
+        ifd.set(tags::JXL_DISTANCE, Value::Float(vec![encoder.jxl_distance]));
+        ifd.set(
+            tags::JXL_EFFORT,
+            Value::Long(vec![u32::from(encoder.jxl_effort)]),
+        );
+    }
+    // The v1 gain-table map lives in the raw IFD (its v2 sibling lives in IFD 0).
+    if let Some(map) = &encoder.gain_table_map {
+        ifd.set(
+            tags::PROFILE_GAIN_TABLE_MAP,
+            Value::Undefined(map.to_bytes_v1(encoder.order)?),
+        );
+    }
+    ifd.set(
+        tags::SAMPLE_FORMAT,
+        Value::Short(vec![
+            crate::values::SampleFormat::UnsignedInteger.code();
+            usize::from(spp)
+        ]),
+    );
     match raw.photometry() {
         RawPhotometry::Cfa {
             repeat,
@@ -669,6 +967,213 @@ mod tests {
             DngEncoder::new()
                 .encode(&raw12, &profile, &mut Vec::new())
                 .is_ok()
+        );
+    }
+
+    /// Hand-computed golden for the tile splitter: a symmetric split∘assemble round-trip cannot
+    /// see a transposed grid or swapped padding, so the expected tiles are written out.
+    #[test]
+    fn tile_samples_splits_row_major_and_zero_pads_edges() {
+        // A 3x3 single-plane image with 2x2 tiles: a 2x2 grid whose right/bottom edges pad.
+        let samples: Vec<u16> = (1..=9).collect();
+        let tiles = tile_samples(&samples, 3, 3, 1, 2, 2);
+        assert_eq!(
+            tiles,
+            vec![
+                vec![1, 2, 4, 5],
+                vec![3, 0, 6, 0],
+                vec![7, 8, 0, 0],
+                vec![9, 0, 0, 0],
+            ]
+        );
+        // Two planes interleave within each tile row.
+        let planar: Vec<u16> = (1..=8).collect(); // 2x2 image, 2 planes
+        let tiles = tile_samples(&planar, 2, 2, 2, 2, 2);
+        assert_eq!(tiles, vec![(1..=8).collect::<Vec<u16>>()]);
+    }
+
+    #[test]
+    fn encode_rejects_bad_tile_dimensions() {
+        let raw = sample_raw(32, 32, 16);
+        let profile = sample_profile();
+        for (tw, th) in [(0, 32), (32, 0), (24, 32), (32, 40)] {
+            let err = DngEncoder::new()
+                .with_tiling(tw, th)
+                .encode(&raw, &profile, &mut Vec::new())
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidInput(m) if m.contains("multiples of 16")),
+                "({tw}, {th}) must be rejected, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tiled_raw_ifd_carries_tile_tags_not_rows_per_strip() {
+        let raw = sample_raw(48, 32, 16);
+        let profile = sample_profile();
+        let mut out = Vec::new();
+        DngEncoder::new()
+            .with_tiling(32, 16)
+            .encode(&raw, &profile, &mut out)
+            .expect("encode");
+        let file = gamut_ifd::read(&out).expect("parse");
+        let raw_off = file.ifds[0].get_u32(tags::SUB_IFDS).expect("SubIFDs");
+        let raw_ifd =
+            read_ifd_at(&out, raw_off.into(), file.order, Variant::Classic).expect("raw IFD");
+        assert_eq!(raw_ifd.get_u32(tags::TILE_WIDTH), Some(32));
+        assert_eq!(raw_ifd.get_u32(tags::TILE_LENGTH), Some(16));
+        assert_eq!(raw_ifd.get(tags::ROWS_PER_STRIP), None);
+        // 48x32 in 32x16 tiles: 2 across, 2 down.
+        assert_eq!(
+            raw_ifd.get_u32_vec(tags::TILE_OFFSETS).map(|v| v.len()),
+            Some(4)
+        );
+        assert_eq!(
+            raw_ifd.get_u32_vec(tags::TILE_BYTE_COUNTS).map(|v| v.len()),
+            Some(4)
+        );
+        // The preview stays stripped.
+        assert!(file.ifds[0].get(tags::STRIP_OFFSETS).is_some());
+    }
+
+    /// Encodes with `enc` and returns the written `(DNGVersion, DNGBackwardVersion)`.
+    fn versions_of(enc: DngEncoder, raw: &RawImage, profile: &CameraProfile) -> ([u8; 4], [u8; 4]) {
+        let mut out = Vec::new();
+        enc.encode(raw, profile, &mut out).expect("encode");
+        let file = gamut_ifd::read(&out).expect("parse");
+        let get = |tag: u16| -> [u8; 4] {
+            let Some(Value::Byte(b)) = file.ifds[0].get(tag) else {
+                panic!("version tag {tag} missing");
+            };
+            [b[0], b[1], b[2], b[3]]
+        };
+        (get(tags::DNG_VERSION), get(tags::DNG_BACKWARD_VERSION))
+    }
+
+    /// The exact version table per the spec's compatibility rules — asserted as literal
+    /// `[u8; 4]` values so no symmetric transform can hide a wrong raise.
+    #[test]
+    fn version_computation_follows_the_compatibility_rules() {
+        let raw = sample_raw(16, 16, 16);
+        let profile = sample_profile();
+
+        // Baseline floor.
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw, &profile),
+            ([1, 4, 0, 0], [1, 1, 0, 0])
+        );
+        // Deflate raises the backward version to 1.4 (Compatibility Issue 10).
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_compression(crate::values::Compression::Deflate),
+                &raw,
+                &profile
+            ),
+            ([1, 4, 0, 0], [1, 4, 0, 0])
+        );
+        // Gain-table maps raise DNGVersion (1.6 / 1.7) but never the backward version
+        // (Issues 15/20).
+        let map = ProfileGainTableMap {
+            points_v: 1,
+            points_h: 1,
+            spacing_v: 1.0,
+            spacing_h: 1.0,
+            origin_v: 0.0,
+            origin_h: 0.0,
+            points_n: 2,
+            input_weights: [0.2; 5],
+            gamma: 1.0,
+            gain_min: 0.0,
+            gain_max: 0.0,
+            gains: crate::gain_map::GainValues::F32(vec![1.0, 2.0]),
+        };
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_gain_table_map(map.clone()),
+                &raw,
+                &profile
+            ),
+            ([1, 6, 0, 0], [1, 1, 0, 0])
+        );
+        let mut map2 = map;
+        map2.gains = crate::gain_map::GainValues::U8(vec![0, 255]);
+        map2.gain_min = 0.5;
+        map2.gain_max = 2.0;
+        assert_eq!(
+            versions_of(DngEncoder::new().with_gain_table_map2(map2), &raw, &profile),
+            ([1, 7, 0, 0], [1, 1, 0, 0])
+        );
+        // An *optional* opcode raises DNGVersion (the file uses it) but not the backward
+        // version; a non-optional one raises both (Issue 7).
+        let opcode = |flags: u32| crate::opcode::Opcode {
+            id: crate::opcode::opcode_id::TRIM_BOUNDS,
+            spec_version: [1, 5, 0, 0],
+            flags,
+            parameters: vec![0; 16],
+        };
+        let mut optional = crate::opcode::OpcodeList::default();
+        optional.push(opcode(crate::opcode::Opcode::FLAG_OPTIONAL));
+        let raw_optional = sample_raw(16, 16, 16).with_opcode_list2(optional);
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw_optional, &profile),
+            ([1, 5, 0, 0], [1, 1, 0, 0])
+        );
+        let mut required = crate::opcode::OpcodeList::default();
+        required.push(opcode(0));
+        let raw_required = sample_raw(16, 16, 16).with_opcode_list2(required);
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw_required, &profile),
+            ([1, 5, 0, 0], [1, 5, 0, 0])
+        );
+        // An explicit override is written verbatim.
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_dng_version([1, 3, 0, 0]),
+                &raw,
+                &profile
+            ),
+            ([1, 3, 0, 0], [1, 1, 0, 0])
+        );
+        // An explicit backward version above the auto floor lifts DNGVersion with it (a reader
+        // may assume DNGVersion >= DNGBackwardVersion).
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_backward_version([1, 6, 0, 0]),
+                &raw,
+                &profile
+            ),
+            ([1, 6, 0, 0], [1, 6, 0, 0])
+        );
+        // The spectral-data illuminant (255) needs a 1.6 reader — as the first illuminant...
+        let m = [0.9, -0.2, -0.1, -0.4, 1.3, 0.1, 0.0, -0.2, 0.9];
+        let spectral1 = CameraProfile::new(
+            "gamut SpectralCam",
+            m,
+            crate::values::CalibrationIlluminant::Other,
+            [0.5, 1.0, 0.6],
+        )
+        .expect("profile");
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw, &spectral1),
+            ([1, 6, 0, 0], [1, 6, 0, 0])
+        );
+        // ...and equally when only the *second* illuminant is spectral.
+        let spectral2 =
+            sample_profile().with_second_illuminant(m, crate::values::CalibrationIlluminant::Other);
+        assert_eq!(
+            versions_of(DngEncoder::new(), &raw, &spectral2),
+            ([1, 6, 0, 0], [1, 6, 0, 0])
+        );
+        // JPEG XL requires a 1.7 reader: both versions raise (Issue 18).
+        #[cfg(feature = "jxl-encode")]
+        assert_eq!(
+            versions_of(
+                DngEncoder::new().with_compression(crate::values::Compression::JpegXl),
+                &raw,
+                &profile
+            ),
+            ([1, 7, 0, 0], [1, 7, 0, 0])
         );
     }
 

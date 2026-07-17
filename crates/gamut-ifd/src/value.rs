@@ -151,6 +151,25 @@ impl Value {
         }
     }
 
+    /// Coerces an array of unsigned integers (`BYTE`, `SHORT`, `LONG`, or — with `bigtiff` —
+    /// `LONG8`/`IFD8`) to `Vec<u64>`, never truncating.
+    ///
+    /// This is the reading for fields that carry **file offsets or byte counts** (sub-IFD
+    /// pointers, `StripOffsets`/`TileOffsets` and their counts): a BigTIFF writes them as
+    /// `LONG8`, whose values are only meaningful past 4 GiB — exactly where [`Self::as_u32_vec`]
+    /// returns `None`.
+    #[must_use]
+    pub fn as_u64_vec(&self) -> Option<Vec<u64>> {
+        match self {
+            Value::Byte(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+            Value::Short(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+            Value::Long(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+            #[cfg(feature = "bigtiff")]
+            Value::Long8(v) | Value::Ifd8(v) => Some(v.clone()),
+            _ => None,
+        }
+    }
+
     /// Builds an offset-array value of the width `variant` stores offsets in: `LONG` for classic
     /// TIFF, `LONG8` for BigTIFF.
     ///
@@ -475,6 +494,25 @@ mod tests {
         // A multi-element (but in-range) value still isn't a scalar — pins the `v.len() == 1` guard
         // rather than the out-of-range path above.
         assert_eq!(Value::Long8(vec![1, 2]).as_u32(), None);
+    }
+
+    /// `as_u64_vec` widens every unsigned integer type and — unlike `as_u32_vec` — keeps
+    /// past-4-GiB `LONG8`/`IFD8` values instead of failing, which is what offset/byte-count
+    /// readers need.
+    #[test]
+    fn as_u64_vec_widens_without_truncating() {
+        assert_eq!(Value::Byte(vec![7]).as_u64_vec(), Some(vec![7]));
+        assert_eq!(Value::Short(vec![1, 2]).as_u64_vec(), Some(vec![1, 2]));
+        assert_eq!(Value::Long(vec![70000]).as_u64_vec(), Some(vec![70000]));
+        assert_eq!(Value::Ascii("x".into()).as_u64_vec(), None);
+        #[cfg(feature = "bigtiff")]
+        {
+            assert_eq!(
+                Value::Long8(vec![1, 0x1_0000_0000]).as_u64_vec(),
+                Some(vec![1, 0x1_0000_0000])
+            );
+            assert_eq!(Value::Ifd8(vec![8]).as_u64_vec(), Some(vec![8]));
+        }
     }
 
     #[test]

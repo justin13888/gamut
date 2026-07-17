@@ -1,27 +1,25 @@
 # gamut-dng — DNG 1.7.1 implementation status
 
-Tracking GitHub issue #109: implement a feature-complete **DNG (Digital Negative) 1.7.1** encoder
-**and** decoder (`references/dng/DNG_Spec_1_7_1_0.pdf`). DNG is a TIFF/EP-based raw-image format,
-so the container spine is the shared `gamut-ifd` primitive; this crate adds the DNG-specific tags,
-raw photometry, compression, colour calibration, and metadata on top. Delivered as a stack of
-small, individually-green phases (P1–P19) on the `feat/dng` branch; each is green
-(`mise run test`/`lint`/`fmt-check`/`coverage` ≥80%).
+Tracking GitHub issue #109: a feature-complete **DNG (Digital Negative) 1.7.1** encoder **and**
+decoder (`references/dng/DNG_Spec_1_7_1_0.pdf`). DNG is a TIFF/EP-based raw-image format, so the
+container spine is the shared `gamut-ifd` primitive; this crate adds the DNG-specific tags, raw
+photometry, compression, colour calibration, and metadata on top. Delivered as a stack of small,
+individually-green phases; each is green (`mise run test`/`lint`/`fmt-check`/`coverage` ≥80%).
 
 **Keystone:** DNG's defining structure is an IFD *tree* — IFD0 (a preview/thumbnail) points, via
 the `SubIFDs` tag (330), at the full-resolution raw image in a **sub-IFD**, with EXIF in another
-(`ExifIFD` 34665). `gamut-ifd`'s writer only linked a flat IFD *chain*, so the first job (P2) is
-sub-IFD **tree layout** — recursive two-pass absolute-offset assignment with pointer-tag patching —
-added to `gamut-ifd` (which `gamut-exif`, issue #34, will share). Once an uncompressed CFA DNG
-validates clean against the Adobe SDK (P4–P6), each later phase swaps a compression scheme,
-photometry, or metadata block into the same spine.
+(`ExifIFD` 34665). `gamut-ifd`'s writer only linked a flat IFD *chain*, so the first job (P2) was
+sub-IFD **tree layout** — recursive two-pass absolute-offset assignment with pointer-tag patching.
 
 **Oracle:** the authoritative **Adobe DNG SDK 1.7.1** (`references/dng/`), built headless via the
-`cc` crate into the dev-only `tooling/gamut-dng-oracle` (XMP disabled; system zlib; a libjxl shim
-since JXL is out of baseline scope), exposing `extern "C"` validate / parse-negative / render
-entry points around `dng_validate`'s call sequence. gamut-encode → `dng_validate` must accept the
-file; Adobe `sample_files/*.dng` → gamut-decode must match. A DNG is also a valid TIFF, so the
-existing `libtiff-oracle` cross-checks the container/strips **pixel-exactly**, and internal
-encode→decode round-trips guard every lossless path.
+`cc` crate into the dev-only `tooling/gamut-dng-oracle` (XMP stubbed; system zlib; **real libjxl
+0.12.0** statically linked via `gamut-jxl-sys`, so the SDK genuinely decodes JPEG XL DNGs),
+exposing `extern "C"` validate / read-stage-1 / read-stage-2 / digest entry points around
+`dng_validate`'s call sequence, plus the SDK ZIP's 14 official `sample_files/*.dng` as
+decode-conformance inputs. gamut-encode → `dng_validate` must accept the file (raw digest
+included); Adobe sample DNGs → gamut-decode must agree with the SDK. A DNG is also a valid TIFF,
+so the existing `libtiff-oracle` cross-checks the container/strips **pixel-exactly**, and
+internal encode→decode round-trips guard every lossless path.
 
 ## Phases
 
@@ -35,53 +33,88 @@ encode→decode round-trips guard every lossless path.
 | P6  | —       | Adobe oracle gate on: gamut-encode → `dng_validate`; libtiff IFD-0 cross-check | ✅ done |
 | P7  | Ch4     | `LinearRaw` photometric (demosaiced RGB), samples-per-pixel / photometric handling | ✅ done |
 | P8  | Ch6     | Colour & calibration: ColorMatrix1/2, CameraCalibration, ForwardMatrix, illuminants, AnalogBalance, BaselineExposure, profile name/policy + `CameraProfile` API | ✅ done |
-| P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). Completed by #253: the full spec level model (`RawLevels`: BlackLevelRepeatDim pattern, RATIONAL blacks, DeltaH/V, per-plane WhiteLevel, LinearizationTable, MaskedAreas) and the chapter-5 mapping itself (`RawImage::to_linear`, gated ±1 LSB against the Adobe SDK's stage-2 image) | ✅ done |
+| P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). Completed by #253: the full spec level model (`RawLevels`) and the chapter-5 mapping itself (`RawImage::to_linear`, gated ±1 LSB against the Adobe SDK's stage-2 image) | ✅ done |
 | P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
-| P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe | ✅ done |
-| P12 | Ch4     | Deflate/ZIP (8) encode+decode (`miniz_oxide`, zlib format) — CFA + LinearRaw, Adobe-validated | ✅ done |
-| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope (predictors 1–7, point transform, per-component tables, restarts; SDK-differential) and published the `lossless_jpeg` module | ✅ done |
-| P14 | Ch2     | Tiled raw layout (`TileOffsets`/`TileByteCounts`) | ⏳ deferred |
+| P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe. Finalization hardened it: full IFD-forest raw search, per-strip sub-byte alignment, `SampleFormat` validation, 64-bit offset reads | ✅ done |
+| P12 | Ch4     | Deflate/ZIP (8) encode+decode (`miniz_oxide`, zlib format) — CFA + LinearRaw, Adobe-validated; encode limited to 8/16-bit (the SDK reader's constraint) | ✅ done |
+| P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module; per-chunk geometry follows the spec's total-sample-count rule | ✅ done |
+| P14 | Ch2     | Tiled raw layout (`TileWidth`/`TileLength`/`TileOffsets`/`TileByteCounts`): decode with edge-crop reassembly + `with_tiling` encode (zero-padded edge tiles), all schemes, Adobe pixel-exact | ✅ done |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
 | P16 | Ch8–9   | Metadata: EXIF sub-IFD + XMP (700) / IPTC (33723) / ICC (34675) — embed + decode, Adobe-validated | ✅ done |
-| P17 | Ch2     | Digests: MD5 `NewRawImageDigest`/`RawImageDigest`/`RawDataUniqueID` | ⏳ deferred |
+| P17 | Ch2     | Digests: the encoder writes `NewRawImageDigest` (51111), bit-matching the SDK's `FindNewRawImageDigest` (256×256 digest tiles, planar LE serialisation, the ≤256-entry-table byte mode); `RawImage::new_raw_image_digest` is public and the decoder surfaces the stored digest | ✅ done |
 | P18 | Ch7     | `OpcodeList1/2/3` container + standard opcode library. Container done via #253: typed `OpcodeList`/`Opcode` parse + pass-through write + `DNGBackwardVersion` raising; the standard opcode *processing* library remains deferred | ◑ partial |
-| P19 | —       | Finalization: docs + top-to-bottom API review (CLI N/A — DNG needs raw sensor input, not the CLI's processed PNG/JPEG inputs) | ✅ done |
+| P19 | —       | Finalization: JPEG XL, sub-images, gain maps, extra-tag explicitness, version auto-computation, docs + API freeze (v1.0.0) | ✅ done |
+| P20 | Ch3–4   | **JPEG XL** (Compression 52546, DNG 1.7): decode always available (pure-Rust jxl-rs; bare codestream + container, full-range 16-bit per the SDK's semantics, fp16 rejected typed); encode behind the `jxl-encode` feature (libjxl; lossless or lossy, `JXLDistance`/`JXLEffort` written); `RowInterleaveFactor`/`ColumnInterleaveFactor` de-interleave on decode | ✅ done |
+| P21 | Ch2,4   | **Sub-images**: every non-raw image IFD as a typed `SubImage` (previews, transparency masks, **semantic masks** with `SemanticName`/`SemanticInstanceID`/`MaskSubArea`, depth maps + `DepthInfo`), best-effort decoded with verbatim-chunk fallback | ✅ done |
+| P22 | Ch4     | **Gain maps**: typed `ProfileGainTableMap` (52525) + `ProfileGainTableMap2` (52544) — parse, byte-exact re-serialise, embed on encode; gated against Adobe's PGTM sample files | ✅ done |
+| P23 | —       | **Explicitness**: every unmodelled IFD field surfaces verbatim as a typed `RawTag` (`ifd0_extra`/`raw_extra`/`exif_extra`/per-sub-image), via a consumption-tracking reader — issue #109's "all metadata explicitly represented" clause | ✅ done |
 
-## Bridge surface for external RAW pipelines (issue #253)
+## Apple ProRAW (DNG 1.7 + JPEG XL): fully covered for decode
 
-Downstream raw *processors* (e.g. rawshift) consume gamut-dng's decode as their DNG front end and
-run their own develop pipeline on top. #253 completed the standard-compliant surface they bridge
-to: the typed `RawLevels` model (P9), the chapter-5 `RawImage::to_linear` mapping (stage-2
-oracle-gated, so downstreams call it instead of reimplementing the spec), typed opcode-list
-containers (P18, processing still ours to do later), and the hardened, now-public
-`lossless_jpeg` module. Opaque tag blobs are deliberately **not** exposed — the crate parses
-spec structures into typed values and writes them back.
+A ProRAW-with-JXL DNG (iPhone 15/16 Pro era) is a DNG 1.7.0.0 linear DNG. Every ingredient maps
+to a shipped, oracle-gated feature:
 
-## Deferred to follow-up campaigns
+| ProRAW ingredient | Coverage |
+| ----------------- | -------- |
+| DNG 1.7.0.0 / backward 1.3+ | version parsing + typed `backward_version` (P11/P23) |
+| `LinearRaw`, 3 samples/pixel | P7 |
+| Tiled layout (e.g. 2016×2016) | P14 |
+| Compression 52546 (JPEG XL), bare codestreams | P20 — full-range 16-bit decode, matching the reference SDK (Apple pairs `BitsPerSample = 10` with `WhiteLevel = 65535`) |
+| `LinearizationTable`, per-plane Black/WhiteLevel | P9 |
+| Semantic-mask sub-IFDs (PhotometricMask 52527, JXL) | P21 (+P20) |
+| `ProfileGainTableMap` | P22 |
+| JPEG preview in IFD 0 | P21 (decoded when in scope, verbatim chunks otherwise) |
+| Apple maker tags | P23 (verbatim typed `RawTag`s) |
+| `NewRawImageDigest` | P17 |
 
-The baseline (P1–P16) ships the full encode+decode pipeline — container/sub-IFD tree, CFA +
-LinearRaw, uncompressed / Deflate / lossless-JPEG compression, the colour-calibration profile,
-8/10/12/14/16-bit packing, embedded preview, EXIF/XMP/IPTC/ICC metadata, and BigTIFF — all
-Adobe-validated. The remaining items each plug into the same IFD-tree / strip pipeline and the
-Adobe + libtiff oracles the same way every phase above does:
+Conformance uses Adobe's official JPEG XL sample DNGs (tiled, interleaved, lossy) — gamut's
+decode agrees with the SDK's own real-libjxl decode within one code (JXL conformance tolerance
+for lossy streams; lossless is bit-exact) — plus ProRAW-shaped synthetic goldens through the
+full encode → SDK-validate → decode → digest loop. No real iPhone file is committed
+(licensing); adding one as a local fixture is a straightforward follow-up.
 
-- **Tiled layout** (P14) — `TileOffsets`/`TileByteCounts`; the strip pipeline already covers every
-  pixel mode, and the `ImageBlocks` writer already lays out N blocks, so tiling is a layout swap
-  (tile/untile with edge padding) plus the decoder's tile reassembly.
-- **Raw digests** (P17) — `NewRawImageDigest`/`RawImageDigest` must bit-match the SDK's internal
-  MD5-over-image algorithm; verifying that needs a `qDNGValidate=1` oracle build (the current build
-  suppresses digest-mismatch reporting). `RawDataUniqueID` is an opaque MD5 the SDK does not verify.
-- **JPEG XL compression** (`Compression = 52546`, DNG 1.7) — **planned**: decode depends on the
-  tiled layout (P14) landing first (real JXL DNGs, e.g. ProRAW-adjacent files, are tiled) plus a
-  `gamut-jxl` decode path; encode additionally needs the `gamut-jxl` (libjxl) encoder. The oracle
-  already links/stubs libjxl so it can read Adobe's JXL sample DNGs.
-- **Lossy JPEG** (`Compression = 34892`) — skipped as low-value; needs a baseline DCT codec
-  (`gamut-tiff` likewise deferred JPEG-in-TIFF).
-- **The standard opcode processing library** (P18) — executing the parsed opcodes:
-  `WarpRectilinear`/`WarpFisheye`, `FixVignetteRadial`, `FixBadPixelsConstant`/`List`, `TrimBounds`,
-  `MapTable`/`MapPolynomial`, `GainMap`, `DeltaPerRow`/`Col`, `ScalePerRow`/`Col`,
-  `WarpRectilinear2`. The container/typed lists already round-trip (#253).
-- **Advanced image types** — transparency masks, depth maps, semantic masks, and the enhanced
-  image (`NewSubFileType` 4/8/16/0x10004); `ProfileGainTableMap`, `RGBTables`, `ImageStats`,
-  `ImageSequenceInfo`, C2PA manifest.
-- **Floating-point samples** (`SampleFormat = 3`) and the DNG float predictors (34894/34895).
+## v1.0.0 freeze decisions
+
+- Spec-coded enums (`Compression`, `PhotometricInterpretation`, `CalibrationIlluminant`,
+  `CfaLayout`, `Predictor`, `SampleFormat`, `ProfileEmbedPolicy`, `PreviewColorSpace`,
+  `SubImageKind`), report enums (`Severity`, `Anomaly`), `RawPhotometry`, and decoder-output
+  structs (`DecodedDng`, `SubImage`, `LinearImage`, `LosslessJpeg`, `DeconstructReport`,
+  `UnknownTag`, `SemanticMaskInfo`, `DepthInfo`, `SubImageData`) are `#[non_exhaustive]` —
+  future spec codes and fields are additive.
+- Encoder-input data structs (`DngMetadata`, `ExifMetadata`, `Opcode`, `ProfileGainTableMap`,
+  `RawTag`, `MaskSubArea`) keep literal construction (no `non_exhaustive`); adding a field there
+  is accepted as semver-major. `GainValues` stays exhaustive — its four variants are the spec's
+  closed `DataType` set.
+- Re-export closure: everything on the crate root, including `RawPhotometry`, `cfa_color`,
+  `opcode_id`, `new_subfile_type`, and `gamut_ifd::Value` (the `RawTag` payload type);
+  `lossless_jpeg::{encode, decode}` stay module-scoped deliberately (a codec namespace).
+- `Compression::is_supported` became `is_decodable` (every decodable scheme encodes, with the
+  documented `jxl-encode`/Deflate-depth caveats).
+- JPEG XL range semantics are frozen to the reference SDK's: decoded JXL data is full-range
+  16-bit; a JXL IFD's `BitsPerSample` records codestream precision; encode requires 16-bit
+  input.
+
+## Deferred / out of scope
+
+Each deferred item plugs into the same IFD-tree/chunk pipeline and oracles the shipped features
+use; additions are semver-additive.
+
+- **Lossy JPEG** (`Compression = 34892`) — needs a baseline DCT codec (`gamut-tiff` likewise
+  deferred JPEG-in-TIFF). Decode surfaces such images as verbatim chunks today.
+- **Floating-point samples** (`SampleFormat = 3`, fp16 JPEG XL, the float predictors
+  34894/34895) — rejected with typed errors on decode; the u16 sample model would need a float
+  sibling.
+- **The standard opcode processing library** (P18) — *executing* `WarpRectilinear`, `GainMap`,
+  `FixVignetteRadial`, … The typed containers round-trip; processing is a raw-developer concern.
+- **Applying gain maps / rendering** — `ProfileGainTableMap` parses typed (and `gain_at`
+  decodes entries); applying it in RIMM space is rendering-pipeline work.
+- **Writing mask/depth/enhanced sub-IFDs** — decode-only today; the encoder writes the raw +
+  preview tree.
+- **4-colour CFA encoding** (RGBW/CYGM) — `CameraProfile` is a 3×3 model; widening it (4×3
+  matrices, `ReductionMatrix`) is its own feature. Decode of 4-colour patterns works.
+- **PGTM2 inside Camera Profile IFDs** (`ExtraCameraProfiles`) — surfaced via extras; typed
+  parse covers the IFD0/raw-IFD placements.
+- **JPEG-compressed previews as pixels** — surfaced as verbatim chunks (`SubImageData::
+  Undecoded`); decoding them needs the baseline DCT codec above.
+- **Advanced 1.7 metadata without a typed surface** (`RGBTables`, `ImageStats`,
+  `ImageSequenceInfo`, `ProfileDynamicRange`, C2PA) — explicitly surfaced as typed `RawTag`s.

@@ -92,6 +92,252 @@ fn gamut_and_adobe_decoders_agree() {
 }
 
 #[test]
+fn tiled_roundtrips_through_gamut() {
+    use gamut_dng::Compression;
+    // 48x40 with 32x32 tiles: a 2x2 grid whose right/bottom tiles carry 16 padding columns and
+    // 24 padding rows — the edge-crop path. Sub-byte depths exercise per-tile row alignment.
+    for compression in [
+        Compression::Uncompressed,
+        Compression::Deflate,
+        Compression::LosslessJpeg,
+    ] {
+        for bits in [8u16, 10, 12, 16] {
+            // Deflate is limited to whole-byte depths (the SDK reader's constraint, enforced at
+            // encode).
+            if compression == Compression::Deflate && !matches!(bits, 8 | 16) {
+                continue;
+            }
+            for raw in [
+                common::sample_raw(48, 40, bits),
+                common::sample_linear_raw(40, 24, bits),
+            ] {
+                let mut dng = Vec::new();
+                DngEncoder::new()
+                    .with_compression(compression)
+                    .with_tiling(32, 32)
+                    .encode(&raw, &common::sample_profile(), &mut dng)
+                    .expect("encode");
+                let decoded = DngDecoder::new().decode(&dng).expect("decode");
+                assert_eq!(
+                    decoded.raw, raw,
+                    "{compression:?} {bits}-bit tiled must round-trip"
+                );
+            }
+        }
+    }
+}
+
+/// JPEG XL (Compression 52546) round-trips, stripped and tiled: gamut encode (lossless) → gamut
+/// decode must be bit-exact, and the Adobe SDK (real libjxl) must both validate the file and
+/// read identical pixels. JXL DNG data is full-range 16-bit (the reference SDK's decode
+/// semantics), so the fixtures are 16-bit.
+#[test]
+fn jxl_roundtrips_and_validates() {
+    use gamut_dng::Compression;
+    for raw in [
+        common::sample_raw(48, 40, 16),
+        common::sample_linear_raw(40, 24, 16),
+    ] {
+        for tiled in [false, true] {
+            let mut enc = DngEncoder::new()
+                .with_compression(Compression::JpegXl)
+                .with_dng_version([1, 7, 0, 0])
+                .with_backward_version([1, 7, 0, 0]);
+            if tiled {
+                enc = enc.with_tiling(32, 32);
+            }
+            let mut dng = Vec::new();
+            enc.encode(&raw, &common::sample_profile(), &mut dng)
+                .expect("encode");
+            let decoded = DngDecoder::new().decode(&dng).expect("decode");
+            assert_eq!(
+                decoded.raw, raw,
+                "JXL (tiled={tiled}) must round-trip bit-exact"
+            );
+            gamut_dng_oracle::validate_dng(&dng)
+                .unwrap_or_else(|e| panic!("Adobe must accept a JXL DNG (tiled={tiled}): {e}"));
+            let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+            assert_eq!(
+                adobe.samples,
+                raw.samples(),
+                "Adobe stage-1 must match the JXL input (tiled={tiled})"
+            );
+        }
+    }
+}
+
+/// Sub-16-bit input under JPEG XL is rejected with a typed error: the DNG ecosystem decodes JXL
+/// at full 16-bit range, so an N-bit-code-value file would misrender against its own levels.
+#[test]
+fn jxl_rejects_sub_16bit_samples() {
+    use gamut_dng::Compression;
+    let raw = common::sample_raw(32, 32, 12);
+    let err = DngEncoder::new()
+        .with_compression(Compression::JpegXl)
+        .encode(&raw, &common::sample_profile(), &mut Vec::new())
+        .unwrap_err();
+    assert!(
+        matches!(err, gamut_core::Error::Unsupported(m) if m.contains("16-bit")),
+        "expected a 16-bit requirement error, got {err:?}"
+    );
+}
+
+/// Lossy JXL: the file must be structurally valid, gamut/Adobe must agree on the lossy pixels to
+/// within one code (independent conforming decoders round the float reconstruction
+/// independently), and the JXLDistance/JXLEffort tags record the configured parameters.
+#[test]
+fn lossy_jxl_validates_and_decoders_agree() {
+    use gamut_dng::Compression;
+    let raw = common::sample_linear_raw(64, 48, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_compression(Compression::JpegXl)
+        .with_jxl_distance(1.0)
+        .with_jxl_effort(5)
+        .with_dng_version([1, 7, 0, 0])
+        .with_backward_version([1, 7, 0, 0])
+        .with_tiling(32, 32)
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept a lossy JXL DNG");
+    let decoded = DngDecoder::new().decode(&dng).expect("gamut decode");
+    let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+    for (i, (&ours, &theirs)) in decoded.raw.samples().iter().zip(&adobe.samples).enumerate() {
+        assert!(
+            (i64::from(ours) - i64::from(theirs)).abs() <= 1,
+            "lossy pixel {i}: gamut {ours} vs Adobe {theirs}"
+        );
+    }
+
+    // The encode parameters are recorded in the raw IFD.
+    let file = gamut_ifd::read(&dng).expect("parse");
+    let raw_off = file.ifds[0].get_u64_vec(330).expect("SubIFDs")[0];
+    let raw_ifd = gamut_ifd::read_ifd_at(&dng, raw_off, file.order, file.variant).expect("raw IFD");
+    assert_eq!(
+        raw_ifd.get(52553),
+        Some(&gamut_ifd::Value::Float(vec![1.0])),
+        "JXLDistance"
+    );
+    assert_eq!(raw_ifd.get_u32(52554), Some(5), "JXLEffort");
+}
+
+/// Gain-table maps embed, validate against the SDK, and round-trip typed through gamut.
+#[test]
+fn gain_table_maps_roundtrip_and_validate() {
+    use gamut_dng::{GainValues, ProfileGainTableMap};
+    let v1 = ProfileGainTableMap {
+        points_v: 2,
+        points_h: 3,
+        spacing_v: 0.5,
+        spacing_h: 1.0 / 3.0,
+        origin_v: 0.0,
+        origin_h: 0.0,
+        points_n: 4,
+        input_weights: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0, 0.0],
+        gamma: 1.0,
+        gain_min: 0.0,
+        gain_max: 0.0,
+        gains: GainValues::F32((0..24).map(|i| 1.0 + f32::from(i as u8) * 0.05).collect()),
+    };
+    let mut v2 = v1.clone();
+    v2.gamma = 2.0;
+    v2.gain_min = 0.7;
+    v2.gain_max = 2.3;
+    v2.gains = GainValues::U16((0..24u16).map(|i| i * 2500).collect());
+
+    let raw = common::sample_raw(32, 24, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_dng_version([1, 7, 0, 0])
+        .with_gain_table_map(v1.clone())
+        .with_gain_table_map2(v2.clone())
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept gain-table maps");
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.gain_table_map.as_ref(), Some(&v1));
+    assert_eq!(decoded.gain_table_map2.as_ref(), Some(&v2));
+}
+
+/// The **Apple ProRAW shape**, end to end: a linear (demosaiced) 3-plane raw, tiled, JPEG XL
+/// compressed, with a LinearizationTable, per-plane levels, and a ProfileGainTableMap2 — the
+/// exact ingredient list of a ProRAW-with-JXL DNG. The encoder must auto-declare DNG 1.7, the
+/// file must round-trip bit-exact through gamut, and the Adobe SDK must validate it, read
+/// identical pixels, and agree on the raw digest.
+#[test]
+fn proraw_shaped_dng_roundtrips_and_validates() {
+    use gamut_dng::{Compression, GainValues, ProfileGainTableMap, RawLevels};
+    let table: Vec<u16> = (0..4096u32).map(|v| (v * 16).min(65535) as u16).collect();
+    let levels = RawLevels::new(
+        3,
+        (1, 1),
+        vec![0.0, 16.0, 32.0],
+        vec![65535.0, 65500.0, 65535.0],
+    )
+    .expect("levels")
+    .with_linearization_table(table);
+    let raw = common::sample_linear_raw(96, 72, 16)
+        .with_levels(levels)
+        .expect("levels");
+    let map2 = ProfileGainTableMap {
+        points_v: 2,
+        points_h: 2,
+        spacing_v: 0.5,
+        spacing_h: 0.5,
+        origin_v: 0.0,
+        origin_h: 0.0,
+        points_n: 3,
+        input_weights: [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 0.0, 0.0],
+        gamma: 1.0,
+        gain_min: 0.5,
+        gain_max: 2.0,
+        gains: GainValues::U16((0..12u16).map(|i| i * 5000).collect()),
+    };
+
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_compression(Compression::JpegXl)
+        .with_tiling(32, 32)
+        .with_gain_table_map2(map2.clone())
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+
+    // No version was configured: JPEG XL must auto-raise both versions to 1.7.0.0.
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    assert_eq!(decoded.dng_version, [1, 7, 0, 0]);
+    assert_eq!(decoded.backward_version, Some([1, 7, 0, 0]));
+    assert_eq!(decoded.raw, raw, "ProRAW shape must round-trip bit-exact");
+    assert_eq!(decoded.gain_table_map2.as_ref(), Some(&map2));
+
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept the ProRAW-shaped DNG");
+    let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+    assert_eq!(adobe.samples, raw.samples(), "Adobe stage-1 must match");
+    assert_eq!(
+        gamut_dng_oracle::new_raw_image_digest(&dng).expect("adobe digest"),
+        raw.new_raw_image_digest(),
+        "raw digest must bit-match the SDK"
+    );
+}
+
+#[test]
+fn tiled_bigtiff_roundtrips_and_validates() {
+    let raw = common::sample_raw(48, 32, 12);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_big_tiff(true)
+        .with_dng_version([1, 7, 0, 0])
+        .with_backward_version([1, 7, 0, 0])
+        .with_tiling(16, 16)
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let decoded = DngDecoder::new()
+        .decode(&dng)
+        .expect("decode tiled BigTIFF");
+    assert_eq!(decoded.raw, raw);
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept a tiled BigTIFF DNG");
+}
+
+#[test]
 fn bigtiff_roundtrips_and_validates() {
     let raw = common::sample_raw(48, 32, 16);
     let mut dng = Vec::new();
