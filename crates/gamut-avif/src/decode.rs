@@ -321,7 +321,8 @@ impl AvifImage {
     /// even when the order violates the MIAF constraint (check with
     /// [`AvifItem::is_miaf_transform_ordered`](crate::AvifItem::is_miaf_transform_ordered)) they
     /// are applied as listed. `clap` crops per ISO/IEC 14496-12 §12.1.4, `irot` rotates
-    /// anti-clockwise, `imir` mirrors about the vertical (axis 0) or horizontal (axis 1) axis.
+    /// anti-clockwise, `imir` mirrors top↔bottom (axis 0) or left↔right (axis 1) per ISO/IEC
+    /// 23008-12:2022 §6.5.12.
     ///
     /// # Errors
     ///
@@ -794,18 +795,19 @@ fn rotate90_ccw(src: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
     (out, h, w)
 }
 
-/// Mirrors an interleaved RGBA buffer about the vertical (`axis = 0`, left↔right) or horizontal
-/// (`axis = 1`, top↔bottom) axis; dimensions are unchanged. Any other `axis` value is treated as
-/// axis 0 (the `imir` field is a single bit).
+/// Mirrors an interleaved RGBA buffer per the `imir` axis semantics of ISO/IEC 23008-12:2022
+/// §6.5.12: `axis = 0` exchanges the top and bottom parts, `axis = 1` exchanges the left and
+/// right parts (the reading libheif and libavif implement). Dimensions are unchanged; any other
+/// `axis` value is treated as axis 0 (the `imir` field is a single bit).
 fn mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
     let (wu, hu) = (w as usize, h as usize);
     let mut out = vec![0u8; wu * hu * 4];
     for y in 0..hu {
         for x in 0..wu {
             let (sx, sy) = if axis == 1 {
-                (x, hu - 1 - y)
-            } else {
                 (wu - 1 - x, y)
+            } else {
+                (x, hu - 1 - y)
             };
             let si = (sy * wu + sx) * 4;
             let oi = (y * wu + x) * 4;

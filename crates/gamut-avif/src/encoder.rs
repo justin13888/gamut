@@ -387,7 +387,8 @@ mod tests {
 
     #[test]
     fn with_mirror_emits_imir_axis() {
-        for (mirror, axis) in [(Mirror::LeftRight, 0u8), (Mirror::TopBottom, 1)] {
+        // ISO/IEC 23008-12:2022 §6.5.12: axis 1 exchanges left/right, axis 0 top/bottom.
+        for (mirror, axis) in [(Mirror::LeftRight, 1u8), (Mirror::TopBottom, 0)] {
             let f = encode_with(AvifEncoder::new().with_mirror(mirror), 4, 4);
             let p = f
                 .windows(4)

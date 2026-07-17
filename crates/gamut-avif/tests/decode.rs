@@ -899,9 +899,9 @@ fn ref_mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
     for y in 0..hu {
         for x in 0..wu {
             let (dx, dy) = if axis == 1 {
-                (x, hu - 1 - y)
-            } else {
                 (wu - 1 - x, y)
+            } else {
+                (x, hu - 1 - y)
             };
             out[(dy * wu + dx) * 4..(dy * wu + dx) * 4 + 4]
                 .copy_from_slice(&src[(y * wu + x) * 4..(y * wu + x) * 4 + 4]);

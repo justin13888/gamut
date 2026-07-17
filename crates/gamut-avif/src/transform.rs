@@ -29,23 +29,26 @@ impl Rotation {
     }
 }
 
-/// A display mirror applied by a reader (the `imir` property, ISO/IEC 23008-12 §6.5.12). The stored
-/// pixels are unchanged. Variants are named by the visual effect rather than the spec's mirror
-/// *axis*, which is the usual source of confusion.
+/// A display mirror applied by a reader (the `imir` property, ISO/IEC 23008-12:2022 §6.5.12). The
+/// stored pixels are unchanged. Variants are named by the visual effect rather than the spec's
+/// mirror *axis*, which is the usual source of confusion: per the 2022 text (the semantics
+/// libheif and libavif implement), `axis = 0` exchanges the top and bottom parts and `axis = 1`
+/// exchanges the left and right parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mirror {
-    /// Mirror left↔right (about a vertical axis; `imir` `axis = 0`).
+    /// Mirror left↔right (`imir` `axis = 1`).
     LeftRight,
-    /// Mirror top↔bottom (about a horizontal axis; `imir` `axis = 1`).
+    /// Mirror top↔bottom (`imir` `axis = 0`).
     TopBottom,
 }
 
 impl Mirror {
-    /// The `imir` `axis` field: `0` for [`Mirror::LeftRight`], `1` for [`Mirror::TopBottom`].
+    /// The `imir` `axis` field: `1` for [`Mirror::LeftRight`], `0` for [`Mirror::TopBottom`]
+    /// (ISO/IEC 23008-12:2022 §6.5.12).
     pub(crate) fn axis(self) -> u8 {
         match self {
-            Mirror::LeftRight => 0,
-            Mirror::TopBottom => 1,
+            Mirror::LeftRight => 1,
+            Mirror::TopBottom => 0,
         }
     }
 }
@@ -65,7 +68,9 @@ mod tests {
 
     #[test]
     fn mirror_axis() {
-        assert_eq!(Mirror::LeftRight.axis(), 0);
-        assert_eq!(Mirror::TopBottom.axis(), 1);
+        // ISO/IEC 23008-12:2022 §6.5.12: axis 0 exchanges top/bottom, axis 1 exchanges
+        // left/right.
+        assert_eq!(Mirror::LeftRight.axis(), 1);
+        assert_eq!(Mirror::TopBottom.axis(), 0);
     }
 }

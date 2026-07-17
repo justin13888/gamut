@@ -336,8 +336,8 @@ impl<'a> AvifItem<'a> {
         })
     }
 
-    /// The `imir` mirror axis (`0` = vertical / left↔right, `1` = horizontal / top↔bottom), if
-    /// present.
+    /// The `imir` mirror axis (`0` = top↔bottom exchanged, `1` = left↔right exchanged; ISO/IEC
+    /// 23008-12:2022 §6.5.12 — the semantics libheif and libavif implement), if present.
     #[must_use]
     pub fn mirror(&self) -> Option<u8> {
         self.find_property(|kind| match *kind {
@@ -604,7 +604,7 @@ pub enum TransformativeProperty {
     CleanAperture(CleanAperture),
     /// `irot` rotation, in anti-clockwise quarter turns (`0..=3`).
     Rotation(u8),
-    /// `imir` mirror axis (`0` = vertical, `1` = horizontal).
+    /// `imir` mirror axis (`0` = top↔bottom, `1` = left↔right; ISO/IEC 23008-12:2022 §6.5.12).
     Mirror(u8),
 }
 
