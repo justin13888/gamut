@@ -133,7 +133,8 @@ pub(crate) fn linearize(raw: &RawImage) -> Result<LinearImage> {
                     Some(t) => f64::from(t[usize::from(stored).min(t.len() - 1)]),
                     None => f64::from(stored),
                 };
-                let black = levels.black_at(r, c, plane) + dh + dv;
+                // `plane < spp` by loop construction, so the lookup cannot miss.
+                let black = levels.black_at(r, c, plane).unwrap_or(0.0) + dh + dv;
                 let value = (linearized - black) * scale[plane];
                 out.push(value.clamp(0.0, 1.0) as f32);
             }

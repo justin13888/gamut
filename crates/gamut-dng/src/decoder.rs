@@ -6,7 +6,7 @@
 //! rendering are out of scope — the decoder returns the sensor samples, not a viewable image.
 
 use gamut_core::{Dimensions, Error, Result};
-use gamut_ifd::{ByteOrder, Ifd, Value, Variant, read, read_ifd_at};
+use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
 
 use crate::levels::RawLevels;
 use crate::metadata::{DngMetadata, ExifMetadata};
@@ -14,7 +14,7 @@ use crate::opcode::OpcodeList;
 use crate::profile::CameraProfile;
 use crate::raw::RawImage;
 use crate::values::{
-    CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy,
+    CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy, SampleFormat,
 };
 use crate::{bitpack, compression, lossless_jpeg, tags};
 
@@ -61,7 +61,7 @@ impl DngDecoder {
             .first()
             .ok_or(Error::InvalidInput("DNG: file has no IFD 0"))?;
 
-        let raw_ifd = find_raw_ifd(ifd0, data, order, variant)?;
+        let raw_ifd = find_raw_ifd(&file, data)?;
         let raw = decode_raw_image(&raw_ifd, data, order)?;
         let profile = decode_profile(ifd0)?;
         let dng_version = read_version(ifd0)?;
@@ -119,21 +119,80 @@ fn is_raw_ifd(ifd: &Ifd) -> bool {
     )
 }
 
-/// Locates the full-resolution raw IFD: a `SubIFDs` child with a raw photometry, or IFD 0 itself.
-fn find_raw_ifd(ifd0: &Ifd, data: &[u8], order: ByteOrder, variant: Variant) -> Result<Ifd> {
-    if let Some(offsets) = ifd0.get_u32_vec(tags::SUB_IFDS) {
-        for offset in offsets {
-            if let Ok(sub) = read_ifd_at(data, u64::from(offset), order, variant)
-                && is_raw_ifd(&sub)
-            {
-                return Ok(sub);
-            }
+/// An upper bound on the `SubIFDs` nesting depth the decoder follows, bounding hostile pointer
+/// graphs; legitimate DNG trees (IFD 0 → raw / enhanced / mask sub-IFDs) are two levels.
+const MAX_SUBIFD_DEPTH: usize = 8;
+
+/// Collects every IFD in the file — the top-level chain plus, recursively, every `SubIFDs`
+/// child — in encounter order. Lenient by design: an unreadable child is skipped rather than
+/// failing the whole decode, while offset de-duplication and the depth cap terminate hostile
+/// pointer cycles.
+fn walk_ifds(file: &TiffFile, data: &[u8]) -> Vec<Ifd> {
+    let mut out = Vec::new();
+    let mut visited: Vec<u64> = Vec::new();
+    for ifd in &file.ifds {
+        collect_sub_ifds(
+            ifd,
+            data,
+            file.order,
+            file.variant,
+            &mut visited,
+            1,
+            &mut out,
+        );
+    }
+    out
+}
+
+/// Pushes `ifd` and recurses into its `SubIFDs` children (see [`walk_ifds`]).
+fn collect_sub_ifds(
+    ifd: &Ifd,
+    data: &[u8],
+    order: ByteOrder,
+    variant: Variant,
+    visited: &mut Vec<u64>,
+    depth: usize,
+    out: &mut Vec<Ifd>,
+) {
+    out.push(ifd.clone());
+    if depth >= MAX_SUBIFD_DEPTH {
+        return;
+    }
+    // Offsets are read at full width: a BigTIFF writes `SubIFDs` as `LONG8`, whose values only
+    // matter past 4 GiB — exactly where a u32 reading would fail.
+    let Some(offsets) = ifd.get_u64_vec(tags::SUB_IFDS) else {
+        return;
+    };
+    for offset in offsets {
+        if visited.contains(&offset) {
+            continue;
+        }
+        visited.push(offset);
+        if let Ok(sub) = read_ifd_at(data, offset, order, variant) {
+            collect_sub_ifds(&sub, data, order, variant, visited, depth + 1, out);
         }
     }
-    if is_raw_ifd(ifd0) {
-        return Ok(ifd0.clone());
+}
+
+/// Locates the full-resolution raw IFD anywhere in the IFD forest — the top-level chain plus all
+/// nested `SubIFDs` (real DNGs keep the raw in a sub-IFD of IFD 0, but TIFF/EP permits either).
+///
+/// Prefers an IFD whose `NewSubFileType` is 0 (the main image; the tag defaults to 0 when
+/// absent) with a raw photometry, falling back to any raw-photometry IFD.
+fn find_raw_ifd(file: &TiffFile, data: &[u8]) -> Result<Ifd> {
+    let mut fallback = None;
+    for ifd in walk_ifds(file, data) {
+        if !is_raw_ifd(&ifd) {
+            continue;
+        }
+        if ifd.get_u32(tags::NEW_SUBFILE_TYPE).unwrap_or(0) == 0 {
+            return Ok(ifd);
+        }
+        if fallback.is_none() {
+            fallback = Some(ifd);
+        }
     }
-    Err(Error::InvalidInput("DNG: no raw image IFD found"))
+    fallback.ok_or(Error::InvalidInput("DNG: no raw image IFD found"))
 }
 
 /// Reconstructs the [`RawImage`] from a raw IFD and the file's strip data.
@@ -159,6 +218,26 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
             "DNG: raw IFD missing PhotometricInterpretation",
         ))?;
 
+    // SampleFormat (339) defaults to unsigned integer, the only encoding whose code values the
+    // u16 sample model represents. Anything else must fail cleanly, not silently misdecode.
+    if let Some(formats) = ifd.get_u32_vec(tags::SAMPLE_FORMAT) {
+        for format in formats {
+            match u16::try_from(format).ok().and_then(SampleFormat::from_code) {
+                Some(SampleFormat::UnsignedInteger) => {}
+                Some(SampleFormat::FloatingPoint) => {
+                    return Err(Error::Unsupported(
+                        "DNG: floating-point sample data is not supported",
+                    ));
+                }
+                _ => {
+                    return Err(Error::Unsupported(
+                        "DNG: only unsigned-integer samples are supported",
+                    ));
+                }
+            }
+        }
+    }
+
     let samples_per_row = (width as usize)
         .checked_mul(spp as usize)
         .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
@@ -166,38 +245,68 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
         .checked_mul(height as usize)
         .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
 
-    let chunks = strip_chunks(ifd, data)?;
-    let samples = match compression {
-        Compression::Uncompressed | Compression::Deflate => {
-            let mut packed = Vec::new();
-            for chunk in &chunks {
-                packed.extend_from_slice(&compression::decompress(compression, chunk)?);
-            }
-            bitpack::unpack(&packed, bits, samples_per_row, height as usize, order)
+    // Each strip is an independent sample stream: `RowsPerStrip` rows (fewer for the last), with
+    // sub-byte depths MSB-packed to byte-aligned rows *per strip*. Decoding therefore works
+    // strip by strip — concatenating the packed bytes first would misalign any strip whose
+    // packed length is not what whole-image geometry predicts.
+    let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
+        Some(0) => {
+            return Err(Error::InvalidInput("DNG: RowsPerStrip must be non-zero"));
         }
-        // Lossless JPEG decodes samples directly; strips concatenate as row-bands.
-        Compression::LosslessJpeg => {
-            let mut samples = Vec::with_capacity(expected);
-            let mut rows_seen = 0usize;
-            for chunk in &chunks {
-                let jpeg = lossless_jpeg::decode(chunk)?;
-                if jpeg.width != width as usize || jpeg.components != spp as usize {
-                    return Err(Error::InvalidInput("DNG: lossless-JPEG geometry mismatch"));
+        Some(r) => r as usize,
+        None => height as usize,
+    };
+
+    // Reject an undecodable scheme up front, so an empty strip list cannot mask it.
+    if !matches!(
+        compression,
+        Compression::Uncompressed | Compression::Deflate | Compression::LosslessJpeg
+    ) {
+        return Err(Error::Unsupported(
+            "DNG: this compression is not yet decodable",
+        ));
+    }
+
+    let chunks = strip_chunks(ifd, data)?;
+    let mut samples = Vec::with_capacity(expected);
+    let mut remaining_rows = height as usize;
+    for chunk in &chunks {
+        let rows = rows_per_strip.min(remaining_rows);
+        if rows == 0 {
+            return Err(Error::InvalidInput("DNG: more strips than image rows"));
+        }
+        let want = rows * samples_per_row;
+        match compression {
+            Compression::Uncompressed | Compression::Deflate => {
+                let bytes = compression::decompress(compression, chunk)?;
+                let mut got = bitpack::unpack(&bytes, bits, samples_per_row, rows, order);
+                if got.len() < want {
+                    return Err(Error::InvalidInput("DNG: raw image data is truncated"));
                 }
-                rows_seen += jpeg.height;
+                got.truncate(want); // tolerate strip padding, per TIFF practice
+                samples.extend(got);
+            }
+            // Lossless JPEG decodes samples directly; strips concatenate as row-bands. The JPEG
+            // stream's internal width/height/components need not match the strip's geometry —
+            // only the total sample count must (DNG 1.7.1, "Compression": real CFA writers store
+            // a two-component stream at half width).
+            Compression::LosslessJpeg => {
+                let jpeg = lossless_jpeg::decode(chunk)?;
+                if jpeg.samples.len() != want {
+                    return Err(Error::InvalidInput(
+                        "DNG: lossless-JPEG sample count mismatch",
+                    ));
+                }
                 samples.extend(jpeg.samples);
             }
-            if rows_seen != height as usize {
-                return Err(Error::InvalidInput("DNG: lossless-JPEG rows mismatch"));
+            _ => {
+                return Err(Error::Unsupported(
+                    "DNG: this compression is not yet decodable",
+                ));
             }
-            samples
         }
-        _ => {
-            return Err(Error::Unsupported(
-                "DNG: this compression is not yet decodable",
-            ));
-        }
-    };
+        remaining_rows -= rows;
+    }
     if samples.len() != expected {
         return Err(Error::InvalidInput("DNG: raw image data is truncated"));
     }
@@ -421,29 +530,38 @@ fn decode_masked_areas(ifd: &Ifd) -> Result<Option<Vec<[u32; 4]>>> {
 }
 
 /// Returns the IFD's strips as raw byte slices (in order), to be decompressed per the scheme.
+/// Offsets and counts are read at full 64-bit width (BigTIFF writes them as `LONG8`).
 fn strip_chunks<'a>(ifd: &Ifd, data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
     let offsets = ifd
-        .get_u32_vec(tags::STRIP_OFFSETS)
+        .get_u64_vec(tags::STRIP_OFFSETS)
         .ok_or(Error::Unsupported(
             "DNG: only stripped raw is decodable so far (no tiles)",
         ))?;
     let counts = ifd
-        .get_u32_vec(tags::STRIP_BYTE_COUNTS)
+        .get_u64_vec(tags::STRIP_BYTE_COUNTS)
         .ok_or(Error::InvalidInput("DNG: missing StripByteCounts"))?;
+    byte_chunks(&offsets, &counts, data)
+}
+
+/// Resolves parallel offset/byte-count arrays into in-bounds byte slices.
+fn byte_chunks<'a>(offsets: &[u64], counts: &[u64], data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
     if offsets.len() != counts.len() {
         return Err(Error::InvalidInput(
-            "DNG: strip offset/count length mismatch",
+            "DNG: image-data offset/count length mismatch",
         ));
     }
     let mut chunks = Vec::with_capacity(offsets.len());
-    for (offset, count) in offsets.iter().zip(counts) {
-        let start = *offset as usize;
-        let end = start
-            .checked_add(count as usize)
-            .ok_or(Error::InvalidInput("DNG: strip extent overflow"))?;
+    for (&offset, &count) in offsets.iter().zip(counts) {
+        let start = usize::try_from(offset)
+            .map_err(|_| Error::InvalidInput("DNG: image data out of bounds"))?;
+        let end = count
+            .try_into()
+            .ok()
+            .and_then(|count: usize| start.checked_add(count))
+            .ok_or(Error::InvalidInput("DNG: image-data extent overflow"))?;
         chunks.push(
             data.get(start..end)
-                .ok_or(Error::InvalidInput("DNG: strip out of bounds"))?,
+                .ok_or(Error::InvalidInput("DNG: image data out of bounds"))?,
         );
     }
     Ok(chunks)
@@ -605,13 +723,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_raw_image_rejects_lossless_jpeg_geometry_mismatch() {
-        // A 4x2, single-component lossless-JPEG strip...
+    fn decode_raw_image_rejects_lossless_jpeg_sample_count_mismatch() {
+        // A 4x2, single-component lossless-JPEG strip (8 samples)...
         let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
         let jpeg = lossless_jpeg::encode(&samples, 4, 2, 1, 12).expect("encode");
-        // ...described by an IFD that claims a 2x2 image. The width disagrees while the component
-        // count matches, so only the `||` (not `&&`) reports the mismatch before the later
-        // sample-count check fires with a different error.
+        // ...described by an IFD that claims a 2x2 image (4 samples). Per spec only the *total
+        // sample count* must match the strip — the stream's internal width/components are free
+        // (real CFA writers halve the width and double the components) — so this fails on the
+        // count, not on any width/components equality.
         let mut ifd = Ifd::new();
         ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
         ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
@@ -627,8 +746,66 @@ mod tests {
 
         let err = decode_raw_image(&ifd, &jpeg, ByteOrder::LittleEndian).unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("geometry")),
-            "expected a geometry-mismatch error, got {err:?}"
+            matches!(err, Error::InvalidInput(m) if m.contains("sample count")),
+            "expected a sample-count mismatch error, got {err:?}"
         );
+    }
+
+    /// A reshaped lossless-JPEG stream — half width, doubled components, same total sample
+    /// count — decodes, per the spec's total-count rule (a width/components equality would
+    /// wrongly reject it).
+    #[test]
+    fn decode_raw_image_accepts_reshaped_lossless_jpeg_stream() {
+        // 8 samples encoded as a 2-wide, 2-component, 2-row stream for a 4x2 one-plane image.
+        let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
+        let jpeg = lossless_jpeg::encode(&samples, 2, 2, 2, 12).expect("encode");
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![4]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![12]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![7]));
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+        ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+        ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(
+            tags::STRIP_BYTE_COUNTS,
+            Value::Long(vec![jpeg.len() as u32]),
+        );
+
+        let raw = decode_raw_image(&ifd, &jpeg, ByteOrder::LittleEndian).expect("decode");
+        assert_eq!(raw.samples(), &samples[..]);
+    }
+
+    #[test]
+    fn decode_raw_image_rejects_non_unsigned_sample_formats() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![16]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![8]));
+
+        // Float data is a distinct, named rejection (a real, deferred DNG feature)...
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![3]));
+        let err = decode_raw_image(&ifd, &[0; 8], ByteOrder::LittleEndian).unwrap_err();
+        assert!(
+            matches!(err, Error::Unsupported(m) if m.contains("floating-point")),
+            "expected a floating-point rejection, got {err:?}"
+        );
+        // ...signed and unrecognised formats fail generically...
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![2]));
+        assert!(decode_raw_image(&ifd, &[0; 8], ByteOrder::LittleEndian).is_err());
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![9]));
+        assert!(decode_raw_image(&ifd, &[0; 8], ByteOrder::LittleEndian).is_err());
+        // ...and the explicit unsigned default decodes.
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![1]));
+        ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+        ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
+        assert!(decode_raw_image(&ifd, &[0; 8], ByteOrder::LittleEndian).is_ok());
     }
 }

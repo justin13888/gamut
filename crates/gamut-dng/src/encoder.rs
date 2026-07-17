@@ -351,7 +351,13 @@ fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Result<Ifd> {
     ifd.set(tags::COMPRESSION, Value::Short(vec![compression.code()]));
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
     ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height));
-    ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![1; usize::from(spp)])); // unsigned integer
+    ifd.set(
+        tags::SAMPLE_FORMAT,
+        Value::Short(vec![
+            crate::values::SampleFormat::UnsignedInteger.code();
+            usize::from(spp)
+        ]),
+    );
     match raw.photometry() {
         RawPhotometry::Cfa {
             repeat,
