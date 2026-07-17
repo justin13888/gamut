@@ -11,11 +11,13 @@ Part of the [gamut](../../README.md) workspace, this crate reads and writes JPEG
   with clause citations in the source. Correctness is proven differentially against libjpeg-turbo
   (see Validation).
 - **Encoder + decoder.** Unlike the workspace's encoder-only PNG crate, JPEG is a two-way format:
-  a baseline sequential DCT Huffman **encoder** ships first (this phase), with the sequential and
-  progressive **decoders** landing in later phases (see [STATUS.md](STATUS.md)).
+  a baseline/extended sequential DCT Huffman **encoder and decoder** ship together, with the
+  progressive decoder and encoder landing in later phases (see [STATUS.md](STATUS.md)).
 - **Memory-safe.** `#![forbid(unsafe_code)]`.
 
 ## Usage
+
+Encode an RGB image to a JFIF stream:
 
 ```rust
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
@@ -32,17 +34,34 @@ JpegEncoder::new()
 # Ok::<(), gamut_core::Error>(())
 ```
 
+Decode a JPEG back to pixels (grayscale is replicated across channels; YCbCr/RGB present as RGB;
+four-component CMYK/YCCK decode via `Cmyk8`):
+
+```rust
+use gamut_core::{DecodeImage, ImageBuf, Rgb8};
+use gamut_jpeg::JpegDecoder;
+
+# fn demo(jpeg: &[u8]) -> Result<(), gamut_core::Error> {
+let image: ImageBuf<Rgb8> = JpegDecoder::new().decode_image(jpeg)?;
+let info = gamut_jpeg::info(jpeg)?; // dimensions / components / process, without decoding
+# let _ = (image, info);
+# Ok(())
+# }
+```
+
 ## Status
 
 Built incrementally; each phase is conformance-checked against libjpeg-turbo (see
-[STATUS.md](STATUS.md)). This first phase ships the **baseline sequential DCT Huffman encoder**
-(SOF0, 8-bit): grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 chroma subsampling, standard
-(Annex K) quantization and Huffman tables, and optional restart intervals, emitting JFIF
-interchange-format streams. The sequential and progressive decoders, a progressive encoder, and
-CMYK/YCCK + Adobe APP14 handling are scoped for later phases.
+[STATUS.md](STATUS.md)). Shipping now: the **baseline (SOF0) / extended-sequential (SOF1) 8-bit DCT
+Huffman encoder and decoder**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 /
+4:2:0 chroma subsampling, standard (Annex K) tables, and optional restart intervals. The decoder
+reads any spec-valid sequential stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via the JFIF APP0 /
+Adobe APP14 hints), interleaved or non-interleaved scans, restart intervals, and DNL-defined
+heights — and never panics on malformed input. The progressive decoder and encoder are scoped for
+later phases.
 
 Out of scope (documented in [STATUS.md](STATUS.md)): 12-bit precision, arithmetic coding
-(SOF9/10), lossless (SOF3), hierarchical (SOF5–7), DNL, SPIFF/T.84 extensions, and T.872 printing
+(SOF9/10), lossless (SOF3), hierarchical (SOF5–7), SPIFF/T.84 extensions, and T.872 printing
 conventions.
 
 ## Validation

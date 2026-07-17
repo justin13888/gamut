@@ -14,6 +14,8 @@
 //! ones written to the stream by baseline encoders. Because they are fixed, [`STD_LUMA_DC`] etc.
 //! carry their own BITS/HUFFVAL and the derived codes are checked against Annex C in the tests.
 
+use gamut_core::{Error, Result};
+
 use crate::marker::{self, code};
 
 /// One Huffman table specification: the class/precision-independent `(BITS, HUFFVAL)` pair of
@@ -120,6 +122,92 @@ impl EncTable {
         } else {
             Some((self.codes[symbol as usize], length))
         }
+    }
+}
+
+/// A decode-side Huffman table: the canonical `MINCODE`/`MAXCODE`/`VALPTR` lookup arrays of T.81
+/// Figure F.15, built from a wire `(BITS, HUFFVAL)` pair. [`crate::scan`]'s `DECODE` procedure
+/// (Figure F.16) walks them to turn a bit sequence back into a symbol.
+///
+/// Indexed by code length `1..=16` (element 0 is unused). `maxcode[l] == -1` marks a length with no
+/// codes; `mincode[l]`/`valptr[l]` are then unused for that length.
+#[derive(Debug, Clone)]
+pub struct DecTable {
+    /// `MINCODE[l]`: the smallest canonical code of length `l` (Figure F.15).
+    mincode: [i32; 17],
+    /// `MAXCODE[l]`: the largest canonical code of length `l`, or `-1` if there are none.
+    maxcode: [i32; 17],
+    /// `VALPTR[l]`: the [`Self::values`] index of the first symbol of length `l`.
+    valptr: [usize; 17],
+    /// `HUFFVAL`: the symbol values ordered by increasing code length.
+    values: Vec<u8>,
+}
+
+impl DecTable {
+    /// Builds the decode tables from a wire `(bits, values)` pair (§B.2.4.2), rejecting a code space
+    /// that is over-subscribed (Annex C: the codes would not be prefix-free / would need > 16 bits).
+    ///
+    /// `bits[i - 1]` is the number of codes of length `i` (`1..=16`) and `values` lists the
+    /// `sum(bits)` symbols in canonical order (the caller guarantees `values.len() == sum(bits)` by
+    /// construction from the segment). An **incomplete** table (fewer codes than the length budget
+    /// allows) is accepted — real streams carry them; only an **overfull** one is rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the code space is over-subscribed
+    /// (`sum(bits[l] · 2^(16−l)) > 2^16`).
+    pub fn from_bits(bits: &[u8; 16], values: &[u8]) -> Result<Self> {
+        // Annex C code-space check: each length-l code claims 2^(16-l) of the depth-16 leaf space;
+        // an over-subscribed table cannot be a prefix code.
+        let mut used: u32 = 0;
+        for (i, &count) in bits.iter().enumerate() {
+            let length = (i + 1) as u32;
+            used += u32::from(count) << (16 - length);
+        }
+        if used > (1u32 << 16) {
+            return Err(Error::InvalidInput(
+                "JPEG: overfull Huffman code space (DHT)",
+            ));
+        }
+
+        // Canonical code assignment (§C.2 / Figure F.15): consecutive codes in HUFFVAL order, the
+        // running value doubling at each length increase.
+        let mut mincode = [0i32; 17];
+        let mut maxcode = [-1i32; 17];
+        let mut valptr = [0usize; 17];
+        let mut code: u32 = 0;
+        let mut p: usize = 0;
+        for length in 1..=16usize {
+            let count = usize::from(bits[length - 1]);
+            if count != 0 {
+                valptr[length] = p;
+                mincode[length] = code as i32;
+                code += count as u32;
+                maxcode[length] = (code - 1) as i32;
+                p += count;
+            }
+            code <<= 1;
+        }
+        Ok(Self {
+            mincode,
+            maxcode,
+            valptr,
+            values: values.to_vec(),
+        })
+    }
+
+    /// `MAXCODE[length]`, or `-1` if no code has that length.
+    #[must_use]
+    pub(crate) fn maxcode(&self, length: usize) -> i32 {
+        self.maxcode[length]
+    }
+
+    /// The symbol at flat `HUFFVAL` index `valptr[length] + (code − mincode[length])`, or `None` if
+    /// that index is past the end of `HUFFVAL` (a corrupt code that maps outside the table).
+    #[must_use]
+    pub(crate) fn value_at(&self, length: usize, code: i32) -> Option<u8> {
+        let offset = (code - self.mincode[length]) as usize;
+        self.values.get(self.valptr[length] + offset).copied()
     }
 }
 
@@ -253,5 +341,51 @@ mod tests {
         let mut ac = Vec::new();
         emit_dht(&mut ac, &[(1, 1, &STD_CHROMA_AC)]);
         assert_eq!(ac[4], 0x11); // Tc=1 (AC), Th=1
+    }
+
+    /// Reference DECODE (Figure F.16) over a [`DecTable`], reading `code` from an explicit MSB-first
+    /// bit iterator — the inverse of the canonical assignment, used only to pin `DecTable`.
+    fn decode_one(table: &DecTable, bits: &mut impl Iterator<Item = u8>) -> Option<u8> {
+        let mut length = 1usize;
+        let mut code = i32::from(bits.next()?);
+        while code > table.maxcode(length) {
+            length += 1;
+            if length > 16 {
+                return None;
+            }
+            code = (code << 1) | i32::from(bits.next()?);
+        }
+        table.value_at(length, code)
+    }
+
+    #[test]
+    fn dectable_inverts_the_canonical_encoder() {
+        // For every standard table, DECODE of each symbol's canonical (code,length) bit sequence
+        // recovers that symbol — DecTable is the exact inverse of EncTable's §C.2 assignment.
+        for spec in [&STD_LUMA_DC, &STD_CHROMA_DC, &STD_LUMA_AC, &STD_CHROMA_AC] {
+            let enc = EncTable::from_spec(spec);
+            let dec = DecTable::from_bits(&spec.bits, spec.values).unwrap();
+            for &sym in spec.values {
+                let (code, len) = enc.lookup(sym).unwrap();
+                let mut bits = (0..len).map(|i| ((code >> (len - 1 - i)) & 1) as u8);
+                assert_eq!(decode_one(&dec, &mut bits), Some(sym), "symbol {sym:#x}");
+            }
+        }
+    }
+
+    #[test]
+    fn dectable_rejects_overfull_code_space() {
+        // Three codes of length 1 need 3·2^15 > 2^16 leaf slots — impossible for a prefix code.
+        let mut bits = [0u8; 16];
+        bits[0] = 3;
+        assert!(DecTable::from_bits(&bits, &[0, 1, 2]).is_err());
+        // Exactly two length-1 codes fill the space (2·2^15 = 2^16): the boundary is accepted.
+        bits[0] = 2;
+        assert!(DecTable::from_bits(&bits, &[0, 1]).is_ok());
+        // An incomplete table (one length-2 code, three slots unused) is accepted — real streams
+        // carry them.
+        let mut sparse = [0u8; 16];
+        sparse[1] = 1;
+        assert!(DecTable::from_bits(&sparse, &[7]).is_ok());
     }
 }

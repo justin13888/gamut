@@ -15,18 +15,37 @@ pub mod code {
     pub const EOI: u8 = 0xD9;
     /// Baseline DCT, Huffman coding, start of frame.
     pub const SOF0: u8 = 0xC0;
+    /// Extended sequential DCT, Huffman coding, start of frame. Treated identically to [`SOF0`] at
+    /// 8-bit precision by the decoder (the extended process only differs at 12-bit).
+    pub const SOF1: u8 = 0xC1;
+    /// Progressive DCT, Huffman coding, start of frame (decode lands in a later phase).
+    pub const SOF2: u8 = 0xC2;
+    /// Lossless (sequential) process, start of frame.
+    pub const SOF3: u8 = 0xC3;
     /// Define Huffman table(s).
     pub const DHT: u8 = 0xC4;
+    /// Define arithmetic coding conditioning(s).
+    pub const DAC: u8 = 0xCC;
     /// Define quantization table(s).
     pub const DQT: u8 = 0xDB;
     /// Define restart interval.
     pub const DRI: u8 = 0xDD;
+    /// Define number of lines (§B.2.5): supplies the frame height when the SOF `Y` field was 0.
+    pub const DNL: u8 = 0xDC;
     /// Start of scan.
     pub const SOS: u8 = 0xDA;
     /// Application data segment 0 (used by JFIF).
     pub const APP0: u8 = 0xE0;
+    /// Application data segment 14 (used by Adobe for the colour-transform flag, TN #5116).
+    pub const APP14: u8 = 0xEE;
+    /// End of image.
+    pub const EOI_CODE: u8 = 0xD9;
+    /// Temporary marker for arithmetic coding (`0x01`); a standalone marker with no segment.
+    pub const TEM: u8 = 0x01;
     /// First restart marker (RST0); RSTm is `RST0 + (m & 7)`, i.e. `0xD0..=0xD7`.
     pub const RST0: u8 = 0xD0;
+    /// Last restart marker (RST7).
+    pub const RST7: u8 = 0xD7;
 }
 
 /// Packs two 4-bit fields into one byte, `hi` in the upper nibble and `lo` in the lower — the

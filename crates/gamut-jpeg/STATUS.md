@@ -38,17 +38,27 @@ and gamut's decoder decodes libjpeg-turbo's output).
 - **Lossless process (SOF3).** The predictive lossless mode is unrelated to the DCT pipeline;
   `gamut-dng` covers the only in-workspace consumer (lossless-JPEG inside DNG). Not planned here.
 - **Hierarchical mode (SOF5–7, DHP, EXP).** No real-world still-image corpus. Not planned.
-- **DNL (define number of lines).** Streaming-height marker; the encoder always knows its height up
-  front and writes it in SOF0. Decoder support is additive if a corpus needs it.
 - **SPIFF and other T.84 extensions; T.872 printing conventions.** Niche container/printing layers
   atop the codec, tracked in `references/jpeg` but not implemented.
+
+**Decoder-specific notes:**
+
+- **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a frame with
+  `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0` frame's height
+  then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and ignored. The
+  encoder never emits `Y = 0` (it always knows its height and writes it in SOF0).
+- **Upsampling filter.** Subsampled chroma is upsampled by **sample replication** (nearest); T.81
+  leaves the reconstruction filter open (§A.2 NOTE), so this is the decoder's documented free choice.
+- **Trailing bytes after EOI** are ignored (the libjpeg convention).
+- **CMYK is presented verbatim** (no Adobe inversion); **YCCK** applies the inverse YCbCr transform to
+  the first three channels with `K` passed through (Adobe TN #5116).
 
 ## Phases
 
 | Phase | Spec | Scope | Status |
 | ----- | ---- | ----- | ------ |
 | P1 | T.81 Annex A/B/C/F/K; T.871 | **Keystone:** scaffold + workspace wiring; marker/syntax layer; baseline SOF0 Huffman **encoder** (gray + YCbCr 4:4:4/4:2:2/4:2:0), Annex K tables, quality scaling, restart intervals, JFIF | ✅ done |
-| P2 | T.81 Annex A/F | Sequential SOF0/SOF1 8-bit Huffman **decoder** | ⏳ pending |
+| P2 | T.81 Annex A/B/C/F; T.871; TN #5116 | Sequential SOF0/SOF1 8-bit Huffman **decoder**: full marker/table parsing (DQT 8/16-bit, DHT with Annex C validation, DRI, DNL, APP0/APP14), interleaved + non-interleaved multi-scan entropy decode (§F.2), restart processing, gray/YCbCr/RGB/CMYK/YCCK colour, sample-replication upsampling, `info()` | ✅ done |
 | P3 | T.83 / oracle | libjpeg-turbo differential oracle (vendored, dev-only) + round-trip gate | ⏳ pending |
 | P4 | T.81 §G | Progressive SOF2 **decode** (spectral selection + successive approximation) | ⏳ pending |
 | P5 | T.81 §G | Progressive SOF2 **encode** | ⏳ pending |

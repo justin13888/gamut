@@ -7,23 +7,28 @@
 //!
 //! - **ITU-T T.81 | ISO/IEC 10918-1** — the core codec. Annex A (the DCT process: level shift
 //!   §A.3.1, FDCT §A.3.3, quantization §A.3.4, DC prediction §A.3.5, zig-zag §A.3.6, MCU
-//!   interleaving §A.2.3); Annex B (compressed-data formats and markers); Annex C (Huffman code
-//!   generation); Annex F (§F.1.2 baseline Huffman entropy coding); Annex K (§K.1 quantization and
-//!   §K.3 typical Huffman tables).
+//!   structure §A.2 / interleaving §A.2.3); Annex B (compressed-data formats and markers); Annex C
+//!   (Huffman code generation); Annex F (§F.1.2 baseline Huffman encoding, §F.2 the `DECODE` /
+//!   `RECEIVE` / `EXTEND` decoding procedures); Annex K (§K.1 quantization and §K.3 typical Huffman
+//!   tables).
 //! - **ITU-T T.871 | ISO/IEC 10918-5** — JFIF: the APP0 segment (§10.1) and the full-range BT.601
 //!   YCbCr conversion (§7).
+//! - **Adobe Technical Note #5116** — the APP14 "Adobe" colour-transform marker (RGB / YCbCr / YCCK).
 //!
 //! # Scope
 //!
 //! This crate is a JPEG **encoder + decoder** (unlike the workspace's encoder-only PNG crate — JPEG
-//! is a two-way format). The first phase ships the **baseline sequential DCT Huffman encoder**
-//! (SOF0, 8-bit): grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 subsampling, standard (Annex
-//! K) tables, a quality→quantization mapping, and optional restart intervals. The sequential and
-//! progressive decoders, a progressive encoder, and Adobe APP14 / CMYK handling land in later
-//! phases (see `STATUS.md`); the public API is designed so they slot in without breaking changes.
+//! is a two-way format). It ships the **baseline (SOF0) / extended-sequential (SOF1) 8-bit DCT
+//! Huffman encoder and decoder**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 /
+//! 4:2:0 subsampling, standard (Annex K) tables, a quality→quantization mapping, and optional
+//! restart intervals. The [`JpegDecoder`] reads any spec-valid sequential stream — grayscale, YCbCr,
+//! RGB, and CMYK/YCCK (via the JFIF APP0 / Adobe APP14 hints), interleaved or non-interleaved scans,
+//! restart intervals, and DNL-defined heights — presenting it as `Rgb8`, `Gray8`, or `Cmyk8`. The
+//! progressive decoder and encoder land in later phases (see `STATUS.md`); the public API is designed
+//! so they slot in without breaking changes.
 //!
-//! Out of scope (see `STATUS.md`): 12-bit precision, arithmetic coding, the lossless and
-//! hierarchical processes, DNL, and the SPIFF/T.84/T.872 layers.
+//! Out of scope (see `STATUS.md`): 12-bit precision, arithmetic coding, and the lossless and
+//! hierarchical processes, and the SPIFF/T.84/T.872 layers.
 //!
 //! # Oracle
 //!
@@ -53,11 +58,15 @@
 #![forbid(unsafe_code)]
 
 mod bitwriter;
+mod decoder;
 mod encoder;
 mod huffman;
 mod marker;
 mod quant;
+mod scan;
+mod syntax;
 mod zigzag;
 
+pub use decoder::{JpegDecoder, JpegInfo, JpegProcess, info};
 pub use encoder::{ChromaSubsampling, JpegEncoder};
 pub use marker::DensityUnit;
