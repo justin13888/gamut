@@ -7,7 +7,9 @@
 
 use core::ffi::c_void;
 
-use crate::types::{JxlBasicInfo, JxlBool, JxlColorEncoding, JxlMemoryManager, JxlPixelFormat};
+use crate::types::{
+    JxlBasicInfo, JxlBitDepth, JxlBool, JxlColorEncoding, JxlMemoryManager, JxlPixelFormat,
+};
 
 /// Opaque encoder instance (`JxlEncoder`). Created by
 /// [`JxlEncoderCreate`] and destroyed by [`JxlEncoderDestroy`].
@@ -177,6 +179,22 @@ unsafe extern "C" {
     pub fn JxlEncoderSetFrameDistance(
         frame_settings: *mut JxlEncoderFrameSettings,
         distance: f32,
+    ) -> JxlEncoderStatus;
+
+    /// Sets how integer pixel buffers added for this frame are interpreted
+    /// (`JxlEncoderSetFrameBitDepth`) — e.g. [`JxlBitDepthType::FROM_CODESTREAM`] reads a
+    /// `UINT16` buffer as the basic info's declared N-bit code values instead of full-range
+    /// 16-bit.
+    ///
+    /// [`JxlBitDepthType::FROM_CODESTREAM`]: crate::types::JxlBitDepthType::FROM_CODESTREAM
+    ///
+    /// # Safety
+    ///
+    /// `frame_settings` must be a valid frame-settings pointer created for a live encoder, and
+    /// `bit_depth` must point to a valid [`JxlBitDepth`].
+    pub fn JxlEncoderSetFrameBitDepth(
+        frame_settings: *mut JxlEncoderFrameSettings,
+        bit_depth: *const JxlBitDepth,
     ) -> JxlEncoderStatus;
 
     /// Enables or disables true lossless mode for a frame (`JxlEncoderSetFrameLossless`).

@@ -274,3 +274,109 @@ fn sixteen_bit_stream_requested_as_rgb8_downscales() {
         );
     }
 }
+
+/// A 12-bit image carried in u16 buffers: `with_bit_depth(12)` declares the coded depth on
+/// encode, and `with_codestream_bit_depth(true)` reads it back at that depth — the pair must be
+/// bit-exact on the 12-bit code values. This is the framing DNG tiles (e.g. Apple ProRAW's
+/// 10-bit LinearRaw) rely on.
+#[test]
+fn coded_bit_depth_roundtrips_sub16_code_values_exactly() {
+    let (w, h) = (17, 13);
+    let dims = Dimensions::new(w, h).unwrap();
+    for ch in [1usize, 3] {
+        let px: Vec<u16> = gen_u16(w, h, ch).iter().map(|&s| s & 0x0FFF).collect();
+        let encode = |img: &[u16]| -> Vec<u8> {
+            let enc = JxlEncoder::lossless().with_bit_depth(12);
+            if ch == 1 {
+                enc.encode_to_vec(ImageRef::<Gray16>::new(img, dims).unwrap())
+                    .unwrap()
+            } else {
+                enc.encode_to_vec(ImageRef::<Rgb16>::new(img, dims).unwrap())
+                    .unwrap()
+            }
+        };
+        let bytes = encode(&px);
+
+        // The stream declares 12-bit integer samples.
+        let info = JxlDecoder::new().info(&bytes).expect("info");
+        assert_eq!(info.bits_per_sample, 12);
+        assert!(!info.is_float);
+        assert_eq!(info.color_channels, ch as u8);
+        assert!(!info.has_alpha);
+        assert_eq!(info.dimensions, dims);
+
+        // Codestream-depth decode returns the exact 12-bit code values...
+        let dec = JxlDecoder::new().with_codestream_bit_depth(true);
+        let got: Vec<u16> = if ch == 1 {
+            let out: ImageBuf<Gray16> = dec.decode_image(&bytes).unwrap();
+            out.as_samples().to_vec()
+        } else {
+            let out: ImageBuf<Rgb16> = dec.decode_image(&bytes).unwrap();
+            out.as_samples().to_vec()
+        };
+        assert_eq!(got, px, "{ch}-channel 12-bit code values must round-trip");
+
+        // ...while the default full-range decode rescales them (the two policies must differ for
+        // any non-zero sample, pinning that the knob actually changes the output range).
+        let full: ImageBuf<Gray16>;
+        let full_samples: &[u16] = if ch == 1 {
+            full = JxlDecoder::new().decode_image(&bytes).unwrap();
+            full.as_samples()
+        } else {
+            &[]
+        };
+        if ch == 1 {
+            for (i, (&coded, &fullr)) in px.iter().zip(full_samples).enumerate() {
+                // jxl-rs renormalises through f32, so allow one code of rounding play — the
+                // point here is only that full-range output is *rescaled*, not the coded values.
+                let expect = (f64::from(coded) / 4095.0 * 65535.0).round() as i64;
+                assert!(
+                    (i64::from(fullr) - expect).abs() <= 1,
+                    "full-range decode at {i}: {fullr} (want ~{expect})"
+                );
+            }
+        }
+    }
+}
+
+/// The coded-depth override is validated: zero or wider than the sample width is a typed error.
+#[test]
+fn with_bit_depth_rejects_incoherent_depths() {
+    let dims = Dimensions::new(4, 4).unwrap();
+    let px8 = gen_u8(4, 4, 1);
+    let img = ImageRef::<Gray8>::new(&px8, dims).unwrap();
+    for bits in [0u8, 12, 17] {
+        // 12 > the 8-bit sample width; 0 and 17 are always incoherent.
+        let err = JxlEncoder::lossless()
+            .with_bit_depth(bits)
+            .encode_to_vec(img)
+            .expect_err("incoherent coded depth must be rejected");
+        assert!(matches!(err, gamut_core::Error::InvalidInput(_)), "{bits}");
+    }
+    // An 8-bit override on an 8-bit layout is coherent (identity).
+    assert!(
+        JxlEncoder::lossless()
+            .with_bit_depth(8)
+            .encode_to_vec(img)
+            .is_ok()
+    );
+}
+
+/// `info` reports float sample types (which integer raw consumers must reject up front).
+#[test]
+fn info_reports_stream_properties_on_alpha_stream() {
+    let dims = Dimensions::new(5, 3).unwrap();
+    let px = gen_u8(5, 3, Rgba8::CHANNELS);
+    let bytes = JxlEncoder::lossless()
+        .encode_to_vec(ImageRef::<Rgba8>::new(&px, dims).unwrap())
+        .unwrap();
+    let info = JxlDecoder::new().info(&bytes).expect("info");
+    assert_eq!(info.dimensions, dims);
+    assert_eq!(info.bits_per_sample, 8);
+    assert!(info.has_alpha);
+    assert!(!info.is_float);
+    assert!(!info.animated);
+    // Junk input errors instead of panicking.
+    assert!(JxlDecoder::new().info(&[0xFF, 0x0A]).is_err());
+    assert!(JxlDecoder::new().info(&[]).is_err());
+}

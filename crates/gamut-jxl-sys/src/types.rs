@@ -54,6 +54,37 @@ impl JxlEndianness {
     pub const BIG: Self = Self(2);
 }
 
+/// Interpretation of a [`JxlBitDepth`] (`JxlBitDepthType`, `jxl/types.h`).
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JxlBitDepthType(pub c_int);
+
+impl JxlBitDepthType {
+    /// Infer the bit depth from the pixel format's data type (`JXL_BIT_DEPTH_FROM_PIXEL_FORMAT`):
+    /// a `UINT16` buffer is treated as full-range 16-bit.
+    pub const FROM_PIXEL_FORMAT: Self = Self(0);
+    /// Use the codestream header's declared bit depth (`JXL_BIT_DEPTH_FROM_CODESTREAM`): a
+    /// `UINT16` buffer for an N-bit image carries values in `0 ..= 2^N - 1`.
+    pub const FROM_CODESTREAM: Self = Self(1);
+    /// Use the explicit `bits_per_sample`/`exponent_bits_per_sample` fields
+    /// (`JXL_BIT_DEPTH_CUSTOM`).
+    pub const CUSTOM: Self = Self(2);
+}
+
+/// The interpretation of integer pixel buffers handed to the encoder or produced by the decoder
+/// (`JxlBitDepth`, `jxl/types.h`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct JxlBitDepth {
+    /// How the bit depth is determined; the fields below apply only to
+    /// [`JxlBitDepthType::CUSTOM`].
+    pub r#type: JxlBitDepthType,
+    /// Custom bits per sample (`JXL_BIT_DEPTH_CUSTOM` only).
+    pub bits_per_sample: u32,
+    /// Custom float exponent bits per sample (`JXL_BIT_DEPTH_CUSTOM` only; 0 for integers).
+    pub exponent_bits_per_sample: u32,
+}
+
 /// Description of an interleaved pixel buffer for encode input / decode output (`JxlPixelFormat`,
 /// `jxl/types.h`). Pixels are laid out row by row, left to right, top to bottom.
 #[repr(C)]

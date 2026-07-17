@@ -11,8 +11,9 @@ use gamut_core::{
 };
 use jxl::api::states::Initialized;
 use jxl::api::{
-    Endianness, JxlColorProfile, JxlColorType, JxlDataFormat, JxlDecoder as JxlRsDecoder,
-    JxlDecoderOptions, JxlOutputBuffer, JxlPixelFormat, ProcessingResult,
+    Endianness, JxlBitDepth, JxlColorProfile, JxlColorType, JxlDataFormat,
+    JxlDecoder as JxlRsDecoder, JxlDecoderOptions, JxlOutputBuffer, JxlPixelFormat,
+    ProcessingResult,
 };
 use jxl::headers::extra_channels::ExtraChannel;
 
@@ -35,19 +36,79 @@ const PIXEL_LIMIT: usize = 1 << 28;
 /// image cannot be decoded as grayscale, animated input is rejected, and premultiplied (associated)
 /// alpha is rejected — each an [`Error::Unsupported`] that a later version may relax.
 ///
-/// The type is a zero-sized handle; construct it with [`JxlDecoder::new`] or [`Default`]. It holds no
-/// configuration today — the private field reserves room to add decode options (e.g. a caller-tunable
-/// pixel limit) without a breaking change.
+/// Construct it with [`JxlDecoder::new`] or [`Default`], then optionally set
+/// [`JxlDecoder::with_codestream_bit_depth`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct JxlDecoder {
-    _private: (),
+    codestream_bit_depth: bool,
 }
 
 impl JxlDecoder {
     /// Creates a decoder with the default configuration.
     #[must_use]
     pub fn new() -> Self {
-        Self { _private: () }
+        Self::default()
+    }
+
+    /// Selects whether integer output carries the **codestream's declared bit depth** instead of
+    /// the output type's full range. Off by default.
+    ///
+    /// A JPEG XL stream declares its samples' bit depth N (e.g. 10-bit). By default a
+    /// 16-bit decode scales samples to full-range `0 ..= 65535`; with this set, samples keep
+    /// their coded range `0 ..= 2^N - 1` — the reading a raw-code-value consumer (e.g. an N-bit
+    /// DNG tile) needs. Streams with a float sample type are unaffected. Returns the updated
+    /// decoder for chaining.
+    #[must_use]
+    pub fn with_codestream_bit_depth(mut self, enabled: bool) -> Self {
+        self.codestream_bit_depth = enabled;
+        self
+    }
+
+    /// Whether integer output carries the codestream's declared bit depth (see
+    /// [`JxlDecoder::with_codestream_bit_depth`]).
+    #[must_use]
+    pub fn codestream_bit_depth(&self) -> bool {
+        self.codestream_bit_depth
+    }
+
+    /// Parses the stream's headers and returns its basic properties without decoding any pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the data is not a decodable JPEG XL stream or is
+    /// truncated before the image headers.
+    pub fn info(&self, data: &[u8]) -> Result<JxlInfo> {
+        let mut options = JxlDecoderOptions::default();
+        options.pixel_limit = Some(PIXEL_LIMIT);
+        let mut input: &[u8] = data;
+
+        let decoder = JxlRsDecoder::<Initialized>::new(options);
+        let decoder = match decoder.process(&mut input).map_err(map_decode_error)? {
+            ProcessingResult::Complete { result } => result,
+            ProcessingResult::NeedsMoreInput { .. } => return Err(truncated()),
+        };
+
+        let basic = decoder.basic_info();
+        let (Ok(width), Ok(height)) = (u32::try_from(basic.size.0), u32::try_from(basic.size.1))
+        else {
+            return Err(Error::InvalidInput("JXL: image dimensions overflow"));
+        };
+        let has_alpha = basic
+            .extra_channels
+            .iter()
+            .any(|c| c.ec_type == ExtraChannel::Alpha);
+        Ok(JxlInfo {
+            dimensions: Dimensions::new(width, height)?,
+            bits_per_sample: basic.bit_depth.bits_per_sample(),
+            is_float: matches!(basic.bit_depth, JxlBitDepth::Float { .. }),
+            color_channels: if decoder.current_pixel_format().color_type.is_grayscale() {
+                1
+            } else {
+                3
+            },
+            has_alpha,
+            animated: basic.animation.is_some(),
+        })
     }
 
     /// Returns the ICC profile **embedded** in the stream's metadata, or `None` when the stream
@@ -81,6 +142,25 @@ impl JxlDecoder {
             JxlColorProfile::Simple(_) => Ok(None),
         }
     }
+}
+
+/// Basic properties of a JPEG XL stream, read from its headers by [`JxlDecoder::info`] without
+/// decoding pixels.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JxlInfo {
+    /// The image dimensions (display orientation).
+    pub dimensions: Dimensions,
+    /// The declared bits per sample (integer precision, or the float format's total width).
+    pub bits_per_sample: u32,
+    /// Whether the samples are floating point (e.g. fp16 HDR) rather than integers.
+    pub is_float: bool,
+    /// Colour samples per pixel: 1 (grayscale) or 3 (RGB).
+    pub color_channels: u8,
+    /// Whether an alpha channel is present.
+    pub has_alpha: bool,
+    /// Whether the stream is animated (which pixel decoding rejects).
+    pub animated: bool,
 }
 
 /// The raw output of one decoded frame: jxl-rs's interleaved byte buffer in the stream's natural
@@ -145,11 +225,13 @@ fn aligned_backing(total: usize, align2: bool) -> (Vec<u8>, usize) {
 ///
 /// `dst_is_gray_family` is the requested layout's colour family; a grayscale request against a colour
 /// stream is rejected here (refusing to guess a luminance). `data_format` selects the output bit
-/// width (8- or 16-bit, native endianness) and must agree with `S`.
+/// width (8- or 16-bit, native endianness) and must agree with `S`; when `codestream_bit_depth` is
+/// set, an integer stream's declared depth replaces the format's full-range depth.
 fn decode_raw<S: ConvSample>(
     data: &[u8],
     dst_is_gray_family: bool,
     data_format: JxlDataFormat,
+    codestream_bit_depth: bool,
 ) -> Result<RawFrame> {
     // `JxlDecoderOptions` is `#[non_exhaustive]`, so it is built from its `Default` and then the
     // one public field we care about is set.
@@ -166,7 +248,7 @@ fn decode_raw<S: ConvSample>(
     };
 
     // Read everything we need from the image info, then drop the borrows before reconfiguring.
-    let (size, num_extra, stream_is_gray, stream_has_alpha, premultiplied) = {
+    let (size, num_extra, stream_is_gray, stream_has_alpha, premultiplied, stream_int_bits) = {
         let basic = decoder.basic_info();
         if basic.animation.is_some() {
             return Err(Error::Unsupported("JXL: animated JPEG XL is not supported"));
@@ -179,13 +261,33 @@ fn decode_raw<S: ConvSample>(
         // The default pixel format's colour type reflects the stream's colour space (grayscale vs
         // RGB) and never carries alpha, so it is the cleanest signal of "is this a colour image?".
         let stream_is_gray = decoder.current_pixel_format().color_type.is_grayscale();
+        // The declared integer precision (None for float streams, which keep full-range output).
+        let stream_int_bits = match basic.bit_depth {
+            JxlBitDepth::Int { bits_per_sample } => Some(bits_per_sample),
+            JxlBitDepth::Float { .. } => None,
+        };
         (
             basic.size,
             basic.extra_channels.len(),
             stream_is_gray,
             alpha.is_some(),
             premultiplied,
+            stream_int_bits,
         )
+    };
+
+    // With the codestream-bit-depth policy on, an integer stream's declared depth replaces the
+    // requested format's full-range depth (clamped to the output type's width), so samples keep
+    // their coded `0 ..= 2^N - 1` range.
+    let data_format = match (codestream_bit_depth, stream_int_bits, data_format) {
+        (true, Some(bits), JxlDataFormat::U8 { .. }) => JxlDataFormat::U8 {
+            bit_depth: bits.min(8) as u8,
+        },
+        (true, Some(bits), JxlDataFormat::U16 { endianness, .. }) => JxlDataFormat::U16 {
+            endianness,
+            bit_depth: bits.min(16) as u8,
+        },
+        (_, _, format) => format,
     };
 
     if premultiplied {
@@ -279,13 +381,14 @@ fn decode_to_buf<P: Pixel>(
     data: &[u8],
     dst_is_gray_family: bool,
     data_format: JxlDataFormat,
+    codestream_bit_depth: bool,
     dst_color: usize,
     dst_alpha: bool,
 ) -> Result<ImageBuf<P>>
 where
     P::Sample: ConvSample,
 {
-    let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format)?;
+    let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format, codestream_bit_depth)?;
     let pixels = raw
         .dims
         .num_pixels()
@@ -308,6 +411,7 @@ fn decode_into_buf<P: Pixel>(
     data: &[u8],
     dst_is_gray_family: bool,
     data_format: JxlDataFormat,
+    codestream_bit_depth: bool,
     dst_color: usize,
     dst_alpha: bool,
     dst: &mut ImageBuf<P>,
@@ -315,7 +419,7 @@ fn decode_into_buf<P: Pixel>(
 where
     P::Sample: ConvSample,
 {
-    let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format)?;
+    let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format, codestream_bit_depth)?;
     let pixels = raw
         .dims
         .num_pixels()
@@ -366,11 +470,26 @@ macro_rules! impl_decode_image {
     ($($pixel:ty => $format:expr, $gray_family:expr, $dst_color:expr, $dst_alpha:expr;)*) => {$(
         impl DecodeImage<$pixel> for JxlDecoder {
             fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<$pixel>> {
-                decode_to_buf::<$pixel>(data, $gray_family, $format, $dst_color, $dst_alpha)
+                decode_to_buf::<$pixel>(
+                    data,
+                    $gray_family,
+                    $format,
+                    self.codestream_bit_depth,
+                    $dst_color,
+                    $dst_alpha,
+                )
             }
 
             fn decode_image_into(&self, data: &[u8], dst: &mut ImageBuf<$pixel>) -> Result<()> {
-                decode_into_buf::<$pixel>(data, $gray_family, $format, $dst_color, $dst_alpha, dst)
+                decode_into_buf::<$pixel>(
+                    data,
+                    $gray_family,
+                    $format,
+                    self.codestream_bit_depth,
+                    $dst_color,
+                    $dst_alpha,
+                    dst,
+                )
             }
         }
     )*};

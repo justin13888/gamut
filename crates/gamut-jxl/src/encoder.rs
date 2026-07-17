@@ -39,6 +39,8 @@ pub struct JxlEncoder {
     exif: Option<Vec<u8>>,
     /// XMP (XML) payload for an `xml ` container box, if any.
     xmp: Option<Vec<u8>>,
+    /// The declared coded bit depth override, if any (see [`JxlEncoder::with_bit_depth`]).
+    bit_depth: Option<u8>,
 }
 
 impl Default for JxlEncoder {
@@ -53,6 +55,7 @@ impl Default for JxlEncoder {
             orientation: Orientation::default(),
             exif: None,
             xmp: None,
+            bit_depth: None,
         }
     }
 }
@@ -142,6 +145,28 @@ impl JxlEncoder {
     pub fn with_xmp(mut self, xmp: &str) -> Self {
         self.xmp = Some(xmp.as_bytes().to_vec());
         self
+    }
+
+    /// Declares the samples' **coded bit depth** N, making a 16-bit pixel buffer carry N-bit code
+    /// values (`0 ..= 2^N - 1`) instead of full-range 16-bit. Returns the updated encoder for
+    /// chaining.
+    ///
+    /// The stream's header then declares N bits per sample and libjxl reads the buffer at that
+    /// depth (`JxlEncoderSetFrameBitDepth`, from-codestream semantics) — the framing an N-bit raw
+    /// consumer (e.g. a 10/12/14-bit DNG tile) round-trips exactly with
+    /// [`JxlDecoder::with_codestream_bit_depth`](crate::JxlDecoder::with_codestream_bit_depth).
+    /// `bits` must be `1..=16` and no wider than the pixel layout's sample width; encoding
+    /// validates this with a typed error.
+    #[must_use]
+    pub fn with_bit_depth(mut self, bits: u8) -> Self {
+        self.bit_depth = Some(bits);
+        self
+    }
+
+    /// The declared coded bit depth override, if any (see [`JxlEncoder::with_bit_depth`]).
+    #[must_use]
+    pub fn bit_depth(&self) -> Option<u8> {
+        self.bit_depth
     }
 
     /// Whether this encoder is in lossless mode.
