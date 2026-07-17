@@ -42,6 +42,7 @@ mod entry;
 mod reader;
 mod source;
 mod stream;
+pub mod tags;
 mod types;
 mod value;
 mod writer;
