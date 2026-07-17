@@ -47,6 +47,7 @@
 mod av1c;
 mod config;
 mod container;
+mod decode;
 mod encoder;
 mod image;
 mod obu;
@@ -55,6 +56,7 @@ mod transform;
 pub use av1c::{Av1Config, ChromaFormat};
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
+pub use decode::{Av1StillDecoder, DecodedFrame};
 pub use encoder::AvifEncoder;
 pub use gamut_core::Dimensions;
 pub use image::{

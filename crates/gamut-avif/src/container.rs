@@ -193,6 +193,21 @@ impl<'a> AvifContainer<'a> {
     pub fn unknown_meta_boxes(&self) -> &[UnknownBox<'a>] {
         &self.unknown_meta_boxes
     }
+
+    /// Decodes an item to a raw planar [`DecodedFrame`](crate::DecodedFrame) via `decoder`.
+    /// Convenience forwarding to
+    /// [`AvifImage::decode_item_planar`](crate::AvifImage::decode_item_planar).
+    ///
+    /// # Errors
+    ///
+    /// As [`AvifImage::decode_item_planar`](crate::AvifImage::decode_item_planar).
+    pub fn decode_item_planar(
+        &self,
+        id: u32,
+        decoder: &mut dyn crate::Av1StillDecoder,
+    ) -> Result<crate::DecodedFrame> {
+        self.image.decode_item_planar(id, decoder)
+    }
 }
 
 /// Walks the top-level boxes into a contiguous, gap-free segment list covering `0..data.len()`,
