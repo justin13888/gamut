@@ -1422,5 +1422,81 @@ mod tests {
             let stream = builder.build(&samples, 6, 4);
             assert_sdk_agrees(&stream, &samples, "per-component tables");
         }
+
+        /// End to end: a DNG whose raw strip is a *predictor-4* SOF3 stream — a shape gamut's
+        /// own encoder never writes — decodes to identical samples through gamut's DNG decoder
+        /// and the Adobe SDK's negative reader.
+        #[test]
+        fn predictor4_strip_dng_decodes_identically_to_adobe() {
+            use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, write};
+
+            use crate::tags;
+
+            let (w, h) = (8usize, 6usize);
+            let samples = test_samples(w, h, 1, 12);
+            let strip = StreamBuilder::simple(12, 4, 1).build(&samples, w, h);
+
+            let mut ifd = Ifd::new();
+            ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![0]));
+            ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![w as u16]));
+            ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![h as u16]));
+            ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![12]));
+            ifd.set(tags::COMPRESSION, Value::Short(vec![7])); // lossless JPEG
+            ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+            ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+            ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![h as u16]));
+            ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+            ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
+            ifd.set(tags::CFA_PLANE_COLOR, Value::Byte(vec![0, 1, 2]));
+            ifd.set(tags::DNG_VERSION, Value::Byte(vec![1, 4, 0, 0]));
+            ifd.set(
+                tags::UNIQUE_CAMERA_MODEL,
+                Value::Ascii("gamut TestCam".to_owned()),
+            );
+            ifd.set(
+                tags::COLOR_MATRIX1,
+                Value::SRational(vec![
+                    (1, 1),
+                    (0, 1),
+                    (0, 1),
+                    (0, 1),
+                    (1, 1),
+                    (0, 1),
+                    (0, 1),
+                    (0, 1),
+                    (1, 1),
+                ]),
+            );
+            ifd.set(tags::CALIBRATION_ILLUMINANT1, Value::Short(vec![21])); // D65
+            ifd.set(
+                tags::AS_SHOT_NEUTRAL,
+                Value::Rational(vec![(1, 1), (1, 1), (1, 1)]),
+            );
+            ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+            ifd.set(
+                tags::STRIP_BYTE_COUNTS,
+                Value::Long(vec![strip.len() as u32]),
+            );
+
+            // Two-pass layout: size the container, then point the strip just past it.
+            let single = |ifd: Ifd| TiffFile {
+                order: ByteOrder::LittleEndian,
+                variant: Variant::Classic,
+                ifds: vec![ifd],
+            };
+            let mut dng = write(&single(ifd.clone())).expect("write");
+            let strip_at = dng.len() as u32;
+            let mut placed = ifd;
+            placed.set(tags::STRIP_OFFSETS, Value::Long(vec![strip_at]));
+            dng = write(&single(placed)).expect("rewrite");
+            dng.extend_from_slice(&strip);
+
+            let ours = crate::decoder::DngDecoder::new()
+                .decode(&dng)
+                .expect("gamut decode");
+            assert_eq!(ours.raw.samples(), samples.as_slice());
+            let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe decode");
+            assert_eq!(adobe.samples, samples);
+        }
     }
 }

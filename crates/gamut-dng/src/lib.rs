@@ -35,6 +35,7 @@ pub mod deconstruct;
 pub mod encoder;
 pub mod levels;
 pub mod linearize;
+pub mod lossless_jpeg;
 pub mod metadata;
 pub mod opcode;
 pub mod profile;
@@ -44,7 +45,6 @@ pub mod values;
 
 mod bitpack;
 mod compression;
-mod lossless_jpeg;
 mod preview;
 mod writer;
 
@@ -57,6 +57,7 @@ pub use gamut_core::{Dimensions, Error, Result};
 pub use gamut_ifd::ByteOrder;
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
+pub use lossless_jpeg::LosslessJpeg;
 pub use metadata::{DngMetadata, ExifMetadata};
 pub use opcode::{Opcode, OpcodeList};
 pub use profile::CameraProfile;
