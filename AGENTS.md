@@ -128,6 +128,14 @@ source tarball by the oracle build scripts. No system-installed codec binaries a
   module docs + declarations (traits/types without bodies), **no placeholder `fn` bodies**
   (a `todo!()`-bodied fn adds an uncovered region). The `gamut-(cli|wasm|ffi)` crates are
   excluded from coverage via `--ignore-filename-regex`.
+- C portability (issue #242): keep the public API mechanically portable to C while staying
+  idiomatic Rust. Codec entry points go through the object-safe `EncodeImage`/`DecodeImage`
+  pair over the sealed `Pixel` matrix (runtime tag: `gamut_core::PixelFormat`); configs are
+  plain data — `Copy` structs, fieldless enums with an explicit `repr` and permanent
+  append-only discriminants, or payloads reachable through accessors; new extension hooks
+  follow the `gamut_heic::HevcDecoder` shape (single object-safe method, borrowed bytes in,
+  owned plain data out). The C ABI contract is `crates/gamut-ffi/DESIGN.md`; `gamut-ffi`'s
+  feature table strictly mirrors `gamut`'s (`mise run check-ffi-features`, enforced in CI).
 
 ## Versioning
 
