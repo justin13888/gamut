@@ -465,4 +465,32 @@ exclude_re = [
     # equivalent. (`> -> <` and `> -> ==` flip the correction direction for real inputs and ARE caught
     # by the successive-approximation test's positive and negative AC coefficients.)
     "replace > with >= in refine",
+    # gamut-jpeg progressive encoder (`ProgCoder::ac_refine`, §G.1.2.3) — two provably-non-observable
+    # mutants, line/column-anchored so each matches EXACTLY its mutant and leaves the sibling operators
+    # (the abs==0 run test, the abs>1 history test, the ZRL/EOB boundaries) in the survey.
+    #
+    # 488:41 `self.raw_bit(u8::from(coeff > 0))` — the newly-nonzero coefficient's sign bit. This arm
+    # is reached only when `abs == 1`, i.e. `|coeff| >> al == 1`, which forces `coeff != 0`; `coeff > 0`
+    # and `coeff >= 0` therefore agree on every value that reaches it. (`> -> <`/`> -> ==` flip the sign
+    # for real inputs and ARE caught by `ac_refine_sign_and_eob_fold_round_trip`'s negative coefficient.)
+    # gamut-jpeg `build_optimal_table` (Annex K.2 length limiting) — the borrow-length search
+    # `let mut j = i - 2; while bits[j] == 0 { j -= 1; }` walks down to the longest shorter length that
+    # still has a code. Mutating the `j -= 1` step turns this terminating descent into a non-terminating
+    # loop: `-= -> /=` pins `j` (`j / 1 == j`) so `while bits[j] == 0` spins forever once it enters, and
+    # `-= -> +=` walks `j` upward into the length whose redistribution nets zero change to `bits[i]`, so
+    # the enclosing `while bits[i] > 0` never makes progress. Neither can be observed as a decoded
+    # result (execution never returns) — cargo-mutants can only ever report a TIMEOUT, never a catchable
+    # behavioural escape. Line/column-anchored so each matches EXACTLY its hang mutant; the redistribution
+    # arithmetic (`bits[i] -= 2`, `bits[i-1] += 1`, …) and the `i - 2` start ARE caught by the exact-BITS
+    # golden in `optimal_skewed_frequencies_force_16_bit_limiting`. Same shape as the scan.rs cursor hangs.
+    'huffman\.rs:365:19: replace -= with (\+|/)= in build_optimal_table',
+    'progressive\.rs:488:41: replace > with >=',
+    # 454:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
+    # that becomes newly-nonzero this scan. It gates ONLY whether a >15 run of zero-history coefficients
+    # ending at an *already-nonzero* coefficient is coded as a ZRL or folded into the EOB run — a free
+    # choice in EOB/ZRL segmentation (§G.1.2.3): both are valid codings of the identical coefficients,
+    # and the decoder reconstructs the same values from either, so no decode-parity test can distinguish
+    # `== 1` from `!= 1`. (The `abs == 0` and `abs > 1` branch tests, which DO change coefficients, are
+    # caught — this line:col anchor leaves them in the survey.)
+    'progressive\.rs:454:55: replace == with !=',
 ]

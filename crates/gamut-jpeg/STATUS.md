@@ -22,11 +22,18 @@ battery and, from P4, the **progressive** one (libjpeg-turbo's standard 10-scan 
 script across gray/colour × 4:4:4/4:2:2/4:2:0 × q{40,75,95} × restart{0,2} × optimize{off,on}); the
 progressive parity numbers are **identical** to the sequential ones (gray/4:4:4 max-diff **3**,
 subsampled PSNR **22.9 dB**), confirming the progressive coefficients match exactly — only the shared
-IDCT/upsampling remains as a source of divergence. Before P2 the encoder was additionally pinned by
-byte-exact micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker; the
-progressive decoder adds hand-built minimal streams (DC-then-AC, a successive-approximation pair, an
-EOBRUN-spanning case, a DC refinement) checked against sequential twins, plus a scan-ordering
-validation corpus.
+IDCT/upsampling remains as a source of divergence. From P5 the **encode** gate adds a **progressive
+exactness** direction (`tests/oracle.rs`): gamut's SOF2 stream and its baseline stream of the same
+image carry the same quantized coefficients, so libjpeg-turbo's decode of each must be **byte-for-byte
+identical** — asserted as exact equality (not a tolerance) across the dims × mode × q{40,75,95} ×
+restart{0,2} battery. gamut's **own** decoder is held to the same exact bar (`tests/progressive.rs`):
+`decode(progressive) == decode(baseline)`. Before P2 the encoder was additionally pinned by byte-exact
+micro-goldens hand-derived from T.81 Annex F/K and a structural stream walker; the progressive decoder
+adds hand-built minimal streams (DC-then-AC, a successive-approximation pair, an EOBRUN-spanning case,
+a DC refinement) checked against sequential twins, plus a scan-ordering validation corpus; the
+progressive encoder adds direct §G.1.2 entropy-model unit tests (ZRL boundary, point transform, DC
+refinement bit, AC-refinement sign/EOB fold), an exact Annex K.2 optimal-table golden, and a
+progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run presence).
 
 ## Scope ledger
 
@@ -80,6 +87,28 @@ validation corpus.
 - **CMYK is presented verbatim** (no Adobe inversion); **YCCK** applies the inverse YCbCr transform to
   the first three channels with `K` passed through (Adobe TN #5116).
 
+**Encoder-specific notes:**
+
+- **Progressive scan script (frozen).** The progressive encoder ([`JpegEncoder::with_progressive`])
+  emits libjpeg's `jpeg_simple_progression` script verbatim (transcribed from libjpeg-turbo's
+  `jcparam.c`), SemVer-frozen: **grayscale** is 6 scans — DC `Al=1`; luma AC `1–5` `Al=2`; luma AC
+  `6–63` `Al=2`; AC refine `Ah=2 Al=1`; DC refine `Ah=1 Al=0`; AC refine `Ah=1 Al=0` — and **YCbCr**
+  is the 10-scan colour variant: interleaved DC `Al=1`; Y AC `1–5` `Al=2`; Cr AC `1–63` `Al=1`;
+  Cb AC `1–63` `Al=1`; Y AC `6–63` `Al=2`; Y AC refine `Ah=2 Al=1`; interleaved DC refine `Ah=1 Al=0`;
+  Cr, Cb, then Y AC refine `Ah=1 Al=0` (Cr before Cb, exactly as libjpeg orders them).
+- **Optimized per-scan Huffman tables (Annex K.2).** The standard Annex K AC tables cannot code a
+  progressive AC scan (the `EOBn` run/size bytes are absent), so — like libjpeg, which forces
+  `optimize_coding` for progressive — each scan builds its own table(s) from its symbol frequencies
+  (a two-pass gather/emit design) via the §K.2 procedure (reserved all-ones pseudo-symbol; 16-bit
+  length-limiting). Baseline encoding is unaffected and stays byte-identical to before (standard
+  tables). Each scan uses one optimized table at destination 0 for its class (a documented free
+  choice; a DC-refinement scan carries no table); this changes only compression density, never the
+  decoded coefficients, which are identical to the baseline encoding of the same input.
+- **EOBRUN cap / correction-bit buffering.** The EOB-run accumulator is forced out at its 15-bit
+  maximum (`0x7FFF`, §G.1.2.2); successive-approximation correction bits (§G.1.2.3) are buffered in a
+  growable vector and emitted after the `EOBn`/run-size/ZRL symbol they attach to, so the reference's
+  fixed-buffer overflow flush is unnecessary.
+
 ## Phases
 
 | Phase | Spec | Scope | Status |
@@ -88,5 +117,5 @@ validation corpus.
 | P2 | T.81 Annex A/B/C/F; T.871; TN #5116 | Sequential SOF0/SOF1 8-bit Huffman **decoder**: full marker/table parsing (DQT 8/16-bit, DHT with Annex C validation, DRI, DNL, APP0/APP14), interleaved + non-interleaved multi-scan entropy decode (§F.2), restart processing, gray/YCbCr/RGB/CMYK/YCCK colour, sample-replication upsampling, `info()` | ✅ done |
 | P3 | T.83 / oracle | libjpeg-turbo differential oracle (vendored, dev-only) + round-trip gate (`tests/oracle.rs`, both directions) | ✅ done |
 | P4 | T.81 §G | Progressive SOF2 **decode**: spectral selection + successive approximation — per-component i32 coefficient accumulators filled across scans (interleaved DC + single-component AC), first-pass Huffman + EOBn runs (§G.1.2.2), DC/AC successive-approximation refinement (§G.1.2.3), point transform (§A.4), scan-band ordering validation (§G.1.1.1), restarts, dequant+IDCT once at EOI reusing the sequential reconstruction tail | ✅ done |
-| P5 | T.81 §G | Progressive SOF2 **encode** | ⏳ pending |
+| P5 | T.81 §G, §K.2 | Progressive SOF2 **encode**: `JpegEncoder::with_progressive(bool)` — the frozen `jpeg_simple_progression` scan script (6-scan gray / 10-scan YCbCr), coefficients materialized once via the shared gather→FDCT→quantize path, two-pass optimized per-scan Huffman tables (Annex K.2, all-ones-reserved, 16-bit length-limited), DC/AC first-pass + successive-approximation refinement with EOBRUN accumulation and the §G.1.2.3 deferred correction-bit protocol, restarts | ✅ done |
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14, CLI `gamut convert → .jpg`, umbrella `jpeg` feature audit | ⏳ pending |

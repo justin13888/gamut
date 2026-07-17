@@ -140,10 +140,24 @@ fn psnr(mse: f64) -> f64 {
 
 /// Encodes `pixels` with gamut in the given mode, returning the JPEG stream.
 fn gamut_encode(mode: Mode, pixels: &[u8], w: u32, h: u32, quality: u8, restart: u16) -> Vec<u8> {
+    gamut_encode_cfg(mode, pixels, w, h, quality, restart, false)
+}
+
+/// Encodes `pixels` with gamut, selecting baseline or progressive.
+fn gamut_encode_cfg(
+    mode: Mode,
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    quality: u8,
+    restart: u16,
+    progressive: bool,
+) -> Vec<u8> {
     let dims = Dimensions::new(w, h).unwrap();
     let enc = JpegEncoder::new()
         .with_quality(quality)
-        .with_restart_interval(restart);
+        .with_restart_interval(restart)
+        .with_progressive(progressive);
     match mode {
         Mode::Gray => enc
             .encode_to_vec(ImageRef::<Gray8>::new(pixels, dims).unwrap())
@@ -305,6 +319,46 @@ fn encode_cross_parity_gamut_vs_libjpeg() {
         "4:2:0 parity PSNR {:.2} dB",
         psnr(worst_420_mse)
     );
+}
+
+#[test]
+fn progressive_encode_libjpeg_decodes_identically_to_baseline() {
+    // The sharp progressive-encode gate: gamut's SOF2 stream and its baseline stream of the same
+    // image carry identical quantized coefficients, so libjpeg-turbo — decoding both through the same
+    // IDCT and upsampling — must produce EXACTLY the same pixels. This proves the progressive entropy
+    // coder (DC/AC first pass, successive-approximation refinement, EOB runs, optimized Huffman
+    // tables) delivers the baseline coefficients bit-for-bit. Asserted as exact equality across a
+    // dims × mode × quality × restart battery; any deviation is a coder bug, not a tolerance.
+    for &(w, h) in DIMS {
+        for mode in Mode::ALL {
+            for &q in &[40u8, 75, 95] {
+                for &restart in &[0u16, 2] {
+                    let src = lcg_pixels(w, h, mode.channels(), 0x1234_5678);
+                    let baseline = gamut_encode_cfg(mode, &src, w, h, q, restart, false);
+                    let progressive = gamut_encode_cfg(mode, &src, w, h, q, restart, true);
+                    // gamut really emitted SOF2.
+                    assert_eq!(
+                        gamut_jpeg::info(&progressive).unwrap().process,
+                        JpegProcess::Progressive,
+                        "gamut must emit SOF2 for {mode:?} {w}x{h}"
+                    );
+                    let base_dec =
+                        libjpeg_oracle::decode(&baseline).expect("oracle decode baseline");
+                    let prog_dec =
+                        libjpeg_oracle::decode(&progressive).expect("oracle decode progressive");
+                    assert_eq!(
+                        (prog_dec.width, prog_dec.height, prog_dec.channels),
+                        (w, h, mode.channels()),
+                        "geometry {mode:?} {w}x{h} q{q} r{restart}"
+                    );
+                    assert_eq!(
+                        prog_dec.pixels, base_dec.pixels,
+                        "progressive != baseline through libjpeg-turbo: {mode:?} {w}x{h} q{q} r{restart}"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ================================================================================================

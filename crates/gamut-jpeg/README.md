@@ -11,9 +11,8 @@ Part of the [gamut](../../README.md) workspace, this crate reads and writes JPEG
   with clause citations in the source. Correctness is proven differentially against libjpeg-turbo
   (see Validation).
 - **Encoder + decoder.** Unlike the workspace's encoder-only PNG crate, JPEG is a two-way format:
-  a baseline/extended sequential DCT Huffman **encoder** and a **sequential + progressive (SOF2)
-  decoder** ship together, with the progressive encoder landing in a later phase (see
-  [STATUS.md](STATUS.md)).
+  a baseline sequential and **progressive (SOF2)** DCT Huffman **encoder** and a **sequential +
+  progressive decoder** ship together (see [STATUS.md](STATUS.md)).
 - **Memory-safe.** `#![forbid(unsafe_code)]`.
 
 ## Usage
@@ -53,15 +52,18 @@ let info = gamut_jpeg::info(jpeg)?; // dimensions / components / process, withou
 ## Status
 
 Built incrementally; each phase is conformance-checked against libjpeg-turbo (see
-[STATUS.md](STATUS.md)). Shipping now: the **baseline (SOF0) / extended-sequential (SOF1) 8-bit DCT
-Huffman encoder** and a **decoder for the sequential and progressive (SOF2) processes**. The encoder
-writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 chroma subsampling, standard (Annex K)
-tables, and optional restart intervals. The decoder reads any spec-valid sequential or progressive
-stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via the JFIF APP0 / Adobe APP14 hints), interleaved or
-non-interleaved scans, spectral selection and successive approximation, restart intervals, and (for
-sequential frames) DNL-defined heights — and never panics on malformed input. Progressive frames with
-a deferred (`Y = 0` / DNL) height are rejected as unsupported, and a partial progressive stream
-renders what it has (matching libjpeg). The progressive encoder is scoped for a later phase.
+[STATUS.md](STATUS.md)). Shipping now: an **8-bit DCT Huffman encoder** for the baseline sequential
+(SOF0) and **progressive (SOF2)** processes, and a **decoder for the sequential and progressive
+processes**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 chroma
+subsampling, standard (Annex K) tables, and optional restart intervals;
+`JpegEncoder::with_progressive(true)` selects the progressive process — libjpeg's frozen
+`jpeg_simple_progression` scan script with optimized per-scan Huffman tables (Annex K.2), producing
+the same coefficients (and thus the same decoded image) as the baseline encoding. The decoder reads
+any spec-valid sequential or progressive stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via the JFIF
+APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral selection and successive
+approximation, restart intervals, and (for sequential frames) DNL-defined heights — and never panics
+on malformed input. Progressive frames with a deferred (`Y = 0` / DNL) height are rejected as
+unsupported, and a partial progressive stream renders what it has (matching libjpeg).
 
 Out of scope (documented in [STATUS.md](STATUS.md)): 12-bit precision, arithmetic coding
 (SOF9/10), lossless (SOF3), hierarchical (SOF5–7), SPIFF/T.84 extensions, and T.872 printing

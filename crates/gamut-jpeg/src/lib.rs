@@ -12,7 +12,8 @@
 //!   generation); Annex F (§F.1.2 baseline Huffman encoding, §F.2 the `DECODE` / `RECEIVE` /
 //!   `EXTEND` decoding procedures); Annex G (the progressive DCT mode: spectral selection and
 //!   successive approximation, §G.1.1–G.1.2 encoding models and §G.2 decoding); Annex K (§K.1
-//!   quantization and §K.3 typical Huffman tables).
+//!   quantization, §K.2 optimized Huffman-table construction for the progressive encoder, and §K.3
+//!   typical Huffman tables).
 //! - **ITU-T T.871 | ISO/IEC 10918-5** — JFIF: the APP0 segment (§10.1) and the full-range BT.601
 //!   YCbCr conversion (§7).
 //! - **Adobe Technical Note #5116** — the APP14 "Adobe" colour-transform marker (RGB / YCbCr / YCCK).
@@ -20,15 +21,17 @@
 //! # Scope
 //!
 //! This crate is a JPEG **encoder + decoder** (unlike the workspace's encoder-only PNG crate — JPEG
-//! is a two-way format). It ships a **baseline (SOF0) / extended-sequential (SOF1) 8-bit DCT Huffman
-//! encoder**, and a **decoder for the sequential and progressive (SOF2) processes**. The encoder
+//! is a two-way format). It ships a **baseline (SOF0) sequential and progressive (SOF2) 8-bit DCT
+//! Huffman encoder**, and a **decoder for the sequential and progressive processes**. The encoder
 //! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 subsampling, standard (Annex K) tables,
-//! a quality→quantization mapping, and optional restart intervals. The [`JpegDecoder`] reads any
-//! spec-valid sequential **or progressive** stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via the
-//! JFIF APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral selection and
+//! a quality→quantization mapping, and optional restart intervals; [`JpegEncoder::with_progressive`]
+//! selects the progressive process (Annex G), which uses libjpeg's frozen `jpeg_simple_progression`
+//! scan script with optimized per-scan Huffman tables (Annex K.2) and produces the same quantized
+//! coefficients — hence the same decoded image — as the baseline encoding. The [`JpegDecoder`] reads
+//! any spec-valid sequential **or progressive** stream — grayscale, YCbCr, RGB, and CMYK/YCCK (via
+//! the JFIF APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral selection and
 //! successive approximation, restart intervals, and (for sequential frames) DNL-defined heights —
-//! presenting it as `Rgb8`, `Gray8`, or `Cmyk8`. The progressive **encoder** lands in a later phase
-//! (see `STATUS.md`); the public API is designed so it slots in without breaking changes.
+//! presenting it as `Rgb8`, `Gray8`, or `Cmyk8`.
 //!
 //! Out of scope (see `STATUS.md`): 12-bit precision, arithmetic coding, and the lossless and
 //! hierarchical processes, and the SPIFF/T.84/T.872 layers.
@@ -67,6 +70,7 @@ mod decoder;
 mod encoder;
 mod huffman;
 mod marker;
+mod progressive;
 mod quant;
 mod scan;
 mod syntax;

@@ -3,9 +3,10 @@
 //! Every marker is the two bytes `0xFF, code`. A *marker segment* (§B.1.1.4) is a marker followed by
 //! a two-byte big-endian length that counts itself but not the marker. This module owns the marker
 //! constants and the segments whose layout is fully determined by their parameters — SOI/EOI, the
-//! JFIF APP0 segment (T.871 §10.1), the SOF0 frame header (§B.2.2), the SOS scan header (§B.2.3),
-//! DRI (§B.2.4.4), and the RSTn restart markers (§B.2.1). The DQT and DHT segments live with the
-//! table data they serialize ([`crate::quant`] and [`crate::huffman`]).
+//! JFIF APP0 segment (T.871 §10.1), the SOF0 (baseline) and SOF2 (progressive) frame headers
+//! (§B.2.2), the SOS scan header (§B.2.3, baseline and progressive band forms), DRI (§B.2.4.4), and
+//! the RSTn restart markers (§B.2.1). The DQT and DHT segments live with the table data they
+//! serialize ([`crate::quant`] and [`crate::huffman`]).
 
 /// Marker codes from T.81 Table B.1. Each is the second byte of the two-byte `0xFF, code` marker.
 pub mod code {
@@ -18,7 +19,7 @@ pub mod code {
     /// Extended sequential DCT, Huffman coding, start of frame. Treated identically to [`SOF0`] at
     /// 8-bit precision by the decoder (the extended process only differs at 12-bit).
     pub const SOF1: u8 = 0xC1;
-    /// Progressive DCT, Huffman coding, start of frame (decode lands in a later phase).
+    /// Progressive DCT, Huffman coding, start of frame.
     pub const SOF2: u8 = 0xC2;
     /// Lossless (sequential) process, start of frame.
     pub const SOF3: u8 = 0xC3;
@@ -138,10 +139,42 @@ pub fn write_sof0(out: &mut Vec<u8>, width: u16, height: u16, components: &[(u8,
     }
 }
 
+/// Appends the progressive SOF2 frame header (§B.2.2): identical layout to [`write_sof0`] but with
+/// the SOF2 marker (progressive DCT, Huffman coding). Precision 8, image `height`×`width`, and one
+/// `(Ci, Hi, Vi, Tqi)` entry per component.
+pub fn write_sof2(out: &mut Vec<u8>, width: u16, height: u16, components: &[(u8, u8, u8, u8)]) {
+    // Lf = 8 + 3·Nf (§B.2.2, Table B.2).
+    let len = 8 + 3 * components.len();
+    write_segment_header(out, code::SOF2, len);
+    out.push(8); // P: sample precision (bits) — 8-bit progressive
+    out.extend_from_slice(&height.to_be_bytes()); // Y: number of lines
+    out.extend_from_slice(&width.to_be_bytes()); // X: samples per line
+    out.push(components.len() as u8); // Nf
+    for &(id, h, v, tq) in components {
+        out.push(id);
+        out.push(pack_nibbles(h, v)); // Hi (high nibble) | Vi (low nibble)
+        out.push(tq);
+    }
+}
+
 /// Appends the SOS scan header (§B.2.3) for a baseline scan: one entry per component as
 /// `(Csj, Tdj, Taj)` (component selector, DC and AC entropy-table destinations), with the baseline
 /// spectral-selection/point-transform fields fixed to `Ss = 0`, `Se = 63`, `Ah = Al = 0`.
 pub fn write_sos(out: &mut Vec<u8>, components: &[(u8, u8, u8)]) {
+    write_sos_bands(out, components, 0, 63, 0, 0);
+}
+
+/// Appends the SOS scan header (§B.2.3) with explicit spectral-selection (`Ss`, `Se`) and
+/// successive-approximation (`Ah`, `Al`) fields — the general form used by progressive (SOF2) scans.
+/// Each component is `(Csj, Tdj, Taj)`. [`write_sos`] is this with the baseline band `(0, 63, 0, 0)`.
+pub fn write_sos_bands(
+    out: &mut Vec<u8>,
+    components: &[(u8, u8, u8)],
+    ss: u8,
+    se: u8,
+    ah: u8,
+    al: u8,
+) {
     // Ls = 6 + 2·Ns (§B.2.3, Table B.3).
     let len = 6 + 2 * components.len();
     write_segment_header(out, code::SOS, len);
@@ -150,9 +183,9 @@ pub fn write_sos(out: &mut Vec<u8>, components: &[(u8, u8, u8)]) {
         out.push(cs);
         out.push(pack_nibbles(td, ta)); // Tdj (high nibble) | Taj (low nibble)
     }
-    out.push(0); // Ss = 0
-    out.push(63); // Se = 63
-    out.push(0); // Ah = 0, Al = 0
+    out.push(ss); // Ss: start of spectral selection
+    out.push(se); // Se: end of spectral selection
+    out.push(pack_nibbles(ah, al)); // Ah (high nibble) | Al (low nibble)
 }
 
 /// Appends a DRI segment (§B.2.4.4) declaring a restart interval of `interval` MCUs (`Lr = 4`).
@@ -253,6 +286,39 @@ mod tests {
         assert_eq!(c[5 + 1], 0x00); // Y: Td<<4|Ta
         assert_eq!(c[7 + 1], 0x11); // Cb
         assert_eq!(c[9 + 1], 0x11); // Cr
+    }
+
+    #[test]
+    fn sof2_uses_the_progressive_marker() {
+        // Same layout as SOF0 but the marker byte is 0xC2 (progressive DCT).
+        let mut out = Vec::new();
+        write_sof2(
+            &mut out,
+            640,
+            480,
+            &[(1, 2, 2, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
+        );
+        assert_eq!(&out[..2], &[0xFF, 0xC2]);
+        assert_eq!(&out[2..4], &[0x00, 17]); // Lf = 8 + 9
+        assert_eq!(out[4], 8); // P
+        assert_eq!(&out[5..7], &480u16.to_be_bytes()); // Y
+        assert_eq!(&out[7..9], &640u16.to_be_bytes()); // X
+        assert_eq!(&out[10..13], &[1, 0x22, 0]);
+    }
+
+    #[test]
+    fn sos_bands_encodes_spectral_and_approximation_fields() {
+        // A progressive AC refinement band: Ss=1, Se=63, Ah=2, Al=1 → last three bytes 1, 63, 0x21.
+        let mut out = Vec::new();
+        write_sos_bands(&mut out, &[(1, 0, 0)], 1, 63, 2, 1);
+        assert_eq!(&out[..4], &[0xFF, 0xDA, 0x00, 8]); // marker + Ls
+        assert_eq!(out[4], 1); // Ns
+        assert_eq!(&out[5..7], &[1, 0x00]); // Cs, Td|Ta
+        assert_eq!(&out[7..10], &[1, 63, 0x21]); // Ss, Se, Ah|Al
+        // write_sos is the baseline band (0, 63, 0, 0): last three bytes 0, 63, 0.
+        let mut base = Vec::new();
+        write_sos(&mut base, &[(1, 0, 0)]);
+        assert_eq!(&base[7..10], &[0, 63, 0]);
     }
 
     #[test]

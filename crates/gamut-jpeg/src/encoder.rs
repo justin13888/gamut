@@ -13,8 +13,8 @@ use gamut_dsp::math::round_div_nearest;
 use crate::bitwriter::BitWriter;
 use crate::huffman::{self, EncTable, TableSpec};
 use crate::marker::{self, DensityUnit};
-use crate::quant;
 use crate::zigzag::ZIGZAG;
+use crate::{progressive, quant};
 
 /// The largest image dimension the frame header can encode: the SOF0 `X`/`Y` fields are 16-bit
 /// (§B.2.2, Table B.2).
@@ -82,6 +82,7 @@ pub struct JpegEncoder {
     density_unit: DensityUnit,
     x_density: u16,
     y_density: u16,
+    progressive: bool,
 }
 
 impl Default for JpegEncoder {
@@ -102,6 +103,7 @@ impl JpegEncoder {
             density_unit: DensityUnit::AspectRatio,
             x_density: 1,
             y_density: 1,
+            progressive: false,
         }
     }
 
@@ -141,6 +143,22 @@ impl JpegEncoder {
         self
     }
 
+    /// Selects the **progressive DCT** process (SOF2, T.81 Annex G) when `true`, or the default
+    /// baseline sequential process (SOF0) when `false`.
+    ///
+    /// A progressive stream codes the image as several scans, each carrying one spectral band at one
+    /// successive-approximation precision, so a decoder can render a coarse whole-image preview from
+    /// the first scans and refine it as more arrive. gamut uses libjpeg's frozen
+    /// `jpeg_simple_progression` scan script (a 6-scan gray / 10-scan YCbCr layout) with optimized
+    /// per-scan Huffman tables (Annex K.2). The quantized coefficients — and therefore the decoded
+    /// image — are identical to the baseline encoding of the same input at the same
+    /// `(quality, subsampling)`; only the stream structure differs.
+    #[must_use]
+    pub fn with_progressive(mut self, progressive: bool) -> Self {
+        self.progressive = progressive;
+        self
+    }
+
     /// The scaled luminance quantization table (natural order) for the configured quality.
     fn luma_quant(&self) -> [u8; 64] {
         quant::scale(&quant::LUMINANCE, self.quality)
@@ -169,10 +187,10 @@ impl JpegEncoder {
 }
 
 /// A single-channel sample plane at a component's own resolution (row-major, 8-bit).
-struct Plane {
-    data: Vec<u8>,
-    width: usize,
-    height: usize,
+pub(crate) struct Plane {
+    pub(crate) data: Vec<u8>,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
 }
 
 impl Plane {
@@ -180,7 +198,7 @@ impl Plane {
     /// to the signed baseline range by subtracting 128 (§A.3.1, `P = 8`). Edge replication is the
     /// encoder's free choice for padding partial edge blocks/MCUs to a whole 8×8 (§A.2.3): repeating
     /// the border minimizes spurious high-frequency energy versus zero-fill.
-    fn level_shifted(&self, x: usize, y: usize) -> i32 {
+    pub(crate) fn level_shifted(&self, x: usize, y: usize) -> i32 {
         let cx = x.min(self.width - 1);
         let cy = y.min(self.height - 1);
         i32::from(self.data[cy * self.width + cx]) - 128
@@ -201,14 +219,14 @@ struct Component<'a> {
 
 /// The magnitude category `SSSS` of `value` (Annex F §F.1.2): the number of bits needed for
 /// `|value|`, and `0` for `value == 0`.
-fn magnitude_category(value: i32) -> u8 {
+pub(crate) fn magnitude_category(value: i32) -> u8 {
     (32 - value.unsigned_abs().leading_zeros()) as u8
 }
 
 /// The `SSSS` additional bits appended after a DC/AC Huffman code (Annex F §F.1.2.1): the low
 /// `category` bits of `value` for a positive value, or of `value - 1` (the "one lower precision"
 /// negative encoding) for a negative value.
-fn additional_bits(value: i32, category: u8) -> u16 {
+pub(crate) fn additional_bits(value: i32, category: u8) -> u16 {
     let v = if value < 0 { value - 1 } else { value };
     (v as u32 & ((1u32 << category) - 1)) as u16
 }
@@ -223,6 +241,27 @@ fn emit_symbol(writer: &mut BitWriter, table: &EncTable, symbol: u8) {
     }
 }
 
+/// Level-shifts, forward-transforms and quantizes one 8×8 block of `plane` at block coordinates
+/// `(bx, by)` (§A.3.1 / §A.3.3 / §A.3.4), returning the natural-order quantized coefficients. Shared
+/// by the baseline single-pass coder ([`encode_block`]) and the progressive encoder
+/// ([`crate::progressive`]), which materializes every block up front before running the scan script.
+pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
+    // Gather the level-shifted samples in natural (raster) order.
+    let mut block = [0i32; 64];
+    for row in 0..8usize {
+        for col in 0..8usize {
+            block[row * 8 + col] = plane.level_shifted(bx * 8 + col, by * 8 + row);
+        }
+    }
+    fdct8x8(&mut block);
+    // Quantize (§A.3.4): round-to-nearest divide by the table entry (which is ≥ 1).
+    let mut q = [0i32; 64];
+    for (dst, (&coeff, &step)) in q.iter_mut().zip(block.iter().zip(quant.iter())) {
+        *dst = round_div_nearest(coeff, i32::from(step));
+    }
+    q
+}
+
 /// Codes one 8×8 block (§A.3): level-shift → FDCT → quantize, then hands the natural-order
 /// quantized coefficients to [`encode_quantized_block`] for entropy coding.
 fn encode_block(
@@ -232,21 +271,7 @@ fn encode_block(
     dc_pred: &mut i32,
     writer: &mut BitWriter,
 ) {
-    // Gather the level-shifted samples in natural (raster) order.
-    let mut block = [0i32; 64];
-    for row in 0..8usize {
-        for col in 0..8usize {
-            block[row * 8 + col] = comp
-                .plane
-                .level_shifted(block_x * 8 + col, block_y * 8 + row);
-        }
-    }
-    fdct8x8(&mut block);
-    // Quantize in place (§A.3.4): round-to-nearest divide by the table entry (which is ≥ 1).
-    let mut q = [0i32; 64];
-    for (dst, (&coeff, &step)) in q.iter_mut().zip(block.iter().zip(comp.quant.iter())) {
-        *dst = round_div_nearest(coeff, i32::from(step));
-    }
+    let q = quantize_block(comp.plane, comp.quant, block_x, block_y);
     encode_quantized_block(&q, dc_pred, comp.dc, comp.ac, writer);
 }
 
@@ -383,32 +408,44 @@ impl EncodeImage<Gray8> for JpegEncoder {
             height: usize::from(height),
         };
         let luma_quant = self.luma_quant();
-        let dc = EncTable::from_spec(&huffman::STD_LUMA_DC);
-        let ac = EncTable::from_spec(&huffman::STD_LUMA_AC);
 
         self.write_prologue(out, &[(0, &luma_quant)]);
-        marker::write_sof0(out, width, height, &[(1, 1, 1, 0)]);
-        emit_huffman_tables(out, false);
-        if self.restart_interval != 0 {
-            marker::write_dri(out, self.restart_interval);
-        }
-        marker::write_sos(out, &[(1, 0, 0)]);
+        if self.progressive {
+            let comps = [progressive::ProgComponent {
+                id: 1,
+                h: 1,
+                v: 1,
+                tq: 0,
+                plane: &plane,
+                quant: &luma_quant,
+            }];
+            progressive::encode(out, width, height, &comps, self.restart_interval);
+        } else {
+            let dc = EncTable::from_spec(&huffman::STD_LUMA_DC);
+            let ac = EncTable::from_spec(&huffman::STD_LUMA_AC);
+            marker::write_sof0(out, width, height, &[(1, 1, 1, 0)]);
+            emit_huffman_tables(out, false);
+            if self.restart_interval != 0 {
+                marker::write_dri(out, self.restart_interval);
+            }
+            marker::write_sos(out, &[(1, 0, 0)]);
 
-        let comp = Component {
-            h: 1,
-            v: 1,
-            plane: &plane,
-            quant: &luma_quant,
-            dc: &dc,
-            ac: &ac,
-        };
-        encode_scan(
-            &[comp],
-            u32::from(width),
-            u32::from(height),
-            self.restart_interval,
-            out,
-        );
+            let comp = Component {
+                h: 1,
+                v: 1,
+                plane: &plane,
+                quant: &luma_quant,
+                dc: &dc,
+                ac: &ac,
+            };
+            encode_scan(
+                &[comp],
+                u32::from(width),
+                u32::from(height),
+                self.restart_interval,
+                out,
+            );
+        }
 
         marker::write_marker(out, marker::code::EOI);
         Ok(out.len() - start)
@@ -448,57 +485,88 @@ impl EncodeImage<Rgb8> for JpegEncoder {
 
         let luma_quant = self.luma_quant();
         let chroma_quant = self.chroma_quant();
-        let luma_dc = EncTable::from_spec(&huffman::STD_LUMA_DC);
-        let luma_ac = EncTable::from_spec(&huffman::STD_LUMA_AC);
-        let chroma_dc = EncTable::from_spec(&huffman::STD_CHROMA_DC);
-        let chroma_ac = EncTable::from_spec(&huffman::STD_CHROMA_AC);
 
         self.write_prologue(out, &[(0, &luma_quant), (1, &chroma_quant)]);
-        marker::write_sof0(
-            out,
-            width,
-            height,
-            &[(1, yh, yv, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
-        );
-        emit_huffman_tables(out, true);
-        if self.restart_interval != 0 {
-            marker::write_dri(out, self.restart_interval);
-        }
-        marker::write_sos(out, &[(1, 0, 0), (2, 1, 1), (3, 1, 1)]);
+        if self.progressive {
+            let comps = [
+                progressive::ProgComponent {
+                    id: 1,
+                    h: yh,
+                    v: yv,
+                    tq: 0,
+                    plane: &luma_plane,
+                    quant: &luma_quant,
+                },
+                progressive::ProgComponent {
+                    id: 2,
+                    h: 1,
+                    v: 1,
+                    tq: 1,
+                    plane: &cb_plane,
+                    quant: &chroma_quant,
+                },
+                progressive::ProgComponent {
+                    id: 3,
+                    h: 1,
+                    v: 1,
+                    tq: 1,
+                    plane: &cr_plane,
+                    quant: &chroma_quant,
+                },
+            ];
+            progressive::encode(out, width, height, &comps, self.restart_interval);
+        } else {
+            let luma_dc = EncTable::from_spec(&huffman::STD_LUMA_DC);
+            let luma_ac = EncTable::from_spec(&huffman::STD_LUMA_AC);
+            let chroma_dc = EncTable::from_spec(&huffman::STD_CHROMA_DC);
+            let chroma_ac = EncTable::from_spec(&huffman::STD_CHROMA_AC);
 
-        let components = [
-            Component {
-                h: yh,
-                v: yv,
-                plane: &luma_plane,
-                quant: &luma_quant,
-                dc: &luma_dc,
-                ac: &luma_ac,
-            },
-            Component {
-                h: 1,
-                v: 1,
-                plane: &cb_plane,
-                quant: &chroma_quant,
-                dc: &chroma_dc,
-                ac: &chroma_ac,
-            },
-            Component {
-                h: 1,
-                v: 1,
-                plane: &cr_plane,
-                quant: &chroma_quant,
-                dc: &chroma_dc,
-                ac: &chroma_ac,
-            },
-        ];
-        encode_scan(
-            &components,
-            u32::from(width),
-            u32::from(height),
-            self.restart_interval,
-            out,
-        );
+            marker::write_sof0(
+                out,
+                width,
+                height,
+                &[(1, yh, yv, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
+            );
+            emit_huffman_tables(out, true);
+            if self.restart_interval != 0 {
+                marker::write_dri(out, self.restart_interval);
+            }
+            marker::write_sos(out, &[(1, 0, 0), (2, 1, 1), (3, 1, 1)]);
+
+            let components = [
+                Component {
+                    h: yh,
+                    v: yv,
+                    plane: &luma_plane,
+                    quant: &luma_quant,
+                    dc: &luma_dc,
+                    ac: &luma_ac,
+                },
+                Component {
+                    h: 1,
+                    v: 1,
+                    plane: &cb_plane,
+                    quant: &chroma_quant,
+                    dc: &chroma_dc,
+                    ac: &chroma_ac,
+                },
+                Component {
+                    h: 1,
+                    v: 1,
+                    plane: &cr_plane,
+                    quant: &chroma_quant,
+                    dc: &chroma_dc,
+                    ac: &chroma_ac,
+                },
+            ];
+            encode_scan(
+                &components,
+                u32::from(width),
+                u32::from(height),
+                self.restart_interval,
+                out,
+            );
+        }
 
         marker::write_marker(out, marker::code::EOI);
         Ok(out.len() - start)
@@ -538,6 +606,18 @@ mod tests {
         assert_eq!(d.restart_interval, 0);
         assert_eq!(d.density_unit, DensityUnit::AspectRatio);
         assert_eq!((d.x_density, d.y_density), (1, 1));
+        assert!(!d.progressive);
+    }
+
+    #[test]
+    fn with_progressive_toggles_the_flag() {
+        assert!(JpegEncoder::new().with_progressive(true).progressive);
+        assert!(
+            !JpegEncoder::new()
+                .with_progressive(true)
+                .with_progressive(false)
+                .progressive
+        );
     }
 
     #[test]
