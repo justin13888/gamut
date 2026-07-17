@@ -89,7 +89,11 @@ pub enum Error {
 pub type Result<T> = core::result::Result<T, Error>;
 
 /// Width and height of an image, in pixels.
+///
+/// `#[repr(C)]`: the layout — `width` then `height`, two `u32`s — is a public guarantee so the
+/// value can cross the C ABI boundary as-is (issue #242).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(C)]
 pub struct Dimensions {
     /// Image width in pixels.
     pub width: u32,

@@ -35,24 +35,28 @@ impl Sample for u16 {}
 /// Distinguishes layouts that share a channel count: [`ColorModel::Rgba`] and [`ColorModel::Cmyk`]
 /// are both four channels but must never be interchanged, and [`ColorModel::Gray`],
 /// [`ColorModel::Bilevel`], and [`ColorModel::Indexed`] are all one channel with different meanings.
+///
+/// Discriminants are explicit and permanent — they are C ABI values (issue #242); new variants
+/// append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[repr(u32)]
 pub enum ColorModel {
     /// Single luminance channel.
-    Gray,
+    Gray = 0,
     /// Luminance plus an alpha channel.
-    GrayAlpha,
+    GrayAlpha = 1,
     /// Red, green, blue.
-    Rgb,
+    Rgb = 2,
     /// Red, green, blue, alpha (unassociated).
-    Rgba,
+    Rgba = 3,
     /// Cyan, magenta, yellow, black ink separations.
-    Cmyk,
+    Cmyk = 4,
     /// One channel, `0` = black and any non-zero value = white (a 1-bit image carried as one byte
     /// per pixel).
-    Bilevel,
+    Bilevel = 5,
     /// One channel of indices into a separate colour palette.
-    Indexed,
+    Indexed = 6,
 }
 
 /// Runtime tag for the closed set of [`Pixel`] marker types — one variant per marker.
@@ -338,6 +342,23 @@ mod tests {
         ];
         for (format, value) in expected {
             assert_eq!(format as u32, value);
+        }
+    }
+
+    #[test]
+    fn color_model_discriminants_are_locked() {
+        // C ABI values — permanent, append-only. A change here is an ABI break, not a refactor.
+        let expected: [(ColorModel, u32); 7] = [
+            (ColorModel::Gray, 0),
+            (ColorModel::GrayAlpha, 1),
+            (ColorModel::Rgb, 2),
+            (ColorModel::Rgba, 3),
+            (ColorModel::Cmyk, 4),
+            (ColorModel::Bilevel, 5),
+            (ColorModel::Indexed, 6),
+        ];
+        for (model, value) in expected {
+            assert_eq!(model as u32, value);
         }
     }
 
