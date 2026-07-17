@@ -110,6 +110,11 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
             prev = None;
             continue;
         }
+        // Indexing invariant: every `table` entry is non-empty — `init_table` seeds the 256
+        // single-byte strings (plus the reserved Clear/EOI slots, which are never reached here:
+        // Clear/EOI are handled above and `prev` is reset to None on Clear, so `p` and the
+        // in-range `code` always name a seeded or appended entry), and every appended entry is a
+        // clone with one byte pushed. `table[p][0]` / `entry[0]` therefore cannot panic.
         let entry = if (code as usize) < table.len() {
             table[code as usize].clone()
         } else if code as usize == table.len() {

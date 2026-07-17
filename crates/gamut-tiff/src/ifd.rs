@@ -10,7 +10,11 @@
 //! the container structure.
 
 /// How pixel samples map to colour, stored in the `PhotometricInterpretation` tag (262).
+///
+/// The set is non-exhaustive: TIFF extensions define further interpretations (LogL, LogLuv,
+/// the TIFF/EP CFA and LinearRaw values, …), so variants may be added without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PhotometricInterpretation {
     /// `0` — bilevel/grayscale where `0` is white and the maximum value is black.
     WhiteIsZero,
@@ -74,7 +78,12 @@ impl From<PhotometricInterpretation> for u16 {
 
 /// The prediction scheme applied before compression, stored in the `Predictor` tag (317,
 /// TIFF 6.0 §14).
+///
+/// The set is non-exhaustive: the TIFF Technical Notes define predictor `3` (floating-point
+/// horizontal differencing, deferred with float-sample support), so variants may be added
+/// without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Predictor {
     /// `1` — no prediction.
     #[default]

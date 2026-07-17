@@ -113,19 +113,25 @@ fn summarize_tiff(report: gamut::tiff::DeconstructReport) -> Summary {
                 tag,
                 code,
                 detail,
+                ..
             } => {
                 format!("[error] page {page}: {detail} (tag {tag:#06x}, code {code})")
             }
-            Anomaly::UnparsableTag { page, tag, detail } => {
+            Anomaly::UnparsableTag {
+                page, tag, detail, ..
+            } => {
                 format!("[error] page {page}: {detail} (tag {tag:#06x})")
             }
             Anomaly::Structure {
                 page,
                 detail,
                 severity,
+                ..
             } => {
                 format!("[{}] page {page}: {detail}", severity_label_tiff(*severity))
             }
+            // `Anomaly` is non-exhaustive; render future categories generically.
+            other => format!("[error] {other:?}"),
         })
         .collect();
     Summary {
@@ -192,6 +198,8 @@ fn severity_label_tiff(severity: gamut::tiff::Severity) -> &'static str {
     match severity {
         gamut::tiff::Severity::Warning => "warning",
         gamut::tiff::Severity::Error => "error",
+        // `Severity` is non-exhaustive; treat future levels as errors (the conservative label).
+        _ => "error",
     }
 }
 

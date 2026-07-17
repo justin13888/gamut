@@ -4,15 +4,20 @@
 //! the remainder are extensions (TIFF 6.0 Part 2). Each scheme is decoded/encoded per strip or
 //! tile; the per-scheme codecs land in later phases.
 
-pub mod ccitt;
-pub mod lzw;
-pub mod packbits;
-pub mod predictor;
+// The per-scheme codecs are implementation details of the encoder/decoder (they operate on raw
+// packed strip/tile bytes); every scheme is reachable through `Compression` on the public API.
+pub(crate) mod ccitt;
+pub(crate) mod lzw;
+pub(crate) mod packbits;
+pub(crate) mod predictor;
 
 /// A compression scheme applied to a strip or tile of image data.
 ///
-/// The discriminants are documented with their on-disk `Compression` tag values.
+/// The discriminants are documented with their on-disk `Compression` tag values. The set is
+/// non-exhaustive: TIFF registers many further schemes (and post-6.0 extensions keep adding
+/// them), so recognised codes may be added without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Compression {
     /// `1` — no compression; samples are packed into bytes as tightly as possible.
     #[default]

@@ -27,7 +27,11 @@ use crate::tags;
 const MAX_SUBIFD_DEPTH: usize = 16;
 
 /// How serious a reported [`Anomaly`] is.
+///
+/// Non-exhaustive: further severities (e.g. an informational level) may be added without a
+/// breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Severity {
     /// Out of spec but often benign (e.g. an image IFD carrying no pixel data).
     Warning,
@@ -37,22 +41,32 @@ pub enum Severity {
 
 /// A tag a valid TIFF would not be expected to carry — recognised structurally but not part of the
 /// TIFF 6.0 tag set (see [`tags::is_known_tag`]).
+///
+/// Non-exhaustive: fields may be added as the deconstruct grows more precise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnknownTag {
     /// The page (top-level IFD index) the tag was found in.
     pub page: usize,
     /// The tag number.
     pub tag: u16,
-    /// The tag's on-disk field-type code.
+    /// The tag's on-disk field-type code. Kept as the raw `u16` (not [`FieldType`](crate::FieldType))
+    /// so that field types this crate does not recognise are still representable.
     pub field_type: u16,
     /// The tag's value count.
     pub count: u64,
 }
 
 /// A recognised but out-of-spec or unparsable element a deconstruct flags.
+///
+/// Non-exhaustive (as are its variants): the diagnostic taxonomy grows with the deconstruct.
+/// The `detail` strings are human-readable diagnostics; their exact wording is not part of the
+/// API contract — match on the variant and its typed fields instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Anomaly {
     /// A tag whose value uses a code this crate does not recognise (e.g. an unknown `Compression`).
+    #[non_exhaustive]
     UnknownCode {
         /// The page the tag was found in.
         page: usize,
@@ -60,23 +74,25 @@ pub enum Anomaly {
         tag: u16,
         /// The unrecognised code.
         code: u32,
-        /// A human-readable description.
+        /// A human-readable description (wording not contractual).
         detail: &'static str,
     },
     /// A known tag whose value could not be interpreted (wrong type, count, or range).
+    #[non_exhaustive]
     UnparsableTag {
         /// The page the tag was found in.
         page: usize,
         /// The tag.
         tag: u16,
-        /// A human-readable description.
+        /// A human-readable description (wording not contractual).
         detail: &'static str,
     },
     /// An out-of-spec or unexpected structural condition.
+    #[non_exhaustive]
     Structure {
         /// The page the condition relates to.
         page: usize,
-        /// A human-readable description.
+        /// A human-readable description (wording not contractual).
         detail: &'static str,
         /// How serious the condition is.
         severity: Severity,
@@ -84,7 +100,10 @@ pub enum Anomaly {
 }
 
 /// The result of a strict deconstruct: byte-range accounting plus TIFF-specific findings.
+///
+/// Non-exhaustive: report categories may be added without a breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DeconstructReport {
     /// Which file bytes were accounted for, and the gaps/overlaps/trailing that were not.
     pub coverage: CoverageReport,
