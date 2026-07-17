@@ -14,18 +14,19 @@ pub fn clip_pixel8(x: i32) -> u8 {
 /// Saturates a computed integer sample to the unsigned `bit_depth`-bit pixel range
 /// `0..=(1 << bit_depth) - 1` (AV1 `Clip1`, §3) — the high-bit-depth companion to [`clip_pixel8`].
 ///
-/// `bit_depth` is 8, 10, or 12 (the [`BitDepth`](crate::BitDepth) values); the result fits a
-/// `u16` for all of them. At `bit_depth == 8` this equals `u16::from(clip_pixel8(x))`.
+/// `bit_depth` is 8, 10, 12, or 16 (the [`BitDepth`](crate::BitDepth) values); the result fits a
+/// `u16` for all of them. At `bit_depth == 8` this equals `u16::from(clip_pixel8(x))`. AV1 itself
+/// only reaches 12 — 16 is here for the wider still-image pipelines that share this vocabulary.
 ///
 /// # Panics
 ///
 /// Debug builds assert the `bit_depth` contract; release builds do not check it (this sits on
-/// codec reconstruction hot paths), and depths outside 8/10/12 give meaningless results.
+/// codec reconstruction hot paths), and depths outside 8/10/12/16 give meaningless results.
 #[must_use]
 pub fn clip_pixel(x: i32, bit_depth: u32) -> u16 {
     debug_assert!(
-        matches!(bit_depth, 8 | 10 | 12),
-        "clip_pixel bit_depth must be 8, 10, or 12"
+        matches!(bit_depth, 8 | 10 | 12 | 16),
+        "clip_pixel bit_depth must be 8, 10, 12, or 16"
     );
     let max = (1i32 << bit_depth) - 1;
     x.clamp(0, max) as u16
@@ -56,5 +57,8 @@ mod tests {
         assert_eq!(clip_pixel(-1, 10), 0);
         assert_eq!(clip_pixel(4095, 12), 4095);
         assert_eq!(clip_pixel(9000, 12), 4095); // saturates at 2^12 - 1
+        assert_eq!(clip_pixel(65535, 16), 65535);
+        assert_eq!(clip_pixel(100_000, 16), 65535); // saturates at 2^16 - 1, the u16 ceiling
+        assert_eq!(clip_pixel(-1, 16), 0);
     }
 }
