@@ -136,6 +136,135 @@ fn unknown_compression_code_is_flagged() {
 }
 
 #[test]
+fn missing_strip_byte_counts_is_flagged() {
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set(256, Value::Short(vec![4])); // ImageWidth: an image IFD...
+    ifd0.set(273, Value::Long(vec![1000])); // ...with StripOffsets but no StripByteCounts
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure {
+                severity: gamut_dng::Severity::Error,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn image_ifd_without_pixel_data_warns() {
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set(256, Value::Short(vec![4])); // ImageWidth, but neither strips nor tiles
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure {
+                severity: gamut_dng::Severity::Warning,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn cyclic_sub_ifd_is_flagged_not_hung() {
+    // Root @8 whose SubIFDs pointer (330) targets a child @26 pointing back at itself.
+    let data: &[u8] = &[
+        b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, //
+        0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00, //
+        0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    let report = deconstruct(data).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure {
+                severity: gamut_dng::Severity::Error,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn unparseable_camera_profile_is_flagged() {
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    // ExtraCameraProfiles pointing at bytes that are not a camera-profile stream.
+    ifd0.set(50933, Value::Long(vec![4]));
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure {
+                severity: gamut_dng::Severity::Error,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn unknown_field_type_entry_is_reported_and_preserved() {
+    // A hand-patched unknown field-type code (0xF0) in IFD 0: reported in `unknown_fields`,
+    // while the byte-level classification stays clean (the record sits inside the body claim).
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set(0x9999, Value::Long(vec![42]));
+    let mut bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    // Entry records start at 10 (header 8 + count 2), sorted by tag — 0x9999 (39321) sorts
+    // before DNGVersion (50706), so its type code sits at 10 + 2.
+    bytes[12] = 0xF0;
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert_eq!(report.unknown_fields.len(), 1, "{report:?}");
+    assert_eq!(report.unknown_fields[0].tag, 0x9999);
+    assert_eq!(report.unknown_fields[0].type_code, 0xF0);
+    assert!(report.segments.is_fully_classified(), "{report:?}");
+    assert!(!report.is_fully_accounted());
+}
+
+#[test]
 fn malformed_color_matrix_is_flagged() {
     use gamut_ifd::{TiffFile, Value, Variant, write};
 
