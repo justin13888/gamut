@@ -46,6 +46,10 @@ pub(crate) struct ConvertArgs {
     /// (`0`, the default, disables restarts). Ignored for other output formats.
     #[arg(long = "jpeg-restart-interval", default_value_t = 0)]
     jpeg_restart_interval: u16,
+    /// Encode JPEG output progressively (SOF2, spectral-band scans with successive approximation)
+    /// instead of baseline sequential. Ignored for other output formats.
+    #[arg(long = "jpeg-progressive")]
+    jpeg_progressive: bool,
     /// Compress TIFF output with PackBits run-length encoding instead of storing it uncompressed.
     #[arg(long)]
     packbits: bool,
@@ -221,13 +225,14 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 bytes = rgb.len(),
                 "decoded input"
             );
-            // JPEG-1 is inherently lossy; `--quality` (default 75) drives the quantization tables
-            // and `--jpeg-subsampling` (default 4:2:0) the chroma resolution. A restart interval of
-            // 0 disables restarts, so only apply a nonzero one.
-            // TODO: expose the progressive-DCT knob (`with_progressive`) once gamut-jpeg lands it.
+            // JPEG-1 is inherently lossy; `--quality` (default 75) drives the quantization tables,
+            // `--jpeg-subsampling` (default 4:2:0) the chroma resolution, and `--jpeg-progressive`
+            // selects the SOF2 progressive process. A restart interval of 0 disables restarts, so
+            // only apply a nonzero one.
             let mut encoder = JpegEncoder::new()
                 .with_quality(args.quality)
-                .with_subsampling(args.jpeg_subsampling.to_codec());
+                .with_subsampling(args.jpeg_subsampling.to_codec())
+                .with_progressive(args.jpeg_progressive);
             if args.jpeg_restart_interval != 0 {
                 encoder = encoder.with_restart_interval(args.jpeg_restart_interval);
             }

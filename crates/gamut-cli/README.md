@@ -41,12 +41,14 @@ gamut convert input.png output.jxl
 gamut convert input.png output.jxl --jxl-distance 1.0 --jxl-effort 7
 gamut convert input.png output.jxl --jxl-container
 
-# Encode JPEG (JPEG-1 baseline): always lossy at --quality (default 75). --jpeg-subsampling picks
-# the YCbCr chroma resolution (444/422/420, default 420); --jpeg-restart-interval N inserts RSTn
-# restart markers every N MCUs (0 = off).
+# Encode JPEG (JPEG-1): always lossy at --quality (default 75). --jpeg-subsampling picks the
+# YCbCr chroma resolution (444/422/420, default 420); --jpeg-restart-interval N inserts RSTn
+# restart markers every N MCUs (0 = off); --jpeg-progressive selects the progressive (SOF2)
+# process instead of baseline sequential.
 gamut convert input.png output.jpg
 gamut convert input.png output.jpg --quality 90 --jpeg-subsampling 444
 gamut convert input.png output.jpg --jpeg-restart-interval 8
+gamut convert input.png output.jpg --jpeg-progressive
 
 # Read WebP or JPEG XL back and transcode it — decoded by gamut's own decoders, no third-party lib.
 gamut convert output.webp roundtrip.avif
@@ -80,9 +82,9 @@ The sandbox exposes:
   - **JPEG XL** — lossless (default) or lossy via `--jxl-distance`, with `--jxl-effort` (1–10) and
     `--jxl-container` (ISO BMFF); transparency preserved. Encoded via libjxl; the `.jxl` input path
     decodes through the pure-Rust jxl-rs backend.
-  - **JPEG** (`.jpg`/`.jpeg`) — JPEG-1 baseline, always lossy at `--quality`; colour is YCbCr with
-    `--jpeg-subsampling` (444/422/420, default 420) and optional `--jpeg-restart-interval` restart
-    markers. No alpha (JPEG has none).
+  - **JPEG** (`.jpg`/`.jpeg`) — JPEG-1, baseline sequential or progressive (`--jpeg-progressive`),
+    always lossy at `--quality`; colour is YCbCr with `--jpeg-subsampling` (444/422/420, default
+    420) and optional `--jpeg-restart-interval` restart markers. No alpha (JPEG has none).
 - `av1 encode` — raw AV1 OBU still images from 8-bit RGB input.
 - `color list`, `dsp wht`, `bitstream leb128` — inspection of the shared primitives.
 
