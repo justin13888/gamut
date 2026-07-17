@@ -18,17 +18,37 @@
 //! Adobe/Aldus, Final — June 3 1992) and the BigTIFF extension (`references/tiff/bigtiff.html`)
 //! rather than wrapping libtiff.
 //!
-//! Implementation in progress (see issue #107). The codec layer (photometric/predictor
-//! semantics, strip/tile/multi-page layout over [`gamut_ifd::write`], [`tags`], the
-//! compression schemes) and the baseline pixel path are in place: [`TiffEncoder`] writes 8-bit
-//! grayscale/RGB/RGBA/CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles) —
-//! uncompressed, PackBits, LZW, or (for bilevel) Modified Huffman / Group 4 fax — and
-//! [`TiffDecoder`] reads them back. Encoding takes a typed [`gamut_core::ImageRef`] via the
-//! per-format [`gamut_core::EncodeImage`] impls, and decoding returns a [`gamut_core::ImageBuf`] via
-//! [`gamut_core::DecodeImage`]. Both the classic 32-bit container and
-//! **BigTIFF** (magic `43`, 64-bit offsets, for files past 4 GiB) are written and read: opt into
-//! BigTIFF with [`TiffEncoder::with_big_tiff`], and the decoder detects the variant from the
-//! header. The remaining compression schemes and colour modes land in subsequent phases.
+//! The v1 surface (built in issue #107, frozen in issue #187): [`TiffEncoder`] writes 8-bit
+//! grayscale/RGB/RGBA/CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles,
+//! single- or multi-page) — uncompressed, PackBits, LZW (optionally with the
+//! horizontal-differencing [`Predictor`]), or (for bilevel) Modified Huffman / Group 4 fax —
+//! and [`TiffDecoder`] reads them all back. Encoding takes a typed [`gamut_core::ImageRef`] via
+//! the per-format [`gamut_core::EncodeImage`] impls, and decoding returns a
+//! [`gamut_core::ImageBuf`] via [`gamut_core::DecodeImage`]. Both the classic 32-bit container
+//! and **BigTIFF** (magic `43`, 64-bit offsets, for files past 4 GiB) are written and read: opt
+//! into BigTIFF with [`TiffEncoder::with_big_tiff`]; the decoder detects the variant from the
+//! header. The strict [`deconstruct`] walk additionally accounts every input byte and flags
+//! unknown tags and codes for archival triage. Every lossless path is pinned pixel-exact in both
+//! directions against libtiff; the deferred colour modes and compression schemes (YCbCr,
+//! CIE L\*a\*b\*, JPEG-in-TIFF, …) land additively — see `STATUS.md` for the scope ledger.
+//!
+//! ```
+//! use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
+//! use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
+//!
+//! let dims = Dimensions { width: 2, height: 2 };
+//! let pixels = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+//! let image = ImageRef::<Rgb8>::new(&pixels, dims)?;
+//!
+//! let mut tiff = Vec::new();
+//! TiffEncoder::new()
+//!     .with_compression(Compression::PackBits)
+//!     .encode_image(image, &mut tiff)?;
+//!
+//! let decoded: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff)?;
+//! assert_eq!(decoded.as_samples(), &pixels[..]);
+//! # Ok::<(), gamut_core::Error>(())
+//! ```
 #![forbid(unsafe_code)]
 
 // Single canonical paths (the gamut-ifd v1 precedent): the implementation modules are private

@@ -2,7 +2,8 @@
 //!
 //! Baseline TIFF readers must handle the uncompressed, Modified Huffman, and PackBits schemes;
 //! the remainder are extensions (TIFF 6.0 Part 2). Each scheme is decoded/encoded per strip or
-//! tile; the per-scheme codecs land in later phases.
+//! tile by the crate-internal per-scheme codecs (LZW, PackBits, CCITT, and the differencing
+//! predictor); [`Compression`] selects the scheme on the public encoder/decoder surface.
 
 // The per-scheme codecs are implementation details of the encoder/decoder (they operate on raw
 // packed strip/tile bytes); every scheme is reachable through `Compression` on the public API.

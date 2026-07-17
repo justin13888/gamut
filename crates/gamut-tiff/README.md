@@ -12,11 +12,12 @@ is:
   IFDs, offset loops, and truncation.
 - **Clean-slate from the spec.** Implemented directly from the TIFF 6.0 specification
   ([`../../references/tiff/tiff6.pdf`](../../references/tiff)) rather than wrapping libtiff.
-- **Self-contained.** TIFF's Image File Directory (IFD) / tag structure *is* its container, so —
+- **Container-native.** TIFF's Image File Directory (IFD) / tag structure *is* its container, so —
   unlike [`gamut-avif`](../gamut-avif)/[`gamut-heic`](../gamut-heic) (ISOBMFF) or
-  [`gamut-webp`](../gamut-webp) (RIFF) — this crate needs no separate container crate. It builds
-  only on [`gamut-color`](../gamut-color), [`gamut-dsp`](../gamut-dsp), and
-  [`gamut-bitstream`](../gamut-bitstream).
+  [`gamut-webp`](../gamut-webp) (RIFF) — there is no separate box/chunk container. That IFD core
+  is the shared [`gamut-ifd`](../gamut-ifd) primitive (also the basis for EXIF and DNG), consumed
+  with its `bigtiff` feature; beyond it the crate builds only on [`gamut-core`](../gamut-core)
+  and [`gamut-bitstream`](../gamut-bitstream).
 - **Permissively licensed**, matching the royalty-free TIFF format.
 
 Unlike the video-derived still-image codecs in the workspace, TIFF is **natively a still-image
@@ -25,22 +26,30 @@ format** — a good long-term fit for gamut's image-first focus.
 ## Usage
 
 [`TiffEncoder`] (implementing [`gamut_core::EncodeImage`] per pixel layout) writes 8-bit grayscale,
-RGB, palette, and 1-bit bilevel images — uncompressed or PackBits — and [`TiffDecoder`] (implementing
-[`gamut_core::DecodeImage`]) reads them back, both reachable through the umbrella crate's `tiff`
+RGB, RGBA, CMYK, palette, and 1-bit bilevel images, and [`TiffDecoder`] (implementing
+[`gamut_core::DecodeImage`]) reads them back — both reachable through the umbrella crate's `tiff`
 feature:
 
 ```rust
-use gamut_core::Dimensions;
-use gamut_tiff::{Compression, TiffEncoder};
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
+use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
+
+let dims = Dimensions { width: 2, height: 2 };
+let pixels = vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("pixel buffer matches dimensions");
 
 let mut tiff = Vec::new();
 TiffEncoder::new()
     .with_compression(Compression::PackBits)
-    .encode_rgb8(&rgb, Dimensions { width, height }, &mut tiff)
+    .encode_image(image, &mut tiff)
     .expect("encode");
+
+let decoded: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+assert_eq!(decoded.as_samples(), &pixels[..]);
 ```
 
-More colour modes and compression schemes are landing incrementally (see Status).
+The same example is compile-checked as the crate-level doctest. The deferred colour modes and
+compression schemes land additively on this frozen surface (see Status).
 
 ## Status
 
@@ -53,16 +62,19 @@ More colour modes and compression schemes are landing incrementally (see Status)
 - The decoder is hardened against hostile input (`#![forbid(unsafe_code)]`, a size cap, and a
   byte-flip fuzz corpus).
 
-**Not yet implemented** (see [STATUS.md](STATUS.md)): YCbCr (§21), CIE L\*a\*b\* / RGB colorimetry
-(§20, §23), JPEG-in-TIFF (§22), and smaller items (CCITT Group 3 2-D, planar config, 16-bit/float
-samples, halftone hints).
+**Deferred — planned, additive** (see the [STATUS.md](STATUS.md) scope ledger): YCbCr (§21),
+CIE L\*a\*b\* / RGB colorimetry (§20, §23), new-style JPEG-in-TIFF (§22, `Compression = 7`), and
+smaller items (CCITT Group 3 2-D, planar config, 16-bit/float samples, halftone hints).
+**Permanently out of scope:** old-style JPEG (§22, `Compression = 6`), deprecated and
+unimplementable-as-specified per TIFF Technical Note 2.
 
 ## Roadmap
 
-The remaining TIFF 6.0 features each land as a follow-up PR that plugs into the same strip/tile
+The deferred TIFF 6.0 features each land as a follow-up PR that plugs into the same strip/tile
 pipeline and libtiff oracle: the colour spaces (YCbCr, L\*a\*b\*) need `gamut-color` conversions
-matched to libtiff's integer math; JPEG-in-TIFF needs a baseline DCT codec and a `libjpeg`-enabled
-oracle build.
+matched to libtiff's integer math; JPEG-in-TIFF's DCT codec now exists in the workspace
+([`gamut-jpeg`](../gamut-jpeg), issue #28) — the remaining work is the Technical Note 2 strip/tile
+wiring and a `libjpeg`-enabled oracle build.
 
 Correctness is pinned with a differential oracle against **libtiff**: gamut-encode → libtiff-decode
 and libtiff-encode → gamut-decode must agree pixel-for-pixel on every lossless path.
