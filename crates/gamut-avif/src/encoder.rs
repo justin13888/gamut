@@ -104,7 +104,8 @@ impl AvifEncoder {
 
 /// The 4-byte `AV1CodecConfigurationRecord` body (empty `configOBUs`) stamped into the `av1C`
 /// property (AV1-ISOBMFF v1.3.0 §2.3.3/§2.3.4). Every field mirrors the AV1 sequence header.
-fn av1c_record(c: &Av1StillConfig) -> [u8; 4] {
+/// Crate-visible so the `av1c` module's tests can pin writer/reader coherence.
+pub(crate) fn av1c_record(c: &Av1StillConfig) -> [u8; 4] {
     [
         0x81, // marker = 1, version = 1
         (c.seq_profile << 5) + (c.seq_level_idx_0 & 0x1f),

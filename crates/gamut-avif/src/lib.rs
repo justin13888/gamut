@@ -44,11 +44,15 @@
 //! tracks (the `avis`/`avio` brands) and AV1 inter-frame coding.
 #![forbid(unsafe_code)]
 
+mod av1c;
 mod config;
 mod encoder;
+mod obu;
 mod transform;
 
+pub use av1c::{Av1Config, ChromaFormat};
 pub use config::{AvifConfig, AvifMode};
 pub use encoder::AvifEncoder;
 pub use gamut_core::Dimensions;
+pub use obu::{Obu, ObuHeader, ObuIter, ObuType, iter_obus};
 pub use transform::{Mirror, Rotation};
