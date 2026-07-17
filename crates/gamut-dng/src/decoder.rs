@@ -208,8 +208,6 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
         .get_u32_vec(tags::BITS_PER_SAMPLE)
         .and_then(|v| v.first().copied())
         .ok_or(Error::InvalidInput("DNG: raw IFD missing BitsPerSample"))? as u16;
-    let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
-        .ok_or(Error::Unsupported("DNG: unknown compression"))?;
     let photometric = ifd
         .get_u32(tags::PHOTOMETRIC_INTERPRETATION)
         .and_then(|c| u16::try_from(c).ok())
@@ -218,98 +216,7 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
             "DNG: raw IFD missing PhotometricInterpretation",
         ))?;
 
-    // SampleFormat (339) defaults to unsigned integer, the only encoding whose code values the
-    // u16 sample model represents. Anything else must fail cleanly, not silently misdecode.
-    if let Some(formats) = ifd.get_u32_vec(tags::SAMPLE_FORMAT) {
-        for format in formats {
-            match u16::try_from(format).ok().and_then(SampleFormat::from_code) {
-                Some(SampleFormat::UnsignedInteger) => {}
-                Some(SampleFormat::FloatingPoint) => {
-                    return Err(Error::Unsupported(
-                        "DNG: floating-point sample data is not supported",
-                    ));
-                }
-                _ => {
-                    return Err(Error::Unsupported(
-                        "DNG: only unsigned-integer samples are supported",
-                    ));
-                }
-            }
-        }
-    }
-
-    let samples_per_row = (width as usize)
-        .checked_mul(spp as usize)
-        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
-    let expected = samples_per_row
-        .checked_mul(height as usize)
-        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
-
-    // Each strip is an independent sample stream: `RowsPerStrip` rows (fewer for the last), with
-    // sub-byte depths MSB-packed to byte-aligned rows *per strip*. Decoding therefore works
-    // strip by strip — concatenating the packed bytes first would misalign any strip whose
-    // packed length is not what whole-image geometry predicts.
-    let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
-        Some(0) => {
-            return Err(Error::InvalidInput("DNG: RowsPerStrip must be non-zero"));
-        }
-        Some(r) => r as usize,
-        None => height as usize,
-    };
-
-    // Reject an undecodable scheme up front, so an empty strip list cannot mask it.
-    if !matches!(
-        compression,
-        Compression::Uncompressed | Compression::Deflate | Compression::LosslessJpeg
-    ) {
-        return Err(Error::Unsupported(
-            "DNG: this compression is not yet decodable",
-        ));
-    }
-
-    let chunks = strip_chunks(ifd, data)?;
-    let mut samples = Vec::with_capacity(expected);
-    let mut remaining_rows = height as usize;
-    for chunk in &chunks {
-        let rows = rows_per_strip.min(remaining_rows);
-        if rows == 0 {
-            return Err(Error::InvalidInput("DNG: more strips than image rows"));
-        }
-        let want = rows * samples_per_row;
-        match compression {
-            Compression::Uncompressed | Compression::Deflate => {
-                let bytes = compression::decompress(compression, chunk)?;
-                let mut got = bitpack::unpack(&bytes, bits, samples_per_row, rows, order);
-                if got.len() < want {
-                    return Err(Error::InvalidInput("DNG: raw image data is truncated"));
-                }
-                got.truncate(want); // tolerate strip padding, per TIFF practice
-                samples.extend(got);
-            }
-            // Lossless JPEG decodes samples directly; strips concatenate as row-bands. The JPEG
-            // stream's internal width/height/components need not match the strip's geometry —
-            // only the total sample count must (DNG 1.7.1, "Compression": real CFA writers store
-            // a two-component stream at half width).
-            Compression::LosslessJpeg => {
-                let jpeg = lossless_jpeg::decode(chunk)?;
-                if jpeg.samples.len() != want {
-                    return Err(Error::InvalidInput(
-                        "DNG: lossless-JPEG sample count mismatch",
-                    ));
-                }
-                samples.extend(jpeg.samples);
-            }
-            _ => {
-                return Err(Error::Unsupported(
-                    "DNG: this compression is not yet decodable",
-                ));
-            }
-        }
-        remaining_rows -= rows;
-    }
-    if samples.len() != expected {
-        return Err(Error::InvalidInput("DNG: raw image data is truncated"));
-    }
+    let samples = decode_image_data(ifd, data, order, width, height, spp as usize, bits)?;
 
     let dims = Dimensions::new(width, height)?;
     let mut raw = match photometric {
@@ -529,17 +436,244 @@ fn decode_masked_areas(ifd: &Ifd) -> Result<Option<Vec<[u32; 4]>>> {
     ))
 }
 
-/// Returns the IFD's strips as raw byte slices (in order), to be decompressed per the scheme.
-/// Offsets and counts are read at full 64-bit width (BigTIFF writes them as `LONG8`).
-fn strip_chunks<'a>(ifd: &Ifd, data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
+/// How an IFD's image data is chunked: TIFF row-band strips, or the DNG 1.7 tile grid.
+enum ChunkGrid {
+    /// `StripOffsets`/`StripByteCounts` row bands of `rows_per_strip` rows (fewer for the last).
+    Strips { rows_per_strip: usize },
+    /// `TileOffsets`/`TileByteCounts` over a `TileWidth × TileLength` grid. Every stored tile is
+    /// full-size — edge tiles carry padding that assembly crops (TIFF 6.0 §15).
+    Tiles {
+        tile_width: usize,
+        tile_height: usize,
+        across: usize,
+        down: usize,
+    },
+}
+
+/// Classifies the IFD's chunk layout: tiled when the tile tags are present, else strips.
+fn chunk_grid(ifd: &Ifd, width: usize, height: usize) -> Result<ChunkGrid> {
+    if ifd.get(tags::TILE_OFFSETS).is_some() || ifd.get(tags::TILE_WIDTH).is_some() {
+        let tile_width = ifd
+            .get_u32(tags::TILE_WIDTH)
+            .ok_or(Error::InvalidInput("DNG: tiled IFD missing TileWidth"))?
+            as usize;
+        let tile_height = ifd
+            .get_u32(tags::TILE_LENGTH)
+            .ok_or(Error::InvalidInput("DNG: tiled IFD missing TileLength"))?
+            as usize;
+        if tile_width == 0 || tile_height == 0 {
+            return Err(Error::InvalidInput("DNG: tile dimensions must be non-zero"));
+        }
+        Ok(ChunkGrid::Tiles {
+            tile_width,
+            tile_height,
+            across: width.div_ceil(tile_width),
+            down: height.div_ceil(tile_height),
+        })
+    } else {
+        let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
+            Some(0) => {
+                return Err(Error::InvalidInput("DNG: RowsPerStrip must be non-zero"));
+            }
+            Some(r) => r as usize,
+            None => height,
+        };
+        Ok(ChunkGrid::Strips { rows_per_strip })
+    }
+}
+
+/// Decodes an image IFD's chunked pixel data (strips or tiles, any supported compression) into
+/// `width * height * spp` unpacked u16 samples. Shared by the raw image and sub-image paths.
+fn decode_image_data(
+    ifd: &Ifd,
+    data: &[u8],
+    order: ByteOrder,
+    width: u32,
+    height: u32,
+    spp: usize,
+    bits: u16,
+) -> Result<Vec<u16>> {
+    let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
+        .ok_or(Error::Unsupported("DNG: unknown compression"))?;
+    // Reject an undecodable scheme up front, so an empty chunk list cannot mask it.
+    if !matches!(
+        compression,
+        Compression::Uncompressed | Compression::Deflate | Compression::LosslessJpeg
+    ) {
+        return Err(Error::Unsupported(
+            "DNG: this compression is not yet decodable",
+        ));
+    }
+
+    // SampleFormat (339) defaults to unsigned integer, the only encoding whose code values the
+    // u16 sample model represents. Anything else must fail cleanly, not silently misdecode.
+    if let Some(formats) = ifd.get_u32_vec(tags::SAMPLE_FORMAT) {
+        for format in formats {
+            match u16::try_from(format).ok().and_then(SampleFormat::from_code) {
+                Some(SampleFormat::UnsignedInteger) => {}
+                Some(SampleFormat::FloatingPoint) => {
+                    return Err(Error::Unsupported(
+                        "DNG: floating-point sample data is not supported",
+                    ));
+                }
+                _ => {
+                    return Err(Error::Unsupported(
+                        "DNG: only unsigned-integer samples are supported",
+                    ));
+                }
+            }
+        }
+    }
+
+    let (width, height) = (width as usize, height as usize);
+    let samples_per_row = width
+        .checked_mul(spp)
+        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+    let expected = samples_per_row
+        .checked_mul(height)
+        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+
+    let grid = chunk_grid(ifd, width, height)?;
+    let chunks = grid_chunks(ifd, data, &grid)?;
+    match grid {
+        // Each strip is an independent sample stream of full-width rows; strips concatenate as
+        // row bands. Decoding works strip by strip — concatenating packed bytes first would
+        // misalign any sub-byte strip whose packed length is not what whole-image geometry
+        // predicts (rows are byte-aligned *per strip*).
+        ChunkGrid::Strips { rows_per_strip } => {
+            let mut samples = Vec::with_capacity(expected);
+            let mut remaining_rows = height;
+            for chunk in &chunks {
+                let rows = rows_per_strip.min(remaining_rows);
+                if rows == 0 {
+                    return Err(Error::InvalidInput("DNG: more strips than image rows"));
+                }
+                samples.extend(decode_chunk_samples(
+                    compression,
+                    chunk,
+                    width,
+                    rows,
+                    spp,
+                    bits,
+                    order,
+                )?);
+                remaining_rows -= rows;
+            }
+            if samples.len() != expected {
+                return Err(Error::InvalidInput("DNG: raw image data is truncated"));
+            }
+            Ok(samples)
+        }
+        // Tiles decode at full tile size, then blit into place with edge cropping.
+        ChunkGrid::Tiles {
+            tile_width,
+            tile_height,
+            across,
+            down,
+        } => {
+            let tile_count = across
+                .checked_mul(down)
+                .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+            if chunks.len() != tile_count {
+                return Err(Error::InvalidInput(
+                    "DNG: tile count must cover the image grid",
+                ));
+            }
+            let mut samples = vec![0u16; expected];
+            for (i, chunk) in chunks.iter().enumerate() {
+                let tile = decode_chunk_samples(
+                    compression,
+                    chunk,
+                    tile_width,
+                    tile_height,
+                    spp,
+                    bits,
+                    order,
+                )?;
+                let x0 = (i % across) * tile_width;
+                let y0 = (i / across) * tile_height;
+                let copy_cols = tile_width.min(width - x0);
+                for r in 0..tile_height {
+                    let y = y0 + r;
+                    if y >= height {
+                        break;
+                    }
+                    let src = r * tile_width * spp;
+                    let dst = (y * width + x0) * spp;
+                    samples[dst..dst + copy_cols * spp]
+                        .copy_from_slice(&tile[src..src + copy_cols * spp]);
+                }
+            }
+            Ok(samples)
+        }
+    }
+}
+
+/// Decodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each, returning
+/// exactly `cols * rows * spp` samples.
+fn decode_chunk_samples(
+    compression: Compression,
+    chunk: &[u8],
+    cols: usize,
+    rows: usize,
+    spp: usize,
+    bits: u16,
+    order: ByteOrder,
+) -> Result<Vec<u16>> {
+    let want = cols
+        .checked_mul(rows)
+        .and_then(|n| n.checked_mul(spp))
+        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+    match compression {
+        Compression::Uncompressed | Compression::Deflate => {
+            let bytes = compression::decompress(compression, chunk)?;
+            let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
+            if got.len() < want {
+                return Err(Error::InvalidInput("DNG: raw image data is truncated"));
+            }
+            got.truncate(want); // tolerate chunk padding, per TIFF practice
+            Ok(got)
+        }
+        // Lossless JPEG decodes samples directly. The JPEG stream's internal width/height/
+        // components need not match the chunk's geometry — only the total sample count must
+        // (DNG 1.7.1, "Compression": real CFA writers store a two-component stream at half
+        // width).
+        Compression::LosslessJpeg => {
+            let jpeg = lossless_jpeg::decode(chunk)?;
+            if jpeg.samples.len() != want {
+                return Err(Error::InvalidInput(
+                    "DNG: lossless-JPEG sample count mismatch",
+                ));
+            }
+            Ok(jpeg.samples)
+        }
+        _ => Err(Error::Unsupported(
+            "DNG: this compression is not yet decodable",
+        )),
+    }
+}
+
+/// Returns the grid's chunks as raw byte slices, in offset-array order. Offsets and counts are
+/// read at full 64-bit width (BigTIFF writes them as `LONG8`).
+fn grid_chunks<'a>(ifd: &Ifd, data: &'a [u8], grid: &ChunkGrid) -> Result<Vec<&'a [u8]>> {
+    let (offset_tag, count_tag, missing) = match grid {
+        ChunkGrid::Strips { .. } => (
+            tags::STRIP_OFFSETS,
+            tags::STRIP_BYTE_COUNTS,
+            "DNG: missing StripOffsets/StripByteCounts",
+        ),
+        ChunkGrid::Tiles { .. } => (
+            tags::TILE_OFFSETS,
+            tags::TILE_BYTE_COUNTS,
+            "DNG: missing TileOffsets/TileByteCounts",
+        ),
+    };
     let offsets = ifd
-        .get_u64_vec(tags::STRIP_OFFSETS)
-        .ok_or(Error::Unsupported(
-            "DNG: only stripped raw is decodable so far (no tiles)",
-        ))?;
+        .get_u64_vec(offset_tag)
+        .ok_or(Error::InvalidInput(missing))?;
     let counts = ifd
-        .get_u64_vec(tags::STRIP_BYTE_COUNTS)
-        .ok_or(Error::InvalidInput("DNG: missing StripByteCounts"))?;
+        .get_u64_vec(count_tag)
+        .ok_or(Error::InvalidInput(missing))?;
     byte_chunks(&offsets, &counts, data)
 }
 
@@ -776,6 +910,37 @@ mod tests {
 
         let raw = decode_raw_image(&ifd, &jpeg, ByteOrder::LittleEndian).expect("decode");
         assert_eq!(raw.samples(), &samples[..]);
+    }
+
+    /// Hand-computed golden for tile reassembly (the counterpart of the encoder's splitter
+    /// golden): a 3x3 image from a 2x2 grid of 2x2 zero-padded tiles, plus the count guard.
+    #[test]
+    fn decode_image_data_assembles_tiles_with_edge_crop() {
+        let tiles: [&[u8]; 4] = [&[1, 2, 4, 5], &[3, 0, 6, 0], &[7, 8, 0, 0], &[9, 0, 0, 0]];
+        let data: Vec<u8> = tiles.concat();
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::TILE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::TILE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0, 4, 8, 12]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4; 4]));
+
+        let samples =
+            decode_image_data(&ifd, &data, ByteOrder::LittleEndian, 3, 3, 1, 8).expect("decode");
+        assert_eq!(samples, (1..=9).collect::<Vec<u16>>());
+
+        // A tile list that does not cover the grid is rejected.
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0, 4, 8]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4; 3]));
+        let err = decode_image_data(&ifd, &data, ByteOrder::LittleEndian, 3, 3, 1, 8).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("tile count")),
+            "expected a tile-count error, got {err:?}"
+        );
+
+        // A tiled IFD missing its geometry is rejected.
+        ifd.remove(tags::TILE_WIDTH);
+        assert!(decode_image_data(&ifd, &data, ByteOrder::LittleEndian, 3, 3, 1, 8).is_err());
     }
 
     #[test]

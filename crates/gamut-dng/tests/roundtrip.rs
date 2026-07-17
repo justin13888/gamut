@@ -92,6 +92,60 @@ fn gamut_and_adobe_decoders_agree() {
 }
 
 #[test]
+fn tiled_roundtrips_through_gamut() {
+    use gamut_dng::Compression;
+    // 48x40 with 32x32 tiles: a 2x2 grid whose right/bottom tiles carry 16 padding columns and
+    // 24 padding rows — the edge-crop path. Sub-byte depths exercise per-tile row alignment.
+    for compression in [
+        Compression::Uncompressed,
+        Compression::Deflate,
+        Compression::LosslessJpeg,
+    ] {
+        for bits in [8u16, 10, 12, 16] {
+            // Deflate is limited to whole-byte depths (the SDK reader's constraint, enforced at
+            // encode).
+            if compression == Compression::Deflate && !matches!(bits, 8 | 16) {
+                continue;
+            }
+            for raw in [
+                common::sample_raw(48, 40, bits),
+                common::sample_linear_raw(40, 24, bits),
+            ] {
+                let mut dng = Vec::new();
+                DngEncoder::new()
+                    .with_compression(compression)
+                    .with_tiling(32, 32)
+                    .encode(&raw, &common::sample_profile(), &mut dng)
+                    .expect("encode");
+                let decoded = DngDecoder::new().decode(&dng).expect("decode");
+                assert_eq!(
+                    decoded.raw, raw,
+                    "{compression:?} {bits}-bit tiled must round-trip"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tiled_bigtiff_roundtrips_and_validates() {
+    let raw = common::sample_raw(48, 32, 12);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_big_tiff(true)
+        .with_dng_version([1, 7, 0, 0])
+        .with_backward_version([1, 7, 0, 0])
+        .with_tiling(16, 16)
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let decoded = DngDecoder::new()
+        .decode(&dng)
+        .expect("decode tiled BigTIFF");
+    assert_eq!(decoded.raw, raw);
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept a tiled BigTIFF DNG");
+}
+
+#[test]
 fn bigtiff_roundtrips_and_validates() {
     let raw = common::sample_raw(48, 32, 16);
     let mut dng = Vec::new();

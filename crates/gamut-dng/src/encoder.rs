@@ -23,6 +23,7 @@ pub struct DngEncoder {
     backward_version: [u8; 4],
     big_tiff: bool,
     compression: Compression,
+    tiling: Option<(u32, u32)>,
     metadata: DngMetadata,
 }
 
@@ -36,6 +37,7 @@ impl Default for DngEncoder {
             backward_version: [1, 1, 0, 0],
             big_tiff: false,
             compression: Compression::Uncompressed,
+            tiling: None,
             metadata: DngMetadata::default(),
         }
     }
@@ -98,6 +100,20 @@ impl DngEncoder {
         self
     }
 
+    /// Returns a copy of this encoder that stores the raw image as a `tile_width × tile_height`
+    /// tile grid (`TileOffsets`/`TileByteCounts`) instead of strips.
+    ///
+    /// Tile dimensions must be positive multiples of 16 (TIFF 6.0 §15); edge tiles are stored
+    /// full-size with zero padding, which decoders crop. The tiled layout is how real-world
+    /// large raws (e.g. Apple ProRAW) are stored, and it bounds a reader's per-chunk working
+    /// set; for small images the per-tile padding overhead usually outweighs that. The preview
+    /// stays stripped.
+    #[must_use]
+    pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
+        self.tiling = Some((tile_width, tile_height));
+        self
+    }
+
     /// Returns a copy of this encoder that embeds `metadata` (EXIF sub-IFD + XMP/IPTC/ICC blocks).
     #[must_use]
     pub fn with_metadata(mut self, metadata: DngMetadata) -> Self {
@@ -137,20 +153,46 @@ impl DngEncoder {
             ));
         }
         let bits = raw.bits_per_sample();
+        // Deflate compresses the *packed* byte stream, and the DNG SDK's reader only accepts it
+        // at whole-byte integer depths (8/16/32-bit; dng_read_image::CanReadTile) — a sub-byte
+        // deflate raw would be a file the reference reader cannot decode.
+        if self.compression == Compression::Deflate && !matches!(bits, 8 | 16) {
+            return Err(Error::Unsupported(
+                "DNG: Deflate compression requires 8- or 16-bit samples",
+            ));
+        }
         let (width, height) = (
             raw.dimensions().width as usize,
             raw.dimensions().height as usize,
         );
         let spp = usize::from(raw.samples_per_pixel());
-        let samples_per_row = width * spp;
 
-        // Lossless JPEG codes samples directly; the byte-oriented schemes compress the packed
-        // stream.
-        let raw_strip = if self.compression == Compression::LosslessJpeg {
-            lossless_jpeg::encode(raw.samples(), width, height, spp, bits)?
-        } else {
-            let packed = bitpack::pack(raw.samples(), bits, samples_per_row, self.order);
-            compression::compress(self.compression, &packed)?
+        let raw_data = match self.tiling {
+            None => vec![encode_chunk(
+                self.compression,
+                raw.samples(),
+                width,
+                height,
+                spp,
+                bits,
+                self.order,
+            )?],
+            Some((tile_width, tile_height)) => {
+                if tile_width == 0
+                    || tile_height == 0
+                    || tile_width % 16 != 0
+                    || tile_height % 16 != 0
+                {
+                    return Err(Error::InvalidInput(
+                        "DNG: tile dimensions must be positive multiples of 16",
+                    ));
+                }
+                let (tw, th) = (tile_width as usize, tile_height as usize);
+                tile_samples(raw.samples(), width, height, spp, tw, th)
+                    .iter()
+                    .map(|tile| encode_chunk(self.compression, tile, tw, th, spp, bits, self.order))
+                    .collect::<Result<Vec<_>>>()?
+            }
         };
 
         let (preview_dims, preview_rgb) = preview::raw_preview(raw);
@@ -161,17 +203,24 @@ impl DngEncoder {
         {
             ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
         }
-        let raw_ifd = build_raw_ifd(raw, self.compression)?;
+        let raw_ifd = build_raw_ifd(raw, self.compression, self.tiling)?;
 
         let preview_blocks = ImageBlocks {
             offset_tag: tags::STRIP_OFFSETS,
             bytecount_tag: tags::STRIP_BYTE_COUNTS,
             blocks: vec![preview_rgb],
         };
-        let raw_blocks = ImageBlocks {
-            offset_tag: tags::STRIP_OFFSETS,
-            bytecount_tag: tags::STRIP_BYTE_COUNTS,
-            blocks: vec![raw_strip],
+        let raw_blocks = match self.tiling {
+            None => ImageBlocks {
+                offset_tag: tags::STRIP_OFFSETS,
+                bytecount_tag: tags::STRIP_BYTE_COUNTS,
+                blocks: raw_data,
+            },
+            Some(_) => ImageBlocks {
+                offset_tag: tags::TILE_OFFSETS,
+                bytecount_tag: tags::TILE_BYTE_COUNTS,
+                blocks: raw_data,
+            },
         };
 
         let bytes = write_cfa_dng(
@@ -315,6 +364,56 @@ fn backward_version_for(encoder: &DngEncoder, raw: &RawImage) -> [u8; 4] {
     version
 }
 
+/// Encodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each. Lossless
+/// JPEG codes samples directly; the byte-oriented schemes pack then compress. Rows are
+/// byte-aligned per chunk (each chunk is an independent sample stream), which is exactly how the
+/// decoder consumes them.
+fn encode_chunk(
+    compression: Compression,
+    samples: &[u16],
+    cols: usize,
+    rows: usize,
+    spp: usize,
+    bits: u16,
+    order: ByteOrder,
+) -> Result<Vec<u8>> {
+    if compression == Compression::LosslessJpeg {
+        lossless_jpeg::encode(samples, cols, rows, spp, bits)
+    } else {
+        let packed = bitpack::pack(samples, bits, cols * spp, order);
+        compression::compress(compression, &packed)
+    }
+}
+
+/// Splits an image into full-size `tw × th` sample tiles in row-major tile order, zero-padding
+/// edge tiles (TIFF 6.0 §15: every stored tile has the same dimensions).
+fn tile_samples(
+    samples: &[u16],
+    width: usize,
+    height: usize,
+    spp: usize,
+    tw: usize,
+    th: usize,
+) -> Vec<Vec<u16>> {
+    let (across, down) = (width.div_ceil(tw), height.div_ceil(th));
+    let mut tiles = Vec::with_capacity(across * down);
+    for ty in 0..down {
+        for tx in 0..across {
+            let mut tile = vec![0u16; tw * th * spp];
+            let (x0, y0) = (tx * tw, ty * th);
+            let copy_cols = tw.min(width - x0);
+            for r in 0..th.min(height - y0) {
+                let src = ((y0 + r) * width + x0) * spp;
+                let dst = r * tw * spp;
+                tile[dst..dst + copy_cols * spp]
+                    .copy_from_slice(&samples[src..src + copy_cols * spp]);
+            }
+            tiles.push(tile);
+        }
+    }
+    tiles
+}
+
 /// Builds an `SRATIONAL` value from a row-major `3 × 3` colour/calibration matrix.
 fn srational_matrix(m: &[f64; 9]) -> Value {
     Value::SRational(m.iter().map(|&x| srational(x)).collect())
@@ -337,7 +436,11 @@ fn color_plane_count(raw: &RawImage) -> usize {
 /// Returns [`Error::InvalidInput`] if the level model cannot be stored: a delta vector whose
 /// length doesn't match the active area, a non-integral white level, or a level outside the
 /// tag's representable range.
-fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Result<Ifd> {
+fn build_raw_ifd(
+    raw: &RawImage,
+    compression: Compression,
+    tiling: Option<(u32, u32)>,
+) -> Result<Ifd> {
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
     let spp = raw.samples_per_pixel();
@@ -350,7 +453,15 @@ fn build_raw_ifd(raw: &RawImage, compression: Compression) -> Result<Ifd> {
     );
     ifd.set(tags::COMPRESSION, Value::Short(vec![compression.code()]));
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
-    ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height));
+    // A tiled image carries the tile geometry; a stripped one carries RowsPerStrip (a strip/tile
+    // IFD must not mix the two families).
+    match tiling {
+        Some((tile_width, tile_height)) => {
+            ifd.set(tags::TILE_WIDTH, count_value(tile_width));
+            ifd.set(tags::TILE_LENGTH, count_value(tile_height));
+        }
+        None => ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height)),
+    }
     ifd.set(
         tags::SAMPLE_FORMAT,
         Value::Short(vec![
@@ -676,6 +787,73 @@ mod tests {
                 .encode(&raw12, &profile, &mut Vec::new())
                 .is_ok()
         );
+    }
+
+    /// Hand-computed golden for the tile splitter: a symmetric split∘assemble round-trip cannot
+    /// see a transposed grid or swapped padding, so the expected tiles are written out.
+    #[test]
+    fn tile_samples_splits_row_major_and_zero_pads_edges() {
+        // A 3x3 single-plane image with 2x2 tiles: a 2x2 grid whose right/bottom edges pad.
+        let samples: Vec<u16> = (1..=9).collect();
+        let tiles = tile_samples(&samples, 3, 3, 1, 2, 2);
+        assert_eq!(
+            tiles,
+            vec![
+                vec![1, 2, 4, 5],
+                vec![3, 0, 6, 0],
+                vec![7, 8, 0, 0],
+                vec![9, 0, 0, 0],
+            ]
+        );
+        // Two planes interleave within each tile row.
+        let planar: Vec<u16> = (1..=8).collect(); // 2x2 image, 2 planes
+        let tiles = tile_samples(&planar, 2, 2, 2, 2, 2);
+        assert_eq!(tiles, vec![(1..=8).collect::<Vec<u16>>()]);
+    }
+
+    #[test]
+    fn encode_rejects_bad_tile_dimensions() {
+        let raw = sample_raw(32, 32, 16);
+        let profile = sample_profile();
+        for (tw, th) in [(0, 32), (32, 0), (24, 32), (32, 40)] {
+            let err = DngEncoder::new()
+                .with_tiling(tw, th)
+                .encode(&raw, &profile, &mut Vec::new())
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidInput(m) if m.contains("multiples of 16")),
+                "({tw}, {th}) must be rejected, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tiled_raw_ifd_carries_tile_tags_not_rows_per_strip() {
+        let raw = sample_raw(48, 32, 16);
+        let profile = sample_profile();
+        let mut out = Vec::new();
+        DngEncoder::new()
+            .with_tiling(32, 16)
+            .encode(&raw, &profile, &mut out)
+            .expect("encode");
+        let file = gamut_ifd::read(&out).expect("parse");
+        let raw_off = file.ifds[0].get_u32(tags::SUB_IFDS).expect("SubIFDs");
+        let raw_ifd =
+            read_ifd_at(&out, raw_off.into(), file.order, Variant::Classic).expect("raw IFD");
+        assert_eq!(raw_ifd.get_u32(tags::TILE_WIDTH), Some(32));
+        assert_eq!(raw_ifd.get_u32(tags::TILE_LENGTH), Some(16));
+        assert_eq!(raw_ifd.get(tags::ROWS_PER_STRIP), None);
+        // 48x32 in 32x16 tiles: 2 across, 2 down.
+        assert_eq!(
+            raw_ifd.get_u32_vec(tags::TILE_OFFSETS).map(|v| v.len()),
+            Some(4)
+        );
+        assert_eq!(
+            raw_ifd.get_u32_vec(tags::TILE_BYTE_COUNTS).map(|v| v.len()),
+            Some(4)
+        );
+        // The preview stays stripped.
+        assert!(file.ifds[0].get(tags::STRIP_OFFSETS).is_some());
     }
 
     #[test]

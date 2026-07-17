@@ -93,6 +93,47 @@ fn adobe_decodes_linear_raw_samples_exactly() {
     );
 }
 
+/// The tiled layout under every compression scheme: the Adobe SDK must validate the container
+/// and decode the stage-1 samples back exactly — the definitive check that gamut's tile grid,
+/// edge padding, and per-tile packing match DNG (the 80x48 image over 32x32 tiles leaves 16
+/// padding columns and rows on the edge tiles).
+#[test]
+fn adobe_validates_and_decodes_tiled_dngs_exactly() {
+    use gamut_dng::Compression;
+    for compression in [
+        Compression::Uncompressed,
+        Compression::Deflate,
+        Compression::LosslessJpeg,
+    ] {
+        // 12-bit exercises per-tile sub-byte packing where the scheme allows it; Deflate is
+        // limited to whole-byte depths (the SDK reader's constraint, enforced at encode).
+        let cfa_bits = if compression == Compression::Deflate {
+            16
+        } else {
+            12
+        };
+        for raw in [
+            common::sample_raw(80, 48, cfa_bits),
+            common::sample_linear_raw(48, 40, 16),
+        ] {
+            let mut dng = Vec::new();
+            DngEncoder::new()
+                .with_compression(compression)
+                .with_tiling(32, 32)
+                .encode(&raw, &common::sample_profile(), &mut dng)
+                .expect("encode");
+            gamut_dng_oracle::validate_dng(&dng)
+                .unwrap_or_else(|e| panic!("Adobe must accept a tiled {compression:?} DNG: {e}"));
+            let decoded = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe reads tiled raw");
+            assert_eq!(
+                decoded.samples,
+                raw.samples(),
+                "Adobe stage-1 must match the tiled {compression:?} input"
+            );
+        }
+    }
+}
+
 /// Encodes `raw`, re-decodes it, and requires gamut's `to_linear` to match the Adobe SDK's
 /// stage-2 image within ±1 of the 16-bit encoding (`round(linear * 65535)`) per sample.
 ///
