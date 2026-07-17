@@ -175,7 +175,6 @@ fn audited_read_classifies_every_byte_of_written_files() {
                 assert_eq!(next, 0);
                 collect(&child, &mut pending);
             }
-            drop(reader);
 
             let mut report = map.finish(Some(tracked.ledger()));
             report

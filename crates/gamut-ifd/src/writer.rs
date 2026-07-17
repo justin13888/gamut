@@ -22,7 +22,45 @@
 
 use gamut_core::{Error, Result};
 
+use crate::segment::{Claim, SegmentMap, SpanKind};
 use crate::{ByteOrder, Ifd, TiffFile, Value, Variant};
+
+/// A directive to land one field's out-of-line value at an exact absolute offset.
+///
+/// This is the **maker-note preservation primitive**: vendor blobs often encode internal
+/// offsets relative to the TIFF header, so relocating them on a rewrite makes those offsets
+/// stale. Pinning the value at its original offset keeps them valid. The tag must appear
+/// exactly once in the whole IFD tree and its value must be out-of-line (larger than the
+/// inline threshold).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PinnedSpan {
+    /// The tag whose value is pinned.
+    pub tag: u16,
+    /// The absolute file offset the value must start at.
+    pub offset: u64,
+}
+
+/// Options for [`write_with`].
+///
+/// `#[non_exhaustive]`: construct via [`Default`] and set fields, so options can grow without
+/// a breaking change.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct WriteOptions {
+    /// Values to land at exact absolute offsets (see [`PinnedSpan`]). The normal value pool
+    /// flows around the pinned ranges; the resulting zero filler is declared as
+    /// [`SpanKind::Padding`] in the returned map.
+    pub pinned: Vec<PinnedSpan>,
+}
+
+impl WriteOptions {
+    /// Adds a pinned span, builder-style: `WriteOptions::default().pin(37500, 0x1000)`.
+    #[must_use]
+    pub fn pin(mut self, tag: u16, offset: u64) -> Self {
+        self.pinned.push(PinnedSpan { tag, offset });
+        self
+    }
+}
 
 /// Rounds `n` up to the next even (word) boundary — where TIFF 6.0 §2 requires values (and this
 /// crate places every structure) to start.
@@ -139,6 +177,21 @@ fn put_offset(out: &mut [u8], pos: usize, v: u64, order: ByteOrder, variant: Var
 /// a directory with more than `u16::MAX` entries, or a total layout past the 4 GiB offset limit.
 /// (BigTIFF widths cannot overflow in practice.)
 pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
+    write_with(file, &WriteOptions::default()).map(|(bytes, _map)| bytes)
+}
+
+/// Like [`write()`], but takes [`WriteOptions`] (value pinning) and returns, alongside the
+/// bytes, a [`SegmentMap`] in which the writer **declares every byte it emitted** — header,
+/// directory bodies, value spans, and all zero-fill padding. `map.finish(None)` is therefore
+/// fully classified by construction, closing the audit loop: an independent audit of the
+/// returned stream must reproduce this map segment for segment.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] under the same conditions as [`write()`], or if a
+/// [`PinnedSpan`] is unsatisfiable: its tag absent or duplicated, its value inline or
+/// unsizable, its offset colliding with the directory region or another pin.
+pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, SegmentMap)> {
     let order = file.order;
     let variant = file.variant;
     let entry_size = variant.entry_size();
@@ -185,6 +238,65 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
         cursor = even(cursor + variant.count_size() + node.n_entries * entry_size + offset_size);
     }
 
+    // Resolve the pinned spans against the placed directories: each pin's tag must name
+    // exactly one out-of-line value in the whole tree, and the pinned ranges must lie beyond
+    // the directory region without overlapping one another.
+    let dir_end = cursor;
+    struct Pin {
+        tag: u16,
+        offset: u64,
+        len: u64,
+    }
+    let mut pins: Vec<Pin> = Vec::with_capacity(opts.pinned.len());
+    for p in &opts.pinned {
+        let mut fields = nodes
+            .iter()
+            .flat_map(|n| n.ifd.fields())
+            .filter(|f| f.tag == p.tag);
+        let Some(field) = fields.next() else {
+            return Err(Error::InvalidInput("TIFF: pinned tag is not present"));
+        };
+        if fields.next().is_some()
+            || nodes
+                .iter()
+                .any(|n| n.pointers.iter().any(|(t, _)| *t == p.tag))
+        {
+            return Err(Error::InvalidInput(
+                "TIFF: pinned tag must appear exactly once",
+            ));
+        }
+        let Some(len) = field.value.byte_len() else {
+            return Err(Error::InvalidInput(
+                "TIFF: an unknown-type value cannot be pinned",
+            ));
+        };
+        if len <= inline as u64 {
+            return Err(Error::InvalidInput(
+                "TIFF: pinned value packs inline, there is no span to pin",
+            ));
+        }
+        if p.offset < dir_end as u64 {
+            return Err(Error::InvalidInput(
+                "TIFF: pinned offset collides with the directory layout",
+            ));
+        }
+        if p.offset.checked_add(len).is_none() {
+            return Err(Error::InvalidInput("TIFF: pinned span overflows"));
+        }
+        pins.push(Pin {
+            tag: p.tag,
+            offset: p.offset,
+            len,
+        });
+    }
+    pins.sort_by_key(|p| p.offset);
+    if pins
+        .windows(2)
+        .any(|w| w[1].offset < w[0].offset + w[0].len)
+    {
+        return Err(Error::InvalidInput("TIFF: pinned spans overlap"));
+    }
+
     // With every directory offset known, synthesise each pointer field (a child-offset array) and
     // build each directory's tag-sorted entry list (real fields interleaved with pointers).
     let mut entries_per_node: Vec<Vec<(u16, FieldRef)>> = Vec::with_capacity(nodes.len());
@@ -204,40 +316,70 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
         entries_per_node.push(entries);
     }
 
-    // Pass 1b: place the out-of-line value pool after the directories.
+    // Pass 1b: place the out-of-line value pool after the directories, flowing around the
+    // pinned reservations; a pinned value lands exactly where asked.
     let mut value_offsets: Vec<Vec<u64>> = Vec::with_capacity(nodes.len());
     let mut pool: Vec<(usize, Vec<u8>)> = Vec::new();
-    for entries in &entries_per_node {
+    // Every placed value as `(directory offset, tag, start, len)` — the writer's own claims.
+    let mut value_spans: Vec<(u64, u16, u64, u64)> = Vec::new();
+    for (idx, entries) in entries_per_node.iter().enumerate() {
+        let node_offset = nodes[idx].offset;
         let mut offs = Vec::with_capacity(entries.len());
-        for (_tag, field) in entries {
+        for (tag, field) in entries {
             // An unknown-type value has no sizable extent (`byte_len` is `None`); its verbatim
             // word always re-emits inline, so it never claims pool space.
             match field.value().byte_len() {
                 Some(n) if n > inline as u64 => {
-                    cursor = even(cursor);
-                    offs.push(cursor as u64);
-                    let bytes = field.value().encode(order);
-                    pool.push((cursor, bytes));
-                    // The encoded length equals `byte_len` for every sizable type.
-                    cursor += n as usize;
+                    let pinned = pins.iter().find(|p| p.tag == *tag);
+                    let start = match pinned {
+                        Some(pin) => pin.offset,
+                        None => {
+                            // Advance to the next word boundary, jumping over any pinned
+                            // range the value would intersect.
+                            let mut c = align_word(cursor as u64);
+                            while let Some(p) = pins
+                                .iter()
+                                .find(|p| p.offset < c.saturating_add(n) && c < p.offset + p.len)
+                            {
+                                c = align_word(p.offset + p.len);
+                            }
+                            c
+                        }
+                    };
+                    let start_usize = usize::try_from(start)
+                        .map_err(|_| Error::InvalidInput("TIFF: layout overflows"))?;
+                    offs.push(start);
+                    pool.push((start_usize, field.value().encode(order)));
+                    value_spans.push((node_offset, *tag, start, n));
+                    if pinned.is_none() {
+                        // The encoded length equals `byte_len` for every sizable type.
+                        cursor = start_usize + n as usize;
+                    }
                 }
                 _ => offs.push(0),
             }
         }
         value_offsets.push(offs);
     }
+    // The stream ends at the later of the flowing pool and the farthest pinned span.
+    let total_len = cursor.max(
+        pins.iter()
+            .map(|p| usize::try_from(p.offset + p.len).unwrap_or(usize::MAX))
+            .max()
+            .unwrap_or(0),
+    );
 
-    // The layout is final; every offset word is a position below `cursor`, so one total-length
-    // check proves every classic 32-bit offset (and value count, which is at most a byte length)
-    // fits without truncation.
-    if layout_overflows(variant, cursor as u64) {
+    // The layout is final; every offset word is a position below `total_len`, so one
+    // total-length check proves every classic 32-bit offset (and value count, which is at most
+    // a byte length) fits without truncation.
+    if layout_overflows(variant, total_len as u64) {
         return Err(Error::InvalidInput(
             "TIFF: layout exceeds the 4 GiB classic-TIFF offset limit",
         ));
     }
 
     // Pass 2: emit.
-    let mut out = vec![0u8; cursor];
+    let mut out = vec![0u8; total_len];
     out[0..2].copy_from_slice(match order {
         ByteOrder::LittleEndian => b"II",
         ByteOrder::BigEndian => b"MM",
@@ -287,7 +429,37 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
     for (offset, bytes) in pool {
         out[offset..offset + bytes.len()].copy_from_slice(&bytes);
     }
-    Ok(out)
+
+    // The writer declares every byte it emitted — header, directory bodies, value spans, and
+    // (as the complement) the zero-fill padding — so the returned map classifies the stream
+    // fully by construction, and an independent audit must reproduce it.
+    let mut map = SegmentMap::new(total_len as u64);
+    let mut placed: Vec<(u64, u64)> = Vec::new();
+    let header_len = variant.header_size() as u64;
+    map.claim(0, header_len, SpanKind::Header, Claim::Parsed);
+    placed.push((0, header_len));
+    for (idx, entries) in entries_per_node.iter().enumerate() {
+        let body = (variant.count_size() + entries.len() * entry_size + offset_size) as u64;
+        let ifd = nodes[idx].offset;
+        map.claim(ifd, body, SpanKind::IfdBody { ifd }, Claim::Parsed);
+        placed.push((ifd, body));
+    }
+    for &(ifd, tag, start, len) in &value_spans {
+        map.claim(start, len, SpanKind::Value { ifd, tag }, Claim::Parsed);
+        placed.push((start, len));
+    }
+    placed.sort_unstable();
+    let mut at = 0u64;
+    for &(start, len) in &placed {
+        if start > at {
+            map.claim(at, start - at, SpanKind::Padding, Claim::Parsed);
+        }
+        at = at.max(start + len);
+    }
+    if (total_len as u64) > at {
+        map.claim(at, total_len as u64 - at, SpanKind::Padding, Claim::Parsed);
+    }
+    Ok((out, map))
 }
 
 #[cfg(test)]
@@ -650,6 +822,102 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    /// The audit closed loop: the map `write_with` declares is fully classified by
+    /// construction, and an independent audited read of the emitted bytes reproduces it
+    /// **segment for segment** (after padding classification) — the writer cannot claim a
+    /// layout it did not emit, and the reader cannot see a layout the writer did not declare.
+    #[test]
+    fn write_with_map_matches_an_independent_audit() {
+        // The sample carries inline and out-of-line values including an odd-length ASCII, so
+        // real padding participates.
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd()],
+        };
+        let (bytes, map) = write_with(&file, &WriteOptions::default()).expect("write");
+        let writer_report = map.finish(None);
+        assert!(
+            writer_report.is_fully_classified(),
+            "writer must declare every byte: {writer_report:?}"
+        );
+
+        let (parsed, mut audit_report) = crate::read_audited(&bytes).expect("audit");
+        assert_eq!(parsed, file);
+        audit_report
+            .classify_padding(&mut (&bytes[..]))
+            .expect("classify");
+        assert!(audit_report.is_fully_classified());
+        assert_eq!(writer_report.segments, audit_report.segments);
+    }
+
+    /// Pinning lands a value at its exact absolute offset, the pool flows around it, the
+    /// filler is declared padding, and the pointer word points at the pin.
+    #[test]
+    fn pinned_value_lands_at_its_offset_with_declared_padding() {
+        let mut ifd = Ifd::new();
+        ifd.set(256, Value::Short(vec![640]));
+        // A maker-note-like opaque blob, pinned far beyond the natural layout.
+        let note = vec![0xC5u8; 10];
+        ifd.set(37500, Value::Undefined(note.clone()));
+        ifd.set(258, Value::Short(vec![8, 8, 8])); // 6 bytes: flows around the pin
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        };
+        let pin_at = 100u64;
+        let opts = WriteOptions::default().pin(37500, pin_at);
+        let (bytes, map) = write_with(&file, &opts).expect("write");
+        // The blob sits exactly at the pin.
+        assert_eq!(&bytes[pin_at as usize..pin_at as usize + note.len()], &note);
+        // The entry's value offset points at the pin.
+        let parsed = read(&bytes).expect("read");
+        assert_eq!(parsed.ifds[0].get(37500), Some(&Value::Undefined(note)));
+        // Every byte is declared, including the filler up to the pin.
+        let report = map.finish(None);
+        assert!(report.is_fully_classified(), "report: {report:?}");
+        assert!(
+            report
+                .segments
+                .iter()
+                .any(|s| s.kind == crate::SpanKind::Padding && s.range.end() == pin_at),
+            "filler before the pin is declared padding: {report:?}"
+        );
+        // The stream ends at the pin's end (nothing after it).
+        assert_eq!(bytes.len() as u64, pin_at + 10);
+    }
+
+    /// Unsatisfiable pins are typed errors: absent tag, duplicated tag, inline value,
+    /// unknown-type value, directory collision, and overlapping pins.
+    #[test]
+    fn unsatisfiable_pins_are_refused() {
+        let pin = |tag, offset| WriteOptions::default().pin(tag, offset);
+        let le = |ifds| TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds,
+        };
+        let mut ifd = Ifd::new();
+        ifd.set(37500, Value::Undefined(vec![1; 10]));
+        ifd.set(256, Value::Short(vec![1])); // inline
+        // Absent tag.
+        assert!(write_with(&le(vec![ifd.clone()]), &pin(999, 100)).is_err());
+        // Inline value: no span to pin.
+        assert!(write_with(&le(vec![ifd.clone()]), &pin(256, 100)).is_err());
+        // Offset inside the directory region.
+        assert!(write_with(&le(vec![ifd.clone()]), &pin(37500, 8)).is_err());
+        // Duplicated tag (present in two directories of the chain).
+        assert!(write_with(&le(vec![ifd.clone(), ifd.clone()]), &pin(37500, 100)).is_err());
+        // Overlapping pins.
+        let mut two = ifd.clone();
+        two.set(700, Value::Undefined(vec![2; 10]));
+        let opts = WriteOptions::default().pin(37500, 100).pin(700, 105);
+        assert!(write_with(&le(vec![two]), &opts).is_err());
+        // A valid pin on the same fixture still succeeds (the guards are not blanket).
+        assert!(write_with(&le(vec![ifd]), &pin(37500, 100)).is_ok());
     }
 
     /// `align_word` is the exported form of the writer's alignment rule: identity on even,
