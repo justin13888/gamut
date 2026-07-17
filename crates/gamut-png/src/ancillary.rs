@@ -29,6 +29,18 @@ impl SrgbIntent {
             SrgbIntent::AbsoluteColorimetric => 3,
         }
     }
+
+    /// The intent for an sRGB chunk's code byte, or `None` if the code is not defined.
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(SrgbIntent::Perceptual),
+            1 => Some(SrgbIntent::RelativeColorimetric),
+            2 => Some(SrgbIntent::Saturation),
+            3 => Some(SrgbIntent::AbsoluteColorimetric),
+            _ => None,
+        }
+    }
 }
 
 /// The unit for a `pHYs` chunk's pixel dimensions.

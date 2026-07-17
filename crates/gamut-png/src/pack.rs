@@ -30,6 +30,34 @@ pub(crate) fn pack_scanlines(
     out
 }
 
+/// Unpacks MSB-first bit-packed, byte-padded scanlines into one byte per sample (values left
+/// unscaled) — the decoder's inverse of [`pack_scanlines`]. `packed` must hold exactly
+/// `width.div_ceil(8 / bit_depth) * height` bytes; `bit_depth` must be 1, 2, or 4.
+pub(crate) fn unpack_scanlines(
+    packed: &[u8],
+    width: usize,
+    height: usize,
+    bit_depth: u8,
+) -> Vec<u8> {
+    debug_assert!(matches!(bit_depth, 1 | 2 | 4));
+    let depth = bit_depth as usize;
+    let per_byte = 8 / depth; // samples per packed byte: 8, 4, or 2
+    let mask = (1u8 << depth) - 1;
+    let row_bytes = width.div_ceil(per_byte);
+    debug_assert_eq!(packed.len(), row_bytes * height);
+    let mut out = vec![0u8; width * height];
+    for y in 0..height {
+        let src = &packed[y * row_bytes..(y + 1) * row_bytes];
+        let dst = &mut out[y * width..(y + 1) * width];
+        for (x, value) in dst.iter_mut().enumerate() {
+            let slot = x % per_byte; // 0 = leftmost = most significant
+            let shift = 8 - depth * (slot + 1);
+            *value = (src[x / per_byte] >> shift) & mask;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +86,44 @@ mod tests {
         let samples = [1, 1, 1, 1, 0, 1];
         let packed = pack_scanlines(&samples, 3, 2, 1);
         assert_eq!(packed, vec![0b1110_0000, 0b1010_0000]);
+    }
+
+    #[test]
+    fn unpack_golden_vectors() {
+        // MSB-first: the leftmost sample sits in the high bits; rows are independently padded.
+        assert_eq!(
+            unpack_scanlines(&[0b1011_0001], 8, 1, 1),
+            vec![1, 0, 1, 1, 0, 0, 0, 1]
+        );
+        assert_eq!(
+            unpack_scanlines(&[0b11_10_01_00], 4, 1, 2),
+            vec![0b11, 0b10, 0b01, 0b00]
+        );
+        assert_eq!(
+            unpack_scanlines(&[0xA5, 0xF0], 3, 1, 4),
+            vec![0xA, 0x5, 0xF]
+        );
+        // Padding bits are dropped, per row.
+        assert_eq!(
+            unpack_scanlines(&[0b1110_0000, 0b1010_0000], 3, 2, 1),
+            vec![1, 1, 1, 1, 0, 1]
+        );
+    }
+
+    #[test]
+    fn unpack_inverts_pack() {
+        for depth in [1u8, 2, 4] {
+            let max = (1u16 << depth) as usize;
+            for width in 1..=17usize {
+                let height = 3;
+                let samples: Vec<u8> = (0..width * height).map(|i| (i % max) as u8).collect();
+                let packed = pack_scanlines(&samples, width, height, depth);
+                assert_eq!(
+                    unpack_scanlines(&packed, width, height, depth),
+                    samples,
+                    "depth {depth} width {width}"
+                );
+            }
+        }
     }
 }

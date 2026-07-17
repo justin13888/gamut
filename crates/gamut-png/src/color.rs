@@ -28,6 +28,19 @@ impl ColorType {
         }
     }
 
+    /// The colour type for an IHDR colour-type code, or `None` if the code is not defined.
+    #[must_use]
+    pub fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(ColorType::Grayscale),
+            2 => Some(ColorType::Truecolor),
+            3 => Some(ColorType::Indexed),
+            4 => Some(ColorType::GrayscaleAlpha),
+            6 => Some(ColorType::TruecolorAlpha),
+            _ => None,
+        }
+    }
+
     /// Channels (samples) per pixel.
     #[must_use]
     pub fn channels(self) -> usize {
@@ -66,6 +79,22 @@ mod tests {
         assert_eq!(ColorType::Truecolor.channels(), 3);
         assert_eq!(ColorType::TruecolorAlpha.channels(), 4);
         assert_eq!(ColorType::GrayscaleAlpha.channels(), 2);
+    }
+
+    #[test]
+    fn from_code_inverts_code() {
+        for ty in [
+            ColorType::Grayscale,
+            ColorType::Truecolor,
+            ColorType::Indexed,
+            ColorType::GrayscaleAlpha,
+            ColorType::TruecolorAlpha,
+        ] {
+            assert_eq!(ColorType::from_code(ty.code()), Some(ty));
+        }
+        for code in [1u8, 5, 7, 255] {
+            assert_eq!(ColorType::from_code(code), None);
+        }
     }
 
     #[test]
