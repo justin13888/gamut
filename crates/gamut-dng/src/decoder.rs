@@ -608,7 +608,7 @@ mod tests {
     fn decode_raw_image_rejects_lossless_jpeg_geometry_mismatch() {
         // A 4x2, single-component lossless-JPEG strip...
         let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
-        let jpeg = lossless_jpeg::encode(&samples, 4, 2, 1, 12);
+        let jpeg = lossless_jpeg::encode(&samples, 4, 2, 1, 12).expect("encode");
         // ...described by an IFD that claims a 2x2 image. The width disagrees while the component
         // count matches, so only the `||` (not `&&`) reports the mismatch before the later
         // sample-count check fires with a different error.

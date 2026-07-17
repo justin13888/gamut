@@ -147,7 +147,7 @@ impl DngEncoder {
         // Lossless JPEG codes samples directly; the byte-oriented schemes compress the packed
         // stream.
         let raw_strip = if self.compression == Compression::LosslessJpeg {
-            lossless_jpeg::encode(raw.samples(), width, height, spp, bits)
+            lossless_jpeg::encode(raw.samples(), width, height, spp, bits)?
         } else {
             let packed = bitpack::pack(raw.samples(), bits, samples_per_row, self.order);
             compression::compress(self.compression, &packed)?
