@@ -53,12 +53,17 @@ impl Compression {
         }
     }
 
-    /// Whether `gamut-dng` can currently encode and decode this scheme.
+    /// Whether `gamut-dng` can decode this scheme. Every decodable scheme also encodes, with two
+    /// caveats: [`JpegXl`](Self::JpegXl) encoding needs the `jxl-encode` cargo feature, and
+    /// [`Deflate`](Self::Deflate) encoding is limited to 8/16-bit samples.
     #[must_use]
     pub fn is_supported(self) -> bool {
         matches!(
             self,
-            Compression::Uncompressed | Compression::LosslessJpeg | Compression::Deflate
+            Compression::Uncompressed
+                | Compression::LosslessJpeg
+                | Compression::Deflate
+                | Compression::JpegXl
         )
     }
 }
@@ -504,7 +509,7 @@ mod tests {
         assert_eq!(Compression::from_code(2), None); // CCITT etc. are not DNG raw schemes
         assert!(Compression::default().is_supported());
         assert!(Compression::LosslessJpeg.is_supported());
-        assert!(!Compression::JpegXl.is_supported());
+        assert!(Compression::JpegXl.is_supported());
         assert!(!Compression::LossyJpeg.is_supported());
     }
 

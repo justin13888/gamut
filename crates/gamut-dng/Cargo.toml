@@ -15,6 +15,13 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+# JPEG XL (Compression = 52546) *encoding* via gamut-jxl's libjxl backend (cmake + a C++
+# toolchain at build time; inert on wasm32 targets other than emscripten, mirroring gamut-jxl).
+# Decoding JPEG XL DNGs is always available — the pure-Rust jxl-rs decode path is a normal
+# dependency.
+jxl-encode = ["gamut-jxl/encode"]
+
 [dependencies]
 gamut-core.workspace = true
 # DNG is a TIFF/EP profile: the IFD container (incl. sub-IFD trees and the BigTIFF variant) is the
@@ -22,12 +29,19 @@ gamut-core.workspace = true
 gamut-ifd = { workspace = true, features = ["bigtiff"] }
 # Shared MSB-first sample bit-packing for sub-byte depths (10/12/14-bit); see `bitpack`.
 gamut-bitstream.workspace = true
+# JPEG XL (Compression = 52546, DNG 1.7): decode is the pure-Rust jxl-rs path (wasm-safe, keeps
+# the default build C-free); encode is opt-in via the `jxl-encode` feature above.
+gamut-jxl = { workspace = true, features = ["decode"] }
 # Pure-Rust zlib/Deflate for the DNG ZIP (Compression = 8) codec; keeps the shipped crate C-free.
 miniz_oxide = "0.8"
 
 [dev-dependencies]
 # Authoritative conformance oracle: the headless-built Adobe DNG SDK 1.7.1 (gamut encode →
-# dng_validate must accept). Dev-only; statically linked from the committed SDK ZIP.
+# dng_validate must accept; its JPEG XL reader is the real libjxl via gamut-jxl-sys). Dev-only;
+# statically linked from the committed SDK ZIP.
 gamut-dng-oracle = { path = "../../tooling/gamut-dng-oracle" }
 # A DNG is a valid TIFF, so libtiff cross-checks the container and the IFD-0 preview pixels.
 libtiff-oracle = { path = "../../tooling/libtiff-oracle" }
+# Self-dependency enabling `jxl-encode` for the test suite, so the JPEG XL encode ⇄ decode ⇄
+# Adobe-oracle round-trips always run (the oracle already builds libjxl, so this adds no cost).
+gamut-dng = { path = ".", features = ["jxl-encode"] }

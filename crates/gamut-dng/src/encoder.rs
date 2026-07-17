@@ -24,6 +24,8 @@ pub struct DngEncoder {
     big_tiff: bool,
     compression: Compression,
     tiling: Option<(u32, u32)>,
+    jxl_distance: f32,
+    jxl_effort: u8,
     metadata: DngMetadata,
 }
 
@@ -38,6 +40,9 @@ impl Default for DngEncoder {
             big_tiff: false,
             compression: Compression::Uncompressed,
             tiling: None,
+            // JPEG XL defaults: lossless (distance 0.0) at libjxl's default effort (7, squirrel).
+            jxl_distance: 0.0,
+            jxl_effort: 7,
             metadata: DngMetadata::default(),
         }
     }
@@ -91,12 +96,32 @@ impl DngEncoder {
 
     /// Returns a copy of this encoder that compresses the raw image with `compression`.
     ///
-    /// [`Uncompressed`](Compression::Uncompressed) and [`Deflate`](Compression::Deflate) are
-    /// supported; lossless JPEG and JPEG XL are added in later phases. The preview is always
-    /// stored uncompressed.
+    /// [`Uncompressed`](Compression::Uncompressed), [`Deflate`](Compression::Deflate) (8/16-bit),
+    /// [`LosslessJpeg`](Compression::LosslessJpeg), and — with the `jxl-encode` cargo feature —
+    /// [`JpegXl`](Compression::JpegXl) (full-range 16-bit samples) are supported. The preview is
+    /// always stored uncompressed.
     #[must_use]
     pub fn with_compression(mut self, compression: Compression) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// Returns a copy of this encoder that encodes JPEG XL at the given Butteraugli `distance` —
+    /// `0.0` (the default) is lossless; larger values are lossy (1.0 ≈ visually lossless). The
+    /// written raw IFD records it in the `JXLDistance` tag. Only meaningful with
+    /// [`Compression::JpegXl`].
+    #[must_use]
+    pub fn with_jxl_distance(mut self, distance: f32) -> Self {
+        self.jxl_distance = distance;
+        self
+    }
+
+    /// Returns a copy of this encoder that encodes JPEG XL at the given libjxl effort level
+    /// (`1..=10`; default 7). The written raw IFD records it in the `JXLEffort` tag. Only
+    /// meaningful with [`Compression::JpegXl`].
+    #[must_use]
+    pub fn with_jxl_effort(mut self, effort: u8) -> Self {
+        self.jxl_effort = effort;
         self
     }
 
@@ -161,6 +186,16 @@ impl DngEncoder {
                 "DNG: Deflate compression requires 8- or 16-bit samples",
             ));
         }
+        // JPEG XL image data is full-range 16-bit in the DNG ecosystem (readers decode it at
+        // pixel-format depth; Apple ProRAW pairs a 10-bit codestream with WhiteLevel 65535).
+        // Encoding N-bit code values directly would produce a file the reference SDK decodes
+        // scaled — misrendering against the written levels — so sub-16-bit input is rejected:
+        // scale the code values and levels to 16-bit first.
+        if self.compression == Compression::JpegXl && bits != 16 {
+            return Err(Error::Unsupported(
+                "DNG: JPEG XL compression requires full-range 16-bit samples",
+            ));
+        }
         let (width, height) = (
             raw.dimensions().width as usize,
             raw.dimensions().height as usize,
@@ -168,15 +203,7 @@ impl DngEncoder {
         let spp = usize::from(raw.samples_per_pixel());
 
         let raw_data = match self.tiling {
-            None => vec![encode_chunk(
-                self.compression,
-                raw.samples(),
-                width,
-                height,
-                spp,
-                bits,
-                self.order,
-            )?],
+            None => vec![self.encode_chunk(raw.samples(), width, height, spp, bits)?],
             Some((tile_width, tile_height)) => {
                 if tile_width == 0
                     || tile_height == 0
@@ -190,7 +217,7 @@ impl DngEncoder {
                 let (tw, th) = (tile_width as usize, tile_height as usize);
                 tile_samples(raw.samples(), width, height, spp, tw, th)
                     .iter()
-                    .map(|tile| encode_chunk(self.compression, tile, tw, th, spp, bits, self.order))
+                    .map(|tile| self.encode_chunk(tile, tw, th, spp, bits))
                     .collect::<Result<Vec<_>>>()?
             }
         };
@@ -203,7 +230,7 @@ impl DngEncoder {
         {
             ifd0.set_sub_ifd(tags::EXIF_IFD, vec![exif]);
         }
-        let raw_ifd = build_raw_ifd(raw, self.compression, self.tiling)?;
+        let raw_ifd = build_raw_ifd(self, raw)?;
 
         let preview_blocks = ImageBlocks {
             offset_tag: tags::STRIP_OFFSETS,
@@ -364,24 +391,45 @@ fn backward_version_for(encoder: &DngEncoder, raw: &RawImage) -> [u8; 4] {
     version
 }
 
-/// Encodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each. Lossless
-/// JPEG codes samples directly; the byte-oriented schemes pack then compress. Rows are
-/// byte-aligned per chunk (each chunk is an independent sample stream), which is exactly how the
-/// decoder consumes them.
-fn encode_chunk(
-    compression: Compression,
-    samples: &[u16],
-    cols: usize,
-    rows: usize,
-    spp: usize,
-    bits: u16,
-    order: ByteOrder,
-) -> Result<Vec<u8>> {
-    if compression == Compression::LosslessJpeg {
-        lossless_jpeg::encode(samples, cols, rows, spp, bits)
-    } else {
-        let packed = bitpack::pack(samples, bits, cols * spp, order);
-        compression::compress(compression, &packed)
+impl DngEncoder {
+    /// Encodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each.
+    /// Lossless JPEG and JPEG XL code samples directly; the byte-oriented schemes pack then
+    /// compress. Rows are byte-aligned per chunk (each chunk is an independent sample stream),
+    /// which is exactly how the decoder consumes them.
+    fn encode_chunk(
+        &self,
+        samples: &[u16],
+        cols: usize,
+        rows: usize,
+        spp: usize,
+        bits: u16,
+    ) -> Result<Vec<u8>> {
+        match self.compression {
+            Compression::LosslessJpeg => lossless_jpeg::encode(samples, cols, rows, spp, bits),
+            #[cfg(all(
+                feature = "jxl-encode",
+                any(not(target_arch = "wasm32"), target_os = "emscripten")
+            ))]
+            Compression::JpegXl => crate::jxl::encode_chunk(
+                samples,
+                cols,
+                rows,
+                spp,
+                self.jxl_distance,
+                self.jxl_effort,
+            ),
+            #[cfg(not(all(
+                feature = "jxl-encode",
+                any(not(target_arch = "wasm32"), target_os = "emscripten")
+            )))]
+            Compression::JpegXl => Err(Error::Unsupported(
+                "DNG: JPEG XL encoding requires the `jxl-encode` feature (non-wasm)",
+            )),
+            _ => {
+                let packed = bitpack::pack(samples, bits, cols * spp, self.order);
+                compression::compress(self.compression, &packed)
+            }
+        }
     }
 }
 
@@ -436,11 +484,8 @@ fn color_plane_count(raw: &RawImage) -> usize {
 /// Returns [`Error::InvalidInput`] if the level model cannot be stored: a delta vector whose
 /// length doesn't match the active area, a non-integral white level, or a level outside the
 /// tag's representable range.
-fn build_raw_ifd(
-    raw: &RawImage,
-    compression: Compression,
-    tiling: Option<(u32, u32)>,
-) -> Result<Ifd> {
+fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
+    let compression = encoder.compression;
     let mut ifd = Ifd::new();
     let dims = raw.dimensions();
     let spp = raw.samples_per_pixel();
@@ -455,12 +500,20 @@ fn build_raw_ifd(
     ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![spp]));
     // A tiled image carries the tile geometry; a stripped one carries RowsPerStrip (a strip/tile
     // IFD must not mix the two families).
-    match tiling {
+    match encoder.tiling {
         Some((tile_width, tile_height)) => {
             ifd.set(tags::TILE_WIDTH, count_value(tile_width));
             ifd.set(tags::TILE_LENGTH, count_value(tile_height));
         }
         None => ifd.set(tags::ROWS_PER_STRIP, count_value(dims.height)),
+    }
+    // JPEG XL records its encode parameters (optional tags; DNG 1.7.1 pp. 97-98).
+    if compression == Compression::JpegXl {
+        ifd.set(tags::JXL_DISTANCE, Value::Float(vec![encoder.jxl_distance]));
+        ifd.set(
+            tags::JXL_EFFORT,
+            Value::Long(vec![u32::from(encoder.jxl_effort)]),
+        );
     }
     ifd.set(
         tags::SAMPLE_FORMAT,

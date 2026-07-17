@@ -649,8 +649,10 @@ version = "0.1.0"
 dependencies = [
  "gamut-bitstream",
  "gamut-core",
+ "gamut-dng",
  "gamut-dng-oracle",
  "gamut-ifd",
+ "gamut-jxl",
  "libtiff-oracle",
  "miniz_oxide",
 ]
@@ -660,6 +662,7 @@ name = "gamut-dng-oracle"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "gamut-jxl-sys",
  "tempfile",
  "zip",
 ]

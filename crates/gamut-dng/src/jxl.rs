@@ -1,0 +1,100 @@
+//! JPEG XL (Compression = 52546, DNG 1.7) chunk codec: the bridge between DNG's tile/strip
+//! layout and [`gamut_jxl`].
+//!
+//! Each DNG chunk holds one complete JPEG XL bitstream — the spec allows both the bare
+//! codestream (recommended for multi-tile images; what Apple ProRAW uses) and the ISO BMFF
+//! container, and [`gamut_jxl::JxlDecoder`] accepts either.
+//!
+//! **Range semantics** (matching the reference Adobe DNG SDK, the crate's oracle): JPEG XL image
+//! data decodes to **full-range 16-bit** code values, whatever precision the codestream declares
+//! — the SDK requests pixel-format depth from libjxl, and real writers depend on it (an Apple
+//! ProRAW declares `BitsPerSample = 10` yet sets `WhiteLevel = 65535`). A JXL IFD's
+//! `BitsPerSample` therefore records the codestream's stored precision, not the decoded
+//! representation; encode likewise treats input as full-range 16-bit.
+//!
+//! Floating-point JPEG XL raws (fp16, `SampleFormat = 3`) are detected here and rejected with a
+//! typed error — float sample support is deferred crate-wide (see `STATUS.md`).
+
+use gamut_core::{DecodeImage, Error, Gray16, Result, Rgb16};
+use gamut_jxl::JxlDecoder;
+
+/// Decodes one JPEG XL chunk of `cols × rows` pixels at `spp` samples each, returning exactly
+/// `cols * rows * spp` full-range 16-bit code values (see the module docs).
+///
+/// The stream's declared geometry and channel count must agree with the IFD's — a disagreement
+/// means the file is lying about its own contents.
+pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -> Result<Vec<u16>> {
+    let decoder = JxlDecoder::new();
+    let info = decoder.info(bytes)?;
+    if info.is_float {
+        return Err(Error::Unsupported(
+            "DNG: floating-point JPEG XL raw data is not supported",
+        ));
+    }
+    if (
+        info.dimensions.width as usize,
+        info.dimensions.height as usize,
+    ) != (cols, rows)
+    {
+        return Err(Error::InvalidInput(
+            "DNG: JPEG XL chunk geometry disagrees with the tile/strip layout",
+        ));
+    }
+    if usize::from(info.color_channels) != spp || info.has_alpha {
+        return Err(Error::InvalidInput(
+            "DNG: JPEG XL channel count disagrees with SamplesPerPixel",
+        ));
+    }
+    match spp {
+        1 => Ok(<JxlDecoder as DecodeImage<Gray16>>::decode_image(&decoder, bytes)?.into_samples()),
+        3 => Ok(<JxlDecoder as DecodeImage<Rgb16>>::decode_image(&decoder, bytes)?.into_samples()),
+        // The spec allows exactly 1 or 3 planes for JPEG XL image data.
+        _ => Err(Error::Unsupported(
+            "DNG: JPEG XL image data must have 1 or 3 sample planes",
+        )),
+    }
+}
+
+/// Encodes one chunk of `cols × rows` pixels at `spp` full-range 16-bit samples each as a bare
+/// JPEG XL codestream (the spec's recommendation for tiled image data). `distance` 0.0 is
+/// lossless (the default); `effort` is the libjxl effort level `1..=10`.
+#[cfg(all(
+    feature = "jxl-encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
+pub(crate) fn encode_chunk(
+    samples: &[u16],
+    cols: usize,
+    rows: usize,
+    spp: usize,
+    distance: f32,
+    effort: u8,
+) -> Result<Vec<u8>> {
+    use gamut_core::{Dimensions, EncodeImage, ImageRef};
+    use gamut_jxl::{Distance, Effort, JxlEncoder};
+
+    let effort = Effort::from_level(effort)
+        .ok_or(Error::InvalidInput("DNG: JPEG XL effort must be in 1..=10"))?;
+    let encoder = if distance == 0.0 {
+        JxlEncoder::lossless()
+    } else {
+        JxlEncoder::lossy(Distance::new(distance)?)
+    };
+    let encoder = encoder.with_effort(effort);
+    let dims = Dimensions::new(cols as u32, rows as u32)?;
+    let mut out = Vec::new();
+    match spp {
+        1 => {
+            encoder.encode_image(ImageRef::<Gray16>::new(samples, dims)?, &mut out)?;
+        }
+        3 => {
+            encoder.encode_image(ImageRef::<Rgb16>::new(samples, dims)?, &mut out)?;
+        }
+        _ => {
+            return Err(Error::Unsupported(
+                "DNG: JPEG XL image data must have 1 or 3 sample planes",
+            ));
+        }
+    }
+    Ok(out)
+}

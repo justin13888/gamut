@@ -127,6 +127,100 @@ fn tiled_roundtrips_through_gamut() {
     }
 }
 
+/// JPEG XL (Compression 52546) round-trips, stripped and tiled: gamut encode (lossless) → gamut
+/// decode must be bit-exact, and the Adobe SDK (real libjxl) must both validate the file and
+/// read identical pixels. JXL DNG data is full-range 16-bit (the reference SDK's decode
+/// semantics), so the fixtures are 16-bit.
+#[test]
+fn jxl_roundtrips_and_validates() {
+    use gamut_dng::Compression;
+    for raw in [
+        common::sample_raw(48, 40, 16),
+        common::sample_linear_raw(40, 24, 16),
+    ] {
+        for tiled in [false, true] {
+            let mut enc = DngEncoder::new()
+                .with_compression(Compression::JpegXl)
+                .with_dng_version([1, 7, 0, 0])
+                .with_backward_version([1, 7, 0, 0]);
+            if tiled {
+                enc = enc.with_tiling(32, 32);
+            }
+            let mut dng = Vec::new();
+            enc.encode(&raw, &common::sample_profile(), &mut dng)
+                .expect("encode");
+            let decoded = DngDecoder::new().decode(&dng).expect("decode");
+            assert_eq!(
+                decoded.raw, raw,
+                "JXL (tiled={tiled}) must round-trip bit-exact"
+            );
+            gamut_dng_oracle::validate_dng(&dng)
+                .unwrap_or_else(|e| panic!("Adobe must accept a JXL DNG (tiled={tiled}): {e}"));
+            let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+            assert_eq!(
+                adobe.samples,
+                raw.samples(),
+                "Adobe stage-1 must match the JXL input (tiled={tiled})"
+            );
+        }
+    }
+}
+
+/// Sub-16-bit input under JPEG XL is rejected with a typed error: the DNG ecosystem decodes JXL
+/// at full 16-bit range, so an N-bit-code-value file would misrender against its own levels.
+#[test]
+fn jxl_rejects_sub_16bit_samples() {
+    use gamut_dng::Compression;
+    let raw = common::sample_raw(32, 32, 12);
+    let err = DngEncoder::new()
+        .with_compression(Compression::JpegXl)
+        .encode(&raw, &common::sample_profile(), &mut Vec::new())
+        .unwrap_err();
+    assert!(
+        matches!(err, gamut_core::Error::Unsupported(m) if m.contains("16-bit")),
+        "expected a 16-bit requirement error, got {err:?}"
+    );
+}
+
+/// Lossy JXL: the file must be structurally valid, gamut/Adobe must agree on the lossy pixels to
+/// within one code (independent conforming decoders round the float reconstruction
+/// independently), and the JXLDistance/JXLEffort tags record the configured parameters.
+#[test]
+fn lossy_jxl_validates_and_decoders_agree() {
+    use gamut_dng::Compression;
+    let raw = common::sample_linear_raw(64, 48, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .with_compression(Compression::JpegXl)
+        .with_jxl_distance(1.0)
+        .with_jxl_effort(5)
+        .with_dng_version([1, 7, 0, 0])
+        .with_backward_version([1, 7, 0, 0])
+        .with_tiling(32, 32)
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    gamut_dng_oracle::validate_dng(&dng).expect("Adobe must accept a lossy JXL DNG");
+    let decoded = DngDecoder::new().decode(&dng).expect("gamut decode");
+    let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+    for (i, (&ours, &theirs)) in decoded.raw.samples().iter().zip(&adobe.samples).enumerate() {
+        assert!(
+            (i64::from(ours) - i64::from(theirs)).abs() <= 1,
+            "lossy pixel {i}: gamut {ours} vs Adobe {theirs}"
+        );
+    }
+
+    // The encode parameters are recorded in the raw IFD.
+    let file = gamut_ifd::read(&dng).expect("parse");
+    let raw_off = file.ifds[0].get_u64_vec(330).expect("SubIFDs")[0];
+    let raw_ifd = gamut_ifd::read_ifd_at(&dng, raw_off, file.order, file.variant).expect("raw IFD");
+    assert_eq!(
+        raw_ifd.get(52553),
+        Some(&gamut_ifd::Value::Float(vec![1.0])),
+        "JXLDistance"
+    );
+    assert_eq!(raw_ifd.get_u32(52554), Some(5), "JXLEffort");
+}
+
 #[test]
 fn tiled_bigtiff_roundtrips_and_validates() {
     let raw = common::sample_raw(48, 32, 12);

@@ -208,6 +208,14 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
         .get_u32_vec(tags::BITS_PER_SAMPLE)
         .and_then(|v| v.first().copied())
         .ok_or(Error::InvalidInput("DNG: raw IFD missing BitsPerSample"))? as u16;
+    // JPEG XL data decodes to full-range 16-bit whatever precision the codestream stores (the
+    // reference SDK's semantics; Apple ProRAW declares BitsPerSample 10 with WhiteLevel 65535).
+    // The reconstructed image therefore carries 16 significant bits.
+    let bits = if ifd.get_u32(tags::COMPRESSION) == Some(u32::from(Compression::JpegXl.code())) {
+        16
+    } else {
+        bits
+    };
     let photometric = ifd
         .get_u32(tags::PHOTOMETRIC_INTERPRETATION)
         .and_then(|c| u16::try_from(c).ok())
@@ -498,7 +506,10 @@ fn decode_image_data(
     // Reject an undecodable scheme up front, so an empty chunk list cannot mask it.
     if !matches!(
         compression,
-        Compression::Uncompressed | Compression::Deflate | Compression::LosslessJpeg
+        Compression::Uncompressed
+            | Compression::Deflate
+            | Compression::LosslessJpeg
+            | Compression::JpegXl
     ) {
         return Err(Error::Unsupported(
             "DNG: this compression is not yet decodable",
@@ -533,9 +544,12 @@ fn decode_image_data(
         .checked_mul(height)
         .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
 
+    let row_factor = interleave_factor(ifd, tags::ROW_INTERLEAVE_FACTOR, height)?;
+    let col_factor = interleave_factor(ifd, tags::COLUMN_INTERLEAVE_FACTOR, width)?;
+
     let grid = chunk_grid(ifd, width, height)?;
     let chunks = grid_chunks(ifd, data, &grid)?;
-    match grid {
+    let samples = match grid {
         // Each strip is an independent sample stream of full-width rows; strips concatenate as
         // row bands. Decoding works strip by strip — concatenating packed bytes first would
         // misalign any sub-byte strip whose packed length is not what whole-image geometry
@@ -562,7 +576,7 @@ fn decode_image_data(
             if samples.len() != expected {
                 return Err(Error::InvalidInput("DNG: raw image data is truncated"));
             }
-            Ok(samples)
+            samples
         }
         // Tiles decode at full tile size, then blit into place with edge cropping.
         ChunkGrid::Tiles {
@@ -604,9 +618,70 @@ fn decode_image_data(
                         .copy_from_slice(&tile[src..src + copy_cols * spp]);
                 }
             }
-            Ok(samples)
+            samples
+        }
+    };
+
+    // Row/column interleaving (RowInterleaveFactor 50975 / ColumnInterleaveFactor 52547): the
+    // stored image concatenates the interleave fields; the logical image re-interleaves them.
+    // Applied to the whole assembled image, matching the SDK (dng_read_image::Read reads a full
+    // temporary image, then runs Interleave2D over it).
+    if row_factor > 1 || col_factor > 1 {
+        Ok(deinterleave(
+            &samples, width, height, spp, row_factor, col_factor,
+        ))
+    } else {
+        Ok(samples)
+    }
+}
+
+/// Reads a `RowInterleaveFactor`/`ColumnInterleaveFactor` tag, validating it against the image
+/// extent (the SDK rejects factors of 0 or beyond the axis length).
+fn interleave_factor(ifd: &Ifd, tag: u16, limit: usize) -> Result<usize> {
+    match ifd.get_u32(tag) {
+        None => Ok(1),
+        Some(f) => {
+            let f = f as usize;
+            if f == 0 || f > limit {
+                return Err(Error::InvalidInput(
+                    "DNG: interleave factor out of valid range",
+                ));
+            }
+            Ok(f)
         }
     }
+}
+
+/// Re-interleaves a stored field-concatenated image into logical pixel order (the decode
+/// direction of the SDK's `Interleave2D`).
+///
+/// With factors `(rf, cf)`, the stored image stacks `rf` row fields (field `i` holds logical
+/// rows `r` with `r % rf == i`) and, within each, `cf` column fields likewise; field `i` gets
+/// `len / factor` rows/columns, with the first `len % factor` fields one longer. The logical
+/// pixel `(r, c)` therefore lives at stored row `offset(r % rf) + r / rf`, column
+/// `offset(c % cf) + c / cf`.
+fn deinterleave(
+    samples: &[u16],
+    width: usize,
+    height: usize,
+    spp: usize,
+    row_factor: usize,
+    col_factor: usize,
+) -> Vec<u16> {
+    let field_offset = |index: usize, len: usize, factor: usize| -> usize {
+        index * (len / factor) + index.min(len % factor)
+    };
+    let mut out = vec![0u16; samples.len()];
+    for r in 0..height {
+        let src_r = field_offset(r % row_factor, height, row_factor) + r / row_factor;
+        for c in 0..width {
+            let src_c = field_offset(c % col_factor, width, col_factor) + c / col_factor;
+            let src = (src_r * width + src_c) * spp;
+            let dst = (r * width + c) * spp;
+            out[dst..dst + spp].copy_from_slice(&samples[src..src + spp]);
+        }
+    }
+    out
 }
 
 /// Decodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each, returning
@@ -647,6 +722,10 @@ fn decode_chunk_samples(
             }
             Ok(jpeg.samples)
         }
+        // JPEG XL (DNG 1.7): each chunk is a complete bitstream whose geometry/channels must
+        // agree with the layout (validated inside the bridge); output is full-range 16-bit,
+        // matching the reference SDK — `bits` describes only the codestream's stored precision.
+        Compression::JpegXl => crate::jxl::decode_chunk(chunk, cols, rows, spp),
         _ => Err(Error::Unsupported(
             "DNG: this compression is not yet decodable",
         )),
@@ -910,6 +989,46 @@ mod tests {
 
         let raw = decode_raw_image(&ifd, &jpeg, ByteOrder::LittleEndian).expect("decode");
         assert_eq!(raw.samples(), &samples[..]);
+    }
+
+    /// Hand-computed golden for the SDK's `Interleave2D` decode mapping: fields are concatenated
+    /// in storage, with the first `len % factor` fields one row/column longer.
+    #[test]
+    fn deinterleave_reassembles_fields_row_major() {
+        // 4x4, both factors 2: stored rows are [row-field 0 | row-field 1], each with column
+        // fields likewise. The stored image below maps back to the logical 0..16 raster.
+        let stored = [
+            0u16, 2, 1, 3, //
+            8, 10, 9, 11, //
+            4, 6, 5, 7, //
+            12, 14, 13, 15,
+        ];
+        let logical: Vec<u16> = (0..16).collect();
+        assert_eq!(deinterleave(&stored, 4, 4, 1, 2, 2), logical);
+
+        // Uneven split: width 3, column factor 2 — field 0 gets two columns, field 1 one.
+        assert_eq!(deinterleave(&[10, 30, 20], 3, 1, 1, 1, 2), vec![10, 20, 30]);
+
+        // Factor 1 on both axes is the identity.
+        assert_eq!(deinterleave(&[1, 2, 3, 4], 2, 2, 1, 1, 1), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn interleave_factor_validates_range() {
+        let mut ifd = Ifd::new();
+        assert_eq!(
+            interleave_factor(&ifd, tags::ROW_INTERLEAVE_FACTOR, 8).unwrap(),
+            1
+        );
+        ifd.set(tags::ROW_INTERLEAVE_FACTOR, Value::Short(vec![2]));
+        assert_eq!(
+            interleave_factor(&ifd, tags::ROW_INTERLEAVE_FACTOR, 8).unwrap(),
+            2
+        );
+        ifd.set(tags::ROW_INTERLEAVE_FACTOR, Value::Short(vec![0]));
+        assert!(interleave_factor(&ifd, tags::ROW_INTERLEAVE_FACTOR, 8).is_err());
+        ifd.set(tags::ROW_INTERLEAVE_FACTOR, Value::Short(vec![9]));
+        assert!(interleave_factor(&ifd, tags::ROW_INTERLEAVE_FACTOR, 8).is_err());
     }
 
     /// Hand-computed golden for tile reassembly (the counterpart of the encoder's splitter

@@ -50,6 +50,7 @@ pub mod values;
 
 mod bitpack;
 mod compression;
+mod jxl;
 mod preview;
 mod writer;
 

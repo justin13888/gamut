@@ -20,7 +20,9 @@ gamut-core.workspace = true
 
 # Optional format crates, enabled via the features below.
 gamut-avif = { workspace = true, optional = true }
-gamut-jxl = { workspace = true, optional = true }
+# The workspace entry disables default features (so gamut-dng can be decode-only); the umbrella
+# re-enables both halves (encode remains target-gated off non-emscripten wasm32 inside gamut-jxl).
+gamut-jxl = { workspace = true, optional = true, features = ["decode", "encode"] }
 gamut-webp = { workspace = true, optional = true }
 gamut-heic = { workspace = true, optional = true }
 gamut-vvc = { workspace = true, optional = true }
