@@ -279,3 +279,72 @@ fn info_reports_frame_header() {
     // info() on junk errors rather than panicking.
     assert!(gamut_jpeg::info(&[0xFF, 0xD8]).is_err());
 }
+
+#[test]
+fn decode_image_into_reuses_matching_buffers() {
+    // A destination whose dimensions match keeps its allocation and holds exactly what a fresh
+    // decode_image produces — for both Gray8 and Rgb8 (Cmyk8 is covered by a unit test, which can
+    // build a four-component stream).
+    let src: Vec<u8> = (0..64).map(pattern).collect();
+    let img = ImageRef::<Gray8>::new(&src, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quality(90)
+        .encode_to_vec(img)
+        .unwrap();
+    let mut gray: ImageBuf<Gray8> = ImageBuf::zeroed(Dimensions::new(8, 8).unwrap()).unwrap();
+    let ptr = gray.as_samples().as_ptr();
+    JpegDecoder::new()
+        .decode_image_into(&jpeg, &mut gray)
+        .unwrap();
+    assert_eq!(gray.as_samples().as_ptr(), ptr, "allocation must be reused");
+    let fresh: ImageBuf<Gray8> = JpegDecoder::new().decode_image(&jpeg).unwrap();
+    assert_eq!(gray.as_samples(), fresh.as_samples());
+
+    let rgb_src: Vec<u8> = (0..8 * 8 * 3).map(pattern).collect();
+    let img = ImageRef::<Rgb8>::new(&rgb_src, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_subsampling(ChromaSubsampling::Ycbcr444)
+        .encode_to_vec(img)
+        .unwrap();
+    let mut rgb: ImageBuf<Rgb8> = ImageBuf::zeroed(Dimensions::new(8, 8).unwrap()).unwrap();
+    let ptr = rgb.as_samples().as_ptr();
+    JpegDecoder::new()
+        .decode_image_into(&jpeg, &mut rgb)
+        .unwrap();
+    assert_eq!(rgb.as_samples().as_ptr(), ptr, "allocation must be reused");
+    let fresh: ImageBuf<Rgb8> = JpegDecoder::new().decode_image(&jpeg).unwrap();
+    assert_eq!(rgb.as_samples(), fresh.as_samples());
+}
+
+#[test]
+fn decode_image_into_replaces_a_mismatched_buffer() {
+    let src: Vec<u8> = (0..16 * 8).map(pattern).collect();
+    let img = ImageRef::<Gray8>::new(&src, Dimensions::new(16, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new().encode_to_vec(img).unwrap();
+    // Destination is 4×4; the decode is 16×8, so the buffer is replaced, not reused.
+    let mut dst: ImageBuf<Gray8> = ImageBuf::zeroed(Dimensions::new(4, 4).unwrap()).unwrap();
+    JpegDecoder::new()
+        .decode_image_into(&jpeg, &mut dst)
+        .unwrap();
+    assert_eq!(dst.dimensions(), Dimensions::new(16, 8).unwrap());
+    let fresh: ImageBuf<Gray8> = JpegDecoder::new().decode_image(&jpeg).unwrap();
+    assert_eq!(dst.as_samples(), fresh.as_samples());
+}
+
+#[test]
+fn decode_image_into_error_leaves_dst_unchanged() {
+    // A colour stream cannot present as Gray8: the call errors after decode but before any write,
+    // so the destination keeps its previous contents (including matching dimensions).
+    let rgb_src: Vec<u8> = (0..8 * 8 * 3).map(pattern).collect();
+    let img = ImageRef::<Rgb8>::new(&rgb_src, Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new().encode_to_vec(img).unwrap();
+    let sentinel = vec![42u8; 64];
+    let mut dst: ImageBuf<Gray8> =
+        ImageBuf::new(sentinel.clone(), Dimensions::new(8, 8).unwrap()).unwrap();
+    assert!(
+        JpegDecoder::new()
+            .decode_image_into(&jpeg, &mut dst)
+            .is_err()
+    );
+    assert_eq!(dst.as_samples(), sentinel.as_slice());
+}

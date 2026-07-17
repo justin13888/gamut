@@ -635,95 +635,116 @@ fn assemble(
 
 /// Presents a decoded image as interleaved 8-bit RGB.
 fn present_rgb(img: &DecodedImage) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; img.width as usize * img.height as usize * 3];
+    present_rgb_into(img, &mut out)?;
+    Ok(out)
+}
+
+/// Writes the RGB presentation into `out`, which must hold exactly `width * height * 3` bytes.
+/// Errors are raised before any byte of `out` is written, so a failed call leaves it untouched.
+fn present_rgb_into(img: &DecodedImage, out: &mut [u8]) -> Result<()> {
     let (w, h) = (img.width as usize, img.height as usize);
     let transform = decide_transform(img)?;
-    let mut out = Vec::with_capacity(w * h * 3);
+    if matches!(transform, Transform::Cmyk | Transform::Ycck) {
+        return Err(Error::Unsupported(
+            "JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8",
+        ));
+    }
+    debug_assert_eq!(out.len(), w * h * 3);
     for py in 0..h {
         for px in 0..w {
+            let i = (py * w + px) * 3;
             match transform {
                 Transform::Gray => {
                     let g = img.sample(0, px, py);
-                    out.extend_from_slice(&[g, g, g]);
+                    out[i..i + 3].copy_from_slice(&[g, g, g]);
                 }
                 Transform::Rgb => {
-                    out.push(img.sample(0, px, py));
-                    out.push(img.sample(1, px, py));
-                    out.push(img.sample(2, px, py));
+                    out[i] = img.sample(0, px, py);
+                    out[i + 1] = img.sample(1, px, py);
+                    out[i + 2] = img.sample(2, px, py);
                 }
-                Transform::YCbCr => {
+                _ => {
+                    // Transform::YCbCr — Cmyk/Ycck were rejected above.
                     let (r, g, b) = ycbcr_to_rgb(
                         img.sample(0, px, py),
                         img.sample(1, px, py),
                         img.sample(2, px, py),
                         ColorRange::Full,
                     );
-                    out.extend_from_slice(&[r, g, b]);
-                }
-                Transform::Cmyk | Transform::Ycck => {
-                    return Err(Error::Unsupported(
-                        "JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8",
-                    ));
+                    out[i..i + 3].copy_from_slice(&[r, g, b]);
                 }
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Presents a decoded image as interleaved 8-bit grayscale (single-component streams only).
 fn present_gray(img: &DecodedImage) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; img.width as usize * img.height as usize];
+    present_gray_into(img, &mut out)?;
+    Ok(out)
+}
+
+/// Writes the grayscale presentation into `out`, which must hold exactly `width * height` bytes.
+/// Errors are raised before any byte of `out` is written, so a failed call leaves it untouched.
+fn present_gray_into(img: &DecodedImage, out: &mut [u8]) -> Result<()> {
     if decide_transform(img)? != Transform::Gray {
         return Err(Error::Unsupported(
             "JPEG: not a single-component grayscale image",
         ));
     }
     let (w, h) = (img.width as usize, img.height as usize);
-    let mut out = Vec::with_capacity(w * h);
+    debug_assert_eq!(out.len(), w * h);
     for py in 0..h {
         for px in 0..w {
-            out.push(img.sample(0, px, py));
+            out[py * w + px] = img.sample(0, px, py);
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Presents a decoded image as interleaved 8-bit CMYK (four-component CMYK/YCCK streams only).
 fn present_cmyk(img: &DecodedImage) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; img.width as usize * img.height as usize * 4];
+    present_cmyk_into(img, &mut out)?;
+    Ok(out)
+}
+
+/// Writes the CMYK presentation into `out`, which must hold exactly `width * height * 4` bytes.
+/// Errors are raised before any byte of `out` is written, so a failed call leaves it untouched.
+fn present_cmyk_into(img: &DecodedImage, out: &mut [u8]) -> Result<()> {
     let transform = decide_transform(img)?;
+    if !matches!(transform, Transform::Cmyk | Transform::Ycck) {
+        return Err(Error::Unsupported(
+            "JPEG: not a 4-component CMYK/YCCK image",
+        ));
+    }
     let (w, h) = (img.width as usize, img.height as usize);
-    let mut out = Vec::with_capacity(w * h * 4);
+    debug_assert_eq!(out.len(), w * h * 4);
     for py in 0..h {
         for px in 0..w {
-            match transform {
-                Transform::Cmyk => {
-                    out.push(img.sample(0, px, py));
-                    out.push(img.sample(1, px, py));
-                    out.push(img.sample(2, px, py));
-                    out.push(img.sample(3, px, py));
-                }
-                Transform::Ycck => {
-                    // YCCK → CMYK: invert the YCbCr transform on the first three channels, K passes
-                    // through (Adobe TN #5116).
-                    let (r, g, b) = ycbcr_to_rgb(
-                        img.sample(0, px, py),
-                        img.sample(1, px, py),
-                        img.sample(2, px, py),
-                        ColorRange::Full,
-                    );
-                    out.push(255 - r);
-                    out.push(255 - g);
-                    out.push(255 - b);
-                    out.push(img.sample(3, px, py));
-                }
-                _ => {
-                    return Err(Error::Unsupported(
-                        "JPEG: not a 4-component CMYK/YCCK image",
-                    ));
-                }
+            let i = (py * w + px) * 4;
+            if transform == Transform::Cmyk {
+                out[i] = img.sample(0, px, py);
+                out[i + 1] = img.sample(1, px, py);
+                out[i + 2] = img.sample(2, px, py);
+            } else {
+                // YCCK → CMYK: invert the YCbCr transform on the first three channels, K passes
+                // through (Adobe TN #5116).
+                let (r, g, b) = ycbcr_to_rgb(
+                    img.sample(0, px, py),
+                    img.sample(1, px, py),
+                    img.sample(2, px, py),
+                    ColorRange::Full,
+                );
+                out[i..i + 3].copy_from_slice(&[255 - r, 255 - g, 255 - b]);
             }
+            out[i + 3] = img.sample(3, px, py);
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 impl DecodeImage<Rgb8> for JpegDecoder {
@@ -734,6 +755,19 @@ impl DecodeImage<Rgb8> for JpegDecoder {
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_rgb(&img)?, dims)
     }
+
+    /// Reuses `dst`'s sample storage when the decoded dimensions match its own, replacing the
+    /// buffer otherwise. On error `dst` is left unchanged.
+    fn decode_image_into(&self, data: &[u8], dst: &mut ImageBuf<Rgb8>) -> Result<()> {
+        let img = Self::decode_internal(data)?;
+        let dims = Dimensions::new(img.width, img.height)?;
+        if dst.dimensions() == dims {
+            present_rgb_into(&img, dst.as_mut_samples())
+        } else {
+            *dst = ImageBuf::new(present_rgb(&img)?, dims)?;
+            Ok(())
+        }
+    }
 }
 
 impl DecodeImage<Gray8> for JpegDecoder {
@@ -743,6 +777,19 @@ impl DecodeImage<Gray8> for JpegDecoder {
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_gray(&img)?, dims)
     }
+
+    /// Reuses `dst`'s sample storage when the decoded dimensions match its own, replacing the
+    /// buffer otherwise. On error `dst` is left unchanged.
+    fn decode_image_into(&self, data: &[u8], dst: &mut ImageBuf<Gray8>) -> Result<()> {
+        let img = Self::decode_internal(data)?;
+        let dims = Dimensions::new(img.width, img.height)?;
+        if dst.dimensions() == dims {
+            present_gray_into(&img, dst.as_mut_samples())
+        } else {
+            *dst = ImageBuf::new(present_gray(&img)?, dims)?;
+            Ok(())
+        }
+    }
 }
 
 impl DecodeImage<Cmyk8> for JpegDecoder {
@@ -751,6 +798,19 @@ impl DecodeImage<Cmyk8> for JpegDecoder {
         let img = Self::decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_cmyk(&img)?, dims)
+    }
+
+    /// Reuses `dst`'s sample storage when the decoded dimensions match its own, replacing the
+    /// buffer otherwise. On error `dst` is left unchanged.
+    fn decode_image_into(&self, data: &[u8], dst: &mut ImageBuf<Cmyk8>) -> Result<()> {
+        let img = Self::decode_internal(data)?;
+        let dims = Dimensions::new(img.width, img.height)?;
+        if dst.dimensions() == dims {
+            present_cmyk_into(&img, dst.as_mut_samples())
+        } else {
+            *dst = ImageBuf::new(present_cmyk(&img)?, dims)?;
+            Ok(())
+        }
     }
 }
 
@@ -763,7 +823,7 @@ mod tests {
     //! CMYK/YCCK, Adobe/RGB colour, SOF1).
 
     use gamut_color::{ColorRange, ycbcr_to_rgb};
-    use gamut_core::{Cmyk8, DecodeImage, Error, Gray8, ImageBuf, Rgb8};
+    use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Rgb8};
     use gamut_dsp::jpeg::idct8x8;
 
     use super::*;
@@ -1143,6 +1203,33 @@ mod tests {
         let expected = [255 - r, 255 - g, 255 - b, (128 + d[3]) as u8];
         let out: ImageBuf<Cmyk8> = JpegDecoder::new().decode_image(&jpeg).unwrap();
         assert_eq!(&out.as_samples()[..4], &expected);
+    }
+
+    #[test]
+    fn decode_image_into_reuses_a_matching_cmyk_buffer() {
+        // The Cmyk8 counterpart of the tests/decode.rs reuse tests (only unit tests can build a
+        // four-component stream): a matching destination keeps its allocation, and the pixels
+        // equal a fresh decode.
+        let jpeg = four_comp_8x8([10, 20, 30, 40], None);
+        let mut dst: ImageBuf<Cmyk8> = ImageBuf::zeroed(Dimensions::new(8, 8).unwrap()).unwrap();
+        let ptr = dst.as_samples().as_ptr();
+        JpegDecoder::new()
+            .decode_image_into(&jpeg, &mut dst)
+            .unwrap();
+        assert_eq!(dst.as_samples().as_ptr(), ptr, "allocation must be reused");
+        assert!(
+            dst.as_samples()
+                .chunks_exact(4)
+                .all(|p| p == [138, 148, 158, 168])
+        );
+
+        // A mismatched destination falls back to replacement with the right dimensions.
+        let mut small: ImageBuf<Cmyk8> = ImageBuf::zeroed(Dimensions::new(2, 2).unwrap()).unwrap();
+        JpegDecoder::new()
+            .decode_image_into(&jpeg, &mut small)
+            .unwrap();
+        assert_eq!(small.dimensions(), Dimensions::new(8, 8).unwrap());
+        assert_eq!(&small.as_samples()[..4], &[138, 148, 158, 168]);
     }
 
     /// Builds an 8×8 three-component stream (given component ids, all 1×1, quant [`dc8_quant`]) with
