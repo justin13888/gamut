@@ -336,14 +336,29 @@ fn oversized_and_empty_metadata_is_rejected_before_writing() {
             .encode_image(image(), &mut rejected),
         Err(Error::InvalidInput(_))
     ));
-    // XMP beyond the 65502-byte StandardXMP cap needs ExtendedXMP, which is unsupported.
+    // XMP: exactly the 65502-byte StandardXMP cap fits; one byte more needs ExtendedXMP, which
+    // is unsupported.
+    let mut out = Vec::new();
+    assert!(
+        JpegEncoder::new()
+            .with_xmp(&vec![b' '; 65_502])
+            .encode_image(image(), &mut out)
+            .is_ok()
+    );
     assert!(matches!(
         JpegEncoder::new()
             .with_xmp(&vec![b' '; 65_503])
             .encode_image(image(), &mut rejected),
         Err(Error::Unsupported(_))
     ));
-    // ICC beyond 255 chunks cannot be indexed by the one-byte count.
+    // ICC: exactly 255 full chunks fit; one byte more cannot be indexed by the one-byte count.
+    let mut out = Vec::new();
+    assert!(
+        JpegEncoder::new()
+            .with_icc_profile(&vec![0u8; 255 * 65_519])
+            .encode_image(image(), &mut out)
+            .is_ok()
+    );
     assert!(matches!(
         JpegEncoder::new()
             .with_icc_profile(&vec![0u8; 255 * 65_519 + 1])
@@ -509,6 +524,13 @@ fn malformed_streams_are_rejected() {
         metadata(&[0xFF, 0xD8, 0xFF, 0xD0]),
         Err(Error::InvalidInput(_))
     ));
+    // A standalone TEM marker followed by bytes that *would* scan as a plausible empty segment
+    // and a valid stream: the standalone-marker rejection itself must fire — without it the walk
+    // would misread the marker as segment-bearing and succeed.
+    let base = base_jpeg();
+    let mut tem = vec![0xFF, 0xD8, 0xFF, 0x01, 0x00, 0x02];
+    tem.extend_from_slice(&base[2..]);
+    assert!(matches!(metadata(&tem), Err(Error::InvalidInput(_))));
     // A declared segment length running past the end of the data.
     let truncated = [0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF, 0x00];
     assert!(matches!(metadata(&truncated), Err(Error::InvalidInput(_))));
