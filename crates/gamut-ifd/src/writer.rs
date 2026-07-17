@@ -274,7 +274,11 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{read, read_header, read_ifd_at};
+    // Only the BigTIFF round-trip inspects the header directly; an unconditional import is an
+    // unused-import warning in classic-only builds.
+    #[cfg(feature = "bigtiff")]
+    use crate::read_header;
+    use crate::{read, read_ifd_at};
 
     // Tag numbers are used literally: tag semantics live in the consuming codec, not this
     // structural core. 256/257 = ImageWidth/ImageLength, 258 = BitsPerSample, 282 = XResolution.

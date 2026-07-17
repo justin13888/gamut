@@ -7,7 +7,7 @@
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, write};
+use gamut_ifd::{ByteOrder, Ifd, IfdReader, StreamSource, TiffFile, Value, Variant, read, write};
 
 fn main() {
     divan::main();
@@ -58,4 +58,46 @@ fn read_ifd(bencher: Bencher) {
     bencher
         .counter(BytesCount::new(bytes.len()))
         .bench_local(|| read(black_box(&bytes)).unwrap());
+}
+
+/// The streaming reader's eager equivalent over a slice source — the honest price of the
+/// positioned-read indirection against `read_ifd`'s zero-copy baseline.
+#[divan::bench]
+fn read_ifd_streaming_slice(bencher: Bencher) {
+    let bytes = write(&sample_file()).expect("write");
+    bencher
+        .counter(BytesCount::new(bytes.len()))
+        .bench_local(|| {
+            IfdReader::open(black_box(&bytes[..]))
+                .and_then(|mut r| r.read_file())
+                .unwrap()
+        });
+}
+
+/// The RAW-decoder access pattern: open, read one directory body, decode two entries — the
+/// "find the raw sub-IFD" hop that never materialises the rest.
+#[divan::bench]
+fn read_ifd_lazy_peek(bencher: Bencher) {
+    let bytes = write(&sample_file()).expect("write");
+    bencher.bench_local(|| {
+        let mut reader = IfdReader::open(black_box(&bytes[..])).unwrap();
+        let raw = reader.read_ifd(reader.first_ifd_offset()).unwrap();
+        let width = reader.value(raw.entry(256).unwrap()).unwrap();
+        let strips = reader.value(raw.entry(273).unwrap()).unwrap();
+        (width, strips)
+    });
+}
+
+/// The same eager streaming parse through a seek-per-read stream, showing the syscall-shaped
+/// overhead honestly (a `Cursor` here; a `File` in production).
+#[divan::bench]
+fn read_ifd_stream_cursor(bencher: Bencher) {
+    let bytes = write(&sample_file()).expect("write");
+    bencher
+        .counter(BytesCount::new(bytes.len()))
+        .bench_local(|| {
+            IfdReader::open(StreamSource::new(std::io::Cursor::new(black_box(&bytes))))
+                .and_then(|mut r| r.read_file())
+                .unwrap()
+        });
 }
