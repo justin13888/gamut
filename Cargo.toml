@@ -21,6 +21,7 @@ exclude = [
     "tooling/libpng-oracle",
     "tooling/libjpeg-oracle",
     "tooling/exiv2-oracle",
+    "tooling/libheif-oracle",
     # Dev-only helper that builds a vendored nasm from a committed source tarball so the
     # oracles above can assemble the aom/dav1d x86 SIMD without a system nasm. Excluded for
     # the same reason: a plain `cargo build` of the shipped crates must never compile it.

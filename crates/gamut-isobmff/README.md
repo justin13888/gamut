@@ -92,10 +92,18 @@ error rather than mis-parsed (this crate is `#![forbid(unsafe_code)]` and bounds
 Models the HEIF still-image box set: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc`/`iinf`/`iref`/`iprp`/
 `idat`/`grpl`), the `ispe`/`pixi`/`colr` (`nclx` + ICC)/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli`
 properties, opaque codec configuration, and `mdat`. Unrecognised property boxes round-trip
-verbatim. The writer normalises to the smallest box versions; the reader additionally accepts the
-foreign-encoder repertoire (`iloc` v1/v2, `idat` placement, multi-extent payloads, 32-bit item
-ids, 16-bit `ipma` indices). Image sequences/tracks, item protection, and external data references
-are out of scope — see [STATUS.md](STATUS.md) for the full deferred/out-of-scope ledger.
+verbatim. The `grid` and `iovl` derived-image payloads are typed by the opt-in
+[`ImageGrid`]/[`ImageOverlay`] helpers. The writer normalises to the smallest box versions; the
+reader additionally accepts the foreign-encoder repertoire (`iloc` v1/v2, `idat` placement,
+multi-extent payloads, 32-bit item ids, 16-bit `ipma` indices). Image sequences/tracks, item
+protection, and external data references are out of scope — see [STATUS.md](STATUS.md) for the full
+deferred/out-of-scope ledger.
+
+`read` models only the *primary* still-image stream and tolerates real-world "motion photo" files
+that append a second, foreign stream: the top-level walk stops cleanly at a second top-level `ftyp`
+(the first wins) and at a malformed trailing box once `ftyp`+`meta` are seen. Mapping every byte of
+the appended remainder to a box or trailer is a consumer's job (`gamut-heic`), served by the
+re-exported [`BoxReader`]/[`RawBox`] box-walk primitives.
 
 Box byte layouts follow ISO/IEC 14496-12 (ISOBMFF) and ISO/IEC 23008-12 (HEIF) — paywalled, so
 cross-checked against the public AVIF box table, hand-authored spec fixtures, and a vendored

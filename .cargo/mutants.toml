@@ -13,7 +13,7 @@ all_features = true
 # the test oracle, not the system under test, so mutating it is meaningless (and its high-bit-depth
 # FFI paths are only exercised once the encoder emits them). This matches the coverage gate, which
 # excludes the same set (the `coverage` mise task, --ignore-filename-regex). Stub crates
-# (av2/jxl/vvc/heic) contain no function bodies and generate no mutants, so they need no entry here.
+# (av2/vvc) contain no function bodies and generate no mutants, so they need no entry here.
 exclude_globs = [
     "crates/gamut-cli/**",
     "crates/gamut-wasm/**",
@@ -24,12 +24,11 @@ exclude_globs = [
     # behaviour cargo-mutants can exercise. Excluded like the binding/binary crates (matches the
     # coverage gate's --ignore-filename-regex).
     "crates/gamut-jxl-sys/**",
-    # The facade crates carry no meaningfully complicated logic of their own — `gamut` is pure
-    # `#[cfg(feature)] pub use` re-exports (it generates no mutants anyway) and `gamut-metadata`
-    # is a thin aggregation facade over the per-format metadata crates, whose logic is mutated
-    # and tested in gamut-exif/xmp/icc/iptc themselves. Excluded package-wide (maintainer
-    # direction, issue #28 hardening) to keep the heavy full-workspace survey focused on codec
-    # logic.
+    # The facade crates carry no meaningfully complicated logic of their own: `gamut` is pure
+    # feature-gated re-exports (no function bodies), and `gamut-metadata` is the thin metadata
+    # facade whose per-format parsing/serialisation lives in gamut-exif/xmp/icc/iptc (each
+    # mutation-tested in place). Excluded package-wide so the heavy mutants runs spend their
+    # budget on the crates that own the logic.
     "crates/gamut/**",
     "crates/gamut-metadata/**",
     "tooling/**",
@@ -501,4 +500,32 @@ exclude_re = [
     # `== 1` from `!= 1`. (The `abs == 0` and `abs > 1` branch tests, which DO change coefficients, are
     # caught — this line:col anchor leaves them in the survey.)
     'progressive\.rs:454:55: replace == with !=',
+    # gamut-heic (issue #238) — behaviourally-equivalent survivors.
+    # `Reader::u48` (hvcc.rs) assembles a 48-bit big-endian value byte-by-byte via
+    # `(acc << 8) | u64::from(byte)`: the running accumulator is shifted up 8 bits before each OR, so
+    # its low 8 bits are always zero and never overlap the freshly-read byte (0..=255). Disjoint
+    # operands ⇒ `|` is identical to `^`; the `| -> ^` mutant is provably equivalent (same shape as
+    # the gamut-ifd `Value::decode` / gamut-iptc `IimBlock::parse` byte-assembly entries above).
+    'replace \| with \^ in Reader<.a>::u48',
+    # `NalHeader::parse` (nal.rs) packs `nuh_layer_id` from two disjoint bit fields:
+    # `(u16::from(b0 & 0x01) << 5) | u16::from(b1 >> 3)`. The left operand contributes only bit 5
+    # (0 or 32); the right only bits 0..=4 (`b1 >> 3` is 0..=31). The operands never share a bit, so
+    # `| -> ^` is equivalent.
+    'replace \| with \^ in NalHeader::parse',
+    # `NalUnitIter::next` (nal.rs) accumulates a big-endian length prefix via
+    # `(acc << 8) | usize::from(b)`: identical disjoint-byte shape as `Reader::u48`, so `| -> ^` is
+    # equivalent.
+    'replace \| with \^ in <impl Iterator for NalUnitIter<.a>>::next',
+    # `walk_segments` (container.rs) is reached only from `HeifContainer::parse`, and only *after*
+    # `gamut_isobmff::read(data)?` has already succeeded — which requires both `ftyp` and `meta` to
+    # have been parsed. `walk_segments` replays the identical `BoxReader` walk, so by the time it
+    # reaches its malformed-box arm (the only place the `seen_ftyp && seen_meta` guard runs) both
+    # flags are necessarily true (had a malformed box preceded either, `read` itself would have
+    # errored and `parse` would never call `walk_segments`). With both operands always true at that
+    # point, `&&` and `||` are indistinguishable — the mutant is equivalent. Line-anchored (like the
+    # frame.rs entries above) because the *other* `&&` in the same function — the second-`ftyp`
+    # appended-stream detection at container.rs:253 — is observable and stays killed by the
+    # accounting tests. (The analogous tolerance guard in `read`, which *is* reachable with only one
+    # box seen, is killed by the exact-message tests in gamut-isobmff `tests/reader.rs`.)
+    'container\.rs:283:30: replace && with \|\|',
 ]

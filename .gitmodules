@@ -28,3 +28,12 @@
 [submodule "third_party/libjpeg-turbo"]
 	path = third_party/libjpeg-turbo
 	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+[submodule "third_party/libde265"]
+	path = third_party/libde265
+	url = https://github.com/strukturag/libde265
+[submodule "third_party/kvazaar"]
+	path = third_party/kvazaar
+	url = https://github.com/ultravideo/kvazaar
+[submodule "third_party/libheif"]
+	path = third_party/libheif
+	url = https://github.com/strukturag/libheif

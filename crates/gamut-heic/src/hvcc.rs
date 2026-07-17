@@ -1,0 +1,383 @@
+//! The typed `hvcC` HEVCDecoderConfigurationRecord ([`HevcConfig`]) and the config-driven bridges to
+//! a downstream HEVC decoder: [`HevcConfig::annex_b`] (length-prefixed → Annex-B start codes) and
+//! [`HevcConfig::validate_still_payload`] (the still-image IRAP constraint).
+//!
+//! Layout is `references/heif` §1 (ISO/IEC 14496-15 §8.3.3.1) exactly. All `reserved` fields are
+//! **ignored** on read (a reader must not reject non-conforming reserved bits — §1); they are masked
+//! away and never validated.
+
+use gamut_core::{Error, Result};
+
+use crate::nal::{NalHeader, NalUnitType, iter_nal_units};
+
+/// The chroma sampling format, from `chroma_format_idc` (`references/heif` §1: 0 = mono, 1 = 4:2:0,
+/// 2 = 4:2:2, 3 = 4:4:4).
+///
+/// `#[repr(u8)]` with explicit discriminants equal to `chroma_format_idc` (0..=3), so the value is
+/// stable across the FFI boundary a platform decoder crosses (issue #238's C-compatibility goal):
+/// a `-sys` shim can pass the raw discriminant without a translation table.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChromaFormat {
+    /// Monochrome (`chroma_format_idc` 0): a single luma plane, no chroma.
+    Monochrome = 0,
+    /// 4:2:0 (`chroma_format_idc` 1): chroma sub-sampled by two horizontally and vertically.
+    Yuv420 = 1,
+    /// 4:2:2 (`chroma_format_idc` 2): chroma sub-sampled by two horizontally.
+    Yuv422 = 2,
+    /// 4:4:4 (`chroma_format_idc` 3): full-resolution chroma.
+    Yuv444 = 3,
+}
+
+impl ChromaFormat {
+    /// The dimensions of each chroma (Cb/Cr) plane for a luma plane of `width` × `height`, using
+    /// **ceiling** division on the subsampled axes so an odd luma dimension keeps the half-covering
+    /// edge sample: 4:2:0 ⇒ `(ceil(width/2), ceil(height/2))`, 4:2:2 ⇒ `(ceil(width/2), height)`,
+    /// 4:4:4 ⇒ `(width, height)`. [`Monochrome`](Self::Monochrome) has no chroma, so it returns
+    /// `(0, 0)`.
+    #[must_use]
+    pub fn chroma_dimensions(self, width: u32, height: u32) -> (u32, u32) {
+        match self {
+            ChromaFormat::Monochrome => (0, 0),
+            ChromaFormat::Yuv420 => (width.div_ceil(2), height.div_ceil(2)),
+            ChromaFormat::Yuv422 => (width.div_ceil(2), height),
+            ChromaFormat::Yuv444 => (width, height),
+        }
+    }
+}
+
+/// One parameter-set array of a [`HevcConfig`] (`references/heif` §1): all NAL units sharing a
+/// `NAL_unit_type`, in file order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NalArray {
+    /// `array_completeness`: when `true`, this array holds *all* NAL units of
+    /// [`nal_unit_type`](Self::nal_unit_type) and none appear inband in the item payload.
+    pub completeness: bool,
+    /// The NAL unit type shared by every unit in [`nal_units`](Self::nal_units).
+    pub nal_unit_type: NalUnitType,
+    /// The raw NAL units (each is `header + RBSP`, no start code), in file order.
+    pub nal_units: Vec<Vec<u8>>,
+}
+
+/// A parsed `hvcC` HEVCDecoderConfigurationRecord (ISO/IEC 14496-15 §8.3.3.1; `references/heif` §1).
+///
+/// The fixed 23-byte header fields are exposed as typed values (bit-width fields as the smallest
+/// integer that holds them), followed by the parameter-set [`arrays`](Self::arrays). Reserved bits
+/// are ignored on read per §1, so two records differing only in their reserved bits parse equal.
+///
+/// Construct via [`parse`](Self::parse). Non-exhaustive so later fields can be surfaced additively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HevcConfig {
+    /// `general_profile_space` (2 bits) — from the HEVC `profile_tier_level()`.
+    pub general_profile_space: u8,
+    /// `general_tier_flag` (1 bit) — `false` = Main tier, `true` = High tier.
+    pub general_tier_flag: bool,
+    /// `general_profile_idc` (5 bits) — 1 = Main, 2 = Main 10, 3 = Main Still Picture, 4 = Rext.
+    pub general_profile_idc: u8,
+    /// `general_profile_compatibility_flags` (32 bits).
+    pub general_profile_compatibility_flags: u32,
+    /// `general_constraint_indicator_flags` (48 bits, held in the low 48 bits of the `u64`).
+    pub general_constraint_indicator_flags: u64,
+    /// `general_level_idc` (8 bits).
+    pub general_level_idc: u8,
+    /// `min_spatial_segmentation_idc` (12 bits).
+    pub min_spatial_segmentation_idc: u16,
+    /// `parallelismType` (2 bits) — 0 = unknown/mixed, 1 = slice, 2 = tile, 3 = WPP.
+    pub parallelism_type: u8,
+    /// `chroma_format_idc` (2 bits) — see [`chroma_format`](Self::chroma_format).
+    pub chroma_format_idc: u8,
+    /// `bit_depth_luma_minus8` (3 bits) — see [`bit_depth_luma`](Self::bit_depth_luma).
+    pub bit_depth_luma_minus8: u8,
+    /// `bit_depth_chroma_minus8` (3 bits) — see [`bit_depth_chroma`](Self::bit_depth_chroma).
+    pub bit_depth_chroma_minus8: u8,
+    /// `avgFrameRate` (16 bits) — 0 = unspecified (a still image).
+    pub avg_frame_rate: u16,
+    /// `constantFrameRate` (2 bits).
+    pub constant_frame_rate: u8,
+    /// `numTemporalLayers` (3 bits).
+    pub num_temporal_layers: u8,
+    /// `temporalIdNested` (1 bit).
+    pub temporal_id_nested: bool,
+    /// `lengthSizeMinusOne` (2 bits) — the NAL length-prefix width minus one; see
+    /// [`nal_length_size`](Self::nal_length_size).
+    pub length_size_minus_one: u8,
+    /// The parameter-set arrays (VPS/SPS/PPS/SEI…), in file order.
+    pub arrays: Vec<NalArray>,
+}
+
+impl HevcConfig {
+    /// Parses an `hvcC` HEVCDecoderConfigurationRecord from its raw body bytes (the `hvcC` item
+    /// property, `references/heif` §1).
+    ///
+    /// Reserved bits are masked away and never validated (§1). The parse is exact: every byte must
+    /// belong to the header or an array — trailing bytes after the last array are an error.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Unsupported`] if `configurationVersion != 1`.
+    /// - [`Error::InvalidInput`] if `lengthSizeMinusOne` is 2 (14496-15 permits only 0, 1, 3 ⇒
+    ///   1/2/4-byte prefixes), if the record is truncated anywhere (header, an array header, or a
+    ///   NAL unit body), or if any bytes remain after the final array.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(data);
+        let configuration_version = r.u8()?;
+        if configuration_version != 1 {
+            return Err(Error::Unsupported(
+                "HEIC: hvcC configurationVersion must be 1",
+            ));
+        }
+        let b1 = r.u8()?;
+        let general_profile_space = (b1 >> 6) & 0x03;
+        let general_tier_flag = (b1 >> 5) & 0x01 != 0;
+        let general_profile_idc = b1 & 0x1f;
+        let general_profile_compatibility_flags = r.u32()?;
+        let general_constraint_indicator_flags = r.u48()?;
+        let general_level_idc = r.u8()?;
+        // reserved(4) | min_spatial_segmentation_idc(12): keep only the low 12 bits.
+        let min_spatial_segmentation_idc = r.u16()? & 0x0fff;
+        // reserved(6) | parallelismType(2).
+        let parallelism_type = r.u8()? & 0x03;
+        // reserved(6) | chroma_format_idc(2).
+        let chroma_format_idc = r.u8()? & 0x03;
+        // reserved(5) | bit_depth_luma_minus8(3).
+        let bit_depth_luma_minus8 = r.u8()? & 0x07;
+        // reserved(5) | bit_depth_chroma_minus8(3).
+        let bit_depth_chroma_minus8 = r.u8()? & 0x07;
+        let avg_frame_rate = r.u16()?;
+        // constantFrameRate(2) | numTemporalLayers(3) | temporalIdNested(1) | lengthSizeMinusOne(2).
+        let packed = r.u8()?;
+        let constant_frame_rate = (packed >> 6) & 0x03;
+        let num_temporal_layers = (packed >> 3) & 0x07;
+        let temporal_id_nested = (packed >> 2) & 0x01 != 0;
+        let length_size_minus_one = packed & 0x03;
+        if length_size_minus_one == 2 {
+            return Err(Error::InvalidInput(
+                "HEIC: hvcC lengthSizeMinusOne 2 (only 0/1/3 are legal)",
+            ));
+        }
+        let num_of_arrays = r.u8()?;
+
+        // `numOfArrays`/`numNalus`/`nalUnitLength` are untrusted; do not pre-allocate from them —
+        // the bounded reads below fail on truncation, so a malformed count errors after a bounded
+        // number of iterations (mirrors the gamut-isobmff reader).
+        let mut arrays = Vec::new();
+        for _ in 0..num_of_arrays {
+            // array_completeness(1) | reserved(1) | NAL_unit_type(6).
+            let head = r.u8()?;
+            let completeness = head & 0x80 != 0;
+            let nal_unit_type = NalUnitType::from_raw(head & 0x3f);
+            let num_nalus = r.u16()?;
+            let mut nal_units = Vec::new();
+            for _ in 0..num_nalus {
+                let nal_unit_length = usize::from(r.u16()?);
+                nal_units.push(r.take(nal_unit_length)?.to_vec());
+            }
+            arrays.push(NalArray {
+                completeness,
+                nal_unit_type,
+                nal_units,
+            });
+        }
+        if !r.at_end() {
+            return Err(Error::InvalidInput(
+                "HEIC: hvcC trailing bytes after arrays",
+            ));
+        }
+
+        Ok(Self {
+            general_profile_space,
+            general_tier_flag,
+            general_profile_idc,
+            general_profile_compatibility_flags,
+            general_constraint_indicator_flags,
+            general_level_idc,
+            min_spatial_segmentation_idc,
+            parallelism_type,
+            chroma_format_idc,
+            bit_depth_luma_minus8,
+            bit_depth_chroma_minus8,
+            avg_frame_rate,
+            constant_frame_rate,
+            num_temporal_layers,
+            temporal_id_nested,
+            length_size_minus_one,
+            arrays,
+        })
+    }
+
+    /// The luma bit depth (`bit_depth_luma_minus8 + 8`).
+    #[must_use]
+    pub fn bit_depth_luma(&self) -> u8 {
+        self.bit_depth_luma_minus8 + 8
+    }
+
+    /// The chroma bit depth (`bit_depth_chroma_minus8 + 8`).
+    #[must_use]
+    pub fn bit_depth_chroma(&self) -> u8 {
+        self.bit_depth_chroma_minus8 + 8
+    }
+
+    /// The chroma sampling format, mapping `chroma_format_idc` `0..=3` to a [`ChromaFormat`].
+    #[must_use]
+    pub fn chroma_format(&self) -> ChromaFormat {
+        match self.chroma_format_idc {
+            0 => ChromaFormat::Monochrome,
+            1 => ChromaFormat::Yuv420,
+            2 => ChromaFormat::Yuv422,
+            // `chroma_format_idc` is a 2-bit field, so the only remaining value is 3.
+            _ => ChromaFormat::Yuv444,
+        }
+    }
+
+    /// The NAL length-prefix width in bytes (`lengthSizeMinusOne + 1` ⇒ 1, 2, or 4), governing the
+    /// item-payload split ([`crate::iter_nal_units`], `references/heif` §2).
+    #[must_use]
+    pub fn nal_length_size(&self) -> usize {
+        usize::from(self.length_size_minus_one) + 1
+    }
+
+    /// The NAL units of the given parameter-set type across all arrays, in file order.
+    ///
+    /// A single record may carry more than one array of the same type, and more than one NAL unit
+    /// per array (e.g. several SPS), so this flattens every match in order.
+    pub fn parameter_sets(&self, ty: NalUnitType) -> impl Iterator<Item = &[u8]> + '_ {
+        self.arrays
+            .iter()
+            .filter(move |a| a.nal_unit_type == ty)
+            .flat_map(|a| a.nal_units.iter().map(Vec::as_slice))
+    }
+
+    /// The Video Parameter Set (VPS) NAL units, in file order (a record normally carries one).
+    pub fn vps(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.parameter_sets(NalUnitType::Vps)
+    }
+
+    /// The Sequence Parameter Set (SPS) NAL units, in file order (a record may carry several).
+    pub fn sps(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.parameter_sets(NalUnitType::Sps)
+    }
+
+    /// The Picture Parameter Set (PPS) NAL units, in file order (a record may carry several).
+    pub fn pps(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.parameter_sets(NalUnitType::Pps)
+    }
+
+    /// Converts an `hvc1`/`hev1` item `payload` to an Annex-B (ITU-T H.265 Annex B) NAL stream,
+    /// appending to `out` (ISO/IEC 14496-15 §8.3.2 / §8.4; `references/heif` §2).
+    ///
+    /// Each NAL unit is prefixed with a four-byte start code (`00 00 00 01`). The record's parameter
+    /// sets are emitted first — all VPS, then all SPS, then all PPS, then any remaining arrays (e.g.
+    /// SEI) in file order — followed by every NAL unit of `payload` in order. Bytes are appended, so
+    /// callers can reuse a scratch buffer (allocation-conscious).
+    ///
+    /// This does **not** de-duplicate: an `hev1` payload may already carry inband parameter sets, in
+    /// which case the emitted stream repeats them. That is intentional — an H.265 decoder accepts
+    /// repeated parameter sets, so de-duplication is neither required nor performed here.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the payload-split errors of [`crate::iter_nal_units`] (truncated length prefix,
+    /// truncated NAL body, or a zero-length NAL). On error, bytes already appended to `out` are left
+    /// in place.
+    pub fn annex_b(&self, payload: &[u8], out: &mut Vec<u8>) -> Result<()> {
+        const START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
+        let mut emit = |nal: &[u8]| {
+            out.extend_from_slice(&START_CODE);
+            out.extend_from_slice(nal);
+        };
+        for nal in self.vps() {
+            emit(nal);
+        }
+        for nal in self.sps() {
+            emit(nal);
+        }
+        for nal in self.pps() {
+            emit(nal);
+        }
+        for array in &self.arrays {
+            if array.nal_unit_type.is_parameter_set() {
+                continue;
+            }
+            for nal in &array.nal_units {
+                emit(nal);
+            }
+        }
+        for nal in iter_nal_units(payload, self.nal_length_size()) {
+            emit(nal?);
+        }
+        Ok(())
+    }
+
+    /// Validates that an `hvc1`/`hev1` item `payload` satisfies the HEIF still-image constraint: every
+    /// VCL NAL unit is an IRAP picture (`nal_unit_type` `16..=23`), so the item is independently
+    /// decodable with no inter-picture prediction (`references/heif` §3).
+    ///
+    /// Non-VCL NAL units (parameter sets, SEI) are permitted and pass through unchecked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if a VCL NAL unit is not an IRAP type, and propagates the
+    /// payload-split ([`crate::iter_nal_units`]) and NAL-header ([`NalHeader::parse`]) errors.
+    pub fn validate_still_payload(&self, payload: &[u8]) -> Result<()> {
+        for nal in iter_nal_units(payload, self.nal_length_size()) {
+            let header = NalHeader::parse(nal?)?;
+            if header.unit_type.is_vcl() && !header.unit_type.is_irap() {
+                return Err(Error::InvalidInput(
+                    "HEIC: still-image payload has a non-IRAP VCL NAL unit",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A minimal big-endian, bounds-checked byte cursor for the `hvcC` body. Every read is fallible and
+/// returns [`Error::InvalidInput`] on truncation, so a malformed length never reads out of bounds.
+struct Reader<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    /// Reads `n` bytes, advancing the cursor.
+    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .filter(|&end| end <= self.data.len())
+            .ok_or(Error::InvalidInput("HEIC: hvcC truncated"))?;
+        let out = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16> {
+        let b = self.take(2)?;
+        Ok(u16::from_be_bytes([b[0], b[1]]))
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        let b = self.take(4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Reads a 48-bit big-endian value into the low 48 bits of a `u64`.
+    fn u48(&mut self) -> Result<u64> {
+        let b = self.take(6)?;
+        Ok(b.iter()
+            .fold(0u64, |acc, &byte| (acc << 8) | u64::from(byte)))
+    }
+
+    fn at_end(&self) -> bool {
+        self.pos == self.data.len()
+    }
+}

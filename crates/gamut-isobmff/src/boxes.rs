@@ -7,6 +7,15 @@
 //! can only be filled once the `mdat` payload position is known. [`BoxReader`] is the read dual: a
 //! bounds-checked cursor whose [`BoxReader::next_box`] walks a box list, never trusting a length
 //! from the stream without checking it against the remaining bytes.
+//!
+//! Visibility: [`BoxBuilder`] is an internal writer detail and stays crate-private. [`BoxReader`]
+//! and [`RawBox`] are re-exported from the crate root as the box-walk primitive a byte-accounting
+//! consumer (e.g. `gamut-heic`) uses to map every byte of a file to a box; their public surface is
+//! deliberately the walk only — [`BoxReader::new`], [`BoxReader::next_box`],
+//! [`BoxReader::position`], [`BoxReader::remaining`], and [`RawBox`]'s fields. The scalar
+//! big-endian field readers ([`BoxReader::u8`], `u16`, `u32`, `u64`, [`BoxReader::fourcc`],
+//! [`BoxReader::take`]) stay crate-private: they decode box *bodies*, which is this crate's job,
+//! not a consumer's.
 
 use gamut_core::{Error, Result};
 
@@ -81,29 +90,75 @@ impl BoxBuilder {
     }
 }
 
-/// A bounds-checked big-endian cursor over a byte slice, used to parse a box (or a list of boxes).
+/// A bounds-checked big-endian cursor over a byte slice, used to walk a box list.
 ///
 /// Every read is checked against the remaining bytes, so a truncated or malformed stream yields a
-/// typed [`Error`] rather than a panic.
-pub(crate) struct BoxReader<'a> {
+/// typed [`Error`] rather than a panic. It is the box-walk primitive re-exported for byte-accounting
+/// consumers: [`new`](Self::new) opens a cursor over a slice, [`next_box`](Self::next_box) yields
+/// each [`RawBox`] in turn (with its [`offset`](RawBox::offset) within that slice),
+/// [`position`](Self::position) is the current cursor, and [`remaining`](Self::remaining) is the
+/// unconsumed tail. To descend into a box, open a fresh reader over its [`body`](RawBox::body).
+///
+/// ```
+/// use gamut_isobmff::BoxReader;
+/// // Two consecutive boxes: an empty 8-byte `free`, then a `skip` with a 2-byte body.
+/// let data = [
+///     0, 0, 0, 8, b'f', b'r', b'e', b'e', // free: size 8, empty body
+///     0, 0, 0, 10, b's', b'k', b'i', b'p', 0xAA, 0xBB, // skip: size 10, body {AA, BB}
+/// ];
+/// let mut r = BoxReader::new(&data);
+///
+/// let free = r.next_box().unwrap().expect("first box");
+/// assert_eq!(&free.ty, b"free");
+/// assert_eq!(free.offset, 0); // header starts at the slice start
+/// assert!(free.body.is_empty());
+/// assert_eq!(r.position(), 8); // cursor now past the first box
+///
+/// let skip = r.next_box().unwrap().expect("second box");
+/// assert_eq!(&skip.ty, b"skip");
+/// assert_eq!(skip.offset, 8); // header starts right after `free`; body is at 8 + 8 = 16
+/// assert_eq!(skip.body, &[0xAA, 0xBB]);
+/// assert_eq!(r.position(), 18);
+///
+/// assert_eq!(r.remaining(), 0);
+/// assert!(r.next_box().unwrap().is_none()); // clean end of the slice
+/// ```
+pub struct BoxReader<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
-/// One box returned by [`BoxReader::next_box`]: its four-character type and a borrow of its body.
-pub(crate) struct RawBox<'a> {
-    pub(crate) ty: [u8; 4],
-    pub(crate) body: &'a [u8],
+/// One box yielded by [`BoxReader::next_box`]: its four-character type, a borrow of its body, and
+/// the absolute offset of its header within the slice the reader was created over.
+pub struct RawBox<'a> {
+    /// The box type (its four-character code).
+    pub ty: [u8; 4],
+    /// The box body — the bytes after the 8-byte header (only 32-bit `size`/`type` headers are
+    /// accepted, so the body starts at [`offset`](Self::offset)` + 8`).
+    pub body: &'a [u8],
+    /// Absolute offset of this box's header within the slice the [`BoxReader`] was created over
+    /// (the size field). The body therefore occupies `offset + 8 .. offset + 8 + body.len()`, which
+    /// a byte-accounting consumer uses to map the whole file to boxes.
+    pub offset: usize,
 }
 
 impl<'a> BoxReader<'a> {
     /// Creates a cursor at the start of `data`.
-    pub(crate) fn new(data: &'a [u8]) -> Self {
+    #[must_use]
+    pub fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
+    /// The current cursor position: the number of bytes consumed from the start of the slice, i.e.
+    /// the absolute offset at which the next [`next_box`](Self::next_box) would read a header.
+    #[must_use]
+    pub fn position(&self) -> usize {
+        self.pos
+    }
+
     /// Bytes not yet consumed.
-    pub(crate) fn remaining(&self) -> usize {
+    #[must_use]
+    pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
     }
 
@@ -155,13 +210,20 @@ impl<'a> BoxReader<'a> {
     /// Reads the next box header and body, advancing past it. Returns `Ok(None)` at a clean end of
     /// the slice.
     ///
+    /// The returned [`RawBox::offset`] records where this box's header began within the slice.
+    ///
     /// Only 32-bit box sizes are accepted: a `size == 1` (64-bit `largesize`) or `size == 0` (box
     /// extends to end-of-file) is rejected as [`Error::Unsupported`] — this crate never writes them,
     /// and accepting an unwritten path would leave it untested.
-    pub(crate) fn next_box(&mut self) -> Result<Option<RawBox<'a>>> {
+    ///
+    /// # Errors
+    /// Returns [`Error::InvalidInput`] if the header or body is truncated or the declared `size` is
+    /// smaller than the 8-byte header, and [`Error::Unsupported`] for a 64-bit or open-ended size.
+    pub fn next_box(&mut self) -> Result<Option<RawBox<'a>>> {
         if self.remaining() == 0 {
             return Ok(None);
         }
+        let offset = self.pos;
         let size = self.u32()? as usize;
         let ty = self.fourcc()?;
         match size {
@@ -171,6 +233,6 @@ impl<'a> BoxReader<'a> {
             _ => {}
         }
         let body = self.take(size - 8)?;
-        Ok(Some(RawBox { ty, body }))
+        Ok(Some(RawBox { ty, body, offset }))
     }
 }

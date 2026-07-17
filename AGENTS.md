@@ -41,7 +41,12 @@ Dependency edges (a crate depends on those to its right):
   DCT Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF), with the sequential/progressive
   decoder and progressive encoder phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only).
   ← core, color, dsp.
-- **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff. **gamut-heic** ← isobmff, core, color.
+- **gamut-avif** ← av1, isobmff, core, color. **gamut-webp** ← +riff.
+- **gamut-heic** -- decode-only HEIF/HEIC container (issue #238): full-fidelity byte-accounting
+  parse (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
+  `hvcC`/NAL layer, and a pluggable `HevcDecoder` hook for platform HEVC decoders — the HEVC
+  bitstream decode itself is issue #18. Differential oracle: libheif+libde265 (+kvazaar fixture
+  generation), dev-only via `tooling/libheif-oracle`. ← isobmff, core, color.
 - **gamut-ifd** -- TIFF/IFD container core (byte order, field types, IFD read/write); a low-level
   container primitive (sibling to bitstream), shared by the `gamut-tiff` codec (issue #107) and EXIF
   metadata. ← core. Its optional `bigtiff` feature adds the 64-bit BigTIFF variant. The per-format
