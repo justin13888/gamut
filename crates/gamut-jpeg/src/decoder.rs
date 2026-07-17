@@ -48,6 +48,7 @@
 use gamut_color::{ColorRange, ycbcr_to_rgb};
 use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result, Rgb8};
 
+use crate::appmeta;
 use crate::marker::code;
 use crate::scan::{Plane, ProgComp, decode_progressive_scan, decode_scan};
 use crate::syntax::{
@@ -173,6 +174,82 @@ pub fn info(data: &[u8]) -> Result<JpegInfo> {
             process,
         });
     }
+}
+
+/// Embedded APP-segment metadata read from a JPEG stream by [`metadata`].
+///
+/// Each payload is stored with its APPn signature header stripped, in the form the dedicated
+/// metadata crates parse (and [`gamut-metadata`](https://crates.io/crates/gamut-metadata)'s
+/// `MetadataBlock` borrows) directly. Marked `#[non_exhaustive]` so carriers (e.g. APP13 IPTC) can
+/// be added without a breaking change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JpegMetadata {
+    /// The EXIF TIFF stream (APP1, `"Exif\0\0"` signature stripped; starts `II`/`MM`).
+    pub exif: Option<Vec<u8>>,
+    /// The XMP `xpacket` (APP1, namespace-URI signature stripped).
+    pub xmp: Option<Vec<u8>>,
+    /// The ICC profile, reassembled from its APP2 `ICC_PROFILE` chunks.
+    pub icc: Option<Vec<u8>>,
+}
+
+/// Reads a JPEG stream's embedded APP1/APP2 metadata without decoding any pixels.
+///
+/// Walks the marker segments up to the first SOS (or EOI) — metadata segments precede the scan
+/// data, so no entropy decoding happens — and collects the three de-facto payloads: APP1 EXIF
+/// (Exif 3.0 §4.7.2), APP1 XMP (XMP Part 3 §1.1.3), and the APP2 `ICC_PROFILE` chunk sequence
+/// (ICC.1:2001-04 Annex B.4), reassembled by chunk index regardless of segment order. For a
+/// duplicated EXIF or XMP APP1 the first segment wins (the libjpeg-family convention); ExtendedXMP
+/// continuation segments and unrecognized APP1/APP2 payloads are skipped.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the stream is malformed before the first scan, or if the
+/// `ICC_PROFILE` chunk sequence is inconsistent (index/count out of range, duplicated, mismatched,
+/// or missing chunks).
+///
+/// # Example
+///
+/// ```
+/// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
+/// use gamut_jpeg::JpegEncoder;
+///
+/// let pixels = vec![128u8; 64];
+/// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
+/// let jpeg = JpegEncoder::new().encode_to_vec(image)?;
+/// assert_eq!(gamut_jpeg::metadata(&jpeg)?, gamut_jpeg::JpegMetadata::default());
+/// # Ok::<(), gamut_core::Error>(())
+/// ```
+pub fn metadata(data: &[u8]) -> Result<JpegMetadata> {
+    expect_soi(data)?;
+    let mut meta = JpegMetadata::default();
+    let mut icc = appmeta::IccAssembler::default();
+    let mut pos = 2;
+    loop {
+        let (marker, after) = read_marker(data, pos)?;
+        match marker {
+            code::SOS | code::EOI_CODE => break,
+            code::SOI | code::TEM | code::RST0..=code::RST7 => {
+                return Err(Error::InvalidInput("JPEG: unexpected standalone marker"));
+            }
+            _ => {}
+        }
+        let (payload, next) = read_segment(data, after)?;
+        match marker {
+            code::APP1 => {
+                if let Some(tiff) = appmeta::exif_payload(payload) {
+                    meta.exif.get_or_insert_with(|| tiff.to_vec());
+                } else if let Some(packet) = appmeta::xmp_payload(payload) {
+                    meta.xmp.get_or_insert_with(|| packet.to_vec());
+                }
+            }
+            code::APP2 => icc.add(payload)?,
+            _ => {}
+        }
+        pos = next;
+    }
+    meta.icc = icc.finish()?;
+    Ok(meta)
 }
 
 /// Shared truncated-frame-header error.

@@ -37,6 +37,10 @@ pub mod code {
     pub const SOS: u8 = 0xDA;
     /// Application data segment 0 (used by JFIF).
     pub const APP0: u8 = 0xE0;
+    /// Application data segment 1 (used by EXIF, Exif 3.0 §4.7.2, and XMP, XMP Part 3 §1.1.3).
+    pub const APP1: u8 = 0xE1;
+    /// Application data segment 2 (used for `ICC_PROFILE` chunks, ICC.1:2001-04 Annex B.4).
+    pub const APP2: u8 = 0xE2;
     /// Application data segment 14 (used by Adobe for the colour-transform flag, TN #5116).
     pub const APP14: u8 = 0xEE;
     /// End of image.

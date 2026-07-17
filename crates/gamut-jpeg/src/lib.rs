@@ -65,6 +65,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod appmeta;
 mod bitwriter;
 mod decoder;
 mod encoder;
@@ -76,6 +77,6 @@ mod scan;
 mod syntax;
 mod zigzag;
 
-pub use decoder::{JpegDecoder, JpegInfo, JpegProcess, info};
+pub use decoder::{JpegDecoder, JpegInfo, JpegMetadata, JpegProcess, info, metadata};
 pub use encoder::{ChromaSubsampling, JpegEncoder};
 pub use marker::DensityUnit;
