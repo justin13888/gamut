@@ -49,13 +49,17 @@ fn minimal_le(type_code: u16, next: u32) -> Vec<u8> {
 }
 
 #[test]
-fn unknown_field_type_is_skipped() {
-    let parsed = read(&minimal_le(13, 0)).expect("parse with unknown type");
+fn unknown_field_type_is_preserved_verbatim() {
+    // 0xF0 is not a recognised field type; the entry is preserved raw (issue #263 — nothing is
+    // dropped on read → rewrite), not decoded and not skipped.
+    let parsed = read(&minimal_le(0xF0, 0)).expect("parse with unknown type");
     assert_eq!(parsed.ifds.len(), 1);
-    assert!(
-        parsed.ifds[0].fields().is_empty(),
-        "unknown-type field skipped"
-    );
+    let fields = parsed.ifds[0].fields();
+    assert_eq!(fields.len(), 1, "unknown-type field preserved");
+    assert_eq!(fields[0].value.field_type(), None);
+    assert_eq!(fields[0].value.type_code(), 0xF0);
+    // It carries no decodable integer, so the typed accessor refuses.
+    assert_eq!(parsed.ifds[0].get_u32(tags::IMAGE_WIDTH), None);
 }
 
 #[test]

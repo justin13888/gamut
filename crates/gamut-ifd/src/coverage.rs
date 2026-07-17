@@ -43,11 +43,11 @@ pub struct Overlap {
 
 /// An IFD entry whose on-disk field-type code is not recognised.
 ///
-/// The normal reader skips such entries silently (TIFF 6.0 §2 says readers ignore unknown field
-/// types); the coverage path records them here instead so a deconstruct can report them. The
-/// 12-/20-byte entry record itself is covered by the enclosing IFD-body mark, but the entry's
-/// out-of-line value bytes (if any) cannot be sized — so they surface as a coverage gap, which is
-/// the correct archival signal.
+/// The readers preserve such entries verbatim as [`Value::Unknown`](crate::Value::Unknown); the
+/// coverage path additionally records them here so a deconstruct can report them with their
+/// file positions. The 12-/20-byte entry record itself is covered by the enclosing IFD-body
+/// mark, but the entry's out-of-line value bytes (if any) cannot be sized — so they surface as
+/// a coverage gap, which is the correct archival signal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnknownField {
     /// The file offset of the IFD that held the entry.

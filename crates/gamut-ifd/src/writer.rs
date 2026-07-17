@@ -156,6 +156,21 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
         nodes[pair[0]].next = Some(pair[1]);
     }
 
+    // An unknown-type value's word is opaque bytes in its captured byte order and offset width;
+    // it cannot be transcoded, so a stream that changes either is refused up front rather than
+    // silently emitting a word whose (unknowable) meaning would be corrupted.
+    for node in &nodes {
+        for field in node.ifd.fields() {
+            if let Value::Unknown(u) = &field.value
+                && (u.order() != order || u.variant() != variant)
+            {
+                return Err(Error::InvalidInput(
+                    "TIFF: unknown-type field cannot be transcoded across byte order or variant",
+                ));
+            }
+        }
+    }
+
     // Pass 1a: place every directory block (top-level and descendant), each on a word boundary.
     let mut cursor = even(variant.header_size());
     for node in &mut nodes {
@@ -195,14 +210,18 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
     for entries in &entries_per_node {
         let mut offs = Vec::with_capacity(entries.len());
         for (_tag, field) in entries {
-            let byte_len = field.value().byte_len();
-            if byte_len <= inline {
-                offs.push(0);
-            } else {
-                cursor = even(cursor);
-                offs.push(cursor as u64);
-                pool.push((cursor, field.value().encode(order)));
-                cursor += byte_len;
+            // An unknown-type value has no sizable extent (`byte_len` is `None`); its verbatim
+            // word always re-emits inline, so it never claims pool space.
+            match field.value().byte_len() {
+                Some(n) if n > inline as u64 => {
+                    cursor = even(cursor);
+                    offs.push(cursor as u64);
+                    let bytes = field.value().encode(order);
+                    pool.push((cursor, bytes));
+                    // The encoded length equals `byte_len` for every sizable type.
+                    cursor += n as usize;
+                }
+                _ => offs.push(0),
             }
         }
         value_offsets.push(offs);
@@ -250,8 +269,8 @@ pub fn write(file: &TiffFile) -> Result<Vec<u8>> {
             let value = field.value();
             let bytes = value.encode(order);
             out[pos..pos + 2].copy_from_slice(&order.pack_u16(*tag));
-            out[pos + 2..pos + 4].copy_from_slice(&order.pack_u16(value.field_type().code()));
-            put_offset(&mut out, pos + 4, value.count() as u64, order, variant);
+            out[pos + 2..pos + 4].copy_from_slice(&order.pack_u16(value.type_code()));
+            put_offset(&mut out, pos + 4, value.count(), order, variant);
             let value_pos = pos + 4 + offset_size;
             if bytes.len() <= inline {
                 // Inline, left-justified: low bytes hold the value, remainder is zero.
@@ -520,6 +539,116 @@ mod tests {
             bytes.len() < 256,
             "value pool not tightly packed: {} bytes",
             bytes.len()
+        );
+    }
+
+    /// An unknown-type entry survives read → write **byte-exactly**: for an already-canonical
+    /// fixture the rewrite reproduces the input bit-for-bit, opaque value/offset word included —
+    /// the issue #263 preservation requirement.
+    #[test]
+    fn unknown_type_entries_write_back_verbatim() {
+        let data = [
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD @ 8
+            0x01, 0x00, // entry count = 1
+            0x99, 0x99, // tag 0x9999
+            0xf0, 0x00, // type 0xF0 (unknown)
+            0x01, 0x00, 0x00, 0x00, // value count = 1
+            0xde, 0xad, 0xbe, 0xef, // opaque value/offset word
+            0x00, 0x00, 0x00, 0x00, // next IFD = 0
+        ];
+        let file = read(&data).expect("read");
+        assert_eq!(write(&file).expect("write"), data);
+
+        // Big-endian: the word is emitted verbatim and the record pins byte-for-byte.
+        let u = crate::UnknownValue::new(
+            0xF0,
+            3,
+            &[1, 2, 3, 4],
+            ByteOrder::BigEndian,
+            Variant::Classic,
+        )
+        .expect("capture");
+        let mut ifd = Ifd::new();
+        ifd.set(0x9999, Value::Unknown(u));
+        let file = TiffFile {
+            order: ByteOrder::BigEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        };
+        let bytes = write(&file).expect("write");
+        assert_eq!(read(&bytes).expect("read back"), file);
+        // Entry record at 10: tag, type code, count (all big-endian), then the verbatim word.
+        assert_eq!(
+            &bytes[10..22],
+            &[0x99, 0x99, 0x00, 0xF0, 0, 0, 0, 3, 1, 2, 3, 4]
+        );
+    }
+
+    /// A BigTIFF unknown-type entry keeps its 8-byte word verbatim through read → write.
+    #[cfg(feature = "bigtiff")]
+    #[test]
+    fn bigtiff_unknown_type_entries_write_back_verbatim() {
+        let u = crate::UnknownValue::new(
+            0xF0,
+            2,
+            &[8, 7, 6, 5, 4, 3, 2, 1],
+            ByteOrder::LittleEndian,
+            Variant::Big,
+        )
+        .expect("capture");
+        let mut ifd = Ifd::new();
+        ifd.set(0x9999, Value::Unknown(u));
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Big,
+            ifds: vec![ifd],
+        };
+        let bytes = write(&file).expect("write");
+        assert_eq!(read(&bytes).expect("read back"), file);
+        assert_eq!(write(&read(&bytes).expect("read")).expect("rewrite"), bytes);
+    }
+
+    /// The opaque word cannot be transcoded: writing an unknown-type value into a stream of a
+    /// different byte order (or variant) is a typed error, not a silent corruption.
+    #[test]
+    fn unknown_type_write_refuses_transcode() {
+        let u = crate::UnknownValue::new(
+            0xF0,
+            1,
+            &[1, 2, 3, 4],
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+        )
+        .expect("capture");
+        let mut ifd = Ifd::new();
+        ifd.set(0x9999, Value::Unknown(u));
+        // Same order and variant: fine.
+        assert!(
+            write(&TiffFile {
+                order: ByteOrder::LittleEndian,
+                variant: Variant::Classic,
+                ifds: vec![ifd.clone()],
+            })
+            .is_ok()
+        );
+        // Flipped byte order: refused.
+        assert!(
+            write(&TiffFile {
+                order: ByteOrder::BigEndian,
+                variant: Variant::Classic,
+                ifds: vec![ifd.clone()],
+            })
+            .is_err()
+        );
+        // Changed variant: refused (the word width itself no longer matches).
+        #[cfg(feature = "bigtiff")]
+        assert!(
+            write(&TiffFile {
+                order: ByteOrder::LittleEndian,
+                variant: Variant::Big,
+                ifds: vec![ifd],
+            })
+            .is_err()
         );
     }
 

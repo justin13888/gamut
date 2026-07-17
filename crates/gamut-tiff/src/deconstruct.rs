@@ -199,8 +199,8 @@ impl Deconstructor<'_> {
                 self.unknown_tags.push(UnknownTag {
                     page,
                     tag: field.tag,
-                    field_type: field.value.field_type().code(),
-                    count: field.value.count() as u64,
+                    field_type: field.value.type_code(),
+                    count: field.value.count(),
                 });
             }
         }

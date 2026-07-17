@@ -6,6 +6,87 @@ use crate::byte_order::ByteOrder;
 use crate::entry::Variant;
 use crate::types::FieldType;
 
+/// The preserved record of an IFD entry whose field-type code is unrecognised — the payload of
+/// [`Value::Unknown`].
+///
+/// The element size of an unknown type cannot be known, so the entry's value/offset word is
+/// opaque: whether it holds inline data or a file offset is undecidable. The word is therefore
+/// kept **verbatim**, in the byte order and offset width it was captured with, so the 12-/20-byte
+/// entry record round-trips byte-exactly through [`write`](crate::write). An out-of-line payload
+/// — if the word was an offset — cannot be sized; its bytes are never fetched or relocated, and
+/// the audit layer surfaces them as unclassified rather than silently dropping them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownValue {
+    type_code: u16,
+    count: u64,
+    /// Verbatim, in `order`; classic TIFF fills `word[..4]`, the rest stays zero.
+    word: [u8; 8],
+    order: ByteOrder,
+    variant: Variant,
+}
+
+impl UnknownValue {
+    /// Captures an unknown-type entry record: its type code, declared count, and value/offset
+    /// word. `word` must be exactly `variant.offset_size()` bytes, as stored, in `order`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `word` is not exactly the variant's offset width.
+    pub fn new(
+        type_code: u16,
+        count: u64,
+        word: &[u8],
+        order: ByteOrder,
+        variant: Variant,
+    ) -> Result<Self> {
+        if word.len() != variant.offset_size() {
+            return Err(Error::InvalidInput(
+                "TIFF: unknown-type word must be exactly the offset width",
+            ));
+        }
+        let mut buf = [0u8; 8];
+        buf[..word.len()].copy_from_slice(word);
+        Ok(Self {
+            type_code,
+            count,
+            word: buf,
+            order,
+            variant,
+        })
+    }
+
+    /// The unrecognised on-disk field-type code.
+    #[must_use]
+    pub fn type_code(&self) -> u16 {
+        self.type_code
+    }
+
+    /// The declared value count — untrusted, since the element size is unknown; re-emitted
+    /// verbatim.
+    #[must_use]
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// The verbatim value/offset word (4 bytes classic, 8 BigTIFF), in the captured byte order.
+    #[must_use]
+    pub fn word(&self) -> &[u8] {
+        &self.word[..self.variant.offset_size()]
+    }
+
+    /// The byte order the word was captured in.
+    #[must_use]
+    pub fn order(&self) -> ByteOrder {
+        self.order
+    }
+
+    /// The container variant that fixes the word's width.
+    #[must_use]
+    pub fn variant(&self) -> Variant {
+        self.variant
+    }
+}
+
 /// The decoded value(s) of one IFD entry, one variant per [`crate::FieldType`].
 ///
 /// A TIFF entry always stores a `count` of values of a single type; even a scalar is a 1-element
@@ -13,6 +94,9 @@ use crate::types::FieldType;
 /// at a file offset otherwise — a distinction the reader/writer resolve, leaving this type purely
 /// the logical value. The BigTIFF 64-bit variants (`Long8`/`SLong8`/`Ifd8`) appear only when the
 /// `bigtiff` feature is enabled.
+///
+/// An entry whose field-type code is unrecognised decodes to [`Value::Unknown`], preserving the
+/// raw record so nothing is dropped on a read → write round-trip.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     /// `BYTE` — unsigned 8-bit integers.
@@ -43,6 +127,11 @@ pub enum Value {
     Float(Vec<f32>),
     /// `DOUBLE` — IEEE double-precision floats.
     Double(Vec<f64>),
+    /// `IFD` — 32-bit sub-IFD offsets (TIFF Technical Note 1); `Long`-shaped, but typed as a
+    /// child-directory pointer, so [`read_tree`](crate::read_tree) follows it.
+    Ifd(Vec<u32>),
+    /// An entry whose field-type code is unrecognised, preserved verbatim (see [`UnknownValue`]).
+    Unknown(UnknownValue),
     /// `UTF8` — a NUL-terminated UTF-8 string (Exif 3.0 / CIPA DC-008; the terminator is not stored
     /// here). Like [`Value::Ascii`] but the field's on-disk type is `129`, preserving non-ASCII
     /// text — including its multi-string form with interior `\0` separators.
@@ -59,10 +148,11 @@ pub enum Value {
 }
 
 impl Value {
-    /// The field type of this value.
+    /// The field type of this value, or `None` for [`Value::Unknown`] (whose on-disk code is
+    /// [`type_code`](Self::type_code)).
     #[must_use]
-    pub fn field_type(&self) -> FieldType {
-        match self {
+    pub fn field_type(&self) -> Option<FieldType> {
+        Some(match self {
             Value::Byte(_) => FieldType::Byte,
             Value::Ascii(_) => FieldType::Ascii,
             Value::Short(_) => FieldType::Short,
@@ -75,26 +165,40 @@ impl Value {
             Value::SRational(_) => FieldType::SRational,
             Value::Float(_) => FieldType::Float,
             Value::Double(_) => FieldType::Double,
+            Value::Ifd(_) => FieldType::Ifd,
             Value::Utf8(_) => FieldType::Utf8,
+            Value::Unknown(_) => return None,
             #[cfg(feature = "bigtiff")]
             Value::Long8(_) => FieldType::Long8,
             #[cfg(feature = "bigtiff")]
             Value::SLong8(_) => FieldType::SLong8,
             #[cfg(feature = "bigtiff")]
             Value::Ifd8(_) => FieldType::Ifd8,
+        })
+    }
+
+    /// The on-disk field-type code — total, unlike [`field_type`](Self::field_type): an
+    /// [`Value::Unknown`] reports the unrecognised code it was captured with.
+    #[must_use]
+    pub fn type_code(&self) -> u16 {
+        match self {
+            Value::Unknown(u) => u.type_code(),
+            // Every other variant has a recognised field type by construction.
+            _ => self.field_type().map_or(0, FieldType::code),
         }
     }
 
     /// The `Count` of this value: the number of elements, or for `ASCII`/`UTF8` the number of bytes
-    /// including the terminating NUL.
+    /// including the terminating NUL. For [`Value::Unknown`] this is the declared (untrusted)
+    /// on-disk count.
     #[must_use]
-    pub fn count(&self) -> usize {
-        match self {
+    pub fn count(&self) -> u64 {
+        let n = match self {
             Value::Byte(v) | Value::Undefined(v) => v.len(),
             // ASCII and UTF-8 both count the trailing NUL (Exif 3.0 / CIPA DC-008).
             Value::Ascii(s) | Value::Utf8(s) => s.len() + 1,
             Value::Short(v) => v.len(),
-            Value::Long(v) => v.len(),
+            Value::Long(v) | Value::Ifd(v) => v.len(),
             Value::Rational(v) => v.len(),
             Value::SByte(v) => v.len(),
             Value::SShort(v) => v.len(),
@@ -102,17 +206,22 @@ impl Value {
             Value::SRational(v) => v.len(),
             Value::Float(v) => v.len(),
             Value::Double(v) => v.len(),
+            Value::Unknown(u) => return u.count(),
             #[cfg(feature = "bigtiff")]
             Value::Long8(v) | Value::Ifd8(v) => v.len(),
             #[cfg(feature = "bigtiff")]
             Value::SLong8(v) => v.len(),
-        }
+        };
+        n as u64
     }
 
-    /// The number of bytes this value occupies on disk (`count * type size`).
+    /// The number of bytes this value occupies on disk (`count * type size`), or `None` for
+    /// [`Value::Unknown`] — an unknown type's element size cannot be known, so its on-disk
+    /// extent is unsizable.
     #[must_use]
-    pub fn byte_len(&self) -> usize {
-        self.count() * self.field_type().size()
+    pub fn byte_len(&self) -> Option<u64> {
+        let ty = self.field_type()?;
+        Some(self.count() * ty.size() as u64)
     }
 
     /// Coerces a single unsigned-integer value (`BYTE`, `SHORT`, `LONG`, or — with `bigtiff` —
@@ -126,7 +235,7 @@ impl Value {
         match self {
             Value::Byte(v) if v.len() == 1 => Some(u32::from(v[0])),
             Value::Short(v) if v.len() == 1 => Some(u32::from(v[0])),
-            Value::Long(v) if v.len() == 1 => Some(v[0]),
+            Value::Long(v) | Value::Ifd(v) if v.len() == 1 => Some(v[0]),
             #[cfg(feature = "bigtiff")]
             Value::Long8(v) | Value::Ifd8(v) if v.len() == 1 => u32::try_from(v[0]).ok(),
             _ => None,
@@ -144,7 +253,7 @@ impl Value {
         match self {
             Value::Byte(v) => Some(v.iter().map(|&x| u32::from(x)).collect()),
             Value::Short(v) => Some(v.iter().map(|&x| u32::from(x)).collect()),
-            Value::Long(v) => Some(v.clone()),
+            Value::Long(v) | Value::Ifd(v) => Some(v.clone()),
             #[cfg(feature = "bigtiff")]
             Value::Long8(v) | Value::Ifd8(v) => v.iter().map(|&x| u32::try_from(x).ok()).collect(),
             _ => None,
@@ -162,7 +271,7 @@ impl Value {
         match self {
             Value::Byte(v) if v.len() == 1 => Some(u64::from(v[0])),
             Value::Short(v) if v.len() == 1 => Some(u64::from(v[0])),
-            Value::Long(v) if v.len() == 1 => Some(u64::from(v[0])),
+            Value::Long(v) | Value::Ifd(v) if v.len() == 1 => Some(u64::from(v[0])),
             #[cfg(feature = "bigtiff")]
             Value::Long8(v) | Value::Ifd8(v) if v.len() == 1 => Some(v[0]),
             _ => None,
@@ -176,7 +285,7 @@ impl Value {
         match self {
             Value::Byte(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
             Value::Short(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
-            Value::Long(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
+            Value::Long(v) | Value::Ifd(v) => Some(v.iter().map(|&x| u64::from(x)).collect()),
             #[cfg(feature = "bigtiff")]
             Value::Long8(v) | Value::Ifd8(v) => Some(v.clone()),
             _ => None,
@@ -250,11 +359,21 @@ impl Value {
     }
 
     /// Serialises the value's elements to bytes in `order` (without any inline/offset padding).
+    ///
+    /// A [`Value::Unknown`] serialises to its verbatim value/offset word — which is already in
+    /// its *captured* byte order, so `order` is ignored for it; [`write`](crate::write) refuses
+    /// a stream whose order or variant differs from an unknown value's capture (the opaque word
+    /// cannot be transcoded).
     #[must_use]
     pub fn encode(&self, order: ByteOrder) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.byte_len());
+        let cap = match self.byte_len() {
+            Some(n) => usize::try_from(n).unwrap_or(0),
+            None => 8,
+        };
+        let mut out = Vec::with_capacity(cap);
         match self {
             Value::Byte(v) | Value::Undefined(v) => out.extend_from_slice(v),
+            Value::Unknown(u) => out.extend_from_slice(u.word()),
             // ASCII and UTF-8 serialise identically: the string bytes then a NUL terminator.
             Value::Ascii(s) | Value::Utf8(s) => {
                 out.extend_from_slice(s.as_bytes());
@@ -271,7 +390,7 @@ impl Value {
                     out.extend_from_slice(&order.pack_u16(x as u16));
                 }
             }
-            Value::Long(v) => {
+            Value::Long(v) | Value::Ifd(v) => {
                 for &x in v {
                     out.extend_from_slice(&order.pack_u32(x));
                 }
@@ -379,6 +498,7 @@ impl Value {
             FieldType::Short => Value::Short(u16s(bytes)),
             FieldType::SShort => Value::SShort(u16s(bytes).into_iter().map(|x| x as i16).collect()),
             FieldType::Long => Value::Long(u32s(bytes)),
+            FieldType::Ifd => Value::Ifd(u32s(bytes)),
             FieldType::SLong => Value::SLong(u32s(bytes).into_iter().map(|x| x as i32).collect()),
             FieldType::Float => Value::Float(u32s(bytes).into_iter().map(f32::from_bits).collect()),
             FieldType::Rational => {
@@ -424,8 +544,9 @@ mod tests {
 
     fn value_roundtrip(value: Value, order: ByteOrder) {
         let bytes = value.encode(order);
-        let decoded =
-            Value::decode(value.field_type(), value.count(), &bytes, order).expect("decode");
+        let ty = value.field_type().expect("sizable type");
+        let count = usize::try_from(value.count()).expect("count fits");
+        let decoded = Value::decode(ty, count, &bytes, order).expect("decode");
         assert_eq!(decoded, value);
     }
 
@@ -448,6 +569,8 @@ mod tests {
             value_roundtrip(Value::Float(vec![1.5, -0.25]), order);
             value_roundtrip(Value::Double(vec![1.5, -0.0625]), order);
             value_roundtrip(Value::Undefined(vec![0, 255, 7]), order);
+            // The TIFF TechNote 1 IFD type (13): LONG-shaped sub-IFD offsets.
+            value_roundtrip(Value::Ifd(vec![8, 0x0001_0000]), order);
             #[cfg(feature = "bigtiff")]
             {
                 value_roundtrip(
@@ -467,11 +590,12 @@ mod tests {
         assert_eq!(Value::Ascii("gamut".into()).count(), 6);
         // UTF-8 counts bytes + NUL: "é" is two UTF-8 bytes, so "café" is 5 bytes + 1 NUL.
         assert_eq!(Value::Utf8("café".into()).count(), 6);
-        assert_eq!(Value::Utf8("café".into()).byte_len(), 6);
+        assert_eq!(Value::Utf8("café".into()).byte_len(), Some(6));
         assert_eq!(Value::Short(vec![1, 2, 3]).count(), 3);
-        assert_eq!(Value::Short(vec![1, 2, 3]).byte_len(), 6); // 3 * 2
-        assert_eq!(Value::Ascii("ab".into()).byte_len(), 3); // 3 * 1
-        assert_eq!(Value::Rational(vec![(1, 2)]).byte_len(), 8); // 1 * 8
+        assert_eq!(Value::Short(vec![1, 2, 3]).byte_len(), Some(6)); // 3 * 2
+        assert_eq!(Value::Ascii("ab".into()).byte_len(), Some(3)); // 3 * 1
+        assert_eq!(Value::Rational(vec![(1, 2)]).byte_len(), Some(8)); // 1 * 8
+        assert_eq!(Value::Ifd(vec![8, 64]).byte_len(), Some(8)); // 2 * 4
     }
 
     #[test]
@@ -547,6 +671,76 @@ mod tests {
     fn decode_rejects_truncated_value() {
         // A LONG needs 4 bytes; only 2 are supplied.
         assert!(Value::decode(FieldType::Long, 1, &[0, 0], ByteOrder::LittleEndian).is_err());
+    }
+
+    /// A `Value::Unknown` is opaque but total: every introspection method answers, the verbatim
+    /// word ignores the encode order (it is already in its captured order), and construction
+    /// polices the word width.
+    #[test]
+    fn unknown_value_is_opaque_but_total() {
+        let u = UnknownValue::new(
+            0xF0,
+            5,
+            &[9, 8, 7, 6],
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+        )
+        .expect("capture");
+        assert_eq!(u.type_code(), 0xF0);
+        assert_eq!(u.count(), 5);
+        assert_eq!(u.word(), &[9, 8, 7, 6]);
+        assert_eq!(u.order(), ByteOrder::LittleEndian);
+        assert_eq!(u.variant(), Variant::Classic);
+        let v = Value::Unknown(u);
+        assert_eq!(v.field_type(), None);
+        assert_eq!(v.type_code(), 0xF0);
+        assert_eq!(v.count(), 5);
+        assert_eq!(v.byte_len(), None, "an unknown type is unsizable");
+        assert_eq!(v.encode(ByteOrder::LittleEndian), vec![9, 8, 7, 6]);
+        // encode ignores the passed order — the word is verbatim, never transcoded.
+        assert_eq!(v.encode(ByteOrder::BigEndian), vec![9, 8, 7, 6]);
+        // Coercions refuse the opaque word rather than guessing.
+        assert_eq!(v.as_u32(), None);
+        assert_eq!(v.as_u64_vec(), None);
+        assert_eq!(v.as_bytes(), None);
+        // A word that is not exactly the variant's offset width is a typed error.
+        assert!(
+            UnknownValue::new(0xF0, 1, &[1, 2], ByteOrder::LittleEndian, Variant::Classic).is_err()
+        );
+        #[cfg(feature = "bigtiff")]
+        {
+            let big = UnknownValue::new(
+                0xF0,
+                1,
+                &[1, 2, 3, 4, 5, 6, 7, 8],
+                ByteOrder::LittleEndian,
+                Variant::Big,
+            )
+            .expect("bigtiff word");
+            assert_eq!(big.word().len(), 8);
+            assert!(
+                UnknownValue::new(
+                    0xF0,
+                    1,
+                    &[1, 2, 3, 4],
+                    ByteOrder::LittleEndian,
+                    Variant::Big
+                )
+                .is_err()
+            );
+        }
+    }
+
+    /// `type_code` is total where `field_type` is partial, and the two agree on known types.
+    #[test]
+    fn type_code_matches_field_type_for_known_values() {
+        assert_eq!(Value::Short(vec![1]).type_code(), 3);
+        assert_eq!(Value::Ifd(vec![8]).type_code(), 13);
+        assert_eq!(Value::Utf8("x".into()).type_code(), 129);
+        assert_eq!(
+            Value::Ifd(vec![8]).field_type().map(FieldType::code),
+            Some(13)
+        );
     }
 
     /// `offset_array` follows the variant's offset width, and classic construction is a typed

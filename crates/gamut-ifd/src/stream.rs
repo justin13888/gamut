@@ -15,6 +15,7 @@
 use gamut_core::{Error, Result};
 
 use crate::reader::{ChainGuard, offset_at, read_header, resolve_pointers_with, u16_at};
+use crate::value::UnknownValue;
 use crate::{ByteOrder, Coverage, FieldType, Ifd, ReadAt, TiffFile, UnknownField, Value, Variant};
 
 /// A lazy, streaming IFD reader: walks TIFF structure through positioned reads on a [`ReadAt`]
@@ -85,9 +86,9 @@ pub struct RawEntry {
 impl RawEntry {
     /// The recognised field type, or `None` for an unknown code.
     ///
-    /// Per TIFF 6.0 §2, readers skip fields with an unexpected type: [`IfdReader::decode_ifd`]
-    /// and [`IfdReader::read_file`] do exactly that (mirroring [`read`](crate::read)), while
-    /// [`IfdReader::value`] on an unknown-type entry returns a typed error.
+    /// An unknown-type entry cannot be decoded, but it is never dropped:
+    /// [`IfdReader::decode_ifd`], [`IfdReader::read_file`], and [`IfdReader::value`] all
+    /// preserve it verbatim as a [`Value::Unknown`], mirroring [`read`](crate::read).
     #[must_use]
     pub fn field_type(&self) -> Option<FieldType> {
         FieldType::from_code(self.type_code)
@@ -226,17 +227,30 @@ impl<S: ReadAt> IfdReader<S> {
 
     /// Fetches (if out of line) and decodes `entry`'s value.
     ///
+    /// An entry whose field-type code is unrecognised yields a verbatim [`Value::Unknown`]
+    /// (nothing is fetched — its payload cannot be sized), matching the eager readers.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::Unsupported`] for an unrecognised field-type code (the eager readers
-    /// *skip* such entries; here the caller filters via [`RawEntry::field_type`]),
-    /// [`Error::InvalidInput`] for a count overflow or an out-of-bounds value offset, or
-    /// [`Error::Io`] if the source fails.
+    /// Returns [`Error::InvalidInput`] for a count overflow or an out-of-bounds value offset,
+    /// or [`Error::Io`] if the source fails.
     pub fn value(&mut self, entry: &RawEntry) -> Result<Value> {
-        let ty = entry
-            .field_type()
-            .ok_or(Error::Unsupported("TIFF: unknown field type"))?;
+        let Some(ty) = entry.field_type() else {
+            return Ok(Value::Unknown(self.unknown_value(entry)?));
+        };
         self.fetch_value(entry, ty, None)
+    }
+
+    /// Captures an unknown-type entry's record verbatim (see [`Value::Unknown`]).
+    fn unknown_value(&self, entry: &RawEntry) -> Result<UnknownValue> {
+        let width = self.variant.offset_size();
+        UnknownValue::new(
+            entry.type_code,
+            entry.count,
+            &entry.word[..width],
+            self.order,
+            self.variant,
+        )
     }
 
     /// The absolute offset of `entry`'s out-of-line value, or `None` if the value packs inline.
@@ -267,9 +281,9 @@ impl<S: ReadAt> IfdReader<S> {
         }
     }
 
-    /// Decodes every recognised entry of `raw` into an [`Ifd`] — unknown field types are
-    /// skipped and a duplicate tag keeps the last occurrence, the same semantics as the eager
-    /// readers.
+    /// Decodes every entry of `raw` into an [`Ifd`] — unknown field types are preserved
+    /// verbatim as [`Value::Unknown`] and a duplicate tag keeps the last occurrence, the same
+    /// semantics as the eager readers.
     ///
     /// # Errors
     ///
@@ -421,6 +435,7 @@ impl<S: ReadAt> IfdReader<S> {
                         entry_offset: entry.offset,
                     });
                 }
+                ifd.set(entry.tag, Value::Unknown(self.unknown_value(entry)?));
                 continue;
             };
             let value = self.fetch_value(entry, ty, cov.as_deref_mut())?;
@@ -644,14 +659,15 @@ mod tests {
     }
 
     /// Raw-entry bookkeeping pinned on a hand-written file (the reader.rs unknown-field
-    /// fixture): entry offsets, the unknown type code surfacing raw, and decode-time skipping.
+    /// fixture): entry offsets, the unknown type code surfacing raw, and decode-time verbatim
+    /// preservation.
     #[test]
     fn raw_entries_expose_unknown_types_and_offsets() {
         let data: &[u8] = &[
             b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD @ 8
             0x01, 0x00, // entry count = 1
             0x99, 0x99, // tag 0x9999
-            0x0d, 0x00, // type 13 (unknown)
+            0xf0, 0x00, // type 0xF0 (unknown)
             0x02, 0x00, 0x00, 0x00, // value count = 2
             0x2a, 0x00, 0x00, 0x00, // value/offset word
             0x00, 0x00, 0x00, 0x00, // next IFD = 0
@@ -663,20 +679,26 @@ mod tests {
         assert_eq!(raw.entries.len(), 1);
         let entry = raw.entries[0].clone();
         assert_eq!(entry.tag, 0x9999);
-        assert_eq!(entry.type_code, 13);
+        assert_eq!(entry.type_code, 0xF0);
         assert_eq!(entry.field_type(), None);
         assert_eq!(entry.count, 2);
         assert_eq!(entry.offset, 10);
         assert_eq!(r.value_offset(&entry), None);
-        assert!(matches!(r.value(&entry), Err(Error::Unsupported(_))));
-        // Decode skips the unknown entry (spec behavior), recording it under coverage.
-        assert_eq!(r.decode_ifd(&raw).expect("decode").fields().len(), 0);
+        // `value` yields the preserved record — nothing to fetch, nothing dropped.
+        let Ok(Value::Unknown(u)) = r.value(&entry) else {
+            panic!("expected a preserved Value::Unknown");
+        };
+        assert_eq!(u.type_code(), 0xF0);
+        assert_eq!(u.count(), 2);
+        assert_eq!(u.word(), &[0x2a, 0x00, 0x00, 0x00]);
+        // Decode preserves the unknown entry too, recording it under coverage.
+        assert_eq!(r.decode_ifd(&raw).expect("decode").fields().len(), 1);
         let mut cov = Coverage::new(data.len() as u64);
         let mut unknown = Vec::new();
         let file = r
             .read_file_with_coverage(&mut cov, &mut unknown)
             .expect("read_file");
-        assert_eq!(file.ifds[0].fields().len(), 0);
+        assert_eq!(file.ifds[0].get(0x9999), Some(&Value::Unknown(u)));
         assert_eq!(unknown.len(), 1);
         assert_eq!(unknown[0].tag, 0x9999);
         assert_eq!(unknown[0].entry_offset, 10);
