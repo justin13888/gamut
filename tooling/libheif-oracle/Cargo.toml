@@ -1,0 +1,35 @@
+# Dev-only oracle: NOT a member of the gamut workspace (listed under `[workspace].exclude` in the
+# root manifest, pulled in only as a path `dev-dependency`). It statically builds the HEIF decode
+# stack — libheif (ISO/IEC 23008-12 container + HEVC image items), the libde265 HEVC decoder, and
+# the kvazaar HEVC encoder — from the `third_party/{libheif,libde265,kvazaar}` submodules, then
+# links them behind a hand-written safe FFI wrapper so gamut-heic's differential tests can
+# (a) decode gamut-authored HEICs and (b) generate real HEIC fixtures at test time.
+#
+# Licensing: libde265 and libheif are LGPL-3.0+; kvazaar is BSD-3-Clause. The LGPL is acceptable
+# here for the same reason the GPL `exiv2-oracle` already in `third_party/` is: this is a dev-only,
+# workspace-excluded test oracle that is never linked into any shipped gamut crate.
+#
+# Hermetic: all three libraries are vendored and built from source into `OUT_DIR`; no system HEIF
+# stack is ever consulted. The only system tools needed are cmake/ninja (from mise) and a C/C++
+# toolchain — no nasm (kvazaar's CMake build uses its portable C paths, not the yasm SIMD). See
+# `build.rs`. CI needs the submodules checked out (`git submodule update --init --recursive`).
+[package]
+name = "libheif-oracle"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only FFI oracle: decodes and generates HEIC with a vendored, statically-linked libheif (libde265 decode, kvazaar encode) for gamut-heic's conformance cross-checks."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+# Declares this crate as the sole provider of the native `heif` library.
+links = "heif"
+
+[lib]
+# The crate exposes a hand-written safe wrapper; there are no doctests to run.
+doctest = false
+
+[build-dependencies]
+# libheif's public headers forward-declare several structs before defining them; bindgen 0.72
+# resolves the complete definitions under recent libclang (the same reason libavif-oracle pins
+# 0.72), so match that pin here.
+bindgen = "0.72"

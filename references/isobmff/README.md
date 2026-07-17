@@ -63,5 +63,35 @@ output_height    u(FieldLength)
 `ImageGrid::parse`/`to_bytes` type this geometry; the tile payloads referenced by `dimg` stay
 opaque to the container.
 
+The `iovl` overlay (23008-12 §6.6.2.4.2) composites its `dimg`-referenced inputs onto one canvas;
+its payload is an `ImageOverlay` struct — also not a box. The `reference_count` is **not** stored:
+it is implied by the number of `dimg` references, so `ImageOverlay::parse` takes it as a parameter:
+
+```
+version           u8       (= 0)
+flags             u8       (bit 0 selects the field length)
+canvas_fill_value u16 × 4  (R, G, B, A — the canvas background)
+FieldLength = ((flags & 1) + 1) * 16   → 16- or 32-bit
+output_width      u(FieldLength)   (canvas width,  unsigned)
+output_height     u(FieldLength)   (canvas height, unsigned)
+for i in 0..reference_count {        (one per dimg reference, in order)
+    horizontal_offset s(FieldLength) (top-left x, SIGNED — sign-extended from 16- or 32-bit)
+    vertical_offset   s(FieldLength) (top-left y, SIGNED)
+}
+```
+
+`ImageOverlay::parse`/`to_bytes` type this geometry (the 16-bit form is chosen only when the dims
+fit `u16` *and* every signed offset fits `i16`); the composed inputs stay opaque to the container.
+
+## Motion-photo walk
+
+`read` models the *primary* still-image stream only. Real "motion photo" files append a foreign
+stream after it (a Samsung MP4 starting with a second `ftyp` and its own `moov`, a Google `mpvd`
+box, or a trailing non-ISOBMFF SEF blob). The top-level walk therefore stops cleanly at a **second
+top-level `ftyp`** (the first wins) and at any malformed trailing box once `ftyp`+`meta` are seen;
+byte-level accounting of the remainder is a consumer's job (`gamut-heic`), served by the re-exported
+`BoxReader`/`RawBox` walk primitives. Payload resolution still addresses the whole buffer, so an
+`iloc` extent pointing into the appended region resolves.
+
 Deferred and out-of-scope boxes are listed in
 [`crates/gamut-isobmff/STATUS.md`](../../crates/gamut-isobmff/STATUS.md).

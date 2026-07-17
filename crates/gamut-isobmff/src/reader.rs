@@ -8,6 +8,19 @@
 //! box versions — the reader also accepts what foreign encoders emit: `iloc` v0–v2 with
 //! `mdat`/`idat` placement, multi-extent payloads (concatenated), `pitm` v0/v1, `infe` v2/v3,
 //! `iref` v0/v1, and `ipma` v0/v1 with 8- or 16-bit indices. See `references/isobmff`.
+//!
+//! # Motion-photo tolerance
+//!
+//! The semantic model intentionally covers only the *primary* still-image stream. Real-world
+//! "motion photo" HEIC/AVIF files append a second, foreign stream after the still image — a Samsung
+//! MP4 (a second top-level `ftyp` with its own `moov`), a Google `mpvd` box, or a trailing
+//! non-ISOBMFF vendor blob (e.g. a Samsung SEF trailer). The top-level walk therefore stops cleanly
+//! (a) at a *second* top-level `ftyp` — the first one wins, and everything from the second onward is
+//! the appended stream — and (b) at any malformed/truncated box header or body encountered *after*
+//! both `ftyp` and `meta` have already been parsed. Byte-level accounting of that remainder (mapping
+//! it to boxes or explicit trailers) is a consumer's job — see the re-exported [`BoxReader`] /
+//! [`crate::RawBox`] primitives and `gamut-heic`. Payload resolution keeps addressing the *full*
+//! input buffer, so an `iloc` extent that points into the appended region still resolves.
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,23 +42,50 @@ type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 /// `idat`-stored data inlined), so writing it back yields an equivalent — not byte-identical —
 /// file. `read(&`[`write`](crate::write)`(&img)?) == img` holds for anything `write` accepts.
 ///
+/// The top-level walk models only the primary still-image stream and tolerates an appended foreign
+/// "motion photo" stream — see the [module docs](self#motion-photo-tolerance): it stops at a second
+/// top-level `ftyp` (the first wins) and at a malformed trailing box once `ftyp`+`meta` are seen.
+///
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] if a box is truncated or overruns, a required box (`ftyp`,
 /// `meta`, `hdlr`, `pitm`, `iinf`) is missing, an `iloc` extent overflows or points outside its
 /// source, the items' extents sum to more than the file size, an `ipma` property index is out of
-/// range, an `iref` names an unknown `from_item`, or a string is not UTF-8.
+/// range, an `iref` names an unknown `from_item`, or a string is not UTF-8. A malformed top-level
+/// box is only an error *before* both `ftyp` and `meta` have been parsed; after that it is treated
+/// as the start of an appended vendor trailer and stops the walk cleanly.
 /// Returns [`Error::Unsupported`] for structurally valid but out-of-scope features: image
-/// sequences (`moov`/`trak`), a non-`pict` handler, protected items, `uri ` items, external data
-/// references, `iloc` `construction_method` 2, 64-bit box sizes, and box versions beyond those
-/// listed above.
+/// sequences (`moov`/`trak`) in the primary stream, a non-`pict` handler, protected items, `uri `
+/// items, external data references, `iloc` `construction_method` 2, 64-bit box sizes, and box
+/// versions beyond those listed above.
 pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     let mut top = BoxReader::new(data);
     let mut ftyp = None;
     let mut meta_body = None;
-    while let Some(b) = top.next_box()? {
+    loop {
+        let b = match top.next_box() {
+            Ok(Some(b)) => b,
+            Ok(None) => break, // clean end of the (primary) stream
+            // A malformed top-level box after both required boxes are seen is the start of an
+            // appended non-ISOBMFF vendor trailer (motion photo) — stop cleanly; the consumer's
+            // accounting layer surfaces it. Before that, the file itself is malformed: propagate.
+            Err(e) => {
+                if ftyp.is_some() && meta_body.is_some() {
+                    break;
+                }
+                return Err(e);
+            }
+        };
         match &b.ty {
-            b"ftyp" => ftyp = Some(parse_ftyp(b.body)?),
+            // First ftyp wins. A second top-level ftyp begins an appended foreign stream (e.g. a
+            // Samsung motion-photo MP4, itself carrying a `moov`); stop the primary-stream walk so
+            // that foreign stream — and any `moov` within it — is never mis-parsed as an image.
+            b"ftyp" => {
+                if ftyp.is_some() {
+                    break;
+                }
+                ftyp = Some(parse_ftyp(b.body)?);
+            }
             b"meta" => meta_body = Some(b.body),
             b"moov" | b"trak" => {
                 return Err(Error::Unsupported(
