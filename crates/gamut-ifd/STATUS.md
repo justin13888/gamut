@@ -93,8 +93,40 @@ shape. P9 adds the streaming layer **additively** — the frozen v1 slice surfac
 The guard story: the chain loop/length guard (`ChainGuard`) and the sub-IFD depth/cycle guards
 (`resolve_pointers_with`) are *shared* with the slice path; the directory-body walk is mirrored
 (the data flows differ — decode-in-loop vs raw capture), and `tests/robustness.rs` runs the whole
-hostile corpus through both paths asserting **agreement**, so a mutant in either copy dies. The
-streaming path is u64-native end to end (no `as usize` truncation of hostile 64-bit widths).
+hostile corpus through both paths asserting **agreement**, so a mutant in either copy dies. Both
+paths are u64-native end to end (no `as usize` truncation of hostile 64-bit widths) — the
+streaming path from birth, the slice path since the #262 audit below.
 Layout requirement 3 of #252 (deterministic write offsets) was already the P4 keystone contract;
 `tests/streaming.rs` pins the rest of the capability surface (three source shapes × orders ×
 variants, coverage parity, the ≤64-read-bytes laziness contract, the maker-note pattern).
+
+## Hardening audit (issue #262)
+
+Rawshift's migration off its hardened binrw TIFF parser required a parity audit of this crate
+against hostile camera TIFFs — its `ParseError` case list is the acceptance checklist. Verdicts:
+
+| Category | Verdict |
+| -------- | ------- |
+| Magic / byte-order validation | Guarded in the shared `read_header`; messages pinned |
+| IFD / value offset bounds | Guarded on both paths, with the two-error offset-vs-span distinction |
+| Circular IFDs | Guarded by the shared `ChainGuard` (chain loop + 65 536 cap) and `resolve_pointers_with` (pointer loop + depth 16); both loop shapes pinned |
+| Offset-arithmetic overflow | Checked u64 arithmetic on both paths — the audit's one real finding, fixed below |
+| Truncated files | Typed error at every stage (header / count / body / value); full prefix sweep |
+| Overlapping records | **Report-not-reject, by design**: TIFF legitimately lets structures share storage, so the parse succeeds and the opt-in `Coverage` accounting surfaces `CoverageReport.overlaps` — pinned by an adversarial header-overlap fixture |
+
+**The finding:** the slice reader cast u64 counts/offsets to `usize` *before* its checked
+arithmetic — on a 32-bit target with `bigtiff`, a hostile 64-bit width truncated into a silent
+in-bounds misparse instead of an error. The reader now stays u64 until a bound against the data
+length proves each conversion lossless, mirroring the streaming path. The guard is verified by
+construction on 64-bit CI (where `u64 → usize` cannot truncate, so no new branch is dead there);
+32-bit CI (`check-cross`) is compile-only.
+
+**The acceptance artifact:** [`tests/hardening_audit.rs`](tests/hardening_audit.rs) pins the
+exact `Error::InvalidInput` string per checklist case — on both paths, including the two cases
+where the data flows legitimately phrase a failure differently (a directory offset at/past EOF:
+slice bounds-check vs streaming positioned read). Those strings are rawshift's mapping contract.
+
+Assumptions: rawshift's malformed-fixture corpus was not yet contributed, so synthetic in-repo
+fixtures stand in (the corpus can slot into `tests/robustness.rs` when it lands); and per the
+issue ("correctness verification, not an API ask") error granularity stays
+`InvalidInput(&'static str)` — no per-case error variants were added.
