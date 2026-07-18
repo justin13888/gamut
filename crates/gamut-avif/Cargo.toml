@@ -19,6 +19,7 @@ workspace = true
 gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-av1.workspace = true
+gamut-codec-abi.workspace = true
 gamut-isobmff.workspace = true
 
 [dev-dependencies]

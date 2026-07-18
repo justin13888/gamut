@@ -579,6 +579,7 @@ dependencies = [
  "dav1d-oracle",
  "divan",
  "gamut-av1",
+ "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
  "gamut-isobmff",

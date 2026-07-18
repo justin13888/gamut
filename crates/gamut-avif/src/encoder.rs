@@ -1,5 +1,7 @@
 //! The AVIF still-image encoder: RGB → identity planes → AV1 temporal unit → ISOBMFF container.
 
+use std::sync::{Arc, Mutex};
+
 use gamut_av1::{Av1StillConfig, EncodedStill, encode_still_intra};
 use gamut_color::Planar8;
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
@@ -7,6 +9,7 @@ use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind, write,
 };
 
+use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendSlot};
 use crate::config::{AvifConfig, AvifMode};
 use crate::transform::{Mirror, Rotation};
 
@@ -27,12 +30,32 @@ struct ImageTransform {
 /// [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) trait, taking a typed [`ImageRef`].
 /// [`AvifEncoder::with_rotation`] / [`AvifEncoder::with_mirror`] add `irot`/`imir`
 /// display-orientation transforms.
-#[derive(Debug, Clone)]
+///
+/// The AV1 codestream comes from `gamut-av1` by default; [`AvifEncoder::push_backend`] registers
+/// alternate [`Av1StillEncoder`] backends ahead of it (see [`crate::backend`] for the fallback
+/// contract).
+#[derive(Clone)]
 pub struct AvifEncoder {
     /// Lossless/lossy mode and the lossy quality factor.
     config: AvifConfig,
     /// Optional `irot`/`imir` display-orientation transforms.
     transform: ImageTransform,
+    /// Pluggable AV1 still-encode backends, tried in push order before the `gamut-av1` tail.
+    /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::push_backend`].
+    backends: Vec<BackendSlot>,
+}
+
+/// Hand-written because a backend registry is not [`Debug`]: the backends are opaque
+/// caller-supplied objects, so they are summarized by count. Every other field is printed as the
+/// derive would.
+impl std::fmt::Debug for AvifEncoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AvifEncoder")
+            .field("config", &self.config)
+            .field("transform", &self.transform)
+            .field("backends", &self.backends.len())
+            .finish()
+    }
 }
 
 impl Default for AvifEncoder {
@@ -62,6 +85,7 @@ impl AvifEncoder {
                 ..AvifConfig::default()
             },
             transform: ImageTransform::default(),
+            backends: Vec::new(),
         }
     }
 
@@ -75,6 +99,7 @@ impl AvifEncoder {
                 quality,
             },
             transform: ImageTransform::default(),
+            backends: Vec::new(),
         }
     }
 
@@ -98,6 +123,50 @@ impl AvifEncoder {
     #[must_use]
     pub fn with_mirror(mut self, mirror: Mirror) -> Self {
         self.transform.mirror_axis = Some(mirror.axis());
+        self
+    }
+
+    /// Registers an [`Av1StillEncoder`] backend for the AV1 codestream, returning `&mut self` for
+    /// chaining.
+    ///
+    /// Backends are tried in **push order**, ahead of the built-in `gamut-av1` encoder, which is
+    /// the implicit tail: for each encode the first backend whose
+    /// [`supports`](Av1StillEncoder::supports) returns `true` produces the codestream, a backend
+    /// that returns `false` is skipped, and if every backend declines the built-in encoder runs. A
+    /// backend that accepts a job and then fails propagates its error — the built-in encoder is
+    /// **not** used as a silent fallback, because substituting a different encoder would change
+    /// the output bytes unpredictably. An encoder with no backends is byte-for-byte the encoder
+    /// this crate shipped before backends existed.
+    ///
+    /// # Cloning shares backends
+    ///
+    /// Backends are held behind [`Arc`]`<`[`Mutex`]`<…>>`, so [`clone`](Clone::clone)ing an
+    /// `AvifEncoder` yields an encoder that drives **the same** backend objects, not copies. A
+    /// stateful backend therefore observes the encodes of every clone, and clones made *before* a
+    /// `push_backend` call do not gain the new backend (the registry vector itself is per-encoder).
+    ///
+    /// ```
+    /// use gamut_avif::{Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
+    /// use gamut_color::Planar8;
+    ///
+    /// // A backend that declines everything, so encoding still uses the built-in encoder.
+    /// struct Decline;
+    /// impl Av1StillEncoder for Decline {
+    ///     fn supports(&mut self, _req: &Av1EncodeRequest) -> bool { false }
+    ///     fn encode_still(
+    ///         &mut self,
+    ///         _req: &Av1EncodeRequest,
+    ///         _planes: &Planar8,
+    ///     ) -> gamut_core::Result<Vec<u8>> {
+    ///         unreachable!("declined")
+    ///     }
+    /// }
+    ///
+    /// let mut encoder = AvifEncoder::new();
+    /// encoder.push_backend(Decline);
+    /// ```
+    pub fn push_backend(&mut self, backend: impl Av1StillEncoder + 'static) -> &mut Self {
+        self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
 }
@@ -215,7 +284,14 @@ impl EncodeImage<Rgb8> for AvifEncoder {
             AvifMode::Lossless => 0,
             AvifMode::Lossy => quality_to_quant(self.config.quality),
         };
-        let still = encode_still_intra(&planes, base_q_idx)?.0;
+        // Pluggable backends first, in push order; `gamut-av1` is the implicit tail when every
+        // backend declines (and the only path taken by an encoder with no backends, which is why
+        // the default output is byte-identical to the pre-backend encoder).
+        let request = Av1EncodeRequest::new(dims, base_q_idx);
+        let still = match crate::backend::run_backends(&self.backends, &request, &planes)? {
+            Some(obus) => crate::backend::still_from_backend_obus(obus, dims)?,
+            None => encode_still_intra(&planes, base_q_idx)?.0,
+        };
         let file = build_avif(&still, dims, self.transform)?;
         out.extend_from_slice(&file);
         Ok(file.len())

@@ -257,6 +257,8 @@ adding it needs no container change.
 | 10/12/16-bit & float HDR input buffers | gamut-color | ☐ | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |
+| AV1 **encode** backend seam (`Av1StillEncoder`/`Av1EncodeRequest`/`push_backend`/`AbiAv1StillEncoder`) | gamut-avif §M | ✅ | D |
+| AV1 **decode** backend registry (`push_decode_backend`/`AbiAv1StillDecoder` around `Av1StillDecoder`) | gamut-avif §M | ☐ | D |
 | `gamut_core::Decoder` (AVIF → pixels with **no** external decoder; needs the pure-Rust AV1 decoder — `libaom`'s reference encoder is staged as its oracle) | gamut-avif | ☐ | D |
 | CLI / wasm / ffi wiring for AVIF | gamut-{cli,wasm,ffi} | ☐ | D |
 
@@ -291,9 +293,9 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | libavif structure/metadata/pixels + dav1d planar bit-exact differential suite | (oracle) | ✅ | S4 |
 
 **Deferred (additive) for the decode surface:** the backend registry + `gamut-codec-abi` adapter
-around `Av1StillDecoder` (the issue #241 program: #272 creates the ABI crate, the avif seam then
-gains `push_backend`/`supports()` and an `AbiAv1StillDecoder` like #273's HEVC retrofit — this
-crate ships the typed trait under the name #274 reserved); the pure-Rust AV1 codestream decoder
+around `Av1StillDecoder` — section M reserves its name and shape; the typed trait itself already
+ships, and #274 has since delivered the mirror-image *encode* registry it will copy; the pure-Rust
+AV1 codestream decoder
 (own issue; would make the seam optional and enable `gamut_core::Decoder`); >8-bit / BT.709/2020 /
 ICC application on the RGBA path (planar delivers them today); `tmap`/`sato` derived-item decode;
 wiring decoded Exif/XMP payloads through `gamut-exif`/`gamut-xmp`; a shared byte-accounting
@@ -304,9 +306,53 @@ and unifying the per-crate `DecodedFrame` types through `gamut-codec-abi`.
 non-overlapping, covering `0..len` — so it is structurally impossible for the container layer to
 silently ignore bits.
 
+## M. Codestream backend seams (issues #241 / #272 / #274)
+
+The workspace-wide inversion of control over the coded picture: `gamut-avif` owns the container,
+while the AV1 codestream may be produced or consumed by an alternate backend (a platform/hardware
+codec, libaom, SVT-AV1, dav1d, …). The shape and the fallback contract come from `gamut-codec-abi`
+(#272) and are identical in both directions — a **typed trait per format**, a registry tried in
+**push order**, `gamut-avif`'s own software path as the **implicit tail**, `supports()` / C
+`Status::UNSUPPORTED` as the **only** fall-through signal, and an accepted-then-failed job
+propagating its error rather than being silently re-encoded.
+
+| Component | Spec | Status | Issue |
+| --- | --- | --- | --- |
+| Typed encode trait `Av1StillEncoder` (`supports` + `encode_still` → AV1 OBUs) | (crate API) | ✅ | #274 |
+| `Av1EncodeRequest`: `#[non_exhaustive]`, private fields + getters, carries the derived `base_q_idx` | (crate API) | ✅ | #274 |
+| `AvifEncoder::push_backend` registry (`Arc<Mutex<…>>`; `Clone` **shares** backends) | (crate API) | ✅ | #274 |
+| Fallback contract: push order, decline-only fall-through, `gamut-av1` tail, error propagation | #241 | ✅ | #274 |
+| `AbiAv1StillEncoder` adapter over `gamut_codec_abi::Encoder` (codec id `av01`, `base_q_idx` in `extra`) | #272 | ✅ | #274 |
+| `av1C`/`colr` re-derived from a backend stream's sequence header (§2.3.4 consistency) | AV1-ISOBMFF §2.3.4 | ✅ | #274 |
+| Byte-identical default output with no pushed backend (the 1.0 additivity guarantee) | (crate API) | ✅ | #274 |
+| Typed decode trait `Av1StillDecoder` (`decode_still` → `DecodedFrame`) | (crate API) | ✅ | #250 |
+| Decode registry `AvifContainer::push_decode_backend` + `AbiAv1StillDecoder` adapter | #241 | ☐ | D |
+| Backend selection beyond first-supporter (cost/priority hints, per-request negotiation) | — | ☐ | D |
+| 10/12-bit, 4:2:0/4:2:2 and limited-range fields on `Av1EncodeRequest` | — | ☐ | M2 |
+
+**Reserved: the decode-side registry.** The `Av1StillDecoder` trait ships today as a *single*
+caller-supplied decoder passed per call (`decode_primary_rgba8(&mut decoder)`). Its registry
+counterpart is deferred and will mirror section M's encode side exactly, so the names are reserved
+here rather than shipped as unused surface on a 1.0 crate:
+
+```text
+impl AvifContainer/AvifImage {
+    pub fn push_decode_backend(&mut self, backend: impl Av1StillDecoder + 'static) -> &mut Self;
+}
+pub struct AbiAv1StillDecoder<D: gamut_codec_abi::Decoder + Send>;  // StreamConfig(av01) + ImageDesc
+```
+
+with `Av1StillDecoder` gaining a **defaulted** `supports(&mut self, config: &Av1Config) -> bool`
+(defaulting to `true`, so every existing implementation keeps compiling) as the fall-through
+signal. The existing per-call `decode_*` entry points stay, so this lands semver-minor. It is
+blocked on nothing but sequencing; the pure-Rust AV1 decoder, when it arrives, becomes the
+implicit tail exactly as `gamut-av1` is on the encode side.
+
 ## The v1 guarantee
 
-`gamut-avif` 1.0 promises: every emitted file is a conformant MIAF/AVIF still image (brands
+`gamut-avif` 1.0 promises: an encoder with **no pushed backend** emits exactly the bytes it always
+has (pinned byte-for-byte by `tests/backend.rs` against goldens captured before the seam existed);
+every emitted file is a conformant MIAF/AVIF still image (brands
 `avif`/`mif1`/`miaf`/`MA1A`, the AVIF §9.1.1 minimum box set, cross-box consistency between
 `av1C`, the AV1 sequence header, `pixi`, `colr`, and `ispe` by construction); lossless mode
 round-trips bit-exact through a conformant decoder; the `quality → base_q_idx` mapping is frozen
