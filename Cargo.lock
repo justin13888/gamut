@@ -527,6 +527,7 @@ dependencies = [
  "gamut-av2",
  "gamut-avif",
  "gamut-bitstream",
+ "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
  "gamut-dng",

@@ -54,6 +54,10 @@ gamut-bitstream = { workspace = true, optional = true }
 # Optional tone-mapping primitives, re-exported behind the `tonemap` feature.
 gamut-tonemap = { workspace = true, optional = true }
 
+# Optional codestream-backend seam (issue #272), re-exported behind the `codec-abi` feature so a
+# consumer can implement/adapt a codec backend against the same ABI the format crates consume.
+gamut-codec-abi = { workspace = true, optional = true }
+
 [features]
 default = []
 avif = ["dep:gamut-avif", "dep:gamut-av1"]
@@ -72,6 +76,8 @@ isobmff = ["dep:gamut-isobmff"]
 # Re-export the shared building blocks (`color`/`dsp`/`bitstream`) for tooling.
 primitives = ["dep:gamut-color", "dep:gamut-dsp", "dep:gamut-bitstream"]
 tonemap = ["dep:gamut-tonemap"]
+# Re-export the shared codestream-backend seam for backend implementors.
+codec-abi = ["dep:gamut-codec-abi"]
 metadata = [
     "dep:gamut-metadata",
     "dep:gamut-exif",
@@ -96,4 +102,5 @@ all = [
     "metadata",
     "primitives",
     "tonemap",
+    "codec-abi",
 ]
