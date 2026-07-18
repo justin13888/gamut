@@ -43,6 +43,11 @@
 //! of scope, as does *executing* opcodes or gain maps. See `STATUS.md` for the per-feature
 //! status and the deferred ledger (lossy JPEG, float samples, the opcode processing library).
 //!
+//! DNG codestreams are permanently backend-less: this crate exposes **no** pluggable codestream
+//! backend (the IoC seam of #241), because the DNG compression schemes have no hardware
+//! acceleration — gamut's software implementation is always used. See AGENTS.md's convention on
+//! exposing the codestream and `STATUS.md`.
+//!
 //! For archival use, [`deconstruct`] classifies **every byte** of a DNG into typed segments
 //! (dual-ledger checked, issue #263), and [`DngRewrite`] is the preserving edit path: the whole
 //! tree opens losslessly, pixel payloads are carried byte-for-byte, and the `MakerNote` byte

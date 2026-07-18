@@ -152,3 +152,6 @@ use; additions are semver-additive.
   Undecoded`); decoding them needs the baseline DCT codec above.
 - **Advanced 1.7 metadata without a typed surface** (`RGBTables`, `ImageStats`,
   `ImageSequenceInfo`, `ProfileDynamicRange`, C2PA) — explicitly surfaced as typed `RawTag`s.
+- **Pluggable codestream backends** (#241) — no hardware acceleration exists for the DNG
+  compression schemes (Uncompressed/Deflate/lossless-JPEG/JPEG XL); gamut's software
+  implementation is always used, so no backend seam is exposed.
