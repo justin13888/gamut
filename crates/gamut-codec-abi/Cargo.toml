@@ -1,0 +1,18 @@
+[package]
+name = "gamut-codec-abi"
+description = "Shared codestream-backend ABI: repr(C) vtables + object-safe Rust twins for pluggable/FFI codec backends."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -16,17 +16,24 @@ the Rust ecosystem lacks a strong, feature-complete implementation.
 Dependency edges (a crate depends on those to its right):
 
 - **gamut** -- umbrella; optional deps on the format crates, gated by features (`avif`,
-  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `png`, `jpeg`, `isobmff`, `metadata`, `all`). `default = []`. The `primitives`
+  `jxl`, `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `png`, `jpeg`, `isobmff`, `metadata`, `codec-abi`, `all`). `default = []`. The `primitives`
   feature additionally re-exports the shared `color`/`dsp`/`bitstream` crates for tooling, the
   `isobmff` feature re-exports the ISOBMFF/HEIF still-image container primitive (the box tree shared
-  by avif/heic), the `metadata` feature re-exports the image-metadata primitives, and the `tonemap` feature re-exports
-  the tone-mapping primitives; `all` includes all of these.
+  by avif/heic), the `metadata` feature re-exports the image-metadata primitives, the `tonemap` feature re-exports
+  the tone-mapping primitives, and the `codec-abi` feature re-exports the codestream-backend seam;
+  `all` includes all of these.
 - **gamut-core** -- `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`. No
   internal deps; everything else depends on it.
 - **gamut-color** / **gamut-dsp** / **gamut-bitstream** -- shared primitives. ← core.
 - **gamut-tonemap** -- scalar tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago
   operators) for HDR→SDR pipelines; sits between `gamut-color`'s transfer functions (linearize)
   and the target SDR re-encode. ← core.
+- **gamut-codec-abi** -- the shared codestream-backend seam (issue #272): `repr(C)` vtables
+  (`DecoderVTable`/`EncoderVTable` + `StreamConfig`/`EncodeConfig`/`ImageDesc` descriptors) and their
+  object-safe Rust twin traits (`Decoder`/`Encoder`), plus the registry fallback contract, by which a
+  foreign (C/FFI) or alternate codestream backend plugs into any format crate. `#![no_std]` and
+  **dependency-free** — it is pure interface (primitives, raw pointers, fn pointers), so it does not
+  even depend on `gamut-core`; `unsafe` is confined to its `bridge` module. ← nothing.
 - **gamut-isobmff** (AVIF/HEIC container) / **gamut-riff** (WebP container). ← core, bitstream.
 - **gamut-av1** / **gamut-av2** / **gamut-vvc** -- codecs. ← core, color, dsp, bitstream.
 - **gamut-jxl** -- JPEG XL codec, uniquely a **wrapper** over the format's reference implementations
@@ -136,6 +143,20 @@ source tarball by the oracle build scripts. No system-installed codec binaries a
   follow the `gamut_heic::HevcDecoder` shape (single object-safe method, borrowed bytes in,
   owned plain data out). The C ABI contract is `crates/gamut-ffi/DESIGN.md`; `gamut-ffi`'s
   feature table strictly mirrors `gamut`'s (`mise run check-ffi-features`, enforced in CI).
+- Exposing the codestream (issue #272): a format crate that lets callers swap in a foreign or
+  alternate codestream backend does so through **one** seam, `gamut-codec-abi`, never a bespoke one.
+  The pattern is a **typed trait per format** (the `gamut_heic::HevcDecoder` shape — object-safe,
+  borrowed bytes in, owned plain data out, named for the codestream it decodes) plus a thin
+  **codec-abi adapter** that bridges that typed trait to the shared `Decoder`/`Encoder` twins and
+  their `repr(C)` vtables, so a C/`-sys` backend and a pure-Rust one enter by the same door. The host
+  keeps a **registry** of backends and tries them in **push order**; a crate's own software
+  implementation, when it ships one, is the implicit tail and is tried last. `supports()` returning
+  `false` (C `Status::UNSUPPORTED`) is the **only** fall-through signal — a backend that accepts a job
+  and *then* fails returns a terminal non-OK `Status` that propagates to the caller unchanged, because
+  a partially-produced result must never be silently masked by a retry. `Send` is **not** a supertrait
+  of `Decoder`/`Encoder`; a host bounds `Send` at the point it inserts a backend, keeping
+  single-threaded backends usable. The stub codecs `gamut-av2` / `gamut-vvc` adopt this convention when
+  they are implemented.
 
 ## Versioning
 

@@ -24,6 +24,10 @@
 //! The `isobmff` feature re-exports the ISOBMFF/HEIF still-image container primitive (`isobmff`) —
 //! the box tree shared by the AVIF and HEIC codecs — so tooling can read and write containers
 //! directly, independently of the codecs that fill them.
+//!
+//! The `codec-abi` feature re-exports the shared codestream-backend seam (`codec_abi`) — the
+//! `repr(C)` vtables and their object-safe Rust twin traits by which a foreign (C/FFI) or alternate
+//! codestream backend plugs into a format crate — for anyone implementing or adapting a backend.
 #![forbid(unsafe_code)]
 
 /// The version of this `gamut` library crate, taken from its `Cargo.toml` at compile time.
@@ -41,6 +45,8 @@ pub use gamut_av2 as av2;
 pub use gamut_avif as avif;
 #[cfg(feature = "primitives")]
 pub use gamut_bitstream as bitstream;
+#[cfg(feature = "codec-abi")]
+pub use gamut_codec_abi as codec_abi;
 #[cfg(feature = "primitives")]
 pub use gamut_color as color;
 pub use gamut_core as core;

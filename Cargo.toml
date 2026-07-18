@@ -90,6 +90,9 @@ gamut-core = { path = "crates/gamut-core", version = "2.0.0" }
 gamut-color = { path = "crates/gamut-color", version = "1.1.0" }
 gamut-dsp = { path = "crates/gamut-dsp", version = "2.0.0" }
 gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.2" }
+# The shared codestream-backend seam (issue #272): repr(C) vtables + object-safe Rust twins that
+# let a foreign/alternate codec backend plug into any format crate. no_std, dependency-free.
+gamut-codec-abi = { path = "crates/gamut-codec-abi", version = "0.1.0" }
 gamut-deflate = { path = "crates/gamut-deflate", version = "0.1.0" }
 gamut-png = { path = "crates/gamut-png", version = "0.1.0" }
 # JPEG-1 (ISO/IEC 10918 / ITU-T T.81) codec (issue #28).
