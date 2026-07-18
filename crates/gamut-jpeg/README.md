@@ -93,7 +93,17 @@ APP2 `ICC_PROFILE` payloads without decoding pixels, and the encoder embeds them
 `jpeg_read_icc_profile`/`jpeg_write_icc_profile` in both directions. `decode_image_into` reuses
 the destination's allocation when dimensions match.
 
-Out of scope (documented in [STATUS.md](STATUS.md)): 12-bit precision, arithmetic coding
+Both directions are **pluggable** (P8): `JpegDecoder::push_backend` / `JpegEncoder::push_backend`
+register `JpegStreamDecoder` / `JpegStreamEncoder` backends — or a `gamut-codec-abi` backend through
+the `AbiStreamDecoder` / `AbiStreamEncoder` adapters — tried in push order with the built-in codec as
+the implicit tail. The seam is the **whole SOI..EOI interchange stream**, the unit real JPEG engines
+(nvJPEG, V4L2 JPEG, libjpeg-turbo) consume, because JPEG's marker layer and entropy-coded data
+interleave and expose no useful sub-stream boundary. The stated consequence: for JPEG, "the crate
+owns the container" means the crate owns **metadata and validation** — APPn EXIF/XMP/ICC stays
+crate-owned in both directions, and the crate patches its metadata into a backend-produced stream.
+
+Out of scope (documented in [STATUS.md](STATUS.md)): a finer per-scan codestream seam, 12-bit
+precision, arithmetic coding
 (SOF9/10), lossless (SOF3), hierarchical (SOF5–7), SPIFF/T.84 extensions, T.872 printing
 conventions, ExtendedXMP continuation segments, and APP13 IPTC-IIM.
 

@@ -50,8 +50,21 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   (`metadata()`) and **write** (`with_exif`/`with_xmp`/`with_icc_profile`), raw-bytes payloads that
   feed `gamut-metadata`'s `MetadataBlock` directly (proven by a dev-only interop test; the runtime
   dependency edge stays jpeg ← core, color, dsp).
+- Pluggable codestream backends (P8, issue #277): the `backend` module's `JpegStreamDecoder` /
+  `JpegStreamEncoder` traits, `JpegDecoder::push_backend` / `JpegEncoder::push_backend`, and the
+  `gamut-codec-abi` adapters in both directions.
 
 **Deferred / out of scope** (documented, with reasons):
+
+- **A finer-grained (per-scan / entropy-segment) codestream seam.** JPEG-1's marker segments and
+  entropy-coded data interleave in one stream (§B.1.1.5), and the Huffman/bit layer is intrinsic to
+  the frame structure it codes, so there is no sub-stream boundary a real accelerator consumes:
+  nvJPEG, V4L2 stateful/stateless JPEG, and libjpeg-turbo all take the **whole SOI..EOI interchange
+  stream**, which is where the P8 seam is drawn. Exposing a per-scan entropy seam would publicize
+  the crate's internal DCT-coefficient, quantizer, and Huffman state as public API for zero
+  consumers. The accepted consequence is that "the crate owns the container" degenerates, for JPEG,
+  to the crate owning **metadata and validation** — APPn EXIF/XMP/ICC stays crate-owned in both
+  directions and is patched into backend-produced streams. Not planned.
 
 - **12-bit precision (P=12).** Baseline is 8-bit only; 12-bit sample precision is an extended-DCT
   feature with little real-world corpus. The DCT kernel (`gamut-dsp`) already handles it, so this is
@@ -151,3 +164,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P5 | T.81 §G, §K.2 | Progressive SOF2 **encode**: `JpegEncoder::with_progressive(bool)` — the frozen `jpeg_simple_progression` scan script (6-scan gray / 10-scan YCbCr), coefficients materialized once via the shared gather→FDCT→quantize path, two-pass optimized per-scan Huffman tables (Annex K.2, all-ones-reserved, 16-bit length-limited), DC/AC first-pass + successive-approximation refinement with EOBRUN accumulation and the §G.1.2.3 deferred correction-bit protocol, restarts | ✅ done |
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14 (landed with P2), CLI `gamut convert → .jpg` (`--quality`/`--jpeg-subsampling`/`--jpeg-restart-interval`/`--jpeg-progressive`), umbrella `jpeg` feature audit, facade mutants scoping, full-workspace gate re-run | ✅ done |
 | P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |
+| P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegStreamDecoder`/`JpegStreamEncoder` traits over the **whole SOI..EOI interchange stream**, `push_backend` push-order registries (`Arc<Mutex<..>>`, so `Clone` shares backends), the `backend_declined` late-decline sentinel, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
