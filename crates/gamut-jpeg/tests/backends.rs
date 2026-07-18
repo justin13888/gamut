@@ -529,6 +529,77 @@ fn stream_info_parse_rejects_malformed_streams_before_any_backend_runs() {
     assert!(seen.lock().unwrap().is_none());
 }
 
+/// What a [`CapturingEncoder`] recorded: the request, then the raster's width, height, format,
+/// sample count, and first byte.
+type SeenRequest = Arc<Mutex<Option<(JpegEncodeRequest, u32, u32, PixelFormat, usize, u8)>>>;
+
+/// An encode backend that captures the request and raster it was offered, then declines late so the
+/// built-in encoder still produces the output.
+struct CapturingEncoder(SeenRequest);
+
+impl JpegStreamEncoder for CapturingEncoder {
+    fn supports(&mut self, _req: &JpegEncodeRequest) -> bool {
+        true
+    }
+    fn encode(
+        &mut self,
+        req: &JpegEncodeRequest,
+        image: &RasterRef<'_>,
+    ) -> gamut_core::Result<Vec<u8>> {
+        *self.0.lock().unwrap() = Some((
+            *req,
+            image.width(),
+            image.height(),
+            image.format(),
+            image.samples().len(),
+            image.samples()[0],
+        ));
+        Err(backend_declined())
+    }
+}
+
+#[test]
+fn the_encode_request_mirrors_every_encoder_setting_and_the_raster() {
+    let g = gray_pixels();
+    let c = rgb_pixels();
+    let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
+    let ci = ImageRef::<Rgb8>::new(&c, dims()).unwrap();
+
+    // Defaults: quality 75, 4:2:0, sequential, no restarts.
+    let seen = Arc::new(Mutex::new(None));
+    let mut enc = JpegEncoder::new();
+    enc.push_backend(CapturingEncoder(seen.clone()));
+    enc.encode_to_vec(gi).unwrap();
+    let (req, w, h, fmt, len, first) = seen.lock().unwrap().unwrap();
+    assert_eq!((req.width(), req.height()), (W, H));
+    assert_eq!(req.format(), PixelFormat::Gray8);
+    assert_eq!(req.quality(), 75);
+    assert_eq!(req.subsampling(), ChromaSubsampling::Ycbcr420);
+    assert!(!req.progressive(), "the default process is sequential");
+    assert_eq!(req.restart_interval(), 0);
+    assert_eq!((w, h, fmt), (W, H, PixelFormat::Gray8));
+    assert_eq!(len, (W * H) as usize);
+    assert_eq!(first, g[0]);
+
+    // Every knob moved: the request must report exactly what was configured.
+    let seen = Arc::new(Mutex::new(None));
+    let mut enc = JpegEncoder::new()
+        .with_quality(31)
+        .with_subsampling(ChromaSubsampling::Ycbcr444)
+        .with_progressive(true)
+        .with_restart_interval(5);
+    enc.push_backend(CapturingEncoder(seen.clone()));
+    enc.encode_to_vec(ci).unwrap();
+    let (req, w, h, fmt, len, first) = seen.lock().unwrap().unwrap();
+    assert_eq!(req.quality(), 31);
+    assert_eq!(req.subsampling(), ChromaSubsampling::Ycbcr444);
+    assert!(req.progressive());
+    assert_eq!(req.restart_interval(), 5);
+    assert_eq!((w, h, fmt), (W, H, PixelFormat::Rgb8));
+    assert_eq!(len, (W * H * 3) as usize);
+    assert_eq!(first, c[0]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Metadata ownership
 // ---------------------------------------------------------------------------------------------
@@ -590,6 +661,34 @@ fn a_backend_stream_without_appn_still_gets_the_crates_metadata() {
     let a: ImageBuf<Gray8> = JpegDecoder::new().decode_image(&out).unwrap();
     let b: ImageBuf<Gray8> = JpegDecoder::new().decode_image(&bare).unwrap();
     assert_eq!(a.as_samples(), b.as_samples());
+}
+
+#[test]
+fn patched_metadata_lands_exactly_where_the_built_in_prologue_puts_it() {
+    // The backend hands back precisely what the built-in encoder produces *without* metadata, so a
+    // correctly positioned patch must reproduce the built-in encoder's metadata-bearing stream byte
+    // for byte — pinning that EXIF/XMP/ICC go after the JFIF APP0 and before the DQT.
+    let g = gray_pixels();
+    let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
+    let bare = JpegEncoder::new()
+        .with_quality(40)
+        .encode_to_vec(gi)
+        .unwrap();
+    let expected = JpegEncoder::new()
+        .with_quality(40)
+        .with_exif(&exif_fixture())
+        .with_xmp(&xmp_fixture())
+        .with_icc_profile(&icc_fixture())
+        .encode_to_vec(gi)
+        .unwrap();
+
+    let mut enc = JpegEncoder::new()
+        .with_quality(40)
+        .with_exif(&exif_fixture())
+        .with_xmp(&xmp_fixture())
+        .with_icc_profile(&icc_fixture());
+    enc.push_backend(BareStream(bare));
+    assert_eq!(enc.encode_to_vec(gi).unwrap(), expected);
 }
 
 #[test]
@@ -1046,20 +1145,33 @@ fn abi_encode_adapter_declines_on_unsupported_and_propagates_other_statuses() {
     let builtin = JpegEncoder::new().encode_to_vec(gi).unwrap();
     let seen = Arc::new(Mutex::new(None));
 
-    for supports in [false, true] {
-        let mut enc = JpegEncoder::new();
-        enc.push_backend(AbiStreamEncoder::new(AbiEnc {
-            supports,
-            status: Status::UNSUPPORTED,
-            out: Vec::new(),
-            seen: seen.clone(),
-        }));
-        assert_eq!(
-            enc.encode_to_vec(gi).unwrap(),
-            builtin,
-            "supports={supports}: an UNSUPPORTED decline must reach the built-in tail"
-        );
-    }
+    // `supports() == false` declines *before* the backend runs: it would have succeeded and its
+    // stream differs from the built-in's, so the built-in output proves the adapter asked at all.
+    let produced = backend_stream();
+    assert_ne!(produced, builtin);
+    let mut enc = JpegEncoder::new();
+    enc.push_backend(AbiStreamEncoder::new(AbiEnc {
+        supports: false,
+        status: Status::OK,
+        out: produced,
+        seen: seen.clone(),
+    }));
+    assert_eq!(enc.encode_to_vec(gi).unwrap(), builtin);
+    assert!(
+        seen.lock().unwrap().is_none(),
+        "a declined backend must never be asked to encode"
+    );
+
+    // A *late* UNSUPPORTED (after `supports` accepted) also reaches the built-in tail.
+    let mut enc = JpegEncoder::new();
+    enc.push_backend(AbiStreamEncoder::new(AbiEnc {
+        supports: true,
+        status: Status::UNSUPPORTED,
+        out: Vec::new(),
+        seen: seen.clone(),
+    }));
+    assert_eq!(enc.encode_to_vec(gi).unwrap(), builtin);
+    assert!(seen.lock().unwrap().is_some());
 
     let mut enc = JpegEncoder::new();
     enc.push_backend(AbiStreamEncoder::new(AbiEnc {
