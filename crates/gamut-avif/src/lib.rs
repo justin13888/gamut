@@ -91,6 +91,15 @@
 //! assert_eq!(rgba.as_samples()[3], 255); // opaque (no alpha auxiliary)
 //! ```
 //!
+//! # The encode-backend seam (issue #274)
+//!
+//! Symmetrically, the AV1 codestream on the **write** side is pluggable: [`AvifEncoder`] encodes
+//! with [`gamut_av1`] by default, and [`AvifEncoder::push_backend`] registers
+//! [`Av1StillEncoder`] backends that are tried ahead of it in push order (`gamut-av1` is the
+//! implicit tail). [`AbiAv1StillEncoder`] bridges the shared [`gamut_codec_abi`] seam — and hence
+//! any C/`-sys` encoder — onto that trait. An encoder with no pushed backend is byte-for-byte the
+//! encoder this crate has always been. See [`backend`] for the full fallback contract.
+//!
 //! Encoding:
 //!
 //! ```
@@ -133,6 +142,7 @@
 #![forbid(unsafe_code)]
 
 mod av1c;
+pub mod backend;
 mod config;
 mod container;
 mod decode;
@@ -142,6 +152,7 @@ mod obu;
 mod transform;
 
 pub use av1c::{Av1Config, ChromaFormat};
+pub use backend::{AV1_CODEC_ID, AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder};
 pub use config::{AvifConfig, AvifMode};
 pub use container::{AvifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{Av1StillDecoder, DecodedFrame};
