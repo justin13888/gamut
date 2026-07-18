@@ -5,11 +5,18 @@
 //! implemented, via the [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) and `EncodeImage<Rgba8>`
 //! impls; transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk.
 
+use std::fmt;
+use std::sync::{Arc, Mutex};
+
 use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8, Rgba8};
 use gamut_riff::{FourCc, Vp8xHeader, write_extended, write_simple_lossless, write_simple_lossy};
 
 use crate::alpha;
+use crate::backend::{
+    RasterRef, SharedEncoder, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest,
+    dispatch_encode,
+};
 use crate::config::{WebpConfig, WebpMode};
 use crate::vp8::frame::encode_frame;
 use crate::vp8l::encoder::encode as encode_vp8l;
@@ -26,10 +33,27 @@ fn quality_to_quant(quality: u8) -> u8 {
 ///
 /// Construct with [`WebpEncoder::new`] (lossless), [`WebpEncoder::lossless`], or
 /// [`WebpEncoder::lossy`], then encode via the [`EncodeImage`](gamut_core::EncodeImage) trait.
-#[derive(Debug, Clone, Default)]
+///
+/// The codestream itself may be produced by a pluggable backend installed with
+/// [`push_backend`](Self::push_backend); with none installed (the default) the crate's own
+/// `vp8`/`vp8l` encoders produce byte-identical output to before the seam existed. See
+/// [`crate::backend`] for the fallback contract.
+#[derive(Clone, Default)]
 pub struct WebpEncoder {
     /// Encoder configuration (mode + quality).
     config: WebpConfig,
+    /// Pluggable codestream encoders, tried in push order ahead of the built-in tails.
+    backends: Vec<SharedEncoder>,
+}
+
+impl fmt::Debug for WebpEncoder {
+    /// Renders the config plus the number of installed backends (a backend need not be `Debug`).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebpEncoder")
+            .field("config", &self.config)
+            .field("backends", &self.backends.len())
+            .finish()
+    }
 }
 
 impl WebpEncoder {
@@ -53,6 +77,47 @@ impl WebpEncoder {
                 mode: WebpMode::Lossy,
                 quality,
             },
+            backends: Vec::new(),
+        }
+    }
+
+    /// Installs a codestream encoder backend, returning `&mut self` so pushes chain.
+    ///
+    /// Backends are tried in **push order**, ahead of the built-in `vp8`/`vp8l` encoders, which
+    /// remain the implicit tails and cannot be removed. A backend declines a job by returning
+    /// `false` from [`supports`](WebpCodestreamEncoder::supports); once it accepts, its error
+    /// propagates and no other encoder is tried.
+    ///
+    /// **Cloning a `WebpEncoder` shares its backends**: the registry holds each backend behind an
+    /// [`Arc`], so a clone dispatches to the very same backend objects (and the same interior
+    /// state), it does not copy them.
+    pub fn push_backend(&mut self, backend: impl WebpCodestreamEncoder + 'static) -> &mut Self {
+        self.backends.push(Arc::new(Mutex::new(backend)));
+        self
+    }
+
+    /// Encodes the lossless codestream for `argb`, via a backend when one accepts, else the
+    /// built-in VP8L encoder.
+    fn encode_vp8l_codestream(&self, argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
+        let req = WebpEncodeRequest::new(WebpCodestream::Vp8l, dims, self.config.quality);
+        let raster = RasterRef::Argb {
+            dimensions: dims,
+            pixels: argb,
+        };
+        match dispatch_encode(&self.backends, &req, &raster) {
+            Some(result) => result,
+            None => encode_vp8l(argb, dims),
+        }
+    }
+
+    /// Encodes the lossy codestream for `yuv`, via a backend when one accepts, else the built-in
+    /// VP8 encoder.
+    fn encode_vp8_codestream(&self, yuv: &Yuv420, dims: Dimensions) -> Result<Vec<u8>> {
+        let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims, self.config.quality);
+        let raster = RasterRef::Yuv420(yuv);
+        match dispatch_encode(&self.backends, &req, &raster) {
+            Some(result) => result,
+            None => Ok(encode_frame(yuv, quality_to_quant(self.config.quality)).0),
         }
     }
 
@@ -76,7 +141,7 @@ impl WebpEncoder {
                     .chunks_exact(3)
                     .map(|p| make_argb(0xff, p[0], p[1], p[2]))
                     .collect();
-                let bitstream = encode_vp8l(&argb, dims)?;
+                let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
                 let file = write_simple_lossless(&bitstream);
                 let written = file.len();
                 out.extend_from_slice(&file);
@@ -85,7 +150,7 @@ impl WebpEncoder {
             WebpMode::Lossy => {
                 // WebP/VP8 is limited-range BT.601 (what libwebp + browsers decode); see ColorRange.
                 let yuv = Yuv420::from_rgb8(pixels, dims.width, dims.height, ColorRange::Limited)?;
-                let (payload, _recon) = encode_frame(&yuv, quality_to_quant(self.config.quality));
+                let payload = self.encode_vp8_codestream(&yuv, dims)?;
                 let file = write_simple_lossy(&payload);
                 let written = file.len();
                 out.extend_from_slice(&file);
@@ -110,7 +175,7 @@ impl WebpEncoder {
                     .chunks_exact(4)
                     .map(|p| make_argb(p[3], p[0], p[1], p[2]))
                     .collect();
-                write_simple_lossless(&encode_vp8l(&argb, dims)?)
+                write_simple_lossless(&self.encode_vp8l_codestream(&argb, dims)?)
             }
             WebpMode::Lossy => {
                 let rgb: Vec<u8> = pixels
@@ -118,7 +183,7 @@ impl WebpEncoder {
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
                 let yuv = Yuv420::from_rgb8(&rgb, dims.width, dims.height, ColorRange::Limited)?;
-                let (vp8, _) = encode_frame(&yuv, quality_to_quant(self.config.quality));
+                let vp8 = self.encode_vp8_codestream(&yuv, dims)?;
                 if pixels.chunks_exact(4).all(|p| p[3] == 0xff) {
                     write_simple_lossy(&vp8)
                 } else {
