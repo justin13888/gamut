@@ -17,7 +17,9 @@
 
 use crate::cicp::{ColourPrimaries, TransferCharacteristics};
 use crate::oklab::{Gamut, linear_rgb_to_oklab};
-use crate::transfer::{adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_eotf};
+use crate::transfer::{
+    adobe_rgb_eotf, bt2020_pq_to_sdr, linear_eotf, prophoto_rgb_eotf, srgb_eotf,
+};
 
 /// The encoder-exact per-channel transfer a [`SourceProfile`] linearizes with.
 ///
@@ -25,6 +27,10 @@ use crate::transfer::{adobe_rgb_eotf, bt2020_pq_to_sdr, prophoto_rgb_eotf, srgb_
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceTransfer {
+    /// Linear — the identity transfer (CICP code point 8). The working space of a
+    /// scene-linear pipeline (RAW demosaic / white balance / colour matrix), which
+    /// operates on already-linear samples and applies its output transfer afterwards.
+    Linear,
     /// sRGB EOTF (IEC 61966-2-1).
     Srgb,
     /// Adobe RGB, pure `x^2.2`.
@@ -40,6 +46,7 @@ impl SourceTransfer {
     #[must_use]
     pub fn eotf(self, x: f64) -> f64 {
         match self {
+            SourceTransfer::Linear => linear_eotf(x),
             SourceTransfer::Srgb => srgb_eotf(x),
             SourceTransfer::AdobeRgb => adobe_rgb_eotf(x),
             SourceTransfer::ProPhotoRgb => prophoto_rgb_eotf(x),
@@ -52,6 +59,7 @@ impl SourceTransfer {
     #[must_use]
     pub fn transfer_characteristics(self) -> Option<TransferCharacteristics> {
         match self {
+            SourceTransfer::Linear => Some(TransferCharacteristics::Linear),
             SourceTransfer::Srgb => Some(TransferCharacteristics::Srgb),
             SourceTransfer::Bt2020Pq => Some(TransferCharacteristics::Pq),
             SourceTransfer::AdobeRgb | SourceTransfer::ProPhotoRgb => None,
@@ -86,6 +94,12 @@ impl SourceProfile {
     pub const SRGB: Self = Self {
         gamut: Gamut::Srgb,
         transfer: SourceTransfer::Srgb,
+    };
+    /// Linear sRGB: BT.709 primaries + linear transfer — the scene-linear working
+    /// space, same gamut as [`SourceProfile::SRGB`] with the gamma curve removed.
+    pub const LINEAR_SRGB: Self = Self {
+        gamut: Gamut::Srgb,
+        transfer: SourceTransfer::Linear,
     };
     /// Display P3: DCI-P3 primaries + sRGB transfer.
     pub const DISPLAY_P3: Self = Self {
@@ -157,6 +171,11 @@ mod tests {
         let cases: &[(SourceProfile, Option<Cp>, Option<Tc>)] = &[
             (SourceProfile::SRGB, Some(Cp::Bt709), Some(Tc::Srgb)),
             (
+                SourceProfile::LINEAR_SRGB,
+                Some(Cp::Bt709),
+                Some(Tc::Linear),
+            ),
+            (
                 SourceProfile::DISPLAY_P3,
                 Some(Cp::DisplayP3),
                 Some(Tc::Srgb),
@@ -166,13 +185,10 @@ mod tests {
             (SourceProfile::PROPHOTO_RGB, None, None),
         ];
         for &(p, primaries, transfer) in cases {
-            assert_eq!(p.colour_primaries(), primaries, "{:?} primaries", p.gamut);
-            assert_eq!(
-                p.transfer_characteristics(),
-                transfer,
-                "{:?} transfer",
-                p.gamut
-            );
+            // Labelled with the whole profile, not just the gamut: SRGB and LINEAR_SRGB
+            // share `Gamut::Srgb` and differ only in transfer.
+            assert_eq!(p.colour_primaries(), primaries, "{p:?} primaries");
+            assert_eq!(p.transfer_characteristics(), transfer, "{p:?} transfer");
         }
     }
 
@@ -183,6 +199,28 @@ mod tests {
         assert_eq!(SourceProfile::PROPHOTO_RGB.eotf(0.5), 0.5_f64.powf(1.8));
         // BT.2020 folds in the PQ + Reinhard tone map.
         assert_eq!(SourceProfile::BT2020.eotf(0.5), bt2020_pq_to_sdr(0.5));
+        // Linear sRGB is the identity across the domain — in particular it is *not*
+        // the sRGB curve, which bends at every interior point.
+        for &x in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(SourceProfile::LINEAR_SRGB.eotf(x), x);
+        }
+        assert_ne!(
+            SourceProfile::SRGB.eotf(0.5),
+            SourceProfile::LINEAR_SRGB.eotf(0.5)
+        );
+    }
+
+    #[test]
+    fn linear_srgb_skips_the_gamma_step() {
+        // Same gamut as SRGB, so feeding LINEAR_SRGB the already-linearized samples
+        // must land on the same OKLab point as feeding SRGB the gamma-encoded ones.
+        let gamma = [0.5, 0.25, 0.75];
+        let linear = gamma.map(srgb_eotf);
+        let via_srgb = SourceProfile::SRGB.gamma_rgb_to_oklab(gamma);
+        let via_linear = SourceProfile::LINEAR_SRGB.gamma_rgb_to_oklab(linear);
+        for (i, (&a, &b)) in via_srgb.iter().zip(via_linear.iter()).enumerate() {
+            assert!((a - b).abs() < 1e-12, "oklab[{i}]: {a} vs {b}");
+        }
     }
 
     /// Golden `gamma_rgb` vectors transcribed from chromahash

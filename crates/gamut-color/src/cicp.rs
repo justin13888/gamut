@@ -115,6 +115,8 @@ pub enum TransferCharacteristics {
     Bt709 = 1,
     /// Unspecified. (Code point 2.)
     Unspecified = 2,
+    /// Linear — the identity transfer, `V = Lc`. (Code point 8.)
+    Linear = 8,
     /// sRGB / IEC 61966-2-1. (Code point 13.)
     Srgb = 13,
     /// BT.2020 10-bit. (Code point 14.)
@@ -140,6 +142,7 @@ impl TransferCharacteristics {
         match code_point {
             1 => Some(TransferCharacteristics::Bt709),
             2 => Some(TransferCharacteristics::Unspecified),
+            8 => Some(TransferCharacteristics::Linear),
             13 => Some(TransferCharacteristics::Srgb),
             14 => Some(TransferCharacteristics::Bt2020_10),
             16 => Some(TransferCharacteristics::Pq),
@@ -197,6 +200,7 @@ mod tests {
         // alone).
         assert_eq!(ColourPrimaries::Bt2020.code_point(), 9);
         assert_eq!(ColourPrimaries::DisplayP3.code_point(), 12);
+        assert_eq!(TransferCharacteristics::Linear.code_point(), 8);
         assert_eq!(TransferCharacteristics::Srgb.code_point(), 13);
         assert_eq!(TransferCharacteristics::Pq.code_point(), 16);
         assert_eq!(ColorRange::Full.flag(), 1);
@@ -231,6 +235,7 @@ mod tests {
         for tc in [
             Tc::Bt709,
             Tc::Unspecified,
+            Tc::Linear,
             Tc::Srgb,
             Tc::Bt2020_10,
             Tc::Pq,

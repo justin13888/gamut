@@ -66,6 +66,7 @@ fn list() {
     for tc in [
         TransferCharacteristics::Bt709,
         TransferCharacteristics::Unspecified,
+        TransferCharacteristics::Linear,
         TransferCharacteristics::Srgb,
         TransferCharacteristics::Bt2020_10,
         TransferCharacteristics::Pq,
