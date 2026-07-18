@@ -55,6 +55,13 @@ jobs:
       - name: MSRV compile check
         # The task reads the MSRV from Cargo.toml, asserts the README documents it, installs that
         # toolchain, and `cargo +<msrv> check`s the libraries. No version is hardcoded here.
+        #
+        # `mise run` would otherwise auto-build every [tools] entry (convco/cargo-edit/cargo-mutants
+        # from source, plus cmake/ninja/meson) before the task — none of which check-msrv touches; it
+        # uses only the runner's rustup + cargo. That source build is slow and intermittently fails,
+        # so disable task auto-install to match the `install: false` above.
+        env:
+          MISE_TASK_RUN_AUTO_INSTALL: "false"
         run: mise run check-msrv
 
   # The JPEG XL encoder on WebAssembly, for real: builds libjxl with the emsdk toolchain and runs
