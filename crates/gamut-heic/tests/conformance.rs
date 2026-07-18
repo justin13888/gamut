@@ -22,7 +22,8 @@ use std::sync::OnceLock;
 
 use gamut_core::Error;
 use gamut_heic::{
-    ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, iter_nal_units,
+    ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, HevcDecoders, NO_BACKEND,
+    iter_nal_units,
 };
 use libheif_oracle::{EncodeOpts, NclxProfile, OracleChroma};
 
@@ -757,5 +758,69 @@ fn t6_hvcc_coherent_with_oracle_yuv() {
         config.chroma_format(),
         config.bit_depth_luma(),
         config.general_profile_idc
+    );
+}
+
+// ============================================================================================
+//   Test 7 — The reference decoder driven through the HevcDecoders registry (issue #273)
+// ============================================================================================
+
+/// The registry is a drop-in for a single `&mut dyn HevcDecoder`: pushing the libde265-backed
+/// `De265Decoder` as the only backend must decode the fixture *identically* to passing that backend
+/// directly, and an empty registry must decline with `Error::Unsupported(NO_BACKEND)` — gamut ships
+/// no in-tree software HEVC decoder (issue #18), so there is no implicit fallback tail.
+#[test]
+fn t7_registry_drives_the_reference_backend() {
+    let heic = full_fixture();
+    let container = HeifContainer::parse(heic).expect("parse");
+    let primary_id = container.image().primary_item().id();
+
+    // Baseline: the backend used directly, exactly as tests 1-6 do.
+    let direct = container
+        .decode_item_planar(primary_id, &mut De265Decoder)
+        .expect("direct planar decode");
+
+    // Through the registry, at the same call site with the same signature.
+    let mut decoders = HevcDecoders::new();
+    decoders.push_backend(De265Decoder);
+    assert_eq!(decoders.len(), 1);
+    let via_registry = container
+        .decode_item_planar(primary_id, &mut decoders)
+        .expect("registry planar decode");
+
+    assert_eq!(
+        via_registry, direct,
+        "registry decode differs from direct decode"
+    );
+
+    // The presentation path routes through the same seam.
+    let rgba_direct = container
+        .decode_primary_rgba8(&mut De265Decoder)
+        .expect("direct rgba decode");
+    let rgba_registry = container
+        .decode_primary_rgba8(&mut decoders)
+        .expect("registry rgba decode");
+    assert_eq!(
+        rgba_registry.as_samples(),
+        rgba_direct.as_samples(),
+        "registry RGBA differs from direct RGBA"
+    );
+
+    // No backends ⇒ no implicit software fallback.
+    let mut empty = HevcDecoders::new();
+    assert!(empty.is_empty());
+    let err = container
+        .decode_item_planar(primary_id, &mut empty)
+        .expect_err("an empty registry cannot decode");
+    assert!(
+        matches!(err, Error::Unsupported(m) if m == NO_BACKEND),
+        "expected Unsupported(NO_BACKEND), got {err:?}"
+    );
+
+    eprintln!(
+        "t7 registry: {}x{} {:?} decoded identically through HevcDecoders",
+        direct.width(),
+        direct.height(),
+        direct.chroma()
     );
 }
