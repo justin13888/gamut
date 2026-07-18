@@ -402,14 +402,16 @@ impl PngEncoder {
             })
         };
         if matches!(self.filter, FilterStrategy::BruteForce) {
-            let mut best: Option<Vec<u8>> = None;
-            for strategy in BRUTE_FORCE_STRATEGIES {
-                let candidate = compress(strategy)?;
-                if best.as_ref().is_none_or(|b| candidate.len() < b.len()) {
-                    best = Some(candidate);
-                }
-            }
-            Ok(best.unwrap_or_default())
+            // `min_by_key` keeps the *first* minimum, so a tie resolves to the earlier (more
+            // preferred) strategy — the behaviour the golden outputs are pinned to.
+            let candidates = BRUTE_FORCE_STRATEGIES
+                .into_iter()
+                .map(compress)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(candidates
+                .into_iter()
+                .min_by_key(Vec::len)
+                .unwrap_or_default())
         } else {
             compress(self.filter)
         }
