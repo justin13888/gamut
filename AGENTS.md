@@ -39,7 +39,12 @@ Dependency edges (a crate depends on those to its right):
 - **gamut-jxl** -- JPEG XL codec, uniquely a **wrapper** over the format's reference implementations
   rather than clean-slate (maintainer-approved departure from the pure-Rust rule, issue #243): encode
   wraps **libjxl 0.12.0** (statically, via `gamut-jxl-sys`; target-gated **off wasm32**), decode wraps
-  the pure-Rust external `jxl` crate (jxl-rs). ← core, gamut-jxl-sys (encode, non-wasm), external `jxl`.
+  the pure-Rust external `jxl` crate (jxl-rs). Both are **pushable backend tails** over `gamut-codec-abi`
+  (issue #276): the seam is the bare `FF 0A` codestream, `push_backend` tries an alternate
+  implementation first (and supplies encode on wasm32), and the `encode`/`decode` features mean
+  "include the built-in tail", not "enable the direction"; container features (ISOBMFF/Exif/XMP/jbrd)
+  stay pinned to the built-in path by a host-side veto.
+  ← core, codec-abi, gamut-jxl-sys (encode, non-wasm), external `jxl`.
 - **gamut-jxl-sys** -- declarations-only (no fn bodies) `-sys` crate that statically builds and links
   **libjxl 0.12.0** via the BSD-3-Clause `jpegxl-src` (`links = "jxl"`); the native backend for
   gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only); build honors

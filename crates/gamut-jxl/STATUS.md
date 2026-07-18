@@ -53,6 +53,17 @@ on a hand-written golden bitstream.
 - **Decode policies.** Pixel-limit bound (`1 << 28` samples); truncated → `InvalidInput`; animation,
   premultiplied (associated) alpha, and colour-as-grayscale each → `Unsupported` (deliberate refusals
   to guess, additive to relax later).
+- **Pluggable codestream backends (issue #276).** Both directions are registries over the shared
+  `gamut-codec-abi` seam, cut at the **bare `FF 0A` codestream**: `JxlEncoder::push_backend` /
+  `JxlDecoder::push_backend` insert a `JxlCodestreamEncoder` / `JxlCodestreamDecoder` ahead of the
+  built-in wrappers, which are the implicit **tails**. Push order; `supports() == false` (or a late
+  `Error::Unsupported`, the typed mirror of `Status::UNSUPPORTED`) is the only fall-through, and an
+  accepted-then-failed backend propagates. `AbiEncodeBackend` / `AbiDecodeBackend` adapt a
+  `gamut_codec_abi::Encoder` / `Decoder` (including a C vtable via `bridge::Foreign*`) onto the same
+  door under `JXL_CODEC_ID` (`"jxl "`). Container-dependent features — ISO BMFF output,
+  `with_exif`/`with_xmp`, and `recompress_jpeg` — are pinned to the built-in path by a **host-side
+  veto**: the registry is not consulted at all. Consequently the `encode`/`decode` features now mean
+  "**include the built-in tail**", not "enable the direction".
 - **WebAssembly.** Decode on every `wasm32` target; **encode on `wasm32-unknown-emscripten`**
   (emsdk-built libjxl, full differential suite in the extended-CI wasm lane).
   `wasm32-unknown-unknown` stays decode-only — a toolchain boundary, not a workaround.
@@ -81,6 +92,12 @@ unlocks it.
   decode and unsupported on encode; unlocks with a typed extra-channel model.
 - **Effort 11 ("tectonic plate").** Expert-gated behind `JxlEncoderAllowExpertOptions`; the `Effort`
   enum caps at 10 by design (also: adding a variant to the exhaustive public enum is semver-major).
+- **Container ownership (follow-up to issue #276).** ISO BMFF box writing and `jbrd` JPEG
+  reconstruction metadata are produced *by libjxl* today, which is why the container features are
+  vetoed away from pushed backends. Moving that box/`jbrd` writing into gamut-jxl proper — building
+  the `.jxl` container over *any* backend's codestream, most naturally on `gamut-isobmff` — would let
+  a pushed backend serve container output and metadata embedding too. Recorded, **not implemented**;
+  it is purely additive to the seam (the traits and the fallback contract do not change).
 - **Streaming / partial decode API.** The decoder consumes a whole buffer per call; a chunked/streaming
   entry point is a separate additive surface.
 - **libjxl 0.12.x tracking.** The pin is exact (`jpegxl-src = "=0.12.0"` → libjxl 0.12.0). Bumps are

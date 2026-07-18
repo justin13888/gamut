@@ -3,52 +3,20 @@
 //!
 //! Everything that touches a raw pointer lives here, behind `#![allow(unsafe_code)]`, so the rest of
 //! `gamut-jxl` stays under the crate-wide `#![deny(unsafe_code)]`. The public entry point is
-//! [`encode`]: it takes a fully-described [`FrameSpec`] plus the caller's [`JxlEncoder`] config,
+//! [`encode`]: it takes a fully-described [`JxlImageRef`] plus the caller's [`JxlEncoder`] config,
 //! runs libjxl's create → configure → add-frame → process-output sequence with **every** status
 //! checked, and appends the encoded stream to the caller's buffer.
 #![allow(unsafe_code)]
 
 use core::ffi::c_void;
 
-use gamut_core::{Dimensions, Error, Result};
+use gamut_core::{Error, Result};
 use gamut_jxl_sys::{encode as sys_enc, types as sys_ty};
 
+use crate::backend::{JxlImageRef, JxlSamples};
 use crate::config::{ColorSpec, Mode, validate_icc};
-use crate::encoder::JxlEncoder;
+use crate::encoder::{JxlEncoder, resolve_coded_bits};
 use crate::error::map_encoder_error;
-
-/// The interleaved sample buffer for a frame, tagged with its storage width.
-///
-/// libjxl consumes the samples as raw bytes with a declared [`sys_ty::JxlDataType`]; the `U16` bytes
-/// cross the boundary in **native** endianness (see [`encode`]), matching the `&[u16]`'s in-memory
-/// representation exactly.
-pub(crate) enum Samples<'a> {
-    /// 8-bit samples, one byte each.
-    U8(&'a [u8]),
-    /// 16-bit samples, two native-endian bytes each.
-    U16(&'a [u16]),
-}
-
-/// A complete description of the single frame to encode.
-///
-/// Built by the [`crate::encoder`] `EncodeImage` impls from a validated `ImageRef`, so the fields are
-/// mutually consistent by construction: `samples.len()` is exactly
-/// `width * height * (num_color_channels + has_alpha as u32)`, and `bits_per_sample` matches the
-/// `Samples` variant (8 ⇒ `U8`, 16 ⇒ `U16`).
-pub(crate) struct FrameSpec<'a> {
-    /// Image width in pixels.
-    pub width: u32,
-    /// Image height in pixels.
-    pub height: u32,
-    /// Coded bit depth per sample: 8 or 16.
-    pub bits_per_sample: u32,
-    /// Number of colour channels: 1 (grayscale) or 3 (RGB). Excludes alpha.
-    pub num_color_channels: u32,
-    /// Whether an interleaved alpha channel follows the colour channels.
-    pub has_alpha: bool,
-    /// The interleaved samples, row-major.
-    pub samples: Samples<'a>,
-}
 
 /// RAII owner of a libjxl encoder handle. [`Drop`] frees it (and, with it, every frame-settings
 /// object libjxl created for it), so an early `?` return can never leak the encoder.
@@ -88,18 +56,23 @@ const OUTPUT_CHUNK_INIT: usize = 65_536;
 /// enormous reservation.
 const OUTPUT_CHUNK_MAX: usize = 67_108_864;
 
-/// Encodes one frame described by `spec`, using `cfg`'s mode/effort/container, appending the JPEG XL
+/// Encodes one frame described by `image`, using `cfg`'s mode/effort/container, appending the JPEG XL
 /// stream to `out` and returning the number of bytes appended.
 ///
-/// The caller's `ImageRef` already guarantees `spec.samples` has the right length, so this does not
-/// re-validate it; it does defensively check that the frame's byte size does not overflow `usize`.
+/// [`JxlImageRef`] already guarantees the samples have the right length and storage width, so this
+/// does not re-validate them; it does defensively check that the frame's byte size does not overflow
+/// `usize`.
 ///
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] on a null encoder/frame-settings handle, a byte-size overflow, or
 /// any libjxl error whose detail maps to invalid input; [`Error::Unsupported`] if libjxl reports the
 /// configuration is unsupported.
-pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -> Result<usize> {
+pub(crate) fn encode(
+    cfg: &JxlEncoder,
+    image: &JxlImageRef<'_>,
+    out: &mut Vec<u8>,
+) -> Result<usize> {
     // Metadata boxes only exist in the ISO BMFF container. Rejecting the combination up front
     // keeps the configured framing authoritative instead of letting libjxl silently force the
     // container on.
@@ -116,30 +89,16 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
     // The coded bit depth: the pixel layout's width, unless overridden to a narrower depth (an
     // N-bit image carried in a 16-bit buffer). A zero or wider-than-the-buffer override cannot
     // mean anything coherent, so it is a typed error.
-    let coded_bits = match cfg.bit_depth() {
-        None => spec.bits_per_sample,
-        Some(bits) => {
-            let bits = u32::from(bits);
-            if bits == 0 || bits > spec.bits_per_sample {
-                return Err(Error::InvalidInput(
-                    "JXL: coded bit depth must be 1..= the sample width",
-                ));
-            }
-            bits
-        }
-    };
+    let coded_bits = resolve_coded_bits(cfg, image.bits_per_sample())?;
 
-    let alpha_channels = u32::from(spec.has_alpha);
-    let total_channels = spec.num_color_channels + alpha_channels;
-    let bytes_per_sample = (spec.bits_per_sample / 8) as usize;
+    let alpha_channels = u32::from(image.has_alpha());
+    let total_channels = image.channels();
+    let bytes_per_sample = (image.bits_per_sample() / 8) as usize;
 
     // Defensive overflow guard on the raw frame byte count. `ImageRef::new` validated the *sample*
     // length against the dimensions, but the FFI hands libjxl a byte length; compute it through the
     // same checked `Dimensions` arithmetic so an overflow is a typed error, never a wrap.
-    let dims = Dimensions {
-        width: spec.width,
-        height: spec.height,
-    };
+    let dims = image.dimensions();
     let num_samples = dims
         .sample_count(total_channels as usize)
         .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
@@ -150,12 +109,12 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
     // The sample buffer pointer + data type. u16 crosses as native-endian bytes: the `&[u16]` is
     // already stored in native byte order and 2-byte aligned, and `JxlPixelFormat`'s NATIVE
     // endianness tells libjxl to read it exactly that way, so the reinterpretation is lossless.
-    let (buffer, data_type) = match spec.samples {
-        Samples::U8(s) => {
+    let (buffer, data_type) = match image.samples() {
+        JxlSamples::U8(s) => {
             debug_assert_eq!(s.len(), num_samples);
             (s.as_ptr().cast::<c_void>(), sys_ty::JxlDataType::UINT8)
         }
-        Samples::U16(s) => {
+        JxlSamples::U16(s) => {
             debug_assert_eq!(s.len(), num_samples);
             (s.as_ptr().cast::<c_void>(), sys_ty::JxlDataType::UINT16)
         }
@@ -193,13 +152,13 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
         sys_enc::JxlEncoderInitBasicInfo(info.as_mut_ptr());
         info.assume_init()
     };
-    info.xsize = spec.width;
-    info.ysize = spec.height;
+    info.xsize = dims.width;
+    info.ysize = dims.height;
     info.bits_per_sample = coded_bits;
     info.exponent_bits_per_sample = 0;
-    info.num_color_channels = spec.num_color_channels;
+    info.num_color_channels = image.color_channels();
     info.num_extra_channels = alpha_channels;
-    info.alpha_bits = if spec.has_alpha { coded_bits } else { 0 };
+    info.alpha_bits = if image.has_alpha() { coded_bits } else { 0 };
     info.alpha_exponent_bits = 0;
     // The display orientation, as an EXIF 1..=8 value; the samples stay in coded order.
     info.orientation = sys_ty::JxlOrientation(cfg.orientation().exif_value().into());
@@ -213,7 +172,7 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
 
     // Colour signalling: the configured ColorSpec, gray or colour to match the channel count. Must
     // follow SetBasicInfo.
-    set_color(&enc, cfg.color(), spec.num_color_channels == 1)?;
+    set_color(&enc, cfg.color(), image.color_channels() == 1)?;
 
     // Frame settings are owned by the encoder (freed on destroy), so they need no separate RAII.
     // SAFETY: `enc.0` is valid; a null source means "copy from defaults".

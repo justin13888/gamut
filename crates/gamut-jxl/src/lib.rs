@@ -23,8 +23,8 @@
 //! pixel layouts (8/16-bit grayscale, gray+alpha, RGB, RGBA) through the
 //! [`EncodeImage`](gamut_core::EncodeImage) trait. [`JxlEncoder::recompress_jpeg`] losslessly
 //! re-packs an existing JPEG so the original is reconstructible bit-for-bit (jbrd).
-//! Requires the `encode` feature (on by default; a no-op on `wasm32` targets other than
-//! emscripten — see below).
+//! The codestream is produced by a [`JxlCodestreamEncoder`] backend; the built-in libjxl wrapper is
+//! the implicit last one (see [Backends](#backends)).
 //!
 //! # Decoding
 //!
@@ -32,8 +32,8 @@
 //! into any of the same eight pixel layouts through the [`DecodeImage`](gamut_core::DecodeImage)
 //! trait. The decoder converts internally where the request and the stream differ (grayscale →
 //! RGB, opaque-alpha padding, alpha dropping) and refuses lossy guesses such as reading a colour
-//! image back as grayscale. Requires the `decode` feature (on by default; available everywhere,
-//! every `wasm32` target included).
+//! image back as grayscale. The codestream is decoded by a [`JxlCodestreamDecoder`] backend; the
+//! built-in jxl-rs wrapper is the implicit last one (see [Backends](#backends)).
 //!
 //! # Example: lossless round-trip
 //!
@@ -60,37 +60,49 @@
 //! # Ok::<(), gamut_core::Error>(())
 //! ```
 //!
+//! # Backends
+//!
+//! Both directions are **registries of codestream backends** (issue #276), not a fixed
+//! implementation. The seam is the bare JPEG XL codestream (signature `FF 0A`):
+//! [`JxlEncoder::push_backend`] and [`JxlDecoder::push_backend`] insert a platform or alternate
+//! implementation, tried in push order, and the crate's own wrappers are the implicit **tails**.
+//! [`crate::backend`] documents the fallback contract; [`crate::abi`] adapts a
+//! [`gamut_codec_abi`] backend (including a C one) onto the same door.
+//!
+//! ## What the `encode` / `decode` features mean
+//!
+//! They select **whether the built-in tail is compiled in** — they do *not* enable or disable the
+//! direction:
+//!
+//! - `encode` (default) includes the libjxl encode tail, where the target supports it. Without it,
+//!   [`JxlEncoder`] still exists and still encodes — through whatever backend was pushed. With
+//!   neither, encoding returns [`Error::Unsupported`](gamut_core::Error::Unsupported).
+//! - `decode` (default) includes the jxl-rs decode tail, and additionally provides the header-only
+//!   accessors ([`JxlDecoder::info`], [`JxlDecoder::embedded_icc_profile`], [`JxlInfo`]), which are
+//!   always answered by the built-in parser. Without it, [`JxlDecoder`] decodes through a pushed
+//!   backend, or returns [`Error::Unsupported`](gamut_core::Error::Unsupported).
+//!
+//! This is why the encode direction works on `wasm32-unknown-unknown` despite libjxl being
+//! unbuildable there: push a backend and the tail's absence stops mattering.
+//!
+//! ## Deferred: container ownership
+//!
+//! Container-dependent features — ISO BMFF output, `Exif`/`xml ` boxes, and `jbrd` JPEG
+//! recompression — are written *by libjxl* today, so they are pinned to the built-in path by a
+//! host-side veto and never reach a backend. Moving that box/`jbrd` writing into gamut-jxl proper,
+//! so a pushed backend's codestream can be wrapped in a gamut-written container, is a recorded
+//! follow-up (see `STATUS.md`), not part of this crate today.
+//!
 //! # Safety and portability
 //!
-//! The crate is `#![deny(unsafe_code)]`; all `unsafe` is confined to the single `ffi` module that
-//! drives libjxl (hence `deny` rather than `forbid`). The decoder is 100% safe Rust and available
-//! on every target.
-//!
-//! The encoder is compiled in for
-//! `all(feature = "encode", any(not(target_arch = "wasm32"), target_os = "emscripten"))` — that
-//! is, everywhere except `wasm32` targets that emscripten does not cover:
-//!
-//! - **`wasm32-unknown-emscripten`** gets the full encoder: libjxl officially supports wasm via
-//!   emscripten, and `gamut-jxl-sys` builds it with the emsdk toolchain (`emcc` on `PATH`).
-//! - **`wasm32-unknown-unknown`** (the wasm-bindgen/browser target) is decode-only, permanently by
-//!   toolchain boundary rather than by workaround: no C/C++ compiler emits archives for that ABI,
-//!   so no build configuration could link libjxl there. A pure-Rust JPEG XL encoder is the only
-//!   thing that could ever change this (jxl-rs ships none).
-#![deny(unsafe_code)]
+//! The crate is `#![deny(unsafe_code)]
 
-#[cfg(all(
-    feature = "encode",
-    any(not(target_arch = "wasm32"), target_os = "emscripten")
-))]
+pub mod abi;
+pub mod backend;
 mod config;
 #[cfg(feature = "decode")]
 mod convert;
-#[cfg(feature = "decode")]
 mod decoder;
-#[cfg(all(
-    feature = "encode",
-    any(not(target_arch = "wasm32"), target_os = "emscripten")
-))]
 mod encoder;
 // The error-mapping module carries an encoder half (libjxl statuses) and a decoder half (jxl-rs
 // errors), each independently feature-gated inside the module; it is present whenever either codec
@@ -108,16 +120,16 @@ mod error;
     any(not(target_arch = "wasm32"), target_os = "emscripten")
 ))]
 mod ffi;
-
-#[cfg(all(
-    feature = "encode",
-    any(not(target_arch = "wasm32"), target_os = "emscripten")
-))]
-pub use config::{ColorSpec, Container, Distance, Effort, Orientation};
 #[cfg(feature = "decode")]
-pub use decoder::{JxlDecoder, JxlInfo};
-#[cfg(all(
-    feature = "encode",
-    any(not(target_arch = "wasm32"), target_os = "emscripten")
-))]
+mod jxlrs;
+
+pub use abi::{AbiDecodeBackend, AbiEncodeBackend, JXL_CODEC_ID};
+pub use backend::{
+    JxlCodestreamDecoder, JxlCodestreamEncoder, JxlDecoded, JxlEncodeRequest, JxlFraming,
+    JxlImageRef, JxlOwnedSamples, JxlSamples, JxlStreamInfo,
+};
+pub use config::{ColorSpec, Container, Distance, Effort, Orientation};
+pub use decoder::JxlDecoder;
+#[cfg(feature = "decode")]
+pub use decoder::JxlInfo;
 pub use encoder::JxlEncoder;
