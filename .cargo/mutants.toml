@@ -192,6 +192,13 @@ exclude_re = [
     # accessors' shifts ARE killed by `decodes_flag_and_attribute_bits`.)
     'replace << with >> in ProfileHeader::is_embedded',
     'replace << with >> in ProfileHeader::is_transparency',
+    # gamut-heic `HevcDecoder::supports` is a *defaulted trait method* whose body already is
+    # `true` (the documented "I will attempt anything" default that keeps every pre-registry
+    # implementation compiling, issue #273). The `-> true` replacement is therefore byte-identical
+    # to the real body — provably equivalent and unkillable. The registry's *use* of the probe (push
+    # order, skip-on-false, short-circuit) is fully covered by `tests/backend.rs`, and the overriding
+    # implementations' `supports` mutants are not excluded.
+    'replace HevcDecoder::supports -> bool with true',
     # gamut-avif `AvifEncoder::lossless`: a named, intent-revealing alias for the default encoder
     # (the default mode is already lossless), so its body *is* `Self::default()` and the
     # `-> Default::default()` replacement is byte-identical — provably equivalent, unkillable. It

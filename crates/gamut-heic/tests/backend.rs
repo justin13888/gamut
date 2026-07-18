@@ -240,6 +240,45 @@ fn all_declining_backends_yield_unsupported() {
     assert_eq!(entries(&log), ["a:supports", "b:supports", "b:decode"]);
 }
 
+/// Only the exact [`BACKEND_DECLINED`] sentinel is a late decline: an accepting backend that fails
+/// with *some other* `Error::Unsupported` has still accepted the job, so its error propagates and
+/// no later backend is consulted.
+#[test]
+fn other_unsupported_errors_are_terminal_not_a_late_decline() {
+    const OTHER: &str = "probe: unsupported HEVC profile";
+
+    struct Picky {
+        log: Log,
+    }
+    impl HevcDecoder for Picky {
+        fn decode_intra(
+            &mut self,
+            _config: &HevcConfig,
+            _payload: &[u8],
+        ) -> gamut_core::Result<DecodedFrame> {
+            self.log
+                .lock()
+                .expect("log lock")
+                .push("picky:decode".into());
+            Err(Error::Unsupported(OTHER))
+        }
+    }
+
+    let log = log();
+    let mut decoders = HevcDecoders::new();
+    decoders
+        .push_backend(Picky {
+            log: Arc::clone(&log),
+        })
+        .push_backend(Probe::new("rescue", true, Outcome::Frame(4), &log));
+
+    let err = decoders
+        .decode_intra(&config(), &[])
+        .expect_err("a non-sentinel Unsupported is terminal");
+    assert!(matches!(err, Error::Unsupported(m) if m == OTHER));
+    assert_eq!(entries(&log), ["picky:decode"]);
+}
+
 #[test]
 fn registry_supports_is_any_and_short_circuits() {
     let log = log();
