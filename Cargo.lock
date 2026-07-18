@@ -686,6 +686,7 @@ dependencies = [
 name = "gamut-heic"
 version = "0.2.1"
 dependencies = [
+ "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
  "gamut-isobmff",

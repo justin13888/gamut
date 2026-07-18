@@ -123,12 +123,16 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod backend;
 mod container;
 mod decode;
 mod hvcc;
 mod image;
 mod nal;
 
+pub use backend::{
+    AbiHevcDecoder, BACKEND_DECLINED, HEVC_CODEC_ID, HevcDecoders, NO_BACKEND, planar_pixel_format,
+};
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{DecodedFrame, HevcDecoder};
 pub use hvcc::{ChromaFormat, HevcConfig, NalArray};

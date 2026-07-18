@@ -16,6 +16,7 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+gamut-codec-abi.workspace = true
 gamut-core.workspace = true
 gamut-color.workspace = true
 gamut-isobmff.workspace = true
