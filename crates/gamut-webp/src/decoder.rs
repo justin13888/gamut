@@ -6,21 +6,41 @@
 //! alpha chunk and preserves a VP8L stream's own alpha; decoding to [`Rgb8`](gamut_core::Rgb8)
 //! drops alpha.
 
-use gamut_color::ColorRange;
+use std::fmt;
+use std::sync::{Arc, Mutex};
+
+use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{DecodeImage, Dimensions, Error, ImageBuf, Result, Rgb8, Rgba8};
 use gamut_riff::{RiffReader, WebpChunkId};
 
 use crate::alpha;
+use crate::backend::{
+    CodestreamInfo, DecodedRaster, SharedDecoder, WebpCodestream, WebpCodestreamDecoder,
+    dispatch_decode, peek_dimensions,
+};
 use crate::vp8l::decoder::{argb_to_rgb8, argb_to_rgba8, decode as decode_vp8l};
 
 /// Decodes a WebP file to interleaved 8-bit RGB.
 ///
 /// gamut ships its own decoder because every WebP decoder in the Rust ecosystem ultimately wraps
 /// libwebp; a `#![forbid(unsafe_code)]` decoder removes that crate's memory-unsafety exposure.
-#[derive(Debug, Clone, Default)]
+/// The codestream itself may be decoded by a pluggable backend installed with
+/// [`push_backend`](Self::push_backend) — a hardware VP8 decoder, say; with none installed (the
+/// default) the crate's own `vp8`/`vp8l` decoders run. See [`crate::backend`] for the fallback
+/// contract.
+#[derive(Clone, Default)]
 pub struct WebpDecoder {
-    /// Reserved for future decode options (e.g. ignoring alpha); keeps the type extensible.
-    _private: (),
+    /// Pluggable codestream decoders, tried in push order ahead of the built-in tails.
+    backends: Vec<SharedDecoder>,
+}
+
+impl fmt::Debug for WebpDecoder {
+    /// Renders the number of installed backends (a backend need not be `Debug`).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WebpDecoder")
+            .field("backends", &self.backends.len())
+            .finish()
+    }
 }
 
 impl WebpDecoder {
@@ -28,6 +48,71 @@ impl WebpDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Installs a codestream decoder backend, returning `&mut self` so pushes chain.
+    ///
+    /// Backends are tried in **push order**, ahead of the built-in `vp8`/`vp8l` decoders, which
+    /// remain the implicit tails and cannot be removed. A backend declines a job by returning
+    /// `false` from [`supports`](WebpCodestreamDecoder::supports); once it accepts, its error
+    /// propagates and no other decoder is tried.
+    ///
+    /// **Cloning a `WebpDecoder` shares its backends**: the registry holds each backend behind an
+    /// [`Arc`], so a clone dispatches to the very same backend objects (and the same interior
+    /// state), it does not copy them.
+    pub fn push_backend(&mut self, backend: impl WebpCodestreamDecoder + 'static) -> &mut Self {
+        self.backends.push(Arc::new(Mutex::new(backend)));
+        self
+    }
+
+    /// Decodes one codestream `payload` through the registry, falling back to the built-in decoder
+    /// when every backend declines (or when the codestream header cannot even be peeked, in which
+    /// case the built-in decoder reports the parse error).
+    fn decode_codestream(
+        &self,
+        codestream: WebpCodestream,
+        payload: &[u8],
+    ) -> Result<DecodedRaster> {
+        if !self.backends.is_empty()
+            && let Some(dims) = peek_dimensions(codestream, payload)
+            && let Some(result) = dispatch_decode(
+                &self.backends,
+                &CodestreamInfo::new(codestream, dims),
+                payload,
+            )
+        {
+            return result;
+        }
+        match codestream {
+            WebpCodestream::Vp8 => Ok(DecodedRaster::Yuv420(
+                crate::vp8::frame::decode_frame(payload)?.to_yuv420(),
+            )),
+            WebpCodestream::Vp8l => {
+                let (dimensions, pixels) = decode_vp8l(payload)?;
+                Ok(DecodedRaster::Argb { dimensions, pixels })
+            }
+        }
+    }
+
+    /// Unwraps a lossless decode result, which is ARGB by construction (the registry rejects a
+    /// backend that returns the other variant).
+    fn expect_argb(raster: DecodedRaster) -> Result<(Dimensions, Vec<u32>)> {
+        match raster {
+            DecodedRaster::Argb { dimensions, pixels } => Ok((dimensions, pixels)),
+            DecodedRaster::Yuv420(_) => Err(Error::InvalidInput(
+                "WebP: VP8L decode produced a YUV raster",
+            )),
+        }
+    }
+
+    /// Unwraps a lossy decode result, which is YUV 4:2:0 by construction.
+    fn expect_yuv(raster: DecodedRaster) -> Result<Yuv420> {
+        match raster {
+            DecodedRaster::Yuv420(yuv) => Ok(yuv),
+            DecodedRaster::Argb { .. } => Err(Error::InvalidInput(
+                "WebP: VP8 decode produced an ARGB raster",
+            )),
+        }
     }
 
     /// Decodes the WebP file in `data` to interleaved 8-bit RGB, appending the pixels to `out` and
@@ -39,13 +124,16 @@ impl WebpDecoder {
             let chunk = chunk?;
             match WebpChunkId::from(chunk.fourcc) {
                 WebpChunkId::Vp8l => {
-                    let (dims, argb) = decode_vp8l(chunk.payload)?;
+                    let (dims, argb) = Self::expect_argb(
+                        self.decode_codestream(WebpCodestream::Vp8l, chunk.payload)?,
+                    )?;
                     argb_to_rgb8(&argb, out);
                     return Ok(dims);
                 }
                 WebpChunkId::Vp8 => {
-                    let recon = crate::vp8::frame::decode_frame(chunk.payload)?;
-                    let yuv = recon.to_yuv420();
+                    let yuv = Self::expect_yuv(
+                        self.decode_codestream(WebpCodestream::Vp8, chunk.payload)?,
+                    )?;
                     let dims = Dimensions {
                         width: yuv.width(),
                         height: yuv.height(),
@@ -83,12 +171,16 @@ impl WebpDecoder {
                 }
                 WebpChunkId::Alpha => alph = Some(chunk.payload),
                 WebpChunkId::Vp8l => {
-                    let (dims, argb) = decode_vp8l(chunk.payload)?;
+                    let (dims, argb) = Self::expect_argb(
+                        self.decode_codestream(WebpCodestream::Vp8l, chunk.payload)?,
+                    )?;
                     argb_to_rgba8(&argb, out);
                     return Ok(dims);
                 }
                 WebpChunkId::Vp8 => {
-                    let yuv = crate::vp8::frame::decode_frame(chunk.payload)?.to_yuv420();
+                    let yuv = Self::expect_yuv(
+                        self.decode_codestream(WebpCodestream::Vp8, chunk.payload)?,
+                    )?;
                     let dims = Dimensions {
                         width: yuv.width(),
                         height: yuv.height(),

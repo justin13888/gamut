@@ -31,6 +31,16 @@
 //!   rate-distortion tuning is tracked in issue #32.
 //! - **Lossless** — always reproduces the input exactly and ignores the quality value; tuning
 //!   compression density is tracked in issue #31.
+//!
+//! # Pluggable codestream backends
+//!
+//! The RIFF container and the coded picture are separable: [`backend`] exposes one trait pair —
+//! [`WebpCodestreamDecoder`] / [`WebpCodestreamEncoder`], discriminated by [`WebpCodestream`] — that
+//! routes a raw `VP8 ` / `VP8L` chunk payload to a hardware or alternate software codec, installed
+//! with [`WebpDecoder::push_backend`] / [`WebpEncoder::push_backend`]. The crate's own `vp8`/`vp8l`
+//! implementations are the implicit tails, so the default behaviour is unchanged. Backends written
+//! against the shared [`gamut_codec_abi`] seam (issue #241) plug in through [`AbiDecoderBackend`] /
+//! [`AbiEncoderBackend`].
 #![forbid(unsafe_code)]
 
 mod config;
@@ -38,9 +48,15 @@ mod decoder;
 mod encoder;
 
 pub mod alpha;
+pub mod backend;
 pub mod vp8;
 pub mod vp8l;
 
+pub use backend::{
+    AbiDecoderBackend, AbiEncoderBackend, CodestreamInfo, DecodedRaster, PIXEL_FORMAT_ARGB,
+    PIXEL_FORMAT_YUV420, RasterRef, WebpCodestream, WebpCodestreamDecoder, WebpCodestreamEncoder,
+    WebpEncodeRequest,
+};
 pub use config::{WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::WebpEncoder;
