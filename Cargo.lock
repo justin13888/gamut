@@ -605,6 +605,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gamut-codec-abi"
+version = "0.1.0"
+
+[[package]]
 name = "gamut-color"
 version = "1.1.0"
 dependencies = [
