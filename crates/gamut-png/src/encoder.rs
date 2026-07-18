@@ -583,6 +583,54 @@ mod tests {
     }
 
     #[test]
+    fn returns_the_number_of_bytes_appended_not_the_total_length() {
+        // `write_png` reports `out.len() - start`; encoding into a non-empty buffer is what tells
+        // that apart from the buffer's total length.
+        let src = vec![0u8; 2 * 2 * 3];
+        let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(2, 2).unwrap()).unwrap();
+        let mut fresh = Vec::new();
+        let alone = PngEncoder::new().encode_image(img, &mut fresh).unwrap();
+        assert_eq!(alone, fresh.len());
+
+        let mut appended = vec![0xAAu8; 17];
+        let written = PngEncoder::new().encode_image(img, &mut appended).unwrap();
+        assert_eq!(written, alone, "only the PNG's own bytes are counted");
+        assert_eq!(appended.len(), 17 + alone);
+        assert_eq!(&appended[17..], &fresh[..], "the prefix is left untouched");
+    }
+
+    #[test]
+    fn brute_force_keeps_the_first_strategy_on_a_tie() {
+        // A 1x1 image compresses to the same length under every strategy, so the tie-break is what
+        // picks the output. `BRUTE_FORCE_STRATEGIES` is in preference order and the first minimum
+        // wins, so the filter byte must be `None` (0) — not the last strategy's choice.
+        let src = vec![200u8];
+        let img = ImageRef::<Gray8>::new(&src, Dimensions::new(1, 1).unwrap()).unwrap();
+        let mut brute = Vec::new();
+        PngEncoder::new()
+            .with_filter(FilterStrategy::BruteForce)
+            .encode_image(img, &mut brute)
+            .unwrap();
+        let mut none = Vec::new();
+        PngEncoder::new()
+            .with_filter(FilterStrategy::None)
+            .encode_image(img, &mut none)
+            .unwrap();
+        assert_eq!(
+            brute, none,
+            "the tie must resolve to the first (None) candidate"
+        );
+        // And it is genuinely a tie the later strategies could have won.
+        let mut paeth = Vec::new();
+        PngEncoder::new()
+            .with_filter(FilterStrategy::Fixed(FilterType::Paeth))
+            .encode_image(img, &mut paeth)
+            .unwrap();
+        assert_eq!(brute.len(), paeth.len(), "same length, different bytes");
+        assert_ne!(brute, paeth);
+    }
+
+    #[test]
     fn large_stream_splits_into_multiple_idats() {
         // Incompressible data larger than IDAT_MAX must yield more than one IDAT chunk.
         let mut out = Vec::new();
