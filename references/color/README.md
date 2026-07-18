@@ -127,6 +127,19 @@ OETF (linear→gamma): `x ≤ 0.0031308 ? 12.92·x : 1.055·x^(1/2.4) − 0.055`
 
 ---
 
+## Linear transfer — ITU-T H.273 / ISO/IEC 23091-2 code point 8
+
+`TransferCharacteristics = 8` is **Linear**, defined as the identity `V = Lc` over the
+reference domain (H.273 Table 3, row 8). There is no constant to transcribe: the curve is
+`f(x) = x`, implemented as `gamut_color::transfer::linear_eotf` and paired with BT.709
+primaries (code point 1) as `SourceProfile::LINEAR_SRGB` — the scene-linear working space a
+RAW pipeline demosaics, white-balances, and colour-matrixes in before applying its output
+transfer.
+
+H.273 is freely published by the ITU: <https://www.itu.int/rec/T-REC-H.273>.
+
+---
+
 ## Encoder-exact transfer simplifications (chromahash)
 
 These deliberately differ from the textbook curves; gamut exposes both so the bitstream a

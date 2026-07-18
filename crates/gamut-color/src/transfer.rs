@@ -21,6 +21,27 @@ pub use gamut_core::luminance::{HDR_REFERENCE_WHITE_NITS, PQ_PEAK_NITS};
 
 use crate::cicp::TransferCharacteristics;
 
+// --- Linear (H.273 code point 8) -------------------------------------------
+
+/// Linear EOTF: the identity, `V = Lc` (CICP [`TransferCharacteristics::Linear`]).
+///
+/// Named so a linear working space — e.g. linear sRGB, the space a RAW pipeline
+/// demosaics and white-balances in — dispatches through [`eotf_for`] like any
+/// other code point instead of special-casing the identity at each call site.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::linear_eotf;
+/// assert_eq!(linear_eotf(0.0), 0.0);
+/// assert_eq!(linear_eotf(0.5), 0.5);
+/// assert_eq!(linear_eotf(1.0), 1.0);
+/// ```
+#[must_use]
+pub fn linear_eotf(x: f64) -> f64 {
+    x
+}
+
 // --- sRGB (IEC 61966-2-1) --------------------------------------------------
 
 /// sRGB EOTF: gamma-encoded signal → linear light, on `[0, 1]`.
@@ -122,13 +143,15 @@ pub fn bt2020_pq_to_sdr(x: f64) -> f64 {
 /// a `fn` mapping signal → scene/display-linear `[0, 1]`.
 ///
 /// `Srgb` returns scene-linear via [`srgb_eotf`]; `Pq` / `Bt2020_10` return the
-/// tone-mapped SDR value via [`bt2020_pq_to_sdr`]. Code points without a curve
-/// implemented here (`Bt709`, `Hlg`, `Unspecified`) return `None`. Adobe RGB and
-/// ProPhoto have no CICP transfer code point and are reached via their named
-/// functions or [`crate::profile`].
+/// tone-mapped SDR value via [`bt2020_pq_to_sdr`]; `Linear` returns the identity
+/// via [`linear_eotf`]. Code points without a curve implemented here (`Bt709`,
+/// `Hlg`, `Unspecified`) return `None`. Adobe RGB and ProPhoto have no CICP
+/// transfer code point and are reached via their named functions or
+/// [`crate::profile`].
 #[must_use]
 pub fn eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
     match tc {
+        TransferCharacteristics::Linear => Some(linear_eotf),
         TransferCharacteristics::Srgb => Some(srgb_eotf),
         TransferCharacteristics::Pq | TransferCharacteristics::Bt2020_10 => Some(bt2020_pq_to_sdr),
         TransferCharacteristics::Bt709
@@ -264,5 +287,11 @@ mod tests {
         // The Srgb dispatch is the sRGB EOTF.
         let f = eotf_for(TransferCharacteristics::Srgb).unwrap();
         assert_eq!(f(0.5), srgb_eotf(0.5));
+        // The Linear dispatch is the identity across the domain — distinct from every
+        // other modelled curve, which bend away from `x` in the interior.
+        let f = eotf_for(TransferCharacteristics::Linear).unwrap();
+        for &x in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(f(x), x);
+        }
     }
 }
