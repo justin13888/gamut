@@ -17,6 +17,9 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
+# The shared codestream-backend seam (issue #272): the `repr(C)` vtable + fallback contract the
+# `AbiInflater`/`AbiDeflater` adapters bridge onto PNG's own IDAT traits (issue #278).
+gamut-codec-abi.workspace = true
 # DEFLATE/zlib compression for the IDAT datastream and zTXt/iCCP.
 gamut-deflate.workspace = true
 # zlib *inflation* for the decoder (IDAT, iCCP, zTXt, compressed iTXt). The in-house gamut-deflate

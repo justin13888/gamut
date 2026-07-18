@@ -18,6 +18,7 @@ use gamut_core::{
     Indexed8, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
+use crate::backend::{IdatInflater, IdatInfo, Registry, run_inflaters};
 use crate::chunk::ChunkReader;
 use crate::color::ColorType;
 use crate::decoded::{self, DecodedPng, PngHeader, PngImage};
@@ -50,6 +51,7 @@ pub struct PngDecoder {
     max_height: u32,
     max_image_bytes: usize,
     max_metadata_bytes: usize,
+    backends: Registry<dyn IdatInflater + Send>,
 }
 
 impl Default for PngDecoder {
@@ -68,7 +70,41 @@ impl PngDecoder {
             max_height: SPEC_MAX_DIMENSION,
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_metadata_bytes: DEFAULT_MAX_METADATA_BYTES,
+            backends: Registry::default(),
         }
+    }
+
+    /// Appends a pluggable [`IdatInflater`] backend for the IDAT zlib stream (issue #278).
+    ///
+    /// Backends are tried in **push order**; the built-in `miniz_oxide` inflater is the implicit
+    /// tail, so pushing nothing keeps today's behaviour exactly. A backend that returns `false`
+    /// from [`IdatInflater::supports`] (or [`Error::Unsupported`] from [`IdatInflater::inflate`])
+    /// is skipped; one that accepts and then fails propagates its error rather than falling back —
+    /// see the [`backend`](crate::backend) module docs for the full contract.
+    ///
+    /// # The output cap stays with the host
+    ///
+    /// The decoder's own budget (see [`with_max_image_bytes`](Self::with_max_image_bytes)) is
+    /// passed to the backend as `max_out` *and* re-checked against the bytes it returns. A backend
+    /// that overshoots is rejected with [`Error::InvalidInput`], never truncated, so a hostile or
+    /// buggy backend cannot turn a zlib bomb into an out-of-memory.
+    ///
+    /// Only the **IDAT** stream goes through the seam. Ancillary compressed payloads (iCCP, zTXt,
+    /// compressed iTXt) always use the built-in inflater: they are not the codestream, and they
+    /// carry their own, much smaller budget.
+    ///
+    /// # Cloning shares backends
+    ///
+    /// [`PngDecoder`] is [`Clone`], and cloning copies the registry *handles*: the clone and the
+    /// original drive the **same** backend instances (held behind `Arc<Mutex<…>>`, since decoding
+    /// takes `&self`). Push a fresh backend instance if you need independent state.
+    ///
+    /// Takes `&mut self` and returns `&mut Self` — unlike the `with_*` builder setters — because a
+    /// registry accumulates rather than replaces.
+    pub fn push_backend(&mut self, backend: impl IdatInflater + 'static) -> &mut Self {
+        self.backends
+            .push(std::sync::Arc::new(std::sync::Mutex::new(backend)));
+        self
     }
 
     /// Caps the accepted image dimensions; a wider or taller image is refused before any
@@ -328,7 +364,20 @@ impl PngDecoder {
         let (palette, trns_key) = validate_plte_and_trns(&header, parsed.plte, parsed.trns)?;
 
         let expected = self.check_limits(&header)?;
-        let stream = inflate::inflate_zlib(&parsed.idat, expected)?;
+        let info = IdatInfo::new(
+            header.width,
+            header.height,
+            header.bit_depth,
+            header.color,
+            expected,
+        );
+        let stream = run_inflaters(
+            &self.backends,
+            &info,
+            &parsed.idat,
+            expected,
+            inflate::inflate_zlib,
+        )?;
         if stream.len() != expected {
             return Err(Error::InvalidInput("PNG: IDAT is shorter than the image"));
         }
