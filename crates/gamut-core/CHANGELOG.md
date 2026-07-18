@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/justin13888/gamut/compare/gamut-core-v1.0.0...gamut-core-v2.0.0) - 2026-07-18
+
+### Added
+
+- *(core)* pin C-compatible layouts for Dimensions and ColorModel
+- *(core)* add PixelFormat runtime tag mirroring the sealed Pixel matrix
+- *(core)* add Error::Io variant for stream-backed sources
+
 ## [0.2.0](https://github.com/justin13888/gamut/compare/gamut-core-v0.1.0...gamut-core-v0.2.0) - 2026-06-12
 
 ### Added

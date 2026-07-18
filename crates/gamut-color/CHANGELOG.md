@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/justin13888/gamut/compare/gamut-color-v1.0.0...gamut-color-v1.1.0) - 2026-07-18
+
+### Added
+
+- *(color)* accept 16-bit samples in clip_pixel
+- *(color)* add BitDepth::Sixteen and max_value()
+
+### Other
+
+- *(color)* record Sixteen as a non-AV1 modeled depth
+
 ## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-color-v0.2.0...gamut-color-v0.3.0) - 2026-06-12
 
 ### Added

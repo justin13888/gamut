@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-jxl-v0.2.0...gamut-jxl-v0.3.0) - 2026-07-18
+
+### Added
+
+- *(jxl)* coded-bit-depth decode and encode, and a header info peek
+- *(jxl)* enable the encoder on wasm32-unknown-emscripten
+- *(jxl)* Exif and XMP container boxes
+- *(jxl)* encoder orientation signalling
+- *(jxl)* surface the embedded ICC profile from the decoder
+- *(jxl)* [**breaking**] typed color encoding (ICC, linear sRGB, PQ, HLG)
+- *(jxl)* implement JPEG bitstream recompression (jbrd)
+- *(jxl)* pure-Rust decoder wrapping jxl-rs with DecodeImage impls
+- *(jxl)* libjxl-backed encoder with typed lossless/lossy, effort, and container options
+
+### Other
+
+- *(jxl)* retire the timeout-caught mutants
+- *(jxl)* move shipped features off the deferred ledger; state the wasm boundary
+- *(jxl)* rewrite README for the wrap architecture; add STATUS.md ledger and oracle pin
+- *(jxl)* decoder robustness corpus and feature-grid differential matrix
+
 ## [0.2.0](https://github.com/justin13888/gamut/compare/gamut-jxl-v0.1.0...gamut-jxl-v0.2.0) - 2026-06-12
 
 ### Other

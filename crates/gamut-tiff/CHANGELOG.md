@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-tiff-v0.2.0...gamut-tiff-v1.0.0) - 2026-07-18
+
+### Added
+
+- [**breaking**] rebuild the TIFF and DNG deconstructs on the ifd segment auditor
+- *(ifd)* [**breaking**] preserve unknown field types losslessly as Value::Unknown
+- *(tiff)* [**breaking**] replace the code accessors with TryFrom and From conversions
+- *(tiff)* add strict deconstruct mode with full-file accounting
+
+### Other
+
+- *(ifd)* byte-completeness ledgers and issue #263 status
+- *(tiff)* release v1.0.0
+- *(tiff)* document the v1 surface and scope ledger
+- *(tiff)* [**breaking**] finalize the v1 surface
+- *(tiff)* drop the dormant gamut-color and gamut-dsp dependencies
+- *(tiff/dng/exif)* source pointer-tag constants from gamut-ifd
+- Merge pull request #235 from justin13888/feat/181-ifd-v1
+- *(tiff)* correct the gamut-dsp attribution in the crate docs
+- apply nightly rustfmt import grouping across the workspace
+- *(mise)* port justfile recipes to mise tasks
+- Merge pull request #151 from justin13888/feat/benchmarks
+- *(tiff)* close mutation-testing gaps
+
 ## [0.2.0](https://github.com/justin13888/gamut/compare/gamut-tiff-v0.1.0...gamut-tiff-v0.2.0) - 2026-06-12
 
 ### Added

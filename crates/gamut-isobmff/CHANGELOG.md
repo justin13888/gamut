@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/justin13888/gamut/compare/gamut-isobmff-v1.0.0...gamut-isobmff-v2.0.0) - 2026-07-18
+
+### Added
+
+- *(isobmff)* iovl overlay payload, exported box-walk primitives, motion-photo-tolerant read
+- *(isobmff)* typed ImageGrid derived-image payload helper
+- *(isobmff)* [**breaking**] finalise the v1 still-image container surface
+
+### Fixed
+
+- *(avif)* follow the 2022 imir axis semantics on both surfaces
+
+### Other
+
+- *(heic)* close every diff-scoped mutation gap; refactor precondition-masked paths
+- *(isobmff)* document the CLI container entrypoint
+- *(isobmff)* drop the equivalent-mutant index_size branch
+- *(isobmff)* disambiguate the write() intra-doc link
+- *(isobmff)* structural count guards and indexed id joins
+- *(isobmff)* ledger the v1 surface — deferred vs likely-out-of-scope
+- *(isobmff)* pin the reader against hand-authored spec fixtures
+
 ### Added
 
 - A typed box-tree model (`IsoBmffImage`/`Item`/`Property`/`PropertyKind`/`ColourInformation`/

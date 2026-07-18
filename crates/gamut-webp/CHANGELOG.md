@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-webp-v0.2.0...gamut-webp-v0.3.0) - 2026-07-18
+
+### Added
+
+- *(webp)* decode VP8 mb_lf_adjustments and validate the bitstream version
+
+### Other
+
+- *(dsp)* [**breaking**] namespace the surface into av1, math, and mulaw spec-family modules
+- *(tooling)* finish just/lefthook references left from the migration
+- apply nightly rustfmt import grouping across the workspace
+- *(webp)* retire the equivalent sharpness mutant via an explicit literal
+- *(webp)* pin VP8L predictor/prefix correctness; justify remaining equivalents
+- *(webp)* pin VP8L transforms and LZ77 codecs; justify encoder free choices
+- *(webp)* pin VP8 quantization/header correctness; justify encoder free choices
+- *(webp)* close the loop-filter and VP8L decoder mutation survivors
+- *(webp)* [**breaking**] narrow the public API surface
+- *(webp)* drop inert reserve hints in the ARGB converters
+- *(webp)* close surviving mutants in the bool coder and loop filter
+- *(webp)* pin B_PRED subblock prediction; drop its dead DC duplicate
+- *(webp)* close surviving mutants in transforms, decoder, encoder, alpha
+- *(webp)* consolidate redundant lossless oracle tests
+- *(webp)* record mb_lf and version conformance in STATUS and README
+- *(webp)* document deferred and unsupported features
+- *(webp)* correct stale config and decoder documentation
+- *(webp)* drop the unused gamut-bitstream dependency
+- *(color)* [**breaking**] unify the YCbCr range selector on cicp::ColorRange
+- add Divan benchmark harnesses for codec and primitive crates
+
 ## [0.2.0](https://github.com/justin13888/gamut/compare/gamut-webp-v0.1.0...gamut-webp-v0.2.0) - 2026-06-12
 
 ### Added

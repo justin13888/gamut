@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/justin13888/gamut/compare/gamut-v0.3.0...gamut-v0.3.1) - 2026-07-18
+
+### Added
+
+- *(dng)* JPEG XL raw decode and encode (Compression 52546)
+- *(jpeg)* add gamut-jpeg with baseline sequential DCT encoder
+- *(gamut)* expose gamut-isobmff via the isobmff feature
+- *(cli)* show resolved gamut library version in gamut -V
+
+### Other
+
+- apply nightly rustfmt import grouping across the workspace
+- Merge branch 'master' into feat/dng
+- Merge branch 'master' into feat/png
+
 ## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-v0.2.0...gamut-v0.3.0) - 2026-06-12
 
 ### Added
