@@ -11,7 +11,9 @@ departure is deliberate and maintainer-confirmed; see [Why a wrapper](#why-a-wra
 
 ## Architecture
 
-Two independent halves, each gated behind its own Cargo feature:
+Two independent halves. Each is the **built-in tail** of a pushable backend registry (issue #276),
+and each is gated behind its own Cargo feature — which selects whether that tail is compiled in, not
+whether the direction works:
 
 - **Encode — the reference libjxl.** The `encode` feature wraps **libjxl v0.12.0**, the ISO/IEC
   18181 reference implementation (C++, BSD-3-Clause), statically linked through the
@@ -125,6 +127,24 @@ JxlEncoder::new().recompress_jpeg(jpeg, &mut jxl).expect("recompress");
 **RGB** and **RGBA** — so handing either an unsupported layout is a compile error. `lossy` takes a
 validated [`Distance`] in `(0.0, 25.0]` (`0.0`, libjxl's lossless sentinel, is deliberately rejected
 so lossless stays a distinct constructor). On the decode side,
+### Pluggable codestream backends
+
+Neither half is a fixed implementation. The seam is the **bare JPEG XL codestream** (signature
+`FF 0A`): `JxlEncoder::push_backend` / `JxlDecoder::push_backend` insert a `JxlCodestreamEncoder` /
+`JxlCodestreamDecoder` — a platform codec, an alternate library, or a C backend reached through the
+shared [`gamut-codec-abi`](../gamut-codec-abi) vtables via `AbiEncodeBackend` / `AbiDecodeBackend`.
+Backends are tried in push order and the built-in wrapper is tried **last**, so pushing one is
+additive. `supports() == false` (or a late `Error::Unsupported`) is the only fall-through; a backend
+that accepts a job and then fails propagates its error rather than being silently retried.
+
+This is also how the encode direction works where libjxl cannot be built: on
+`wasm32-unknown-unknown` there is no tail, so a pushed backend *is* the encoder. With neither, the
+direction returns `Error::Unsupported`.
+
+Container-dependent features — ISO BMFF output, `with_exif`/`with_xmp`, and `recompress_jpeg` — are
+written by libjxl today, so they are pinned to the built-in path by a host-side veto and never reach
+a backend. Giving gamut-jxl its own container writer is a recorded follow-up ([STATUS.md](STATUS.md)).
+
 `JxlDecoder::embedded_icc_profile` surfaces the exact ICC bytes a stream embeds (`None` for
 structured encodings like sRGB/PQ) without decoding pixels; pixel decoding applies no colour
 transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
@@ -133,8 +153,13 @@ transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
 
 | Feature  | Default | What it pulls in | Toolchain / targets |
 | -------- | ------- | ---------------- | ------------------- |
-| `encode` | yes | `gamut-jxl-sys` → static **libjxl 0.12.0** FFI | needs **cmake + a C++ toolchain** (emsdk on `wasm32-unknown-emscripten`); inert — not a build error — on other `wasm32` targets |
-| `decode` | yes | the pure-Rust `jxl` crate (jxl-rs) | pure safe Rust; builds **everywhere**, every `wasm32` target included |
+| `encode` | yes | the built-in **libjxl 0.12.0** encode tail (`gamut-jxl-sys`) | needs **cmake + a C++ toolchain** (emsdk on `wasm32-unknown-emscripten`); inert — not a build error — on other `wasm32` targets |
+| `decode` | yes | the built-in **jxl-rs** decode tail (the pure-Rust `jxl` crate), plus the header-only accessors `JxlDecoder::info` / `embedded_icc_profile` | pure safe Rust; builds **everywhere**, every `wasm32` target included |
+
+Each feature means "**include the built-in tail**", not "enable the direction": without `encode`,
+`JxlEncoder` still exists and still encodes through any backend pushed with `push_backend`; without
+`decode`, likewise for `JxlDecoder`. With neither a tail nor a backend, that direction returns
+`Error::Unsupported`.
 
 For a C-toolchain-free build — a pure-Rust decoder, e.g. for `wasm32` or CI without cmake — depend
 with `default-features = false, features = ["decode"]`. On `wasm32` the encoder is compiled out

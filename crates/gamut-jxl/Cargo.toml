@@ -16,6 +16,11 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+# The shared codestream-backend seam (issue #272): the `repr(C)` vtables and their Rust twin traits
+# that `crate::abi` adapts onto gamut-jxl's typed `JxlCodestreamEncoder`/`JxlCodestreamDecoder`.
+# Unconditional and feature-independent: the seam is pure interface (no_std, dependency-free), and
+# pushing a backend is exactly what supplies a direction whose built-in tail is compiled out.
+gamut-codec-abi.workspace = true
 gamut-core.workspace = true
 
 # The pure-Rust JPEG XL decoder (jxl-rs). Not target-gated: it is 100% safe Rust and compiles for

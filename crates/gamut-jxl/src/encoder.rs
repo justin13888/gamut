@@ -1,18 +1,63 @@
-//! The [`JxlEncoder`]: a typed front end over the reference libjxl encoder ([`crate::ffi`]).
+//! The [`JxlEncoder`]: a typed front end over a stack of JPEG XL codestream encoders — any backend
+//! pushed with [`JxlEncoder::push_backend`], and, last, the built-in libjxl wrapper
+//! ([`crate::ffi`]).
 //!
 //! Construct one with a mode — [`JxlEncoder::lossless`] (the default) or [`JxlEncoder::lossy`] — then
 //! refine it with the chainable [`JxlEncoder::with_effort`] / [`JxlEncoder::with_container`] builders,
 //! and drive it through the [`EncodeImage`] trait for any of the eight supported pixel layouts.
 
 use gamut_core::{
-    EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Result, Rgb8, Rgb16, Rgba8,
-    Rgba16,
+    EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Pixel, Result, Rgb8,
+    Rgb16, Rgba8, Rgba16,
 };
 
+use crate::backend::{JxlCodestreamEncoder, JxlEncodeRequest, JxlImageRef, JxlSamples, Registry};
 use crate::config::{ColorSpec, Container, Distance, Effort, Mode, Orientation};
-use crate::ffi::{self, FrameSpec, Samples};
 
-/// A JPEG XL encoder backed by the reference libjxl.
+/// The refusal returned when no backend can encode: nothing was pushed, and the built-in libjxl
+/// tail is not compiled into this build (no `encode` feature, or a `wasm32` target it cannot be
+/// built for).
+///
+/// Always compiled (and unit-tested) even where the tail *is* present, so its message stays pinned
+/// on every build rather than only on the targets that can return it.
+#[cfg_attr(
+    all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    ),
+    allow(dead_code)
+)]
+pub(crate) fn no_encode_backend() -> Error {
+    Error::Unsupported(
+        "JXL: no encode backend (enable the `encode` feature or push a codestream backend)",
+    )
+}
+
+/// Resolves the **coded** bit depth to declare for a raster whose samples are stored
+/// `bits_per_sample` wide: the storage width, unless [`JxlEncoder::with_bit_depth`] narrowed it.
+///
+/// Shared by the built-in FFI driver and the backend request builder so both see one value.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the override is `0` or wider than the storage width — neither
+/// can mean anything coherent.
+pub(crate) fn resolve_coded_bits(cfg: &JxlEncoder, bits_per_sample: u32) -> Result<u32> {
+    match cfg.bit_depth() {
+        None => Ok(bits_per_sample),
+        Some(bits) => {
+            let bits = u32::from(bits);
+            if bits == 0 || bits > bits_per_sample {
+                return Err(Error::InvalidInput(
+                    "JXL: coded bit depth must be 1..= the sample width",
+                ));
+            }
+            Ok(bits)
+        }
+    }
+}
+
+/// A JPEG XL encoder.
 ///
 /// Encodes 8- and 16-bit grayscale, gray+alpha, RGB and RGBA images. Pick a mode at construction —
 /// [`JxlEncoder::lossless`] (bit-exact; also [`JxlEncoder::new`] and [`Default`]) or
@@ -21,9 +66,21 @@ use crate::ffi::{self, FrameSpec, Samples};
 /// [`EncodeImage`](gamut_core::EncodeImage) trait, which appends the JPEG XL stream to the caller's
 /// buffer.
 ///
+/// # Backends
+///
+/// The codestream itself is produced by a [`JxlCodestreamEncoder`]. With the `encode` feature (and
+/// an encoder-capable target) the reference libjxl wrapper is the implicit **last** backend, so the
+/// default encoder needs no wiring at all. [`JxlEncoder::push_backend`] inserts a platform or
+/// alternate encoder *ahead* of it — and is what supplies the encode direction on `wasm32`, where
+/// the libjxl tail cannot be built. See [`crate::backend`] for the fallback contract and the
+/// container-feature veto.
+///
 /// The type is `Clone` but deliberately not `Copy`: a [`ColorSpec::Icc`] configuration owns the
-/// profile bytes.
-#[derive(Debug, Clone, PartialEq)]
+/// profile bytes, and the backend registry is shared. Cloning shares one registry: a backend pushed
+/// onto a clone is visible through the original.
+///
+/// `PartialEq` compares the **configuration** only — backends are opaque and have no equality.
+#[derive(Debug, Clone)]
 pub struct JxlEncoder {
     /// Lossless, or lossy at a validated distance.
     mode: Mode,
@@ -41,6 +98,23 @@ pub struct JxlEncoder {
     xmp: Option<Vec<u8>>,
     /// The declared coded bit depth override, if any (see [`JxlEncoder::with_bit_depth`]).
     bit_depth: Option<u8>,
+    /// Pushed codestream backends, tried in push order ahead of the built-in libjxl tail.
+    backends: Registry<dyn JxlCodestreamEncoder>,
+}
+
+impl PartialEq for JxlEncoder {
+    /// Compares the encoder **configuration**; the backend registries are ignored, since a
+    /// [`JxlCodestreamEncoder`] is an opaque trait object with no notion of equality.
+    fn eq(&self, other: &Self) -> bool {
+        self.mode == other.mode
+            && self.effort == other.effort
+            && self.container == other.container
+            && self.color == other.color
+            && self.orientation == other.orientation
+            && self.exif == other.exif
+            && self.xmp == other.xmp
+            && self.bit_depth == other.bit_depth
+    }
 }
 
 impl Default for JxlEncoder {
@@ -56,6 +130,7 @@ impl Default for JxlEncoder {
             exif: None,
             xmp: None,
             bit_depth: None,
+            backends: Registry::default(),
         }
     }
 }
@@ -221,8 +296,104 @@ impl JxlEncoder {
     }
 
     /// The internal lossless/lossy mode, for the FFI driver.
+    #[cfg(all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    ))]
     pub(crate) fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Pushes a [`JxlCodestreamEncoder`] onto the end of this encoder's backend list, ahead of the
+    /// built-in libjxl tail. Returns `&mut self` for chaining.
+    ///
+    /// Backends are tried in push order; the first whose
+    /// [`supports`](JxlCodestreamEncoder::supports) returns `true` produces the codestream, and the
+    /// built-in wrapper (when compiled in) is tried last. A backend that accepts a job and then
+    /// fails propagates its error rather than falling through — see [`crate::backend`] for the full
+    /// contract.
+    ///
+    /// Two things a pushed backend never sees, because the host vetoes them **before** consulting
+    /// the registry: [`Container::IsoBmff`] output and
+    /// [`with_exif`](JxlEncoder::with_exif)/[`with_xmp`](JxlEncoder::with_xmp) metadata (both
+    /// container-level, outside the codestream seam), and
+    /// [`recompress_jpeg`](JxlEncoder::recompress_jpeg) (jbrd reconstruction metadata, likewise a
+    /// container box). Those requests always go to the built-in path.
+    ///
+    /// On `wasm32` targets without emscripten there is no built-in tail, so a pushed backend is the
+    /// **only** way to encode; with neither, encoding reports
+    /// [`Error::Unsupported`](gamut_core::Error::Unsupported).
+    pub fn push_backend(&mut self, backend: impl JxlCodestreamEncoder + 'static) -> &mut Self {
+        self.backends.push(Box::new(backend));
+        self
+    }
+
+    /// Whether this configuration requests a **container-level** feature, which pins the encode to
+    /// the built-in path and skips the backend registry entirely.
+    ///
+    /// The seam is the bare codestream, so ISO BMFF framing and the `Exif`/`xml ` metadata boxes
+    /// have no representation a backend could honour; asking one anyway would either drop the
+    /// request or produce a mis-framed stream.
+    fn uses_container_features(&self) -> bool {
+        self.container == Container::IsoBmff || self.exif.is_some() || self.xmp.is_some()
+    }
+
+    /// Builds the plain-data [`JxlEncodeRequest`] a backend sees for `image`.
+    fn encode_request(&self, image: &JxlImageRef<'_>) -> Result<JxlEncodeRequest> {
+        Ok(JxlEncodeRequest::new(
+            self.distance(),
+            self.effort,
+            resolve_coded_bits(self, image.bits_per_sample())?,
+            self.color.clone(),
+            self.orientation,
+        ))
+    }
+
+    /// Encodes `image` through the backend registry, falling back to the built-in tail.
+    ///
+    /// The registry is consulted only when a backend has actually been pushed *and* no
+    /// container-level feature is requested, so a default encoder takes exactly the same code path —
+    /// and produces exactly the same bytes — as before backends existed.
+    fn dispatch_encode(&self, image: &JxlImageRef<'_>, out: &mut Vec<u8>) -> Result<usize> {
+        if !self.uses_container_features() && !self.backends.is_empty() {
+            let request = self.encode_request(image)?;
+            let mut backends = self.backends.lock();
+            for backend in backends.iter_mut() {
+                if !backend.supports(&request) {
+                    continue;
+                }
+                match backend.encode(&request, image) {
+                    Ok(codestream) => {
+                        out.extend_from_slice(&codestream);
+                        return Ok(codestream.len());
+                    }
+                    // A late decline: fall through exactly as `supports() == false` would.
+                    Err(Error::Unsupported(_)) => continue,
+                    // Terminal: the backend accepted the job and failed, so propagate.
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        self.builtin_encode(image, out)
+    }
+
+    /// The built-in libjxl tail, or a typed refusal where it is not compiled in.
+    fn builtin_encode(&self, image: &JxlImageRef<'_>, out: &mut Vec<u8>) -> Result<usize> {
+        #[cfg(all(
+            feature = "encode",
+            any(not(target_arch = "wasm32"), target_os = "emscripten")
+        ))]
+        {
+            crate::ffi::encode(self, image, out)
+        }
+        #[cfg(not(all(
+            feature = "encode",
+            any(not(target_arch = "wasm32"), target_os = "emscripten")
+        )))]
+        {
+            let _ = (image, out);
+            Err(no_encode_backend())
+        }
     }
 
     /// Losslessly transcodes an existing JPEG bitstream into JPEG XL (the "jbrd" recompression
@@ -242,47 +413,63 @@ impl JxlEncoder {
     ///
     /// Returns [`gamut_core::Error::InvalidInput`] on an empty or malformed JPEG codestream, and
     /// [`gamut_core::Error::Unsupported`] if the JPEG uses features whose reconstruction metadata
-    /// libjxl cannot represent.
+    /// libjxl cannot represent — or if the built-in encoder is not compiled into this build, since
+    /// jbrd recompression is **never** delegated to a pushed backend (the reconstruction metadata is
+    /// a container box, outside the codestream seam).
     pub fn recompress_jpeg(&self, jpeg: &[u8], out: &mut Vec<u8>) -> Result<usize> {
-        ffi::recompress(self, jpeg, out)
+        #[cfg(all(
+            feature = "encode",
+            any(not(target_arch = "wasm32"), target_os = "emscripten")
+        ))]
+        {
+            crate::ffi::recompress(self, jpeg, out)
+        }
+        #[cfg(not(all(
+            feature = "encode",
+            any(not(target_arch = "wasm32"), target_os = "emscripten")
+        )))]
+        {
+            let _ = (jpeg, out);
+            Err(no_encode_backend())
+        }
     }
 }
 
-/// Implements [`EncodeImage`] for each supported pixel layout by building a [`FrameSpec`] and handing
-/// it to the FFI driver. Every arm names its `bits_per_sample`, colour-channel count, alpha presence,
-/// and sample variant so the frame description stays consistent with the layout brand.
+/// Implements [`EncodeImage`] for each supported pixel layout by describing the raster as a
+/// [`JxlImageRef`] and handing it to the backend dispatcher. The channel layout is derived from the
+/// layout brand's [`Pixel::FORMAT`], so there is exactly one table of layout facts in the crate; the
+/// macro only names the sample-storage variant.
 macro_rules! impl_encode_image {
-    ($($pixel:ty => $variant:ident, $bits:expr, $color_channels:expr, $has_alpha:expr;)*) => {$(
+    ($($pixel:ty => $variant:ident;)*) => {$(
         impl EncodeImage<$pixel> for JxlEncoder {
             fn encode_image(&self, image: ImageRef<'_, $pixel>, out: &mut Vec<u8>) -> Result<usize> {
-                let dims = image.dimensions();
-                let spec = FrameSpec {
-                    width: dims.width,
-                    height: dims.height,
-                    bits_per_sample: $bits,
-                    num_color_channels: $color_channels,
-                    has_alpha: $has_alpha,
-                    samples: Samples::$variant(image.as_samples()),
-                };
-                ffi::encode(self, spec, out)
+                let described = JxlImageRef::new(
+                    <$pixel as Pixel>::FORMAT,
+                    image.dimensions(),
+                    JxlSamples::$variant(image.as_samples()),
+                )?;
+                self.dispatch_encode(&described, out)
             }
         }
     )*};
 }
 
 impl_encode_image! {
-    Gray8       => U8,  8,  1, false;
-    GrayAlpha8  => U8,  8,  1, true;
-    Rgb8        => U8,  8,  3, false;
-    Rgba8       => U8,  8,  3, true;
-    Gray16      => U16, 16, 1, false;
-    GrayAlpha16 => U16, 16, 1, true;
-    Rgb16       => U16, 16, 3, false;
-    Rgba16      => U16, 16, 3, true;
+    Gray8       => U8;
+    GrayAlpha8  => U8;
+    Rgb8        => U8;
+    Rgba8       => U8;
+    Gray16      => U16;
+    GrayAlpha16 => U16;
+    Rgb16       => U16;
+    Rgba16      => U16;
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     #[test]
@@ -327,6 +514,10 @@ mod tests {
         assert_eq!(l.effort(), Effort::Lightning);
     }
 
+    #[cfg(all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    ))]
     #[test]
     fn recompress_jpeg_rejects_empty_input() {
         let mut out = Vec::new();
@@ -339,5 +530,416 @@ mod tests {
         ));
         // No output was produced on the rejected path.
         assert!(out.is_empty());
+    }
+
+    #[cfg(not(all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    )))]
+    #[test]
+    fn recompress_jpeg_without_the_builtin_is_unsupported() {
+        // jbrd recompression is never delegated to a pushed backend, so with no built-in tail it is
+        // unsupported regardless of the registry.
+        let mut out = Vec::new();
+        let mut enc = JxlEncoder::new();
+        enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x01]));
+        assert!(matches!(
+            enc.recompress_jpeg(&[0xFF, 0xD8], &mut out),
+            Err(Error::Unsupported(_))
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn no_encode_backend_is_the_pinned_refusal() {
+        assert!(matches!(
+            no_encode_backend(),
+            Error::Unsupported(
+                "JXL: no encode backend (enable the `encode` feature or push a codestream backend)"
+            )
+        ));
+    }
+
+    #[test]
+    fn resolve_coded_bits_defaults_to_the_sample_width() {
+        let enc = JxlEncoder::new();
+        assert_eq!(resolve_coded_bits(&enc, 8).unwrap(), 8);
+        assert_eq!(resolve_coded_bits(&enc, 16).unwrap(), 16);
+    }
+
+    #[test]
+    fn resolve_coded_bits_honours_and_bounds_the_override() {
+        assert_eq!(
+            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(10), 16).unwrap(),
+            10
+        );
+        // The storage width itself is the inclusive upper bound; 1 is the inclusive lower bound.
+        assert_eq!(
+            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(16), 16).unwrap(),
+            16
+        );
+        assert_eq!(
+            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(1), 8).unwrap(),
+            1
+        );
+        // Zero, and anything wider than the buffer, are rejected.
+        assert!(matches!(
+            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(0), 16),
+            Err(Error::InvalidInput(
+                "JXL: coded bit depth must be 1..= the sample width"
+            ))
+        ));
+        assert!(resolve_coded_bits(&JxlEncoder::new().with_bit_depth(17), 16).is_err());
+        assert!(resolve_coded_bits(&JxlEncoder::new().with_bit_depth(9), 8).is_err());
+    }
+
+    #[test]
+    fn container_features_are_exactly_isobmff_exif_and_xmp() {
+        assert!(!JxlEncoder::new().uses_container_features());
+        assert!(
+            !JxlEncoder::new()
+                .with_container(Container::Codestream)
+                .uses_container_features()
+        );
+        assert!(
+            JxlEncoder::new()
+                .with_container(Container::IsoBmff)
+                .uses_container_features()
+        );
+        assert!(
+            JxlEncoder::new()
+                .with_exif(&[1, 2, 3])
+                .uses_container_features()
+        );
+        assert!(JxlEncoder::new().with_xmp("<x/>").uses_container_features());
+        // Codestream-level knobs do not trigger the veto.
+        assert!(
+            !JxlEncoder::new()
+                .with_effort(Effort::Glacier)
+                .with_bit_depth(10)
+                .with_color(ColorSpec::Pq)
+                .with_orientation(Orientation::Rotate180)
+                .uses_container_features()
+        );
+    }
+
+    #[test]
+    fn encode_request_mirrors_the_configuration() {
+        let enc = JxlEncoder::lossy(Distance::new(4.0).unwrap())
+            .with_effort(Effort::Tortoise)
+            .with_color(ColorSpec::Hlg)
+            .with_orientation(Orientation::FlipVertical)
+            .with_bit_depth(12);
+        let pixels = [0u16; 4];
+        let image = JxlImageRef::new(
+            gamut_core::PixelFormat::Gray16,
+            gamut_core::Dimensions::new(2, 2).unwrap(),
+            JxlSamples::U16(&pixels),
+        )
+        .unwrap();
+        let req = enc.encode_request(&image).unwrap();
+        assert_eq!(req.distance(), Some(Distance::new(4.0).unwrap()));
+        assert!(!req.is_lossless());
+        assert_eq!(req.effort(), Effort::Tortoise);
+        assert_eq!(req.coded_bit_depth(), 12);
+        assert_eq!(req.color(), &ColorSpec::Hlg);
+        assert_eq!(req.orientation(), Orientation::FlipVertical);
+
+        // A lossless encoder without an override reports no distance and the storage width.
+        let req = JxlEncoder::lossless().encode_request(&image).unwrap();
+        assert!(req.is_lossless());
+        assert_eq!(req.distance(), None);
+        assert_eq!(req.coded_bit_depth(), 16);
+    }
+
+    #[test]
+    fn encode_request_propagates_a_bad_bit_depth_override() {
+        let pixels = [0u8; 4];
+        let image = JxlImageRef::new(
+            gamut_core::PixelFormat::Gray8,
+            gamut_core::Dimensions::new(2, 2).unwrap(),
+            JxlSamples::U8(&pixels),
+        )
+        .unwrap();
+        assert!(
+            JxlEncoder::new()
+                .with_bit_depth(9)
+                .encode_request(&image)
+                .is_err()
+        );
+    }
+
+    /// A backend that answers `supports` from a flag and `encode` with a canned outcome, recording
+    /// how often each was called.
+    struct FixedBackend {
+        supported: bool,
+        outcome: Result<Vec<u8>>,
+        supports_calls: Arc<AtomicUsize>,
+        encode_calls: Arc<AtomicUsize>,
+    }
+
+    impl FixedBackend {
+        /// A backend that accepts everything and returns `bytes`.
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                supported: true,
+                outcome: Ok(bytes),
+                supports_calls: Arc::new(AtomicUsize::new(0)),
+                encode_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// A backend that declines at `supports` time.
+        fn declining() -> Self {
+            Self {
+                supported: false,
+                outcome: Ok(Vec::new()),
+                supports_calls: Arc::new(AtomicUsize::new(0)),
+                encode_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// A backend that accepts and then returns `error`.
+        fn failing(error: Error) -> Self {
+            Self {
+                supported: true,
+                outcome: Err(error),
+                supports_calls: Arc::new(AtomicUsize::new(0)),
+                encode_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        /// A shared handle to this backend's call counters, readable after it is pushed.
+        fn counters(&self) -> (Arc<AtomicUsize>, Arc<AtomicUsize>) {
+            (
+                Arc::clone(&self.supports_calls),
+                Arc::clone(&self.encode_calls),
+            )
+        }
+    }
+
+    impl JxlCodestreamEncoder for FixedBackend {
+        fn supports(&mut self, _req: &JxlEncodeRequest) -> bool {
+            self.supports_calls.fetch_add(1, Ordering::SeqCst);
+            self.supported
+        }
+
+        fn encode(&mut self, _req: &JxlEncodeRequest, _image: &JxlImageRef<'_>) -> Result<Vec<u8>> {
+            self.encode_calls.fetch_add(1, Ordering::SeqCst);
+            match &self.outcome {
+                Ok(bytes) => Ok(bytes.clone()),
+                Err(Error::Unsupported(m)) => Err(Error::Unsupported(m)),
+                Err(Error::InvalidInput(m)) => Err(Error::InvalidInput(m)),
+                Err(_) => Err(Error::InvalidInput("JXL: test backend failure")),
+            }
+        }
+    }
+
+    /// A 2×2 Gray8 raster, and its `JxlImageRef`.
+    const GRAY_2X2: [u8; 4] = [1, 2, 3, 4];
+
+    /// Describes [`GRAY_2X2`] for the dispatcher.
+    fn gray_image() -> JxlImageRef<'static> {
+        JxlImageRef::new(
+            gamut_core::PixelFormat::Gray8,
+            gamut_core::Dimensions::new(2, 2).unwrap(),
+            JxlSamples::U8(&GRAY_2X2),
+        )
+        .expect("valid raster")
+    }
+
+    #[test]
+    fn first_supporting_backend_wins_and_later_ones_are_untouched() {
+        let first = FixedBackend::new(vec![0xFF, 0x0A, 0x11]);
+        let second = FixedBackend::new(vec![0xFF, 0x0A, 0x22]);
+        let (_, first_encodes) = first.counters();
+        let (second_supports, second_encodes) = second.counters();
+
+        let mut enc = JxlEncoder::new();
+        enc.push_backend(first).push_backend(second);
+
+        let mut out = vec![0xEE];
+        let written = enc.dispatch_encode(&gray_image(), &mut out).unwrap();
+        assert_eq!(written, 3);
+        // The output is appended after the caller's existing bytes.
+        assert_eq!(out, vec![0xEE, 0xFF, 0x0A, 0x11]);
+        assert_eq!(first_encodes.load(Ordering::SeqCst), 1);
+        // The second backend was never consulted at all.
+        assert_eq!(second_supports.load(Ordering::SeqCst), 0);
+        assert_eq!(second_encodes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_declining_backend_is_skipped_in_favour_of_the_next() {
+        let first = FixedBackend::declining();
+        let second = FixedBackend::new(vec![0xFF, 0x0A, 0x22]);
+        let (first_supports, first_encodes) = first.counters();
+        let (second_supports, second_encodes) = second.counters();
+
+        let mut enc = JxlEncoder::new();
+        enc.push_backend(first).push_backend(second);
+
+        let mut out = Vec::new();
+        assert_eq!(enc.dispatch_encode(&gray_image(), &mut out).unwrap(), 3);
+        assert_eq!(out, vec![0xFF, 0x0A, 0x22]);
+        assert_eq!(first_supports.load(Ordering::SeqCst), 1);
+        // Declining at `supports` means `encode` is never called on it.
+        assert_eq!(first_encodes.load(Ordering::SeqCst), 0);
+        assert_eq!(second_supports.load(Ordering::SeqCst), 1);
+        assert_eq!(second_encodes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_late_unsupported_falls_through_to_the_next_backend() {
+        let first = FixedBackend::failing(Error::Unsupported("backend changed its mind"));
+        let second = FixedBackend::new(vec![0xFF, 0x0A, 0x33]);
+        let (_, first_encodes) = first.counters();
+        let (_, second_encodes) = second.counters();
+
+        let mut enc = JxlEncoder::new();
+        enc.push_backend(first).push_backend(second);
+
+        let mut out = Vec::new();
+        assert_eq!(enc.dispatch_encode(&gray_image(), &mut out).unwrap(), 3);
+        assert_eq!(out, vec![0xFF, 0x0A, 0x33]);
+        assert_eq!(first_encodes.load(Ordering::SeqCst), 1);
+        assert_eq!(second_encodes.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_accepted_then_failed_backend_propagates_and_stops_the_chain() {
+        let first = FixedBackend::failing(Error::InvalidInput("JXL: test backend failure"));
+        let second = FixedBackend::new(vec![0xFF, 0x0A, 0x44]);
+        let (_, first_encodes) = first.counters();
+        let (second_supports, second_encodes) = second.counters();
+
+        let mut enc = JxlEncoder::new();
+        enc.push_backend(first).push_backend(second);
+
+        let mut out = Vec::new();
+        assert!(matches!(
+            enc.dispatch_encode(&gray_image(), &mut out),
+            Err(Error::InvalidInput("JXL: test backend failure"))
+        ));
+        assert_eq!(first_encodes.load(Ordering::SeqCst), 1);
+        // No later backend — and no built-in tail — was reached.
+        assert_eq!(second_supports.load(Ordering::SeqCst), 0);
+        assert_eq!(second_encodes.load(Ordering::SeqCst), 0);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn container_features_skip_the_registry_entirely() {
+        // Each container-level request must bypass `supports` altogether, not merely ignore the
+        // backend's answer.
+        for enc in [
+            JxlEncoder::new().with_container(Container::IsoBmff),
+            JxlEncoder::new()
+                .with_container(Container::IsoBmff)
+                .with_exif(&[1, 2, 3]),
+            JxlEncoder::new()
+                .with_container(Container::IsoBmff)
+                .with_xmp("<x/>"),
+            // Metadata without the container is a typed error from the built-in path — but the
+            // registry must still be skipped, so the error is the built-in's, not a backend's.
+            JxlEncoder::new().with_exif(&[1, 2, 3]),
+        ] {
+            let backend = FixedBackend::new(vec![0xFF, 0x0A, 0x55]);
+            let (supports, encodes) = backend.counters();
+            let mut enc = enc;
+            enc.push_backend(backend);
+
+            let mut out = Vec::new();
+            let _ = enc.dispatch_encode(&gray_image(), &mut out);
+            assert_eq!(
+                supports.load(Ordering::SeqCst),
+                0,
+                "a container request must not consult the registry"
+            );
+            assert_eq!(encodes.load(Ordering::SeqCst), 0);
+            // Whatever the built-in did, the backend's bytes are certainly not the output.
+            assert_ne!(out, vec![0xFF, 0x0A, 0x55]);
+        }
+    }
+
+    #[test]
+    fn all_backends_declining_falls_through_to_the_builtin_tail() {
+        let mut enc = JxlEncoder::new();
+        let first = FixedBackend::declining();
+        let second = FixedBackend::failing(Error::Unsupported("late decline"));
+        let (first_supports, _) = first.counters();
+        let (_, second_encodes) = second.counters();
+        enc.push_backend(first).push_backend(second);
+
+        let mut out = Vec::new();
+        let result = enc.dispatch_encode(&gray_image(), &mut out);
+        assert_eq!(first_supports.load(Ordering::SeqCst), 1);
+        assert_eq!(second_encodes.load(Ordering::SeqCst), 1);
+
+        if cfg!(all(
+            feature = "encode",
+            any(not(target_arch = "wasm32"), target_os = "emscripten")
+        )) {
+            // The libjxl tail encoded it: a real bare codestream, not the backends' bytes.
+            let written = result.expect("the built-in tail encodes");
+            assert_eq!(written, out.len());
+            assert_eq!(&out[..2], &[0xFF, 0x0A]);
+        } else {
+            // No tail compiled in: the direction is unsupported.
+            assert!(matches!(result, Err(Error::Unsupported(_))));
+            assert!(out.is_empty());
+        }
+    }
+
+    #[test]
+    fn with_no_backend_and_no_builtin_encoding_is_unsupported() {
+        // The wasm32 story, asserted directly on the dispatcher so it holds on every host: an empty
+        // registry falls to the tail, and the tail's absence is a typed refusal.
+        let enc = JxlEncoder::new();
+        assert!(enc.backends.is_empty());
+        let mut out = Vec::new();
+        let result = enc.dispatch_encode(&gray_image(), &mut out);
+        assert_eq!(
+            result.is_ok(),
+            cfg!(all(
+                feature = "encode",
+                any(not(target_arch = "wasm32"), target_os = "emscripten")
+            ))
+        );
+        if let Err(error) = result {
+            assert!(matches!(error, Error::Unsupported(_)));
+        }
+    }
+
+    #[test]
+    fn a_pushed_backend_supplies_encode_without_any_builtin() {
+        // The other half of the wasm32 story: whatever the build, a pushed backend serves the
+        // encode, so a target with no libjxl tail still encodes.
+        let mut enc = JxlEncoder::new();
+        enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x66]));
+        let mut out = Vec::new();
+        assert_eq!(enc.dispatch_encode(&gray_image(), &mut out).unwrap(), 3);
+        assert_eq!(out, vec![0xFF, 0x0A, 0x66]);
+    }
+
+    #[test]
+    fn clones_share_one_registry_and_equality_ignores_backends() {
+        let mut enc = JxlEncoder::new();
+        let clone = enc.clone();
+        enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x77]));
+        // The clone sees the push, and equality still holds: only configuration is compared.
+        assert!(!clone.backends.is_empty());
+        assert_eq!(enc, clone);
+        assert_eq!(enc, JxlEncoder::new());
+        // A configuration difference is still a difference.
+        assert_ne!(enc, JxlEncoder::new().with_effort(Effort::Glacier));
+    }
+
+    #[test]
+    fn debug_includes_the_backend_count() {
+        let mut enc = JxlEncoder::new();
+        assert!(format!("{enc:?}").contains("backends: 0"));
+        enc.push_backend(FixedBackend::new(Vec::new()));
+        assert!(format!("{enc:?}").contains("backends: 1"));
     }
 }

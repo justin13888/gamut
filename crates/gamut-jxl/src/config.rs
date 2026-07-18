@@ -251,6 +251,10 @@ pub enum ColorSpec {
 ///
 /// This is a cheap structural pre-check so an obvious mismatch is a clear typed error before the
 /// bytes reach libjxl; full profile validation remains libjxl's job.
+#[cfg(all(
+    feature = "encode",
+    any(not(target_arch = "wasm32"), target_os = "emscripten")
+))]
 pub(crate) fn validate_icc(icc: &[u8], is_gray: bool) -> Result<()> {
     // The fixed ICC header is 128 bytes; anything shorter cannot be a profile at all.
     if icc.len() < 128 {
@@ -404,6 +408,10 @@ mod tests {
     }
 
     /// A minimal 128-byte "profile": all zeros except the data colour space signature.
+    #[cfg(all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    ))]
     fn fake_icc(space: &[u8; 4]) -> Vec<u8> {
         let mut icc = vec![0u8; 128];
         icc[16..20].copy_from_slice(space);
@@ -411,12 +419,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    ))]
     fn validate_icc_accepts_matching_color_spaces() {
         assert!(validate_icc(&fake_icc(b"RGB "), false).is_ok());
         assert!(validate_icc(&fake_icc(b"GRAY"), true).is_ok());
     }
 
     #[test]
+    #[cfg(all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    ))]
     fn validate_icc_rejects_mismatched_color_spaces() {
         // An RGB profile on a grayscale image and vice versa are both structural mismatches.
         assert!(validate_icc(&fake_icc(b"RGB "), true).is_err());
@@ -426,6 +442,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    ))]
     fn validate_icc_rejects_short_profiles() {
         assert!(validate_icc(&[], false).is_err());
         assert!(validate_icc(&[0u8; 127], false).is_err());

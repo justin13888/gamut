@@ -10,7 +10,7 @@
 //! `all(feature = "encode", any(not(target_arch = "wasm32"), target_os = "emscripten"))`, exactly like the other differential tests.
 #![cfg(feature = "decode")]
 
-use gamut_core::{DecodeImage, Error, Rgba8};
+use gamut_core::{DecodeImage, Rgba8};
 use gamut_jxl::JxlDecoder;
 
 // Only the stream-producing corpus needs the shared helpers (and the libjxl-backed encoder they use),
@@ -76,10 +76,10 @@ fn signatures_followed_by_garbage_error() {
     any(not(target_arch = "wasm32"), target_os = "emscripten")
 ))]
 mod with_streams {
-    use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Pixel, Rgb8};
+    use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, Pixel, Rgb8};
     use gamut_jxl::{Container, Effort, JxlEncoder};
 
-    use super::{Error, decode_rgba8};
+    use super::decode_rgba8;
     use crate::common::gen_u8;
 
     /// A small, valid, lossless bare codestream (textured 16×16 RGB).
