@@ -42,6 +42,13 @@ jobs:
         # Target install is owned by the `check-cross` mise task (`rustup target add`), so local
         # and CI run the exact same command.
       - name: Cross-compile check
+        # `install: false` above only skips the mise-action setup install; `mise run` would still
+        # auto-build every [tools] entry (convco/cargo-edit/cargo-mutants from source, plus cmake/
+        # ninja/meson) before the task. check-cross needs none of them — only rustup + cargo — and
+        # that source build is slow and intermittently times out fetching from crates.io, so disable
+        # task auto-install to honor the comment above.
+        env:
+          MISE_TASK_RUN_AUTO_INSTALL: false
         run: mise run check-cross ${{ matrix.target }}
 
   msrv:
@@ -61,7 +68,7 @@ jobs:
         # uses only the runner's rustup + cargo. That source build is slow and intermittently fails,
         # so disable task auto-install to match the `install: false` above.
         env:
-          MISE_TASK_RUN_AUTO_INSTALL: "false"
+          MISE_TASK_RUN_AUTO_INSTALL: false
         run: mise run check-msrv
 
   # The JPEG XL encoder on WebAssembly, for real: builds libjxl with the emsdk toolchain and runs
