@@ -271,4 +271,6 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | tier-2 oracle: hermetic native decoder reproduces encoder output | — | ✅ | M0 |
 | tier-3 oracle: `libwebp-sys` differential (enc→libwebp-dec, libwebp-enc→dec) | — | ✅ | M0 |
 | CLI `gamut convert … .webp` (encode) + `.webp` decode input | gamut-cli | ✅ | M0 |
+| codestream backend registries (`WebpCodestreamDecoder`/`WebpCodestreamEncoder`, push order + built-in tails) | issue #275 | ✅ | M6 |
+| `gamut-codec-abi` adapters (`AbiDecoderBackend` / `AbiEncoderBackend`, `VP8 `/`VP8L` codec ids) | issue #241 | ✅ | M6 |
 | wasm / ffi bindings for WebP | gamut-{wasm,ffi} | ☐ | future |

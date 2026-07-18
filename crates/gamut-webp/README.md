@@ -39,6 +39,18 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
 - **Alpha** — `EncodeImage<Rgba8>` / `DecodeImage<Rgba8>`. A transparent lossy image uses the extended
   (`VP8X`) format with an `ALPH` chunk (raw or lossless); an opaque one stays a simple file.
 
+### Pluggable codestream backends
+
+The container and the coded picture are separable. `WebpDecoder::push_backend` /
+`WebpEncoder::push_backend` install a `WebpCodestreamDecoder` / `WebpCodestreamEncoder` — one trait
+pair, discriminated by `WebpCodestream` (`Vp8` or `Vp8l`) — that handles the raw `VP8 ` / `VP8L`
+chunk payload: a stateless-V4L2-style hardware VP8 decoder, say, or libwebp as an alternate VP8L
+software path. Backends are tried in **push order**; `supports() == false` is the only fall-through;
+the crate's own `vp8`/`vp8l` codecs are the implicit tails, so the default output is unchanged.
+Backends written against the shared [`gamut-codec-abi`](../gamut-codec-abi) seam plug in through
+`AbiDecoderBackend` / `AbiEncoderBackend`. `ALPH` alpha stays container-side and never crosses the
+seam.
+
 ## Status
 
 The intra-frame still-image surface and its milestones (M0 VP8L lossless → M1 VP8L full → M2 VP8
