@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-cli-v0.2.0...gamut-cli-v0.3.0) - 2026-07-18
+
+### Added
+
+- [**breaking**] rebuild the TIFF and DNG deconstructs on the ifd segment auditor
+- *(cli)* list BitDepth::Sixteen in color list
+- *(cli)* JPEG XL output format and .jxl input decoding
+- *(cli)* add the gamut isobmff container entrypoint
+- *(cli)* add `gamut icc` to extract and inspect embedded ICC profiles
+- *(cli)* add `gamut inspect` for strict TIFF/DNG deconstruct
+- *(cli)* show resolved gamut library version in gamut -V
+
+### Fixed
+
+- *(cli)* migrate convert to the AvifEncoder lossless/lossy API
+
+### Other
+
+- *(tiff)* [**breaking**] finalize the v1 surface
+- Merge pull request #266 from justin13888/feat/260-color-bit-depth
+- Merge branch 'master' into feat/184-isobmff-v1
+- *(icc)* [**breaking**] move profile-ID computation onto ProfileId and add Display impls
+- *(icc)* [**breaking**] adopt std conversion traits for signatures and header enums
+- apply nightly rustfmt import grouping across the workspace
+- Merge branch 'master' into feat/png
+
 ## [0.2.0](https://github.com/justin13888/gamut/compare/gamut-cli-v0.1.0...gamut-cli-v0.2.0) - 2026-06-12
 
 ### Added

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/justin13888/gamut/compare/gamut-heic-v0.2.0...gamut-heic-v0.2.1) - 2026-07-18
+
+### Added
+
+- *(heic)* pluggable HevcDecoder trait and full container decode pipeline
+- *(heic)* typed hvcC record, NAL unit layer, and decoder-facing bridges
+- *(heic)* full-fidelity HEIF container parse with byte-exact accounting
+
+### Other
+
+- *(heic)* close every diff-scoped mutation gap; refactor precondition-masked paths
+- *(heic)* libheif differential conformance suite over generated fixtures
+
 ## [0.2.0](https://github.com/justin13888/gamut/compare/gamut-heic-v0.1.0...gamut-heic-v0.2.0) - 2026-06-12
 
 ### Other

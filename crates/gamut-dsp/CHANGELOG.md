@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/justin13888/gamut/compare/gamut-dsp-v1.0.0...gamut-dsp-v2.0.0) - 2026-07-18
+
+### Added
+
+- *(dsp)* add JPEG-1 8x8 forward/inverse DCT kernels
+
+### Other
+
+- *(dsp)* trim trailing whitespace in crate docs
+- *(gamut-dsp)* [**breaking**] remove mulaw module
+
 ## [0.2.1](https://github.com/justin13888/gamut/compare/gamut-dsp-v0.2.0...gamut-dsp-v0.2.1) - 2026-06-12
 
 ### Added

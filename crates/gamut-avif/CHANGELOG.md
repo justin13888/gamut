@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-avif-v0.3.0...gamut-avif-v1.0.0) - 2026-07-18
+
+### Added
+
+- *(avif)* treat unspecified matrix coefficients as bt601 on rgba
+- *(avif)* add rgba presentation path with colour alpha and transforms
+- *(avif)* add Av1StillDecoder seam and planar decode pipeline
+- *(avif)* add byte-accounting container and role-typed image view
+- *(avif)* add typed av1C parse and OBU enumeration layer
+- *(isobmff)* [**breaking**] finalise the v1 still-image container surface
+
+### Fixed
+
+- *(avif)* follow the 2022 imir axis semantics on both surfaces
+
+### Other
+
+- *(avif)* record the decode surface in STATUS and references
+- *(avif)* add libavif and dav1d differential conformance suite
+- *(avif)* release v1.0.0
+- *(avif)* finalize the v1 scope ledger and crate docs
+- *(avif)* [**breaking**] future-proof the v1 public API
+- *(avif)* hermetic remux round-trip via the libavif oracle
+- *(avif)* note the container rows are ready in gamut-isobmff v1
+- *(av1)* vendor libaom as the definitive AV1 reference oracle
+- *(avif)* assert the quality precondition in the roundtrip helper
+- *(avif)* define AvifEncoder constructors before its default
+- *(avif)* finalize v1 documentation
+- *(avif)* assert container field contents and trim redundant tests
+- *(avif)* [**breaking**] type the orientation API
+- *(avif)* [**breaking**] replace raw qindex with a 0..=100 quality knob
+- *(avif)* build the container via gamut_isobmff::write
+- add Divan benchmark harnesses for codec and primitive crates
+
 ## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-avif-v0.2.0...gamut-avif-v0.3.0) - 2026-06-12
 
 ### Added
