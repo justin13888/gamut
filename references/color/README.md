@@ -138,6 +138,8 @@ transfer.
 
 H.273 is freely published by the ITU: <https://www.itu.int/rec/T-REC-H.273>.
 
+Vendored in this directory as: `T-REC-H.273-202407-I!!PDF-E.pdf`.s
+
 ---
 
 ## Encoder-exact transfer simplifications (chromahash)
