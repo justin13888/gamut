@@ -92,9 +92,10 @@ The API was frozen after a full-surface review; the additions and breaks:
 - **`#[non_exhaustive]`** on the open code sets (`Compression`, `PhotometricInterpretation`,
   `Predictor`) and the grow-prone deconstruct types (`Severity`, `Anomaly` + its variants,
   `UnknownTag`, `DeconstructReport`), so new codes/categories/fields land semver-minor.
-- **Complete re-export closure** — `CoverageReport`, `UnknownField`, `Range`, `Overlap`, and
-  `SubIfd` join the `gamut_ifd` re-exports: every type reachable from this crate's public items
-  is nameable without a direct gamut-ifd dependency.
+- **Complete re-export closure** — every gamut-ifd type reachable from this crate's public
+  items is re-exported (since #263: `SegmentReport`, `Segment`, `SpanKind`, `DataLabel`,
+  `Range`, `Conflict`, `SharedSpan`, `UnknownValue`, and `SubIfd`), so none needs a direct
+  gamut-ifd dependency to name.
 - **Documented freeze rationales** — `UnknownTag.field_type` stays a raw `u16` (unrecognised
   on-disk type codes must be representable); `Anomaly`'s `detail` strings are human-readable
   diagnostics whose wording is not contractual.
@@ -103,8 +104,11 @@ The API was frozen after a full-surface review; the additions and breaks:
 
 ## The v1 guarantee
 
-`gamut-tiff` 1.0 promises: every emitted file is a well-formed TIFF 6.0 (or BigTIFF) whose
-structure the strict `deconstruct` fully accounts; every lossless path round-trips pixel-exact and
+`gamut-tiff` promises: every emitted file is a well-formed TIFF 6.0 (or BigTIFF) whose
+structure the strict `deconstruct` fully classifies — since issue #263 with **zero tolerance**
+(the byte-level verdict is `SegmentReport::is_fully_classified`: alignment padding comes back
+as typed `Padding` segments, and the dual-ledger cross-check proves the parser's own
+accounting); every lossless path round-trips pixel-exact and
 is continuously validated in both directions against libtiff; the on-disk code↔enum mappings
 (`Compression`, `PhotometricInterpretation`, `Predictor`) are frozen contracts; and every deferred
 row above lands additively — the v1 public surface is never reshaped.

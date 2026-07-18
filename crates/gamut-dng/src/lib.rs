@@ -43,6 +43,11 @@
 //! of scope, as does *executing* opcodes or gain maps. See `STATUS.md` for the per-feature
 //! status and the deferred ledger (lossy JPEG, float samples, the opcode processing library).
 //!
+//! For archival use, [`deconstruct`] classifies **every byte** of a DNG into typed segments
+//! (dual-ledger checked, issue #263), and [`DngRewrite`] is the preserving edit path: the whole
+//! tree opens losslessly, pixel payloads are carried byte-for-byte, and the `MakerNote` byte
+//! range is pinned at its original offset.
+//!
 //! Memory-safe on hostile input: `#![forbid(unsafe_code)]` — like TIFF, DNG's offset-driven
 //! structure is a classic parser-exploit surface, so the decoder is built to resist malformed
 //! IFDs, offset loops, and truncation.
@@ -59,6 +64,7 @@ pub mod metadata;
 pub mod opcode;
 pub mod profile;
 pub mod raw;
+pub mod rewrite;
 pub mod subimage;
 pub mod tags;
 pub mod values;
@@ -74,7 +80,9 @@ mod writer;
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
 // not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
 pub use decoder::{DecodedDng, DngDecoder, RawTag};
-pub use deconstruct::{Anomaly, DeconstructReport, Severity, UnknownTag, deconstruct};
+pub use deconstruct::{
+    Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
+};
 pub use encoder::DngEncoder;
 pub use gain_map::{GainValues, ProfileGainTableMap};
 pub use gamut_core::{Dimensions, Error, Result};
@@ -87,6 +95,7 @@ pub use metadata::{DngMetadata, ExifMetadata};
 pub use opcode::{Opcode, OpcodeList, opcode_id};
 pub use profile::CameraProfile;
 pub use raw::{RawImage, RawPhotometry, cfa_color};
+pub use rewrite::{DngRewrite, MakerNotePreservation, RewrittenDng};
 pub use subimage::{
     DepthInfo, MaskSubArea, SemanticMaskInfo, SubImage, SubImageData, SubImageKind,
 };

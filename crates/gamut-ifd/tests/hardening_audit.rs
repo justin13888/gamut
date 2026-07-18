@@ -6,10 +6,12 @@
 //!
 //! Non-redundancy: the robustness corpus and in-module tests assert *behavior* (typed error,
 //! path agreement, guard boundaries); this file's sole added value is pinning the *message* per
-//! acceptance case, on the slice path and — where the data flows legitimately phrase a failure
-//! differently — the streaming path too. Overlapping records, the one checklist item that is
+//! acceptance case, on both the slice entry point (`read`) and the streaming entry point
+//! (`IfdReader`). Since the byte-completeness reshape (#263) the slice functions are thin wrappers
+//! over the streaming engine — one parser — so the two entry points now phrase every failure
+//! identically. Overlapping records, the one checklist item that is
 //! report-not-reject by design, is pinned in `robustness.rs`
-//! (`overlapping_value_offset_parses_and_surfaces_in_coverage`).
+//! (`overlapping_value_offset_parses_and_surfaces_in_audit`).
 
 use gamut_core::Error;
 use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree, write};
@@ -51,14 +53,11 @@ fn truncated_header() {
     both_paths(b"II\x2a", "TIFF: header too short");
 }
 
-/// A first-IFD offset far past EOF. The paths phrase this differently — the slice reader bounds
-/// the offset against the file, the streaming reader's positioned read fails — so both strings
-/// are contract.
+/// A first-IFD offset far past EOF. With the slice reader now a thin wrapper over the streaming
+/// engine (one parser), the positioned directory read fails identically on both entry points.
 #[test]
 fn ifd_offset_out_of_bounds() {
-    let data = b"MM\x00\x2a\x7f\xff\xff\xff";
-    assert_eq!(slice_msg(data), "TIFF: IFD extends past end of file");
-    assert_eq!(stream_msg(data), "TIFF: read out of bounds");
+    both_paths(b"MM\x00\x2a\x7f\xff\xff\xff", "TIFF: read out of bounds");
 }
 
 /// A 26-byte classic file with one out-of-line SHORT×3 entry whose value offset is `voff`.
@@ -107,13 +106,11 @@ fn ifd_body_overruns_end_of_file() {
     );
 }
 
-/// A first-IFD offset exactly at EOF: the directory *starts* in bounds, so the failure is the
-/// truncated count read — phrased per data flow, like `ifd_offset_out_of_bounds`.
+/// A first-IFD offset exactly at EOF: the directory read starts at EOF, so the positioned count
+/// read fails out of bounds — identically on both entry points (one parser).
 #[test]
 fn ifd_at_exactly_end_of_file() {
-    let data = b"II\x2a\x00\x08\x00\x00\x00";
-    assert_eq!(slice_msg(data), "TIFF: truncated 16-bit field");
-    assert_eq!(stream_msg(data), "TIFF: read out of bounds");
+    both_paths(b"II\x2a\x00\x08\x00\x00\x00", "TIFF: read out of bounds");
 }
 
 #[test]

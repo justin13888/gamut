@@ -72,8 +72,9 @@ relative to the note start or the TIFF header, and for TIFF streams embedded ins
 container). `IfdReader` walks structure lazily on top: `read_ifd` fetches one directory body
 and leaves each entry **raw** (tag, type code, count, and the value/offset word verbatim);
 `value` fetches and decodes a single value on demand; `ifds()` iterates the top-level chain;
-`read_file` / `read_tree` / the `*_with_coverage` methods are the eager slice APIs' equivalents
-and produce identical results (the robustness corpus drives both paths and requires agreement).
+`read_file` / `read_tree` / the audited methods are the eager slice APIs' equivalents and
+produce identical results — in fact the slice functions *are* thin wrappers over this engine
+(one parser; the robustness corpus drives both entry points as a regression gate).
 
 ```rust
 use gamut_ifd::{IfdReader, StreamSource, tags};
@@ -91,8 +92,20 @@ Codecs that append image data after the stream (strips, tiles, an embedded JPEG)
 documented **layout contract**: every structure sits on an even word boundary (`align_word` is the
 rule) and the layout is a pure function of structure sizes, so writing with correctly-sized
 placeholders, measuring, patching (`Value::offset_array` builds the variant-width offset arrays),
-and re-writing is byte-stable. The `*_with_coverage` readers additionally account every byte range
-consumed (`Coverage`) for strict archival "deconstruct" decoding.
+and re-writing is byte-stable; `write_with` additionally returns a `SegmentMap` declaring every
+emitted byte (padding included) and can **pin** a value at an exact absolute offset (the
+maker-note preservation primitive).
+
+### Byte-completeness auditing (issue #263)
+
+For strict archival decoding, `audit` (and the composable `Auditor`) classifies **every byte**
+of a stream into typed segments — header, directory bodies, values, declared data extents
+(strips/tiles/free/embedded JPEG), and padding — under a **dual-ledger** cross-check: a
+`Tracked` source records every byte the parse physically reads, and `SegmentMap::finish`
+verifies reads ⊆ claims and claims ⊆ reads, so the report is a machine-checked proof of what
+the parse touched, not a promise. `SegmentReport::is_fully_classified` is the zero-tolerance
+verdict; unknown-type entries are preserved verbatim as `Value::Unknown` (their unsizable
+out-of-line payloads are the one documented gap an audit can still surface).
 
 Beyond the twelve TIFF 6.0 field types, `FieldType::Utf8` (`Value::Utf8`, on-disk code `129`) carries
 the Exif 3.0 UTF-8 string type (CIPA DC-008 §4.6.2) — like `Ascii` but NUL-terminated UTF-8, so

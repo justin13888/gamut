@@ -1,34 +1,38 @@
-//! Strict "deconstruct" decoding: walk the whole DNG and prove every byte was accounted for.
+//! Strict "deconstruct" decoding: walk the whole DNG and prove every byte is classified.
 //!
 //! This is the archival counterpart to [`crate::decoder`], filed as issue #197 from the PR #161
-//! review. Ordinary decoding reads the raw image, profile, and metadata it needs and ignores the
-//! rest. [`deconstruct`] instead walks the entire IFD tree — IFD 0 and its chain, the `SubIFDs`
-//! image sub-IFDs (including the full-resolution raw), and the Exif/GPS metadata sub-IFDs — marking
-//! every consumed byte into a [`gamut_ifd::Coverage`] and layering DNG tag knowledge on top. The
-//! resulting [`DeconstructReport`] surfaces unaccounted bytes (gaps / trailing / overlaps), unknown
-//! field types, unknown/private tags, out-of-spec codes, and malformed colour matrices instead of
-//! silently dropping them.
+//! review and rebuilt on the shared structural auditor for issue #263. Ordinary decoding reads
+//! the raw image, profile, and metadata it needs and ignores the rest. [`deconstruct`] instead
+//! drives [`gamut_ifd::audit`] over the entire IFD tree — IFD 0 and its chain, the `SubIFDs`
+//! image sub-IFDs (including the full-resolution raw), the Exif/GPS/Interoperability metadata
+//! sub-IFDs, and every strip/tile/free/embedded-JPEG extent — then layers DNG tag knowledge on
+//! top. The resulting [`DeconstructReport`] carries the byte-level [`SegmentReport`] (every byte
+//! typed, or precisely what was not — including the dual-ledger parser cross-check) plus unknown
+//! field types, unknown/private tags, out-of-spec codes, and malformed colour matrices.
 //!
 //! It is **collect-and-report, not fail-fast**: it errors only when the container itself is
-//! unreadable, exactly as [`gamut_ifd::read`] would; everything else is reported for the caller to
-//! judge.
+//! unreadable, exactly as [`gamut_ifd::read`] would; everything else is reported for the caller
+//! to judge.
 
-use gamut_core::Result;
+use gamut_core::{Error, Result};
 use gamut_ifd::{
-    ByteOrder, Coverage, CoverageReport, Ifd, UnknownField, Value, Variant,
-    read_ifd_at_with_coverage, read_with_coverage,
+    AuditFinding, Auditor, ByteOrder, Claim, DataLabel, Ifd, SegmentReport, SkipReason, SpanKind,
+    StandardAuditSpec, Value, Variant,
 };
 
 use crate::decoder::{DecodedDng, DngDecoder};
 use crate::tags;
 use crate::values::{Compression, PhotometricInterpretation};
 
-/// An upper bound on sub-IFD nesting, guarding the recursive walk against malformed/looping trees.
-const MAX_SUBIFD_DEPTH: usize = 16;
+/// The magic number of an embedded DNG camera-profile stream (the `.dcp` form): the two bytes
+/// after the byte-order mark, `0x4352` (`"RC"` little-endian) where a TIFF header carries `42`.
+const CAMERA_PROFILE_MAGIC: u16 = 0x4352;
 
 /// How serious a reported [`Anomaly`] is.
-#[non_exhaustive]
+///
+/// Non-exhaustive: further severities may be added without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Severity {
     /// Out of spec but often benign.
     Warning,
@@ -38,8 +42,10 @@ pub enum Severity {
 
 /// A tag a valid DNG would not be expected to carry — recognised structurally but not part of the
 /// DNG 1.7.1 tag set (see [`tags::is_known_tag`]).
-#[non_exhaustive]
+///
+/// Non-exhaustive: fields may be added as the deconstruct grows more precise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnknownTag {
     /// The page (top-level IFD index) the tag was found in.
     pub page: usize,
@@ -51,11 +57,34 @@ pub struct UnknownTag {
     pub count: u64,
 }
 
-/// A recognised but out-of-spec or unparsable element a deconstruct flags.
+/// An IFD entry whose field-type code is unrecognised. The entry is **preserved verbatim** in
+/// the parse (as a [`gamut_ifd::Value::Unknown`]) — reported here because its out-of-line
+/// payload, if any, is unsizable and therefore unclassifiable.
+///
+/// Non-exhaustive: fields may be added as the deconstruct grows more precise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+pub struct UnknownFieldType {
+    /// The page (top-level IFD index) the entry was found in.
+    pub page: usize,
+    /// The entry's tag.
+    pub tag: u16,
+    /// The unrecognised on-disk field-type code.
+    pub type_code: u16,
+    /// The entry's declared value count (untrusted — the element size is unknown).
+    pub count: u64,
+}
+
+/// A recognised but out-of-spec or unparsable element a deconstruct flags.
+///
+/// Non-exhaustive (as are its variants): the diagnostic taxonomy grows with the deconstruct.
+/// The `detail` strings are human-readable diagnostics; their exact wording is not part of the
+/// API contract — match on the variant and its typed fields instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Anomaly {
     /// A tag whose value uses a code this crate does not recognise (e.g. an unknown `Compression`).
+    #[non_exhaustive]
     UnknownCode {
         /// The page the tag was found in.
         page: usize,
@@ -63,37 +92,43 @@ pub enum Anomaly {
         tag: u16,
         /// The unrecognised code.
         code: u32,
-        /// A human-readable description.
+        /// A human-readable description (wording not contractual).
         detail: &'static str,
     },
     /// A known tag whose value could not be interpreted (wrong type, count, or range).
+    #[non_exhaustive]
     UnparsableTag {
         /// The page the tag was found in.
         page: usize,
         /// The tag.
         tag: u16,
-        /// A human-readable description.
+        /// A human-readable description (wording not contractual).
         detail: &'static str,
     },
     /// An out-of-spec or unexpected structural condition.
+    #[non_exhaustive]
     Structure {
         /// The page the condition relates to.
         page: usize,
-        /// A human-readable description.
+        /// A human-readable description (wording not contractual).
         detail: &'static str,
         /// How serious the condition is.
         severity: Severity,
     },
 }
 
-/// The result of a strict deconstruct: byte-range accounting plus DNG-specific findings.
-#[non_exhaustive]
+/// The result of a strict deconstruct: byte-level classification plus DNG-specific findings.
+///
+/// Non-exhaustive: report categories may be added without a breaking change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DeconstructReport {
-    /// Which file bytes were accounted for, and the gaps/overlaps/trailing that were not.
-    pub coverage: CoverageReport,
-    /// IFD entries whose field-type code was unrecognised (and thus skipped by the reader).
-    pub unknown_fields: Vec<UnknownField>,
+    /// The byte-level verdict: every byte of the file typed ([`SegmentReport::segments`]), or
+    /// precisely what was not — unclassified ranges, conflicts, out-of-bounds claims, and the
+    /// dual-ledger parser cross-check.
+    pub segments: SegmentReport,
+    /// IFD entries whose field-type code was unrecognised (preserved verbatim in the parse).
+    pub unknown_fields: Vec<UnknownFieldType>,
     /// Tags not part of the recognised DNG tag set.
     pub unknown_tags: Vec<UnknownTag>,
     /// Recognised-but-out-of-spec codes, unparsable tags, and structural problems.
@@ -101,93 +136,101 @@ pub struct DeconstructReport {
 }
 
 impl DeconstructReport {
-    /// Whether every byte of the file was accounted for exactly once (delegates to
-    /// [`CoverageReport::is_fully_covered`]). Independent of whether every tag/code was recognised.
+    /// Whether every byte of the file maps to exactly one typed segment (delegates to
+    /// [`SegmentReport::is_fully_classified`] — zero tolerance, alignment padding included).
+    /// Independent of whether every tag/code was recognised.
     #[must_use]
-    pub fn is_fully_covered(&self) -> bool {
-        self.coverage.is_fully_covered()
+    pub fn is_fully_classified(&self) -> bool {
+        self.segments.is_fully_classified()
     }
 
-    /// Whether the file is pristine for archival: fully covered, with no unknown field types, no
-    /// unknown tags, and no anomalies.
+    /// Whether the file is pristine for archival: fully classified, with no unknown field
+    /// types, no unknown tags, and no anomalies.
     #[must_use]
     pub fn is_fully_accounted(&self) -> bool {
-        self.coverage.is_fully_covered()
+        self.segments.is_fully_classified()
             && self.unknown_fields.is_empty()
             && self.unknown_tags.is_empty()
             && self.anomalies.is_empty()
     }
 }
 
-/// Walks `data` (a DNG file) and returns a [`DeconstructReport`] accounting every byte — without
+/// Walks `data` (a DNG file) and returns a [`DeconstructReport`] classifying every byte — without
 /// decoding the raw image.
 ///
 /// # Errors
 ///
 /// Returns [`gamut_core::Error::InvalidInput`] only when the container is unreadable (bad header,
 /// truncated/looping IFD chain) — the same conditions under which [`gamut_ifd::read`] fails.
-/// Unknown tags, unknown field types, out-of-spec codes, malformed matrices, and unaccounted bytes
-/// are reported, not errored.
+/// Unknown tags, unknown field types, out-of-spec codes, malformed matrices, and unclassified
+/// bytes are reported, not errored.
 pub fn deconstruct(data: &[u8]) -> Result<DeconstructReport> {
-    let mut cov = Coverage::new(data.len() as u64);
-    let mut unknown_fields = Vec::new();
-    let file = read_with_coverage(data, &mut cov, &mut unknown_fields)?;
-    let mut d = Deconstructor {
-        data,
-        order: file.order,
-        variant: file.variant,
-        cov,
-        unknown_fields,
-        unknown_tags: Vec::new(),
-        anomalies: Vec::new(),
-        visited: Vec::new(),
-    };
+    // The standard audit spec covers everything DNG locates through plain TIFF structure: the
+    // pointer tags (SubIFDs/Exif/GPS/Interop) and the data extents (strips, tiles, free ranges,
+    // embedded JPEG) — u64-native, so BigTIFF DNGs past 4 GiB account correctly. DNG's one
+    // extra structural carrier — `ExtraCameraProfiles`, pointing at *embedded camera-profile
+    // streams* rather than plain sub-IFDs — is walked below.
+    let mut auditor = Auditor::new(data)?;
+    let file = auditor.walk(&StandardAuditSpec)?;
+    let mut findings = Findings::default();
     for (page, ifd) in file.ifds.iter().enumerate() {
-        d.account_image_ifd(ifd, page, 0);
+        findings.check_image_ifd(ifd, page);
+        findings.audit_camera_profiles(&mut auditor, ifd, page);
     }
-    let coverage = d.cov.finish();
+    let (segments, audit_findings) = auditor.finish()?;
+    findings.map_audit_findings(&audit_findings);
     Ok(DeconstructReport {
-        coverage,
-        unknown_fields: d.unknown_fields,
-        unknown_tags: d.unknown_tags,
-        anomalies: d.anomalies,
+        segments,
+        unknown_fields: findings.unknown_fields,
+        unknown_tags: findings.unknown_tags,
+        anomalies: findings.anomalies,
     })
 }
 
-/// Accumulates the byte-range accounting and DNG findings while walking the IFD tree.
-struct Deconstructor<'a> {
-    data: &'a [u8],
-    order: ByteOrder,
-    variant: Variant,
-    cov: Coverage,
-    unknown_fields: Vec<UnknownField>,
+/// Accumulates the DNG-level findings over the audited tree.
+#[derive(Default)]
+struct Findings {
+    unknown_fields: Vec<UnknownFieldType>,
     unknown_tags: Vec<UnknownTag>,
     anomalies: Vec<Anomaly>,
-    /// Sub-IFD offsets already visited, to break cycles across the whole tree.
-    visited: Vec<u64>,
 }
 
-impl Deconstructor<'_> {
-    /// Accounts an image IFD (IFD 0, the raw sub-IFD, or a preview/image sub-IFD): its tags, codes,
-    /// colour matrices, pixel data, and the image / metadata sub-IFDs it points at.
-    fn account_image_ifd(&mut self, ifd: &Ifd, page: usize, depth: usize) {
+impl Findings {
+    /// Checks an image IFD (IFD 0, the raw sub-IFD, or a preview/image sub-IFD): its tags,
+    /// codes, colour matrices, and pixel-structure coherence, then its image sub-IFDs. Metadata
+    /// sub-IFDs (Exif/GPS/Interop) belong to a separate tag namespace, so they are followed
+    /// (their bytes are already classified by the audit) but not tag-checked.
+    fn check_image_ifd(&mut self, ifd: &Ifd, page: usize) {
         self.check_tags(ifd, page);
         self.check_codes(ifd, page);
         self.check_matrices(ifd, page);
-        self.account_pixels(ifd, page);
-        self.follow_image_subifds(ifd, page, depth);
-        self.follow_metadata(ifd, page, depth);
+        self.check_pixel_structure(ifd, page);
+        for group in ifd.sub_ifds() {
+            if group.tag == tags::SUB_IFDS {
+                for child in &group.ifds {
+                    self.check_image_ifd(child, page);
+                }
+            }
+        }
     }
 
-    /// Flags every field whose tag is not part of the recognised DNG tag set.
+    /// Flags unknown-type entries (preserved verbatim by the parse) and every field whose tag
+    /// is not part of the recognised DNG tag set.
     fn check_tags(&mut self, ifd: &Ifd, page: usize) {
         for field in ifd.fields() {
-            if !tags::is_known_tag(field.tag) {
+            if let Value::Unknown(u) = &field.value {
+                self.unknown_fields.push(UnknownFieldType {
+                    page,
+                    tag: field.tag,
+                    type_code: u.type_code(),
+                    count: u.count(),
+                });
+            } else if !tags::is_known_tag(field.tag) {
                 self.unknown_tags.push(UnknownTag {
                     page,
                     tag: field.tag,
-                    field_type: field.value.field_type().code(),
-                    count: field.value.count() as u64,
+                    field_type: field.value.type_code(),
+                    count: field.value.count(),
                 });
             }
         }
@@ -242,10 +285,12 @@ impl Deconstructor<'_> {
         }
     }
 
-    /// Marks the byte ranges of an image IFD's strips or tiles.
-    fn account_pixels(&mut self, ifd: &Ifd, page: usize) {
+    /// Checks the pixel-data structure: the strip/tile extents themselves are claimed by the
+    /// audit; this validates their *coherence* (pair present, lengths matching) and flags an
+    /// image IFD with no pixel data at all.
+    fn check_pixel_structure(&mut self, ifd: &Ifd, page: usize) {
         if ifd.get(tags::TILE_WIDTH).is_some() || ifd.get(tags::TILE_OFFSETS).is_some() {
-            self.account_ranges(
+            self.check_pair(
                 ifd,
                 page,
                 tags::TILE_OFFSETS,
@@ -254,7 +299,7 @@ impl Deconstructor<'_> {
                 "DNG: tiled image missing TileOffsets/TileByteCounts",
             );
         } else if ifd.get(tags::STRIP_OFFSETS).is_some() {
-            self.account_ranges(
+            self.check_pair(
                 ifd,
                 page,
                 tags::STRIP_OFFSETS,
@@ -271,8 +316,38 @@ impl Deconstructor<'_> {
         }
     }
 
-    /// Marks each `(offset, byte_count)` pair of a strip/tile array, flagging length mismatches.
-    fn account_ranges(
+    /// Walks the embedded camera-profile streams `ExtraCameraProfiles` (50933) points at.
+    ///
+    /// Each target is a `.dcp`-form stream — a byte-order mark, the profile magic `0x4352`
+    /// where a TIFF header carries `42`, and a first-IFD offset, followed by a directory whose
+    /// internal offsets are relative to the **stream start** — so it is audited as an embedded
+    /// rebased chain, its bytes claimed at their physical positions. An unreadable target is an
+    /// anomaly; its bytes stay unclassified (the honest verdict).
+    fn audit_camera_profiles(&mut self, auditor: &mut Auditor<&[u8]>, ifd: &Ifd, page: usize) {
+        let Some(offsets) = ifd.get_u64_vec(tags::EXTRA_CAMERA_PROFILES) else {
+            return;
+        };
+        for base in offsets {
+            match audit_camera_profile(auditor, base) {
+                Ok(profile_ifds) => {
+                    // Profile IFDs carry DNG profile tags (ColorMatrix1, ProfileName, …): run
+                    // the tag and matrix checks, but no pixel-structure expectations.
+                    for profile in &profile_ifds {
+                        self.check_tags(profile, page);
+                        self.check_matrices(profile, page);
+                    }
+                }
+                Err(_) => self.anomalies.push(Anomaly::Structure {
+                    page,
+                    detail: "DNG: extra camera profile could not be parsed",
+                    severity: Severity::Error,
+                }),
+            }
+        }
+    }
+
+    /// Validates an `(offsets, byte counts)` tag pair, u64-native.
+    fn check_pair(
         &mut self,
         ifd: &Ifd,
         page: usize,
@@ -281,7 +356,7 @@ impl Deconstructor<'_> {
         mismatch: &'static str,
         missing: &'static str,
     ) {
-        let (Some(offsets), Some(counts)) = (ifd.get_u32_vec(off_tag), ifd.get_u32_vec(cnt_tag))
+        let (Some(offsets), Some(counts)) = (ifd.get_u64_vec(off_tag), ifd.get_u64_vec(cnt_tag))
         else {
             self.anomalies.push(Anomaly::Structure {
                 page,
@@ -297,103 +372,67 @@ impl Deconstructor<'_> {
                 severity: Severity::Error,
             });
         }
-        for (&off, &cnt) in offsets.iter().zip(&counts) {
-            self.cov.mark(u64::from(off), u64::from(cnt));
-        }
     }
 
-    /// Follows the `SubIFDs` (330) pointers, accounting each child as another image IFD (this is how
-    /// the full-resolution raw sub-IFD is reached).
-    fn follow_image_subifds(&mut self, ifd: &Ifd, page: usize, depth: usize) {
-        let Some(offsets) = ifd.get_u32_vec(tags::SUB_IFDS) else {
-            return;
-        };
-        for off in offsets {
-            let off = u64::from(off);
-            if !self.guard(off, page, depth + 1) {
-                continue;
-            }
-            if let Some(sub) = self.read_sub(off, page) {
-                self.account_image_ifd(&sub, page, depth + 1);
-            }
-        }
-    }
-
-    /// Follows the Exif (34665) and GPS (34853) sub-IFD pointers, accounting their bytes (their tags
-    /// belong to a separate namespace, so they are not tag-checked here).
-    fn follow_metadata(&mut self, ifd: &Ifd, page: usize, depth: usize) {
-        for tag in [tags::EXIF_IFD, tags::GPS_INFO] {
-            if let Some(off) = ifd.get_u32(tag) {
-                self.account_meta_tree(u64::from(off), page, depth + 1);
+    /// Maps the audit walk's lenient findings onto this crate's anomaly taxonomy.
+    fn map_audit_findings(&mut self, findings: &[AuditFinding]) {
+        for finding in findings {
+            match *finding {
+                AuditFinding::SkippedSubIfd { page, reason, .. } => {
+                    self.anomalies.push(Anomaly::Structure {
+                        page,
+                        detail: match reason {
+                            SkipReason::Cycle => "DNG: sub-IFD offset revisited (possible cycle)",
+                            SkipReason::TooDeep => "DNG: sub-IFD nesting too deep",
+                            _ => "DNG: sub-IFD could not be parsed",
+                        },
+                        severity: Severity::Error,
+                    });
+                }
+                AuditFinding::ChainedSubIfd { page, .. } => {
+                    self.anomalies.push(Anomaly::Structure {
+                        page,
+                        detail: "DNG: sub-IFD carries a next-IFD chain",
+                        severity: Severity::Warning,
+                    });
+                }
+                // The finding taxonomy may grow; unrecognised findings are not anomalies.
+                _ => {}
             }
         }
     }
+}
 
-    /// Accounts a metadata sub-IFD and any nested Interoperability sub-IFD (40965).
-    fn account_meta_tree(&mut self, offset: u64, page: usize, depth: usize) {
-        if !self.guard(offset, page, depth) {
-            return;
+/// Parses (and claims) one embedded camera-profile stream at `base`: its 8-byte header, then
+/// its rebased directory chain.
+fn audit_camera_profile(auditor: &mut Auditor<&[u8]>, base: u64) -> Result<Vec<Ifd>> {
+    let mut head = [0u8; 8];
+    auditor.read_at(base, &mut head)?;
+    let order = match [head[0], head[1]] {
+        [0x49, 0x49] => ByteOrder::LittleEndian,
+        [0x4D, 0x4D] => ByteOrder::BigEndian,
+        _ => {
+            return Err(Error::InvalidInput(
+                "DNG: bad camera-profile byte-order mark",
+            ));
         }
-        let Some(sub) = self.read_sub(offset, page) else {
-            return;
-        };
-        // The Exif Interoperability pointer (40965) is the one nested metadata sub-IFD DNG uses.
-        if let Some(off) = sub.get_u32(40965) {
-            self.account_meta_tree(u64::from(off), page, depth + 1);
-        }
+    };
+    if order.u16([head[2], head[3]]) != CAMERA_PROFILE_MAGIC {
+        return Err(Error::InvalidInput("DNG: bad camera-profile magic"));
     }
-
-    /// Parses (and accounts the bytes of) a sub-IFD at `offset`, recording an anomaly if it cannot
-    /// be parsed.
-    fn read_sub(&mut self, offset: u64, page: usize) -> Option<Ifd> {
-        let (data, order, variant) = (self.data, self.order, self.variant);
-        match read_ifd_at_with_coverage(
-            data,
-            offset,
-            order,
-            variant,
-            &mut self.cov,
-            &mut self.unknown_fields,
-        ) {
-            Ok((ifd, _next)) => Some(ifd),
-            Err(_) => {
-                self.anomalies.push(Anomaly::Structure {
-                    page,
-                    detail: "DNG: sub-IFD could not be parsed",
-                    severity: Severity::Error,
-                });
-                None
-            }
-        }
-    }
-
-    /// Returns whether a sub-IFD at `offset` may be followed, recording an anomaly (and refusing)
-    /// on excessive depth or a revisited offset (cycle).
-    fn guard(&mut self, offset: u64, page: usize, depth: usize) -> bool {
-        if depth > MAX_SUBIFD_DEPTH {
-            self.anomalies.push(Anomaly::Structure {
-                page,
-                detail: "DNG: sub-IFD nesting too deep",
-                severity: Severity::Error,
-            });
-            return false;
-        }
-        if self.visited.contains(&offset) {
-            self.anomalies.push(Anomaly::Structure {
-                page,
-                detail: "DNG: sub-IFD offset revisited (possible cycle)",
-                severity: Severity::Error,
-            });
-            return false;
-        }
-        self.visited.push(offset);
-        true
-    }
+    let first = u64::from(order.u32([head[4], head[5], head[6], head[7]]));
+    auditor.claim(
+        base,
+        8,
+        SpanKind::Data(DataLabel::Other("camera-profile header")),
+        Claim::Parsed,
+    );
+    auditor.walk_embedded(base, first, order, Variant::Classic)
 }
 
 impl DngDecoder {
     /// Decodes `data` to its [`DecodedDng`] *and* returns a whole-file [`DeconstructReport`] that
-    /// accounts every byte and flags anything unrecognised.
+    /// classifies every byte and flags anything unrecognised.
     ///
     /// # Errors
     ///

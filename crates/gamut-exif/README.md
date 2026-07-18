@@ -54,9 +54,10 @@ designed to be added without breaking the 1.0 API — the catalogue and vendor e
 `#[non_exhaustive]`):
 
 - **Per-vendor MakerNote decoding.** The `MakerNote` block is preserved verbatim and its vendor
-  detected ([`MakerNoteVendor`]), but not decoded. Re-serialising relocates the block, so a vendor's
-  TIFF-absolute internal offsets can go stale — round-trip is guaranteed at the *value* level, not
-  byte-for-byte; keep the original blob if you need offset-correct MakerNotes.
+  detected ([`MakerNoteVendor`]), but not decoded. Since issue #263 a parsed model records the
+  note's absolute source offset and the writer **pins** the byte range there on a rewrite, so
+  vendor TIFF-absolute internal offsets stay valid; only an unsatisfiable pin (the directory
+  region outgrew the old position) falls back to relocation, with the bytes still value-exact.
 - **exiftool-parity tag breadth** beyond the standard dictionary (unknown tags still round-trip
   losslessly via the raw `Ifd`).
 - **Uncompressed strip-based thumbnails** are read but not re-embedded (JPEG thumbnails are).

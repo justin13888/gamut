@@ -6,13 +6,16 @@
 //! **not decoded**. Per-vendor decoding is deferred; it can be added later without breaking this
 //! API (hence [`MakerNoteVendor`] is `#[non_exhaustive]`).
 //!
-//! # Round-trip limitation
+//! # Round-trip behaviour
 //!
-//! Re-serialising relocates the block, so any TIFF-header-**absolute** internal offsets a vendor
-//! encodes (common for Canon and many Nikon) become stale — v1 does not decode the block and so
-//! cannot rebase them. The *bytes* round-trip exactly (value-level), but a consumer that needs
-//! offset-correct MakerNotes should retain and re-embed the original EXIF blob rather than
-//! re-serialise.
+//! The *bytes* always round-trip exactly (value-level). Additionally, a model that came from
+//! [`Exif::parse`](crate::Exif::parse) records the note's absolute source offset
+//! ([`Exif::maker_note_offset`](crate::Exif::maker_note_offset)), and the writer **pins** the
+//! note's byte range at that exact position on a rewrite — so TIFF-header-absolute internal
+//! offsets a vendor encodes (common for Canon and many Nikon) stay valid even when edits shift
+//! the surrounding directories (issue #263). Only when the new layout makes the pin
+//! unsatisfiable (the directory region grows past the note's old position) does the writer fall
+//! back to relocating the block, in which case such vendor-internal offsets may go stale.
 
 /// A decoded-only-as-far-as-the-vendor MakerNote block: its detected vendor and its raw bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]

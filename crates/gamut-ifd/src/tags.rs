@@ -36,6 +36,36 @@ pub const INTEROPERABILITY_IFD: u16 = 40965;
 /// [`INTEROPERABILITY_IFD`]. ([`MAKER_NOTE`] is deliberately absent — see its docs.)
 pub const STANDARD_POINTER_TAGS: &[u16] = &[SUB_IFDS, EXIF_IFD, GPS_INFO, INTEROPERABILITY_IFD];
 
+// The data-locating tag pairs below are the second structural exception (with the pointer tags
+// above): their values are `(offset, byte count)` pairs naming ranges of file bytes outside the
+// directory/value structure. The byte-completeness audit (`audit`, issue #263) must know them to
+// classify those ranges; what the located bytes *mean* stays codec business.
+
+/// `StripOffsets` (273, 0x0111) — the file offsets of the image's strips (TIFF 6.0 §3).
+pub const STRIP_OFFSETS: u16 = 273;
+
+/// `StripByteCounts` (279, 0x0117) — the byte count of each strip.
+pub const STRIP_BYTE_COUNTS: u16 = 279;
+
+/// `TileOffsets` (324, 0x0144) — the file offsets of the image's tiles (TIFF 6.0 §15).
+pub const TILE_OFFSETS: u16 = 324;
+
+/// `TileByteCounts` (325, 0x0145) — the byte count of each tile.
+pub const TILE_BYTE_COUNTS: u16 = 325;
+
+/// `FreeOffsets` (288, 0x0120) — the file offsets of declared dead space (TIFF 6.0 §8).
+pub const FREE_OFFSETS: u16 = 288;
+
+/// `FreeByteCounts` (289, 0x0121) — the byte count of each free range.
+pub const FREE_BYTE_COUNTS: u16 = 289;
+
+/// `JPEGInterchangeFormat` (513, 0x0201) — the file offset of an embedded JPEG stream (an Exif
+/// thumbnail, or old-style JPEG-in-TIFF).
+pub const JPEG_INTERCHANGE_FORMAT: u16 = 513;
+
+/// `JPEGInterchangeFormatLength` (514, 0x0202) — the embedded JPEG stream's byte count.
+pub const JPEG_INTERCHANGE_FORMAT_LENGTH: u16 = 514;
+
 #[cfg(test)]
 mod tests {
     use super::*;

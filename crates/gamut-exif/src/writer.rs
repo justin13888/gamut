@@ -7,7 +7,10 @@
 //! IFD — so the round-trip `parse → write → parse` reproduces the directories with the source byte
 //! order preserved.
 
-use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, align_word, write};
+use gamut_ifd::{
+    ByteOrder, Ifd, TiffFile, Value, Variant, WriteOptions, align_word, tags as ifd_tags, write,
+    write_with,
+};
 
 use crate::error::Result;
 use crate::exif::{EXIF_IFD_POINTER, Exif, GPS_IFD_POINTER, INTEROP_IFD_POINTER, MARKER};
@@ -66,7 +69,14 @@ impl ExifWriter {
     pub fn write(&self, exif: &Exif) -> Result<Vec<u8>> {
         let order = self.byte_order.unwrap_or_else(|| exif.byte_order());
         let image = build_image(exif);
-        let tiff = write_with_thumbnail(order, image, exif.thumbnail())?;
+        // Pin the maker note at its source offset when the model still carries one there —
+        // vendor notes encode absolute internal offsets, so keeping the byte range in place
+        // keeps them valid.
+        let pin = exif.maker_note_offset().filter(|_| {
+            exif.exif_ifd()
+                .is_some_and(|e| e.get(ifd_tags::MAKER_NOTE).is_some())
+        });
+        let tiff = write_with_thumbnail(order, image, exif.thumbnail(), pin)?;
 
         Ok(if self.marker {
             let mut out = MARKER.to_vec();
@@ -116,12 +126,13 @@ fn write_with_thumbnail(
     order: ByteOrder,
     image: Ifd,
     thumbnail: Option<&Thumbnail>,
+    pin: Option<u64>,
 ) -> Result<Vec<u8>> {
     let Some(thumb) = thumbnail else {
-        return Ok(write(&tiff_file(order, vec![image]))?);
+        return write_tree(order, vec![image], pin);
     };
     let Some(jpeg) = thumb.jpeg() else {
-        return Ok(write(&tiff_file(order, vec![image, thumb.ifd().clone()]))?);
+        return write_tree(order, vec![image, thumb.ifd().clone()], pin);
     };
 
     let mut thumb_ifd = thumb.ifd().clone();
@@ -135,7 +146,7 @@ fn write_with_thumbnail(
     );
 
     // Pass 1: lay out the directories to learn where the JPEG will start (word-aligned).
-    let planned = write(&tiff_file(order, vec![image.clone(), thumb_ifd.clone()]))?;
+    let planned = write_tree(order, vec![image.clone(), thumb_ifd.clone()], pin)?;
     let jpeg_offset = align_word(planned.len() as u64) as usize;
 
     // Pass 2: patch the now-known offset. Changing an inline LONG moves nothing, so the byte length
@@ -144,11 +155,27 @@ fn write_with_thumbnail(
         ExifTag::JpegInterchangeFormat.tag_id(),
         Value::Long(vec![jpeg_offset as u32]),
     );
-    let mut bytes = write(&tiff_file(order, vec![image, thumb_ifd]))?;
+    let mut bytes = write_tree(order, vec![image, thumb_ifd], pin)?;
     debug_assert_eq!(jpeg_offset, align_word(bytes.len() as u64) as usize);
     bytes.resize(jpeg_offset, 0);
     bytes.extend_from_slice(jpeg);
     Ok(bytes)
+}
+
+/// Serialises the tree, pinning the maker note at `pin` when possible: a pin the new layout
+/// cannot satisfy (the offset now collides with the directory region) falls back to an ordinary
+/// relocating write — the note's *bytes* still round-trip exactly.
+fn write_tree(order: ByteOrder, ifds: Vec<Ifd>, pin: Option<u64>) -> Result<Vec<u8>> {
+    let file = tiff_file(order, ifds);
+    if let Some(at) = pin
+        && let Ok((bytes, _map)) = write_with(
+            &file,
+            &WriteOptions::default().pin(ifd_tags::MAKER_NOTE, at),
+        )
+    {
+        return Ok(bytes);
+    }
+    Ok(write(&file)?)
 }
 
 /// A classic-TIFF [`TiffFile`] in `order`.
@@ -298,6 +325,67 @@ mod tests {
         let maker = parsed.maker_note().expect("maker note present");
         assert_eq!(maker.bytes, blob, "MakerNote bytes preserved verbatim");
         assert_eq!(maker.vendor, crate::MakerNoteVendor::Nikon);
+    }
+
+    /// The maker-note pin (issue #263): after a parse, a rewrite keeps the note's byte range at
+    /// its exact source offset even when an edit shifts every directory — so vendor-internal
+    /// absolute offsets stay valid.
+    #[test]
+    fn maker_note_pins_at_its_source_offset_across_rewrites() {
+        let blob: Vec<u8> = (0..64u16).map(|b| b as u8).collect();
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_tag(ExifTag::Make, Value::Ascii("NIKON CORPORATION".into()));
+        exif.set_tag(ExifTag::MakerNote, Value::Undefined(blob.clone()));
+        let bytes1 = ExifWriter::new().marker(false).write(&exif).expect("write");
+
+        let mut parsed = Exif::parse(&bytes1).expect("parse");
+        let at = parsed.maker_note_offset().expect("offset recorded") as usize;
+        assert_eq!(&bytes1[at..at + blob.len()], &blob[..], "offset is real");
+
+        // An edit that grows the 0th IFD, shifting everything after it.
+        parsed.set_tag(
+            ExifTag::ImageDescription,
+            Value::Ascii("a description long enough to move every following directory".into()),
+        );
+        let bytes2 = ExifWriter::new()
+            .marker(false)
+            .write(&parsed)
+            .expect("write");
+        assert_eq!(
+            &bytes2[at..at + blob.len()],
+            &blob[..],
+            "maker-note byte range untouched at its source offset"
+        );
+        // Reparsing records the same (pinned) offset, so pinning is stable across generations.
+        assert_eq!(
+            Exif::parse(&bytes2).expect("reparse").maker_note_offset(),
+            Some(at as u64)
+        );
+    }
+
+    /// A pin the new layout cannot honor (the directories now reach past the note's old offset)
+    /// falls back to relocation — the bytes still round-trip exactly.
+    #[test]
+    fn unsatisfiable_pin_falls_back_to_relocation() {
+        let blob: Vec<u8> = (0..32u16).map(|b| b as u8).collect();
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_tag(ExifTag::MakerNote, Value::Undefined(blob.clone()));
+        let bytes1 = ExifWriter::new().marker(false).write(&exif).expect("write");
+        let mut parsed = Exif::parse(&bytes1).expect("parse");
+        // Balloon the 0th IFD so the directory region engulfs the note's old offset.
+        for tag in 0x8000..0x8060u16 {
+            parsed.image_mut().set(tag, Value::Short(vec![1]));
+        }
+        let bytes2 = ExifWriter::new()
+            .marker(false)
+            .write(&parsed)
+            .expect("write");
+        let reparsed = Exif::parse(&bytes2).expect("reparse");
+        assert_eq!(
+            reparsed.maker_note().expect("note").bytes,
+            blob,
+            "bytes exact despite relocation"
+        );
     }
 
     #[test]

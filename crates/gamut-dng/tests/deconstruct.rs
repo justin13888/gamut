@@ -5,18 +5,15 @@ mod common;
 
 use gamut_dng::{Anomaly, ByteOrder, DeconstructReport, DngDecoder, DngEncoder, deconstruct};
 
-/// Total bytes left in interior gaps — for a tightly-written DNG this is only word-alignment
-/// padding between the directories, value pools, and strips.
-fn total_gap_bytes(r: &DeconstructReport) -> u64 {
-    r.coverage.gaps.iter().map(|g| g.len).sum()
-}
-
-/// Asserts the structural walk explained the whole file bar a little word-alignment padding, with
-/// nothing unrecognised.
+/// Asserts the structural walk classified the whole file with nothing unrecognised —
+/// **zero tolerance**: word-alignment padding must come back as typed `Padding` segments,
+/// not tolerated gaps (issue #263).
 fn assert_clean(r: &DeconstructReport) {
-    assert!(r.coverage.overlaps.is_empty(), "overlaps: {r:?}");
-    assert!(r.coverage.out_of_bounds.is_empty(), "out of bounds: {r:?}");
-    assert!(r.coverage.trailing.is_none(), "trailing: {r:?}");
+    assert!(r.is_fully_classified(), "not fully classified: {r:?}");
+    assert!(
+        r.segments.is_fully_classified(),
+        "not fully classified: {r:?}"
+    );
     assert!(r.unknown_fields.is_empty(), "unknown fields: {r:?}");
     assert!(
         r.unknown_tags.is_empty(),
@@ -24,8 +21,7 @@ fn assert_clean(r: &DeconstructReport) {
         r.unknown_tags
     );
     assert!(r.anomalies.is_empty(), "anomalies: {:?}", r.anomalies);
-    // A handful of bytes of inter-block word-alignment padding is the only thing left over.
-    assert!(total_gap_bytes(r) <= 16, "alignment gap too large: {r:?}");
+    assert!(r.is_fully_accounted(), "not fully accounted: {r:?}");
 }
 
 #[test]
@@ -40,11 +36,16 @@ fn encoded_cfa_dng_is_accounted() {
                 .expect("encode");
             let report = deconstruct(&dng).expect("deconstruct");
             assert_clean(&report);
-            // The raw sub-IFD's strips are the bulk of the file — coverage must reach most of it.
-            assert!(
-                report.coverage.covered_bytes * 2 > report.coverage.file_len,
-                "{report:?}"
-            );
+            // The raw sub-IFD's strips are the bulk of the file — the Data segments must
+            // cover most of it.
+            let data_bytes: u64 = report
+                .segments
+                .segments
+                .iter()
+                .filter(|s| matches!(s.kind, gamut_ifd::SpanKind::Data(_)))
+                .map(|s| s.range.len)
+                .sum();
+            assert!(data_bytes * 2 > report.segments.file_len, "{report:?}");
         }
     }
 }
@@ -108,8 +109,8 @@ fn unknown_private_tag_is_flagged() {
         "{report:?}"
     );
     assert!(!report.is_fully_accounted());
-    // The unknown tag's value is inline, so byte coverage is unaffected.
-    assert!(report.coverage.overlaps.is_empty());
+    // The unknown tag's value is inline, so byte classification is unaffected.
+    assert!(report.segments.is_fully_classified());
 }
 
 #[test]
@@ -133,6 +134,325 @@ fn unknown_compression_code_is_flagged() {
         )),
         "{report:?}"
     );
+}
+
+#[test]
+fn trailing_junk_fails_classification() {
+    let raw = common::sample_raw(16, 16, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    dng.extend_from_slice(&[9, 9, 9]);
+    let report = deconstruct(&dng).expect("deconstruct");
+    assert!(!report.is_fully_classified(), "{report:?}");
+    assert!(!report.is_fully_accounted());
+    assert_eq!(report.segments.unclassified_bytes(), 3);
+}
+
+#[test]
+fn private_tag_inside_the_raw_sub_ifd_is_flagged() {
+    // The tag check must recurse through the `SubIFDs` image children — and only those (the
+    // Exif sub-IFD's own namespace is exempt).
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut raw_ifd = gamut_ifd::Ifd::new();
+    raw_ifd.set(256, Value::Short(vec![4])); // ImageWidth (known)
+    raw_ifd.set(273, Value::Long(vec![0])); // StripOffsets placeholder
+    raw_ifd.set(279, Value::Long(vec![0]));
+    raw_ifd.set(0x9AAA, Value::Short(vec![1])); // private/unknown
+    let mut exif = gamut_ifd::Ifd::new();
+    exif.set(33434, Value::Rational(vec![(1, 100)])); // EXIF namespace: must NOT be flagged
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set_sub_ifd(330, vec![raw_ifd]);
+    ifd0.set_sub_ifd(34665, vec![exif]);
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.unknown_tags.iter().any(|u| u.tag == 0x9AAA),
+        "{report:?}"
+    );
+    assert!(
+        report.unknown_tags.iter().all(|u| u.tag != 33434),
+        "EXIF-namespace tags are not DNG-unknown: {report:?}"
+    );
+}
+
+#[test]
+fn tiled_image_missing_tile_pair_is_flagged() {
+    // TileWidth alone declares a tiled image; the missing TileOffsets/TileByteCounts pair must
+    // surface as the *tile* anomaly, not fall through to the strip/no-data branches.
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set(256, Value::Short(vec![4])); // ImageWidth
+    ifd0.set(322, Value::Short(vec![16])); // TileWidth, but no offsets/counts
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure { detail, severity: gamut_dng::Severity::Error, .. }
+                if detail.contains("Tile")
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn chained_sub_ifd_is_followed_and_warned() {
+    // A SubIFDs child carrying an out-of-spec next-IFD link: followed and accounted, with a
+    // warning anomaly.
+    let data: &[u8] = &[
+        b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+        0x01, 0x00, // IFD0: 1 entry
+        0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, // 330 -> 26
+        0x00, 0x00, 0x00, 0x00, // next = 0
+        0x01, 0x00, // child A @ 26
+        0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // 256 = 1
+        0x2c, 0x00, 0x00, 0x00, // next = 44 (out of spec)
+        0x01, 0x00, // child B @ 44
+        0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // 256 = 2
+        0x00, 0x00, 0x00, 0x00, // next = 0
+    ];
+    let report = deconstruct(data).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure { detail, severity: gamut_dng::Severity::Warning, .. }
+                if detail.contains("next-IFD chain")
+        )),
+        "{report:?}"
+    );
+    assert!(report.segments.is_fully_classified(), "{report:?}");
+}
+
+#[test]
+fn sub_ifd_skip_reasons_map_to_distinct_details() {
+    // A cycle names the cycle; a depth bomb names the depth — the mapped details must stay
+    // distinct diagnoses, not collapse into the generic "could not be parsed".
+    let cyclic: &[u8] = &[
+        b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, //
+        0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00, //
+        0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    let report = deconstruct(cyclic).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure { detail, .. } if detail.contains("cycle")
+        )),
+        "{report:?}"
+    );
+
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+    let mut ifd = gamut_ifd::Ifd::new();
+    ifd.set(256, Value::Short(vec![1]));
+    for _ in 0..20 {
+        let mut parent = gamut_ifd::Ifd::new();
+        parent.set_sub_ifd(330, vec![ifd]);
+        ifd = parent;
+    }
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure { detail, .. } if detail.contains("too deep")
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn big_endian_camera_profile_is_walked_cleanly() {
+    // A valid big-endian `.dcp`-form profile stream: header BOM `MM`, magic 0x4352, then a
+    // stream-relative directory — built by writing a BE mini-TIFF and patching its magic.
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut profile = gamut_ifd::Ifd::new();
+    profile.set(50936, Value::Ascii("Standard".into())); // ProfileName
+    let mut stream = write(&TiffFile {
+        order: ByteOrder::BigEndian,
+        variant: Variant::Classic,
+        ifds: vec![profile],
+    })
+    .expect("write profile");
+    // Patch the TIFF magic (42) to the camera-profile magic (0x4352), big-endian.
+    stream[2] = 0x43;
+    stream[3] = 0x52;
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set(50933, Value::Long(vec![0])); // ExtraCameraProfiles: patched below
+    let probe = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0.clone()],
+    })
+    .expect("probe");
+    let base = gamut_ifd::align_word(probe.len() as u64);
+    ifd0.set(50933, Value::Long(vec![base as u32]));
+    let mut bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    bytes.resize(base as usize, 0);
+    bytes.extend_from_slice(&stream);
+
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(report.anomalies.is_empty(), "{report:?}");
+    assert!(report.segments.is_fully_classified(), "{report:?}");
+}
+
+#[test]
+fn missing_strip_byte_counts_is_flagged() {
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set(256, Value::Short(vec![4])); // ImageWidth: an image IFD...
+    ifd0.set(273, Value::Long(vec![1000])); // ...with StripOffsets but no StripByteCounts
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure {
+                severity: gamut_dng::Severity::Error,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn image_ifd_without_pixel_data_warns() {
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set(256, Value::Short(vec![4])); // ImageWidth, but neither strips nor tiles
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure {
+                severity: gamut_dng::Severity::Warning,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn cyclic_sub_ifd_is_flagged_not_hung() {
+    // Root @8 whose SubIFDs pointer (330) targets a child @26 pointing back at itself.
+    let data: &[u8] = &[
+        b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, //
+        0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00, //
+        0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00,
+    ];
+    let report = deconstruct(data).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure {
+                severity: gamut_dng::Severity::Error,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn unparseable_camera_profile_is_flagged() {
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    // ExtraCameraProfiles pointing at bytes that are not a camera-profile stream.
+    ifd0.set(50933, Value::Long(vec![4]));
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        report.anomalies.iter().any(|a| matches!(
+            a,
+            Anomaly::Structure {
+                severity: gamut_dng::Severity::Error,
+                ..
+            }
+        )),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn unknown_field_type_entry_is_reported_and_preserved() {
+    // A hand-patched unknown field-type code (0xF0) in IFD 0: reported in `unknown_fields`,
+    // while the byte-level classification stays clean (the record sits inside the body claim).
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    ifd0.set(0x9999, Value::Long(vec![42]));
+    let mut bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+    // Entry records start at 10 (header 8 + count 2), sorted by tag — 0x9999 (39321) sorts
+    // before DNGVersion (50706), so its type code sits at 10 + 2.
+    bytes[12] = 0xF0;
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert_eq!(report.unknown_fields.len(), 1, "{report:?}");
+    assert_eq!(report.unknown_fields[0].tag, 0x9999);
+    assert_eq!(report.unknown_fields[0].type_code, 0xF0);
+    assert!(report.segments.is_fully_classified(), "{report:?}");
+    assert!(!report.is_fully_accounted());
 }
 
 #[test]

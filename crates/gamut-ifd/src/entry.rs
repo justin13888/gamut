@@ -157,9 +157,15 @@ impl Ifd {
         self.get(tag).and_then(Value::as_u32_vec)
     }
 
-    /// Returns `tag` coerced to a `Vec<u64>` (accepting `BYTE`/`SHORT`/`LONG`, and — with
-    /// `bigtiff` — `LONG8`/`IFD8`), never truncating. The reading for offset/byte-count fields;
-    /// see [`Value::as_u64_vec`].
+    /// Returns `tag` coerced to a single `u64`, without any width clamp (see [`Value::as_u64`]) —
+    /// the form BigTIFF-scale offsets need.
+    #[must_use]
+    pub fn get_u64(&self, tag: u16) -> Option<u64> {
+        self.get(tag).and_then(Value::as_u64)
+    }
+
+    /// Returns `tag` coerced to a `Vec<u64>`, without any width clamp (see
+    /// [`Value::as_u64_vec`]).
     #[must_use]
     pub fn get_u64_vec(&self, tag: u16) -> Option<Vec<u64>> {
         self.get(tag).and_then(Value::as_u64_vec)
@@ -193,6 +199,16 @@ impl Ifd {
     #[must_use]
     pub fn sub_ifds(&self) -> &[SubIfd] {
         &self.sub_ifds
+    }
+
+    /// Returns the sub-IFD groups mutably — how a tree-preserving rewrite edits child
+    /// directories in place.
+    ///
+    /// The groups must stay sorted by ascending pointer tag (the [`sub_ifds`](Self::sub_ifds)
+    /// invariant): edit each group's [`ifds`](SubIfd::ifds), not its `tag` — change a group's
+    /// tag by removing and re-attaching it with [`set_sub_ifd`](Self::set_sub_ifd).
+    pub fn sub_ifds_mut(&mut self) -> &mut [SubIfd] {
+        &mut self.sub_ifds
     }
 
     /// Attaches `ifds` as the child directories of pointer `tag`, replacing any existing group for
@@ -289,11 +305,27 @@ mod tests {
     }
 
     #[test]
-    fn get_u64_vec_reads_arrays_and_misses() {
+    fn get_u64_reads_scalars_and_arrays() {
         let mut ifd = Ifd::new();
-        ifd.set(324, Value::Long(vec![8, 4096]));
-        assert_eq!(ifd.get_u64_vec(324), Some(vec![8, 4096]));
+        ifd.set(273, Value::Long(vec![64, 128]));
+        ifd.set(279, Value::Long(vec![100]));
+        assert_eq!(ifd.get_u64(279), Some(100));
+        assert_eq!(ifd.get_u64_vec(273), Some(vec![64, 128]));
+        assert_eq!(ifd.get_u64(999), None);
         assert_eq!(ifd.get_u64_vec(999), None);
+    }
+
+    /// `sub_ifds_mut` exposes the real groups (not a detached view): an in-place child edit is
+    /// visible through the shared accessors.
+    #[test]
+    fn sub_ifds_mut_edits_children_in_place() {
+        let mut ifd = Ifd::new();
+        let mut child = Ifd::new();
+        child.set(256, Value::Short(vec![1]));
+        ifd.set_sub_ifd(330, vec![child]);
+        assert_eq!(ifd.sub_ifds_mut().len(), 1);
+        ifd.sub_ifds_mut()[0].ifds[0].set(256, Value::Short(vec![9]));
+        assert_eq!(ifd.sub_ifds()[0].ifds[0].get_u32(256), Some(9));
     }
 
     #[test]

@@ -2,14 +2,13 @@
 //! parser-exploit surface — so hostile input must yield a typed error or a valid parse, never a
 //! panic, a hang, or unbounded allocation (STATUS P6).
 //!
-//! Every input is also driven through the streaming [`IfdReader`] and the two paths must
-//! *agree* — both parse to equal files, or both fail. This differential layer is what makes the
-//! streaming reader's parallel directory-body walk safe under mutation testing: a behavioral
-//! mutant in either copy breaks agreement somewhere in the corpus.
+//! Every input is also driven through the streaming [`IfdReader`] and the two entry points must
+//! *agree* — both parse to equal files, or both fail. The slice functions are thin wrappers over
+//! the streaming engine (one parser), so this differential layer is now a regression gate on the
+//! wrappers themselves staying faithful.
 
 use gamut_ifd::{
-    ByteOrder, Coverage, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree,
-    read_with_coverage, write,
+    ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_audited, read_tree, write,
 };
 
 /// Sub-IFD pointer tags a DNG/EXIF-shaped consumer would follow.
@@ -56,6 +55,20 @@ fn survives(data: &[u8]) {
         (Ok(a), Ok(b)) => assert_eq!(a, b, "tree parse disagreement"),
         (Err(_), Err(_)) => {}
         _ => panic!("tree readers disagree: slice {slice_tree:?} vs stream {stream_tree:?}"),
+    }
+    // The dual-ledger differential invariant (issue #263): whenever a parse succeeds, every
+    // byte the parser physically read is inside a structural claim, and every Parsed claim was
+    // physically read. Over the whole hostile corpus, a parser that eats bytes it does not
+    // declare — or declares bytes it never touched — is caught here mechanically.
+    if let Ok((_, report)) = read_audited(data) {
+        assert!(
+            report.unclaimed_reads.is_empty(),
+            "parser read bytes it never claimed: {report:?}"
+        );
+        assert!(
+            report.unread_claims.is_empty(),
+            "parser claimed bytes it never read: {report:?}"
+        );
     }
 }
 
@@ -129,11 +142,11 @@ fn single_byte_overwrites_do_not_panic() {
 }
 
 /// Overlapping records are *report-not-reject* (issue #262): TIFF legitimately allows two
-/// structures to share storage, so the parse must succeed — the opt-in [`Coverage`] accounting
-/// is where the overlap surfaces. This is the adversarial end-to-end check of that contract:
-/// an out-of-line value whose offset points back into the file header.
+/// structures to share storage, so the parse must succeed — the dual-ledger byte audit is where
+/// the overlap surfaces. This is the adversarial end-to-end check of that contract: an out-of-line
+/// value whose offset points back into the file header.
 #[test]
-fn overlapping_value_offset_parses_and_surfaces_in_coverage() {
+fn overlapping_value_offset_parses_and_surfaces_in_audit() {
     let data: &[u8] = &[
         b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD at 8
         0x01, 0x00, // entry count = 1
@@ -153,21 +166,12 @@ fn overlapping_value_offset_parses_and_surfaces_in_coverage() {
         file.ifds[0].get(258),
         Some(&Value::Short(vec![0x4949, 0x002A, 0x0008]))
     );
-    // The overlap is not silent: byte accounting flags it, on both paths identically.
-    let mut cov = Coverage::new(data.len() as u64);
-    let mut unknown = Vec::new();
-    read_with_coverage(data, &mut cov, &mut unknown).expect("coverage parse");
-    let report = cov.finish();
-    assert_eq!(report.overlaps.len(), 1, "header/value overlap flagged");
-    assert!(!report.is_fully_covered());
-    assert_eq!(report.covered_bytes, data.len() as u64); // every byte reached, one twice
-    assert!(report.gaps.is_empty() && report.trailing.is_none());
-    let mut stream_cov = Coverage::new(data.len() as u64);
-    let mut stream_unknown = Vec::new();
-    IfdReader::open(data)
-        .and_then(|mut r| r.read_file_with_coverage(&mut stream_cov, &mut stream_unknown))
-        .expect("streaming coverage parse");
-    assert_eq!(stream_cov.finish(), report);
+    // The overlap is not silent: the byte audit flags the value span nesting into the header as a
+    // structural conflict (partial overlap, not identical-extent legal sharing).
+    let (audited, report) = read_audited(data).expect("audited parse");
+    assert_eq!(audited, file);
+    assert_eq!(report.conflicts.len(), 1, "header/value overlap flagged");
+    assert!(!report.is_fully_classified());
 }
 
 /// A classic-TIFF stream of `n` chained zero-entry directories (6 bytes each), hand-emitted —

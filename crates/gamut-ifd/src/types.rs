@@ -2,11 +2,12 @@
 
 /// The type of a tag's value, stored as the 2-byte `Type` of an IFD entry (TIFF 6.0 §2).
 ///
-/// The discriminants match the on-disk codes (`Byte` is `1`, `Short` is `3`, `Rational` is `5`,
-/// …). The first twelve are the TIFF 6.0 field types; `Utf8` (code `129`) is the Exif 3.0
-/// addition for internationalised text. The BigTIFF 64-bit additions
-/// (`Long8`/`SLong8`/`Ifd8`, codes `16`–`18`) appear only when the `bigtiff` feature is enabled,
-/// so the set stays additive and a classic-only build treats those codes as unknown.
+/// The variants are named for the on-disk codes (`Byte` is `1`, `Short` is `3`, `Rational` is
+/// `5`, …). The first twelve are the TIFF 6.0 field types; `Ifd` (code `13`) is the TIFF
+/// Technical Note 1 sub-IFD offset type, and `Utf8` (code `129`) is the Exif 3.0 addition for
+/// internationalised text. The BigTIFF 64-bit additions (`Long8`/`SLong8`/`Ifd8`, codes
+/// `16`–`18`) appear only when the `bigtiff` feature is enabled, so the set stays additive and
+/// a classic-only build treats those codes as unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
     /// `1` — an 8-bit unsigned integer.
@@ -33,6 +34,9 @@ pub enum FieldType {
     Float,
     /// `12` — a 64-bit IEEE double-precision float.
     Double,
+    /// `13` — a 32-bit unsigned sub-IFD offset (TIFF Technical Note 1 / the Adobe PageMaker 6.0
+    /// TIFF supplement). Shaped like `Long`, but marks the value as a child-directory pointer.
+    Ifd,
     /// `129` — a UTF-8 string (Exif 3.0 / CIPA DC-008 §4.6.2); NUL-terminated. Like `Ascii`, but
     /// the bytes are explicitly UTF-8 rather than 7-bit ASCII, so non-ASCII text round-trips.
     Utf8,
@@ -67,6 +71,7 @@ impl FieldType {
             10 => FieldType::SRational,
             11 => FieldType::Float,
             12 => FieldType::Double,
+            13 => FieldType::Ifd,
             129 => FieldType::Utf8,
             #[cfg(feature = "bigtiff")]
             16 => FieldType::Long8,
@@ -94,6 +99,7 @@ impl FieldType {
             FieldType::SRational => 10,
             FieldType::Float => 11,
             FieldType::Double => 12,
+            FieldType::Ifd => 13,
             FieldType::Utf8 => 129,
             #[cfg(feature = "bigtiff")]
             FieldType::Long8 => 16,
@@ -114,7 +120,7 @@ impl FieldType {
             | FieldType::Undefined
             | FieldType::Utf8 => 1,
             FieldType::Short | FieldType::SShort => 2,
-            FieldType::Long | FieldType::SLong | FieldType::Float => 4,
+            FieldType::Long | FieldType::SLong | FieldType::Float | FieldType::Ifd => 4,
             FieldType::Rational | FieldType::SRational | FieldType::Double => 8,
             #[cfg(feature = "bigtiff")]
             FieldType::Long8 | FieldType::SLong8 | FieldType::Ifd8 => 8,
@@ -128,14 +134,16 @@ mod tests {
 
     #[test]
     fn field_type_codes_round_trip() {
-        for code in 1..=12u16 {
+        for code in 1..=13u16 {
             let ty = FieldType::from_code(code).expect("known type");
             assert_eq!(ty.code(), code);
         }
         assert_eq!(FieldType::from_code(0), None);
-        assert_eq!(FieldType::from_code(13), None);
+        assert_eq!(FieldType::from_code(14), None);
         assert_eq!(FieldType::Rational.size(), 8);
         assert_eq!(FieldType::Short.size(), 2);
+        // TIFF TechNote 1's IFD type (13) is LONG-shaped: a 4-byte offset.
+        assert_eq!(FieldType::Ifd.size(), 4);
         // Exif 3.0 UTF-8 (code 129): a one-byte-per-element string type, decoded even in a
         // classic-only build (it is not gated behind `bigtiff`).
         assert_eq!(FieldType::from_code(129), Some(FieldType::Utf8));

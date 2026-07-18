@@ -32,7 +32,7 @@ pub(crate) const INTEROP_IFD_POINTER: u16 = gamut_ifd::tags::INTEROPERABILITY_IF
 /// The pointer tags — `ExifIFD` (`0x8769`), `GPSInfo` (`0x8825`), and `Interoperability`
 /// (`0xA005`) — are **managed by the crate**: the writer synthesises them from the typed sub-IFDs,
 /// so set the sub-IFDs (e.g. [`set_exif_ifd`](Self::set_exif_ifd)), never the pointer fields.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Exif {
     order: ByteOrder,
     image: Ifd,
@@ -40,6 +40,22 @@ pub struct Exif {
     gps: Option<Ifd>,
     interop: Option<Ifd>,
     thumbnail: Option<Thumbnail>,
+    /// The absolute offset the out-of-line `MakerNote` value was read from in the source
+    /// stream, if any — provenance the writer uses to pin the note in place on a rewrite.
+    maker_note_at: Option<u64>,
+}
+
+impl PartialEq for Exif {
+    fn eq(&self, other: &Self) -> bool {
+        // `maker_note_at` is source provenance (where the note happened to sit in the parsed
+        // stream), not content: models differing only there are equal.
+        self.order == other.order
+            && self.image == other.image
+            && self.exif == other.exif
+            && self.gps == other.gps
+            && self.interop == other.interop
+            && self.thumbnail == other.thumbnail
+    }
 }
 
 impl Exif {
@@ -53,6 +69,7 @@ impl Exif {
             gps: None,
             interop: None,
             thumbnail: None,
+            maker_note_at: None,
         }
     }
 
@@ -64,6 +81,7 @@ impl Exif {
         gps: Option<Ifd>,
         interop: Option<Ifd>,
         thumbnail: Option<Thumbnail>,
+        maker_note_at: Option<u64>,
     ) -> Self {
         Self {
             order,
@@ -72,7 +90,17 @@ impl Exif {
             gps,
             interop,
             thumbnail,
+            maker_note_at,
         }
+    }
+
+    /// The absolute offset (within the source TIFF stream) the out-of-line `MakerNote` value
+    /// was read from — recorded at parse time so a rewrite can pin the note at its original
+    /// position, keeping vendor-internal absolute offsets valid. `None` for a model built from
+    /// scratch, or when the note was absent or inline.
+    #[must_use]
+    pub fn maker_note_offset(&self) -> Option<u64> {
+        self.maker_note_at
     }
 
     /// Parses an EXIF blob (with or without the `Exif\0\0` marker) with default options.
@@ -338,6 +366,45 @@ fn first_rational(value: &Value) -> Option<Rational> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The manual `PartialEq` compares every *content* field (each must independently break
+    /// equality) while ignoring the recorded maker-note source offset (provenance).
+    #[test]
+    fn equality_covers_each_content_field_and_ignores_provenance() {
+        let base = Exif::new(ByteOrder::LittleEndian);
+        assert_eq!(base, base.clone());
+
+        // Each content field flips inequality on its own.
+        let order = Exif::new(ByteOrder::BigEndian);
+        assert_ne!(base, order);
+        let mut image = base.clone();
+        image.set_tag(ExifTag::Make, Value::Ascii("Canon".into()));
+        assert_ne!(base, image);
+        let mut exif_ifd = base.clone();
+        exif_ifd.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
+        assert_ne!(base, exif_ifd);
+        let mut gps = base.clone();
+        gps.set_tag(ExifTag::GpsVersionId, Value::Byte(vec![2, 3, 0, 0]));
+        assert_ne!(base, gps);
+        let mut interop = base.clone();
+        interop.set_tag(ExifTag::InteroperabilityIndex, Value::Ascii("R98".into()));
+        assert_ne!(base, interop);
+        let mut thumb = base.clone();
+        thumb.set_thumbnail(vec![0xFF, 0xD8, 0xFF, 0xD9]);
+        assert_ne!(base, thumb);
+
+        // Provenance is ignored: a parsed model equals a from-scratch model with the same
+        // content even though only the former records a maker-note offset.
+        let mut with_note = Exif::new(ByteOrder::LittleEndian);
+        with_note.set_tag(
+            ExifTag::MakerNote,
+            Value::Undefined((0..32u8).collect::<Vec<u8>>()),
+        );
+        let parsed = Exif::parse(&with_note.to_bytes().expect("write")).expect("parse");
+        assert!(parsed.maker_note_offset().is_some());
+        assert!(with_note.maker_note_offset().is_none());
+        assert_eq!(parsed, with_note);
+    }
 
     #[test]
     fn typed_accessors_read_their_tags() {

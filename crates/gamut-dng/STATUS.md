@@ -73,6 +73,40 @@ for lossy streams; lossless is bit-exact) — plus ProRAW-shaped synthetic golde
 full encode → SDK-validate → decode → digest loop. No real iPhone file is committed
 (licensing); adding one as a local fixture is a straightforward follow-up.
 
+## Bridge surface for external RAW pipelines (issue #253)
+
+Downstream raw *processors* (e.g. rawshift) consume gamut-dng's decode as their DNG front end and
+run their own develop pipeline on top. #253 completed the standard-compliant surface they bridge
+to: the typed `RawLevels` model (P9), the chapter-5 `RawImage::to_linear` mapping (stage-2
+oracle-gated, so downstreams call it instead of reimplementing the spec), typed opcode-list
+containers (P18, processing still ours to do later), and the hardened, now-public
+`lossless_jpeg` module. The typed encode/decode path deliberately exposes no opaque tag blobs —
+it parses spec structures into typed values and writes them back; **preservation** is a
+separate path (below).
+
+## Byte completeness and the preserving rewrite (issue #263)
+
+#263 verified — and, where verification failed, fixed — the byte-completeness story end to end:
+
+- **`deconstruct`** is rebuilt on `gamut_ifd::audit`'s dual-ledger engine: every byte of the
+  file classifies into typed segments (u64-native, so >4 GiB BigTIFF strips no longer
+  false-flag), embedded camera-profile streams (`ExtraCameraProfiles` → `.dcp`-form,
+  magic `0x4352`, stream-relative offsets) are walked and claimed at physical positions, and
+  the strict verdict is the zero-tolerance `SegmentReport::is_fully_classified`. Gated over the
+  Adobe SDK's full `sample_files` corpus (`tests/corpus.rs`): all fourteen Adobe-authored DNGs
+  — JXL tiles, PGTM2, ImageStats, ImageSequenceInfo, HDR/SDR profiles — classify to the last
+  byte with the parser cross-check holding.
+- **`DngRewrite`** is the preservation path the typed codec deliberately is not: open the whole
+  tree losslessly (unknown/vendor tags and unknown field types survive as data), edit it
+  surgically, and write it back with every tag value byte-exact, every strip/tile/embedded-JPEG
+  payload copied verbatim (never re-encoded), and the `MakerNote` **pinned at its original
+  absolute offset** whenever the new layout permits (`MakerNotePreservation` reports the
+  outcome). Intentional drops, in full: declared dead space (`FreeOffsets`/`FreeByteCounts` —
+  the tags name explicitly-dead bytes) is dropped; a file carrying `ExtraCameraProfiles` is
+  refused (`Unsupported`, deferred) rather than rewritten lossily. Corpus-gated: every
+  rewritable Adobe sample survives open → write fully classified, with its unknown-tag
+  inventory unchanged and `dng_validate` accepting the result wherever it accepts the original.
+
 ## v1.0.0 freeze decisions
 
 - Spec-coded enums (`Compression`, `PhotometricInterpretation`, `CalibrationIlluminant`,
