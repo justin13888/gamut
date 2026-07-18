@@ -782,6 +782,7 @@ dependencies = [
 name = "gamut-png"
 version = "0.1.0"
 dependencies = [
+ "gamut-codec-abi",
  "gamut-core",
  "gamut-deflate",
  "libpng-oracle",

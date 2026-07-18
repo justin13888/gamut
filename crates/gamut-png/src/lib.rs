@@ -9,6 +9,15 @@
 //! surfaces ancillary metadata (EXIF/ICC/XMP/text) as raw payloads. Animation (APNG) is out of
 //! scope. Correctness in both directions is proven differentially against a vendored libpng.
 //!
+//! # Pluggable IDAT backends
+//!
+//! The PNG codestream is the concatenated-IDAT **zlib stream**, and it is where PNG spends its
+//! time. The [`backend`] module opens that one seam: push an [`IdatDeflater`] or [`IdatInflater`]
+//! to route it through a hardware DEFLATE engine (Intel QAT/IAA, IBM zEDC, POWER nx-gzip) or a
+//! faster software library (zlib-ng, libdeflate), with [`AbiDeflater`] / [`AbiInflater`] adapting a
+//! [`gamut_codec_abi`] backend. The built-ins ([`gamut_deflate`] and `miniz_oxide`) stay the
+//! implicit tail, so an encoder or decoder with nothing pushed behaves exactly as before.
+//!
 //! # Example
 //!
 //! ```
@@ -27,8 +36,10 @@
 //! ```
 #![forbid(unsafe_code)]
 
+mod abi;
 mod adam7;
 mod ancillary;
+pub mod backend;
 mod chunk;
 mod color;
 mod crc32;
@@ -42,7 +53,9 @@ mod pack;
 mod palette;
 mod reduce;
 
+pub use abi::{AbiDeflater, AbiInflater, CODEC_ID_ZLIB, PIXEL_FORMAT_FILTERED_BYTES};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
+pub use backend::{IdatDeflater, IdatInflater, IdatInfo};
 pub use color::ColorType;
 pub use decoded::{Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, TextChunk};
 pub use decoder::{PngDecoder, TransparencyKey};

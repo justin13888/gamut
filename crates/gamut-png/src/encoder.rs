@@ -9,6 +9,7 @@ use gamut_core::{
 use gamut_deflate::{DeflateEncoder, Level};
 
 use crate::ancillary::{Ancillary, PhysicalUnit, SrgbIntent};
+use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
 use crate::filter::{self, FilterStrategy, FilterType};
@@ -37,6 +38,7 @@ pub struct PngEncoder {
     filter: FilterStrategy,
     ancillary: Ancillary,
     auto_reduce: bool,
+    backends: Registry<dyn IdatDeflater + Send>,
 }
 
 impl Default for PngEncoder {
@@ -55,7 +57,38 @@ impl PngEncoder {
             filter: FilterStrategy::MinSumAbs,
             ancillary: Ancillary::default(),
             auto_reduce: false,
+            backends: Registry::default(),
         }
+    }
+
+    /// Appends a pluggable [`IdatDeflater`] backend for the IDAT zlib stream (issue #278).
+    ///
+    /// Backends are tried in **push order**; the built-in [`gamut_deflate`] encoder is the implicit
+    /// tail, so pushing nothing keeps today's behaviour byte for byte. A backend that returns
+    /// `false` from [`IdatDeflater::supports`] (or [`Error::Unsupported`] from
+    /// [`IdatDeflater::deflate`]) is skipped; one that accepts and then fails propagates its error
+    /// rather than falling back — see the [`backend`](crate::backend) module docs for the full
+    /// contract.
+    ///
+    /// # Interaction with [`with_compression`](Self::with_compression)
+    ///
+    /// A pushed deflater **bypasses the configured [`Level`]** for every stream it accepts:
+    /// `Level` is a `gamut-deflate` concept that a foreign backend knows nothing about, and the
+    /// seam datum is only the byte stream. The `Level` still governs the built-in tail, i.e. any
+    /// stream every pushed backend declines.
+    ///
+    /// # Cloning shares backends
+    ///
+    /// [`PngEncoder`] is [`Clone`], and cloning copies the registry *handles*: the clone and the
+    /// original drive the **same** backend instances (they are held behind `Arc<Mutex<…>>`, since
+    /// encoding takes `&self`). Push a fresh backend instance if you need independent state.
+    ///
+    /// Takes `&mut self` and returns `&mut Self` — unlike the `with_*` builder setters — because a
+    /// registry accumulates rather than replaces.
+    pub fn push_backend(&mut self, backend: impl IdatDeflater + 'static) -> &mut Self {
+        self.backends
+            .push(std::sync::Arc::new(std::sync::Mutex::new(backend)));
+        self
     }
 
     /// Sets the DEFLATE compression [`Level`] used for the image data. [`Level::Best`] is the
@@ -254,7 +287,7 @@ impl PngEncoder {
         };
         let plte = palette.plte();
         let trns = palette.trns();
-        Ok(self.write_png(
+        self.write_png(
             (dims.width, dims.height),
             sample_bytes,
             ColorType::Indexed,
@@ -266,7 +299,7 @@ impl PngEncoder {
                 }
             },
             out,
-        ))
+        )
     }
 
     /// Encodes an 8-bit-per-sample image (samples are already PNG's storage bytes).
@@ -275,7 +308,7 @@ impl PngEncoder {
         image: ImageRef<'_, P>,
         color: ColorType,
         out: &mut Vec<u8>,
-    ) -> usize {
+    ) -> Result<usize> {
         let dims = image.dimensions();
         self.write_png(
             (dims.width, dims.height),
@@ -293,7 +326,7 @@ impl PngEncoder {
         image: ImageRef<'_, P>,
         color: ColorType,
         out: &mut Vec<u8>,
-    ) -> usize {
+    ) -> Result<usize> {
         let dims = image.dimensions();
         let samples = image.as_samples();
         let mut bytes = Vec::with_capacity(samples.len() * 2);
@@ -314,7 +347,7 @@ impl PngEncoder {
         bit_depth: u8,
         pre_idat: F,
         out: &mut Vec<u8>,
-    ) -> usize {
+    ) -> Result<usize> {
         // Stride in bytes per pixel (≥1, even for sub-byte depths) and the padded row length.
         let bits_per_pixel = color.channels() * bit_depth as usize;
         let bpp = bits_per_pixel.div_ceil(8).max(1);
@@ -327,37 +360,70 @@ impl PngEncoder {
         pre_idat(out); // PLTE + tRNS (indexed only)
         self.ancillary.write_post_plte(out); // background / physical / timing / text
 
-        let idat = self.compress_scanlines(sample_bytes, row_bytes, bpp);
+        let idat = self.compress_scanlines(
+            sample_bytes,
+            row_bytes,
+            bpp,
+            IdatInfo::new(
+                width,
+                height,
+                bit_depth,
+                color,
+                // The filtered stream is one filter-type byte plus `row_bytes` per scanline; the
+                // encoder never interlaces, so this is exact.
+                (height as usize) * (row_bytes + 1),
+            ),
+        )?;
         write_idat(out, &idat);
 
         chunk::write_chunk(out, *b"IEND", &[]);
-        out.len() - start
+        Ok(out.len() - start)
     }
 
     /// Filters and DEFLATE-compresses the scanlines into a zlib stream. For
     /// [`FilterStrategy::BruteForce`] it compresses under every whole-image strategy and keeps the
     /// smallest; otherwise it uses the single configured strategy.
-    fn compress_scanlines(&self, sample_bytes: &[u8], row_bytes: usize, bpp: usize) -> Vec<u8> {
+    fn compress_scanlines(
+        &self,
+        sample_bytes: &[u8],
+        row_bytes: usize,
+        bpp: usize,
+        info: IdatInfo,
+    ) -> Result<Vec<u8>> {
         let deflate = DeflateEncoder::new().with_level(self.level);
+        // Every candidate stream goes through the same seam: a pushed backend that accepts sees
+        // each brute-force candidate, and the smallest result still wins.
         let compress = |strategy| {
             let filtered = filter::filter_image(strategy, sample_bytes, row_bytes, bpp);
-            let mut idat = Vec::new();
-            deflate.zlib_compress(&filtered, &mut idat);
-            idat
+            run_deflaters(&self.backends, &info, &filtered, |raw| {
+                let mut idat = Vec::new();
+                deflate.zlib_compress(raw, &mut idat);
+                idat
+            })
         };
         if matches!(self.filter, FilterStrategy::BruteForce) {
-            BRUTE_FORCE_STRATEGIES
+            // `min_by_key` keeps the *first* minimum, so a tie resolves to the earlier (more
+            // preferred) strategy — the behaviour the golden outputs are pinned to.
+            let candidates = BRUTE_FORCE_STRATEGIES
                 .into_iter()
                 .map(compress)
+                .collect::<Result<Vec<_>>>()?;
+            Ok(candidates
+                .into_iter()
                 .min_by_key(Vec::len)
-                .unwrap_or_default()
+                .unwrap_or_default())
         } else {
             compress(self.filter)
         }
     }
 
     /// Writes a reduced encoding chosen by [`reduce::analyze`].
-    fn write_reduced(&self, dims: Dimensions, reduced: Reduced, out: &mut Vec<u8>) -> usize {
+    fn write_reduced(
+        &self,
+        dims: Dimensions,
+        reduced: Reduced,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
         let wh = (dims.width, dims.height);
         match reduced {
             Reduced::Gray8(samples) => {
@@ -420,7 +486,7 @@ fn write_idat(out: &mut Vec<u8>, zlib_stream: &[u8]) {
 // CMYK has no PNG colour type.
 impl EncodeImage<Gray8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
-        Ok(self.encode_8bit(image, ColorType::Grayscale, out))
+        self.encode_8bit(image, ColorType::Grayscale, out)
     }
 }
 impl EncodeImage<Bilevel> for PngEncoder {
@@ -433,14 +499,14 @@ impl EncodeImage<Bilevel> for PngEncoder {
             .map(|&v| u8::from(v != 0))
             .collect();
         let packed = pack::pack_scanlines(&bits, dims.width as usize, dims.height as usize, 1);
-        Ok(self.write_png(
+        self.write_png(
             (dims.width, dims.height),
             &packed,
             ColorType::Grayscale,
             1,
             |_| {},
             out,
-        ))
+        )
     }
 }
 impl EncodeImage<Rgb8> for PngEncoder {
@@ -448,9 +514,9 @@ impl EncodeImage<Rgb8> for PngEncoder {
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze(image.as_samples(), 3)
         {
-            return Ok(self.write_reduced(image.dimensions(), reduced, out));
+            return self.write_reduced(image.dimensions(), reduced, out);
         }
-        Ok(self.encode_8bit(image, ColorType::Truecolor, out))
+        self.encode_8bit(image, ColorType::Truecolor, out)
     }
 }
 impl EncodeImage<Rgba8> for PngEncoder {
@@ -458,34 +524,34 @@ impl EncodeImage<Rgba8> for PngEncoder {
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze(image.as_samples(), 4)
         {
-            return Ok(self.write_reduced(image.dimensions(), reduced, out));
+            return self.write_reduced(image.dimensions(), reduced, out);
         }
-        Ok(self.encode_8bit(image, ColorType::TruecolorAlpha, out))
+        self.encode_8bit(image, ColorType::TruecolorAlpha, out)
     }
 }
 impl EncodeImage<GrayAlpha8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, GrayAlpha8>, out: &mut Vec<u8>) -> Result<usize> {
-        Ok(self.encode_8bit(image, ColorType::GrayscaleAlpha, out))
+        self.encode_8bit(image, ColorType::GrayscaleAlpha, out)
     }
 }
 impl EncodeImage<Gray16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray16>, out: &mut Vec<u8>) -> Result<usize> {
-        Ok(self.encode_16bit(image, ColorType::Grayscale, out))
+        self.encode_16bit(image, ColorType::Grayscale, out)
     }
 }
 impl EncodeImage<Rgb16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
-        Ok(self.encode_16bit(image, ColorType::Truecolor, out))
+        self.encode_16bit(image, ColorType::Truecolor, out)
     }
 }
 impl EncodeImage<Rgba16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
-        Ok(self.encode_16bit(image, ColorType::TruecolorAlpha, out))
+        self.encode_16bit(image, ColorType::TruecolorAlpha, out)
     }
 }
 impl EncodeImage<GrayAlpha16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, GrayAlpha16>, out: &mut Vec<u8>) -> Result<usize> {
-        Ok(self.encode_16bit(image, ColorType::GrayscaleAlpha, out))
+        self.encode_16bit(image, ColorType::GrayscaleAlpha, out)
     }
 }
 
@@ -516,6 +582,54 @@ mod tests {
         // IHDR data starts at byte 16: width(4) height(4) depth(1) colortype(1).
         assert_eq!(png[24], 16, "bit depth");
         assert_eq!(png[25], ColorType::GrayscaleAlpha.code(), "colour type");
+    }
+
+    #[test]
+    fn returns_the_number_of_bytes_appended_not_the_total_length() {
+        // `write_png` reports `out.len() - start`; encoding into a non-empty buffer is what tells
+        // that apart from the buffer's total length.
+        let src = vec![0u8; 2 * 2 * 3];
+        let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(2, 2).unwrap()).unwrap();
+        let mut fresh = Vec::new();
+        let alone = PngEncoder::new().encode_image(img, &mut fresh).unwrap();
+        assert_eq!(alone, fresh.len());
+
+        let mut appended = vec![0xAAu8; 17];
+        let written = PngEncoder::new().encode_image(img, &mut appended).unwrap();
+        assert_eq!(written, alone, "only the PNG's own bytes are counted");
+        assert_eq!(appended.len(), 17 + alone);
+        assert_eq!(&appended[17..], &fresh[..], "the prefix is left untouched");
+    }
+
+    #[test]
+    fn brute_force_keeps_the_first_strategy_on_a_tie() {
+        // A 1x1 image compresses to the same length under every strategy, so the tie-break is what
+        // picks the output. `BRUTE_FORCE_STRATEGIES` is in preference order and the first minimum
+        // wins, so the filter byte must be `None` (0) — not the last strategy's choice.
+        let src = vec![200u8];
+        let img = ImageRef::<Gray8>::new(&src, Dimensions::new(1, 1).unwrap()).unwrap();
+        let mut brute = Vec::new();
+        PngEncoder::new()
+            .with_filter(FilterStrategy::BruteForce)
+            .encode_image(img, &mut brute)
+            .unwrap();
+        let mut none = Vec::new();
+        PngEncoder::new()
+            .with_filter(FilterStrategy::None)
+            .encode_image(img, &mut none)
+            .unwrap();
+        assert_eq!(
+            brute, none,
+            "the tie must resolve to the first (None) candidate"
+        );
+        // And it is genuinely a tie the later strategies could have won.
+        let mut paeth = Vec::new();
+        PngEncoder::new()
+            .with_filter(FilterStrategy::Fixed(FilterType::Paeth))
+            .encode_image(img, &mut paeth)
+            .unwrap();
+        assert_eq!(brute.len(), paeth.len(), "same length, different bytes");
+        assert_ne!(brute, paeth);
     }
 
     #[test]
