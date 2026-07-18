@@ -590,6 +590,7 @@ dependencies = [
 name = "gamut-avif"
 version = "1.0.0"
 dependencies = [
+ "dav1d-oracle",
  "divan",
  "gamut-av1",
  "gamut-color",
