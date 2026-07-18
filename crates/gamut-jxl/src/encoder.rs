@@ -14,13 +14,19 @@ use gamut_core::{
 use crate::backend::{JxlCodestreamEncoder, JxlEncodeRequest, JxlImageRef, JxlSamples, Registry};
 use crate::config::{ColorSpec, Container, Distance, Effort, Mode, Orientation};
 
-#[cfg(not(all(
-    feature = "encode",
-    any(not(target_arch = "wasm32"), target_os = "emscripten")
-)))]
 /// The refusal returned when no backend can encode: nothing was pushed, and the built-in libjxl
 /// tail is not compiled into this build (no `encode` feature, or a `wasm32` target it cannot be
 /// built for).
+///
+/// Always compiled (and unit-tested) even where the tail *is* present, so its message stays pinned
+/// on every build rather than only on the targets that can return it.
+#[cfg_attr(
+    all(
+        feature = "encode",
+        any(not(target_arch = "wasm32"), target_os = "emscripten")
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn no_encode_backend() -> Error {
     Error::Unsupported(
         "JXL: no encode backend (enable the `encode` feature or push a codestream backend)",
@@ -542,6 +548,16 @@ mod tests {
             Err(Error::Unsupported(_))
         ));
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn no_encode_backend_is_the_pinned_refusal() {
+        assert!(matches!(
+            no_encode_backend(),
+            Error::Unsupported(
+                "JXL: no encode backend (enable the `encode` feature or push a codestream backend)"
+            )
+        ));
     }
 
     #[test]

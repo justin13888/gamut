@@ -13,9 +13,12 @@ use crate::backend::{
 #[cfg(feature = "decode")]
 pub use crate::jxlrs::JxlInfo;
 
-#[cfg(not(feature = "decode"))]
 /// The refusal returned when no backend can decode: nothing was pushed, and the built-in jxl-rs
 /// tail is not compiled into this build (no `decode` feature).
+///
+/// Always compiled (and unit-tested) even where the tail *is* present, so its message stays pinned
+/// on every build rather than only on the targets that can return it.
+#[cfg_attr(feature = "decode", allow(dead_code))]
 fn no_decode_backend() -> Error {
     Error::Unsupported(
         "JXL: no decode backend (enable the `decode` feature or push a codestream backend)",
@@ -290,8 +293,17 @@ mod tests {
     }
 
     #[test]
-    fn wrong_backend_layout_is_typed() {
-        assert!(matches!(wrong_backend_layout(), Error::InvalidInput(_)));
+    fn the_refusal_errors_are_pinned() {
+        assert!(matches!(
+            wrong_backend_layout(),
+            Error::InvalidInput("JXL: backend returned a raster in the wrong pixel layout")
+        ));
+        assert!(matches!(
+            no_decode_backend(),
+            Error::Unsupported(
+                "JXL: no decode backend (enable the `decode` feature or push a codestream backend)"
+            )
+        ));
     }
 
     /// A backend answering `supports` from a flag and `decode` with a canned outcome, counting both.
