@@ -5,8 +5,11 @@
 # authoritative reference implementation.
 #
 # XMP is disabled (no Linux XMP toolkit ships), zlib is linked from the system, and the libjxl C
-# API — which DNG 1.7.1 wires in unconditionally — is satisfied by link-only stubs (the baseline
-# oracle never exercises JPEG XL DNGs). See `build.rs` for the full recipe.
+# API — which DNG 1.7.1 wires in unconditionally — is satisfied by the **real libjxl 0.12.0**
+# that `gamut-jxl-sys` statically builds (its `links = "jxl"` guarantees one copy per binary even
+# when a test also links gamut-jxl's encoder), making the oracle genuinely JXL-capable. Under
+# `GAMUT_JXL_SYS_SKIP_NATIVE=1` (check-only environments without cmake) the link-only stubs in
+# `src/jxl_stub.cpp` take over. See `build.rs` for the full recipe.
 [package]
 name = "gamut-dng-oracle"
 version = "0.0.0"
@@ -23,6 +26,9 @@ doctest = false
 
 [dependencies]
 tempfile = "3"
+# Provides the statically built libjxl the SDK's JPEG XL reader calls, plus (via `links = "jxl"`
+# metadata) the matching header path for `build.rs`. Never used from Rust.
+gamut-jxl-sys = { path = "../../crates/gamut-jxl-sys" }
 
 [build-dependencies]
 cc = "1"

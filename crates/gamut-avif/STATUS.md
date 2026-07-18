@@ -1,10 +1,11 @@
 # gamut-avif — implementation status
 
-The complete component surface a conformant AVIF encoder needs, drawn from every related spec
-(AV1 Bitstream & Decoding Process Specification; AVIF v1.2.0; AV1-ISOBMFF v1.3.0; ISO/IEC 14496-12
-ISOBMFF; 23008-12 HEIF; 23000-22 MIAF; ITU-T H.273 CICP). Rows are **technical components**, not
-user features. This is the map for extension: each module's doc comment cites the same spec
-sections, and a row flips ☐→✅ (with the module cross-reference) when it ships.
+The complete component surface a conformant AVIF encoder — and, since issue #250, the AVIF
+**container decoder** (section L) — needs, drawn from every related spec (AV1 Bitstream & Decoding
+Process Specification; AVIF v1.2.0; AV1-ISOBMFF v1.3.0; ISO/IEC 14496-12 ISOBMFF; 23008-12 HEIF;
+23000-22 MIAF; ITU-T H.273 CICP). Rows are **technical components**, not user features. This is
+the map for extension: each module's doc comment cites the same spec sections, and a row flips
+☐→✅ (with the module cross-reference) when it ships.
 
 **Status:** ✅ = implemented · ☐ = deferred (planned, additive) · **OOS** = permanently out of
 scope. A ✅ cell may carry a qualifier when the row is only partially covered. The **M** column is
@@ -42,12 +43,14 @@ monochrome, limited range, `MA1B`); alpha and depth auxiliary items; ICC / Exif 
 (`grid`, thumbnails, `idat`, `iloc` v1/v2 emission, `pasp`/`clap`); layered/progressive still
 images (`a1op`/`a1lx`/`lsel`, multi-operating-point sequence header); `tmap` tone-map (gain-map)
 derived items; `sato` sample transforms (bit depths beyond 12); `cmin`/`cmex` camera matrices;
-`altr`/`ster` entity groups; encoder speed and rate control; the **AVIF decoder** (planned —
-pure-Rust AVIF decode is a real ecosystem gap; `libaom`'s reference *encoder* is already staged as
-the future decoder's oracle, see [`references/av1`](../../references/av1/README.md)); and
-CLI/wasm/ffi wiring. **Additivity guarantee:** each lands semver-minor — a new builder method on
-the (non-`Copy`) `AvifEncoder`, a new field on the `#[non_exhaustive]` `AvifConfig`, a new
-`AvifMode` variant, or a new crate item — never a reshape of the v1 surface.
+`altr`/`ster` entity groups; encoder speed and rate control; and CLI/wasm/ffi wiring. The
+**container decode surface** (issue #250) has since landed additively as new crate items —
+section L is its ledger; the remaining decode-side gap is the **pure-Rust AV1 codestream
+decoder** (its own issue — `libaom`'s reference encoder is already staged as that decoder's
+oracle, see [`references/av1`](../../references/av1/README.md); today the codestream is supplied
+through the external `Av1StillDecoder` seam). **Additivity guarantee:** each lands semver-minor —
+a new builder method on the (non-`Copy`) `AvifEncoder`, a new field on the `#[non_exhaustive]`
+`AvifConfig`, a new `AvifMode` variant, or a new crate item — never a reshape of the v1 surface.
 
 **Permanently out of scope (workspace charter: image-first, no inter-frame/motion/sequence
 coding).** Image sequences and tracks — the `avis` and `avio` brands (AVIF §3, §6.3),
@@ -253,8 +256,53 @@ adding it needs no container change.
 | RGBA8 input + alpha-plane extraction | gamut-color/avif | ☐ | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ☐ | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
-| `gamut_core::Decoder` (AVIF → pixels; planned — `libaom`'s reference encoder is staged as its oracle) | gamut-avif | ☐ | D |
+| AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |
+| `gamut_core::Decoder` (AVIF → pixels with **no** external decoder; needs the pure-Rust AV1 decoder — `libaom`'s reference encoder is staged as its oracle) | gamut-avif | ☐ | D |
 | CLI / wasm / ffi wiring for AVIF | gamut-{cli,wasm,ffi} | ☐ | D |
+
+## L. AVIF decode surface (issue #250)
+
+The container read + AV1 codestream handoff, mirroring the surface `gamut-heic` established for
+HEIF (#238): the container and everything around the coded picture are decoded in pure Rust; the
+AV1 codestream itself is supplied by the caller through the `Av1StillDecoder` seam (a platform
+hardware decoder, dav1d, …) — the split downstream `rawshift` consumes. Delivered in four slices:
+**S1** byte-accounting container + role-typed view (`container.rs`/`image.rs`), **S2** typed
+`av1C` + OBU layer (`av1c.rs`/`obu.rs`), **S3** the decoder seam + derivation/colour/transform
+pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/conformance.rs`).
+
+| Component | Spec | Status | Slice |
+| --- | --- | --- | --- |
+| Byte-exact segment accounting (every byte a box / appended stream / trailer) | 14496-12 | ✅ | S1 |
+| `meta`/`iprp` unknown-box surfacing (shadow walk) | 14496-12 | ✅ | S1 |
+| Role-typed view: primary validation, brands (`avif`/`avio` still; `avis` OOS), item kinds | AVIF §8.3; 23008-12 | ✅ | S1 |
+| Relationship lenses: thumbnails, aux (alpha/depth URNs), `prem`, `cdsc` Exif/XMP, `dimg` | AVIF §4; 23008-12 §6 | ✅ | S1 |
+| Typed property accessors + `ipma`-ordered transforms + MIAF order check | 23008-12 §7; MIAF | ✅ | S1 |
+| `av1C` typed parse (`Av1Config`), reserved-bit tolerant, `configOBUs` size-field rule | AV1-ISOBMFF §2.3.3/.4 | ✅ | S2 |
+| OBU split (`iter_obus`): low-overhead syntax, LEB128 bounds, size-field framing | AV1 §5.3, §4.10.5; AV1-ISOBMFF §2.4 | ✅ | S2 |
+| Still-payload validation (one seq header, sync-RAP key frame, no tile list) | AVIF §2.1; AV1-ISOBMFF §2.4 | ✅ | S2 |
+| `full_stream` bridge (TD + `configOBUs` + payload, size fields normalized) | AV1-ISOBMFF §2.4 | ✅ | S2 |
+| `Av1StillDecoder` seam + validating `DecodedFrame` contract | (crate API) | ✅ | S3 |
+| Planar pipeline: coded / `iden` / `grid` assembly (uniform tiles, checked canvas, crop) | 23008-12 §6.6.2.3.2 | ✅ | S3 |
+| Derivation cycle + depth guards | (hardening) | ✅ | S3 |
+| RGBA path: identity / BT.601 (mc 2/5/6) / monochrome, 8-bit; missing-`colr` default | H.273; AVIF §2.2 | ✅ | S3 |
+| Alpha merge (luma-plane, non-mono accepted, bit-depth rescale) | AVIF §4.1 | ✅ | S3 |
+| `clap`/`irot`/`imir` application in `ipma` order (2022 `imir` axis semantics) | 23008-12:2022 §6.5.12; 14496-12 §12.1.4 | ✅ | S3 |
+| `iovl` overlay compositing (source-over, canvas fill, clipping) | 23008-12 §6.6.2.3.3 | ✅ | S3 |
+| libavif structure/metadata/pixels + dav1d planar bit-exact differential suite | (oracle) | ✅ | S4 |
+
+**Deferred (additive) for the decode surface:** the backend registry + `gamut-codec-abi` adapter
+around `Av1StillDecoder` (the issue #241 program: #272 creates the ABI crate, the avif seam then
+gains `push_backend`/`supports()` and an `AbiAv1StillDecoder` like #273's HEVC retrofit — this
+crate ships the typed trait under the name #274 reserved); the pure-Rust AV1 codestream decoder
+(own issue; would make the seam optional and enable `gamut_core::Decoder`); >8-bit / BT.709/2020 /
+ICC application on the RGBA path (planar delivers them today); `tmap`/`sato` derived-item decode;
+wiring decoded Exif/XMP payloads through `gamut-exif`/`gamut-xmp`; a shared byte-accounting
+segment walker (an isobmff 2.0 candidate — today's walker deliberately mirrors `gamut-heic`'s);
+and unifying the per-crate `DecodedFrame` types through `gamut-codec-abi`.
+
+**The S1 guarantee.** Parsing maps every input byte to exactly one segment — contiguous,
+non-overlapping, covering `0..len` — so it is structurally impossible for the container layer to
+silently ignore bits.
 
 ## The v1 guarantee
 

@@ -153,18 +153,19 @@ impl RawLevels {
     /// **active-area-relative** coordinates (the pattern anchors at the active area's top-left,
     /// spec p. 28). Deltas are not included.
     ///
-    /// # Panics
-    ///
-    /// Panics if `plane >= samples_per_pixel()`.
+    /// Returns `None` if `plane >= samples_per_pixel()` (rows and columns wrap modulo the repeat
+    /// pattern, so they cannot be out of range).
     #[must_use]
-    pub fn black_at(&self, row: usize, col: usize, plane: usize) -> f64 {
+    pub fn black_at(&self, row: usize, col: usize, plane: usize) -> Option<f64> {
         let (rows, cols) = (
             usize::from(self.black_repeat.0),
             usize::from(self.black_repeat.1),
         );
         let spp = self.white.len();
-        assert!(plane < spp, "plane out of range");
-        self.black[((row % rows) * cols + (col % cols)) * spp + plane]
+        if plane >= spp {
+            return None;
+        }
+        Some(self.black[((row % rows) * cols + (col % cols)) * spp + plane])
     }
 
     /// The per-column black deltas (`BlackLevelDeltaH`), if set.
@@ -238,12 +239,14 @@ mod tests {
         // 2x2 pattern, 1 plane, distinct values per cell: value = row-major cell index.
         let levels = RawLevels::new(1, (2, 2), vec![10.0, 20.0, 30.0, 40.0], vec![255.0]).unwrap();
         // Phase wraps modulo the repeat dims — (2, 3) has phase (0, 1).
-        assert_eq!(levels.black_at(0, 0, 0), 10.0);
-        assert_eq!(levels.black_at(0, 1, 0), 20.0);
-        assert_eq!(levels.black_at(1, 0, 0), 30.0);
-        assert_eq!(levels.black_at(1, 1, 0), 40.0);
-        assert_eq!(levels.black_at(2, 3, 0), 20.0);
-        assert_eq!(levels.black_at(3, 2, 0), 30.0);
+        assert_eq!(levels.black_at(0, 0, 0), Some(10.0));
+        assert_eq!(levels.black_at(0, 1, 0), Some(20.0));
+        assert_eq!(levels.black_at(1, 0, 0), Some(30.0));
+        assert_eq!(levels.black_at(1, 1, 0), Some(40.0));
+        assert_eq!(levels.black_at(2, 3, 0), Some(20.0));
+        assert_eq!(levels.black_at(3, 2, 0), Some(30.0));
+        // A plane past `samples_per_pixel` is a miss, not a panic.
+        assert_eq!(levels.black_at(0, 0, 1), None);
     }
 
     #[test]
@@ -251,12 +254,12 @@ mod tests {
         // 1x2 pattern, 2 planes: cells are [c0p0, c0p1, c1p0, c1p1].
         let levels =
             RawLevels::new(2, (1, 2), vec![1.0, 2.0, 3.0, 4.0], vec![255.0, 255.0]).unwrap();
-        assert_eq!(levels.black_at(0, 0, 0), 1.0);
-        assert_eq!(levels.black_at(0, 0, 1), 2.0);
-        assert_eq!(levels.black_at(0, 1, 0), 3.0);
-        assert_eq!(levels.black_at(0, 1, 1), 4.0);
+        assert_eq!(levels.black_at(0, 0, 0), Some(1.0));
+        assert_eq!(levels.black_at(0, 0, 1), Some(2.0));
+        assert_eq!(levels.black_at(0, 1, 0), Some(3.0));
+        assert_eq!(levels.black_at(0, 1, 1), Some(4.0));
         // Rows all share the single pattern row.
-        assert_eq!(levels.black_at(5, 0, 1), 2.0);
+        assert_eq!(levels.black_at(5, 0, 1), Some(2.0));
     }
 
     #[test]

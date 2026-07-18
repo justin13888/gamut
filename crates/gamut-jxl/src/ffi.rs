@@ -113,6 +113,22 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
         return Err(Error::InvalidInput("JXL: empty metadata payload"));
     }
 
+    // The coded bit depth: the pixel layout's width, unless overridden to a narrower depth (an
+    // N-bit image carried in a 16-bit buffer). A zero or wider-than-the-buffer override cannot
+    // mean anything coherent, so it is a typed error.
+    let coded_bits = match cfg.bit_depth() {
+        None => spec.bits_per_sample,
+        Some(bits) => {
+            let bits = u32::from(bits);
+            if bits == 0 || bits > spec.bits_per_sample {
+                return Err(Error::InvalidInput(
+                    "JXL: coded bit depth must be 1..= the sample width",
+                ));
+            }
+            bits
+        }
+    };
+
     let alpha_channels = u32::from(spec.has_alpha);
     let total_channels = spec.num_color_channels + alpha_channels;
     let bytes_per_sample = (spec.bits_per_sample / 8) as usize;
@@ -179,15 +195,11 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
     };
     info.xsize = spec.width;
     info.ysize = spec.height;
-    info.bits_per_sample = spec.bits_per_sample;
+    info.bits_per_sample = coded_bits;
     info.exponent_bits_per_sample = 0;
     info.num_color_channels = spec.num_color_channels;
     info.num_extra_channels = alpha_channels;
-    info.alpha_bits = if spec.has_alpha {
-        spec.bits_per_sample
-    } else {
-        0
-    };
+    info.alpha_bits = if spec.has_alpha { coded_bits } else { 0 };
     info.alpha_exponent_bits = 0;
     // The display orientation, as an EXIF 1..=8 value; the samples stay in coded order.
     info.orientation = sys_ty::JxlOrientation(cfg.orientation().exif_value().into());
@@ -234,6 +246,20 @@ pub(crate) fn encode(cfg: &JxlEncoder, spec: FrameSpec<'_>, out: &mut Vec<u8>) -
             i64::from(cfg.effort().level()),
         )
     })?;
+
+    // With a coded-depth override, tell libjxl to read the integer input buffer at the basic
+    // info's declared depth (from-codestream) instead of the pixel format's full range — without
+    // this, a 10-bit image handed over as u16 would be rescaled from 16-bit.
+    if cfg.bit_depth().is_some() {
+        let bit_depth = sys_ty::JxlBitDepth {
+            r#type: sys_ty::JxlBitDepthType::FROM_CODESTREAM,
+            bits_per_sample: 0,
+            exponent_bits_per_sample: 0,
+        };
+        // SAFETY: `frame_settings` is valid; `bit_depth` is a fully initialised value copied by
+        // the call.
+        enc.check(unsafe { sys_enc::JxlEncoderSetFrameBitDepth(frame_settings, &bit_depth) })?;
+    }
 
     let format = sys_ty::JxlPixelFormat {
         num_channels: total_channels,

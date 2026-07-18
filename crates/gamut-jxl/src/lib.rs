@@ -115,7 +115,7 @@ mod ffi;
 ))]
 pub use config::{ColorSpec, Container, Distance, Effort, Orientation};
 #[cfg(feature = "decode")]
-pub use decoder::JxlDecoder;
+pub use decoder::{JxlDecoder, JxlInfo};
 #[cfg(all(
     feature = "encode",
     any(not(target_arch = "wasm32"), target_os = "emscripten")

@@ -141,6 +141,39 @@ fn single_byte_overwrites_do_not_panic() {
     }
 }
 
+/// Overlapping records are *report-not-reject* (issue #262): TIFF legitimately allows two
+/// structures to share storage, so the parse must succeed — the dual-ledger byte audit is where
+/// the overlap surfaces. This is the adversarial end-to-end check of that contract: an out-of-line
+/// value whose offset points back into the file header.
+#[test]
+fn overlapping_value_offset_parses_and_surfaces_in_audit() {
+    let data: &[u8] = &[
+        b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, first IFD at 8
+        0x01, 0x00, // entry count = 1
+        0x02, 0x01, // tag 258
+        0x03, 0x00, // type SHORT
+        0x03, 0x00, 0x00, 0x00, // count = 3 (6 bytes, forced out of line)
+        0x00, 0x00, 0x00, 0x00, // value offset = 0 — the value span [0, 6) is the header
+        0x00, 0x00, 0x00, 0x00, // next IFD = 0
+    ];
+    // Both readers parse it, agree, and decode the header bytes as the value.
+    let file = read(data).expect("overlap parses");
+    let streamed = IfdReader::open(data)
+        .and_then(|mut r| r.read_file())
+        .expect("overlap parses (streaming)");
+    assert_eq!(file, streamed);
+    assert_eq!(
+        file.ifds[0].get(258),
+        Some(&Value::Short(vec![0x4949, 0x002A, 0x0008]))
+    );
+    // The overlap is not silent: the byte audit flags the value span nesting into the header as a
+    // structural conflict (partial overlap, not identical-extent legal sharing).
+    let (audited, report) = read_audited(data).expect("audited parse");
+    assert_eq!(audited, file);
+    assert_eq!(report.conflicts.len(), 1, "header/value overlap flagged");
+    assert!(!report.is_fully_classified());
+}
+
 /// A classic-TIFF stream of `n` chained zero-entry directories (6 bytes each), hand-emitted —
 /// `write` links real directories the same way, but building 65 537 `Ifd`s through it is slower
 /// than emitting the 6-byte records directly.

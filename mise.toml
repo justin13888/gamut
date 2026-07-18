@@ -157,6 +157,18 @@ run = [
 description = "Mutation testing of one crate, e.g. `mise run mutants-crate gamut-bitstream`"
 run = "cargo mutants -p {{arg(name='crate')}}"
 
+# gamut-ffi's feature table must strictly mirror gamut's (issue #242): identical feature-name
+# set, each feature forwarding the same-named gamut feature, and `all`/`default` member-for-member
+# equal. Metadata-only, near-free; CI runs it in the lint job.
+[tasks.check-ffi-features]
+description = "Verify gamut-ffi's feature table strictly mirrors gamut's"
+run = '''cargo metadata --no-deps --format-version 1 | jq -e '
+  (.packages[] | select(.name == "gamut").features) as $g
+  | (.packages[] | select(.name == "gamut-ffi").features) as $f
+  | ($g | with_entries(if .key == "all" or .key == "default" then . else .value = ["gamut/\(.key)"] end)) as $want
+  | if $f == $want then "gamut-ffi features in sync with gamut"
+    else error("gamut-ffi features out of sync with gamut:\nwant \($want)\ngot  \($f)") end' '''
+
 [tasks.versions]
 description = "List every workspace crate and its version"
 run = '''cargo metadata --no-deps --format-version 1 | jq -r '.packages | sort_by(.name)[] | "\(.name) \(.version)"' '''

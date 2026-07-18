@@ -93,6 +93,121 @@ fn adobe_decodes_linear_raw_samples_exactly() {
     );
 }
 
+/// The tiled layout under every compression scheme: the Adobe SDK must validate the container
+/// and decode the stage-1 samples back exactly — the definitive check that gamut's tile grid,
+/// edge padding, and per-tile packing match DNG (the 80x48 image over 32x32 tiles leaves 16
+/// padding columns and rows on the edge tiles).
+#[test]
+fn adobe_validates_and_decodes_tiled_dngs_exactly() {
+    use gamut_dng::Compression;
+    for compression in [
+        Compression::Uncompressed,
+        Compression::Deflate,
+        Compression::LosslessJpeg,
+    ] {
+        // 12-bit exercises per-tile sub-byte packing where the scheme allows it; Deflate is
+        // limited to whole-byte depths (the SDK reader's constraint, enforced at encode).
+        let cfa_bits = if compression == Compression::Deflate {
+            16
+        } else {
+            12
+        };
+        for raw in [
+            common::sample_raw(80, 48, cfa_bits),
+            common::sample_linear_raw(48, 40, 16),
+        ] {
+            let mut dng = Vec::new();
+            DngEncoder::new()
+                .with_compression(compression)
+                .with_tiling(32, 32)
+                .encode(&raw, &common::sample_profile(), &mut dng)
+                .expect("encode");
+            gamut_dng_oracle::validate_dng(&dng)
+                .unwrap_or_else(|e| panic!("Adobe must accept a tiled {compression:?} DNG: {e}"));
+            let decoded = gamut_dng_oracle::read_raw_dng(&dng).expect("Adobe reads tiled raw");
+            assert_eq!(
+                decoded.samples,
+                raw.samples(),
+                "Adobe stage-1 must match the tiled {compression:?} input"
+            );
+        }
+    }
+}
+
+/// `NewRawImageDigest` (tag 51111) must bit-match the SDK's own `FindNewRawImageDigest` — the
+/// definitive gate on the digest-tile grid, planar little-endian serialisation, and the
+/// byte-mode (≤ 256-entry linearization table) branch. The multi-tile case (300x280 > 256)
+/// exercises clipped edge tiles.
+#[test]
+fn new_raw_image_digest_matches_adobe() {
+    let table: Vec<u16> = (0..256u32).map(|v| (v * 257) as u16).collect();
+    let cases = [
+        ("single-tile CFA", common::sample_raw(64, 48, 16)),
+        ("multi-tile CFA", common::sample_raw(300, 280, 16)),
+        ("LinearRaw 3-plane", common::sample_linear_raw(48, 36, 16)),
+        ("byte-mode (8-bit image)", common::sample_raw(32, 24, 8)),
+        (
+            "byte-mode (12-bit with a small linearization table)",
+            // Deeper than 8 bits, so *only* the <= 256-entry-table rule can select byte mode;
+            // sample values stay below 256 so the 8-bit narrowing is lossless on both sides.
+            RawImage::new_cfa(
+                gamut_dng::Dimensions::new(32, 24).expect("dims"),
+                12,
+                (2, 2),
+                vec![0, 1, 1, 2],
+                (0..32u16 * 24).map(|i| i % 251).collect(),
+            )
+            .expect("raw")
+            .with_levels(
+                gamut_dng::RawLevels::uniform(1, 0.0, 4095.0)
+                    .expect("levels")
+                    .with_linearization_table(table),
+            )
+            .expect("levels"),
+        ),
+    ];
+    for (what, raw) in cases {
+        let mut dng = Vec::new();
+        DngEncoder::new()
+            .encode(&raw, &common::sample_profile(), &mut dng)
+            .expect("encode");
+        let adobe = gamut_dng_oracle::new_raw_image_digest(&dng).expect("adobe digest");
+        assert_eq!(
+            raw.new_raw_image_digest(),
+            adobe,
+            "{what}: digest must bit-match the SDK"
+        );
+        // The stored tag round-trips through decode, and validate (which runs the SDK's
+        // ValidateRawImageDigest over the written tag) accepts the file.
+        let decoded = DngDecoder::new().decode(&dng).expect("decode");
+        assert_eq!(decoded.new_raw_image_digest, Some(adobe));
+        gamut_dng_oracle::validate_dng(&dng).expect("validate with digest");
+    }
+}
+
+/// The digest gate is genuine: corrupting one byte of the raw data after the digest was written
+/// must make the SDK reject the file as damaged (and shift the recomputed digest).
+#[test]
+fn adobe_rejects_a_corrupted_raw_digest() {
+    let raw = common::sample_raw(64, 48, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let good_digest = gamut_dng_oracle::new_raw_image_digest(&dng).expect("digest");
+    // Flip one bit of the last raw byte (the raw strips are laid out after the preview, at the
+    // end of the file), leaving the stored digest stale.
+    let last = dng.len() - 1;
+    dng[last] ^= 0x01;
+    let err = gamut_dng_oracle::validate_dng(&dng).expect_err("stale digest must reject");
+    assert!(err.contains("(error code 1)"), "{err}");
+    // And the SDK's recomputed digest moves with the data.
+    assert_ne!(
+        gamut_dng_oracle::new_raw_image_digest(&dng).expect("digest"),
+        good_digest
+    );
+}
+
 /// Encodes `raw`, re-decodes it, and requires gamut's `to_linear` to match the Adobe SDK's
 /// stage-2 image within ±1 of the 16-bit encoding (`round(linear * 65535)`) per sample.
 ///

@@ -132,8 +132,8 @@ pub enum PropertyKind {
     Colour(ColourInformation),
     /// `irot` image rotation — anti-clockwise quarter turns, `0..=3` (ISO/IEC 23008-12 §6.5.10).
     Rotation(u8),
-    /// `imir` image mirror — axis `0` (vertical, left↔right) or `1` (horizontal, top↔bottom)
-    /// (ISO/IEC 23008-12 §6.5.12).
+    /// `imir` image mirror — axis `0` exchanges the top and bottom parts, axis `1` the left and
+    /// right parts (ISO/IEC 23008-12:2022 §6.5.12, the semantics libheif and libavif implement).
     Mirror(u8),
     /// `clap` clean aperture — the displayed crop as fractional width/height/centre-offsets
     /// (ISO/IEC 14496-12 §12.1.4). Fields are the raw unsigned 32-bit box values; the offset

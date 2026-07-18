@@ -1,6 +1,6 @@
 [package]
 name = "gamut-avif"
-description = "Pure-Rust AVIF still-image encoder — lossless and lossy AV1 intra frames in an ISOBMFF/MIAF container (the full .avif format)."
+description = "Pure-Rust AVIF still-image encoder and container decoder — lossless and lossy AV1 intra frames in an ISOBMFF/MIAF container, with a pluggable AV1 codestream-decoder hook."
 version = "1.0.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -27,6 +27,9 @@ gamut-isobmff.workspace = true
 # Building these tests requires cmake/meson/ninja/nasm and the `third_party/libavif`
 # + `third_party/dav1d` submodules.
 libavif-oracle = { path = "../../tooling/libavif-oracle" }
+# dav1d directly (raw OBU stream in, planes out) implements the conformance suite's
+# Av1StillDecoder bridge — the exact seam a platform decoder plugs into.
+dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
 divan.workspace = true
 
 [[bench]]

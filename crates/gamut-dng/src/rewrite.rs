@@ -340,21 +340,6 @@ fn tree_has_tag(file: &TiffFile, tag: u16) -> bool {
     file.ifds.iter().any(|ifd| ifd_has(ifd, tag))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The 4 GiB boundary, on the pure predicate: the largest classic length is representable,
-    /// one past it is not, and BigTIFF never overflows.
-    #[test]
-    fn stream_overflow_boundary() {
-        assert!(!stream_overflows(Variant::Classic, 100));
-        assert!(!stream_overflows(Variant::Classic, u64::from(u32::MAX)));
-        assert!(stream_overflows(Variant::Classic, u64::from(u32::MAX) + 1));
-        assert!(!stream_overflows(Variant::Big, u64::from(u32::MAX) + 1));
-    }
-}
-
 /// Finds the original absolute offset of the Exif sub-IFD's out-of-line `MakerNote` value
 /// (`None` if absent or inline).
 fn find_maker_note_offset(data: &[u8]) -> Result<Option<u64>> {
@@ -376,4 +361,19 @@ fn find_maker_note_offset(data: &[u8]) -> Result<Option<u64>> {
         return Ok(None);
     };
     Ok(reader.value_offset(note))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 4 GiB boundary, on the pure predicate: the largest classic length is representable,
+    /// one past it is not, and BigTIFF never overflows.
+    #[test]
+    fn stream_overflow_boundary() {
+        assert!(!stream_overflows(Variant::Classic, 100));
+        assert!(!stream_overflows(Variant::Classic, u64::from(u32::MAX)));
+        assert!(stream_overflows(Variant::Classic, u64::from(u32::MAX) + 1));
+        assert!(!stream_overflows(Variant::Big, u64::from(u32::MAX) + 1));
+    }
 }

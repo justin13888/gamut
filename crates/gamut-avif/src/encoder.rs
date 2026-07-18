@@ -104,7 +104,8 @@ impl AvifEncoder {
 
 /// The 4-byte `AV1CodecConfigurationRecord` body (empty `configOBUs`) stamped into the `av1C`
 /// property (AV1-ISOBMFF v1.3.0 §2.3.3/§2.3.4). Every field mirrors the AV1 sequence header.
-fn av1c_record(c: &Av1StillConfig) -> [u8; 4] {
+/// Crate-visible so the `av1c` module's tests can pin writer/reader coherence.
+pub(crate) fn av1c_record(c: &Av1StillConfig) -> [u8; 4] {
     [
         0x81, // marker = 1, version = 1
         (c.seq_profile << 5) + (c.seq_level_idx_0 & 0x1f),
@@ -386,7 +387,8 @@ mod tests {
 
     #[test]
     fn with_mirror_emits_imir_axis() {
-        for (mirror, axis) in [(Mirror::LeftRight, 0u8), (Mirror::TopBottom, 1)] {
+        // ISO/IEC 23008-12:2022 §6.5.12: axis 1 exchanges left/right, axis 0 top/bottom.
+        for (mirror, axis) in [(Mirror::LeftRight, 1u8), (Mirror::TopBottom, 0)] {
             let f = encode_with(AvifEncoder::new().with_mirror(mirror), 4, 4);
             let p = f
                 .windows(4)

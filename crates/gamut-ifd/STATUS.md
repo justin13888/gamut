@@ -147,3 +147,18 @@ type parameter where TIFF's is runtime data; winnow/nom model streams, not rando
 `rangemap` would replace only the ~120-line interval coalescer while the bespoke semantics
 (claim provenance, sharing dedupe, conflict kinds) still need wrapping. The crate stays
 zero-dependency; the guarantee comes from the dual-ledger architecture, not a parser library.
+
+### Hardening audit (issue #262, subsumed by the one-parser collapse)
+
+The #262 audit against rawshift's `ParseError` acceptance checklist (magic/byte-order validation,
+IFD/value offset bounds with the two-error offset-vs-span distinction, circular-IFD and sub-IFD
+guards, checked u64 offset arithmetic, truncated-file staging, and report-not-reject overlaps) is
+now satisfied **by construction**: the slice functions are thin wrappers over the u64-native
+streaming engine, so there is one code path to harden rather than two mirrored ones. Its finding —
+a slice reader that cast u64 counts/offsets to `usize` before its checked arithmetic, truncating a
+hostile 64-bit BigTIFF width into a silent in-bounds misparse on 32-bit targets — cannot recur:
+the streaming engine stays u64 until a bound against the source length proves each conversion
+lossless. [`tests/hardening_audit.rs`](tests/hardening_audit.rs) remains the acceptance artifact,
+pinning the exact `Error::InvalidInput` string rawshift keys its `ParseError` mapping on for every
+checklist case; per the issue ("correctness verification, not an API ask") error granularity stays
+`InvalidInput(&'static str)` — no per-case error variants were added.

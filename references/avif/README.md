@@ -1,8 +1,9 @@
 # AVIF (AV1 Image File Format)
 
-Reference for **`gamut-avif`** — the AVIF still-image encoder. AVIF is a layering, not a new codec:
-an AV1 intra-frame bitstream carried as an item in an ISOBMFF/MIAF container. This crate is the glue;
-the substantive specs live with the layers it composes:
+Reference for **`gamut-avif`** — the AVIF still-image encoder and **container decoder**
+(issue #250). AVIF is a layering, not a new codec: an AV1 intra-frame bitstream carried as an item
+in an ISOBMFF/MIAF container. This crate is the glue; the substantive specs live with the layers
+it composes:
 
 - **AV1 bitstream** (the coded `mdat` payload + the `av1C` configuration record) — see
   [`references/av1`](../av1), including AV1-ISOBMFF v1.3.0 for the `av01` item type and the
@@ -44,6 +45,31 @@ yields a lower index. Endpoints: `lossy(100) -> 1`, `lossy(50) -> 127`, `lossy(0
 of `1` keeps `lossy(_)` on the lossy DCT pipeline; `base_q_idx 0` (the lossless path) is reserved for
 `lossless()`/the default, so the lossless and lossy modes never alias.
 
+## The decode surface (issue #250)
+
+The read side implements the **AV1 Image Item Data** constraints normatively (all enforced as
+errors before a payload reaches the pluggable `Av1StillDecoder`):
+
+- AVIF v1.2.0 §2.1 — the item data is a sync-sample temporal unit with **exactly one** Sequence
+  Header OBU;
+- AV1-ISOBMFF §2.4 — every OBU carries `obu_has_size_field = 1` except (optionally) the last,
+  which then fills the remainder; `OBU_TILE_LIST` SHALL NOT appear; the sync-sample Random Access
+  Point rules (a Sequence Header OBU before the first frame-bearing OBU; the first frame a shown
+  key frame, checked from the fixed leading `uncompressed_header()` bits, AV1 §5.9.2).
+
+SHOULD-level shapes are tolerated (temporal delimiters, padding, redundant frame headers, a
+sequence header repeated in `configOBUs`, `still_picture`/`reduced_still_picture_header` = 0), and
+the §2.3.4 rule that a `configOBUs` sequence header match the payload's is left to the decoder.
+
+The RGBA presentation path supports the 8-bit still-image colour cases — identity `mc=0`
+(requiring 4:4:4), BT.601 `mc=5/6`, `mc=2` unspecified (treated as BT.601, matching libavif's
+fallback), and monochrome — with nearest co-sited chroma upsampling. A **missing `colr` defaults
+to BT.601 limited range** (the posture `gamut-heic` documents for HEIF): AVIF technically defers
+to the AV1 sequence header's `color_config`, which the container layer deliberately does not
+parse; callers needing sequence-header CICP use the planar surface. `imir` is applied with the
+ISO/IEC 23008-12:**2022** §6.5.12 axis semantics (axis 0 exchanges top/bottom, axis 1 left/right
+— the reading libheif and libavif implement).
+
 ## Conformance
 
 `gamut-avif/tests/decode_roundtrip.rs` is a differential oracle: it encodes an image, has the
@@ -52,6 +78,15 @@ vendored **libavif** (with a **dav1d** backend, from `third_party/libavif` + `th
 source for lossless, bit-exact to the AV1 reconstruction for lossy, and that `irot`/`imir` are
 accepted as essential properties. The container layout is pinned independently by `gamut-isobmff`'s
 `read(&write) == img` round-trip and by `gamut-avif`'s own parse-back unit tests.
+
+The decode surface has its own differential suite, `gamut-avif/tests/conformance.rs`, over the
+libavif conformance corpus committed in `third_party/libavif/tests/data`: libavif's parse
+(`introspect`) pins container structure, CICP, transforms, and the ICC/Exif/XMP payloads
+byte-exact; libavif's own RGBA presentation (`decode_rgba`, nearest-neighbour upsampling on both
+sides) bounds the colour path within conversion rounding with alpha exact; and **dav1d plugged
+directly into the `Av1StillDecoder` seam** proves the planar pipeline bit-exact against both the
+raw codestream and libavif's independent container decode. Self-encoded lossless files decode
+back bit-exact end to end through the same seam.
 
 The wrapped **AV1 bitstream** is validated one layer down by `gamut-av1` against **libaom** — the AV1
 reference codec, the definitive oracle — with `dav1d` corroborating (see

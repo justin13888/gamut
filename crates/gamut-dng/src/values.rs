@@ -9,9 +9,10 @@
 /// The compression scheme of an image's data, stored in the `Compression` tag (259).
 ///
 /// `gamut-dng` encodes and decodes [`Uncompressed`](Self::Uncompressed),
-/// [`LosslessJpeg`](Self::LosslessJpeg), and [`Deflate`](Self::Deflate). [`LossyJpeg`](Self::LossyJpeg)
-/// and [`JpegXl`](Self::JpegXl) are recognised for completeness but are out of the current
-/// encode/decode scope (see `STATUS.md`).
+/// [`LosslessJpeg`](Self::LosslessJpeg), [`Deflate`](Self::Deflate), and
+/// [`JpegXl`](Self::JpegXl) (encode behind the `jxl-encode` feature).
+/// [`LossyJpeg`](Self::LossyJpeg) is recognised but out of codec scope (see `STATUS.md`).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Compression {
     /// `1` — uncompressed sample data.
@@ -21,9 +22,10 @@ pub enum Compression {
     LosslessJpeg,
     /// `8` — Deflate/ZIP (RFC 1951), used for integer and floating-point data.
     Deflate,
-    /// `34892` — DNG lossy JPEG (8-bit `LinearRaw`/mask only). Out of scope.
+    /// `34892` — DNG lossy JPEG (8-bit `LinearRaw`/mask only). Out of codec scope.
     LossyJpeg,
-    /// `52546` — JPEG XL (DNG 1.7). Out of scope (deferred to a `gamut-jxl`-backed follow-up).
+    /// `52546` — JPEG XL (DNG 1.7); what Apple ProRAW uses. Decoded via the pure-Rust jxl-rs
+    /// path; encoding needs the `jxl-encode` cargo feature.
     JpegXl,
 }
 
@@ -53,12 +55,17 @@ impl Compression {
         }
     }
 
-    /// Whether `gamut-dng` can currently encode and decode this scheme.
+    /// Whether `gamut-dng` can decode this scheme. Every decodable scheme also encodes, with two
+    /// caveats: [`JpegXl`](Self::JpegXl) encoding needs the `jxl-encode` cargo feature, and
+    /// [`Deflate`](Self::Deflate) encoding is limited to 8/16-bit samples.
     #[must_use]
-    pub fn is_supported(self) -> bool {
+    pub fn is_decodable(self) -> bool {
         matches!(
             self,
-            Compression::Uncompressed | Compression::LosslessJpeg | Compression::Deflate
+            Compression::Uncompressed
+                | Compression::LosslessJpeg
+                | Compression::Deflate
+                | Compression::JpegXl
         )
     }
 }
@@ -66,6 +73,7 @@ impl Compression {
 /// How pixel samples map to colour / raw photometry, stored in `PhotometricInterpretation` (262).
 ///
 /// Only the DNG-relevant interpretations are modelled.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhotometricInterpretation {
     /// `1` — grayscale where `0` is black (used by previews and masks).
@@ -120,6 +128,7 @@ impl PhotometricInterpretation {
 ///
 /// [`Other`](Self::Other) (`255`) signals that spectral data is supplied separately via the
 /// `IlluminantData1/2/3` tags instead of a named illuminant.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalibrationIlluminant {
     /// `0` — unknown.
@@ -233,6 +242,7 @@ impl CalibrationIlluminant {
 ///
 /// `1` is the common rectangular (square) grid (e.g. ordinary Bayer); `2`–`9` are the staggered
 /// layouts where alternate rows or columns are offset by half a pixel.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CfaLayout {
     /// `1` — rectangular (square) layout.
@@ -292,6 +302,7 @@ impl CfaLayout {
 }
 
 /// The prediction scheme applied before compression, stored in the `Predictor` tag (317).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Predictor {
     /// `1` — no prediction.
@@ -343,6 +354,7 @@ impl Predictor {
 }
 
 /// How each sample is encoded, stored in the `SampleFormat` tag (339).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SampleFormat {
     /// `1` — unsigned integer (the default for raw mosaic and linear-raw data).
@@ -382,6 +394,7 @@ impl SampleFormat {
 }
 
 /// The embedding/usage policy of a camera profile, stored in `ProfileEmbedPolicy` (50941).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProfileEmbedPolicy {
     /// `0` — the profile may be freely copied.
@@ -421,6 +434,7 @@ impl ProfileEmbedPolicy {
 }
 
 /// The colour space of a preview image, stored in `PreviewColorSpace` (50970).
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PreviewColorSpace {
     /// `0` — unknown.
@@ -502,10 +516,10 @@ mod tests {
             assert_eq!(Compression::from_code(c.code()), Some(c));
         }
         assert_eq!(Compression::from_code(2), None); // CCITT etc. are not DNG raw schemes
-        assert!(Compression::default().is_supported());
-        assert!(Compression::LosslessJpeg.is_supported());
-        assert!(!Compression::JpegXl.is_supported());
-        assert!(!Compression::LossyJpeg.is_supported());
+        assert!(Compression::default().is_decodable());
+        assert!(Compression::LosslessJpeg.is_decodable());
+        assert!(Compression::JpegXl.is_decodable());
+        assert!(!Compression::LossyJpeg.is_decodable());
     }
 
     #[test]

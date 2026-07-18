@@ -5,20 +5,106 @@
 //! [`RawImage`] and [`CameraProfile`]. As stated in the crate docs, demosaicing and colour
 //! rendering are out of scope — the decoder returns the sensor samples, not a viewable image.
 
-use gamut_core::{Dimensions, Error, Result};
-use gamut_ifd::{ByteOrder, Ifd, Value, Variant, read, read_ifd_at};
+use std::cell::RefCell;
 
+use gamut_core::{Dimensions, Error, Result};
+use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
+
+use crate::gain_map::ProfileGainTableMap;
 use crate::levels::RawLevels;
 use crate::metadata::{DngMetadata, ExifMetadata};
 use crate::opcode::OpcodeList;
 use crate::profile::CameraProfile;
 use crate::raw::RawImage;
+use crate::subimage::{
+    DepthInfo, MaskSubArea, SemanticMaskInfo, SubImage, SubImageData, SubImageKind,
+};
 use crate::values::{
-    CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy,
+    CalibrationIlluminant, Compression, PhotometricInterpretation, ProfileEmbedPolicy, SampleFormat,
 };
 use crate::{bitpack, compression, lossless_jpeg, tags};
 
+/// One IFD entry preserved verbatim: the tag number and its fully typed [`Value`].
+///
+/// This is how the decoder represents every field it does not model — private maker tags,
+/// DNG features without a typed surface yet — so nothing in the file is silently dropped
+/// (issue #109's decode contract). The value is `gamut-ifd`'s typed enum, not opaque bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawTag {
+    /// The TIFF/DNG tag number.
+    pub tag: u16,
+    /// The entry's decoded value.
+    pub value: Value,
+}
+
+/// An [`Ifd`] wrapper that records every tag the decode pipeline consumes, so the tags *not*
+/// consumed can be surfaced verbatim ([`TrackedIfd::remaining`]) — correct by construction: a
+/// helper that stops reading a tag makes that tag reappear in the extras, which golden tests
+/// pin. Interior mutability keeps the read API `&self` like [`Ifd`]'s.
+struct TrackedIfd<'a> {
+    ifd: &'a Ifd,
+    seen: RefCell<Vec<u16>>,
+}
+
+impl<'a> TrackedIfd<'a> {
+    fn new(ifd: &'a Ifd) -> Self {
+        Self {
+            ifd,
+            seen: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Marks `tag` consumed (whether or not it is present).
+    fn touch(&self, tag: u16) {
+        let mut seen = self.seen.borrow_mut();
+        if !seen.contains(&tag) {
+            seen.push(tag);
+        }
+    }
+
+    /// Un-marks `tag`, so a value that was read but then *rejected* (e.g. an invalid
+    /// `MaskSubArea`, which the spec says to ignore) still surfaces in the extras.
+    fn untouch(&self, tag: u16) {
+        self.seen.borrow_mut().retain(|&t| t != tag);
+    }
+
+    fn get(&self, tag: u16) -> Option<&Value> {
+        self.touch(tag);
+        self.ifd.get(tag)
+    }
+
+    fn get_u32(&self, tag: u16) -> Option<u32> {
+        self.touch(tag);
+        self.ifd.get_u32(tag)
+    }
+
+    fn get_u32_vec(&self, tag: u16) -> Option<Vec<u32>> {
+        self.touch(tag);
+        self.ifd.get_u32_vec(tag)
+    }
+
+    fn get_u64_vec(&self, tag: u16) -> Option<Vec<u64>> {
+        self.touch(tag);
+        self.ifd.get_u64_vec(tag)
+    }
+
+    /// Every field the pipeline did not consume, in tag order, values verbatim.
+    fn remaining(&self) -> Vec<RawTag> {
+        let seen = self.seen.borrow();
+        self.ifd
+            .fields()
+            .iter()
+            .filter(|f| !seen.contains(&f.tag))
+            .map(|f| RawTag {
+                tag: f.tag,
+                value: f.value.clone(),
+            })
+            .collect()
+    }
+}
+
 /// A decoded DNG: the raw sensor image, the camera colour profile, and the declared DNG version.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct DecodedDng {
     /// The raw sensor image (CFA mosaic or linear), with its photometry and levels.
@@ -31,6 +117,30 @@ pub struct DecodedDng {
     pub dng_version: [u8; 4],
     /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
     pub metadata: DngMetadata,
+    /// The raw IFD's `ProfileGainTableMap` (52525), if present.
+    pub gain_table_map: Option<ProfileGainTableMap>,
+    /// IFD 0's `ProfileGainTableMap2` (52544), if present. When both maps are present, this one
+    /// supersedes [`gain_table_map`](Self::gain_table_map) for rendering (DNG 1.7.1 p. 88).
+    pub gain_table_map2: Option<ProfileGainTableMap>,
+    /// Every non-raw image IFD in the file — previews, transparency/semantic masks, depth maps,
+    /// enhanced images — decoded where the scheme is in scope, verbatim chunks otherwise.
+    pub sub_images: Vec<SubImage>,
+    /// IFD 0's depth-map description tags, when any is present.
+    pub depth_info: Option<DepthInfo>,
+    /// The `DNGBackwardVersion` the file declares, if present.
+    pub backward_version: Option<[u8; 4]>,
+    /// The stored `NewRawImageDigest` (51111), if present — as written, not recomputed. Compare
+    /// against [`RawImage::new_raw_image_digest`] to verify raw-data integrity.
+    pub new_raw_image_digest: Option<[u8; 16]>,
+    /// Every IFD 0 field the pipeline does not model, verbatim — proprietary maker tags
+    /// included — in tag order. Nothing in the file is silently dropped; `deconstruct` remains
+    /// the byte-accounting *diagnostic* view of the same principle.
+    pub ifd0_extra: Vec<RawTag>,
+    /// Every unmodelled field of the raw IFD, verbatim. Empty when the raw image lives in IFD 0
+    /// itself (its extras are then in [`ifd0_extra`](Self::ifd0_extra)).
+    pub raw_extra: Vec<RawTag>,
+    /// Every EXIF sub-IFD entry beyond the typed [`ExifMetadata`] fields, verbatim.
+    pub exif_extra: Vec<RawTag>,
 }
 
 /// Decoder for DNG (Adobe Digital Negative) raw images.
@@ -53,46 +163,113 @@ impl DngDecoder {
     /// Returns [`Error::InvalidInput`] if the container is malformed or a required tag is missing,
     /// or [`Error::Unsupported`] for a compression scheme or photometry not yet decodable.
     pub fn decode(&self, data: &[u8]) -> Result<DecodedDng> {
+        // `read` guarantees at least one IFD, so index 0 below is IFD 0.
         let file = read(data)?;
         let order = file.order;
         let variant = file.variant;
-        let ifd0 = file
-            .ifds
-            .first()
-            .ok_or(Error::InvalidInput("DNG: file has no IFD 0"))?;
 
-        let raw_ifd = find_raw_ifd(ifd0, data, order, variant)?;
-        let raw = decode_raw_image(&raw_ifd, data, order)?;
+        let ifds = walk_ifds(&file, data);
+        let raw_index = select_raw_ifd(&ifds)?;
+        // One consumption tracker per IFD; `walk_ifds` pushes IFD 0 first, so index 0 is IFD 0
+        // (and `raw_index == 0` means the raw image lives in IFD 0 itself). Tags the walk/select
+        // phase consumed on plain IFDs are marked up front.
+        let tracked: Vec<TrackedIfd> = ifds.iter().map(TrackedIfd::new).collect();
+        for t in &tracked {
+            t.touch(tags::SUB_IFDS);
+            t.touch(tags::NEW_SUBFILE_TYPE);
+            t.touch(tags::PHOTOMETRIC_INTERPRETATION);
+        }
+        let ifd0 = &tracked[0];
+        let raw_ifd = &tracked[raw_index];
+
+        let raw = decode_raw_image(raw_ifd, data, order)?;
         let profile = decode_profile(ifd0)?;
         let dng_version = read_version(ifd0)?;
-        let metadata = decode_metadata(ifd0, data, order, variant);
+        let backward_version = bytes_value(ifd0.get(tags::DNG_BACKWARD_VERSION)).map(|b| {
+            let mut v = [0u8; 4];
+            for (slot, byte) in v.iter_mut().zip(b) {
+                *slot = byte;
+            }
+            v
+        });
+        let new_raw_image_digest = bytes_value(ifd0.get(tags::NEW_RAW_IMAGE_DIGEST))
+            .and_then(|b| <[u8; 16]>::try_from(b).ok());
+        let (metadata, exif_extra) = decode_metadata(ifd0, data, order, variant);
+        let gain_table_map = decode_gain_map(raw_ifd, tags::PROFILE_GAIN_TABLE_MAP, order)?;
+        let gain_table_map2 = decode_gain_map(ifd0, tags::PROFILE_GAIN_TABLE_MAP2, order)?;
+        let depth_info = decode_depth_info(ifd0);
+        // Sub-images last, so an IFD-0 preview's extras reflect every root-level consumer above.
+        let mut sub_images = Vec::new();
+        let mut sub_indices = Vec::new();
+        for (i, t) in tracked.iter().enumerate() {
+            if i == raw_index {
+                continue;
+            }
+            if let Some(sub) = decode_sub_image(t, data, order) {
+                sub_images.push(sub);
+                sub_indices.push(i);
+            }
+        }
+        // Extras are computed only after every consumer has run. IFD 0's unmodelled tags go to
+        // `ifd0_extra` alone (even when IFD 0 doubles as the raw IFD or a preview sub-image).
+        for (sub, &i) in sub_images.iter_mut().zip(&sub_indices) {
+            if i != 0 {
+                sub.extra_tags = tracked[i].remaining();
+            }
+        }
+        let ifd0_extra = tracked[0].remaining();
+        let raw_extra = if raw_index == 0 {
+            Vec::new()
+        } else {
+            tracked[raw_index].remaining()
+        };
 
         Ok(DecodedDng {
             raw,
             profile,
             dng_version,
             metadata,
+            gain_table_map,
+            gain_table_map2,
+            sub_images,
+            depth_info,
+            backward_version,
+            new_raw_image_digest,
+            ifd0_extra,
+            raw_extra,
+            exif_extra,
         })
     }
 }
 
-/// Reconstructs embedded metadata from IFD 0: the XMP/IPTC/ICC blocks and the EXIF sub-IFD.
-fn decode_metadata(ifd0: &Ifd, data: &[u8], order: ByteOrder, variant: Variant) -> DngMetadata {
-    let exif = ifd0
+/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD —
+/// plus the EXIF entries beyond the typed fields, verbatim.
+fn decode_metadata(
+    ifd0: &TrackedIfd,
+    data: &[u8],
+    order: ByteOrder,
+    variant: Variant,
+) -> (DngMetadata, Vec<RawTag>) {
+    let (exif, exif_extra) = ifd0
         .get_u32(tags::EXIF_IFD)
         .and_then(|offset| read_ifd_at(data, u64::from(offset), order, variant).ok())
-        .map(|exif_ifd| decode_exif(&exif_ifd))
+        .map(|exif_ifd| {
+            let tracked = TrackedIfd::new(&exif_ifd);
+            let exif = decode_exif(&tracked);
+            (exif, tracked.remaining())
+        })
         .unwrap_or_default();
-    DngMetadata {
+    let metadata = DngMetadata {
         exif,
         xmp: bytes_value(ifd0.get(tags::XMP)),
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
-    }
+    };
+    (metadata, exif_extra)
 }
 
 /// Reads the common capture settings out of an EXIF sub-IFD.
-fn decode_exif(exif: &Ifd) -> ExifMetadata {
+fn decode_exif(exif: &TrackedIfd) -> ExifMetadata {
     ExifMetadata {
         exposure_time: rational_pair(exif.get(tags::EXPOSURE_TIME)),
         f_number: rational_pair(exif.get(tags::F_NUMBER)),
@@ -119,25 +296,201 @@ fn is_raw_ifd(ifd: &Ifd) -> bool {
     )
 }
 
-/// Locates the full-resolution raw IFD: a `SubIFDs` child with a raw photometry, or IFD 0 itself.
-fn find_raw_ifd(ifd0: &Ifd, data: &[u8], order: ByteOrder, variant: Variant) -> Result<Ifd> {
-    if let Some(offsets) = ifd0.get_u32_vec(tags::SUB_IFDS) {
-        for offset in offsets {
-            if let Ok(sub) = read_ifd_at(data, u64::from(offset), order, variant)
-                && is_raw_ifd(&sub)
-            {
-                return Ok(sub);
-            }
+/// An upper bound on the `SubIFDs` nesting depth the decoder follows, bounding hostile pointer
+/// graphs; legitimate DNG trees (IFD 0 → raw / enhanced / mask sub-IFDs) are two levels.
+const MAX_SUBIFD_DEPTH: usize = 8;
+
+/// Collects every IFD in the file — the top-level chain plus, recursively, every `SubIFDs`
+/// child — in encounter order. Lenient by design: an unreadable child is skipped rather than
+/// failing the whole decode, while offset de-duplication and the depth cap terminate hostile
+/// pointer cycles.
+fn walk_ifds(file: &TiffFile, data: &[u8]) -> Vec<Ifd> {
+    let mut out = Vec::new();
+    let mut visited: Vec<u64> = Vec::new();
+    for ifd in &file.ifds {
+        collect_sub_ifds(
+            ifd,
+            data,
+            file.order,
+            file.variant,
+            &mut visited,
+            1,
+            &mut out,
+        );
+    }
+    out
+}
+
+/// Pushes `ifd` and recurses into its `SubIFDs` children (see [`walk_ifds`]).
+fn collect_sub_ifds(
+    ifd: &Ifd,
+    data: &[u8],
+    order: ByteOrder,
+    variant: Variant,
+    visited: &mut Vec<u64>,
+    depth: usize,
+    out: &mut Vec<Ifd>,
+) {
+    out.push(ifd.clone());
+    if depth >= MAX_SUBIFD_DEPTH {
+        return;
+    }
+    // Offsets are read at full width: a BigTIFF writes `SubIFDs` as `LONG8`, whose values only
+    // matter past 4 GiB — exactly where a u32 reading would fail.
+    let Some(offsets) = ifd.get_u64_vec(tags::SUB_IFDS) else {
+        return;
+    };
+    for offset in offsets {
+        if visited.contains(&offset) {
+            continue;
+        }
+        visited.push(offset);
+        if let Ok(sub) = read_ifd_at(data, offset, order, variant) {
+            collect_sub_ifds(&sub, data, order, variant, visited, depth + 1, out);
         }
     }
-    if is_raw_ifd(ifd0) {
-        return Ok(ifd0.clone());
+}
+
+/// Selects the full-resolution raw IFD from the walked forest (real DNGs keep the raw in a
+/// sub-IFD of IFD 0, but TIFF/EP permits it anywhere).
+///
+/// Prefers an IFD whose `NewSubFileType` is 0 (the main image; the tag defaults to 0 when
+/// absent) with a raw photometry, falling back to any raw-photometry IFD.
+fn select_raw_ifd(ifds: &[Ifd]) -> Result<usize> {
+    let mut fallback = None;
+    for (index, ifd) in ifds.iter().enumerate() {
+        if !is_raw_ifd(ifd) {
+            continue;
+        }
+        if ifd.get_u32(tags::NEW_SUBFILE_TYPE).unwrap_or(0) == 0 {
+            return Ok(index);
+        }
+        if fallback.is_none() {
+            fallback = Some(index);
+        }
     }
-    Err(Error::InvalidInput("DNG: no raw image IFD found"))
+    fallback.ok_or(Error::InvalidInput("DNG: no raw image IFD found"))
+}
+
+/// Decodes one non-raw image IFD into a [`SubImage`], or `None` when the IFD carries no image
+/// data (or its geometry/chunks are too malformed to represent — `deconstruct` diagnoses those).
+///
+/// Sub-images are auxiliary, so pixel decoding is **best-effort**: a scheme or stream outside
+/// decode scope (baseline-DCT JPEG previews, lossy JPEG, float JXL) falls back to carrying the
+/// compressed chunks verbatim rather than failing the whole decode.
+fn decode_sub_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Option<SubImage> {
+    if ifd.get(tags::STRIP_OFFSETS).is_none() && ifd.get(tags::TILE_OFFSETS).is_none() {
+        return None;
+    }
+    let width = ifd.get_u32(tags::IMAGE_WIDTH)?;
+    let height = ifd.get_u32(tags::IMAGE_LENGTH)?;
+    let dimensions = Dimensions::new(width, height).ok()?;
+    let spp = u16::try_from(ifd.get_u32(tags::SAMPLES_PER_PIXEL).unwrap_or(1)).ok()?;
+    let bits = ifd
+        .get_u32_vec(tags::BITS_PER_SAMPLE)
+        .and_then(|v| v.first().copied())
+        .unwrap_or(1) as u16;
+    let photometric = ifd
+        .get_u32(tags::PHOTOMETRIC_INTERPRETATION)
+        .and_then(|c| u16::try_from(c).ok())
+        .unwrap_or(0);
+    let kind = SubImageKind::from_code(ifd.get_u32(tags::NEW_SUBFILE_TYPE).unwrap_or(0));
+    let compression = ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16;
+
+    let data_payload =
+        match decode_image_data(ifd, data, order, width, height, usize::from(spp), bits) {
+            Ok(samples) => SubImageData::Decoded(samples),
+            Err(_) => SubImageData::Undecoded {
+                compression,
+                chunks: undecoded_chunks(ifd, data)?,
+            },
+        };
+
+    let semantic = semantic_mask_info(ifd, dimensions);
+    Some(SubImage {
+        kind,
+        photometric,
+        dimensions,
+        bits_per_sample: bits,
+        samples_per_pixel: spp,
+        data: data_payload,
+        semantic: if kind == SubImageKind::SemanticMask {
+            Some(semantic.unwrap_or_default())
+        } else {
+            semantic
+        },
+        // Filled in by `decode` once every consumer has run.
+        extra_tags: Vec::new(),
+    })
+}
+
+/// The stored chunks of an image IFD, verbatim (strips or tiles, in offset order). Only the
+/// offset/count tags are consumed; the rest of the layout and interpretation tags
+/// (`RowsPerStrip`, `TileWidth`/`TileLength`, `SampleFormat`, interleave factors, …) stay in the
+/// extras — the consumer of undecoded chunks needs them to interpret the data.
+fn undecoded_chunks(ifd: &TrackedIfd, data: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let (offset_tag, count_tag) = if ifd.get(tags::TILE_OFFSETS).is_some() {
+        (tags::TILE_OFFSETS, tags::TILE_BYTE_COUNTS)
+    } else {
+        (tags::STRIP_OFFSETS, tags::STRIP_BYTE_COUNTS)
+    };
+    let offsets = ifd.get_u64_vec(offset_tag)?;
+    let counts = ifd.get_u64_vec(count_tag)?;
+    let chunks = byte_chunks(&offsets, &counts, data).ok()?;
+    Some(chunks.into_iter().map(<[u8]>::to_vec).collect())
+}
+
+/// Reads the semantic-mask tags, when any is present. `MaskSubArea` is validated by pairing top
+/// with the mask height and left with the mask width (as the SDK does — the spec's own
+/// inequality text transposes the axes) and ignored when invalid, per spec.
+fn semantic_mask_info(ifd: &TrackedIfd, mask_dims: Dimensions) -> Option<SemanticMaskInfo> {
+    let name = ascii_value(ifd.get(tags::SEMANTIC_NAME));
+    let instance_id = ascii_value(ifd.get(tags::SEMANTIC_INSTANCE_ID));
+    let sub_area = ifd
+        .get_u32_vec(tags::MASK_SUB_AREA)
+        .filter(|v| v.len() == 4)
+        .and_then(|v| {
+            let area = MaskSubArea {
+                top: v[0],
+                left: v[1],
+                full_width: v[2],
+                full_height: v[3],
+            };
+            let fits = u64::from(area.top) + u64::from(mask_dims.height)
+                <= u64::from(area.full_height)
+                && u64::from(area.left) + u64::from(mask_dims.width) <= u64::from(area.full_width);
+            if !fits {
+                // Ignored per spec, but not dropped: the rejected value surfaces in the extras.
+                ifd.untouch(tags::MASK_SUB_AREA);
+            }
+            fits.then_some(area)
+        });
+    if name.is_none() && instance_id.is_none() && sub_area.is_none() {
+        return None;
+    }
+    Some(SemanticMaskInfo {
+        name,
+        instance_id,
+        sub_area,
+    })
+}
+
+/// Reads IFD 0's depth-map description tags, when any is present.
+fn decode_depth_info(ifd0: &TrackedIfd) -> Option<DepthInfo> {
+    let short = |tag: u16| ifd0.get_u32(tag).and_then(|v| u16::try_from(v).ok());
+    let rational = |tag: u16| rational_pair(ifd0.get(tag));
+    let info = DepthInfo {
+        format: short(tags::DEPTH_FORMAT),
+        near: rational(tags::DEPTH_NEAR),
+        far: rational(tags::DEPTH_FAR),
+        units: short(tags::DEPTH_UNITS),
+        measure_type: short(tags::DEPTH_MEASURE_TYPE),
+    };
+    (info != DepthInfo::default()).then_some(info)
 }
 
 /// Reconstructs the [`RawImage`] from a raw IFD and the file's strip data.
-fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage> {
+fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<RawImage> {
     let width = ifd
         .get_u32(tags::IMAGE_WIDTH)
         .ok_or(Error::InvalidInput("DNG: raw IFD missing ImageWidth"))?;
@@ -149,8 +502,14 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
         .get_u32_vec(tags::BITS_PER_SAMPLE)
         .and_then(|v| v.first().copied())
         .ok_or(Error::InvalidInput("DNG: raw IFD missing BitsPerSample"))? as u16;
-    let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
-        .ok_or(Error::Unsupported("DNG: unknown compression"))?;
+    // JPEG XL data decodes to full-range 16-bit whatever precision the codestream stores (the
+    // reference SDK's semantics; Apple ProRAW declares BitsPerSample 10 with WhiteLevel 65535).
+    // The reconstructed image therefore carries 16 significant bits.
+    let bits = if ifd.get_u32(tags::COMPRESSION) == Some(u32::from(Compression::JpegXl.code())) {
+        16
+    } else {
+        bits
+    };
     let photometric = ifd
         .get_u32(tags::PHOTOMETRIC_INTERPRETATION)
         .and_then(|c| u16::try_from(c).ok())
@@ -159,48 +518,7 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
             "DNG: raw IFD missing PhotometricInterpretation",
         ))?;
 
-    let samples_per_row = (width as usize)
-        .checked_mul(spp as usize)
-        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
-    let expected = samples_per_row
-        .checked_mul(height as usize)
-        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
-
-    let chunks = strip_chunks(ifd, data)?;
-    let samples = match compression {
-        Compression::Uncompressed | Compression::Deflate => {
-            let mut packed = Vec::new();
-            for chunk in &chunks {
-                packed.extend_from_slice(&compression::decompress(compression, chunk)?);
-            }
-            bitpack::unpack(&packed, bits, samples_per_row, height as usize, order)
-        }
-        // Lossless JPEG decodes samples directly; strips concatenate as row-bands.
-        Compression::LosslessJpeg => {
-            let mut samples = Vec::with_capacity(expected);
-            let mut rows_seen = 0usize;
-            for chunk in &chunks {
-                let jpeg = lossless_jpeg::decode(chunk)?;
-                if jpeg.width != width as usize || jpeg.components != spp as usize {
-                    return Err(Error::InvalidInput("DNG: lossless-JPEG geometry mismatch"));
-                }
-                rows_seen += jpeg.height;
-                samples.extend(jpeg.samples);
-            }
-            if rows_seen != height as usize {
-                return Err(Error::InvalidInput("DNG: lossless-JPEG rows mismatch"));
-            }
-            samples
-        }
-        _ => {
-            return Err(Error::Unsupported(
-                "DNG: this compression is not yet decodable",
-            ));
-        }
-    };
-    if samples.len() != expected {
-        return Err(Error::InvalidInput("DNG: raw image data is truncated"));
-    }
+    let samples = decode_image_data(ifd, data, order, width, height, spp as usize, bits)?;
 
     let dims = Dimensions::new(width, height)?;
     let mut raw = match photometric {
@@ -262,10 +580,32 @@ fn decode_raw_image(ifd: &Ifd, data: &[u8], order: ByteOrder) -> Result<RawImage
     Ok(raw)
 }
 
+/// Reads a `ProfileGainTableMap`/`ProfileGainTableMap2` tag (UNDEFINED bytes, file byte order)
+/// into its typed model; the tag number selects the version's layout. A malformed map is an
+/// error, not silently dropped.
+fn decode_gain_map(
+    ifd: &TrackedIfd,
+    tag: u16,
+    order: ByteOrder,
+) -> Result<Option<ProfileGainTableMap>> {
+    let Some(value) = ifd.get(tag) else {
+        return Ok(None);
+    };
+    let bytes = value.as_bytes().ok_or(Error::InvalidInput(
+        "DNG: gain-table maps must be UNDEFINED byte data",
+    ))?;
+    let map = if tag == tags::PROFILE_GAIN_TABLE_MAP {
+        ProfileGainTableMap::parse_v1(bytes, order)?
+    } else {
+        ProfileGainTableMap::parse_v2(bytes, order)?
+    };
+    Ok(Some(map))
+}
+
 /// Reads an `OpcodeList1/2/3` tag (UNDEFINED bytes) into a typed [`OpcodeList`]. The container
 /// is big-endian regardless of the file's byte order (DNG 1.7.1 p. 105); a malformed container
 /// is an error, not silently dropped.
-fn decode_opcode_list(ifd: &Ifd, tag: u16) -> Result<Option<OpcodeList>> {
+fn decode_opcode_list(ifd: &TrackedIfd, tag: u16) -> Result<Option<OpcodeList>> {
     let Some(value) = ifd.get(tag) else {
         return Ok(None);
     };
@@ -282,7 +622,7 @@ fn decode_opcode_list(ifd: &Ifd, tag: u16) -> Result<Option<OpcodeList>> {
 /// shorthand, and what pre-pattern gamut-dng emitted); any other count mismatch is an error.
 /// Delta counts must match the active area (defaulting to the full image), mirroring the DNG SDK.
 fn decode_levels(
-    ifd: &Ifd,
+    ifd: &TrackedIfd,
     spp: u16,
     bits: u16,
     dims: Dimensions,
@@ -366,7 +706,7 @@ fn decode_levels(
 /// Reads a `BlackLevelDeltaH`/`BlackLevelDeltaV` tag, requiring `expected` values (one per
 /// active-area column/row — the SDK enforces the same).
 fn decode_deltas(
-    ifd: &Ifd,
+    ifd: &TrackedIfd,
     tag: u16,
     expected: usize,
     axis: &'static str,
@@ -404,7 +744,7 @@ fn active_area_size(dims: Dimensions, active_area: Option<[u32; 4]>) -> (usize, 
 
 /// Reads `MaskedAreas` as `[top, left, bottom, right]` rectangles (count must be a positive
 /// multiple of four, DNG 1.7.1 p. 44).
-fn decode_masked_areas(ifd: &Ifd) -> Result<Option<Vec<[u32; 4]>>> {
+fn decode_masked_areas(ifd: &TrackedIfd) -> Result<Option<Vec<[u32; 4]>>> {
     let Some(flat) = ifd.get_u32_vec(tags::MASKED_AREAS) else {
         return Ok(None);
     };
@@ -420,37 +760,345 @@ fn decode_masked_areas(ifd: &Ifd) -> Result<Option<Vec<[u32; 4]>>> {
     ))
 }
 
-/// Returns the IFD's strips as raw byte slices (in order), to be decompressed per the scheme.
-fn strip_chunks<'a>(ifd: &Ifd, data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
+/// How an IFD's image data is chunked: TIFF row-band strips, or the DNG 1.7 tile grid.
+#[derive(Debug)]
+enum ChunkGrid {
+    /// `StripOffsets`/`StripByteCounts` row bands of `rows_per_strip` rows (fewer for the last).
+    Strips { rows_per_strip: usize },
+    /// `TileOffsets`/`TileByteCounts` over a `TileWidth × TileLength` grid. Every stored tile is
+    /// full-size — edge tiles carry padding that assembly crops (TIFF 6.0 §15).
+    Tiles {
+        tile_width: usize,
+        tile_height: usize,
+        across: usize,
+        down: usize,
+    },
+}
+
+/// Classifies the IFD's chunk layout: tiled when the tile tags are present, else strips.
+fn chunk_grid(ifd: &TrackedIfd, width: usize, height: usize) -> Result<ChunkGrid> {
+    if ifd.get(tags::TILE_OFFSETS).is_some() || ifd.get(tags::TILE_WIDTH).is_some() {
+        let tile_width = ifd
+            .get_u32(tags::TILE_WIDTH)
+            .ok_or(Error::InvalidInput("DNG: tiled IFD missing TileWidth"))?
+            as usize;
+        let tile_height = ifd
+            .get_u32(tags::TILE_LENGTH)
+            .ok_or(Error::InvalidInput("DNG: tiled IFD missing TileLength"))?
+            as usize;
+        if tile_width == 0 || tile_height == 0 {
+            return Err(Error::InvalidInput("DNG: tile dimensions must be non-zero"));
+        }
+        Ok(ChunkGrid::Tiles {
+            tile_width,
+            tile_height,
+            across: width.div_ceil(tile_width),
+            down: height.div_ceil(tile_height),
+        })
+    } else {
+        let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
+            Some(0) => {
+                return Err(Error::InvalidInput("DNG: RowsPerStrip must be non-zero"));
+            }
+            Some(r) => r as usize,
+            None => height,
+        };
+        Ok(ChunkGrid::Strips { rows_per_strip })
+    }
+}
+
+/// Decodes an image IFD's chunked pixel data (strips or tiles, any supported compression) into
+/// `width * height * spp` unpacked u16 samples. Shared by the raw image and sub-image paths.
+fn decode_image_data(
+    ifd: &TrackedIfd,
+    data: &[u8],
+    order: ByteOrder,
+    width: u32,
+    height: u32,
+    spp: usize,
+    bits: u16,
+) -> Result<Vec<u16>> {
+    let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
+        .ok_or(Error::Unsupported("DNG: unknown compression"))?;
+    // Reject an undecodable scheme up front, so an empty chunk list cannot mask it.
+    if !matches!(
+        compression,
+        Compression::Uncompressed
+            | Compression::Deflate
+            | Compression::LosslessJpeg
+            | Compression::JpegXl
+    ) {
+        return Err(Error::Unsupported(
+            "DNG: this compression is not yet decodable",
+        ));
+    }
+
+    // SampleFormat (339) defaults to unsigned integer, the only encoding whose code values the
+    // u16 sample model represents. Anything else must fail cleanly, not silently misdecode.
+    if let Some(formats) = ifd.get_u32_vec(tags::SAMPLE_FORMAT) {
+        for format in formats {
+            match u16::try_from(format).ok().and_then(SampleFormat::from_code) {
+                Some(SampleFormat::UnsignedInteger) => {}
+                Some(SampleFormat::FloatingPoint) => {
+                    return Err(Error::Unsupported(
+                        "DNG: floating-point sample data is not supported",
+                    ));
+                }
+                _ => {
+                    return Err(Error::Unsupported(
+                        "DNG: only unsigned-integer samples are supported",
+                    ));
+                }
+            }
+        }
+    }
+
+    let (width, height) = (width as usize, height as usize);
+    let samples_per_row = width
+        .checked_mul(spp)
+        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+    let expected = samples_per_row
+        .checked_mul(height)
+        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+
+    let row_factor = interleave_factor(ifd, tags::ROW_INTERLEAVE_FACTOR, height)?;
+    let col_factor = interleave_factor(ifd, tags::COLUMN_INTERLEAVE_FACTOR, width)?;
+
+    let grid = chunk_grid(ifd, width, height)?;
+    let chunks = grid_chunks(ifd, data, &grid)?;
+    let samples = match grid {
+        // Each strip is an independent sample stream of full-width rows; strips concatenate as
+        // row bands. Decoding works strip by strip — concatenating packed bytes first would
+        // misalign any sub-byte strip whose packed length is not what whole-image geometry
+        // predicts (rows are byte-aligned *per strip*).
+        ChunkGrid::Strips { rows_per_strip } => {
+            let mut samples = Vec::with_capacity(expected);
+            let mut remaining_rows = height;
+            for chunk in &chunks {
+                let rows = rows_per_strip.min(remaining_rows);
+                if rows == 0 {
+                    return Err(Error::InvalidInput("DNG: more strips than image rows"));
+                }
+                samples.extend(decode_chunk_samples(
+                    compression,
+                    chunk,
+                    width,
+                    rows,
+                    spp,
+                    bits,
+                    order,
+                )?);
+                remaining_rows -= rows;
+            }
+            if samples.len() != expected {
+                return Err(Error::InvalidInput("DNG: raw image data is truncated"));
+            }
+            samples
+        }
+        // Tiles decode at full tile size, then blit into place with edge cropping.
+        ChunkGrid::Tiles {
+            tile_width,
+            tile_height,
+            across,
+            down,
+        } => {
+            let tile_count = across
+                .checked_mul(down)
+                .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+            if chunks.len() != tile_count {
+                return Err(Error::InvalidInput(
+                    "DNG: tile count must cover the image grid",
+                ));
+            }
+            let mut samples = vec![0u16; expected];
+            for (i, chunk) in chunks.iter().enumerate() {
+                let tile = decode_chunk_samples(
+                    compression,
+                    chunk,
+                    tile_width,
+                    tile_height,
+                    spp,
+                    bits,
+                    order,
+                )?;
+                let x0 = (i % across) * tile_width;
+                let y0 = (i / across) * tile_height;
+                let copy_cols = tile_width.min(width - x0);
+                for r in 0..tile_height {
+                    let y = y0 + r;
+                    if y >= height {
+                        break;
+                    }
+                    let src = r * tile_width * spp;
+                    let dst = (y * width + x0) * spp;
+                    samples[dst..dst + copy_cols * spp]
+                        .copy_from_slice(&tile[src..src + copy_cols * spp]);
+                }
+            }
+            samples
+        }
+    };
+
+    // Row/column interleaving (RowInterleaveFactor 50975 / ColumnInterleaveFactor 52547): the
+    // stored image concatenates the interleave fields; the logical image re-interleaves them.
+    // Applied to the whole assembled image, matching the SDK (dng_read_image::Read reads a full
+    // temporary image, then runs Interleave2D over it).
+    if row_factor > 1 || col_factor > 1 {
+        Ok(deinterleave(
+            &samples, width, height, spp, row_factor, col_factor,
+        ))
+    } else {
+        Ok(samples)
+    }
+}
+
+/// Reads a `RowInterleaveFactor`/`ColumnInterleaveFactor` tag, validating it against the image
+/// extent (the SDK rejects factors of 0 or beyond the axis length).
+fn interleave_factor(ifd: &TrackedIfd, tag: u16, limit: usize) -> Result<usize> {
+    match ifd.get_u32(tag) {
+        None => Ok(1),
+        Some(f) => {
+            let f = f as usize;
+            if f == 0 || f > limit {
+                return Err(Error::InvalidInput(
+                    "DNG: interleave factor out of valid range",
+                ));
+            }
+            Ok(f)
+        }
+    }
+}
+
+/// Re-interleaves a stored field-concatenated image into logical pixel order (the decode
+/// direction of the SDK's `Interleave2D`).
+///
+/// With factors `(rf, cf)`, the stored image stacks `rf` row fields (field `i` holds logical
+/// rows `r` with `r % rf == i`) and, within each, `cf` column fields likewise; field `i` gets
+/// `len / factor` rows/columns, with the first `len % factor` fields one longer. The logical
+/// pixel `(r, c)` therefore lives at stored row `offset(r % rf) + r / rf`, column
+/// `offset(c % cf) + c / cf`.
+fn deinterleave(
+    samples: &[u16],
+    width: usize,
+    height: usize,
+    spp: usize,
+    row_factor: usize,
+    col_factor: usize,
+) -> Vec<u16> {
+    let field_offset = |index: usize, len: usize, factor: usize| -> usize {
+        index * (len / factor) + index.min(len % factor)
+    };
+    let mut out = vec![0u16; samples.len()];
+    for r in 0..height {
+        let src_r = field_offset(r % row_factor, height, row_factor) + r / row_factor;
+        for c in 0..width {
+            let src_c = field_offset(c % col_factor, width, col_factor) + c / col_factor;
+            let src = (src_r * width + src_c) * spp;
+            let dst = (r * width + c) * spp;
+            out[dst..dst + spp].copy_from_slice(&samples[src..src + spp]);
+        }
+    }
+    out
+}
+
+/// Decodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each, returning
+/// exactly `cols * rows * spp` samples.
+fn decode_chunk_samples(
+    compression: Compression,
+    chunk: &[u8],
+    cols: usize,
+    rows: usize,
+    spp: usize,
+    bits: u16,
+    order: ByteOrder,
+) -> Result<Vec<u16>> {
+    let want = cols
+        .checked_mul(rows)
+        .and_then(|n| n.checked_mul(spp))
+        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+    match compression {
+        Compression::Uncompressed | Compression::Deflate => {
+            let bytes = compression::decompress(compression, chunk)?;
+            let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
+            if got.len() < want {
+                return Err(Error::InvalidInput("DNG: raw image data is truncated"));
+            }
+            got.truncate(want); // tolerate chunk padding, per TIFF practice
+            Ok(got)
+        }
+        // Lossless JPEG decodes samples directly. The JPEG stream's internal width/height/
+        // components need not match the chunk's geometry — only the total sample count must
+        // (DNG 1.7.1, "Compression": real CFA writers store a two-component stream at half
+        // width).
+        Compression::LosslessJpeg => {
+            let jpeg = lossless_jpeg::decode(chunk)?;
+            if jpeg.samples.len() != want {
+                return Err(Error::InvalidInput(
+                    "DNG: lossless-JPEG sample count mismatch",
+                ));
+            }
+            Ok(jpeg.samples)
+        }
+        // JPEG XL (DNG 1.7): each chunk is a complete bitstream whose geometry/channels must
+        // agree with the layout (validated inside the bridge); output is full-range 16-bit,
+        // matching the reference SDK — `bits` describes only the codestream's stored precision.
+        Compression::JpegXl => crate::jxl::decode_chunk(chunk, cols, rows, spp),
+        _ => Err(Error::Unsupported(
+            "DNG: this compression is not yet decodable",
+        )),
+    }
+}
+
+/// Returns the grid's chunks as raw byte slices, in offset-array order. Offsets and counts are
+/// read at full 64-bit width (BigTIFF writes them as `LONG8`).
+fn grid_chunks<'a>(ifd: &TrackedIfd, data: &'a [u8], grid: &ChunkGrid) -> Result<Vec<&'a [u8]>> {
+    let (offset_tag, count_tag, missing) = match grid {
+        ChunkGrid::Strips { .. } => (
+            tags::STRIP_OFFSETS,
+            tags::STRIP_BYTE_COUNTS,
+            "DNG: missing StripOffsets/StripByteCounts",
+        ),
+        ChunkGrid::Tiles { .. } => (
+            tags::TILE_OFFSETS,
+            tags::TILE_BYTE_COUNTS,
+            "DNG: missing TileOffsets/TileByteCounts",
+        ),
+    };
     let offsets = ifd
-        .get_u32_vec(tags::STRIP_OFFSETS)
-        .ok_or(Error::Unsupported(
-            "DNG: only stripped raw is decodable so far (no tiles)",
-        ))?;
+        .get_u64_vec(offset_tag)
+        .ok_or(Error::InvalidInput(missing))?;
     let counts = ifd
-        .get_u32_vec(tags::STRIP_BYTE_COUNTS)
-        .ok_or(Error::InvalidInput("DNG: missing StripByteCounts"))?;
+        .get_u64_vec(count_tag)
+        .ok_or(Error::InvalidInput(missing))?;
+    byte_chunks(&offsets, &counts, data)
+}
+
+/// Resolves parallel offset/byte-count arrays into in-bounds byte slices.
+fn byte_chunks<'a>(offsets: &[u64], counts: &[u64], data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
     if offsets.len() != counts.len() {
         return Err(Error::InvalidInput(
-            "DNG: strip offset/count length mismatch",
+            "DNG: image-data offset/count length mismatch",
         ));
     }
     let mut chunks = Vec::with_capacity(offsets.len());
-    for (offset, count) in offsets.iter().zip(counts) {
-        let start = *offset as usize;
-        let end = start
-            .checked_add(count as usize)
-            .ok_or(Error::InvalidInput("DNG: strip extent overflow"))?;
+    for (&offset, &count) in offsets.iter().zip(counts) {
+        let start = usize::try_from(offset)
+            .map_err(|_| Error::InvalidInput("DNG: image data out of bounds"))?;
+        let end = count
+            .try_into()
+            .ok()
+            .and_then(|count: usize| start.checked_add(count))
+            .ok_or(Error::InvalidInput("DNG: image-data extent overflow"))?;
         chunks.push(
             data.get(start..end)
-                .ok_or(Error::InvalidInput("DNG: strip out of bounds"))?,
+                .ok_or(Error::InvalidInput("DNG: image data out of bounds"))?,
         );
     }
     Ok(chunks)
 }
 
 /// Reconstructs the [`CameraProfile`] from IFD 0's identity and calibration tags.
-fn decode_profile(ifd0: &Ifd) -> Result<CameraProfile> {
+fn decode_profile(ifd0: &TrackedIfd) -> Result<CameraProfile> {
     let model = ascii_value(ifd0.get(tags::UNIQUE_CAMERA_MODEL))
         .ok_or(Error::InvalidInput("DNG: missing UniqueCameraModel"))?;
     let color_matrix1 = matrix9(ifd0, tags::COLOR_MATRIX1)?;
@@ -499,7 +1147,7 @@ fn decode_profile(ifd0: &Ifd) -> Result<CameraProfile> {
 }
 
 /// Reads `DNGVersion` as a 4-byte array (defaulting trailing bytes to zero).
-fn read_version(ifd0: &Ifd) -> Result<[u8; 4]> {
+fn read_version(ifd0: &TrackedIfd) -> Result<[u8; 4]> {
     let bytes = bytes_value(ifd0.get(tags::DNG_VERSION))
         .ok_or(Error::InvalidInput("DNG: missing DNGVersion"))?;
     let mut version = [0u8; 4];
@@ -556,7 +1204,7 @@ fn unsigned_f64s(value: &Value) -> Option<Vec<f64>> {
 }
 
 /// Reads a 9-element `(S)RATIONAL` matrix tag as `[f64; 9]`.
-fn matrix9(ifd: &Ifd, tag: u16) -> Result<[f64; 9]> {
+fn matrix9(ifd: &TrackedIfd, tag: u16) -> Result<[f64; 9]> {
     let v = f64_vec(ifd.get(tag))
         .filter(|v| v.len() == 9)
         .ok_or(Error::InvalidInput("DNG: expected a 3x3 matrix tag"))?;
@@ -566,7 +1214,7 @@ fn matrix9(ifd: &Ifd, tag: u16) -> Result<[f64; 9]> {
 }
 
 /// Reads a `CalibrationIlluminant` tag.
-fn illuminant(ifd: &Ifd, tag: u16) -> Option<CalibrationIlluminant> {
+fn illuminant(ifd: &TrackedIfd, tag: u16) -> Option<CalibrationIlluminant> {
     ifd.get_u32(tag)
         .and_then(|c| u16::try_from(c).ok())
         .and_then(CalibrationIlluminant::from_code)
@@ -605,13 +1253,14 @@ mod tests {
     }
 
     #[test]
-    fn decode_raw_image_rejects_lossless_jpeg_geometry_mismatch() {
-        // A 4x2, single-component lossless-JPEG strip...
+    fn decode_raw_image_rejects_lossless_jpeg_sample_count_mismatch() {
+        // A 4x2, single-component lossless-JPEG strip (8 samples)...
         let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
         let jpeg = lossless_jpeg::encode(&samples, 4, 2, 1, 12).expect("encode");
-        // ...described by an IFD that claims a 2x2 image. The width disagrees while the component
-        // count matches, so only the `||` (not `&&`) reports the mismatch before the later
-        // sample-count check fires with a different error.
+        // ...described by an IFD that claims a 2x2 image (4 samples). Per spec only the *total
+        // sample count* must match the strip — the stream's internal width/components are free
+        // (real CFA writers halve the width and double the components) — so this fails on the
+        // count, not on any width/components equality.
         let mut ifd = Ifd::new();
         ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
         ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
@@ -625,10 +1274,458 @@ mod tests {
             Value::Long(vec![jpeg.len() as u32]),
         );
 
-        let err = decode_raw_image(&ifd, &jpeg, ByteOrder::LittleEndian).unwrap_err();
+        let err =
+            decode_raw_image(&TrackedIfd::new(&ifd), &jpeg, ByteOrder::LittleEndian).unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("geometry")),
-            "expected a geometry-mismatch error, got {err:?}"
+            matches!(err, Error::InvalidInput(m) if m.contains("sample count")),
+            "expected a sample-count mismatch error, got {err:?}"
         );
+    }
+
+    /// A reshaped lossless-JPEG stream — half width, doubled components, same total sample
+    /// count — decodes, per the spec's total-count rule (a width/components equality would
+    /// wrongly reject it).
+    #[test]
+    fn decode_raw_image_accepts_reshaped_lossless_jpeg_stream() {
+        // 8 samples encoded as a 2-wide, 2-component, 2-row stream for a 4x2 one-plane image.
+        let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
+        let jpeg = lossless_jpeg::encode(&samples, 2, 2, 2, 12).expect("encode");
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![4]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![12]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![7]));
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+        ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+        ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(
+            tags::STRIP_BYTE_COUNTS,
+            Value::Long(vec![jpeg.len() as u32]),
+        );
+
+        let raw = decode_raw_image(&TrackedIfd::new(&ifd), &jpeg, ByteOrder::LittleEndian)
+            .expect("decode");
+        assert_eq!(raw.samples(), &samples[..]);
+    }
+
+    /// The `SubIFDs` walk is depth-capped: a 10-deep nested chain yields exactly
+    /// `MAX_SUBIFD_DEPTH` IFDs (the cap stops recursion, not collection of the capped node).
+    #[test]
+    fn walk_ifds_caps_hostile_nesting_depth() {
+        // Innermost first: each level wraps the previous as its SubIFDs child.
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        for _ in 0..9 {
+            let mut parent = Ifd::new();
+            parent.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+            parent.set_sub_ifd(tags::SUB_IFDS, vec![ifd]);
+            ifd = parent;
+        }
+        let bytes = gamut_ifd::write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        let file = read(&bytes).expect("read");
+        assert_eq!(walk_ifds(&file, &bytes).len(), MAX_SUBIFD_DEPTH);
+    }
+
+    /// With several raw-photometry IFDs, the main image (`NewSubFileType` 0) wins even when a
+    /// reduced-resolution raw appears first.
+    #[test]
+    fn select_raw_ifd_prefers_the_main_image() {
+        let raw_ifd = |nsft: u32, width: u16| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::NEW_SUBFILE_TYPE, Value::Long(vec![nsft]));
+            ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+            ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![width]));
+            ifd
+        };
+        // A reduced-resolution raw (type 1) first, the main raw (type 0) second.
+        let ifds = vec![raw_ifd(1, 2), raw_ifd(0, 4)];
+        assert_eq!(select_raw_ifd(&ifds).unwrap(), 1);
+        // With no type-0 raw at all, the first raw IFD is the fallback.
+        let ifds = vec![raw_ifd(1, 2), raw_ifd(1, 4)];
+        assert_eq!(select_raw_ifd(&ifds).unwrap(), 0);
+        // No raw photometry anywhere is an error.
+        assert!(select_raw_ifd(&[Ifd::new()]).is_err());
+    }
+
+    /// `MaskSubArea` validity pairs top with the mask *height* and left with the mask *width*
+    /// (the SDK's reading; the spec's inequality text transposes the axes), each axis rejecting
+    /// on its own. Boundary values distinguish the additions from any other arithmetic.
+    #[test]
+    fn mask_sub_area_validation_pairs_axes_exactly() {
+        let dims = Dimensions::new(2, 2).unwrap(); // a 2x2 stored mask
+        let area_of = |vals: Vec<u32>| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::SEMANTIC_NAME, Value::Ascii("m".into()));
+            ifd.set(tags::MASK_SUB_AREA, Value::Long(vals));
+            semantic_mask_info(&TrackedIfd::new(&ifd), dims).and_then(|s| s.sub_area)
+        };
+        // top + height against H_full, exactly at the boundary (3 + 2 == 5).
+        assert!(area_of(vec![3, 0, 4, 5]).is_some());
+        assert!(area_of(vec![4, 0, 4, 5]).is_none());
+        // left + width against W_full, exactly at the boundary (3 + 2 == 5).
+        assert!(area_of(vec![0, 3, 5, 4]).is_some());
+        assert!(area_of(vec![0, 4, 5, 4]).is_none());
+        // One failing axis alone invalidates (top overflows, left fits).
+        assert!(area_of(vec![3, 0, 4, 4]).is_none());
+        // A tall, narrow full mask fits a 2x2 crop — the transposed pairing would reject it.
+        assert!(area_of(vec![0, 0, 2, 6]).is_some());
+    }
+
+    #[test]
+    fn chunk_grid_rejects_zero_tile_dimensions() {
+        for (tw, th) in [(0u16, 2u16), (2, 0)] {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::TILE_WIDTH, Value::Short(vec![tw]));
+            ifd.set(tags::TILE_LENGTH, Value::Short(vec![th]));
+            ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0]));
+            ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4]));
+            let err = chunk_grid(&TrackedIfd::new(&ifd), 4, 4).unwrap_err();
+            assert!(
+                matches!(err, Error::InvalidInput(m) if m.contains("non-zero")),
+                "({tw}, {th}): {err:?}"
+            );
+        }
+    }
+
+    /// Either tile tag alone classifies the IFD as tiled — the resulting error must come from
+    /// the *tile* family, not from a strips fallback complaining about StripOffsets.
+    #[test]
+    fn either_tile_tag_alone_classifies_as_tiled() {
+        // Geometry present, offsets missing.
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::TILE_WIDTH, Value::Short(vec![16]));
+        ifd.set(tags::TILE_LENGTH, Value::Short(vec![16]));
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &[],
+            ByteOrder::LittleEndian,
+            16,
+            16,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("Tile")),
+            "{err:?}"
+        );
+        // Offsets present, geometry missing.
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4]));
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &[0; 4],
+            ByteOrder::LittleEndian,
+            16,
+            16,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("TileWidth")),
+            "{err:?}"
+        );
+    }
+
+    /// Height 4 at RowsPerStrip 2 needs exactly two strips; a third must fail with the
+    /// strip-count error (not a generic truncation), pinning the remaining-rows bookkeeping.
+    #[test]
+    fn decode_image_data_rejects_surplus_strips() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![2]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0, 8, 16]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![8, 8, 8]));
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &[0u8; 24],
+            ByteOrder::LittleEndian,
+            4,
+            4,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("more strips")),
+            "{err:?}"
+        );
+    }
+
+    /// Single-axis interleaving (the Adobe Bayer sample sets *both* factors, so it cannot
+    /// distinguish the two conditions): each factor alone must trigger the de-interleave.
+    #[test]
+    fn single_axis_interleave_deinterleaves() {
+        let image = |tag: u16, w: u16, h: u16, data: &[u8]| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+            ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![h]));
+            ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+            ifd.set(
+                tags::STRIP_BYTE_COUNTS,
+                Value::Long(vec![u32::from(w) * u32::from(h)]),
+            );
+            ifd.set(tag, Value::Short(vec![2]));
+            decode_image_data(
+                &TrackedIfd::new(&ifd),
+                data,
+                ByteOrder::LittleEndian,
+                u32::from(w),
+                u32::from(h),
+                1,
+                8,
+            )
+            .expect("decode")
+        };
+        // Row-only: a 1-wide, 4-tall image stores its rows as [r0, r2 | r1, r3].
+        assert_eq!(
+            image(tags::ROW_INTERLEAVE_FACTOR, 1, 4, &[10, 30, 20, 40]),
+            vec![10, 20, 30, 40]
+        );
+        // Column-only: a 4-wide, 1-tall image stores its columns as [c0, c2 | c1, c3].
+        assert_eq!(
+            image(tags::COLUMN_INTERLEAVE_FACTOR, 4, 1, &[10, 30, 20, 40]),
+            vec![10, 20, 30, 40]
+        );
+    }
+
+    /// Interleaved *multi-plane* data moves whole pixels: the per-pixel sample pairs stay
+    /// together under the column shuffle (a `spp` slip in the flat indexing would tear them).
+    #[test]
+    fn interleave_moves_whole_pixels_across_planes() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![2]));
+        ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![1]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![8]));
+        ifd.set(tags::COLUMN_INTERLEAVE_FACTOR, Value::Short(vec![2]));
+        // Stored pixel pairs in field order [c0, c2 | c1, c3], two samples each.
+        let stored = [10u8, 11, 30, 31, 20, 21, 40, 41];
+        let got = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &stored,
+            ByteOrder::LittleEndian,
+            4,
+            1,
+            2,
+            8,
+        )
+        .expect("decode");
+        assert_eq!(got, vec![10, 11, 20, 21, 30, 31, 40, 41]);
+    }
+
+    /// A factor equal to the axis length is valid (the SDK allows `1..=axis`); one past it is
+    /// not. Factor-per-column de-interleaving is the identity, which pins the boundary exactly.
+    #[test]
+    fn interleave_factor_accepts_the_full_axis() {
+        let decode_with_factor = |factor: u16| {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+            ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![1]));
+            ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+            ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![4]));
+            ifd.set(tags::COLUMN_INTERLEAVE_FACTOR, Value::Short(vec![factor]));
+            decode_image_data(
+                &TrackedIfd::new(&ifd),
+                &[1, 2, 3, 4],
+                ByteOrder::LittleEndian,
+                4,
+                1,
+                1,
+                8,
+            )
+        };
+        assert_eq!(
+            decode_with_factor(4).expect("factor == width"),
+            vec![1, 2, 3, 4]
+        );
+        assert!(decode_with_factor(5).is_err());
+    }
+
+    /// A truncated tile is a typed error before assembly could index out of range.
+    #[test]
+    fn truncated_tile_data_is_a_typed_error_not_a_panic() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::TILE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::TILE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![2])); // 2 of the 4 needed bytes
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &[0u8; 2],
+            ByteOrder::LittleEndian,
+            2,
+            2,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("truncated")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn decode_depth_info_reads_when_present() {
+        let mut ifd = Ifd::new();
+        assert_eq!(decode_depth_info(&TrackedIfd::new(&ifd)), None);
+        ifd.set(tags::DEPTH_FORMAT, Value::Short(vec![2]));
+        ifd.set(tags::DEPTH_NEAR, Value::Rational(vec![(1, 10)]));
+        ifd.set(tags::DEPTH_UNITS, Value::Short(vec![1]));
+        let info = decode_depth_info(&TrackedIfd::new(&ifd)).expect("depth info");
+        assert_eq!(info.format, Some(2));
+        assert_eq!(info.near, Some((1, 10)));
+        assert_eq!(info.far, None);
+        assert_eq!(info.units, Some(1));
+        assert_eq!(info.measure_type, None);
+    }
+
+    /// Hand-computed golden for the SDK's `Interleave2D` decode mapping: fields are concatenated
+    /// in storage, with the first `len % factor` fields one row/column longer.
+    #[test]
+    fn deinterleave_reassembles_fields_row_major() {
+        // 4x4, both factors 2: stored rows are [row-field 0 | row-field 1], each with column
+        // fields likewise. The stored image below maps back to the logical 0..16 raster.
+        let stored = [
+            0u16, 2, 1, 3, //
+            8, 10, 9, 11, //
+            4, 6, 5, 7, //
+            12, 14, 13, 15,
+        ];
+        let logical: Vec<u16> = (0..16).collect();
+        assert_eq!(deinterleave(&stored, 4, 4, 1, 2, 2), logical);
+
+        // Uneven split: width 3, column factor 2 — field 0 gets two columns, field 1 one.
+        assert_eq!(deinterleave(&[10, 30, 20], 3, 1, 1, 1, 2), vec![10, 20, 30]);
+
+        // Factor 1 on both axes is the identity.
+        assert_eq!(deinterleave(&[1, 2, 3, 4], 2, 2, 1, 1, 1), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn interleave_factor_validates_range() {
+        let mut ifd = Ifd::new();
+        assert_eq!(
+            interleave_factor(&TrackedIfd::new(&ifd), tags::ROW_INTERLEAVE_FACTOR, 8).unwrap(),
+            1
+        );
+        ifd.set(tags::ROW_INTERLEAVE_FACTOR, Value::Short(vec![2]));
+        assert_eq!(
+            interleave_factor(&TrackedIfd::new(&ifd), tags::ROW_INTERLEAVE_FACTOR, 8).unwrap(),
+            2
+        );
+        ifd.set(tags::ROW_INTERLEAVE_FACTOR, Value::Short(vec![0]));
+        assert!(interleave_factor(&TrackedIfd::new(&ifd), tags::ROW_INTERLEAVE_FACTOR, 8).is_err());
+        ifd.set(tags::ROW_INTERLEAVE_FACTOR, Value::Short(vec![9]));
+        assert!(interleave_factor(&TrackedIfd::new(&ifd), tags::ROW_INTERLEAVE_FACTOR, 8).is_err());
+    }
+
+    /// Hand-computed golden for tile reassembly (the counterpart of the encoder's splitter
+    /// golden): a 3x3 image from a 2x2 grid of 2x2 zero-padded tiles, plus the count guard.
+    #[test]
+    fn decode_image_data_assembles_tiles_with_edge_crop() {
+        let tiles: [&[u8]; 4] = [&[1, 2, 4, 5], &[3, 0, 6, 0], &[7, 8, 0, 0], &[9, 0, 0, 0]];
+        let data: Vec<u8> = tiles.concat();
+        let mut ifd = Ifd::new();
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::TILE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::TILE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0, 4, 8, 12]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4; 4]));
+
+        let samples = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &data,
+            ByteOrder::LittleEndian,
+            3,
+            3,
+            1,
+            8,
+        )
+        .expect("decode");
+        assert_eq!(samples, (1..=9).collect::<Vec<u16>>());
+
+        // A tile list that does not cover the grid is rejected.
+        ifd.set(tags::TILE_OFFSETS, Value::Long(vec![0, 4, 8]));
+        ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4; 3]));
+        let err = decode_image_data(
+            &TrackedIfd::new(&ifd),
+            &data,
+            ByteOrder::LittleEndian,
+            3,
+            3,
+            1,
+            8,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(m) if m.contains("tile count")),
+            "expected a tile-count error, got {err:?}"
+        );
+
+        // A tiled IFD missing its geometry is rejected.
+        ifd.remove(tags::TILE_WIDTH);
+        assert!(
+            decode_image_data(
+                &TrackedIfd::new(&ifd),
+                &data,
+                ByteOrder::LittleEndian,
+                3,
+                3,
+                1,
+                8
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn decode_raw_image_rejects_non_unsigned_sample_formats() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![16]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![8]));
+
+        // Float data is a distinct, named rejection (a real, deferred DNG feature)...
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![3]));
+        let err =
+            decode_raw_image(&TrackedIfd::new(&ifd), &[0; 8], ByteOrder::LittleEndian).unwrap_err();
+        assert!(
+            matches!(err, Error::Unsupported(m) if m.contains("floating-point")),
+            "expected a floating-point rejection, got {err:?}"
+        );
+        // ...signed and unrecognised formats fail generically...
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![2]));
+        assert!(
+            decode_raw_image(&TrackedIfd::new(&ifd), &[0; 8], ByteOrder::LittleEndian).is_err()
+        );
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![9]));
+        assert!(
+            decode_raw_image(&TrackedIfd::new(&ifd), &[0; 8], ByteOrder::LittleEndian).is_err()
+        );
+        // ...and the explicit unsigned default decodes.
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![1]));
+        ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+        ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
+        assert!(decode_raw_image(&TrackedIfd::new(&ifd), &[0; 8], ByteOrder::LittleEndian).is_ok());
     }
 }

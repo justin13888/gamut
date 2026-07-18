@@ -10,7 +10,7 @@ use gamut_dng::{DngRewrite, deconstruct};
 #[test]
 fn adobe_sample_corpus_is_fully_classified() {
     let dir = gamut_dng_oracle::sample_files_dir();
-    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
         .expect("sample_files extracted by the oracle build")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "dng"))
@@ -67,7 +67,7 @@ fn adobe_sample_corpus_is_fully_classified() {
 #[test]
 fn adobe_sample_corpus_survives_a_preserving_rewrite() {
     let dir = gamut_dng_oracle::sample_files_dir();
-    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
         .expect("sample_files extracted by the oracle build")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "dng"))

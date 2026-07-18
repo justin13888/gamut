@@ -22,11 +22,13 @@ DNG is **natively a still-image** raw format — a good long-term fit for gamut'
 
 ## Scope
 
-**Encoder-first** with a matching raw decoder (sample unpacking, decompression, and tag parsing).
-The decoder returns the sensor samples (CFA mosaic or linear RGB) plus the parsed metadata; the
-spec's chapter-5 "raw to linear reference values" mapping (linearization table, black-pattern
-subtraction, rescale) is available as the explicit opt-in `RawImage::to_linear`. Full demosaicing
-and colour rendering are a raw *processor's* job and stay out of scope.
+A full-surface encoder **and** decoder. The decoder returns the stored sensor samples (CFA
+mosaic or linear RGB) plus everything else the file carries — typed sub-images (previews,
+transparency/semantic masks, depth maps), gain-table maps, the colour profile and metadata, and
+every unmodelled field verbatim as typed `RawTag`s. The spec's chapter-5 "raw to linear
+reference values" mapping is the explicit opt-in `RawImage::to_linear`. An **Apple ProRAW** DNG
+(1.7, JPEG XL, tiled) decodes fully. Full demosaicing and colour rendering are a raw
+*processor's* job and stay out of scope, as is *executing* opcodes/gain maps.
 
 ## Usage
 
@@ -40,7 +42,7 @@ DngEncoder::new()
     .expect("encode");
 ```
 
-(The exact API lands incrementally — see Status.)
+Decoding is `DngDecoder::new().decode(&bytes)` — see `DecodedDng` for the full surface.
 
 ## Status
 
@@ -48,25 +50,37 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
 [STATUS.md](STATUS.md) for the per-feature phase table.
 
 - **Encode + decode**, both directions Adobe-validated: CFA mosaic and `LinearRaw` photometry;
-  **uncompressed, Deflate/ZIP (8), and lossless JPEG (7)** compression; the colour-calibration
-  profile (ColorMatrix1/2, CameraCalibration, ForwardMatrix, dual illuminant, AnalogBalance,
-  BaselineExposure, profile identity); the full level model (`RawLevels`: the BlackLevel repeat
-  pattern with RATIONAL values, `BlackLevelDeltaH/V`, per-plane `WhiteLevel`,
+  **strips and DNG-1.7 tiles**; **uncompressed, Deflate/ZIP (8), lossless JPEG (7), and
+  JPEG XL (52546)** compression (JXL decode is pure-Rust jxl-rs; encode is the opt-in
+  `jxl-encode` cargo feature over libjxl) with row/column interleave handling; the
+  colour-calibration profile (ColorMatrix1/2, CameraCalibration, ForwardMatrix, dual illuminant,
+  AnalogBalance, BaselineExposure, profile identity); the full level model (`RawLevels`: the
+  BlackLevel repeat pattern with RATIONAL values, `BlackLevelDeltaH/V`, per-plane `WhiteLevel`,
   `LinearizationTable`, `MaskedAreas`), active area, default crop, and 8/10/12/14/16-bit packing;
   typed `OpcodeList1/2/3` containers (parse + pass-through write); an embedded RGB preview;
-  EXIF/XMP/IPTC/ICC metadata; classic TIFF and **BigTIFF**.
+  EXIF/XMP/IPTC/ICC metadata; classic TIFF and **BigTIFF**; the minimal `DNGVersion` and the
+  spec's `DNGBackwardVersion` raises computed automatically.
+- **Beyond the raw image** (decode): every other image IFD as a typed `SubImage` — previews,
+  transparency and **semantic masks** (`SemanticName`/`SemanticInstanceID`/`MaskSubArea`), depth
+  maps (`DepthInfo`) — decoded where the scheme is in scope, verbatim chunks otherwise; typed
+  **`ProfileGainTableMap`/`ProfileGainTableMap2`** parsing with byte-exact re-serialisation; and
+  every unmodelled field surfaced verbatim as a typed `RawTag` (nothing is silently dropped).
+- **Raw digests** — the encoder writes `NewRawImageDigest` (51111), bit-matching the SDK's own
+  MD5-over-raw-image computation (`RawImage::new_raw_image_digest`).
 - **`RawImage::to_linear`** — the spec's chapter-5 raw-to-linear-reference mapping, differentially
   gated (±1 of 16-bit) against the Adobe SDK's stage-2 image.
 - **Public `lossless_jpeg` module** — the SOF3 codec: decode covers the full T.81 process-14
   reader envelope (predictors 1–7, point transform, per-component tables, restart markers;
   SDK-differential), encode stays the predictor-1 subset every reader accepts.
-- **Deferred** (tracked in `STATUS.md`): tiled layout, MD5 raw digests, the standard opcode
-  *processing* library, JPEG XL (planned — needs tiled layout plus a `gamut-jxl` decode path),
-  lossy JPEG, transparency/depth/semantic masks, and floating-point samples.
+- **Deferred** (ledger in `STATUS.md`): lossy JPEG (34892), floating-point samples (fp16 JXL
+  rejects with a typed error), the standard opcode *processing* library, 4-colour CFA encoding,
+  and writing mask/depth sub-images.
 
-Correctness is pinned with the **Adobe DNG SDK** oracle — gamut-encode → `dng_validate` accepts the
-file, and the SDK's stage-1 decode matches gamut's own decode pixel-for-pixel — plus the **libtiff**
-oracle for the TIFF-container/preview layer and internal encode→decode round-trips on every path.
+Correctness is pinned with the **Adobe DNG SDK** oracle — gamut-encode → `dng_validate` accepts
+the file (raw digest included), the SDK's stage-1 decode matches gamut's own decode
+pixel-for-pixel (including tiled JPEG XL), and Adobe's own sample DNGs (JPEG XL, gain maps)
+decode in agreement with the SDK — plus the **libtiff** oracle for the TIFF-container/preview
+layer and internal encode→decode round-trips on every path.
 
 ## License
 
