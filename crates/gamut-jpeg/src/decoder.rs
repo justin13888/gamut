@@ -45,10 +45,16 @@
 //! replication is the decoder's documented free choice — exact for 4:4:4 and the cheapest faithful
 //! choice for subsampled chroma.
 
+use std::fmt;
+use std::sync::{Arc, Mutex};
+
 use gamut_color::{ColorRange, ycbcr_to_rgb};
-use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result, Rgb8};
+use gamut_core::{
+    Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, PixelFormat, Result, Rgb8,
+};
 
 use crate::appmeta;
+use crate::backend::{self, DecodedJpeg, DecoderSlot, JpegStreamDecoder, JpegStreamInfo};
 use crate::marker::code;
 use crate::scan::{Plane, ProgComp, decode_progressive_scan, decode_scan};
 use crate::syntax::{
@@ -77,17 +83,113 @@ use crate::syntax::{
 /// let _rgb: gamut_core::ImageBuf<Rgb8> = decoded; // grayscale replicated across channels
 /// # Ok::<(), gamut_core::Error>(())
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct JpegDecoder {
-    _private: (),
+    /// Pluggable whole-stream backends, tried in push order ahead of the built-in decoder.
+    backends: Vec<DecoderSlot>,
+}
+
+impl fmt::Debug for JpegDecoder {
+    /// The backends are opaque `dyn` objects, so only their count is shown.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JpegDecoder")
+            .field("backends", &self.backends.len())
+            .finish()
+    }
 }
 
 impl JpegDecoder {
-    /// Creates a decoder.
+    /// Creates a decoder with no pluggable backends: every stream is decoded by the built-in
+    /// decoder.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Appends a [`JpegStreamDecoder`] backend to this decoder's registry.
+    ///
+    /// Backends are consulted in **push order** for every decode, each being offered the
+    /// crate-parsed [`JpegStreamInfo`] through [`JpegStreamDecoder::supports`]; the first to accept
+    /// receives the **whole** SOI..EOI stream. The built-in decoder is the implicit tail, used only
+    /// when every backend declines. See the [`crate::backend`] module docs for the full contract.
+    ///
+    /// # Cloning shares backends
+    ///
+    /// Backends are stored behind `Arc<Mutex<..>>`, so **cloning a `JpegDecoder` shares them with
+    /// the clone** rather than duplicating them: a stateful backend sees the decodes of every clone,
+    /// and its lock serializes concurrent ones. Build a fresh decoder when a clone needs its own
+    /// backend instances.
+    pub fn push_backend(&mut self, backend: impl JpegStreamDecoder + 'static) -> &mut Self {
+        self.backends.push(Arc::new(Mutex::new(backend)));
+        self
+    }
+
+    /// Offers `data` to the registry, returning the first accepted raster, or `None` when there are
+    /// no backends or every one declined — in which case the caller runs the built-in decoder.
+    ///
+    /// The marker layer is parsed **here**, crate-side, before any backend is consulted.
+    fn decode_via_backend(&self, data: &[u8]) -> Result<Option<DecodedJpeg>> {
+        if self.backends.is_empty() {
+            return Ok(None);
+        }
+        let info = JpegStreamInfo::parse(data)?;
+        backend::decode_with_backends(&self.backends, &info, data)
+    }
+}
+
+/// Writes a backend raster into an RGB destination of exactly `width * height * 3` bytes, applying
+/// the same presentation rules as the built-in decoder: grayscale replicates across channels, RGB
+/// passes through, CMYK is rejected.
+fn backend_rgb_into(img: &DecodedJpeg, out: &mut [u8]) -> Result<()> {
+    match img.format() {
+        PixelFormat::Rgb8 => out.copy_from_slice(img.samples()),
+        PixelFormat::Gray8 => {
+            for (px, g) in out.chunks_exact_mut(3).zip(img.samples()) {
+                px.copy_from_slice(&[*g, *g, *g]);
+            }
+        }
+        _ => {
+            return Err(Error::Unsupported(
+                "JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Writes a backend raster into a grayscale destination of exactly `width * height` bytes; only a
+/// single-component raster can be presented this way.
+fn backend_gray_into(img: &DecodedJpeg, out: &mut [u8]) -> Result<()> {
+    if img.format() != PixelFormat::Gray8 {
+        return Err(Error::Unsupported(
+            "JPEG: not a single-component grayscale image",
+        ));
+    }
+    out.copy_from_slice(img.samples());
+    Ok(())
+}
+
+/// Writes a backend raster into a CMYK destination of exactly `width * height * 4` bytes; only a
+/// four-component raster can be presented this way.
+fn backend_cmyk_into(img: &DecodedJpeg, out: &mut [u8]) -> Result<()> {
+    if img.format() != PixelFormat::Cmyk8 {
+        return Err(Error::Unsupported(
+            "JPEG: not a 4-component CMYK/YCCK image",
+        ));
+    }
+    out.copy_from_slice(img.samples());
+    Ok(())
+}
+
+/// Packages a backend raster as an [`ImageBuf`] of the target pixel type, via `present`.
+fn backend_buf<P: gamut_core::Pixel<Sample = u8>>(
+    img: &DecodedJpeg,
+    present: fn(&DecodedJpeg, &mut [u8]) -> Result<()>,
+) -> Result<ImageBuf<P>> {
+    let dims = Dimensions::new(img.width(), img.height())?;
+    let mut samples = vec![0u8; img.width() as usize * img.height() as usize * P::CHANNELS];
+    present(img, &mut samples)?;
+    ImageBuf::new(samples, dims)
 }
 
 /// The DCT process a JPEG stream uses, as reported by [`info`].
@@ -130,6 +232,37 @@ pub struct JpegInfo {
 /// [`Error::Unsupported`] if the frame uses a process other than baseline / extended-sequential /
 /// progressive DCT.
 pub fn info(data: &[u8]) -> Result<JpegInfo> {
+    let (process, payload) = frame_header(data)?;
+    // Frame header layout (§B.2.2): P, Y(2), X(2), Nf, then components.
+    let precision = *payload.first().ok_or(TRUNC_SOF)?;
+    let y = u16::from_be_bytes([
+        *payload.get(1).ok_or(TRUNC_SOF)?,
+        *payload.get(2).ok_or(TRUNC_SOF)?,
+    ]);
+    let x = u16::from_be_bytes([
+        *payload.get(3).ok_or(TRUNC_SOF)?,
+        *payload.get(4).ok_or(TRUNC_SOF)?,
+    ]);
+    let nf = *payload.get(5).ok_or(TRUNC_SOF)?;
+    Ok(JpegInfo {
+        width: u32::from(x),
+        height: u32::from(y),
+        components: nf,
+        precision,
+        process,
+    })
+}
+
+/// Walks the marker layer to the frame header, returning its process and raw SOFn payload without
+/// entropy decoding. Shared by [`info`] and [`crate::JpegStreamInfo::parse`], which read different
+/// field subsets out of the same payload.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the stream is malformed or has no frame header, or
+/// [`Error::Unsupported`] if the frame uses a process other than baseline / extended-sequential /
+/// progressive DCT.
+pub(crate) fn frame_header(data: &[u8]) -> Result<(JpegProcess, &[u8])> {
     expect_soi(data)?;
     let mut pos = 2;
     loop {
@@ -155,24 +288,7 @@ pub fn info(data: &[u8]) -> Result<JpegInfo> {
             }
         };
         let (payload, _) = read_segment(data, after)?;
-        // Frame header layout (§B.2.2): P, Y(2), X(2), Nf, then components.
-        let precision = *payload.first().ok_or(TRUNC_SOF)?;
-        let y = u16::from_be_bytes([
-            *payload.get(1).ok_or(TRUNC_SOF)?,
-            *payload.get(2).ok_or(TRUNC_SOF)?,
-        ]);
-        let x = u16::from_be_bytes([
-            *payload.get(3).ok_or(TRUNC_SOF)?,
-            *payload.get(4).ok_or(TRUNC_SOF)?,
-        ]);
-        let nf = *payload.get(5).ok_or(TRUNC_SOF)?;
-        return Ok(JpegInfo {
-            width: u32::from(x),
-            height: u32::from(y),
-            components: nf,
-            precision,
-            process,
-        });
+        return Ok((process, payload));
     }
 }
 
@@ -281,10 +397,10 @@ pub fn metadata(data: &[u8]) -> Result<JpegMetadata> {
 }
 
 /// Shared truncated-frame-header error.
-const TRUNC_SOF: Error = Error::InvalidInput("JPEG: truncated frame header");
+pub(crate) const TRUNC_SOF: Error = Error::InvalidInput("JPEG: truncated frame header");
 
 /// Verifies the two-byte SOI that opens every JPEG stream (§B.2.1).
-fn expect_soi(data: &[u8]) -> Result<()> {
+pub(crate) fn expect_soi(data: &[u8]) -> Result<()> {
     if data.len() < 2 || data[0] != 0xFF || data[1] != code::SOI {
         return Err(Error::InvalidInput("JPEG: missing SOI marker"));
     }
@@ -293,7 +409,7 @@ fn expect_soi(data: &[u8]) -> Result<()> {
 
 /// Reads the next marker at or after `pos` (skipping fill `0xFF` bytes, §B.1.1.2), returning its
 /// code and the offset just past it.
-fn read_marker(data: &[u8], pos: usize) -> Result<(u8, usize)> {
+pub(crate) fn read_marker(data: &[u8], pos: usize) -> Result<(u8, usize)> {
     if data.get(pos) != Some(&0xFF) {
         return Err(Error::InvalidInput("JPEG: expected a marker"));
     }
@@ -307,7 +423,7 @@ fn read_marker(data: &[u8], pos: usize) -> Result<(u8, usize)> {
 
 /// Reads a marker segment's payload at `pos` (the offset just past the marker code), returning the
 /// payload bytes and the offset just past the segment. The two-byte length counts itself (§B.1.1.4).
-fn read_segment(data: &[u8], pos: usize) -> Result<(&[u8], usize)> {
+pub(crate) fn read_segment(data: &[u8], pos: usize) -> Result<(&[u8], usize)> {
     let hi = *data.get(pos).ok_or(TRUNC_SEG)?;
     let lo = *data.get(pos + 1).ok_or(TRUNC_SEG)?;
     let len = usize::from(u16::from_be_bytes([hi, lo]));
@@ -751,6 +867,9 @@ impl DecodeImage<Rgb8> for JpegDecoder {
     /// Grayscale is replicated across channels; three-component YCbCr/RGB is presented as RGB;
     /// four-component (CMYK/YCCK) returns [`Error::Unsupported`] (decode as [`Cmyk8`]).
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
+        if let Some(img) = self.decode_via_backend(data)? {
+            return backend_buf::<Rgb8>(&img, backend_rgb_into);
+        }
         let img = Self::decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_rgb(&img)?, dims)
@@ -759,6 +878,14 @@ impl DecodeImage<Rgb8> for JpegDecoder {
     /// Reuses `dst`'s sample storage when the decoded dimensions match its own, replacing the
     /// buffer otherwise. On error `dst` is left unchanged.
     fn decode_image_into(&self, data: &[u8], dst: &mut ImageBuf<Rgb8>) -> Result<()> {
+        if let Some(img) = self.decode_via_backend(data)? {
+            let dims = Dimensions::new(img.width(), img.height())?;
+            if dst.dimensions() == dims {
+                return backend_rgb_into(&img, dst.as_mut_samples());
+            }
+            *dst = backend_buf::<Rgb8>(&img, backend_rgb_into)?;
+            return Ok(());
+        }
         let img = Self::decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         if dst.dimensions() == dims {
@@ -773,6 +900,9 @@ impl DecodeImage<Rgb8> for JpegDecoder {
 impl DecodeImage<Gray8> for JpegDecoder {
     /// Errors unless the stream is single-component; the luminance samples pass through unchanged.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
+        if let Some(img) = self.decode_via_backend(data)? {
+            return backend_buf::<Gray8>(&img, backend_gray_into);
+        }
         let img = Self::decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_gray(&img)?, dims)
@@ -781,6 +911,14 @@ impl DecodeImage<Gray8> for JpegDecoder {
     /// Reuses `dst`'s sample storage when the decoded dimensions match its own, replacing the
     /// buffer otherwise. On error `dst` is left unchanged.
     fn decode_image_into(&self, data: &[u8], dst: &mut ImageBuf<Gray8>) -> Result<()> {
+        if let Some(img) = self.decode_via_backend(data)? {
+            let dims = Dimensions::new(img.width(), img.height())?;
+            if dst.dimensions() == dims {
+                return backend_gray_into(&img, dst.as_mut_samples());
+            }
+            *dst = backend_buf::<Gray8>(&img, backend_gray_into)?;
+            return Ok(());
+        }
         let img = Self::decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         if dst.dimensions() == dims {
@@ -795,6 +933,9 @@ impl DecodeImage<Gray8> for JpegDecoder {
 impl DecodeImage<Cmyk8> for JpegDecoder {
     /// Errors unless the stream is four-component; CMYK passes through, YCCK is inverted to CMYK.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Cmyk8>> {
+        if let Some(img) = self.decode_via_backend(data)? {
+            return backend_buf::<Cmyk8>(&img, backend_cmyk_into);
+        }
         let img = Self::decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_cmyk(&img)?, dims)
@@ -803,6 +944,14 @@ impl DecodeImage<Cmyk8> for JpegDecoder {
     /// Reuses `dst`'s sample storage when the decoded dimensions match its own, replacing the
     /// buffer otherwise. On error `dst` is left unchanged.
     fn decode_image_into(&self, data: &[u8], dst: &mut ImageBuf<Cmyk8>) -> Result<()> {
+        if let Some(img) = self.decode_via_backend(data)? {
+            let dims = Dimensions::new(img.width(), img.height())?;
+            if dst.dimensions() == dims {
+                return backend_cmyk_into(&img, dst.as_mut_samples());
+            }
+            *dst = backend_buf::<Cmyk8>(&img, backend_cmyk_into)?;
+            return Ok(());
+        }
         let img = Self::decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         if dst.dimensions() == dims {

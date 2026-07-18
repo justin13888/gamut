@@ -743,6 +743,7 @@ dependencies = [
 name = "gamut-jpeg"
 version = "0.1.0"
 dependencies = [
+ "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
  "gamut-dsp",

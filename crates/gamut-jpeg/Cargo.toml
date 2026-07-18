@@ -17,6 +17,9 @@ workspace = true
 
 [dependencies]
 gamut-core.workspace = true
+# The shared codestream-backend seam (issue #272): the `Decoder`/`Encoder` twins and `repr(C)`
+# vtables the `backend` module's adapters bridge the JPEG whole-stream traits onto.
+gamut-codec-abi.workspace = true
 # Full-range (JFIF) BT.601 RGB→YCbCr conversion (T.871 §7).
 gamut-color.workspace = true
 # The §A.3.3 forward DCT kernel and the §A.3.4 round-to-nearest quantizer divide.
