@@ -11,7 +11,8 @@ parsing + byte accounting + role-typed view slice (issue #238); **S2** = the `hv
 NAL demux/classification slice (delivered — `src/hvcc.rs`, `src/nal.rs`); **S3** = the pluggable
 decoder trait + derivation/colour/transform pipeline slice (delivered — `src/decode.rs`); **S4** =
 the libheif differential-oracle slice (delivered — `tests/conformance.rs` over the
-`tooling/libheif-oracle` dev-dependency).
+`tooling/libheif-oracle` dev-dependency); **S5** = the backend-registry slice (delivered —
+`src/backend.rs`, issue #273: `HevcDecoders` + the `gamut-codec-abi` adapter).
 
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
@@ -52,6 +53,20 @@ no committed binaries) are cross-checked against libheif — container structure
 presentation pixels vs `decode_primary_rgba` (tight bound), planar samples bit-exact vs a direct
 `decode_hevc_intra`, orientation (`irot`) direction, motion-photo byte accounting, and hvcC/YUV
 coherence. See the `references/heif` "Oracle" section.
+
+**Implemented (S5, issue #273).** `HevcDecoders` (`src/backend.rs`) is the ordered backend registry
+for the S3 seam, retrofitted **additively**: it *is* a `HevcDecoder`, so it drops into every existing
+`&mut dyn HevcDecoder` call site with no signature change, and the new `HevcDecoder::supports` probe
+is defaulted (`true`) so every pre-registry implementation keeps compiling. Backends are pushed in
+preference order (`push_backend`, `Box<dyn HevcDecoder + Send>` — `Send` is bound at insertion, not
+as a trait supertrait); `supports() == false`, or the `BACKEND_DECLINED` late-decline sentinel, is
+the only fall-through, and a backend that accepts and then fails propagates its error with no later
+backend consulted. There is **no implicit software tail** — gamut ships no in-tree HEVC codestream
+decoder (issue #18) — so an empty registry or an all-declining one returns
+`Error::Unsupported(NO_BACKEND)`. `AbiHevcDecoder` adapts a `gamut_codec_abi::Decoder` (pure-Rust or
+a bridged C vtable) onto the seam: it lowers `HevcConfig` to a `HEVC_CODEC_ID` `StreamConfig` with
+Annex-B parameter sets as extradata, allocates the `u16` planes itself (`planar_pixel_format` tags
+the layout), and maps the written planes back through the validating `DecodedFrame::new`.
 
 **Deferred (planned, additive).** The wider colour surface on the RGBA convenience path (rows below).
 Each lands additively — new crate items or new `#[non_exhaustive]` variants — never a reshape of the
@@ -123,6 +138,10 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Alpha-auxiliary merge (dims-checked, bit-depth-scaled); `prem` surfaced, not un-premultiplied | 23008-12 §6 | ✅ | S3 |
 | Transformative-property application (`clap`/`irot`/`imir`) in `ipma` order to output pixels | 23008-12 §7; 14496-12 §12.1.4; MIAF | ✅ | S3 |
 | `iovl` source-over compositing onto a filled canvas (signed offsets, clipping) | 23008-12 §6.6.2.4 | ✅ | S3 |
+| Ordered backend registry `HevcDecoders` (`push_backend`, itself a `HevcDecoder`; `Send` bound at insertion) | #241 / #273 | ✅ | S5 |
+| `HevcDecoder::supports` capability probe (defaulted `true`, additive to the S3 trait) | #273 | ✅ | S5 |
+| Fallback contract: push order; `supports()==false` / `BACKEND_DECLINED` fall through, accepted-then-failed propagates; no implicit software tail ⇒ `Error::Unsupported(NO_BACKEND)` | #241 | ✅ | S5 |
+| `AbiHevcDecoder`: `gamut_codec_abi::Decoder` ⇄ `HevcDecoder` (StreamConfig/`ImageDesc` lowering, `Status::UNSUPPORTED` ⇒ late decline) | #241 / #272 | ✅ | S5 |
 | HEVC-intra reconstruction (slice/CTU/transform/intra-pred/in-loop filters) — delegated to the caller's `HevcDecoder` | H.265 (ITU-T) | ☐ | user / #18 |
 | >8-bit RGBA presentation (pending `gamut-color` high-bit-depth RGB) | H.273 | ☐ | later |
 | BT.709 / BT.2020 matrices on the RGBA surface (pending `gamut-color`) | H.273 | ☐ | later |
@@ -139,6 +158,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Structure conformance: `HeifContainer::parse` vs libheif `introspect` (primary id, item ids+types, ispe dims, alpha, thumbnails, Exif/XMP bytes incl. the `exif_tiff_header_offset`) | 23008-12; `references/heif` §9 | ✅ | S4 |
 | Presentation-pixel conformance vs libheif `decode_primary_rgba` (tight measured bound; alpha exact) + orientation `irot`/`imir` direction | 23008-12 §7; H.273 | ✅ | S4 |
 | Motion-photo overlay: appended `mpvd` / second-`ftyp` / trailer decode identically to the pristine still (byte accounting) | `references/heif` §8 | ✅ | S4 |
+| Reference backend driven **through** the registry: `De265Decoder` pushed into `HevcDecoders` decodes the fixture identically (planar + RGBA) to the direct hook; an empty registry errors | #273 | ✅ | S5 |
 | Nokia HEIF reference software as a secondary fixture source | `references/heif` "Oracle" | ☐ | later |
 | Real multi-tile `grid` differential (libheif+kvazaar do not auto-emit grids; the oracle API exposes no grid knob — synthetic grid-assembly unit tests cover the path) | 23008-12 §6.6.2.2 | ☐ | later |
 
