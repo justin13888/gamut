@@ -84,6 +84,21 @@ pub trait HevcDecoder {
     /// Returns a [`gamut_core::Error`] if the codestream cannot be decoded — malformed bitstream,
     /// an unsupported HEVC tool or profile, and so on. The pipeline propagates it unchanged.
     fn decode_intra(&mut self, config: &HevcConfig, payload: &[u8]) -> Result<DecodedFrame>;
+
+    /// Reports whether this backend can decode a picture with this `hvcC` configuration — the
+    /// capability probe [`HevcDecoders`](crate::HevcDecoders) selects on.
+    ///
+    /// Returning `false` is the **only** signal that lets the registry fall through to the next
+    /// backend (a backend that accepts and then fails propagates its error instead; see
+    /// [`crate::BACKEND_DECLINED`] for the narrow late-decline escape hatch). Implementations
+    /// typically check profile/tier/level, chroma format, and bit depth.
+    ///
+    /// Defaults to `true` — "I will attempt anything" — so a single plugged-in decoder needs no
+    /// extra code and every pre-registry implementation keeps compiling unchanged.
+    fn supports(&mut self, config: &HevcConfig) -> bool {
+        let _ = config;
+        true
+    }
 }
 
 /// The owned planar output of a [`HevcDecoder`]: a YCbCr (or monochrome) frame at native chroma and
