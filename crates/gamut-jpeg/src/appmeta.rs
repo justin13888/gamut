@@ -16,6 +16,7 @@
 
 use gamut_core::{Error, Result};
 
+use crate::decoder::{expect_soi, read_marker, read_segment};
 use crate::marker::{code, write_segment_header};
 
 /// APP1 EXIF signature (Exif 3.0 §4.7.2.3): `"Exif"` plus two NUL padding bytes.
@@ -73,6 +74,100 @@ pub(crate) fn write_app2_icc(out: &mut Vec<u8>, profile: &[u8]) {
         out.push(count);
         out.extend_from_slice(chunk);
     }
+}
+
+/// The encoder's configured metadata, as handed to [`patch_stream`]: the already-cap-checked EXIF
+/// TIFF stream, XMP `xpacket`, and ICC profile.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AppMetadata<'a> {
+    /// The APP1 EXIF TIFF stream, signature stripped.
+    pub(crate) exif: Option<&'a [u8]>,
+    /// The APP1 XMP `xpacket`, namespace URI stripped.
+    pub(crate) xmp: Option<&'a [u8]>,
+    /// The ICC profile, to be split across APP2 `ICC_PROFILE` chunks.
+    pub(crate) icc: Option<&'a [u8]>,
+}
+
+impl AppMetadata<'_> {
+    /// Appends this metadata as APPn segments, in the order [`crate::JpegEncoder`]'s prologue uses
+    /// (EXIF, XMP, ICC).
+    fn write(self, out: &mut Vec<u8>) {
+        if let Some(exif) = self.exif {
+            write_app1_exif(out, exif);
+        }
+        if let Some(xmp) = self.xmp {
+            write_app1_xmp(out, xmp);
+        }
+        if let Some(icc) = self.icc {
+            write_app2_icc(out, icc);
+        }
+    }
+}
+
+/// Returns `true` for an APPn segment whose payload is one the crate owns — an APP1 EXIF, an APP1
+/// XMP, or an APP2 `ICC_PROFILE` chunk. Any other APPn (JFIF APP0, Adobe APP14, ExtendedXMP, Exif
+/// Flashpix APP2, …) belongs to the producer and is preserved.
+fn is_crate_owned(marker: u8, payload: &[u8]) -> bool {
+    match marker {
+        code::APP1 => exif_payload(payload).is_some() || xmp_payload(payload).is_some(),
+        code::APP2 => payload.starts_with(ICC_SIG),
+        _ => false,
+    }
+}
+
+/// Rewrites a backend-produced interchange stream so its crate-owned APPn metadata is exactly
+/// `meta` — the encode-side half of the crate's metadata ownership (see [`crate::backend`]).
+///
+/// Every EXIF / XMP / `ICC_PROFILE` segment the producer emitted is **dropped**, and `meta` is
+/// written once at the crate's canonical position: after the leading run of APP0 segments and before
+/// everything else (matching `JpegEncoder::write_prologue`), so metadata is patched rather than
+/// double-written. All other bytes — APP0, tables, the frame header, and every entropy-coded byte
+/// from the first SOS onward — are copied verbatim.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `stream` is not a complete, parsable interchange stream: no
+/// SOI, no trailing EOI, an unreadable marker or segment before the first scan, or a standalone
+/// marker where a segment was expected.
+pub(crate) fn patch_stream(stream: &[u8], meta: AppMetadata<'_>) -> Result<Vec<u8>> {
+    expect_soi(stream)?;
+    if stream.len() < 4 || stream[stream.len() - 2..] != [0xFF, code::EOI_CODE] {
+        return Err(Error::InvalidInput(
+            "JPEG: backend stream does not end with EOI",
+        ));
+    }
+    let mut out = Vec::with_capacity(stream.len());
+    out.extend_from_slice(&stream[..2]);
+    let mut pos = 2;
+    let mut written = false;
+    loop {
+        let (marker, after) = read_marker(stream, pos)?;
+        match marker {
+            code::SOS | code::EOI_CODE => break,
+            code::SOI | code::TEM | code::RST0..=code::RST7 => {
+                return Err(Error::InvalidInput(
+                    "JPEG: backend stream has a standalone marker before the first scan",
+                ));
+            }
+            _ => {}
+        }
+        if !written && marker != code::APP0 {
+            meta.write(&mut out);
+            written = true;
+        }
+        let (payload, next) = read_segment(stream, after)?;
+        if !is_crate_owned(marker, payload) {
+            out.extend_from_slice(&stream[pos..next]);
+        }
+        pos = next;
+    }
+    if !written {
+        meta.write(&mut out);
+    }
+    // From the first SOS (or a scanless EOI) on, the stream is copied byte for byte: entropy-coded
+    // data and its stuffing must not be reinterpreted.
+    out.extend_from_slice(&stream[pos..]);
+    Ok(out)
 }
 
 /// Returns the TIFF stream of an APP1 EXIF payload, or `None` if the signature does not match.

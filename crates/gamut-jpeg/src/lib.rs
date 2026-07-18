@@ -42,6 +42,16 @@
 //! embed them. The payloads are raw bytes in exactly the form the `gamut-metadata` facade's
 //! `MetadataBlock` borrows.
 //!
+//! # Pluggable backends
+//!
+//! Both directions are pluggable through the [`backend`] module: [`JpegStreamDecoder`] and
+//! [`JpegStreamEncoder`] hand a backend the **whole SOI..EOI interchange stream** — the unit real
+//! JPEG engines (nvJPEG, V4L2 JPEG, libjpeg-turbo) consume — because JPEG's marker layer and its
+//! entropy-coded data interleave and have no sub-stream boundary worth publicizing. The explicit
+//! consequence is that "the crate owns the container" degenerates, for JPEG, to the crate owning
+//! **metadata and validation**: APPn EXIF/XMP/ICC stays crate-owned in both directions, and the
+//! crate patches its metadata into a backend-produced stream. See the [`backend`] module docs.
+//!
 //! Out of scope (see `STATUS.md`): 12-bit precision, arithmetic coding, the lossless and
 //! hierarchical processes, the SPIFF/T.84/T.872 layers, ExtendedXMP, and APP13 IPTC-IIM.
 //!
@@ -74,6 +84,8 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod backend;
+
 mod appmeta;
 mod bitwriter;
 mod decoder;
@@ -86,6 +98,11 @@ mod scan;
 mod syntax;
 mod zigzag;
 
+pub use backend::{
+    AbiStreamDecoder, AbiStreamEncoder, DecodedJpeg, JPEG_CODEC_ID, JpegEncodeRequest,
+    JpegStreamDecoder, JpegStreamEncoder, JpegStreamInfo, RasterRef, backend_declined,
+    is_backend_declined,
+};
 pub use decoder::{JpegDecoder, JpegInfo, JpegMetadata, JpegProcess, info, metadata};
 pub use encoder::{ChromaSubsampling, JpegEncoder};
 pub use marker::DensityUnit;

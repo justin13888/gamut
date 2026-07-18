@@ -5,11 +5,15 @@
 //! (§A.3.4) → zig-zag (§A.3.6) → differential DC + run-length AC Huffman coding (Annex F §F.1.2) —
 //! interleaved into minimum coded units (§A.2.3) and wrapped in a JFIF interchange stream (§B.2).
 
+use std::fmt;
+use std::sync::{Arc, Mutex};
+
 use gamut_color::{ColorRange, rgb_to_ycbcr};
-use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, Result, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, PixelFormat, Result, Rgb8};
 use gamut_dsp::jpeg::fdct8x8;
 use gamut_dsp::math::round_div_nearest;
 
+use crate::backend::{self, EncoderSlot, JpegEncodeRequest, JpegStreamEncoder, RasterRef};
 use crate::bitwriter::BitWriter;
 use crate::huffman::{self, EncTable, TableSpec};
 use crate::marker::{self, DensityUnit};
@@ -74,7 +78,7 @@ impl ChromaSubsampling {
 /// assert_eq!(&jpeg[..2], &[0xFF, 0xD8]); // SOI
 /// # Ok::<(), gamut_core::Error>(())
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct JpegEncoder {
     quality: u8,
     subsampling: ChromaSubsampling,
@@ -86,6 +90,28 @@ pub struct JpegEncoder {
     exif: Option<Vec<u8>>,
     xmp: Option<Vec<u8>>,
     icc: Option<Vec<u8>>,
+    /// Pluggable whole-stream backends, tried in push order ahead of the built-in encoder.
+    backends: Vec<EncoderSlot>,
+}
+
+impl fmt::Debug for JpegEncoder {
+    /// Mirrors the derived formatting, except that the opaque `dyn` backends show as a count and the
+    /// metadata payloads as their byte lengths.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JpegEncoder")
+            .field("quality", &self.quality)
+            .field("subsampling", &self.subsampling)
+            .field("restart_interval", &self.restart_interval)
+            .field("density_unit", &self.density_unit)
+            .field("x_density", &self.x_density)
+            .field("y_density", &self.y_density)
+            .field("progressive", &self.progressive)
+            .field("exif", &self.exif.as_ref().map(Vec::len))
+            .field("xmp", &self.xmp.as_ref().map(Vec::len))
+            .field("icc", &self.icc.as_ref().map(Vec::len))
+            .field("backends", &self.backends.len())
+            .finish()
+    }
 }
 
 impl Default for JpegEncoder {
@@ -110,7 +136,84 @@ impl JpegEncoder {
             exif: None,
             xmp: None,
             icc: None,
+            backends: Vec::new(),
         }
+    }
+
+    /// Appends a [`JpegStreamEncoder`] backend to this encoder's registry.
+    ///
+    /// Backends are consulted in **push order** for every encode; the first whose
+    /// [`JpegStreamEncoder::supports`] accepts the [`JpegEncodeRequest`] produces the whole JFIF
+    /// interchange stream. The built-in encoder is the implicit tail, used only when every backend
+    /// declines. The crate then **patches its APPn metadata into the produced stream** — any
+    /// EXIF/XMP/`ICC_PROFILE` segment the backend emitted is replaced by this encoder's configured
+    /// [`with_exif`](Self::with_exif) / [`with_xmp`](Self::with_xmp) /
+    /// [`with_icc_profile`](Self::with_icc_profile) payloads (validated against their caps *before*
+    /// any backend runs). See the [`crate::backend`] module docs for the full contract.
+    ///
+    /// Unlike the `with_*` builders this takes `&mut self`, because a registry is not a `Copy`
+    /// setting.
+    ///
+    /// # Cloning shares backends
+    ///
+    /// Backends are stored behind `Arc<Mutex<..>>`, so **cloning a `JpegEncoder` shares them with
+    /// the clone** rather than duplicating them: a stateful backend sees the encodes of every clone,
+    /// and its lock serializes concurrent ones. Build a fresh encoder when a clone needs its own
+    /// backend instances.
+    pub fn push_backend(&mut self, backend: impl JpegStreamEncoder + 'static) -> &mut Self {
+        self.backends.push(Arc::new(Mutex::new(backend)));
+        self
+    }
+
+    /// Offers the raster to the encode registry; on acceptance the returned stream has this
+    /// encoder's metadata patched into it and is appended to `out`, and the written length is
+    /// returned. `None` means no backend accepted and the caller runs the built-in encoder.
+    ///
+    /// `width`/`height` have already passed [`Self::check_dimensions`] and the metadata
+    /// [`Self::check_metadata`], so a backend never sees a job the built-in path would reject.
+    fn encode_via_backend(
+        &self,
+        width: u16,
+        height: u16,
+        format: PixelFormat,
+        samples: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<Option<usize>> {
+        if self.backends.is_empty() {
+            return Ok(None);
+        }
+        let (w, h) = (u32::from(width), u32::from(height));
+        let req = JpegEncodeRequest::new(
+            w,
+            h,
+            format,
+            self.quality,
+            self.subsampling,
+            self.progressive,
+            self.restart_interval,
+        );
+        let raster = RasterRef::new(w, h, format, samples)?;
+        let Some(stream) = backend::encode_with_backends(&self.backends, &req, &raster)? else {
+            return Ok(None);
+        };
+        let patched = appmeta::patch_stream(
+            &stream,
+            appmeta::AppMetadata {
+                exif: self.exif.as_deref(),
+                xmp: self.xmp.as_deref(),
+                icc: self.icc.as_deref(),
+            },
+        )?;
+        // Validation ownership: the produced stream must declare a frame of exactly the image the
+        // caller asked to encode, so a backend cannot quietly resize or drop it.
+        let info = crate::JpegStreamInfo::parse(&patched)?;
+        if (info.width(), info.height()) != (w, h) {
+            return Err(Error::InvalidInput(
+                "JPEG: backend stream declares different dimensions than the encoded image",
+            ));
+        }
+        out.extend_from_slice(&patched);
+        Ok(Some(patched.len()))
     }
 
     /// Sets the quality, **clamped** to `1..=100` (higher is better/larger). Quality 50 uses the
@@ -489,6 +592,11 @@ impl EncodeImage<Gray8> for JpegEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
         let (width, height) = Self::check_dimensions(image.dimensions())?;
         self.check_metadata()?;
+        if let Some(written) =
+            self.encode_via_backend(width, height, PixelFormat::Gray8, image.as_samples(), out)?
+        {
+            return Ok(written);
+        }
         let start = out.len();
 
         let plane = Plane {
@@ -548,6 +656,11 @@ impl EncodeImage<Rgb8> for JpegEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         let (width, height) = Self::check_dimensions(image.dimensions())?;
         self.check_metadata()?;
+        if let Some(written) =
+            self.encode_via_backend(width, height, PixelFormat::Rgb8, image.as_samples(), out)?
+        {
+            return Ok(written);
+        }
         let start = out.len();
         let (w, h) = (usize::from(width), usize::from(height));
 
