@@ -77,6 +77,13 @@ with `Compression = 7`. The `Compression::OldJpeg` variant exists only so the on
 round-trips through `deconstruct`; neither encode nor decode will be implemented (maintainer
 decision, issue #187).
 
+**Permanently out of scope.** Pluggable codestream backends (the codestream-generation IoC seam
+of #241): TIFF's compression schemes (None/PackBits/LZW/CCITT/Deflate) have no hardware
+acceleration, so — unlike the hardware-accelerated formats that gain a backend seam
+(PNG/JPEG/WebP/AVIF/HEIC/JXL) — gamut's own software implementation is always used and no
+pluggable codestream backend is exposed. See AGENTS.md's convention on exposing the codestream
+(maintainer decision, #241).
+
 ## v1 surface (issue #187)
 
 The API was frozen after a full-surface review; the additions and breaks:

@@ -32,6 +32,11 @@
 //! directions against libtiff; the deferred colour modes and compression schemes (YCbCr,
 //! CIE L\*a\*b\*, JPEG-in-TIFF, …) land additively — see `STATUS.md` for the scope ledger.
 //!
+//! TIFF codestreams are permanently backend-less: unlike the other format crates, this crate
+//! adds **no** pluggable codestream backend (the IoC seam of #241), because TIFF's compression
+//! schemes have no hardware acceleration — gamut's software implementation is always used. See
+//! AGENTS.md's convention on exposing the codestream and `STATUS.md`.
+//!
 //! ```
 //! use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8};
 //! use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
