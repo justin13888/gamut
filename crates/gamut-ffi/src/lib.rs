@@ -55,6 +55,19 @@ mod seam;
 ))]
 mod test_support;
 
+#[cfg(feature = "avif")]
+pub mod avif;
+#[cfg(feature = "heic")]
+pub mod heic;
+#[cfg(feature = "jpeg")]
+pub mod jpeg;
+#[cfg(feature = "jxl")]
+pub mod jxl;
+#[cfg(feature = "png")]
+pub mod png;
+#[cfg(feature = "webp")]
+pub mod webp;
+
 // The C header states GAMUT_CODEC_ABI_VERSION and documents the backend Status contract in
 // terms of these exact values. A `gamut-codec-abi` bump or Status change must fail this
 // crate's build until the C contract is consciously revisited — header regenerated, status
