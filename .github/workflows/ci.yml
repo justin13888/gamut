@@ -5,9 +5,66 @@ on:
     branches: [master]
   pull_request:
 
+# Supersede in-flight runs for the same ref. Deliberately PR-only: on `push: master` a rapid
+# second merge must not cancel the first commit's run and leave that commit with no CI result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The vendored C/C++ oracles (libaom, dav1d, libavif, libheif, exiv2, libjpeg-turbo, the DNG SDK,
+# libjxl, …) dominate CI: they are workspace members under `tooling/`, and Swatinem/rust-cache
+# deliberately drops workspace crates — including their build-script OUT_DIRs, where every static
+# archive lives — so before sccache each heavy job rebuilt all fourteen from scratch (~9 min, paid
+# twice per PR).
+#
+# sccache is the right tool because it is content-addressed on preprocessed source + compiler +
+# flags: a `third_party/` submodule bump changes the content, changes the hash, and misses. There
+# is no cache key for a future change to under-specify, so a stale oracle — tests silently passing
+# against the wrong reference implementation — is not a reachable state. The GHA backend is one
+# store shared by every job, which matters because `cargo llvm-cov` builds into its own
+# `target/llvm-cov-target/` and can share nothing with the lint lane through rust-cache.
+#
+# `CC`/`CXX` carry the launcher; `tooling/build-env` moves it to `CMAKE_{C,CXX}_COMPILER_LAUNCHER`
+# per spawned cmake/meson command (see that crate's docs for the two failure modes this avoids).
+# The three env vars are set per-job rather than here, so the `fast` job — which installs no
+# sccache because it compiles no native code — can never inherit a `CC` it cannot run.
+
 jobs:
-  check:
-    name: Format, Lint & Test
+  # Everything that needs neither the submodules nor a C toolchain, so the "you forgot to run fmt"
+  # round trip is ~90 seconds instead of the length of the heavy lanes.
+  fast:
+    name: Format & Metadata
+    runs-on: ubuntu-latest
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # convco walks base..head, so it needs full history
+      - uses: jdx/mise-action@v4
+        with:
+          # convco for the commit check, jq for the feature-table check. No cmake/ninja/meson:
+          # nothing here builds native code.
+          install_args: cargo:convco jq
+      - name: Clear pre-installed Rust toolchain
+        # Same rustup `bin/cargo-fmt` reinstall-conflict guard as the heavy jobs below.
+        run: rustup toolchain uninstall stable || true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format check
+        # Self-installs the nightly rustfmt it needs (rustfmt.toml's import options are nightly-only).
+        run: mise run fmt-check
+      - name: gamut-ffi feature sync
+        run: mise run check-ffi-features
+      - name: Check PR commit messages
+        # Only PRs have a base..head range; validate just the PR's own commits so the pre-existing
+        # non-conventional history on master doesn't fail the check.
+        if: github.event_name == 'pull_request'
+        run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+
+  lint:
+    name: Clippy & Doctests
     runs-on: ubuntu-latest
     env:
       # Run the same mise tasks CI and the git hooks share, but keep this job lean:
@@ -22,7 +79,12 @@ jobs:
       # get the step SIGKILLed with no diagnostic (exit 137; exit 143 when it lands as SIGTERM).
       # `--all-features --all-targets` builds every oracle at once, so this job is the worst case.
       # Capping the outer factor bounds peak memory; the inner `--parallel` still uses the cores.
+      # sccache does not relax this: it makes each compile cheap, not fewer of them concurrent.
       CARGO_BUILD_JOBS: 2
+      # See the sccache rationale above the `jobs:` key.
+      SCCACHE_GHA_ENABLED: "true"
+      CC: sccache gcc
+      CXX: sccache g++
     steps:
       - uses: actions/checkout@v5
         with:
@@ -41,28 +103,35 @@ jobs:
         run: rustup toolchain uninstall stable || true
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      # Cache target/ and the cargo registry: gamut-jxl-sys's cold libjxl cmake build is ~3-6 min,
-      # and the vendored C oracles are expensive too. Precedent: mutants.yml. (Same as the coverage job.)
+          components: clippy
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      # Cache target/ and the cargo registry for the Rust half; sccache (above) covers the native
+      # half, which rust-cache structurally cannot. Precedent: mutants.yml. (Same as coverage.)
       - uses: Swatinem/rust-cache@v2
-      # fmt/lint/test go through the shared mise tasks (single source of truth with the
-      # git hooks). `mise run fmt-check` self-installs the nightly rustfmt it needs.
-      - name: Format check
-        run: mise run fmt-check
+      # Clippy and the doctests go through the shared mise tasks (single source of truth with the
+      # git hooks). The full test suite is NOT run here — the coverage job runs it instrumented and
+      # fails on any test failure, so it is the green-test gate; `test-doc` adds back only the
+      # doctests, which `cargo llvm-cov` cannot instrument on stable.
       - name: Clippy
         run: mise run lint
-      - name: gamut-ffi feature sync
-        run: mise run check-ffi-features
-      - name: Test
-        run: mise run test
+      - name: Doctests
+        run: mise run test-doc
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
 
   coverage:
-    name: Coverage
+    name: Coverage (test gate)
     runs-on: ubuntu-latest
     env:
-      # Same jobs × cores OOM as the check job above: this one also builds every C++ oracle
+      MISE_TASK_RUN_AUTO_INSTALL: false
+      # Same jobs × cores OOM as the lint job above: this one also builds every C++ oracle
       # (`--workspace --all-features`), and instrumented builds are heavier still.
       CARGO_BUILD_JOBS: 2
+      # See the sccache rationale above the `jobs:` key.
+      SCCACHE_GHA_ENABLED: "true"
+      CC: sccache gcc
+      CXX: sccache g++
     steps:
       - uses: actions/checkout@v5
         with:
@@ -73,39 +142,25 @@ jobs:
         with:
           install_args: cmake ninja meson aqua:taiki-e/cargo-llvm-cov
       - name: Clear pre-installed Rust toolchain
-        # Same rustup `bin/cargo-fmt` conflict guard as the check job above.
+        # Same rustup `bin/cargo-fmt` conflict guard as the lint job above.
         run: rustup toolchain uninstall stable || true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      # Cache target/ and the cargo registry (gamut-jxl-sys's cold libjxl cmake build is ~3-6 min).
-      # Precedent: mutants.yml. (Same as the check job.)
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
+      # This is the workspace's test gate as well as its coverage gate: llvm-cov runs the same
+      # suite `cargo test` would and fails the job on any test failure. The invocation lives in
+      # mise.toml so the exclusion regex and the 80% threshold are not duplicated here.
       - name: Generate coverage report
-        run: >-
-          cargo llvm-cov --workspace --all-features
-          --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi|jxl-sys)|tooling)/'
-          --lcov --output-path lcov.info --fail-under-lines 80
+        run: mise run coverage-lcov
       - name: Generate coverage summary
         run: cargo llvm-cov report --summary-only
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: lcov.info
-
-  commits:
-    name: Conventional Commits
-    # Only PRs have a base..head range; validate just the PR's own commits so the
-    # pre-existing non-conventional history on master doesn't fail the check.
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0 # convco walks base..head, so it needs full history
-      - uses: jdx/mise-action@v4
-        with:
-          install_args: cargo:convco
-      - name: Check PR commit messages
-        run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
