@@ -32,7 +32,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config
       - uses: jdx/mise-action@v4
         with:
-          install_args: cmake ninja meson cargo:cbindgen
+          install_args: cmake ninja meson
       - name: Clear pre-installed Rust toolchain
         # The runner image bakes in a `stable` toolchain that rustup can leave "partially
         # installed"; dtolnay/rust-toolchain then does an in-place reinstall that aborts with
@@ -45,6 +45,13 @@ jobs:
       # Cache target/ and the cargo registry: gamut-jxl-sys's cold libjxl cmake build is ~3-6 min,
       # and the vendored C oracles are expensive too. Precedent: mutants.yml. (Same as the coverage job.)
       - uses: Swatinem/rust-cache@v2
+      # cbindgen is a `cargo:` mise tool, so it needs a working cargo — which the runner's
+      # baked-in `stable` toolchain is not (see the uninstall step above: rustup reports
+      # "the 'cargo' binary … is not applicable to the 'stable-…' toolchain"). Installing it
+      # in the mise-action step above therefore fails before the real toolchain exists, so
+      # it is installed here instead, after dtolnay/rust-toolchain and the cargo cache.
+      - name: Install cbindgen (needs the rustup toolchain installed above)
+        run: mise install cargo:cbindgen
       # fmt/lint/test go through the shared mise tasks (single source of truth with the
       # git hooks). `mise run fmt-check` self-installs the nightly rustfmt it needs.
       - name: Format check
