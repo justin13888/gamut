@@ -20,6 +20,11 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 gamut = { workspace = true }
+# The provider-boundary seam types (vtables + Foreign* bridges) are needed whenever *any*
+# format feature is on, and the feature mirror below must stay exactly `gamut/<name>` per
+# entry (enforced by `mise run check-ffi-features`) — so the seam crate is a direct,
+# unconditional dependency, exactly as in the format crates themselves.
+gamut-codec-abi = { workspace = true }
 
 # Strictly mirrors the `gamut` umbrella's feature table (enforced by `mise run
 # check-ffi-features`): every feature forwards the same-named gamut feature, so gamut-ffi built

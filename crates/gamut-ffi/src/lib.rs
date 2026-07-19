@@ -1,5 +1,66 @@
 //! C-compatible FFI bindings for the gamut image codecs, so `gamut` can be used as a
 //! drop-in replacement for traditional C image libraries from C, C++, Python, Go, and more.
 //!
-//! Placeholder — implementation pending. (`unsafe` is permitted here for the `extern "C"`
-//! boundary.)
+//! The surface implemented today is the **provider boundary** (issue #280): per-format opaque
+//! handles with `gamut_<fmt>_<dir>_new`/`_free` lifecycles and `..._push_backend` entry points
+//! that adopt a foreign [`gamut_codec_abi`] vtable backend into the format crate's push-order
+//! backend registry. The **consumer boundary** — C entry points that run encodes and decodes —
+//! is issue #242. The full contract lives in this crate's `DESIGN.md`.
+//!
+//! # Drift locking
+//!
+//! Every entry point is a *living shim*: a thin, fully typed call into the real `gamut::*`
+//! Rust API, so drift in that API is a compile error in this crate rather than silent
+//! C-surface skew. What a shim cannot express — permanent numeric values, struct layout —
+//! is pinned by `const` asserts here and in the defining crates. `unsafe` is permitted in
+//! this crate for the `extern "C"` boundary only.
+#![deny(unsafe_op_in_unsafe_fn)]
+
+mod status;
+
+pub use status::{
+    GAMUT_CODEC_ABI_VERSION, GAMUT_OK, GAMUT_STATUS_ABI_MISMATCH, GAMUT_STATUS_BUFFER_TOO_SMALL,
+    GAMUT_STATUS_INVALID_INPUT, GAMUT_STATUS_IO, GAMUT_STATUS_NULL_ARGUMENT, GAMUT_STATUS_PANIC,
+    GAMUT_STATUS_UNSUPPORTED, GamutStatus,
+};
+
+#[cfg(any(
+    feature = "avif",
+    feature = "heic",
+    feature = "jpeg",
+    feature = "jxl",
+    feature = "png",
+    feature = "webp"
+))]
+mod guard;
+#[cfg(any(
+    feature = "avif",
+    feature = "heic",
+    feature = "jpeg",
+    feature = "jxl",
+    feature = "png",
+    feature = "webp"
+))]
+mod seam;
+#[cfg(all(
+    test,
+    any(
+        feature = "avif",
+        feature = "heic",
+        feature = "jpeg",
+        feature = "jxl",
+        feature = "png",
+        feature = "webp"
+    )
+))]
+mod test_support;
+
+// The C header states GAMUT_CODEC_ABI_VERSION and documents the backend Status contract in
+// terms of these exact values. A `gamut-codec-abi` bump or Status change must fail this
+// crate's build until the C contract is consciously revisited — header regenerated, status
+// codes re-audited — rather than ship a header that lies.
+const _: () = {
+    assert!(gamut_codec_abi::ABI_VERSION == 1);
+    assert!(gamut_codec_abi::Status::OK.0 == 0);
+    assert!(gamut_codec_abi::Status::UNSUPPORTED.0 == -1);
+};
