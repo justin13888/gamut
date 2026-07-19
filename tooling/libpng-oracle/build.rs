@@ -175,6 +175,10 @@ fn path_str(p: &Path) -> String {
 }
 
 fn run(cmd: &mut Command) {
+    // Normalise any compiler-launcher env (sccache/ccache) into the single position cmake
+    // defines for it, so this build is hermetic to exactly what it configures. See the
+    // `build-env` crate docs; `GAMUT_BUILD_KEEP_ENV=1` opts out.
+    build_env::sanitize(cmd);
     let status = cmd
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn {cmd:?}: {e}"));

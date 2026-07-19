@@ -156,6 +156,9 @@ fn env(key: &str) -> String {
 /// Runs a build subcommand, aborting the build with its output on failure.
 /// (Mirrors the `run` helper in the oracle build scripts.)
 fn run(cmd: &mut Command) {
+    // nasm's `configure`/`make` read `CC` too, so normalise the compiler-launcher env here for
+    // the same reason the oracles do. See the `build-env` crate docs.
+    build_env::sanitize(cmd);
     let status = cmd
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn {cmd:?}: {e}"));

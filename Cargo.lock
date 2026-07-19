@@ -83,6 +83,7 @@ name = "aom-oracle"
 version = "0.0.0"
 dependencies = [
  "bindgen 0.72.1",
+ "build-env",
  "cc",
  "nasm-vendor",
 ]
@@ -162,6 +163,10 @@ checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "build-env"
+version = "0.0.0"
 
 [[package]]
 name = "bumpalo"
@@ -376,6 +381,7 @@ name = "dav1d-oracle"
 version = "0.0.0"
 dependencies = [
  "bindgen 0.71.1",
+ "build-env",
  "nasm-vendor",
 ]
 
@@ -475,6 +481,7 @@ dependencies = [
 name = "exiv2-oracle"
 version = "0.0.0"
 dependencies = [
+ "build-env",
  "cc",
 ]
 
@@ -728,6 +735,7 @@ dependencies = [
 name = "gamut-iptc-oracle"
 version = "0.0.0"
 dependencies = [
+ "build-env",
  "cc",
 ]
 
@@ -1069,6 +1077,7 @@ name = "libavif-oracle"
 version = "0.0.0"
 dependencies = [
  "bindgen 0.72.1",
+ "build-env",
  "nasm-vendor",
 ]
 
@@ -1083,12 +1092,14 @@ name = "libheif-oracle"
 version = "0.0.0"
 dependencies = [
  "bindgen 0.72.1",
+ "build-env",
 ]
 
 [[package]]
 name = "libjpeg-oracle"
 version = "0.0.0"
 dependencies = [
+ "build-env",
  "cc",
 ]
 
@@ -1107,6 +1118,7 @@ name = "libpng-oracle"
 version = "0.0.0"
 dependencies = [
  "bindgen 0.71.1",
+ "build-env",
 ]
 
 [[package]]
@@ -1114,6 +1126,7 @@ name = "libtiff-oracle"
 version = "0.0.0"
 dependencies = [
  "bindgen 0.71.1",
+ "build-env",
  "tempfile",
 ]
 
@@ -1232,6 +1245,7 @@ dependencies = [
 name = "nasm-vendor"
 version = "0.0.0"
 dependencies = [
+ "build-env",
  "lzma-rs",
  "sha2",
  "tar",
@@ -1884,6 +1898,7 @@ name = "zlib-oracle"
 version = "0.0.0"
 dependencies = [
  "bindgen 0.71.1",
+ "build-env",
 ]
 
 [[package]]

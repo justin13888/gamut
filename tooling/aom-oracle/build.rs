@@ -116,7 +116,10 @@ fn main() {
 /// search resolves to it. On arches/platforms where no vendored nasm is built (non-x86,
 /// non-Unix), returns the unchanged `PATH`.
 fn path_with_nasm() -> std::ffi::OsString {
-    let base = std::env::var_os("PATH").unwrap_or_default();
+    // Base on the launcher-shim-filtered PATH, not the raw one: `run` applies the same
+    // filtering but deliberately will not overwrite a PATH the command already sets, so the
+    // filtering has to happen here for these commands.
+    let base = build_env::BuildEnv::detect().path();
     match nasm_vendor::ensure_nasm() {
         Some(dir) => std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&base)))
             .expect("join PATH with vendored nasm dir"),
@@ -138,6 +141,10 @@ fn path_str(p: &Path) -> String {
 
 /// Runs a build subcommand, aborting the build with its output on failure.
 fn run(cmd: &mut Command) {
+    // Normalise any compiler-launcher env (sccache/ccache) into the single position cmake
+    // defines for it, so this build is hermetic to exactly what it configures. See the
+    // `build-env` crate docs; `GAMUT_BUILD_KEEP_ENV=1` opts out.
+    build_env::sanitize(cmd);
     let status = cmd
         .status()
         .unwrap_or_else(|e| panic!("failed to spawn {cmd:?}: {e}"));

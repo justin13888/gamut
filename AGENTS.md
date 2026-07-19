@@ -130,6 +130,14 @@ submodules checked out (`git submodule update --init --recursive`) and the build
 (`apt-get install pkg-config`), and nasm (for the aom/dav1d x86 SIMD) is built from a vendored
 source tarball by the oracle build scripts. No system-installed codec binaries are used.
 
+Those native builds are hermetic to exactly what they configure, **including the toolchain**: the
+build scripts normalise an ambient compiler cache (`CC="sccache gcc"`,
+`CMAKE_*_COMPILER_LAUNCHER`, `ccache` shim dirs on `PATH`) into a bare compiler plus a launcher in
+CMake's one defined position, via `tooling/build-env` called from each build script's `run`
+chokepoint. So a native build failing is *not* explained by the invoking shell's compiler
+settings — do not "fix" it by overriding `CC`/`CXX` per command. `GAMUT_BUILD_KEEP_ENV=1` opts
+out (and is the way to confirm a suspected env interaction is real).
+
 ## Conventions
 
 - All `pub` items need doc comments. Mark fallible/owning return types with `#[must_use]`

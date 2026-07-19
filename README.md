@@ -173,6 +173,14 @@ system-installed codecs. libaom — the AV1 reference codec — is the definitiv
 (see [`references/av1`](references/av1/README.md)). Install pkg-config on Debian/Ubuntu with
 `sudo apt-get install pkg-config` (macOS: `brew install pkg-config`).
 
+Those native builds are **hermetic to exactly what they configure**, including the toolchain: if
+your shell exports a compiler cache (`CC="sccache gcc"`, `CMAKE_C_COMPILER_LAUNCHER=ccache`, a
+`ccache` shim directory on `PATH`, …), the build scripts normalise it rather than inherit it —
+the compiler is passed bare and the launcher is placed in the single position CMake defines for
+it. Compiler caching keeps working; you do not need to special-case this repo in your shell
+profile. Set `GAMUT_BUILD_KEEP_ENV=1` to opt out and use the ambient environment verbatim. See
+[`tooling/build-env`](tooling/build-env/src/lib.rs) for what is normalised and why.
+
 ## Quick Start
 
 ```bash
