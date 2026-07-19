@@ -68,12 +68,20 @@ pub mod png;
 #[cfg(feature = "webp")]
 pub mod webp;
 
-// The C header states GAMUT_CODEC_ABI_VERSION and documents the backend Status contract in
-// terms of these exact values. A `gamut-codec-abi` bump or Status change must fail this
-// crate's build until the C contract is consciously revisited — header regenerated, status
-// codes re-audited — rather than ship a header that lies.
+/// The number of plane slots in a `GamutImageDesc` (the C spelling of
+/// [`gamut_codec_abi::MAX_PLANES`]).
+///
+/// A literal so cbindgen can emit the `#define` that sizes the header's plane arrays; the
+/// const assert below locks it to the seam's value.
+pub const GAMUT_MAX_PLANES: usize = 4;
+
+// The C header states GAMUT_CODEC_ABI_VERSION / GAMUT_MAX_PLANES and documents the backend
+// Status contract in terms of these exact values. A `gamut-codec-abi` bump or Status change
+// must fail this crate's build until the C contract is consciously revisited — header
+// regenerated, status codes re-audited — rather than ship a header that lies.
 const _: () = {
     assert!(gamut_codec_abi::ABI_VERSION == 1);
+    assert!(GAMUT_MAX_PLANES == gamut_codec_abi::MAX_PLANES);
     assert!(gamut_codec_abi::Status::OK.0 == 0);
     assert!(gamut_codec_abi::Status::UNSUPPORTED.0 == -1);
 };

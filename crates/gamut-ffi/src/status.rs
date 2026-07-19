@@ -36,7 +36,11 @@ pub const GAMUT_STATUS_ABI_MISMATCH: GamutStatus = 7;
 /// The `gamut-codec-abi` seam revision this library was built against. A pushed vtable's
 /// `abi_version` field must equal this value or `push_backend` returns
 /// [`GAMUT_STATUS_ABI_MISMATCH`].
-pub const GAMUT_CODEC_ABI_VERSION: u32 = gamut_codec_abi::ABI_VERSION;
+///
+/// A literal (not `gamut_codec_abi::ABI_VERSION`) so cbindgen can emit it; the const assert
+/// below locks the two together, so a seam bump fails this build until the value — and the
+/// header — are consciously updated.
+pub const GAMUT_CODEC_ABI_VERSION: u32 = 1;
 
 // Permanent, append-only C ABI values (see DESIGN.md) — a change here is an ABI break, not a
 // refactor, and fails the build.
@@ -49,4 +53,5 @@ const _: () = {
     assert!(GAMUT_STATUS_PANIC == 5);
     assert!(GAMUT_STATUS_BUFFER_TOO_SMALL == 6);
     assert!(GAMUT_STATUS_ABI_MISMATCH == 7);
+    assert!(GAMUT_CODEC_ABI_VERSION == gamut_codec_abi::ABI_VERSION);
 };

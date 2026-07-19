@@ -20,6 +20,7 @@ jq                            = "1.8.1"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"   # coverage (taiki-e prebuilt binary)
 "cargo:cargo-edit"            = "0.13.11" # `cargo set-version` for `mise run bump` (compiled from source)
 "cargo:cargo-mutants"         = "27.1.0"
+"cargo:cbindgen"              = "0.29.4"  # gamut-ffi C header generation (gen-ffi-header / check-ffi-header)
 
 # Native build deps for the cross-check tests (build vendored dav1d/libavif from third_party/)
 cmake                         = "4.3.3"
@@ -168,6 +169,18 @@ run = '''cargo metadata --no-deps --format-version 1 | jq -e '
   | ($g | with_entries(if .key == "all" or .key == "default" then . else .value = ["gamut/\(.key)"] end)) as $want
   | if $f == $want then "gamut-ffi features in sync with gamut"
     else error("gamut-ffi features out of sync with gamut:\nwant \($want)\ngot  \($f)") end' '''
+
+# The committed C header (crates/gamut-ffi/include/gamut.h) is generated from the Rust source
+# of truth by cbindgen — plain parse on the pinned stable toolchain, never handwritten, never
+# hand-edited (see gamut-ffi/DESIGN.md).
+[tasks.gen-ffi-header]
+description = "Regenerate gamut-ffi's committed C header"
+run = "cbindgen --config crates/gamut-ffi/cbindgen.toml --output crates/gamut-ffi/include/gamut.h crates/gamut-ffi"
+
+[tasks.check-ffi-header]
+description = "Verify the committed C header matches cbindgen output (fix: mise run gen-ffi-header)"
+run = '''cbindgen --config crates/gamut-ffi/cbindgen.toml crates/gamut-ffi 2>/dev/null | diff -u crates/gamut-ffi/include/gamut.h - \
+  || { echo "gamut-ffi header out of date: run 'mise run gen-ffi-header' and commit the result"; exit 1; }'''
 
 [tasks.versions]
 description = "List every workspace crate and its version"
