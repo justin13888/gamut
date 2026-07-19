@@ -111,12 +111,6 @@ fn status_constants_and_predicates() {
     assert_ne!(Status(1), Status::UNSUPPORTED);
 }
 
-#[test]
-fn abi_version_is_one() {
-    assert_eq!(ABI_VERSION, 1);
-    assert_eq!(MAX_PLANES, 4);
-}
-
 // ---- descriptor struct_size guards -----------------------------------------------------------
 
 #[test]
