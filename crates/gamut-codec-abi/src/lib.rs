@@ -408,6 +408,37 @@ pub trait Encoder {
     ) -> Status;
 }
 
+/// A `&mut` reference to a decoder is itself a decoder (as `&mut I` is an `Iterator`), so an owned
+/// backend — e.g. a long-lived [`bridge::ForeignDecoder`] — can be lent to a per-job adapter (such
+/// as a per-item `AbiHevcDecoder`) without moving it and thus without triggering its
+/// destroy-on-drop teardown.
+impl<D: Decoder + ?Sized> Decoder for &mut D {
+    fn supports(&mut self, cfg: &StreamConfig) -> bool {
+        (**self).supports(cfg)
+    }
+
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+        (**self).decode(cfg, codestream, out)
+    }
+}
+
+/// A `&mut` reference to an encoder is itself an encoder; see the [`Decoder`] blanket impl for the
+/// borrowing rationale.
+impl<E: Encoder + ?Sized> Encoder for &mut E {
+    fn supports(&mut self, cfg: &EncodeConfig) -> bool {
+        (**self).supports(cfg)
+    }
+
+    fn encode(
+        &mut self,
+        cfg: &EncodeConfig,
+        image: &ImageDesc,
+        sink: &mut dyn FnMut(&[u8]) -> Status,
+    ) -> Status {
+        (**self).encode(cfg, image, sink)
+    }
+}
+
 /// Borrows `len` bytes at `ptr`, or an empty slice when `len == 0` (so a null `ptr` with zero length
 /// is safe).
 ///
