@@ -25,3 +25,6 @@ bindgen = "0.71"
 # Builds a vendored nasm from a committed source tarball so meson can assemble dav1d's
 # x86 SIMD without a system nasm (no-op on non-x86 targets). See its crate docs.
 nasm-vendor = { path = "../nasm-vendor" }
+# Normalises ambient compiler-launcher env (sccache/ccache) so this build is hermetic to
+# exactly what it configures. See its crate docs.
+build-env = { path = "../build-env" }

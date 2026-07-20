@@ -26,6 +26,10 @@ exclude = [
     # oracles above can assemble the aom/dav1d x86 SIMD without a system nasm. Excluded for
     # the same reason: a plain `cargo build` of the shipped crates must never compile it.
     "tooling/nasm-vendor",
+    # Dev-only helper that normalises ambient compiler-launcher env (sccache/ccache) so the
+    # oracles' cmake/meson builds are hermetic to exactly what they configure. Excluded for the
+    # same reason: a plain `cargo build` of the shipped crates must never compile it.
+    "tooling/build-env",
 ]
 
 [workspace.package]

@@ -72,6 +72,8 @@ fn main() {
         source.display()
     );
 
+    silence_intel_compiler_note(&source.join("dng_simd_type.h"));
+
     // libjxl's public headers `#include` CMake-generated export-macro headers; the gamut-jxl-sys
     // install tree has the real generated ones, but the SDK's vendored source tree does not, so
     // empty-macro stubs back both modes (static build, no symbol visibility decoration).
@@ -167,6 +169,28 @@ fn extract_zip(zip: &Path, dest: &Path) {
     let file = fs::File::open(zip).expect("open DNG SDK ZIP");
     let mut archive = zip::ZipArchive::new(file).expect("read DNG SDK ZIP");
     archive.extract(dest).expect("extract DNG SDK ZIP");
+}
+
+/// Neutralizes the SDK's `INTEL_COMPILER_NEEDED_NOTE` macro in the extracted `dng_simd_type.h`.
+///
+/// On a non-Intel x86 compiler that is neither clang nor MSVC — i.e. GCC here — the SDK expands
+/// that macro to `_Pragma("message(...)")` at ~30 call sites, so every build prints a screenful of
+/// "Intel Compiler needed for optimizations" notes. They are advisory only (the macro is already
+/// empty on the Intel, clang, and macOS paths), and `#pragma message` output is a *note*, not a
+/// warning, so the `-w` on the compile does not suppress it and GCC offers no flag that does.
+/// Appending an unconditional empty redefinition after the header's own `#define` is idempotent
+/// (the lines sit outside the include guard, so they re-apply on every inclusion) and confined to
+/// the `OUT_DIR` copy, which `cargo clean` discards.
+fn silence_intel_compiler_note(header: &Path) {
+    const SENTINEL: &str = "/* gamut: Intel-compiler advisory notes silenced */";
+    let mut text = fs::read_to_string(header).expect("read dng_simd_type.h");
+    if text.contains(SENTINEL) {
+        return;
+    }
+    text.push_str(&format!(
+        "\n{SENTINEL}\n#undef INTEL_COMPILER_NEEDED_NOTE\n#define INTEL_COMPILER_NEEDED_NOTE\n"
+    ));
+    fs::write(header, text).expect("write patched dng_simd_type.h");
 }
 
 /// Writes empty-macro stubs for the CMake-generated libjxl export headers under `dir`.

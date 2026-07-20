@@ -22,3 +22,6 @@ doctest = false
 
 [build-dependencies]
 bindgen = "0.71"
+# Normalises ambient compiler-launcher env (sccache/ccache) so this build is hermetic to
+# exactly what it configures. See its crate docs.
+build-env = { path = "../build-env" }

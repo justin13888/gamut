@@ -33,3 +33,6 @@ doctest = false
 # resolves the complete definitions under recent libclang (the same reason libavif-oracle pins
 # 0.72), so match that pin here.
 bindgen = "0.72"
+# Normalises ambient compiler-launcher env (sccache/ccache) so this build is hermetic to
+# exactly what it configures. See its crate docs.
+build-env = { path = "../build-env" }
