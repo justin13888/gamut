@@ -127,6 +127,15 @@ run = "cargo install --path crates/gamut-cli"
 description = "Run tests (workspace, all features)"
 run = "cargo test --workspace --all-features"
 
+# Doctests only. On stable, `cargo llvm-cov` cannot instrument doctests (that needs nightly), so
+# the coverage gate — which CI uses as its green-test gate — silently skips them. This task is the
+# missing slice: CI's lint lane runs it, reusing the `--all-targets --all-features` build it just
+# did for Clippy, so the marginal cost is compiling and running the doctests, not another full
+# build. Locally, prefer plain `test` above; it covers these too.
+[tasks.test-doc]
+description = "Run doctests only (the slice `coverage` cannot instrument on stable)"
+run = "cargo test --workspace --all-features --doc"
+
 # Divan; issue #149. Like `test`, this builds the codec crates' cross-check-oracle
 # dev-dependencies, so it needs the submodules + C toolchain. To pass Divan flags
 # (e.g. `--sample-count 50`) target one harness directly, since the per-crate
@@ -141,6 +150,13 @@ run = "cargo bench --workspace"
 [tasks.coverage]
 description = "Run tests with coverage (enforces 80% line coverage)"
 run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi|jxl-sys)|tooling)/' --fail-under-lines 80"
+
+# What CI runs: `coverage` plus an lcov artifact. Kept as a task rather than inlined in ci.yml so
+# the exclusion regex and the 80% threshold live in exactly one place — when CI spelled its own
+# invocation, the two copies could drift silently. Keep the flags in sync with `coverage` above.
+[tasks.coverage-lcov]
+description = "Run the coverage gate and write lcov.info (what CI runs)"
+run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi|jxl-sys)|tooling)/' --fail-under-lines 80 --lcov --output-path lcov.info"
 
 [tasks.mutants]
 description = "Mutation testing, whole workspace; slow (needs submodules + C toolchain)"
