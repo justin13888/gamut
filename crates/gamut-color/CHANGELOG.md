@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0](https://github.com/justin13888/gamut/compare/gamut-color-v1.1.0...gamut-color-v2.0.0) - 2026-07-20
+
+### Added
+
+- *(gamut-color)* add SourceProfile::LINEAR_SRGB
+- *(gamut-color)* add TransferCharacteristics::Linear (CICP code point 8)
+
 ## [1.1.0](https://github.com/justin13888/gamut/compare/gamut-color-v1.0.0...gamut-color-v1.1.0) - 2026-07-18
 
 ### Added
