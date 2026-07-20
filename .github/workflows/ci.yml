@@ -108,12 +108,25 @@ jobs:
       # Cache target/ and the cargo registry for the Rust half; sccache (above) covers the native
       # half, which rust-cache structurally cannot. Precedent: mutants.yml. (Same as coverage.)
       - uses: Swatinem/rust-cache@v2
+      # cbindgen is a `cargo:` mise tool, so it needs a working cargo — which the runner's
+      # baked-in `stable` toolchain is not (see the uninstall step above: rustup reports
+      # "the 'cargo' binary … is not applicable to the 'stable-…' toolchain"). Installing it
+      # in the mise-action step above therefore fails before the real toolchain exists, so
+      # it is installed here instead, after dtolnay/rust-toolchain and the cargo cache.
+      - name: Install cbindgen (needs the rustup toolchain installed above)
+        run: mise install cargo:cbindgen
       # Clippy and the doctests go through the shared mise tasks (single source of truth with the
       # git hooks). The full test suite is NOT run here — the coverage job runs it instrumented and
       # fails on any test failure, so it is the green-test gate; `test-doc` adds back only the
       # doctests, which `cargo llvm-cov` cannot instrument on stable.
       - name: Clippy
         run: mise run lint
+      - name: gamut-ffi feature sync
+        run: mise run check-ffi-features
+      - name: gamut-ffi header sync
+        run: mise run check-ffi-header
+      - name: gamut-ffi seam manifest
+        run: mise run check-ffi-seams
       - name: Doctests
         run: mise run test-doc
       - name: sccache stats

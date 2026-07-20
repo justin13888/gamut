@@ -688,6 +688,7 @@ name = "gamut-ffi"
 version = "0.1.2"
 dependencies = [
  "gamut",
+ "gamut-codec-abi",
 ]
 
 [[package]]

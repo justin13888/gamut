@@ -334,6 +334,43 @@ pub struct EncoderVTable {
     pub destroy: Option<unsafe extern "C" fn(ctx: *mut c_void)>,
 }
 
+// Compile-time ABI pins. These are the layout facts the C side of the seam is built on; an edit
+// that moves them is an ABI break and must fail the build here, in the defining crate, together
+// with an [`ABI_VERSION`] bump. Field *append* (guarded by `struct_size`) leaves every pinned
+// offset unchanged and stays friction-free — deliberately, no `size_of` pins on the descriptors.
+const _: () = {
+    use core::mem::{offset_of, size_of};
+
+    assert!(ABI_VERSION == 1);
+    assert!(MAX_PLANES == 4);
+
+    // `Status` round-trips a C `int`, and its two contractual values are permanent.
+    assert!(size_of::<Status>() == 4);
+    assert!(Status::OK.0 == 0);
+    assert!(Status::UNSUPPORTED.0 == -1);
+
+    // The Option-wrapped fn pointers rely on the null-pointer optimization to be plain,
+    // nullable C function pointers.
+    assert!(size_of::<Option<unsafe extern "C" fn(*mut c_void)>>() == size_of::<usize>());
+
+    // Vtables lead with `abi_version`; the fn-pointer slots follow at pointer stride. A reorder
+    // or mid-struct insertion moves one of these and fails here.
+    const PTR: usize = size_of::<usize>();
+    assert!(offset_of!(DecoderVTable, abi_version) == 0);
+    assert!(offset_of!(DecoderVTable, supports) == PTR);
+    assert!(offset_of!(DecoderVTable, decode) == 2 * PTR);
+    assert!(offset_of!(DecoderVTable, destroy) == 3 * PTR);
+    assert!(offset_of!(EncoderVTable, abi_version) == 0);
+    assert!(offset_of!(EncoderVTable, supports) == PTR);
+    assert!(offset_of!(EncoderVTable, encode) == 2 * PTR);
+    assert!(offset_of!(EncoderVTable, destroy) == 3 * PTR);
+
+    // Descriptors lead with `struct_size` — the forward-compatibility guard every reader trusts.
+    assert!(offset_of!(StreamConfig, struct_size) == 0);
+    assert!(offset_of!(EncodeConfig, struct_size) == 0);
+    assert!(offset_of!(ImageDesc, struct_size) == 0);
+};
+
 /// The object-safe Rust twin of [`DecoderVTable`]: a pluggable decode backend.
 ///
 /// A pure-Rust backend implements this directly; a foreign C backend reaches it through
@@ -369,6 +406,37 @@ pub trait Encoder {
         image: &ImageDesc,
         sink: &mut dyn FnMut(&[u8]) -> Status,
     ) -> Status;
+}
+
+/// A `&mut` reference to a decoder is itself a decoder (as `&mut I` is an `Iterator`), so an owned
+/// backend — e.g. a long-lived [`bridge::ForeignDecoder`] — can be lent to a per-job adapter (such
+/// as a per-item `AbiHevcDecoder`) without moving it and thus without triggering its
+/// destroy-on-drop teardown.
+impl<D: Decoder + ?Sized> Decoder for &mut D {
+    fn supports(&mut self, cfg: &StreamConfig) -> bool {
+        (**self).supports(cfg)
+    }
+
+    fn decode(&mut self, cfg: &StreamConfig, codestream: &[u8], out: &ImageDesc) -> Status {
+        (**self).decode(cfg, codestream, out)
+    }
+}
+
+/// A `&mut` reference to an encoder is itself an encoder; see the [`Decoder`] blanket impl for the
+/// borrowing rationale.
+impl<E: Encoder + ?Sized> Encoder for &mut E {
+    fn supports(&mut self, cfg: &EncodeConfig) -> bool {
+        (**self).supports(cfg)
+    }
+
+    fn encode(
+        &mut self,
+        cfg: &EncodeConfig,
+        image: &ImageDesc,
+        sink: &mut dyn FnMut(&[u8]) -> Status,
+    ) -> Status {
+        (**self).encode(cfg, image, sink)
+    }
 }
 
 /// Borrows `len` bytes at `ptr`, or an empty slice when `len == 0` (so a null `ptr` with zero length

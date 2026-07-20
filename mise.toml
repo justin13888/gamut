@@ -20,6 +20,7 @@ jq                            = "1.8.1"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"   # coverage (taiki-e prebuilt binary)
 "cargo:cargo-edit"            = "0.13.11" # `cargo set-version` for `mise run bump` (compiled from source)
 "cargo:cargo-mutants"         = "27.1.0"
+"cargo:cbindgen"              = "0.29.4"  # gamut-ffi C header generation (gen-ffi-header / check-ffi-header)
 
 # Native build deps for the cross-check tests (build vendored dav1d/libavif from third_party/)
 cmake                         = "4.3.3"
@@ -61,10 +62,13 @@ run = "cargo clippy --workspace --fix --allow-dirty --allow-staged"
 
 # Fast lint for the pre-push hook: default features, lib/bin targets only, so it
 # does NOT compile the `--all-targets`/`--all-features` cross-check oracle dev-deps
-# (the vendored C codecs). The full `lint` above is the gate CI runs.
+# (the vendored C codecs). The full `lint` above is the gate CI runs. `check-ffi` rides
+# along because gamut-ffi's living shims are cfg'd out under default features and would
+# otherwise only fail in CI's --all-features lanes.
 [tasks.lint-quick]
 description = "Fast Clippy check (default features; no C-oracle build) for the pre-push hook"
 run = "cargo clippy --workspace -- -D warnings"
+depends_post = ["check-ffi"]
 
 # Extended portability checks (run on master / manual dispatch in CI, see .github/workflows/extended.yml).
 # Both `cargo check` the shipped library surface only — no `--all-targets`/`--tests`, so the C-oracle
@@ -184,6 +188,40 @@ run = '''cargo metadata --no-deps --format-version 1 | jq -e '
   | ($g | with_entries(if .key == "all" or .key == "default" then . else .value = ["gamut/\(.key)"] end)) as $want
   | if $f == $want then "gamut-ffi features in sync with gamut"
     else error("gamut-ffi features out of sync with gamut:\nwant \($want)\ngot  \($f)") end' '''
+
+# The committed C header (crates/gamut-ffi/include/gamut.h) is generated from the Rust source
+# of truth by cbindgen — plain parse on the pinned stable toolchain, never handwritten, never
+# hand-edited (see gamut-ffi/DESIGN.md).
+[tasks.gen-ffi-header]
+description = "Regenerate gamut-ffi's committed C header"
+run = "cbindgen --config crates/gamut-ffi/cbindgen.toml --output crates/gamut-ffi/include/gamut.h crates/gamut-ffi"
+
+[tasks.check-ffi-header]
+description = "Verify the committed C header matches cbindgen output (fix: mise run gen-ffi-header)"
+run = '''cbindgen --config crates/gamut-ffi/cbindgen.toml crates/gamut-ffi 2>/dev/null | diff -u crates/gamut-ffi/include/gamut.h - \
+  || { echo "gamut-ffi header out of date: run 'mise run gen-ffi-header' and commit the result"; exit 1; }'''
+
+# A format crate *gaining* a seam is the one drift class gamut-ffi cannot catch at compile
+# time (nothing there can reference an entry point that does not exist yet), so it is gated
+# here: the workspace's `pub fn push_backend` set is diffed against the committed manifest
+# (crates/gamut-ffi/SEAMS.txt — pure data, no comments, so the diff is exact). Every manifest
+# line must have a C entry point in gamut-ffi or a documented exclusion in its DESIGN.md.
+# Losing or reshaping a seam already breaks gamut-ffi's living shims at compile time.
+[tasks.check-ffi-seams]
+description = "Verify the workspace push_backend seam set matches gamut-ffi's manifest"
+run = '''grep -rn --include='*.rs' 'pub fn push_backend' crates/*/src \
+  | sed -E 's/:[0-9]+:/ /; s/[[:space:]]+/ /g; s/ $//' | sort \
+  | diff -u crates/gamut-ffi/SEAMS.txt - \
+  || { echo "push_backend seam set changed: give the seam a C entry point (or a DESIGN.md exclusion) in gamut-ffi, then update crates/gamut-ffi/SEAMS.txt"; exit 1; }'''
+
+# Fast pre-push guard for the FFI living shims: gamut-ffi's entry points only compile when
+# their format features are on, and lint-quick runs default features — so without this, shim
+# drift would first surface in CI's --all-features lanes. Check-only, so the libjxl native
+# build is skipped.
+[tasks.check-ffi]
+description = "Type-check gamut-ffi with every feature on (the living-shim drift gate)"
+env = { GAMUT_JXL_SYS_SKIP_NATIVE = "1" }
+run = "cargo check -p gamut-ffi --all-features"
 
 [tasks.versions]
 description = "List every workspace crate and its version"

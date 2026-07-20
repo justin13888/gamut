@@ -168,6 +168,31 @@ impl PixelFormat {
     }
 }
 
+// C ABI values — permanent, append-only (issue #242). A change here is an ABI break, not a
+// refactor, so the pins are compile-time: editing a discriminant fails the defining crate's
+// build rather than a later test run.
+const _: () = {
+    assert!(ColorModel::Gray as u32 == 0);
+    assert!(ColorModel::GrayAlpha as u32 == 1);
+    assert!(ColorModel::Rgb as u32 == 2);
+    assert!(ColorModel::Rgba as u32 == 3);
+    assert!(ColorModel::Cmyk as u32 == 4);
+    assert!(ColorModel::Bilevel as u32 == 5);
+    assert!(ColorModel::Indexed as u32 == 6);
+
+    assert!(PixelFormat::Gray8 as u32 == 0);
+    assert!(PixelFormat::Bilevel as u32 == 1);
+    assert!(PixelFormat::Indexed8 as u32 == 2);
+    assert!(PixelFormat::Rgb8 as u32 == 3);
+    assert!(PixelFormat::Rgba8 as u32 == 4);
+    assert!(PixelFormat::Cmyk8 as u32 == 5);
+    assert!(PixelFormat::GrayAlpha8 as u32 == 6);
+    assert!(PixelFormat::Gray16 as u32 == 7);
+    assert!(PixelFormat::Rgb16 as u32 == 8);
+    assert!(PixelFormat::Rgba16 as u32 == 9);
+    assert!(PixelFormat::GrayAlpha16 as u32 == 10);
+};
+
 mod pixel_sealed {
     pub trait Sealed {}
 }
@@ -321,44 +346,6 @@ mod tests {
             for b in &PixelFormat::ALL[i + 1..] {
                 assert_ne!(a, b);
             }
-        }
-    }
-
-    #[test]
-    fn pixel_format_discriminants_are_locked() {
-        // C ABI values — permanent, append-only. A change here is an ABI break, not a refactor.
-        let expected: [(PixelFormat, u32); 11] = [
-            (PixelFormat::Gray8, 0),
-            (PixelFormat::Bilevel, 1),
-            (PixelFormat::Indexed8, 2),
-            (PixelFormat::Rgb8, 3),
-            (PixelFormat::Rgba8, 4),
-            (PixelFormat::Cmyk8, 5),
-            (PixelFormat::GrayAlpha8, 6),
-            (PixelFormat::Gray16, 7),
-            (PixelFormat::Rgb16, 8),
-            (PixelFormat::Rgba16, 9),
-            (PixelFormat::GrayAlpha16, 10),
-        ];
-        for (format, value) in expected {
-            assert_eq!(format as u32, value);
-        }
-    }
-
-    #[test]
-    fn color_model_discriminants_are_locked() {
-        // C ABI values — permanent, append-only. A change here is an ABI break, not a refactor.
-        let expected: [(ColorModel, u32); 7] = [
-            (ColorModel::Gray, 0),
-            (ColorModel::GrayAlpha, 1),
-            (ColorModel::Rgb, 2),
-            (ColorModel::Rgba, 3),
-            (ColorModel::Cmyk, 4),
-            (ColorModel::Bilevel, 5),
-            (ColorModel::Indexed, 6),
-        ];
-        for (model, value) in expected {
-            assert_eq!(model as u32, value);
         }
     }
 

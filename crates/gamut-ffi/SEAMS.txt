@@ -1,0 +1,10 @@
+crates/gamut-avif/src/encoder.rs pub fn push_backend(&mut self, backend: impl Av1StillEncoder + 'static) -> &mut Self {
+crates/gamut-heic/src/backend.rs pub fn push_backend(&mut self, backend: impl HevcDecoder + Send + 'static) -> &mut Self {
+crates/gamut-jpeg/src/decoder.rs pub fn push_backend(&mut self, backend: impl JpegStreamDecoder + 'static) -> &mut Self {
+crates/gamut-jpeg/src/encoder.rs pub fn push_backend(&mut self, backend: impl JpegStreamEncoder + 'static) -> &mut Self {
+crates/gamut-jxl/src/decoder.rs pub fn push_backend(&mut self, backend: impl JxlCodestreamDecoder + 'static) -> &mut Self {
+crates/gamut-jxl/src/encoder.rs pub fn push_backend(&mut self, backend: impl JxlCodestreamEncoder + 'static) -> &mut Self {
+crates/gamut-png/src/decoder.rs pub fn push_backend(&mut self, backend: impl IdatInflater + 'static) -> &mut Self {
+crates/gamut-png/src/encoder.rs pub fn push_backend(&mut self, backend: impl IdatDeflater + 'static) -> &mut Self {
+crates/gamut-webp/src/decoder.rs pub fn push_backend(&mut self, backend: impl WebpCodestreamDecoder + 'static) -> &mut Self {
+crates/gamut-webp/src/encoder.rs pub fn push_backend(&mut self, backend: impl WebpCodestreamEncoder + 'static) -> &mut Self {
