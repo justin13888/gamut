@@ -96,7 +96,7 @@ gamut-dsp = { path = "crates/gamut-dsp", version = "2.0.0" }
 gamut-bitstream = { path = "crates/gamut-bitstream", version = "0.2.3" }
 # The shared codestream-backend seam (issue #272): repr(C) vtables + object-safe Rust twins that
 # let a foreign/alternate codec backend plug into any format crate. no_std, dependency-free.
-gamut-codec-abi = { path = "crates/gamut-codec-abi", version = "0.1.0" }
+gamut-codec-abi = { path = "crates/gamut-codec-abi", version = "0.1.1" }
 gamut-deflate = { path = "crates/gamut-deflate", version = "0.1.0" }
 gamut-png = { path = "crates/gamut-png", version = "0.1.0" }
 # JPEG-1 (ISO/IEC 10918 / ITU-T T.81) codec (issue #28).
@@ -113,7 +113,7 @@ gamut-jxl = { path = "crates/gamut-jxl", version = "0.4.0", default-features = f
 # building this one runs cmake to compile libjxl (see its README); `links = "jxl"`.
 gamut-jxl-sys = { path = "crates/gamut-jxl-sys", version = "0.1.0" }
 gamut-webp = { path = "crates/gamut-webp", version = "0.3.0" }
-gamut-heic = { path = "crates/gamut-heic", version = "0.2.1" }
+gamut-heic = { path = "crates/gamut-heic", version = "0.2.2" }
 gamut-vvc = { path = "crates/gamut-vvc", version = "0.2.1" }
 gamut-tonemap = { path = "crates/gamut-tonemap", version = "1.0.0" }
 # Image metadata primitives (issue #34): the shared TIFF/IFD core plus per-format crates.
