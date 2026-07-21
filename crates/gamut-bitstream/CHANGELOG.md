@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3](https://github.com/justin13888/gamut/compare/gamut-bitstream-v0.2.2...gamut-bitstream-v0.2.3) - 2026-07-20
+
+### Other
+
+- updated the following local packages: gamut-core
+
 ## [0.2.2](https://github.com/justin13888/gamut/compare/gamut-bitstream-v0.2.1...gamut-bitstream-v0.2.2) - 2026-07-18
 
 ### Added

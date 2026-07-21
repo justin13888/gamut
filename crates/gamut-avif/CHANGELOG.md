@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0](https://github.com/justin13888/gamut/compare/gamut-avif-v1.0.0...gamut-avif-v1.1.0) - 2026-07-20
+
+### Added
+
+- *(avif)* add pluggable Av1StillEncoder backends + push_backend (additive)
+
+### Other
+
+- *(avif)* ledger the encode backend seam and reserve the decode registry
+- *(avif)* assert byte-identical default output and the backend fallback contract
+
 ## [1.0.0](https://github.com/justin13888/gamut/compare/gamut-avif-v0.3.0...gamut-avif-v1.0.0) - 2026-07-18
 
 ### Added
