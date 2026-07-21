@@ -455,64 +455,6 @@ fn exif_interop_matches_the_oracle_marker_capture() {
 }
 
 #[test]
-fn facade_round_trip_through_a_jpeg_stream() {
-    // The gamut-metadata hookup this crate's raw-bytes surface is designed for: typed metadata →
-    // EncodedMetadata → with_* builders → JPEG → metadata() → MetadataBlocks → equal typed model.
-    use gamut_metadata::exif::{ByteOrder, Exif, ExifTag, Value};
-    use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
-    use gamut_metadata::xmp::{WellKnownNs, XmpMeta};
-    use gamut_metadata::{Metadata, MetadataBlock};
-
-    let mut exif = Exif::new(ByteOrder::LittleEndian);
-    exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
-    let mut xmp = XmpMeta::new();
-    xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-    let icc = IccProfile {
-        header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
-        tags: Vec::new(),
-    };
-    let typed = Metadata {
-        exif: Some(exif),
-        xmp: Some(xmp),
-        icc: Some(icc),
-    };
-
-    // Embed: EncodedMetadata's fields feed the builders directly (the exif block's "Exif\0\0"
-    // prefix is recognized and not doubled).
-    let enc = typed.encode().unwrap();
-    let pixels = vec![128u8; 64];
-    let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8).unwrap()).unwrap();
-    let jpeg = JpegEncoder::new()
-        .with_exif(enc.exif.as_deref().unwrap())
-        .with_xmp(enc.xmp.as_deref().unwrap())
-        .with_icc_profile(enc.icc.as_deref().unwrap())
-        .encode_to_vec(image)
-        .unwrap();
-
-    // Extract: metadata()'s stripped payloads are exactly what MetadataBlock borrows. The JPEG
-    // carriage must be lossless: parsing the read-back bytes equals parsing the embedded bytes
-    // directly (the constructed model itself differs only in serialization-filled header fields).
-    let read = metadata(&jpeg).unwrap();
-    let blocks = [
-        MetadataBlock::Exif(read.exif.as_deref().unwrap()),
-        MetadataBlock::Xmp(read.xmp.as_deref().unwrap()),
-        MetadataBlock::Icc(read.icc.as_deref().unwrap()),
-    ];
-    let through_jpeg = Metadata::from_blocks(&blocks).unwrap();
-    let direct = Metadata::from_blocks(&[
-        MetadataBlock::Exif(enc.exif.as_deref().unwrap()),
-        MetadataBlock::Xmp(enc.xmp.as_deref().unwrap()),
-        MetadataBlock::Icc(enc.icc.as_deref().unwrap()),
-    ])
-    .unwrap();
-    assert_eq!(through_jpeg, direct);
-    assert_eq!(
-        through_jpeg.exif.as_ref().and_then(|e| e.make()),
-        Some("gamut")
-    );
-}
-
-#[test]
 fn malformed_streams_are_rejected() {
     // Missing SOI.
     assert!(matches!(

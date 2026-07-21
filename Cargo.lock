@@ -756,7 +756,6 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-dsp",
- "gamut-metadata",
  "libjpeg-oracle",
 ]
 
@@ -825,7 +824,6 @@ name = "gamut-tonemap"
 version = "1.0.0"
 dependencies = [
  "divan",
- "gamut-color",
  "gamut-core",
 ]
 

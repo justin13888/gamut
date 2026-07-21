@@ -520,24 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn reinhard_matches_gamut_color_pq_step() {
-        // gamut-color's bt2020_pq_to_sdr normalizes PQ nits by the HDR reference white, then applies
-        // the same Reinhard step L/(1+L). Our Reinhard must agree, sample for sample — proving the
-        // two crates' implementations are consistent without sharing code.
-        use gamut_color::transfer::{bt2020_pq_to_sdr, pq_eotf};
-        use gamut_core::luminance::HDR_REFERENCE_WHITE_NITS;
-        for &signal in &[0.1_f64, 0.25, 0.5, 0.75, 1.0] {
-            let l = pq_eotf(signal) / HDR_REFERENCE_WHITE_NITS;
-            let ours = Reinhard.map(l as f32);
-            let theirs = bt2020_pq_to_sdr(signal) as f32;
-            assert!(
-                close_eps(ours, theirs, 1e-6),
-                "signal {signal}: {ours} vs {theirs}"
-            );
-        }
-    }
-
-    #[test]
     fn exposure_scales_by_gain() {
         let c = Exposure::new(2.0).expect("positive gain");
         assert_eq!(c.map(0.0), 0.0);

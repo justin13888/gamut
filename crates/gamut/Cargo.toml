@@ -104,3 +104,7 @@ all = [
     "tonemap",
     "codec-abi",
 ]
+
+[[test]]
+name = "interoperability"
+required-features = ["jpeg", "metadata", "primitives", "tonemap"]

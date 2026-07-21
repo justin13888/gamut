@@ -299,30 +299,23 @@ pub(crate) fn frame_header(data: &[u8]) -> Result<(JpegProcess, &[u8])> {
 /// `MetadataBlock` borrows) directly. Marked `#[non_exhaustive]` so carriers (e.g. APP13 IPTC) can
 /// be added without a breaking change.
 ///
-/// # Example: feeding the `gamut-metadata` facade
+/// # Example
 ///
-/// The payloads borrow straight into the facade's blocks — no re-framing needed:
+/// The extracted payload is byte-for-byte identical to the one given to the encoder. It can then
+/// be borrowed directly by a typed metadata facade without re-framing:
 ///
 /// ```
 /// use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef};
 /// use gamut_jpeg::JpegEncoder;
-/// use gamut_metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
-/// use gamut_metadata::{Metadata, MetadataBlock};
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let icc = IccProfile {
-///     header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
-///     tags: Vec::new(),
-/// }
-/// .to_bytes()?;
+/// let icc = b"opaque ICC profile bytes";
 /// let pixels = vec![0u8; 64];
 /// let image = ImageRef::<Gray8>::new(&pixels, Dimensions::new(8, 8)?)?;
-/// let jpeg = JpegEncoder::new().with_icc_profile(&icc).encode_to_vec(image)?;
+/// let jpeg = JpegEncoder::new().with_icc_profile(icc).encode_to_vec(image)?;
 ///
 /// let meta = gamut_jpeg::metadata(&jpeg)?;
-/// let blocks: Vec<MetadataBlock> = meta.icc.as_deref().map(MetadataBlock::Icc).into_iter().collect();
-/// let typed = Metadata::from_blocks(&blocks)?;
-/// assert!(typed.icc.is_some());
+/// assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()));
 /// # Ok(())
 /// # }
 /// ```

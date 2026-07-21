@@ -6,7 +6,9 @@
 # plus GitHub release. It also rewrites the internal `{ version = "..." }` dependency
 # requirements when a dependency bumps, and publishes in dependency-correct order (e.g.
 # gamut-core before gamut-color before gamut-avif before gamut), so the crates.io
-# "dependency must already be published" constraint is handled for us.
+# "dependency must already be published" constraint is handled for us. release-plz deliberately
+# ignores dev-only edges; `mise run check-release-deps` keeps cross-crate interoperability tests at
+# a layer with real normal/build edges so its release graph matches every packaged requirement.
 
 [workspace]
 # Refresh the whole `Cargo.lock` (not just workspace members) on a release run.
@@ -14,7 +16,7 @@ dependencies_update = true
 # Create a GitHub release and tag for each published version.
 git_release_enable = true
 git_tag_enable = true
-# All 17 crates publish to crates.io by default — this reserves the `gamut-*`
+# All workspace crates publish to crates.io by default — this reserves the `gamut-*`
 # namespace. To stop distributing a crate via crates.io later (e.g. move gamut-wasm
 # to npm or gamut-ffi to compiled artifacts), add a `[[package]]` block with
 # `publish = false`.

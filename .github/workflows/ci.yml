@@ -57,6 +57,8 @@ jobs:
         run: mise run fmt-check
       - name: gamut-ffi feature sync
         run: mise run check-ffi-features
+      - name: Release dependency graph
+        run: mise run check-release-deps
       - name: Check PR commit messages
         # Only PRs have a base..head range; validate just the PR's own commits so the pre-existing
         # non-conventional history on master doesn't fail the check.

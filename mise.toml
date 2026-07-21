@@ -177,6 +177,35 @@ run = [
 description = "Mutation testing of one crate, e.g. `mise run mutants-crate gamut-bitstream`"
 run = "cargo mutants -p {{arg(name='crate')}}"
 
+# release-plz orders normal and build dependencies, but deliberately ignores ordinary
+# dev-dependencies. A versioned dev-only edge between publishable workspace crates can therefore
+# make a major bump unpublishable: Cargo records the new requirement in the packaged manifest,
+# while release-plz may try the dependent first. Cross-crate interoperability tests belong in a
+# package (normally the gamut umbrella) that has real dependency edges to both sides.
+[tasks.check-release-deps]
+description = "Reject publishable dev-only workspace edges that release-plz cannot order"
+run = '''cargo metadata --no-deps --format-version 1 | jq -r -e '
+  (.workspace_members | map({key: ., value: true}) | from_entries) as $members
+  | [.packages[] | select($members[.id]) | select(.publish != [])] as $publishable
+  | ($publishable | map({key: .name, value: true}) | from_entries) as $names
+  | [
+      $publishable[] as $package
+      | $package.dependencies[] as $dependency
+      | select($dependency.kind == "dev")
+      | select($dependency.name != $package.name)
+      | select($names[$dependency.name])
+      | select([
+          $package.dependencies[]
+          | select(.name == $dependency.name and (.kind == null or .kind == "build"))
+        ] | length == 0)
+      | "\($package.name) -> \($dependency.name)"
+    ] as $violations
+  | if $violations | length == 0
+    then "release dependency graph has no dev-only workspace edges"
+    else error("publishable dev-only workspace dependencies are invisible to release-plz:\n\($violations | join("\n"))")
+    end
+' '''
+
 # gamut-ffi's feature table must strictly mirror gamut's (issue #242): identical feature-name
 # set, each feature forwarding the same-named gamut feature, and `all`/`default` member-for-member
 # equal. Metadata-only, near-free; CI runs it in the lint job.

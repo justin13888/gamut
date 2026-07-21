@@ -180,3 +180,9 @@ automated by release-plz from conventional-commit history — write conventional
 (enforced by convco via the `commit-msg` hook and CI) and don't hand-edit versions for
 routine changes. `mise run versions` lists every crate's current version; `mise run bump
 <crate> <level>` is a manual escape hatch.
+
+Release ordering follows normal and build dependency edges; release-plz deliberately ignores
+dev-only edges. A publishable crate must therefore not dev-depend on another distinct publishable
+workspace crate unless it also has a normal/build dependency on that crate. Put cross-crate
+interoperability tests at an integrating layer such as the `gamut` umbrella instead. `mise run
+check-release-deps` enforces this before a version bump reaches the release workflow.
