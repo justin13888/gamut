@@ -35,7 +35,12 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   libwebp recovers gamut's exact alpha and gamut recovers libwebp's. Alpha is a flagship still-image
   feature; `VP8X` is its enabler.
 - **M4** — Color & metadata (**in scope**, embed on encode + preserve on decode): `ICCP` ICC
-  profiles, `EXIF` / `XMP ` metadata, unknown-chunk round-trip preservation.
+  profiles and `EXIF` / `XMP ` metadata are ✅ **done** (issue #302) — `WebpEncoder::with_icc_profile`
+  / `with_exif` / `with_xmp` embed the payloads verbatim (promoting a simple file to `VP8X` and
+  deriving the feature flags from the chunks present), and the `gamut_webp::metadata` free function
+  reads them back without decoding pixels; libwebp's own muxer is the oracle in both directions.
+  Still open in this milestone: read-side chunk-order enforcement and unknown-chunk round-trip
+  preservation.
 - **M5** — Animation: `ANIM` / `ANMF` — **out of scope** (decision 2026-06-09). Multi-frame
   sequences fall outside the image-first charter and the single-image `gamut_core` traits; WebP
   animation needs no codec work (each frame is an independent keyframe) but does need a non-trait
@@ -88,9 +93,10 @@ Owner: [`gamut-riff`](../gamut-riff).
 | `VP8X` extended header: feature flags + 24-bit canvas W/H (1-based) | §2.7 | ✅ | M3 |
 | `ALPH` alpha chunk: preprocessing/filter/compression + bitstream | §2.7.1 (Alpha) | ✅ | M3 |
 | simple→extended promotion (emit `VP8X` when a feature needs it) | §2.7 | ✅ | M3 |
-| `ICCP` color profile chunk | §2.7.2 | ☐ | M4 |
-| `EXIF` / `XMP ` metadata chunks | §2.7.3 | ☐ | M4 |
-| chunk ordering enforcement (reconstruction chunks in canonical order) | §2.7 | ☐ | M4 |
+| `ICCP` color profile chunk | §2.7.2 | ✅ | M4 |
+| `EXIF` / `XMP ` metadata chunks | §2.7.3 | ✅ | M4 |
+| canonical chunk order on **write** (`VP8X`, `ICCP`, image data, `EXIF`, `XMP `) | §2.7 | ✅ | M4 |
+| chunk ordering enforcement on **read** (reject out-of-order reconstruction chunks) | §2.7 | ☐ | M4 |
 | `ANIM` global animation parameters (bg color, loop count) | §2.7.1 (Animation) | ⊘ | M5 |
 | `ANMF` per-frame chunk + frame disposal/blend, canvas assembly | §2.7.1 (Animation) | ⊘ | M5 |
 | unknown-chunk passthrough (preserve order) | §2.7.4 | ☐ | M4 |
@@ -270,6 +276,8 @@ Owner: [`gamut-webp`](.) + [`gamut-cli`](../gamut-cli).
 | tier-1 oracle: internal forward/inverse round-trips (transforms, coders) | — | ✅ | M0 |
 | tier-2 oracle: hermetic native decoder reproduces encoder output | — | ✅ | M0 |
 | tier-3 oracle: `libwebp-sys` differential (enc→libwebp-dec, libwebp-enc→dec) | — | ✅ | M0 |
+| embedded-metadata API (`metadata` / `WebpMetadata`; `with_icc_profile`/`with_exif`/`with_xmp`) | issue #302 | ✅ | M4 |
+| tier-3 oracle: libwebpmux metadata differential (gamut↔libwebp `ICCP`/`EXIF`/`XMP `, flags + order) | — | ✅ | M4 |
 | CLI `gamut convert … .webp` (encode) + `.webp` decode input | gamut-cli | ✅ | M0 |
 | codestream backend registries (`WebpCodestreamDecoder`/`WebpCodestreamEncoder`, push order + built-in tails) | issue #275 | ✅ | M6 |
 | `gamut-codec-abi` adapters (`AbiDecoderBackend` / `AbiEncoderBackend`, `VP8 `/`VP8L` codec ids) | issue #241 | ✅ | M6 |
