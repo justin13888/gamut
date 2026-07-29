@@ -107,4 +107,4 @@ all = [
 
 [[test]]
 name = "interoperability"
-required-features = ["jpeg", "metadata", "primitives", "tonemap"]
+required-features = ["jpeg", "metadata", "primitives", "tonemap", "webp"]
