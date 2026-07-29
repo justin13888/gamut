@@ -3,14 +3,18 @@
 //!
 //! Both the lossless **VP8L** path (see [`crate::vp8l::encoder`]) and the lossy **VP8** path are
 //! implemented, via the [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) and `EncodeImage<Rgba8>`
-//! impls; transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk.
+//! impls; transparent lossy images use the extended (`VP8X`) format with a raw `ALPH` alpha chunk,
+//! as does any image carrying embedded metadata.
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8, Rgba8};
-use gamut_riff::{FourCc, Vp8xHeader, write_extended, write_simple_lossless, write_simple_lossy};
+use gamut_riff::{
+    FourCc, MetadataChunks, Vp8xHeader, write_extended_with_metadata, write_simple_lossless,
+    write_simple_lossy,
+};
 
 use crate::alpha;
 use crate::backend::{
@@ -34,6 +38,10 @@ fn quality_to_quant(quality: u8) -> u8 {
 /// Construct with [`WebpEncoder::new`] (lossless), [`WebpEncoder::lossless`], or
 /// [`WebpEncoder::lossy`], then encode via the [`EncodeImage`](gamut_core::EncodeImage) trait.
 ///
+/// Embedded metadata is attached with [`with_exif`](Self::with_exif) / [`with_xmp`](Self::with_xmp)
+/// / [`with_icc_profile`](Self::with_icc_profile), which promote the output to the extended (`VP8X`)
+/// format automatically.
+///
 /// The codestream itself may be produced by a pluggable backend installed with
 /// [`push_backend`](Self::push_backend); with none installed (the default) the crate's own
 /// `vp8`/`vp8l` encoders produce byte-identical output to before the seam existed. See
@@ -42,15 +50,25 @@ fn quality_to_quant(quality: u8) -> u8 {
 pub struct WebpEncoder {
     /// Encoder configuration (mode + quality).
     config: WebpConfig,
+    /// The `EXIF` chunk payload to embed, verbatim.
+    exif: Option<Vec<u8>>,
+    /// The `XMP ` chunk payload to embed, verbatim.
+    xmp: Option<Vec<u8>>,
+    /// The `ICCP` chunk payload (ICC colour profile) to embed, verbatim.
+    icc: Option<Vec<u8>>,
     /// Pluggable codestream encoders, tried in push order ahead of the built-in tails.
     backends: Vec<SharedEncoder>,
 }
 
 impl fmt::Debug for WebpEncoder {
-    /// Renders the config plus the number of installed backends (a backend need not be `Debug`).
+    /// Renders the config plus the metadata payloads' byte lengths and the number of installed
+    /// backends (a backend need not be `Debug`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("WebpEncoder")
             .field("config", &self.config)
+            .field("exif", &self.exif.as_ref().map(Vec::len))
+            .field("xmp", &self.xmp.as_ref().map(Vec::len))
+            .field("icc", &self.icc.as_ref().map(Vec::len))
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -77,8 +95,44 @@ impl WebpEncoder {
                 mode: WebpMode::Lossy,
                 quality,
             },
-            backends: Vec::new(),
+            ..Self::default()
         }
+    }
+
+    /// Embeds Exif metadata as an `EXIF` chunk (RFC 9649 §2.7.3), promoting the output to the
+    /// extended (`VP8X`) format and setting the Exif feature flag.
+    ///
+    /// `exif` is stored **verbatim**: a WebP `EXIF` chunk carries the bare payload — unlike a JPEG
+    /// APP1 segment, there is no `"Exif\0\0"` signature to add or strip — so [`crate::metadata`]
+    /// reads back exactly these bytes. Calling this twice keeps the last payload.
+    #[must_use]
+    pub fn with_exif(mut self, exif: &[u8]) -> Self {
+        self.exif = Some(exif.to_vec());
+        self
+    }
+
+    /// Embeds an XMP packet as an `XMP ` chunk (RFC 9649 §2.7.3), promoting the output to the
+    /// extended (`VP8X`) format and setting the XMP feature flag.
+    ///
+    /// Takes bytes rather than `&str` because a packet may open with a BOM. The payload is stored
+    /// verbatim, so [`crate::metadata`] reads back exactly these bytes. Calling this twice keeps the
+    /// last payload.
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: &[u8]) -> Self {
+        self.xmp = Some(xmp.to_vec());
+        self
+    }
+
+    /// Embeds an ICC colour profile as an `ICCP` chunk (RFC 9649 §2.7.2), promoting the output to
+    /// the extended (`VP8X`) format and setting the ICC feature flag.
+    ///
+    /// The profile is stored verbatim and placed before the image data, as the spec requires, so
+    /// [`crate::metadata`] reads back exactly these bytes. With no profile embedded, readers assume
+    /// sRGB. Calling this twice keeps the last payload.
+    #[must_use]
+    pub fn with_icc_profile(mut self, profile: &[u8]) -> Self {
+        self.icc = Some(profile.to_vec());
+        self
     }
 
     /// Installs a codestream encoder backend, returning `&mut self` so pushes chain.
@@ -127,6 +181,59 @@ impl WebpEncoder {
         self.config
     }
 
+    /// Borrows the configured metadata payloads for the container writer.
+    fn metadata_chunks(&self) -> MetadataChunks<'_> {
+        MetadataChunks {
+            icc: self.icc.as_deref(),
+            exif: self.exif.as_deref(),
+            xmp: self.xmp.as_deref(),
+        }
+    }
+
+    /// Wraps a coded `bitstream` in a WebP file (RFC 9649 §2.5-§2.7).
+    ///
+    /// With nothing that needs the extended format — no metadata and no separate `ALPH` chunk — this
+    /// is the simple format: the `RIFF`/`WEBP` header plus the lone `VP8 `/`VP8L` chunk. Otherwise
+    /// the file is promoted to extended, and the chunks go out in the spec's canonical order:
+    /// `VP8X`, `ICCP`, `ALPH`, the bitstream, `EXIF`, `XMP `.
+    ///
+    /// `has_alpha` records transparency for the `VP8X` feature flag independently of `alph`, because
+    /// a `VP8L` bitstream carries its own alpha and so needs no `ALPH` chunk.
+    fn wrap(
+        &self,
+        dims: Dimensions,
+        codestream: WebpCodestream,
+        bitstream: &[u8],
+        alph: Option<&[u8]>,
+        has_alpha: bool,
+    ) -> Vec<u8> {
+        let metadata = self.metadata_chunks();
+        if metadata.is_empty() && alph.is_none() {
+            return match codestream {
+                WebpCodestream::Vp8 => write_simple_lossy(bitstream),
+                WebpCodestream::Vp8l => write_simple_lossless(bitstream),
+            };
+        }
+        let mut image_data: Vec<(FourCc, &[u8])> = Vec::with_capacity(2);
+        if let Some(alph) = alph {
+            image_data.push((FourCc::ALPH, alph));
+        }
+        image_data.push((
+            match codestream {
+                WebpCodestream::Vp8 => FourCc::VP8,
+                WebpCodestream::Vp8l => FourCc::VP8L,
+            },
+            bitstream,
+        ));
+        let header = Vp8xHeader {
+            alpha: has_alpha,
+            canvas_width: dims.width,
+            canvas_height: dims.height,
+            ..Default::default()
+        };
+        write_extended_with_metadata(&header, &metadata, &image_data)
+    }
+
     /// Encodes interleaved 8-bit RGB `pixels` (row-major) of `dims`, appending the WebP file to
     /// `out`. Backs the [`EncodeImage<Rgb8>`] impl; the buffer is already validated by [`ImageRef`].
     fn encode_rgb8_inner(
@@ -135,47 +242,49 @@ impl WebpEncoder {
         dims: Dimensions,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        match self.config.mode {
+        let file = match self.config.mode {
             WebpMode::Lossless => {
                 let argb: Vec<u32> = pixels
                     .chunks_exact(3)
                     .map(|p| make_argb(0xff, p[0], p[1], p[2]))
                     .collect();
                 let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
-                let file = write_simple_lossless(&bitstream);
-                let written = file.len();
-                out.extend_from_slice(&file);
-                Ok(written)
+                self.wrap(dims, WebpCodestream::Vp8l, &bitstream, None, false)
             }
             WebpMode::Lossy => {
                 // WebP/VP8 is limited-range BT.601 (what libwebp + browsers decode); see ColorRange.
                 let yuv = Yuv420::from_rgb8(pixels, dims.width, dims.height, ColorRange::Limited)?;
                 let payload = self.encode_vp8_codestream(&yuv, dims)?;
-                let file = write_simple_lossy(&payload);
-                let written = file.len();
-                out.extend_from_slice(&file);
-                Ok(written)
+                self.wrap(dims, WebpCodestream::Vp8, &payload, None, false)
             }
-        }
+        };
+        let written = file.len();
+        out.extend_from_slice(&file);
+        Ok(written)
     }
 
     /// Encodes interleaved 8-bit RGBA `pixels` (row-major) of `dims`, appending the WebP file to
-    /// `out`. A fully opaque image produces a simple file; a transparent one uses the extended
-    /// (`VP8X`) format with a raw `ALPH` alpha chunk (lossy color) or in-bitstream alpha (lossless).
-    /// Backs the [`EncodeImage<Rgba8>`] impl; the buffer is already validated by [`ImageRef`].
+    /// `out`. A fully opaque image with no metadata produces a simple file; a transparent one uses
+    /// the extended (`VP8X`) format with a raw `ALPH` alpha chunk (lossy color) or in-bitstream alpha
+    /// (lossless). Backs the [`EncodeImage<Rgba8>`] impl; the buffer is already validated by
+    /// [`ImageRef`].
     fn encode_rgba8_inner(
         &self,
         pixels: &[u8],
         dims: Dimensions,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
+        let transparent = pixels.chunks_exact(4).any(|p| p[3] != 0xff);
         let file = match self.config.mode {
             WebpMode::Lossless => {
                 let argb: Vec<u32> = pixels
                     .chunks_exact(4)
                     .map(|p| make_argb(p[3], p[0], p[1], p[2]))
                     .collect();
-                write_simple_lossless(&self.encode_vp8l_codestream(&argb, dims)?)
+                let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
+                // A VP8L bitstream carries its own alpha, so there is no `ALPH` chunk — but an
+                // extended file must still advertise the transparency in its `VP8X` header.
+                self.wrap(dims, WebpCodestream::Vp8l, &bitstream, None, transparent)
             }
             WebpMode::Lossy => {
                 let rgb: Vec<u8> = pixels
@@ -184,19 +293,13 @@ impl WebpEncoder {
                     .collect();
                 let yuv = Yuv420::from_rgb8(&rgb, dims.width, dims.height, ColorRange::Limited)?;
                 let vp8 = self.encode_vp8_codestream(&yuv, dims)?;
-                if pixels.chunks_exact(4).all(|p| p[3] == 0xff) {
-                    write_simple_lossy(&vp8)
-                } else {
+                if transparent {
                     let alpha: Vec<u8> = pixels.chunks_exact(4).map(|p| p[3]).collect();
                     let alph =
                         alpha::write_alph(&alpha, dims.width as usize, dims.height as usize)?;
-                    let header = Vp8xHeader {
-                        alpha: true,
-                        canvas_width: dims.width,
-                        canvas_height: dims.height,
-                        ..Default::default()
-                    };
-                    write_extended(&header, &[(FourCc::ALPH, &alph), (FourCc::VP8, &vp8)])
+                    self.wrap(dims, WebpCodestream::Vp8, &vp8, Some(&alph), true)
+                } else {
+                    self.wrap(dims, WebpCodestream::Vp8, &vp8, None, false)
                 }
             }
         };
