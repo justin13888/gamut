@@ -38,6 +38,12 @@ a typed `ImageRef` and returning a typed `ImageBuf`, for RGB and RGBA:
   segmentation, token partitions, and skip); `WebpDecoder` decodes any conformant key frame.
 - **Alpha** — `EncodeImage<Rgba8>` / `DecodeImage<Rgba8>`. A transparent lossy image uses the extended
   (`VP8X`) format with an `ALPH` chunk (raw or lossless); an opaque one stays a simple file.
+- **Embedded metadata** — `WebpEncoder::with_icc_profile` / `with_exif` / `with_xmp` embed the `ICCP`,
+  `EXIF`, and `XMP ` chunks; the `gamut_webp::metadata` free function reads them back out of any WebP
+  file without decoding pixels. Payloads are carried **verbatim** — never parsed or reserialized — so
+  they can be borrowed straight into [`gamut-metadata`](../gamut-metadata)'s `MetadataBlock`.
+  Embedding promotes a simple file to the extended format, derives the `VP8X` feature flags from the
+  chunks present, and emits everything in the spec's canonical order.
 
 ### Pluggable codestream backends
 

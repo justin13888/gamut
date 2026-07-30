@@ -417,3 +417,155 @@ pub fn photo_like_rgba(width: u32, height: u32, seed: u32) -> Vec<u8> {
     }
     rgba
 }
+
+/// The metadata a WebP file carries, as libwebp's **muxer** reads it: the three chunk payloads plus
+/// the raw `VP8X` feature-flag word. This is the reference view of the metadata surface — libwebpmux
+/// is the library behind `webpmux` and `cwebp -metadata all`.
+pub struct LibwebpMetadata {
+    /// The `ICCP` chunk payload (ICC colour profile), or `None` if libwebp found no such chunk.
+    pub icc: Option<Vec<u8>>,
+    /// The `EXIF` chunk payload.
+    pub exif: Option<Vec<u8>>,
+    /// The `XMP ` chunk payload.
+    pub xmp: Option<Vec<u8>>,
+    /// libwebp's decoded `VP8X` feature flags (`ICCP_FLAG`, `EXIF_FLAG`, `XMP_FLAG`, `ALPHA_FLAG`).
+    pub feature_flags: u32,
+}
+
+/// Borrows `bytes` as a libwebp `WebPData` (a pointer/length pair, no ownership transfer).
+fn as_webp_data(bytes: &[u8]) -> libwebp_sys::WebPData {
+    libwebp_sys::WebPData {
+        bytes: bytes.as_ptr(),
+        size: bytes.len(),
+    }
+}
+
+/// Copies the bytes a `WebPData` points at into a `Vec`, without taking ownership.
+///
+/// # Safety
+///
+/// `data.bytes` must be valid for `data.size` bytes (or null, which yields an empty `Vec`).
+unsafe fn copy_webp_data(data: &libwebp_sys::WebPData) -> Vec<u8> {
+    if data.bytes.is_null() || data.size == 0 {
+        // A zero-length payload may come back with a null pointer, which `from_raw_parts` forbids.
+        return Vec::new();
+    }
+    // SAFETY: the caller guarantees `bytes` is valid for `size` bytes.
+    unsafe { slice::from_raw_parts(data.bytes, data.size) }.to_vec()
+}
+
+/// Copies a libwebp-**allocated** `WebPData` out to a `Vec` and releases it.
+///
+/// # Safety
+///
+/// `data` must be a `WebPData` libwebp allocated for the caller to free — `WebPMuxAssemble`'s output,
+/// not `WebPMuxGetChunk`'s, which returns a reference into the mux that must NOT be freed.
+unsafe fn take_webp_data(data: &mut libwebp_sys::WebPData) -> Vec<u8> {
+    // SAFETY: delegated to the caller's guarantee on `data`.
+    let out = unsafe { copy_webp_data(data) };
+    // SAFETY: as above — `WebPDataClear` frees `bytes` (a no-op for null) and re-initialises it.
+    unsafe { libwebp_sys::WebPDataClear(data) };
+    out
+}
+
+/// Rebuilds `webp` through libwebp's muxer with the given metadata chunks attached, returning the
+/// assembled file. This is exactly how `cwebp -metadata all` embeds `ICCP`/`EXIF`/`XMP ` — the muxer
+/// promotes the file to the extended format, sets the `VP8X` flags, and orders the chunks itself — so
+/// the result is the reference fixture for gamut's decode side.
+///
+/// Panics (these are tests) if libwebp reports an error.
+#[must_use]
+pub fn libwebp_mux_set_metadata(
+    webp: &[u8],
+    icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
+    xmp: Option<&[u8]>,
+) -> Vec<u8> {
+    // SAFETY: `WebPMuxNew` returns an owned mux deleted below on every path. Each `WebPData` borrows
+    // a live slice for the duration of the call and `copy_data = 1` makes libwebp copy the bytes, so
+    // no borrow outlives this scope. `assembled` is libwebp-allocated and freed by `take_webp_data`.
+    unsafe {
+        let mux = libwebp_sys::WebPMuxNew();
+        assert!(!mux.is_null(), "WebPMuxNew failed");
+        let image = as_webp_data(webp);
+        let status = libwebp_sys::WebPMuxSetImage(mux, &image, 1);
+        assert_eq!(
+            status,
+            libwebp_sys::WEBP_MUX_OK,
+            "WebPMuxSetImage failed ({status})"
+        );
+        for (fourcc, payload) in [
+            (c"ICCP", icc),
+            (c"EXIF", exif),
+            // libwebp names the chunk "XMP " with its significant trailing space.
+            (c"XMP ", xmp),
+        ] {
+            let Some(payload) = payload else { continue };
+            let data = as_webp_data(payload);
+            let status = libwebp_sys::WebPMuxSetChunk(mux, fourcc.as_ptr(), &data, 1);
+            assert_eq!(
+                status,
+                libwebp_sys::WEBP_MUX_OK,
+                "WebPMuxSetChunk({fourcc:?}) failed ({status})"
+            );
+        }
+        let mut assembled = libwebp_sys::WebPData {
+            bytes: std::ptr::null(),
+            size: 0,
+        };
+        let status = libwebp_sys::WebPMuxAssemble(mux, &mut assembled);
+        libwebp_sys::WebPMuxDelete(mux);
+        assert_eq!(
+            status,
+            libwebp_sys::WEBP_MUX_OK,
+            "WebPMuxAssemble failed ({status})"
+        );
+        take_webp_data(&mut assembled)
+    }
+}
+
+/// Reads a WebP file's metadata chunks and `VP8X` feature flags with libwebp's muxer — the reverse
+/// direction of [`libwebp_mux_set_metadata`], used to check that gamut's *encoder* produces chunks
+/// and flags the reference implementation agrees with.
+///
+/// Panics (these are tests) if libwebp cannot parse the file.
+#[must_use]
+pub fn libwebp_mux_read_metadata(webp: &[u8]) -> LibwebpMetadata {
+    // SAFETY: `WebPMuxCreate` parses the borrowed `bitstream` (with `copy_data = 1`, into memory it
+    // owns) and returns an owned mux deleted before returning. `WebPMuxGetChunk` fills a `WebPData`
+    // *referencing* the mux's own storage — the caller must not free it, so it is only copied out,
+    // and the copy happens while the mux is still alive.
+    unsafe {
+        let bitstream = as_webp_data(webp);
+        let mux = libwebp_sys::WebPMuxCreate(&bitstream, 1);
+        assert!(!mux.is_null(), "WebPMuxCreate rejected the file");
+        let get = |fourcc: &std::ffi::CStr| -> Option<Vec<u8>> {
+            let mut data = libwebp_sys::WebPData {
+                bytes: std::ptr::null(),
+                size: 0,
+            };
+            match libwebp_sys::WebPMuxGetChunk(mux, fourcc.as_ptr(), &mut data) {
+                libwebp_sys::WEBP_MUX_OK => Some(copy_webp_data(&data)),
+                libwebp_sys::WEBP_MUX_NOT_FOUND => None,
+                status => panic!("WebPMuxGetChunk({fourcc:?}) failed ({status})"),
+            }
+        };
+        let icc = get(c"ICCP");
+        let exif = get(c"EXIF");
+        let xmp = get(c"XMP ");
+        let mut feature_flags: u32 = 0;
+        let status = libwebp_sys::WebPMuxGetFeatures(mux, &mut feature_flags);
+        libwebp_sys::WebPMuxDelete(mux);
+        assert_eq!(
+            status,
+            libwebp_sys::WEBP_MUX_OK,
+            "WebPMuxGetFeatures failed ({status})"
+        );
+        LibwebpMetadata {
+            icc,
+            exif,
+            xmp,
+            feature_flags,
+        }
+    }
+}

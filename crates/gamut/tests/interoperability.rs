@@ -56,6 +56,67 @@ fn metadata_facade_round_trips_through_a_jpeg_stream() {
 }
 
 #[test]
+fn metadata_facade_round_trips_through_a_webp_file() {
+    // The WebP counterpart of the JPEG check above. WebP carries each block as its own RIFF chunk
+    // (`ICCP` / `EXIF` / `XMP `) with no signature framing or 64 KiB segmentation, so the facade's
+    // encoded bytes must reappear verbatim — this is the seam a downstream caller migrating off
+    // libwebp-sys depends on.
+    use gamut::core::{ImageRef, Rgb8};
+    use gamut::metadata::exif::{ByteOrder, Exif, ExifTag, Value};
+    use gamut::metadata::icc::{ColorSpace, DeviceClass, IccProfile, ProfileHeader};
+    use gamut::metadata::xmp::{WellKnownNs, XmpMeta};
+    use gamut::metadata::{Metadata, MetadataBlock};
+    use gamut::webp::{WebpEncoder, metadata};
+
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
+    let mut xmp = XmpMeta::new();
+    xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
+    let typed = Metadata {
+        exif: Some(exif),
+        xmp: Some(xmp),
+        icc: Some(IccProfile {
+            header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
+            tags: Vec::new(),
+        }),
+    };
+
+    let encoded = typed.encode().unwrap();
+    let pixels = [64u8, 128, 192];
+    let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(1, 1).unwrap()).unwrap();
+    let mut file = Vec::new();
+    WebpEncoder::lossless()
+        .with_exif(encoded.exif.as_deref().unwrap())
+        .with_xmp(encoded.xmp.as_deref().unwrap())
+        .with_icc_profile(encoded.icc.as_deref().unwrap())
+        .encode_image(image, &mut file)
+        .unwrap();
+
+    let read = metadata(&file).unwrap();
+    assert_eq!(read.exif, encoded.exif, "EXIF payload is unmodified");
+    assert_eq!(read.xmp, encoded.xmp, "XMP payload is unmodified");
+    assert_eq!(read.icc, encoded.icc, "ICC payload is unmodified");
+
+    let through_webp = Metadata::from_blocks(&[
+        MetadataBlock::Exif(read.exif.as_deref().unwrap()),
+        MetadataBlock::Xmp(read.xmp.as_deref().unwrap()),
+        MetadataBlock::Icc(read.icc.as_deref().unwrap()),
+    ])
+    .unwrap();
+    assert_eq!(
+        through_webp.exif.as_ref().and_then(|value| value.make()),
+        Some("gamut")
+    );
+    assert_eq!(
+        through_webp
+            .xmp
+            .as_ref()
+            .and_then(|value| value.get_text(WellKnownNs::Xmp.uri(), "CreatorTool")),
+        Some("gamut")
+    );
+}
+
+#[test]
 fn reinhard_matches_the_color_pq_to_sdr_step() {
     use gamut::color::transfer::{bt2020_pq_to_sdr, pq_eotf};
     use gamut::core::luminance::HDR_REFERENCE_WHITE_NITS;

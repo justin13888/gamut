@@ -22,15 +22,26 @@
 //! The crate codes the single still image. Some container features are deliberately deferred or out
 //! of scope (see `STATUS.md` for the full matrix):
 //!
-//! - **Embedded metadata** — `ICCP` color profiles and `EXIF` / `XMP ` metadata are neither emitted
-//!   on encode nor surfaced on decode (such chunks are skipped). Planned once the `gamut-metadata`
-//!   facade lands (issue #34); the `gamut_core` still-image traits also carry no metadata channel yet.
+//! - **Unknown-chunk passthrough** — a chunk whose FourCC the container spec does not define is
+//!   ignored on decode and cannot be re-emitted, so a decode→encode cycle drops it (RFC 9649 §2.7.4
+//!   asks writers to preserve such chunks in their original order).
 //! - **Animation** — `ANIM` / `ANMF` multi-frame sequences are out of scope under the image-first
 //!   charter. Each frame is an independent key frame, but assembling them needs a non-trait API.
 //! - **Lossy quality** — the `0..=100` quality maps coarsely onto the VP8 base quantizer;
 //!   rate-distortion tuning is tracked in issue #32.
 //! - **Lossless** — always reproduces the input exactly and ignores the quality value; tuning
 //!   compression density is tracked in issue #31.
+//!
+//! # Embedded metadata
+//!
+//! The three metadata chunks the container defines round-trip **verbatim**: an ICC colour profile
+//! (`ICCP`) plus Exif and XMP metadata (`EXIF` / `XMP `). [`WebpEncoder::with_icc_profile`],
+//! [`WebpEncoder::with_exif`], and [`WebpEncoder::with_xmp`] embed them — promoting a simple file to
+//! the extended (`VP8X`) format, setting the matching feature flags, and emitting the chunks in the
+//! spec's canonical order — and the [`metadata`] free function reads them back out of any WebP file
+//! without decoding pixels. Payloads are never parsed or reserialized here, so they can be borrowed
+//! straight into `gamut-metadata`'s `MetadataBlock` (the still-image [`gamut_core`] traits carry no
+//! metadata channel, which is why this is a separate entry point rather than a decode result field).
 //!
 //! # Pluggable codestream backends
 //!
@@ -46,6 +57,7 @@
 mod config;
 mod decoder;
 mod encoder;
+mod metadata;
 
 pub mod alpha;
 pub mod backend;
@@ -61,3 +73,4 @@ pub use config::{WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::WebpEncoder;
 pub use gamut_core::Dimensions;
+pub use metadata::{WebpMetadata, metadata};

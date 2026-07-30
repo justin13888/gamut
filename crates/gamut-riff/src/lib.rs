@@ -6,7 +6,9 @@
 //!
 //! Byte layouts follow RFC 9649 (*WebP Image Format*) §2 and the Google *WebP Container*
 //! specification in `references/webp/`. The implemented surface — and the extended-format chunks
-//! still to come — is tracked in `gamut-webp/STATUS.md` section A.
+//! still to come — is tracked in `gamut-webp/STATUS.md` section A. Metadata chunks
+//! (`ICCP`/`EXIF`/`XMP `) are carried verbatim through [`MetadataChunks`] and
+//! [`write_extended_with_metadata`], never parsed or reserialized.
 //!
 //! # Example
 //!
@@ -30,7 +32,7 @@ pub use chunk::{CHUNK_HEADER_LEN, Chunk, ChunkHeader};
 pub use fourcc::FourCc;
 pub use reader::RiffReader;
 pub use webp::{
-    VP8X_PAYLOAD_LEN, Vp8xHeader, WebpChunkId, write_extended, write_simple_lossless,
-    write_simple_lossy,
+    MetadataChunks, VP8X_PAYLOAD_LEN, Vp8xHeader, WebpChunkId, write_extended,
+    write_extended_with_metadata, write_simple_lossless, write_simple_lossy,
 };
 pub use writer::RiffWriter;

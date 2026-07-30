@@ -1,13 +1,14 @@
 //! WebP-specific helpers over the generic RIFF layer: classifying WebP chunks, the [`Vp8xHeader`]
-//! extended-format feature header, and writing the simple (single-bitstream) and extended file
-//! formats (RFC 9649 §2.5-§2.7).
+//! extended-format feature header, the [`MetadataChunks`] passthrough for `ICCP`/`EXIF`/`XMP `, and
+//! writing the simple (single-bitstream) and extended file formats (RFC 9649 §2.5-§2.7).
 //!
-//! The remaining extended-format chunks (`ALPH`, `ANIM`/`ANMF`, metadata) are tracked in
-//! `gamut-webp/STATUS.md` section A and land with the alpha/animation milestones.
+//! The remaining extended-format chunks (`ANIM`/`ANMF`) are tracked in `gamut-webp/STATUS.md`
+//! section A and are out of scope under the image-first charter.
 
 use gamut_core::{Error, Result};
 
 use crate::fourcc::FourCc;
+use crate::reader::RiffReader;
 use crate::writer::RiffWriter;
 
 /// The number of bytes in a `VP8X` chunk payload (RFC 9649 §2.7).
@@ -100,6 +101,93 @@ pub fn write_extended(header: &Vp8xHeader, chunks: &[(FourCc, &[u8])]) -> Vec<u8
     w.finish()
 }
 
+/// The metadata chunks an extended WebP file may carry, **borrowed** rather than copied: the `ICCP`
+/// colour profile and the `EXIF` / `XMP ` metadata payloads (RFC 9649 §2.7.2-§2.7.3).
+///
+/// The container assigns these payloads no meaning — each is carried verbatim, so metadata survives
+/// a read/write cycle byte for byte with no reserialization. Use [`MetadataChunks::read`] to collect
+/// them from a file and [`write_extended_with_metadata`] to emit them in the spec's chunk order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MetadataChunks<'a> {
+    /// The `ICCP` chunk payload: an ICC colour profile. `None` means sRGB is assumed (§2.7.2).
+    pub icc: Option<&'a [u8]>,
+    /// The `EXIF` chunk payload: Exif metadata, carried bare (no `"Exif\0\0"` signature).
+    pub exif: Option<&'a [u8]>,
+    /// The `XMP ` chunk payload: an XMP packet.
+    pub xmp: Option<&'a [u8]>,
+}
+
+impl<'a> MetadataChunks<'a> {
+    /// Collects the metadata chunks of the WebP file in `data`, borrowing each payload in place.
+    ///
+    /// The spec allows at most one chunk of each kind and lets readers "ignore all except the first
+    /// one" (RFC 9649 §2.7.2-§2.7.3), so the **first** `ICCP` / `EXIF` / `XMP ` chunk wins. The
+    /// `VP8X` feature flags are advisory here: a payload is reported because its chunk is present,
+    /// never because a flag claims it is — so a flag set over a missing chunk yields `None`, and a
+    /// chunk a non-conformant writer left unflagged is still recovered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP file, or if a chunk's
+    /// declared size runs past the end of the data.
+    pub fn read(data: &'a [u8]) -> Result<Self> {
+        let mut found = Self::default();
+        for chunk in RiffReader::new(data)? {
+            let chunk = chunk?;
+            let slot = match WebpChunkId::from(chunk.fourcc) {
+                WebpChunkId::Iccp => &mut found.icc,
+                WebpChunkId::Exif => &mut found.exif,
+                WebpChunkId::Xmp => &mut found.xmp,
+                _ => continue,
+            };
+            slot.get_or_insert(chunk.payload);
+        }
+        Ok(found)
+    }
+
+    /// Whether no metadata chunk is present — i.e. nothing here forces a simple (single-bitstream)
+    /// file into the extended format.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.icc.is_none() && self.exif.is_none() && self.xmp.is_none()
+    }
+}
+
+/// Writes an extended WebP file carrying `metadata`, placing every chunk in the canonical order the
+/// spec mandates: `VP8X`, `ICCP`, the image data (an optional `ALPH` then the `VP8 `/`VP8L`
+/// bitstream), then `EXIF` and `XMP ` (RFC 9649 §2.7 — readers "SHOULD fail" when the chunks needed
+/// for reconstruction and colour correction are out of order, and metadata follows the image data).
+///
+/// The three metadata feature flags of `header` are **derived** from `metadata`, so a chunk can
+/// never be emitted without its flag nor a flag without its chunk; `alpha`, `animation`, and the
+/// canvas size are taken as given. Ordering *within* `image_data` is the caller's responsibility, as
+/// in [`write_extended`].
+#[must_use]
+pub fn write_extended_with_metadata(
+    header: &Vp8xHeader,
+    metadata: &MetadataChunks<'_>,
+    image_data: &[(FourCc, &[u8])],
+) -> Vec<u8> {
+    let header = Vp8xHeader {
+        icc_profile: metadata.icc.is_some(),
+        exif_metadata: metadata.exif.is_some(),
+        xmp_metadata: metadata.xmp.is_some(),
+        ..*header
+    };
+    let mut chunks: Vec<(FourCc, &[u8])> = Vec::with_capacity(image_data.len() + 3);
+    if let Some(icc) = metadata.icc {
+        chunks.push((FourCc::ICCP, icc));
+    }
+    chunks.extend_from_slice(image_data);
+    if let Some(exif) = metadata.exif {
+        chunks.push((FourCc::EXIF, exif));
+    }
+    if let Some(xmp) = metadata.xmp {
+        chunks.push((FourCc::XMP, xmp));
+    }
+    write_extended(&header, &chunks)
+}
+
 /// Identifies a WebP chunk by its FourCC, distinguishing the chunks defined by the WebP container
 /// spec from any unrecognized ("unknown") chunk that readers must ignore (RFC 9649 §2.5-§2.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,7 +253,6 @@ pub fn write_simple_lossy(vp8_bitstream: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reader::RiffReader;
 
     #[test]
     fn classifies_known_and_unknown_chunks() {
@@ -278,6 +365,255 @@ mod tests {
         assert_eq!(WebpChunkId::from(chunks[1].fourcc), WebpChunkId::Alpha);
         assert_eq!(WebpChunkId::from(chunks[2].fourcc), WebpChunkId::Vp8);
         assert_eq!(Vp8xHeader::from_payload(chunks[0].payload).unwrap(), h);
+    }
+
+    /// The chunk FourCCs of `file`, in file order.
+    fn chunk_ids(file: &[u8]) -> Vec<FourCc> {
+        RiffReader::new(file)
+            .unwrap()
+            .map(|c| c.unwrap().fourcc)
+            .collect()
+    }
+
+    /// The parsed `VP8X` feature header of an extended `file` (its first chunk).
+    fn vp8x_header_of(file: &[u8]) -> Vp8xHeader {
+        let first = RiffReader::new(file).unwrap().next().unwrap().unwrap();
+        assert_eq!(
+            first.fourcc,
+            FourCc::VP8X,
+            "an extended file opens with VP8X"
+        );
+        Vp8xHeader::from_payload(first.payload).unwrap()
+    }
+
+    #[test]
+    fn metadata_chunks_round_trip_in_canonical_order() {
+        // The spec's order for a still image: VP8X, ICCP, image data, EXIF, XMP — and every payload
+        // comes back byte-for-byte (odd lengths included, so the RIFF pad byte is not absorbed).
+        let (icc, exif, xmp) = (&[1u8, 2, 3][..], &[0xee; 4][..], &b"<x:xmpmeta/>"[..]);
+        let header = Vp8xHeader {
+            alpha: true,
+            canvas_width: 16,
+            canvas_height: 8,
+            ..Default::default()
+        };
+        let metadata = MetadataChunks {
+            icc: Some(icc),
+            exif: Some(exif),
+            xmp: Some(xmp),
+        };
+        let file = write_extended_with_metadata(
+            &header,
+            &metadata,
+            &[(FourCc::ALPH, &[9, 9]), (FourCc::VP8, &[0x9d, 0x01, 0x2a])],
+        );
+        assert_eq!(
+            chunk_ids(&file),
+            vec![
+                FourCc::VP8X,
+                FourCc::ICCP,
+                FourCc::ALPH,
+                FourCc::VP8,
+                FourCc::EXIF,
+                FourCc::XMP,
+            ]
+        );
+        assert_eq!(MetadataChunks::read(&file).unwrap(), metadata);
+    }
+
+    #[test]
+    fn write_extended_with_metadata_derives_the_feature_flags() {
+        // Each metadata flag follows its payload, not the caller's header, in **both** directions: a
+        // stale flag with no payload is cleared, and a payload the caller forgot to flag is still
+        // advertised. `alpha`, `animation`, and the canvas pass through untouched — the two headers
+        // below differ only in the three metadata flags, so comparing whole headers pins that too.
+        let all_flags = Vp8xHeader {
+            icc_profile: true,
+            exif_metadata: true,
+            xmp_metadata: true,
+            alpha: true,
+            animation: true,
+            canvas_width: 4,
+            canvas_height: 5,
+        };
+        let no_flags = Vp8xHeader {
+            icc_profile: false,
+            exif_metadata: false,
+            xmp_metadata: false,
+            ..all_flags
+        };
+        let all_payloads = MetadataChunks {
+            icc: Some(&[1]),
+            exif: Some(&[2]),
+            xmp: Some(&[3]),
+        };
+        let image: &[(FourCc, &[u8])] = &[(FourCc::VP8L, &[0x2f])];
+
+        let cleared = write_extended_with_metadata(&all_flags, &MetadataChunks::default(), image);
+        assert_eq!(
+            vp8x_header_of(&cleared),
+            no_flags,
+            "a stale flag must be cleared when nothing is embedded"
+        );
+        assert_eq!(
+            chunk_ids(&cleared),
+            vec![FourCc::VP8X, FourCc::VP8L],
+            "a stale flag must not conjure an empty chunk"
+        );
+
+        let advertised = write_extended_with_metadata(&no_flags, &all_payloads, image);
+        assert_eq!(
+            vp8x_header_of(&advertised),
+            all_flags,
+            "an embedded payload must be advertised even if the caller left its flag unset"
+        );
+    }
+
+    #[test]
+    fn write_extended_with_metadata_flags_each_chunk_independently() {
+        // One payload at a time: only that chunk's flag may be set, so the three assignments cannot be
+        // swapped or share a source.
+        let base = Vp8xHeader {
+            canvas_width: 2,
+            canvas_height: 2,
+            ..Default::default()
+        };
+        let image: &[(FourCc, &[u8])] = &[(FourCc::VP8L, &[0x2f])];
+        for (chunks, want) in [
+            (
+                MetadataChunks {
+                    icc: Some(&[1]),
+                    ..Default::default()
+                },
+                Vp8xHeader {
+                    icc_profile: true,
+                    ..base
+                },
+            ),
+            (
+                MetadataChunks {
+                    exif: Some(&[2]),
+                    ..Default::default()
+                },
+                Vp8xHeader {
+                    exif_metadata: true,
+                    ..base
+                },
+            ),
+            (
+                MetadataChunks {
+                    xmp: Some(&[3]),
+                    ..Default::default()
+                },
+                Vp8xHeader {
+                    xmp_metadata: true,
+                    ..base
+                },
+            ),
+        ] {
+            let file = write_extended_with_metadata(&base, &chunks, image);
+            assert_eq!(vp8x_header_of(&file), want, "flags for {chunks:?}");
+        }
+    }
+
+    #[test]
+    fn metadata_chunks_default_is_empty_and_writes_no_metadata() {
+        // With nothing to embed, the extended file is exactly `write_extended`'s output — the
+        // pre-metadata byte stream is preserved.
+        let empty = MetadataChunks::default();
+        assert!(empty.is_empty());
+        let header = Vp8xHeader {
+            alpha: true,
+            canvas_width: 2,
+            canvas_height: 2,
+            ..Default::default()
+        };
+        let image: &[(FourCc, &[u8])] = &[(FourCc::ALPH, &[1]), (FourCc::VP8, &[2])];
+        assert_eq!(
+            write_extended_with_metadata(&header, &empty, image),
+            write_extended(&header, image)
+        );
+    }
+
+    #[test]
+    fn is_empty_is_false_for_each_chunk_kind() {
+        // Each field must count towards emptiness on its own, so a promotion decision keyed on
+        // `is_empty` cannot miss a single-chunk file.
+        for chunks in [
+            MetadataChunks {
+                icc: Some(&[0]),
+                ..Default::default()
+            },
+            MetadataChunks {
+                exif: Some(&[0]),
+                ..Default::default()
+            },
+            MetadataChunks {
+                xmp: Some(&[0]),
+                ..Default::default()
+            },
+        ] {
+            assert!(!chunks.is_empty(), "{chunks:?} carries a payload");
+        }
+    }
+
+    #[test]
+    fn metadata_chunks_read_keeps_the_first_of_each_kind() {
+        // "Readers MAY ignore all except the first one" (§2.7.2-§2.7.3).
+        let mut w = RiffWriter::new();
+        w.write_chunk(FourCc::ICCP, b"first-icc");
+        w.write_chunk(FourCc::VP8L, &[0x2f]);
+        w.write_chunk(FourCc::EXIF, b"first-exif");
+        w.write_chunk(FourCc::EXIF, b"second-exif");
+        w.write_chunk(FourCc::ICCP, b"second-icc");
+        let file = w.finish();
+        let got = MetadataChunks::read(&file).unwrap();
+        assert_eq!(got.icc, Some(&b"first-icc"[..]));
+        assert_eq!(got.exif, Some(&b"first-exif"[..]));
+        assert_eq!(got.xmp, None);
+    }
+
+    #[test]
+    fn metadata_chunks_read_reports_presence_not_vp8x_flags() {
+        // A flag set over a missing chunk yields `None`; a chunk an unconformant writer left
+        // unflagged is still recovered. The flags never fabricate or suppress a payload.
+        let lying = Vp8xHeader {
+            icc_profile: true,
+            exif_metadata: true,
+            xmp_metadata: true,
+            canvas_width: 1,
+            canvas_height: 1,
+            ..Default::default()
+        };
+        let mut w = RiffWriter::new();
+        w.write_chunk(FourCc::VP8X, &lying.to_payload());
+        w.write_chunk(FourCc::VP8L, &[0x2f]);
+        w.write_chunk(FourCc::XMP, b"<x/>");
+        let file = w.finish();
+        assert_eq!(
+            MetadataChunks::read(&file).unwrap(),
+            MetadataChunks {
+                icc: None,
+                exif: None,
+                xmp: Some(&b"<x/>"[..]),
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_chunks_read_is_empty_for_a_simple_file() {
+        let file = write_simple_lossless(&[0x2f, 1, 2]);
+        assert!(MetadataChunks::read(&file).unwrap().is_empty());
+    }
+
+    #[test]
+    fn metadata_chunks_read_rejects_malformed_input() {
+        assert!(MetadataChunks::read(b"not a webp file").is_err());
+        // A chunk whose declared size runs past the data must surface the reader's error rather than
+        // being silently treated as "no metadata".
+        let mut file = write_simple_lossless(&[0; 4]);
+        file[16..20].copy_from_slice(&5u32.to_le_bytes());
+        assert!(MetadataChunks::read(&file).is_err());
     }
 
     #[test]

@@ -52,7 +52,9 @@ Dependency edges (a crate depends on those to its right):
   progressive encoder phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only).
   ← core, color, dsp.
 - **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
-  codestream seam; `gamut-av1` is the implicit software tail). **gamut-webp** ← +riff.
+  codestream seam; `gamut-av1` is the implicit software tail). **gamut-webp** ← +riff; like
+  gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw `MetadataBlock`-ready
+  payloads, so it does not depend on the metadata facade.
 - **gamut-heic** — decode-only HEIF/HEIC container: full-fidelity byte-accounting parse
   (every input byte maps to a box, appended motion-photo stream, or explicit trailer), typed
   `hvcC`/NAL layer, pluggable `HevcDecoder` hook for platform HEVC decoders (HEVC bitstream

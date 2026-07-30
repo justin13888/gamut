@@ -925,3 +925,155 @@ fn gamut_decodes_libwebp_lossy_alpha_exactly() {
         );
     }
 }
+
+#[test]
+fn libwebp_reads_gamut_metadata_chunks_and_flags() {
+    // Forward direction for the metadata surface: gamut embeds `ICCP`/`EXIF`/`XMP `, and libwebp's own
+    // muxer must recover every payload byte-for-byte and decode the same `VP8X` feature flags.
+    //
+    // `WebPMuxCreate` also *validates* the container (muxinternal.c `MuxValidate`): it rejects a file
+    // whose feature flags disagree with the chunks actually present, or whose reconstruction chunks
+    // are out of order. So this pins gamut's flag bookkeeping and chunk ordering against the
+    // reference implementation, not just the payload bytes.
+    use common::libwebp_mux_read_metadata;
+
+    let icc: Vec<u8> = (0..512u32).map(|i| (i % 251) as u8).collect();
+    let exif: &[u8] = b"II\x2a\x00\x08\x00\x00\x00gamut-exif";
+    let xmp: &[u8] = b"<?xpacket begin='\xef\xbb\xbf'?><x:xmpmeta/><?xpacket end='w'?>";
+    let (w, h) = (48u32, 32u32);
+    let dims = Dimensions {
+        width: w,
+        height: h,
+    };
+    let rgba = photo_like_rgba(w, h, 7);
+
+    for (label, encoder) in [
+        ("lossless", WebpEncoder::lossless()),
+        ("lossy", WebpEncoder::lossy(80)),
+    ] {
+        // Opaque RGB input: only the three metadata flags should be set.
+        let rgb = rgba_to_rgb(&rgba);
+        let mut file = Vec::new();
+        encoder
+            .clone()
+            .with_icc_profile(&icc)
+            .with_exif(exif)
+            .with_xmp(xmp)
+            .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut file)
+            .expect("encode with metadata");
+
+        let read = libwebp_mux_read_metadata(&file);
+        assert_eq!(read.icc.as_deref(), Some(icc.as_slice()), "{label}: ICCP");
+        assert_eq!(read.exif.as_deref(), Some(exif), "{label}: EXIF");
+        assert_eq!(read.xmp.as_deref(), Some(xmp), "{label}: XMP");
+        assert_eq!(
+            read.feature_flags,
+            libwebp_sys::ICCP_FLAG | libwebp_sys::EXIF_FLAG | libwebp_sys::XMP_FLAG,
+            "{label}: libwebp must see exactly the three metadata features"
+        );
+
+        // libwebp must still decode the promoted (extended) container, to exactly the pixels it gets
+        // from the same encode without metadata — the promotion touches the container, not the
+        // codestream.
+        let mut plain = Vec::new();
+        encoder
+            .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut plain)
+            .expect("encode without metadata");
+        let decoded = libwebp_decode_rgba(&file);
+        assert_eq!((decoded.width, decoded.height), (w, h), "{label}: canvas");
+        assert_eq!(
+            decoded.rgba,
+            libwebp_decode_rgba(&plain).rgba,
+            "{label}: metadata must not disturb the pixels libwebp decodes"
+        );
+    }
+}
+
+#[test]
+fn libwebp_reads_gamut_metadata_alongside_alpha() {
+    // A transparent lossy image adds `ALPH` *inside* the image data, between `ICCP` and the
+    // bitstream. libwebp's muxer is the arbiter of that layout: it rejects a mis-ordered file, and its
+    // feature flags must show alpha next to the metadata.
+    use common::libwebp_mux_read_metadata;
+
+    let (w, h) = (32u32, 24u32);
+    let rgba: Vec<u8> = (0..(w * h) as usize)
+        .flat_map(|i| {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            [
+                (x * 7) as u8,
+                (y * 9) as u8,
+                (x ^ y) as u8,
+                ((x * 11 + y * 5) & 0xff) as u8,
+            ]
+        })
+        .collect();
+    let dims = Dimensions {
+        width: w,
+        height: h,
+    };
+    let exif: &[u8] = b"II\x2a\x00\x08\x00\x00\x00alpha-and-exif";
+    let mut file = Vec::new();
+    WebpEncoder::lossy(75)
+        .with_exif(exif)
+        .encode_image(ImageRef::<Rgba8>::new(&rgba, dims).unwrap(), &mut file)
+        .expect("encode transparent lossy with metadata");
+
+    let read = libwebp_mux_read_metadata(&file);
+    assert_eq!(read.exif.as_deref(), Some(exif));
+    assert_eq!(
+        read.feature_flags,
+        libwebp_sys::ALPHA_FLAG | libwebp_sys::EXIF_FLAG
+    );
+    // And the alpha still survives the round-trip through gamut's own decoder.
+    let got: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).expect("decode");
+    let dec_alpha: Vec<u8> = got.as_samples().chunks_exact(4).map(|p| p[3]).collect();
+    let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+    assert_eq!(dec_alpha, src_alpha);
+}
+
+#[test]
+fn gamut_reads_metadata_libwebp_embedded() {
+    // Reverse direction: libwebp encodes the image and its muxer attaches the metadata — the exact
+    // path `cwebp -metadata all` takes — so this is a reference-produced fixture. gamut must recover
+    // every payload byte-for-byte and still decode the pixels bit-exactly.
+    use common::{libwebp_mux_set_metadata, pattern_rgba};
+
+    let icc: Vec<u8> = (0..1024u32).map(|i| (i % 241) as u8).collect();
+    let exif: &[u8] = b"MM\x00\x2a\x00\x00\x00\x08libwebp-exif";
+    let xmp: &[u8] = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'></x:xmpmeta>";
+
+    for &(w, h) in &[(1u32, 1u32), (17, 9), (64, 48)] {
+        let rgba = pattern_rgba(w, h);
+        let plain = libwebp_encode_lossless_rgba(&rgba, w, h);
+        let tagged = libwebp_mux_set_metadata(&plain, Some(&icc), Some(exif), Some(xmp));
+
+        let meta = gamut_webp::metadata(&tagged).expect("read libwebp-muxed metadata");
+        assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()), "ICCP at {w}x{h}");
+        assert_eq!(meta.exif.as_deref(), Some(exif), "EXIF at {w}x{h}");
+        assert_eq!(meta.xmp.as_deref(), Some(xmp), "XMP at {w}x{h}");
+
+        let got: ImageBuf<Rgba8> = WebpDecoder::new()
+            .decode_image(&tagged)
+            .expect("gamut decode libwebp-muxed file");
+        assert_eq!(
+            got.dimensions(),
+            Dimensions {
+                width: w,
+                height: h
+            }
+        );
+        assert_eq!(
+            got.as_samples(),
+            rgba.as_slice(),
+            "metadata chunks must not disturb the lossless pixels at {w}x{h}"
+        );
+
+        // Only the chunks libwebp was asked to attach are reported: a subset stays a subset.
+        let icc_only = libwebp_mux_set_metadata(&plain, Some(&icc), None, None);
+        let meta = gamut_webp::metadata(&icc_only).expect("read ICCP-only file");
+        assert_eq!(meta.icc.as_deref(), Some(icc.as_slice()));
+        assert_eq!(meta.exif, None);
+        assert_eq!(meta.xmp, None);
+    }
+}

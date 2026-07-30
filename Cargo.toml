@@ -76,7 +76,14 @@ jxl = { version = "0.4.3", default-features = false, features = ["sse42", "avx",
 # libwebp FFI — used ONLY as a dev-dependency oracle in gamut-webp's differential tests, never
 # in shipped code. Handwritten bindings (no bindgen/libclang); statically links bundled libwebp,
 # so the test build needs a C toolchain while the library itself stays C-free.
-libwebp-sys2 = "0.2"
+#   * `static` builds the bundled libwebp sources unconditionally instead of probing pkg-config for a
+#     system libwebp. That makes the oracle hermetic (the workspace policy: no system-installed
+#     codecs) and, with `mux` below, avoids a partial system install — a libwebp without libwebpmux —
+#     failing the build script.
+#   * `mux` adds libwebpmux, the reference muxer/demuxer for the metadata chunks (`ICCP`/`EXIF`/
+#     `XMP `). It is how `cwebp -metadata all` attaches them, so it is the oracle for gamut-webp's
+#     metadata round-trip in both directions.
+libwebp-sys2 = { version = "0.2", features = ["mux", "static"] }
 # Benchmark harness (issue #149). Dev-only: pulled in as a `dev-dependency` by each crate's
 # `[[bench]]` target, never by shipped code. Lightweight (few transitive deps) and reports
 # throughput counters; `mise run bench` runs the suite.
