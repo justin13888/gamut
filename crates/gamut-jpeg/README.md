@@ -49,6 +49,22 @@ let info = gamut_jpeg::info(jpeg)?; // dimensions / components / process, withou
 # }
 ```
 
+For untrusted input, opt in to both geometry and native-raster budgets. The byte cap counts the
+JPEG frame's own components, independently of the requested presentation type:
+
+```rust
+# use gamut_core::{DecodeImage, ImageBuf, Rgb8};
+# use gamut_jpeg::JpegDecoder;
+# fn demo(jpeg: &[u8]) -> Result<(), gamut_core::Error> {
+let decoder = JpegDecoder::new()
+    .with_max_dimensions(16_384, 16_384)
+    .with_max_image_bytes(64 * 1024 * 1024);
+let image: ImageBuf<Rgb8> = decoder.decode_image(jpeg)?;
+# let _ = image;
+# Ok(())
+# }
+```
+
 Read and write embedded APP-segment metadata — APP1 EXIF, APP1 XMP, and multi-segment APP2 ICC
 (the payloads are raw bytes in exactly the form `gamut-metadata`'s `MetadataBlock` borrows):
 
@@ -86,6 +102,9 @@ APP0 / Adobe APP14 hints), interleaved or non-interleaved scans, spectral select
 approximation, restart intervals, and (for sequential frames) DNL-defined heights — and never panics
 on malformed input. Progressive frames with a deferred (`Y = 0` / DNL) height are rejected as
 unsupported, and a partial progressive stream renders what it has (matching libjpeg).
+`JpegDecoder::with_max_dimensions` and `with_max_image_bytes` provide opt-in hostile-input guards;
+known SOF geometry is rejected before frame-sized allocation, and a sequential DNL-deferred height
+is bounded while its first scan grows.
 
 Embedded metadata ships both ways (P7): `metadata()` reads APP1 EXIF, APP1 XMP, and multi-segment
 APP2 `ICC_PROFILE` payloads without decoding pixels, and the encoder embeds them via

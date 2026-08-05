@@ -5,9 +5,9 @@
 //! §E.2.5.
 //!
 //! Decoding is deliberately generous: every read is bounds-checked and every table lookup is
-//! fallible, so malformed input yields a typed [`Error`] and never a panic. The only hard limits are
-//! the spec's own — a Huffman code longer than 16 bits, a DC magnitude category above 11 (8-bit), or
-//! an AC coefficient index past 63 — each of which is a validation error.
+//! fallible, so malformed input yields a typed [`Error`] and never a panic. The decoder can also
+//! supply an MCU-row ceiling for a DNL-deferred sequential frame, preventing an unbounded sample
+//! plane from growing before the height marker arrives.
 //!
 //! # Progressive coefficient model (§G.1.1)
 //!
@@ -56,6 +56,15 @@ pub struct ScanResult {
     pub planes: Vec<(usize, Plane)>,
     /// Byte offset of the terminating marker's `0xFF` prefix, where the segment parser resumes.
     pub marker_offset: usize,
+}
+
+/// Allocation ceiling for a sequential scan whose frame height is deferred to DNL.
+#[derive(Clone, Copy)]
+pub struct McuRowLimit {
+    /// Maximum number of MCU rows the configured limits can permit.
+    pub rows: usize,
+    /// Static [`Error::Unsupported`] message identifying the limit that supplied this ceiling.
+    pub message: &'static str,
 }
 
 /// The outcome of fetching one destuffed entropy byte.
@@ -371,6 +380,7 @@ pub fn decode_scan(
     frame: &Frame,
     scan: &ScanHeader,
     tables: &Tables,
+    row_limit: Option<McuRowLimit>,
 ) -> Result<ScanResult> {
     let hmax = usize::from(frame.hmax());
     let vmax = usize::from(frame.vmax());
@@ -441,6 +451,11 @@ pub fn decode_scan(
         match mcus_y {
             Some(rows) if mcu_y >= rows => break,
             None if reader.at_data_end() => break,
+            None if row_limit.is_some_and(|limit| mcu_y >= limit.rows) => {
+                return Err(Error::Unsupported(
+                    row_limit.map_or("JPEG: image exceeds a decoder limit", |limit| limit.message),
+                ));
+            }
             _ => {}
         }
         for mcu_x in 0..mcus_x {
