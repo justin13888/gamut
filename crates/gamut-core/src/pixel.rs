@@ -39,6 +39,7 @@ impl Sample for u16 {}
 /// Discriminants are explicit and permanent — they are C ABI values (issue #242); new variants
 /// append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 #[repr(u32)]
 pub enum ColorModel {

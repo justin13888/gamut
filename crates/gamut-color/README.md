@@ -39,6 +39,11 @@ assert_eq!(planes.width(), 2);
 let _y = planes.plane(0); // luma plane
 ```
 
+Enable the optional `serde` feature to serialize and deserialize [`BitDepth`],
+[`ChromaSubsampling`], and the four CICP enums by their Rust variant names. It also enables
+`gamut-core`'s matching feature and is disabled by default; the numeric CICP code points remain the
+explicit `code_point`/`from_code_point` API rather than serde's representation.
+
 ## Status
 
 Released as **v1** (issue #179); see [`STATUS.md`](STATUS.md) for the phase history, the frozen

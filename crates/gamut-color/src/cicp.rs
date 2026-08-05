@@ -17,6 +17,7 @@
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MatrixCoefficients {
     /// Identity (RGB / "GBR"); no luma–chroma transform. Requires 4:4:4. (Code point 0.)
     Identity = 0,
@@ -65,6 +66,7 @@ impl MatrixCoefficients {
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColourPrimaries {
     /// BT.709 (also sRGB primaries). (Code point 1.)
     Bt709 = 1,
@@ -110,6 +112,7 @@ impl ColourPrimaries {
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TransferCharacteristics {
     /// BT.709. (Code point 1.)
     Bt709 = 1,
@@ -161,6 +164,7 @@ impl TransferCharacteristics {
 /// so consumers can match it exhaustively forever.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColorRange {
     /// Studio / limited range (e.g. luma 16–235 for 8-bit). (Flag 0.)
     Limited = 0,
