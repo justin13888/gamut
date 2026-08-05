@@ -56,8 +56,8 @@ type ItemAssociations = Vec<(u32, Vec<(u16, bool)>)>;
 /// as the start of an appended vendor trailer and stops the walk cleanly.
 /// Returns [`Error::Unsupported`] for structurally valid but out-of-scope features: image
 /// sequences (`moov`/`trak`) in the primary stream, a non-`pict` handler, protected items, `uri `
-/// items, external data references, `iloc` `construction_method` 2, 64-bit box sizes, and box
-/// versions beyond those listed above.
+/// items, external data references, `iloc` `construction_method` 2, and box versions beyond those
+/// listed above.
 pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     let mut top = BoxReader::new(data);
     let mut ftyp = None;

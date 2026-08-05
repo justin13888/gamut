@@ -12,7 +12,8 @@
 //! and [`RawBox`] are re-exported from the crate root as the box-walk primitive a byte-accounting
 //! consumer (e.g. `gamut-heic`) uses to map every byte of a file to a box; their public surface is
 //! deliberately the walk only — [`BoxReader::new`], [`BoxReader::next_box`],
-//! [`BoxReader::position`], [`BoxReader::remaining`], and [`RawBox`]'s fields. The scalar
+//! [`BoxReader::position`], [`BoxReader::remaining`], and [`RawBox`]'s fields and
+//! [`RawBox::payload`]. The scalar
 //! big-endian field readers ([`BoxReader::u8`], `u16`, `u32`, `u64`, [`BoxReader::fourcc`],
 //! [`BoxReader::take`]) stay crate-private: they decode box *bodies*, which is this crate's job,
 //! not a consumer's.
@@ -97,7 +98,8 @@ impl BoxBuilder {
 /// consumers: [`new`](Self::new) opens a cursor over a slice, [`next_box`](Self::next_box) yields
 /// each [`RawBox`] in turn (with its [`offset`](RawBox::offset) within that slice),
 /// [`position`](Self::position) is the current cursor, and [`remaining`](Self::remaining) is the
-/// unconsumed tail. To descend into a box, open a fresh reader over its [`body`](RawBox::body).
+/// unconsumed tail. To descend into a box, open a fresh reader over its [`body`](RawBox::body), or
+/// over [`payload`](RawBox::payload) when a `uuid` box's user type is framing rather than payload.
 ///
 /// ```
 /// use gamut_isobmff::BoxReader;
@@ -133,13 +135,29 @@ pub struct BoxReader<'a> {
 pub struct RawBox<'a> {
     /// The box type (its four-character code).
     pub ty: [u8; 4],
-    /// The box body — the bytes after the 8-byte header (only 32-bit `size`/`type` headers are
-    /// accepted, so the body starts at [`offset`](Self::offset)` + 8`).
+    /// The box body — the bytes after the complete size/type header. For a `uuid` box this starts
+    /// with the 16-byte user type; [`payload`](Self::payload) omits that prefix.
     pub body: &'a [u8],
+    /// The 16-byte user type for a `uuid` box, or `None` for every other box type.
+    pub user_type: Option<[u8; 16]>,
     /// Absolute offset of this box's header within the slice the [`BoxReader`] was created over
-    /// (the size field). The body therefore occupies `offset + 8 .. offset + 8 + body.len()`, which
-    /// a byte-accounting consumer uses to map the whole file to boxes.
+    /// (the size field). After yielding this box, [`BoxReader::position`] is its authoritative end
+    /// offset, including a 64-bit size header when present.
     pub offset: usize,
+}
+
+impl RawBox<'_> {
+    /// Returns the box payload, excluding the 16-byte user type prefix of a `uuid` box.
+    ///
+    /// For every other box type this is identical to [`body`](Self::body).
+    #[must_use]
+    pub fn payload(&self) -> &[u8] {
+        if self.user_type.is_some() {
+            self.body.get(16..).unwrap_or_default()
+        } else {
+            self.body
+        }
+    }
 }
 
 impl<'a> BoxReader<'a> {
@@ -212,27 +230,52 @@ impl<'a> BoxReader<'a> {
     ///
     /// The returned [`RawBox::offset`] records where this box's header began within the slice.
     ///
-    /// Only 32-bit box sizes are accepted: a `size == 1` (64-bit `largesize`) or `size == 0` (box
-    /// extends to end-of-file) is rejected as [`Error::Unsupported`] — this crate never writes them,
-    /// and accepting an unwritten path would leave it untested.
+    /// A 32-bit `size` of 1 selects the following 64-bit `largesize`; a size of 0 extends the box
+    /// through the end of this reader's slice. The writer continues to emit only 32-bit sizes.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidInput`] if the header or body is truncated or the declared `size` is
-    /// smaller than the 8-byte header, and [`Error::Unsupported`] for a 64-bit or open-ended size.
+    /// Returns [`Error::InvalidInput`] if the header or body is truncated, the declared size is
+    /// smaller than its header, a size cannot fit the platform address space, or a `uuid` body does
+    /// not contain its complete 16-byte user type.
     pub fn next_box(&mut self) -> Result<Option<RawBox<'a>>> {
         if self.remaining() == 0 {
             return Ok(None);
         }
         let offset = self.pos;
-        let size = self.u32()? as usize;
+        let size = self.u32()?;
         let ty = self.fourcc()?;
-        match size {
-            1 => return Err(Error::Unsupported("ISOBMFF: 64-bit box size (largesize)")),
-            0 => return Err(Error::Unsupported("ISOBMFF: open-ended box (size 0)")),
-            s if s < 8 => return Err(Error::InvalidInput("ISOBMFF: box size smaller than header")),
-            _ => {}
+        let (size, header_size) = match size {
+            0 => (self.data.len() - offset, 8),
+            1 => {
+                let large_size = usize::try_from(self.u64()?)
+                    .map_err(|_| Error::InvalidInput("ISOBMFF: box size exceeds address space"))?;
+                (large_size, 16)
+            }
+            size => (
+                usize::try_from(size)
+                    .map_err(|_| Error::InvalidInput("ISOBMFF: box size exceeds address space"))?,
+                8,
+            ),
+        };
+        if size < header_size {
+            return Err(Error::InvalidInput("ISOBMFF: box size smaller than header"));
         }
-        let body = self.take(size - 8)?;
-        Ok(Some(RawBox { ty, body, offset }))
+        let body = self.take(size - header_size)?;
+        let user_type = if &ty == b"uuid" {
+            if body.len() < 16 {
+                return Err(Error::InvalidInput("ISOBMFF: truncated uuid user type"));
+            }
+            let mut user_type = [0; 16];
+            user_type.copy_from_slice(&body[..16]);
+            Some(user_type)
+        } else {
+            None
+        };
+        Ok(Some(RawBox {
+            ty,
+            body,
+            user_type,
+            offset,
+        }))
     }
 }
