@@ -820,8 +820,10 @@ dependencies = [
  "divan",
  "gamut-bitstream",
  "gamut-core",
+ "gamut-deflate",
  "gamut-ifd",
  "libtiff-oracle",
+ "miniz_oxide",
 ]
 
 [[package]]

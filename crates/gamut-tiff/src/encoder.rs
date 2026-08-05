@@ -5,7 +5,7 @@ use gamut_core::{
 };
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
-use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
+use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::palette::Palette8;
 use crate::{tags, writer};
@@ -20,10 +20,9 @@ struct SampleLayout {
 
 /// Encoder for baseline TIFF images.
 ///
-/// Writes chunky (`PlanarConfiguration = 1`) strips, optionally PackBits-compressed
-/// ([`Self::with_compression`]). Supports 8-bit grayscale/RGB and 1-bit bilevel; richer colour
-/// modes and compression schemes are added in later phases. Emits classic TIFF by default, or
-/// BigTIFF (64-bit offsets) when [`Self::with_big_tiff`] is set.
+/// Writes chunky (`PlanarConfiguration = 1`) strips or tiles using the compression selected by
+/// [`Self::with_compression`]. Supports 8-bit grayscale/RGB/RGBA/CMYK/palette and 1-bit bilevel.
+/// Emits classic TIFF by default, or BigTIFF (64-bit offsets) when [`Self::with_big_tiff`] is set.
 #[derive(Debug, Clone)]
 pub struct TiffEncoder {
     order: ByteOrder,
@@ -68,7 +67,8 @@ impl TiffEncoder {
 
     /// Returns a copy of this encoder that applies `predictor` before compression.
     ///
-    /// [`Predictor::HorizontalDifferencing`] requires 8-bit samples and pairs well with LZW.
+    /// [`Predictor::HorizontalDifferencing`] requires 8-bit samples and pairs well with LZW or
+    /// Deflate.
     #[must_use]
     pub fn with_predictor(mut self, predictor: Predictor) -> Self {
         self.predictor = predictor;
@@ -78,8 +78,8 @@ impl TiffEncoder {
     /// Returns a copy of this encoder that writes the image as tiles of `tile_width × tile_height`
     /// pixels instead of strips.
     ///
-    /// Both dimensions must be positive multiples of 16. Tiling is currently supported for 8-bit
-    /// images compressed with `None`/PackBits/LZW (no predictor).
+    /// Both dimensions must be positive multiples of 16. Tiling supports every byte-oriented
+    /// compression; horizontal differencing on encode is currently enabled with Deflate.
     #[must_use]
     pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
         self.tiling = Some((tile_width, tile_height));
@@ -335,6 +335,7 @@ impl TiffEncoder {
                 Ok(out)
             }
             Compression::Lzw => Ok(lzw::encode(raw)),
+            Compression::Deflate => Ok(deflate::encode(raw)),
             _ => Err(Error::Unsupported(
                 "TIFF: unsupported compression for encoding",
             )),
@@ -358,9 +359,10 @@ impl TiffEncoder {
                 "TIFF: tiling supported only for 8-bit images so far",
             ));
         }
-        if self.predictor != Predictor::None {
+        let predicting = self.predictor == Predictor::HorizontalDifferencing;
+        if predicting && self.compression != Compression::Deflate {
             return Err(Error::Unsupported(
-                "TIFF: predictor with tiling not supported yet",
+                "TIFF: tiled predictor is supported only with Deflate",
             ));
         }
         let (tw, th) = (tile_w as usize, tile_h as usize);
@@ -390,6 +392,9 @@ impl TiffEncoder {
                     tile[dst..dst + copy_cols * spp]
                         .copy_from_slice(&packed[src..src + copy_cols * spp]);
                 }
+                if predicting {
+                    predictor::forward(&mut tile, tile_row_bytes, spp);
+                }
                 tiles.push(self.compress_bytes(&tile, tile_row_bytes)?);
             }
         }
@@ -415,6 +420,12 @@ impl TiffEncoder {
         ifd.set(tags::X_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::Y_RESOLUTION, Value::Rational(vec![(72, 1)]));
         ifd.set(tags::RESOLUTION_UNIT, Value::Short(vec![2])); // inch
+        if predicting {
+            ifd.set(
+                tags::PREDICTOR,
+                Value::Short(vec![u16::from(self.predictor)]),
+            );
+        }
         for (tag, value) in extra_fields {
             ifd.set(*tag, value.clone());
         }

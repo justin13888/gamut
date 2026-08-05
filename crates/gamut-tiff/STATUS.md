@@ -1,7 +1,7 @@
 # gamut-tiff — TIFF 6.0 implementation status
 
 Tracking GitHub issue #107: implement the **full TIFF 6.0 standard** (`references/tiff/tiff6.pdf`,
-§1–23). Delivered as a stack of small, individually-reviewable PRs (P1–P19) onto the `feat/tiff`
+§1–23). Delivered as a stack of small, individually-reviewable PRs (P1–P20) onto the `feat/tiff`
 integration branch; each PR is independently green (`mise run test`/`lint`/`fmt-check`/`coverage`
 ≥80%) and mergeable on its own.
 
@@ -40,13 +40,14 @@ lossy → MAE/PSNR tolerance.
 | P17 | §12     | Multi-page documents (halftone hints deferred) | ✅ done |
 | P18 | §22     | JPEG-in-TIFF (Compression=7) — deferrable tail | ⏳ deferred |
 | P19 | —       | Finalization: decoder robustness corpus + docs | ✅ done |
+| P20 | Adobe Photoshop TIFF Technical Note 3 | Deflate/zlib (`Compression=8`, legacy `32946` read alias), strips/tiles + Predictor 2 | ✅ done |
 
 ## Scope & dispositions (v1)
 
 **Implemented (v1.0).** The full strip/tile serialization spine (two-pass absolute-offset layout,
 II/MM, classic + BigTIFF), single- and multi-page documents, the 8-bit colour modes
 (grayscale/RGB/RGBA/CMYK/palette) plus 1-bit bilevel, the compression schemes
-None/PackBits/LZW (+ horizontal-differencing predictor)/Modified Huffman/Group 4 fax, and the
+None/PackBits/LZW/Deflate (+ horizontal-differencing predictor)/Modified Huffman/Group 4 fax, and the
 strict byte-accounting `deconstruct`. Evidence: every lossless path is pinned **pixel-exact in
 both directions against libtiff** (`tests/oracle.rs` and the per-scheme differential suites over
 `tooling/libtiff-oracle`), the decoder is fuzz-hardened over a byte-flip robustness corpus
@@ -90,7 +91,7 @@ The API was frozen after a full-surface review; the additions and breaks:
 
 - **Single canonical paths** — the implementation modules are private; the surface is the
   crate-root re-export list (plus [`tags`](src/tags.rs), the one *named* module, mirroring
-  `gamut_ifd::tags`). The per-scheme strip codecs (LZW/PackBits/CCITT/predictor) are
+  `gamut_ifd::tags`). The per-scheme strip codecs (LZW/PackBits/Deflate/CCITT/predictor) are
   crate-internal: every scheme is reachable through `Compression` on the encoder/decoder.
 - **std conversions** — `Compression::{from_code, code}` and
   `PhotometricInterpretation::{from_code, code}` became `TryFrom<u32>` / `From<_> for u16`

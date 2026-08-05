@@ -2,8 +2,8 @@
 //!
 //! gamut's TIFF encoder must produce files that the canonical reference reader decodes back to the
 //! same pixels, and its decoder must read files the reference writer produces. This crate wraps a
-//! libtiff built from the `third_party/libtiff` submodule (all optional codecs disabled, so only
-//! the built-in none/PackBits/LZW/CCITT schemes are available) behind a small, safe API:
+//! libtiff built from the `third_party/libtiff` submodule against vendored zlib (all other optional
+//! codecs disabled) behind a small, safe API:
 //! [`decode_tiff`], [`encode_rgb8`], and [`encode_gray8`].
 //!
 //! libtiff's public API is file-based, so each call round-trips through a temporary file. All
@@ -29,6 +29,8 @@ pub enum Compression {
     PackBits,
     /// LZW (`COMPRESSION_LZW`).
     Lzw,
+    /// Adobe Deflate (`COMPRESSION_ADOBE_DEFLATE`).
+    Deflate,
     /// CCITT Group 3 1-D Modified Huffman (`COMPRESSION_CCITTRLE`).
     CcittRle,
     /// CCITT Group 4 (T.6) fax (`COMPRESSION_CCITTFAX4`).
@@ -41,6 +43,7 @@ impl Compression {
             Compression::None => sys::COMPRESSION_NONE as u16,
             Compression::PackBits => sys::COMPRESSION_PACKBITS as u16,
             Compression::Lzw => sys::COMPRESSION_LZW as u16,
+            Compression::Deflate => sys::COMPRESSION_ADOBE_DEFLATE as u16,
             Compression::CcittRle => sys::COMPRESSION_CCITTRLE as u16,
             Compression::CcittGroup4Fax => sys::COMPRESSION_CCITTFAX4 as u16,
         }
@@ -503,6 +506,35 @@ pub fn encode_rgb8_tiled(
     tile_h: u32,
     compression: Compression,
 ) -> Result<Vec<u8>, String> {
+    encode_rgb8_tiled_with_predictor(pixels, width, height, tile_w, tile_h, compression, 1)
+}
+
+/// Encodes 8-bit RGB as a tiled TIFF with horizontal differencing (`Predictor = 2`).
+///
+/// # Errors
+///
+/// Returns a message if `pixels` does not match the dimensions or libtiff fails to write.
+pub fn encode_rgb8_tiled_predictor(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    encode_rgb8_tiled_with_predictor(pixels, width, height, tile_w, tile_h, compression, 2)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_rgb8_tiled_with_predictor(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    tile_w: u32,
+    tile_h: u32,
+    compression: Compression,
+    predictor: u16,
+) -> Result<Vec<u8>, String> {
     if pixels.len() != (width as usize) * (height as usize) * 3 {
         return Err("pixel buffer does not match dimensions".into());
     }
@@ -516,7 +548,16 @@ pub fn encode_rgb8_tiled(
         if t.is_null() {
             return Err("TIFFOpen (write) failed".into());
         }
-        let result = write_tiles(t, pixels, width, height, tile_w, tile_h, compression.code());
+        let result = write_tiles(
+            t,
+            pixels,
+            width,
+            height,
+            tile_w,
+            tile_h,
+            compression.code(),
+            predictor,
+        );
         sys::TIFFClose(t);
         result?;
     }
@@ -532,6 +573,7 @@ unsafe fn write_tiles(
     tile_w: u32,
     tile_h: u32,
     compression: u16,
+    predictor: u16,
 ) -> Result<(), String> {
     unsafe {
         sys::TIFFSetField(t, sys::TIFFTAG_IMAGEWIDTH, width);
@@ -545,6 +587,9 @@ unsafe fn write_tiles(
             sys::PLANARCONFIG_CONTIG as c_int,
         );
         sys::TIFFSetField(t, sys::TIFFTAG_COMPRESSION, compression as c_int);
+        if predictor != 1 {
+            sys::TIFFSetField(t, sys::TIFFTAG_PREDICTOR, predictor as c_int);
+        }
         sys::TIFFSetField(t, sys::TIFFTAG_TILEWIDTH, tile_w);
         sys::TIFFSetField(t, sys::TIFFTAG_TILELENGTH, tile_h);
     }

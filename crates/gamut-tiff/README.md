@@ -16,8 +16,9 @@ is:
   unlike [`gamut-avif`](../gamut-avif)/[`gamut-heic`](../gamut-heic) (ISOBMFF) or
   [`gamut-webp`](../gamut-webp) (RIFF) — there is no separate box/chunk container. That IFD core
   is the shared [`gamut-ifd`](../gamut-ifd) primitive (also the basis for EXIF and DNG), consumed
-  with its `bigtiff` feature; beyond it the crate builds only on [`gamut-core`](../gamut-core)
-  and [`gamut-bitstream`](../gamut-bitstream).
+  with its `bigtiff` feature; codec primitives come from [`gamut-core`](../gamut-core),
+  [`gamut-bitstream`](../gamut-bitstream), [`gamut-deflate`](../gamut-deflate), and the bounded
+  pure-Rust `miniz_oxide` inflater.
 - **Permissively licensed**, matching the royalty-free TIFF format.
 
 Unlike the video-derived still-image codecs in the workspace, TIFF is **natively a still-image
@@ -57,8 +58,9 @@ compression schemes land additively on this frozen surface (see Status).
 
 - **Structure** — byte-order header, IFD/tag read & write, strips and tiles, multi-page documents.
 - **Colour modes** (8-bit) — grayscale, RGB, RGBA (alpha), palette, CMYK, and 1-bit bilevel.
-- **Compression** — uncompressed, PackBits, LZW (+ horizontal differencing predictor), and the
-  bilevel CCITT schemes Modified Huffman (Group 3 1-D) and Group 4 (T.6).
+- **Compression** — uncompressed, PackBits, LZW (+ strip predictor), and Adobe Deflate
+  (+ horizontal differencing on strips or tiles), plus the bilevel CCITT schemes Modified Huffman
+  (Group 3 1-D) and Group 4 (T.6).
 - The decoder is hardened against hostile input (`#![forbid(unsafe_code)]`, a size cap, and a
   byte-flip fuzz corpus).
 

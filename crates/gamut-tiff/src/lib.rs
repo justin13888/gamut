@@ -8,19 +8,20 @@
 //! is the shared [`gamut_ifd`](https://crates.io/crates/gamut-ifd) primitive (also the basis for
 //! EXIF); this crate adds the codec on top and re-exports the structural types from its root so its
 //! public API is unchanged. It further layers on the shared primitives: [`gamut_core`] (traits /
-//! errors / typed pixel formats) and [`gamut_bitstream`] (LZW and CCITT bit coding). The
-//! differencing predictor is TIFF-specific and lives in this crate;
+//! errors / typed pixel formats), [`gamut_bitstream`] (LZW and CCITT bit coding), and
+//! [`gamut_deflate`](https://crates.io/crates/gamut-deflate) plus `miniz_oxide` for Adobe Deflate.
+//! The differencing predictor is TIFF-specific and lives in this crate;
 //! the deferred colour-space work (YCbCr, CIE L\*a\*b\*) and JPEG-in-TIFF will bring back the
 //! `gamut-color` and `gamut-dsp` edges additively when they land (see `STATUS.md`).
 //!
 //! The encoder and decoder are reachable through the umbrella crate's `tiff` feature. Everything
 //! is implemented clean-slate from the TIFF 6.0 specification (`references/tiff/tiff6.pdf`,
-//! Adobe/Aldus, Final — June 3 1992) and the BigTIFF extension (`references/tiff/bigtiff.html`)
-//! rather than wrapping libtiff.
+//! Adobe/Aldus, Final — June 3 1992), Adobe Photoshop TIFF Technical Note 3 (Deflate), and the
+//! BigTIFF extension (`references/tiff/bigtiff.html`) rather than wrapping libtiff.
 //!
 //! The v1 surface (built in issue #107, frozen in issue #187): [`TiffEncoder`] writes 8-bit
 //! grayscale/RGB/RGBA/CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles,
-//! single- or multi-page) — uncompressed, PackBits, LZW (optionally with the
+//! single- or multi-page) — uncompressed, PackBits, LZW/Deflate (optionally with the
 //! horizontal-differencing [`Predictor`]), or (for bilevel) Modified Huffman / Group 4 fax —
 //! and [`TiffDecoder`] reads them all back. Encoding takes a typed [`gamut_core::ImageRef`] via
 //! the per-format [`gamut_core::EncodeImage`] impls, and decoding returns a

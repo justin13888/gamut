@@ -2,12 +2,13 @@
 //!
 //! Baseline TIFF readers must handle the uncompressed, Modified Huffman, and PackBits schemes;
 //! the remainder are extensions (TIFF 6.0 Part 2). Each scheme is decoded/encoded per strip or
-//! tile by the crate-internal per-scheme codecs (LZW, PackBits, CCITT, and the differencing
+//! tile by the crate-internal per-scheme codecs (Deflate, LZW, PackBits, CCITT, and the differencing
 //! predictor); [`Compression`] selects the scheme on the public encoder/decoder surface.
 
 // The per-scheme codecs are implementation details of the encoder/decoder (they operate on raw
 // packed strip/tile bytes); every scheme is reachable through `Compression` on the public API.
 pub(crate) mod ccitt;
+pub(crate) mod deflate;
 pub(crate) mod lzw;
 pub(crate) mod packbits;
 pub(crate) mod predictor;
@@ -35,7 +36,7 @@ pub enum Compression {
     OldJpeg,
     /// `7` — JPEG (the redefined "new-style" process; TIFF Technical Note 2).
     Jpeg,
-    /// `8` — Deflate/zlib (Adobe). Post-6.0 extension; out of the current campaign's scope.
+    /// `8` — Deflate using the zlib data format (Adobe TIFF Technical Note 3).
     Deflate,
     /// `32773` — PackBits, a simple byte-oriented run-length scheme (TIFF 6.0 §9).
     PackBits,

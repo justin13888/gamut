@@ -158,7 +158,12 @@ fn bigtiff_compression_variants_cross_check() {
         width: w,
         height: h,
     };
-    for compression in [Compression::None, Compression::PackBits, Compression::Lzw] {
+    for compression in [
+        Compression::None,
+        Compression::PackBits,
+        Compression::Lzw,
+        Compression::Deflate,
+    ] {
         let mut tiff = Vec::new();
         TiffEncoder::new()
             .with_big_tiff(true)

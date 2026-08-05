@@ -14,6 +14,10 @@ Image File Directory (IFD) / tag structure defined here.
   every file offset to 64 bits (magic `43`, a 16-byte header, 20-byte IFD entries, and the
   `LONG8`/`SLONG8`/`IFD8` field types). Canonical source:
   <https://libtiff.gitlab.io/libtiff/specification/bigtiff.html>.
+- **Adobe Photoshop TIFF Technical Notes, Supplement 2 (March 22, 2002)** — Technical Note 3
+  defines `Compression = 8` as one complete RFC 1950 zlib stream per strip or tile and extends
+  horizontal Predictor 2 to Deflate. Adobe's retired canonical filename is `TIFFphotoshop.pdf`;
+  the contract is cross-checked against the vendored libtiff + zlib oracle.
 
 ## Not vendored (cross-checked via oracle)
 
