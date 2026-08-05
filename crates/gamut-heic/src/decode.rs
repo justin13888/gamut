@@ -610,7 +610,7 @@ fn assemble_plane(
 /// The presentation matrix coefficients and signal range for an item: its nclx `colr`, or the
 /// documented BT.601-limited default when absent.
 fn colour_params(item: &HeifItem<'_>) -> Result<(u16, ColorRange)> {
-    match item.colour() {
+    match item.colour_for_presentation() {
         // Default when no `colr`: BT.601 (matrix 6), limited range — see `decode_item_rgba8`.
         None => Ok((6, ColorRange::Limited)),
         Some(ColourInformation::Nclx(nclx)) => {

@@ -419,6 +419,21 @@ impl<'a> HeifItem<'a> {
         })
     }
 
+    /// The colour property suitable for YCbCr-to-RGB presentation: prefer `nclx` regardless of
+    /// association order, then retain the first-colour fallback used by [`Self::colour`].
+    pub(crate) fn colour_for_presentation(&self) -> Option<&'a ColourInformation> {
+        let mut first = None;
+        for property in &self.inner.properties {
+            if let PropertyKind::Colour(info) = &property.kind {
+                first.get_or_insert(info);
+                if matches!(info, ColourInformation::Nclx(_)) {
+                    return Some(info);
+                }
+            }
+        }
+        first
+    }
+
     /// The `clli` content light level (`MaxCLL`/`MaxPALL`), if present.
     #[must_use]
     pub fn content_light_level(&self) -> Option<ContentLightLevel> {
