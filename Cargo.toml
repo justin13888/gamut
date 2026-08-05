@@ -52,6 +52,7 @@ missing_docs = "warn" # becomes a hard error under `clippy -D warnings` in CI
 # Third-party
 thiserror = "2.0.18"
 serde = { version = "1", features = ["derive"] }
+geocoordinates = { version = "0.14", default-features = false }
 # MD5 for the ICC profile ID (ICC.1:2022 §7.2.18) — a content fingerprint mandated by the format,
 # not a security primitive. RustCrypto, pure-Rust, no_std-compatible.
 md-5 = { version = "0.10", default-features = false }

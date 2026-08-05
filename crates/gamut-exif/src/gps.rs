@@ -10,6 +10,34 @@ use gamut_ifd::{Ifd, Value};
 use crate::tag::ExifTag;
 use crate::value::{Rational, as_text};
 
+/// Errors converting EXIF GPS fields into `geocoordinates` types.
+#[cfg(feature = "geocoordinates")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum GpsConversionError {
+    /// Latitude is required for a complete position.
+    #[error("GPS latitude is missing")]
+    MissingLatitude,
+    /// Longitude is required for a complete position.
+    #[error("GPS longitude is missing")]
+    MissingLongitude,
+    /// Latitude used an east/west reference instead of north/south.
+    #[error("GPS latitude reference must be N or S")]
+    InvalidLatitudeReference,
+    /// Longitude used a north/south reference instead of east/west.
+    #[error("GPS longitude reference must be E or W")]
+    InvalidLongitudeReference,
+    /// A rational component had a zero denominator.
+    #[error("GPS {0} has a zero denominator")]
+    ZeroDenominator(&'static str),
+    /// A DMS coordinate used minutes or seconds outside `[0, 60)`.
+    #[error("GPS {0} has invalid degrees/minutes/seconds components")]
+    InvalidDms(&'static str),
+    /// The resulting latitude or longitude is outside the WGS-84 angular domain.
+    #[error("GPS position is outside the valid latitude/longitude range")]
+    OutOfRange,
+}
+
 /// The positioning data from the GPS sub-IFD, as typed latitude/longitude/altitude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpsInfo {
@@ -175,6 +203,98 @@ impl GpsInfo {
     }
 }
 
+#[cfg(feature = "geocoordinates")]
+impl TryFrom<GpsInfo> for geocoordinates::Wgs84 {
+    type Error = GpsConversionError;
+
+    /// Converts a complete, valid EXIF GPS position to decimal-degree WGS-84.
+    ///
+    /// EXIF altitude is intentionally omitted because [`geocoordinates::Wgs84`] is a 2D datum
+    /// newtype. Convert to [`geocoordinates::Coordinate`] to preserve it.
+    fn try_from(value: GpsInfo) -> Result<Self, Self::Error> {
+        let coordinate = coordinate_without_height(&value)?;
+        Ok(geocoordinates::Wgs84::new(coordinate.lat, coordinate.lon))
+    }
+}
+
+#[cfg(feature = "geocoordinates")]
+impl TryFrom<GpsInfo> for geocoordinates::Coordinate {
+    type Error = GpsConversionError;
+
+    /// Converts a complete, valid EXIF GPS position to a WGS-84 coordinate, preserving EXIF
+    /// sea-level altitude as an orthometric height when present.
+    fn try_from(value: GpsInfo) -> Result<Self, Self::Error> {
+        let mut coordinate = coordinate_without_height(&value)?;
+        if let Some(altitude) = value.altitude {
+            let meters = altitude
+                .meters
+                .to_f64()
+                .ok_or(GpsConversionError::ZeroDenominator("altitude"))?;
+            let signed = if altitude.below_sea_level {
+                -meters
+            } else {
+                meters
+            };
+            coordinate = coordinate.with_height(geocoordinates::Height::Orthometric(signed));
+        }
+        coordinate
+            .validate()
+            .map_err(|_| GpsConversionError::OutOfRange)?;
+        Ok(coordinate)
+    }
+}
+
+#[cfg(feature = "geocoordinates")]
+fn coordinate_without_height(
+    value: &GpsInfo,
+) -> Result<geocoordinates::Coordinate, GpsConversionError> {
+    let latitude = value.latitude.ok_or(GpsConversionError::MissingLatitude)?;
+    let longitude = value
+        .longitude
+        .ok_or(GpsConversionError::MissingLongitude)?;
+    let lat = coordinate_degrees(latitude, true)?;
+    let lon = coordinate_degrees(longitude, false)?;
+    let coordinate = geocoordinates::Coordinate::wgs84(lat, lon);
+    coordinate
+        .validate()
+        .map_err(|_| GpsConversionError::OutOfRange)?;
+    Ok(coordinate)
+}
+
+#[cfg(feature = "geocoordinates")]
+fn coordinate_degrees(
+    coordinate: GpsCoordinate,
+    latitude: bool,
+) -> Result<f64, GpsConversionError> {
+    let sign = match (latitude, coordinate.reference) {
+        (true, GpsReference::North) | (false, GpsReference::East) => 1.0,
+        (true, GpsReference::South) | (false, GpsReference::West) => -1.0,
+        (true, GpsReference::East | GpsReference::West) => {
+            return Err(GpsConversionError::InvalidLatitudeReference);
+        }
+        (false, GpsReference::North | GpsReference::South) => {
+            return Err(GpsConversionError::InvalidLongitudeReference);
+        }
+    };
+    let axis = if latitude { "latitude" } else { "longitude" };
+    let degrees = coordinate
+        .degrees
+        .to_f64()
+        .ok_or(GpsConversionError::ZeroDenominator(axis))?;
+    let minutes = coordinate
+        .minutes
+        .to_f64()
+        .ok_or(GpsConversionError::ZeroDenominator(axis))?;
+    let seconds = coordinate
+        .seconds
+        .to_f64()
+        .ok_or(GpsConversionError::ZeroDenominator(axis))?;
+    if minutes >= 60.0 || seconds >= 60.0 {
+        return Err(GpsConversionError::InvalidDms(axis));
+    }
+    Ok(sign * (degrees + minutes / 60.0 + seconds / 3600.0))
+}
+
 /// Reads a degrees/minutes/seconds coordinate and its reference from `ifd`.
 fn coordinate(ifd: &Ifd, value_tag: ExifTag, ref_tag: ExifTag) -> Option<GpsCoordinate> {
     let dms = match ifd.get(value_tag.tag_id())? {
@@ -291,5 +411,150 @@ mod tests {
             reference: GpsReference::North,
         };
         assert_eq!(coord.to_degrees(), None);
+    }
+
+    #[cfg(feature = "geocoordinates")]
+    mod geocoordinates_conversion {
+        use geocoordinates::{Coordinate, Crs, Height, Wgs84};
+
+        use super::*;
+
+        fn dms(degrees: u32, minutes: u32, seconds: u32, reference: GpsReference) -> GpsCoordinate {
+            GpsCoordinate {
+                degrees: Rational {
+                    num: degrees,
+                    den: 1,
+                },
+                minutes: Rational {
+                    num: minutes,
+                    den: 1,
+                },
+                seconds: Rational {
+                    num: seconds,
+                    den: 1,
+                },
+                reference,
+            }
+        }
+
+        fn position() -> GpsInfo {
+            GpsInfo {
+                latitude: Some(dms(48, 51, 30, GpsReference::North)),
+                longitude: Some(dms(2, 21, 2, GpsReference::East)),
+                altitude: Some(GpsAltitude {
+                    meters: Rational { num: 35, den: 1 },
+                    below_sea_level: false,
+                }),
+            }
+        }
+
+        #[test]
+        fn wgs84_conversion_uses_axis_signs_and_drops_altitude() {
+            let north_east = Wgs84::try_from(position()).unwrap();
+            assert!((north_east.lat - 48.858_333_333_333_334).abs() < 1e-12);
+            assert!((north_east.lon - 2.350_555_555_555_555_4).abs() < 1e-12);
+
+            let mut south_west = position();
+            south_west.latitude.as_mut().unwrap().reference = GpsReference::South;
+            south_west.longitude.as_mut().unwrap().reference = GpsReference::West;
+            let converted = Wgs84::try_from(south_west).unwrap();
+            assert_eq!(converted.lat, -north_east.lat);
+            assert_eq!(converted.lon, -north_east.lon);
+        }
+
+        #[test]
+        fn coordinate_conversion_preserves_orthometric_altitude() {
+            let above = Coordinate::try_from(position()).unwrap();
+            assert_eq!(above.crs, Crs::Wgs84);
+            assert_eq!(above.height, Some(Height::Orthometric(35.0)));
+            above.validate().unwrap();
+
+            let mut below = position();
+            below.altitude.as_mut().unwrap().below_sea_level = true;
+            assert_eq!(
+                Coordinate::try_from(below).unwrap().height,
+                Some(Height::Orthometric(-35.0))
+            );
+
+            let mut no_altitude = position();
+            no_altitude.altitude = None;
+            assert_eq!(Coordinate::try_from(no_altitude).unwrap().height, None);
+        }
+
+        #[test]
+        fn complete_coordinates_and_axis_references_are_required() {
+            let mut missing_latitude = position();
+            missing_latitude.latitude = None;
+            assert_eq!(
+                Wgs84::try_from(missing_latitude),
+                Err(GpsConversionError::MissingLatitude)
+            );
+
+            let mut missing_longitude = position();
+            missing_longitude.longitude = None;
+            assert_eq!(
+                Wgs84::try_from(missing_longitude),
+                Err(GpsConversionError::MissingLongitude)
+            );
+
+            let mut bad_latitude_ref = position();
+            bad_latitude_ref.latitude.as_mut().unwrap().reference = GpsReference::East;
+            assert_eq!(
+                Wgs84::try_from(bad_latitude_ref),
+                Err(GpsConversionError::InvalidLatitudeReference)
+            );
+
+            let mut bad_longitude_ref = position();
+            bad_longitude_ref.longitude.as_mut().unwrap().reference = GpsReference::North;
+            assert_eq!(
+                Wgs84::try_from(bad_longitude_ref),
+                Err(GpsConversionError::InvalidLongitudeReference)
+            );
+        }
+
+        #[test]
+        fn malformed_rationals_and_dms_are_rejected() {
+            let mut zero_denominator = position();
+            zero_denominator.latitude.as_mut().unwrap().seconds.den = 0;
+            assert_eq!(
+                Wgs84::try_from(zero_denominator),
+                Err(GpsConversionError::ZeroDenominator("latitude"))
+            );
+
+            let mut invalid_dms = position();
+            invalid_dms.longitude.as_mut().unwrap().minutes.num = 60;
+            assert_eq!(
+                Wgs84::try_from(invalid_dms),
+                Err(GpsConversionError::InvalidDms("longitude"))
+            );
+
+            let mut invalid_altitude = position();
+            invalid_altitude.altitude.as_mut().unwrap().meters.den = 0;
+            assert_eq!(
+                Coordinate::try_from(invalid_altitude),
+                Err(GpsConversionError::ZeroDenominator("altitude"))
+            );
+            assert!(
+                Wgs84::try_from(invalid_altitude).is_ok(),
+                "the 2D conversion deliberately ignores altitude"
+            );
+        }
+
+        #[test]
+        fn angular_boundaries_are_valid_and_excess_is_rejected() {
+            let boundary = GpsInfo {
+                latitude: Some(dms(90, 0, 0, GpsReference::South)),
+                longitude: Some(dms(180, 0, 0, GpsReference::West)),
+                altitude: None,
+            };
+            assert_eq!(Wgs84::try_from(boundary), Ok(Wgs84::new(-90.0, -180.0)));
+
+            let mut beyond_pole = boundary;
+            beyond_pole.latitude = Some(dms(90, 0, 1, GpsReference::North));
+            assert_eq!(
+                Coordinate::try_from(beyond_pole),
+                Err(GpsConversionError::OutOfRange)
+            );
+        }
     }
 }

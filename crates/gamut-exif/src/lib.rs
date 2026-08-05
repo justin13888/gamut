@@ -45,6 +45,8 @@ pub mod writer;
 pub use error::{ExifError, Result};
 pub use exif::Exif;
 pub use gamut_ifd::{ByteOrder, Ifd, Value};
+#[cfg(feature = "geocoordinates")]
+pub use gps::GpsConversionError;
 pub use gps::{GpsAltitude, GpsCoordinate, GpsInfo, GpsReference};
 pub use maker_note::{MakerNote, MakerNoteVendor};
 pub use reader::ExifReader;

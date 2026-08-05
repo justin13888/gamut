@@ -15,9 +15,15 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+full = ["geocoordinates"]
+geocoordinates = ["dep:geocoordinates"]
+
 [dependencies]
 gamut-core.workspace = true
 gamut-ifd.workspace = true
+geocoordinates = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]

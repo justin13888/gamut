@@ -46,6 +46,12 @@ let out = edited.to_bytes();                // Exif\0\0 + TIFF, ready to re-embe
 For a bare TIFF stream (PNG `eXIf` / WebP `EXIF`) or a byte-order override, use [`ExifWriter`];
 [`ExifReader`] carries the read-side options (`require_marker`, `strict`).
 
+Enable the optional `geocoordinates` feature (also included by `full`) to convert a complete
+[`GpsInfo`] with `TryFrom` into `geocoordinates::Wgs84` or `geocoordinates::Coordinate`. The latter
+preserves EXIF sea-level altitude as an orthometric height; the 2D `Wgs84` newtype intentionally
+drops altitude. Malformed references, rationals, DMS components, and out-of-range positions return
+the typed [`GpsConversionError`].
+
 ## Scope
 
 v1 covers the **standard CIPA DC-008 tag dictionary** ([`ExifTag`]), full read/write round-trips
