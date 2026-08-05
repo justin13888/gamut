@@ -195,7 +195,10 @@ fn an_empty_registry_leaves_both_directions_on_the_built_in_path() {
     let mut enc = JpegEncoder::new();
     assert!(format!("{enc:?}").contains("backends: 0"));
     let dec = JpegDecoder::new();
-    assert_eq!(format!("{dec:?}"), "JpegDecoder { backends: 0 }");
+    assert_eq!(
+        format!("{dec:?}"),
+        "JpegDecoder { max_width: None, max_height: None, max_image_bytes: None, backends: 0 }"
+    );
     let a: ImageBuf<Gray8> = dec.decode_image(&plain).unwrap();
 
     // Pushing a backend that always declines must not change either result.
@@ -871,6 +874,77 @@ fn decoder_returning(raster: DecodedJpeg) -> JpegDecoder {
     let mut dec = JpegDecoder::new();
     dec.push_backend(Fixed(raster));
     dec
+}
+
+#[test]
+fn decoder_limits_run_before_backend_selection_and_after_backend_output() {
+    let stream = backend_stream();
+    let log: Log = Arc::default();
+    let mut preflight = JpegDecoder::new().with_max_dimensions(W - 1, H);
+    preflight.push_backend(ScriptedDecoder {
+        name: "must-not-run",
+        act: Act::Accept,
+        log: log.clone(),
+        out: flat_gray(),
+    });
+    assert_eq!(
+        DecodeImage::<Gray8>::decode_image(&preflight, &stream)
+            .unwrap_err()
+            .to_string(),
+        "unsupported: JPEG: image exceeds the dimension limit"
+    );
+    assert!(log.lock().unwrap().is_empty());
+
+    // The input header itself is exactly within both caps, but a backend may return a different
+    // shape or layout. Re-check the owned result before presentation or destination replacement.
+    let too_wide = decoder_returning(
+        DecodedJpeg::new(
+            W + 1,
+            H,
+            PixelFormat::Gray8,
+            vec![0; ((W + 1) * H) as usize],
+        )
+        .unwrap(),
+    )
+    .with_max_dimensions(W, H);
+    assert_eq!(
+        DecodeImage::<Gray8>::decode_image(&too_wide, &stream)
+            .unwrap_err()
+            .to_string(),
+        "unsupported: JPEG: image exceeds the dimension limit"
+    );
+
+    let too_many_bytes = decoder_returning(
+        DecodedJpeg::new(W, H, PixelFormat::Rgb8, vec![0; (W * H * 3) as usize]).unwrap(),
+    )
+    .with_max_image_bytes((W * H) as usize);
+    assert_eq!(
+        DecodeImage::<Rgb8>::decode_image(&too_many_bytes, &stream)
+            .unwrap_err()
+            .to_string(),
+        "unsupported: JPEG: image exceeds the size limit"
+    );
+}
+
+#[test]
+fn backend_limit_error_leaves_decode_into_destination_unchanged() {
+    let stream = backend_stream();
+    let decoder = decoder_returning(
+        DecodedJpeg::new(
+            W + 1,
+            H,
+            PixelFormat::Gray8,
+            vec![0; ((W + 1) * H) as usize],
+        )
+        .unwrap(),
+    )
+    .with_max_dimensions(W, H);
+    let mut dst = ImageBuf::<Gray8>::new(vec![77; (W * H) as usize], dims()).unwrap();
+    let ptr = dst.as_samples().as_ptr();
+
+    assert!(decoder.decode_image_into(&stream, &mut dst).is_err());
+    assert_eq!(dst.as_samples().as_ptr(), ptr);
+    assert!(dst.as_samples().iter().all(|&sample| sample == 77));
 }
 
 #[test]

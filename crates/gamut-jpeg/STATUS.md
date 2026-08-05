@@ -53,6 +53,9 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Pluggable codestream backends (P8, issue #277): the `backend` module's `JpegStreamDecoder` /
   `JpegStreamEncoder` traits, `JpegDecoder::push_backend` / `JpegEncoder::push_backend`, and the
   `gamut-codec-abi` adapters in both directions.
+- Opt-in decoder resource guards (P9, issue #306): `JpegDecoder::with_max_dimensions` and
+  `with_max_image_bytes`, enforced before built-in frame allocations and backend selection, while
+  bounding sequential DNL-deferred sample-plane growth until the exact height arrives.
 
 **Deferred / out of scope** (documented, with reasons):
 
@@ -93,7 +96,14 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **DNL (define number of lines, §B.2.5).** The **decoder** parses DNL and resolves a *sequential*
   frame with `Y = 0` by decoding MCU rows until the entropy data ends at a marker (the `Y = 0`
   frame's height then arrives in the following DNL). A DNL after a `Y ≠ 0` frame is advisory and
-  ignored. The encoder never emits `Y = 0` (it always knows its height and writes it in SOF0).
+  ignored. An opt-in dimension or byte cap derives an MCU-row ceiling before this dynamic decode,
+  then the exact resolved height is checked when DNL arrives. The encoder never emits `Y = 0` (it
+  always knows its height and writes it in SOF0).
+- **Resource-budget accounting.** `with_max_image_bytes` budgets the native 8-bit interleaved
+  raster (`width × height × frame components`), independent of chroma subsampling or requested
+  `Gray8`/`Rgb8`/`Cmyk8` presentation. Defaults remain unrestricted for compatibility. SOF limits
+  run before built-in frame-sized allocation or backend selection; accepted backend output is
+  checked again, although the host cannot cap memory internal to an accepted foreign backend.
 - **Progressive + `Y = 0` (deferred height) is rejected as `Unsupported`.** The progressive
   coefficient buffers are sized to each component's full block grid before the first scan, so a
   height deferred to a trailing DNL cannot be accommodated without a two-pass scan or dynamically
@@ -165,3 +175,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P6 | — | Hardening: CMYK/YCCK + Adobe APP14 (landed with P2), CLI `gamut convert → .jpg` (`--quality`/`--jpeg-subsampling`/`--jpeg-restart-interval`/`--jpeg-progressive`), umbrella `jpeg` feature audit, facade mutants scoping, full-workspace gate re-run | ✅ done |
 | P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |
 | P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegStreamDecoder`/`JpegStreamEncoder` traits over the **whole SOI..EOI interchange stream**, `push_backend` push-order registries (`Arc<Mutex<..>>`, so `Clone` shares backends), the `backend_declined` late-decline sentinel, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
+| P9 | issue #306 | **Decoder resource limits:** opt-in dimension and native-raster byte builders; checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |

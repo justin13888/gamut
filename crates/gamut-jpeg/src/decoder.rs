@@ -3,7 +3,9 @@
 //! Decoding is where the codec is generous (T.81 Annex F §F.2, Annex G §G.2, Annex A §A.2): it
 //! accepts any spec-valid baseline (SOF0), extended-sequential (SOF1) **or progressive (SOF2)** 8-bit
 //! stream, resolves the colour space from the JFIF/Adobe application segments, and rejects malformed
-//! input with a typed [`Error`] rather than panicking. The pipeline is: walk the marker segments
+//! input with a typed [`Error`] rather than panicking. Opt-in dimension and native-raster byte caps
+//! reject hostile frame geometry before the built-in decoder allocates from it. The pipeline is:
+//! walk the marker segments
 //! (SOI → tables → frame → scans → EOI, [`crate::syntax`]); decode each scan's entropy data into
 //! per-component sample planes ([`crate::scan`]); upsample the chroma planes to full resolution by
 //! sample replication; and colour-convert to the requested pixel layout.
@@ -56,7 +58,7 @@ use gamut_core::{
 use crate::appmeta;
 use crate::backend::{self, DecodedJpeg, DecoderSlot, JpegStreamDecoder, JpegStreamInfo};
 use crate::marker::code;
-use crate::scan::{Plane, ProgComp, decode_progressive_scan, decode_scan};
+use crate::scan::{McuRowLimit, Plane, ProgComp, decode_progressive_scan, decode_scan};
 use crate::syntax::{
     ColorInfo, Frame, Tables, parse_app0, parse_app14, parse_dht, parse_dnl, parse_dqt, parse_dri,
     parse_sof, parse_sos,
@@ -64,9 +66,12 @@ use crate::syntax::{
 
 /// A decoder for sequential (baseline SOF0 / extended SOF1) 8-bit Huffman JPEG streams.
 ///
-/// Stateless and cheap to construct; drive it through the [`DecodeImage`] trait. It presents the
-/// decoded image as [`Rgb8`] (grayscale replicated, YCbCr/RGB three-component), [`Gray8`]
-/// (single-component streams only), or [`Cmyk8`] (four-component CMYK/YCCK streams only).
+/// Cheap to construct; drive it through the [`DecodeImage`] trait. It presents the decoded image as
+/// [`Rgb8`] (grayscale replicated, YCbCr/RGB three-component), [`Gray8`] (single-component streams
+/// only), or [`Cmyk8`] (four-component CMYK/YCCK streams only). Limits are opt-in, preserving the
+/// decoder's previous unrestricted defaults; applications handling untrusted input should set both
+/// [`with_max_dimensions`](Self::with_max_dimensions) and
+/// [`with_max_image_bytes`](Self::with_max_image_bytes).
 ///
 /// # Example
 ///
@@ -85,6 +90,12 @@ use crate::syntax::{
 /// ```
 #[derive(Clone, Default)]
 pub struct JpegDecoder {
+    /// Optional maximum accepted width.
+    max_width: Option<u32>,
+    /// Optional maximum accepted height.
+    max_height: Option<u32>,
+    /// Optional maximum native interleaved raster length.
+    max_image_bytes: Option<usize>,
     /// Pluggable whole-stream backends, tried in push order ahead of the built-in decoder.
     backends: Vec<DecoderSlot>,
 }
@@ -93,17 +104,43 @@ impl fmt::Debug for JpegDecoder {
     /// The backends are opaque `dyn` objects, so only their count is shown.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JpegDecoder")
+            .field("max_width", &self.max_width)
+            .field("max_height", &self.max_height)
+            .field("max_image_bytes", &self.max_image_bytes)
             .field("backends", &self.backends.len())
             .finish()
     }
 }
 
 impl JpegDecoder {
-    /// Creates a decoder with no pluggable backends: every stream is decoded by the built-in
-    /// decoder.
+    /// Creates a decoder with no resource limits and no pluggable backends: every stream is decoded
+    /// by the built-in decoder.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Caps the accepted image dimensions. A wider SOF or a known taller SOF is refused before any
+    /// frame-sized allocation; a DNL-deferred height is bounded while its first scan is decoded and
+    /// checked exactly when the DNL arrives.
+    #[must_use]
+    pub fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.max_width = Some(width);
+        self.max_height = Some(height);
+        self
+    }
+
+    /// Caps the image's native interleaved 8-bit raster in bytes: `width × height × frame
+    /// components`.
+    ///
+    /// The cap is independent of the requested presentation type: for example, a one-component
+    /// grayscale JPEG costs one byte per pixel even when decoded as [`Rgb8`]. For a DNL-deferred
+    /// height, the decoder derives a safe MCU-row ceiling from this budget before growing its sample
+    /// planes. The default is unrestricted.
+    #[must_use]
+    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
+        self.max_image_bytes = Some(bytes);
+        self
     }
 
     /// Appends a [`JpegStreamDecoder`] backend to this decoder's registry.
@@ -133,7 +170,86 @@ impl JpegDecoder {
             return Ok(None);
         }
         let info = JpegStreamInfo::parse(data)?;
-        backend::decode_with_backends(&self.backends, &info, data)
+        self.check_limits(info.width(), info.height(), usize::from(info.components()))?;
+        let decoded = backend::decode_with_backends(&self.backends, &info, data)?;
+        if let Some(img) = &decoded {
+            self.check_limits(img.width(), img.height(), img.format().channels())?;
+        }
+        Ok(decoded)
+    }
+
+    /// Checks dimensions and native raster bytes. A zero `height` is a DNL-deferred SOF: width and
+    /// the minimum possible one-row raster are still checked immediately.
+    fn check_limits(&self, width: u32, height: u32, components: usize) -> Result<()> {
+        if self.max_width.is_some_and(|max| width > max)
+            || (height != 0 && self.max_height.is_some_and(|max| height > max))
+        {
+            return Err(Error::Unsupported(
+                "JPEG: image exceeds the dimension limit",
+            ));
+        }
+        let row_bytes = usize::try_from(width)
+            .ok()
+            .and_then(|width| width.checked_mul(components))
+            .ok_or(Error::InvalidInput("JPEG: image dimensions overflow"))?;
+        if let Some(max) = self.max_image_bytes {
+            let native_bytes = if height == 0 {
+                row_bytes
+            } else {
+                row_bytes
+                    .checked_mul(
+                        usize::try_from(height)
+                            .map_err(|_| Error::InvalidInput("JPEG: image dimensions overflow"))?,
+                    )
+                    .ok_or(Error::InvalidInput("JPEG: image dimensions overflow"))?
+            };
+            if native_bytes > max {
+                return Err(Error::Unsupported("JPEG: image exceeds the size limit"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Caps the number of MCU rows a sequential `Y=0` scan may allocate before its DNL arrives.
+    /// The cap is the tighter of the explicit height and the height implied by the byte budget.
+    fn deferred_row_limit(
+        &self,
+        frame: &Frame,
+        scan: &crate::syntax::ScanHeader,
+    ) -> Result<Option<McuRowLimit>> {
+        let mut limit = self.max_height.map(|height| McuRowLimit {
+            rows: scan_mcu_rows(frame, scan, usize::try_from(height).unwrap_or(usize::MAX)),
+            message: "JPEG: image exceeds the dimension limit",
+        });
+        if let Some(max_bytes) = self.max_image_bytes {
+            let row_bytes = usize::from(frame.x)
+                .checked_mul(frame.components.len())
+                .ok_or(Error::InvalidInput("JPEG: image dimensions overflow"))?;
+            let height = max_bytes / row_bytes;
+            let size_limit = McuRowLimit {
+                rows: scan_mcu_rows(frame, scan, height),
+                message: "JPEG: image exceeds the size limit",
+            };
+            if limit.is_none_or(|current| size_limit.rows < current.rows) {
+                limit = Some(size_limit);
+            }
+        }
+        Ok(limit)
+    }
+}
+
+/// Number of MCU rows needed to cover `height` output lines in `scan`.
+fn scan_mcu_rows(frame: &Frame, scan: &crate::syntax::ScanHeader, height: usize) -> usize {
+    // SOF/DNL heights are u16, so a looser application cap cannot require a larger grid. Clamping
+    // also keeps the sampling-factor multiplication below `usize` overflow on narrow targets.
+    let height = height.min(usize::from(u16::MAX));
+    let vmax = usize::from(frame.vmax());
+    if scan.interleaved() {
+        height.div_ceil(8 * vmax)
+    } else {
+        let fc = &frame.components[scan.components[0].frame_index];
+        let comp_h = (height * usize::from(fc.v)).div_ceil(vmax);
+        comp_h.div_ceil(8)
     }
 }
 
@@ -509,7 +625,7 @@ fn decide_transform(img: &DecodedImage) -> Result<Transform> {
 
 impl JpegDecoder {
     /// The shared marker-loop driver: decodes `data` to an internal [`DecodedImage`].
-    fn decode_internal(data: &[u8]) -> Result<DecodedImage> {
+    fn decode_internal(&self, data: &[u8]) -> Result<DecodedImage> {
         expect_soi(data)?;
         let mut pos = 2;
         let mut tables = Tables::default();
@@ -531,6 +647,7 @@ impl JpegDecoder {
                     }
                     let (payload, next) = read_segment(data, after)?;
                     let f = parse_sof(payload)?;
+                    self.check_limits(f.x.into(), f.y.into(), f.components.len())?;
                     planes = (0..f.components.len()).map(|_| None).collect();
                     frame = Some(f);
                     pos = next;
@@ -541,6 +658,7 @@ impl JpegDecoder {
                     }
                     let (payload, next) = read_segment(data, after)?;
                     let f = parse_sof(payload)?;
+                    self.check_limits(f.x.into(), f.y.into(), f.components.len())?;
                     if f.y == 0 {
                         // A Y=0 (DNL-deferred height) progressive frame is rejected: the
                         // coefficient buffers must be sized to the full block grid before the first
@@ -598,7 +716,12 @@ impl JpegDecoder {
                                 ));
                             }
                         }
-                        let result = decode_scan(data, next, f, &scan, &tables)?;
+                        let row_limit = if f.y == 0 {
+                            self.deferred_row_limit(f, &scan)?
+                        } else {
+                            None
+                        };
+                        let result = decode_scan(data, next, f, &scan, &tables, row_limit)?;
                         for (ci, plane) in result.planes {
                             planes[ci] = Some(plane);
                         }
@@ -613,6 +736,7 @@ impl JpegDecoder {
                         && f.y == 0
                     {
                         f.y = nl;
+                        self.check_limits(f.x.into(), f.y.into(), f.components.len())?;
                     }
                     pos = next;
                 }
@@ -863,7 +987,7 @@ impl DecodeImage<Rgb8> for JpegDecoder {
         if let Some(img) = self.decode_via_backend(data)? {
             return backend_buf::<Rgb8>(&img, backend_rgb_into);
         }
-        let img = Self::decode_internal(data)?;
+        let img = self.decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_rgb(&img)?, dims)
     }
@@ -879,7 +1003,7 @@ impl DecodeImage<Rgb8> for JpegDecoder {
             *dst = backend_buf::<Rgb8>(&img, backend_rgb_into)?;
             return Ok(());
         }
-        let img = Self::decode_internal(data)?;
+        let img = self.decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         if dst.dimensions() == dims {
             present_rgb_into(&img, dst.as_mut_samples())
@@ -896,7 +1020,7 @@ impl DecodeImage<Gray8> for JpegDecoder {
         if let Some(img) = self.decode_via_backend(data)? {
             return backend_buf::<Gray8>(&img, backend_gray_into);
         }
-        let img = Self::decode_internal(data)?;
+        let img = self.decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_gray(&img)?, dims)
     }
@@ -912,7 +1036,7 @@ impl DecodeImage<Gray8> for JpegDecoder {
             *dst = backend_buf::<Gray8>(&img, backend_gray_into)?;
             return Ok(());
         }
-        let img = Self::decode_internal(data)?;
+        let img = self.decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         if dst.dimensions() == dims {
             present_gray_into(&img, dst.as_mut_samples())
@@ -929,7 +1053,7 @@ impl DecodeImage<Cmyk8> for JpegDecoder {
         if let Some(img) = self.decode_via_backend(data)? {
             return backend_buf::<Cmyk8>(&img, backend_cmyk_into);
         }
-        let img = Self::decode_internal(data)?;
+        let img = self.decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         ImageBuf::new(present_cmyk(&img)?, dims)
     }
@@ -945,7 +1069,7 @@ impl DecodeImage<Cmyk8> for JpegDecoder {
             *dst = backend_buf::<Cmyk8>(&img, backend_cmyk_into)?;
             return Ok(());
         }
-        let img = Self::decode_internal(data)?;
+        let img = self.decode_internal(data)?;
         let dims = Dimensions::new(img.width, img.height)?;
         if dst.dimensions() == dims {
             present_cmyk_into(&img, dst.as_mut_samples())
@@ -1561,6 +1685,166 @@ mod tests {
         let jpeg = gray_stream(8, 0, &[flat(5)], None);
         assert!(
             <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &jpeg).is_err()
+        );
+    }
+
+    #[test]
+    fn deferred_height_limits_are_exact_and_bound_missing_dnl_growth() {
+        let resolved = gray_stream(8, 0, &[flat(5), flat(6)], Some((4, 16)));
+        assert!(
+            DecodeImage::<Gray8>::decode_image(
+                &JpegDecoder::new().with_max_dimensions(8, 16),
+                &resolved,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            err_msg(DecodeImage::<Gray8>::decode_image(
+                &JpegDecoder::new().with_max_dimensions(8, 15),
+                &resolved,
+            )),
+            "JPEG: image exceeds the dimension limit"
+        );
+        assert!(
+            DecodeImage::<Gray8>::decode_image(
+                &JpegDecoder::new().with_max_image_bytes(8 * 16),
+                &resolved,
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            err_msg(DecodeImage::<Gray8>::decode_image(
+                &JpegDecoder::new().with_max_image_bytes(8 * 16 - 1),
+                &resolved,
+            )),
+            "JPEG: image exceeds the size limit"
+        );
+
+        // With no DNL, the configured ceiling must stop a third entropy row before the later
+        // "height never defined" error. This makes the allocation guard itself observable.
+        let no_dnl = gray_stream(8, 0, &[flat(1), flat(2), flat(3)], None);
+        assert_eq!(
+            err_msg(DecodeImage::<Gray8>::decode_image(
+                &JpegDecoder::new().with_max_dimensions(8, 8),
+                &no_dnl,
+            )),
+            "JPEG: image exceeds the dimension limit"
+        );
+        assert_eq!(
+            err_msg(DecodeImage::<Gray8>::decode_image(
+                &JpegDecoder::new().with_max_image_bytes(8 * 8),
+                &no_dnl,
+            )),
+            "JPEG: image exceeds the size limit"
+        );
+    }
+
+    #[test]
+    fn deferred_scan_row_geometry_covers_both_scan_shapes() {
+        use crate::syntax::{FrameComponent, ScanComponent, ScanHeader};
+
+        let frame = Frame {
+            x: 16,
+            y: 0,
+            components: vec![
+                FrameComponent {
+                    id: 1,
+                    h: 2,
+                    v: 2,
+                    tq: 0,
+                },
+                FrameComponent {
+                    id: 2,
+                    h: 1,
+                    v: 1,
+                    tq: 0,
+                },
+                FrameComponent {
+                    id: 3,
+                    h: 1,
+                    v: 1,
+                    tq: 0,
+                },
+            ],
+        };
+        let component = |frame_index| ScanComponent {
+            frame_index,
+            td: 0,
+            ta: 0,
+        };
+        let scan = |components| ScanHeader {
+            components,
+            ss: 0,
+            se: 63,
+            ah: 0,
+            al: 0,
+        };
+        let interleaved = scan(vec![component(0), component(1), component(2)]);
+        assert_eq!(scan_mcu_rows(&frame, &interleaved, 16), 1);
+        assert_eq!(scan_mcu_rows(&frame, &interleaved, 17), 2);
+
+        let luma_only = scan(vec![component(0)]);
+        assert_eq!(scan_mcu_rows(&frame, &luma_only, 16), 2);
+        assert_eq!(scan_mcu_rows(&frame, &luma_only, 17), 3);
+
+        let chroma_only = scan(vec![component(1)]);
+        assert_eq!(scan_mcu_rows(&frame, &chroma_only, 16), 1);
+        assert_eq!(scan_mcu_rows(&frame, &chroma_only, 17), 2);
+    }
+
+    #[test]
+    fn deferred_row_limit_uses_the_tighter_budget_and_dimension_precedence_on_ties() {
+        use crate::syntax::{FrameComponent, ScanComponent, ScanHeader};
+
+        let frame = Frame {
+            x: 8,
+            y: 0,
+            components: vec![FrameComponent {
+                id: 1,
+                h: 1,
+                v: 1,
+                tq: 0,
+            }],
+        };
+        let scan = ScanHeader {
+            components: vec![ScanComponent {
+                frame_index: 0,
+                td: 0,
+                ta: 0,
+            }],
+            ss: 0,
+            se: 63,
+            ah: 0,
+            al: 0,
+        };
+        let selected = |decoder: JpegDecoder| {
+            let limit = decoder.deferred_row_limit(&frame, &scan).unwrap().unwrap();
+            (limit.rows, limit.message)
+        };
+
+        assert_eq!(
+            selected(
+                JpegDecoder::new()
+                    .with_max_dimensions(8, 24)
+                    .with_max_image_bytes(8 * 8),
+            ),
+            (1, "JPEG: image exceeds the size limit")
+        );
+        assert_eq!(
+            selected(
+                JpegDecoder::new()
+                    .with_max_dimensions(8, 8)
+                    .with_max_image_bytes(8 * 24),
+            ),
+            (1, "JPEG: image exceeds the dimension limit")
+        );
+        assert_eq!(
+            selected(
+                JpegDecoder::new()
+                    .with_max_dimensions(8, 8)
+                    .with_max_image_bytes(8 * 8),
+            ),
+            (1, "JPEG: image exceeds the dimension limit")
         );
     }
 
