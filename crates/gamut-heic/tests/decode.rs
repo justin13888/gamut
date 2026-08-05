@@ -139,6 +139,13 @@ fn colr(matrix: u16, full: bool) -> Property {
     }
 }
 
+fn icc(profile: &[u8]) -> Property {
+    Property {
+        essential: false,
+        kind: PropertyKind::Colour(ColourInformation::UnrestrictedIcc(profile.to_vec())),
+    }
+}
+
 fn irot(turns: u8) -> Property {
     Property {
         essential: true,
@@ -945,6 +952,59 @@ fn identity_matrix_maps_gbr_directly() {
         .decode_item_rgba8(1, &mut Mock::default())
         .unwrap();
     assert_eq!(rgba.as_samples(), &identity_base_rgba(33, 3, 2)[..]);
+}
+
+#[test]
+fn rgba_presentation_prefers_nclx_over_icc_in_either_order() {
+    let nclx_only = {
+        let item = coded_item(1, 3, 8, 33, 3, 2, vec![colr(0, true)]);
+        let bytes = file(1, vec![item]);
+        HeifContainer::parse(&bytes)
+            .unwrap()
+            .image()
+            .decode_item_rgba8(1, &mut Mock::default())
+            .unwrap()
+            .into_samples()
+    };
+
+    for properties in [
+        vec![icc(b"first"), colr(0, true)],
+        vec![colr(0, true), icc(b"second")],
+    ] {
+        let item = coded_item(1, 3, 8, 33, 3, 2, properties);
+        let bytes = file(1, vec![item]);
+        let container = HeifContainer::parse(&bytes).unwrap();
+        let got = container
+            .image()
+            .decode_item_rgba8(1, &mut Mock::default())
+            .unwrap();
+        assert_eq!(got.as_samples(), nclx_only.as_slice());
+    }
+}
+
+#[test]
+fn first_colour_accessor_and_icc_only_fallback_are_unchanged() {
+    let dual = coded_item(1, 3, 8, 33, 3, 2, vec![icc(b"first"), colr(0, true)]);
+    let bytes = file(1, vec![dual]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    assert!(matches!(
+        container.image().item(1).unwrap().colour(),
+        Some(ColourInformation::UnrestrictedIcc(profile)) if profile == b"first"
+    ));
+
+    let icc_only = coded_item(1, 3, 8, 33, 3, 2, vec![icc(b"only")]);
+    let bytes = file(1, vec![icc_only]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    assert!(
+        container
+            .image()
+            .decode_item_planar(1, &mut Mock::default())
+            .is_ok()
+    );
+    assert!(matches!(
+        container.image().decode_item_rgba8(1, &mut Mock::default()),
+        Err(Error::Unsupported(_))
+    ));
 }
 
 #[test]
