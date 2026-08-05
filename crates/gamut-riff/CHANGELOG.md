@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/visualcommons/gamut/compare/gamut-riff-v0.1.2...gamut-riff-v0.1.3) - 2026-07-30
+
+### Added
+
+- *(gamut-riff)* carry ICCP, EXIF, and XMP chunks through the WebP container
+
 ## [0.1.2](https://github.com/justin13888/gamut/compare/gamut-riff-v0.1.1...gamut-riff-v0.1.2) - 2026-07-18
 
 ### Other

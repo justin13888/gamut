@@ -109,7 +109,7 @@ gamut-png = { path = "crates/gamut-png", version = "0.1.0" }
 # JPEG-1 (ISO/IEC 10918 / ITU-T T.81) codec (issue #28).
 gamut-jpeg = { path = "crates/gamut-jpeg", version = "0.1.0" }
 gamut-isobmff = { path = "crates/gamut-isobmff", version = "2.0.1" }
-gamut-riff = { path = "crates/gamut-riff", version = "0.1.2" }
+gamut-riff = { path = "crates/gamut-riff", version = "0.1.3" }
 gamut-av1 = { path = "crates/gamut-av1", version = "0.4.1" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.3" }
 gamut-avif = { path = "crates/gamut-avif", version = "1.1.0" }
@@ -119,7 +119,7 @@ gamut-jxl = { path = "crates/gamut-jxl", version = "0.4.0", default-features = f
 # Static libjxl build + hand-written FFI for gamut-jxl's encoder. Unlike every other shipped crate,
 # building this one runs cmake to compile libjxl (see its README); `links = "jxl"`.
 gamut-jxl-sys = { path = "crates/gamut-jxl-sys", version = "0.1.0" }
-gamut-webp = { path = "crates/gamut-webp", version = "0.3.0" }
+gamut-webp = { path = "crates/gamut-webp", version = "0.3.1" }
 gamut-heic = { path = "crates/gamut-heic", version = "0.2.2" }
 gamut-vvc = { path = "crates/gamut-vvc", version = "0.2.1" }
 gamut-tonemap = { path = "crates/gamut-tonemap", version = "1.0.0" }
@@ -134,7 +134,7 @@ gamut-metadata = { path = "crates/gamut-metadata", version = "1.0.0" }
 gamut-tiff = { path = "crates/gamut-tiff", version = "1.0.0" }
 # DNG raw-image codec (issue #109): a TIFF/EP profile built on gamut-ifd.
 gamut-dng = { path = "crates/gamut-dng", version = "1.0.0" }
-gamut = { path = "crates/gamut", version = "0.3.1" }
+gamut = { path = "crates/gamut", version = "0.3.2" }
 
 [profile.release]
 lto = "thin"

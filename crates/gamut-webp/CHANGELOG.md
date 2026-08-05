@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/visualcommons/gamut/compare/gamut-webp-v0.3.0...gamut-webp-v0.3.1) - 2026-07-30
+
+### Added
+
+- *(gamut-webp)* read and write the EXIF, XMP, and ICCP metadata chunks
+
+### Other
+
+- record WebP metadata support in STATUS, READMEs, and AGENTS.md
+- *(gamut-webp)* pin the metadata chunks against libwebp's muxer
+
 ## [0.3.0](https://github.com/justin13888/gamut/compare/gamut-webp-v0.2.0...gamut-webp-v0.3.0) - 2026-07-18
 
 ### Added
