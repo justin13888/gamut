@@ -710,9 +710,9 @@ fn ref_mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
     for y in 0..hu {
         for x in 0..wu {
             let (dx, dy) = if axis == 1 {
-                (x, hu - 1 - y)
-            } else {
                 (wu - 1 - x, y)
+            } else {
+                (x, hu - 1 - y)
             };
             out[(dy * wu + dx) * 4..(dy * wu + dx) * 4 + 4]
                 .copy_from_slice(&src[(y * wu + x) * 4..(y * wu + x) * 4 + 4]);
@@ -767,8 +767,16 @@ fn irot_all_four_rotations_are_golden() {
 #[test]
 fn imir_both_axes_are_golden() {
     let base = identity_base_rgba(60, 4, 2);
-    for axis in 0..=1u8 {
-        let want = ref_mirror(&base, 4, 2, axis);
+    // Pin the two spec-defined permutations directly. The asymmetric 4x2 raster numbers its
+    // pixels in row-major order, so neither expected order repeats the implementation's branch.
+    for (axis, order) in [
+        (0u8, [4usize, 5, 6, 7, 0, 1, 2, 3]),
+        (1u8, [3usize, 2, 1, 0, 7, 6, 5, 4]),
+    ] {
+        let want: Vec<u8> = order
+            .into_iter()
+            .flat_map(|i| base[i * 4..i * 4 + 4].iter().copied())
+            .collect();
         let (got, gw, gh) = decode_rgba_with_props(60, 4, 2, vec![imir(axis)]);
         assert_eq!((gw, gh), (4, 2), "axis {axis}");
         assert_eq!(got, want, "axis {axis}");

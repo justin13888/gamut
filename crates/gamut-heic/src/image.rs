@@ -346,7 +346,7 @@ impl<'a> HeifItem<'a> {
         })
     }
 
-    /// The `imir` mirror axis (`0` = vertical / left↔right, `1` = horizontal / top↔bottom), if
+    /// The `imir` mirror axis (`0` exchanges top and bottom, `1` exchanges left and right), if
     /// present.
     #[must_use]
     pub fn mirror(&self) -> Option<u8> {
@@ -612,7 +612,7 @@ pub enum TransformativeProperty {
     CleanAperture(CleanAperture),
     /// `irot` rotation, in anti-clockwise quarter turns (`0..=3`).
     Rotation(u8),
-    /// `imir` mirror axis (`0` = vertical, `1` = horizontal).
+    /// `imir` mirror axis (`0` exchanges top and bottom, `1` exchanges left and right).
     Mirror(u8),
 }
 

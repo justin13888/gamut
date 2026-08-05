@@ -188,6 +188,24 @@ fn orientation_fixture() -> &'static [u8] {
     })
 }
 
+/// Builds the same asymmetric source with an EXIF mirror orientation. libheif serializes
+/// orientation 2 as `imir` axis 1 (left↔right) and orientation 4 as axis 0 (top↔bottom).
+fn mirror_orientation_fixture(orientation: u8) -> Vec<u8> {
+    let src = gradient_rgba(ORI_W, ORI_H, false);
+    libheif_oracle::encode_rgba_to_heic(
+        ORI_W,
+        ORI_H,
+        &src,
+        &EncodeOpts {
+            quality: 90,
+            orientation,
+            nclx: Some(nclx_bt601_full()),
+            ..Default::default()
+        },
+    )
+    .expect("encode mirror orientation fixture")
+}
+
 /// A lossless GRAY-ish fixture: 32×32 solid mid-gray, encoded lossless — a tight-bound identity case.
 fn lossless_gray_fixture() -> &'static [u8] {
     static FIXTURE: OnceLock<Vec<u8>> = OnceLock::new();
@@ -576,6 +594,43 @@ fn t4_orientation_matches_libheif() {
         "fewer than 99% of oriented pixels within ±2: {:.4}",
         d.frac_rgb_within_2
     );
+}
+
+#[test]
+fn t4_mirror_axes_match_libheif() {
+    for (orientation, axis) in [(2, 1), (4, 0)] {
+        let heic = mirror_orientation_fixture(orientation);
+        let container = HeifContainer::parse(&heic).expect("parse");
+        assert_eq!(
+            container.image().primary_item().transformative_properties(),
+            vec![gamut_heic::TransformativeProperty::Mirror(axis)],
+            "EXIF orientation {orientation}"
+        );
+
+        let ours = container
+            .decode_primary_rgba8(&mut De265Decoder)
+            .expect("decode primary with mirror applied");
+        let (w, h, theirs) = libheif_oracle::decode_primary_rgba(&heic).expect("libheif decode");
+        assert_eq!((ours.width(), ours.height()), (ORI_W, ORI_H));
+        assert_eq!((w, h), (ORI_W, ORI_H));
+
+        let d = rgba_diff(ours.as_samples(), &theirs);
+        assert!(
+            d.max_rgb <= 3,
+            "orientation {orientation} RGB max diff too high: {}",
+            d.max_rgb
+        );
+        assert!(
+            d.mean_rgb <= 0.5,
+            "orientation {orientation} RGB mean diff too high: {:.3}",
+            d.mean_rgb
+        );
+        assert!(
+            d.frac_rgb_within_2 >= 0.99,
+            "orientation {orientation}: fewer than 99% of RGB samples within ±2: {:.4}",
+            d.frac_rgb_within_2
+        );
+    }
 }
 
 // ============================================================================================
