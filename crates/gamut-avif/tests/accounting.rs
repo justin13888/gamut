@@ -79,6 +79,31 @@ fn unknown_top_level_box_surfaces_verbatim() {
 }
 
 #[test]
+fn alternate_size_headers_account_for_every_header_byte() {
+    let clean = clean_file(1, vec![av01_item(1, vec![1, 2, 3, 4])]);
+    let mut large = vec![0, 0, 0, 1, b'f', b'r', b'e', b'e'];
+    large.extend_from_slice(&19_u64.to_be_bytes());
+    large.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+    let open = vec![0, 0, 0, 0, b's', b'k', b'i', b'p', 0xDD, 0xEE];
+    let data = cat(&[clean.clone(), large.clone(), open.clone()]);
+    let c = AvifContainer::parse(&data).unwrap();
+
+    assert_covers(&c, data.len());
+    assert_eq!(
+        box_types(&c),
+        vec![*b"ftyp", *b"meta", *b"mdat", *b"free", *b"skip"]
+    );
+    let free = c.boxes().find(|(ty, _)| ty == b"free").unwrap();
+    assert_eq!(free.1, &[0xAA, 0xBB, 0xCC]);
+    let skip = c.boxes().find(|(ty, _)| ty == b"skip").unwrap();
+    assert_eq!(skip.1, &[0xDD, 0xEE]);
+    assert_eq!(
+        c.segments()[3].range,
+        clean.len()..clean.len() + large.len()
+    );
+}
+
+#[test]
 fn second_ftyp_starts_appended_stream_to_eof() {
     // Samsung motion photo: a second whole file (second top-level `ftyp` + its own stream), then a
     // proprietary trailer — all opaque, all one appended segment starting at the second ftyp.

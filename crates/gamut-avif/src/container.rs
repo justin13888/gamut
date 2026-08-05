@@ -263,7 +263,7 @@ fn walk_segments(data: &[u8]) -> Result<(Vec<Segment<'_>>, Option<&[u8]>)> {
                     });
                     break;
                 }
-                let end = b.offset + 8 + b.body.len();
+                let end = reader.position();
                 segments.push(Segment {
                     range: b.offset..end,
                     kind: SegmentKind::Box {

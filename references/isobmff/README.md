@@ -40,10 +40,11 @@ Written (normalised to the smallest still-image versions): `ftyp` · `meta` (Ful
 `irot`, `imir`, `clap`, `pasp`, `auxC`, `clli`, plus opaque codec-configuration
 (`av1C`/`hvcC`/`vvcC`) · `mdat`.
 
-Additionally read (the foreign-encoder repertoire, normalised into the same model): `iloc` v1/v2 —
+Additionally read (the foreign-encoder repertoire, normalised into the same model): 64-bit
+`largesize`, size-0 boxes extending through the current slice, UUID user types, `iloc` v1/v2 —
 `construction_method` 1 (`idat`), base offsets, 0/4/8-byte fields, multi-extent concatenation —
-plus `pitm` v1, `iinf` v1, `infe` v3, `iref` v1, and `ipma` v1. Hand-authored spec fixtures
-(`crates/gamut-isobmff/tests/foreign.rs`) pin these layouts independently of the writer.
+plus `pitm` v1, `iinf` v1, `infe` v3, `iref` v1, and `ipma` v1. Hand-authored spec fixtures pin
+these layouts independently of the writer, which continues to emit only 32-bit box sizes.
 
 ## Derived-image payloads
 

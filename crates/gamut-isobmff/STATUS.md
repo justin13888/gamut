@@ -33,7 +33,7 @@ files.
 | P1 | 14496-12 §4.2 | Typed box-tree model (`IsoBmffImage`/`Item`/`ItemReference`/`EntityGroup`/`Property`/`PropertyKind`) + low-level `BoxBuilder`/`BoxReader` | ✅ done |
 | P2 | 14496-12; 23008-12 | Writer: `ftyp`, `meta` (`hdlr`/`pitm`/`iloc` v0/`iinf`+`infe` v2/`iref` v0/`iprp`/`grpl`), `mdat`; `ispe`/`pixi`/`colr` (`nclx`+ICC)/`irot`/`imir`/`clap`/`pasp`/`auxC`/`clli` properties; opaque codec config; model validation (typed errors, no silent truncation) | ✅ done |
 | P3 | 14496-12 | **Keystone** — `iloc` extent back-patch + shared `ipco` dedup → per-item `ipma` (8/16-bit forms) | ✅ done |
-| P4 | 14496-12; 23008-12 | Reader: bounds-checked box walk; foreign-file repertoire (`iloc` v0–v2, `mdat`/`idat`, base offsets, 0/4/8-byte fields, multi-extent, `pitm`/`ipma` v0–v1, `infe` v2–v3, `iref` v0–v1); motion-photo tolerance (stop at a second top-level `ftyp` / at a malformed trailing box once `ftyp`+`meta` are seen); `read(&write)` round-trip; unrecognised property boxes preserved verbatim | ✅ done |
+| P4 | 14496-12; 23008-12 | Reader: bounds-checked box walk including `largesize`, size-0, and UUID user types; foreign-file repertoire (`iloc` v0–v2, `mdat`/`idat`, base offsets, 0/4/8-byte fields, multi-extent, `pitm`/`ipma` v0–v1, `infe` v2–v3, `iref` v0–v1); motion-photo tolerance (stop at a second top-level `ftyp` / at a malformed trailing box once `ftyp`+`meta` are seen); `read(&write)` round-trip; unrecognised property boxes preserved verbatim | ✅ done |
 | P5 | — | Robustness: truncation/overrun/size/index guards ✅; counts never trusted for allocation ✅; total payload capped at input size (anti amplification) ✅; spec fixtures independent of the writer ✅; fuzz corpus ☐ | ◑ partial |
 | P6 | — | Differential oracle: libavif/dav1d parses the container and reproduces pixels (via `gamut-avif/tests/decode_roundtrip.rs`) | ✅ via codec |
 
@@ -43,8 +43,8 @@ The read/write spine is exercised end-to-end — without a working codec, since 
 is opaque — by the `gamut isobmff` CLI (`inspect`/`remux`/`build`) and two oracle tests:
 
 - **`inspect`** parses real third-party `.avif`/`.heic` and prints the box structure; across the
-  libavif conformance corpus it reads every still image, rejecting only out-of-scope constructs
-  (image sequences, `largesize`/size-0 boxes) and malformed input with a typed error.
+  libavif conformance corpus it reads every still image, including alternate-size boxes, while
+  rejecting out-of-scope image sequences and malformed input with a typed error.
 - **`remux`** re-serialises a container and re-parses it, verifying `read(&write) == model` on
   foreign files; `gamut-avif/tests/remux_roundtrip.rs` additionally confirms libavif decodes the
   re-muxed container to **pixel-identical** output (the coded payload survives verbatim).
@@ -69,8 +69,10 @@ is opaque — by the `gamut isobmff` CLI (`inspect`/`remux`/`build`) and two ora
 `BoxReader` and `RawBox` are re-exported from the crate root so a byte-accounting consumer
 (`gamut-heic`, issue #238) can map every byte of a file to a box: `RawBox::offset` is the absolute
 header offset within the reader's slice, and `BoxReader::position`/`remaining` bracket the cursor.
-The public surface is the walk only (`new`/`next_box`/`position`/`remaining` + `RawBox` fields); the
-scalar field readers and the writer's `BoxBuilder` stay crate-private. Additive (semver-minor).
+`RawBox::user_type` identifies UUID boxes while `RawBox::payload()` omits their 16-byte user-type
+prefix without changing the existing `body` view. The public surface is the walk only
+(`new`/`next_box`/`position`/`remaining` + `RawBox` fields/`payload`); scalar field readers and the
+writer's `BoxBuilder` stay crate-private. Additive (semver-minor).
 
 ## Deferred (planned, additive — no model reshape)
 
@@ -83,6 +85,9 @@ scalar field readers and the writer's `BoxBuilder` stay crate-private. Additive 
   separate options-taking entry point (semver-minor), not a change to `write`.
 - **Fuzz corpus** (P5). The reader is bounds-checked, allocation-capped, and fixture-tested; a
   libFuzzer/AFL corpus remains the missing hardening step.
+- **Streaming/`ReadAt` input.** `BoxReader` intentionally remains a zero-copy cursor over one byte
+  slice. Large-file consumers currently buffer or memory-map their input; a source abstraction can
+  be added separately without coupling it to alternate-size parsing.
 
 ## Likely out of scope (rejected with a typed error; revisited only if the charter changes)
 
@@ -97,8 +102,9 @@ scalar field readers and the writer's `BoxBuilder` stay crate-private. Additive 
   still-image encoder.
 - **`uri ` items** (23008-12 URI-typed metadata) — unused by AVIF/HEIC; `Exif` and `mime`
   (XMP/MPEG-7) items cover real metadata.
-- **64-bit box sizes (`largesize`), `size == 0` boxes, files ≥ 4 GiB** — a still image never
-  approaches them; every offset/length this crate writes is 32-bit.
+- **64-bit writer emission and files at or beyond 4 GiB** — the parser accepts `largesize`, but the
+  normalising writer deliberately emits 32-bit sizes and rejects payload/file offsets that do not
+  fit `u32`.
 - **Non-`pict` handlers** — a `meta` that is not a HEIF image (e.g. ID3 metadata containers).
 
 Round-trip is guaranteed for files this crate's `write` produces (`read(&write(&img)?) == img`,

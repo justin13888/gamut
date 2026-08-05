@@ -83,9 +83,10 @@ $ gamut isobmff remux image.avif out.avif
 $ gamut isobmff build demo.avif
 ```
 
-`inspect`/`remux` accept the foreign-encoder repertoire below; out-of-scope structures — image
-sequences (`moov`/`trak`), `largesize`/size-0 boxes — and malformed input are rejected with a typed
-error rather than mis-parsed (this crate is `#![forbid(unsafe_code)]` and bounds-checks every read).
+`inspect`/`remux` accept the foreign-encoder repertoire below, including 64-bit `largesize` and
+size-0 boxes. Out-of-scope structures such as image sequences (`moov`/`trak`) and malformed input
+are rejected with a typed error rather than mis-parsed (this crate is `#![forbid(unsafe_code)]` and
+bounds-checks every read).
 
 ## Status
 
@@ -95,9 +96,9 @@ properties, opaque codec configuration, and `mdat`. Unrecognised property boxes 
 verbatim. The `grid` and `iovl` derived-image payloads are typed by the opt-in
 [`ImageGrid`]/[`ImageOverlay`] helpers. The writer normalises to the smallest box versions; the
 reader additionally accepts the foreign-encoder repertoire (`iloc` v1/v2, `idat` placement,
-multi-extent payloads, 32-bit item ids, 16-bit `ipma` indices). Image sequences/tracks, item
-protection, and external data references are out of scope — see [STATUS.md](STATUS.md) for the full
-deferred/out-of-scope ledger.
+multi-extent payloads, 32-bit item ids, 16-bit `ipma` indices, alternate box sizes, and UUID user
+types). Image sequences/tracks, item protection, and external data references are out of scope —
+see [STATUS.md](STATUS.md) for the full deferred/out-of-scope ledger.
 
 `read` models only the *primary* still-image stream and tolerates real-world "motion photo" files
 that append a second, foreign stream: the top-level walk stops cleanly at a second top-level `ftyp`

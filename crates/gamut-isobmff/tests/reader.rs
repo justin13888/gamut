@@ -68,14 +68,33 @@ fn tracks_are_unsupported() {
 }
 
 #[test]
-fn largesize_is_unsupported() {
-    assert_read_fails(&[0, 0, 0, 1, b'm', b'd', b'a', b't'], "largesize");
+fn truncated_largesize_errors() {
+    assert_read_fails(&[0, 0, 0, 1, b'm', b'd', b'a', b't'], "unexpected end");
 }
 
 #[test]
-fn open_ended_box_is_unsupported() {
-    // A top-level box with size 0 (extends to EOF) is rejected — this crate never writes one.
-    assert_read_fails(&[0, 0, 0, 0, b'f', b't', b'y', b'p'], "open-ended");
+fn largesize_mdat_resolves_the_shifted_payload() {
+    let mut f = valid();
+    let iloc = find(&f, b"iloc");
+    let old_offset = u32::from_be_bytes(f[iloc + 18..iloc + 22].try_into().unwrap());
+    f[iloc + 18..iloc + 22].copy_from_slice(&(old_offset + 8).to_be_bytes());
+
+    let mdat = find(&f, b"mdat");
+    let size_field = mdat - 4;
+    let old_size = u32::from_be_bytes(f[size_field..mdat].try_into().unwrap());
+    f[size_field..mdat].copy_from_slice(&1_u32.to_be_bytes());
+    f.splice(mdat + 4..mdat + 4, (u64::from(old_size) + 8).to_be_bytes());
+
+    assert_eq!(read(&f).unwrap().items[0].payload, vec![0xAB; 8]);
+}
+
+#[test]
+fn zero_size_mdat_resolves_payload_through_end_of_input() {
+    let mut f = valid();
+    let mdat = find(&f, b"mdat");
+    f[mdat - 4..mdat].copy_from_slice(&0_u32.to_be_bytes());
+
+    assert_eq!(read(&f).unwrap().items[0].payload, vec![0xAB; 8]);
 }
 
 #[test]
