@@ -47,6 +47,9 @@ MyEncoder
     .unwrap();
 ```
 
+Enable the optional `serde` feature to serialize and deserialize [`ColorModel`] by its Rust variant
+name (for example, `ColorModel::Rgba` is `"Rgba"` in JSON). The feature is disabled by default.
+
 ## Status
 
 Stable foundation with a frozen public surface: the [`EncodeImage`] / [`DecodeImage`] traits, the

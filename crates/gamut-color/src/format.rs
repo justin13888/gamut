@@ -14,6 +14,7 @@
 #[repr(u8)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BitDepth {
     /// 8 bits per sample.
     Eight = 8,
@@ -65,6 +66,7 @@ impl BitDepth {
 /// 4:1:1) later.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ChromaSubsampling {
     /// 4:4:4 — full-resolution chroma (`subsampling_x = subsampling_y = 0`). Required for identity.
     Cs444,

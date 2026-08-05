@@ -15,11 +15,17 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+serde = ["dep:serde", "gamut-core/serde"]
+
 [dependencies]
 gamut-core.workspace = true
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 divan.workspace = true
+serde_json.workspace = true
 
 [[bench]]
 name = "color"
