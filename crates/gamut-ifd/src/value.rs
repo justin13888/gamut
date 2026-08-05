@@ -292,6 +292,46 @@ impl Value {
         }
     }
 
+    /// Coerces a numeric value array to `Vec<f64>`.
+    ///
+    /// Integer, rational, `FLOAT`, and `DOUBLE` fields are accepted; string, opaque-byte, and IFD
+    /// pointer fields are not. A zero denominator in any `RATIONAL` or `SRATIONAL` element makes
+    /// the whole conversion fail. Empty arrays of an accepted type produce an empty vector, and
+    /// IEEE NaN and infinity values are preserved.
+    ///
+    /// Converting 64-bit integers (available with `bigtiff`) can lose precision beyond the exact
+    /// integer range of `f64`.
+    #[must_use]
+    pub fn as_f64_vec(&self) -> Option<Vec<f64>> {
+        match self {
+            Value::Byte(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+            Value::Short(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+            Value::Long(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+            Value::SByte(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+            Value::SShort(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+            Value::SLong(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+            Value::Rational(v) => v
+                .iter()
+                .map(|&(numerator, denominator)| {
+                    (denominator != 0).then(|| f64::from(numerator) / f64::from(denominator))
+                })
+                .collect(),
+            Value::SRational(v) => v
+                .iter()
+                .map(|&(numerator, denominator)| {
+                    (denominator != 0).then(|| f64::from(numerator) / f64::from(denominator))
+                })
+                .collect(),
+            Value::Float(v) => Some(v.iter().map(|&x| f64::from(x)).collect()),
+            Value::Double(v) => Some(v.clone()),
+            #[cfg(feature = "bigtiff")]
+            Value::Long8(v) => Some(v.iter().map(|&x| x as f64).collect()),
+            #[cfg(feature = "bigtiff")]
+            Value::SLong8(v) => Some(v.iter().map(|&x| x as f64).collect()),
+            _ => None,
+        }
+    }
+
     /// Builds an offset-array value of the width `variant` stores offsets in: `LONG` for classic
     /// TIFF, `LONG8` for BigTIFF.
     ///
@@ -665,6 +705,121 @@ mod tests {
             );
             assert_eq!(Value::Long8(vec![1, 2]).as_u64(), None);
         }
+    }
+
+    #[test]
+    fn f64_coercion_accepts_every_classic_numeric_type() {
+        assert_eq!(
+            Value::Byte(vec![0, u8::MAX]).as_f64_vec(),
+            Some(vec![0.0, 255.0])
+        );
+        assert_eq!(
+            Value::Short(vec![0, u16::MAX]).as_f64_vec(),
+            Some(vec![0.0, 65_535.0])
+        );
+        assert_eq!(
+            Value::Long(vec![0, u32::MAX]).as_f64_vec(),
+            Some(vec![0.0, 4_294_967_295.0])
+        );
+        assert_eq!(
+            Value::SByte(vec![i8::MIN, i8::MAX]).as_f64_vec(),
+            Some(vec![-128.0, 127.0])
+        );
+        assert_eq!(
+            Value::SShort(vec![i16::MIN, i16::MAX]).as_f64_vec(),
+            Some(vec![-32_768.0, 32_767.0])
+        );
+        assert_eq!(
+            Value::SLong(vec![i32::MIN, i32::MAX]).as_f64_vec(),
+            Some(vec![-2_147_483_648.0, 2_147_483_647.0])
+        );
+        assert_eq!(
+            Value::Rational(vec![(1, 2), (u32::MAX, 1)]).as_f64_vec(),
+            Some(vec![0.5, 4_294_967_295.0])
+        );
+        assert_eq!(
+            Value::SRational(vec![(i32::MIN, 1), (-1, 2), (1, -2), (i32::MAX, 1)]).as_f64_vec(),
+            Some(vec![-2_147_483_648.0, -0.5, -0.5, 2_147_483_647.0])
+        );
+
+        let floats = Value::Float(vec![f32::NEG_INFINITY, -0.0, 1.25, f32::INFINITY, f32::NAN])
+            .as_f64_vec()
+            .expect("FLOAT is numeric");
+        assert_eq!(
+            &floats[..4],
+            &[f64::NEG_INFINITY, -0.0, 1.25, f64::INFINITY]
+        );
+        assert!(floats[4].is_nan());
+
+        let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+        let doubles = vec![f64::NEG_INFINITY, -0.0, 1.25, f64::INFINITY, nan];
+        let converted = Value::Double(doubles.clone())
+            .as_f64_vec()
+            .expect("DOUBLE is numeric");
+        assert_eq!(
+            converted.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            doubles.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn f64_coercion_rejects_zero_denominators_atomically() {
+        assert_eq!(Value::Rational(vec![(1, 2), (3, 0)]).as_f64_vec(), None);
+        assert_eq!(Value::SRational(vec![(-1, 2), (0, 0)]).as_f64_vec(), None);
+    }
+
+    #[test]
+    fn f64_coercion_distinguishes_empty_numeric_and_non_numeric_values() {
+        let accepted = [
+            Value::Byte(vec![]),
+            Value::Short(vec![]),
+            Value::Long(vec![]),
+            Value::SByte(vec![]),
+            Value::SShort(vec![]),
+            Value::SLong(vec![]),
+            Value::Rational(vec![]),
+            Value::SRational(vec![]),
+            Value::Float(vec![]),
+            Value::Double(vec![]),
+        ];
+        for value in accepted {
+            assert_eq!(value.as_f64_vec(), Some(vec![]));
+        }
+
+        let unknown = UnknownValue::new(
+            0xf0,
+            1,
+            &[1, 2, 3, 4],
+            ByteOrder::LittleEndian,
+            Variant::Classic,
+        )
+        .expect("unknown value");
+        let rejected = [
+            Value::Ascii("1".into()),
+            Value::Utf8("1".into()),
+            Value::Undefined(vec![1]),
+            Value::Ifd(vec![8]),
+            Value::Unknown(unknown),
+        ];
+        for value in rejected {
+            assert_eq!(value.as_f64_vec(), None);
+        }
+    }
+
+    #[cfg(feature = "bigtiff")]
+    #[test]
+    fn f64_coercion_handles_bigtiff_integers_but_not_ifd_pointers() {
+        assert_eq!(
+            Value::Long8(vec![0, u64::MAX]).as_f64_vec(),
+            Some(vec![0.0, u64::MAX as f64])
+        );
+        assert_eq!(
+            Value::SLong8(vec![i64::MIN, i64::MAX]).as_f64_vec(),
+            Some(vec![i64::MIN as f64, i64::MAX as f64])
+        );
+        assert_eq!(Value::Long8(vec![]).as_f64_vec(), Some(vec![]));
+        assert_eq!(Value::SLong8(vec![]).as_f64_vec(), Some(vec![]));
+        assert_eq!(Value::Ifd8(vec![8]).as_f64_vec(), None);
     }
 
     #[test]
