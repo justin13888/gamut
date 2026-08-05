@@ -3,16 +3,16 @@
 use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result, Rgb8, Rgba8};
 use gamut_ifd::{Ifd, read};
 
-use crate::compression::{Compression, ccitt, lzw, packbits, predictor};
+use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::palette::Palette8;
 use crate::tags;
 
 /// Decoder for baseline TIFF images.
 ///
-/// Reads chunky images compressed with `None` or PackBits: 8-bit grayscale/RGB, 1-bit bilevel,
-/// and 8-bit palette colour. Other compressions and colour modes return [`Error::Unsupported`]
-/// until their phases land.
+/// Reads chunky strips or tiles compressed with None, PackBits, LZW, Adobe Deflate, Modified
+/// Huffman, or Group 4 fax. Supported layouts are 8-bit grayscale/RGB/RGBA/CMYK/palette and 1-bit
+/// bilevel; other compression and colour modes return [`Error::Unsupported`].
 #[derive(Debug, Clone, Default)]
 pub struct TiffDecoder {
     _private: (),
@@ -185,6 +185,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             | Compression::CcittRle
             | Compression::CcittGroup4Fax
             | Compression::Lzw
+            | Compression::Deflate
     ) {
         return Err(Error::Unsupported("TIFF: compression not supported yet"));
     }
@@ -277,15 +278,16 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         stored_row_bytes,
         compression,
     };
-    let mut packed = if ifd.get(tags::TILE_WIDTH).is_some() {
-        decode_tiles(ifd, data, &layout)?
+    let tiled = ifd.get(tags::TILE_WIDTH).is_some();
+    let mut packed = if tiled {
+        decode_tiles(ifd, data, &layout, use_predictor)?
     } else {
         decode_strips(ifd, data, &layout)?
     };
     debug_assert_eq!(packed.len(), stored_total);
 
     // Reverse the horizontal-differencing predictor (8-bit only) before unpacking.
-    if use_predictor {
+    if use_predictor && !tiled {
         predictor::reverse(&mut packed, stored_row_bytes, spp);
     }
 
@@ -345,7 +347,7 @@ struct Layout {
     compression: Compression,
 }
 
-/// Decompresses one strip/tile of byte-level data (`None`/PackBits/LZW) to `want` bytes.
+/// Decompresses one strip/tile of byte-level data (`None`/PackBits/LZW/Deflate) to `want` bytes.
 fn decompress_simple(raw: &[u8], want: usize, compression: Compression) -> Result<Vec<u8>> {
     match compression {
         Compression::None => raw
@@ -354,6 +356,7 @@ fn decompress_simple(raw: &[u8], want: usize, compression: Compression) -> Resul
             .ok_or(Error::InvalidInput("TIFF: block shorter than expected")),
         Compression::PackBits => packbits::decode(raw, want),
         Compression::Lzw => lzw::decode(raw, want),
+        Compression::Deflate => deflate::decode(raw, want),
         _ => Err(Error::Unsupported(
             "TIFF: compression not supported for this layout",
         )),
@@ -397,7 +400,7 @@ fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
 }
 
 /// Reassembles the stored row bytes from tiles (8-bit only), cropping the edge-tile padding.
-fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
+fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Result<Vec<u8>> {
     if l.bps != 8 {
         return Err(Error::Unsupported(
             "TIFF: tiled images supported only for 8-bit samples so far",
@@ -440,7 +443,10 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
             let raw = data
                 .get(off..off + cnt)
                 .ok_or(Error::InvalidInput("TIFF: tile out of bounds"))?;
-            let tile = decompress_simple(raw, tile_size, l.compression)?;
+            let mut tile = decompress_simple(raw, tile_size, l.compression)?;
+            if use_predictor {
+                predictor::reverse(&mut tile, tile_row_bytes, l.spp);
+            }
             let copy_cols = tw.min(l.width - tx * tw);
             for r in 0..th {
                 let dst_row = ty * th + r;

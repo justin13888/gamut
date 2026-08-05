@@ -26,7 +26,12 @@ fn gray_pattern(w: u32, h: u32) -> Vec<u8> {
 
 #[test]
 fn tiled_roundtrips_in_gamut() {
-    for &comp in &[Compression::None, Compression::PackBits, Compression::Lzw] {
+    for &comp in &[
+        Compression::None,
+        Compression::PackBits,
+        Compression::Lzw,
+        Compression::Deflate,
+    ] {
         for &(w, h) in SIZES {
             let src = rgb_pattern(w, h);
             let mut tiff = Vec::new();

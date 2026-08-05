@@ -1,60 +1,94 @@
 //! Builds a static `libtiff` from the `third_party/libtiff` submodule and generates FFI bindings
 //! for its public API.
 //!
-//! All optional codecs (zlib/deflate, JPEG, JBIG, LZMA, ZSTD, WebP, LERC, PixarLog) are turned
-//! off so the build is hermetic — it pulls in no system libraries — leaving libtiff's built-in
-//! schemes: uncompressed, PackBits, LZW, and CCITT (Modified Huffman / T.4 / T.6). Everything
-//! lands under `OUT_DIR`, so `cargo clean` fully resets the build.
+//! A vendored static zlib enables Deflate; every other optional codec (JPEG, JBIG, LZMA, ZSTD,
+//! WebP, LERC, PixarLog) is disabled. Everything lands under `OUT_DIR`, so the oracle remains
+//! hermetic and `cargo clean` fully resets the build.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
     let manifest_dir = PathBuf::from(env("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env("OUT_DIR"));
+    let zlib_submodule = manifest_dir.join("../../third_party/zlib");
     let src = manifest_dir.join("../../third_party/libtiff");
 
-    assert!(
-        src.join("CMakeLists.txt").exists(),
-        "vendored libtiff not found under {} — run `git submodule update --init --recursive`",
-        src.display()
-    );
+    for (name, source) in [("zlib", &zlib_submodule), ("libtiff", &src)] {
+        assert!(
+            source.join("CMakeLists.txt").exists(),
+            "vendored {name} not found under {} — run `git submodule update --init --recursive`",
+            source.display()
+        );
+    }
 
-    // ---- CMake-build a static libtiff with every optional codec disabled. ------------------
-    let build = out_dir.join("libtiff-build");
-    if !build.join("CMakeCache.txt").exists() {
+    // zlib's CMake deletes its source-tree zconf.h even for an out-of-source build. Build a private
+    // copy so the submodule remains pristine.
+    let zlib_src = out_dir.join("zlib-src");
+    if !zlib_src.join("CMakeLists.txt").exists() {
+        copy_dir(&zlib_submodule, &zlib_src);
+    }
+    let zlib_build = out_dir.join("zlib-build");
+    let zlib_prefix = out_dir.join("zlib-prefix");
+    if !zlib_build.join("CMakeCache.txt").exists() {
         run(Command::new("cmake")
             .arg("-S")
-            .arg(&src)
+            .arg(&zlib_src)
             .arg("-B")
-            .arg(&build)
+            .arg(&zlib_build)
             .args([
                 "-DCMAKE_BUILD_TYPE=Release",
-                "-DBUILD_SHARED_LIBS=OFF",
-                // Compile the static archive position-independent so it links into Rust test
-                // binaries on PIE-by-default toolchains (e.g. Fedora). libtiff's own CMake does
-                // not enable PIC (unlike the vendored libavif), so we set it here; it is a no-op
-                // on platforms that don't produce PIE executables.
                 "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
-                // Disable every optional codec/dependency and the auxiliary build targets so the
-                // static archive is self-contained.
-                "-Dzlib=OFF",
-                "-Dlibdeflate=OFF",
-                "-Dpixarlog=OFF",
-                "-Djpeg=OFF",
-                "-Dold-jpeg=OFF",
-                "-Djbig=OFF",
-                "-Dlzma=OFF",
-                "-Dzstd=OFF",
-                "-Dwebp=OFF",
-                "-Dlerc=OFF",
-                "-Dcxx=OFF",
-                "-Dtiff-tools=OFF",
-                "-Dtiff-tests=OFF",
-                "-Dtiff-contrib=OFF",
-                "-Dtiff-docs=OFF",
+                "-DZLIB_BUILD_EXAMPLES=OFF",
+                &format!("-DCMAKE_INSTALL_PREFIX={}", path_str(&zlib_prefix)),
+                "-DCMAKE_INSTALL_LIBDIR=lib",
             ]));
     }
+    run(Command::new("cmake").arg("--build").arg(&zlib_build).args([
+        "--config",
+        "Release",
+        "--parallel",
+        "--target",
+        "install",
+    ]));
+
+    // ---- CMake-build a static libtiff with only the vendored zlib codec enabled. ------------
+    let build = out_dir.join("libtiff-build");
+    // Always configure: changing the oracle's codec matrix must update an existing OUT_DIR cache.
+    run(Command::new("cmake")
+        .arg("-S")
+        .arg(&src)
+        .arg("-B")
+        .arg(&build)
+        .args([
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DBUILD_SHARED_LIBS=OFF",
+            // Compile the static archive position-independent so it links into Rust test
+            // binaries on PIE-by-default toolchains (e.g. Fedora). libtiff's own CMake does
+            // not enable PIC (unlike the vendored libavif), so we set it here; it is a no-op
+            // on platforms that don't produce PIE executables.
+            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+            // Deflate uses the vendored static zlib. Disable every other optional codec/dependency
+            // and auxiliary target so the archive remains self-contained.
+            "-Dzlib=ON",
+            &format!("-DZLIB_ROOT={}", path_str(&zlib_prefix)),
+            &format!("-DCMAKE_PREFIX_PATH={}", path_str(&zlib_prefix)),
+            "-Dlibdeflate=OFF",
+            "-Dpixarlog=OFF",
+            "-Djpeg=OFF",
+            "-Dold-jpeg=OFF",
+            "-Djbig=OFF",
+            "-Dlzma=OFF",
+            "-Dzstd=OFF",
+            "-Dwebp=OFF",
+            "-Dlerc=OFF",
+            "-Dcxx=OFF",
+            "-Dtiff-tools=OFF",
+            "-Dtiff-tests=OFF",
+            "-Dtiff-contrib=OFF",
+            "-Dtiff-docs=OFF",
+        ]));
     run(Command::new("cmake").arg("--build").arg(&build).args([
         "--config",
         "Release",
@@ -66,7 +100,12 @@ fn main() {
         "cargo:rustc-link-search=native={}",
         path_str(&build.join("libtiff"))
     );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        path_str(&zlib_prefix.join("lib"))
+    );
     println!("cargo:rustc-link-lib=static=tiff");
+    println!("cargo:rustc-link-lib=static=z");
     if env("CARGO_CFG_TARGET_OS") != "macos" {
         println!("cargo:rustc-link-lib=dylib=m");
     }
@@ -101,6 +140,26 @@ fn main() {
         "cargo:rerun-if-changed={}",
         path_str(&src.join("libtiff/tiffio.h"))
     );
+}
+
+/// Recursively copies `src` into `dst` (skipping `.git`).
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap_or_else(|e| panic!("create {}: {e}", dst.display()));
+    for entry in fs::read_dir(src)
+        .unwrap_or_else(|e| panic!("read_dir {}: {e}", src.display()))
+        .flatten()
+    {
+        let path = entry.path();
+        if path.file_name().is_some_and(|name| name == ".git") {
+            continue;
+        }
+        let target = dst.join(path.file_name().expect("dir entry has a name"));
+        if path.is_dir() {
+            copy_dir(&path, &target);
+        } else {
+            fs::copy(&path, &target).unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
+        }
+    }
 }
 
 /// Reads a required build-time env var, panicking (this is a build script) if absent.
