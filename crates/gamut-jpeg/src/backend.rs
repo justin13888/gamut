@@ -82,14 +82,14 @@ const DECLINED_MSG: &str = "JPEG: backend declined the stream after accepting it
 /// at the next backend; **every other** error is terminal and propagates to the caller unchanged.
 #[must_use]
 pub fn backend_declined() -> Error {
-    Error::Unsupported(DECLINED_MSG)
+    Error::unsupported(env!("CARGO_PKG_NAME"), DECLINED_MSG)
 }
 
 /// Returns `true` iff `err` is the [`backend_declined`] sentinel, i.e. the registry treats it as a
 /// fall-through rather than a failure.
 #[must_use]
 pub fn is_backend_declined(err: &Error) -> bool {
-    matches!(err, Error::Unsupported(msg) if *msg == DECLINED_MSG)
+    err.kind() == gamut_core::ErrorKind::Unsupported && err.static_message() == Some(DECLINED_MSG)
 }
 
 /// The pixel layouts the JPEG seam exchanges: [`PixelFormat::Gray8`] (1 component),
@@ -102,7 +102,8 @@ fn check_format(format: PixelFormat) -> Result<()> {
     if SEAM_FORMATS.contains(&format) {
         Ok(())
     } else {
-        Err(Error::Unsupported(
+        Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: seam pixel format must be Gray8, Rgb8, or Cmyk8",
         ))
     }
@@ -149,22 +150,22 @@ impl JpegStreamInfo {
     /// / progressive DCT.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let (process, payload) = frame_header(data)?;
-        let precision = *payload.first().ok_or(crate::decoder::TRUNC_SOF)?;
+        let precision = *payload.first().ok_or_else(crate::decoder::trunc_sof)?;
         let height = u16::from_be_bytes([
-            *payload.get(1).ok_or(crate::decoder::TRUNC_SOF)?,
-            *payload.get(2).ok_or(crate::decoder::TRUNC_SOF)?,
+            *payload.get(1).ok_or_else(crate::decoder::trunc_sof)?,
+            *payload.get(2).ok_or_else(crate::decoder::trunc_sof)?,
         ]);
         let width = u16::from_be_bytes([
-            *payload.get(3).ok_or(crate::decoder::TRUNC_SOF)?,
-            *payload.get(4).ok_or(crate::decoder::TRUNC_SOF)?,
+            *payload.get(3).ok_or_else(crate::decoder::trunc_sof)?,
+            *payload.get(4).ok_or_else(crate::decoder::trunc_sof)?,
         ]);
-        let nf = usize::from(*payload.get(5).ok_or(crate::decoder::TRUNC_SOF)?);
+        let nf = usize::from(*payload.get(5).ok_or_else(crate::decoder::trunc_sof)?);
         let mut sampling = Vec::with_capacity(nf);
         for i in 0..nf {
             // Each component is 3 bytes: Ci, Hi<<4|Vi, Tqi (§B.2.2).
             let hv = *payload
                 .get(6 + i * 3 + 1)
-                .ok_or(crate::decoder::TRUNC_SOF)?;
+                .ok_or_else(crate::decoder::trunc_sof)?;
             sampling.push((hv >> 4, hv & 0x0F));
         }
         Ok(Self {
@@ -258,12 +259,14 @@ impl DecodedJpeg {
     pub fn new(width: u32, height: u32, format: PixelFormat, samples: Vec<u8>) -> Result<Self> {
         check_format(format)?;
         if width == 0 || height == 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: backend raster has a zero extent",
             ));
         }
         if sample_len(width, height, format) != Some(samples.len()) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: backend raster sample count does not match its dimensions",
             ));
         }
@@ -330,12 +333,14 @@ impl<'a> RasterRef<'a> {
     pub fn new(width: u32, height: u32, format: PixelFormat, samples: &'a [u8]) -> Result<Self> {
         check_format(format)?;
         if width == 0 || height == 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: backend raster has a zero extent",
             ));
         }
         if sample_len(width, height, format) != Some(samples.len()) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: backend raster sample count does not match its dimensions",
             ));
         }
@@ -506,7 +511,12 @@ pub(crate) type DecoderSlot = Arc<Mutex<dyn JpegStreamDecoder>>;
 pub(crate) type EncoderSlot = Arc<Mutex<dyn JpegStreamEncoder>>;
 
 /// Raised when a backend panicked while holding its registry lock.
-const POISONED: Error = Error::InvalidInput("JPEG: a backend poisoned the registry lock");
+fn poisoned() -> Error {
+    Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
+        "JPEG: a backend poisoned the registry lock",
+    )
+}
 
 /// Runs the decode registry in push order, returning the first accepted result, or `None` when
 /// every backend declined (the caller then runs the built-in decoder).
@@ -516,7 +526,7 @@ pub(crate) fn decode_with_backends(
     jpeg: &[u8],
 ) -> Result<Option<DecodedJpeg>> {
     for slot in backends {
-        let mut backend = slot.lock().map_err(|_| POISONED)?;
+        let mut backend = slot.lock().map_err(|_| poisoned())?;
         if !backend.supports(info) {
             continue;
         }
@@ -537,7 +547,7 @@ pub(crate) fn encode_with_backends(
     image: &RasterRef<'_>,
 ) -> Result<Option<Vec<u8>>> {
     for slot in backends {
-        let mut backend = slot.lock().map_err(|_| POISONED)?;
+        let mut backend = slot.lock().map_err(|_| poisoned())?;
         if !backend.supports(req) {
             continue;
         }
@@ -573,7 +583,8 @@ fn abi_output_format(info: &JpegStreamInfo) -> Result<PixelFormat> {
         1 => Ok(PixelFormat::Gray8),
         3 => Ok(PixelFormat::Rgb8),
         4 => Ok(PixelFormat::Cmyk8),
-        _ => Err(Error::Unsupported(
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: only 1, 3, or 4 component streams are supported",
         )),
     }
@@ -597,7 +608,7 @@ fn image_desc(width: u32, height: u32, format: PixelFormat, base: *mut u8) -> Im
 /// `decode` with the **whole** interchange stream as the codestream. A late
 /// [`Status::UNSUPPORTED`] becomes [`backend_declined`] — the registry then tries the next backend;
 /// any other non-OK status becomes a terminal [`Error::InvalidInput`] that propagates. The numeric
-/// status is not carried into the error, because [`gamut_core::Error`] holds no payload.
+/// status is retained as diagnostic detail.
 #[derive(Debug, Clone)]
 pub struct AbiStreamDecoder<D> {
     inner: D,
@@ -621,9 +632,12 @@ impl<D: AbiDecode + Send> JpegStreamDecoder for AbiStreamDecoder<D> {
         let (width, height) = (info.width(), info.height());
         let len = sample_len(width, height, format)
             .filter(|&n| n != 0)
-            .ok_or(Error::InvalidInput(
-                "JPEG: frame dimensions cannot be decoded into a raster",
-            ))?;
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: frame dimensions cannot be decoded into a raster",
+                )
+            })?;
         let mut samples = vec![0u8; len];
         let desc = image_desc(width, height, format, samples.as_mut_ptr());
         let status = self.inner.decode(&stream_config(info), jpeg, &desc);
@@ -632,9 +646,11 @@ impl<D: AbiDecode + Send> JpegStreamDecoder for AbiStreamDecoder<D> {
         } else if status.is_unsupported() {
             Err(backend_declined())
         } else {
-            Err(Error::InvalidInput(
+            Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: codec-abi decode backend returned a failure status",
-            ))
+            )
+            .with_detail(format!("codec-abi status {}", status.0)))
         }
     }
 }
@@ -685,9 +701,11 @@ impl<E: AbiEncode + Send> JpegStreamEncoder for AbiStreamEncoder<E> {
         } else if status.is_unsupported() {
             Err(backend_declined())
         } else {
-            Err(Error::InvalidInput(
+            Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: codec-abi encode backend returned a failure status",
-            ))
+            )
+            .with_detail(format!("codec-abi status {}", status.0)))
         }
     }
 }
@@ -707,12 +725,16 @@ mod tests {
         assert!(is_backend_declined(&err));
         assert_eq!(
             err.to_string(),
-            "unsupported: JPEG: backend declined the stream after accepting it"
+            "unsupported: JPEG: backend declined the stream after accepting it [origin: gamut-jpeg]"
         );
-        assert!(!is_backend_declined(&Error::Unsupported(
+        assert!(!is_backend_declined(&Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: something else"
         )));
-        assert!(!is_backend_declined(&Error::InvalidInput(DECLINED_MSG)));
+        assert!(!is_backend_declined(&Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            DECLINED_MSG
+        )));
     }
 
     #[test]
@@ -722,11 +744,11 @@ mod tests {
         }
         assert_eq!(
             check_format(PixelFormat::Rgba8).unwrap_err().to_string(),
-            "unsupported: JPEG: seam pixel format must be Gray8, Rgb8, or Cmyk8"
+            "unsupported: JPEG: seam pixel format must be Gray8, Rgb8, or Cmyk8 [origin: gamut-jpeg]"
         );
         assert_eq!(
             check_format(PixelFormat::Gray16).unwrap_err().to_string(),
-            "unsupported: JPEG: seam pixel format must be Gray8, Rgb8, or Cmyk8"
+            "unsupported: JPEG: seam pixel format must be Gray8, Rgb8, or Cmyk8 [origin: gamut-jpeg]"
         );
     }
 
@@ -744,25 +766,25 @@ mod tests {
             DecodedJpeg::new(0, 2, PixelFormat::Gray8, Vec::new())
                 .unwrap_err()
                 .to_string(),
-            "invalid input: JPEG: backend raster has a zero extent"
+            "invalid input: JPEG: backend raster has a zero extent [origin: gamut-jpeg]"
         );
         assert_eq!(
             DecodedJpeg::new(2, 0, PixelFormat::Gray8, Vec::new())
                 .unwrap_err()
                 .to_string(),
-            "invalid input: JPEG: backend raster has a zero extent"
+            "invalid input: JPEG: backend raster has a zero extent [origin: gamut-jpeg]"
         );
         assert_eq!(
             DecodedJpeg::new(2, 2, PixelFormat::Gray8, vec![0; 3])
                 .unwrap_err()
                 .to_string(),
-            "invalid input: JPEG: backend raster sample count does not match its dimensions"
+            "invalid input: JPEG: backend raster sample count does not match its dimensions [origin: gamut-jpeg]"
         );
         assert_eq!(
             DecodedJpeg::new(2, 2, PixelFormat::Gray8, vec![0; 5])
                 .unwrap_err()
                 .to_string(),
-            "invalid input: JPEG: backend raster sample count does not match its dimensions"
+            "invalid input: JPEG: backend raster sample count does not match its dimensions [origin: gamut-jpeg]"
         );
         let ok = DecodedJpeg::new(2, 2, PixelFormat::Gray8, vec![1, 2, 3, 4]).unwrap();
         assert_eq!((ok.width(), ok.height()), (2, 2));
@@ -775,19 +797,19 @@ mod tests {
             RasterRef::new(0, 2, PixelFormat::Rgb8, &buf)
                 .unwrap_err()
                 .to_string(),
-            "invalid input: JPEG: backend raster has a zero extent"
+            "invalid input: JPEG: backend raster has a zero extent [origin: gamut-jpeg]"
         );
         assert_eq!(
             RasterRef::new(2, 0, PixelFormat::Rgb8, &buf)
                 .unwrap_err()
                 .to_string(),
-            "invalid input: JPEG: backend raster has a zero extent"
+            "invalid input: JPEG: backend raster has a zero extent [origin: gamut-jpeg]"
         );
         assert_eq!(
             RasterRef::new(2, 3, PixelFormat::Rgb8, &buf)
                 .unwrap_err()
                 .to_string(),
-            "invalid input: JPEG: backend raster sample count does not match its dimensions"
+            "invalid input: JPEG: backend raster sample count does not match its dimensions [origin: gamut-jpeg]"
         );
         let r = RasterRef::new(2, 2, PixelFormat::Rgb8, &buf).unwrap();
         assert_eq!((r.width(), r.height()), (2, 2));
@@ -810,7 +832,7 @@ mod tests {
         for nf in [2, 5] {
             assert_eq!(
                 abi_output_format(&info(nf)).unwrap_err().to_string(),
-                "unsupported: JPEG: only 1, 3, or 4 component streams are supported"
+                "unsupported: JPEG: only 1, 3, or 4 component streams are supported [origin: gamut-jpeg]"
             );
         }
     }

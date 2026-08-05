@@ -20,7 +20,7 @@
 
 use std::sync::OnceLock;
 
-use gamut_core::Error;
+use gamut_core::{Error, ErrorKind};
 use gamut_heic::{
     ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, HevcDecoders, NO_BACKEND,
     iter_nal_units,
@@ -867,10 +867,8 @@ fn t7_registry_drives_the_reference_backend() {
     let err = container
         .decode_item_planar(primary_id, &mut empty)
         .expect_err("an empty registry cannot decode");
-    assert!(
-        matches!(err, Error::Unsupported(m) if m == NO_BACKEND),
-        "expected Unsupported(NO_BACKEND), got {err:?}"
-    );
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some(NO_BACKEND));
 
     eprintln!(
         "t7 registry: {}x{} {:?} decoded identically through HevcDecoders",

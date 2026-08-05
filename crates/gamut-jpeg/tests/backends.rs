@@ -286,7 +286,7 @@ fn decode_accepted_then_failed_propagates_and_never_reaches_the_built_in_tail() 
         out: flat_gray(),
     });
     let err = DecodeImage::<Gray8>::decode_image(&dec, &stream).unwrap_err();
-    assert_eq!(err.to_string(), "invalid input: scripted decode failure");
+    assert_eq!(err.static_message().unwrap(), "scripted decode failure");
     // Only the failing backend ran: neither a later backend nor the built-in tail was consulted.
     assert_eq!(*log.lock().unwrap(), vec!["failing"]);
     assert!(!builtin.as_samples().is_empty());
@@ -378,7 +378,7 @@ fn encode_accepted_then_failed_propagates_and_never_reaches_the_built_in_tail() 
     });
     let mut out = Vec::new();
     let err = enc.encode_image(gi, &mut out).unwrap_err();
-    assert_eq!(err.to_string(), "invalid input: scripted encode failure");
+    assert_eq!(err.static_message().unwrap(), "scripted encode failure");
     assert_eq!(*log.lock().unwrap(), vec!["failing"]);
     // The built-in tail never ran, so not one byte was written.
     assert!(out.is_empty());
@@ -513,16 +513,20 @@ fn stream_info_parse_rejects_malformed_streams_before_any_backend_runs() {
     assert_eq!(
         JpegStreamInfo::parse(&[0xFF, 0xD9])
             .unwrap_err()
-            .to_string(),
-        "invalid input: JPEG: missing SOI marker"
+            .static_message()
+            .unwrap(),
+        "JPEG: missing SOI marker"
     );
     // A frame header declaring Nf=3 but whose segment length only covers one component entry.
     let short = [
         0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0A, 8, 0, 8, 0, 8, 3, 1, 0x22,
     ];
     assert_eq!(
-        JpegStreamInfo::parse(&short).unwrap_err().to_string(),
-        "invalid input: JPEG: truncated frame header"
+        JpegStreamInfo::parse(&short)
+            .unwrap_err()
+            .static_message()
+            .unwrap(),
+        "JPEG: truncated frame header"
     );
     // A backend must never be consulted for a stream the crate cannot parse.
     let seen = Arc::new(Mutex::new(None));
@@ -761,8 +765,8 @@ fn metadata_caps_are_validated_before_any_backend_runs() {
     });
     let err = enc.encode_to_vec(gi).unwrap_err();
     assert_eq!(
-        err.to_string(),
-        "unsupported: JPEG: XMP exceeds one APP1 segment (ExtendedXMP not supported)"
+        err.static_message().unwrap(),
+        "JPEG: XMP exceeds one APP1 segment (ExtendedXMP not supported)"
     );
     assert!(log.lock().unwrap().is_empty());
 }
@@ -772,33 +776,36 @@ fn a_backend_stream_that_is_not_a_jpeg_is_rejected() {
     let g = gray_pixels();
     let gi = ImageRef::<Gray8>::new(&g, dims()).unwrap();
     for (bytes, msg) in [
-        (vec![0u8; 8], "invalid input: JPEG: missing SOI marker"),
+        (vec![0u8; 8], "JPEG: missing SOI marker"),
         (
             vec![0xFF, 0xD8, 0xFF, 0xD8],
-            "invalid input: JPEG: backend stream does not end with EOI",
+            "JPEG: backend stream does not end with EOI",
         ),
         (
             vec![0xFF, 0xD8, 0xFF, 0xD0, 0xFF, 0xD9],
-            "invalid input: JPEG: backend stream has a standalone marker before the first scan",
+            "JPEG: backend stream has a standalone marker before the first scan",
         ),
         (
             vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x40, 0xFF, 0xD9],
-            "invalid input: JPEG: truncated segment",
+            "JPEG: truncated segment",
         ),
         // Framed correctly, but carrying no frame header at all.
         (
             vec![0xFF, 0xD8, 0xFF, 0xD9],
-            "invalid input: JPEG: no frame header before scan/end",
+            "JPEG: no frame header before scan/end",
         ),
         // A frame of the wrong size: the crate validates what the backend produced.
         (
             wrong_size_stream(),
-            "invalid input: JPEG: backend stream declares different dimensions than the encoded image",
+            "JPEG: backend stream declares different dimensions than the encoded image",
         ),
     ] {
         let mut enc = JpegEncoder::new();
         enc.push_backend(BareStream(bytes));
-        assert_eq!(enc.encode_to_vec(gi).unwrap_err().to_string(), msg);
+        assert_eq!(
+            enc.encode_to_vec(gi).unwrap_err().static_message().unwrap(),
+            msg
+        );
     }
 }
 
@@ -890,8 +897,9 @@ fn decoder_limits_run_before_backend_selection_and_after_backend_output() {
     assert_eq!(
         DecodeImage::<Gray8>::decode_image(&preflight, &stream)
             .unwrap_err()
-            .to_string(),
-        "unsupported: JPEG: image exceeds the dimension limit"
+            .static_message()
+            .unwrap(),
+        "JPEG: image exceeds the dimension limit"
     );
     assert!(log.lock().unwrap().is_empty());
 
@@ -910,8 +918,9 @@ fn decoder_limits_run_before_backend_selection_and_after_backend_output() {
     assert_eq!(
         DecodeImage::<Gray8>::decode_image(&too_wide, &stream)
             .unwrap_err()
-            .to_string(),
-        "unsupported: JPEG: image exceeds the dimension limit"
+            .static_message()
+            .unwrap(),
+        "JPEG: image exceeds the dimension limit"
     );
 
     let too_many_bytes = decoder_returning(
@@ -921,8 +930,9 @@ fn decoder_limits_run_before_backend_selection_and_after_backend_output() {
     assert_eq!(
         DecodeImage::<Rgb8>::decode_image(&too_many_bytes, &stream)
             .unwrap_err()
-            .to_string(),
-        "unsupported: JPEG: image exceeds the size limit"
+            .static_message()
+            .unwrap(),
+        "JPEG: image exceeds the size limit"
     );
 }
 
@@ -963,8 +973,9 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
     assert_eq!(
         DecodeImage::<Cmyk8>::decode_image(&d, &stream)
             .unwrap_err()
-            .to_string(),
-        "unsupported: JPEG: not a 4-component CMYK/YCCK image"
+            .static_message()
+            .unwrap(),
+        "JPEG: not a 4-component CMYK/YCCK image"
     );
 
     // Rgb passes through to Rgb8 and is rejected for the other two.
@@ -974,8 +985,9 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
     assert_eq!(
         DecodeImage::<Gray8>::decode_image(&d, &stream)
             .unwrap_err()
-            .to_string(),
-        "unsupported: JPEG: not a single-component grayscale image"
+            .static_message()
+            .unwrap(),
+        "JPEG: not a single-component grayscale image"
     );
 
     // Cmyk passes through to Cmyk8 and is rejected for Rgb8, with the built-in's own message.
@@ -985,8 +997,9 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
     assert_eq!(
         DecodeImage::<Rgb8>::decode_image(&d, &stream)
             .unwrap_err()
-            .to_string(),
-        "unsupported: JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8"
+            .static_message()
+            .unwrap(),
+        "JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8"
     );
 }
 
@@ -1142,8 +1155,9 @@ fn abi_decode_adapter_declines_on_unsupported_and_propagates_other_statuses() {
     assert_eq!(
         DecodeImage::<Gray8>::decode_image(&dec, &stream)
             .unwrap_err()
-            .to_string(),
-        "invalid input: JPEG: codec-abi decode backend returned a failure status"
+            .static_message()
+            .unwrap(),
+        "JPEG: codec-abi decode backend returned a failure status"
     );
 }
 
@@ -1255,8 +1269,8 @@ fn abi_encode_adapter_declines_on_unsupported_and_propagates_other_statuses() {
         seen,
     }));
     assert_eq!(
-        enc.encode_to_vec(gi).unwrap_err().to_string(),
-        "invalid input: JPEG: codec-abi encode backend returned a failure status"
+        enc.encode_to_vec(gi).unwrap_err().static_message().unwrap(),
+        "JPEG: codec-abi encode backend returned a failure status"
     );
 }
 
@@ -1279,8 +1293,9 @@ fn abi_decode_adapter_rejects_component_counts_it_cannot_lay_out() {
     assert_eq!(
         DecodeImage::<Rgb8>::decode_image(&dec, &stream)
             .unwrap_err()
-            .to_string(),
-        "unsupported: JPEG: only 1, 3, or 4 component streams are supported"
+            .static_message()
+            .unwrap(),
+        "JPEG: only 1, 3, or 4 component streams are supported"
     );
 }
 

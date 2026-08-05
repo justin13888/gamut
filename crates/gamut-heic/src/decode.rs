@@ -149,14 +149,21 @@ impl DecodedFrame {
     ) -> Result<Self> {
         let luma = Dimensions::new(width, height)?
             .num_pixels()
-            .ok_or(Error::InvalidInput("HEIF: frame dimensions overflow usize"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "HEIF: frame dimensions overflow usize",
+                )
+            })?;
         if !(8..=16).contains(&bit_depth) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: frame bit depth out of range (8..=16)",
             ));
         }
         if y.len() != luma {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: luma plane length does not match dimensions",
             ));
         }
@@ -165,12 +172,14 @@ impl DecodedFrame {
         let chroma_len = cw as usize * ch as usize;
         if chroma == ChromaFormat::Monochrome {
             if !cb.is_empty() || !cr.is_empty() {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "HEIF: monochrome frame must have empty chroma planes",
                 ));
             }
         } else if cb.len() != chroma_len || cr.len() != chroma_len {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: chroma plane length does not match dimensions",
             ));
         }
@@ -351,11 +360,12 @@ impl HeifImage {
         decoder: &mut dyn HevcDecoder,
         stack: &mut Vec<u32>,
     ) -> Result<DecodedFrame> {
-        let item = self
-            .item(id)
-            .ok_or(Error::InvalidInput("HEIF: item id names no item"))?;
+        let item = self.item(id).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIF: item id names no item")
+        })?;
         if item.has_unsupported_essential_property() {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: item has an unrecognised essential property",
             ));
         }
@@ -374,33 +384,40 @@ impl HeifImage {
     ) -> Result<DecodedFrame> {
         match item.kind() {
             ItemKind::CodedImage { .. } if item.kind().is_hevc() => {
-                let config = item.hevc_config().ok_or(Error::InvalidInput(
-                    "HEIF: HEVC item has no hvcC configuration",
-                ))??;
+                let config = item.hevc_config().ok_or_else(|| {
+                    Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "HEIF: HEVC item has no hvcC configuration",
+                    )
+                })??;
                 let payload = &item.as_isobmff_item().payload;
                 // The pipeline enforces the still-image constraint before the codec hook sees the
                 // payload (a non-IRAP VCL NAL never reaches `decode_intra`).
                 config.validate_still_payload(payload)?;
                 decoder.decode_intra(&config, payload)
             }
-            ItemKind::CodedImage { .. } => Err(Error::Unsupported(
+            ItemKind::CodedImage { .. } => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: only HEVC coded items are decodable here",
             )),
             ItemKind::Identity => {
                 let [source] = item.derivation_target_ids() else {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "HEIF: iden item must reference exactly one source",
                     ));
                 };
                 self.decode_planar_inner(*source, decoder, stack)
             }
             ItemKind::Grid => self.decode_grid(id, item, decoder, stack),
-            ItemKind::Overlay => Err(Error::Unsupported(
+            ItemKind::Overlay => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: overlay compositing is not available on the planar surface (use the RGBA path)",
             )),
-            ItemKind::Exif | ItemKind::Mime | ItemKind::Unknown(_) => {
-                Err(Error::InvalidInput("HEIF: item is not a decodable image"))
-            }
+            ItemKind::Exif | ItemKind::Mime | ItemKind::Unknown(_) => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIF: item is not a decodable image",
+            )),
         }
     }
 
@@ -427,21 +444,23 @@ impl HeifImage {
         if tiles.iter().any(|t| {
             t.chroma != chroma || t.bit_depth != bit_depth || t.width != tw || t.height != th
         }) {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: grid tiles are not uniform in dimensions, chroma, or bit depth",
             ));
         }
 
         // Canvas = columns·tile_w × rows·tile_h, checked; the output must fit within it.
-        let canvas_w = (cols as u32)
-            .checked_mul(tw)
-            .ok_or(Error::InvalidInput("HEIF: grid canvas width overflow"))?;
-        let canvas_h = (rows as u32)
-            .checked_mul(th)
-            .ok_or(Error::InvalidInput("HEIF: grid canvas height overflow"))?;
+        let canvas_w = (cols as u32).checked_mul(tw).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIF: grid canvas width overflow")
+        })?;
+        let canvas_h = (rows as u32).checked_mul(th).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIF: grid canvas height overflow")
+        })?;
         let (ow, oh) = (grid.output_width, grid.output_height);
         if ow == 0 || oh == 0 || ow > canvas_w || oh > canvas_h {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: grid output dimensions exceed the tiled canvas",
             ));
         }
@@ -491,11 +510,12 @@ impl HeifImage {
         decoder: &mut dyn HevcDecoder,
         stack: &mut Vec<u32>,
     ) -> Result<ImageBuf<Rgba8>> {
-        let item = self
-            .item(id)
-            .ok_or(Error::InvalidInput("HEIF: item id names no item"))?;
+        let item = self.item(id).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIF: item id names no item")
+        })?;
         if item.has_unsupported_essential_property() {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: item has an unrecognised essential property",
             ));
         }
@@ -535,9 +555,12 @@ impl HeifImage {
             .checked_mul(oh as usize)
             .and_then(|p| p.checked_mul(4))
             .filter(|_| ow != 0 && oh != 0)
-            .ok_or(Error::InvalidInput(
-                "HEIF: overlay canvas is empty or too large",
-            ))?;
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "HEIF: overlay canvas is empty or too large",
+                )
+            })?;
         // Fill: 16-bit canvas samples scaled to 8-bit by >> 8.
         let fill = [
             (overlay.canvas_fill_value[0] >> 8) as u8,
@@ -569,10 +592,16 @@ impl HeifImage {
 /// pops `id` when the step completes.
 fn enter_derivation(stack: &mut Vec<u32>, id: u32) -> Result<()> {
     if stack.contains(&id) {
-        return Err(Error::InvalidInput("HEIF: derivation reference cycle"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "HEIF: derivation reference cycle",
+        ));
     }
     if stack.len() >= MAX_DERIVATION_DEPTH {
-        return Err(Error::Unsupported("HEIF: derivation nested too deeply"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "HEIF: derivation nested too deeply",
+        ));
     }
     stack.push(id);
     Ok(())
@@ -621,7 +650,8 @@ fn colour_params(item: &HeifItem<'_>) -> Result<(u16, ColorRange)> {
             };
             Ok((nclx.matrix_coefficients, range))
         }
-        Some(_) => Err(Error::Unsupported(
+        Some(_) => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "HEIF: ICC-profile colr is not supported on the RGBA surface (use the planar surface)",
         )),
     }
@@ -631,7 +661,8 @@ fn colour_params(item: &HeifItem<'_>) -> Result<(u16, ColorRange)> {
 /// this crate's colour policy (see [`HeifImage::decode_item_rgba8`]).
 fn frame_to_rgba(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
     if frame.bit_depth != 8 {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "HEIF: >8-bit RGBA presentation is not yet supported (use the planar surface)",
         ));
     }
@@ -651,7 +682,8 @@ fn frame_to_rgba(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
         // Identity / GBR (mc = 0): plane order Y=G, Cb=B, Cr=R; requires 4:4:4, no range expansion.
         0 => {
             if frame.chroma != ChromaFormat::Yuv444 {
-                return Err(Error::Unsupported(
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     "HEIF: identity matrix (mc = 0) requires 4:4:4 chroma",
                 ));
             }
@@ -686,7 +718,8 @@ fn frame_to_rgba(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
             }
         }
         _ => {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: only BT.601 (matrix 5/6), identity (0), and monochrome are supported on the RGBA surface",
             ));
         }
@@ -709,12 +742,14 @@ fn expand_gray8(y: u16, range: ColorRange) -> u8 {
 /// Merges an alpha auxiliary into the RGBA buffer's alpha channel.
 fn apply_alpha(rgba: &mut [u8], w: usize, h: usize, alpha: &DecodedFrame) -> Result<()> {
     if alpha.chroma != ChromaFormat::Monochrome {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "HEIF: alpha auxiliary must be monochrome",
         ));
     }
     if alpha.width as usize != w || alpha.height as usize != h {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "HEIF: alpha auxiliary dimensions do not match the master image",
         ));
     }
@@ -820,17 +855,24 @@ fn mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
 /// top-left corner is not integer-valued, or if the crop window falls outside the image.
 fn crop_clap(src: &[u8], w: u32, h: u32, clap: &CleanAperture) -> Result<(Vec<u8>, u32, u32)> {
     if clap.width_d == 0 || clap.height_d == 0 || clap.horiz_off_d == 0 || clap.vert_off_d == 0 {
-        return Err(Error::InvalidInput("HEIF: clap has a zero denominator"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "HEIF: clap has a zero denominator",
+        ));
     }
     if !clap.width_n.is_multiple_of(clap.width_d) || !clap.height_n.is_multiple_of(clap.height_d) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "HEIF: clap width/height is not integer-valued",
         ));
     }
     let crop_w = clap.width_n / clap.width_d;
     let crop_h = clap.height_n / clap.height_d;
     if crop_w == 0 || crop_h == 0 {
-        return Err(Error::InvalidInput("HEIF: clap has a zero-sized crop"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "HEIF: clap has a zero-sized crop",
+        ));
     }
     let left = clap_offset(
         i64::from(w),
@@ -849,7 +891,8 @@ fn crop_clap(src: &[u8], w: u32, h: u32, clap: &CleanAperture) -> Result<(Vec<u8
         || left + i64::from(crop_w) > i64::from(w)
         || top + i64::from(crop_h) > i64::from(h)
     {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "HEIF: clap crop window lies outside the image",
         ));
     }
@@ -878,7 +921,8 @@ fn clap_offset(dim: i64, crop: i64, off_n: u32, off_d: u32) -> Result<i64> {
     let num = (dim - crop) * i64::from(off_d) + 2 * i64::from(off_n as i32);
     let den = 2 * i64::from(off_d);
     if num % den != 0 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "HEIF: clap offset is not integer-valued",
         ));
     }

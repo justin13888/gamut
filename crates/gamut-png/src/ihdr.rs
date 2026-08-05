@@ -49,35 +49,54 @@ impl Ihdr {
 /// undefined colour type, a bit depth Table 12 forbids, or a non-zero compression, filter, or
 /// unknown interlace method code.
 pub(crate) fn parse(data: &[u8]) -> Result<Ihdr> {
-    let data: &[u8; 13] = data
-        .try_into()
-        .map_err(|_| Error::InvalidInput("PNG: IHDR payload must be 13 bytes"))?;
+    let data: &[u8; 13] = data.try_into().map_err(|_| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: IHDR payload must be 13 bytes")
+    })?;
     let width = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
     let height = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     if width == 0 || height == 0 {
-        return Err(Error::InvalidInput("PNG: zero image dimension"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: zero image dimension",
+        ));
     }
     if width >= 1 << 31 || height >= 1 << 31 {
-        return Err(Error::InvalidInput("PNG: dimension exceeds 2^31 - 1"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: dimension exceeds 2^31 - 1",
+        ));
     }
     let bit_depth = data[8];
-    let color =
-        ColorType::from_code(data[9]).ok_or(Error::InvalidInput("PNG: undefined colour type"))?;
+    let color = ColorType::from_code(data[9]).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: undefined colour type")
+    })?;
     if !color.allows_bit_depth(bit_depth) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "PNG: bit depth not allowed for the colour type",
         ));
     }
     if data[10] != 0 {
-        return Err(Error::InvalidInput("PNG: unknown compression method"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: unknown compression method",
+        ));
     }
     if data[11] != 0 {
-        return Err(Error::InvalidInput("PNG: unknown filter method"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: unknown filter method",
+        ));
     }
     let interlaced = match data[12] {
         0 => false,
         1 => true,
-        _ => return Err(Error::InvalidInput("PNG: unknown interlace method")),
+        _ => {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: unknown interlace method",
+            ));
+        }
     };
     Ok(Ihdr {
         width,

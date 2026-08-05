@@ -55,9 +55,9 @@ const asserts in `src/status.rs`:
 | Code | Value | Kind |
 |---|---|---|
 | `GAMUT_OK` | 0 | success |
-| `GAMUT_STATUS_INVALID_INPUT` | 1 | maps `gamut_core::Error::InvalidInput` |
-| `GAMUT_STATUS_UNSUPPORTED` | 2 | maps `gamut_core::Error::Unsupported` |
-| `GAMUT_STATUS_IO` | 3 | maps `gamut_core::Error::Io` |
+| `GAMUT_STATUS_INVALID_INPUT` | 1 | maps `gamut_core::ErrorKind::InvalidInput` |
+| `GAMUT_STATUS_UNSUPPORTED` | 2 | maps `gamut_core::ErrorKind::Unsupported` |
+| `GAMUT_STATUS_IO` | 3 | maps `gamut_core::ErrorKind::Io` |
 | `GAMUT_STATUS_NULL_ARGUMENT` | 4 | boundary-only |
 | `GAMUT_STATUS_PANIC` | 5 | boundary-only |
 | `GAMUT_STATUS_BUFFER_TOO_SMALL` | 6 | boundary-only (reserved for #242) |
@@ -68,11 +68,11 @@ is the *library's* result type; it is distinct from the backend-seam `GamutAbiSt
 (`gamut_codec_abi::Status`), whose `0`/`-1` values carry the registry fall-through contract and
 belong to backends.
 
-Error messages: `Error::InvalidInput`/`Error::Unsupported` carry `&'static str`, so their
-messages are returned as **borrowed `const char*` valid for the program lifetime** — no
-allocation, no free protocol. Preserving the `&'static str` payload property in `gamut_core` is
-therefore a convention, not an accident. Dynamic messages (`Error::Io`) go through a
-thread-local last-error string.
+Error classification always uses `Error::kind()`, looking through `Error::Context`. Bare
+`Error::InvalidInput`/`Error::Unsupported` messages remain borrowed `const char*` values valid for
+the program lifetime. Contextual diagnostics (origin, byte offset, or owned detail), like
+`Error::Io`, are formatted into the thread-local last-error string; no Rust allocation crosses the
+C allocator boundary.
 
 ## Ownership
 

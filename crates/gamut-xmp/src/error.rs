@@ -52,15 +52,20 @@ pub type Result<T> = core::result::Result<T, XmpError>;
 impl From<XmpError> for gamut_core::Error {
     /// Funnels an [`XmpError`] into the workspace's unified [`gamut_core::Error`] so the
     /// `gamut-metadata` facade and the format crates can present one error surface. gamut-core's
-    /// error carries only static messages, so the dynamic detail is dropped; reach for [`XmpError`]
-    /// directly when that detail matters.
+    /// error retains the original XMP diagnostic as owned detail while preserving a stable
+    /// [`gamut_core::ErrorKind`].
     fn from(err: XmpError) -> Self {
-        match err {
+        let detail = err.to_string();
+        let classified = match err {
             XmpError::Encoding(_) | XmpError::UnsupportedForm(_) => {
-                gamut_core::Error::Unsupported("XMP: unsupported feature")
+                gamut_core::Error::unsupported(env!("CARGO_PKG_NAME"), "XMP: unsupported feature")
             }
-            _ => gamut_core::Error::InvalidInput("XMP: invalid metadata packet"),
-        }
+            _ => gamut_core::Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "XMP: invalid metadata packet",
+            ),
+        };
+        classified.with_detail(detail)
     }
 }
 
@@ -81,19 +86,19 @@ mod tests {
         // Encoding / unsupported-form become Unsupported; everything else is invalid input.
         assert!(matches!(
             gamut_core::Error::from(XmpError::Encoding("x")),
-            gamut_core::Error::Unsupported(_)
+            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::Unsupported
         ));
         assert!(matches!(
             gamut_core::Error::from(XmpError::UnsupportedForm("parseType=Literal".into())),
-            gamut_core::Error::Unsupported(_)
+            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::Unsupported
         ));
         assert!(matches!(
             gamut_core::Error::from(XmpError::MissingRdf),
-            gamut_core::Error::InvalidInput(_)
+            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
         ));
         assert!(matches!(
             gamut_core::Error::from(XmpError::DuplicateLang("en".into())),
-            gamut_core::Error::InvalidInput(_)
+            gamut_core::Error::Context(ref diagnostic) if diagnostic.source_error().kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 }

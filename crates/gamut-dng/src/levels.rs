@@ -69,33 +69,39 @@ impl RawLevels {
     ) -> Result<Self> {
         let (rows, cols) = black_repeat;
         if samples_per_pixel == 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: levels need at least one sample plane",
             ));
         }
         if rows == 0 || cols == 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: BlackLevelRepeatDim dimensions must be non-zero",
             ));
         }
         let cells = usize::from(rows) * usize::from(cols) * usize::from(samples_per_pixel);
         if black.len() != cells {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: BlackLevel length must be repeat rows * cols * samples per pixel",
             ));
         }
         if white.len() != usize::from(samples_per_pixel) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: WhiteLevel needs one value per sample plane",
             ));
         }
         if black.iter().any(|v| !v.is_finite() || *v < 0.0) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: black levels must be finite and non-negative",
             ));
         }
         if white.iter().any(|v| !v.is_finite() || *v <= 0.0) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: white levels must be finite and positive",
             ));
         }

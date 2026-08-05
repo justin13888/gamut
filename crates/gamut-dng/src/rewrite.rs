@@ -78,7 +78,8 @@ impl DngRewrite {
         let file = gamut_ifd::read_tree(data, ifd_tags::STANDARD_POINTER_TAGS)?;
         for ifd in &file.ifds {
             if ifd.get(tags::EXTRA_CAMERA_PROFILES).is_some() {
-                return Err(Error::Unsupported(
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     "DNG: rewriting a file with ExtraCameraProfiles is not supported yet",
                 ));
             }
@@ -210,19 +211,21 @@ impl DngRewrite {
         }
         let (mut bytes, _map) = write_with(&tree, &opts(pin))?;
         debug_assert_eq!(bytes.len(), probe.len(), "structural determinism");
-        let base =
-            usize::try_from(base).map_err(|_| Error::InvalidInput("DNG: layout overflows"))?;
+        let base = usize::try_from(base)
+            .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows"))?;
         bytes.resize(base, 0);
         for (payload, offsets) in payloads.iter().zip(&placed) {
             for (block, &offset) in payload.blocks.iter().zip(offsets) {
-                let offset = usize::try_from(offset)
-                    .map_err(|_| Error::InvalidInput("DNG: layout overflows"))?;
+                let offset = usize::try_from(offset).map_err(|_| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows")
+                })?;
                 bytes.resize(offset, 0); // the ≤1 byte of word-alignment padding
                 bytes.extend_from_slice(block);
             }
         }
         if stream_overflows(self.variant, bytes.len() as u64) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: layout exceeds the 4 GiB classic-TIFF offset limit",
             ));
         }
@@ -265,24 +268,32 @@ fn collect_payloads(
         let Some(offsets) = ifd.get_u64_vec(off_tag) else {
             continue;
         };
-        let counts = ifd.get_u64_vec(cnt_tag).ok_or(Error::InvalidInput(
-            "DNG: payload offsets without matching byte counts",
-        ))?;
+        let counts = ifd.get_u64_vec(cnt_tag).ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: payload offsets without matching byte counts",
+            )
+        })?;
         if offsets.len() != counts.len() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: payload offset/byte-count length mismatch",
             ));
         }
         let mut blocks = Vec::with_capacity(offsets.len());
         for (&offset, &count) in offsets.iter().zip(&counts) {
-            let start = usize::try_from(offset)
-                .map_err(|_| Error::InvalidInput("DNG: payload offset out of bounds"))?;
-            let len = usize::try_from(count)
-                .map_err(|_| Error::InvalidInput("DNG: payload out of bounds"))?;
+            let start = usize::try_from(offset).map_err(|_| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: payload offset out of bounds")
+            })?;
+            let len = usize::try_from(count).map_err(|_| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: payload out of bounds")
+            })?;
             let block = start
                 .checked_add(len)
                 .and_then(|end| data.get(start..end))
-                .ok_or(Error::InvalidInput("DNG: payload out of bounds"))?;
+                .ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: payload out of bounds")
+                })?;
             blocks.push(block.to_vec());
         }
         // A placeholder of the same element count and offset width keeps the layout final.
@@ -314,9 +325,12 @@ fn patch_payload_offsets<'a>(
         if ifd.get(off_tag).is_none() {
             continue;
         }
-        let offsets = placed
-            .next()
-            .ok_or(Error::InvalidInput("DNG: payload bookkeeping out of sync"))?;
+        let offsets = placed.next().ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: payload bookkeeping out of sync",
+            )
+        })?;
         ifd.set(off_tag, Value::offset_array(variant, offsets)?);
     }
     for group in ifd.sub_ifds_mut() {

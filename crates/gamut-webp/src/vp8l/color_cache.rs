@@ -32,7 +32,10 @@ impl ColorCache {
     /// Returns [`Error::InvalidInput`] if `bits` is outside `1..=11`.
     pub fn new(bits: u32) -> Result<Self> {
         if !(MIN_CACHE_BITS..=MAX_CACHE_BITS).contains(&bits) {
-            return Err(Error::InvalidInput("VP8L: color cache bits out of range"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8L: color cache bits out of range",
+            ));
         }
         Ok(Self {
             bits,

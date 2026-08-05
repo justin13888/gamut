@@ -16,11 +16,11 @@
 //! - **Open where growth is additive, sealed where it must not be.** [`Error`] and [`ColorModel`]
 //!   are `#[non_exhaustive]` so variants can be added without a breaking change, while [`Pixel`]
 //!   and [`Sample`] are sealed — the set of pixel layouts is closed and only this crate defines it.
-//! - **Static error messages.** [`Error::InvalidInput`] / [`Error::Unsupported`] carry `&'static
-//!   str`; dynamic context is deferred and can be added later as a new `#[non_exhaustive]` variant.
-//!   [`Error::Io`] is the one dynamic exception: it wraps the underlying [`std::io::Error`] so a
-//!   transport failure (a disk read error while parsing from a stream-backed source) stays
-//!   distinguishable from malformed input.
+//! - **Static classifications, optional diagnostics.** [`Error::InvalidInput`] /
+//!   [`Error::Unsupported`] retain their allocation-free `&'static str` payloads and public shape.
+//!   Producers can wrap any error in [`Error::Context`] to attach an origin, byte offset, or owned
+//!   detail without changing its [`ErrorKind`]. [`Error::Io`] preserves the underlying
+//!   [`std::io::Error`] so transport failures stay distinguishable from malformed input.
 //! - **The length invariant lives on the buffers, not on [`Dimensions`].** [`Dimensions`] is a plain
 //!   value type with public fields; non-emptiness and `len == width * height * channels` are
 //!   enforced once, at [`ImageRef::new`] / [`ImageBuf::new`], so codecs receive a known-good buffer.
@@ -63,6 +63,97 @@ pub use pixel::{
     PixelFormat, Rgb8, Rgb16, Rgba8, Rgba16, Sample,
 };
 
+/// Stable classification of a gamut error, independent of any diagnostic context around it.
+///
+/// The discriminants are permanent and append-only so the classification remains mechanically
+/// portable to the C status surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u32)]
+pub enum ErrorKind {
+    /// The input data was malformed, truncated, or otherwise invalid.
+    InvalidInput = 1,
+    /// The requested format, profile, or feature is unsupported.
+    Unsupported = 2,
+    /// An underlying I/O operation failed.
+    Io = 3,
+}
+
+const _: () = {
+    assert!(ErrorKind::InvalidInput as u32 == 1);
+    assert!(ErrorKind::Unsupported as u32 == 2);
+    assert!(ErrorKind::Io as u32 == 3);
+};
+
+/// Structured diagnostic information attached to an [`Error`].
+///
+/// Callers normally inspect this through [`Error::origin`], [`Error::byte_offset`], and
+/// [`Error::detail`]. The fields stay private so more optional context can be added without
+/// changing the construction contract.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct Diagnostic {
+    source: Error,
+    origin: Option<&'static str>,
+    byte_offset: Option<u64>,
+    detail: Option<Box<str>>,
+}
+
+impl Diagnostic {
+    /// The underlying classified error.
+    #[must_use]
+    pub fn source_error(&self) -> &Error {
+        &self.source
+    }
+
+    /// The Cargo package or format layer that produced the error, when known.
+    #[must_use]
+    pub fn origin(&self) -> Option<&'static str> {
+        self.origin
+    }
+
+    /// The byte offset relative to the producing parser's immediate input, when known.
+    #[must_use]
+    pub fn byte_offset(&self) -> Option<u64> {
+        self.byte_offset
+    }
+
+    /// Dynamic diagnostic detail retained from an underlying parser or backend, when available.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+}
+
+impl core::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.source)?;
+        if self.origin.is_some() || self.byte_offset.is_some() {
+            f.write_str(" [")?;
+            if let Some(origin) = self.origin {
+                write!(f, "origin: {origin}")?;
+                if self.byte_offset.is_some() {
+                    f.write_str(", ")?;
+                }
+            }
+            if let Some(offset) = self.byte_offset {
+                write!(f, "byte offset: {offset}")?;
+            }
+            f.write_str("]")?;
+        }
+        if let Some(detail) = &self.detail {
+            write!(f, ": {detail}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Diagnostic {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Errors produced by gamut encoders and decoders.
 ///
 /// Marked `#[non_exhaustive]` so additional variants can be added as formats land without a
@@ -83,6 +174,137 @@ pub enum Error {
     /// or surface it instead of misclassifying the file as corrupt.
     #[error("i/o error: {0}")]
     Io(#[from] std::io::Error),
+    /// An existing error enriched with optional structured diagnostic context.
+    ///
+    /// The payload is boxed so adding context does not inflate the allocation-free legacy
+    /// variants. Context is allocated only while constructing an error, never on a successful
+    /// codec path.
+    #[error("{0}")]
+    Context(#[source] Box<Diagnostic>),
+}
+
+impl Error {
+    /// Constructs an invalid-input error attributed to `origin`.
+    ///
+    /// Direct [`Error::InvalidInput`] construction remains the allocation-free compatibility
+    /// path. This constructor is for producers that opt into structured diagnostics.
+    #[must_use]
+    pub fn invalid_input(origin: &'static str, message: &'static str) -> Self {
+        Self::InvalidInput(message).with_origin(origin)
+    }
+
+    /// Constructs an unsupported-feature error attributed to `origin`.
+    ///
+    /// Direct [`Error::Unsupported`] construction remains the allocation-free compatibility path.
+    #[must_use]
+    pub fn unsupported(origin: &'static str, message: &'static str) -> Self {
+        Self::Unsupported(message).with_origin(origin)
+    }
+
+    /// Returns the stable classification of this error, looking through diagnostic context.
+    #[must_use]
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::InvalidInput(_) => ErrorKind::InvalidInput,
+            Self::Unsupported(_) => ErrorKind::Unsupported,
+            Self::Io(_) => ErrorKind::Io,
+            Self::Context(diagnostic) => diagnostic.source.kind(),
+        }
+    }
+
+    /// Returns the allocation-free static message carried by a legacy error, when present.
+    ///
+    /// Context does not change the message. [`Error::Io`] has no static message because its text
+    /// belongs to the underlying [`std::io::Error`].
+    #[must_use]
+    pub fn static_message(&self) -> Option<&'static str> {
+        match self {
+            Self::InvalidInput(message) | Self::Unsupported(message) => Some(message),
+            Self::Io(_) => None,
+            Self::Context(diagnostic) => diagnostic.source.static_message(),
+        }
+    }
+
+    /// Returns the Cargo package or format layer that produced the error, when known.
+    #[must_use]
+    pub fn origin(&self) -> Option<&'static str> {
+        match self {
+            Self::Context(diagnostic) => diagnostic.origin(),
+            _ => None,
+        }
+    }
+
+    /// Returns the byte offset relative to the producing parser's immediate input, when known.
+    #[must_use]
+    pub fn byte_offset(&self) -> Option<u64> {
+        match self {
+            Self::Context(diagnostic) => diagnostic.byte_offset(),
+            _ => None,
+        }
+    }
+
+    /// Returns dynamic diagnostic detail retained from an underlying parser or backend.
+    #[must_use]
+    pub fn detail(&self) -> Option<&str> {
+        match self {
+            Self::Context(diagnostic) => diagnostic.detail(),
+            _ => None,
+        }
+    }
+
+    /// Attaches the producing Cargo package or format layer if no origin is already present.
+    #[must_use]
+    pub fn with_origin(self, origin: &'static str) -> Self {
+        self.with_diagnostic(|diagnostic| {
+            if diagnostic.origin.is_none() {
+                diagnostic.origin = Some(origin);
+            }
+        })
+    }
+
+    /// Attaches a byte offset if no offset is already present.
+    ///
+    /// The offset is relative to the immediate input accepted by the parser that reports it.
+    #[must_use]
+    pub fn with_byte_offset(self, byte_offset: u64) -> Self {
+        self.with_diagnostic(|diagnostic| {
+            if diagnostic.byte_offset.is_none() {
+                diagnostic.byte_offset = Some(byte_offset);
+            }
+        })
+    }
+
+    /// Attaches owned dynamic detail if no detail is already present.
+    ///
+    /// This is the opt-in allocating path; static-only callers can keep constructing
+    /// [`Error::InvalidInput`] and [`Error::Unsupported`] directly.
+    #[must_use]
+    pub fn with_detail(self, detail: impl Into<Box<str>>) -> Self {
+        self.with_diagnostic(|diagnostic| {
+            if diagnostic.detail.is_none() {
+                diagnostic.detail = Some(detail.into());
+            }
+        })
+    }
+
+    fn with_diagnostic(self, update: impl FnOnce(&mut Diagnostic)) -> Self {
+        match self {
+            Self::Context(mut diagnostic) => {
+                update(&mut diagnostic);
+                Self::Context(diagnostic)
+            }
+            source => {
+                let mut diagnostic = Diagnostic {
+                    source,
+                    origin: None,
+                    byte_offset: None,
+                    detail: None,
+                };
+                update(&mut diagnostic);
+                Self::Context(Box::new(diagnostic))
+            }
+        }
+    }
 }
 
 /// Convenience result type for gamut operations.
@@ -113,7 +335,7 @@ impl Dimensions {
     /// Returns [`Error::InvalidInput`] if either dimension is zero.
     pub fn new(width: u32, height: u32) -> Result<Self> {
         if width == 0 || height == 0 {
-            return Err(Error::InvalidInput("zero-sized image"));
+            return Err(Error::InvalidInput("zero-sized image").with_origin(env!("CARGO_PKG_NAME")));
         }
         Ok(Self { width, height })
     }
@@ -225,6 +447,94 @@ mod tests {
         let err: Error = io.into();
         assert!(matches!(err, Error::Io(_)));
         assert!(err.to_string().contains("short read"));
+    }
+
+    #[test]
+    fn legacy_error_variants_keep_their_public_shape() {
+        let invalid = Error::InvalidInput("bad bytes");
+        let unsupported = Error::Unsupported("future profile");
+        assert!(matches!(invalid, Error::InvalidInput("bad bytes")));
+        assert!(matches!(unsupported, Error::Unsupported("future profile")));
+        assert_eq!(invalid.kind(), ErrorKind::InvalidInput);
+        assert_eq!(unsupported.kind(), ErrorKind::Unsupported);
+        assert_eq!(invalid.static_message(), Some("bad bytes"));
+        assert_eq!(unsupported.static_message(), Some("future profile"));
+        assert_eq!(invalid.origin(), None);
+    }
+
+    #[test]
+    fn context_is_structured_first_write_wins_and_keeps_the_source() {
+        use std::error::Error as _;
+
+        let err = Error::InvalidInput("bad box")
+            .with_origin("gamut-isobmff")
+            .with_origin("gamut-avif")
+            .with_byte_offset(17)
+            .with_byte_offset(99)
+            .with_detail("declared size exceeds input")
+            .with_detail("replacement");
+
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(err.static_message(), Some("bad box"));
+        assert_eq!(err.origin(), Some("gamut-isobmff"));
+        assert_eq!(err.byte_offset(), Some(17));
+        assert_eq!(err.detail(), Some("declared size exceeds input"));
+        assert_eq!(
+            err.to_string(),
+            "invalid input: bad box [origin: gamut-isobmff, byte offset: 17]: declared size exceeds input"
+        );
+
+        let diagnostic = match &err {
+            Error::Context(diagnostic) => diagnostic,
+            other => panic!("expected contextual error, got {other:?}"),
+        };
+        assert!(matches!(
+            diagnostic.source_error(),
+            Error::InvalidInput("bad box")
+        ));
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn partial_context_displays_without_empty_separators() {
+        assert_eq!(
+            Error::Unsupported("future profile")
+                .with_byte_offset(3)
+                .to_string(),
+            "unsupported: future profile [byte offset: 3]"
+        );
+        assert_eq!(
+            Error::InvalidInput("bad bytes")
+                .with_detail("decoder rejected marker")
+                .to_string(),
+            "invalid input: bad bytes: decoder rejected marker"
+        );
+        assert_eq!(
+            Error::unsupported("gamut-test", "future profile").to_string(),
+            "unsupported: future profile [origin: gamut-test]"
+        );
+    }
+
+    #[test]
+    fn contextual_io_keeps_its_kind_and_source_chain() {
+        use std::error::Error as _;
+
+        let err = Error::Io(std::io::Error::other("disk on fire"))
+            .with_origin("gamut-ifd")
+            .with_byte_offset(4096);
+        assert_eq!(err.kind(), ErrorKind::Io);
+        assert_eq!(err.static_message(), None);
+        assert_eq!(err.origin(), Some("gamut-ifd"));
+        assert_eq!(err.byte_offset(), Some(4096));
+        let diagnostic = err.source().expect("diagnostic source");
+        let io = diagnostic.source().expect("io source");
+        assert_eq!(io.to_string(), "i/o error: disk on fire");
+    }
+
+    #[test]
+    fn errors_remain_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Error>();
     }
 
     #[test]

@@ -52,7 +52,8 @@ impl TryFrom<u32> for PhotometricInterpretation {
             6 => PhotometricInterpretation::YCbCr,
             8 => PhotometricInterpretation::CieLab,
             _ => {
-                return Err(gamut_core::Error::Unsupported(
+                return Err(gamut_core::Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     "TIFF: unrecognised PhotometricInterpretation tag value",
                 ));
             }
@@ -106,7 +107,8 @@ impl TryFrom<u32> for Predictor {
             1 => Predictor::None,
             2 => Predictor::HorizontalDifferencing,
             _ => {
-                return Err(gamut_core::Error::Unsupported(
+                return Err(gamut_core::Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     "TIFF: unrecognised Predictor tag value",
                 ));
             }

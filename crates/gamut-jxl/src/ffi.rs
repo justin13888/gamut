@@ -78,12 +78,16 @@ pub(crate) fn encode(
     // container on.
     let has_boxes = cfg.exif().is_some() || cfg.xmp().is_some();
     if has_boxes && cfg.container() != crate::Container::IsoBmff {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "JXL: Exif/XMP metadata requires the ISO BMFF container",
         ));
     }
     if cfg.exif().is_some_and(<[u8]>::is_empty) || cfg.xmp().is_some_and(<[u8]>::is_empty) {
-        return Err(Error::InvalidInput("JXL: empty metadata payload"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: empty metadata payload",
+        ));
     }
 
     // The coded bit depth: the pixel layout's width, unless overridden to a narrower depth (an
@@ -99,12 +103,12 @@ pub(crate) fn encode(
     // length against the dimensions, but the FFI hands libjxl a byte length; compute it through the
     // same checked `Dimensions` arithmetic so an overflow is a typed error, never a wrap.
     let dims = image.dimensions();
-    let num_samples = dims
-        .sample_count(total_channels as usize)
-        .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
-    let byte_len = num_samples
-        .checked_mul(bytes_per_sample)
-        .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
+    let num_samples = dims.sample_count(total_channels as usize).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
+    })?;
+    let byte_len = num_samples.checked_mul(bytes_per_sample).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
+    })?;
 
     // The sample buffer pointer + data type. u16 crosses as native-endian bytes: the `&[u16]` is
     // already stored in native byte order and 2-byte aligned, and `JxlPixelFormat`'s NATIVE
@@ -123,7 +127,10 @@ pub(crate) fn encode(
     // SAFETY: null memory manager selects libjxl's default allocator (documented in the sys crate).
     let handle = unsafe { sys_enc::JxlEncoderCreate(core::ptr::null()) };
     if handle.is_null() {
-        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: encoder ran out of memory",
+        ));
     }
     let enc = Encoder(handle);
 
@@ -179,7 +186,10 @@ pub(crate) fn encode(
     let frame_settings =
         unsafe { sys_enc::JxlEncoderFrameSettingsCreate(enc.0, core::ptr::null()) };
     if frame_settings.is_null() {
-        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: encoder ran out of memory",
+        ));
     }
 
     match cfg.mode() {
@@ -284,13 +294,19 @@ fn add_box(enc: &Encoder, box_type: &[u8; 4], contents: &[u8]) -> Result<()> {
 /// [`Error::Unsupported`] if reconstruction metadata cannot represent the input.
 pub(crate) fn recompress(cfg: &JxlEncoder, jpeg: &[u8], out: &mut Vec<u8>) -> Result<usize> {
     if jpeg.is_empty() {
-        return Err(Error::InvalidInput("JXL: empty JPEG input"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: empty JPEG input",
+        ));
     }
 
     // SAFETY: null memory manager selects libjxl's default allocator (documented in the sys crate).
     let handle = unsafe { sys_enc::JxlEncoderCreate(core::ptr::null()) };
     if handle.is_null() {
-        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: encoder ran out of memory",
+        ));
     }
     let enc = Encoder(handle);
 
@@ -306,7 +322,10 @@ pub(crate) fn recompress(cfg: &JxlEncoder, jpeg: &[u8], out: &mut Vec<u8>) -> Re
     let frame_settings =
         unsafe { sys_enc::JxlEncoderFrameSettingsCreate(enc.0, core::ptr::null()) };
     if frame_settings.is_null() {
-        return Err(Error::InvalidInput("JXL: encoder ran out of memory"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: encoder ran out of memory",
+        ));
     }
 
     // SAFETY: `frame_settings` is valid; EFFORT takes an integer level in `1..=10`.

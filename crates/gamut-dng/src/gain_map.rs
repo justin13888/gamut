@@ -120,7 +120,8 @@ impl ProfileGainTableMap {
         let (points_v, points_h, spacing, points_n, input_weights) = r.header()?;
         let count = table_count(points_v, points_h, points_n)?;
         if bytes.len() != 64 + 4 * count {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: ProfileGainTableMap byte count disagrees with its dimensions",
             ));
         }
@@ -128,7 +129,8 @@ impl ProfileGainTableMap {
         for _ in 0..count {
             let g = r.f32()?;
             if !g.is_finite() || g < 0.0 {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "DNG: ProfileGainTableMap gains must be finite and non-negative",
                 ));
             }
@@ -170,7 +172,8 @@ impl ProfileGainTableMap {
         let gain_min = r.f32()?;
         let gain_max = r.f32()?;
         if !(0.25..=4.0).contains(&gamma) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: ProfileGainTableMap2 Gamma must be within 0.25 ..= 4.0",
             ));
         }
@@ -180,13 +183,15 @@ impl ProfileGainTableMap {
             1 | 2 => 2,
             3 => 4,
             _ => {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "DNG: ProfileGainTableMap2 has an unknown DataType",
                 ));
             }
         };
         if bytes.len() != 80 + entry * count {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: ProfileGainTableMap2 byte count disagrees with its dimensions",
             ));
         }
@@ -208,7 +213,8 @@ impl ProfileGainTableMap {
                 for _ in 0..count {
                     let g = r.f32()?;
                     if !g.is_finite() {
-                        return Err(Error::InvalidInput(
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
                             "DNG: ProfileGainTableMap2 gains must be finite",
                         ));
                     }
@@ -242,18 +248,21 @@ impl ProfileGainTableMap {
     /// gain count disagrees with the dimensions, or `gamma` is not the 1.0 v1 cannot store.
     pub fn to_bytes_v1(&self, order: ByteOrder) -> Result<Vec<u8>> {
         let GainValues::F32(gains) = &self.gains else {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: ProfileGainTableMap (v1) stores 32-bit float gains only",
             ));
         };
         if self.gamma != 1.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: ProfileGainTableMap (v1) cannot store a Gamma; use ProfileGainTableMap2",
             ));
         }
         let count = table_count(self.points_v, self.points_h, self.points_n)?;
         if gains.len() != count {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: gain count must be MapPointsV * MapPointsH * MapPointsN",
             ));
         }
@@ -277,13 +286,15 @@ impl ProfileGainTableMap {
     /// `gamma` is outside `0.25 ..= 4.0`.
     pub fn to_bytes_v2(&self, order: ByteOrder) -> Result<Vec<u8>> {
         if !(0.25..=4.0).contains(&self.gamma) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: ProfileGainTableMap2 Gamma must be within 0.25 ..= 4.0",
             ));
         }
         let count = table_count(self.points_v, self.points_h, self.points_n)?;
         if self.gains.len() != count {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: gain count must be MapPointsV * MapPointsH * MapPointsN",
             ));
         }
@@ -354,16 +365,20 @@ impl ProfileGainTableMap {
 /// `MapPointsV * MapPointsH * MapPointsN` with zero and overflow rejection.
 fn table_count(points_v: u32, points_h: u32, points_n: u32) -> Result<usize> {
     if points_v == 0 || points_h == 0 || points_n == 0 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: gain-table map dimensions must be non-zero",
         ));
     }
     (points_v as usize)
         .checked_mul(points_h as usize)
         .and_then(|n| n.checked_mul(points_n as usize))
-        .ok_or(Error::InvalidInput(
-            "DNG: gain-table map dimensions overflow",
-        ))
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: gain-table map dimensions overflow",
+            )
+        })
 }
 
 /// A bounds-checked little cursor over the payload in the file's byte order.
@@ -375,10 +390,15 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn take<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let offset = self.pos as u64;
         let slice = self
-            .bytes
-            .get(self.pos..self.pos + N)
-            .ok_or(Error::InvalidInput("DNG: gain-table map is truncated"))?;
+            .pos
+            .checked_add(N)
+            .and_then(|end| self.bytes.get(self.pos..end))
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: gain-table map is truncated")
+                    .with_byte_offset(offset)
+            })?;
         self.pos += N;
         let mut a = [0u8; N];
         a.copy_from_slice(slice);

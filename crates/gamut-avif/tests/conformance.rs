@@ -14,7 +14,7 @@ use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, ChromaFormat, DecodedFrame, Mirror,
     Rotation,
 };
-use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Result, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
 use gamut_isobmff::ColourInformation;
 
 // ---- the dav1d bridge: an Av1StillDecoder over the raw codestream oracle ---------------------
@@ -389,7 +389,7 @@ fn planar_decode_is_bit_exact_against_raw_dav1d_and_libavif() {
     // The RGBA surface correctly declines the 10-bit frame while planar delivered it.
     assert!(matches!(
         container.decode_item_rgba8(primary.id(), &mut Dav1dDecoder),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -545,7 +545,7 @@ fn animated_sequence_is_rejected_gracefully() {
     let data = corpus("colors-animated-8bpc.avif");
     assert!(matches!(
         AvifContainer::parse(&data),
-        Err(Error::Unsupported(_) | Error::InvalidInput(_))
+        Err(error) if matches!(error.kind(), ErrorKind::Unsupported | ErrorKind::InvalidInput)
     ));
 }
 

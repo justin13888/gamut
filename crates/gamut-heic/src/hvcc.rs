@@ -123,7 +123,8 @@ impl HevcConfig {
         let mut r = Reader::new(data);
         let configuration_version = r.u8()?;
         if configuration_version != 1 {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "HEIC: hvcC configurationVersion must be 1",
             ));
         }
@@ -152,7 +153,8 @@ impl HevcConfig {
         let temporal_id_nested = (packed >> 2) & 0x01 != 0;
         let length_size_minus_one = packed & 0x03;
         if length_size_minus_one == 2 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "HEIC: hvcC lengthSizeMinusOne 2 (only 0/1/3 are legal)",
             ));
         }
@@ -180,7 +182,8 @@ impl HevcConfig {
             });
         }
         if !r.at_end() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "HEIC: hvcC trailing bytes after arrays",
             ));
         }
@@ -323,7 +326,8 @@ impl HevcConfig {
         for nal in iter_nal_units(payload, self.nal_length_size()) {
             let header = NalHeader::parse(nal?)?;
             if header.unit_type.is_vcl() && !header.unit_type.is_irap() {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "HEIC: still-image payload has a non-IRAP VCL NAL unit",
                 ));
             }
@@ -346,11 +350,15 @@ impl<'a> Reader<'a> {
 
     /// Reads `n` bytes, advancing the cursor.
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+        let offset = self.pos as u64;
         let end = self
             .pos
             .checked_add(n)
             .filter(|&end| end <= self.data.len())
-            .ok_or(Error::InvalidInput("HEIC: hvcC truncated"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIC: hvcC truncated")
+                    .with_byte_offset(offset)
+            })?;
         let out = &self.data[self.pos..end];
         self.pos = end;
         Ok(out)

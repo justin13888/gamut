@@ -74,12 +74,14 @@ impl CameraProfile {
     ) -> Result<Self> {
         let unique_camera_model = unique_camera_model.into();
         if unique_camera_model.is_empty() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: UniqueCameraModel must not be empty",
             ));
         }
         if !as_shot_neutral.iter().all(|&n| n.is_finite() && n > 0.0) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: AsShotNeutral components must be positive",
             ));
         }

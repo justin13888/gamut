@@ -26,7 +26,10 @@ impl Palette8 {
     /// Returns [`Error::InvalidInput`] if `rgb.len() != 256 * 3`.
     pub fn from_rgb_triples(rgb: &[u8]) -> Result<Self> {
         if rgb.len() != 256 * 3 {
-            return Err(Error::InvalidInput("TIFF: palette must be 256 RGB entries"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: palette must be 256 RGB entries",
+            ));
         }
         let mut entries = [[0u8; 3]; 256];
         for (i, e) in entries.iter_mut().enumerate() {
@@ -44,7 +47,8 @@ impl Palette8 {
     /// Returns [`Error::InvalidInput`] if `colormap.len() != 3 * 256`.
     pub fn from_tiff_colormap(colormap: &[u32]) -> Result<Self> {
         if colormap.len() != 3 * 256 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: ColorMap must have 3*256 entries",
             ));
         }

@@ -4,7 +4,7 @@
 //! account these files it cannot *decode*: the dual-ledger parser invariants must hold
 //! unconditionally, and every byte must be classified.
 
-use gamut_core::Error;
+use gamut_core::ErrorKind;
 use gamut_dng::{DngRewrite, deconstruct};
 
 #[test]
@@ -81,7 +81,7 @@ fn adobe_sample_corpus_survives_a_preserving_rewrite() {
         let rewrite = match DngRewrite::open(&data) {
             Ok(r) => r,
             // Embedded camera-profile carriage through a rewrite is explicitly deferred.
-            Err(Error::Unsupported(_)) => continue,
+            Err(error) if error.kind() == ErrorKind::Unsupported => continue,
             Err(e) => panic!("{name}: open: {e}"),
         };
         let out = rewrite

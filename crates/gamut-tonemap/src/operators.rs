@@ -44,7 +44,8 @@ impl Clamp {
     /// Returns [`Error::InvalidInput`] if `max` is not finite or is not strictly positive.
     pub fn new(max: f32) -> Result<Self> {
         if !max.is_finite() || max <= 0.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "Clamp max must be finite and greater than zero",
             ));
         }
@@ -110,13 +111,15 @@ impl ReinhardExtended {
     /// the `map(white) == 1` fixed point.
     pub fn new(white: f32) -> Result<Self> {
         if !white.is_finite() || white <= 0.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "Reinhard white point must be finite and greater than zero",
             ));
         }
         let white_sq = white * white;
         if !white_sq.is_normal() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "Reinhard white point squared must be a normal f32 (white roughly within [1.1e-19, 1.8e19])",
             ));
         }
@@ -169,7 +172,8 @@ impl Exposure {
     /// Returns [`Error::InvalidInput`] if `scale` is not finite or is not strictly positive.
     pub fn new(scale: f32) -> Result<Self> {
         if !scale.is_finite() || scale <= 0.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "Exposure scale must be finite and greater than zero",
             ));
         }
@@ -275,7 +279,8 @@ impl Hable {
     /// Returns [`Error::InvalidInput`] if `white` is not finite or is not strictly positive.
     pub fn new(white: f32) -> Result<Self> {
         if !white.is_finite() || white <= 0.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "Hable white point must be finite and greater than zero",
             ));
         }
@@ -344,13 +349,15 @@ impl Drago {
     /// curve's `log10(world_max + 1)` normalizer to zero.
     pub fn new(world_max: f32) -> Result<Self> {
         if !world_max.is_finite() || world_max <= 0.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "Drago world_max must be finite and greater than zero",
             ));
         }
         let scale = (DRAGO_LDMAX_NITS * 0.01) / (world_max + 1.0).log10();
         if !scale.is_finite() || scale <= 0.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "Drago world_max must be large enough that log10(world_max + 1) is positive in f32",
             ));
         }
@@ -371,7 +378,8 @@ impl Drago {
     /// `(0, 1)`.
     pub fn with_bias(self, bias: f32) -> Result<Self> {
         if !bias.is_finite() || bias <= 0.0 || bias >= 1.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "Drago bias must be finite and in the open interval (0, 1)",
             ));
         }

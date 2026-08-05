@@ -369,7 +369,8 @@ fn select_raw_ifd(ifds: &[Ifd]) -> Result<usize> {
             fallback = Some(index);
         }
     }
-    fallback.ok_or(Error::InvalidInput("DNG: no raw image IFD found"))
+    fallback
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: no raw image IFD found"))
 }
 
 /// Decodes one non-raw image IFD into a [`SubImage`], or `None` when the IFD carries no image
@@ -491,17 +492,19 @@ fn decode_depth_info(ifd0: &TrackedIfd) -> Option<DepthInfo> {
 
 /// Reconstructs the [`RawImage`] from a raw IFD and the file's strip data.
 fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<RawImage> {
-    let width = ifd
-        .get_u32(tags::IMAGE_WIDTH)
-        .ok_or(Error::InvalidInput("DNG: raw IFD missing ImageWidth"))?;
-    let height = ifd
-        .get_u32(tags::IMAGE_LENGTH)
-        .ok_or(Error::InvalidInput("DNG: raw IFD missing ImageLength"))?;
+    let width = ifd.get_u32(tags::IMAGE_WIDTH).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: raw IFD missing ImageWidth")
+    })?;
+    let height = ifd.get_u32(tags::IMAGE_LENGTH).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: raw IFD missing ImageLength")
+    })?;
     let spp = ifd.get_u32(tags::SAMPLES_PER_PIXEL).unwrap_or(1);
     let bits = ifd
         .get_u32_vec(tags::BITS_PER_SAMPLE)
         .and_then(|v| v.first().copied())
-        .ok_or(Error::InvalidInput("DNG: raw IFD missing BitsPerSample"))? as u16;
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: raw IFD missing BitsPerSample")
+        })? as u16;
     // JPEG XL data decodes to full-range 16-bit whatever precision the codestream stores (the
     // reference SDK's semantics; Apple ProRAW declares BitsPerSample 10 with WhiteLevel 65535).
     // The reconstructed image therefore carries 16 significant bits.
@@ -514,9 +517,12 @@ fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<R
         .get_u32(tags::PHOTOMETRIC_INTERPRETATION)
         .and_then(|c| u16::try_from(c).ok())
         .and_then(PhotometricInterpretation::from_code)
-        .ok_or(Error::InvalidInput(
-            "DNG: raw IFD missing PhotometricInterpretation",
-        ))?;
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: raw IFD missing PhotometricInterpretation",
+            )
+        })?;
 
     let samples = decode_image_data(ifd, data, order, width, height, spp as usize, bits)?;
 
@@ -526,9 +532,15 @@ fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<R
             let dim = ifd
                 .get_u32_vec(tags::CFA_REPEAT_PATTERN_DIM)
                 .filter(|v| v.len() == 2)
-                .ok_or(Error::InvalidInput("DNG: CFA missing CFARepeatPatternDim"))?;
-            let pattern = bytes_value(ifd.get(tags::CFA_PATTERN))
-                .ok_or(Error::InvalidInput("DNG: CFA missing CFAPattern"))?;
+                .ok_or_else(|| {
+                    Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "DNG: CFA missing CFARepeatPatternDim",
+                    )
+                })?;
+            let pattern = bytes_value(ifd.get(tags::CFA_PATTERN)).ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: CFA missing CFAPattern")
+            })?;
             let repeat = (dim[0] as u16, dim[1] as u16);
             let mut raw = RawImage::new_cfa(dims, bits, repeat, pattern, samples)?;
             if let Some(colors) = bytes_value(ifd.get(tags::CFA_PLANE_COLOR)) {
@@ -546,7 +558,12 @@ fn decode_raw_image(ifd: &TrackedIfd, data: &[u8], order: ByteOrder) -> Result<R
         PhotometricInterpretation::LinearRaw => {
             RawImage::new_linear_raw(dims, bits, spp as u16, samples)?
         }
-        _ => return Err(Error::Unsupported("DNG: photometry is not a raw image")),
+        _ => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "DNG: photometry is not a raw image",
+            ));
+        }
     };
 
     let active_area = ifd
@@ -591,9 +608,12 @@ fn decode_gain_map(
     let Some(value) = ifd.get(tag) else {
         return Ok(None);
     };
-    let bytes = value.as_bytes().ok_or(Error::InvalidInput(
-        "DNG: gain-table maps must be UNDEFINED byte data",
-    ))?;
+    let bytes = value.as_bytes().ok_or_else(|| {
+        Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: gain-table maps must be UNDEFINED byte data",
+        )
+    })?;
     let map = if tag == tags::PROFILE_GAIN_TABLE_MAP {
         ProfileGainTableMap::parse_v1(bytes, order)?
     } else {
@@ -609,9 +629,12 @@ fn decode_opcode_list(ifd: &TrackedIfd, tag: u16) -> Result<Option<OpcodeList>> 
     let Some(value) = ifd.get(tag) else {
         return Ok(None);
     };
-    let bytes = value.as_bytes().ok_or(Error::InvalidInput(
-        "DNG: opcode lists must be UNDEFINED byte data",
-    ))?;
+    let bytes = value.as_bytes().ok_or_else(|| {
+        Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: opcode lists must be UNDEFINED byte data",
+        )
+    })?;
     Ok(Some(OpcodeList::parse(bytes)?))
 }
 
@@ -635,14 +658,16 @@ fn decode_levels(
             match (rows, cols) {
                 (Some(rows), Some(cols)) => (rows, cols),
                 _ => {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "DNG: BlackLevelRepeatDim dimensions must be non-zero",
                     ));
                 }
             }
         }
         Some(_) => {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: BlackLevelRepeatDim needs two values (rows, cols)",
             ));
         }
@@ -653,15 +678,19 @@ fn decode_levels(
     let black = match ifd.get(tags::BLACK_LEVEL) {
         None => vec![0.0; cells],
         Some(value) => {
-            let v = unsigned_f64s(value).ok_or(Error::InvalidInput(
-                "DNG: BlackLevel must be SHORT, LONG, or RATIONAL",
-            ))?;
+            let v = unsigned_f64s(value).ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "DNG: BlackLevel must be SHORT, LONG, or RATIONAL",
+                )
+            })?;
             if v.len() == cells {
                 v
             } else if v.len() == 1 {
                 vec![v[0]; cells]
             } else {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "DNG: BlackLevel count must be repeat rows * cols * samples per pixel",
                 ));
             }
@@ -673,7 +702,8 @@ fn decode_levels(
         Some(v) if v.len() == usize::from(spp) => v.into_iter().map(f64::from).collect(),
         Some(v) if v.len() == 1 => vec![f64::from(v[0]); usize::from(spp)],
         Some(_) => {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: WhiteLevel needs one value per sample plane",
             ));
         }
@@ -683,10 +713,14 @@ fn decode_levels(
 
     if let Some(value) = ifd.get(tags::LINEARIZATION_TABLE) {
         let Value::Short(table) = value else {
-            return Err(Error::InvalidInput("DNG: LinearizationTable must be SHORT"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: LinearizationTable must be SHORT",
+            ));
         };
         if table.is_empty() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: LinearizationTable must not be empty",
             ));
         }
@@ -716,17 +750,23 @@ fn decode_deltas(
     };
     let deltas: Vec<f64> = value
         .as_srationals()
-        .ok_or(Error::InvalidInput(
-            "DNG: black-level deltas must be SRATIONAL",
-        ))?
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: black-level deltas must be SRATIONAL",
+            )
+        })?
         .iter()
         .map(|&(n, d)| ratio(f64::from(n), f64::from(d)))
         .collect();
     if deltas.len() != expected {
-        return Err(Error::InvalidInput(match axis {
-            "column" => "DNG: BlackLevelDeltaH needs one value per active-area column",
-            _ => "DNG: BlackLevelDeltaV needs one value per active-area row",
-        }));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            match axis {
+                "column" => "DNG: BlackLevelDeltaH needs one value per active-area column",
+                _ => "DNG: BlackLevelDeltaV needs one value per active-area row",
+            },
+        ));
     }
     Ok(Some(deltas))
 }
@@ -749,7 +789,8 @@ fn decode_masked_areas(ifd: &TrackedIfd) -> Result<Option<Vec<[u32; 4]>>> {
         return Ok(None);
     };
     if flat.is_empty() || flat.len() % 4 != 0 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: MaskedAreas count must be a positive multiple of four",
         ));
     }
@@ -778,16 +819,17 @@ enum ChunkGrid {
 /// Classifies the IFD's chunk layout: tiled when the tile tags are present, else strips.
 fn chunk_grid(ifd: &TrackedIfd, width: usize, height: usize) -> Result<ChunkGrid> {
     if ifd.get(tags::TILE_OFFSETS).is_some() || ifd.get(tags::TILE_WIDTH).is_some() {
-        let tile_width = ifd
-            .get_u32(tags::TILE_WIDTH)
-            .ok_or(Error::InvalidInput("DNG: tiled IFD missing TileWidth"))?
-            as usize;
-        let tile_height = ifd
-            .get_u32(tags::TILE_LENGTH)
-            .ok_or(Error::InvalidInput("DNG: tiled IFD missing TileLength"))?
-            as usize;
+        let tile_width = ifd.get_u32(tags::TILE_WIDTH).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: tiled IFD missing TileWidth")
+        })? as usize;
+        let tile_height = ifd.get_u32(tags::TILE_LENGTH).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: tiled IFD missing TileLength")
+        })? as usize;
         if tile_width == 0 || tile_height == 0 {
-            return Err(Error::InvalidInput("DNG: tile dimensions must be non-zero"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: tile dimensions must be non-zero",
+            ));
         }
         Ok(ChunkGrid::Tiles {
             tile_width,
@@ -798,7 +840,10 @@ fn chunk_grid(ifd: &TrackedIfd, width: usize, height: usize) -> Result<ChunkGrid
     } else {
         let rows_per_strip = match ifd.get_u32(tags::ROWS_PER_STRIP) {
             Some(0) => {
-                return Err(Error::InvalidInput("DNG: RowsPerStrip must be non-zero"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "DNG: RowsPerStrip must be non-zero",
+                ));
             }
             Some(r) => r as usize,
             None => height,
@@ -819,7 +864,7 @@ fn decode_image_data(
     bits: u16,
 ) -> Result<Vec<u16>> {
     let compression = Compression::from_code(ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
-        .ok_or(Error::Unsupported("DNG: unknown compression"))?;
+        .ok_or_else(|| Error::unsupported(env!("CARGO_PKG_NAME"), "DNG: unknown compression"))?;
     // Reject an undecodable scheme up front, so an empty chunk list cannot mask it.
     if !matches!(
         compression,
@@ -828,7 +873,8 @@ fn decode_image_data(
             | Compression::LosslessJpeg
             | Compression::JpegXl
     ) {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "DNG: this compression is not yet decodable",
         ));
     }
@@ -840,12 +886,14 @@ fn decode_image_data(
             match u16::try_from(format).ok().and_then(SampleFormat::from_code) {
                 Some(SampleFormat::UnsignedInteger) => {}
                 Some(SampleFormat::FloatingPoint) => {
-                    return Err(Error::Unsupported(
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
                         "DNG: floating-point sample data is not supported",
                     ));
                 }
                 _ => {
-                    return Err(Error::Unsupported(
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
                         "DNG: only unsigned-integer samples are supported",
                     ));
                 }
@@ -856,10 +904,10 @@ fn decode_image_data(
     let (width, height) = (width as usize, height as usize);
     let samples_per_row = width
         .checked_mul(spp)
-        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow"))?;
     let expected = samples_per_row
         .checked_mul(height)
-        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow"))?;
 
     let row_factor = interleave_factor(ifd, tags::ROW_INTERLEAVE_FACTOR, height)?;
     let col_factor = interleave_factor(ifd, tags::COLUMN_INTERLEAVE_FACTOR, width)?;
@@ -877,7 +925,10 @@ fn decode_image_data(
             for chunk in &chunks {
                 let rows = rows_per_strip.min(remaining_rows);
                 if rows == 0 {
-                    return Err(Error::InvalidInput("DNG: more strips than image rows"));
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "DNG: more strips than image rows",
+                    ));
                 }
                 samples.extend(decode_chunk_samples(
                     compression,
@@ -891,7 +942,10 @@ fn decode_image_data(
                 remaining_rows -= rows;
             }
             if samples.len() != expected {
-                return Err(Error::InvalidInput("DNG: raw image data is truncated"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "DNG: raw image data is truncated",
+                ));
             }
             samples
         }
@@ -902,11 +956,12 @@ fn decode_image_data(
             across,
             down,
         } => {
-            let tile_count = across
-                .checked_mul(down)
-                .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+            let tile_count = across.checked_mul(down).ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow")
+            })?;
             if chunks.len() != tile_count {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "DNG: tile count must cover the image grid",
                 ));
             }
@@ -960,7 +1015,8 @@ fn interleave_factor(ifd: &TrackedIfd, tag: u16, limit: usize) -> Result<usize> 
         Some(f) => {
             let f = f as usize;
             if f == 0 || f > limit {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "DNG: interleave factor out of valid range",
                 ));
             }
@@ -1015,13 +1071,16 @@ fn decode_chunk_samples(
     let want = cols
         .checked_mul(rows)
         .and_then(|n| n.checked_mul(spp))
-        .ok_or(Error::InvalidInput("DNG: dimensions overflow"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow"))?;
     match compression {
         Compression::Uncompressed | Compression::Deflate => {
             let bytes = compression::decompress(compression, chunk)?;
             let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
             if got.len() < want {
-                return Err(Error::InvalidInput("DNG: raw image data is truncated"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "DNG: raw image data is truncated",
+                ));
             }
             got.truncate(want); // tolerate chunk padding, per TIFF practice
             Ok(got)
@@ -1033,7 +1092,8 @@ fn decode_chunk_samples(
         Compression::LosslessJpeg => {
             let jpeg = lossless_jpeg::decode(chunk)?;
             if jpeg.samples.len() != want {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "DNG: lossless-JPEG sample count mismatch",
                 ));
             }
@@ -1043,7 +1103,8 @@ fn decode_chunk_samples(
         // agree with the layout (validated inside the bridge); output is full-range 16-bit,
         // matching the reference SDK — `bits` describes only the codestream's stored precision.
         Compression::JpegXl => crate::jxl::decode_chunk(chunk, cols, rows, spp),
-        _ => Err(Error::Unsupported(
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "DNG: this compression is not yet decodable",
         )),
     }
@@ -1066,47 +1127,57 @@ fn grid_chunks<'a>(ifd: &TrackedIfd, data: &'a [u8], grid: &ChunkGrid) -> Result
     };
     let offsets = ifd
         .get_u64_vec(offset_tag)
-        .ok_or(Error::InvalidInput(missing))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), missing))?;
     let counts = ifd
         .get_u64_vec(count_tag)
-        .ok_or(Error::InvalidInput(missing))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), missing))?;
     byte_chunks(&offsets, &counts, data)
 }
 
 /// Resolves parallel offset/byte-count arrays into in-bounds byte slices.
 fn byte_chunks<'a>(offsets: &[u64], counts: &[u64], data: &'a [u8]) -> Result<Vec<&'a [u8]>> {
     if offsets.len() != counts.len() {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: image-data offset/count length mismatch",
         ));
     }
     let mut chunks = Vec::with_capacity(offsets.len());
     for (&offset, &count) in offsets.iter().zip(counts) {
-        let start = usize::try_from(offset)
-            .map_err(|_| Error::InvalidInput("DNG: image data out of bounds"))?;
+        let start = usize::try_from(offset).map_err(|_| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: image data out of bounds")
+        })?;
         let end = count
             .try_into()
             .ok()
             .and_then(|count: usize| start.checked_add(count))
-            .ok_or(Error::InvalidInput("DNG: image-data extent overflow"))?;
-        chunks.push(
-            data.get(start..end)
-                .ok_or(Error::InvalidInput("DNG: image data out of bounds"))?,
-        );
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: image-data extent overflow")
+            })?;
+        chunks.push(data.get(start..end).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: image data out of bounds")
+        })?);
     }
     Ok(chunks)
 }
 
 /// Reconstructs the [`CameraProfile`] from IFD 0's identity and calibration tags.
 fn decode_profile(ifd0: &TrackedIfd) -> Result<CameraProfile> {
-    let model = ascii_value(ifd0.get(tags::UNIQUE_CAMERA_MODEL))
-        .ok_or(Error::InvalidInput("DNG: missing UniqueCameraModel"))?;
+    let model = ascii_value(ifd0.get(tags::UNIQUE_CAMERA_MODEL)).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: missing UniqueCameraModel")
+    })?;
     let color_matrix1 = matrix9(ifd0, tags::COLOR_MATRIX1)?;
-    let illuminant1 = illuminant(ifd0, tags::CALIBRATION_ILLUMINANT1)
-        .ok_or(Error::InvalidInput("DNG: missing CalibrationIlluminant1"))?;
+    let illuminant1 = illuminant(ifd0, tags::CALIBRATION_ILLUMINANT1).ok_or_else(|| {
+        Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: missing CalibrationIlluminant1",
+        )
+    })?;
     let neutral = f64_vec(ifd0.get(tags::AS_SHOT_NEUTRAL))
         .filter(|v| v.len() == 3)
-        .ok_or(Error::InvalidInput("DNG: missing AsShotNeutral"))?;
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: missing AsShotNeutral")
+        })?;
 
     let mut profile = CameraProfile::new(
         model,
@@ -1149,7 +1220,7 @@ fn decode_profile(ifd0: &TrackedIfd) -> Result<CameraProfile> {
 /// Reads `DNGVersion` as a 4-byte array (defaulting trailing bytes to zero).
 fn read_version(ifd0: &TrackedIfd) -> Result<[u8; 4]> {
     let bytes = bytes_value(ifd0.get(tags::DNG_VERSION))
-        .ok_or(Error::InvalidInput("DNG: missing DNGVersion"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: missing DNGVersion"))?;
     let mut version = [0u8; 4];
     for (slot, b) in version.iter_mut().zip(bytes) {
         *slot = b;
@@ -1207,7 +1278,9 @@ fn unsigned_f64s(value: &Value) -> Option<Vec<f64>> {
 fn matrix9(ifd: &TrackedIfd, tag: u16) -> Result<[f64; 9]> {
     let v = f64_vec(ifd.get(tag))
         .filter(|v| v.len() == 9)
-        .ok_or(Error::InvalidInput("DNG: expected a 3x3 matrix tag"))?;
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: expected a 3x3 matrix tag")
+        })?;
     let mut m = [0.0; 9];
     m.copy_from_slice(&v);
     Ok(m)
@@ -1253,6 +1326,48 @@ mod tests {
     }
 
     #[test]
+    fn decode_deltas_distinguishes_axes_and_requires_the_active_area_length() {
+        for (tag, axis, message) in [
+            (
+                tags::BLACK_LEVEL_DELTA_H,
+                "column",
+                "DNG: BlackLevelDeltaH needs one value per active-area column",
+            ),
+            (
+                tags::BLACK_LEVEL_DELTA_V,
+                "row",
+                "DNG: BlackLevelDeltaV needs one value per active-area row",
+            ),
+        ] {
+            let mut ifd = Ifd::new();
+            ifd.set(tag, Value::SRational(vec![(1, 2)]));
+            let error = decode_deltas(&TrackedIfd::new(&ifd), tag, 2, axis).unwrap_err();
+            assert_eq!(error.static_message(), Some(message));
+        }
+    }
+
+    #[test]
+    fn decode_masked_areas_requires_complete_nonempty_rectangles() {
+        for values in [vec![], vec![0, 0, 1]] {
+            let mut ifd = Ifd::new();
+            ifd.set(tags::MASKED_AREAS, Value::Long(values));
+            assert_eq!(
+                decode_masked_areas(&TrackedIfd::new(&ifd))
+                    .unwrap_err()
+                    .static_message(),
+                Some("DNG: MaskedAreas count must be a positive multiple of four")
+            );
+        }
+
+        let mut ifd = Ifd::new();
+        ifd.set(tags::MASKED_AREAS, Value::Long(vec![0, 1, 2, 3]));
+        assert_eq!(
+            decode_masked_areas(&TrackedIfd::new(&ifd)).unwrap(),
+            Some(vec![[0, 1, 2, 3]])
+        );
+    }
+
+    #[test]
     fn decode_raw_image_rejects_lossless_jpeg_sample_count_mismatch() {
         // A 4x2, single-component lossless-JPEG strip (8 samples)...
         let samples: Vec<u16> = (0..8).map(|i| i as u16).collect();
@@ -1277,7 +1392,7 @@ mod tests {
         let err =
             decode_raw_image(&TrackedIfd::new(&ifd), &jpeg, ByteOrder::LittleEndian).unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("sample count")),
+            matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("sample count"))),
             "expected a sample-count mismatch error, got {err:?}"
         );
     }
@@ -1388,7 +1503,7 @@ mod tests {
             ifd.set(tags::TILE_BYTE_COUNTS, Value::Long(vec![4]));
             let err = chunk_grid(&TrackedIfd::new(&ifd), 4, 4).unwrap_err();
             assert!(
-                matches!(err, Error::InvalidInput(m) if m.contains("non-zero")),
+                matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("non-zero"))),
                 "({tw}, {th}): {err:?}"
             );
         }
@@ -1414,7 +1529,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("Tile")),
+            matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("Tile"))),
             "{err:?}"
         );
         // Offsets present, geometry missing.
@@ -1433,7 +1548,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("TileWidth")),
+            matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("TileWidth"))),
             "{err:?}"
         );
     }
@@ -1458,7 +1573,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("more strips")),
+            matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("more strips"))),
             "{err:?}"
         );
     }
@@ -1574,7 +1689,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("truncated")),
+            matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("truncated"))),
             "{err:?}"
         );
     }
@@ -1673,7 +1788,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("tile count")),
+            matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("tile count"))),
             "expected a tile-count error, got {err:?}"
         );
 
@@ -1710,7 +1825,7 @@ mod tests {
         let err =
             decode_raw_image(&TrackedIfd::new(&ifd), &[0; 8], ByteOrder::LittleEndian).unwrap_err();
         assert!(
-            matches!(err, Error::Unsupported(m) if m.contains("floating-point")),
+            matches!(err, ref error if error.kind() == gamut_core::ErrorKind::Unsupported && error.static_message().is_some_and(|message| message.contains("floating-point"))),
             "expected a floating-point rejection, got {err:?}"
         );
         // ...signed and unrecognised formats fail generically...

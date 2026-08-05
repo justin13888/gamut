@@ -79,7 +79,10 @@ fn encode_with(
     let width = planes.width();
     let height = planes.height();
     if width == 0 || height == 0 {
-        return Err(Error::InvalidInput("image has a zero dimension"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "image has a zero dimension",
+        ));
     }
 
     // Superres downscales the source horizontally to the coded (Frame) width; the reconstruction is
@@ -200,9 +203,12 @@ fn encode_with(
     let recon = ReconImage {
         width,
         height,
-        bit_depth: BitDepth::from_bits(recon.bit_depth).ok_or(Error::Unsupported(
-            "AV1: unsupported reconstruction bit depth",
-        ))?,
+        bit_depth: BitDepth::from_bits(recon.bit_depth).ok_or_else(|| {
+            Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AV1: unsupported reconstruction bit depth",
+            )
+        })?,
         planes: recon_planes,
     };
     Ok((still, recon))
@@ -404,8 +410,12 @@ mod tests {
         for (w, h) in [(0, 0), (0, 4), (4, 0)] {
             let p = Planar8::from_rgb8_identity(&[], w, h).unwrap();
             match encode_still_intra(&p, 0) {
-                Err(Error::InvalidInput(msg)) => {
-                    assert_eq!(msg, "image has a zero dimension", "{w}x{h}");
+                Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                    assert_eq!(
+                        error.static_message(),
+                        Some("image has a zero dimension"),
+                        "{w}x{h}"
+                    );
                 }
                 other => panic!("{w}x{h}: expected zero-dimension InvalidInput, got {other:?}"),
             }

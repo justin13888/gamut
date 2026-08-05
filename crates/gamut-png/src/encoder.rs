@@ -272,7 +272,10 @@ impl PngEncoder {
         let indices = image.as_samples();
         let max_index = indices.iter().copied().max().unwrap_or(0);
         if usize::from(max_index) >= palette.len() {
-            return Err(Error::InvalidInput("PNG: palette index out of range"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: palette index out of range",
+            ));
         }
         let dims = image.dimensions();
         // Use the smallest bit depth that holds every index — a free, lossless space win.

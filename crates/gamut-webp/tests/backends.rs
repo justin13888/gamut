@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use gamut_codec_abi as abi;
 use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{
-    DecodeImage, Dimensions, EncodeImage, Error, ImageBuf, ImageRef, Result, Rgb8, Rgba8,
+    DecodeImage, Dimensions, EncodeImage, Error, ErrorKind, ImageBuf, ImageRef, Result, Rgb8, Rgba8,
 };
 use gamut_riff::{RiffReader, WebpChunkId};
 use gamut_webp::{
@@ -16,6 +16,17 @@ use gamut_webp::{
     PIXEL_FORMAT_YUV420, RasterRef, WebpCodestream, WebpCodestreamDecoder, WebpCodestreamEncoder,
     WebpDecoder, WebpEncodeRequest, WebpEncoder,
 };
+
+#[track_caller]
+fn assert_error<T>(result: Result<T>, kind: ErrorKind, message: &'static str) {
+    match result {
+        Err(error) => {
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.static_message(), Some(message));
+        }
+        Ok(_) => panic!("expected {kind:?}: {message}"),
+    }
+}
 
 // ================================================================================================
 // Fixtures
@@ -355,12 +366,11 @@ fn decode_rejects_a_raster_that_does_not_match_the_codestream() {
         &log,
     ));
     let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
-    assert!(matches!(
+    assert_error(
         err,
-        Err(Error::InvalidInput(
-            "WebP: VP8L decode produced a YUV raster"
-        ))
-    ));
+        ErrorKind::InvalidInput,
+        "WebP: VP8L decode produced a YUV raster",
+    );
 }
 
 #[test]
@@ -375,20 +385,18 @@ fn decode_rejects_an_argb_raster_from_a_vp8_backend() {
         &log,
     ));
     let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
-    assert!(matches!(
+    assert_error(
         err,
-        Err(Error::InvalidInput(
-            "WebP: VP8 decode produced an ARGB raster"
-        ))
-    ));
+        ErrorKind::InvalidInput,
+        "WebP: VP8 decode produced an ARGB raster",
+    );
     // Same rejection on the RGBA path.
     let err: Result<ImageBuf<Rgba8>> = dec.decode_image(&file);
-    assert!(matches!(
+    assert_error(
         err,
-        Err(Error::InvalidInput(
-            "WebP: VP8 decode produced an ARGB raster"
-        ))
-    ));
+        ErrorKind::InvalidInput,
+        "WebP: VP8 decode produced an ARGB raster",
+    );
 }
 
 /// A backend that always panics, used to poison the registry lock.
@@ -431,12 +439,11 @@ fn a_panicking_backend_poisons_the_registry_and_is_reported() {
     assert!(first.is_err(), "the backend panic must surface");
     // The lock is now poisoned: the next decode reports it instead of using stale backend state.
     let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
-    assert!(matches!(
+    assert_error(
         err,
-        Err(Error::InvalidInput(
-            "WebP: a codestream backend panicked (registry lock poisoned)"
-        ))
-    ));
+        ErrorKind::InvalidInput,
+        "WebP: a codestream backend panicked (registry lock poisoned)",
+    );
 
     let mut enc = WebpEncoder::lossless();
     enc.push_backend(PanickingEncoder);
@@ -447,12 +454,11 @@ fn a_panicking_backend_poisons_the_registry_and_is_reported() {
     }));
     std::panic::set_hook(hook);
     assert!(first.is_err());
-    assert!(matches!(
+    assert_error(
         encode_rgb(&enc, &rgb(8, 8), dims(8, 8)),
-        Err(Error::InvalidInput(
-            "WebP: a codestream backend panicked (registry lock poisoned)"
-        ))
-    ));
+        ErrorKind::InvalidInput,
+        "WebP: a codestream backend panicked (registry lock poisoned)",
+    );
 }
 
 #[test]
@@ -864,12 +870,11 @@ fn abi_decode_adapter_maps_statuses_to_typed_errors() {
             fill: 0,
             seen_strides: [0; abi::MAX_PLANES],
         });
-        assert!(matches!(
+        assert_error(
             late.decode(&info, &[]),
-            Err(Error::Unsupported(
-                "WebP: codec-abi decode backend declined after accepting the job"
-            ))
-        ));
+            ErrorKind::Unsupported,
+            "WebP: codec-abi decode backend declined after accepting the job",
+        );
         // Any other non-OK status is a backend failure.
         let mut failed = AbiDecoderBackend::new(AbiFakeDecoder {
             accepts: codestream.codec_id(),
@@ -877,10 +882,11 @@ fn abi_decode_adapter_maps_statuses_to_typed_errors() {
             fill: 0,
             seen_strides: [0; abi::MAX_PLANES],
         });
-        assert!(matches!(
+        assert_error(
             failed.decode(&info, &[]),
-            Err(Error::InvalidInput("WebP: codec-abi decode backend failed"))
-        ));
+            ErrorKind::InvalidInput,
+            "WebP: codec-abi decode backend failed",
+        );
     }
 }
 
@@ -961,12 +967,11 @@ fn abi_encode_adapter_declines_and_maps_statuses() {
         seen: None,
         seen_strides: [0; abi::MAX_PLANES],
     });
-    assert!(matches!(
+    assert_error(
         late.encode(&req, &RasterRef::Yuv420(&yuv)),
-        Err(Error::Unsupported(
-            "WebP: codec-abi encode backend declined after accepting the job"
-        ))
-    ));
+        ErrorKind::Unsupported,
+        "WebP: codec-abi encode backend declined after accepting the job",
+    );
     let mut failed = AbiEncoderBackend::new(AbiFakeEncoder {
         accepts: WebpCodestream::Vp8.codec_id(),
         status: abi::Status(9),
@@ -974,10 +979,11 @@ fn abi_encode_adapter_declines_and_maps_statuses() {
         seen: None,
         seen_strides: [0; abi::MAX_PLANES],
     });
-    assert!(matches!(
+    assert_error(
         failed.encode(&req, &RasterRef::Yuv420(&yuv)),
-        Err(Error::InvalidInput("WebP: codec-abi encode backend failed"))
-    ));
+        ErrorKind::InvalidInput,
+        "WebP: codec-abi encode backend failed",
+    );
 }
 
 #[test]

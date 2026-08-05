@@ -20,7 +20,7 @@
 mod common;
 
 use common::{DecodedSamples, decode, reconstruct_jpeg};
-use gamut_core::{DecodeImage, Error, Rgb8};
+use gamut_core::{DecodeImage, ErrorKind, Rgb8};
 use gamut_jxl::{Container, JxlDecoder, JxlEncoder};
 
 /// A tiny deterministic 16x16 baseline JPEG (see `fixtures/README.md` for provenance).
@@ -128,7 +128,7 @@ fn malformed_jpeg_is_a_typed_error_and_restores_the_buffer() {
         .recompress_jpeg(&junk, &mut out)
         .expect_err("malformed JPEG must be rejected");
     assert!(
-        matches!(err, Error::InvalidInput(_) | Error::Unsupported(_)),
+        matches!(err.kind(), ErrorKind::InvalidInput | ErrorKind::Unsupported),
         "unexpected error class: {err:?}"
     );
     assert_eq!(out, vec![0x5A; 4], "output buffer not restored on error");
@@ -142,7 +142,7 @@ fn truncated_jpeg_is_rejected() {
         .recompress_jpeg(truncated, &mut out)
         .expect_err("truncated JPEG must be rejected");
     assert!(
-        matches!(err, Error::InvalidInput(_) | Error::Unsupported(_)),
+        matches!(err.kind(), ErrorKind::InvalidInput | ErrorKind::Unsupported),
         "unexpected error class: {err:?}"
     );
     assert!(out.is_empty(), "output buffer not restored on error");

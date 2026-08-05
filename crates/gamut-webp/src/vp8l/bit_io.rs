@@ -58,11 +58,19 @@ impl<'a> BitReader<'a> {
             return Ok(0);
         }
         if n > MAX_BITS_PER_OP {
-            return Err(Error::InvalidInput("VP8L: bit read width out of range"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8L: bit read width out of range",
+            )
+            .with_byte_offset((self.bits_consumed_inner() / 8) as u64));
         }
         while self.bits_in_acc < n {
             let Some(&byte) = self.data.get(self.byte_pos) else {
-                return Err(Error::InvalidInput("VP8L: unexpected end of bitstream"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "VP8L: unexpected end of bitstream",
+                )
+                .with_byte_offset(self.byte_pos as u64));
             };
             self.acc |= u64::from(byte) << self.bits_in_acc;
             self.bits_in_acc += 8;
@@ -88,6 +96,10 @@ impl<'a> BitReader<'a> {
     #[must_use]
     #[cfg(test)]
     pub fn bits_consumed(&self) -> usize {
+        self.bits_consumed_inner()
+    }
+
+    fn bits_consumed_inner(&self) -> usize {
         self.byte_pos * 8 - self.bits_in_acc as usize
     }
 
@@ -217,16 +229,25 @@ mod tests {
     fn out_of_data_is_invalid_input_not_panic() {
         let mut r = BitReader::new(&[0xAB]);
         assert_eq!(r.read_bits(8).unwrap(), 0xAB);
-        assert!(matches!(r.read_bits(1), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            r.read_bits(1),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
         // Reading from empty input also fails cleanly.
         let mut empty = BitReader::new(&[]);
-        assert!(matches!(empty.read_bits(1), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            empty.read_bits(1),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]
     fn oversized_read_is_rejected() {
         let mut r = BitReader::new(&[0; 8]);
-        assert!(matches!(r.read_bits(33), Err(Error::InvalidInput(_))));
+        r.read_bits(12).unwrap();
+        let error = r.read_bits(33).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(error.byte_offset(), Some(1));
     }
 
     #[test]

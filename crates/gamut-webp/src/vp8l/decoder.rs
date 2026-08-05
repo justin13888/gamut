@@ -57,7 +57,10 @@ pub(crate) fn decode_image(r: &mut BitReader<'_>, width: u32, height: u32) -> Re
     while r.read_bit()? == 1 {
         let transform_type = r.read_bits(2)? as usize;
         if seen[transform_type] {
-            return Err(Error::InvalidInput("VP8L: transform type repeated"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8L: transform type repeated",
+            ));
         }
         seen[transform_type] = true;
         let transform = read_transform(r, transform_type as u8, work_width, height)?;
@@ -110,7 +113,10 @@ fn read_transform(
                 expanded_width: width,
             })
         }
-        _ => Err(Error::InvalidInput("VP8L: unknown transform type")),
+        _ => Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8L: unknown transform type",
+        )),
     }
 }
 
@@ -137,7 +143,7 @@ fn read_image(
     let num_pixels = (width as usize)
         .checked_mul(height as usize)
         .filter(|&n| n <= MAX_PIXELS)
-        .ok_or(Error::InvalidInput("VP8L: image too large"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "VP8L: image too large"))?;
 
     let mut color_cache = read_color_cache_info(r)?;
     let cache_size = color_cache.as_ref().map_or(0, ColorCache::size);
@@ -227,7 +233,9 @@ fn decode_image_data(
         } else {
             huffman.groups.first()
         }
-        .ok_or(Error::InvalidInput("VP8L: missing prefix code group"))?;
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "VP8L: missing prefix code group")
+        })?;
 
         let symbol = group.green.read_symbol(r)?;
         if symbol < LENGTH_CODE_BASE {
@@ -247,16 +255,20 @@ fn decode_image_data(
             let dist_code = read_lz77_value(r, u32::from(dist_symbol))?;
             let dist = distance_code_to_pixel_distance(dist_code, width) as usize;
             if dist == 0 || dist > i {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "VP8L: backward reference before image start",
                 ));
             }
             let end = i
                 .checked_add(length as usize)
                 .filter(|&e| e <= num_pixels)
-                .ok_or(Error::InvalidInput(
-                    "VP8L: backward reference past image end",
-                ))?;
+                .ok_or_else(|| {
+                    Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "VP8L: backward reference past image end",
+                    )
+                })?;
             while i < end {
                 let argb = pixels[i - dist];
                 pixels[i] = argb;
@@ -267,7 +279,10 @@ fn decode_image_data(
             }
         } else {
             let Some(cache) = color_cache.as_mut() else {
-                return Err(Error::InvalidInput("VP8L: cache code without color cache"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "VP8L: cache code without color cache",
+                ));
             };
             let index = u32::from(symbol - CACHE_CODE_BASE);
             let argb = cache.lookup(index);
@@ -422,14 +437,17 @@ mod tests {
     fn rejects_bad_signature() {
         assert!(matches!(
             decode(&[0x00, 0, 0, 0, 0]),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 
     #[test]
     fn rejects_truncated_stream() {
         // Valid signature, but the stream ends mid-header.
-        assert!(matches!(decode(&[0x2f, 0x00]), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            decode(&[0x2f, 0x00]),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]
@@ -450,7 +468,10 @@ mod tests {
         w.write_bits(1, 1);
         w.write_bits(u32::from(SUBTRACT_GREEN_TRANSFORM), 2);
         let bytes = w.finish();
-        assert!(matches!(decode(&bytes), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            decode(&bytes),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]
@@ -478,7 +499,10 @@ mod tests {
         w.write_bits(1, 1); // use color cache
         w.write_bits(0, 4); // cache_code_bits = 0 → invalid
         let bytes = w.finish();
-        assert!(matches!(decode(&bytes), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            decode(&bytes),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]

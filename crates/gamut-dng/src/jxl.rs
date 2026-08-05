@@ -27,7 +27,8 @@ pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -
     let decoder = JxlDecoder::new();
     let info = decoder.info(bytes)?;
     if info.is_float {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "DNG: floating-point JPEG XL raw data is not supported",
         ));
     }
@@ -36,12 +37,14 @@ pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -
         info.dimensions.height as usize,
     ) != (cols, rows)
     {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: JPEG XL chunk geometry disagrees with the tile/strip layout",
         ));
     }
     if usize::from(info.color_channels) != spp || info.has_alpha {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: JPEG XL channel count disagrees with SamplesPerPixel",
         ));
     }
@@ -49,7 +52,8 @@ pub(crate) fn decode_chunk(bytes: &[u8], cols: usize, rows: usize, spp: usize) -
         1 => Ok(<JxlDecoder as DecodeImage<Gray16>>::decode_image(&decoder, bytes)?.into_samples()),
         3 => Ok(<JxlDecoder as DecodeImage<Rgb16>>::decode_image(&decoder, bytes)?.into_samples()),
         // The spec allows exactly 1 or 3 planes for JPEG XL image data.
-        _ => Err(Error::Unsupported(
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "DNG: JPEG XL image data must have 1 or 3 sample planes",
         )),
     }
@@ -73,8 +77,12 @@ pub(crate) fn encode_chunk(
     use gamut_core::{Dimensions, EncodeImage, ImageRef};
     use gamut_jxl::{Distance, Effort, JxlEncoder};
 
-    let effort = Effort::from_level(effort)
-        .ok_or(Error::InvalidInput("DNG: JPEG XL effort must be in 1..=10"))?;
+    let effort = Effort::from_level(effort).ok_or_else(|| {
+        Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: JPEG XL effort must be in 1..=10",
+        )
+    })?;
     let encoder = if distance == 0.0 {
         JxlEncoder::lossless()
     } else {
@@ -91,7 +99,8 @@ pub(crate) fn encode_chunk(
             encoder.encode_image(ImageRef::<Rgb16>::new(samples, dims)?, &mut out)?;
         }
         _ => {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "DNG: JPEG XL image data must have 1 or 3 sample planes",
             ));
         }
@@ -121,7 +130,7 @@ mod tests {
             .unwrap();
         let err = decode_chunk(&bytes, 2, 2, 3).unwrap_err();
         assert!(
-            matches!(err, Error::InvalidInput(m) if m.contains("channel")),
+            matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("channel"))),
             "{err:?}"
         );
     }

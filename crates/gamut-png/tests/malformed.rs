@@ -6,7 +6,7 @@
 mod common;
 
 use common::{SIGNATURE, chunk, ihdr_payload, minimal_png, png_from_chunks, zlib};
-use gamut_core::{DecodeImage, Error, Gray8, ImageBuf, Rgb8};
+use gamut_core::{DecodeImage, Error, ErrorKind, Gray8, ImageBuf, Rgb8};
 use gamut_png::PngDecoder;
 
 fn decode(png: &[u8]) -> Result<gamut_png::DecodedPng, Error> {
@@ -15,14 +15,14 @@ fn decode(png: &[u8]) -> Result<gamut_png::DecodedPng, Error> {
 
 fn assert_invalid(png: &[u8], context: &str) {
     match decode(png) {
-        Err(Error::InvalidInput(_)) => {}
+        Err(error) if error.kind() == ErrorKind::InvalidInput => {}
         other => panic!("{context}: expected InvalidInput, got {other:?}"),
     }
 }
 
 fn assert_unsupported(png: &[u8], context: &str) {
     match decode(png) {
-        Err(Error::Unsupported(_)) => {}
+        Err(error) if error.kind() == ErrorKind::Unsupported => {}
         other => panic!("{context}: expected Unsupported, got {other:?}"),
     }
 }
@@ -440,10 +440,10 @@ fn typed_decodes_reject_malformed_input_too() {
     // The typed path shares the pipeline: spot-check that it errors identically.
     let png = corrupt_crc_of(&minimal_png(), b"IDAT");
     let result: Result<ImageBuf<Rgb8>, Error> = PngDecoder::new().decode_image(&png);
-    assert!(matches!(result, Err(Error::InvalidInput(_))));
+    assert!(matches!(result, Err(error) if error.kind() == ErrorKind::InvalidInput));
     let result: Result<ImageBuf<Gray8>, Error> = PngDecoder::new().decode_image(&minimal_png());
     assert!(
-        matches!(result, Err(Error::Unsupported(_))),
+        matches!(result, Err(error) if error.kind() == ErrorKind::Unsupported),
         "RGB as Gray8 is a lossy request, refused as Unsupported"
     );
 }

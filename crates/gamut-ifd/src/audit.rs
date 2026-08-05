@@ -14,7 +14,7 @@
 //! Codecs supply tag knowledge through [`AuditSpec`]; the [`StandardAuditSpec`] covers the
 //! structural tags every TIFF-family file shares (strips, tiles, free ranges, embedded JPEG).
 
-use gamut_core::{Error, Result};
+use gamut_core::{ErrorKind, Result};
 
 use crate::reader::pointer_offsets;
 use crate::segment::{Claim, DataLabel, SegmentMap, SegmentReport, SpanKind};
@@ -345,7 +345,7 @@ fn follow_subifds<S: ReadAt>(
                 let (mut child, next) = match reader.read_ifd_at_audited(offset, map) {
                     Ok(parsed) => parsed,
                     // Transport failures abort the audit; file defects are findings.
-                    Err(e @ Error::Io(_)) => return Err(e),
+                    Err(error) if error.kind() == ErrorKind::Io => return Err(error),
                     Err(_) => {
                         findings.push(AuditFinding::SkippedSubIfd {
                             page,

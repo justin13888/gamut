@@ -214,22 +214,26 @@ pub fn encode(
     precision: u16,
 ) -> Result<Vec<u8>> {
     if !(2..=16).contains(&precision) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless-JPEG precision must be 2..=16",
         ));
     }
     if !(1..=4).contains(&components) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless JPEG carries 1..=4 interleaved components",
         ));
     }
     if width == 0 || height == 0 || width > 65535 || height > 65535 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless-JPEG dimensions must be 1..=65535",
         ));
     }
     if samples.len() != width * height * components {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless-JPEG sample count must be width * height * components",
         ));
     }
@@ -352,9 +356,11 @@ impl<'a> BitReader<'a> {
             self.pos += 2;
             Ok(())
         } else {
-            Err(Error::InvalidInput(
+            Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: lossless JPEG missing or out-of-sequence restart marker",
-            ))
+            )
+            .with_byte_offset(self.pos as u64))
         }
     }
 }
@@ -371,9 +377,11 @@ fn decode_symbol(reader: &mut BitReader, codes: &[(u16, u8)]) -> Result<u8> {
             }
         }
     }
-    Err(Error::InvalidInput(
+    Err(Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
         "DNG: invalid lossless-JPEG Huffman code",
-    ))
+    )
+    .with_byte_offset(reader.pos as u64))
 }
 
 /// Reconstructs a difference from its category `ssss` and the mantissa bits read from `reader`.
@@ -394,9 +402,16 @@ fn extend(reader: &mut BitReader, ssss: u8) -> i32 {
 
 /// Reads a big-endian `u16` at `pos`.
 fn be16(data: &[u8], pos: usize) -> Result<usize> {
-    let b = data
-        .get(pos..pos + 2)
-        .ok_or(Error::InvalidInput("DNG: truncated lossless-JPEG marker"))?;
+    let b = pos
+        .checked_add(2)
+        .and_then(|end| data.get(pos..end))
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: truncated lossless-JPEG marker",
+            )
+            .with_byte_offset(pos as u64)
+        })?;
     Ok(usize::from(u16::from_be_bytes([b[0], b[1]])))
 }
 
@@ -424,10 +439,11 @@ fn parse_sof3(data: &[u8], pos: usize) -> Result<Frame> {
     let precision = u16::from(
         *data
             .get(pos + 2)
-            .ok_or(Error::InvalidInput("DNG: truncated SOF3"))?,
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOF3"))?,
     );
     if !(2..=16).contains(&precision) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless-JPEG precision must be 2..=16",
         ));
     }
@@ -435,27 +451,30 @@ fn parse_sof3(data: &[u8], pos: usize) -> Result<Frame> {
     let width = be16(data, pos + 5)?;
     if height == 0 {
         // A zero height defers the line count to a DNL marker after the scan (§B.2.5).
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless JPEG with DNL-deferred height is not supported",
         ));
     }
     let count = usize::from(
         *data
             .get(pos + 7)
-            .ok_or(Error::InvalidInput("DNG: truncated SOF3"))?,
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOF3"))?,
     );
     if !(1..=4).contains(&count) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless JPEG carries 1..=4 components",
         ));
     }
     let mut component_ids = Vec::with_capacity(count);
     for c in 0..count {
-        let spec = data
-            .get(pos + 8 + 3 * c..pos + 11 + 3 * c)
-            .ok_or(Error::InvalidInput("DNG: truncated SOF3 components"))?;
+        let spec = data.get(pos + 8 + 3 * c..pos + 11 + 3 * c).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOF3 components")
+        })?;
         if spec[1] != 0x11 {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "DNG: subsampled lossless-JPEG components are not supported",
             ));
         }
@@ -479,32 +498,35 @@ fn parse_dht(
     let end = pos
         .checked_add(len)
         .filter(|e| *e <= data.len())
-        .ok_or(Error::InvalidInput("DNG: truncated DHT"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?;
     let mut at = pos + 2;
     while at < end {
         let tc_th = data[at];
         let (class, dest) = (tc_th >> 4, usize::from(tc_th & 0x0F));
         if class != 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: lossless JPEG uses DC-class (Tc=0) Huffman tables",
             ));
         }
         if dest > 3 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: Huffman table destination must be 0..=3",
             ));
         }
         let bits: [u8; 16] = data
             .get(at + 1..at + 17)
-            .ok_or(Error::InvalidInput("DNG: truncated DHT"))?
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?
             .try_into()
-            .map_err(|_| Error::InvalidInput("DNG: truncated DHT"))?;
+            .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT"))?;
         let nvals: usize = bits.iter().map(|&b| usize::from(b)).sum();
-        let huffval = data
-            .get(at + 17..at + 17 + nvals)
-            .ok_or(Error::InvalidInput("DNG: truncated DHT values"))?;
+        let huffval = data.get(at + 17..at + 17 + nvals).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated DHT values")
+        })?;
         if huffval.iter().any(|&v| v > 16) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: lossless-JPEG Huffman symbols are magnitude categories 0..=16",
             ));
         }
@@ -512,7 +534,10 @@ fn parse_dht(
         at += 17 + nvals;
     }
     if at != end {
-        return Err(Error::InvalidInput("DNG: DHT length mismatch"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: DHT length mismatch",
+        ));
     }
     Ok(())
 }
@@ -522,20 +547,22 @@ fn parse_sos(data: &[u8], pos: usize, frame: &Frame) -> Result<Scan> {
     let ns = usize::from(
         *data
             .get(pos + 2)
-            .ok_or(Error::InvalidInput("DNG: truncated SOS"))?,
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOS"))?,
     );
     if ns != frame.component_ids.len() {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "DNG: only single-scan (fully interleaved) lossless JPEG is supported",
         ));
     }
     let mut table_ids = Vec::with_capacity(ns);
     for c in 0..ns {
-        let spec = data
-            .get(pos + 3 + 2 * c..pos + 5 + 2 * c)
-            .ok_or(Error::InvalidInput("DNG: truncated SOS components"))?;
+        let spec = data.get(pos + 3 + 2 * c..pos + 5 + 2 * c).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOS components")
+        })?;
         if spec[0] != frame.component_ids[c] {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "DNG: lossless-JPEG scan components must follow the frame order",
             ));
         }
@@ -543,7 +570,7 @@ fn parse_sos(data: &[u8], pos: usize, frame: &Frame) -> Result<Scan> {
     }
     let tail = data
         .get(pos + 3 + 2 * ns..pos + 6 + 2 * ns)
-        .ok_or(Error::InvalidInput("DNG: truncated SOS"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated SOS"))?;
     let (ss, se, ah, al) = (
         tail[0],
         tail[1],
@@ -551,17 +578,20 @@ fn parse_sos(data: &[u8], pos: usize, frame: &Frame) -> Result<Scan> {
         u16::from(tail[2] & 0x0F),
     );
     if !(1..=7).contains(&ss) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless-JPEG predictor (Ss) must be 1..=7",
         ));
     }
     if se != 0 || ah != 0 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless-JPEG scan header must have Se = 0 and Ah = 0",
         ));
     }
     if al >= frame.precision {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless-JPEG point transform must be below the precision",
         ));
     }
@@ -585,7 +615,10 @@ fn parse_sos(data: &[u8], pos: usize, frame: &Frame) -> Result<Scan> {
 /// DNL-deferred height).
 pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
     if data.len() < 2 || data[0] != MARKER || data[1] != SOI {
-        return Err(Error::InvalidInput("DNG: not a JPEG (missing SOI)"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: not a JPEG (missing SOI)",
+        ));
     }
     let mut pos = 2;
     let mut frame: Option<Frame> = None;
@@ -599,19 +632,24 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
         let off = data[pos..]
             .iter()
             .position(|&b| b == MARKER)
-            .ok_or(Error::InvalidInput("DNG: lossless JPEG missing SOS"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOS")
+            })?;
         pos += off;
         while data.get(pos) == Some(&MARKER) {
             pos += 1;
         }
-        let marker = *data
-            .get(pos)
-            .ok_or(Error::InvalidInput("DNG: truncated lossless JPEG"))?;
+        let marker = *data.get(pos).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: truncated lossless JPEG")
+        })?;
         pos += 1;
         match marker {
             SOF3 => {
                 if frame.is_some() {
-                    return Err(Error::InvalidInput("DNG: duplicate SOF3 frame header"));
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "DNG: duplicate SOF3 frame header",
+                    ));
                 }
                 let len = be16(data, pos)?;
                 frame = Some(parse_sof3(data, pos)?);
@@ -620,7 +658,8 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
             // Any other frame type (baseline/extended/progressive DCT, other lossless variants,
             // arithmetic coding) is not the DNG lossless process.
             0xC0..=0xC2 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF | 0xCC => {
-                return Err(Error::Unsupported(
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     "DNG: only the SOF3 (lossless Huffman) JPEG process is supported",
                 ));
             }
@@ -632,21 +671,29 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
             DRI => {
                 let len = be16(data, pos)?;
                 if len != 4 {
-                    return Err(Error::InvalidInput("DNG: DRI segment must be 4 bytes"));
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "DNG: DRI segment must be 4 bytes",
+                    ));
                 }
                 restart_interval = be16(data, pos + 2)?;
                 pos += len;
             }
             SOS => {
-                let f = frame
-                    .as_ref()
-                    .ok_or(Error::InvalidInput("DNG: SOS before SOF3"))?;
+                let f = frame.as_ref().ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: SOS before SOF3")
+                })?;
                 let len = be16(data, pos)?;
                 scan = parse_sos(data, pos, f)?;
                 pos += len; // entropy data follows
                 break;
             }
-            EOI => return Err(Error::InvalidInput("DNG: lossless JPEG ended before SOS")),
+            EOI => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "DNG: lossless JPEG ended before SOS",
+                ));
+            }
             _ => {
                 // Skip any other marker segment by its length.
                 let len = be16(data, pos)?;
@@ -655,27 +702,36 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
         }
     }
 
-    let frame = frame.ok_or(Error::InvalidInput("DNG: lossless JPEG missing SOF3"))?;
+    let frame = frame.ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: lossless JPEG missing SOF3")
+    })?;
     let (width, height, components) = (frame.width, frame.height, frame.component_ids.len());
     if width == 0 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: lossless JPEG has zero dimensions",
         ));
     }
     // One resolved table reference per component (missing destinations are an error up front).
     let mut codes: Vec<&[(u16, u8)]> = Vec::with_capacity(components);
     for &id in &scan.table_ids {
-        codes.push(tables[id].as_deref().ok_or(Error::InvalidInput(
-            "DNG: scan references an undefined Huffman table",
-        ))?);
+        codes.push(tables[id].as_deref().ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: scan references an undefined Huffman table",
+            )
+        })?);
     }
 
     let count = width
         .checked_mul(height)
         .and_then(|n| n.checked_mul(components))
-        .ok_or(Error::InvalidInput(
-            "DNG: lossless JPEG dimensions overflow",
-        ))?;
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: lossless JPEG dimensions overflow",
+            )
+        })?;
     let mut samples = vec![0u16; count];
     let mut reader = BitReader::new(&data[pos..]);
     let pt = scan.point_transform;
@@ -695,7 +751,8 @@ pub fn decode(data: &[u8]) -> Result<LosslessJpeg> {
             for (c, code) in codes.iter().enumerate() {
                 let ssss = decode_symbol(&mut reader, code)?;
                 if ssss > 16 {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "DNG: lossless-JPEG category out of range",
                     ));
                 }
@@ -897,7 +954,10 @@ mod tests {
         // `< 2` -> `<=`: a bare SOI (len 2) must reach the marker loop and fail with "missing SOS",
         // not the header's "not a JPEG" message.
         match decode(&[MARKER, SOI]) {
-            Err(Error::InvalidInput(m)) => assert!(m.contains("missing SOS"), "got {m:?}"),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                let m = error.static_message().unwrap_or_default();
+                assert!(m.contains("missing SOS"), "got {m:?}")
+            }
             Err(other) => panic!("expected missing-SOS error, got {other:?}"),
             Ok(_) => panic!("expected missing-SOS error, got Ok"),
         }
@@ -951,7 +1011,10 @@ mod tests {
         let mut s = valid_stream();
         s[7] = 0;
         s[8] = 0;
-        assert!(matches!(decode(&s), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            decode(&s),
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
+        ));
     }
 
     // ------------------------------------------------------------------------------------------
@@ -1290,7 +1353,10 @@ mod tests {
         let mut s = base.clone();
         let sof = s.windows(2).position(|w| w == [0xFF, 0xC3]).expect("SOF3");
         s[sof + 11] = 0x21;
-        assert!(matches!(decode(&s), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            decode(&s),
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
+        ));
 
         // Multi-scan: the scan lists fewer components than the frame (Ns=1 of 2). Rebuild the
         // SOS by hand: one component spec, fixed length.
@@ -1300,18 +1366,27 @@ mod tests {
             .expect("SOS")]
             .to_vec();
         s.extend_from_slice(&[0xFF, 0xDA, 0x00, 0x08, 1, 0x01, 0x00, 1, 0, 0x00]);
-        assert!(matches!(decode(&s), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            decode(&s),
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
+        ));
 
         // A non-SOF3 frame type.
         let mut s = base.clone();
         s[sof + 1] = 0xC0;
-        assert!(matches!(decode(&s), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            decode(&s),
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
+        ));
 
         // A duplicate SOF3 is malformed, not unsupported.
         let mut s = base.clone();
         let sof_seg = base[sof..sof + 2 + 8 + 3 * 2].to_vec();
         s.splice(sof..sof, sof_seg);
-        assert!(matches!(decode(&s), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            decode(&s),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]

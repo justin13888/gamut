@@ -45,8 +45,9 @@ pub fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
     bb.end_box(mdat_start);
 
     for (slot, pos) in extent_slots.into_iter().zip(payload_positions) {
-        let pos = u32::try_from(pos)
-            .map_err(|_| Error::Unsupported("ISOBMFF: file at or beyond 4 GiB"))?;
+        let pos = u32::try_from(pos).map_err(|_| {
+            Error::unsupported(env!("CARGO_PKG_NAME"), "ISOBMFF: file at or beyond 4 GiB")
+        })?;
         bb.patch_u32(slot, pos);
     }
     Ok(bb.into_vec())
@@ -56,16 +57,23 @@ pub fn write(image: &IsoBmffImage) -> Result<Vec<u8>> {
 /// versions [`write`] emits (see the [`write`] error docs for the full list).
 fn validate(image: &IsoBmffImage) -> Result<()> {
     if !image.items.iter().any(|i| i.id == image.primary_item_id) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "ISOBMFF: primary_item_id names no item",
         ));
     }
     if u16::try_from(image.items.len()).is_err() {
-        return Err(Error::Unsupported("ISOBMFF: more than 65535 items"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: more than 65535 items",
+        ));
     }
     for (n, item) in image.items.iter().enumerate() {
         if image.items[..n].iter().any(|prev| prev.id == item.id) {
-            return Err(Error::InvalidInput("ISOBMFF: duplicate item id"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: duplicate item id",
+            ));
         }
         validate_item(item)?;
     }
@@ -74,25 +82,32 @@ fn validate(image: &IsoBmffImage) -> Result<()> {
 
 fn validate_item(item: &Item) -> Result<()> {
     if u16::try_from(item.id).is_err() {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "ISOBMFF: item id above u16::MAX (still-image writer emits 16-bit boxes)",
         ));
     }
     if item.item_type == *b"uri " {
-        return Err(Error::Unsupported("ISOBMFF: uri items not modelled"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: uri items not modelled",
+        ));
     }
     if (item.item_type == *b"mime") != item.content_type.is_some() {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "ISOBMFF: content_type is required for mime items and forbidden otherwise",
         ));
     }
     if item.content_encoding.is_some() && item.content_type.is_none() {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "ISOBMFF: content_encoding requires a content_type",
         ));
     }
     if item.content_encoding.as_deref() == Some("") {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "ISOBMFF: empty content_encoding does not round-trip (use None)",
         ));
     }
@@ -105,34 +120,51 @@ fn validate_item(item: &Item) -> Result<()> {
     .flatten()
     {
         if s.as_bytes().contains(&0) {
-            return Err(Error::InvalidInput("ISOBMFF: interior NUL in item string"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: interior NUL in item string",
+            ));
         }
     }
     if u32::try_from(item.payload.len()).is_err() {
-        return Err(Error::Unsupported("ISOBMFF: payload at or beyond 4 GiB"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: payload at or beyond 4 GiB",
+        ));
     }
     if u8::try_from(item.properties.len()).is_err() {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "ISOBMFF: more than 255 properties on one item",
         ));
     }
     for property in &item.properties {
         match &property.kind {
             PropertyKind::Rotation(angle) if *angle > 3 => {
-                return Err(Error::InvalidInput("ISOBMFF: irot angle above 3"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ISOBMFF: irot angle above 3",
+                ));
             }
             PropertyKind::Mirror(axis) if *axis > 1 => {
-                return Err(Error::InvalidInput("ISOBMFF: imir axis above 1"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ISOBMFF: imir axis above 1",
+                ));
             }
             PropertyKind::AuxiliaryType { aux_type, .. } if aux_type.as_bytes().contains(&0) => {
-                return Err(Error::InvalidInput("ISOBMFF: interior NUL in auxC type"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ISOBMFF: interior NUL in auxC type",
+                ));
             }
             _ => {}
         }
     }
     for reference in &item.references {
         if u16::try_from(reference.to_item_ids.len()).is_err() {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "ISOBMFF: more than 65535 targets in one reference",
             ));
         }
@@ -141,7 +173,8 @@ fn validate_item(item: &Item) -> Result<()> {
             .iter()
             .any(|&id| u16::try_from(id).is_err())
         {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "ISOBMFF: referenced item id above u16::MAX",
             ));
         }
@@ -310,7 +343,8 @@ fn write_iprp(bb: &mut BoxBuilder, items: &[Item]) -> Result<()> {
     }
     // The widest ipma association form has a 15-bit index, i.e. i16::MAX slots.
     if i16::try_from(pool.len()).is_err() {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "ISOBMFF: more than 32767 distinct properties",
         ));
     }

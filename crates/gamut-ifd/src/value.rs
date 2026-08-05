@@ -40,7 +40,8 @@ impl UnknownValue {
         variant: Variant,
     ) -> Result<Self> {
         if word.len() != variant.offset_size() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: unknown-type word must be exactly the offset width",
             ));
         }
@@ -349,7 +350,10 @@ impl Value {
                 .iter()
                 .map(|&o| {
                     u32::try_from(o).map_err(|_| {
-                        Error::InvalidInput("TIFF: offset exceeds the 4 GiB classic-TIFF limit")
+                        Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "TIFF: offset exceeds the 4 GiB classic-TIFF limit",
+                        )
                     })
                 })
                 .collect::<Result<Vec<u32>>>()
@@ -497,12 +501,12 @@ impl Value {
     ///
     /// Returns [`Error::InvalidInput`] if `bytes` is too short for the declared count.
     pub fn decode(ty: FieldType, count: usize, bytes: &[u8], order: ByteOrder) -> Result<Value> {
-        let need = count
-            .checked_mul(ty.size())
-            .ok_or(Error::InvalidInput("TIFF: field length overflow"))?;
-        let bytes = bytes
-            .get(..need)
-            .ok_or(Error::InvalidInput("TIFF: field value out of bounds"))?;
+        let need = count.checked_mul(ty.size()).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: field length overflow")
+        })?;
+        let bytes = bytes.get(..need).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: field value out of bounds")
+        })?;
         let u16s =
             |b: &[u8]| -> Vec<u16> { b.chunks_exact(2).map(|c| order.u16([c[0], c[1]])).collect() };
         let u32s = |b: &[u8]| -> Vec<u32> {
@@ -525,14 +529,16 @@ impl Value {
                 // keep everything before it: an ASCII field may hold *multiple* NUL-separated
                 // strings (TIFF 6.0 §2), so interior NULs are data, not terminators.
                 let body = bytes.strip_suffix(&[0]).unwrap_or(bytes);
-                let s = core::str::from_utf8(body)
-                    .map_err(|_| Error::InvalidInput("TIFF: non-UTF-8 ASCII field"))?;
+                let s = core::str::from_utf8(body).map_err(|_| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: non-UTF-8 ASCII field")
+                })?;
                 Value::Ascii(s.to_owned())
             }
             FieldType::Utf8 => {
                 let body = bytes.strip_suffix(&[0]).unwrap_or(bytes);
-                let s = core::str::from_utf8(body)
-                    .map_err(|_| Error::InvalidInput("TIFF: invalid UTF-8 field"))?;
+                let s = core::str::from_utf8(body).map_err(|_| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: invalid UTF-8 field")
+                })?;
                 Value::Utf8(s.to_owned())
             }
             FieldType::Short => Value::Short(u16s(bytes)),

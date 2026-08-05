@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::Planar8;
-use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Result, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
 
 /// The fixture the golden files in `tests/data` were produced from: a 34×18 deterministic RGB ramp.
 const W: u32 = 34;
@@ -33,6 +33,13 @@ fn encode(encoder: &AvifEncoder) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     encoder.encode_image(ImageRef::<Rgb8>::new(&rgb, dims()).unwrap(), &mut out)?;
     Ok(out)
+}
+
+#[track_caller]
+fn assert_owned_error(error: &Error, kind: ErrorKind, message: &'static str) {
+    assert_eq!(error.kind(), kind);
+    assert_eq!(error.static_message(), Some(message));
+    assert_eq!(error.origin(), Some("gamut-avif"));
 }
 
 /// The AV1 OBU stream the built-in encoder produces for the fixture — a conformant stream a test
@@ -304,12 +311,10 @@ fn a_panicking_backend_poisons_the_registry() {
     assert!(first.is_err(), "the backend's panic unwinds to the caller");
 
     let err = encode(&encoder).expect_err("the poisoned registry is reported");
-    assert!(
-        matches!(
-            err,
-            Error::InvalidInput("AVIF: AV1 encode backend is poisoned")
-        ),
-        "unexpected error: {err:?}"
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 encode backend is poisoned",
     );
 }
 
@@ -343,12 +348,10 @@ fn backend_stream_dimensions_must_match() {
     let mut encoder = AvifEncoder::new();
     encoder.push_backend(Scripted::new("wrong", true, Outcome::Bytes(wrong), &log));
     let err = encode(&encoder).expect_err("dimension mismatch rejected");
-    assert!(
-        matches!(
-            err,
-            Error::InvalidInput("AVIF: AV1 backend stream dimensions differ from the image")
-        ),
-        "unexpected error: {err:?}"
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend stream dimensions differ from the image",
     );
 }
 
@@ -365,12 +368,10 @@ fn backend_stream_without_sequence_header_is_rejected() {
         &log,
     ));
     let err = encode(&encoder).expect_err("missing sequence header rejected");
-    assert!(
-        matches!(
-            err,
-            Error::InvalidInput("AVIF: AV1 backend stream has no sequence header OBU")
-        ),
-        "unexpected error: {err:?}"
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend stream has no sequence header OBU",
     );
 }
 
@@ -385,12 +386,10 @@ fn backend_stream_must_be_a_reduced_still_picture() {
     let mut encoder = AvifEncoder::new();
     encoder.push_backend(Scripted::new("full", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("non-reduced sequence header rejected");
-    assert!(
-        matches!(
-            err,
-            Error::Unsupported("AVIF: AV1 backend stream must set reduced_still_picture_header")
-        ),
-        "unexpected error: {err:?}"
+    assert_owned_error(
+        &err,
+        ErrorKind::Unsupported,
+        "AVIF: AV1 backend stream must set reduced_still_picture_header",
     );
 }
 
@@ -406,12 +405,10 @@ fn backend_stream_must_use_profile_1() {
     let mut encoder = AvifEncoder::new();
     encoder.push_backend(Scripted::new("p0", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("profile 0 rejected");
-    assert!(
-        matches!(
-            err,
-            Error::Unsupported("AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)")
-        ),
-        "unexpected error: {err:?}"
+    assert_owned_error(
+        &err,
+        ErrorKind::Unsupported,
+        "AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)",
     );
 }
 
@@ -426,12 +423,10 @@ fn truncated_sequence_header_is_reported() {
     let mut encoder = AvifEncoder::new();
     encoder.push_backend(Scripted::new("short", true, Outcome::Bytes(obus), &log));
     let err = encode(&encoder).expect_err("truncated header rejected");
-    assert!(
-        matches!(
-            err,
-            Error::InvalidInput("AVIF: AV1 backend sequence header truncated")
-        ),
-        "unexpected error: {err:?}"
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend sequence header truncated",
     );
 }
 
@@ -648,10 +643,12 @@ fn abi_adapter_other_status_propagates() {
         )))))
         .push_backend(Scripted::new("never", true, Outcome::Passthrough, &log));
     let err = encode(&encoder).expect_err("a terminal backend status propagates");
-    assert!(
-        matches!(err, Error::InvalidInput("AVIF: AV1 encode backend failed")),
-        "unexpected error: {err:?}"
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 encode backend failed",
     );
+    assert_eq!(err.detail(), Some("codec-abi status -42"));
     assert!(events(&log).is_empty(), "no later backend, no tail");
 }
 

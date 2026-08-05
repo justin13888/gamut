@@ -108,7 +108,8 @@ impl OpcodeList {
         // Each opcode needs at least its 16-byte header; an impossible count fails fast instead
         // of looping toward the inevitable truncation error.
         if (count as usize) > bytes.len().saturating_sub(4) / 16 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: opcode list is truncated (count exceeds the data)",
             ));
         }
@@ -116,21 +117,27 @@ impl OpcodeList {
         let mut pos = 4usize;
         for _ in 0..count {
             let id = read_u32(bytes, pos)?;
-            let version = bytes
-                .get(pos + 4..pos + 8)
-                .ok_or(Error::InvalidInput("DNG: opcode list is truncated"))?;
+            let version = bytes.get(pos + 4..pos + 8).ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: opcode list is truncated")
+            })?;
             let flags = read_u32(bytes, pos + 8)?;
             let param_len = read_u32(bytes, pos + 12)? as usize;
             pos += 16;
             let parameters = bytes
                 .get(
-                    pos..pos.checked_add(param_len).ok_or(Error::InvalidInput(
-                        "DNG: opcode parameter length overflows",
-                    ))?,
+                    pos..pos.checked_add(param_len).ok_or_else(|| {
+                        Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "DNG: opcode parameter length overflows",
+                        )
+                    })?,
                 )
-                .ok_or(Error::InvalidInput(
-                    "DNG: opcode parameters exceed the list data",
-                ))?
+                .ok_or_else(|| {
+                    Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "DNG: opcode parameters exceed the list data",
+                    )
+                })?
                 .to_vec();
             pos += param_len;
             opcodes.push(Opcode {
@@ -141,7 +148,8 @@ impl OpcodeList {
             });
         }
         if pos != bytes.len() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: opcode list has trailing bytes after the last opcode",
             ));
         }
@@ -195,9 +203,13 @@ impl OpcodeList {
 
 /// Reads a big-endian `u32` at `pos`.
 fn read_u32(bytes: &[u8], pos: usize) -> Result<u32> {
-    let b = bytes
-        .get(pos..pos + 4)
-        .ok_or(Error::InvalidInput("DNG: opcode list is truncated"))?;
+    let b = pos
+        .checked_add(4)
+        .and_then(|end| bytes.get(pos..end))
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: opcode list is truncated")
+                .with_byte_offset(pos as u64)
+        })?;
     Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 

@@ -61,7 +61,8 @@ impl TryFrom<u32> for Compression {
             8 | 32946 => Compression::Deflate,
             32773 => Compression::PackBits,
             _ => {
-                return Err(gamut_core::Error::Unsupported(
+                return Err(gamut_core::Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     "TIFF: unrecognised Compression tag value",
                 ));
             }

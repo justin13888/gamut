@@ -19,7 +19,7 @@ use gamut_codec_abi::{
     StreamConfig,
 };
 use gamut_core::{
-    DecodeImage, Dimensions, EncodeImage, Error, Gray8, ImageBuf, ImageRef, Rgb8, Rgba8,
+    DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, ImageBuf, ImageRef, Rgb8, Rgba8,
 };
 use gamut_jxl::{
     AbiDecodeBackend, AbiEncodeBackend, Container, Distance, Effort, JXL_CODEC_ID,
@@ -240,10 +240,9 @@ fn jpeg_recompression_never_reaches_a_backend() {
     encoder.push_backend(backend);
     let mut out = Vec::new();
     // An empty JPEG is rejected by the built-in path; what matters is that the registry was skipped.
-    assert!(matches!(
-        encoder.recompress_jpeg(&[], &mut out),
-        Err(Error::InvalidInput("JXL: empty JPEG input"))
-    ));
+    let error = encoder.recompress_jpeg(&[], &mut out).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert_eq!(error.static_message(), Some("JXL: empty JPEG input"));
     assert_eq!(Counting::calls(&counter), 0);
 }
 
@@ -367,10 +366,13 @@ fn a_codec_abi_decode_backend_declines_on_unsupported_and_propagates_otherwise()
     let mut failing = JxlDecoder::new();
     failing.push_backend(AbiDecodeBackend::new(AbiDecodeFixture(Status(-99))));
     let result: gamut_core::Result<ImageBuf<Rgb8>> = failing.decode_image(&stream);
-    assert!(matches!(
-        result,
-        Err(Error::InvalidInput("JXL: codec-abi decode backend failed"))
-    ));
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        error.static_message(),
+        Some("JXL: codec-abi decode backend failed")
+    );
+    assert_eq!(error.detail(), Some("codec-abi status -99"));
 }
 
 #[test]

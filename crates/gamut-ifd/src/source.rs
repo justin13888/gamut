@@ -57,11 +57,17 @@ impl ReadAt for &[u8] {
         let start = usize::try_from(offset)
             .ok()
             .filter(|&s| s <= <[u8]>::len(self))
-            .ok_or(Error::InvalidInput("TIFF: read out of bounds"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: read out of bounds")
+                    .with_byte_offset(offset)
+            })?;
         let bytes = start
             .checked_add(buf.len())
             .and_then(|end| self.get(start..end))
-            .ok_or(Error::InvalidInput("TIFF: read out of bounds"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: read out of bounds")
+                    .with_byte_offset(offset)
+            })?;
         buf.copy_from_slice(bytes);
         Ok(())
     }
@@ -113,14 +119,23 @@ impl<R: std::io::Read + std::io::Seek> StreamSource<R> {
 
 impl<R: std::io::Read + std::io::Seek> ReadAt for StreamSource<R> {
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        self.inner.seek(std::io::SeekFrom::Start(offset))?;
+        self.inner
+            .seek(std::io::SeekFrom::Start(offset))
+            .map_err(|error| {
+                Error::Io(error)
+                    .with_origin(env!("CARGO_PKG_NAME"))
+                    .with_byte_offset(offset)
+            })?;
         self.inner.read_exact(buf).map_err(|e| {
             // A stream that ends before `buf` is filled is a bounds violation (the offsets
             // promised more bytes than exist), not a transport failure.
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                Error::InvalidInput("TIFF: read out of bounds")
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: read out of bounds")
+                    .with_byte_offset(offset)
             } else {
                 Error::Io(e)
+                    .with_origin(env!("CARGO_PKG_NAME"))
+                    .with_byte_offset(offset)
             }
         })
     }
@@ -129,7 +144,10 @@ impl<R: std::io::Read + std::io::Seek> ReadAt for StreamSource<R> {
         if let Some(len) = self.len {
             return Ok(len);
         }
-        let len = self.inner.seek(std::io::SeekFrom::End(0))?;
+        let len = self
+            .inner
+            .seek(std::io::SeekFrom::End(0))
+            .map_err(|error| Error::Io(error).with_origin(env!("CARGO_PKG_NAME")))?;
         self.len = Some(len);
         Ok(len)
     }
@@ -170,10 +188,9 @@ impl<S: ReadAt> Rebased<S> {
 
 impl<S: ReadAt> ReadAt for Rebased<S> {
     fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        let physical = self
-            .base
-            .checked_add(offset)
-            .ok_or(Error::InvalidInput("TIFF: rebased offset overflow"))?;
+        let physical = self.base.checked_add(offset).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: rebased offset overflow")
+        })?;
         self.inner.read_exact_at(physical, buf)
     }
 
@@ -241,7 +258,10 @@ mod tests {
         let mut src = StreamSource::new(std::io::Cursor::new(vec![1, 2]));
         let mut buf = [0u8; 4];
         match src.read_exact_at(0, &mut buf) {
-            Err(Error::InvalidInput(msg)) => assert_eq!(msg, "TIFF: read out of bounds"),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                assert_eq!(error.static_message(), Some("TIFF: read out of bounds"));
+                assert_eq!(error.byte_offset(), Some(0));
+            }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
     }
@@ -267,7 +287,10 @@ mod tests {
         let mut src = StreamSource::new(FailingStream);
         let mut buf = [0u8; 1];
         match src.read_exact_at(0, &mut buf) {
-            Err(Error::Io(e)) => assert_eq!(e.to_string(), "disk on fire"),
+            Err(error) if error.kind() == gamut_core::ErrorKind::Io => {
+                assert!(error.to_string().contains("disk on fire"));
+                assert_eq!(error.byte_offset(), Some(0));
+            }
             other => panic!("expected Io, got {other:?}"),
         }
     }

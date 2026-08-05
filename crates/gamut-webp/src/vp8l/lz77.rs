@@ -156,7 +156,10 @@ pub fn read_lz77_value(r: &mut BitReader<'_>, prefix_code: u32) -> Result<u32> {
     }
     let extra_bits = (prefix_code - 2) >> 1;
     if extra_bits > 24 {
-        return Err(Error::InvalidInput("VP8L: LZ77 prefix code out of range"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8L: LZ77 prefix code out of range",
+        ));
     }
     let offset = (2 + (prefix_code & 1)) << extra_bits;
     Ok(offset + r.read_bits(extra_bits)? + 1)

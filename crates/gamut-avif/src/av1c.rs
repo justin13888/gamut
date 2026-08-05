@@ -111,14 +111,23 @@ impl Av1Config {
     ///   size-field-carrying OBUs.
     pub fn parse(data: &[u8]) -> Result<Self> {
         let &[b0, b1, b2, b3, ref config_obus @ ..] = data else {
-            return Err(Error::InvalidInput("AVIF: av1C truncated"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: av1C truncated",
+            ));
         };
         // marker(1) | version(7)
         if b0 & 0x80 == 0 {
-            return Err(Error::InvalidInput("AVIF: av1C marker must be 1"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: av1C marker must be 1",
+            ));
         }
         if b0 & 0x7f != 1 {
-            return Err(Error::Unsupported("AVIF: av1C version must be 1"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: av1C version must be 1",
+            ));
         }
         // seq_profile(3) | seq_level_idx_0(5)
         let seq_profile = b1 >> 5;
@@ -133,12 +142,14 @@ impl Av1Config {
         let chroma_subsampling_y = (b2 >> 2) & 0x01;
         let chroma_sample_position = b2 & 0x03;
         if chroma_subsampling_x == 0 && chroma_subsampling_y == 1 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "AVIF: av1C chroma subsampling (0, 1) is not expressible",
             ));
         }
         if monochrome && (chroma_subsampling_x, chroma_subsampling_y) != (1, 1) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "AVIF: av1C monochrome requires chroma subsampling (1, 1)",
             ));
         }
@@ -147,7 +158,8 @@ impl Av1Config {
         // configOBUs SHALL each carry a size field (§2.3.4); the split also bounds-checks them.
         for obu in iter_obus(config_obus) {
             if !obu?.header.has_size_field {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "AVIF: av1C configOBUs must carry size fields",
                 ));
             }
@@ -264,7 +276,8 @@ impl Av1Config {
             let obu = obu?;
             match obu.header.obu_type {
                 ObuType::TileList => {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "AVIF: item payload must not contain a tile list OBU",
                     ));
                 }
@@ -272,20 +285,25 @@ impl Av1Config {
                     sequence_headers += 1;
                     // seq_profile(3) | still_picture(1) | reduced_still_picture_header(1) | …
                     let &[b0, ..] = obu.payload else {
-                        return Err(Error::InvalidInput("AVIF: empty sequence header OBU"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "AVIF: empty sequence header OBU",
+                        ));
                     };
                     reduced_still_picture = b0 & 0x08 != 0;
                 }
                 ty if ty.is_frame_bearing() && !first_frame_checked => {
                     if sequence_headers == 0 {
-                        return Err(Error::InvalidInput(
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
                             "AVIF: sequence header OBU must precede the first frame",
                         ));
                     }
                     // A tile group before any frame header is malformed whatever the sequence
                     // header says.
                     if ty == ObuType::TileGroup {
-                        return Err(Error::InvalidInput(
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
                             "AVIF: tile group OBU precedes the first frame header",
                         ));
                     }
@@ -294,20 +312,26 @@ impl Av1Config {
                     // show_existing_frame(1) | frame_type(2) | show_frame(1) | …
                     if !reduced_still_picture {
                         let &[b0, ..] = obu.payload else {
-                            return Err(Error::InvalidInput("AVIF: empty frame OBU"));
+                            return Err(Error::invalid_input(
+                                env!("CARGO_PKG_NAME"),
+                                "AVIF: empty frame OBU",
+                            ));
                         };
                         if b0 & 0x80 != 0 {
-                            return Err(Error::InvalidInput(
+                            return Err(Error::invalid_input(
+                                env!("CARGO_PKG_NAME"),
                                 "AVIF: first frame must not be show_existing_frame",
                             ));
                         }
                         if (b0 >> 5) & 0x03 != 0 {
-                            return Err(Error::InvalidInput(
+                            return Err(Error::invalid_input(
+                                env!("CARGO_PKG_NAME"),
                                 "AVIF: first frame must be a key frame",
                             ));
                         }
                         if b0 & 0x10 == 0 {
-                            return Err(Error::InvalidInput(
+                            return Err(Error::invalid_input(
+                                env!("CARGO_PKG_NAME"),
                                 "AVIF: first frame must have show_frame set",
                             ));
                         }
@@ -318,12 +342,14 @@ impl Av1Config {
             }
         }
         if sequence_headers != 1 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "AVIF: item payload must have exactly one sequence header OBU",
             ));
         }
         if !first_frame_checked {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "AVIF: item payload has no frame-bearing OBU",
             ));
         }

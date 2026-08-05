@@ -155,12 +155,18 @@ pub(crate) fn layout_of(format: PixelFormat) -> Option<(u32, bool, u32)> {
 
 /// The error for a pixel format outside gamut-jxl's eight coded layouts.
 fn unsupported_layout() -> Error {
-    Error::Unsupported("JXL: pixel format is not a JPEG XL coded layout")
+    Error::unsupported(
+        env!("CARGO_PKG_NAME"),
+        "JXL: pixel format is not a JPEG XL coded layout",
+    )
 }
 
 /// The error for a sample buffer whose length or storage width contradicts its declared layout.
 fn mismatched_samples() -> Error {
-    Error::InvalidInput("JXL: sample buffer does not match the declared layout")
+    Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
+        "JXL: sample buffer does not match the declared layout",
+    )
 }
 
 /// Total interleaved sample count for `dimensions` at `channels` samples per pixel, or `None` on
@@ -208,7 +214,7 @@ impl<'a> JxlImageRef<'a> {
             layout_of(format).ok_or_else(unsupported_layout)?;
         let channels = color_channels + u32::from(has_alpha);
         let expected = sample_count(dimensions, channels)
-            .ok_or(Error::InvalidInput("JXL: image too large"))?;
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image too large"))?;
         if samples.bits_per_sample() != bits_per_sample || samples.len() != expected {
             return Err(mismatched_samples());
         }
@@ -298,7 +304,7 @@ impl JxlDecoded {
             layout_of(format).ok_or_else(unsupported_layout)?;
         let channels = color_channels + u32::from(has_alpha);
         let expected = sample_count(dimensions, channels)
-            .ok_or(Error::InvalidInput("JXL: image too large"))?;
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image too large"))?;
         if samples.bits_per_sample() != bits_per_sample || samples.len() != expected {
             return Err(mismatched_samples());
         }
@@ -684,19 +690,21 @@ mod tests {
     fn image_ref_rejects_bad_layout_width_and_length() {
         let dims = Dimensions::new(2, 3).unwrap();
         // A format outside the coded eight.
-        assert!(matches!(
-            JxlImageRef::new(PixelFormat::Cmyk8, dims, JxlSamples::U8(&[0u8; 24])),
-            Err(Error::Unsupported(
-                "JXL: pixel format is not a JPEG XL coded layout"
-            ))
-        ));
+        let error =
+            JxlImageRef::new(PixelFormat::Cmyk8, dims, JxlSamples::U8(&[0u8; 24])).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: pixel format is not a JPEG XL coded layout")
+        );
         // Right length, wrong storage width.
-        assert!(matches!(
-            JxlImageRef::new(PixelFormat::Rgba8, dims, JxlSamples::U16(&[0u16; 24])),
-            Err(Error::InvalidInput(
-                "JXL: sample buffer does not match the declared layout"
-            ))
-        ));
+        let error =
+            JxlImageRef::new(PixelFormat::Rgba8, dims, JxlSamples::U16(&[0u16; 24])).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: sample buffer does not match the declared layout")
+        );
         // Right storage width, wrong length (one sample short, and one too many).
         assert!(JxlImageRef::new(PixelFormat::Rgba8, dims, JxlSamples::U8(&[0u8; 23])).is_err());
         assert!(JxlImageRef::new(PixelFormat::Rgba8, dims, JxlSamples::U8(&[0u8; 25])).is_err());
@@ -723,15 +731,15 @@ mod tests {
 
         assert!(matches!(
             JxlDecoded::new(PixelFormat::Bilevel, dims, JxlOwnedSamples::U8(vec![0; 4])),
-            Err(Error::Unsupported(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
         assert!(matches!(
             JxlDecoded::new(PixelFormat::Gray8, dims, JxlOwnedSamples::U8(vec![0; 5])),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
         assert!(matches!(
             JxlDecoded::new(PixelFormat::Gray8, dims, JxlOwnedSamples::U16(vec![0; 4])),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 
@@ -805,7 +813,7 @@ mod tests {
         }
 
         fn encode(&mut self, _req: &JxlEncodeRequest, _image: &JxlImageRef<'_>) -> Result<Vec<u8>> {
-            Err(Error::Unsupported("test backend"))
+            Err(Error::unsupported(env!("CARGO_PKG_NAME"), "test backend"))
         }
     }
 

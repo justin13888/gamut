@@ -19,7 +19,7 @@ mod common;
 
 use common::{DecodedSamples, decode, encoded_color_profile, gen_u8, gen_u16, icc_profile};
 use gamut_core::{
-    DecodeImage, Dimensions, EncodeImage, Error, Gray8, Gray16, ImageBuf, ImageRef, Rgb8, Rgb16,
+    DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, Gray16, ImageBuf, ImageRef, Rgb8, Rgb16,
 };
 use gamut_jxl::{ColorSpec, Distance, JxlDecoder, JxlEncoder};
 use gamut_jxl_sys::types as ty;
@@ -228,7 +228,7 @@ fn icc_color_family_mismatch_is_rejected() {
         .with_color(ColorSpec::Icc(rgb_icc))
         .encode_image(image, &mut out)
         .expect_err("an RGB profile on a grayscale image must be rejected");
-    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err:?}");
     assert!(out.is_empty(), "no output on the rejected path");
 }
 
@@ -242,7 +242,7 @@ fn truncated_icc_is_rejected() {
         .with_color(ColorSpec::Icc(vec![0u8; 64]))
         .encode_image(image, &mut out)
         .expect_err("a truncated ICC profile must be rejected");
-    assert!(matches!(err, Error::InvalidInput(_)), "{err:?}");
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err:?}");
 }
 
 #[test]

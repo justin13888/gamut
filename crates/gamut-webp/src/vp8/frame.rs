@@ -1162,7 +1162,10 @@ pub fn encode_frame_filtered(
 fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>> {
     let sizes_len = (n - 1) * 3;
     if data.len() < sizes_len {
-        return Err(Error::InvalidInput("VP8: token-partition sizes truncated"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: token-partition sizes truncated",
+        ));
     }
     let mut decoders = Vec::with_capacity(n);
     let mut offset = sizes_len;
@@ -1176,7 +1179,9 @@ fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>>
         let end = offset
             .checked_add(size)
             .filter(|&e| e <= data.len())
-            .ok_or(Error::InvalidInput("VP8: token partition exceeds frame"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "VP8: token partition exceeds frame")
+            })?;
         decoders.push(BoolDecoder::new(&data[offset..end]));
         offset = end;
     }
@@ -1192,18 +1197,27 @@ fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>>
 pub fn decode_frame(data: &[u8]) -> Result<FrameBuffers> {
     let chunk = header::read_uncompressed_chunk(data)?;
     if chunk.width == 0 || chunk.height == 0 {
-        return Err(Error::InvalidInput("VP8: zero frame dimension"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: zero frame dimension",
+        ));
     }
     // RFC 6386 §9.1: the 3-bit version selects decoding profiles 0–3; 4–7 are undefined, and libwebp
     // rejects them, so we do too. Profiles 1–3 differ from 0 only in the inter-frame reconstruction
     // filter and a loop-filter hint; for intra key frames the explicit filter-type bit governs, so
     // 0–3 reconstruct identically here (pinned against libwebp in tests/oracle.rs).
     if chunk.version > 3 {
-        return Err(Error::Unsupported("VP8: unsupported bitstream version"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "VP8: unsupported bitstream version",
+        ));
     }
     let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
     if part0_end > data.len() {
-        return Err(Error::InvalidInput("VP8: first partition exceeds frame"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: first partition exceeds frame",
+        ));
     }
     let mut modes = BoolDecoder::new(&data[UNCOMPRESSED_CHUNK_LEN..part0_end]);
     let (head, coeff_probs) = header::read_frame_header(&chunk, &mut modes);
@@ -1575,7 +1589,10 @@ mod tests {
         }
         for v in 4u8..=7 {
             assert!(
-                matches!(decode_frame(&patch_version(v)), Err(Error::Unsupported(_))),
+                matches!(
+                    decode_frame(&patch_version(v)),
+                    Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
+                ),
                 "profile {v} must be rejected"
             );
         }
@@ -1702,7 +1719,10 @@ mod tests {
         // only the `width == 0` half of the guard fires: `||` flipped to `&&` would let it through.
         bits[6] = 0;
         bits[7] &= 0xC0;
-        assert!(matches!(decode_frame(&bits), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            decode_frame(&bits),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]

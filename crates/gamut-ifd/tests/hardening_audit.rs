@@ -13,13 +13,15 @@
 //! report-not-reject by design, is pinned in `robustness.rs`
 //! (`overlapping_value_offset_parses_and_surfaces_in_audit`).
 
-use gamut_core::Error;
+use gamut_core::{Error, ErrorKind};
 use gamut_ifd::{ByteOrder, Ifd, IfdReader, TiffFile, Value, Variant, read, read_tree, write};
 
 /// Unwraps the `InvalidInput` message — the string rawshift keys its `ParseError` mapping on.
 fn msg<T: std::fmt::Debug>(res: Result<T, Error>) -> &'static str {
     match res {
-        Err(Error::InvalidInput(m)) => m,
+        Err(error) if error.kind() == ErrorKind::InvalidInput => error
+            .static_message()
+            .expect("invalid input has a static message"),
         other => panic!("expected Error::InvalidInput, got {other:?}"),
     }
 }

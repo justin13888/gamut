@@ -412,13 +412,17 @@ fn audit_camera_profile(auditor: &mut Auditor<&[u8]>, base: u64) -> Result<Vec<I
         [0x49, 0x49] => ByteOrder::LittleEndian,
         [0x4D, 0x4D] => ByteOrder::BigEndian,
         _ => {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: bad camera-profile byte-order mark",
             ));
         }
     };
     if order.u16([head[2], head[3]]) != CAMERA_PROFILE_MAGIC {
-        return Err(Error::InvalidInput("DNG: bad camera-profile magic"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: bad camera-profile magic",
+        ));
     }
     let first = u64::from(order.u32([head[4], head[5], head[6], head[7]]));
     auditor.claim(

@@ -201,7 +201,8 @@ impl DngEncoder {
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         if color_plane_count(raw) != 3 {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "DNG: only 3-colour (RGB) raw images are supported so far",
             ));
         }
@@ -210,7 +211,8 @@ impl DngEncoder {
         // at whole-byte integer depths (8/16/32-bit; dng_read_image::CanReadTile) — a sub-byte
         // deflate raw would be a file the reference reader cannot decode.
         if self.compression == Compression::Deflate && !matches!(bits, 8 | 16) {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "DNG: Deflate compression requires 8- or 16-bit samples",
             ));
         }
@@ -220,7 +222,8 @@ impl DngEncoder {
         // scaled — misrendering against the written levels — so sub-16-bit input is rejected:
         // scale the code values and levels to 16-bit first.
         if self.compression == Compression::JpegXl && bits != 16 {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "DNG: JPEG XL compression requires full-range 16-bit samples",
             ));
         }
@@ -238,7 +241,8 @@ impl DngEncoder {
                     || tile_width % 16 != 0
                     || tile_height % 16 != 0
                 {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "DNG: tile dimensions must be positive multiples of 16",
                     ));
                 }
@@ -541,7 +545,8 @@ impl DngEncoder {
                     any(not(target_arch = "wasm32"), target_os = "emscripten")
                 )))]
                 {
-                    Err(Error::Unsupported(
+                    Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
                         "DNG: JPEG XL encoding requires the `jxl-encode` feature (non-wasm)",
                     ))
                 }
@@ -683,7 +688,8 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
     ifd.set(tags::WHITE_LEVEL, white_level_value(levels.white())?);
     if let Some(table) = levels.linearization_table() {
         if table.is_empty() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: LinearizationTable must not be empty",
             ));
         }
@@ -701,7 +707,8 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
     };
     if let Some(deltas) = levels.black_delta_h() {
         if deltas.len() != aa_width {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: BlackLevelDeltaH needs one value per active-area column",
             ));
         }
@@ -709,7 +716,8 @@ fn build_raw_ifd(encoder: &DngEncoder, raw: &RawImage) -> Result<Ifd> {
     }
     if let Some(deltas) = levels.black_delta_v() {
         if deltas.len() != aa_height {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: BlackLevelDeltaV needs one value per active-area row",
             ));
         }
@@ -765,7 +773,8 @@ fn black_level_value(values: &[f64]) -> Result<Value> {
                 .collect(),
         ))
     } else {
-        Err(Error::InvalidInput(
+        Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: fractional black levels must be below 65536",
         ))
     }
@@ -774,7 +783,8 @@ fn black_level_value(values: &[f64]) -> Result<Value> {
 /// Stores `BlackLevelDeltaH`/`BlackLevelDeltaV` as `SRATIONAL`s on the [`LEVEL_DEN`] grid.
 fn delta_value(deltas: &[f64]) -> Result<Value> {
     if deltas.iter().any(|v| !v.is_finite() || v.abs() >= 32768.0) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: black-level deltas must be finite and within +/-32768",
         ));
     }
@@ -793,7 +803,8 @@ fn white_level_value(values: &[f64]) -> Result<Value> {
         .iter()
         .any(|v| v.fract() != 0.0 || *v > f64::from(u32::MAX))
     {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: white levels must be integers storable as SHORT or LONG",
         ));
     }
@@ -1002,7 +1013,7 @@ mod tests {
                 .encode(&raw, &profile, &mut Vec::new())
                 .unwrap_err();
             assert!(
-                matches!(err, Error::InvalidInput(m) if m.contains("multiples of 16")),
+                matches!(err, ref error if error.kind() == gamut_core::ErrorKind::InvalidInput && error.static_message().is_some_and(|message| message.contains("multiples of 16"))),
                 "({tw}, {th}) must be rejected, got {err:?}"
             );
         }

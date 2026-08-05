@@ -126,19 +126,28 @@ impl ObuHeader {
 /// an extension header).
 fn parse_header(data: &[u8]) -> Result<(ObuHeader, usize)> {
     let &[b0, ..] = data else {
-        return Err(Error::InvalidInput("AVIF: truncated OBU header"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: truncated OBU header",
+        ));
     };
     // obu_forbidden_bit(1) | obu_type(4) | obu_extension_flag(1) | obu_has_size_field(1) |
     // obu_reserved_1bit(1)
     if b0 & 0x80 != 0 {
-        return Err(Error::InvalidInput("AVIF: OBU forbidden bit set"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: OBU forbidden bit set",
+        ));
     }
     let obu_type = ObuType::from_raw((b0 >> 3) & 0x0f);
     let has_size_field = b0 & 0x02 != 0;
     let (temporal_id, spatial_id, len) = if b0 & 0x04 != 0 {
         // temporal_id(3) | spatial_id(2) | extension_header_reserved_3bits(3)
         let Some(&b1) = data.get(1) else {
-            return Err(Error::InvalidInput("AVIF: truncated OBU extension header"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: truncated OBU extension header",
+            ));
         };
         (b1 >> 5, (b1 >> 3) & 0x03, 2)
     } else {
@@ -194,12 +203,14 @@ impl<'a> Iterator for ObuIter<'a> {
         let rest = &self.data[self.pos..];
         let (header, header_len) = match parse_header(rest) {
             Ok(parsed) => parsed,
-            Err(e) => return Some(Err(e)),
+            Err(e) => return Some(Err(e.with_byte_offset(self.pos as u64))),
         };
         let (payload_start, payload_len) = if header.has_size_field {
             let (size, size_len) = match read_leb128(&rest[header_len..]) {
                 Ok(read) => read,
-                Err(e) => return Some(Err(e)),
+                Err(e) => {
+                    return Some(Err(e.with_byte_offset((self.pos + header_len) as u64)));
+                }
             };
             (header_len + size_len, size as usize)
         } else {
@@ -210,7 +221,11 @@ impl<'a> Iterator for ObuIter<'a> {
             .checked_add(payload_len)
             .filter(|&e| e <= rest.len())
         else {
-            return Some(Err(Error::InvalidInput("AVIF: truncated OBU payload")));
+            return Some(Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: truncated OBU payload",
+            )
+            .with_byte_offset((self.pos + payload_start) as u64)));
         };
         // The read succeeded: clear the fuse and advance past this OBU.
         self.done = false;
@@ -257,17 +272,24 @@ fn read_leb128(data: &[u8]) -> Result<(u64, usize)> {
     let mut value = 0u64;
     for i in 0..8 {
         let Some(&byte) = data.get(i) else {
-            return Err(Error::InvalidInput("AVIF: truncated OBU size field"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: truncated OBU size field",
+            ));
         };
         value |= u64::from(byte & 0x7f) << (i * 7);
         if byte & 0x80 == 0 {
             if value > u64::from(u32::MAX) {
-                return Err(Error::InvalidInput("AVIF: OBU size exceeds 32 bits"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: OBU size exceeds 32 bits",
+                ));
             }
             return Ok((value, i + 1));
         }
     }
-    Err(Error::InvalidInput(
+    Err(Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
         "AVIF: OBU size field longer than 8 bytes",
     ))
 }

@@ -441,8 +441,9 @@ fn animated_stream_is_rejected_as_unsupported() {
     // gamut refuses it.
     let err = <JxlDecoder as DecodeImage<Rgb8>>::decode_image(&JxlDecoder::new(), &bytes)
         .expect_err("animated input must be rejected");
-    assert!(
-        matches!(err, gamut_core::Error::Unsupported(_)),
+    assert_eq!(
+        err.kind(),
+        gamut_core::ErrorKind::Unsupported,
         "expected Unsupported for animated input, got {err:?}"
     );
 }

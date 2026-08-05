@@ -229,7 +229,7 @@ fn color_stream_requested_as_gray8_is_unsupported() {
     let err = <JxlDecoder as DecodeImage<Gray8>>::decode_image(&JxlDecoder::new(), &bytes)
         .expect_err("a colour image cannot be decoded as grayscale");
     assert!(
-        matches!(err, gamut_core::Error::Unsupported(_)),
+        err.kind() == gamut_core::ErrorKind::Unsupported,
         "expected Unsupported, got {err:?}"
     );
 
@@ -241,7 +241,7 @@ fn color_stream_requested_as_gray8_is_unsupported() {
         .unwrap();
     let err = <JxlDecoder as DecodeImage<GrayAlpha8>>::decode_image(&JxlDecoder::new(), &rgb_bytes)
         .expect_err("colour as gray+alpha is also refused");
-    assert!(matches!(err, gamut_core::Error::Unsupported(_)));
+    assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn with_bit_depth_rejects_incoherent_depths() {
             .with_bit_depth(bits)
             .encode_to_vec(img)
             .expect_err("incoherent coded depth must be rejected");
-        assert!(matches!(err, gamut_core::Error::InvalidInput(_)), "{bits}");
+        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput, "{bits}");
     }
     // An 8-bit override on an 8-bit layout is coherent (identity).
     assert!(

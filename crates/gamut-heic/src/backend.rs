@@ -151,11 +151,16 @@ impl HevcDecoder for HevcDecoders {
                 continue;
             }
             match backend.decode_intra(config, payload) {
-                Err(Error::Unsupported(message)) if message == BACKEND_DECLINED => continue,
+                Err(error)
+                    if error.kind() == gamut_core::ErrorKind::Unsupported
+                        && error.static_message() == Some(BACKEND_DECLINED) =>
+                {
+                    continue;
+                }
                 outcome => return outcome,
             }
         }
-        Err(Error::Unsupported(NO_BACKEND))
+        Err(Error::unsupported(env!("CARGO_PKG_NAME"), NO_BACKEND))
     }
 }
 
@@ -290,10 +295,12 @@ impl<D: Decoder> HevcDecoder for AbiHevcDecoder<D> {
         let height = self.dimensions.height;
         let chroma = config.chroma_format();
         let bit_depth = config.bit_depth_luma();
-        let luma_len = self
-            .dimensions
-            .num_pixels()
-            .ok_or(Error::InvalidInput("HEIF: frame dimensions overflow usize"))?;
+        let luma_len = self.dimensions.num_pixels().ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIF: frame dimensions overflow usize",
+            )
+        })?;
         let (chroma_w, chroma_h) = chroma.chroma_dimensions(width, height);
         // Cannot overflow: each chroma dimension is at most its luma dimension, and `luma_len` fit.
         let chroma_len = chroma_w as usize * chroma_h as usize;
@@ -332,12 +339,15 @@ impl<D: Decoder> HevcDecoder for AbiHevcDecoder<D> {
         let cfg = self.stream_config(config, &extradata);
         let status = self.backend.decode(&cfg, payload, &out);
         if status.is_unsupported() {
-            return Err(Error::Unsupported(BACKEND_DECLINED));
+            return Err(Error::unsupported(env!("CARGO_PKG_NAME"), BACKEND_DECLINED)
+                .with_detail(format!("codec-abi status {}", status.0)));
         }
         if !status.is_ok() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "HEIF: HEVC backend returned a failure status",
-            ));
+            )
+            .with_detail(format!("codec-abi status {}", status.0)));
         }
         DecodedFrame::new(width, height, bit_depth, chroma, y, cb, cr)
     }

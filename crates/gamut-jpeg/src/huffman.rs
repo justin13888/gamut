@@ -174,7 +174,8 @@ impl DecTable {
             used += u32::from(count) << (16 - length);
         }
         if used > (1u32 << 16) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: overfull Huffman code space (DHT)",
             ));
         }

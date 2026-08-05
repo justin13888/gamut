@@ -12,11 +12,11 @@ pub type GamutStatus = i32;
 
 /// Success.
 pub const GAMUT_OK: GamutStatus = 0;
-/// The operation rejected its input (the C mapping of `gamut_core::Error::InvalidInput`).
+/// The operation rejected its input (the C mapping of `gamut_core::ErrorKind::InvalidInput`).
 pub const GAMUT_STATUS_INVALID_INPUT: GamutStatus = 1;
-/// The operation is not supported (the C mapping of `gamut_core::Error::Unsupported`).
+/// The operation is not supported (the C mapping of `gamut_core::ErrorKind::Unsupported`).
 pub const GAMUT_STATUS_UNSUPPORTED: GamutStatus = 2;
-/// An I/O error (the C mapping of `gamut_core::Error::Io`).
+/// An I/O error (the C mapping of `gamut_core::ErrorKind::Io`).
 pub const GAMUT_STATUS_IO: GamutStatus = 3;
 /// A required pointer argument was `NULL`. Boundary-only: never maps a Rust error.
 pub const GAMUT_STATUS_NULL_ARGUMENT: GamutStatus = 4;

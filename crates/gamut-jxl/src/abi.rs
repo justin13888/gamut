@@ -118,11 +118,12 @@ fn image_desc(image: &JxlImageRef<'_>, coded_depth: u32) -> ImageDesc {
 /// decline the host converts back into "try the next backend". Anything else is a backend failure
 /// and becomes [`Error::InvalidInput`], which propagates.
 fn status_error(status: Status, declined: &'static str, failed: &'static str) -> Error {
-    if status.is_unsupported() {
-        Error::Unsupported(declined)
+    let classified = if status.is_unsupported() {
+        Error::unsupported(env!("CARGO_PKG_NAME"), declined)
     } else {
-        Error::InvalidInput(failed)
-    }
+        Error::invalid_input(env!("CARGO_PKG_NAME"), failed)
+    };
+    classified.with_detail(format!("codec-abi status {}", status.0))
 }
 
 /// Adapts a [`gamut_codec_abi::Encoder`] into a [`JxlCodestreamEncoder`] that can be pushed onto a
@@ -167,7 +168,8 @@ impl<E: AbiEncoder + Send> JxlCodestreamEncoder for AbiEncodeBackend<E> {
         if !is_conveyable(req) {
             // A late decline mirroring `supports`: the host falls through to the next backend
             // rather than letting the colour/orientation request be silently dropped.
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "JXL: codec-abi encode cannot carry this colour or orientation request",
             ));
         }
@@ -238,17 +240,21 @@ impl<D: AbiDecoder + Send> JxlCodestreamDecoder for AbiDecodeBackend<D> {
     fn decode(&mut self, info: &JxlStreamInfo, codestream: &[u8]) -> Result<JxlDecoded> {
         let Some(dims) = info.dimensions() else {
             // A late decline: without dimensions there is no buffer to decode into.
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "JXL: codec-abi decode needs stream dimensions the host could not determine",
             ));
         };
-        let (color_channels, has_alpha, bits) = layout_of(info.format()).ok_or(
-            Error::Unsupported("JXL: pixel format is not a JPEG XL coded layout"),
-        )?;
+        let (color_channels, has_alpha, bits) = layout_of(info.format()).ok_or_else(|| {
+            Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JXL: pixel format is not a JPEG XL coded layout",
+            )
+        })?;
         let channels = color_channels + u32::from(has_alpha);
         let count = dims
             .sample_count(channels as usize)
-            .ok_or(Error::InvalidInput("JXL: image too large"))?;
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image too large"))?;
         let bytes_per_sample = (bits / 8) as usize;
         let stride = (dims.width as usize)
             .saturating_mul(channels as usize)
@@ -388,18 +394,17 @@ mod tests {
 
     #[test]
     fn status_error_separates_decline_from_failure() {
-        assert!(matches!(
-            status_error(Status::UNSUPPORTED, "declined", "failed"),
-            Error::Unsupported("declined")
-        ));
-        assert!(matches!(
-            status_error(Status(-7), "declined", "failed"),
-            Error::InvalidInput("failed")
-        ));
-        assert!(matches!(
-            status_error(Status(1), "declined", "failed"),
-            Error::InvalidInput("failed")
-        ));
+        let declined = status_error(Status::UNSUPPORTED, "declined", "failed");
+        assert_eq!(declined.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(declined.static_message(), Some("declined"));
+        assert_eq!(declined.detail(), Some("codec-abi status -1"));
+
+        for status in [Status(-7), Status(1)] {
+            let failed = status_error(status, "declined", "failed");
+            assert_eq!(failed.kind(), gamut_core::ErrorKind::InvalidInput);
+            assert_eq!(failed.static_message(), Some("failed"));
+            assert!(failed.detail().is_some());
+        }
     }
 
     #[test]
@@ -507,12 +512,12 @@ mod tests {
             payload: Vec::new(),
             seen_quality: None,
         });
-        assert!(matches!(
-            late.encode(&req, &image),
-            Err(Error::Unsupported(
-                "JXL: codec-abi encode backend declined the job"
-            ))
-        ));
+        let error = late.encode(&req, &image).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: codec-abi encode backend declined the job")
+        );
 
         // Any other status is a terminal failure.
         let mut failing = AbiEncodeBackend::new(FakeAbiEncoder {
@@ -521,10 +526,12 @@ mod tests {
             payload: Vec::new(),
             seen_quality: None,
         });
-        assert!(matches!(
-            failing.encode(&req, &image),
-            Err(Error::InvalidInput("JXL: codec-abi encode backend failed"))
-        ));
+        let error = failing.encode(&req, &image).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: codec-abi encode backend failed")
+        );
     }
 
     #[test]
@@ -545,12 +552,12 @@ mod tests {
             seen_quality: None,
         });
         assert!(!backend.supports(&odd));
-        assert!(matches!(
-            backend.encode(&odd, &image),
-            Err(Error::Unsupported(
-                "JXL: codec-abi encode cannot carry this colour or orientation request"
-            ))
-        ));
+        let error = backend.encode(&odd, &image).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: codec-abi encode cannot carry this colour or orientation request")
+        );
         // The inner backend was never asked to encode.
         assert_eq!(backend.get_ref().seen_quality, None);
     }
@@ -655,12 +662,12 @@ mod tests {
         });
         // `supports` declines outright, and the late path is an Unsupported decline too.
         assert!(!backend.supports(&info));
-        assert!(matches!(
-            backend.decode(&info, &[0xFF, 0x0A]),
-            Err(Error::Unsupported(
-                "JXL: codec-abi decode needs stream dimensions the host could not determine"
-            ))
-        ));
+        let error = backend.decode(&info, &[0xFF, 0x0A]).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: codec-abi decode needs stream dimensions the host could not determine")
+        );
     }
 
     #[test]
@@ -678,12 +685,12 @@ mod tests {
             fill: 0,
             seen_size: None,
         });
-        assert!(matches!(
-            late.decode(&info, &[0xFF, 0x0A]),
-            Err(Error::Unsupported(
-                "JXL: codec-abi decode backend declined the job"
-            ))
-        ));
+        let error = late.decode(&info, &[0xFF, 0x0A]).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: codec-abi decode backend declined the job")
+        );
 
         let mut failing = AbiDecodeBackend::new(FakeAbiDecoder {
             supported: true,
@@ -691,10 +698,12 @@ mod tests {
             fill: 0,
             seen_size: None,
         });
-        assert!(matches!(
-            failing.decode(&info, &[0xFF, 0x0A]),
-            Err(Error::InvalidInput("JXL: codec-abi decode backend failed"))
-        ));
+        let error = failing.decode(&info, &[0xFF, 0x0A]).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: codec-abi decode backend failed")
+        );
 
         // supports=false is the early decline.
         let mut declining = AbiDecodeBackend::new(FakeAbiDecoder {

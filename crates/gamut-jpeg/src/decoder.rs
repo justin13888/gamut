@@ -184,27 +184,40 @@ impl JpegDecoder {
         if self.max_width.is_some_and(|max| width > max)
             || (height != 0 && self.max_height.is_some_and(|max| height > max))
         {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: image exceeds the dimension limit",
             ));
         }
         let row_bytes = usize::try_from(width)
             .ok()
             .and_then(|width| width.checked_mul(components))
-            .ok_or(Error::InvalidInput("JPEG: image dimensions overflow"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
+            })?;
         if let Some(max) = self.max_image_bytes {
             let native_bytes = if height == 0 {
                 row_bytes
             } else {
                 row_bytes
-                    .checked_mul(
-                        usize::try_from(height)
-                            .map_err(|_| Error::InvalidInput("JPEG: image dimensions overflow"))?,
-                    )
-                    .ok_or(Error::InvalidInput("JPEG: image dimensions overflow"))?
+                    .checked_mul(usize::try_from(height).map_err(|_| {
+                        Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "JPEG: image dimensions overflow",
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "JPEG: image dimensions overflow",
+                        )
+                    })?
             };
             if native_bytes > max {
-                return Err(Error::Unsupported("JPEG: image exceeds the size limit"));
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: image exceeds the size limit",
+                ));
             }
         }
         Ok(())
@@ -224,7 +237,9 @@ impl JpegDecoder {
         if let Some(max_bytes) = self.max_image_bytes {
             let row_bytes = usize::from(frame.x)
                 .checked_mul(frame.components.len())
-                .ok_or(Error::InvalidInput("JPEG: image dimensions overflow"))?;
+                .ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: image dimensions overflow")
+                })?;
             let height = max_bytes / row_bytes;
             let size_limit = McuRowLimit {
                 rows: scan_mcu_rows(frame, scan, height),
@@ -265,7 +280,8 @@ fn backend_rgb_into(img: &DecodedJpeg, out: &mut [u8]) -> Result<()> {
             }
         }
         _ => {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8",
             ));
         }
@@ -277,7 +293,8 @@ fn backend_rgb_into(img: &DecodedJpeg, out: &mut [u8]) -> Result<()> {
 /// single-component raster can be presented this way.
 fn backend_gray_into(img: &DecodedJpeg, out: &mut [u8]) -> Result<()> {
     if img.format() != PixelFormat::Gray8 {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: not a single-component grayscale image",
         ));
     }
@@ -289,7 +306,8 @@ fn backend_gray_into(img: &DecodedJpeg, out: &mut [u8]) -> Result<()> {
 /// four-component raster can be presented this way.
 fn backend_cmyk_into(img: &DecodedJpeg, out: &mut [u8]) -> Result<()> {
     if img.format() != PixelFormat::Cmyk8 {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: not a 4-component CMYK/YCCK image",
         ));
     }
@@ -350,16 +368,16 @@ pub struct JpegInfo {
 pub fn info(data: &[u8]) -> Result<JpegInfo> {
     let (process, payload) = frame_header(data)?;
     // Frame header layout (§B.2.2): P, Y(2), X(2), Nf, then components.
-    let precision = *payload.first().ok_or(TRUNC_SOF)?;
+    let precision = *payload.first().ok_or_else(trunc_sof)?;
     let y = u16::from_be_bytes([
-        *payload.get(1).ok_or(TRUNC_SOF)?,
-        *payload.get(2).ok_or(TRUNC_SOF)?,
+        *payload.get(1).ok_or_else(trunc_sof)?,
+        *payload.get(2).ok_or_else(trunc_sof)?,
     ]);
     let x = u16::from_be_bytes([
-        *payload.get(3).ok_or(TRUNC_SOF)?,
-        *payload.get(4).ok_or(TRUNC_SOF)?,
+        *payload.get(3).ok_or_else(trunc_sof)?,
+        *payload.get(4).ok_or_else(trunc_sof)?,
     ]);
-    let nf = *payload.get(5).ok_or(TRUNC_SOF)?;
+    let nf = *payload.get(5).ok_or_else(trunc_sof)?;
     Ok(JpegInfo {
         width: u32::from(x),
         height: u32::from(y),
@@ -388,13 +406,22 @@ pub(crate) fn frame_header(data: &[u8]) -> Result<(JpegProcess, &[u8])> {
             code::SOF1 => JpegProcess::ExtendedSequential,
             code::SOF2 => JpegProcess::Progressive,
             code::SOF3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
-                return Err(Error::Unsupported("JPEG: unsupported process"));
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: unsupported process",
+                ));
             }
             code::SOS | code::EOI_CODE => {
-                return Err(Error::InvalidInput("JPEG: no frame header before scan/end"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: no frame header before scan/end",
+                ));
             }
             code::SOI | code::TEM | code::RST0..=code::RST7 => {
-                return Err(Error::InvalidInput("JPEG: unexpected standalone marker"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: unexpected standalone marker",
+                ));
             }
             _ => {
                 // Any other segment (tables, application data, comment): skip by length.
@@ -483,7 +510,10 @@ pub fn metadata(data: &[u8]) -> Result<JpegMetadata> {
         match marker {
             code::SOS | code::EOI_CODE => break,
             code::SOI | code::TEM | code::RST0..=code::RST7 => {
-                return Err(Error::InvalidInput("JPEG: unexpected standalone marker"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: unexpected standalone marker",
+                ));
             }
             _ => {}
         }
@@ -506,12 +536,17 @@ pub fn metadata(data: &[u8]) -> Result<JpegMetadata> {
 }
 
 /// Shared truncated-frame-header error.
-pub(crate) const TRUNC_SOF: Error = Error::InvalidInput("JPEG: truncated frame header");
+pub(crate) fn trunc_sof() -> Error {
+    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated frame header")
+}
 
 /// Verifies the two-byte SOI that opens every JPEG stream (§B.2.1).
 pub(crate) fn expect_soi(data: &[u8]) -> Result<()> {
     if data.len() < 2 || data[0] != 0xFF || data[1] != code::SOI {
-        return Err(Error::InvalidInput("JPEG: missing SOI marker"));
+        return Err(
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: missing SOI marker")
+                .with_byte_offset(0),
+        );
     }
     Ok(())
 }
@@ -520,32 +555,43 @@ pub(crate) fn expect_soi(data: &[u8]) -> Result<()> {
 /// code and the offset just past it.
 pub(crate) fn read_marker(data: &[u8], pos: usize) -> Result<(u8, usize)> {
     if data.get(pos) != Some(&0xFF) {
-        return Err(Error::InvalidInput("JPEG: expected a marker"));
+        return Err(
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: expected a marker")
+                .with_byte_offset(pos as u64),
+        );
     }
     // The marker code is the first non-fill byte: skip any run of fill 0xFF bytes (§B.1.1.2).
     let code_pos = pos + data[pos..].iter().take_while(|&&b| b == 0xFF).count();
-    let code = *data
-        .get(code_pos)
-        .ok_or(Error::InvalidInput("JPEG: truncated marker"))?;
+    let code = *data.get(code_pos).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated marker")
+            .with_byte_offset(code_pos as u64)
+    })?;
     Ok((code, code_pos + 1))
 }
 
 /// Reads a marker segment's payload at `pos` (the offset just past the marker code), returning the
 /// payload bytes and the offset just past the segment. The two-byte length counts itself (§B.1.1.4).
 pub(crate) fn read_segment(data: &[u8], pos: usize) -> Result<(&[u8], usize)> {
-    let hi = *data.get(pos).ok_or(TRUNC_SEG)?;
-    let lo = *data.get(pos + 1).ok_or(TRUNC_SEG)?;
+    let truncated = || trunc_seg().with_byte_offset(pos as u64);
+    let hi = *data.get(pos).ok_or_else(truncated)?;
+    let lo = *data.get(pos.saturating_add(1)).ok_or_else(truncated)?;
     let len = usize::from(u16::from_be_bytes([hi, lo]));
     if len < 2 {
-        return Err(Error::InvalidInput("JPEG: segment length < 2"));
+        return Err(
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: segment length < 2")
+                .with_byte_offset(pos as u64),
+        );
     }
-    let end = pos + len;
-    let payload = data.get(pos + 2..end).ok_or(TRUNC_SEG)?;
+    let end = pos.checked_add(len).ok_or_else(truncated)?;
+    let payload_start = pos.checked_add(2).ok_or_else(truncated)?;
+    let payload = data.get(payload_start..end).ok_or_else(truncated)?;
     Ok((payload, end))
 }
 
 /// Shared truncated-segment error.
-const TRUNC_SEG: Error = Error::InvalidInput("JPEG: truncated segment");
+fn trunc_seg() -> Error {
+    Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: truncated segment")
+}
 
 /// One decoded component ready for presentation: its sampling factors, the valid image region, and
 /// the reconstructed plane at block-padded resolution (`stride` wide).
@@ -617,7 +663,8 @@ fn decide_transform(img: &DecodedImage) -> Result<Transform> {
             Some(2) => Transform::Ycck,
             _ => Transform::Cmyk,
         }),
-        _ => Err(Error::Unsupported(
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: only 1, 3, or 4 component streams are supported",
         )),
     }
@@ -643,7 +690,10 @@ impl JpegDecoder {
                 code::EOI_CODE => break,
                 code::SOF0 | code::SOF1 => {
                     if frame.is_some() {
-                        return Err(Error::InvalidInput("JPEG: duplicate frame header"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "JPEG: duplicate frame header",
+                        ));
                     }
                     let (payload, next) = read_segment(data, after)?;
                     let f = parse_sof(payload)?;
@@ -654,7 +704,10 @@ impl JpegDecoder {
                 }
                 code::SOF2 => {
                     if frame.is_some() {
-                        return Err(Error::InvalidInput("JPEG: duplicate frame header"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "JPEG: duplicate frame header",
+                        ));
                     }
                     let (payload, next) = read_segment(data, after)?;
                     let f = parse_sof(payload)?;
@@ -663,7 +716,8 @@ impl JpegDecoder {
                         // A Y=0 (DNL-deferred height) progressive frame is rejected: the
                         // coefficient buffers must be sized to the full block grid before the first
                         // scan, and libjpeg-turbo never emits one. See STATUS.md.
-                        return Err(Error::Unsupported(
+                        return Err(Error::unsupported(
+                            env!("CARGO_PKG_NAME"),
                             "JPEG: progressive frame with deferred height (Y=0/DNL) not supported",
                         ));
                     }
@@ -673,17 +727,22 @@ impl JpegDecoder {
                     pos = next;
                 }
                 code::SOF3 => {
-                    return Err(Error::Unsupported(
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
                         "JPEG: lossless process (SOF3) not supported",
                     ));
                 }
                 0xC5..=0xC7 => {
-                    return Err(Error::Unsupported(
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
                         "JPEG: hierarchical process (SOF5-7) not supported",
                     ));
                 }
                 0xC9..=0xCB | 0xCD..=0xCF | code::DAC => {
-                    return Err(Error::Unsupported("JPEG: arithmetic coding not supported"));
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        "JPEG: arithmetic coding not supported",
+                    ));
                 }
                 code::DHT => {
                     let (payload, next) = read_segment(data, after)?;
@@ -701,9 +760,9 @@ impl JpegDecoder {
                     pos = next;
                 }
                 code::SOS => {
-                    let f = frame
-                        .as_ref()
-                        .ok_or(Error::InvalidInput("JPEG: SOS before SOF"))?;
+                    let f = frame.as_ref().ok_or_else(|| {
+                        Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: SOS before SOF")
+                    })?;
                     let (payload, next) = read_segment(data, after)?;
                     let scan = parse_sos(payload, f, progressive)?;
                     if progressive {
@@ -711,7 +770,8 @@ impl JpegDecoder {
                     } else {
                         for sc in &scan.components {
                             if planes[sc.frame_index].is_some() {
-                                return Err(Error::InvalidInput(
+                                return Err(Error::invalid_input(
+                                    env!("CARGO_PKG_NAME"),
                                     "JPEG: component coded by more than one scan",
                                 ));
                             }
@@ -751,7 +811,8 @@ impl JpegDecoder {
                     pos = next;
                 }
                 code::SOI | code::TEM | code::RST0..=code::RST7 => {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "JPEG: unexpected standalone marker outside a scan",
                     ));
                 }
@@ -798,12 +859,14 @@ fn assemble_progressive(
     comps: Vec<ProgComp>,
     color: ColorInfo,
 ) -> Result<DecodedImage> {
-    let frame = frame.ok_or(Error::InvalidInput("JPEG: no frame header"))?;
+    let frame = frame
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: no frame header"))?;
     for c in &comps {
         // Partial-render policy: an incomplete stream renders whatever bands arrived, but every
         // component must at least have its DC scan or the image has no baseline to show.
         if !c.has_dc() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: progressive frame missing a component's DC scan",
             ));
         }
@@ -819,9 +882,11 @@ fn assemble(
     planes: Vec<Option<Plane>>,
     color: ColorInfo,
 ) -> Result<DecodedImage> {
-    let frame = frame.ok_or(Error::InvalidInput("JPEG: no frame header"))?;
+    let frame = frame
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: no frame header"))?;
     if frame.y == 0 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "JPEG: frame height Y is 0 and no DNL supplied it",
         ));
     }
@@ -833,14 +898,17 @@ fn assemble(
     let mut comps = Vec::with_capacity(frame.components.len());
     let mut ids = Vec::with_capacity(frame.components.len());
     for (fc, plane) in frame.components.iter().zip(planes) {
-        let plane = plane.ok_or(Error::InvalidInput("JPEG: a component was never coded"))?;
+        let plane = plane.ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: a component was never coded")
+        })?;
         let comp_w = (x * usize::from(fc.h)).div_ceil(hmax);
         let comp_h = (y * usize::from(fc.v)).div_ceil(vmax);
         // The decoded plane must cover the valid region (a DNL claiming more lines than were coded
         // would fail here).
         let padded_rows = plane.data.len().checked_div(plane.stride).unwrap_or(0);
         if comp_w > plane.stride || comp_h > padded_rows {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: decoded plane smaller than the frame declares",
             ));
         }
@@ -879,7 +947,8 @@ fn present_rgb_into(img: &DecodedImage, out: &mut [u8]) -> Result<()> {
     let (w, h) = (img.width as usize, img.height as usize);
     let transform = decide_transform(img)?;
     if matches!(transform, Transform::Cmyk | Transform::Ycck) {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8",
         ));
     }
@@ -924,7 +993,8 @@ fn present_gray(img: &DecodedImage) -> Result<Vec<u8>> {
 /// Errors are raised before any byte of `out` is written, so a failed call leaves it untouched.
 fn present_gray_into(img: &DecodedImage, out: &mut [u8]) -> Result<()> {
     if decide_transform(img)? != Transform::Gray {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: not a single-component grayscale image",
         ));
     }
@@ -950,7 +1020,8 @@ fn present_cmyk(img: &DecodedImage) -> Result<Vec<u8>> {
 fn present_cmyk_into(img: &DecodedImage, out: &mut [u8]) -> Result<()> {
     let transform = decide_transform(img)?;
     if !matches!(transform, Transform::Cmyk | Transform::Ycck) {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: not a 4-component CMYK/YCCK image",
         ));
     }
@@ -1089,7 +1160,7 @@ mod tests {
     //! CMYK/YCCK, Adobe/RGB colour, SOF1).
 
     use gamut_color::{ColorRange, ycbcr_to_rgb};
-    use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Rgb8};
+    use gamut_core::{Cmyk8, DecodeImage, Dimensions, Gray8, ImageBuf, Rgb8};
     use gamut_dsp::jpeg::idct8x8;
 
     use super::*;
@@ -1912,16 +1983,22 @@ mod tests {
             assert!(
                 matches!(
                     <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &m),
-                    Err(Error::Unsupported(_))
+                    Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
                 ),
                 "marker {code:#x} must be Unsupported"
             );
         }
         // info() reports Unsupported for an unsupported process, InvalidInput for a scan-before-frame
         // stream (SOS with no preceding SOF).
-        assert!(matches!(info(&flip(0xC3)), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            info(&flip(0xC3)),
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
+        ));
         let early = [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x08, 1, 1, 0x00, 0, 63, 0];
-        assert!(matches!(info(&early), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            info(&early),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
 
         // Duplicate SOF: splice a second SOF0 segment before SOS → InvalidInput.
         let sos = base.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
@@ -1931,7 +2008,7 @@ mod tests {
         dup.splice(sos..sos, extra);
         assert!(matches!(
             <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &dup),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 
@@ -2049,7 +2126,14 @@ mod tests {
     /// would change WHICH error is reported, not merely whether one is.
     fn err_msg<T>(r: gamut_core::Result<T>) -> &'static str {
         match r {
-            Err(Error::InvalidInput(m)) | Err(Error::Unsupported(m)) => m,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    gamut_core::ErrorKind::InvalidInput | gamut_core::ErrorKind::Unsupported
+                ) =>
+            {
+                error.static_message().unwrap_or("other")
+            }
             Err(_) => "other",
             Ok(_) => "ok",
         }
@@ -2771,7 +2855,10 @@ mod tests {
 
         // An AC scan before any DC scan of the component → InvalidInput (§G.1.1.1.1).
         let ac_before_dc = prog_scans(&quant, 8, 8, &[(&[(1, 0, 0)], (1, 63, 0, 0), Vec::new())]);
-        assert!(matches!(d(&ac_before_dc), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            d(&ac_before_dc),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
 
         // A refinement scan of a band whose first pass never happened → InvalidInput. DC first, then
         // an AC *refinement* (Ah=1, Al=0) with no AC first pass.
@@ -2784,7 +2871,10 @@ mod tests {
                 (&[(1, 0, 0)], (1, 63, 1, 0), Vec::new()),
             ],
         );
-        assert!(matches!(d(&refine_first), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            d(&refine_first),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
 
         // The same band coded twice at the first pass (overlap) → InvalidInput. DC first, AC band
         // [1..5] first pass, then AC band [3..8] first pass overlapping at 3..5.
@@ -2798,7 +2888,10 @@ mod tests {
                 (&[(1, 0, 0)], (3, 8, 0, 0), ac_eob_body()),
             ],
         );
-        assert!(matches!(d(&overlap), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            d(&overlap),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
 
         // A multi-component AC scan (Ns = 2) is rejected at header parse (§B.2.3).
         let multi_ac = {
@@ -2807,7 +2900,10 @@ mod tests {
             marker::write_marker(&mut j, marker::code::EOI);
             j
         };
-        assert!(matches!(d(&multi_ac), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            d(&multi_ac),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
 
         // EOI after a DC-only scan leaves the frame renderable (partial-render policy): decode Ok.
         let dc_only = prog_scans(
@@ -2850,7 +2946,7 @@ mod tests {
         marker::write_marker(&mut jpeg, marker::code::EOI);
         assert!(matches!(
             <JpegDecoder as DecodeImage<Rgb8>>::decode_image(&JpegDecoder::new(), &jpeg),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 
@@ -2868,7 +2964,7 @@ mod tests {
         marker::write_marker(&mut jpeg, marker::code::EOI);
         assert!(matches!(
             <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &jpeg),
-            Err(Error::Unsupported(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
     }
 
@@ -2952,7 +3048,7 @@ mod tests {
         marker::write_marker(&mut bad, marker::code::EOI);
         assert!(matches!(
             <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &bad),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 
@@ -2979,7 +3075,7 @@ mod tests {
         marker::write_marker(&mut jpeg, marker::code::EOI);
         assert!(matches!(
             <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &jpeg),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 
@@ -3063,7 +3159,7 @@ mod tests {
         marker::write_marker(&mut jpeg, marker::code::EOI);
         assert!(matches!(
             <JpegDecoder as DecodeImage<Gray8>>::decode_image(&JpegDecoder::new(), &jpeg),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 

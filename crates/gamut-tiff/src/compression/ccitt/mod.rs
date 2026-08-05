@@ -72,7 +72,7 @@ fn encode_run(out: &mut BitWriter, length: usize, white: bool) -> Result<()> {
     let put = |out: &mut BitWriter, run: u16| -> Result<()> {
         let &(v, l) = enc
             .get(&run)
-            .ok_or(Error::Unsupported("CCITT: missing run code"))?;
+            .ok_or_else(|| Error::unsupported(env!("CARGO_PKG_NAME"), "CCITT: missing run code"))?;
         out.put_bits(v, u32::from(l));
         Ok(())
     };
@@ -157,16 +157,20 @@ fn decode_code(r: &mut BitReader, white: bool) -> Result<u16> {
     let mut value = 0u32;
     let mut len = 0u8;
     loop {
-        let bit = r
-            .read_bit()
-            .ok_or(Error::InvalidInput("CCITT: truncated code"))?;
+        let bit = r.read_bit().ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: truncated code")
+                .with_byte_offset((r.pos / 8) as u64)
+        })?;
         value = (value << 1) | u32::from(bit);
         len += 1;
         if let Some(&run) = dec.get(&(len, value)) {
             return Ok(run);
         }
         if len >= 14 {
-            return Err(Error::InvalidInput("CCITT: invalid code"));
+            return Err(
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: invalid code")
+                    .with_byte_offset((r.pos / 8) as u64),
+            );
         }
     }
 }
@@ -201,7 +205,11 @@ pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
         while pos < width {
             let run = decode_run(&mut reader, white)?;
             if pos + run > width {
-                return Err(Error::InvalidInput("CCITT: run overruns the row"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "CCITT: run overruns the row",
+                )
+                .with_byte_offset((reader.pos / 8) as u64));
             }
             let bit = if white { white_bit } else { 1 - white_bit };
             if bit == 1 {

@@ -18,7 +18,7 @@ while never re-checking the invariant.
 
 | Item | Shape | Openness |
 | ---- | ----- | -------- |
-| `Error` / `Result` | 2 variants (`InvalidInput`/`Unsupported`), each `&'static str` | `#[non_exhaustive]` — new variants are additive |
+| `Error` / `ErrorKind` / `Result` | allocation-free `InvalidInput`/`Unsupported`, sourced `Io`, and boxed `Context`; stable three-way classification | `#[non_exhaustive]`; `ErrorKind` is `repr(u32)` with append-only discriminants |
 | `Dimensions` | plain `{ width, height }` value type + `new`/`num_pixels`/`sample_count`/`is_empty` | public fields; length invariant lives on the buffers |
 | `EncodeImage<P>` / `DecodeImage<P>` | one `impl` per supported layout `P`; object-safe | sealed via the `Pixel` bound |
 | `ImageRef<'a, P>` / `ImageBuf<P>` | borrowed / owned interleaved buffers | length-validated at construction |
@@ -41,9 +41,11 @@ backward-compatible; removing or reshaping any of the above would not.
 - **The length invariant lives on the buffers, not on `Dimensions`.** `Dimensions` keeps public
   fields for ergonomic literals; non-emptiness and the length product are enforced once, at buffer
   construction, so codecs receive a known-good buffer and never re-check.
-- **Static error messages.** `Error` payloads are `&'static str`. This is *the* workspace error type
-  — every crate returns `gamut_core::Result` and none defines its own — so the two variants are
-  deliberately minimal; richer dynamic context is deferred (see below), addable without a break.
+- **Static fast path, structured failure context.** `InvalidInput` and `Unsupported` keep their
+  original `&'static str` payloads and allocation-free construction. Producers opt into one boxed
+  `Context` on an error path to attach an origin, parser-relative byte offset, and owned backend or
+  parser detail. `kind` and `static_message` look through that wrapper, so classification and
+  fallback do not depend on presentation text.
 - **`luminance` lives here, not in `gamut-color`.** Both `gamut-color` and `gamut-tonemap` need the
   reference nit levels, and `gamut-tonemap` depends only on core at runtime; putting the constants
   here keeps a single authoritative definition without coupling tonemap to color.
@@ -52,12 +54,6 @@ backward-compatible; removing or reshaping any of the above would not.
   `slice[i]`), not error handling.
 
 ## Deferred / tracked follow-ups (all additive — none blocks v1)
-
-- **Dynamic error context.** `Error::InvalidInput`/`Unsupported` carry only `&'static str`, so a
-  boundary that funnels a richer foreign error into core drops the dynamic detail (e.g. `gamut-xmp`'s
-  7-variant error collapses to two static strings; `gamut-dng` discards the Deflate source). Because
-  `Error` is `#[non_exhaustive]`, a future variant carrying an owned message and/or a boxed source
-  can land without a breaking change; deferred until a caller needs it.
 - **A shared palette primitive.** `Indexed8` is a first-class buffer brand but has no `EncodeImage`
   path, because the single-buffer trait shape cannot carry a palette table; `gamut-png` and
   `gamut-tiff` each define their own palette type today. A shared palette primitive (alongside

@@ -17,15 +17,20 @@ pub fn encode(raw: &[u8]) -> Vec<u8> {
 /// Inflates one zlib stream to exactly `expected` bytes.
 pub fn decode(zlib: &[u8], expected: usize) -> Result<Vec<u8>> {
     let decoded = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(zlib, expected).map_err(
-        |error| match error.status {
-            TINFLStatus::HasMoreOutput => {
-                Error::InvalidInput("TIFF: Deflate stream exceeds the expected size")
-            }
-            _ => Error::InvalidInput("TIFF: corrupt Deflate stream"),
+        |error| {
+            let classified = match error.status {
+                TINFLStatus::HasMoreOutput => Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: Deflate stream exceeds the expected size",
+                ),
+                _ => Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: corrupt Deflate stream"),
+            };
+            classified.with_detail(format!("miniz status {:?}", error.status))
         },
     )?;
     if decoded.len() != expected {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "TIFF: Deflate stream shorter than expected",
         ));
     }
@@ -41,13 +46,15 @@ mod tests {
         let raw: Vec<u8> = (0..4096u32).map(|i| (i * 17) as u8).collect();
         let zlib = encode(&raw);
         assert_eq!(decode(&zlib, raw.len()).unwrap(), raw);
+        let too_long = decode(&zlib, raw.len() - 1).unwrap_err();
         assert_eq!(
-            decode(&zlib, raw.len() - 1).unwrap_err().to_string(),
-            "invalid input: TIFF: Deflate stream exceeds the expected size"
+            too_long.static_message(),
+            Some("TIFF: Deflate stream exceeds the expected size")
         );
+        assert!(too_long.detail().is_some());
         assert_eq!(
-            decode(&zlib, raw.len() + 1).unwrap_err().to_string(),
-            "invalid input: TIFF: Deflate stream shorter than expected"
+            decode(&zlib, raw.len() + 1).unwrap_err().static_message(),
+            Some("TIFF: Deflate stream shorter than expected")
         );
     }
 

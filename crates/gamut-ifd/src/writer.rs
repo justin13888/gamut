@@ -217,7 +217,8 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
             if let Value::Unknown(u) = &field.value
                 && (u.order() != order || u.variant() != variant)
             {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "TIFF: unknown-type field cannot be transcoded across byte order or variant",
                 ));
             }
@@ -230,7 +231,8 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
         // The entry count must fit its on-disk width (2 bytes in classic TIFF); a silent `as u16`
         // truncation would drop entries.
         if variant == Variant::Classic && node.n_entries > usize::from(u16::MAX) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: too many IFD entries for classic TIFF",
             ));
         }
@@ -254,34 +256,44 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
             .flat_map(|n| n.ifd.fields())
             .filter(|f| f.tag == p.tag);
         let Some(field) = fields.next() else {
-            return Err(Error::InvalidInput("TIFF: pinned tag is not present"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: pinned tag is not present",
+            ));
         };
         if fields.next().is_some()
             || nodes
                 .iter()
                 .any(|n| n.pointers.iter().any(|(t, _)| *t == p.tag))
         {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: pinned tag must appear exactly once",
             ));
         }
         let Some(len) = field.value.byte_len() else {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: an unknown-type value cannot be pinned",
             ));
         };
         if len <= inline as u64 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: pinned value packs inline, there is no span to pin",
             ));
         }
         if p.offset < dir_end as u64 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: pinned offset collides with the directory layout",
             ));
         }
         if p.offset.checked_add(len).is_none() {
-            return Err(Error::InvalidInput("TIFF: pinned span overflows"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: pinned span overflows",
+            ));
         }
         pins.push(Pin {
             tag: p.tag,
@@ -294,7 +306,10 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
         .windows(2)
         .any(|w| w[1].offset < w[0].offset + w[0].len)
     {
-        return Err(Error::InvalidInput("TIFF: pinned spans overlap"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: pinned spans overlap",
+        ));
     }
 
     // With every directory offset known, synthesise each pointer field (a child-offset array) and
@@ -346,8 +361,9 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
                             c
                         }
                     };
-                    let start_usize = usize::try_from(start)
-                        .map_err(|_| Error::InvalidInput("TIFF: layout overflows"))?;
+                    let start_usize = usize::try_from(start).map_err(|_| {
+                        Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: layout overflows")
+                    })?;
                     offs.push(start);
                     pool.push((start_usize, field.value().encode(order)));
                     value_spans.push((node_offset, *tag, start, n));
@@ -373,7 +389,8 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
     // total-length check proves every classic 32-bit offset (and value count, which is at most
     // a byte length) fits without truncation.
     if layout_overflows(variant, total_len as u64) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "TIFF: layout exceeds the 4 GiB classic-TIFF offset limit",
         ));
     }
