@@ -39,7 +39,10 @@ impl ImageGrid {
         let mut r = BoxReader::new(data);
         let version = r.u8()?;
         if version != 0 {
-            return Err(Error::Unsupported("ISOBMFF: grid version (only v0)"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: grid version (only v0)",
+            ));
         }
         let flags = r.u8()?;
         let rows = u16::from(r.u8()?) + 1;
@@ -51,7 +54,10 @@ impl ImageGrid {
             (r.u32()?, r.u32()?)
         };
         if r.remaining() != 0 {
-            return Err(Error::InvalidInput("ISOBMFF: grid has trailing bytes"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: grid has trailing bytes",
+            ));
         }
         Ok(Self {
             rows,
@@ -70,7 +76,8 @@ impl ImageGrid {
     /// cannot be represented (rather than silently truncating it).
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         if !(1..=256).contains(&self.rows) || !(1..=256).contains(&self.columns) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "ISOBMFF: grid rows/columns out of range (1..=256)",
             ));
         }

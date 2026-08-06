@@ -49,11 +49,12 @@ impl Planar8 {
     /// Returns [`Error::InvalidInput`] if `rgb.len() != width * height * 3`, or if that product
     /// overflows `usize`.
     pub fn from_rgb8_identity(rgb: &[u8], width: u32, height: u32) -> Result<Self> {
-        let n = Dimensions { width, height }
-            .num_pixels()
-            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+        let n = Dimensions { width, height }.num_pixels().ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
+        })?;
         if n.checked_mul(3) != Some(rgb.len()) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "rgb buffer length != width * height * 3",
             ));
         }
@@ -88,11 +89,14 @@ impl Planar8 {
     /// Returns [`Error::InvalidInput`] if any plane's length is not `width * height`, or if that
     /// product overflows `usize`.
     pub fn from_planes(width: u32, height: u32, planes: [Vec<u8>; 3]) -> Result<Self> {
-        let n = Dimensions { width, height }
-            .num_pixels()
-            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+        let n = Dimensions { width, height }.num_pixels().ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
+        })?;
         if planes.iter().any(|p| p.len() != n) {
-            return Err(Error::InvalidInput("plane length != width * height"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "plane length != width * height",
+            ));
         }
         Ok(Self {
             width,

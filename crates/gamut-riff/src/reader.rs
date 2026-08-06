@@ -16,6 +16,8 @@ use crate::fourcc::FourCc;
 pub struct RiffReader<'a> {
     /// Remaining bytes, positioned at the next chunk header. Emptied once exhausted or on error.
     rest: &'a [u8],
+    /// Offset of `rest` within the complete RIFF input.
+    offset: usize,
 }
 
 impl<'a> RiffReader<'a> {
@@ -29,25 +31,38 @@ impl<'a> RiffReader<'a> {
     pub fn new(data: &'a [u8]) -> Result<Self> {
         // 12-byte header: 'RIFF' (4) + file size (4, little-endian) + form (4).
         if data.len() < 12 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "RIFF: shorter than 12-byte file header",
-            ));
+            )
+            .with_byte_offset(data.len() as u64));
         }
         if &data[0..4] != FourCc::RIFF.as_bytes() {
-            return Err(Error::InvalidInput("RIFF: missing RIFF magic"));
+            return Err(
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "RIFF: missing RIFF magic")
+                    .with_byte_offset(0),
+            );
         }
         if &data[8..12] != FourCc::WEBP.as_bytes() {
-            return Err(Error::InvalidInput("RIFF: form is not WEBP"));
+            return Err(
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "RIFF: form is not WEBP")
+                    .with_byte_offset(8),
+            );
         }
         // file_size counts everything after the size field: the 'WEBP' form (4) plus the chunks. It
         // must cover at least the form and must not claim more bytes than are present.
         let file_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
         if file_size < 4 || file_size > data.len() - 8 {
-            return Err(Error::InvalidInput("RIFF: declared file size out of range"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "RIFF: declared file size out of range",
+            )
+            .with_byte_offset(4));
         }
         // Chunks occupy bytes 12..(8 + file_size); ignore any trailing data past that point.
         Ok(Self {
             rest: &data[12..8 + file_size],
+            offset: 12,
         })
     }
 }
@@ -60,24 +75,33 @@ impl<'a> Iterator for RiffReader<'a> {
             return None;
         }
         if self.rest.len() < CHUNK_HEADER_LEN {
+            let offset = self.offset;
             self.rest = &[];
-            return Some(Err(Error::InvalidInput("RIFF: truncated chunk header")));
+            return Some(Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "RIFF: truncated chunk header",
+            )
+            .with_byte_offset(offset as u64)));
         }
         let fourcc = FourCc([self.rest[0], self.rest[1], self.rest[2], self.rest[3]]);
         let size =
             u32::from_le_bytes([self.rest[4], self.rest[5], self.rest[6], self.rest[7]]) as usize;
         let avail = self.rest.len() - CHUNK_HEADER_LEN;
         if size > avail {
+            let offset = self.offset;
             self.rest = &[];
-            return Some(Err(Error::InvalidInput(
+            return Some(Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "RIFF: chunk size exceeds remaining data",
-            )));
+            )
+            .with_byte_offset(offset as u64)));
         }
         let payload = &self.rest[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size];
         // Advance past header + payload + the RIFF pad byte. A non-conforming final chunk may omit
         // the pad byte; `get` clamps so the reader simply ends instead of erroring on it.
         let consumed = CHUNK_HEADER_LEN + size + ChunkHeader::padding(size as u32);
         self.rest = self.rest.get(consumed..).unwrap_or(&[]);
+        self.offset += consumed;
         Some(Ok(Chunk { fourcc, payload }))
     }
 }
@@ -189,7 +213,9 @@ mod tests {
         // chunk and slice the payload out of bounds.
         file[16..20].copy_from_slice(&5u32.to_le_bytes());
         let mut reader = RiffReader::new(&file).unwrap();
-        assert!(reader.next().unwrap().is_err());
+        let error = reader.next().unwrap().unwrap_err();
+        assert_eq!(error.origin(), Some("gamut-riff"));
+        assert_eq!(error.byte_offset(), Some(12));
         assert!(reader.next().is_none(), "iteration stops after an error");
     }
 
@@ -206,6 +232,9 @@ mod tests {
         let results: Vec<_> = RiffReader::new(&file).unwrap().collect();
         assert_eq!(results.len(), 2);
         assert!(results[0].is_ok());
-        assert!(results[1].is_err(), "trailing partial header is an error");
+        let error = results[1]
+            .as_ref()
+            .expect_err("trailing partial header is an error");
+        assert_eq!(error.byte_offset(), Some(24));
     }
 }

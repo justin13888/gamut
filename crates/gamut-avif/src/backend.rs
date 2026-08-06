@@ -159,9 +159,12 @@ pub(crate) fn run_backends(
     planes: &Planar8,
 ) -> Result<Option<Vec<u8>>> {
     for slot in backends {
-        let mut backend = slot
-            .lock()
-            .map_err(|_| Error::InvalidInput("AVIF: AV1 encode backend is poisoned"))?;
+        let mut backend = slot.lock().map_err(|_| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 encode backend is poisoned",
+            )
+        })?;
         if backend.supports(req) {
             // Accepted: this backend owns the job, so its error propagates — falling back to a
             // different encoder here would silently change the output bytes. The sole exception is
@@ -189,12 +192,14 @@ pub(crate) fn run_backends(
 pub(crate) fn still_from_backend_obus(obus: Vec<u8>, dims: Dimensions) -> Result<EncodedStill> {
     let header = SeqHeaderParams::parse(&obus)?;
     if header.seq_profile != 1 {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)",
         ));
     }
     if (header.width, header.height) != (dims.width, dims.height) {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "AVIF: AV1 backend stream dimensions differ from the image",
         ));
     }
@@ -246,14 +251,18 @@ impl SeqHeaderParams {
                 Ok(_) => None,
                 Err(e) => Some(Err(e)),
             })
-            .ok_or(Error::InvalidInput(
-                "AVIF: AV1 backend stream has no sequence header OBU",
-            ))??;
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: AV1 backend stream has no sequence header OBU",
+                )
+            })??;
         let mut r = BitReader::new(seq);
         let seq_profile = r.bits(3)? as u8;
         let _still_picture = r.bits(1)?;
         if r.bits(1)? != 1 {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "AVIF: AV1 backend stream must set reduced_still_picture_header",
             ));
         }
@@ -293,12 +302,12 @@ impl<'a> BitReader<'a> {
     fn bits(&mut self, n: u32) -> Result<u32> {
         let mut value = 0u32;
         for _ in 0..n {
-            let byte = self
-                .data
-                .get((self.pos / 8) as usize)
-                .ok_or(Error::InvalidInput(
+            let byte = self.data.get((self.pos / 8) as usize).ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "AVIF: AV1 backend sequence header truncated",
-                ))?;
+                )
+            })?;
             let bit = (byte >> (7 - self.pos % 8)) & 1;
             value = (value << 1) | u32::from(bit);
             self.pos += 1;
@@ -401,9 +410,12 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
         if status.is_ok() {
             Ok(obus)
         } else if status.is_unsupported() {
-            Err(LateDecline::ERROR)
+            Err(LateDecline::error().with_detail(format!("codec-abi status {}", status.0)))
         } else {
-            Err(Error::InvalidInput("AVIF: AV1 encode backend failed"))
+            Err(
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: AV1 encode backend failed")
+                    .with_detail(format!("codec-abi status {}", status.0)),
+            )
         }
     }
 }
@@ -420,11 +432,14 @@ pub(crate) struct LateDecline;
 impl LateDecline {
     /// The sentinel error value.
     pub(crate) const MESSAGE: &'static str = "AVIF: AV1 encode backend declined late (UNSUPPORTED)";
-    /// The sentinel error.
-    pub(crate) const ERROR: Error = Error::Unsupported(Self::MESSAGE);
+    /// Builds the sentinel error.
+    pub(crate) fn error() -> Error {
+        Error::unsupported(env!("CARGO_PKG_NAME"), Self::MESSAGE)
+    }
 
     /// Whether `err` is the late-decline sentinel.
     pub(crate) fn is(err: &Error) -> bool {
-        matches!(err, Error::Unsupported(m) if *m == Self::MESSAGE)
+        err.kind() == gamut_core::ErrorKind::Unsupported
+            && err.static_message() == Some(Self::MESSAGE)
     }
 }

@@ -3,7 +3,7 @@
 //! or continuation segments, and the encoder's `with_exif`/`with_xmp`/`with_icc_profile`
 //! embedding (round-trips, chunk framing at the 65519-byte boundaries, size caps, segment order).
 
-use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Rgb8};
 use gamut_jpeg::{JpegEncoder, JpegMetadata, metadata};
 
 /// Encodes a minimal valid grayscale JPEG to splice APP segments into.
@@ -129,7 +129,7 @@ fn icc_chunk_inconsistencies_are_rejected() {
     for segments in cases {
         let jpeg = splice(&base, segments);
         assert!(
-            matches!(metadata(&jpeg), Err(Error::InvalidInput(_))),
+            matches!(metadata(&jpeg), Err(error) if error.kind() == ErrorKind::InvalidInput),
             "case {segments:?} was not rejected"
         );
     }
@@ -334,7 +334,7 @@ fn oversized_and_empty_metadata_is_rejected_before_writing() {
         JpegEncoder::new()
             .with_exif(&vec![0u8; 65_528])
             .encode_image(image(), &mut rejected),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
     // XMP: exactly the 65502-byte StandardXMP cap fits; one byte more needs ExtendedXMP, which
     // is unsupported.
@@ -349,7 +349,7 @@ fn oversized_and_empty_metadata_is_rejected_before_writing() {
         JpegEncoder::new()
             .with_xmp(&vec![b' '; 65_503])
             .encode_image(image(), &mut rejected),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
     // ICC: exactly 255 full chunks fit; one byte more cannot be indexed by the one-byte count.
     let mut out = Vec::new();
@@ -363,7 +363,7 @@ fn oversized_and_empty_metadata_is_rejected_before_writing() {
         JpegEncoder::new()
             .with_icc_profile(&vec![0u8; 255 * 65_519 + 1])
             .encode_image(image(), &mut rejected),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
     // Empty payloads are meaningless and rejected.
     for enc in [
@@ -373,7 +373,7 @@ fn oversized_and_empty_metadata_is_rejected_before_writing() {
     ] {
         assert!(matches!(
             enc.encode_image(image(), &mut rejected),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == ErrorKind::InvalidInput
         ));
     }
     // A failed encode writes nothing.
@@ -459,12 +459,12 @@ fn malformed_streams_are_rejected() {
     // Missing SOI.
     assert!(matches!(
         metadata(b"\xFF\xE1\x00\x04ab"),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
     // A standalone marker (RST0) where a segment is expected.
     assert!(matches!(
         metadata(&[0xFF, 0xD8, 0xFF, 0xD0]),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
     // A standalone TEM marker followed by bytes that *would* scan as a plausible empty segment
     // and a valid stream: the standalone-marker rejection itself must fire — without it the walk
@@ -472,8 +472,8 @@ fn malformed_streams_are_rejected() {
     let base = base_jpeg();
     let mut tem = vec![0xFF, 0xD8, 0xFF, 0x01, 0x00, 0x02];
     tem.extend_from_slice(&base[2..]);
-    assert!(matches!(metadata(&tem), Err(Error::InvalidInput(_))));
+    assert!(matches!(metadata(&tem), Err(error) if error.kind() == ErrorKind::InvalidInput));
     // A declared segment length running past the end of the data.
     let truncated = [0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF, 0x00];
-    assert!(matches!(metadata(&truncated), Err(Error::InvalidInput(_))));
+    assert!(matches!(metadata(&truncated), Err(error) if error.kind() == ErrorKind::InvalidInput));
 }

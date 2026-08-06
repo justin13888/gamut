@@ -94,7 +94,10 @@ impl DecodeImage<Cmyk8> for TiffDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Cmyk8>> {
         let img = decode_page_samples(data, 0)?;
         if img.samples_per_pixel != 4 {
-            return Err(Error::Unsupported("TIFF: image is not 4-sample CMYK"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: image is not 4-sample CMYK",
+            ));
         }
         ImageBuf::new(img.pixels, img.dims)
     }
@@ -105,7 +108,10 @@ impl DecodeImage<Gray8> for TiffDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
         let img = decode_page_samples(data, 0)?;
         if img.samples_per_pixel != 1 {
-            return Err(Error::Unsupported("TIFF: image is not grayscale"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: image is not grayscale",
+            ));
         }
         ImageBuf::new(img.pixels, img.dims)
     }
@@ -127,7 +133,8 @@ fn present_rgb(img: &DecodedImage) -> Result<Vec<u8>> {
             }
         }
         _ => {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: cannot present this sample layout as RGB",
             ));
         }
@@ -151,7 +158,8 @@ fn present_rgba(img: &DecodedImage) -> Result<Vec<u8>> {
         }
         4 => out.extend_from_slice(&img.pixels),
         _ => {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: cannot present this sample layout as RGBA",
             ));
         }
@@ -161,20 +169,23 @@ fn present_rgba(img: &DecodedImage) -> Result<Vec<u8>> {
 
 /// Reads a required unsigned-integer tag.
 fn require_u32(ifd: &Ifd, tag: u16, what: &'static str) -> Result<u32> {
-    ifd.get_u32(tag).ok_or(Error::InvalidInput(what))
+    ifd.get_u32(tag)
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), what))
 }
 
 fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     let file = read(data)?;
-    let ifd = file
-        .ifds
-        .get(page)
-        .ok_or(Error::InvalidInput("TIFF: page index out of range"))?;
+    let ifd = file.ifds.get(page).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: page index out of range")
+    })?;
 
     let width = require_u32(ifd, tags::IMAGE_WIDTH, "TIFF: missing ImageWidth")? as usize;
     let height = require_u32(ifd, tags::IMAGE_LENGTH, "TIFF: missing ImageLength")? as usize;
     if width == 0 || height == 0 {
-        return Err(Error::InvalidInput("TIFF: zero-sized image"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: zero-sized image",
+        ));
     }
 
     let compression = Compression::try_from(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))?;
@@ -187,23 +198,33 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             | Compression::Lzw
             | Compression::Deflate
     ) {
-        return Err(Error::Unsupported("TIFF: compression not supported yet"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: compression not supported yet",
+        ));
     }
     if ifd.get_u32(tags::PLANAR_CONFIGURATION).unwrap_or(1) != 1 {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "TIFF: planar configuration not supported yet",
         ));
     }
 
     if ifd.get_u32(tags::FILL_ORDER).unwrap_or(1) != 1 {
-        return Err(Error::Unsupported("TIFF: FillOrder 2 not supported"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: FillOrder 2 not supported",
+        ));
     }
     let spp = ifd.get_u32(tags::SAMPLES_PER_PIXEL).unwrap_or(1) as usize;
     let bits = ifd
         .get_u32_vec(tags::BITS_PER_SAMPLE)
         .unwrap_or_else(|| vec![1; spp]);
     if bits.len() != spp || bits.iter().any(|&b| b != bits[0]) {
-        return Err(Error::Unsupported("TIFF: mixed bit depths not supported"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: mixed bit depths not supported",
+        ));
     }
     let bps = bits[0];
     if matches!(
@@ -211,14 +232,18 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         Compression::CcittRle | Compression::CcittGroup4Fax
     ) && bps != 1
     {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "TIFF: CCITT coding requires a bilevel image",
         ));
     }
     let use_predictor = Predictor::try_from(ifd.get_u32(tags::PREDICTOR).unwrap_or(1))?
         == Predictor::HorizontalDifferencing;
     if use_predictor && bps != 8 {
-        return Err(Error::Unsupported("TIFF: predictor requires 8-bit samples"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: predictor requires 8-bit samples",
+        ));
     }
 
     let photometric = PhotometricInterpretation::try_from(require_u32(
@@ -238,13 +263,17 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         (4, 8, PhotometricInterpretation::Rgb) => Mode::Rgba,
         (4, 8, PhotometricInterpretation::Cmyk) => Mode::Cmyk,
         (1, 8, PhotometricInterpretation::Palette) => {
-            let cm = ifd
-                .get_u32_vec(tags::COLOR_MAP)
-                .ok_or(Error::InvalidInput("TIFF: palette image missing ColorMap"))?;
+            let cm = ifd.get_u32_vec(tags::COLOR_MAP).ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: palette image missing ColorMap",
+                )
+            })?;
             Mode::Palette(Box::new(Palette8::from_tiff_colormap(&cm)?))
         }
         _ => {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: photometric/sample combination not supported yet",
             ));
         }
@@ -254,19 +283,23 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     let stored_row_bytes = match bps {
         8 => width
             .checked_mul(spp)
-            .ok_or(Error::InvalidInput("TIFF: image too large"))?,
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?,
         1 => width.div_ceil(8), // spp == 1, guaranteed by the match above
         _ => {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: only 1- and 8-bit samples supported so far",
             ));
         }
     };
     let stored_total = stored_row_bytes
         .checked_mul(height)
-        .ok_or(Error::InvalidInput("TIFF: image too large"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?;
     if stored_total > MAX_IMAGE_BYTES {
-        return Err(Error::Unsupported("TIFF: image exceeds the size limit"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: image exceeds the size limit",
+        ));
     }
 
     // Reassemble the stored (packed) row bytes from tiles or strips.
@@ -350,14 +383,14 @@ struct Layout {
 /// Decompresses one strip/tile of byte-level data (`None`/PackBits/LZW/Deflate) to `want` bytes.
 fn decompress_simple(raw: &[u8], want: usize, compression: Compression) -> Result<Vec<u8>> {
     match compression {
-        Compression::None => raw
-            .get(..want)
-            .map(<[u8]>::to_vec)
-            .ok_or(Error::InvalidInput("TIFF: block shorter than expected")),
+        Compression::None => raw.get(..want).map(<[u8]>::to_vec).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: block shorter than expected")
+        }),
         Compression::PackBits => packbits::decode(raw, want),
         Compression::Lzw => lzw::decode(raw, want),
         Compression::Deflate => deflate::decode(raw, want),
-        _ => Err(Error::Unsupported(
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "TIFF: compression not supported for this layout",
         )),
     }
@@ -369,15 +402,18 @@ fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
         Some(0) | None => l.height,
         Some(r) => (r as usize).min(l.height),
     };
-    let offsets = ifd
-        .get_u32_vec(tags::STRIP_OFFSETS)
-        .ok_or(Error::InvalidInput("TIFF: missing StripOffsets"))?;
-    let counts = ifd
-        .get_u32_vec(tags::STRIP_BYTE_COUNTS)
-        .ok_or(Error::InvalidInput("TIFF: missing StripByteCounts"))?;
+    let offsets = ifd.get_u32_vec(tags::STRIP_OFFSETS).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing StripOffsets")
+    })?;
+    let counts = ifd.get_u32_vec(tags::STRIP_BYTE_COUNTS).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing StripByteCounts")
+    })?;
     let strips = l.height.div_ceil(rows_per_strip);
     if offsets.len() != strips || counts.len() != strips {
-        return Err(Error::InvalidInput("TIFF: strip count mismatch"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: strip count mismatch",
+        ));
     }
     let mut packed = Vec::with_capacity(l.stored_row_bytes * l.height);
     for (i, (&off, &cnt)) in offsets.iter().zip(&counts).enumerate() {
@@ -385,7 +421,9 @@ fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
         let want = rows * l.stored_row_bytes;
         let raw = data
             .get(off as usize..off as usize + cnt as usize)
-            .ok_or(Error::InvalidInput("TIFF: strip out of bounds"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: strip out of bounds")
+            })?;
         match l.compression {
             Compression::CcittRle => {
                 packed.extend_from_slice(&ccitt::mh_decode_strip(raw, rows, l.width)?);
@@ -402,47 +440,59 @@ fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
 /// Reassembles the stored row bytes from tiles (8-bit only), cropping the edge-tile padding.
 fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Result<Vec<u8>> {
     if l.bps != 8 {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "TIFF: tiled images supported only for 8-bit samples so far",
         ));
     }
     let tw = ifd
         .get_u32(tags::TILE_WIDTH)
-        .ok_or(Error::InvalidInput("TIFF: missing TileWidth"))? as usize;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileWidth"))?
+        as usize;
     let th = ifd
         .get_u32(tags::TILE_LENGTH)
-        .ok_or(Error::InvalidInput("TIFF: missing TileLength"))? as usize;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileLength"))?
+        as usize;
     if tw == 0 || th == 0 {
-        return Err(Error::InvalidInput("TIFF: zero tile dimension"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: zero tile dimension",
+        ));
     }
     let offsets = ifd
         .get_u32_vec(tags::TILE_OFFSETS)
-        .ok_or(Error::InvalidInput("TIFF: missing TileOffsets"))?;
-    let counts = ifd
-        .get_u32_vec(tags::TILE_BYTE_COUNTS)
-        .ok_or(Error::InvalidInput("TIFF: missing TileByteCounts"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileOffsets"))?;
+    let counts = ifd.get_u32_vec(tags::TILE_BYTE_COUNTS).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileByteCounts")
+    })?;
     let across = l.width.div_ceil(tw);
     let down = l.height.div_ceil(th);
     if offsets.len() != across * down || counts.len() != across * down {
-        return Err(Error::InvalidInput("TIFF: tile count mismatch"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: tile count mismatch",
+        ));
     }
     let tile_row_bytes = tw
         .checked_mul(l.spp)
-        .ok_or(Error::InvalidInput("TIFF: tile too large"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile too large"))?;
     let tile_size = th
         .checked_mul(tile_row_bytes)
-        .ok_or(Error::InvalidInput("TIFF: tile too large"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile too large"))?;
     if tile_size > MAX_IMAGE_BYTES {
-        return Err(Error::Unsupported("TIFF: tile exceeds the size limit"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: tile exceeds the size limit",
+        ));
     }
     let mut packed = vec![0u8; l.stored_row_bytes * l.height];
     for ty in 0..down {
         for tx in 0..across {
             let idx = ty * across + tx;
             let (off, cnt) = (offsets[idx] as usize, counts[idx] as usize);
-            let raw = data
-                .get(off..off + cnt)
-                .ok_or(Error::InvalidInput("TIFF: tile out of bounds"))?;
+            let raw = data.get(off..off + cnt).ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile out of bounds")
+            })?;
             let mut tile = decompress_simple(raw, tile_size, l.compression)?;
             if use_predictor {
                 predictor::reverse(&mut tile, tile_row_bytes, l.spp);

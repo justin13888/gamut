@@ -37,7 +37,8 @@ impl Vp8lHeader {
     pub fn from_dimensions(dims: Dimensions, alpha_is_used: bool) -> Result<Self> {
         let max = u32::from(VP8L_MAX_DIMENSION);
         if dims.width == 0 || dims.height == 0 || dims.width > max || dims.height > max {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "VP8L: dimensions out of range (1..=16384)",
             ));
         }
@@ -68,7 +69,10 @@ impl Vp8lHeader {
     /// the stream is truncated.
     pub fn read(r: &mut BitReader<'_>) -> Result<Self> {
         if r.read_bits(8)? != u32::from(VP8L_SIGNATURE) {
-            return Err(Error::InvalidInput("VP8L: bad signature byte"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8L: bad signature byte",
+            ));
         }
         // 14-bit fields store width-1/height-1, so the decoded values are always 1..=16384.
         let width = (r.read_bits(14)? + 1) as u16;
@@ -76,7 +80,10 @@ impl Vp8lHeader {
         let alpha_is_used = r.read_bits(1)? != 0;
         let version = r.read_bits(3)? as u8;
         if version != 0 {
-            return Err(Error::InvalidInput("VP8L: unsupported version (must be 0)"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8L: unsupported version (must be 0)",
+            ));
         }
         Ok(Self {
             width,
@@ -161,7 +168,7 @@ mod tests {
         ] {
             assert!(matches!(
                 Vp8lHeader::from_dimensions(bad, false),
-                Err(Error::InvalidInput(_))
+                Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
             ));
         }
     }
@@ -172,7 +179,7 @@ mod tests {
         let mut r = BitReader::new(&bytes);
         assert!(matches!(
             Vp8lHeader::read(&mut r),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 
@@ -189,7 +196,7 @@ mod tests {
         let mut r = BitReader::new(&bytes);
         assert!(matches!(
             Vp8lHeader::read(&mut r),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 
@@ -198,7 +205,7 @@ mod tests {
         let mut r = BitReader::new(&[0x2f, 0x00]); // signature + only 8 of 28 dimension bits
         assert!(matches!(
             Vp8lHeader::read(&mut r),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 }

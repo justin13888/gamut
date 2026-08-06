@@ -304,17 +304,17 @@ typedef struct GamutDecoderVTable {
 #define GAMUT_OK 0
 
 /**
- * The operation rejected its input (the C mapping of `gamut_core::Error::InvalidInput`).
+ * The operation rejected its input (the C mapping of `gamut_core::ErrorKind::InvalidInput`).
  */
 #define GAMUT_STATUS_INVALID_INPUT 1
 
 /**
- * The operation is not supported (the C mapping of `gamut_core::Error::Unsupported`).
+ * The operation is not supported (the C mapping of `gamut_core::ErrorKind::Unsupported`).
  */
 #define GAMUT_STATUS_UNSUPPORTED 2
 
 /**
- * An I/O error (the C mapping of `gamut_core::Error::Io`).
+ * An I/O error (the C mapping of `gamut_core::ErrorKind::Io`).
  */
 #define GAMUT_STATUS_IO 3
 

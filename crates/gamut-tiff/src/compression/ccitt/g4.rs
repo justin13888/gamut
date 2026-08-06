@@ -142,8 +142,9 @@ enum Mode {
 
 fn read_mode(r: &mut BitReader) -> Result<Mode> {
     let mut bit = || {
-        r.read_bit()
-            .ok_or(Error::InvalidInput("CCITT: truncated mode code"))
+        r.read_bit().ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: truncated mode code")
+        })
     };
     if bit()? == 1 {
         return Ok(Mode::Vertical(0));
@@ -167,7 +168,8 @@ fn read_mode(r: &mut BitReader) -> Result<Mode> {
         // 000001x
         return Ok(Mode::Vertical(if bit()? == 1 { 3 } else { -3 }));
     }
-    Err(Error::InvalidInput(
+    Err(Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
         "CCITT: unsupported 2D mode (EOFB or extension)",
     ))
 }

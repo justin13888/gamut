@@ -197,7 +197,10 @@ impl TiffEncoder {
         // Apply the horizontal-differencing predictor (8-bit only) before compression.
         let predicting = self.predictor == Predictor::HorizontalDifferencing;
         if predicting && layout.bits_per_sample != 8 {
-            return Err(Error::Unsupported("TIFF: predictor requires 8-bit samples"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: predictor requires 8-bit samples",
+            ));
         }
         let predicted = predicting.then(|| {
             let mut buf = packed.to_vec();
@@ -266,7 +269,10 @@ impl TiffEncoder {
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         if pages.is_empty() {
-            return Err(Error::InvalidInput("TIFF: no pages to encode"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: no pages to encode",
+            ));
         }
         let total = pages.len() as u16;
         let mut images: Vec<(Ifd, Vec<Vec<u8>>)> = Vec::with_capacity(pages.len());
@@ -304,7 +310,8 @@ impl TiffEncoder {
         match self.compression {
             Compression::CcittRle => {
                 if layout.bits_per_sample != 1 {
-                    return Err(Error::Unsupported(
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
                         "TIFF: Modified Huffman requires a bilevel image",
                     ));
                 }
@@ -312,7 +319,8 @@ impl TiffEncoder {
             }
             Compression::CcittGroup4Fax => {
                 if layout.bits_per_sample != 1 {
-                    return Err(Error::Unsupported(
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
                         "TIFF: Group 4 fax requires a bilevel image",
                     ));
                 }
@@ -336,7 +344,8 @@ impl TiffEncoder {
             }
             Compression::Lzw => Ok(lzw::encode(raw)),
             Compression::Deflate => Ok(deflate::encode(raw)),
-            _ => Err(Error::Unsupported(
+            _ => Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: unsupported compression for encoding",
             )),
         }
@@ -355,19 +364,22 @@ impl TiffEncoder {
         out: &mut Vec<u8>,
     ) -> Result<usize> {
         if layout.bits_per_sample != 8 {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: tiling supported only for 8-bit images so far",
             ));
         }
         let predicting = self.predictor == Predictor::HorizontalDifferencing;
         if predicting && self.compression != Compression::Deflate {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: tiled predictor is supported only with Deflate",
             ));
         }
         let (tw, th) = (tile_w as usize, tile_h as usize);
         if tw == 0 || th == 0 || tw % 16 != 0 || th % 16 != 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "TIFF: tile dimensions must be positive multiples of 16",
             ));
         }

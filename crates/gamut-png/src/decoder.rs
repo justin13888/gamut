@@ -35,9 +35,12 @@ const DEFAULT_MAX_METADATA_BYTES: usize = 16 << 20;
 const SPEC_MAX_DIMENSION: u32 = i32::MAX as u32;
 
 /// The one refusal message for typed decodes the layout cannot hold losslessly.
-const LOSSY: Error = Error::Unsupported(
-    "PNG: this pixel layout cannot hold the image losslessly; use PngDecoder::decode",
-);
+fn lossy() -> Error {
+    Error::unsupported(
+        env!("CARGO_PKG_NAME"),
+        "PNG: this pixel layout cannot hold the image losslessly; use PngDecoder::decode",
+    )
+}
 
 /// A reusable PNG decoder with hostile-input limits.
 ///
@@ -177,12 +180,18 @@ impl PngDecoder {
         let mut reader = ChunkReader::new(data)?;
         let first = reader
             .next_chunk()?
-            .ok_or(Error::InvalidInput("PNG: missing IHDR"))?;
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: missing IHDR"))?;
         if first.chunk_type != *b"IHDR" {
-            return Err(Error::InvalidInput("PNG: first chunk must be IHDR"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: first chunk must be IHDR",
+            ));
         }
         if !first.crc_ok {
-            return Err(Error::InvalidInput("PNG: critical chunk CRC mismatch"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: critical chunk CRC mismatch",
+            ));
         }
         let header = ihdr::parse(first.data)?;
 
@@ -198,13 +207,24 @@ impl PngDecoder {
                 idat_done = true;
             }
             match &chunk.chunk_type {
-                b"IHDR" => return Err(Error::InvalidInput("PNG: duplicate IHDR")),
+                b"IHDR" => {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "PNG: duplicate IHDR",
+                    ));
+                }
                 b"IEND" => {
                     if !chunk.crc_ok {
-                        return Err(Error::InvalidInput("PNG: critical chunk CRC mismatch"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: critical chunk CRC mismatch",
+                        ));
                     }
                     if !chunk.data.is_empty() {
-                        return Err(Error::InvalidInput("PNG: IEND payload must be empty"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: IEND payload must be empty",
+                        ));
                     }
                     seen_iend = true;
                     // Everything after IEND is not part of the PNG datastream; trailing bytes
@@ -213,32 +233,53 @@ impl PngDecoder {
                 }
                 b"IDAT" => {
                     if !chunk.crc_ok {
-                        return Err(Error::InvalidInput("PNG: critical chunk CRC mismatch"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: critical chunk CRC mismatch",
+                        ));
                     }
                     if idat_done {
-                        return Err(Error::InvalidInput("PNG: IDAT chunks must be consecutive"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: IDAT chunks must be consecutive",
+                        ));
                     }
                     seen_idat = true;
                     idat.extend_from_slice(chunk.data);
                 }
                 b"PLTE" => {
                     if !chunk.crc_ok {
-                        return Err(Error::InvalidInput("PNG: critical chunk CRC mismatch"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: critical chunk CRC mismatch",
+                        ));
                     }
                     if plte.is_some() {
-                        return Err(Error::InvalidInput("PNG: duplicate PLTE"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: duplicate PLTE",
+                        ));
                     }
                     if seen_idat {
-                        return Err(Error::InvalidInput("PNG: PLTE must precede IDAT"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: PLTE must precede IDAT",
+                        ));
                     }
                     if trns.is_some() {
-                        return Err(Error::InvalidInput("PNG: PLTE must precede tRNS"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: PLTE must precede tRNS",
+                        ));
                     }
                     plte = Some(chunk.data);
                 }
                 b"tRNS" => {
                     if seen_idat {
-                        return Err(Error::InvalidInput("PNG: tRNS must precede IDAT"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "PNG: tRNS must precede IDAT",
+                        ));
                     }
                     // tRNS is ancillary: a CRC mismatch skips the chunk (§13.1); duplicates keep
                     // the first occurrence.
@@ -272,15 +313,24 @@ impl PngDecoder {
                 _ => {
                     // §5.4/§13.2: a chunk that is critical but unknown means the image cannot
                     // be correctly rendered.
-                    return Err(Error::Unsupported("PNG: unknown critical chunk"));
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        "PNG: unknown critical chunk",
+                    ));
                 }
             }
         }
         if !seen_iend {
-            return Err(Error::InvalidInput("PNG: missing IEND"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: missing IEND",
+            ));
         }
         if !seen_idat {
-            return Err(Error::InvalidInput("PNG: missing IDAT"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: missing IDAT",
+            ));
         }
         Ok(Parsed {
             header,
@@ -295,7 +345,10 @@ impl PngDecoder {
     /// byte length of the filtered scanline stream the IDAT data must inflate to.
     fn check_limits(&self, header: &Ihdr) -> Result<usize> {
         if header.width > self.max_width || header.height > self.max_height {
-            return Err(Error::Unsupported("PNG: image exceeds the dimension limit"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "PNG: image exceeds the dimension limit",
+            ));
         }
         let (width, height) = (header.width as usize, header.height as usize);
         // Budget the *decoded* representation: one byte per sample below depth 16 (sub-byte
@@ -305,12 +358,18 @@ impl PngDecoder {
             .checked_mul(height)
             .and_then(|pixels| pixels.checked_mul(header.color.channels()))
             .and_then(|samples| samples.checked_mul(bytes_per_sample))
-            .ok_or(Error::InvalidInput("PNG: image dimensions overflow"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: image dimensions overflow")
+            })?;
         if native_bytes > self.max_image_bytes {
-            return Err(Error::Unsupported("PNG: image exceeds the size limit"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "PNG: image exceeds the size limit",
+            ));
         }
-        adam7::expected_stream_len(header)
-            .ok_or(Error::InvalidInput("PNG: image dimensions overflow"))
+        adam7::expected_stream_len(header).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: image dimensions overflow")
+        })
     }
 
     /// Decodes a PNG into its native layout together with the ancillary metadata — the rich
@@ -379,7 +438,10 @@ impl PngDecoder {
             inflate::inflate_zlib,
         )?;
         if stream.len() != expected {
-            return Err(Error::InvalidInput("PNG: IDAT is shorter than the image"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: IDAT is shorter than the image",
+            ));
         }
 
         let samples = match header.bit_depth {
@@ -399,7 +461,10 @@ impl PngDecoder {
         if let (Some(palette), NativeSamples::B8(indices)) = (&palette, &samples)
             && indices.iter().any(|&idx| usize::from(idx) >= palette.len())
         {
-            return Err(Error::InvalidInput("PNG: palette index out of range"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: palette index out of range",
+            ));
         }
         Ok(NativeImage {
             header,
@@ -421,7 +486,8 @@ fn validate_plte_and_trns(
     if let Some(plte) = plte {
         match header.color {
             ColorType::Grayscale | ColorType::GrayscaleAlpha => {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "PNG: PLTE is forbidden for greyscale colour types",
                 ));
             }
@@ -430,20 +496,27 @@ fn validate_plte_and_trns(
             ColorType::Truecolor | ColorType::TruecolorAlpha => {
                 let entries = plte.len() / 3;
                 if !plte.len().is_multiple_of(3) || !(1..=256).contains(&entries) {
-                    return Err(Error::InvalidInput("PNG: malformed PLTE payload"));
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "PNG: malformed PLTE payload",
+                    ));
                 }
             }
             ColorType::Indexed => {}
         }
     }
     if header.color == ColorType::Indexed {
-        let plte = plte.ok_or(Error::InvalidInput(
-            "PNG: an indexed image requires a PLTE chunk",
-        ))?;
+        let plte = plte.ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: an indexed image requires a PLTE chunk",
+            )
+        })?;
         let palette = PngPalette::from_chunks(plte, trns)?;
         // §11.2.2: the palette must not have more entries than the bit depth can reference.
         if palette.len() > 1 << header.bit_depth {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "PNG: palette larger than the bit depth can reference",
             ));
         }
@@ -454,15 +527,15 @@ fn validate_plte_and_trns(
     };
     let key = match header.color {
         ColorType::Grayscale => {
-            let bytes: &[u8; 2] = trns
-                .try_into()
-                .map_err(|_| Error::InvalidInput("PNG: malformed tRNS payload"))?;
+            let bytes: &[u8; 2] = trns.try_into().map_err(|_| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: malformed tRNS payload")
+            })?;
             TransparencyKey::Gray(u16::from_be_bytes(*bytes) & depth_mask(header.bit_depth))
         }
         ColorType::Truecolor => {
-            let bytes: &[u8; 6] = trns
-                .try_into()
-                .map_err(|_| Error::InvalidInput("PNG: malformed tRNS payload"))?;
+            let bytes: &[u8; 6] = trns.try_into().map_err(|_| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: malformed tRNS payload")
+            })?;
             let mask = depth_mask(header.bit_depth);
             TransparencyKey::Rgb(
                 u16::from_be_bytes([bytes[0], bytes[1]]) & mask,
@@ -473,7 +546,8 @@ fn validate_plte_and_trns(
         // Indexed images returned above (their tRNS folds into the palette).
         ColorType::Indexed => return Ok((None, None)),
         ColorType::GrayscaleAlpha | ColorType::TruecolorAlpha => {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "PNG: tRNS is forbidden for colour types with alpha",
             ));
         }
@@ -511,7 +585,8 @@ fn decode_canvas<S: Copy + Default>(
     header: &Ihdr,
     to_samples: impl Fn(Vec<u8>, usize, usize) -> Vec<S>,
 ) -> Result<Vec<S>> {
-    let overflow = || Error::InvalidInput("PNG: image dimensions overflow");
+    let overflow =
+        || Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: image dimensions overflow");
     let (width, height) = (header.width as usize, header.height as usize);
     let channels = header.color.channels();
     let canvas_len = width
@@ -532,9 +607,12 @@ fn decode_canvas<S: Copy + Default>(
         let pass_len = pass_height
             .checked_mul(row_bytes + 1)
             .ok_or_else(overflow)?;
-        let (segment, remaining) = rest
-            .split_at_checked(pass_len)
-            .ok_or(Error::InvalidInput("PNG: IDAT is shorter than the image"))?;
+        let (segment, remaining) = rest.split_at_checked(pass_len).ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: IDAT is shorter than the image",
+            )
+        })?;
         rest = remaining;
         let packed = unfilter_stream(segment, row_bytes, pass_height, stride)?;
         let samples = to_samples(packed, pass_width, pass_height);
@@ -551,8 +629,9 @@ fn unfilter_stream(stream: &[u8], row_bytes: usize, height: usize, bpp: usize) -
     let zero_row = vec![0u8; row_bytes];
     for y in 0..height {
         let src = &stream[y * (row_bytes + 1)..(y + 1) * (row_bytes + 1)];
-        let filter = FilterType::from_code(src[0])
-            .ok_or(Error::InvalidInput("PNG: undefined filter type"))?;
+        let filter = FilterType::from_code(src[0]).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: undefined filter type")
+        })?;
         let (done, rest) = out.split_at_mut(y * row_bytes);
         let prev = if y == 0 {
             zero_row.as_slice()
@@ -600,7 +679,8 @@ fn native_image(header: &Ihdr, samples: NativeSamples) -> Result<PngImage> {
         }
         // Indexed depths are at most 8 (Table 12), so 16-bit indexed samples cannot exist.
         (ColorType::Indexed, NativeSamples::B16(_)) => {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "PNG: bit depth not allowed for the colour type",
             ));
         }
@@ -621,7 +701,7 @@ fn gray8_scale(bit_depth: u8) -> u8 {
 fn native8(samples: NativeSamples) -> Result<Vec<u8>> {
     match samples {
         NativeSamples::B8(v) => Ok(v),
-        NativeSamples::B16(_) => Err(LOSSY),
+        NativeSamples::B16(_) => Err(lossy()),
     }
 }
 
@@ -629,7 +709,7 @@ fn native8(samples: NativeSamples) -> Result<Vec<u8>> {
 fn native16(samples: NativeSamples) -> Result<Vec<u16>> {
     match samples {
         NativeSamples::B16(v) => Ok(v),
-        NativeSamples::B8(_) => Err(LOSSY),
+        NativeSamples::B8(_) => Err(lossy()),
     }
 }
 
@@ -651,7 +731,7 @@ impl DecodeImage<Bilevel> for PngDecoder {
             || native.header.bit_depth != 1
             || native.trns_key.is_some()
         {
-            return Err(LOSSY);
+            return Err(lossy());
         }
         ImageBuf::new(native8(native.samples)?, dims(&native.header)?)
     }
@@ -663,7 +743,7 @@ impl DecodeImage<Gray8> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
         let native = self.decode_native(data)?;
         if native.header.color != ColorType::Grayscale || native.trns_key.is_some() {
-            return Err(LOSSY);
+            return Err(lossy());
         }
         let scale = gray8_scale(native.header.bit_depth);
         let mut samples = native8(native.samples)?;
@@ -691,7 +771,7 @@ impl DecodeImage<GrayAlpha8> for PngDecoder {
                 }
                 out
             }
-            _ => return Err(LOSSY),
+            _ => return Err(lossy()),
         };
         ImageBuf::new(out, dims(&native.header)?)
     }
@@ -702,7 +782,7 @@ impl DecodeImage<Rgb8> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
         let native = self.decode_native(data)?;
         if native.trns_key.is_some() {
-            return Err(LOSSY);
+            return Err(lossy());
         }
         let out = match native.header.color {
             ColorType::Truecolor if native.header.bit_depth == 8 => native8(native.samples)?,
@@ -717,10 +797,10 @@ impl DecodeImage<Rgb8> for PngDecoder {
                 let palette = native
                     .palette
                     .filter(|palette| !palette.has_transparency())
-                    .ok_or(LOSSY)?;
+                    .ok_or_else(lossy)?;
                 expand_palette(&native8(native.samples)?, &palette, false)
             }
-            _ => return Err(LOSSY),
+            _ => return Err(lossy()),
         };
         ImageBuf::new(out, dims(&native.header)?)
     }
@@ -764,10 +844,10 @@ impl DecodeImage<Rgba8> for PngDecoder {
                     .collect()
             }
             ColorType::Indexed => {
-                let palette = native.palette.ok_or(LOSSY)?;
+                let palette = native.palette.ok_or_else(lossy)?;
                 expand_palette(&native8(native.samples)?, &palette, true)
             }
-            _ => return Err(LOSSY),
+            _ => return Err(lossy()),
         };
         ImageBuf::new(out, dims(&native.header)?)
     }
@@ -780,7 +860,7 @@ impl DecodeImage<Indexed8> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Indexed8>> {
         let native = self.decode_native(data)?;
         if native.header.color != ColorType::Indexed {
-            return Err(LOSSY);
+            return Err(lossy());
         }
         ImageBuf::new(native8(native.samples)?, dims(&native.header)?)
     }
@@ -808,7 +888,7 @@ impl DecodeImage<Gray16> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray16>> {
         let native = self.decode_native(data)?;
         if native.header.color != ColorType::Grayscale || native.trns_key.is_some() {
-            return Err(LOSSY);
+            return Err(lossy());
         }
         ImageBuf::new(native16(native.samples)?, dims(&native.header)?)
     }
@@ -827,7 +907,7 @@ impl DecodeImage<GrayAlpha16> for PngDecoder {
                     .flat_map(|&gray| [gray, alpha16(key != Some(gray))])
                     .collect()
             }
-            _ => return Err(LOSSY),
+            _ => return Err(lossy()),
         };
         ImageBuf::new(out, dims(&native.header)?)
     }
@@ -838,7 +918,7 @@ impl DecodeImage<Rgb16> for PngDecoder {
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb16>> {
         let native = self.decode_native(data)?;
         if native.trns_key.is_some() {
-            return Err(LOSSY);
+            return Err(lossy());
         }
         let out = match native.header.color {
             ColorType::Truecolor if native.header.bit_depth == 16 => native16(native.samples)?,
@@ -846,7 +926,7 @@ impl DecodeImage<Rgb16> for PngDecoder {
                 .iter()
                 .flat_map(|&gray| [gray; 3])
                 .collect(),
-            _ => return Err(LOSSY),
+            _ => return Err(lossy()),
         };
         ImageBuf::new(out, dims(&native.header)?)
     }
@@ -880,7 +960,7 @@ impl DecodeImage<Rgba16> for PngDecoder {
                     .flat_map(|&gray| [gray, gray, gray, alpha16(key != Some(gray))])
                     .collect()
             }
-            _ => return Err(LOSSY),
+            _ => return Err(lossy()),
         };
         ImageBuf::new(out, dims(&native.header)?)
     }
@@ -1324,7 +1404,7 @@ mod tests {
         let tight = PngDecoder::new().with_max_image_bytes(8 * 8 * 3 - 1);
         assert!(matches!(
             DecodeImage::<Rgb8>::decode_image(&tight, &png),
-            Err(Error::Unsupported(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
     }
 }

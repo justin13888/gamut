@@ -18,7 +18,7 @@
 mod common;
 
 use common::{DecodedSamples, decode, gen_u8};
-use gamut_core::{DecodeImage, Dimensions, EncodeImage, Error, ImageBuf, ImageRef, Rgb8};
+use gamut_core::{DecodeImage, Dimensions, EncodeImage, ErrorKind, ImageBuf, ImageRef, Rgb8};
 use gamut_jxl::{Container, JxlDecoder, JxlEncoder};
 
 /// A tiny TIFF-structured EXIF payload (little-endian byte-order mark; contents are opaque to the
@@ -107,12 +107,10 @@ fn metadata_with_codestream_framing_is_rejected() {
         .with_exif(EXIF)
         .encode_image(image, &mut out)
         .expect_err("metadata without the container must be rejected");
-    assert!(
-        matches!(
-            err,
-            Error::InvalidInput("JXL: Exif/XMP metadata requires the ISO BMFF container")
-        ),
-        "{err:?}"
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err:?}");
+    assert_eq!(
+        err.static_message(),
+        Some("JXL: Exif/XMP metadata requires the ISO BMFF container")
     );
     assert!(out.is_empty(), "no output on the rejected path");
 }
@@ -128,8 +126,6 @@ fn empty_metadata_payload_is_rejected() {
         .with_xmp("")
         .encode_image(image, &mut out)
         .expect_err("an empty metadata payload must be rejected");
-    assert!(
-        matches!(err, Error::InvalidInput("JXL: empty metadata payload")),
-        "{err:?}"
-    );
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err:?}");
+    assert_eq!(err.static_message(), Some("JXL: empty metadata payload"));
 }

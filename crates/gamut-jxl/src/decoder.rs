@@ -20,14 +20,18 @@ pub use crate::jxlrs::JxlInfo;
 /// on every build rather than only on the targets that can return it.
 #[cfg_attr(feature = "decode", allow(dead_code))]
 fn no_decode_backend() -> Error {
-    Error::Unsupported(
+    Error::unsupported(
+        env!("CARGO_PKG_NAME"),
         "JXL: no decode backend (enable the `decode` feature or push a codestream backend)",
     )
 }
 
 /// The error for a backend that returned a raster in a layout other than the one requested.
 fn wrong_backend_layout() -> Error {
-    Error::InvalidInput("JXL: backend returned a raster in the wrong pixel layout")
+    Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
+        "JXL: backend returned a raster in the wrong pixel layout",
+    )
 }
 
 /// A JPEG XL decoder.
@@ -190,7 +194,7 @@ impl JxlDecoder {
                     return Ok(Some(decoded));
                 }
                 // A late decline: fall through exactly as `supports() == false` would.
-                Err(Error::Unsupported(_)) => continue,
+                Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported => continue,
                 // Terminal: the backend accepted the stream and failed, so propagate.
                 Err(error) => return Err(error),
             }
@@ -294,16 +298,20 @@ mod tests {
 
     #[test]
     fn the_refusal_errors_are_pinned() {
-        assert!(matches!(
-            wrong_backend_layout(),
-            Error::InvalidInput("JXL: backend returned a raster in the wrong pixel layout")
-        ));
-        assert!(matches!(
-            no_decode_backend(),
-            Error::Unsupported(
+        let wrong = wrong_backend_layout();
+        assert_eq!(wrong.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            wrong.static_message(),
+            Some("JXL: backend returned a raster in the wrong pixel layout")
+        );
+        let missing = no_decode_backend();
+        assert_eq!(missing.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            missing.static_message(),
+            Some(
                 "JXL: no decode backend (enable the `decode` feature or push a codestream backend)"
             )
-        ));
+        );
     }
 
     /// A backend answering `supports` from a flag and `decode` with a canned outcome, counting both.
@@ -362,9 +370,26 @@ mod tests {
             self.decode_calls.fetch_add(1, Ordering::SeqCst);
             match &self.outcome {
                 Ok(decoded) => Ok(decoded.clone()),
-                Err(Error::Unsupported(m)) => Err(Error::Unsupported(m)),
-                Err(Error::InvalidInput(m)) => Err(Error::InvalidInput(m)),
-                Err(_) => Err(Error::InvalidInput("JXL: test backend failure")),
+                Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported => {
+                    Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        error
+                            .static_message()
+                            .unwrap_or("JXL: test backend refusal"),
+                    ))
+                }
+                Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                    Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        error
+                            .static_message()
+                            .unwrap_or("JXL: test backend failure"),
+                    ))
+                }
+                Err(_) => Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JXL: test backend failure",
+                )),
             }
         }
     }
@@ -415,7 +440,13 @@ mod tests {
 
     #[test]
     fn a_late_unsupported_falls_through_to_the_next_backend() {
-        let first = FixedBackend::with(true, Err(Error::Unsupported("changed its mind")));
+        let first = FixedBackend::with(
+            true,
+            Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "changed its mind",
+            )),
+        );
         let (_, first_decodes) = first.counters();
         let second = FixedBackend::returning(5);
         let (_, second_decodes) = second.counters();
@@ -431,7 +462,13 @@ mod tests {
 
     #[test]
     fn an_accepted_then_failed_backend_propagates_and_stops_the_chain() {
-        let first = FixedBackend::with(true, Err(Error::InvalidInput("JXL: test backend failure")));
+        let first = FixedBackend::with(
+            true,
+            Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: test backend failure",
+            )),
+        );
         let second = FixedBackend::returning(6);
         let (second_supports, second_decodes) = second.counters();
 
@@ -439,10 +476,9 @@ mod tests {
         dec.push_backend(first).push_backend(second);
 
         let result: Result<ImageBuf<Gray8>> = dec.decode_image(&STREAM);
-        assert!(matches!(
-            result,
-            Err(Error::InvalidInput("JXL: test backend failure"))
-        ));
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(error.static_message(), Some("JXL: test backend failure"));
         // Neither a later backend nor the built-in tail was reached.
         assert_eq!(second_supports.load(Ordering::SeqCst), 0);
         assert_eq!(second_decodes.load(Ordering::SeqCst), 0);
@@ -462,12 +498,12 @@ mod tests {
         let mut dec = JxlDecoder::new();
         dec.push_backend(backend);
         let result: Result<ImageBuf<Gray8>> = dec.decode_image(&STREAM);
-        assert!(matches!(
-            result,
-            Err(Error::InvalidInput(
-                "JXL: backend returned a raster in the wrong pixel layout"
-            ))
-        ));
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: backend returned a raster in the wrong pixel layout")
+        );
     }
 
     #[test]
@@ -538,22 +574,29 @@ mod tests {
         // the *kind* differs.
         let error = result.expect_err("a bare signature is not an image");
         if cfg!(feature = "decode") {
-            assert!(matches!(error, Error::InvalidInput(_)));
+            assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
         } else {
-            assert!(matches!(
-                error,
-                Error::Unsupported(
+            assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+            assert_eq!(
+                error.static_message(),
+                Some(
                     "JXL: no decode backend (enable the `decode` feature or push a codestream backend)"
                 )
-            ));
+            );
         }
     }
 
     #[test]
     fn all_backends_declining_falls_through_to_the_tail() {
-        let first = FixedBackend::with(false, Err(Error::Unsupported("never called")));
+        let first = FixedBackend::with(
+            false,
+            Err(Error::unsupported(env!("CARGO_PKG_NAME"), "never called")),
+        );
         let (first_supports, _) = first.counters();
-        let second = FixedBackend::with(true, Err(Error::Unsupported("late decline")));
+        let second = FixedBackend::with(
+            true,
+            Err(Error::unsupported(env!("CARGO_PKG_NAME"), "late decline")),
+        );
         let (_, second_decodes) = second.counters();
 
         let mut dec = JxlDecoder::new();
@@ -565,9 +608,9 @@ mod tests {
         // Reaching the tail with a two-byte signature errors, but as the tail's error.
         let error = result.expect_err("a bare signature is not an image");
         if cfg!(feature = "decode") {
-            assert!(matches!(error, Error::InvalidInput(_)));
+            assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
         } else {
-            assert!(matches!(error, Error::Unsupported(_)));
+            assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
         }
     }
 

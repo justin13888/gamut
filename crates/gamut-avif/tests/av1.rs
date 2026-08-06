@@ -3,7 +3,7 @@
 //! (AV1-ISOBMFF v1.3.0 §2.3/§2.4; AVIF v1.2.0 §2.1; AV1 §4.10.5/§5.3).
 
 use gamut_avif::{Av1Config, ChromaFormat, Obu, ObuHeader, ObuType, iter_obus};
-use gamut_core::Error;
+use gamut_core::{Error, ErrorKind};
 
 /// Appends the minimal `leb128()` encoding of `value`.
 fn leb128(mut value: usize, out: &mut Vec<u8>) {
@@ -44,9 +44,12 @@ fn concat(parts: &[Vec<u8>]) -> Vec<u8> {
 }
 
 #[track_caller]
-fn assert_invalid<T: core::fmt::Debug>(result: Result<T, Error>, message: &str) {
+fn assert_invalid<T: core::fmt::Debug>(result: Result<T, Error>, message: &str) -> Error {
     match result {
-        Err(Error::InvalidInput(m)) => assert_eq!(m, message),
+        Err(error) if error.kind() == ErrorKind::InvalidInput => {
+            assert_eq!(error.static_message(), Some(message));
+            error
+        }
         other => panic!("expected InvalidInput({message:?}), got {other:?}"),
     }
 }
@@ -155,22 +158,33 @@ fn leb128_accepts_padding_and_enforces_the_conformance_bounds() {
         iter_obus(&huge).next().unwrap(),
         "AVIF: OBU size exceeds 32 bits",
     );
-    // A truncated size field (continuation bit on the final byte).
-    let cut = [(5 << 3) | 0x02, 0x80];
+    // u32::MAX itself is legal. With no corresponding payload it must reach the payload bounds
+    // check, rather than being rejected by the size-field bound.
+    let max = [(5 << 3) | 0x02, 0xff, 0xff, 0xff, 0xff, 0x0f];
     assert_invalid(
-        iter_obus(&cut).next().unwrap(),
+        iter_obus(&max).next().unwrap(),
+        "AVIF: truncated OBU payload",
+    );
+    // A truncated size field (continuation bit on the final byte).
+    let mut cut = obu(2, &[0]);
+    cut.extend_from_slice(&[(5 << 3) | 0x02, 0x80]);
+    let error = assert_invalid(
+        iter_obus(&cut).nth(1).unwrap(),
         "AVIF: truncated OBU size field",
     );
+    assert_eq!(error.byte_offset(), Some(4));
 }
 
 #[test]
 fn obu_split_rejects_a_truncated_body() {
+    let mut stream = obu(2, &[0]);
     // Size field claims 4 bytes; only 2 follow.
-    let stream = [(5 << 3) | 0x02, 0x04, 0xAA, 0xBB];
-    assert_invalid(
-        iter_obus(&stream).next().unwrap(),
+    stream.extend_from_slice(&[(5 << 3) | 0x02, 0x04, 0xAA, 0xBB]);
+    let error = assert_invalid(
+        iter_obus(&stream).nth(1).unwrap(),
         "AVIF: truncated OBU payload",
     );
+    assert_eq!(error.byte_offset(), Some(5));
 }
 
 // ---- av1C parse ------------------------------------------------------------------------------
@@ -251,7 +265,9 @@ fn av1c_rejects_malformed_records() {
         "AVIF: av1C marker must be 1",
     );
     match Av1Config::parse(&[0x82, 0x00, 0x0C, 0x00]) {
-        Err(Error::Unsupported(m)) => assert_eq!(m, "AVIF: av1C version must be 1"),
+        Err(error) if error.kind() == ErrorKind::Unsupported => {
+            assert_eq!(error.static_message(), Some("AVIF: av1C version must be 1"))
+        }
         other => panic!("expected Unsupported, got {other:?}"),
     }
     // Subsampling (0, 1) is not expressible by an AV1 sequence header.

@@ -75,7 +75,8 @@ pub fn pick_level(width: u32, height: u32) -> Result<u8> {
             return Ok(idx);
         }
     }
-    Err(Error::Unsupported(
+    Err(Error::unsupported(
+        env!("CARGO_PKG_NAME"),
         "image dimensions exceed AV1 level 6.0 limits",
     ))
 }

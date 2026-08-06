@@ -99,7 +99,8 @@ impl WebpDecoder {
     fn expect_argb(raster: DecodedRaster) -> Result<(Dimensions, Vec<u32>)> {
         match raster {
             DecodedRaster::Argb { dimensions, pixels } => Ok((dimensions, pixels)),
-            DecodedRaster::Yuv420(_) => Err(Error::InvalidInput(
+            DecodedRaster::Yuv420(_) => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "WebP: VP8L decode produced a YUV raster",
             )),
         }
@@ -109,7 +110,8 @@ impl WebpDecoder {
     fn expect_yuv(raster: DecodedRaster) -> Result<Yuv420> {
         match raster {
             DecodedRaster::Yuv420(yuv) => Ok(yuv),
-            DecodedRaster::Argb { .. } => Err(Error::InvalidInput(
+            DecodedRaster::Argb { .. } => Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "WebP: VP8 decode produced an ARGB raster",
             )),
         }
@@ -152,7 +154,8 @@ impl WebpDecoder {
                 _ => continue,
             }
         }
-        Err(Error::InvalidInput(
+        Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "WebP: no VP8/VP8L/VP8X bitstream chunk",
         ))
     }
@@ -199,7 +202,10 @@ impl WebpDecoder {
                 _ => continue,
             }
         }
-        Err(Error::InvalidInput("WebP: no VP8/VP8L bitstream chunk"))
+        Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "WebP: no VP8/VP8L bitstream chunk",
+        ))
     }
 }
 
@@ -310,7 +316,10 @@ mod tests {
         };
         let file = gamut_riff::write_extended(&header, &[]);
         let got: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
-        assert!(matches!(got, Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            got,
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]
@@ -348,13 +357,19 @@ mod tests {
         w.write_chunk(FourCc::EXIF, &[0xee; 6]);
         let file = w.finish();
         let err: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
-        assert!(matches!(err, Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            err,
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]
     fn rejects_non_riff_data() {
         let err: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(b"not a webp");
-        assert!(matches!(err, Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            err,
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     #[test]

@@ -31,12 +31,14 @@ impl PngPalette {
     /// are more alpha values than RGB entries.
     pub fn with_transparency(rgb: &[[u8; 3]], alpha: &[u8]) -> Result<Self> {
         if rgb.is_empty() || rgb.len() > 256 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "PNG: palette must have 1..=256 entries",
             ));
         }
         if alpha.len() > rgb.len() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "PNG: more tRNS entries than palette entries",
             ));
         }
@@ -54,7 +56,8 @@ impl PngPalette {
     /// holds zero or more than 256 entries, or has fewer entries than the tRNS payload.
     pub(crate) fn from_chunks(plte: &[u8], trns: Option<&[u8]>) -> Result<Self> {
         if !plte.len().is_multiple_of(3) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "PNG: PLTE payload must be a whole number of RGB triples",
             ));
         }

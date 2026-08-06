@@ -14,7 +14,7 @@
 //! Codecs supply tag knowledge through [`AuditSpec`]; the [`StandardAuditSpec`] covers the
 //! structural tags every TIFF-family file shares (strips, tiles, free ranges, embedded JPEG).
 
-use gamut_core::{Error, Result};
+use gamut_core::{ErrorKind, Result};
 
 use crate::reader::pointer_offsets;
 use crate::segment::{Claim, DataLabel, SegmentMap, SegmentReport, SpanKind};
@@ -345,7 +345,7 @@ fn follow_subifds<S: ReadAt>(
                 let (mut child, next) = match reader.read_ifd_at_audited(offset, map) {
                     Ok(parsed) => parsed,
                     // Transport failures abort the audit; file defects are findings.
-                    Err(e @ Error::Io(_)) => return Err(e),
+                    Err(error) if error.kind() == ErrorKind::Io => return Err(error),
                     Err(_) => {
                         findings.push(AuditFinding::SkippedSubIfd {
                             page,
@@ -462,6 +462,43 @@ mod tests {
             out.report.is_fully_classified(),
             "the file bytes themselves are all classified"
         );
+    }
+
+    #[test]
+    fn subifd_transport_failure_is_propagated() {
+        struct FailsAt {
+            bytes: Vec<u8>,
+            offset: u64,
+        }
+
+        impl ReadAt for FailsAt {
+            fn read_exact_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<()> {
+                if offset == self.offset {
+                    return Err(gamut_core::Error::Io(std::io::Error::other(
+                        "injected transport failure",
+                    )));
+                }
+                let mut bytes = self.bytes.as_slice();
+                bytes.read_exact_at(offset, buf)
+            }
+
+            fn len(&mut self) -> Result<u64> {
+                Ok(self.bytes.len() as u64)
+            }
+        }
+
+        let bytes = vec![
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+            0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00,
+            0x00, // SubIFDs -> 26
+            0x00, 0x00, 0x00, 0x00, // next = 0
+            0x01, 0x00, 0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+            0x00, // child ImageWidth = 1
+            0x00, 0x00, 0x00, 0x00, // next = 0
+        ];
+        let error = audit(FailsAt { bytes, offset: 26 }, &StandardAuditSpec)
+            .expect_err("transport failure");
+        assert_eq!(error.kind(), ErrorKind::Io);
     }
 
     /// A self-pointing sub-IFD terminates as a cycle finding, not a hang.

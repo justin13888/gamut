@@ -1,7 +1,7 @@
 //! `ImageOverlay` (`iovl`) payload parse/serialise round-trip plus hand-authored layout fixtures
 //! (ISO/IEC 23008-12 §6.6.2.4.2), pinned independently of the serialiser.
 
-use gamut_core::Error;
+use gamut_core::ErrorKind;
 use gamut_isobmff::ImageOverlay;
 
 /// A 16-bit-form payload: version 0, flags 0, canvas fill R,G,B,A = 1111/2222/3333/FFFF, canvas
@@ -147,42 +147,42 @@ fn parses_zero_references() {
 fn rejects_nonzero_version() {
     let mut bytes = GOLDEN_16;
     bytes[0] = 0x01;
-    assert!(matches!(
-        ImageOverlay::parse(&bytes, 2),
-        Err(Error::Unsupported(_))
-    ));
+    assert_eq!(
+        ImageOverlay::parse(&bytes, 2).unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
 }
 
 #[test]
 fn rejects_truncated_payload() {
     // One byte short of the second offset pair.
     let bytes = &GOLDEN_16[..GOLDEN_16.len() - 1];
-    assert!(matches!(
-        ImageOverlay::parse(bytes, 2),
-        Err(Error::InvalidInput(_))
-    ));
+    assert_eq!(
+        ImageOverlay::parse(bytes, 2).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
 }
 
 #[test]
 fn rejects_trailing_bytes() {
     let mut bytes = GOLDEN_16.to_vec();
     bytes.push(0xFF);
-    assert!(matches!(
-        ImageOverlay::parse(&bytes, 2),
-        Err(Error::InvalidInput(_))
-    ));
+    assert_eq!(
+        ImageOverlay::parse(&bytes, 2).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
 }
 
 #[test]
 fn rejects_reference_count_mismatch() {
     // Too many claimed references: the payload runs out mid-offset (truncation).
-    assert!(matches!(
-        ImageOverlay::parse(&GOLDEN_16, 3),
-        Err(Error::InvalidInput(_))
-    ));
+    assert_eq!(
+        ImageOverlay::parse(&GOLDEN_16, 3).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
     // Too few claimed references: the unread offset pair is surplus (trailing bytes).
-    assert!(matches!(
-        ImageOverlay::parse(&GOLDEN_16, 1),
-        Err(Error::InvalidInput(_))
-    ));
+    assert_eq!(
+        ImageOverlay::parse(&GOLDEN_16, 1).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
 }

@@ -389,8 +389,8 @@ fn a_backend_returning_more_than_max_out_is_rejected_by_the_host() {
     let err = DecodeImage::<Rgb8>::decode_image(&decoder, &png)
         .expect_err("an over-cap backend must be rejected");
     assert_eq!(
-        err.to_string(),
-        "invalid input: PNG: IDAT backend produced more than the allowed output size",
+        err.static_message().unwrap(),
+        "PNG: IDAT backend produced more than the allowed output size",
         "the host's re-check — not the backend — must catch this"
     );
     assert_eq!(entries(&log), vec!["greedy:supports", "greedy:inflate"]);
@@ -421,8 +421,8 @@ fn a_short_backend_result_is_still_length_checked_by_the_decoder() {
     let err = DecodeImage::<Rgb8>::decode_image(&decoder, &png)
         .expect_err("a short stream is not a valid image");
     assert_eq!(
-        err.to_string(),
-        "invalid input: PNG: IDAT is shorter than the image"
+        err.static_message().unwrap(),
+        "PNG: IDAT is shorter than the image"
     );
 }
 
@@ -484,7 +484,7 @@ fn an_accepted_then_failed_inflater_propagates_and_the_tail_is_not_used() {
         .push_backend(ScriptedInflater::new("never", true, Act::Work, &log));
     let err =
         DecodeImage::<Rgb8>::decode_image(&decoder, &png).expect_err("the failure must propagate");
-    assert_eq!(err.to_string(), "invalid input: test: backend exploded");
+    assert_eq!(err.static_message().unwrap(), "test: backend exploded");
     assert_eq!(
         entries(&log),
         vec!["boom:supports", "boom:inflate"],
@@ -561,7 +561,7 @@ fn an_accepted_then_failed_deflater_propagates_and_the_tail_is_not_used() {
             &mut png,
         )
         .expect_err("the failure must propagate");
-    assert_eq!(err.to_string(), "invalid input: test: backend exploded");
+    assert_eq!(err.static_message().unwrap(), "test: backend exploded");
     assert_eq!(entries(&log), vec!["boom:supports", "boom:deflate"]);
 }
 
@@ -868,8 +868,8 @@ fn abi_other_statuses_propagate_as_typed_errors() {
     let err = DecodeImage::<Rgb8>::decode_image(&decoder, &png)
         .expect_err("a terminal status must propagate");
     assert_eq!(
-        err.to_string(),
-        "invalid input: PNG: IDAT codec-abi backend reported an error"
+        err.static_message().unwrap(),
+        "PNG: IDAT codec-abi backend reported an error"
     );
 
     let mut encoder = PngEncoder::new();
@@ -885,8 +885,8 @@ fn abi_other_statuses_propagate_as_typed_errors() {
         )
         .expect_err("a terminal status must propagate");
     assert_eq!(
-        err.to_string(),
-        "invalid input: PNG: IDAT codec-abi backend reported an error"
+        err.static_message().unwrap(),
+        "PNG: IDAT codec-abi backend reported an error"
     );
 }
 
@@ -945,8 +945,8 @@ fn abi_inflater_refuses_to_allocate_past_max_out() {
         .inflate(&info, &[], 9)
         .expect_err("a 10-byte job under a 9-byte cap must be refused");
     assert_eq!(
-        err.to_string(),
-        "invalid input: PNG: IDAT is larger than the decoder's output budget"
+        err.static_message().unwrap(),
+        "PNG: IDAT is larger than the decoder's output budget"
     );
 
     // Exactly at the cap the job runs.

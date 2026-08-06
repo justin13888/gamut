@@ -39,7 +39,10 @@ pub(crate) fn info(data: &[u8]) -> Result<JxlInfo> {
 
     let basic = decoder.basic_info();
     let (Ok(width), Ok(height)) = (u32::try_from(basic.size.0), u32::try_from(basic.size.1)) else {
-        return Err(Error::InvalidInput("JXL: image dimensions overflow"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: image dimensions overflow",
+        ));
     };
     let has_alpha = basic
         .extra_channels
@@ -87,9 +90,12 @@ pub(crate) fn embedded_icc_profile(data: &[u8]) -> Result<Option<Vec<u8>>> {
 /// Derived from the single [`layout_of`] table so the decoder cannot disagree with the encoder or
 /// the backend seam about what a layout brand means.
 fn output_layout(format: PixelFormat) -> Result<(JxlDataFormat, bool, usize, bool)> {
-    let (color_channels, has_alpha, bits) = layout_of(format).ok_or(Error::Unsupported(
-        "JXL: pixel format is not a JPEG XL coded layout",
-    ))?;
+    let (color_channels, has_alpha, bits) = layout_of(format).ok_or_else(|| {
+        Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "JXL: pixel format is not a JPEG XL coded layout",
+        )
+    })?;
     let data_format = if bits == 8 { u8_format() } else { u16_format() };
     Ok((
         data_format,
@@ -206,7 +212,10 @@ fn decode_raw<S: ConvSample>(
     let (size, num_extra, stream_is_gray, stream_has_alpha, premultiplied, stream_int_bits) = {
         let basic = decoder.basic_info();
         if basic.animation.is_some() {
-            return Err(Error::Unsupported("JXL: animated JPEG XL is not supported"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JXL: animated JPEG XL is not supported",
+            ));
         }
         let alpha = basic
             .extra_channels
@@ -246,12 +255,14 @@ fn decode_raw<S: ConvSample>(
     };
 
     if premultiplied {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JXL: premultiplied (associated) alpha is not supported",
         ));
     }
     if dst_is_gray_family && !stream_is_gray {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JXL: cannot decode a color image as grayscale",
         ));
     }
@@ -259,7 +270,10 @@ fn decode_raw<S: ConvSample>(
     // jxl-rs reports usize dimensions; gamut carries u32. A stream claiming a dimension beyond u32
     // is malformed for gamut's buffers (and far past the pixel limit anyway).
     let (Ok(width), Ok(height)) = (u32::try_from(size.0), u32::try_from(size.1)) else {
-        return Err(Error::InvalidInput("JXL: image dimensions overflow"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: image dimensions overflow",
+        ));
     };
     let dims = Dimensions::new(width, height)?;
 
@@ -285,10 +299,12 @@ fn decode_raw<S: ConvSample>(
     let bytes_per_row = (width as usize)
         .checked_mul(src_channels)
         .and_then(|n| n.checked_mul(S::BYTES))
-        .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
-    let total = bytes_per_row
-        .checked_mul(height as usize)
-        .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
+        })?;
+    let total = bytes_per_row.checked_mul(height as usize).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
+    })?;
     let (mut backing, offset) = aligned_backing(total, needs_row_alignment(S::BYTES));
 
     // WithImageInfo -> WithFrameInfo: parse the frame header.
@@ -328,7 +344,7 @@ fn decode_raw<S: ConvSample>(
 /// `NeedsMoreInput`; since the decoder is fed the whole buffer at once, needing more means the input
 /// was truncated.
 fn truncated() -> Error {
-    Error::InvalidInput("JXL: truncated codestream")
+    Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: truncated codestream")
 }
 
 /// Decodes `data` into a fresh [`ImageBuf`] of layout `P`.
@@ -341,10 +357,9 @@ where
 {
     let (data_format, dst_is_gray_family, dst_color, dst_alpha) = output_layout(P::FORMAT)?;
     let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format, codestream_bit_depth)?;
-    let pixels = raw
-        .dims
-        .num_pixels()
-        .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
+    let pixels = raw.dims.num_pixels().ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
+    })?;
     let mut out = vec![P::Sample::default(); pixels * (dst_color + usize::from(dst_alpha))];
     convert_into::<P::Sample>(
         raw.samples(),
@@ -369,10 +384,9 @@ where
 {
     let (data_format, dst_is_gray_family, dst_color, dst_alpha) = output_layout(P::FORMAT)?;
     let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format, codestream_bit_depth)?;
-    let pixels = raw
-        .dims
-        .num_pixels()
-        .ok_or(Error::InvalidInput("JXL: image dimensions overflow"))?;
+    let pixels = raw.dims.num_pixels().ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
+    })?;
     if dst.dimensions() == raw.dims {
         // Same geometry: convert straight into the existing storage (its length is invariant).
         convert_into::<P::Sample>(
@@ -439,7 +453,7 @@ mod tests {
         // A format outside the coded eight is refused rather than guessed at.
         assert!(matches!(
             output_layout(PixelFormat::Cmyk8),
-            Err(Error::Unsupported(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
     }
 
@@ -470,7 +484,7 @@ mod tests {
 
     #[test]
     fn truncated_is_invalid_input() {
-        assert!(matches!(truncated(), Error::InvalidInput(_)));
+        assert_eq!(truncated().kind(), gamut_core::ErrorKind::InvalidInput);
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, ChromaFormat, DecodedFrame, ObuType, iter_obus,
 };
-use gamut_core::{Error, Result};
+use gamut_core::{Error, ErrorKind, Result};
 use gamut_isobmff::{
     ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, Property, PropertyKind, write,
 };
@@ -258,7 +258,7 @@ fn non_conforming_payload_never_reaches_the_decoder() {
     // `NeverCalled` panics if invoked; the error proves it was not.
     assert!(matches!(
         container.decode_item_planar(1, &mut NeverCalled),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -276,7 +276,7 @@ fn essential_unknown_property_is_refused() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -297,7 +297,7 @@ fn non_av1_coded_item_is_unsupported() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -311,7 +311,7 @@ fn av1_item_without_av1c_is_invalid() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_planar(1, &mut NeverCalled),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -544,7 +544,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let c = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
     // Mixed chroma.
@@ -557,7 +557,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let c = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
     // Mixed bit depth.
@@ -570,7 +570,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let c = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -666,7 +666,7 @@ fn iden_requires_exactly_one_source() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -694,7 +694,7 @@ fn overlay_via_planar_is_unsupported() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -715,12 +715,12 @@ fn metadata_item_is_not_a_decodable_image() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_planar(2, &mut NeverCalled),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
     // A missing id is invalid, too.
     assert!(matches!(
         container.decode_item_planar(99, &mut NeverCalled),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -742,7 +742,7 @@ fn mutual_dimg_cycle_errors_without_overflow() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -766,7 +766,7 @@ fn derivation_depth_is_bounded() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
     // A 2-deep iden chain onto the same leaf decodes fine.
@@ -1260,7 +1260,7 @@ fn identity_matrix_requires_444() {
     );
     assert!(matches!(
         container.decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -1297,7 +1297,7 @@ fn unsupported_colour_falls_back_to_planar_only() {
     );
     assert!(matches!(
         container.decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
     // An ICC-only colr likewise: planar delivers, RGBA refuses.
@@ -1317,7 +1317,7 @@ fn unsupported_colour_falls_back_to_planar_only() {
     );
     assert!(matches!(
         container.decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -1332,7 +1332,7 @@ fn ten_bit_frame_is_planar_only() {
     assert_eq!(frame.bit_depth(), 10);
     assert!(matches!(
         container.decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -1421,7 +1421,7 @@ fn alpha_dimension_mismatch_one_axis_at_a_time() {
         let container = AvifContainer::parse(&bytes).unwrap();
         assert!(matches!(
             container.decode_item_rgba8(1, &mut Mock::default()),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == ErrorKind::InvalidInput
         ));
     }
 }
@@ -1647,7 +1647,7 @@ fn essential_unknown_property_is_refused_on_rgba_too() {
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 

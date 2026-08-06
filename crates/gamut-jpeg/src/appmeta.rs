@@ -132,7 +132,8 @@ fn is_crate_owned(marker: u8, payload: &[u8]) -> bool {
 pub(crate) fn patch_stream(stream: &[u8], meta: AppMetadata<'_>) -> Result<Vec<u8>> {
     expect_soi(stream)?;
     if stream.len() < 4 || stream[stream.len() - 2..] != [0xFF, code::EOI_CODE] {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "JPEG: backend stream does not end with EOI",
         ));
     }
@@ -145,7 +146,8 @@ pub(crate) fn patch_stream(stream: &[u8], meta: AppMetadata<'_>) -> Result<Vec<u
         match marker {
             code::SOS | code::EOI_CODE => break,
             code::SOI | code::TEM | code::RST0..=code::RST7 => {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "JPEG: backend stream has a standalone marker before the first scan",
                 ));
             }
@@ -206,24 +208,32 @@ impl IccAssembler {
             return Ok(());
         };
         let [index, count, data @ ..] = rest else {
-            return Err(Error::InvalidInput("JPEG: truncated ICC_PROFILE chunk"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: truncated ICC_PROFILE chunk",
+            ));
         };
         let (index, count) = (usize::from(*index), usize::from(*count));
         if index == 0 || count == 0 || index > count {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: ICC_PROFILE chunk index out of range",
             ));
         }
         if self.chunks.is_empty() {
             self.chunks.resize(count, None);
         } else if self.chunks.len() != count {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: ICC_PROFILE chunk count mismatch",
             ));
         }
         let slot = &mut self.chunks[index - 1];
         if slot.is_some() {
-            return Err(Error::InvalidInput("JPEG: duplicate ICC_PROFILE chunk"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: duplicate ICC_PROFILE chunk",
+            ));
         }
         *slot = Some(data.to_vec());
         Ok(())
@@ -240,7 +250,9 @@ impl IccAssembler {
         }
         let mut profile = Vec::new();
         for chunk in self.chunks {
-            let chunk = chunk.ok_or(Error::InvalidInput("JPEG: missing ICC_PROFILE chunk"))?;
+            let chunk = chunk.ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: missing ICC_PROFILE chunk")
+            })?;
             profile.extend_from_slice(&chunk);
         }
         Ok(Some(profile))

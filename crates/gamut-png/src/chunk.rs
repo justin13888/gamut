@@ -42,6 +42,7 @@ impl RawChunk<'_> {
 /// Iterates the chunks of a PNG stream after validating the signature (§5.2).
 pub(crate) struct ChunkReader<'a> {
     rest: &'a [u8],
+    offset: usize,
 }
 
 impl<'a> ChunkReader<'a> {
@@ -52,8 +53,14 @@ impl<'a> ChunkReader<'a> {
     /// Returns [`Error::InvalidInput`] if the input does not start with the PNG signature.
     pub(crate) fn new(png: &'a [u8]) -> Result<Self> {
         match png.split_at_checked(SIGNATURE.len()) {
-            Some((signature, rest)) if signature == SIGNATURE => Ok(Self { rest }),
-            _ => Err(Error::InvalidInput("PNG: bad signature")),
+            Some((signature, rest)) if signature == SIGNATURE => Ok(Self {
+                rest,
+                offset: SIGNATURE.len(),
+            }),
+            _ => Err(
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: bad signature")
+                    .with_byte_offset(0),
+            ),
         }
     }
 
@@ -71,26 +78,34 @@ impl<'a> ChunkReader<'a> {
         if self.rest.is_empty() {
             return Ok(None);
         }
-        let (header, after) = self
-            .rest
-            .split_at_checked(8)
-            .ok_or(Error::InvalidInput("PNG: truncated chunk"))?;
+        let offset = self.offset as u64;
+        let (header, after) = self.rest.split_at_checked(8).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: truncated chunk")
+                .with_byte_offset(offset)
+        })?;
         let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         if length >= 1 << 31 {
-            return Err(Error::InvalidInput("PNG: chunk length exceeds 2^31 - 1"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: chunk length exceeds 2^31 - 1",
+            )
+            .with_byte_offset(offset));
         }
         let chunk_type = [header[4], header[5], header[6], header[7]];
-        let (data, tail) = after
-            .split_at_checked(length as usize)
-            .ok_or(Error::InvalidInput("PNG: chunk overruns the input"))?;
-        let (stored, rest) = tail
-            .split_at_checked(4)
-            .ok_or(Error::InvalidInput("PNG: truncated chunk CRC"))?;
+        let (data, tail) = after.split_at_checked(length as usize).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: chunk overruns the input")
+                .with_byte_offset(offset)
+        })?;
+        let (stored, rest) = tail.split_at_checked(4).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: truncated chunk CRC")
+                .with_byte_offset(offset)
+        })?;
         let mut crc = Crc32::new();
         crc.update(&chunk_type);
         crc.update(data);
         let crc_ok = crc.finish().to_be_bytes() == stored;
         self.rest = rest;
+        self.offset += 12 + length as usize;
         Ok(Some(RawChunk {
             chunk_type,
             data,
@@ -176,9 +191,16 @@ mod tests {
     #[test]
     fn reader_rejects_oversized_length() {
         let mut png = SIGNATURE.to_vec();
+        write_chunk(&mut png, *b"tEXt", &[1, 2, 3]);
         png.extend_from_slice(&(1u32 << 31).to_be_bytes());
         png.extend_from_slice(b"IDAT");
         let mut reader = ChunkReader::new(&png).unwrap();
-        assert!(reader.next_chunk().is_err());
+        assert!(reader.next_chunk().unwrap().is_some());
+        let error = match reader.next_chunk() {
+            Err(error) => error,
+            Ok(_) => panic!("oversized chunk length must fail"),
+        };
+        assert_eq!(error.origin(), Some("gamut-png"));
+        assert_eq!(error.byte_offset(), Some(23));
     }
 }

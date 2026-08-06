@@ -15,13 +15,15 @@ use miniz_oxide::inflate::TINFLStatus;
 /// Returns [`Error::InvalidInput`] if the stream is corrupt, truncated, or would inflate past
 /// `max_out`.
 pub(crate) fn inflate_zlib(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
-    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, max_out).map_err(|e| {
-        match e.status {
-            TINFLStatus::HasMoreOutput => {
-                Error::InvalidInput("PNG: compressed data inflates past the expected size")
-            }
-            _ => Error::InvalidInput("PNG: corrupt zlib stream"),
-        }
+    miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(data, max_out).map_err(|error| {
+        let classified = match error.status {
+            TINFLStatus::HasMoreOutput => Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: compressed data inflates past the expected size",
+            ),
+            _ => Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: corrupt zlib stream"),
+        };
+        classified.with_detail(format!("miniz status {:?}", error.status))
     })
 }
 
@@ -48,11 +50,13 @@ mod tests {
         // distinction from plain corruption matters because a decoder reports a bomb, not a
         // damaged file.
         match inflate_zlib(&zlib, payload.len() - 1) {
-            Err(Error::InvalidInput(msg)) => {
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                let msg = error.static_message().unwrap_or_default();
                 assert!(
                     msg.contains("inflates past"),
                     "cap-specific message, got {msg:?}"
                 );
+                assert!(error.detail().is_some());
             }
             other => panic!("expected the cap error, got {other:?}"),
         }

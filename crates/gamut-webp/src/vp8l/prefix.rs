@@ -90,7 +90,10 @@ impl PrefixCode {
         let mut last_used = 0u16;
         for (sym, &len) in code_lengths.iter().enumerate() {
             if len as usize > MAX_CODE_LENGTH {
-                return Err(Error::InvalidInput("VP8L: prefix code length too large"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "VP8L: prefix code length too large",
+                ));
             }
             if len > 0 {
                 counts[len as usize] += 1;
@@ -99,7 +102,10 @@ impl PrefixCode {
             }
         }
         if n_used == 0 {
-            return Err(Error::InvalidInput("VP8L: empty prefix code"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8L: empty prefix code",
+            ));
         }
         if n_used == 1 {
             return Ok(Self {
@@ -114,11 +120,17 @@ impl PrefixCode {
             left <<= 1;
             left -= i32::from(count);
             if left < 0 {
-                return Err(Error::InvalidInput("VP8L: over-subscribed prefix code"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "VP8L: over-subscribed prefix code",
+                ));
             }
         }
         if left != 0 {
-            return Err(Error::InvalidInput("VP8L: incomplete prefix code"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8L: incomplete prefix code",
+            ));
         }
         // Sort symbols by (length, symbol) into a flat table.
         let mut offsets = [0usize; MAX_CODE_LENGTH + 2];
@@ -157,18 +169,22 @@ impl PrefixCode {
             let count = i32::from(self.counts[len]);
             if code - first < count {
                 let pos = index + (code - first) as usize;
-                return self
-                    .symbols
-                    .get(pos)
-                    .copied()
-                    .ok_or(Error::InvalidInput("VP8L: prefix code index out of range"));
+                return self.symbols.get(pos).copied().ok_or_else(|| {
+                    Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "VP8L: prefix code index out of range",
+                    )
+                });
             }
             index += count as usize;
             first += count;
             first <<= 1;
             code <<= 1;
         }
-        Err(Error::InvalidInput("VP8L: invalid prefix code"))
+        Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8L: invalid prefix code",
+        ))
     }
 }
 
@@ -193,7 +209,8 @@ fn read_simple_prefix_code(r: &mut BitReader<'_>, alphabet_size: usize) -> Resul
     let mut lengths = vec![0u8; alphabet_size];
     let symbol0 = r.read_bits(1 + 7 * is_first_8bits)? as usize;
     if symbol0 >= alphabet_size {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "VP8L: simple prefix symbol out of range",
         ));
     }
@@ -201,7 +218,8 @@ fn read_simple_prefix_code(r: &mut BitReader<'_>, alphabet_size: usize) -> Resul
     if num_symbols == 2 {
         let symbol1 = r.read_bits(8)? as usize;
         if symbol1 >= alphabet_size {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "VP8L: simple prefix symbol out of range",
             ));
         }
@@ -215,7 +233,10 @@ fn read_simple_prefix_code(r: &mut BitReader<'_>, alphabet_size: usize) -> Resul
 fn read_normal_prefix_code(r: &mut BitReader<'_>, alphabet_size: usize) -> Result<PrefixCode> {
     let num_code_lengths = 4 + r.read_bits(4)? as usize;
     if num_code_lengths > CODE_LENGTH_CODES {
-        return Err(Error::InvalidInput("VP8L: too many code-length codes"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8L: too many code-length codes",
+        ));
     }
     let mut cl_lengths = [0u8; CODE_LENGTH_CODES];
     for &order in CODE_LENGTH_CODE_ORDER.iter().take(num_code_lengths) {
@@ -230,7 +251,10 @@ fn read_normal_prefix_code(r: &mut BitReader<'_>, alphabet_size: usize) -> Resul
         alphabet_size
     };
     if max_symbol > alphabet_size {
-        return Err(Error::InvalidInput("VP8L: max_symbol exceeds alphabet"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8L: max_symbol exceeds alphabet",
+        ));
     }
 
     let mut lengths = vec![0u8; alphabet_size];
@@ -253,11 +277,17 @@ fn read_normal_prefix_code(r: &mut BitReader<'_>, alphabet_size: usize) -> Resul
                 16 => (2u32, 3usize, prev_len),
                 17 => (3, 3, 0),
                 18 => (7, 11, 0),
-                _ => return Err(Error::InvalidInput("VP8L: invalid code-length symbol")),
+                _ => {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "VP8L: invalid code-length symbol",
+                    ));
+                }
             };
             let repeat = repeat_offset + r.read_bits(extra_bits)? as usize;
             if symbol + repeat > alphabet_size {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "VP8L: code-length repeat overruns alphabet",
                 ));
             }
@@ -689,22 +719,22 @@ mod tests {
         // Over-subscribed: three length-1 codes (Kraft sum > 1).
         assert!(matches!(
             PrefixCode::from_code_lengths(&[1, 1, 1]),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
         // Incomplete: a length-1 and a length-2 code leave the tree under-filled.
         assert!(matches!(
             PrefixCode::from_code_lengths(&[1, 2]),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
         // Length beyond the 15-bit cap.
         assert!(matches!(
             PrefixCode::from_code_lengths(&[16, 0]),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
         // Empty alphabet.
         assert!(matches!(
             PrefixCode::from_code_lengths(&[0, 0, 0]),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 

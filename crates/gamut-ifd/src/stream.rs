@@ -192,23 +192,29 @@ impl<S: ReadAt> IfdReader<S> {
 
         // Checked in u64 end to end (no `usize` truncation): a hostile 8-byte BigTIFF count can
         // overflow the multiply, and any of the sums can wrap near u64::MAX.
-        let entries_start = offset
-            .checked_add(count_size)
-            .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
+        let entries_start = offset.checked_add(count_size).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: IFD entry count overflow")
+        })?;
         let body_size = count
             .checked_mul(entry_size)
             .and_then(|n| n.checked_add(offset_size))
-            .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
-        let body_end = entries_start
-            .checked_add(body_size)
-            .ok_or(Error::InvalidInput("TIFF: IFD entry count overflow"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: IFD entry count overflow")
+            })?;
+        let body_end = entries_start.checked_add(body_size).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: IFD entry count overflow")
+        })?;
         // Bound the directory to the source *before* allocating, so a corrupt count fails fast;
         // this also bounds the body buffer and entry vector by the source length.
         if body_end > len {
-            return Err(Error::InvalidInput("TIFF: IFD extends past end of file"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: IFD extends past end of file",
+            ));
         }
-        let body_len = usize::try_from(body_size)
-            .map_err(|_| Error::InvalidInput("TIFF: IFD entry count overflow"))?;
+        let body_len = usize::try_from(body_size).map_err(|_| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: IFD entry count overflow")
+        })?;
         let mut body = vec![0u8; body_len];
         self.source.read_exact_at(entries_start, &mut body)?;
 
@@ -403,7 +409,10 @@ impl<S: ReadAt> IfdReader<S> {
             offset = raw.next;
         }
         if ifds.is_empty() {
-            return Err(Error::InvalidInput("TIFF: file has no IFD"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: file has no IFD",
+            ));
         }
         Ok(TiffFile {
             order: self.order,
@@ -452,11 +461,12 @@ impl<S: ReadAt> IfdReader<S> {
         ifd_offset: u64,
         map: Option<&mut SegmentMap>,
     ) -> Result<Value> {
-        let count = usize::try_from(entry.count)
-            .map_err(|_| Error::InvalidInput("TIFF: field length overflow"))?;
-        let byte_len = count
-            .checked_mul(ty.size())
-            .ok_or(Error::InvalidInput("TIFF: field length overflow"))?;
+        let count = usize::try_from(entry.count).map_err(|_| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: field length overflow")
+        })?;
+        let byte_len = count.checked_mul(ty.size()).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: field length overflow")
+        })?;
         let inline = self.variant.inline_threshold();
         if byte_len <= inline {
             // Byte-for-byte the eager path's inline decode: the word kept the file's byte
@@ -469,13 +479,19 @@ impl<S: ReadAt> IfdReader<S> {
         // a value that starts in bounds but runs past the end is another. Checking the span
         // *before* allocating also keeps a hostile count from becoming an allocation bomb.
         if voff > len {
-            return Err(Error::InvalidInput("TIFF: value offset out of bounds"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: value offset out of bounds",
+            ));
         }
         if voff
             .checked_add(byte_len as u64)
             .is_none_or(|end| end > len)
         {
-            return Err(Error::InvalidInput("TIFF: field value out of bounds"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: field value out of bounds",
+            ));
         }
         let mut bytes = vec![0u8; byte_len];
         self.source.read_exact_at(voff, &mut bytes)?;
@@ -778,13 +794,19 @@ mod tests {
         let entry = raw.entries[0].clone();
         assert_eq!(entry.count, u64::from(u32::MAX));
         assert_eq!(r.value_offset(&entry), Some(26), "declared, not validated");
-        assert!(matches!(r.value(&entry), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            r.value(&entry),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
         // A count whose directory would run past the source also fails before allocating.
         let mut huge = data.to_vec();
         huge[8] = 0xff;
         huge[9] = 0xff; // entry count = 65535 in a 26-byte file
         let mut r = IfdReader::open(&huge[..]).expect("open");
-        assert!(matches!(r.read_ifd(8), Err(Error::InvalidInput(_))));
+        assert!(matches!(
+            r.read_ifd(8),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
+        ));
     }
 
     /// The out-of-line two-error distinction the slice path makes, reproduced through a source.
@@ -802,14 +824,24 @@ mod tests {
         let short = &bytes[..voff as usize + 2];
         let mut r_short = IfdReader::open(short).expect("open");
         match r_short.value(&entry) {
-            Err(Error::InvalidInput(msg)) => assert_eq!(msg, "TIFF: field value out of bounds"),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                assert_eq!(
+                    error.static_message(),
+                    Some("TIFF: field value out of bounds")
+                )
+            }
             other => panic!("expected truncated-value error, got {other:?}"),
         }
         // Truncate so the offset itself is past the end.
         let shorter = &bytes[..voff as usize - 2];
         let mut r_off = IfdReader::open(shorter).expect("open");
         match r_off.value(&entry) {
-            Err(Error::InvalidInput(msg)) => assert_eq!(msg, "TIFF: value offset out of bounds"),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                assert_eq!(
+                    error.static_message(),
+                    Some("TIFF: value offset out of bounds")
+                )
+            }
             other => panic!("expected offset error, got {other:?}"),
         }
         // The boundary between the two: an offset exactly at EOF is an *empty* value span, not
@@ -817,7 +849,12 @@ mod tests {
         let at_end = &bytes[..voff as usize];
         let mut r_end = IfdReader::open(at_end).expect("open");
         match r_end.value(&entry) {
-            Err(Error::InvalidInput(msg)) => assert_eq!(msg, "TIFF: field value out of bounds"),
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                assert_eq!(
+                    error.static_message(),
+                    Some("TIFF: field value out of bounds")
+                )
+            }
             other => panic!("expected truncated-value error, got {other:?}"),
         }
     }

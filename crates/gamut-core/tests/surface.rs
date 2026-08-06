@@ -5,7 +5,7 @@
 //! end to end.
 
 use gamut_core::{
-    DecodeImage, Dimensions, EncodeImage, Error, ImageBuf, ImageRef, Pixel, Result, Rgb8,
+    DecodeImage, Dimensions, EncodeImage, Error, ErrorKind, ImageBuf, ImageRef, Pixel, Result, Rgb8,
 };
 
 /// A minimal self-describing codec: a big-endian `width`,`height` header followed by the raw
@@ -63,8 +63,7 @@ fn decode_rejects_a_truncated_stream() {
         .unwrap();
     // ...with the header intact but most of the payload lost is rejected, not silently padded.
     let truncated = &full[..8 + 2];
-    assert!(matches!(
-        RawCodec.decode_image(truncated),
-        Err(Error::InvalidInput(_))
-    ));
+    let err = RawCodec.decode_image(truncated).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(err.origin(), Some("gamut-core"));
 }

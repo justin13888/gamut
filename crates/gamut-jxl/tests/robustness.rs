@@ -76,7 +76,7 @@ fn signatures_followed_by_garbage_error() {
     any(not(target_arch = "wasm32"), target_os = "emscripten")
 ))]
 mod with_streams {
-    use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, Pixel, Rgb8};
+    use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Pixel, Rgb8};
     use gamut_jxl::{Container, Effort, JxlEncoder};
 
     use super::decode_rgba8;
@@ -177,12 +177,11 @@ mod with_streams {
             .unwrap();
 
         let err = decode_rgba8(&bytes).expect_err("oversized image must be rejected");
-        assert!(
-            matches!(
-                err,
-                Error::InvalidInput("JXL: image exceeds the decoder pixel limit")
-            ),
-            "expected the pixel-limit error, got {err:?}"
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            err.static_message(),
+            Some("JXL: image exceeds the decoder pixel limit")
         );
+        assert!(err.detail().is_some());
     }
 }

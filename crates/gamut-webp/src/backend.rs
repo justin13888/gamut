@@ -312,7 +312,10 @@ pub(crate) type SharedEncoder = Arc<Mutex<dyn WebpCodestreamEncoder + Send>>;
 /// The error a poisoned registry lock yields: another thread panicked inside a backend, so the
 /// backend's state cannot be trusted.
 fn poisoned() -> Error {
-    Error::InvalidInput("WebP: a codestream backend panicked (registry lock poisoned)")
+    Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
+        "WebP: a codestream backend panicked (registry lock poisoned)",
+    )
 }
 
 /// Offers the decode job to each backend in push order, returning the first acceptance's outcome, or
@@ -385,11 +388,12 @@ pub(crate) fn peek_dimensions(codestream: WebpCodestream, payload: &[u8]) -> Opt
 /// a later backend once one has accepted), so it surfaces as [`Error::Unsupported`]; every other
 /// non-OK status is a backend failure and surfaces as [`Error::InvalidInput`].
 fn status_error(status: abi::Status, unsupported: &'static str, failed: &'static str) -> Error {
-    if status.is_unsupported() {
-        Error::Unsupported(unsupported)
+    let classified = if status.is_unsupported() {
+        Error::unsupported(env!("CARGO_PKG_NAME"), unsupported)
     } else {
-        Error::InvalidInput(failed)
-    }
+        Error::invalid_input(env!("CARGO_PKG_NAME"), failed)
+    };
+    classified.with_detail(format!("codec-abi status {}", status.0))
 }
 
 /// Adapts a [`gamut_codec_abi::Decoder`] (the shared ABI's Rust twin, and hence — via
@@ -681,14 +685,15 @@ mod tests {
 
     #[test]
     fn status_error_separates_late_decline_from_failure() {
-        assert!(matches!(
-            status_error(abi::Status::UNSUPPORTED, "declined", "failed"),
-            Error::Unsupported("declined")
-        ));
-        assert!(matches!(
-            status_error(abi::Status(7), "declined", "failed"),
-            Error::InvalidInput("failed")
-        ));
+        let declined = status_error(abi::Status::UNSUPPORTED, "declined", "failed");
+        assert_eq!(declined.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(declined.static_message(), Some("declined"));
+        assert_eq!(declined.detail(), Some("codec-abi status -1"));
+
+        let failed = status_error(abi::Status(7), "declined", "failed");
+        assert_eq!(failed.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(failed.static_message(), Some("failed"));
+        assert_eq!(failed.detail(), Some("codec-abi status 7"));
     }
 
     #[test]

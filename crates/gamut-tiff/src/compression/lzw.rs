@@ -119,12 +119,18 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
             table[code as usize].clone()
         } else if code as usize == table.len() {
             // `KwKwK`: the code names the entry being defined this step.
-            let p = prev.ok_or(Error::InvalidInput("LZW: code before ClearCode"))? as usize;
+            let p = prev.ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "LZW: code before ClearCode")
+                    .with_byte_offset((reader.pos / 8) as u64)
+            })? as usize;
             let mut s = table[p].clone();
             s.push(table[p][0]);
             s
         } else {
-            return Err(Error::InvalidInput("LZW: code out of range"));
+            return Err(
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "LZW: code out of range")
+                    .with_byte_offset((reader.pos / 8) as u64),
+            );
         };
         out.extend_from_slice(&entry);
 
@@ -140,9 +146,11 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
     }
 
     if out.len() < expected {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "LZW: decoded fewer bytes than expected",
-        ));
+        )
+        .with_byte_offset((reader.pos / 8) as u64));
     }
     out.truncate(expected);
     Ok(out)
@@ -171,5 +179,38 @@ mod tests {
             .collect();
         roundtrip(&big);
         roundtrip(&vec![0xABu8; 10000]);
+    }
+
+    fn codes(codes: &[u32]) -> Vec<u8> {
+        let mut writer = BitWriter::new();
+        for &code in codes {
+            writer.put_bits(code, 9);
+        }
+        writer.into_bytes()
+    }
+
+    #[test]
+    fn malformed_streams_report_the_consumed_byte_offset() {
+        let mut before_clear = vec![CLEAR; 7];
+        before_clear.push(FIRST);
+        let error = decode(&codes(&before_clear), 1).unwrap_err();
+        assert_eq!(error.static_message(), Some("LZW: code before ClearCode"));
+        assert_eq!(error.byte_offset(), Some(9));
+
+        let mut out_of_range = vec![CLEAR; 7];
+        out_of_range.push(FIRST + 1);
+        let error = decode(&codes(&out_of_range), 1).unwrap_err();
+        assert_eq!(error.static_message(), Some("LZW: code out of range"));
+        assert_eq!(error.byte_offset(), Some(9));
+
+        let mut short = vec![CLEAR];
+        short.extend(0..7);
+        short.push(EOI);
+        let error = decode(&codes(&short), 8).unwrap_err();
+        assert_eq!(
+            error.static_message(),
+            Some("LZW: decoded fewer bytes than expected")
+        );
+        assert_eq!(error.byte_offset(), Some(10));
     }
 }

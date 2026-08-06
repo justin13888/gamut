@@ -94,7 +94,8 @@ impl RawImage {
         check_bits(bits_per_sample)?;
         let (rr, rc) = cfa_repeat;
         if rr == 0 || rc == 0 || cfa_pattern.len() != usize::from(rr) * usize::from(rc) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: CFA pattern length must equal cfa_repeat rows * cols",
             ));
         }
@@ -134,7 +135,8 @@ impl RawImage {
     ) -> Result<Self> {
         check_bits(bits_per_sample)?;
         if planes == 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: LinearRaw needs at least one plane",
             ));
         }
@@ -161,7 +163,8 @@ impl RawImage {
     /// than this image has.
     pub fn with_levels(mut self, levels: RawLevels) -> Result<Self> {
         if levels.samples_per_pixel() != self.samples_per_pixel {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: levels plane count must match the image's samples per pixel",
             ));
         }
@@ -403,7 +406,10 @@ fn check_bits(bits: u16) -> Result<()> {
     if (1..=16).contains(&bits) {
         Ok(())
     } else {
-        Err(Error::InvalidInput("DNG: bits_per_sample must be 1..=16"))
+        Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "DNG: bits_per_sample must be 1..=16",
+        ))
     }
 }
 
@@ -412,11 +418,14 @@ fn check_sample_count(dims: Dimensions, spp: u16, samples: &[u16]) -> Result<()>
     let expected = dims
         .num_pixels()
         .and_then(|p| p.checked_mul(usize::from(spp)))
-        .ok_or(Error::InvalidInput("DNG: image dimensions overflow"))?;
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: image dimensions overflow")
+        })?;
     if samples.len() == expected {
         Ok(())
     } else {
-        Err(Error::InvalidInput(
+        Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: sample count must equal width * height * samples_per_pixel",
         ))
     }

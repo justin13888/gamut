@@ -208,7 +208,8 @@ impl JpegEncoder {
         // caller asked to encode, so a backend cannot quietly resize or drop it.
         let info = crate::JpegStreamInfo::parse(&patched)?;
         if (info.width(), info.height()) != (w, h) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: backend stream declares different dimensions than the encoded image",
             ));
         }
@@ -315,7 +316,10 @@ impl JpegEncoder {
     /// excluded by [`Dimensions`].
     fn check_dimensions(dims: Dimensions) -> Result<(u16, u16)> {
         if dims.width > MAX_DIMENSION || dims.height > MAX_DIMENSION {
-            return Err(Error::InvalidInput("JPEG: image exceeds 65535×65535"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: image exceeds 65535×65535",
+            ));
         }
         Ok((dims.width as u16, dims.height as u16))
     }
@@ -325,28 +329,42 @@ impl JpegEncoder {
     fn check_metadata(&self) -> Result<()> {
         if let Some(exif) = &self.exif {
             if exif.is_empty() {
-                return Err(Error::InvalidInput("JPEG: empty EXIF payload"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: empty EXIF payload",
+                ));
             }
             if exif.len() > appmeta::MAX_EXIF {
-                return Err(Error::InvalidInput("JPEG: EXIF exceeds one APP1 segment"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: EXIF exceeds one APP1 segment",
+                ));
             }
         }
         if let Some(xmp) = &self.xmp {
             if xmp.is_empty() {
-                return Err(Error::InvalidInput("JPEG: empty XMP payload"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: empty XMP payload",
+                ));
             }
             if xmp.len() > appmeta::MAX_XMP {
-                return Err(Error::Unsupported(
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     "JPEG: XMP exceeds one APP1 segment (ExtendedXMP not supported)",
                 ));
             }
         }
         if let Some(icc) = &self.icc {
             if icc.is_empty() {
-                return Err(Error::InvalidInput("JPEG: empty ICC profile"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: empty ICC profile",
+                ));
             }
             if icc.len() > appmeta::MAX_ICC {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "JPEG: ICC profile exceeds 255 APP2 segments",
                 ));
             }

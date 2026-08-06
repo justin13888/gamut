@@ -64,7 +64,10 @@ impl ImageOverlay {
         let mut r = BoxReader::new(data);
         let version = r.u8()?;
         if version != 0 {
-            return Err(Error::Unsupported("ISOBMFF: iovl version (only v0)"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: iovl version (only v0)",
+            ));
         }
         let flags = r.u8()?;
         // FieldLength = ((flags & 1) + 1) * 16 bits — 16-bit fields unless flag bit 0 selects 32.
@@ -87,7 +90,10 @@ impl ImageOverlay {
             offsets.push((horizontal_offset, vertical_offset));
         }
         if r.remaining() != 0 {
-            return Err(Error::InvalidInput("ISOBMFF: iovl has trailing bytes"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: iovl has trailing bytes",
+            ));
         }
         Ok(Self {
             canvas_fill_value,

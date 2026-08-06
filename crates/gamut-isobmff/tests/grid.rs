@@ -1,7 +1,7 @@
 //! `ImageGrid` payload parse/serialise round-trip plus hand-authored layout fixtures
 //! (ISO/IEC 23008-12 §6.6.2.3.2), pinned independently of the serialiser.
 
-use gamut_core::Error;
+use gamut_core::ErrorKind;
 use gamut_isobmff::ImageGrid;
 
 #[track_caller]
@@ -122,30 +122,30 @@ fn to_bytes_matches_hand_authored_layout() {
 #[test]
 fn rejects_nonzero_version() {
     let bytes = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-    assert!(matches!(
-        ImageGrid::parse(&bytes),
-        Err(Error::Unsupported(_))
-    ));
+    assert_eq!(
+        ImageGrid::parse(&bytes).unwrap_err().kind(),
+        ErrorKind::Unsupported
+    );
 }
 
 #[test]
 fn rejects_truncated_payload() {
     // The 16-bit form needs 8 bytes; supply 7.
     let bytes = [0x00, 0x00, 0x01, 0x01, 0x10, 0x00, 0x10];
-    assert!(matches!(
-        ImageGrid::parse(&bytes),
-        Err(Error::InvalidInput(_))
-    ));
+    assert_eq!(
+        ImageGrid::parse(&bytes).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
 }
 
 #[test]
 fn rejects_trailing_bytes() {
     // A valid 8-byte 16-bit payload with one extra byte appended.
     let bytes = [0x00, 0x00, 0x01, 0x01, 0x10, 0x00, 0x10, 0x00, 0xff];
-    assert!(matches!(
-        ImageGrid::parse(&bytes),
-        Err(Error::InvalidInput(_))
-    ));
+    assert_eq!(
+        ImageGrid::parse(&bytes).unwrap_err().kind(),
+        ErrorKind::InvalidInput
+    );
 }
 
 #[test]
@@ -176,6 +176,6 @@ fn to_bytes_rejects_out_of_range_tile_counts() {
             output_height: 8,
         },
     ] {
-        assert!(matches!(g.to_bytes(), Err(Error::InvalidInput(_))));
+        assert_eq!(g.to_bytes().unwrap_err().kind(), ErrorKind::InvalidInput);
     }
 }

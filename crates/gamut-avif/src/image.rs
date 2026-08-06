@@ -54,9 +54,17 @@ impl AvifImage {
             .items
             .iter()
             .position(|item| item.id == inner.primary_item_id)
-            .ok_or(Error::InvalidInput("AVIF: primary item id names no item"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "AVIF: primary item id names no item",
+                )
+            })?;
         if inner.items[primary_index].hidden {
-            return Err(Error::InvalidInput("AVIF: primary item is hidden"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: primary item is hidden",
+            ));
         }
         Ok(Self {
             inner,
@@ -231,13 +239,14 @@ impl AvifImage {
     /// Returns [`Error::InvalidInput`] if `item_id` names no item or the tile count does not match
     /// `rows * columns`, and propagates [`ImageGrid::parse`] errors for a malformed payload.
     pub fn grid(&self, item_id: u32) -> Result<ImageGrid> {
-        let item = self
-            .item(item_id)
-            .ok_or(Error::InvalidInput("AVIF: grid item not found"))?;
+        let item = self.item(item_id).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: grid item not found")
+        })?;
         let grid = ImageGrid::parse(&item.as_isobmff_item().payload)?;
         let tiles = usize::from(grid.rows) * usize::from(grid.columns);
         if item.derivation_target_ids().len() != tiles {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "AVIF: grid dimg count does not equal rows * columns",
             ));
         }
@@ -253,9 +262,9 @@ impl AvifImage {
     /// [`ImageOverlay::parse`] errors for a payload that does not hold exactly that many offset
     /// pairs.
     pub fn overlay(&self, item_id: u32) -> Result<ImageOverlay> {
-        let item = self
-            .item(item_id)
-            .ok_or(Error::InvalidInput("AVIF: overlay item not found"))?;
+        let item = self.item(item_id).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: overlay item not found")
+        })?;
         ImageOverlay::parse(
             &item.as_isobmff_item().payload,
             item.derivation_target_ids().len(),

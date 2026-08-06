@@ -131,8 +131,7 @@ fn corrupt_segment_is_a_typed_error() {
     let count = file.ifds[0].get_u32_vec(tags::STRIP_BYTE_COUNTS).unwrap()[0] as usize;
     tiff[offset + count - 1] ^= 0xFF; // corrupt the zlib Adler-32 trailer
     let result: gamut_core::Result<ImageBuf<Rgb8>> = TiffDecoder::new().decode_image(&tiff);
-    assert_eq!(
-        result.unwrap_err().to_string(),
-        "invalid input: TIFF: corrupt Deflate stream"
-    );
+    let error = result.unwrap_err();
+    assert_eq!(error.static_message(), Some("TIFF: corrupt Deflate stream"));
+    assert!(error.detail().is_some());
 }

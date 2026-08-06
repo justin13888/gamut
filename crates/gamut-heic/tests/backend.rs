@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_codec_abi::{Decoder, ImageDesc, Status, StreamConfig};
-use gamut_core::{Dimensions, Error};
+use gamut_core::{Dimensions, Error, ErrorKind};
 use gamut_heic::{
     AbiHevcDecoder, BACKEND_DECLINED, ChromaFormat, DecodedFrame, HEVC_CODEC_ID, HevcConfig,
     HevcDecoder, HevcDecoders, NO_BACKEND, planar_pixel_format,
@@ -139,8 +139,9 @@ fn empty_registry_is_empty_and_declines() {
     let err = decoders
         .decode_intra(&config(), &[])
         .expect_err("an empty registry cannot decode");
-    assert_eq!(err.to_string(), Error::Unsupported(NO_BACKEND).to_string());
-    assert!(matches!(err, Error::Unsupported(m) if m == NO_BACKEND));
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some(NO_BACKEND));
+    assert_eq!(err.origin(), Some("gamut-heic"));
 }
 
 #[test]
@@ -236,7 +237,8 @@ fn all_declining_backends_yield_unsupported() {
     let err = decoders
         .decode_intra(&config(), &[])
         .expect_err("every backend declined");
-    assert!(matches!(err, Error::Unsupported(m) if m == NO_BACKEND));
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some(NO_BACKEND));
     assert_eq!(entries(&log), ["a:supports", "b:supports", "b:decode"]);
 }
 
@@ -561,7 +563,9 @@ fn abi_adapter_late_unsupported_falls_through_the_registry() {
     let err = adapter
         .decode_intra(&config(), &[])
         .expect_err("UNSUPPORTED is a decline");
-    assert!(matches!(err, Error::Unsupported(m) if m == BACKEND_DECLINED));
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
+    assert_eq!(err.static_message(), Some(BACKEND_DECLINED));
+    assert_eq!(err.detail(), Some("codec-abi status -1"));
 
     // ... and the registry treats it as a fall-through, reaching the next backend.
     let log = log();
@@ -584,9 +588,12 @@ fn abi_adapter_other_failure_status_propagates() {
     let err = adapter
         .decode_intra(&config(), &[])
         .expect_err("a non-OK status is terminal");
-    assert!(
-        matches!(err, Error::InvalidInput(m) if m == "HEIF: HEVC backend returned a failure status")
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        err.static_message(),
+        Some("HEIF: HEVC backend returned a failure status")
     );
+    assert_eq!(err.detail(), Some("codec-abi status 7"));
 
     // Through the registry: terminal, so a later backend is never consulted.
     let log = log();
@@ -600,8 +607,10 @@ fn abi_adapter_other_failure_status_propagates() {
     let err = decoders
         .decode_intra(&config(), &[])
         .expect_err("propagates");
-    assert!(
-        matches!(err, Error::InvalidInput(m) if m == "HEIF: HEVC backend returned a failure status")
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        err.static_message(),
+        Some("HEIF: HEVC backend returned a failure status")
     );
     assert!(entries(&log).is_empty());
 }

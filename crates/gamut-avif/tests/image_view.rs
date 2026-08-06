@@ -12,7 +12,7 @@ use gamut_avif::{
     AvifContainer, CleanAperture, ContentLightLevel, ItemKind, PixelAspectRatio,
     TransformativeProperty,
 };
-use gamut_core::Error;
+use gamut_core::ErrorKind;
 use gamut_isobmff::{ColourInformation, Item, NclxColr, Property, PropertyKind};
 
 fn prop(essential: bool, kind: PropertyKind) -> Property {
@@ -116,7 +116,7 @@ fn av1_config_lens_distinguishes_absent_foreign_and_malformed() {
     assert!(img.item(3).unwrap().av1_config().is_none());
     assert!(matches!(
         img.item(4).unwrap().av1_config(),
-        Some(Err(Error::InvalidInput(_)))
+        Some(Err(error)) if error.kind() == ErrorKind::InvalidInput
     ));
 
     // The raw record stays reachable opaquely alongside the typed lens.

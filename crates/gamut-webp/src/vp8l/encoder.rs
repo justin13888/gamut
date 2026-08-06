@@ -116,7 +116,8 @@ fn check_dimensions(argb: &[u32], dims: Dimensions) -> Result<()> {
     if (dims.width as usize).checked_mul(dims.height as usize) == Some(argb.len()) {
         Ok(())
     } else {
-        Err(Error::InvalidInput(
+        Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "VP8L: pixel buffer does not match dimensions",
         ))
     }
@@ -705,7 +706,7 @@ mod tests {
                     height: 2
                 }
             ),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
     }
 }

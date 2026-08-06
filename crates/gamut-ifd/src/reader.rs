@@ -47,10 +47,16 @@ impl ChainGuard {
     /// the [`MAX_IFDS`] + 1'th directory (runaway length).
     pub(crate) fn admit(&mut self, offset: u64) -> Result<()> {
         if !self.seen.insert(offset) {
-            return Err(Error::InvalidInput("TIFF: IFD chain loops"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: IFD chain loops",
+            ));
         }
         if self.count >= MAX_IFDS {
-            return Err(Error::InvalidInput("TIFF: too many IFDs"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: too many IFDs",
+            ));
         }
         self.count += 1;
         Ok(())
@@ -59,26 +65,38 @@ impl ChainGuard {
 
 /// Reads a 16-bit value at `pos` in `order`, bounds-checked.
 pub(crate) fn u16_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u16> {
-    let b = data
-        .get(pos..pos + 2)
-        .ok_or(Error::InvalidInput("TIFF: truncated 16-bit field"))?;
+    let b = pos
+        .checked_add(2)
+        .and_then(|end| data.get(pos..end))
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: truncated 16-bit field")
+                .with_byte_offset(pos as u64)
+        })?;
     Ok(order.u16([b[0], b[1]]))
 }
 
 /// Reads a 32-bit value at `pos` in `order`, bounds-checked.
 pub(crate) fn u32_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u32> {
-    let b = data
-        .get(pos..pos + 4)
-        .ok_or(Error::InvalidInput("TIFF: truncated 32-bit field"))?;
+    let b = pos
+        .checked_add(4)
+        .and_then(|end| data.get(pos..end))
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: truncated 32-bit field")
+                .with_byte_offset(pos as u64)
+        })?;
     Ok(order.u32([b[0], b[1], b[2], b[3]]))
 }
 
 /// Reads a 64-bit value at `pos` in `order`, bounds-checked (BigTIFF offsets/counts).
 #[cfg(feature = "bigtiff")]
 pub(crate) fn u64_at(data: &[u8], pos: usize, order: ByteOrder) -> Result<u64> {
-    let b = data
-        .get(pos..pos + 8)
-        .ok_or(Error::InvalidInput("TIFF: truncated 64-bit field"))?;
+    let b = pos
+        .checked_add(8)
+        .and_then(|end| data.get(pos..end))
+        .ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: truncated 64-bit field")
+                .with_byte_offset(pos as u64)
+        })?;
     Ok(order.u64([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
 }
 
@@ -110,11 +128,16 @@ pub(crate) fn offset_at(
 pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
     let head = data
         .get(..8)
-        .ok_or(Error::InvalidInput("TIFF: header too short"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: header too short"))?;
     let order = match [head[0], head[1]] {
         [0x49, 0x49] => ByteOrder::LittleEndian,
         [0x4D, 0x4D] => ByteOrder::BigEndian,
-        _ => return Err(Error::InvalidInput("TIFF: bad byte-order mark")),
+        _ => {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: bad byte-order mark",
+            ));
+        }
     };
     match order.u16([head[2], head[3]]) {
         42 => Ok((order, Variant::Classic, u64::from(u32_at(data, 4, order)?))),
@@ -123,16 +146,23 @@ pub fn read_header(data: &[u8]) -> Result<(ByteOrder, Variant, u64)> {
             // BigTIFF: bytes 4-5 are the offset bytesize (always 8), bytes 6-7 are reserved (0),
             // and the first-IFD offset is the 8-byte value at bytes 8-15.
             if order.u16([head[4], head[5]]) != 8 {
-                return Err(Error::InvalidInput("TIFF: BigTIFF offset size must be 8"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: BigTIFF offset size must be 8",
+                ));
             }
             if order.u16([head[6], head[7]]) != 0 {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "TIFF: BigTIFF reserved field must be 0",
                 ));
             }
             Ok((order, Variant::Big, u64_at(data, 8, order)?))
         }
-        _ => Err(Error::InvalidInput("TIFF: bad magic number")),
+        _ => Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: bad magic number",
+        )),
     }
 }
 
@@ -220,7 +250,10 @@ pub(crate) fn resolve_pointers_with(
     depth: usize,
 ) -> Result<()> {
     if depth > MAX_SUBIFD_DEPTH {
-        return Err(Error::InvalidInput("TIFF: sub-IFD tree too deep"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: sub-IFD tree too deep",
+        ));
     }
     for &tag in tags {
         let Some(offsets) = ifd.get(tag).and_then(pointer_offsets) else {
@@ -229,7 +262,10 @@ pub(crate) fn resolve_pointers_with(
         let mut children = Vec::with_capacity(offsets.len());
         for off in offsets {
             if visited.contains(&off) {
-                return Err(Error::InvalidInput("TIFF: sub-IFD pointer loop"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: sub-IFD pointer loop",
+                ));
             }
             visited.push(off);
             let mut child = fetch(off)?;

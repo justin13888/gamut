@@ -135,11 +135,17 @@ impl NalHeader {
     /// is set (a conforming HEVC NAL header always has it 0).
     pub fn parse(nal: &[u8]) -> Result<Self> {
         let &[b0, b1, ..] = nal else {
-            return Err(Error::InvalidInput("HEIC: truncated NAL header"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIC: truncated NAL header",
+            ));
         };
         // forbidden_zero_bit(1) | nal_unit_type(6) | nuh_layer_id(6) | nuh_temporal_id_plus1(3)
         if b0 & 0x80 != 0 {
-            return Err(Error::InvalidInput("HEIC: forbidden_zero_bit set"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIC: forbidden_zero_bit set",
+            ));
         }
         let unit_type = NalUnitType::from_raw((b0 >> 1) & 0x3f);
         let layer_id = (u16::from(b0 & 0x01) << 5) | u16::from(b1 >> 3);
@@ -178,21 +184,31 @@ impl<'a> Iterator for NalUnitIter<'a> {
         self.done = true;
         let body_start = self.pos + self.len_size;
         let Some(prefix) = self.data.get(self.pos..body_start) else {
-            return Some(Err(Error::InvalidInput(
+            return Some(Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "HEIC: truncated NAL length prefix",
-            )));
+            )
+            .with_byte_offset(self.pos as u64)));
         };
         let len = prefix
             .iter()
             .fold(0usize, |acc, &b| (acc << 8) | usize::from(b));
         if len == 0 {
-            return Some(Err(Error::InvalidInput("HEIC: zero-length NAL unit")));
+            return Some(Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIC: zero-length NAL unit",
+            )
+            .with_byte_offset(self.pos as u64)));
         }
         let Some(nal) = body_start
             .checked_add(len)
             .and_then(|end| self.data.get(body_start..end))
         else {
-            return Some(Err(Error::InvalidInput("HEIC: truncated NAL unit body")));
+            return Some(Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIC: truncated NAL unit body",
+            )
+            .with_byte_offset(body_start as u64)));
         };
         // The read succeeded: clear the fuse and advance past this NAL unit.
         self.done = false;

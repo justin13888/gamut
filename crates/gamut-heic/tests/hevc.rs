@@ -6,7 +6,7 @@
 mod common;
 
 use common::{clean_file, item};
-use gamut_core::Error;
+use gamut_core::ErrorKind;
 use gamut_heic::{ChromaFormat, HeifContainer, HevcConfig, NalHeader, NalUnitType, iter_nal_units};
 use gamut_isobmff::{Item, Property, PropertyKind};
 
@@ -214,7 +214,7 @@ fn version_not_one_is_unsupported() {
     bytes[0] = 2;
     assert!(matches!(
         HevcConfig::parse(&bytes),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -224,7 +224,7 @@ fn length_size_minus_one_two_is_invalid() {
     bytes[21] = (bytes[21] & !0x03) | 0x02; // set lengthSizeMinusOne = 2 (illegal)
     assert!(matches!(
         HevcConfig::parse(&bytes),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -234,17 +234,17 @@ fn truncation_is_invalid() {
     // Truncated header (only 10 of 23 bytes).
     assert!(matches!(
         HevcConfig::parse(&full[..10]),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
     // Header present but numOfArrays says 3 and no array bytes follow (array-header boundary).
     assert!(matches!(
         HevcConfig::parse(&full[..23]),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
     // Truncated mid-NAL-body: drop the final PPS RBSP byte.
     assert!(matches!(
         HevcConfig::parse(&full[..full.len() - 1]),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -254,7 +254,7 @@ fn trailing_byte_after_arrays_is_invalid() {
     bytes.push(0x00);
     assert!(matches!(
         HevcConfig::parse(&bytes),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -354,11 +354,11 @@ fn nal_header_bit_extraction() {
 fn nal_header_forbidden_bit_and_truncation() {
     assert!(matches!(
         NalHeader::parse(&[0x80, 0x00]),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
     assert!(matches!(
         NalHeader::parse(&[0x40]),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -440,7 +440,7 @@ fn validate_still_payload_rejects_trailing_picture() {
     let payload = [0x00, 0x00, 0x00, 0x03, 0x02, 0x01, 0xDD];
     assert!(matches!(
         cfg.validate_still_payload(&payload),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 

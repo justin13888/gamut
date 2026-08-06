@@ -154,7 +154,11 @@ impl<'a> BitReader<'a> {
                     self.bit_count += 8;
                 }
                 Fetch::Eof => {
-                    return Err(Error::InvalidInput("JPEG: truncated entropy-coded data"));
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "JPEG: truncated entropy-coded data",
+                    )
+                    .with_byte_offset(self.pos as u64));
                 }
             }
         }
@@ -227,15 +231,24 @@ impl<'a> BitReader<'a> {
                 Fetch::Data(_) => continue,
                 Fetch::Marker => break self.marker.unwrap_or(0),
                 Fetch::Eof => {
-                    return Err(Error::InvalidInput("JPEG: truncated before restart marker"));
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "JPEG: truncated before restart marker",
+                    ));
                 }
             }
         };
         if !(0xD0..=0xD7).contains(&code) {
-            return Err(Error::InvalidInput("JPEG: expected restart marker"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: expected restart marker",
+            ));
         }
         if code - 0xD0 != expected {
-            return Err(Error::InvalidInput("JPEG: restart marker out of sequence"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: restart marker out of sequence",
+            ));
         }
         self.pos = self.marker_off + 2;
         self.marker = None;
@@ -251,7 +264,12 @@ impl<'a> BitReader<'a> {
             match self.fetch() {
                 Fetch::Data(_) => continue,
                 Fetch::Marker => return Ok((self.marker.unwrap_or(0), self.marker_off)),
-                Fetch::Eof => return Err(Error::InvalidInput("JPEG: missing marker after scan")),
+                Fetch::Eof => {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "JPEG: missing marker after scan",
+                    ));
+                }
             }
         }
     }
@@ -278,13 +296,16 @@ fn decode_symbol(table: &DecTable, r: &mut BitReader) -> Result<u8> {
     while code > table.maxcode(length) {
         length += 1;
         if length > 16 {
-            return Err(Error::InvalidInput("JPEG: undecodable Huffman code"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: undecodable Huffman code",
+            ));
         }
         code = (code << 1) + r.read_bit()?;
     }
-    table
-        .value_at(length, code)
-        .ok_or(Error::InvalidInput("JPEG: Huffman value out of table"))
+    table.value_at(length, code).ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: Huffman value out of table")
+    })
 }
 
 /// Per-scan-component decode context: the tables it uses, its sampling, and its running DC predictor
@@ -310,7 +331,10 @@ impl Ctx<'_> {
         // DC: differential against the running predictor (§F.2.2.1).
         let t = decode_symbol(self.dc, r)?;
         if t > 11 {
-            return Err(Error::InvalidInput("JPEG: DC magnitude category > 11"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: DC magnitude category > 11",
+            ));
         }
         let diff = if t == 0 {
             0
@@ -334,7 +358,10 @@ impl Ctx<'_> {
             }
             k += run;
             if k > 63 {
-                return Err(Error::InvalidInput("JPEG: AC coefficient index past 63"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: AC coefficient index past 63",
+                ));
             }
             let coeff = extend(r.read_bits(u32::from(size))?, size);
             let natural = ZIGZAG[k];
@@ -413,15 +440,18 @@ pub fn decode_scan(
     let mut ctxs: Vec<Ctx> = Vec::with_capacity(scan.components.len());
     for sc in &scan.components {
         let fc = &frame.components[sc.frame_index];
-        let dc = tables.dc[usize::from(sc.td)]
-            .as_ref()
-            .ok_or(Error::InvalidInput("JPEG: scan uses undefined DC table"))?;
-        let ac = tables.ac[usize::from(sc.ta)]
-            .as_ref()
-            .ok_or(Error::InvalidInput("JPEG: scan uses undefined AC table"))?;
-        let quant = tables.quant[usize::from(fc.tq)]
-            .as_ref()
-            .ok_or(Error::InvalidInput("JPEG: scan uses undefined quant table"))?;
+        let dc = tables.dc[usize::from(sc.td)].as_ref().ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: scan uses undefined DC table")
+        })?;
+        let ac = tables.ac[usize::from(sc.ta)].as_ref().ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: scan uses undefined AC table")
+        })?;
+        let quant = tables.quant[usize::from(fc.tq)].as_ref().ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: scan uses undefined quant table",
+            )
+        })?;
         let blk_cols = if interleaved { usize::from(fc.h) } else { 1 };
         let blocks_per_line = mcus_x * blk_cols;
         ctxs.push(Ctx {
@@ -452,7 +482,8 @@ pub fn decode_scan(
             Some(rows) if mcu_y >= rows => break,
             None if reader.at_data_end() => break,
             None if row_limit.is_some_and(|limit| mcu_y >= limit.rows) => {
-                return Err(Error::Unsupported(
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     row_limit.map_or("JPEG: image exceeds a decoder limit", |limit| limit.message),
                 ));
             }
@@ -585,7 +616,8 @@ fn validate_progression(scan: &ScanHeader, comps: &mut [ProgComp]) -> Result<()>
         let c = &mut comps[sc.frame_index];
         let (lo, hi) = if ss == 0 { (0, 0) } else { (ss, se) };
         if ss != 0 && !c.has_dc() {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: progressive AC scan before the component's DC scan",
             ));
         }
@@ -594,14 +626,16 @@ fn validate_progression(scan: &ScanHeader, comps: &mut [ProgComp]) -> Result<()>
                 // First pass of a band: the position must not have been coded yet (no overlap).
                 (0, None) => {}
                 (0, Some(_)) => {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "JPEG: progressive band coded twice at the first pass (overlap)",
                     ));
                 }
                 // Refinement: the position's history must be exactly Ah (its previous Al).
                 (ah, Some(prev)) if prev == ah => {}
                 (_, _) => {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "JPEG: progressive refinement without a matching first pass",
                     ));
                 }
@@ -657,8 +691,12 @@ pub fn decode_progressive_scan(
         let c = &mut comps[sc.frame_index];
         if !c.quant_bound {
             let fc = &frame.components[sc.frame_index];
-            c.quant = tables.quant[usize::from(fc.tq)]
-                .ok_or(Error::InvalidInput("JPEG: scan uses undefined quant table"))?;
+            c.quant = tables.quant[usize::from(fc.tq)].ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: scan uses undefined quant table",
+                )
+            })?;
             c.quant_bound = true;
         }
     }
@@ -669,22 +707,18 @@ pub fn decode_progressive_scan(
     for sc in &scan.components {
         let fc = &frame.components[sc.frame_index];
         let dc = if ss == 0 {
-            Some(
-                tables.dc[usize::from(sc.td)]
-                    .as_ref()
-                    .ok_or(Error::InvalidInput("JPEG: scan uses undefined DC table"))?,
-            )
+            Some(tables.dc[usize::from(sc.td)].as_ref().ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: scan uses undefined DC table")
+            })?)
         } else {
             None
         };
         let ac = if ss == 0 {
             None
         } else {
-            Some(
-                tables.ac[usize::from(sc.ta)]
-                    .as_ref()
-                    .ok_or(Error::InvalidInput("JPEG: scan uses undefined AC table"))?,
-            )
+            Some(tables.ac[usize::from(sc.ta)].as_ref().ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "JPEG: scan uses undefined AC table")
+            })?)
         };
         scs.push(ProgSc {
             frame_index: sc.frame_index,
@@ -742,7 +776,8 @@ pub fn decode_progressive_scan(
                             if ah == 0 {
                                 let t = decode_symbol(sc.dc.unwrap(), &mut reader)?;
                                 if t > 11 {
-                                    return Err(Error::InvalidInput(
+                                    return Err(Error::invalid_input(
+                                        env!("CARGO_PKG_NAME"),
                                         "JPEG: DC magnitude category > 11",
                                     ));
                                 }
@@ -838,7 +873,8 @@ fn decode_ac_first(
         } else {
             k += run;
             if k > se {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "JPEG: progressive AC run past band end",
                 ));
             }
@@ -876,7 +912,8 @@ fn decode_ac_refine(
                 // In a refinement scan a newly non-zero coefficient always has magnitude 1; the one
                 // appended bit is its sign (1 → positive, 0 → negative) (§G.1.2.3 rule a).
                 if size != 1 {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "JPEG: progressive AC refinement coefficient size ≠ 1",
                     ));
                 }
@@ -912,7 +949,8 @@ fn decode_ac_refine(
             }
             if new_val != 0 {
                 if k > se {
-                    return Err(Error::InvalidInput(
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
                         "JPEG: progressive AC refinement past band end",
                     ));
                 }

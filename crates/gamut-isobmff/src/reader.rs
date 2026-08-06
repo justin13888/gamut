@@ -88,7 +88,8 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
             }
             b"meta" => meta_body = Some(b.body),
             b"moov" | b"trak" => {
-                return Err(Error::Unsupported(
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
                     "ISOBMFF: image sequences (tracks) not supported",
                 ));
             }
@@ -97,8 +98,9 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     }
 
     let (major_brand, minor_version, compatible_brands) =
-        ftyp.ok_or(Error::InvalidInput("ISOBMFF: missing ftyp"))?;
-    let meta_body = meta_body.ok_or(Error::InvalidInput("ISOBMFF: missing meta"))?;
+        ftyp.ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: missing ftyp"))?;
+    let meta_body = meta_body
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: missing meta"))?;
     let meta = parse_meta(meta_body)?;
 
     // Index iloc/ipma/iref by item id up front (first iloc/ipma entry wins; references keep file
@@ -117,7 +119,10 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
     }
     let item_ids: HashSet<u32> = meta.infe.iter().map(|i| i.id).collect();
     if iref_by_from.keys().any(|from| !item_ids.contains(from)) {
-        return Err(Error::InvalidInput("ISOBMFF: iref from unknown item"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: iref from unknown item",
+        ));
     }
 
     // Assemble items. `budget` caps the total resolved payload at the input size so overlapping
@@ -137,7 +142,8 @@ pub fn read(data: &[u8]) -> Result<IsoBmffImage> {
         for &(index, essential) in assoc {
             let i = usize::from(index);
             if index == 0 || i > meta.ipco.len() {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "ISOBMFF: ipma property index out of range",
                 ));
             }
@@ -181,7 +187,10 @@ fn parse_ftyp(body: &[u8]) -> Result<([u8; 4], u32, Vec<[u8; 4]>)> {
         compatible.push(r.fourcc()?);
     }
     if r.remaining() != 0 {
-        return Err(Error::InvalidInput("ISOBMFF: ftyp has trailing bytes"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: ftyp has trailing bytes",
+        ));
     }
     Ok((major, minor, compatible))
 }
@@ -248,14 +257,20 @@ fn parse_meta(body: &[u8]) -> Result<Meta<'_>> {
     }
 
     if !hdlr_seen {
-        return Err(Error::InvalidInput("ISOBMFF: meta missing hdlr"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: meta missing hdlr",
+        ));
     }
     let (ipco, ipma) = iprp.unwrap_or_default();
     Ok(Meta {
-        primary_item_id: primary_item_id
-            .ok_or(Error::InvalidInput("ISOBMFF: meta missing pitm"))?,
+        primary_item_id: primary_item_id.ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: meta missing pitm")
+        })?,
         iloc: iloc.unwrap_or_default(),
-        infe: infe.ok_or(Error::InvalidInput("ISOBMFF: meta missing iinf"))?,
+        infe: infe.ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: meta missing iinf")
+        })?,
         ipco,
         ipma,
         iref: iref.unwrap_or_default(),
@@ -275,26 +290,33 @@ fn resolve_payload(
 ) -> Result<Vec<u8>> {
     let source = match entry.construction_method {
         0 => data,
-        _ => idat.ok_or(Error::InvalidInput(
-            "ISOBMFF: iloc references idat but meta has none",
-        ))?,
+        _ => idat.ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: iloc references idat but meta has none",
+            )
+        })?,
     };
     let mut payload = Vec::new();
     for &(offset, length) in &entry.extents {
-        let start = entry
-            .base_offset
-            .checked_add(offset)
-            .ok_or(Error::InvalidInput("ISOBMFF: iloc extent overflow"))?;
-        let end = start
-            .checked_add(length)
-            .ok_or(Error::InvalidInput("ISOBMFF: iloc extent overflow"))?;
+        let start = entry.base_offset.checked_add(offset).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: iloc extent overflow")
+        })?;
+        let end = start.checked_add(length).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: iloc extent overflow")
+        })?;
         let range = usize::try_from(start).ok().zip(usize::try_from(end).ok());
         let slice = range
             .and_then(|(start, end)| source.get(start..end))
-            .ok_or(Error::InvalidInput("ISOBMFF: iloc extent out of bounds"))?;
-        *budget = budget
-            .checked_sub(slice.len())
-            .ok_or(Error::InvalidInput("ISOBMFF: extents exceed the file size"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: iloc extent out of bounds")
+            })?;
+        *budget = budget.checked_sub(slice.len()).ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: extents exceed the file size",
+            )
+        })?;
         payload.extend_from_slice(slice);
     }
     Ok(payload)
@@ -314,7 +336,10 @@ fn parse_hdlr(body: &[u8]) -> Result<()> {
     let _pre_defined = r.u32()?;
     let handler = r.fourcc()?;
     if &handler != b"pict" {
-        return Err(Error::Unsupported("ISOBMFF: non-picture handler"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: non-picture handler",
+        ));
     }
     Ok(())
 }
@@ -325,7 +350,10 @@ fn parse_pitm(body: &[u8]) -> Result<u32> {
     match full_box_header(&mut r)?.0 {
         0 => Ok(u32::from(r.u16()?)),
         1 => r.u32(),
-        _ => Err(Error::Unsupported("ISOBMFF: pitm version above 1")),
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: pitm version above 1",
+        )),
     }
 }
 
@@ -344,7 +372,10 @@ fn parse_iloc(body: &[u8]) -> Result<Vec<IlocEntry>> {
     let mut r = BoxReader::new(body);
     let version = full_box_header(&mut r)?.0;
     if version > 2 {
-        return Err(Error::Unsupported("ISOBMFF: iloc version above 2"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: iloc version above 2",
+        ));
     }
     let b0 = r.u8()?;
     let (offset_size, length_size) = (b0 >> 4, b0 & 0xf);
@@ -353,7 +384,10 @@ fn parse_iloc(body: &[u8]) -> Result<Vec<IlocEntry>> {
     let index_size = if version >= 1 { b1 & 0xf } else { 0 };
     for size in [offset_size, length_size, base_offset_size, index_size] {
         if !matches!(size, 0 | 4 | 8) {
-            return Err(Error::InvalidInput("ISOBMFF: iloc field size not 0/4/8"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: iloc field size not 0/4/8",
+            ));
         }
     }
     let item_count = if version == 2 {
@@ -376,12 +410,16 @@ fn parse_iloc(body: &[u8]) -> Result<Vec<IlocEntry>> {
             0
         };
         if construction_method > 1 {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "ISOBMFF: iloc construction_method 2 (item offsets)",
             ));
         }
         if r.u16()? != 0 {
-            return Err(Error::Unsupported("ISOBMFF: external data reference"));
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: external data reference",
+            ));
         }
         let base_offset = read_sized(&mut r, base_offset_size)?;
         let extent_count = r.u16()?;
@@ -408,15 +446,23 @@ fn parse_iinf(body: &[u8]) -> Result<Vec<InfeEntry>> {
     let entry_count = match full_box_header(&mut r)?.0 {
         0 => u32::from(r.u16()?),
         1 => r.u32()?,
-        _ => return Err(Error::Unsupported("ISOBMFF: iinf version above 1")),
+        _ => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: iinf version above 1",
+            ));
+        }
     };
     let mut entries = Vec::new();
     for _ in 0..entry_count {
-        let b = r
-            .next_box()?
-            .ok_or(Error::InvalidInput("ISOBMFF: iinf truncated"))?;
+        let b = r.next_box()?.ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: iinf truncated")
+        })?;
         if &b.ty != b"infe" {
-            return Err(Error::InvalidInput("ISOBMFF: iinf child is not infe"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: iinf child is not infe",
+            ));
         }
         entries.push(parse_infe(b.body)?);
     }
@@ -431,21 +477,33 @@ fn parse_infe(body: &[u8]) -> Result<InfeEntry> {
     let id = match version {
         2 => u32::from(r.u16()?),
         3 => r.u32()?,
-        _ => return Err(Error::Unsupported("ISOBMFF: infe version (only v2/v3)")),
+        _ => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: infe version (only v2/v3)",
+            ));
+        }
     };
     if r.u16()? != 0 {
-        return Err(Error::Unsupported("ISOBMFF: protected item"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: protected item",
+        ));
     }
     let item_type = r.fourcc()?;
     if &item_type == b"uri " {
-        return Err(Error::Unsupported("ISOBMFF: uri items not modelled"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: uri items not modelled",
+        ));
     }
     let name = read_c_string(&mut r)?;
     let mut content_type = None;
     let mut content_encoding = None;
     if &item_type == b"mime" {
         if r.remaining() == 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "ISOBMFF: mime infe missing content_type",
             ));
         }
@@ -476,7 +534,8 @@ fn read_c_string(r: &mut BoxReader) -> Result<String> {
         }
         bytes.push(b);
     }
-    String::from_utf8(bytes).map_err(|_| Error::InvalidInput("ISOBMFF: string not UTF-8"))
+    String::from_utf8(bytes)
+        .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: string not UTF-8"))
 }
 
 /// `iref` v0 (16-bit ids) / v1 (32-bit ids): each child box is one typed reference set,
@@ -485,7 +544,10 @@ fn parse_iref(body: &[u8]) -> Result<Vec<(u32, ItemReference)>> {
     let mut r = BoxReader::new(body);
     let version = full_box_header(&mut r)?.0;
     if version > 1 {
-        return Err(Error::Unsupported("ISOBMFF: iref version above 1"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: iref version above 1",
+        ));
     }
     let mut references = Vec::new();
     while let Some(b) = r.next_box()? {
@@ -522,7 +584,8 @@ fn parse_grpl(body: &[u8]) -> Result<Vec<EntityGroup>> {
     while let Some(b) = r.next_box()? {
         let mut r = BoxReader::new(b.body);
         if full_box_header(&mut r)?.0 != 0 {
-            return Err(Error::Unsupported(
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
                 "ISOBMFF: EntityToGroupBox version above 0",
             ));
         }
@@ -553,8 +616,12 @@ fn parse_iprp(body: &[u8]) -> Result<(Vec<PropertyKind>, ItemAssociations)> {
             _ => {}
         }
     }
-    let ipco = ipco.ok_or(Error::InvalidInput("ISOBMFF: iprp missing ipco"))?;
-    let ipma = ipma.ok_or(Error::InvalidInput("ISOBMFF: iprp missing ipma"))?;
+    let ipco = ipco.ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: iprp missing ipco")
+    })?;
+    let ipma = ipma.ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: iprp missing ipma")
+    })?;
     Ok((ipco, ipma))
 }
 
@@ -680,7 +747,10 @@ fn parse_ipma(body: &[u8]) -> Result<ItemAssociations> {
     let mut r = BoxReader::new(body);
     let (version, flags) = full_box_header(&mut r)?;
     if version > 1 {
-        return Err(Error::Unsupported("ISOBMFF: ipma version above 1"));
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "ISOBMFF: ipma version above 1",
+        ));
     }
     let wide = flags & 1 == 1;
     // `entry_count`/`association_count` are untrusted; do not pre-allocate from them — the bounded

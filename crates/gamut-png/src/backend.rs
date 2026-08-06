@@ -82,7 +82,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use gamut_core::{Error, Result};
+use gamut_core::{Error, ErrorKind, Result};
 
 use crate::color::ColorType;
 
@@ -251,11 +251,20 @@ impl<T: ?Sized> Default for Registry<T> {
 
 /// The error a poisoned backend mutex produces: another thread panicked inside this backend, so its
 /// state is not trustworthy.
-pub(crate) const POISONED: Error = Error::InvalidInput("PNG: IDAT backend mutex was poisoned");
+pub(crate) fn poisoned() -> Error {
+    Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
+        "PNG: IDAT backend mutex was poisoned",
+    )
+}
 
 /// The host's cap re-check failing — the security invariant of this module.
-pub(crate) const OVER_CAP: Error =
-    Error::InvalidInput("PNG: IDAT backend produced more than the allowed output size");
+pub(crate) fn over_cap() -> Error {
+    Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
+        "PNG: IDAT backend produced more than the allowed output size",
+    )
+}
 
 /// Runs the inflater registry, falling back to `tail` (the built-in `miniz_oxide` inflater).
 ///
@@ -268,19 +277,19 @@ pub(crate) fn run_inflaters(
     tail: impl FnOnce(&[u8], usize) -> Result<Vec<u8>>,
 ) -> Result<Vec<u8>> {
     for backend in registry.iter() {
-        let mut backend = backend.lock().map_err(|_| POISONED)?;
+        let mut backend = backend.lock().map_err(|_| poisoned())?;
         if !backend.supports(info) {
             continue;
         }
         let out = match backend.inflate(info, zlib, max_out) {
             // A late decline (the C-ABI `Status::UNSUPPORTED`) falls through, like `supports`.
-            Err(Error::Unsupported(_)) => continue,
+            Err(error) if error.kind() == ErrorKind::Unsupported => continue,
             other => other?,
         };
         // SECURITY: the backend is untrusted with the limit. Reject, never truncate — a truncated
         // stream would be silently wrong image data.
         if out.len() > max_out {
-            return Err(OVER_CAP);
+            return Err(over_cap());
         }
         return Ok(out);
     }
@@ -295,12 +304,12 @@ pub(crate) fn run_deflaters(
     tail: impl FnOnce(&[u8]) -> Vec<u8>,
 ) -> Result<Vec<u8>> {
     for backend in registry.iter() {
-        let mut backend = backend.lock().map_err(|_| POISONED)?;
+        let mut backend = backend.lock().map_err(|_| poisoned())?;
         if !backend.supports(info) {
             continue;
         }
         match backend.deflate(info, raw) {
-            Err(Error::Unsupported(_)) => continue,
+            Err(error) if error.kind() == ErrorKind::Unsupported => continue,
             other => return other,
         }
     }
@@ -391,7 +400,7 @@ mod tests {
         let err = run_inflaters(&r, &info(), &[], 8, |_, _| {
             unreachable!("tail must not run")
         });
-        assert_eq!(err.unwrap_err().to_string(), OVER_CAP.to_string());
+        assert_eq!(err.unwrap_err().to_string(), over_cap().to_string());
         // Exactly at the cap is fine.
         let r = reg(vec![Fixed {
             accepts: true,
@@ -556,6 +565,6 @@ mod tests {
         let mut r: Registry<dyn IdatInflater + Send> = Registry::default();
         r.push(backend);
         let err = run_inflaters(&r, &info(), &[], 8, |_, _| unreachable!());
-        assert_eq!(err.unwrap_err().to_string(), POISONED.to_string());
+        assert_eq!(err.unwrap_err().to_string(), poisoned().to_string());
     }
 }

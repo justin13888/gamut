@@ -28,7 +28,8 @@ use crate::config::{ColorSpec, Container, Distance, Effort, Mode, Orientation};
     allow(dead_code)
 )]
 pub(crate) fn no_encode_backend() -> Error {
-    Error::Unsupported(
+    Error::unsupported(
+        env!("CARGO_PKG_NAME"),
         "JXL: no encode backend (enable the `encode` feature or push a codestream backend)",
     )
 }
@@ -48,7 +49,8 @@ pub(crate) fn resolve_coded_bits(cfg: &JxlEncoder, bits_per_sample: u32) -> Resu
         Some(bits) => {
             let bits = u32::from(bits);
             if bits == 0 || bits > bits_per_sample {
-                return Err(Error::InvalidInput(
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "JXL: coded bit depth must be 1..= the sample width",
                 ));
             }
@@ -368,7 +370,7 @@ impl JxlEncoder {
                         return Ok(codestream.len());
                     }
                     // A late decline: fall through exactly as `supports() == false` would.
-                    Err(Error::Unsupported(_)) => continue,
+                    Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported => continue,
                     // Terminal: the backend accepted the job and failed, so propagate.
                     Err(error) => return Err(error),
                 }
@@ -524,10 +526,8 @@ mod tests {
         let err = JxlEncoder::new()
             .recompress_jpeg(&[], &mut out)
             .unwrap_err();
-        assert!(matches!(
-            err,
-            gamut_core::Error::InvalidInput("JXL: empty JPEG input")
-        ));
+        assert_eq!(err.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(err.static_message(), Some("JXL: empty JPEG input"));
         // No output was produced on the rejected path.
         assert!(out.is_empty());
     }
@@ -545,19 +545,21 @@ mod tests {
         enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x01]));
         assert!(matches!(
             enc.recompress_jpeg(&[0xFF, 0xD8], &mut out),
-            Err(Error::Unsupported(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
         assert!(out.is_empty());
     }
 
     #[test]
     fn no_encode_backend_is_the_pinned_refusal() {
-        assert!(matches!(
-            no_encode_backend(),
-            Error::Unsupported(
+        let error = no_encode_backend();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
+        assert_eq!(
+            error.static_message(),
+            Some(
                 "JXL: no encode backend (enable the `encode` feature or push a codestream backend)"
             )
-        ));
+        );
     }
 
     #[test]
@@ -583,12 +585,12 @@ mod tests {
             1
         );
         // Zero, and anything wider than the buffer, are rejected.
-        assert!(matches!(
-            resolve_coded_bits(&JxlEncoder::new().with_bit_depth(0), 16),
-            Err(Error::InvalidInput(
-                "JXL: coded bit depth must be 1..= the sample width"
-            ))
-        ));
+        let error = resolve_coded_bits(&JxlEncoder::new().with_bit_depth(0), 16).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: coded bit depth must be 1..= the sample width")
+        );
         assert!(resolve_coded_bits(&JxlEncoder::new().with_bit_depth(17), 16).is_err());
         assert!(resolve_coded_bits(&JxlEncoder::new().with_bit_depth(9), 8).is_err());
     }
@@ -728,9 +730,26 @@ mod tests {
             self.encode_calls.fetch_add(1, Ordering::SeqCst);
             match &self.outcome {
                 Ok(bytes) => Ok(bytes.clone()),
-                Err(Error::Unsupported(m)) => Err(Error::Unsupported(m)),
-                Err(Error::InvalidInput(m)) => Err(Error::InvalidInput(m)),
-                Err(_) => Err(Error::InvalidInput("JXL: test backend failure")),
+                Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported => {
+                    Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        error
+                            .static_message()
+                            .unwrap_or("JXL: test backend refusal"),
+                    ))
+                }
+                Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {
+                    Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        error
+                            .static_message()
+                            .unwrap_or("JXL: test backend failure"),
+                    ))
+                }
+                Err(_) => Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JXL: test backend failure",
+                )),
             }
         }
     }
@@ -791,7 +810,10 @@ mod tests {
 
     #[test]
     fn a_late_unsupported_falls_through_to_the_next_backend() {
-        let first = FixedBackend::failing(Error::Unsupported("backend changed its mind"));
+        let first = FixedBackend::failing(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "backend changed its mind",
+        ));
         let second = FixedBackend::new(vec![0xFF, 0x0A, 0x33]);
         let (_, first_encodes) = first.counters();
         let (_, second_encodes) = second.counters();
@@ -808,7 +830,10 @@ mod tests {
 
     #[test]
     fn an_accepted_then_failed_backend_propagates_and_stops_the_chain() {
-        let first = FixedBackend::failing(Error::InvalidInput("JXL: test backend failure"));
+        let first = FixedBackend::failing(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: test backend failure",
+        ));
         let second = FixedBackend::new(vec![0xFF, 0x0A, 0x44]);
         let (_, first_encodes) = first.counters();
         let (second_supports, second_encodes) = second.counters();
@@ -817,10 +842,9 @@ mod tests {
         enc.push_backend(first).push_backend(second);
 
         let mut out = Vec::new();
-        assert!(matches!(
-            enc.dispatch_encode(&gray_image(), &mut out),
-            Err(Error::InvalidInput("JXL: test backend failure"))
-        ));
+        let error = enc.dispatch_encode(&gray_image(), &mut out).unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(error.static_message(), Some("JXL: test backend failure"));
         assert_eq!(first_encodes.load(Ordering::SeqCst), 1);
         // No later backend — and no built-in tail — was reached.
         assert_eq!(second_supports.load(Ordering::SeqCst), 0);
@@ -866,7 +890,8 @@ mod tests {
     fn all_backends_declining_falls_through_to_the_builtin_tail() {
         let mut enc = JxlEncoder::new();
         let first = FixedBackend::declining();
-        let second = FixedBackend::failing(Error::Unsupported("late decline"));
+        let second =
+            FixedBackend::failing(Error::unsupported(env!("CARGO_PKG_NAME"), "late decline"));
         let (first_supports, _) = first.counters();
         let (_, second_encodes) = second.counters();
         enc.push_backend(first).push_backend(second);
@@ -886,7 +911,10 @@ mod tests {
             assert_eq!(&out[..2], &[0xFF, 0x0A]);
         } else {
             // No tail compiled in: the direction is unsupported.
-            assert!(matches!(result, Err(Error::Unsupported(_))));
+            assert!(matches!(
+                result,
+                Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
+            ));
             assert!(out.is_empty());
         }
     }
@@ -907,7 +935,7 @@ mod tests {
             ))
         );
         if let Err(error) = result {
-            assert!(matches!(error, Error::Unsupported(_)));
+            assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
         }
     }
 

@@ -3,7 +3,7 @@
 //! the SDK itself reads from Adobe's own files. These are the ProRAW-shaped inputs — tiled,
 //! JPEG-XL-compressed linear and Bayer raws.
 
-use gamut_core::Error;
+use gamut_core::ErrorKind;
 use gamut_dng::DngDecoder;
 
 /// Decodes an Adobe sample with both gamut and the SDK and requires pixel-exact agreement.
@@ -64,8 +64,10 @@ fn rejects_adobe_jxl_float_sample_cleanly() {
     let bytes =
         gamut_dng_oracle::sample_file("02_jxl_linear_raw_float.dng").expect("sample DNG present");
     let err = DngDecoder::new().decode(&bytes).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Unsupported);
     assert!(
-        matches!(err, Error::Unsupported(m) if m.contains("floating-point")),
+        err.static_message()
+            .is_some_and(|message| message.contains("floating-point")),
         "expected a floating-point rejection, got {err:?}"
     );
 }

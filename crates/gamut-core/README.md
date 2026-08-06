@@ -54,18 +54,18 @@ name (for example, `ColorModel::Rgba` is `"Rgba"` in JSON). The feature is disab
 
 Stable foundation with a frozen public surface: the [`EncodeImage`] / [`DecodeImage`] traits, the
 branded [`ImageRef`] / [`ImageBuf`] buffers and [`Pixel`] markers, [`Dimensions`], [`Result`], and
-the [`Error`] variants (`InvalidInput`, `Unsupported`). Every codec in the workspace is built on it.
+the structured [`Error`] / [`ErrorKind`] surface. Every codec in the workspace is built on it.
 
 The surface is intentionally minimal. The following are deliberate design decisions, not gaps:
 
 - **Interleaved `u8` / `u16` layouts only.** [`Sample`] is sealed over `u8` and `u16`. Planar
   layouts and coded bit depth are codec concerns and live in `gamut-color` (`Planar8`, `BitDepth`),
   which builds on these types.
-- **Open vs. sealed.** [`Error`] and `ColorModel` are `#[non_exhaustive]`, so new variants — for
-  example a future dynamic-context error — land additively. [`Pixel`] / [`Sample`] are sealed: the
-  set of supported pixel layouts is closed and defined only here.
-- **Static error messages.** Error payloads are `&'static str`; richer dynamic context is deferred
-  and addable later behind `#[non_exhaustive]` without breaking callers.
+- **Open vs. sealed.** [`Error`], [`ErrorKind`], and `ColorModel` are `#[non_exhaustive]`.
+  [`Pixel`] / [`Sample`] are sealed: the supported layouts are closed and defined only here.
+- **Static fast path, structured diagnostics.** `InvalidInput` and `Unsupported` retain their
+  allocation-free `&'static str` shape. The opt-in `Context` wrapper adds an origin, byte offset,
+  or owned detail while `Error::kind` preserves stable classification.
 - **The length invariant lives on the buffers.** [`Dimensions`] is a plain value type; non-emptiness
   and `len == width * height * channels` are validated once, at [`ImageRef::new`] / [`ImageBuf::new`],
   so codecs never re-check.

@@ -52,7 +52,12 @@ pub const CODEC_ID_ZLIB: u32 = u32::from_be_bytes(*b"zlib");
 pub const PIXEL_FORMAT_FILTERED_BYTES: u32 = u32::MAX;
 
 /// The error a non-OK, non-`UNSUPPORTED` status becomes. Terminal: the host propagates it.
-const BACKEND_FAILED: Error = Error::InvalidInput("PNG: IDAT codec-abi backend reported an error");
+fn backend_failed() -> Error {
+    Error::invalid_input(
+        env!("CARGO_PKG_NAME"),
+        "PNG: IDAT codec-abi backend reported an error",
+    )
+}
 
 /// Builds the single-plane descriptor for a `len`-byte filtered stream at `ptr`.
 fn desc(info: &IdatInfo, ptr: *mut u8, len: usize) -> ImageDesc {
@@ -74,9 +79,13 @@ fn desc(info: &IdatInfo, ptr: *mut u8, len: usize) -> ImageDesc {
 /// Turns a terminal status into a typed error; [`Status::UNSUPPORTED`] into a late decline.
 fn from_status(status: Status) -> Error {
     if status.is_unsupported() {
-        Error::Unsupported("PNG: IDAT codec-abi backend declined the stream")
+        Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "PNG: IDAT codec-abi backend declined the stream",
+        )
+        .with_detail(format!("codec-abi status {}", status.0))
     } else {
-        BACKEND_FAILED
+        backend_failed().with_detail(format!("codec-abi status {}", status.0))
     }
 }
 
@@ -120,7 +129,8 @@ impl<D: Decoder + Send> IdatInflater for AbiInflater<D> {
         // on a job that is already doomed.
         let len = info.raw_len();
         if len > max_out {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "PNG: IDAT is larger than the decoder's output budget",
             ));
         }

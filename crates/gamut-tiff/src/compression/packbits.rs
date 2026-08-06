@@ -49,28 +49,31 @@ pub fn decode(src: &[u8], expected: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(expected.min(1 << 16));
     let mut i = 0;
     while out.len() < expected {
-        let n = *src
-            .get(i)
-            .ok_or(Error::InvalidInput("PackBits: truncated control byte"))? as i8;
+        let n = *src.get(i).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "PackBits: truncated control byte")
+        })? as i8;
         i += 1;
         if n >= 0 {
             let count = n as usize + 1;
-            let chunk = src
-                .get(i..i + count)
-                .ok_or(Error::InvalidInput("PackBits: truncated literal run"))?;
+            let chunk = src.get(i..i + count).ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "PackBits: truncated literal run")
+            })?;
             out.extend_from_slice(chunk);
             i += count;
         } else if n != -128 {
             let count = (1 - i32::from(n)) as usize;
-            let b = *src
-                .get(i)
-                .ok_or(Error::InvalidInput("PackBits: truncated replicate run"))?;
+            let b = *src.get(i).ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "PackBits: truncated replicate run")
+            })?;
             i += 1;
             out.resize(out.len() + count, b);
         }
     }
     if out.len() != expected {
-        return Err(Error::InvalidInput("PackBits: decoded length mismatch"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PackBits: decoded length mismatch",
+        ));
     }
     Ok(out)
 }

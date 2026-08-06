@@ -17,10 +17,11 @@ use crate::{Dimensions, Error, Pixel, Result};
 /// dimensions. The single validation shared by every buffer constructor.
 fn expected_len<P: Pixel>(dims: Dimensions) -> Result<usize> {
     if dims.is_empty() {
-        return Err(Error::InvalidInput("zero-sized image"));
+        return Err(Error::InvalidInput("zero-sized image").with_origin(env!("CARGO_PKG_NAME")));
     }
-    dims.sample_count(P::CHANNELS)
-        .ok_or(Error::InvalidInput("image dimensions overflow usize"))
+    dims.sample_count(P::CHANNELS).ok_or_else(|| {
+        Error::InvalidInput("image dimensions overflow usize").with_origin(env!("CARGO_PKG_NAME"))
+    })
 }
 
 /// Checks the length invariant `data_len == width * height * P::CHANNELS` (with non-empty,
@@ -28,9 +29,10 @@ fn expected_len<P: Pixel>(dims: Dimensions) -> Result<usize> {
 /// rejection messages never drift between the borrowed and owned paths.
 fn validate_len<P: Pixel>(data_len: usize, dims: Dimensions) -> Result<()> {
     if data_len != expected_len::<P>(dims)? {
-        return Err(Error::InvalidInput(
-            "image buffer length does not match dimensions",
-        ));
+        return Err(
+            Error::InvalidInput("image buffer length does not match dimensions")
+                .with_origin(env!("CARGO_PKG_NAME")),
+        );
     }
     Ok(())
 }

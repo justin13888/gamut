@@ -141,14 +141,15 @@ impl Yuv420 {
     /// Returns [`Error::InvalidInput`] if any plane length does not match the dimensions, or if
     /// the luma sample count overflows `usize`.
     pub fn new(width: u32, height: u32, y: Vec<u8>, u: Vec<u8>, v: Vec<u8>) -> Result<Self> {
-        let luma = Dimensions { width, height }
-            .num_pixels()
-            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+        let luma = Dimensions { width, height }.num_pixels().ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
+        })?;
         // Cannot overflow: each chroma plane has at most as many samples as the luma plane
         // (`ceil(d / 2) <= d` for d >= 1, and 0 for d == 0), and `luma` just fit `usize`.
         let chroma = Self::chroma_width(width) as usize * Self::chroma_height(height) as usize;
         if y.len() != luma || u.len() != chroma || v.len() != chroma {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "YUV plane length does not match dimensions",
             ));
         }
@@ -181,9 +182,12 @@ impl Yuv420 {
     pub fn from_rgb8(rgb: &[u8], width: u32, height: u32, range: ColorRange) -> Result<Self> {
         let samples = Dimensions::new(width, height)?
             .sample_count(3)
-            .ok_or(Error::InvalidInput("image dimensions overflow usize"))?;
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
+            })?;
         if rgb.len() != samples {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "rgb buffer length does not match dimensions",
             ));
         }

@@ -176,8 +176,10 @@ fn jxl_rejects_sub_16bit_samples() {
         .with_compression(Compression::JpegXl)
         .encode(&raw, &common::sample_profile(), &mut Vec::new())
         .unwrap_err();
+    assert_eq!(err.kind(), gamut_core::ErrorKind::Unsupported);
     assert!(
-        matches!(err, gamut_core::Error::Unsupported(m) if m.contains("16-bit")),
+        err.static_message()
+            .is_some_and(|message| message.contains("16-bit")),
         "expected a 16-bit requirement error, got {err:?}"
     );
 }

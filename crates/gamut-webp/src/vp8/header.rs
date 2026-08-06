@@ -176,20 +176,30 @@ pub fn write_uncompressed_chunk(
 /// [`Error::Unsupported`] for an inter frame (gamut codes key frames only).
 pub fn read_uncompressed_chunk(data: &[u8]) -> Result<UncompressedChunk> {
     if data.len() < 3 {
-        return Err(Error::InvalidInput("VP8: truncated frame tag"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: truncated frame tag",
+        ));
     }
     let tag = u32::from(data[0]) | (u32::from(data[1]) << 8) | (u32::from(data[2]) << 16);
     let is_key_frame = (tag & 1) == 0;
     if !is_key_frame {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "VP8: only intra key frames are supported",
         ));
     }
     if data.len() < UNCOMPRESSED_CHUNK_LEN {
-        return Err(Error::InvalidInput("VP8: truncated key-frame header"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: truncated key-frame header",
+        ));
     }
     if data[3..6] != VP8_KEYFRAME_START_CODE {
-        return Err(Error::InvalidInput("VP8: bad key-frame start code"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: bad key-frame start code",
+        ));
     }
     let hsc = u32::from(data[6]) | (u32::from(data[7]) << 8);
     let vsc = u32::from(data[8]) | (u32::from(data[9]) << 8);
@@ -564,12 +574,12 @@ mod tests {
         // Inter frame: frame-tag bit 0 set.
         assert!(matches!(
             read_uncompressed_chunk(&[0x01, 0, 0, 0x9d, 0x01, 0x2a, 0, 0, 0, 0]),
-            Err(Error::Unsupported(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
         // Key frame with a corrupted start code.
         assert!(matches!(
             read_uncompressed_chunk(&[0x00, 0, 0, 0x9d, 0x01, 0x2b, 16, 0, 16, 0]),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
         // Truncated.
         assert!(read_uncompressed_chunk(&[0x00, 0, 0]).is_err());
@@ -667,7 +677,7 @@ mod tests {
         // reject it as a truncated tag (`InvalidInput`) before the tag is ever examined.
         assert!(matches!(
             read_uncompressed_chunk(&[0x01, 0x00, 0x00]),
-            Err(Error::Unsupported(_))
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
         ));
         // Exactly `UNCOMPRESSED_CHUNK_LEN` (10) bytes is a complete minimal key-frame chunk; the
         // `data.len() < 10` guard widened to `<= 10` would reject this valid input.

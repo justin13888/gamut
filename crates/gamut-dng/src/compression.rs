@@ -22,7 +22,8 @@ pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
         // `gamut-deflate` (on the unmerged `feat/png` branch) is encoder-only, so revisiting this is
         // tracked for after that lands — see issue #196.
         Compression::Deflate => Ok(miniz_oxide::deflate::compress_to_vec_zlib(packed, 6)),
-        _ => Err(Error::Unsupported(
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "DNG: this compression is not yet encodable",
         )),
     }
@@ -37,9 +38,14 @@ pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
 pub(crate) fn decompress(scheme: Compression, bytes: &[u8]) -> Result<Vec<u8>> {
     match scheme {
         Compression::Uncompressed => Ok(bytes.to_vec()),
-        Compression::Deflate => miniz_oxide::inflate::decompress_to_vec_zlib(bytes)
-            .map_err(|_| Error::InvalidInput("DNG: corrupt Deflate stream")),
-        _ => Err(Error::Unsupported(
+        Compression::Deflate => {
+            miniz_oxide::inflate::decompress_to_vec_zlib(bytes).map_err(|error| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: corrupt Deflate stream")
+                    .with_detail(format!("miniz status {:?}", error.status))
+            })
+        }
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "DNG: this compression is not yet decodable",
         )),
     }

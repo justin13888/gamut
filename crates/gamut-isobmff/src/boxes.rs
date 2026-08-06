@@ -182,14 +182,15 @@ impl<'a> BoxReader<'a> {
 
     /// Consumes `n` bytes, returning them, or [`Error::InvalidInput`] if fewer remain.
     pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .ok_or(Error::InvalidInput("ISOBMFF: length overflow"))?;
-        let slice = self
-            .data
-            .get(self.pos..end)
-            .ok_or(Error::InvalidInput("ISOBMFF: unexpected end of box"))?;
+        let offset = self.pos as u64;
+        let end = self.pos.checked_add(n).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: length overflow")
+                .with_byte_offset(offset)
+        })?;
+        let slice = self.data.get(self.pos..end).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "ISOBMFF: unexpected end of box")
+                .with_byte_offset(offset)
+        })?;
         self.pos = end;
         Ok(slice)
     }
@@ -247,23 +248,41 @@ impl<'a> BoxReader<'a> {
         let (size, header_size) = match size {
             0 => (self.data.len() - offset, 8),
             1 => {
-                let large_size = usize::try_from(self.u64()?)
-                    .map_err(|_| Error::InvalidInput("ISOBMFF: box size exceeds address space"))?;
+                let large_size = usize::try_from(self.u64()?).map_err(|_| {
+                    Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "ISOBMFF: box size exceeds address space",
+                    )
+                    .with_byte_offset(offset as u64)
+                })?;
                 (large_size, 16)
             }
             size => (
-                usize::try_from(size)
-                    .map_err(|_| Error::InvalidInput("ISOBMFF: box size exceeds address space"))?,
+                usize::try_from(size).map_err(|_| {
+                    Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "ISOBMFF: box size exceeds address space",
+                    )
+                    .with_byte_offset(offset as u64)
+                })?,
                 8,
             ),
         };
         if size < header_size {
-            return Err(Error::InvalidInput("ISOBMFF: box size smaller than header"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ISOBMFF: box size smaller than header",
+            )
+            .with_byte_offset(offset as u64));
         }
         let body = self.take(size - header_size)?;
         let user_type = if &ty == b"uuid" {
             if body.len() < 16 {
-                return Err(Error::InvalidInput("ISOBMFF: truncated uuid user type"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ISOBMFF: truncated uuid user type",
+                )
+                .with_byte_offset(offset as u64));
             }
             let mut user_type = [0; 16];
             user_type.copy_from_slice(&body[..16]);

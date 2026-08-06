@@ -25,7 +25,9 @@ fn rgb_jpeg(width: u32, height: u32) -> Vec<u8> {
 fn gray_error(decoder: &JpegDecoder, jpeg: &[u8]) -> String {
     DecodeImage::<Gray8>::decode_image(decoder, jpeg)
         .unwrap_err()
-        .to_string()
+        .static_message()
+        .unwrap()
+        .to_owned()
 }
 
 #[test]
@@ -39,11 +41,11 @@ fn dimension_limits_are_exact_and_independent() {
 
     assert_eq!(
         gray_error(&JpegDecoder::new().with_max_dimensions(16, 13), &jpeg),
-        "unsupported: JPEG: image exceeds the dimension limit"
+        "JPEG: image exceeds the dimension limit"
     );
     assert_eq!(
         gray_error(&JpegDecoder::new().with_max_dimensions(17, 12), &jpeg),
-        "unsupported: JPEG: image exceeds the dimension limit"
+        "JPEG: image exceeds the dimension limit"
     );
 }
 
@@ -56,7 +58,7 @@ fn byte_limit_uses_the_frame_component_count_at_an_exact_boundary() {
     );
     assert_eq!(
         gray_error(&JpegDecoder::new().with_max_image_bytes(8 * 8 - 1), &gray),
-        "unsupported: JPEG: image exceeds the size limit"
+        "JPEG: image exceeds the size limit"
     );
 
     // The encoder's default 4:2:0 subsampling does not discount the native three-channel raster.
@@ -74,8 +76,9 @@ fn byte_limit_uses_the_frame_component_count_at_an_exact_boundary() {
             &rgb
         )
         .unwrap_err()
-        .to_string(),
-        "unsupported: JPEG: image exceeds the size limit"
+        .static_message()
+        .unwrap(),
+        "JPEG: image exceeds the size limit"
     );
 }
 
@@ -92,11 +95,11 @@ fn synthetic_pathological_sof_is_rejected_by_the_cap_first() {
     ];
     assert_eq!(
         gray_error(&JpegDecoder::new().with_max_dimensions(4096, 4096), &jpeg),
-        "unsupported: JPEG: image exceeds the dimension limit"
+        "JPEG: image exceeds the dimension limit"
     );
     assert_eq!(
         gray_error(&JpegDecoder::new().with_max_image_bytes(64 << 20), &jpeg),
-        "unsupported: JPEG: image exceeds the size limit"
+        "JPEG: image exceeds the size limit"
     );
 }
 
@@ -109,6 +112,6 @@ fn limits_are_cloneable_and_defaults_remain_unrestricted() {
     let limited = JpegDecoder::new().with_max_dimensions(7, 8).clone();
     assert_eq!(
         gray_error(&limited, &jpeg),
-        "unsupported: JPEG: image exceeds the dimension limit"
+        "JPEG: image exceeds the dimension limit"
     );
 }

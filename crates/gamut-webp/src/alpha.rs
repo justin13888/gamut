@@ -210,13 +210,16 @@ pub fn write_alph(plane: &[u8], width: usize, height: usize) -> Result<Vec<u8>> 
 pub fn read_alph(payload: &[u8], width: usize, height: usize) -> Result<Vec<u8>> {
     let &header = payload
         .first()
-        .ok_or(Error::InvalidInput("ALPH: empty chunk"))?;
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "ALPH: empty chunk"))?;
     let method = AlphaFilter::from_code(header >> 2);
     let data = &payload[1..];
     let residuals = match header & 0x3 {
         0 => {
             if data.len() != width * height {
-                return Err(Error::InvalidInput("ALPH: raw alpha length mismatch"));
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "ALPH: raw alpha length mismatch",
+                ));
             }
             data.to_vec()
         }
@@ -225,7 +228,12 @@ pub fn read_alph(payload: &[u8], width: usize, height: usize) -> Result<Vec<u8>>
             let argb = decode_image(&mut r, width as u32, height as u32)?;
             argb.iter().map(|&p| (p >> 8) as u8).collect() // green channel
         }
-        _ => return Err(Error::InvalidInput("ALPH: reserved compression method")),
+        _ => {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "ALPH: reserved compression method",
+            ));
+        }
     };
     Ok(unfilter(&residuals, width, height, method))
 }

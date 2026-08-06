@@ -7,7 +7,7 @@
 //! reference transforms.
 
 use gamut_color::{ColorRange, ycbcr_to_rgb};
-use gamut_core::{Error, Result};
+use gamut_core::{Error, ErrorKind, Result};
 use gamut_heic::{
     ChromaFormat, DecodedFrame, HeifContainer, HevcConfig, HevcDecoder, iter_nal_units,
 };
@@ -280,7 +280,7 @@ fn non_irap_payload_never_reaches_the_decoder() {
     // `NeverCalled` panics if invoked; the error proves it was not.
     assert!(matches!(
         container.image().decode_item_planar(1, &mut NeverCalled),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -300,12 +300,12 @@ fn essential_unknown_property_is_refused() {
         container
             .image()
             .decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
     // The RGBA surface refuses it too.
     assert!(matches!(
         container.image().decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -328,7 +328,7 @@ fn non_hevc_coded_item_is_unsupported() {
         container
             .image()
             .decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -608,7 +608,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.image().decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
     // Mixed chroma.
@@ -621,7 +621,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.image().decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
     // Mixed bit depth.
@@ -634,7 +634,7 @@ fn grid_non_uniform_tiles_are_unsupported() {
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.image().decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -822,7 +822,7 @@ fn clap_non_integer_and_out_of_bounds_are_invalid() {
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.image().decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 
     // Non-integer offset (0.5 via horizOff 1/2 on an even (w-crop)).
@@ -839,7 +839,7 @@ fn clap_non_integer_and_out_of_bounds_are_invalid() {
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.image().decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 
     // Out of bounds: crop 4x2 shifted right by 1 ⇒ right edge at 5 > 4.
@@ -856,7 +856,7 @@ fn clap_non_integer_and_out_of_bounds_are_invalid() {
     let c = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         c.image().decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -1003,7 +1003,7 @@ fn first_colour_accessor_and_icc_only_fallback_are_unchanged() {
     );
     assert!(matches!(
         container.image().decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -1042,7 +1042,7 @@ fn unsupported_colour_falls_back_to_planar_only() {
     );
     assert!(matches!(
         container.image().decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -1058,7 +1058,7 @@ fn ten_bit_frame_is_planar_only() {
     assert_eq!(frame.bit_depth(), 10);
     assert!(matches!(
         container.image().decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -1098,7 +1098,7 @@ fn alpha_dimension_mismatch_one_axis_at_a_time() {
         let container = HeifContainer::parse(&bytes).unwrap();
         assert!(matches!(
             container.image().decode_item_rgba8(1, &mut Mock::default()),
-            Err(Error::InvalidInput(_))
+            Err(error) if error.kind() == ErrorKind::InvalidInput
         ));
     }
 }
@@ -1161,7 +1161,7 @@ fn alpha_dimension_mismatch_is_invalid() {
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(matches!(
         container.image().decode_item_rgba8(1, &mut Mock::default()),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -1223,7 +1223,7 @@ fn overlay_via_planar_is_unsupported() {
         container
             .image()
             .decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 }
 
@@ -1326,7 +1326,7 @@ fn mutual_dimg_cycle_errors_without_overflow() {
         container
             .image()
             .decode_item_planar(1, &mut Mock::default()),
-        Err(Error::InvalidInput(_))
+        Err(error) if error.kind() == ErrorKind::InvalidInput
     ));
 }
 
@@ -1351,7 +1351,7 @@ fn derivation_depth_is_bounded() {
         container
             .image()
             .decode_item_planar(1, &mut Mock::default()),
-        Err(Error::Unsupported(_))
+        Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
     // A 2-deep iden chain onto the same leaf decodes fine.

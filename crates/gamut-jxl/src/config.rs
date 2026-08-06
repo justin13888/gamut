@@ -101,7 +101,8 @@ impl Distance {
         if distance.is_finite() && distance > 0.0 && distance <= 25.0 {
             Ok(Self(distance))
         } else {
-            Err(Error::InvalidInput(
+            Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JXL: distance must be finite and in (0, 25]",
             ))
         }
@@ -258,12 +259,16 @@ pub enum ColorSpec {
 pub(crate) fn validate_icc(icc: &[u8], is_gray: bool) -> Result<()> {
     // The fixed ICC header is 128 bytes; anything shorter cannot be a profile at all.
     if icc.len() < 128 {
-        return Err(Error::InvalidInput("JXL: ICC profile is too short"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JXL: ICC profile is too short",
+        ));
     }
     let space = &icc[16..20];
     let expected: &[u8; 4] = if is_gray { b"GRAY" } else { b"RGB " };
     if space != expected {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "JXL: ICC profile color space does not match the image layout",
         ));
     }

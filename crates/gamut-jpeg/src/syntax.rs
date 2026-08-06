@@ -34,7 +34,9 @@ impl<'a> Reader<'a> {
 
     /// Reads one byte, erroring (`what`) if the payload is exhausted.
     fn u8(&mut self, what: &'static str) -> Result<u8> {
-        let b = *self.data.get(self.pos).ok_or(Error::InvalidInput(what))?;
+        let b = *self.data.get(self.pos).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), what).with_byte_offset(self.pos as u64)
+        })?;
         self.pos += 1;
         Ok(b)
     }
@@ -50,11 +52,13 @@ impl<'a> Reader<'a> {
 
     /// Borrows the next `n` bytes, erroring (`what`) if fewer remain.
     fn take(&mut self, n: usize, what: &'static str) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(n).ok_or(Error::InvalidInput(what))?;
-        let slice = self
-            .data
-            .get(self.pos..end)
-            .ok_or(Error::InvalidInput(what))?;
+        let offset = self.pos as u64;
+        let end = self.pos.checked_add(n).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), what).with_byte_offset(offset)
+        })?;
+        let slice = self.data.get(self.pos..end).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), what).with_byte_offset(offset)
+        })?;
         self.pos = end;
         Ok(slice)
     }
@@ -183,7 +187,10 @@ pub fn parse_dqt(payload: &[u8], tables: &mut Tables) -> Result<()> {
         let pq = pq_tq >> 4;
         let tq = usize::from(pq_tq & 0x0F);
         if tq >= MAX_TABLES {
-            return Err(Error::InvalidInput("JPEG: DQT table destination > 3"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: DQT table destination > 3",
+            ));
         }
         let mut table = [0u16; 64];
         match pq {
@@ -191,7 +198,10 @@ pub fn parse_dqt(payload: &[u8], tables: &mut Tables) -> Result<()> {
                 let vals = r.take(64, "JPEG: truncated DQT (8-bit)")?;
                 for (k, &v) in ZIGZAG.iter().zip(vals.iter()) {
                     if v == 0 {
-                        return Err(Error::InvalidInput("JPEG: zero quantization value"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "JPEG: zero quantization value",
+                        ));
                     }
                     table[*k] = u16::from(v);
                 }
@@ -200,12 +210,20 @@ pub fn parse_dqt(payload: &[u8], tables: &mut Tables) -> Result<()> {
                 for &k in ZIGZAG.iter() {
                     let v = r.u16("JPEG: truncated DQT (16-bit)")?;
                     if v == 0 {
-                        return Err(Error::InvalidInput("JPEG: zero quantization value"));
+                        return Err(Error::invalid_input(
+                            env!("CARGO_PKG_NAME"),
+                            "JPEG: zero quantization value",
+                        ));
                     }
                     table[k] = v;
                 }
             }
-            _ => return Err(Error::InvalidInput("JPEG: DQT precision Pq > 1")),
+            _ => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: DQT precision Pq > 1",
+                ));
+            }
         }
         tables.quant[tq] = Some(table);
     }
@@ -226,7 +244,10 @@ pub fn parse_dht(payload: &[u8], tables: &mut Tables) -> Result<()> {
         let tc = tc_th >> 4;
         let th = usize::from(tc_th & 0x0F);
         if th >= MAX_TABLES {
-            return Err(Error::InvalidInput("JPEG: DHT table destination > 3"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: DHT table destination > 3",
+            ));
         }
         let mut bits = [0u8; 16];
         bits.copy_from_slice(r.take(16, "JPEG: truncated DHT counts")?);
@@ -236,7 +257,12 @@ pub fn parse_dht(payload: &[u8], tables: &mut Tables) -> Result<()> {
         match tc {
             0 => tables.dc[th] = Some(table),
             1 => tables.ac[th] = Some(table),
-            _ => return Err(Error::InvalidInput("JPEG: DHT class Tc > 1")),
+            _ => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: DHT class Tc > 1",
+                ));
+            }
         }
     }
     Ok(())
@@ -251,7 +277,10 @@ pub fn parse_dri(payload: &[u8]) -> Result<u16> {
     let mut r = Reader::new(payload);
     let ri = r.u16("JPEG: truncated DRI")?;
     if r.remaining() != 0 {
-        return Err(Error::InvalidInput("JPEG: DRI length must be 4"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: DRI length must be 4",
+        ));
     }
     Ok(ri)
 }
@@ -265,10 +294,16 @@ pub fn parse_dnl(payload: &[u8]) -> Result<u16> {
     let mut r = Reader::new(payload);
     let nl = r.u16("JPEG: truncated DNL")?;
     if r.remaining() != 0 {
-        return Err(Error::InvalidInput("JPEG: DNL length must be 4"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: DNL length must be 4",
+        ));
     }
     if nl == 0 {
-        return Err(Error::InvalidInput("JPEG: DNL number-of-lines is 0"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: DNL number-of-lines is 0",
+        ));
     }
     Ok(nl)
 }
@@ -285,20 +320,37 @@ pub fn parse_sof(payload: &[u8]) -> Result<Frame> {
     let mut r = Reader::new(payload);
     match r.u8("JPEG: truncated SOF")? {
         8 => {}
-        12 => return Err(Error::Unsupported("JPEG: 12-bit precision not supported")),
-        _ => return Err(Error::InvalidInput("JPEG: invalid SOF precision")),
+        12 => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: 12-bit precision not supported",
+            ));
+        }
+        _ => {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: invalid SOF precision",
+            ));
+        }
     }
     let y = r.u16("JPEG: truncated SOF")?;
     let x = r.u16("JPEG: truncated SOF")?;
     if x == 0 {
-        return Err(Error::InvalidInput("JPEG: SOF samples-per-line X is 0"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: SOF samples-per-line X is 0",
+        ));
     }
     let nf = r.u8("JPEG: truncated SOF")?;
     if nf == 0 {
-        return Err(Error::InvalidInput("JPEG: SOF has zero components"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: SOF has zero components",
+        ));
     }
     if nf > 4 {
-        return Err(Error::Unsupported(
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
             "JPEG: more than 4 components not supported",
         ));
     }
@@ -310,20 +362,30 @@ pub fn parse_sof(payload: &[u8]) -> Result<Frame> {
         let h = hv >> 4;
         let v = hv & 0x0F;
         if !(1..=4).contains(&h) || !(1..=4).contains(&v) {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: SOF sampling factor out of 1..=4",
             ));
         }
         if usize::from(tq) >= MAX_TABLES {
-            return Err(Error::InvalidInput("JPEG: SOF Tq > 3"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: SOF Tq > 3",
+            ));
         }
         if components.iter().any(|c: &FrameComponent| c.id == id) {
-            return Err(Error::InvalidInput("JPEG: duplicate SOF component id"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: duplicate SOF component id",
+            ));
         }
         components.push(FrameComponent { id, h, v, tq });
     }
     if r.remaining() != 0 {
-        return Err(Error::InvalidInput("JPEG: SOF length mismatch"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: SOF length mismatch",
+        ));
     }
     Ok(Frame { y, x, components })
 }
@@ -344,7 +406,8 @@ pub fn parse_sos(payload: &[u8], frame: &Frame, progressive: bool) -> Result<Sca
     let mut r = Reader::new(payload);
     let ns = r.u8("JPEG: truncated SOS")?;
     if ns == 0 || ns > 4 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "JPEG: SOS component count out of 1..=4",
         ));
     }
@@ -355,21 +418,29 @@ pub fn parse_sos(payload: &[u8], frame: &Frame, progressive: bool) -> Result<Sca
         let td = td_ta >> 4;
         let ta = td_ta & 0x0F;
         if usize::from(td) >= MAX_TABLES || usize::from(ta) >= MAX_TABLES {
-            return Err(Error::InvalidInput("JPEG: SOS table destination > 3"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: SOS table destination > 3",
+            ));
         }
-        let frame_index =
-            frame
-                .components
-                .iter()
-                .position(|c| c.id == cs)
-                .ok_or(Error::InvalidInput(
+        let frame_index = frame
+            .components
+            .iter()
+            .position(|c| c.id == cs)
+            .ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
                     "JPEG: SOS references unknown component",
-                ))?;
+                )
+            })?;
         if components
             .iter()
             .any(|c: &ScanComponent| c.frame_index == frame_index)
         {
-            return Err(Error::InvalidInput("JPEG: duplicate SOS component"));
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: duplicate SOS component",
+            ));
         }
         components.push(ScanComponent {
             frame_index,
@@ -383,12 +454,16 @@ pub fn parse_sos(payload: &[u8], frame: &Frame, progressive: bool) -> Result<Sca
     let ah = ah_al >> 4;
     let al = ah_al & 0x0F;
     if r.remaining() != 0 {
-        return Err(Error::InvalidInput("JPEG: SOS length mismatch"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: SOS length mismatch",
+        ));
     }
     if progressive {
         validate_progressive_spectral(ss, se, ah, al, components.len())?;
     } else if ss != 0 || se != 63 || ah_al != 0 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "JPEG: non-baseline spectral selection (progressive scan)",
         ));
     }
@@ -402,7 +477,8 @@ pub fn parse_sos(payload: &[u8], frame: &Frame, progressive: bool) -> Result<Sca
             })
             .sum();
         if sum > 10 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: interleaved sampling sum(Hi·Vi) > 10",
             ));
         }
@@ -426,29 +502,36 @@ pub fn parse_sos(payload: &[u8], frame: &Frame, progressive: bool) -> Result<Sca
 fn validate_progressive_spectral(ss: u8, se: u8, ah: u8, al: u8, ns: usize) -> Result<()> {
     if ss == 0 {
         if se != 0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: progressive DC scan must set Se = 0",
             ));
         }
     } else {
         if ss > se || se > 63 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: progressive AC band out of Ss ≤ Se ≤ 63",
             ));
         }
         if ns != 1 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "JPEG: progressive AC scan must be single-component",
             ));
         }
     }
     if ah != 0 && al != ah - 1 {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "JPEG: progressive refinement requires Al = Ah − 1",
         ));
     }
     if al > 13 {
-        return Err(Error::InvalidInput("JPEG: progressive Al > 13"));
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "JPEG: progressive Al > 13",
+        ));
     }
     Ok(())
 }
@@ -690,7 +773,10 @@ mod tests {
     fn sof_rejects_12bit_and_duplicate_ids() {
         // P=12 → Unsupported.
         let p12 = vec![12, 0, 8, 0, 8, 1, 1, 0x11, 0];
-        assert!(matches!(parse_sof(&p12), Err(Error::Unsupported(_))));
+        assert!(matches!(
+            parse_sof(&p12),
+            Err(error) if error.kind() == gamut_core::ErrorKind::Unsupported
+        ));
         // Two components sharing id 1.
         let dup = vec![8, 0, 8, 0, 8, 2, 1, 0x11, 0, 1, 0x11, 0];
         assert!(parse_sof(&dup).is_err());

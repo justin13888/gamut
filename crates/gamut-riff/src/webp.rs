@@ -70,7 +70,8 @@ impl Vp8xHeader {
     /// Returns [`Error::InvalidInput`] if `payload` is shorter than [`VP8X_PAYLOAD_LEN`].
     pub fn from_payload(payload: &[u8]) -> Result<Self> {
         if payload.len() < VP8X_PAYLOAD_LEN {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "VP8X: chunk payload shorter than 10 bytes",
             ));
         }

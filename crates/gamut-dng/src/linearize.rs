@@ -37,7 +37,8 @@ pub(crate) fn linearize(raw: &RawImage) -> Result<LinearImage> {
     let [top, left, bottom, right] = raw.active_area().unwrap_or([0, 0, dims.height, dims.width]);
     let (top, left, bottom, right) = (top as usize, left as usize, bottom as usize, right as usize);
     if top >= bottom || left >= right || bottom > height || right > width {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: active area must be a non-empty rectangle within the image",
         ));
     }
@@ -53,14 +54,16 @@ pub(crate) fn linearize(raw: &RawImage) -> Result<LinearImage> {
     if let Some(deltas) = delta_h
         && (deltas.len() != aa_width || deltas.iter().any(|d| !d.is_finite()))
     {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: BlackLevelDeltaH needs one finite value per active-area column",
         ));
     }
     if let Some(deltas) = delta_v
         && (deltas.len() != aa_height || deltas.iter().any(|d| !d.is_finite()))
     {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: BlackLevelDeltaV needs one finite value per active-area row",
         ));
     }
@@ -68,7 +71,8 @@ pub(crate) fn linearize(raw: &RawImage) -> Result<LinearImage> {
     if let Some(table) = table
         && table.is_empty()
     {
-        return Err(Error::InvalidInput(
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
             "DNG: LinearizationTable must not be empty",
         ));
     }
@@ -114,7 +118,8 @@ pub(crate) fn linearize(raw: &RawImage) -> Result<LinearImage> {
         }
         let range = levels.white()[plane] - max_black;
         if range <= 0.0 {
-            return Err(Error::InvalidInput(
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
                 "DNG: white level must exceed the maximum computed black level",
             ));
         }
