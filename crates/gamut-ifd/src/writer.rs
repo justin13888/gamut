@@ -907,6 +907,23 @@ mod tests {
         assert_eq!(bytes.len() as u64, pin_at + 10);
     }
 
+    #[test]
+    fn pin_may_start_exactly_at_directory_end() {
+        let note = vec![0xA5; 10];
+        let mut ifd = Ifd::new();
+        ifd.set(37500, Value::Undefined(note.clone()));
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        };
+
+        // Classic header (8) + one-entry directory (18) ends exactly at byte 26.
+        let (bytes, _) = write_with(&file, &WriteOptions::default().pin(37500, 26))
+            .expect("pin at directory boundary");
+        assert_eq!(&bytes[26..36], note.as_slice());
+    }
+
     /// Unsatisfiable pins are typed errors: absent tag, duplicated tag, inline value,
     /// unknown-type value, directory collision, and overlapping pins.
     #[test]

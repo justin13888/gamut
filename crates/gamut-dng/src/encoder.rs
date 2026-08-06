@@ -833,6 +833,21 @@ mod tests {
     use crate::raw::cfa_color;
     use crate::values::CalibrationIlluminant;
 
+    #[test]
+    fn black_level_delta_rejects_each_invalid_class_independently() {
+        for value in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            32768.0,
+            -32768.0,
+        ] {
+            let error = delta_value(&[value]).expect_err("invalid delta");
+            assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        }
+        assert!(delta_value(&[32767.999, -32767.999]).is_ok());
+    }
+
     fn sample_profile() -> CameraProfile {
         // A plausible XYZ->camera matrix and white balance; values are illustrative.
         let m = [0.95, -0.20, -0.05, -0.40, 1.30, 0.10, 0.02, -0.18, 0.85];

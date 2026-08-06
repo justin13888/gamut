@@ -945,6 +945,55 @@ mod tests {
     }
 
     #[test]
+    fn encode_dimension_boundaries_are_exact() {
+        for (width, height) in [(0, 1), (1, 0), (65536, 1), (1, 65536)] {
+            let error = encode(&[], width, height, 1, 16).expect_err("invalid dimensions");
+            assert!(
+                error
+                    .static_message()
+                    .is_some_and(|message| message.contains("dimensions must be 1..=65535")),
+                "unexpected error for {width}x{height}: {error:?}"
+            );
+        }
+
+        let samples = vec![0u16; 65535];
+        assert!(encode(&samples, 65535, 1, 1, 16).is_ok());
+        assert!(encode(&samples, 1, 65535, 1, 16).is_ok());
+    }
+
+    #[test]
+    fn four_component_header_ranges_are_exact() {
+        let mut sof3 = vec![0, 20, 16, 0, 1, 0, 1, 4];
+        for id in 1..=4 {
+            sof3.extend_from_slice(&[id, 0x11, 0]);
+        }
+        let frame = parse_sof3(&sof3, 0).expect("four-component SOF3");
+        assert_eq!(frame.component_ids, vec![1, 2, 3, 4]);
+
+        let sos = [0, 14, 4, 1, 0, 2, 0, 3, 0, 4, 0, 1, 0, 0];
+        let scan = parse_sos(&sos, 0, &frame).expect("four-component SOS");
+        assert_eq!(scan.table_ids, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn dht_destination_boundary_is_exact() {
+        let mut segment = vec![0, 19, 3];
+        segment.extend_from_slice(&[0; 16]);
+        let mut tables: [Option<Vec<(u16, u8)>>; 4] = std::array::from_fn(|_| None);
+        parse_dht(&segment, 0, segment.len(), &mut tables).expect("destination 3");
+        assert!(tables[3].is_some());
+
+        segment[2] = 4;
+        let error = parse_dht(&segment, 0, segment.len(), &mut tables)
+            .expect_err("destination 4 must be rejected");
+        assert!(
+            error
+                .static_message()
+                .is_some_and(|message| message.contains("destination must be 0..=3"))
+        );
+    }
+
+    #[test]
     fn decode_rejects_bad_header() {
         // Too short / no SOI.
         assert!(decode(&[]).is_err());

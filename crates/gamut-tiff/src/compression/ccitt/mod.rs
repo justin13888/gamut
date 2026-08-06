@@ -202,8 +202,21 @@ pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
         let dst = &mut out[row * stored_row_bytes..(row + 1) * stored_row_bytes];
         let mut pos = 0;
         let mut white = true;
+        let mut previous_run_was_zero = false;
         while pos < width {
             let run = decode_run(&mut reader, white)?;
+            if run == 0 {
+                if previous_run_was_zero {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "CCITT: consecutive zero-length runs make no row progress",
+                    )
+                    .with_byte_offset((reader.pos / 8) as u64));
+                }
+                previous_run_was_zero = true;
+            } else {
+                previous_run_was_zero = false;
+            }
             if pos + run > width {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
@@ -269,5 +282,49 @@ mod tests {
             *b = 1;
         }
         roundtrip(&[pack(&bits)], w);
+    }
+
+    #[test]
+    fn decode_errors_report_exact_byte_offsets() {
+        let mut truncated = BitReader { data: &[], pos: 8 };
+        let error = decode_code(&mut truncated, true).expect_err("truncated code");
+        assert_eq!(error.byte_offset(), Some(1));
+        assert!(
+            error
+                .static_message()
+                .is_some_and(|message| message.contains("truncated code"))
+        );
+
+        let mut invalid = BitReader::new(&[0, 0]);
+        let error = decode_code(&mut invalid, true).expect_err("invalid code");
+        assert_eq!(error.byte_offset(), Some(1));
+        assert!(
+            error
+                .static_message()
+                .is_some_and(|message| message.contains("invalid code"))
+        );
+
+        let encoded = mh_encode_strip(&[0], 1, 2).expect("two-white-pixel row");
+        let error = mh_decode_strip(&encoded, 1, 1).expect_err("run overrun");
+        assert_eq!(error.byte_offset(), Some(0));
+        assert!(
+            error
+                .static_message()
+                .is_some_and(|message| message.contains("run overruns"))
+        );
+
+        let mut zeros = BitWriter::new();
+        encode_run(&mut zeros, 1, true).expect("one white pixel");
+        encode_run(&mut zeros, 0, false).expect("zero black run");
+        encode_run(&mut zeros, 0, true).expect("zero white run");
+        zeros.byte_align();
+        let error = mh_decode_strip(&zeros.into_bytes(), 1, 2)
+            .expect_err("consecutive zero runs must not hang");
+        assert_eq!(error.byte_offset(), Some(3));
+        assert!(
+            error
+                .static_message()
+                .is_some_and(|message| message.contains("no row progress"))
+        );
     }
 }

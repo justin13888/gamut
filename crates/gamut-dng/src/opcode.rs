@@ -304,4 +304,20 @@ mod tests {
         bytes.push(0);
         assert!(OpcodeList::parse(&bytes).is_err());
     }
+
+    #[test]
+    fn count_capacity_guard_uses_complete_opcode_headers() {
+        let mut one = vec![0u8; 20];
+        one[3] = 1;
+        assert_eq!(OpcodeList::parse(&one).expect("one opcode").len(), 1);
+
+        let mut two_claimed = one;
+        two_claimed[3] = 2;
+        let error = OpcodeList::parse(&two_claimed).expect_err("truncated second opcode");
+        assert!(
+            error
+                .static_message()
+                .is_some_and(|message| message.contains("count exceeds the data"))
+        );
+    }
 }
