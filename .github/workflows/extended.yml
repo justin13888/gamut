@@ -102,3 +102,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build and run the JXL tests under node
         run: mise run test-jxl-wasm
+
+  # Real camera DNGs (issue #174). The corpus lives in the `gamut-dng-samples` submodule — ~178 MiB
+  # of CC0 files written by actual cameras — and is marked `update = none` in .gitmodules so no
+  # other job or contributor checkout pays for it; this job fetches it explicitly. It also builds
+  # the Adobe DNG SDK oracle and libjxl for the differential, which is why it is a slow, off-PR
+  # lane rather than part of the coverage gate. Gate locally with `mise run test-dng-real`.
+  real-dng:
+    name: Real camera DNG conformance
+    runs-on: ubuntu-latest
+    env:
+      MISE_TASK_RUN_AUTO_INSTALL: false
+      # Same jobs x cores OOM guard as ci.yml's oracle-building lanes.
+      CARGO_BUILD_JOBS: 2
+      SCCACHE_GHA_ENABLED: "true"
+      CC: sccache gcc
+      CXX: sccache g++
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # `recursive` honours `update = none`, so the samples submodule is NOT fetched here;
+          # the explicit step below is what pulls it. The C oracles under third_party/ are.
+          submodules: recursive
+      - name: Install system build deps (pkg-config; nasm is vendored, rest via mise)
+        run: sudo apt-get update && sudo apt-get install -y pkg-config
+      - uses: jdx/mise-action@v4
+        with:
+          install_args: cmake ninja meson
+      - name: Clear pre-installed Rust toolchain
+        # Same rustup `bin/cargo-fmt` conflict guard as ci.yml's lint job.
+        run: rustup toolchain uninstall stable || true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+      - name: Fetch the real-camera DNG corpus
+        run: mise run fetch-dng-samples
+      - name: Validate gamut-dng against real camera DNGs
+        run: mise run test-dng-real
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

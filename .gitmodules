@@ -37,6 +37,13 @@
 [submodule "third_party/libheif"]
 	path = third_party/libheif
 	url = https://github.com/strukturag/libheif
+# Real camera DNG files (CC0) for gamut-dng's real-world conformance tier — issue #174.
+# `update = none` keeps it out of `git submodule update --init --recursive`: it is ~178 MiB that
+# only `mise run test-dng-real` and the `real-dng` extended-CI job need, and every other job and
+# contributor checkout would otherwise pay for it. Fetch it explicitly:
+#     mise run fetch-dng-samples
 [submodule "gamut-dng-samples"]
 	path = third_party/gamut-dng-samples
 	url = https://github.com/visualcommons/gamut-dng-samples.git
+	update = none
+	shallow = true
