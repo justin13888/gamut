@@ -1074,7 +1074,16 @@ fn decode_chunk_samples(
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow"))?;
     match compression {
         Compression::Uncompressed | Compression::Deflate => {
-            let bytes = compression::decompress(compression, chunk)?;
+            // Cap inflation at the packed length this chunk's geometry implies: a Deflate chunk
+            // that expands past it cannot be a valid sample stream, and the cap is what keeps a
+            // hostile zlib stream from allocating without bound.
+            let max_out = cols
+                .checked_mul(spp)
+                .and_then(|per_row| bitpack::packed_len(per_row, bits, rows))
+                .ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow")
+                })?;
+            let bytes = compression::decompress(compression, chunk, max_out)?;
             let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
             if got.len() < want {
                 return Err(Error::invalid_input(
@@ -1423,6 +1432,37 @@ mod tests {
         let raw = decode_raw_image(&TrackedIfd::new(&ifd), &jpeg, ByteOrder::LittleEndian)
             .expect("decode");
         assert_eq!(raw.samples(), &samples[..]);
+    }
+
+    /// A zlib bomb — a tiny Deflate strip that inflates to megabytes — is rejected against the
+    /// strip's own geometry rather than decompressed. The cap comes from the IFD's dimensions, so
+    /// the decoder never allocates on the attacker's say-so.
+    #[test]
+    fn decode_raw_image_rejects_a_deflate_strip_that_inflates_past_its_geometry() {
+        // 2x2 CFA at 16 bits is an 8-byte strip; this one inflates to 4 MiB from ~4 KiB.
+        let bomb = compression::compress(Compression::Deflate, &vec![0u8; 4 << 20]).expect("bomb");
+        assert!(bomb.len() < 8192, "the bomb must be small on disk");
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![16]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![8])); // Deflate
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803])); // CFA
+        ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+        ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(
+            tags::STRIP_BYTE_COUNTS,
+            Value::Long(vec![bomb.len() as u32]),
+        );
+
+        let err =
+            decode_raw_image(&TrackedIfd::new(&ifd), &bomb, ByteOrder::LittleEndian).unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("DNG: Deflate stream inflates past the expected size")
+        );
     }
 
     /// The `SubIFDs` walk is depth-capped: a 10-deep nested chain yields exactly
