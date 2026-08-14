@@ -35,6 +35,7 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 6] = [
 #[derive(Debug, Clone)]
 pub struct PngEncoder {
     level: Level,
+    effort: u8,
     filter: FilterStrategy,
     ancillary: Ancillary,
     auto_reduce: bool,
@@ -54,6 +55,7 @@ impl PngEncoder {
     pub fn new() -> Self {
         Self {
             level: Level::Default,
+            effort: DeflateEncoder::DEFAULT_EFFORT,
             filter: FilterStrategy::MinSumAbs,
             ancillary: Ancillary::default(),
             auto_reduce: false,
@@ -72,10 +74,11 @@ impl PngEncoder {
     ///
     /// # Interaction with [`with_compression`](Self::with_compression)
     ///
-    /// A pushed deflater **bypasses the configured [`Level`]** for every stream it accepts:
-    /// `Level` is a `gamut-deflate` concept that a foreign backend knows nothing about, and the
-    /// seam datum is only the byte stream. The `Level` still governs the built-in tail, i.e. any
-    /// stream every pushed backend declines.
+    /// A pushed deflater **bypasses the configured [`Level`]** (and the
+    /// [`with_effort`](Self::with_effort) budget) for every stream it accepts: `Level` is a
+    /// `gamut-deflate` concept that a foreign backend knows nothing about, and the seam datum is
+    /// only the byte stream. The `Level` still governs the built-in tail, i.e. any stream every
+    /// pushed backend declines.
     ///
     /// # Cloning shares backends
     ///
@@ -96,6 +99,19 @@ impl PngEncoder {
     #[must_use]
     pub fn with_compression(mut self, level: Level) -> Self {
         self.level = level;
+        self
+    }
+
+    /// Sets the [`Level::Best`] effort budget: the maximum number of optimal-parse refinement
+    /// passes (see [`DeflateEncoder::with_effort`]) applied to every zlib stream this encoder emits
+    /// — the IDAT image data and compressed ancillary payloads (`iCCP`, `zTXt`).
+    ///
+    /// Defaults to [`DeflateEncoder::DEFAULT_EFFORT`]; `0` keeps the lazy seed parse only, and
+    /// `zopfli`'s default budget is 15. Ignored at every other [`Level`] and by any pushed
+    /// [`IdatDeflater`] backend that accepts a stream.
+    #[must_use]
+    pub fn with_effort(mut self, effort: u8) -> Self {
+        self.effort = effort;
         self
     }
 
@@ -359,9 +375,9 @@ impl PngEncoder {
         let start = out.len();
         out.extend_from_slice(&SIGNATURE);
         ihdr::write(out, width, height, bit_depth, color);
-        self.ancillary.write_pre_plte(out); // colour-space chunks precede PLTE
+        self.ancillary.write_pre_plte(out, self.effort); // colour-space chunks precede PLTE
         pre_idat(out); // PLTE + tRNS (indexed only)
-        self.ancillary.write_post_plte(out); // background / physical / timing / text
+        self.ancillary.write_post_plte(out, self.effort); // background / physical / timing / text
 
         let idat = self.compress_scanlines(
             sample_bytes,
@@ -393,7 +409,9 @@ impl PngEncoder {
         bpp: usize,
         info: IdatInfo,
     ) -> Result<Vec<u8>> {
-        let deflate = DeflateEncoder::new().with_level(self.level);
+        let deflate = DeflateEncoder::new()
+            .with_level(self.level)
+            .with_effort(self.effort);
         // Every candidate stream goes through the same seam: a pushed backend that accepts sees
         // each brute-force candidate, and the smallest result still wins.
         let compress = |strategy| {

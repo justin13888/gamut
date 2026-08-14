@@ -52,6 +52,49 @@ fn every_colour_type_and_level_round_trips() {
 }
 
 #[test]
+fn effort_budget_round_trips_and_defaults_to_six_passes() {
+    let (w, h) = (23u32, 11u32);
+    let n = (w * h) as usize;
+    // Structured-plus-noisy samples (the shape that makes the optimal parse's refinement passes
+    // change the stream), filtered with `None` so they reach DEFLATE unmixed.
+    let src: Vec<u8> = b"header header header "
+        .iter()
+        .copied()
+        .cycle()
+        .take(n)
+        .chain((0..n as u32 * 2).map(|i| (i.wrapping_mul(48_271) >> 20) as u8))
+        .collect();
+    for effort in [0u8, 15] {
+        let encoder = PngEncoder::new()
+            .with_compression(Level::Best)
+            .with_effort(effort)
+            .with_filter(FilterStrategy::None);
+        round_trip::<Rgb8>(&encoder, &src, w, h);
+    }
+
+    // The builder default must be exactly effort 6 — for the IDAT and for the compressed
+    // ancillary streams (iCCP, zTXt), which follow the same budget — while effort 0 must
+    // actually change the emitted bytes.
+    let encode = |encoder: PngEncoder| {
+        let mut png = Vec::new();
+        encoder
+            .with_compression(Level::Best)
+            .with_filter(FilterStrategy::None)
+            .with_icc_profile("prof", &tiny_icc_profile())
+            .with_compressed_text("Comment", &"squeeze ".repeat(40))
+            .encode_image(
+                ImageRef::<Rgb8>::new(&src, Dimensions::new(w, h).unwrap()).unwrap(),
+                &mut png,
+            )
+            .expect("encode");
+        png
+    };
+    let implicit = encode(PngEncoder::new());
+    assert_eq!(implicit, encode(PngEncoder::new().with_effort(6)));
+    assert_ne!(implicit, encode(PngEncoder::new().with_effort(0)));
+}
+
+#[test]
 fn every_filter_strategy_round_trips() {
     let (w, h) = (32u32, 24u32);
     let src = noise((w * h * 3) as usize, 7);
