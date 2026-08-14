@@ -114,7 +114,7 @@ gamut-png = { path = "crates/gamut-png", version = "0.1.0" }
 # JPEG-1 (ISO/IEC 10918 / ITU-T T.81) codec (issue #28).
 gamut-jpeg = { path = "crates/gamut-jpeg", version = "0.1.0" }
 gamut-isobmff = { path = "crates/gamut-isobmff", version = "2.0.1" }
-gamut-riff = { path = "crates/gamut-riff", version = "0.1.3" }
+gamut-riff = { path = "crates/gamut-riff", version = "1.0.0" }
 gamut-av1 = { path = "crates/gamut-av1", version = "0.4.1" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.3" }
 gamut-avif = { path = "crates/gamut-avif", version = "1.1.0" }
