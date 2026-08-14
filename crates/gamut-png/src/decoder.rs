@@ -8,14 +8,21 @@
 //! anything is allocated, and the inflater refuses to produce more bytes than the image geometry
 //! implies, so a "zlib bomb" fails cleanly.
 //!
-//! The typed [`DecodeImage`] implementations perform **lossless widening only** — greyscale
-//! replicates into RGB, an opaque alpha channel can be added, sub-byte greys scale exactly to
-//! 8 bits (§13.12) — and refuse lossy requests (dropping alpha or transparency, narrowing 16-bit
-//! samples) with [`Error::Unsupported`].
+//! Presenting the decoded image as a caller's pixel layout is delegated to
+//! [`gamut_core::convert`], so PNG applies the same rules as every other gamut decoder. What stays
+//! here is what only PNG knows: palette lookup, folding a tRNS colour key into a real alpha
+//! channel, and §13.12 sub-byte scaling (see [`presentable`]).
+//!
+//! The typed [`DecodeImage`] implementations therefore perform **lossless widening only** —
+//! greyscale replicates into RGB, an opaque alpha channel can be added, sub-byte greys scale
+//! exactly to 8 bits, 8-bit samples widen to 16 — and refuse lossy requests (dropping alpha or
+//! transparency, narrowing 16-bit samples) with [`Error::Unsupported`] unless
+//! [`PngDecoder::convert_policy`] permits them.
 
+use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
 use gamut_core::{
     Bilevel, DecodeImage, Dimensions, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,
-    Indexed8, Result, Rgb8, Rgb16, Rgba8, Rgba16,
+    Indexed8, Pixel, PixelFormat, Result, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 
 use crate::backend::{IdatInflater, IdatInfo, Registry, run_inflaters};
@@ -55,6 +62,7 @@ pub struct PngDecoder {
     max_image_bytes: usize,
     max_metadata_bytes: usize,
     backends: Registry<dyn IdatInflater + Send>,
+    policy: ConvertPolicy,
 }
 
 impl Default for PngDecoder {
@@ -74,6 +82,7 @@ impl PngDecoder {
             max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
             max_metadata_bytes: DEFAULT_MAX_METADATA_BYTES,
             backends: Registry::default(),
+            policy: ConvertPolicy::lossless(),
         }
     }
 
@@ -132,6 +141,18 @@ impl PngDecoder {
     #[must_use]
     pub fn with_max_metadata_bytes(mut self, bytes: usize) -> Self {
         self.max_metadata_bytes = bytes;
+        self
+    }
+
+    /// Selects which lossy conversions a typed decode may perform.
+    ///
+    /// Defaults to [`ConvertPolicy::lossless`], which is what makes a typed decode's result
+    /// faithful to the file. Widening is unaffected — it loses nothing and never needed
+    /// permission. Pass [`ConvertPolicy::permissive`] to get pixels in a fixed layout regardless
+    /// of what the file carries.
+    #[must_use]
+    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+        self.policy = policy;
         self
     }
 }
@@ -697,174 +718,125 @@ fn gray8_scale(bit_depth: u8) -> u8 {
     }
 }
 
-/// The 8-bit samples of a native image, or the lossless-refusal error.
-fn native8(samples: NativeSamples) -> Result<Vec<u8>> {
-    match samples {
-        NativeSamples::B8(v) => Ok(v),
-        NativeSamples::B16(_) => Err(lossy()),
-    }
-}
-
-/// The 16-bit samples of a native image, or the lossless-refusal error.
-fn native16(samples: NativeSamples) -> Result<Vec<u16>> {
-    match samples {
-        NativeSamples::B16(v) => Ok(v),
-        NativeSamples::B8(_) => Err(lossy()),
-    }
-}
-
 /// `Dimensions` for a validated header (post-IHDR this cannot fail, but stays checked).
 fn dims(header: &Ihdr) -> Result<Dimensions> {
     Dimensions::new(header.width, header.height)
 }
 
+/// A decoded image reduced to one plain interleaved buffer plus the layout tag describing it.
+///
+/// The boundary between what is PNG's business and what is not. Everything format-specific —
+/// palette lookup, folding a tRNS key into a real alpha channel, §13.12 sub-byte scaling — is
+/// resolved on this side, so what crosses into [`gamut_core::convert`] is an ordinary grey,
+/// grey+alpha, RGB, or RGBA buffer that any format could have produced.
+enum Presentable {
+    /// 8-bit samples.
+    B8(PixelFormat, Vec<u8>),
+    /// 16-bit samples.
+    B16(PixelFormat, Vec<u16>),
+}
+
+/// Reduces a natively decoded image to a [`Presentable`] buffer.
+///
+/// A 1-bit greyscale image without transparency stays [`PixelFormat::Bilevel`] rather than being
+/// scaled to grey, so an [`ImageBuf<Bilevel>`] request is a copy rather than a re-thresholding.
+fn presentable(native: NativeImage) -> Result<Presentable> {
+    let depth = native.header.bit_depth;
+    let key = native.trns_key;
+    Ok(match (native.header.color, native.samples) {
+        (ColorType::Grayscale, NativeSamples::B8(gray)) => {
+            let scale = gray8_scale(depth);
+            match gray_key(key) {
+                // A colour key turns the image into genuine grey+alpha.
+                Some(transparent) => {
+                    let mut out = Vec::with_capacity(gray.len() * 2);
+                    for &value in &gray {
+                        out.push(value * scale);
+                        out.push(alpha8(u16::from(value) != transparent));
+                    }
+                    Presentable::B8(PixelFormat::GrayAlpha8, out)
+                }
+                // Unscaled 0/1 samples: exactly what Bilevel means.
+                None if depth == 1 => Presentable::B8(PixelFormat::Bilevel, gray),
+                None => {
+                    let mut out = gray;
+                    for value in &mut out {
+                        *value *= scale;
+                    }
+                    Presentable::B8(PixelFormat::Gray8, out)
+                }
+            }
+        }
+        (ColorType::Grayscale, NativeSamples::B16(gray)) => match gray_key(key) {
+            Some(transparent) => {
+                let mut out = Vec::with_capacity(gray.len() * 2);
+                for &value in &gray {
+                    out.push(value);
+                    out.push(alpha16(value != transparent));
+                }
+                Presentable::B16(PixelFormat::GrayAlpha16, out)
+            }
+            None => Presentable::B16(PixelFormat::Gray16, gray),
+        },
+        (ColorType::GrayscaleAlpha, NativeSamples::B8(v)) => {
+            Presentable::B8(PixelFormat::GrayAlpha8, v)
+        }
+        (ColorType::GrayscaleAlpha, NativeSamples::B16(v)) => {
+            Presentable::B16(PixelFormat::GrayAlpha16, v)
+        }
+        (ColorType::Truecolor, NativeSamples::B8(rgb)) => match key {
+            Some(TransparencyKey::Rgb(kr, kg, kb)) => {
+                let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
+                for px in rgb.chunks_exact(3) {
+                    let opaque =
+                        (u16::from(px[0]), u16::from(px[1]), u16::from(px[2])) != (kr, kg, kb);
+                    out.extend_from_slice(&[px[0], px[1], px[2], alpha8(opaque)]);
+                }
+                Presentable::B8(PixelFormat::Rgba8, out)
+            }
+            _ => Presentable::B8(PixelFormat::Rgb8, rgb),
+        },
+        (ColorType::Truecolor, NativeSamples::B16(rgb)) => match key {
+            Some(TransparencyKey::Rgb(kr, kg, kb)) => {
+                let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
+                for px in rgb.chunks_exact(3) {
+                    let opaque = (px[0], px[1], px[2]) != (kr, kg, kb);
+                    out.extend_from_slice(&[px[0], px[1], px[2], alpha16(opaque)]);
+                }
+                Presentable::B16(PixelFormat::Rgba16, out)
+            }
+            _ => Presentable::B16(PixelFormat::Rgb16, rgb),
+        },
+        (ColorType::TruecolorAlpha, NativeSamples::B8(v)) => Presentable::B8(PixelFormat::Rgba8, v),
+        (ColorType::TruecolorAlpha, NativeSamples::B16(v)) => {
+            Presentable::B16(PixelFormat::Rgba16, v)
+        }
+        (ColorType::Indexed, NativeSamples::B8(indices)) => {
+            // The palette is the image's real colour; indices alone carry none of it.
+            let palette = native.palette.ok_or_else(lossy)?;
+            let with_alpha = palette.has_transparency();
+            let format = if with_alpha {
+                PixelFormat::Rgba8
+            } else {
+                PixelFormat::Rgb8
+            };
+            Presentable::B8(format, expand_palette(&indices, &palette, with_alpha))
+        }
+        // Indexed depths are at most 8 (Table 12), so 16-bit indexed samples cannot exist.
+        (ColorType::Indexed, NativeSamples::B16(_)) => {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "PNG: bit depth not allowed for the colour type",
+            ));
+        }
+    })
+}
+
 // --- Typed presentation ------------------------------------------------------------------------
 //
-// Each impl accepts exactly the native layouts the pixel type holds losslessly (see the module
-// docs) and funnels through `decode_native`. The typed path never inflates metadata chunks.
-
-impl DecodeImage<Bilevel> for PngDecoder {
-    /// Accepts 1-bit greyscale without transparency; samples are presented as 0/1.
-    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Bilevel>> {
-        let native = self.decode_native(data)?;
-        if native.header.color != ColorType::Grayscale
-            || native.header.bit_depth != 1
-            || native.trns_key.is_some()
-        {
-            return Err(lossy());
-        }
-        ImageBuf::new(native8(native.samples)?, dims(&native.header)?)
-    }
-}
-
-impl DecodeImage<Gray8> for PngDecoder {
-    /// Accepts 1/2/4/8-bit greyscale without transparency; sub-byte samples scale exactly to
-    /// 8 bits (§13.12).
-    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
-        let native = self.decode_native(data)?;
-        if native.header.color != ColorType::Grayscale || native.trns_key.is_some() {
-            return Err(lossy());
-        }
-        let scale = gray8_scale(native.header.bit_depth);
-        let mut samples = native8(native.samples)?;
-        for value in &mut samples {
-            *value *= scale;
-        }
-        ImageBuf::new(samples, dims(&native.header)?)
-    }
-}
-
-impl DecodeImage<GrayAlpha8> for PngDecoder {
-    /// Accepts 8-bit grey+alpha, and 1/2/4/8-bit greyscale (opaque, or keyed by tRNS).
-    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<GrayAlpha8>> {
-        let native = self.decode_native(data)?;
-        let out = match native.header.color {
-            ColorType::GrayscaleAlpha if native.header.bit_depth == 8 => native8(native.samples)?,
-            ColorType::Grayscale if native.header.bit_depth <= 8 => {
-                let key = gray_key(native.trns_key);
-                let scale = gray8_scale(native.header.bit_depth);
-                let grays = native8(native.samples)?;
-                let mut out = Vec::with_capacity(grays.len() * 2);
-                for &gray in &grays {
-                    out.push(gray * scale);
-                    out.push(alpha8(key != Some(u16::from(gray))));
-                }
-                out
-            }
-            _ => return Err(lossy()),
-        };
-        ImageBuf::new(out, dims(&native.header)?)
-    }
-}
-
-impl DecodeImage<Rgb8> for PngDecoder {
-    /// Accepts 8-bit RGB, and 1/2/4/8-bit greyscale, both without transparency.
-    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
-        let native = self.decode_native(data)?;
-        if native.trns_key.is_some() {
-            return Err(lossy());
-        }
-        let out = match native.header.color {
-            ColorType::Truecolor if native.header.bit_depth == 8 => native8(native.samples)?,
-            ColorType::Grayscale if native.header.bit_depth <= 8 => {
-                let scale = gray8_scale(native.header.bit_depth);
-                native8(native.samples)?
-                    .iter()
-                    .flat_map(|&gray| [gray * scale; 3])
-                    .collect()
-            }
-            ColorType::Indexed => {
-                let palette = native
-                    .palette
-                    .filter(|palette| !palette.has_transparency())
-                    .ok_or_else(lossy)?;
-                expand_palette(&native8(native.samples)?, &palette, false)
-            }
-            _ => return Err(lossy()),
-        };
-        ImageBuf::new(out, dims(&native.header)?)
-    }
-}
-
-impl DecodeImage<Rgba8> for PngDecoder {
-    /// Accepts 8-bit RGBA and, by lossless widening, 8-bit RGB / grey+alpha and 1/2/4/8-bit
-    /// greyscale, honouring a tRNS colour key.
-    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
-        let native = self.decode_native(data)?;
-        let out = match native.header.color {
-            ColorType::TruecolorAlpha if native.header.bit_depth == 8 => native8(native.samples)?,
-            ColorType::Truecolor if native.header.bit_depth == 8 => {
-                let key = native.trns_key;
-                native8(native.samples)?
-                    .chunks_exact(3)
-                    .flat_map(|px| {
-                        let transparent = key
-                            == Some(TransparencyKey::Rgb(
-                                u16::from(px[0]),
-                                u16::from(px[1]),
-                                u16::from(px[2]),
-                            ));
-                        [px[0], px[1], px[2], alpha8(!transparent)]
-                    })
-                    .collect()
-            }
-            ColorType::GrayscaleAlpha if native.header.bit_depth == 8 => native8(native.samples)?
-                .chunks_exact(2)
-                .flat_map(|px| [px[0], px[0], px[0], px[1]])
-                .collect(),
-            ColorType::Grayscale if native.header.bit_depth <= 8 => {
-                let key = gray_key(native.trns_key);
-                let scale = gray8_scale(native.header.bit_depth);
-                native8(native.samples)?
-                    .iter()
-                    .flat_map(|&gray| {
-                        let alpha = alpha8(key != Some(u16::from(gray)));
-                        [gray * scale, gray * scale, gray * scale, alpha]
-                    })
-                    .collect()
-            }
-            ColorType::Indexed => {
-                let palette = native.palette.ok_or_else(lossy)?;
-                expand_palette(&native8(native.samples)?, &palette, true)
-            }
-            _ => return Err(lossy()),
-        };
-        ImageBuf::new(out, dims(&native.header)?)
-    }
-}
-
-impl DecodeImage<Indexed8> for PngDecoder {
-    /// Accepts indexed images at any bit depth, returning the bare palette indices (sub-byte
-    /// indices are widened to one byte but never scaled — §13.12 rescaling does not apply to
-    /// indices). The palette itself is carried by [`PngDecoder::decode`].
-    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Indexed8>> {
-        let native = self.decode_native(data)?;
-        if native.header.color != ColorType::Indexed {
-            return Err(lossy());
-        }
-        ImageBuf::new(native8(native.samples)?, dims(&native.header)?)
-    }
-}
+// Every impl funnels through `PngDecoder::present`, which reduces the file to a plain interleaved
+// buffer (see `presentable`) and hands the layout change to `gamut_core::convert`. The typed path
+// never inflates metadata chunks.
 
 /// Expands validated palette indices to RGB or RGBA bytes. Indices were range-checked during
 /// decode, so lookups cannot fail; a defensive default keeps the path panic-free regardless.
@@ -883,86 +855,110 @@ fn expand_palette(indices: &[u8], palette: &PngPalette, with_alpha: bool) -> Vec
     out
 }
 
-impl DecodeImage<Gray16> for PngDecoder {
-    /// Accepts 16-bit greyscale without transparency.
-    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray16>> {
+impl PngDecoder {
+    /// Decodes `data` and presents it as pixel layout `P`.
+    ///
+    /// [`Indexed8`] is served straight from the decoded indices: palette indices are not a colour
+    /// layout, so there is nothing for the conversion engine to do with them (and it refuses them
+    /// for exactly that reason). Every other layout goes through the shared engine.
+    fn present<P: Pixel>(&self, data: &[u8]) -> Result<ImageBuf<P>> {
         let native = self.decode_native(data)?;
-        if native.header.color != ColorType::Grayscale || native.trns_key.is_some() {
-            return Err(lossy());
+        let dimensions = dims(&native.header)?;
+        if P::FORMAT == PixelFormat::Indexed8 {
+            let NativeSamples::B8(indices) = native.samples else {
+                return Err(lossy());
+            };
+            if native.header.color != ColorType::Indexed {
+                return Err(lossy());
+            }
+            // `P` is Indexed8, so its sample type is u8 -- but only the value knows that, so the
+            // buffer is rebuilt through the engine's identity path rather than transmuted.
+            let raw = RawImage::new(&indices, PixelFormat::Indexed8, dimensions)?;
+            return convert_from_raw(raw, self.policy);
         }
-        ImageBuf::new(native16(native.samples)?, dims(&native.header)?)
+        match presentable(native)? {
+            Presentable::B8(format, samples) => {
+                convert_from_raw(RawImage::new(&samples, format, dimensions)?, self.policy)
+            }
+            Presentable::B16(format, samples) => {
+                convert_from_raw(RawImage::new(&samples, format, dimensions)?, self.policy)
+            }
+        }
+    }
+}
+
+impl DecodeImage<Bilevel> for PngDecoder {
+    /// Accepts 1-bit greyscale without transparency; samples are presented as 0/1.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Bilevel>> {
+        self.present(data)
+    }
+}
+
+impl DecodeImage<Gray8> for PngDecoder {
+    /// Accepts 1/2/4/8-bit greyscale without transparency; sub-byte samples scale exactly to
+    /// 8 bits (§13.12).
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
+        self.present(data)
+    }
+}
+
+impl DecodeImage<GrayAlpha8> for PngDecoder {
+    /// Accepts 8-bit grey+alpha, and 1/2/4/8-bit greyscale (opaque, or keyed by tRNS).
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<GrayAlpha8>> {
+        self.present(data)
+    }
+}
+
+impl DecodeImage<Rgb8> for PngDecoder {
+    /// Accepts 8-bit RGB, 1/2/4/8-bit greyscale, and an opaque palette, none with transparency.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
+        self.present(data)
+    }
+}
+
+impl DecodeImage<Rgba8> for PngDecoder {
+    /// Accepts 8-bit RGBA and, by lossless widening, 8-bit RGB / grey+alpha, 1/2/4/8-bit
+    /// greyscale, and palette images, honouring a tRNS colour key.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
+        self.present(data)
+    }
+}
+
+impl DecodeImage<Indexed8> for PngDecoder {
+    /// Accepts indexed images at any bit depth, returning the bare palette indices (sub-byte
+    /// indices are widened to one byte but never scaled — §13.12 rescaling does not apply to
+    /// indices). The palette itself is carried by [`PngDecoder::decode`].
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Indexed8>> {
+        self.present(data)
+    }
+}
+
+impl DecodeImage<Gray16> for PngDecoder {
+    /// Accepts 16-bit greyscale without transparency, and widens 1/2/4/8-bit greyscale into it.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray16>> {
+        self.present(data)
     }
 }
 
 impl DecodeImage<GrayAlpha16> for PngDecoder {
-    /// Accepts 16-bit grey+alpha, and 16-bit greyscale (opaque, or keyed by tRNS).
+    /// Accepts 16-bit grey+alpha, and widens the narrower greyscale layouts into it (honouring a
+    /// tRNS key).
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<GrayAlpha16>> {
-        let native = self.decode_native(data)?;
-        let out = match native.header.color {
-            ColorType::GrayscaleAlpha if native.header.bit_depth == 16 => native16(native.samples)?,
-            ColorType::Grayscale if native.header.bit_depth == 16 => {
-                let key = gray_key(native.trns_key);
-                native16(native.samples)?
-                    .iter()
-                    .flat_map(|&gray| [gray, alpha16(key != Some(gray))])
-                    .collect()
-            }
-            _ => return Err(lossy()),
-        };
-        ImageBuf::new(out, dims(&native.header)?)
+        self.present(data)
     }
 }
 
 impl DecodeImage<Rgb16> for PngDecoder {
-    /// Accepts 16-bit RGB and 16-bit greyscale, both without transparency.
+    /// Accepts 16-bit RGB, and widens greyscale and 8-bit colour into it, without transparency.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb16>> {
-        let native = self.decode_native(data)?;
-        if native.trns_key.is_some() {
-            return Err(lossy());
-        }
-        let out = match native.header.color {
-            ColorType::Truecolor if native.header.bit_depth == 16 => native16(native.samples)?,
-            ColorType::Grayscale if native.header.bit_depth == 16 => native16(native.samples)?
-                .iter()
-                .flat_map(|&gray| [gray; 3])
-                .collect(),
-            _ => return Err(lossy()),
-        };
-        ImageBuf::new(out, dims(&native.header)?)
+        self.present(data)
     }
 }
 
 impl DecodeImage<Rgba16> for PngDecoder {
-    /// Accepts every 16-bit layout: RGBA natively and, by lossless widening, RGB / grey+alpha /
-    /// greyscale, honouring a tRNS colour key.
+    /// The widest target: accepts every non-indexed layout, honouring a tRNS colour key.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba16>> {
-        let native = self.decode_native(data)?;
-        let out = match native.header.color {
-            ColorType::TruecolorAlpha if native.header.bit_depth == 16 => native16(native.samples)?,
-            ColorType::Truecolor if native.header.bit_depth == 16 => {
-                let key = native.trns_key;
-                native16(native.samples)?
-                    .chunks_exact(3)
-                    .flat_map(|px| {
-                        let transparent = key == Some(TransparencyKey::Rgb(px[0], px[1], px[2]));
-                        [px[0], px[1], px[2], alpha16(!transparent)]
-                    })
-                    .collect()
-            }
-            ColorType::GrayscaleAlpha if native.header.bit_depth == 16 => native16(native.samples)?
-                .chunks_exact(2)
-                .flat_map(|px| [px[0], px[0], px[0], px[1]])
-                .collect(),
-            ColorType::Grayscale if native.header.bit_depth == 16 => {
-                let key = gray_key(native.trns_key);
-                native16(native.samples)?
-                    .iter()
-                    .flat_map(|&gray| [gray, gray, gray, alpha16(key != Some(gray))])
-                    .collect()
-            }
-            _ => return Err(lossy()),
-        };
-        ImageBuf::new(out, dims(&native.header)?)
+        self.present(data)
     }
 }
 
