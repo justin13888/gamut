@@ -191,6 +191,69 @@ fn headroom(i: usize) -> usize {
 }
 
 #[test]
+fn auto_reduce_round_trips_grey_and_sixteen_bit_layouts() {
+    // Every extended reduction shape decodes back **as the source pixel type**: sub-byte grey and
+    // grey palettes rewiden through the Gray8/GrayAlpha8 impls, and demoted 16-bit files through
+    // the ×257 widening in the 16-bit impls. Width 19 exercises sub-byte row padding.
+    let (w, h) = (19u32, 7u32);
+    let n = (w * h) as usize;
+    let encoder = PngEncoder::new().with_auto_reduce(true);
+
+    // Gray8 -> 1-bit grey; off-grid low-cardinality grey -> grey palette.
+    let bw: Vec<u8> = (0..n).map(|i| if i % 3 == 0 { 255 } else { 0 }).collect();
+    round_trip::<Gray8>(&encoder, &bw, w, h);
+    let off_grid: Vec<u8> = (0..n).map(|i| [5u8, 9, 200][i % 3]).collect();
+    round_trip::<Gray8>(&encoder, &off_grid, w, h);
+
+    // GrayAlpha8 -> alpha drop; two (grey, alpha) combinations -> grey palette with tRNS.
+    let ga_opaque: Vec<u8> = (0..n).flat_map(|i| [(i % 89) as u8, 255]).collect();
+    round_trip::<GrayAlpha8>(&encoder, &ga_opaque, w, h);
+    let ga_keyed: Vec<u8> = (0..n)
+        .flat_map(|i| if i % 2 == 0 { [0u8, 0] } else { [255, 255] })
+        .collect();
+    round_trip::<GrayAlpha8>(&encoder, &ga_keyed, w, h);
+
+    // Demotable 16-bit inputs: grey recursion, plain demotion, and a Gray16 source.
+    let gray16: Vec<u16> = (0..n).map(|i| ((i % 60) as u16) * 257).collect();
+    round_trip::<Gray16>(&encoder, &gray16, w, h);
+    let rgba16_gray: Vec<u16> = (0..n)
+        .flat_map(|i| {
+            let v = ((i % 60) as u16) * 257;
+            [v, v, v, u16::MAX]
+        })
+        .collect();
+    round_trip::<Rgba16>(&encoder, &rgba16_gray, w, h);
+    let rgba16_demoted: Vec<u16> = (0..n)
+        .flat_map(|i| {
+            [
+                ((i % 251) as u16) * 257,
+                ((i % 241) as u16) * 257,
+                ((i % 239) as u16) * 257,
+                ((i % 233) as u16) * 257,
+            ]
+        })
+        .collect();
+    round_trip::<Rgba16>(&encoder, &rgba16_demoted, w, h);
+
+    // Non-demotable 16-bit-native reductions: grey and alpha-drop at full depth.
+    let rgb16_gray: Vec<u16> = (0..n)
+        .flat_map(|i| {
+            let v = (i * 501 + 1) as u16;
+            [v, v, v]
+        })
+        .collect();
+    round_trip::<Rgb16>(&encoder, &rgb16_gray, w, h);
+    let ga16_opaque: Vec<u16> = (0..n)
+        .flat_map(|i| [(i * 501 + 1) as u16, u16::MAX])
+        .collect();
+    round_trip::<GrayAlpha16>(&encoder, &ga16_opaque, w, h);
+    let rgba16_rgb: Vec<u16> = (0..n)
+        .flat_map(|i| [(i * 501 + 1) as u16, (i * 703 + 2) as u16, 3, u16::MAX])
+        .collect();
+    round_trip::<Rgba16>(&encoder, &rgba16_rgb, w, h);
+}
+
+#[test]
 fn ancillary_pile_survives_decode() {
     let (w, h) = (16u32, 16u32);
     let src = noise((w * h * 3) as usize, 9);

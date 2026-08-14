@@ -1,22 +1,40 @@
 //! Lossless colour-type / bit-depth reductions (the PNG-side space optimisation).
 //!
 //! Before encoding, an image is scanned for redundancy that a smaller PNG encoding can drop without
-//! changing any pixel: an all-opaque alpha channel, identical R=G=B channels, or a palette of ≤256
-//! distinct colours. The smallest *estimated* encoding (by raw byte count) is chosen; the actual
-//! DEFLATE pass then compresses it. Every reduction is exactly reversible, so the decoded pixels are
-//! unchanged — the libpng oracle verifies this.
+//! changing any pixel: an all-opaque alpha channel, identical R=G=B channels, a palette of ≤256
+//! distinct colours, grey values exactly representable at a sub-byte depth (§13.12), or 16-bit
+//! samples whose high and low bytes agree (lossless 16→8 demotion). The smallest *estimated*
+//! encoding (by raw byte count; sub-byte row padding is ignored, as in the palette estimate) is
+//! chosen; the actual DEFLATE pass then compresses it. Every reduction is exactly reversible, so
+//! the decoded pixels are unchanged — the libpng oracle verifies this.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
-/// A chosen reduced encoding for an RGB/RGBA image.
+use crate::pack::gray8_scale;
+
+/// A chosen reduced encoding for an image.
 pub(crate) enum Reduced {
-    /// 8-bit greyscale (R=G=B, fully opaque).
-    Gray8(Vec<u8>),
+    /// Greyscale at depth 1, 2, 4, or 8 (R=G=B, fully opaque). `samples` holds one byte per pixel:
+    /// the raw value at depth 8, the unscaled code (`value / gray8_scale(depth)`) below it.
+    Gray {
+        /// Grey bit depth (1, 2, 4, or 8).
+        depth: u8,
+        /// One sample per pixel (one byte each, pre-packing).
+        samples: Vec<u8>,
+    },
     /// 8-bit greyscale + alpha (R=G=B with transparency).
     GrayAlpha8(Vec<u8>),
     /// 8-bit RGB (alpha was fully opaque and dropped).
     Rgb8(Vec<u8>),
+    /// 8-bit RGBA: a 16-bit input demoted losslessly, with no further channel reduction.
+    Rgba8(Vec<u8>),
+    /// 16-bit greyscale (R=G=B, fully opaque), pre-serialised big-endian.
+    Gray16Be(Vec<u8>),
+    /// 16-bit greyscale + alpha (R=G=B with transparency), pre-serialised big-endian.
+    GrayAlpha16Be(Vec<u8>),
+    /// 16-bit RGB (alpha was fully opaque and dropped), pre-serialised big-endian.
+    Rgb16Be(Vec<u8>),
     /// Indexed colour with the smallest sufficient bit depth.
     Indexed {
         /// Index bit depth (1, 2, 4, or 8).
@@ -40,30 +58,49 @@ pub(crate) fn index_bit_depth(palette_len: usize) -> u8 {
     }
 }
 
-/// Analyses interleaved 8-bit pixels (`channels` is 3 for RGB or 4 for RGBA) and returns the
-/// smallest lossless reduction that beats the input encoding, or `None` to keep it as-is.
-pub(crate) fn analyze(pixels: &[u8], channels: usize) -> Option<Reduced> {
-    debug_assert!(channels == 3 || channels == 4);
+/// The RGBA quad a pixel of any supported layout presents: grey replicates into R=G=B, and layouts
+/// without an alpha channel (the odd channel counts) are opaque.
+fn pixel_key(px: &[u8], channels: usize) -> [u8; 4] {
+    let alpha = if channels.is_multiple_of(2) {
+        px[channels - 1]
+    } else {
+        255
+    };
+    if channels >= 3 {
+        [px[0], px[1], px[2], alpha]
+    } else {
+        [px[0], px[0], px[0], alpha]
+    }
+}
+
+/// Analyses interleaved 8-bit samples (`channels`: 1 = grey, 2 = grey+alpha, 3 = RGB, 4 = RGBA)
+/// and returns the smallest lossless reduction that beats the input encoding, or `None` to keep it
+/// as-is.
+pub(crate) fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
+    debug_assert!((1..=4).contains(&channels));
     let pixel_count = pixels.len() / channels;
 
     let mut all_opaque = true;
     let mut all_gray = true;
+    // Whether every grey value is exactly representable at 1/2/4 bits — a multiple of the depth's
+    // §13.12 scale factor, not merely low-cardinality. Meaningful only while `all_gray` holds.
+    let (mut fits1, mut fits2, mut fits4) = (true, true, true);
     let mut palette_index: HashMap<[u8; 4], u8> = HashMap::new();
     let mut palette: Vec<[u8; 4]> = Vec::new();
     let mut too_many_colors = false;
     for px in pixels.chunks_exact(channels) {
-        let alpha = if channels == 4 { px[3] } else { 255 };
-        all_opaque &= alpha == 255;
-        all_gray &= px[0] == px[1] && px[1] == px[2];
-        if !too_many_colors {
-            let key = [px[0], px[1], px[2], alpha];
-            if let Entry::Vacant(slot) = palette_index.entry(key) {
-                if palette.len() == 256 {
-                    too_many_colors = true;
-                } else {
-                    slot.insert(palette.len() as u8);
-                    palette.push(key);
-                }
+        let key = pixel_key(px, channels);
+        all_opaque &= key[3] == 255;
+        all_gray &= key[0] == key[1] && key[1] == key[2];
+        fits1 &= key[0] == 0 || key[0] == 255;
+        fits2 &= key[0].is_multiple_of(85);
+        fits4 &= key[0].is_multiple_of(17);
+        if !too_many_colors && let Entry::Vacant(slot) = palette_index.entry(key) {
+            if palette.len() == 256 {
+                too_many_colors = true;
+            } else {
+                slot.insert(palette.len() as u8);
+                palette.push(key);
             }
         }
     }
@@ -78,8 +115,17 @@ pub(crate) fn analyze(pixels: &[u8], channels: usize) -> Option<Reduced> {
         let overhead = palette.len() * 3 + if needs_trns { palette.len() } else { 0 } + 24;
         pixel_count * depth as usize / 8 + overhead
     };
+    let gray_depth = if fits1 {
+        1
+    } else if fits2 {
+        2
+    } else if fits4 {
+        4
+    } else {
+        8
+    };
     let gray_size = if all_gray && all_opaque {
-        pixel_count
+        pixel_count * gray_depth as usize / 8
     } else {
         usize::MAX
     };
@@ -103,14 +149,20 @@ pub(crate) fn analyze(pixels: &[u8], channels: usize) -> Option<Reduced> {
     }
 
     if best == gray_size {
-        Some(Reduced::Gray8(
-            pixels.chunks_exact(channels).map(|px| px[0]).collect(),
-        ))
+        let scale = gray8_scale(gray_depth);
+        Some(Reduced::Gray {
+            depth: gray_depth,
+            samples: pixels
+                .chunks_exact(channels)
+                .map(|px| px[0] / scale)
+                .collect(),
+        })
     } else if best == gray_alpha_size {
         let mut out = Vec::with_capacity(pixel_count * 2);
         for px in pixels.chunks_exact(channels) {
-            out.push(px[0]);
-            out.push(px[3]);
+            let key = pixel_key(px, channels);
+            out.push(key[0]);
+            out.push(key[3]);
         }
         Some(Reduced::GrayAlpha8(out))
     } else if best == rgb_size {
@@ -124,6 +176,91 @@ pub(crate) fn analyze(pixels: &[u8], channels: usize) -> Option<Reduced> {
     }
 }
 
+/// Analyses interleaved 16-bit samples (`channels` as in [`analyze8`]). An input where every
+/// sample's high byte equals its low byte (`v == k·257`, the exact inverse of the decoder's 8→16
+/// widening) is demoted and re-analysed at 8 bits — the demotion alone halves the payload, so it
+/// always reduces. Otherwise only the 16-bit-native channel reductions (grey, alpha drop) apply;
+/// PNG has no 16-bit palette.
+pub(crate) fn analyze16(samples: &[u16], channels: usize) -> Option<Reduced> {
+    debug_assert!((1..=4).contains(&channels));
+    if let Some(demoted) = demote16(samples) {
+        let further = analyze8(&demoted, channels);
+        return Some(further.unwrap_or(match channels {
+            1 => Reduced::Gray {
+                depth: 8,
+                samples: demoted,
+            },
+            2 => Reduced::GrayAlpha8(demoted),
+            3 => Reduced::Rgb8(demoted),
+            _ => Reduced::Rgba8(demoted),
+        }));
+    }
+
+    let pixel_count = samples.len() / channels;
+    let mut all_opaque = true;
+    let mut all_gray = true;
+    for px in samples.chunks_exact(channels) {
+        if channels.is_multiple_of(2) {
+            all_opaque &= px[channels - 1] == u16::MAX;
+        }
+        if channels >= 3 {
+            all_gray &= px[0] == px[1] && px[1] == px[2];
+        }
+    }
+
+    let input_size = pixel_count * channels * 2;
+    let gray_size = if all_gray && all_opaque {
+        pixel_count * 2
+    } else {
+        usize::MAX
+    };
+    let gray_alpha_size = if all_gray && !all_opaque {
+        pixel_count * 4
+    } else {
+        usize::MAX
+    };
+    let rgb_size = if channels == 4 && all_opaque && !all_gray {
+        pixel_count * 6
+    } else {
+        usize::MAX
+    };
+
+    let best = gray_size.min(gray_alpha_size).min(rgb_size);
+    if best >= input_size {
+        return None;
+    }
+
+    let px16 = samples.chunks_exact(channels);
+    if best == gray_size {
+        Some(Reduced::Gray16Be(be_bytes(px16.map(|px| px[0]))))
+    } else if best == gray_alpha_size {
+        Some(Reduced::GrayAlpha16Be(be_bytes(
+            px16.flat_map(|px| [px[0], px[channels - 1]]),
+        )))
+    } else {
+        Some(Reduced::Rgb16Be(be_bytes(
+            px16.flat_map(|px| [px[0], px[1], px[2]]),
+        )))
+    }
+}
+
+/// The 8-bit demotion of `samples`, or `None` unless every sample is exactly `k·257` (high byte ==
+/// low byte), which makes the demotion reversible by ×257 widening.
+fn demote16(samples: &[u16]) -> Option<Vec<u8>> {
+    samples
+        .iter()
+        .map(|&v| {
+            let [hi, lo] = v.to_be_bytes();
+            (hi == lo).then_some(lo)
+        })
+        .collect()
+}
+
+/// Serialises 16-bit samples big-endian (PNG's network byte order).
+fn be_bytes(samples: impl Iterator<Item = u16>) -> Vec<u8> {
+    samples.flat_map(u16::to_be_bytes).collect()
+}
+
 /// Builds the indexed reduction from the collected palette.
 fn build_indexed(
     pixels: &[u8],
@@ -133,12 +270,7 @@ fn build_indexed(
 ) -> Reduced {
     let indices: Vec<u8> = pixels
         .chunks_exact(channels)
-        .map(|px| {
-            let alpha = if channels == 4 { px[3] } else { 255 };
-            *palette_index
-                .get(&[px[0], px[1], px[2], alpha])
-                .unwrap_or(&0)
-        })
+        .map(|px| *palette_index.get(&pixel_key(px, channels)).unwrap_or(&0))
         .collect();
     let plte: Vec<u8> = palette.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
     let trns = if palette.iter().any(|c| c[3] != 255) {
@@ -167,7 +299,7 @@ mod tests {
     fn drops_opaque_alpha() {
         // Opaque, non-grey RGBA -> RGB.
         let rgba = [10, 20, 30, 255, 40, 50, 60, 255];
-        match analyze(&rgba, 4) {
+        match analyze8(&rgba, 4) {
             Some(Reduced::Rgb8(rgb)) => assert_eq!(rgb, vec![10, 20, 30, 40, 50, 60]),
             _ => panic!("expected Rgb8"),
         }
@@ -175,11 +307,13 @@ mod tests {
 
     #[test]
     fn detects_grayscale() {
-        // Opaque R=G=B RGB with many levels -> Gray8.
+        // Opaque R=G=B RGB with many levels -> 8-bit grey.
         let rgb: Vec<u8> = (0..60u8).flat_map(|v| [v, v, v]).collect();
-        match analyze(&rgb, 3) {
-            Some(Reduced::Gray8(g)) => assert_eq!(g, (0..60u8).collect::<Vec<_>>()),
-            _ => panic!("expected Gray8"),
+        match analyze8(&rgb, 3) {
+            Some(Reduced::Gray { depth: 8, samples }) => {
+                assert_eq!(samples, (0..60u8).collect::<Vec<_>>());
+            }
+            _ => panic!("expected 8-bit Gray"),
         }
     }
 
@@ -194,7 +328,7 @@ mod tests {
                 rgb.extend_from_slice(&[10, 10, 200]);
             }
         }
-        match analyze(&rgb, 3) {
+        match analyze8(&rgb, 3) {
             Some(Reduced::Indexed {
                 depth,
                 plte,
@@ -216,7 +350,7 @@ mod tests {
         let rgb: Vec<u8> = (0..300u32)
             .flat_map(|i| [i as u8, (i >> 1) as u8, (i >> 2) as u8])
             .collect();
-        assert!(analyze(&rgb, 3).is_none());
+        assert!(analyze8(&rgb, 3).is_none());
     }
 
     #[test]
@@ -226,9 +360,227 @@ mod tests {
             255, 255, 255, 255, // opaque white
         ]
         .repeat(20);
-        match analyze(&rgba, 4) {
+        match analyze8(&rgba, 4) {
             Some(Reduced::Indexed { trns: Some(t), .. }) => assert_eq!(t, vec![0]),
             _ => panic!("expected indexed with tRNS"),
+        }
+    }
+
+    /// Asserts `pixels` (of `channels`) reduces to grey at `depth` with the expected codes.
+    fn expect_gray(pixels: &[u8], channels: usize, depth: u8, codes: &[u8]) {
+        match analyze8(pixels, channels) {
+            Some(Reduced::Gray {
+                depth: got,
+                samples,
+            }) => {
+                assert_eq!(got, depth, "depth");
+                assert_eq!(samples, codes, "codes");
+            }
+            _ => panic!("expected Gray at depth {depth}"),
+        }
+    }
+
+    #[test]
+    fn grey_packs_to_the_smallest_exact_depth() {
+        // §13.12 exactness per depth: 1-bit {0,255}, 2-bit multiples of 85, 4-bit multiples of 17.
+        // Each set breaks the next-lower depth's divisibility, pinning the moduli individually.
+        let bw: Vec<u8> = [0u8, 255].repeat(30);
+        expect_gray(&bw, 1, 1, &[0, 1].repeat(30));
+
+        let quarters: Vec<u8> = [0u8, 85, 170, 255].repeat(20);
+        expect_gray(&quarters, 1, 2, &[0, 1, 2, 3].repeat(20));
+
+        let sixteenths: Vec<u8> = (0..16u8).map(|v| v * 17).collect::<Vec<_>>().repeat(10);
+        expect_gray(&sixteenths, 1, 4, &(0..16u8).collect::<Vec<_>>().repeat(10));
+
+        // The same values arriving as opaque RGBA reduce straight to sub-byte grey too.
+        let rgba: Vec<u8> = quarters.iter().flat_map(|&v| [v, v, v, 255]).collect();
+        expect_gray(&rgba, 4, 2, &[0, 1, 2, 3].repeat(20));
+    }
+
+    #[test]
+    fn low_cardinality_grey_off_the_scale_grid_is_indexed() {
+        // Three grey levels, none a §13.12 multiple: not packable as grey, but a grey palette at
+        // 2 bits still beats 8-bit grey.
+        let gray: Vec<u8> = [5u8, 9, 200].repeat(40);
+        match analyze8(&gray, 1) {
+            Some(Reduced::Indexed {
+                depth, plte, trns, ..
+            }) => {
+                assert_eq!(depth, 2);
+                assert_eq!(plte, vec![5, 5, 5, 9, 9, 9, 200, 200, 200]);
+                assert!(trns.is_none());
+            }
+            _ => panic!("expected Indexed"),
+        }
+    }
+
+    #[test]
+    fn grey_input_with_full_range_keeps_its_encoding() {
+        // 8-bit grey using values off every sub-byte grid and >16 distinct levels: nothing beats
+        // the input.
+        let gray: Vec<u8> = (0..=255u8).collect();
+        assert!(analyze8(&gray, 1).is_none());
+    }
+
+    #[test]
+    fn grey_alpha_drops_an_opaque_alpha_channel() {
+        let ga: Vec<u8> = (0..90u8).flat_map(|v| [v, 255]).collect();
+        expect_gray(&ga, 2, 8, &(0..90u8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn grey_alpha_with_few_combinations_is_indexed_with_trns() {
+        let ga: Vec<u8> = [0, 0, 255, 255].repeat(40); // transparent black, opaque white
+        match analyze8(&ga, 2) {
+            Some(Reduced::Indexed {
+                depth,
+                plte,
+                trns: Some(t),
+                ..
+            }) => {
+                assert_eq!(depth, 1);
+                assert_eq!(plte, vec![0, 0, 0, 255, 255, 255]);
+                assert_eq!(t, vec![0]);
+            }
+            _ => panic!("expected indexed with tRNS"),
+        }
+    }
+
+    #[test]
+    fn grey_alpha_noise_keeps_its_encoding() {
+        let ga: Vec<u8> = (0..600u32)
+            .flat_map(|i| [(i % 251) as u8, (i % 249) as u8])
+            .collect();
+        assert!(analyze8(&ga, 2).is_none());
+    }
+
+    #[test]
+    fn demotable_sixteen_bit_recurses_into_the_eight_bit_analysis() {
+        // Grey, opaque, every sample k*257 -> demoted and reduced all the way to 8-bit grey.
+        let rgba16: Vec<u16> = (0..80u16)
+            .flat_map(|i| {
+                let v = (i % 60) * 257;
+                [v, v, v, u16::MAX]
+            })
+            .collect();
+        match analyze16(&rgba16, 4) {
+            Some(Reduced::Gray { depth: 8, samples }) => {
+                assert_eq!(samples, (0..80).map(|i| (i % 60) as u8).collect::<Vec<_>>());
+            }
+            _ => panic!("expected 8-bit Gray"),
+        }
+    }
+
+    #[test]
+    fn demotable_but_irreducible_sixteen_bit_falls_back_to_plain_demotion() {
+        // Every sample k*257 but many colours and varied alpha: the demotion itself is the win.
+        let rgba16: Vec<u16> = (0..600u32)
+            .flat_map(|i| {
+                [
+                    ((i % 251) * 257) as u16,
+                    ((i % 241) * 257) as u16,
+                    ((i % 239) * 257) as u16,
+                    ((i % 233) * 257) as u16,
+                ]
+            })
+            .collect();
+        match analyze16(&rgba16, 4) {
+            Some(Reduced::Rgba8(demoted)) => {
+                assert_eq!(demoted.len(), 600 * 4);
+                assert_eq!(demoted[0..4], [0, 0, 0, 0]);
+                assert_eq!(demoted[4 * 250], 250u8);
+            }
+            _ => panic!("expected demoted Rgba8"),
+        }
+    }
+
+    #[test]
+    fn one_asymmetric_sample_disables_demotion() {
+        // All grey/opaque k*257 except a single 0x0100 (hi != lo): must stay 16-bit native.
+        let mut rgba16: Vec<u16> = (0..80u16)
+            .flat_map(|i| {
+                let v = (i % 60) * 257;
+                [v, v, v, u16::MAX]
+            })
+            .collect();
+        rgba16[0] = 0x0100;
+        rgba16[1] = 0x0100;
+        rgba16[2] = 0x0100; // keep the pixel grey so the native grey reduction still applies
+        match analyze16(&rgba16, 4) {
+            Some(Reduced::Gray16Be(bytes)) => {
+                assert_eq!(&bytes[0..2], &[0x01, 0x00], "big-endian, undemoted");
+            }
+            _ => panic!("expected Gray16Be"),
+        }
+    }
+
+    #[test]
+    fn sixteen_bit_native_reductions_serialise_big_endian() {
+        // Opaque, non-grey, non-demotable RGBA16 -> RGB16, big-endian.
+        let rgba16: Vec<u16> = (0..90u32)
+            .flat_map(|i| [(i * 501 + 1) as u16, (i * 703 + 2) as u16, 3, u16::MAX])
+            .collect();
+        match analyze16(&rgba16, 4) {
+            Some(Reduced::Rgb16Be(bytes)) => {
+                assert_eq!(bytes.len(), 90 * 6);
+                assert_eq!(&bytes[0..6], &[0, 1, 0, 2, 0, 3]);
+            }
+            _ => panic!("expected Rgb16Be"),
+        }
+
+        // Grey non-demotable RGB16 -> Gray16.
+        let rgb16: Vec<u16> = (0..90u32)
+            .flat_map(|i| {
+                let v = (i * 501 + 1) as u16;
+                [v, v, v]
+            })
+            .collect();
+        assert!(matches!(
+            analyze16(&rgb16, 3),
+            Some(Reduced::Gray16Be(bytes)) if bytes.len() == 90 * 2
+        ));
+
+        // Opaque non-demotable GrayAlpha16 -> Gray16.
+        let ga16: Vec<u16> = (0..90u32)
+            .flat_map(|i| [(i * 501 + 1) as u16, u16::MAX])
+            .collect();
+        assert!(matches!(
+            analyze16(&ga16, 2),
+            Some(Reduced::Gray16Be(bytes)) if bytes.len() == 90 * 2
+        ));
+
+        // A translucent grey+alpha pair -> gets a full 16-bit gray+alpha only when smaller, which
+        // it never is for GrayAlpha16 input; and 16-bit noise stays as-is.
+        let translucent: Vec<u16> = (0..90u32)
+            .flat_map(|i| [(i * 501 + 1) as u16, (i * 703) as u16 | 1])
+            .collect();
+        assert!(analyze16(&translucent, 2).is_none());
+        let noise: Vec<u16> = (0..600u32)
+            .flat_map(|i| {
+                [
+                    (i * 501 + 1) as u16,
+                    (i * 703 + 2) as u16,
+                    (i * 907 + 3) as u16,
+                    (i * 111) as u16 | 1,
+                ]
+            })
+            .collect();
+        assert!(analyze16(&noise, 4).is_none());
+    }
+
+    #[test]
+    fn translucent_rgba16_reduces_to_grey_alpha() {
+        // Grey with varied (non-demotable) alpha -> GrayAlpha16Be at 4 bytes/px vs 8.
+        let rgba16: Vec<u16> = (0..90u32)
+            .flat_map(|i| {
+                let v = (i * 501 + 1) as u16;
+                [v, v, v, (i * 703) as u16 | 1]
+            })
+            .collect();
+        match analyze16(&rgba16, 4) {
+            Some(Reduced::GrayAlpha16Be(bytes)) => assert_eq!(bytes.len(), 90 * 4),
+            _ => panic!("expected GrayAlpha16Be"),
         }
     }
 }
