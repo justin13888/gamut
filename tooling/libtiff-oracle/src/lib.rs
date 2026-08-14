@@ -470,6 +470,35 @@ pub fn encode_rgb16(
     )
 }
 
+/// Encodes 16-bit grayscale as `MINISWHITE` — the inverted photometric, where `0` is white.
+///
+/// gamut's encoder only ever writes `MINISBLACK`, so this is the only way to obtain a 16-bit
+/// WhiteIsZero page to decode against.
+///
+/// # Errors
+///
+/// Returns a message if `samples` does not match the dimensions or libtiff fails to write.
+pub fn encode_gray16_miniswhite(
+    samples: &[u16],
+    width: u32,
+    height: u32,
+    compression: Compression,
+) -> Result<Vec<u8>, String> {
+    encode_packed_mode(
+        &native_bytes(samples),
+        width,
+        height,
+        1,
+        16,
+        sys::PHOTOMETRIC_MINISWHITE as u16,
+        (width as usize) * 2,
+        compression,
+        1,
+        false,
+        false,
+    )
+}
+
 /// Encodes interleaved 16-bit RGB as a **tiled** TIFF with `tile_w × tile_h` tiles.
 ///
 /// # Errors
