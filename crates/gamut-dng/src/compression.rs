@@ -3,7 +3,9 @@
 //! The codec wraps the [`crate::bitpack`] byte stream: the encoder packs samples then compresses
 //! each strip; the decoder decompresses each strip then unpacks. DNG's **Deflate** (`Compression =
 //! 8`) is zlib-format (RFC 1950), matching what the reference implementation reads/writes via
-//! zlib's `compress2`/`uncompress`. Lossless JPEG and JPEG XL are added in later phases.
+//! zlib's `compress2`/`uncompress`. Compression uses [`gamut_deflate`]; decompression uses
+//! [`miniz_oxide`], since `gamut-deflate` is deliberately encoder-only. Lossless JPEG and JPEG XL
+//! are added in later phases.
 
 use gamut_core::{Error, Result};
 
@@ -17,11 +19,14 @@ use crate::values::Compression;
 pub(crate) fn compress(scheme: Compression, packed: &[u8]) -> Result<Vec<u8>> {
     match scheme {
         Compression::Uncompressed => Ok(packed.to_vec()),
-        // Level 6 is zlib's default speed/ratio trade-off. `miniz_oxide` is a deliberate choice for
-        // now: it covers both encode *and* decode and is Adobe-DNG-SDK validated. The in-house
-        // `gamut-deflate` (on the unmerged `feat/png` branch) is encoder-only, so revisiting this is
-        // tracked for after that lands — see issue #196.
-        Compression::Deflate => Ok(miniz_oxide::deflate::compress_to_vec_zlib(packed, 6)),
+        // Encoding goes through the workspace's own space-optimising zlib encoder at its default
+        // level (lazy matching + per-block dynamic Huffman), the same choice `gamut-tiff` makes for
+        // Adobe Deflate. Inflation stays with `miniz_oxide` — see [`decompress`].
+        Compression::Deflate => {
+            let mut out = Vec::new();
+            gamut_deflate::DeflateEncoder::new().zlib_compress(packed, &mut out);
+            Ok(out)
+        }
         _ => Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
             "DNG: this compression is not yet encodable",

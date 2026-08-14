@@ -360,11 +360,17 @@ fn bigtiff_roundtrips_and_validates() {
 #[test]
 fn deflate_roundtrips_and_validates() {
     use gamut_dng::Compression;
+    // `(image, the SDK reads its samples back)`. Deflate is limited to whole-byte depths (the SDK
+    // reader's constraint, enforced at encode), so 16- and 8-bit CFA cover the encodable range.
+    // The SDK's stage-1 *reader* is 16-bit-only for CFA — an 8-bit CFA DNG fails it under every
+    // scheme, `Uncompressed` included — so that case asserts SDK validation plus the gamut
+    // round-trip and stops short of `read_raw_dng`, matching `adobe_sdk_validates_8bit_cfa`.
     let cases = [
-        common::sample_raw(64, 48, 16),
-        common::sample_linear_raw(48, 36, 16),
+        (common::sample_raw(64, 48, 16), true),
+        (common::sample_linear_raw(48, 36, 16), true),
+        (common::sample_raw(64, 48, 8), false),
     ];
-    for raw in cases {
+    for (raw, sdk_reads_samples) in cases {
         let mut dng = Vec::new();
         DngEncoder::new()
             .with_compression(Compression::Deflate)
@@ -375,8 +381,10 @@ fn deflate_roundtrips_and_validates() {
         assert_eq!(decoded.raw, raw);
         // ...and the Adobe SDK both validates and decodes it to the same samples.
         gamut_dng_oracle::validate_dng(&dng).expect("Adobe DNG SDK must accept a Deflate DNG");
-        let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
-        assert_eq!(adobe.samples, raw.samples());
+        if sdk_reads_samples {
+            let adobe = gamut_dng_oracle::read_raw_dng(&dng).expect("adobe decode");
+            assert_eq!(adobe.samples, raw.samples());
+        }
     }
 }
 

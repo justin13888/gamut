@@ -652,6 +652,7 @@ version = "1.0.0"
 dependencies = [
  "gamut-bitstream",
  "gamut-core",
+ "gamut-deflate",
  "gamut-dng",
  "gamut-dng-oracle",
  "gamut-ifd",
