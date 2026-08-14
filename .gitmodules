@@ -37,3 +37,6 @@
 [submodule "third_party/libheif"]
 	path = third_party/libheif
 	url = https://github.com/strukturag/libheif
+[submodule "gamut-dng-samples"]
+	path = third_party/gamut-dng-samples
+	url = https://github.com/visualcommons/gamut-dng-samples.git
