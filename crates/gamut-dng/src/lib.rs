@@ -23,10 +23,11 @@
 //! real-libjxl JPEG XL reader and its `NewRawImageDigest` computation). Both directions are
 //! full-surface:
 //!
-//! - **Layouts & compression**: strips and DNG-1.7 tiles; uncompressed, Deflate, lossless JPEG
-//!   (the public SOF3 [`lossless_jpeg`] module), and **JPEG XL** (Compression 52546 — the Apple
-//!   ProRAW codec; decode is pure-Rust jxl-rs, encode is the opt-in `jxl-encode` feature), with
-//!   row/column interleave de-interleaving on decode.
+//! - **Layouts & compression**: strips and DNG-1.7 tiles; uncompressed, Deflate (encoded with
+//!   [`gamut_deflate`], inflated with `miniz_oxide` under a cap derived from the chunk geometry),
+//!   lossless JPEG (the public SOF3 [`lossless_jpeg`] module), and **JPEG XL** (Compression
+//!   52546 — the Apple ProRAW codec; decode is pure-Rust jxl-rs, encode is the opt-in
+//!   `jxl-encode` feature), with row/column interleave de-interleaving on decode.
 //! - **Raw model**: CFA and `LinearRaw` photometries at 1–16 bits, the typed [`RawLevels`] level
 //!   family, and the spec's chapter-5 raw-to-linear mapping as the explicit opt-in
 //!   [`RawImage::to_linear`] (differentially gated against the SDK's stage-2 image).
