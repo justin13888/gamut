@@ -57,4 +57,4 @@ pub use oklab::Gamut;
 pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
 pub use profile::{SourceProfile, SourceTransfer};
-pub use ycbcr::{Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};
+pub use ycbcr::{YcbcrMatrix, Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};
