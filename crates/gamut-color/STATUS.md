@@ -16,9 +16,13 @@ ProPhoto `x^1.8`, BT.2020 PQ→Reinhard@203) and the standard curves, pinned to 
 **Oracle:** published external values, no FFI — Bruce Lindbloom's sRGB→XYZ (D65) and Bradford
 D65→D50 matrices; Ottosson's published OKLab `M1`/`M2` constants; an independent BT.2100
 forward-OETF inversion of `pq_eotf`; chromahash golden vectors (`unit-color.json`,
-`unit-softgamutclamp.json`, MIT OR Apache-2.0); and libwebp's integer-exact `VP8RGBToY/U/V`
-anchors plus the JFIF/BT.601 full-range anchors. Determinism is **Tier-1** (correctness only,
-`std` `f64`): golden-vector agreement is tolerance-level, not bit-for-bit.
+`unit-softgamutclamp.json`, MIT OR Apache-2.0); libwebp's integer-exact `VP8RGBToY/U/V`
+anchors plus the JFIF/BT.601 full-range anchors; and for the `lab` module the Sharma, Wu &
+Dalal (2005) 34-pair CIEDE2000 golden set (`references/color/ciede2000-testdata.txt`, asserted
+to 1e-4 in both argument orders), with lcms2 differential tests as the follow-up oracle
+(issue #322 — the PCS codecs already replicate lcms2 `cmspcs.c` rounding/clamping exactly).
+Determinism is **Tier-1** (correctness only, `std` `f64`): golden-vector agreement is
+tolerance-level, not bit-for-bit.
 
 ## Phases
 
@@ -31,6 +35,7 @@ anchors plus the JFIF/BT.601 full-range anchors. Determinism is **Tier-1** (corr
 | P5 | **Keystone** — `M1` derivation cross-check + encoder-exact vs standard curves | ✅ |
 | P6 | Tone-map dedupe with `gamut-tonemap`; luminance levels sourced from `gamut_core::luminance` | ✅ |
 | v1 | Issue #179 — API finalization (`non_exhaustive` policy, profile surface, code-point inverses), overflow-safe constructors, AV1 §6.4.2 monochrome fix, oracle-only minimal test set | ✅ |
+| P7 | Issue #321 — CIELab colorimetry (`lab`): XYZ↔Lab (exact ε = 216/24389, κ = 24389/27), LCh, xyY, ICC PCS encodings (PCSXYZ u1Fixed15, 16-bit PCSLAB v4/v2, 8-bit Lab; lcms2 `cmspcs.c`-exact rounding/clamping), ΔE\*ab + CIEDE2000; `linalg` promoted public for gamut-cmm (#323/#327) | ✅ |
 
 ## API policies frozen at v1
 
@@ -65,3 +70,9 @@ anchors plus the JFIF/BT.601 full-range anchors. Determinism is **Tier-1** (corr
 - **Better chroma resampling** (sharp-YUV-style) — the box filter is the documented baseline.
 - **Bit-reproducible math substrate** — chromahash's `cbrt_halley`/portable-pow tier is
   deliberately not ported (Tier-1 policy, issue #37).
+- **ΔE94 and ΔE-CMC** — deliberately out of scope (issue #321): CIEDE2000 supersedes both for
+  the workspace's conformance-metric and gamut-statistics use cases; either can be added to
+  `lab` later without reshaping the module.
+- **lcms2 differential tests for the `lab` module** — issue #322; the PCS codecs are already
+  written to lcms2 `cmspcs.c`'s exact rounding and clamping so the differential can demand
+  exactness rather than tolerance.

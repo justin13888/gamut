@@ -37,6 +37,9 @@ constant they define is instead transcribed with its exact value in the tables b
 | `itu-r-bt2408-8.pdf`     | Report ITU-R BT.2408-8 (2024) — HDR Reference White (203 cd/m²) for HDR production |
 | `adobe-rgb-1998.pdf`     | Adobe RGB (1998) Color Image Encoding — primaries & γ (authentic Adobe file via the Internet Archive; Adobe's host no longer serves it) |
 | `romm-rgb.pdf`           | ROMM RGB / ProPhoto white paper — the free primary reference for ISO 22028-2's reference encoding |
+| `ciede2000-sharma-2005.pdf` | Sharma, Wu & Dalal, "The CIEDE2000 Color-Difference Formula: Implementation Notes, Supplementary Test Data, and Mathematical Observations", *Color Res. Appl.* 30(1):21–30 (2005) — <https://hajim.rochester.edu/ece/sites/gsharma/papers/CIEDE2000CRNAFeb05.pdf> |
+| `ciede2000-testdata.txt` | The canonical 34-pair CIEDE2000 golden set accompanying the Sharma paper — <https://hajim.rochester.edu/ece/sites/gsharma/ciede2000/dataNprograms/ciede2000testdata.txt> |
+| `lab-lindbloom.html`     | Bruce Lindbloom, XYZ ↔ Lab equations (the exact-rational ε/κ transcription) — <http://www.brucelindbloom.com/Eqn_XYZ_to_Lab.html> |
 
 ## Not vendored (paywalled — values transcribed inline below)
 
@@ -44,6 +47,9 @@ constant they define is instead transcribed with its exact value in the tables b
 - **IEC 61966-2-1** (sRGB transfer functions) — IEC, paywalled.
 - **ISO 22028-2** (ROMM/ProPhoto reference colour encoding) — ISO, paywalled; the ROMM RGB white paper
   above is the freely-published primary reference for the same primaries and encoding.
+- **CIE 15:2004** (colorimetry — CIELab) — CIE, paywalled; the ε/κ junction rationals are
+  transcribed in the *CIELab* section below, and the freely-published Lindbloom page above is
+  the vendored transcription of the same equations.
 
 ---
 
@@ -183,6 +189,44 @@ CAT (verified 2026-06).
 ```
 Adaptation: `M_adapt = M_B⁻¹ · diag(cone_dst / cone_src) · M_B`, applied for non-D65
 gamuts (ProPhoto's D50→D65) before the LMS projection.
+
+---
+
+## CIELab — CIE 15:2004 (exact junction rationals)
+
+Source: CIE 15:2004 *Colorimetry* (paywalled, not vendored — verified 2026-08); freely-published
+transcription: Bruce Lindbloom, <http://www.brucelindbloom.com/Eqn_XYZ_to_Lab.html>, vendored as
+`lab-lindbloom.html`. The companding constants are **exact rationals**, never the rounded
+`0.008856` / `903.3` forms (the two branches of `f` are tangent only at the exact ε):
+
+| const | value                 | rational      |
+|-------|-----------------------|---------------|
+| ε     | `0.008856451679…`     | `216/24389`   |
+| κ     | `903.2962962…`        | `24389/27`    |
+
+`f(t) = t^(1/3)` for `t > ε`, else `(κ·t + 16)/116`; note `κ·ε = 8` exactly (the L\* value at
+the junction). Implemented as `gamut_color::lab` with the whites `D50 = (63190/65536, 1,
+54061/65536)` (the ICC PCS illuminant at its exact u1Fixed15 header encoding, ICC.1:2022
+§7.2.16 — lcms2 instead uses the rounded `0.9642`/`0.8249` literals) and `D65` derived from the
+chromaticity `(0.3127, 0.3290)` in the table above.
+
+CIEDE2000 (ΔE₀₀) follows Sharma, Wu & Dalal (2005), vendored as `ciede2000-sharma-2005.pdf`,
+Eqs. (2)–(22) — including the ±360° hue adjustments and the `C1′·C2′ = 0` sum convention their
+"mathematical observations" flag — and is pinned to the vendored 34-pair golden set
+`ciede2000-testdata.txt` at 1e-4 in both argument orders. ΔE94 and ΔE-CMC are deliberately out
+of scope (documented in `gamut_color::lab`).
+
+---
+
+## ICC PCS Lab/XYZ encodings
+
+Source: ICC.1:2022 Annex A and the legacy ICC.1:2001-04 §6.3.4, both vendored under
+[`references/icc/`](../icc/) (`icc.1-2022-05.pdf`, `icc.1-2001-04.pdf`). The fixed-point
+codecs — PCSXYZ u1Fixed15 (`v·32768`, range `0 … 1 + 32767/32768`), 16-bit PCSLAB v4
+(`L·65535/100`, `(a|b + 128)·257`), the legacy 16-bit v2 with its `0xFF00` top-end scaling
+(`L·652.8`, `(a|b + 128)·256`), and 8-bit Lab — live in `crates/gamut-color/src/lab.rs`, with
+rounding and clamping replicating lcms2's `cmspcs.c` (floor of `v + 0.5`, saturating) so the
+planned lcms2 differential tests (issue #322) can demand exact agreement.
 
 ---
 
