@@ -36,7 +36,7 @@ internal encode→decode round-trips guard every lossless path.
 | P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). Completed by #253: the full spec level model (`RawLevels`) and the chapter-5 mapping itself (`RawImage::to_linear`, gated ±1 LSB against the Adobe SDK's stage-2 image) | ✅ done |
 | P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
 | P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe. Finalization hardened it: full IFD-forest raw search, per-strip sub-byte alignment, `SampleFormat` validation, 64-bit offset reads | ✅ done |
-| P12 | Ch4     | Deflate/ZIP (8) encode+decode (`miniz_oxide`, zlib format) — CFA + LinearRaw, Adobe-validated; encode limited to 8/16-bit (the SDK reader's constraint) | ✅ done |
+| P12 | Ch4     | Deflate/ZIP (8) encode+decode (zlib format; encode `gamut-deflate`, decode `miniz_oxide`) — CFA + LinearRaw, Adobe-validated; encode limited to 8/16-bit (the SDK reader's constraint) | ✅ done |
 | P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module; per-chunk geometry follows the spec's total-sample-count rule | ✅ done |
 | P14 | Ch2     | Tiled raw layout (`TileWidth`/`TileLength`/`TileOffsets`/`TileByteCounts`): decode with edge-crop reassembly + `with_tiling` encode (zero-padded edge tiles), all schemes, Adobe pixel-exact | ✅ done |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
@@ -127,6 +127,30 @@ separate path (below).
 - JPEG XL range semantics are frozen to the reference SDK's: decoded JXL data is full-range
   16-bit; a JXL IFD's `BitsPerSample` records codestream precision; encode requires 16-bit
   input.
+
+## Deflate codec choice (#196)
+
+Encode uses `gamut-deflate` at `Level::Default`; decode uses `miniz_oxide`, bounded to the packed
+length the chunk geometry implies. `gamut-deflate` is deliberately encoder-only (inflating is
+solved and security-sensitive), so the split is permanent, not a staging post — the same one
+`gamut-tiff` and `gamut-png` make.
+
+Measured by `cargo bench -p gamut-dng --bench compression`, against the `miniz_oxide` level 6 this
+crate encoded with before:
+
+- **Ratio is a wash.** On packed raw payloads `Level::Default` lands within ±0.6% of miniz-6 —
+  slightly better tiled, slightly worse as one strip. Raw sensor noise leaves DEFLATE modelling
+  almost nothing to work with (a 16-bit frame compresses ~3%), so the entropy-coding differences
+  that separate these encoders on text do not show up here.
+- **Encode is ~17% slower** (≈46 MB/s vs ≈56 MB/s); `Level::Best` is ~12× slower again.
+- **`Level::Best` only pays off tiled** (−0.3% to −0.5% on real raw, −5.5% on 8-bit), because
+  `gamut-deflate` applies its optimal parse at 1 MiB or below and the untiled encoder writes
+  `RowsPerStrip = ImageLength` — one strip for the whole image, above the threshold. Raising that
+  limit is tracked upstream rather than worked around here, which is why the shipped level stays
+  `Default`.
+
+The Adobe DNG SDK validates the output on every fixture the oracle covers (CFA and LinearRaw,
+8- and 16-bit, strips and tiles), so the migration is correctness-neutral.
 
 ## Deferred / out of scope
 
