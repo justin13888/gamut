@@ -16,6 +16,10 @@ exclude = [
     "tooling/libtiff-oracle",
     "tooling/lcms2-oracle",
     "tooling/gamut-dng-oracle",
+    # Dev-only conformance tier over the real-camera DNG corpus in the `gamut-dng-samples`
+    # submodule (issue #174). Excluded so `cargo test --workspace` never pulls in ~178 MiB of
+    # camera files or the slow SDK oracle build; run it explicitly with `mise run test-dng-real`.
+    "tooling/gamut-dng-real-conformance",
     "tooling/gamut-iptc-oracle",
     "tooling/zlib-oracle",
     "tooling/libpng-oracle",
