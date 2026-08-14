@@ -6,7 +6,7 @@ use gamut_ifd::{Ifd, read};
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor};
 use crate::palette::Palette8;
-use crate::tags;
+use crate::{info, tags};
 
 /// Decoder for baseline TIFF images.
 ///
@@ -181,28 +181,18 @@ fn present_rgba(img: &DecodedImage) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Reads a required unsigned-integer tag.
-fn require_u32(ifd: &Ifd, tag: u16, what: &'static str) -> Result<u32> {
-    ifd.get_u32(tag)
-        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), what))
-}
-
 fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     let file = read(data)?;
     let ifd = file.ifds.get(page).ok_or_else(|| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: page index out of range")
     })?;
 
-    let width = require_u32(ifd, tags::IMAGE_WIDTH, "TIFF: missing ImageWidth")? as usize;
-    let height = require_u32(ifd, tags::IMAGE_LENGTH, "TIFF: missing ImageLength")? as usize;
-    if width == 0 || height == 0 {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: zero-sized image",
-        ));
-    }
-
-    let compression = Compression::try_from(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))?;
+    // Everything the page *declares* comes from one shared reader, so the probe and the decoder can
+    // never disagree about a default; what follows here is purely which of those declarations this
+    // decoder is willing to act on.
+    let info = info::page_info(ifd, file.order)?;
+    let (width, height) = (info.width as usize, info.height as usize);
+    let compression = info.compression;
     if !matches!(
         compression,
         Compression::None
@@ -230,17 +220,8 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             "TIFF: FillOrder 2 not supported",
         ));
     }
-    let spp = ifd.get_u32(tags::SAMPLES_PER_PIXEL).unwrap_or(1) as usize;
-    let bits = ifd
-        .get_u32_vec(tags::BITS_PER_SAMPLE)
-        .unwrap_or_else(|| vec![1; spp]);
-    if bits.len() != spp || bits.iter().any(|&b| b != bits[0]) {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: mixed bit depths not supported",
-        ));
-    }
-    let bps = bits[0];
+    let spp = info.samples_per_pixel as usize;
+    let bps = info.bits_per_sample;
     if matches!(
         compression,
         Compression::CcittRle | Compression::CcittGroup4Fax
@@ -251,8 +232,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             "TIFF: CCITT coding requires a bilevel image",
         ));
     }
-    let use_predictor = Predictor::try_from(ifd.get_u32(tags::PREDICTOR).unwrap_or(1))?
-        == Predictor::HorizontalDifferencing;
+    let use_predictor = info.predictor == Predictor::HorizontalDifferencing;
     if use_predictor && bps != 8 {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
@@ -260,13 +240,8 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         ));
     }
 
-    let photometric = PhotometricInterpretation::try_from(require_u32(
-        ifd,
-        tags::PHOTOMETRIC_INTERPRETATION,
-        "TIFF: missing PhotometricInterpretation",
-    )?)?;
     // How stored samples become the decoded output (TIFF 6.0 §8 PhotometricInterpretation).
-    let mode = match (spp, bps, photometric) {
+    let mode = match (spp, bps, info.photometric) {
         (1, 1 | 8, PhotometricInterpretation::WhiteIsZero) => Mode::Gray {
             white_is_zero: true,
         },

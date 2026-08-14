@@ -67,6 +67,7 @@ mod decoder;
 mod deconstruct;
 mod encoder;
 mod ifd;
+mod info;
 mod palette;
 mod writer;
 
