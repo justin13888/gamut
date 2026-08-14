@@ -6,11 +6,14 @@
 //! depths, subsamplings, and CICP code points) so later milestones (M2 pixel formats, M4 HDR;
 //! see `gamut-avif/STATUS.md`) extend without reshaping the types.
 //!
-//! On top of that metadata layer, the [`transfer`], [`oklab`], [`matrix`], [`gamut_map`], and
-//! [`profile`] modules add `f64` colour science — encoder-exact EOTFs, OKLab transforms with
-//! per-gamut matrices (derived from chromaticities via Bradford adaptation), gamut clamping, and
-//! source-profile bundles over the CICP axes. This math is **Tier-1** (correctness only): it uses
-//! `std` `f64`, so it is not bit-reproducible across platforms — see `references/color/README.md`.
+//! On top of that metadata layer, the [`transfer`], [`oklab`], [`lab`], [`matrix`],
+//! [`gamut_map`], and [`profile`] modules add `f64` colour science — encoder-exact EOTFs, OKLab
+//! transforms with per-gamut matrices (derived from chromaticities via Bradford adaptation),
+//! CIELab/LCh/xyY colorimetry with the ICC PCS fixed-point encodings and the ΔE\*ab / CIEDE2000
+//! colour-difference metrics, gamut clamping, and source-profile bundles over the CICP axes; the
+//! [`linalg`] module exports the shared 3×3 helpers underneath them. This math is **Tier-1**
+//! (correctness only): it uses `std` `f64`, so it is not bit-reproducible across platforms — see
+//! `references/color/README.md`.
 //!
 //! # API layout
 //!
@@ -18,8 +21,9 @@
 //! `M2` matrices, the `*_standard` transfer-curve variants, the matrix derivations) — is reachable
 //! and grouped under its module. For convenience the crate root additionally re-exports the items
 //! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`],
-//! [`Planar8`] / [`Yuv420`], the [`clip_pixel`] / [`rgb_to_ycbcr`] helpers, and the colour-science
-//! entry types [`Gamut`] and [`SourceProfile`] / [`SourceTransfer`].
+//! [`Planar8`] / [`Yuv420`], the [`clip_pixel`] / [`rgb_to_ycbcr`] helpers, the colour-science
+//! entry types [`Gamut`] and [`SourceProfile`] / [`SourceTransfer`], and the headline
+//! colour-difference metrics [`delta_e_76`] / [`delta_e_2000`].
 //!
 //! # Implemented vs. modeled
 //!
@@ -28,8 +32,8 @@
 //!
 //! - **Implemented:** 8-bit ([`BitDepth::Eight`]) RGB → identity 4:4:4 ([`ChromaSubsampling::Cs444`],
 //!   [`MatrixCoefficients::Identity`]) planes; the CICP code-point tables; BT.601 YCbCr 4:2:0
-//!   ([`ycbcr`]); and the `f64` colour science ([`transfer`], [`oklab`], [`matrix`], [`gamut_map`],
-//!   [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
+//!   ([`ycbcr`]); and the `f64` colour science ([`transfer`], [`oklab`], [`lab`], [`matrix`],
+//!   [`gamut_map`], [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
 //! - **Modeled but deferred:** 10/12-bit ([`BitDepth::Ten`] / [`BitDepth::Twelve`], awaiting AV1
 //!   encode wiring — distinct from [`BitDepth::Sixteen`], which is outside the AV1 profile set
 //!   entirely and exists for the 16-bit still-image pipelines that share these types); the subsampled
@@ -42,7 +46,8 @@
 pub mod cicp;
 pub mod format;
 pub mod gamut_map;
-mod linalg;
+pub mod lab;
+pub mod linalg;
 pub mod matrix;
 pub mod oklab;
 pub mod pixel;
@@ -53,6 +58,7 @@ pub mod ycbcr;
 
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 pub use format::{BitDepth, ChromaSubsampling};
+pub use lab::{delta_e_76, delta_e_2000};
 pub use oklab::Gamut;
 pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
