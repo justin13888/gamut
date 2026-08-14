@@ -4,6 +4,12 @@
 //! chroma-subsample → level shift (§A.3.1) → forward DCT (§A.3.3, via `gamut_dsp`) → quantize
 //! (§A.3.4) → zig-zag (§A.3.6) → differential DC + run-length AC Huffman coding (Annex F §F.1.2) —
 //! interleaved into minimum coded units (§A.2.3) and wrapped in a JFIF interchange stream (§B.2).
+//!
+//! The entropy coder runs through [`BaselineCoder`], which either **emits** codes or merely
+//! **gathers** symbol frequencies. The fixed-table path runs one emit pass; the optimized-table path
+//! ([`JpegEncoder::with_optimized_tables`]) runs a gather pass first, builds the Annex K.2 tables
+//! from what it counted, and then emits — both passes driven by the same [`encode_scan`] walk, so a
+//! symbol can never be written without having been counted.
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -62,8 +68,10 @@ impl ChromaSubsampling {
 /// # Frozen quality contract
 ///
 /// For a given `(quality, subsampling)` the quantization tables — and therefore the coefficient
-/// values and byte stream — are SemVer-stable: quality 50 emits the T.81 Annex K tables verbatim,
-/// and the IJG quality→scale mapping is frozen.
+/// values — are SemVer-stable: quality 50 emits the T.81 Annex K tables verbatim, and the IJG
+/// quality→scale mapping is frozen. The byte stream is likewise stable for a given configuration;
+/// [`Self::with_optimized_tables`] changes the Huffman tables and hence the entropy bytes, but it
+/// is opt-in and leaves the coefficients — and the decoded image — untouched.
 ///
 /// # Example
 ///
@@ -87,6 +95,7 @@ pub struct JpegEncoder {
     x_density: u16,
     y_density: u16,
     progressive: bool,
+    optimize_tables: bool,
     exif: Option<Vec<u8>>,
     xmp: Option<Vec<u8>>,
     icc: Option<Vec<u8>>,
@@ -106,6 +115,7 @@ impl fmt::Debug for JpegEncoder {
             .field("x_density", &self.x_density)
             .field("y_density", &self.y_density)
             .field("progressive", &self.progressive)
+            .field("optimize_tables", &self.optimize_tables)
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("icc", &self.icc.as_ref().map(Vec::len))
@@ -133,6 +143,7 @@ impl JpegEncoder {
             x_density: 1,
             y_density: 1,
             progressive: false,
+            optimize_tables: false,
             exif: None,
             xmp: None,
             icc: None,
@@ -269,6 +280,31 @@ impl JpegEncoder {
         self
     }
 
+    /// Builds the baseline scan's Huffman tables from the image's own symbol statistics (T.81
+    /// Annex K.2) instead of writing the fixed Annex K.3–K.6 "typical" tables.
+    ///
+    /// The typical tables were tuned for a generic photographic mix, so a table matched to the
+    /// actual image is a few percent smaller for free — the same `optimize_coding` tradeoff
+    /// libjpeg offers, and the same one gamut's progressive encoder already takes unconditionally
+    /// (Annex K.5/K.6 cannot code a progressive AC scan at all).
+    ///
+    /// **Cost:** the scan is walked twice — once to count symbols, once to write them — so the
+    /// forward DCT runs twice and encoding takes roughly twice as long. No coefficient buffer is
+    /// retained, so peak memory is unchanged.
+    ///
+    /// **Not a quality change.** The quantized coefficients are untouched; only the DHT and the
+    /// entropy-coded bytes differ, so the decoded image is identical either way. Marker order and
+    /// segment count are identical too: one DHT segment, in the same position.
+    ///
+    /// Defaults to `false`, which keeps the byte stream of every previously-encodable
+    /// configuration exactly as it was. Has no effect on [`Self::with_progressive`] streams, whose
+    /// per-scan tables are always optimized.
+    #[must_use]
+    pub fn with_optimized_tables(mut self, optimize: bool) -> Self {
+        self.optimize_tables = optimize;
+        self
+    }
+
     /// Embeds EXIF metadata as an APP1 segment (`"Exif\0\0"` + TIFF stream, Exif 3.0 §4.7.2).
     ///
     /// `exif` is the TIFF stream beginning `II`/`MM` — e.g. `gamut-exif` output; a blob already
@@ -393,6 +429,49 @@ impl JpegEncoder {
         }
         quant::emit_dqt(out, quant_tables);
     }
+
+    /// Writes the whole baseline (SOF0) frame: the frame header, one DHT segment, an optional DRI,
+    /// the scan header, and the entropy-coded scan. The caller has already written the SOI/APP0/DQT
+    /// prologue and appends EOI afterward.
+    ///
+    /// With [`Self::with_optimized_tables`] enabled the scan is walked **twice**: a gather pass
+    /// counts the symbols each entropy destination will code, those counts drive the Annex K.2
+    /// optimal-table construction, and the emit pass writes the entropy data with the resulting
+    /// tables. Marker order and segment count are identical either way — only the DHT contents and
+    /// the entropy bytes differ.
+    fn write_baseline_frame(
+        &self,
+        out: &mut Vec<u8>,
+        width: u16,
+        height: u16,
+        sof: &[(u8, u8, u8, u8)],
+        sos: &[(u8, u8, u8)],
+        components: &[Component],
+    ) {
+        let (w, h) = (u32::from(width), u32::from(height));
+        marker::write_sof0(out, width, height, sof);
+
+        let tables = if self.optimize_tables {
+            let mut freq = Histograms::default();
+            let mut coder = BaselineCoder::gather(&mut freq);
+            encode_scan(components, w, h, self.restart_interval, &mut coder);
+            coder.finish();
+            optimized_tables(out, &freq)
+        } else {
+            let color = components.len() > 1;
+            emit_huffman_tables(out, color);
+            standard_tables(color)
+        };
+
+        if self.restart_interval != 0 {
+            marker::write_dri(out, self.restart_interval);
+        }
+        marker::write_sos(out, sos);
+
+        let mut coder = BaselineCoder::emit(out, &tables);
+        encode_scan(components, w, h, self.restart_interval, &mut coder);
+        coder.finish();
+    }
 }
 
 /// A single-channel sample plane at a component's own resolution (row-major, 8-bit).
@@ -414,7 +493,9 @@ impl Plane {
     }
 }
 
-/// One frame component paired with the tables and sampling used to code it.
+/// One frame component paired with the sampling, quantization table and entropy-table destination
+/// used to code it. The entropy *tables* themselves live in [`ScanTables`], not here, because the
+/// optimized path only knows them after the gather pass has walked these same components.
 struct Component<'a> {
     /// Horizontal sampling factor `Hi`.
     h: u8,
@@ -422,8 +503,99 @@ struct Component<'a> {
     v: u8,
     plane: &'a Plane,
     quant: &'a [u8; 64],
-    dc: &'a EncTable,
-    ac: &'a EncTable,
+    /// Entropy-table destination (the SOS `Tdj` = `Taj`): 0 = luma, 1 = chroma.
+    dest: usize,
+}
+
+/// The entropy tables a baseline scan codes with, indexed by destination (0 = luma, 1 = chroma).
+///
+/// A destination is `None` when the scan never references it — a grayscale frame has no chroma
+/// destination, and an optimized table is omitted entirely when its histogram came back empty.
+#[derive(Default)]
+struct ScanTables {
+    /// DC-class tables (DHT `Tc = 0`).
+    dc: [Option<EncTable>; 2],
+    /// AC-class tables (DHT `Tc = 1`).
+    ac: [Option<EncTable>; 2],
+}
+
+/// Per-destination symbol counts for one baseline scan, the input to the Annex K.2 optimal-table
+/// construction. Only Huffman *symbols* are counted; the magnitude/sign bits that follow them are
+/// raw, not coded, so they contribute nothing.
+struct Histograms {
+    /// DC-class symbol counts, indexed by entropy-table destination.
+    dc: [[u32; 256]; 2],
+    /// AC-class symbol counts, indexed by entropy-table destination.
+    ac: [[u32; 256]; 2],
+}
+
+impl Default for Histograms {
+    fn default() -> Self {
+        Self {
+            dc: [[0; 256]; 2],
+            ac: [[0; 256]; 2],
+        }
+    }
+}
+
+/// The two-mode baseline entropy sink, mirroring [`crate::progressive`]'s `ProgCoder`: a **gather**
+/// pass accumulates per-destination symbol frequencies, an **emit** pass writes Huffman codes and
+/// the raw magnitude bits. Both passes run the identical control flow ([`encode_scan`]), so every
+/// symbol the emit pass writes was counted by the gather pass that built its table.
+enum BaselineCoder<'a, 'o> {
+    /// Counting only: no output is produced and raw bits are ignored.
+    Gather(&'a mut Histograms),
+    /// Writing: Huffman codes from `ScanTables` plus raw bits, into the entropy bit writer.
+    Emit(BitWriter<'o>, &'a ScanTables),
+}
+
+impl<'a, 'o> BaselineCoder<'a, 'o> {
+    /// A gather pass accumulating into `freq`.
+    fn gather(freq: &'a mut Histograms) -> Self {
+        Self::Gather(freq)
+    }
+
+    /// An emit pass appending entropy bytes to `out`, coding with `tables`.
+    fn emit(out: &'o mut Vec<u8>, tables: &'a ScanTables) -> Self {
+        Self::Emit(BitWriter::new(out), tables)
+    }
+
+    /// Counts (gather) or emits (emit) one DC-class symbol at entropy destination `dest`.
+    fn dc_symbol(&mut self, dest: usize, symbol: u8) {
+        match self {
+            Self::Gather(freq) => freq.dc[dest][usize::from(symbol)] += 1,
+            Self::Emit(writer, tables) => emit_symbol(writer, tables.dc[dest].as_ref(), symbol),
+        }
+    }
+
+    /// Counts (gather) or emits (emit) one AC-class symbol at entropy destination `dest`.
+    fn ac_symbol(&mut self, dest: usize, symbol: u8) {
+        match self {
+            Self::Gather(freq) => freq.ac[dest][usize::from(symbol)] += 1,
+            Self::Emit(writer, tables) => emit_symbol(writer, tables.ac[dest].as_ref(), symbol),
+        }
+    }
+
+    /// Emits (emit pass only) `n` raw bits of `value`, MSB-first; a no-op while gathering.
+    fn raw_bits(&mut self, value: u16, n: u8) {
+        if let Self::Emit(writer, _) = self {
+            writer.write_bits(value, n);
+        }
+    }
+
+    /// Writes (emit pass only) restart marker `RSTm`, flushing the segment first.
+    fn restart(&mut self, m: u8) {
+        if let Self::Emit(writer, _) = self {
+            writer.restart(m);
+        }
+    }
+
+    /// Pads and flushes the final entropy byte (emit pass only).
+    fn finish(&mut self) {
+        if let Self::Emit(writer, _) = self {
+            writer.flush();
+        }
+    }
 }
 
 /// The magnitude category `SSSS` of `value` (Annex F §F.1.2): the number of bits needed for
@@ -440,11 +612,13 @@ pub(crate) fn additional_bits(value: i32, category: u8) -> u16 {
     (v as u32 & ((1u32 << category) - 1)) as u16
 }
 
-/// Emits the Huffman code for `symbol` from `table`. The entropy coder only ever produces symbols
-/// present in the standard tables (DC categories 0..=11; AC run/size, EOB `0x00`, ZRL `0xF0`), so a
-/// missing symbol is a logic error, asserted in debug builds.
-fn emit_symbol(writer: &mut BitWriter, table: &EncTable, symbol: u8) {
-    match table.lookup(symbol) {
+/// Emits the Huffman code for `symbol` from `table`. Every symbol the entropy coder produces is
+/// present in the table it codes with — the standard tables cover the whole baseline alphabet (DC
+/// categories 0..=11; AC run/size, EOB `0x00`, ZRL `0xF0`), and an optimized table is built from
+/// the very symbols the emit pass then writes — so a missing table or symbol is a logic error,
+/// asserted in debug builds.
+fn emit_symbol(writer: &mut BitWriter, table: Option<&EncTable>, symbol: u8) {
+    match table.and_then(|t| t.lookup(symbol)) {
         Some((code, length)) => writer.write_bits(code, length),
         None => debug_assert!(false, "Huffman symbol {symbol:#x} absent from table"),
     }
@@ -478,10 +652,10 @@ fn encode_block(
     block_x: usize,
     block_y: usize,
     dc_pred: &mut i32,
-    writer: &mut BitWriter,
+    coder: &mut BaselineCoder,
 ) {
     let q = quantize_block(comp.plane, comp.quant, block_x, block_y);
-    encode_quantized_block(&q, dc_pred, comp.dc, comp.ac, writer);
+    encode_quantized_block(&q, dc_pred, comp.dest, coder);
 }
 
 /// Entropy-codes one block of quantized coefficients (natural order) per §F.1.2: the DC difference
@@ -490,16 +664,15 @@ fn encode_block(
 fn encode_quantized_block(
     q: &[i32; 64],
     dc_pred: &mut i32,
-    dc: &EncTable,
-    ac: &EncTable,
-    writer: &mut BitWriter,
+    dest: usize,
+    coder: &mut BaselineCoder,
 ) {
     // DC: differential coding against the running predictor (§F.1.2.1).
     let diff = q[0] - *dc_pred;
     *dc_pred = q[0];
     let cat = magnitude_category(diff);
-    emit_symbol(writer, dc, cat);
-    writer.write_bits(additional_bits(diff, cat), cat);
+    coder.dc_symbol(dest, cat);
+    coder.raw_bits(additional_bits(diff, cat), cat);
 
     // AC: run-length of zeros then (run, size) symbols in zig-zag order (§F.1.2.2).
     let mut run = 0u8;
@@ -510,29 +683,33 @@ fn encode_quantized_block(
             continue;
         }
         while run >= 16 {
-            emit_symbol(writer, ac, 0xF0); // ZRL: 16 zeros
+            coder.ac_symbol(dest, 0xF0); // ZRL: 16 zeros
             run -= 16;
         }
         let cat = magnitude_category(coeff);
-        emit_symbol(writer, ac, marker::pack_nibbles(run, cat));
-        writer.write_bits(additional_bits(coeff, cat), cat);
+        coder.ac_symbol(dest, marker::pack_nibbles(run, cat));
+        coder.raw_bits(additional_bits(coeff, cat), cat);
         run = 0;
     }
     if run > 0 {
-        emit_symbol(writer, ac, 0x00); // EOB: block ends in zeros
+        coder.ac_symbol(dest, 0x00); // EOB: block ends in zeros
     }
 }
 
 /// Codes the interleaved scan over all components (§A.2.3): walk MCUs row-major, and within each MCU
 /// walk each component's `Vi×Hi` blocks. Restart markers are inserted every `restart_interval` MCUs
-/// (predictors reset), and the final entropy byte is padded before EOI. A single-component (gray)
-/// scan degenerates to one 8×8 block per MCU — the non-interleaved order of §A.2.2.
+/// (predictors reset). A single-component (gray) scan degenerates to one 8×8 block per MCU — the
+/// non-interleaved order of §A.2.2.
+///
+/// Shared verbatim by the gather and emit passes of the optimized-table path (and run once, in emit
+/// mode, by the fixed-table path), so the frequency counts always match the emitted symbols. The
+/// caller flushes the coder afterwards, padding the final entropy byte before the next marker.
 fn encode_scan(
     components: &[Component],
     width: u32,
     height: u32,
     restart_interval: u16,
-    out: &mut Vec<u8>,
+    coder: &mut BaselineCoder,
 ) {
     let hmax = components.iter().map(|c| c.h).max().unwrap_or(1);
     let vmax = components.iter().map(|c| c.v).max().unwrap_or(1);
@@ -541,7 +718,6 @@ fn encode_scan(
     let mcus_x = width.div_ceil(mcu_w);
     let mcus_y = height.div_ceil(mcu_h);
 
-    let mut writer = BitWriter::new(out);
     let mut dc_pred = vec![0i32; components.len()];
     let mut mcu_index = 0u32;
     let mut restart_m = 0u8;
@@ -552,7 +728,7 @@ fn encode_scan(
                 && mcu_index != 0
                 && mcu_index.is_multiple_of(u32::from(restart_interval))
             {
-                writer.restart(restart_m);
+                coder.restart(restart_m);
                 restart_m = restart_m.wrapping_add(1);
                 dc_pred.iter_mut().for_each(|p| *p = 0);
             }
@@ -561,14 +737,13 @@ fn encode_scan(
                     for bx in 0..u32::from(comp.h) {
                         let block_x = (mx * u32::from(comp.h) + bx) as usize;
                         let block_y = (my * u32::from(comp.v) + by) as usize;
-                        encode_block(comp, block_x, block_y, &mut dc_pred[ci], &mut writer);
+                        encode_block(comp, block_x, block_y, &mut dc_pred[ci], coder);
                     }
                 }
             }
             mcu_index += 1;
         }
     }
-    writer.flush();
 }
 
 /// Box-averages `plane` (row-major, `width`×`height`) by `(sx, sy)`, producing a
@@ -636,30 +811,14 @@ impl EncodeImage<Gray8> for JpegEncoder {
             }];
             progressive::encode(out, width, height, &comps, self.restart_interval);
         } else {
-            let dc = EncTable::from_spec(&huffman::STD_LUMA_DC);
-            let ac = EncTable::from_spec(&huffman::STD_LUMA_AC);
-            marker::write_sof0(out, width, height, &[(1, 1, 1, 0)]);
-            emit_huffman_tables(out, false);
-            if self.restart_interval != 0 {
-                marker::write_dri(out, self.restart_interval);
-            }
-            marker::write_sos(out, &[(1, 0, 0)]);
-
             let comp = Component {
                 h: 1,
                 v: 1,
                 plane: &plane,
                 quant: &luma_quant,
-                dc: &dc,
-                ac: &ac,
+                dest: 0,
             };
-            encode_scan(
-                &[comp],
-                u32::from(width),
-                u32::from(height),
-                self.restart_interval,
-                out,
-            );
+            self.write_baseline_frame(out, width, height, &[(1, 1, 1, 0)], &[(1, 0, 0)], &[comp]);
         }
 
         marker::write_marker(out, marker::code::EOI);
@@ -737,55 +896,36 @@ impl EncodeImage<Rgb8> for JpegEncoder {
             ];
             progressive::encode(out, width, height, &comps, self.restart_interval);
         } else {
-            let luma_dc = EncTable::from_spec(&huffman::STD_LUMA_DC);
-            let luma_ac = EncTable::from_spec(&huffman::STD_LUMA_AC);
-            let chroma_dc = EncTable::from_spec(&huffman::STD_CHROMA_DC);
-            let chroma_ac = EncTable::from_spec(&huffman::STD_CHROMA_AC);
-
-            marker::write_sof0(
-                out,
-                width,
-                height,
-                &[(1, yh, yv, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
-            );
-            emit_huffman_tables(out, true);
-            if self.restart_interval != 0 {
-                marker::write_dri(out, self.restart_interval);
-            }
-            marker::write_sos(out, &[(1, 0, 0), (2, 1, 1), (3, 1, 1)]);
-
             let components = [
                 Component {
                     h: yh,
                     v: yv,
                     plane: &luma_plane,
                     quant: &luma_quant,
-                    dc: &luma_dc,
-                    ac: &luma_ac,
+                    dest: 0,
                 },
                 Component {
                     h: 1,
                     v: 1,
                     plane: &cb_plane,
                     quant: &chroma_quant,
-                    dc: &chroma_dc,
-                    ac: &chroma_ac,
+                    dest: 1,
                 },
                 Component {
                     h: 1,
                     v: 1,
                     plane: &cr_plane,
                     quant: &chroma_quant,
-                    dc: &chroma_dc,
-                    ac: &chroma_ac,
+                    dest: 1,
                 },
             ];
-            encode_scan(
-                &components,
-                u32::from(width),
-                u32::from(height),
-                self.restart_interval,
+            self.write_baseline_frame(
                 out,
+                width,
+                height,
+                &[(1, yh, yv, 0), (2, 1, 1, 1), (3, 1, 1, 1)],
+                &[(1, 0, 0), (2, 1, 1), (3, 1, 1)],
+                &components,
             );
         }
 
@@ -814,6 +954,58 @@ fn emit_huffman_tables(out: &mut Vec<u8>, color: bool) {
     }
 }
 
+/// The fixed Annex K.3–K.6 tables as encode tables, laid out by destination to match the segment
+/// [`emit_huffman_tables`] writes: luma at destination 0, chroma at destination 1 when `color`.
+fn standard_tables(color: bool) -> ScanTables {
+    ScanTables {
+        dc: [
+            Some(EncTable::from_spec(&huffman::STD_LUMA_DC)),
+            color.then(|| EncTable::from_spec(&huffman::STD_CHROMA_DC)),
+        ],
+        ac: [
+            Some(EncTable::from_spec(&huffman::STD_LUMA_AC)),
+            color.then(|| EncTable::from_spec(&huffman::STD_CHROMA_AC)),
+        ],
+    }
+}
+
+/// Builds the Annex K.2 optimal table for each destination the scan actually used, emits them as
+/// **one** DHT segment — the same segment count and position the fixed-table path occupies, in the
+/// same `(luma DC, luma AC, chroma DC, chroma AC)` order — and returns them as encode tables.
+///
+/// A destination whose histogram is empty is omitted from both the segment and the returned tables:
+/// nothing in the scan references it, so writing a zero-length table would only cost bytes.
+fn optimized_tables(out: &mut Vec<u8>, freq: &Histograms) -> ScanTables {
+    // `(Tc, Th, BITS, HUFFVAL)`, in the emission order above.
+    let mut built: Vec<(u8, u8, [u8; 16], Vec<u8>)> = Vec::new();
+    for dest in 0..2usize {
+        for (class, hist) in [(0u8, &freq.dc[dest]), (1u8, &freq.ac[dest])] {
+            if hist.iter().all(|&n| n == 0) {
+                continue;
+            }
+            let (bits, values) = huffman::build_optimal_table(hist);
+            built.push((class, dest as u8, bits, values));
+        }
+    }
+
+    let segment: Vec<(u8, u8, &[u8; 16], &[u8])> = built
+        .iter()
+        .map(|(class, dest, bits, values)| (*class, *dest, bits, values.as_slice()))
+        .collect();
+    huffman::emit_dht_dynamic(out, &segment);
+
+    let mut tables = ScanTables::default();
+    for (class, dest, bits, values) in &built {
+        let slot = if *class == 0 {
+            &mut tables.dc[usize::from(*dest)]
+        } else {
+            &mut tables.ac[usize::from(*dest)]
+        };
+        *slot = Some(EncTable::from_bits_values(bits, values));
+    }
+    tables
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +1020,7 @@ mod tests {
         assert_eq!(d.density_unit, DensityUnit::AspectRatio);
         assert_eq!((d.x_density, d.y_density), (1, 1));
         assert!(!d.progressive);
+        assert!(!d.optimize_tables);
         assert_eq!((&d.exif, &d.xmp, &d.icc), (&None, &None, &None));
     }
 
@@ -840,6 +1033,64 @@ mod tests {
                 .with_progressive(false)
                 .progressive
         );
+    }
+
+    #[test]
+    fn with_optimized_tables_toggles_the_flag() {
+        assert!(
+            JpegEncoder::new()
+                .with_optimized_tables(true)
+                .optimize_tables
+        );
+        assert!(
+            !JpegEncoder::new()
+                .with_optimized_tables(true)
+                .with_optimized_tables(false)
+                .optimize_tables
+        );
+    }
+
+    #[test]
+    fn optimized_tables_omit_destinations_the_scan_never_used() {
+        // Only the luma DC destination carries symbols, so the DHT must hold exactly one table —
+        // writing empty tables for the other three destinations would be pure overhead, and the
+        // returned `ScanTables` must leave them `None` so nothing can code against them.
+        let mut freq = Histograms::default();
+        freq.dc[0][3] = 7;
+        let mut dht = Vec::new();
+        let tables = optimized_tables(&mut dht, &freq);
+
+        assert!(tables.dc[0].is_some(), "luma DC was used");
+        assert!(tables.ac[0].is_none(), "luma AC saw no symbols");
+        assert!(
+            tables.dc[1].is_none() && tables.ac[1].is_none(),
+            "no chroma"
+        );
+        // DHT: FFC4, 2-byte length, then one table (1 byte Tc/Th + 16 counts + 1 value).
+        assert_eq!(&dht[..2], &[0xFF, marker::code::DHT]);
+        assert_eq!(
+            u16::from_be_bytes([dht[2], dht[3]]) as usize,
+            2 + 1 + 16 + 1,
+            "one table, one symbol"
+        );
+        assert_eq!(dht[4], 0x00, "Tc = 0 (DC), Th = 0 (luma)");
+    }
+
+    #[test]
+    fn optimized_tables_are_emitted_in_the_standard_destination_order() {
+        // The optimized DHT must list (luma DC, luma AC, chroma DC, chroma AC) — the same order the
+        // fixed-table segment uses — so a reader sees no structural difference between the two.
+        let mut freq = Histograms::default();
+        freq.dc[0][1] = 1;
+        freq.ac[0][2] = 1;
+        freq.dc[1][3] = 1;
+        freq.ac[1][4] = 1;
+        let mut dht = Vec::new();
+        let _ = optimized_tables(&mut dht, &freq);
+
+        // Each single-symbol table occupies 1 + 16 + 1 bytes after the 4-byte marker+length header.
+        let tc_th: Vec<u8> = (0..4).map(|i| dht[4 + i * 18]).collect();
+        assert_eq!(tc_th, vec![0x00, 0x10, 0x01, 0x11]);
     }
 
     #[test]
@@ -999,6 +1250,17 @@ mod tests {
             .collect()
     }
 
+    /// Runs one baseline scan with the fixed Annex K tables and returns just the entropy bytes —
+    /// the emit half of [`encode_scan`] without the surrounding markers.
+    fn scan_entropy(components: &[Component], width: u32, height: u32, restart: u16) -> Vec<u8> {
+        let tables = standard_tables(components.len() > 1);
+        let mut out = Vec::new();
+        let mut coder = BaselineCoder::emit(&mut out, &tables);
+        encode_scan(components, width, height, restart, &mut coder);
+        coder.finish();
+        out
+    }
+
     /// Decodes `block_count` sequential blocks (one component, one table pair), returning each
     /// block's `(dc_diff, natural-order quantized coefficients)`.
     fn decode_blocks(
@@ -1059,12 +1321,10 @@ mod tests {
             v: 1,
             plane: &plane,
             quant: &quant,
-            dc: &dc,
-            ac: &ac,
+            dest: 0,
         };
 
-        let mut entropy = Vec::new();
-        encode_scan(&[comp], 16, 16, 0, &mut entropy);
+        let entropy = scan_entropy(&[comp], 16, 16, 0);
         let blocks = decode_blocks(&entropy, &dc, &ac, 4);
 
         // Independent expected DC: round((200−128)·8 / 16) = round(576/16) = 36.
@@ -1111,12 +1371,10 @@ mod tests {
             v: 1,
             plane: &plane,
             quant: &quant,
-            dc: &dc,
-            ac: &ac,
+            dest: 0,
         };
 
-        let mut entropy = Vec::new();
-        encode_scan(&[comp], 8, 8, 0, &mut entropy);
+        let entropy = scan_entropy(&[comp], 8, 8, 0);
         let (_, coeffs) = decode_blocks(&entropy, &dc, &ac, 1)[0];
 
         assert_ne!(coeffs[1], 0, "the u=1 coefficient must be lit");
@@ -1133,12 +1391,11 @@ mod tests {
 
     /// Entropy-codes one hand-built block with the standard luma tables, flushing at the end.
     fn encode_one(q: &[i32; 64], dc_pred: &mut i32) -> Vec<u8> {
-        let dc = EncTable::from_spec(&huffman::STD_LUMA_DC);
-        let ac = EncTable::from_spec(&huffman::STD_LUMA_AC);
+        let tables = standard_tables(false);
         let mut out = Vec::new();
-        let mut w = BitWriter::new(&mut out);
-        encode_quantized_block(q, dc_pred, &dc, &ac, &mut w);
-        w.flush();
+        let mut coder = BaselineCoder::emit(&mut out, &tables);
+        encode_quantized_block(q, dc_pred, 0, &mut coder);
+        coder.finish();
         out
     }
 
@@ -1232,16 +1489,15 @@ mod tests {
         // Three blocks with absolute DCs 5, 2, 2 sharing one predictor: diffs +5 (cat 3, DC code
         // 100₂, bits 101₂), −3 (cat 2, DC code 011₂, bits (−3−1)&11₂ = 00₂), 0 (cat 0, no bits).
         let mut out = Vec::new();
-        let dc = EncTable::from_spec(&huffman::STD_LUMA_DC);
-        let ac = EncTable::from_spec(&huffman::STD_LUMA_AC);
-        let mut w = BitWriter::new(&mut out);
+        let tables = standard_tables(false);
+        let mut coder = BaselineCoder::emit(&mut out, &tables);
         let mut pred = 0i32;
         for dc_value in [5, 2, 2] {
             let mut q = [0i32; 64];
             q[0] = dc_value;
-            encode_quantized_block(&q, &mut pred, &dc, &ac, &mut w);
+            encode_quantized_block(&q, &mut pred, 0, &mut coder);
         }
-        w.flush();
+        coder.finish();
         assert_eq!(pred, 2, "predictor tracks the last absolute DC");
         assert_eq!(
             out,
@@ -1353,11 +1609,9 @@ mod tests {
             v: 1,
             plane: &plane,
             quant: &quant,
-            dc: &dc,
-            ac: &ac,
+            dest: 0,
         };
-        let mut entropy = Vec::new();
-        encode_scan(&[comp], 16, 16, 0, &mut entropy);
+        let entropy = scan_entropy(&[comp], 16, 16, 0);
 
         let decoded = decode_interleaved(&entropy, &[(1, 1, &dc, &ac)], 4);
         let mut n = 0;

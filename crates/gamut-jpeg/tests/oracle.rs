@@ -153,11 +153,32 @@ fn gamut_encode_cfg(
     restart: u16,
     progressive: bool,
 ) -> Vec<u8> {
-    let dims = Dimensions::new(w, h).unwrap();
     let enc = JpegEncoder::new()
         .with_quality(quality)
         .with_restart_interval(restart)
         .with_progressive(progressive);
+    gamut_encode_with(enc, mode, pixels, w, h)
+}
+
+/// Encodes `pixels` with gamut's baseline path using Annex K.2 optimized Huffman tables.
+fn gamut_encode_optimized(
+    mode: Mode,
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    quality: u8,
+    restart: u16,
+) -> Vec<u8> {
+    let enc = JpegEncoder::new()
+        .with_quality(quality)
+        .with_restart_interval(restart)
+        .with_optimized_tables(true);
+    gamut_encode_with(enc, mode, pixels, w, h)
+}
+
+/// Drives an already-configured encoder over the mode's pixel type, applying its subsampling.
+fn gamut_encode_with(enc: JpegEncoder, mode: Mode, pixels: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let dims = Dimensions::new(w, h).unwrap();
     match mode {
         Mode::Gray => enc
             .encode_to_vec(ImageRef::<Gray8>::new(pixels, dims).unwrap())
@@ -358,6 +379,94 @@ fn progressive_encode_libjpeg_decodes_identically_to_baseline() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn optimized_baseline_libjpeg_decodes_identically_to_the_fixed_tables() {
+    // The sharp optimized-table gate, the baseline twin of the progressive one above: Annex K.2
+    // tables change only the Huffman code words, never the quantized coefficients, so libjpeg-turbo
+    // must decode the optimized stream to EXACTLY the same pixels as the fixed-table stream of the
+    // same image. Any deviation is an entropy-coder bug — the gather pass and the emit pass having
+    // disagreed — not a tolerance. Asserted over dims × mode × quality × restart, which also covers
+    // the DC-predictor resets at restart boundaries and the sparse-histogram edge cases.
+    let mut fixed_total = 0usize;
+    let mut optimized_total = 0usize;
+    for &(w, h) in DIMS {
+        for mode in Mode::ALL {
+            for &q in &[40u8, 75, 95] {
+                for &restart in &[0u16, 2] {
+                    let src = lcg_pixels(w, h, mode.channels(), 0x1234_5678);
+                    let fixed = gamut_encode(mode, &src, w, h, q, restart);
+                    let optimized = gamut_encode_optimized(mode, &src, w, h, q, restart);
+                    // Still a baseline (SOF0) stream — the flag must not change the process.
+                    assert_eq!(
+                        gamut_jpeg::info(&optimized).unwrap().process,
+                        JpegProcess::Baseline,
+                        "optimized tables must stay baseline for {mode:?} {w}x{h}"
+                    );
+                    let fixed_dec = libjpeg_oracle::decode(&fixed).expect("oracle decode fixed");
+                    let opt_dec =
+                        libjpeg_oracle::decode(&optimized).expect("oracle decode optimized");
+                    assert_eq!(
+                        (opt_dec.width, opt_dec.height, opt_dec.channels),
+                        (w, h, mode.channels()),
+                        "geometry {mode:?} {w}x{h} q{q} r{restart}"
+                    );
+                    assert_eq!(
+                        opt_dec.pixels, fixed_dec.pixels,
+                        "optimized != fixed through libjpeg-turbo: {mode:?} {w}x{h} q{q} r{restart}"
+                    );
+                    // A Huffman code fitted to this image's own statistics is never longer than the
+                    // generic Annex K one, and its table is never larger than the 162-value maximum
+                    // the standard tables already spend.
+                    assert!(
+                        optimized.len() <= fixed.len(),
+                        "optimized {} > fixed {} bytes: {mode:?} {w}x{h} q{q} r{restart}",
+                        optimized.len(),
+                        fixed.len()
+                    );
+                    fixed_total += fixed.len();
+                    optimized_total += optimized.len();
+                }
+            }
+        }
+    }
+    assert!(
+        optimized_total < fixed_total,
+        "optimized {optimized_total} bytes vs fixed {fixed_total} across the battery"
+    );
+}
+
+#[test]
+fn optimized_baseline_is_tight_against_libjpeg_turbo_optimize_coding() {
+    // Against the reference doing the same job: libjpeg-turbo with `optimize_coding`. gamut builds
+    // its tables from the same §K.2 procedure over the same symbol alphabet, so the stream sizes
+    // must be in the same league — this catches a table that is technically valid but badly built
+    // (e.g. a mis-ordered HUFFVAL) which the decode-equality check above would not notice.
+    for &(w, h) in &[(33u32, 31u32), (64, 48)] {
+        for mode in Mode::ALL {
+            let src = gray_or_rgb_gradient(mode, w, h);
+            let gamut = gamut_encode_optimized(mode, &src, w, h, 75, 0);
+            let oracle = oracle_encode(mode, &src, w, h, 75, 0, true, false);
+            // Measured worst ratio over this battery: 1.083 (gray 64×48). Asserted with margin.
+            let ratio = gamut.len() as f64 / oracle.len() as f64;
+            assert!(
+                ratio < 1.15,
+                "{mode:?} {w}x{h}: gamut {} vs libjpeg -optimize {} bytes (ratio {ratio:.3})",
+                gamut.len(),
+                oracle.len()
+            );
+        }
+    }
+}
+
+/// The gradient content of the right channel count for `mode`.
+fn gray_or_rgb_gradient(mode: Mode, w: u32, h: u32) -> Vec<u8> {
+    if matches!(mode, Mode::Gray) {
+        gray_gradient(w, h)
+    } else {
+        rgb_gradient(w, h)
     }
 }
 
