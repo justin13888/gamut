@@ -347,19 +347,22 @@ fn truncated() -> Error {
     Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: truncated codestream")
 }
 
-/// Decodes `data` into a fresh [`ImageBuf`] of layout `P`.
-pub(crate) fn decode_to_buf<P: Pixel>(
-    data: &[u8],
-    codestream_bit_depth: bool,
-) -> Result<ImageBuf<P>>
+/// The number of pixels a decoded frame holds, or the overflow error.
+fn frame_pixels(raw: &RawFrame) -> Result<usize> {
+    raw.dims.num_pixels().ok_or_else(|| {
+        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
+    })
+}
+
+/// Reshapes a decoded [`RawFrame`] into a fresh [`ImageBuf`] of layout `P`.
+///
+/// The shared tail of every decode entry point: size the destination from the frame's dimensions,
+/// reconcile channels with [`convert_into`], and brand the result.
+fn finish<P: Pixel>(raw: &RawFrame, dst_color: usize, dst_alpha: bool) -> Result<ImageBuf<P>>
 where
     P::Sample: ConvSample,
 {
-    let (data_format, dst_is_gray_family, dst_color, dst_alpha) = output_layout(P::FORMAT)?;
-    let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format, codestream_bit_depth)?;
-    let pixels = raw.dims.num_pixels().ok_or_else(|| {
-        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
-    })?;
+    let pixels = frame_pixels(raw)?;
     let mut out = vec![P::Sample::default(); pixels * (dst_color + usize::from(dst_alpha))];
     convert_into::<P::Sample>(
         raw.samples(),
@@ -373,6 +376,19 @@ where
     ImageBuf::<P>::new(out, raw.dims)
 }
 
+/// Decodes `data` into a fresh [`ImageBuf`] of layout `P`.
+pub(crate) fn decode_to_buf<P: Pixel>(
+    data: &[u8],
+    codestream_bit_depth: bool,
+) -> Result<ImageBuf<P>>
+where
+    P::Sample: ConvSample,
+{
+    let (data_format, dst_is_gray_family, dst_color, dst_alpha) = output_layout(P::FORMAT)?;
+    let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format, codestream_bit_depth)?;
+    finish::<P>(&raw, dst_color, dst_alpha)
+}
+
 /// Decodes `data` into `dst`, reusing its sample allocation when the decoded dimensions match.
 pub(crate) fn decode_into_buf<P: Pixel>(
     data: &[u8],
@@ -384,9 +400,6 @@ where
 {
     let (data_format, dst_is_gray_family, dst_color, dst_alpha) = output_layout(P::FORMAT)?;
     let raw = decode_raw::<P::Sample>(data, dst_is_gray_family, data_format, codestream_bit_depth)?;
-    let pixels = raw.dims.num_pixels().ok_or_else(|| {
-        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
-    })?;
     if dst.dimensions() == raw.dims {
         // Same geometry: convert straight into the existing storage (its length is invariant).
         convert_into::<P::Sample>(
@@ -396,20 +409,10 @@ where
             dst.as_mut_samples(),
             dst_color,
             dst_alpha,
-            pixels,
+            frame_pixels(&raw)?,
         );
     } else {
-        let mut out = vec![P::Sample::default(); pixels * (dst_color + usize::from(dst_alpha))];
-        convert_into::<P::Sample>(
-            raw.samples(),
-            raw.src_color,
-            raw.src_alpha,
-            &mut out,
-            dst_color,
-            dst_alpha,
-            pixels,
-        );
-        *dst = ImageBuf::<P>::new(out, raw.dims)?;
+        *dst = finish::<P>(&raw, dst_color, dst_alpha)?;
     }
     Ok(())
 }
