@@ -29,6 +29,7 @@ use super::prediction::{self, B_DC_PRED, B_PRED, DC_PRED, H_PRED, NUM_BMODES, TM
 use super::quant::{self, QuantFactors};
 use super::tokens::{self, CoeffProbs};
 use super::transform::{fdct4x4, fwht4x4, idct4x4, iwht4x4};
+use crate::config::Effort;
 
 /// The whole-block prediction modes the encoder considers, in signaling order.
 const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
@@ -58,6 +59,9 @@ pub struct EncodeOptions {
     /// intra `ref_frame[0]` delta shifts every macroblock's filter level and the `B_PRED` `mode[0]`
     /// delta shifts 4×4-predicted ones; the default (all-zero) emits the disabled record.
     pub loop_filter_deltas: LoopFilterDeltas,
+    /// Compression effort: which coding tools the encoder may spend time on. Every level emits a
+    /// conformant key frame, so this trades encode time for size, never correctness.
+    pub effort: Effort,
 }
 
 impl Default for EncodeOptions {
@@ -67,6 +71,7 @@ impl Default for EncodeOptions {
             segmented: false,
             partitions: 1,
             loop_filter_deltas: LoopFilterDeltas::default(),
+            effort: Effort::Default,
         }
     }
 }

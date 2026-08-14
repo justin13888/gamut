@@ -69,7 +69,7 @@ pub use backend::{
     PIXEL_FORMAT_YUV420, RasterRef, WebpCodestream, WebpCodestreamDecoder, WebpCodestreamEncoder,
     WebpEncodeRequest,
 };
-pub use config::{WebpConfig, WebpMode};
+pub use config::{Effort, WebpConfig, WebpMode};
 pub use decoder::WebpDecoder;
 pub use encoder::WebpEncoder;
 pub use gamut_core::Dimensions;

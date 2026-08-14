@@ -21,8 +21,8 @@ use crate::backend::{
     RasterRef, SharedEncoder, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest,
     dispatch_encode,
 };
-use crate::config::{WebpConfig, WebpMode};
-use crate::vp8::frame::encode_frame;
+use crate::config::{Effort, WebpConfig, WebpMode};
+use crate::vp8::frame::{EncodeOptions, encode_frame_filtered};
 use crate::vp8l::encoder::encode as encode_vp8l;
 use crate::vp8l::transform::make_argb;
 
@@ -94,6 +94,7 @@ impl WebpEncoder {
             config: WebpConfig {
                 mode: WebpMode::Lossy,
                 quality,
+                ..WebpConfig::default()
             },
             ..Self::default()
         }
@@ -135,6 +136,17 @@ impl WebpEncoder {
         self
     }
 
+    /// Sets the compression [`Effort`] — libwebp's `method` dial, `0..=6`.
+    ///
+    /// Applies to both modes. Higher effort spends more time searching for a smaller file; it
+    /// never changes what a lossless encode reproduces (still bit-exact) nor a lossy encode's
+    /// [`quality`](WebpConfig::quality) target. Calling this twice keeps the last value.
+    #[must_use]
+    pub fn with_effort(mut self, effort: Effort) -> Self {
+        self.config.effort = effort;
+        self
+    }
+
     /// Installs a codestream encoder backend, returning `&mut self` so pushes chain.
     ///
     /// Backends are tried in **push order**, ahead of the built-in `vp8`/`vp8l` encoders, which
@@ -153,7 +165,8 @@ impl WebpEncoder {
     /// Encodes the lossless codestream for `argb`, via a backend when one accepts, else the
     /// built-in VP8L encoder.
     fn encode_vp8l_codestream(&self, argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
-        let req = WebpEncodeRequest::new(WebpCodestream::Vp8l, dims, self.config.quality);
+        let req = WebpEncodeRequest::new(WebpCodestream::Vp8l, dims, self.config.quality)
+            .with_effort(self.config.effort);
         let raster = RasterRef::Argb {
             dimensions: dims,
             pixels: argb,
@@ -167,11 +180,18 @@ impl WebpEncoder {
     /// Encodes the lossy codestream for `yuv`, via a backend when one accepts, else the built-in
     /// VP8 encoder.
     fn encode_vp8_codestream(&self, yuv: &Yuv420, dims: Dimensions) -> Result<Vec<u8>> {
-        let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims, self.config.quality);
+        let req = WebpEncodeRequest::new(WebpCodestream::Vp8, dims, self.config.quality)
+            .with_effort(self.config.effort);
         let raster = RasterRef::Yuv420(yuv);
         match dispatch_encode(&self.backends, &req, &raster) {
             Some(result) => result,
-            None => Ok(encode_frame(yuv, quality_to_quant(self.config.quality)).0),
+            None => {
+                let opts = EncodeOptions {
+                    effort: self.config.effort,
+                    ..EncodeOptions::default()
+                };
+                Ok(encode_frame_filtered(yuv, quality_to_quant(self.config.quality), opts).0)
+            }
         }
     }
 
@@ -341,6 +361,26 @@ mod tests {
         let lossy = WebpEncoder::lossy(40);
         assert_eq!(lossy.config().mode, WebpMode::Lossy);
         assert_eq!(lossy.config().quality, 40);
+    }
+
+    #[test]
+    fn with_effort_sets_the_knob_without_disturbing_the_mode() {
+        // Effort is orthogonal to mode and quality: setting it must not perturb either, and the
+        // last call wins.
+        assert_eq!(WebpEncoder::new().config().effort, Effort::Default);
+        let enc = WebpEncoder::lossy(40)
+            .with_effort(Effort::Slowest)
+            .with_effort(Effort::Fastest);
+        assert_eq!(enc.config().effort, Effort::Fastest);
+        assert_eq!(enc.config().mode, WebpMode::Lossy);
+        assert_eq!(enc.config().quality, 40);
+        assert_eq!(
+            WebpEncoder::lossless()
+                .with_effort(Effort::Slower)
+                .config()
+                .effort,
+            Effort::Slower
+        );
     }
 
     #[test]
