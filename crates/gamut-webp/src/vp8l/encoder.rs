@@ -16,11 +16,13 @@
 
 use gamut_core::{Dimensions, Error, Result};
 
+use crate::config::Effort;
 use crate::vp8l::bit_io::BitWriter;
 use crate::vp8l::color_cache::ColorCache;
 use crate::vp8l::div_round_up;
 use crate::vp8l::header::Vp8lHeader;
 use crate::vp8l::lz77::{BackwardRefs, pixel_distance_to_code, value_to_prefix};
+use crate::vp8l::plan::{CacheBits, Grouping, Lz77Params, Structure, Vp8lPlan, enumerate};
 use crate::vp8l::prefix::{
     MAX_CODE_LENGTH, NUM_DISTANCE_CODES, NUM_LENGTH_CODES, NUM_LITERAL_CODES, PrefixEncoder,
     build_length_limited_lengths, green_alphabet_size, write_prefix_code,
@@ -43,8 +45,6 @@ const LENGTH_CODE_BASE: usize = NUM_LITERAL_CODES;
 /// First green-alphabet symbol denoting a color-cache index.
 const CACHE_CODE_BASE: usize = NUM_LITERAL_CODES + NUM_LENGTH_CODES;
 
-/// Block-size exponent for the meta-prefix (entropy) image (16×16 meta-blocks).
-const PREFIX_BITS: u32 = 4;
 /// Cap on prefix-code groups; beyond this the encoder falls back to a single group rather than pay
 /// the per-group overhead (a naive bound — smarter clustering is deferred to issue #31).
 const MAX_GROUPS: u32 = 256;
@@ -86,14 +86,18 @@ impl Token {
 ///
 /// Returns [`Error::InvalidInput`] if `argb.len()` does not equal `width * height`, or the
 /// dimensions are out of the VP8L range.
-pub fn encode(argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
+pub fn encode(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>> {
     check_dimensions(argb, dims)?;
     let alpha_is_used = argb.iter().any(|&p| alpha(p) != 0xff);
     let header = Vp8lHeader::from_dimensions(dims, alpha_is_used)?;
     let mut w = BitWriter::new();
     header.write(&mut w);
-    write_image_body(&mut w, argb, dims);
-    Ok(w.finish())
+    // The header is exactly 40 bits and therefore byte-aligned (see `Vp8lHeader::write`), so the
+    // body can be encoded independently and concatenated rather than spliced bit by bit — which is
+    // what lets candidate bodies be measured against each other before one is chosen.
+    let mut out = w.finish();
+    out.extend_from_slice(&best_body(argb, dims, effort));
+    Ok(out)
 }
 
 /// Encodes an ARGB image to a **headerless** VP8L image-stream — the transform chain plus the
@@ -104,11 +108,28 @@ pub fn encode(argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns [`Error::InvalidInput`] if `argb.len()` does not equal `width * height`.
-pub fn encode_image(argb: &[u32], dims: Dimensions) -> Result<Vec<u8>> {
+pub fn encode_image(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Vec<u8>> {
     check_dimensions(argb, dims)?;
-    let mut w = BitWriter::new();
-    write_image_body(&mut w, argb, dims);
-    Ok(w.finish())
+    Ok(best_body(argb, dims, effort))
+}
+
+/// Encodes the image body under every candidate plan [`enumerate`] offers for `effort` and returns
+/// the shortest, ties going to the earliest (lowest-effort) plan.
+///
+/// Candidates are compared in **bits**, not bytes: the body is byte-padded only once, when it is
+/// flushed, and `ceil` is monotone, so minimising bits also minimises the finished chunk.
+fn best_body(argb: &[u32], dims: Dimensions, effort: Effort) -> Vec<u8> {
+    let mut best: Option<(usize, Vec<u8>)> = None;
+    for plan in enumerate(effort) {
+        let mut w = BitWriter::new();
+        write_image_body(&mut w, argb, dims, &plan);
+        let bits = w.bit_len();
+        if best.as_ref().is_none_or(|(best_bits, _)| bits < *best_bits) {
+            best = Some((bits, w.finish()));
+        }
+    }
+    // `enumerate` always offers at least one plan, which its own test pins.
+    best.map(|(_, bytes)| bytes).unwrap_or_default()
 }
 
 /// Validates that `argb` holds exactly `width * height` pixels.
@@ -126,16 +147,18 @@ fn check_dimensions(argb: &[u32], dims: Dimensions) -> Result<()> {
 /// Writes the image body (transforms + spatially-coded image). Few-color images take the palette
 /// path; everything else takes the spatial-transform path. Choosing the densest path for a given
 /// image is a tuning concern deferred to issue #31.
-fn write_image_body(w: &mut BitWriter, argb: &[u32], dims: Dimensions) {
-    match build_palette(argb) {
-        Some(palette) => encode_palette(w, argb, dims, &palette),
-        None => encode_spatial(w, argb, dims),
+fn write_image_body(w: &mut BitWriter, argb: &[u32], dims: Dimensions, plan: &Vp8lPlan) {
+    match plan.structure {
+        Structure::Auto => match build_palette(argb) {
+            Some(palette) => encode_palette(w, argb, dims, &palette, plan),
+            None => encode_spatial(w, argb, dims, plan),
+        },
     }
 }
 
 /// Encodes via the spatial transforms (subtract-green, predictor, color) applied in read order; the
 /// decoder inverts them last-first.
-fn encode_spatial(w: &mut BitWriter, argb: &[u32], dims: Dimensions) {
+fn encode_spatial(w: &mut BitWriter, argb: &[u32], dims: Dimensions, plan: &Vp8lPlan) {
     let (width, height) = (dims.width, dims.height);
     let mut pixels = argb.to_vec();
 
@@ -154,12 +177,18 @@ fn encode_spatial(w: &mut BitWriter, argb: &[u32], dims: Dimensions) {
     write_sub_image(w, &color_sub);
 
     w.write_bits(0, 1); // End of transforms.
-    write_main_image(w, &pixels, width);
+    write_main_image(w, &pixels, width, plan);
 }
 
 /// Encodes via the color-indexing (palette) transform: the subtraction-coded palette followed by the
 /// bundled index image (RFC 9649 §4.4).
-fn encode_palette(w: &mut BitWriter, argb: &[u32], dims: Dimensions, palette: &[u32]) {
+fn encode_palette(
+    w: &mut BitWriter,
+    argb: &[u32],
+    dims: Dimensions,
+    palette: &[u32],
+    plan: &Vp8lPlan,
+) {
     write_transform_tag(w, COLOR_INDEXING_TRANSFORM);
     w.write_bits((palette.len() - 1) as u32, 8);
 
@@ -173,7 +202,7 @@ fn encode_palette(w: &mut BitWriter, argb: &[u32], dims: Dimensions, palette: &[
 
     let (bundled, bundled_width) = forward_color_indexing(argb, dims.width, dims.height, palette);
     w.write_bits(0, 1); // End of transforms.
-    write_main_image(w, &bundled, bundled_width);
+    write_main_image(w, &bundled, bundled_width, plan);
 }
 
 /// Collects the distinct colors in first-seen order, or `None` if there are more than
@@ -310,8 +339,10 @@ fn write_sub_image(w: &mut BitWriter, pixels: &[u32]) {
 
 /// Writes the top-level image with a color cache, LZ77 backward references, and (when the encoder
 /// splits the image into multiple statistical regions) a meta-prefix entropy image.
-fn write_main_image(w: &mut BitWriter, pixels: &[u32], width: u32) {
-    let cache_bits = pick_cache_bits(pixels.len());
+fn write_main_image(w: &mut BitWriter, pixels: &[u32], width: u32, plan: &Vp8lPlan) {
+    let cache_bits = match plan.cache {
+        CacheBits::Auto => pick_cache_bits(pixels.len()),
+    };
     let cache_size = if cache_bits > 0 {
         1usize << cache_bits
     } else {
@@ -324,9 +355,9 @@ fn write_main_image(w: &mut BitWriter, pixels: &[u32], width: u32) {
         w.write_bits(0, 1);
     }
 
-    let tokens = tokenize(pixels, cache_bits);
+    let tokens = tokenize(pixels, cache_bits, &plan.lz77);
     let height = (pixels.len() as u32).checked_div(width).unwrap_or(0);
-    let groups = assign_groups(&tokens, width, height);
+    let groups = assign_groups(&tokens, width, height, &plan.grouping);
 
     if groups.num_groups > 1 {
         w.write_bits(1, 1); // Meta prefix codes present.
@@ -389,13 +420,19 @@ impl GroupAssignment {
 /// Assigns meta-blocks to groups by a cheap signature (each block's most frequent green symbol).
 /// Distinct signatures become distinct groups; if every block matches, a single group is used (no
 /// entropy-image overhead). Smarter, cost-aware clustering is deferred to issue #31.
-fn assign_groups(tokens: &[Token], width: u32, height: u32) -> GroupAssignment {
+fn assign_groups(
+    tokens: &[Token],
+    width: u32,
+    height: u32,
+    grouping: &Grouping,
+) -> GroupAssignment {
     use std::collections::HashMap;
-    let grid_width = div_round_up(width, 1 << PREFIX_BITS);
-    let grid_height = div_round_up(height, 1 << PREFIX_BITS);
+    let Grouping::Signature { prefix_bits } = *grouping;
+    let grid_width = div_round_up(width, 1 << prefix_bits);
+    let grid_height = div_round_up(height, 1 << prefix_bits);
     let num_blocks = (grid_width as usize) * (grid_height as usize);
     let single = GroupAssignment {
-        prefix_bits: PREFIX_BITS,
+        prefix_bits,
         grid_width,
         block_group: vec![0; num_blocks.max(1)],
         num_groups: 1,
@@ -410,7 +447,7 @@ fn assign_groups(tokens: &[Token], width: u32, height: u32) -> GroupAssignment {
     for token in tokens {
         let x = pos as u32 % width;
         let y = pos as u32 / width;
-        let block = ((y >> PREFIX_BITS) * grid_width + (x >> PREFIX_BITS)) as usize;
+        let block = ((y >> prefix_bits) * grid_width + (x >> prefix_bits)) as usize;
         if let Some(counter) = counts.get_mut(block) {
             *counter.entry(token.green_symbol()).or_insert(0) += 1;
         }
@@ -444,7 +481,7 @@ fn assign_groups(tokens: &[Token], width: u32, height: u32) -> GroupAssignment {
         return single;
     }
     GroupAssignment {
-        prefix_bits: PREFIX_BITS,
+        prefix_bits,
         grid_width,
         block_group,
         num_groups,
@@ -455,10 +492,10 @@ fn assign_groups(tokens: &[Token], width: u32, height: u32) -> GroupAssignment {
 /// as the decoder will reconstruct it (every produced pixel is inserted, in stream order). Token
 /// preference is copy > cache > literal — a simple deterministic policy; optimal parsing is deferred
 /// to issue #31.
-fn tokenize(pixels: &[u32], cache_bits: u32) -> Vec<Token> {
+fn tokenize(pixels: &[u32], cache_bits: u32, lz77: &Lz77Params) -> Vec<Token> {
     let n = pixels.len();
     let mut tokens = Vec::new();
-    let mut refs = BackwardRefs::new(n);
+    let mut refs = BackwardRefs::new(n, lz77.max_chain);
     let mut cache = if cache_bits > 0 {
         ColorCache::new(cache_bits).ok()
     } else {
@@ -526,7 +563,7 @@ mod tests {
 
     fn round_trip(argb: &[u32], width: u32, height: u32) {
         let dims = Dimensions { width, height };
-        let bitstream = encode(argb, dims).expect("encode");
+        let bitstream = encode(argb, dims, Effort::default()).expect("encode");
         let (decoded_dims, pixels) = decode(&bitstream).expect("decode");
         assert_eq!(decoded_dims, dims);
         assert_eq!(pixels, argb, "round-trip mismatch at {width}x{height}");
@@ -649,9 +686,14 @@ mod tests {
         // Replicate the encoder's internal grouping to assert it splits into multiple groups.
         let detected = build_palette(&img).expect("few-color image has a palette");
         let (bundled, bundled_width) = forward_color_indexing(&img, w, h, &detected);
-        let tokens = tokenize(&bundled, pick_cache_bits(bundled.len()));
-        let assignment =
-            assign_groups(&tokens, bundled_width, bundled.len() as u32 / bundled_width);
+        let plan = enumerate(Effort::default())[0];
+        let tokens = tokenize(&bundled, pick_cache_bits(bundled.len()), &plan.lz77);
+        let assignment = assign_groups(
+            &tokens,
+            bundled_width,
+            bundled.len() as u32 / bundled_width,
+            &plan.grouping,
+        );
         assert!(
             assignment.num_groups >= 2,
             "expected multiple groups, got {}",
@@ -667,7 +709,7 @@ mod tests {
         let tokens: Vec<Token> = (0..1024)
             .map(|_| Token::Literal(make_argb(0xff, 0, 7, 0)))
             .collect();
-        let assignment = assign_groups(&tokens, 32, 32);
+        let assignment = assign_groups(&tokens, 32, 32, &enumerate(Effort::default())[0].grouping);
         assert_eq!(assignment.num_groups, 1);
     }
 
@@ -692,7 +734,7 @@ mod tests {
                 Token::Literal(make_argb(0xff, 0, g, 0))
             })
             .collect();
-        let assignment = assign_groups(&tokens, w, h);
+        let assignment = assign_groups(&tokens, w, h, &enumerate(Effort::default())[0].grouping);
         assert_eq!(
             assignment.num_groups, 1,
             "tied signatures must resolve to the lower green symbol"
@@ -720,6 +762,7 @@ mod tests {
                 width: 4,
                 height: 4,
             },
+            Effort::default(),
         )
         .unwrap();
         let mut r = crate::vp8l::bit_io::BitReader::new(&bitstream);
@@ -735,7 +778,8 @@ mod tests {
                 Dimensions {
                     width: 2,
                     height: 2
-                }
+                },
+                Effort::default()
             ),
             Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));

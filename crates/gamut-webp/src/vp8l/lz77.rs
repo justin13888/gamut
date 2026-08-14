@@ -191,8 +191,6 @@ pub fn distance_code_to_pixel_distance(distance_code: u32, width: u32) -> u32 {
 pub const MIN_MATCH: usize = 3;
 /// Hash-table width (number of chain heads is `1 << HASH_BITS`).
 const HASH_BITS: u32 = 14;
-/// Maximum chain length walked per position — the search-depth knob, deferred for tuning to #31.
-const MAX_CHAIN: usize = 32;
 
 /// Splits a length-or-distance `value` into `(prefix_code, num_extra_bits, extra_value)` — the exact
 /// inverse of [`read_lz77_value`] (RFC 9649 §5.2.2).
@@ -234,15 +232,19 @@ pub struct BackwardRefs {
     head: Vec<i32>,
     /// Previous position sharing a position's hash bucket (the chain).
     prev: Vec<i32>,
+    /// Maximum chain length walked per position — the search-depth knob the effort ladder sets.
+    max_chain: usize,
 }
 
 impl BackwardRefs {
-    /// Creates an index for an image of `num_pixels` pixels.
+    /// Creates an index for an image of `num_pixels` pixels, walking at most `max_chain`
+    /// candidates per position.
     #[must_use]
-    pub fn new(num_pixels: usize) -> Self {
+    pub fn new(num_pixels: usize, max_chain: usize) -> Self {
         Self {
             head: vec![-1; 1usize << HASH_BITS],
             prev: vec![-1; num_pixels],
+            max_chain,
         }
     }
 
@@ -279,7 +281,7 @@ impl BackwardRefs {
         let mut best_len = 0usize;
         let mut best_dist = 0u32;
         let mut chain = 0usize;
-        while candidate >= 0 && chain < MAX_CHAIN {
+        while candidate >= 0 && chain < self.max_chain {
             let c = candidate as usize;
             let mut len = 0usize;
             // Overlapping copies (source running into the destination) are valid for run-length.
@@ -450,7 +452,7 @@ mod tests {
         let block = [1u32, 2, 3, 4, 5, 6, 7, 8];
         let mut pixels = block.to_vec();
         pixels.extend_from_slice(&block);
-        let mut refs = BackwardRefs::new(pixels.len());
+        let mut refs = BackwardRefs::new(pixels.len(), 32);
         for p in 0..8 {
             refs.insert(&pixels, p);
         }

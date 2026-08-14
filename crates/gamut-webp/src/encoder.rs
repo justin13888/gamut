@@ -173,7 +173,7 @@ impl WebpEncoder {
         };
         match dispatch_encode(&self.backends, &req, &raster) {
             Some(result) => result,
-            None => encode_vp8l(argb, dims),
+            None => encode_vp8l(argb, dims, self.config.effort),
         }
     }
 
