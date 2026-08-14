@@ -19,6 +19,9 @@ workspace = true
 gamut-core.workspace = true
 
 [dev-dependencies]
+# libwebp's demuxer as the differential container oracle (FFI). Dev-only: the shipped library is
+# C-free and `#![forbid(unsafe_code)]`.
+libwebp-sys2.workspace = true
 divan.workspace = true
 
 [[bench]]

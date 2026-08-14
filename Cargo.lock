@@ -810,6 +810,7 @@ version = "0.1.3"
 dependencies = [
  "divan",
  "gamut-core",
+ "libwebp-sys2 0.2.0",
 ]
 
 [[package]]
