@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8, Rgba8};
 use gamut_riff::{
-    FourCc, MetadataChunks, Vp8xHeader, write_extended_with_metadata, write_simple_lossless,
+    Chunk, FourCc, MetadataChunks, Vp8xHeader, write_extended_preserving, write_simple_lossless,
     write_simple_lossy,
 };
 
@@ -56,6 +56,8 @@ pub struct WebpEncoder {
     xmp: Option<Vec<u8>>,
     /// The `ICCP` chunk payload (ICC colour profile) to embed, verbatim.
     icc: Option<Vec<u8>>,
+    /// Unknown chunks to re-emit after the metadata, in the order given (RFC 9649 §2.7.1.6).
+    unknown: Vec<(FourCc, Vec<u8>)>,
     /// Pluggable codestream encoders, tried in push order ahead of the built-in tails.
     backends: Vec<SharedEncoder>,
 }
@@ -132,6 +134,24 @@ impl WebpEncoder {
     #[must_use]
     pub fn with_icc_profile(mut self, profile: &[u8]) -> Self {
         self.icc = Some(profile.to_vec());
+        self
+    }
+
+    /// Re-emits `chunks` whose FourCC the container spec does not define, after the metadata and in
+    /// the order given — what RFC 9649 §2.7.1.6 asks of writers: "writers SHOULD preserve them in
+    /// their original order".
+    ///
+    /// Pair with [`gamut_riff::WebpLayout::parse`], whose `unknown` field yields exactly this list
+    /// from a file that was read, to carry an application's private chunks through a
+    /// decode/re-encode cycle instead of dropping them. Any unknown chunk promotes the output to
+    /// the extended (`VP8X`) format, since only that format has a place to put one. Calling this
+    /// twice keeps the last list.
+    #[must_use]
+    pub fn with_unknown_chunks(mut self, chunks: &[(FourCc, &[u8])]) -> Self {
+        self.unknown = chunks
+            .iter()
+            .map(|(fourcc, payload)| (*fourcc, payload.to_vec()))
+            .collect();
         self
     }
 
@@ -213,7 +233,7 @@ impl WebpEncoder {
         has_alpha: bool,
     ) -> Result<Vec<u8>> {
         let metadata = self.metadata_chunks();
-        if metadata.is_empty() && alph.is_none() {
+        if metadata.is_empty() && alph.is_none() && self.unknown.is_empty() {
             return match codestream {
                 WebpCodestream::Vp8 => write_simple_lossy(bitstream),
                 WebpCodestream::Vp8l => write_simple_lossless(bitstream),
@@ -236,7 +256,15 @@ impl WebpEncoder {
             canvas_height: dims.height,
             ..Default::default()
         };
-        write_extended_with_metadata(&header, &metadata, &image_data)
+        let unknown: Vec<Chunk<'_>> = self
+            .unknown
+            .iter()
+            .map(|(fourcc, payload)| Chunk {
+                fourcc: *fourcc,
+                payload,
+            })
+            .collect();
+        write_extended_preserving(&header, &metadata, &image_data, &unknown)
     }
 
     /// Encodes interleaved 8-bit RGB `pixels` (row-major) of `dims`, appending the WebP file to

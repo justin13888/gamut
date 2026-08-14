@@ -33,7 +33,8 @@ pub use chunk::{CHUNK_HEADER_LEN, Chunk, ChunkHeader};
 pub use fourcc::FourCc;
 pub use reader::RiffReader;
 pub use webp::{
-    MAX_CANVAS_DIMENSION, MetadataChunks, VP8X_PAYLOAD_LEN, Vp8xHeader, WebpChunkId,
-    write_extended, write_extended_with_metadata, write_simple_lossless, write_simple_lossy,
+    MAX_CANVAS_DIMENSION, MetadataChunks, VP8X_PAYLOAD_LEN, Vp8xHeader, WebpChunkId, WebpLayout,
+    write_extended, write_extended_preserving, write_extended_with_metadata, write_simple_lossless,
+    write_simple_lossy,
 };
 pub use writer::RiffWriter;

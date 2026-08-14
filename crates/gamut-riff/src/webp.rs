@@ -7,6 +7,7 @@
 
 use gamut_core::{Error, Result};
 
+use crate::chunk::{CHUNK_HEADER_LEN, Chunk};
 use crate::fourcc::FourCc;
 use crate::reader::RiffReader;
 use crate::writer::RiffWriter;
@@ -217,13 +218,34 @@ pub fn write_extended_with_metadata(
     metadata: &MetadataChunks<'_>,
     image_data: &[(FourCc, &[u8])],
 ) -> Result<Vec<u8>> {
+    write_extended_preserving(header, metadata, image_data, &[])
+}
+
+/// As [`write_extended_with_metadata`], additionally re-emitting `unknown` chunks after the metadata.
+///
+/// A chunk whose FourCC the container spec does not define is an *unknown chunk*, and "writers
+/// SHOULD preserve them in their original order" (RFC 9649 §2.7.1.6). Pass the
+/// [`WebpLayout::unknown`] of a file that was read to carry an application's private chunks through
+/// a read/modify/write cycle instead of dropping them. The spec places unknown chunks at the end of
+/// the file and lets them "appear out of order" relative to metadata, so emitting them last is
+/// conforming regardless of where they sat in the original.
+///
+/// # Errors
+///
+/// As [`write_extended`]: an inexpressible canvas or an over-large payload or file.
+pub fn write_extended_preserving(
+    header: &Vp8xHeader,
+    metadata: &MetadataChunks<'_>,
+    image_data: &[(FourCc, &[u8])],
+    unknown: &[Chunk<'_>],
+) -> Result<Vec<u8>> {
     let header = Vp8xHeader {
         icc_profile: metadata.icc.is_some(),
         exif_metadata: metadata.exif.is_some(),
         xmp_metadata: metadata.xmp.is_some(),
         ..*header
     };
-    let mut chunks: Vec<(FourCc, &[u8])> = Vec::with_capacity(image_data.len() + 3);
+    let mut chunks: Vec<(FourCc, &[u8])> = Vec::with_capacity(image_data.len() + 3 + unknown.len());
     if let Some(icc) = metadata.icc {
         chunks.push((FourCc::ICCP, icc));
     }
@@ -234,7 +256,137 @@ pub fn write_extended_with_metadata(
     if let Some(xmp) = metadata.xmp {
         chunks.push((FourCc::XMP, xmp));
     }
+    chunks.extend(unknown.iter().map(|c| (c.fourcc, c.payload)));
     write_extended(&header, &chunks)
+}
+
+/// The position a chunk occupies in the extended format's reconstruction sequence: `VP8X`, `ICCP`,
+/// `ANIM`, then the image data (`ALPH` before the bitstream) — RFC 9649 §2.7.
+///
+/// `None` marks a chunk the ordering rule does not constrain: metadata (`EXIF`/`XMP `) and unknown
+/// chunks, which the spec says "MAY appear out of order".
+const fn reconstruction_rank(id: WebpChunkId) -> Option<u8> {
+    match id {
+        WebpChunkId::Vp8x => Some(0),
+        WebpChunkId::Iccp => Some(1),
+        WebpChunkId::Anim => Some(2),
+        WebpChunkId::Anmf | WebpChunkId::Alpha => Some(3),
+        WebpChunkId::Vp8 | WebpChunkId::Vp8l => Some(4),
+        WebpChunkId::Exif | WebpChunkId::Xmp | WebpChunkId::Unknown(_) => None,
+    }
+}
+
+/// A still-image WebP file's chunks, sorted into their roles and checked against the spec's
+/// ordering rule (RFC 9649 §2.7).
+///
+/// Where [`RiffReader`] is the permissive low-level iterator and [`MetadataChunks::read`] collects
+/// only the metadata, this is the **strict** reader: it rejects a file whose reconstruction chunks
+/// are out of order, and it keeps the unknown chunks so a caller can write them back out with
+/// [`write_extended_preserving`]. Every payload is borrowed from the input, never copied.
+///
+/// # Example
+///
+/// ```
+/// use gamut_riff::{WebpLayout, WebpChunkId, write_simple_lossless};
+///
+/// let file = write_simple_lossless(&[0x2f, 0x01, 0x02])?;
+/// let layout = WebpLayout::parse(&file)?;
+/// assert_eq!(layout.bitstream, Some((WebpChunkId::Vp8l, &[0x2f, 0x01, 0x02][..])));
+/// assert!(layout.unknown.is_empty());
+/// # Ok::<(), gamut_core::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct WebpLayout<'a> {
+    /// The parsed `VP8X` feature header, or `None` for a simple (single-bitstream) file.
+    pub vp8x: Option<Vp8xHeader>,
+    /// The `ICCP`, `EXIF`, and `XMP ` payloads, first of each kind winning as the spec permits.
+    pub metadata: MetadataChunks<'a>,
+    /// The `ALPH` chunk payload, when the file carries lossy alpha.
+    pub alph: Option<&'a [u8]>,
+    /// The image bitstream and which codestream it is: `VP8 ` (lossy) or `VP8L` (lossless).
+    pub bitstream: Option<(WebpChunkId, &'a [u8])>,
+    /// Unknown chunks, in the order they appeared — what §2.7.1.6 asks writers to preserve.
+    pub unknown: Vec<Chunk<'a>>,
+    /// Bytes past the region the RIFF file-size field declares; see
+    /// [`RiffReader::trailing_bytes`].
+    pub trailing_bytes: usize,
+}
+
+impl<'a> WebpLayout<'a> {
+    /// Parses the still-image WebP file in `data`.
+    ///
+    /// Enforces the ordering rule the spec states for the chunks "necessary for reconstruction and
+    /// color correction" — `VP8X`, `ICCP`, `ANIM`, `ANMF`, `ALPH`, `VP8 `, `VP8L` — which "MUST
+    /// appear in the order described" and over which "readers SHOULD fail" when they do not.
+    /// Metadata and unknown chunks are exempt by the same paragraph and may appear anywhere.
+    ///
+    /// Where a chunk may legally repeat, the **first** wins, matching [`MetadataChunks::read`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `data` is not a valid RIFF/WebP file, if a chunk runs
+    /// past the end of the data, or if a reconstruction chunk appears out of order (the error
+    /// carries the offending chunk's byte offset). Returns [`Error::Unsupported`] for an animated
+    /// file — an `ANIM` or `ANMF` chunk — which is outside this crate's still-image scope.
+    pub fn parse(data: &'a [u8]) -> Result<Self> {
+        let reader = RiffReader::new(data)?;
+        let mut layout = Self {
+            trailing_bytes: reader.trailing_bytes(),
+            ..Self::default()
+        };
+        // Rank of the last reconstruction chunk seen; the sequence must never regress.
+        let mut last_rank = 0;
+        let mut offset = 12;
+        for chunk in reader {
+            let chunk = chunk?;
+            let id = WebpChunkId::from(chunk.fourcc);
+            if let Some(rank) = reconstruction_rank(id) {
+                if rank < last_rank {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "WebP: reconstruction chunks are out of order",
+                    )
+                    .with_byte_offset(offset as u64));
+                }
+                last_rank = rank;
+            }
+            match id {
+                WebpChunkId::Vp8x => {
+                    if layout.vp8x.is_none() {
+                        layout.vp8x = Some(Vp8xHeader::from_payload(chunk.payload)?);
+                    }
+                }
+                WebpChunkId::Iccp => {
+                    layout.metadata.icc.get_or_insert(chunk.payload);
+                }
+                WebpChunkId::Exif => {
+                    layout.metadata.exif.get_or_insert(chunk.payload);
+                }
+                WebpChunkId::Xmp => {
+                    layout.metadata.xmp.get_or_insert(chunk.payload);
+                }
+                WebpChunkId::Alpha => {
+                    layout.alph.get_or_insert(chunk.payload);
+                }
+                WebpChunkId::Vp8 | WebpChunkId::Vp8l => {
+                    if layout.bitstream.is_none() {
+                        layout.bitstream = Some((id, chunk.payload));
+                    }
+                }
+                WebpChunkId::Anim | WebpChunkId::Anmf => {
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        "WebP: animated files (ANIM/ANMF) are out of scope",
+                    )
+                    .with_byte_offset(offset as u64));
+                }
+                WebpChunkId::Unknown(_) => layout.unknown.push(chunk),
+            }
+            offset += CHUNK_HEADER_LEN + chunk.payload.len() + (chunk.payload.len() & 1);
+        }
+        Ok(layout)
+    }
 }
 
 /// Identifies a WebP chunk by its FourCC, distinguishing the chunks defined by the WebP container
@@ -769,5 +921,240 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(WebpChunkId::from(chunks[0].fourcc), WebpChunkId::Vp8);
         assert_eq!(chunks[0].payload, &bitstream);
+    }
+
+    /// Assembles a file from raw chunks, bypassing the ordering the writers impose — the only way
+    /// to build the malformed inputs `WebpLayout::parse` must reject.
+    fn raw_file(chunks: &[(FourCc, &[u8])]) -> Vec<u8> {
+        let mut w = RiffWriter::new();
+        for (fourcc, payload) in chunks {
+            w.write_chunk(*fourcc, payload).unwrap();
+        }
+        w.finish().unwrap()
+    }
+
+    /// A `VP8X` payload for a small canvas with the given feature flags left at their defaults.
+    fn vp8x(alpha: bool) -> [u8; VP8X_PAYLOAD_LEN] {
+        Vp8xHeader {
+            alpha,
+            canvas_width: 16,
+            canvas_height: 16,
+            ..Default::default()
+        }
+        .to_payload()
+        .unwrap()
+    }
+
+    #[test]
+    fn layout_parses_a_simple_file() {
+        let file = write_simple_lossless(&[0x2f, 1, 2]).unwrap();
+        let layout = WebpLayout::parse(&file).unwrap();
+        assert_eq!(layout.vp8x, None, "a simple file has no VP8X");
+        assert_eq!(
+            layout.bitstream,
+            Some((WebpChunkId::Vp8l, &[0x2f, 1, 2][..]))
+        );
+        assert_eq!(layout.alph, None);
+        assert!(layout.metadata.is_empty());
+        assert!(layout.unknown.is_empty());
+        assert_eq!(layout.trailing_bytes, 0);
+    }
+
+    #[test]
+    fn layout_parses_the_canonical_extended_order() {
+        // RFC 9649 §2.7.3, Figure 17: VP8X, ICCP, VP8L, XMP.
+        let file = raw_file(&[
+            (FourCc::VP8X, &vp8x(false)),
+            (FourCc::ICCP, b"icc"),
+            (FourCc::VP8L, &[0x2f]),
+            (FourCc::XMP, b"<x/>"),
+        ]);
+        let layout = WebpLayout::parse(&file).unwrap();
+        assert_eq!(layout.vp8x.unwrap().canvas_width, 16);
+        assert_eq!(layout.metadata.icc, Some(&b"icc"[..]));
+        assert_eq!(layout.metadata.xmp, Some(&b"<x/>"[..]));
+        assert_eq!(layout.bitstream, Some((WebpChunkId::Vp8l, &[0x2f][..])));
+    }
+
+    #[test]
+    fn layout_rejects_each_out_of_order_reconstruction_pair() {
+        // "Readers SHOULD fail when chunks necessary for reconstruction and color correction are
+        // out of order" (§2.7). Each pair below inverts one adjacent step of the sequence
+        // VP8X -> ICCP -> ALPH -> bitstream, so no single rank comparison can be dropped.
+        let alph: &[u8] = &[1, 2];
+        let vp8: &[u8] = &[0x9d, 0x01, 0x2a];
+        let inverted: &[&[(FourCc, &[u8])]] = &[
+            // ICCP before VP8X
+            &[
+                (FourCc::ICCP, b"icc"),
+                (FourCc::VP8X, &vp8x(true)),
+                (FourCc::VP8, vp8),
+            ],
+            // ALPH before ICCP
+            &[
+                (FourCc::VP8X, &vp8x(true)),
+                (FourCc::ALPH, alph),
+                (FourCc::ICCP, b"icc"),
+                (FourCc::VP8, vp8),
+            ],
+            // bitstream before ALPH
+            &[
+                (FourCc::VP8X, &vp8x(true)),
+                (FourCc::VP8, vp8),
+                (FourCc::ALPH, alph),
+            ],
+        ];
+        for chunks in inverted {
+            let file = raw_file(chunks);
+            let error = WebpLayout::parse(&file).expect_err("out of order");
+            assert_eq!(error.origin(), Some("gamut-riff"));
+            assert_eq!(error.kind(), ErrorKind::InvalidInput);
+            assert!(
+                error.byte_offset().is_some(),
+                "the offending chunk's offset is reported"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_lets_metadata_and_unknown_chunks_appear_out_of_order() {
+        // The same paragraph exempts them: "Metadata and unknown chunks MAY appear out of order."
+        // Here EXIF and an unknown chunk sit *before* the bitstream, which must still parse.
+        let odd = FourCc::from(*b"XYZW");
+        let file = raw_file(&[
+            (FourCc::VP8X, &vp8x(false)),
+            (FourCc::EXIF, b"exif"),
+            (odd, b"private"),
+            (FourCc::VP8L, &[0x2f]),
+            (FourCc::XMP, b"<x/>"),
+        ]);
+        let layout = WebpLayout::parse(&file).expect("metadata may float");
+        assert_eq!(
+            layout.metadata.exif,
+            Some(&b"exif"[..]),
+            "EXIF before the bitstream is unusual but explicitly allowed"
+        );
+        assert_eq!(layout.metadata.xmp, Some(&b"<x/>"[..]));
+        assert_eq!(layout.unknown.len(), 1);
+        assert_eq!(layout.unknown[0].fourcc, odd);
+
+        // `ICCP`, by contrast, is *not* exempt: §2.7 lists it among the ordered chunks and §2.7.1.4
+        // adds "this chunk MUST appear before the image data".
+        let late_icc = raw_file(&[
+            (FourCc::VP8X, &vp8x(false)),
+            (FourCc::VP8L, &[0x2f]),
+            (FourCc::ICCP, b"icc"),
+        ]);
+        assert!(
+            WebpLayout::parse(&late_icc).is_err(),
+            "a colour profile after the image data is an ordering violation"
+        );
+    }
+
+    #[test]
+    fn layout_keeps_unknown_chunks_in_their_original_order() {
+        // §2.7.1.6: "Writers SHOULD preserve them in their original order." Preserving order on
+        // read is the half that makes that possible.
+        let (a, b, c) = (
+            FourCc::from(*b"AAAA"),
+            FourCc::from(*b"BBBB"),
+            FourCc::from(*b"CCCC"),
+        );
+        let file = raw_file(&[
+            (FourCc::VP8X, &vp8x(false)),
+            (FourCc::VP8L, &[0x2f]),
+            (c, b"third"),
+            (a, b"first"),
+            (b, b"second"),
+        ]);
+        let layout = WebpLayout::parse(&file).unwrap();
+        assert_eq!(
+            layout
+                .unknown
+                .iter()
+                .map(|k| (k.fourcc, k.payload))
+                .collect::<Vec<_>>(),
+            vec![(c, &b"third"[..]), (a, &b"first"[..]), (b, &b"second"[..])],
+        );
+    }
+
+    #[test]
+    fn unknown_chunks_survive_a_read_write_cycle() {
+        let odd = FourCc::from(*b"XYZW");
+        let original = raw_file(&[
+            (FourCc::VP8X, &vp8x(false)),
+            (FourCc::ICCP, b"icc"),
+            (FourCc::VP8L, &[0x2f]),
+            (odd, b"private payload"),
+        ]);
+        let layout = WebpLayout::parse(&original).unwrap();
+
+        let header = Vp8xHeader {
+            canvas_width: 16,
+            canvas_height: 16,
+            ..Default::default()
+        };
+        let rewritten = write_extended_preserving(
+            &header,
+            &layout.metadata,
+            &[(FourCc::VP8L, layout.bitstream.unwrap().1)],
+            &layout.unknown,
+        )
+        .unwrap();
+
+        let round_tripped = WebpLayout::parse(&rewritten).unwrap();
+        assert_eq!(round_tripped.unknown.len(), 1);
+        assert_eq!(round_tripped.unknown[0].fourcc, odd);
+        assert_eq!(round_tripped.unknown[0].payload, b"private payload");
+        assert_eq!(round_tripped.metadata.icc, Some(&b"icc"[..]));
+
+        // Without the preserving writer the chunk is dropped — the behaviour this closes.
+        let dropped = write_extended_with_metadata(
+            &header,
+            &layout.metadata,
+            &[(FourCc::VP8L, layout.bitstream.unwrap().1)],
+        )
+        .unwrap();
+        assert!(WebpLayout::parse(&dropped).unwrap().unknown.is_empty());
+    }
+
+    #[test]
+    fn layout_keeps_the_first_of_each_repeatable_chunk() {
+        let file = raw_file(&[
+            (FourCc::VP8X, &vp8x(true)),
+            (FourCc::ICCP, b"first-icc"),
+            (FourCc::ICCP, b"second-icc"),
+            (FourCc::ALPH, b"first-alph"),
+            (FourCc::ALPH, b"second-alph"),
+            (FourCc::VP8, b"first-vp8"),
+            (FourCc::VP8, b"second-vp8"),
+        ]);
+        let layout = WebpLayout::parse(&file).unwrap();
+        assert_eq!(layout.metadata.icc, Some(&b"first-icc"[..]));
+        assert_eq!(layout.alph, Some(&b"first-alph"[..]));
+        assert_eq!(
+            layout.bitstream,
+            Some((WebpChunkId::Vp8, &b"first-vp8"[..]))
+        );
+    }
+
+    #[test]
+    fn layout_reports_animation_as_out_of_scope() {
+        for fourcc in [FourCc::ANIM, FourCc::ANMF] {
+            let file = raw_file(&[(FourCc::VP8X, &vp8x(false)), (fourcc, &[0; 6])]);
+            let error = WebpLayout::parse(&file).expect_err("animation is out of scope");
+            assert_eq!(
+                error.kind(),
+                ErrorKind::Unsupported,
+                "an animated file is unsupported, not malformed"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_surfaces_trailing_bytes() {
+        let mut file = write_simple_lossless(&[0x2f, 1, 2]).unwrap();
+        file.extend_from_slice(b"motion photo stream");
+        assert_eq!(WebpLayout::parse(&file).unwrap().trailing_bytes, 19);
     }
 }
