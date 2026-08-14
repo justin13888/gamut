@@ -46,6 +46,15 @@ fn patch_inline(tiff: &mut [u8], tag: u16, new: u32) {
     panic!("tag {tag} not found");
 }
 
+/// The decoder's static message for a file it rejects, for tests that must distinguish *which*
+/// guard fired rather than merely that one did.
+fn err_message(tiff: &[u8]) -> Option<&'static str> {
+    match TiffDecoder::new().decode_page(tiff, 0) {
+        Ok(_) => panic!("the decoder must reject this file"),
+        Err(error) => error.static_message(),
+    }
+}
+
 fn errs(tiff: &[u8]) -> bool {
     // The correct decoder rejects these cleanly (Err, no panic). A mutated guard that lets the file
     // through then trips a later bounds/zero check and panics — which fails this test, so the mutant
@@ -151,6 +160,46 @@ fn rejects_strip_count_mismatch() {
     let mut v = valid_rgb(200, 100);
     bump_count(&mut v, tags::STRIP_OFFSETS);
     assert!(TiffDecoder::new().decode_page(&v, 0).is_err());
+}
+
+#[test]
+fn rejects_an_image_past_the_size_cap() {
+    // 8000x8000 RGB declares 192 MB of stored samples against a 64 MiB cap. The assertion is on the
+    // *message*, not merely `is_err()`: with the guard removed the file is still rejected, but by the
+    // strip-count check further down — so only the message distinguishes the guard doing its job.
+    let mut v = valid_rgb(8, 8);
+    patch_inline(&mut v, tags::IMAGE_WIDTH, 8000);
+    patch_inline(&mut v, tags::IMAGE_LENGTH, 8000);
+    assert_eq!(err_message(&v), Some("TIFF: image exceeds the size limit"));
+}
+
+#[test]
+fn rejects_a_tile_past_the_size_cap() {
+    // One 16x16 tile covering the whole image, so widening the tile to 8192x8192 keeps the tile count
+    // at 1 (the count check would otherwise fire first) while the tile itself declares 192 MB.
+    // Uncompressed on purpose: `Compression::None` slices rather than reserving, so a guard-removed
+    // run fails on the short block instead of attempting the allocation — again, only the message
+    // separates the two.
+    let rgb: Vec<u8> = (0..16 * 16 * 3).map(|i| (i * 7) as u8).collect();
+    let mut v = Vec::new();
+    TiffEncoder::new()
+        .with_compression(Compression::None)
+        .with_tiling(16, 16)
+        .encode_image(
+            ImageRef::<Rgb8>::new(
+                &rgb,
+                Dimensions {
+                    width: 16,
+                    height: 16,
+                },
+            )
+            .unwrap(),
+            &mut v,
+        )
+        .unwrap();
+    patch_inline(&mut v, tags::TILE_WIDTH, 8192);
+    patch_inline(&mut v, tags::TILE_LENGTH, 8192);
+    assert_eq!(err_message(&v), Some("TIFF: tile exceeds the size limit"));
 }
 
 #[test]

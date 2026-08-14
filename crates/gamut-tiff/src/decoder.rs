@@ -22,6 +22,20 @@ pub struct TiffDecoder {
 /// decompression bombs (64 MiB — e.g. a 4096×4096 RGBA image).
 const MAX_IMAGE_BYTES: usize = 64 << 20;
 
+/// Rejects a byte count past [`MAX_IMAGE_BYTES`].
+///
+/// An *allocation* guard, not a validity one: the caller is about to reserve this many bytes for a
+/// buffer whose size the file's tags — not its data — declare, so a malformed or hostile header
+/// must not be able to name an arbitrary allocation. A file rejected here would fail later anyway;
+/// the guard only stops the reservation from happening first, which is why each call site passes
+/// its own message.
+fn within_size_limit(bytes: usize, message: &'static str) -> Result<()> {
+    if bytes > MAX_IMAGE_BYTES {
+        return Err(Error::unsupported(env!("CARGO_PKG_NAME"), message));
+    }
+    Ok(())
+}
+
 /// An image decoded to interleaved 8-bit samples in `BlackIsZero`/RGB convention.
 struct DecodedImage {
     dims: Dimensions,
@@ -295,12 +309,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     let stored_total = stored_row_bytes
         .checked_mul(height)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?;
-    if stored_total > MAX_IMAGE_BYTES {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: image exceeds the size limit",
-        ));
-    }
+    within_size_limit(stored_total, "TIFF: image exceeds the size limit")?;
 
     // Reassemble the stored (packed) row bytes from tiles or strips.
     let layout = Layout {
@@ -479,12 +488,7 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
     let tile_size = th
         .checked_mul(tile_row_bytes)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile too large"))?;
-    if tile_size > MAX_IMAGE_BYTES {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: tile exceeds the size limit",
-        ));
-    }
+    within_size_limit(tile_size, "TIFF: tile exceeds the size limit")?;
     let mut packed = vec![0u8; l.stored_row_bytes * l.height];
     for ty in 0..down {
         for tx in 0..across {
