@@ -14,7 +14,7 @@ use gamut_core::{Error, Result};
 use gamut_jxl_sys::{encode as sys_enc, types as sys_ty};
 
 use crate::backend::{JxlImageRef, JxlSamples};
-use crate::config::{ColorSpec, Mode, validate_icc};
+use crate::config::{ColorSpec, Mode, ModularMode, validate_icc};
 use crate::encoder::{JxlEncoder, resolve_coded_bits};
 use crate::error::map_encoder_error;
 
@@ -215,6 +215,21 @@ pub(crate) fn encode(
             i64::from(cfg.effort().level()),
         )
     })?;
+
+    // The coding tool, only when the caller pinned one: leaving MODULAR unset keeps a default
+    // encoder's bytes identical to what gamut produced before this knob existed. A lossless
+    // encoder can never reach `VarDct` here — `JxlEncoder::dispatch_encode` rejects that
+    // combination up front, because libjxl's `SetLossless` would silently override it.
+    if cfg.modular() != ModularMode::Auto {
+        // SAFETY: `frame_settings` is valid; MODULAR takes -1 (auto), 0 (VarDCT) or 1 (modular).
+        enc.check(unsafe {
+            sys_enc::JxlEncoderFrameSettingsSetOption(
+                frame_settings,
+                sys_enc::JxlEncoderFrameSettingId::MODULAR,
+                i64::from(cfg.modular().option_value()),
+            )
+        })?;
+    }
 
     // With a coded-depth override, tell libjxl to read the integer input buffer at the basic
     // info's declared depth (from-codestream) instead of the pixel format's full range — without

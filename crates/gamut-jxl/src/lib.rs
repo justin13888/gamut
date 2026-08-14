@@ -17,6 +17,7 @@
 //!
 //! Build a [`JxlEncoder`] — [`JxlEncoder::lossless`] (the default) or [`JxlEncoder::lossy`] with a
 //! validated [`Distance`] — tune it with the chainable builders ([`JxlEncoder::with_effort`],
+//! [`JxlEncoder::with_modular`] to pin the VarDCT/Modular coding tool,
 //! [`JxlEncoder::with_container`], [`JxlEncoder::with_color`] for sRGB/linear/PQ/HLG/ICC
 //! signalling, [`JxlEncoder::with_orientation`], and [`JxlEncoder::with_exif`] /
 //! [`JxlEncoder::with_xmp`] for container metadata boxes), then encode any of the eight supported
@@ -128,7 +129,7 @@ pub use backend::{
     JxlCodestreamDecoder, JxlCodestreamEncoder, JxlDecoded, JxlEncodeRequest, JxlFraming,
     JxlImageRef, JxlOwnedSamples, JxlSamples, JxlStreamInfo,
 };
-pub use config::{ColorSpec, Container, Distance, Effort, Orientation};
+pub use config::{ColorSpec, Container, Distance, Effort, ModularMode, Orientation};
 pub use decoder::JxlDecoder;
 #[cfg(feature = "decode")]
 pub use decoder::JxlInfo;
