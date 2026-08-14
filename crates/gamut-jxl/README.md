@@ -80,11 +80,11 @@ let decoded: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(&stream).expect("de
 assert_eq!(decoded.as_samples(), pixels.as_slice());
 ```
 
-Encode a lossy stream with a chosen effort and ISO BMFF container framing:
+Encode a lossy stream with a chosen effort, coding tool and ISO BMFF container framing:
 
 ```rust
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut_jxl::{Container, Distance, Effort, JxlEncoder};
+use gamut_jxl::{Container, Distance, Effort, JxlEncoder, ModularMode};
 
 let dims = Dimensions { width: 64, height: 64 };
 let pixels = vec![0u8; (64 * 64 * 3) as usize];
@@ -92,7 +92,8 @@ let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("buffer length matches d
 
 // `Distance::new` validates the Butteraugli target; 1.0 is "visually lossless".
 let encoder = JxlEncoder::lossy(Distance::new(1.0).expect("valid distance"))
-    .with_effort(Effort::Squirrel)       // libjxl effort 1..=10 (default = Squirrel, 7)
+    .with_effort(Effort::Squirrel)        // libjxl effort 1..=10 (default = Squirrel, 7)
+    .with_modular(ModularMode::Modular)   // pin the coding tool (default = Auto, libjxl chooses)
     .with_container(Container::IsoBmff);  // .jxl box framing (default = bare Codestream)
 let stream = encoder.encode_to_vec(image).expect("encode");
 ```

@@ -33,6 +33,16 @@ on a hand-written golden bitstream.
   pixels. Output is always container-framed (the `jbrd` box requires it); only `Effort` applies.
 - **Effort dial.** `Effort` `Lightning..=Glacier`, mapping libjxl effort `1..=10` (default
   `Squirrel` = 7). Level 11 ("tectonic plate") is expert-gated and out of scope.
+- **Modular-mode control (issue #339).** `ModularMode` `Auto`/`VarDct`/`Modular` via `with_modular`,
+  mapping libjxl's `JXL_ENC_FRAME_SETTING_MODULAR` values `-1`/`0`/`1`. `Auto` is the default and
+  leaves the option **unsent**, so a default encoder's bytes are unchanged. Forcing `VarDct` on a
+  lossless encoder is a typed `InvalidInput` rather than a silent no-op: libjxl's `SetLossless`
+  overrides the frame setting to modular unconditionally, so the request could not be honoured.
+  `ModularMode` is a codestream-level knob, so it reaches pushed backends through `JxlEncodeRequest`;
+  the `gamut-codec-abi` adapter has no `EncodeConfig` field for it and therefore **declines** a
+  pinned mode (as it already does for colour and orientation) instead of dropping it. It does not
+  apply to `recompress_jpeg`, which re-packs the JPEG's own coefficients — a non-default setting is
+  ignored there, as the other inapplicable knobs already are.
 - **Pixel layouts.** 8- and 16-bit **Gray / GrayAlpha / RGB / RGBA** (eight `EncodeImage` /
   `DecodeImage` impls); 16-bit samples handed to libjxl as native-endian bytes.
 - **Container framing.** Bare codestream (default, signature `FF 0A`) and the ISO BMFF `.jxl`
@@ -86,8 +96,14 @@ unlocks it.
 - **Premultiplied (associated) alpha decode.** Rejected today; unlocks with an un-premultiply step in
   `convert` (deliberately deferred: an integer un-premultiply is an approximate inverse — alpha = 0
   is unrecoverable — so it belongs behind an explicit opt-in, not a silent default).
-- **Progressive encode control.** No passes / group-order / responsive knobs are exposed; unlocks with
-  the corresponding `FrameSettingsSetOption` calls plus a config surface.
+- **Frame settings beyond effort and modular mode.** Progressive control (passes / group order /
+  responsive), the modular *tuning* knobs (`MODULAR_COLOR_SPACE`, `MODULAR_GROUP_SIZE`,
+  `MODULAR_PREDICTOR`, `MODULAR_NB_PREV_CHANNELS`, and the float-valued
+  `MODULAR_MA_TREE_LEARNING_PERCENT`, which additionally needs
+  `JxlEncoderFrameSettingsSetFloatOption` declared) and the coding-tool toggles (noise, dots,
+  patches, EPF, gaborish) are not exposed. Each unlocks with its `gamut-jxl-sys` enumerant plus a
+  config surface; issue #339 opened that seam, so these are now additive rather than an FFI change
+  each time.
 - **Extra channels beyond alpha.** Depth, thermal, spot, and other extra channels are ignored on
   decode and unsupported on encode; unlocks with a typed extra-channel model.
 - **Effort 11 ("tectonic plate").** Expert-gated behind `JxlEncoderAllowExpertOptions`; the `Effort`
@@ -165,6 +181,12 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   16-bit, alpha, grayscale, gray+alpha) plus a large hostile-input corpus (empty,
   short prefixes, systematic truncations, garbage bodies, and bit-flips across the first 256 bytes,
   and the pixel-limit trigger): every case returns a typed `Err`, never a panic.
+- **Coding tool — plumbed, and `Auto` provably inert.** Neither decoder reports whether a stream is
+  VarDCT or Modular, so `ModularMode` is pinned the way `Effort` is: forcing Modular must change the
+  stream bytes (against both forced VarDCT and libjxl's own choice) while staying decodable by
+  jxl-rs *and* the oracle, and a forced-Modular lossy stream must still clear the PSNR floor.
+  Conversely `ModularMode::Auto` must be **byte-identical** to an encoder that never named the knob
+  — the guard that keeps the option unsent — and lossless + forced VarDCT must be the typed refusal.
 - **jbrd — bit-exact reconstruction.** The vendored baseline-JPEG fixture recompresses and the
   libjxl oracle reconstructs the **original JPEG bytes exactly**; the stream's pixels also decode
   within the lossy agreement bound in both decoders; malformed/truncated JPEG inputs are typed
