@@ -38,6 +38,23 @@
 //! IRAP constraint, and [`HevcConfig::annex_b`] converts a payload to a start-coded NAL stream for a
 //! downstream decoder.
 //!
+//! # Feeding a platform decoder
+//!
+//! Hardware HEVC decoders disagree on how the parameter sets and the coded picture should arrive, so
+//! the three shapes are addressable separately. The item payload is *always* the length-prefixed
+//! stream stored in the file ([`HevcConfig::nal_length_size`] gives the prefix width); the Annex-B
+//! emitters append to a caller-owned buffer, so a scratch `Vec<u8>` can be reused across items.
+//!
+//! | Target | Parameter sets | Coded picture |
+//! | --- | --- | --- |
+//! | Apple VideoToolbox (`CMVideoFormatDescription`) | raw `hvcC` bytes from [`HeifItem::codec_configuration`], or the bare NAL units from [`HevcConfig::vps`]/[`sps`](HevcConfig::sps)/[`pps`](HevcConfig::pps) with `nalUnitHeaderLength` = [`nal_length_size`](HevcConfig::nal_length_size) | the item payload verbatim — **no** Annex-B conversion |
+//! | VAAPI / FFmpeg / libde265 (raw Annex-B) | [`HevcConfig::annex_b`] emits both in one buffer | — |
+//! | Android MediaCodec | [`HevcConfig::annex_b_parameter_sets`] ⇒ the `csd-0` buffer | [`HevcConfig::annex_b_payload`] ⇒ the sample buffers |
+//!
+//! Parameter sets may also arrive inband: an `hev1` item is allowed to carry them in the payload
+//! (and an `hvc1` item never does — [`HeifItem::hevc_inband_parameter_sets_allowed`]). The emitters
+//! do not de-duplicate, so an `hev1` stream can repeat them; H.265 decoders accept that.
+//!
 //! # Decode pipeline
 //!
 //! [`HevcDecoder`] is the pluggable HEVC-intra codestream hook a caller implements (typically
