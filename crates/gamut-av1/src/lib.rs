@@ -10,9 +10,16 @@
 //! selection, recursive partitioning, per-superblock delta-Q/delta-LF, segmentation, uniform
 //! multi-tile, and the in-loop filters (deblocking, CDEF, loop restoration, superres) — still with
 //! static default CDFs (`disable_cdf_update = 1`). It produces the AV1 temporal unit that
-//! `gamut-avif` wraps in an AVIF still image. The remaining surface (10/12-bit, 4:2:0/4:2:2,
-//! monochrome, CDF adaptation, quantizer matrices, and the AVIF-level alpha/metadata/container
-//! features) is tracked in `gamut-avif/STATUS.md`.
+//! `gamut-avif` wraps in an AVIF still image.
+//!
+//! The colour signalling is selectable: [`encode_still_intra_with`] takes an [`Av1Colour`] (CICP
+//! primaries/transfer/matrix plus the signal range) and mirrors it into `color_config()` and, via
+//! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. Planes stay 4:4:4 — a
+//! luma–chroma matrix changes what the samples *mean*, not their geometry — so the caller supplies
+//! either GBR planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
+//!
+//! The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, CDF adaptation, quantizer matrices,
+//! and the AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D
@@ -30,6 +37,6 @@ pub mod transform;
 
 pub use encoder::{
     EncodedStill, ReconImage, encode_still_intra, encode_still_intra_superres,
-    encode_still_lossless_identity,
+    encode_still_intra_with, encode_still_lossless_identity,
 };
-pub use headers::Av1StillConfig;
+pub use headers::{Av1Colour, Av1StillConfig};

@@ -1,10 +1,10 @@
 //! Top-level: turn 4:4:4 identity planes into the AV1 temporal unit for an AVIF still image.
 
-use gamut_color::cicp::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::cicp::ColorRange;
 use gamut_color::{BitDepth, Planar8};
 use gamut_core::{Error, Result};
 
-use crate::headers::{self, Av1StillConfig};
+use crate::headers::{self, Av1Colour, Av1StillConfig};
 use crate::tile::FrameEncoder;
 
 /// The encoded AV1 temporal unit (sequence-header OBU + frame OBU) for one still image, plus the
@@ -56,7 +56,27 @@ pub fn encode_still_lossless_identity(planes: &Planar8) -> Result<EncodedStill> 
 /// Returns [`Error::InvalidInput`] for zero-sized images, or [`Error::Unsupported`] if the
 /// dimensions exceed AV1 level 6.0.
 pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill, ReconImage)> {
-    encode_with(planes, qindex, None)
+    encode_with(planes, qindex, None, Av1Colour::default())
+}
+
+/// Like [`encode_still_intra`] but signals `colour` instead of the default identity/full-range
+/// configuration.
+///
+/// The planes must already be in the layout `colour.matrix` describes — GBR for
+/// [`MatrixCoefficients::Identity`], `Y/Cb/Cr` for a luma–chroma matrix (see
+/// [`gamut_color::Planar8::from_rgb8_matrix`]). The coding tools are matrix-agnostic; `colour` only
+/// selects what the sequence header — and, through [`EncodedStill::config`], the container's `av1C`
+/// and `colr` boxes — declare the samples to be.
+///
+/// # Errors
+///
+/// As [`encode_still_intra`].
+pub fn encode_still_intra_with(
+    planes: &Planar8,
+    qindex: u8,
+    colour: Av1Colour,
+) -> Result<(EncodedStill, ReconImage)> {
+    encode_with(planes, qindex, None, colour)
 }
 
 /// Like [`encode_still_intra`] but codes the frame with horizontal **superres** (§7.16): the source
@@ -68,13 +88,14 @@ pub fn encode_still_intra_superres(
     qindex: u8,
     coded_denom: u8,
 ) -> Result<(EncodedStill, ReconImage)> {
-    encode_with(planes, qindex, Some(coded_denom))
+    encode_with(planes, qindex, Some(coded_denom), Av1Colour::default())
 }
 
 fn encode_with(
     planes: &Planar8,
     qindex: u8,
     coded_denom: Option<u8>,
+    colour: Av1Colour,
 ) -> Result<(EncodedStill, ReconImage)> {
     let width = planes.width();
     let height = planes.height();
@@ -114,11 +135,20 @@ fn encode_with(
         chroma_subsampling_x: 0,
         chroma_subsampling_y: 0,
         chroma_sample_position: 0,
-        color_primaries: ColourPrimaries::Bt709.code_point(),
-        transfer_characteristics: TransferCharacteristics::Srgb.code_point(),
-        matrix_coefficients: MatrixCoefficients::Identity.code_point(),
-        full_range: true,
+        color_primaries: colour.primaries.code_point(),
+        transfer_characteristics: colour.transfer.code_point(),
+        matrix_coefficients: colour.matrix.code_point(),
+        full_range: matches!(colour.range, ColorRange::Full),
     };
+    // Under the §5.5.2 sRGB shortcut `color_range` is *inferred* as full and no bit is coded, so a
+    // studio-range request there could not be signalled — the stream would silently claim full
+    // range. Reject it rather than emit a header that disagrees with the samples.
+    if config.is_srgb_shortcut() && !config.full_range {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AV1: the sRGB color_config shortcut infers full range; studio range needs a non-identity matrix",
+        ));
+    }
 
     let mi_cols = 2 * ((coded_w + 7) >> 3);
     let mi_rows = 2 * ((height + 7) >> 3);
@@ -475,6 +505,101 @@ mod tests {
                     "flat recon {got} far from {want}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn default_colour_entry_point_matches_the_identity_one() {
+        // `encode_still_intra_with(_, _, Av1Colour::default())` must be the *same* encode as
+        // `encode_still_intra` — otherwise the default path's pinned checksums would not cover it.
+        let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
+        for &q in &[0u8, 40] {
+            let plain = encode_still_intra(&p, q).unwrap().0;
+            let with = encode_still_intra_with(&p, q, Av1Colour::default())
+                .unwrap()
+                .0;
+            assert_eq!(plain.obus, with.obus, "q{q}");
+            assert_eq!(
+                plain.config.matrix_coefficients,
+                with.config.matrix_coefficients
+            );
+        }
+    }
+
+    #[test]
+    fn colour_is_mirrored_into_the_config_and_the_sequence_header() {
+        use gamut_color::cicp::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+
+        let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
+        let colour = Av1Colour {
+            primaries: ColourPrimaries::Bt2020,
+            transfer: TransferCharacteristics::Srgb,
+            matrix: MatrixCoefficients::Bt2020Ncl,
+            range: ColorRange::Limited,
+        };
+        let (still, _) = encode_still_intra_with(&p, 40, colour).unwrap();
+        // `gamut-avif` mirrors these straight into `av1C`/`colr`, so each field must survive.
+        assert_eq!(still.config.color_primaries, 9);
+        assert_eq!(still.config.transfer_characteristics, 13);
+        assert_eq!(still.config.matrix_coefficients, 9);
+        assert!(!still.config.full_range);
+        // Still profile 1 / 4:4:4 — this change is the colour transform, not the plane geometry.
+        assert_eq!(still.config.seq_profile, 1);
+        assert_eq!(
+            (
+                still.config.chroma_subsampling_x,
+                still.config.chroma_subsampling_y
+            ),
+            (0, 0)
+        );
+        // The CICP code points really reach the bitstream.
+        let identity = encode_still_intra(&p, 40).unwrap().0;
+        assert_ne!(
+            seq_header_payload(&still.obus),
+            seq_header_payload(&identity.obus)
+        );
+    }
+
+    #[test]
+    fn colour_range_bit_is_coded_only_outside_the_srgb_shortcut() {
+        use gamut_color::cicp::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+
+        // AV1 §5.5.2: with BT.709 primaries + sRGB transfer + identity matrix, `color_range` is
+        // inferred and *no* bit is coded; any other combination codes it explicitly. Flipping only
+        // the range must therefore change the payload for a real matrix…
+        let p = planes(40, 24, |x, y| [(x * 3) as u8, (y * 5) as u8, (x + y) as u8]);
+        let base = Av1Colour {
+            primaries: ColourPrimaries::Bt709,
+            transfer: TransferCharacteristics::Srgb,
+            matrix: MatrixCoefficients::Bt709,
+            range: ColorRange::Full,
+        };
+        let full = encode_still_intra_with(&p, 40, base).unwrap().0;
+        let limited = encode_still_intra_with(
+            &p,
+            40,
+            Av1Colour {
+                range: ColorRange::Limited,
+                ..base
+            },
+        )
+        .unwrap()
+        .0;
+        assert_ne!(
+            seq_header_payload(&full.obus),
+            seq_header_payload(&limited.obus),
+            "color_range must be coded when the sRGB shortcut does not apply"
+        );
+
+        // …and under the shortcut a studio-range request is refused rather than silently signalled
+        // as full range.
+        let shortcut = Av1Colour {
+            range: ColorRange::Limited,
+            ..Av1Colour::default()
+        };
+        match encode_still_intra_with(&p, 40, shortcut) {
+            Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput => {}
+            other => panic!("expected an InvalidInput for shortcut + studio range, got {other:?}"),
         }
     }
 
