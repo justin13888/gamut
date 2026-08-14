@@ -248,7 +248,7 @@ mod tests {
         write_simple_prefix_code(&mut w, &[u16::from(b)]);
         write_simple_prefix_code(&mut w, &[0xff]); // alpha (opaque)
         write_simple_prefix_code(&mut w, &[0]); // distance (unused)
-        write_simple_lossless(&w.finish())
+        write_simple_lossless(&w.finish()).unwrap()
     }
 
     #[test]
@@ -269,7 +269,7 @@ mod tests {
     fn routes_lossy_container_to_vp8() {
         // A `VP8 ` chunk reaches the VP8 decoder, which rejects this malformed (non-key-frame, 3-byte)
         // payload rather than panicking.
-        let file = write_simple_lossy(&[0x9d, 0x01, 0x2a]);
+        let file = write_simple_lossy(&[0x9d, 0x01, 0x2a]).unwrap();
         let got: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(got.is_err());
     }
@@ -292,7 +292,7 @@ mod tests {
             canvas_height: 2,
             ..Default::default()
         };
-        let file = write_extended(&header, &[(FourCc::VP8L, &vp8l)]);
+        let file = write_extended(&header, &[(FourCc::VP8L, &vp8l)]).unwrap();
         let got: ImageBuf<Rgb8> = WebpDecoder::new()
             .decode_image(&file)
             .expect("decode VP8X file");
@@ -314,7 +314,7 @@ mod tests {
             canvas_height: 4,
             ..Default::default()
         };
-        let file = gamut_riff::write_extended(&header, &[]);
+        let file = gamut_riff::write_extended(&header, &[]).unwrap();
         let got: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(matches!(
             got,
@@ -337,9 +337,9 @@ mod tests {
                 .to_vec()
         };
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::ICCP, &[1, 2, 3, 4]);
-        w.write_chunk(FourCc::VP8L, &vp8l);
-        let file = w.finish();
+        w.write_chunk(FourCc::ICCP, &[1, 2, 3, 4]).unwrap();
+        w.write_chunk(FourCc::VP8L, &vp8l).unwrap();
+        let file = w.finish().unwrap();
         let got: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&file).unwrap();
         assert_eq!(
             got.dimensions(),
@@ -354,8 +354,8 @@ mod tests {
     #[test]
     fn errors_when_no_bitstream_chunk() {
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::EXIF, &[0xee; 6]);
-        let file = w.finish();
+        w.write_chunk(FourCc::EXIF, &[0xee; 6]).unwrap();
+        let file = w.finish().unwrap();
         let err: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(matches!(
             err,
@@ -405,9 +405,9 @@ mod tests {
             .payload
             .to_vec();
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::VP8X, &[0u8; 4]);
-        w.write_chunk(FourCc::VP8L, &vp8l);
-        let file = w.finish();
+        w.write_chunk(FourCc::VP8X, &[0u8; 4]).unwrap();
+        w.write_chunk(FourCc::VP8L, &vp8l).unwrap();
+        let file = w.finish().unwrap();
         let rgb: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(
             rgb.is_err(),

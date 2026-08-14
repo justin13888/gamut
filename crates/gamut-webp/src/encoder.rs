@@ -199,6 +199,11 @@ impl WebpEncoder {
     ///
     /// `has_alpha` records transparency for the `VP8X` feature flag independently of `alph`, because
     /// a `VP8L` bitstream carries its own alpha and so needs no `ALPH` chunk.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the container writer's rejection of a canvas or a payload the RIFF/WebP fields
+    /// cannot express (RFC 9649 §2.3, §2.4, §2.7).
     fn wrap(
         &self,
         dims: Dimensions,
@@ -206,7 +211,7 @@ impl WebpEncoder {
         bitstream: &[u8],
         alph: Option<&[u8]>,
         has_alpha: bool,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         let metadata = self.metadata_chunks();
         if metadata.is_empty() && alph.is_none() {
             return match codestream {
@@ -257,7 +262,7 @@ impl WebpEncoder {
                 let payload = self.encode_vp8_codestream(&yuv, dims)?;
                 self.wrap(dims, WebpCodestream::Vp8, &payload, None, false)
             }
-        };
+        }?;
         let written = file.len();
         out.extend_from_slice(&file);
         Ok(written)
@@ -302,7 +307,7 @@ impl WebpEncoder {
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, None, false)
                 }
             }
-        };
+        }?;
         let written = file.len();
         out.extend_from_slice(&file);
         Ok(written)

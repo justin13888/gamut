@@ -115,9 +115,9 @@ mod tests {
     fn build(chunks: &[(FourCc, &[u8])]) -> Vec<u8> {
         let mut w = RiffWriter::new();
         for (fourcc, payload) in chunks {
-            w.write_chunk(*fourcc, payload);
+            w.write_chunk(*fourcc, payload).unwrap();
         }
-        w.finish()
+        w.finish().unwrap()
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn empty_chunk_list_yields_nothing() {
-        let file = RiffWriter::new().finish();
+        let file = RiffWriter::new().finish().unwrap();
         assert_eq!(RiffReader::new(&file).unwrap().count(), 0);
     }
 
@@ -224,8 +224,8 @@ mod tests {
         // A valid VP8L chunk followed by 3 stray bytes (too few for another header). Hand-build so
         // the RIFF file size includes the stray bytes.
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::VP8L, &[0; 4]);
-        let mut file = w.finish();
+        w.write_chunk(FourCc::VP8L, &[0; 4]).unwrap();
+        let mut file = w.finish().unwrap();
         file.extend_from_slice(&[1, 2, 3]);
         let new_size = u32::try_from(file.len() - 8).unwrap();
         file[4..8].copy_from_slice(&new_size.to_le_bytes());

@@ -377,13 +377,14 @@ fn metadata_reads_a_hand_built_file_first_chunk_wins() {
         ..Default::default()
     };
     let mut w = RiffWriter::new();
-    w.write_chunk(FourCc::VP8X, &header.to_payload());
-    w.write_chunk(FourCc::ICCP, b"first-icc");
-    w.write_chunk(FourCc::ICCP, b"second-icc");
-    w.write_chunk(FourCc::VP8L, &bitstream);
-    w.write_chunk(FourCc::EXIF, b"first-exif");
-    w.write_chunk(FourCc::EXIF, b"second-exif");
-    let file = w.finish();
+    w.write_chunk(FourCc::VP8X, &header.to_payload().unwrap())
+        .unwrap();
+    w.write_chunk(FourCc::ICCP, b"first-icc").unwrap();
+    w.write_chunk(FourCc::ICCP, b"second-icc").unwrap();
+    w.write_chunk(FourCc::VP8L, &bitstream).unwrap();
+    w.write_chunk(FourCc::EXIF, b"first-exif").unwrap();
+    w.write_chunk(FourCc::EXIF, b"second-exif").unwrap();
+    let file = w.finish().unwrap();
 
     assert_eq!(
         read(&file),

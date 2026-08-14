@@ -14,6 +14,10 @@ use crate::writer::RiffWriter;
 /// The number of bytes in a `VP8X` chunk payload (RFC 9649 §2.7).
 pub const VP8X_PAYLOAD_LEN: usize = 10;
 
+/// The largest canvas dimension a `VP8X` header can express: the width and height are stored
+/// 1-based in 24 bits, so `1..=2^24` (RFC 9649 §2.7).
+pub const MAX_CANVAS_DIMENSION: u32 = 1 << 24;
+
 /// The extended-format feature header carried by a `VP8X` chunk (RFC 9649 §2.7): which optional
 /// features the file uses, plus the 1-based canvas dimensions. A simple (single-bitstream) file has no
 /// `VP8X` chunk; one is required as soon as the file carries alpha, an ICC profile, metadata, or
@@ -39,16 +43,24 @@ pub struct Vp8xHeader {
 impl Vp8xHeader {
     /// Encodes the 10-byte `VP8X` chunk payload (RFC 9649 §2.7, Figure 7): the feature-flag byte,
     /// three reserved bytes, and the 24-bit little-endian canvas width-minus-one and height-minus-one.
-    #[must_use]
-    pub fn to_payload(&self) -> [u8; VP8X_PAYLOAD_LEN] {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if the canvas is one the format cannot express: either
+    /// dimension outside `1..=`[`MAX_CANVAS_DIMENSION`], or a width × height product above
+    /// `2^32 - 1`, both of which §2.7 forbids. Validating here rather than truncating means a
+    /// header that encodes always decodes back to the same canvas.
+    pub fn to_payload(&self) -> Result<[u8; VP8X_PAYLOAD_LEN]> {
+        self.validate_canvas()?;
         let flags = (u8::from(self.icc_profile) << 5)
             | (u8::from(self.alpha) << 4)
             | (u8::from(self.exif_metadata) << 3)
             | (u8::from(self.xmp_metadata) << 2)
             | (u8::from(self.animation) << 1);
-        let w = self.canvas_width.saturating_sub(1);
-        let h = self.canvas_height.saturating_sub(1);
-        [
+        // Validated above, so neither subtraction underflows and both fit in 24 bits.
+        let w = self.canvas_width - 1;
+        let h = self.canvas_height - 1;
+        Ok([
             flags,
             0,
             0,
@@ -59,7 +71,28 @@ impl Vp8xHeader {
             h as u8,
             (h >> 8) as u8,
             (h >> 16) as u8,
-        ]
+        ])
+    }
+
+    /// Rejects a canvas the `VP8X` fields cannot carry (RFC 9649 §2.7): each dimension is 1-based in
+    /// 24 bits, so `1..=2^24`, and "the product of _Canvas Width_ and _Canvas Height_ MUST be at
+    /// most 2^32 - 1".
+    fn validate_canvas(&self) -> Result<()> {
+        for dimension in [self.canvas_width, self.canvas_height] {
+            if dimension == 0 || dimension > MAX_CANVAS_DIMENSION {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "VP8X: canvas dimension outside 1..=2^24",
+                ));
+            }
+        }
+        if u64::from(self.canvas_width) * u64::from(self.canvas_height) > u64::from(u32::MAX) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8X: canvas width x height exceeds 2^32 - 1",
+            ));
+        }
+        Ok(())
     }
 
     /// Parses a `VP8X` chunk payload, mirroring [`to_payload`](Self::to_payload). The two reserved
@@ -67,17 +100,20 @@ impl Vp8xHeader {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `payload` is shorter than [`VP8X_PAYLOAD_LEN`].
+    /// Returns [`Error::InvalidInput`] if `payload` is shorter than [`VP8X_PAYLOAD_LEN`], or if the
+    /// canvas it declares has a width × height product above `2^32 - 1`, which §2.7 forbids. (The
+    /// dimensions themselves need no check: 24 bits stored 1-based can only land in `1..=2^24`.)
     pub fn from_payload(payload: &[u8]) -> Result<Self> {
         if payload.len() < VP8X_PAYLOAD_LEN {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "VP8X: chunk payload shorter than 10 bytes",
-            ));
+            )
+            .with_byte_offset(payload.len() as u64));
         }
         let flags = payload[0];
         let le24 = |b: &[u8]| u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16);
-        Ok(Self {
+        let header = Self {
             icc_profile: flags & 0x20 != 0,
             alpha: flags & 0x10 != 0,
             exif_metadata: flags & 0x08 != 0,
@@ -85,19 +121,28 @@ impl Vp8xHeader {
             animation: flags & 0x02 != 0,
             canvas_width: le24(&payload[4..7]) + 1,
             canvas_height: le24(&payload[7..10]) + 1,
-        })
+        };
+        header
+            .validate_canvas()
+            .map_err(|e| e.with_byte_offset(4))?;
+        Ok(header)
     }
 }
 
 /// Writes an extended WebP file: the `RIFF`/`WEBP` header, a `VP8X` feature header, then the given
 /// chunks in order (RFC 9649 §2.7). Chunk ordering (e.g. `ALPH` before the `VP8 ` bitstream) is the
 /// caller's responsibility.
-#[must_use]
-pub fn write_extended(header: &Vp8xHeader, chunks: &[(FourCc, &[u8])]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if `header` declares a canvas the format cannot express (see
+/// [`Vp8xHeader::to_payload`]), or [`Error::Unsupported`] if a payload or the finished file exceeds
+/// the RIFF size fields.
+pub fn write_extended(header: &Vp8xHeader, chunks: &[(FourCc, &[u8])]) -> Result<Vec<u8>> {
     let mut w = RiffWriter::new();
-    w.write_chunk(FourCc::VP8X, &header.to_payload());
+    w.write_chunk(FourCc::VP8X, &header.to_payload()?)?;
     for (fourcc, payload) in chunks {
-        w.write_chunk(*fourcc, payload);
+        w.write_chunk(*fourcc, payload)?;
     }
     w.finish()
 }
@@ -163,12 +208,15 @@ impl<'a> MetadataChunks<'a> {
 /// never be emitted without its flag nor a flag without its chunk; `alpha`, `animation`, and the
 /// canvas size are taken as given. Ordering *within* `image_data` is the caller's responsibility, as
 /// in [`write_extended`].
-#[must_use]
+///
+/// # Errors
+///
+/// As [`write_extended`]: an inexpressible canvas or an over-large payload or file.
 pub fn write_extended_with_metadata(
     header: &Vp8xHeader,
     metadata: &MetadataChunks<'_>,
     image_data: &[(FourCc, &[u8])],
-) -> Vec<u8> {
+) -> Result<Vec<u8>> {
     let header = Vp8xHeader {
         icc_profile: metadata.icc.is_some(),
         exif_metadata: metadata.exif.is_some(),
@@ -235,24 +283,34 @@ impl From<FourCc> for WebpChunkId {
 
 /// Wraps a VP8L lossless bitstream in the simple WebP (lossless) file format: a `RIFF`/`WEBP` header
 /// and a single `VP8L` chunk (RFC 9649 §2.6).
-#[must_use]
-pub fn write_simple_lossless(vp8l_bitstream: &[u8]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] if the bitstream or the finished file exceeds the RIFF size
+/// fields (§2.3, §2.4).
+pub fn write_simple_lossless(vp8l_bitstream: &[u8]) -> Result<Vec<u8>> {
     let mut w = RiffWriter::new();
-    w.write_chunk(FourCc::VP8L, vp8l_bitstream);
+    w.write_chunk(FourCc::VP8L, vp8l_bitstream)?;
     w.finish()
 }
 
 /// Wraps a VP8 lossy bitstream in the simple WebP (lossy) file format: a `RIFF`/`WEBP` header and a
 /// single `VP8 ` chunk (RFC 9649 §2.5).
-#[must_use]
-pub fn write_simple_lossy(vp8_bitstream: &[u8]) -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns [`Error::Unsupported`] if the bitstream or the finished file exceeds the RIFF size
+/// fields (§2.3, §2.4).
+pub fn write_simple_lossy(vp8_bitstream: &[u8]) -> Result<Vec<u8>> {
     let mut w = RiffWriter::new();
-    w.write_chunk(FourCc::VP8, vp8_bitstream);
+    w.write_chunk(FourCc::VP8, vp8_bitstream)?;
     w.finish()
 }
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::ErrorKind;
+
     use super::*;
 
     #[test]
@@ -273,7 +331,7 @@ mod tests {
     #[test]
     fn simple_lossless_wraps_one_vp8l_chunk() {
         let bitstream = [0x2f, 0xde, 0xad, 0xbe, 0xef];
-        let file = write_simple_lossless(&bitstream);
+        let file = write_simple_lossless(&bitstream).unwrap();
         let chunks: Vec<_> = RiffReader::new(&file)
             .unwrap()
             .map(|c| c.unwrap())
@@ -294,7 +352,7 @@ mod tests {
             canvas_width: 640,
             canvas_height: 481,
         };
-        let payload = h.to_payload();
+        let payload = h.to_payload().unwrap();
         assert_eq!(payload.len(), VP8X_PAYLOAD_LEN);
         assert_eq!(payload[0] & 0x10, 0x10, "alpha (L) flag is bit 4");
         assert_eq!(&payload[1..4], &[0, 0, 0], "reserved bytes are zero");
@@ -303,25 +361,104 @@ mod tests {
 
     #[test]
     fn vp8x_all_flags_and_large_canvas_round_trip() {
-        // Every feature flag set and a canvas large enough that both 24-bit dimensions use all three
-        // bytes — the existing round-trip only sets `alpha` and a sub-2^16 canvas, so the other
-        // flags' shifts/masks and the high dimension byte (`>> 16`) went unexercised.
-        let h = Vp8xHeader {
+        // Every feature flag set, plus a dimension large enough to use all three bytes of its 24-bit
+        // field — the plain round-trip only sets `alpha` and a sub-2^16 canvas, so the other flags'
+        // shifts/masks and the high dimension byte (`>> 16`) would otherwise go unexercised.
+        //
+        // The two dimensions must be exercised *separately*: §2.7 caps width × height at 2^32 - 1,
+        // and a third byte is non-zero only from 65537 up, so 65537^2 = 4_295_098_369 already
+        // exceeds the cap. No legal canvas uses all three bytes of both fields at once.
+        let wide = Vp8xHeader {
             icc_profile: true,
             alpha: true,
             exif_metadata: true,
             xmp_metadata: true,
             animation: true,
             canvas_width: 0x12_3456 + 1,
-            canvas_height: 0x65_4321 + 1,
+            canvas_height: 2,
         };
-        let p = h.to_payload();
+        let p = wide.to_payload().unwrap();
         // flags = icc(0x20) | alpha(0x10) | exif(0x08) | xmp(0x04) | anim(0x02).
         assert_eq!(p[0], 0x3E);
         // 24-bit little-endian width-1 then height-1.
         assert_eq!(&p[4..7], &[0x56, 0x34, 0x12]);
+        assert_eq!(&p[7..10], &[0x01, 0x00, 0x00]);
+        assert_eq!(Vp8xHeader::from_payload(&p).unwrap(), wide);
+
+        let tall = Vp8xHeader {
+            canvas_width: 2,
+            canvas_height: 0x65_4321 + 1,
+            ..wide
+        };
+        let p = tall.to_payload().unwrap();
+        assert_eq!(&p[4..7], &[0x01, 0x00, 0x00]);
         assert_eq!(&p[7..10], &[0x21, 0x43, 0x65]);
-        assert_eq!(Vp8xHeader::from_payload(&p).unwrap(), h);
+        assert_eq!(Vp8xHeader::from_payload(&p).unwrap(), tall);
+    }
+
+    #[test]
+    fn vp8x_rejects_a_canvas_the_format_cannot_express() {
+        let ok = Vp8xHeader {
+            canvas_width: MAX_CANVAS_DIMENSION,
+            canvas_height: 1,
+            ..Default::default()
+        };
+        assert!(ok.to_payload().is_ok(), "2^24 x 1 is the largest width");
+
+        // Zero is not representable: the field is 1-based, so 0 would encode as -1.
+        for bad in [
+            Vp8xHeader {
+                canvas_width: 0,
+                canvas_height: 1,
+                ..Default::default()
+            },
+            Vp8xHeader {
+                canvas_width: 1,
+                canvas_height: 0,
+                ..Default::default()
+            },
+            // One past the 24-bit field in each dimension.
+            Vp8xHeader {
+                canvas_width: MAX_CANVAS_DIMENSION + 1,
+                canvas_height: 1,
+                ..Default::default()
+            },
+            Vp8xHeader {
+                canvas_width: 1,
+                canvas_height: MAX_CANVAS_DIMENSION + 1,
+                ..Default::default()
+            },
+        ] {
+            let error = bad.to_payload().expect_err("outside 1..=2^24");
+            assert_eq!(error.origin(), Some("gamut-riff"));
+            assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        }
+
+        // Both dimensions legal on their own, but the product exceeds 2^32 - 1. 65536 x 65536 is
+        // exactly 2^32, one past the cap; 65536 x 65535 is the largest square-ish canvas allowed.
+        let over = Vp8xHeader {
+            canvas_width: 65536,
+            canvas_height: 65536,
+            ..Default::default()
+        };
+        assert!(over.to_payload().is_err(), "65536^2 is 2^32, one too many");
+        let under = Vp8xHeader {
+            canvas_height: 65535,
+            ..over
+        };
+        assert!(under.to_payload().is_ok(), "65536 x 65535 fits");
+    }
+
+    #[test]
+    fn from_payload_rejects_a_canvas_whose_product_overflows() {
+        // A hostile file can declare a canvas no encoder would produce: 2^24 x 2^24 = 2^48 pixels.
+        // Rejecting it on read matches libwebp, which caps the decoded canvas area the same way.
+        let mut payload = [0u8; VP8X_PAYLOAD_LEN];
+        payload[4..7].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
+        payload[7..10].copy_from_slice(&[0xFF, 0xFF, 0xFF]);
+        let error = Vp8xHeader::from_payload(&payload).expect_err("2^48 pixels");
+        assert_eq!(error.byte_offset(), Some(4));
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]
@@ -333,7 +470,7 @@ mod tests {
             canvas_height: 1,
             ..Default::default()
         };
-        let p = h.to_payload();
+        let p = h.to_payload().unwrap();
         assert_eq!(p[0], 0x00);
         assert_eq!(Vp8xHeader::from_payload(&p).unwrap(), h);
     }
@@ -357,7 +494,8 @@ mod tests {
                 (FourCc::ALPH, &[1, 2, 3]),
                 (FourCc::VP8, &[0x9d, 0x01, 0x2a]),
             ],
-        );
+        )
+        .unwrap();
         let chunks: Vec<_> = RiffReader::new(&file)
             .unwrap()
             .map(|c| c.unwrap())
@@ -407,7 +545,8 @@ mod tests {
             &header,
             &metadata,
             &[(FourCc::ALPH, &[9, 9]), (FourCc::VP8, &[0x9d, 0x01, 0x2a])],
-        );
+        )
+        .unwrap();
         assert_eq!(
             chunk_ids(&file),
             vec![
@@ -450,7 +589,8 @@ mod tests {
         };
         let image: &[(FourCc, &[u8])] = &[(FourCc::VP8L, &[0x2f])];
 
-        let cleared = write_extended_with_metadata(&all_flags, &MetadataChunks::default(), image);
+        let cleared =
+            write_extended_with_metadata(&all_flags, &MetadataChunks::default(), image).unwrap();
         assert_eq!(
             vp8x_header_of(&cleared),
             no_flags,
@@ -462,7 +602,7 @@ mod tests {
             "a stale flag must not conjure an empty chunk"
         );
 
-        let advertised = write_extended_with_metadata(&no_flags, &all_payloads, image);
+        let advertised = write_extended_with_metadata(&no_flags, &all_payloads, image).unwrap();
         assert_eq!(
             vp8x_header_of(&advertised),
             all_flags,
@@ -512,7 +652,7 @@ mod tests {
                 },
             ),
         ] {
-            let file = write_extended_with_metadata(&base, &chunks, image);
+            let file = write_extended_with_metadata(&base, &chunks, image).unwrap();
             assert_eq!(vp8x_header_of(&file), want, "flags for {chunks:?}");
         }
     }
@@ -531,8 +671,8 @@ mod tests {
         };
         let image: &[(FourCc, &[u8])] = &[(FourCc::ALPH, &[1]), (FourCc::VP8, &[2])];
         assert_eq!(
-            write_extended_with_metadata(&header, &empty, image),
-            write_extended(&header, image)
+            write_extended_with_metadata(&header, &empty, image).unwrap(),
+            write_extended(&header, image).unwrap()
         );
     }
 
@@ -562,12 +702,12 @@ mod tests {
     fn metadata_chunks_read_keeps_the_first_of_each_kind() {
         // "Readers MAY ignore all except the first one" (§2.7.2-§2.7.3).
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::ICCP, b"first-icc");
-        w.write_chunk(FourCc::VP8L, &[0x2f]);
-        w.write_chunk(FourCc::EXIF, b"first-exif");
-        w.write_chunk(FourCc::EXIF, b"second-exif");
-        w.write_chunk(FourCc::ICCP, b"second-icc");
-        let file = w.finish();
+        w.write_chunk(FourCc::ICCP, b"first-icc").unwrap();
+        w.write_chunk(FourCc::VP8L, &[0x2f]).unwrap();
+        w.write_chunk(FourCc::EXIF, b"first-exif").unwrap();
+        w.write_chunk(FourCc::EXIF, b"second-exif").unwrap();
+        w.write_chunk(FourCc::ICCP, b"second-icc").unwrap();
+        let file = w.finish().unwrap();
         let got = MetadataChunks::read(&file).unwrap();
         assert_eq!(got.icc, Some(&b"first-icc"[..]));
         assert_eq!(got.exif, Some(&b"first-exif"[..]));
@@ -587,10 +727,11 @@ mod tests {
             ..Default::default()
         };
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::VP8X, &lying.to_payload());
-        w.write_chunk(FourCc::VP8L, &[0x2f]);
-        w.write_chunk(FourCc::XMP, b"<x/>");
-        let file = w.finish();
+        w.write_chunk(FourCc::VP8X, &lying.to_payload().unwrap())
+            .unwrap();
+        w.write_chunk(FourCc::VP8L, &[0x2f]).unwrap();
+        w.write_chunk(FourCc::XMP, b"<x/>").unwrap();
+        let file = w.finish().unwrap();
         assert_eq!(
             MetadataChunks::read(&file).unwrap(),
             MetadataChunks {
@@ -603,7 +744,7 @@ mod tests {
 
     #[test]
     fn metadata_chunks_read_is_empty_for_a_simple_file() {
-        let file = write_simple_lossless(&[0x2f, 1, 2]);
+        let file = write_simple_lossless(&[0x2f, 1, 2]).unwrap();
         assert!(MetadataChunks::read(&file).unwrap().is_empty());
     }
 
@@ -612,7 +753,7 @@ mod tests {
         assert!(MetadataChunks::read(b"not a webp file").is_err());
         // A chunk whose declared size runs past the data must surface the reader's error rather than
         // being silently treated as "no metadata".
-        let mut file = write_simple_lossless(&[0; 4]);
+        let mut file = write_simple_lossless(&[0; 4]).unwrap();
         file[16..20].copy_from_slice(&5u32.to_le_bytes());
         assert!(MetadataChunks::read(&file).is_err());
     }
@@ -620,7 +761,7 @@ mod tests {
     #[test]
     fn simple_lossy_wraps_one_vp8_chunk() {
         let bitstream = [0x9d, 0x01, 0x2a];
-        let file = write_simple_lossy(&bitstream);
+        let file = write_simple_lossy(&bitstream).unwrap();
         let chunks: Vec<_> = RiffReader::new(&file)
             .unwrap()
             .map(|c| c.unwrap())

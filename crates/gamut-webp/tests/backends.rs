@@ -476,7 +476,7 @@ fn abi_adapters_return_their_wrapped_backend() {
 fn decode_skips_the_registry_when_the_codestream_header_is_unparseable() {
     // A malformed VP8 payload has no peekable dimensions, so no backend is consulted at all and the
     // built-in decoder reports the parse error.
-    let file = gamut_riff::write_simple_lossy(&[0x9d, 0x01, 0x2a]);
+    let file = gamut_riff::write_simple_lossy(&[0x9d, 0x01, 0x2a]).unwrap();
     let log = Arc::new(Log::default());
     let mut dec = WebpDecoder::new();
     dec.push_backend(ScriptedDecoder::new(
