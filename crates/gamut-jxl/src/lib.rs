@@ -96,7 +96,21 @@
 //!
 //! # Safety and portability
 //!
-//! The crate is `#![deny(unsafe_code)]
+//! The crate is `#![deny(unsafe_code)]`; all `unsafe` is confined to the single `ffi` module that
+//! drives libjxl (hence `deny` rather than `forbid`). The decoder is 100% safe Rust and available
+//! on every target.
+//!
+//! The encoder is compiled in for
+//! `all(feature = "encode", any(not(target_arch = "wasm32"), target_os = "emscripten"))` — that
+//! is, everywhere except `wasm32` targets that emscripten does not cover:
+//!
+//! - **`wasm32-unknown-emscripten`** gets the full encoder: libjxl officially supports wasm via
+//!   emscripten, and `gamut-jxl-sys` builds it with the emsdk toolchain (`emcc` on `PATH`).
+//! - **`wasm32-unknown-unknown`** (the wasm-bindgen/browser target) is decode-only, permanently by
+//!   toolchain boundary rather than by workaround: no C/C++ compiler emits archives for that ABI,
+//!   so no build configuration could link libjxl there. A pure-Rust JPEG XL encoder is the only
+//!   thing that could ever change this (jxl-rs ships none).
+#![deny(unsafe_code)]
 
 pub mod abi;
 pub mod backend;
