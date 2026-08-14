@@ -421,9 +421,12 @@ fn assign_groups(tokens: &[Token], width: u32, height: u32) -> GroupAssignment {
     let mut block_group = vec![0u32; num_blocks];
     let mut num_groups = 0u32;
     for (block, counter) in counts.iter().enumerate() {
+        // Ties must break on the symbol, not on `HashMap` iteration order: that order is seeded
+        // per process, so leaving it to `max_by_key` alone makes the encoder emit different bytes
+        // for the same input from one run to the next.
         let signature = counter
             .iter()
-            .max_by_key(|&(_, &count)| count)
+            .max_by_key(|&(&sym, &count)| (count, std::cmp::Reverse(sym)))
             .map_or(0, |(&sym, _)| sym);
         let group = match signature_group.get(&signature) {
             Some(&g) => g,
@@ -666,6 +669,34 @@ mod tests {
             .collect();
         let assignment = assign_groups(&tokens, 32, 32);
         assert_eq!(assignment.num_groups, 1);
+    }
+
+    #[test]
+    fn a_tied_block_signature_resolves_to_the_lower_symbol() {
+        // A block whose most-frequent green symbol is tied must resolve the tie on the symbol
+        // value, not on `HashMap` iteration order — that order is seeded per process, so the
+        // encoder would otherwise emit different bytes for the same input from run to run.
+        //
+        // Observable consequence: block 0 ties greens 3 and 7 while block 1 is all green 3. If the
+        // tie resolves low, both blocks share a signature and collapse to one group; if it resolves
+        // high (or arbitrarily), they split into two.
+        let (w, h) = (32u32, 16u32);
+        let tokens: Vec<Token> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let g = if x < 16 {
+                    if (x + y) % 2 == 0 { 3 } else { 7 }
+                } else {
+                    3
+                };
+                Token::Literal(make_argb(0xff, 0, g, 0))
+            })
+            .collect();
+        let assignment = assign_groups(&tokens, w, h);
+        assert_eq!(
+            assignment.num_groups, 1,
+            "tied signatures must resolve to the lower green symbol"
+        );
     }
 
     #[test]
