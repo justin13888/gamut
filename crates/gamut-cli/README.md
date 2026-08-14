@@ -17,11 +17,10 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
 - **Expose the shared primitives.** Each shared building block — color/CICP tables, the DSP
   Walsh–Hadamard transform, and the bitstream LEB128 coder — gets an inspection subcommand, so new
   primitives have an obvious place to be surfaced as they land.
-- **Keep the codec path pure gamut.** *Encoding* is always produced by the gamut crates. *Decoding*
-  of PNG/JPEG/PPM inputs borrows the third-party [`image`](https://crates.io/crates/image) crate for
-  convenience, but **WebP input is decoded by gamut's own decoder** (no third-party webp library) —
-  so the full WebP path, both directions, stays on the memory-safe, `#![forbid(unsafe_code)]` gamut
-  code.
+- **Keep the codec path pure gamut.** *Encoding* is always produced by the gamut crates, and so is
+  *decoding* of **PNG, JPEG, WebP, and JPEG XL** input. Only PPM still borrows the third-party
+  [`image`](https://crates.io/crates/image) crate, because gamut has no PPM decoder — so every
+  format gamut implements runs both directions on memory-safe gamut code.
 
 The crate is `gamut-cli` (so `cargo install gamut-cli`), but it installs a binary named `gamut`.
 
@@ -88,9 +87,13 @@ The sandbox exposes:
 - `av1 encode` — raw AV1 OBU still images from 8-bit RGB input.
 - `color list`, `dsp wht`, `bitstream leb128` — inspection of the shared primitives.
 
-Output is always encoded by gamut crates. Input decoding uses the `image` crate for PNG/JPEG/PPM,
-while **WebP and JPEG XL input are decoded by gamut's own decoders** — so a WebP or JXL round-trip
-(`png → webp → avif`, `png → jxl → png`) runs entirely in-tool. AVIF/AV1 output still has no
+Output is always encoded by gamut crates, and **PNG, JPEG, WebP, and JPEG XL input are decoded by
+gamut's own decoders** — so those round-trips (`png → webp → avif`, `png → jxl → png`) run entirely
+in-tool. Only PPM input uses the `image` crate. Because the encoders take a fixed 8-bit RGB(A)
+buffer, the CLI asks every decoder for one with
+`ConvertPolicy::permissive()`: a 16-bit PNG narrows, a grayscale JPEG replicates, and a transparent
+image asked for RGB drops its alpha — losses the gamut libraries refuse by default and the CLI opts
+into on your behalf. AVIF/AV1 output still has no
 in-workspace decoder, so verify it externally (`avifdec` / `dav1d`). `avif`, `webp`, `tiff`, `png`,
 `jxl`, and `jpg`/`jpeg` are the supported output formats; `convert` reports a clear error for
 anything else.
