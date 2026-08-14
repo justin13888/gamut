@@ -27,8 +27,12 @@ fn cfa_roundtrips_through_gamut() {
             );
             assert_eq!(decoded.dng_version, [1, 4, 0, 0]);
             // The colour matrix round-trips within the RATIONAL storage precision.
-            assert!((decoded.profile.color_matrix1()[0] - 0.6722).abs() < 1e-5);
-            assert_eq!(decoded.profile.unique_camera_model(), "gamut TestCam");
+            let profile = decoded
+                .profile
+                .as_ref()
+                .expect("an encoded profile decodes back");
+            assert!((profile.color_matrix1()[0] - 0.6722).abs() < 1e-5);
+            assert_eq!(profile.unique_camera_model(), "gamut TestCam");
         }
     }
 }
@@ -58,7 +62,10 @@ fn full_profile_roundtrips_optional_fields() {
         .encode(&raw, &common::sample_profile_full(), &mut dng)
         .expect("encode");
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
-    let p = &decoded.profile;
+    let p = decoded
+        .profile
+        .as_ref()
+        .expect("an encoded profile decodes back");
     assert!(p.second_illuminant().is_some());
     assert!(p.forward_matrices().0.is_some());
     assert!(p.camera_calibration().0.is_some());
