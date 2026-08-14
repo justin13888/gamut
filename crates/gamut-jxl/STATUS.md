@@ -49,10 +49,13 @@ on a hand-written golden bitstream.
 - **Full pixel decode (jxl-rs).** Decodes the entire ISO/IEC 18181-1 pixel surface jxl-rs
   covers — VarDCT and Modular (RCT/palette/squeeze), XYB, splines/patches/noise/spot colours,
   progressive-encoded streams, and both `jxlc`/`jxlp` container framings — reshaping to the
-  requested layout losslessly (grayscale→RGB, opaque-alpha pad, alpha drop).
-- **Decode policies.** Pixel-limit bound (`1 << 28` samples); truncated → `InvalidInput`; animation,
-  premultiplied (associated) alpha, and colour-as-grayscale each → `Unsupported` (deliberate refusals
-  to guess, additive to relax later).
+  requested layout through `gamut_core::convert` (issue #268). `crate::convert` now keeps only the
+  jxl-specific half — reassembling jxl-rs's native-endian output *bytes* into typed samples — at the
+  cost of one extra pass and allocation the previously fused loop avoided.
+- **Decode policies.** Pixel-limit bound (`1 << 28` samples); truncated → `InvalidInput`; animation
+  and premultiplied (associated) alpha → `Unsupported`. Layout loss (dropping a present alpha
+  channel, reducing colour to grayscale) is refused by default and enabled per decoder with
+  `JxlDecoder::with_convert_policy` — the refusal is no longer unconditional.
 - **Pluggable codestream backends (issue #276).** Both directions are registries over the shared
   `gamut-codec-abi` seam, cut at the **bare `FF 0A` codestream**: `JxlEncoder::push_backend` /
   `JxlDecoder::push_backend` insert a `JxlCodestreamEncoder` / `JxlCodestreamDecoder` ahead of the

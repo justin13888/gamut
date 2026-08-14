@@ -10,9 +10,10 @@
     any(not(target_arch = "wasm32"), target_os = "emscripten")
 ))]
 
+use gamut_core::convert::{AlphaPolicy, ConvertPolicy};
 use gamut_core::{
-    DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,
-    ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
+    DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
+    ImageBuf, ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_jxl::{Container, JxlDecoder, JxlEncoder};
 
@@ -196,7 +197,17 @@ fn gray_stream_expands_to_rgb8_and_rgba8() {
 #[test]
 fn rgba_stream_decodes_as_rgb8_dropping_alpha() {
     let (bytes, px, dims) = encode_rgba8(16, 16);
-    let rgb: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(&bytes).unwrap();
+
+    // Discarding a present alpha channel is a loss, so the default decoder refuses it rather than
+    // deciding for the caller.
+    let refused = DecodeImage::<Rgb8>::decode_image(&JxlDecoder::new(), &bytes)
+        .expect_err("alpha drop must not happen silently");
+    assert_eq!(refused.kind(), ErrorKind::Unsupported);
+
+    let rgb: ImageBuf<Rgb8> = JxlDecoder::new()
+        .with_convert_policy(ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop))
+        .decode_image(&bytes)
+        .unwrap();
     assert_eq!(rgb.dimensions(), dims);
     // Every RGB triple matches the source's colour channels; the source alpha is discarded.
     for i in 0..(16 * 16) {
