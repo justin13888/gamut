@@ -56,6 +56,8 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Opt-in decoder resource guards (P9, issue #306): `JpegDecoder::with_max_dimensions` and
   `with_max_image_bytes`, enforced before built-in frame allocations and backend selection, while
   bounding sequential DNL-deferred sample-plane growth until the exact height arrives.
+- Opt-in optimized baseline Huffman tables (P10, issue #331): `JpegEncoder::with_optimized_tables`,
+  the Annex K.2 construction the progressive encoder already uses, reached from the sequential path.
 
 **Deferred / out of scope** (documented, with reasons):
 
@@ -148,10 +150,16 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   progressive AC scan (the `EOBn` run/size bytes are absent), so — like libjpeg, which forces
   `optimize_coding` for progressive — each scan builds its own table(s) from its symbol frequencies
   (a two-pass gather/emit design) via the §K.2 procedure (reserved all-ones pseudo-symbol; 16-bit
-  length-limiting). Baseline encoding is unaffected and stays byte-identical to before (standard
-  tables). Each scan uses one optimized table at destination 0 for its class (a documented free
-  choice; a DC-refinement scan carries no table); this changes only compression density, never the
-  decoded coefficients, which are identical to the baseline encoding of the same input.
+  length-limiting). Each scan uses one optimized table at destination 0 for its class (a documented
+  free choice; a DC-refinement scan carries no table); this changes only compression density, never
+  the decoded coefficients, which are identical to the baseline encoding of the same input.
+  **Baseline** takes the same construction only when asked
+  ([`JpegEncoder::with_optimized_tables`], P10) — its default output stays the Annex K.3–K.6 typical
+  tables, byte-identical to before. Unlike progressive it keeps the two luma/chroma destinations the
+  SOS already references, so up to four tables are built and emitted in the one DHT segment the
+  fixed path writes; a destination the scan never used (chroma in a grayscale frame) is omitted
+  rather than emitted empty. The two passes share `encode_scan`, so a counted symbol and an emitted
+  symbol cannot diverge; the forward DCT therefore runs twice and no coefficient buffer is retained.
 - **EOBRUN cap / correction-bit buffering.** The EOB-run accumulator is forced out at its 15-bit
   maximum (`0x7FFF`, §G.1.2.2); successive-approximation correction bits (§G.1.2.3) are buffered in a
   growable vector and emitted after the `EOBn`/run-size/ZRL symbol they attach to, so the reference's
@@ -176,3 +184,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P7 | Exif 3.0 §4.7.2; XMP Part 3 §1.1.3; ICC.1:2001-04 Annex B.4 | APP-segment metadata (rawshift requirements, issue #28 follow-up): `metadata()` header-only read of APP1 EXIF/XMP and index-reassembled multi-segment APP2 ICC; `with_exif`/`with_xmp`/`with_icc_profile` encoder builders with pre-write size validation; bidirectional libjpeg-turbo interop (`jpeg_read_icc_profile`/`jpeg_write_icc_profile`/marker capture) and a dev-only `gamut-metadata` `MetadataBlock` round-trip; `decode_image_into` destination reuse | ✅ done |
 | P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegStreamDecoder`/`JpegStreamEncoder` traits over the **whole SOI..EOI interchange stream**, `push_backend` push-order registries (`Arc<Mutex<..>>`, so `Clone` shares backends), the `backend_declined` late-decline sentinel, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
 | P9 | issue #306 | **Decoder resource limits:** opt-in dimension and native-raster byte builders; checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
+| P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
