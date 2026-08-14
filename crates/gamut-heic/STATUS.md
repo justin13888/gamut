@@ -33,8 +33,13 @@ bitstream stays opaque.
 typed fields plus the parameter-set arrays, reached from a coded item via `HeifItem::hevc_config`;
 `iter_nal_units` splits a length-prefixed `hvc1`/`hev1` payload (§2); `NalUnitType`/`NalHeader`
 classify each NAL unit (§3); `HevcConfig::validate_still_payload` enforces the still-image IRAP
-constraint and `HevcConfig::annex_b` emits a start-coded stream for a downstream decoder. Still
-parsing/classification only — the RBSP payloads stay opaque (decode is S3 / issue #18).
+constraint and `HevcConfig::annex_b` emits a start-coded stream for a downstream decoder — split
+(issue #255) into `annex_b_parameter_sets` (the `hvcC` arrays alone: Android MediaCodec `csd-0`, the
+VAAPI parameter-set feed, the `AbiHevcDecoder` extradata) and `annex_b_payload` (the item payload
+alone: the matching sample buffers), whose concatenation is `annex_b`. The per-platform mapping —
+including Apple VideoToolbox, which wants the raw `hvcC` and the length-prefixed payload with **no**
+conversion — is tabulated in the crate docs. Still parsing/classification only — the RBSP payloads
+stay opaque (decode is S3 / issue #18).
 
 **Implemented (S3).** `HevcDecoder` (`src/decode.rs`) is the pluggable HEVC-intra codestream hook —
 object-safe and byte-slice-shaped for FFI adaptation — that a caller implements over a platform
@@ -123,6 +128,9 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Item payload → length-prefixed NAL unit split (`lengthSizeMinusOne`) — `iter_nal_units`/`NalUnitIter` (`src/nal.rs`) | 14496-15 §8.3.2; `references/heif` §2 | ✅ | S2 |
 | NAL unit header classify (VPS/SPS/PPS/SEI/IRAP) + still-image IRAP constraint — `NalUnitType`/`NalHeader` (`src/nal.rs`), `HevcConfig::validate_still_payload` | H.265 §7.3.1.2; `references/heif` §3 | ✅ | S2 |
 | Annex-B conversion for a downstream decoder — `HevcConfig::annex_b` (`src/hvcc.rs`) | 14496-15 §8.3.2 | ✅ | S2 |
+| Parameter-sets-only Annex-B export (MediaCodec `csd-0` / VAAPI) — `HevcConfig::annex_b_parameter_sets` | 14496-15 §8.4 | ✅ | S2 (#255) |
+| Payload-only Annex-B export (sample buffers for a separately-configured decoder) — `HevcConfig::annex_b_payload` | 14496-15 §8.3.2 | ✅ | S2 (#255) |
+| Per-platform decoder-feed expectations documented (VideoToolbox / VAAPI / MediaCodec) — crate docs | 14496-15 §8.4 | ✅ | S2 (#255) |
 | L-HEVC multi-layer decode (`heim`/`heis` beyond base layer) | 14496-15 | OOS | OOS |
 
 ## D. Pixel decode & API (H.265 intra · gamut-core)
