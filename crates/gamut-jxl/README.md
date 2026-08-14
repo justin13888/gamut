@@ -128,6 +128,10 @@ JxlEncoder::new().recompress_jpeg(jpeg, &mut jxl).expect("recompress");
 **RGB** and **RGBA** — so handing either an unsupported layout is a compile error. `lossy` takes a
 validated [`Distance`] in `(0.0, 25.0]` (`0.0`, libjxl's lossless sentinel, is deliberately rejected
 so lossless stays a distinct constructor). On the decode side,
+`JxlDecoder::embedded_icc_profile` surfaces the exact ICC bytes a stream embeds (`None` for
+structured encodings like sRGB/PQ) without decoding pixels; pixel decoding applies no colour
+transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
+
 ### Pluggable codestream backends
 
 Neither half is a fixed implementation. The seam is the **bare JPEG XL codestream** (signature
@@ -145,10 +149,6 @@ direction returns `Error::Unsupported`.
 Container-dependent features — ISO BMFF output, `with_exif`/`with_xmp`, and `recompress_jpeg` — are
 written by libjxl today, so they are pinned to the built-in path by a host-side veto and never reach
 a backend. Giving gamut-jxl its own container writer is a recorded follow-up ([STATUS.md](STATUS.md)).
-
-`JxlDecoder::embedded_icc_profile` surfaces the exact ICC bytes a stream embeds (`None` for
-structured encodings like sRGB/PQ) without decoding pixels; pixel decoding applies no colour
-transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
 
 ## Features
 
