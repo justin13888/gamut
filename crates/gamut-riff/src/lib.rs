@@ -5,10 +5,23 @@
 //! [`gamut-webp`](https://docs.rs/gamut-webp), mirroring how `gamut-isobmff` backs AVIF/HEIC.
 //!
 //! Byte layouts follow RFC 9649 (*WebP Image Format*) §2 and the Google *WebP Container*
-//! specification in `references/webp/`. The implemented surface — and the extended-format chunks
-//! still to come — is tracked in `gamut-webp/STATUS.md` section A. Metadata chunks
-//! (`ICCP`/`EXIF`/`XMP `) are carried verbatim through [`MetadataChunks`] and
+//! specification in `references/webp/`; the crate's `STATUS.md` ledgers the v1 surface, and
+//! `gamut-webp/STATUS.md` section A is the per-requirement conformance table this crate owns.
+//! Metadata chunks (`ICCP`/`EXIF`/`XMP `) are carried verbatim through [`MetadataChunks`] and
 //! [`write_extended_with_metadata`], never parsed or reserialized.
+//!
+//! # Reading
+//!
+//! Three readers, in increasing strictness — pick the one the job needs:
+//!
+//! | Reader | Yields | Rejects |
+//! | ------ | ------ | ------- |
+//! | [`RiffReader`] | every chunk, in file order | only what it cannot frame |
+//! | [`MetadataChunks::read`] | the `ICCP`/`EXIF`/`XMP ` triple | malformed framing |
+//! | [`WebpLayout::parse`] | every chunk sorted into its role | + chunks out of the spec's order |
+//!
+//! Animation (`ANIM`/`ANMF`) is out of scope: the FourCCs are recognised, so an animated file is
+//! reported as unsupported rather than mis-parsed as a still image.
 //!
 //! # Example
 //!

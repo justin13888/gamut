@@ -149,14 +149,14 @@ pub fn write_extended(header: &Vp8xHeader, chunks: &[(FourCc, &[u8])]) -> Result
 }
 
 /// The metadata chunks an extended WebP file may carry, **borrowed** rather than copied: the `ICCP`
-/// colour profile and the `EXIF` / `XMP ` metadata payloads (RFC 9649 §2.7.2-§2.7.3).
+/// colour profile and the `EXIF` / `XMP ` metadata payloads (RFC 9649 §2.7.1.4-§2.7.1.5).
 ///
 /// The container assigns these payloads no meaning — each is carried verbatim, so metadata survives
 /// a read/write cycle byte for byte with no reserialization. Use [`MetadataChunks::read`] to collect
 /// them from a file and [`write_extended_with_metadata`] to emit them in the spec's chunk order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MetadataChunks<'a> {
-    /// The `ICCP` chunk payload: an ICC colour profile. `None` means sRGB is assumed (§2.7.2).
+    /// The `ICCP` chunk payload: an ICC colour profile. `None` means sRGB is assumed (§2.7.1.4).
     pub icc: Option<&'a [u8]>,
     /// The `EXIF` chunk payload: Exif metadata, carried bare (no `"Exif\0\0"` signature).
     pub exif: Option<&'a [u8]>,
@@ -168,7 +168,7 @@ impl<'a> MetadataChunks<'a> {
     /// Collects the metadata chunks of the WebP file in `data`, borrowing each payload in place.
     ///
     /// The spec allows at most one chunk of each kind and lets readers "ignore all except the first
-    /// one" (RFC 9649 §2.7.2-§2.7.3), so the **first** `ICCP` / `EXIF` / `XMP ` chunk wins. The
+    /// one" (RFC 9649 §2.7.1.4-§2.7.1.5), so the **first** `ICCP` / `EXIF` / `XMP ` chunk wins. The
     /// `VP8X` feature flags are advisory here: a payload is reported because its chunk is present,
     /// never because a flag claims it is — so a flag set over a missing chunk yields `None`, and a
     /// chunk a non-conformant writer left unflagged is still recovered.
@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn metadata_chunks_read_keeps_the_first_of_each_kind() {
-        // "Readers MAY ignore all except the first one" (§2.7.2-§2.7.3).
+        // "Readers MAY ignore all except the first one" (§2.7.1.4-§2.7.1.5).
         let mut w = RiffWriter::new();
         w.write_chunk(FourCc::ICCP, b"first-icc").unwrap();
         w.write_chunk(FourCc::VP8L, &[0x2f]).unwrap();
