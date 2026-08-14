@@ -4,7 +4,7 @@ use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result,
 use gamut_ifd::{Ifd, read};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
-use crate::ifd::{PhotometricInterpretation, Predictor};
+use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
 use crate::palette::Palette8;
 use crate::{info, tags};
 
@@ -222,6 +222,33 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     }
     let spp = info.samples_per_pixel as usize;
     let bps = info.bits_per_sample;
+
+    // Sample *format* is checked before sample *depth*, and that order is the point: a 16-bit
+    // half-float page (`bps = 16`, `SampleFormat = 3`) passes every depth gate below and would
+    // decode to plausible nonsense if read as unsigned. Refusing by format first means the
+    // diagnostic names the real problem, and no non-integer encoding can reach the sample path.
+    match info.sample_format {
+        SampleFormat::UnsignedInteger => {}
+        SampleFormat::SignedInteger => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: signed-integer samples not supported",
+            ));
+        }
+        SampleFormat::FloatingPoint => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: floating-point samples not supported",
+            ));
+        }
+        SampleFormat::Undefined => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: undefined sample format not supported",
+            ));
+        }
+    }
+
     if matches!(
         compression,
         Compression::CcittRle | Compression::CcittGroup4Fax
@@ -239,6 +266,34 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             "TIFF: predictor requires 8-bit samples",
         ));
     }
+
+    // Bytes of one stored (packed) row, before unpacking to output samples. Every depth this
+    // decoder cannot unpack is rejected *here*, above the photometric table, so the diagnostic
+    // names the depth rather than blaming the colour mode: the table's catch-all would otherwise
+    // report a 32-bit RGB page as an unsupported photometric/sample combination.
+    let stored_row_bytes = match bps {
+        8 => width
+            .checked_mul(spp)
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?,
+        // Sub-byte samples pack across the whole row, then pad to a byte boundary. Written for any
+        // `spp` rather than relying on the photometric table below to have restricted it to 1.
+        1 => width
+            .checked_mul(spp)
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?
+            .div_ceil(8),
+        32 => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: 32-bit samples not supported",
+            ));
+        }
+        _ => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: unsupported bits per sample",
+            ));
+        }
+    };
 
     // How stored samples become the decoded output (TIFF 6.0 §8 PhotometricInterpretation).
     let mode = match (spp, bps, info.photometric) {
@@ -268,19 +323,6 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         }
     };
 
-    // Bytes of one stored (packed) row, before unpacking to 8-bit output samples.
-    let stored_row_bytes = match bps {
-        8 => width
-            .checked_mul(spp)
-            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?,
-        1 => width.div_ceil(8), // spp == 1, guaranteed by the match above
-        _ => {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: only 1- and 8-bit samples supported so far",
-            ));
-        }
-    };
     let stored_total = stored_row_bytes
         .checked_mul(height)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?;

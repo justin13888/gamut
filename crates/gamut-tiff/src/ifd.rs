@@ -77,6 +77,65 @@ impl From<PhotometricInterpretation> for u16 {
     }
 }
 
+/// How a sample's bits are interpreted, stored in the `SampleFormat` tag (339, TIFF 6.0 §19).
+///
+/// When the tag is absent the format is unsigned integer — the TIFF 6.0 default, and the only
+/// encoding this crate's `u8`/`u16` sample model represents. The others are recognised so the
+/// decoder can name what it is refusing: an IEEE-float or two's-complement page read as unsigned
+/// would decode to plausible nonsense rather than fail.
+///
+/// The set is non-exhaustive: the TIFF Technical Notes may register further codes, so variants may
+/// be added without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SampleFormat {
+    /// `1` — unsigned integer (the default when the tag is absent).
+    #[default]
+    UnsignedInteger,
+    /// `2` — two's-complement signed integer.
+    SignedInteger,
+    /// `3` — IEEE floating point.
+    FloatingPoint,
+    /// `4` — undefined data format.
+    Undefined,
+}
+
+impl TryFrom<u32> for SampleFormat {
+    type Error = gamut_core::Error;
+
+    /// Maps an on-disk `SampleFormat` tag value (tag 339) to its interpretation.
+    ///
+    /// Unrecognised codes fail with [`gamut_core::Error::Unsupported`] rather than falling back to
+    /// unsigned integer: guessing here is exactly the silent misdecode the typed error exists to
+    /// prevent.
+    fn try_from(code: u32) -> Result<Self, Self::Error> {
+        Ok(match code {
+            1 => SampleFormat::UnsignedInteger,
+            2 => SampleFormat::SignedInteger,
+            3 => SampleFormat::FloatingPoint,
+            4 => SampleFormat::Undefined,
+            _ => {
+                return Err(gamut_core::Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "TIFF: unrecognised SampleFormat tag value",
+                ));
+            }
+        })
+    }
+}
+
+impl From<SampleFormat> for u16 {
+    /// Returns the on-disk tag value (the `SHORT` written to tag 339).
+    fn from(format: SampleFormat) -> Self {
+        match format {
+            SampleFormat::UnsignedInteger => 1,
+            SampleFormat::SignedInteger => 2,
+            SampleFormat::FloatingPoint => 3,
+            SampleFormat::Undefined => 4,
+        }
+    }
+}
+
 /// The prediction scheme applied before compression, stored in the `Predictor` tag (317,
 /// TIFF 6.0 §14).
 ///
@@ -140,6 +199,23 @@ mod tests {
         }
         assert!(PhotometricInterpretation::try_from(7).is_err());
         assert!(PhotometricInterpretation::try_from(9).is_err());
+    }
+
+    #[test]
+    fn sample_format_codes_round_trip() {
+        assert_eq!(SampleFormat::default(), SampleFormat::UnsignedInteger);
+        for (format, code) in [
+            (SampleFormat::UnsignedInteger, 1u16),
+            (SampleFormat::SignedInteger, 2),
+            (SampleFormat::FloatingPoint, 3),
+            (SampleFormat::Undefined, 4),
+        ] {
+            assert_eq!(u16::from(format), code);
+            assert_eq!(SampleFormat::try_from(u32::from(code)).unwrap(), format);
+        }
+        // `0` and codes past the registered set are refused rather than defaulted to unsigned.
+        assert!(SampleFormat::try_from(0).is_err());
+        assert!(SampleFormat::try_from(5).is_err());
     }
 
     #[test]

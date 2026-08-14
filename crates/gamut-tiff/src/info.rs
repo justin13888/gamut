@@ -10,7 +10,7 @@ use gamut_core::{Error, Result};
 use gamut_ifd::{ByteOrder, Ifd};
 
 use crate::compression::Compression;
-use crate::ifd::{PhotometricInterpretation, Predictor};
+use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
 use crate::tags;
 
 /// Reads a required unsigned-integer tag.
@@ -31,6 +31,8 @@ pub(crate) struct TiffInfo {
     pub(crate) height: u32,
     /// Bits per sample (`BitsPerSample`, 258). Every sample shares one depth.
     pub(crate) bits_per_sample: u32,
+    /// How the sample bits are interpreted (`SampleFormat`, 339).
+    pub(crate) sample_format: SampleFormat,
     /// How samples map to colour (`PhotometricInterpretation`, 262).
     pub(crate) photometric: PhotometricInterpretation,
     /// Components per pixel (`SamplesPerPixel`, 277).
@@ -77,6 +79,21 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
         ));
     }
 
+    // SampleFormat (339) is likewise one value per sample. Writers commonly store a single value
+    // for all samples, so the count is deliberately not checked against SamplesPerPixel — only
+    // samples that disagree with each other are refused, since one value cannot describe them.
+    let formats = ifd.get_u32_vec(tags::SAMPLE_FORMAT).unwrap_or_default();
+    let sample_format = match formats.first() {
+        None => SampleFormat::UnsignedInteger,
+        Some(&first) if formats.iter().all(|&f| f == first) => SampleFormat::try_from(first)?,
+        Some(_) => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: mixed sample formats not supported",
+            ));
+        }
+    };
+
     let photometric = PhotometricInterpretation::try_from(require_u32(
         ifd,
         tags::PHOTOMETRIC_INTERPRETATION,
@@ -88,6 +105,7 @@ pub(crate) fn page_info(ifd: &Ifd, byte_order: ByteOrder) -> Result<TiffInfo> {
         width,
         height,
         bits_per_sample: bits[0],
+        sample_format,
         photometric,
         samples_per_pixel,
         compression,
