@@ -18,25 +18,27 @@
 //! `M2` matrices, the `*_standard` transfer-curve variants, the matrix derivations) — is reachable
 //! and grouped under its module. For convenience the crate root additionally re-exports the items
 //! most consumers name directly: the CICP enums, [`BitDepth`] / [`ChromaSubsampling`],
-//! [`Planar8`] / [`Yuv420`], the [`clip_pixel`] / [`rgb_to_ycbcr`] helpers, and the colour-science
-//! entry types [`Gamut`] and [`SourceProfile`] / [`SourceTransfer`].
+//! [`Planar8`] / [`Yuv420`] / [`YcbcrMatrix`], the [`clip_pixel`] / [`rgb_to_ycbcr`] helpers, and the
+//! colour-science entry types [`Gamut`] and [`SourceProfile`] / [`SourceTransfer`].
 //!
 //! # Implemented vs. modeled
 //!
 //! Many enum variants model the full spec surface but are **not yet wired into an encode path** —
 //! they exist so later milestones extend without reshaping the types. As of this release:
 //!
-//! - **Implemented:** 8-bit ([`BitDepth::Eight`]) RGB → identity 4:4:4 ([`ChromaSubsampling::Cs444`],
-//!   [`MatrixCoefficients::Identity`]) planes; the CICP code-point tables; BT.601 YCbCr 4:2:0
-//!   ([`ycbcr`]); and the `f64` colour science ([`transfer`], [`oklab`], [`matrix`], [`gamut_map`],
-//!   [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
+//! - **Implemented:** 8-bit ([`BitDepth::Eight`]) RGB → 4:4:4 ([`ChromaSubsampling::Cs444`]) planes,
+//!   either identity ([`MatrixCoefficients::Identity`]) or through a CICP luma–chroma matrix
+//!   ([`YcbcrMatrix`]: [`MatrixCoefficients::Bt601`] / `Bt709` / `Bt2020Ncl`, both signal ranges);
+//!   the CICP code-point tables; BT.601 YCbCr 4:2:0 ([`ycbcr`]); and the `f64` colour science
+//!   ([`transfer`], [`oklab`], [`matrix`], [`gamut_map`], [`profile`]) for the sRGB, Display P3,
+//!   Adobe RGB, BT.2020 and ProPhoto gamuts.
 //! - **Modeled but deferred:** 10/12-bit ([`BitDepth::Ten`] / [`BitDepth::Twelve`], awaiting AV1
 //!   encode wiring — distinct from [`BitDepth::Sixteen`], which is outside the AV1 profile set
 //!   entirely and exists for the 16-bit still-image pipelines that share these types); the subsampled
-//!   formats ([`ChromaSubsampling::Cs422`] / `Cs420` / `Cs400`); the non-identity matrix coefficients
-//!   ([`MatrixCoefficients::Bt709`] / `Bt601` / `Bt2020Ncl` / `YCgCo`); and the HLG / BT.709 transfer
-//!   curves ([`eotf_for`](transfer::eotf_for) returns `None` for these). These land with the
-//!   milestones tracked in `gamut-avif/STATUS.md`.
+//!   formats ([`ChromaSubsampling::Cs422`] / `Cs420` / `Cs400`) as a [`Planar8`] geometry;
+//!   [`MatrixCoefficients::YCgCo`]; and the HLG / BT.709 transfer curves
+//!   ([`eotf_for`](transfer::eotf_for) returns `None` for these). These land with the milestones
+//!   tracked in `gamut-avif/STATUS.md`.
 #![forbid(unsafe_code)]
 
 pub mod cicp;
@@ -50,6 +52,7 @@ pub mod planar;
 pub mod profile;
 pub mod transfer;
 pub mod ycbcr;
+pub mod ycbcr_matrix;
 
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 pub use format::{BitDepth, ChromaSubsampling};
@@ -58,3 +61,4 @@ pub use pixel::{clip_pixel, clip_pixel8};
 pub use planar::Planar8;
 pub use profile::{SourceProfile, SourceTransfer};
 pub use ycbcr::{Yuv420, rgb_to_ycbcr, ycbcr_to_rgb};
+pub use ycbcr_matrix::YcbcrMatrix;
