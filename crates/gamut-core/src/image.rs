@@ -11,6 +11,7 @@
 
 use core::marker::PhantomData;
 
+use crate::convert::RawImage;
 use crate::{Dimensions, Error, Pixel, Result};
 
 /// The required sample count for `dims` at `P`'s channel count, rejecting empty or overflowing
@@ -119,6 +120,14 @@ impl<'a, P: Pixel> ImageRef<'a, P> {
     pub fn pixel(self, x: u32, y: u32) -> &'a [P::Sample] {
         let i = (y as usize * self.dims.width as usize + x as usize) * P::CHANNELS;
         &self.data[i..i + P::CHANNELS]
+    }
+
+    /// Re-describes this view with `P`'s layout carried as a runtime [`crate::PixelFormat`] tag
+    /// instead of a brand, for [`crate::convert`]'s raw entry points.
+    ///
+    /// Infallible: the brand guarantees everything [`RawImage::new`] would otherwise check.
+    pub fn as_raw(self) -> RawImage<'a, P::Sample> {
+        RawImage::from_branded(self.data, P::FORMAT, self.dims)
     }
 }
 
