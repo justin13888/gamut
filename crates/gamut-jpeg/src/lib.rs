@@ -12,8 +12,8 @@
 //!   generation); Annex F (§F.1.2 baseline Huffman encoding, §F.2 the `DECODE` / `RECEIVE` /
 //!   `EXTEND` decoding procedures); Annex G (the progressive DCT mode: spectral selection and
 //!   successive approximation, §G.1.1–G.1.2 encoding models and §G.2 decoding); Annex K (§K.1
-//!   quantization, §K.2 optimized Huffman-table construction for the progressive encoder, and §K.3
-//!   typical Huffman tables).
+//!   quantization, §K.2 optimized Huffman-table construction — mandatory for the progressive
+//!   encoder, opt-in for the baseline one — and §K.3–K.6 typical Huffman tables).
 //! - **ITU-T T.871 | ISO/IEC 10918-5** — JFIF: the APP0 segment (§10.1) and the full-range BT.601
 //!   YCbCr conversion (§7).
 //! - **Adobe Technical Note #5116** — the APP14 "Adobe" colour-transform marker (RGB / YCbCr / YCCK).
@@ -25,7 +25,9 @@
 //! This crate is a JPEG **encoder + decoder** (unlike the workspace's encoder-only PNG crate — JPEG
 //! is a two-way format). It ships a **baseline (SOF0) sequential and progressive (SOF2) 8-bit DCT
 //! Huffman encoder**, and a **decoder for the sequential and progressive processes**. The encoder
-//! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 subsampling, standard (Annex K) tables,
+//! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 subsampling, standard (Annex K) tables
+//! — or, with [`JpegEncoder::with_optimized_tables`], tables fitted to the image's own symbol
+//! statistics (Annex K.2), a few percent smaller for the same decoded pixels —
 //! a quality→quantization mapping, and optional restart intervals; [`JpegEncoder::with_progressive`]
 //! selects the progressive process (Annex G), which uses libjpeg's frozen `jpeg_simple_progression`
 //! scan script with optimized per-scan Huffman tables (Annex K.2) and produces the same quantized
