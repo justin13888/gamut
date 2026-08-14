@@ -28,7 +28,8 @@
 //! writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 subsampling, standard (Annex K) tables
 //! — or, with [`JpegEncoder::with_optimized_tables`], tables fitted to the image's own symbol
 //! statistics (Annex K.2), a few percent smaller for the same decoded pixels —
-//! a quality→quantization mapping, and optional restart intervals; [`JpegEncoder::with_progressive`]
+//! a quality→quantization mapping (or caller-supplied [`QuantTables`] via
+//! [`JpegEncoder::with_quant_tables`]), and optional restart intervals; [`JpegEncoder::with_progressive`]
 //! selects the progressive process (Annex G), which uses libjpeg's frozen `jpeg_simple_progression`
 //! scan script with optimized per-scan Huffman tables (Annex K.2) and produces the same quantized
 //! coefficients — hence the same decoded image — as the baseline encoding. The [`JpegDecoder`] reads
@@ -108,3 +109,4 @@ pub use backend::{
 pub use decoder::{JpegDecoder, JpegInfo, JpegMetadata, JpegProcess, info, metadata};
 pub use encoder::{ChromaSubsampling, JpegEncoder};
 pub use marker::DensityUnit;
+pub use quant::{CHROMINANCE, LUMINANCE, QuantTables};
