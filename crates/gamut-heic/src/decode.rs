@@ -43,8 +43,8 @@
 //!   outside them is [`Error::Unsupported`] on *this* surface while the planar surface still delivers
 //!   the samples.
 
-use gamut_color::{ColorRange, ycbcr_to_rgb};
-use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8};
+use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, YcbcrMatrix, ycbcr_to_rgb};
+use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8, Rgba16};
 use gamut_isobmff::ColourInformation;
 
 use crate::hvcc::{ChromaFormat, HevcConfig};
@@ -353,6 +353,56 @@ impl HeifImage {
         self.decode_item_rgba8(self.as_isobmff().primary_item_id, decoder)
     }
 
+    /// Decodes an item to a presentation-ready **high-bit-depth** [`ImageBuf<Rgba16>`]: the same
+    /// pipeline as [`decode_item_rgba8`](Self::decode_item_rgba8) — planar decode (or `iovl`
+    /// compositing), colour conversion, alpha merge, then the transformative properties in `ipma`
+    /// order — widened to 16-bit samples and the full matrix set.
+    ///
+    /// **Sample scale.** Samples are normalized to the **full 16-bit range** `0..=65535` whatever
+    /// the coded depth: a 10-bit sample `s` becomes `(s·65535 + 511)/1023`, a 12-bit sample
+    /// `(s·65535 + 2047)/4095`, and an 8-bit sample exactly `s·257`. The buffer therefore carries
+    /// no residual notion of "this was 10-bit" — an [`ImageBuf`] has nowhere to put one, and every
+    /// other `Rgba16` producer in the workspace means full-range too. Read the coded depth from
+    /// [`decode_item_planar`](Self::decode_item_planar)'s [`DecodedFrame::bit_depth`], the item's
+    /// `pixi`, or its `hvcC`.
+    ///
+    /// **Coded depth.** Any depth [`DecodedFrame`] admits (`8..=16`) is accepted; 8-bit content
+    /// widens losslessly, so a caller whose decoder emits either depth need not branch. The
+    /// matrixed paths additionally require a CICP-modeled depth (8, 10, 12 or 16) — an unmodeled
+    /// depth such as 9 is [`Error::Unsupported`] rather than silently reinterpreted, while
+    /// monochrome and identity work at every depth.
+    ///
+    /// **Colour policy.** As [`decode_item_rgba8`](Self::decode_item_rgba8), which documents the
+    /// shared policy in full: nclx matrices 1 (BT.709), 5/6 (BT.601, BT.470 B,G) and 9 (BT.2020
+    /// non-constant luminance), identity (0) at 4:4:4, monochrome, and the missing-`colr` BT.601
+    /// limited default. Beyond 8 bits every matrix — BT.601 included — goes through the
+    /// H.273-derived [`YcbcrMatrix`].
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba8`](Self::decode_item_rgba8), except that a `bit_depth > 8` frame is no
+    /// longer rejected.
+    pub fn decode_item_rgba16(
+        &self,
+        id: u32,
+        decoder: &mut dyn HevcDecoder,
+    ) -> Result<ImageBuf<Rgba16>> {
+        let mut stack = Vec::new();
+        let (rgba, dims) = self.decode_rgba_inner::<u16>(id, decoder, &mut stack)?;
+        ImageBuf::<Rgba16>::new(rgba, dims)
+    }
+
+    /// Decodes the primary item to a presentation-ready [`ImageBuf<Rgba16>`].
+    ///
+    /// Equivalent to [`decode_item_rgba16`](Self::decode_item_rgba16) on the primary item id.
+    ///
+    /// # Errors
+    ///
+    /// As [`decode_item_rgba16`](Self::decode_item_rgba16).
+    pub fn decode_primary_rgba16(&self, decoder: &mut dyn HevcDecoder) -> Result<ImageBuf<Rgba16>> {
+        self.decode_item_rgba16(self.as_isobmff().primary_item_id, decoder)
+    }
+
     // ---- planar pipeline ---------------------------------------------------------------------
 
     fn decode_planar_inner(
@@ -658,6 +708,14 @@ trait RgbaSample: sample_sealed::Sealed + Copy + Default + Eq {
     /// The all-ones sample: `255` for `u8`, `65535` for `u16`.
     const MAX: u32;
 
+    /// The deepest coded frame this surface will present. The `u8` surface stops at 8 so that
+    /// narrowing a 10/12-bit frame is an explicit [`Error::Unsupported`] rather than silent
+    /// quality loss; the `u16` surface accepts everything [`DecodedFrame`] can carry.
+    const MAX_CODED_DEPTH: u8;
+
+    /// The name of the entry point that does present deeper frames, for that error message.
+    const WIDER_SURFACE: &'static str;
+
     /// Narrows a value the caller has already bounded by [`Self::MAX`].
     fn narrow(v: u32) -> Self;
 
@@ -671,6 +729,9 @@ trait RgbaSample: sample_sealed::Sealed + Copy + Default + Eq {
 
 impl RgbaSample for u8 {
     const MAX: u32 = 255;
+    const MAX_CODED_DEPTH: u8 = 8;
+    const WIDER_SURFACE: &'static str =
+        "HEIF: >8-bit RGBA presentation needs decode_item_rgba16 (or the planar surface)";
 
     fn narrow(v: u32) -> Self {
         v as Self
@@ -687,6 +748,8 @@ impl RgbaSample for u8 {
 
 impl RgbaSample for u16 {
     const MAX: u32 = 65535;
+    const MAX_CODED_DEPTH: u8 = 16;
+    const WIDER_SURFACE: &'static str = "HEIF: bit depth is out of range (use the planar surface)";
 
     fn narrow(v: u32) -> Self {
         v as Self
@@ -739,21 +802,74 @@ fn colour_params(item: &HeifItem<'_>) -> Result<(u16, ColorRange)> {
     }
 }
 
+/// The per-frame YCbCr → RGB conversion this crate's colour policy selected.
+enum Converter {
+    /// 8-bit BT.601 through [`ycbcr_to_rgb`], gamut-color's libwebp-exact integer inverse — the
+    /// conversion this crate has always used at 8 bits, kept so shipped output stays byte-identical.
+    Bt601Legacy8(ColorRange),
+    /// The bit-depth- and matrix-generic H.273 §8.3 de-matrixing.
+    Generic(YcbcrMatrix),
+}
+
+impl Converter {
+    /// The converter for an nclx `matrix_coefficients` code point at `range` and `bit_depth`, or
+    /// [`Error::Unsupported`] if this surface does not present that combination.
+    ///
+    /// Matrix 0 (identity / GBR) never reaches here — it is a plane permutation, handled inline.
+    fn select(matrix: u16, range: ColorRange, bit_depth: u8) -> Result<Self> {
+        // BT.601 at 8 bits keeps the libwebp-exact inverse; every other pair takes the generic path.
+        if matches!(matrix, 5 | 6) && bit_depth == 8 {
+            return Ok(Converter::Bt601Legacy8(range));
+        }
+        let unsupported = || {
+            Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "HEIF: unsupported matrix coefficients or bit depth on the RGBA surface (BT.709, \
+                 BT.601/BT.470 B,G, BT.2020 NCL, identity, and monochrome are supported at 8, 10, \
+                 12 and 16 bits)",
+            )
+        };
+        let coefficients = MatrixCoefficients::from_code_point(matrix).ok_or_else(unsupported)?;
+        // `DecodedFrame` admits any depth in 8..=16, but only the CICP-modeled depths have a
+        // de-matrixing; an unmodeled depth is an explicit refusal, never a silent reinterpretation.
+        let depth = BitDepth::from_bits(u32::from(bit_depth)).ok_or_else(unsupported)?;
+        YcbcrMatrix::new(coefficients, range, depth).map(Converter::Generic)
+    }
+
+    /// Converts one triple, returning samples at the **input** depth's scale, so the caller
+    /// rescales from the frame's white level either way.
+    fn to_rgb(&self, y: u16, cb: u16, cr: u16) -> (u16, u16, u16) {
+        match self {
+            Converter::Bt601Legacy8(range) => {
+                let (r, g, b) = ycbcr_to_rgb(y as u8, cb as u8, cr as u8, *range);
+                (u16::from(r), u16::from(g), u16::from(b))
+            }
+            Converter::Generic(matrix) => matrix.to_rgb(y, cb, cr),
+        }
+    }
+}
+
 /// Converts a planar [`DecodedFrame`] to an interleaved RGBA buffer (opaque alpha) at the
 /// presentation sample width `T`, applying this crate's colour policy (see
 /// [`HeifImage::decode_item_rgba8`]).
 fn frame_to_rgba<T: RgbaSample>(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<T>> {
-    if frame.bit_depth != 8 {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "HEIF: >8-bit RGBA presentation is not yet supported (use the planar surface)",
-        ));
+    if frame.bit_depth > T::MAX_CODED_DEPTH {
+        return Err(Error::unsupported(env!("CARGO_PKG_NAME"), T::WIDER_SURFACE));
     }
     let (matrix, range) = colour_params(item)?;
     let (w, h) = (frame.width as usize, frame.height as usize);
     let max_in = (1u32 << frame.bit_depth) - 1;
     let opaque = T::narrow(T::MAX);
-    let mut out = vec![T::default(); w * h * 4];
+    let len = w
+        .checked_mul(h)
+        .and_then(|p| p.checked_mul(4))
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "HEIF: image is too large to present",
+            )
+        })?;
+    let mut out = vec![T::default(); len];
 
     if frame.chroma == ChromaFormat::Monochrome {
         for (i, px) in out.chunks_exact_mut(4).enumerate() {
@@ -763,84 +879,74 @@ fn frame_to_rgba<T: RgbaSample>(item: &HeifItem<'_>, frame: &DecodedFrame) -> Re
         return Ok(out);
     }
 
-    match matrix {
-        // Identity / GBR (mc = 0): plane order Y=G, Cb=B, Cr=R; requires 4:4:4, no range expansion.
-        0 => {
-            if frame.chroma != ChromaFormat::Yuv444 {
-                return Err(Error::unsupported(
-                    env!("CARGO_PKG_NAME"),
-                    "HEIF: identity matrix (mc = 0) requires 4:4:4 chroma",
-                ));
-            }
-            for (i, px) in out.chunks_exact_mut(4).enumerate() {
-                px.copy_from_slice(&[
-                    rescale::<T>(frame.cr[i], max_in),
-                    rescale::<T>(frame.y[i], max_in),
-                    rescale::<T>(frame.cb[i], max_in),
-                    opaque,
-                ]);
-            }
-        }
-        // BT.601 (matrix 6) and BT.470 System B,G (matrix 5) share coefficients.
-        5 | 6 => {
-            let (cw, _) = frame.chroma.chroma_dimensions(frame.width, frame.height);
-            let cw = cw as usize;
-            for y in 0..h {
-                let cy = match frame.chroma {
-                    ChromaFormat::Yuv420 => y / 2,
-                    _ => y,
-                };
-                for x in 0..w {
-                    let cx = match frame.chroma {
-                        ChromaFormat::Yuv444 => x,
-                        _ => x / 2,
-                    };
-                    let ci = cy * cw + cx;
-                    let (r, g, b) = ycbcr_to_rgb(
-                        frame.y[y * w + x] as u8,
-                        frame.cb[ci] as u8,
-                        frame.cr[ci] as u8,
-                        range,
-                    );
-                    let o = (y * w + x) * 4;
-                    out[o..o + 4].copy_from_slice(&[
-                        rescale::<T>(u16::from(r), max_in),
-                        rescale::<T>(u16::from(g), max_in),
-                        rescale::<T>(u16::from(b), max_in),
-                        opaque,
-                    ]);
-                }
-            }
-        }
-        _ => {
+    // Identity / GBR (mc = 0): plane order Y=G, Cb=B, Cr=R; requires 4:4:4, no range expansion.
+    if matrix == 0 {
+        if frame.chroma != ChromaFormat::Yuv444 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "HEIF: only BT.601 (matrix 5/6), identity (0), and monochrome are supported on the RGBA surface",
+                "HEIF: identity matrix (mc = 0) requires 4:4:4 chroma",
             ));
+        }
+        for (i, px) in out.chunks_exact_mut(4).enumerate() {
+            px.copy_from_slice(&[
+                rescale::<T>(frame.cr[i], max_in),
+                rescale::<T>(frame.y[i], max_in),
+                rescale::<T>(frame.cb[i], max_in),
+                opaque,
+            ]);
+        }
+        return Ok(out);
+    }
+
+    let converter = Converter::select(matrix, range, frame.bit_depth)?;
+    let (cw, _) = frame.chroma.chroma_dimensions(frame.width, frame.height);
+    let cw = cw as usize;
+    for y in 0..h {
+        let cy = match frame.chroma {
+            ChromaFormat::Yuv420 => y / 2,
+            _ => y,
+        };
+        for x in 0..w {
+            let cx = match frame.chroma {
+                ChromaFormat::Yuv444 => x,
+                _ => x / 2,
+            };
+            let ci = cy * cw + cx;
+            let (r, g, b) = converter.to_rgb(frame.y[y * w + x], frame.cb[ci], frame.cr[ci]);
+            let o = (y * w + x) * 4;
+            out[o..o + 4].copy_from_slice(&[
+                rescale::<T>(r, max_in),
+                rescale::<T>(g, max_in),
+                rescale::<T>(b, max_in),
+                opaque,
+            ]);
         }
     }
     Ok(out)
 }
 
 /// Expands one monochrome luma sample at `bit_depth` to a display gray value on the presentation
-/// sample's full range: a plain rescale for full range, and the studio-swing expansion
-/// `(y - 16·2^(bit_depth-8)) · MAX / (219·2^(bit_depth-8))` (rounded, clamped) for limited range.
+/// sample's full range: the identity for full range, and the studio-swing expansion
+/// `(y - 16·2^(bit_depth-8)) · max / (219·2^(bit_depth-8))` (rounded, clamped) for limited range.
 ///
-/// At `bit_depth = 8` on the `u8` surface the limited-range arm reduces exactly to
+/// Like every other path here the expansion happens **at the coded depth** and the result is then
+/// rescaled, so one precision model covers the whole surface and 8-bit content widens onto the
+/// 16-bit surface exactly. At `bit_depth = 8` the limited-range arm is exactly
 /// `((y - 16)·255 + 109)/219`, since `219/2 == 109` in integer division.
 fn expand_gray<T: RgbaSample>(y: u16, bit_depth: u8, range: ColorRange) -> T {
     let max_in = (1u32 << bit_depth) - 1;
-    match range {
-        ColorRange::Full => rescale::<T>(y, max_in),
+    let coded = match range {
+        ColorRange::Full => u32::from(y).min(max_in),
         ColorRange::Limited => {
             let s = i64::from(1u32 << (bit_depth - 8));
             let black = 16 * s;
             let span = 219 * s;
-            let max = i64::from(T::MAX);
+            let max = i64::from(max_in);
             let expanded = ((i64::from(y) - black) * max + span / 2) / span;
-            T::narrow(expanded.clamp(0, max) as u32)
+            expanded.clamp(0, max) as u32
         }
-    }
+    };
+    rescale::<T>(coded as u16, max_in)
 }
 
 /// Merges an alpha auxiliary into the RGBA buffer's alpha channel, rescaling from the auxiliary's
