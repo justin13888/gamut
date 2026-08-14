@@ -23,7 +23,7 @@ use crate::vp8l::header::Vp8lHeader;
 use crate::vp8l::lz77::{BackwardRefs, pixel_distance_to_code, value_to_prefix};
 use crate::vp8l::prefix::{
     MAX_CODE_LENGTH, NUM_DISTANCE_CODES, NUM_LENGTH_CODES, NUM_LITERAL_CODES, PrefixEncoder,
-    build_length_limited_lengths, green_alphabet_size, write_normal_prefix_code,
+    build_length_limited_lengths, green_alphabet_size, write_prefix_code,
 };
 use crate::vp8l::transform::{
     COLOR_INDEXING_TRANSFORM, COLOR_TRANSFORM, PREDICTOR_TRANSFORM, SUBTRACT_GREEN_TRANSFORM,
@@ -262,11 +262,11 @@ struct CodeGroup {
 impl CodeGroup {
     /// Writes the five code descriptions in bitstream order.
     fn write_descriptions(&self, w: &mut BitWriter) {
-        write_normal_prefix_code(w, self.green.lengths());
-        write_normal_prefix_code(w, self.red.lengths());
-        write_normal_prefix_code(w, self.blue.lengths());
-        write_normal_prefix_code(w, self.alpha.lengths());
-        write_normal_prefix_code(w, self.distance.lengths());
+        write_prefix_code(w, self.green.lengths());
+        write_prefix_code(w, self.red.lengths());
+        write_prefix_code(w, self.blue.lengths());
+        write_prefix_code(w, self.alpha.lengths());
+        write_prefix_code(w, self.distance.lengths());
     }
 
     /// Emits one token's symbols (and any LZ77 extra bits).

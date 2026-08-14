@@ -5,6 +5,11 @@
 //! The fixtures are pinned by length + FNV-1a-64 digest (and, for the smallest case, the full byte
 //! vector), so any change to the default output — including one that merely re-orders chunks — fails
 //! here rather than silently shipping. The digests were captured from the pre-change encoder.
+//!
+//! Re-pinning is deliberate and rare. The **lossless** digests were re-captured once, when the VP8L
+//! encoder began choosing the smallest of the spec's prefix-code description encodings (issue #31):
+//! 696 → 238 and 690 → 234 bytes for the same pixels. The lossy digests are unchanged from the
+//! original capture, which is what makes them a working regression net either side of that change.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
 use gamut_webp::{WebpDecoder, WebpEncoder};
@@ -74,7 +79,7 @@ fn assert_bytes(what: &str, bytes: &[u8], len: usize, digest: u64) {
 #[test]
 fn lossless_rgb_default_bytes_are_unchanged() {
     let file = encode_rgb(&WebpEncoder::lossless(), &rgb_fixture(24, 16), dims(24, 16));
-    assert_bytes("lossless rgb", &file, 696, 0x681b_82d9_857c_7277);
+    assert_bytes("lossless rgb", &file, 238, 0xe5d6_66c6_021f_86f3);
 }
 
 #[test]
@@ -84,7 +89,7 @@ fn lossless_rgba_default_bytes_are_unchanged() {
         &rgba_fixture(24, 16),
         dims(24, 16),
     );
-    assert_bytes("lossless rgba", &file, 690, 0x9a2f_8f5b_407c_73ae);
+    assert_bytes("lossless rgba", &file, 234, 0x8020_d49d_cd1b_9a08);
 }
 
 #[test]
