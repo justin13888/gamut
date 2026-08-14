@@ -338,7 +338,8 @@ impl HeifImage {
         decoder: &mut dyn HevcDecoder,
     ) -> Result<ImageBuf<Rgba8>> {
         let mut stack = Vec::new();
-        self.decode_rgba_inner(id, decoder, &mut stack)
+        let (rgba, dims) = self.decode_rgba_inner::<u8>(id, decoder, &mut stack)?;
+        ImageBuf::<Rgba8>::new(rgba, dims)
     }
 
     /// Decodes the primary item to a presentation-ready [`ImageBuf<Rgba8>`].
@@ -504,12 +505,16 @@ impl HeifImage {
 
     // ---- RGBA pipeline -----------------------------------------------------------------------
 
-    fn decode_rgba_inner(
+    /// The shared RGBA pipeline, generic over the presentation sample width. Returns the
+    /// interleaved buffer and its post-transform dimensions rather than an `ImageBuf`, so the
+    /// overlay recursion can composite sub-images without allocating and revalidating one per
+    /// sub-item; the two public entry points wrap the result.
+    fn decode_rgba_inner<T: RgbaSample>(
         &self,
         id: u32,
         decoder: &mut dyn HevcDecoder,
         stack: &mut Vec<u32>,
-    ) -> Result<ImageBuf<Rgba8>> {
+    ) -> Result<(Vec<T>, Dimensions)> {
         let item = self.item(id).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "HEIF: item id names no item")
         })?;
@@ -538,16 +543,16 @@ impl HeifImage {
         };
 
         let (rgba, w, h) = apply_transforms(item.transformative_properties(), rgba, w, h)?;
-        ImageBuf::<Rgba8>::new(rgba, Dimensions::new(w, h)?)
+        Ok((rgba, Dimensions::new(w, h)?))
     }
 
-    fn composite_overlay(
+    fn composite_overlay<T: RgbaSample>(
         &self,
         id: u32,
         item: HeifItem<'_>,
         decoder: &mut dyn HevcDecoder,
         stack: &mut Vec<u32>,
-    ) -> Result<(Vec<u8>, u32, u32)> {
+    ) -> Result<(Vec<T>, u32, u32)> {
         // `overlay` validates the payload holds exactly one offset per `dimg` reference.
         let overlay = self.overlay(id)?;
         let (ow, oh) = (overlay.output_width, overlay.output_height);
@@ -561,24 +566,26 @@ impl HeifImage {
                     "HEIF: overlay canvas is empty or too large",
                 )
             })?;
-        // Fill: 16-bit canvas samples scaled to 8-bit by >> 8.
+        // The `canvas_fill_value` channels are 16-bit; narrowing to a smaller sample takes the most
+        // significant bits (ISO/IEC 23008-12 §6.6.2.4), deliberately *not* the round-to-nearest
+        // rescale used for coded samples.
         let fill = [
-            (overlay.canvas_fill_value[0] >> 8) as u8,
-            (overlay.canvas_fill_value[1] >> 8) as u8,
-            (overlay.canvas_fill_value[2] >> 8) as u8,
-            (overlay.canvas_fill_value[3] >> 8) as u8,
+            T::from_canvas_fill(overlay.canvas_fill_value[0]),
+            T::from_canvas_fill(overlay.canvas_fill_value[1]),
+            T::from_canvas_fill(overlay.canvas_fill_value[2]),
+            T::from_canvas_fill(overlay.canvas_fill_value[3]),
         ];
-        let mut canvas = vec![0u8; len];
+        let mut canvas = vec![T::default(); len];
         for px in canvas.chunks_exact_mut(4) {
             px.copy_from_slice(&fill);
         }
         for (&input_id, &(dx, dy)) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
-            let src = self.decode_rgba_inner(input_id, decoder, stack)?;
+            let (src, dims) = self.decode_rgba_inner::<T>(input_id, decoder, stack)?;
             composite_over(
                 &mut canvas,
                 (ow, oh),
-                src.as_samples(),
-                (src.width(), src.height()),
+                &src,
+                (dims.width, dims.height),
                 (dx, dy),
             );
         }
@@ -634,6 +641,81 @@ fn assemble_plane(
     out
 }
 
+// ---- presentation sample width ---------------------------------------------------------------
+
+mod sample_sealed {
+    pub trait Sealed {}
+    impl Sealed for u8 {}
+    impl Sealed for u16 {}
+}
+
+/// The interleaved-RGBA sample type of a presentation surface: `u8` for [`Rgba8`], `u16` for
+/// [`Rgba16`]. Sealed — those two surfaces are the only implementors.
+///
+/// Every presentation surface carries samples over its type's **full** range, so [`Self::MAX`] is
+/// both the opaque-alpha value and the unity of the source-over blend.
+trait RgbaSample: sample_sealed::Sealed + Copy + Default + Eq {
+    /// The all-ones sample: `255` for `u8`, `65535` for `u16`.
+    const MAX: u32;
+
+    /// Narrows a value the caller has already bounded by [`Self::MAX`].
+    fn narrow(v: u32) -> Self;
+
+    /// Widens a sample for arithmetic.
+    fn widen(self) -> u32;
+
+    /// Narrows one `iovl` `canvas_fill_value` channel to this sample width by taking the **most
+    /// significant bits** (ISO/IEC 23008-12 §6.6.2.4): `v >> 8` for `u8`, `v` unchanged for `u16`.
+    fn from_canvas_fill(v: u16) -> Self;
+}
+
+impl RgbaSample for u8 {
+    const MAX: u32 = 255;
+
+    fn narrow(v: u32) -> Self {
+        v as Self
+    }
+
+    fn widen(self) -> u32 {
+        u32::from(self)
+    }
+
+    fn from_canvas_fill(v: u16) -> Self {
+        (v >> 8) as Self
+    }
+}
+
+impl RgbaSample for u16 {
+    const MAX: u32 = 65535;
+
+    fn narrow(v: u32) -> Self {
+        v as Self
+    }
+
+    fn widen(self) -> u32 {
+        u32::from(self)
+    }
+
+    fn from_canvas_fill(v: u16) -> Self {
+        v
+    }
+}
+
+/// Rescales one coded sample from a plane whose white level is `max_in` onto the presentation
+/// sample's full range, round-to-nearest, saturating a sample that exceeds its declared depth.
+///
+/// This is the single place the surfaces' sample-scale policy lives. `rescale::<u8>(s, 255)` is the
+/// identity, and `rescale::<u16>(s, 255)` is exactly `s * 257` — so widening 8-bit content to the
+/// 16-bit surface is lossless.
+///
+/// Round-to-nearest rather than bit replication: the two differ (at 10-bit, sample 15 gives 961
+/// here and 960 replicated), and this is the formula the alpha merge has always used.
+fn rescale<T: RgbaSample>(s: u16, max_in: u32) -> T {
+    let s = u64::from(u32::from(s).min(max_in));
+    let max = u64::from(max_in);
+    T::narrow(((s * u64::from(T::MAX) + max / 2) / max) as u32)
+}
+
 // ---- colour conversion -----------------------------------------------------------------------
 
 /// The presentation matrix coefficients and signal range for an item: its nclx `colr`, or the
@@ -657,9 +739,10 @@ fn colour_params(item: &HeifItem<'_>) -> Result<(u16, ColorRange)> {
     }
 }
 
-/// Converts a planar [`DecodedFrame`] to an interleaved 8-bit RGBA buffer (opaque alpha), applying
-/// this crate's colour policy (see [`HeifImage::decode_item_rgba8`]).
-fn frame_to_rgba(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
+/// Converts a planar [`DecodedFrame`] to an interleaved RGBA buffer (opaque alpha) at the
+/// presentation sample width `T`, applying this crate's colour policy (see
+/// [`HeifImage::decode_item_rgba8`]).
+fn frame_to_rgba<T: RgbaSample>(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<T>> {
     if frame.bit_depth != 8 {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
@@ -668,12 +751,14 @@ fn frame_to_rgba(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
     }
     let (matrix, range) = colour_params(item)?;
     let (w, h) = (frame.width as usize, frame.height as usize);
-    let mut out = vec![0u8; w * h * 4];
+    let max_in = (1u32 << frame.bit_depth) - 1;
+    let opaque = T::narrow(T::MAX);
+    let mut out = vec![T::default(); w * h * 4];
 
     if frame.chroma == ChromaFormat::Monochrome {
         for (i, px) in out.chunks_exact_mut(4).enumerate() {
-            let g = expand_gray8(frame.y[i], range);
-            px.copy_from_slice(&[g, g, g, 255]);
+            let g = expand_gray::<T>(frame.y[i], frame.bit_depth, range);
+            px.copy_from_slice(&[g, g, g, opaque]);
         }
         return Ok(out);
     }
@@ -688,7 +773,12 @@ fn frame_to_rgba(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
                 ));
             }
             for (i, px) in out.chunks_exact_mut(4).enumerate() {
-                px.copy_from_slice(&[frame.cr[i] as u8, frame.y[i] as u8, frame.cb[i] as u8, 255]);
+                px.copy_from_slice(&[
+                    rescale::<T>(frame.cr[i], max_in),
+                    rescale::<T>(frame.y[i], max_in),
+                    rescale::<T>(frame.cb[i], max_in),
+                    opaque,
+                ]);
             }
         }
         // BT.601 (matrix 6) and BT.470 System B,G (matrix 5) share coefficients.
@@ -713,7 +803,12 @@ fn frame_to_rgba(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
                         range,
                     );
                     let o = (y * w + x) * 4;
-                    out[o..o + 4].copy_from_slice(&[r, g, b, 255]);
+                    out[o..o + 4].copy_from_slice(&[
+                        rescale::<T>(u16::from(r), max_in),
+                        rescale::<T>(u16::from(g), max_in),
+                        rescale::<T>(u16::from(b), max_in),
+                        opaque,
+                    ]);
                 }
             }
         }
@@ -727,20 +822,35 @@ fn frame_to_rgba(item: &HeifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Expands one 8-bit monochrome luma sample to a display gray value: identity for full range, and
-/// the studio-swing expansion `(y - 16) · 255 / 219` (rounded, clamped) for limited range.
-fn expand_gray8(y: u16, range: ColorRange) -> u8 {
+/// Expands one monochrome luma sample at `bit_depth` to a display gray value on the presentation
+/// sample's full range: a plain rescale for full range, and the studio-swing expansion
+/// `(y - 16·2^(bit_depth-8)) · MAX / (219·2^(bit_depth-8))` (rounded, clamped) for limited range.
+///
+/// At `bit_depth = 8` on the `u8` surface the limited-range arm reduces exactly to
+/// `((y - 16)·255 + 109)/219`, since `219/2 == 109` in integer division.
+fn expand_gray<T: RgbaSample>(y: u16, bit_depth: u8, range: ColorRange) -> T {
+    let max_in = (1u32 << bit_depth) - 1;
     match range {
-        ColorRange::Full => y.min(255) as u8,
+        ColorRange::Full => rescale::<T>(y, max_in),
         ColorRange::Limited => {
-            let expanded = ((i32::from(y) - 16) * 255 + 109) / 219;
-            expanded.clamp(0, 255) as u8
+            let s = i64::from(1u32 << (bit_depth - 8));
+            let black = 16 * s;
+            let span = 219 * s;
+            let max = i64::from(T::MAX);
+            let expanded = ((i64::from(y) - black) * max + span / 2) / span;
+            T::narrow(expanded.clamp(0, max) as u32)
         }
     }
 }
 
-/// Merges an alpha auxiliary into the RGBA buffer's alpha channel.
-fn apply_alpha(rgba: &mut [u8], w: usize, h: usize, alpha: &DecodedFrame) -> Result<()> {
+/// Merges an alpha auxiliary into the RGBA buffer's alpha channel, rescaling from the auxiliary's
+/// own bit depth (independent of the master's) to the presentation sample's full range.
+fn apply_alpha<T: RgbaSample>(
+    rgba: &mut [T],
+    w: usize,
+    h: usize,
+    alpha: &DecodedFrame,
+) -> Result<()> {
     if alpha.chroma != ChromaFormat::Monochrome {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
@@ -755,11 +865,9 @@ fn apply_alpha(rgba: &mut [u8], w: usize, h: usize, alpha: &DecodedFrame) -> Res
     }
     let max = (1u32 << alpha.bit_depth) - 1;
     for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
-        // Scale the sample from its native bit depth to 8-bit, round-to-nearest. Depth 8 needs no
-        // special case: `(s * 255 + 127) / 255 == s` for every `s` in `0..=255`, so this general
-        // rescale is already the identity there.
-        let s = u32::from(alpha.y[i]);
-        px[3] = ((s * 255 + max / 2) / max) as u8;
+        // Depth 8 onto the `u8` surface needs no special case: `(s * 255 + 127) / 255 == s` for
+        // every `s` in `0..=255`, so the general rescale is already the identity there.
+        px[3] = rescale::<T>(alpha.y[i], max);
     }
     Ok(())
 }
@@ -768,12 +876,12 @@ fn apply_alpha(rgba: &mut [u8], w: usize, h: usize, alpha: &DecodedFrame) -> Res
 
 /// Applies transformative properties to an interleaved RGBA buffer in `ipma` (list) order, returning
 /// the transformed buffer and its dimensions.
-fn apply_transforms(
+fn apply_transforms<T: Copy + Default>(
     props: Vec<TransformativeProperty>,
-    rgba: Vec<u8>,
+    rgba: Vec<T>,
     w: u32,
     h: u32,
-) -> Result<(Vec<u8>, u32, u32)> {
+) -> Result<(Vec<T>, u32, u32)> {
     let (mut cur, mut cw, mut ch) = (rgba, w, h);
     for tp in props {
         match tp {
@@ -804,10 +912,10 @@ fn apply_transforms(
 
 /// Rotates an interleaved RGBA buffer 90° anti-clockwise: output `(ox, oy)` reads input
 /// `(w - 1 - oy, ox)`, giving output dimensions `(h, w)`.
-fn rotate90_ccw(src: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+fn rotate90_ccw<T: Copy + Default>(src: &[T], w: u32, h: u32) -> (Vec<T>, u32, u32) {
     let (wu, hu) = (w as usize, h as usize);
     let (nw, nh) = (hu, wu);
-    let mut out = vec![0u8; nw * nh * 4];
+    let mut out = vec![T::default(); nw * nh * 4];
     for oy in 0..nh {
         for ox in 0..nw {
             let (sx, sy) = (wu - 1 - oy, ox);
@@ -822,9 +930,9 @@ fn rotate90_ccw(src: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
 /// Mirrors an interleaved RGBA buffer by exchanging top and bottom (`axis = 0`) or left and right
 /// (`axis = 1`); dimensions are unchanged. Any other `axis` value is treated as axis 0 (the `imir`
 /// field is a single bit).
-fn mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
+fn mirror<T: Copy + Default>(src: &[T], w: u32, h: u32, axis: u8) -> Vec<T> {
     let (wu, hu) = (w as usize, h as usize);
-    let mut out = vec![0u8; wu * hu * 4];
+    let mut out = vec![T::default(); wu * hu * 4];
     for y in 0..hu {
         for x in 0..wu {
             let (sx, sy) = if axis == 1 {
@@ -853,7 +961,12 @@ fn mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
 ///
 /// Returns [`Error::InvalidInput`] if any denominator is zero, if the width/height or the computed
 /// top-left corner is not integer-valued, or if the crop window falls outside the image.
-fn crop_clap(src: &[u8], w: u32, h: u32, clap: &CleanAperture) -> Result<(Vec<u8>, u32, u32)> {
+fn crop_clap<T: Copy + Default>(
+    src: &[T],
+    w: u32,
+    h: u32,
+    clap: &CleanAperture,
+) -> Result<(Vec<T>, u32, u32)> {
     if clap.width_d == 0 || clap.height_d == 0 || clap.horiz_off_d == 0 || clap.vert_off_d == 0 {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
@@ -899,7 +1012,7 @@ fn crop_clap(src: &[u8], w: u32, h: u32, clap: &CleanAperture) -> Result<(Vec<u8
 
     let (wu, left, top) = (w as usize, left as usize, top as usize);
     let (cw, chh) = (crop_w as usize, crop_h as usize);
-    let mut out = vec![0u8; cw * chh * 4];
+    let mut out = vec![T::default(); cw * chh * 4];
     for y in 0..chh {
         for x in 0..cw {
             let si = ((top + y) * wu + (left + x)) * 4;
@@ -934,20 +1047,25 @@ fn clap_offset(dim: i64, crop: i64, off_n: u32, off_d: u32) -> Result<i64> {
 /// Composites a source RGBA image over the canvas at signed offset `(dx, dy)`, clipping to the
 /// canvas, with unassociated-alpha source-over blending.
 ///
-/// Source-over in integer math (`sa`/`da` the source/destination alpha, `sc`/`dc` a channel):
-/// `out_a = sa + round(da·(255 - sa)/255)`, and each channel
-/// `out_c = round((sc·sa + round(dc·da·(255 - sa)/255)) / out_a)`, or a fully transparent pixel when
-/// `out_a = 0`. Rounding is round-half-up (`+ half`).
-fn composite_over(
-    canvas: &mut [u8],
+/// Source-over in integer math, with `MAX` the presentation sample's all-ones value (`sa`/`da` the
+/// source/destination alpha, `sc`/`dc` a channel): `out_a = sa + round(da·(MAX - sa)/MAX)`, and each
+/// channel `out_c = round((sc·sa + round(dc·da·(MAX - sa)/MAX)) / out_a)`, or a fully transparent
+/// pixel when `out_a = 0`. Rounding is round-half-up (`+ half`).
+fn composite_over<T: RgbaSample>(
+    canvas: &mut [T],
     canvas_dims: (u32, u32),
-    src: &[u8],
+    src: &[T],
     src_dims: (u32, u32),
     offset: (i32, i32),
 ) {
     let (cw, ch) = canvas_dims;
     let (sw, sh) = src_dims;
     let (dx, dy) = offset;
+    // The intermediates are `u64`: at 16-bit samples `dc·da·inv` reaches ~2.8e14, far past `u32`.
+    // Every 8-bit intermediate already fitted `u32` and the arithmetic is exact, so widening cannot
+    // change an 8-bit result.
+    let max = u64::from(T::MAX);
+    let transparent = T::narrow(0);
     for sy in 0..sh as i64 {
         let y = i64::from(dy) + sy;
         if y < 0 || y >= i64::from(ch) {
@@ -960,22 +1078,22 @@ fn composite_over(
             }
             let si = ((sy * i64::from(sw) + sx) * 4) as usize;
             let di = ((y * i64::from(cw) + x) * 4) as usize;
-            let sa = u32::from(src[si + 3]);
-            let inv = 255 - sa;
-            let da = u32::from(canvas[di + 3]);
-            let da_contrib = (da * inv + 127) / 255;
+            let sa = u64::from(src[si + 3].widen());
+            let inv = max - sa;
+            let da = u64::from(canvas[di + 3].widen());
+            let da_contrib = (da * inv + max / 2) / max;
             let out_a = sa + da_contrib;
             if out_a == 0 {
-                canvas[di..di + 4].copy_from_slice(&[0, 0, 0, 0]);
+                canvas[di..di + 4].copy_from_slice(&[transparent; 4]);
                 continue;
             }
             for c in 0..3 {
-                let sc = u32::from(src[si + c]);
-                let dc = u32::from(canvas[di + c]);
-                let num = sc * sa + (dc * da * inv + 127) / 255;
-                canvas[di + c] = ((num + out_a / 2) / out_a).min(255) as u8;
+                let sc = u64::from(src[si + c].widen());
+                let dc = u64::from(canvas[di + c].widen());
+                let num = sc * sa + (dc * da * inv + max / 2) / max;
+                canvas[di + c] = T::narrow(((num + out_a / 2) / out_a).min(max) as u32);
             }
-            canvas[di + 3] = out_a as u8;
+            canvas[di + 3] = T::narrow(out_a as u32);
         }
     }
 }
