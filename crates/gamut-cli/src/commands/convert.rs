@@ -54,6 +54,11 @@ pub(crate) struct ConvertArgs {
     /// Compress TIFF output with PackBits run-length encoding instead of storing it uncompressed.
     #[arg(long)]
     packbits: bool,
+    /// PNG DEFLATE effort: optimal-parse refinement passes at the always-used best compression
+    /// level (0 = lazy parse only; zopfli's default budget is 15). Omitting it keeps the encoder
+    /// default (6). Ignored for other output formats.
+    #[arg(long)]
+    png_effort: Option<u8>,
     /// JPEG XL Butteraugli distance for lossy encoding (~1.0 = visually lossless, up to 25.0).
     /// Supplying it selects lossy JXL; omitting it keeps the lossless default. Ignored for other
     /// output formats.
@@ -208,10 +213,13 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 bytes = rgba.len(),
                 "decoded input"
             );
-            PngEncoder::new()
+            let mut encoder = PngEncoder::new()
                 .with_compression(PngLevel::Best)
-                .with_auto_reduce(true)
-                .encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
+                .with_auto_reduce(true);
+            if let Some(effort) = args.png_effort {
+                encoder = encoder.with_effort(effort);
+            }
+            encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)
         }
         OutputFormat::Jxl => {
