@@ -3,7 +3,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::chunk::ChunkHeader;
+use crate::chunk::pad_len;
 use crate::fourcc::FourCc;
 
 /// The largest value the RIFF file-size field may hold: "the maximum value of this field is 2^32
@@ -47,7 +47,7 @@ impl RiffWriter {
         self.buf.extend_from_slice(fourcc.as_bytes());
         self.buf.extend_from_slice(&size.to_le_bytes());
         self.buf.extend_from_slice(payload);
-        if ChunkHeader::padding(size) == 1 {
+        if pad_len(size) == 1 {
             self.buf.push(0);
         }
         Ok(())

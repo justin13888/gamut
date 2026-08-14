@@ -7,7 +7,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::chunk::{CHUNK_HEADER_LEN, Chunk};
+use crate::chunk::{CHUNK_HEADER_LEN, Chunk, pad_len};
 use crate::fourcc::FourCc;
 use crate::reader::RiffReader;
 use crate::writer::RiffWriter;
@@ -383,7 +383,7 @@ impl<'a> WebpLayout<'a> {
                 }
                 WebpChunkId::Unknown(_) => layout.unknown.push(chunk),
             }
-            offset += CHUNK_HEADER_LEN + chunk.payload.len() + (chunk.payload.len() & 1);
+            offset += CHUNK_HEADER_LEN + chunk.payload.len() + pad_len(chunk.payload.len() as u32);
         }
         Ok(layout)
     }

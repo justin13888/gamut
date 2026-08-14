@@ -3,7 +3,7 @@
 
 use gamut_core::{Error, Result};
 
-use crate::chunk::{CHUNK_HEADER_LEN, Chunk, ChunkHeader};
+use crate::chunk::{CHUNK_HEADER_LEN, Chunk, pad_len};
 use crate::fourcc::FourCc;
 
 /// Iterator over the top-level chunks of a WebP file's `RIFF`/`WEBP` payload.
@@ -112,7 +112,7 @@ impl<'a> Iterator for RiffReader<'a> {
             .with_byte_offset(offset as u64)));
         }
         let payload = &self.rest[CHUNK_HEADER_LEN..CHUNK_HEADER_LEN + size];
-        let pad = ChunkHeader::padding(size as u32);
+        let pad = pad_len(size as u32);
         // An odd payload is followed by a pad byte "which MUST be 0 to conform with RIFF"
         // (RFC 9649 §2.3). A non-conforming final chunk may omit it entirely — the `get` below
         // clamps for that — but a pad byte that is present and non-zero is malformed, and silently

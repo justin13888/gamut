@@ -29,7 +29,7 @@ mod reader;
 mod webp;
 mod writer;
 
-pub use chunk::{CHUNK_HEADER_LEN, Chunk, ChunkHeader};
+pub use chunk::Chunk;
 pub use fourcc::FourCc;
 pub use reader::RiffReader;
 pub use webp::{
