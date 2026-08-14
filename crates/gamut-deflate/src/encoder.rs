@@ -10,18 +10,21 @@ const OPTIMAL_PARSE_LIMIT: usize = 1 << 20;
 
 /// Compression effort, trading encode time for output size. Every level produces a correct stream;
 /// they differ only in ratio.
+///
+/// The discriminants are permanent and append-only, so the enum maps directly onto a C ABI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
 pub enum Level {
     /// Stored (uncompressed) blocks only — the always-correct floor and an upper bound on size.
-    Store,
+    Store = 0,
     /// Fast: greedy matching with fixed Huffman codes.
-    Fast,
+    Fast = 1,
     /// Balanced default: lazy matching with per-block dynamic Huffman codes.
     #[default]
-    Default,
+    Default = 2,
     /// Smallest output: a zopfli-style optimal parse with per-block dynamic Huffman codes and
     /// cost-driven block splitting. Slowest; intended for write-once assets where size dominates.
-    Best,
+    Best = 3,
 }
 
 /// A reusable DEFLATE / zlib encoder configured by a [`Level`].
