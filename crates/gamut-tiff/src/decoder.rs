@@ -1,6 +1,15 @@
 //! The TIFF decoder.
+//!
+//! Decoding proper produces the image in the layout the file natively carries; presenting it as a
+//! caller's chosen [`gamut_core::Pixel`] is then a pure conversion, delegated wholesale to
+//! [`gamut_core::convert`] so TIFF applies exactly the same widening and narrowing rules as every
+//! other gamut decoder. [`TiffDecoder::convert_policy`] selects which lossy conversions are
+//! permitted; the default permits none.
 
-use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result, Rgb8, Rgba8};
+use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
+use gamut_core::{
+    Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Pixel, PixelFormat, Result, Rgb8, Rgba8,
+};
 use gamut_ifd::{Ifd, read};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
@@ -13,9 +22,13 @@ use crate::tags;
 /// Reads chunky strips or tiles compressed with None, PackBits, LZW, Adobe Deflate, Modified
 /// Huffman, or Group 4 fax. Supported layouts are 8-bit grayscale/RGB/RGBA/CMYK/palette and 1-bit
 /// bilevel; other compression and colour modes return [`Error::Unsupported`].
+///
+/// A typed decode presents the image losslessly by default, so requesting a layout that cannot
+/// hold the file — [`Rgb8`] for an RGBA TIFF, [`Gray8`] for a colour one — is refused rather than
+/// silently narrowed. Call [`TiffDecoder::convert_policy`] to opt into the loss.
 #[derive(Debug, Clone, Default)]
 pub struct TiffDecoder {
-    _private: (),
+    policy: ConvertPolicy,
 }
 
 /// Upper bound on a decoded image's stored bytes, guarding against malformed huge dimensions and
@@ -23,9 +36,13 @@ pub struct TiffDecoder {
 const MAX_IMAGE_BYTES: usize = 64 << 20;
 
 /// An image decoded to interleaved 8-bit samples in `BlackIsZero`/RGB convention.
+///
+/// `format` is the layout those samples are *already* in — palette indices are expanded and
+/// `WhiteIsZero` is inverted during decode, so what reaches [`gamut_core::convert`] is a plain
+/// grayscale, RGB, RGBA, or CMYK buffer.
 struct DecodedImage {
     dims: Dimensions,
-    samples_per_pixel: usize,
+    format: PixelFormat,
     pixels: Vec<u8>,
 }
 
@@ -60,111 +77,92 @@ impl TiffDecoder {
         Ok(read(data)?.ifds.len())
     }
 
-    /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit [`Rgb8`] (page 0 is the first;
-    /// grayscale is replicated across channels, any alpha is dropped). Multi-page access is
-    /// TIFF-specific, so it stays inherent; the [`DecodeImage`] impls present page 0.
+    /// Selects which lossy conversions a typed decode may perform.
+    ///
+    /// Defaults to [`ConvertPolicy::lossless`], under which a layout that cannot hold the file
+    /// exactly is refused. Pass [`ConvertPolicy::permissive`] for the "just give me RGB" behaviour
+    /// an application usually wants:
+    ///
+    /// ```no_run
+    /// use gamut_core::{convert::ConvertPolicy, DecodeImage, ImageBuf, Rgb8};
+    /// use gamut_tiff::TiffDecoder;
+    ///
+    /// # fn main() -> gamut_core::Result<()> {
+    /// # let bytes: &[u8] = &[];
+    /// let decoder = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    /// let rgb: ImageBuf<Rgb8> = decoder.decode_image(bytes)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit [`Rgb8`] (page 0 is the
+    /// first). Multi-page access is TIFF-specific, so it stays inherent; the [`DecodeImage`] impls
+    /// present page 0.
+    ///
+    /// Shorthand for [`TiffDecoder::decode_page_as`] at [`Rgb8`], and subject to the same
+    /// [`ConvertPolicy`]: an RGBA or CMYK page is refused unless the policy permits the loss.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for malformed input or an out-of-range page, or
-    /// [`Error::Unsupported`] for a feature not yet implemented.
+    /// As [`TiffDecoder::decode_page_as`].
     pub fn decode_page(&self, data: &[u8], page: usize) -> Result<ImageBuf<Rgb8>> {
+        self.decode_page_as(data, page)
+    }
+
+    /// Decodes page `page` of a multi-page TIFF and presents it as pixel layout `P`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for malformed input or an out-of-range page,
+    /// [`Error::Unsupported`] for a feature not yet implemented, or [`Error::Unsupported`] for a
+    /// conversion to `P` that would lose information this decoder's [`ConvertPolicy`] does not
+    /// permit.
+    pub fn decode_page_as<P: Pixel<Sample = u8>>(
+        &self,
+        data: &[u8],
+        page: usize,
+    ) -> Result<ImageBuf<P>> {
         let img = decode_page_samples(data, page)?;
-        ImageBuf::new(present_rgb(&img)?, img.dims)
+        let raw = RawImage::new(&img.pixels, img.format, img.dims)?;
+        convert_from_raw(raw, self.policy)
     }
 }
 
 impl DecodeImage<Rgb8> for TiffDecoder {
-    /// Grayscale is replicated across channels; any alpha is dropped.
+    /// Grayscale and palette images widen into RGB. An RGBA file needs an
+    /// [`AlphaPolicy`](gamut_core::convert::AlphaPolicy), and a CMYK file cannot be presented as
+    /// RGB at all (decode it as [`Cmyk8`]).
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
-        self.decode_page(data, 0)
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Rgba8> for TiffDecoder {
     /// RGB gains opaque alpha; grayscale is replicated then made opaque.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
-        let img = decode_page_samples(data, 0)?;
-        ImageBuf::new(present_rgba(&img)?, img.dims)
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Cmyk8> for TiffDecoder {
-    /// Errors unless the image is 4-sample; the samples pass through unchanged.
+    /// Errors unless the image is CMYK; the samples pass through unchanged. CMYK is an ink space,
+    /// not a rearrangement of RGB, so no policy converts into or out of it.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Cmyk8>> {
-        let img = decode_page_samples(data, 0)?;
-        if img.samples_per_pixel != 4 {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: image is not 4-sample CMYK",
-            ));
-        }
-        ImageBuf::new(img.pixels, img.dims)
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Gray8> for TiffDecoder {
-    /// Errors unless the image is single-sample; the samples pass through unchanged.
+    /// A grayscale file passes through unchanged. A colour file needs a
+    /// [`LumaPolicy`](gamut_core::convert::LumaPolicy) to be reduced to luma.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
-        let img = decode_page_samples(data, 0)?;
-        if img.samples_per_pixel != 1 {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: image is not grayscale",
-            ));
-        }
-        ImageBuf::new(img.pixels, img.dims)
+        self.decode_page_as(data, 0)
     }
-}
-
-/// Presents decoded samples as interleaved 8-bit RGB (1 → replicated, 3 → as-is, 4 → alpha dropped).
-fn present_rgb(img: &DecodedImage) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(img.dims.width as usize * img.dims.height as usize * 3);
-    match img.samples_per_pixel {
-        1 => {
-            for &v in &img.pixels {
-                out.extend_from_slice(&[v, v, v]);
-            }
-        }
-        3 => out.extend_from_slice(&img.pixels),
-        4 => {
-            for px in img.pixels.chunks_exact(4) {
-                out.extend_from_slice(&px[0..3]);
-            }
-        }
-        _ => {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: cannot present this sample layout as RGB",
-            ));
-        }
-    }
-    Ok(out)
-}
-
-/// Presents decoded samples as interleaved 8-bit RGBA (1 → replicated opaque, 3 → opaque, 4 → as-is).
-fn present_rgba(img: &DecodedImage) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(img.dims.width as usize * img.dims.height as usize * 4);
-    match img.samples_per_pixel {
-        1 => {
-            for &v in &img.pixels {
-                out.extend_from_slice(&[v, v, v, 255]);
-            }
-        }
-        3 => {
-            for px in img.pixels.chunks_exact(3) {
-                out.extend_from_slice(&[px[0], px[1], px[2], 255]);
-            }
-        }
-        4 => out.extend_from_slice(&img.pixels),
-        _ => {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: cannot present this sample layout as RGBA",
-            ));
-        }
-    }
-    Ok(out)
 }
 
 /// Reads a required unsigned-integer tag.
@@ -325,9 +323,10 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     }
 
     // Unpack the stored bytes into 8-bit output samples per the photometric mode.
-    let (out_spp, pixels) = match mode {
-        Mode::Rgb => (3, packed),
-        Mode::Rgba | Mode::Cmyk => (4, packed),
+    let (format, pixels) = match mode {
+        Mode::Rgb => (PixelFormat::Rgb8, packed),
+        Mode::Rgba => (PixelFormat::Rgba8, packed),
+        Mode::Cmyk => (PixelFormat::Cmyk8, packed),
         Mode::Gray { white_is_zero } if bps == 8 => {
             let mut px = packed;
             if white_is_zero {
@@ -335,7 +334,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
                     *v = 255 - *v;
                 }
             }
-            (1, px)
+            (PixelFormat::Gray8, px)
         }
         Mode::Gray { white_is_zero } => {
             // bps == 1: expand each MSB-first bit to a 0/255 sample.
@@ -348,7 +347,8 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
                     px.push(if white { 255 } else { 0 });
                 }
             }
-            (1, px)
+            // Already expanded to full-range 0/255 samples, so this is Gray8 rather than Bilevel.
+            (PixelFormat::Gray8, px)
         }
         Mode::Palette(palette) => {
             // Each 8-bit index selects an RGB triple from the colour table.
@@ -356,7 +356,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             for &idx in &packed {
                 px.extend_from_slice(&palette.entry(idx));
             }
-            (3, px)
+            (PixelFormat::Rgb8, px)
         }
     };
 
@@ -365,7 +365,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             width: width as u32,
             height: height as u32,
         },
-        samples_per_pixel: out_spp,
+        format,
         pixels,
     })
 }

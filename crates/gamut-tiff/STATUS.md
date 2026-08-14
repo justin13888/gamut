@@ -34,6 +34,7 @@ lossy → MAE/PSNR tolerance.
 | P11 | §11     | CCITT Group 4 / T.6 fax (Compression=4); G3-2D deferred | ✅ done |
 | P12 | §15     | Tiled images (8-bit; None/PackBits/LZW) | ✅ done |
 | P13 | §18     | RGBA (ExtraSamples alpha); planar / 16-bit / float deferred | ✅ done |
+| P14 | —       | Typed presentation delegated to `gamut_core::convert` (issue #268): lossless by default, `TiffDecoder::convert_policy` opts into alpha dropping and luma reduction | ✅ done |
 | P14 | §16     | CMYK (Separated, 8-bit) | ✅ done |
 | P15 | §21     | YCbCr | ⏳ deferred |
 | P16 | §20,23  | RGB colorimetry + CIE L\*a\*b\* | ⏳ deferred |
