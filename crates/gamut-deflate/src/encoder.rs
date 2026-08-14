@@ -7,8 +7,6 @@ use crate::{block, dynamic, lz77, zlib};
 /// Largest input for which `Level::Best` runs the (quadratic-ish) optimal parse; above this it falls
 /// back to lazy matching with block splitting, which already lands at/below zlib-9.
 const OPTIMAL_PARSE_LIMIT: usize = 1 << 20;
-/// Cost-model refinement passes for the optimal parse.
-const OPTIMAL_PARSE_ITERATIONS: u32 = 6;
 
 /// Compression effort, trading encode time for output size. Every level produces a correct stream;
 /// they differ only in ratio.
@@ -30,6 +28,7 @@ pub enum Level {
 #[derive(Debug, Clone)]
 pub struct DeflateEncoder {
     level: Level,
+    effort: u8,
 }
 
 impl Default for DeflateEncoder {
@@ -39,11 +38,16 @@ impl Default for DeflateEncoder {
 }
 
 impl DeflateEncoder {
+    /// The default [`Level::Best`] effort: the number of cost-model refinement passes the optimal
+    /// parse runs unless overridden by [`DeflateEncoder::with_effort`].
+    pub const DEFAULT_EFFORT: u8 = 6;
+
     /// Creates an encoder at [`Level::Default`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             level: Level::Default,
+            effort: Self::DEFAULT_EFFORT,
         }
     }
 
@@ -51,6 +55,21 @@ impl DeflateEncoder {
     #[must_use]
     pub fn with_level(mut self, level: Level) -> Self {
         self.level = level;
+        self
+    }
+
+    /// Sets the [`Level::Best`] effort: the maximum number of cost-model refinement passes the
+    /// zopfli-style optimal parse runs (default [`DeflateEncoder::DEFAULT_EFFORT`]; `zopfli`'s own
+    /// default budget is 15).
+    ///
+    /// `0` skips refinement entirely and emits the lazy seed parse — still with `Best`'s full
+    /// match-finder depth and block splitting, and always a correct stream. Higher values only cost
+    /// time: passes stop early once the parse reaches a fixed point. The knob is ignored at every
+    /// other level, and for inputs over 1 MiB, where `Best` falls back to lazy matching regardless
+    /// of effort.
+    #[must_use]
+    pub fn with_effort(mut self, effort: u8) -> Self {
+        self.effort = effort;
         self
     }
 
@@ -84,7 +103,7 @@ impl DeflateEncoder {
                 let chain = self.max_chain();
                 let tokens = if matches!(self.level, Level::Best) {
                     if data.len() <= OPTIMAL_PARSE_LIMIT {
-                        lz77::parse_optimal(data, chain, OPTIMAL_PARSE_ITERATIONS)
+                        lz77::parse_optimal(data, chain, u32::from(self.effort))
                     } else {
                         lz77::parse(data, chain, true)
                     }
