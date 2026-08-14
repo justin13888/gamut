@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{DecodeImage, Dimensions, Error, ImageBuf, Result, Rgb8, Rgba8};
-use gamut_riff::{RiffReader, WebpChunkId};
+use gamut_riff::{WebpChunkId, WebpLayout};
 
 use crate::alpha;
 use crate::backend::{
@@ -117,47 +117,48 @@ impl WebpDecoder {
         }
     }
 
+    /// Sorts the container's chunks and locates the image bitstream.
+    ///
+    /// [`WebpLayout::parse`] is the single container walk behind both pixel paths: it validates the
+    /// `VP8X` header, enforces the spec's reconstruction-chunk order, and hands back the `ALPH` and
+    /// bitstream payloads (RFC 9649 §2.7).
+    fn layout(data: &[u8]) -> Result<(WebpLayout<'_>, WebpCodestream, &[u8])> {
+        let layout = WebpLayout::parse(data)?;
+        let (id, payload) = layout.bitstream.ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "WebP: no VP8/VP8L bitstream chunk")
+        })?;
+        let codestream = match id {
+            WebpChunkId::Vp8l => WebpCodestream::Vp8l,
+            _ => WebpCodestream::Vp8,
+        };
+        Ok((layout, codestream, payload))
+    }
+
     /// Decodes the WebP file in `data` to interleaved 8-bit RGB, appending the pixels to `out` and
     /// returning the image [`Dimensions`]. Backs the [`DecodeImage<Rgb8>`] impl.
+    ///
+    /// This path carries no alpha, so an `ALPH` chunk is ignored here; the RGBA decoder applies it
+    /// (see `decode_rgba8_into`).
     fn decode_rgb8_into(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        // Reconstruction chunks must precede metadata, so the first VP8/VP8L/VP8X chunk wins; any
-        // leading metadata/unknown chunks are skipped (RFC 9649 §2.7).
-        for chunk in RiffReader::new(data)? {
-            let chunk = chunk?;
-            match WebpChunkId::from(chunk.fourcc) {
-                WebpChunkId::Vp8l => {
-                    let (dims, argb) = Self::expect_argb(
-                        self.decode_codestream(WebpCodestream::Vp8l, chunk.payload)?,
-                    )?;
-                    argb_to_rgb8(&argb, out);
-                    return Ok(dims);
-                }
-                WebpChunkId::Vp8 => {
-                    let yuv = Self::expect_yuv(
-                        self.decode_codestream(WebpCodestream::Vp8, chunk.payload)?,
-                    )?;
-                    let dims = Dimensions {
-                        width: yuv.width(),
-                        height: yuv.height(),
-                    };
-                    // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
-                    out.extend_from_slice(&yuv.to_rgb8(ColorRange::Limited));
-                    return Ok(dims);
-                }
-                WebpChunkId::Vp8x => {
-                    // Validate the extended-format header, then fall through to the inner VP8/VP8L
-                    // bitstream chunk that follows. This RGB path carries no alpha, so any `ALPH`
-                    // chunk is ignored here; the RGBA decoder applies it (see `decode_rgba8_into`).
-                    gamut_riff::Vp8xHeader::from_payload(chunk.payload)?;
-                    continue;
-                }
-                _ => continue,
+        let (_, codestream, payload) = Self::layout(data)?;
+        match codestream {
+            WebpCodestream::Vp8l => {
+                let (dims, argb) =
+                    Self::expect_argb(self.decode_codestream(WebpCodestream::Vp8l, payload)?)?;
+                argb_to_rgb8(&argb, out);
+                Ok(dims)
+            }
+            WebpCodestream::Vp8 => {
+                let yuv = Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
+                let dims = Dimensions {
+                    width: yuv.width(),
+                    height: yuv.height(),
+                };
+                // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
+                out.extend_from_slice(&yuv.to_rgb8(ColorRange::Limited));
+                Ok(dims)
             }
         }
-        Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "WebP: no VP8/VP8L/VP8X bitstream chunk",
-        ))
     }
 
     /// Decodes the WebP file in `data` to interleaved 8-bit RGBA, appending the pixels to `out` and
@@ -165,47 +166,32 @@ impl WebpDecoder {
     /// extended file's `ALPH` chunk supplies the alpha; a `VP8L` bitstream carries its own. Backs the
     /// [`DecodeImage<Rgba8>`] impl.
     fn decode_rgba8_into(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let mut alph: Option<&[u8]> = None;
-        for chunk in RiffReader::new(data)? {
-            let chunk = chunk?;
-            match WebpChunkId::from(chunk.fourcc) {
-                WebpChunkId::Vp8x => {
-                    gamut_riff::Vp8xHeader::from_payload(chunk.payload)?;
+        let (layout, codestream, payload) = Self::layout(data)?;
+        match codestream {
+            WebpCodestream::Vp8l => {
+                let (dims, argb) =
+                    Self::expect_argb(self.decode_codestream(WebpCodestream::Vp8l, payload)?)?;
+                argb_to_rgba8(&argb, out);
+                Ok(dims)
+            }
+            WebpCodestream::Vp8 => {
+                let yuv = Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
+                let dims = Dimensions {
+                    width: yuv.width(),
+                    height: yuv.height(),
+                };
+                let (w, h) = (dims.width as usize, dims.height as usize);
+                let alpha = match layout.alph {
+                    Some(payload) => alpha::read_alph(payload, w, h)?,
+                    None => vec![0xffu8; w * h],
+                };
+                let rgb = yuv.to_rgb8(ColorRange::Limited);
+                for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
+                    out.extend_from_slice(&[px[0], px[1], px[2], a]);
                 }
-                WebpChunkId::Alpha => alph = Some(chunk.payload),
-                WebpChunkId::Vp8l => {
-                    let (dims, argb) = Self::expect_argb(
-                        self.decode_codestream(WebpCodestream::Vp8l, chunk.payload)?,
-                    )?;
-                    argb_to_rgba8(&argb, out);
-                    return Ok(dims);
-                }
-                WebpChunkId::Vp8 => {
-                    let yuv = Self::expect_yuv(
-                        self.decode_codestream(WebpCodestream::Vp8, chunk.payload)?,
-                    )?;
-                    let dims = Dimensions {
-                        width: yuv.width(),
-                        height: yuv.height(),
-                    };
-                    let (w, h) = (dims.width as usize, dims.height as usize);
-                    let alpha = match alph {
-                        Some(payload) => alpha::read_alph(payload, w, h)?,
-                        None => vec![0xffu8; w * h],
-                    };
-                    let rgb = yuv.to_rgb8(ColorRange::Limited);
-                    for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
-                        out.extend_from_slice(&[px[0], px[1], px[2], a]);
-                    }
-                    return Ok(dims);
-                }
-                _ => continue,
+                Ok(dims)
             }
         }
-        Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "WebP: no VP8/VP8L bitstream chunk",
-        ))
     }
 }
 
@@ -227,7 +213,7 @@ impl DecodeImage<Rgba8> for WebpDecoder {
 
 #[cfg(test)]
 mod tests {
-    use gamut_riff::{FourCc, RiffWriter, write_simple_lossless, write_simple_lossy};
+    use gamut_riff::{FourCc, RiffReader, RiffWriter, write_simple_lossless, write_simple_lossy};
 
     use super::*;
     use crate::vp8l::bit_io::BitWriter;
@@ -248,7 +234,7 @@ mod tests {
         write_simple_prefix_code(&mut w, &[u16::from(b)]);
         write_simple_prefix_code(&mut w, &[0xff]); // alpha (opaque)
         write_simple_prefix_code(&mut w, &[0]); // distance (unused)
-        write_simple_lossless(&w.finish())
+        write_simple_lossless(&w.finish()).unwrap()
     }
 
     #[test]
@@ -269,7 +255,7 @@ mod tests {
     fn routes_lossy_container_to_vp8() {
         // A `VP8 ` chunk reaches the VP8 decoder, which rejects this malformed (non-key-frame, 3-byte)
         // payload rather than panicking.
-        let file = write_simple_lossy(&[0x9d, 0x01, 0x2a]);
+        let file = write_simple_lossy(&[0x9d, 0x01, 0x2a]).unwrap();
         let got: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(got.is_err());
     }
@@ -292,7 +278,7 @@ mod tests {
             canvas_height: 2,
             ..Default::default()
         };
-        let file = write_extended(&header, &[(FourCc::VP8L, &vp8l)]);
+        let file = write_extended(&header, &[(FourCc::VP8L, &vp8l)]).unwrap();
         let got: ImageBuf<Rgb8> = WebpDecoder::new()
             .decode_image(&file)
             .expect("decode VP8X file");
@@ -314,7 +300,7 @@ mod tests {
             canvas_height: 4,
             ..Default::default()
         };
-        let file = gamut_riff::write_extended(&header, &[]);
+        let file = gamut_riff::write_extended(&header, &[]).unwrap();
         let got: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(matches!(
             got,
@@ -337,9 +323,9 @@ mod tests {
                 .to_vec()
         };
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::ICCP, &[1, 2, 3, 4]);
-        w.write_chunk(FourCc::VP8L, &vp8l);
-        let file = w.finish();
+        w.write_chunk(FourCc::ICCP, &[1, 2, 3, 4]).unwrap();
+        w.write_chunk(FourCc::VP8L, &vp8l).unwrap();
+        let file = w.finish().unwrap();
         let got: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&file).unwrap();
         assert_eq!(
             got.dimensions(),
@@ -354,8 +340,8 @@ mod tests {
     #[test]
     fn errors_when_no_bitstream_chunk() {
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::EXIF, &[0xee; 6]);
-        let file = w.finish();
+        w.write_chunk(FourCc::EXIF, &[0xee; 6]).unwrap();
+        let file = w.finish().unwrap();
         let err: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(matches!(
             err,
@@ -405,9 +391,9 @@ mod tests {
             .payload
             .to_vec();
         let mut w = RiffWriter::new();
-        w.write_chunk(FourCc::VP8X, &[0u8; 4]);
-        w.write_chunk(FourCc::VP8L, &vp8l);
-        let file = w.finish();
+        w.write_chunk(FourCc::VP8X, &[0u8; 4]).unwrap();
+        w.write_chunk(FourCc::VP8L, &vp8l).unwrap();
+        let file = w.finish().unwrap();
         let rgb: Result<ImageBuf<Rgb8>> = WebpDecoder::new().decode_image(&file);
         assert!(
             rgb.is_err(),

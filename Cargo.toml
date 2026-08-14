@@ -82,10 +82,13 @@ jxl = { version = "0.4.3", default-features = false, features = ["sse42", "avx",
 #     system libwebp. That makes the oracle hermetic (the workspace policy: no system-installed
 #     codecs) and, with `mux` below, avoids a partial system install — a libwebp without libwebpmux —
 #     failing the build script.
-#   * `mux` adds libwebpmux, the reference muxer/demuxer for the metadata chunks (`ICCP`/`EXIF`/
-#     `XMP `). It is how `cwebp -metadata all` attaches them, so it is the oracle for gamut-webp's
-#     metadata round-trip in both directions.
-libwebp-sys2 = { version = "0.2", features = ["mux", "static"] }
+#   * `mux` adds libwebpmux, the reference muxer for the metadata chunks (`ICCP`/`EXIF`/`XMP `).
+#     It is how `cwebp -metadata all` attaches them, so it is the oracle for gamut-webp's metadata
+#     round-trip in both directions.
+#   * `demux` adds libwebpdemux, whose `WebPDemux` is the reference *container parser*: it walks the
+#     RIFF chunk structure and reports each chunk and the canvas. That makes it gamut-riff's own
+#     oracle — the crate codes no bitstream, so the container is the whole of what it must get right.
+libwebp-sys2 = { version = "0.2", features = ["demux", "mux", "static"] }
 # Benchmark harness (issue #149). Dev-only: pulled in as a `dev-dependency` by each crate's
 # `[[bench]]` target, never by shipped code. Lightweight (few transitive deps) and reports
 # throughput counters; `mise run bench` runs the suite.
@@ -111,7 +114,7 @@ gamut-png = { path = "crates/gamut-png", version = "0.1.0" }
 # JPEG-1 (ISO/IEC 10918 / ITU-T T.81) codec (issue #28).
 gamut-jpeg = { path = "crates/gamut-jpeg", version = "0.1.0" }
 gamut-isobmff = { path = "crates/gamut-isobmff", version = "2.0.1" }
-gamut-riff = { path = "crates/gamut-riff", version = "0.1.3" }
+gamut-riff = { path = "crates/gamut-riff", version = "1.0.0" }
 gamut-av1 = { path = "crates/gamut-av1", version = "0.4.1" }
 gamut-av2 = { path = "crates/gamut-av2", version = "0.1.3" }
 gamut-avif = { path = "crates/gamut-avif", version = "1.1.0" }
