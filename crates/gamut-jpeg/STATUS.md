@@ -56,6 +56,13 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Opt-in decoder resource guards (P9, issue #306): `JpegDecoder::with_max_dimensions` and
   `with_max_image_bytes`, enforced before built-in frame allocations and backend selection, while
   bounding sequential DNL-deferred sample-plane growth until the exact height arrives.
+- Rate–distortion optimized coefficient selection (P12, issue #333): `with_rd_optimization` —
+  per-block AC trellis over the exact §F.1.2.2 run/size cost of the typical Annex K.5/K.6 tables
+  (a documented rate-proxy free choice that keeps baseline and progressive coefficients
+  identical), step-normalized distortion with a tuned dimensionless λ, and per-block adaptive λ
+  modulation from block activity relative to the quantization resolution. DC keeps plain rounding
+  (DC trellis deferred: a cross-block DP through the §F.1.2.1 predictor and restart resets —
+  mozjpeg ships it separately too). Default off (byte-identical); backends vetoed.
 - Caller-supplied quantization tables (P11, issue #332): the validated `QuantTables` pair
   (natural order, entries `1..=255` by construction) used **verbatim** via
   `JpegEncoder::with_quant_tables`, bypassing — without changing — the frozen quality mapping;
@@ -196,3 +203,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P9 | issue #306 | **Decoder resource limits:** opt-in dimension and native-raster byte builders; checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
 | P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
 | P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |
+| P12 | T.81 §F.1.2, Annex K.5/K.6; issue #333 | **RD-optimized coefficient selection:** the `rd` module's per-block AC trellis — dynamic program over (position, {v, v−1}) nodes with the exact run/size + ZRL + EOB bit cost of the typical AC tables as rate proxy, step-normalized distortion (the quantization table as the perceptual weighting), tuned dimensionless λ (pinned; measured 8.7% battery-wide saving at ≤ 0.35 dB) — plus `TrellisAdaptive` per-block λ modulation `√(energy/Σstep²)` clamped `[¼, 4]`. Opt-in `with_rd_optimization`; DC plain (deferred: cross-block DP through the DC predictor/restarts); default byte-identical; backends vetoed; progressive carries identical coefficients by the shared `quantize_block_rd` seam + configuration-only rate model | ✅ done |
