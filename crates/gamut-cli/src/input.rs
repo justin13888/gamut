@@ -1,18 +1,47 @@
 //! Input decoding: turn an image file into interleaved 8-bit RGB(A) for the gamut encoders.
 //!
-//! PNG/JPEG/PPM are decoded with the third-party [`image`] crate; **WebP** and **JPEG XL** are
-//! decoded by gamut's own decoders ([`gamut::webp::WebpDecoder`] and [`gamut::jxl::JxlDecoder`], the
-//! latter the pure-Rust jxl-rs backend), so those paths need no third-party image library.
-//! Everything downstream — the actual encode — is produced by the gamut crates regardless of input
-//! format.
+//! **PNG, JPEG, WebP, and JPEG XL are decoded by gamut's own decoders.** Only PPM still goes
+//! through the third-party [`image`] crate, because gamut has no PPM decoder. Everything
+//! downstream — the actual encode — is produced by the gamut crates regardless of input format.
+//!
+//! Asking every decoder for a fixed `Rgb8`/`Rgba8` buffer is a *lossy* request: a 16-bit PNG has to
+//! narrow, a grayscale JPEG has to replicate, a transparent WebP asked for RGB has to drop its
+//! alpha. gamut's decoders refuse that by default, which is the right default for a library and the
+//! wrong one for this CLI — so every decoder here is given
+//! [`ConvertPolicy::permissive`](gamut::core::convert::ConvertPolicy::permissive), the CLI opting
+//! into the loss explicitly on the user's behalf.
 
 use std::path::Path;
 
+use gamut::core::convert::{ConvertPolicy, convert};
 use gamut::core::{DecodeImage, Dimensions, ImageBuf, Rgb8, Rgba8};
+use gamut::jpeg::JpegDecoder;
 use gamut::jxl::JxlDecoder;
+use gamut::png::PngDecoder;
 use gamut::webp::WebpDecoder;
 
 use crate::error::CliError;
+
+/// Unwraps a gamut decode into the flat `(samples, dimensions)` pair the encoders take, choosing
+/// the RGB or RGBA layout by `want_alpha`.
+///
+/// A macro rather than a function because the two arms instantiate `DecodeImage` at different
+/// pixel types, which no single call can express.
+macro_rules! decode_with {
+    ($decoder:expr, $bytes:expr, $want_alpha:expr) => {{
+        let decoder = $decoder;
+        // `?` maps `gamut::core::Error` to `CliError::Codec` via the existing `#[from]` impl.
+        if $want_alpha {
+            let img: ImageBuf<Rgba8> = decoder.decode_image($bytes)?;
+            let dims = img.dimensions();
+            (img.into_samples(), dims)
+        } else {
+            let img: ImageBuf<Rgb8> = decoder.decode_image($bytes)?;
+            let dims = img.dimensions();
+            (img.into_samples(), dims)
+        }
+    }};
+}
 
 /// Decodes a supported image file (PNG, JPEG, PPM/P6, WebP, or JPEG XL) into interleaved 8-bit RGB.
 ///
@@ -41,40 +70,54 @@ fn decode(path: &Path, want_alpha: bool) -> Result<(Vec<u8>, Dimensions), CliErr
     decode_bytes(path, &bytes, want_alpha)
 }
 
-/// Format-dispatching core: routes WebP and JPEG XL streams to gamut's own decoders and everything
-/// else to the `image` crate (which has no JPEG XL support). Split out from [`decode`] so it is
-/// unit-testable without touching the filesystem; `path` is used only to label errors.
+/// Format-dispatching core: routes every format gamut can decode to gamut's own decoder, and the
+/// remainder (PPM) to the `image` crate. Split out from [`decode`] so it is unit-testable without
+/// touching the filesystem; `path` is used only to label errors.
 fn decode_bytes(
     path: &Path,
     bytes: &[u8],
     want_alpha: bool,
 ) -> Result<(Vec<u8>, Dimensions), CliError> {
+    let lossy = ConvertPolicy::permissive();
+
     if is_webp(bytes) {
-        let decoder = WebpDecoder::new();
-        // `?` maps `gamut::core::Error` to `CliError::Codec` via the existing `#[from]` impl.
-        return Ok(if want_alpha {
-            let img: ImageBuf<Rgba8> = decoder.decode_image(bytes)?;
-            let dims = img.dimensions();
-            (img.into_samples(), dims)
-        } else {
-            let img: ImageBuf<Rgb8> = decoder.decode_image(bytes)?;
-            let dims = img.dimensions();
-            (img.into_samples(), dims)
-        });
+        return Ok(decode_with!(
+            WebpDecoder::new().convert_policy(lossy),
+            bytes,
+            want_alpha
+        ));
     }
 
     if is_jxl(bytes) {
-        let decoder = JxlDecoder::new();
-        // `?` maps `gamut::core::Error` to `CliError::Codec` via the existing `#[from]` impl.
-        return Ok(if want_alpha {
-            let img: ImageBuf<Rgba8> = decoder.decode_image(bytes)?;
+        return Ok(decode_with!(
+            JxlDecoder::new().with_convert_policy(lossy),
+            bytes,
+            want_alpha
+        ));
+    }
+
+    if is_png(bytes) {
+        return Ok(decode_with!(
+            PngDecoder::new().convert_policy(lossy),
+            bytes,
+            want_alpha
+        ));
+    }
+
+    if is_jpeg(bytes) {
+        // A JPEG never carries alpha, so gamut-jpeg implements no `DecodeImage<Rgba8>`. Decode the
+        // colour it does carry, then let the same conversion engine add the opaque alpha channel
+        // rather than padding it by hand here.
+        let img: ImageBuf<Rgb8> = JpegDecoder::new()
+            .convert_policy(lossy)
+            .decode_image(bytes)?;
+        if !want_alpha {
             let dims = img.dimensions();
-            (img.into_samples(), dims)
-        } else {
-            let img: ImageBuf<Rgb8> = decoder.decode_image(bytes)?;
-            let dims = img.dimensions();
-            (img.into_samples(), dims)
-        });
+            return Ok((img.into_samples(), dims));
+        }
+        let rgba: ImageBuf<Rgba8> = convert(img.as_ref(), lossy)?;
+        let dims = rgba.dimensions();
+        return Ok((rgba.into_samples(), dims));
     }
 
     let decoded = image::load_from_memory(bytes).map_err(|source| CliError::Decode {
@@ -97,6 +140,18 @@ fn decode_bytes(
 /// how the `image` crate detects formats by content rather than trusting the file extension.
 fn is_webp(bytes: &[u8]) -> bool {
     bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
+}
+
+/// Returns `true` if `bytes` begins with the 8-byte PNG signature (§5.2). Sniffs by content like
+/// [`is_webp`], so the file extension need not be accurate.
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A])
+}
+
+/// Returns `true` if `bytes` begins with the JPEG SOI marker (`FF D8 FF`). Sniffs by content like
+/// [`is_webp`], so the file extension need not be accurate.
+fn is_jpeg(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8, 0xFF])
 }
 
 /// Returns `true` if `bytes` begins with a JPEG XL signature — either the 2-byte bare codestream
@@ -257,6 +312,65 @@ mod tests {
         assert!(is_jxl(&[0xFF, 0x0A, 0x00]));
         assert!(!is_jxl(&[0xFF, 0x0B]));
         assert!(!is_jxl(b"RIFF"));
+    }
+
+    #[test]
+    fn sixteen_bit_grayscale_png_is_decoded_by_gamut() {
+        use gamut::core::Gray16;
+        use gamut::png::PngEncoder;
+
+        // Two things gamut-png refuses by default happen here at once: 16-bit samples narrow to 8,
+        // and a single grey channel replicates into three. The decode therefore succeeds only
+        // because this module opts into the loss -- and only because the PNG path now goes through
+        // gamut-png at all instead of detouring through the `image` crate.
+        let dims = Dimensions {
+            width: 4,
+            height: 1,
+        };
+        let gray16: [u16; 4] = [0, 0x8080, 0xFFFF, 0x0101];
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .encode_image(ImageRef::<Gray16>::new(&gray16, dims).unwrap(), &mut png)
+            .expect("encode png");
+        assert!(is_png(&png));
+
+        let (rgb, got) = decode_bytes(Path::new("mem.png"), &png, false).unwrap();
+        assert_eq!(got, dims);
+        // 0x8080 -> 128 and 0x0101 -> 1 are the round-to-nearest narrowing; a truncating `>> 8`
+        // would give 255 -> 255 but 0x8080 -> 128 and 0xFFFF -> 255 only by luck, so the endpoints
+        // plus 0x0101 pin the scale.
+        assert_eq!(rgb, [0, 0, 0, 128, 128, 128, 255, 255, 255, 1, 1, 1]);
+    }
+
+    #[test]
+    fn grayscale_jpeg_is_decoded_by_gamut_and_gains_opaque_alpha() {
+        use gamut::core::Gray8;
+        use gamut::jpeg::JpegEncoder;
+
+        // gamut-jpeg has no `DecodeImage<Rgba8>` (a JPEG carries no alpha), so this exercises the
+        // decode-then-widen path: grey replicates into RGB and the shared engine appends opaque
+        // alpha.
+        let dims = Dimensions {
+            width: 8,
+            height: 8,
+        };
+        let gray = vec![0x40u8; 64];
+        let mut jpeg = Vec::new();
+        JpegEncoder::new()
+            .encode_image(ImageRef::<Gray8>::new(&gray, dims).unwrap(), &mut jpeg)
+            .expect("encode jpeg");
+        assert!(is_jpeg(&jpeg));
+
+        let (rgba, got) = decode_bytes(Path::new("mem.jpg"), &jpeg, true).unwrap();
+        assert_eq!(got, dims);
+        assert_eq!(rgba.len(), 64 * 4);
+        for px in rgba.chunks_exact(4) {
+            // Lossy JPEG, so the grey level is approximate -- but it must stay grey (R == G == B)
+            // and every pixel must be fully opaque.
+            assert_eq!(px[0], px[1]);
+            assert_eq!(px[1], px[2]);
+            assert_eq!(px[3], 0xff);
+        }
     }
 
     #[test]

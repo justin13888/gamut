@@ -66,7 +66,9 @@ on a hand-written golden bitstream.
 - **Full pixel decode (jxl-rs).** Decodes the entire ISO/IEC 18181-1 pixel surface jxl-rs
   covers — VarDCT and Modular (RCT/palette/squeeze), XYB, splines/patches/noise/spot colours,
   progressive-encoded streams, and both `jxlc`/`jxlp` container framings — reshaping to the
-  requested layout losslessly (grayscale→RGB, opaque-alpha pad, alpha drop).
+  requested layout through `gamut_core::convert` (issue #268). `crate::convert` now keeps only the
+  jxl-specific half — reassembling jxl-rs's native-endian output *bytes* into typed samples — at the
+  cost of one extra pass and allocation the previously fused loop avoided.
 - **Best-effort decode of truncated streams (issue #256).** `DecodePartialImage` decodes an
   incomplete codestream to the best image it supports plus a `JxlPartialReport` — the
   `is_complete()` flag, a `JxlRender` (`HeaderOnly` / `BestEffort` / `Complete`), jxl-rs's completed
@@ -80,11 +82,14 @@ on a hand-written golden bitstream.
   before the image headers stays `InvalidInput` — there are no dimensions to size a buffer with —
   and so do the truncation points jxl-rs cannot distinguish from corruption. Pinned to the built-in
   tail: the codec-abi seam has no notion of a partial result, so the registry is not consulted, as
-  for `info` / `embedded_icc_profile`. The default `DecodeImage` path is unchanged.
+  for `info` / `embedded_icc_profile`. It presents through the same `gamut_core::convert` seam, so
+  it answers to the same `ConvertPolicy`. The default `DecodeImage` path is unchanged.
 - **Decode policies.** Pixel-limit bound (`1 << 28` samples); truncated → `InvalidInput` on the
   default `DecodeImage` path (`DecodePartialImage` above is the opt-in relaxation, and relaxes
-  *only* truncation); animation, premultiplied (associated) alpha, and colour-as-grayscale each →
-  `Unsupported` (deliberate refusals to guess, additive to relax later).
+  *only* truncation); animation and premultiplied (associated) alpha → `Unsupported` (deliberate
+  refusals to guess, additive to relax later). Layout loss (dropping a present alpha channel,
+  reducing colour to grayscale) is refused by default and enabled per decoder with
+  `JxlDecoder::with_convert_policy` — the refusal is no longer unconditional.
 - **Pluggable codestream backends (issue #276).** Both directions are registries over the shared
   `gamut-codec-abi` seam, cut at the **bare `FF 0A` codestream**: `JxlEncoder::push_backend` /
   `JxlDecoder::push_backend` insert a `JxlCodestreamEncoder` / `JxlCodestreamDecoder` ahead of the

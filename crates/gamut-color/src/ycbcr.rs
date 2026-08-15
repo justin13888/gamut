@@ -41,6 +41,7 @@
 //! as issue #32, not a correctness one. This conversion is deliberately *not* on the VP8 codec's
 //! bit-exact path (the codec operates on YCbCr planes directly); it backs the public RGB API.
 
+use gamut_core::luminance::BT601_LUMA_WEIGHTS;
 use gamut_core::{Dimensions, Error, Result};
 
 use crate::cicp::{ColorRange, MatrixCoefficients};
@@ -48,7 +49,21 @@ use crate::format::BitDepth;
 use crate::{clip_pixel, clip_pixel8};
 
 /// Fixed-point fractional bits for the conversion coefficients.
+///
+/// The same scale as [`LUMA_FIX`], which is what lets the full-range luma row below come straight
+/// from `gamut_core::luminance` rather than being restated here (pinned by a test).
 const FIX: i32 = 16;
+
+/// The full-range BT.601 luma row, widened once from the workspace's single authoritative
+/// definition so the per-pixel expression stays integer-typed.
+///
+/// Only the *luma* row is shared: the chroma rows below, and every limited-range coefficient, are
+/// libwebp's own studio-swing values with no counterpart in `gamut_core`.
+const LUMA_R: i32 = BT601_LUMA_WEIGHTS[0] as i32;
+/// Green's full-range BT.601 luma coefficient. See [`LUMA_R`].
+const LUMA_G: i32 = BT601_LUMA_WEIGHTS[1] as i32;
+/// Blue's full-range BT.601 luma coefficient. See [`LUMA_R`].
+const LUMA_B: i32 = BT601_LUMA_WEIGHTS[2] as i32;
 /// Rounding addend (`0.5` in the fixed-point scale).
 const HALF: i32 = 1 << (FIX - 1);
 /// The chroma offset (`128`) pre-scaled to the fixed-point domain, with rounding folded in.
@@ -90,7 +105,7 @@ pub fn rgb_to_ycbcr(r: u8, g: u8, b: u8, range: ColorRange) -> (u8, u8, u8) {
     let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
     match range {
         ColorRange::Full => {
-            let y = (19595 * r + 38470 * g + 7471 * b + HALF) >> FIX;
+            let y = (LUMA_R * r + LUMA_G * g + LUMA_B * b + HALF) >> FIX;
             let cb = (-11059 * r - 21709 * g + 32768 * b + CHROMA_BIAS) >> FIX;
             let cr = (32768 * r - 27439 * g - 5329 * b + CHROMA_BIAS) >> FIX;
             (clip_pixel8(y), clip_pixel8(cb), clip_pixel8(cr))
@@ -647,8 +662,37 @@ impl RgbToYcbcr {
 
 #[cfg(test)]
 mod tests {
+    use gamut_core::luminance::LUMA_FIX;
+
     use super::*;
     use crate::cicp::ColorRange::{Full, Limited};
+
+    #[test]
+    fn full_range_luma_row_comes_from_gamut_core_unchanged() {
+        // The luma row is no longer written down here, so this pins the two things that make the
+        // substitution safe: the shared fixed-point scale, and the exact coefficients that were
+        // inlined before. A drift in either would silently reshade every full-range conversion.
+        // FIX stays independent of LUMA_FIX because it also scales the chroma rows below, which
+        // have no counterpart in gamut-core -- so the two are asserted equal rather than aliased.
+        assert_eq!(FIX, LUMA_FIX as i32);
+        assert_eq!([LUMA_R, LUMA_G, LUMA_B], [19_595, 38_470, 7_471]);
+
+        // And the observable result: every value the old literals produced, still produced. The
+        // sweep covers the whole cube coarsely plus the endpoints where rounding is decided.
+        for r in (0..=255u8).step_by(17) {
+            for g in (0..=255u8).step_by(17) {
+                for b in (0..=255u8).step_by(17) {
+                    let expected = (i32::from(r) * 19_595
+                        + i32::from(g) * 38_470
+                        + i32::from(b) * 7_471
+                        + HALF)
+                        >> FIX;
+                    let (y, _, _) = rgb_to_ycbcr(r, g, b, Full);
+                    assert_eq!(i32::from(y), expected, "luma drifted at ({r}, {g}, {b})");
+                }
+            }
+        }
+    }
 
     #[test]
     fn full_range_color_anchors() {

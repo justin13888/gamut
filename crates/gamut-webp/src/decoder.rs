@@ -3,14 +3,22 @@
 //! Container parsing and format routing are implemented (via [`gamut_riff`]). The lossless **VP8L**
 //! and lossy **VP8** bitstreams are decoded natively; an extended **VP8X** file is parsed and its
 //! inner bitstream decoded. Decoding to [`Rgba8`](gamut_core::Rgba8) applies a lossy file's `ALPH`
-//! alpha chunk and preserves a VP8L stream's own alpha; decoding to [`Rgb8`](gamut_core::Rgb8)
-//! drops alpha.
+//! alpha chunk and preserves a VP8L stream's own alpha.
+//!
+//! Every typed decode runs one container traversal producing the file's *native* layout, then hands
+//! it to [`gamut_core::convert`] — so WebP applies the same widening and narrowing rules as every
+//! other gamut decoder. Decoding a genuinely transparent file to [`Rgb8`](gamut_core::Rgb8) would
+//! discard the alpha channel, so it is refused unless
+//! [`WebpDecoder::convert_policy`] permits it.
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use gamut_color::{ColorRange, Yuv420};
-use gamut_core::{DecodeImage, Dimensions, Error, ImageBuf, Result, Rgb8, Rgba8};
+use gamut_core::convert::{ConvertPolicy, RawImage, convert_from_raw};
+use gamut_core::{
+    DecodeImage, Dimensions, Error, ImageBuf, Pixel, PixelFormat, Result, Rgb8, Rgba8,
+};
 use gamut_riff::{WebpChunkId, WebpLayout};
 
 use crate::alpha;
@@ -32,6 +40,8 @@ use crate::vp8l::decoder::{argb_to_rgb8, argb_to_rgba8, decode as decode_vp8l};
 pub struct WebpDecoder {
     /// Pluggable codestream decoders, tried in push order ahead of the built-in tails.
     backends: Vec<SharedDecoder>,
+    /// Which lossy layout conversions a typed decode may perform.
+    policy: ConvertPolicy,
 }
 
 impl fmt::Debug for WebpDecoder {
@@ -117,9 +127,20 @@ impl WebpDecoder {
         }
     }
 
+    /// Selects which lossy conversions a typed decode may perform.
+    ///
+    /// Defaults to [`ConvertPolicy::lossless`], under which a file that genuinely carries
+    /// transparency cannot be decoded as [`Rgb8`]. A file whose alpha is entirely opaque still
+    /// decodes as [`Rgb8`], because discarding an all-opaque alpha channel loses nothing.
+    #[must_use]
+    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
     /// Sorts the container's chunks and locates the image bitstream.
     ///
-    /// [`WebpLayout::parse`] is the single container walk behind both pixel paths: it validates the
+    /// [`WebpLayout::parse`] is the single container walk behind the pixel path: it validates the
     /// `VP8X` header, enforces the spec's reconstruction-chunk order, and hands back the `ALPH` and
     /// bitstream payloads (RFC 9649 §2.7).
     fn layout(data: &[u8]) -> Result<(WebpLayout<'_>, WebpCodestream, &[u8])> {
@@ -134,19 +155,30 @@ impl WebpDecoder {
         Ok((layout, codestream, payload))
     }
 
-    /// Decodes the WebP file in `data` to interleaved 8-bit RGB, appending the pixels to `out` and
-    /// returning the image [`Dimensions`]. Backs the [`DecodeImage<Rgb8>`] impl.
+    /// Decodes the WebP file in `data` to the interleaved 8-bit layout it natively carries,
+    /// returning the samples with the [`PixelFormat`] describing them.
     ///
-    /// This path carries no alpha, so an `ALPH` chunk is ignored here; the RGBA decoder applies it
-    /// (see `decode_rgba8_into`).
-    fn decode_rgb8_into(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let (_, codestream, payload) = Self::layout(data)?;
+    /// One decode serves every typed request: a lossy `VP8` bitstream becomes RGB, gaining an alpha
+    /// channel only when an `ALPH` chunk supplies one, and a lossless `VP8L` bitstream becomes RGBA
+    /// unless every pixel is opaque. Reporting `Rgb8` for a fully opaque image is what keeps the
+    /// common "decode this WebP as RGB" request lossless rather than making it depend on a policy.
+    fn decode_native(&self, data: &[u8]) -> Result<(Dimensions, PixelFormat, Vec<u8>)> {
+        let (layout, codestream, payload) = Self::layout(data)?;
         match codestream {
             WebpCodestream::Vp8l => {
                 let (dims, argb) =
                     Self::expect_argb(self.decode_codestream(WebpCodestream::Vp8l, payload)?)?;
-                argb_to_rgb8(&argb, out);
-                Ok(dims)
+                let mut out = Vec::new();
+                // A VP8L stream always codes an alpha channel, but most images are fully opaque;
+                // reporting those as RGB keeps an `Rgb8` request lossless.
+                let format = if argb.iter().all(|&p| (p >> 24) as u8 == 0xff) {
+                    argb_to_rgb8(&argb, &mut out);
+                    PixelFormat::Rgb8
+                } else {
+                    argb_to_rgba8(&argb, &mut out);
+                    PixelFormat::Rgba8
+                };
+                Ok((dims, format, out))
             }
             WebpCodestream::Vp8 => {
                 let yuv = Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
@@ -155,59 +187,43 @@ impl WebpDecoder {
                     height: yuv.height(),
                 };
                 // WebP/VP8 is limited-range BT.601; decode with the matching inverse.
-                out.extend_from_slice(&yuv.to_rgb8(ColorRange::Limited));
-                Ok(dims)
+                let rgb = yuv.to_rgb8(ColorRange::Limited);
+                // A lossy bitstream carries no alpha of its own: it exists only when the extended
+                // container supplies an `ALPH` chunk.
+                let Some(payload) = layout.alph else {
+                    return Ok((dims, PixelFormat::Rgb8, rgb));
+                };
+                let (w, h) = (dims.width as usize, dims.height as usize);
+                let alpha = alpha::read_alph(payload, w, h)?;
+                let mut out = Vec::with_capacity(w * h * 4);
+                for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
+                    out.extend_from_slice(&[px[0], px[1], px[2], a]);
+                }
+                Ok((dims, PixelFormat::Rgba8, out))
             }
         }
     }
 
-    /// Decodes the WebP file in `data` to interleaved 8-bit RGBA, appending the pixels to `out` and
-    /// returning the image [`Dimensions`]. A simple (alpha-less) file decodes to opaque RGBA; an
-    /// extended file's `ALPH` chunk supplies the alpha; a `VP8L` bitstream carries its own. Backs the
-    /// [`DecodeImage<Rgba8>`] impl.
-    fn decode_rgba8_into(&self, data: &[u8], out: &mut Vec<u8>) -> Result<Dimensions> {
-        let (layout, codestream, payload) = Self::layout(data)?;
-        match codestream {
-            WebpCodestream::Vp8l => {
-                let (dims, argb) =
-                    Self::expect_argb(self.decode_codestream(WebpCodestream::Vp8l, payload)?)?;
-                argb_to_rgba8(&argb, out);
-                Ok(dims)
-            }
-            WebpCodestream::Vp8 => {
-                let yuv = Self::expect_yuv(self.decode_codestream(WebpCodestream::Vp8, payload)?)?;
-                let dims = Dimensions {
-                    width: yuv.width(),
-                    height: yuv.height(),
-                };
-                let (w, h) = (dims.width as usize, dims.height as usize);
-                let alpha = match layout.alph {
-                    Some(payload) => alpha::read_alph(payload, w, h)?,
-                    None => vec![0xffu8; w * h],
-                };
-                let rgb = yuv.to_rgb8(ColorRange::Limited);
-                for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
-                    out.extend_from_slice(&[px[0], px[1], px[2], a]);
-                }
-                Ok(dims)
-            }
-        }
+    /// Decodes `data` and presents it as pixel layout `P`.
+    fn present<P: Pixel<Sample = u8>>(&self, data: &[u8]) -> Result<ImageBuf<P>> {
+        let (dims, format, pixels) = self.decode_native(data)?;
+        convert_from_raw(RawImage::new(&pixels, format, dims)?, self.policy)
     }
 }
 
 impl DecodeImage<Rgb8> for WebpDecoder {
+    /// An opaque file decodes straight to RGB. One that genuinely carries transparency needs an
+    /// [`AlphaPolicy`](gamut_core::convert::AlphaPolicy) -- see [`WebpDecoder::convert_policy`].
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
-        let mut px = Vec::new();
-        let dims = self.decode_rgb8_into(data, &mut px)?;
-        ImageBuf::new(px, dims)
+        self.present(data)
     }
 }
 
 impl DecodeImage<Rgba8> for WebpDecoder {
+    /// A file without transparency gains an opaque alpha channel; one with an `ALPH` chunk or a
+    /// VP8L alpha channel keeps it.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
-        let mut px = Vec::new();
-        let dims = self.decode_rgba8_into(data, &mut px)?;
-        ImageBuf::new(px, dims)
+        self.present(data)
     }
 }
 

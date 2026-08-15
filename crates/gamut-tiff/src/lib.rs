@@ -31,7 +31,8 @@
 //! header. [`TiffDecoder::info`] reports a page's declared depth, sample format and layout from
 //! tags alone, so a caller can pick a pixel type before paying for a decode — including for pages
 //! this crate declines to decode. Sample depths are 1, 8 and 16 bits; the typed impls widen 8-bit
-//! samples to 16-bit exactly (`×257`) and narrow 16-bit to 8-bit by truncation, while signed,
+//! samples to 16-bit exactly (`×257`) and, once [`TiffDecoder::convert_policy`] permits the loss,
+//! narrow 16-bit to 8-bit by the shared engine's rescaling, while signed,
 //! IEEE-float and 32-bit samples are refused by name rather than reinterpreted (§19 float support
 //! and its Predictor 3 remain deferred). The strict [`deconstruct`] walk additionally accounts
 //! every input byte and flags unknown tags and codes for archival triage. Every lossless path is pinned pixel-exact in both

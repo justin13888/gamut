@@ -128,9 +128,10 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
   table is a citation obligation under the `references/` policy, and no such table has a vendored
   source here yet. `QuantTables`' inherent constructors are append-only, so tuned built-ins are
   additive later; until then callers supply their own bytes.
-- **CLI metadata passthrough.** `gamut convert` decodes its input via the third-party `image`
-  crate, which discards APP segments before gamut ever sees them; a passthrough needs source-side
-  extraction and belongs to a broader CLI metadata story, not issue #28.
+- **CLI metadata passthrough.** `gamut convert` now decodes JPEG input with `JpegDecoder` rather
+  than the third-party `image` crate (issue #268), but still through the `DecodeImage` pixel path,
+  which carries no APP segments; a passthrough needs the metadata-bearing decode entry point and
+  belongs to a broader CLI metadata story, not issue #28.
 
 **Decoder-specific notes:**
 

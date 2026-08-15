@@ -1,6 +1,7 @@
 //! 16-bit samples (§19): native decode over strips and tiles in both byte orders, the
 //! widening/narrowing presentation policy, and bidirectional libtiff parity.
 
+use gamut_core::convert::ConvertPolicy;
 use gamut_core::{
     Cmyk8, DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, ImageBuf, ImageRef, Rgb8, Rgb16,
     Rgba16,
@@ -429,29 +430,48 @@ fn eight_bit_widens_to_sixteen_by_257() {
 }
 
 #[test]
-fn sixteen_bit_narrows_to_eight_by_truncation() {
-    // Truncation, not rounding: 0x01FF must become 0x01, never 0x02. Documented as lossy, and the
-    // exact inverse of the widening above.
+fn sixteen_bit_narrows_to_eight_only_under_a_depth_policy() {
+    // Narrowing is a loss, so the default lossless decoder refuses it by name; a `DepthPolicy`
+    // opts in. The values then come from the shared engine's rescaling — round(v * 255 / 65535),
+    // half up — not a truncating shift, so 0x01FF is 0x02 and 0xFFFF stays 0xFF.
     let src: Vec<u16> = vec![0x0000, 0x00FF, 0x0100, 0x01FF, 0xFFFF];
     let tiff = libtiff_oracle::encode_gray16(&src, 5, 1, OC::None, 1, false).expect("libtiff");
-    let got: ImageBuf<Gray8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
-    assert_eq!(got.as_samples(), &[0x00u8, 0x00, 0x01, 0x01, 0xFF]);
+
+    let refused: Result<ImageBuf<Gray8>, _> = TiffDecoder::new().decode_image(&tiff);
+    assert_eq!(
+        refused.err().map(|e| e.static_message()),
+        Some(Some(
+            "convert: target layout is narrower than the source; set a DepthPolicy"
+        )),
+        "the default decoder refuses to narrow"
+    );
+
+    let dec = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let got: ImageBuf<Gray8> = dec.decode_image(&tiff).expect("decode");
+    assert_eq!(got.as_samples(), &[0x00u8, 0x01, 0x01, 0x02, 0xFF]);
 }
 
 #[test]
 fn sixteen_bit_rgb_narrows_through_the_eight_bit_surface() {
-    // The behaviour change this policy introduces: before 16-bit support these calls returned
-    // `Unsupported`. `decode_page` and `DecodeImage<Rgb8>` must now both narrow.
+    // `decode_page` and `DecodeImage<Rgb8>` both reach 8-bit RGB from a 16-bit page, and both do
+    // so only once the policy permits the narrowing.
     let (w, h) = (17u32, 13u32);
     let src = rgb16_pattern(w, h);
     let tiff = libtiff_oracle::encode_rgb16(&src, w, h, OC::Lzw, 1, false).expect("libtiff");
-    let expected: Vec<u8> = src.iter().map(|&v| (v >> 8) as u8).collect();
+    let expected: Vec<u8> = src
+        .iter()
+        .map(|&v| ((u32::from(v) * 255 + 32767) / 65535) as u8)
+        .collect();
 
-    let got: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+    assert!(
+        DecodeImage::<Rgb8>::decode_image(&TiffDecoder::new(), &tiff).is_err(),
+        "the default decoder refuses to narrow"
+    );
+
+    let dec = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let got: ImageBuf<Rgb8> = dec.decode_image(&tiff).expect("decode");
     assert_eq!(got.as_samples(), expected.as_slice());
-    let page = TiffDecoder::new()
-        .decode_page(&tiff, 0)
-        .expect("decode_page");
+    let page = dec.decode_page(&tiff, 0).expect("decode_page");
     assert_eq!(page.as_samples(), expected.as_slice());
 }
 
@@ -479,9 +499,11 @@ fn gray16_replicates_and_gains_opaque_alpha() {
 
 #[test]
 fn single_sample_pixel_types_reject_a_multi_sample_page() {
-    // The assertion is on the *message*, not `is_err()`. Without the sample-count guard these
-    // decode calls still fail — `ImageBuf::new` rejects a buffer whose length does not match the
+    // The assertion is on the *message*, not `is_err()`. Without the layout guard these decode
+    // calls still fail — `ImageBuf::new` rejects a buffer whose length does not match the
     // dimensions — so only the message distinguishes the guard from that incidental backstop.
+    // Since presentation moved to the shared engine, the message names the missing *policy*: a
+    // colour page reaches a grey layout only through a `LumaPolicy`, and never reaches CMYK.
     let rgb = rgb16_pattern(4, 4);
     let tiff = libtiff_oracle::encode_rgb16(&rgb, 4, 4, OC::None, 1, false).expect("libtiff");
 
@@ -489,18 +511,24 @@ fn single_sample_pixel_types_reject_a_multi_sample_page() {
     let gray16: Result<ImageBuf<Gray16>, _> = dec.decode_image(&tiff);
     assert_eq!(
         gray16.err().map(|e| e.static_message()),
-        Some(Some("TIFF: image is not grayscale")),
+        Some(Some(
+            "convert: target layout cannot hold colour; set a LumaPolicy"
+        )),
         "an RGB page cannot be presented as Gray16"
     );
     let gray8: Result<ImageBuf<Gray8>, _> = dec.decode_image(&tiff);
     assert_eq!(
         gray8.err().map(|e| e.static_message()),
-        Some(Some("TIFF: image is not grayscale"))
+        Some(Some(
+            "convert: target layout cannot hold colour; set a LumaPolicy"
+        ))
     );
     let cmyk: Result<ImageBuf<Cmyk8>, _> = dec.decode_image(&tiff);
     assert_eq!(
         cmyk.err().map(|e| e.static_message()),
-        Some(Some("TIFF: image is not 4-sample CMYK")),
+        Some(Some(
+            "convert: CMYK conversion needs a colour-management transform, not a layout change"
+        )),
         "a 3-sample page cannot be presented as CMYK"
     );
 }
@@ -515,4 +543,51 @@ fn white_is_zero_inverts_at_sixteen_bits() {
     let got: ImageBuf<Gray16> = TiffDecoder::new().decode_image(&tiff).expect("decode");
     let inverted: Vec<u16> = src.iter().map(|&v| u16::MAX - v).collect();
     assert_eq!(got.as_samples(), inverted.as_slice());
+}
+
+#[test]
+fn sixteen_bit_cmyk_reaches_eight_bit_ink_only_under_a_depth_policy() {
+    // A 16-bit CMYK page is the one decodable layout with no pixel type to land in: the ink model
+    // has no 16-bit member. It must still decode — to `Cmyk8`, and only once the policy permits the
+    // narrowing — rather than being refused for want of a `Cmyk16`. Hand-built because gamut's
+    // encoder writes 8-bit CMYK only.
+    let samples: Vec<u16> = vec![
+        0x0000, 0x00FF, 0x0100, 0x01FF, // pixel 0
+        0xFFFF, 0x8000, 0x4321, 0xFEDC, // pixel 1
+    ];
+    let mut strip = Vec::with_capacity(samples.len() * 2);
+    for &v in &samples {
+        strip.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut ifd = Ifd::new();
+    ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+    ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![1]));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![16, 16, 16, 16]));
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![4]));
+    ifd.set(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        Value::Short(vec![PhotometricInterpretation::Cmyk as u16]),
+    );
+    ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+    ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![1]));
+    let tiff = write_image(ByteOrder::LittleEndian, Variant::Classic, &ifd, &[strip])
+        .expect("write fixture");
+
+    let refused: Result<ImageBuf<Cmyk8>, _> = TiffDecoder::new().decode_image(&tiff);
+    assert_eq!(
+        refused.err().map(|e| e.static_message()),
+        Some(Some(
+            "TIFF: 16-bit CMYK needs a depth policy to reach 8-bit ink samples"
+        )),
+        "the default decoder refuses to narrow ink samples"
+    );
+
+    let dec = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let got: ImageBuf<Cmyk8> = dec.decode_image(&tiff).expect("decode");
+    let expected: Vec<u8> = samples
+        .iter()
+        .map(|&v| ((u32::from(v) * 255 + 32767) / 65535) as u8)
+        .collect();
+    assert_eq!(got.as_samples(), expected.as_slice());
+    assert_eq!(got.dimensions(), dims(2, 1));
 }

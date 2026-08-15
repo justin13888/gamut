@@ -1,8 +1,15 @@
 //! The TIFF decoder.
+//!
+//! Decoding proper produces the image in the layout the file natively carries; presenting it as a
+//! caller's chosen [`gamut_core::Pixel`] is then a pure conversion, delegated wholesale to
+//! [`gamut_core::convert`] so TIFF applies exactly the same widening and narrowing rules as every
+//! other gamut decoder. [`TiffDecoder::convert_policy`] selects which lossy conversions are
+//! permitted; the default permits none.
 
+use gamut_core::convert::{ConvertPolicy, DepthPolicy, RawImage, convert_from_raw};
 use gamut_core::{
-    Cmyk8, DecodeImage, Dimensions, Error, Gray8, Gray16, ImageBuf, Result, Rgb8, Rgb16, Rgba8,
-    Rgba16,
+    Cmyk8, DecodeImage, Dimensions, Error, Gray8, Gray16, ImageBuf, Pixel, PixelFormat, Result,
+    Rgb8, Rgb16, Rgba8, Rgba16, Sample,
 };
 use gamut_ifd::{ByteOrder, Ifd, read};
 
@@ -20,12 +27,12 @@ use crate::tags;
 ///
 /// # Choosing a pixel type
 ///
-/// The [`DecodeImage`] impls *present* a page rather than insisting it already match, so a request
-/// is satisfied whenever it can be: grayscale replicates across RGB channels, RGB gains an opaque
-/// alpha, a fourth sample is dropped for RGB output, 8-bit samples widen to 16-bit by `×257`
-/// (exact), and 16-bit samples narrow to 8-bit by discarding the low byte (lossy). Only a
-/// channel count that cannot be mapped — asking for [`Gray8`]/[`Gray16`] from a multi-sample page,
-/// or [`Cmyk8`] from anything but a 4-sample one — is refused.
+/// The [`DecodeImage`] impls *present* a page rather than insisting it already match, and every
+/// such presentation goes through [`gamut_core::convert`]. Lossless requests are always satisfied:
+/// grayscale replicates across RGB channels, RGB gains an opaque alpha, and 8-bit samples widen to
+/// 16-bit by `×257` (exact). A request that would *lose* information — dropping alpha, narrowing
+/// 16-bit samples to 8, reducing colour to luma — is refused by default; call
+/// [`TiffDecoder::convert_policy`] to opt into it.
 ///
 /// Use [`TiffDecoder::info`] to see a page's declared depth before deciding, rather than relying
 /// on the conversions above.
@@ -35,9 +42,13 @@ use crate::tags;
 /// Sample formats this crate's `u8`/`u16` model cannot represent — signed integer, IEEE float, and
 /// 32-bit samples — return [`Error::Unsupported`] naming the offending tag, never a truncated or
 /// reinterpreted image. A 16-bit *half-float* page is refused by its `SampleFormat`, not its depth.
+///
+/// CMYK is an ink space, not a rearrangement of RGB, so no policy converts into or out of it; a
+/// 16-bit CMYK page has no 16-bit ink layout to land in and is presented as [`Cmyk8`] only when the
+/// policy permits the narrowing.
 #[derive(Debug, Clone, Default)]
 pub struct TiffDecoder {
-    _private: (),
+    policy: ConvertPolicy,
 }
 
 /// Upper bound on a decoded image's stored bytes, guarding against malformed huge dimensions and
@@ -72,41 +83,16 @@ enum Samples {
     U16(Vec<u16>),
 }
 
-/// Scales an 8-bit sample to 16-bit. `×257` maps `0 → 0` and `255 → 65535` exactly (it is
-/// `v << 8 | v`), so the conversion is lossless and is inverted precisely by [`narrow`].
-fn widen(value: u8) -> u16 {
-    u16::from(value) * 257
-}
-
-/// Truncates a 16-bit sample to 8-bit, discarding the low byte. Lossy, and deliberately truncation
-/// rather than rounding: it is the exact inverse of [`widen`] on widened values, and it matches the
-/// convention `Palette8::from_tiff_colormap` already uses for 16-bit `ColorMap` entries.
-fn narrow(value: u16) -> u8 {
-    (value >> 8) as u8
-}
-
-impl Samples {
-    /// The samples as 8-bit, narrowing a 16-bit source.
-    fn into_u8(self) -> Vec<u8> {
-        match self {
-            Samples::U8(v) => v,
-            Samples::U16(v) => v.into_iter().map(narrow).collect(),
-        }
-    }
-
-    /// The samples as 16-bit, widening an 8-bit source.
-    fn into_u16(self) -> Vec<u16> {
-        match self {
-            Samples::U8(v) => v.into_iter().map(widen).collect(),
-            Samples::U16(v) => v,
-        }
-    }
-}
-
 /// An image decoded to interleaved samples in `BlackIsZero`/RGB convention.
+///
+/// `format` is the layout those samples are *already* in — palette indices are expanded,
+/// `WhiteIsZero` is inverted, and bilevel is expanded to 0/255 during decode, so what reaches
+/// [`gamut_core::convert`] is a plain grayscale, RGB, RGBA, or CMYK buffer. It is the pairing of
+/// `format` with `samples` that is load-bearing: a 4-sample page is `Rgba*` or `Cmyk8` by its
+/// photometric tag, which a sample count alone cannot distinguish.
 struct DecodedImage {
     dims: Dimensions,
-    samples_per_pixel: usize,
+    format: PixelFormat,
     samples: Samples,
 }
 
@@ -197,137 +183,138 @@ impl TiffDecoder {
         info::page_info(ifd, file.order)
     }
 
-    /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit [`Rgb8`] (page 0 is the first;
-    /// grayscale is replicated across channels, any alpha is dropped). Multi-page access is
-    /// TIFF-specific, so it stays inherent; the [`DecodeImage`] impls present page 0.
+    /// Selects which lossy conversions a typed decode may perform.
+    ///
+    /// Defaults to [`ConvertPolicy::lossless`], under which a layout that cannot hold the page
+    /// exactly is refused. Pass [`ConvertPolicy::permissive`] for the "just give me RGB" behaviour
+    /// an application usually wants:
+    ///
+    /// ```no_run
+    /// use gamut_core::{convert::ConvertPolicy, DecodeImage, ImageBuf, Rgb8};
+    /// use gamut_tiff::TiffDecoder;
+    ///
+    /// # fn main() -> gamut_core::Result<()> {
+    /// # let bytes: &[u8] = &[];
+    /// let decoder = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    /// let rgb: ImageBuf<Rgb8> = decoder.decode_image(bytes)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn convert_policy(mut self, policy: ConvertPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit [`Rgb8`] (page 0 is the
+    /// first). Multi-page access is TIFF-specific, so it stays inherent; the [`DecodeImage`] impls
+    /// present page 0.
+    ///
+    /// Shorthand for [`TiffDecoder::decode_page_as`] at [`Rgb8`], and subject to the same
+    /// [`ConvertPolicy`]: an RGBA, CMYK, or 16-bit page is refused unless the policy permits the
+    /// loss.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] for malformed input or an out-of-range page, or
-    /// [`Error::Unsupported`] for a feature not yet implemented.
+    /// As [`TiffDecoder::decode_page_as`].
     pub fn decode_page(&self, data: &[u8], page: usize) -> Result<ImageBuf<Rgb8>> {
-        let img = decode_page_samples(data, page)?;
-        ImageBuf::new(
-            present_rgb(img.samples.into_u8(), img.samples_per_pixel)?,
-            img.dims,
-        )
+        self.decode_page_as(data, page)
     }
-}
 
-/// Errors unless the image has exactly `want` samples per pixel.
-fn require_spp(img: &DecodedImage, want: usize, message: &'static str) -> Result<()> {
-    if img.samples_per_pixel != want {
-        return Err(Error::unsupported(env!("CARGO_PKG_NAME"), message));
+    /// Decodes page `page` of a multi-page TIFF and presents it as pixel layout `P`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for malformed input or an out-of-range page,
+    /// [`Error::Unsupported`] for a feature not yet implemented, or [`Error::Unsupported`] for a
+    /// conversion to `P` that would lose information this decoder's [`ConvertPolicy`] does not
+    /// permit.
+    pub fn decode_page_as<P: Pixel>(&self, data: &[u8], page: usize) -> Result<ImageBuf<P>> {
+        let img = decode_page_samples(data, page)?;
+        match img.samples {
+            Samples::U8(ref samples) => {
+                convert_from_raw(RawImage::new(samples, img.format, img.dims)?, self.policy)
+            }
+            // CMYK is the one 16-bit layout with no `PixelFormat` to name it: the ink model has no
+            // 16-bit member. Narrowing it to `Cmyk8` here is the same loss the engine would gate,
+            // so it answers to the same policy rather than inventing a second rule.
+            Samples::U16(samples) if img.format == PixelFormat::Cmyk8 => {
+                if self.policy.depth() != DepthPolicy::Rescale {
+                    return Err(Error::unsupported(
+                        env!("CARGO_PKG_NAME"),
+                        "TIFF: 16-bit CMYK needs a depth policy to reach 8-bit ink samples",
+                    ));
+                }
+                let narrowed: Vec<u8> = samples
+                    .iter()
+                    .map(|&v| u8::from_full_range_u16(v))
+                    .collect();
+                convert_from_raw(
+                    RawImage::new(&narrowed, PixelFormat::Cmyk8, img.dims)?,
+                    self.policy,
+                )
+            }
+            Samples::U16(ref samples) => {
+                convert_from_raw(RawImage::new(samples, img.format, img.dims)?, self.policy)
+            }
+        }
     }
-    Ok(())
 }
 
 impl DecodeImage<Rgb8> for TiffDecoder {
-    /// Grayscale is replicated across channels; any alpha is dropped, and 16-bit samples are
-    /// narrowed to their high byte.
+    /// Grayscale and palette pages widen into RGB. Dropping an alpha or ink channel, and narrowing
+    /// 16-bit samples, each need the matching [`ConvertPolicy`].
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
-        self.decode_page(data, 0)
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Rgba8> for TiffDecoder {
-    /// RGB gains opaque alpha; grayscale is replicated then made opaque; 16-bit samples are
-    /// narrowed to their high byte.
+    /// RGB gains opaque alpha; grayscale is replicated then made opaque. Narrowing 16-bit samples
+    /// needs a [`DepthPolicy`].
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
-        let img = decode_page_samples(data, 0)?;
-        ImageBuf::new(
-            present_rgba(img.samples.into_u8(), img.samples_per_pixel, u8::MAX)?,
-            img.dims,
-        )
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Cmyk8> for TiffDecoder {
-    /// Errors unless the image is 4-sample; 16-bit samples are narrowed to their high byte.
+    /// Errors unless the page is CMYK; the samples pass through unchanged. CMYK is an ink space,
+    /// not a rearrangement of RGB, so no policy converts into or out of it — but a 16-bit CMYK page
+    /// still needs a [`DepthPolicy`] to reach 8-bit ink samples.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Cmyk8>> {
-        let img = decode_page_samples(data, 0)?;
-        require_spp(&img, 4, "TIFF: image is not 4-sample CMYK")?;
-        ImageBuf::new(img.samples.into_u8(), img.dims)
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Gray8> for TiffDecoder {
-    /// Errors unless the image is single-sample; 16-bit samples are narrowed to their high byte.
+    /// A grayscale page passes through unchanged. A colour page needs a
+    /// [`LumaPolicy`](gamut_core::convert::LumaPolicy), and a 16-bit one a [`DepthPolicy`].
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
-        let img = decode_page_samples(data, 0)?;
-        require_spp(&img, 1, "TIFF: image is not grayscale")?;
-        ImageBuf::new(img.samples.into_u8(), img.dims)
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Gray16> for TiffDecoder {
-    /// Errors unless the image is single-sample; 8-bit samples are widened by `×257`.
+    /// A 16-bit grayscale page passes through; an 8-bit one widens by `×257`. A colour page needs
+    /// a [`LumaPolicy`](gamut_core::convert::LumaPolicy).
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray16>> {
-        let img = decode_page_samples(data, 0)?;
-        require_spp(&img, 1, "TIFF: image is not grayscale")?;
-        ImageBuf::new(img.samples.into_u16(), img.dims)
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Rgb16> for TiffDecoder {
-    /// Grayscale is replicated across channels; any alpha is dropped; 8-bit samples are widened
-    /// by `×257`.
+    /// Grayscale is replicated across channels and 8-bit samples widen by `×257`. Dropping an
+    /// alpha or ink channel needs the matching [`ConvertPolicy`].
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb16>> {
-        let img = decode_page_samples(data, 0)?;
-        ImageBuf::new(
-            present_rgb(img.samples.into_u16(), img.samples_per_pixel)?,
-            img.dims,
-        )
+        self.decode_page_as(data, 0)
     }
 }
 
 impl DecodeImage<Rgba16> for TiffDecoder {
-    /// RGB gains opaque alpha; grayscale is replicated then made opaque; 8-bit samples are widened
-    /// by `×257`.
+    /// The widest target: RGB gains opaque alpha, grayscale is replicated then made opaque, and
+    /// 8-bit samples widen by `×257` — all losslessly.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba16>> {
-        let img = decode_page_samples(data, 0)?;
-        ImageBuf::new(
-            present_rgba(img.samples.into_u16(), img.samples_per_pixel, u16::MAX)?,
-            img.dims,
-        )
-    }
-}
-
-/// Presents decoded samples as interleaved RGB (1 → replicated, 3 → as-is, 4 → 4th sample dropped).
-///
-/// Takes the buffer by value so the already-RGB case is a move rather than a copy. Generic over the
-/// sample type because the channel mapping is identical at both widths — only the sample width
-/// differs, and that is settled before this is called.
-fn present_rgb<S: Copy>(samples: Vec<S>, spp: usize) -> Result<Vec<S>> {
-    match spp {
-        1 => Ok(samples.iter().flat_map(|&v| [v, v, v]).collect()),
-        3 => Ok(samples),
-        // A 4-sample image is RGB + alpha, or CMYK; both drop their fourth sample here.
-        4 => Ok(samples
-            .chunks_exact(4)
-            .flat_map(|px| [px[0], px[1], px[2]])
-            .collect()),
-        _ => Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: cannot present this sample layout as RGB",
-        )),
-    }
-}
-
-/// Presents decoded samples as interleaved RGBA (1 → replicated opaque, 3 → opaque, 4 → as-is),
-/// synthesising alpha from `opaque` where the source has none.
-fn present_rgba<S: Copy>(samples: Vec<S>, spp: usize, opaque: S) -> Result<Vec<S>> {
-    match spp {
-        1 => Ok(samples.iter().flat_map(|&v| [v, v, v, opaque]).collect()),
-        3 => Ok(samples
-            .chunks_exact(3)
-            .flat_map(|px| [px[0], px[1], px[2], opaque])
-            .collect()),
-        4 => Ok(samples),
-        _ => Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: cannot present this sample layout as RGBA",
-        )),
+        self.decode_page_as(data, 0)
     }
 }
 
@@ -513,13 +500,24 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     // Unpack the stored bytes into output samples per the photometric mode. 16-bit samples are
     // deserialised from the file's byte order here — after the predictor, which by §14 operates on
     // the samples as stored.
-    let (out_spp, samples) = match mode {
-        Mode::Rgb if bps == 16 => (3, Samples::U16(samples_u16(&packed, layout.order))),
-        Mode::Rgb => (3, Samples::U8(packed)),
-        Mode::Rgba | Mode::Cmyk if bps == 16 => {
-            (4, Samples::U16(samples_u16(&packed, layout.order)))
-        }
-        Mode::Rgba | Mode::Cmyk => (4, Samples::U8(packed)),
+    let (format, samples) = match mode {
+        Mode::Rgb if bps == 16 => (
+            PixelFormat::Rgb16,
+            Samples::U16(samples_u16(&packed, layout.order)),
+        ),
+        Mode::Rgb => (PixelFormat::Rgb8, Samples::U8(packed)),
+        Mode::Rgba if bps == 16 => (
+            PixelFormat::Rgba16,
+            Samples::U16(samples_u16(&packed, layout.order)),
+        ),
+        Mode::Rgba => (PixelFormat::Rgba8, Samples::U8(packed)),
+        // There is no `Cmyk16`, so a 16-bit ink page is tagged by its ink model and carries its
+        // native width; `decode_page_as` settles the narrowing against the policy.
+        Mode::Cmyk if bps == 16 => (
+            PixelFormat::Cmyk8,
+            Samples::U16(samples_u16(&packed, layout.order)),
+        ),
+        Mode::Cmyk => (PixelFormat::Cmyk8, Samples::U8(packed)),
         Mode::Gray { white_is_zero } if bps == 16 => {
             let mut px = samples_u16(&packed, layout.order);
             if white_is_zero {
@@ -527,7 +525,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
                     *v = u16::MAX - *v;
                 }
             }
-            (1, Samples::U16(px))
+            (PixelFormat::Gray16, Samples::U16(px))
         }
         Mode::Gray { white_is_zero } if bps == 8 => {
             let mut px = packed;
@@ -536,7 +534,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
                     *v = 255 - *v;
                 }
             }
-            (1, Samples::U8(px))
+            (PixelFormat::Gray8, Samples::U8(px))
         }
         Mode::Gray { white_is_zero } => {
             // bps == 1: expand each MSB-first bit to a 0/255 sample.
@@ -549,7 +547,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
                     px.push(if white { 255 } else { 0 });
                 }
             }
-            (1, Samples::U8(px))
+            (PixelFormat::Gray8, Samples::U8(px))
         }
         Mode::Palette(palette) => {
             // Each 8-bit index selects an RGB triple from the colour table.
@@ -557,7 +555,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             for &idx in &packed {
                 px.extend_from_slice(&palette.entry(idx));
             }
-            (3, Samples::U8(px))
+            (PixelFormat::Rgb8, Samples::U8(px))
         }
     };
 
@@ -566,7 +564,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             width: width as u32,
             height: height as u32,
         },
-        samples_per_pixel: out_spp,
+        format,
         samples,
     })
 }

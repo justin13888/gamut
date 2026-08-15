@@ -964,6 +964,8 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
     let rgb = DecodedJpeg::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).unwrap();
     let cmyk = DecodedJpeg::new(2, 1, PixelFormat::Cmyk8, vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
 
+    // The refusal messages now come from the shared conversion engine rather than from JPEG: the
+    // presentation rules are gamut-core's, so the wording is the same for every format crate.
     // Gray → Rgb8 replicates; Gray → Gray8 passes through; Gray → Cmyk8 is rejected.
     let d = decoder_returning(gray.clone());
     let r: ImageBuf<Rgb8> = d.decode_image(&stream).unwrap();
@@ -975,7 +977,7 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
             .unwrap_err()
             .static_message()
             .unwrap(),
-        "JPEG: not a 4-component CMYK/YCCK image"
+        "convert: CMYK conversion needs a colour-management transform, not a layout change"
     );
 
     // Rgb passes through to Rgb8 and is rejected for the other two.
@@ -987,10 +989,10 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
             .unwrap_err()
             .static_message()
             .unwrap(),
-        "JPEG: not a single-component grayscale image"
+        "convert: target layout cannot hold colour; set a LumaPolicy"
     );
 
-    // Cmyk passes through to Cmyk8 and is rejected for Rgb8, with the built-in's own message.
+    // Cmyk passes through to Cmyk8 and is rejected for Rgb8.
     let d = decoder_returning(cmyk);
     let c: ImageBuf<Cmyk8> = d.decode_image(&stream).unwrap();
     assert_eq!(c.as_samples(), &[1, 2, 3, 4, 5, 6, 7, 8]);
@@ -999,7 +1001,7 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
             .unwrap_err()
             .static_message()
             .unwrap(),
-        "JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8"
+        "convert: CMYK conversion needs a colour-management transform, not a layout change"
     );
 }
 

@@ -6,6 +6,7 @@
 //! reconciling channels to the requested [`gamut_core::Pixel`] layout in [`crate::convert`]. All of
 //! that is 100% safe Rust: this module contains no `unsafe`.
 
+use gamut_core::convert::{ConvertPolicy, LumaPolicy, RawImage, convert_from_raw};
 use gamut_core::{Dimensions, Error, ImageBuf, Pixel, PixelFormat, Result};
 use jxl::api::states::Initialized;
 use jxl::api::{
@@ -16,7 +17,7 @@ use jxl::api::{
 use jxl::headers::extra_channels::ExtraChannel;
 
 use crate::backend::layout_of;
-use crate::convert::{ConvSample, convert_into};
+use crate::convert::{ConvSample, native_format, reassemble};
 use crate::error::map_decode_error;
 
 /// Upper bound on decoded size, in **pixels × channels**, enforced by jxl-rs's
@@ -494,111 +495,98 @@ fn truncated() -> Error {
     Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: truncated codestream")
 }
 
-/// The number of pixels a decoded frame holds, or the overflow error.
-fn frame_pixels(raw: &RawFrame) -> Result<usize> {
-    raw.dims.num_pixels().ok_or_else(|| {
-        Error::invalid_input(env!("CARGO_PKG_NAME"), "JXL: image dimensions overflow")
-    })
-}
-
-/// Reshapes a decoded [`RawFrame`] into a fresh [`ImageBuf`] of layout `P`.
+/// Decodes `data` and reassembles it into typed samples plus the layout tag describing them, and
+/// the report describing how complete the frame is.
 ///
-/// The shared tail of every decode entry point: size the destination from the frame's dimensions,
-/// reconcile channels with [`convert_into`], and brand the result.
-fn finish<P: Pixel>(raw: &RawFrame, dst_color: usize, dst_alpha: bool) -> Result<ImageBuf<P>>
+/// The shared prologue of every entry point below: everything up to the point where
+/// [`gamut_core::convert`] takes over.
+fn decode_samples<P: Pixel>(
+    data: &[u8],
+    codestream_bit_depth: bool,
+    policy: ConvertPolicy,
+    truncation: Truncation,
+) -> Result<(Vec<P::Sample>, PixelFormat, Dimensions, JxlPartialReport)>
 where
     P::Sample: ConvSample,
 {
-    let pixels = frame_pixels(raw)?;
-    let mut out = vec![P::Sample::default(); pixels * (dst_color + usize::from(dst_alpha))];
-    convert_into::<P::Sample>(
-        raw.samples(),
-        raw.src_color,
-        raw.src_alpha,
-        &mut out,
-        dst_color,
-        dst_alpha,
-        pixels,
-    );
-    ImageBuf::<P>::new(out, raw.dims)
+    let (data_format, dst_is_gray_family, _, _) = output_layout(P::FORMAT)?;
+    // A grayscale request against a colour stream can only be served by reducing colour to luma, so
+    // the caller must have chosen the weights. Checked before decoding: the request jxl-rs is given
+    // depends on the answer, and a refusal should not cost an entropy decode.
+    let reduce_to_luma = dst_is_gray_family && policy.luma() != LumaPolicy::Reject;
+    let (raw, report) = decode_raw::<P::Sample>(
+        data,
+        dst_is_gray_family && !reduce_to_luma,
+        data_format,
+        RawOptions {
+            codestream_bit_depth,
+            truncation,
+        },
+    )?;
+    let format =
+        native_format(raw.src_color, raw.src_alpha, P::Sample::BYTES).ok_or_else(|| {
+            Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JXL: stream layout is not a gamut pixel format",
+            )
+        })?;
+    Ok((
+        reassemble::<P::Sample>(raw.samples()),
+        format,
+        raw.dims,
+        report,
+    ))
 }
 
 /// Decodes `data` into a fresh [`ImageBuf`] of layout `P`.
 pub(crate) fn decode_to_buf<P: Pixel>(
     data: &[u8],
     codestream_bit_depth: bool,
+    policy: ConvertPolicy,
 ) -> Result<ImageBuf<P>>
 where
     P::Sample: ConvSample,
 {
-    let (data_format, dst_is_gray_family, dst_color, dst_alpha) = output_layout(P::FORMAT)?;
-    let (raw, _) = decode_raw::<P::Sample>(
-        data,
-        dst_is_gray_family,
-        data_format,
-        RawOptions {
-            codestream_bit_depth,
-            truncation: Truncation::Reject,
-        },
-    )?;
-    finish::<P>(&raw, dst_color, dst_alpha)
+    let (samples, format, dims, _) =
+        decode_samples::<P>(data, codestream_bit_depth, policy, Truncation::Reject)?;
+    convert_from_raw(RawImage::new(&samples, format, dims)?, policy)
 }
 
 /// Decodes `data` best-effort into a fresh [`ImageBuf`] of layout `P`, tolerating truncation.
 pub(crate) fn decode_partial_to_buf<P: Pixel>(
     data: &[u8],
     codestream_bit_depth: bool,
+    policy: ConvertPolicy,
 ) -> Result<(ImageBuf<P>, JxlPartialReport)>
 where
     P::Sample: ConvSample,
 {
-    let (data_format, dst_is_gray_family, dst_color, dst_alpha) = output_layout(P::FORMAT)?;
-    let (raw, report) = decode_raw::<P::Sample>(
-        data,
-        dst_is_gray_family,
-        data_format,
-        RawOptions {
-            codestream_bit_depth,
-            truncation: Truncation::BestEffort,
-        },
-    )?;
-    Ok((finish::<P>(&raw, dst_color, dst_alpha)?, report))
+    let (samples, format, dims, report) =
+        decode_samples::<P>(data, codestream_bit_depth, policy, Truncation::BestEffort)?;
+    let image = convert_from_raw(RawImage::new(&samples, format, dims)?, policy)?;
+    Ok((image, report))
 }
 
 /// Decodes `data` into `dst`, reusing its sample allocation when the decoded dimensions match.
 pub(crate) fn decode_into_buf<P: Pixel>(
     data: &[u8],
     codestream_bit_depth: bool,
+    policy: ConvertPolicy,
     dst: &mut ImageBuf<P>,
 ) -> Result<()>
 where
     P::Sample: ConvSample,
 {
-    let (data_format, dst_is_gray_family, dst_color, dst_alpha) = output_layout(P::FORMAT)?;
-    let (raw, _) = decode_raw::<P::Sample>(
-        data,
-        dst_is_gray_family,
-        data_format,
-        RawOptions {
-            codestream_bit_depth,
-            truncation: Truncation::Reject,
-        },
-    )?;
-    if dst.dimensions() == raw.dims {
+    let (samples, format, dims, _) =
+        decode_samples::<P>(data, codestream_bit_depth, policy, Truncation::Reject)?;
+    let src = RawImage::new(&samples, format, dims)?;
+    if dst.dimensions() == dims {
         // Same geometry: convert straight into the existing storage (its length is invariant).
-        convert_into::<P::Sample>(
-            raw.samples(),
-            raw.src_color,
-            raw.src_alpha,
-            dst.as_mut_samples(),
-            dst_color,
-            dst_alpha,
-            frame_pixels(&raw)?,
-        );
+        gamut_core::convert::convert_from_raw_into::<_, P>(src, policy, dst.as_mut_samples())
     } else {
-        *dst = finish::<P>(&raw, dst_color, dst_alpha)?;
+        *dst = convert_from_raw(src, policy)?;
+        Ok(())
     }
-    Ok(())
 }
 
 /// The native-endian 8-bit output format.
@@ -687,8 +675,15 @@ mod tests {
     fn empty_and_garbage_input_error_without_panicking() {
         // Enough of the decode entry path to prove it returns typed errors on junk rather than
         // panicking; full corpus coverage lives in the robustness test unit.
-        assert!(decode_to_buf::<gamut_core::Rgba8>(&[], false).is_err());
-        assert!(decode_to_buf::<gamut_core::Rgb8>(&[0x00, 0x01, 0x02, 0x03], false).is_err());
+        assert!(decode_to_buf::<gamut_core::Rgba8>(&[], false, ConvertPolicy::lossless()).is_err());
+        assert!(
+            decode_to_buf::<gamut_core::Rgb8>(
+                &[0x00, 0x01, 0x02, 0x03],
+                false,
+                ConvertPolicy::lossless(),
+            )
+            .is_err()
+        );
         assert!(info(&[]).is_err());
     }
 
@@ -724,10 +719,25 @@ mod tests {
     fn partial_decode_still_rejects_input_it_cannot_size_a_buffer_for() {
         // Truncation before the image headers has no dimensions to report, so the best-effort
         // policy is no more permissive than the rejecting one. Junk is likewise still an error.
-        assert!(decode_partial_to_buf::<gamut_core::Rgba8>(&[], false).is_err());
-        assert!(decode_partial_to_buf::<gamut_core::Rgba8>(&[0xFF, 0x0A], false).is_err());
         assert!(
-            decode_partial_to_buf::<gamut_core::Rgb8>(&[0x00, 0x01, 0x02, 0x03], false).is_err()
+            decode_partial_to_buf::<gamut_core::Rgba8>(&[], false, ConvertPolicy::lossless())
+                .is_err()
+        );
+        assert!(
+            decode_partial_to_buf::<gamut_core::Rgba8>(
+                &[0xFF, 0x0A],
+                false,
+                ConvertPolicy::lossless()
+            )
+            .is_err()
+        );
+        assert!(
+            decode_partial_to_buf::<gamut_core::Rgb8>(
+                &[0x00, 0x01, 0x02, 0x03],
+                false,
+                ConvertPolicy::lossless()
+            )
+            .is_err()
         );
     }
 

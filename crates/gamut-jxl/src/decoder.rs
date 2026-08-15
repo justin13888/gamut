@@ -2,6 +2,7 @@
 //! pushed with [`JxlDecoder::push_backend`], and, last, the built-in pure-Rust jxl-rs wrapper
 //! ([`crate::jxlrs`]).
 
+use gamut_core::convert::ConvertPolicy;
 use gamut_core::{
     DecodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Pixel, PixelFormat,
     Result, Rgb8, Rgb16, Rgba8, Rgba16,
@@ -39,13 +40,16 @@ fn wrong_backend_layout() -> Error {
 /// Decodes both JPEG XL framings — a bare codestream and the ISO BMFF `.jxl` container — into any of
 /// the eight supported pixel layouts (8/16-bit grayscale, gray+alpha, RGB, RGBA) through the
 /// [`DecodeImage`](gamut_core::DecodeImage) trait. Where the requested layout and the stream differ,
-/// the built-in decoder converts internally: grayscale expands to RGB, a missing alpha channel is
-/// padded opaque, and a present-but-unwanted alpha is dropped. It deliberately refuses to *guess*: a
-/// colour image cannot be decoded as grayscale, animated input is rejected, and premultiplied
-/// (associated) alpha is rejected — each an [`Error::Unsupported`] that a later version may relax.
+/// [`gamut_core::convert`] reconciles them: grayscale expands to RGB and a missing alpha channel is
+/// padded opaque, since neither loses anything.
+///
+/// Anything **lossy** — dropping a present alpha channel, reducing colour to grayscale — is refused
+/// by default and needs [`JxlDecoder::with_convert_policy`]. Animated input and premultiplied
+/// (associated) alpha are rejected outright, each an [`Error::Unsupported`] a later version may
+/// relax.
 ///
 /// Construct it with [`JxlDecoder::new`] or [`Default`], then optionally set
-/// [`JxlDecoder::with_codestream_bit_depth`].
+/// [`JxlDecoder::with_codestream_bit_depth`] and [`JxlDecoder::with_convert_policy`].
 ///
 /// # Backends
 ///
@@ -62,6 +66,8 @@ fn wrong_backend_layout() -> Error {
 pub struct JxlDecoder {
     /// Whether integer output carries the codestream's declared bit depth.
     codestream_bit_depth: bool,
+    /// Which lossy layout conversions a typed decode may perform.
+    policy: ConvertPolicy,
     /// Pushed codestream backends, tried in push order ahead of the built-in jxl-rs tail.
     backends: Registry<dyn JxlCodestreamDecoder>,
 }
@@ -70,7 +76,7 @@ impl PartialEq for JxlDecoder {
     /// Compares the decoder **configuration**; the backend registries are ignored, since a
     /// [`JxlCodestreamDecoder`] is an opaque trait object with no notion of equality.
     fn eq(&self, other: &Self) -> bool {
-        self.codestream_bit_depth == other.codestream_bit_depth
+        self.codestream_bit_depth == other.codestream_bit_depth && self.policy == other.policy
     }
 }
 
@@ -102,6 +108,24 @@ impl JxlDecoder {
     #[must_use]
     pub fn codestream_bit_depth(&self) -> bool {
         self.codestream_bit_depth
+    }
+
+    /// Selects which lossy conversions a typed decode may perform when the stream's layout differs
+    /// from the requested one.
+    ///
+    /// Defaults to [`ConvertPolicy::lossless`]: a stream carrying alpha cannot be decoded as an
+    /// alpha-less layout, and a colour stream cannot be decoded as grayscale. Grayscale still
+    /// widens into RGB and opaque alpha is still added, since neither loses anything. Returns the
+    /// updated decoder for chaining.
+    #[must_use]
+    pub fn with_convert_policy(mut self, policy: ConvertPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// The conversion policy typed decodes apply (see [`JxlDecoder::with_convert_policy`]).
+    pub fn convert_policy(&self) -> ConvertPolicy {
+        self.policy
     }
 
     /// Pushes a [`JxlCodestreamDecoder`] onto the end of this decoder's backend list, ahead of the
@@ -279,7 +303,7 @@ macro_rules! impl_decode_image {
                 }
                 #[cfg(feature = "decode")]
                 {
-                    crate::jxlrs::decode_to_buf::<$pixel>(data, self.codestream_bit_depth)
+                    crate::jxlrs::decode_to_buf::<$pixel>(data, self.codestream_bit_depth, self.policy)
                 }
                 #[cfg(not(feature = "decode"))]
                 {
@@ -302,7 +326,12 @@ macro_rules! impl_decode_image {
                 }
                 #[cfg(feature = "decode")]
                 {
-                    crate::jxlrs::decode_into_buf::<$pixel>(data, self.codestream_bit_depth, dst)
+                    crate::jxlrs::decode_into_buf::<$pixel>(
+                        data,
+                        self.codestream_bit_depth,
+                        self.policy,
+                        dst,
+                    )
                 }
                 #[cfg(not(feature = "decode"))]
                 {
@@ -319,7 +348,11 @@ macro_rules! impl_decode_image {
                 data: &[u8],
             ) -> Result<(ImageBuf<$pixel>, JxlPartialReport)> {
                 // The registry is deliberately not consulted; see the trait's docs.
-                crate::jxlrs::decode_partial_to_buf::<$pixel>(data, self.codestream_bit_depth)
+                crate::jxlrs::decode_partial_to_buf::<$pixel>(
+                    data,
+                    self.codestream_bit_depth,
+                    self.policy,
+                )
             }
         }
     )*};

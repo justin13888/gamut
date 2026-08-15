@@ -997,8 +997,11 @@ fn abi_adapters_plug_into_the_registries_end_to_end() {
         fill: 0x33,
         seen_strides: [0; abi::MAX_PLANES],
     }));
-    let got: ImageBuf<Rgb8> = dec.decode_image(&file).expect("decode");
-    assert_eq!(got.as_samples(), [0x33u8, 0x33, 0x33].repeat(64).as_slice());
+    // The fake fills all 32 ARGB bits with 0x33, so the raster is semi-transparent (alpha 0x33) and
+    // Rgba8 is the layout that holds it losslessly. Requesting Rgb8 would discard that alpha, which
+    // now needs an explicit AlphaPolicy rather than happening silently.
+    let got: ImageBuf<Rgba8> = dec.decode_image(&file).expect("decode");
+    assert_eq!(got.as_samples(), [0x33u8; 4].repeat(64).as_slice());
 
     // Encode: an ABI backend's streamed bytes become the VP8L chunk payload.
     let mut enc = WebpEncoder::lossless();
