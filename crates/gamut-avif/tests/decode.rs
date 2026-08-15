@@ -1286,8 +1286,8 @@ fn monochrome_limited_expansion_is_golden() {
 
 #[test]
 fn unsupported_colour_falls_back_to_planar_only() {
-    // BT.709 (matrix 1): planar decodes; RGBA is Unsupported.
-    let item = coded_item(1, 1, 8, 10, 4, 4, vec![colr(1, false)]);
+    // YCgCo (matrix 8) is a different transform family: planar decodes; both RGBA surfaces refuse.
+    let item = coded_item(1, 1, 8, 10, 4, 4, vec![colr(8, false)]);
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
     assert!(
@@ -1297,6 +1297,10 @@ fn unsupported_colour_falls_back_to_planar_only() {
     );
     assert!(matches!(
         container.decode_item_rgba8(1, &mut Mock::default()),
+        Err(error) if error.kind() == ErrorKind::Unsupported
+    ));
+    assert!(matches!(
+        container.decode_item_rgba16(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
 
@@ -1322,7 +1326,7 @@ fn unsupported_colour_falls_back_to_planar_only() {
 }
 
 #[test]
-fn ten_bit_frame_is_planar_only() {
+fn ten_bit_frame_is_rejected_by_the_eight_bit_surface() {
     let item = coded_item(1, 1, 10, 200, 4, 4, vec![colr(6, false)]);
     let bytes = file(1, vec![item]);
     let container = AvifContainer::parse(&bytes).unwrap();
@@ -1330,10 +1334,167 @@ fn ten_bit_frame_is_planar_only() {
         .decode_item_planar(1, &mut Mock::default())
         .unwrap();
     assert_eq!(frame.bit_depth(), 10);
+    // Narrowing to 8 bits would be silent quality loss, so the narrow surface still declines...
     assert!(matches!(
         container.decode_item_rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
+    // ...while the wide surface presents it.
+    let rgba = container
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap();
+    assert_eq!((rgba.width(), rgba.height()), (4, 4));
+    assert_eq!(rgba.as_samples().len(), 4 * 4 * 4);
+}
+
+#[test]
+fn high_bit_depth_matches_an_independent_reference() {
+    // The same H.273 §8.3 reference conversion the gamut-heic surface is checked against, applied
+    // to 10-bit BT.709 and BT.2020 (both ranges) and to 12-bit.
+    fn luma_weights(matrix: u16) -> (f64, f64) {
+        match matrix {
+            1 => (0.2126, 0.0722),
+            2 | 5 | 6 => (0.299, 0.114),
+            9 => (0.2627, 0.0593),
+            other => panic!("no reference weights for matrix {other}"),
+        }
+    }
+    fn ref_rgb16(matrix: u16, full: bool, bd: u8, y: u16, cb: u16, cr: u16) -> (u16, u16, u16) {
+        let (kr, kb) = luma_weights(matrix);
+        let max_in = f64::from((1u32 << bd) - 1);
+        let (yn, cbn, crn) = if full {
+            let mid = f64::from(1u32 << (bd - 1));
+            (
+                f64::from(y) / max_in,
+                (f64::from(cb) - mid) / max_in,
+                (f64::from(cr) - mid) / max_in,
+            )
+        } else {
+            let s = f64::from(1u32 << (bd - 8));
+            (
+                (f64::from(y) - 16.0 * s) / (219.0 * s),
+                (f64::from(cb) - 128.0 * s) / (224.0 * s),
+                (f64::from(cr) - 128.0 * s) / (224.0 * s),
+            )
+        };
+        let kg = 1.0 - kr - kb;
+        let r = yn + 2.0 * (1.0 - kr) * crn;
+        let b = yn + 2.0 * (1.0 - kb) * cbn;
+        let g = yn - (2.0 * kb * (1.0 - kb) / kg) * cbn - (2.0 * kr * (1.0 - kr) / kg) * crn;
+        let q = |v: f64| {
+            let max = max_in as u32;
+            let coded = (v.clamp(0.0, 1.0) * max_in).round() as u32;
+            ((u64::from(coded) * 65535 + u64::from(max) / 2) / u64::from(max)) as u16
+        };
+        (q(r), q(g), q(b))
+    }
+
+    for (matrix, full, bd) in [
+        (1u16, false, 10u8),
+        (9, false, 10),
+        (9, true, 10),
+        (1, false, 12),
+    ] {
+        let item = coded_item(1, 1, bd, 200, 4, 4, vec![colr(matrix, full)]);
+        let bytes = file(1, vec![item]);
+        let container = AvifContainer::parse(&bytes).unwrap();
+        let got = container
+            .decode_item_rgba16(1, &mut Mock::default())
+            .unwrap()
+            .into_samples();
+        // Tolerance is one coded-depth LSB on the 16-bit surface: the surface's precision is
+        // inherently that of the coded frame.
+        let tol = (65535 / ((1u32 << bd) - 1)) as u16 + 1;
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let (cx, cy) = (x / 2, y / 2);
+                let want = ref_rgb16(
+                    matrix,
+                    full,
+                    bd,
+                    ey(200, x, y, bd),
+                    ecb(200, cx, cy, bd),
+                    ecr(200, cx, cy, bd),
+                );
+                let o = ((y * 4 + x) * 4) as usize;
+                for (c, want) in [want.0, want.1, want.2].into_iter().enumerate() {
+                    assert!(
+                        got[o + c].abs_diff(want) <= tol,
+                        "matrix={matrix} full={full} bd={bd} ({x},{y}) ch{c}: got {} want {want}",
+                        got[o + c]
+                    );
+                }
+                assert_eq!(got[o + 3], 65535);
+            }
+        }
+    }
+    // The matrix argument is load-bearing, not decorative.
+    let of = |m: u16| {
+        let item = coded_item(1, 1, 10, 200, 4, 4, vec![colr(m, false)]);
+        let bytes = file(1, vec![item]);
+        AvifContainer::parse(&bytes)
+            .unwrap()
+            .decode_item_rgba16(1, &mut Mock::default())
+            .unwrap()
+            .into_samples()
+    };
+    assert_ne!(of(1), of(6));
+    assert_ne!(of(6), of(9));
+    assert_ne!(of(1), of(9));
+}
+
+#[test]
+fn eight_bit_widens_exactly_by_257() {
+    // 8-bit content is carried losslessly onto the wide surface, because 65535 == 255 * 257.
+    for (chroma_idc, matrix) in [(3u8, 0u16), (1, 1), (1, 6), (1, 9), (0, 6)] {
+        for full in [false, true] {
+            let props = vec![colr(matrix, full)];
+            let item = coded_item(1, chroma_idc, 8, 33, 4, 4, props.clone());
+            let bytes = file(1, vec![item]);
+            let container = AvifContainer::parse(&bytes).unwrap();
+            let narrow = container
+                .decode_item_rgba8(1, &mut Mock::default())
+                .unwrap()
+                .into_samples();
+            let item = coded_item(1, chroma_idc, 8, 33, 4, 4, props);
+            let bytes = file(1, vec![item]);
+            let container = AvifContainer::parse(&bytes).unwrap();
+            let wide = container
+                .decode_item_rgba16(1, &mut Mock::default())
+                .unwrap()
+                .into_samples();
+            assert_eq!(narrow.len(), wide.len());
+            for (i, (&n, &w)) in narrow.iter().zip(&wide).enumerate() {
+                assert_eq!(
+                    u16::from(n) * 257,
+                    w,
+                    "matrix={matrix} full={full} sample {i}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn decode_primary_rgba16_and_container_forwarder_agree() {
+    let item = coded_item(7, 1, 10, 200, 4, 4, vec![colr(9, false)]);
+    let bytes = file(7, vec![item]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    let by_id = container
+        .decode_item_rgba16(7, &mut Mock::default())
+        .unwrap()
+        .into_samples();
+    let primary = container
+        .decode_primary_rgba16(&mut Mock::default())
+        .unwrap()
+        .into_samples();
+    let image_level = container
+        .image()
+        .decode_primary_rgba16(&mut Mock::default())
+        .unwrap()
+        .into_samples();
+    assert_eq!(by_id, primary);
+    assert_eq!(by_id, image_level);
 }
 
 // ---- alpha -----------------------------------------------------------------------------------
