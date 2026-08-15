@@ -1100,5 +1100,10 @@ mod tests {
         assert_eq!(round_div(-2, 3), -1);
         assert_eq!(round_div(0, 7), 0);
         assert_eq!(round_div(7, 1), 7);
+        // Denominators where `2·den` and `2 + den` diverge, on both signs — a denominator of 2
+        // makes the two coincide and hides a mutated scale factor.
+        assert_eq!(round_div(-7, 3), -2);
+        assert_eq!(round_div(7, 3), 2);
+        assert_eq!(round_div(-13, 5), -3);
     }
 }

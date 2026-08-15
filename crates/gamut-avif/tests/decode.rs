@@ -8,6 +8,7 @@
 use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, ChromaFormat, DecodedFrame, ObuType, iter_obus,
 };
+use gamut_color::{ColorRange, ycbcr_to_rgb};
 use gamut_core::{Error, ErrorKind, Result};
 use gamut_isobmff::{
     ImageGrid, ImageOverlay, IsoBmffImage, Item, ItemReference, Property, PropertyKind, write,
@@ -1389,8 +1390,11 @@ fn high_bit_depth_matches_an_independent_reference() {
         (q(r), q(g), q(b))
     }
 
+    // Matrix 6 at 10 bits is load-bearing: it is the pair that must leave the 8-bit libwebp path
+    // and take the generic converter.
     for (matrix, full, bd) in [
         (1u16, false, 10u8),
+        (6, false, 10),
         (9, false, 10),
         (9, true, 10),
         (1, false, 12),
@@ -1471,6 +1475,172 @@ fn eight_bit_widens_exactly_by_257() {
                     "matrix={matrix} full={full} sample {i}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn bt601_at_eight_bit_still_uses_the_libwebp_inverse() {
+    // The deliberate carve-out: 8-bit BT.601 keeps gamut-color's libwebp-exact integer inverse, so
+    // the output this crate has always produced stays byte-identical. Everything else routes
+    // through the H.273-derived converter.
+    for full in [false, true] {
+        let range = if full {
+            ColorRange::Full
+        } else {
+            ColorRange::Limited
+        };
+        let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(6, full)]);
+        let bytes = file(1, vec![item]);
+        let container = AvifContainer::parse(&bytes).unwrap();
+        let rgba = container
+            .decode_item_rgba8(1, &mut Mock::default())
+            .unwrap();
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let (cx, cy) = (x / 2, y / 2);
+                let (r, g, b) = ycbcr_to_rgb(
+                    ey(15, x, y, 8) as u8,
+                    ecb(15, cx, cy, 8) as u8,
+                    ecr(15, cx, cy, 8) as u8,
+                    range,
+                );
+                let o = ((y * 4 + x) * 4) as usize;
+                assert_eq!(&rgba.as_samples()[o..o + 4], &[r, g, b, 255]);
+            }
+        }
+    }
+}
+
+#[test]
+fn monochrome_ten_bit_expansion_is_golden() {
+    let item = coded_item(1, 0, 10, 200, 3, 2, vec![]);
+    let bytes = file(1, vec![item]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    let got = container
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap()
+        .into_samples();
+    let widen = |coded: i64| ((coded as u64 * 65535 + 511) / 1023) as u16;
+    for y in 0..2u32 {
+        for x in 0..3u32 {
+            // Studio swing at 10-bit — black 64, span 876 — expanded at the coded depth, then
+            // widened, which is the precision model the whole surface uses.
+            let luma = i64::from(ey(200, x, y, 10));
+            let coded = (((luma - 64) * 1023 + 438) / 876).clamp(0, 1023);
+            let want = widen(coded);
+            let o = ((y * 3 + x) * 4) as usize;
+            assert_eq!(&got[o..o + 4], &[want, want, want, 65535], "({x},{y})");
+        }
+    }
+    // Literal anchor: pixel (0,0) luma = 200 ⇒ (200-64)*1023/876 = 159 coded ⇒ 10186.
+    assert_eq!(got[0], 10186);
+    // Full range is a plain rescale of the same planes, and differs.
+    let item = coded_item(1, 0, 10, 200, 3, 2, vec![colr(6, true)]);
+    let bytes = file(1, vec![item]);
+    let full = AvifContainer::parse(&bytes)
+        .unwrap()
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap()
+        .into_samples();
+    assert_ne!(got, full);
+    assert_eq!(
+        full[0],
+        ((u64::from(ey(200, 0, 0, 10)) * 65535 + 511) / 1023) as u16
+    );
+}
+
+#[test]
+fn overlay_blend_rounding_is_observable_on_a_translucent_canvas() {
+    // Every other overlay test composites onto an *opaque* canvas, where `da · (MAX - sa)` is
+    // always a multiple of MAX and the source-over rounding addends cancel exactly. This one uses
+    // a nearly-transparent canvas fill so both addends change the result.
+    let src = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 0, 2, 2, vec![colr(0, true)])
+    };
+    let src_alpha = alpha_aux(3, 2, 0, 2, 2);
+    let ov = Item {
+        references: vec![dimg(&[2])],
+        payload: ImageOverlay {
+            // (2, 1, 0) at alpha 1 after `>> 8`.
+            canvas_fill_value: [0x0200, 0x0100, 0x0000, 0x0100],
+            output_width: 2,
+            output_height: 2,
+            offsets: vec![(0, 0)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    let bytes = file(1, vec![ov, src, src_alpha]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    let got = container
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap();
+    assert_eq!(&got.as_samples()[0..4], &[2, 1, 0, 1]);
+    assert_eq!(&got.as_samples()[4..8], &[73, 3, 34, 4]);
+    assert_eq!(&got.as_samples()[8..12], &[97, 16, 48, 18]);
+    assert_eq!(&got.as_samples()[12..16], &[105, 19, 53, 21]);
+}
+
+#[test]
+fn overlay_composites_at_sixteen_bit_across_mixed_depths() {
+    // An `iovl` may composite sub-items of different coded depths — only `grid` requires
+    // uniformity. Normalizing every sub-item to the full 16-bit range is what makes that work.
+    let a = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)])
+    };
+    let b = Item {
+        hidden: true,
+        ..coded_item(3, 3, 10, 130, 2, 2, vec![colr(0, true)])
+    };
+    let ov = Item {
+        references: vec![dimg(&[2, 3])],
+        payload: ImageOverlay {
+            // On the 16-bit surface the fill channels are used verbatim, not shifted down.
+            canvas_fill_value: [0x1234, 0x5678, 0x9ABC, 0xFFFF],
+            output_width: 4,
+            output_height: 4,
+            offsets: vec![(-1, -1), (1, 1)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    let bytes = file(1, vec![ov, a, b]);
+    let container = AvifContainer::parse(&bytes).unwrap();
+    let got = container
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap();
+    assert_eq!((got.width(), got.height()), (4, 4));
+
+    let widen8 = |s: u16| s * 257;
+    let widen10 = |s: u16| ((u64::from(s) * 65535 + 511) / 1023) as u16;
+    let samples = got.as_samples();
+    for y in 0..4u32 {
+        for x in 0..4u32 {
+            let o = ((y * 4 + x) * 4) as usize;
+            let want = if (x, y) == (0, 0) {
+                [
+                    widen8(ecr(50, 1, 1, 8)),
+                    widen8(ey(50, 1, 1, 8)),
+                    widen8(ecb(50, 1, 1, 8)),
+                    65535,
+                ]
+            } else if (1..3).contains(&x) && (1..3).contains(&y) {
+                let (sx, sy) = (x - 1, y - 1);
+                [
+                    widen10(ecr(130, sx, sy, 10)),
+                    widen10(ey(130, sx, sy, 10)),
+                    widen10(ecb(130, sx, sy, 10)),
+                    65535,
+                ]
+            } else {
+                [0x1234, 0x5678, 0x9ABC, 0xFFFF]
+            };
+            assert_eq!(&samples[o..o + 4], &want, "({x},{y})");
         }
     }
 }

@@ -1492,6 +1492,66 @@ fn alpha_auxiliary_at_ten_bit_merges_onto_the_wide_surface() {
 }
 
 #[test]
+fn overlay_blend_rounding_is_observable_on_a_translucent_canvas() {
+    // Every other overlay test composites onto an *opaque* canvas, where `da · (MAX - sa)` is
+    // always a multiple of MAX and the source-over rounding addends cancel exactly. This one uses
+    // a nearly-transparent canvas fill so both addends — the alpha term and the per-channel term —
+    // change the result, pinning the `MAX / 2` rounding the blend depends on.
+    let src = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 0, 2, 2, vec![colr(0, true)])
+    };
+    let src_alpha = alpha_aux(3, 2, 0, 2, 2);
+    let ov = Item {
+        references: vec![dimg(&[2])],
+        payload: ImageOverlay {
+            // (2, 1, 0) at alpha 1 after `>> 8`.
+            canvas_fill_value: [0x0200, 0x0100, 0x0000, 0x0100],
+            output_width: 2,
+            output_height: 2,
+            offsets: vec![(0, 0)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    let bytes = file(1, vec![ov, src, src_alpha]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let got = container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap();
+
+    // Independent integer reference of ISO/IEC 23008-12 §6.6.2.4 source-over, round-half-up.
+    let (da, fill) = (1u32, [2u32, 1, 0]);
+    for y in 0..2u32 {
+        for x in 0..2u32 {
+            let sa = u32::from(ey(0, x, y, 8) as u8);
+            let sc = [
+                u32::from(ecr(0, x, y, 8) as u8),
+                u32::from(ey(0, x, y, 8) as u8),
+                u32::from(ecb(0, x, y, 8) as u8),
+            ];
+            let inv = 255 - sa;
+            let out_a = sa + (da * inv + 127) / 255;
+            let mut want = [0u8; 4];
+            for c in 0..3 {
+                let num = sc[c] * sa + (fill[c] * da * inv + 127) / 255;
+                want[c] = ((num + out_a / 2) / out_a).min(255) as u8;
+            }
+            want[3] = out_a as u8;
+            let o = ((y * 2 + x) * 4) as usize;
+            assert_eq!(&got.as_samples()[o..o + 4], &want, "({x},{y})");
+        }
+    }
+    // Literal anchors: each of these differs if either rounding addend is altered.
+    assert_eq!(&got.as_samples()[0..4], &[2, 1, 0, 1]);
+    assert_eq!(&got.as_samples()[4..8], &[73, 3, 34, 4]);
+    assert_eq!(&got.as_samples()[8..12], &[97, 16, 48, 18]);
+    assert_eq!(&got.as_samples()[12..16], &[105, 19, 53, 21]);
+}
+
+#[test]
 fn overlay_composites_at_sixteen_bit_across_mixed_depths() {
     // An `iovl` may composite sub-items of different coded depths — only `grid` requires
     // uniformity. Normalizing every sub-item to the full 16-bit range is what makes that work.
