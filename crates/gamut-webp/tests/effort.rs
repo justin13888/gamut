@@ -290,38 +290,46 @@ fn near_lossless_keeps_rgb_within_the_bound_and_alpha_exact() {
 }
 
 #[test]
-fn near_lossless_shrinks_smooth_content() {
-    // A knob that never shrinks anything is not implemented, only plumbed. The fixture is a smooth
-    // gradient carrying low-amplitude dither — photographic content, and the case the technique is
-    // for. A pure ramp would not do: the spatial predictor already drives it to all-zero residuals,
-    // so there are no low bits left to discard. Noise and flat colour are the other extremes, where
-    // there is respectively nothing predictable and nothing left to remove.
-    let (w, h) = (64u32, 48u32);
+fn near_lossless_never_inflates_and_pays_at_strength() {
+    // Two things a caller needs to be able to rely on.
+    //
+    // First, turning the knob on can never make a file *bigger*: quantization is not
+    // unconditionally a win, so the encoder codes the image both ways and keeps the smaller. That
+    // guard is what makes the knob safe to set without measuring.
+    //
+    // Second, it has to actually do something at strength, or it is plumbing rather than a feature.
+    // The fixture is a gradient carrying low-amplitude noise — photographic content, and the case
+    // the technique is for. A pure ramp would not do: the spatial predictor already drives it to
+    // all-zero residuals, so there are no low bits left to discard.
+    let (w, h) = (96u32, 72u32);
     let mut state = 0x9e37_79b9u32;
     let px: Vec<u8> = (0..w * h)
         .flat_map(|i| {
             let (x, y) = (i % w, i / w);
             let base = [(x * 2) as u8, (y * 2) as u8, (x + y) as u8];
-            let mut dithered = [0u8; 4];
-            for (c, out) in base.iter().zip(dithered.iter_mut()) {
+            let mut out = [0u8; 4];
+            for (c, slot) in base.iter().zip(out.iter_mut()) {
                 state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                *out = c.wrapping_add(((state >> 28) as u8) & 0x0f);
+                *slot = c.wrapping_add(((state >> 28) as u8) & 0x0f);
             }
-            dithered[3] = 0xff;
-            dithered
+            out[3] = 0xff;
+            out
         })
         .collect();
     let d = dims(w, h);
     let exact = encode_lossless(Effort::default(), &px, d).len();
-    let gentle = encode_near_lossless(80, &px, d).len();
+    for strength in [0u8, 20, 40, 60, 80, 99] {
+        let size = encode_near_lossless(strength, &px, d).len();
+        assert!(
+            size <= exact,
+            "strength {strength} inflated the file: {size} vs {exact} exact"
+        );
+    }
     let aggressive = encode_near_lossless(0, &px, d).len();
     assert!(
-        gentle < exact,
-        "gentle near-lossless ({gentle}) must beat exact ({exact})"
-    );
-    assert!(
-        aggressive < gentle,
-        "aggressive near-lossless ({aggressive}) must beat gentle ({gentle})"
+        aggressive < exact * 4 / 5,
+        "the strongest setting saved only {} of {exact} bytes",
+        exact - aggressive
     );
 }
 

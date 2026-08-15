@@ -63,8 +63,9 @@ impl Effort {
 /// The strength of near-lossless preprocessing.
 ///
 /// Near-lossless is **not a bitstream mode**: the encoder still emits a conformant VP8L stream that
-/// decodes bit-exactly. What it changes is the *input* — the source pixels are quantized in smooth
-/// regions first, so the coder has far less residual to carry, for an error the eye does not see.
+/// decodes bit-exactly. What it changes is the *input* — every colour channel is rounded to a
+/// coarser grid first, so the spatial predictor's residuals collapse onto multiples of that grid
+/// and the entropy coder has a far smaller alphabet to carry.
 ///
 /// The scale is libwebp's `near_lossless`, where `0` is maximum loss and larger values are gentler,
 /// so a caller migrating from `cwebp -near_lossless N` gets what they expect. libwebp's `100` —
@@ -79,6 +80,10 @@ impl Effort {
 /// Red, green and blue move by at most [`max_deviation`](Self::max_deviation); **alpha is never
 /// modified**, so transparency still round-trips bit-exactly. This diverges from libwebp, which
 /// quantizes all four channels.
+///
+/// Setting a strength can never make the file **larger**: the encoder codes the image both with and
+/// without preprocessing and keeps the smaller, so a gentle strength that would not have paid
+/// simply falls back to the exact encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NearLossless(u8);
 
@@ -128,10 +133,11 @@ impl NearLossless {
     }
 
     /// The maximum absolute deviation this strength may introduce in **red, green or blue**:
-    /// `2^bits - 1`, i.e. `1`, `3`, `7`, `15` or `31`. Alpha's deviation is always zero.
+    /// half the quantization step, i.e. `1`, `2`, `4`, `8` or `16`. Alpha's deviation is always
+    /// zero.
     #[must_use]
     pub const fn max_deviation(self) -> u16 {
-        (1u16 << self.bits()) - 1
+        1u16 << (self.bits() - 1)
     }
 }
 
@@ -246,7 +252,7 @@ mod tests {
             assert_eq!(nl.bits(), bits, "strength {strength}");
             assert_eq!(
                 nl.max_deviation(),
-                (1u16 << bits) - 1,
+                1u16 << (bits - 1),
                 "strength {strength}"
             );
         }
