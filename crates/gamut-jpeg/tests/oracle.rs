@@ -610,3 +610,60 @@ fn oracle_is_libjpeg_turbo_3() {
     let v = libjpeg_oracle::version();
     assert!(v.starts_with("3."), "expected libjpeg-turbo 3.x, got {v:?}");
 }
+
+// ================================================================================================
+// Custom quantization tables (`with_quant_tables`) through the reference decoder.
+// ================================================================================================
+
+#[test]
+fn encode_all_one_custom_tables_are_near_lossless() {
+    // All-1 tables quantize with step 1 everywhere — the residual error is FDCT/IDCT rounding
+    // only, so libjpeg-turbo's decode must sit within a few codes of the source. This pins that
+    // the caller's tables really drive quantization (any scaled Annex K pair would be far coarser
+    // at high frequencies and blow the bound on LCG content).
+    use gamut_jpeg::QuantTables;
+    let ones = QuantTables::new([1u8; 64], [1u8; 64]).unwrap();
+    let mut worst = 0u8;
+    for &(w, h) in DIMS {
+        for mode in [Mode::Gray, Mode::C444] {
+            let src = lcg_pixels(w, h, mode.channels(), 0xC0FF_EE00);
+            let enc = JpegEncoder::new().with_quant_tables(ones);
+            let jpeg = gamut_encode_with(enc, mode, &src, w, h);
+            let img = libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo decode");
+            assert_eq!(
+                (img.width, img.height, img.channels),
+                (w, h, mode.channels()),
+                "geometry {mode:?} {w}x{h}"
+            );
+            let (max, _) = diff_stats(&img.pixels, &src);
+            worst = worst.max(max);
+        }
+    }
+    // Measured worst over the battery: 3 (gray = pure IDCT rounding; 4:4:4 adds the YCbCr
+    // round-trip). Asserted with margin.
+    assert!(worst <= 4, "all-1 tables max-diff {worst}");
+}
+
+#[test]
+fn encode_coarse_custom_tables_decode_parity_gamut_vs_libjpeg() {
+    // A deliberately coarse custom pair (Annex K scaled to quality 20): both decoders see the
+    // same stream, so gamut's decode must match libjpeg-turbo's within the same IDCT-rounding
+    // parity bound the standard-table battery established (gray/4:4:4 ≤ 3 codes).
+    use gamut_jpeg::QuantTables;
+    let coarse = QuantTables::annex_k().scaled(20);
+    let mut worst = 0u8;
+    for &(w, h) in DIMS {
+        for mode in [Mode::Gray, Mode::C444] {
+            let src = lcg_pixels(w, h, mode.channels(), 0xBAD_5EED);
+            let enc = JpegEncoder::new().with_quant_tables(coarse);
+            let jpeg = gamut_encode_with(enc, mode, &src, w, h);
+            let reference = libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo decode");
+            let (gw, gh, gamut_px) = gamut_decode(mode, &jpeg);
+            assert_eq!((gw, gh), (w, h), "geometry {mode:?} {w}x{h}");
+            let (max, _) = diff_stats(&gamut_px, &reference.pixels);
+            worst = worst.max(max);
+        }
+    }
+    // Measured worst over the battery: 2. Asserted at the established parity bound.
+    assert!(worst <= 3, "coarse custom tables parity max-diff {worst}");
+}
