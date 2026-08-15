@@ -2,7 +2,8 @@
 //! widening/narrowing presentation policy, and bidirectional libtiff parity.
 
 use gamut_core::{
-    DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, ImageBuf, ImageRef, Rgb8, Rgb16, Rgba16,
+    Cmyk8, DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, ImageBuf, ImageRef, Rgb8, Rgb16,
+    Rgba16,
 };
 use gamut_tiff::{
     ByteOrder, Compression, Ifd, PhotometricInterpretation, Predictor, SampleFormat, TiffDecoder,
@@ -477,11 +478,31 @@ fn gray16_replicates_and_gains_opaque_alpha() {
 }
 
 #[test]
-fn gray16_rejects_a_multi_sample_page() {
-    let src = rgb16_pattern(4, 4);
-    let tiff = libtiff_oracle::encode_rgb16(&src, 4, 4, OC::None, 1, false).expect("libtiff");
-    let got: Result<ImageBuf<Gray16>, _> = TiffDecoder::new().decode_image(&tiff);
-    assert!(got.is_err(), "an RGB page cannot be presented as Gray16");
+fn single_sample_pixel_types_reject_a_multi_sample_page() {
+    // The assertion is on the *message*, not `is_err()`. Without the sample-count guard these
+    // decode calls still fail — `ImageBuf::new` rejects a buffer whose length does not match the
+    // dimensions — so only the message distinguishes the guard from that incidental backstop.
+    let rgb = rgb16_pattern(4, 4);
+    let tiff = libtiff_oracle::encode_rgb16(&rgb, 4, 4, OC::None, 1, false).expect("libtiff");
+
+    let dec = TiffDecoder::new();
+    let gray16: Result<ImageBuf<Gray16>, _> = dec.decode_image(&tiff);
+    assert_eq!(
+        gray16.err().map(|e| e.static_message()),
+        Some(Some("TIFF: image is not grayscale")),
+        "an RGB page cannot be presented as Gray16"
+    );
+    let gray8: Result<ImageBuf<Gray8>, _> = dec.decode_image(&tiff);
+    assert_eq!(
+        gray8.err().map(|e| e.static_message()),
+        Some(Some("TIFF: image is not grayscale"))
+    );
+    let cmyk: Result<ImageBuf<Cmyk8>, _> = dec.decode_image(&tiff);
+    assert_eq!(
+        cmyk.err().map(|e| e.static_message()),
+        Some(Some("TIFF: image is not 4-sample CMYK")),
+        "a 3-sample page cannot be presented as CMYK"
+    );
 }
 
 #[test]
