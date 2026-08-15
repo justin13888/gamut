@@ -53,8 +53,8 @@ so no profile is rejected for carrying an unmodelled tag.
   combinations (B alone; M+matrix+B; A+CLUT+B; all five). gamut-icc accepts and re-emits *any*
   combination a profile signals (only the B-curves are required), so non-conformant real-world
   profiles still round-trip losslessly.
-- **`gamut-color` integration**: building runnable transforms (matrix/TRC → pipeline, `chad`
-  application) belongs in `gamut-color` (dependency direction `gamut-color → gamut-icc`), not here.
+- **CMM integration**: building runnable transforms (matrix/TRC → pipeline, `chad` application)
+  belongs in `gamut-cmm` (epic #323; dependency direction `gamut-cmm → gamut-icc`), not here.
 - **`multiProcessElementsType`** (`mpet`, and the `D2Bx`/`B2Dx` transform tags that use it): the
   v4/iccMAX general-purpose processing pipeline is preserved as `Raw` rather than decoded. Every
   other §10 element type is now modelled (see above).

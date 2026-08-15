@@ -17,7 +17,7 @@ Dependency edges (a crate depends on those to its right):
 
 - **gamut** — umbrella; optional deps on format crates gated by features (`avif`, `jxl`,
   `webp`, `heic`, `vvc`, `av1`, `av2`, `tiff`, `dng`, `png`, `jpeg`, `isobmff`, `metadata`,
-  `codec-abi`, `all`); `default = []`. `primitives` re-exports shared `color`/`dsp`/`bitstream`;
+  `cmm`, `codec-abi`, `all`); `default = []`. `primitives` re-exports shared `color`/`dsp`/`bitstream`;
   `isobmff`/`metadata`/`tonemap`/`codec-abi` re-export their respective primitive crates;
   `all` includes all of these.
 - **gamut-core** — `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`. No
@@ -74,6 +74,10 @@ Dependency edges (a crate depends on those to its right):
   crates (**gamut-exif** ← ifd; **gamut-icc**; **gamut-xmp**; **gamut-iptc** ← xmp) and the
   **gamut-metadata** facade (← exif/xmp/icc/iptc) layer on top under the `metadata` feature;
   format crates consume the facade for embedded metadata.
+- **gamut-cmm** — ICC colour management module (epic #323): the transform engine — a
+  validated pipeline/stage model behind the object-safe `Transform` trait — that builds and
+  applies colour transforms from the profiles `gamut-icc` parses; f64 Tier-1, behavioural
+  oracle Little-CMS (`references/cmm/`, dev-only `tooling/lcms2-oracle`). ← icc, color, core.
 - **gamut-tiff** — natively still-image TIFF 6.0; its IFD/tag container is the shared
   **gamut-ifd** primitive (with `bigtiff`), not isobmff/riff. Adds pixel modes plus
   compressions (None/PackBits/LZW/CCITT; JPEG-in-TIFF deferred). ← ifd, core, bitstream.
