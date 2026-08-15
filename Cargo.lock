@@ -623,6 +623,7 @@ version = "2.0.0"
 dependencies = [
  "divan",
  "gamut-core",
+ "lcms2-oracle",
  "serde",
  "serde_json",
 ]
