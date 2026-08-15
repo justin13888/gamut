@@ -23,10 +23,11 @@
 //! real-libjxl JPEG XL reader and its `NewRawImageDigest` computation). Both directions are
 //! full-surface:
 //!
-//! - **Layouts & compression**: strips and DNG-1.7 tiles; uncompressed, Deflate, lossless JPEG
-//!   (the public SOF3 [`lossless_jpeg`] module), and **JPEG XL** (Compression 52546 — the Apple
-//!   ProRAW codec; decode is pure-Rust jxl-rs, encode is the opt-in `jxl-encode` feature), with
-//!   row/column interleave de-interleaving on decode.
+//! - **Layouts & compression**: strips and DNG-1.7 tiles; uncompressed, Deflate (encoded with
+//!   [`gamut_deflate`], inflated with `miniz_oxide` under a cap derived from the chunk geometry),
+//!   lossless JPEG (the public SOF3 [`lossless_jpeg`] module), and **JPEG XL** (Compression
+//!   52546 — the Apple ProRAW codec; decode is pure-Rust jxl-rs, encode is the opt-in
+//!   `jxl-encode` feature), with row/column interleave de-interleaving on decode.
 //! - **Raw model**: CFA and `LinearRaw` photometries at 1–16 bits, the typed [`RawLevels`] level
 //!   family, and the spec's chapter-5 raw-to-linear mapping as the explicit opt-in
 //!   [`RawImage::to_linear`] (differentially gated against the SDK's stage-2 image).
@@ -79,20 +80,23 @@ mod compression;
 mod digest;
 mod jxl;
 mod md5;
+mod predictor;
 mod preview;
 mod writer;
 
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
 // not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
-pub use decoder::{DecodedDng, DngDecoder, RawTag};
+pub use decoder::{DecodedDng, DigestCheck, DngDecoder, RawTag};
 pub use deconstruct::{
     Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
 };
 pub use encoder::DngEncoder;
 pub use gain_map::{GainValues, ProfileGainTableMap};
 pub use gamut_core::{Dimensions, Error, Result};
-// `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum.
-pub use gamut_ifd::{ByteOrder, Value};
+// `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum;
+// `Segment`/`SpanKind` are part of the preservation surface, naming the byte runs a real camera
+// file carries that its own structures do not account for.
+pub use gamut_ifd::{ByteOrder, Segment, SpanKind, Value};
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
 pub use lossless_jpeg::LosslessJpeg;
@@ -100,7 +104,7 @@ pub use metadata::{DngMetadata, ExifMetadata};
 pub use opcode::{Opcode, OpcodeList, opcode_id};
 pub use profile::CameraProfile;
 pub use raw::{RawImage, RawPhotometry, cfa_color};
-pub use rewrite::{DngRewrite, MakerNotePreservation, RewrittenDng};
+pub use rewrite::{DngRewrite, MakerNotePreservation, PreservedSpan, RewrittenDng};
 pub use subimage::{
     DepthInfo, MaskSubArea, SemanticMaskInfo, SubImage, SubImageData, SubImageKind,
 };

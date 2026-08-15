@@ -11,8 +11,19 @@
 //! `samples_per_row` is `width * samples_per_pixel` (the per-plane samples interleave for
 //! `LinearRaw`, so they pack/unpack identically to a single wider row of values).
 
-use gamut_bitstream::{pack_msb_rows, unpack_msb_rows};
+use gamut_bitstream::{pack_msb_rows, row_bytes, unpack_msb_rows};
 use gamut_ifd::ByteOrder;
+
+/// The exact byte length [`pack`] produces for `rows` rows of `samples_per_row` samples at `bits`.
+///
+/// Holds for all three layouts above: `row_bytes(n, 8) == n` and `row_bytes(n, 16) == 2 * n`, and
+/// the sub-byte case is row-padded by construction. Returns `None` if the geometry overflows.
+pub(crate) fn packed_len(samples_per_row: usize, bits: u16, rows: usize) -> Option<usize> {
+    // `row_bytes` multiplies internally, and `bits` reaches the decoder straight from an untrusted
+    // `BitsPerSample` tag, so check that product before delegating.
+    samples_per_row.checked_mul(usize::from(bits))?;
+    row_bytes(samples_per_row, bits).checked_mul(rows)
+}
 
 /// Packs `samples` to the uncompressed DNG byte stream at `bits` per sample.
 #[must_use]
@@ -58,8 +69,6 @@ pub(crate) fn unpack(
 
 #[cfg(test)]
 mod tests {
-    use gamut_bitstream::row_bytes;
-
     use super::*;
 
     fn roundtrip(bits: u16, spr: usize, rows: usize, order: ByteOrder) {
@@ -68,10 +77,9 @@ mod tests {
             .map(|i| (i as u16).wrapping_mul(2749) & max)
             .collect();
         let packed = pack(&samples, bits, spr, order);
-        // MSB-packed rows are byte-aligned; 8/16-bit are exact multiples.
-        if !matches!(bits, 8 | 16) {
-            assert_eq!(packed.len(), row_bytes(spr, bits) * rows);
-        }
+        // `packed_len` predicts the byte length for every depth — MSB-packed rows are byte-aligned
+        // and 8/16-bit are exact multiples. The Deflate decode cap depends on this being exact.
+        assert_eq!(packed.len(), packed_len(spr, bits, rows).expect("geometry"));
         let got = unpack(&packed, bits, spr, rows, order);
         assert_eq!(got, samples, "bits={bits} spr={spr} rows={rows}");
     }
@@ -84,6 +92,14 @@ mod tests {
                 roundtrip(bits, 16, 3, order);
             }
         }
+    }
+
+    #[test]
+    fn packed_len_reports_none_on_overflow() {
+        // `samples_per_row * bits` overflows before any row multiply can.
+        assert_eq!(packed_len(usize::MAX / 4, 12, 1), None);
+        // ...and the row multiply is checked separately.
+        assert_eq!(packed_len(1024, 16, usize::MAX / 1024), None);
     }
 
     #[test]

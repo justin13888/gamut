@@ -94,6 +94,8 @@ Built incrementally; each phase is conformance-checked against libjpeg-turbo (se
 (SOF0) and **progressive (SOF2)** processes, and a **decoder for the sequential and progressive
 processes**. The encoder writes grayscale and JFIF YCbCr with 4:4:4 / 4:2:2 / 4:2:0 chroma
 subsampling, standard (Annex K) tables, and optional restart intervals;
+`JpegEncoder::with_optimized_tables(true)` swaps the fixed tables for ones built from the image's own
+symbol statistics (Annex K.2) — a few percent smaller, same decoded pixels;
 `JpegEncoder::with_progressive(true)` selects the progressive process — libjpeg's frozen
 `jpeg_simple_progression` scan script with optimized per-scan Huffman tables (Annex K.2), producing
 the same coefficients (and thus the same decoded image) as the baseline encoding. The decoder reads

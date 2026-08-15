@@ -275,7 +275,7 @@ fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
     for &(w, h) in &[(16u32, 16u32), (32, 32), (48, 48), (49, 33), (64, 16)] {
         for &quant_index in &[0u8, 8, 40] {
             let (payload, _) = encode_frame(&detailed_yuv(w, h), quant_index);
-            let webp = write_simple_lossy(&payload);
+            let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
@@ -366,7 +366,7 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
         for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33), (33, 145)] {
             for &q in &[12u8, 48] {
                 let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
-                let webp = write_simple_lossy(&payload);
+                let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
                 assert_eq!(gamut.y(), lib.y.as_slice(), "{label} Y at {w}x{h} q{q}");
@@ -397,7 +397,7 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
     ] {
         for &quant_index in &[0u8, 20, 60, 110] {
             let (payload, _) = encode_frame(&synthetic_yuv(w, h), quant_index);
-            let webp = write_simple_lossy(&payload);
+            let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
@@ -444,7 +444,7 @@ fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
     for &(w, h) in &dims {
         for &quant_index in &[12u8, 56] {
             let (payload, _) = encode_frame(&photo_like_yuv(w, h, 0x7e57), quant_index);
-            let webp = write_simple_lossy(&payload);
+            let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
@@ -492,7 +492,7 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
     // would make the conformance assertions below vacuous.
     {
         let yuv = detailed_yuv(48, 48);
-        let base = write_simple_lossy(&encode_frame(&yuv, 16).0);
+        let base = write_simple_lossy(&encode_frame(&yuv, 16).0).unwrap();
         let with = write_simple_lossy(
             &encode_frame_filtered(
                 &yuv,
@@ -503,7 +503,8 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                 },
             )
             .0,
-        );
+        )
+        .unwrap();
         assert_ne!(
             libwebp_decode_yuv(&base).y,
             libwebp_decode_yuv(&with).y,
@@ -519,7 +520,7 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                     ..Default::default()
                 };
                 let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
-                let webp = write_simple_lossy(&payload);
+                let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
                 assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
@@ -546,7 +547,7 @@ fn gamut_decodes_patched_vp8_profiles_like_libwebp() {
         for version in 1u8..=3 {
             let mut patched = payload.clone();
             patched[0] = (patched[0] & !0b1110) | (version << 1);
-            let webp = write_simple_lossy(&patched);
+            let webp = write_simple_lossy(&patched).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&patched).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims v{version} {w}x{h}");

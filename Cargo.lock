@@ -650,8 +650,10 @@ dependencies = [
 name = "gamut-dng"
 version = "1.0.0"
 dependencies = [
+ "divan",
  "gamut-bitstream",
  "gamut-core",
+ "gamut-deflate",
  "gamut-dng",
  "gamut-dng-oracle",
  "gamut-ifd",
@@ -806,11 +808,11 @@ dependencies = [
 
 [[package]]
 name = "gamut-riff"
-version = "0.1.3"
+version = "1.0.0"
 dependencies = [
  "divan",
- "gamut-bitstream",
  "gamut-core",
+ "libwebp-sys2 0.2.0",
 ]
 
 [[package]]

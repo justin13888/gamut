@@ -3,8 +3,9 @@
 //! ([`crate::ffi`]).
 //!
 //! Construct one with a mode — [`JxlEncoder::lossless`] (the default) or [`JxlEncoder::lossy`] — then
-//! refine it with the chainable [`JxlEncoder::with_effort`] / [`JxlEncoder::with_container`] builders,
-//! and drive it through the [`EncodeImage`] trait for any of the eight supported pixel layouts.
+//! refine it with the chainable [`JxlEncoder::with_effort`] / [`JxlEncoder::with_modular`] /
+//! [`JxlEncoder::with_container`] builders, and drive it through the [`EncodeImage`] trait for any
+//! of the eight supported pixel layouts.
 
 use gamut_core::{
     EncodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageRef, Pixel, Result, Rgb8,
@@ -12,7 +13,7 @@ use gamut_core::{
 };
 
 use crate::backend::{JxlCodestreamEncoder, JxlEncodeRequest, JxlImageRef, JxlSamples, Registry};
-use crate::config::{ColorSpec, Container, Distance, Effort, Mode, Orientation};
+use crate::config::{ColorSpec, Container, Distance, Effort, Mode, ModularMode, Orientation};
 
 /// The refusal returned when no backend can encode: nothing was pushed, and the built-in libjxl
 /// tail is not compiled into this build (no `encode` feature, or a `wasm32` target it cannot be
@@ -63,8 +64,8 @@ pub(crate) fn resolve_coded_bits(cfg: &JxlEncoder, bits_per_sample: u32) -> Resu
 ///
 /// Encodes 8- and 16-bit grayscale, gray+alpha, RGB and RGBA images. Pick a mode at construction —
 /// [`JxlEncoder::lossless`] (bit-exact; also [`JxlEncoder::new`] and [`Default`]) or
-/// [`JxlEncoder::lossy`] with a Butteraugli [`Distance`] — then optionally set the [`Effort`] and
-/// output [`Container`] with the `with_*` builders. Encode through the
+/// [`JxlEncoder::lossy`] with a Butteraugli [`Distance`] — then optionally set the [`Effort`],
+/// [`ModularMode`] and output [`Container`] with the `with_*` builders. Encode through the
 /// [`EncodeImage`](gamut_core::EncodeImage) trait, which appends the JPEG XL stream to the caller's
 /// buffer.
 ///
@@ -88,6 +89,8 @@ pub struct JxlEncoder {
     mode: Mode,
     /// The speed/density effort level.
     effort: Effort,
+    /// Which coding tool (VarDCT or Modular) the encoder is told to use, if either.
+    modular: ModularMode,
     /// Codestream vs. ISO BMFF container framing.
     container: Container,
     /// The colour interpretation signalled for the pixel samples.
@@ -110,6 +113,7 @@ impl PartialEq for JxlEncoder {
     fn eq(&self, other: &Self) -> bool {
         self.mode == other.mode
             && self.effort == other.effort
+            && self.modular == other.modular
             && self.container == other.container
             && self.color == other.color
             && self.orientation == other.orientation
@@ -126,6 +130,7 @@ impl Default for JxlEncoder {
         Self {
             mode: Mode::Lossless,
             effort: Effort::default(),
+            modular: ModularMode::default(),
             container: Container::default(),
             color: ColorSpec::default(),
             orientation: Orientation::default(),
@@ -166,6 +171,17 @@ impl JxlEncoder {
     #[must_use]
     pub fn with_effort(mut self, effort: Effort) -> Self {
         self.effort = effort;
+        self
+    }
+
+    /// Sets the [`ModularMode`] (which coding tool libjxl uses, or [`ModularMode::Auto`] to let it
+    /// choose). Returns the updated encoder for chaining.
+    ///
+    /// [`ModularMode::VarDct`] on a **lossless** encoder is a contradiction — libjxl always codes a
+    /// lossless frame with Modular — and is rejected when encoding rather than silently ignored.
+    #[must_use]
+    pub fn with_modular(mut self, modular: ModularMode) -> Self {
+        self.modular = modular;
         self
     }
 
@@ -267,6 +283,12 @@ impl JxlEncoder {
         self.effort
     }
 
+    /// The configured [`ModularMode`].
+    #[must_use]
+    pub fn modular(&self) -> ModularMode {
+        self.modular
+    }
+
     /// The configured output [`Container`].
     #[must_use]
     pub fn container(&self) -> Container {
@@ -345,10 +367,29 @@ impl JxlEncoder {
         Ok(JxlEncodeRequest::new(
             self.distance(),
             self.effort,
+            self.modular,
             resolve_coded_bits(self, image.bits_per_sample())?,
             self.color.clone(),
             self.orientation,
         ))
+    }
+
+    /// Rejects a configuration whose coding-tool request cannot be honoured.
+    ///
+    /// Only one combination is contradictory: a **lossless** encoder with
+    /// [`ModularMode::VarDct`]. libjxl codes every lossless frame with Modular regardless of the
+    /// frame setting, so honouring the request is impossible — and quietly emitting a Modular stream
+    /// for a caller who asked for VarDCT is exactly the silent-drop this crate refuses elsewhere.
+    ///
+    /// [`ModularMode::Modular`] with lossless is *not* rejected: it agrees with what libjxl does.
+    fn validate_modular(&self) -> Result<()> {
+        if self.is_lossless() && self.modular == ModularMode::VarDct {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JXL: lossless encoding cannot force VarDCT mode",
+            ));
+        }
+        Ok(())
     }
 
     /// Encodes `image` through the backend registry, falling back to the built-in tail.
@@ -357,6 +398,8 @@ impl JxlEncoder {
     /// container-level feature is requested, so a default encoder takes exactly the same code path —
     /// and produces exactly the same bytes — as before backends existed.
     fn dispatch_encode(&self, image: &JxlImageRef<'_>, out: &mut Vec<u8>) -> Result<usize> {
+        // Ahead of the registry *and* the tail, so every target and every backend sees one refusal.
+        self.validate_modular()?;
         if !self.uses_container_features() && !self.backends.is_empty() {
             let request = self.encode_request(image)?;
             let mut backends = self.backends.lock();
@@ -406,7 +449,9 @@ impl JxlEncoder {
     /// stream also decodes as ordinary JPEG XL pixels. Because that metadata lives in a container
     /// box, the output is **always ISO BMFF container framing** — the configured [`Container`] does
     /// not apply here. The transcode is inherently lossless, so the lossless/lossy mode and
-    /// [`Distance`] do not apply either; only the configured [`Effort`] is honoured. Metadata
+    /// [`Distance`] do not apply either; only the configured [`Effort`] is honoured. [`ModularMode`]
+    /// does not apply: the path re-packs the JPEG's own DCT coefficients, so there is no coding-tool
+    /// choice to make, and a non-default setting is ignored rather than rejected. Metadata
     /// attached with [`JxlEncoder::with_exif`]/[`JxlEncoder::with_xmp`] is **not** applied on this
     /// path: libjxl already carries the JPEG's own EXIF/XMP into the container automatically, and
     /// duplicating those boxes would corrupt the reconstruction metadata's byte accounting.
@@ -485,9 +530,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_squirrel_effort_and_codestream() {
+    fn defaults_are_squirrel_effort_auto_modular_and_codestream() {
         let enc = JxlEncoder::new();
         assert_eq!(enc.effort(), Effort::Squirrel);
+        assert_eq!(enc.modular(), ModularMode::Auto);
         assert_eq!(enc.container(), Container::Codestream);
     }
 
@@ -514,6 +560,67 @@ mod tests {
         let l = JxlEncoder::lossless().with_effort(Effort::Lightning);
         assert!(l.is_lossless());
         assert_eq!(l.effort(), Effort::Lightning);
+    }
+
+    #[test]
+    fn with_modular_is_chainable_and_touches_only_its_own_field() {
+        let enc = JxlEncoder::lossy(Distance::new(3.0).unwrap())
+            .with_modular(ModularMode::Modular)
+            .with_effort(Effort::Kitten);
+        assert_eq!(enc.modular(), ModularMode::Modular);
+        assert_eq!(enc.effort(), Effort::Kitten);
+        assert!(!enc.is_lossless());
+        assert_eq!(enc.distance(), Some(Distance::new(3.0).unwrap()));
+
+        // Each variant survives the round trip through the builder, mode untouched.
+        for modular in [ModularMode::Auto, ModularMode::VarDct, ModularMode::Modular] {
+            let l = JxlEncoder::lossless().with_modular(modular);
+            assert_eq!(l.modular(), modular);
+            assert!(l.is_lossless());
+        }
+
+        // The knob participates in configuration equality.
+        assert_ne!(
+            JxlEncoder::new().with_modular(ModularMode::Modular),
+            JxlEncoder::new()
+        );
+        assert_eq!(
+            JxlEncoder::new().with_modular(ModularMode::Auto),
+            JxlEncoder::new()
+        );
+    }
+
+    #[test]
+    fn lossless_rejects_forced_vardct_but_accepts_the_others() {
+        let error = JxlEncoder::lossless()
+            .with_modular(ModularMode::VarDct)
+            .validate_modular()
+            .unwrap_err();
+        assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.static_message(),
+            Some("JXL: lossless encoding cannot force VarDCT mode")
+        );
+
+        // Modular agrees with what libjxl already does for lossless, and Auto is the default.
+        assert!(
+            JxlEncoder::lossless()
+                .with_modular(ModularMode::Modular)
+                .validate_modular()
+                .is_ok()
+        );
+        assert!(JxlEncoder::lossless().validate_modular().is_ok());
+
+        // Lossy accepts every coding tool, VarDCT included.
+        for modular in [ModularMode::Auto, ModularMode::VarDct, ModularMode::Modular] {
+            assert!(
+                JxlEncoder::lossy(Distance::new(1.0).unwrap())
+                    .with_modular(modular)
+                    .validate_modular()
+                    .is_ok(),
+                "lossy + {modular:?} should be accepted"
+            );
+        }
     }
 
     #[cfg(all(
@@ -618,6 +725,7 @@ mod tests {
         assert!(
             !JxlEncoder::new()
                 .with_effort(Effort::Glacier)
+                .with_modular(ModularMode::Modular)
                 .with_bit_depth(10)
                 .with_color(ColorSpec::Pq)
                 .with_orientation(Orientation::Rotate180)
@@ -629,6 +737,7 @@ mod tests {
     fn encode_request_mirrors_the_configuration() {
         let enc = JxlEncoder::lossy(Distance::new(4.0).unwrap())
             .with_effort(Effort::Tortoise)
+            .with_modular(ModularMode::Modular)
             .with_color(ColorSpec::Hlg)
             .with_orientation(Orientation::FlipVertical)
             .with_bit_depth(12);
@@ -643,6 +752,7 @@ mod tests {
         assert_eq!(req.distance(), Some(Distance::new(4.0).unwrap()));
         assert!(!req.is_lossless());
         assert_eq!(req.effort(), Effort::Tortoise);
+        assert_eq!(req.modular(), ModularMode::Modular);
         assert_eq!(req.coded_bit_depth(), 12);
         assert_eq!(req.color(), &ColorSpec::Hlg);
         assert_eq!(req.orientation(), Orientation::FlipVertical);
@@ -652,6 +762,7 @@ mod tests {
         assert!(req.is_lossless());
         assert_eq!(req.distance(), None);
         assert_eq!(req.coded_bit_depth(), 16);
+        assert_eq!(req.modular(), ModularMode::Auto);
     }
 
     #[test]

@@ -109,8 +109,14 @@ impl<'a> TrackedIfd<'a> {
 pub struct DecodedDng {
     /// The raw sensor image (CFA mosaic or linear), with its photometry and levels.
     pub raw: RawImage,
-    /// The camera colour profile reconstructed from IFD 0.
-    pub profile: CameraProfile,
+    /// The camera colour profile reconstructed from IFD 0, when the file carries one.
+    ///
+    /// `None` for a DNG with no colour calibration to reconstruct — a monochrome camera has no
+    /// colour to calibrate, and such files legitimately omit `ColorMatrix1`,
+    /// `CalibrationIlluminant1` and `AsShotNeutral` entirely (a Leica M Monochrom writes a DNG
+    /// 1.0.0.0 file carrying only `UniqueCameraModel`). The raw image still decodes; nothing is
+    /// invented to fill the gap.
+    pub profile: Option<CameraProfile>,
     /// The `DNGVersion` the file declares, as its four dotted version octets in order — e.g. DNG
     /// 1.7.1.0 is `[1, 7, 1, 0]`. Kept as four bytes (not a packed `u32`) so each component reads
     /// directly and byte order never enters into it.
@@ -143,6 +149,27 @@ pub struct DecodedDng {
     pub exif_extra: Vec<RawTag>,
 }
 
+/// The verdict of [`DngDecoder::verify_new_raw_image_digest`].
+///
+/// `#[non_exhaustive]`: further verdicts (e.g. a transparency-mask-inclusive digest) may be added
+/// without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DigestCheck {
+    /// The file carries no `NewRawImageDigest` tag, so there is nothing to verify. Common: no
+    /// Apple ProRAW or Leica file in the wild writes one.
+    Absent,
+    /// The recomputed digest equals the stored one — the raw data is intact.
+    Match,
+    /// The digests differ: the raw data does not match what the writer recorded.
+    Mismatch {
+        /// The digest the file stores.
+        stored: [u8; 16],
+        /// The digest recomputed from the file's raw image.
+        computed: [u8; 16],
+    },
+}
+
 /// Decoder for DNG (Adobe Digital Negative) raw images.
 #[derive(Debug, Clone, Default)]
 pub struct DngDecoder {
@@ -154,6 +181,60 @@ impl DngDecoder {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Verifies a file's stored `NewRawImageDigest` (51111) against the digest recomputed from its
+    /// raw image, choosing the rule the file's own storage demands.
+    ///
+    /// Two rules exist and picking the wrong one produces a spurious mismatch, which is why this
+    /// is a verb on the decoder rather than a value the caller compares by hand:
+    ///
+    /// - **Lossless storage** (uncompressed, Deflate, lossless JPEG) digests the *samples*, via
+    ///   [`RawImage::new_raw_image_digest`].
+    /// - **Lossy-compressed storage** (JPEG XL, lossy JPEG) digests the *compressed chunks* in
+    ///   offset order — the SDK's `dng_lossy_compressed_image::FindDigest`. Because this rule
+    ///   never decodes pixels, it verifies files whose compression this crate cannot yet decode
+    ///   at all: a lossy-JPEG DNG's integrity is checkable even though its image is not.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`decode`](Self::decode) for a malformed container, and — for
+    /// lossless storage only — whatever decoding the raw image reports.
+    pub fn verify_new_raw_image_digest(&self, data: &[u8]) -> Result<DigestCheck> {
+        let file = read(data)?;
+        let ifds = walk_ifds(&file, data);
+        let raw_index = select_raw_ifd(&ifds)?;
+        let tracked: Vec<TrackedIfd> = ifds.iter().map(TrackedIfd::new).collect();
+        let Some(stored) = bytes_value(tracked[0].get(tags::NEW_RAW_IMAGE_DIGEST))
+            .and_then(|b| <[u8; 16]>::try_from(b).ok())
+        else {
+            return Ok(DigestCheck::Absent);
+        };
+
+        let raw_ifd = &tracked[raw_index];
+        let compression =
+            Compression::from_code(raw_ifd.get_u32(tags::COMPRESSION).unwrap_or(1) as u16)
+                .ok_or_else(|| {
+                    Error::unsupported(env!("CARGO_PKG_NAME"), "DNG: unknown compression")
+                })?;
+        let computed = if compression.is_lossy() {
+            let grid = chunk_grid(
+                raw_ifd,
+                raw_ifd.get_u32(tags::IMAGE_WIDTH).unwrap_or(0) as usize,
+                raw_ifd.get_u32(tags::IMAGE_LENGTH).unwrap_or(0) as usize,
+            )?;
+            let chunks = grid_chunks(raw_ifd, data, &grid)?;
+            let owned: Vec<Vec<u8>> = chunks.iter().map(|c| c.to_vec()).collect();
+            crate::digest::lossy_compressed_digest(&owned)
+        } else {
+            decode_raw_image(raw_ifd, data, file.order)?.new_raw_image_digest()
+        };
+
+        Ok(if computed == stored {
+            DigestCheck::Match
+        } else {
+            DigestCheck::Mismatch { stored, computed }
+        })
     }
 
     /// Decodes `data` (a DNG file) into its raw image, profile, and version.
@@ -901,6 +982,27 @@ fn decode_image_data(
         }
     }
 
+    // PlanarConfiguration (284) defaults to chunky (1), the only layout the interleaved sample
+    // model represents. Planar (2) is legal TIFF that a DNG must not use (the SDK's IsValidDNG
+    // rejects it) and would otherwise be misread as chunky — silently wrong pixels.
+    match ifd.get_u32(tags::PLANAR_CONFIGURATION) {
+        None | Some(1) => {}
+        Some(2) => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "DNG: planar component storage is not supported",
+            ));
+        }
+        Some(_) => {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: PlanarConfiguration must be 1 (chunky) or 2 (planar)",
+            ));
+        }
+    }
+
+    let predictor = crate::predictor::validate(ifd.get_u32(tags::PREDICTOR), compression, bits)?;
+
     let (width, height) = (width as usize, height as usize);
     let samples_per_row = width
         .checked_mul(spp)
@@ -912,6 +1014,13 @@ fn decode_image_data(
     let row_factor = interleave_factor(ifd, tags::ROW_INTERLEAVE_FACTOR, height)?;
     let col_factor = interleave_factor(ifd, tags::COLUMN_INTERLEAVE_FACTOR, width)?;
 
+    let layout = ChunkLayout {
+        compression,
+        spp,
+        bits,
+        order,
+        predictor,
+    };
     let grid = chunk_grid(ifd, width, height)?;
     let chunks = grid_chunks(ifd, data, &grid)?;
     let samples = match grid {
@@ -930,15 +1039,7 @@ fn decode_image_data(
                         "DNG: more strips than image rows",
                     ));
                 }
-                samples.extend(decode_chunk_samples(
-                    compression,
-                    chunk,
-                    width,
-                    rows,
-                    spp,
-                    bits,
-                    order,
-                )?);
+                samples.extend(decode_chunk_samples(layout, chunk, width, rows)?);
                 remaining_rows -= rows;
             }
             if samples.len() != expected {
@@ -967,15 +1068,7 @@ fn decode_image_data(
             }
             let mut samples = vec![0u16; expected];
             for (i, chunk) in chunks.iter().enumerate() {
-                let tile = decode_chunk_samples(
-                    compression,
-                    chunk,
-                    tile_width,
-                    tile_height,
-                    spp,
-                    bits,
-                    order,
-                )?;
+                let tile = decode_chunk_samples(layout, chunk, tile_width, tile_height)?;
                 let x0 = (i % across) * tile_width;
                 let y0 = (i / across) * tile_height;
                 let copy_cols = tile_width.min(width - x0);
@@ -1057,24 +1150,53 @@ fn deinterleave(
     out
 }
 
-/// Decodes one chunk (a strip or tile) of `cols × rows` pixels at `spp` samples each, returning
-/// exactly `cols * rows * spp` samples.
-fn decode_chunk_samples(
+/// How one chunk's samples are stored: everything but the bytes themselves. Bundled so the
+/// per-chunk decode takes a layout rather than a long positional argument list.
+#[derive(Debug, Clone, Copy)]
+struct ChunkLayout {
+    /// The chunk's compression scheme.
     compression: Compression,
+    /// Samples per pixel.
+    spp: usize,
+    /// Bits per sample.
+    bits: u16,
+    /// The stream's byte order.
+    order: ByteOrder,
+    /// The `Predictor` to undo after unpacking.
+    predictor: crate::values::Predictor,
+}
+
+/// Decodes one chunk (a strip or tile) of `cols x rows` pixels, returning exactly
+/// `cols * rows * layout.spp` samples.
+fn decode_chunk_samples(
+    layout: ChunkLayout,
     chunk: &[u8],
     cols: usize,
     rows: usize,
-    spp: usize,
-    bits: u16,
-    order: ByteOrder,
 ) -> Result<Vec<u16>> {
+    let ChunkLayout {
+        compression,
+        spp,
+        bits,
+        order,
+        predictor,
+    } = layout;
     let want = cols
         .checked_mul(rows)
         .and_then(|n| n.checked_mul(spp))
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow"))?;
     match compression {
         Compression::Uncompressed | Compression::Deflate => {
-            let bytes = compression::decompress(compression, chunk)?;
+            // Cap inflation at the packed length this chunk's geometry implies: a Deflate chunk
+            // that expands past it cannot be a valid sample stream, and the cap is what keeps a
+            // hostile zlib stream from allocating without bound.
+            let max_out = cols
+                .checked_mul(spp)
+                .and_then(|per_row| bitpack::packed_len(per_row, bits, rows))
+                .ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: dimensions overflow")
+                })?;
+            let bytes = compression::decompress(compression, chunk, max_out)?;
             let mut got = bitpack::unpack(&bytes, bits, cols * spp, rows, order);
             if got.len() < want {
                 return Err(Error::invalid_input(
@@ -1083,6 +1205,9 @@ fn decode_chunk_samples(
                 ));
             }
             got.truncate(want); // tolerate chunk padding, per TIFF practice
+            // The predictor is undone per chunk, after unpacking and (inside `bitpack`) after the
+            // byte-order swap — the SDK's ordering.
+            crate::predictor::undo(predictor, &mut got, cols, rows, spp, bits);
             Ok(got)
         }
         // Lossless JPEG decodes samples directly. The JPEG stream's internal width/height/
@@ -1161,8 +1286,24 @@ fn byte_chunks<'a>(offsets: &[u64], counts: &[u64], data: &'a [u8]) -> Result<Ve
     Ok(chunks)
 }
 
-/// Reconstructs the [`CameraProfile`] from IFD 0's identity and calibration tags.
-fn decode_profile(ifd0: &TrackedIfd) -> Result<CameraProfile> {
+/// Reconstructs the [`CameraProfile`] from IFD 0's identity and calibration tags, or `None` when
+/// the file carries no colour calibration at all.
+///
+/// `ColorMatrix1` is the tag that decides whether a colour profile exists: a monochrome camera has
+/// no colour to calibrate and omits the whole calibration family (a Leica M Monochrom writes a DNG
+/// 1.0.0.0 file carrying only `UniqueCameraModel`). Such a file decodes to a raw image with no
+/// profile rather than failing — but a calibration that is *present and malformed* is still an
+/// error, because that is a broken file rather than an absent feature.
+fn decode_profile(ifd0: &TrackedIfd) -> Result<Option<CameraProfile>> {
+    // Absent colour calibration is a property of the camera, not a defect. `AsShotWhiteXY` (50729)
+    // is the spec's alternative to `AsShotNeutral`; typed support for it is deferred, so a file
+    // carrying only that also yields no profile and surfaces the tag through `ifd0_extra`.
+    if ifd0.get(tags::COLOR_MATRIX1).is_none()
+        || ifd0.get(tags::CALIBRATION_ILLUMINANT1).is_none()
+        || ifd0.get(tags::AS_SHOT_NEUTRAL).is_none()
+    {
+        return Ok(None);
+    }
     let model = ascii_value(ifd0.get(tags::UNIQUE_CAMERA_MODEL)).ok_or_else(|| {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: missing UniqueCameraModel")
     })?;
@@ -1176,7 +1317,7 @@ fn decode_profile(ifd0: &TrackedIfd) -> Result<CameraProfile> {
     let neutral = f64_vec(ifd0.get(tags::AS_SHOT_NEUTRAL))
         .filter(|v| v.len() == 3)
         .ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: missing AsShotNeutral")
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: malformed AsShotNeutral")
         })?;
 
     let mut profile = CameraProfile::new(
@@ -1214,7 +1355,7 @@ fn decode_profile(ifd0: &TrackedIfd) -> Result<CameraProfile> {
     {
         profile = profile.with_profile_embed_policy(policy);
     }
-    Ok(profile)
+    Ok(Some(profile))
 }
 
 /// Reads `DNGVersion` as a 4-byte array (defaulting trailing bytes to zero).
@@ -1423,6 +1564,37 @@ mod tests {
         let raw = decode_raw_image(&TrackedIfd::new(&ifd), &jpeg, ByteOrder::LittleEndian)
             .expect("decode");
         assert_eq!(raw.samples(), &samples[..]);
+    }
+
+    /// A zlib bomb — a tiny Deflate strip that inflates to megabytes — is rejected against the
+    /// strip's own geometry rather than decompressed. The cap comes from the IFD's dimensions, so
+    /// the decoder never allocates on the attacker's say-so.
+    #[test]
+    fn decode_raw_image_rejects_a_deflate_strip_that_inflates_past_its_geometry() {
+        // 2x2 CFA at 16 bits is an 8-byte strip; this one inflates to 4 MiB from ~4 KiB.
+        let bomb = compression::compress(Compression::Deflate, &vec![0u8; 4 << 20]).expect("bomb");
+        assert!(bomb.len() < 8192, "the bomb must be small on disk");
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+        ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+        ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+        ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![16]));
+        ifd.set(tags::COMPRESSION, Value::Short(vec![8])); // Deflate
+        ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![32803])); // CFA
+        ifd.set(tags::CFA_REPEAT_PATTERN_DIM, Value::Short(vec![2, 2]));
+        ifd.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
+        ifd.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
+        ifd.set(
+            tags::STRIP_BYTE_COUNTS,
+            Value::Long(vec![bomb.len() as u32]),
+        );
+
+        let err =
+            decode_raw_image(&TrackedIfd::new(&ifd), &bomb, ByteOrder::LittleEndian).unwrap_err();
+        assert_eq!(
+            err.static_message(),
+            Some("DNG: Deflate stream inflates past the expected size")
+        );
     }
 
     /// The `SubIFDs` walk is depth-capped: a 10-deep nested chain yields exactly

@@ -1,6 +1,8 @@
 //! The typed `hvcC` HEVCDecoderConfigurationRecord ([`HevcConfig`]) and the config-driven bridges to
-//! a downstream HEVC decoder: [`HevcConfig::annex_b`] (length-prefixed → Annex-B start codes) and
-//! [`HevcConfig::validate_still_payload`] (the still-image IRAP constraint).
+//! a downstream HEVC decoder: the Annex-B emitters [`HevcConfig::annex_b`],
+//! [`HevcConfig::annex_b_parameter_sets`], and [`HevcConfig::annex_b_payload`] (length-prefixed →
+//! Annex-B start codes), and [`HevcConfig::validate_still_payload`] (the still-image IRAP
+//! constraint). Which emitter each platform decoder API wants is tabulated in the [crate] docs.
 //!
 //! Layout is `references/heif` §1 (ISO/IEC 14496-15 §8.3.3.1) exactly. All `reserved` fields are
 //! **ignored** on read (a reader must not reject non-conforming reserved bits — §1); they are masked
@@ -266,17 +268,17 @@ impl HevcConfig {
         self.parameter_sets(NalUnitType::Pps)
     }
 
-    /// Converts an `hvc1`/`hev1` item `payload` to an Annex-B (ITU-T H.265 Annex B) NAL stream,
-    /// appending to `out` (ISO/IEC 14496-15 §8.3.2 / §8.4; `references/heif` §2).
+    /// Converts an `hvc1`/`hev1` item `payload` to a complete Annex-B (ITU-T H.265 Annex B) NAL
+    /// stream, appending to `out` (ISO/IEC 14496-15 §8.3.2 / §8.4; `references/heif` §2).
     ///
-    /// Each NAL unit is prefixed with a four-byte start code (`00 00 00 01`). The record's parameter
-    /// sets are emitted first — all VPS, then all SPS, then all PPS, then any remaining arrays (e.g.
-    /// SEI) in file order — followed by every NAL unit of `payload` in order. Bytes are appended, so
-    /// callers can reuse a scratch buffer (allocation-conscious).
+    /// This is exactly [`annex_b_parameter_sets`](Self::annex_b_parameter_sets) followed by
+    /// [`annex_b_payload`](Self::annex_b_payload): the record's parameter sets first, then every NAL
+    /// unit of `payload`, each prefixed with a four-byte start code (`00 00 00 01`). It is the form
+    /// a raw Annex-B decoder wants — VAAPI/FFmpeg, libde265 — where an API that takes the parameter
+    /// sets separately (Android MediaCodec `csd-0`) wants the two halves instead. See the [crate]
+    /// docs for the per-API mapping.
     ///
-    /// This does **not** de-duplicate: an `hev1` payload may already carry inband parameter sets, in
-    /// which case the emitted stream repeats them. That is intentional — an H.265 decoder accepts
-    /// repeated parameter sets, so de-duplication is neither required nor performed here.
+    /// Bytes are appended, so callers can reuse a scratch buffer (allocation-conscious).
     ///
     /// # Errors
     ///
@@ -284,30 +286,101 @@ impl HevcConfig {
     /// truncated NAL body, or a zero-length NAL). On error, bytes already appended to `out` are left
     /// in place.
     pub fn annex_b(&self, payload: &[u8], out: &mut Vec<u8>) -> Result<()> {
-        const START_CODE: [u8; 4] = [0x00, 0x00, 0x00, 0x01];
-        let mut emit = |nal: &[u8]| {
-            out.extend_from_slice(&START_CODE);
-            out.extend_from_slice(nal);
-        };
+        self.annex_b_parameter_sets(out);
+        self.annex_b_payload(payload, out)
+    }
+
+    /// Emits the record's parameter-set [`arrays`](Self::arrays) as an Annex-B NAL stream, appending
+    /// to `out` (ISO/IEC 14496-15 §8.4; `references/heif` §2).
+    ///
+    /// Each NAL unit is prefixed with a four-byte start code (`00 00 00 01`), ordered all VPS, then
+    /// all SPS, then all PPS, then any remaining arrays (e.g. SEI) in file order — the decoder-init
+    /// order H.265 expects, regardless of the order the arrays appear in the record. This is the
+    /// Android MediaCodec `csd-0` blob and the VAAPI parameter-set feed; the coded picture follows
+    /// from [`annex_b_payload`](Self::annex_b_payload).
+    ///
+    /// Emitting nothing is valid and not an error: an `hev1` record may carry its parameter sets
+    /// inband in the item payload instead (see
+    /// [`HeifItem::hevc_inband_parameter_sets_allowed`](crate::HeifItem::hevc_inband_parameter_sets_allowed)).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gamut_heic::HevcConfig;
+    ///
+    /// // A minimal `hvcC`: the 23-byte header (4-byte NAL length prefixes) plus one VPS array.
+    /// let mut record = vec![0u8; 23];
+    /// record[0] = 1; // configurationVersion
+    /// record[21] = 0b0000_0011; // ... | lengthSizeMinusOne = 3
+    /// record[22] = 1; // numOfArrays
+    /// // array_completeness | VPS (32); numNalus = 1; nalUnitLength = 3; the NAL unit.
+    /// record.extend_from_slice(&[0xA0, 0x00, 0x01, 0x00, 0x03, 0x40, 0x01, 0xAA]);
+    /// let config = HevcConfig::parse(&record).unwrap();
+    ///
+    /// let mut csd0 = Vec::new();
+    /// config.annex_b_parameter_sets(&mut csd0);
+    /// assert_eq!(csd0, [0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0xAA]);
+    /// ```
+    pub fn annex_b_parameter_sets(&self, out: &mut Vec<u8>) {
         for nal in self.vps() {
-            emit(nal);
+            emit_annex_b(nal, out);
         }
         for nal in self.sps() {
-            emit(nal);
+            emit_annex_b(nal, out);
         }
         for nal in self.pps() {
-            emit(nal);
+            emit_annex_b(nal, out);
         }
         for array in &self.arrays {
             if array.nal_unit_type.is_parameter_set() {
                 continue;
             }
             for nal in &array.nal_units {
-                emit(nal);
+                emit_annex_b(nal, out);
             }
         }
+    }
+
+    /// Emits an `hvc1`/`hev1` item `payload` — and nothing else — as an Annex-B NAL stream,
+    /// appending to `out` (ISO/IEC 14496-15 §8.3.2; `references/heif` §2).
+    ///
+    /// Every NAL unit of `payload` is emitted in order, its length prefix
+    /// ([`nal_length_size`](Self::nal_length_size) bytes) replaced by a four-byte start code
+    /// (`00 00 00 01`). No parameter set from the record is emitted — this is the sample data an API
+    /// that was configured separately expects (Android MediaCodec, after `csd-0` from
+    /// [`annex_b_parameter_sets`](Self::annex_b_parameter_sets)).
+    ///
+    /// Payload NAL units are passed through as they appear, with no de-duplication against the
+    /// record: an `hev1` payload may carry inband parameter sets, which are emitted here as well.
+    /// That is intentional — an H.265 decoder accepts repeated parameter sets.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the payload-split errors of [`crate::iter_nal_units`] (truncated length prefix,
+    /// truncated NAL body, or a zero-length NAL). On error, bytes already appended to `out` are left
+    /// in place.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gamut_heic::HevcConfig;
+    ///
+    /// // A minimal `hvcC`: the 23-byte header, 4-byte NAL length prefixes, no arrays.
+    /// let mut record = vec![0u8; 23];
+    /// record[0] = 1; // configurationVersion
+    /// record[21] = 0b0000_0011; // ... | lengthSizeMinusOne = 3
+    /// let config = HevcConfig::parse(&record).unwrap();
+    ///
+    /// // One length-prefixed IDR_W_RADL NAL unit.
+    /// let mut sample = Vec::new();
+    /// config
+    ///     .annex_b_payload(&[0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD], &mut sample)
+    ///     .unwrap();
+    /// assert_eq!(sample, [0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xDD]);
+    /// ```
+    pub fn annex_b_payload(&self, payload: &[u8], out: &mut Vec<u8>) -> Result<()> {
         for nal in iter_nal_units(payload, self.nal_length_size()) {
-            emit(nal?);
+            emit_annex_b(nal?, out);
         }
         Ok(())
     }
@@ -334,6 +407,13 @@ impl HevcConfig {
         }
         Ok(())
     }
+}
+
+/// Appends one NAL unit to an Annex-B stream: a four-byte start code (`00 00 00 01`) followed by the
+/// unit's bytes (ITU-T H.265 Annex B; ISO/IEC 14496-15 §8.4).
+fn emit_annex_b(nal: &[u8], out: &mut Vec<u8>) {
+    out.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    out.extend_from_slice(nal);
 }
 
 /// A minimal big-endian, bounds-checked byte cursor for the `hvcC` body. Every read is fallible and

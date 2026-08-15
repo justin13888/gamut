@@ -36,7 +36,7 @@ internal encode→decode round-trips guard every lossless path.
 | P9  | Ch5     | Levels (Black/White) + ActiveArea + DefaultCrop + **bit-depth packing 8/10/12/14/16** (MSB-first, Adobe-verified pixel-exact). Completed by #253: the full spec level model (`RawLevels`) and the chapter-5 mapping itself (`RawImage::to_linear`, gated ±1 LSB against the Adobe SDK's stage-2 image) | ✅ done |
 | P10 | Ch2     | Embedded uncompressed RGB preview in IFD 0 (JPEG preview + size cap deferred) | ✅ done |
 | P11 | Ch2–5   | **Decoder**: walk the tree (SubIFDs → raw), unpack samples, reconstruct RawImage + CameraProfile; round-trips & agrees with Adobe. Finalization hardened it: full IFD-forest raw search, per-strip sub-byte alignment, `SampleFormat` validation, 64-bit offset reads | ✅ done |
-| P12 | Ch4     | Deflate/ZIP (8) encode+decode (`miniz_oxide`, zlib format) — CFA + LinearRaw, Adobe-validated; encode limited to 8/16-bit (the SDK reader's constraint) | ✅ done |
+| P12 | Ch4     | Deflate/ZIP (8) encode+decode (zlib format; encode `gamut-deflate`, decode `miniz_oxide`) — CFA + LinearRaw, Adobe-validated; encode limited to 8/16-bit (the SDK reader's constraint) | ✅ done |
 | P13 | Ch4     | Lossless JPEG (7) encode+decode (SOF3) — CFA + LinearRaw, Adobe decodes pixel-exact. #253 hardened decode to the full T.81 process-14 reader envelope and published the `lossless_jpeg` module; per-chunk geometry follows the spec's total-sample-count rule | ✅ done |
 | P14 | Ch2     | Tiled raw layout (`TileWidth`/`TileLength`/`TileOffsets`/`TileByteCounts`): decode with edge-crop reassembly + `with_tiling` encode (zero-padded edge tiles), all schemes, Adobe pixel-exact | ✅ done |
 | P15 | Ch2     | BigTIFF DNG (1.7, 64-bit offsets) — encode + decode, Adobe-validated | ✅ done |
@@ -48,6 +48,7 @@ internal encode→decode round-trips guard every lossless path.
 | P21 | Ch2,4   | **Sub-images**: every non-raw image IFD as a typed `SubImage` (previews, transparency masks, **semantic masks** with `SemanticName`/`SemanticInstanceID`/`MaskSubArea`, depth maps + `DepthInfo`), best-effort decoded with verbatim-chunk fallback | ✅ done |
 | P22 | Ch4     | **Gain maps**: typed `ProfileGainTableMap` (52525) + `ProfileGainTableMap2` (52544) — parse, byte-exact re-serialise, embed on encode; gated against Adobe's PGTM sample files | ✅ done |
 | P23 | —       | **Explicitness**: every unmodelled IFD field surfaces verbatim as a typed `RawTag` (`ifd0_extra`/`raw_extra`/`exif_extra`/per-sub-image), via a consumption-tracking reader — issue #109's "all metadata explicitly represented" clause | ✅ done |
+| P24 | Ch2-4   | **Real camera conformance** (#174): the `gamut-dng-samples` corpus + `tooling/gamut-dng-real-conformance`; `Predictor`/`PlanarConfiguration` honoured, byte accounting and the preserving rewrite fixed for real files, optional camera profile | ✅ done |
 
 ## Apple ProRAW (DNG 1.7 + JPEG XL): fully covered for decode
 
@@ -70,8 +71,75 @@ to a shipped, oracle-gated feature:
 Conformance uses Adobe's official JPEG XL sample DNGs (tiled, interleaved, lossy) — gamut's
 decode agrees with the SDK's own real-libjxl decode within one code (JXL conformance tolerance
 for lossy streams; lossless is bit-exact) — plus ProRAW-shaped synthetic goldens through the
-full encode → SDK-validate → decode → digest loop. No real iPhone file is committed
-(licensing); adding one as a local fixture is a straightforward follow-up.
+full encode → SDK-validate → decode → digest loop. Since #174 a **real iPhone 12 Pro ProRAW
+file** is gated too (below), which is what turned the table above from a mapping argument into a
+measurement.
+
+## Real camera conformance (issue #174)
+
+Every input above is either synthetic or Adobe-authored. **Real camera files are a different
+population**, and running six of them through the decoder found four defects nothing else could
+have: two produced silently wrong output, one dropped 651 KB, one refused a valid file outright.
+
+**Corpus:** the `gamut-dng-samples` submodule at `third_party/gamut-dng-samples` — six CC0 files
+from raw.pixls.us, each verified CC0 by SHA-256 against the upstream index, kept byte-identical
+to upstream (cropping would destroy the byte-completeness and digest properties they exist to
+test). `MANIFEST.toml` carries provenance plus *measured* expectations, so drift fails rather
+than passes quietly.
+
+**Harness:** `tooling/gamut-dng-real-conformance`, excluded from the workspace so
+`cargo test --workspace` never pulls in ~178 MiB of camera files. Run it with `mise run
+fetch-dng-samples && mise run test-dng-real`; CI runs it in `extended.yml`'s `real-dng` job, not
+on the per-PR path. Five layers per file: byte accounting (including the exact inventory of
+unaccounted runs), decode against the manifest, the stored digest under the storage-correct rule,
+the Adobe SDK stage-2 differential at ±1 code, and the preserving rewrite.
+
+| File | What it alone proves |
+| ---- | -------------------- |
+| Apple iPhone 12 Pro (ProRAW) | Big-endian, tiled 504×378 12-bit `LinearRaw`, `LinearizationTable`, PGTM, semantic mask, a real MakerNote pinned across a rewrite — and a 10-byte `APPLEDNG` vendor preamble |
+| Canon 5D3 uncompressed | `Compression = 1`, one 5920×3950 16-bit CFA strip |
+| Canon 5D3 lossless | `Compression = 7` CFA, 384 tiles |
+| Canon 5D3 lossy | `Compression = 34892`, a deferral that must be a *typed* refusal; the only file whose digest uses the compressed-chunk rule, so its integrity verifies even though its image does not decode |
+| Leica M Monochrom | DNG 1.0.0.0 monochrome carrying **no colour calibration at all** — must decode with no profile rather than fail |
+| Leica M10 | Raw in IFD 0 itself, previews with no `RowsPerStrip`, and a **651 KB appended trailer** the rewrite must carry |
+
+What the corpus fixed:
+
+- **`Predictor` (317)** was parsed and then ignored — a `Predictor = 2` file decoded to garbage
+  with no error. Now undone per chunk following the SDK's `DecodeDelta8/16/32` exactly (rows
+  independent, back-reference `samples_per_pixel × x_factor`, wrapping at the *container* width),
+  with the float predictors and sub-byte depths refused typed. Self-predicting schemes (lossless
+  JPEG, JPEG XL) ignore the tag, as the SDK reader does.
+- **`PlanarConfiguration` (284)** was never read, so planar storage would have been misread as
+  chunky. Now validated: chunky accepted, planar refused typed.
+- **Byte accounting** did not hold for real files. `gamut-ifd` gained `SpanKind::{Preamble,
+  Interstitial, Trailer}` and an explicit `classify_unclaimed` pass, so every byte of every real
+  file classifies *and* the report still says what each run was. The pass is skipped when the walk
+  admits a `SkippedSubIfd`, so it can never mask a parser defect, and the dual-ledger invariants
+  are untouched.
+- **`DngRewrite` dropped those bytes.** It now carries every unaccounted run through verbatim and
+  reports each in `RewrittenDng::preserved`. Bytes survive; original absolute offsets generally do
+  not, because the directory layout is rebuilt — the runs are appended after the payload region in
+  file order, which leaves a trailer last.
+
+## v2.0.0: what changed and why
+
+Three breaking changes, all forced by real files:
+
+- **`DecodedDng::profile` is `Option<CameraProfile>`.** A monochrome camera has no colour to
+  calibrate and legitimately writes no `ColorMatrix1`, `CalibrationIlluminant1` or
+  `AsShotNeutral`; the Leica M Monochrom does exactly that and previously failed the whole decode.
+  Absent calibration now yields `None` — nothing is invented. Calibration that is *present and
+  malformed* is still an error.
+- **`PhotometricInterpretation::YCbCr` (6)** is modelled, so the baseline-JPEG previews every real
+  camera embeds stop raising an anomaly per preview.
+- **`DngDecoder::verify_new_raw_image_digest`** is new, returning `DigestCheck`. It picks the rule
+  the file's storage demands — sample-domain for lossless, compressed-chunk for lossy/JXL — which
+  a caller could not previously do, because `lossy_compressed_digest` is crate-private.
+
+`AsShotWhiteXY` (50729) as a typed alternative to `AsShotNeutral` remains **deferred**: no corpus
+file needs it, converting xy to camera neutral is DNG §6 rendering work, and the tag surfaces
+verbatim through `ifd0_extra` meanwhile.
 
 ## Bridge surface for external RAW pipelines (issue #253)
 
@@ -128,13 +196,45 @@ separate path (below).
   16-bit; a JXL IFD's `BitsPerSample` records codestream precision; encode requires 16-bit
   input.
 
+## Deflate codec choice (#196)
+
+Encode uses `gamut-deflate` at `Level::Default`; decode uses `miniz_oxide`, bounded to the packed
+length the chunk geometry implies. `gamut-deflate` is deliberately encoder-only (inflating is
+solved and security-sensitive), so the split is permanent, not a staging post — the same one
+`gamut-tiff` and `gamut-png` make.
+
+Measured by `cargo bench -p gamut-dng --bench compression`, against the `miniz_oxide` level 6 this
+crate encoded with before:
+
+- **Ratio is a wash.** On packed raw payloads `Level::Default` lands within ±0.6% of miniz-6 —
+  slightly better tiled, slightly worse as one strip. Raw sensor noise leaves DEFLATE modelling
+  almost nothing to work with (a 16-bit frame compresses ~3%), so the entropy-coding differences
+  that separate these encoders on text do not show up here.
+- **Encode is ~17% slower** (≈46 MB/s vs ≈56 MB/s); `Level::Best` is ~12× slower again.
+- **`Level::Best` only pays off tiled** (−0.3% to −0.5% on real raw, −5.5% on 8-bit), because
+  `gamut-deflate` applies its optimal parse at 1 MiB or below and the untiled encoder writes
+  `RowsPerStrip = ImageLength` — one strip for the whole image, above the threshold. Raising that
+  limit is tracked upstream rather than worked around here, which is why the shipped level stays
+  `Default`.
+
+The Adobe DNG SDK validates the output on every fixture the oracle covers (CFA and LinearRaw,
+8- and 16-bit, strips and tiles), so the migration is correctness-neutral.
+
 ## Deferred / out of scope
 
 Each deferred item plugs into the same IFD-tree/chunk pipeline and oracles the shipped features
 use; additions are semver-additive.
 
 - **Lossy JPEG** (`Compression = 34892`) — needs a baseline DCT codec (`gamut-tiff` likewise
-  deferred JPEG-in-TIFF). Decode surfaces such images as verbatim chunks today.
+  deferred JPEG-in-TIFF). Decode surfaces such images as verbatim chunks today; a lossy *raw*
+  IFD is refused with a typed `Unsupported`, and its `NewRawImageDigest` still verifies (the
+  compressed-chunk rule needs no pixels).
+- **`AsShotWhiteXY`** (50729) as a typed alternative to `AsShotNeutral` — the tag surfaces
+  verbatim through `ifd0_extra`; converting xy to camera neutral is DNG §6 rendering work and no
+  real file in the corpus needs it. A file carrying only `AsShotWhiteXY` decodes with no profile.
+- **Restoring unaccounted bytes to their original offsets** — the preserving rewrite carries a
+  vendor preamble, interstitial filler and a trailer through verbatim and reports where each
+  landed, but the rebuilt directory layout cannot generally reproduce their absolute positions.
 - **Floating-point samples** (`SampleFormat = 3`, fp16 JPEG XL, the float predictors
   34894/34895) — rejected with typed errors on decode; the u16 sample model would need a float
   sibling.

@@ -51,8 +51,9 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
 
 - **Encode + decode**, both directions Adobe-validated: CFA mosaic and `LinearRaw` photometry;
   **strips and DNG-1.7 tiles**; **uncompressed, Deflate/ZIP (8), lossless JPEG (7), and
-  JPEG XL (52546)** compression (JXL decode is pure-Rust jxl-rs; encode is the opt-in
-  `jxl-encode` cargo feature over libjxl) with row/column interleave handling; the
+  JPEG XL (52546)** compression (Deflate encodes with `gamut-deflate` and inflates with
+  `miniz_oxide`; JXL decode is pure-Rust jxl-rs, encode is the opt-in `jxl-encode` cargo feature
+  over libjxl) with row/column interleave handling; the
   colour-calibration profile (ColorMatrix1/2, CameraCalibration, ForwardMatrix, dual illuminant,
   AnalogBalance, BaselineExposure, profile identity); the full level model (`RawLevels`: the
   BlackLevel repeat pattern with RATIONAL values, `BlackLevelDeltaH/V`, per-plane `WhiteLevel`,
@@ -81,6 +82,18 @@ the file (raw digest included), the SDK's stage-1 decode matches gamut's own dec
 pixel-for-pixel (including tiled JPEG XL), and Adobe's own sample DNGs (JPEG XL, gain maps)
 decode in agreement with the SDK — plus the **libtiff** oracle for the TIFF-container/preview
 layer and internal encode→decode round-trips on every path.
+
+Those inputs are all synthetic or Adobe-authored, so a separate tier (issue #174) gates the crate
+against **files real cameras wrote**: six CC0 DNGs — Apple ProRAW, Canon via Adobe DNG Converter
+in all three compressions, a monochrome Leica, a Leica M10 — in the `gamut-dng-samples` submodule,
+checked for byte completeness, decode, stored digest, the Adobe stage-2 differential and the
+preserving rewrite. It lives outside the workspace so a normal `cargo test` never pulls in
+~178 MiB of camera files:
+
+```sh
+mise run fetch-dng-samples   # clone the corpus submodule (once)
+mise run test-dng-real       # run the real-camera conformance tier
+```
 
 ## License
 

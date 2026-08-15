@@ -32,7 +32,11 @@ gamut-bitstream.workspace = true
 # JPEG XL (Compression = 52546, DNG 1.7): decode is the pure-Rust jxl-rs path (wasm-safe, keeps
 # the default build C-free); encode is opt-in via the `jxl-encode` feature above.
 gamut-jxl = { workspace = true, features = ["decode"] }
-# Pure-Rust zlib/Deflate for the DNG ZIP (Compression = 8) codec; keeps the shipped crate C-free.
+# DNG ZIP (Compression = 8, zlib RFC 1950). Encoding uses the workspace's space-optimising zlib
+# encoder; bounded inflation delegates the security-sensitive decode surface to `miniz_oxide`,
+# which `gamut-deflate` (encoder-only by design) blesses for exactly this. Both are pure Rust, so
+# the shipped crate stays C-free.
+gamut-deflate.workspace = true
 miniz_oxide = "0.8"
 
 [dev-dependencies]
@@ -45,3 +49,8 @@ libtiff-oracle = { path = "../../tooling/libtiff-oracle" }
 # Self-dependency enabling `jxl-encode` for the test suite, so the JPEG XL encode ⇄ decode ⇄
 # Adobe-oracle round-trips always run (the oracle already builds libjxl, so this adds no cost).
 gamut-dng = { path = ".", features = ["jxl-encode"] }
+divan.workspace = true
+
+[[bench]]
+name = "compression"
+harness = false
