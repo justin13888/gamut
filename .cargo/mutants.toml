@@ -607,9 +607,15 @@ exclude_re = [
     # stays killed by the Sharma golden set.
     'replace \* with \+ in chroma_product_is_zero',
     'replace \* with / in chroma_product_is_zero',
+    # …and the whole-function `-> false` replacement is the same class: it only reroutes
+    # zero-chroma pairs onto the general arms, whose hue terms the zero factor annihilates
+    # anyway. (`-> true` reroutes chromatic pairs and stays killed by the Sharma set.)
+    'replace chroma_product_is_zero -> bool with false',
     # Same vanishing-term argument for the Eq. (14) degenerate sum itself: `h1′ + h2′` is only
-    # consumed when ΔH′ = 0 has already zeroed every term it feeds.
+    # consumed when ΔH′ = 0 has already zeroed every term it feeds — so its operator mutants
+    # *and* every whole-function value replacement are unobservable alike.
     'replace \+ with (-|\*) in degenerate_hue_sum',
+    'replace degenerate_hue_sum -> f64 with',
     # The Eq. (14) mean-hue `sum < 360` boundary: `<` vs `<=` differs only when h1′ + h2′ ==
     # 360.0 exactly with |h1′ − h2′| > 180°, which no exactly-representable hue pair satisfies
     # (the representable right angles give |Δh′| ≤ 180°) — and even then the two arms differ by
