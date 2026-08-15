@@ -105,6 +105,15 @@ all = [
     "codec-abi",
 ]
 
+[dev-dependencies]
+# The lcms2 differential oracle for the umbrella's XYB ICC pin (dev-only tooling, not publishable,
+# so this edge is invisible to release ordering).
+lcms2-oracle = { path = "../../tooling/lcms2-oracle" }
+
 [[test]]
 name = "interoperability"
 required-features = ["jpeg", "metadata", "primitives", "tonemap", "webp"]
+
+[[test]]
+name = "xyb_icc"
+required-features = ["jpeg", "metadata", "primitives"]

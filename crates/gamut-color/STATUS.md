@@ -31,6 +31,7 @@ anchors plus the JFIF/BT.601 full-range anchors. Determinism is **Tier-1** (corr
 | P5 | **Keystone** — `M1` derivation cross-check + encoder-exact vs standard curves | ✅ |
 | P6 | Tone-map dedupe with `gamut-tonemap`; luminance levels sourced from `gamut_core::luminance` | ✅ |
 | v1 | Issue #179 — API finalization (`non_exhaustive` policy, profile surface, code-point inverses), overflow-safe constructors, AV1 §6.4.2 monochrome fix, oracle-only minimal test set | ✅ |
+| P7 | `xyb` (issue #334): the JPEG XL opsin space — frozen libjxl 0.12.0 constants (absorbance matrix + bias + normative inverse, transcribed in `references/color/README.md` with `references/jxl/opsin_params.h` vendored), `linear_srgb_to_xyb`/`xyb_to_linear_srgb`, and the scaled-XYB byte encoding (`scale_xyb`/`unscale_xyb`, third stored channel `B − Y`) for `gamut-jpeg`'s XYB colour mode. Tier-1 f64 like the rest of the colour science | ✅ |
 
 ## API policies frozen at v1
 

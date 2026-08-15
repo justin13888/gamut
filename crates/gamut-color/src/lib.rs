@@ -31,7 +31,7 @@
 //!   [`MatrixCoefficients::Identity`]) planes; the CICP code-point tables; BT.601 YCbCr 4:2:0
 //!   ([`ycbcr`]); **YCbCr → RGB de-matrixing at every modeled bit depth for
 //!   [`MatrixCoefficients::Bt709`] / `Bt601` / `Bt470Bg` / `Bt2020Ncl` in both ranges
-//!   ([`YcbcrMatrix`])**; and the `f64` colour science ([`transfer`], [`oklab`], [`matrix`],
+//!   ([`YcbcrMatrix`])**; and the `f64` colour science ([`transfer`], [`oklab`], [`xyb`], [`matrix`],
 //!   [`gamut_map`], [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
 //! - **Modeled but deferred:** 10/12-bit *encode* wiring ([`BitDepth::Ten`] / [`BitDepth::Twelve`]
 //!   — the presentation direction ships, see [`YcbcrMatrix`]; distinct from [`BitDepth::Sixteen`],
@@ -53,6 +53,7 @@ pub mod pixel;
 pub mod planar;
 pub mod profile;
 pub mod transfer;
+pub mod xyb;
 pub mod ycbcr;
 
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};

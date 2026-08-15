@@ -195,6 +195,53 @@ Defaults: `µ_L = 5.0`, `µ_C = 8.0`, `µ_alpha = 5.0`.
 
 ---
 
+## XYB (JPEG XL opsin colour space) — ISO/IEC 18181-1 / libjxl
+
+Sources: the pre-ISO Committee Draft `references/jxl/1908.03565.pdf` (defines the XYB space and
+the normative inverse), and the **frozen** reference-implementation constants of **libjxl
+0.12.0** — the exact version this workspace pins as its JXL oracle (`references/jxl/README.md`) —
+vendored verbatim (BSD-3-Clause, header retained) as `references/jxl/opsin_params.h`.
+Implemented by `gamut-color`'s `xyb` module; consumed by `gamut-jpeg`'s XYB colour mode and its
+embedded ICC profile (regenerated and byte-pinned by `crates/gamut/tests/xyb_icc.rs`).
+
+Forward: linear sRGB → opsin absorbance matrix → per-channel `∛(x + b) − ∛b` →
+`X = (L′−M′)/2, Y = (L′+M′)/2, B = S′`.
+
+Opsin absorbance matrix (`kOpsinAbsorbanceMatrix`; middle/last entries of each row are defined
+as `1 −` the others, so each row sums to 1):
+```
+0.30                  1 − 0.078 − 0.30      0.078
+0.23                  1 − 0.078 − 0.23      0.078
+0.24342268924547819   0.20476744424496821   1 − kM20 − kM21
+```
+Bias (`kOpsinAbsorbanceBias`, all channels): `b = 0.0037930732552754493`.
+
+Frozen inverse (`kDefaultInverseOpsinAbsorbanceMatrix` — transcribed, not re-derived: the decode
+direction is normative and carries its own f32-rounded literals):
+```
+ 11.031566901960783  −9.866943921568629   −0.16462299647058826
+ −3.254147380392157   4.418770392156863   −0.16462299647058826
+ −3.6588512862745097  2.7129230470588235   1.9459282392156863
+```
+
+Scaled-XYB byte encoding (`kScaledXYBOffset` / `kScaledXYBScale`; the **third stored channel is
+`B − Y`**): `sᵢ = clamp((storedᵢ + offsetᵢ)·scaleᵢ, 0, 1)` with
+```
+offset = (0.015386134, 0.0, 0.27770459)
+scale  = (22.995788804, 1.183000077, 1.502141333)
+```
+
+XYB ICC `A2B0` matrix (libjxl `jxl_cms_internal.h`, `CreateICCLutAtoBTagForXYB`): the literal
+`0.5 · XYZ(D50)←linear-sRGB · inverse-opsin` (the 0.5 bakes in the mAB PCS-XYZ encoding
+ceiling), verified against a fresh derivation in `crates/gamut/tests/xyb_icc.rs` before use:
+```
+ 1.5170095  −1.1065225   0.071623
+−0.050022    0.5683655  −0.018344
+−1.387676    1.1145555   0.6857255
+```
+
+---
+
 ## YCbCr matrix coefficients — ITU-T H.273 §8.3 / ISO/IEC 23091-2
 
 Source: ITU-T H.273 (2024-07) Table 4 (`MatrixCoefficients`) and §8.3, the non-constant-luminance

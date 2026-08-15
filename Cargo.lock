@@ -554,6 +554,7 @@ dependencies = [
  "gamut-vvc",
  "gamut-webp",
  "gamut-xmp",
+ "lcms2-oracle",
 ]
 
 [[package]]
