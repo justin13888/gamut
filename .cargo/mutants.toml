@@ -142,15 +142,17 @@ exclude_re = [
     # the `n` it shifts is only consumed on an iteration that never executes, so `n >>= 8` is dead.
     # `>>= → <<=` is unobservable. (The loop-bound and `e`/`n` init mutants stay live and are caught.)
     'replace >>= with <<= in SymbolEncoder::finish',
-    # gamut-tiff `stored_total > MAX_IMAGE_BYTES` (decode_page_samples) and `tile_size > MAX_IMAGE_BYTES`
-    # (decode_tiles) are *allocation* guards: relaxing `>` to `==`/`>=` only changes whether a 64 MiB+
-    # buffer is reserved before the (still inevitable) decode error — the malformed file is rejected
-    # either way, so the Ok/Err outcome a functional test can see is unchanged. (`> -> <` flips the
-    # guard for every normal image and is caught.) These are the only `>` in either function.
-    'replace > with == in decode_page_samples',
-    'replace > with >= in decode_page_samples',
-    'replace > with == in decode_tiles',
-    'replace > with >= in decode_tiles',
+    # gamut-tiff `within_size_limit` is the shared *allocation* guard behind `stored_total`
+    # (decode_page_samples) and `tile_size` (decode_tiles): relaxing `>` to `==`/`>=` only changes
+    # whether a 64 MiB+ buffer is reserved before the (still inevitable) decode error — the malformed
+    # file is rejected either way, so the Ok/Err outcome a functional test can see is unchanged.
+    # (`> -> <` flips the guard for every normal image and is caught.) The guard lives in its own
+    # three-line function precisely so these two entries stay scoped to that one comparison, rather
+    # than blanketing every `>` its callers may grow. Removing the guard entirely is a *separate*
+    # mutant, killed by the two size-cap tests in tests/decoder_validation.rs, which assert the
+    # distinct cap messages rather than a bare `is_err()`.
+    'replace > with == in within_size_limit',
+    'replace > with >= in within_size_limit',
     # gamut-riff `Vp8xHeader::to_payload`: the feature-flag byte ORs five single bits each shifted to
     # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
     # gamut-riff `Vp8xHeader::from_payload`: the `le24` closure ORs three bytes at offsets 0/8/16

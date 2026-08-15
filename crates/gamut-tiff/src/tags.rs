@@ -40,6 +40,8 @@ pub const RESOLUTION_UNIT: u16 = 296;
 pub const PREDICTOR: u16 = 317;
 /// `ExtraSamples` (338) — the meaning of each extra component (e.g. alpha) beyond the photometric.
 pub const EXTRA_SAMPLES: u16 = 338;
+/// `SampleFormat` (339) — how each sample's bits are interpreted (unsigned/signed integer, float).
+pub const SAMPLE_FORMAT: u16 = 339;
 /// `ColorMap` (320) — the palette for palette-colour images.
 pub const COLOR_MAP: u16 = 320;
 /// `TileWidth` (322) — the width of each tile in pixels (a multiple of 16).
@@ -96,6 +98,7 @@ pub fn is_known_tag(tag: u16) -> bool {
             | RESOLUTION_UNIT
             | PREDICTOR
             | EXTRA_SAMPLES
+            | SAMPLE_FORMAT
             | COLOR_MAP
             | TILE_WIDTH
             | TILE_LENGTH
@@ -149,7 +152,6 @@ pub fn is_known_tag(tag: u16) -> bool {
             | 334 // NumberOfInks
             | 336 // DotRange
             | 337 // TargetPrinter
-            | 339 // SampleFormat
             | 340..=342 // SMinSampleValue / SMaxSampleValue / TransferRange
             | 343 // ClipPath
             | 344 // XClipPathUnits
@@ -189,6 +191,7 @@ mod tests {
             RESOLUTION_UNIT,
             PREDICTOR,
             EXTRA_SAMPLES,
+            SAMPLE_FORMAT,
             COLOR_MAP,
             TILE_WIDTH,
             TILE_LENGTH,
