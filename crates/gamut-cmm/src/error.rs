@@ -72,6 +72,14 @@ pub enum CmmError {
     /// [`ToneCurve::inverse`](crate::ToneCurve::inverse) has no functional inverse to build.
     #[error("cmm: tone curve is not monotonic; no inverse exists")]
     NonMonotonicCurve,
+
+    /// A CLUT's declared geometry is inconsistent, so [`ClutTable`](crate::ClutTable) cannot
+    /// index it safely: no input dimensions, an axis with zero grid nodes, a sample count that
+    /// disagrees with `∏ grid_points × output_channels`, or a tetrahedral interpolation
+    /// request for fewer than 3 input channels. Unreachable from `gamut-icc`-parsed CLUTs
+    /// (the parser upholds the invariants), reachable from hand-built values.
+    #[error("cmm: CLUT geometry inconsistent ({0})")]
+    ClutGeometry(&'static str),
 }
 
 /// A [`Result`](core::result::Result) whose error is [`CmmError`].

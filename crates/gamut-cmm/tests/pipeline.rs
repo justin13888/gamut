@@ -1,8 +1,10 @@
 //! Integration tests for the pipeline/stage model: construction-time validation, evaluation,
 //! composition, and the `Transform` buffer contract.
 
-use gamut_cmm::{CmmError, MAX_CHANNELS, Pipeline, Stage, ToneCurve, Transform};
-use gamut_icc::{Curve, CurveOrParametric, ParametricCurve, S15Fixed16, U8Fixed8};
+use gamut_cmm::{ClutTable, CmmError, MAX_CHANNELS, Pipeline, Stage, ToneCurve, Transform};
+use gamut_icc::{
+    Clut, ClutPrecision, Curve, CurveOrParametric, ParametricCurve, S15Fixed16, U8Fixed8,
+};
 
 /// A non-trivial affine stage (negative entries, distinct coefficients) whose arithmetic is
 /// exact in `f64`, so results assert with `==`.
@@ -370,6 +372,113 @@ fn curves_stage_reports_its_channel_count_saturating() {
     assert_eq!(stage.input_channels(), u8::MAX);
     let err = Pipeline::new(16, 16, vec![stage]).unwrap_err();
     assert!(matches!(err, CmmError::TooManyChannels(255)));
+}
+
+/// A hand-checkable 3→3 CLUT on a 2×2×2 grid: outputs `[x, z, y]` (an axis-swapping affine
+/// map, so addressing slips show). Node values are exactly `0.0`/`1.0` after normalization
+/// and both interpolants reproduce an affine map exactly, keeping downstream arithmetic
+/// dyadic-exact.
+fn axis_swap_clut_stage() -> Stage {
+    let mut samples = Vec::new();
+    for x in 0..2_u16 {
+        for y in 0..2_u16 {
+            for z in 0..2_u16 {
+                samples.extend_from_slice(&[x * 65535, z * 65535, y * 65535]);
+            }
+        }
+    }
+    Stage::Clut(
+        ClutTable::new(&Clut {
+            grid_points: vec![2, 2, 2],
+            output_channels: 3,
+            precision: ClutPrecision::U16,
+            samples,
+        })
+        .unwrap(),
+    )
+}
+
+#[test]
+fn clut_stage_reports_grid_channel_counts() {
+    let stage = axis_swap_clut_stage();
+    assert_eq!(stage.input_channels(), 3);
+    assert_eq!(stage.output_channels(), 3);
+    // An asymmetric grid: 4-D in, 2 out.
+    let stage = Stage::Clut(
+        ClutTable::new(&Clut {
+            grid_points: vec![2, 2, 2, 2],
+            output_channels: 2,
+            precision: ClutPrecision::U16,
+            samples: vec![0; 32],
+        })
+        .unwrap(),
+    );
+    assert_eq!(stage.input_channels(), 4);
+    assert_eq!(stage.output_channels(), 2);
+}
+
+#[test]
+fn clut_stage_channel_counts_flow_through_validation() {
+    // A 4-input CLUT cannot follow the 3-output matrix stage.
+    let four_in = Stage::Clut(
+        ClutTable::new(&Clut {
+            grid_points: vec![2, 2, 2, 2],
+            output_channels: 3,
+            precision: ClutPrecision::U16,
+            samples: vec![0; 48],
+        })
+        .unwrap(),
+    );
+    let err = Pipeline::new(3, 3, vec![dyadic_matrix(), four_in]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CmmError::StageChannelMismatch {
+                index: 1,
+                expected: 4,
+                found: 3,
+            }
+        ),
+        "unexpected error: {err:?}"
+    );
+    // Declared ends must match the grid shape.
+    let err = Pipeline::new(2, 2, vec![axis_swap_clut_stage()]).unwrap_err();
+    assert!(matches!(
+        err,
+        CmmError::PipelineEndsMismatch {
+            end: "input",
+            declared: 2,
+            found: 3,
+        }
+    ));
+}
+
+#[test]
+fn curves_clut_matrix_composition_evaluates_hand_checked_pixels() {
+    // curves (x² on channel 0) → CLUT (3→3 axis swap [x, z, y]) → matrix: all dyadic, exact.
+    let square = ToneCurve::new(&CurveOrParametric::Curve(Curve::Gamma(U8Fixed8(0x0200)))).unwrap();
+    let pipeline = Pipeline::new(
+        3,
+        3,
+        vec![
+            Stage::Curves(vec![square, identity_curve(), identity_curve()]),
+            axis_swap_clut_stage(),
+            dyadic_matrix(),
+        ],
+    )
+    .unwrap();
+    // Pixel 1: (0.5, 1, 0.25) → curves → (0.25, 1, 0.25) → CLUT → (0.25, 0.25, 1) → matrix:
+    //   0.5·0.25 − 0.25·0.25 + 0.125·1 + 0.5  = 0.6875
+    //   1.0·0.25 + 2.0·0.25  − 0.5·1   − 0.25 = 0.0
+    //  −2.0·0.25 + 0.25·0.25 + 1.0·1   + 2.0  = 2.5625
+    // Pixel 2: (1, 0, 0.5) → curves → (1, 0, 0.5) → CLUT → (1, 0.5, 0) → matrix:
+    //   0.5·1 − 0.25·0.5 + 0 + 0.5  = 0.875
+    //   1.0·1 + 2.0·0.5  − 0 − 0.25 = 1.75
+    //  −2.0·1 + 0.25·0.5 + 0 + 2.0  = 0.125
+    let src = [0.5, 1.0, 0.25, 1.0, 0.0, 0.5];
+    let mut dst = [9.0; 6];
+    pipeline.transform(&src, &mut dst).unwrap();
+    assert_eq!(dst, [0.6875, 0.0, 2.5625, 0.875, 1.75, 0.125]);
 }
 
 #[test]
