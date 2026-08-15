@@ -60,6 +60,18 @@ pub enum CmmError {
         /// The offending buffer's length in samples.
         found: usize,
     },
+
+    /// A hand-built parametric curve carries a function type outside the five ICC.1:2022 §10.18
+    /// defines (0–4). Unreachable from parsed profiles — `gamut-icc`'s parser rejects such
+    /// types — but `gamut_icc::ParametricCurve::eval` silently treats them as the identity, so
+    /// [`ToneCurve::new`](crate::ToneCurve::new) refuses them with this typed error instead.
+    #[error("cmm: parametric curve function type {0} is not supported")]
+    UnsupportedParametricType(u16),
+
+    /// A tone curve is neither non-decreasing nor non-increasing (or is constant), so
+    /// [`ToneCurve::inverse`](crate::ToneCurve::inverse) has no functional inverse to build.
+    #[error("cmm: tone curve is not monotonic; no inverse exists")]
+    NonMonotonicCurve,
 }
 
 /// A [`Result`](core::result::Result) whose error is [`CmmError`].

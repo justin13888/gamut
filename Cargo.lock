@@ -621,6 +621,7 @@ dependencies = [
  "gamut-color",
  "gamut-core",
  "gamut-icc",
+ "lcms2-oracle",
  "thiserror",
 ]
 
