@@ -324,8 +324,10 @@ fn planar<S: Sample>(
         ));
     }
     let (mut fin, mut fout) = scratch(pixels, src_shape, dst_shape);
-    let mut start = 0;
-    while start < pixels {
+    // Iterator-driven chunking: `step_by` owns the loop's progress, so no arithmetic
+    // inside the body can stall it (a `while start < pixels { … start += count }` shape
+    // hangs forever under mutation testing when the increment is mutated away).
+    for start in (0..pixels).step_by(CHUNK_PIXELS) {
         let count = (pixels - start).min(CHUNK_PIXELS);
         for (c, plane) in src_planes.iter().take(src_shape.color).enumerate() {
             for (p, sample) in plane[start..start + count].iter().enumerate() {
@@ -344,7 +346,6 @@ fn planar<S: Sample>(
                 };
             }
         }
-        start += count;
     }
     Ok(())
 }
