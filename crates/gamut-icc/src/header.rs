@@ -407,6 +407,28 @@ impl From<ColorSpace> for Signature {
     }
 }
 
+impl ColorSpace {
+    /// The number of device channels (components) a colour in this space carries — the sample
+    /// count per pixel a CMM transform for this space consumes or produces (ICC.1:2022 Table 19).
+    #[must_use]
+    pub fn channel_count(&self) -> u8 {
+        match self {
+            Self::Xyz
+            | Self::Lab
+            | Self::Luv
+            | Self::YCbCr
+            | Self::Yxy
+            | Self::Rgb
+            | Self::Hsv
+            | Self::Hls
+            | Self::Cmy => 3,
+            Self::Gray => 1,
+            Self::Cmyk => 4,
+            Self::NColor(n) => *n,
+        }
+    }
+}
+
 /// The default rendering intent (ICC.1:2022 §7.2.15).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RenderingIntent {
@@ -657,6 +679,27 @@ mod tests {
                 core::str::from_utf8(bad).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn channel_count_covers_every_colour_space() {
+        for three in [
+            ColorSpace::Xyz,
+            ColorSpace::Lab,
+            ColorSpace::Luv,
+            ColorSpace::YCbCr,
+            ColorSpace::Yxy,
+            ColorSpace::Rgb,
+            ColorSpace::Hsv,
+            ColorSpace::Hls,
+            ColorSpace::Cmy,
+        ] {
+            assert_eq!(three.channel_count(), 3, "{three:?}");
+        }
+        assert_eq!(ColorSpace::Gray.channel_count(), 1);
+        assert_eq!(ColorSpace::Cmyk.channel_count(), 4);
+        assert_eq!(ColorSpace::NColor(2).channel_count(), 2);
+        assert_eq!(ColorSpace::NColor(15).channel_count(), 15);
     }
 
     #[test]
