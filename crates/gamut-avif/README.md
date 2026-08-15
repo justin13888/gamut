@@ -62,12 +62,15 @@ worked example.
 ## Status
 
 **v1 surface.** The encoder produces **lossless** (the default) and **lossy**
-(`AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 identity-matrix 4:4:4 and
-wrapped as a single `av01` item in a conformant MIAF/AVIF container. Lossless output is bit-exact
-to the input; lossy trades fidelity for size on a `0..=100` quality scale (higher = closer to the
-source; the `quality → base_q_idx` mapping and its silent clamp above 100 are a frozen v1
-contract, defined in [`references/avif`](../../references/avif/README.md)). `irot`/`imir` display
-orientation is supported. Output is verified against real decoders (`libavif`, `dav1d`, `libaom`),
+(`AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 4:4:4 planes and wrapped as
+a single `av01` item in a conformant MIAF/AVIF container. Lossless codes the identity matrix, so
+its output is bit-exact to the input; lossy codes **BT.709 YCbCr** by default — the luma–chroma
+decorrelation is worth a large fraction of the bitrate — with BT.601 / BT.2020-NCL and studio
+range selectable via `with_matrix` / `with_color_range`. Lossy trades fidelity for size on a
+`0..=100` quality scale (higher = closer to the source; the `quality → base_q_idx` mapping and its
+silent clamp above 100 are a frozen v1 contract, defined in
+[`references/avif`](../../references/avif/README.md)). `irot`/`imir` display orientation is
+supported. Output is verified against real decoders (`libavif`, `dav1d`, `libaom`),
 linked from vendored `third_party/` submodules rather than system-installed binaries.
 
 **Decode surface.** The container read + codestream handoff (issue #250, mirroring what
@@ -75,8 +78,8 @@ linked from vendored `third_party/` submodules rather than system-installed bina
 typed `av1C`/OBU layer with the AVIF still-image payload validation, planar decode with
 grid/identity reassembly, and the RGBA presentation paths — 8-bit (`decode_primary_rgba8`) and
 high-bit-depth (`decode_primary_rgba16`, 10/12-bit normalized to full-range 16-bit), with
-identity/BT.601/BT.709/BT.2020/monochrome colour, alpha merge, overlay compositing,
-`clap`/`irot`/`imir`). Validated differentially against
+identity / BT.601 / BT.709 / BT.2020-NCL / monochrome colour, alpha merge, overlay compositing,
+`clap`/`irot`/`imir`. Validated differentially against
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant

@@ -3,20 +3,23 @@
 //!
 //! # Two layers, deliberately not one
 //!
-//! - [`YcbcrMatrix`] — the **presentation** layer. It applies the normative ITU-T H.273 §8.3
-//!   non-constant-luminance de-matrixing for BT.709 / BT.601 / BT.470 B,G / BT.2020 NCL, in either
-//!   [`ColorRange`], at every modeled [`BitDepth`] (8/10/12/16). This is what a still-image
-//!   container reaches for when it has a `colr` box and a decoded frame — 10-bit HDR HEIC/AVIF
-//!   included.
+//! - [`YcbcrMatrix`] / [`RgbToYcbcr`] — the **H.273** layer, one type per direction. They apply the
+//!   normative ITU-T H.273 §8.3 non-constant-luminance de-matrixing and matrixing for BT.709 /
+//!   BT.601 / BT.470 B,G / BT.2020 NCL, in either [`ColorRange`], at every modeled [`BitDepth`]
+//!   (8/10/12/16). [`YcbcrMatrix`] is what a still-image container reaches for when it has a `colr`
+//!   box and a decoded frame — 10-bit HDR HEIC/AVIF included; [`RgbToYcbcr`] is what an encoder
+//!   reaches for to code a lossy still in YCbCr.
 //! - [`rgb_to_ycbcr`] / [`ycbcr_to_rgb`] / [`Yuv420`] — the **VP8** layer, 8-bit BT.601 only. Its
 //!   limited-range inverse is a bit-exact port of libwebp's `VP8YUVToR/G/B` (`src/dsp/yuv.h`),
 //!   pinned per pixel against libwebp by gamut-webp's oracle tests.
 //!
-//! [`ycbcr_to_rgb`] is **not** a special case of [`YcbcrMatrix`], and [`YcbcrMatrix`] is not built
-//! on it. Both are correct BT.601: libwebp's Q6 `MultHi` truncates intermediates, while
-//! [`YcbcrMatrix`] rounds once at Q20. They therefore agree on the great majority of 8-bit triples
-//! and differ by **at most 1 LSB** on the rest. Use [`ycbcr_to_rgb`] when you must match libwebp
-//! byte for byte (i.e. WebP); use [`YcbcrMatrix`] everywhere else.
+//! The VP8 layer is **not** a special case of the H.273 one, and the H.273 one is not built on it.
+//! Both are correct BT.601, and they differ only in how they round: libwebp's Q6 `MultHi`
+//! truncates intermediates and the full-range arm's Q16 constants are truncated transcriptions,
+//! while [`YcbcrMatrix`] / [`RgbToYcbcr`] derive exactly and round once at Q20. They therefore
+//! agree on the great majority of 8-bit triples and differ by **at most 1 LSB** on the rest. Use
+//! [`rgb_to_ycbcr`] / [`ycbcr_to_rgb`] when you must match libwebp byte for byte (i.e. WebP); use
+//! the H.273 pair everywhere else.
 //!
 //! # The VP8 layer
 //!
@@ -525,6 +528,123 @@ impl YcbcrMatrix {
     }
 }
 
+/// A precomputed non-constant-luminance RGB → YCbCr matrixing (ITU-T H.273 §8.3) for one
+/// (matrix coefficients, range, bit depth) triple — the **coding** direction, and the exact
+/// inverse-in-intent of [`YcbcrMatrix`].
+///
+/// An encoder builds one per image and calls [`from_rgb`](Self::from_rgb) per pixel; the two types
+/// share this module's weight table, range anchors and rounding, so the pair cannot drift apart.
+/// The split is by *direction* rather than one type with two halves because the two are not needed
+/// together: a decoder never matrixes, and a monochrome plane
+/// ([`YcbcrMatrix::monochrome`]) has a de-matrixing but no luma weights to matrix *with*.
+///
+/// Samples are `u16` at every depth with a `bit_depth`-bit value in the low bits, matching
+/// [`YcbcrMatrix`]. Inputs above the depth's maximum are not rejected; results saturate.
+///
+/// The derivation is exact integer arithmetic and the conversion is fixed-point, so this path is
+/// bit-exact and deterministic.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, RgbToYcbcr};
+///
+/// let m = RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight)?;
+/// // Neutral grey stays neutral: chroma centred, luma unchanged.
+/// assert_eq!(m.from_rgb(128, 128, 128), (128, 128, 128));
+/// # Ok::<(), gamut_core::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RgbToYcbcr {
+    /// Luma row over `(R, G, B)`, in the [`MATRIX_FIX`] scale.
+    y_row: [i32; 3],
+    /// Cb row over `(R, G, B)`, in the [`MATRIX_FIX`] scale.
+    cb_row: [i32; 3],
+    /// Cr row over `(R, G, B)`, in the [`MATRIX_FIX`] scale.
+    cr_row: [i32; 3],
+    /// Luma pedestal added after matrixing: `16 << (bits - 8)` limited, `0` full.
+    y_offset: i32,
+    /// Chroma centre added after matrixing: `128 << (bits - 8)` limited, `1 << (bits - 1)` full.
+    c_offset: i32,
+    /// The depth of both the RGB inputs and the coded planes.
+    depth: BitDepth,
+}
+
+impl RgbToYcbcr {
+    /// Derives the matrixing for `matrix` at `range` and `bit_depth`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] for exactly the coefficients [`YcbcrMatrix::new`] rejects,
+    /// and for the same reasons: [`MatrixCoefficients::Identity`] (the encoder writes GBR planes
+    /// itself — see [`Planar8::from_rgb8_identity`](crate::Planar8::from_rgb8_identity)),
+    /// [`MatrixCoefficients::YCgCo`], [`MatrixCoefficients::Unspecified`], and any code point a
+    /// later minor release adds without support here.
+    pub fn new(matrix: MatrixCoefficients, range: ColorRange, bit_depth: BitDepth) -> Result<Self> {
+        let (kr, kb) = luma_weights(matrix).ok_or_else(|| {
+            Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "YCbCr matrix coefficients are not a Kr/Kb matrixing (identity, YCgCo, and \
+                 unspecified are the caller's to resolve)",
+            )
+        })?;
+        let kg = K_DEN - kr - kb;
+        let bits = u32::from(bit_depth.bits());
+        let (y_off, y_scale, c_off, c_scale, max) = range_params(range, bits);
+        let scale = 1i128 << MATRIX_FIX;
+
+        // Y' = (Kr·R + Kg·G + Kb·B) scaled from the 0..=max input span onto the luma excursion;
+        // Cb = (B - Y')/(2(1 - Kb)) and Cr = (R - Y')/(2(1 - Kr)) onto the chroma excursion. Each
+        // row is pre-divided by `max` so a raw RGB sample maps straight onto a coded sample.
+        let luma_den = K_DEN * max;
+        let row = |num: i128, den: i128| round_div(num * scale, den);
+        let (cb_den, cr_den) = (2 * (K_DEN - kb) * max, 2 * (K_DEN - kr) * max);
+
+        Ok(Self {
+            y_row: [
+                row(y_scale * kr, luma_den) as i32,
+                row(y_scale * kg, luma_den) as i32,
+                row(y_scale * kb, luma_den) as i32,
+            ],
+            cb_row: [
+                -row(c_scale * kr, cb_den) as i32,
+                -row(c_scale * kg, cb_den) as i32,
+                row(c_scale * (K_DEN - kb), cb_den) as i32,
+            ],
+            cr_row: [
+                row(c_scale * (K_DEN - kr), cr_den) as i32,
+                -row(c_scale * kg, cr_den) as i32,
+                -row(c_scale * kb, cr_den) as i32,
+            ],
+            y_offset: y_off as i32,
+            c_offset: c_off as i32,
+            depth: bit_depth,
+        })
+    }
+
+    /// Converts one R'G'B' triple to Y'CbCr, each component in `0..=(1 << bit_depth) - 1`.
+    #[must_use]
+    #[inline]
+    pub fn from_rgb(self, r: u16, g: u16, b: u16) -> (u16, u16, u16) {
+        let bits = u32::from(self.depth.bits());
+        let (r, g, b) = (i64::from(r), i64::from(g), i64::from(b));
+        let dot =
+            |row: [i32; 3]| i64::from(row[0]) * r + i64::from(row[1]) * g + i64::from(row[2]) * b;
+        let bias = |offset: i32| i64::from(offset) << MATRIX_FIX;
+        (
+            round_clip(dot(self.y_row) + bias(self.y_offset), bits),
+            round_clip(dot(self.cb_row) + bias(self.c_offset), bits),
+            round_clip(dot(self.cr_row) + bias(self.c_offset), bits),
+        )
+    }
+
+    /// The bit depth of both the RGB inputs and the YCbCr samples this matrix produces.
+    #[must_use]
+    pub fn bit_depth(self) -> BitDepth {
+        self.depth
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,7 +831,7 @@ mod tests {
     use gamut_core::ErrorKind;
 
     use crate::cicp::MatrixCoefficients::{
-        Bt470Bg, Bt601, Bt709, Bt2020Ncl, Identity, Unspecified,
+        Bt470Bg, Bt601, Bt709, Bt2020Ncl, Identity, Unspecified, YCgCo,
     };
     use crate::format::BitDepth::{Eight, Sixteen, Ten, Twelve};
 
@@ -1105,5 +1225,168 @@ mod tests {
         assert_eq!(round_div(-7, 3), -2);
         assert_eq!(round_div(7, 3), 2);
         assert_eq!(round_div(-13, 5), -3);
+    }
+
+    // ---- RgbToYcbcr -------------------------------------------------------------------------
+
+    #[test]
+    fn matrixing_rejects_exactly_what_de_matrixing_rejects() {
+        // The two directions must agree on their domain, or a format crate could construct one
+        // half of a round trip and fail on the other.
+        for mc in [Identity, YCgCo, Unspecified] {
+            let error = RgbToYcbcr::new(mc, Limited, Ten).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::Unsupported, "{mc:?}");
+            assert!(
+                error.to_string().contains("Kr/Kb matrixing"),
+                "{mc:?}: {error}"
+            );
+            assert!(YcbcrMatrix::new(mc, Limited, Ten).is_err(), "{mc:?}");
+        }
+        for (mc, range, depth) in CONFIGS {
+            assert!(RgbToYcbcr::new(mc, range, depth).is_ok(), "{mc:?}");
+        }
+    }
+
+    #[test]
+    fn full_range_bt601_at_eight_bits_tracks_the_jfif_path_within_one_lsb() {
+        // The VP8 layer's full-range arm is an independent hand transcription of full-range BT.601
+        // at Q16, so deriving the same matrix from the Table 4 weights pins the derivation formulas
+        // against it — but only to 1 LSB, the same bound the module documents for the inverse
+        // direction. The transcribed constants are *truncated* (0.587 → 38470, not 38471), so on an
+        // exact half like (0, 28, 176) — luma 36.5 — they round down where this rounds up. A
+        // mutated weight or a swapped row misses by far more than one code.
+        //
+        // (Only the *full*-range arm: the limited one is libwebp's truncating Q6 math, which this
+        // deliberately does not reproduce.)
+        let m = RgbToYcbcr::new(Bt601, Full, Eight).unwrap();
+        let (mut differed, mut total) = (0usize, 0usize);
+        for r in (0..=255u16).step_by(5) {
+            for g in (0..=255u16).step_by(7) {
+                for b in (0..=255u16).step_by(11) {
+                    let (ey, ecb, ecr) = rgb_to_ycbcr(r as u8, g as u8, b as u8, Full);
+                    let got = m.from_rgb(r, g, b);
+                    for (got, want, name) in [
+                        (got.0, u16::from(ey), "Y"),
+                        (got.1, u16::from(ecb), "Cb"),
+                        (got.2, u16::from(ecr), "Cr"),
+                    ] {
+                        assert!(
+                            got.abs_diff(want) <= 1,
+                            "{name} at ({r},{g},{b}): {got} vs {want}"
+                        );
+                        differed += usize::from(got != want);
+                        total += 1;
+                    }
+                }
+            }
+        }
+        // Ties are rare: 21 of 138 528 samples on this grid. Without a density bound a derivation
+        // that merely *looked* like BT.601 could sit 1 LSB off everywhere and still pass the
+        // per-sample check above.
+        assert!(
+            differed * 1000 < total,
+            "{differed} of {total} samples differed — expected well under 0.1%"
+        );
+    }
+
+    #[test]
+    fn primaries_land_on_the_h273_reference_values() {
+        // Hand-computed from H.273 §8.3 with the Table 4 weights. Pure red under BT.709
+        // (Kr = 0.2126) has Y = round(255·0.2126) = 54, Cr at its positive extreme (255) and Cb at
+        // its negative one: Cb = round(255·(0 − 0.2126)/(2·0.9278)) + 128 = round(−29.2) + 128 = 99.
+        let m709 = RgbToYcbcr::new(Bt709, Full, Eight).unwrap();
+        assert_eq!(m709.from_rgb(255, 0, 0), (54, 99, 255));
+        // Pure blue: Y = round(255·0.0722) = 18, Cb at +255, Cr = round(255·(0 − 0.0722)/(2·0.7874))
+        // + 128 = round(−11.7) + 128 = 116.
+        assert_eq!(m709.from_rgb(0, 0, 255), (18, 255, 116));
+
+        // BT.601 (Kr = 0.299): pure red → Y = round(255·0.299) = 76.
+        let m601 = RgbToYcbcr::new(Bt601, Full, Eight).unwrap();
+        assert_eq!(m601.from_rgb(255, 0, 0).0, 76);
+        // BT.2020 (Kr = 0.2627): pure red → Y = round(255·0.2627) = 67.
+        let m2020 = RgbToYcbcr::new(Bt2020Ncl, Full, Eight).unwrap();
+        assert_eq!(m2020.from_rgb(255, 0, 0).0, 67);
+        // The three matrices really are distinct — a mutated weight table that collapsed them
+        // would still pass a round-trip test.
+        assert_ne!(m709.from_rgb(255, 0, 0), m601.from_rgb(255, 0, 0));
+        assert_ne!(m709.from_rgb(255, 0, 0), m2020.from_rgb(255, 0, 0));
+        // BT.470 B,G names the same de-matrixing as BT.601 in this direction too.
+        assert_eq!(
+            RgbToYcbcr::new(Bt470Bg, Full, Eight).unwrap(),
+            RgbToYcbcr::new(Bt601, Full, Eight).unwrap()
+        );
+    }
+
+    #[test]
+    fn range_anchors_hold_at_every_depth() {
+        for (mc, range, depth) in CONFIGS {
+            let m = RgbToYcbcr::new(mc, range, depth).unwrap();
+            let bits = u32::from(depth.bits());
+            let max = (1u32 << bits) - 1;
+            let (black, white, centre) = match range {
+                // Studio swing scales the 16/235/128 anchors by `1 << (bits - 8)`.
+                Limited => {
+                    let s = 1u32 << (bits - 8);
+                    (16 * s, 235 * s, 128 * s)
+                }
+                Full => (0, max, 1u32 << (bits - 1)),
+            };
+            let max = max as u16;
+            assert_eq!(
+                m.from_rgb(0, 0, 0),
+                (black as u16, centre as u16, centre as u16),
+                "{mc:?} {range:?} {depth:?} black"
+            );
+            assert_eq!(
+                m.from_rgb(max, max, max),
+                (white as u16, centre as u16, centre as u16),
+                "{mc:?} {range:?} {depth:?} white"
+            );
+            assert_eq!(m.bit_depth(), depth, "{mc:?} {range:?} {depth:?}");
+        }
+    }
+
+    #[test]
+    fn matrixing_round_trips_through_de_matrixing() {
+        // YCbCr at the same depth is not a bijection of RGB — the transform is lossy by
+        // quantization alone. Bound the error rather than assert equality, over a grid dense
+        // enough to catch a sign flip or a swapped row (either blows past the tolerance at once).
+        for (mc, range, depth) in CONFIGS {
+            let fwd = RgbToYcbcr::new(mc, range, depth).unwrap();
+            let inv = YcbcrMatrix::new(mc, range, depth).unwrap();
+            let bits = u32::from(depth.bits());
+            let max = ((1u32 << bits) - 1) as u16;
+            // Studio swing spends only 219/256 of the luma codes, so its round trip is looser.
+            let tolerance = match range {
+                Full => max / 255 + 1,
+                Limited => 2 * (max / 255 + 1),
+            };
+            let step = (usize::from(max) / 12).max(1);
+            for r in (0..=usize::from(max)).step_by(step) {
+                for g in (0..=usize::from(max)).step_by(step + 1) {
+                    for b in (0..=usize::from(max)).step_by(step + 2) {
+                        let (r, g, b) = (r as u16, g as u16, b as u16);
+                        let (y, cb, cr) = fwd.from_rgb(r, g, b);
+                        let (r2, g2, b2) = inv.to_rgb(y, cb, cr);
+                        for (src, back, name) in [(r, r2, "R"), (g, g2, "G"), (b, b2, "B")] {
+                            assert!(
+                                src.abs_diff(back) <= tolerance,
+                                "{mc:?} {range:?} {depth:?} {name} at ({r},{g},{b}): \
+                                 {src} → {back} (tolerance {tolerance})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_range_rgb_saturates_instead_of_wrapping() {
+        // A caller can hand an 8-bit matrix a sample above 255 (a widened 10-bit plane, say); the
+        // result must clamp to the depth, not wrap through the `as u16` narrowing.
+        let m = RgbToYcbcr::new(Bt709, Full, Eight).unwrap();
+        assert_eq!(m.from_rgb(4095, 0, 0), (255, 0, 255));
+        assert_eq!(m.from_rgb(0, 4095, 0).0, 255);
     }
 }

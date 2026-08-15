@@ -306,10 +306,11 @@ impl AvifImage {
     /// delivers the samples:
     ///
     /// - **nclx matrix 0 (identity / GBR)** — requires 4:4:4; samples are mapped directly
-    ///   (`R=Cr, G=Y, B=Cb`) with no range expansion. This is the configuration the crate's own
-    ///   encoder emits, so gamut-encoded AVIFs always decode here (lossless ones bit-exactly).
+    ///   (`R=Cr, G=Y, B=Cb`) with no range expansion. This is what the crate's **lossless**
+    ///   encoder emits, so a gamut-encoded lossless AVIF decodes here bit-exactly.
     /// - **nclx matrix 1 (BT.709), 5/6 (BT.601, BT.470 System B,G), 9 (BT.2020 non-constant
-    ///   luminance)** — with the nclx `full_range` flag selecting [`ColorRange`].
+    ///   luminance)** — via the general H.273 §8.3 derivation, with the nclx `full_range` flag
+    ///   selecting [`ColorRange`]. BT.709 is what this crate's own lossy encoder emits.
     /// - **nclx matrix 2 (unspecified)** — treated as BT.601, matching libavif's fallback for
     ///   unspecified matrix coefficients (real-world AVIFs commonly stamp CICP 2/2/2).
     /// - **Monochrome** — luma replicated to gray, range-expanded for limited range.
@@ -916,7 +917,7 @@ fn frame_to_rgba<T: RgbaSample>(item: &AvifItem<'_>, frame: &DecodedFrame) -> Re
     }
 
     // Identity / GBR (mc = 0): plane order Y=G, Cb=B, Cr=R; requires 4:4:4, no range expansion.
-    // The configuration gamut-avif's own encoder emits.
+    // The configuration gamut-avif's own lossless encoder emits.
     if matrix == 0 {
         if frame.chroma != ChromaFormat::Yuv444 {
             return Err(Error::unsupported(

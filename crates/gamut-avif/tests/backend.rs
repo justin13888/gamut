@@ -4,9 +4,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use gamut_av1::Av1Colour;
 use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::Planar8;
+use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
 
 /// The fixture the golden files in `tests/data` were produced from: a 34×18 deterministic RGB ramp.
@@ -44,13 +45,28 @@ fn assert_owned_error(error: &Error, kind: ErrorKind, message: &'static str) {
 
 /// The AV1 OBU stream the built-in encoder produces for the fixture — a conformant stream a test
 /// backend can hand back verbatim, so "the backend was used" is observable without a second AV1
-/// encoder.
-fn builtin_obus(base_q_idx: u8) -> Vec<u8> {
-    let planes = Planar8::from_rgb8_identity(&fixture(), W, H).unwrap();
-    gamut_av1::encode_still_intra(&planes, base_q_idx)
+/// encoder. `colour` must match the request's, or the crate rejects the stream for signalling a
+/// different colour configuration than it asked for.
+fn builtin_obus(base_q_idx: u8, colour: Av1Colour) -> Vec<u8> {
+    let planes = fixture_planes(colour);
+    gamut_av1::encode_still_intra_with(&planes, base_q_idx, colour)
         .unwrap()
         .0
         .obus
+}
+
+/// The fixture in the plane layout `colour` describes: identity GBR, or YCbCr through its matrix.
+fn fixture_planes(colour: Av1Colour) -> Planar8 {
+    match colour.matrix {
+        MatrixCoefficients::Identity => Planar8::from_rgb8_identity(&fixture(), W, H).unwrap(),
+        matrix => Planar8::from_rgb8_matrix(
+            &fixture(),
+            W,
+            H,
+            RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight).unwrap(),
+        )
+        .unwrap(),
+    }
 }
 
 // ================================================================================================
@@ -61,9 +77,11 @@ fn builtin_obus(base_q_idx: u8) -> Vec<u8> {
 /// built-in encoder produces — pushing a backend and then not using it must perturb nothing.
 ///
 /// The goldens are re-captured whenever the built-in AV1 encoder deliberately changes what it
-/// codes; they pin the seam's additivity, not the codec's output forever. Last re-captured when
+/// codes; they pin the seam's additivity, not the codec's output forever. Re-captured when
 /// `gamut-av1` enabled CDF adaptation (`disable_cdf_update = 0`), which shrank these two files
-/// from 4426/1864 bytes to 3407/1557 with an unchanged reconstruction.
+/// from 4426/1864 bytes to 3407/1557 with an unchanged reconstruction, and again when the lossy
+/// encoder moved to BT.709 YCbCr, taking `lossy50` to 1323. The lossless golden is unaffected by
+/// the colour change — lossless stays on the identity matrix.
 #[test]
 fn default_encoder_output_is_byte_identical() {
     for (name, encoder) in [
@@ -157,14 +175,15 @@ impl Av1StillEncoder for Scripted {
 
     fn encode_still(&mut self, req: &Av1EncodeRequest, planes: &Planar8) -> Result<Vec<u8>> {
         assert_eq!((planes.width(), planes.height()), (W, H));
-        // Identity planes: Y = G, U = B, V = R of the fixture's first pixel.
-        let rgb = fixture();
-        assert_eq!(planes.plane(0)[0], rgb[1]);
-        assert_eq!(planes.plane(1)[0], rgb[2]);
-        assert_eq!(planes.plane(2)[0], rgb[0]);
+        // The planes must be in exactly the layout the request's colour describes — identity GBR
+        // for the lossless job, YCbCr through the matrix for the lossy one.
+        let expected = fixture_planes(req.colour());
+        for p in 0..3 {
+            assert_eq!(planes.plane(p), expected.plane(p), "plane {p}");
+        }
         self.record("encode");
         match &self.result {
-            Outcome::Passthrough => Ok(builtin_obus(req.base_q_idx())),
+            Outcome::Passthrough => Ok(builtin_obus(req.base_q_idx(), req.colour())),
             Outcome::Bytes(b) => Ok(b.clone()),
             Outcome::Fail(msg) => Err(Error::Unsupported(msg)),
         }
@@ -417,6 +436,107 @@ fn backend_stream_must_use_profile_1() {
     );
 }
 
+/// A backend stream whose `color_config()` disagrees with the request is rejected: the container
+/// mirrors the sequence header into `colr`, so accepting it would publish a colour description the
+/// samples do not have.
+#[test]
+fn backend_stream_must_signal_the_requested_colour() {
+    // The default lossy encoder asks for BT.709; hand back an otherwise-conformant stream that
+    // signals identity instead.
+    let identity_stream = builtin_obus(127, Av1Colour::default());
+    let log = log();
+    let mut encoder = AvifEncoder::lossy(50);
+    encoder.push_backend(Scripted::new(
+        "wrong-colour",
+        true,
+        Outcome::Bytes(identity_stream),
+        &log,
+    ));
+    let err = encode(&encoder).expect_err("mismatched colour rejected");
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend stream signals a different colour configuration than requested",
+    );
+
+    // …and a matching stream is accepted, so the check is not simply refusing every backend.
+    //
+    // The three encoders below make the parser's AV1 §5.5.2 branch load-bearing in both
+    // directions. `lossless()` signals BT.709 + sRGB + identity, which **takes** the shortcut: no
+    // `color_range` bit is coded, so a parser that read one would consume `separate_uv_delta_q`
+    // (0) and report studio range. `lossy(50)` misses the shortcut on the matrix alone, and the
+    // studio-range encoder misses it *and* codes `color_range = 0` — so a parser that skipped the
+    // bit would report full range. Either way the mismatch check fires and the encode fails.
+    for (name, encoder) in [
+        ("shortcut", AvifEncoder::lossless()),
+        ("bt709-full", AvifEncoder::lossy(50)),
+        (
+            "bt709-studio",
+            AvifEncoder::lossy(50).with_color_range(ColorRange::Limited),
+        ),
+    ] {
+        let colour = encoder_colour(&encoder);
+        let base_q_idx = if colour == Av1Colour::default() {
+            0
+        } else {
+            127
+        };
+        let mut with_backend = encoder.clone();
+        with_backend.push_backend(Scripted::new(
+            "right-colour",
+            true,
+            Outcome::Bytes(builtin_obus(base_q_idx, colour)),
+            &log,
+        ));
+        assert_eq!(
+            encode(&with_backend)
+                .unwrap_or_else(|e| panic!("{name}: matching colour rejected: {e}")),
+            encode(&encoder).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+/// The colour an encoder's configuration selects, mirroring `AvifEncoder::colour` — the test needs
+/// it to build a stream the crate will accept.
+fn encoder_colour(encoder: &AvifEncoder) -> Av1Colour {
+    let config = encoder.config();
+    match config.mode {
+        gamut_avif::AvifMode::Lossless => Av1Colour::default(),
+        _ => Av1Colour {
+            matrix: config.matrix,
+            range: config.range,
+            ..Av1Colour::default()
+        },
+    }
+}
+
+/// A stream that leaves its CICP code points UNSPECIFIED is rejected with a message that says so,
+/// rather than falling out of the colour comparison as a confusing mismatch.
+#[test]
+fn backend_stream_must_describe_its_colour() {
+    // A hand-built reduced-still-picture sequence header for the 34×18 fixture with
+    // `color_description_present_flag = 0`:
+    //   seq_profile(3)=1 | still_picture=1 | reduced=1 | seq_level_idx[0](5)=0
+    //   | frame_width_bits_minus_1(4)=5 | frame_height_bits_minus_1(4)=4
+    //   | max_frame_width_minus_1(6)=33 | max_frame_height_minus_1(5)=17
+    //   | use_128x128_superblock, filter_intra, intra_edge_filter, superres, cdef, restoration = 0
+    //   | high_bitdepth=0 | color_description_present_flag=0 | color_range=0
+    //   | separate_uv_delta_q=0 | film_grain_params_present=0 | trailing one + zero pad
+    let payload = [0x38u8, 0x15, 0x21, 0x88, 0x00, 0x80];
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+    let log = log();
+    let mut encoder = AvifEncoder::lossy(50);
+    encoder.push_backend(Scripted::new("no-cicp", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("undescribed colour rejected");
+    assert_owned_error(
+        &err,
+        ErrorKind::Unsupported,
+        "AVIF: AV1 backend stream must set color_description_present_flag",
+    );
+}
+
 /// A truncated sequence header (too few bits for the dimension fields) is reported, not panicked on.
 #[test]
 fn truncated_sequence_header_is_reported() {
@@ -538,10 +658,15 @@ impl Encoder for SharedStub {
 
 /// The adapter's happy path: the sink's chunks become the OBU payload, and the descriptors carry
 /// the AV1 codec id, the `base_q_idx` in `extra` (never a `0..=100` quality), and the three
-/// identity planes.
+/// planes.
 #[test]
 fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
-    let obus = builtin_obus(127);
+    // The encoder under test is `lossy(50)`, whose colour is the BT.709 default.
+    let colour = Av1Colour {
+        matrix: MatrixCoefficients::Bt709,
+        ..Av1Colour::default()
+    };
+    let obus = builtin_obus(127, colour);
     // Two chunks, so the adapter's accumulation (not just a single hand-off) is exercised.
     let (head, tail) = obus.split_at(7);
     let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
@@ -564,7 +689,15 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
         Some((u32::from_be_bytes(*b"av01"), 0, Some(127))),
         "codec id av01, quality unused (0), base_q_idx in extra"
     );
-    let rgb = fixture();
+    // The lowered plane pointers are the encoder's own BT.709 planes, not the raw RGB — the
+    // adapter must hand a backend exactly what the request's colour describes.
+    let planes = fixture_planes(colour);
+    let first = [planes.plane(0)[0], planes.plane(1)[0], planes.plane(2)[0]];
+    assert_ne!(
+        first,
+        [fixture()[1], fixture()[2], fixture()[0]],
+        "BT.709 planes must differ from the identity GBR mapping"
+    );
     assert_eq!(
         seen.seen_image,
         Some((
@@ -574,7 +707,7 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
             8,
             3,
             [W as usize, W as usize, W as usize, 0],
-            [rgb[1], rgb[2], rgb[0]], // identity planes: Y = G, U = B, V = R
+            first,
         ))
     );
 }

@@ -1213,6 +1213,62 @@ fn bt601_limited_and_full_range_are_golden() {
 }
 
 #[test]
+fn bt709_and_bt2020_are_golden_against_the_h273_matrix() {
+    use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, YcbcrMatrix};
+    // The matrices this crate's own lossy encoder can emit. 4x4, 4:2:0, both signal ranges,
+    // asserted per pixel against `gamut_color`'s H.273 derivation — the same transform the encoder
+    // ran forward, so this closes the encode→decode loop through the container's RGBA surface.
+    for (code, matrix) in [
+        (1u16, MatrixCoefficients::Bt709),
+        (9, MatrixCoefficients::Bt2020Ncl),
+    ] {
+        for full in [false, true] {
+            let range = if full {
+                ColorRange::Full
+            } else {
+                ColorRange::Limited
+            };
+            let m = YcbcrMatrix::new(matrix, range, BitDepth::Eight).unwrap();
+            let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(code, full)]);
+            let bytes = file(1, vec![item]);
+            let container = AvifContainer::parse(&bytes).unwrap();
+            let rgba = container
+                .decode_item_rgba8(1, &mut Mock::default())
+                .unwrap();
+            for y in 0..4u32 {
+                for x in 0..4u32 {
+                    let (cx, cy) = (x / 2, y / 2);
+                    let (r, g, b) =
+                        m.to_rgb(ey(15, x, y, 8), ecb(15, cx, cy, 8), ecr(15, cx, cy, 8));
+                    let (r, g, b) = (r as u8, g as u8, b as u8);
+                    let o = ((y * 4 + x) * 4) as usize;
+                    assert_eq!(
+                        &rgba.as_samples()[o..o + 4],
+                        &[r, g, b, 255],
+                        "matrix {code} full={full} ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+    // The three supported matrices are genuinely distinct on the same coded samples — a lookup
+    // that collapsed them would still satisfy the per-pixel assertions above.
+    let decode = |code: u16| {
+        let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(code, true)]);
+        let bytes = file(1, vec![item]);
+        AvifContainer::parse(&bytes)
+            .unwrap()
+            .decode_item_rgba8(1, &mut Mock::default())
+            .unwrap()
+            .into_samples()
+    };
+    let (bt709, bt601, bt2020) = (decode(1), decode(6), decode(9));
+    assert_ne!(bt709, bt601);
+    assert_ne!(bt709, bt2020);
+    assert_ne!(bt601, bt2020);
+}
+
+#[test]
 fn bt601_444_uses_full_chroma_resolution() {
     use gamut_color::{ColorRange, ycbcr_to_rgb};
     // A 4:4:4 BT.601 frame: the chroma column index must be `x` (not `x / 2`). Deleting the
@@ -1287,23 +1343,33 @@ fn monochrome_limited_expansion_is_golden() {
 
 #[test]
 fn unsupported_colour_falls_back_to_planar_only() {
-    // YCgCo (matrix 8) is a different transform family: planar decodes; both RGBA surfaces refuse.
-    let item = coded_item(1, 1, 8, 10, 4, 4, vec![colr(8, false)]);
-    let bytes = file(1, vec![item]);
-    let container = AvifContainer::parse(&bytes).unwrap();
-    assert!(
-        container
-            .decode_item_planar(1, &mut Mock::default())
-            .is_ok()
-    );
-    assert!(matches!(
-        container.decode_item_rgba8(1, &mut Mock::default()),
-        Err(error) if error.kind() == ErrorKind::Unsupported
-    ));
-    assert!(matches!(
-        container.decode_item_rgba16(1, &mut Mock::default()),
-        Err(error) if error.kind() == ErrorKind::Unsupported
-    ));
+    // YCgCo (matrix 8) is a different transform family, and BT.2020 constant-luminance (matrix 10)
+    // is not a `Kr`/`Kb` de-matrixing at all: planar decodes; both RGBA surfaces refuse.
+    for matrix in [8u16, 10] {
+        let item = coded_item(1, 1, 8, 10, 4, 4, vec![colr(matrix, false)]);
+        let bytes = file(1, vec![item]);
+        let container = AvifContainer::parse(&bytes).unwrap();
+        assert!(
+            container
+                .decode_item_planar(1, &mut Mock::default())
+                .is_ok(),
+            "matrix {matrix}"
+        );
+        assert!(
+            matches!(
+                container.decode_item_rgba8(1, &mut Mock::default()),
+                Err(error) if error.kind() == ErrorKind::Unsupported
+            ),
+            "matrix {matrix} rgba8"
+        );
+        assert!(
+            matches!(
+                container.decode_item_rgba16(1, &mut Mock::default()),
+                Err(error) if error.kind() == ErrorKind::Unsupported
+            ),
+            "matrix {matrix} rgba16"
+        );
+    }
 
     // An ICC-only colr likewise: planar delivers, RGBA refuses.
     let icc = Property {
