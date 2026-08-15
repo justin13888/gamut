@@ -56,6 +56,12 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Opt-in decoder resource guards (P9, issue #306): `JpegDecoder::with_max_dimensions` and
   `with_max_image_bytes`, enforced before built-in frame allocations and backend selection, while
   bounding sequential DNL-deferred sample-plane growth until the exact height arrives.
+- Caller-supplied quantization tables (P11, issue #332): the validated `QuantTables` pair
+  (natural order, entries `1..=255` by construction) used **verbatim** via
+  `JpegEncoder::with_quant_tables`, bypassing — without changing — the frozen quality mapping;
+  `QuantTables::annex_k()`/`scaled()` recover the frozen mapping over arbitrary base tables.
+  Custom tables pin the encode to the built-in path (a `JpegEncodeRequest` cannot carry them, so
+  backends are not consulted — the host-side-veto convention).
 - Opt-in optimized baseline Huffman tables (P10, issue #331): `JpegEncoder::with_optimized_tables`,
   the Annex K.2 construction the progressive encoder already uses, reached from the sequential path.
 
@@ -89,6 +95,10 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **APP13 IPTC-IIM (Photoshop 3.0 PSIR).** The legacy IPTC carrier; modern IPTC rides inside XMP
   (which `gamut-metadata` models as the single home). `JpegMetadata` is `#[non_exhaustive]` so the
   carrier can be added without a breaking change.
+- **Alternate built-in base tables (flat, mozjpeg/jpegli psychovisual).** Every built-in constant
+  table is a citation obligation under the `references/` policy, and no such table has a vendored
+  source here yet. `QuantTables`' inherent constructors are append-only, so tuned built-ins are
+  additive later; until then callers supply their own bytes.
 - **CLI metadata passthrough.** `gamut convert` decodes its input via the third-party `image`
   crate, which discards APP segments before gamut ever sees them; a passthrough needs source-side
   extraction and belongs to a broader CLI metadata story, not issue #28.
@@ -185,3 +195,4 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P8 | T.81 §B.1.1.5; issue #277 (seam #272) | **Pluggable codestream backends:** the `backend` module — `JpegStreamInfo`/`DecodedJpeg`/`RasterRef`/`JpegEncodeRequest`, the `JpegStreamDecoder`/`JpegStreamEncoder` traits over the **whole SOI..EOI interchange stream**, `push_backend` push-order registries (`Arc<Mutex<..>>`, so `Clone` shares backends), the `backend_declined` late-decline sentinel, `JPEG_CODEC_ID`, and the `gamut-codec-abi` adapters both ways. APPn metadata + stream validation stay crate-owned: the crate parses the marker layer before consulting a backend and patches its EXIF/XMP/ICC into whatever a backend produces | ✅ done |
 | P9 | issue #306 | **Decoder resource limits:** opt-in dimension and native-raster byte builders; checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
 | P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
+| P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |

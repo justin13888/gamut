@@ -23,6 +23,7 @@ use crate::backend::{self, EncoderSlot, JpegEncodeRequest, JpegStreamEncoder, Ra
 use crate::bitwriter::BitWriter;
 use crate::huffman::{self, EncTable, TableSpec};
 use crate::marker::{self, DensityUnit};
+use crate::quant::QuantTables;
 use crate::zigzag::ZIGZAG;
 use crate::{appmeta, progressive, quant};
 
@@ -71,7 +72,8 @@ impl ChromaSubsampling {
 /// values — are SemVer-stable: quality 50 emits the T.81 Annex K tables verbatim, and the IJG
 /// quality→scale mapping is frozen. The byte stream is likewise stable for a given configuration;
 /// [`Self::with_optimized_tables`] changes the Huffman tables and hence the entropy bytes, but it
-/// is opt-in and leaves the coefficients — and the decoded image — untouched.
+/// is opt-in and leaves the coefficients — and the decoded image — untouched. Caller-supplied
+/// tables ([`Self::with_quant_tables`]) bypass the frozen mapping without changing it.
 ///
 /// # Example
 ///
@@ -96,6 +98,7 @@ pub struct JpegEncoder {
     y_density: u16,
     progressive: bool,
     optimize_tables: bool,
+    quant_tables: Option<QuantTables>,
     exif: Option<Vec<u8>>,
     xmp: Option<Vec<u8>>,
     icc: Option<Vec<u8>>,
@@ -116,6 +119,7 @@ impl fmt::Debug for JpegEncoder {
             .field("y_density", &self.y_density)
             .field("progressive", &self.progressive)
             .field("optimize_tables", &self.optimize_tables)
+            .field("quant_tables", &self.quant_tables)
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("icc", &self.icc.as_ref().map(Vec::len))
@@ -144,6 +148,7 @@ impl JpegEncoder {
             y_density: 1,
             progressive: false,
             optimize_tables: false,
+            quant_tables: None,
             exif: None,
             xmp: None,
             icc: None,
@@ -156,7 +161,9 @@ impl JpegEncoder {
     /// Backends are consulted in **push order** for every encode; the first whose
     /// [`JpegStreamEncoder::supports`] accepts the [`JpegEncodeRequest`] produces the whole JFIF
     /// interchange stream. The built-in encoder is the implicit tail, used only when every backend
-    /// declines. The crate then **patches its APPn metadata into the produced stream** — any
+    /// declines. An encoder configured with [`Self::with_quant_tables`] skips the registry
+    /// entirely — a [`JpegEncodeRequest`] cannot carry custom tables, so the job is pinned to the
+    /// built-in path. The crate then **patches its APPn metadata into the produced stream** — any
     /// EXIF/XMP/`ICC_PROFILE` segment the backend emitted is replaced by this encoder's configured
     /// [`with_exif`](Self::with_exif) / [`with_xmp`](Self::with_xmp) /
     /// [`with_icc_profile`](Self::with_icc_profile) payloads (validated against their caps *before*
@@ -190,6 +197,12 @@ impl JpegEncoder {
         samples: &[u8],
         out: &mut Vec<u8>,
     ) -> Result<Option<usize>> {
+        // Caller-supplied quantization tables cannot ride a `JpegEncodeRequest`, so they pin the
+        // encode to the built-in path rather than let a backend silently encode with different
+        // tables (the same host-side veto gamut-jxl applies to its container features).
+        if self.quant_tables.is_some() {
+            return Ok(None);
+        }
         if self.backends.is_empty() {
             return Ok(None);
         }
@@ -230,10 +243,26 @@ impl JpegEncoder {
 
     /// Sets the quality, **clamped** to `1..=100` (higher is better/larger). Quality 50 uses the
     /// Annex K tables verbatim; 100 uses all-1 tables. Clamping (rather than rejecting) matches
-    /// libjpeg's `jpeg_set_quality`.
+    /// libjpeg's `jpeg_set_quality`. Ignored when [`Self::with_quant_tables`] is set.
     #[must_use]
     pub fn with_quality(mut self, quality: u8) -> Self {
         self.quality = quality.clamp(1, 100);
+        self
+    }
+
+    /// Quantizes with `tables` **verbatim** instead of the quality-scaled Annex K tables,
+    /// replacing the only lever [`Self::with_quality`] offers — the frozen IJG mapping — with full
+    /// caller control (perceptually-tuned tables, near-lossless all-1 tables, or
+    /// [`QuantTables::scaled`] re-scaling of an arbitrary base).
+    ///
+    /// While set, `with_quality` has no effect on the emitted tables or coefficients, and the
+    /// encode is pinned to the **built-in** encoder: pushed backends are not consulted, because a
+    /// [`crate::backend::JpegEncodeRequest`] cannot carry custom tables. Grayscale uses only the
+    /// luma table. The frozen quality contract is unaffected — it continues to govern the default
+    /// path.
+    #[must_use]
+    pub fn with_quant_tables(mut self, tables: QuantTables) -> Self {
+        self.quant_tables = Some(tables);
         self
     }
 
@@ -338,14 +367,22 @@ impl JpegEncoder {
         self
     }
 
-    /// The scaled luminance quantization table (natural order) for the configured quality.
+    /// The luminance quantization table (natural order): the caller's table when
+    /// [`Self::with_quant_tables`] is set, otherwise Annex K.1 scaled for the configured quality.
     fn luma_quant(&self) -> [u8; 64] {
-        quant::scale(&quant::LUMINANCE, self.quality)
+        match &self.quant_tables {
+            Some(tables) => *tables.luma(),
+            None => quant::scale(&quant::LUMINANCE, self.quality),
+        }
     }
 
-    /// The scaled chrominance quantization table (natural order) for the configured quality.
+    /// The chrominance quantization table (natural order): the caller's table when
+    /// [`Self::with_quant_tables`] is set, otherwise Annex K.2 scaled for the configured quality.
     fn chroma_quant(&self) -> [u8; 64] {
-        quant::scale(&quant::CHROMINANCE, self.quality)
+        match &self.quant_tables {
+            Some(tables) => *tables.chroma(),
+            None => quant::scale(&quant::CHROMINANCE, self.quality),
+        }
     }
 
     /// Rejects dimensions the frame header cannot encode (`X`/`Y` are 16-bit). Zero is already
@@ -1021,7 +1058,29 @@ mod tests {
         assert_eq!((d.x_density, d.y_density), (1, 1));
         assert!(!d.progressive);
         assert!(!d.optimize_tables);
+        assert_eq!(d.quant_tables, None);
         assert_eq!((&d.exif, &d.xmp, &d.icc), (&None, &None, &None));
+    }
+
+    #[test]
+    fn quant_chokepoints_prefer_custom_tables_and_fall_back_to_the_scaled_annex_k() {
+        // Distinct luma/chroma fixtures: a swapped arm in either chokepoint changes the result.
+        let luma = [7u8; 64];
+        let chroma = [11u8; 64];
+        let tables = QuantTables::new(luma, chroma).expect("nonzero fixtures");
+        let custom = JpegEncoder::new().with_quant_tables(tables);
+        assert_eq!(custom.luma_quant(), luma);
+        assert_eq!(custom.chroma_quant(), chroma);
+        // Quality set after (or before) custom tables must not perturb them.
+        assert_eq!(custom.clone().with_quality(5).luma_quant(), luma);
+        assert_eq!(custom.with_quality(5).chroma_quant(), chroma);
+        // Default path: the frozen scaled Annex K tables, per configured quality.
+        let default = JpegEncoder::new().with_quality(85);
+        assert_eq!(default.luma_quant(), quant::scale(&quant::LUMINANCE, 85));
+        assert_eq!(
+            default.chroma_quant(),
+            quant::scale(&quant::CHROMINANCE, 85)
+        );
     }
 
     #[test]
