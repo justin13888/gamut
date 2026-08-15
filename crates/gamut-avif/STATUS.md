@@ -296,7 +296,8 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | `Av1StillDecoder` seam + validating `DecodedFrame` contract | (crate API) | ✅ | S3 |
 | Planar pipeline: coded / `iden` / `grid` assembly (uniform tiles, checked canvas, crop) | 23008-12 §6.6.2.3.2 | ✅ | S3 |
 | Derivation cycle + depth guards | (hardening) | ✅ | S3 |
-| RGBA path: identity / BT.601 (mc 2/5/6) / monochrome, 8-bit; missing-`colr` default | H.273; AVIF §2.2 | ✅ | S3 |
+| RGBA path: identity / BT.601 (mc 2/5/6) / BT.709 (1) / BT.2020 NCL (9) / monochrome; missing-`colr` default | H.273; AVIF §2.2 | ✅ | S3/S6 |
+| High-bit-depth surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
 | Alpha merge (luma-plane, non-mono accepted, bit-depth rescale) | AVIF §4.1 | ✅ | S3 |
 | `clap`/`irot`/`imir` application in `ipma` order (2022 `imir` axis semantics) | 23008-12:2022 §6.5.12; 14496-12 §12.1.4 | ✅ | S3 |
 | `iovl` overlay compositing (source-over, canvas fill, clipping) | 23008-12 §6.6.2.3.3 | ✅ | S3 |
@@ -306,8 +307,11 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 around `Av1StillDecoder` — section M reserves its name and shape; the typed trait itself already
 ships, and #274 has since delivered the mirror-image *encode* registry it will copy; the pure-Rust
 AV1 codestream decoder
-(own issue; would make the seam optional and enable `gamut_core::Decoder`); >8-bit / BT.709/2020 /
-ICC application on the RGBA path (planar delivers them today); `tmap`/`sato` derived-item decode;
+(own issue; would make the seam optional and enable `gamut_core::Decoder`); ICC application on the
+RGBA path, plus the matrix coefficients outside the modeled Kr/Kb set — YCgCo (8) and the
+chromaticity-derived points (12/13/14), which the 10-bit corpus file uses — and coded depths CICP
+does not model (9/11/13…), all explicitly refused rather than approximated (planar delivers them
+today); `tmap`/`sato` derived-item decode;
 wiring decoded Exif/XMP payloads through `gamut-exif`/`gamut-xmp`; a shared byte-accounting
 segment walker (an isobmff 2.0 candidate — today's walker deliberately mirrors `gamut-heic`'s);
 and unifying the per-crate `DecodedFrame` types through `gamut-codec-abi`.

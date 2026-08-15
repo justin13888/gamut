@@ -28,7 +28,10 @@
 //! colour pipeline — while [`AvifImage::decode_item_rgba8`] /
 //! [`AvifImage::decode_primary_rgba8`] add colour conversion, alpha merge, `iovl` compositing,
 //! and the `clap`/`irot`/`imir` transforms for a presentation-ready
-//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). The whole pipeline is validated differentially
+//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). [`AvifImage::decode_item_rgba16`] /
+//! [`AvifImage::decode_primary_rgba16`] are the same pipeline for high-bit-depth content: they take
+//! any coded depth from 8 to 16 bits and normalize the samples to the full 16-bit range. The whole
+//! pipeline is validated differentially
 //! against **libavif + dav1d** (`tests/conformance.rs`).
 //!
 //! # Examples
@@ -123,8 +126,8 @@
 //! the input) and **lossy** ([`AvifEncoder::lossy`], `quality` `0..=100`) AV1 intra coding at
 //! identity-matrix 4:4:4; `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
 //! [`AvifEncoder::with_mirror`]); and the **container decode surface** above (full read of items,
-//! properties, derivations, and metadata; planar and 8-bit RGBA presentation around a caller
-//! decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
+//! properties, derivations, and metadata; planar, 8-bit and high-bit-depth RGBA presentation around
+//! a caller decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
 //! container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the AV1
 //! reference codec — and `dav1d` via [`gamut_av1`].
 //!
