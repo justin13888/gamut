@@ -11,7 +11,7 @@
 #![cfg(feature = "decode")]
 
 use gamut_core::{DecodeImage, Rgba8};
-use gamut_jxl::JxlDecoder;
+use gamut_jxl::{DecodePartialImage, JxlDecoder};
 
 // Only the stream-producing corpus needs the shared helpers (and the libjxl-backed encoder they use),
 // so the module is pulled in under the same gate. `mod common;` here resolves to `tests/common/mod.rs`.
@@ -25,6 +25,18 @@ mod common;
 /// padding, grayscale expansion) are exercised on whatever the (possibly corrupt) header claims.
 fn decode_rgba8(data: &[u8]) -> gamut_core::Result<gamut_core::ImageBuf<Rgba8>> {
     <JxlDecoder as DecodeImage<Rgba8>>::decode_image(&JxlDecoder::new(), data)
+}
+
+/// The same request through the best-effort path, whose outcome is deliberately discarded.
+///
+/// Every corpus case below is driven through this as well as [`decode_rgba8`]. The relaxed path
+/// reaches jxl-rs's flush machinery, which the rejecting path never touches — and that machinery
+/// has open upstream bugs (libjxl/jxl-rs#730, #771, #783), so it is exactly the code that most needs
+/// the no-panic invariant asserted over hostile input. `Ok` is a legitimate outcome here: a partial
+/// decode of a corrupt stream may well produce a (possibly blank) image, and that is the point.
+fn decode_rgba8_partial(data: &[u8]) {
+    let _ =
+        <JxlDecoder as DecodePartialImage<Rgba8>>::decode_partial_image(&JxlDecoder::new(), data);
 }
 
 /// A short deterministic "random-ish" junk generator: a linear congruential sweep, so the garbage is
@@ -42,12 +54,15 @@ fn junk(len: usize, seed: u32) -> Vec<u8> {
 #[test]
 fn empty_input_errors_without_panicking() {
     assert!(decode_rgba8(&[]).is_err(), "empty input must error");
+    // No dimensions to size a buffer with, so the best-effort path refuses this one too.
+    decode_rgba8_partial(&[]);
 }
 
 #[test]
 fn bare_signature_alone_errors() {
     // The 2-byte codestream signature with nothing after it is not a decodable image.
     assert!(decode_rgba8(&[0xFF, 0x0A]).is_err());
+    decode_rgba8_partial(&[0xFF, 0x0A]);
 }
 
 #[test]
@@ -58,6 +73,7 @@ fn signatures_followed_by_garbage_error() {
         let mut cs = vec![0xFF, 0x0A];
         cs.extend_from_slice(&junk(512, seed));
         assert!(decode_rgba8(&cs).is_err(), "FF0A+junk seed {seed:#x}");
+        decode_rgba8_partial(&cs);
 
         // The 12-byte ISO BMFF JXL signature box + junk.
         const JXL_BOX: [u8; 12] = [
@@ -66,6 +82,7 @@ fn signatures_followed_by_garbage_error() {
         let mut ct = JXL_BOX.to_vec();
         ct.extend_from_slice(&junk(512, seed ^ 0xFFFF));
         assert!(decode_rgba8(&ct).is_err(), "box+junk seed {seed:#x}");
+        decode_rgba8_partial(&ct);
     }
 }
 
@@ -76,10 +93,10 @@ fn signatures_followed_by_garbage_error() {
     any(not(target_arch = "wasm32"), target_os = "emscripten")
 ))]
 mod with_streams {
-    use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Pixel, Rgb8};
-    use gamut_jxl::{Container, Effort, JxlEncoder};
+    use gamut_core::{Dimensions, EncodeImage, ErrorKind, Gray8, ImageRef, Pixel, Rgb8, Rgba8};
+    use gamut_jxl::{Container, DecodePartialImage, Effort, JxlDecoder, JxlEncoder};
 
-    use super::decode_rgba8;
+    use super::{decode_rgba8, decode_rgba8_partial};
     use crate::common::gen_u8;
 
     /// A small, valid, lossless bare codestream (textured 16×16 RGB).
@@ -115,6 +132,23 @@ mod with_streams {
                     decode_rgba8(&stream[..len]).is_err(),
                     "prefix len {len} decoded unexpectedly"
                 );
+                decode_rgba8_partial(&stream[..len]);
+            }
+        }
+    }
+
+    /// Every truncation length of a small valid stream, driven through the best-effort path.
+    ///
+    /// Dense (step 1, not 7) and on a *lossless* stream by design: Modular is the one encoding for
+    /// which jxl-rs hands a deliberately incomplete section to its bit reader, so this is the shape
+    /// that reaches the least-travelled upstream code. The invariant is only "no panic" — these
+    /// 16×16 fixtures are a single coded group, so they have nothing to render partially, and it is
+    /// `partial.rs` that asserts what a decodable truncation actually produces.
+    #[test]
+    fn dense_truncations_of_both_framings_never_panic_on_the_partial_path() {
+        for stream in [valid_codestream(), valid_container()] {
+            for len in 0..=stream.len() {
+                decode_rgba8_partial(&stream[..len]);
             }
         }
     }
@@ -123,7 +157,9 @@ mod with_streams {
     fn systematic_truncations_error_until_full() {
         // Every 7th truncation length from 0 up to (but not including) the full stream must error:
         // jxl-rs signals the missing tail as "needs more input", which the decoder maps to a
-        // truncation error. The full stream itself decodes cleanly.
+        // truncation error. The full stream itself decodes cleanly. This pins the *default* path's
+        // contract, which the opt-in `DecodePartialImage` surface deliberately does not move; the
+        // best-effort behaviour is asserted separately, above and in `partial.rs`.
         for stream in [valid_codestream(), valid_container()] {
             let full = stream.len();
             let mut len = 0;
@@ -155,6 +191,8 @@ mod with_streams {
                 m[byte] ^= 1 << bit;
                 // Drive the decoder; discard the outcome. A panic here fails the test.
                 let _ = decode_rgba8(&m);
+                // Same corpus through the relaxed path, which additionally reaches the flush code.
+                decode_rgba8_partial(&m);
             }
         }
     }
@@ -183,5 +221,17 @@ mod with_streams {
             Some("JXL: image exceeds the decoder pixel limit")
         );
         assert!(err.detail().is_some());
+
+        // The best-effort path relaxes truncation, not the memory bound: the same typed refusal.
+        let err = <JxlDecoder as DecodePartialImage<Rgba8>>::decode_partial_image(
+            &JxlDecoder::new(),
+            &bytes,
+        )
+        .expect_err("the pixel limit is not relaxed by the best-effort policy");
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert_eq!(
+            err.static_message(),
+            Some("JXL: image exceeds the decoder pixel limit")
+        );
     }
 }

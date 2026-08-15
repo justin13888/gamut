@@ -428,6 +428,114 @@ fn auto_reduce_is_lossless_smaller_and_picks_the_right_type() {
 }
 
 #[test]
+fn extended_auto_reduce_covers_grey_and_sixteen_bit_inputs() {
+    // A non-byte-aligned width exercises sub-byte row padding in the reduced outputs.
+    let (w, h) = (19u32, 13u32);
+    let n = (w * h) as usize;
+    let dims = Dimensions::new(w, h).unwrap();
+    let encoder = || {
+        PngEncoder::new()
+            .with_compression(Level::Best)
+            .with_auto_reduce(true)
+    };
+
+    // Gray8 on the §13.12 grids -> sub-byte grey; libpng reports the packed depth and the codes.
+    for (scale, depth) in [(255u8, 1u8), (85, 2), (17, 4)] {
+        let levels = 256 / u16::from(scale) + 1; // 2, 4, or 16 representable values
+        let src: Vec<u8> = (0..n)
+            .map(|i| (i % levels as usize) as u8 * scale)
+            .collect();
+        let mut png = Vec::new();
+        encoder()
+            .encode_image(ImageRef::<Gray8>::new(&src, dims).unwrap(), &mut png)
+            .expect("encode");
+        let dec = libpng_oracle::decode(&png);
+        assert_eq!(dec.color_type, libpng_oracle::COLOR_GRAY, "scale {scale}");
+        assert_eq!(dec.bit_depth, depth, "scale {scale}");
+        let codes: Vec<u8> = src.iter().map(|&v| v / scale).collect();
+        assert_eq!(dec.pixels, codes, "scale {scale}");
+        // No strict size assertion: the reducer compares *raw* byte estimates, and on a fixture
+        // this tiny and regular DEFLATE can squeeze the 8-bit stream to within a few bytes of the
+        // packed one. The depth/pixel checks above pin the contract that matters.
+    }
+
+    // Low-cardinality grey off the scale grid -> a grey palette at 2 bits.
+    let off_grid: Vec<u8> = (0..n).map(|i| [5u8, 9, 200][i % 3]).collect();
+    let mut png = Vec::new();
+    encoder()
+        .encode_image(ImageRef::<Gray8>::new(&off_grid, dims).unwrap(), &mut png)
+        .expect("encode");
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(dec.color_type, libpng_oracle::COLOR_PALETTE);
+    assert_eq!(dec.bit_depth, 2);
+    let (_, _, rgba) = libpng_oracle::decode_rgba8(&png);
+    let expected: Vec<u8> = off_grid.iter().flat_map(|&v| [v, v, v, 255]).collect();
+    assert_eq!(rgba, expected, "grey palette resolves losslessly");
+
+    // GrayAlpha8 with an all-opaque alpha channel -> plain 8-bit grey.
+    let ga: Vec<u8> = (0..n).flat_map(|i| [(i % 89) as u8, 255]).collect();
+    let mut png = Vec::new();
+    encoder()
+        .encode_image(ImageRef::<GrayAlpha8>::new(&ga, dims).unwrap(), &mut png)
+        .expect("encode");
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(dec.color_type, libpng_oracle::COLOR_GRAY);
+    assert_eq!(dec.bit_depth, 8);
+    let grays: Vec<u8> = ga.chunks_exact(2).map(|px| px[0]).collect();
+    assert_eq!(dec.pixels, grays);
+
+    // Rgba16 with every sample k*257, grey and opaque -> demoted all the way to 8-bit grey.
+    let rgba16: Vec<u16> = (0..n)
+        .flat_map(|i| {
+            let v = ((i % 60) as u16) * 257;
+            [v, v, v, u16::MAX]
+        })
+        .collect();
+    let mut png = Vec::new();
+    encoder()
+        .encode_image(ImageRef::<Rgba16>::new(&rgba16, dims).unwrap(), &mut png)
+        .expect("encode");
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(dec.color_type, libpng_oracle::COLOR_GRAY);
+    assert_eq!(dec.bit_depth, 8);
+    assert_eq!(
+        dec.pixels,
+        (0..n).map(|i| (i % 60) as u8).collect::<Vec<_>>()
+    );
+
+    // The demotion must beat the unreduced 16-bit encoding.
+    let mut full = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .encode_image(ImageRef::<Rgba16>::new(&rgba16, dims).unwrap(), &mut full)
+        .expect("encode");
+    assert!(
+        png.len() < full.len(),
+        "demoted {} < full {}",
+        png.len(),
+        full.len()
+    );
+
+    // Non-demotable opaque RGBA16 -> the alpha channel is dropped at 16 bits.
+    let deep: Vec<u16> = (0..n)
+        .flat_map(|i| [(i * 501 + 1) as u16, (i * 703 + 2) as u16, 3, u16::MAX])
+        .collect();
+    let mut png = Vec::new();
+    encoder()
+        .encode_image(ImageRef::<Rgba16>::new(&deep, dims).unwrap(), &mut png)
+        .expect("encode");
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(dec.color_type, libpng_oracle::COLOR_RGB);
+    assert_eq!(dec.bit_depth, 16);
+    let expected: Vec<u8> = deep
+        .chunks_exact(4)
+        .flat_map(|px| [px[0], px[1], px[2]])
+        .flat_map(u16::to_be_bytes)
+        .collect();
+    assert_eq!(dec.pixels, expected);
+}
+
+#[test]
 fn brute_force_filtering_round_trips_and_is_competitive() {
     let (w, h) = (48u32, 48u32);
     let src = rgb_pattern(w, h);

@@ -73,8 +73,10 @@ linked from vendored `third_party/` submodules rather than system-installed bina
 **Decode surface.** The container read + codestream handoff (issue #250, mirroring what
 `gamut-heic` ships for HEIF): byte-accounting parse, the full item/property/derivation model, the
 typed `av1C`/OBU layer with the AVIF still-image payload validation, planar decode with
-grid/identity reassembly, and an 8-bit RGBA presentation path (identity/BT.601/monochrome colour,
-alpha merge, overlay compositing, `clap`/`irot`/`imir`). Validated differentially against
+grid/identity reassembly, and the RGBA presentation paths — 8-bit (`decode_primary_rgba8`) and
+high-bit-depth (`decode_primary_rgba16`, 10/12-bit normalized to full-range 16-bit), with
+identity/BT.601/BT.709/BT.2020/monochrome colour, alpha merge, overlay compositing,
+`clap`/`irot`/`imir`). Validated differentially against
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant

@@ -138,8 +138,9 @@ impl Ancillary {
         });
     }
 
-    /// Emits the colour-space chunks that must precede `PLTE` (PNG Table 7).
-    pub(crate) fn write_pre_plte(&self, out: &mut Vec<u8>) {
+    /// Emits the colour-space chunks that must precede `PLTE` (PNG Table 7). `effort` is the
+    /// encoder's [`Level::Best`] budget, applied to the compressed `iCCP` payload.
+    pub(crate) fn write_pre_plte(&self, out: &mut Vec<u8>, effort: u8) {
         if let Some(chrm) = self.chrm {
             let mut data = [0u8; 32];
             for (slot, value) in chrm.iter().enumerate() {
@@ -156,6 +157,7 @@ impl Ancillary {
             data.push(0); // compression method: 0 = zlib/deflate
             DeflateEncoder::new()
                 .with_level(Level::Best)
+                .with_effort(effort)
                 .zlib_compress(profile, &mut data);
             chunk::write_chunk(out, *b"iCCP", &data);
         }
@@ -168,7 +170,8 @@ impl Ancillary {
     }
 
     /// Emits the remaining ancillary chunks that precede `IDAT` (after any `PLTE`/`tRNS`).
-    pub(crate) fn write_post_plte(&self, out: &mut Vec<u8>) {
+    /// `effort` is the encoder's [`Level::Best`] budget, applied to compressed `zTXt` payloads.
+    pub(crate) fn write_post_plte(&self, out: &mut Vec<u8>, effort: u8) {
         if let Some(exif) = &self.exif {
             chunk::write_chunk(out, *b"eXIf", exif);
         }
@@ -186,13 +189,13 @@ impl Ancillary {
             chunk::write_chunk(out, *b"tIME", &time);
         }
         for entry in &self.texts {
-            write_text(out, entry);
+            write_text(out, entry, effort);
         }
     }
 }
 
 /// Serialises one text chunk (tEXt / zTXt / iTXt).
-fn write_text(out: &mut Vec<u8>, entry: &TextEntry) {
+fn write_text(out: &mut Vec<u8>, entry: &TextEntry, effort: u8) {
     match entry.kind {
         TextKind::Latin1 => {
             let mut data = entry.keyword.clone().into_bytes();
@@ -206,6 +209,7 @@ fn write_text(out: &mut Vec<u8>, entry: &TextEntry) {
             data.push(0); // compression method: 0 = zlib/deflate
             DeflateEncoder::new()
                 .with_level(Level::Best)
+                .with_effort(effort)
                 .zlib_compress(entry.text.as_bytes(), &mut data);
             chunk::write_chunk(out, *b"zTXt", &data);
         }
@@ -249,7 +253,7 @@ mod tests {
             ..Default::default()
         };
         let mut out = vec![0u8; 8]; // fake signature
-        a.write_pre_plte(&mut out);
+        a.write_pre_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT);
         assert_eq!(
             find_chunk(&out, b"gAMA"),
             Some(45455u32.to_be_bytes().to_vec())
@@ -265,7 +269,7 @@ mod tests {
         a.set_time(2026, 6, 13, 1, 2, 3);
         a.add_text_latin1("Title", "hi");
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT);
         let phys = find_chunk(&out, b"pHYs").unwrap();
         assert_eq!(&phys[0..4], 2835u32.to_be_bytes());
         assert_eq!(phys[8], 1); // metre
@@ -284,14 +288,14 @@ mod tests {
             ..Default::default()
         };
         let mut pre = vec![0u8; 8];
-        a.write_pre_plte(&mut pre);
+        a.write_pre_plte(&mut pre, DeflateEncoder::DEFAULT_EFFORT);
         let iccp = find_chunk(&pre, b"iCCP").unwrap();
         assert_eq!(&iccp[..2], b"p\0"); // profile name + null
         assert_eq!(iccp[2], 0); // compression method
         assert_eq!(iccp[3], 0x78); // zlib CMF byte begins the compressed profile
 
         let mut post = vec![0u8; 8];
-        a.write_post_plte(&mut post);
+        a.write_post_plte(&mut post, DeflateEncoder::DEFAULT_EFFORT);
         assert_eq!(
             find_chunk(&post, b"eXIf").unwrap(),
             vec![0x49, 0x49, 0x2A, 0x00]
@@ -305,7 +309,7 @@ mod tests {
         let mut a = Ancillary::default();
         a.add_text_compressed("Comment", "the quick brown fox");
         let mut out = vec![0u8; 8];
-        a.write_post_plte(&mut out);
+        a.write_post_plte(&mut out, DeflateEncoder::DEFAULT_EFFORT);
         let data = find_chunk(&out, b"zTXt").unwrap();
         assert_eq!(&data[..8], b"Comment\0");
         assert_eq!(data[8], 0); // compression method

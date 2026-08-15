@@ -36,6 +36,12 @@
 //! image back as grayscale. The codestream is decoded by a [`JxlCodestreamDecoder`] backend; the
 //! built-in jxl-rs wrapper is the implicit last one (see [Backends](#backends)).
 //!
+//! A truncated stream is an [`Error::InvalidInput`](gamut_core::Error::InvalidInput) on that path.
+//! [`DecodePartialImage`] is the opt-in alternative: it returns the best-effort image plus a
+//! [`JxlPartialReport`] carrying the completeness flag, for a partly-downloaded or damaged file.
+//! Read its documentation before relying on the pixels — "best effort" can legitimately mean a
+//! blank buffer.
+//!
 //! # Example: lossless round-trip
 //!
 //! With the default features (`encode` + `decode`), a lossless stream decodes back bit-exact. The
@@ -79,9 +85,10 @@
 //!   [`JxlEncoder`] still exists and still encodes — through whatever backend was pushed. With
 //!   neither, encoding returns [`Error::Unsupported`](gamut_core::Error::Unsupported).
 //! - `decode` (default) includes the jxl-rs decode tail, and additionally provides the header-only
-//!   accessors ([`JxlDecoder::info`], [`JxlDecoder::embedded_icc_profile`], [`JxlInfo`]), which are
-//!   always answered by the built-in parser. Without it, [`JxlDecoder`] decodes through a pushed
-//!   backend, or returns [`Error::Unsupported`](gamut_core::Error::Unsupported).
+//!   accessors ([`JxlDecoder::info`], [`JxlDecoder::embedded_icc_profile`], [`JxlInfo`]) and the
+//!   best-effort [`DecodePartialImage`] surface, all of which are always answered by the built-in
+//!   parser. Without it, [`JxlDecoder`] decodes through a pushed backend, or returns
+//!   [`Error::Unsupported`](gamut_core::Error::Unsupported).
 //!
 //! This is why the encode direction works on `wasm32-unknown-unknown` despite libjxl being
 //! unbuildable there: push a backend and the tail's absence stops mattering.
@@ -96,7 +103,21 @@
 //!
 //! # Safety and portability
 //!
-//! The crate is `#![deny(unsafe_code)]
+//! The crate is `#![deny(unsafe_code)]`; all `unsafe` is confined to the single `ffi` module that
+//! drives libjxl (hence `deny` rather than `forbid`). The decoder is 100% safe Rust and available
+//! on every target.
+//!
+//! The encoder is compiled in for
+//! `all(feature = "encode", any(not(target_arch = "wasm32"), target_os = "emscripten"))` — that
+//! is, everywhere except `wasm32` targets that emscripten does not cover:
+//!
+//! - **`wasm32-unknown-emscripten`** gets the full encoder: libjxl officially supports wasm via
+//!   emscripten, and `gamut-jxl-sys` builds it with the emsdk toolchain (`emcc` on `PATH`).
+//! - **`wasm32-unknown-unknown`** (the wasm-bindgen/browser target) is decode-only, permanently by
+//!   toolchain boundary rather than by workaround: no C/C++ compiler emits archives for that ABI,
+//!   so no build configuration could link libjxl there. A pure-Rust JPEG XL encoder is the only
+//!   thing that could ever change this (jxl-rs ships none).
+#![deny(unsafe_code)]
 
 pub mod abi;
 pub mod backend;
@@ -132,5 +153,5 @@ pub use backend::{
 pub use config::{ColorSpec, Container, Distance, Effort, ModularMode, Orientation};
 pub use decoder::JxlDecoder;
 #[cfg(feature = "decode")]
-pub use decoder::JxlInfo;
+pub use decoder::{DecodePartialImage, JxlInfo, JxlPartialReport, JxlRender};
 pub use encoder::JxlEncoder;
