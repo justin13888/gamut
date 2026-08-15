@@ -1,7 +1,8 @@
 //! The TIFF encoder.
 
 use gamut_core::{
-    Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, ImageRef, Indexed8, Result, Rgb8, Rgba8,
+    Bilevel, Cmyk8, Dimensions, EncodeImage, Error, Gray8, Gray16, ImageRef, Indexed8, Result,
+    Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_ifd::{ByteOrder, Ifd, Value, Variant};
 
@@ -21,7 +22,9 @@ struct SampleLayout {
 /// Encoder for baseline TIFF images.
 ///
 /// Writes chunky (`PlanarConfiguration = 1`) strips or tiles using the compression selected by
-/// [`Self::with_compression`]. Supports 8-bit grayscale/RGB/RGBA/CMYK/palette and 1-bit bilevel.
+/// [`Self::with_compression`]. Supports 8- and 16-bit grayscale/RGB/RGBA, 8-bit CMYK/palette, and
+/// 1-bit bilevel. 16-bit samples are written in this encoder's byte order; no `SampleFormat` tag is
+/// emitted, since unsigned integer is the TIFF default and the only format written.
 /// Emits classic TIFF by default, or BigTIFF (64-bit offsets) when [`Self::with_big_tiff`] is set.
 #[derive(Debug, Clone)]
 pub struct TiffEncoder {
@@ -67,8 +70,8 @@ impl TiffEncoder {
 
     /// Returns a copy of this encoder that applies `predictor` before compression.
     ///
-    /// [`Predictor::HorizontalDifferencing`] requires 8-bit samples and pairs well with LZW or
-    /// Deflate.
+    /// [`Predictor::HorizontalDifferencing`] requires 8- or 16-bit samples and pairs well with LZW
+    /// or Deflate. At 16 bits it differences sample *values* (TIFF 6.0 §14), not bytes.
     #[must_use]
     pub fn with_predictor(mut self, predictor: Predictor) -> Self {
         self.predictor = predictor;
@@ -79,7 +82,8 @@ impl TiffEncoder {
     /// pixels instead of strips.
     ///
     /// Both dimensions must be positive multiples of 16. Tiling supports every byte-oriented
-    /// compression; horizontal differencing on encode is currently enabled with Deflate.
+    /// compression at 8 and 16 bits; horizontal differencing on encode is currently enabled with
+    /// Deflate.
     #[must_use]
     pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
         self.tiling = Some((tile_width, tile_height));
@@ -163,6 +167,44 @@ impl TiffEncoder {
         )
     }
 
+    /// Serialises 16-bit samples into this encoder's byte order and lays them out like
+    /// [`Self::encode_8bit`].
+    ///
+    /// No `SampleFormat` tag is written: unsigned integer is the TIFF 6.0 default and the only
+    /// format these impls emit, so writing it would be redundant.
+    fn encode_16bit(
+        &self,
+        samples: &[u16],
+        dims: Dimensions,
+        spp: usize,
+        photometric: PhotometricInterpretation,
+        extra_fields: &[(u16, Value)],
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        // As in `encode_8bit`, the caller hands us an ImageRef-validated buffer.
+        let row_bytes = dims.width as usize * spp * 2;
+        debug_assert_eq!(samples.len() * 2, row_bytes * dims.height as usize);
+        // The packed buffer must exist in *file* order, and must be owned so the predictor can
+        // difference it in place — one allocation is the format's unavoidable serialisation cost.
+        let order = self.order;
+        let mut packed = Vec::with_capacity(samples.len() * 2);
+        for &sample in samples {
+            packed.extend_from_slice(&order.pack_u16(sample));
+        }
+        self.encode_packed(
+            &packed,
+            dims,
+            &SampleLayout {
+                spp,
+                bits_per_sample: 16,
+                stored_row_bytes: row_bytes,
+                photometric,
+            },
+            extra_fields,
+            out,
+        )
+    }
+
     /// Lays out an image from already-packed sample bytes (`height * stored_row_bytes`), applying
     /// the strip codec and building the directory.
     fn encode_packed(
@@ -194,17 +236,23 @@ impl TiffEncoder {
         let h = dims.height as usize;
         let stored_row_bytes = layout.stored_row_bytes;
 
-        // Apply the horizontal-differencing predictor (8-bit only) before compression.
+        // Apply the horizontal-differencing predictor before compression. §14 differences sample
+        // values, so 16-bit samples are differenced as `u16` lanes in the file's byte order — the
+        // order they are already packed in here.
         let predicting = self.predictor == Predictor::HorizontalDifferencing;
-        if predicting && layout.bits_per_sample != 8 {
+        if predicting && !matches!(layout.bits_per_sample, 8 | 16) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "TIFF: predictor requires 8-bit samples",
+                "TIFF: predictor requires 8- or 16-bit samples",
             ));
         }
         let predicted = predicting.then(|| {
             let mut buf = packed.to_vec();
-            predictor::forward(&mut buf, stored_row_bytes, layout.spp);
+            if layout.bits_per_sample == 16 {
+                predictor::forward16(&mut buf, stored_row_bytes, layout.spp, self.order);
+            } else {
+                predictor::forward(&mut buf, stored_row_bytes, layout.spp);
+            }
             buf
         });
         let packed: &[u8] = predicted.as_deref().unwrap_or(packed);
@@ -363,10 +411,10 @@ impl TiffEncoder {
         tile_h: u32,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        if layout.bits_per_sample != 8 {
+        if !matches!(layout.bits_per_sample, 8 | 16) {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "TIFF: tiling supported only for 8-bit images so far",
+                "TIFF: tiling requires 8- or 16-bit images",
             ));
         }
         let predicting = self.predictor == Predictor::HorizontalDifferencing;
@@ -385,7 +433,9 @@ impl TiffEncoder {
         }
         let (w, h, spp) = (dims.width as usize, dims.height as usize, layout.spp);
         let stored_row_bytes = layout.stored_row_bytes;
-        let tile_row_bytes = tw * spp;
+        // Every offset below is a byte offset, so the per-pixel stride carries the sample width too.
+        let pixel_bytes = spp * (layout.bits_per_sample as usize / 8);
+        let tile_row_bytes = tw * pixel_bytes;
         let tiles_across = w.div_ceil(tw);
         let tiles_down = h.div_ceil(th);
 
@@ -399,13 +449,17 @@ impl TiffEncoder {
                         break;
                     }
                     let copy_cols = tw.min(w - tx * tw);
-                    let src = (src_row * stored_row_bytes) + (tx * tw) * spp;
+                    let src = (src_row * stored_row_bytes) + (tx * tw) * pixel_bytes;
                     let dst = r * tile_row_bytes;
-                    tile[dst..dst + copy_cols * spp]
-                        .copy_from_slice(&packed[src..src + copy_cols * spp]);
+                    tile[dst..dst + copy_cols * pixel_bytes]
+                        .copy_from_slice(&packed[src..src + copy_cols * pixel_bytes]);
                 }
                 if predicting {
-                    predictor::forward(&mut tile, tile_row_bytes, spp);
+                    if layout.bits_per_sample == 16 {
+                        predictor::forward16(&mut tile, tile_row_bytes, spp, self.order);
+                    } else {
+                        predictor::forward(&mut tile, tile_row_bytes, spp);
+                    }
                 }
                 tiles.push(self.compress_bytes(&tile, tile_row_bytes)?);
             }
@@ -498,6 +552,51 @@ impl EncodeImage<Rgba8> for TiffEncoder {
                 stored_row_bytes: row_bytes,
                 photometric: PhotometricInterpretation::Rgb,
             },
+            &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
+            out,
+        )
+    }
+}
+
+impl EncodeImage<Gray16> for TiffEncoder {
+    /// `PhotometricInterpretation = BlackIsZero` (1), one 16-bit sample per pixel written in the
+    /// encoder's byte order.
+    fn encode_image(&self, image: ImageRef<'_, Gray16>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_16bit(
+            image.as_samples(),
+            image.dimensions(),
+            1,
+            PhotometricInterpretation::BlackIsZero,
+            &[],
+            out,
+        )
+    }
+}
+
+impl EncodeImage<Rgb16> for TiffEncoder {
+    /// `PhotometricInterpretation = RGB` (2), three 16-bit samples per pixel written in the
+    /// encoder's byte order.
+    fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_16bit(
+            image.as_samples(),
+            image.dimensions(),
+            3,
+            PhotometricInterpretation::Rgb,
+            &[],
+            out,
+        )
+    }
+}
+
+impl EncodeImage<Rgba16> for TiffEncoder {
+    /// Stores the fourth sample as *unassociated* alpha (`ExtraSamples = 2`, not premultiplied),
+    /// matching the 8-bit [`Rgba8`] impl.
+    fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
+        self.encode_16bit(
+            image.as_samples(),
+            image.dimensions(),
+            4,
+            PhotometricInterpretation::Rgb,
             &[(tags::EXTRA_SAMPLES, Value::Short(vec![2]))],
             out,
         )

@@ -386,11 +386,59 @@ fn planar_decode_is_bit_exact_against_raw_dav1d_and_libavif() {
     assert_eq!(frame.cb(), &via_libavif.planes[1][..]);
     assert_eq!(frame.cr(), &via_libavif.planes[2][..]);
 
-    // The RGBA surface correctly declines the 10-bit frame while planar delivered it.
+    // The 8-bit RGBA surface still declines the 10-bit frame rather than narrowing it.
     assert!(matches!(
         container.decode_item_rgba8(primary.id(), &mut Dav1dDecoder),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
+
+    // This file's `colr` carries matrix_coefficients = 12 (chromaticity-derived non-constant
+    // luminance), which is *not* a modeled Kr/Kb de-matrixing — deriving its weights from the
+    // primaries is a separate feature. So even the wide surface declines it, and it declines for
+    // that reason rather than for its bit depth: the same file's monochrome/identity paths would
+    // present fine. An unmodeled matrix must be refused, never silently approximated.
+    let matrix = match primary.colour() {
+        Some(gamut_isobmff::ColourInformation::Nclx(nclx)) => nclx.matrix_coefficients,
+        other => panic!("expected an nclx colr on the corpus file, got {other:?}"),
+    };
+    assert_eq!(
+        matrix, 12,
+        "corpus file's matrix changed; revisit this test"
+    );
+    assert!(matches!(
+        container.decode_primary_rgba16(&mut Dav1dDecoder),
+        Err(error) if error.kind() == ErrorKind::Unsupported
+    ));
+}
+
+#[test]
+fn wide_surface_widens_a_real_eight_bit_codestream_exactly() {
+    // The widening invariant against a genuine dav1d-decoded frame rather than a synthetic one:
+    // 8-bit content reaches the 16-bit surface losslessly, since 65535 == 255 · 257.
+    //
+    // The corpus has no 10-bit file with a modeled matrix (the only 10-bit file is
+    // chromaticity-derived, see above), so the high-bit-depth colour maths is validated against an
+    // independent f64 reference in `tests/decode.rs` instead of a reference codec here.
+    let data = corpus("io/kodim03_yuv420_8bpc.avif");
+    let container = AvifContainer::parse(&data).unwrap();
+    let narrow = container
+        .decode_primary_rgba8(&mut Dav1dDecoder)
+        .expect("8-bit RGBA decode");
+    let wide = container
+        .decode_primary_rgba16(&mut Dav1dDecoder)
+        .expect("16-bit RGBA decode");
+    assert_eq!(
+        (narrow.width(), narrow.height()),
+        (wide.width(), wide.height())
+    );
+    for (i, (&n, &w)) in narrow
+        .as_samples()
+        .iter()
+        .zip(wide.as_samples())
+        .enumerate()
+    {
+        assert_eq!(u16::from(n) * 257, w, "sample {i}");
+    }
 }
 
 // ---- t5: byte accounting on a real file + appended stream ------------------------------------

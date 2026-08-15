@@ -50,16 +50,17 @@ std::fs::write("out.obu", &still.obus).unwrap();
 
 Today (milestone **M0**) the encoder implements a single, narrow path: a **lossless** all-intra
 keyframe — `seq_profile = 1` (8-bit 4:4:4), identity matrix coefficients, full range, single tile,
-64×64 superblocks, `DC_PRED`, and the forced `TX_4X4` Walsh–Hadamard transform, with static default
-CDFs (`disable_cdf_update = 1`). It produces the AV1 temporal unit that `gamut-avif` wraps in an
-AVIF still image.
+64×64 superblocks, `DC_PRED`, and the forced `TX_4X4` Walsh–Hadamard transform. Symbols are coded
+against adapting CDFs (`disable_cdf_update = 0`, AV1 §8.2.6): each tile starts from the §9.4
+defaults and nudges every context toward what it codes. It produces the AV1 temporal unit that
+`gamut-avif` wraps in an AVIF still image.
 
 The wider AV1 surface — lossy DCT/ADST, more intra modes, in-loop filters, inter coding for image
 sequences — is tracked row by row in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md).
 
 ## Roadmap
 
-- M1: lossy intra (DCT/ADST + quantization), adaptive CDFs, more intra prediction modes.
+- M1: lossy intra (DCT/ADST + quantization), adaptive CDFs ✅, more intra prediction modes.
 - Later: in-loop filters, multi-tile, and inter coding for animated AVIF.
 
 ## License

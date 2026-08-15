@@ -27,6 +27,16 @@ pub enum MetadataError {
     /// Decoding the legacy IPTC-IIM carrier, or projecting IPTC back to it, failed.
     #[error("IPTC: {0}")]
     Iptc(#[from] IptcError),
+    /// The model carried an [extension](crate::MetadataExtension) — which has no carrier to
+    /// serialize into — while the embedder was set to
+    /// [`ExtensionPolicy::Reject`](crate::ExtensionPolicy::Reject).
+    #[error("extension: {namespace}/{key} has no carrier to embed into")]
+    UnembeddableExtension {
+        /// The namespace of the first offending extension.
+        namespace: String,
+        /// Its key within `namespace`.
+        key: String,
+    },
 }
 
 /// A [`Result`](core::result::Result) whose error is [`MetadataError`].

@@ -63,7 +63,7 @@ const MOD_MAX: i64 = 1 << (FIX_SHIFT + 2);
 pub(crate) struct RdCtx {
     /// The AC-class rate proxy (typical Annex K.5 or K.6 for the component's class).
     ac: EncTable,
-    /// λ in `FIX_SHIFT` fixed point, per [`lambda_for`].
+    /// λ in `FIX_SHIFT` fixed point ([`DEFAULT_LAMBDA`], or an explicit value in tests).
     lambda: i64,
     /// Modulate λ per block from the block's own AC energy ([`RdOptimization::TrellisAdaptive`](crate::RdOptimization::TrellisAdaptive)).
     adaptive: bool,
@@ -102,11 +102,11 @@ impl RdCtx {
 /// Integer square root: the largest `r` with `r² ≤ n`.
 fn isqrt(n: i64) -> i64 {
     debug_assert!(n >= 0);
-    let mut r = (n as f64).sqrt() as i64;
-    // Float seeding is only a guess; settle exactly so the result is platform-independent.
-    while r > 0 && r * r > n {
-        r -= 1;
-    }
+    // Seed one BELOW the float estimate: the correctly-rounded f64 sqrt of an i64 is within one
+    // of the true root (above 2⁵² it can land exactly on ⌈√n⌉ — e.g. n = (2²⁶+1)² − 1 rounds to
+    // 2²⁶ + 1), so `estimate − 1` never overshoots and the single ascending settle is exact and
+    // platform-independent. A negative seed (n = 0) self-heals: the first probe is 0² ≤ 0.
+    let mut r = (n as f64).sqrt() as i64 - 1;
     while (r + 1) * (r + 1) <= n {
         r += 1;
     }
@@ -491,6 +491,120 @@ mod tests {
     }
 
     #[test]
+    fn modulation_clamps_and_the_zero_reference_guard_are_pinned() {
+        // The clamp bounds are load-bearing free choices: pin their numeric values (a mutated
+        // shift or offset in the constant would silently widen or narrow the adaptive range).
+        assert_eq!(MOD_MIN, 1024); // ¼ in 2^12 fixed point
+        assert_eq!(MOD_MAX, 16384); // 4 in 2^12 fixed point
+        // The zero-reference guard (defensive: in-crate quantization steps are always ≥ 1) must
+        // return exactly 1.0 fixed-point, not a shifted-down zero.
+        assert_eq!(activity_factor(123, 0), 4096);
+    }
+
+    #[test]
+    fn zero_lambda_keeps_adjacent_half_step_ties() {
+        // TWO adjacent half-step ties: every keep/drop combination of the pair costs the same
+        // distortion at λ = 0, so the search's tie-breaking discipline (strict `<`, nearest
+        // predecessor first, farthest termination first) is what makes the output equal plain
+        // rounding — a tie-preference flip anywhere in the DP or termination loop drops one.
+        let mut quant = [1u8; 64];
+        quant[ZIGZAG[5]] = 10;
+        quant[ZIGZAG[6]] = 10;
+        let mut dct = [0i32; 64];
+        dct[ZIGZAG[5]] = 5;
+        dct[ZIGZAG[6]] = 5;
+        let out = trellis_quantize(&dct, &quant, &ctx_with_lambda(0));
+        assert_eq!((out[ZIGZAG[5]], out[ZIGZAG[6]]), (1, 1));
+    }
+
+    #[test]
+    fn zrl_runs_are_charged_and_multiplied() {
+        // The ZRL arm of the rate model, both branch selection and multiplication.
+        //
+        // Branch: a run of 16 codes as ZRL + (0,1) = 11 + 3 = 14 bits, so with z − d = 819 the
+        // keep threshold is λ < 58; were the ZRL branch skipped the rate would be 3 bits and the
+        // threshold λ < 273. λ = 100 separates them: the coefficient must be DROPPED.
+        let mut quant17 = [1u8; 64];
+        quant17[ZIGZAG[17]] = 10;
+        let dropped = trellis_quantize(&block_at(17, 6), &quant17, &ctx_with_lambda(100));
+        assert_eq!(dropped, [0i32; 64], "run of 16 must pay its ZRL at λ = 100");
+
+        // Multiplication: a run of 33 needs TWO ZRLs — rate = 2·11 + (1,1)'s 4 + 1 = 27 bits,
+        // keep threshold λ < 30. A miscounted single ZRL (rate 18 → λ < 45) or a divided one
+        // (rate 10 → λ < 81) would keep at λ = 38; the correct cost drops.
+        let mut quant34 = [1u8; 64];
+        quant34[ZIGZAG[34]] = 10;
+        let dropped = trellis_quantize(&block_at(34, 6), &quant34, &ctx_with_lambda(38));
+        assert_eq!(
+            dropped, [0i32; 64],
+            "run of 33 must pay both ZRLs at λ = 38"
+        );
+        // And below the true threshold the same coefficient survives (the branch is priced, not
+        // pruned).
+        let kept = trellis_quantize(&block_at(34, 6), &quant34, &ctx_with_lambda(25));
+        assert_eq!(kept[ZIGZAG[34]], 1);
+    }
+
+    #[test]
+    fn adaptive_lambda_is_exactly_base_times_activity() {
+        // The adaptive path must scale λ by exactly activity_factor(block AC energy, Σ step²):
+        // recompute both inputs here with the true formulas and demand array equality with an
+        // explicit-λ run. The block is built so the resulting λ (453) and the λ of a perturbed
+        // activity reference (the clamp at 576) sit on opposite sides of a marginal
+        // coefficient's drop threshold (468) — so a miscomputed energy or step sum changes the
+        // output, not just an internal number.
+        let quant = [10u8; 64];
+        let mut dct = [0i32; 64];
+        dct[ZIGZAG[1]] = 250; // big: kept at every λ in play; provides the block's energy
+        dct[ZIGZAG[5]] = 9; // marginal: kept at λ = 453, dropped at λ = 576
+        let energy: i64 = 250 * 250 + 9 * 9;
+        let sum_step_sq: i64 = 63 * 100;
+        let factor = activity_factor(energy, sum_step_sq);
+        let explicit = (DEFAULT_LAMBDA * factor) >> FIX_SHIFT;
+        assert_eq!(explicit, 453, "the crafted block's effective λ");
+
+        let adaptive_ctx = RdCtx {
+            ac: EncTable::from_spec(&huffman::STD_LUMA_AC),
+            lambda: DEFAULT_LAMBDA,
+            adaptive: true,
+        };
+        let adaptive = trellis_quantize(&dct, &quant, &adaptive_ctx);
+        let reference = trellis_quantize(&dct, &quant, &ctx_with_lambda(explicit));
+        assert_eq!(adaptive, reference);
+        assert_eq!(
+            adaptive[ZIGZAG[5]], 1,
+            "marginal coefficient kept at λ = 453"
+        );
+        // Sanity for the kill-radius claim: the clamped-up λ really flips the marginal
+        // coefficient, so a perturbed activity computation cannot masquerade as correct.
+        let flipped = trellis_quantize(&dct, &quant, &ctx_with_lambda(576));
+        assert_eq!(flipped[ZIGZAG[5]], 0);
+    }
+
+    #[test]
+    fn a_table_with_no_eob_falls_back_to_plain_rounding() {
+        // A proxy table carrying ONLY the ZRL symbol prices no transition and no EOB, so the
+        // search cannot cost any coding of the block at all — the documented fallback is plain
+        // nearest rounding, never a silently zeroed block.
+        let mut bits = [0u8; 16];
+        bits[10] = 1; // one symbol of code length 11
+        let zrl_only = RdCtx {
+            ac: EncTable::from_bits_values(&bits, &[0xF0]),
+            lambda: DEFAULT_LAMBDA,
+            adaptive: false,
+        };
+        let quant = [10u8; 64];
+        let mut dct = [0i32; 64];
+        dct[0] = 77;
+        dct[ZIGZAG[1]] = 25;
+        let out = trellis_quantize(&dct, &quant, &zrl_only);
+        let mut plain_expected = [0i32; 64];
+        plain_expected[0] = round_div_nearest(77, 10);
+        plain_expected[ZIGZAG[1]] = round_div_nearest(25, 10);
+        assert_eq!(out, plain_expected);
+    }
+
+    #[test]
     fn isqrt_is_exact_at_boundaries() {
         for (n, r) in [
             (0, 0),
@@ -503,6 +617,13 @@ mod tests {
         ] {
             assert_eq!(isqrt(n), r, "isqrt({n})");
         }
+        // n = (2²⁶+1)² − 1: the correctly-rounded f64 sqrt is EXACTLY 2²⁶ + 1 (the true root
+        // plus ~1/2²⁷, closer to the next float than to itself), so a naive truncate-the-float
+        // seed overshoots — this pins the seed-minus-one discipline that keeps the ascending
+        // settle sufficient. (Below 2⁵² the float estimate never overshoots; this is the
+        // smallest-magnitude family where it does.)
+        let k = (1i64 << 26) + 1;
+        assert_eq!(isqrt(k * k - 1), k - 1);
         assert_eq!(isqrt((1 << 40) - 1), (1 << 20) - 1);
     }
 
