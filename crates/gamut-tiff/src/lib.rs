@@ -86,6 +86,7 @@ pub use gamut_ifd::{
     ByteOrder, Conflict, DataLabel, Field, FieldType, Ifd, Range, Segment, SegmentReport,
     SharedSpan, SpanKind, SubIfd, TiffFile, UnknownValue, Value, Variant, read, write,
 };
-pub use ifd::{PhotometricInterpretation, Predictor};
+pub use ifd::{PhotometricInterpretation, Predictor, SampleFormat};
+pub use info::TiffInfo;
 pub use palette::Palette8;
 pub use writer::{write_image, write_image_tiled, write_multipage};

@@ -4,7 +4,10 @@
 use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, ImageBuf, ImageRef, Rgb8, Rgb16, Rgba16,
 };
-use gamut_tiff::{ByteOrder, Compression, Predictor, TiffDecoder, TiffEncoder, read, tags};
+use gamut_tiff::{
+    ByteOrder, Compression, Ifd, PhotometricInterpretation, Predictor, SampleFormat, TiffDecoder,
+    TiffEncoder, Value, Variant, read, tags, write_image,
+};
 use libtiff_oracle::Compression as OC;
 
 /// Sizes include 1x1, a size smaller than one tile, and 17x13 — deliberately not a multiple of 16,
@@ -217,6 +220,98 @@ fn sixteen_bit_rejects_ccitt_which_is_bilevel_only() {
         .with_compression(Compression::CcittGroup4Fax)
         .encode_to_vec(ImageRef::<Gray16>::new(&src, dims(8, 8)).unwrap());
     assert!(got.is_err(), "CCITT cannot carry 16-bit samples");
+}
+
+#[test]
+fn info_reports_the_declared_layout() {
+    let src = rgb16_pattern(17, 13);
+    let tiff = TiffEncoder::new()
+        .with_byte_order(ByteOrder::BigEndian)
+        .with_compression(Compression::Deflate)
+        .with_predictor(Predictor::HorizontalDifferencing)
+        .encode_to_vec(ImageRef::<Rgb16>::new(&src, dims(17, 13)).unwrap())
+        .expect("encode");
+
+    let info = TiffDecoder::new().info(&tiff).expect("info");
+    assert_eq!((info.width, info.height), (17, 13));
+    assert_eq!(info.bits_per_sample, 16);
+    assert_eq!(info.samples_per_pixel, 3);
+    assert_eq!(info.sample_format, SampleFormat::UnsignedInteger);
+    assert_eq!(info.photometric, PhotometricInterpretation::Rgb);
+    assert_eq!(info.compression, Compression::Deflate);
+    assert_eq!(info.predictor, Predictor::HorizontalDifferencing);
+    assert_eq!(info.byte_order, ByteOrder::BigEndian);
+    assert!(!info.tiled);
+}
+
+#[test]
+fn info_reports_tiling_and_the_eight_bit_default() {
+    // An 8-bit tiled page with no SampleFormat tag: `tiled` must be set, and the absent tag must
+    // read back as the TIFF 6.0 unsigned-integer default rather than an error.
+    let src: Vec<u8> = (0..17 * 13 * 3).map(|i| (i * 7) as u8).collect();
+    let tiff = TiffEncoder::new()
+        .with_tiling(16, 16)
+        .encode_to_vec(ImageRef::<Rgb8>::new(&src, dims(17, 13)).unwrap())
+        .expect("encode");
+    let info = TiffDecoder::new().info(&tiff).expect("info");
+    assert_eq!(info.bits_per_sample, 8);
+    assert_eq!(info.sample_format, SampleFormat::UnsignedInteger);
+    assert!(info.tiled);
+}
+
+#[test]
+fn info_describes_a_page_the_decoder_refuses() {
+    // The contract that makes the probe worth having: a 32-bit float page is *described*, not
+    // rejected, so a caller can dispatch on the depth it finds instead of inferring it from a
+    // decode failure. Decoding the same file must still fail.
+    let mut ifd = Ifd::new();
+    ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![4]));
+    ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![2]));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![32]));
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+    ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![1]));
+    ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+    ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![2]));
+    ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![3]));
+    let tiff = write_image(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        &ifd,
+        &[vec![0u8; 4 * 2 * 4]],
+    )
+    .expect("write fixture");
+
+    let info = TiffDecoder::new()
+        .info(&tiff)
+        .expect("a float page must still describe itself");
+    assert_eq!(info.bits_per_sample, 32);
+    assert_eq!(info.sample_format, SampleFormat::FloatingPoint);
+
+    assert!(
+        TiffDecoder::new().decode_page(&tiff, 0).is_err(),
+        "describing a float page must not imply decoding it"
+    );
+}
+
+#[test]
+fn info_page_addresses_each_page_and_rejects_an_out_of_range_one() {
+    let a: Vec<u8> = (0..4 * 4 * 3).map(|i| (i * 3) as u8).collect();
+    let b = gray16_pattern(6, 5);
+    let mut pages = Vec::new();
+    TiffEncoder::new()
+        .encode_image(ImageRef::<Rgb8>::new(&a, dims(4, 4)).unwrap(), &mut pages)
+        .expect("encode");
+    // A genuinely multi-page file needs the multipage writer; here it is enough that page 0 is
+    // described and that an out-of-range index is refused the same way `decode_page` refuses it.
+    let dec = TiffDecoder::new();
+    assert_eq!(dec.info_page(&pages, 0).expect("page 0").bits_per_sample, 8);
+    assert!(dec.info_page(&pages, 1).is_err(), "page 1 does not exist");
+
+    let single = TiffEncoder::new()
+        .encode_to_vec(ImageRef::<Gray16>::new(&b, dims(6, 5)).unwrap())
+        .expect("encode");
+    let info = dec.info_page(&single, 0).expect("page 0");
+    assert_eq!((info.width, info.height, info.bits_per_sample), (6, 5, 16));
 }
 
 #[test]

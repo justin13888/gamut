@@ -19,32 +19,47 @@ fn require_u32(ifd: &Ifd, tag: u16, what: &'static str) -> Result<u32> {
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), what))
 }
 
-/// What a TIFF page declares about its stored pixels.
+/// What a TIFF page declares about its stored pixels — enough to choose a pixel type, or to decline
+/// the file, without paying for a decode.
 ///
 /// Every field is reported **as declared**, with the TIFF 6.0 defaults applied for absent tags
-/// (`SamplesPerPixel = 1`, `BitsPerSample = 1`, `Compression = None`, `Predictor = 1`).
+/// (`SamplesPerPixel = 1`, `BitsPerSample = 1`, `Compression = None`, `Predictor = 1`,
+/// `SampleFormat = 1`).
+///
+/// Crucially, a page this crate cannot *decode* can still be described: a 32-bit floating-point
+/// page reports its depth and format here and only fails at
+/// [`decode_image`](gamut_core::DecodeImage::decode_image). That is the whole point of a probe —
+/// support policy belongs to the decoder, so a caller can see what it is dealing with and dispatch
+/// (or give a good error of its own) rather than guess from a failure.
+///
+/// What *is* refused here is a page one value cannot honestly describe — samples that disagree
+/// about their depth or format — and an on-disk code this crate does not recognise. Use
+/// [`deconstruct`](crate::deconstruct) to inspect unknown codes verbatim.
+///
+/// Marked `#[non_exhaustive]` so further fields can be added without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TiffInfo {
+#[non_exhaustive]
+pub struct TiffInfo {
     /// Image width in pixels (`ImageWidth`, 256).
-    pub(crate) width: u32,
+    pub width: u32,
     /// Image height in pixels (`ImageLength`, 257).
-    pub(crate) height: u32,
+    pub height: u32,
     /// Bits per sample (`BitsPerSample`, 258). Every sample shares one depth.
-    pub(crate) bits_per_sample: u32,
+    pub bits_per_sample: u32,
     /// How the sample bits are interpreted (`SampleFormat`, 339).
-    pub(crate) sample_format: SampleFormat,
+    pub sample_format: SampleFormat,
     /// How samples map to colour (`PhotometricInterpretation`, 262).
-    pub(crate) photometric: PhotometricInterpretation,
+    pub photometric: PhotometricInterpretation,
     /// Components per pixel (`SamplesPerPixel`, 277).
-    pub(crate) samples_per_pixel: u32,
+    pub samples_per_pixel: u32,
     /// The compression scheme (`Compression`, 259).
-    pub(crate) compression: Compression,
+    pub compression: Compression,
     /// The prediction scheme applied before compression (`Predictor`, 317).
-    pub(crate) predictor: Predictor,
+    pub predictor: Predictor,
     /// Whether the page stores tiles (`TileWidth` present) rather than strips.
-    pub(crate) tiled: bool,
+    pub tiled: bool,
     /// The byte order of the file the page belongs to (`II` or `MM`).
-    pub(crate) byte_order: ByteOrder,
+    pub byte_order: ByteOrder,
 }
 
 /// Reads one page's pixel-layout tags, applying TIFF's defaults for the absent ones.

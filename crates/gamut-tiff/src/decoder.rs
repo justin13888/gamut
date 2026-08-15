@@ -8,8 +8,9 @@ use gamut_ifd::{ByteOrder, Ifd, read};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
 use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
+use crate::info::{self, TiffInfo};
 use crate::palette::Palette8;
-use crate::{info, tags};
+use crate::tags;
 
 /// Decoder for baseline TIFF images.
 ///
@@ -128,6 +129,51 @@ impl TiffDecoder {
     /// Returns [`Error::InvalidInput`] if the file header or IFD chain is malformed.
     pub fn page_count(&self, data: &[u8]) -> Result<usize> {
         Ok(read(data)?.ifds.len())
+    }
+
+    /// Describes page 0 — the page the [`DecodeImage`] impls present — without decoding pixels.
+    ///
+    /// Reads tags only, so it is cheap to call before committing to a decode. A page this crate
+    /// cannot decode is still described; see [`TiffInfo`].
+    ///
+    /// ```
+    /// use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray16, ImageBuf, ImageRef};
+    /// use gamut_tiff::{TiffDecoder, TiffEncoder};
+    ///
+    /// let dims = Dimensions { width: 2, height: 1 };
+    /// let tiff = TiffEncoder::new()
+    ///     .encode_to_vec(ImageRef::<Gray16>::new(&[4660, 43981], dims)?)?;
+    ///
+    /// // Choose the pixel type from what the file declares, rather than guessing and retrying.
+    /// let info = TiffDecoder::new().info(&tiff)?;
+    /// assert_eq!(info.bits_per_sample, 16);
+    /// if info.bits_per_sample == 16 {
+    ///     let image: ImageBuf<Gray16> = TiffDecoder::new().decode_image(&tiff)?;
+    ///     assert_eq!(image.as_samples(), &[4660, 43981]);
+    /// }
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or
+    /// [`Error::Unsupported`] for an unrecognised on-disk code or a page whose samples disagree
+    /// about their depth or format.
+    pub fn info(&self, data: &[u8]) -> Result<TiffInfo> {
+        self.info_page(data, 0)
+    }
+
+    /// Describes page `page` of a multi-page TIFF (page 0 is the first) without decoding pixels.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::info`], plus [`Error::InvalidInput`] for an out-of-range page.
+    pub fn info_page(&self, data: &[u8], page: usize) -> Result<TiffInfo> {
+        let file = read(data)?;
+        let ifd = file.ifds.get(page).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: page index out of range")
+        })?;
+        info::page_info(ifd, file.order)
     }
 
     /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit [`Rgb8`] (page 0 is the first;
