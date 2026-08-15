@@ -342,3 +342,80 @@ fn near_lossless_is_ignored_by_the_lossy_path() {
         .expect("encode");
     assert_eq!(with_nl, encode_lossy(Effort::default(), 70, &px, d));
 }
+
+/// Peak signal-to-noise ratio, in dB, between two RGBA buffers over the colour channels.
+fn psnr_rgb(a: &[u8], b: &[u8]) -> f64 {
+    let mut sse = 0f64;
+    let mut n = 0f64;
+    for (x, y) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        for c in 0..3 {
+            let d = f64::from(x[c]) - f64::from(y[c]);
+            sse += d * d;
+            n += 1.0;
+        }
+    }
+    if sse == 0.0 {
+        return f64::INFINITY;
+    }
+    10.0 * (255.0 * 255.0 * n / sse).log10()
+}
+
+fn decode_rgba(file: &[u8]) -> ImageBuf<Rgba8> {
+    WebpDecoder::new().decode_image(file).expect("decode")
+}
+
+#[test]
+fn lossy_rungs_above_the_anchor_never_cost_size_or_quality() {
+    // Lossy size is not monotone across the *whole* ladder, and asserting that it were would be
+    // wrong: the fastest rungs drop `B_PRED` entirely, which removes mode bits and can make output
+    // *smaller* at lower quality. What must hold is the useful half — every rung above the
+    // historical anchor (level 2) is at least as good on both axes, because those rungs only add
+    // entropy-coding and quantizer work.
+    for (label, px, d) in corpus() {
+        for quality in [40u8, 75] {
+            let anchor = encode_lossy(Effort::Fast, quality, &px, d);
+            let anchor_psnr = psnr_rgb(&px, decode_rgba(&anchor).as_samples());
+            for level in 3..=6u8 {
+                let effort = Effort::from_level(level).expect("in range");
+                let file = encode_lossy(effort, quality, &px, d);
+                assert!(
+                    file.len() <= anchor.len(),
+                    "{label} q{quality}: effort {level} grew to {} from {} at effort 2",
+                    file.len(),
+                    anchor.len()
+                );
+                let psnr = psnr_rgb(&px, decode_rgba(&file).as_samples());
+                assert!(
+                    psnr >= anchor_psnr - 1.0,
+                    "{label} q{quality}: effort {level} lost {:.2} dB against effort 2",
+                    anchor_psnr - psnr
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn optimizing_coefficient_probabilities_costs_no_quality() {
+    // The property that makes the two-pass entropy work provably safe: probabilities change how
+    // many bits the tokens take, never what those tokens decode to. Effort 2 and 3 differ *only*
+    // in the probability and skip-probability derivation, so their reconstructions must be
+    // identical pixel for pixel while effort 3's file is no larger.
+    for (label, px, d) in corpus() {
+        for quality in [40u8, 75] {
+            let default_probs = encode_lossy(Effort::Fast, quality, &px, d);
+            let optimized = encode_lossy(Effort::Moderate, quality, &px, d);
+            assert_eq!(
+                decode_rgba(&optimized).as_samples(),
+                decode_rgba(&default_probs).as_samples(),
+                "{label} q{quality}: optimizing probabilities changed the decoded pixels"
+            );
+            assert!(
+                optimized.len() <= default_probs.len(),
+                "{label} q{quality}: optimizing probabilities grew the file, {} vs {}",
+                optimized.len(),
+                default_probs.len()
+            );
+        }
+    }
+}

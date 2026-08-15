@@ -19,6 +19,8 @@ use gamut_color::{Yuv420, clip_pixel8};
 use gamut_core::{Error, Result};
 
 use super::bool_coder::{BoolDecoder, BoolEncoder};
+use super::cost::bit_cost;
+use super::effort::{Bpred, EFFORT_TABLE, QuantBias};
 /// Re-exported so the low-level frame API carries the loop-filter delta type next to [`EncodeOptions`].
 pub use super::header::LoopFilterDeltas;
 use super::header::{
@@ -37,6 +39,11 @@ const WHOLE_BLOCK_MODES: [usize; 4] = [DC_PRED, V_PRED, H_PRED, TM_PRED];
 /// SAD margin by which per-subblock `B_PRED` must beat the best whole-block mode to be chosen — a
 /// coarse stand-in for `B_PRED`'s extra mode-signaling cost (true rate-distortion search is issue #32).
 const BPRED_SAD_PENALTY: u32 = 160;
+
+/// Mean absolute prediction error per luma pixel above which the gated rungs will consider
+/// `B_PRED`. Below it the whole-block modes already fit, and the 4x4 search would not repay its
+/// cost.
+const BPRED_GATE_SAD_PER_PIXEL: u32 = 6;
 
 /// Segment-id coding tree (RFC 6386 §10 `mb_segment_tree`): four leaves over two boolean decisions.
 const MB_SEGMENT_TREE: &[i8] = &[2, 4, 0, -1, -2, -3];
@@ -132,6 +139,115 @@ struct MbLevels {
     y: [[i16; 16]; 16],
     u: [[i16; 16]; 4],
     v: [[i16; 16]; 4],
+}
+
+/// One macroblock's coding decisions — everything the writing pass needs to emit its mode and token
+/// bits.
+///
+/// Reconstruction has already happened by the time this exists, and nothing in it depends on a
+/// probability: changing the frame's probabilities changes only the bit cost, never a decoded pixel.
+/// That is what makes measuring the probabilities between the two passes exact rather than an
+/// approximation.
+#[derive(Clone)]
+struct MbRecord {
+    /// The quantized coefficient levels for every block of the macroblock.
+    levels: MbLevels,
+    /// The 16 `B_PRED` submodes; meaningful only when `y_mode == B_PRED`.
+    sub_modes: [usize; 16],
+    /// The coded luma mode.
+    y_mode: usize,
+    /// The whole-block luma mode that was considered, which the `B_PRED` context propagation needs
+    /// even when `B_PRED` won.
+    wb_mode: usize,
+    /// The coded chroma mode.
+    uv_mode: usize,
+    /// The quantizer segment this macroblock was assigned.
+    segment: usize,
+    /// Whether every block came out all-zero, so no tokens are coded.
+    skip: bool,
+}
+
+/// The probability that a macroblock is **not** skipped, measured from what the frame actually
+/// produced (RFC 6386 §9.10).
+///
+/// The single-pass encoder had to guess this from the quantizer. Measuring it costs nothing once
+/// the decisions are recorded, and it is coded once in the header against one bool per macroblock.
+fn measured_skip_prob(records: &[MbRecord]) -> u8 {
+    let total = records.len() as u32;
+    if total == 0 {
+        return 1;
+    }
+    let skipped = records.iter().filter(|r| r.skip).count() as u32;
+    // `put_bool(prob_skip_false, skip)` codes `skip` as the *one* branch, so the stored probability
+    // is that of the zero branch — not skipping.
+    ((255 * (total - skipped)) / total).clamp(1, 255) as u8
+}
+
+/// Tallies the zero/one branches every coefficient token in the frame would take, threading the
+/// same above/left non-zero contexts the writing pass will.
+fn tally_coeff_bits(records: &[MbRecord], mb_cols: usize) -> tokens::CoeffCounts {
+    let mut counts: tokens::CoeffCounts =
+        [[[[[0; 2]; tokens::ENTROPY_NODES]; 3]; tokens::COEFF_BANDS]; tokens::PLANE_TYPES];
+    let mut above = vec![EntropyCtx::default(); mb_cols];
+    for chunk in records.chunks(mb_cols) {
+        let mut left = EntropyCtx::default();
+        for (mb_x, record) in chunk.iter().enumerate() {
+            let use_bpred = record.y_mode == B_PRED;
+            if record.skip {
+                clear_mb_context(&mut above[mb_x], &mut left, use_bpred);
+            } else {
+                count_mb_tokens(
+                    &mut counts,
+                    &mut above[mb_x],
+                    &mut left,
+                    &record.levels,
+                    use_bpred,
+                );
+            }
+        }
+    }
+    counts
+}
+
+/// Derives the frame's coefficient probabilities from measured token counts, adopting a measured
+/// value only where it pays for its own update record (RFC 6386 §13.4).
+///
+/// A context that was never exercised keeps its default: there is nothing to learn from it, and
+/// coding an update for it would be pure loss.
+fn optimize_coeff_probs(counts: &tokens::CoeffCounts) -> tokens::CoeffProbs {
+    let mut probs = tokens::DEFAULT_COEFF_PROBS;
+    for plane in 0..tokens::PLANE_TYPES {
+        for band in 0..tokens::COEFF_BANDS {
+            for ctx in 0..3 {
+                for node in 0..tokens::ENTROPY_NODES {
+                    let [zeros, ones] = counts[plane][band][ctx][node];
+                    let total = zeros + ones;
+                    if total == 0 {
+                        continue;
+                    }
+                    let old = tokens::DEFAULT_COEFF_PROBS[plane][band][ctx][node];
+                    let new = (((zeros as u64) * 255) / u64::from(total)).clamp(1, 255) as u8;
+                    if new == old {
+                        continue;
+                    }
+                    let update_prob = tokens::COEFF_UPDATE_PROBS[plane][band][ctx][node];
+                    let old_cost = zeros * bit_cost(false, old)
+                        + ones * bit_cost(true, old)
+                        + bit_cost(false, update_prob);
+                    // Adopting costs the "yes, update" flag plus the eight literal bits of the new
+                    // value, on top of coding every token at the new probability.
+                    let new_cost = zeros * bit_cost(false, new)
+                        + ones * bit_cost(true, new)
+                        + bit_cost(true, update_prob)
+                        + 8 * 256;
+                    if new_cost < old_cost {
+                        probs[plane][band][ctx][node] = new;
+                    }
+                }
+            }
+        }
+    }
+    probs
 }
 
 /// Macroblock-aligned reconstructed YUV planes (luma `mb_cols*16 × mb_rows*16`, chroma half each).
@@ -672,6 +788,15 @@ fn reconstruct_chroma(
 
 /// Transforms + quantizes one luma macroblock against its prediction, returning the Y2 and per
 /// sub-block AC levels.
+/// Forward-quantizes one coefficient under the effort level's rounding rule.
+fn quantize_with(bias: QuantBias, coeff: i16, factor: i16, dead_zone: u16) -> i16 {
+    match bias {
+        QuantBias::Nearest => quant::quantize(coeff, factor),
+        QuantBias::DeadZone => quant::quantize_biased(coeff, factor, dead_zone),
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // source, position, prediction, quantizer, and output
 fn quantize_luma(
     src: &[u8],
     stride: usize,
@@ -679,6 +804,7 @@ fn quantize_luma(
     mb_y: usize,
     pred: &[u8; 256],
     qf: &QuantFactors,
+    bias: QuantBias,
     levels: &mut MbLevels,
 ) {
     let mut y_coeffs = [[0i16; 16]; 16];
@@ -692,13 +818,13 @@ fn quantize_luma(
         y_dc[i] = y_coeffs[i][0];
     }
     let y2_coeffs = fwht4x4(&y_dc);
-    levels.y2[0] = quant::quantize(y2_coeffs[0], qf.y2_dc);
+    levels.y2[0] = quantize_with(bias, y2_coeffs[0], qf.y2_dc, quant::BIAS_DC);
     for k in 1..16 {
-        levels.y2[k] = quant::quantize(y2_coeffs[k], qf.y2_ac);
+        levels.y2[k] = quantize_with(bias, y2_coeffs[k], qf.y2_ac, quant::BIAS_AC);
     }
     for i in 0..16 {
         for k in 1..16 {
-            levels.y[i][k] = quant::quantize(y_coeffs[i][k], qf.y1_ac);
+            levels.y[i][k] = quantize_with(bias, y_coeffs[i][k], qf.y1_ac, quant::BIAS_AC);
         }
     }
 }
@@ -711,6 +837,7 @@ fn quantize_chroma(
     mb_y: usize,
     pred: &[u8; 64],
     qf: &QuantFactors,
+    bias: QuantBias,
 ) -> [[i16; 16]; 4] {
     let mut levels = [[0i16; 16]; 4];
     for i in 0..4 {
@@ -719,9 +846,9 @@ fn quantize_chroma(
         let p = sub_pred(pred, 8, sc * 4, sr * 4);
         let residue: [i16; 16] = core::array::from_fn(|k| block[k] - p[k]);
         let coeffs = fdct4x4(&residue);
-        levels[i][0] = quant::quantize(coeffs[0], qf.uv_dc);
+        levels[i][0] = quantize_with(bias, coeffs[0], qf.uv_dc, quant::BIAS_DC);
         for k in 1..16 {
-            levels[i][k] = quant::quantize(coeffs[k], qf.uv_ac);
+            levels[i][k] = quantize_with(bias, coeffs[k], qf.uv_ac, quant::BIAS_AC);
         }
     }
     levels
@@ -731,6 +858,7 @@ fn quantize_chroma(
 /// lowest-SAD submode, quantizes the residual (plane 3 — DC included, no Y2), and reconstructs in
 /// place so the next subblock predicts from it. Returns the 16 submodes, their quantized levels, and
 /// the total prediction SAD (for the macroblock mode decision).
+#[allow(clippy::too_many_arguments)] // the per-subblock search genuinely needs all of this state
 fn encode_bpred_luma(
     recon: &mut FrameBuffers,
     src: &[u8],
@@ -738,6 +866,7 @@ fn encode_bpred_luma(
     mb_x: usize,
     mb_y: usize,
     qf: &QuantFactors,
+    bias: QuantBias,
     above_right: &[u8; 4],
 ) -> ([usize; 16], [[i16; 16]; 16], u32) {
     let (px, py, rstride) = (mb_x * 16, mb_y * 16, recon.y_stride());
@@ -765,9 +894,9 @@ fn encode_bpred_luma(
 
         let residue: [i16; 16] = core::array::from_fn(|k| src_sub[k] - i16::from(pred[k]));
         let coeffs = fdct4x4(&residue);
-        levels[i][0] = quant::quantize(coeffs[0], qf.y1_dc);
+        levels[i][0] = quantize_with(bias, coeffs[0], qf.y1_dc, quant::BIAS_DC);
         for k in 1..16 {
-            levels[i][k] = quant::quantize(coeffs[k], qf.y1_ac);
+            levels[i][k] = quantize_with(bias, coeffs[k], qf.y1_ac, quant::BIAS_AC);
         }
         let mut dq = [0i16; 16];
         dq[0] = quant::dequantize(levels[i][0], qf.y1_dc);
@@ -917,6 +1046,46 @@ fn encode_mb_tokens(
     encode_chroma_tokens(enc, above, left, probs, levels);
 }
 
+/// Tallies the branches a macroblock's coefficient tokens would take, threading the same above/left
+/// contexts [`encode_mb_tokens`] does.
+///
+/// Deliberately mirrors that function's *shape* while sharing its per-block tokenization through
+/// [`tokens::count_block`], so the two cannot disagree about which bits exist.
+fn count_mb_tokens(
+    counts: &mut tokens::CoeffCounts,
+    above: &mut EntropyCtx,
+    left: &mut EntropyCtx,
+    levels: &MbLevels,
+    is_bpred: bool,
+) {
+    if !is_bpred {
+        let ctx = usize::from(above.y2) + usize::from(left.y2);
+        let has = tokens::count_block(counts, &levels.y2, 1, ctx);
+        above.y2 = has;
+        left.y2 = has;
+    }
+    let plane = if is_bpred { 3 } else { 0 };
+    for i in 0..16 {
+        let (r, c) = (i / 4, i % 4);
+        let ctx = usize::from(above.y[c]) + usize::from(left.y[r]);
+        let has = tokens::count_block(counts, &levels.y[i], plane, ctx);
+        above.y[c] = has;
+        left.y[r] = has;
+    }
+    for (plane_levels, above_ctx, left_ctx) in [
+        (&levels.u, &mut above.u, &mut left.u),
+        (&levels.v, &mut above.v, &mut left.v),
+    ] {
+        for i in 0..4 {
+            let (r, c) = (i / 2, i % 2);
+            let ctx = usize::from(above_ctx[c]) + usize::from(left_ctx[r]);
+            let has = tokens::count_block(counts, &plane_levels[i], 2, ctx);
+            above_ctx[c] = has;
+            left_ctx[r] = has;
+        }
+    }
+}
+
 /// Codes a macroblock's U then V chroma blocks (plane 2).
 fn encode_chroma_tokens(
     enc: &mut BoolEncoder,
@@ -1013,6 +1182,7 @@ pub fn encode_frame_filtered(
             tree_probs: [128, 128, 128],
         };
     }
+    let tools = EFFORT_TABLE[opts.effort.level() as usize];
     header.token_partitions = opts.partitions.max(1);
     header.loop_filter.deltas = opts.loop_filter_deltas;
     let n = header.token_partitions as usize;
@@ -1038,18 +1208,14 @@ pub fn encode_frame_filtered(
         })
         .collect();
 
-    let mut modes = BoolEncoder::new();
-    header::write_frame_header(&mut modes, &header);
-    let mut residuals: Vec<BoolEncoder> = (0..n).map(|_| BoolEncoder::new()).collect();
-    let probs = &tokens::DEFAULT_COEFF_PROBS;
-
-    let mut above = vec![EntropyCtx::default(); recon.mb_cols];
-    let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
     let mut filter_interior = vec![false; recon.mb_cols * recon.mb_rows];
     let mut is_bpred_map = vec![false; recon.mb_cols * recon.mb_rows];
+    // Pass 1 decides and reconstructs; nothing is written yet. Every decision below depends only on
+    // the source, the reconstruction, and the quantizer — never on a probability — which is exactly
+    // why the frame's coefficient probabilities can be measured afterwards and still describe the
+    // stream that gets written.
+    let mut records: Vec<MbRecord> = Vec::with_capacity(recon.mb_cols * recon.mb_rows);
     for mb_y in 0..recon.mb_rows {
-        let mut left = EntropyCtx::default();
-        let mut left_bmodes = [B_DC_PRED; 4];
         for mb_x in 0..recon.mb_cols {
             let segment = segment_map[mb_y * recon.mb_cols + mb_x];
             let qf = seg_qf[segment];
@@ -1068,15 +1234,39 @@ pub fn encode_frame_filtered(
                 16,
             );
 
-            // B_PRED candidate — scribbles its reconstruction into recon.y while selecting submodes.
-            let above_right = above_right_source(&recon, mb_x, mb_y);
-            let (sub_modes, bpred_levels, bpred_sad) =
-                encode_bpred_luma(&mut recon, &src_y, yw, mb_x, mb_y, &qf, &above_right);
-            let use_bpred = bpred_sad + BPRED_SAD_PENALTY < wb_sad;
+            // B_PRED candidate — scribbles its reconstruction into recon.y while selecting
+            // submodes, so it is only run when the rung allows it. Searching ten submodes across
+            // sixteen subblocks is the most expensive thing the encoder does, and the fast rungs
+            // buy their speed almost entirely by skipping it.
+            let consider_bpred = match tools.bpred {
+                Bpred::Off => false,
+                // A macroblock the whole-block modes already predict well is very unlikely to
+                // profit from 4x4 prediction, so the gate skips the search there. The threshold is
+                // per-pixel mean absolute error, scaled by the quantizer because coarser
+                // quantization makes small prediction gains irrelevant.
+                Bpred::Gated => wb_sad > BPRED_GATE_SAD_PER_PIXEL * 256,
+                Bpred::Always => true,
+            };
+            let (sub_modes, bpred_levels, bpred_sad) = if consider_bpred {
+                let above_right = above_right_source(&recon, mb_x, mb_y);
+                encode_bpred_luma(
+                    &mut recon,
+                    &src_y,
+                    yw,
+                    mb_x,
+                    mb_y,
+                    &qf,
+                    tools.quant_bias,
+                    &above_right,
+                )
+            } else {
+                ([B_DC_PRED; 16], [[0i16; 16]; 16], u32::MAX)
+            };
+            let use_bpred = consider_bpred && bpred_sad + BPRED_SAD_PENALTY < wb_sad;
 
             let mut levels = MbLevels {
-                u: quantize_chroma(&src_u, cw, mb_x, mb_y, &u_pred, &qf),
-                v: quantize_chroma(&src_v, cw, mb_x, mb_y, &v_pred, &qf),
+                u: quantize_chroma(&src_u, cw, mb_x, mb_y, &u_pred, &qf, tools.quant_bias),
+                v: quantize_chroma(&src_v, cw, mb_x, mb_y, &v_pred, &qf, tools.quant_bias),
                 ..Default::default()
             };
             // Compute the luma levels before writing modes so the skip flag — which precedes the luma
@@ -1084,30 +1274,21 @@ pub fn encode_frame_filtered(
             // was already reconstructed during submode selection).
             let wb_pred = (!use_bpred).then(|| predict_luma(&recon, mb_x, mb_y, wb_mode));
             if let Some(yp) = &wb_pred {
-                quantize_luma(&src_y, yw, mb_x, mb_y, yp, &qf, &mut levels);
+                quantize_luma(
+                    &src_y,
+                    yw,
+                    mb_x,
+                    mb_y,
+                    yp,
+                    &qf,
+                    tools.quant_bias,
+                    &mut levels,
+                );
             } else {
                 levels.y = bpred_levels;
             }
             let skip = !mb_has_coeffs(&levels);
             let y_mode = if use_bpred { B_PRED } else { wb_mode };
-
-            if header.segmentation.update_map {
-                modes.put_tree(MB_SEGMENT_TREE, &header.segmentation.tree_probs, segment);
-            }
-            modes.put_bool(header.prob_skip_false, skip);
-            modes.put_tree(
-                prediction::KF_YMODE_TREE,
-                &prediction::KF_YMODE_PROB,
-                y_mode,
-            );
-            if use_bpred {
-                write_bmodes(&mut modes, &sub_modes, &above_bmodes[mb_x], &left_bmodes);
-            }
-            modes.put_tree(
-                prediction::KF_UV_MODE_TREE,
-                &prediction::KF_UV_MODE_PROB,
-                uv_mode,
-            );
 
             if let Some(yp) = &wb_pred {
                 reconstruct_luma(&mut recon, mb_x, mb_y, yp, &levels, &qf);
@@ -1118,20 +1299,84 @@ pub fn encode_frame_filtered(
 
             filter_interior[mb_y * recon.mb_cols + mb_x] = use_bpred || mb_has_coeffs(&levels);
             is_bpred_map[mb_y * recon.mb_cols + mb_x] = use_bpred;
-            if skip {
+            records.push(MbRecord {
+                levels,
+                sub_modes,
+                y_mode,
+                wb_mode,
+                uv_mode,
+                segment,
+                skip,
+            });
+        }
+    }
+
+    // Between the passes: measure what pass 1 actually produced, so the header can describe it.
+    if tools.measured_skip_prob {
+        header.prob_skip_false = measured_skip_prob(&records);
+    }
+    let probs = if tools.two_pass_probs {
+        optimize_coeff_probs(&tally_coeff_bits(&records, recon.mb_cols))
+    } else {
+        tokens::DEFAULT_COEFF_PROBS
+    };
+
+    // Pass 2 writes. The header goes first because it carries the probabilities and the skip
+    // probability the mode and token bits are coded against.
+    let mut modes = BoolEncoder::new();
+    header::write_frame_header(&mut modes, &header, &probs);
+    let mut residuals: Vec<BoolEncoder> = (0..n).map(|_| BoolEncoder::new()).collect();
+    let mut above = vec![EntropyCtx::default(); recon.mb_cols];
+    let mut above_bmodes = vec![[B_DC_PRED; 4]; recon.mb_cols];
+    for mb_y in 0..recon.mb_rows {
+        let mut left = EntropyCtx::default();
+        let mut left_bmodes = [B_DC_PRED; 4];
+        for mb_x in 0..recon.mb_cols {
+            let record = &records[mb_y * recon.mb_cols + mb_x];
+            let use_bpred = record.y_mode == B_PRED;
+
+            if header.segmentation.update_map {
+                modes.put_tree(
+                    MB_SEGMENT_TREE,
+                    &header.segmentation.tree_probs,
+                    record.segment,
+                );
+            }
+            modes.put_bool(header.prob_skip_false, record.skip);
+            modes.put_tree(
+                prediction::KF_YMODE_TREE,
+                &prediction::KF_YMODE_PROB,
+                record.y_mode,
+            );
+            if use_bpred {
+                write_bmodes(
+                    &mut modes,
+                    &record.sub_modes,
+                    &above_bmodes[mb_x],
+                    &left_bmodes,
+                );
+            }
+            modes.put_tree(
+                prediction::KF_UV_MODE_TREE,
+                &prediction::KF_UV_MODE_PROB,
+                record.uv_mode,
+            );
+
+            if record.skip {
                 clear_mb_context(&mut above[mb_x], &mut left, use_bpred);
             } else {
                 encode_mb_tokens(
                     &mut residuals[mb_y % n],
                     &mut above[mb_x],
                     &mut left,
-                    probs,
-                    &levels,
+                    &probs,
+                    &record.levels,
                     use_bpred,
                 );
             }
 
-            (above_bmodes[mb_x], left_bmodes) = bmode_propagation(use_bpred, wb_mode, &sub_modes);
+            (above_bmodes[mb_x], left_bmodes) =
+                bmode_propagation(use_bpred, record.wb_mode, &record.sub_modes);
         }
     }
 
@@ -1638,7 +1883,7 @@ mod tests {
         let qf = QuantFactors::new(16, &QuantIndices::default());
         let mut levels = MbLevels::default();
         // Quantize macroblock (1, 1) so the `mb_x * 16` and `mb_y * 16` read offsets are non-zero.
-        quantize_luma(&src, 32, 1, 1, &pred, &qf, &mut levels);
+        quantize_luma(&src, 32, 1, 1, &pred, &qf, QuantBias::Nearest, &mut levels);
         assert_eq!(weighted_checksum(levels.y2), 707);
         assert_eq!(weighted_checksum(levels.y.into_iter().flatten()), -22284);
     }
@@ -1655,7 +1900,7 @@ mod tests {
             *p = ((i * 5 + 3) % 251) as u8;
         }
         let qf = QuantFactors::new(16, &QuantIndices::default());
-        let levels = quantize_chroma(&src, 8, 0, 0, &pred, &qf);
+        let levels = quantize_chroma(&src, 8, 0, 0, &pred, &qf, QuantBias::Nearest);
         assert_eq!(weighted_checksum(levels.into_iter().flatten()), -1085);
     }
 
@@ -1669,7 +1914,8 @@ mod tests {
             *s = ((i * 11 + 3) % 251) as u8;
         }
         let qf = QuantFactors::new(12, &QuantIndices::default());
-        let (_, levels, _) = encode_bpred_luma(&mut recon, &src, 16, 0, 0, &qf, &[0; 4]);
+        let (_, levels, _) =
+            encode_bpred_luma(&mut recon, &src, 16, 0, 0, &qf, QuantBias::Nearest, &[0; 4]);
         assert_eq!(weighted_checksum(levels.into_iter().flatten()), -3083);
     }
 

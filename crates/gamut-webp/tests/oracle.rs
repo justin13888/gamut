@@ -1077,3 +1077,104 @@ fn gamut_reads_metadata_libwebp_embedded() {
         assert_eq!(meta.xmp, None);
     }
 }
+
+#[test]
+fn libwebp_decodes_every_effort_level_bit_exactly() {
+    // The ladder's conformance gate. Each rung changes what the encoder emits — 4x4 search on or
+    // off, derived coefficient probabilities, a measured skip probability, a dead-zone quantizer —
+    // and every one of those must still produce a stream libwebp reconstructs identically to
+    // gamut's own decoder. Without this, a rung could quietly ship a stream only gamut can read.
+    //
+    // Swept over efforts x sizes x quantizers rather than crossed with the full dimension matrices
+    // the other tests use: each rung needs conformance coverage, not conformance coverage of every
+    // shape, and the combinatorial version would dominate the suite's runtime.
+    use common::libwebp_decode_yuv;
+    use gamut_riff::write_simple_lossy;
+    use gamut_webp::Effort;
+    use gamut_webp::vp8::frame::{EncodeOptions, decode_frame, encode_frame_filtered};
+
+    for level in 0..=6u8 {
+        let effort = Effort::from_level(level).expect("0..=6");
+        let opts = EncodeOptions {
+            effort,
+            ..EncodeOptions::default()
+        };
+        for &(w, h) in &[(32u32, 32u32), (49, 33)] {
+            for &q in &[12u8, 48] {
+                for (kind, yuv) in [
+                    ("detailed", detailed_yuv(w, h)),
+                    ("photo", photo_like_yuv(w, h, 7)),
+                ] {
+                    let (payload, _) = encode_frame_filtered(&yuv, q, opts);
+                    let webp = write_simple_lossy(&payload);
+                    let lib = libwebp_decode_yuv(&webp);
+                    let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
+                    assert_eq!(
+                        gamut.y(),
+                        lib.y.as_slice(),
+                        "effort {level} {kind} Y {w}x{h} q{q}"
+                    );
+                    assert_eq!(
+                        gamut.u(),
+                        lib.u.as_slice(),
+                        "effort {level} {kind} U {w}x{h} q{q}"
+                    );
+                    assert_eq!(
+                        gamut.v(),
+                        lib.v.as_slice(),
+                        "effort {level} {kind} V {w}x{h} q{q}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn libwebp_decodes_every_effort_levels_lossless_and_alpha() {
+    // The container-level companion: lossless streams and the `ALPH` chunk at every rung, checked
+    // through libwebp's own decoder rather than gamut's, so a rung that produced a stream only
+    // gamut could read would fail here.
+    use common::{libwebp_decode_rgba, pattern_rgba};
+    use gamut_core::{EncodeImage, ImageRef, Rgba8};
+    use gamut_webp::{Effort, WebpEncoder};
+
+    let (w, h) = (48u32, 32u32);
+    let rgba = pattern_rgba(w, h);
+    let dims = gamut_core::Dimensions {
+        width: w,
+        height: h,
+    };
+    for level in 0..=6u8 {
+        let effort = Effort::from_level(level).expect("0..=6");
+        let mut lossless = Vec::new();
+        WebpEncoder::lossless()
+            .with_effort(effort)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims).expect("fixture"),
+                &mut lossless,
+            )
+            .expect("lossless encode");
+        let decoded = libwebp_decode_rgba(&lossless);
+        assert_eq!(
+            decoded.rgba, rgba,
+            "libwebp did not recover the source losslessly at effort {level}"
+        );
+
+        let mut lossy = Vec::new();
+        WebpEncoder::lossy(70)
+            .with_effort(effort)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&rgba, dims).expect("fixture"),
+                &mut lossy,
+            )
+            .expect("lossy encode");
+        let decoded = libwebp_decode_rgba(&lossy);
+        let got: Vec<u8> = decoded.rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let want: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(
+            got, want,
+            "libwebp did not recover the alpha plane exactly at effort {level}"
+        );
+    }
+}

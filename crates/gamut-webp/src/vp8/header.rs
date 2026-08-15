@@ -379,7 +379,11 @@ fn read_mb_lf_adjustments(dec: &mut BoolDecoder) -> LoopFilterDeltas {
 /// encoder `enc`, leaving it open for the per-macroblock records that follow. Segmentation,
 /// per-macroblock loop-filter adjustments, and coefficient-probability updates are emitted as
 /// configured.
-pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
+pub fn write_frame_header(
+    enc: &mut BoolEncoder,
+    header: &Vp8FrameHeader,
+    coeff_probs: &tokens::CoeffProbs,
+) {
     enc.put_literal(u32::from(header.color_space), 1);
     enc.put_flag(!header.clamp_required); // clamping_type: 1 = no clamp needed
     enc.put_flag(header.segmentation.enabled);
@@ -393,7 +397,9 @@ pub fn write_frame_header(enc: &mut BoolEncoder, header: &Vp8FrameHeader) {
     enc.put_literal(log2_partitions(header.token_partitions), 2);
     write_quant_indices(enc, &header.quant);
     enc.put_flag(header.refresh_entropy_probs);
-    tokens::write_coeff_prob_updates(enc, &DEFAULT_COEFF_PROBS, &DEFAULT_COEFF_PROBS);
+    // The record is a delta against the key-frame defaults, so passing the defaults themselves
+    // emits the all-"no update" record a single-pass encoder needs.
+    tokens::write_coeff_prob_updates(enc, coeff_probs, &DEFAULT_COEFF_PROBS);
     enc.put_flag(header.mb_no_skip_coeff);
     if header.mb_no_skip_coeff {
         enc.put_literal(u32::from(header.prob_skip_false), 8);
@@ -485,7 +491,7 @@ mod tests {
     /// Encodes a header to a complete (header-only) VP8 bitstream and decodes it back.
     fn roundtrip(header: &Vp8FrameHeader) {
         let mut enc = BoolEncoder::new();
-        write_frame_header(&mut enc, header);
+        write_frame_header(&mut enc, header, &DEFAULT_COEFF_PROBS);
         let part0 = enc.finish();
         let mut stream = Vec::new();
         write_uncompressed_chunk(header, part0.len() as u32, &mut stream);
@@ -664,7 +670,7 @@ mod tests {
             vertical_scale: 0,
         };
         let mut enc = BoolEncoder::new();
-        write_frame_header(&mut enc, &header);
+        write_frame_header(&mut enc, &header, &DEFAULT_COEFF_PROBS);
         let bytes = enc.finish();
         let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes));
         assert_eq!(decoded.segmentation, header.segmentation);
@@ -724,7 +730,7 @@ mod tests {
             vertical_scale: 0,
         };
         let mut enc = BoolEncoder::new();
-        write_frame_header(&mut enc, &header);
+        write_frame_header(&mut enc, &header, &DEFAULT_COEFF_PROBS);
         let bytes = enc.finish();
         let (decoded, _) = read_frame_header(&chunk, &mut BoolDecoder::new(&bytes));
         assert_eq!(decoded.segmentation, header.segmentation);

@@ -134,15 +134,9 @@ impl BoolEncoder {
     /// In a release build a `value` not reachable from `start` writes nothing (a caller bug — the
     /// trees and values are static); in a debug build it triggers a `debug_assert`.
     pub fn put_tree_start(&mut self, tree: &Tree, probs: &[Prob], value: usize, start: usize) {
-        let mut path = [(0usize, false); MAX_TREE_DEPTH];
-        match find_tree_path(tree, start as i32, value, &mut path, 0) {
-            Some(len) => {
-                for &(prob_idx, bit) in &path[..len] {
-                    self.put_bool(probs[prob_idx], bit);
-                }
-            }
-            None => debug_assert!(false, "value {value} not reachable in tree from {start}"),
-        }
+        walk_tree(tree, value, start, |prob_idx, bit| {
+            self.put_bool(probs[prob_idx], bit);
+        });
     }
 
     /// Encodes the tree-coded `value` from the root (equivalent to
@@ -329,6 +323,23 @@ const MAX_TREE_DEPTH: usize = 16;
 /// Finds the root-to-leaf path to `value` in `tree`, starting at interior node `start`, recording
 /// `(prob_index, bit)` pairs into `out` from depth `depth`. Returns the total path length, or `None`
 /// if `value` is not a leaf reachable from `start`.
+/// Visits the `(probability index, bit)` pairs that code `value` in `tree` starting at node
+/// `start`, in emission order (RFC 6386 §8).
+///
+/// Factored out of [`BoolEncoder::put_tree_start`] so that writing a symbol, counting its bits, and
+/// costing it all traverse **one** definition of the tree walk rather than three that can drift.
+pub fn walk_tree(tree: &Tree, value: usize, start: usize, mut visit: impl FnMut(usize, bool)) {
+    let mut path = [(0usize, false); MAX_TREE_DEPTH];
+    match find_tree_path(tree, start as i32, value, &mut path, 0) {
+        Some(len) => {
+            for &(prob_idx, bit) in &path[..len] {
+                visit(prob_idx, bit);
+            }
+        }
+        None => debug_assert!(false, "value {value} not reachable in tree from {start}"),
+    }
+}
+
 fn find_tree_path(
     tree: &Tree,
     start: i32,
