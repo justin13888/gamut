@@ -21,9 +21,10 @@ use crate::backend::{
     RasterRef, SharedEncoder, WebpCodestream, WebpCodestreamEncoder, WebpEncodeRequest,
     dispatch_encode,
 };
-use crate::config::{Effort, WebpConfig, WebpMode};
+use crate::config::{Effort, NearLossless, WebpConfig, WebpMode};
 use crate::vp8::frame::{EncodeOptions, encode_frame_filtered};
 use crate::vp8l::encoder::encode as encode_vp8l;
+use crate::vp8l::near_lossless;
 use crate::vp8l::transform::make_argb;
 
 /// Maps a `0..=100` quality to a VP8 base quantizer index (`0..=127`); higher quality → lower index
@@ -147,6 +148,33 @@ impl WebpEncoder {
         self
     }
 
+    /// Sets (or, with `None`, clears) near-lossless preprocessing.
+    ///
+    /// Applies to [`WebpMode::Lossless`] only; a lossy encoder ignores it, exactly as a lossless
+    /// encoder ignores [`quality`](WebpConfig::quality). The coded stream stays a conformant,
+    /// bit-exact VP8L stream — what changes is its *input*, which is quantized in smooth regions
+    /// first. Red, green and blue move by at most
+    /// [`NearLossless::max_deviation`]; **alpha is never touched**. Calling this twice keeps the
+    /// last value.
+    #[must_use]
+    pub fn with_near_lossless(mut self, near_lossless: Option<NearLossless>) -> Self {
+        self.config.near_lossless = near_lossless;
+        self
+    }
+
+    /// Applies near-lossless preprocessing, if configured, to the ARGB about to be coded.
+    ///
+    /// Host-side and **before** the backend dispatch in `encode_vp8l_codestream`, so a pluggable
+    /// codestream backend simply receives already-quantized pixels and needs no knob of its own.
+    /// It also has to run before the palette is built: quantization is precisely what can drop an
+    /// image under the 256-colour threshold and make the palette path available.
+    fn preprocess_lossless(&self, argb: Vec<u32>, dims: Dimensions) -> Vec<u32> {
+        match self.config.near_lossless {
+            Some(strength) => near_lossless::apply(&argb, dims, strength.bits()),
+            None => argb,
+        }
+    }
+
     /// Installs a codestream encoder backend, returning `&mut self` so pushes chain.
     ///
     /// Backends are tried in **push order**, ahead of the built-in `vp8`/`vp8l` encoders, which
@@ -268,6 +296,7 @@ impl WebpEncoder {
                     .chunks_exact(3)
                     .map(|p| make_argb(0xff, p[0], p[1], p[2]))
                     .collect();
+                let argb = self.preprocess_lossless(argb, dims);
                 let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
                 self.wrap(dims, WebpCodestream::Vp8l, &bitstream, None, false)
             }
@@ -301,6 +330,7 @@ impl WebpEncoder {
                     .chunks_exact(4)
                     .map(|p| make_argb(p[3], p[0], p[1], p[2]))
                     .collect();
+                let argb = self.preprocess_lossless(argb, dims);
                 let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
                 // A VP8L bitstream carries its own alpha, so there is no `ALPH` chunk — but an
                 // extended file must still advertise the transparency in its `VP8X` header.

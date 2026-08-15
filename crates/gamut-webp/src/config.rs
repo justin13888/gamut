@@ -60,6 +60,81 @@ impl Effort {
     }
 }
 
+/// The strength of near-lossless preprocessing.
+///
+/// Near-lossless is **not a bitstream mode**: the encoder still emits a conformant VP8L stream that
+/// decodes bit-exactly. What it changes is the *input* — the source pixels are quantized in smooth
+/// regions first, so the coder has far less residual to carry, for an error the eye does not see.
+///
+/// The scale is libwebp's `near_lossless`, where `0` is maximum loss and larger values are gentler,
+/// so a caller migrating from `cwebp -near_lossless N` gets what they expect. libwebp's `100` —
+/// its "off" sentinel — is deliberately **rejected**: off is a distinct state
+/// ([`WebpConfig::near_lossless`] is `None`), not a point on the strength scale, so a stray value
+/// can never silently disable preprocessing the caller asked for, and an unset `0` can never
+/// silently mean *maximum* loss. [`from_libwebp_strength`](Self::from_libwebp_strength) maps the
+/// raw libwebp value, sentinel included.
+///
+/// # What it guarantees
+///
+/// Red, green and blue move by at most [`max_deviation`](Self::max_deviation); **alpha is never
+/// modified**, so transparency still round-trips bit-exactly. This diverges from libwebp, which
+/// quantizes all four channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NearLossless(u8);
+
+impl NearLossless {
+    /// The highest strength value, one below libwebp's "off" sentinel.
+    const MAX_STRENGTH: u8 = 99;
+
+    /// Creates a strength on libwebp's scale, rejecting `100` (the "off" sentinel — use `None`)
+    /// and anything above it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`](gamut_core::Error) if `strength` exceeds `99`.
+    pub fn new(strength: u8) -> gamut_core::Result<Self> {
+        if strength <= Self::MAX_STRENGTH {
+            Ok(Self(strength))
+        } else {
+            Err(gamut_core::Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "WebP: near-lossless strength must be 0..=99 (100 means off — use None)",
+            ))
+        }
+    }
+
+    /// The wrapped strength on libwebp's scale.
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+
+    /// Maps a raw libwebp `near_lossless` value: `100` and above is the "off" sentinel and yields
+    /// `None`; `0..=99` yields the matching strength.
+    #[must_use]
+    pub const fn from_libwebp_strength(strength: u8) -> Option<Self> {
+        if strength <= Self::MAX_STRENGTH {
+            Some(Self(strength))
+        } else {
+            None
+        }
+    }
+
+    /// The number of low bits this strength may discard per colour channel — libwebp's
+    /// `5 - strength / 20`, so `0..=19` gives 5 bits and `80..=99` gives 1.
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        5 - self.0 / 20
+    }
+
+    /// The maximum absolute deviation this strength may introduce in **red, green or blue**:
+    /// `2^bits - 1`, i.e. `1`, `3`, `7`, `15` or `31`. Alpha's deviation is always zero.
+    #[must_use]
+    pub const fn max_deviation(self) -> u16 {
+        (1u16 << self.bits()) - 1
+    }
+}
+
 /// Which WebP bitstream the encoder produces.
 ///
 /// `#[non_exhaustive]`: modes are an open set — variants for deferred coding strategies are added
@@ -103,6 +178,11 @@ pub struct WebpConfig {
     /// only how hard the encoder searches and therefore how long it takes and how small the
     /// result is.
     pub effort: Effort,
+    /// Near-lossless preprocessing strength, or `None` (the default) for off — bit-exact.
+    ///
+    /// Applies to [`WebpMode::Lossless`] only, and is ignored for [`WebpMode::Lossy`], exactly as
+    /// [`quality`](Self::quality) is ignored for lossless.
+    pub near_lossless: Option<NearLossless>,
 }
 
 impl Default for WebpConfig {
@@ -111,6 +191,7 @@ impl Default for WebpConfig {
             mode: WebpMode::Lossless,
             quality: 75,
             effort: Effort::Default,
+            near_lossless: None,
         }
     }
 }
@@ -125,7 +206,50 @@ mod tests {
         assert_eq!(c.mode, WebpMode::Lossless);
         assert_eq!(c.quality, 75);
         assert_eq!(c.effort, Effort::Default);
+        assert_eq!(c.near_lossless, None);
         assert_eq!(WebpMode::default(), WebpMode::Lossless);
+    }
+
+    #[test]
+    fn near_lossless_rejects_the_off_sentinel_and_maps_libwebp_values() {
+        // `100` is libwebp's "off"; representing it as a strength would let a stray value silently
+        // disable preprocessing, and an unset `0` silently mean *maximum* loss.
+        assert!(NearLossless::new(0).is_ok());
+        assert!(NearLossless::new(99).is_ok());
+        assert!(NearLossless::new(100).is_err());
+        assert!(NearLossless::new(u8::MAX).is_err());
+        assert_eq!(NearLossless::from_libwebp_strength(100), None);
+        assert_eq!(NearLossless::from_libwebp_strength(u8::MAX), None);
+        assert_eq!(
+            NearLossless::from_libwebp_strength(60).map(NearLossless::get),
+            Some(60)
+        );
+    }
+
+    #[test]
+    fn near_lossless_bits_follow_libwebps_table() {
+        // The bits are the frozen half of the contract: the deviation bound derives from them, so
+        // pin every boundary of `5 - strength / 20`.
+        for (strength, bits) in [
+            (0u8, 5u8),
+            (19, 5),
+            (20, 4),
+            (39, 4),
+            (40, 3),
+            (59, 3),
+            (60, 2),
+            (79, 2),
+            (80, 1),
+            (99, 1),
+        ] {
+            let nl = NearLossless::new(strength).expect("in range");
+            assert_eq!(nl.bits(), bits, "strength {strength}");
+            assert_eq!(
+                nl.max_deviation(),
+                (1u16 << bits) - 1,
+                "strength {strength}"
+            );
+        }
     }
 
     #[test]

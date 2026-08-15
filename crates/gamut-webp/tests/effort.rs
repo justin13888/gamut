@@ -222,3 +222,123 @@ fn effort_does_not_disturb_the_rgb_surface() {
         assert_eq!(decoded.as_samples(), rgb.as_slice());
     }
 }
+
+/// Encodes losslessly with near-lossless preprocessing at `strength`.
+fn encode_near_lossless(strength: u8, px: &[u8], d: Dimensions) -> Vec<u8> {
+    let mut out = Vec::new();
+    WebpEncoder::lossless()
+        .with_near_lossless(Some(
+            gamut_webp::NearLossless::new(strength).expect("0..=99"),
+        ))
+        .encode_image(ImageRef::<Rgba8>::new(px, d).expect("fixture"), &mut out)
+        .expect("near-lossless encode");
+    out
+}
+
+#[test]
+fn near_lossless_off_is_byte_identical_to_plain_lossless() {
+    // `None` must be a true no-op, not merely "close enough" — otherwise every existing caller
+    // silently changes output the day the knob lands.
+    for (label, px, d) in corpus() {
+        let mut with_none = Vec::new();
+        WebpEncoder::lossless()
+            .with_near_lossless(None)
+            .encode_image(
+                ImageRef::<Rgba8>::new(&px, d).expect("fixture"),
+                &mut with_none,
+            )
+            .expect("encode");
+        assert_eq!(
+            with_none,
+            encode_lossless(Effort::default(), &px, d),
+            "{label}: near-lossless None must be byte-identical"
+        );
+    }
+}
+
+#[test]
+fn near_lossless_keeps_rgb_within_the_bound_and_alpha_exact() {
+    // The contract callers rely on. The stream itself is still bit-exact lossless — it just codes
+    // a quantized image — so what is checked is the distance from the *original*.
+    for (label, px, d) in corpus() {
+        for strength in [0u8, 40, 60, 99] {
+            let bound = gamut_webp::NearLossless::new(strength)
+                .expect("0..=99")
+                .max_deviation();
+            let file = encode_near_lossless(strength, &px, d);
+            let decoded: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).expect("decode");
+            assert_eq!(decoded.dimensions(), d, "{label} at strength {strength}");
+            for (i, (before, after)) in px
+                .chunks_exact(4)
+                .zip(decoded.as_samples().chunks_exact(4))
+                .enumerate()
+            {
+                assert_eq!(
+                    before[3], after[3],
+                    "{label} at strength {strength}: alpha moved at pixel {i}"
+                );
+                for c in 0..3 {
+                    assert!(
+                        u16::from(before[c].abs_diff(after[c])) <= bound,
+                        "{label} at strength {strength}: channel {c} moved {} at pixel {i}, bound {bound}",
+                        before[c].abs_diff(after[c])
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn near_lossless_shrinks_smooth_content() {
+    // A knob that never shrinks anything is not implemented, only plumbed. The fixture is a smooth
+    // gradient carrying low-amplitude dither — photographic content, and the case the technique is
+    // for. A pure ramp would not do: the spatial predictor already drives it to all-zero residuals,
+    // so there are no low bits left to discard. Noise and flat colour are the other extremes, where
+    // there is respectively nothing predictable and nothing left to remove.
+    let (w, h) = (64u32, 48u32);
+    let mut state = 0x9e37_79b9u32;
+    let px: Vec<u8> = (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            let base = [(x * 2) as u8, (y * 2) as u8, (x + y) as u8];
+            let mut dithered = [0u8; 4];
+            for (c, out) in base.iter().zip(dithered.iter_mut()) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *out = c.wrapping_add(((state >> 28) as u8) & 0x0f);
+            }
+            dithered[3] = 0xff;
+            dithered
+        })
+        .collect();
+    let d = dims(w, h);
+    let exact = encode_lossless(Effort::default(), &px, d).len();
+    let gentle = encode_near_lossless(80, &px, d).len();
+    let aggressive = encode_near_lossless(0, &px, d).len();
+    assert!(
+        gentle < exact,
+        "gentle near-lossless ({gentle}) must beat exact ({exact})"
+    );
+    assert!(
+        aggressive < gentle,
+        "aggressive near-lossless ({aggressive}) must beat gentle ({gentle})"
+    );
+}
+
+#[test]
+fn near_lossless_is_ignored_by_the_lossy_path() {
+    // Near-lossless is a VP8L preprocessing step. The lossy path documents that it ignores the
+    // knob, so pin that rather than leaving it to the reader's assumption.
+    let (w, h) = (32u32, 24u32);
+    let px = ramp_rgba(w, h);
+    let d = dims(w, h);
+    let mut with_nl = Vec::new();
+    WebpEncoder::lossy(70)
+        .with_near_lossless(Some(gamut_webp::NearLossless::new(0).expect("0..=99")))
+        .encode_image(
+            ImageRef::<Rgba8>::new(&px, d).expect("fixture"),
+            &mut with_nl,
+        )
+        .expect("encode");
+    assert_eq!(with_nl, encode_lossy(Effort::default(), 70, &px, d));
+}
