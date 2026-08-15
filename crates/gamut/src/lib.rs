@@ -21,6 +21,10 @@
 //! `iptc`) and the `metadata` facade that unifies them — for tooling and for the container crates
 //! to consume.
 //!
+//! The `cmm` feature re-exports the ICC colour management module (`cmm`, epic #323) — the
+//! transform engine that builds and applies colour transforms from the profiles `gamut-icc`
+//! parses — for colour-managed decode/encode pipelines and tooling.
+//!
 //! The `isobmff` feature re-exports the ISOBMFF/HEIF still-image container primitive (`isobmff`) —
 //! the box tree shared by the AVIF and HEIC codecs — so tooling can read and write containers
 //! directly, independently of the codecs that fill them.
@@ -45,6 +49,8 @@ pub use gamut_av2 as av2;
 pub use gamut_avif as avif;
 #[cfg(feature = "primitives")]
 pub use gamut_bitstream as bitstream;
+#[cfg(feature = "cmm")]
+pub use gamut_cmm as cmm;
 #[cfg(feature = "codec-abi")]
 pub use gamut_codec_abi as codec_abi;
 #[cfg(feature = "primitives")]

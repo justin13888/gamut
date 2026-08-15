@@ -534,6 +534,7 @@ dependencies = [
  "gamut-av2",
  "gamut-avif",
  "gamut-bitstream",
+ "gamut-cmm",
  "gamut-codec-abi",
  "gamut-color",
  "gamut-core",
@@ -611,6 +612,16 @@ dependencies = [
  "thiserror",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "gamut-cmm"
+version = "0.1.0"
+dependencies = [
+ "gamut-color",
+ "gamut-core",
+ "gamut-icc",
+ "thiserror",
 ]
 
 [[package]]

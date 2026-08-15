@@ -1,0 +1,66 @@
+//! The crate's error type.
+
+/// An error from building or evaluating a colour transform.
+///
+/// Every variant is a violated structural invariant — a mismatched channel count or a missized
+/// sample buffer — detected either when a [`Pipeline`](crate::Pipeline) is constructed or when a
+/// [`Transform`](crate::Transform) is evaluated. Exposing the crate's own type — rather than the
+/// shared `gamut_core::Error` — keeps the failing carrier identifiable when the CMM is embedded
+/// in a wider colour pipeline.
+///
+/// Marked `#[non_exhaustive]`: the CMM phases (curves, CLUTs, profile linking, intents) add
+/// failure categories additively without a breaking change.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CmmError {
+    /// Two adjacent pipeline stages disagree on the channel count flowing between them: the
+    /// stage at `index` expects `expected` input channels but the stage before it produces
+    /// `found`. Also raised by [`Pipeline::compose`](crate::Pipeline::compose) when the second
+    /// pipeline's input does not match the first pipeline's output (there `index` is the
+    /// position the second pipeline's first stage would take).
+    #[error(
+        "cmm: stage {index} expects {expected} input channels, previous stage produces {found}"
+    )]
+    StageChannelMismatch {
+        /// Zero-based index of the stage whose input is mismatched.
+        index: usize,
+        /// The input channel count that stage expects.
+        expected: u8,
+        /// The output channel count actually produced upstream.
+        found: u8,
+    },
+
+    /// A pipeline's declared end does not match the stage chain: the `end` ("input" or
+    /// "output") was declared as `declared` channels, but the terminal stage on that end
+    /// carries `found`. For an empty (identity) pipeline this reports the two declared ends
+    /// disagreeing with each other.
+    #[error("cmm: pipeline {end} declares {declared} channels, found {found}")]
+    PipelineEndsMismatch {
+        /// Which pipeline end is mismatched: `"input"` or `"output"`.
+        end: &'static str,
+        /// The channel count the pipeline declared for that end.
+        declared: u8,
+        /// The channel count the stage chain actually carries there.
+        found: u8,
+    },
+
+    /// A declared channel count is outside `1..=`[`MAX_CHANNELS`](crate::MAX_CHANNELS) (ICC
+    /// caps multi-dimensional
+    /// transform inputs at 16 channels; zero channels is structurally meaningless).
+    #[error("cmm: channel count {0} outside 1..=16")]
+    TooManyChannels(u8),
+
+    /// A sample buffer's length does not fit the transform's channel count: `found` samples is
+    /// not a whole number of `channels`-sample pixels, or disagrees with the pixel count
+    /// implied by the paired buffer.
+    #[error("cmm: buffer length {found} is not a multiple of {channels} channels")]
+    BufferLength {
+        /// The per-pixel channel count of the offending buffer's end of the transform.
+        channels: u8,
+        /// The offending buffer's length in samples.
+        found: usize,
+    },
+}
+
+/// A [`Result`](core::result::Result) whose error is [`CmmError`].
+pub type Result<T> = core::result::Result<T, CmmError>;
