@@ -387,20 +387,23 @@ fn annex_b_golden_output() {
     );
 }
 
+// ---- split emitters: parameter sets (MediaCodec csd-0) / payload (sample data) ------------------
+
 #[test]
-fn annex_b_reorders_param_sets_and_keeps_sei_after_pps() {
-    // Arrays deliberately out of order (PPS, SPS, VPS, SEI); annex_b must emit VPS→SPS→PPS→SEI.
+fn annex_b_parameter_sets_emits_only_the_record_in_decoder_order() {
+    // Arrays deliberately out of order (PPS, SPS, VPS, SEI); the emit order must be VPS→SPS→PPS→SEI.
     let mut bytes = hvcc_header(3, 4);
     bytes.extend(nal_array(true, 34, &[&[0x44, 0x01, 0xC1]])); // PPS
     bytes.extend(nal_array(true, 33, &[&[0x42, 0x01, 0xB1]])); // SPS
     bytes.extend(nal_array(true, 32, &[&[0x40, 0x01, 0xA1]])); // VPS
     bytes.extend(nal_array(false, 39, &[&[0x4E, 0x01, 0x91]])); // PREFIX_SEI
     let cfg = HevcConfig::parse(&bytes).expect("valid");
-    let mut out = Vec::new();
-    cfg.annex_b(&[], &mut out).expect("annex_b");
+    let mut out = vec![0x77]; // pre-existing content: the emitter appends.
+    cfg.annex_b_parameter_sets(&mut out);
     assert_eq!(
         out,
         vec![
+            0x77, //
             0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0xA1, // VPS
             0x00, 0x00, 0x00, 0x01, 0x42, 0x01, 0xB1, // SPS
             0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xC1, // PPS
@@ -410,14 +413,75 @@ fn annex_b_reorders_param_sets_and_keeps_sei_after_pps() {
 }
 
 #[test]
-fn annex_b_propagates_payload_error() {
+fn annex_b_parameter_sets_of_arrayless_record_emits_nothing() {
+    // An `hev1` record may carry no arrays at all (parameter sets inband in the payload).
+    let cfg = HevcConfig::parse(&hvcc_header(3, 0)).expect("valid");
+    let mut out = Vec::new();
+    cfg.annex_b_parameter_sets(&mut out);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn annex_b_payload_emits_only_the_payload() {
+    let cfg = HevcConfig::parse(&main_still_hvcc()).expect("valid"); // VPS+SPS+PPS present
+    let payload = [
+        0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD, // NAL 1
+        0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xEE, // NAL 2
+    ];
+    let mut out = vec![0x77]; // pre-existing content: the emitter appends.
+    cfg.annex_b_payload(&payload, &mut out).expect("payload");
+    assert_eq!(
+        out,
+        vec![
+            0x77, //
+            // No parameter set is emitted — only the two payload NAL units.
+            0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xDD, // payload NAL 1
+            0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xEE, // payload NAL 2
+        ]
+    );
+}
+
+#[test]
+fn annex_b_payload_honours_nal_length_size() {
+    // lengthSizeMinusOne 0 ⇒ one-byte length prefixes.
+    let cfg = HevcConfig::parse(&hvcc_header(0, 0)).expect("valid");
+    assert_eq!(cfg.nal_length_size(), 1);
+    let mut out = Vec::new();
+    cfg.annex_b_payload(&[0x03, 0x26, 0x01, 0xDD, 0x02, 0x4E, 0x01], &mut out)
+        .expect("payload");
+    assert_eq!(
+        out,
+        vec![
+            0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xDD, //
+            0x00, 0x00, 0x00, 0x01, 0x4E, 0x01,
+        ]
+    );
+}
+
+#[test]
+fn annex_b_payload_propagates_split_error() {
     let cfg = HevcConfig::parse(&main_still_hvcc()).expect("valid");
     let mut out = Vec::new();
     // Payload length prefix (4-byte) claims 9 bytes but only 1 follows.
-    assert!(
-        cfg.annex_b(&[0x00, 0x00, 0x00, 0x09, 0xAA], &mut out)
-            .is_err()
-    );
+    assert!(matches!(
+        cfg.annex_b_payload(&[0x00, 0x00, 0x00, 0x09, 0xAA], &mut out),
+        Err(error) if error.kind() == ErrorKind::InvalidInput
+    ));
+}
+
+#[test]
+fn annex_b_is_parameter_sets_then_payload() {
+    let cfg = HevcConfig::parse(&main_still_hvcc()).expect("valid");
+    let payload = [0x00, 0x00, 0x00, 0x03, 0x26, 0x01, 0xDD];
+
+    let mut whole = Vec::new();
+    cfg.annex_b(&payload, &mut whole).expect("annex_b");
+
+    let mut split = Vec::new();
+    cfg.annex_b_parameter_sets(&mut split);
+    cfg.annex_b_payload(&payload, &mut split).expect("payload");
+
+    assert_eq!(whole, split);
 }
 
 // ---- still-image IRAP constraint -------------------------------------------------------------

@@ -39,8 +39,9 @@ container-completeness only). **Milestone (M)** is indicative sequencing, not a 
   / `with_exif` / `with_xmp` embed the payloads verbatim (promoting a simple file to `VP8X` and
   deriving the feature flags from the chunks present), and the `gamut_webp::metadata` free function
   reads them back without decoding pixels; libwebp's own muxer is the oracle in both directions.
-  Still open in this milestone: read-side chunk-order enforcement and unknown-chunk round-trip
-  preservation.
+  Read-side chunk-order enforcement and unknown-chunk round-trip preservation closed with
+  `gamut-riff` v1 (issue #186): `gamut_riff::WebpLayout::parse` is the single container walk behind
+  both decode paths, and `WebpEncoder::with_unknown_chunks` re-emits preserved chunks.
 - **M5** — Animation: `ANIM` / `ANMF` — **out of scope** (decision 2026-06-09). Multi-frame
   sequences fall outside the image-first charter and the single-image `gamut_core` traits; WebP
   animation needs no codec work (each frame is an independent keyframe) but does need a non-trait
@@ -91,15 +92,17 @@ Owner: [`gamut-riff`](../gamut-riff).
 | simple lossy: wrap `VP8 ` payload (note trailing space) | §2.5 | ✅ | M0 |
 | chunk routing: identify `VP8 `/`VP8L`/`VP8X` on read | §2.5–§2.7 | ✅ | M0 |
 | `VP8X` extended header: feature flags + 24-bit canvas W/H (1-based) | §2.7 | ✅ | M3 |
-| `ALPH` alpha chunk: preprocessing/filter/compression + bitstream | §2.7.1 (Alpha) | ✅ | M3 |
+| `ALPH` alpha chunk: preprocessing/filter/compression + bitstream | §2.7.1.2 | ✅ | M3 |
 | simple→extended promotion (emit `VP8X` when a feature needs it) | §2.7 | ✅ | M3 |
-| `ICCP` color profile chunk | §2.7.2 | ✅ | M4 |
-| `EXIF` / `XMP ` metadata chunks | §2.7.3 | ✅ | M4 |
+| `ICCP` color profile chunk | §2.7.1.4 | ✅ | M4 |
+| `EXIF` / `XMP ` metadata chunks | §2.7.1.5 | ✅ | M4 |
 | canonical chunk order on **write** (`VP8X`, `ICCP`, image data, `EXIF`, `XMP `) | §2.7 | ✅ | M4 |
-| chunk ordering enforcement on **read** (reject out-of-order reconstruction chunks) | §2.7 | ☐ | M4 |
-| `ANIM` global animation parameters (bg color, loop count) | §2.7.1 (Animation) | ⊘ | M5 |
-| `ANMF` per-frame chunk + frame disposal/blend, canvas assembly | §2.7.1 (Animation) | ⊘ | M5 |
-| unknown-chunk passthrough (preserve order) | §2.7.4 | ☐ | M4 |
+| chunk ordering enforcement on **read** (reject out-of-order reconstruction chunks) | §2.7 | ✅ | M4 |
+| canvas bounds: dimensions in `1..=2^24`, width × height ≤ `2^32 - 1` | §2.7 | ✅ | M4 |
+| pad byte MUST be zero; trailing data past *File Size* surfaced | §2.3/§2.4 | ✅ | M4 |
+| `ANIM` global animation parameters (bg color, loop count) | §2.7.1.1 | ⊘ | M5 |
+| `ANMF` per-frame chunk + frame disposal/blend, canvas assembly | §2.7.1.1 | ⊘ | M5 |
+| unknown-chunk passthrough (preserve order) | §2.7.1.6 | ✅ | M4 |
 
 ## B. VP8L bitstream header (RFC 9649 §3.4; Google *Lossless Bitstream*)
 

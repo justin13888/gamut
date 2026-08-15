@@ -136,18 +136,44 @@ fn unknown_compression_code_is_flagged() {
     );
 }
 
+/// Bytes appended after everything the file accounts for are a **trailer**: named, reported, and
+/// never silently absorbed into a neighbouring structure. Real cameras append them (a Leica M10
+/// sample carries 651 KB), so the report has to describe them rather than just refuse the file.
 #[test]
-fn trailing_junk_fails_classification() {
+fn trailing_junk_is_classified_as_a_trailer() {
     let raw = common::sample_raw(16, 16, 16);
     let mut dng = Vec::new();
     DngEncoder::new()
         .encode(&raw, &common::sample_profile(), &mut dng)
         .expect("encode");
+    let clean_len = dng.len() as u64;
     dng.extend_from_slice(&[9, 9, 9]);
+
     let report = deconstruct(&dng).expect("deconstruct");
-    assert!(!report.is_fully_classified(), "{report:?}");
-    assert!(!report.is_fully_accounted());
-    assert_eq!(report.segments.unclassified_bytes(), 3);
+    assert_eq!(report.segments.unclassified_bytes(), 0);
+    assert!(report.is_fully_classified(), "{report:?}");
+
+    let spans = report.segments.unclaimed_spans();
+    assert_eq!(spans.len(), 1, "{spans:?}");
+    assert_eq!(spans[0].kind, gamut_dng::SpanKind::Trailer);
+    assert_eq!(spans[0].range.start, clean_len);
+    assert_eq!(spans[0].range.len, 3);
+    assert_eq!(report.segments.unclaimed_span_bytes(), 3);
+}
+
+/// A gamut-encoded file accounts for every one of its own bytes, so nothing is named by the
+/// position pass — the trailer test above is measuring the appended bytes, not a baseline.
+#[test]
+fn a_clean_file_has_no_unaccounted_spans() {
+    let raw = common::sample_raw(16, 16, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let report = deconstruct(&dng).expect("deconstruct");
+    assert!(report.is_fully_classified(), "{report:?}");
+    assert!(report.segments.unclaimed_spans().is_empty());
+    assert!(report.is_fully_accounted());
 }
 
 #[test]

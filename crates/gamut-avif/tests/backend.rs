@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use gamut_av1::Av1Colour;
 use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{ColorRange, MatrixCoefficients, Planar8, YcbcrMatrix};
+use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
 
 /// The fixture the golden files in `tests/data` were produced from: a 34×18 deterministic RGB ramp.
@@ -63,7 +63,7 @@ fn fixture_planes(colour: Av1Colour) -> Planar8 {
             &fixture(),
             W,
             H,
-            YcbcrMatrix::new(matrix, colour.range).unwrap(),
+            RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight).unwrap(),
         )
         .unwrap(),
     }
@@ -74,7 +74,14 @@ fn fixture_planes(colour: Av1Colour) -> Planar8 {
 // ================================================================================================
 
 /// **The 1.0 guarantee.** An `AvifEncoder` with no pushed backend must emit exactly the bytes the
-/// crate emitted before the backend seam existed. The goldens were captured on the parent commit.
+/// built-in encoder produces — pushing a backend and then not using it must perturb nothing.
+///
+/// The goldens are re-captured whenever the built-in AV1 encoder deliberately changes what it
+/// codes; they pin the seam's additivity, not the codec's output forever. Re-captured when
+/// `gamut-av1` enabled CDF adaptation (`disable_cdf_update = 0`), which shrank these two files
+/// from 4426/1864 bytes to 3407/1557 with an unchanged reconstruction, and again when the lossy
+/// encoder moved to BT.709 YCbCr, taking `lossy50` to 1323. The lossless golden is unaffected by
+/// the colour change — lossless stays on the identity matrix.
 #[test]
 fn default_encoder_output_is_byte_identical() {
     for (name, encoder) in [

@@ -141,7 +141,7 @@ adding it needs no container change.
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
 | INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
 | `disable_cdf_update`=1 (static CDFs) | §5.9.2 | ✅ | M0 |
-| `disable_cdf_update`=0 + frame-end CDF update | §5.9.2,§7.7 | ☐ | M1 |
+| `disable_cdf_update`=0 + frame-end CDF update | §5.9.2,§7.7 | ✅ (`headers::frame_header_payload`; §7.7 n/a — see below) | M1 |
 | frame_size / render_size (no override, no superres) | §5.9.5/.6 | ✅ | M0 |
 | superres_params (enable_superres + use_superres + coded_denom) | §5.9.8,§7.16 | ✅ (frame_size_override deferred) | M1 |
 | tile_info: single tile | §5.9.15 | ✅ | M0 |
@@ -216,11 +216,21 @@ adding it needs no container change.
 | static default CDFs: Partition, Skip, IntraFrameYMode, UvMode(±CfL) | §9.4 | ✅ | M0 |
 | coeff CDFs (qctx0, TX_4X4): TxbSkip/EobPt16/EobExtra/CoeffBaseEob/CoeffBase/CoeffBr/DcSign | §9.4 | ✅ | M0 |
 | full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ✅ (intra: coeff CDFs all used tx sizes × qctx 0–3, mode/partition/palette; inter/MV OOS) | M1/OOS |
-| CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ☐ | M1 |
+| CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ✅ (`cdf::CdfContext`, per-tile; §7.7 n/a — see below) | M1 |
 | `coeffs()` TX_4X4: txb_skip/eob/base/br/sign/dc_sign/golomb | §5.11.39 | ✅ | M0 |
 | `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8 + 16×16 + 32×32 + 64×64, 32×32/64×64 DCT-only) | M1 |
 | scan table `Default_Scan_4x4` + context-offset tables | §9.2/§9.3/§8.3.2 | ✅ | M0 |
 | all scan tables (default/col/row per tx size) | §9.2 | ✅ (4×4 + 8×8 + 16×16 + 32×32 + 64×64 default) | M1 |
+
+**§7.7 `frame_end_update_cdf` is not applicable to a still image.** `uncompressed_header()`
+(§5.9.2) infers `disable_frame_end_update_cdf = 1` whenever `reduced_still_picture_header ||
+disable_cdf_update`, and this encoder always sets `reduced_still_picture_header = 1`. So turning
+`disable_cdf_update` off codes no additional header bit, `frame_end_update_cdf()` is never invoked
+from the tile group (§5.11.1), and the §8.2.4 save at `context_update_tile_id` never fires — there
+is no later frame that could `load_cdfs` the saved context. `context_update_tile_id` itself is
+still coded in `tile_info()` for the multi-tile case (row B), as the syntax requires. Adaptation is
+therefore per tile: each tile re-runs `init_non_coeff_cdfs`/`init_coeff_cdfs` and adapts its own
+copy, which is what a decoder does for an independently decodable tile.
 
 ## H. AV1 — in-loop filters & post (§7.14-§7.18; all bypassed under CodedLossless)
 
@@ -247,7 +257,7 @@ adding it needs no container change.
 | --- | --- | --- | --- |
 | identity matrix (mc=0), full range, 4:4:4, planar G/B/R mapping | CICP H.273; §5.5.2 | ✅ | M0 |
 | BT.601/709/2020-NCL matrices (mc=1/6/9), studio range, `color_config()` non-shortcut branch | CICP H.273 §8.3; AV1 §5.5.2 | ✅ (encode + RGBA decode; #335) | M2 |
-| RGB↔YCbCr at 4:4:4 (`gamut_color::YcbcrMatrix`) | (gamut-color) | ✅ | M2 |
+| RGB↔YCbCr at 4:4:4 (`gamut_color::RgbToYcbcr` / `YcbcrMatrix`) | (gamut-color) | ✅ | M2 |
 | chroma down/up-sample (4:2:0/4:2:2 plane geometry) | (gamut-av1) | ☐ | M2 |
 | transfer sRGB/BT.709 (tagged only in M0) | CICP H.273 | ✅ (tag) | M0 |
 | transfer PQ (SMPTE ST 2084) / HLG (BT.2100) | CICP H.273 | ☐ | M4 |
@@ -294,7 +304,8 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 | `Av1StillDecoder` seam + validating `DecodedFrame` contract | (crate API) | ✅ | S3 |
 | Planar pipeline: coded / `iden` / `grid` assembly (uniform tiles, checked canvas, crop) | 23008-12 §6.6.2.3.2 | ✅ | S3 |
 | Derivation cycle + depth guards | (hardening) | ✅ | S3 |
-| RGBA path: identity / BT.601 (mc 2/5/6) / monochrome, 8-bit; missing-`colr` default | H.273; AVIF §2.2 | ✅ | S3 |
+| RGBA path: identity / BT.601 (mc 2/5/6) / BT.709 (1) / BT.2020 NCL (9) / monochrome; missing-`colr` default | H.273; AVIF §2.2 | ✅ | S3/S6 |
+| High-bit-depth surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
 | Alpha merge (luma-plane, non-mono accepted, bit-depth rescale) | AVIF §4.1 | ✅ | S3 |
 | `clap`/`irot`/`imir` application in `ipma` order (2022 `imir` axis semantics) | 23008-12:2022 §6.5.12; 14496-12 §12.1.4 | ✅ | S3 |
 | `iovl` overlay compositing (source-over, canvas fill, clipping) | 23008-12 §6.6.2.3.3 | ✅ | S3 |
@@ -304,8 +315,11 @@ pipeline (`decode.rs`), **S4** the libavif/dav1d differential oracle (`tests/con
 around `Av1StillDecoder` — section M reserves its name and shape; the typed trait itself already
 ships, and #274 has since delivered the mirror-image *encode* registry it will copy; the pure-Rust
 AV1 codestream decoder
-(own issue; would make the seam optional and enable `gamut_core::Decoder`); >8-bit / BT.709/2020 /
-ICC application on the RGBA path (planar delivers them today); `tmap`/`sato` derived-item decode;
+(own issue; would make the seam optional and enable `gamut_core::Decoder`); ICC application on the
+RGBA path, plus the matrix coefficients outside the modeled Kr/Kb set — YCgCo (8) and the
+chromaticity-derived points (12/13/14), which the 10-bit corpus file uses — and coded depths CICP
+does not model (9/11/13…), all explicitly refused rather than approximated (planar delivers them
+today); `tmap`/`sato` derived-item decode;
 wiring decoded Exif/XMP payloads through `gamut-exif`/`gamut-xmp`; a shared byte-accounting
 segment walker (an isobmff 2.0 candidate — today's walker deliberately mirrors `gamut-heic`'s);
 and unifying the per-crate `DecodedFrame` types through `gamut-codec-abi`.

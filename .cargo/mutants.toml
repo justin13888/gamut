@@ -24,13 +24,11 @@ exclude_globs = [
     # behaviour cargo-mutants can exercise. Excluded like the binding/binary crates (matches the
     # coverage gate's --ignore-filename-regex).
     "crates/gamut-jxl-sys/**",
-    # The facade crates carry no meaningfully complicated logic of their own: `gamut` is pure
-    # feature-gated re-exports (no function bodies), and `gamut-metadata` is the thin metadata
-    # facade whose per-format parsing/serialisation lives in gamut-exif/xmp/icc/iptc (each
-    # mutation-tested in place). Excluded package-wide so the heavy mutants runs spend their
-    # budget on the crates that own the logic.
+    # The `gamut` umbrella is pure feature-gated re-exports (no function bodies), so it carries no
+    # logic of its own to mutate. (`gamut-metadata` used to be excluded here on the same grounds —
+    # a thin facade delegating to gamut-exif/xmp/icc/iptc — but its extension table owns real
+    # lookup/replace/remove logic now, so it is mutation-tested in full.)
     "crates/gamut/**",
-    "crates/gamut-metadata/**",
     "tooling/**",
 ]
 
@@ -144,15 +142,17 @@ exclude_re = [
     # the `n` it shifts is only consumed on an iteration that never executes, so `n >>= 8` is dead.
     # `>>= → <<=` is unobservable. (The loop-bound and `e`/`n` init mutants stay live and are caught.)
     'replace >>= with <<= in SymbolEncoder::finish',
-    # gamut-tiff `stored_total > MAX_IMAGE_BYTES` (decode_page_samples) and `tile_size > MAX_IMAGE_BYTES`
-    # (decode_tiles) are *allocation* guards: relaxing `>` to `==`/`>=` only changes whether a 64 MiB+
-    # buffer is reserved before the (still inevitable) decode error — the malformed file is rejected
-    # either way, so the Ok/Err outcome a functional test can see is unchanged. (`> -> <` flips the
-    # guard for every normal image and is caught.) These are the only `>` in either function.
-    'replace > with == in decode_page_samples',
-    'replace > with >= in decode_page_samples',
-    'replace > with == in decode_tiles',
-    'replace > with >= in decode_tiles',
+    # gamut-tiff `within_size_limit` is the shared *allocation* guard behind `stored_total`
+    # (decode_page_samples) and `tile_size` (decode_tiles): relaxing `>` to `==`/`>=` only changes
+    # whether a 64 MiB+ buffer is reserved before the (still inevitable) decode error — the malformed
+    # file is rejected either way, so the Ok/Err outcome a functional test can see is unchanged.
+    # (`> -> <` flips the guard for every normal image and is caught.) The guard lives in its own
+    # three-line function precisely so these two entries stay scoped to that one comparison, rather
+    # than blanketing every `>` its callers may grow. Removing the guard entirely is a *separate*
+    # mutant, killed by the two size-cap tests in tests/decoder_validation.rs, which assert the
+    # distinct cap messages rather than a bare `is_err()`.
+    'replace > with == in within_size_limit',
+    'replace > with >= in within_size_limit',
     # gamut-riff `Vp8xHeader::to_payload`: the feature-flag byte ORs five single bits each shifted to
     # a distinct position (`icc<<5 | alpha<<4 | ...`), so the operands are disjoint and `|` == `^`.
     # gamut-riff `Vp8xHeader::from_payload`: the `le24` closure ORs three bytes at offsets 0/8/16
@@ -433,7 +433,9 @@ exclude_re = [
     'replace <impl Drop for Encoder>::drop with \(\)',
     # `Encoder::check` maps a libjxl setup status to a `Result`, returning `Ok(())` on SUCCESS. gamut
     # validates every parameter it forwards *before* the FFI — dimensions > 0 (`Dimensions`), distance
-    # ∈ (0,25] (`Distance`), effort ∈ 1..=10 (`Effort`), and a fixed set of supported pixel formats —
+    # ∈ (0,25] (`Distance`), effort ∈ 1..=10 (`Effort`), modular ∈ {-1,0,1} (`ModularMode`, and the
+    # one combination libjxl would override — lossless + forced VarDCT — is rejected before the FFI
+    # by `JxlEncoder::validate_modular`), and a fixed set of supported pixel formats —
     # and libjxl's setters accept all of them, so in every reachable state the checked status IS
     # SUCCESS and `check` already returns `Ok(())`. Replacing the whole body with `Ok(())` is therefore
     # indistinguishable on every reachable path (the error path is defensive, like the av1/tiff

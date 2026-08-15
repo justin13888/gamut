@@ -192,3 +192,50 @@ gamuts (ProPhoto's D50→D65) before the LMS projection.
 Quantization uses an **odd** level count: `max_idx = 2^bits − 2` (the top code is never
 written), so the center index dequantizes to exactly 0. Round-half-away-from-zero.
 Defaults: `µ_L = 5.0`, `µ_C = 8.0`, `µ_alpha = 5.0`.
+
+---
+
+## YCbCr matrix coefficients — ITU-T H.273 §8.3 / ISO/IEC 23091-2
+
+Source: ITU-T H.273 (2024-07) Table 4 (`MatrixCoefficients`) and §8.3, the non-constant-luminance
+YCbCr ↔ RGB relations. Backs `gamut_color::YcbcrMatrix`.
+
+The published luma weights are exact four-decimal values, so the derivation is exact integer
+arithmetic — unlike the rest of this directory, that path is bit-exact and deterministic rather
+than Tier-1 `f64`.
+
+| Code point | Name | `Kr` | `Kb` |
+| --- | --- | --- | --- |
+| 1 | BT.709 / BT.1361 / sRGB-matrix | 0.2126 | 0.0722 |
+| 5 | BT.470 System B,G / BT.601 625 | 0.2990 | 0.1140 |
+| 6 | BT.601 525 / SMPTE 170M | 0.2990 | 0.1140 |
+| 9 | BT.2020 non-constant luminance | 0.2627 | 0.0593 |
+
+Code points 5 and 6 are distinct points naming identical coefficients; both are modeled so a `colr`
+box read as 5 is written back as 5.
+
+With `Kg = 1 − Kr − Kb`, the inverse (de-matrixing) is
+
+```
+R' = Y'                              + 2(1 − Kr)·Cr
+G' = Y' − (2·Kb(1 − Kb)/Kg)·Cb − (2·Kr(1 − Kr)/Kg)·Cr
+B' = Y' + 2(1 − Kb)·Cb
+```
+
+Range normalization at bit depth `bd`, with `max = 2^bd − 1` (H.273 §8.3):
+
+| | luma offset | luma scale | chroma offset | chroma scale |
+| --- | --- | --- | --- | --- |
+| Limited ("studio swing") | `16 << (bd − 8)` | `219 << (bd − 8)` | `128 << (bd − 8)` | `224 << (bd − 8)` |
+| Full | `0` | `max` | `2^(bd − 1)` | `max` |
+
+`Y' = (Y − luma_offset)/luma_scale`, `Cb = (cb − chroma_offset)/chroma_scale`, and the output
+sample is `round(max · R')` saturated to `0..=max` (the AV1 `Clip1` of `clip_pixel`).
+
+Two consequences worth recording, both asserted by tests: the full-range chroma coefficients are
+bit-depth independent (`max / chroma_scale = 1`), and the limited-range luma gain depends only on
+`(range, bit_depth)`, never on the matrix.
+
+Note that `gamut_color::ycbcr_to_rgb` does **not** use these relations: it is a bit-exact port of
+libwebp's `VP8YUVToR/G/B`, kept so WebP decode matches libwebp per pixel. The two are both correct
+BT.601 and differ by at most 1 LSB.

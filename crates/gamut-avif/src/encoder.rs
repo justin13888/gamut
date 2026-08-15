@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with};
-use gamut_color::{ColorRange, MatrixCoefficients, Planar8, YcbcrMatrix};
+use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind, write,
@@ -336,7 +336,7 @@ impl EncodeImage<Rgb8> for AvifEncoder {
             matrix => {
                 // Rejects a matrix with no luma–chroma transform (Unspecified, YCgCo) before any
                 // bytes are written.
-                let m = YcbcrMatrix::new(matrix, colour.range)?;
+                let m = RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight)?;
                 Planar8::from_rgb8_matrix_view(image, m)
             }
         };

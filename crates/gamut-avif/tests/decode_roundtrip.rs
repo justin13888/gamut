@@ -170,10 +170,11 @@ fn lossy_colour() -> gamut_av1::Av1Colour {
 }
 
 /// The matching prepared transform.
-fn lossy_matrix() -> gamut_color::YcbcrMatrix {
-    gamut_color::YcbcrMatrix::new(
+fn lossy_matrix() -> gamut_color::RgbToYcbcr {
+    gamut_color::RgbToYcbcr::new(
         gamut_color::MatrixCoefficients::Bt709,
         gamut_color::ColorRange::Full,
+        gamut_color::BitDepth::Eight,
     )
     .unwrap()
 }

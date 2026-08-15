@@ -1,8 +1,8 @@
 //! AV1 OBU framing (§5.3, Annex B), the reduced-still-picture sequence header (§5.5), and the
 //! all-intra keyframe uncompressed frame header (§5.9.2). Both the lossless M0 config and the lossy
 //! intra path are emitted: `base_q_idx > 0` with per-superblock delta-Q/delta-LF, segmentation
-//! (`SEG_LVL_ALT_Q`), CDEF, loop restoration, superres, and uniform multi-tile — all still under
-//! `disable_cdf_update = 1` and `using_qmatrix = 0` (8-bit 4:4:4).
+//! (`SEG_LVL_ALT_Q`), CDEF, loop restoration, superres, and uniform multi-tile — all under
+//! `disable_cdf_update = 0` (adapting CDFs, §8.2.6) and `using_qmatrix = 0` (8-bit 4:4:4).
 //!
 //! `color_config()` (§5.5.2) is parameterized by [`Av1Colour`]: the identity/sRGB default takes the
 //! spec's shortcut, where `color_range` and the subsampling are inferred and no bits are coded,
@@ -232,7 +232,9 @@ pub(crate) fn frame_header_payload(
     let lossless = base_q_idx == 0;
     let mut w = BitWriter::new();
     // reduced_still_picture_header ⇒ KEY_FRAME, show_frame=1, FrameIsIntra=1 (no bits).
-    w.put_bit(1); // disable_cdf_update = 1
+    // disable_cdf_update = 0: every symbol adapts its CDF as it is coded (§8.2.6). The tile encoder
+    // performs the identical update, so encoder and decoder track the same probabilities.
+    w.put_bit(0); // disable_cdf_update
     // allow_screen_content_tools = 1 (palette mode is available; intra-block-copy is left off).
     w.put_bit(u8::from(!lossless)); // allow_screen_content_tools (1 on the lossy path)
     if !lossless {
@@ -256,7 +258,9 @@ pub(crate) fn frame_header_payload(
         // allow_intrabc is coded only when UpscaledWidth == FrameWidth (i.e. no superres).
         w.put_bit(0); // allow_intrabc = 0
     }
-    // disable_frame_end_update_cdf inferred 1.
+    // disable_frame_end_update_cdf: `reduced_still_picture_header || disable_cdf_update` ⇒ inferred
+    // 1, so no bit is coded even now that `disable_cdf_update` is 0, and `frame_end_update_cdf`
+    // (§7.7) is never invoked. A still image has no later frame to load a saved context anyway.
 
     // tile_info() (§5.9.15): uniform spacing, two tile columns when the frame is ≥ 2 superblocks
     // wide (else one). `tile_cols_log2` mirrors the split `FrameEncoder::encode` applies.

@@ -49,8 +49,10 @@ anchors plus the JFIF/BT.601 full-range anchors. Determinism is **Tier-1** (corr
 
 ## Intentionally deferred (additive)
 
-- **10/12-bit encode wiring** — `BitDepth::Ten`/`Twelve` are modeled; the AV1 reconstruction
-  accepts them but no encode path produces them yet (gamut-avif M2).
+- **10/12-bit plane wiring** — both H.273 directions now cover 8/10/12/16-bit (`RgbToYcbcr` /
+  `YcbcrMatrix`); what is deferred is the plane geometry to carry them. `BitDepth::Ten`/`Twelve`
+  are modeled and the AV1 reconstruction accepts them, but `Planar8` is 8-bit and no encode path
+  produces a deeper plane yet (gamut-avif M2).
 - **16-bit is modeled, not an AV1 depth** — `BitDepth::Sixteen` (issue #260) is not deferred AV1
   wiring like `Ten`/`Twelve`: AV1 tops out at 12 and never produces it. It exists for the 16-bit
   interleaved still-image pipelines (PNG/TIFF/JXL/DNG) that consume this vocabulary. `clip_pixel`
@@ -60,7 +62,12 @@ anchors plus the JFIF/BT.601 full-range anchors. Determinism is **Tier-1** (corr
   cannot model.
 - **Subsampled coded planes** — `Cs422`/`Cs420`/`Cs400` wiring into AV1 (M2); today 4:2:0
   exists only in the WebP/VP8 `Yuv420` path.
-- **Non-identity `MatrixCoefficients`** (BT.709, BT.2020 NCL, YCgCo) — modeled, land with M2/M4.
+- **`MatrixCoefficients::YCgCo`** — modeled, with neither direction yet: it is a lifting transform,
+  not a `Kr`/`Kb` matrix. Lands with M4. `Identity` is deliberately *not* a `YcbcrMatrix` either —
+  it is a GBR plane permutation the caller performs, not an affine transform — and `Unspecified` is
+  a policy choice belonging to the format layer.
+- **Row / SIMD YCbCr ↔ RGB** — `YcbcrMatrix::to_rgb` and `RgbToYcbcr::from_rgb` are scalar and
+  `#[inline]`; a subsampling-aware row API is additive if profiling asks for it.
 - **HLG and BT.709 transfer curves** — `eotf_for` returns `None` for them (M4 HDR).
 - **Better chroma resampling** (sharp-YUV-style) — the box filter is the documented baseline.
 - **Bit-reproducible math substrate** — chromahash's `cbrt_halley`/portable-pow tier is

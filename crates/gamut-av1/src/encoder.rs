@@ -351,16 +351,16 @@ mod tests {
             }
         };
         let cases: &[(u8, u32, u32, u8, u64)] = &[
-            (0, 40, 24, 0, 0x7734_889d_bb0f_3d10),
-            (1, 64, 64, 1, 0x555f_b439_5f54_0869),
-            (2, 32, 32, 40, 0xc137_a411_19d0_00fa),
-            (3, 48, 48, 16, 0x1f80_0ee1_459d_bc80),
-            (4, 64, 48, 90, 0x55c2_d41f_b10c_edac),
-            (0, 100, 80, 8, 0x9b7c_1ba3_3bd9_bdb0),
-            (0, 130, 70, 120, 0x381a_b126_b155_d441),
-            (2, 64, 64, 200, 0x6874_9d61_4529_698e),
-            (3, 96, 96, 60, 0x8ecd_b3b2_df5f_fc09),
-            (4, 128, 64, 30, 0xb755_5da2_fbd3_7636),
+            (0, 40, 24, 0, 0x5728_aabc_5720_858a),
+            (1, 64, 64, 1, 0xa6ac_d7ee_70b8_7653),
+            (2, 32, 32, 40, 0xad7f_19dc_a8cb_bf32),
+            (3, 48, 48, 16, 0x4d6f_bb67_2399_a35e),
+            (4, 64, 48, 90, 0x5fed_6011_e0a0_278c),
+            (0, 100, 80, 8, 0x8302_4eaa_7b86_ddc7),
+            (0, 130, 70, 120, 0x3324_a4a0_9acf_6e8f),
+            (2, 64, 64, 200, 0x307c_fb34_8720_4baf),
+            (3, 96, 96, 60, 0x0540_b9da_a870_9e1a),
+            (4, 128, 64, 30, 0x800d_d57f_9bd3_5fae),
         ];
         for &(id, w, h, q, want) in cases {
             let p = planes(w, h, |x, y| pat(id, x, y));
@@ -369,6 +369,44 @@ mod tests {
                 fnv1a(&obus),
                 want,
                 "bitstream changed for pat{id} {w}x{h} q{q}"
+            );
+        }
+    }
+
+    #[test]
+    fn cdf_adaptation_shrinks_the_coded_stream() {
+        // `disable_cdf_update = 0` is a pure coding win: the reconstruction is unchanged (recon.rs
+        // proves that against libaom and dav1d), only the symbol stream gets shorter. The bounds
+        // below are the byte counts this encoder produced with *static* CDFs, measured on the
+        // parent commit. Each case must now come in strictly under its bound, so silently losing
+        // adaptation — the checksums in `encoded_bitstream_is_stable` would move, but so would any
+        // other encoder change — is caught for what it is: a size regression.
+        //
+        // The margin is large (~20–35%) because a still image gives every context a whole frame to
+        // converge, and the §9.4 defaults are tuned for video.
+        let gradient = planes(64, 64, |x, y| {
+            [(x * 3) as u8, (y * 3) as u8, ((x + y) * 2) as u8]
+        });
+        let noise = planes(128, 96, |x, y| {
+            let v = (x
+                .wrapping_mul(2_654_435_761)
+                .wrapping_add(y.wrapping_mul(40503))
+                >> 13) as u8;
+            [v, v.wrapping_mul(3), v.wrapping_add(77)]
+        });
+        let smooth = planes(160, 120, |x, y| {
+            let a = ((x as f32 / 9.0).sin() * 60.0 + (y as f32 / 7.0).cos() * 50.0 + 128.0) as u8;
+            [a, a.wrapping_add(20), a.wrapping_sub(30)]
+        });
+        for (name, p, q, static_bytes) in [
+            ("gradient", &gradient, 60u8, 495usize),
+            ("noise", &noise, 120, 17_736),
+            ("smooth", &smooth, 90, 8173),
+        ] {
+            let n = encode_still_intra(p, q).unwrap().0.obus.len();
+            assert!(
+                n < static_bytes,
+                "{name} q{q}: {n} bytes, not below the static-CDF baseline of {static_bytes}"
             );
         }
     }

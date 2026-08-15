@@ -78,7 +78,8 @@ C libraries build from source on the first run. See [`references/heif`](../../re
 ## Status
 
 Container-parsing / byte-accounting / role layer, the typed `hvcC` record + NAL demux, the pluggable
-`HevcDecoder` decode pipeline, and the libheif differential oracle are all implemented (issue #238).
+`HevcDecoder` decode pipeline, and the libheif differential oracle are all implemented (issue #238),
+as is the high-bit-depth (10/12-bit, BT.709/BT.2020) `Rgba16` presentation surface (issue #303).
 Encoding is **not** provided. See [`STATUS.md`](STATUS.md) for the full component ledger.
 
 ## License

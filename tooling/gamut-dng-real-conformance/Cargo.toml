@@ -1,0 +1,33 @@
+# Dev-only conformance tier: NOT a member of the gamut workspace (listed under `[workspace].exclude`
+# in the root manifest). Nothing depends on it — it is invoked directly by manifest path, via
+# `mise run test-dng-real`, so `cargo test --workspace --all-features` never builds or runs it.
+#
+# It decodes the real camera DNGs in the `gamut-dng-samples` submodule (issue #174) and checks them
+# in four layers: byte-completeness, decode against the manifest's expectations, an Adobe DNG SDK
+# differential, and the preserving rewrite. Those files are ~178 MiB and the SDK oracle is a slow
+# native build, which is exactly why this tier is kept off the per-PR path — see the `real-dng` job
+# in `.github/workflows/extended.yml`.
+[package]
+name = "gamut-dng-real-conformance"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only conformance tier: validates gamut-dng against real camera DNG files (issue #174)."
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+# Parses the corpus MANIFEST.toml (provenance + per-file decode expectations). Confined to this
+# excluded crate, so no shipped crate gains a dependency.
+toml = "0.9"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# The crate under test. `jxl-encode` mirrors `crates/gamut-dng/Cargo.toml`'s own test setup so the
+# feature surface matches what the workspace suite exercises.
+gamut-dng = { path = "../../crates/gamut-dng", features = ["jxl-encode"] }
+gamut-core = { path = "../../crates/gamut-core" }
+# Authoritative differential oracle: the headless-built Adobe DNG SDK 1.7.1.
+gamut-dng-oracle = { path = "../gamut-dng-oracle" }

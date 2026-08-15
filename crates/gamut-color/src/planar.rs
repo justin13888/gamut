@@ -3,7 +3,7 @@
 
 use gamut_core::{Dimensions, Error, ImageRef, Result, Rgb8};
 
-use crate::ycbcr_matrix::YcbcrMatrix;
+use crate::ycbcr::RgbToYcbcr;
 
 /// Maps an interleaved RGB buffer (`n` pixels) to identity GBR planes (`Y=G, U=B, V=R`).
 fn rgb_to_gbr_planes(rgb: &[u8], n: usize) -> [Vec<u8>; 3] {
@@ -19,15 +19,20 @@ fn rgb_to_gbr_planes(rgb: &[u8], n: usize) -> [Vec<u8>; 3] {
 }
 
 /// Maps an interleaved RGB buffer (`n` pixels) to `Y/Cb/Cr` planes through `matrix`.
-fn rgb_to_ycbcr_planes(rgb: &[u8], n: usize, matrix: YcbcrMatrix) -> [Vec<u8>; 3] {
+fn rgb_to_ycbcr_planes(rgb: &[u8], n: usize, matrix: RgbToYcbcr) -> [Vec<u8>; 3] {
     let mut y = vec![0u8; n];
     let mut cb = vec![0u8; n];
     let mut cr = vec![0u8; n];
     for i in 0..n {
-        let (yy, u, v) = matrix.forward(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
-        y[i] = yy;
-        cb[i] = u;
-        cr[i] = v;
+        let (yy, u, v) = matrix.from_rgb(
+            u16::from(rgb[i * 3]),
+            u16::from(rgb[i * 3 + 1]),
+            u16::from(rgb[i * 3 + 2]),
+        );
+        // `matrix` is built at `BitDepth::Eight`, so every output is already in `0..=255`.
+        y[i] = yy as u8;
+        cb[i] = u as u8;
+        cr[i] = v as u8;
     }
     [y, cb, cr]
 }
@@ -40,7 +45,7 @@ fn rgb_to_ycbcr_planes(rgb: &[u8], n: usize, matrix: YcbcrMatrix) -> [Vec<u8>; 3
 /// end-to-end round-trip (decode via `avifdec`) is the single source of truth for its correctness.
 ///
 /// For any other matrix the planes are **Y, Cb, Cr** in AV1's `Y/U/V` order;
-/// [`Planar8::from_rgb8_matrix`] applies the H.273 transform of [`YcbcrMatrix`]. Chroma stays at
+/// [`Planar8::from_rgb8_matrix`] applies the H.273 transform of [`RgbToYcbcr`]. Chroma stays at
 /// full resolution either way — subsampled (4:2:0 / 4:2:2) plane geometry is not modelled here yet.
 #[derive(Debug, Clone)]
 pub struct Planar8 {
@@ -106,15 +111,15 @@ impl Planar8 {
     ///
     /// The counterpart of [`Planar8::from_rgb8_identity`] for every CICP matrix that *does* apply a
     /// luma–chroma transform; build `matrix` once with
-    /// [`YcbcrMatrix::new`](crate::YcbcrMatrix::new), which is where an unsupported matrix is
-    /// rejected.
+    /// [`RgbToYcbcr::new`](crate::RgbToYcbcr::new) at [`BitDepth::Eight`](crate::BitDepth::Eight),
+    /// which is where an unsupported matrix is rejected.
     ///
     /// # Examples
     ///
     /// ```
-    /// use gamut_color::{ColorRange, MatrixCoefficients, Planar8, YcbcrMatrix};
+    /// use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
     ///
-    /// let m = YcbcrMatrix::new(MatrixCoefficients::Bt709, ColorRange::Full)?;
+    /// let m = RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight)?;
     /// let rgb = [255, 255, 255, 0, 0, 0]; // white then black
     /// let planes = Planar8::from_rgb8_matrix(&rgb, 2, 1, m)?;
     /// assert_eq!(planes.plane(0), &[255u8, 0]); // luma
@@ -130,7 +135,7 @@ impl Planar8 {
         rgb: &[u8],
         width: u32,
         height: u32,
-        matrix: YcbcrMatrix,
+        matrix: RgbToYcbcr,
     ) -> Result<Self> {
         let n = Dimensions { width, height }.num_pixels().ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
@@ -152,7 +157,7 @@ impl Planar8 {
     /// infallible — the view already guarantees `rgb.len() == width * height * 3`. This is the
     /// boundary an encoder uses to turn a typed RGB image into AV1 YCbCr planes.
     #[must_use]
-    pub fn from_rgb8_matrix_view(img: ImageRef<'_, Rgb8>, matrix: YcbcrMatrix) -> Self {
+    pub fn from_rgb8_matrix_view(img: ImageRef<'_, Rgb8>, matrix: RgbToYcbcr) -> Self {
         let (width, height) = (img.width(), img.height());
         // No overflow check needed: `ImageRef` already validated that width * height * 3 fits
         // `usize` (it equals the sample slice's length).
@@ -280,11 +285,13 @@ mod tests {
     #[test]
     fn matrix_ctor_writes_y_cb_cr_in_plane_order() {
         use crate::cicp::{ColorRange, MatrixCoefficients};
-        use crate::ycbcr_matrix::YcbcrMatrix;
+        use crate::format::BitDepth;
+        use crate::ycbcr::RgbToYcbcr;
 
-        // Pure red under BT.709 full range: Y = 54, Cb = 99, Cr = 255 (pinned in `ycbcr_matrix`).
+        // Pure red under BT.709 full range: Y = 54, Cb = 99, Cr = 255 (pinned in `ycbcr`).
         // Asserting per plane pins the Y/Cb/Cr order — the opposite of the identity path's GBR.
-        let m = YcbcrMatrix::new(MatrixCoefficients::Bt709, ColorRange::Full).unwrap();
+        let m =
+            RgbToYcbcr::new(MatrixCoefficients::Bt709, ColorRange::Full, BitDepth::Eight).unwrap();
         let p = Planar8::from_rgb8_matrix(&[255, 0, 0], 1, 1, m).unwrap();
         assert_eq!(
             (p.plane(0), p.plane(1), p.plane(2)),

@@ -696,10 +696,10 @@ fn identity_base_rgba(base: u8, w: u32, h: u32) -> Vec<u8> {
 }
 
 /// Independent 90° CCW rotation by forward scatter (input `(x,y)` → output `(y, w-1-x)`).
-fn ref_rotate_ccw(src: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
+fn ref_rotate_ccw<T: Copy + Default>(src: &[T], w: u32, h: u32) -> (Vec<T>, u32, u32) {
     let (wu, hu) = (w as usize, h as usize);
     let (nw, nh) = (hu, wu);
-    let mut out = vec![0u8; nw * nh * 4];
+    let mut out = vec![T::default(); nw * nh * 4];
     for y in 0..hu {
         for x in 0..wu {
             let (ox, oy) = (y, wu - 1 - x);
@@ -711,9 +711,9 @@ fn ref_rotate_ccw(src: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
 }
 
 /// Independent mirror by forward scatter.
-fn ref_mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
+fn ref_mirror<T: Copy + Default>(src: &[T], w: u32, h: u32, axis: u8) -> Vec<T> {
     let (wu, hu) = (w as usize, h as usize);
-    let mut out = vec![0u8; wu * hu * 4];
+    let mut out = vec![T::default(); wu * hu * 4];
     for y in 0..hu {
         for x in 0..wu {
             let (dx, dy) = if axis == 1 {
@@ -728,9 +728,9 @@ fn ref_mirror(src: &[u8], w: u32, h: u32, axis: u8) -> Vec<u8> {
     out
 }
 
-fn ref_crop(src: &[u8], w: u32, left: u32, top: u32, cw: u32, ch: u32) -> Vec<u8> {
+fn ref_crop<T: Copy + Default>(src: &[T], w: u32, left: u32, top: u32, cw: u32, ch: u32) -> Vec<T> {
     let (wu, cwu) = (w as usize, cw as usize);
-    let mut out = vec![0u8; (cw * ch * 4) as usize];
+    let mut out = vec![T::default(); (cw * ch * 4) as usize];
     for y in 0..ch as usize {
         for x in 0..cwu {
             let si = ((top as usize + y) * wu + (left as usize + x)) * 4;
@@ -1030,8 +1030,8 @@ fn monochrome_limited_expansion_is_golden() {
 
 #[test]
 fn unsupported_colour_falls_back_to_planar_only() {
-    // BT.709 (matrix 1): planar decodes; RGBA is Unsupported.
-    let item = coded_item(1, 1, 8, 10, 4, 4, vec![colr(1, false)]);
+    // YCgCo (matrix 8) is a different transform family: planar decodes; both RGBA surfaces refuse.
+    let item = coded_item(1, 1, 8, 10, 4, 4, vec![colr(8, false)]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
     assert!(
@@ -1044,10 +1044,14 @@ fn unsupported_colour_falls_back_to_planar_only() {
         container.image().decode_item_rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
+    assert!(matches!(
+        container.image().decode_item_rgba16(1, &mut Mock::default()),
+        Err(error) if error.kind() == ErrorKind::Unsupported
+    ));
 }
 
 #[test]
-fn ten_bit_frame_is_planar_only() {
+fn ten_bit_frame_is_rejected_by_the_eight_bit_surface() {
     let item = coded_item(1, 1, 10, 200, 4, 4, vec![colr(6, false)]);
     let bytes = file(1, vec![item]);
     let container = HeifContainer::parse(&bytes).unwrap();
@@ -1056,10 +1060,561 @@ fn ten_bit_frame_is_planar_only() {
         .decode_item_planar(1, &mut Mock::default())
         .unwrap();
     assert_eq!(frame.bit_depth(), 10);
+    // Narrowing to 8 bits would be silent quality loss, so the narrow surface still declines...
     assert!(matches!(
         container.image().decode_item_rgba8(1, &mut Mock::default()),
         Err(error) if error.kind() == ErrorKind::Unsupported
     ));
+    // ...while the wide surface presents it.
+    let rgba = container
+        .image()
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap();
+    assert_eq!((rgba.width(), rgba.height()), (4, 4));
+    assert_eq!(rgba.as_samples().len(), 4 * 4 * 4);
+}
+
+#[test]
+fn unmodeled_bit_depth_is_matrixed_only_by_refusal() {
+    // `DecodedFrame` admits 9-bit, but no CICP de-matrixing is modeled for it: an explicit refusal
+    // beats silently reinterpreting it as 8- or 10-bit.
+    let item = coded_item(1, 1, 9, 200, 4, 4, vec![colr(6, false)]);
+    let bytes = file(1, vec![item]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    assert_eq!(
+        container
+            .image()
+            .decode_item_planar(1, &mut Mock::default())
+            .unwrap()
+            .bit_depth(),
+        9
+    );
+    assert!(matches!(
+        container.image().decode_item_rgba16(1, &mut Mock::default()),
+        Err(error) if error.kind() == ErrorKind::Unsupported
+    ));
+    // Monochrome never consults a matrix, so it presents at any depth the frame can carry.
+    let mono = coded_item(1, 0, 9, 200, 4, 4, vec![colr(6, false)]);
+    let bytes = file(1, vec![mono]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    assert!(
+        container
+            .image()
+            .decode_item_rgba16(1, &mut Mock::default())
+            .is_ok()
+    );
+}
+
+// ---- high-bit-depth presentation (issue #303) ------------------------------------------------
+
+/// The `(Kr, Kb)` of an nclx matrix code point, for the reference conversion below.
+fn luma_weights(matrix: u16) -> (f64, f64) {
+    match matrix {
+        1 => (0.2126, 0.0722),
+        5 | 6 => (0.299, 0.114),
+        9 => (0.2627, 0.0593),
+        other => panic!("no reference weights for matrix {other}"),
+    }
+}
+
+/// An independent `f64` reference for the wide surface, written from the H.273 §8.3 equations:
+/// de-matrix at the coded depth, then apply the documented full-16-bit rescale.
+fn ref_rgb16(matrix: u16, full: bool, bd: u8, y: u16, cb: u16, cr: u16) -> (u16, u16, u16) {
+    let (kr, kb) = luma_weights(matrix);
+    let max_in = f64::from((1u32 << bd) - 1);
+    let (yn, cbn, crn) = if full {
+        let mid = f64::from(1u32 << (bd - 1));
+        (
+            f64::from(y) / max_in,
+            (f64::from(cb) - mid) / max_in,
+            (f64::from(cr) - mid) / max_in,
+        )
+    } else {
+        let s = f64::from(1u32 << (bd - 8));
+        (
+            (f64::from(y) - 16.0 * s) / (219.0 * s),
+            (f64::from(cb) - 128.0 * s) / (224.0 * s),
+            (f64::from(cr) - 128.0 * s) / (224.0 * s),
+        )
+    };
+    let kg = 1.0 - kr - kb;
+    let r = yn + 2.0 * (1.0 - kr) * crn;
+    let b = yn + 2.0 * (1.0 - kb) * cbn;
+    let g = yn - (2.0 * kb * (1.0 - kb) / kg) * cbn - (2.0 * kr * (1.0 - kr) / kg) * crn;
+    // Quantize at the coded depth (what the surface actually resolves), then rescale as documented.
+    let q = |v: f64| {
+        let coded = (v.clamp(0.0, 1.0) * max_in).round() as u32;
+        let max = max_in as u32;
+        ((u64::from(coded) * 65535 + u64::from(max) / 2) / u64::from(max)) as u16
+    };
+    (q(r), q(g), q(b))
+}
+
+/// One coded-depth LSB expressed on the 16-bit surface — the tolerance against `ref_rgb16`, since
+/// the surface's precision is inherently that of the coded frame.
+fn coded_lsb16(bd: u8) -> u16 {
+    (65535 / ((1u32 << bd) - 1)) as u16 + 1
+}
+
+/// Decodes a single coded item to the wide surface.
+fn decode_rgba16(
+    chroma_idc: u8,
+    bd: u8,
+    base: u8,
+    w: u32,
+    h: u32,
+    props: Vec<Property>,
+) -> Vec<u16> {
+    let item = coded_item(1, chroma_idc, bd, base, w, h, props);
+    let bytes = file(1, vec![item]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    container
+        .image()
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap()
+        .into_samples()
+}
+
+/// Asserts a 4:2:0 wide-surface decode matches the reference conversion pixel by pixel.
+fn assert_matches_reference(matrix: u16, full: bool, bd: u8, base: u8, w: u32, h: u32) {
+    let got = decode_rgba16(1, bd, base, w, h, vec![colr(matrix, full)]);
+    let tol = coded_lsb16(bd);
+    for y in 0..h {
+        for x in 0..w {
+            let (cx, cy) = (x / 2, y / 2);
+            let want = ref_rgb16(
+                matrix,
+                full,
+                bd,
+                ey(base, x, y, bd),
+                ecb(base, cx, cy, bd),
+                ecr(base, cx, cy, bd),
+            );
+            let o = ((y * w + x) * 4) as usize;
+            for (c, want) in [want.0, want.1, want.2].into_iter().enumerate() {
+                assert!(
+                    got[o + c].abs_diff(want) <= tol,
+                    "matrix={matrix} full={full} bd={bd} ({x},{y}) ch{c}: got {} want {want}",
+                    got[o + c]
+                );
+            }
+            assert_eq!(got[o + 3], 65535, "alpha ({x},{y})");
+        }
+    }
+}
+
+#[test]
+fn bt709_ten_bit_limited_matches_the_reference() {
+    assert_matches_reference(1, false, 10, 200, 4, 4);
+}
+
+#[test]
+fn bt2020_ten_bit_limited_and_full_match_the_reference() {
+    // The issue's headline case: 10-bit BT.2020, both ranges.
+    assert_matches_reference(9, false, 10, 200, 4, 4);
+    assert_matches_reference(9, true, 10, 200, 4, 4);
+    // The two ranges genuinely differ, so a range-ignoring conversion cannot pass.
+    let limited = decode_rgba16(1, 10, 200, 4, 4, vec![colr(9, false)]);
+    let full = decode_rgba16(1, 10, 200, 4, 4, vec![colr(9, true)]);
+    assert_ne!(limited, full);
+}
+
+#[test]
+fn twelve_bit_matches_the_reference() {
+    // Pins that the white level is the frame's own (4095), not 1023 or 255.
+    assert_matches_reference(1, false, 12, 200, 4, 4);
+}
+
+#[test]
+fn matrices_differ_at_ten_bit() {
+    // A tolerance-based comparison passes even if the matrix argument is ignored; this does not.
+    let of = |m| decode_rgba16(1, 10, 200, 4, 4, vec![colr(m, false)]);
+    let (a, b, c) = (of(1), of(6), of(9));
+    assert_ne!(a, b);
+    assert_ne!(b, c);
+    assert_ne!(a, c);
+}
+
+#[test]
+fn eight_bit_widens_exactly_by_257() {
+    // The strongest invariant on the wide surface: 8-bit content is carried losslessly, because
+    // 65535 == 255 * 257. Covers every matrix the surface supports, both ranges, plus monochrome
+    // and identity, and pins opaque alpha at both widths.
+    for (chroma_idc, matrix) in [(3u8, 0u16), (1, 1), (1, 6), (1, 9), (0, 6)] {
+        for full in [false, true] {
+            let props = vec![colr(matrix, full)];
+            let item = coded_item(1, chroma_idc, 8, 33, 4, 4, props.clone());
+            let bytes = file(1, vec![item]);
+            let container = HeifContainer::parse(&bytes).unwrap();
+            let narrow = container
+                .image()
+                .decode_item_rgba8(1, &mut Mock::default())
+                .unwrap()
+                .into_samples();
+            let wide = decode_rgba16(chroma_idc, 8, 33, 4, 4, props);
+            assert_eq!(narrow.len(), wide.len());
+            for (i, (&n, &w)) in narrow.iter().zip(&wide).enumerate() {
+                assert_eq!(
+                    u16::from(n) * 257,
+                    w,
+                    "matrix={matrix} full={full} sample {i}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn bt601_at_eight_bit_still_uses_the_libwebp_inverse() {
+    // The deliberate carve-out: 8-bit BT.601 keeps gamut-color's libwebp-exact integer inverse, so
+    // the output this crate has always produced stays byte-identical. Everything else routes
+    // through the H.273-derived converter.
+    for full in [false, true] {
+        let range = if full {
+            ColorRange::Full
+        } else {
+            ColorRange::Limited
+        };
+        let item = coded_item(1, 1, 8, 15, 4, 4, vec![colr(6, full)]);
+        let bytes = file(1, vec![item]);
+        let container = HeifContainer::parse(&bytes).unwrap();
+        let rgba = container
+            .image()
+            .decode_item_rgba8(1, &mut Mock::default())
+            .unwrap();
+        for y in 0..4u32 {
+            for x in 0..4u32 {
+                let (cx, cy) = (x / 2, y / 2);
+                let (r, g, b) = ycbcr_to_rgb(
+                    ey(15, x, y, 8) as u8,
+                    ecb(15, cx, cy, 8) as u8,
+                    ecr(15, cx, cy, 8) as u8,
+                    range,
+                );
+                let o = ((y * 4 + x) * 4) as usize;
+                assert_eq!(&rgba.as_samples()[o..o + 4], &[r, g, b, 255]);
+            }
+        }
+    }
+}
+
+#[test]
+fn monochrome_ten_bit_expansion_is_golden() {
+    let got = decode_rgba16(0, 10, 200, 3, 2, vec![]);
+    let widen = |coded: i64| ((coded as u64 * 65535 + 511) / 1023) as u16;
+    for y in 0..2u32 {
+        for x in 0..3u32 {
+            // Studio swing at 10-bit — black 64, span 876 — expanded at the coded depth, then
+            // widened, which is the precision model the whole surface uses.
+            let luma = i64::from(ey(200, x, y, 10));
+            let coded = (((luma - 64) * 1023 + 438) / 876).clamp(0, 1023);
+            let want = widen(coded);
+            let o = ((y * 3 + x) * 4) as usize;
+            assert_eq!(&got[o..o + 4], &[want, want, want, 65535], "({x},{y})");
+        }
+    }
+    // Literal anchor: pixel (0,0) luma = 200 ⇒ (200-64)*1023/876 = 159 coded ⇒ 10186.
+    assert_eq!(got[0], widen(159));
+    assert_eq!(got[0], 10186);
+    // Full range is a plain rescale of the same planes, and differs.
+    let full = decode_rgba16(0, 10, 200, 3, 2, vec![colr(6, true)]);
+    assert_ne!(got, full);
+    let luma = u64::from(ey(200, 0, 0, 10));
+    assert_eq!(full[0], ((luma * 65535 + 511) / 1023) as u16);
+}
+
+#[test]
+fn identity_matrix_maps_gbr_directly_at_ten_bit() {
+    let got = decode_rgba16(3, 10, 200, 3, 2, vec![colr(0, true)]);
+    let scale = |s: u16| ((u64::from(s) * 65535 + 511) / 1023) as u16;
+    for y in 0..2u32 {
+        for x in 0..3u32 {
+            let o = ((y * 3 + x) * 4) as usize;
+            assert_eq!(
+                &got[o..o + 4],
+                &[
+                    scale(ecr(200, x, y, 10)),
+                    scale(ey(200, x, y, 10)),
+                    scale(ecb(200, x, y, 10)),
+                    65535
+                ],
+                "({x},{y})"
+            );
+        }
+    }
+    // Identity still requires 4:4:4 on the wide surface.
+    let item = coded_item(1, 1, 10, 200, 4, 4, vec![colr(0, true)]);
+    let bytes = file(1, vec![item]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    assert!(matches!(
+        container.image().decode_item_rgba16(1, &mut Mock::default()),
+        Err(error) if error.kind() == ErrorKind::Unsupported
+    ));
+}
+
+#[test]
+fn grid_and_irot_on_a_ten_bit_item() {
+    // The combination issue #303 calls out: derived-image assembly and a transform on a >8-bit
+    // item, presented through the wide surface.
+    let tile = |id: u32, base: u8| Item {
+        hidden: true,
+        ..coded_item(id, 0, 10, base, 2, 2, vec![])
+    };
+    let bases = [10u8, 40, 70, 100];
+    let grid = Item {
+        properties: vec![irot(1)],
+        ..grid_item(1, 2, 2, 3, 3, &[2, 3, 4, 5])
+    };
+    let bytes = file(
+        1,
+        vec![
+            grid,
+            tile(2, bases[0]),
+            tile(3, bases[1]),
+            tile(4, bases[2]),
+            tile(5, bases[3]),
+        ],
+    );
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let rgba = container
+        .image()
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap();
+
+    // Independent reference: assemble the 3x3 monochrome canvas, expand, then rotate.
+    let mut flat = vec![0u16; 3 * 3 * 4];
+    for oy in 0..3u32 {
+        for ox in 0..3u32 {
+            let base = bases[((oy / 2) * 2 + ox / 2) as usize];
+            let luma = i64::from(ey(base, ox % 2, oy % 2, 10));
+            let coded = (((luma - 64) * 1023 + 438) / 876).clamp(0, 1023) as u64;
+            let g = ((coded * 65535 + 511) / 1023) as u16;
+            let o = ((oy * 3 + ox) * 4) as usize;
+            flat[o..o + 4].copy_from_slice(&[g, g, g, 65535]);
+        }
+    }
+    let (want, ww, wh) = ref_rotate_ccw(&flat, 3, 3);
+    assert_eq!((rgba.width(), rgba.height()), (ww, wh));
+    assert_eq!(rgba.as_samples(), &want[..]);
+}
+
+#[test]
+fn imir_and_clap_on_a_ten_bit_item() {
+    let props = vec![colr(0, true), imir(1), clap(2, 1, 2, 1, 0, 1, 0, 1)];
+    let item = coded_item(1, 3, 10, 200, 4, 4, props);
+    let bytes = file(1, vec![item]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let rgba = container
+        .image()
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap();
+
+    let scale = |s: u16| ((u64::from(s) * 65535 + 511) / 1023) as u16;
+    let mut flat = vec![0u16; 4 * 4 * 4];
+    for y in 0..4u32 {
+        for x in 0..4u32 {
+            let o = ((y * 4 + x) * 4) as usize;
+            flat[o..o + 4].copy_from_slice(&[
+                scale(ecr(200, x, y, 10)),
+                scale(ey(200, x, y, 10)),
+                scale(ecb(200, x, y, 10)),
+                65535,
+            ]);
+        }
+    }
+    let mirrored = ref_mirror(&flat, 4, 4, 1);
+    let want = ref_crop(&mirrored, 4, 1, 1, 2, 2);
+    assert_eq!((rgba.width(), rgba.height()), (2, 2));
+    assert_eq!(rgba.as_samples(), &want[..]);
+}
+
+#[test]
+fn absent_alpha_is_opaque_at_sixteen_bit() {
+    let got = decode_rgba16(1, 10, 200, 4, 4, vec![colr(9, false)]);
+    for px in got.chunks_exact(4) {
+        assert_eq!(px[3], 65535);
+    }
+}
+
+#[test]
+fn decode_primary_rgba16_and_container_forwarders_agree() {
+    let item = coded_item(7, 1, 10, 200, 4, 4, vec![colr(9, false)]);
+    let bytes = file(7, vec![item]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let by_id = container
+        .image()
+        .decode_item_rgba16(7, &mut Mock::default())
+        .unwrap()
+        .into_samples();
+    let primary = container
+        .image()
+        .decode_primary_rgba16(&mut Mock::default())
+        .unwrap()
+        .into_samples();
+    let fwd_item = container
+        .decode_item_rgba16(7, &mut Mock::default())
+        .unwrap()
+        .into_samples();
+    let fwd_primary = container
+        .decode_primary_rgba16(&mut Mock::default())
+        .unwrap()
+        .into_samples();
+    assert_eq!(by_id, primary);
+    assert_eq!(by_id, fwd_item);
+    assert_eq!(by_id, fwd_primary);
+}
+
+#[test]
+fn alpha_auxiliary_at_ten_bit_merges_onto_the_wide_surface() {
+    // The alpha auxiliary's depth is independent of the master's, so exercise a 10-bit master with
+    // a 10-bit alpha and an 8-bit master with a 9-bit alpha.
+    for (master_bd, alpha_bd) in [(10u8, 10u8), (8, 9)] {
+        let master = coded_item(1, 3, master_bd, 33, 2, 2, vec![colr(0, true)]);
+        let alpha = alpha_aux_bd(2, 1, 77, 2, 2, alpha_bd);
+        let bytes = file(1, vec![master, alpha]);
+        let container = HeifContainer::parse(&bytes).unwrap();
+        let got = container
+            .image()
+            .decode_item_rgba16(1, &mut Mock::default())
+            .unwrap()
+            .into_samples();
+        let max = u64::from((1u32 << alpha_bd) - 1);
+        for i in 0..4usize {
+            let s = u64::from(ey(77, (i % 2) as u32, (i / 2) as u32, alpha_bd));
+            let want = ((s * 65535 + max / 2) / max) as u16;
+            assert_eq!(
+                got[i * 4 + 3],
+                want,
+                "master_bd={master_bd} alpha_bd={alpha_bd} px {i}"
+            );
+        }
+    }
+}
+
+#[test]
+fn overlay_blend_rounding_is_observable_on_a_translucent_canvas() {
+    // Every other overlay test composites onto an *opaque* canvas, where `da · (MAX - sa)` is
+    // always a multiple of MAX and the source-over rounding addends cancel exactly. This one uses
+    // a nearly-transparent canvas fill so both addends — the alpha term and the per-channel term —
+    // change the result, pinning the `MAX / 2` rounding the blend depends on.
+    let src = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 0, 2, 2, vec![colr(0, true)])
+    };
+    let src_alpha = alpha_aux(3, 2, 0, 2, 2);
+    let ov = Item {
+        references: vec![dimg(&[2])],
+        payload: ImageOverlay {
+            // (2, 1, 0) at alpha 1 after `>> 8`.
+            canvas_fill_value: [0x0200, 0x0100, 0x0000, 0x0100],
+            output_width: 2,
+            output_height: 2,
+            offsets: vec![(0, 0)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    let bytes = file(1, vec![ov, src, src_alpha]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let got = container
+        .image()
+        .decode_item_rgba8(1, &mut Mock::default())
+        .unwrap();
+
+    // Independent integer reference of ISO/IEC 23008-12 §6.6.2.4 source-over, round-half-up.
+    let (da, fill) = (1u32, [2u32, 1, 0]);
+    for y in 0..2u32 {
+        for x in 0..2u32 {
+            let sa = u32::from(ey(0, x, y, 8) as u8);
+            let sc = [
+                u32::from(ecr(0, x, y, 8) as u8),
+                u32::from(ey(0, x, y, 8) as u8),
+                u32::from(ecb(0, x, y, 8) as u8),
+            ];
+            let inv = 255 - sa;
+            let out_a = sa + (da * inv + 127) / 255;
+            let mut want = [0u8; 4];
+            for c in 0..3 {
+                let num = sc[c] * sa + (fill[c] * da * inv + 127) / 255;
+                want[c] = ((num + out_a / 2) / out_a).min(255) as u8;
+            }
+            want[3] = out_a as u8;
+            let o = ((y * 2 + x) * 4) as usize;
+            assert_eq!(&got.as_samples()[o..o + 4], &want, "({x},{y})");
+        }
+    }
+    // Literal anchors: each of these differs if either rounding addend is altered.
+    assert_eq!(&got.as_samples()[0..4], &[2, 1, 0, 1]);
+    assert_eq!(&got.as_samples()[4..8], &[73, 3, 34, 4]);
+    assert_eq!(&got.as_samples()[8..12], &[97, 16, 48, 18]);
+    assert_eq!(&got.as_samples()[12..16], &[105, 19, 53, 21]);
+}
+
+#[test]
+fn overlay_composites_at_sixteen_bit_across_mixed_depths() {
+    // An `iovl` may composite sub-items of different coded depths — only `grid` requires
+    // uniformity. Normalizing every sub-item to the full 16-bit range is what makes that work.
+    let a = Item {
+        hidden: true,
+        ..coded_item(2, 3, 8, 50, 2, 2, vec![colr(0, true)])
+    };
+    let b = Item {
+        hidden: true,
+        ..coded_item(3, 3, 10, 130, 2, 2, vec![colr(0, true)])
+    };
+    let ov = Item {
+        references: vec![dimg(&[2, 3])],
+        payload: ImageOverlay {
+            // On the 16-bit surface the fill channels are used verbatim, not shifted down.
+            canvas_fill_value: [0x1234, 0x5678, 0x9ABC, 0xFFFF],
+            output_width: 4,
+            output_height: 4,
+            offsets: vec![(-1, -1), (1, 1)],
+        }
+        .to_bytes()
+        .unwrap(),
+        ..base_item(1, *b"iovl")
+    };
+    let bytes = file(1, vec![ov, a, b]);
+    let container = HeifContainer::parse(&bytes).unwrap();
+    let got = container
+        .image()
+        .decode_item_rgba16(1, &mut Mock::default())
+        .unwrap();
+    assert_eq!((got.width(), got.height()), (4, 4));
+
+    // Both sub-items are opaque, so each simply overwrites where it lands; everywhere else keeps
+    // the verbatim fill.
+    let widen8 = |s: u16| s * 257;
+    let widen10 = |s: u16| ((u64::from(s) * 65535 + 511) / 1023) as u16;
+    let samples = got.as_samples();
+    for y in 0..4u32 {
+        for x in 0..4u32 {
+            let o = ((y * 4 + x) * 4) as usize;
+            let want = if (x, y) == (0, 0) {
+                // A's pixel (1,1), 8-bit identity/GBR.
+                [
+                    widen8(ecr(50, 1, 1, 8)),
+                    widen8(ey(50, 1, 1, 8)),
+                    widen8(ecb(50, 1, 1, 8)),
+                    65535,
+                ]
+            } else if (1..3).contains(&x) && (1..3).contains(&y) {
+                // B's pixel (x-1, y-1), 10-bit identity/GBR.
+                let (sx, sy) = (x - 1, y - 1);
+                [
+                    widen10(ecr(130, sx, sy, 10)),
+                    widen10(ey(130, sx, sy, 10)),
+                    widen10(ecb(130, sx, sy, 10)),
+                    65535,
+                ]
+            } else {
+                [0x1234, 0x5678, 0x9ABC, 0xFFFF]
+            };
+            assert_eq!(&samples[o..o + 4], &want, "({x},{y})");
+        }
+    }
 }
 
 // ---- alpha -----------------------------------------------------------------------------------

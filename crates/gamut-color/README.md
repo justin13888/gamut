@@ -49,10 +49,11 @@ explicit `code_point`/`from_code_point` API rather than serde's representation.
 Released as **v1** (issue #179); see [`STATUS.md`](STATUS.md) for the phase history, the frozen
 API policies, and the deferrals. Implemented today: 8-bit RGB ↔ identity 4:4:4 conversion
 ([`Planar8::from_rgb8_identity`] / [`Planar8::to_rgb8_identity`]), the CICP tables the AVIF
-`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP), the general H.273 §8.3 luma–chroma matrices
-at 4:4:4 (`YcbcrMatrix`: BT.601 / BT.709 / BT.2020-NCL, both signal ranges, used by the AVIF lossy
-path), and the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto
-gamuts. The remaining bit depths and the subsampled plane geometries are modeled in the type
+`colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP), the general H.273 §8.3 luma–chroma transform
+in both directions (`RgbToYcbcr` / `YcbcrMatrix`: BT.601 / BT.470 B,G / BT.709 / BT.2020-NCL, both
+signal ranges, at every modeled bit depth — the AVIF lossy encode path and the AVIF/HEIC
+presentation path), and the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and
+ProPhoto gamuts. The 10/12-bit *plane* geometries and the subsampled ones are modeled in the type
 system (`#[non_exhaustive]` enums, so extension is non-breaking) and land with the milestones
 tracked in
 [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md). See the crate docs ("Implemented vs. modeled")

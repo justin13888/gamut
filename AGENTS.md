@@ -116,6 +116,8 @@ mise run fmt-check     # formatting (nightly rustfmt, auto-installed)
 mise run lint          # lint (Clippy, warnings as errors)
 mise run coverage      # coverage (minimum 80%)
 mise run mutants       # mutation testing (needs submodules + C toolchain; run `mise install` once)
+mise run test-dng-real # gamut-dng vs real camera DNGs (needs `mise run fetch-dng-samples`
+                       # first: a ~178 MiB CC0 corpus submodule). Extended CI, master/manual
 mise run check-cross <triple> # cross-compile check (wasm32/aarch64/musl); extended CI, master/manual
 mise run check-msrv    # compile on documented MSRV; extended CI, master/manual
 mise run check-commits # commit messages are Conventional Commits
