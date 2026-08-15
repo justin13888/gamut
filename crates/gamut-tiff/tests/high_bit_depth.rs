@@ -544,3 +544,50 @@ fn white_is_zero_inverts_at_sixteen_bits() {
     let inverted: Vec<u16> = src.iter().map(|&v| u16::MAX - v).collect();
     assert_eq!(got.as_samples(), inverted.as_slice());
 }
+
+#[test]
+fn sixteen_bit_cmyk_reaches_eight_bit_ink_only_under_a_depth_policy() {
+    // A 16-bit CMYK page is the one decodable layout with no pixel type to land in: the ink model
+    // has no 16-bit member. It must still decode — to `Cmyk8`, and only once the policy permits the
+    // narrowing — rather than being refused for want of a `Cmyk16`. Hand-built because gamut's
+    // encoder writes 8-bit CMYK only.
+    let samples: Vec<u16> = vec![
+        0x0000, 0x00FF, 0x0100, 0x01FF, // pixel 0
+        0xFFFF, 0x8000, 0x4321, 0xFEDC, // pixel 1
+    ];
+    let mut strip = Vec::with_capacity(samples.len() * 2);
+    for &v in &samples {
+        strip.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut ifd = Ifd::new();
+    ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![2]));
+    ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![1]));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![16, 16, 16, 16]));
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![4]));
+    ifd.set(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        Value::Short(vec![PhotometricInterpretation::Cmyk as u16]),
+    );
+    ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+    ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![1]));
+    let tiff = write_image(ByteOrder::LittleEndian, Variant::Classic, &ifd, &[strip])
+        .expect("write fixture");
+
+    let refused: Result<ImageBuf<Cmyk8>, _> = TiffDecoder::new().decode_image(&tiff);
+    assert_eq!(
+        refused.err().map(|e| e.static_message()),
+        Some(Some(
+            "TIFF: 16-bit CMYK needs a depth policy to reach 8-bit ink samples"
+        )),
+        "the default decoder refuses to narrow ink samples"
+    );
+
+    let dec = TiffDecoder::new().convert_policy(ConvertPolicy::permissive());
+    let got: ImageBuf<Cmyk8> = dec.decode_image(&tiff).expect("decode");
+    let expected: Vec<u8> = samples
+        .iter()
+        .map(|&v| ((u32::from(v) * 255 + 32767) / 65535) as u8)
+        .collect();
+    assert_eq!(got.as_samples(), expected.as_slice());
+    assert_eq!(got.dimensions(), dims(2, 1));
+}
