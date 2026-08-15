@@ -423,6 +423,10 @@ fn convert_policy_round_trips_and_reaches_the_decode() {
     let refused = DecodeImage::<Gray8>::decode_image(&JxlDecoder::new(), &bytes)
         .expect_err("colour as grayscale must not be guessed");
     assert_eq!(refused.kind(), ErrorKind::Unsupported);
+    // The refusal must come from this crate, before the entropy decode -- not from gamut-core
+    // afterwards. Both would report Unsupported, so the origin is what distinguishes "declined the
+    // request" from "decoded the whole image and then declined".
+    assert_eq!(refused.origin(), Some("gamut-jxl"));
 
     let bt601: ImageBuf<Gray8> = JxlDecoder::new()
         .with_convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt601))
