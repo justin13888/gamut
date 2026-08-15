@@ -28,8 +28,8 @@
 //!
 //! - **Implemented:** 8-bit ([`BitDepth::Eight`]) RGB → identity 4:4:4 ([`ChromaSubsampling::Cs444`],
 //!   [`MatrixCoefficients::Identity`]) planes; the CICP code-point tables; BT.601 YCbCr 4:2:0
-//!   ([`ycbcr`]); and the `f64` colour science ([`transfer`], [`oklab`], [`matrix`], [`gamut_map`],
-//!   [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
+//!   ([`ycbcr`]); and the `f64` colour science ([`transfer`], [`oklab`], [`xyb`], [`matrix`],
+//!   [`gamut_map`], [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
 //! - **Modeled but deferred:** 10/12-bit ([`BitDepth::Ten`] / [`BitDepth::Twelve`], awaiting AV1
 //!   encode wiring — distinct from [`BitDepth::Sixteen`], which is outside the AV1 profile set
 //!   entirely and exists for the 16-bit still-image pipelines that share these types); the subsampled
@@ -49,6 +49,7 @@ pub mod pixel;
 pub mod planar;
 pub mod profile;
 pub mod transfer;
+pub mod xyb;
 pub mod ycbcr;
 
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
