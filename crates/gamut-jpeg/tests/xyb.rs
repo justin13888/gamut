@@ -111,6 +111,25 @@ fn xyb_stream_structure_is_the_jpegli_convention() {
 }
 
 #[test]
+fn xyb_byte_count_is_relative_to_appended_output() {
+    // The XYB path returns early with its own byte count: encode into a Vec that already holds a
+    // 5-byte prefix and check the count covers only the appended stream, prefix left intact.
+    let prefix = [0xA1u8, 0xA2, 0xA3, 0xA4, 0xA5];
+    let src = rgb_gradient(8, 8);
+    let img = ImageRef::<Rgb8>::new(&src, Dimensions::new(8, 8).unwrap()).unwrap();
+
+    let mut out = prefix.to_vec();
+    let n = JpegEncoder::new()
+        .with_color_mode(JpegColorMode::Xyb)
+        .encode_image(img, &mut out)
+        .unwrap();
+
+    assert_eq!(n, out.len() - prefix.len());
+    assert_eq!(&out[..prefix.len()], &prefix);
+    assert_eq!(&out[prefix.len()..prefix.len() + 2], &[0xFF, 0xD8]); // SOI right after the prefix
+}
+
+#[test]
 fn xyb_round_trips_through_libjpeg_and_through_gamut() {
     // Both decoders see passthrough samples; inverting the XYB pipeline in the test must recover
     // the source within JPEG-lossy tolerance, baseline and progressive, plus a restart cell.
