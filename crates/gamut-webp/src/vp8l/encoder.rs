@@ -18,11 +18,14 @@ use gamut_core::{Dimensions, Error, Result};
 
 use crate::config::Effort;
 use crate::vp8l::bit_io::BitWriter;
-use crate::vp8l::color_cache::ColorCache;
+use crate::vp8l::color_cache::{ColorCache, MAX_CACHE_BITS};
 use crate::vp8l::div_round_up;
 use crate::vp8l::header::Vp8lHeader;
 use crate::vp8l::lz77::{BackwardRefs, DistanceCodes, value_to_prefix};
-use crate::vp8l::plan::{CacheBits, Grouping, Lz77Params, Structure, Vp8lPlan, enumerate};
+use crate::vp8l::plan::{
+    CacheBits, DEFAULT_PREFIX_BITS, Grouping, Lz77Params, PaletteOrder, Structure, Vp8lPlan,
+    enumerate,
+};
 use crate::vp8l::prefix::{
     MAX_CODE_LENGTH, NUM_DISTANCE_CODES, NUM_LENGTH_CODES, NUM_LITERAL_CODES, PrefixEncoder,
     build_length_limited_lengths, green_alphabet_size, write_prefix_code,
@@ -119,16 +122,20 @@ pub fn encode_image(argb: &[u32], dims: Dimensions, effort: Effort) -> Result<Ve
 /// Candidates are compared in **bits**, not bytes: the body is byte-padded only once, when it is
 /// flushed, and `ceil` is monotone, so minimising bits also minimises the finished chunk.
 fn best_body(argb: &[u32], dims: Dimensions, effort: Effort) -> Vec<u8> {
+    // Built once and shared: every palette candidate needs it, and it is an O(n) hash pass.
+    let palette = build_palette(argb);
     let mut best: Option<(usize, Vec<u8>)> = None;
     for plan in enumerate(effort) {
         let mut w = BitWriter::new();
-        write_image_body(&mut w, argb, dims, &plan);
+        if !write_image_body(&mut w, argb, dims, &plan, palette.as_deref()) {
+            continue; // The plan does not apply to this image (a palette plan without a palette).
+        }
         let bits = w.bit_len();
         if best.as_ref().is_none_or(|(best_bits, _)| bits < *best_bits) {
             best = Some((bits, w.finish()));
         }
     }
-    // `enumerate` always offers at least one plan, which its own test pins.
+    // `enumerate` always offers at least one plan, and `Structure::Auto` always applies.
     best.map(|(_, bytes)| bytes).unwrap_or_default()
 }
 
@@ -144,37 +151,97 @@ fn check_dimensions(argb: &[u32], dims: Dimensions) -> Result<()> {
     }
 }
 
-/// Writes the image body (transforms + spatially-coded image). Few-color images take the palette
-/// path; everything else takes the spatial-transform path. Choosing the densest path for a given
-/// image is a tuning concern deferred to issue #31.
-fn write_image_body(w: &mut BitWriter, argb: &[u32], dims: Dimensions, plan: &Vp8lPlan) {
+/// Writes the image body (transforms + spatially-coded image) under `plan`.
+///
+/// Returns `false` without writing anything when the plan does not apply to this image — a palette
+/// plan for an image with too many distinct colours — so the driver can skip it. Applicability
+/// depends only on the pixels, never on the effort level, which is what keeps a rung's candidate
+/// list a superset of the rung below's after filtering.
+fn write_image_body(
+    w: &mut BitWriter,
+    argb: &[u32],
+    dims: Dimensions,
+    plan: &Vp8lPlan,
+    palette: Option<&[u32]>,
+) -> bool {
     match plan.structure {
-        Structure::Auto => match build_palette(argb) {
-            Some(palette) => encode_palette(w, argb, dims, &palette, plan),
-            None => encode_spatial(w, argb, dims, plan),
+        Structure::Auto => match palette {
+            Some(palette) => encode_palette(w, argb, dims, palette, PaletteOrder::FirstSeen, plan),
+            None => encode_spatial(w, argb, dims, FULL_SPATIAL_CHAIN, plan),
         },
+        Structure::Palette { order } => match palette {
+            Some(palette) => encode_palette(w, argb, dims, palette, order, plan),
+            None => return false,
+        },
+        Structure::Spatial {
+            subtract_green,
+            predictor,
+            color,
+        } => encode_spatial(
+            w,
+            argb,
+            dims,
+            SpatialChain {
+                subtract_green,
+                predictor,
+                color,
+            },
+            plan,
+        ),
     }
+    true
 }
+
+/// The spatial transforms a single encode applies, in emission order.
+#[derive(Clone, Copy)]
+struct SpatialChain {
+    subtract_green: bool,
+    predictor: Option<u8>,
+    color: Option<u8>,
+}
+
+/// The historical full chain, which `Structure::Auto` falls back to.
+const FULL_SPATIAL_CHAIN: SpatialChain = SpatialChain {
+    subtract_green: true,
+    predictor: Some(TRANSFORM_SIZE_BITS),
+    color: Some(TRANSFORM_SIZE_BITS),
+};
 
 /// Encodes via the spatial transforms (subtract-green, predictor, color) applied in read order; the
 /// decoder inverts them last-first.
-fn encode_spatial(w: &mut BitWriter, argb: &[u32], dims: Dimensions, plan: &Vp8lPlan) {
+///
+/// Each transform is independently optional: emitting one is not free — the predictor and colour
+/// transforms each carry a sub-resolution image — so a transform that does not pay for itself is
+/// better omitted than applied with a degenerate sub-image.
+fn encode_spatial(
+    w: &mut BitWriter,
+    argb: &[u32],
+    dims: Dimensions,
+    chain: SpatialChain,
+    plan: &Vp8lPlan,
+) {
     let (width, height) = (dims.width, dims.height);
     let mut pixels = argb.to_vec();
 
-    forward_subtract_green(&mut pixels);
-    write_transform_tag(w, SUBTRACT_GREEN_TRANSFORM);
+    if chain.subtract_green {
+        forward_subtract_green(&mut pixels);
+        write_transform_tag(w, SUBTRACT_GREEN_TRANSFORM);
+    }
 
-    let (residual, predictor_sub) = forward_predictor(&pixels, width, height, TRANSFORM_SIZE_BITS);
-    pixels = residual;
-    write_transform_tag(w, PREDICTOR_TRANSFORM);
-    w.write_bits(u32::from(TRANSFORM_SIZE_BITS - 2), 3);
-    write_sub_image(w, &predictor_sub);
+    if let Some(bits) = chain.predictor {
+        let (residual, predictor_sub) = forward_predictor(&pixels, width, height, bits);
+        pixels = residual;
+        write_transform_tag(w, PREDICTOR_TRANSFORM);
+        w.write_bits(u32::from(bits - 2), 3);
+        write_sub_image(w, &predictor_sub);
+    }
 
-    let color_sub = forward_color(&mut pixels, width, height, TRANSFORM_SIZE_BITS);
-    write_transform_tag(w, COLOR_TRANSFORM);
-    w.write_bits(u32::from(TRANSFORM_SIZE_BITS - 2), 3);
-    write_sub_image(w, &color_sub);
+    if let Some(bits) = chain.color {
+        let color_sub = forward_color(&mut pixels, width, height, bits);
+        write_transform_tag(w, COLOR_TRANSFORM);
+        w.write_bits(u32::from(bits - 2), 3);
+        write_sub_image(w, &color_sub);
+    }
 
     w.write_bits(0, 1); // End of transforms.
     write_main_image(w, &pixels, width, plan);
@@ -187,8 +254,10 @@ fn encode_palette(
     argb: &[u32],
     dims: Dimensions,
     palette: &[u32],
+    order: PaletteOrder,
     plan: &Vp8lPlan,
 ) {
+    let palette = order_palette(palette, order);
     write_transform_tag(w, COLOR_INDEXING_TRANSFORM);
     w.write_bits((palette.len() - 1) as u32, 8);
 
@@ -200,9 +269,24 @@ fn encode_palette(
     }
     write_sub_image(w, &palette_image);
 
-    let (bundled, bundled_width) = forward_color_indexing(argb, dims.width, dims.height, palette);
+    let (bundled, bundled_width) = forward_color_indexing(argb, dims.width, dims.height, &palette);
     w.write_bits(0, 1); // End of transforms.
     write_main_image(w, &bundled, bundled_width, plan);
+}
+
+/// Reorders a palette.
+///
+/// The ordering is a free encoder choice — the decoder just reads the table — but it changes two
+/// costs at once: the palette is stored subtraction-coded onto the previous entry, so sorting
+/// shrinks those deltas, and the index image is spatially predicted, so putting similar colours on
+/// adjacent indices makes its residuals smaller too.
+fn order_palette(palette: &[u32], order: PaletteOrder) -> Vec<u32> {
+    let mut out = palette.to_vec();
+    match order {
+        PaletteOrder::FirstSeen => {}
+        PaletteOrder::Ascending => out.sort_unstable(),
+    }
+    out
 }
 
 /// Collects the distinct colors in first-seen order, or `None` if there are more than
@@ -342,9 +426,7 @@ fn write_sub_image(w: &mut BitWriter, pixels: &[u32]) {
 /// Writes the top-level image with a color cache, LZ77 backward references, and (when the encoder
 /// splits the image into multiple statistical regions) a meta-prefix entropy image.
 fn write_main_image(w: &mut BitWriter, pixels: &[u32], width: u32, plan: &Vp8lPlan) {
-    let cache_bits = match plan.cache {
-        CacheBits::Auto => pick_cache_bits(pixels.len()),
-    };
+    let cache_bits = resolve_cache_bits(plan.cache, pixels.len());
     let cache_size = if cache_bits > 0 {
         1usize << cache_bits
     } else {
@@ -420,6 +502,20 @@ impl GroupAssignment {
     }
 }
 
+/// The degenerate assignment: every meta-block in one prefix-code group, so no entropy image is
+/// emitted and the image carries exactly one set of code descriptions.
+fn single_group(prefix_bits: u32, width: u32, height: u32) -> GroupAssignment {
+    let grid_width = div_round_up(width, 1 << prefix_bits);
+    let grid_height = div_round_up(height, 1 << prefix_bits);
+    let num_blocks = (grid_width as usize) * (grid_height as usize);
+    GroupAssignment {
+        prefix_bits,
+        grid_width,
+        block_group: vec![0; num_blocks.max(1)],
+        num_groups: 1,
+    }
+}
+
 /// Assigns meta-blocks to groups by a cheap signature (each block's most frequent green symbol).
 /// Distinct signatures become distinct groups; if every block matches, a single group is used (no
 /// entropy-image overhead). Smarter, cost-aware clustering is deferred to issue #31.
@@ -430,16 +526,16 @@ fn assign_groups(
     grouping: &Grouping,
 ) -> GroupAssignment {
     use std::collections::HashMap;
-    let Grouping::Signature { prefix_bits } = *grouping;
+    let prefix_bits = match *grouping {
+        // One group for the whole image: no entropy image and no per-group code descriptions, which
+        // is the cheaper choice whenever the image has no strong statistical regions.
+        Grouping::Single => return single_group(DEFAULT_PREFIX_BITS, width, height),
+        Grouping::Signature { prefix_bits } => prefix_bits,
+    };
     let grid_width = div_round_up(width, 1 << prefix_bits);
     let grid_height = div_round_up(height, 1 << prefix_bits);
     let num_blocks = (grid_width as usize) * (grid_height as usize);
-    let single = GroupAssignment {
-        prefix_bits,
-        grid_width,
-        block_group: vec![0; num_blocks.max(1)],
-        num_groups: 1,
-    };
+    let single = single_group(prefix_bits, width, height);
     if num_blocks <= 1 || width == 0 {
         return single;
     }
@@ -492,9 +588,12 @@ fn assign_groups(
 }
 
 /// Tokenizes `pixels` into literals, LZ77 copies, and color-cache hits, simulating the cache exactly
-/// as the decoder will reconstruct it (every produced pixel is inserted, in stream order). Token
-/// preference is copy > cache > literal — a simple deterministic policy; optimal parsing is deferred
-/// to issue #31.
+/// as the decoder will reconstruct it (every produced pixel is inserted, in stream order).
+///
+/// The base policy is greedy with the preference copy > cache > literal. With
+/// [`Lz77Params::lazy`] set, a match is deferred whenever emitting a literal at this position lets
+/// a **strictly longer** match start at the next one — the classic lazy-matching trade, which
+/// pays whenever a short match would otherwise swallow the start of a long run.
 fn tokenize(pixels: &[u32], cache_bits: u32, lz77: &Lz77Params) -> Vec<Token> {
     let n = pixels.len();
     let mut tokens = Vec::new();
@@ -507,7 +606,36 @@ fn tokenize(pixels: &[u32], cache_bits: u32, lz77: &Lz77Params) -> Vec<Token> {
 
     let mut i = 0;
     while i < n {
-        if let Some((len, dist)) = refs.find(pixels, i) {
+        // Lazy matching probes the next position against the chain as it stands, without first
+        // indexing this one. Indexing `i` here would either have to be undone (the chain is a
+        // singly-linked list, so it cannot be) or repeated when the copy branch runs, and a double
+        // insert makes `prev[i] == i`, which loops forever in `find`. The cost of not indexing `i`
+        // is only that a distance-1 match from `i + 1` is invisible to the probe, which merely
+        // makes the encoder slightly less eager to defer — never incorrect.
+        let candidate = refs.find(pixels, i);
+        let defer = lz77.lazy
+            && candidate.is_some_and(|(len, _)| {
+                refs.find(pixels, i + 1)
+                    .is_some_and(|(next_len, _)| next_len > len)
+            });
+        if defer {
+            let pixel = pixels[i];
+            let hit_slot = cache.as_ref().and_then(|c| {
+                let slot = c.slot(pixel);
+                (c.lookup(slot as u32) == pixel).then_some(slot)
+            });
+            match hit_slot {
+                Some(slot) => tokens.push(Token::CacheIndex(slot as u16)),
+                None => tokens.push(Token::Literal(pixel)),
+            }
+            if let Some(c) = cache.as_mut() {
+                c.insert(pixel);
+            }
+            refs.insert(pixels, i);
+            i += 1;
+            continue;
+        }
+        if let Some((len, dist)) = candidate {
             tokens.push(Token::Copy { len, dist });
             let end = i + len as usize;
             while i < end {
@@ -544,6 +672,26 @@ fn pick_cache_bits(num_pixels: usize) -> u32 {
         0
     } else {
         (usize::BITS - (num_pixels - 1).leading_zeros()).clamp(1, 10)
+    }
+}
+
+/// Resolves a plan's [`CacheBits`] against the image actually being coded.
+///
+/// The heuristic self-caps at 10 while the spec allows 11 (`MAX_CACHE_BITS`), so a positive delta
+/// can reach a size the heuristic never picks. A resolved value of 0 means no cache at all.
+fn resolve_cache_bits(cache: CacheBits, num_pixels: usize) -> u32 {
+    match cache {
+        CacheBits::Auto => pick_cache_bits(num_pixels),
+        CacheBits::Off => 0,
+        CacheBits::AutoDelta(delta) => {
+            let base = pick_cache_bits(num_pixels);
+            if base == 0 {
+                // The image is too small for a cache to pay for its own code; a delta must not
+                // conjure one, or the tiny-image plans all degrade.
+                return 0;
+            }
+            (i64::from(base) + i64::from(delta)).clamp(1, MAX_CACHE_BITS as i64) as u32
+        }
     }
 }
 

@@ -6,10 +6,18 @@
 //! vector), so any change to the default output — including one that merely re-orders chunks — fails
 //! here rather than silently shipping. The digests were captured from the pre-change encoder.
 //!
-//! Re-pinning is deliberate and rare. The **lossless** digests were re-captured once, when the VP8L
-//! encoder began choosing the smallest of the spec's prefix-code description encodings (issue #31):
-//! 696 → 238 and 690 → 234 bytes for the same pixels. The lossy digests are unchanged from the
-//! original capture, which is what makes them a working regression net either side of that change.
+//! Re-pinning is deliberate, and every re-pin is a commit that says why. The issue-#31 density work
+//! moved these twice: first when the encoder began choosing the smallest of the spec's prefix-code
+//! description encodings, then when the effort ladder began racing candidate encodings against each
+//! other. Cumulatively, for the same pixels:
+//!
+//! - lossless RGB 696 → 182 bytes, lossless RGBA 690 → 178 (−74%);
+//! - the transparent lossy file 932 → 186, because its `ALPH` chunk — a green-only image — now
+//!   reaches a transform chain suited to it instead of one that decorrelates channels it does not
+//!   have.
+//!
+//! The **lossy VP8 digests are untouched** throughout, which is what keeps this file a working
+//! regression net for the codestream-backend seam across all of that churn.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
 use gamut_webp::{WebpDecoder, WebpEncoder};
@@ -79,7 +87,7 @@ fn assert_bytes(what: &str, bytes: &[u8], len: usize, digest: u64) {
 #[test]
 fn lossless_rgb_default_bytes_are_unchanged() {
     let file = encode_rgb(&WebpEncoder::lossless(), &rgb_fixture(24, 16), dims(24, 16));
-    assert_bytes("lossless rgb", &file, 238, 0xe5d6_66c6_021f_86f3);
+    assert_bytes("lossless rgb", &file, 182, 0x8e85_b274_9b43_e196);
 }
 
 #[test]
@@ -89,7 +97,7 @@ fn lossless_rgba_default_bytes_are_unchanged() {
         &rgba_fixture(24, 16),
         dims(24, 16),
     );
-    assert_bytes("lossless rgba", &file, 234, 0x8020_d49d_cd1b_9a08);
+    assert_bytes("lossless rgba", &file, 178, 0xbc81_86a9_fd2e_b67b);
 }
 
 #[test]
@@ -103,7 +111,7 @@ fn lossy_rgba_extended_default_bytes_are_unchanged() {
     // The transparent path: VP8X + ALPH + VP8 . `ALPH` stays container-side, so its bytes are
     // pinned here too.
     let file = encode_rgba(&WebpEncoder::lossy(60), &rgba_fixture(32, 24), dims(32, 24));
-    assert_bytes("lossy rgba extended", &file, 932, 0xbb55_353e_7974_f6ea);
+    assert_bytes("lossy rgba extended", &file, 186, 0x4e86_861b_b8de_dbb4);
 }
 
 #[test]
