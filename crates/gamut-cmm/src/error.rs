@@ -2,11 +2,13 @@
 
 /// An error from building or evaluating a colour transform.
 ///
-/// Every variant is a violated structural invariant — a mismatched channel count or a missized
-/// sample buffer — detected either when a [`Pipeline`](crate::Pipeline) is constructed or when a
-/// [`Transform`](crate::Transform) is evaluated. Exposing the crate's own type — rather than the
-/// shared `gamut_core::Error` — keeps the failing carrier identifiable when the CMM is embedded
-/// in a wider colour pipeline.
+/// Every variant is a violated invariant, detected when a [`Pipeline`](crate::Pipeline) is
+/// constructed or a [`Transform`](crate::Transform) is evaluated (mismatched channel counts,
+/// missized sample buffers, inconsistent stage shapes), or when [`link`](crate::link) builds a
+/// pipeline from a parsed profile (missing/unusable tags, non-invertible data, profile forms a
+/// later phase covers). Exposing the crate's own type — rather than the shared
+/// `gamut_core::Error` — keeps the failing carrier identifiable when the CMM is embedded in a
+/// wider colour pipeline.
 ///
 /// Marked `#[non_exhaustive]`: the CMM phases (curves, CLUTs, profile linking, intents) add
 /// failure categories additively without a breaking change.
@@ -80,6 +82,40 @@ pub enum CmmError {
     /// (the parser upholds the invariants), reachable from hand-built values.
     #[error("cmm: CLUT geometry inconsistent ({0})")]
     ClutGeometry(&'static str),
+
+    /// A profile lacks a tag the requested link requires: a matrix/TRC shaper build needs all
+    /// three colorants (`rXYZ`/`gXYZ`/`bXYZ`) and TRCs (`rTRC`/`gTRC`/`bTRC`) for RGB, or
+    /// `kTRC` for gray. The payload is the missing tag's signature.
+    #[error("cmm: profile is missing required tag {0}")]
+    MissingTag(gamut_icc::Signature),
+
+    /// A required tag is present but holds an element type the link cannot use: a colorant tag
+    /// without an `XYZType` value (or with an empty one), or a TRC tag holding something other
+    /// than a `curveType`/`parametricCurveType`. The payload is the offending tag's signature.
+    #[error("cmm: tag {0} holds an unusable element type")]
+    BadTagType(gamut_icc::Signature),
+
+    /// The profile's colorant matrix has no finite inverse, so no PCS→device shaper transform
+    /// exists. Raised when the determinant is zero or non-finite
+    /// (`gamut_color::linalg::mat_inv_3x3` returning `None` — the crate's conditioning
+    /// threshold: exact singularity, no epsilon), or when an inverse entry overflows to
+    /// non-finite.
+    #[error("cmm: colorant matrix is singular; no PCS-to-device transform exists")]
+    SingularMatrix,
+
+    /// The profile is outside what [`link`](crate::link) currently builds; the payload says
+    /// which boundary was hit (LUT-tag pipelines arrive with #328, absolute colorimetric with
+    /// #329, non-RGB/gray shapers are unsupported).
+    #[error("cmm: unsupported profile ({0})")]
+    UnsupportedProfile(&'static str),
+
+    /// A stage's internal shape is inconsistent — a
+    /// [`Stage::MatrixN`](crate::Stage::MatrixN) whose coefficient or offset vector length
+    /// contradicts its declared `rows`/`cols`. Detected by
+    /// [`Pipeline::new`](crate::Pipeline::new); unreachable from pipelines this crate builds,
+    /// reachable from hand-built stages.
+    #[error("cmm: malformed stage ({0})")]
+    BadStage(&'static str),
 }
 
 /// A [`Result`](core::result::Result) whose error is [`CmmError`].

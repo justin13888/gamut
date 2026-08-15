@@ -36,6 +36,9 @@
 //! - [`clut`] — [`ClutTable`]: multi-dimensional CLUT interpolation (lcms2's tetrahedral
 //!   decomposition and N-D multilinear, selectable via [`ClutInterpolation`]) over
 //!   `gamut-icc`'s parsed CLUT elements, applied by [`Stage::Clut`].
+//! - [`link`] — profile linking: [`device_to_pcs`]/[`pcs_to_device`] build runnable pipelines
+//!   from parsed profiles (matrix/TRC shaper profiles at this phase; the module docs record
+//!   the settled `chad`/colorant convention).
 //! - [`transform`] — the object-safe [`Transform`] entry trait every runnable transform
 //!   implements.
 //! - [`error`] — the typed [`CmmError`] and the crate [`Result`].
@@ -70,6 +73,7 @@
 pub mod clut;
 pub mod curve;
 pub mod error;
+pub mod link;
 pub mod pipeline;
 pub mod transform;
 
@@ -79,6 +83,8 @@ pub use clut::{ClutInterpolation, ClutTable};
 pub use curve::ToneCurve;
 #[doc(inline)]
 pub use error::{CmmError, Result};
+#[doc(inline)]
+pub use link::{device_to_pcs, pcs_to_device};
 #[doc(inline)]
 pub use pipeline::{MAX_CHANNELS, Pipeline, Stage};
 #[doc(inline)]

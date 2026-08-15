@@ -24,10 +24,11 @@ pub const MAX_CHANNELS: u8 = 16;
 /// # Growth plan
 ///
 /// The enum is `#[non_exhaustive]` and grows additively with the CMM phases: [`Curves`]
-/// (#325, landed), [`Clut`](Stage::Clut) (#326, landed), and the `MatrixN`/`XyzToLab`/
-/// `LabToXyz` stages profile linking needs (#327/#328) each arrive **together with their
-/// `eval` arm** — the crate-internal `eval` match is deliberately exhaustive (no wildcard), so
-/// the compiler forces every future variant to bring its evaluation in the same change.
+/// (#325, landed), [`Clut`](Stage::Clut) (#326, landed), [`MatrixN`](Stage::MatrixN) (#327,
+/// landed), and the `XyzToLab`/`LabToXyz` stages LUT-profile linking needs (#328) each arrive
+/// **together with their `eval` arm** — the crate-internal `eval` match is deliberately
+/// exhaustive (no wildcard), so the compiler forces every future variant to bring its
+/// evaluation in the same change.
 ///
 /// [`Curves`]: Stage::Curves
 #[derive(Debug, Clone)]
@@ -75,6 +76,25 @@ pub enum Stage {
         /// The per-row offset added after the multiply (`e10..e12`).
         offset: [f64; 3],
     },
+    /// A general `cols`-in/`rows`-out affine matrix: `out = m · in + offset`.
+    ///
+    /// The rectangular sibling of [`Matrix`](Stage::Matrix), for the channel-count-changing
+    /// seams profile linking needs — a gray shaper's 1→3 white-scaling and 3→1
+    /// channel-picking matrices (lcms2's `cmsStageAllocMatrix(3, 1, …)` /
+    /// `(1, 3, …)` in `cmsio1.c`). `m` is row-major with `rows × cols` coefficients
+    /// (`out[r] = Σ_c m[r·cols + c]·in[c] + offset[r]`), `offset` holds `rows` entries.
+    /// [`Pipeline::new`] validates both lengths ([`CmmError::BadStage`] on mismatch) and the
+    /// `1..=`[`MAX_CHANNELS`] bounds on the channel counts.
+    MatrixN {
+        /// The output channel count (matrix rows), in `1..=`[`MAX_CHANNELS`].
+        rows: u8,
+        /// The input channel count (matrix columns), in `1..=`[`MAX_CHANNELS`].
+        cols: u8,
+        /// The `rows × cols` coefficients, row-major.
+        m: Vec<f64>,
+        /// The per-row offset added after the multiply, `rows` entries.
+        offset: Vec<f64>,
+    },
 }
 
 impl Stage {
@@ -88,6 +108,7 @@ impl Stage {
             Self::Curves(curves) => u8::try_from(curves.len()).unwrap_or(u8::MAX),
             Self::Clut(table) => table.input_channels(),
             Self::Matrix { .. } => 3,
+            Self::MatrixN { cols, .. } => *cols,
         }
     }
 
@@ -99,6 +120,45 @@ impl Stage {
             Self::Curves(curves) => u8::try_from(curves.len()).unwrap_or(u8::MAX),
             Self::Clut(table) => table.output_channels(),
             Self::Matrix { .. } => 3,
+            Self::MatrixN { rows, .. } => *rows,
+        }
+    }
+
+    /// Checks the stage's *internal* consistency — the invariants a hand-built stage can
+    /// violate that the channel accessors cannot express. Called once per stage by
+    /// [`Pipeline::new`].
+    ///
+    /// # Errors
+    ///
+    /// [`CmmError::BadStage`] for a [`MatrixN`](Stage::MatrixN) whose coefficient or offset
+    /// vector length contradicts its declared `rows`/`cols`.
+    //
+    // Exhaustive like `eval` (no wildcard): a new variant must decide its validation here.
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Identity { .. }
+            | Self::Clamp { .. }
+            | Self::Curves(_)
+            | Self::Clut(_)
+            | Self::Matrix { .. } => Ok(()),
+            Self::MatrixN {
+                rows,
+                cols,
+                m,
+                offset,
+            } => {
+                if m.len() != usize::from(*rows) * usize::from(*cols) {
+                    return Err(CmmError::BadStage(
+                        "MatrixN coefficient count differs from rows x cols",
+                    ));
+                }
+                if offset.len() != usize::from(*rows) {
+                    return Err(CmmError::BadStage(
+                        "MatrixN offset length differs from rows",
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -126,6 +186,22 @@ impl Stage {
             Self::Matrix { m, offset } => {
                 for ((out, row), off) in output.iter_mut().zip(m).zip(offset) {
                     *out = row[0] * input[0] + row[1] * input[1] + row[2] * input[2] + off;
+                }
+            }
+            Self::MatrixN {
+                rows: _,
+                cols,
+                m,
+                offset,
+            } => {
+                let cols = usize::from(*cols);
+                for (row, (out, off)) in output.iter_mut().zip(offset).enumerate() {
+                    let coefficients = &m[row * cols..(row + 1) * cols];
+                    let mut acc = *off;
+                    for (c, v) in coefficients.iter().zip(input) {
+                        acc += c * v;
+                    }
+                    *out = acc;
                 }
             }
         }
@@ -163,14 +239,16 @@ impl Pipeline {
     /// Builds a pipeline from a stage chain, validating every channel count.
     ///
     /// Checks, in order: the declared ends and every stage's input/output are in
-    /// `1..=`[`MAX_CHANNELS`]; each stage's input matches the previous stage's output; the
-    /// declared `input_channels` equals the first stage's input and `output_channels` the last
-    /// stage's output. An empty `stages` list builds a valid identity pipeline iff
-    /// `input_channels == output_channels`.
+    /// `1..=`[`MAX_CHANNELS`]; every stage is internally consistent (a
+    /// [`Stage::MatrixN`]'s vector lengths match its declared shape); each stage's input
+    /// matches the previous stage's output; the declared `input_channels` equals the first
+    /// stage's input and `output_channels` the last stage's output. An empty `stages` list
+    /// builds a valid identity pipeline iff `input_channels == output_channels`.
     ///
     /// # Errors
     ///
     /// [`CmmError::TooManyChannels`] for a count outside `1..=`[`MAX_CHANNELS`],
+    /// [`CmmError::BadStage`] for an internally inconsistent stage,
     /// [`CmmError::StageChannelMismatch`] for a disagreeing adjacent pair, and
     /// [`CmmError::PipelineEndsMismatch`] for a declared end the stage chain contradicts.
     pub fn new(input_channels: u8, output_channels: u8, stages: Vec<Stage>) -> Result<Self> {
@@ -179,6 +257,7 @@ impl Pipeline {
         for stage in &stages {
             check_channel_count(stage.input_channels())?;
             check_channel_count(stage.output_channels())?;
+            stage.validate()?;
         }
         for (index, pair) in stages.windows(2).enumerate() {
             if pair[1].input_channels() != pair[0].output_channels() {
@@ -381,6 +460,112 @@ mod tests {
         assert_eq!(Stage::Clamp { channels: 7 }.output_channels(), 7);
         assert_eq!(dyadic_matrix().input_channels(), 3);
         assert_eq!(dyadic_matrix().output_channels(), 3);
+    }
+
+    /// A rectangular 2×3 affine stage with exact-dyadic coefficients, offsets included.
+    fn dyadic_matrix_n() -> Stage {
+        Stage::MatrixN {
+            rows: 2,
+            cols: 3,
+            m: vec![0.5, -0.25, 0.125, 1.0, 2.0, -0.5],
+            offset: vec![0.5, -0.25],
+        }
+    }
+
+    #[test]
+    fn matrix_n_eval_matches_hand_computation() {
+        let mut out = [0.0; 2];
+        dyadic_matrix_n().eval(&[0.25, 0.5, -1.0], &mut out);
+        // Row 0: 0.5·0.25 − 0.25·0.5 + 0.125·(−1) + 0.5 = 0.375
+        // Row 1: 1.0·0.25 + 2.0·0.5  − 0.5·(−1)   − 0.25 = 1.5
+        assert_eq!(out, [0.375, 1.5]);
+    }
+
+    #[test]
+    fn matrix_n_eval_covers_column_and_row_shapes() {
+        // 3×1 (the gray device→PCS shape): out = column · scalar, exactly.
+        let widen = Stage::MatrixN {
+            rows: 3,
+            cols: 1,
+            m: vec![0.5, 1.0, -0.25],
+            offset: vec![0.0, 0.125, 0.0],
+        };
+        let mut out = [0.0; 3];
+        widen.eval(&[0.5], &mut out);
+        assert_eq!(out, [0.25, 0.625, -0.125]);
+        // 1×3 (the gray PCS→device shape): picks/combines a row, exactly.
+        let pick = Stage::MatrixN {
+            rows: 1,
+            cols: 3,
+            m: vec![0.0, 1.0, 0.0],
+            offset: vec![0.0],
+        };
+        let mut out = [0.0; 1];
+        pick.eval(&[0.25, 0.75, 0.5], &mut out);
+        assert_eq!(out, [0.75]);
+    }
+
+    #[test]
+    fn matrix_n_channel_accessors_are_cols_in_rows_out() {
+        assert_eq!(dyadic_matrix_n().input_channels(), 3);
+        assert_eq!(dyadic_matrix_n().output_channels(), 2);
+    }
+
+    #[test]
+    fn pipeline_rejects_malformed_matrix_n() {
+        // Coefficient count disagrees with rows × cols.
+        let err = Pipeline::new(
+            3,
+            2,
+            vec![Stage::MatrixN {
+                rows: 2,
+                cols: 3,
+                m: vec![0.0; 5],
+                offset: vec![0.0; 2],
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cmm: malformed stage (MatrixN coefficient count differs from rows x cols)"
+        );
+        // Offset length disagrees with rows.
+        let err = Pipeline::new(
+            3,
+            2,
+            vec![Stage::MatrixN {
+                rows: 2,
+                cols: 3,
+                m: vec![0.0; 6],
+                offset: vec![0.0; 3],
+            }],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cmm: malformed stage (MatrixN offset length differs from rows)"
+        );
+        // Zero rows is a channel-count violation, caught before the length checks.
+        let err = Pipeline::new(
+            3,
+            1,
+            vec![Stage::MatrixN {
+                rows: 0,
+                cols: 3,
+                m: vec![],
+                offset: vec![],
+            }],
+        )
+        .unwrap_err();
+        assert!(matches!(err, CmmError::TooManyChannels(0)));
+    }
+
+    #[test]
+    fn well_formed_matrix_n_builds_and_runs_in_a_pipeline() {
+        let pipeline = Pipeline::new(3, 2, vec![dyadic_matrix_n()]).unwrap();
+        let mut out = [0.0; 2];
+        pipeline.eval(&[0.25, 0.5, -1.0], &mut out).unwrap();
+        assert_eq!(out, [0.375, 1.5]);
     }
 
     #[test]
