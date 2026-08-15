@@ -31,7 +31,10 @@
 //! a quality→quantization mapping (or caller-supplied [`QuantTables`] via
 //! [`JpegEncoder::with_quant_tables`]), opt-in rate–distortion optimized coefficient selection
 //! ([`JpegEncoder::with_rd_optimization`]: per-block AC trellis, optionally with per-block
-//! adaptive quantization), and optional restart intervals; [`JpegEncoder::with_progressive`]
+//! adaptive quantization), an opt-in jpegli-style **XYB colour mode**
+//! ([`JpegEncoder::with_color_mode`]: scaled-XYB samples, no JFIF APP0, Adobe APP14 `transform = 0`,
+//! component ids `R`,`G`,`B`, and the embedded [`XYB_ICC_PROFILE`] so any ICC-aware decoder
+//! reproduces sRGB), and optional restart intervals; [`JpegEncoder::with_progressive`]
 //! selects the progressive process (Annex G), which uses libjpeg's frozen `jpeg_simple_progression`
 //! scan script with optimized per-scan Huffman tables (Annex K.2) and produces the same quantized
 //! coefficients — hence the same decoded image — as the baseline encoding. The [`JpegDecoder`] reads
@@ -110,6 +113,6 @@ pub use backend::{
     is_backend_declined,
 };
 pub use decoder::{JpegDecoder, JpegInfo, JpegMetadata, JpegProcess, info, metadata};
-pub use encoder::{ChromaSubsampling, JpegEncoder, RdOptimization};
+pub use encoder::{ChromaSubsampling, JpegColorMode, JpegEncoder, RdOptimization, XYB_ICC_PROFILE};
 pub use marker::DensityUnit;
 pub use quant::{CHROMINANCE, LUMINANCE, QuantTables};
