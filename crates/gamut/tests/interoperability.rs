@@ -18,11 +18,7 @@ fn metadata_facade_round_trips_through_a_jpeg_stream() {
         header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
         tags: Vec::new(),
     };
-    let typed = Metadata {
-        exif: Some(exif),
-        xmp: Some(xmp),
-        icc: Some(icc),
-    };
+    let typed = Metadata::from_carriers(Some(exif), Some(xmp), Some(icc));
 
     let encoded = typed.encode().unwrap();
     let pixels = vec![128u8; 64];
@@ -72,14 +68,14 @@ fn metadata_facade_round_trips_through_a_webp_file() {
     exif.set_tag(ExifTag::Make, Value::Ascii("gamut".to_owned()));
     let mut xmp = XmpMeta::new();
     xmp.set_text(WellKnownNs::Xmp.uri(), "CreatorTool", "gamut");
-    let typed = Metadata {
-        exif: Some(exif),
-        xmp: Some(xmp),
-        icc: Some(IccProfile {
+    let typed = Metadata::from_carriers(
+        Some(exif),
+        Some(xmp),
+        Some(IccProfile {
             header: ProfileHeader::new(DeviceClass::Display, ColorSpace::Rgb),
             tags: Vec::new(),
         }),
-    };
+    );
 
     let encoded = typed.encode().unwrap();
     let pixels = [64u8, 128, 192];

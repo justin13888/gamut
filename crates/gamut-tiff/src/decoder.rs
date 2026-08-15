@@ -1,32 +1,124 @@
 //! The TIFF decoder.
 
-use gamut_core::{Cmyk8, DecodeImage, Dimensions, Error, Gray8, ImageBuf, Result, Rgb8, Rgba8};
-use gamut_ifd::{Ifd, read};
+use gamut_core::{
+    Cmyk8, DecodeImage, Dimensions, Error, Gray8, Gray16, ImageBuf, Result, Rgb8, Rgb16, Rgba8,
+    Rgba16,
+};
+use gamut_ifd::{ByteOrder, Ifd, read};
 
 use crate::compression::{Compression, ccitt, deflate, lzw, packbits, predictor};
-use crate::ifd::{PhotometricInterpretation, Predictor};
+use crate::ifd::{PhotometricInterpretation, Predictor, SampleFormat};
+use crate::info::{self, TiffInfo};
 use crate::palette::Palette8;
 use crate::tags;
 
 /// Decoder for baseline TIFF images.
 ///
 /// Reads chunky strips or tiles compressed with None, PackBits, LZW, Adobe Deflate, Modified
-/// Huffman, or Group 4 fax. Supported layouts are 8-bit grayscale/RGB/RGBA/CMYK/palette and 1-bit
-/// bilevel; other compression and colour modes return [`Error::Unsupported`].
+/// Huffman, or Group 4 fax. Supported layouts are 8- and 16-bit grayscale/RGB/RGBA/CMYK, 8-bit
+/// palette, and 1-bit bilevel; other compression and colour modes return [`Error::Unsupported`].
+///
+/// # Choosing a pixel type
+///
+/// The [`DecodeImage`] impls *present* a page rather than insisting it already match, so a request
+/// is satisfied whenever it can be: grayscale replicates across RGB channels, RGB gains an opaque
+/// alpha, a fourth sample is dropped for RGB output, 8-bit samples widen to 16-bit by `×257`
+/// (exact), and 16-bit samples narrow to 8-bit by discarding the low byte (lossy). Only a
+/// channel count that cannot be mapped — asking for [`Gray8`]/[`Gray16`] from a multi-sample page,
+/// or [`Cmyk8`] from anything but a 4-sample one — is refused.
+///
+/// Use [`TiffDecoder::info`] to see a page's declared depth before deciding, rather than relying
+/// on the conversions above.
+///
+/// # Refused, deliberately
+///
+/// Sample formats this crate's `u8`/`u16` model cannot represent — signed integer, IEEE float, and
+/// 32-bit samples — return [`Error::Unsupported`] naming the offending tag, never a truncated or
+/// reinterpreted image. A 16-bit *half-float* page is refused by its `SampleFormat`, not its depth.
 #[derive(Debug, Clone, Default)]
 pub struct TiffDecoder {
     _private: (),
 }
 
 /// Upper bound on a decoded image's stored bytes, guarding against malformed huge dimensions and
-/// decompression bombs (64 MiB — e.g. a 4096×4096 RGBA image).
+/// decompression bombs (64 MiB — e.g. a 4096×4096 8-bit RGBA image, or a 2896×2896 16-bit RGB one).
+///
+/// The cap is on *stored* bytes, so a 16-bit image gets half the pixel budget of an 8-bit one at
+/// the same channel count — which is the intent: the guard bounds the buffer actually allocated.
 const MAX_IMAGE_BYTES: usize = 64 << 20;
 
-/// An image decoded to interleaved 8-bit samples in `BlackIsZero`/RGB convention.
+/// Rejects a byte count past [`MAX_IMAGE_BYTES`].
+///
+/// An *allocation* guard, not a validity one: the caller is about to reserve this many bytes for a
+/// buffer whose size the file's tags — not its data — declare, so a malformed or hostile header
+/// must not be able to name an arbitrary allocation. A file rejected here would fail later anyway;
+/// the guard only stops the reservation from happening first, which is why each call site passes
+/// its own message.
+fn within_size_limit(bytes: usize, message: &'static str) -> Result<()> {
+    if bytes > MAX_IMAGE_BYTES {
+        return Err(Error::unsupported(env!("CARGO_PKG_NAME"), message));
+    }
+    Ok(())
+}
+
+/// Decoded samples at the width the file stores them in.
+///
+/// Sub-byte and 8-bit sources land in [`Samples::U8`] — bilevel expanded to 0/255, palette resolved
+/// to RGB bytes — and 16-bit sources in [`Samples::U16`]. Keeping the native width here rather than
+/// normalising to one type is what lets the 8-bit path stay a move: converting everything to `u16`
+/// would make every ordinary image pay a widen and a narrow it does not need.
+enum Samples {
+    U8(Vec<u8>),
+    U16(Vec<u16>),
+}
+
+/// Scales an 8-bit sample to 16-bit. `×257` maps `0 → 0` and `255 → 65535` exactly (it is
+/// `v << 8 | v`), so the conversion is lossless and is inverted precisely by [`narrow`].
+fn widen(value: u8) -> u16 {
+    u16::from(value) * 257
+}
+
+/// Truncates a 16-bit sample to 8-bit, discarding the low byte. Lossy, and deliberately truncation
+/// rather than rounding: it is the exact inverse of [`widen`] on widened values, and it matches the
+/// convention `Palette8::from_tiff_colormap` already uses for 16-bit `ColorMap` entries.
+fn narrow(value: u16) -> u8 {
+    (value >> 8) as u8
+}
+
+impl Samples {
+    /// The samples as 8-bit, narrowing a 16-bit source.
+    fn into_u8(self) -> Vec<u8> {
+        match self {
+            Samples::U8(v) => v,
+            Samples::U16(v) => v.into_iter().map(narrow).collect(),
+        }
+    }
+
+    /// The samples as 16-bit, widening an 8-bit source.
+    fn into_u16(self) -> Vec<u16> {
+        match self {
+            Samples::U8(v) => v.into_iter().map(widen).collect(),
+            Samples::U16(v) => v,
+        }
+    }
+}
+
+/// An image decoded to interleaved samples in `BlackIsZero`/RGB convention.
 struct DecodedImage {
     dims: Dimensions,
     samples_per_pixel: usize,
-    pixels: Vec<u8>,
+    samples: Samples,
+}
+
+/// Deserialises packed 16-bit samples from the file's byte order.
+///
+/// Called *after* the predictor has been reversed, since §14 differencing operates on the samples
+/// as the file stores them.
+fn samples_u16(packed: &[u8], order: ByteOrder) -> Vec<u16> {
+    packed
+        .chunks_exact(2)
+        .map(|s| order.u16([s[0], s[1]]))
+        .collect()
 }
 
 /// How a decoded image's stored samples map to output pixels.
@@ -60,6 +152,51 @@ impl TiffDecoder {
         Ok(read(data)?.ifds.len())
     }
 
+    /// Describes page 0 — the page the [`DecodeImage`] impls present — without decoding pixels.
+    ///
+    /// Reads tags only, so it is cheap to call before committing to a decode. A page this crate
+    /// cannot decode is still described; see [`TiffInfo`].
+    ///
+    /// ```
+    /// use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray16, ImageBuf, ImageRef};
+    /// use gamut_tiff::{TiffDecoder, TiffEncoder};
+    ///
+    /// let dims = Dimensions { width: 2, height: 1 };
+    /// let tiff = TiffEncoder::new()
+    ///     .encode_to_vec(ImageRef::<Gray16>::new(&[4660, 43981], dims)?)?;
+    ///
+    /// // Choose the pixel type from what the file declares, rather than guessing and retrying.
+    /// let info = TiffDecoder::new().info(&tiff)?;
+    /// assert_eq!(info.bits_per_sample, 16);
+    /// if info.bits_per_sample == 16 {
+    ///     let image: ImageBuf<Gray16> = TiffDecoder::new().decode_image(&tiff)?;
+    ///     assert_eq!(image.as_samples(), &[4660, 43981]);
+    /// }
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] for a malformed header or IFD chain, or
+    /// [`Error::Unsupported`] for an unrecognised on-disk code or a page whose samples disagree
+    /// about their depth or format.
+    pub fn info(&self, data: &[u8]) -> Result<TiffInfo> {
+        self.info_page(data, 0)
+    }
+
+    /// Describes page `page` of a multi-page TIFF (page 0 is the first) without decoding pixels.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::info`], plus [`Error::InvalidInput`] for an out-of-range page.
+    pub fn info_page(&self, data: &[u8], page: usize) -> Result<TiffInfo> {
+        let file = read(data)?;
+        let ifd = file.ifds.get(page).ok_or_else(|| {
+            Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: page index out of range")
+        })?;
+        info::page_info(ifd, file.order)
+    }
+
     /// Decodes page `page` of a multi-page TIFF to interleaved 8-bit [`Rgb8`] (page 0 is the first;
     /// grayscale is replicated across channels, any alpha is dropped). Multi-page access is
     /// TIFF-specific, so it stays inherent; the [`DecodeImage`] impls present page 0.
@@ -70,107 +207,128 @@ impl TiffDecoder {
     /// [`Error::Unsupported`] for a feature not yet implemented.
     pub fn decode_page(&self, data: &[u8], page: usize) -> Result<ImageBuf<Rgb8>> {
         let img = decode_page_samples(data, page)?;
-        ImageBuf::new(present_rgb(&img)?, img.dims)
+        ImageBuf::new(
+            present_rgb(img.samples.into_u8(), img.samples_per_pixel)?,
+            img.dims,
+        )
     }
 }
 
+/// Errors unless the image has exactly `want` samples per pixel.
+fn require_spp(img: &DecodedImage, want: usize, message: &'static str) -> Result<()> {
+    if img.samples_per_pixel != want {
+        return Err(Error::unsupported(env!("CARGO_PKG_NAME"), message));
+    }
+    Ok(())
+}
+
 impl DecodeImage<Rgb8> for TiffDecoder {
-    /// Grayscale is replicated across channels; any alpha is dropped.
+    /// Grayscale is replicated across channels; any alpha is dropped, and 16-bit samples are
+    /// narrowed to their high byte.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb8>> {
         self.decode_page(data, 0)
     }
 }
 
 impl DecodeImage<Rgba8> for TiffDecoder {
-    /// RGB gains opaque alpha; grayscale is replicated then made opaque.
+    /// RGB gains opaque alpha; grayscale is replicated then made opaque; 16-bit samples are
+    /// narrowed to their high byte.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba8>> {
         let img = decode_page_samples(data, 0)?;
-        ImageBuf::new(present_rgba(&img)?, img.dims)
+        ImageBuf::new(
+            present_rgba(img.samples.into_u8(), img.samples_per_pixel, u8::MAX)?,
+            img.dims,
+        )
     }
 }
 
 impl DecodeImage<Cmyk8> for TiffDecoder {
-    /// Errors unless the image is 4-sample; the samples pass through unchanged.
+    /// Errors unless the image is 4-sample; 16-bit samples are narrowed to their high byte.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Cmyk8>> {
         let img = decode_page_samples(data, 0)?;
-        if img.samples_per_pixel != 4 {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: image is not 4-sample CMYK",
-            ));
-        }
-        ImageBuf::new(img.pixels, img.dims)
+        require_spp(&img, 4, "TIFF: image is not 4-sample CMYK")?;
+        ImageBuf::new(img.samples.into_u8(), img.dims)
     }
 }
 
 impl DecodeImage<Gray8> for TiffDecoder {
-    /// Errors unless the image is single-sample; the samples pass through unchanged.
+    /// Errors unless the image is single-sample; 16-bit samples are narrowed to their high byte.
     fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray8>> {
         let img = decode_page_samples(data, 0)?;
-        if img.samples_per_pixel != 1 {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: image is not grayscale",
-            ));
-        }
-        ImageBuf::new(img.pixels, img.dims)
+        require_spp(&img, 1, "TIFF: image is not grayscale")?;
+        ImageBuf::new(img.samples.into_u8(), img.dims)
     }
 }
 
-/// Presents decoded samples as interleaved 8-bit RGB (1 → replicated, 3 → as-is, 4 → alpha dropped).
-fn present_rgb(img: &DecodedImage) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(img.dims.width as usize * img.dims.height as usize * 3);
-    match img.samples_per_pixel {
-        1 => {
-            for &v in &img.pixels {
-                out.extend_from_slice(&[v, v, v]);
-            }
-        }
-        3 => out.extend_from_slice(&img.pixels),
-        4 => {
-            for px in img.pixels.chunks_exact(4) {
-                out.extend_from_slice(&px[0..3]);
-            }
-        }
-        _ => {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: cannot present this sample layout as RGB",
-            ));
-        }
+impl DecodeImage<Gray16> for TiffDecoder {
+    /// Errors unless the image is single-sample; 8-bit samples are widened by `×257`.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Gray16>> {
+        let img = decode_page_samples(data, 0)?;
+        require_spp(&img, 1, "TIFF: image is not grayscale")?;
+        ImageBuf::new(img.samples.into_u16(), img.dims)
     }
-    Ok(out)
 }
 
-/// Presents decoded samples as interleaved 8-bit RGBA (1 → replicated opaque, 3 → opaque, 4 → as-is).
-fn present_rgba(img: &DecodedImage) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(img.dims.width as usize * img.dims.height as usize * 4);
-    match img.samples_per_pixel {
-        1 => {
-            for &v in &img.pixels {
-                out.extend_from_slice(&[v, v, v, 255]);
-            }
-        }
-        3 => {
-            for px in img.pixels.chunks_exact(3) {
-                out.extend_from_slice(&[px[0], px[1], px[2], 255]);
-            }
-        }
-        4 => out.extend_from_slice(&img.pixels),
-        _ => {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: cannot present this sample layout as RGBA",
-            ));
-        }
+impl DecodeImage<Rgb16> for TiffDecoder {
+    /// Grayscale is replicated across channels; any alpha is dropped; 8-bit samples are widened
+    /// by `×257`.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgb16>> {
+        let img = decode_page_samples(data, 0)?;
+        ImageBuf::new(
+            present_rgb(img.samples.into_u16(), img.samples_per_pixel)?,
+            img.dims,
+        )
     }
-    Ok(out)
 }
 
-/// Reads a required unsigned-integer tag.
-fn require_u32(ifd: &Ifd, tag: u16, what: &'static str) -> Result<u32> {
-    ifd.get_u32(tag)
-        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), what))
+impl DecodeImage<Rgba16> for TiffDecoder {
+    /// RGB gains opaque alpha; grayscale is replicated then made opaque; 8-bit samples are widened
+    /// by `×257`.
+    fn decode_image(&self, data: &[u8]) -> Result<ImageBuf<Rgba16>> {
+        let img = decode_page_samples(data, 0)?;
+        ImageBuf::new(
+            present_rgba(img.samples.into_u16(), img.samples_per_pixel, u16::MAX)?,
+            img.dims,
+        )
+    }
+}
+
+/// Presents decoded samples as interleaved RGB (1 → replicated, 3 → as-is, 4 → 4th sample dropped).
+///
+/// Takes the buffer by value so the already-RGB case is a move rather than a copy. Generic over the
+/// sample type because the channel mapping is identical at both widths — only the sample width
+/// differs, and that is settled before this is called.
+fn present_rgb<S: Copy>(samples: Vec<S>, spp: usize) -> Result<Vec<S>> {
+    match spp {
+        1 => Ok(samples.iter().flat_map(|&v| [v, v, v]).collect()),
+        3 => Ok(samples),
+        // A 4-sample image is RGB + alpha, or CMYK; both drop their fourth sample here.
+        4 => Ok(samples
+            .chunks_exact(4)
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect()),
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: cannot present this sample layout as RGB",
+        )),
+    }
+}
+
+/// Presents decoded samples as interleaved RGBA (1 → replicated opaque, 3 → opaque, 4 → as-is),
+/// synthesising alpha from `opaque` where the source has none.
+fn present_rgba<S: Copy>(samples: Vec<S>, spp: usize, opaque: S) -> Result<Vec<S>> {
+    match spp {
+        1 => Ok(samples.iter().flat_map(|&v| [v, v, v, opaque]).collect()),
+        3 => Ok(samples
+            .chunks_exact(3)
+            .flat_map(|px| [px[0], px[1], px[2], opaque])
+            .collect()),
+        4 => Ok(samples),
+        _ => Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "TIFF: cannot present this sample layout as RGBA",
+        )),
+    }
 }
 
 fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
@@ -179,16 +337,12 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: page index out of range")
     })?;
 
-    let width = require_u32(ifd, tags::IMAGE_WIDTH, "TIFF: missing ImageWidth")? as usize;
-    let height = require_u32(ifd, tags::IMAGE_LENGTH, "TIFF: missing ImageLength")? as usize;
-    if width == 0 || height == 0 {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: zero-sized image",
-        ));
-    }
-
-    let compression = Compression::try_from(ifd.get_u32(tags::COMPRESSION).unwrap_or(1))?;
+    // Everything the page *declares* comes from one shared reader, so the probe and the decoder can
+    // never disagree about a default; what follows here is purely which of those declarations this
+    // decoder is willing to act on.
+    let info = info::page_info(ifd, file.order)?;
+    let (width, height) = (info.width as usize, info.height as usize);
+    let compression = info.compression;
     if !matches!(
         compression,
         Compression::None
@@ -216,17 +370,35 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             "TIFF: FillOrder 2 not supported",
         ));
     }
-    let spp = ifd.get_u32(tags::SAMPLES_PER_PIXEL).unwrap_or(1) as usize;
-    let bits = ifd
-        .get_u32_vec(tags::BITS_PER_SAMPLE)
-        .unwrap_or_else(|| vec![1; spp]);
-    if bits.len() != spp || bits.iter().any(|&b| b != bits[0]) {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: mixed bit depths not supported",
-        ));
+    let spp = info.samples_per_pixel as usize;
+    let bps = info.bits_per_sample;
+
+    // Sample *format* is checked before sample *depth*, and that order is the point: a 16-bit
+    // half-float page (`bps = 16`, `SampleFormat = 3`) passes every depth gate below and would
+    // decode to plausible nonsense if read as unsigned. Refusing by format first means the
+    // diagnostic names the real problem, and no non-integer encoding can reach the sample path.
+    match info.sample_format {
+        SampleFormat::UnsignedInteger => {}
+        SampleFormat::SignedInteger => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: signed-integer samples not supported",
+            ));
+        }
+        SampleFormat::FloatingPoint => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: floating-point samples not supported",
+            ));
+        }
+        SampleFormat::Undefined => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: undefined sample format not supported",
+            ));
+        }
     }
-    let bps = bits[0];
+
     if matches!(
         compression,
         Compression::CcittRle | Compression::CcittGroup4Fax
@@ -237,31 +409,57 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             "TIFF: CCITT coding requires a bilevel image",
         ));
     }
-    let use_predictor = Predictor::try_from(ifd.get_u32(tags::PREDICTOR).unwrap_or(1))?
-        == Predictor::HorizontalDifferencing;
-    if use_predictor && bps != 8 {
+    let use_predictor = info.predictor == Predictor::HorizontalDifferencing;
+    if use_predictor && !matches!(bps, 8 | 16) {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
-            "TIFF: predictor requires 8-bit samples",
+            "TIFF: predictor requires 8- or 16-bit samples",
         ));
     }
 
-    let photometric = PhotometricInterpretation::try_from(require_u32(
-        ifd,
-        tags::PHOTOMETRIC_INTERPRETATION,
-        "TIFF: missing PhotometricInterpretation",
-    )?)?;
+    // Bytes of one stored (packed) row, before unpacking to output samples. Every depth this
+    // decoder cannot unpack is rejected *here*, above the photometric table, so the diagnostic
+    // names the depth rather than blaming the colour mode: the table's catch-all would otherwise
+    // report a 32-bit RGB page as an unsupported photometric/sample combination.
+    let stored_row_bytes = match bps {
+        8 => width
+            .checked_mul(spp)
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?,
+        16 => width
+            .checked_mul(spp)
+            .and_then(|n| n.checked_mul(2))
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?,
+        // Sub-byte samples pack across the whole row, then pad to a byte boundary. Written for any
+        // `spp` rather than relying on the photometric table below to have restricted it to 1.
+        1 => width
+            .checked_mul(spp)
+            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?
+            .div_ceil(8),
+        32 => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: 32-bit samples not supported",
+            ));
+        }
+        _ => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: unsupported bits per sample",
+            ));
+        }
+    };
+
     // How stored samples become the decoded output (TIFF 6.0 §8 PhotometricInterpretation).
-    let mode = match (spp, bps, photometric) {
-        (1, 1 | 8, PhotometricInterpretation::WhiteIsZero) => Mode::Gray {
+    let mode = match (spp, bps, info.photometric) {
+        (1, 1 | 8 | 16, PhotometricInterpretation::WhiteIsZero) => Mode::Gray {
             white_is_zero: true,
         },
-        (1, 1 | 8, PhotometricInterpretation::BlackIsZero) => Mode::Gray {
+        (1, 1 | 8 | 16, PhotometricInterpretation::BlackIsZero) => Mode::Gray {
             white_is_zero: false,
         },
-        (3, 8, PhotometricInterpretation::Rgb) => Mode::Rgb,
-        (4, 8, PhotometricInterpretation::Rgb) => Mode::Rgba,
-        (4, 8, PhotometricInterpretation::Cmyk) => Mode::Cmyk,
+        (3, 8 | 16, PhotometricInterpretation::Rgb) => Mode::Rgb,
+        (4, 8 | 16, PhotometricInterpretation::Rgb) => Mode::Rgba,
+        (4, 8 | 16, PhotometricInterpretation::Cmyk) => Mode::Cmyk,
         (1, 8, PhotometricInterpretation::Palette) => {
             let cm = ifd.get_u32_vec(tags::COLOR_MAP).ok_or_else(|| {
                 Error::invalid_input(
@@ -279,28 +477,10 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         }
     };
 
-    // Bytes of one stored (packed) row, before unpacking to 8-bit output samples.
-    let stored_row_bytes = match bps {
-        8 => width
-            .checked_mul(spp)
-            .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?,
-        1 => width.div_ceil(8), // spp == 1, guaranteed by the match above
-        _ => {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "TIFF: only 1- and 8-bit samples supported so far",
-            ));
-        }
-    };
     let stored_total = stored_row_bytes
         .checked_mul(height)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: image too large"))?;
-    if stored_total > MAX_IMAGE_BYTES {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: image exceeds the size limit",
-        ));
-    }
+    within_size_limit(stored_total, "TIFF: image exceeds the size limit")?;
 
     // Reassemble the stored (packed) row bytes from tiles or strips.
     let layout = Layout {
@@ -310,8 +490,9 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
         bps,
         stored_row_bytes,
         compression,
+        order: info.byte_order,
     };
-    let tiled = ifd.get(tags::TILE_WIDTH).is_some();
+    let tiled = info.tiled;
     let mut packed = if tiled {
         decode_tiles(ifd, data, &layout, use_predictor)?
     } else {
@@ -319,15 +500,35 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
     };
     debug_assert_eq!(packed.len(), stored_total);
 
-    // Reverse the horizontal-differencing predictor (8-bit only) before unpacking.
+    // Reverse the horizontal-differencing predictor before unpacking. Tiles were already handled
+    // per tile, inside `decode_tiles`, since each tile is predicted independently.
     if use_predictor && !tiled {
-        predictor::reverse(&mut packed, stored_row_bytes, spp);
+        if bps == 16 {
+            predictor::reverse16(&mut packed, stored_row_bytes, spp, layout.order);
+        } else {
+            predictor::reverse(&mut packed, stored_row_bytes, spp);
+        }
     }
 
-    // Unpack the stored bytes into 8-bit output samples per the photometric mode.
-    let (out_spp, pixels) = match mode {
-        Mode::Rgb => (3, packed),
-        Mode::Rgba | Mode::Cmyk => (4, packed),
+    // Unpack the stored bytes into output samples per the photometric mode. 16-bit samples are
+    // deserialised from the file's byte order here — after the predictor, which by §14 operates on
+    // the samples as stored.
+    let (out_spp, samples) = match mode {
+        Mode::Rgb if bps == 16 => (3, Samples::U16(samples_u16(&packed, layout.order))),
+        Mode::Rgb => (3, Samples::U8(packed)),
+        Mode::Rgba | Mode::Cmyk if bps == 16 => {
+            (4, Samples::U16(samples_u16(&packed, layout.order)))
+        }
+        Mode::Rgba | Mode::Cmyk => (4, Samples::U8(packed)),
+        Mode::Gray { white_is_zero } if bps == 16 => {
+            let mut px = samples_u16(&packed, layout.order);
+            if white_is_zero {
+                for v in &mut px {
+                    *v = u16::MAX - *v;
+                }
+            }
+            (1, Samples::U16(px))
+        }
         Mode::Gray { white_is_zero } if bps == 8 => {
             let mut px = packed;
             if white_is_zero {
@@ -335,7 +536,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
                     *v = 255 - *v;
                 }
             }
-            (1, px)
+            (1, Samples::U8(px))
         }
         Mode::Gray { white_is_zero } => {
             // bps == 1: expand each MSB-first bit to a 0/255 sample.
@@ -348,7 +549,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
                     px.push(if white { 255 } else { 0 });
                 }
             }
-            (1, px)
+            (1, Samples::U8(px))
         }
         Mode::Palette(palette) => {
             // Each 8-bit index selects an RGB triple from the colour table.
@@ -356,7 +557,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             for &idx in &packed {
                 px.extend_from_slice(&palette.entry(idx));
             }
-            (3, px)
+            (3, Samples::U8(px))
         }
     };
 
@@ -366,7 +567,7 @@ fn decode_page_samples(data: &[u8], page: usize) -> Result<DecodedImage> {
             height: height as u32,
         },
         samples_per_pixel: out_spp,
-        pixels,
+        samples,
     })
 }
 
@@ -378,6 +579,8 @@ struct Layout {
     bps: u32,
     stored_row_bytes: usize,
     compression: Compression,
+    /// The file's byte order — how 16-bit samples and the 16-bit predictor read and write them.
+    order: ByteOrder,
 }
 
 /// Decompresses one strip/tile of byte-level data (`None`/PackBits/LZW/Deflate) to `want` bytes.
@@ -439,12 +642,14 @@ fn decode_strips(ifd: &Ifd, data: &[u8], l: &Layout) -> Result<Vec<u8>> {
 
 /// Reassembles the stored row bytes from tiles (8-bit only), cropping the edge-tile padding.
 fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Result<Vec<u8>> {
-    if l.bps != 8 {
+    if !matches!(l.bps, 8 | 16) {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
-            "TIFF: tiled images supported only for 8-bit samples so far",
+            "TIFF: tiled images require 8- or 16-bit samples",
         ));
     }
+    // Every offset below is a byte offset, so the per-pixel stride carries the sample width too.
+    let pixel_bytes = l.spp * (l.bps as usize / 8);
     let tw = ifd
         .get_u32(tags::TILE_WIDTH)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: missing TileWidth"))?
@@ -474,17 +679,12 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
         ));
     }
     let tile_row_bytes = tw
-        .checked_mul(l.spp)
+        .checked_mul(pixel_bytes)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile too large"))?;
     let tile_size = th
         .checked_mul(tile_row_bytes)
         .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile too large"))?;
-    if tile_size > MAX_IMAGE_BYTES {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "TIFF: tile exceeds the size limit",
-        ));
-    }
+    within_size_limit(tile_size, "TIFF: tile exceeds the size limit")?;
     let mut packed = vec![0u8; l.stored_row_bytes * l.height];
     for ty in 0..down {
         for tx in 0..across {
@@ -494,8 +694,14 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: tile out of bounds")
             })?;
             let mut tile = decompress_simple(raw, tile_size, l.compression)?;
+            // Each tile is predicted independently, so the predictor is reversed here — before the
+            // crop-and-blit, while the tile's own rows are still intact.
             if use_predictor {
-                predictor::reverse(&mut tile, tile_row_bytes, l.spp);
+                if l.bps == 16 {
+                    predictor::reverse16(&mut tile, tile_row_bytes, l.spp, l.order);
+                } else {
+                    predictor::reverse(&mut tile, tile_row_bytes, l.spp);
+                }
             }
             let copy_cols = tw.min(l.width - tx * tw);
             for r in 0..th {
@@ -504,9 +710,9 @@ fn decode_tiles(ifd: &Ifd, data: &[u8], l: &Layout, use_predictor: bool) -> Resu
                     break;
                 }
                 let src = r * tile_row_bytes;
-                let dst = dst_row * l.stored_row_bytes + tx * tw * l.spp;
-                packed[dst..dst + copy_cols * l.spp]
-                    .copy_from_slice(&tile[src..src + copy_cols * l.spp]);
+                let dst = dst_row * l.stored_row_bytes + tx * tw * pixel_bytes;
+                packed[dst..dst + copy_cols * pixel_bytes]
+                    .copy_from_slice(&tile[src..src + copy_cols * pixel_bytes]);
             }
         }
     }
