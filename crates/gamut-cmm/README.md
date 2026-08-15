@@ -56,10 +56,12 @@ assert_eq!(dst, [0.75, 0.5, 1.0]);
 
 ## Status
 
-The architectural keystone (epic #323, this scaffold is #324): the `Pipeline`/`Stage` evaluation
-model with construction-time channel validation, the object-safe `Transform` entry trait, and the
-typed `CmmError`. Stages currently cover identity, clamp, and the 3×3 affine matrix; curves,
-CLUTs, profile linking, rendering intents/BPC, and transform chaining land phase by phase — see
+The architectural keystone (epic #323, scaffold #324): the `Pipeline`/`Stage` evaluation model
+with construction-time channel validation, the object-safe `Transform` entry trait, and the
+typed `CmmError`. Stages cover identity, clamp, the 3×3 affine matrix, and per-channel tone
+curves (#325): `ToneCurve` evaluates and inverts `curveType`/`parametricCurveType` elements
+(analytic closed forms plus an lcms2-shaped numeric reversal) behind `Stage::Curves`. CLUTs,
+profile linking, rendering intents/BPC, and transform chaining land phase by phase — see
 [STATUS.md](STATUS.md).
 
 ## Deferred
