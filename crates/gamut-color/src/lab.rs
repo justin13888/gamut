@@ -240,8 +240,10 @@ fn quick_saturate_byte(d: f64) -> u8 {
 /// covers `0..=(1 + 32767/32768)`.
 ///
 /// Clamping replicates lcms2 `cmsFloat2XYZEncoded`: if `Y <= 0` **all three** components
-/// encode as 0 (a colour with no luminance is black); otherwise each component is clamped
-/// to `[0, 65535/32768]` independently.
+/// encode as 0 (a colour with no luminance is black); otherwise each component saturates
+/// to `[0, 65535/32768]`. (lcms2 also pre-clamps to `MAX_ENCODEABLE_XYZ` before its word
+/// saturation; the saturation alone produces byte-identical codes for every input, so the
+/// redundant pre-clamp is deliberately not mirrored.)
 ///
 /// # Examples
 ///
@@ -253,13 +255,11 @@ fn quick_saturate_byte(d: f64) -> u8 {
 /// ```
 #[must_use]
 pub fn encode_pcs_xyz(xyz: [f64; 3]) -> [u16; 3] {
-    const MAX_ENCODEABLE_XYZ: f64 = 1.0 + 32767.0 / 32768.0;
     if xyz[1] <= 0.0 {
         return [0, 0, 0];
     }
     let mut out = [0u16; 3];
     for (o, &v) in out.iter_mut().zip(xyz.iter()) {
-        let v = v.clamp(0.0, MAX_ENCODEABLE_XYZ);
         *o = quick_saturate_word(v * 32768.0);
     }
     out
@@ -281,8 +281,10 @@ pub fn decode_pcs_xyz(xyz: [u16; 3]) -> [f64; 3] {
 /// `L*: 0..100 → 0..0xFFFF` (`L · 65535/100 = L · 655.35`) and
 /// `a*,b*: −128..+127 → 0..0xFFFF` (`(v + 128) · 65535/255 = (v + 128) · 257`).
 ///
-/// Clamping and rounding replicate lcms2 `cmsFloat2LabEncoded`: `L` is clamped to
-/// `[0, 100]`, `a`/`b` to `[−128, 127]`, then floor-of-`+0.5` rounded.
+/// Rounding replicates lcms2 `cmsFloat2LabEncoded`: floor-of-`+0.5`, saturating — which
+/// clamps `L` to `[0, 100]` and `a`/`b` to `[−128, 127]` on its own. (lcms2's explicit
+/// `Clamp_L_doubleV4`/`Clamp_ab_doubleV4` pre-clamps are redundant with that saturation —
+/// byte-identical codes for every input — so they are deliberately not mirrored.)
 ///
 /// # Examples
 ///
@@ -293,13 +295,10 @@ pub fn decode_pcs_xyz(xyz: [u16; 3]) -> [f64; 3] {
 /// ```
 #[must_use]
 pub fn encode_lab_v4_16(lab: [f64; 3]) -> [u16; 3] {
-    let l = lab[0].clamp(0.0, 100.0);
-    let a = lab[1].clamp(-128.0, 127.0);
-    let b = lab[2].clamp(-128.0, 127.0);
     [
-        quick_saturate_word(l * 655.35),
-        quick_saturate_word((a + 128.0) * 257.0),
-        quick_saturate_word((b + 128.0) * 257.0),
+        quick_saturate_word(lab[0] * 655.35),
+        quick_saturate_word((lab[1] + 128.0) * 257.0),
+        quick_saturate_word((lab[2] + 128.0) * 257.0),
     ]
 }
 
@@ -321,9 +320,11 @@ pub fn decode_lab_v4_16(lab: [u16; 3]) -> [f64; 3] {
 /// but out of nominal range, so out-of-range *input* clamps to the full-u16 top rather
 /// than to the nominal top.
 ///
-/// Clamping and rounding replicate lcms2 `cmsFloat2LabEncodedV2` exactly: `L` clamps to
-/// `[0, 0xFFFF·100/0xFF00]` (= 100.390625), `a`/`b` to `[−128, 65535/256 − 128]`
-/// (= 127.99609375), then floor-of-`+0.5` rounding.
+/// Rounding replicates lcms2 `cmsFloat2LabEncodedV2` exactly: floor-of-`+0.5`,
+/// saturating — which clamps `L` to `[0, 0xFFFF·100/0xFF00]` (= 100.390625) and `a`/`b`
+/// to `[−128, 65535/256 − 128]` (= 127.99609375) on its own. (lcms2's explicit
+/// `Clamp_L_doubleV2`/`Clamp_ab_doubleV2` pre-clamps are redundant with that saturation —
+/// byte-identical codes for every input — so they are deliberately not mirrored.)
 ///
 /// # Examples
 ///
@@ -335,14 +336,10 @@ pub fn decode_lab_v4_16(lab: [u16; 3]) -> [f64; 3] {
 /// ```
 #[must_use]
 pub fn encode_lab_v2_16(lab: [f64; 3]) -> [u16; 3] {
-    // lcms2 Clamp_L_doubleV2 / Clamp_ab_doubleV2 bounds, written as lcms2 writes them.
-    let l = lab[0].clamp(0.0, 65535.0 * 100.0 / 65280.0);
-    let a = lab[1].clamp(-128.0, 65535.0 / 256.0 - 128.0);
-    let b = lab[2].clamp(-128.0, 65535.0 / 256.0 - 128.0);
     [
-        quick_saturate_word(l * 652.8),
-        quick_saturate_word((a + 128.0) * 256.0),
-        quick_saturate_word((b + 128.0) * 256.0),
+        quick_saturate_word(lab[0] * 652.8),
+        quick_saturate_word((lab[1] + 128.0) * 256.0),
+        quick_saturate_word((lab[2] + 128.0) * 256.0),
     ]
 }
 
@@ -359,8 +356,8 @@ pub fn decode_lab_v2_16(lab: [u16; 3]) -> [f64; 3] {
 
 /// Encode CIELab as the 8-bit Lab encoding (ICC.1:2022 Annex A; same nominal ranges in
 /// ICC.1:2001-04): `L*: 0..100 → 0..255` (`L · 255/100`) and `a*,b*: −128..+127 → 0..255`
-/// (`v + 128` — the 8-bit a/b step is exactly 1). Inputs clamp to `[0, 100]` /
-/// `[−128, 127]`, then floor-of-`+0.5` rounding.
+/// (`v + 128` — the 8-bit a/b step is exactly 1), floor-of-`+0.5` rounded with byte
+/// saturation, which clamps to `[0, 100]` / `[−128, 127]` on its own.
 ///
 /// Note: this is the spec-direct 8-bit mapping. lcms2 has no direct float→8-bit Lab
 /// codec — its formatters widen 8-bit samples to 16-bit v2 by byte duplication — so the
@@ -375,13 +372,10 @@ pub fn decode_lab_v2_16(lab: [u16; 3]) -> [f64; 3] {
 /// ```
 #[must_use]
 pub fn encode_lab_8(lab: [f64; 3]) -> [u8; 3] {
-    let l = lab[0].clamp(0.0, 100.0);
-    let a = lab[1].clamp(-128.0, 127.0);
-    let b = lab[2].clamp(-128.0, 127.0);
     [
-        quick_saturate_byte(l * 255.0 / 100.0),
-        quick_saturate_byte(a + 128.0),
-        quick_saturate_byte(b + 128.0),
+        quick_saturate_byte(lab[0] * 255.0 / 100.0),
+        quick_saturate_byte(lab[1] + 128.0),
+        quick_saturate_byte(lab[2] + 128.0),
     ]
 }
 
@@ -439,6 +433,41 @@ fn ciede2000_hue_deg(b: f64, a_prime: f64) -> f64 {
     if h < 0.0 { h + 360.0 } else { h }
 }
 
+/// Fold a raw hue difference `h2′ − h1′` into `(−180°, 180°]` per CIEDE2000 Eq. (10).
+///
+/// Isolated so the equivalence class of its mutations is self-contained: the only
+/// consumer is `sin(Δh′/2)` in Eq. (11), which is 360°-periodic, so the *choice* of
+/// adding versus subtracting 360° is unobservable (see `.cargo/mutants.toml`).
+fn wrap_hue_diff(d: f64) -> f64 {
+    if d > 180.0 {
+        d - 360.0
+    } else if d < -180.0 {
+        d + 360.0
+    } else {
+        d
+    }
+}
+
+/// True when either CIEDE2000 modified chroma is zero (`C1′·C2′ == 0`), the condition
+/// under which Eqs. (10) and (14) switch to their degenerate conventions.
+///
+/// Isolated so the equivalence class of its mutations is self-contained: whenever
+/// either chroma is zero, every downstream hue term carries the factor
+/// `√(C1′·C2′) = 0`, so the branch choice is unobservable (see `.cargo/mutants.toml`).
+fn chroma_product_is_zero(c1p: f64, c2p: f64) -> bool {
+    c1p * c2p == 0.0
+}
+
+/// The degenerate mean-hue convention of CIEDE2000 Eq. (14): when `C1′·C2′ == 0`, `h̄′`
+/// is the *sum* `h1′ + h2′`, not the half-sum.
+///
+/// Isolated so the equivalence class of its mutations is self-contained: this value is
+/// only ever used when a chroma is zero, where `ΔH′ = 0` forces the hue and rotation
+/// terms to vanish — kept for spec fidelity (see `.cargo/mutants.toml`).
+fn degenerate_hue_sum(h1p: f64, h2p: f64) -> f64 {
+    h1p + h2p
+}
+
 /// CIEDE2000 colour difference ΔE₀₀ with parametric weighting factors `kl` / `kc` / `kh`
 /// (`kL`, `kC`, `kH` — all 1 for reference conditions).
 ///
@@ -473,17 +502,10 @@ pub fn delta_e_2000_weighted(lab1: [f64; 3], lab2: [f64; 3], kl: f64, kc: f64, k
     let dl = l2 - l1; // Eq. (8)
     let dc = c2p - c1p; // Eq. (9)
     // Eq. (10): hue difference, ±360°-adjusted into (−180°, 180°]; 0 if either chroma is 0.
-    let dhp = if c1p * c2p == 0.0 {
+    let dhp = if chroma_product_is_zero(c1p, c2p) {
         0.0
     } else {
-        let d = h2p - h1p;
-        if d > 180.0 {
-            d - 360.0
-        } else if d < -180.0 {
-            d + 360.0
-        } else {
-            d
-        }
+        wrap_hue_diff(h2p - h1p)
     };
     let dh = 2.0 * (c1p * c2p).sqrt() * (0.5 * dhp).to_radians().sin(); // Eq. (11)
 
@@ -492,8 +514,8 @@ pub fn delta_e_2000_weighted(lab1: [f64; 3], lab2: [f64; 3], kl: f64, kc: f64, k
     let c_bar = 0.5 * (c1p + c2p); // Eq. (13)
     // Eq. (14): mean hue. When C1′·C2′ == 0 the paper defines h̄′ as the *sum* h1′ + h2′
     // (not the half-sum); otherwise the ±360° adjustment keeps the mean on the short arc.
-    let h_bar = if c1p * c2p == 0.0 {
-        h1p + h2p
+    let h_bar = if chroma_product_is_zero(c1p, c2p) {
+        degenerate_hue_sum(h1p, h2p)
     } else {
         let sum = h1p + h2p;
         if (h1p - h2p).abs() <= 180.0 {
@@ -608,6 +630,108 @@ mod tests {
             delta_e_76([10.0, -5.0, 2.0], [1.0, 4.0, -3.0]),
             delta_e_76([1.0, 4.0, -3.0], [10.0, -5.0, 2.0])
         );
+        // Both endpoints non-zero in every component, value pinned by hand:
+        // ΔL = 9, Δa = −9, Δb = 5 → √(81 + 81 + 25) = √187. A sign-flipped component
+        // difference (a1 + a2) is symmetric too, so the symmetry assert above cannot
+        // catch it — only this value pin does.
+        let want = 187.0_f64.sqrt();
+        let got = delta_e_76([10.0, -5.0, 2.0], [1.0, 4.0, -3.0]);
+        assert!((got - want).abs() < 1e-12, "got {got}, want {want}");
+    }
+
+    /// A reference white with `Y ≠ 1` (unnormalized, as some workflows carry) must divide
+    /// through every channel. The standard whites all have `Y = 1.0`, which makes a
+    /// mutated `Y`-channel division (`xyz[1] * white[1]`) invisible to every other test —
+    /// this one pins the exact Lab values (computed independently from the CIE equations)
+    /// and closes the round trip under the same white.
+    #[test]
+    fn lab_conversions_divide_by_non_unit_white() {
+        let white = [0.75, 1.25, 0.5];
+        let xyz = [0.30, 0.40, 0.20];
+        let lab = xyz_to_lab(xyz, white);
+        let want = [
+            63.342883925798745,
+            26.407_960_528_699_26,
+            -10.563184211479705,
+        ];
+        for i in 0..3 {
+            assert!(
+                (lab[i] - want[i]).abs() < 1e-12,
+                "component {i}: {} vs {}",
+                lab[i],
+                want[i]
+            );
+        }
+        let rt = lab_to_xyz(lab, white);
+        for i in 0..3 {
+            assert!((rt[i] - xyz[i]).abs() < 1e-12, "round trip {rt:?}");
+        }
+    }
+
+    /// Encoder value pins derived by hand from the ICC scale factors (unit tests, not
+    /// doctests, so mutation testing sees them). Each pin is the exact fixed-point
+    /// product, so any mutated scale, offset, or clamp constant misses it.
+    #[test]
+    fn pcs_encoders_pin_spec_values() {
+        // PCSXYZ u1Fixed15: v·32768, clamp [0, 1 + 32767/32768].
+        assert_eq!(encode_pcs_xyz([1.0, 1.0, 1.0]), [0x8000, 0x8000, 0x8000]);
+        assert_eq!(encode_pcs_xyz([0.5, 1.0, 2.5]), [0x4000, 0x8000, 0xFFFF]);
+        // 1 + 32767/32768 is the top of the encodable range: exactly 0xFFFF.
+        let max = 1.0 + 32767.0 / 32768.0;
+        assert_eq!(encode_pcs_xyz([max, 1.0, max]), [0xFFFF, 0x8000, 0xFFFF]);
+        // v4 Lab 16-bit: L·65535/100, (ab+128)·257.
+        assert_eq!(
+            encode_lab_v4_16([100.0, 0.0, 127.0]),
+            [0xFFFF, 0x8080, 0xFFFF]
+        );
+        assert_eq!(encode_lab_v4_16([50.0, -128.0, -1.0]), [32768, 0, 32639]);
+        // v2 Lab 16-bit: L·65280/100 (white at 0xFF00, NOT 0xFFFF), (ab+128)·256.
+        assert_eq!(
+            encode_lab_v2_16([100.0, 0.0, 0.0]),
+            [0xFF00, 0x8000, 0x8000]
+        );
+        assert_eq!(encode_lab_v2_16([50.0, -128.0, 127.0]), [32640, 0, 65280]);
+        // v2 clamp tops: L ≤ 0xFFFF·100/0xFF00 = 100.390625, ab ≤ 65535/256 − 128.
+        assert_eq!(
+            encode_lab_v2_16([100.390625, 128.0, 200.0]),
+            [0xFFFF, 0xFFFF, 0xFFFF]
+        );
+        // 8-bit Lab: L·255/100, (ab+128).
+        assert_eq!(encode_lab_8([100.0, 0.0, 127.0]), [255, 128, 255]);
+        assert_eq!(encode_lab_8([0.0, -128.0, 25.0]), [0, 0, 153]);
+    }
+
+    /// Hue-branch pairs pinned against Little-CMS (`cmsCIE2000DeltaE`, lcms2 2.19 —
+    /// computed offline from the vendored `third_party/lcms2` sources; both
+    /// implementations follow Sharma et al., so agreement is at f64 noise level).
+    /// Each pair drives a branch the Sharma golden set leaves uncovered:
+    /// exact hue 180° (`b = 0, a < 0` — kills a mutated achromatic guard in Eq. (7)),
+    /// and the two `|h1′−h2′| > 180°` mean-hue wrap arms of Eq. (14).
+    #[test]
+    fn ciede2000_matches_lcms2_on_hue_branch_pairs() {
+        let cases: [([f64; 3], [f64; 3], f64); 5] = [
+            // h1′ = 180° exactly (b = 0, a′ < 0).
+            (
+                [50.0, -30.0, 0.0],
+                [55.0, 20.0, 15.0],
+                41.451_251_126_888_49,
+            ),
+            ([50.0, -30.0, 0.0], [50.0, 0.0, 25.0], 25.868219816084746),
+            // |Δh′| > 180°, h1′ + h2′ ≥ 360° (Eq. (14) subtract-360 arm).
+            ([50.0, 0.0, 30.0], [60.0, 5.0, -28.0], 39.015_483_992_144_69),
+            // |Δh′| > 180°, h1′ + h2′ < 360° (Eq. (14) add-360 arm, mean ≈ 275°
+            // where the Δθ rotation term is at its strongest).
+            ([50.0, 30.0, 1.0], [55.0, -25.0, -3.5], 45.960431944486025),
+            // Hues straddling 0°/360° without an exact-180 difference.
+            ([60.0, 25.0, -2.0], [50.0, 28.0, 3.0], 10.082089021578778),
+        ];
+        for (lab1, lab2, want) in cases {
+            let got = delta_e_2000(lab1, lab2);
+            assert!(
+                (got - want).abs() < 1e-9,
+                "ΔE00({lab1:?}, {lab2:?}) = {got}, lcms2 says {want}"
+            );
+        }
     }
 
     /// XYZ→Lab→XYZ across a grid of the PCS domain (0 ..= 65535/32768) under both
