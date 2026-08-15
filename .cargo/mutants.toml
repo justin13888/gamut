@@ -534,6 +534,33 @@ exclude_re = [
     # arithmetic (`bits[i] -= 2`, `bits[i-1] += 1`, …) and the `i - 2` start ARE caught by the exact-BITS
     # golden in `optimal_skewed_frequencies_force_16_bit_limiting`. Same shape as the scan.rs cursor hangs.
     'huffman\.rs:365:19: replace -= with (\+|/)= in build_optimal_table',
+    # gamut-jpeg `rd` (issue #333) — non-terminating and provably-equivalent mutants, line/column
+    # anchored so each matches EXACTLY its mutant and leaves every sibling in the survey.
+    #
+    # isqrt's ascending settle `while (r + 1) * (r + 1) <= n { r += 1 }`: `* -> /` turns the
+    # probe into `(r+1)/(r+1) = 1 <= n`, true for every n >= 1, and `+= -> *=` pins `r` at its
+    # seed (`r * 1 == r`) — in both the loop never terminates, so cargo-mutants can only report a
+    # TIMEOUT, never a catchable behavioural escape (the same shape as the scan.rs cursor hangs).
+    # The seed arithmetic, the `<=` boundary, and `+= -> -=` (which walks r negative and returns
+    # a wrong root) ARE caught by the exact isqrt cases incl. the 2^52 - 1 rounded-up-seed pin.
+    'rd\.rs:110:19: replace \* with / in isqrt',
+    'rd\.rs:111:11: replace \+= with \*= in isqrt',
+    # `(run % 16) as u8` feeding `pack_nibbles(run, size)`: `% -> +` maps run r (< 16 after the
+    # ZRL split) to r + 16, and `pack_nibbles` computes `(hi << 4) + lo` on u8, where
+    # `(r + 16) << 4 ≡ r << 4 (mod 256)` — the added bit is exactly the one the shift discards,
+    # so the emitted symbol is identical for every reachable run. Provably equivalent.
+    # (`% -> /` collapses the run nibble to 0 and IS caught by the run-cost threshold tests.)
+    'rd\.rs:178:37: replace % with \+ in trellis_quantize',
+    # Backtrack sign restore `if coeff[k] < 0`: a backtracked node k always has a candidate
+    # v >= 1, which requires v_hi[k] >= 1 and hence coeff[k] != 0 — the only value where `<` and
+    # `<=` disagree is unreachable. Provably equivalent (same shape as the `refine` sign-test
+    # entry above). (`< -> >` flips real signs and IS caught by the entropy-decode round-trip.)
+    'rd\.rs:271:36: replace < with <= in trellis_quantize',
+    # Backtrack terminator `node = (j > 0).then_some((j, jc))`: node j = 0 is the virtual start
+    # whose parent is (0, 0), so `> -> >=` (and `> -> ==`, which chains INTO j = 0) re-visits the
+    # same node forever — non-terminating, TIMEOUT-only. (`> -> <` truncates real chains and IS
+    # caught by the trellis round-trip tests.)
+    'rd\.rs:273:19: replace > with (>=|==) in trellis_quantize',
     'progressive\.rs:493:41: replace > with >=',
     # 459:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
     # that becomes newly-nonzero this scan. It gates ONLY whether a >15 run of zero-history coefficients
