@@ -53,7 +53,7 @@
 //!   [`AvifImage::decode_item_rgba8`]); anything outside them is [`Error::Unsupported`] on *this*
 //!   surface while the planar surface still delivers the samples.
 
-use gamut_color::{ColorRange, ycbcr_to_rgb};
+use gamut_color::{ColorRange, MatrixCoefficients, YcbcrMatrix, ycbcr_to_rgb};
 use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8};
 use gamut_isobmff::ColourInformation;
 
@@ -303,10 +303,12 @@ impl AvifImage {
     ///   `full_range` flag selecting [`ColorRange`].
     /// - **nclx matrix 2 (unspecified)** — treated as BT.601, matching libavif's fallback for
     ///   unspecified matrix coefficients (real-world AVIFs commonly stamp CICP 2/2/2).
+    /// - **nclx matrix 1 (BT.709) / 9 (BT.2020-NCL)** — via [`gamut_color::YcbcrMatrix`], the
+    ///   general H.273 §8.3 derivation. BT.709 is what this crate's own lossy encoder emits.
     /// - **Monochrome** — luma replicated to gray, range-expanded for limited range.
     /// - **Missing `colr`** — defaults to **BT.601, limited range** (justification below).
-    /// - Anything else — BT.709/2020, an ICC-only `colr`, or a `bit_depth > 8` frame — is
-    ///   [`Error::Unsupported`].
+    /// - Anything else — a constant-luminance or YCgCo matrix, an ICC-only `colr`, or a
+    ///   `bit_depth > 8` frame — is [`Error::Unsupported`].
     ///
     /// The missing-`colr` default is BT.601 limited range, matching the posture `gamut-heic`
     /// documents for HEIF. AVIF technically defers an absent `colr` to the AV1 sequence header's
@@ -703,9 +705,24 @@ fn frame_to_rgba(item: &AvifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
                 px.copy_from_slice(&[frame.cr[i] as u8, frame.y[i] as u8, frame.cb[i] as u8, 255]);
             }
         }
-        // BT.601 (matrix 6) and BT.470 System B,G (matrix 5) share coefficients; unspecified
-        // (matrix 2) falls back to them, matching libavif.
-        2 | 5 | 6 => {
+        // The luma–chroma matrices. BT.601 (matrix 6) and BT.470 System B,G (matrix 5) share
+        // coefficients; unspecified (matrix 2) falls back to them, matching libavif. BT.709
+        // (matrix 1) and BT.2020 non-constant-luminance (matrix 9) go through the general H.273
+        // derivation — BT.601 deliberately does not, keeping the libwebp-exact transcription the
+        // surface has always used (the two agree exactly at full range anyway).
+        1 | 2 | 5 | 6 | 9 => {
+            let general = match matrix {
+                2 | 5 | 6 => None,
+                code => Some(YcbcrMatrix::new(
+                    MatrixCoefficients::from_code_point(code).ok_or_else(|| {
+                        Error::unsupported(
+                            env!("CARGO_PKG_NAME"),
+                            "AVIF: unsupported matrix coefficients on the RGBA surface",
+                        )
+                    })?,
+                    range,
+                )?),
+            };
             let (cw, _) = frame.chroma.chroma_dimensions(frame.width, frame.height);
             let cw = cw as usize;
             for y in 0..h {
@@ -719,12 +736,15 @@ fn frame_to_rgba(item: &AvifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
                         _ => x / 2,
                     };
                     let ci = cy * cw + cx;
-                    let (r, g, b) = ycbcr_to_rgb(
+                    let (yy, cb, cr) = (
                         frame.y[y * w + x] as u8,
                         frame.cb[ci] as u8,
                         frame.cr[ci] as u8,
-                        range,
                     );
+                    let (r, g, b) = match general {
+                        Some(m) => m.inverse(yy, cb, cr),
+                        None => ycbcr_to_rgb(yy, cb, cr, range),
+                    };
                     let o = (y * w + x) * 4;
                     out[o..o + 4].copy_from_slice(&[r, g, b, 255]);
                 }
@@ -733,7 +753,7 @@ fn frame_to_rgba(item: &AvifItem<'_>, frame: &DecodedFrame) -> Result<Vec<u8>> {
         _ => {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "AVIF: only BT.601 (matrix 2/5/6), identity (0), and monochrome are supported on the RGBA surface",
+                "AVIF: only BT.709 (1), BT.601 (2/5/6), BT.2020-NCL (9), identity (0), and monochrome are supported on the RGBA surface",
             ));
         }
     }

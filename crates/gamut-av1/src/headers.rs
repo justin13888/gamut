@@ -74,7 +74,7 @@ impl Av1StillConfig {
 /// [`Default`] is the M0 configuration — BT.709 primaries, sRGB transfer, **identity** matrix, full
 /// range — i.e. RGB carried directly as 4:4:4 GBR planes, which is what
 /// [`encode_still_intra`](crate::encode_still_intra) and its siblings use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Av1Colour {
     /// CICP colour primaries.
     pub primaries: ColourPrimaries,
