@@ -321,11 +321,15 @@ fn large_and_boundary_round_trip() {
     }
 
     // Just past the optimal-parse limit: `Level::Best` must still round-trip via the lazy fallback.
+    // Effort 0 changes nothing on the fallback path (the budget is ignored past the limit) but
+    // keeps this test fast under mutation, where a broken limit check would otherwise route the
+    // 1 MiB input into the (quadratic-ish) optimal parse and time the suite out.
     let big = generate(&mut rng, (1 << 20) + 1);
     for &level in &[Level::Default, Level::Best] {
         let mut zl = Vec::new();
         DeflateEncoder::new()
             .with_level(level)
+            .with_effort(0)
             .zlib_compress(&big, &mut zl);
         assert_eq!(
             zlib_oracle::inflate_zlib(&zl).unwrap(),
