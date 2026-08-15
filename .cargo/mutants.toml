@@ -24,13 +24,11 @@ exclude_globs = [
     # behaviour cargo-mutants can exercise. Excluded like the binding/binary crates (matches the
     # coverage gate's --ignore-filename-regex).
     "crates/gamut-jxl-sys/**",
-    # The facade crates carry no meaningfully complicated logic of their own: `gamut` is pure
-    # feature-gated re-exports (no function bodies), and `gamut-metadata` is the thin metadata
-    # facade whose per-format parsing/serialisation lives in gamut-exif/xmp/icc/iptc (each
-    # mutation-tested in place). Excluded package-wide so the heavy mutants runs spend their
-    # budget on the crates that own the logic.
+    # The `gamut` umbrella is pure feature-gated re-exports (no function bodies), so it carries no
+    # logic of its own to mutate. (`gamut-metadata` used to be excluded here on the same grounds —
+    # a thin facade delegating to gamut-exif/xmp/icc/iptc — but its extension table owns real
+    # lookup/replace/remove logic now, so it is mutation-tested in full.)
     "crates/gamut/**",
-    "crates/gamut-metadata/**",
     "tooling/**",
 ]
 
