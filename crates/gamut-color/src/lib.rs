@@ -32,8 +32,8 @@
 //!   ([`Planar8`]); the CICP code-point tables; BT.601 YCbCr 4:2:0 ([`ycbcr`]); **the H.273
 //!   matrixing and de-matrixing at every modeled bit depth for [`MatrixCoefficients::Bt709`] /
 //!   `Bt601` / `Bt470Bg` / `Bt2020Ncl` in both ranges ([`RgbToYcbcr`] / [`YcbcrMatrix`])**; and the
-//!   `f64` colour science ([`transfer`], [`oklab`], [`matrix`], [`gamut_map`], [`profile`]) for the
-//!   sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
+//!   `f64` colour science ([`transfer`], [`oklab`], [`xyb`], [`matrix`], [`gamut_map`],
+//!   [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
 //! - **Modeled but deferred:** 10/12-bit *plane* wiring ([`BitDepth::Ten`] / [`BitDepth::Twelve`] —
 //!   both H.273 directions ship at these depths; what is missing is the AV1 encode path and a
 //!   [`Planar8`] geometry to carry them. Distinct from [`BitDepth::Sixteen`], which is outside the
@@ -56,6 +56,7 @@ pub mod pixel;
 pub mod planar;
 pub mod profile;
 pub mod transfer;
+pub mod xyb;
 pub mod ycbcr;
 
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};

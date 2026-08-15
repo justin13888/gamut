@@ -14,7 +14,8 @@
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use gamut_color::{ColorRange, rgb_to_ycbcr};
+use gamut_color::transfer::srgb_eotf;
+use gamut_color::{ColorRange, rgb_to_ycbcr, xyb};
 use gamut_core::{Dimensions, EncodeImage, Error, Gray8, ImageRef, PixelFormat, Result, Rgb8};
 use gamut_dsp::jpeg::fdct8x8;
 use gamut_dsp::math::round_div_nearest;
@@ -24,8 +25,9 @@ use crate::bitwriter::BitWriter;
 use crate::huffman::{self, EncTable, TableSpec};
 use crate::marker::{self, DensityUnit};
 use crate::quant::QuantTables;
+use crate::rd::RdCtx;
 use crate::zigzag::ZIGZAG;
-use crate::{appmeta, progressive, quant};
+use crate::{appmeta, progressive, quant, rd};
 
 /// The largest image dimension the frame header can encode: the SOF0 `X`/`Y` fields are 16-bit
 /// (§B.2.2, Table B.2).
@@ -58,6 +60,56 @@ impl ChromaSubsampling {
             ChromaSubsampling::Ycbcr420 => (2, 2),
         }
     }
+}
+
+/// The colour space the encoder codes an [`Rgb8`] image in
+/// ([`JpegEncoder::with_color_mode`]).
+///
+/// The discriminants are permanent and append-only (the workspace C-ABI contract for fieldless
+/// enums).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum JpegColorMode {
+    /// T.871 §7 full-range BT.601 YCbCr in a JFIF stream — the frozen default.
+    #[default]
+    Ycbcr = 0,
+    /// The JPEG XL **XYB** opsin space, jpegli-style: samples are scaled-XYB
+    /// (`gamut_color::xyb::scale_xyb` — stored channels X, Y, B−Y), the stream carries no JFIF
+    /// APP0 (T.871 would imply YCbCr) but an Adobe APP14 with `transform = 0` and component ids
+    /// `R`,`G`,`B`, and [`XYB_ICC_PROFILE`] is embedded so any ICC-aware decoder reproduces sRGB.
+    Xyb = 1,
+}
+
+/// The ICC profile a [`JpegColorMode::Xyb`] stream embeds (and the one to hand a CMM after
+/// decoding such a stream): an input-class RGB→XYZ profile whose `A2B0` pipeline inverts the
+/// scaled-XYB byte encoding, the opsin cube root and bias, and the opsin mixing into D50 PCS XYZ.
+///
+/// The bytes are static (vendored) and platform-independent; an umbrella-level test regenerates
+/// them from `gamut-icc` + `gamut-color` and asserts byte equality, and validates them against
+/// the lcms2 oracle end-to-end.
+pub const XYB_ICC_PROFILE: &[u8] = include_bytes!("xyb/xyb-srgb.icc");
+
+/// Rate–distortion optimization mode ([`JpegEncoder::with_rd_optimization`]): how quantized
+/// coefficients are chosen from the DCT output.
+///
+/// The discriminants are permanent and append-only (the workspace C-ABI contract for fieldless
+/// enums); future refinements are new variants, never renumberings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum RdOptimization {
+    /// Plain §A.3.4 nearest rounding — the frozen default; output bytes are unchanged.
+    #[default]
+    None = 0,
+    /// Per-block trellis search over the AC coefficients, minimizing distortion plus λ times the
+    /// exact §F.1.2.2 entropy cost (see the crate's `rd` module docs). Smaller files at nearly
+    /// identical fidelity; the DC coefficient keeps plain rounding.
+    Trellis = 1,
+    /// [`Self::Trellis`] plus per-block adaptive quantization: λ is modulated by each block's own
+    /// AC energy, spending relatively more bits on flat (masking-poor) blocks and fewer on busy
+    /// ones.
+    TrellisAdaptive = 2,
 }
 
 /// A reusable baseline JPEG encoder.
@@ -99,6 +151,8 @@ pub struct JpegEncoder {
     progressive: bool,
     optimize_tables: bool,
     quant_tables: Option<QuantTables>,
+    rd: RdOptimization,
+    color_mode: JpegColorMode,
     exif: Option<Vec<u8>>,
     xmp: Option<Vec<u8>>,
     icc: Option<Vec<u8>>,
@@ -120,6 +174,8 @@ impl fmt::Debug for JpegEncoder {
             .field("progressive", &self.progressive)
             .field("optimize_tables", &self.optimize_tables)
             .field("quant_tables", &self.quant_tables)
+            .field("rd", &self.rd)
+            .field("color_mode", &self.color_mode)
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("icc", &self.icc.as_ref().map(Vec::len))
@@ -149,6 +205,8 @@ impl JpegEncoder {
             progressive: false,
             optimize_tables: false,
             quant_tables: None,
+            rd: RdOptimization::None,
+            color_mode: JpegColorMode::Ycbcr,
             exif: None,
             xmp: None,
             icc: None,
@@ -197,10 +255,14 @@ impl JpegEncoder {
         samples: &[u8],
         out: &mut Vec<u8>,
     ) -> Result<Option<usize>> {
-        // Caller-supplied quantization tables cannot ride a `JpegEncodeRequest`, so they pin the
-        // encode to the built-in path rather than let a backend silently encode with different
-        // tables (the same host-side veto gamut-jxl applies to its container features).
-        if self.quant_tables.is_some() {
+        // Caller-supplied quantization tables, RD optimization, and the XYB colour mode cannot
+        // ride a `JpegEncodeRequest`, so any of them pins the encode to the built-in path rather
+        // than let a backend silently encode with a different configuration (the same host-side
+        // veto gamut-jxl applies to its container features).
+        if self.quant_tables.is_some()
+            || self.rd != RdOptimization::None
+            || self.color_mode != JpegColorMode::Ycbcr
+        {
             return Ok(None);
         }
         if self.backends.is_empty() {
@@ -334,6 +396,50 @@ impl JpegEncoder {
         self
     }
 
+    /// Selects the colour space colour ([`Rgb8`]) input is coded in ([`JpegColorMode`]).
+    ///
+    /// The default [`JpegColorMode::Ycbcr`] is the frozen JFIF path. [`JpegColorMode::Xyb`] codes
+    /// jpegli-style XYB samples with [`XYB_ICC_PROFILE`] embedded — a perceptual space that
+    /// out-compresses YCbCr on an ICC-aware pipeline. In XYB mode: [`Self::with_subsampling`] is
+    /// ignored (always 4:4:4 — chroma-style subsampling of X would destroy opponent-colour detail
+    /// jpegli keeps at full resolution; jpegli's B-only subsampling is a possible follow-up),
+    /// [`Self::with_density`] is
+    /// inert (no JFIF APP0 is written), [`Self::with_icc_profile`] is rejected at encode time (a
+    /// caller profile would misdescribe the XYB samples; EXIF/XMP stay available), grayscale
+    /// ([`Gray8`]) input is rejected as unsupported, and pushed backends are not consulted.
+    /// Progressive mode, restart intervals, optimized tables, custom quantization tables, and RD
+    /// optimization all compose. Decoding an XYB stream (with this crate's decoder or any other)
+    /// yields the scaled-XYB samples presented as RGB plus the embedded profile via
+    /// [`crate::metadata`]; applying the profile is the caller's CMM's job.
+    ///
+    /// The samples come from `f64` colour math, so — unlike the default path — XYB-mode output
+    /// bytes are **not** bit-reproducible across platforms (gamut-color's Tier-1 determinism);
+    /// the embedded profile bytes are static and platform-independent.
+    #[must_use]
+    pub fn with_color_mode(mut self, mode: JpegColorMode) -> Self {
+        self.color_mode = mode;
+        self
+    }
+
+    /// Selects how quantized coefficients are chosen ([`RdOptimization`]): plain nearest rounding
+    /// (the default — output bytes unchanged), per-block AC trellis, or trellis with per-block
+    /// adaptive λ.
+    ///
+    /// Rate–distortion optimization changes the coefficients (that is its point), so it is opt-in
+    /// and produces different — spec-valid — bytes; the frozen quality contract continues to bind
+    /// only the default [`RdOptimization::None`] path. It composes with every other builder:
+    /// custom [`Self::with_quant_tables`], [`Self::with_optimized_tables`] (rates are still costed
+    /// against the typical-table proxy; the emitted tables then fit whatever the trellis chose),
+    /// and [`Self::with_progressive`] (the progressive stream carries the same trellis-chosen
+    /// coefficients as the baseline stream, preserving the exactness invariant). While set to a
+    /// non-`None` mode the encode is pinned to the **built-in** encoder — a
+    /// [`crate::backend::JpegEncodeRequest`] cannot carry the RD configuration.
+    #[must_use]
+    pub fn with_rd_optimization(mut self, rd: RdOptimization) -> Self {
+        self.rd = rd;
+        self
+    }
+
     /// Embeds EXIF metadata as an APP1 segment (`"Exif\0\0"` + TIFF stream, Exif 3.0 §4.7.2).
     ///
     /// `exif` is the TIFF stream beginning `II`/`MM` — e.g. `gamut-exif` output; a blob already
@@ -385,6 +491,22 @@ impl JpegEncoder {
         }
     }
 
+    /// The rate–distortion context for one component class (`chroma` selects the typical AC rate
+    /// proxy: Annex K.6 rather than K.5), or `None` when RD optimization is off.
+    fn rd_ctx(&self, chroma: bool) -> Option<RdCtx> {
+        (self.rd != RdOptimization::None).then(|| {
+            let spec = if chroma {
+                &huffman::STD_CHROMA_AC
+            } else {
+                &huffman::STD_LUMA_AC
+            };
+            RdCtx::new(
+                EncTable::from_spec(spec),
+                self.rd == RdOptimization::TrellisAdaptive,
+            )
+        })
+    }
+
     /// Rejects dimensions the frame header cannot encode (`X`/`Y` are 16-bit). Zero is already
     /// excluded by [`Dimensions`].
     fn check_dimensions(dims: Dimensions) -> Result<(u16, u16)> {
@@ -429,6 +551,12 @@ impl JpegEncoder {
             }
         }
         if let Some(icc) = &self.icc {
+            if self.color_mode == JpegColorMode::Xyb {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "JPEG: XYB mode embeds its own ICC profile; a caller profile would misdescribe the samples",
+                ));
+            }
             if icc.is_empty() {
                 return Err(Error::invalid_input(
                     env!("CARGO_PKG_NAME"),
@@ -509,6 +637,146 @@ impl JpegEncoder {
         encode_scan(components, w, h, self.restart_interval, &mut coder);
         coder.finish();
     }
+
+    /// Encodes `rgb` as an XYB stream ([`JpegColorMode::Xyb`]): sRGB → linear (EOTF LUT) → XYB →
+    /// scaled-XYB bytes into three full-resolution planes (X, Y, B−Y), coded 4:4:4 with component
+    /// ids `R`,`G`,`B` under a no-APP0 / APP14 `transform = 0` prologue that embeds
+    /// [`XYB_ICC_PROFILE`]. X and Y quantize with the luminance table (destination 0), the stored
+    /// B−Y with the chrominance table (destination 1) — Annex K tables are YCbCr-tuned, so this
+    /// pairing is an honest placeholder, not XYB-tuned (see STATUS.md). The caller writes EOI.
+    fn encode_xyb(&self, rgb: &[u8], width: u16, height: u16, out: &mut Vec<u8>) {
+        let (w, h) = (usize::from(width), usize::from(height));
+
+        // 256-entry EOTF LUT: the only per-pixel float work left is the XYB transform itself.
+        let mut eotf = [0f64; 256];
+        for (i, v) in eotf.iter_mut().enumerate() {
+            *v = srgb_eotf(i as f64 / 255.0);
+        }
+
+        let mut planes = [
+            vec![0u8; w * h], // X
+            vec![0u8; w * h], // Y
+            vec![0u8; w * h], // stored B − Y
+        ];
+        for i in 0..w * h {
+            let linear = [
+                eotf[usize::from(rgb[i * 3])],
+                eotf[usize::from(rgb[i * 3 + 1])],
+                eotf[usize::from(rgb[i * 3 + 2])],
+            ];
+            let scaled = xyb::scale_xyb(xyb::linear_srgb_to_xyb(linear));
+            for (plane, &s) in planes.iter_mut().zip(scaled.iter()) {
+                // scale_xyb clamps to [0, 1], so the rounded value is already in 0..=255.
+                plane[i] = (s * 255.0).round() as u8;
+            }
+        }
+        let [x, y, b] = planes;
+        let x_plane = Plane {
+            data: x,
+            width: w,
+            height: h,
+        };
+        let y_plane = Plane {
+            data: y,
+            width: w,
+            height: h,
+        };
+        let b_plane = Plane {
+            data: b,
+            width: w,
+            height: h,
+        };
+
+        let luma_quant = self.luma_quant();
+        let chroma_quant = self.chroma_quant();
+        let luma_rd = self.rd_ctx(false);
+        let chroma_rd = self.rd_ctx(true);
+
+        // Prologue: SOI, Adobe APP14 transform = 0 (no JFIF APP0 — T.871 defines the 3-component
+        // JFIF stream as YCbCr), EXIF/XMP if configured, the XYB ICC profile, DQT.
+        marker::write_marker(out, marker::code::SOI);
+        marker::write_app14_adobe(out, 0);
+        if let Some(exif) = &self.exif {
+            appmeta::write_app1_exif(out, exif);
+        }
+        if let Some(xmp) = &self.xmp {
+            appmeta::write_app1_xmp(out, xmp);
+        }
+        appmeta::write_app2_icc(out, XYB_ICC_PROFILE);
+        quant::emit_dqt(out, &[(0, &luma_quant), (1, &chroma_quant)]);
+
+        // Component ids are the bytes 'R','G','B' (the jpegli convention for XYB streams),
+        // belt-and-braces beside the APP14: either signal alone keeps a decoder from applying a
+        // YCbCr inverse. All components 1×1 (4:4:4).
+        let ids: [u8; 3] = *b"RGB";
+        if self.progressive {
+            let comps = [
+                progressive::ProgComponent {
+                    id: ids[0],
+                    h: 1,
+                    v: 1,
+                    tq: 0,
+                    plane: &x_plane,
+                    quant: &luma_quant,
+                    rd: luma_rd.as_ref(),
+                },
+                progressive::ProgComponent {
+                    id: ids[1],
+                    h: 1,
+                    v: 1,
+                    tq: 0,
+                    plane: &y_plane,
+                    quant: &luma_quant,
+                    rd: luma_rd.as_ref(),
+                },
+                progressive::ProgComponent {
+                    id: ids[2],
+                    h: 1,
+                    v: 1,
+                    tq: 1,
+                    plane: &b_plane,
+                    quant: &chroma_quant,
+                    rd: chroma_rd.as_ref(),
+                },
+            ];
+            progressive::encode(out, width, height, &comps, self.restart_interval);
+        } else {
+            let components = [
+                Component {
+                    h: 1,
+                    v: 1,
+                    plane: &x_plane,
+                    quant: &luma_quant,
+                    dest: 0,
+                    rd: luma_rd.as_ref(),
+                },
+                Component {
+                    h: 1,
+                    v: 1,
+                    plane: &y_plane,
+                    quant: &luma_quant,
+                    dest: 0,
+                    rd: luma_rd.as_ref(),
+                },
+                Component {
+                    h: 1,
+                    v: 1,
+                    plane: &b_plane,
+                    quant: &chroma_quant,
+                    dest: 1,
+                    rd: chroma_rd.as_ref(),
+                },
+            ];
+            self.write_baseline_frame(
+                out,
+                width,
+                height,
+                &[(ids[0], 1, 1, 0), (ids[1], 1, 1, 0), (ids[2], 1, 1, 1)],
+                &[(ids[0], 0, 0), (ids[1], 0, 0), (ids[2], 1, 1)],
+                &components,
+            );
+        }
+    }
 }
 
 /// A single-channel sample plane at a component's own resolution (row-major, 8-bit).
@@ -542,6 +810,8 @@ struct Component<'a> {
     quant: &'a [u8; 64],
     /// Entropy-table destination (the SOS `Tdj` = `Taj`): 0 = luma, 1 = chroma.
     dest: usize,
+    /// The rate–distortion context for this component's class, when RD optimization is enabled.
+    rd: Option<&'a RdCtx>,
 }
 
 /// The entropy tables a baseline scan codes with, indexed by destination (0 = luma, 1 = chroma).
@@ -661,11 +931,9 @@ fn emit_symbol(writer: &mut BitWriter, table: Option<&EncTable>, symbol: u8) {
     }
 }
 
-/// Level-shifts, forward-transforms and quantizes one 8×8 block of `plane` at block coordinates
-/// `(bx, by)` (§A.3.1 / §A.3.3 / §A.3.4), returning the natural-order quantized coefficients. Shared
-/// by the baseline single-pass coder ([`encode_block`]) and the progressive encoder
-/// ([`crate::progressive`]), which materializes every block up front before running the scan script.
-pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
+/// Gathers and level-shifts one 8×8 block of `plane` at block coordinates `(bx, by)` and runs the
+/// forward DCT (§A.3.1 / §A.3.3), returning the natural-order **unquantized** coefficients.
+fn dct_block(plane: &Plane, bx: usize, by: usize) -> [i32; 64] {
     // Gather the level-shifted samples in natural (raster) order.
     let mut block = [0i32; 64];
     for row in 0..8usize {
@@ -674,12 +942,38 @@ pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usi
         }
     }
     fdct8x8(&mut block);
+    block
+}
+
+/// Level-shifts, forward-transforms and quantizes one 8×8 block of `plane` at block coordinates
+/// `(bx, by)` (§A.3.1 / §A.3.3 / §A.3.4), returning the natural-order quantized coefficients. Shared
+/// by the baseline single-pass coder ([`encode_block`]) and the progressive encoder
+/// ([`crate::progressive`]), which materializes every block up front before running the scan script.
+pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
+    let block = dct_block(plane, bx, by);
     // Quantize (§A.3.4): round-to-nearest divide by the table entry (which is ≥ 1).
     let mut q = [0i32; 64];
     for (dst, (&coeff, &step)) in q.iter_mut().zip(block.iter().zip(quant.iter())) {
         *dst = round_div_nearest(coeff, i32::from(step));
     }
     q
+}
+
+/// [`quantize_block`] with an optional rate–distortion context: `None` is exactly the plain
+/// nearest-rounding path (the frozen default, byte-for-byte), `Some` routes the unquantized DCT
+/// output through the [`crate::rd`] trellis. The single quantization seam shared by the baseline
+/// and progressive processes, so an RD choice is identical in both.
+pub(crate) fn quantize_block_rd(
+    plane: &Plane,
+    quant: &[u8; 64],
+    bx: usize,
+    by: usize,
+    rd: Option<&RdCtx>,
+) -> [i32; 64] {
+    match rd {
+        None => quantize_block(plane, quant, bx, by),
+        Some(ctx) => rd::trellis_quantize(&dct_block(plane, bx, by), quant, ctx),
+    }
 }
 
 /// Codes one 8×8 block (§A.3): level-shift → FDCT → quantize, then hands the natural-order
@@ -691,7 +985,7 @@ fn encode_block(
     dc_pred: &mut i32,
     coder: &mut BaselineCoder,
 ) {
-    let q = quantize_block(comp.plane, comp.quant, block_x, block_y);
+    let q = quantize_block_rd(comp.plane, comp.quant, block_x, block_y, comp.rd);
     encode_quantized_block(&q, dc_pred, comp.dest, coder);
 }
 
@@ -820,6 +1114,14 @@ impl EncodeImage<Gray8> for JpegEncoder {
     /// Encodes a grayscale image as a single-component (Y) baseline JPEG. Subsampling does not apply
     /// to a one-component image; a JFIF APP0 segment is still written.
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.color_mode == JpegColorMode::Xyb {
+            // A single-channel image has no XYB representation; silently encoding plain
+            // grayscale under an "XYB" setting would misdescribe the output.
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: XYB colour mode requires RGB input",
+            ));
+        }
         let (width, height) = Self::check_dimensions(image.dimensions())?;
         self.check_metadata()?;
         if let Some(written) =
@@ -835,6 +1137,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
             height: usize::from(height),
         };
         let luma_quant = self.luma_quant();
+        let luma_rd = self.rd_ctx(false);
 
         self.write_prologue(out, &[(0, &luma_quant)]);
         if self.progressive {
@@ -845,6 +1148,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 tq: 0,
                 plane: &plane,
                 quant: &luma_quant,
+                rd: luma_rd.as_ref(),
             }];
             progressive::encode(out, width, height, &comps, self.restart_interval);
         } else {
@@ -854,6 +1158,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 plane: &plane,
                 quant: &luma_quant,
                 dest: 0,
+                rd: luma_rd.as_ref(),
             };
             self.write_baseline_frame(out, width, height, &[(1, 1, 1, 0)], &[(1, 0, 0)], &[comp]);
         }
@@ -877,6 +1182,12 @@ impl EncodeImage<Rgb8> for JpegEncoder {
         }
         let start = out.len();
         let (w, h) = (usize::from(width), usize::from(height));
+
+        if self.color_mode == JpegColorMode::Xyb {
+            self.encode_xyb(image.as_samples(), width, height, out);
+            marker::write_marker(out, marker::code::EOI);
+            return Ok(out.len() - start);
+        }
 
         // RGB → full-resolution Y/Cb/Cr planes (T.871 §7 full-range BT.601, fixed-point).
         let rgb = image.as_samples();
@@ -902,6 +1213,8 @@ impl EncodeImage<Rgb8> for JpegEncoder {
 
         let luma_quant = self.luma_quant();
         let chroma_quant = self.chroma_quant();
+        let luma_rd = self.rd_ctx(false);
+        let chroma_rd = self.rd_ctx(true);
 
         self.write_prologue(out, &[(0, &luma_quant), (1, &chroma_quant)]);
         if self.progressive {
@@ -913,6 +1226,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     tq: 0,
                     plane: &luma_plane,
                     quant: &luma_quant,
+                    rd: luma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
                     id: 2,
@@ -921,6 +1235,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     tq: 1,
                     plane: &cb_plane,
                     quant: &chroma_quant,
+                    rd: chroma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
                     id: 3,
@@ -929,6 +1244,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     tq: 1,
                     plane: &cr_plane,
                     quant: &chroma_quant,
+                    rd: chroma_rd.as_ref(),
                 },
             ];
             progressive::encode(out, width, height, &comps, self.restart_interval);
@@ -940,6 +1256,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     plane: &luma_plane,
                     quant: &luma_quant,
                     dest: 0,
+                    rd: luma_rd.as_ref(),
                 },
                 Component {
                     h: 1,
@@ -947,6 +1264,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     plane: &cb_plane,
                     quant: &chroma_quant,
                     dest: 1,
+                    rd: chroma_rd.as_ref(),
                 },
                 Component {
                     h: 1,
@@ -954,6 +1272,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     plane: &cr_plane,
                     quant: &chroma_quant,
                     dest: 1,
+                    rd: chroma_rd.as_ref(),
                 },
             ];
             self.write_baseline_frame(
@@ -1059,6 +1378,8 @@ mod tests {
         assert!(!d.progressive);
         assert!(!d.optimize_tables);
         assert_eq!(d.quant_tables, None);
+        assert_eq!(d.rd, RdOptimization::None);
+        assert_eq!(d.color_mode, JpegColorMode::Ycbcr);
         assert_eq!((&d.exif, &d.xmp, &d.icc), (&None, &None, &None));
     }
 
@@ -1381,6 +1702,7 @@ mod tests {
             plane: &plane,
             quant: &quant,
             dest: 0,
+            rd: None,
         };
 
         let entropy = scan_entropy(&[comp], 16, 16, 0);
@@ -1431,6 +1753,7 @@ mod tests {
             plane: &plane,
             quant: &quant,
             dest: 0,
+            rd: None,
         };
 
         let entropy = scan_entropy(&[comp], 8, 8, 0);
@@ -1669,6 +1992,7 @@ mod tests {
             plane: &plane,
             quant: &quant,
             dest: 0,
+            rd: None,
         };
         let entropy = scan_entropy(&[comp], 16, 16, 0);
 

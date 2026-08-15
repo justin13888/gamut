@@ -56,6 +56,22 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - Opt-in decoder resource guards (P9, issue #306): `JpegDecoder::with_max_dimensions` and
   `with_max_image_bytes`, enforced before built-in frame allocations and backend selection, while
   bounding sequential DNL-deferred sample-plane growth until the exact height arrives.
+- XYB colour mode (P13, issue #334): `with_color_mode(JpegColorMode::Xyb)` — jpegli-style
+  scaled-XYB samples (via `gamut_color::xyb`; stored channels X, Y, B−Y), a no-JFIF-APP0 / Adobe
+  APP14 `transform = 0` prologue with component ids `R`,`G`,`B` (either signal alone keeps a
+  decoder from applying a YCbCr inverse), and the static vendored `XYB_ICC_PROFILE` embedded so
+  any ICC-aware consumer reproduces sRGB. The profile is regenerated and byte-pinned from
+  `gamut-icc`+`gamut-color` by an umbrella-layer test (`crates/gamut/tests/xyb_icc.rs`) and
+  validated end-to-end against the lcms2 oracle — the runtime dependency edge stays
+  jpeg ← core, color, dsp. Always 4:4:4; grayscale and caller ICC profiles rejected; backends
+  vetoed; progressive/restarts/optimized-tables/custom-tables/RD compose.
+- Rate–distortion optimized coefficient selection (P12, issue #333): `with_rd_optimization` —
+  per-block AC trellis over the exact §F.1.2.2 run/size cost of the typical Annex K.5/K.6 tables
+  (a documented rate-proxy free choice that keeps baseline and progressive coefficients
+  identical), step-normalized distortion with a tuned dimensionless λ, and per-block adaptive λ
+  modulation from block activity relative to the quantization resolution. DC keeps plain rounding
+  (DC trellis deferred: a cross-block DP through the §F.1.2.1 predictor and restart resets —
+  mozjpeg ships it separately too). Default off (byte-identical); backends vetoed.
 - Caller-supplied quantization tables (P11, issue #332): the validated `QuantTables` pair
   (natural order, entries `1..=255` by construction) used **verbatim** via
   `JpegEncoder::with_quant_tables`, bypassing — without changing — the frozen quality mapping;
@@ -95,6 +111,19 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 - **APP13 IPTC-IIM (Photoshop 3.0 PSIR).** The legacy IPTC carrier; modern IPTC rides inside XMP
   (which `gamut-metadata` models as the single home). `JpegMetadata` is `#[non_exhaustive]` so the
   carrier can be added without a breaking change.
+- **XYB-tuned quantization tables.** The XYB mode quantizes X/Y with Annex K.1 and the stored
+  B−Y with K.2 — an honest placeholder (those tables are YCbCr-tuned). jpegli's
+  `kBaseQuantMatrixXYB` needs a quality→distance mapping and a vendored citation; additive later
+  through the `QuantTables` plumbing.
+- **jpegli B-only subsampling for XYB.** jpegli optionally subsamples only the B channel
+  (2,2/2,2/1,1); gamut's XYB mode is 4:4:4-only for now (`ChromaSubsampling` is ignored — its
+  chroma semantics would subsample X, destroying opponent-colour detail). The scan machinery is
+  sampling-generic, so this is additive.
+- **XYB-mode byte reproducibility.** The XYB sample path is `f64` colour math under gamut-color's
+  Tier-1 determinism, so — unlike the frozen default path — XYB output bytes are not
+  bit-reproducible across platforms; XYB tests are tolerance/structure based and the vendored ICC
+  bytes are static. Not a contract change: the frozen quality/byte contracts bind the default
+  path only.
 - **Alternate built-in base tables (flat, mozjpeg/jpegli psychovisual).** Every built-in constant
   table is a citation obligation under the `references/` policy, and no such table has a vendored
   source here yet. `QuantTables`' inherent constructors are append-only, so tuned built-ins are
@@ -196,3 +225,5 @@ progressive-stream walker (scan script, per-scan DHTs, restart cadence, EOBn-run
 | P9 | issue #306 | **Decoder resource limits:** opt-in dimension and native-raster byte builders; checked before built-in frame allocation and backend selection, rechecked on accepted backend output, and converted into a safe sequential DNL MCU-row ceiling | ✅ done |
 | P10 | T.81 §K.2; issue #331 | **Optimized baseline Huffman tables:** `JpegEncoder::with_optimized_tables(bool)` — the baseline scan is walked twice through one shared coder (`BaselineCoder::gather`/`::emit`), per-destination symbol histograms drive the §K.2 construction, and the resulting luma/chroma DC+AC tables replace the Annex K.3–K.6 typical ones in the same single DHT segment. Default off, so every previously-encodable configuration stays byte-identical | ✅ done |
 | P11 | T.81 §A.3.4, §B.2.4.1; issue #332 | **Caller-supplied quantization tables:** the public `QuantTables` pair — natural order, every entry `1..=255` **by construction** (`new` rejects zero, so the encoder never divides by zero and never emits a DQT its own decoder refuses) — used verbatim via `JpegEncoder::with_quant_tables`, with `annex_k()`/`scaled()` recovering the frozen IJG mapping over arbitrary bases. Quality becomes inert while set; the frozen quality contract still governs the default path; backends are vetoed (a `JpegEncodeRequest` cannot carry tables). Alternate built-in base tables deferred (citation obligation) | ✅ done |
+| P12 | T.81 §F.1.2, Annex K.5/K.6; issue #333 | **RD-optimized coefficient selection:** the `rd` module's per-block AC trellis — dynamic program over (position, {v, v−1}) nodes with the exact run/size + ZRL + EOB bit cost of the typical AC tables as rate proxy, step-normalized distortion (the quantization table as the perceptual weighting), tuned dimensionless λ (pinned; measured 8.7% battery-wide saving at ≤ 0.35 dB) — plus `TrellisAdaptive` per-block λ modulation `√(energy/Σstep²)` clamped `[¼, 4]`. Opt-in `with_rd_optimization`; DC plain (deferred: cross-block DP through the DC predictor/restarts); default byte-identical; backends vetoed; progressive carries identical coefficients by the shared `quantize_block_rd` seam + configuration-only rate model | ✅ done |
+| P13 | Adobe TN #5116; ISO/IEC 18181-1 (XYB, via the vendored CD + pinned libjxl 0.12.0 constants); issue #334 | **XYB colour mode:** `with_color_mode(JpegColorMode::Xyb)` — sRGB → linear (EOTF LUT) → opsin XYB → scaled-XYB u8 planes (X, Y, B−Y) coded 4:4:4 under SOI → APP14 `transform=0` → EXIF/XMP → APP2 `XYB_ICC_PROFILE` → DQT, SOF ids `R`,`G`,`B`, X/Y on the luminance table and B−Y on the chrominance table (placeholder pairing, ledgered above). The 768-byte profile (input class, D50 XYZ PCS, `desc`/`cprt`/`wtpt`/`chad`/`A2B0` mAB with a 2×2×2 CLUT + cube-root parametric M curves + the frozen 0.5·XYZ(D50)·OpsinInverse matrix/`B2A0` no-op) is vendored static and umbrella-pinned; the decoder needs zero changes (RGB passthrough via APP14/ids). Differential: libjpeg-turbo decodes + test-side XYB inversion ≥ 40 dB on the battery; lcms2 reproduces sRGB from real samples (worst 25 codes at the documented near-black X amplification, mean 2.46) | ✅ done |

@@ -1337,3 +1337,31 @@ fn custom_quant_tables_pin_the_encode_to_the_built_in_path() {
         .unwrap();
     assert_eq!(with_registry, built_in);
 }
+
+#[test]
+fn rd_optimization_pins_the_encode_to_the_built_in_path() {
+    // The RD configuration cannot ride a `JpegEncodeRequest`, so a non-`None` mode must skip the
+    // registry entirely, exactly like custom quantization tables.
+    use gamut_jpeg::RdOptimization;
+    let log: Log = Arc::default();
+    let mut enc = JpegEncoder::new().with_rd_optimization(RdOptimization::Trellis);
+    enc.push_backend(ScriptedEncoder {
+        name: "eager",
+        act: Act::Accept,
+        log: Arc::clone(&log),
+        out: backend_stream(),
+    });
+    let pixels = gray_pixels();
+    let img = ImageRef::<Gray8>::new(&pixels, dims()).unwrap();
+    let with_registry = enc.encode_to_vec(img).unwrap();
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "no backend may be consulted while RD optimization is on"
+    );
+    let img = ImageRef::<Gray8>::new(&pixels, dims()).unwrap();
+    let built_in = JpegEncoder::new()
+        .with_rd_optimization(RdOptimization::Trellis)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(with_registry, built_in);
+}

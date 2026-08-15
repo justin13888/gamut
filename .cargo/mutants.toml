@@ -519,7 +519,7 @@ exclude_re = [
     # mutants, line/column-anchored so each matches EXACTLY its mutant and leaves the sibling operators
     # (the abs==0 run test, the abs>1 history test, the ZRL/EOB boundaries) in the survey.
     #
-    # 488:41 `self.raw_bit(u8::from(coeff > 0))` — the newly-nonzero coefficient's sign bit. This arm
+    # 493:41 `self.raw_bit(u8::from(coeff > 0))` — the newly-nonzero coefficient's sign bit. This arm
     # is reached only when `abs == 1`, i.e. `|coeff| >> al == 1`, which forces `coeff != 0`; `coeff > 0`
     # and `coeff >= 0` therefore agree on every value that reaches it. (`> -> <`/`> -> ==` flip the sign
     # for real inputs and ARE caught by `ac_refine_sign_and_eob_fold_round_trip`'s negative coefficient.)
@@ -534,15 +534,42 @@ exclude_re = [
     # arithmetic (`bits[i] -= 2`, `bits[i-1] += 1`, …) and the `i - 2` start ARE caught by the exact-BITS
     # golden in `optimal_skewed_frequencies_force_16_bit_limiting`. Same shape as the scan.rs cursor hangs.
     'huffman\.rs:365:19: replace -= with (\+|/)= in build_optimal_table',
-    'progressive\.rs:488:41: replace > with >=',
-    # 454:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
+    # gamut-jpeg `rd` (issue #333) — non-terminating and provably-equivalent mutants, line/column
+    # anchored so each matches EXACTLY its mutant and leaves every sibling in the survey.
+    #
+    # isqrt's ascending settle `while (r + 1) * (r + 1) <= n { r += 1 }`: `* -> /` turns the
+    # probe into `(r+1)/(r+1) = 1 <= n`, true for every n >= 1, and `+= -> *=` pins `r` at its
+    # seed (`r * 1 == r`) — in both the loop never terminates, so cargo-mutants can only report a
+    # TIMEOUT, never a catchable behavioural escape (the same shape as the scan.rs cursor hangs).
+    # The seed arithmetic, the `<=` boundary, and `+= -> -=` (which walks r negative and returns
+    # a wrong root) ARE caught by the exact isqrt cases incl. the 2^52 - 1 rounded-up-seed pin.
+    'rd\.rs:110:19: replace \* with / in isqrt',
+    'rd\.rs:111:11: replace \+= with \*= in isqrt',
+    # `(run % 16) as u8` feeding `pack_nibbles(run, size)`: `% -> +` maps run r (< 16 after the
+    # ZRL split) to r + 16, and `pack_nibbles` computes `(hi << 4) + lo` on u8, where
+    # `(r + 16) << 4 ≡ r << 4 (mod 256)` — the added bit is exactly the one the shift discards,
+    # so the emitted symbol is identical for every reachable run. Provably equivalent.
+    # (`% -> /` collapses the run nibble to 0 and IS caught by the run-cost threshold tests.)
+    'rd\.rs:178:37: replace % with \+ in trellis_quantize',
+    # Backtrack sign restore `if coeff[k] < 0`: a backtracked node k always has a candidate
+    # v >= 1, which requires v_hi[k] >= 1 and hence coeff[k] != 0 — the only value where `<` and
+    # `<=` disagree is unreachable. Provably equivalent (same shape as the `refine` sign-test
+    # entry above). (`< -> >` flips real signs and IS caught by the entropy-decode round-trip.)
+    'rd\.rs:271:36: replace < with <= in trellis_quantize',
+    # Backtrack terminator `node = (j > 0).then_some((j, jc))`: node j = 0 is the virtual start
+    # whose parent is (0, 0), so `> -> >=` (and `> -> ==`, which chains INTO j = 0) re-visits the
+    # same node forever — non-terminating, TIMEOUT-only. (`> -> <` truncates real chains and IS
+    # caught by the trellis round-trip tests.)
+    'rd\.rs:273:19: replace > with (>=|==) in trellis_quantize',
+    'progressive\.rs:493:41: replace > with >=',
+    # 459:55 `.find(|&k| (block[ZIGZAG[k]].abs() >> al) == 1)` computes `eob_pos`, the last coefficient
     # that becomes newly-nonzero this scan. It gates ONLY whether a >15 run of zero-history coefficients
     # ending at an *already-nonzero* coefficient is coded as a ZRL or folded into the EOB run — a free
     # choice in EOB/ZRL segmentation (§G.1.2.3): both are valid codings of the identical coefficients,
     # and the decoder reconstructs the same values from either, so no decode-parity test can distinguish
     # `== 1` from `!= 1`. (The `abs == 0` and `abs > 1` branch tests, which DO change coefficients, are
     # caught — this line:col anchor leaves them in the survey.)
-    'progressive\.rs:454:55: replace == with !=',
+    'progressive\.rs:459:55: replace == with !=',
     # gamut-heic (issue #238) — behaviourally-equivalent survivors.
     # `Reader::u48` (hvcc.rs) assembles a 48-bit big-endian value byte-by-byte via
     # `(acc << 8) | u64::from(byte)`: the running accumulator is shifted up 8 bits before each OR, so
