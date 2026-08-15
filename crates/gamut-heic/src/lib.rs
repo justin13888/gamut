@@ -45,8 +45,11 @@
 //! [`DecodedFrame`] samples (resolving `iden`/`grid` derivation), and
 //! [`HeifImage::decode_item_rgba8`] / [`HeifImage::decode_primary_rgba8`] add colour conversion,
 //! alpha merge, `iovl` compositing, and the transformative properties to produce an
-//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). See the [`HevcDecoder`] docs for the FFI rationale and
-//! the exact colour policy.
+//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). [`HeifImage::decode_item_rgba16`] /
+//! [`HeifImage::decode_primary_rgba16`] are the same pipeline for high-bit-depth content: they take
+//! any coded depth from 8 to 16 bits — 10-bit BT.2020 HDR included — and normalize the samples to
+//! the full 16-bit range. See the [`HevcDecoder`] docs for the FFI rationale and the exact colour
+//! policy.
 //!
 //! # Conformance
 //!

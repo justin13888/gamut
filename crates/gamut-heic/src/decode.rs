@@ -27,7 +27,7 @@
 //! - **`&mut self`.** A stateful platform decoder (reused contexts, GPU handles) fits behind
 //!   `&mut self`; a pure function fits too.
 //!
-//! # Two presentation surfaces
+//! # Three presentation surfaces
 //!
 //! - [`HeifImage::decode_item_planar`] — the **raw** surface. It resolves an item through its
 //!   derivation (coded → decoder; `iden` → source; `grid` → tile assembly in the plane domain) and
@@ -38,10 +38,16 @@
 //!   RGBA path.
 //! - [`HeifImage::decode_item_rgba8`] / [`HeifImage::decode_primary_rgba8`] — the **presentation**
 //!   surface. It planar-decodes (or `iovl`-composites), converts colour, merges the alpha auxiliary,
-//!   and applies the item's transformative properties in `ipma` order. It intentionally supports only
-//!   the common 8-bit still-image colour cases (see [`HeifImage::decode_item_rgba8`]); anything
-//!   outside them is [`Error::Unsupported`] on *this* surface while the planar surface still delivers
-//!   the samples.
+//!   and applies the item's transformative properties in `ipma` order. It presents **8-bit coded
+//!   frames only**: a deeper frame is [`Error::Unsupported`] here rather than silently narrowed.
+//! - [`HeifImage::decode_item_rgba16`] / [`HeifImage::decode_primary_rgba16`] — the **high-bit-depth
+//!   presentation** surface (issue #303). The same pipeline over 16-bit samples: it accepts every
+//!   coded depth [`DecodedFrame`] admits (`8..=16`) and normalizes samples to the full 16-bit range,
+//!   so the buffer does not carry the coded depth — read that from the planar surface or `pixi`.
+//!
+//! Both presentation surfaces share one colour policy, documented on
+//! [`HeifImage::decode_item_rgba8`]; anything outside it is [`Error::Unsupported`] on *those*
+//! surfaces while the planar surface still delivers the samples.
 
 use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, YcbcrMatrix, ycbcr_to_rgb};
 use gamut_core::{Dimensions, Error, ImageBuf, Result, Rgba8, Rgba16};
@@ -293,18 +299,27 @@ impl HeifImage {
     /// compositing), colour conversion, alpha-auxiliary merge, then the item's transformative
     /// properties applied in `ipma` order.
     ///
-    /// **Colour policy (8-bit only).** This convenience surface supports the common still-image
-    /// cases; anything else is [`Error::Unsupported`] *here* while
-    /// [`decode_item_planar`](Self::decode_item_planar) still delivers the samples:
+    /// **Colour policy.** Shared with [`decode_item_rgba16`](Self::decode_item_rgba16); this
+    /// surface additionally presents **8-bit coded frames only**. Anything outside the policy is
+    /// [`Error::Unsupported`] *here* while [`decode_item_planar`](Self::decode_item_planar) still
+    /// delivers the samples:
     ///
-    /// - **nclx matrix 6 / 5 (BT.601)** — via [`gamut_color::ycbcr_to_rgb`], with the nclx
-    ///   `full_range` flag selecting [`ColorRange`].
+    /// - **nclx matrix 1 (BT.709), 5/6 (BT.601, BT.470 System B,G), 9 (BT.2020 non-constant
+    ///   luminance)** — with the nclx `full_range` flag selecting [`ColorRange`].
     /// - **nclx matrix 0 (identity / GBR)** — requires 4:4:4; samples are mapped directly
     ///   (`R=Cr, G=Y, B=Cb`) with no range expansion.
     /// - **Monochrome** — luma replicated to gray, range-expanded for limited range.
     /// - **Missing `colr`** — defaults to **BT.601, limited range** (justification below).
-    /// - Anything else — BT.709/2020, an ICC-only `colr`, or a `bit_depth > 8` frame — is
-    ///   [`Error::Unsupported`].
+    /// - Anything else — YCgCo, the chromaticity-derived matrices, an ICC-only `colr`, or a coded
+    ///   depth CICP does not model — is [`Error::Unsupported`]. On *this* surface a `bit_depth > 8`
+    ///   frame is too: narrowing it would trade an honest error for silent quality loss, so use
+    ///   [`decode_item_rgba16`](Self::decode_item_rgba16) instead.
+    ///
+    /// **Which conversion runs.** BT.601 at 8 bits uses [`gamut_color::ycbcr_to_rgb`], gamut-color's
+    /// libwebp-exact integer inverse; **every other (matrix, depth) pair** uses the H.273-derived
+    /// bit-depth-generic [`YcbcrMatrix`]. The two agree to within a rounding unit — the split exists
+    /// so the 8-bit BT.601 output this crate has always produced, which the libheif differential
+    /// bound pins, stays byte-identical.
     ///
     /// The missing-`colr` default is BT.601 limited range: with no nclx present the matrix is
     /// undefined, and libheif assumes BT.601 for undefined/unspecified matrix coefficients; the range
