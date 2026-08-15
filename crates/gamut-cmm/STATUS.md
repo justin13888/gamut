@@ -27,7 +27,7 @@ that add behaviour (#325 onward).
 | P1 | #324 | Scaffold + keystone: `Pipeline`/`Stage` model, `Transform` entry trait, `CmmError`, workspace wiring | ✅ |
 | P2 | #325 | Curve stages: `ToneCurve` (`curveType`/`parametricCurveType` evaluation, monotonicity detection, analytic + lcms2-shaped numeric inversion) + `Stage::Curves` | ✅ |
 | P3 | #326 | CLUT stage: multi-dimensional interpolation (lcms2-matching) — `ClutTable`/`ClutInterpolation` + `Stage::Clut` | ✅ |
-| P4 | #327 | Profile linking: matrix/TRC (shaper) profile pairs | ☐ |
+| P4 | #327 | Profile linking: matrix/TRC (shaper) profile pairs — `link::{device_to_pcs, pcs_to_device}` over RGB/gray v2+v4 shaper profiles, `Stage::MatrixN` | ✅ |
 | P5 | #328 | Profile linking: LUT (`lut8`/`lut16`/`mAB `/`mBA `) profile pairs | ☐ |
 | P6 | #329 | Rendering intents + black-point compensation | ☐ |
 | P7 | #330 | Transform chaining + typed pixel buffers | ☐ |
@@ -80,6 +80,57 @@ that add behaviour (#325 onward).
 - **Bounds:** CLUT input dimensions cap at 15 (lcms2 `MAX_INPUT_DIMENSIONS`; ICC device
   spaces stop at 15 colorants), outputs at the pipeline-wide 16.
 
+## Settled decisions (P4, shaper + chad)
+
+- **THE convention — colorants as-is, `chad` never read (the epic's flagged v2/v4 risk):**
+  the shaper builders consume `rXYZ`/`gXYZ`/`bXYZ` exactly as tagged, for **v2 and v4
+  profiles alike**, and never read the `chad` tag on the relative-colorimetric path. Basis:
+  (1) ICC.1:2022 requires colorant tag values to be **already D50-adapted** (§8.3.4's
+  PCSXYZ relation and §9.2.44/.28/.11's colorant definitions are D50-relative; the
+  measured-to-PCS adaptation is recorded *informatively* in `chad`, §9.2.15); (2) lcms2's
+  shaper readers (`ReadICCMatrixRGB2XYZ`, `cmsio1.c:132–152`, feeding both
+  `BuildRGBInputMatrixShaper` and `BuildRGBOutputMatrixShaper`) read no chad; and (3) the
+  exhaustive audit of every `chad` consumer in lcms2 2.19 (`references/cmm`) finds exactly
+  one — `ComputeConversion`'s absolute-colorimetric branch (`cmscnvrt.c:374/377`) — which the
+  default adaptation state 1.0 leaves inert even there. A strict reading of *some* legacy v2
+  profiles (colorants relative to the actual media white, chad meant to adapt them) would
+  disagree; this crate **deliberately matches lcms2 over that strict v2 reading** — the
+  documented divergence the issue demands — and the three-way differentials
+  (`tests/oracle_shaper.rs`: v2-with-chad vs v2-without-chad bitwise identical; v2 vs v4 of
+  the same colorimetry exact; each vs lcms2) pin it.
+- **`wtpt` is reserved to absolute intent:** the media white point participates only in the
+  ICC-absolute white scaling, which arrives with #329; the relative baseline never reads it
+  (again matching lcms2, including its v2-display-class force-D50 quirk — irrelevant until
+  #329).
+- **Decoded-PCS pipelines — no `InpAdj`/`OutpAdj`:** lcms2 runs shaper pipelines in encoded
+  XYZ (`[0, 1]`) and folds `1/MAX_ENCODEABLE_XYZ` (and its reciprocal) into the matrices;
+  this crate's PCS seams are decoded colorimetry (crate convention), so the factors are
+  omitted. End-to-end lcms2 transforms with `TYPE_XYZ_DBL` formatters produce decoded XYZ,
+  so differentials compare directly.
+- **Intent parameter accepted but inert:** shaper profiles carry no per-intent tables
+  (perceptual/saturation renderings live in LUT tags, #328) and absolute colorimetric
+  arrives with #329, so `device_to_pcs`/`pcs_to_device` build the relative-colorimetric
+  baseline for every intent — documented on the functions and pinned by a test.
+- **LUT-tag precedence:** lcms2 consults LUT tags before the shaper fallback; a profile
+  carrying the requested direction's LUT tags (`A2B0/1/2` or `B2A0/1/2`) is refused with
+  `UnsupportedProfile("LUT-tag pipelines arrive with issue #328")` — a temporary placeholder
+  #328 replaces — rather than silently using the shaper tags. Lab-PCS *RGB* shapers (which
+  need an `XyzToLab` stage) are likewise deferred to #328; the gray Lab-PCS form is
+  supported now.
+- **Gray pipelines:** XYZ PCS is `kTRC(g)·D50` forward and pick-`Y` → `kTRC⁻¹` reverse; Lab
+  PCS is `[100·kTRC(g), 0, 0]` forward and pick-`L*/100` → `kTRC⁻¹` reverse (the decoded
+  equivalents of lcms2's `GrayInputMatrix`/`PickYMatrix`/`PickLstarMatrix`). The D50 is
+  `gamut_color::lab::D50_XYZ` — the s15Fixed16-encoded PCS illuminant §7.2.16 mandates —
+  not lcms2's truncated `0.9642/0.8249` constants (≤ 5.5e-6 apart; the differential bound
+  documents it).
+- **Reverse-direction conditioning:** the colorant matrix inverts via
+  `gamut_color::linalg::mat_inv_3x3`, whose exact-zero/non-finite-determinant `None` **is**
+  the conditioning threshold (no epsilon — a nearly-collinear but invertible colorant set
+  still inverts, as in lcms2); a non-finite inverse entry (overflowed cofactor over a
+  denormal determinant) is also `SingularMatrix`. TRC inversion reuses `ToneCurve::inverse`:
+  analytic for gamma and well-behaved parametric TRCs (as in lcms2's
+  `cmsReverseToneCurveEx`), the lcms2-shaped 4096-entry numeric reversal for sampled tables.
+
 ## Deferred / out of scope
 
 | Item | Notes | Status |
@@ -103,8 +154,14 @@ per-channel `Stage::Curves` evaluation, curves → CLUT → matrix hand-checked 
 differential suites against lcms2: `tests/oracle_curves.rs` (forward sweeps for
 identity/gamma/sampled/all five parametric types, inversion vs `cmsReverseToneCurveEx`,
 analytic-vs-numeric inverse agreement, round-trip batteries over gammas, parametric curves, and
-seeded random tables with and without flat runs) and `tests/oracle_clut.rs` (float-pipeline
+seeded random tables with and without flat runs), `tests/oracle_clut.rs` (float-pipeline
 sweeps against lcms2's `TetrahedralInterpFloat`/`Eval4InputsFloat`/1-D/2-D interpolators to
 f32-rounding tightness, plus end-to-end `cmsDoTransform` sweeps over synthesized devicelink
-CLUT probe profiles to 16-bit-quantization tightness). Gates: `mise run test` / `lint` /
-`fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate gamut-cmm`.
+CLUT probe profiles to 16-bit-quantization tightness), and `tests/oracle_shaper.rs` (shaper
+linking: device→PCS and PCS→device sweeps for sRGB/Display P3/Adobe-ish/gray v2+v4 profiles
+against end-to-end lcms2 transforms over the **same serialized bytes**, to f32-rounding
+tightness in XYZ plus ΔE₀₀ bounds; the three-way chad cases; analytic round trips; the
+assembled sRGB matrix pinned to Lindbloom's published D50-adapted values; LUT-precedence and
+error-path pins — the P4 linking unit tests hand-build `gamut-icc` profiles for the
+missing/mistyped-tag, singular-matrix, Lab-PCS, and dispatch boundaries). Gates: `mise run
+test` / `lint` / `fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate gamut-cmm`.
