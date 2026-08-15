@@ -20,7 +20,8 @@ APNG's default image). Format-agnostic pixel conversion (grey↔RGB, alpha, 16�
 [`gamut_core::convert`]'s (issue #268), not this crate's: the decoder resolves what only PNG knows —
 palette lookup, folding a tRNS key into a real alpha channel, §13.12 sub-byte scaling — and hands the
 layout change to the shared engine. A typed decode is lossless by default; `PngDecoder::convert_policy`
-opts into narrowing.
+opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce (#338), which demotes
+16→8 only when every sample is exactly `k·257` and drops alpha only when fully opaque.
 
 ## Phases
 
@@ -34,7 +35,7 @@ opts into narrowing.
 | P6 | §7.2 | Sub-byte depths: 1-bit bilevel grey + auto-minimal-depth indexed (1/2/4) | ✅ done |
 | P7 | §11.3 | Standard ancillary chunks: gAMA/cHRM/sRGB/sBIT/bKGD/pHYs/tIME/tEXt/zTXt/iTXt | ✅ done |
 | P8 | §11.3 | Metadata: eXIf, iCCP (deflate-compressed), iTXt-XMP (raw-bytes setters) | ✅ done |
-| P9 | §4.5 | **Space opt:** lossless palette/gray/alpha-drop reduction (size-estimate chosen) + brute-force filter strategy | ✅ done |
+| P9 | §4.5 | **Space opt:** lossless palette/gray/alpha-drop reduction (size-estimate chosen) + brute-force filter strategy; extended to grey/grey-alpha/16-bit inputs with lossless 16→8 demotion and sub-byte grey packing (#338) | ✅ done |
 | P10 | — | CLI `gamut convert → .png`; umbrella `png` feature; final API review | ✅ done |
 
 ## Decoder phases (issue #249)

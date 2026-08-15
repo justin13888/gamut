@@ -15,8 +15,9 @@
 //! decoder binary. Building these tests therefore needs cmake/meson/ninja/nasm and the checked-out
 //! submodules (`git submodule update --init --recursive`).
 
-use gamut_av1::encode_still_intra;
+use gamut_av1::{Av1Colour, encode_still_intra, encode_still_intra_with};
 use gamut_color::Planar8;
+use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 
 /// Builds identity planes (Y=G, U=B, V=R) from an RGB generator.
 fn planes(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
@@ -33,7 +34,12 @@ fn planes(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
 /// Encodes `planes` at `qindex`, then decodes the OBU stream with both reference decoders and
 /// asserts each reproduces the encoder's reconstruction byte-for-byte.
 fn check(planes: &Planar8, qindex: u8) {
-    let (still, recon) = encode_still_intra(planes, qindex).unwrap();
+    check_with(encode_still_intra(planes, qindex).unwrap(), qindex);
+}
+
+/// The body of [`check`], over an already-encoded still, so colour-parameterized cases share it.
+fn check_with(encoded: (gamut_av1::EncodedStill, gamut_av1::ReconImage), qindex: u8) {
+    let (still, recon) = encoded;
     let (w, h) = (recon.width as usize, recon.height as usize);
 
     // A standalone Section-5 OBU stream needs a temporal-delimiter OBU first (AVIF omits it inside
@@ -732,6 +738,54 @@ fn smooth_modes_match_dav1d() {
     for &q in &[8u8, 40, 120] {
         for &(w, h) in &[(16, 16), (32, 32), (24, 40), (31, 17), (17, 31), (40, 36)] {
             check(&planes(w, h, smooth), q);
+        }
+    }
+}
+
+#[test]
+fn non_identity_colour_config_matches_dav1d() {
+    // Signalling a real matrix leaves the AV1 §5.5.2 sRGB shortcut, so `color_config()` codes an
+    // extra `color_range` bit before `separate_uv_delta_q`. Every later syntax element shifts by
+    // that one bit, so a wrong branch — the bit emitted when it should be inferred, omitted when it
+    // should be coded, or written in the wrong position — desyncs the whole sequence header and
+    // both reference decoders diverge or fail outright. The coding tools themselves are
+    // matrix-agnostic (the planes are the same bytes either way), which is exactly why this test
+    // isolates the header change.
+    let texture = |x: u32, y: u32| {
+        let r = (x.wrapping_mul(5).wrapping_add(y.wrapping_mul(3)) % 256) as u8;
+        let g = ((x.wrapping_add(y).wrapping_mul(2)) % 256) as u8;
+        let b = (64 + ((x.wrapping_mul(7) ^ y) % 128)) as u8;
+        [r, g, b]
+    };
+    let colours = [
+        // BT.709 full range — what the AVIF encoder's lossy default signals.
+        Av1Colour {
+            primaries: ColourPrimaries::Bt709,
+            transfer: TransferCharacteristics::Srgb,
+            matrix: MatrixCoefficients::Bt709,
+            range: ColorRange::Full,
+        },
+        // …and studio range, so the coded bit is exercised at both values.
+        Av1Colour {
+            primaries: ColourPrimaries::Bt709,
+            transfer: TransferCharacteristics::Srgb,
+            matrix: MatrixCoefficients::Bt709,
+            range: ColorRange::Limited,
+        },
+        // A non-BT.709 primaries/matrix pair, so the shortcut is missed on more than one field.
+        Av1Colour {
+            primaries: ColourPrimaries::Bt2020,
+            transfer: TransferCharacteristics::Srgb,
+            matrix: MatrixCoefficients::Bt2020Ncl,
+            range: ColorRange::Full,
+        },
+    ];
+    for colour in colours {
+        for &q in &[0u8, 12, 64, 200] {
+            for &(w, h) in &[(8, 8), (17, 13), (64, 48), (100, 70)] {
+                let p = planes(w, h, texture);
+                check_with(encode_still_intra_with(&p, q, colour).unwrap(), q);
+            }
         }
     }
 }

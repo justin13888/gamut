@@ -469,3 +469,84 @@ fn density_is_written_to_app0() {
     assert_eq!(&app0[8..10], &300u16.to_be_bytes());
     assert_eq!(&app0[10..12], &150u16.to_be_bytes());
 }
+
+#[test]
+fn custom_quant_tables_reach_the_dqt_verbatim_and_quality_is_inert() {
+    use gamut_jpeg::QuantTables;
+    // Distinct constant tables: a luma/chroma swap or an accidental quality re-scale of either
+    // half would change the payload bytes. (Zig-zag re-emission of a non-constant table is pinned
+    // by the quant module's own DQT test; constants make the whole 64 assertable here.)
+    let tables = QuantTables::new([7u8; 64], [11u8; 64]).unwrap();
+    let rgb = vec![100u8; 16 * 16 * 3];
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quality(30) // must be ignored: custom tables bypass the quality mapping
+        .with_quant_tables(tables)
+        .encode_to_vec(img)
+        .unwrap();
+    let p = parse(&jpeg);
+    let dqt = p.segment(m::DQT).unwrap();
+    let mut expected = vec![0x00u8]; // Pq=0 | Tq=0
+    expected.extend_from_slice(&[7u8; 64]);
+    expected.push(0x01); // Pq=0 | Tq=1
+    expected.extend_from_slice(&[11u8; 64]);
+    assert_eq!(dqt, expected.as_slice());
+
+    // With custom tables set, quality must be inert for the WHOLE stream, not just the DQT.
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap();
+    let q90 = JpegEncoder::new()
+        .with_quality(90)
+        .with_quant_tables(tables)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(jpeg, q90);
+
+    // Grayscale uses only the luma table: a single 65-byte DQT payload at Tq=0.
+    let gray = ImageRef::<Gray8>::new(&[100u8; 64], Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quant_tables(tables)
+        .encode_to_vec(gray)
+        .unwrap();
+    let p = parse(&jpeg);
+    let dqt = p.segment(m::DQT).unwrap();
+    let mut expected = vec![0x00u8];
+    expected.extend_from_slice(&[7u8; 64]);
+    assert_eq!(dqt, expected.as_slice());
+}
+
+#[test]
+fn annex_k_scaled_custom_tables_reproduce_the_quality_path_byte_for_byte() {
+    use gamut_jpeg::QuantTables;
+    // `QuantTables::annex_k().scaled(q)` is documented to be exactly the pair `with_quality(q)`
+    // uses, so the two configurations must produce byte-identical streams — bridging the custom
+    // path to the frozen quality contract. Gray and colour, quality on both sides of 50.
+    let rgb = vec![90u8; 24 * 16 * 3];
+    for &q in &[25u8, 85] {
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+        let via_quality = JpegEncoder::new()
+            .with_quality(q)
+            .encode_to_vec(img)
+            .unwrap();
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+        let via_tables = JpegEncoder::new()
+            .with_quant_tables(QuantTables::annex_k().scaled(q))
+            .encode_to_vec(img)
+            .unwrap();
+        assert_eq!(via_quality, via_tables, "q{q}: custom-table path diverged");
+    }
+}
+
+#[test]
+fn rd_none_is_byte_identical_to_the_default() {
+    use gamut_jpeg::RdOptimization;
+    // `RdOptimization::None` IS the default path — not merely equivalent: byte-for-byte.
+    let rgb = vec![77u8; 24 * 16 * 3];
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+    let default = JpegEncoder::new().encode_to_vec(img).unwrap();
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+    let explicit = JpegEncoder::new()
+        .with_rd_optimization(RdOptimization::None)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(default, explicit);
+}

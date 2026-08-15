@@ -51,9 +51,9 @@ Dependency edges (a crate depends on those to its right):
   gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only);
   honors `GAMUT_JXL_SYS_SKIP_NATIVE=1` to skip cmake for check-only (cross/MSRV) jobs.
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
-  Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF), sequential/progressive decoder and
-  progressive encoder phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only).
-  ← core, color, dsp.
+  Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF; opt-in jpegli-style XYB colour mode
+  with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
+  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, color, dsp.
 - **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
   codestream seam; `gamut-av1` is the implicit software tail). **gamut-webp** ← +riff; like
   gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw `MetadataBlock`-ready

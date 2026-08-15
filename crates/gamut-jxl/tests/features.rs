@@ -19,7 +19,7 @@ mod common;
 
 use common::{DecodedSamples, decode, gen_u8, gen_u16};
 use gamut_core::{
-    DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Pixel, Rgb16, Rgba8,
+    DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Pixel, Rgb16, Rgba8, Rgba16,
 };
 use gamut_jxl::{Container, Effort, JxlDecoder, JxlEncoder};
 
@@ -115,11 +115,18 @@ macro_rules! grid_u16 {
     };
 }
 
-// The three grids span the axes that matter: bit width (8/16), colour family (gray/RGB), and alpha
-// presence — Gray8 (1×u8), Rgba8 (4×u8) and Rgb16 (3×u16).
+// The grids span the axes that matter: bit width (8/16), colour family (gray/RGB), and alpha
+// presence. `oracle.rs` already pins all eight layouts bit-exact against the source and the libjxl
+// oracle, but across *sizes*; these sweep the encoder-configuration space instead, so one cell per
+// axis combination is the point rather than an exhaustive layout list.
+//
+// Rgba16 is the cell that was missing: the 8-bit half had a with-alpha grid but the 16-bit half did
+// not, leaving 16-bit-plus-alpha — the widest layout, and the one whose 2-byte output alignment is
+// most stressed — unswept across container × effort (issue #256's 16-bit confirmation).
 grid_u8!(feature_grid_gray8, Gray8);
 grid_u8!(feature_grid_rgba8, Rgba8);
 grid_u16!(feature_grid_rgb16, Rgb16);
+grid_u16!(feature_grid_rgba16, Rgba16);
 
 #[test]
 fn decode_into_reuses_allocation_after_a_replacement() {

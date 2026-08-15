@@ -12,7 +12,9 @@ NAL demux/classification slice (delivered — `src/hvcc.rs`, `src/nal.rs`); **S3
 decoder trait + derivation/colour/transform pipeline slice (delivered — `src/decode.rs`); **S4** =
 the libheif differential-oracle slice (delivered — `tests/conformance.rs` over the
 `tooling/libheif-oracle` dev-dependency); **S5** = the backend-registry slice (delivered —
-`src/backend.rs`, issue #273: `HevcDecoders` + the `gamut-codec-abi` adapter).
+`src/backend.rs`, issue #273: `HevcDecoders` + the `gamut-codec-abi` adapter); **S6** = the
+high-bit-depth presentation slice (delivered — issue #303: `decode_item_rgba16` and the wider
+matrix set, retrofitted **additively** onto the S3 pipeline).
 
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
@@ -73,9 +75,15 @@ a bridged C vtable) onto the seam: it lowers `HevcConfig` to a `HEVC_CODEC_ID` `
 Annex-B parameter sets as extradata, allocates the `u16` planes itself (`planar_pixel_format` tags
 the layout), and maps the written planes back through the validating `DecodedFrame::new`.
 
-**Deferred (planned, additive).** The wider colour surface on the RGBA convenience path (rows below).
-Each lands additively — new crate items or new `#[non_exhaustive]` variants — never a reshape of the
-shipped surface.
+**Implemented (S6).** The wider colour surface on the RGBA convenience path landed **additively**,
+as the S1 guarantee requires: `decode_item_rgba16`/`decode_primary_rgba16` joined the shipped
+`rgba8` pair rather than replacing it, and BT.709/BT.2020 turned `Unsupported` into `Ok` on both.
+The 8-bit surface still refuses a >8-bit frame rather than narrowing it, since that would trade an
+honest error for silent quality loss; 8-bit BT.601 keeps `gamut-color`'s libwebp-exact inverse so
+its output is byte-identical to every previous release.
+
+**Deferred (planned, additive).** The rows below. Each lands additively — new crate items or new
+`#[non_exhaustive]` variants — never a reshape of the shipped surface.
 
 **Permanently out of scope** (workspace charter: image-first, no inter-frame/motion/sequence
 coding). Image sequences and tracks — the `msf1`/`hevc`/`hevx` brands, `moov`/`trak`/`mdia`/`stbl`
@@ -141,7 +149,9 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Planar decode surface `decode_item_planar` (coded → hook; still-IRAP validated first) | 14496-15; H.265 | ✅ | S3 |
 | `grid`/`iden` derived-image assembly to planes (`iovl` on the RGBA surface); cycle-/depth-limited, checked | 23008-12 §6.6.2 | ✅ | S3 |
 | RGBA presentation surface `decode_item_rgba8`/`decode_primary_rgba8` (colour + alpha + transforms) | 23008-12; H.273 | ✅ | S3 |
-| Colour conversion: BT.601 (matrix 5/6) via `gamut-color`, identity (0) GBR, monochrome; missing-`colr` default BT.601 limited | H.273; MIAF | ✅ | S3 |
+| High-bit-depth presentation surface `decode_item_rgba16`/`decode_primary_rgba16` (8..=16-bit in, samples normalized to the full 16-bit range) | H.273 | ✅ | S6 |
+| Colour conversion: BT.709 (1), BT.601 / BT.470 B,G (5/6), BT.2020 NCL (9) via `gamut-color`, identity (0) GBR, monochrome; missing-`colr` default BT.601 limited | H.273; MIAF | ✅ | S3/S6 |
+| Sample-scale contract: every surface carries samples over its type's full range; the coded depth is read from the planar surface / `pixi`, not the buffer | H.273 | ✅ | S6 |
 | Nearest-neighbour co-sited chroma upsampling (4:2:0 / 4:2:2 → 4:4:4) | 23008-12 | ✅ | S3 |
 | Alpha-auxiliary merge (dims-checked, bit-depth-scaled); `prem` surfaced, not un-premultiplied | 23008-12 §6 | ✅ | S3 |
 | Transformative-property application (`clap`/`irot`/`imir`) in `ipma` order to output pixels | 23008-12 §7; 14496-12 §12.1.4; MIAF | ✅ | S3 |
@@ -151,8 +161,8 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Fallback contract: push order; `supports()==false` / `BACKEND_DECLINED` fall through, accepted-then-failed propagates; no implicit software tail ⇒ `Error::Unsupported(NO_BACKEND)` | #241 | ✅ | S5 |
 | `AbiHevcDecoder`: `gamut_codec_abi::Decoder` ⇄ `HevcDecoder` (StreamConfig/`ImageDesc` lowering, `Status::UNSUPPORTED` ⇒ late decline) | #241 / #272 | ✅ | S5 |
 | HEVC-intra reconstruction (slice/CTU/transform/intra-pred/in-loop filters) — delegated to the caller's `HevcDecoder` | H.265 (ITU-T) | ☐ | user / #18 |
-| >8-bit RGBA presentation (pending `gamut-color` high-bit-depth RGB) | H.273 | ☐ | later |
-| BT.709 / BT.2020 matrices on the RGBA surface (pending `gamut-color`) | H.273 | ☐ | later |
+| Matrix coefficients outside the modeled Kr/Kb set (YCgCo 8, chromaticity-derived 12/13/14) and unmodeled coded depths (9/11/13…) on the RGBA surfaces — explicitly refused, never approximated | H.273 | ☐ | later |
+| 10/12-bit differential vs libheif (needs a Main10 encode path in the oracle's `encode_rgba_to_heic`; the wide surface is validated against an independent reference conversion instead) | — | ☐ | later |
 | Depth-map auxiliary presentation | 23008-12 §6.5.8 | ☐ | later |
 | HEVC inter coding (motion, reference frames, sequences) | H.265 | OOS | OOS |
 | CLI / wasm / ffi wiring | gamut-{cli,wasm,ffi} | ☐ | later |

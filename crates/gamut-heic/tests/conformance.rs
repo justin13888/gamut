@@ -438,6 +438,17 @@ fn t2_presentation_pixels_match_libheif() {
         d.max_rgb, d.mean_rgb, d.max_a, d.frac_rgb_within_2
     );
 
+    // The wide surface carries the same real, libde265-decoded frame losslessly: 8-bit content
+    // widens by exactly 257 (65535 == 255 · 257). This is the widening invariant against a genuine
+    // codestream rather than the mock decoder.
+    let wide = container
+        .decode_primary_rgba16(&mut De265Decoder)
+        .expect("gamut-heic decodes primary to RGBA16");
+    assert_eq!((wide.width(), wide.height()), (w, h));
+    for (i, (&narrow, &widened)) in ours.as_samples().iter().zip(wide.as_samples()).enumerate() {
+        assert_eq!(u16::from(narrow) * 257, widened, "sample {i}");
+    }
+
     // Measured (libheif 1.23.1 + kvazaar 2.3.2, q90 4:2:0, explicit BT.601-full colr): max_rgb=1,
     // mean_rgb≈0.010, max_a=0, frac_within2=1.0000. With both readers on the same colour policy the
     // only residual is chroma-upsampling/rounding (our nearest co-sited + BT.601 integer conversion

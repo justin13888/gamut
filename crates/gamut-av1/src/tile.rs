@@ -113,20 +113,6 @@ struct PaletteBlock {
     index_map: Vec<u8>,
 }
 
-/// The `palette_color_idx_y` CDF for a luma palette of size `n` (2..=8) at color context `ctx`
-/// (§9.4). `n` is the palette size; `ctx` is `Palette_Color_Context[hash]`.
-fn palette_color_cdf(n: usize, ctx: usize) -> &'static [u16] {
-    match n {
-        2 => &cdf::PALETTE_SIZE_2_Y_COLOR[ctx],
-        3 => &cdf::PALETTE_SIZE_3_Y_COLOR[ctx],
-        4 => &cdf::PALETTE_SIZE_4_Y_COLOR[ctx],
-        5 => &cdf::PALETTE_SIZE_5_Y_COLOR[ctx],
-        6 => &cdf::PALETTE_SIZE_6_Y_COLOR[ctx],
-        7 => &cdf::PALETTE_SIZE_7_Y_COLOR[ctx],
-        _ => &cdf::PALETTE_SIZE_8_Y_COLOR[ctx],
-    }
-}
-
 /// `CeilLog2(x)` (§4.7): the smallest `k` with `2^k >= x` (0 for `x <= 1`).
 fn ceil_log2(x: usize) -> u32 {
     if x < 2 { 0 } else { (x - 1).ilog2() + 1 }
@@ -350,6 +336,9 @@ pub(crate) struct FrameEncoder<'a> {
     /// `0..=(1 << bit_depth) - 1`.
     recon: [Vec<u16>; 3],
     sym: SymbolEncoder,
+    /// The adapting CDFs the current tile codes against (§8.2.6, `disable_cdf_update = 0`). Reset
+    /// to the frame defaults at each tile boundary, since tiles decode independently.
+    cdfs: cdf::CdfContext,
     above_level: [Vec<u8>; 3],
     above_dc: [Vec<u8>; 3],
     left_level: [Vec<u8>; 3],
@@ -478,6 +467,7 @@ impl<'a> FrameEncoder<'a> {
             bit_depth,
             recon,
             sym: SymbolEncoder::new(),
+            cdfs: cdf::CdfContext::new(qctx_for(i32::from(qindex))),
             above_level: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
             above_dc: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
             left_level: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
@@ -542,7 +532,7 @@ impl<'a> FrameEncoder<'a> {
         for _ in row_start..row_end {
             for _ in col_start..col_end {
                 // restore_wiener = 1 (use Wiener), then vertical then horizontal half-taps.
-                self.sym.encode_symbol(1, &cdf::RESTORE_WIENER);
+                cdf::encode(&mut self.sym, 1, self.cdfs.restore_wiener.slot());
                 for _pass in 0..2 {
                     for (j, &(off, num_syms, k)) in TAPS.iter().enumerate() {
                         let v = crate::filter::WIENER_DEFAULT[j] + off;
@@ -569,7 +559,10 @@ impl<'a> FrameEncoder<'a> {
             self.tile_c0 = c_start;
             self.tile_x0 = c_start * 4;
             self.tile_c1 = c_end;
-            // Per-tile reset: a fresh range coder and the delta accumulators back to frame defaults.
+            // Per-tile reset: a fresh range coder, the CDFs back to the frame defaults
+            // (`init_non_coeff_cdfs`/`init_coeff_cdfs` — each tile adapts from its own copy), and
+            // the delta accumulators back to frame defaults.
+            self.cdfs = cdf::CdfContext::new(self.qctx);
             self.set_quant(i32::from(self.qindex));
             self.current_dlf = 0;
             let mut r = 0;
@@ -660,7 +653,7 @@ impl<'a> FrameEncoder<'a> {
         } else if has_rows && has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
             if self.qindex == 0 {
-                self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
+                cdf::encode(&mut self.sym, 0, self.cdfs.partition(bsl, ctx)); // PARTITION_NONE
                 0
             } else if block_exceeds_frame(r, c, num4x4, self.mi_rows, self.mi_cols) {
                 // The block extends past the frame edge (only its top/left half is in-frame, which is
@@ -669,31 +662,31 @@ impl<'a> FrameEncoder<'a> {
                 // block-size transform would write out of bounds. Force PARTITION_SPLIT — always a
                 // legal choice in this branch — so the recursion descends until every coded transform
                 // fits (a 4×4 leaf always fits); the out-of-frame leaves are skipped in `residual`.
-                self.sym.encode_symbol(3, partition_cdf(bsl, ctx)); // PARTITION_SPLIT
+                cdf::encode(&mut self.sym, 3, self.cdfs.partition(bsl, ctx)); // PARTITION_SPLIT
                 3
             } else if let Some(d) = self.decide_rect(r, c, bw) {
                 // PARTITION_HORZ (1) / PARTITION_VERT (2): two rectangular halves, each its own mode
                 // and one matching rectangular transform.
-                self.sym.encode_symbol(d, partition_cdf(bsl, ctx));
+                cdf::encode(&mut self.sym, d, self.cdfs.partition(bsl, ctx));
                 d
             } else if (8..=64).contains(&bw) && !self.should_split(r, c, bw) {
                 // Lossy: an 8×8…64×64 region coded as a single PARTITION_NONE block + one
                 // TX_8X8…TX_64X64 when it is smooth enough; otherwise split for per-block
                 // mode/transform adaptation (each SPLIT halves, recursing down to 4×4 as needed).
-                self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
+                cdf::encode(&mut self.sym, 0, self.cdfs.partition(bsl, ctx)); // PARTITION_NONE
                 0
             } else {
-                self.sym.encode_symbol(3, partition_cdf(bsl, ctx)); // PARTITION_SPLIT
+                cdf::encode(&mut self.sym, 3, self.cdfs.partition(bsl, ctx)); // PARTITION_SPLIT
                 3
             }
         } else if has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
-            let cdf2 = split_or_horz_cdf(partition_cdf(bsl, ctx));
+            let cdf2 = split_or_horz_cdf(self.cdfs.partition_probs(bsl, ctx));
             self.sym.encode_symbol(1, &cdf2); // split
             3
         } else if has_rows {
             let ctx = self.partition_ctx(r, c, bsl);
-            let cdf2 = split_or_vert_cdf(partition_cdf(bsl, ctx));
+            let cdf2 = split_or_vert_cdf(self.cdfs.partition_probs(bsl, ctx));
             self.sym.encode_symbol(1, &cdf2); // split
             3
         } else {
@@ -850,7 +843,11 @@ impl<'a> FrameEncoder<'a> {
             0
         };
         let diff = neg_interleave(assigned, pred, LAST_ACTIVE_SEG + 1);
-        self.sym.encode_symbol(diff as usize, &cdf::SEGMENT_ID[ctx]);
+        cdf::encode(
+            &mut self.sym,
+            diff as usize,
+            self.cdfs.segment_id[ctx].slot(),
+        );
 
         assigned as usize
     }
@@ -869,7 +866,7 @@ impl<'a> FrameEncoder<'a> {
             _ => 2,
         };
         let abs = delta.unsigned_abs() as usize;
-        self.sym.encode_symbol(abs, &cdf::DELTA_Q);
+        cdf::encode(&mut self.sym, abs, self.cdfs.delta_q.slot());
         self.sym.encode_literal(u32::from(delta < 0), 1); // delta_q_sign_bit (1 ⇒ negative)
         let nq = (self.current_qindex + delta).clamp(1, 255);
         self.set_quant(nq);
@@ -890,7 +887,7 @@ impl<'a> FrameEncoder<'a> {
             (self.sb_r / 16 + self.sb_c / 16) as i32 % 2
         };
         let abs = delta.unsigned_abs() as usize;
-        self.sym.encode_symbol(abs, &cdf::DELTA_LF);
+        cdf::encode(&mut self.sym, abs, self.cdfs.delta_lf.slot());
         if abs > 0 {
             self.sym.encode_literal(u32::from(delta < 0), 1); // delta_lf_sign_bit
         }
@@ -1084,7 +1081,7 @@ impl<'a> FrameEncoder<'a> {
                 let (order, ctx) = palette_color_context(index_map, bw, rr, cc, psize);
                 let actual = index_map[rr * bw + cc] as usize;
                 let sym = order.iter().position(|&x| x == actual).unwrap_or(0);
-                self.sym.encode_symbol(sym, palette_color_cdf(psize, ctx));
+                cdf::encode(&mut self.sym, sym, self.cdfs.palette_color_y(psize, ctx));
                 if j == j_end {
                     break;
                 }
@@ -1223,7 +1220,11 @@ impl<'a> FrameEncoder<'a> {
             palette.is_some() || (self.qindex > 0 && !is_rect && self.block_is_skippable(r, c, bw));
 
         let sctx = self.skip_ctx(r, c);
-        self.sym.encode_symbol(usize::from(skip), &cdf::SKIP[sctx]);
+        cdf::encode(
+            &mut self.sym,
+            usize::from(skip),
+            self.cdfs.skip[sctx].slot(),
+        );
         // intra_segment_id / read_segment_id (§5.11.9): with segmentation on, code the block's
         // segment id right after the skip flag (`SegIdPreSkip = 0`). A skip block inherits the
         // predicted id with no bits.
@@ -1271,15 +1272,21 @@ impl<'a> FrameEncoder<'a> {
         } else {
             usize::from(DC_PRED)
         }];
-        self.sym
-            .encode_symbol(usize::from(y_mode), &cdf::INTRA_FRAME_Y_MODE[amode][lmode]);
+        cdf::encode(
+            &mut self.sym,
+            usize::from(y_mode),
+            self.cdfs.intra_frame_y_mode[amode][lmode].slot(),
+        );
         // intra_angle_info_y (§5.11.42): for MiSize ≥ BLOCK_8X8 with a directional YMode, the fine
         // angle `AngleDeltaY ∈ [-3, 3]` is signaled (biased by MAX_ANGLE_DELTA = 3) under the
         // per-mode `Angle_Delta_Cdf`. 4×4 blocks never reach this (MiSize < BLOCK_8X8 ⇒ delta = 0).
         if bw >= 8 && is_directional(y_mode) {
             let sym = (i32::from(angle_delta) + 3) as usize;
-            self.sym
-                .encode_symbol(sym, &cdf::ANGLE_DELTA[(y_mode - V_PRED) as usize]);
+            cdf::encode(
+                &mut self.sym,
+                sym,
+                self.cdfs.angle_delta[(y_mode - V_PRED) as usize].slot(),
+            );
         }
         // uv_mode. Its CDF is indexed by the luma mode. `is_cfl_allowed` is `MiSize == BLOCK_4X4`
         // when Lossless, else `Max(w, h) <= 32` — so CfL is allowed for the lossy 4×4 and 8×8 blocks
@@ -1300,13 +1307,20 @@ impl<'a> FrameEncoder<'a> {
         let ym = usize::from(y_mode);
         if cfl_allowed {
             let uv = if cfl.is_some() { UV_CFL_PRED } else { DC_PRED };
-            self.sym
-                .encode_symbol(usize::from(uv), &cdf::UV_MODE_CFL_ALLOWED[ym]);
+            cdf::encode(
+                &mut self.sym,
+                usize::from(uv),
+                self.cdfs.uv_mode_cfl_allowed[ym].slot(),
+            );
             if let Some((au, av)) = cfl {
                 self.emit_cfl_alphas(au, av);
             }
         } else {
-            self.sym.encode_symbol(0, &cdf::UV_MODE_CFL_NOT_ALLOWED[ym]);
+            cdf::encode(
+                &mut self.sym,
+                0,
+                self.cdfs.uv_mode_cfl_not_allowed[ym].slot(),
+            );
         }
 
         // palette_mode_info (§5.11.46): with allow_screen_content_tools an 8×8..64×64 block signals
@@ -1319,14 +1333,18 @@ impl<'a> FrameEncoder<'a> {
                 let above = r > 0 && self.mi_psize[(r - 1) * self.mi_cols + c] > 0;
                 let left = c > self.tile_c0 && self.mi_psize[r * self.mi_cols + (c - 1)] > 0;
                 let pctx = usize::from(above) + usize::from(left);
-                self.sym.encode_symbol(
+                cdf::encode(
+                    &mut self.sym,
                     usize::from(palette.is_some()),
-                    &cdf::PALETTE_Y_MODE[bctx][pctx],
+                    self.cdfs.palette_y_mode[bctx][pctx].slot(),
                 );
                 if let Some(pal) = &palette {
                     // palette_size_y_minus_2, then the colors (cache flags + new colors).
-                    self.sym
-                        .encode_symbol(pal.colors.len() - 2, &cdf::PALETTE_Y_SIZE[bctx]);
+                    cdf::encode(
+                        &mut self.sym,
+                        pal.colors.len() - 2,
+                        self.cdfs.palette_y_size[bctx].slot(),
+                    );
                     let cache_n = self.palette_cache(r, c).len();
                     let colors = pal.colors.clone();
                     self.signal_palette_colors(&colors, cache_n);
@@ -1335,7 +1353,7 @@ impl<'a> FrameEncoder<'a> {
             // UVMode == DC_PRED; the context is `(PaletteSizeY > 0)`. No chroma palette is used.
             if cfl.is_none() {
                 let uctx = usize::from(palette.is_some());
-                self.sym.encode_symbol(0, &cdf::PALETTE_UV_MODE[uctx]);
+                cdf::encode(&mut self.sym, 0, self.cdfs.palette_uv_mode[uctx].slot());
             }
         }
 
@@ -1343,17 +1361,23 @@ impl<'a> FrameEncoder<'a> {
         // (`PaletteSizeY == 0`) signals use_filter_intra, under the block-size CDF row. A 64×64 block
         // (`Max(w, h) > 32`) does not signal it.
         if self.qindex > 0 && y_mode == DC_PRED && palette.is_none() && bw <= 32 && bh <= 32 {
-            let fi_cdf: &[u16] = match bw {
-                4 => &cdf::FILTER_INTRA_4X4,
-                8 => &cdf::FILTER_INTRA_8X8,
-                16 => &cdf::FILTER_INTRA_16X16,
-                _ => &cdf::FILTER_INTRA_32X32,
+            let fi_cdf = match bw {
+                4 => &mut self.cdfs.filter_intra_4x4,
+                8 => &mut self.cdfs.filter_intra_8x8,
+                16 => &mut self.cdfs.filter_intra_16x16,
+                _ => &mut self.cdfs.filter_intra_32x32,
             };
-            self.sym
-                .encode_symbol(usize::from(filter_intra.is_some()), fi_cdf);
+            cdf::encode(
+                &mut self.sym,
+                usize::from(filter_intra.is_some()),
+                fi_cdf.slot(),
+            );
             if let Some(fi) = filter_intra {
-                self.sym
-                    .encode_symbol(usize::from(fi), &cdf::FILTER_INTRA_MODE);
+                cdf::encode(
+                    &mut self.sym,
+                    usize::from(fi),
+                    self.cdfs.filter_intra_mode.slot(),
+                );
             }
         }
 
@@ -1373,24 +1397,25 @@ impl<'a> FrameEncoder<'a> {
             // bounding square (`txSzSqrUp = Max(bw, bh)`); the context is `(aboveTxW ≥ bw) +
             // (leftTxH ≥ bh)`, exactly as for a square block of that size.
             let ctx = self.tx_depth_ctx(r, c, bw, bh);
-            let cdf: &[u16] = match bw.max(bh) {
-                16 => &cdf::TX_SIZE_16X16[ctx],
-                _ => &cdf::TX_SIZE_32X32[ctx],
+            let slot = if bw.max(bh) == 16 {
+                self.cdfs.tx_size_16x16[ctx].slot()
+            } else {
+                self.cdfs.tx_size_32x32[ctx].slot()
             };
-            self.sym.encode_symbol(0, cdf);
+            cdf::encode(&mut self.sym, 0, slot);
             rect_tx(bw, bh)
         } else if lossy_large {
             let max_depth = if bw == 8 { 1 } else { 2 };
             let tx_depth = self.select_tx_depth(c * 4, r * 4, bw, max_depth);
             let ctx = self.tx_depth_ctx(r, c, bw, bw);
-            let cdf: &[u16] = match bw {
-                8 => &cdf::TX_SIZE_8X8[ctx],
-                16 => &cdf::TX_SIZE_16X16[ctx],
-                32 => &cdf::TX_SIZE_32X32[ctx],
-                _ => &cdf::TX_SIZE_64X64[ctx],
+            let slot = match bw {
+                8 => self.cdfs.tx_size_8x8[ctx].slot(),
+                16 => self.cdfs.tx_size_16x16[ctx].slot(),
+                32 => self.cdfs.tx_size_32x32[ctx].slot(),
+                _ => self.cdfs.tx_size_64x64[ctx].slot(),
             };
 
-            self.sym.encode_symbol(tx_depth, cdf);
+            cdf::encode(&mut self.sym, tx_depth, slot);
             square_tx(bw >> tx_depth)
         } else {
             TxSize::Tx4x4
@@ -1586,8 +1611,8 @@ impl<'a> FrameEncoder<'a> {
                 self.quantize_tx(&res, tx_size, TxType::DctDct),
             )
         };
-        // intraDir (§9.4) keys the 16×16 transform-type CDF: the filter-intra mode's mapped direction
-        // when filter-intra is used, else YMode. Ignored for 4×4/8×8 (uniform CDF) and for chroma.
+        // intraDir (§9.4) keys the transform-type CDF: the filter-intra mode's mapped direction
+        // when filter-intra is used, else YMode. Unused for chroma (no transform type is coded).
         let intra_dir = match desc.filter_intra {
             Some(fi) => usize::from(FILTER_INTRA_MODE_TO_INTRA_DIR[fi as usize]),
             None => usize::from(desc.mode),
@@ -2485,16 +2510,22 @@ impl<'a> FrameEncoder<'a> {
         let (su, sv) = (sign(au), sign(av));
         // signs + 1 = 3 * signU + signV  ⇒  cfl_alpha_signs = 3 * signU + signV - 1.
         let signs = 3 * su + sv - 1;
-        self.sym.encode_symbol(signs, &cdf::CFL_SIGN);
+        cdf::encode(&mut self.sym, signs, self.cdfs.cfl_sign.slot());
         if su != 0 {
             let ctx = (su - 1) * 3 + sv;
-            self.sym
-                .encode_symbol((au.abs() - 1) as usize, &cdf::CFL_ALPHA[ctx]);
+            cdf::encode(
+                &mut self.sym,
+                (au.abs() - 1) as usize,
+                self.cdfs.cfl_alpha[ctx].slot(),
+            );
         }
         if sv != 0 {
             let ctx = (sv - 1) * 3 + su;
-            self.sym
-                .encode_symbol((av.abs() - 1) as usize, &cdf::CFL_ALPHA[ctx]);
+            cdf::encode(
+                &mut self.sym,
+                (av.abs() - 1) as usize,
+                self.cdfs.cfl_alpha[ctx].slot(),
+            );
         }
     }
 
@@ -2516,7 +2547,6 @@ impl<'a> FrameEncoder<'a> {
         intra_dir: usize,
     ) {
         let ptype = usize::from(plane > 0);
-        let qctx = self.qctx;
         let (w, h) = (tx_size.width(), tx_size.height());
         // OPTION A: a rectangular block is coded as the single transform that fills it, so block == tx.
         let block_h = if w == h { block_w } else { h };
@@ -2544,56 +2574,20 @@ impl<'a> FrameEncoder<'a> {
             }
         };
 
-        // Size-specific CDF tables, selected by the bounding square (same `[qctx][...]` layout).
-        let (txb_skip, eob_extra, base_eob, base, br, offset): (
-            &[[[u16; 2]; 13]; 4],
-            &[[[[u16; 2]; 9]; 2]; 4],
-            &[[[[u16; 3]; 4]; 2]; 4],
-            &[[[[u16; 4]; 42]; 2]; 4],
-            &[[[[u16; 4]; 21]; 2]; 4],
-            &[[u8; 5]; 5],
-        ) = match up_sq {
-            4 => (
-                &cdf::TXB_SKIP,
-                &cdf::EOB_EXTRA,
-                &cdf::COEFF_BASE_EOB,
-                &cdf::COEFF_BASE,
-                &cdf::COEFF_BR,
-                &cdf::COEFF_BASE_CTX_OFFSET_4X4,
-            ),
-            8 => (
-                &cdf::TXB_SKIP_8X8,
-                &cdf::EOB_EXTRA_8X8,
-                &cdf::COEFF_BASE_EOB_8X8,
-                &cdf::COEFF_BASE_8X8,
-                &cdf::COEFF_BR_8X8,
-                &cdf::COEFF_BASE_CTX_OFFSET_8X8,
-            ),
-            16 => (
-                &cdf::TXB_SKIP_16X16,
-                &cdf::EOB_EXTRA_16X16,
-                &cdf::COEFF_BASE_EOB_16X16,
-                &cdf::COEFF_BASE_16X16,
-                &cdf::COEFF_BR_16X16,
-                &cdf::COEFF_BASE_CTX_OFFSET_8X8,
-            ),
-            32 => (
-                &cdf::TXB_SKIP_32X32,
-                &cdf::EOB_EXTRA_32X32,
-                &cdf::COEFF_BASE_EOB_32X32,
-                &cdf::COEFF_BASE_32X32,
-                &cdf::COEFF_BR_32X32,
-                &cdf::COEFF_BASE_CTX_OFFSET_8X8,
-            ),
-            // 64: `txSzCtx = 4` skip/base CDFs but `coeff_br` capped at TX_32X32 (Min(txSzCtx,3)).
-            _ => (
-                &cdf::TXB_SKIP_64X64,
-                &cdf::EOB_EXTRA_64X64,
-                &cdf::COEFF_BASE_EOB_64X64,
-                &cdf::COEFF_BASE_64X64,
-                &cdf::COEFF_BR_32X32,
-                &cdf::COEFF_BASE_CTX_OFFSET_8X8,
-            ),
+        // `txSzCtx` (§8.3.2): the bounding square's class, which keys the skip/eob/base CDFs.
+        // `coeff_br` is capped at TX_32X32 (`Min(txSzCtx, 3)`), so TX_64X64 shares its row.
+        let sz = match up_sq {
+            4 => 0,
+            8 => 1,
+            16 => 2,
+            32 => 3,
+            _ => 4,
+        };
+        let br_sz = sz.min(3);
+        let offset: &[[u8; 5]; 5] = if up_sq == 4 {
+            &cdf::COEFF_BASE_CTX_OFFSET_4X4
+        } else {
+            &cdf::COEFF_BASE_CTX_OFFSET_8X8
         };
 
         // A rectangular transform uses an aspect-specific `coeff_base` offset table (§8.3.2): the
@@ -2623,8 +2617,11 @@ impl<'a> FrameEncoder<'a> {
             );
         }
         let txb_ctx = self.txb_skip_ctx(plane, x4, y4, block_w, block_h, w, h);
-        self.sym
-            .encode_symbol(usize::from(eob == 0), &txb_skip[qctx][txb_ctx]);
+        cdf::encode(
+            &mut self.sym,
+            usize::from(eob == 0),
+            self.cdfs.txb_skip[sz][txb_ctx].slot(),
+        );
         if eob == 0 {
             self.set_ctx(plane, x4, y4, w4, h4, 0, 0);
             return;
@@ -2638,44 +2635,37 @@ impl<'a> FrameEncoder<'a> {
         // The set is TX_SET_INTRA_2 when `txSzSqrUp ≤ TX_16X16` (`up_sq ≤ 16`), else DCTONLY (no
         // type). The CDF is keyed by `txSzSqr = Min(w, h)`: uniform for ≤ 8, per-`intraDir` for 16×16.
         if self.qindex > 0 && plane == 0 && up_sq <= 16 {
-            let tx_cdf: &[u16] = if w.min(h) == 16 {
-                &cdf::INTRA_TX_TYPE_SET2_16X16[intra_dir]
-            } else {
-                &cdf::INTRA_TX_TYPE_SET2
-            };
-            self.sym.encode_symbol(tx_sym, tx_cdf);
+            // `TileIntraTxTypeSet2Cdf[Tx_Size_Sqr[txSz]][intraDir]`: one context per (square size,
+            // intra direction). The 4×4 and 8×8 defaults are the same uniform row for every
+            // direction, but each pair still adapts on its own.
+            let sqr = cdf::tx_sqr_class(w.min(h));
+            cdf::encode(
+                &mut self.sym,
+                tx_sym,
+                self.cdfs.intra_tx_type_set2[sqr][intra_dir].slot(),
+            );
         }
 
         // eob position (TX_CLASS_2D ⇒ eob_pt context 0). The eob class is the coded coefficient count
         // (`area`): 16/64/128/256/512/1024. The 512 and 1024 tables have no neighbour-context dimension.
         let eobpt = eobpt_from_eob(eob);
-        match area {
-            16 => self
-                .sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_16[qctx][ptype][0]),
-            64 => self
-                .sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_64[qctx][ptype][0]),
-            128 => self
-                .sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_128[qctx][ptype][0]),
-            256 => self
-                .sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_256[qctx][ptype][0]),
-            512 => self
-                .sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_512[qctx][ptype]),
-            _ => self
-                .sym
-                .encode_symbol(eobpt - 1, &cdf::EOB_PT_1024[qctx][ptype]),
-        }
+        let eob_pt = match area {
+            16 => self.cdfs.eob_pt_16[ptype].slot(),
+            64 => self.cdfs.eob_pt_64[ptype].slot(),
+            128 => self.cdfs.eob_pt_128[ptype].slot(),
+            256 => self.cdfs.eob_pt_256[ptype].slot(),
+            512 => self.cdfs.eob_pt_512[ptype].slot(),
+            _ => self.cdfs.eob_pt_1024[ptype].slot(),
+        };
+        cdf::encode(&mut self.sym, eobpt - 1, eob_pt);
         if eobpt >= 3 {
             let nbits = eobpt - 2;
             let base_eob_val = (1usize << (eobpt - 2)) + 1;
             let extra = eob - base_eob_val;
-            self.sym.encode_symbol(
+            cdf::encode(
+                &mut self.sym,
                 (extra >> (nbits - 1)) & 1,
-                &eob_extra[qctx][ptype][eobpt - 3],
+                self.cdfs.eob_extra[sz][ptype][eobpt - 3].slot(),
             );
             let mut i = nbits as isize - 2;
             while i >= 0 {
@@ -2691,20 +2681,29 @@ impl<'a> FrameEncoder<'a> {
             let level = quant[pos].abs();
             if c == eob - 1 {
                 let ctx = coeff_base_eob_ctx(c, area);
-                self.sym
-                    .encode_symbol((level.min(3) - 1) as usize, &base_eob[qctx][ptype][ctx]);
+                cdf::encode(
+                    &mut self.sym,
+                    (level.min(3) - 1) as usize,
+                    self.cdfs.coeff_base_eob[sz][ptype][ctx].slot(),
+                );
             } else {
                 let ctx = coeff_base_ctx(pos, &levels, bwl, code_w, code_h, offset);
-                self.sym
-                    .encode_symbol(level.min(3) as usize, &base[qctx][ptype][ctx]);
+                cdf::encode(
+                    &mut self.sym,
+                    level.min(3) as usize,
+                    self.cdfs.coeff_base[sz][ptype][ctx].slot(),
+                );
             }
             if level > NUM_BASE_LEVELS {
                 let br_ctx = coeff_br_ctx(pos, &levels, bwl, code_w, code_h);
                 let mut rem = level - 3;
                 for _ in 0..4 {
                     let brv = rem.min(3);
-                    self.sym
-                        .encode_symbol(brv as usize, &br[qctx][ptype][br_ctx]);
+                    cdf::encode(
+                        &mut self.sym,
+                        brv as usize,
+                        self.cdfs.coeff_br[br_sz][ptype][br_ctx].slot(),
+                    );
                     rem -= brv;
                     if brv < 3 {
                         break;
@@ -2721,8 +2720,11 @@ impl<'a> FrameEncoder<'a> {
                 let neg = quant[pos] < 0;
                 if c == 0 {
                     let ctx = self.dc_sign_ctx(plane, x4, y4, w4, h4);
-                    self.sym
-                        .encode_symbol(usize::from(neg), &cdf::DC_SIGN[ptype][ctx]);
+                    cdf::encode(
+                        &mut self.sym,
+                        usize::from(neg),
+                        self.cdfs.dc_sign[ptype][ctx].slot(),
+                    );
                 } else {
                     self.sym.encode_literal(u32::from(neg), 1);
                 }
@@ -2871,17 +2873,7 @@ impl<'a> FrameEncoder<'a> {
     }
 }
 
-/// Selects the partition CDF by `bsl` (`Mi_Width_Log2`); M0 never uses 128×128 superblocks.
-fn partition_cdf(bsl: usize, ctx: usize) -> &'static [u16] {
-    match bsl {
-        1 => &cdf::PARTITION_W8[ctx],
-        2 => &cdf::PARTITION_W16[ctx],
-        3 => &cdf::PARTITION_W32[ctx],
-        _ => &cdf::PARTITION_W64[ctx],
-    }
-}
-
-/// Derives the 2-symbol `split_or_horz` CDF from the partition CDF (§8.3.2): the vertical-ish
+/// Derives the 2-symbol `split_or_horz` CDF from the partition CDF (§8.2.6): the vertical-ish
 /// partition probabilities are folded into the "split" outcome.
 fn split_or_horz_cdf(p: &[u16]) -> [u16; 2] {
     let psum = (p[2] - p[1])
@@ -3126,43 +3118,6 @@ mod tests {
             (17, 5),
         ] {
             assert_eq!(ceil_log2(x), want, "ceil_log2({x})");
-        }
-    }
-
-    #[test]
-    fn palette_color_cdf_selects_the_size_table() {
-        // Each palette size 2..=8 maps to its own §9.4 color CDF; the recon oracle never coded a
-        // 3-colour palette, so a deleted match arm (n falling through to the size-8 table) is invisible
-        // to it. Pin the table per size across all color contexts.
-        for ctx in 0..5 {
-            assert_eq!(
-                palette_color_cdf(2, ctx),
-                &cdf::PALETTE_SIZE_2_Y_COLOR[ctx][..]
-            );
-            assert_eq!(
-                palette_color_cdf(3, ctx),
-                &cdf::PALETTE_SIZE_3_Y_COLOR[ctx][..]
-            );
-            assert_eq!(
-                palette_color_cdf(4, ctx),
-                &cdf::PALETTE_SIZE_4_Y_COLOR[ctx][..]
-            );
-            assert_eq!(
-                palette_color_cdf(5, ctx),
-                &cdf::PALETTE_SIZE_5_Y_COLOR[ctx][..]
-            );
-            assert_eq!(
-                palette_color_cdf(6, ctx),
-                &cdf::PALETTE_SIZE_6_Y_COLOR[ctx][..]
-            );
-            assert_eq!(
-                palette_color_cdf(7, ctx),
-                &cdf::PALETTE_SIZE_7_Y_COLOR[ctx][..]
-            );
-            assert_eq!(
-                palette_color_cdf(8, ctx),
-                &cdf::PALETTE_SIZE_8_Y_COLOR[ctx][..]
-            );
         }
     }
 
