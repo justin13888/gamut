@@ -6,7 +6,9 @@
 //! flips the colours — all distinguishable from the correct clean rejection.
 
 use gamut_core::{Bilevel, DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
-use gamut_tiff::{Compression, TiffDecoder, TiffEncoder, tags};
+use gamut_tiff::{
+    ByteOrder, Compression, Ifd, TiffDecoder, TiffEncoder, Value, Variant, tags, write_image,
+};
 
 fn valid_rgb(w: u32, h: u32) -> Vec<u8> {
     let rgb: Vec<u8> = (0..w * h * 3).map(|i| (i * 7) as u8).collect();
@@ -44,6 +46,15 @@ fn patch_inline(tiff: &mut [u8], tag: u16, new: u32) {
         }
     }
     panic!("tag {tag} not found");
+}
+
+/// The decoder's static message for a file it rejects, for tests that must distinguish *which*
+/// guard fired rather than merely that one did.
+fn err_message(tiff: &[u8]) -> Option<&'static str> {
+    match TiffDecoder::new().decode_page(tiff, 0) {
+        Ok(_) => panic!("the decoder must reject this file"),
+        Err(error) => error.static_message(),
+    }
 }
 
 fn errs(tiff: &[u8]) -> bool {
@@ -151,6 +162,166 @@ fn rejects_strip_count_mismatch() {
     let mut v = valid_rgb(200, 100);
     bump_count(&mut v, tags::STRIP_OFFSETS);
     assert!(TiffDecoder::new().decode_page(&v, 0).is_err());
+}
+
+#[test]
+fn rejects_an_image_past_the_size_cap() {
+    // 8000x8000 RGB declares 192 MB of stored samples against a 64 MiB cap. The assertion is on the
+    // *message*, not merely `is_err()`: with the guard removed the file is still rejected, but by the
+    // strip-count check further down — so only the message distinguishes the guard doing its job.
+    let mut v = valid_rgb(8, 8);
+    patch_inline(&mut v, tags::IMAGE_WIDTH, 8000);
+    patch_inline(&mut v, tags::IMAGE_LENGTH, 8000);
+    assert_eq!(err_message(&v), Some("TIFF: image exceeds the size limit"));
+}
+
+#[test]
+fn rejects_a_tile_past_the_size_cap() {
+    // One 16x16 tile covering the whole image, so widening the tile to 8192x8192 keeps the tile count
+    // at 1 (the count check would otherwise fire first) while the tile itself declares 192 MB.
+    // Uncompressed on purpose: `Compression::None` slices rather than reserving, so a guard-removed
+    // run fails on the short block instead of attempting the allocation — again, only the message
+    // separates the two.
+    let rgb: Vec<u8> = (0..16 * 16 * 3).map(|i| (i * 7) as u8).collect();
+    let mut v = Vec::new();
+    TiffEncoder::new()
+        .with_compression(Compression::None)
+        .with_tiling(16, 16)
+        .encode_image(
+            ImageRef::<Rgb8>::new(
+                &rgb,
+                Dimensions {
+                    width: 16,
+                    height: 16,
+                },
+            )
+            .unwrap(),
+            &mut v,
+        )
+        .unwrap();
+    patch_inline(&mut v, tags::TILE_WIDTH, 8192);
+    patch_inline(&mut v, tags::TILE_LENGTH, 8192);
+    assert_eq!(err_message(&v), Some("TIFF: tile exceeds the size limit"));
+}
+
+/// A structurally valid single-strip grayscale TIFF declaring `bits` bits per sample and, when
+/// `sample_format` is `Some`, that tag. The strip really does hold `width * height * bits / 8`
+/// bytes, so nothing but the declared format/depth can be what the decoder objects to.
+///
+/// Hand-built rather than encoder-produced because `patch_inline` can only rewrite a tag that is
+/// already present, and `SampleFormat` is one the encoder has no reason to write.
+fn declared_page(width: u32, height: u32, bits: u16, sample_format: Option<u16>) -> Vec<u8> {
+    let mut ifd = Ifd::new();
+    ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![width as u16]));
+    ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![height as u16]));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![bits]));
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![1]));
+    ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![1]));
+    ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+    ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![height as u16]));
+    if let Some(format) = sample_format {
+        ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![format]));
+    }
+    let strip = vec![0u8; (width * height) as usize * (bits as usize / 8).max(1)];
+    write_image(ByteOrder::LittleEndian, Variant::Classic, &ifd, &[strip]).expect("write fixture")
+}
+
+#[test]
+fn rejects_floating_point_samples() {
+    // Both the 32-bit float a float TIFF actually uses, and the 16-bit half-float that is the real
+    // trap: `bps = 16` clears every depth gate, so only the format check stands between it and a
+    // silent misdecode as unsigned. Both must name the format, not the depth.
+    for bits in [16u16, 32] {
+        assert_eq!(
+            err_message(&declared_page(8, 4, bits, Some(3))),
+            Some("TIFF: floating-point samples not supported"),
+            "{bits}-bit float must be refused by format"
+        );
+    }
+}
+
+#[test]
+fn rejects_signed_integer_samples() {
+    assert_eq!(
+        err_message(&declared_page(8, 4, 16, Some(2))),
+        Some("TIFF: signed-integer samples not supported")
+    );
+}
+
+#[test]
+fn rejects_undefined_sample_format() {
+    assert_eq!(
+        err_message(&declared_page(8, 4, 8, Some(4))),
+        Some("TIFF: undefined sample format not supported")
+    );
+}
+
+#[test]
+fn rejects_unrecognised_sample_format() {
+    // `0` is not a registered code. Refused rather than defaulted to unsigned — guessing here is
+    // the silent misdecode the typed error exists to prevent.
+    assert_eq!(
+        err_message(&declared_page(8, 4, 8, Some(0))),
+        Some("TIFF: unrecognised SampleFormat tag value")
+    );
+}
+
+#[test]
+fn rejects_mixed_sample_formats() {
+    // Three samples that disagree: one value cannot describe the page, so it is refused rather
+    // than silently taking the first.
+    let mut ifd = Ifd::new();
+    ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![8]));
+    ifd.set(tags::IMAGE_LENGTH, Value::Short(vec![4]));
+    ifd.set(tags::BITS_PER_SAMPLE, Value::Short(vec![8, 8, 8]));
+    ifd.set(tags::SAMPLES_PER_PIXEL, Value::Short(vec![3]));
+    ifd.set(tags::PHOTOMETRIC_INTERPRETATION, Value::Short(vec![2]));
+    ifd.set(tags::COMPRESSION, Value::Short(vec![1]));
+    ifd.set(tags::ROWS_PER_STRIP, Value::Short(vec![4]));
+    ifd.set(tags::SAMPLE_FORMAT, Value::Short(vec![1, 3, 1]));
+    let tiff = write_image(
+        ByteOrder::LittleEndian,
+        Variant::Classic,
+        &ifd,
+        &[vec![0u8; 8 * 4 * 3]],
+    )
+    .expect("write fixture");
+    assert_eq!(
+        err_message(&tiff),
+        Some("TIFF: mixed sample formats not supported")
+    );
+}
+
+#[test]
+fn rejects_thirty_two_bit_samples() {
+    // Unsigned 32-bit: the format is fine, the depth is not. The message must name the depth —
+    // before this gate moved above the photometric table, this file was reported as an unsupported
+    // photometric/sample combination, which pointed at the wrong tag entirely.
+    assert_eq!(
+        err_message(&declared_page(8, 4, 32, Some(1))),
+        Some("TIFF: 32-bit samples not supported")
+    );
+}
+
+#[test]
+fn rejects_an_unsupported_bit_depth() {
+    // 4-bit grayscale is a real TIFF layout this crate has not implemented; it must be refused by
+    // depth rather than falling through to a colour-mode complaint.
+    assert_eq!(
+        err_message(&declared_page(8, 4, 4, None)),
+        Some("TIFF: unsupported bits per sample")
+    );
+}
+
+#[test]
+fn absent_sample_format_defaults_to_unsigned() {
+    // The TIFF 6.0 default. An 8-bit page with no SampleFormat tag must decode, not be refused —
+    // pinning that the format check cannot reject the overwhelmingly common case.
+    assert!(
+        TiffDecoder::new()
+            .decode_page(&declared_page(8, 4, 8, None), 0)
+            .is_ok()
+    );
 }
 
 #[test]

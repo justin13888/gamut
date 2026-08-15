@@ -39,15 +39,17 @@ let rich = PngDecoder::new().with_max_dimensions(8192, 8192).decode(&png)?;
 
 The typed `DecodeImage<P>` implementations accept any file `P` can hold **losslessly** — palette
 and tRNS expand to RGB(A), greyscale replicates into RGB, an opaque alpha channel can be added,
-sub-byte greys scale exactly to 8 bits — and refuse lossy requests (16-bit files as 8-bit
-layouts, dropping alpha or transparency) with `Error::Unsupported`. Format-agnostic *lossy*
-pixel conversion is deliberately out of scope here and belongs in a shared gamut-core facility.
+sub-byte greys scale exactly to 8 bits and 8-bit samples to 16 by ×257 — and refuse lossy
+requests (16-bit files as 8-bit layouts, dropping alpha or transparency) with
+`Error::Unsupported`. Format-agnostic *lossy* pixel conversion is deliberately out of scope here
+and belongs in a shared gamut-core facility.
 
 ## Status
 
 Built incrementally; each phase is conformance-checked against libpng (see [STATUS.md](STATUS.md)).
 Encoder scope: all five colour types, bit depths 1/2/4/8/16, palette, the five scanline filters,
-lossless reductions, the standard colour/text ancillary chunks, and embedded metadata
+lossless reductions over every input layout (palette, grey, alpha drop, sub-byte grey packing,
+16→8 demotion), the standard colour/text ancillary chunks, and embedded metadata
 (eXIf/iCCP/iTXt). Decoder scope: everything above plus Adam7 **decoding** and decode limits.
 Out of scope: Adam7 *encoding* and animation (APNG decodes as its default image).
 

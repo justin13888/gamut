@@ -8,15 +8,17 @@
 //! `angle_delta`, `SMOOTH`/`SMOOTH_V`/`SMOOTH_H`/`PAETH`, recursive filter-intra, chroma-from-luma,
 //! and palette), DCT/ADST/identity transforms with variable `tx_depth` and `TX_SET_INTRA_2` type
 //! selection, recursive partitioning, per-superblock delta-Q/delta-LF, segmentation, uniform
-//! multi-tile, and the in-loop filters (deblocking, CDEF, loop restoration, superres) — still with
-//! static default CDFs (`disable_cdf_update = 1`). It produces the AV1 temporal unit that
-//! `gamut-avif` wraps in an AVIF still image. The remaining surface (10/12-bit, 4:2:0/4:2:2,
-//! monochrome, CDF adaptation, quantizer matrices, and the AVIF-level alpha/metadata/container
-//! features) is tracked in `gamut-avif/STATUS.md`.
+//! multi-tile, and the in-loop filters (deblocking, CDEF, loop restoration, superres). Symbols are
+//! coded against **adapting CDFs** (`disable_cdf_update = 0`): each tile starts from the §9.4
+//! defaults and nudges every context toward what it codes, which costs no fidelity and shrinks a
+//! still by roughly 20–35%. It produces the AV1 temporal unit that `gamut-avif` wraps in an AVIF
+//! still image. The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, quantizer matrices, and
+//! the AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D
-//! transforms (§7.13), `cdf` = default CDF + scan + context tables (§9.2/§9.4/§8.3.2),
+//! transforms (§7.13), `cdf` = default CDF + scan + context tables and the adapting per-tile CDF
+//! context (§9.2/§9.4/§8.2.6/§8.3.2),
 //! [`quant`] = quantizer tables + dequant (§7.12), `filter` = in-loop filters (§7.14-§7.17).
 #![forbid(unsafe_code)]
 

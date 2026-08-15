@@ -58,7 +58,12 @@ fn builtin_obus(base_q_idx: u8) -> Vec<u8> {
 // ================================================================================================
 
 /// **The 1.0 guarantee.** An `AvifEncoder` with no pushed backend must emit exactly the bytes the
-/// crate emitted before the backend seam existed. The goldens were captured on the parent commit.
+/// built-in encoder produces — pushing a backend and then not using it must perturb nothing.
+///
+/// The goldens are re-captured whenever the built-in AV1 encoder deliberately changes what it
+/// codes; they pin the seam's additivity, not the codec's output forever. Last re-captured when
+/// `gamut-av1` enabled CDF adaptation (`disable_cdf_update = 0`), which shrank these two files
+/// from 4426/1864 bytes to 3407/1557 with an unchanged reconstruction.
 #[test]
 fn default_encoder_output_is_byte_identical() {
     for (name, encoder) in [
