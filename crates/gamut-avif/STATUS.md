@@ -135,7 +135,7 @@ adding it needs no container change.
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
 | INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
 | `disable_cdf_update`=1 (static CDFs) | §5.9.2 | ✅ | M0 |
-| `disable_cdf_update`=0 + frame-end CDF update | §5.9.2,§7.7 | ☐ | M1 |
+| `disable_cdf_update`=0 + frame-end CDF update | §5.9.2,§7.7 | ✅ (`headers::frame_header_payload`; §7.7 n/a — see below) | M1 |
 | frame_size / render_size (no override, no superres) | §5.9.5/.6 | ✅ | M0 |
 | superres_params (enable_superres + use_superres + coded_denom) | §5.9.8,§7.16 | ✅ (frame_size_override deferred) | M1 |
 | tile_info: single tile | §5.9.15 | ✅ | M0 |
@@ -210,11 +210,21 @@ adding it needs no container change.
 | static default CDFs: Partition, Skip, IntraFrameYMode, UvMode(±CfL) | §9.4 | ✅ | M0 |
 | coeff CDFs (qctx0, TX_4X4): TxbSkip/EobPt16/EobExtra/CoeffBaseEob/CoeffBase/CoeffBr/DcSign | §9.4 | ✅ | M0 |
 | full default CDF tables: all qctx, tx classes, inter/MV/palette | §9.4 | ✅ (intra: coeff CDFs all used tx sizes × qctx 0–3, mode/partition/palette; inter/MV OOS) | M1/OOS |
-| CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ☐ | M1 |
+| CDF adaptation + frame-end update + context_update_tile | §8.2.6,§7.7 | ✅ (`cdf::CdfContext`, per-tile; §7.7 n/a — see below) | M1 |
 | `coeffs()` TX_4X4: txb_skip/eob/base/br/sign/dc_sign/golomb | §5.11.39 | ✅ | M0 |
 | `coeffs()` all tx sizes + transform_type signaling | §5.11.39/.47 | ✅ (lossy 4×4 + 8×8 + 16×16 + 32×32 + 64×64, 32×32/64×64 DCT-only) | M1 |
 | scan table `Default_Scan_4x4` + context-offset tables | §9.2/§9.3/§8.3.2 | ✅ | M0 |
 | all scan tables (default/col/row per tx size) | §9.2 | ✅ (4×4 + 8×8 + 16×16 + 32×32 + 64×64 default) | M1 |
+
+**§7.7 `frame_end_update_cdf` is not applicable to a still image.** `uncompressed_header()`
+(§5.9.2) infers `disable_frame_end_update_cdf = 1` whenever `reduced_still_picture_header ||
+disable_cdf_update`, and this encoder always sets `reduced_still_picture_header = 1`. So turning
+`disable_cdf_update` off codes no additional header bit, `frame_end_update_cdf()` is never invoked
+from the tile group (§5.11.1), and the §8.2.4 save at `context_update_tile_id` never fires — there
+is no later frame that could `load_cdfs` the saved context. `context_update_tile_id` itself is
+still coded in `tile_info()` for the multi-tile case (row B), as the syntax requires. Adaptation is
+therefore per tile: each tile re-runs `init_non_coeff_cdfs`/`init_coeff_cdfs` and adapts its own
+copy, which is what a decoder does for an independently decodable tile.
 
 ## H. AV1 — in-loop filters & post (§7.14-§7.18; all bypassed under CodedLossless)
 
