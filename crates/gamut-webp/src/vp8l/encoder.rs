@@ -21,7 +21,7 @@ use crate::vp8l::bit_io::BitWriter;
 use crate::vp8l::color_cache::ColorCache;
 use crate::vp8l::div_round_up;
 use crate::vp8l::header::Vp8lHeader;
-use crate::vp8l::lz77::{BackwardRefs, pixel_distance_to_code, value_to_prefix};
+use crate::vp8l::lz77::{BackwardRefs, DistanceCodes, value_to_prefix};
 use crate::vp8l::plan::{CacheBits, Grouping, Lz77Params, Structure, Vp8lPlan, enumerate};
 use crate::vp8l::prefix::{
     MAX_CODE_LENGTH, NUM_DISTANCE_CODES, NUM_LENGTH_CODES, NUM_LITERAL_CODES, PrefixEncoder,
@@ -250,7 +250,7 @@ impl Histograms {
     }
 
     /// Accumulates a token's symbols.
-    fn add(&mut self, token: &Token, width: u32) {
+    fn add(&mut self, token: &Token, distances: &DistanceCodes) {
         match *token {
             Token::Literal(p) => {
                 self.green[green(p) as usize] += 1;
@@ -260,7 +260,7 @@ impl Histograms {
             }
             Token::Copy { len, dist } => {
                 self.green[LENGTH_CODE_BASE + value_to_prefix(len).0 as usize] += 1;
-                let dist_code = pixel_distance_to_code(dist, width);
+                let dist_code = distances.code(dist);
                 self.distance[value_to_prefix(dist_code).0 as usize] += 1;
             }
             Token::CacheIndex(idx) => self.green[CACHE_CODE_BASE + idx as usize] += 1,
@@ -299,7 +299,7 @@ impl CodeGroup {
     }
 
     /// Emits one token's symbols (and any LZ77 extra bits).
-    fn write_token(&self, w: &mut BitWriter, token: &Token, width: u32) {
+    fn write_token(&self, w: &mut BitWriter, token: &Token, distances: &DistanceCodes) {
         match *token {
             Token::Literal(p) => {
                 self.green.write_symbol(w, green(p) as usize);
@@ -312,8 +312,7 @@ impl CodeGroup {
                 self.green
                     .write_symbol(w, LENGTH_CODE_BASE + len_code as usize);
                 w.write_bits(len_extra, u32::from(len_bits));
-                let (dist_sym, dist_bits, dist_extra) =
-                    value_to_prefix(pixel_distance_to_code(dist, width));
+                let (dist_sym, dist_bits, dist_extra) = value_to_prefix(distances.code(dist));
                 self.distance.write_symbol(w, dist_sym as usize);
                 w.write_bits(dist_extra, u32::from(dist_bits));
             }
@@ -326,14 +325,17 @@ impl CodeGroup {
 /// pixels: no color cache, no meta prefix codes (the decoder reads these with `allow_meta = false`).
 fn write_sub_image(w: &mut BitWriter, pixels: &[u32]) {
     w.write_bits(0, 1); // No color cache.
+    // A sub-image is coded as pure literals, so no distance code is ever emitted; the table's
+    // width is irrelevant here and 1 keeps it a single allocation.
+    let distances = DistanceCodes::new(1);
     let mut hist = Histograms::new(0);
     for &p in pixels {
-        hist.add(&Token::Literal(p), 0);
+        hist.add(&Token::Literal(p), &distances);
     }
     let codes = hist.build();
     codes.write_descriptions(w);
     for &p in pixels {
-        codes.write_token(w, &Token::Literal(p), 0);
+        codes.write_token(w, &Token::Literal(p), &distances);
     }
 }
 
@@ -355,6 +357,7 @@ fn write_main_image(w: &mut BitWriter, pixels: &[u32], width: u32, plan: &Vp8lPl
         w.write_bits(0, 1);
     }
 
+    let distances = DistanceCodes::new(width);
     let tokens = tokenize(pixels, cache_bits, &plan.lz77);
     let height = (pixels.len() as u32).checked_div(width).unwrap_or(0);
     let groups = assign_groups(&tokens, width, height, &plan.grouping);
@@ -374,7 +377,7 @@ fn write_main_image(w: &mut BitWriter, pixels: &[u32], width: u32, plan: &Vp8lPl
         .collect();
     let mut pos = 0usize;
     for token in &tokens {
-        histograms[groups.group_at(pos, width)].add(token, width);
+        histograms[groups.group_at(pos, width)].add(token, &distances);
         pos += token.pixel_count();
     }
     let code_groups: Vec<CodeGroup> = histograms.iter().map(Histograms::build).collect();
@@ -383,7 +386,7 @@ fn write_main_image(w: &mut BitWriter, pixels: &[u32], width: u32, plan: &Vp8lPl
     }
     let mut pos = 0usize;
     for token in &tokens {
-        code_groups[groups.group_at(pos, width)].write_token(w, token, width);
+        code_groups[groups.group_at(pos, width)].write_token(w, token, &distances);
         pos += token.pixel_count();
     }
 }

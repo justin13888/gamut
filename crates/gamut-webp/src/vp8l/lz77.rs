@@ -213,6 +213,10 @@ pub fn value_to_prefix(value: u32) -> (u16, u8, u32) {
 /// Maps a backward pixel `distance` to the smallest distance *code* for an image of `width` pixels:
 /// a [`DISTANCE_MAP`] neighbor code when one matches exactly (post-clamp), else `distance + 120`
 /// (RFC 9649 §3.6.2). It is the inverse of [`distance_code_to_pixel_distance`].
+///
+/// Retained as the straight-from-the-spec reference that [`DistanceCodes`] is checked against; the
+/// encoder itself uses the table.
+#[cfg(test)]
 #[must_use]
 pub fn pixel_distance_to_code(distance: u32, width: u32) -> u32 {
     for (i, &(xi, yi)) in DISTANCE_MAP.iter().enumerate() {
@@ -223,6 +227,48 @@ pub fn pixel_distance_to_code(distance: u32, width: u32) -> u32 {
         }
     }
     distance + DISTANCE_MAP_LEN
+}
+
+/// A distance-to-code lookup for one image width, replacing [`pixel_distance_to_code`]'s scan over
+/// all 120 neighbourhood entries.
+///
+/// Every mapped neighbourhood distance is at most `8 * width + 8` (the map's largest `yi` is 8), so
+/// a table that size resolves the neighbour codes in O(1) and anything beyond it falls through to
+/// the plain `distance + DISTANCE_MAP_LEN` form. The scan happened **twice per emitted copy** —
+/// once to histogram it and once to write it — and once more per candidate the parse considers, so
+/// it dominated the encoder's inner loop.
+pub struct DistanceCodes {
+    /// `table[d]` is the code for distance `d` (index 0 unused), or 0 when no neighbour maps there.
+    table: Vec<u16>,
+}
+
+impl DistanceCodes {
+    /// Builds the lookup for an image `width` pixels wide.
+    #[must_use]
+    pub fn new(width: u32) -> Self {
+        // `+ 9` covers the largest mapped distance (yi = 8, xi = 8) plus the 1-based slot.
+        let len = (8usize.saturating_mul(width.max(1) as usize)).saturating_add(9);
+        let mut table = vec![0u16; len];
+        // Filled in reverse so the *smallest* code wins each distance, matching the forward scan's
+        // first-match semantics in `pixel_distance_to_code`.
+        for (i, &(xi, yi)) in DISTANCE_MAP.iter().enumerate().rev() {
+            let mapped = i32::from(xi) + i32::from(yi) * width as i32;
+            let mapped = if mapped < 1 { 1 } else { mapped as usize };
+            if let Some(slot) = table.get_mut(mapped) {
+                *slot = (i + 1) as u16;
+            }
+        }
+        Self { table }
+    }
+
+    /// The smallest distance *code* for a backward `distance` (RFC 9649 §3.6.2).
+    #[must_use]
+    pub fn code(&self, distance: u32) -> u32 {
+        match self.table.get(distance as usize) {
+            Some(&code) if code != 0 => u32::from(code),
+            _ => distance + DISTANCE_MAP_LEN,
+        }
+    }
 }
 
 /// A hash-chain index over already-seen pixels for finding LZ77 backward references. Correctness
@@ -441,6 +487,24 @@ mod tests {
                     distance_code_to_pixel_distance(code, width),
                     dist,
                     "dist {dist}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn distance_table_matches_the_reference_scan() {
+        // `DistanceCodes` is a lookup rewrite of `pixel_distance_to_code`, so the two must agree on
+        // every distance the neighbourhood can reach — including the ties the spec's forward scan
+        // resolves to the *smallest* code, which a naive table fill would get backwards.
+        for width in [1u32, 2, 3, 7, 16, 64, 257] {
+            let table = DistanceCodes::new(width);
+            let limit = 8 * width + 32;
+            for distance in 1..=limit {
+                assert_eq!(
+                    table.code(distance),
+                    pixel_distance_to_code(distance, width),
+                    "distance {distance} at width {width}"
                 );
             }
         }
