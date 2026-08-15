@@ -139,9 +139,12 @@ impl From<SampleFormat> for u16 {
 /// The prediction scheme applied before compression, stored in the `Predictor` tag (317,
 /// TIFF 6.0 §14).
 ///
+/// [`Predictor::HorizontalDifferencing`] covers 8- and 16-bit samples; it differences sample
+/// *values*, so the two widths are distinct operations rather than one loop over a wider stride.
+///
 /// The set is non-exhaustive: the TIFF Technical Notes define predictor `3` (floating-point
-/// horizontal differencing, deferred with float-sample support), so variants may be added
-/// without a breaking change.
+/// horizontal differencing, deferred along with float samples themselves), so variants may be
+/// added without a breaking change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Predictor {
@@ -159,8 +162,8 @@ impl TryFrom<u32> for Predictor {
     /// Maps an on-disk `Predictor` tag value (tag 317) to its scheme.
     ///
     /// The TIFF Technical Notes also define `3` (floating-point horizontal differencing); it is
-    /// deferred with the float-sample work (see `STATUS.md`) and, like every other unrecognised
-    /// code, fails with [`gamut_core::Error::Unsupported`].
+    /// deferred along with float samples themselves (see `STATUS.md`) and, like every other
+    /// unrecognised code, fails with [`gamut_core::Error::Unsupported`].
     fn try_from(code: u32) -> Result<Self, Self::Error> {
         Ok(match code {
             1 => Predictor::None,

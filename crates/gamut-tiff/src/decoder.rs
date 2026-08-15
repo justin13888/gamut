@@ -15,15 +15,36 @@ use crate::tags;
 /// Decoder for baseline TIFF images.
 ///
 /// Reads chunky strips or tiles compressed with None, PackBits, LZW, Adobe Deflate, Modified
-/// Huffman, or Group 4 fax. Supported layouts are 8-bit grayscale/RGB/RGBA/CMYK/palette and 1-bit
-/// bilevel; other compression and colour modes return [`Error::Unsupported`].
+/// Huffman, or Group 4 fax. Supported layouts are 8- and 16-bit grayscale/RGB/RGBA/CMYK, 8-bit
+/// palette, and 1-bit bilevel; other compression and colour modes return [`Error::Unsupported`].
+///
+/// # Choosing a pixel type
+///
+/// The [`DecodeImage`] impls *present* a page rather than insisting it already match, so a request
+/// is satisfied whenever it can be: grayscale replicates across RGB channels, RGB gains an opaque
+/// alpha, a fourth sample is dropped for RGB output, 8-bit samples widen to 16-bit by `×257`
+/// (exact), and 16-bit samples narrow to 8-bit by discarding the low byte (lossy). Only a
+/// channel count that cannot be mapped — asking for [`Gray8`]/[`Gray16`] from a multi-sample page,
+/// or [`Cmyk8`] from anything but a 4-sample one — is refused.
+///
+/// Use [`TiffDecoder::info`] to see a page's declared depth before deciding, rather than relying
+/// on the conversions above.
+///
+/// # Refused, deliberately
+///
+/// Sample formats this crate's `u8`/`u16` model cannot represent — signed integer, IEEE float, and
+/// 32-bit samples — return [`Error::Unsupported`] naming the offending tag, never a truncated or
+/// reinterpreted image. A 16-bit *half-float* page is refused by its `SampleFormat`, not its depth.
 #[derive(Debug, Clone, Default)]
 pub struct TiffDecoder {
     _private: (),
 }
 
 /// Upper bound on a decoded image's stored bytes, guarding against malformed huge dimensions and
-/// decompression bombs (64 MiB — e.g. a 4096×4096 RGBA image).
+/// decompression bombs (64 MiB — e.g. a 4096×4096 8-bit RGBA image, or a 2896×2896 16-bit RGB one).
+///
+/// The cap is on *stored* bytes, so a 16-bit image gets half the pixel budget of an 8-bit one at
+/// the same channel count — which is the intent: the guard bounds the buffer actually allocated.
 const MAX_IMAGE_BYTES: usize = 64 << 20;
 
 /// Rejects a byte count past [`MAX_IMAGE_BYTES`].

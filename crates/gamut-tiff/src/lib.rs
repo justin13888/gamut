@@ -19,8 +19,8 @@
 //! Adobe/Aldus, Final — June 3 1992), Adobe Photoshop TIFF Technical Note 3 (Deflate), and the
 //! BigTIFF extension (`references/tiff/bigtiff.html`) rather than wrapping libtiff.
 //!
-//! The v1 surface (built in issue #107, frozen in issue #187): [`TiffEncoder`] writes 8-bit
-//! grayscale/RGB/RGBA/CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles,
+//! The v1 surface (built in issue #107, frozen in issue #187): [`TiffEncoder`] writes 8- and
+//! 16-bit grayscale/RGB/RGBA, 8-bit CMYK, 1-bit bilevel, and 8-bit palette images (as strips or tiles,
 //! single- or multi-page) — uncompressed, PackBits, LZW/Deflate (optionally with the
 //! horizontal-differencing [`Predictor`]), or (for bilevel) Modified Huffman / Group 4 fax —
 //! and [`TiffDecoder`] reads them all back. Encoding takes a typed [`gamut_core::ImageRef`] via
@@ -28,8 +28,13 @@
 //! [`gamut_core::ImageBuf`] via [`gamut_core::DecodeImage`]. Both the classic 32-bit container
 //! and **BigTIFF** (magic `43`, 64-bit offsets, for files past 4 GiB) are written and read: opt
 //! into BigTIFF with [`TiffEncoder::with_big_tiff`]; the decoder detects the variant from the
-//! header. The strict [`deconstruct`] walk additionally accounts every input byte and flags
-//! unknown tags and codes for archival triage. Every lossless path is pinned pixel-exact in both
+//! header. [`TiffDecoder::info`] reports a page's declared depth, sample format and layout from
+//! tags alone, so a caller can pick a pixel type before paying for a decode — including for pages
+//! this crate declines to decode. Sample depths are 1, 8 and 16 bits; the typed impls widen 8-bit
+//! samples to 16-bit exactly (`×257`) and narrow 16-bit to 8-bit by truncation, while signed,
+//! IEEE-float and 32-bit samples are refused by name rather than reinterpreted (§19 float support
+//! and its Predictor 3 remain deferred). The strict [`deconstruct`] walk additionally accounts
+//! every input byte and flags unknown tags and codes for archival triage. Every lossless path is pinned pixel-exact in both
 //! directions against libtiff; the deferred colour modes and compression schemes (YCbCr,
 //! CIE L\*a\*b\*, JPEG-in-TIFF, …) land additively — see `STATUS.md` for the scope ledger.
 //!

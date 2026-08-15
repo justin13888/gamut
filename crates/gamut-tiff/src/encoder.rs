@@ -22,7 +22,9 @@ struct SampleLayout {
 /// Encoder for baseline TIFF images.
 ///
 /// Writes chunky (`PlanarConfiguration = 1`) strips or tiles using the compression selected by
-/// [`Self::with_compression`]. Supports 8-bit grayscale/RGB/RGBA/CMYK/palette and 1-bit bilevel.
+/// [`Self::with_compression`]. Supports 8- and 16-bit grayscale/RGB/RGBA, 8-bit CMYK/palette, and
+/// 1-bit bilevel. 16-bit samples are written in this encoder's byte order; no `SampleFormat` tag is
+/// emitted, since unsigned integer is the TIFF default and the only format written.
 /// Emits classic TIFF by default, or BigTIFF (64-bit offsets) when [`Self::with_big_tiff`] is set.
 #[derive(Debug, Clone)]
 pub struct TiffEncoder {
@@ -68,8 +70,8 @@ impl TiffEncoder {
 
     /// Returns a copy of this encoder that applies `predictor` before compression.
     ///
-    /// [`Predictor::HorizontalDifferencing`] requires 8-bit samples and pairs well with LZW or
-    /// Deflate.
+    /// [`Predictor::HorizontalDifferencing`] requires 8- or 16-bit samples and pairs well with LZW
+    /// or Deflate. At 16 bits it differences sample *values* (TIFF 6.0 §14), not bytes.
     #[must_use]
     pub fn with_predictor(mut self, predictor: Predictor) -> Self {
         self.predictor = predictor;
@@ -80,7 +82,8 @@ impl TiffEncoder {
     /// pixels instead of strips.
     ///
     /// Both dimensions must be positive multiples of 16. Tiling supports every byte-oriented
-    /// compression; horizontal differencing on encode is currently enabled with Deflate.
+    /// compression at 8 and 16 bits; horizontal differencing on encode is currently enabled with
+    /// Deflate.
     #[must_use]
     pub fn with_tiling(mut self, tile_width: u32, tile_height: u32) -> Self {
         self.tiling = Some((tile_width, tile_height));
