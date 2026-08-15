@@ -758,6 +758,23 @@ mod tests {
     }
 
     #[test]
+    fn compositing_rounds_to_nearest_at_full_precision() {
+        // An 8-bit target re-quantises the blend, which hides a one-unit error in the rounding
+        // addend. A 16-bit target does not: an opaque sample of 1 survives only if the addend is
+        // added, since (1*65535 - 32767) / 65535 truncates to 0.
+        let src = raw(&[1u16, 1, 1, u16::MAX], PixelFormat::Rgba16);
+        let policy = ConvertPolicy::lossless()
+            .with_alpha(AlphaPolicy::CompositeOver)
+            .with_background([0; 3]);
+        assert_eq!(
+            convert_from_raw::<_, Rgb16>(src, policy)
+                .unwrap()
+                .as_samples(),
+            &[1, 1, 1]
+        );
+    }
+
+    #[test]
     fn reducing_colour_needs_a_luma_policy_and_honours_the_standard() {
         let src = raw(&[255u8, 0, 0], PixelFormat::Rgb8);
         assert_eq!(
@@ -782,6 +799,21 @@ mod tests {
         assert_eq!(bt601.as_samples(), &[76]); // round(0.299 * 255)
         assert_eq!(bt709.as_samples(), &[54]); // round(0.2126 * 255)
         assert_ne!(bt601.as_samples(), bt709.as_samples());
+    }
+
+    #[test]
+    fn luma_rounds_to_nearest_rather_than_truncating() {
+        // BT.709 red weight is 13933, so an input of 3 sums to 41799 -- less than one full unit
+        // (65536) but more than half of it. Rounding gives 1, truncation gives 0. A 16-bit target
+        // keeps the difference visible instead of re-quantising it away.
+        let src = raw(&[3u16, 0, 0], PixelFormat::Rgb16);
+        let policy = ConvertPolicy::lossless().with_luma(LumaPolicy::Bt709);
+        assert_eq!(
+            convert_from_raw::<_, Gray16>(src, policy)
+                .unwrap()
+                .as_samples(),
+            &[1]
+        );
     }
 
     #[test]
@@ -893,6 +925,15 @@ mod tests {
                 ErrorKind::Unsupported
             );
         }
+
+        // Each refusal names the machinery it is missing; they are not interchangeable.
+        let indexed_err = convert_from_raw::<_, Rgb8>(indexed, strict).unwrap_err();
+        let cmyk_err = convert_from_raw::<_, Rgb8>(cmyk, strict).unwrap_err();
+        let indexed_msg = indexed_err.static_message().unwrap();
+        let cmyk_msg = cmyk_err.static_message().unwrap();
+        assert_ne!(indexed_msg, cmyk_msg);
+        assert!(indexed_msg.contains("palette"), "{indexed_msg}");
+        assert!(cmyk_msg.contains("colour-management"), "{cmyk_msg}");
 
         // Identity still works: the samples pass straight through.
         assert_eq!(

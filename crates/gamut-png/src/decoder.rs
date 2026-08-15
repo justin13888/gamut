@@ -987,6 +987,31 @@ mod tests {
     use super::*;
     use crate::PngEncoder;
 
+    /// The policy set by `convert_policy` must reach the typed decode: a 16-bit file cannot fill
+    /// an 8-bit layout under the default, and can under a permissive one. A decoder that dropped
+    /// the setter on the floor would refuse both times.
+    #[test]
+    fn convert_policy_reaches_the_typed_decode() {
+        let dims = Dimensions::new(2, 1).unwrap();
+        let gray16 = [0u16, 0xFFFF];
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .encode_image(ImageRef::<Gray16>::new(&gray16, dims).unwrap(), &mut png)
+            .expect("encode");
+
+        let strict = PngDecoder::new();
+        assert_eq!(
+            DecodeImage::<Gray8>::decode_image(&strict, &png)
+                .unwrap_err()
+                .kind(),
+            gamut_core::ErrorKind::Unsupported
+        );
+
+        let lax = PngDecoder::new().convert_policy(ConvertPolicy::permissive());
+        let narrowed: ImageBuf<Gray8> = lax.decode_image(&png).expect("permissive decode");
+        assert_eq!(narrowed.as_samples(), &[0, 255]);
+    }
+
     fn rgb_png(w: u32, h: u32) -> (Vec<u8>, Vec<u8>) {
         let src: Vec<u8> = (0..(w * h * 3) as usize)
             .map(|i| (i.wrapping_mul(41) ^ (i >> 3)) as u8)
