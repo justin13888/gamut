@@ -424,22 +424,34 @@ mod tests {
         // differs. Parsing it back (gamut-isobmff round-trips its own output) pins the brands, the
         // primary `av01` item, and the av1C-derived `ispe`/`pixi`/`colr` the encoder stamps — none
         // of which a box-presence check would catch if a field were wrong.
-        // `(encoder, expected matrix_coefficients)`: lossless is pinned to identity, lossy defaults
-        // to BT.709, and an explicit matrix overrides the lossy default.
+        // `(encoder, expected matrix_coefficients, expected full_range)`: lossless is pinned to
+        // identity/full, lossy defaults to BT.709/full, and both knobs override the lossy defaults.
         let cases = [
-            (AvifEncoder::lossless(), 0u16),
-            (AvifEncoder::lossy(50), 1),
+            (AvifEncoder::lossless(), 0u16, true),
+            (AvifEncoder::lossy(50), 1, true),
             (
                 AvifEncoder::lossy(50).with_matrix(MatrixCoefficients::Bt601),
                 6,
+                true,
             ),
-            // …but never on the lossless path, which ignores the matrix as it ignores quality.
+            // Studio range reaches `colr` — and can only be signalled outside the §5.5.2 sRGB
+            // shortcut, which is why it pairs with a real matrix.
             (
-                AvifEncoder::lossless().with_matrix(MatrixCoefficients::Bt709),
+                AvifEncoder::lossy(50).with_color_range(ColorRange::Limited),
+                1,
+                false,
+            ),
+            // …but neither knob applies on the lossless path, which ignores them as it ignores
+            // quality: an 8-bit YCbCr round trip is not bit-exact, and studio range discards codes.
+            (
+                AvifEncoder::lossless()
+                    .with_matrix(MatrixCoefficients::Bt709)
+                    .with_color_range(ColorRange::Limited),
                 0,
+                true,
             ),
         ];
-        for (enc, want_matrix) in cases {
+        for (enc, want_matrix, want_full_range) in cases {
             let img = read(&encode_with(enc, 34, 18)).expect("emitted AVIF parses");
             assert_eq!(img.major_brand, *b"avif");
             for brand in [*b"avif", *b"mif1", *b"miaf", *b"MA1A"] {
@@ -472,12 +484,12 @@ mod tests {
                 })
                 .expect("colr nclx present");
             // Primaries and transfer stay BT.709 / sRGB (the colour-metadata surface is deferred);
-            // the matrix is whatever the configuration selected, and the range is full throughout
-            // (AVIF v1.2.0 §2.2; mc = 0 additionally requires 4:4:4 full range).
+            // the matrix and range are whatever the configuration selected (AVIF v1.2.0 §2.2;
+            // mc = 0 additionally requires 4:4:4 full range).
             assert_eq!(nclx.colour_primaries, 1);
             assert_eq!(nclx.transfer_characteristics, 13);
             assert_eq!(nclx.matrix_coefficients, want_matrix);
-            assert!(nclx.full_range);
+            assert_eq!(nclx.full_range, want_full_range);
         }
     }
 

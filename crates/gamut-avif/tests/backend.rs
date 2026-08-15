@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use gamut_av1::Av1Colour;
 use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{MatrixCoefficients, Planar8, YcbcrMatrix};
+use gamut_color::{ColorRange, MatrixCoefficients, Planar8, YcbcrMatrix};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
 
 /// The fixture the golden files in `tests/data` were produced from: a 34×18 deterministic RGB ramp.
@@ -452,21 +452,81 @@ fn backend_stream_must_signal_the_requested_colour() {
         "AVIF: AV1 backend stream signals a different colour configuration than requested",
     );
 
-    // …and the matching stream is accepted, so the check is not simply refusing every backend.
-    let colour = Av1Colour {
-        matrix: MatrixCoefficients::Bt709,
-        ..Av1Colour::default()
-    };
+    // …and a matching stream is accepted, so the check is not simply refusing every backend.
+    //
+    // The three encoders below make the parser's AV1 §5.5.2 branch load-bearing in both
+    // directions. `lossless()` signals BT.709 + sRGB + identity, which **takes** the shortcut: no
+    // `color_range` bit is coded, so a parser that read one would consume `separate_uv_delta_q`
+    // (0) and report studio range. `lossy(50)` misses the shortcut on the matrix alone, and the
+    // studio-range encoder misses it *and* codes `color_range = 0` — so a parser that skipped the
+    // bit would report full range. Either way the mismatch check fires and the encode fails.
+    for (name, encoder) in [
+        ("shortcut", AvifEncoder::lossless()),
+        ("bt709-full", AvifEncoder::lossy(50)),
+        (
+            "bt709-studio",
+            AvifEncoder::lossy(50).with_color_range(ColorRange::Limited),
+        ),
+    ] {
+        let colour = encoder_colour(&encoder);
+        let base_q_idx = if colour == Av1Colour::default() {
+            0
+        } else {
+            127
+        };
+        let mut with_backend = encoder.clone();
+        with_backend.push_backend(Scripted::new(
+            "right-colour",
+            true,
+            Outcome::Bytes(builtin_obus(base_q_idx, colour)),
+            &log,
+        ));
+        assert_eq!(
+            encode(&with_backend)
+                .unwrap_or_else(|e| panic!("{name}: matching colour rejected: {e}")),
+            encode(&encoder).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+/// The colour an encoder's configuration selects, mirroring `AvifEncoder::colour` — the test needs
+/// it to build a stream the crate will accept.
+fn encoder_colour(encoder: &AvifEncoder) -> Av1Colour {
+    let config = encoder.config();
+    match config.mode {
+        gamut_avif::AvifMode::Lossless => Av1Colour::default(),
+        _ => Av1Colour {
+            matrix: config.matrix,
+            range: config.range,
+            ..Av1Colour::default()
+        },
+    }
+}
+
+/// A stream that leaves its CICP code points UNSPECIFIED is rejected with a message that says so,
+/// rather than falling out of the colour comparison as a confusing mismatch.
+#[test]
+fn backend_stream_must_describe_its_colour() {
+    // A hand-built reduced-still-picture sequence header for the 34×18 fixture with
+    // `color_description_present_flag = 0`:
+    //   seq_profile(3)=1 | still_picture=1 | reduced=1 | seq_level_idx[0](5)=0
+    //   | frame_width_bits_minus_1(4)=5 | frame_height_bits_minus_1(4)=4
+    //   | max_frame_width_minus_1(6)=33 | max_frame_height_minus_1(5)=17
+    //   | use_128x128_superblock, filter_intra, intra_edge_filter, superres, cdef, restoration = 0
+    //   | high_bitdepth=0 | color_description_present_flag=0 | color_range=0
+    //   | separate_uv_delta_q=0 | film_grain_params_present=0 | trailing one + zero pad
+    let payload = [0x38u8, 0x15, 0x21, 0x88, 0x00, 0x80];
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+    let log = log();
     let mut encoder = AvifEncoder::lossy(50);
-    encoder.push_backend(Scripted::new(
-        "right-colour",
-        true,
-        Outcome::Bytes(builtin_obus(127, colour)),
-        &log,
-    ));
-    assert_eq!(
-        encode(&encoder).expect("matching colour accepted"),
-        encode(&AvifEncoder::lossy(50)).unwrap()
+    encoder.push_backend(Scripted::new("no-cicp", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("undescribed colour rejected");
+    assert_owned_error(
+        &err,
+        ErrorKind::Unsupported,
+        "AVIF: AV1 backend stream must set color_description_present_flag",
     );
 }
 

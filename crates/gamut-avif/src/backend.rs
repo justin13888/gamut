@@ -216,12 +216,6 @@ pub(crate) fn still_from_backend_obus(
     colour: Av1Colour,
 ) -> Result<EncodedStill> {
     let header = SeqHeaderParams::parse(&obus)?;
-    if header.seq_profile != 1 {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)",
-        ));
-    }
     if (header.width, header.height) != (dims.width, dims.height) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
@@ -306,6 +300,16 @@ impl SeqHeaderParams {
             })??;
         let mut r = BitReader::new(seq);
         let seq_profile = r.bits(3)? as u8;
+        // Enforced here, not by the caller, because `color_config()`'s *layout* depends on it: only
+        // `seq_profile == 2` codes `twelve_bit`, and only `seq_profile != 1` codes `mono_chrome`.
+        // Reading the colour fields off a profile this parser cannot describe would misparse them
+        // before anyone had a chance to reject the stream.
+        if seq_profile != 1 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)",
+            ));
+        }
         let _still_picture = r.bits(1)?;
         if r.bits(1)? != 1 {
             return Err(Error::unsupported(
@@ -331,23 +335,27 @@ impl SeqHeaderParams {
                 "AVIF: AV1 backend stream must be 8-bit (high_bitdepth = 0)",
             ));
         }
-        let colour = if r.bits(1)? == 1 {
-            let cp = r.bits(8)? as u16;
-            let tc = r.bits(8)? as u16;
-            let mc = r.bits(8)? as u16;
-            // The §5.5.2 shortcut: BT.709 primaries + sRGB transfer + identity matrix infer full
-            // range (and 4:4:4) with no coded bit; every other triple codes `color_range`.
-            let full_range = if cp == 1 && tc == 13 && mc == 0 {
-                true
-            } else {
-                r.bits(1)? == 1
-            };
-            (cp, tc, mc, full_range)
+        // `color_description_present_flag = 0` leaves all three code points UNSPECIFIED (2), which
+        // the container would have to stamp verbatim into `colr` — and which can never match the
+        // concrete triple the request carries. Reject it here, with a message that says why,
+        // rather than let it fall out of the colour comparison as a confusing mismatch.
+        if r.bits(1)? != 1 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend stream must set color_description_present_flag",
+            ));
+        }
+        let cp = r.bits(8)? as u16;
+        let tc = r.bits(8)? as u16;
+        let mc = r.bits(8)? as u16;
+        // The §5.5.2 shortcut: BT.709 primaries + sRGB transfer + identity matrix infer full range
+        // (and 4:4:4) with no coded bit; every other triple codes `color_range`.
+        let full_range = if cp == 1 && tc == 13 && mc == 0 {
+            true
         } else {
-            // color_description_present_flag = 0 ⇒ all three are CP/TC/MC_UNSPECIFIED (2), which
-            // misses the shortcut, so `color_range` is coded.
-            (2, 2, 2, r.bits(1)? == 1)
+            r.bits(1)? == 1
         };
+        let colour = (cp, tc, mc, full_range);
         Ok(Self {
             seq_profile,
             seq_level_idx_0,
