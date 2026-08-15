@@ -535,3 +535,18 @@ fn annex_k_scaled_custom_tables_reproduce_the_quality_path_byte_for_byte() {
         assert_eq!(via_quality, via_tables, "q{q}: custom-table path diverged");
     }
 }
+
+#[test]
+fn rd_none_is_byte_identical_to_the_default() {
+    use gamut_jpeg::RdOptimization;
+    // `RdOptimization::None` IS the default path — not merely equivalent: byte-for-byte.
+    let rgb = vec![77u8; 24 * 16 * 3];
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+    let default = JpegEncoder::new().encode_to_vec(img).unwrap();
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+    let explicit = JpegEncoder::new()
+        .with_rd_optimization(RdOptimization::None)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(default, explicit);
+}

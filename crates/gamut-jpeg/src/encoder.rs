@@ -24,8 +24,9 @@ use crate::bitwriter::BitWriter;
 use crate::huffman::{self, EncTable, TableSpec};
 use crate::marker::{self, DensityUnit};
 use crate::quant::QuantTables;
+use crate::rd::RdCtx;
 use crate::zigzag::ZIGZAG;
-use crate::{appmeta, progressive, quant};
+use crate::{appmeta, progressive, quant, rd};
 
 /// The largest image dimension the frame header can encode: the SOF0 `X`/`Y` fields are 16-bit
 /// (§B.2.2, Table B.2).
@@ -58,6 +59,28 @@ impl ChromaSubsampling {
             ChromaSubsampling::Ycbcr420 => (2, 2),
         }
     }
+}
+
+/// Rate–distortion optimization mode ([`JpegEncoder::with_rd_optimization`]): how quantized
+/// coefficients are chosen from the DCT output.
+///
+/// The discriminants are permanent and append-only (the workspace C-ABI contract for fieldless
+/// enums); future refinements are new variants, never renumberings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum RdOptimization {
+    /// Plain §A.3.4 nearest rounding — the frozen default; output bytes are unchanged.
+    #[default]
+    None = 0,
+    /// Per-block trellis search over the AC coefficients, minimizing distortion plus λ times the
+    /// exact §F.1.2.2 entropy cost (see the crate's `rd` module docs). Smaller files at nearly
+    /// identical fidelity; the DC coefficient keeps plain rounding.
+    Trellis = 1,
+    /// [`Self::Trellis`] plus per-block adaptive quantization: λ is modulated by each block's own
+    /// AC energy, spending relatively more bits on flat (masking-poor) blocks and fewer on busy
+    /// ones.
+    TrellisAdaptive = 2,
 }
 
 /// A reusable baseline JPEG encoder.
@@ -99,6 +122,7 @@ pub struct JpegEncoder {
     progressive: bool,
     optimize_tables: bool,
     quant_tables: Option<QuantTables>,
+    rd: RdOptimization,
     exif: Option<Vec<u8>>,
     xmp: Option<Vec<u8>>,
     icc: Option<Vec<u8>>,
@@ -120,6 +144,7 @@ impl fmt::Debug for JpegEncoder {
             .field("progressive", &self.progressive)
             .field("optimize_tables", &self.optimize_tables)
             .field("quant_tables", &self.quant_tables)
+            .field("rd", &self.rd)
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("icc", &self.icc.as_ref().map(Vec::len))
@@ -149,6 +174,7 @@ impl JpegEncoder {
             progressive: false,
             optimize_tables: false,
             quant_tables: None,
+            rd: RdOptimization::None,
             exif: None,
             xmp: None,
             icc: None,
@@ -197,10 +223,11 @@ impl JpegEncoder {
         samples: &[u8],
         out: &mut Vec<u8>,
     ) -> Result<Option<usize>> {
-        // Caller-supplied quantization tables cannot ride a `JpegEncodeRequest`, so they pin the
-        // encode to the built-in path rather than let a backend silently encode with different
-        // tables (the same host-side veto gamut-jxl applies to its container features).
-        if self.quant_tables.is_some() {
+        // Caller-supplied quantization tables and RD optimization cannot ride a
+        // `JpegEncodeRequest`, so either pins the encode to the built-in path rather than let a
+        // backend silently encode with a different configuration (the same host-side veto
+        // gamut-jxl applies to its container features).
+        if self.quant_tables.is_some() || self.rd != RdOptimization::None {
             return Ok(None);
         }
         if self.backends.is_empty() {
@@ -334,6 +361,25 @@ impl JpegEncoder {
         self
     }
 
+    /// Selects how quantized coefficients are chosen ([`RdOptimization`]): plain nearest rounding
+    /// (the default — output bytes unchanged), per-block AC trellis, or trellis with per-block
+    /// adaptive λ.
+    ///
+    /// Rate–distortion optimization changes the coefficients (that is its point), so it is opt-in
+    /// and produces different — spec-valid — bytes; the frozen quality contract continues to bind
+    /// only the default [`RdOptimization::None`] path. It composes with every other builder:
+    /// custom [`Self::with_quant_tables`], [`Self::with_optimized_tables`] (rates are still costed
+    /// against the typical-table proxy; the emitted tables then fit whatever the trellis chose),
+    /// and [`Self::with_progressive`] (the progressive stream carries the same trellis-chosen
+    /// coefficients as the baseline stream, preserving the exactness invariant). While set to a
+    /// non-`None` mode the encode is pinned to the **built-in** encoder — a
+    /// [`crate::backend::JpegEncodeRequest`] cannot carry the RD configuration.
+    #[must_use]
+    pub fn with_rd_optimization(mut self, rd: RdOptimization) -> Self {
+        self.rd = rd;
+        self
+    }
+
     /// Embeds EXIF metadata as an APP1 segment (`"Exif\0\0"` + TIFF stream, Exif 3.0 §4.7.2).
     ///
     /// `exif` is the TIFF stream beginning `II`/`MM` — e.g. `gamut-exif` output; a blob already
@@ -383,6 +429,22 @@ impl JpegEncoder {
             Some(tables) => *tables.chroma(),
             None => quant::scale(&quant::CHROMINANCE, self.quality),
         }
+    }
+
+    /// The rate–distortion context for one component class (`chroma` selects the typical AC rate
+    /// proxy: Annex K.6 rather than K.5), or `None` when RD optimization is off.
+    fn rd_ctx(&self, chroma: bool) -> Option<RdCtx> {
+        (self.rd != RdOptimization::None).then(|| {
+            let spec = if chroma {
+                &huffman::STD_CHROMA_AC
+            } else {
+                &huffman::STD_LUMA_AC
+            };
+            RdCtx::new(
+                EncTable::from_spec(spec),
+                self.rd == RdOptimization::TrellisAdaptive,
+            )
+        })
     }
 
     /// Rejects dimensions the frame header cannot encode (`X`/`Y` are 16-bit). Zero is already
@@ -542,6 +604,8 @@ struct Component<'a> {
     quant: &'a [u8; 64],
     /// Entropy-table destination (the SOS `Tdj` = `Taj`): 0 = luma, 1 = chroma.
     dest: usize,
+    /// The rate–distortion context for this component's class, when RD optimization is enabled.
+    rd: Option<&'a RdCtx>,
 }
 
 /// The entropy tables a baseline scan codes with, indexed by destination (0 = luma, 1 = chroma).
@@ -661,11 +725,9 @@ fn emit_symbol(writer: &mut BitWriter, table: Option<&EncTable>, symbol: u8) {
     }
 }
 
-/// Level-shifts, forward-transforms and quantizes one 8×8 block of `plane` at block coordinates
-/// `(bx, by)` (§A.3.1 / §A.3.3 / §A.3.4), returning the natural-order quantized coefficients. Shared
-/// by the baseline single-pass coder ([`encode_block`]) and the progressive encoder
-/// ([`crate::progressive`]), which materializes every block up front before running the scan script.
-pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
+/// Gathers and level-shifts one 8×8 block of `plane` at block coordinates `(bx, by)` and runs the
+/// forward DCT (§A.3.1 / §A.3.3), returning the natural-order **unquantized** coefficients.
+fn dct_block(plane: &Plane, bx: usize, by: usize) -> [i32; 64] {
     // Gather the level-shifted samples in natural (raster) order.
     let mut block = [0i32; 64];
     for row in 0..8usize {
@@ -674,12 +736,38 @@ pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usi
         }
     }
     fdct8x8(&mut block);
+    block
+}
+
+/// Level-shifts, forward-transforms and quantizes one 8×8 block of `plane` at block coordinates
+/// `(bx, by)` (§A.3.1 / §A.3.3 / §A.3.4), returning the natural-order quantized coefficients. Shared
+/// by the baseline single-pass coder ([`encode_block`]) and the progressive encoder
+/// ([`crate::progressive`]), which materializes every block up front before running the scan script.
+pub(crate) fn quantize_block(plane: &Plane, quant: &[u8; 64], bx: usize, by: usize) -> [i32; 64] {
+    let block = dct_block(plane, bx, by);
     // Quantize (§A.3.4): round-to-nearest divide by the table entry (which is ≥ 1).
     let mut q = [0i32; 64];
     for (dst, (&coeff, &step)) in q.iter_mut().zip(block.iter().zip(quant.iter())) {
         *dst = round_div_nearest(coeff, i32::from(step));
     }
     q
+}
+
+/// [`quantize_block`] with an optional rate–distortion context: `None` is exactly the plain
+/// nearest-rounding path (the frozen default, byte-for-byte), `Some` routes the unquantized DCT
+/// output through the [`crate::rd`] trellis. The single quantization seam shared by the baseline
+/// and progressive processes, so an RD choice is identical in both.
+pub(crate) fn quantize_block_rd(
+    plane: &Plane,
+    quant: &[u8; 64],
+    bx: usize,
+    by: usize,
+    rd: Option<&RdCtx>,
+) -> [i32; 64] {
+    match rd {
+        None => quantize_block(plane, quant, bx, by),
+        Some(ctx) => rd::trellis_quantize(&dct_block(plane, bx, by), quant, ctx),
+    }
 }
 
 /// Codes one 8×8 block (§A.3): level-shift → FDCT → quantize, then hands the natural-order
@@ -691,7 +779,7 @@ fn encode_block(
     dc_pred: &mut i32,
     coder: &mut BaselineCoder,
 ) {
-    let q = quantize_block(comp.plane, comp.quant, block_x, block_y);
+    let q = quantize_block_rd(comp.plane, comp.quant, block_x, block_y, comp.rd);
     encode_quantized_block(&q, dc_pred, comp.dest, coder);
 }
 
@@ -835,6 +923,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
             height: usize::from(height),
         };
         let luma_quant = self.luma_quant();
+        let luma_rd = self.rd_ctx(false);
 
         self.write_prologue(out, &[(0, &luma_quant)]);
         if self.progressive {
@@ -845,6 +934,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 tq: 0,
                 plane: &plane,
                 quant: &luma_quant,
+                rd: luma_rd.as_ref(),
             }];
             progressive::encode(out, width, height, &comps, self.restart_interval);
         } else {
@@ -854,6 +944,7 @@ impl EncodeImage<Gray8> for JpegEncoder {
                 plane: &plane,
                 quant: &luma_quant,
                 dest: 0,
+                rd: luma_rd.as_ref(),
             };
             self.write_baseline_frame(out, width, height, &[(1, 1, 1, 0)], &[(1, 0, 0)], &[comp]);
         }
@@ -902,6 +993,8 @@ impl EncodeImage<Rgb8> for JpegEncoder {
 
         let luma_quant = self.luma_quant();
         let chroma_quant = self.chroma_quant();
+        let luma_rd = self.rd_ctx(false);
+        let chroma_rd = self.rd_ctx(true);
 
         self.write_prologue(out, &[(0, &luma_quant), (1, &chroma_quant)]);
         if self.progressive {
@@ -913,6 +1006,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     tq: 0,
                     plane: &luma_plane,
                     quant: &luma_quant,
+                    rd: luma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
                     id: 2,
@@ -921,6 +1015,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     tq: 1,
                     plane: &cb_plane,
                     quant: &chroma_quant,
+                    rd: chroma_rd.as_ref(),
                 },
                 progressive::ProgComponent {
                     id: 3,
@@ -929,6 +1024,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     tq: 1,
                     plane: &cr_plane,
                     quant: &chroma_quant,
+                    rd: chroma_rd.as_ref(),
                 },
             ];
             progressive::encode(out, width, height, &comps, self.restart_interval);
@@ -940,6 +1036,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     plane: &luma_plane,
                     quant: &luma_quant,
                     dest: 0,
+                    rd: luma_rd.as_ref(),
                 },
                 Component {
                     h: 1,
@@ -947,6 +1044,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     plane: &cb_plane,
                     quant: &chroma_quant,
                     dest: 1,
+                    rd: chroma_rd.as_ref(),
                 },
                 Component {
                     h: 1,
@@ -954,6 +1052,7 @@ impl EncodeImage<Rgb8> for JpegEncoder {
                     plane: &cr_plane,
                     quant: &chroma_quant,
                     dest: 1,
+                    rd: chroma_rd.as_ref(),
                 },
             ];
             self.write_baseline_frame(
@@ -1059,6 +1158,7 @@ mod tests {
         assert!(!d.progressive);
         assert!(!d.optimize_tables);
         assert_eq!(d.quant_tables, None);
+        assert_eq!(d.rd, RdOptimization::None);
         assert_eq!((&d.exif, &d.xmp, &d.icc), (&None, &None, &None));
     }
 
@@ -1381,6 +1481,7 @@ mod tests {
             plane: &plane,
             quant: &quant,
             dest: 0,
+            rd: None,
         };
 
         let entropy = scan_entropy(&[comp], 16, 16, 0);
@@ -1431,6 +1532,7 @@ mod tests {
             plane: &plane,
             quant: &quant,
             dest: 0,
+            rd: None,
         };
 
         let entropy = scan_entropy(&[comp], 8, 8, 0);
@@ -1669,6 +1771,7 @@ mod tests {
             plane: &plane,
             quant: &quant,
             dest: 0,
+            rd: None,
         };
         let entropy = scan_entropy(&[comp], 16, 16, 0);
 
