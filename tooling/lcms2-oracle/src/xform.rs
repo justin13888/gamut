@@ -6,6 +6,8 @@
 //! packing and the flag words are transcribed here from `include/lcms2.h` (lcms2 2.19), with a
 //! unit test pinning the composed values against the header's expansions.
 
+use std::ptr;
+
 pub use sys::{
     INTENT_ABSOLUTE_COLORIMETRIC, INTENT_PERCEPTUAL, INTENT_RELATIVE_COLORIMETRIC,
     INTENT_SATURATION,
@@ -127,6 +129,35 @@ impl Transform {
         })
     }
 
+    /// A single-profile **devicelink** transform (`cmsCreateTransform` with a NULL output
+    /// profile — lcms2's documented devicelink spelling): applies `link`'s A2B pipeline from
+    /// its device space (`in_format`) to its "PCS" field, which for a link-class profile holds
+    /// the *output* device space (`out_format`).
+    ///
+    /// Caution: the `TYPE_*_DBL`/`_FLT` CMYK formats carry **ink percentages 0..100**, not
+    /// 0..1 (see [`TYPE_CMYK_DBL`]).
+    #[must_use]
+    pub fn devicelink(
+        link: &Profile,
+        in_format: u32,
+        out_format: u32,
+        intent: u32,
+        flags: u32,
+    ) -> Transform {
+        // SAFETY: `link` is a live handle; a NULL output profile selects the one-profile
+        // (devicelink) path in `cmsCreateTransformTHR`.
+        wrap_transform(unsafe {
+            sys::cmsCreateTransform(
+                link.raw,
+                in_format,
+                ptr::null_mut(),
+                out_format,
+                intent,
+                flags,
+            )
+        })
+    }
+
     /// A chained transform over two or more profiles (`cmsCreateMultiprofileTransform`), applying
     /// `intent` at every hop.
     #[must_use]
@@ -222,6 +253,76 @@ impl Transform {
         unsafe {
             sys::cmsDoTransform(self.raw, src.as_ptr().cast(), out.as_mut_ptr().cast(), n);
         }
+        out
+    }
+}
+
+/// A bare lcms2 pipeline holding a single **float** CLUT stage
+/// (`cmsStageAllocCLutFloatGranular`), evaluated through `cmsPipelineEvalFloat` — the most
+/// direct window onto lcms2's float interpolators (`LinLerp1Dfloat`/`Eval1InputFloat`,
+/// `BilinearInterpFloat`, `TetrahedralInterpFloat`, `Eval4InputsFloat`…`Eval15InputsFloat`)
+/// with no profile, transform, formatter, or optimization machinery in between. This is the
+/// tight CLUT-interpolation oracle; a CLUT embedded in a profile is evaluated through lcms2's
+/// 16-bit fixed-point interpolators instead (`EvaluateCLUTfloatIn16` quantizes even float
+/// transforms), so profile-borne comparisons are only 16-bit-tight.
+pub struct ClutPipeline {
+    raw: *mut sys::cmsPipeline,
+    in_ch: usize,
+    out_ch: usize,
+}
+
+impl Drop for ClutPipeline {
+    fn drop(&mut self) {
+        // SAFETY: `raw` is a live pipeline from `cmsPipelineAlloc`, freed exactly once.
+        unsafe { sys::cmsPipelineFree(self.raw) };
+    }
+}
+
+impl ClutPipeline {
+    /// Builds the pipeline over a float CLUT with per-axis `grid_points`, `samples` in grid
+    /// order (last input axis fastest, output channels interleaved per node; values normalized
+    /// to `[0, 1]`), and `out_ch` outputs. lcms2 copies the table. The input channel count is
+    /// `grid_points.len()` (at most 15, lcms2's `MAX_INPUT_DIMENSIONS`).
+    #[must_use]
+    pub fn new(grid_points: &[u8], samples: &[f32], out_ch: u32) -> ClutPipeline {
+        let in_ch = u32::try_from(grid_points.len()).expect("axis count fits u32");
+        let nodes: usize = grid_points.iter().map(|&n| usize::from(n)).product();
+        assert_eq!(
+            samples.len(),
+            nodes * out_ch as usize,
+            "sample count must be prod(grid) x out_ch"
+        );
+        let points: Vec<sys::cmsUInt32Number> = grid_points.iter().map(|&n| u32::from(n)).collect();
+        // SAFETY: the points/samples pointers are live for the call and copied by lcms2; the
+        // stage moves into the pipeline on insert.
+        unsafe {
+            let raw = sys::cmsPipelineAlloc(ptr::null_mut(), in_ch, out_ch);
+            assert!(!raw.is_null(), "cmsPipelineAlloc failed");
+            let stage = sys::cmsStageAllocCLutFloatGranular(
+                ptr::null_mut(),
+                points.as_ptr(),
+                in_ch,
+                out_ch,
+                samples.as_ptr(),
+            );
+            assert!(!stage.is_null(), "cmsStageAllocCLutFloatGranular failed");
+            assert!(sys::cmsPipelineInsertStage(raw, sys::cmsAT_END, stage) != 0);
+            ClutPipeline {
+                raw,
+                in_ch: in_ch as usize,
+                out_ch: out_ch as usize,
+            }
+        }
+    }
+
+    /// Evaluates one pixel (`cmsPipelineEvalFloat`): `input` holds one sample per grid axis.
+    #[must_use]
+    pub fn eval(&self, input: &[f32]) -> Vec<f32> {
+        assert_eq!(input.len(), self.in_ch, "one sample per input channel");
+        let mut out = vec![0.0_f32; self.out_ch];
+        // SAFETY: `input` and `out` hold the pipeline's declared channel counts; lcms2
+        // reads/writes exactly those ranges.
+        unsafe { sys::cmsPipelineEvalFloat(input.as_ptr(), out.as_mut_ptr(), self.raw) };
         out
     }
 }
