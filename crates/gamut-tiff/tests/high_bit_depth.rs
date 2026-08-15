@@ -4,7 +4,7 @@
 use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, ImageBuf, ImageRef, Rgb8, Rgb16, Rgba16,
 };
-use gamut_tiff::{TiffDecoder, TiffEncoder};
+use gamut_tiff::{ByteOrder, Compression, Predictor, TiffDecoder, TiffEncoder, read, tags};
 use libtiff_oracle::Compression as OC;
 
 /// Sizes include 1x1, a size smaller than one tile, and 17x13 — deliberately not a multiple of 16,
@@ -37,6 +37,186 @@ fn dims(w: u32, h: u32) -> Dimensions {
         width: w,
         height: h,
     }
+}
+
+/// Every gamut compression that can carry 16-bit samples, paired with the predictors it allows.
+/// CCITT is bilevel-only and so is absent by construction.
+const GAMUT_MODES: &[(Compression, Predictor)] = &[
+    (Compression::None, Predictor::None),
+    (Compression::PackBits, Predictor::None),
+    (Compression::Lzw, Predictor::None),
+    (Compression::Lzw, Predictor::HorizontalDifferencing),
+    (Compression::Deflate, Predictor::None),
+    (Compression::Deflate, Predictor::HorizontalDifferencing),
+];
+
+fn encoder(order: ByteOrder, compression: Compression, predictor: Predictor) -> TiffEncoder {
+    TiffEncoder::new()
+        .with_byte_order(order)
+        .with_compression(compression)
+        .with_predictor(predictor)
+}
+
+#[test]
+fn gray16_roundtrips_in_gamut() {
+    for &(w, h) in SIZES {
+        let src = gray16_pattern(w, h);
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            for &(compression, predictor) in GAMUT_MODES {
+                let tiff = encoder(order, compression, predictor)
+                    .encode_to_vec(ImageRef::<Gray16>::new(&src, dims(w, h)).unwrap())
+                    .expect("encode");
+                let got: ImageBuf<Gray16> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+                assert_eq!(got.dimensions(), dims(w, h));
+                assert_eq!(
+                    got.as_samples(),
+                    src.as_slice(),
+                    "gray16 {compression:?} {predictor:?} {order:?} at {w}x{h}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rgb16_and_rgba16_roundtrip_in_gamut() {
+    for &(w, h) in SIZES {
+        let rgb = rgb16_pattern(w, h);
+        let rgba = pattern16((w * h * 4) as usize, 3);
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            for &(compression, predictor) in GAMUT_MODES {
+                let enc = encoder(order, compression, predictor);
+                let tiff = enc
+                    .encode_to_vec(ImageRef::<Rgb16>::new(&rgb, dims(w, h)).unwrap())
+                    .expect("encode");
+                let got: ImageBuf<Rgb16> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+                assert_eq!(
+                    got.as_samples(),
+                    rgb.as_slice(),
+                    "rgb16 {compression:?} {predictor:?} {order:?} at {w}x{h}"
+                );
+
+                let tiff = enc
+                    .encode_to_vec(ImageRef::<Rgba16>::new(&rgba, dims(w, h)).unwrap())
+                    .expect("encode");
+                let got: ImageBuf<Rgba16> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+                assert_eq!(
+                    got.as_samples(),
+                    rgba.as_slice(),
+                    "rgba16 {compression:?} {predictor:?} {order:?} at {w}x{h}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rgb16_roundtrips_in_gamut_as_tiles() {
+    // Tiles are predicted independently and the encoder's tiled predictor is Deflate-only, so this
+    // covers both the padded-edge blit and the per-tile predictor at 16 bits.
+    for &(w, h) in SIZES {
+        let src = rgb16_pattern(w, h);
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            for (compression, predictor) in [
+                (Compression::None, Predictor::None),
+                (Compression::Lzw, Predictor::None),
+                (Compression::Deflate, Predictor::HorizontalDifferencing),
+            ] {
+                let tiff = encoder(order, compression, predictor)
+                    .with_tiling(16, 16)
+                    .encode_to_vec(ImageRef::<Rgb16>::new(&src, dims(w, h)).unwrap())
+                    .expect("encode");
+                let got: ImageBuf<Rgb16> = TiffDecoder::new().decode_image(&tiff).expect("decode");
+                assert_eq!(
+                    got.as_samples(),
+                    src.as_slice(),
+                    "rgb16 tiled {compression:?} {predictor:?} {order:?} at {w}x{h}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn gamut_sixteen_bit_is_decoded_by_libtiff() {
+    // The other direction, and the one that actually pins the encoder's byte order: a gamut-only
+    // round-trip would survive a swapped pack/unpack pair, since it writes and reads with the same
+    // code. libtiff reading an `MM` file gamut wrote cannot.
+    for &(w, h) in SIZES {
+        let gray = gray16_pattern(w, h);
+        let rgb = rgb16_pattern(w, h);
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            for &(compression, predictor) in GAMUT_MODES {
+                let enc = encoder(order, compression, predictor);
+
+                let tiff = enc
+                    .encode_to_vec(ImageRef::<Gray16>::new(&gray, dims(w, h)).unwrap())
+                    .expect("encode");
+                let oracle = libtiff_oracle::decode_tiff16(&tiff).expect("libtiff decode");
+                assert_eq!((oracle.width, oracle.height), (w, h));
+                assert_eq!(
+                    oracle.samples, gray,
+                    "gray16 {compression:?} {predictor:?} {order:?} at {w}x{h}"
+                );
+
+                let tiff = enc
+                    .encode_to_vec(ImageRef::<Rgb16>::new(&rgb, dims(w, h)).unwrap())
+                    .expect("encode");
+                let oracle = libtiff_oracle::decode_tiff16(&tiff).expect("libtiff decode");
+                assert_eq!(
+                    oracle.samples, rgb,
+                    "rgb16 {compression:?} {predictor:?} {order:?} at {w}x{h}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn gamut_tiled_sixteen_bit_is_decoded_by_libtiff() {
+    for &(w, h) in SIZES {
+        let src = rgb16_pattern(w, h);
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            for (compression, predictor) in [
+                (Compression::Lzw, Predictor::None),
+                (Compression::Deflate, Predictor::HorizontalDifferencing),
+            ] {
+                let tiff = encoder(order, compression, predictor)
+                    .with_tiling(16, 16)
+                    .encode_to_vec(ImageRef::<Rgb16>::new(&src, dims(w, h)).unwrap())
+                    .expect("encode");
+                let oracle = libtiff_oracle::decode_tiff16(&tiff).expect("libtiff decode");
+                assert_eq!(
+                    oracle.samples, src,
+                    "rgb16 tiled {compression:?} {predictor:?} {order:?} at {w}x{h}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn sixteen_bit_encode_declares_its_depth_and_alpha() {
+    let src = pattern16(4 * 4 * 4, 5);
+    let tiff = TiffEncoder::new()
+        .encode_to_vec(ImageRef::<Rgba16>::new(&src, dims(4, 4)).unwrap())
+        .expect("encode");
+    let ifd = &read(&tiff).expect("read").ifds[0];
+    assert_eq!(
+        ifd.get_u32_vec(tags::BITS_PER_SAMPLE),
+        Some(vec![16, 16, 16, 16])
+    );
+    // Unassociated alpha, matching the 8-bit RGBA impl.
+    assert_eq!(ifd.get_u32_vec(tags::EXTRA_SAMPLES), Some(vec![2]));
+}
+
+#[test]
+fn sixteen_bit_rejects_ccitt_which_is_bilevel_only() {
+    let src = gray16_pattern(8, 8);
+    let got = TiffEncoder::new()
+        .with_compression(Compression::CcittGroup4Fax)
+        .encode_to_vec(ImageRef::<Gray16>::new(&src, dims(8, 8)).unwrap());
+    assert!(got.is_err(), "CCITT cannot carry 16-bit samples");
 }
 
 #[test]

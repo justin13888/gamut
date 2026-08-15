@@ -44,6 +44,19 @@ fn store(row: &mut [u8], i: usize, value: u16, order: ByteOrder) {
     row[i + 1] = bytes[1];
 }
 
+/// Applies horizontal differencing to each row of 16-bit samples in place (right to left, so each
+/// subtraction sees the original left neighbour).
+pub fn forward16(packed: &mut [u8], stored_row_bytes: usize, spp: usize, order: ByteOrder) {
+    for row in packed.chunks_mut(stored_row_bytes) {
+        let samples = row.len() / 2;
+        for s in (spp..samples).rev() {
+            let left = load(row, (s - spp) * 2, order);
+            let here = load(row, s * 2, order);
+            store(row, s * 2, here.wrapping_sub(left), order);
+        }
+    }
+}
+
 /// Reverses horizontal differencing on each row of 16-bit samples in place (left to right,
 /// accumulating).
 pub fn reverse16(packed: &mut [u8], stored_row_bytes: usize, spp: usize, order: ByteOrder) {
@@ -60,6 +73,33 @@ pub fn reverse16(packed: &mut [u8], stored_row_bytes: usize, spp: usize, order: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forward16_then_reverse16_is_identity() {
+        for order in [ByteOrder::LittleEndian, ByteOrder::BigEndian] {
+            for spp in [1usize, 3, 4] {
+                let row_bytes = 7 * spp * 2;
+                let original: Vec<u8> = (0..(row_bytes * 4) as u32)
+                    .map(|i| (i.wrapping_mul(37) ^ (i >> 3)) as u8)
+                    .collect();
+                let mut buf = original.clone();
+                forward16(&mut buf, row_bytes, spp, order);
+                assert_ne!(buf, original, "differencing should change the data");
+                reverse16(&mut buf, row_bytes, spp, order);
+                assert_eq!(buf, original, "{order:?} spp={spp}");
+            }
+        }
+    }
+
+    #[test]
+    fn forward16_differences_sample_values_not_bytes() {
+        // The exact inverse of `reverse16_accumulates_sample_values_not_bytes`: big-endian samples
+        // 0x0101 then 0x0200 difference to 0x00FF. A byte-wise predictor would subtract each byte
+        // independently and give 0x01_FF, missing the borrow out of the high byte.
+        let mut buf = vec![0x01, 0x01, 0x02, 0x00];
+        forward16(&mut buf, 4, 1, ByteOrder::BigEndian);
+        assert_eq!(buf, vec![0x01, 0x01, 0x00, 0xFF]);
+    }
 
     #[test]
     fn reverse16_accumulates_sample_values_not_bytes() {
