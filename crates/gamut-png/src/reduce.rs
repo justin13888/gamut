@@ -196,7 +196,6 @@ pub(crate) fn analyze16(samples: &[u16], channels: usize) -> Option<Reduced> {
         }));
     }
 
-    let pixel_count = samples.len() / channels;
     let mut all_opaque = true;
     let mut all_gray = true;
     for px in samples.chunks_exact(channels) {
@@ -208,39 +207,25 @@ pub(crate) fn analyze16(samples: &[u16], channels: usize) -> Option<Reduced> {
         }
     }
 
-    let input_size = pixel_count * channels * 2;
-    let gray_size = if all_gray && all_opaque {
-        pixel_count * 2
-    } else {
-        usize::MAX
-    };
-    let gray_alpha_size = if all_gray && !all_opaque {
-        pixel_count * 4
-    } else {
-        usize::MAX
-    };
-    let rgb_size = if channels == 4 && all_opaque && !all_gray {
-        pixel_count * 6
-    } else {
-        usize::MAX
-    };
-
-    let best = gray_size.min(gray_alpha_size).min(rgb_size);
-    if best >= input_size {
-        return None;
-    }
-
+    // Unlike the 8-bit analysis there is no size estimate to weigh: the candidates' gates are
+    // mutually exclusive, and each strictly shrinks the channel count, so whichever gate matches
+    // wins outright. The channel checks reject the identity "reductions" (grey of a Gray16 input,
+    // grey+alpha of a GrayAlpha16 input).
     let px16 = samples.chunks_exact(channels);
-    if best == gray_size {
+    if all_gray && all_opaque && channels > 1 {
         Some(Reduced::Gray16Be(be_bytes(px16.map(|px| px[0]))))
-    } else if best == gray_alpha_size {
+    } else if all_gray && channels > 2 {
+        // Not all-opaque (that is the branch above), so the alpha channel must be kept.
         Some(Reduced::GrayAlpha16Be(be_bytes(
             px16.flat_map(|px| [px[0], px[channels - 1]]),
         )))
-    } else {
+    } else if channels == 4 && all_opaque {
+        // Not all-grey (the branches above), so only the opaque alpha channel can be dropped.
         Some(Reduced::Rgb16Be(be_bytes(
             px16.flat_map(|px| [px[0], px[1], px[2]]),
         )))
+    } else {
+        None
     }
 }
 
@@ -492,6 +477,56 @@ mod tests {
                 assert_eq!(demoted[4 * 250], 250u8);
             }
             _ => panic!("expected demoted Rgba8"),
+        }
+    }
+
+    #[test]
+    fn two_matching_channels_are_not_grey() {
+        // R == G but B differs on every pixel: not greyscale, too many colours to palette.
+        let rgb: Vec<u8> = (0..60u8).flat_map(|v| [v, v, 200]).collect();
+        assert!(analyze8(&rgb, 3).is_none());
+        // The 16-bit twin (non-demotable): same verdict.
+        let rgb16: Vec<u16> = (0..60u32)
+            .flat_map(|i| {
+                let v = (i * 501 + 1) as u16;
+                [v, v, 200]
+            })
+            .collect();
+        assert!(analyze16(&rgb16, 3).is_none());
+    }
+
+    #[test]
+    fn sixteen_bit_identity_reductions_are_rejected() {
+        // Non-demotable grey noise arriving as Gray16 is already minimal.
+        let gray16: Vec<u16> = (0..90u32).map(|i| (i * 501 + 1) as u16).collect();
+        assert!(analyze16(&gray16, 1).is_none());
+    }
+
+    #[test]
+    fn demotable_grey_alpha_and_rgb_fall_back_to_their_own_layout() {
+        // GrayAlpha16, every sample k*257, varied alpha, >256 (grey, alpha) combos: the demotion
+        // itself is the only win, and it must keep the grey+alpha layout.
+        let ga16: Vec<u16> = (0..600u32)
+            .flat_map(|i| [((i % 251) * 257) as u16, ((i % 33) * 7 * 257) as u16])
+            .collect();
+        match analyze16(&ga16, 2) {
+            Some(Reduced::GrayAlpha8(demoted)) => assert_eq!(demoted.len(), 600 * 2),
+            _ => panic!("expected demoted GrayAlpha8"),
+        }
+
+        // Rgb16, every sample k*257, many non-grey colours: plain demotion keeps RGB.
+        let rgb16: Vec<u16> = (0..600u32)
+            .flat_map(|i| {
+                [
+                    ((i % 251) * 257) as u16,
+                    ((i % 241) * 257) as u16,
+                    ((i % 239) * 257) as u16,
+                ]
+            })
+            .collect();
+        match analyze16(&rgb16, 3) {
+            Some(Reduced::Rgb8(demoted)) => assert_eq!(demoted.len(), 600 * 3),
+            _ => panic!("expected demoted Rgb8"),
         }
     }
 

@@ -773,9 +773,11 @@ fn gray8_samples(native: NativeImage) -> Result<Vec<u8>> {
 /// opaque or keyed by tRNS — or an all-grey palette with per-entry alpha), or the
 /// lossless-refusal error.
 fn gray_alpha8_samples(native: NativeImage) -> Result<Vec<u8>> {
+    // No depth guards: `native8` itself refuses 16-bit files (their samples arrive as `B16`), so
+    // every arm below is reachable only at 8 bits or less.
     match native.header.color {
-        ColorType::GrayscaleAlpha if native.header.bit_depth == 8 => native8(native.samples),
-        ColorType::Grayscale if native.header.bit_depth <= 8 => {
+        ColorType::GrayscaleAlpha => native8(native.samples),
+        ColorType::Grayscale => {
             let key = gray_key(native.trns_key);
             let scale = pack::gray8_scale(native.header.bit_depth);
             let grays = native8(native.samples)?;
@@ -827,9 +829,10 @@ fn rgb8_samples(native: NativeImage) -> Result<Vec<u8>> {
     if native.trns_key.is_some() {
         return Err(lossy());
     }
+    // No depth guards: `native8` itself refuses 16-bit files (their samples arrive as `B16`).
     match native.header.color {
-        ColorType::Truecolor if native.header.bit_depth == 8 => native8(native.samples),
-        ColorType::Grayscale if native.header.bit_depth <= 8 => {
+        ColorType::Truecolor => native8(native.samples),
+        ColorType::Grayscale => {
             let scale = pack::gray8_scale(native.header.bit_depth);
             Ok(native8(native.samples)?
                 .iter()
@@ -850,9 +853,10 @@ fn rgb8_samples(native: NativeImage) -> Result<Vec<u8>> {
 /// The [`Rgba8`] presentation of a native image (any 8-bit-presentable layout, widened, honouring
 /// a tRNS colour key), or the lossless-refusal error.
 fn rgba8_samples(native: NativeImage) -> Result<Vec<u8>> {
+    // No depth guards: `native8` itself refuses 16-bit files (their samples arrive as `B16`).
     match native.header.color {
-        ColorType::TruecolorAlpha if native.header.bit_depth == 8 => native8(native.samples),
-        ColorType::Truecolor if native.header.bit_depth == 8 => {
+        ColorType::TruecolorAlpha => native8(native.samples),
+        ColorType::Truecolor => {
             let key = native.trns_key;
             Ok(native8(native.samples)?
                 .chunks_exact(3)
@@ -867,11 +871,11 @@ fn rgba8_samples(native: NativeImage) -> Result<Vec<u8>> {
                 })
                 .collect())
         }
-        ColorType::GrayscaleAlpha if native.header.bit_depth == 8 => Ok(native8(native.samples)?
+        ColorType::GrayscaleAlpha => Ok(native8(native.samples)?
             .chunks_exact(2)
             .flat_map(|px| [px[0], px[0], px[0], px[1]])
             .collect()),
-        ColorType::Grayscale if native.header.bit_depth <= 8 => {
+        ColorType::Grayscale => {
             let key = gray_key(native.trns_key);
             let scale = pack::gray8_scale(native.header.bit_depth);
             Ok(native8(native.samples)?
@@ -886,7 +890,6 @@ fn rgba8_samples(native: NativeImage) -> Result<Vec<u8>> {
             let palette = native.palette.ok_or_else(lossy)?;
             Ok(expand_palette(&native8(native.samples)?, &palette, true))
         }
-        _ => Err(lossy()),
     }
 }
 
@@ -1281,6 +1284,74 @@ mod tests {
         let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&png).unwrap();
         let opaque: Vec<u8> = values.iter().flat_map(|&v| [v * 17, 255]).collect();
         assert_eq!(ga.as_samples(), opaque);
+    }
+
+    #[test]
+    fn sub_16_files_widen_by_257_into_every_16bit_layout() {
+        // The same 4-bit grey file, presented as each 16-bit layout: exact §13.12 scaling is
+        // ×17 to 8 bits then ×257 to 16 (= ×4369 total).
+        let png = build_png(3, 2, 4, 0, &[0, 0x12, 0x30, 0, 0x45, 0xF0]);
+        let values = [1u16, 2, 3, 4, 5, 15];
+        let gray: ImageBuf<Gray16> = PngDecoder::new().decode_image(&png).unwrap();
+        assert_eq!(
+            gray.as_samples(),
+            values.map(|v| v * 4369),
+            "Gray16 widening"
+        );
+        let ga: ImageBuf<GrayAlpha16> = PngDecoder::new().decode_image(&png).unwrap();
+        let opaque: Vec<u16> = values.iter().flat_map(|&v| [v * 4369, u16::MAX]).collect();
+        assert_eq!(ga.as_samples(), opaque, "GrayAlpha16 widening");
+        let rgb: ImageBuf<Rgb16> = PngDecoder::new().decode_image(&png).unwrap();
+        let replicated: Vec<u16> = values.iter().flat_map(|&v| [v * 4369; 3]).collect();
+        assert_eq!(rgb.as_samples(), replicated, "Rgb16 widening");
+        let rgba: ImageBuf<Rgba16> = PngDecoder::new().decode_image(&png).unwrap();
+        let widened: Vec<u16> = values
+            .iter()
+            .flat_map(|&v| [v * 4369, v * 4369, v * 4369, u16::MAX])
+            .collect();
+        assert_eq!(rgba.as_samples(), widened, "Rgba16 widening");
+    }
+
+    #[test]
+    fn grey_layouts_accept_only_all_grey_palettes() {
+        use gamut_core::Indexed8 as Idx;
+        let encode = |palette: &PngPalette| {
+            let indices = [0u8, 1, 0, 1, 1, 0];
+            let mut png = Vec::new();
+            PngEncoder::new()
+                .encode_indexed8(
+                    ImageRef::<Idx>::new(&indices, Dimensions::new(3, 2).unwrap()).unwrap(),
+                    palette,
+                    &mut png,
+                )
+                .unwrap();
+            png
+        };
+
+        // An entry with r == g but a different b is coloured: both grey layouts must refuse it.
+        let colored = encode(&PngPalette::new(&[[7, 7, 200], [3, 3, 3]]).unwrap());
+        assert!(DecodeImage::<Gray8>::decode_image(&PngDecoder::new(), &colored).is_err());
+        assert!(DecodeImage::<GrayAlpha8>::decode_image(&PngDecoder::new(), &colored).is_err());
+
+        // An all-grey opaque palette resolves to its grey values (plus opaque alpha).
+        let grey = encode(&PngPalette::new(&[[7, 7, 7], [200, 200, 200]]).unwrap());
+        let gray: ImageBuf<Gray8> = PngDecoder::new().decode_image(&grey).unwrap();
+        assert_eq!(gray.as_samples(), [7, 200, 7, 200, 200, 7]);
+        let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&grey).unwrap();
+        assert_eq!(
+            ga.as_samples(),
+            [7, 255, 200, 255, 7, 255, 200, 255, 200, 255, 7, 255]
+        );
+
+        // A grey palette with transparency: Gray8 refuses (alpha is lossy), GrayAlpha8 keeps it.
+        let keyed =
+            encode(&PngPalette::with_transparency(&[[7, 7, 7], [200, 200, 200]], &[128]).unwrap());
+        assert!(DecodeImage::<Gray8>::decode_image(&PngDecoder::new(), &keyed).is_err());
+        let ga: ImageBuf<GrayAlpha8> = PngDecoder::new().decode_image(&keyed).unwrap();
+        assert_eq!(
+            ga.as_samples(),
+            [7, 128, 200, 255, 7, 128, 200, 255, 200, 255, 7, 128]
+        );
     }
 
     #[test]
