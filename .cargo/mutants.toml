@@ -627,4 +627,20 @@ exclude_re = [
     # ±360° shift of either hue to the identical h̄′ (that invariance is the point of its
     # adjustment arms). Provably equivalent.
     'replace < with <= in ciede2000_hue_deg',
+    # gamut-cmm curve.rs — provably-equivalent mutants in tone-curve inversion/monotonicity.
+    #   is_monotonic: deleting the SampledInverse arm falls through to the dense-probe path; a
+    #   SampledInverse table always holds exactly INVERSE_SAMPLES == MONOTONICITY_PROBES
+    #   entries, and probing at i/(PROBES − 1) evaluates the linear interpolant exactly at
+    #   every entry, so both paths inspect the identical sample sequence. Equivalent. (The
+    #   analogous Icc(Sampled) arm deletion IS killable — tables of other lengths diverge — and
+    #   is killed by `sampled_monotonicity_is_judged_on_entries_not_probes`.)
+    'delete match arm Repr::SampledInverse\{table\} in ToneCurve::is_monotonic',
+    #   reverse_table's no-interval arm (the only bare `<`/`>` in the function): reached only
+    #   when the interval scan fails, and for the monotonic tables reverse_table receives, a
+    #   target exactly equal to table[0] is always bracketed by segment 0 (`table[0] <= y &&
+    #   y <= table[1]` holds at equality in both scan directions), so the boundary the mutation
+    #   changes (y == table[0]) never reaches these comparisons. Equivalent both times; the
+    #   strict sides ARE killed by `reverse_table_out_of_range_targets_clamp_to_domain_ends`.
+    'replace < with <= in reverse_table',
+    'replace > with >= in reverse_table',
 ]
