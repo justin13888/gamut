@@ -220,25 +220,30 @@ fn optimize_coeff_probs(counts: &tokens::CoeffCounts) -> tokens::CoeffProbs {
         for band in 0..tokens::COEFF_BANDS {
             for ctx in 0..3 {
                 for node in 0..tokens::ENTROPY_NODES {
-                    let [zeros, ones] = counts[plane][band][ctx][node];
+                    // Widened to `u64` before anything is multiplied: these are frame-wide
+                    // tallies, and a single hot context on a large frame holds millions of
+                    // events. At up to 2048 cost units each (`bit_cost`'s maximum), the product
+                    // leaves `u32` around two million events — well inside the canvas sizes
+                    // WebP allows, so `u32` here is an overflow, not a bound.
+                    let [zeros, ones] = counts[plane][band][ctx][node].map(u64::from);
                     let total = zeros + ones;
                     if total == 0 {
                         continue;
                     }
                     let old = tokens::DEFAULT_COEFF_PROBS[plane][band][ctx][node];
-                    let new = (((zeros as u64) * 255) / u64::from(total)).clamp(1, 255) as u8;
+                    let new = ((zeros * 255) / total).clamp(1, 255) as u8;
                     if new == old {
                         continue;
                     }
                     let update_prob = tokens::COEFF_UPDATE_PROBS[plane][band][ctx][node];
-                    let old_cost = zeros * bit_cost(false, old)
-                        + ones * bit_cost(true, old)
-                        + bit_cost(false, update_prob);
+                    let old_cost = zeros * u64::from(bit_cost(false, old))
+                        + ones * u64::from(bit_cost(true, old))
+                        + u64::from(bit_cost(false, update_prob));
                     // Adopting costs the "yes, update" flag plus the eight literal bits of the new
                     // value, on top of coding every token at the new probability.
-                    let new_cost = zeros * bit_cost(false, new)
-                        + ones * bit_cost(true, new)
-                        + bit_cost(true, update_prob)
+                    let new_cost = zeros * u64::from(bit_cost(false, new))
+                        + ones * u64::from(bit_cost(true, new))
+                        + u64::from(bit_cost(true, update_prob))
                         + 8 * 256;
                     if new_cost < old_cost {
                         probs[plane][band][ctx][node] = new;
@@ -2036,5 +2041,42 @@ mod tests {
             decode_frame(&bits[..end]).is_ok(),
             "a stream ending exactly at the first partition (no token bytes) must decode"
         );
+    }
+
+    /// The probability optimizer accumulates frame-wide token tallies, so its cost arithmetic must
+    /// survive counts a large frame really produces. A 4000x4000 encode puts well over two million
+    /// events into a single hot context, and at `bit_cost`'s maximum of 2048 units each the product
+    /// leaves `u32` — which used to abort the encode under overflow checks (and silently invert the
+    /// adopt/reject decision without them). Driving one context past that boundary pins the `u64`
+    /// accumulator without needing a sixteen-megapixel fixture.
+    #[test]
+    fn probability_costs_survive_large_frame_counts() {
+        // Above u32::MAX / 2048, so any context whose default probability is extreme overflows.
+        const HUGE: u32 = 4_000_000;
+        let mut counts: tokens::CoeffCounts =
+            [[[[[0; 2]; tokens::ENTROPY_NODES]; 3]; tokens::COEFF_BANDS]; tokens::PLANE_TYPES];
+        for plane in counts.iter_mut() {
+            for band in plane.iter_mut() {
+                for ctx in band.iter_mut() {
+                    for node in ctx.iter_mut() {
+                        *node = [HUGE, HUGE];
+                    }
+                }
+            }
+        }
+        let probs = optimize_coeff_probs(&counts);
+        // Every context saw an even split, so the measured probability is 127 wherever adopting it
+        // pays for the update record — and nothing may be left at a wildly mispredicting default.
+        assert!(
+            probs
+                .iter()
+                .flatten()
+                .flatten()
+                .flatten()
+                .any(|&p| p == 127),
+            "an even split must be adopted somewhere"
+        );
+        // The counts are symmetric, so no adopted value may sit outside the codable range.
+        assert!(probs.iter().flatten().flatten().flatten().all(|&p| p >= 1));
     }
 }
