@@ -21,3 +21,10 @@ Bumping either is a **deliberate** change, not a routine dependency update: it m
 (`tests/version.rs`, which assert the linked libjxl reports version `12000`), because the
 hand-written FFI declarations are transcribed against the pinned libjxl headers and drift silently
 otherwise.
+
+## Vendored opsin constants
+
+`opsin_params.h` is libjxl 0.12.0's `lib/jxl/cms/opsin_params.h` verbatim (BSD-3-Clause, header
+retained): the frozen XYB opsin absorbance matrix, bias, inverse matrix, and scaled-XYB byte
+encoding. Transcribed (with the derivation notes) into `references/color/README.md` for
+`gamut-color`'s `xyb` module and `gamut-jpeg`'s XYB colour mode.

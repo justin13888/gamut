@@ -562,3 +562,45 @@ fn eob_run_resets_at_restart_boundaries() {
         .unwrap();
     assert_eq!(ac.rst_count, 3);
 }
+
+#[test]
+fn custom_quant_tables_feed_baseline_and_progressive_identically() {
+    // `with_quant_tables` swaps the tables at the shared `luma_quant`/`chroma_quant` chokepoints,
+    // so the progressive path must pick up exactly the tables the baseline path quantizes with —
+    // decode(progressive) == decode(baseline) byte-for-byte under a custom pair distinct from any
+    // quality-scaled Annex K output.
+    use gamut_jpeg::QuantTables;
+    let tables = QuantTables::new([6u8; 64], [14u8; 64]).unwrap();
+    let (w, h) = (23u32, 19u32);
+    for mode in [Mode::Gray, Mode::C420] {
+        let src: Vec<u8> = (0..(w * h * mode.channels()) as usize)
+            .map(pattern)
+            .collect();
+        let dims = Dimensions::new(w, h).unwrap();
+        let enc = |progressive: bool| {
+            let e = JpegEncoder::new()
+                .with_quant_tables(tables)
+                .with_progressive(progressive);
+            match mode {
+                Mode::Gray => e
+                    .encode_to_vec(ImageRef::<Gray8>::new(&src, dims).unwrap())
+                    .unwrap(),
+                _ => e
+                    .with_subsampling(mode.subsampling())
+                    .encode_to_vec(ImageRef::<Rgb8>::new(&src, dims).unwrap())
+                    .unwrap(),
+            }
+        };
+        let base = enc(false);
+        let prog = enc(true);
+        assert_eq!(
+            gamut_jpeg::info(&prog).unwrap().process,
+            JpegProcess::Progressive
+        );
+        assert_eq!(
+            decode(mode, &base),
+            decode(mode, &prog),
+            "{mode:?}: custom-table prog != baseline decode"
+        );
+    }
+}

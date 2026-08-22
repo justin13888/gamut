@@ -230,6 +230,35 @@ impl<'a> HeifContainer<'a> {
     ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba8>> {
         self.image.decode_primary_rgba8(decoder)
     }
+
+    /// Decodes an item to a presentation-ready high-bit-depth `ImageBuf<Rgba16>` via `decoder`.
+    /// Convenience forwarding to
+    /// [`HeifImage::decode_item_rgba16`](crate::HeifImage::decode_item_rgba16).
+    ///
+    /// # Errors
+    ///
+    /// As [`HeifImage::decode_item_rgba16`](crate::HeifImage::decode_item_rgba16).
+    pub fn decode_item_rgba16(
+        &self,
+        id: u32,
+        decoder: &mut dyn crate::HevcDecoder,
+    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba16>> {
+        self.image.decode_item_rgba16(id, decoder)
+    }
+
+    /// Decodes the primary item to a presentation-ready high-bit-depth `ImageBuf<Rgba16>` via
+    /// `decoder`. Convenience forwarding to
+    /// [`HeifImage::decode_primary_rgba16`](crate::HeifImage::decode_primary_rgba16).
+    ///
+    /// # Errors
+    ///
+    /// As [`HeifImage::decode_primary_rgba16`](crate::HeifImage::decode_primary_rgba16).
+    pub fn decode_primary_rgba16(
+        &self,
+        decoder: &mut dyn crate::HevcDecoder,
+    ) -> Result<gamut_core::ImageBuf<gamut_core::Rgba16>> {
+        self.image.decode_primary_rgba16(decoder)
+    }
 }
 
 /// Walks the top-level boxes into a contiguous, gap-free segment list covering `0..data.len()`,

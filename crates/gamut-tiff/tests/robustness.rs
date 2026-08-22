@@ -1,8 +1,8 @@
 //! Robustness: the `#![forbid(unsafe_code)]` decoder must reject malformed input cleanly — never
 //! panic, never allocate unboundedly — on hostile data (P19).
 
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgb16};
+use gamut_tiff::{Compression, Predictor, TiffDecoder, TiffEncoder};
 
 fn valid_lzw_tiff() -> Vec<u8> {
     let dims = Dimensions {
@@ -16,6 +16,22 @@ fn valid_lzw_tiff() -> Vec<u8> {
         .encode_image(ImageRef::<Rgb8>::new(&rgb, dims).unwrap(), &mut out)
         .expect("encode");
     out
+}
+
+/// A 16-bit LZW+predictor file: the deepest of the new sample paths, since a mutated header can
+/// send the byte-order deserialisation and the `u16` predictor over a buffer whose length no longer
+/// matches the declared depth.
+fn valid_rgb16_tiff() -> Vec<u8> {
+    let dims = Dimensions {
+        width: 12,
+        height: 9,
+    };
+    let rgb: Vec<u16> = (0..12 * 9 * 3).map(|i| (i * 2711 % 65536) as u16).collect();
+    TiffEncoder::new()
+        .with_compression(Compression::Lzw)
+        .with_predictor(Predictor::HorizontalDifferencing)
+        .encode_to_vec(ImageRef::<Rgb16>::new(&rgb, dims).unwrap())
+        .expect("encode")
 }
 
 #[test]
@@ -40,16 +56,22 @@ fn specific_malformed_inputs_error_without_panic() {
 
 #[test]
 fn truncations_do_not_panic() {
-    let valid = valid_lzw_tiff();
     let dec = TiffDecoder::new();
-    for len in 0..=valid.len() {
-        let _ = dec.decode_page(&valid[..len], 0);
+    for valid in [valid_lzw_tiff(), valid_rgb16_tiff()] {
+        for len in 0..=valid.len() {
+            let _ = dec.decode_page(&valid[..len], 0);
+        }
     }
 }
 
 #[test]
 fn byte_flip_fuzz_does_not_panic() {
-    let valid = valid_lzw_tiff();
+    for valid in [valid_lzw_tiff(), valid_rgb16_tiff()] {
+        byte_flip_fuzz(&valid);
+    }
+}
+
+fn byte_flip_fuzz(valid: &[u8]) {
     let dec = TiffDecoder::new();
     // Deterministic LCG (no RNG dependency) drives the mutations.
     let mut state: u64 = 0x1234_5678_9abc_def0;
@@ -60,7 +82,7 @@ fn byte_flip_fuzz_does_not_panic() {
         (state >> 33) as u32
     };
     for _ in 0..5000 {
-        let mut data = valid.clone();
+        let mut data = valid.to_vec();
         let flips = 1 + next() % 4;
         for _ in 0..flips {
             let pos = next() as usize % data.len();

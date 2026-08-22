@@ -109,6 +109,22 @@ fn marker_order(p: &Parsed) -> Vec<u8> {
     p.segments.iter().map(|(c, _)| *c).collect()
 }
 
+/// Splits a DHT payload (§B.2.4.2) into its `(Tc|Th, BITS, HUFFVAL)` tables.
+fn dht_tables(payload: &[u8]) -> Vec<(u8, [u8; 16], Vec<u8>)> {
+    let mut tables = Vec::new();
+    let mut i = 0;
+    while i < payload.len() {
+        let tc_th = payload[i];
+        let mut bits = [0u8; 16];
+        bits.copy_from_slice(&payload[i + 1..i + 17]);
+        let count: usize = bits.iter().map(|&b| usize::from(b)).sum();
+        assert!(i + 17 + count <= payload.len(), "HUFFVAL runs past the DHT");
+        tables.push((tc_th, bits, payload[i + 17..i + 17 + count].to_vec()));
+        i += 17 + count;
+    }
+    tables
+}
+
 #[test]
 fn header_order_and_fields_grayscale() {
     let img = ImageRef::<Gray8>::new(&[128u8; 64], Dimensions::new(8, 8).unwrap()).unwrap();
@@ -186,6 +202,102 @@ fn golden_constant_gray_8x8_entropy_is_hand_derived() {
         .encode_to_vec(img)
         .unwrap();
     assert_eq!(parse(&jpeg).entropy, vec![0xF4, 0x0A]);
+}
+
+#[test]
+fn optimized_tables_replace_the_standard_dht_without_touching_the_layout() {
+    // Optimized tables are a pure entropy-coding change: same markers, same one DHT segment in the
+    // same place, same DQT/SOF0/SOS bytes — only the table contents and the entropy data differ.
+    let rgb: Vec<u8> = (0..48 * 32 * 3)
+        .map(|i| ((i * 71 + 13) % 256) as u8)
+        .collect();
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(48, 32).unwrap()).unwrap();
+
+    let fixed = JpegEncoder::new()
+        .with_quality(80)
+        .encode_to_vec(img)
+        .unwrap();
+    let optimized = JpegEncoder::new()
+        .with_quality(80)
+        .with_optimized_tables(true)
+        .encode_to_vec(img)
+        .unwrap();
+    let (pf, po) = (parse(&fixed), parse(&optimized));
+
+    assert_eq!(marker_order(&po), marker_order(&pf), "marker layout");
+    assert_eq!(
+        marker_order(&po).iter().filter(|&&c| c == m::DHT).count(),
+        1,
+        "still a single DHT segment"
+    );
+    assert_eq!(po.segment(m::DQT), pf.segment(m::DQT));
+    assert_eq!(po.segment(m::SOF0), pf.segment(m::SOF0));
+    assert_eq!(po.segment(m::SOS), pf.segment(m::SOS));
+
+    let tf = dht_tables(pf.segment(m::DHT).unwrap());
+    let to = dht_tables(po.segment(m::DHT).unwrap());
+    assert_eq!(
+        to.iter().map(|t| t.0).collect::<Vec<_>>(),
+        vec![0x00, 0x10, 0x01, 0x11],
+        "luma DC/AC then chroma DC/AC, the fixed-table order"
+    );
+    assert_eq!(
+        to.iter().map(|t| t.0).collect::<Vec<_>>(),
+        tf.iter().map(|t| t.0).collect::<Vec<_>>()
+    );
+    for (o, f) in to.iter().zip(&tf) {
+        assert!(
+            (o.1, &o.2) != (f.1, &f.2),
+            "destination {:#04x} still carries the Annex K table",
+            o.0
+        );
+    }
+
+    assert!(
+        optimized.len() < fixed.len(),
+        "optimized {} bytes vs fixed {} bytes",
+        optimized.len(),
+        fixed.len()
+    );
+}
+
+#[test]
+fn optimized_grayscale_emits_only_the_two_luma_tables() {
+    // A grayscale scan never references the chroma destinations, so the optimized DHT must carry
+    // exactly the luma DC and AC tables — matching what the fixed-table path writes for gray.
+    let gray: Vec<u8> = (0..32 * 32).map(|i| ((i * 37 + 5) % 256) as u8).collect();
+    let img = ImageRef::<Gray8>::new(&gray, Dimensions::new(32, 32).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_optimized_tables(true)
+        .encode_to_vec(img)
+        .unwrap();
+    let tables = dht_tables(parse(&jpeg).segment(m::DHT).unwrap());
+    assert_eq!(
+        tables.iter().map(|t| t.0).collect::<Vec<_>>(),
+        vec![0x00, 0x10]
+    );
+}
+
+#[test]
+fn optimized_tables_survive_restart_intervals_and_flat_content() {
+    // Restart markers reset the DC predictors mid-scan, so the gather pass must see exactly the
+    // symbols the emit pass writes. Flat content is the degenerate end: almost every block codes a
+    // zero DC difference and an immediate EOB, leaving very sparse histograms.
+    for &restart in &[0u16, 1, 3] {
+        let rgb = vec![97u8; 40 * 24 * 3];
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(40, 24).unwrap()).unwrap();
+        let jpeg = JpegEncoder::new()
+            .with_optimized_tables(true)
+            .with_restart_interval(restart)
+            .encode_to_vec(img)
+            .unwrap();
+        // `parse` structurally validates stuffing, segment lengths and the restart-marker framing.
+        let p = parse(&jpeg);
+        assert!(
+            !dht_tables(p.segment(m::DHT).unwrap()).is_empty(),
+            "restart {restart}: a table is always emitted"
+        );
+    }
 }
 
 /// The luma `(Hmax, Vmax)` sampling of a subsampling mode — the MCU is `8·Hmax × 8·Vmax` pixels.
@@ -356,4 +468,85 @@ fn density_is_written_to_app0() {
     assert_eq!(app0[7], 1, "units = dpi");
     assert_eq!(&app0[8..10], &300u16.to_be_bytes());
     assert_eq!(&app0[10..12], &150u16.to_be_bytes());
+}
+
+#[test]
+fn custom_quant_tables_reach_the_dqt_verbatim_and_quality_is_inert() {
+    use gamut_jpeg::QuantTables;
+    // Distinct constant tables: a luma/chroma swap or an accidental quality re-scale of either
+    // half would change the payload bytes. (Zig-zag re-emission of a non-constant table is pinned
+    // by the quant module's own DQT test; constants make the whole 64 assertable here.)
+    let tables = QuantTables::new([7u8; 64], [11u8; 64]).unwrap();
+    let rgb = vec![100u8; 16 * 16 * 3];
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quality(30) // must be ignored: custom tables bypass the quality mapping
+        .with_quant_tables(tables)
+        .encode_to_vec(img)
+        .unwrap();
+    let p = parse(&jpeg);
+    let dqt = p.segment(m::DQT).unwrap();
+    let mut expected = vec![0x00u8]; // Pq=0 | Tq=0
+    expected.extend_from_slice(&[7u8; 64]);
+    expected.push(0x01); // Pq=0 | Tq=1
+    expected.extend_from_slice(&[11u8; 64]);
+    assert_eq!(dqt, expected.as_slice());
+
+    // With custom tables set, quality must be inert for the WHOLE stream, not just the DQT.
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap();
+    let q90 = JpegEncoder::new()
+        .with_quality(90)
+        .with_quant_tables(tables)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(jpeg, q90);
+
+    // Grayscale uses only the luma table: a single 65-byte DQT payload at Tq=0.
+    let gray = ImageRef::<Gray8>::new(&[100u8; 64], Dimensions::new(8, 8).unwrap()).unwrap();
+    let jpeg = JpegEncoder::new()
+        .with_quant_tables(tables)
+        .encode_to_vec(gray)
+        .unwrap();
+    let p = parse(&jpeg);
+    let dqt = p.segment(m::DQT).unwrap();
+    let mut expected = vec![0x00u8];
+    expected.extend_from_slice(&[7u8; 64]);
+    assert_eq!(dqt, expected.as_slice());
+}
+
+#[test]
+fn annex_k_scaled_custom_tables_reproduce_the_quality_path_byte_for_byte() {
+    use gamut_jpeg::QuantTables;
+    // `QuantTables::annex_k().scaled(q)` is documented to be exactly the pair `with_quality(q)`
+    // uses, so the two configurations must produce byte-identical streams — bridging the custom
+    // path to the frozen quality contract. Gray and colour, quality on both sides of 50.
+    let rgb = vec![90u8; 24 * 16 * 3];
+    for &q in &[25u8, 85] {
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+        let via_quality = JpegEncoder::new()
+            .with_quality(q)
+            .encode_to_vec(img)
+            .unwrap();
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+        let via_tables = JpegEncoder::new()
+            .with_quant_tables(QuantTables::annex_k().scaled(q))
+            .encode_to_vec(img)
+            .unwrap();
+        assert_eq!(via_quality, via_tables, "q{q}: custom-table path diverged");
+    }
+}
+
+#[test]
+fn rd_none_is_byte_identical_to_the_default() {
+    use gamut_jpeg::RdOptimization;
+    // `RdOptimization::None` IS the default path — not merely equivalent: byte-for-byte.
+    let rgb = vec![77u8; 24 * 16 * 3];
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+    let default = JpegEncoder::new().encode_to_vec(img).unwrap();
+    let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(24, 16).unwrap()).unwrap();
+    let explicit = JpegEncoder::new()
+        .with_rd_optimization(RdOptimization::None)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(default, explicit);
 }

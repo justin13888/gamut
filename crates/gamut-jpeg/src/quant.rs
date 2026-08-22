@@ -13,6 +13,12 @@
 //! baseline `Pq = 0`). Quality 50 reproduces the Annex K tables exactly; quality 100 collapses every
 //! entry to 1 (`scale = 0` → `(0 + 50)/100 = 0`, clamped up to 1). Changing these bytes for a fixed
 //! `(quality, subsampling)` is a breaking change.
+//!
+//! The contract governs the default quality path only: caller-supplied [`QuantTables`]
+//! ([`JpegEncoder::with_quant_tables`](crate::JpegEncoder::with_quant_tables)) bypass the mapping
+//! without changing it.
+
+use gamut_core::{Error, Result};
 
 use crate::marker::{self, code};
 use crate::zigzag::ZIGZAG;
@@ -45,6 +51,71 @@ pub const CHROMINANCE: [u8; 64] = [
     99, 99, 99, 99, 99, 99, 99, 99, //
     99, 99, 99, 99, 99, 99, 99, 99, //
 ];
+
+/// A validated pair of baseline quantization tables in **natural** (row-major) order: one for the
+/// luminance destination (`Tq = 0`; also the only table a grayscale frame uses) and one for the
+/// chrominance destination (`Tq = 1`).
+///
+/// Every entry is in the baseline `Pq = 0` range `1..=255` (§A.3.4) — `u8` caps the top and
+/// [`Self::new`] rejects zero — so an encoder holding a `QuantTables` never divides by zero and
+/// never emits a DQT segment its own decoder (or any conformant decoder) would refuse.
+///
+/// Handed to [`JpegEncoder::with_quant_tables`](crate::JpegEncoder::with_quant_tables), the tables
+/// are used verbatim, replacing the frozen quality→scale mapping; [`Self::annex_k`] and
+/// [`Self::scaled`] recover that mapping over arbitrary base tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuantTables {
+    luma: [u8; 64],
+    chroma: [u8; 64],
+}
+
+impl QuantTables {
+    /// Builds a table pair from natural-order entries, rejecting any zero entry as
+    /// `InvalidInput` (§A.3.4 requires baseline `Q` values in `1..=255`).
+    pub fn new(luma: [u8; 64], chroma: [u8; 64]) -> Result<Self> {
+        if luma.contains(&0) || chroma.contains(&0) {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "JPEG: quantization table entries must be in 1..=255 (zero is illegal)",
+            ));
+        }
+        Ok(Self { luma, chroma })
+    }
+
+    /// The T.81 Annex K.1/K.2 example tables verbatim — the pair the default quality path scales.
+    #[must_use]
+    pub fn annex_k() -> Self {
+        Self {
+            luma: LUMINANCE,
+            chroma: CHROMINANCE,
+        }
+    }
+
+    /// These tables re-scaled by the frozen IJG quality mapping (`quality` clamped to `1..=100`,
+    /// matching [`JpegEncoder::with_quality`](crate::JpegEncoder::with_quality)). Infallible: the
+    /// mapping clamps every output entry into `1..=255`. `QuantTables::annex_k().scaled(q)`
+    /// reproduces exactly the tables `with_quality(q)` uses.
+    #[must_use]
+    pub fn scaled(&self, quality: u8) -> Self {
+        let q = quality.clamp(1, 100);
+        Self {
+            luma: scale(&self.luma, q),
+            chroma: scale(&self.chroma, q),
+        }
+    }
+
+    /// The luminance (`Tq = 0`) table, natural order.
+    #[must_use]
+    pub fn luma(&self) -> &[u8; 64] {
+        &self.luma
+    }
+
+    /// The chrominance (`Tq = 1`) table, natural order.
+    #[must_use]
+    pub fn chroma(&self) -> &[u8; 64] {
+        &self.chroma
+    }
+}
 
 /// The IJG quality→scale percentage for `quality` in `1..=100`: `5000/q` below 50, `200 − 2·q`
 /// at 50 and above. A larger scale means coarser quantization (smaller files, lower fidelity).
@@ -122,6 +193,50 @@ mod tests {
         // chrominance[0]=17 → (17·200 + 50)/100 = (3400+50)/100 = 34.
         assert_eq!(scale(&LUMINANCE, 25)[0], 32);
         assert_eq!(scale(&CHROMINANCE, 25)[0], 34);
+    }
+
+    #[test]
+    fn quant_tables_reject_a_zero_entry_in_either_table() {
+        // Zero must be caught in whichever table carries it — a validator that checks only one
+        // array would let the other's zero through to a division and an illegal DQT.
+        let mut bad = LUMINANCE;
+        bad[63] = 0;
+        assert!(QuantTables::new(bad, CHROMINANCE).is_err());
+        assert!(QuantTables::new(LUMINANCE, bad).is_err());
+    }
+
+    #[test]
+    fn quant_tables_accept_the_full_legal_range() {
+        // 1 and 255 are the §A.3.4 boundaries; both all-boundary pairs must construct.
+        let one = QuantTables::new([1; 64], [255; 64]).expect("boundary tables are legal");
+        assert_eq!(one.luma(), &[1; 64]);
+        assert_eq!(one.chroma(), &[255; 64]);
+    }
+
+    #[test]
+    fn annex_k_is_the_annex_k_tables_and_scaling_matches_the_frozen_mapping() {
+        // `annex_k()` must be the K.1/K.2 constants verbatim, and `scaled()` must reuse the frozen
+        // mapping on both tables: quality 50 is the fixed point, 75 reproduces the hand-computed
+        // anchors pinned above, and the luma/chroma halves must not be swapped (asserting whole
+        // distinct arrays catches a swap).
+        let k = QuantTables::annex_k();
+        assert_eq!(k.luma(), &LUMINANCE);
+        assert_eq!(k.chroma(), &CHROMINANCE);
+        assert_eq!(k.scaled(50), k);
+        let q75 = k.scaled(75);
+        assert_eq!(q75.luma(), &scale(&LUMINANCE, 75));
+        assert_eq!(q75.chroma(), &scale(&CHROMINANCE, 75));
+        assert_eq!(q75.luma()[0], 8);
+        assert_eq!(q75.chroma()[0], 9);
+    }
+
+    #[test]
+    fn scaled_clamps_quality_like_with_quality() {
+        // 0 clamps up to 1 and 200 clamps down to 100, mirroring `with_quality`'s documented
+        // clamping so the two quality expressions can never disagree.
+        let k = QuantTables::annex_k();
+        assert_eq!(k.scaled(0), k.scaled(1));
+        assert_eq!(k.scaled(200), k.scaled(100));
     }
 
     #[test]

@@ -35,6 +35,7 @@ const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 6] = [
 #[derive(Debug, Clone)]
 pub struct PngEncoder {
     level: Level,
+    effort: u8,
     filter: FilterStrategy,
     ancillary: Ancillary,
     auto_reduce: bool,
@@ -54,6 +55,7 @@ impl PngEncoder {
     pub fn new() -> Self {
         Self {
             level: Level::Default,
+            effort: DeflateEncoder::DEFAULT_EFFORT,
             filter: FilterStrategy::MinSumAbs,
             ancillary: Ancillary::default(),
             auto_reduce: false,
@@ -72,10 +74,11 @@ impl PngEncoder {
     ///
     /// # Interaction with [`with_compression`](Self::with_compression)
     ///
-    /// A pushed deflater **bypasses the configured [`Level`]** for every stream it accepts:
-    /// `Level` is a `gamut-deflate` concept that a foreign backend knows nothing about, and the
-    /// seam datum is only the byte stream. The `Level` still governs the built-in tail, i.e. any
-    /// stream every pushed backend declines.
+    /// A pushed deflater **bypasses the configured [`Level`]** (and the
+    /// [`with_effort`](Self::with_effort) budget) for every stream it accepts: `Level` is a
+    /// `gamut-deflate` concept that a foreign backend knows nothing about, and the seam datum is
+    /// only the byte stream. The `Level` still governs the built-in tail, i.e. any stream every
+    /// pushed backend declines.
     ///
     /// # Cloning shares backends
     ///
@@ -99,6 +102,19 @@ impl PngEncoder {
         self
     }
 
+    /// Sets the [`Level::Best`] effort budget: the maximum number of optimal-parse refinement
+    /// passes (see [`DeflateEncoder::with_effort`]) applied to every zlib stream this encoder emits
+    /// — the IDAT image data and compressed ancillary payloads (`iCCP`, `zTXt`).
+    ///
+    /// Defaults to [`DeflateEncoder::DEFAULT_EFFORT`]; `0` keeps the lazy seed parse only, and
+    /// `zopfli`'s default budget is 15. Ignored at every other [`Level`] and by any pushed
+    /// [`IdatDeflater`] backend that accepts a stream.
+    #[must_use]
+    pub fn with_effort(mut self, effort: u8) -> Self {
+        self.effort = effort;
+        self
+    }
+
     /// Sets the scanline [`FilterStrategy`].
     #[must_use]
     pub fn with_filter(mut self, filter: FilterStrategy) -> Self {
@@ -106,11 +122,13 @@ impl PngEncoder {
         self
     }
 
-    /// Enables automatic lossless reduction of truecolour input to a smaller colour type
-    /// (greyscale, palette, or alpha-dropped) when it does not change any pixel.
+    /// Enables automatic lossless reduction of any [`EncodeImage`] input to a smaller encoding
+    /// when it does not change any pixel: greyscale (at the smallest exactly-representable bit
+    /// depth), palette, alpha-channel drop, and 16→8 demotion when every sample's high and low
+    /// bytes agree.
     ///
-    /// Off by default so the output colour type matches the input. Enable it — ideally with
-    /// [`Level::Best`] and [`FilterStrategy::BruteForce`] — for the smallest possible files.
+    /// Off by default so the output colour type and depth match the input. Enable it — ideally
+    /// with [`Level::Best`] and [`FilterStrategy::BruteForce`] — for the smallest possible files.
     #[must_use]
     pub fn with_auto_reduce(mut self, enabled: bool) -> Self {
         self.auto_reduce = enabled;
@@ -359,9 +377,9 @@ impl PngEncoder {
         let start = out.len();
         out.extend_from_slice(&SIGNATURE);
         ihdr::write(out, width, height, bit_depth, color);
-        self.ancillary.write_pre_plte(out); // colour-space chunks precede PLTE
+        self.ancillary.write_pre_plte(out, self.effort); // colour-space chunks precede PLTE
         pre_idat(out); // PLTE + tRNS (indexed only)
-        self.ancillary.write_post_plte(out); // background / physical / timing / text
+        self.ancillary.write_post_plte(out, self.effort); // background / physical / timing / text
 
         let idat = self.compress_scanlines(
             sample_bytes,
@@ -393,7 +411,9 @@ impl PngEncoder {
         bpp: usize,
         info: IdatInfo,
     ) -> Result<Vec<u8>> {
-        let deflate = DeflateEncoder::new().with_level(self.level);
+        let deflate = DeflateEncoder::new()
+            .with_level(self.level)
+            .with_effort(self.effort);
         // Every candidate stream goes through the same seam: a pushed backend that accepts sees
         // each brute-force candidate, and the smallest result still wins.
         let compress = |strategy| {
@@ -420,7 +440,7 @@ impl PngEncoder {
         }
     }
 
-    /// Writes a reduced encoding chosen by [`reduce::analyze`].
+    /// Writes a reduced encoding chosen by [`reduce::analyze8`] / [`reduce::analyze16`].
     fn write_reduced(
         &self,
         dims: Dimensions,
@@ -429,14 +449,38 @@ impl PngEncoder {
     ) -> Result<usize> {
         let wh = (dims.width, dims.height);
         match reduced {
-            Reduced::Gray8(samples) => {
-                self.write_png(wh, &samples, ColorType::Grayscale, 8, |_| {}, out)
+            Reduced::Gray { depth, samples } => {
+                let packed;
+                let sample_bytes = if depth < 8 {
+                    packed = pack::pack_scanlines(
+                        &samples,
+                        dims.width as usize,
+                        dims.height as usize,
+                        depth,
+                    );
+                    packed.as_slice()
+                } else {
+                    &samples
+                };
+                self.write_png(wh, sample_bytes, ColorType::Grayscale, depth, |_| {}, out)
             }
             Reduced::GrayAlpha8(samples) => {
                 self.write_png(wh, &samples, ColorType::GrayscaleAlpha, 8, |_| {}, out)
             }
             Reduced::Rgb8(samples) => {
                 self.write_png(wh, &samples, ColorType::Truecolor, 8, |_| {}, out)
+            }
+            Reduced::Rgba8(samples) => {
+                self.write_png(wh, &samples, ColorType::TruecolorAlpha, 8, |_| {}, out)
+            }
+            Reduced::Gray16Be(bytes) => {
+                self.write_png(wh, &bytes, ColorType::Grayscale, 16, |_| {}, out)
+            }
+            Reduced::GrayAlpha16Be(bytes) => {
+                self.write_png(wh, &bytes, ColorType::GrayscaleAlpha, 16, |_| {}, out)
+            }
+            Reduced::Rgb16Be(bytes) => {
+                self.write_png(wh, &bytes, ColorType::Truecolor, 16, |_| {}, out)
             }
             Reduced::Indexed {
                 depth,
@@ -489,6 +533,11 @@ fn write_idat(out: &mut Vec<u8>, zlib_stream: &[u8]) {
 // CMYK has no PNG colour type.
 impl EncodeImage<Gray8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.auto_reduce
+            && let Some(reduced) = reduce::analyze8(image.as_samples(), 1)
+        {
+            return self.write_reduced(image.dimensions(), reduced, out);
+        }
         self.encode_8bit(image, ColorType::Grayscale, out)
     }
 }
@@ -515,7 +564,7 @@ impl EncodeImage<Bilevel> for PngEncoder {
 impl EncodeImage<Rgb8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         if self.auto_reduce
-            && let Some(reduced) = reduce::analyze(image.as_samples(), 3)
+            && let Some(reduced) = reduce::analyze8(image.as_samples(), 3)
         {
             return self.write_reduced(image.dimensions(), reduced, out);
         }
@@ -525,7 +574,7 @@ impl EncodeImage<Rgb8> for PngEncoder {
 impl EncodeImage<Rgba8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
         if self.auto_reduce
-            && let Some(reduced) = reduce::analyze(image.as_samples(), 4)
+            && let Some(reduced) = reduce::analyze8(image.as_samples(), 4)
         {
             return self.write_reduced(image.dimensions(), reduced, out);
         }
@@ -534,26 +583,51 @@ impl EncodeImage<Rgba8> for PngEncoder {
 }
 impl EncodeImage<GrayAlpha8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, GrayAlpha8>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.auto_reduce
+            && let Some(reduced) = reduce::analyze8(image.as_samples(), 2)
+        {
+            return self.write_reduced(image.dimensions(), reduced, out);
+        }
         self.encode_8bit(image, ColorType::GrayscaleAlpha, out)
     }
 }
 impl EncodeImage<Gray16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray16>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.auto_reduce
+            && let Some(reduced) = reduce::analyze16(image.as_samples(), 1)
+        {
+            return self.write_reduced(image.dimensions(), reduced, out);
+        }
         self.encode_16bit(image, ColorType::Grayscale, out)
     }
 }
 impl EncodeImage<Rgb16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.auto_reduce
+            && let Some(reduced) = reduce::analyze16(image.as_samples(), 3)
+        {
+            return self.write_reduced(image.dimensions(), reduced, out);
+        }
         self.encode_16bit(image, ColorType::Truecolor, out)
     }
 }
 impl EncodeImage<Rgba16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.auto_reduce
+            && let Some(reduced) = reduce::analyze16(image.as_samples(), 4)
+        {
+            return self.write_reduced(image.dimensions(), reduced, out);
+        }
         self.encode_16bit(image, ColorType::TruecolorAlpha, out)
     }
 }
 impl EncodeImage<GrayAlpha16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, GrayAlpha16>, out: &mut Vec<u8>) -> Result<usize> {
+        if self.auto_reduce
+            && let Some(reduced) = reduce::analyze16(image.as_samples(), 2)
+        {
+            return self.write_reduced(image.dimensions(), reduced, out);
+        }
         self.encode_16bit(image, ColorType::GrayscaleAlpha, out)
     }
 }

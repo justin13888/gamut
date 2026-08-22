@@ -2,6 +2,7 @@
 //! pushed with [`JxlDecoder::push_backend`], and, last, the built-in pure-Rust jxl-rs wrapper
 //! ([`crate::jxlrs`]).
 
+use gamut_core::convert::ConvertPolicy;
 use gamut_core::{
     DecodeImage, Error, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf, Pixel, PixelFormat,
     Result, Rgb8, Rgb16, Rgba8, Rgba16,
@@ -11,7 +12,7 @@ use crate::backend::{
     JxlCodestreamDecoder, JxlDecoded, JxlFraming, JxlOwnedSamples, JxlStreamInfo, Registry,
 };
 #[cfg(feature = "decode")]
-pub use crate::jxlrs::JxlInfo;
+pub use crate::jxlrs::{JxlInfo, JxlPartialReport, JxlRender};
 
 /// The refusal returned when no backend can decode: nothing was pushed, and the built-in jxl-rs
 /// tail is not compiled into this build (no `decode` feature).
@@ -39,13 +40,16 @@ fn wrong_backend_layout() -> Error {
 /// Decodes both JPEG XL framings — a bare codestream and the ISO BMFF `.jxl` container — into any of
 /// the eight supported pixel layouts (8/16-bit grayscale, gray+alpha, RGB, RGBA) through the
 /// [`DecodeImage`](gamut_core::DecodeImage) trait. Where the requested layout and the stream differ,
-/// the built-in decoder converts internally: grayscale expands to RGB, a missing alpha channel is
-/// padded opaque, and a present-but-unwanted alpha is dropped. It deliberately refuses to *guess*: a
-/// colour image cannot be decoded as grayscale, animated input is rejected, and premultiplied
-/// (associated) alpha is rejected — each an [`Error::Unsupported`] that a later version may relax.
+/// [`gamut_core::convert`] reconciles them: grayscale expands to RGB and a missing alpha channel is
+/// padded opaque, since neither loses anything.
+///
+/// Anything **lossy** — dropping a present alpha channel, reducing colour to grayscale — is refused
+/// by default and needs [`JxlDecoder::with_convert_policy`]. Animated input and premultiplied
+/// (associated) alpha are rejected outright, each an [`Error::Unsupported`] a later version may
+/// relax.
 ///
 /// Construct it with [`JxlDecoder::new`] or [`Default`], then optionally set
-/// [`JxlDecoder::with_codestream_bit_depth`].
+/// [`JxlDecoder::with_codestream_bit_depth`] and [`JxlDecoder::with_convert_policy`].
 ///
 /// # Backends
 ///
@@ -62,6 +66,8 @@ fn wrong_backend_layout() -> Error {
 pub struct JxlDecoder {
     /// Whether integer output carries the codestream's declared bit depth.
     codestream_bit_depth: bool,
+    /// Which lossy layout conversions a typed decode may perform.
+    policy: ConvertPolicy,
     /// Pushed codestream backends, tried in push order ahead of the built-in jxl-rs tail.
     backends: Registry<dyn JxlCodestreamDecoder>,
 }
@@ -70,7 +76,7 @@ impl PartialEq for JxlDecoder {
     /// Compares the decoder **configuration**; the backend registries are ignored, since a
     /// [`JxlCodestreamDecoder`] is an opaque trait object with no notion of equality.
     fn eq(&self, other: &Self) -> bool {
-        self.codestream_bit_depth == other.codestream_bit_depth
+        self.codestream_bit_depth == other.codestream_bit_depth && self.policy == other.policy
     }
 }
 
@@ -102,6 +108,24 @@ impl JxlDecoder {
     #[must_use]
     pub fn codestream_bit_depth(&self) -> bool {
         self.codestream_bit_depth
+    }
+
+    /// Selects which lossy conversions a typed decode may perform when the stream's layout differs
+    /// from the requested one.
+    ///
+    /// Defaults to [`ConvertPolicy::lossless`]: a stream carrying alpha cannot be decoded as an
+    /// alpha-less layout, and a colour stream cannot be decoded as grayscale. Grayscale still
+    /// widens into RGB and opaque alpha is still added, since neither loses anything. Returns the
+    /// updated decoder for chaining.
+    #[must_use]
+    pub fn with_convert_policy(mut self, policy: ConvertPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// The conversion policy typed decodes apply (see [`JxlDecoder::with_convert_policy`]).
+    pub fn convert_policy(&self) -> ConvertPolicy {
+        self.policy
     }
 
     /// Pushes a [`JxlCodestreamDecoder`] onto the end of this decoder's backend list, ahead of the
@@ -203,10 +227,63 @@ impl JxlDecoder {
     }
 }
 
+/// Decodes a possibly-incomplete JPEG XL codestream into layout `P`, returning the best-effort
+/// image alongside a [`JxlPartialReport`] saying how far the decode got.
+///
+/// The mirror of [`DecodeImage`] for input that may be cut short — a partly-downloaded file, a
+/// stream still in flight, a salvage attempt on a damaged one. [`DecodeImage::decode_image`] is
+/// unchanged and still rejects every truncation; this is the opt-in relaxation, and it relaxes
+/// **truncation only**: animation, premultiplied alpha, colour-as-grayscale and the pixel limit
+/// stay the same typed refusals.
+///
+/// # What you actually get
+///
+/// Best effort means exactly that, and JPEG XL's coding structure sets the ceiling:
+///
+/// - Truncation **before the image headers** is still [`Error::InvalidInput`] — without dimensions
+///   there is no buffer to hand back.
+/// - Truncation **before the frame header** yields a zero-filled buffer at the declared dimensions
+///   ([`JxlRender::HeaderOnly`]).
+/// - Truncation **mid-frame** yields whatever groups arrived ([`JxlRender::BestEffort`]): for a
+///   lossy (VarDCT) stream, groups with no detail pass are drawn from the upsampled DC image, so
+///   the result is a full-size coarse preview sharpening towards the front of the stream; for a
+///   lossless (Modular) stream, delivered groups are exact and the remainder stays zero.
+/// - An image small enough to be coded as a **single group** — roughly 256×256 or below — has no
+///   partially-decodable structure at all, and comes back blank.
+/// - Not every truncation is even recoverable: some cut points are indistinguishable from
+///   corruption to the decoder and still return [`Error::InvalidInput`].
+///
+/// So always consult [`JxlPartialReport::is_complete`]; never assume pixels are present.
+///
+/// # Backends
+///
+/// Unlike [`DecodeImage`], this is **always answered by the built-in jxl-rs tail** — a backend
+/// pushed with [`JxlDecoder::push_backend`] is not consulted, exactly as for [`JxlDecoder::info`]
+/// and [`JxlDecoder::embedded_icc_profile`]. The shared `gamut-codec-abi` seam has no notion of a
+/// partial result, so a backend could neither report one nor be asked for one; routing partial
+/// decode through the seam would mean extending that crate, and is additive if it ever happens.
+///
+/// There is deliberately no `_into` counterpart: reusing a destination allocation pays off across a
+/// decode loop, which a one-shot salvage is not. Adding one later is additive.
+#[cfg(feature = "decode")]
+pub trait DecodePartialImage<P: Pixel> {
+    /// Decodes `data` best-effort into a fresh [`ImageBuf`], tolerating a truncated stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `data` is malformed, or truncated before the image
+    /// headers, or truncated at a point jxl-rs cannot tell from corruption; [`Error::Unsupported`]
+    /// if the stream uses a feature that is not implemented or cannot be presented as `P`.
+    fn decode_partial_image(&self, data: &[u8]) -> Result<(ImageBuf<P>, JxlPartialReport)>;
+}
+
 /// Implements [`DecodeImage`] for each supported layout: the pushed backends first, then the
 /// built-in jxl-rs tail (or a typed refusal where it is not compiled in). The macro names only the
 /// owned-sample variant a layout's storage width implies; every other layout fact comes from
 /// [`Pixel::FORMAT`] via the crate's single layout table.
+///
+/// It emits [`DecodePartialImage`] for the same layout in the same breath, so the eight coded
+/// layouts stay enumerated exactly once.
 macro_rules! impl_decode_image {
     ($($pixel:ty => $variant:ident;)*) => {$(
         impl DecodeImage<$pixel> for JxlDecoder {
@@ -226,7 +303,7 @@ macro_rules! impl_decode_image {
                 }
                 #[cfg(feature = "decode")]
                 {
-                    crate::jxlrs::decode_to_buf::<$pixel>(data, self.codestream_bit_depth)
+                    crate::jxlrs::decode_to_buf::<$pixel>(data, self.codestream_bit_depth, self.policy)
                 }
                 #[cfg(not(feature = "decode"))]
                 {
@@ -249,13 +326,33 @@ macro_rules! impl_decode_image {
                 }
                 #[cfg(feature = "decode")]
                 {
-                    crate::jxlrs::decode_into_buf::<$pixel>(data, self.codestream_bit_depth, dst)
+                    crate::jxlrs::decode_into_buf::<$pixel>(
+                        data,
+                        self.codestream_bit_depth,
+                        self.policy,
+                        dst,
+                    )
                 }
                 #[cfg(not(feature = "decode"))]
                 {
                     let _ = dst;
                     Err(no_decode_backend())
                 }
+            }
+        }
+
+        #[cfg(feature = "decode")]
+        impl DecodePartialImage<$pixel> for JxlDecoder {
+            fn decode_partial_image(
+                &self,
+                data: &[u8],
+            ) -> Result<(ImageBuf<$pixel>, JxlPartialReport)> {
+                // The registry is deliberately not consulted; see the trait's docs.
+                crate::jxlrs::decode_partial_to_buf::<$pixel>(
+                    data,
+                    self.codestream_bit_depth,
+                    self.policy,
+                )
             }
         }
     )*};
@@ -612,6 +709,30 @@ mod tests {
         } else {
             assert_eq!(error.kind(), gamut_core::ErrorKind::Unsupported);
         }
+    }
+
+    #[cfg(feature = "decode")]
+    #[test]
+    fn the_partial_path_never_consults_a_pushed_backend() {
+        // A backend that would win the ordinary decode is not even asked about the partial one:
+        // the codec-abi seam cannot express a partial result, so the built-in tail answers alone.
+        let backend = FixedBackend::returning(4);
+        let (supports, decodes) = backend.counters();
+        let mut dec = JxlDecoder::new();
+        dec.push_backend(backend);
+
+        // The ordinary path does go through it, so the counters below mean "vetoed", not "unused".
+        let image: ImageBuf<Gray8> = dec.decode_image(&STREAM).expect("decode");
+        assert_eq!(image.as_samples(), &[4, 4, 4, 4]);
+        assert_eq!(supports.load(Ordering::SeqCst), 1);
+        assert_eq!(decodes.load(Ordering::SeqCst), 1);
+
+        // A bare signature is not a decodable image to the tail either, so this errors — but as
+        // the tail's error, with the backend never consulted a second time.
+        let result: Result<(ImageBuf<Gray8>, JxlPartialReport)> = dec.decode_partial_image(&STREAM);
+        assert!(result.is_err(), "a bare signature carries no image headers");
+        assert_eq!(supports.load(Ordering::SeqCst), 1);
+        assert_eq!(decodes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
