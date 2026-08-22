@@ -298,8 +298,9 @@ fn randomized_round_trip() {
 }
 
 /// End-to-end coverage of the two size-dependent edges: the 65 535-byte stored-block `LEN` split
-/// (level-independent, so exercised through the fast levels) and the 1 MiB optimal-parse limit
-/// (just above it, `Level::Best` falls back to lazy matching — the branch tested here).
+/// (level-independent, so exercised through the fast levels) and the optimal-parse limit, which
+/// past #343 spans the input rather than disabling the parse — just above it, `Level::Best` runs
+/// the optimal parse over two spans.
 #[test]
 fn large_and_boundary_round_trip() {
     let mut rng = Rng(0xDEAD_BEEF_CAFE_0001);
@@ -320,10 +321,9 @@ fn large_and_boundary_round_trip() {
         }
     }
 
-    // Just past the optimal-parse limit: `Level::Best` must still round-trip via the lazy fallback.
-    // Effort 0 changes nothing on the fallback path (the budget is ignored past the limit) but
-    // keeps this test fast under mutation, where a broken limit check would otherwise route the
-    // 1 MiB input into the (quadratic-ish) optimal parse and time the suite out.
+    // Just past the optimal-parse limit, where the input is now split into two spans (the second
+    // one byte long). Effort 0 keeps this fast under mutation while still exercising the span
+    // loop and its seed parse.
     let big = generate(&mut rng, (1 << 20) + 1);
     for &level in &[Level::Default, Level::Best] {
         let mut zl = Vec::new();
@@ -338,4 +338,94 @@ fn large_and_boundary_round_trip() {
             big.len()
         );
     }
+}
+
+/// #343: above the old 1 MiB cut-off, `Level::Best` used to fall back to lazy matching and could
+/// come out *larger* than the cheaper levels — the crate's headline "Best is smallest" claim
+/// failing on a chunking technicality rather than on the data. The optimal parse now spans the
+/// input instead, so the ordering must hold at any size.
+///
+/// The fixture is deliberately compressible-but-structured: on incompressible noise every level
+/// converges on stored blocks and the comparison proves nothing.
+#[test]
+fn best_beats_default_above_the_optimal_parse_limit() {
+    let mut rng = Rng(0x0BAD_C0DE_1234_5678);
+    let mut data = Vec::with_capacity((1 << 20) + (1 << 18));
+    while data.len() < (1 << 20) + (1 << 18) {
+        // Repeating structure with drifting noise, the shape a raw image strip has.
+        let chunk = generate(&mut rng, 512);
+        data.extend_from_slice(&chunk);
+        data.extend_from_slice(&chunk);
+    }
+    assert!(
+        data.len() > 1 << 20,
+        "fixture must exceed the default limit"
+    );
+
+    let size = |enc: DeflateEncoder| {
+        let mut out = Vec::new();
+        enc.zlib_compress(&data, &mut out);
+        assert_eq!(zlib_oracle::inflate_zlib(&out).unwrap(), data);
+        out.len()
+    };
+
+    let default = size(DeflateEncoder::new().with_level(Level::Default));
+    let best = size(DeflateEncoder::new().with_level(Level::Best).with_effort(2));
+    assert!(
+        best < default,
+        "Best ({best}) must beat Default ({default}) on a {}-byte input",
+        data.len()
+    );
+}
+
+/// The limit must be a live knob, not a stored-and-ignored field: a one-span parse of an input
+/// that spans several times over at the small setting has more cost-model context and cannot come
+/// out larger, and the two settings must not produce byte-identical output.
+#[test]
+fn optimal_parse_limit_is_live() {
+    // Several windows' worth, so the narrow setting is genuinely many spans.
+    const NARROW: usize = 32_768;
+    let mut rng = Rng(0x5EED_0343_0343_5EED);
+    let mut data = Vec::new();
+    while data.len() < NARROW * 6 {
+        let chunk = generate(&mut rng, 300);
+        data.extend_from_slice(&chunk);
+        data.extend_from_slice(&chunk);
+    }
+
+    let size = |limit: usize| {
+        let mut out = Vec::new();
+        DeflateEncoder::new()
+            .with_level(Level::Best)
+            .with_effort(2)
+            .with_optimal_parse_limit(limit)
+            .zlib_compress(&data, &mut out);
+        assert_eq!(zlib_oracle::inflate_zlib(&out).unwrap(), data);
+        out.len()
+    };
+
+    let narrow = size(NARROW);
+    let whole = size(data.len());
+    assert_ne!(
+        narrow, whole,
+        "the limit must change the parse; both settings produced {narrow} bytes"
+    );
+    assert!(
+        whole <= narrow,
+        "one span ({whole}) should not be worse than {} spans ({narrow})",
+        data.len().div_ceil(NARROW)
+    );
+}
+
+/// A zero limit must be raised to the window floor, not looped on forever.
+#[test]
+fn zero_optimal_parse_limit_terminates() {
+    let data = b"abracadabra alakazam ".repeat(40);
+    let mut out = Vec::new();
+    DeflateEncoder::new()
+        .with_level(Level::Best)
+        .with_effort(1)
+        .with_optimal_parse_limit(0)
+        .zlib_compress(&data, &mut out);
+    assert_eq!(zlib_oracle::inflate_zlib(&out).unwrap(), data);
 }

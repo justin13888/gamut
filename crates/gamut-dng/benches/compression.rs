@@ -137,9 +137,10 @@ fn compressed_len(compress: &dyn Fn(&[u8]) -> Vec<u8>, data: &[u8], chunk: Optio
 /// Prints a size comparison (zlib streams; lower is better) against the `miniz_oxide` level 6 that
 /// `gamut-deflate` replaced.
 ///
-/// Chunking is reported both ways because it decides whether `Level::Best`'s optimal parse engages
-/// at all: that parse is applied only to inputs of 1 MiB or less, so a whole-image strip above that
-/// falls back to lazy matching plus block splitting, while a tiled writer's chunks stay under it.
+/// Chunking is reported both ways because it used to decide whether `Level::Best`'s optimal parse
+/// engaged at all: before #343 that parse ran only on inputs of 1 MiB or less, so a whole-image
+/// strip above it fell back to lazy matching while a tiled writer's chunks stayed under it. The
+/// parse now spans large input instead, so both rows exercise it.
 fn print_size_table() {
     println!(
         "\nDNG Deflate: zlib-stream output size, bytes (lower is better):\n\n{:<44} {:>11} {:>11} {:>11} {:>11}  {:>10}",
@@ -170,7 +171,7 @@ fn print_size_table() {
 }
 
 /// A single representative payload for the throughput benchmarks: one 16-bit CFA frame, sized so
-/// the `Level::Best` optimal parse (applied below 1 MiB of input) stays quick.
+/// the `Level::Best` optimal parse stays quick (one span, under the default 1 MiB limit).
 fn throughput_input() -> Vec<u8> {
     pack16(&sensor_cfa(512, 384, 16))
 }
