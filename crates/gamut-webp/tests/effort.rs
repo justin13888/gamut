@@ -471,6 +471,52 @@ fn gradient_rgba(w: u32, h: u32) -> Vec<u8> {
         .collect()
 }
 
+/// A gradient carrying deterministic high-frequency noise, at a size where the two-pass VP8
+/// path has something to measure: the 32x24 gradients above produce too few coefficient tokens
+/// for any context to pay for a probability-update record, so the whole derivation collapses to
+/// the defaults and its inputs stop being observable. At 96x80 the updates are adopted, and the
+/// rung-2 to rung-3 step drops the file by an eighth instead of two bytes.
+fn busy(w: u32, h: u32, channels: usize) -> Vec<u8> {
+    let mut state: u32 = 0x9E37_79B9;
+    (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let n = (state >> 27) as u8;
+            let px = [
+                ((x * 3) as u8).wrapping_add(n),
+                ((y * 5) as u8).wrapping_add(n >> 1),
+                ((x ^ y) as u8).wrapping_add(n << 1),
+                ((x + y * 2) & 0xff) as u8,
+            ];
+            px[..channels].to_vec()
+        })
+        .collect()
+}
+
+/// Alternating 16-pixel bands of flat colour and noise. Uniform detail hides two decisions: a
+/// frame that is busy everywhere makes every macroblock take `B_PRED`, so the whole-block `Y2`
+/// path is never coded and the effort-1 `B_PRED` gate never sees a macroblock its threshold
+/// could exclude. Half the blocks here predict perfectly and half not at all.
+fn patchwork(w: u32, h: u32, channels: usize) -> Vec<u8> {
+    let mut state: u32 = 0x1234_5678;
+    (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let flat = ((x / 16) + (y / 16)) % 2 == 0;
+            let n = if flat { 0 } else { (state >> 26) as u8 };
+            let px = [
+                0x40_u8.wrapping_add(n),
+                0x80_u8.wrapping_add(n << 1),
+                0xC0_u8.wrapping_add(n >> 1),
+                if flat { 0xff } else { 0x80_u8.wrapping_add(n) },
+            ];
+            px[..channels].to_vec()
+        })
+        .collect()
+}
+
 /// Every rung's output, pinned by length + digest — the density contract made concrete.
 ///
 /// `tests/default_bytes.rs` pins the *default* rung. That leaves the other six describing
@@ -529,6 +575,86 @@ fn every_effort_rung_pins_its_output_bytes() {
         (184, 0xe2df_69e2_2c62_ce64),
     ];
 
+    // The busy fixture is the one the two-pass VP8 derivation is actually visible in (see `busy`).
+    let bd = dims(96, 80);
+    let brgb = busy(96, 80, 3);
+    let brgba = busy(96, 80, 4);
+    const BUSY_LOSSLESS_RGB: [(usize, u64); 7] = [
+        (14372, 0x0699_b1a7_3d00_db45),
+        (14372, 0x0699_b1a7_3d00_db45),
+        (14372, 0x0699_b1a7_3d00_db45),
+        (14242, 0x56f2_1de9_92fd_9c49),
+        (13434, 0xc295_20d5_69cc_56e6),
+        (13434, 0xc295_20d5_69cc_56e6),
+        (13280, 0xff8c_c0b5_1326_359e),
+    ];
+    const BUSY_LOSSLESS_RGBA: [(usize, u64); 7] = [
+        (14690, 0x0c41_f16b_2ac5_700b),
+        (14536, 0x87cc_4cc4_4171_3c60),
+        (14536, 0x87cc_4cc4_4171_3c60),
+        (14452, 0xb2b7_d34b_b003_56c8),
+        (13992, 0x49a2_7f5d_23b1_5e29),
+        (13202, 0x9f43_8822_8cf0_0d09),
+        (13202, 0x9f43_8822_8cf0_0d09),
+    ];
+    const BUSY_LOSSY60_RGB: [(usize, u64); 7] = [
+        (1898, 0x3b9b_365a_f0da_ec79),
+        (1794, 0x662a_15bc_cf1e_5f8b),
+        (1794, 0x662a_15bc_cf1e_5f8b),
+        (1570, 0x9744_c62e_e66f_299e),
+        (1452, 0x1af0_7556_ce3c_4e47),
+        (1452, 0x1af0_7556_ce3c_4e47),
+        (1452, 0x1af0_7556_ce3c_4e47),
+    ];
+    const BUSY_LOSSY60_RGBA: [(usize, u64); 7] = [
+        (2006, 0x1b05_1ab2_78fa_182d),
+        (1902, 0x7723_400f_6c97_eb68),
+        (1902, 0x7723_400f_6c97_eb68),
+        (1678, 0x2854_d6a4_7516_7592),
+        (1560, 0xee54_68aa_8ddc_632e),
+        (1560, 0xee54_68aa_8ddc_632e),
+        (1560, 0xee54_68aa_8ddc_632e),
+    ];
+
+    let prgb = patchwork(96, 80, 3);
+    let prgba = patchwork(96, 80, 4);
+    const PATCH_LOSSLESS_RGB: [(usize, u64); 7] = [
+        (4860, 0x7bdb_f2c2_5cdb_1bfe),
+        (4860, 0x7bdb_f2c2_5cdb_1bfe),
+        (4548, 0x76aa_bae6_f922_51a6),
+        (4454, 0x3d81_9a50_8c47_ff83),
+        (3742, 0x35f0_63db_581e_8103),
+        (3564, 0x5d56_8fa9_b31f_a5b0),
+        (3564, 0x5d56_8fa9_b31f_a5b0),
+    ];
+    const PATCH_LOSSLESS_RGBA: [(usize, u64); 7] = [
+        (4916, 0xafed_9682_0caa_2947),
+        (4916, 0xafed_9682_0caa_2947),
+        (4564, 0x743b_e192_421e_5da8),
+        (4510, 0x9ff1_623d_9845_7fb3),
+        (3806, 0x0e2e_4db8_4d3f_c7fd),
+        (3586, 0x73ff_3012_b8f4_14ae),
+        (3586, 0x73ff_3012_b8f4_14ae),
+    ];
+    const PATCH_LOSSY60_RGB: [(usize, u64); 7] = [
+        (2328, 0x694d_3467_b970_2251),
+        (1832, 0xafb1_b617_367a_ce08),
+        (1832, 0xafb1_b617_367a_ce08),
+        (1530, 0x9f44_352a_1325_6914),
+        (1500, 0x7eca_6871_1963_eae7),
+        (1500, 0x7eca_6871_1963_eae7),
+        (1500, 0x7eca_6871_1963_eae7),
+    ];
+    const PATCH_LOSSY60_RGBA: [(usize, u64); 7] = [
+        (5930, 0x0a06_79c4_cf67_fa1b),
+        (5434, 0x9d9d_2ab5_bf81_63a6),
+        (5434, 0x9d9d_2ab5_bf81_63a6),
+        (5132, 0x617f_8f42_96ac_c10f),
+        (5102, 0x01e0_f3cc_764b_692d),
+        (5102, 0x01e0_f3cc_764b_692d),
+        (5102, 0x01e0_f3cc_764b_692d),
+    ];
+
     for (level, effort) in all_efforts().into_iter().enumerate() {
         for (label, want, got) in [
             (
@@ -550,6 +676,46 @@ fn every_effort_rung_pins_its_output_bytes() {
                 "lossy60 rgba",
                 LOSSY60_RGBA[level],
                 encode_lossy(effort, 60, &rgba, d),
+            ),
+            (
+                "busy lossless rgb",
+                BUSY_LOSSLESS_RGB[level],
+                encode_lossless_rgb(effort, &brgb, bd),
+            ),
+            (
+                "busy lossless rgba",
+                BUSY_LOSSLESS_RGBA[level],
+                encode_lossless(effort, &brgba, bd),
+            ),
+            (
+                "busy lossy60 rgb",
+                BUSY_LOSSY60_RGB[level],
+                encode_lossy_rgb(effort, 60, &brgb, bd),
+            ),
+            (
+                "busy lossy60 rgba",
+                BUSY_LOSSY60_RGBA[level],
+                encode_lossy(effort, 60, &brgba, bd),
+            ),
+            (
+                "patchwork lossless rgb",
+                PATCH_LOSSLESS_RGB[level],
+                encode_lossless_rgb(effort, &prgb, bd),
+            ),
+            (
+                "patchwork lossless rgba",
+                PATCH_LOSSLESS_RGBA[level],
+                encode_lossless(effort, &prgba, bd),
+            ),
+            (
+                "patchwork lossy60 rgb",
+                PATCH_LOSSY60_RGB[level],
+                encode_lossy_rgb(effort, 60, &prgb, bd),
+            ),
+            (
+                "patchwork lossy60 rgba",
+                PATCH_LOSSY60_RGBA[level],
+                encode_lossy(effort, 60, &prgba, bd),
             ),
         ] {
             assert_eq!(

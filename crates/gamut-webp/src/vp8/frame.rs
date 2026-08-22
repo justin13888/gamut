@@ -2172,6 +2172,69 @@ mod tests {
         );
     }
 
+    /// A saving that exactly equals the update record's cost is not a saving: the record buys
+    /// nothing and the default survives. The optimizer's comparison is strict for that reason, and
+    /// a tie is the only input that tells a strict comparison from a permissive one.
+    ///
+    /// The tie is solved for rather than hardcoded — at an even split the measured probability is
+    /// 127, whose per-event cost is exactly 256 either way, so the boundary count is
+    /// `(update_yes + record - update_no) / (default_cost - 512)` wherever that divides exactly.
+    /// If a future probability table leaves no context with an exact solution the search says so
+    /// instead of passing vacuously.
+    #[test]
+    fn a_probability_update_that_exactly_breaks_even_is_not_taken() {
+        const RECORD: u64 = 8 * 256;
+        let mut solved = None;
+        'search: for plane in 0..tokens::PLANE_TYPES {
+            for band in 0..tokens::COEFF_BANDS {
+                for ctx in 0..3 {
+                    for node in 0..tokens::ENTROPY_NODES {
+                        let old = tokens::DEFAULT_COEFF_PROBS[plane][band][ctx][node];
+                        if old == 127 {
+                            continue;
+                        }
+                        let up = tokens::COEFF_UPDATE_PROBS[plane][band][ctx][node];
+                        let per_event_old =
+                            u64::from(bit_cost(false, old)) + u64::from(bit_cost(true, old));
+                        // The measured 127 costs exactly one bit each way: 256 + 256.
+                        let Some(gain) = per_event_old.checked_sub(512) else {
+                            continue;
+                        };
+                        if gain == 0 {
+                            continue;
+                        }
+                        let need =
+                            u64::from(bit_cost(true, up)) + RECORD - u64::from(bit_cost(false, up));
+                        if need % gain == 0 && need / gain > 0 && need / gain < u64::from(u32::MAX)
+                        {
+                            solved = Some((plane, band, ctx, node, old, (need / gain) as u32));
+                            break 'search;
+                        }
+                    }
+                }
+            }
+        }
+        let (plane, band, ctx, node, old, n) =
+            solved.expect("some context must admit an exact break-even count");
+
+        let mut counts: tokens::CoeffCounts =
+            [[[[[0; 2]; tokens::ENTROPY_NODES]; 3]; tokens::COEFF_BANDS]; tokens::PLANE_TYPES];
+        counts[plane][band][ctx][node] = [n, n];
+        assert_eq!(
+            optimize_coeff_probs(&counts)[plane][band][ctx][node],
+            old,
+            "breaking even must keep the default, not spend a record to buy nothing"
+        );
+        // One event more and the saving is real, so the same context does adopt — which is what
+        // shows the tie above is the boundary and not simply an unreachable context.
+        counts[plane][band][ctx][node] = [n + 1, n + 1];
+        assert_eq!(
+            optimize_coeff_probs(&counts)[plane][band][ctx][node],
+            127,
+            "one event past break-even must adopt"
+        );
+    }
+
     /// The probability optimizer accumulates frame-wide token tallies, so its cost arithmetic must
     /// survive counts a large frame really produces. A 4000x4000 encode puts well over two million
     /// events into a single hot context, and at `bit_cost`'s maximum of 2048 units each the product
