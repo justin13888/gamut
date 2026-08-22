@@ -812,6 +812,38 @@ mod tests {
             "the deferred pixel must be coded as a cache hit, not a literal"
         );
         assert_eq!(cached_tail[1], (1, 8, 10), "the long match still follows");
+
+        // Deferring costs a token, so it only pays for a *strictly* longer match. Laid out so both
+        // positions match exactly three pixels, the lazy parse must come out identical to the
+        // greedy one — the only input that separates a strict comparison from a permissive one.
+        let d = px_of(4);
+        let mut tie: Vec<u32> = vec![a, b, c, x, b, c, d, y];
+        tie.extend_from_slice(&[a, b, c, d]);
+        let tie_greedy = tokenize(
+            &tie,
+            0,
+            &Lz77Params {
+                max_chain: 32,
+                lazy: false,
+            },
+        );
+        let tie_lazy = tokenize(
+            &tie,
+            0,
+            &Lz77Params {
+                max_chain: 32,
+                lazy: true,
+            },
+        );
+        assert_eq!(
+            shape(&tie_greedy),
+            shape(&tie_lazy),
+            "an equally long match one pixel later is not worth a deferral"
+        );
+        assert!(
+            shape(&tie_greedy).iter().any(|t| t.0 == 1),
+            "the fixture must actually produce a match to defer or not"
+        );
     }
 
     /// The cache-size deltas, exercised directly. Whether an `AutoDelta` plan wins an image is a
