@@ -159,6 +159,12 @@ fn pcs_seam(
 /// The chain engine: composes `profiles` into one pipeline with per-hop `intents` and
 /// `bpc_flags` (all three slices share their length; the crate-internal callers guarantee
 /// it). See the module docs for the transcribed algorithm.
+///
+/// # Errors
+///
+/// [`CmmError::ChainMismatch`] for fewer than two profiles — checked here rather than left to
+/// the callers, so the shortest chain is rejected before the first profile is read instead of
+/// panicking on the index. Otherwise whatever the per-hop builders and the seam raise.
 pub(crate) fn link_chain(
     profiles: &[&IccProfile],
     intents: &[RenderingIntent],
@@ -166,7 +172,12 @@ pub(crate) fn link_chain(
 ) -> Result<Pipeline> {
     debug_assert_eq!(profiles.len(), intents.len());
     debug_assert_eq!(profiles.len(), bpc_flags.len());
-    let mut current_space = profiles[0].header.data_color_space;
+    let Some(first) = profiles.first() else {
+        return Err(CmmError::ChainMismatch(
+            "a transform chain needs at least two profiles",
+        ));
+    };
+    let mut current_space = first.header.data_color_space;
     let mut result: Option<Pipeline> = None;
     for (i, &profile) in profiles.iter().enumerate() {
         let class = profile.header.device_class;
@@ -212,7 +223,7 @@ pub(crate) fn link_chain(
         });
         current_space = exit_space;
     }
-    // The callers all pass at least two profiles, so the fold produced a pipeline.
+    // The empty case returned above, so the fold ran at least once.
     result.ok_or(CmmError::ChainMismatch(
         "a transform chain needs at least two profiles",
     ))
@@ -459,6 +470,20 @@ mod tests {
         let mut out = [0.0; 3];
         transform.transform(input, &mut out).unwrap();
         out
+    }
+
+    /// `link_chain` is crate-internal and every caller checks the count first, so nothing
+    /// reaches it empty today — but it used to read `profiles[0]` before the guard that reports
+    /// the too-short chain, which made that error unreachable and an empty slice a panic in a
+    /// library path. The guard now comes first, and this pins it directly rather than through a
+    /// caller that would have rejected the input anyway.
+    #[test]
+    fn an_empty_chain_is_reported_not_panicked() {
+        let err = link_chain(&[], &[], &[]).expect_err("an empty chain has nothing to link");
+        assert!(
+            matches!(err, CmmError::ChainMismatch(m) if m.contains("at least two profiles")),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
