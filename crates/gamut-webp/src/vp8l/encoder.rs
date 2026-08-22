@@ -780,11 +780,38 @@ mod tests {
                 })
                 .collect()
         }
-        assert_ne!(
-            shape(&greedy),
-            shape(&lazy),
-            "lazy matching must change the parse on content built for it"
+        // The last two tokens are the whole point: greedy takes the three-pixel match and then
+        // whatever is left; lazy spends one token on `a` and takes the eight-pixel match. Pinning
+        // them is what fixes *which* position is probed and *which* way the lengths compare — a
+        // probe at `i` or `i - 1`, or a reversed or non-strict comparison, moves one of these.
+        let tail = |t: &[Token]| shape(t)[t.len() - 2..].to_vec();
+        assert_eq!(
+            tail(&greedy),
+            vec![(1, 3, 13), (1, 6, 10)],
+            "greedy must take the short match first"
         );
+        assert_eq!(
+            tail(&lazy),
+            vec![(0, a, 0), (1, 8, 10)],
+            "lazy must defer `a` and take the long match"
+        );
+
+        // With a cache the deferred pixel is a hit rather than a literal — `a` was coded at the
+        // start of the run — which is the only path through the cache probe inside the deferral.
+        let cached = tokenize(
+            &px,
+            10,
+            &Lz77Params {
+                max_chain: 32,
+                lazy: true,
+            },
+        );
+        let cached_tail = tail(&cached);
+        assert_eq!(
+            cached_tail[0].0, 2,
+            "the deferred pixel must be coded as a cache hit, not a literal"
+        );
+        assert_eq!(cached_tail[1], (1, 8, 10), "the long match still follows");
     }
 
     /// The cache-size deltas, exercised directly. Whether an `AutoDelta` plan wins an image is a
