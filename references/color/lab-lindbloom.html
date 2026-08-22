@@ -1,0 +1,80 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+
+<html>
+  <head>
+    <title>XYZ to Lab</title>
+    <script src="loadFrames.js" language="javascript" type="text/javascript"></script>
+	
+	<script type="text/x-mathjax-config"> MathJax.Hub.Config({tex2jax: {inlineMath: [['$','$'], ['\\(','\\)']]}}); </script>
+	<script type="text/x-mathjax-config"> MathJax.Hub.Config({ TeX: { equationNumbers: { autoNumber: "all" } } }); </script>
+	<script type="text/x-mathjax-config"> MathJax.Hub.Config({displayAlign: "left" }); </script>
+	<script type="text/x-mathjax-config"> MathJax.Hub.Config({displayIndent: "1em" }); </script>
+	<script type="text/javascript" async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML"> </script>
+	
+    <meta name="AUTHOR" content="Bruce Justin Lindbloom">
+    <meta name="DESCRIPTION" content="XYZ to Lab">
+    <meta name="KEYWORDS" content="color, equations, conversions, Lab, XYZ">
+    <link rel="stylesheet" href="style/default.css" type="text/css">
+  </head>
+
+  <body onload="parent.navigation.resetAll('but3')">
+
+    <h1>XYZ to Lab</h1>
+
+    <p>This conversion requires a reference white $(X_r , Y_r , Z_r)$.</p>
+	
+	$$L = 116 f_y - 16$$
+	$$a = 500(f_x - f_y)$$
+	$$b = 200(f_y - f_z)$$
+
+    <p>where</p>
+	
+	$$f_x = \cases{
+	\sqrt[3]{x_r} & \text{if }x_r \gt \epsilon \\
+	{{\kappa x_r + 16} \over {116}} & \text{otherwise}
+	}$$
+	
+	$$f_y = \cases{
+	\sqrt[3]{y_r} & \text{if }y_r \gt \epsilon \\
+	{{\kappa y_r + 16} \over {116}} & \text{otherwise}
+	}$$
+	
+	$$f_z = \cases{
+	\sqrt[3]{z_r} & \text{if }z_r \gt \epsilon \\
+	{{\kappa z_r + 16} \over {116}} & \text{otherwise}
+	}$$
+	
+	$$x_r = {{X} \over {X_r}}$$
+	$$y_r = {{Y} \over {Y_r}}$$
+	$$z_r = {{Z} \over {Z_r}}$$
+	
+	$$\epsilon = \cases{
+	{0.008856} & \text{Actual CIE standard} \\
+	{216 / 24389} & \text{Intent of the CIE standard}
+	}$$
+	
+	$$\kappa = \cases{
+	{903.3} & \text{Actual CIE standard} \\
+	{24389 / 27} & \text{Intent of the CIE standard}
+	}$$
+
+    <p><b>Implementation Notes:</b></p>
+    <ol>
+      <li>For an explanation of $\epsilon$ and $\kappa$ click <a href="LContinuity.html">here</a>.</li>
+    </ol>
+
+    <script src="footer.js" type="text/javascript"></script>
+  <!-- WiredMinds eMetrics tracking with Enterprise Edition V5.4 START -->
+<script type='text/javascript' src='https://count.carrierzone.com/app/count_server/count.js'></script>
+<script type='text/javascript'><!--
+wm_custnum='95a451a4b38981e7';
+wm_page_name='Eqn_XYZ_to_Lab.html';
+wm_group_name='/services/webpages/b/r/brucelindbloom.com/public';
+wm_campaign_key='campaign_id';
+wm_track_alt='';
+wiredminds.count();
+// -->
+</script>
+<!-- WiredMinds eMetrics tracking with Enterprise Edition V5.4 END -->
+</body>
+</html>
