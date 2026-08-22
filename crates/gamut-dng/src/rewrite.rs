@@ -40,6 +40,27 @@ pub enum MakerNotePreservation {
     Relocated,
 }
 
+/// A run of bytes the original file's own structures did not account for, carried through the
+/// rewrite verbatim.
+///
+/// Real camera files routinely carry these — a vendor preamble after the header (Apple ProRAW's
+/// `APPLEDNG`), leftover filler between structures, an appended trailer (a Leica M10 sample
+/// carries 651 KB of it). The typed codec has no model for them and the directory layout is
+/// rebuilt, so their original absolute offsets cannot generally be reproduced; the rewrite
+/// guarantees the **bytes** survive and reports where each run landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PreservedSpan {
+    /// What the run is, by position in the original file.
+    pub kind: gamut_ifd::SpanKind,
+    /// The run's offset in the original stream.
+    pub original_offset: u64,
+    /// The run's offset in the rewritten stream.
+    pub offset: u64,
+    /// The run's length in bytes (identical in both streams).
+    pub len: u64,
+}
+
 /// The output of [`DngRewrite::write`]: the serialised stream and what happened to the
 /// offset-sensitive material.
 #[derive(Debug, Clone)]
@@ -49,6 +70,9 @@ pub struct RewrittenDng {
     pub bytes: Vec<u8>,
     /// What happened to the `MakerNote` byte range.
     pub maker_note: MakerNotePreservation,
+    /// Every unaccounted byte run carried through verbatim, in original file order. Empty for a
+    /// file whose structures account for all of its bytes (every Adobe-authored sample).
+    pub preserved: Vec<PreservedSpan>,
 }
 
 /// A DNG opened for a preserving rewrite: the full IFD tree on the lossless model, plus the
@@ -61,6 +85,9 @@ pub struct DngRewrite {
     file: TiffFile,
     /// The original absolute offset of the (out-of-line) `MakerNote` value, if any.
     maker_note_at: Option<u64>,
+    /// Byte runs the file's own structures do not account for, in file order — carried through
+    /// [`write`](DngRewrite::write) verbatim so a real camera file loses nothing.
+    unaccounted: Vec<gamut_ifd::Segment>,
 }
 
 impl DngRewrite {
@@ -85,13 +112,29 @@ impl DngRewrite {
             }
         }
         let maker_note_at = find_maker_note_offset(data)?;
+        // Whatever the structures do not account for is carried verbatim rather than dropped;
+        // a failed deconstruct is not fatal here, it just means there is nothing extra to carry.
+        let unaccounted = crate::deconstruct(data)
+            .map(|report| report.segments.unclaimed_spans())
+            .unwrap_or_default();
         Ok(Self {
             data: data.to_vec(),
             order,
             variant,
             file,
             maker_note_at,
+            unaccounted,
         })
+    }
+
+    /// The byte runs the file's own structures do not account for — a vendor preamble, leftover
+    /// filler, an appended trailer — in file order.
+    ///
+    /// [`write`](Self::write) carries all of them through verbatim; this exposes them for
+    /// inspection beforehand. Empty for a file that accounts for every one of its bytes.
+    #[must_use]
+    pub fn unaccounted_spans(&self) -> &[gamut_ifd::Segment] {
+        &self.unaccounted
     }
 
     /// The parsed tree: every page, sub-IFD, and tag — including unknown/vendor material —
@@ -135,6 +178,12 @@ impl DngRewrite {
     /// byte-exactly (unknown field types verbatim), every strip/tile/embedded-JPEG payload
     /// copied byte-for-byte from the original stream, and the maker note pinned at its original
     /// absolute offset when the new layout permits.
+    ///
+    /// Byte runs the file's own structures do not account for — a vendor preamble, leftover
+    /// filler between structures, an appended trailer — are carried through **verbatim** and
+    /// reported in [`RewrittenDng::preserved`]. Their bytes survive; their original absolute
+    /// offsets generally do not, because the directory layout is rebuilt, so they are appended
+    /// after the payload region in original file order (which leaves a trailer last).
     ///
     /// Declared dead space (`FreeOffsets`/`FreeByteCounts`) is dropped — the one intentional
     /// omission, since those tags name explicitly-dead bytes.
@@ -223,13 +272,50 @@ impl DngRewrite {
                 bytes.extend_from_slice(block);
             }
         }
+        // Pass C: carry every unaccounted run through verbatim, in original file order, so a real
+        // camera file's vendor preamble, leftover filler and appended trailer are not silently
+        // lost. The runs are appended after the payload region — the rebuilt directory layout
+        // cannot generally reproduce their original absolute offsets — and each one's landing
+        // place is reported back.
+        let mut preserved = Vec::with_capacity(self.unaccounted.len());
+        for span in &self.unaccounted {
+            let start = usize::try_from(span.range.start).map_err(|_| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows")
+            })?;
+            let end = usize::try_from(span.range.end()).map_err(|_| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows")
+            })?;
+            let source = self.data.get(start..end).ok_or_else(|| {
+                Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "DNG: an unaccounted run lies outside the original stream",
+                )
+            })?;
+            let at = align_word(bytes.len() as u64);
+            let at_usize = usize::try_from(at).map_err(|_| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows")
+            })?;
+            bytes.resize(at_usize, 0); // the <=1 byte of word-alignment padding
+            bytes.extend_from_slice(source);
+            preserved.push(PreservedSpan {
+                kind: span.kind,
+                original_offset: span.range.start,
+                offset: at,
+                len: span.range.len,
+            });
+        }
+
         if stream_overflows(self.variant, bytes.len() as u64) {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "DNG: layout exceeds the 4 GiB classic-TIFF offset limit",
             ));
         }
-        Ok(RewrittenDng { bytes, maker_note })
+        Ok(RewrittenDng {
+            bytes,
+            maker_note,
+            preserved,
+        })
     }
 }
 

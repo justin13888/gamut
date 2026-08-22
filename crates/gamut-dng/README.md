@@ -83,6 +83,18 @@ pixel-for-pixel (including tiled JPEG XL), and Adobe's own sample DNGs (JPEG XL,
 decode in agreement with the SDK — plus the **libtiff** oracle for the TIFF-container/preview
 layer and internal encode→decode round-trips on every path.
 
+Those inputs are all synthetic or Adobe-authored, so a separate tier (issue #174) gates the crate
+against **files real cameras wrote**: six CC0 DNGs — Apple ProRAW, Canon via Adobe DNG Converter
+in all three compressions, a monochrome Leica, a Leica M10 — in the `gamut-dng-samples` submodule,
+checked for byte completeness, decode, stored digest, the Adobe stage-2 differential and the
+preserving rewrite. It lives outside the workspace so a normal `cargo test` never pulls in
+~178 MiB of camera files:
+
+```sh
+mise run fetch-dng-samples   # clone the corpus submodule (once)
+mise run test-dng-real       # run the real-camera conformance tier
+```
+
 ## License
 
 Licensed under either of MIT or Apache-2.0 at your option.
