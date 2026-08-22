@@ -192,8 +192,14 @@ fn every_effort_level_produces_a_decodable_lossy_file() {
                 "{label} at effort {}",
                 effort.level()
             );
-            let got: Vec<u8> = decoded.as_samples().chunks_exact(4).map(|p| p[3]).collect();
-            let want: Vec<u8> = px.chunks_exact(4).map(|p| p[3]).collect();
+            let got: Vec<u8> = decoded
+                .as_samples()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect();
+            let want: Vec<u8> = px.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
             assert_eq!(
                 got,
                 want,
@@ -269,8 +275,10 @@ fn near_lossless_keeps_rgb_within_the_bound_and_alpha_exact() {
             let decoded: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).expect("decode");
             assert_eq!(decoded.dimensions(), d, "{label} at strength {strength}");
             for (i, (before, after)) in px
-                .chunks_exact(4)
-                .zip(decoded.as_samples().chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(decoded.as_samples().as_chunks::<4>().0)
                 .enumerate()
             {
                 assert_eq!(
@@ -355,7 +363,7 @@ fn near_lossless_is_ignored_by_the_lossy_path() {
 fn psnr_rgb(a: &[u8], b: &[u8]) -> f64 {
     let mut sse = 0f64;
     let mut n = 0f64;
-    for (x, y) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (x, y) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         for c in 0..3 {
             let d = f64::from(x[c]) - f64::from(y[c]);
             sse += d * d;

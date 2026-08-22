@@ -340,7 +340,9 @@ impl WebpEncoder {
         let file = match self.config.mode {
             WebpMode::Lossless => {
                 let argb: Vec<u32> = pixels
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .map(|p| make_argb(0xff, p[0], p[1], p[2]))
                     .collect();
                 let bitstream = self.encode_lossless(&argb, dims)?;
@@ -369,11 +371,13 @@ impl WebpEncoder {
         dims: Dimensions,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let transparent = pixels.chunks_exact(4).any(|p| p[3] != 0xff);
+        let transparent = pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0xff);
         let file = match self.config.mode {
             WebpMode::Lossless => {
                 let argb: Vec<u32> = pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|p| make_argb(p[3], p[0], p[1], p[2]))
                     .collect();
                 let bitstream = self.encode_lossless(&argb, dims)?;
@@ -383,13 +387,15 @@ impl WebpEncoder {
             }
             WebpMode::Lossy => {
                 let rgb: Vec<u8> = pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
                 let yuv = Yuv420::from_rgb8(&rgb, dims.width, dims.height, ColorRange::Limited)?;
                 let vp8 = self.encode_vp8_codestream(&yuv, dims)?;
                 if transparent {
-                    let alpha: Vec<u8> = pixels.chunks_exact(4).map(|p| p[3]).collect();
+                    let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
                     let alph =
                         alpha::write_alph(&alpha, dims.width as usize, dims.height as usize)?;
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, Some(&alph), true)
@@ -530,8 +536,14 @@ mod tests {
             .decode_image(&file)
             .expect("rgba decode");
         assert_eq!(decoded.dimensions(), dims(w, h));
-        let dec_alpha: Vec<u8> = decoded.as_samples().chunks_exact(4).map(|p| p[3]).collect();
-        let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let dec_alpha: Vec<u8> = decoded
+            .as_samples()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(dec_alpha, src_alpha, "alpha must round-trip losslessly");
     }
 

@@ -471,7 +471,7 @@ mod tests {
         let img = decode_forced_rgb(&jpeg).expect("decode forced RGB");
         assert_eq!(img.channels, 3, "forced RGB must yield 3 channels");
         // A grayscale source forced to RGB has R == G == B in every pixel.
-        for px in img.pixels.chunks_exact(3) {
+        for px in img.pixels.as_chunks::<3>().0 {
             assert_eq!(px[0], px[1]);
             assert_eq!(px[1], px[2]);
         }

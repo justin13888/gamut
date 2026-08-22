@@ -1413,8 +1413,10 @@ mod tests {
         assert_eq!(&out.as_samples()[..4], &[138, 148, 158, 168]);
         assert!(
             out.as_samples()
-                .chunks_exact(4)
-                .all(|p| p == [138, 148, 158, 168])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [138, 148, 158, 168])
         );
     }
 
@@ -1445,8 +1447,10 @@ mod tests {
         assert_eq!(dst.as_samples().as_ptr(), ptr, "allocation must be reused");
         assert!(
             dst.as_samples()
-                .chunks_exact(4)
-                .all(|p| p == [138, 148, 158, 168])
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [138, 148, 158, 168])
         );
 
         // A mismatched destination falls back to replacement with the right dimensions.

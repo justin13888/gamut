@@ -212,7 +212,7 @@ fn lossless_gray_fixture() -> &'static [u8] {
     FIXTURE.get_or_init(|| {
         let (w, h) = (32u32, 32u32);
         let mut src = vec![0u8; (w * h * 4) as usize];
-        for px in src.chunks_exact_mut(4) {
+        for px in src.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[128, 128, 128, 255]);
         }
         libheif_oracle::encode_rgba_to_heic(
@@ -248,7 +248,7 @@ fn rgba_diff(a: &[u8], b: &[u8]) -> Diff {
     let (mut max_rgb, mut max_a) = (0u8, 0u8);
     let mut within = 0u64;
     let mut pixels = 0u64;
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         let mut ok = true;
         for c in 0..3 {
             let d = pa[c].abs_diff(pb[c]);

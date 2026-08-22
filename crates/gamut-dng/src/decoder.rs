@@ -876,7 +876,9 @@ fn decode_masked_areas(ifd: &TrackedIfd) -> Result<Option<Vec<[u32; 4]>>> {
         ));
     }
     Ok(Some(
-        flat.chunks_exact(4)
+        flat.as_chunks::<4>()
+            .0
+            .iter()
             .map(|r| [r[0], r[1], r[2], r[3]])
             .collect(),
     ))

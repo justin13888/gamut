@@ -55,7 +55,9 @@ fn strip_and_tile_round_trips_match_libtiff_with_predictor_on_and_off() {
                 libtiff_oracle::decode_rgba(&tiff)
                     .unwrap()
                     .2
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .flat_map(|pixel| [pixel[0], pixel[1], pixel[2]])
                     .collect()
             } else {

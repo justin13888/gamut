@@ -1431,7 +1431,7 @@ fn imir_and_clap_on_a_ten_bit_item() {
 #[test]
 fn absent_alpha_is_opaque_at_sixteen_bit() {
     let got = decode_rgba16(1, 10, 200, 4, 4, vec![colr(9, false)]);
-    for px in got.chunks_exact(4) {
+    for px in got.as_chunks::<4>().0 {
         assert_eq!(px[3], 65535);
     }
 }
@@ -1729,7 +1729,13 @@ fn absent_alpha_is_opaque() {
         .image()
         .decode_item_rgba8(1, &mut Mock::default())
         .unwrap();
-    assert!(rgba.as_samples().chunks_exact(4).all(|px| px[3] == 255));
+    assert!(
+        rgba.as_samples()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| px[3] == 255)
+    );
 }
 
 #[test]
@@ -1823,7 +1829,7 @@ fn overlay_composites_with_fill_clipping_and_alpha() {
         b_rgba[i * 4 + 3] = ey(90, (i % 2) as u32, (i / 2) as u32, 8) as u8;
     }
     let mut want = vec![0f64; 4 * 4 * 4];
-    for px in want.chunks_exact_mut(4) {
+    for px in want.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&[10.0, 20.0, 30.0, 255.0]);
     }
     for (src, (ox, oy)) in [(&a_rgba, (-1i32, -1i32)), (&b_rgba, (1, 1))] {
