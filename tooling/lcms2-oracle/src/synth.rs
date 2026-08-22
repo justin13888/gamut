@@ -370,6 +370,80 @@ fn write_lut_tag(
     }
 }
 
+/// Maps a CLUT probe channel count onto a device colour-space signature: the shapes the CLUT
+/// differential tests need (1 → `GRAY`, 3 → `RGB `, 4 → `CMYK`).
+fn probe_space(channels: u32) -> &'static [u8; 4] {
+    match channels {
+        1 => b"GRAY",
+        3 => b"RGB ",
+        4 => b"CMYK",
+        n => panic!("clut probe profiles support 1/3/4 channels, got {n}"),
+    }
+}
+
+/// A **devicelink-class** profile wrapping an arbitrary caller-supplied 16-bit CLUT: `A2B0` is
+/// identity curves → `cmsStageAllocCLut16bitGranular(grid_points, samples)` → identity curves,
+/// written at version 4.3 (serializes as `mAB `). Colour space and "PCS" (a link profile's
+/// output space) are chosen by channel count ([`probe_space`]); drive it with
+/// [`Transform::devicelink`](crate::xform::Transform::devicelink).
+///
+/// `samples` are in grid order (last input axis fastest, output channels interleaved per
+/// node), `prod(grid_points) × out_ch` entries; lcms2 copies them.
+///
+/// Two behavioural notes for differential tests:
+/// - `PreOptimize` runs even under `FLAGS_NOOPTIMIZE`, but only strips
+///   `cmsSigIdentityElemType` stages and folds matrices; the identity *tone-curve* stages here
+///   (`cmsStageAllocToneCurves(n, NULL)` = gamma-1.0 curves) survive, so the pipeline reaching
+///   `cmsDoTransform` is exactly curves → CLUT → curves (verified empirically by the
+///   node-reproduction test below).
+/// - A profile-borne 16-bit CLUT is evaluated through lcms2's **fixed-point** interpolators
+///   even in a double-precision transform (`EvaluateCLUTfloatIn16`), so agreement is
+///   16-bit-tight only; the float-path oracle is [`ClutPipeline`](crate::xform::ClutPipeline).
+#[must_use]
+pub fn clut_probe_profile(grid_points: &[u8], samples: &[u16], out_ch: u32) -> Profile {
+    let in_ch = u32::try_from(grid_points.len()).expect("axis count fits u32");
+    let nodes: usize = grid_points.iter().map(|&n| usize::from(n)).product();
+    assert_eq!(
+        samples.len(),
+        nodes * out_ch as usize,
+        "sample count must be prod(grid) x out_ch"
+    );
+    let raw = placeholder_with(4.3, b"link", probe_space(in_ch), probe_space(out_ch));
+    let points: Vec<sys::cmsUInt32Number> = grid_points.iter().map(|&n| u32::from(n)).collect();
+    // SAFETY: every stage is checked non-null and ownership moves into the pipeline on insert;
+    // lcms2 copies `points`/`samples` during the allocation call; the pipeline is freed exactly
+    // once after `cmsWriteTag` stores a duplicate.
+    unsafe {
+        let lut = sys::cmsPipelineAlloc(ptr::null_mut(), in_ch, out_ch);
+        assert!(!lut.is_null(), "cmsPipelineAlloc failed");
+        let pre = sys::cmsStageAllocToneCurves(ptr::null_mut(), in_ch, ptr::null());
+        assert!(!pre.is_null(), "identity input curves failed");
+        assert!(sys::cmsPipelineInsertStage(lut, sys::cmsAT_END, pre) != 0);
+        let clut = sys::cmsStageAllocCLut16bitGranular(
+            ptr::null_mut(),
+            points.as_ptr(),
+            in_ch,
+            out_ch,
+            samples.as_ptr(),
+        );
+        assert!(!clut.is_null(), "cmsStageAllocCLut16bitGranular failed");
+        assert!(sys::cmsPipelineInsertStage(lut, sys::cmsAT_END, clut) != 0);
+        let post = sys::cmsStageAllocToneCurves(ptr::null_mut(), out_ch, ptr::null());
+        assert!(!post.is_null(), "identity output curves failed");
+        assert!(sys::cmsPipelineInsertStage(lut, sys::cmsAT_END, post) != 0);
+        assert!(
+            sys::cmsWriteTag(
+                raw,
+                tag::A_TO_B0 as sys::cmsTagSignature,
+                lut.cast_const().cast()
+            ) != 0,
+            "cmsWriteTag failed for A2B0"
+        );
+        sys::cmsPipelineFree(lut);
+    }
+    wrap(raw)
+}
+
 /// Overwrites the `wtpt` tag with the XYZ of the chromaticity `white` (via `cmsxyY2XYZ`).
 fn write_wtpt(raw: sys::cmsHPROFILE, white: [f64; 2]) {
     let wp = xyy(white[0], white[1], 1.0);
@@ -673,6 +747,45 @@ mod tests {
             "default wtpt X = {}",
             wtpt[0]
         );
+    }
+
+    /// The empirical guard the CLUT probe's docs promise: the identity tone-curve stages are
+    /// not collapsed by `PreOptimize` under `NOOPTIMIZE`, so exact node coordinates driven
+    /// through `cmsDoTransform` reproduce the stored node samples (to 16-bit quantization).
+    #[test]
+    fn clut_probe_profile_reproduces_nodes_through_do_transform() {
+        use crate::xform::{FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, INTENT_PERCEPTUAL, TYPE_RGB_DBL};
+        set_quiet_log_handler();
+        // 3×3×3 RGB→RGB grid with distinct, well-spread node values.
+        let samples: Vec<u16> = (0..27 * 3)
+            .map(|i| (i * 811) % 65536)
+            .map(|v| v as u16)
+            .collect();
+        let probe = clut_probe_profile(&[3, 3, 3], &samples, 3);
+        assert_eq!(probe.device_class(), fourcc(b"link"));
+        let t = crate::xform::Transform::devicelink(
+            &probe,
+            TYPE_RGB_DBL,
+            TYPE_RGB_DBL,
+            INTENT_PERCEPTUAL,
+            FLAGS_NOCACHE | FLAGS_NOOPTIMIZE,
+        );
+        for (xi, x) in [0.0, 0.5, 1.0].into_iter().enumerate() {
+            for (yi, y) in [0.0, 0.5, 1.0].into_iter().enumerate() {
+                for (zi, z) in [0.0, 0.5, 1.0].into_iter().enumerate() {
+                    let node = (xi * 3 + yi) * 3 + zi;
+                    let out = t.apply_f64(&[x, y, z], 1, 3);
+                    for ch in 0..3 {
+                        let want = f64::from(samples[node * 3 + ch]) / 65535.0;
+                        assert!(
+                            (out[ch] - want).abs() < 1e-3,
+                            "node {node} ch {ch}: {} vs {want}",
+                            out[ch]
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// `gray()` writes the curve under `kTRC` (documented on the synthesizer).

@@ -41,19 +41,19 @@ pub use color::{
 };
 pub use curves::ToneCurve;
 pub use synth::{
-    cicp, cmyk_ink_limiting_devicelink, cmyk_prtr_v2, cmyk_prtr_v4, display_p3_srgb_trc, gray,
-    lab2, lab4, measurement, rgb_linearization_devicelink, rgb_matrix_shaper,
-    rgb_matrix_shaper_d65_wtpt, rgb_matrix_shaper_v2, scnr_lut, scnr_matrix_shaper, srgb,
-    viewing_conditions, xyz,
+    cicp, clut_probe_profile, cmyk_ink_limiting_devicelink, cmyk_prtr_v2, cmyk_prtr_v4,
+    display_p3_srgb_trc, gray, lab2, lab4, measurement, rgb_linearization_devicelink,
+    rgb_matrix_shaper, rgb_matrix_shaper_d65_wtpt, rgb_matrix_shaper_v2, scnr_lut,
+    scnr_matrix_shaper, srgb, viewing_conditions, xyz,
 };
 pub use xform::{
-    FLAGS_BLACKPOINTCOMPENSATION, FLAGS_GAMUTCHECK, FLAGS_HIGHRESPRECALC, FLAGS_LOWRESPRECALC,
-    FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, FLAGS_SOFTPROOFING, INTENT_ABSOLUTE_COLORIMETRIC,
-    INTENT_PERCEPTUAL, INTENT_RELATIVE_COLORIMETRIC, INTENT_SATURATION, TYPE_CMYK_8, TYPE_CMYK_16,
-    TYPE_CMYK_DBL, TYPE_CMYK_FLT, TYPE_GRAY_8, TYPE_GRAY_16, TYPE_GRAY_DBL, TYPE_Lab_16,
-    TYPE_Lab_DBL, TYPE_LabV2_16, TYPE_RGB_8, TYPE_RGB_16, TYPE_RGB_DBL, TYPE_RGB_FLT, TYPE_XYZ_16,
-    TYPE_XYZ_DBL, Transform, detect_black_point, detect_destination_black_point, set_alarm_codes,
-    set_quiet_log_handler,
+    ClutPipeline, FLAGS_BLACKPOINTCOMPENSATION, FLAGS_GAMUTCHECK, FLAGS_HIGHRESPRECALC,
+    FLAGS_LOWRESPRECALC, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, FLAGS_SOFTPROOFING,
+    INTENT_ABSOLUTE_COLORIMETRIC, INTENT_PERCEPTUAL, INTENT_RELATIVE_COLORIMETRIC,
+    INTENT_SATURATION, TYPE_CMYK_8, TYPE_CMYK_16, TYPE_CMYK_DBL, TYPE_CMYK_FLT, TYPE_GRAY_8,
+    TYPE_GRAY_16, TYPE_GRAY_DBL, TYPE_Lab_16, TYPE_Lab_DBL, TYPE_LabV2_16, TYPE_RGB_8, TYPE_RGB_16,
+    TYPE_RGB_DBL, TYPE_RGB_FLT, TYPE_XYZ_16, TYPE_XYZ_DBL, Transform, detect_black_point,
+    detect_destination_black_point, set_alarm_codes, set_quiet_log_handler,
 };
 
 /// ICC tag signatures (a four-character code as a big-endian `u32`) accepted by the `tag` argument

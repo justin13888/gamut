@@ -5,6 +5,7 @@
 //! construction, so evaluation carries no per-sample validation beyond buffer lengths and a
 //! constructed [`Pipeline`] can always run.
 
+use crate::clut::ClutTable;
 use crate::curve::ToneCurve;
 use crate::error::{CmmError, Result};
 use crate::transform::Transform;
@@ -23,10 +24,10 @@ pub const MAX_CHANNELS: u8 = 16;
 /// # Growth plan
 ///
 /// The enum is `#[non_exhaustive]` and grows additively with the CMM phases: [`Curves`]
-/// (#325, landed), `Clut` (#326), and the `MatrixN`/`XyzToLab`/`LabToXyz` stages profile
-/// linking needs (#327/#328) each arrive **together with their `eval` arm** — the
-/// crate-internal `eval` match is deliberately exhaustive (no wildcard), so the compiler forces
-/// every future variant to bring its evaluation in the same change.
+/// (#325, landed), [`Clut`](Stage::Clut) (#326, landed), and the `MatrixN`/`XyzToLab`/
+/// `LabToXyz` stages profile linking needs (#327/#328) each arrive **together with their
+/// `eval` arm** — the crate-internal `eval` match is deliberately exhaustive (no wildcard), so
+/// the compiler forces every future variant to bring its evaluation in the same change.
 ///
 /// [`Curves`]: Stage::Curves
 #[derive(Debug, Clone)]
@@ -55,6 +56,15 @@ pub enum Stage {
     /// matrix-shaper TRCs). Each [`ToneCurve`] clamps its channel to `[0, 1]` on both sides
     /// (see [`ToneCurve::eval`]).
     Curves(Vec<ToneCurve>),
+    /// A multi-dimensional colour lookup table: interpolates
+    /// [`input_channels`](ClutTable::input_channels) samples through a validated grid to
+    /// [`output_channels`](ClutTable::output_channels) samples.
+    ///
+    /// The stage form of the CLUT every ICC LUT transform carries (`lut8`/`lut16`,
+    /// `lutAToB`/`lutBToA`, ICC.1:2022 §10.10–§10.13). Interpolation semantics — lcms2's
+    /// tetrahedral/multilinear split, input clamping, and edge rules — are documented on
+    /// [`ClutTable`].
+    Clut(ClutTable),
     /// A 3-in/3-out affine matrix: `out = m · in + offset`.
     ///
     /// `m` is row-major (`out[r] = m[r][0]·in[0] + m[r][1]·in[1] + m[r][2]·in[2] + offset[r]`)
@@ -76,6 +86,7 @@ impl Stage {
             // Counts above 255 saturate for reporting; anything above MAX_CHANNELS is
             // rejected by `Pipeline::new` either way.
             Self::Curves(curves) => u8::try_from(curves.len()).unwrap_or(u8::MAX),
+            Self::Clut(table) => table.input_channels(),
             Self::Matrix { .. } => 3,
         }
     }
@@ -86,6 +97,7 @@ impl Stage {
         match self {
             Self::Identity { channels } | Self::Clamp { channels } => *channels,
             Self::Curves(curves) => u8::try_from(curves.len()).unwrap_or(u8::MAX),
+            Self::Clut(table) => table.output_channels(),
             Self::Matrix { .. } => 3,
         }
     }
@@ -110,6 +122,7 @@ impl Stage {
                     *out = curve.eval(v);
                 }
             }
+            Self::Clut(table) => table.eval(input, output),
             Self::Matrix { m, offset } => {
                 for ((out, row), off) in output.iter_mut().zip(m).zip(offset) {
                     *out = row[0] * input[0] + row[1] * input[1] + row[2] * input[2] + off;

@@ -33,6 +33,9 @@
 //! - [`curve`] — [`ToneCurve`]: 1-D tone-curve evaluation, monotonicity detection, and
 //!   inversion over `gamut-icc`'s parsed `curveType`/`parametricCurveType` elements, applied
 //!   per channel by [`Stage::Curves`].
+//! - [`clut`] — [`ClutTable`]: multi-dimensional CLUT interpolation (lcms2's tetrahedral
+//!   decomposition and N-D multilinear, selectable via [`ClutInterpolation`]) over
+//!   `gamut-icc`'s parsed CLUT elements, applied by [`Stage::Clut`].
 //! - [`transform`] — the object-safe [`Transform`] entry trait every runnable transform
 //!   implements.
 //! - [`error`] — the typed [`CmmError`] and the crate [`Result`].
@@ -64,11 +67,14 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod clut;
 pub mod curve;
 pub mod error;
 pub mod pipeline;
 pub mod transform;
 
+#[doc(inline)]
+pub use clut::{ClutInterpolation, ClutTable};
 #[doc(inline)]
 pub use curve::ToneCurve;
 #[doc(inline)]
