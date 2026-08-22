@@ -221,9 +221,9 @@ pub fn write_alph_with_effort(
     effort: Effort,
 ) -> Result<Vec<u8>> {
     let mut best = write_raw_alph(plane, width, height);
-    // The compressed path's pre-filter is a free choice the decoder inverts either way. At most
-    // rungs only the magnitude-chosen filter is tried; the top rungs search all four, which costs a
-    // full VP8L encode each and is why it sits where it does on the ladder.
+    // The compressed path's pre-filter is a free choice the decoder inverts either way. Most rungs
+    // leave it off and let the VP8L spatial predictors do the decorrelation; the top rungs search
+    // all four, which costs a full VP8L encode each and is why it sits where it does on the ladder.
     let methods: &[AlphaFilter] = match EFFORT_TABLE[effort.level() as usize].alpha {
         AlphaEffort::Balanced => &[AlphaFilter::None],
         AlphaEffort::Exhaustive => &[

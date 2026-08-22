@@ -317,12 +317,9 @@ impl<'a> BoolDecoder<'a> {
 }
 
 /// Maximum interior-node depth of any VP8 tree (the 12-value DCT token tree has depth 11); sizes the
-/// fixed path buffer in [`BoolEncoder::put_tree_start`].
+/// fixed path buffer in [`walk_tree`].
 const MAX_TREE_DEPTH: usize = 16;
 
-/// Finds the root-to-leaf path to `value` in `tree`, starting at interior node `start`, recording
-/// `(prob_index, bit)` pairs into `out` from depth `depth`. Returns the total path length, or `None`
-/// if `value` is not a leaf reachable from `start`.
 /// Visits the `(probability index, bit)` pairs that code `value` in `tree` starting at node
 /// `start`, in emission order (RFC 6386 §8).
 ///
@@ -340,6 +337,9 @@ pub fn walk_tree(tree: &Tree, value: usize, start: usize, mut visit: impl FnMut(
     }
 }
 
+/// Finds the root-to-leaf path to `value` in `tree`, starting at interior node `start`, recording
+/// `(prob_index, bit)` pairs into `out` from depth `depth`. Returns the total path length, or `None`
+/// if `value` is not a leaf reachable from `start`.
 fn find_tree_path(
     tree: &Tree,
     start: i32,
