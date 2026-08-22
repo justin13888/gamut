@@ -45,6 +45,11 @@ const BPRED_SAD_PENALTY: u32 = 160;
 /// cost.
 const BPRED_GATE_SAD_PER_PIXEL: u32 = 6;
 
+/// The largest non-final token partition the bitstream can describe: its size is a 3-byte
+/// little-endian prefix (RFC 6386 §9.5), so 16 MiB - 1. The final partition carries no prefix —
+/// its length is the remainder — so it is unbounded.
+pub const MAX_TOKEN_PARTITION_SIZE: u32 = (1 << 24) - 1;
+
 /// Segment-id coding tree (RFC 6386 §10 `mb_segment_tree`): four leaves over two boolean decisions.
 const MB_SEGMENT_TREE: &[i8] = &[2, 4, 0, -1, -2, -3];
 
@@ -1162,20 +1167,36 @@ fn decode_mb_tokens(
 /// Encodes a [`Yuv420`] image as a VP8 key-frame bitstream (the `VP8 ` chunk payload), returning the
 /// bitstream and the encoder's reconstruction (the tier-2 oracle: it must equal any decoder's output).
 /// Uses the normal loop filter.
-#[must_use]
-pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> (Vec<u8>, FrameBuffers) {
+///
+/// # Errors
+///
+/// As [`encode_frame_filtered`].
+pub fn encode_frame(yuv: &Yuv420, quant_index: u8) -> Result<(Vec<u8>, FrameBuffers)> {
     encode_frame_filtered(yuv, quant_index, EncodeOptions::default())
 }
 
 /// Encodes a frame with explicit [`EncodeOptions`] — the loop-filter type and whether to emit
 /// quantizer segments. [`encode_frame`] uses the defaults (normal filter, unsegmented). This lets the
 /// differential oracle drive the alternative encoder paths.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] when the coded frame outgrows one of the bitstream's own
+/// partition-size fields: the control partition past
+/// [`MAX_FIRST_PARTITION_SIZE`](super::header::MAX_FIRST_PARTITION_SIZE) (19 bits, RFC 6386 §9.1),
+/// or a non-final token partition past [`MAX_TOKEN_PARTITION_SIZE`] (24 bits, §9.5). Both are
+/// format ceilings a large, highly detailed frame can genuinely reach — the mode records of a
+/// `B_PRED`-heavy frame are what fill the control partition — and neither can be encoded, so the
+/// alternative to reporting them is emitting a stream no decoder accepts. libwebp reports the same
+/// condition (`VP8_ENC_ERROR_PARTITION0_OVERFLOW`) rather than degrading quality behind the
+/// caller's back, and neither does this. The lever is [`EncodeOptions::effort`]: `B_PRED` is what
+/// fills partition 0, so [`Effort::Fastest`] (which never emits it) encodes the whole WebP canvas
+/// range, up to 16383x16383, at any detail level.
 pub fn encode_frame_filtered(
     yuv: &Yuv420,
     quant_index: u8,
     opts: EncodeOptions,
-) -> (Vec<u8>, FrameBuffers) {
+) -> Result<(Vec<u8>, FrameBuffers)> {
     let mut header = frame_header(yuv.width(), yuv.height(), quant_index, opts.simple_filter);
     if opts.segmented {
         header.segmentation = Segmentation {
@@ -1397,18 +1418,26 @@ pub fn encode_frame_filtered(
     let part0 = modes.finish();
     let token_parts: Vec<Vec<u8>> = residuals.into_iter().map(BoolEncoder::finish).collect();
     let mut out = Vec::new();
-    header::write_uncompressed_chunk(&header, part0.len() as u32, &mut out);
+    let part0_len = u32::try_from(part0.len()).unwrap_or(u32::MAX);
+    header::write_uncompressed_chunk(&header, part0_len, &mut out)?;
     out.extend_from_slice(&part0);
     // The first N-1 token-partition sizes are stored as 3-byte little-endian prefixes (§9.5); the
-    // last partition's size is implied by the remainder.
+    // last partition's size is implied by the remainder — which is why only the first N-1 are
+    // bounded here.
     for part in &token_parts[..n - 1] {
-        let len = part.len() as u32;
+        let len = u32::try_from(part.len()).unwrap_or(u32::MAX);
+        if len > MAX_TOKEN_PARTITION_SIZE {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "VP8: token partition exceeds the 3-byte size prefix",
+            ));
+        }
         out.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8]);
     }
     for part in &token_parts {
         out.extend_from_slice(part);
     }
-    (out, recon)
+    Ok((out, recon))
 }
 
 /// Splits the token-partition section (everything after the control partition) into `n` boolean
@@ -1662,7 +1691,8 @@ mod tests {
     #[test]
     fn bpred_is_exercised_and_bit_exact() {
         let yuv = detailed(48, 48);
-        let (bitstream, recon) = encode_frame(&yuv, 8);
+        let (bitstream, recon) =
+            encode_frame(&yuv, 8).expect("fixture fits the partition-size fields");
         assert!(
             mode_stats(&bitstream).0 > 0,
             "detailed content should select B_PRED for some macroblocks"
@@ -1691,7 +1721,7 @@ mod tests {
             vec![128u8; cw * ch],
         )
         .unwrap();
-        let (bits, recon) = encode_frame(&yuv, 60);
+        let (bits, recon) = encode_frame(&yuv, 60).expect("fixture fits the partition-size fields");
         assert!(
             mode_stats(&bits).1 > 0,
             "flat content should skip macroblocks"
@@ -1705,7 +1735,8 @@ mod tests {
     /// Tier-2: the encoder's reconstruction must equal the native decoder's output, bit-for-bit.
     fn assert_encoder_recon_matches_decoder(width: u32, height: u32, q: u8) {
         let yuv = pattern(width, height);
-        let (bitstream, recon) = encode_frame(&yuv, q);
+        let (bitstream, recon) =
+            encode_frame(&yuv, q).expect("fixture fits the partition-size fields");
         let decoded = decode_frame(&bitstream).expect("decode");
         let enc = recon.to_yuv420();
         let dec = decoded.to_yuv420();
@@ -1744,7 +1775,8 @@ mod tests {
                     partitions: 1,
                     ..Default::default()
                 };
-                let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
+                let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
+                    .expect("fixture fits the partition-size fields");
                 let dec = decode_frame(&bits).expect("decode");
                 let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
                 assert_eq!(enc.y(), dec.y(), "luma simple={simple} q{q}");
@@ -1766,7 +1798,8 @@ mod tests {
                 partitions: 1,
                 ..Default::default()
             };
-            let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
+            let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
+                .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
             let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
             assert_eq!(enc.y(), dec.y(), "luma q{q}");
@@ -1787,7 +1820,8 @@ mod tests {
                 partitions,
                 ..Default::default()
             };
-            let (bits, recon) = encode_frame_filtered(&yuv, 30, opts);
+            let (bits, recon) = encode_frame_filtered(&yuv, 30, opts)
+                .expect("fixture fits the partition-size fields");
             let dec = decode_frame(&bits).expect("decode");
             let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
             assert_eq!(enc.y(), dec.y(), "luma p{partitions}");
@@ -1814,7 +1848,8 @@ mod tests {
                         },
                         ..Default::default()
                     };
-                    let (bits, recon) = encode_frame_filtered(&yuv, q, opts);
+                    let (bits, recon) = encode_frame_filtered(&yuv, q, opts)
+                        .expect("fixture fits the partition-size fields");
                     let dec = decode_frame(&bits).expect("decode");
                     let (enc, dec) = (recon.to_yuv420(), dec.to_yuv420());
                     assert_eq!(enc.y(), dec.y(), "luma ref={ref_d} mode={mode_d} q{q}");
@@ -1830,7 +1865,7 @@ mod tests {
         // RFC 6386 §9.1: the frame-tag version selects profiles 0–3 (4–7 undefined). The version sits
         // in bits 1–3 of byte 0; patching it must not change which (valid) frame decodes.
         let yuv = pattern(32, 32);
-        let (bits, _) = encode_frame(&yuv, 40);
+        let (bits, _) = encode_frame(&yuv, 40).expect("fixture fits the partition-size fields");
         let patch_version = |v: u8| {
             let mut p = bits.clone();
             p[0] = (p[0] & !0b1110) | (v << 1);
@@ -1856,7 +1891,8 @@ mod tests {
     #[test]
     fn decode_rejects_truncated_first_partition() {
         let yuv = pattern(16, 16);
-        let (mut bitstream, _) = encode_frame(&yuv, 40);
+        let (mut bitstream, _) =
+            encode_frame(&yuv, 40).expect("fixture fits the partition-size fields");
         bitstream.truncate(UNCOMPRESSED_CHUNK_LEN + 1);
         let _ = decode_frame(&bitstream);
     }
@@ -1970,7 +2006,7 @@ mod tests {
     #[test]
     fn decode_rejects_zero_dimension() {
         let yuv = pattern(16, 16);
-        let (mut bits, _) = encode_frame(&yuv, 40);
+        let (mut bits, _) = encode_frame(&yuv, 40).expect("fixture fits the partition-size fields");
         // Clear the 14-bit width field (low 6 bits live in byte 7) while leaving height non-zero, so
         // only the `width == 0` half of the guard fires: `||` flipped to `&&` would let it through.
         bits[6] = 0;
@@ -2010,7 +2046,8 @@ mod tests {
             Yuv420::chroma_height(h) as usize,
         );
         let yuv = Yuv420::new(w, h, y, vec![128; cw * ch], vec![128; cw * ch]).unwrap();
-        let (bits, recon) = encode_frame_filtered(&yuv, 40, EncodeOptions::default());
+        let (bits, recon) = encode_frame_filtered(&yuv, 40, EncodeOptions::default())
+            .expect("fixture fits the partition-size fields");
         let dec = decode_frame(&bits).expect("decode");
         assert_eq!(recon.to_yuv420().y(), dec.to_yuv420().y());
     }
@@ -2034,7 +2071,7 @@ mod tests {
             vec![128; cw * ch],
         )
         .unwrap();
-        let (bits, _) = encode_frame(&yuv, 127); // coarsest quantizer → every macroblock skips
+        let (bits, _) = encode_frame(&yuv, 127).expect("fixture fits the partition-size fields"); // coarsest quantizer → every macroblock skips
         let chunk = header::read_uncompressed_chunk(&bits).expect("chunk");
         let end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
         assert!(

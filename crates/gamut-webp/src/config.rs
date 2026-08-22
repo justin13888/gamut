@@ -12,6 +12,15 @@
 ///
 /// The default is [`Effort::Default`] (level 4), matching libwebp's `WebPConfigInit`.
 ///
+/// One interaction is worth knowing about on very large lossy frames. Levels 1 and up emit VP8's
+/// 4x4 (`B_PRED`) modes, whose per-macroblock records fill the control partition, and that
+/// partition's size field is only 19 bits (RFC 6386 §9.1). Past roughly twelve megapixels of
+/// highly detailed content the records no longer fit, and the encode fails with
+/// [`Error::InvalidInput`](gamut_core::Error) rather than emitting an unreadable file — the same
+/// condition libwebp reports as `VP8_ENC_ERROR_PARTITION0_OVERFLOW`. [`Effort::Fastest`] never
+/// emits `B_PRED`, so it covers the whole canvas range (up to 16383x16383) at any detail level.
+/// Lossless encodes are unaffected: VP8L has no such field.
+///
 /// The discriminants **are** the libwebp method numbers and are a permanent, append-only part of
 /// the contract: they are what [`level`](Self::level) and [`from_level`](Self::from_level) round
 /// trip, and what a numeric CLI or FFI knob carries.

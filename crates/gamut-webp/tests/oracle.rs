@@ -274,7 +274,8 @@ fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
 
     for &(w, h) in &[(16u32, 16u32), (32, 32), (48, 48), (49, 33), (64, 16)] {
         for &quant_index in &[0u8, 8, 40] {
-            let (payload, _) = encode_frame(&detailed_yuv(w, h), quant_index);
+            let (payload, _) = encode_frame(&detailed_yuv(w, h), quant_index)
+                .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload);
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -365,7 +366,8 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
         // (33, 145) spans ten macroblock rows, so the eight-partition cases route across every one.
         for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33), (33, 145)] {
             for &q in &[12u8, 48] {
-                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
+                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts)
+                    .expect("fixture fits the partition-size fields");
                 let webp = write_simple_lossy(&payload);
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -396,7 +398,8 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
         (33, 49),
     ] {
         for &quant_index in &[0u8, 20, 60, 110] {
-            let (payload, _) = encode_frame(&synthetic_yuv(w, h), quant_index);
+            let (payload, _) = encode_frame(&synthetic_yuv(w, h), quant_index)
+                .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload);
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -443,7 +446,8 @@ fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
     ];
     for &(w, h) in &dims {
         for &quant_index in &[12u8, 56] {
-            let (payload, _) = encode_frame(&photo_like_yuv(w, h, 0x7e57), quant_index);
+            let (payload, _) = encode_frame(&photo_like_yuv(w, h, 0x7e57), quant_index)
+                .expect("fixture fits the partition-size fields");
             let webp = write_simple_lossy(&payload);
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -492,7 +496,11 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
     // would make the conformance assertions below vacuous.
     {
         let yuv = detailed_yuv(48, 48);
-        let base = write_simple_lossy(&encode_frame(&yuv, 16).0);
+        let base = write_simple_lossy(
+            &encode_frame(&yuv, 16)
+                .expect("fixture fits the partition-size fields")
+                .0,
+        );
         let with = write_simple_lossy(
             &encode_frame_filtered(
                 &yuv,
@@ -502,6 +510,7 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                     ..Default::default()
                 },
             )
+            .expect("fixture fits the partition-size fields")
             .0,
         );
         assert_ne!(
@@ -518,7 +527,8 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                     loop_filter_deltas: deltas,
                     ..Default::default()
                 };
-                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
+                let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts)
+                    .expect("fixture fits the partition-size fields");
                 let webp = write_simple_lossy(&payload);
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
@@ -542,7 +552,8 @@ fn gamut_decodes_patched_vp8_profiles_like_libwebp() {
     use gamut_webp::vp8::frame::{decode_frame, encode_frame};
 
     for &(w, h) in &[(32u32, 32u32), (49, 33)] {
-        let (payload, _) = encode_frame(&detailed_yuv(w, h), 24);
+        let (payload, _) =
+            encode_frame(&detailed_yuv(w, h), 24).expect("fixture fits the partition-size fields");
         for version in 1u8..=3 {
             let mut patched = payload.clone();
             patched[0] = (patched[0] & !0b1110) | (version << 1);
@@ -1105,7 +1116,8 @@ fn libwebp_decodes_every_effort_level_bit_exactly() {
                     ("detailed", detailed_yuv(w, h)),
                     ("photo", photo_like_yuv(w, h, 7)),
                 ] {
-                    let (payload, _) = encode_frame_filtered(&yuv, q, opts);
+                    let (payload, _) = encode_frame_filtered(&yuv, q, opts)
+                        .expect("fixture fits the partition-size fields");
                     let webp = write_simple_lossy(&payload);
                     let lib = libwebp_decode_yuv(&webp);
                     let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();

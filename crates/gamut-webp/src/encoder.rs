@@ -232,7 +232,7 @@ impl WebpEncoder {
                     effort: self.config.effort,
                     ..EncodeOptions::default()
                 };
-                Ok(encode_frame_filtered(yuv, quality_to_quant(self.config.quality), opts).0)
+                Ok(encode_frame_filtered(yuv, quality_to_quant(self.config.quality), opts)?.0)
             }
         }
     }
