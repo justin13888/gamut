@@ -30,6 +30,9 @@
 //! - [`pipeline`] — the keystone: [`Stage`] (the evaluation primitive) and [`Pipeline`] (a
 //!   validated chain of stages), plus the [`MAX_CHANNELS`] bound that keeps evaluation
 //!   allocation-free.
+//! - [`curve`] — [`ToneCurve`]: 1-D tone-curve evaluation, monotonicity detection, and
+//!   inversion over `gamut-icc`'s parsed `curveType`/`parametricCurveType` elements, applied
+//!   per channel by [`Stage::Curves`].
 //! - [`transform`] — the object-safe [`Transform`] entry trait every runnable transform
 //!   implements.
 //! - [`error`] — the typed [`CmmError`] and the crate [`Result`].
@@ -61,10 +64,13 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod curve;
 pub mod error;
 pub mod pipeline;
 pub mod transform;
 
+#[doc(inline)]
+pub use curve::ToneCurve;
 #[doc(inline)]
 pub use error::{CmmError, Result};
 #[doc(inline)]

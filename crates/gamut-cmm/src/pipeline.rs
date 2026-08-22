@@ -5,6 +5,7 @@
 //! construction, so evaluation carries no per-sample validation beyond buffer lengths and a
 //! constructed [`Pipeline`] can always run.
 
+use crate::curve::ToneCurve;
 use crate::error::{CmmError, Result};
 use crate::transform::Transform;
 
@@ -21,11 +22,13 @@ pub const MAX_CHANNELS: u8 = 16;
 ///
 /// # Growth plan
 ///
-/// The enum is `#[non_exhaustive]` and grows additively with the CMM phases: `Curves` (#325),
-/// `Clut` (#326), and the `MatrixN`/`XyzToLab`/`LabToXyz` stages profile linking needs
-/// (#327/#328) each arrive **together with their `eval` arm** — the crate-internal `eval` match
-/// is deliberately exhaustive (no wildcard), so the compiler forces every future variant to
-/// bring its evaluation in the same change.
+/// The enum is `#[non_exhaustive]` and grows additively with the CMM phases: [`Curves`]
+/// (#325, landed), `Clut` (#326), and the `MatrixN`/`XyzToLab`/`LabToXyz` stages profile
+/// linking needs (#327/#328) each arrive **together with their `eval` arm** — the
+/// crate-internal `eval` match is deliberately exhaustive (no wildcard), so the compiler forces
+/// every future variant to bring its evaluation in the same change.
+///
+/// [`Curves`]: Stage::Curves
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Stage {
@@ -44,6 +47,14 @@ pub enum Stage {
         /// The channel count clamped, in `1..=`[`MAX_CHANNELS`].
         channels: u8,
     },
+    /// Per-channel 1-D tone curves: applies `curves[i]` to sample `i` — n-in/n-out, with `n`
+    /// the number of curves.
+    ///
+    /// The stage form of the "curve set" every ICC LUT transform carries (the input/output
+    /// tables of `lut8`/`lut16`, the A/M/B curves of `lutAToB`/`lutBToA`, and the
+    /// matrix-shaper TRCs). Each [`ToneCurve`] clamps its channel to `[0, 1]` on both sides
+    /// (see [`ToneCurve::eval`]).
+    Curves(Vec<ToneCurve>),
     /// A 3-in/3-out affine matrix: `out = m · in + offset`.
     ///
     /// `m` is row-major (`out[r] = m[r][0]·in[0] + m[r][1]·in[1] + m[r][2]·in[2] + offset[r]`)
@@ -62,6 +73,9 @@ impl Stage {
     pub fn input_channels(&self) -> u8 {
         match self {
             Self::Identity { channels } | Self::Clamp { channels } => *channels,
+            // Counts above 255 saturate for reporting; anything above MAX_CHANNELS is
+            // rejected by `Pipeline::new` either way.
+            Self::Curves(curves) => u8::try_from(curves.len()).unwrap_or(u8::MAX),
             Self::Matrix { .. } => 3,
         }
     }
@@ -71,6 +85,7 @@ impl Stage {
     pub fn output_channels(&self) -> u8 {
         match self {
             Self::Identity { channels } | Self::Clamp { channels } => *channels,
+            Self::Curves(curves) => u8::try_from(curves.len()).unwrap_or(u8::MAX),
             Self::Matrix { .. } => 3,
         }
     }
@@ -88,6 +103,11 @@ impl Stage {
                 for (out, &v) in output.iter_mut().zip(input) {
                     // lcms2 fclamp semantics: NaN and negatives → 0.0, above 1.0 → 1.0.
                     *out = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+                }
+            }
+            Self::Curves(curves) => {
+                for ((out, curve), &v) in output.iter_mut().zip(curves).zip(input) {
+                    *out = curve.eval(v);
                 }
             }
             Self::Matrix { m, offset } => {
