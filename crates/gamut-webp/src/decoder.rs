@@ -196,7 +196,7 @@ impl WebpDecoder {
                 let (w, h) = (dims.width as usize, dims.height as usize);
                 let alpha = alpha::read_alph(payload, w, h)?;
                 let mut out = Vec::with_capacity(w * h * 4);
-                for (px, &a) in rgb.chunks_exact(3).zip(alpha.iter()) {
+                for (px, &a) in rgb.as_chunks::<3>().0.iter().zip(alpha.iter()) {
                     out.extend_from_slice(&[px[0], px[1], px[2], a]);
                 }
                 Ok((dims, PixelFormat::Rgba8, out))

@@ -657,7 +657,7 @@ impl AvifImage {
             T::from_canvas_fill(overlay.canvas_fill_value[3]),
         ];
         let mut canvas = vec![T::default(); len];
-        for px in canvas.chunks_exact_mut(4) {
+        for px in canvas.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&fill);
         }
         for (&input_id, &(dx, dy)) in item.derivation_target_ids().iter().zip(&overlay.offsets) {
@@ -909,7 +909,7 @@ fn frame_to_rgba<T: RgbaSample>(item: &AvifItem<'_>, frame: &DecodedFrame) -> Re
     let mut out = vec![T::default(); len];
 
     if frame.chroma == ChromaFormat::Monochrome {
-        for (i, px) in out.chunks_exact_mut(4).enumerate() {
+        for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let g = expand_gray::<T>(frame.y[i], frame.bit_depth, range);
             px.copy_from_slice(&[g, g, g, opaque]);
         }
@@ -925,7 +925,7 @@ fn frame_to_rgba<T: RgbaSample>(item: &AvifItem<'_>, frame: &DecodedFrame) -> Re
                 "AVIF: identity matrix (mc = 0) requires 4:4:4 chroma",
             ));
         }
-        for (i, px) in out.chunks_exact_mut(4).enumerate() {
+        for (i, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             px.copy_from_slice(&[
                 rescale::<T>(frame.cr[i], max_in),
                 rescale::<T>(frame.y[i], max_in),
@@ -1007,7 +1007,7 @@ fn apply_alpha<T: RgbaSample>(
         ));
     }
     let max = (1u32 << alpha.bit_depth) - 1;
-    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         // Depth 8 onto the `u8` surface needs no special case: `(s * 255 + 127) / 255 == s` for
         // every `s` in `0..=255`, so the general rescale is already the identity there.
         px[3] = rescale::<T>(alpha.y[i], max);

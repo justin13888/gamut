@@ -57,7 +57,9 @@ fn rgba_roundtrips_in_gamut() {
                 .decode_image(&tiff)
                 .expect("rgb");
             let expect_rgb: Vec<u8> = src
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .flat_map(|p| [p[0], p[1], p[2]])
                 .collect();
             assert_eq!(rgb.as_samples(), expect_rgb.as_slice());

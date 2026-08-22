@@ -102,7 +102,9 @@ struct DecodedImage {
 /// as the file stores them.
 fn samples_u16(packed: &[u8], order: ByteOrder) -> Vec<u16> {
     packed
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|s| order.u16([s[0], s[1]]))
         .collect()
 }

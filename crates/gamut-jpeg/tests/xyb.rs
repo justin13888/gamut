@@ -26,7 +26,9 @@ fn rgb_gradient(w: u32, h: u32) -> Vec<u8> {
 /// linear sRGB → sRGB bytes.
 fn xyb_samples_to_srgb(samples: &[u8]) -> Vec<u8> {
     samples
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .flat_map(|px| {
             let scaled = [
                 f64::from(px[0]) / 255.0,
