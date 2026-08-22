@@ -58,14 +58,18 @@ assert_eq!(dst, [0.75, 0.5, 1.0]);
 
 The architectural keystone (epic #323, scaffold #324): the `Pipeline`/`Stage` evaluation model
 with construction-time channel validation, the object-safe `Transform` entry trait, and the
-typed `CmmError`. Stages cover identity, clamp, the 3×3 affine matrix, per-channel tone
-curves (#325) — `ToneCurve` evaluates and inverts `curveType`/`parametricCurveType` elements
-(analytic closed forms plus an lcms2-shaped numeric reversal) behind `Stage::Curves` — and
-multi-dimensional CLUTs (#326): `ClutTable` interpolates 1–15-input grids behind `Stage::Clut`,
-with lcms2's exact tetrahedral decomposition (default from 3 inputs, recursing lcms2's
-slice-and-blend above 3-D) and selectable N-D multilinear (`ClutInterpolation`, the hook #328
-uses for Lab-indexed CLUTs). Profile linking, rendering intents/BPC, and transform chaining
-land phase by phase — see [STATUS.md](STATUS.md).
+typed `CmmError`. Stages cover identity, clamp, the 3×3 affine matrix and its rectangular
+`MatrixN` sibling, per-channel tone curves (#325) — `ToneCurve` evaluates and inverts
+`curveType`/`parametricCurveType` elements (analytic closed forms plus an lcms2-shaped numeric
+reversal) behind `Stage::Curves` — and multi-dimensional CLUTs (#326): `ClutTable`
+interpolates 1–15-input grids behind `Stage::Clut`, with lcms2's exact tetrahedral
+decomposition (default from 3 inputs, recursing lcms2's slice-and-blend above 3-D) and
+selectable N-D multilinear (`ClutInterpolation`, the hook #328 uses for Lab-indexed CLUTs).
+Profile linking has begun (#327): `link::{device_to_pcs, pcs_to_device}` build runnable
+pipelines from **matrix/TRC ("shaper") profiles** — RGB and gray, v2 and v4, both directions —
+with the settled chromatic-adaptation convention (colorants as-is, `chad` unread on the
+relative path) documented in [STATUS.md](STATUS.md). LUT-profile linking, rendering
+intents/BPC, and transform chaining land phase by phase — see [STATUS.md](STATUS.md).
 
 ## Deferred
 
