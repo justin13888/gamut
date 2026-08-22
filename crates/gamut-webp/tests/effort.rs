@@ -532,6 +532,23 @@ fn smooth_rgb(w: u32, h: u32) -> Vec<u8> {
         .collect()
 }
 
+/// A tiled motif with slow drift, in a few hundred colours. The other fixtures are all either
+/// unique-per-pixel or a handful of flat colours, and neither shape lets the VP8L ladder's
+/// *parse* plans win: long backward matches only exist when content repeats, lazy matching only
+/// pays when the better match starts one pixel later than the greedy one would take, and the
+/// colour cache's size only matters in the range between "everything fits" and "nothing repeats".
+fn tiled_rgba(w: u32, h: u32) -> Vec<u8> {
+    (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            let motif = (x % 13) * 7 + (y % 11) * 3;
+            let drift = (x / 13 + y / 11) % 5;
+            let v = (motif + drift * 17) as u8;
+            [v, v.wrapping_mul(3), v.wrapping_add(90), 0xff]
+        })
+        .collect()
+}
+
 /// Every rung's output, pinned by length + digest — the density contract made concrete.
 ///
 /// `tests/default_bytes.rs` pins the *default* rung. That leaves the other six describing
@@ -681,6 +698,17 @@ fn every_effort_rung_pins_its_output_bytes() {
         (316, 0xc5dc_3cc3_1d04_a684),
     ];
 
+    let trgba = tiled_rgba(96, 80);
+    const TILED_LOSSLESS_RGBA: [(usize, u64); 7] = [
+        (8074, 0x9e59_e894_c56f_1018),
+        (1230, 0x20f1_a6a8_6fa1_96b1),
+        (1230, 0x20f1_a6a8_6fa1_96b1),
+        (1202, 0xa513_d6d8_bd3f_44f3),
+        (1202, 0xa513_d6d8_bd3f_44f3),
+        (1202, 0xa513_d6d8_bd3f_44f3),
+        (1100, 0xaaec_4438_b319_d2a5),
+    ];
+
     for (level, effort) in all_efforts().into_iter().enumerate() {
         for (label, want, got) in [
             (
@@ -747,6 +775,11 @@ fn every_effort_rung_pins_its_output_bytes() {
                 "smooth lossy95 rgb",
                 SMOOTH_LOSSY95_RGB[level],
                 encode_lossy_rgb(effort, 95, &srgb, bd),
+            ),
+            (
+                "tiled lossless rgba",
+                TILED_LOSSLESS_RGBA[level],
+                encode_lossless(effort, &trgba, bd),
             ),
         ] {
             assert_eq!(
