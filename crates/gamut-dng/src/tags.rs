@@ -47,6 +47,8 @@ pub const X_RESOLUTION: u16 = 282;
 pub const Y_RESOLUTION: u16 = 283;
 /// `PlanarConfiguration` (284, 0x011C) — chunky (1) or planar (2) component storage.
 pub const PLANAR_CONFIGURATION: u16 = 284;
+/// `Predictor` (317, 0x013D) — the differencing transform applied before compression.
+pub const PREDICTOR: u16 = 317;
 /// `ResolutionUnit` (296, 0x0128) — the unit for `XResolution`/`YResolution`.
 pub const RESOLUTION_UNIT: u16 = 296;
 /// `Software` (305, 0x0131) — the name/version of the writing software.
@@ -396,6 +398,7 @@ const KNOWN_TAGS: &[u16] = &[
     X_RESOLUTION,
     Y_RESOLUTION,
     PLANAR_CONFIGURATION,
+    PREDICTOR,
     RESOLUTION_UNIT,
     SOFTWARE,
     DATE_TIME,
@@ -569,8 +572,8 @@ pub const MATRIX_3X3_TAGS: &[u16] = &[
 /// unknown tag a strict deconstruct should flag.
 ///
 /// A handful of common baseline TIFF tags a DNG may carry but the codec does not name
-/// (`HostComputer`, `Min`/`MaxSampleValue`, `Predictor`) are also accepted so a valid file is not
-/// flagged for them.
+/// (`HostComputer`, `Min`/`MaxSampleValue`) are also accepted so a valid file is not flagged for
+/// them.
 #[must_use]
 pub fn is_known_tag(tag: u16) -> bool {
     KNOWN_TAGS.contains(&tag)
@@ -579,7 +582,6 @@ pub fn is_known_tag(tag: u16) -> bool {
             280 // MinSampleValue
             | 281 // MaxSampleValue
             | 316 // HostComputer
-            | 317 // Predictor
             | 320 // ColorMap (palette previews)
         )
 }

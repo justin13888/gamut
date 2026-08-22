@@ -280,7 +280,18 @@ impl<S: ReadAt> Auditor<S> {
     }
 
     /// Finishes the audit: cross-checks the read ledger against the claims, classifies padding
-    /// from the actual bytes, and returns the report with the accumulated findings.
+    /// from the actual bytes, names whatever bytes the file's own structures still do not
+    /// account for by position, and returns the report with the accumulated findings.
+    ///
+    /// The two classification passes run in that order so all-zero word padding keeps its
+    /// specific kind and only the genuinely unaccounted remainder becomes a preamble,
+    /// interstitial or trailer — see [`SegmentReport::classify_unclaimed`]. Real camera files
+    /// routinely carry all three; the dual-ledger invariants still fail the verdict on an actual
+    /// parser defect.
+    ///
+    /// The naming pass is **skipped entirely** when the walk recorded an
+    /// [`AuditFinding::SkippedSubIfd`]: bytes the walker admits it never reached are the
+    /// walker's failure, not the file's, and must stay unclassified so the verdict says so.
     ///
     /// # Errors
     ///
@@ -288,6 +299,13 @@ impl<S: ReadAt> Auditor<S> {
     pub fn finish(mut self) -> Result<(SegmentReport, Vec<AuditFinding>)> {
         let mut report = self.map.finish(Some(self.tracked.ledger()));
         report.classify_padding(&mut self.tracked)?;
+        let walked_everything = !self
+            .findings
+            .iter()
+            .any(|f| matches!(f, AuditFinding::SkippedSubIfd { .. }));
+        if walked_everything {
+            report.classify_unclaimed();
+        }
         Ok((report, self.findings))
     }
 }

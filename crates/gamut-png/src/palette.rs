@@ -62,7 +62,9 @@ impl PngPalette {
             ));
         }
         let rgb: Vec<[u8; 3]> = plte
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|entry| [entry[0], entry[1], entry[2]])
             .collect();
         Self::with_transparency(&rgb, trns.unwrap_or_default())

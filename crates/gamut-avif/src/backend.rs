@@ -13,7 +13,8 @@
 //! - [`Av1StillEncoder::supports`] returning `false` — or, across the C seam,
 //!   [`Status::UNSUPPORTED`](gamut_codec_abi::Status::UNSUPPORTED) — is the **only** fall-through
 //!   signal.
-//! - `gamut-av1`'s [`encode_still_intra`](gamut_av1::encode_still_intra) is the **implicit tail**,
+//! - `gamut-av1`'s [`encode_still_intra_with`](gamut_av1::encode_still_intra_with) is the
+//!   **implicit tail**,
 //!   used when every pushed backend declines. `gamut-av1` itself is unaware of this seam.
 //! - A backend that *accepts* a job and then fails propagates its error; the tail is **not** retried,
 //!   because silently substituting a different encoder would make the output non-deterministic.
@@ -23,17 +24,19 @@
 //! The container's `av1C`/`colr` boxes must mirror the sequence header the item payload actually
 //! carries (AV1-ISOBMFF v1.3.0 §2.3.4). For the built-in tail those values come back from
 //! `gamut-av1`; for a backend they are recovered from the returned OBUs themselves —
-//! `seq_profile`, `seq_level_idx[0]` and the coded dimensions are read from the sequence header,
-//! and the stream is then checked against the AVIF still-image item constraints
-//! ([`Av1Config::validate_still_payload`](crate::Av1Config::validate_still_payload)). The pixel
-//! parameters (8-bit, identity 4:4:4, full range) are the v1 surface's fixed contract, stated on
+//! `seq_profile`, `seq_level_idx[0]`, the coded dimensions and `color_config()` are read from the
+//! sequence header, the colour configuration is checked against the one the request asked for (so
+//! the `colr` box can never disagree with the payload), and the stream is then checked against the
+//! AVIF still-image item constraints
+//! ([`Av1Config::validate_still_payload`](crate::Av1Config::validate_still_payload)). The rest of
+//! the pixel parameters (8-bit, 4:4:4) are the v1 surface's fixed contract, stated on
 //! [`Av1StillEncoder::encode_still`] and enforced by the `seq_profile` check.
 
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1StillConfig, EncodedStill};
+use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{ColourPrimaries, MatrixCoefficients, Planar8, TransferCharacteristics};
+use gamut_color::{ColorRange, Planar8};
 use gamut_core::{Dimensions, Error, PixelFormat, Result};
 
 use crate::av1c::Av1Config;
@@ -62,15 +65,18 @@ pub struct Av1EncodeRequest {
     dimensions: Dimensions,
     /// The AV1 `base_q_idx` (AV1 §5.9.12), `0..=255`; `0` selects the lossless path.
     base_q_idx: u8,
+    /// The colour signalling the returned stream must carry — and the layout `planes` is in.
+    colour: Av1Colour,
 }
 
 impl Av1EncodeRequest {
     /// Builds a request. Crate-internal: the `base_q_idx` must already have been derived through
     /// the encoder's frozen quality mapping.
-    pub(crate) fn new(dimensions: Dimensions, base_q_idx: u8) -> Self {
+    pub(crate) fn new(dimensions: Dimensions, base_q_idx: u8, colour: Av1Colour) -> Self {
         Self {
             dimensions,
             base_q_idx,
+            colour,
         }
     }
 
@@ -106,6 +112,19 @@ impl Av1EncodeRequest {
     pub fn is_lossless(&self) -> bool {
         self.base_q_idx == 0
     }
+
+    /// The colour encoding the job is in: the CICP triple plus the signal range.
+    ///
+    /// This is **both** an input and an obligation. It says what the `planes` handed to
+    /// [`Av1StillEncoder::encode_still`] contain — GBR for
+    /// [`MatrixCoefficients::Identity`](gamut_color::MatrixCoefficients::Identity), `Y/Cb/Cr`
+    /// otherwise — and the returned stream's `color_config()` must declare exactly it, because the
+    /// container mirrors these values into `colr` and they must agree with the payload
+    /// (AV1-ISOBMFF v1.3.0 §2.3.4). A mismatch is rejected.
+    #[must_use]
+    pub fn colour(&self) -> Av1Colour {
+        self.colour
+    }
 }
 
 /// A pluggable AV1 **still-image encoder** backend.
@@ -128,12 +147,14 @@ pub trait Av1StillEncoder: Send {
     /// low-overhead OBU syntax of AV1 §5.3, with no temporal delimiter, exactly as
     /// [`gamut_av1::EncodedStill::obus`] carries it.
     ///
-    /// `planes` are `gamut-color` identity planes (`Y = G`, `U = B`, `V = R`), each
-    /// `width * height` 8-bit samples. The v1 surface fixes the coding parameters: the returned
-    /// stream must be a **still picture** with `seq_profile = 1` (High), 8-bit, 4:4:4, full range,
-    /// identity matrix, whose sequence header carries `reduced_still_picture_header = 1` and the
-    /// request's dimensions. The crate re-derives the `av1C`/`colr` boxes from that sequence
-    /// header and rejects a stream that does not meet the contract.
+    /// `planes` are `gamut-color` planes, each `width * height` 8-bit samples, in the layout
+    /// [`Av1EncodeRequest::colour`] describes: identity GBR (`Y = G`, `U = B`, `V = R`) or
+    /// `Y/Cb/Cr` through that matrix. The v1 surface fixes the rest of the coding parameters: the
+    /// returned stream must be a **still picture** with `seq_profile = 1` (High), 8-bit, 4:4:4,
+    /// whose sequence header carries `reduced_still_picture_header = 1`, the request's dimensions,
+    /// and a `color_config()` matching the request's colour. The crate re-derives the
+    /// `av1C`/`colr` boxes from that sequence header and rejects a stream that does not meet the
+    /// contract.
     ///
     /// # Errors
     ///
@@ -189,20 +210,35 @@ pub(crate) fn run_backends(
 /// - [`Error::Unsupported`] if the sequence header is not `seq_profile = 1` /
 ///   `reduced_still_picture_header = 1` (the only shape the v1 surface can describe).
 /// - Whatever [`Av1Config::validate_still_payload`] reports for a non-conformant item payload.
-pub(crate) fn still_from_backend_obus(obus: Vec<u8>, dims: Dimensions) -> Result<EncodedStill> {
+pub(crate) fn still_from_backend_obus(
+    obus: Vec<u8>,
+    dims: Dimensions,
+    colour: Av1Colour,
+) -> Result<EncodedStill> {
     let header = SeqHeaderParams::parse(&obus)?;
-    if header.seq_profile != 1 {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)",
-        ));
-    }
     if (header.width, header.height) != (dims.width, dims.height) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
             "AVIF: AV1 backend stream dimensions differ from the image",
         ));
     }
+    // The container mirrors these into `colr`, so they must be what the payload actually declares
+    // — not what the request asked for. Read them back and reject a disagreement rather than stamp
+    // a `colr` box that lies about the samples (AV1-ISOBMFF v1.3.0 §2.3.4).
+    let requested = (
+        colour.primaries.code_point(),
+        colour.transfer.code_point(),
+        colour.matrix.code_point(),
+        matches!(colour.range, ColorRange::Full),
+    );
+    if header.colour != requested {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: AV1 backend stream signals a different colour configuration than requested",
+        ));
+    }
+    let (color_primaries, transfer_characteristics, matrix_coefficients, full_range) =
+        header.colour;
     let config = Av1StillConfig {
         seq_profile: header.seq_profile,
         seq_level_idx_0: header.seq_level_idx_0,
@@ -213,10 +249,10 @@ pub(crate) fn still_from_backend_obus(obus: Vec<u8>, dims: Dimensions) -> Result
         chroma_subsampling_x: 0,
         chroma_subsampling_y: 0,
         chroma_sample_position: 0,
-        color_primaries: ColourPrimaries::Bt709.code_point(),
-        transfer_characteristics: TransferCharacteristics::Srgb.code_point(),
-        matrix_coefficients: MatrixCoefficients::Identity.code_point(),
-        full_range: true,
+        color_primaries,
+        transfer_characteristics,
+        matrix_coefficients,
+        full_range,
     };
     // Re-read the record we are about to stamp and validate the payload through the crate's own
     // reader, so a backend stream faces exactly the checks a third-party AVIF file would.
@@ -234,16 +270,21 @@ struct SeqHeaderParams {
     width: u32,
     /// `max_frame_height_minus_1 + 1`.
     height: u32,
+    /// `color_config()`: `(color_primaries, transfer_characteristics, matrix_coefficients,
+    /// color_range == full)`.
+    colour: (u16, u16, u16, bool),
 }
 
 impl SeqHeaderParams {
-    /// Reads the leading fields of the (single) sequence header OBU in `payload`.
+    /// Reads the (single) sequence header OBU in `payload`, through `color_config()`.
     ///
     /// Only the `reduced_still_picture_header = 1` layout is read — the shape AVIF still images
     /// use (AV1 §5.5.1: with the reduced header the syntax runs `seq_profile(3)`,
     /// `still_picture(1)`, `reduced_still_picture_header(1)`, `seq_level_idx[0](5)`,
     /// `frame_width_bits_minus_1(4)`, `frame_height_bits_minus_1(4)`,
-    /// `max_frame_width_minus_1(n)`, `max_frame_height_minus_1(m)`).
+    /// `max_frame_width_minus_1(n)`, `max_frame_height_minus_1(m)`, then `use_128x128_superblock`,
+    /// `enable_filter_intra`, `enable_intra_edge_filter`, `enable_superres`, `enable_cdef`,
+    /// `enable_restoration`, and `color_config()`).
     fn parse(payload: &[u8]) -> Result<Self> {
         let seq = iter_obus(payload)
             .find_map(|obu| match obu {
@@ -259,6 +300,16 @@ impl SeqHeaderParams {
             })??;
         let mut r = BitReader::new(seq);
         let seq_profile = r.bits(3)? as u8;
+        // Enforced here, not by the caller, because `color_config()`'s *layout* depends on it: only
+        // `seq_profile == 2` codes `twelve_bit`, and only `seq_profile != 1` codes `mono_chrome`.
+        // Reading the colour fields off a profile this parser cannot describe would misparse them
+        // before anyone had a chance to reject the stream.
+        if seq_profile != 1 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)",
+            ));
+        }
         let _still_picture = r.bits(1)?;
         if r.bits(1)? != 1 {
             return Err(Error::unsupported(
@@ -271,11 +322,46 @@ impl SeqHeaderParams {
         let height_bits = r.bits(4)? + 1;
         let width = r.bits(width_bits)? + 1;
         let height = r.bits(height_bits)? + 1;
+        // `frame_id_numbers_present_flag` is inferred 0 under the reduced header; the six enable
+        // flags below carry no information the container needs, but they must be stepped over to
+        // reach `color_config()`.
+        r.bits(6)?; // use_128x128_superblock, filter_intra, intra_edge_filter, superres, cdef, restoration
+
+        // color_config() (§5.5.2). `seq_profile == 1` is already enforced by the caller, so
+        // `twelve_bit` is absent and `mono_chrome` is inferred 0.
+        if r.bits(1)? != 0 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend stream must be 8-bit (high_bitdepth = 0)",
+            ));
+        }
+        // `color_description_present_flag = 0` leaves all three code points UNSPECIFIED (2), which
+        // the container would have to stamp verbatim into `colr` — and which can never match the
+        // concrete triple the request carries. Reject it here, with a message that says why,
+        // rather than let it fall out of the colour comparison as a confusing mismatch.
+        if r.bits(1)? != 1 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend stream must set color_description_present_flag",
+            ));
+        }
+        let cp = r.bits(8)? as u16;
+        let tc = r.bits(8)? as u16;
+        let mc = r.bits(8)? as u16;
+        // The §5.5.2 shortcut: BT.709 primaries + sRGB transfer + identity matrix infer full range
+        // (and 4:4:4) with no coded bit; every other triple codes `color_range`.
+        let full_range = if cp == 1 && tc == 13 && mc == 0 {
+            true
+        } else {
+            r.bits(1)? == 1
+        };
+        let colour = (cp, tc, mc, full_range);
         Ok(Self {
             seq_profile,
             seq_level_idx_0,
             width,
             height,
+            colour,
         })
     }
 }

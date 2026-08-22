@@ -80,11 +80,11 @@ let decoded: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(&stream).expect("de
 assert_eq!(decoded.as_samples(), pixels.as_slice());
 ```
 
-Encode a lossy stream with a chosen effort and ISO BMFF container framing:
+Encode a lossy stream with a chosen effort, coding tool and ISO BMFF container framing:
 
 ```rust
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
-use gamut_jxl::{Container, Distance, Effort, JxlEncoder};
+use gamut_jxl::{Container, Distance, Effort, JxlEncoder, ModularMode};
 
 let dims = Dimensions { width: 64, height: 64 };
 let pixels = vec![0u8; (64 * 64 * 3) as usize];
@@ -92,7 +92,8 @@ let image = ImageRef::<Rgb8>::new(&pixels, dims).expect("buffer length matches d
 
 // `Distance::new` validates the Butteraugli target; 1.0 is "visually lossless".
 let encoder = JxlEncoder::lossy(Distance::new(1.0).expect("valid distance"))
-    .with_effort(Effort::Squirrel)       // libjxl effort 1..=10 (default = Squirrel, 7)
+    .with_effort(Effort::Squirrel)        // libjxl effort 1..=10 (default = Squirrel, 7)
+    .with_modular(ModularMode::Modular)   // pin the coding tool (default = Auto, libjxl chooses)
     .with_container(Container::IsoBmff);  // .jxl box framing (default = bare Codestream)
 let stream = encoder.encode_to_vec(image).expect("encode");
 ```
@@ -126,7 +127,12 @@ JxlEncoder::new().recompress_jpeg(jpeg, &mut jxl).expect("recompress");
 [`gamut_core::DecodeImage`] for exactly eight pixel layouts — 8- and 16-bit **Gray**, **GrayAlpha**,
 **RGB** and **RGBA** — so handing either an unsupported layout is a compile error. `lossy` takes a
 validated [`Distance`] in `(0.0, 25.0]` (`0.0`, libjxl's lossless sentinel, is deliberately rejected
-so lossless stays a distinct constructor). On the decode side,
+so lossless stays a distinct constructor); there is no `0..=100` *quality* dial, because distance is
+JPEG XL's native one and a quality scale would only be a lossier spelling of it. On the decode side,
+`JxlDecoder::embedded_icc_profile` surfaces the exact ICC bytes a stream embeds (`None` for
+structured encodings like sRGB/PQ) without decoding pixels; pixel decoding applies no colour
+transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
+
 ### Pluggable codestream backends
 
 Neither half is a fixed implementation. The seam is the **bare JPEG XL codestream** (signature
@@ -145,16 +151,12 @@ Container-dependent features — ISO BMFF output, `with_exif`/`with_xmp`, and `r
 written by libjxl today, so they are pinned to the built-in path by a host-side veto and never reach
 a backend. Giving gamut-jxl its own container writer is a recorded follow-up ([STATUS.md](STATUS.md)).
 
-`JxlDecoder::embedded_icc_profile` surfaces the exact ICC bytes a stream embeds (`None` for
-structured encodings like sRGB/PQ) without decoding pixels; pixel decoding applies no colour
-transform (see [STATUS.md](STATUS.md) for the decode-side CMS deferral).
-
 ## Features
 
 | Feature  | Default | What it pulls in | Toolchain / targets |
 | -------- | ------- | ---------------- | ------------------- |
 | `encode` | yes | the built-in **libjxl 0.12.0** encode tail (`gamut-jxl-sys`) | needs **cmake + a C++ toolchain** (emsdk on `wasm32-unknown-emscripten`); inert — not a build error — on other `wasm32` targets |
-| `decode` | yes | the built-in **jxl-rs** decode tail (the pure-Rust `jxl` crate), plus the header-only accessors `JxlDecoder::info` / `embedded_icc_profile` | pure safe Rust; builds **everywhere**, every `wasm32` target included |
+| `decode` | yes | the built-in **jxl-rs** decode tail (the pure-Rust `jxl` crate), plus the header-only accessors `JxlDecoder::info` / `embedded_icc_profile` and the best-effort `DecodePartialImage` surface | pure safe Rust; builds **everywhere**, every `wasm32` target included |
 
 Each feature means "**include the built-in tail**", not "enable the direction": without `encode`,
 `JxlEncoder` still exists and still encodes through any backend pushed with `push_backend`; without
@@ -179,6 +181,42 @@ alpha is dropped. It refuses to *guess*, returning `Error::Unsupported` rather t
 
 Oversized streams are bounded by a pixel limit; truncated or malformed input returns a typed
 `Error`, never a panic.
+
+### Truncated and partial decode
+
+`DecodeImage` rejects every truncated stream. `DecodePartialImage` is the opt-in alternative for a
+partly-downloaded, still-arriving or damaged file — it returns the best-effort image plus a
+`JxlPartialReport` carrying the completeness flag:
+
+```rust,ignore
+use gamut_jxl::{DecodePartialImage, JxlDecoder};
+use gamut_core::{ImageBuf, Rgba8};
+
+let (image, report): (ImageBuf<Rgba8>, _) = JxlDecoder::new().decode_partial_image(&bytes)?;
+if !report.is_complete() {
+    // `image` is a preview: correctly sized, but only partly drawn.
+}
+```
+
+| Where the stream ran out | Result |
+| ------------------------ | ------ |
+| Before the image headers | `Error::InvalidInput` — no dimensions, so no buffer to return |
+| Before the frame header | `JxlRender::HeaderOnly`: a zero-filled buffer at the declared size |
+| Mid-frame | `JxlRender::BestEffort`: whatever groups arrived |
+| Not truncated | `JxlRender::Complete`: byte-identical to `decode_image` |
+
+**Best effort is a real qualifier.** A truncated *lossy* (VarDCT) stream renders groups with no
+detail pass from the upsampled DC image, so it yields a full-size coarse preview that sharpens
+toward the front of the stream; a truncated *lossless* (Modular) stream renders the groups that
+arrived exactly and leaves the rest zero. But an image small enough to be coded as a single group
+(roughly 256×256 and below) has no partially-decodable structure at all and comes back blank, and
+some cut points are indistinguishable from corruption to the decoder and still return
+`Error::InvalidInput`. Always check `report.is_complete()`; never assume pixels are present.
+
+This path is always answered by the built-in jxl-rs tail — a pushed backend is not consulted,
+because the shared codec-abi seam has no way to express a partial result. It relaxes *truncation
+only*: the animation, premultiplied-alpha, colour-as-grayscale and pixel-limit refusals above are
+unchanged.
 
 ## MSRV
 

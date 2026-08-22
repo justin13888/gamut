@@ -25,9 +25,9 @@ fn build_file() -> Vec<u8> {
     let codes = fourccs();
     let mut w = RiffWriter::new();
     for i in 0..CHUNKS {
-        w.write_chunk(codes[i % codes.len()], &payload);
+        w.write_chunk(codes[i % codes.len()], &payload).unwrap();
     }
-    w.finish()
+    w.finish().unwrap()
 }
 
 #[divan::bench]
@@ -39,9 +39,10 @@ fn write_chunks(bencher: Bencher) {
         .bench_local(|| {
             let mut w = RiffWriter::new();
             for i in 0..CHUNKS {
-                w.write_chunk(codes[i % codes.len()], black_box(&payload));
+                w.write_chunk(codes[i % codes.len()], black_box(&payload))
+                    .unwrap();
             }
-            w.finish()
+            w.finish().unwrap()
         });
 }
 

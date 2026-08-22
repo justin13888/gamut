@@ -173,7 +173,7 @@ impl HevcDecoder for HevcDecoders {
 /// - **Down**: [`HevcConfig`] becomes a [`StreamConfig`] with [`codec_id`](StreamConfig::codec_id)
 ///   [`HEVC_CODEC_ID`], the adapter's [`dimensions`](Self::dimensions), the record's luma bit depth,
 ///   and the `hvcC` parameter sets as Annex-B `extradata` (exactly what
-///   [`HevcConfig::annex_b`] emits for an empty payload). The item payload is passed through as the
+///   [`HevcConfig::annex_b_parameter_sets`] emits). The item payload is passed through as the
 ///   codestream, still length-prefixed.
 /// - **Up**: the adapter allocates the `u16` planes itself, hands their pointers to the backend in
 ///   an [`ImageDesc`] (one plane for [`ChromaFormat::Monochrome`], otherwise Y/Cb/Cr; strides are
@@ -250,10 +250,10 @@ impl<D: Decoder> AbiHevcDecoder<D> {
     }
 
     /// Builds the `hvcC` parameter sets as an Annex-B `extradata` blob.
-    fn extradata(config: &HevcConfig) -> Result<Vec<u8>> {
+    fn extradata(config: &HevcConfig) -> Vec<u8> {
         let mut out = Vec::new();
-        config.annex_b(&[], &mut out)?;
-        Ok(out)
+        config.annex_b_parameter_sets(&mut out);
+        out
     }
 
     /// Builds the [`StreamConfig`] for `config`, borrowing `extradata` for the call.
@@ -271,13 +271,11 @@ impl<D: Decoder> AbiHevcDecoder<D> {
 }
 
 impl<D: Decoder> HevcDecoder for AbiHevcDecoder<D> {
-    /// Forwards to [`Decoder::supports`] with the lowered [`StreamConfig`]; a malformed `hvcC` that
-    /// cannot be lowered reads as "not supported" (the typed error surfaces from
-    /// [`decode_intra`](Self::decode_intra)).
+    /// Forwards to [`Decoder::supports`] with the lowered [`StreamConfig`]. Lowering a parsed
+    /// [`HevcConfig`] is infallible (the parameter sets come from the record, not the payload), so
+    /// this probe reflects only the backend's own answer.
     fn supports(&mut self, config: &HevcConfig) -> bool {
-        let Ok(extradata) = Self::extradata(config) else {
-            return false;
-        };
+        let extradata = Self::extradata(config);
         let cfg = self.stream_config(config, &extradata);
         self.backend.supports(&cfg)
     }
@@ -335,7 +333,7 @@ impl<D: Decoder> HevcDecoder for AbiHevcDecoder<D> {
             strides,
         );
 
-        let extradata = Self::extradata(config)?;
+        let extradata = Self::extradata(config);
         let cfg = self.stream_config(config, &extradata);
         let status = self.backend.decode(&cfg, payload, &out);
         if status.is_unsupported() {

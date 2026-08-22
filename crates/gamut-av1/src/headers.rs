@@ -1,10 +1,15 @@
 //! AV1 OBU framing (§5.3, Annex B), the reduced-still-picture sequence header (§5.5), and the
 //! all-intra keyframe uncompressed frame header (§5.9.2). Both the lossless M0 config and the lossy
 //! intra path are emitted: `base_q_idx > 0` with per-superblock delta-Q/delta-LF, segmentation
-//! (`SEG_LVL_ALT_Q`), CDEF, loop restoration, superres, and uniform multi-tile — all still under
-//! `disable_cdf_update = 1` and `using_qmatrix = 0` (8-bit 4:4:4, identity matrix, full range).
+//! (`SEG_LVL_ALT_Q`), CDEF, loop restoration, superres, and uniform multi-tile — all under
+//! `disable_cdf_update = 0` (adapting CDFs, §8.2.6) and `using_qmatrix = 0` (8-bit 4:4:4).
+//!
+//! `color_config()` (§5.5.2) is parameterized by [`Av1Colour`]: the identity/sRGB default takes the
+//! spec's shortcut, where `color_range` and the subsampling are inferred and no bits are coded,
+//! while any other CICP triple codes `color_range` explicitly.
 
 use gamut_bitstream::{BitWriter, write_leb128};
+use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Error, Result};
 
 /// `OBU_SEQUENCE_HEADER`.
@@ -48,6 +53,48 @@ pub struct Av1StillConfig {
     pub matrix_coefficients: u16,
     /// `color_range` (full = true).
     pub full_range: bool,
+}
+
+impl Av1StillConfig {
+    /// Whether `color_config()` takes the AV1 §5.5.2 sRGB shortcut: with BT.709 primaries, the sRGB
+    /// transfer function and the identity matrix, `color_range`, `subsampling_x` and
+    /// `subsampling_y` are all **inferred** (full range, 4:4:4) and no bits are coded for them.
+    /// Outside the shortcut `color_range` is coded explicitly.
+    #[must_use]
+    pub fn is_srgb_shortcut(&self) -> bool {
+        self.color_primaries == ColourPrimaries::Bt709.code_point()
+            && self.transfer_characteristics == TransferCharacteristics::Srgb.code_point()
+            && self.matrix_coefficients == MatrixCoefficients::Identity.code_point()
+    }
+}
+
+/// The colour signalling one still carries: the CICP triple plus the signal range, mirrored
+/// identically into the AV1 sequence header's `color_config()` and the container's `colr` box.
+///
+/// [`Default`] is the M0 configuration — BT.709 primaries, sRGB transfer, **identity** matrix, full
+/// range — i.e. RGB carried directly as 4:4:4 GBR planes, which is what
+/// [`encode_still_intra`](crate::encode_still_intra) and its siblings use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Av1Colour {
+    /// CICP colour primaries.
+    pub primaries: ColourPrimaries,
+    /// CICP transfer characteristics.
+    pub transfer: TransferCharacteristics,
+    /// CICP matrix coefficients. `Identity` means the planes carry GBR, not YCbCr.
+    pub matrix: MatrixCoefficients,
+    /// The signal range the samples occupy.
+    pub range: ColorRange,
+}
+
+impl Default for Av1Colour {
+    fn default() -> Self {
+        Self {
+            primaries: ColourPrimaries::Bt709,
+            transfer: TransferCharacteristics::Srgb,
+            matrix: MatrixCoefficients::Identity,
+            range: ColorRange::Full,
+        }
+    }
 }
 
 /// Level limits (`seq_level_idx`, MaxHSize, MaxVSize, MaxPicSize) for the defined levels up to 6.0
@@ -105,8 +152,8 @@ pub(crate) fn write_obu(out: &mut Vec<u8>, obu_type: u8, payload: &[u8]) {
     out.extend_from_slice(payload);
 }
 
-/// Builds the sequence-header OBU payload for the M0 config (reduced still picture, profile 1,
-/// 8-bit, identity 4:4:4, full range), terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
+/// Builds the sequence-header OBU payload (reduced still picture, profile 1, 8-bit, 4:4:4),
+/// terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
 /// `lossy` enables `enable_filter_intra` (recursive filter-intra is used only on the lossy path;
 /// the lossless path stays DC-only and emits no `use_filter_intra` symbols).
 pub(crate) fn sequence_header_payload(
@@ -139,14 +186,21 @@ pub(crate) fn sequence_header_payload(
     w.put_bit(u8::from(lossy)); // enable_cdef
     w.put_bit(u8::from(lossy)); // enable_restoration (1 on the lossy path: luma Wiener)
 
-    // color_config(): high_bitdepth=0; (profile 1 ⇒ mono_chrome=0 inferred);
-    // color_description_present_flag=1; cp/tc/mc; (mc==IDENTITY ⇒ color_range/subsampling
-    // inferred, no bits); separate_uv_delta_q=0.
+    // color_config() (§5.5.2): high_bitdepth=0; (profile 1 ⇒ mono_chrome=0 inferred);
+    // color_description_present_flag=1; cp/tc/mc; then either the sRGB shortcut or an explicit
+    // color_range; separate_uv_delta_q=0.
     w.put_bit(0); // high_bitdepth
     w.put_bit(1); // color_description_present_flag
     w.put_bits(u32::from(cfg.color_primaries), 8);
     w.put_bits(u32::from(cfg.transfer_characteristics), 8);
     w.put_bits(u32::from(cfg.matrix_coefficients), 8);
+    // §5.5.2: `cp == CP_BT_709 && tc == TC_SRGB && mc == MC_IDENTITY` infers full range and 4:4:4
+    // and codes **no** further bits. Outside that shortcut `color_range` is coded explicitly; for
+    // `seq_profile == 1` the subsampling is still inferred as 4:4:4 and, since neither
+    // `subsampling_x` nor `subsampling_y` is 1, no `chroma_sample_position` follows either.
+    if !cfg.is_srgb_shortcut() {
+        w.put_bit(u8::from(cfg.full_range)); // color_range
+    }
     w.put_bit(0); // separate_uv_delta_q
 
     w.put_bit(0); // film_grain_params_present
@@ -178,7 +232,9 @@ pub(crate) fn frame_header_payload(
     let lossless = base_q_idx == 0;
     let mut w = BitWriter::new();
     // reduced_still_picture_header ⇒ KEY_FRAME, show_frame=1, FrameIsIntra=1 (no bits).
-    w.put_bit(1); // disable_cdf_update = 1
+    // disable_cdf_update = 0: every symbol adapts its CDF as it is coded (§8.2.6). The tile encoder
+    // performs the identical update, so encoder and decoder track the same probabilities.
+    w.put_bit(0); // disable_cdf_update
     // allow_screen_content_tools = 1 (palette mode is available; intra-block-copy is left off).
     w.put_bit(u8::from(!lossless)); // allow_screen_content_tools (1 on the lossy path)
     if !lossless {
@@ -202,7 +258,9 @@ pub(crate) fn frame_header_payload(
         // allow_intrabc is coded only when UpscaledWidth == FrameWidth (i.e. no superres).
         w.put_bit(0); // allow_intrabc = 0
     }
-    // disable_frame_end_update_cdf inferred 1.
+    // disable_frame_end_update_cdf: `reduced_still_picture_header || disable_cdf_update` ⇒ inferred
+    // 1, so no bit is coded even now that `disable_cdf_update` is 0, and `frame_end_update_cdf`
+    // (§7.7) is never invoked. A still image has no later frame to load a saved context anyway.
 
     // tile_info() (§5.9.15): uniform spacing, two tile columns when the frame is ≥ 2 superblocks
     // wide (else one). `tile_cols_log2` mirrors the split `FrameEncoder::encode` applies.

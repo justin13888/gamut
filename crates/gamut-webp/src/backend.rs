@@ -499,7 +499,9 @@ impl<D: abi::Decoder + Send> WebpCodestreamDecoder for AbiDecoderBackend<D> {
                     ));
                 }
                 let pixels = bytes
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|p| u32::from_le_bytes([p[0], p[1], p[2], p[3]]))
                     .collect();
                 Ok(DecodedRaster::Argb {

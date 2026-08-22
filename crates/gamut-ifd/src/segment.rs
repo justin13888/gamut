@@ -65,6 +65,19 @@ pub enum SpanKind {
     /// Word-alignment padding: all-zero filler between structures, either declared by the
     /// writer or classified by [`SegmentReport::classify_padding`].
     Padding,
+    /// Bytes between the file header and the first structure it points at — a vendor preamble.
+    /// Real writers put signatures here (Apple's ProRAW files carry the ASCII `APPLEDNG`
+    /// immediately after the 8-byte TIFF header). Classified by
+    /// [`SegmentReport::classify_unclaimed`].
+    Preamble,
+    /// Non-zero filler between two claimed structures that no tag accounts for — leftover bytes
+    /// real writers leave behind when they rewrite a file in place. Distinct from
+    /// [`Padding`](Self::Padding), which is all-zero and word-aligned. Classified by
+    /// [`SegmentReport::classify_unclaimed`].
+    Interstitial,
+    /// A run of bytes appended after the last structure the file accounts for, reaching the end
+    /// of the file. Classified by [`SegmentReport::classify_unclaimed`].
+    Trailer,
 }
 
 /// What located a [`SpanKind::Data`] range.
@@ -400,6 +413,65 @@ impl SegmentReport {
         self.segments.sort_by_key(|s| (s.range.start, s.range.len));
         Ok(())
     }
+
+    /// Names every remaining unclassified range by *where it sits*, rather than leaving real
+    /// files permanently unaccounted: a range immediately following the header becomes
+    /// [`SpanKind::Preamble`], one reaching the end of the file becomes [`SpanKind::Trailer`],
+    /// and any other interior gap becomes [`SpanKind::Interstitial`].
+    ///
+    /// This is deliberately a separate, explicit pass — like [`classify_padding`](Self::
+    /// classify_padding) — so that "every byte is accounted for" is never reached by accident.
+    /// Run it *after* `classify_padding`, so all-zero word padding keeps its more specific kind.
+    ///
+    /// The bytes are not discarded: each becomes a typed [`Segment`] whose range still addresses
+    /// the original file, and [`unclaimed_spans`](Self::unclaimed_spans) enumerates exactly the
+    /// spans this pass named. A caller that wants the stricter verdict can assert on that list —
+    /// which is what pins these ranges down per file, so a genuine parser gap cannot hide among
+    /// them. The dual-ledger invariants ([`unclaimed_reads`](Self::unclaimed_reads) and
+    /// [`unread_claims`](Self::unread_claims)) are untouched and still catch parser defects.
+    pub fn classify_unclaimed(&mut self) {
+        let header_end = self
+            .segments
+            .iter()
+            .find(|s| s.kind == SpanKind::Header)
+            .map(|s| s.range.end());
+        for range in std::mem::take(&mut self.unclassified) {
+            let kind = if Some(range.start) == header_end {
+                SpanKind::Preamble
+            } else if range.end() == self.file_len {
+                SpanKind::Trailer
+            } else {
+                SpanKind::Interstitial
+            };
+            self.segments.push(Segment { range, kind });
+        }
+        self.segments.sort_by_key(|s| (s.range.start, s.range.len));
+    }
+
+    /// The spans [`classify_unclaimed`](Self::classify_unclaimed) named — every byte the file's
+    /// own structures did not account for, typed by position and in file order.
+    ///
+    /// Empty before that pass runs. Assert on this to pin down exactly which unaccounted bytes a
+    /// file is expected to carry.
+    #[must_use]
+    pub fn unclaimed_spans(&self) -> Vec<Segment> {
+        self.segments
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    SpanKind::Preamble | SpanKind::Interstitial | SpanKind::Trailer
+                )
+            })
+            .copied()
+            .collect()
+    }
+
+    /// The total number of bytes [`unclaimed_spans`](Self::unclaimed_spans) covers.
+    #[must_use]
+    pub fn unclaimed_span_bytes(&self) -> u64 {
+        self.unclaimed_spans().iter().map(|s| s.range.len).sum()
+    }
 }
 
 /// Whether every byte of `range` in `src` is zero, read in bounded chunks.
@@ -708,6 +780,81 @@ mod tests {
         let mut src = odd_end;
         r.classify_padding(&mut src).expect("classify");
         assert_eq!(r.unclassified, vec![Range { start: 6, len: 3 }]);
+    }
+
+    /// The three positions a real camera file leaves bytes in — right after the header, between
+    /// structures, and appended at the end — each get their own kind, and the archival verdict
+    /// only then holds.
+    #[test]
+    fn classify_unclaimed_names_gaps_by_position() {
+        // [0,4) header | [4,6) preamble | [6,10) value | [10,12) interstitial | [12,16) value |
+        // [16,20) trailer.
+        let mut map = SegmentMap::new(20);
+        map.claim(0, 4, SpanKind::Header, Claim::Parsed);
+        map.claim(6, 4, SpanKind::Value { ifd: 0, tag: 1 }, Claim::Parsed);
+        map.claim(12, 4, SpanKind::Value { ifd: 0, tag: 2 }, Claim::Parsed);
+        let mut r = map.finish(None);
+        assert_eq!(r.unclassified.len(), 3);
+        assert!(r.unclaimed_spans().is_empty(), "not named before the pass");
+
+        r.classify_unclaimed();
+
+        assert!(r.unclassified.is_empty());
+        assert!(r.is_fully_classified(), "report: {r:?}");
+        assert_eq!(
+            r.unclaimed_spans(),
+            vec![
+                Segment {
+                    range: Range { start: 4, len: 2 },
+                    kind: SpanKind::Preamble
+                },
+                Segment {
+                    range: Range { start: 10, len: 2 },
+                    kind: SpanKind::Interstitial
+                },
+                Segment {
+                    range: Range { start: 16, len: 4 },
+                    kind: SpanKind::Trailer
+                },
+            ]
+        );
+        assert_eq!(r.unclaimed_span_bytes(), 8);
+    }
+
+    /// Without a header segment there is no preamble position, so a leading gap is interstitial —
+    /// the pass must not guess that offset 0 means "after the header".
+    #[test]
+    fn classify_unclaimed_needs_a_header_to_call_a_gap_a_preamble() {
+        let mut map = SegmentMap::new(12);
+        map.claim(4, 4, SpanKind::Value { ifd: 0, tag: 1 }, Claim::Parsed);
+        let mut r = map.finish(None);
+        r.classify_unclaimed();
+        assert_eq!(
+            r.unclaimed_spans()
+                .iter()
+                .map(|s| s.kind)
+                .collect::<Vec<_>>(),
+            vec![SpanKind::Interstitial, SpanKind::Trailer],
+        );
+    }
+
+    /// The pass names positions; it must never paper over a parser defect, which the dual-ledger
+    /// invariants report separately and which still fails the verdict.
+    #[test]
+    fn classify_unclaimed_does_not_mask_parser_defects() {
+        let mut map = SegmentMap::new(12);
+        map.claim(0, 4, SpanKind::Header, Claim::Parsed);
+        // The parser read [8,12) but claimed nothing there.
+        let mut ledger = ReadLedger::new();
+        ledger.record(8, 4);
+        let mut r = map.finish(Some(&ledger));
+        r.classify_unclaimed();
+        assert!(r.unclassified.is_empty());
+        assert!(
+            !r.unclaimed_reads.is_empty(),
+            "the read ledger still reports the defect"
+        );
+        assert!(!r.is_fully_classified(), "report: {r:?}");
     }
 
     #[test]
