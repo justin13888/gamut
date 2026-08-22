@@ -435,3 +435,182 @@ fn optimizing_coefficient_probabilities_costs_no_quality() {
         }
     }
 }
+
+/// FNV-1a (64-bit), the digest `tests/default_bytes.rs` pins its fixtures with.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The gradient fixtures `tests/default_bytes.rs` pins the default rung with, so the numbers here
+/// and there describe the same pixels.
+fn gradient_rgb(w: u32, h: u32) -> Vec<u8> {
+    (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            [(x * 7) as u8, (y * 11) as u8, (x ^ y) as u8]
+        })
+        .collect()
+}
+
+fn gradient_rgba(w: u32, h: u32) -> Vec<u8> {
+    (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            [
+                (x * 7) as u8,
+                (y * 11) as u8,
+                (x ^ y) as u8,
+                ((x * 5 + y * 3) & 0xff) as u8,
+            ]
+        })
+        .collect()
+}
+
+/// Every rung's output, pinned by length + digest — the density contract made concrete.
+///
+/// `tests/default_bytes.rs` pins the *default* rung. That leaves the other six describing
+/// themselves only by inequalities (round-trips losslessly, is no larger than the rung below), and
+/// inequalities are satisfied by a great deal of code that is nonetheless wrong: a mis-derived
+/// coefficient probability, a token counter threading the wrong neighbour context, a dead zone
+/// applied to the wrong coefficient, a VP8L plan racer keeping the wrong candidate, an `ALPH`
+/// pre-filter written into the wrong header bits — each of those still round-trips and still
+/// shrinks, and each moves a number in this table.
+///
+/// Re-pinning is expected whenever a rung's search genuinely changes, and the commit that does it
+/// should say what moved and why (the same rule `default_bytes.rs` states). The lossy column is
+/// deliberately **not** monotone at rung 0→1: rung 0 emits no `B_PRED` modes at all, so it spends
+/// fewer header bits on a worse prediction. Only the VP8L ladder claims monotonicity.
+#[test]
+fn every_effort_rung_pins_its_output_bytes() {
+    let d = dims(32, 24);
+    let rgb = gradient_rgb(32, 24);
+    let rgba = gradient_rgba(32, 24);
+
+    // Indexed by effort level 0..=6.
+    const LOSSLESS_RGB: [(usize, u64); 7] = [
+        (354, 0x73f6_5a70_5f83_090f),
+        (314, 0x78f8_05cc_0245_d9ff),
+        (244, 0xffe4_2036_c125_47dc),
+        (240, 0x84c5_1f6b_3460_7770),
+        (240, 0x84c5_1f6b_3460_7770),
+        (240, 0x84c5_1f6b_3460_7770),
+        (224, 0xcc01_b0ff_f924_fc02),
+    ];
+    const LOSSLESS_RGBA: [(usize, u64); 7] = [
+        (348, 0x8c73_bdb3_57b6_6710),
+        (324, 0x318e_a962_4829_8dab),
+        (252, 0xaebd_b52e_45a9_f819),
+        (246, 0x6f7c_d692_613c_775e),
+        (246, 0x6f7c_d692_613c_775e),
+        (246, 0x6f7c_d692_613c_775e),
+        (216, 0xb770_b826_a8e4_1754),
+    ];
+    const LOSSY60_RGB: [(usize, u64); 7] = [
+        (122, 0x9ef8_1c74_ea19_d16c),
+        (136, 0x2eb3_c30d_36b6_067e),
+        (136, 0x2eb3_c30d_36b6_067e),
+        (134, 0xe796_fd02_7a9b_65e5),
+        (134, 0x414b_d885_3a94_d316),
+        (134, 0x414b_d885_3a94_d316),
+        (134, 0x414b_d885_3a94_d316),
+    ];
+    const LOSSY60_RGBA: [(usize, u64); 7] = [
+        (172, 0x3b9c_e9fc_45c8_e0ba),
+        (186, 0x4e86_861b_b8de_dbb4),
+        (186, 0x4e86_861b_b8de_dbb4),
+        (184, 0xd5b5_d2a9_f740_8bc7),
+        (184, 0xe2df_69e2_2c62_ce64),
+        (184, 0xe2df_69e2_2c62_ce64),
+        (184, 0xe2df_69e2_2c62_ce64),
+    ];
+
+    for (level, effort) in all_efforts().into_iter().enumerate() {
+        for (label, want, got) in [
+            (
+                "lossless rgb",
+                LOSSLESS_RGB[level],
+                encode_lossless_rgb(effort, &rgb, d),
+            ),
+            (
+                "lossless rgba",
+                LOSSLESS_RGBA[level],
+                encode_lossless(effort, &rgba, d),
+            ),
+            (
+                "lossy60 rgb",
+                LOSSY60_RGB[level],
+                encode_lossy_rgb(effort, 60, &rgb, d),
+            ),
+            (
+                "lossy60 rgba",
+                LOSSY60_RGBA[level],
+                encode_lossy(effort, 60, &rgba, d),
+            ),
+        ] {
+            assert_eq!(
+                (got.len(), fnv1a64(&got)),
+                want,
+                "{label} at effort {level}: got ({}, {:#018x})",
+                got.len(),
+                fnv1a64(&got)
+            );
+        }
+    }
+}
+
+/// [`encode_lossless`] for an RGB (no-alpha) surface.
+fn encode_lossless_rgb(effort: Effort, px: &[u8], d: Dimensions) -> Vec<u8> {
+    let mut out = Vec::new();
+    WebpEncoder::lossless()
+        .with_effort(effort)
+        .encode_image(ImageRef::<Rgb8>::new(px, d).expect("rgb fixture"), &mut out)
+        .expect("encode");
+    out
+}
+
+/// [`encode_lossy`] for an RGB (no-alpha) surface.
+fn encode_lossy_rgb(effort: Effort, quality: u8, px: &[u8], d: Dimensions) -> Vec<u8> {
+    let mut out = Vec::new();
+    WebpEncoder::lossy(quality)
+        .with_effort(effort)
+        .encode_image(ImageRef::<Rgb8>::new(px, d).expect("rgb fixture"), &mut out)
+        .expect("encode");
+    out
+}
+
+/// Near-lossless keeps the **smaller** of the quantized and exact encodings, and a tie is not
+/// smaller — so a strength that buys nothing must leave the file bit-exact, not merely no larger.
+///
+/// The distinction is the whole reason the knob is safe to turn on: "no larger" would still let a
+/// gentle setting silently discard low bits for nothing. Tiny fixtures are where ties actually
+/// happen (the two candidates differ in content but not in length), which is what makes this
+/// reachable at all.
+#[test]
+fn a_near_lossless_setting_that_buys_nothing_stays_bit_exact() {
+    let mut ties = 0usize;
+    for (w, h) in [(1u32, 1u32), (1, 3), (3, 1), (2, 2), (3, 3), (4, 4)] {
+        let d = dims(w, h);
+        let px = noisy_rgba(w, h);
+        let exact = encode_lossless(Effort::default(), &px, d);
+        for strength in [0u8, 20, 40, 60, 80, 99] {
+            let got = encode_near_lossless(strength, &px, d);
+            assert!(
+                got.len() <= exact.len(),
+                "{w}x{h} strength {strength}: near-lossless must never inflate"
+            );
+            if got.len() == exact.len() {
+                ties += 1;
+                assert_eq!(
+                    got, exact,
+                    "{w}x{h} strength {strength}: a tie must keep the exact encoding"
+                );
+            }
+        }
+    }
+    assert!(ties > 0, "the fixtures must actually produce ties to pin");
+}

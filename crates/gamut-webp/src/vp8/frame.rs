@@ -1425,19 +1425,30 @@ pub fn encode_frame_filtered(
     // last partition's size is implied by the remainder — which is why only the first N-1 are
     // bounded here.
     for part in &token_parts[..n - 1] {
-        let len = u32::try_from(part.len()).unwrap_or(u32::MAX);
-        if len > MAX_TOKEN_PARTITION_SIZE {
-            return Err(Error::invalid_input(
-                env!("CARGO_PKG_NAME"),
-                "VP8: token partition exceeds the 3-byte size prefix",
-            ));
-        }
+        let len = token_partition_size(part.len())?;
         out.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8]);
     }
     for part in &token_parts {
         out.extend_from_slice(part);
     }
     Ok((out, recon))
+}
+
+/// The 3-byte little-endian size prefix for a non-final token partition (RFC 6386 §9.5).
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] when `len` exceeds [`MAX_TOKEN_PARTITION_SIZE`], which the
+/// prefix cannot describe. Split out from the writer so the ceiling is reachable from a test
+/// without building a 16 MiB partition.
+fn token_partition_size(len: usize) -> Result<u32> {
+    match u32::try_from(len) {
+        Ok(len) if len <= MAX_TOKEN_PARTITION_SIZE => Ok(len),
+        _ => Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "VP8: token partition exceeds the 3-byte size prefix",
+        )),
+    }
 }
 
 /// Splits the token-partition section (everything after the control partition) into `n` boolean
@@ -2077,6 +2088,87 @@ mod tests {
         assert!(
             decode_frame(&bits[..end]).is_ok(),
             "a stream ending exactly at the first partition (no token bytes) must decode"
+        );
+    }
+
+    /// The 3-byte size prefix (RFC 6386 §9.5) tops out at 16 MiB - 1, and the writer packs the
+    /// value into exactly those three bytes — so a length one past the ceiling would be written
+    /// truncated, pointing the decoder at a boundary that is not there. Both sides of the edge are
+    /// pinned, and the constant is checked against the field it describes rather than against
+    /// itself.
+    #[test]
+    fn token_partition_size_stops_at_the_three_byte_prefix() {
+        // The ceiling is what three little-endian bytes can hold, derived independently.
+        assert_eq!(
+            MAX_TOKEN_PARTITION_SIZE,
+            u32::from_le_bytes([0xFF, 0xFF, 0xFF, 0])
+        );
+        assert_eq!(token_partition_size(0).expect("empty"), 0);
+        let max = MAX_TOKEN_PARTITION_SIZE as usize;
+        assert_eq!(
+            token_partition_size(max).expect("the ceiling"),
+            MAX_TOKEN_PARTITION_SIZE
+        );
+        let err = token_partition_size(max + 1).expect_err("one past the ceiling");
+        assert!(
+            err.to_string().contains("token partition"),
+            "unexpected error: {err}"
+        );
+        // And a length that does not even fit `u32` is the same refusal, not a wrapped success.
+        let err = token_partition_size(usize::MAX).expect_err("absurd length");
+        assert!(err.to_string().contains("token partition"));
+    }
+
+    /// The probability optimizer only adopts a measured value when it pays for its own update
+    /// record: the "yes, update" flag plus eight literal bits, which is 2048 cost units on top of
+    /// re-coding every token. That trade is the entire point of the function, so it is pinned at
+    /// its boundary from both sides — a context whose saving clears the record cost adopts, and an
+    /// otherwise identical context whose saving does not clear it keeps the default.
+    ///
+    /// Both cases use one context of the frame, and the counts are chosen so the *only* thing
+    /// separating them is the size of the saving; a mis-sized record cost, or an adopt/reject
+    /// comparison that admits ties, moves one of them.
+    #[test]
+    fn probability_updates_must_pay_for_their_own_record() {
+        /// Cost, in 1/256 bit, of coding `zeros`/`ones` at probability `p`.
+        fn coding_cost(zeros: u64, ones: u64, p: u8) -> u64 {
+            zeros * u64::from(bit_cost(false, p)) + ones * u64::from(bit_cost(true, p))
+        }
+        // Find a context whose default probability is far from an even split, so a measured 50/50
+        // has something to save.
+        let (plane, band, ctx, node) = (0, 1, 0, 0);
+        let old = tokens::DEFAULT_COEFF_PROBS[plane][band][ctx][node];
+        let update_prob = tokens::COEFF_UPDATE_PROBS[plane][band][ctx][node];
+        // Saving of the measured probability over the default, at an even split of `n` each way.
+        let saving = |n: u64| -> i64 {
+            let new = 127u8;
+            let keep = coding_cost(n, n, old) + u64::from(bit_cost(false, update_prob));
+            let adopt = coding_cost(n, n, new) + u64::from(bit_cost(true, update_prob)) + 8 * 256;
+            keep as i64 - adopt as i64
+        };
+        // Grow the count until adopting is worth it; `n - 1` is then the last count that is not.
+        let mut n = 1u64;
+        while saving(n) <= 0 && n < 1 << 20 {
+            n += 1;
+        }
+        assert!(n > 1, "the boundary must be interior to the search");
+        let mut counts: tokens::CoeffCounts =
+            [[[[[0; 2]; tokens::ENTROPY_NODES]; 3]; tokens::COEFF_BANDS]; tokens::PLANE_TYPES];
+
+        // Just over the boundary: adopted.
+        counts[plane][band][ctx][node] = [n as u32, n as u32];
+        assert_eq!(
+            optimize_coeff_probs(&counts)[plane][band][ctx][node],
+            127,
+            "a saving that clears the update record must be adopted"
+        );
+
+        // Just under it: the default survives.
+        counts[plane][band][ctx][node] = [(n - 1) as u32, (n - 1) as u32];
+        assert_eq!(
+            optimize_coeff_probs(&counts)[plane][band][ctx][node],
+            old,
+            "a saving that does not clear the update record must be rejected"
         );
     }
 

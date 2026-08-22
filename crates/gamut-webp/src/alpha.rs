@@ -330,6 +330,44 @@ mod tests {
         assert_eq!(read_alph(&chunk, w, h).unwrap(), plane);
     }
 
+    /// The filter method lives in bits 2-3 of the `ALPH` header byte (RFC 9649 §2.7.1), beside the
+    /// compression method in bits 0-1. Writing it into the wrong bits still produces a chunk the
+    /// reader accepts — it just unfilters with the wrong method, so the plane comes back wrong.
+    /// Every method is round-tripped through the compressed writer with a plane that is not
+    /// filter-invariant, which is what makes a misplaced field observable.
+    #[test]
+    fn every_alpha_filter_survives_the_compressed_round_trip() {
+        let (w, h) = (12usize, 9usize);
+        // Gradients in both axes plus a corner discontinuity: no two filters agree on this plane.
+        let plane: Vec<u8> = (0..w * h)
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                ((x * 9 + y * 23) % 256) as u8
+            })
+            .collect();
+        for method in [
+            AlphaFilter::None,
+            AlphaFilter::Horizontal,
+            AlphaFilter::Vertical,
+            AlphaFilter::Gradient,
+        ] {
+            let payload = write_compressed_alph(&plane, w, h, method, Effort::default())
+                .expect("the plane matches the dimensions");
+            assert_eq!(
+                payload[0] & 0x03,
+                0x01,
+                "compression method must be lossless for {method:?}"
+            );
+            assert_eq!(
+                (payload[0] >> 2) & 0x03,
+                method.code(),
+                "filter method must occupy bits 2-3 for {method:?}"
+            );
+            let back = read_alph(&payload, w, h).expect("round trip");
+            assert_eq!(back, plane, "{method:?} did not round-trip");
+        }
+    }
+
     #[test]
     fn read_alph_rejects_bad_input() {
         assert!(read_alph(&[], 4, 4).is_err());
