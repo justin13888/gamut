@@ -2,8 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1StillConfig, EncodedStill, encode_still_intra};
-use gamut_color::Planar8;
+use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with};
+use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind, write,
@@ -91,12 +91,17 @@ impl AvifEncoder {
 
     /// Creates an encoder that produces a **lossy** still image at the given `quality` (`0..=100`,
     /// higher = larger output, closer to the source; values above `100` are clamped).
+    /// Lossy stills are coded in **BT.709 YCbCr** by default (full range, 4:4:4): the luma–chroma
+    /// decorrelation is worth a large fraction of the bitrate and costs nothing in coding tools.
+    /// Override it with [`AvifEncoder::with_matrix`].
     #[must_use]
     pub fn lossy(quality: u8) -> Self {
         Self {
             config: AvifConfig {
                 mode: AvifMode::Lossy,
                 quality,
+                matrix: MatrixCoefficients::Bt709,
+                ..AvifConfig::default()
             },
             transform: ImageTransform::default(),
             backends: Vec::new(),
@@ -106,7 +111,54 @@ impl AvifEncoder {
     /// Returns a snapshot of the encoder's configuration.
     #[must_use]
     pub fn config(&self) -> AvifConfig {
-        self.config.clone()
+        self.config
+    }
+
+    /// Selects the CICP matrix the samples are coded through — the colour half of the
+    /// space/quality tradeoff.
+    ///
+    /// Supported: [`MatrixCoefficients::Identity`] (R'G'B' as GBR planes, no decorrelation),
+    /// [`MatrixCoefficients::Bt601`], [`MatrixCoefficients::Bt709`] (the lossy default) and
+    /// [`MatrixCoefficients::Bt2020Ncl`]. Any other code point is rejected at encode time.
+    ///
+    /// **Ignored by [`AvifMode::Lossless`]**, which always uses the identity matrix — an 8-bit
+    /// YCbCr round trip is not bit-exact, so a lossless encode through a luma–chroma matrix would
+    /// not be lossless. This mirrors how lossless already ignores `quality`.
+    ///
+    /// Colour **primaries** and the transfer function stay BT.709 / sRGB; selecting those is part
+    /// of the deferred colour-metadata surface (`STATUS.md`). A BT.2020 *matrix* with BT.709
+    /// primaries is legal CICP — the matrix is a coding choice, independent of the gamut — but a
+    /// caller wanting a true BT.2020 image needs that surface, not this knob.
+    #[must_use]
+    pub fn with_matrix(mut self, matrix: MatrixCoefficients) -> Self {
+        self.config.matrix = matrix;
+        self
+    }
+
+    /// Selects the signal range the coded samples occupy, signalled in `colr` and the AV1 sequence
+    /// header. Defaults to [`ColorRange::Full`], the AVIF ecosystem's default.
+    ///
+    /// Ignored by [`AvifMode::Lossless`] (and by an identity-matrix encode generally): AV1's
+    /// §5.5.2 sRGB shortcut infers full range for BT.709/sRGB/identity and codes no bit for it.
+    #[must_use]
+    pub fn with_color_range(mut self, range: ColorRange) -> Self {
+        self.config.range = range;
+        self
+    }
+
+    /// The colour signalling and plane layout this encoder's configuration selects.
+    ///
+    /// Lossless pins identity/full regardless of the configured matrix and range — see
+    /// [`AvifEncoder::with_matrix`].
+    fn colour(&self) -> Av1Colour {
+        match self.config.mode {
+            AvifMode::Lossless => Av1Colour::default(),
+            _ => Av1Colour {
+                matrix: self.config.matrix,
+                range: self.config.range,
+                ..Av1Colour::default()
+            },
+        }
     }
 
     /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
@@ -274,10 +326,20 @@ fn quality_to_quant(quality: u8) -> u8 {
 }
 
 impl EncodeImage<Rgb8> for AvifEncoder {
-    /// Maps the RGB image to AV1 identity 4:4:4 planes and wraps the temporal unit in an AVIF file.
+    /// Maps the RGB image to AV1 4:4:4 planes — identity GBR, or YCbCr through the configured
+    /// matrix — and wraps the temporal unit in an AVIF file.
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
-        let planes = Planar8::from_rgb8_identity_view(image);
+        let colour = self.colour();
+        let planes = match colour.matrix {
+            MatrixCoefficients::Identity => Planar8::from_rgb8_identity_view(image),
+            matrix => {
+                // Rejects a matrix with no luma–chroma transform (Unspecified, YCgCo) before any
+                // bytes are written.
+                let m = RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight)?;
+                Planar8::from_rgb8_matrix_view(image, m)
+            }
+        };
         // base_q_idx 0 is the lossless path; encode_still_intra(_, 0) is exactly what
         // encode_still_lossless_identity does, so a single call covers both modes.
         let base_q_idx = match self.config.mode {
@@ -287,10 +349,10 @@ impl EncodeImage<Rgb8> for AvifEncoder {
         // Pluggable backends first, in push order; `gamut-av1` is the implicit tail when every
         // backend declines (and the only path taken by an encoder with no backends, which is why
         // the default output is byte-identical to the pre-backend encoder).
-        let request = Av1EncodeRequest::new(dims, base_q_idx);
+        let request = Av1EncodeRequest::new(dims, base_q_idx, colour);
         let still = match crate::backend::run_backends(&self.backends, &request, &planes)? {
-            Some(obus) => crate::backend::still_from_backend_obus(obus, dims)?,
-            None => encode_still_intra(&planes, base_q_idx)?.0,
+            Some(obus) => crate::backend::still_from_backend_obus(obus, dims, colour)?,
+            None => encode_still_intra_with(&planes, base_q_idx, colour)?.0,
         };
         let file = build_avif(&still, dims, self.transform)?;
         out.extend_from_slice(&file);
@@ -362,7 +424,34 @@ mod tests {
         // differs. Parsing it back (gamut-isobmff round-trips its own output) pins the brands, the
         // primary `av01` item, and the av1C-derived `ispe`/`pixi`/`colr` the encoder stamps — none
         // of which a box-presence check would catch if a field were wrong.
-        for enc in [AvifEncoder::lossless(), AvifEncoder::lossy(50)] {
+        // `(encoder, expected matrix_coefficients, expected full_range)`: lossless is pinned to
+        // identity/full, lossy defaults to BT.709/full, and both knobs override the lossy defaults.
+        let cases = [
+            (AvifEncoder::lossless(), 0u16, true),
+            (AvifEncoder::lossy(50), 1, true),
+            (
+                AvifEncoder::lossy(50).with_matrix(MatrixCoefficients::Bt601),
+                6,
+                true,
+            ),
+            // Studio range reaches `colr` — and can only be signalled outside the §5.5.2 sRGB
+            // shortcut, which is why it pairs with a real matrix.
+            (
+                AvifEncoder::lossy(50).with_color_range(ColorRange::Limited),
+                1,
+                false,
+            ),
+            // …but neither knob applies on the lossless path, which ignores them as it ignores
+            // quality: an 8-bit YCbCr round trip is not bit-exact, and studio range discards codes.
+            (
+                AvifEncoder::lossless()
+                    .with_matrix(MatrixCoefficients::Bt709)
+                    .with_color_range(ColorRange::Limited),
+                0,
+                true,
+            ),
+        ];
+        for (enc, want_matrix, want_full_range) in cases {
             let img = read(&encode_with(enc, 34, 18)).expect("emitted AVIF parses");
             assert_eq!(img.major_brand, *b"avif");
             for brand in [*b"avif", *b"mif1", *b"miaf", *b"MA1A"] {
@@ -386,11 +475,7 @@ mod tests {
                 }
                 _ => None,
             });
-            assert_eq!(
-                pixi,
-                Some(vec![8u8, 8, 8]),
-                "three 8-bit channels (identity 4:4:4)"
-            );
+            assert_eq!(pixi, Some(vec![8u8, 8, 8]), "three 8-bit channels (4:4:4)");
             let nclx = props
                 .iter()
                 .find_map(|p| match &p.kind {
@@ -398,12 +483,13 @@ mod tests {
                     _ => None,
                 })
                 .expect("colr nclx present");
-            // BT.709 primaries (1), sRGB transfer (13), identity matrix (0), full range — the values
-            // the identity 8-bit path must carry (AVIF v1.2.0 §2.2; mc=0 requires 4:4:4 full range).
+            // Primaries and transfer stay BT.709 / sRGB (the colour-metadata surface is deferred);
+            // the matrix and range are whatever the configuration selected (AVIF v1.2.0 §2.2;
+            // mc = 0 additionally requires 4:4:4 full range).
             assert_eq!(nclx.colour_primaries, 1);
             assert_eq!(nclx.transfer_characteristics, 13);
-            assert_eq!(nclx.matrix_coefficients, 0);
-            assert!(nclx.full_range);
+            assert_eq!(nclx.matrix_coefficients, want_matrix);
+            assert_eq!(nclx.full_range, want_full_range);
         }
     }
 

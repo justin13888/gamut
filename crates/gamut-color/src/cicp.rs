@@ -25,7 +25,14 @@ pub enum MatrixCoefficients {
     Bt709 = 1,
     /// Unspecified. (Code point 2.)
     Unspecified = 2,
-    /// BT.601 / SMPTE 170M — KR=0.299, KB=0.114. (Code point 6; BT.470 System B,G is
+    /// BT.470 System B,G — KR=0.299, KB=0.114, identical to [`Bt601`](Self::Bt601).
+    /// (Code point 5.)
+    ///
+    /// A distinct code point naming the same de-matrixing: to test whether two streams convert
+    /// alike, compare the [`YcbcrMatrix`](crate::YcbcrMatrix) values, not the
+    /// [`MatrixCoefficients`] values. Kept distinct so a `colr` box read as 5 is written back as 5.
+    Bt470Bg = 5,
+    /// BT.601 / SMPTE 170M — KR=0.299, KB=0.114. (Code point 6; [`Bt470Bg`](Self::Bt470Bg) is
     /// point 5, with identical coefficients.)
     Bt601 = 6,
     /// YCgCo. (Code point 8.)
@@ -51,6 +58,7 @@ impl MatrixCoefficients {
             0 => Some(MatrixCoefficients::Identity),
             1 => Some(MatrixCoefficients::Bt709),
             2 => Some(MatrixCoefficients::Unspecified),
+            5 => Some(MatrixCoefficients::Bt470Bg),
             6 => Some(MatrixCoefficients::Bt601),
             8 => Some(MatrixCoefficients::YCgCo),
             9 => Some(MatrixCoefficients::Bt2020Ncl),
@@ -199,6 +207,9 @@ mod tests {
     fn code_points_match_spec() {
         assert_eq!(MatrixCoefficients::Identity.code_point(), 0);
         assert_eq!(MatrixCoefficients::Bt709.code_point(), 1);
+        assert_eq!(MatrixCoefficients::Bt470Bg.code_point(), 5);
+        assert_eq!(MatrixCoefficients::Bt601.code_point(), 6);
+        assert_eq!(MatrixCoefficients::Bt2020Ncl.code_point(), 9);
         assert_eq!(ColourPrimaries::Bt709.code_point(), 1);
         // A second, non-1 primaries value pins `self as u16` (a constant `1` would pass on Bt709
         // alone).
@@ -220,6 +231,7 @@ mod tests {
             Mc::Identity,
             Mc::Bt709,
             Mc::Unspecified,
+            Mc::Bt470Bg,
             Mc::Bt601,
             Mc::YCgCo,
             Mc::Bt2020Ncl,

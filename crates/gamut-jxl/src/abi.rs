@@ -24,11 +24,13 @@
 //! [`EncodeConfig`] carries a codec id and a `0..=100` quality; [`ImageDesc`] carries the pixel
 //! format, dimensions, coded depth, and plane pointers. That covers the raster, the coded bit depth
 //! and the lossless/lossy target, but **not** JPEG XL's [`Effort`](crate::Effort) dial,
-//! [`ColorSpec`](crate::ColorSpec) signalling or [`Orientation`](crate::Orientation) metadata.
+//! [`ModularMode`](crate::ModularMode) coding-tool selection, [`ColorSpec`](crate::ColorSpec)
+//! signalling or [`Orientation`](crate::Orientation) metadata.
 //! Rather than emit a stream that silently ignores a request, [`AbiEncodeBackend::supports`]
-//! **declines** any job whose colour signalling or orientation is non-default. Effort is a pure
-//! speed/density free choice with no effect on decoded pixels, so it is simply not conveyed and an
-//! ABI backend picks its own.
+//! **declines** any job whose colour signalling, orientation or coding tool is non-default. Effort
+//! is a pure speed/density free choice with no effect on decoded pixels, so it is simply not
+//! conveyed and an ABI backend picks its own; a pinned [`ModularMode`](crate::ModularMode) is not
+//! in that class — it reshapes the codestream — so it is declined rather than dropped.
 
 use gamut_codec_abi::{
     Decoder as AbiDecoder, EncodeConfig, Encoder as AbiEncoder, ImageDesc, MAX_PLANES, Status,
@@ -40,7 +42,7 @@ use crate::backend::{
     JxlCodestreamDecoder, JxlCodestreamEncoder, JxlDecoded, JxlEncodeRequest, JxlImageRef,
     JxlOwnedSamples, JxlSamples, JxlStreamInfo, layout_of,
 };
-use crate::config::{ColorSpec, Orientation};
+use crate::config::{ColorSpec, ModularMode, Orientation};
 
 /// The codec identifier gamut-jxl puts in every [`StreamConfig`] / [`EncodeConfig`] it builds: the
 /// four-character code `"jxl "` read big-endian (`0x6A_78_6C_20`).
@@ -77,10 +79,13 @@ fn quality_for(req: &JxlEncodeRequest) -> u32 {
 
 /// Whether the ABI descriptors can faithfully carry `req`.
 ///
-/// Colour signalling and orientation have no [`EncodeConfig`] field, so a non-default request for
-/// either is declined rather than dropped (see the [module docs](self#what-the-abi-can-and-cannot-carry)).
+/// Colour signalling, orientation and the coding-tool selection have no [`EncodeConfig`] field, so a
+/// non-default request for any of them is declined rather than dropped (see the
+/// [module docs](self#what-the-abi-can-and-cannot-carry)).
 fn is_conveyable(req: &JxlEncodeRequest) -> bool {
-    *req.color() == ColorSpec::Srgb && req.orientation() == Orientation::Identity
+    *req.color() == ColorSpec::Srgb
+        && req.orientation() == Orientation::Identity
+        && req.modular() == ModularMode::Auto
 }
 
 /// Builds an [`ImageDesc`] over a borrowed encode raster: one interleaved plane, tightly packed.
@@ -337,6 +342,7 @@ mod tests {
         JxlEncodeRequest::new(
             distance,
             Effort::Squirrel,
+            ModularMode::Auto,
             8,
             ColorSpec::Srgb,
             Orientation::Identity,
@@ -374,11 +380,12 @@ mod tests {
     }
 
     #[test]
-    fn conveyable_only_for_default_colour_and_orientation() {
+    fn conveyable_only_for_default_colour_orientation_and_coding_tool() {
         assert!(is_conveyable(&request(None)));
         assert!(!is_conveyable(&JxlEncodeRequest::new(
             None,
             Effort::Squirrel,
+            ModularMode::Auto,
             8,
             ColorSpec::Pq,
             Orientation::Identity
@@ -386,10 +393,25 @@ mod tests {
         assert!(!is_conveyable(&JxlEncodeRequest::new(
             None,
             Effort::Squirrel,
+            ModularMode::Auto,
             8,
             ColorSpec::Srgb,
             Orientation::Rotate180
         )));
+        // A pinned coding tool has no EncodeConfig field either, so both non-default modes decline.
+        for modular in [ModularMode::Modular, ModularMode::VarDct] {
+            assert!(
+                !is_conveyable(&JxlEncodeRequest::new(
+                    Some(Distance::new(1.0).unwrap()),
+                    Effort::Squirrel,
+                    modular,
+                    8,
+                    ColorSpec::Srgb,
+                    Orientation::Identity
+                )),
+                "{modular:?} should not be conveyable"
+            );
+        }
     }
 
     #[test]
@@ -541,6 +563,7 @@ mod tests {
         let odd = JxlEncodeRequest::new(
             None,
             Effort::Squirrel,
+            ModularMode::Auto,
             8,
             ColorSpec::Srgb,
             Orientation::Rotate90Cw,

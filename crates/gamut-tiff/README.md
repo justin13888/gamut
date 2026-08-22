@@ -57,7 +57,13 @@ compression schemes land additively on this frozen surface (see Status).
 **Implemented and conformance-checked against libtiff** (issue #107):
 
 - **Structure** — byte-order header, IFD/tag read & write, strips and tiles, multi-page documents.
-- **Colour modes** (8-bit) — grayscale, RGB, RGBA (alpha), palette, CMYK, and 1-bit bilevel.
+- **Colour modes** — grayscale, RGB and RGBA at 8 and 16 bits; CMYK (8-bit encode, 8- or 16-bit
+  decode); 8-bit palette; 1-bit bilevel. Cross-depth requests resolve rather than fail: 8-bit
+  widens to 16-bit exactly (`×257`), 16-bit narrows to 8-bit by truncation (lossy).
+- **Sample format** — `SampleFormat` (339) is honoured: signed-integer, IEEE-float and 32-bit
+  samples are refused with a typed error naming the offending tag, never truncated or
+  reinterpreted. `TiffDecoder::info` reports a page's declared depth and format from tags alone —
+  including for pages the decoder declines — so callers can dispatch before decoding.
 - **Compression** — uncompressed, PackBits, LZW (+ strip predictor), and Adobe Deflate
   (+ horizontal differencing on strips or tiles), plus the bilevel CCITT schemes Modified Huffman
   (Group 3 1-D) and Group 4 (T.6).
@@ -66,7 +72,8 @@ compression schemes land additively on this frozen surface (see Status).
 
 **Deferred — planned, additive** (see the [STATUS.md](STATUS.md) scope ledger): YCbCr (§21),
 CIE L\*a\*b\* / RGB colorimetry (§20, §23), new-style JPEG-in-TIFF (§22, `Compression = 7`), and
-smaller items (CCITT Group 3 2-D, planar config, 16-bit/float samples, halftone hints).
+smaller items (CCITT Group 3 2-D, planar config, IEEE-float and 32-bit samples, 4-bit grayscale,
+halftone hints).
 **Permanently out of scope:** old-style JPEG (§22, `Compression = 6`), deprecated and
 unimplementable-as-specified per TIFF Technical Note 2.
 

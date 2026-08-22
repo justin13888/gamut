@@ -236,3 +236,97 @@ planned lcms2 differential tests (issue #322) can demand exact agreement.
 Quantization uses an **odd** level count: `max_idx = 2^bits − 2` (the top code is never
 written), so the center index dequantizes to exactly 0. Round-half-away-from-zero.
 Defaults: `µ_L = 5.0`, `µ_C = 8.0`, `µ_alpha = 5.0`.
+
+---
+
+## XYB (JPEG XL opsin colour space) — ISO/IEC 18181-1 / libjxl
+
+Sources: the pre-ISO Committee Draft `references/jxl/1908.03565.pdf` (defines the XYB space and
+the normative inverse), and the **frozen** reference-implementation constants of **libjxl
+0.12.0** — the exact version this workspace pins as its JXL oracle (`references/jxl/README.md`) —
+vendored verbatim (BSD-3-Clause, header retained) as `references/jxl/opsin_params.h`.
+Implemented by `gamut-color`'s `xyb` module; consumed by `gamut-jpeg`'s XYB colour mode and its
+embedded ICC profile (regenerated and byte-pinned by `crates/gamut/tests/xyb_icc.rs`).
+
+Forward: linear sRGB → opsin absorbance matrix → per-channel `∛(x + b) − ∛b` →
+`X = (L′−M′)/2, Y = (L′+M′)/2, B = S′`.
+
+Opsin absorbance matrix (`kOpsinAbsorbanceMatrix`; middle/last entries of each row are defined
+as `1 −` the others, so each row sums to 1):
+```
+0.30                  1 − 0.078 − 0.30      0.078
+0.23                  1 − 0.078 − 0.23      0.078
+0.24342268924547819   0.20476744424496821   1 − kM20 − kM21
+```
+Bias (`kOpsinAbsorbanceBias`, all channels): `b = 0.0037930732552754493`.
+
+Frozen inverse (`kDefaultInverseOpsinAbsorbanceMatrix` — transcribed, not re-derived: the decode
+direction is normative and carries its own f32-rounded literals):
+```
+ 11.031566901960783  −9.866943921568629   −0.16462299647058826
+ −3.254147380392157   4.418770392156863   −0.16462299647058826
+ −3.6588512862745097  2.7129230470588235   1.9459282392156863
+```
+
+Scaled-XYB byte encoding (`kScaledXYBOffset` / `kScaledXYBScale`; the **third stored channel is
+`B − Y`**): `sᵢ = clamp((storedᵢ + offsetᵢ)·scaleᵢ, 0, 1)` with
+```
+offset = (0.015386134, 0.0, 0.27770459)
+scale  = (22.995788804, 1.183000077, 1.502141333)
+```
+
+XYB ICC `A2B0` matrix (libjxl `jxl_cms_internal.h`, `CreateICCLutAtoBTagForXYB`): the literal
+`0.5 · XYZ(D50)←linear-sRGB · inverse-opsin` (the 0.5 bakes in the mAB PCS-XYZ encoding
+ceiling), verified against a fresh derivation in `crates/gamut/tests/xyb_icc.rs` before use:
+```
+ 1.5170095  −1.1065225   0.071623
+−0.050022    0.5683655  −0.018344
+−1.387676    1.1145555   0.6857255
+```
+
+---
+
+## YCbCr matrix coefficients — ITU-T H.273 §8.3 / ISO/IEC 23091-2
+
+Source: ITU-T H.273 (2024-07) Table 4 (`MatrixCoefficients`) and §8.3, the non-constant-luminance
+YCbCr ↔ RGB relations. Backs `gamut_color::YcbcrMatrix`.
+
+The published luma weights are exact four-decimal values, so the derivation is exact integer
+arithmetic — unlike the rest of this directory, that path is bit-exact and deterministic rather
+than Tier-1 `f64`.
+
+| Code point | Name | `Kr` | `Kb` |
+| --- | --- | --- | --- |
+| 1 | BT.709 / BT.1361 / sRGB-matrix | 0.2126 | 0.0722 |
+| 5 | BT.470 System B,G / BT.601 625 | 0.2990 | 0.1140 |
+| 6 | BT.601 525 / SMPTE 170M | 0.2990 | 0.1140 |
+| 9 | BT.2020 non-constant luminance | 0.2627 | 0.0593 |
+
+Code points 5 and 6 are distinct points naming identical coefficients; both are modeled so a `colr`
+box read as 5 is written back as 5.
+
+With `Kg = 1 − Kr − Kb`, the inverse (de-matrixing) is
+
+```
+R' = Y'                              + 2(1 − Kr)·Cr
+G' = Y' − (2·Kb(1 − Kb)/Kg)·Cb − (2·Kr(1 − Kr)/Kg)·Cr
+B' = Y' + 2(1 − Kb)·Cb
+```
+
+Range normalization at bit depth `bd`, with `max = 2^bd − 1` (H.273 §8.3):
+
+| | luma offset | luma scale | chroma offset | chroma scale |
+| --- | --- | --- | --- | --- |
+| Limited ("studio swing") | `16 << (bd − 8)` | `219 << (bd − 8)` | `128 << (bd − 8)` | `224 << (bd − 8)` |
+| Full | `0` | `max` | `2^(bd − 1)` | `max` |
+
+`Y' = (Y − luma_offset)/luma_scale`, `Cb = (cb − chroma_offset)/chroma_scale`, and the output
+sample is `round(max · R')` saturated to `0..=max` (the AV1 `Clip1` of `clip_pixel`).
+
+Two consequences worth recording, both asserted by tests: the full-range chroma coefficients are
+bit-depth independent (`max / chroma_scale = 1`), and the limited-range luma gain depends only on
+`(range, bit_depth)`, never on the matrix.
+
+Note that `gamut_color::ycbcr_to_rgb` does **not** use these relations: it is a bit-exact port of
+libwebp's `VP8YUVToR/G/B`, kept so WebP decode matches libwebp per pixel. The two are both correct
+BT.601 and differ by at most 1 LSB.

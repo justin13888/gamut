@@ -77,6 +77,10 @@ impl JxlEncoderFrameSettingId {
     /// Encoder effort/speed level, 1 (lightning) to 10 (glacier); default 7 (squirrel)
     /// (`JXL_ENC_FRAME_SETTING_EFFORT`).
     pub const EFFORT: Self = Self(0);
+
+    /// Coding-tool selection: `-1` lets the encoder choose (the default), `0` enforces VarDCT, `1`
+    /// enforces modular (`JXL_ENC_FRAME_SETTING_MODULAR`).
+    pub const MODULAR: Self = Self(11);
 }
 
 unsafe extern "C" {

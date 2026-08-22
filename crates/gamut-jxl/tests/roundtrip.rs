@@ -10,9 +10,10 @@
     any(not(target_arch = "wasm32"), target_os = "emscripten")
 ))]
 
+use gamut_core::convert::{AlphaPolicy, ConvertPolicy, LumaPolicy};
 use gamut_core::{
-    DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,
-    ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
+    DecodeImage, Dimensions, EncodeImage, ErrorKind, Gray8, Gray16, GrayAlpha8, GrayAlpha16,
+    ImageBuf, ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
 use gamut_jxl::{Container, JxlDecoder, JxlEncoder};
 
@@ -196,7 +197,17 @@ fn gray_stream_expands_to_rgb8_and_rgba8() {
 #[test]
 fn rgba_stream_decodes_as_rgb8_dropping_alpha() {
     let (bytes, px, dims) = encode_rgba8(16, 16);
-    let rgb: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(&bytes).unwrap();
+
+    // Discarding a present alpha channel is a loss, so the default decoder refuses it rather than
+    // deciding for the caller.
+    let refused = DecodeImage::<Rgb8>::decode_image(&JxlDecoder::new(), &bytes)
+        .expect_err("alpha drop must not happen silently");
+    assert_eq!(refused.kind(), ErrorKind::Unsupported);
+
+    let rgb: ImageBuf<Rgb8> = JxlDecoder::new()
+        .with_convert_policy(ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop))
+        .decode_image(&bytes)
+        .unwrap();
     assert_eq!(rgb.dimensions(), dims);
     // Every RGB triple matches the source's colour channels; the source alpha is discarded.
     for i in 0..(16 * 16) {
@@ -379,4 +390,63 @@ fn info_reports_stream_properties_on_alpha_stream() {
     // Junk input errors instead of panicking.
     assert!(JxlDecoder::new().info(&[0xFF, 0x0A]).is_err());
     assert!(JxlDecoder::new().info(&[]).is_err());
+}
+
+/// The conversion policy is readable back, and it reaches the decode.
+///
+/// `decode_samples` consults the policy *before* decoding, because the answer decides which layout
+/// jxl-rs is asked for. A colour stream therefore cannot be presented as grayscale under the
+/// default, and can once a `LumaPolicy` names the weights — and the two standards must disagree,
+/// which pins that the policy's value is used rather than merely its presence.
+#[test]
+fn convert_policy_round_trips_and_reaches_the_decode() {
+    let policy = ConvertPolicy::lossless().with_luma(LumaPolicy::Bt601);
+    assert_eq!(
+        JxlDecoder::new().convert_policy(),
+        ConvertPolicy::lossless()
+    );
+    assert_eq!(
+        JxlDecoder::new()
+            .with_convert_policy(policy)
+            .convert_policy(),
+        policy
+    );
+
+    // Saturated red, so the chosen weights are plainly visible in the luma.
+    let (w, h) = (16, 16);
+    let dims = Dimensions::new(w, h).unwrap();
+    let rgb: Vec<u8> = (0..w * h).flat_map(|_| [255u8, 0, 0]).collect();
+    let bytes = JxlEncoder::lossless()
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims).unwrap())
+        .expect("encode");
+
+    let refused = DecodeImage::<Gray8>::decode_image(&JxlDecoder::new(), &bytes)
+        .expect_err("colour as grayscale must not be guessed");
+    assert_eq!(refused.kind(), ErrorKind::Unsupported);
+    // The refusal must come from this crate, before the entropy decode -- not from gamut-core
+    // afterwards. Both would report Unsupported, so the origin is what distinguishes "declined the
+    // request" from "decoded the whole image and then declined".
+    assert_eq!(refused.origin(), Some("gamut-jxl"));
+
+    let bt601: ImageBuf<Gray8> = JxlDecoder::new()
+        .with_convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt601))
+        .decode_image(&bytes)
+        .expect("bt601 decode");
+    let bt709: ImageBuf<Gray8> = JxlDecoder::new()
+        .with_convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt709))
+        .decode_image(&bytes)
+        .expect("bt709 decode");
+    assert_eq!(bt601.as_samples()[0], 76); // round(0.299 * 255)
+    assert_eq!(bt709.as_samples()[0], 54); // round(0.2126 * 255)
+
+    // A grayscale stream still reaches a grayscale target with no policy at all: the guard must
+    // narrow to "colour source", not to "grayscale target".
+    let gray: Vec<u8> = (0..w * h).map(|i| (i % 256) as u8).collect();
+    let gray_bytes = JxlEncoder::lossless()
+        .encode_to_vec(ImageRef::<Gray8>::new(&gray, dims).unwrap())
+        .expect("encode grey");
+    let back: ImageBuf<Gray8> = JxlDecoder::new()
+        .decode_image(&gray_bytes)
+        .expect("grey decode needs no policy");
+    assert_eq!(back.as_samples(), gray.as_slice());
 }

@@ -153,11 +153,32 @@ fn gamut_encode_cfg(
     restart: u16,
     progressive: bool,
 ) -> Vec<u8> {
-    let dims = Dimensions::new(w, h).unwrap();
     let enc = JpegEncoder::new()
         .with_quality(quality)
         .with_restart_interval(restart)
         .with_progressive(progressive);
+    gamut_encode_with(enc, mode, pixels, w, h)
+}
+
+/// Encodes `pixels` with gamut's baseline path using Annex K.2 optimized Huffman tables.
+fn gamut_encode_optimized(
+    mode: Mode,
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    quality: u8,
+    restart: u16,
+) -> Vec<u8> {
+    let enc = JpegEncoder::new()
+        .with_quality(quality)
+        .with_restart_interval(restart)
+        .with_optimized_tables(true);
+    gamut_encode_with(enc, mode, pixels, w, h)
+}
+
+/// Drives an already-configured encoder over the mode's pixel type, applying its subsampling.
+fn gamut_encode_with(enc: JpegEncoder, mode: Mode, pixels: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let dims = Dimensions::new(w, h).unwrap();
     match mode {
         Mode::Gray => enc
             .encode_to_vec(ImageRef::<Gray8>::new(pixels, dims).unwrap())
@@ -361,6 +382,94 @@ fn progressive_encode_libjpeg_decodes_identically_to_baseline() {
     }
 }
 
+#[test]
+fn optimized_baseline_libjpeg_decodes_identically_to_the_fixed_tables() {
+    // The sharp optimized-table gate, the baseline twin of the progressive one above: Annex K.2
+    // tables change only the Huffman code words, never the quantized coefficients, so libjpeg-turbo
+    // must decode the optimized stream to EXACTLY the same pixels as the fixed-table stream of the
+    // same image. Any deviation is an entropy-coder bug — the gather pass and the emit pass having
+    // disagreed — not a tolerance. Asserted over dims × mode × quality × restart, which also covers
+    // the DC-predictor resets at restart boundaries and the sparse-histogram edge cases.
+    let mut fixed_total = 0usize;
+    let mut optimized_total = 0usize;
+    for &(w, h) in DIMS {
+        for mode in Mode::ALL {
+            for &q in &[40u8, 75, 95] {
+                for &restart in &[0u16, 2] {
+                    let src = lcg_pixels(w, h, mode.channels(), 0x1234_5678);
+                    let fixed = gamut_encode(mode, &src, w, h, q, restart);
+                    let optimized = gamut_encode_optimized(mode, &src, w, h, q, restart);
+                    // Still a baseline (SOF0) stream — the flag must not change the process.
+                    assert_eq!(
+                        gamut_jpeg::info(&optimized).unwrap().process,
+                        JpegProcess::Baseline,
+                        "optimized tables must stay baseline for {mode:?} {w}x{h}"
+                    );
+                    let fixed_dec = libjpeg_oracle::decode(&fixed).expect("oracle decode fixed");
+                    let opt_dec =
+                        libjpeg_oracle::decode(&optimized).expect("oracle decode optimized");
+                    assert_eq!(
+                        (opt_dec.width, opt_dec.height, opt_dec.channels),
+                        (w, h, mode.channels()),
+                        "geometry {mode:?} {w}x{h} q{q} r{restart}"
+                    );
+                    assert_eq!(
+                        opt_dec.pixels, fixed_dec.pixels,
+                        "optimized != fixed through libjpeg-turbo: {mode:?} {w}x{h} q{q} r{restart}"
+                    );
+                    // A Huffman code fitted to this image's own statistics is never longer than the
+                    // generic Annex K one, and its table is never larger than the 162-value maximum
+                    // the standard tables already spend.
+                    assert!(
+                        optimized.len() <= fixed.len(),
+                        "optimized {} > fixed {} bytes: {mode:?} {w}x{h} q{q} r{restart}",
+                        optimized.len(),
+                        fixed.len()
+                    );
+                    fixed_total += fixed.len();
+                    optimized_total += optimized.len();
+                }
+            }
+        }
+    }
+    assert!(
+        optimized_total < fixed_total,
+        "optimized {optimized_total} bytes vs fixed {fixed_total} across the battery"
+    );
+}
+
+#[test]
+fn optimized_baseline_is_tight_against_libjpeg_turbo_optimize_coding() {
+    // Against the reference doing the same job: libjpeg-turbo with `optimize_coding`. gamut builds
+    // its tables from the same §K.2 procedure over the same symbol alphabet, so the stream sizes
+    // must be in the same league — this catches a table that is technically valid but badly built
+    // (e.g. a mis-ordered HUFFVAL) which the decode-equality check above would not notice.
+    for &(w, h) in &[(33u32, 31u32), (64, 48)] {
+        for mode in Mode::ALL {
+            let src = gray_or_rgb_gradient(mode, w, h);
+            let gamut = gamut_encode_optimized(mode, &src, w, h, 75, 0);
+            let oracle = oracle_encode(mode, &src, w, h, 75, 0, true, false);
+            // Measured worst ratio over this battery: 1.083 (gray 64×48). Asserted with margin.
+            let ratio = gamut.len() as f64 / oracle.len() as f64;
+            assert!(
+                ratio < 1.15,
+                "{mode:?} {w}x{h}: gamut {} vs libjpeg -optimize {} bytes (ratio {ratio:.3})",
+                gamut.len(),
+                oracle.len()
+            );
+        }
+    }
+}
+
+/// The gradient content of the right channel count for `mode`.
+fn gray_or_rgb_gradient(mode: Mode, w: u32, h: u32) -> Vec<u8> {
+    if matches!(mode, Mode::Gray) {
+        gray_gradient(w, h)
+    } else {
+        rgb_gradient(w, h)
+    }
+}
+
 // ================================================================================================
 // Decode direction: libjpeg-turbo encodes → gamut decodes.
 // ================================================================================================
@@ -500,4 +609,289 @@ fn oracle_is_libjpeg_turbo_3() {
     // Guards against accidental submodule drift to a different major version.
     let v = libjpeg_oracle::version();
     assert!(v.starts_with("3."), "expected libjpeg-turbo 3.x, got {v:?}");
+}
+
+// ================================================================================================
+// Custom quantization tables (`with_quant_tables`) through the reference decoder.
+// ================================================================================================
+
+#[test]
+fn encode_all_one_custom_tables_are_near_lossless() {
+    // All-1 tables quantize with step 1 everywhere — the residual error is FDCT/IDCT rounding
+    // only, so libjpeg-turbo's decode must sit within a few codes of the source. This pins that
+    // the caller's tables really drive quantization (any scaled Annex K pair would be far coarser
+    // at high frequencies and blow the bound on LCG content).
+    use gamut_jpeg::QuantTables;
+    let ones = QuantTables::new([1u8; 64], [1u8; 64]).unwrap();
+    let mut worst = 0u8;
+    for &(w, h) in DIMS {
+        for mode in [Mode::Gray, Mode::C444] {
+            let src = lcg_pixels(w, h, mode.channels(), 0xC0FF_EE00);
+            let enc = JpegEncoder::new().with_quant_tables(ones);
+            let jpeg = gamut_encode_with(enc, mode, &src, w, h);
+            let img = libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo decode");
+            assert_eq!(
+                (img.width, img.height, img.channels),
+                (w, h, mode.channels()),
+                "geometry {mode:?} {w}x{h}"
+            );
+            let (max, _) = diff_stats(&img.pixels, &src);
+            worst = worst.max(max);
+        }
+    }
+    // Measured worst over the battery: 3 (gray = pure IDCT rounding; 4:4:4 adds the YCbCr
+    // round-trip). Asserted with margin.
+    assert!(worst <= 4, "all-1 tables max-diff {worst}");
+}
+
+#[test]
+fn encode_coarse_custom_tables_decode_parity_gamut_vs_libjpeg() {
+    // A deliberately coarse custom pair (Annex K scaled to quality 20): both decoders see the
+    // same stream, so gamut's decode must match libjpeg-turbo's within the same IDCT-rounding
+    // parity bound the standard-table battery established (gray/4:4:4 ≤ 3 codes).
+    use gamut_jpeg::QuantTables;
+    let coarse = QuantTables::annex_k().scaled(20);
+    let mut worst = 0u8;
+    for &(w, h) in DIMS {
+        for mode in [Mode::Gray, Mode::C444] {
+            let src = lcg_pixels(w, h, mode.channels(), 0xBAD_5EED);
+            let enc = JpegEncoder::new().with_quant_tables(coarse);
+            let jpeg = gamut_encode_with(enc, mode, &src, w, h);
+            let reference = libjpeg_oracle::decode(&jpeg).expect("libjpeg-turbo decode");
+            let (gw, gh, gamut_px) = gamut_decode(mode, &jpeg);
+            assert_eq!((gw, gh), (w, h), "geometry {mode:?} {w}x{h}");
+            let (max, _) = diff_stats(&gamut_px, &reference.pixels);
+            worst = worst.max(max);
+        }
+    }
+    // Measured worst over the battery: 2. Asserted at the established parity bound.
+    assert!(worst <= 3, "coarse custom tables parity max-diff {worst}");
+}
+
+// ================================================================================================
+// Rate–distortion optimization (`with_rd_optimization`) through the reference decoder.
+// ================================================================================================
+
+/// Textured content: a smooth two-axis gradient plus low-amplitude LCG noise — many small,
+/// near-threshold AC coefficients, the population trellis quantization exists to prune.
+fn textured_pixels(w: u32, h: u32, channels: u32) -> Vec<u8> {
+    let mut lcg = Lcg::new(0x7E97_0A1D);
+    let mut px = Vec::with_capacity((w * h * channels) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..channels {
+                let base = (x * 200 / w.max(1) + y * 55 / h.max(1) + c * 17) as i32;
+                let noise = i32::from(lcg.byte() % 33) - 16;
+                px.push((base + noise).clamp(0, 255) as u8);
+            }
+        }
+    }
+    px
+}
+
+/// Composite content: a flat left half and an LCG-textured right half — the flat/busy contrast
+/// that per-block adaptive λ modulation exists for.
+fn composite_pixels(w: u32, h: u32, channels: u32) -> Vec<u8> {
+    let mut lcg = Lcg::new(0x5EED_CAFE);
+    let mut px = Vec::with_capacity((w * h * channels) as usize);
+    for _y in 0..h {
+        for x in 0..w {
+            for _c in 0..channels {
+                px.push(if x < w / 2 { 128 } else { lcg.byte() });
+            }
+        }
+    }
+    px
+}
+
+/// Encodes with the given RD mode, no other configuration changes.
+fn gamut_encode_rd(
+    mode: Mode,
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    quality: u8,
+    restart: u16,
+    rd: gamut_jpeg::RdOptimization,
+) -> Vec<u8> {
+    let enc = JpegEncoder::new()
+        .with_quality(quality)
+        .with_restart_interval(restart)
+        .with_rd_optimization(rd);
+    gamut_encode_with(enc, mode, pixels, w, h)
+}
+
+#[test]
+fn trellis_shrinks_streams_at_bounded_psnr_cost() {
+    use gamut_jpeg::RdOptimization;
+    // The RD gate: across dims × mode × quality × restart on gradient and composite content,
+    // every trellis stream must (a) decode by libjpeg-turbo with the right geometry, (b) be no
+    // larger than the plain stream, and (c) lose no more than 0.5 dB PSNR against the source.
+    // Aggregated over the battery the size saving must clear a measured-then-margined floor.
+    // Larger-than-DIMS canvases: the RD claims are about entropy data, which the marker
+    // prologue would otherwise dominate; stream validity on tiny dims is the other batteries'
+    // job. Content: smooth gradients (little to prune — the PSNR guard matters) and textured
+    // (the near-threshold population trellis prunes — the size win matters).
+    let mut plain_total = 0usize;
+    let mut trellis_total = 0usize;
+    for &(w, h) in &[(64u32, 48u32), (96, 80)] {
+        for mode in [Mode::Gray, Mode::C444, Mode::C420] {
+            for &q in &[50u8, 75, 90] {
+                for &restart in &[0u16, 2] {
+                    for content in 0..2 {
+                        let src = if content == 0 {
+                            if matches!(mode, Mode::Gray) {
+                                gray_gradient(w, h)
+                            } else {
+                                rgb_gradient(w, h)
+                            }
+                        } else {
+                            textured_pixels(w, h, mode.channels())
+                        };
+                        let plain = gamut_encode(mode, &src, w, h, q, restart);
+                        let trellis =
+                            gamut_encode_rd(mode, &src, w, h, q, restart, RdOptimization::Trellis);
+                        // Modeled AC bits never exceed plain's (nearest rounding is in the
+                        // search space), but byte padding and 0xFF stuffing can still wobble a
+                        // couple of bytes on tiny streams.
+                        assert!(
+                            trellis.len() <= plain.len() + 2,
+                            "{mode:?} {w}x{h} q{q} r{restart} c{content}: trellis grew the stream"
+                        );
+                        let p_img = libjpeg_oracle::decode(&plain).expect("decode plain");
+                        let t_img = libjpeg_oracle::decode(&trellis).expect("decode trellis");
+                        assert_eq!(
+                            (t_img.width, t_img.height, t_img.channels),
+                            (w, h, mode.channels()),
+                            "geometry {mode:?} {w}x{h} q{q} r{restart}"
+                        );
+                        let (_, p_mse) = diff_stats(&p_img.pixels, &src);
+                        let (_, t_mse) = diff_stats(&t_img.pixels, &src);
+                        assert!(
+                            psnr(t_mse) >= psnr(p_mse) - 0.5,
+                            "{mode:?} {w}x{h} q{q} r{restart} c{content}: PSNR {:.2} -> {:.2}",
+                            psnr(p_mse),
+                            psnr(t_mse)
+                        );
+                        plain_total += plain.len();
+                        trellis_total += trellis.len();
+                    }
+                }
+            }
+        }
+    }
+    // Measured at λ = 144: 8.70% of the battery's total bytes saved; worst cell −0.35 dB.
+    // Asserted with margin.
+    let saved = plain_total - trellis_total;
+    assert!(
+        saved * 100 >= plain_total * 5,
+        "trellis saved only {saved} of {plain_total} bytes"
+    );
+}
+
+#[test]
+fn adaptive_trellis_redistributes_bits_by_block_activity() {
+    use gamut_jpeg::RdOptimization;
+    // The modulation direction, both ways. Activity is measured relative to the quantization
+    // resolution (√(energy / Σ step²)), so "busy" means busy *at this quality*: at q90+ the steps
+    // are fine and LCG noise sits far above them — λ scales UP and the adaptive stream must be
+    // smaller in aggregate at a bounded PSNR cost. On smooth gradients λ scales DOWN, so the
+    // adaptive stream keeps at least trellis fidelity (and may spend a few more bytes doing it).
+    let mut busy_trellis = 0usize;
+    let mut busy_adaptive = 0usize;
+    for &(w, h) in &[(33u32, 31u32), (64, 48)] {
+        for mode in [Mode::Gray, Mode::C444] {
+            for &q in &[90u8, 95] {
+                let src = lcg_pixels(w, h, mode.channels(), 0xADA9_71FE);
+                let trellis = gamut_encode_rd(mode, &src, w, h, q, 0, RdOptimization::Trellis);
+                let adaptive =
+                    gamut_encode_rd(mode, &src, w, h, q, 0, RdOptimization::TrellisAdaptive);
+                let t_img = libjpeg_oracle::decode(&trellis).expect("decode trellis");
+                let a_img = libjpeg_oracle::decode(&adaptive).expect("decode adaptive");
+                let (_, t_mse) = diff_stats(&t_img.pixels, &src);
+                let (_, a_mse) = diff_stats(&a_img.pixels, &src);
+                assert!(
+                    psnr(a_mse) >= psnr(t_mse) - 1.5,
+                    "{mode:?} {w}x{h} q{q}: busy adaptive PSNR {:.2} vs trellis {:.2}",
+                    psnr(a_mse),
+                    psnr(t_mse)
+                );
+                busy_trellis += trellis.len();
+                busy_adaptive += adaptive.len();
+            }
+        }
+    }
+    // Uniform noise is adaptive Q's thinnest showcase — most coefficients sit far above the
+    // marginal band even at 4λ, so the aggregate effect is small; the point of this gate is the
+    // *direction*. Measured: 0.67% saved (28836 vs 29031). Floor margined to 0.3%.
+    assert!(
+        busy_adaptive * 1000 <= busy_trellis * 997,
+        "busy content: adaptive {busy_adaptive} vs trellis {busy_trellis}: no saving"
+    );
+
+    // Smooth content: λ is modulated down, so adaptive fidelity must not fall below trellis's.
+    for &(w, h) in &[(33u32, 31u32), (64, 48)] {
+        let src = gray_gradient(w, h);
+        let trellis = gamut_encode_rd(Mode::Gray, &src, w, h, 75, 0, RdOptimization::Trellis);
+        let adaptive = gamut_encode_rd(
+            Mode::Gray,
+            &src,
+            w,
+            h,
+            75,
+            0,
+            RdOptimization::TrellisAdaptive,
+        );
+        let (_, t_mse) = diff_stats(&libjpeg_oracle::decode(&trellis).unwrap().pixels, &src);
+        let (_, a_mse) = diff_stats(&libjpeg_oracle::decode(&adaptive).unwrap().pixels, &src);
+        // Redistribution is fidelity-neutral on smooth content (measured worst: −0.06 dB at
+        // 64×48; the per-block factor sits near 1 either side of the activity reference). The
+        // strict flat-block protection direction is unit-pinned in `rd::tests`.
+        assert!(
+            psnr(a_mse) >= psnr(t_mse) - 0.15,
+            "{w}x{h}: smooth adaptive PSNR {:.2} fell below trellis {:.2}",
+            psnr(a_mse),
+            psnr(t_mse)
+        );
+    }
+}
+
+#[test]
+fn trellis_composes_with_custom_tables_and_progressive() {
+    use gamut_jpeg::{QuantTables, RdOptimization};
+    // Composition cells: (a) trellis over caller-supplied tables — the stream must stay
+    // libjpeg-decodable with sane fidelity; (b) trellis progressive vs trellis baseline — the
+    // same coefficients, so libjpeg's decodes must be byte-identical (the exactness invariant).
+    let (w, h) = (33u32, 31u32);
+    let src = composite_pixels(w, h, 3);
+    let tables = QuantTables::annex_k().scaled(60);
+    let enc = JpegEncoder::new()
+        .with_quant_tables(tables)
+        .with_rd_optimization(RdOptimization::Trellis);
+    let custom = gamut_encode_with(enc, Mode::C444, &src, w, h);
+    let img = libjpeg_oracle::decode(&custom).expect("decode custom+trellis");
+    let (_, mse) = diff_stats(&img.pixels, &src);
+    // Measured: 20.96 dB on this half-noise composite at ~q60. A loose sanity floor proving the
+    // pipeline composes, not a tuning pin.
+    assert!(psnr(mse) > 19.0, "custom+trellis PSNR {:.2}", psnr(mse));
+
+    for rd in [RdOptimization::Trellis, RdOptimization::TrellisAdaptive] {
+        let base_enc = JpegEncoder::new().with_quality(75).with_rd_optimization(rd);
+        let prog_enc = JpegEncoder::new()
+            .with_quality(75)
+            .with_rd_optimization(rd)
+            .with_progressive(true);
+        let base = gamut_encode_with(base_enc, Mode::C444, &src, w, h);
+        let prog = gamut_encode_with(prog_enc, Mode::C444, &src, w, h);
+        let base_px = libjpeg_oracle::decode(&base)
+            .expect("decode baseline")
+            .pixels;
+        let prog_px = libjpeg_oracle::decode(&prog)
+            .expect("decode progressive")
+            .pixels;
+        assert_eq!(
+            base_px, prog_px,
+            "{rd:?}: progressive coefficients diverged from baseline"
+        );
+    }
 }
