@@ -1,0 +1,73 @@
+# gamut-cmm
+
+`gamut-cmm` is the workspace's **ICC colour management module** (CMM): it builds runnable colour
+transforms from parsed ICC profiles and applies them to pixels.
+
+## Goals
+
+Part of the [gamut](../../README.md) workspace, this crate exists to be the transform *engine*
+over [`gamut-icc`](../gamut-icc)'s parsed profiles:
+
+- **Memory-safe.** `#![forbid(unsafe_code)]`; pure scalar `f64` math over borrowed sample
+  buffers, no I/O.
+- **Clean-slate from the spec, behaviour pinned to the reference CMM.** Data layouts follow
+  **ICC.1:2022** ([`references/icc`](../../references/icc)); where ICC.1 is silent on CMM
+  behaviour (interpolation, clamping), observable semantics follow **Little-CMS** (lcms2), the
+  differential oracle ([`references/cmm`](../../references/cmm/README.md)).
+- **Layered on shared crates.** Profiles are parsed by [`gamut-icc`](../gamut-icc); colorimetric
+  primitives come from [`gamut-color`](../gamut-color); this crate owns only linking and
+  evaluation.
+
+## Use cases
+
+- **Colour-correct decoding** — convert decoded pixels through an embedded profile (a PNG
+  `iCCP`, a JPEG `APP2`, a TIFF/DNG tag 34675) into a display or working space.
+- **Profile-accurate encoding** — bring working-space pixels into the space an embedded profile
+  describes before encoding.
+- **Custom pipelines** — assemble a validated stage chain by hand and run it through the same
+  `Transform` entry point a linked profile pair will use.
+
+## Integration with other gamut libraries
+
+`gamut-cmm` sits between `gamut-icc` and pixel data: a format crate extracts the profile blob,
+`gamut-icc` parses it, and this crate turns it into a runnable [`Transform`]. Samples are
+interleaved `f64` — device channels encoded in `[0, 1]`, PCS seams decoded colorimetry (XYZ with
+D50 `Y = 1.0`, Lab with `L*` in `0..=100`). Evaluation is Tier-1 (correctness only, not
+bit-reproducible), the same posture as `gamut-color`.
+
+## Usage
+
+```rust
+use gamut_cmm::{Pipeline, Stage, Transform};
+
+// A toy transform: scale-and-offset each RGB channel, then clamp to [0, 1].
+let scale = Stage::Matrix {
+    m: [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]],
+    offset: [0.25, 0.25, 0.25],
+};
+let pipeline = Pipeline::new(3, 3, vec![scale, Stage::Clamp { channels: 3 }])?;
+
+let src = [1.0, 0.5, 2.0]; // one interleaved RGB pixel
+let mut dst = [0.0; 3];
+pipeline.transform(&src, &mut dst)?;
+assert_eq!(dst, [0.75, 0.5, 1.0]);
+# Ok::<(), gamut_cmm::CmmError>(())
+```
+
+## Status
+
+The architectural keystone (epic #323, this scaffold is #324): the `Pipeline`/`Stage` evaluation
+model with construction-time channel validation, the object-safe `Transform` entry trait, and the
+typed `CmmError`. Stages currently cover identity, clamp, and the 3×3 affine matrix; curves,
+CLUTs, profile linking, rendering intents/BPC, and transform chaining land phase by phase — see
+[STATUS.md](STATUS.md).
+
+## Deferred
+
+iccMAX (`ICC.2`), `multiProcessElementsType` (`mpet`), and the `DToBx`/`BToDx` tags are out of
+scope — the still-image profiles embedded in real images are all ICC.1 v2/v4, and the lcms2
+oracle does not implement iccMAX. See [STATUS.md](STATUS.md).
+
+## License
+
+Licensed under either of MIT or Apache-2.0 at your option.

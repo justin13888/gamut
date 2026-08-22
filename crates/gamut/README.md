@@ -25,17 +25,26 @@ consumers depend on:
 
 `default = []` — a bare dependency compiles only `gamut-core`.
 
-| Feature      | Enables                                                                 |
-| ------------ | ----------------------------------------------------------------------- |
+| Feature      | Enables                                                                  |
+| ------------ | ------------------------------------------------------------------------ |
 | `avif`       | AVIF encoding (`gamut-avif` + `gamut-av1`)                               |
-| `av1`        | Standalone AV1 image encoding (`gamut-av1`)                             |
-| `webp`       | WebP (`gamut-webp`) — placeholder                                       |
-| `jxl`        | JPEG XL (`gamut-jxl`) — placeholder                                     |
-| `heic`       | HEIC/HEIF (`gamut-heic`) — placeholder                                  |
-| `vvc`        | VVC / H.266 (`gamut-vvc`) — placeholder                                 |
-| `av2`        | AV2 (`gamut-av2`) — placeholder                                         |
-| `primitives` | Re-export `color` / `dsp` / `bitstream` for tooling                     |
-| `all`        | Every format above **plus** `primitives`                                |
+| `av1`        | Standalone AV1 still-image encoding (`gamut-av1`)                        |
+| `webp`       | WebP VP8/VP8L encoder + decoder (`gamut-webp`)                           |
+| `jxl`        | JPEG XL encoder (libjxl wrap) + decoder (`gamut-jxl`)                    |
+| `heic`       | HEIC/HEIF decode-only container (`gamut-heic`)                           |
+| `vvc`        | VVC / H.266 (`gamut-vvc`) — placeholder                                  |
+| `av2`        | AV2 (`gamut-av2`) — placeholder                                          |
+| `tiff`       | TIFF 6.0 encoder + decoder (`gamut-tiff`)                                |
+| `dng`        | DNG 1.7.1 raw encoder + decoder (`gamut-dng`)                            |
+| `png`        | PNG encoder + decoder (`gamut-png`)                                      |
+| `jpeg`       | JPEG-1 (ITU-T T.81) codec (`gamut-jpeg`)                                 |
+| `isobmff`    | ISOBMFF/HEIF still-image container primitive (`gamut-isobmff`)           |
+| `metadata`   | Metadata facade + primitives (`gamut-metadata` + `exif`/`xmp`/`icc`/`iptc`/`ifd`) |
+| `cmm`        | ICC colour management module over `gamut-icc` profiles (`gamut-cmm`)     |
+| `tonemap`    | Scalar tone-mapping curves for HDR→SDR (`gamut-tonemap`)                 |
+| `primitives` | Re-export `color` / `dsp` / `bitstream` for tooling                      |
+| `codec-abi`  | Shared codestream-backend seam for backend implementors (`gamut-codec-abi`) |
+| `all`        | Every feature above                                                      |
 
 ## Usage
 

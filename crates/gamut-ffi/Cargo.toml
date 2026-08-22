@@ -48,6 +48,7 @@ isobmff = ["gamut/isobmff"]
 primitives = ["gamut/primitives"]
 tonemap = ["gamut/tonemap"]
 metadata = ["gamut/metadata"]
+cmm = ["gamut/cmm"]
 codec-abi = ["gamut/codec-abi"]
 all = [
     "avif",
@@ -63,6 +64,7 @@ all = [
     "jpeg",
     "isobmff",
     "metadata",
+    "cmm",
     "primitives",
     "tonemap",
     "codec-abi",

@@ -1,0 +1,371 @@
+//! The keystone pipeline/stage model: a colour transform as a validated chain of stages.
+//!
+//! [`Pipeline::new`] is the crate's validity boundary — every channel count (the pipeline's
+//! declared ends, each stage's input/output, and every adjacent seam) is checked exactly once at
+//! construction, so evaluation carries no per-sample validation beyond buffer lengths and a
+//! constructed [`Pipeline`] can always run.
+
+use crate::error::{CmmError, Result};
+use crate::transform::Transform;
+
+/// The largest channel count a stage or pipeline end may declare.
+///
+/// ICC.1:2022 caps multi-dimensional transform inputs at 16 channels (the CLUT encodings of
+/// §10.12/§10.13; device spaces themselves stop at 15 colorants, `FCLR`), so 16 bounds every
+/// channel count this CMM can meet. Fixing the bound lets [`Pipeline::eval`] ping-pong two
+/// fixed-size stack buffers instead of allocating per pixel.
+pub const MAX_CHANNELS: u8 = 16;
+
+/// One evaluation step of a colour transform: maps [`input_channels`](Stage::input_channels)
+/// samples to [`output_channels`](Stage::output_channels) samples of one pixel.
+///
+/// # Growth plan
+///
+/// The enum is `#[non_exhaustive]` and grows additively with the CMM phases: `Curves` (#325),
+/// `Clut` (#326), and the `MatrixN`/`XyzToLab`/`LabToXyz` stages profile linking needs
+/// (#327/#328) each arrive **together with their `eval` arm** — the crate-internal `eval` match
+/// is deliberately exhaustive (no wildcard), so the compiler forces every future variant to
+/// bring its evaluation in the same change.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum Stage {
+    /// Passes `channels` samples through unchanged.
+    Identity {
+        /// The channel count carried through, in `1..=`[`MAX_CHANNELS`].
+        channels: u8,
+    },
+    /// Clamps every one of `channels` samples to `[0.0, 1.0]`.
+    ///
+    /// Out-of-range semantics match the oracle (lcms2's `fclamp`): **negative values and NaN
+    /// clamp to `0.0`**, values above `1.0` clamp to `1.0`. ICC.1 does not define CMM clamping
+    /// behaviour, so the observable choice — including NaN → `0.0` rather than propagation —
+    /// follows Little-CMS.
+    Clamp {
+        /// The channel count clamped, in `1..=`[`MAX_CHANNELS`].
+        channels: u8,
+    },
+    /// A 3-in/3-out affine matrix: `out = m · in + offset`.
+    ///
+    /// `m` is row-major (`out[r] = m[r][0]·in[0] + m[r][1]·in[1] + m[r][2]·in[2] + offset[r]`)
+    /// — the `e1..e12` layout of the lutAToB/lutBToA matrix element (ICC.1:2022 §10.12.5).
+    Matrix {
+        /// The 3×3 matrix, row-major.
+        m: [[f64; 3]; 3],
+        /// The per-row offset added after the multiply (`e10..e12`).
+        offset: [f64; 3],
+    },
+}
+
+impl Stage {
+    /// The number of samples this stage consumes per pixel.
+    #[must_use]
+    pub fn input_channels(&self) -> u8 {
+        match self {
+            Self::Identity { channels } | Self::Clamp { channels } => *channels,
+            Self::Matrix { .. } => 3,
+        }
+    }
+
+    /// The number of samples this stage produces per pixel.
+    #[must_use]
+    pub fn output_channels(&self) -> u8 {
+        match self {
+            Self::Identity { channels } | Self::Clamp { channels } => *channels,
+            Self::Matrix { .. } => 3,
+        }
+    }
+
+    /// Evaluates the stage over one pixel: reads `input_channels()` samples from `input` and
+    /// writes `output_channels()` samples to `output`. The caller ([`Pipeline::eval`])
+    /// guarantees both slice lengths.
+    //
+    // Deliberately an exhaustive match with NO wildcard arm: adding a `Stage` variant must fail
+    // compilation here until its eval arm lands in the same change (see the enum's growth plan).
+    pub(crate) fn eval(&self, input: &[f64], output: &mut [f64]) {
+        match self {
+            Self::Identity { .. } => output.copy_from_slice(input),
+            Self::Clamp { .. } => {
+                for (out, &v) in output.iter_mut().zip(input) {
+                    // lcms2 fclamp semantics: NaN and negatives → 0.0, above 1.0 → 1.0.
+                    *out = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+                }
+            }
+            Self::Matrix { m, offset } => {
+                for ((out, row), off) in output.iter_mut().zip(m).zip(offset) {
+                    *out = row[0] * input[0] + row[1] * input[1] + row[2] * input[2] + off;
+                }
+            }
+        }
+    }
+}
+
+/// Rejects a declared channel count outside `1..=`[`MAX_CHANNELS`].
+fn check_channel_count(channels: u8) -> Result<()> {
+    if channels == 0 || channels > MAX_CHANNELS {
+        return Err(CmmError::TooManyChannels(channels));
+    }
+    Ok(())
+}
+
+/// A colour transform as a validated chain of [`Stage`]s.
+///
+/// Construction ([`Pipeline::new`]) is the validity boundary: every channel count is checked
+/// once, so a constructed pipeline always evaluates. An empty stage list is a valid identity
+/// pipeline (its declared ends must agree).
+///
+/// # Space/time tradeoff
+///
+/// Evaluation is allocation-free: [`Pipeline::eval`] ping-pongs two fixed
+/// `[f64; MAX_CHANNELS]` stack buffers (256 bytes total, regardless of stage count) instead of
+/// allocating intermediates, at the cost of capping channel counts at [`MAX_CHANNELS`] — the
+/// bound ICC itself imposes on transforms.
+#[derive(Debug, Clone)]
+pub struct Pipeline {
+    stages: Vec<Stage>,
+    input_channels: u8,
+    output_channels: u8,
+}
+
+impl Pipeline {
+    /// Builds a pipeline from a stage chain, validating every channel count.
+    ///
+    /// Checks, in order: the declared ends and every stage's input/output are in
+    /// `1..=`[`MAX_CHANNELS`]; each stage's input matches the previous stage's output; the
+    /// declared `input_channels` equals the first stage's input and `output_channels` the last
+    /// stage's output. An empty `stages` list builds a valid identity pipeline iff
+    /// `input_channels == output_channels`.
+    ///
+    /// # Errors
+    ///
+    /// [`CmmError::TooManyChannels`] for a count outside `1..=`[`MAX_CHANNELS`],
+    /// [`CmmError::StageChannelMismatch`] for a disagreeing adjacent pair, and
+    /// [`CmmError::PipelineEndsMismatch`] for a declared end the stage chain contradicts.
+    pub fn new(input_channels: u8, output_channels: u8, stages: Vec<Stage>) -> Result<Self> {
+        check_channel_count(input_channels)?;
+        check_channel_count(output_channels)?;
+        for stage in &stages {
+            check_channel_count(stage.input_channels())?;
+            check_channel_count(stage.output_channels())?;
+        }
+        for (index, pair) in stages.windows(2).enumerate() {
+            if pair[1].input_channels() != pair[0].output_channels() {
+                return Err(CmmError::StageChannelMismatch {
+                    index: index + 1,
+                    expected: pair[1].input_channels(),
+                    found: pair[0].output_channels(),
+                });
+            }
+        }
+        if let (Some(first), Some(last)) = (stages.first(), stages.last()) {
+            if first.input_channels() != input_channels {
+                return Err(CmmError::PipelineEndsMismatch {
+                    end: "input",
+                    declared: input_channels,
+                    found: first.input_channels(),
+                });
+            }
+            if last.output_channels() != output_channels {
+                return Err(CmmError::PipelineEndsMismatch {
+                    end: "output",
+                    declared: output_channels,
+                    found: last.output_channels(),
+                });
+            }
+        } else if input_channels != output_channels {
+            // Empty stage list: identity, so the declared output must repeat the input.
+            return Err(CmmError::PipelineEndsMismatch {
+                end: "output",
+                declared: output_channels,
+                found: input_channels,
+            });
+        }
+        Ok(Self {
+            stages,
+            input_channels,
+            output_channels,
+        })
+    }
+
+    /// The number of samples this pipeline consumes per pixel.
+    #[must_use]
+    pub fn input_channels(&self) -> u8 {
+        self.input_channels
+    }
+
+    /// The number of samples this pipeline produces per pixel.
+    #[must_use]
+    pub fn output_channels(&self) -> u8 {
+        self.output_channels
+    }
+
+    /// The validated stage chain, first to last.
+    #[must_use]
+    pub fn stages(&self) -> &[Stage] {
+        &self.stages
+    }
+
+    /// Concatenates `next` after `self`: the result runs `self`'s stages, then `next`'s, with
+    /// `self`'s input and `next`'s output as its ends.
+    ///
+    /// # Errors
+    ///
+    /// [`CmmError::StageChannelMismatch`] if `next`'s input channel count does not equal
+    /// `self`'s output channel count (with `index` set to `self.stages().len()`, the position
+    /// `next`'s first stage would take).
+    pub fn compose(self, next: Pipeline) -> Result<Pipeline> {
+        if next.input_channels != self.output_channels {
+            return Err(CmmError::StageChannelMismatch {
+                index: self.stages.len(),
+                expected: next.input_channels,
+                found: self.output_channels,
+            });
+        }
+        let mut stages = self.stages;
+        stages.extend(next.stages);
+        Ok(Pipeline {
+            stages,
+            input_channels: self.input_channels,
+            output_channels: next.output_channels,
+        })
+    }
+
+    /// Evaluates the pipeline over one pixel: `input` holds exactly
+    /// [`input_channels`](Self::input_channels) samples, `output` exactly
+    /// [`output_channels`](Self::output_channels).
+    ///
+    /// Allocation-free: intermediates ping-pong between two `[f64; MAX_CHANNELS]` stack
+    /// buffers (see the type-level space/time note). For whole interleaved buffers, use the
+    /// [`Transform`] impl instead.
+    ///
+    /// # Errors
+    ///
+    /// [`CmmError::BufferLength`] if either slice's length differs from the declared per-pixel
+    /// channel count.
+    pub fn eval(&self, input: &[f64], output: &mut [f64]) -> Result<()> {
+        if input.len() != usize::from(self.input_channels) {
+            return Err(CmmError::BufferLength {
+                channels: self.input_channels,
+                found: input.len(),
+            });
+        }
+        if output.len() != usize::from(self.output_channels) {
+            return Err(CmmError::BufferLength {
+                channels: self.output_channels,
+                found: output.len(),
+            });
+        }
+        let mut a = [0.0_f64; MAX_CHANNELS as usize];
+        let mut b = [0.0_f64; MAX_CHANNELS as usize];
+        a[..input.len()].copy_from_slice(input);
+        let (mut cur, mut next) = (&mut a, &mut b);
+        for stage in &self.stages {
+            let n_in = usize::from(stage.input_channels());
+            let n_out = usize::from(stage.output_channels());
+            stage.eval(&cur[..n_in], &mut next[..n_out]);
+            core::mem::swap(&mut cur, &mut next);
+        }
+        output.copy_from_slice(&cur[..output.len()]);
+        Ok(())
+    }
+}
+
+impl Transform for Pipeline {
+    fn transform(&self, src: &[f64], dst: &mut [f64]) -> Result<()> {
+        let n_in = usize::from(self.input_channels);
+        let n_out = usize::from(self.output_channels);
+        if !src.len().is_multiple_of(n_in) {
+            return Err(CmmError::BufferLength {
+                channels: self.input_channels,
+                found: src.len(),
+            });
+        }
+        if dst.len() != (src.len() / n_in) * n_out {
+            return Err(CmmError::BufferLength {
+                channels: self.output_channels,
+                found: dst.len(),
+            });
+        }
+        for (pixel_in, pixel_out) in src.chunks_exact(n_in).zip(dst.chunks_exact_mut(n_out)) {
+            self.eval(pixel_in, pixel_out)?;
+        }
+        Ok(())
+    }
+
+    fn input_channels(&self) -> u8 {
+        self.input_channels
+    }
+
+    fn output_channels(&self) -> u8 {
+        self.output_channels
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A non-trivial matrix stage whose products and sums are exact dyadic rationals, so every
+    /// coefficient position can be asserted with exact `f64` equality.
+    fn dyadic_matrix() -> Stage {
+        Stage::Matrix {
+            m: [[0.5, -0.25, 0.125], [1.0, 2.0, -0.5], [-2.0, 0.25, 1.0]],
+            offset: [0.5, -0.25, 2.0],
+        }
+    }
+
+    #[test]
+    fn matrix_eval_matches_hand_computation() {
+        let mut out = [0.0; 3];
+        dyadic_matrix().eval(&[0.25, 0.5, -1.0], &mut out);
+        // Row by row: 0.5·0.25 − 0.25·0.5 + 0.125·(−1) + 0.5      = 0.375
+        //             1.0·0.25 + 2.0·0.5  − 0.5·(−1)   − 0.25     = 1.5
+        //            −2.0·0.25 + 0.25·0.5 + 1.0·(−1)   + 2.0      = 0.625
+        assert_eq!(out, [0.375, 1.5, 0.625]);
+    }
+
+    #[test]
+    fn clamp_eval_follows_lcms2_fclamp() {
+        let stage = Stage::Clamp { channels: 6 };
+        let mut out = [9.0; 6];
+        stage.eval(&[-0.5, f64::NAN, 1.5, 0.5, 0.0, 1.0], &mut out);
+        // Negatives and NaN → 0.0; above 1.0 → 1.0; in-range (boundaries included) unchanged.
+        assert_eq!(out, [0.0, 0.0, 1.0, 0.5, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn identity_eval_copies_input() {
+        let stage = Stage::Identity { channels: 4 };
+        let mut out = [0.0; 4];
+        stage.eval(&[0.1, -2.0, 7.5, 1.0], &mut out);
+        assert_eq!(out, [0.1, -2.0, 7.5, 1.0]);
+    }
+
+    #[test]
+    fn stage_channel_accessors_per_variant() {
+        assert_eq!(Stage::Identity { channels: 5 }.input_channels(), 5);
+        assert_eq!(Stage::Identity { channels: 5 }.output_channels(), 5);
+        assert_eq!(Stage::Clamp { channels: 7 }.input_channels(), 7);
+        assert_eq!(Stage::Clamp { channels: 7 }.output_channels(), 7);
+        assert_eq!(dyadic_matrix().input_channels(), 3);
+        assert_eq!(dyadic_matrix().output_channels(), 3);
+    }
+
+    #[test]
+    fn eval_ping_pongs_through_more_than_two_stages() {
+        // Matrix → Identity → Clamp exercises both swap directions of the two stack buffers.
+        let pipeline = Pipeline::new(
+            3,
+            3,
+            vec![
+                dyadic_matrix(),
+                Stage::Identity { channels: 3 },
+                Stage::Clamp { channels: 3 },
+            ],
+        )
+        .unwrap();
+        let mut out = [0.0; 3];
+        pipeline.eval(&[0.25, 0.5, -1.0], &mut out).unwrap();
+        // Matrix result [0.375, 1.5, 0.625] survives Identity, then Clamp caps 1.5 to 1.0.
+        assert_eq!(out, [0.375, 1.0, 0.625]);
+    }
+}
