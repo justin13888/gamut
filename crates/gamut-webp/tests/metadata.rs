@@ -300,8 +300,14 @@ fn metadata_does_not_disturb_the_pixels() {
             .decode_image(&tagged)
             .expect("decode rgba");
         assert_eq!(decoded.dimensions(), d, "{label}: dimensions");
-        let got: Vec<u8> = decoded.as_samples().chunks_exact(4).map(|p| p[3]).collect();
-        let want: Vec<u8> = source.chunks_exact(4).map(|p| p[3]).collect();
+        let got: Vec<u8> = decoded
+            .as_samples()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let want: Vec<u8> = source.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(got, want, "{label}: alpha still lossless");
     }
 }

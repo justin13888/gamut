@@ -481,7 +481,7 @@ fn extended_auto_reduce_covers_grey_and_sixteen_bit_inputs() {
     let dec = libpng_oracle::decode(&png);
     assert_eq!(dec.color_type, libpng_oracle::COLOR_GRAY);
     assert_eq!(dec.bit_depth, 8);
-    let grays: Vec<u8> = ga.chunks_exact(2).map(|px| px[0]).collect();
+    let grays: Vec<u8> = ga.as_chunks::<2>().0.iter().map(|px| px[0]).collect();
     assert_eq!(dec.pixels, grays);
 
     // Rgba16 with every sample k*257, grey and opaque -> demoted all the way to 8-bit grey.
@@ -528,7 +528,9 @@ fn extended_auto_reduce_covers_grey_and_sixteen_bit_inputs() {
     assert_eq!(dec.color_type, libpng_oracle::COLOR_RGB);
     assert_eq!(dec.bit_depth, 16);
     let expected: Vec<u8> = deep
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|px| [px[0], px[1], px[2]])
         .flat_map(u16::to_be_bytes)
         .collect();

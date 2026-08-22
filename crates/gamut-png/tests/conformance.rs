@@ -339,7 +339,13 @@ fn colour_key_transparency_matches_oracle() {
         let img: ImageBuf<GrayAlpha8> = PngDecoder::new()
             .decode_image(&png)
             .unwrap_or_else(|e| panic!("{context}: grey+alpha decode failed: {e}"));
-        for (out, &raw) in img.as_samples().chunks_exact(2).zip(pixels.iter()) {
+        for (out, &raw) in img
+            .as_samples()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(pixels.iter())
+        {
             assert_eq!(out[0], raw * scale, "{context}: sample {raw} scaled wrong");
             let opaque = u16::from(raw) != u16::from(pixels[0]);
             assert_eq!(out[1], u8::from(opaque) * 255, "{context}: alpha for {raw}");
@@ -368,7 +374,13 @@ fn colour_key_transparency_matches_oracle() {
     assert_matches_oracle(&png, "key rgb16");
     let img: ImageBuf<Rgba16> = PngDecoder::new().decode_image(&png).unwrap();
     let mut keyed = 0;
-    for (px, src) in img.as_samples().chunks_exact(4).zip(pixels.chunks_exact(6)) {
+    for (px, src) in img
+        .as_samples()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(pixels.as_chunks::<6>().0)
+    {
         let native = [
             u16::from_be_bytes([src[0], src[1]]),
             u16::from_be_bytes([src[2], src[3]]),
@@ -397,7 +409,13 @@ fn colour_key_transparency_matches_oracle() {
     );
     assert_matches_oracle(&png, "key gray16");
     let img: ImageBuf<gamut_core::GrayAlpha16> = PngDecoder::new().decode_image(&png).unwrap();
-    for (px, src) in img.as_samples().chunks_exact(2).zip(pixels.chunks_exact(2)) {
+    for (px, src) in img
+        .as_samples()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(pixels.as_chunks::<2>().0)
+    {
         let native = u16::from_be_bytes([src[0], src[1]]);
         assert_eq!(px[0], native);
         assert_eq!(px[1], if native == key { 0 } else { u16::MAX });

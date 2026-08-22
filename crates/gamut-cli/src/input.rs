@@ -364,7 +364,7 @@ mod tests {
         let (rgba, got) = decode_bytes(Path::new("mem.jpg"), &jpeg, true).unwrap();
         assert_eq!(got, dims);
         assert_eq!(rgba.len(), 64 * 4);
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             // Lossy JPEG, so the grey level is approximate -- but it must stay grey (R == G == B)
             // and every pixel must be fully opaque.
             assert_eq!(px[0], px[1]);

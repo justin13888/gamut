@@ -389,7 +389,9 @@ fn read_u16_vec(r: &mut ByteReader<'_>, count: usize) -> Result<Vec<u16>> {
         .ok_or(IccError::Malformed("icc: LUT size overflow"))?;
     let bytes = r.bytes(byte_len)?;
     Ok(bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect())
 }

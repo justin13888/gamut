@@ -468,7 +468,9 @@ impl PngDecoder {
         let samples = match header.bit_depth {
             16 => NativeSamples::B16(decode_canvas(&stream, &header, |packed, _, _| {
                 packed
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
                     .collect()
             })?),
@@ -788,7 +790,7 @@ fn presentable(native: NativeImage) -> Result<Presentable> {
         (ColorType::Truecolor, NativeSamples::B8(rgb)) => match key {
             Some(TransparencyKey::Rgb(kr, kg, kb)) => {
                 let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
-                for px in rgb.chunks_exact(3) {
+                for px in rgb.as_chunks::<3>().0 {
                     let opaque =
                         (u16::from(px[0]), u16::from(px[1]), u16::from(px[2])) != (kr, kg, kb);
                     out.extend_from_slice(&[px[0], px[1], px[2], alpha8(opaque)]);
@@ -800,7 +802,7 @@ fn presentable(native: NativeImage) -> Result<Presentable> {
         (ColorType::Truecolor, NativeSamples::B16(rgb)) => match key {
             Some(TransparencyKey::Rgb(kr, kg, kb)) => {
                 let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
-                for px in rgb.chunks_exact(3) {
+                for px in rgb.as_chunks::<3>().0 {
                     let opaque = (px[0], px[1], px[2]) != (kr, kg, kb);
                     out.extend_from_slice(&[px[0], px[1], px[2], alpha16(opaque)]);
                 }
