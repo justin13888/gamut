@@ -45,6 +45,23 @@ const BPRED_SAD_PENALTY: u32 = 160;
 /// cost.
 const BPRED_GATE_SAD_PER_PIXEL: u32 = 6;
 
+/// The gated rungs' `B_PRED` admission test: a macroblock is worth a 4x4 search only when the
+/// whole-block prediction misses by more than [`BPRED_GATE_SAD_PER_PIXEL`] per luma pixel
+/// (256 of them). Strict, so a macroblock exactly at the threshold is *not* admitted.
+///
+/// Split out from the mode loop because the threshold is where the rung differs from its
+/// neighbours, and an inequality is only pinned by the value that sits on it.
+fn bpred_gate_admits(wb_sad: u32) -> bool {
+    wb_sad > BPRED_GATE_SAD_PER_PIXEL * 256
+}
+
+/// Whether the 4x4 prediction wins the macroblock: its SAD plus [`BPRED_SAD_PENALTY`] — a coarse
+/// stand-in for the extra mode-signaling `B_PRED` costs — must come in strictly under the whole
+/// block's. A tie keeps the whole-block mode, which is the cheaper one to signal.
+fn bpred_beats_whole_block(bpred_sad: u32, wb_sad: u32) -> bool {
+    bpred_sad + BPRED_SAD_PENALTY < wb_sad
+}
+
 /// The largest non-final token partition the bitstream can describe: its size is a 3-byte
 /// little-endian prefix (RFC 6386 §9.5), so 16 MiB - 1. The final partition carries no prefix —
 /// its length is the remainder — so it is unbounded.
@@ -1270,7 +1287,7 @@ pub fn encode_frame_filtered(
                 // profit from 4x4 prediction, so the gate skips the search there. The threshold is
                 // per-pixel mean absolute error, scaled by the quantizer because coarser
                 // quantization makes small prediction gains irrelevant.
-                Bpred::Gated => wb_sad > BPRED_GATE_SAD_PER_PIXEL * 256,
+                Bpred::Gated => bpred_gate_admits(wb_sad),
                 Bpred::Always => true,
             };
             let (sub_modes, bpred_levels, bpred_sad) = if consider_bpred {
@@ -1288,7 +1305,7 @@ pub fn encode_frame_filtered(
             } else {
                 ([B_DC_PRED; 16], [[0i16; 16]; 16], u32::MAX)
             };
-            let use_bpred = consider_bpred && bpred_sad + BPRED_SAD_PENALTY < wb_sad;
+            let use_bpred = consider_bpred && bpred_beats_whole_block(bpred_sad, wb_sad);
 
             let mut levels = MbLevels {
                 u: quantize_chroma(&src_u, cw, mb_x, mb_y, &u_pred, &qf, tools.quant_bias),
@@ -2170,6 +2187,30 @@ mod tests {
             old,
             "a saving that does not clear the update record must be rejected"
         );
+    }
+
+    /// Both `B_PRED` decisions are inequalities, and an inequality is only pinned by the value
+    /// that sits exactly on it. The gate admits a macroblock whose whole-block prediction misses
+    /// by *more* than the per-pixel threshold, and the 4x4 mode wins only by coming in *under*
+    /// the whole-block cost — a tie keeps the whole-block mode, which is cheaper to signal.
+    #[test]
+    fn bpred_decisions_are_strict_at_their_thresholds() {
+        let threshold = BPRED_GATE_SAD_PER_PIXEL * 256;
+        assert!(!bpred_gate_admits(threshold - 1));
+        assert!(
+            !bpred_gate_admits(threshold),
+            "the threshold itself is not admitted"
+        );
+        assert!(bpred_gate_admits(threshold + 1));
+
+        // A tie goes to the whole-block mode.
+        let wb = 5_000;
+        assert!(bpred_beats_whole_block(wb - BPRED_SAD_PENALTY - 1, wb));
+        assert!(
+            !bpred_beats_whole_block(wb - BPRED_SAD_PENALTY, wb),
+            "an exact tie must keep the whole-block mode"
+        );
+        assert!(!bpred_beats_whole_block(wb - BPRED_SAD_PENALTY + 1, wb));
     }
 
     /// A saving that exactly equals the update record's cost is not a saving: the record buys

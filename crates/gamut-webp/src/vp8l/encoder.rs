@@ -720,6 +720,101 @@ mod tests {
         assert_eq!(pixels, argb, "round-trip mismatch at {width}x{height}");
     }
 
+    /// Lazy matching, exercised directly rather than through a plan that happens to win.
+    ///
+    /// The parse plans race against every other plan for the whole image, so whether the lazy ones
+    /// ever come out ahead depends on the fixture — which makes the deferral rule itself easy to
+    /// leave untested. Here it is driven straight: a pixel run laid out so the greedy parse finds
+    /// a short match at `i` while a longer one starts at `i + 1`. Greedy takes the short match;
+    /// lazy emits the pixel at `i` on its own and takes the long one.
+    #[test]
+    fn lazy_matching_defers_to_the_longer_match_one_pixel_later() {
+        // Laid out so position `i` has a *short* match and `i + 1` a longer one:
+        //
+        //   [a b c] X [b c d e f g h i] Y [a b c d e f g h i]
+        //                                  ^ greedy matches "a b c" (3); lazy sees that the next
+        //                                    position starts "b c d e f g h i" (8) and defers.
+        let px_of = |k: u32| 0xff00_0000 | (k * 0x0001_3579);
+        let (a, b, c) = (px_of(1), px_of(2), px_of(3));
+        let tail: Vec<u32> = (4..10).map(px_of).collect(); // d e f g h i
+        let (x, y) = (px_of(90), px_of(91));
+        let mut px: Vec<u32> = vec![a, b, c, x, b, c];
+        px.extend_from_slice(&tail); // ... b c d e f g h i
+        px.push(y);
+        px.extend_from_slice(&[a, b, c]);
+        px.extend_from_slice(&tail); // a b c d e f g h i
+        let greedy = tokenize(
+            &px,
+            0,
+            &Lz77Params {
+                max_chain: 32,
+                lazy: false,
+            },
+        );
+        let lazy = tokenize(
+            &px,
+            0,
+            &Lz77Params {
+                max_chain: 32,
+                lazy: true,
+            },
+        );
+        // Both parses must reproduce the pixels exactly — the property that makes either legal.
+        for tokens in [&greedy, &lazy] {
+            let coded: usize = tokens.iter().map(Token::pixel_count).sum();
+            assert_eq!(coded, px.len(), "a parse must cover every pixel");
+        }
+        // And the deferral rule must be live: with the same chain depth, turning it on changes
+        // which tokens come out. A probe that looked at `i` instead of `i + 1`, or compared the
+        // lengths the other way round, would leave the two parses identical.
+        //
+        // `Token` carries no `PartialEq` in production, so the comparison is over a test-local
+        // projection rather than a derive added for a test's benefit.
+        fn shape(tokens: &[Token]) -> Vec<(u8, u32, u32)> {
+            tokens
+                .iter()
+                .map(|t| match *t {
+                    Token::Literal(p) => (0, p, 0),
+                    Token::Copy { len, dist } => (1, len, dist),
+                    Token::CacheIndex(slot) => (2, u32::from(slot), 0),
+                })
+                .collect()
+        }
+        assert_ne!(
+            shape(&greedy),
+            shape(&lazy),
+            "lazy matching must change the parse on content built for it"
+        );
+    }
+
+    /// The cache-size deltas, exercised directly. Whether an `AutoDelta` plan wins an image is a
+    /// race against every other plan; the resolution rule itself is not, and the module doc makes
+    /// a specific claim about it — the heuristic self-caps at 10 while the spec allows 11, so a
+    /// positive delta reaches a size `Auto` never picks.
+    #[test]
+    fn cache_bits_deltas_move_off_the_heuristic_in_both_directions() {
+        let pixels = 96 * 80;
+        let base = resolve_cache_bits(CacheBits::Auto, pixels);
+        assert_eq!(base, 10, "the heuristic self-caps at 10");
+        assert_eq!(
+            resolve_cache_bits(CacheBits::AutoDelta(-1), pixels),
+            base - 1
+        );
+        assert_eq!(
+            resolve_cache_bits(CacheBits::AutoDelta(1), pixels),
+            base + 1
+        );
+        // The spec ceiling, which a delta can reach but the heuristic never does.
+        assert_eq!(
+            resolve_cache_bits(CacheBits::AutoDelta(2), pixels),
+            MAX_CACHE_BITS
+        );
+        assert_eq!(resolve_cache_bits(CacheBits::Off, pixels), 0);
+        // An image too small for a cache stays without one: a delta must not conjure one.
+        assert_eq!(resolve_cache_bits(CacheBits::Auto, 4), 0);
+        assert_eq!(resolve_cache_bits(CacheBits::AutoDelta(3), 4), 0);
+    }
+
     #[test]
     fn round_trips_single_pixel() {
         round_trip(&[make_argb(0xff, 0x12, 0x34, 0x56)], 1, 1);
