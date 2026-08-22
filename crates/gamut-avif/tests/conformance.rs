@@ -90,7 +90,7 @@ struct Diff {
 fn rgba_diff(a: &[u8], b: &[u8]) -> Diff {
     assert_eq!(a.len(), b.len(), "buffers must be the same size");
     let (mut max_rgb, mut max_alpha, mut sum) = (0u8, 0u8, 0u64);
-    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         for c in 0..3 {
             let d = pa[c].abs_diff(pb[c]);
             max_rgb = max_rgb.max(d);
@@ -299,7 +299,13 @@ fn self_encoded_lossless_is_bit_exact_end_to_end() {
     assert!(container.image().is_av1_still());
     let rgba = container.decode_primary_rgba8(&mut Dav1dDecoder).unwrap();
     assert_eq!((rgba.width(), rgba.height()), (w, h));
-    for (px, src) in rgba.as_samples().chunks_exact(4).zip(rgb.chunks_exact(3)) {
+    for (px, src) in rgba
+        .as_samples()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgb.as_chunks::<3>().0)
+    {
         assert_eq!(&px[0..3], src);
         assert_eq!(px[3], 255);
     }
@@ -563,7 +569,11 @@ fn alpha_merge_agrees_with_libavif() {
     );
     // And the file genuinely has non-trivial alpha (guards against an all-opaque comparison).
     assert!(
-        ours.as_samples().chunks_exact(4).any(|px| px[3] != 255),
+        ours.as_samples()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[3] != 255),
         "fixture must carry real alpha"
     );
 }

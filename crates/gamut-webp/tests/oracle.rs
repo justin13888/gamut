@@ -39,7 +39,9 @@ const LARGE_DIMENSIONS: &[(u32, u32)] =
 
 /// Drops the alpha byte of an interleaved RGBA buffer, yielding interleaved RGB.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[0], p[1], p[2]])
         .collect()
 }
@@ -880,8 +882,14 @@ fn libwebp_decodes_gamut_lossy_alpha_exactly() {
             .expect("gamut rgba encode");
         let decoded = libwebp_decode_rgba(&file);
         assert_eq!((decoded.width, decoded.height), (w, h), "dims at {w}x{h}");
-        let lib_alpha: Vec<u8> = decoded.rgba.chunks_exact(4).map(|p| p[3]).collect();
-        let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let lib_alpha: Vec<u8> = decoded
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(
             lib_alpha, src_alpha,
             "libwebp must recover gamut's exact alpha at {w}x{h}"
@@ -918,8 +926,14 @@ fn gamut_decodes_libwebp_lossy_alpha_exactly() {
                 height: h
             }
         );
-        let dec_alpha: Vec<u8> = got.as_samples().chunks_exact(4).map(|p| p[3]).collect();
-        let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let dec_alpha: Vec<u8> = got
+            .as_samples()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(
             dec_alpha, src_alpha,
             "gamut must recover libwebp's exact alpha at {w}x{h}"
@@ -1028,8 +1042,14 @@ fn libwebp_reads_gamut_metadata_alongside_alpha() {
     );
     // And the alpha still survives the round-trip through gamut's own decoder.
     let got: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).expect("decode");
-    let dec_alpha: Vec<u8> = got.as_samples().chunks_exact(4).map(|p| p[3]).collect();
-    let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+    let dec_alpha: Vec<u8> = got
+        .as_samples()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| p[3])
+        .collect();
+    let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
     assert_eq!(dec_alpha, src_alpha);
 }
 

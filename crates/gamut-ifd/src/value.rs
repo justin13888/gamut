@@ -507,16 +507,25 @@ impl Value {
         let bytes = bytes.get(..need).ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "TIFF: field value out of bounds")
         })?;
-        let u16s =
-            |b: &[u8]| -> Vec<u16> { b.chunks_exact(2).map(|c| order.u16([c[0], c[1]])).collect() };
+        let u16s = |b: &[u8]| -> Vec<u16> {
+            b.as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| order.u16([c[0], c[1]]))
+                .collect()
+        };
         let u32s = |b: &[u8]| -> Vec<u32> {
-            b.chunks_exact(4)
+            b.as_chunks::<4>()
+                .0
+                .iter()
                 .map(|c| order.u32([c[0], c[1], c[2], c[3]]))
                 .collect()
         };
         #[cfg(feature = "bigtiff")]
         let u64s = |b: &[u8]| -> Vec<u64> {
-            b.chunks_exact(8)
+            b.as_chunks::<8>()
+                .0
+                .iter()
                 .map(|c| order.u64([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                 .collect()
         };
@@ -549,19 +558,21 @@ impl Value {
             FieldType::Float => Value::Float(u32s(bytes).into_iter().map(f32::from_bits).collect()),
             FieldType::Rational => {
                 let w = u32s(bytes);
-                Value::Rational(w.chunks_exact(2).map(|c| (c[0], c[1])).collect())
+                Value::Rational(w.as_chunks::<2>().0.iter().map(|c| (c[0], c[1])).collect())
             }
             FieldType::SRational => {
                 let w = u32s(bytes);
                 Value::SRational(
-                    w.chunks_exact(2)
+                    w.as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|c| (c[0] as i32, c[1] as i32))
                         .collect(),
                 )
             }
             FieldType::Double => {
                 let mut v = Vec::with_capacity(count);
-                for c in bytes.chunks_exact(8) {
+                for c in bytes.as_chunks::<8>().0 {
                     let (a, b) = (
                         order.u32([c[0], c[1], c[2], c[3]]),
                         order.u32([c[4], c[5], c[6], c[7]]),
