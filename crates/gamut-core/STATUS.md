@@ -7,6 +7,10 @@ branded `ImageRef`/`ImageBuf` interleaved buffers, the `Dimensions` value type, 
 has **no dependency on the format crates** — everything else depends on it, never the other way
 around — and is `#![forbid(unsafe_code)]`.
 
+It is also where **pixel conversion** is defined, once, for every layout pair (issue #268): format
+crates decode to what the file carries and hand the layout change to `convert`, so widening rules and
+lossy policy are stated in exactly one place instead of once per codec.
+
 **Keystone:** the **branded, length-validated buffer**. `len == width * height * P::CHANNELS` (with
 non-empty, non-overflowing dimensions) is checked exactly once, at `ImageRef::new` / `ImageBuf::new`,
 and the pixel brand `P` makes a layout mismatch (CMYK bytes into an RGBA encoder) a *compile* error
@@ -24,7 +28,8 @@ while never re-checking the invariant.
 | `ImageRef<'a, P>` / `ImageBuf<P>` | borrowed / owned interleaved buffers | length-validated at construction |
 | `Pixel` / `Sample` / `ColorModel` | compile-time layout descriptors | `Pixel`/`Sample` **sealed**; `ColorModel` `#[non_exhaustive]` |
 | 11 pixel markers | `Gray8` `Bilevel` `Indexed8` `Rgb8` `Rgba8` `Cmyk8` `GrayAlpha8` `Gray16` `Rgb16` `Rgba16` `GrayAlpha16` | closed set, defined only here |
-| `luminance::*` | `SDR_REFERENCE_WHITE_NITS` / `HDR_REFERENCE_WHITE_NITS` / `PQ_PEAK_NITS` | shared by `gamut-color` + `gamut-tonemap` |
+| `luminance::*` | reference nit levels + BT.601/709/2020 fixed-point luma weights | shared by `gamut-color`, `gamut-tonemap`, and `convert` |
+| `convert::*` | `ConvertPolicy` + `AlphaPolicy`/`DepthPolicy`/`LumaPolicy`, `RawImage`, `convert`/`convert_from_raw`/`convert_from_raw_into` | policy enums `#[non_exhaustive]` `repr(u32)`, append-only |
 
 Adding items (new `Error`/`ColorModel` variants, more buffer helpers, more markers) stays
 backward-compatible; removing or reshaping any of the above would not.
@@ -48,7 +53,19 @@ backward-compatible; removing or reshaping any of the above would not.
   fallback do not depend on presentation text.
 - **`luminance` lives here, not in `gamut-color`.** Both `gamut-color` and `gamut-tonemap` need the
   reference nit levels, and `gamut-tonemap` depends only on core at runtime; putting the constants
-  here keeps a single authoritative definition without coupling tonemap to color.
+  here keeps a single authoritative definition without coupling tonemap to color. The luma weight
+  triples joined them for the same reason: `convert` needs them, and `gamut-png`/`gamut-tiff`/
+  `gamut-jxl` depend on core but **not** on `gamut-color`, so defining them there would have added a
+  dependency edge to four crates. `gamut_color::rgb_to_ycbcr` now derives its BT.601 luma row from
+  here rather than restating it.
+- **`convert` is layout, not colorimetry.** It owns the axes the sealed `Pixel` matrix describes —
+  channel count, alpha, sample width — and refuses the two layouts that need machinery core does not
+  have: `Indexed8` (no shared palette primitive, see below) and `Cmyk8` (needs an ICC transform, the
+  `gamut-cmm` epic). Shipping a naive uncalibrated CMYK formula into a frozen surface would have to
+  be contradicted later, so it is a typed `Unsupported` instead.
+- **Lossless by default, lossy by opt-in.** `ConvertPolicy::lossless()` is the `Default`, so every
+  decoder's typed path is faithful to the file unless the caller says otherwise. Widening (grey into
+  RGB, opaque alpha, 8-bit into 16) needs no policy: it loses nothing.
 - **Typed errors, no panics in library paths.** No `unwrap`/`expect`/`panic!` outside tests; the
   documented `ImageRef::row`/`pixel` panics are the idiomatic out-of-bounds-index behaviour (like
   `slice[i]`), not error handling.

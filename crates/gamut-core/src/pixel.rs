@@ -22,13 +22,58 @@ mod sample_sealed {
 /// without callers repeating `where P::Sample: …` clauses. The storage width is available as
 /// `size_of::<Self>()`; a stream's *coded* bit depth (e.g. 10 or 12) is a separate codec concern
 /// carried elsewhere (see `gamut_color::BitDepth`).
+///
+/// [`Sample::MAX_VALUE`] and the two full-range conversions are what lets [`crate::convert`] do
+/// depth-generic arithmetic: every sample width maps onto one canonical 16-bit working range, so
+/// the conversion engine is written once rather than once per width.
 pub trait Sample:
     sample_sealed::Sealed + Copy + Default + Ord + core::fmt::Debug + 'static
 {
+    /// The all-ones value for this width: fully opaque alpha, or white.
+    const MAX_VALUE: Self;
+
+    /// Widens this sample onto the canonical full-range 16-bit working scale.
+    ///
+    /// Exact and reversible: [`Sample::MAX_VALUE`] maps to `u16::MAX` and `0` maps to `0`, with no
+    /// value left unreachable. For `u8` this is the `× 0x101` rescale PNG specifies for sample-depth
+    /// expansion (3rd edition, §13.12); for `u16` it is the identity.
+    fn to_full_range_u16(self) -> u16;
+
+    /// Narrows a canonical full-range 16-bit working value back to this width, rounding to nearest.
+    ///
+    /// The inverse of [`Sample::to_full_range_u16`] — lossless for values that round-trip, and
+    /// half-up rounded otherwise. For `u16` it is the identity.
+    fn from_full_range_u16(value: u16) -> Self;
 }
 
-impl Sample for u8 {}
-impl Sample for u16 {}
+impl Sample for u8 {
+    const MAX_VALUE: Self = u8::MAX;
+
+    fn to_full_range_u16(self) -> u16 {
+        // PNG 3rd edition §13.12 sample-depth rescaling: replicating the byte (v * 0x101) spreads
+        // 0..=255 exactly onto 0..=65535, so 0xFF becomes 0xFFFF rather than 0xFF00.
+        u16::from(self) * 0x101
+    }
+
+    fn from_full_range_u16(value: u16) -> Self {
+        // round(value * 255 / 65535), half up. The +HALF addend before the division is what makes
+        // this round to nearest rather than truncate, so 8-bit values survive a widen/narrow
+        // round-trip unchanged.
+        ((u32::from(value) * 255 + 32_767) / 65_535) as u8
+    }
+}
+
+impl Sample for u16 {
+    const MAX_VALUE: Self = u16::MAX;
+
+    fn to_full_range_u16(self) -> u16 {
+        self
+    }
+
+    fn from_full_range_u16(value: u16) -> Self {
+        value
+    }
+}
 
 /// The colour interpretation of a pixel's channels.
 ///
@@ -348,6 +393,45 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
+    }
+
+    #[test]
+    fn u8_widens_by_byte_replication() {
+        // PNG §13.12: the byte is replicated, not shifted. Endpoints and a midpoint pin the scale.
+        assert_eq!(0u8.to_full_range_u16(), 0);
+        assert_eq!(1u8.to_full_range_u16(), 0x0101);
+        assert_eq!(128u8.to_full_range_u16(), 0x8080);
+        assert_eq!(u8::MAX.to_full_range_u16(), u16::MAX);
+        assert_eq!(u8::MAX_VALUE, 255);
+    }
+
+    #[test]
+    fn u8_narrows_round_to_nearest() {
+        // The rounding boundary sits between 128 and 129 (128/257 = 0.498, 129/257 = 0.502), so a
+        // truncating implementation and an off-by-one addend both fail here.
+        assert_eq!(u8::from_full_range_u16(0), 0);
+        assert_eq!(u8::from_full_range_u16(128), 0);
+        assert_eq!(u8::from_full_range_u16(129), 1);
+        assert_eq!(u8::from_full_range_u16(257), 1);
+        assert_eq!(u8::from_full_range_u16(u16::MAX), 255);
+    }
+
+    #[test]
+    fn u8_survives_a_widen_narrow_round_trip() {
+        // Every 8-bit value must be recovered exactly; this is what makes an 8 -> 16 -> 8 decode
+        // path lossless and is the property the two constants above jointly guarantee.
+        for value in 0..=u8::MAX {
+            assert_eq!(u8::from_full_range_u16(value.to_full_range_u16()), value);
+        }
+    }
+
+    #[test]
+    fn u16_conversions_are_the_identity() {
+        for value in [0u16, 1, 0x8080, 40_000, u16::MAX] {
+            assert_eq!(value.to_full_range_u16(), value);
+            assert_eq!(u16::from_full_range_u16(value), value);
+        }
+        assert_eq!(u16::MAX_VALUE, 65_535);
     }
 
     #[test]

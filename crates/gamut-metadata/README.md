@@ -23,6 +23,49 @@ extract/embed surface.
   merged into the single XMP graph via `gamut-iptc`, resolving disagreements with a configurable
   `ConflictPolicy` (`conflicts()` reports them without resolving). Because each datum is stored once,
   the extract → embed → extract round-trip is a **true equality**.
+- **Extensions are not a fourth carrier.** `Metadata::extensions` is a namespaced table for data no
+  carrier can express, so a downstream typed model round-trips through `Metadata` without being
+  narrowed to three fields. It is explicitly outside the carrier model: extraction never produces
+  an extension and embedding never emits one.
+
+## Extensions: data with no carrier
+
+A downstream typed model is usually wider than what a still-image file can carry — sensor geometry,
+container-level facts, structs it derives itself. `Metadata::extensions` holds that residue as
+`MetadataExtension { namespace, key, value }`, where `namespace` is a reverse-DNS string or URI the
+caller owns (the `gamut.` prefix is reserved) and `value` is the same TIFF/IFD `Value` model gamut's
+metadata crates already use.
+
+Two guarantees, deliberately distinct:
+
+| | What survives | |
+| --- | --- | --- |
+| **Model round-trip** | carriers **and** extensions | `their model → Metadata → their model` |
+| **Carrier round-trip** (keystone, unchanged) | `exif` / `xmp` / `icc` only | extract → embed → extract is still a true equality |
+
+**Prefer a carrier whenever one exists** — only a carrier reaches the file. An unmodelled EXIF tag,
+MakerNote included, already round-trips inside `exif` because `Exif` retains the raw `gamut_ifd::Ifd`;
+any property round-trips inside `xmp` because the XMP graph is open; an unmodelled ICC element
+round-trips inside `icc` as `TagData::Raw`. Reach for an extension only when no carrier can hold the
+datum at all.
+
+```rust
+use gamut_metadata::{ExtensionPolicy, Metadata, MetadataEmbedder};
+use gamut_metadata::exif::Value;
+
+let mut meta = Metadata::default();
+meta.set_extension("com.example.raw", "WhiteLevel", Value::Long(vec![16_383]));
+
+// Embedding cannot carry it: dropped by default, or refused when losing it must be an error.
+let blocks = meta.encode()?;                       // no block corresponds to the extension
+let strict = MetadataEmbedder::new()
+    .extension_policy(ExtensionPolicy::Reject)
+    .embed(&meta);                                  // Err(MetadataError::UnembeddableExtension { .. })
+```
+
+Not yet supported, and deferred deliberately: a `MetadataBlock` variant for container-located blocks
+the facade does not model, which would let *extraction* produce extensions. Today extensions are set
+by the caller only.
 
 ## Usage
 
@@ -51,6 +94,22 @@ let blocks = meta.encode()?;
 
 The umbrella [`gamut`](../gamut) crate re-exports this crate as `gamut::metadata` behind its
 `metadata` feature.
+
+## Migrating from 1.x
+
+`Metadata`, `MetadataBlock`, and `EncodedMetadata` are now `#[non_exhaustive]`, so a later carrier
+is an additive change rather than a breaking one. Struct literals become a constructor call:
+
+```rust
+// 1.x
+let meta = Metadata { exif, xmp, icc };
+// 2.x
+let meta = Metadata::from_carriers(exif, xmp, icc);
+```
+
+Use `Metadata::default()` plus field assignment when you also need `extensions`, and add a wildcard
+arm to any exhaustive `match` on `MetadataBlock`. Nothing else changed: every existing method keeps
+its signature and behaviour.
 
 ## Consumer integration
 

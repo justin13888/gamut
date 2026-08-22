@@ -8,7 +8,7 @@
 mod common;
 
 use common::{channels, gray8_scale, sample_bytes, tiny_exif, tiny_icc_profile};
-use gamut_core::{DecodeImage, ImageBuf, Rgba8, Rgba16};
+use gamut_core::{DecodeImage, GrayAlpha8, ImageBuf, Rgba8, Rgba16};
 use gamut_png::{PngDecoder, PngImage};
 use libpng_oracle::{EncodeOpts, TextChunk, TextKind};
 
@@ -312,6 +312,46 @@ fn colour_key_transparency_matches_oracle() {
         assert_rgba8_matches_oracle(&png, &context);
     }
 
+    // Sub-byte greyscale with a colour key exercises the one path that both scales a sample to
+    // 8 bits (§13.12) and derives an alpha channel from the key -- the keyed value must land on
+    // `scale * key` with alpha 0, and every other value on `scale * value` with alpha 255.
+    for bit_depth in [1u8, 2, 4] {
+        let (width, height) = (13u32, 5u32);
+        let pixels = sample_bytes(width, height, libpng_oracle::COLOR_GRAY, bit_depth, 9);
+        let opts = EncodeOpts {
+            trns_gray: Some(u16::from(pixels[0])),
+            ..EncodeOpts::default()
+        };
+        let png = libpng_oracle::encode(
+            &pixels,
+            width,
+            height,
+            libpng_oracle::COLOR_GRAY,
+            bit_depth,
+            &opts,
+        );
+        let context = format!("key ct0/d{bit_depth}");
+        assert_rgba8_matches_oracle(&png, &context);
+
+        // Assert the scaling directly too: libpng agreeing is necessary but does not pin which
+        // arithmetic produced it, and a divide-instead-of-multiply is invisible at bit depth 8.
+        let scale = gray8_scale(bit_depth);
+        let img: ImageBuf<GrayAlpha8> = PngDecoder::new()
+            .decode_image(&png)
+            .unwrap_or_else(|e| panic!("{context}: grey+alpha decode failed: {e}"));
+        for (out, &raw) in img
+            .as_samples()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(pixels.iter())
+        {
+            assert_eq!(out[0], raw * scale, "{context}: sample {raw} scaled wrong");
+            let opaque = u16::from(raw) != u16::from(pixels[0]);
+            assert_eq!(out[1], u8::from(opaque) * 255, "{context}: alpha for {raw}");
+        }
+    }
+
     // 16-bit: libpng's simplified RGBA read is 8-bit, so assert the keying directly.
     let (width, height) = (9u32, 4u32);
     let pixels = sample_bytes(width, height, libpng_oracle::COLOR_RGB, 16, 21);
@@ -334,7 +374,13 @@ fn colour_key_transparency_matches_oracle() {
     assert_matches_oracle(&png, "key rgb16");
     let img: ImageBuf<Rgba16> = PngDecoder::new().decode_image(&png).unwrap();
     let mut keyed = 0;
-    for (px, src) in img.as_samples().chunks_exact(4).zip(pixels.chunks_exact(6)) {
+    for (px, src) in img
+        .as_samples()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(pixels.as_chunks::<6>().0)
+    {
         let native = [
             u16::from_be_bytes([src[0], src[1]]),
             u16::from_be_bytes([src[2], src[3]]),
@@ -363,7 +409,13 @@ fn colour_key_transparency_matches_oracle() {
     );
     assert_matches_oracle(&png, "key gray16");
     let img: ImageBuf<gamut_core::GrayAlpha16> = PngDecoder::new().decode_image(&png).unwrap();
-    for (px, src) in img.as_samples().chunks_exact(2).zip(pixels.chunks_exact(2)) {
+    for (px, src) in img
+        .as_samples()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(pixels.as_chunks::<2>().0)
+    {
         let native = u16::from_be_bytes([src[0], src[1]]);
         assert_eq!(px[0], native);
         assert_eq!(px[1], if native == key { 0 } else { u16::MAX });

@@ -111,7 +111,7 @@ fn rotate_180_reverses_the_pixel_order() {
         .expect("gamut decode failed");
 
     let mut expected = Vec::with_capacity(source.len());
-    for pixel in source.chunks_exact(3).rev() {
+    for pixel in source.as_chunks::<3>().0.iter().rev() {
         expected.extend_from_slice(pixel);
     }
     assert_eq!(image.as_samples(), expected.as_slice());

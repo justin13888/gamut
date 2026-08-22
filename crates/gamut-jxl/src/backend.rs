@@ -55,7 +55,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gamut_core::{Dimensions, Error, PixelFormat, Result};
 
-use crate::config::{ColorSpec, Distance, Effort, Orientation};
+use crate::config::{ColorSpec, Distance, Effort, ModularMode, Orientation};
 
 /// Borrowed interleaved samples handed to an encode backend, tagged with their storage width.
 ///
@@ -343,9 +343,10 @@ impl JxlDecoded {
 /// The plain-data description of one codestream encode job, as a backend sees it.
 ///
 /// It carries exactly the knobs that shape the **codestream**: the lossless/lossy mode and its
-/// Butteraugli [`Distance`], the [`Effort`] dial, the coded bit depth, the [`ColorSpec`] signalling
-/// and the [`Orientation`] metadata. Container-level requests are deliberately absent — they never
-/// reach a backend (see the [module docs](self#container-feature-veto)).
+/// Butteraugli [`Distance`], the [`Effort`] dial, the [`ModularMode`] coding-tool selection, the
+/// coded bit depth, the [`ColorSpec`] signalling and the [`Orientation`] metadata. Container-level
+/// requests are deliberately absent — they never reach a backend (see the
+/// [module docs](self#container-feature-veto)).
 ///
 /// Requests are produced by the host and handed to a backend by reference; there is no public
 /// constructor.
@@ -355,6 +356,8 @@ pub struct JxlEncodeRequest {
     distance: Option<Distance>,
     /// The speed/density effort level.
     effort: Effort,
+    /// Which coding tool (VarDCT or Modular) the caller asked for, if either.
+    modular: ModularMode,
     /// The declared coded bit depth, in bits per sample.
     coded_bit_depth: u32,
     /// The colour interpretation signalled for the samples.
@@ -368,6 +371,7 @@ impl JxlEncodeRequest {
     pub(crate) fn new(
         distance: Option<Distance>,
         effort: Effort,
+        modular: ModularMode,
         coded_bit_depth: u32,
         color: ColorSpec,
         orientation: Orientation,
@@ -375,6 +379,7 @@ impl JxlEncodeRequest {
         Self {
             distance,
             effort,
+            modular,
             coded_bit_depth,
             color,
             orientation,
@@ -397,6 +402,16 @@ impl JxlEncodeRequest {
     #[must_use]
     pub fn effort(&self) -> Effort {
         self.effort
+    }
+
+    /// The requested [`ModularMode`] (which coding tool to use, if the caller pinned one).
+    ///
+    /// [`ModularMode::Auto`] — the default — means the backend is free to choose, exactly as libjxl
+    /// would. A backend that cannot honour a pinned mode should decline the job rather than encode
+    /// with the other tool.
+    #[must_use]
+    pub fn modular(&self) -> ModularMode {
+        self.modular
     }
 
     /// The coded bit depth to declare in the stream, in bits per sample.
@@ -768,6 +783,7 @@ mod tests {
         let lossy = JxlEncodeRequest::new(
             Some(d),
             Effort::Kitten,
+            ModularMode::Modular,
             10,
             ColorSpec::Pq,
             Orientation::Rotate90Cw,
@@ -775,6 +791,7 @@ mod tests {
         assert!(!lossy.is_lossless());
         assert_eq!(lossy.distance(), Some(d));
         assert_eq!(lossy.effort(), Effort::Kitten);
+        assert_eq!(lossy.modular(), ModularMode::Modular);
         assert_eq!(lossy.coded_bit_depth(), 10);
         assert_eq!(lossy.color(), &ColorSpec::Pq);
         assert_eq!(lossy.orientation(), Orientation::Rotate90Cw);
@@ -782,12 +799,14 @@ mod tests {
         let lossless = JxlEncodeRequest::new(
             None,
             Effort::Squirrel,
+            ModularMode::Auto,
             8,
             ColorSpec::Srgb,
             Orientation::Identity,
         );
         assert!(lossless.is_lossless());
         assert_eq!(lossless.distance(), None);
+        assert_eq!(lossless.modular(), ModularMode::Auto);
     }
 
     #[test]

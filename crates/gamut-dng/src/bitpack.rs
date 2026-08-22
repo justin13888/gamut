@@ -60,7 +60,9 @@ pub(crate) fn unpack(
     match bits {
         8 => bytes.iter().map(|&b| u16::from(b)).collect(),
         16 => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| order.u16([c[0], c[1]]))
             .collect(),
         _ => unpack_msb_rows(bytes, bits, samples_per_row, rows),

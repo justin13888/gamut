@@ -4,6 +4,17 @@
 //! leftmost pixel occupies the high bits), and every scanline is padded to a byte boundary with
 //! zero bits. 8- and 16-bit samples need no packing.
 
+/// The exact §13.12 factor presenting a sub-byte grey sample at 8 bits: 255 / (2^depth − 1).
+/// Shared by the decoder (widening) and the reduce analysis (its inverse, sub-byte packing).
+pub(crate) fn gray8_scale(bit_depth: u8) -> u8 {
+    match bit_depth {
+        1 => 255,
+        2 => 85,
+        4 => 17,
+        _ => 1,
+    }
+}
+
 /// Packs one-byte-per-sample `samples` (each value `< 2^bit_depth`) into MSB-first bit-packed,
 /// byte-padded scanlines. `bit_depth` must be 1, 2, or 4.
 pub(crate) fn pack_scanlines(

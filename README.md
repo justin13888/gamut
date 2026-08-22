@@ -114,7 +114,7 @@ format.
 | `gamut-dsp`       | Shared DSP: DCT, wavelet transforms, quantization, filtering           | stabilizing api                        |
 | `gamut-bitstream` | Bit readers/writers and entropy coders (ANS, arithmetic, Huffman)      | stabilizing api                        |
 | `gamut-isobmff`   | ISOBMFF container utilities (AVIF, HEIC)                               | finalizing api                         |
-| `gamut-riff`      | RIFF container utilities (WebP)                                        | finalizing api                         |
+| `gamut-riff`      | RIFF container utilities (WebP)                                        | stable (v1, #186)                      |
 | `gamut-av1`       | AV1 still-image (intra-frame) encoder — the codec layer beneath AVIF   | implemented lossless and lossy (alpha) |
 | `gamut-av2`       | AV2 still-image (intra-frame) encoder/decoder — AV1's successor        | placeholder                            |
 | `gamut-avif`      | AVIF encoder — AV1 still frames in an ISOBMFF container                | stabilizing with gamut-av1             |

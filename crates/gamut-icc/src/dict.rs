@@ -117,7 +117,9 @@ fn decode_utf16be(bytes: &[u8]) -> Result<String> {
         return Err(IccError::Malformed("icc: odd-length UTF-16 dict string"));
     }
     let units = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_be_bytes([c[0], c[1]]));
     let mut text = String::new();
     for unit in char::decode_utf16(units) {

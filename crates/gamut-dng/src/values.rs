@@ -68,6 +68,19 @@ impl Compression {
                 | Compression::JpegXl
         )
     }
+
+    /// Whether this scheme stores the raw image **lossily**, which changes how its
+    /// `NewRawImageDigest` is computed: lossy storage digests the compressed chunks (the SDK's
+    /// `dng_lossy_compressed_image::FindDigest`) rather than the decoded samples. See
+    /// [`DngDecoder::verify_new_raw_image_digest`](crate::DngDecoder::verify_new_raw_image_digest).
+    ///
+    /// JPEG XL counts as lossy storage for digest purposes whether or not the codestream itself
+    /// was encoded losslessly — the reference implementation routes every JXL image through the
+    /// compressed-chunk path.
+    #[must_use]
+    pub fn is_lossy(self) -> bool {
+        matches!(self, Compression::LossyJpeg | Compression::JpegXl)
+    }
 }
 
 /// How pixel samples map to colour / raw photometry, stored in `PhotometricInterpretation` (262).
@@ -82,6 +95,9 @@ pub enum PhotometricInterpretation {
     Rgb,
     /// `4` — a transparency mask.
     TransparencyMask,
+    /// `6` — YCbCr, the colour space of the baseline-JPEG previews real cameras embed. Raw
+    /// images never use it; it appears on preview and thumbnail sub-images.
+    YCbCr,
     /// `32803` — a colour-filter-array (mosaic) raw image.
     Cfa,
     /// `34892` — a demosaiced ("linear") raw image, one sample per plane per pixel.
@@ -100,6 +116,7 @@ impl PhotometricInterpretation {
             1 => PhotometricInterpretation::BlackIsZero,
             2 => PhotometricInterpretation::Rgb,
             4 => PhotometricInterpretation::TransparencyMask,
+            6 => PhotometricInterpretation::YCbCr,
             32803 => PhotometricInterpretation::Cfa,
             34892 => PhotometricInterpretation::LinearRaw,
             51177 => PhotometricInterpretation::Depth,
@@ -115,6 +132,7 @@ impl PhotometricInterpretation {
             PhotometricInterpretation::BlackIsZero => 1,
             PhotometricInterpretation::Rgb => 2,
             PhotometricInterpretation::TransparencyMask => 4,
+            PhotometricInterpretation::YCbCr => 6,
             PhotometricInterpretation::Cfa => 32803,
             PhotometricInterpretation::LinearRaw => 34892,
             PhotometricInterpretation::Depth => 51177,
@@ -528,6 +546,7 @@ mod tests {
             PhotometricInterpretation::BlackIsZero,
             PhotometricInterpretation::Rgb,
             PhotometricInterpretation::TransparencyMask,
+            PhotometricInterpretation::YCbCr,
             PhotometricInterpretation::Cfa,
             PhotometricInterpretation::LinearRaw,
             PhotometricInterpretation::Depth,
