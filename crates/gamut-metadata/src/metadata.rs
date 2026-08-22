@@ -1,12 +1,13 @@
 //! The unified metadata model.
 
-use gamut_exif::Exif;
+use gamut_exif::{Exif, Value};
 use gamut_icc::IccProfile;
 use gamut_iptc::PhotoMetadata;
 use gamut_xmp::XmpMeta;
 
 use crate::embed::{EncodedMetadata, MetadataEmbedder};
 use crate::error::Result;
+use crate::extension::MetadataExtension;
 use crate::extract::MetadataExtractor;
 use crate::source::MetadataBlock;
 
@@ -31,7 +32,20 @@ use crate::source::MetadataBlock;
 /// `8BIM 0x0404`, TIFF/DNG tag 33723); the [extractor](crate::MetadataExtractor) reconciles it
 /// *into* `xmp`, and the [embedder](crate::MetadataEmbedder) projects it back out only on request.
 /// Read the IPTC view with [`iptc`](Self::iptc) — a typed lens over `xmp` that stores nothing.
+///
+/// # Extensions
+///
+/// [`extensions`](Self::extensions) is deliberately **not** a fourth carrier: it holds data no
+/// carrier can express, so a downstream typed model survives `their model → Metadata → their
+/// model` in full. It does not serialize — see [`MetadataExtension`] and the
+/// [crate docs](crate#extensions-data-with-no-carrier).
+///
+/// # Construction
+///
+/// Marked `#[non_exhaustive]`, so build one with [`from_carriers`](Self::from_carriers), or with
+/// [`Metadata::default`] followed by field assignment, rather than a struct literal.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Metadata {
     /// EXIF metadata (camera/capture parameters, GPS, thumbnail), if present.
     pub exif: Option<Exif>,
@@ -40,9 +54,33 @@ pub struct Metadata {
     pub xmp: Option<XmpMeta>,
     /// The embedded ICC colour profile, if present.
     pub icc: Option<IccProfile>,
+    /// Data none of the carriers above models, in namespaces the caller owns.
+    ///
+    /// **Never serialized** — [`encode`](Self::encode) drops these (see
+    /// [`ExtensionPolicy`](crate::ExtensionPolicy)) and extraction never produces them. Order is
+    /// preserved; a `(namespace, key)` pair appears at most once when maintained through
+    /// [`set_extension`](Self::set_extension).
+    pub extensions: Vec<MetadataExtension>,
 }
 
 impl Metadata {
+    /// Builds a model from the three carriers, with no [`extensions`](Self::extensions).
+    ///
+    /// The `#[non_exhaustive]` replacement for a `Metadata { exif, xmp, icc }` struct literal.
+    #[must_use]
+    pub fn from_carriers(
+        exif: Option<Exif>,
+        xmp: Option<XmpMeta>,
+        icc: Option<IccProfile>,
+    ) -> Self {
+        Self {
+            exif,
+            xmp,
+            icc,
+            extensions: Vec::new(),
+        }
+    }
+
     /// Extracts a unified model from already-located container metadata blocks, using default
     /// options. A convenience for [`MetadataExtractor::new().extract(blocks)`](MetadataExtractor::extract);
     /// use [`MetadataExtractor`] directly to choose an IPTC [`ConflictPolicy`](crate::ConflictPolicy).
@@ -77,10 +115,64 @@ impl Metadata {
         (!pm.xmp.properties.is_empty()).then_some(pm)
     }
 
-    /// Whether no metadata carrier is present (every field is `None`).
+    /// The value bound to `key` in `namespace`, or `None` when the model carries no such
+    /// [extension](Self::extensions).
+    #[must_use]
+    pub fn extension(&self, namespace: &str, key: &str) -> Option<&Value> {
+        self.extensions
+            .iter()
+            .find(|e| e.namespace == namespace && e.key == key)
+            .map(|e| &e.value)
+    }
+
+    /// Binds `key` in `namespace` to `value`, replacing the existing binding in place if there is
+    /// one and appending otherwise — so a `(namespace, key)` pair never appears twice.
+    pub fn set_extension(
+        &mut self,
+        namespace: impl Into<String>,
+        key: impl Into<String>,
+        value: Value,
+    ) {
+        let (namespace, key) = (namespace.into(), key.into());
+        match self
+            .extensions
+            .iter_mut()
+            .find(|e| e.namespace == namespace && e.key == key)
+        {
+            Some(existing) => existing.value = value,
+            None => self
+                .extensions
+                .push(MetadataExtension::new(namespace, key, value)),
+        }
+    }
+
+    /// Removes the binding for `key` in `namespace`, returning its value if there was one.
+    pub fn remove_extension(&mut self, namespace: &str, key: &str) -> Option<Value> {
+        let index = self
+            .extensions
+            .iter()
+            .position(|e| e.namespace == namespace && e.key == key)?;
+        Some(self.extensions.remove(index).value)
+    }
+
+    /// The [extensions](Self::extensions) in `namespace`, in insertion order.
+    pub fn extensions_in<'a>(
+        &'a self,
+        namespace: &'a str,
+    ) -> impl Iterator<Item = &'a MetadataExtension> {
+        self.extensions
+            .iter()
+            .filter(move |e| e.namespace == namespace)
+    }
+
+    /// Whether the model holds nothing at all — no carrier and no
+    /// [extension](Self::extensions).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.exif.is_none() && self.xmp.is_none() && self.icc.is_none()
+        self.exif.is_none()
+            && self.xmp.is_none()
+            && self.icc.is_none()
+            && self.extensions.is_empty()
     }
 }
 

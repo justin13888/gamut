@@ -219,7 +219,9 @@ fn bigtiff_tiled_is_decoded_by_libtiff() {
     let (rw, rh, rgba) = libtiff_oracle::decode_rgba(&tiff).expect("libtiff rgba");
     assert_eq!((rw, rh), (w, h));
     let got: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[0], p[1], p[2]])
         .collect();
     assert_eq!(got, rgb, "BigTIFF tiled libtiff cross-check");

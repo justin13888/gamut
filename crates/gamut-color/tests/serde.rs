@@ -23,6 +23,7 @@ fn public_enums_round_trip_by_variant_name() {
         MatrixCoefficients::Identity,
         MatrixCoefficients::Bt709,
         MatrixCoefficients::Unspecified,
+        MatrixCoefficients::Bt470Bg,
         MatrixCoefficients::Bt601,
         MatrixCoefficients::YCgCo,
         MatrixCoefficients::Bt2020Ncl,

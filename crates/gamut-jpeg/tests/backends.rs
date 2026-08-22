@@ -964,6 +964,8 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
     let rgb = DecodedJpeg::new(2, 1, PixelFormat::Rgb8, vec![1, 2, 3, 4, 5, 6]).unwrap();
     let cmyk = DecodedJpeg::new(2, 1, PixelFormat::Cmyk8, vec![1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
 
+    // The refusal messages now come from the shared conversion engine rather than from JPEG: the
+    // presentation rules are gamut-core's, so the wording is the same for every format crate.
     // Gray → Rgb8 replicates; Gray → Gray8 passes through; Gray → Cmyk8 is rejected.
     let d = decoder_returning(gray.clone());
     let r: ImageBuf<Rgb8> = d.decode_image(&stream).unwrap();
@@ -975,7 +977,7 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
             .unwrap_err()
             .static_message()
             .unwrap(),
-        "JPEG: not a 4-component CMYK/YCCK image"
+        "convert: CMYK conversion needs a colour-management transform, not a layout change"
     );
 
     // Rgb passes through to Rgb8 and is rejected for the other two.
@@ -987,10 +989,10 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
             .unwrap_err()
             .static_message()
             .unwrap(),
-        "JPEG: not a single-component grayscale image"
+        "convert: target layout cannot hold colour; set a LumaPolicy"
     );
 
-    // Cmyk passes through to Cmyk8 and is rejected for Rgb8, with the built-in's own message.
+    // Cmyk passes through to Cmyk8 and is rejected for Rgb8.
     let d = decoder_returning(cmyk);
     let c: ImageBuf<Cmyk8> = d.decode_image(&stream).unwrap();
     assert_eq!(c.as_samples(), &[1, 2, 3, 4, 5, 6, 7, 8]);
@@ -999,7 +1001,7 @@ fn backend_rasters_are_presented_by_the_same_rules_as_the_built_in_decoder() {
             .unwrap_err()
             .static_message()
             .unwrap(),
-        "JPEG: 4-component (CMYK/YCCK) — decode as Cmyk8"
+        "convert: CMYK conversion needs a colour-management transform, not a layout change"
     );
 }
 
@@ -1305,4 +1307,63 @@ fn the_declined_sentinel_is_public_and_recognised() {
     assert!(is_backend_declined(&err));
     assert!(!is_backend_declined(&Error::InvalidInput("nope")));
     assert!(!is_backend_declined(&Error::Unsupported("nope")));
+}
+
+#[test]
+fn custom_quant_tables_pin_the_encode_to_the_built_in_path() {
+    // A `JpegEncodeRequest` cannot carry caller-supplied tables, so an encoder configured with
+    // `with_quant_tables` must not consult its registry at all — an always-accepting backend
+    // would otherwise encode with the wrong tables. The output must equal a registry-free encode
+    // of the same configuration.
+    use gamut_jpeg::QuantTables;
+    let tables = QuantTables::new([9u8; 64], [13u8; 64]).unwrap();
+    let log: Log = Arc::default();
+    let mut enc = JpegEncoder::new().with_quant_tables(tables);
+    enc.push_backend(ScriptedEncoder {
+        name: "eager",
+        act: Act::Accept,
+        log: Arc::clone(&log),
+        out: backend_stream(),
+    });
+    let pixels = gray_pixels();
+    let img = ImageRef::<Gray8>::new(&pixels, dims()).unwrap();
+    let with_registry = enc.encode_to_vec(img).unwrap();
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "no backend may be consulted while custom tables are set"
+    );
+    let img = ImageRef::<Gray8>::new(&pixels, dims()).unwrap();
+    let built_in = JpegEncoder::new()
+        .with_quant_tables(tables)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(with_registry, built_in);
+}
+
+#[test]
+fn rd_optimization_pins_the_encode_to_the_built_in_path() {
+    // The RD configuration cannot ride a `JpegEncodeRequest`, so a non-`None` mode must skip the
+    // registry entirely, exactly like custom quantization tables.
+    use gamut_jpeg::RdOptimization;
+    let log: Log = Arc::default();
+    let mut enc = JpegEncoder::new().with_rd_optimization(RdOptimization::Trellis);
+    enc.push_backend(ScriptedEncoder {
+        name: "eager",
+        act: Act::Accept,
+        log: Arc::clone(&log),
+        out: backend_stream(),
+    });
+    let pixels = gray_pixels();
+    let img = ImageRef::<Gray8>::new(&pixels, dims()).unwrap();
+    let with_registry = enc.encode_to_vec(img).unwrap();
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "no backend may be consulted while RD optimization is on"
+    );
+    let img = ImageRef::<Gray8>::new(&pixels, dims()).unwrap();
+    let built_in = JpegEncoder::new()
+        .with_rd_optimization(RdOptimization::Trellis)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(with_registry, built_in);
 }

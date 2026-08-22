@@ -5,8 +5,25 @@ use gamut_icc::IccProfile;
 use gamut_iptc::{IimCharset, IptcWriter};
 use gamut_xmp::XmpMeta;
 
-use crate::error::Result;
+use crate::error::{MetadataError, Result};
 use crate::metadata::Metadata;
+
+/// What [`MetadataEmbedder::embed`] does with a model's
+/// [extensions](crate::Metadata::extensions).
+///
+/// Extensions hold data no carrier can express, so there is nothing to serialize them into. This
+/// chooses between losing them quietly and being told.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum ExtensionPolicy {
+    /// Drop them. Extensions are process-local; the emitted blocks are unaffected. **Default.**
+    #[default]
+    Drop = 0,
+    /// Fail with [`MetadataError::UnembeddableExtension`] when the model carries any extension —
+    /// for a caller that must not silently lose data on the way to a file.
+    Reject = 1,
+}
 
 /// The per-carrier byte blocks produced by [`MetadataEmbedder::embed`] — the owned inverse of the
 /// [`MetadataBlock`](crate::MetadataBlock)s an [extractor](crate::MetadataExtractor) consumes.
@@ -15,7 +32,14 @@ use crate::metadata::Metadata;
 /// as its chunk / item / segment. IPTC-Core travels inside [`xmp`](Self::xmp) (the XMP packet);
 /// [`iptc_iim`](Self::iptc_iim) is the optional legacy binary form, emitted only when requested via
 /// [`MetadataEmbedder::emit_iptc_iim`].
+///
+/// A model's [extensions](Metadata::extensions) produce no block — they have no carrier — so
+/// nothing here corresponds to them.
+///
+/// Marked `#[non_exhaustive]`, so a later carrier can add a field without a breaking change;
+/// build one with [`EncodedMetadata::default`] plus field assignment rather than a struct literal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 #[must_use]
 pub struct EncodedMetadata {
     /// The EXIF blob (`Exif\0\0` + TIFF stream), if [`Metadata::exif`] was present.
@@ -55,6 +79,7 @@ pub struct EncodedMetadata {
 pub struct MetadataEmbedder {
     emit_iptc_iim: bool,
     iim_charset: IimCharset,
+    extension_policy: ExtensionPolicy,
 }
 
 impl Default for MetadataEmbedder {
@@ -62,12 +87,14 @@ impl Default for MetadataEmbedder {
         Self {
             emit_iptc_iim: false,
             iim_charset: IimCharset::Utf8,
+            extension_policy: ExtensionPolicy::Drop,
         }
     }
 }
 
 impl MetadataEmbedder {
-    /// Creates an embedder with the default options (no legacy IIM block; UTF-8 IIM charset).
+    /// Creates an embedder with the default options (no legacy IIM block; UTF-8 IIM charset;
+    /// extensions dropped).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -90,7 +117,18 @@ impl MetadataEmbedder {
         self
     }
 
+    /// Sets what to do with the model's [extensions](Metadata::extensions), and returns the
+    /// embedder. Defaults to [`ExtensionPolicy::Drop`].
+    #[must_use]
+    pub fn extension_policy(mut self, policy: ExtensionPolicy) -> Self {
+        self.extension_policy = policy;
+        self
+    }
+
     /// Serializes the model to its per-carrier blocks.
+    ///
+    /// The model's [extensions](Metadata::extensions) are not carriers and produce no block; they
+    /// are dropped, or rejected, per [`extension_policy`](Self::extension_policy).
     ///
     /// # Errors
     ///
@@ -101,7 +139,21 @@ impl MetadataEmbedder {
     /// an invariant, or [`MetadataError::Iptc`](crate::MetadataError::Iptc) when
     /// [`emit_iptc_iim`](Self::emit_iptc_iim) is set and an IPTC value cannot be expressed in the
     /// chosen IIM charset.
+    ///
+    /// Also returns [`MetadataError::UnembeddableExtension`](crate::MetadataError::UnembeddableExtension),
+    /// naming the first extension, when [`extension_policy`](Self::extension_policy) is
+    /// [`ExtensionPolicy::Reject`] and the model carries one.
     pub fn embed(&self, meta: &Metadata) -> Result<EncodedMetadata> {
+        // Refuse before serializing anything, so a rejected model produces no partial work.
+        if self.extension_policy == ExtensionPolicy::Reject
+            && let Some(ext) = meta.extensions.first()
+        {
+            return Err(MetadataError::UnembeddableExtension {
+                namespace: ext.namespace.clone(),
+                key: ext.key.clone(),
+            });
+        }
+
         let exif = meta.exif.as_ref().map(Exif::to_bytes).transpose()?;
         let xmp = meta.xmp.as_ref().map(XmpMeta::to_packet);
         let icc = meta.icc.as_ref().map(IccProfile::to_bytes).transpose()?;

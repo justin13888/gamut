@@ -27,9 +27,10 @@
 //! here: a 6-scan grayscale layout and the 10-scan YCbCr layout (see [`scan_script`]).
 
 use crate::bitwriter::BitWriter;
-use crate::encoder::{Plane, additional_bits, magnitude_category, quantize_block};
+use crate::encoder::{Plane, additional_bits, magnitude_category, quantize_block_rd};
 use crate::huffman::{EncTable, build_optimal_table, emit_dht_dynamic};
 use crate::marker;
+use crate::rd::RdCtx;
 use crate::zigzag::ZIGZAG;
 
 /// The largest EOB run an `EOBn` symbol can carry (§G.1.2.2): `EOBn` codes `n` in `0..=14`, so the
@@ -52,6 +53,10 @@ pub(crate) struct ProgComponent<'a> {
     pub plane: &'a Plane,
     /// The component's natural-order quantization table.
     pub quant: &'a [u8; 64],
+    /// The rate–distortion context for this component's class, when RD optimization is enabled.
+    /// Shared with the baseline path through the same quantization seam, so the materialized
+    /// coefficients — and hence the decoded image — stay identical between the two processes.
+    pub rd: Option<&'a RdCtx>,
 }
 
 /// One frame component's fully-materialized quantized coefficients (§A.3.4), the source the scan
@@ -165,7 +170,7 @@ fn build_coeffs(input: &[ProgComponent], x: usize, y: usize) -> (Vec<CoeffComp>,
             let mut coeffs = vec![[0i32; 64]; pbw * pbh];
             for by in 0..pbh {
                 for bx in 0..pbw {
-                    coeffs[by * pbw + bx] = quantize_block(c.plane, c.quant, bx, by);
+                    coeffs[by * pbw + bx] = quantize_block_rd(c.plane, c.quant, bx, by, c.rd);
                 }
             }
             CoeffComp {
