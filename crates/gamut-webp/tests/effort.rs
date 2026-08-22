@@ -517,6 +517,21 @@ fn patchwork(w: u32, h: u32, channels: usize) -> Vec<u8> {
         .collect()
 }
 
+/// A smooth ramp, coded at high quality. The busy and patchwork fixtures are both extremes: their
+/// macroblocks either take `B_PRED` or quantize away to a skip, and both of those bypass the
+/// whole-block `Y2` residual entirely. A gentle gradient at a fine quantizer is the case in
+/// between — whole-block prediction wins, and the residual still survives quantization — which is
+/// also where the effort-1 `B_PRED` gate meets prediction errors near its threshold rather than
+/// far on either side of it.
+fn smooth_rgb(w: u32, h: u32) -> Vec<u8> {
+    (0..w * h)
+        .flat_map(|i| {
+            let (x, y) = (i % w, i / w);
+            [(40 + x) as u8, (60 + y) as u8, (80 + (x + y) / 2) as u8]
+        })
+        .collect()
+}
+
 /// Every rung's output, pinned by length + digest — the density contract made concrete.
 ///
 /// `tests/default_bytes.rs` pins the *default* rung. That leaves the other six describing
@@ -655,6 +670,17 @@ fn every_effort_rung_pins_its_output_bytes() {
         (5102, 0x01e0_f3cc_764b_692d),
     ];
 
+    let srgb = smooth_rgb(96, 80);
+    const SMOOTH_LOSSY95_RGB: [(usize, u64); 7] = [
+        (492, 0xb6f5_db75_6942_5bdc),
+        (472, 0xf13f_9296_fc56_0ab0),
+        (484, 0x293f_cb65_b36d_4eb2),
+        (446, 0x314b_0c7b_7da6_2863),
+        (316, 0xc5dc_3cc3_1d04_a684),
+        (316, 0xc5dc_3cc3_1d04_a684),
+        (316, 0xc5dc_3cc3_1d04_a684),
+    ];
+
     for (level, effort) in all_efforts().into_iter().enumerate() {
         for (label, want, got) in [
             (
@@ -716,6 +742,11 @@ fn every_effort_rung_pins_its_output_bytes() {
                 "patchwork lossy60 rgba",
                 PATCH_LOSSY60_RGBA[level],
                 encode_lossy(effort, 60, &prgba, bd),
+            ),
+            (
+                "smooth lossy95 rgb",
+                SMOOTH_LOSSY95_RGB[level],
+                encode_lossy_rgb(effort, 95, &srgb, bd),
             ),
         ] {
             assert_eq!(
