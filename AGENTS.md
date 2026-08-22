@@ -20,8 +20,11 @@ Dependency edges (a crate depends on those to its right):
   `cmm`, `codec-abi`, `all`); `default = []`. `primitives` re-exports shared `color`/`dsp`/`bitstream`;
   `isobmff`/`metadata`/`tonemap`/`codec-abi` re-export their respective primitive crates;
   `all` includes all of these.
-- **gamut-core** — `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`. No
-  internal deps; everything else depends on it.
+- **gamut-core** — `Encoder`/`Decoder` traits, image buffers, `Dimensions`, `Error`, plus the
+  format-agnostic `convert` module: the one place any `Pixel` layout converts to another
+  (grey↔RGB, alpha add/drop/composite, 8↔16-bit), lossless by default with loss opted into per
+  decoder via a `ConvertPolicy`. Format crates decode to what the file carries and delegate the
+  layout change there rather than hand-rolling it. No internal deps; everything else depends on it.
 - **gamut-color** / **gamut-dsp** / **gamut-bitstream** — shared primitives. ← core.
 - **gamut-tonemap** — scalar tone-mapping curves (`ToneCurve` + Reinhard/ACES/Hable/Drago)
   for HDR→SDR pipelines, between `gamut-color`'s transfer functions and the SDR re-encode.
@@ -48,9 +51,9 @@ Dependency edges (a crate depends on those to its right):
   gamut-jxl's encoder and its libjxl decode-oracle tests. No gamut deps (C/FFI only);
   honors `GAMUT_JXL_SYS_SKIP_NATIVE=1` to skip cmake for check-only (cross/MSRV) jobs.
 - **gamut-jpeg** — JPEG-1 (ISO/IEC 10918-1 / ITU-T T.81) codec: baseline sequential DCT
-  Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF), sequential/progressive decoder and
-  progressive encoder phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only).
-  ← core, color, dsp.
+  Huffman encoder (gray + YCbCr 4:4:4/4:2:2/4:2:0, JFIF; opt-in jpegli-style XYB colour mode
+  with a static vendored ICC profile), sequential/progressive decoder and progressive encoder
+  phased in per its STATUS.md; oracle = libjpeg-turbo (dev-only). ← core, color, dsp.
 - **gamut-avif** ← av1, isobmff, core, color, codec-abi (pluggable `Av1StillEncoder`
   codestream seam; `gamut-av1` is the implicit software tail). **gamut-webp** ← +riff; like
   gamut-png it carries the `ICCP`/`EXIF`/`XMP ` chunks verbatim as raw `MetadataBlock`-ready
@@ -87,9 +90,9 @@ Dependency edges (a crate depends on those to its right):
   metadata. Conformance-gated against the headless-built **Adobe DNG SDK**. ← ifd, bitstream,
   core (MSB-first sub-byte packing reuses `gamut-bitstream`; `miniz_oxide` for Deflate).
 - **gamut-cli** (binary `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib).
-  ← gamut. `gamut-cli` is the sandbox exercising implemented features: decodes input via the
-  third-party `image` crate (PNG/JPEG/PPM) but encodes only with gamut crates, and exposes
-  `primitives` re-exports as inspection subcommands.
+  ← gamut. `gamut-cli` is the sandbox exercising implemented features: decodes PNG/JPEG/WebP/JXL
+  input with gamut's own decoders (only PPM uses the third-party `image` crate) and encodes only
+  with gamut crates, and exposes `primitives` re-exports as inspection subcommands.
 
 ## Code correctness
 
@@ -120,6 +123,8 @@ mise run fmt-check     # formatting (nightly rustfmt, auto-installed)
 mise run lint          # lint (Clippy, warnings as errors)
 mise run coverage      # coverage (minimum 80%)
 mise run mutants       # mutation testing (needs submodules + C toolchain; run `mise install` once)
+mise run test-dng-real # gamut-dng vs real camera DNGs (needs `mise run fetch-dng-samples`
+                       # first: a ~178 MiB CC0 corpus submodule). Extended CI, master/manual
 mise run check-cross <triple> # cross-compile check (wasm32/aarch64/musl); extended CI, master/manual
 mise run check-msrv    # compile on documented MSRV; extended CI, master/manual
 mise run check-commits # commit messages are Conventional Commits

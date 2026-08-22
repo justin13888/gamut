@@ -38,9 +38,11 @@ Output size in bytes (zlib streams; lower is better), reproduced by `cargo bench
 | pseudo-random (~incompressible)| 20 000 |     **2 236** |     2 290 |            2 291 |    2 122 |
 
 `Level::Best` lands ~1–7% below `zlib -9`; `zopfli` (15 optimization passes + package-merge
-length-limiting, vs. this crate's 6 passes + a count-floor heuristic) is a few percent smaller again,
-at a much higher and non-configurable cost. If you need inflate, streaming, or gzip framing, reach
-for `flate2`/`miniz_oxide` instead — this crate is deliberately narrower (see [Scope](#scope)).
+length-limiting, vs. this crate's default 6 passes + a count-floor heuristic) is a few percent
+smaller again at a much higher cost. The pass budget is configurable via
+`DeflateEncoder::with_effort` (0 = the lazy seed parse only; 15 ≈ zopfli's budget), so size-vs-time
+curves can be swept along one axis. If you need inflate, streaming, or gzip framing, reach for
+`flate2`/`miniz_oxide` instead — this crate is deliberately narrower (see [Scope](#scope)).
 
 ## Usage
 
@@ -56,6 +58,13 @@ DeflateEncoder::new().compress(&data, &mut raw);
 // zlib-wrapped (RFC 1950) — what PNG's IDAT carries:
 let mut zlib = Vec::new();
 DeflateEncoder::new().with_level(Level::Best).zlib_compress(&data, &mut zlib);
+
+// Best with a zopfli-class effort budget (more optimal-parse passes, more time):
+let mut dense = Vec::new();
+DeflateEncoder::new()
+    .with_level(Level::Best)
+    .with_effort(15)
+    .zlib_compress(&data, &mut dense);
 ```
 
 ## Scope

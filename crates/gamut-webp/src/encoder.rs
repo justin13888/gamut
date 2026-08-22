@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use gamut_color::{ColorRange, Yuv420};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8, Rgba8};
 use gamut_riff::{
-    FourCc, MetadataChunks, Vp8xHeader, write_extended_with_metadata, write_simple_lossless,
+    Chunk, FourCc, MetadataChunks, Vp8xHeader, write_extended_preserving, write_simple_lossless,
     write_simple_lossy,
 };
 
@@ -56,6 +56,8 @@ pub struct WebpEncoder {
     xmp: Option<Vec<u8>>,
     /// The `ICCP` chunk payload (ICC colour profile) to embed, verbatim.
     icc: Option<Vec<u8>>,
+    /// Unknown chunks to re-emit after the metadata, in the order given (RFC 9649 §2.7.1.6).
+    unknown: Vec<(FourCc, Vec<u8>)>,
     /// Pluggable codestream encoders, tried in push order ahead of the built-in tails.
     backends: Vec<SharedEncoder>,
 }
@@ -135,6 +137,24 @@ impl WebpEncoder {
         self
     }
 
+    /// Re-emits `chunks` whose FourCC the container spec does not define, after the metadata and in
+    /// the order given — what RFC 9649 §2.7.1.6 asks of writers: "writers SHOULD preserve them in
+    /// their original order".
+    ///
+    /// Pair with [`gamut_riff::WebpLayout::parse`], whose `unknown` field yields exactly this list
+    /// from a file that was read, to carry an application's private chunks through a
+    /// decode/re-encode cycle instead of dropping them. Any unknown chunk promotes the output to
+    /// the extended (`VP8X`) format, since only that format has a place to put one. Calling this
+    /// twice keeps the last list.
+    #[must_use]
+    pub fn with_unknown_chunks(mut self, chunks: &[(FourCc, &[u8])]) -> Self {
+        self.unknown = chunks
+            .iter()
+            .map(|(fourcc, payload)| (*fourcc, payload.to_vec()))
+            .collect();
+        self
+    }
+
     /// Installs a codestream encoder backend, returning `&mut self` so pushes chain.
     ///
     /// Backends are tried in **push order**, ahead of the built-in `vp8`/`vp8l` encoders, which
@@ -199,6 +219,11 @@ impl WebpEncoder {
     ///
     /// `has_alpha` records transparency for the `VP8X` feature flag independently of `alph`, because
     /// a `VP8L` bitstream carries its own alpha and so needs no `ALPH` chunk.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the container writer's rejection of a canvas or a payload the RIFF/WebP fields
+    /// cannot express (RFC 9649 §2.3, §2.4, §2.7).
     fn wrap(
         &self,
         dims: Dimensions,
@@ -206,9 +231,9 @@ impl WebpEncoder {
         bitstream: &[u8],
         alph: Option<&[u8]>,
         has_alpha: bool,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>> {
         let metadata = self.metadata_chunks();
-        if metadata.is_empty() && alph.is_none() {
+        if metadata.is_empty() && alph.is_none() && self.unknown.is_empty() {
             return match codestream {
                 WebpCodestream::Vp8 => write_simple_lossy(bitstream),
                 WebpCodestream::Vp8l => write_simple_lossless(bitstream),
@@ -231,7 +256,15 @@ impl WebpEncoder {
             canvas_height: dims.height,
             ..Default::default()
         };
-        write_extended_with_metadata(&header, &metadata, &image_data)
+        let unknown: Vec<Chunk<'_>> = self
+            .unknown
+            .iter()
+            .map(|(fourcc, payload)| Chunk {
+                fourcc: *fourcc,
+                payload,
+            })
+            .collect();
+        write_extended_preserving(&header, &metadata, &image_data, &unknown)
     }
 
     /// Encodes interleaved 8-bit RGB `pixels` (row-major) of `dims`, appending the WebP file to
@@ -245,7 +278,9 @@ impl WebpEncoder {
         let file = match self.config.mode {
             WebpMode::Lossless => {
                 let argb: Vec<u32> = pixels
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .map(|p| make_argb(0xff, p[0], p[1], p[2]))
                     .collect();
                 let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
@@ -257,7 +292,7 @@ impl WebpEncoder {
                 let payload = self.encode_vp8_codestream(&yuv, dims)?;
                 self.wrap(dims, WebpCodestream::Vp8, &payload, None, false)
             }
-        };
+        }?;
         let written = file.len();
         out.extend_from_slice(&file);
         Ok(written)
@@ -274,11 +309,13 @@ impl WebpEncoder {
         dims: Dimensions,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let transparent = pixels.chunks_exact(4).any(|p| p[3] != 0xff);
+        let transparent = pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0xff);
         let file = match self.config.mode {
             WebpMode::Lossless => {
                 let argb: Vec<u32> = pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|p| make_argb(p[3], p[0], p[1], p[2]))
                     .collect();
                 let bitstream = self.encode_vp8l_codestream(&argb, dims)?;
@@ -288,13 +325,15 @@ impl WebpEncoder {
             }
             WebpMode::Lossy => {
                 let rgb: Vec<u8> = pixels
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .flat_map(|p| [p[0], p[1], p[2]])
                     .collect();
                 let yuv = Yuv420::from_rgb8(&rgb, dims.width, dims.height, ColorRange::Limited)?;
                 let vp8 = self.encode_vp8_codestream(&yuv, dims)?;
                 if transparent {
-                    let alpha: Vec<u8> = pixels.chunks_exact(4).map(|p| p[3]).collect();
+                    let alpha: Vec<u8> = pixels.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
                     let alph =
                         alpha::write_alph(&alpha, dims.width as usize, dims.height as usize)?;
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, Some(&alph), true)
@@ -302,7 +341,7 @@ impl WebpEncoder {
                     self.wrap(dims, WebpCodestream::Vp8, &vp8, None, false)
                 }
             }
-        };
+        }?;
         let written = file.len();
         out.extend_from_slice(&file);
         Ok(written)
@@ -415,8 +454,14 @@ mod tests {
             .decode_image(&file)
             .expect("rgba decode");
         assert_eq!(decoded.dimensions(), dims(w, h));
-        let dec_alpha: Vec<u8> = decoded.as_samples().chunks_exact(4).map(|p| p[3]).collect();
-        let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let dec_alpha: Vec<u8> = decoded
+            .as_samples()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(dec_alpha, src_alpha, "alpha must round-trip losslessly");
     }
 

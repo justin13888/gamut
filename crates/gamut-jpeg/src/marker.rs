@@ -125,6 +125,20 @@ pub fn write_app0_jfif(out: &mut Vec<u8>, unit: DensityUnit, x_density: u16, y_d
     out.push(0); // thumbnail height = 0
 }
 
+/// Appends the Adobe APP14 marker segment (Adobe TN #5116, `Lp = 14`): the `"Adobe"` identifier,
+/// DCTEncode version 100, zero flag words, and the colour-`transform` byte (0 = untransformed
+/// RGB/CMYK, 1 = YCbCr, 2 = YCCK). The encoder writes it (with `transform = 0`) for streams whose
+/// three components are **not** YCbCr, so a decoder never guesses a YCbCr inverse.
+pub fn write_app14_adobe(out: &mut Vec<u8>, transform: u8) {
+    // Lp = 2 (length) + 5 (identifier) + 2 (version) + 2 + 2 (flags0/flags1) + 1 (transform) = 14.
+    write_segment_header(out, code::APP14, 14);
+    out.extend_from_slice(b"Adobe");
+    out.extend_from_slice(&[0x00, 0x64]); // DCTEncode version 100
+    out.extend_from_slice(&[0x00, 0x00]); // flags0
+    out.extend_from_slice(&[0x00, 0x00]); // flags1
+    out.push(transform);
+}
+
 /// Appends the baseline SOF0 frame header (§B.2.2): precision 8, image `height`×`width`, and one
 /// entry per component as `(Ci, Hi, Vi, Tqi)` — the component id, horizontal/vertical sampling
 /// factors, and quantization-table destination.
@@ -219,6 +233,30 @@ mod tests {
         let mut out = Vec::new();
         write_segment_header(&mut out, code::DRI, 4);
         assert_eq!(out, vec![0xFF, 0xDD, 0x00, 0x04]);
+    }
+
+    #[test]
+    fn app14_is_the_canonical_14_byte_adobe_segment() {
+        // Byte-exact Adobe APP14 (TN #5116): marker, Lp=14, "Adobe", version 100, zero flags,
+        // transform byte last.
+        let mut out = Vec::new();
+        write_app14_adobe(&mut out, 0);
+        assert_eq!(
+            out,
+            vec![
+                0xFF, 0xEE, // APP14
+                0x00, 0x0E, // Lp = 14
+                0x41, 0x64, 0x6F, 0x62, 0x65, // "Adobe"
+                0x00, 0x64, // DCTEncode version 100
+                0x00, 0x00, // flags0
+                0x00, 0x00, // flags1
+                0x00, // transform = 0 (untransformed)
+            ]
+        );
+        // The transform byte is the caller's, verbatim.
+        let mut ycc = Vec::new();
+        write_app14_adobe(&mut ycc, 1);
+        assert_eq!(ycc[15], 1);
     }
 
     #[test]

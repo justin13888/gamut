@@ -1,6 +1,7 @@
-//! Encoder configuration: the [`Effort`] speed/density dial, the validated lossy [`Distance`]
-//! newtype, the output [`Container`] selector, the [`ColorSpec`] colour signalling, and the
-//! internal [`Mode`] that makes a lossless-with-a-distance state unrepresentable.
+//! Encoder configuration: the [`Effort`] speed/density dial, the [`ModularMode`] coding-tool
+//! selector, the validated lossy [`Distance`] newtype, the output [`Container`] selector, the
+//! [`ColorSpec`] colour signalling, and the internal [`Mode`] that makes a lossless-with-a-distance
+//! state unrepresentable.
 
 use gamut_core::{Error, Result};
 
@@ -72,6 +73,63 @@ impl Effort {
             8 => Self::Kitten,
             9 => Self::Tortoise,
             10 => Self::Glacier,
+            _ => return None,
+        })
+    }
+}
+
+/// Which of JPEG XL's two coding tools the encoder is told to use.
+///
+/// JPEG XL codes an image either with **VarDCT** — the variable-block-size DCT path, XYB colour and
+/// perceptual quantisation, aimed at photographic material — or with **Modular**, the
+/// predictor/transform path that also underpins lossless coding. Maps directly onto libjxl's
+/// `JXL_ENC_FRAME_SETTING_MODULAR`, whose three states are `-1` (encoder chooses), `0` (VarDCT) and
+/// `1` (Modular).
+///
+/// The default is [`ModularMode::Auto`], which leaves the choice to libjxl and emits exactly the
+/// bytes gamut produced before this knob existed — the option is not sent at all.
+///
+/// Two things worth knowing before reaching for a forced mode:
+///
+/// - **Lossless is already Modular.** [`JxlEncoder::lossless`](crate::JxlEncoder::lossless) makes
+///   libjxl select Modular regardless of this setting, so [`ModularMode::Modular`] is redundant
+///   there and [`ModularMode::VarDct`] is a contradiction the encoder **rejects** rather than
+///   silently ignore.
+/// - **Forcing Modular usually costs rate on lossy photos.** Above roughly
+///   [`Distance`] `0.5` the VarDCT path is the denser choice for photographic input. This knob
+///   exists so a stream can be produced under a *deliberately chosen* coding tool — for
+///   comparison, or for synthetic/screenshot-like material Modular suits — not as a quality dial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ModularMode {
+    /// Let libjxl choose the coding tool (libjxl option value `-1`); the default.
+    #[default]
+    Auto,
+    /// Force the VarDCT path (libjxl option value `0`).
+    VarDct,
+    /// Force the Modular path (libjxl option value `1`).
+    Modular,
+}
+
+impl ModularMode {
+    /// The libjxl `JXL_ENC_FRAME_SETTING_MODULAR` value (`-1`, `0` or `1`) this variant selects.
+    #[must_use]
+    pub fn option_value(self) -> i32 {
+        match self {
+            Self::Auto => -1,
+            Self::VarDct => 0,
+            Self::Modular => 1,
+        }
+    }
+
+    /// The [`ModularMode`] for a libjxl option value, or `None` if `value` is outside `-1..=1`.
+    ///
+    /// The inverse of [`ModularMode::option_value`]; handy for wiring up a numeric CLI flag.
+    #[must_use]
+    pub fn from_option_value(value: i32) -> Option<Self> {
+        Some(match value {
+            -1 => Self::Auto,
+            0 => Self::VarDct,
+            1 => Self::Modular,
             _ => return None,
         })
     }
@@ -328,6 +386,44 @@ mod tests {
     fn effort_default_is_squirrel() {
         assert_eq!(Effort::default(), Effort::Squirrel);
         assert_eq!(Effort::default().level(), 7);
+    }
+
+    #[test]
+    fn modular_mode_option_value_round_trips_over_full_range() {
+        // Every variant maps to a distinct -1..=1 libjxl value and back.
+        let all = [ModularMode::Auto, ModularMode::VarDct, ModularMode::Modular];
+        for (i, m) in all.into_iter().enumerate() {
+            let value = i as i32 - 1;
+            assert_eq!(m.option_value(), value, "{m:?} option value");
+            assert_eq!(
+                ModularMode::from_option_value(value),
+                Some(m),
+                "from_option_value({value})"
+            );
+        }
+        // Exhaustive -1..=1 coverage: no gaps, no aliasing.
+        for value in -1..=1i32 {
+            assert_eq!(
+                ModularMode::from_option_value(value)
+                    .unwrap()
+                    .option_value(),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn modular_mode_from_option_value_rejects_out_of_range() {
+        assert_eq!(ModularMode::from_option_value(-2), None);
+        assert_eq!(ModularMode::from_option_value(2), None);
+        assert_eq!(ModularMode::from_option_value(i32::MIN), None);
+        assert_eq!(ModularMode::from_option_value(i32::MAX), None);
+    }
+
+    #[test]
+    fn modular_mode_default_is_auto() {
+        assert_eq!(ModularMode::default(), ModularMode::Auto);
+        assert_eq!(ModularMode::default().option_value(), -1);
     }
 
     #[test]

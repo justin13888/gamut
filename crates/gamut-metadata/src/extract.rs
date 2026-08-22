@@ -94,7 +94,8 @@ impl MetadataExtractor {
             xmp = None;
         }
 
-        Ok(Metadata { exif, xmp, icc })
+        // Extraction parses carriers only: a block never yields an extension.
+        Ok(Metadata::from_carriers(exif, xmp, icc))
     }
 
     /// Reports the mapped IPTC fields on which the legacy IIM and XMP carriers disagree, without
