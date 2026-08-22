@@ -8,7 +8,7 @@
 //! lives in `oracle.rs`.
 
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Result, Rgb8, Rgba8};
-use gamut_riff::{FourCc, RiffReader, RiffWriter, Vp8xHeader};
+use gamut_riff::{FourCc, RiffReader, RiffWriter, Vp8xHeader, WebpLayout};
 use gamut_webp::{WebpDecoder, WebpEncoder, WebpMetadata};
 
 /// A 200-byte "ICC profile": opaque bytes, even length.
@@ -377,13 +377,14 @@ fn metadata_reads_a_hand_built_file_first_chunk_wins() {
         ..Default::default()
     };
     let mut w = RiffWriter::new();
-    w.write_chunk(FourCc::VP8X, &header.to_payload());
-    w.write_chunk(FourCc::ICCP, b"first-icc");
-    w.write_chunk(FourCc::ICCP, b"second-icc");
-    w.write_chunk(FourCc::VP8L, &bitstream);
-    w.write_chunk(FourCc::EXIF, b"first-exif");
-    w.write_chunk(FourCc::EXIF, b"second-exif");
-    let file = w.finish();
+    w.write_chunk(FourCc::VP8X, &header.to_payload().unwrap())
+        .unwrap();
+    w.write_chunk(FourCc::ICCP, b"first-icc").unwrap();
+    w.write_chunk(FourCc::ICCP, b"second-icc").unwrap();
+    w.write_chunk(FourCc::VP8L, &bitstream).unwrap();
+    w.write_chunk(FourCc::EXIF, b"first-exif").unwrap();
+    w.write_chunk(FourCc::EXIF, b"second-exif").unwrap();
+    let file = w.finish().unwrap();
 
     assert_eq!(
         read(&file),
@@ -398,4 +399,92 @@ fn metadata_reads_a_hand_built_file_first_chunk_wins() {
 fn metadata_rejects_input_that_is_not_a_webp_file() {
     let err: Result<WebpMetadata> = gamut_webp::metadata(b"definitely not a WebP file");
     assert!(err.is_err());
+}
+
+/// A chunk FourCC the WebP container spec does not define — an *unknown chunk* (RFC 9649 §2.7.1.6).
+const PRIVATE: [u8; 4] = *b"XYZW";
+
+#[test]
+fn unknown_chunks_survive_a_decode_re_encode_cycle() {
+    // §2.7.1.6: "Readers SHOULD ignore these chunks. Writers SHOULD preserve them in their original
+    // order." This is the full loop the two halves exist for — read the chunks out of one file with
+    // gamut-riff's layout view, hand them back to the encoder, and find them again unchanged.
+    let odd = FourCc::from(PRIVATE);
+    let pixels = rgb(2, 2);
+    let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2).unwrap()).unwrap();
+
+    let mut original = Vec::new();
+    WebpEncoder::lossless()
+        .with_exif(b"exif payload")
+        .with_unknown_chunks(&[(odd, b"private payload")])
+        .encode_image(image, &mut original)
+        .expect("encode");
+
+    // The decoder ignores it, exactly as the spec asks of readers.
+    let decoded: ImageBuf<Rgb8> = WebpDecoder::new().decode_image(&original).expect("decode");
+    assert_eq!(decoded.as_samples(), pixels.as_slice());
+
+    let layout = WebpLayout::parse(&original).expect("parse");
+    assert_eq!(layout.unknown.len(), 1);
+    assert_eq!(layout.unknown[0].fourcc, odd);
+    assert_eq!(layout.unknown[0].payload, b"private payload");
+
+    // Re-encode, feeding the recovered chunks straight back in.
+    let carried: Vec<(FourCc, &[u8])> = layout
+        .unknown
+        .iter()
+        .map(|c| (c.fourcc, c.payload))
+        .collect();
+    let mut rewritten = Vec::new();
+    WebpEncoder::lossless()
+        .with_exif(b"exif payload")
+        .with_unknown_chunks(&carried)
+        .encode_image(
+            ImageRef::<Rgb8>::new(decoded.as_samples(), decoded.dimensions()).unwrap(),
+            &mut rewritten,
+        )
+        .expect("re-encode");
+
+    let round_tripped = WebpLayout::parse(&rewritten).expect("parse");
+    assert_eq!(round_tripped.unknown.len(), 1, "the chunk survived");
+    assert_eq!(round_tripped.unknown[0].fourcc, odd);
+    assert_eq!(round_tripped.unknown[0].payload, b"private payload");
+    assert_eq!(
+        round_tripped.metadata.exif,
+        Some(&b"exif payload"[..]),
+        "metadata survived alongside it"
+    );
+}
+
+#[test]
+fn an_unknown_chunk_alone_promotes_a_file_to_the_extended_format() {
+    // Only the extended format has a place for an unknown chunk, so one must promote the file even
+    // with no metadata and no alpha to force it.
+    let pixels = rgb(2, 2);
+    let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2).unwrap()).unwrap();
+    let mut file = Vec::new();
+    WebpEncoder::lossless()
+        .with_unknown_chunks(&[(FourCc::from(PRIVATE), b"payload")])
+        .encode_image(image, &mut file)
+        .expect("encode");
+
+    let layout = WebpLayout::parse(&file).expect("parse");
+    assert!(layout.vp8x.is_some(), "promoted to extended");
+    assert_eq!(layout.unknown.len(), 1);
+}
+
+#[test]
+fn no_unknown_chunks_leaves_a_simple_file_simple() {
+    // The converse: the promotion must be driven by an actual chunk, not by the field existing.
+    let pixels = rgb(2, 2);
+    let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2).unwrap()).unwrap();
+    let mut file = Vec::new();
+    WebpEncoder::lossless()
+        .with_unknown_chunks(&[])
+        .encode_image(image, &mut file)
+        .expect("encode");
+
+    let layout = WebpLayout::parse(&file).expect("parse");
+    assert!(layout.vp8x.is_none(), "still the simple format");
+    assert!(layout.unknown.is_empty());
 }

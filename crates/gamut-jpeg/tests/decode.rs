@@ -2,6 +2,7 @@
 //! against the crate's own encoder across a dimension/subsampling/quality/restart battery, a
 //! malformed-input rejection corpus, a no-panic byte-flip sweep, and `info()`.
 
+use gamut_core::convert::{ConvertPolicy, LumaPolicy};
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef, Rgb8};
 use gamut_jpeg::{ChromaSubsampling, JpegDecoder, JpegEncoder, JpegProcess};
 
@@ -347,4 +348,41 @@ fn decode_image_into_error_leaves_dst_unchanged() {
             .is_err()
     );
     assert_eq!(dst.as_samples(), sentinel.as_slice());
+}
+
+/// The policy set by `convert_policy` must reach the typed decode.
+///
+/// A colour stream cannot be presented as grayscale without luma weights, so the default decoder
+/// refuses it; naming a `LumaPolicy` permits it. A decoder that dropped the setter would refuse
+/// both times, and one that ignored the policy's *value* would produce the same grey for both
+/// standards — so the two are asserted to differ as well.
+#[test]
+fn convert_policy_reaches_the_typed_decode() {
+    let dims = Dimensions::new(16, 16).unwrap();
+    // Saturated red: the standard whose weights are used is plainly visible in the luma.
+    let rgb: Vec<u8> = (0..16 * 16).flat_map(|_| [255u8, 0, 0]).collect();
+    let jpeg = JpegEncoder::new()
+        .with_quality(100)
+        .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, dims).unwrap())
+        .expect("encode");
+
+    let refused = DecodeImage::<Gray8>::decode_image(&JpegDecoder::new(), &jpeg)
+        .expect_err("colour as grayscale must not be guessed");
+    assert_eq!(refused.kind(), gamut_core::ErrorKind::Unsupported);
+
+    let bt601: ImageBuf<Gray8> = JpegDecoder::new()
+        .convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt601))
+        .decode_image(&jpeg)
+        .expect("bt601 decode");
+    let bt709: ImageBuf<Gray8> = JpegDecoder::new()
+        .convert_policy(ConvertPolicy::lossless().with_luma(LumaPolicy::Bt709))
+        .decode_image(&jpeg)
+        .expect("bt709 decode");
+
+    // Red weighs 0.299 under BT.601 and 0.2126 under BT.709; both land near those fractions of
+    // full scale, and the two must not agree.
+    let (a, b) = (bt601.as_samples()[0], bt709.as_samples()[0]);
+    assert!(a.abs_diff(76) <= 3, "bt601 luma {a} far from 76");
+    assert!(b.abs_diff(54) <= 3, "bt709 luma {b} far from 54");
+    assert_ne!(a, b);
 }

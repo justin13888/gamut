@@ -23,6 +23,7 @@
 //! rung that still produces them, which is what made the two-pass restructure checkable as a pure
 //! refactor.
 
+use gamut_core::convert::{AlphaPolicy, ConvertPolicy};
 use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
 use gamut_webp::{Effort, WebpDecoder, WebpEncoder};
 
@@ -177,4 +178,55 @@ fn effort_two_still_reproduces_the_historical_lossy_bytes() {
     let px = [120u8, 60, 200, 0xff].repeat(16 * 16);
     let opaque = encode_rgba(&e2, &px, dims(16, 16));
     assert_eq!(opaque.as_slice(), HISTORICAL_OPAQUE.as_slice());
+}
+
+/// The policy set by `convert_policy` must reach the typed decode.
+///
+/// A file that genuinely carries transparency cannot be presented as RGB without discarding it, so
+/// the default decoder refuses; naming an `AlphaPolicy` permits it. A decoder that dropped the
+/// setter would refuse both times.
+#[test]
+fn convert_policy_reaches_the_typed_decode() {
+    let dims = Dimensions {
+        width: 2,
+        height: 2,
+    };
+    // Alpha varies, so the file is genuinely transparent rather than opaque-and-therefore-lossless.
+    #[rustfmt::skip]
+    let rgba = [
+        0x10u8, 0x20, 0x30, 0x00,
+        0x40,   0x50, 0x60, 0x80,
+        0x70,   0x80, 0x90, 0xc0,
+        0xa0,   0xb0, 0xc0, 0xff,
+    ];
+    let webp = WebpEncoder::lossless()
+        .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, dims).unwrap())
+        .expect("encode");
+
+    let refused = DecodeImage::<Rgb8>::decode_image(&WebpDecoder::new(), &webp)
+        .expect_err("alpha must not be discarded silently");
+    assert_eq!(refused.kind(), gamut_core::ErrorKind::Unsupported);
+
+    let dropped: ImageBuf<Rgb8> = WebpDecoder::new()
+        .convert_policy(ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop))
+        .decode_image(&webp)
+        .expect("drop decode");
+    let expected: Vec<u8> = rgba
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    assert_eq!(dropped.as_samples(), expected.as_slice());
+
+    // Compositing is a different answer to the same question, so it must not agree with dropping
+    // on the pixels that are actually transparent.
+    let composited: ImageBuf<Rgb8> = WebpDecoder::new()
+        .convert_policy(
+            ConvertPolicy::lossless()
+                .with_alpha(AlphaPolicy::CompositeOver)
+                .with_background([u16::MAX; 3]),
+        )
+        .decode_image(&webp)
+        .expect("composite decode");
+    assert_eq!(&composited.as_samples()[0..3], &[255, 255, 255]);
+    assert_ne!(composited.as_samples(), dropped.as_samples());
 }

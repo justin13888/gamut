@@ -1,6 +1,9 @@
 //! RGBA images (4 samples, unassociated alpha): tier-1 + libtiff cross-checks (P13).
 
-use gamut_core::{DecodeImage, Dimensions, EncodeImage, ImageBuf, ImageRef, Rgb8, Rgba8};
+use gamut_core::convert::{AlphaPolicy, ConvertPolicy};
+use gamut_core::{
+    DecodeImage, Dimensions, EncodeImage, ErrorKind, ImageBuf, ImageRef, Rgb8, Rgba8,
+};
 use gamut_tiff::{Compression, TiffDecoder, TiffEncoder};
 
 const SIZES: &[(u32, u32)] = &[(1, 1), (3, 7), (17, 13), (64, 40)];
@@ -42,8 +45,17 @@ fn rgba_roundtrips_in_gamut() {
             assert_eq!((got.dimensions().width, got.dimensions().height), (w, h));
             assert_eq!(got.as_samples(), src.as_slice(), "{comp:?} {w}x{h}");
 
-            // RGB view drops alpha.
-            let rgb: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).expect("rgb");
+            // An RGB view of an RGBA file discards the alpha channel, so the default (lossless)
+            // decoder refuses it rather than deciding for the caller.
+            let refused = DecodeImage::<Rgb8>::decode_image(&TiffDecoder::new(), &tiff)
+                .expect_err("alpha drop must not happen silently");
+            assert_eq!(refused.kind(), ErrorKind::Unsupported);
+
+            // With the loss opted into, the samples pass through unchanged.
+            let rgb: ImageBuf<Rgb8> = TiffDecoder::new()
+                .convert_policy(ConvertPolicy::lossless().with_alpha(AlphaPolicy::Drop))
+                .decode_image(&tiff)
+                .expect("rgb");
             let expect_rgb: Vec<u8> = src
                 .chunks_exact(4)
                 .flat_map(|p| [p[0], p[1], p[2]])

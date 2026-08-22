@@ -10,9 +10,13 @@
 //! running code each time the length increases. [`EncTable`] precomputes, per symbol, the
 //! `(code, length)` an encoder emits; [`emit_dht`] writes the BITS/HUFFVAL lists into a DHT segment.
 //!
-//! The four constant tables are the Annex K "typical" tables, transcribed verbatim — they are the
-//! ones written to the stream by baseline encoders. Because they are fixed, [`STD_LUMA_DC`] etc.
-//! carry their own BITS/HUFFVAL and the derived codes are checked against Annex C in the tests.
+//! The four constant tables are the Annex K "typical" tables, transcribed verbatim — what a baseline
+//! encoder writes by default. Because they are fixed, [`STD_LUMA_DC`] etc. carry their own
+//! BITS/HUFFVAL and the derived codes are checked against Annex C in the tests. Both encoders can
+//! instead fit a table to the image: [`build_optimal_table`] runs the §K.2 construction over measured
+//! symbol frequencies and [`emit_dht_dynamic`] writes the result — mandatory for progressive (the
+//! typical AC tables cannot code an `EOBn` symbol) and opt-in for baseline via
+//! [`JpegEncoder::with_optimized_tables`](crate::JpegEncoder::with_optimized_tables).
 
 use gamut_core::{Error, Result};
 

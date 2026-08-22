@@ -53,6 +53,7 @@
 //! ```
 #![forbid(unsafe_code)]
 
+pub mod convert;
 mod image;
 pub mod luminance;
 mod pixel;

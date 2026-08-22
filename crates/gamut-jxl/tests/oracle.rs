@@ -5,6 +5,9 @@
 //! - lossy encoding decodes within a bounded PSNR and differs from the lossless bytes;
 //! - the [`Effort`] setting is actually plumbed through (Lightning vs Glacier produce different
 //!   streams, both decodable);
+//! - the [`ModularMode`] coding-tool selection is plumbed through too (forcing Modular changes the
+//!   stream), `ModularMode::Auto` is byte-identical to never naming the knob, and lossless with a
+//!   forced VarDCT is the typed refusal;
 //! - the two independent decoders — gamut's pure-Rust [`JxlDecoder`] (jxl-rs) and the reference
 //!   libjxl oracle — **agree with each other and the source** bit-for-bit on lossless streams, and
 //!   within a tight bound on lossy ones.
@@ -24,7 +27,7 @@ use gamut_core::{
     DecodeImage, Dimensions, EncodeImage, Gray8, Gray16, GrayAlpha8, GrayAlpha16, ImageBuf,
     ImageRef, Pixel, Rgb8, Rgb16, Rgba8, Rgba16,
 };
-use gamut_jxl::{Container, Distance, Effort, JxlDecoder, JxlEncoder};
+use gamut_jxl::{Container, Distance, Effort, JxlDecoder, JxlEncoder, ModularMode};
 
 /// The size grid: 1x1 up to a non-square textured image, including odd dimensions.
 const SIZES: [(u32, u32); 5] = [(1, 1), (3, 7), (16, 16), (17, 13), (64, 100)];
@@ -224,6 +227,130 @@ fn effort_setting_changes_the_stream() {
         assert_eq!((out.width, out.height), (w, h));
         assert_eq!(out.num_channels, 3);
     }
+}
+
+#[test]
+fn modular_setting_changes_the_stream() {
+    // The coding-tool selection must reach libjxl: on the same lossy job, forcing Modular and
+    // forcing VarDCT produce three mutually distinct streams together with the encoder's own
+    // choice — and all three stay decodable by both jxl-rs and the libjxl oracle.
+    let (w, h) = (64, 100);
+    let dims = Dimensions::new(w, h).unwrap();
+    let px = gen_u8(w, h, Rgb8::CHANNELS);
+    let img = ImageRef::<Rgb8>::new(&px, dims).unwrap();
+    let d = Distance::new(1.0).unwrap();
+
+    let encode = |modular| {
+        JxlEncoder::lossy(d)
+            .with_modular(modular)
+            .encode_to_vec(img)
+            .unwrap()
+    };
+    let auto = encode(ModularMode::Auto);
+    let vardct = encode(ModularMode::VarDct);
+    let modular = encode(ModularMode::Modular);
+
+    assert_ne!(
+        modular, vardct,
+        "forcing Modular vs VarDCT must change the stream"
+    );
+    assert_ne!(
+        modular, auto,
+        "forcing Modular must change the stream libjxl would have chosen"
+    );
+
+    for (label, bytes) in [("auto", &auto), ("vardct", &vardct), ("modular", &modular)] {
+        // The libjxl oracle reads every one of them.
+        let out = decode(bytes);
+        assert_eq!((out.width, out.height), (w, h), "{label} oracle geometry");
+        assert_eq!(out.num_channels, 3, "{label} oracle channels");
+        // …and so does gamut's own pure-Rust decoder.
+        let gamut: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(bytes).unwrap();
+        assert_eq!(gamut.dimensions(), dims, "{label} gamut geometry");
+    }
+}
+
+#[test]
+fn auto_modular_is_byte_identical_to_the_untouched_default() {
+    // `ModularMode::Auto` must leave the frame setting unsent, so it cannot perturb the bytes of
+    // an encoder that never named the knob — in either mode, and at a non-default effort.
+    let (w, h) = (17, 13);
+    let dims = Dimensions::new(w, h).unwrap();
+    let px = gen_u8(w, h, Rgba8::CHANNELS);
+    let img = ImageRef::<Rgba8>::new(&px, dims).unwrap();
+
+    let lossless = JxlEncoder::lossless().encode_to_vec(img).unwrap();
+    let lossless_auto = JxlEncoder::lossless()
+        .with_modular(ModularMode::Auto)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(lossless, lossless_auto, "Auto must be a no-op on lossless");
+
+    let d = Distance::new(2.0).unwrap();
+    let lossy = JxlEncoder::lossy(d)
+        .with_effort(Effort::Cheetah)
+        .encode_to_vec(img)
+        .unwrap();
+    let lossy_auto = JxlEncoder::lossy(d)
+        .with_effort(Effort::Cheetah)
+        .with_modular(ModularMode::Auto)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(lossy, lossy_auto, "Auto must be a no-op on lossy");
+}
+
+#[test]
+fn lossless_rejects_forced_vardct() {
+    // libjxl codes every lossless frame with Modular regardless of the frame setting, so a forced
+    // VarDCT request is refused rather than silently answered with a Modular stream.
+    let dims = Dimensions::new(4, 4).unwrap();
+    let px = gen_u8(4, 4, Rgb8::CHANNELS);
+    let img = ImageRef::<Rgb8>::new(&px, dims).unwrap();
+
+    let mut out = Vec::new();
+    let error = JxlEncoder::lossless()
+        .with_modular(ModularMode::VarDct)
+        .encode_image(img, &mut out)
+        .unwrap_err();
+    assert_eq!(error.kind(), gamut_core::ErrorKind::InvalidInput);
+    assert_eq!(
+        error.static_message(),
+        Some("JXL: lossless encoding cannot force VarDCT mode")
+    );
+    assert!(out.is_empty(), "the rejected path produced no output");
+
+    // Forcing Modular is the agreeing case, and still round-trips bit-exact.
+    let bytes = JxlEncoder::lossless()
+        .with_modular(ModularMode::Modular)
+        .encode_to_vec(img)
+        .unwrap();
+    assert_eq!(decode(&bytes).samples, DecodedSamples::U8(px.clone()));
+    let gamut: ImageBuf<Rgb8> = JxlDecoder::new().decode_image(&bytes).unwrap();
+    assert_eq!(gamut.as_samples(), px.as_slice());
+}
+
+#[test]
+fn forced_modular_lossy_stays_within_psnr() {
+    // A forced-Modular lossy stream is a different stream, not a broken one: it must still decode
+    // close to the source. (Modular usually costs rate here, which is why Auto stays the default.)
+    let (w, h) = (64, 100);
+    let dims = Dimensions::new(w, h).unwrap();
+    let px = gen_smooth_u8(w, h, Rgb8::CHANNELS);
+    let img = ImageRef::<Rgb8>::new(&px, dims).unwrap();
+
+    let bytes = JxlEncoder::lossy(Distance::new(1.0).unwrap())
+        .with_modular(ModularMode::Modular)
+        .encode_to_vec(img)
+        .unwrap();
+    let out = decode(&bytes);
+    let DecodedSamples::U8(got) = out.samples else {
+        panic!("expected u8 samples");
+    };
+    let psnr = psnr_u8(&px, &got);
+    assert!(
+        psnr >= 35.0,
+        "forced-modular lossy PSNR {psnr:.2} dB below 35 dB floor"
+    );
 }
 
 // ---------------------------------------------------------------------------

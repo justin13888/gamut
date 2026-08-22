@@ -122,3 +122,15 @@ The intended correctness strategy mirrors the other codec crates: a **differenti
 canonical C JPEG-1 implementation (libjpeg-turbo / mozjpeg family) plus the vendored **T.873 reference
 software** for spec-exact behaviour, gating decode round-trips and encode parity. The concrete oracle
 crate and gate will be documented in `gamut-jpeg`'s `STATUS.md` when the crate lands.
+
+## XYB-coded JPEG (the jpegli convention, issue #334)
+
+An XYB JPEG stores three components of scaled-XYB samples (see `references/color/README.md`,
+"XYB") rather than YCbCr. Because T.871 defines the three-component **JFIF** stream as YCbCr, an
+XYB stream carries **no APP0**; jpegli marks the samples untransformed by using component ids
+`R`,`G`,`B` (0x52, 0x47, 0x42), and gamut additionally writes an Adobe **APP14** with
+`transform = 0` (TN #5116, vendored above) so either signal alone stops a decoder from applying a
+YCbCr inverse. The colour meaning rides in a mandatory multi-segment APP2 `ICC_PROFILE`
+(`gamut_jpeg::XYB_ICC_PROFILE`) whose `A2B0` pipeline maps the samples to D50 PCS XYZ — an
+ICC-aware consumer reproduces sRGB; an ICC-unaware one sees false colour, which is the format's
+documented trade-off (jpegli behaves identically).

@@ -8,6 +8,7 @@ use gamut::core::{EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut::jpeg::{ChromaSubsampling as JpegChroma, JpegEncoder};
 use gamut::jxl::{
     Container as JxlContainer, Distance as JxlDistance, Effort as JxlEffort, JxlEncoder,
+    ModularMode as JxlModularMode,
 };
 use gamut::png::{Level as PngLevel, PngEncoder};
 use gamut::tiff::{Compression as TiffCompression, TiffEncoder};
@@ -62,6 +63,11 @@ pub(crate) struct ConvertArgs {
     /// Compress TIFF output with PackBits run-length encoding instead of storing it uncompressed.
     #[arg(long)]
     packbits: bool,
+    /// PNG DEFLATE effort: optimal-parse refinement passes at the always-used best compression
+    /// level (0 = lazy parse only; zopfli's default budget is 15). Omitting it keeps the encoder
+    /// default (6). Ignored for other output formats.
+    #[arg(long)]
+    png_effort: Option<u8>,
     /// JPEG XL Butteraugli distance for lossy encoding (~1.0 = visually lossless, up to 25.0).
     /// Supplying it selects lossy JXL; omitting it keeps the lossless default. Ignored for other
     /// output formats.
@@ -71,6 +77,11 @@ pub(crate) struct ConvertArgs {
     /// other output formats.
     #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u8).range(1..=10))]
     jxl_effort: u8,
+    /// JPEG XL coding tool: `auto` (the default) lets libjxl choose, `vardct` forces the DCT path,
+    /// `modular` forces the modular path. `vardct` is rejected for lossless JPEG XL (which is always
+    /// modular). Ignored for other output formats.
+    #[arg(long = "jxl-modular", value_enum, default_value = "auto")]
+    jxl_modular: JxlModular,
     /// Emit JPEG XL in the ISO BMFF (`.jxl` box) container instead of a bare codestream. Ignored
     /// for other output formats.
     #[arg(long)]
@@ -108,6 +119,17 @@ pub(crate) enum JpegSubsampling {
     S420,
 }
 
+/// Coding-tool selection for JPEG XL output.
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum JxlModular {
+    /// Let libjxl choose between VarDCT and modular; the default.
+    Auto,
+    /// Force the VarDCT path (photographic material); invalid for lossless output.
+    Vardct,
+    /// Force the modular path (what lossless output already uses).
+    Modular,
+}
+
 impl JpegSubsampling {
     /// Maps the CLI choice onto the codec's [`JpegChroma`] enum.
     fn to_codec(self) -> JpegChroma {
@@ -115,6 +137,17 @@ impl JpegSubsampling {
             JpegSubsampling::S444 => JpegChroma::Ycbcr444,
             JpegSubsampling::S422 => JpegChroma::Ycbcr422,
             JpegSubsampling::S420 => JpegChroma::Ycbcr420,
+        }
+    }
+}
+
+impl JxlModular {
+    /// Maps the CLI choice onto the codec's [`JxlModularMode`] enum.
+    fn to_codec(self) -> JxlModularMode {
+        match self {
+            JxlModular::Auto => JxlModularMode::Auto,
+            JxlModular::Vardct => JxlModularMode::VarDct,
+            JxlModular::Modular => JxlModularMode::Modular,
         }
     }
 }
@@ -203,10 +236,13 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
                 bytes = rgba.len(),
                 "decoded input"
             );
-            PngEncoder::new()
+            let mut encoder = PngEncoder::new()
                 .with_compression(PngLevel::Best)
-                .with_auto_reduce(true)
-                .encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
+                .with_auto_reduce(true);
+            if let Some(effort) = args.png_effort {
+                encoder = encoder.with_effort(effort);
+            }
+            encoder.encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)
         }
         OutputFormat::Jxl => {
@@ -232,8 +268,11 @@ pub(crate) fn run(args: &ConvertArgs) -> Result<(), CliError> {
             } else {
                 JxlContainer::Codestream
             };
+            // `Auto` leaves the coding tool to libjxl; forcing VarDCT on the lossless default is a
+            // contradiction the codec reports as `InvalidInput` through `CliError::Codec`.
             encoder
                 .with_effort(effort)
+                .with_modular(args.jxl_modular.to_codec())
                 .with_container(container)
                 .encode_image(ImageRef::<Rgba8>::new(&rgba, dims)?, &mut out)?;
             (rgba.len(), dims)

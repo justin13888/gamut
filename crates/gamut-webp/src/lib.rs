@@ -23,8 +23,10 @@
 //! of scope (see `STATUS.md` for the full matrix):
 //!
 //! - **Unknown-chunk passthrough** — a chunk whose FourCC the container spec does not define is
-//!   ignored on decode and cannot be re-emitted, so a decode→encode cycle drops it (RFC 9649 §2.7.4
-//!   asks writers to preserve such chunks in their original order).
+//!   ignored on decode, as RFC 9649 §2.7.1.6 asks of readers. Preserving one across a
+//!   decode→encode cycle is opt-in and takes two steps: read the chunks with
+//!   [`gamut_riff::WebpLayout::parse`] and hand them back via
+//!   [`WebpEncoder::with_unknown_chunks`]. The pixel API alone does not thread them through.
 //! - **Animation** — `ANIM` / `ANMF` multi-frame sequences are out of scope under the image-first
 //!   charter. Each frame is an independent key frame, but assembling them needs a non-trait API.
 //! - **Lossy quality** — the `0..=100` quality maps coarsely onto the VP8 base quantizer. The
