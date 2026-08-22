@@ -26,6 +26,10 @@ serde = { workspace = true, optional = true }
 [dev-dependencies]
 divan.workspace = true
 serde_json.workspace = true
+# Differential oracle: a vendored, statically-linked Little-CMS (lcms2). Dev-only and excluded
+# from the workspace, so a plain `cargo build` of this crate never needs a C toolchain; the
+# conformance tests do (`git submodule update --init` + a C compiler + libclang).
+lcms2-oracle = { path = "../../tooling/lcms2-oracle" }
 
 [[bench]]
 name = "color"

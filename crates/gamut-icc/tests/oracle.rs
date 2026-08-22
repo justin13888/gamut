@@ -451,6 +451,76 @@ fn cicp_tag_matches_lcms() {
     assert_eq!(cicp.video_full_range_flag, 1);
 }
 
+/// Every synthesizer added for the transform-oracle work (issue #322) produces a profile that
+/// gamut-icc parses without error and round-trips: re-serializing the parsed model yields bytes
+/// that parse to the same tag set and that lcms2 itself re-accepts.
+#[test]
+fn transform_oracle_corpus_parses_and_round_trips() {
+    lcms2_oracle::set_quiet_log_handler();
+    let profiles = [
+        (
+            "scnr_matrix_shaper",
+            lcms2_oracle::scnr_matrix_shaper(D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]),
+        ),
+        ("scnr_lut", lcms2_oracle::scnr_lut(9)),
+        ("cmyk_prtr_v4", lcms2_oracle::cmyk_prtr_v4(9)),
+        ("cmyk_prtr_v2", lcms2_oracle::cmyk_prtr_v2(9)),
+        ("display_p3_srgb_trc", lcms2_oracle::display_p3_srgb_trc()),
+        (
+            "rgb_matrix_shaper_v2_chad",
+            lcms2_oracle::rgb_matrix_shaper_v2(true, D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]),
+        ),
+        (
+            "rgb_matrix_shaper_v2_no_chad",
+            lcms2_oracle::rgb_matrix_shaper_v2(false, D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]),
+        ),
+        (
+            "rgb_matrix_shaper_d65_wtpt",
+            lcms2_oracle::rgb_matrix_shaper_d65_wtpt(D65, REC709_PRIMARIES, [2.2, 2.2, 2.2]),
+        ),
+    ];
+    for (label, profile) in profiles {
+        let bytes = profile.to_bytes();
+        let parsed = IccProfile::parse(&bytes).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+        let rewritten = parsed
+            .to_bytes()
+            .unwrap_or_else(|e| panic!("{label}: serialize: {e:?}"));
+        let reparsed =
+            IccProfile::parse(&rewritten).unwrap_or_else(|e| panic!("{label}: reparse: {e:?}"));
+        let sigs =
+            |p: &IccProfile| -> Vec<u32> { p.tags.iter().map(|(s, _)| u32::from(*s)).collect() };
+        assert_eq!(sigs(&parsed), sigs(&reparsed), "{label}: tag set survives");
+        assert!(
+            lcms2_oracle::Profile::from_bytes(&rewritten).is_some(),
+            "{label}: lcms2 rejects gamut-icc's re-serialization"
+        );
+    }
+}
+
+/// The `prtr` synthesizers' A2B0 element type follows the profile version the tag was written
+/// under: `lut16` for the v2 build, `lutAToB` for the v4 build.
+#[test]
+fn prtr_lut_element_type_follows_version() {
+    lcms2_oracle::set_quiet_log_handler();
+    let v2 = IccProfile::parse(&lcms2_oracle::cmyk_prtr_v2(9).to_bytes()).unwrap();
+    match v2.get(Signature::from(tag::A_TO_B0)).expect("A2B0 present") {
+        TagData::Lut16(lut) => {
+            assert_eq!(lut.input_channels, 4);
+            assert_eq!(lut.output_channels, 3);
+        }
+        other => panic!("expected a lut16 A2B0 in the v2 prtr, got {other:?}"),
+    }
+
+    let v4 = IccProfile::parse(&lcms2_oracle::cmyk_prtr_v4(9).to_bytes()).unwrap();
+    match v4.get(Signature::from(tag::A_TO_B0)).expect("A2B0 present") {
+        TagData::LutAToB(lut) => {
+            assert_eq!(lut.input_channels, 4);
+            assert_eq!(lut.output_channels, 3);
+        }
+        other => panic!("expected a lutAToB A2B0 in the v4 prtr, got {other:?}"),
+    }
+}
+
 /// A v2 device link written by lcms2 carries `profileSequenceDescType` and
 /// `profileSequenceIdentifierType` tags whose descriptions are the legacy `textDescriptionType`;
 /// gamut-icc decodes both (walking the 4-byte-aligned embedded descriptions) rather than failing.
