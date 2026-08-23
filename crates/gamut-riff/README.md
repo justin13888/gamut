@@ -7,37 +7,40 @@ container that WebP is built on.
 
 Part of the [gamut](../../README.md) workspace, this crate exists to:
 
-- **Own the WebP container, not the codec.** It will read and write the RIFF chunk structure
-  (`RIFF`/`WEBP` plus `VP8 `/`VP8L`/`VP8X`/`ALPH`/`ANIM`… chunks), leaving the VP8/VP8L bitstream to
+- **Own the WebP container, not the codec.** It reads and writes the RIFF chunk structure
+  (`RIFF`/`WEBP` plus `VP8 `/`VP8L`/`VP8X`/`ALPH`… chunks), leaving the VP8/VP8L bitstream to
   [`gamut-webp`](../gamut-webp) — mirroring how [`gamut-isobmff`](../gamut-isobmff) backs AVIF/HEIC.
-- **Stay spec-faithful.** Implemented clean-slate from the RIFF and WebP container specs (see
-  [`../../references/`](../../references)).
-- **Stay memory-safe on hostile input.** `#![forbid(unsafe_code)]`.
+- **Stay spec-faithful.** Implemented clean-slate from **RFC 9649 §2** (*WebP Image Format*) and the
+  Google *WebP Container* specification in [`../../references/webp/`](../../references/webp). Those
+  are the authority for the RIFF subset WebP uses — a flat chunk list under a single `RIFF`/`WEBP`
+  form. The canonical RIFF document (Microsoft/IBM *Multimedia Programming Interface and Data
+  Specifications 1.0*) is only *cited* by RFC 9649, not vendored here, and the wider RIFF vocabulary
+  it defines — `LIST`, arbitrary form types, the AVI/WAVE chunks — is deliberately out of scope.
+- **Stay memory-safe on hostile input.** `#![forbid(unsafe_code)]`, typed errors carrying a byte
+  offset, and no allocation driven by a count the input chose.
 
 ## Usage
 
-`gamut-riff` exposes a RIFF chunk reader (`RiffReader`) and writer (`RiffWriter`), a `FourCc` type,
-and WebP-specific helpers: the simple file formats (`write_simple_lossless` / `write_simple_lossy`),
-the extended format (`Vp8xHeader`, `write_extended`, `write_extended_with_metadata`), chunk
-classification (`WebpChunkId`), and the `ICCP`/`EXIF`/`XMP ` metadata passthrough (`MetadataChunks`).
-It is driven by [`gamut-webp`](../gamut-webp); most consumers use it indirectly through that crate
-rather than directly.
+`gamut-riff` exposes three readers at increasing strictness — `RiffReader` (a permissive chunk
+iterator), `MetadataChunks::read` (the metadata triple alone), and `WebpLayout::parse` (the full
+still-image layout, which enforces the spec's chunk ordering) — plus the `RiffWriter` chunk writer,
+a `FourCc` type, chunk classification (`WebpChunkId`), and the WebP file writers:
+`write_simple_lossless` / `write_simple_lossy` for the simple formats and `write_extended`,
+`write_extended_with_metadata`, `write_extended_preserving` for the extended one. It is driven by
+[`gamut-webp`](../gamut-webp); most consumers use it indirectly through that crate rather than
+directly.
 
 ## Status
 
-The simple-WebP container (RIFF/WEBP header + `VP8 `/`VP8L` chunk read/write) and the extended
-format — the `VP8X` feature header plus the `ALPH`, `ICCP`, `EXIF`, and `XMP ` chunks — are
-implemented. The remaining chunks (`ANIM`/`ANMF`) are tracked alongside the codec in
-[`gamut-webp/STATUS.md`](../gamut-webp/STATUS.md) (section A).
+**Stable at v1** — the public surface is frozen; see [`STATUS.md`](STATUS.md) for the full ledger of
+what is covered, what is deliberately settled, and what is deferred. The simple-WebP container and
+the extended format (`VP8X` plus `ALPH`, `ICCP`, `EXIF`, `XMP `, and unknown chunks) are
+implemented, read and write, and validated against libwebp's demuxer as the differential oracle.
 
-## Roadmap
-
-- RIFF chunk reader/writer for the simple-WebP case (`RIFF`/`WEBP` + `VP8 `/`VP8L`). — done
-- Extended WebP (`VP8X`) — alpha (`ALPH`) and metadata chunks (`ICCP`, `EXIF`, `XMP `), read +
-  write. — done
-- Animation (`ANIM`/`ANMF`) — **out of scope** (recognized FourCCs only). Multi-frame sequences sit
-  outside the image-first charter; see
-  [`gamut-webp/STATUS.md`](../gamut-webp/STATUS.md#scope-decisions--non-core-feature-paths).
+Animation (`ANIM`/`ANMF`) is **out of scope** — recognized FourCCs only, so an animated file is
+reported as unsupported rather than mis-parsed. Multi-frame sequences sit outside the image-first
+charter; see
+[`gamut-webp/STATUS.md`](../gamut-webp/STATUS.md#scope-decisions--non-core-feature-paths).
 
 ## License
 

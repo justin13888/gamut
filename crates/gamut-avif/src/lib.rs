@@ -4,8 +4,8 @@
 //! The encode surface is [`AvifEncoder`], which implements [`gamut_core::EncodeImage<Rgb8>`], so
 //! the input is a typed [`ImageRef`](gamut_core::ImageRef) and handing it an unsupported pixel
 //! layout is a compile error. The crate is orchestration only: [`gamut_color`] maps pixels to
-//! identity-matrix 4:4:4 planes, [`gamut_av1`] encodes the AV1 temporal unit, and
-//! [`gamut_isobmff`] writes the container.
+//! 4:4:4 planes — identity GBR, or YCbCr through a CICP matrix — [`gamut_av1`] encodes the AV1
+//! temporal unit, and [`gamut_isobmff`] writes the container.
 //!
 //! # The decode surface (issue #250)
 //!
@@ -28,7 +28,10 @@
 //! colour pipeline — while [`AvifImage::decode_item_rgba8`] /
 //! [`AvifImage::decode_primary_rgba8`] add colour conversion, alpha merge, `iovl` compositing,
 //! and the `clap`/`irot`/`imir` transforms for a presentation-ready
-//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). The whole pipeline is validated differentially
+//! [`ImageBuf<Rgba8>`](gamut_core::ImageBuf). [`AvifImage::decode_item_rgba16`] /
+//! [`AvifImage::decode_primary_rgba16`] are the same pipeline for high-bit-depth content: they take
+//! any coded depth from 8 to 16 bits and normalize the samples to the full 16-bit range. The whole
+//! pipeline is validated differentially
 //! against **libavif + dav1d** (`tests/conformance.rs`).
 //!
 //! # Examples
@@ -121,16 +124,19 @@
 //! gamut is image-first, so only the still-image (intra) subset of AV1 is in scope — no sequences or
 //! animation. **Supported:** 8-bit RGB input; **lossless** (the default, decoded output bit-exact to
 //! the input) and **lossy** ([`AvifEncoder::lossy`], `quality` `0..=100`) AV1 intra coding at
-//! identity-matrix 4:4:4; `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
+//! 4:4:4 — lossless through the identity matrix, lossy through **BT.709 YCbCr** by default, with
+//! BT.601 / BT.2020-NCL and studio range selectable ([`AvifEncoder::with_matrix`] /
+//! [`AvifEncoder::with_color_range`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
 //! [`AvifEncoder::with_mirror`]); and the **container decode surface** above (full read of items,
-//! properties, derivations, and metadata; planar and 8-bit RGBA presentation around a caller
-//! decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
+//! properties, derivations, and metadata; planar, 8-bit and high-bit-depth RGBA presentation around
+//! a caller decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
 //! container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the AV1
 //! reference codec — and `dav1d` via [`gamut_av1`].
 //!
 //! **Deferred, planned** (tracked row-by-row against the specs in `STATUS.md`, whose disposition
-//! ledger is the authority): alpha / RGBA *encoding*, 10/12-bit and 4:2:0/4:2:2, non-identity
-//! colour matrices and ICC / Exif / XMP emission, HDR (PQ/HLG and the HDR metadata properties),
+//! ledger is the authority): alpha / RGBA *encoding*, 10/12-bit and 4:2:0/4:2:2 chroma
+//! subsampling, colour-primaries selection and ICC / Exif / XMP emission, HDR (PQ/HLG and the HDR
+//! metadata properties),
 //! `grid` / `tmap` (gain-map) / `sato` derivations and the remaining container transforms on the
 //! encode side, layered/progressive still images, encoder speed / rate control, the pure-Rust AV1
 //! codestream **decoder** (which will make [`Av1StillDecoder`] optional), and the decoder backend

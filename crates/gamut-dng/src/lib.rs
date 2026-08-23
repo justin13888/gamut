@@ -80,20 +80,23 @@ mod compression;
 mod digest;
 mod jxl;
 mod md5;
+mod predictor;
 mod preview;
 mod writer;
 
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
 // not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
-pub use decoder::{DecodedDng, DngDecoder, RawTag};
+pub use decoder::{DecodedDng, DigestCheck, DngDecoder, RawTag};
 pub use deconstruct::{
     Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
 };
 pub use encoder::DngEncoder;
 pub use gain_map::{GainValues, ProfileGainTableMap};
 pub use gamut_core::{Dimensions, Error, Result};
-// `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum.
-pub use gamut_ifd::{ByteOrder, Value};
+// `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum;
+// `Segment`/`SpanKind` are part of the preservation surface, naming the byte runs a real camera
+// file carries that its own structures do not account for.
+pub use gamut_ifd::{ByteOrder, Segment, SpanKind, Value};
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
 pub use lossless_jpeg::LosslessJpeg;
@@ -101,7 +104,7 @@ pub use metadata::{DngMetadata, ExifMetadata};
 pub use opcode::{Opcode, OpcodeList, opcode_id};
 pub use profile::CameraProfile;
 pub use raw::{RawImage, RawPhotometry, cfa_color};
-pub use rewrite::{DngRewrite, MakerNotePreservation, RewrittenDng};
+pub use rewrite::{DngRewrite, MakerNotePreservation, PreservedSpan, RewrittenDng};
 pub use subimage::{
     DepthInfo, MaskSubArea, SemanticMaskInfo, SubImage, SubImageData, SubImageKind,
 };

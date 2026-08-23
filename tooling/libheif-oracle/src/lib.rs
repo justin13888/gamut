@@ -902,7 +902,7 @@ mod tests {
         let mut sum = 0u64;
         let mut count = 0u64;
         let mut max = 0u8;
-        for (px_a, px_b) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        for (px_a, px_b) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
             for c in 0..3 {
                 let d = px_a[c].abs_diff(px_b[c]);
                 sum += u64::from(d);

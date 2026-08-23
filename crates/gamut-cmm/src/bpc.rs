@@ -231,11 +231,11 @@ fn below_tolerance(magnitude: f64, tolerance: f64) -> bool {
 /// its comparisons are unobservable in this crate: `L* == 95` exactly is unreachable from
 /// any 16-bit Lab encoding, and the `L* < 0` arm is dead in decoded pipelines (every PCS
 /// decode here yields `L* ≥ 0`) — kept as transcription fidelity.
-#[expect(
-    clippy::manual_range_contains,
-    reason = "verbatim lcms2 comparisons (cmssamp.c:129-134), kept explicit so the excluded \
-              boundary mutants match the documented shape"
-)]
+///
+/// The two comparisons stay written out rather than folded into a range test, so the excluded
+/// boundary mutants match the documented shape. Clippy used to ask for the range form here and
+/// carried an `#[expect]`; as of 1.98 it no longer fires, and an unfulfilled expectation is
+/// itself an error under `-D warnings`.
 fn clip_probe_l(l: f64) -> f64 {
     if l > 95.0 || l < 0.0 {
         0.0
@@ -951,7 +951,7 @@ mod tests {
             profile.tags.iter_mut().find(|(sig, _)| sig.0 == *b"A2B1")
             && let Some(clut) = lut.clut.as_mut()
         {
-            for chunk in clut.samples.chunks_exact_mut(3) {
+            for chunk in clut.samples.as_chunks_mut::<3>().0 {
                 chunk[0] = 0;
             }
         }

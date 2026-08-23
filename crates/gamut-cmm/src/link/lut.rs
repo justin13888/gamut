@@ -281,7 +281,9 @@ fn curves_stage(curves: &[CurveOrParametric]) -> Result<Stage> {
 /// and becomes a [`Curve::Sampled`] evaluated over `raw / 65535`.
 fn lut8_tables_stage(table: &[u8]) -> Result<Stage> {
     let curves: Vec<ToneCurve> = table
-        .chunks_exact(256)
+        .as_chunks::<256>()
+        .0
+        .iter()
         .map(|chunk| {
             let widened: Vec<u16> = chunk.iter().map(|&v| u16::from(v) * 257).collect();
             ToneCurve::new(&CurveOrParametric::Curve(Curve::Sampled(widened)))

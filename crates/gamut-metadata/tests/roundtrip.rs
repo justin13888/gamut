@@ -181,11 +181,7 @@ fn conflicts_reports_carrier_disagreements() {
 
 #[test]
 fn embed_serializes_only_present_carriers() {
-    let meta = Metadata {
-        exif: Some(Exif::new(ByteOrder::LittleEndian)),
-        xmp: None,
-        icc: None,
-    };
+    let meta = Metadata::from_carriers(Some(Exif::new(ByteOrder::LittleEndian)), None, None);
     let enc = meta.encode().unwrap();
     assert!(enc.exif.is_some());
     assert_eq!(enc.xmp, None);

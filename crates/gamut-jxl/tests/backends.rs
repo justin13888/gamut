@@ -24,7 +24,7 @@ use gamut_core::{
 use gamut_jxl::{
     AbiDecodeBackend, AbiEncodeBackend, Container, Distance, Effort, JXL_CODEC_ID,
     JxlCodestreamDecoder, JxlCodestreamEncoder, JxlDecoded, JxlDecoder, JxlEncodeRequest,
-    JxlEncoder, JxlImageRef, JxlOwnedSamples, JxlStreamInfo,
+    JxlEncoder, JxlImageRef, JxlOwnedSamples, JxlStreamInfo, ModularMode,
 };
 
 mod common;
@@ -142,10 +142,14 @@ fn default_decode_output_is_byte_identical_with_a_declining_backend() {
     assert_eq!(Counting::calls(&counter), 1);
 }
 
+/// The fields of the [`JxlEncodeRequest`] a [`Canned`] backend records: lossless flag, effort,
+/// coding tool, coded bit depth.
+type SeenRequest = std::sync::Arc<std::sync::Mutex<Option<(bool, Effort, ModularMode, u32)>>>;
+
 /// A backend that returns a canned codestream, recording the request it saw.
 struct Canned {
     stream: Vec<u8>,
-    seen: std::sync::Arc<std::sync::Mutex<Option<(bool, Effort, u32)>>>,
+    seen: SeenRequest,
 }
 
 impl JxlCodestreamEncoder for Canned {
@@ -161,8 +165,12 @@ impl JxlCodestreamEncoder for Canned {
         assert_eq!(image.dimensions(), Dimensions::new(16, 16).unwrap());
         assert_eq!(image.color_channels(), 3);
         assert!(!image.has_alpha());
-        *self.seen.lock().expect("test lock") =
-            Some((req.is_lossless(), req.effort(), req.coded_bit_depth()));
+        *self.seen.lock().expect("test lock") = Some((
+            req.is_lossless(),
+            req.effort(),
+            req.modular(),
+            req.coded_bit_depth(),
+        ));
         Ok(self.stream.clone())
     }
 }
@@ -173,7 +181,9 @@ fn a_pushed_encode_backend_supplies_the_codestream_and_sees_the_request() {
     let real = encode_fixture(&JxlEncoder::lossless());
     let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-    let mut encoder = JxlEncoder::lossy(Distance::new(3.0).unwrap()).with_effort(Effort::Tortoise);
+    let mut encoder = JxlEncoder::lossy(Distance::new(3.0).unwrap())
+        .with_effort(Effort::Tortoise)
+        .with_modular(ModularMode::Modular);
     encoder.push_backend(Canned {
         stream: real.clone(),
         seen: std::sync::Arc::clone(&seen),
@@ -186,9 +196,10 @@ fn a_pushed_encode_backend_supplies_the_codestream_and_sees_the_request() {
     );
 
     // The request carried the configuration, not the built-in's defaults.
-    let (lossless, effort, depth) = seen.lock().expect("test lock").expect("backend ran");
+    let (lossless, effort, modular, depth) = seen.lock().expect("test lock").expect("backend ran");
     assert!(!lossless);
     assert_eq!(effort, Effort::Tortoise);
+    assert_eq!(modular, ModularMode::Modular);
     assert_eq!(depth, 8);
 
     let (pixels, _) = fixture();
@@ -336,6 +347,45 @@ fn a_codec_abi_encode_backend_plugs_in_through_the_adapter() {
     assert_eq!(produced, real);
     // Distance 1.0 maps to quality 96 under the frozen contract.
     assert_eq!(quality.load(std::sync::atomic::Ordering::SeqCst), 96);
+}
+
+#[test]
+fn a_codec_abi_encode_backend_declines_a_pinned_coding_tool() {
+    // `EncodeConfig` carries a codec id and a quality — there is no field for the VarDCT/Modular
+    // selection — so the adapter declines rather than let the backend answer with the other tool.
+    // The job falls through to the built-in libjxl tail, which honours it.
+    let stream = vec![0xFF, 0x0A, 0xDE, 0xAD];
+    let quality = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let configured =
+        JxlEncoder::lossy(Distance::new(1.0).unwrap()).with_modular(ModularMode::Modular);
+    let baseline = encode_fixture(&configured);
+
+    let mut encoder = configured.clone();
+    encoder.push_backend(AbiEncodeBackend::new(AbiFixture {
+        stream: stream.clone(),
+        seen_quality: std::sync::Arc::clone(&quality),
+    }));
+
+    let produced = encode_fixture(&encoder);
+    assert_ne!(produced, stream, "the ABI backend must not have run");
+    assert_eq!(
+        produced, baseline,
+        "the declined job falls through to the built-in tail unchanged"
+    );
+    assert_eq!(
+        quality.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "encode was never reached"
+    );
+
+    // The same backend does accept the otherwise-identical job with the coding tool left to libjxl.
+    let mut auto = JxlEncoder::lossy(Distance::new(1.0).unwrap());
+    auto.push_backend(AbiEncodeBackend::new(AbiFixture {
+        stream: stream.clone(),
+        seen_quality: std::sync::Arc::clone(&quality),
+    }));
+    assert_eq!(encode_fixture(&auto), stream);
 }
 
 /// A `gamut-codec-abi` decoder that reports a fixed status and never writes.

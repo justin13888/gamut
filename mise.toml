@@ -131,6 +131,18 @@ run = "cargo install --path crates/gamut-cli"
 description = "Run tests (workspace, all features)"
 run = "cargo test --workspace --all-features"
 
+# Real camera DNGs (issue #174). The corpus is the `gamut-dng-samples` submodule — ~178 MiB of
+# CC0 files written by actual cameras — and the harness is `tooling/gamut-dng-real-conformance`,
+# excluded from the workspace so `test` above never drags either in. Off the per-PR path by
+# design; the `real-dng` job in `.github/workflows/extended.yml` runs it on master and on demand.
+[tasks.fetch-dng-samples]
+description = "Fetch the real-camera DNG corpus submodule (~178 MiB; needed by test-dng-real)"
+run = "git submodule update --init --checkout third_party/gamut-dng-samples"
+
+[tasks.test-dng-real]
+description = "Validate gamut-dng against real camera DNGs (issue #174; needs fetch-dng-samples)"
+run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
+
 # Doctests only. On stable, `cargo llvm-cov` cannot instrument doctests (that needs nightly), so
 # the coverage gate — which CI uses as its green-test gate — silently skips them. This task is the
 # missing slice: CI's lint lane runs it, reusing the `--all-targets --all-features` build it just

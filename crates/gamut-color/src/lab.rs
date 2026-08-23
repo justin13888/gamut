@@ -208,10 +208,18 @@ pub fn xyy_to_xyz(xyy: [f64; 3]) -> [f64; 3] {
 /// lcms2 `_cmsQuickSaturateWord`: `floor(d + 0.5)` saturated to `0..=65535`. This is the
 /// single rounding convention of every 16-bit PCS encoder here (round half up, not Rust's
 /// round-half-away — identical on the non-negative post-clamp domain, but written as the
-/// lcms2 expression so the issue #322 differential can demand exactness). lcms2's fast
-/// floor quantizes to 1/65536 before flooring; that can differ from a true floor only when
-/// `d + 0.5` lands within ~2⁻¹⁷ below an integer, which the clamped encoders never produce
-/// from finite spec-range inputs.
+/// lcms2 expression so the issue #322 differential can demand exactness).
+///
+/// **One documented gap in that exactness.** lcms2's fast floor quantizes to 1/65536 before
+/// flooring, so it rounds up where a true floor stays down whenever `d + 0.5` lands within
+/// ~2⁻¹⁷ below an integer — an off-by-one in the last code. Nothing rules those inputs out:
+/// the window is a fixed fraction of every unit interval, so a sweep of arbitrary `f64`
+/// values lands in it at a rate of roughly 2⁻¹⁷ (the issue #322 differential measures about
+/// one point in six thousand and excludes them by name; see
+/// `gamut-color/tests/lab_oracle.rs`). Agreement with lcms2 is therefore exact *outside*
+/// that window and one code off inside it. This crate keeps the true floor deliberately:
+/// it is the value the ICC encodings specify, and replicating a reference implementation's
+/// rounding artefact would be the wrong kind of fidelity.
 fn quick_saturate_word(d: f64) -> u16 {
     let d = d + 0.5;
     if d <= 0.0 {
