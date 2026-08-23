@@ -612,12 +612,7 @@ fn tokenize(pixels: &[u32], cache_bits: u32, lz77: &Lz77Params) -> Vec<Token> {
         // insert makes `prev[i] == i`, which loops forever in `find`. The cost of not indexing `i`
         // is only that a distance-1 match from `i + 1` is invisible to the probe, which merely
         // makes the encoder slightly less eager to defer — never incorrect.
-        // A zero-length match is discarded rather than trusted. `find` never returns one, but
-        // the copy branch advances `i` by exactly `len`, so a zero would leave the cursor where
-        // it was and this loop would append tokens until the allocator gave out — a hang, not a
-        // wrong answer, and one that takes the machine with it. The guard costs a comparison per
-        // pixel and turns the whole class into "no match here".
-        let candidate = refs.find(pixels, i).filter(|&(len, _)| len > 0);
+        let candidate = nonempty_match(refs.find(pixels, i));
         let defer = lz77.lazy
             && candidate.is_some_and(|(len, _)| {
                 refs.find(pixels, i + 1)
@@ -668,6 +663,22 @@ fn tokenize(pixels: &[u32], cache_bits: u32, lz77: &Lz77Params) -> Vec<Token> {
         }
     }
     tokens
+}
+
+/// Drops a zero-length match, so the parse loop always advances.
+///
+/// `BackwardRefs::find` never reports one — every match it returns spans at least a pixel — but
+/// the copy branch advances the cursor by exactly `len`, so a zero would leave it where it was
+/// and the loop would append a token per iteration until the allocator gave out. That is a hang
+/// rather than a wrong answer, and it takes the machine with it, which is worth a comparison per
+/// pixel to rule out.
+///
+/// Split into its own function so the guard can be named where it needs to be: the comparison is
+/// unobservable while `find` keeps its side of the contract, so mutation testing will always
+/// report it as surviving, and the exclusion that says so must not also cover the observable
+/// `>` in the deferral probe beside it.
+fn nonempty_match(candidate: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    candidate.filter(|&(len, _)| len > 0)
 }
 
 /// Chooses a color-cache size for an image of `num_pixels` pixels: off for tiny images, otherwise

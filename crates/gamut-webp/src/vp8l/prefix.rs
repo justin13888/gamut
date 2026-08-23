@@ -580,10 +580,16 @@ fn code_length_symbols(lengths: &[u8], count: usize, run_coded: bool) -> Vec<ClS
     let mut i = 0;
     while i < count {
         let value = lengths[i];
+        // `.max(1)` is the loop's termination guarantee, not arithmetic: `run` counts a prefix
+        // that starts with `value` itself, so it is always at least one — but `i` advances by
+        // exactly `run`, and a zero would leave the cursor where it was and spin here forever,
+        // appending nothing. Cheap insurance against a hang that no amount of output checking
+        // would catch, because there is no output.
         let run = lengths[i..count]
             .iter()
             .take_while(|&&l| l == value)
-            .count();
+            .count()
+            .max(1);
         i += run;
         if value == 0 {
             let mut left = run;

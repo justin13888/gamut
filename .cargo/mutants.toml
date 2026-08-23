@@ -739,4 +739,12 @@ exclude_re = [
     # is therefore unobservable through any input. The same expressions in `assign_groups`, where
     # the grid *is* read, stay killed by the effort byte-pins.
     'encoder\.rs:(508|509|510):\d+: replace (<< with >>|\* with [+/]) in single_group',
+    # gamut-webp VP8L zero-length-match guard (encoder.rs `nonempty_match`) — the comparison
+    # defends the parse cursor against a length `BackwardRefs::find` never returns, so `>` and
+    # `>=` admit exactly the same candidates on every input. That is what makes the mutant
+    # equivalent, and also what makes the guard worth keeping: what it prevents is a
+    # non-terminating loop, which produces no output to check. Named rather than line-anchored so
+    # it cannot also cover the observable `>` in the deferral probe, which the lazy-parse tests
+    # kill.
+    'replace > with >= in nonempty_match',
 ]
