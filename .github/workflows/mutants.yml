@@ -43,7 +43,8 @@ jobs:
       # gate on its own.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # cargo-mutants numbers shards from zero: `--shard k/n` requires k < n.
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v5
         with:
