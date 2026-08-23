@@ -1,14 +1,19 @@
 //! Dev-only differential oracle around a vendored, statically-linked **Little-CMS (lcms2)**.
 //!
 //! `gamut-icc` must parse the ICC profiles a reference CMM writes and re-serialize profiles that
-//! CMM accepts as equivalent. This crate wraps lcms2 (built from the `third_party/lcms2` submodule)
-//! behind a small, safe API with two halves:
+//! CMM accepts as equivalent, and `gamut-color` must reproduce that CMM's colorimetry. This crate
+//! wraps lcms2 (built from the `third_party/lcms2` submodule) behind a small, safe API:
 //!
-//! * **synthesis** — build a diverse corpus of valid profiles *in memory*, so no binary `.icc`
-//!   fixtures need committing: [`srgb`], [`rgb_matrix_shaper`], [`gray`], [`xyz`], [`lab4`],
-//!   [`lab2`];
+//! * **synthesis** ([`synth`]) — build a diverse corpus of valid profiles *in memory*, so no
+//!   binary `.icc` fixtures need committing: [`srgb`], [`rgb_matrix_shaper`], [`gray`], [`xyz`],
+//!   [`lab4`], [`lab2`], the LUT-bearing [`scnr_lut`] / [`cmyk_prtr_v4`] / [`cmyk_prtr_v2`], …;
 //! * **inspection** — open a profile blob and read back header fields and decoded tag values
-//!   ([`Profile::from_bytes`], [`Profile::color_space`], [`Profile::read_xyz`], …).
+//!   ([`Profile::from_bytes`], [`Profile::color_space`], [`Profile::read_xyz`], …);
+//! * **transforms** ([`xform`]) — [`Transform`] over `cmsCreateTransform` and friends, pixel
+//!   format codes ([`TYPE_RGB_DBL`], …), transform flags ([`FLAGS_NOCACHE`], …), and black-point
+//!   detection;
+//! * **colorimetry** ([`color`], [`curves`]) — ΔE metrics, XYZ↔Lab, the fixed-point PCS
+//!   encoders, and standalone [`ToneCurve`]s.
 //!
 //! Profiles work entirely in RAM via `cmsSaveProfileToMem`/`cmsOpenProfileFromMem`, so — unlike the
 //! file-based libtiff/DNG oracles — there is no temp-file round-trip. All `unsafe` FFI is confined
@@ -24,6 +29,32 @@ mod sys {
     #![allow(warnings, clippy::all)]
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
+
+pub mod color;
+pub mod curves;
+pub mod synth;
+pub mod xform;
+
+pub use color::{
+    cie2000_delta_e, delta_e_76, lab_decode_v2, lab_decode_v4, lab_encode_v2, lab_encode_v4,
+    lab_to_xyz, xyz_decode, xyz_encode, xyz_to_lab,
+};
+pub use curves::ToneCurve;
+pub use synth::{
+    cicp, clut_probe_profile, cmyk_ink_limiting_devicelink, cmyk_prtr_v2, cmyk_prtr_v4,
+    display_p3_srgb_trc, gray, lab2, lab4, measurement, rgb_linearization_devicelink,
+    rgb_matrix_shaper, rgb_matrix_shaper_d65_wtpt, rgb_matrix_shaper_v2, scnr_lut,
+    scnr_matrix_shaper, srgb, viewing_conditions, xyz,
+};
+pub use xform::{
+    ClutPipeline, FLAGS_BLACKPOINTCOMPENSATION, FLAGS_GAMUTCHECK, FLAGS_HIGHRESPRECALC,
+    FLAGS_LOWRESPRECALC, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, FLAGS_SOFTPROOFING,
+    INTENT_ABSOLUTE_COLORIMETRIC, INTENT_PERCEPTUAL, INTENT_RELATIVE_COLORIMETRIC,
+    INTENT_SATURATION, TYPE_CMYK_8, TYPE_CMYK_16, TYPE_CMYK_DBL, TYPE_CMYK_FLT, TYPE_GRAY_8,
+    TYPE_GRAY_16, TYPE_GRAY_DBL, TYPE_Lab_16, TYPE_Lab_DBL, TYPE_LabV2_16, TYPE_RGB_8, TYPE_RGB_16,
+    TYPE_RGB_DBL, TYPE_RGB_FLT, TYPE_XYZ_16, TYPE_XYZ_DBL, Transform, detect_black_point,
+    detect_destination_black_point, set_alarm_codes, set_quiet_log_handler,
+};
 
 /// ICC tag signatures (a four-character code as a big-endian `u32`) accepted by the `tag` argument
 /// of the read-back methods. Mirrors the subset of `cmsTagSignature` the cross-checks exercise.
@@ -55,6 +86,16 @@ pub mod tag {
     pub const CHROMATIC_ADAPTATION: u32 = sig(b"chad");
     /// `A2B0` — the device-to-PCS lookup transform (perceptual).
     pub const A_TO_B0: u32 = sig(b"A2B0");
+    /// `A2B1` — the device-to-PCS lookup transform (relative colorimetric).
+    pub const A_TO_B1: u32 = sig(b"A2B1");
+    /// `A2B2` — the device-to-PCS lookup transform (saturation).
+    pub const A_TO_B2: u32 = sig(b"A2B2");
+    /// `B2A0` — the PCS-to-device lookup transform (perceptual).
+    pub const B_TO_A0: u32 = sig(b"B2A0");
+    /// `B2A1` — the PCS-to-device lookup transform (relative colorimetric).
+    pub const B_TO_A1: u32 = sig(b"B2A1");
+    /// `B2A2` — the PCS-to-device lookup transform (saturation).
+    pub const B_TO_A2: u32 = sig(b"B2A2");
 }
 
 /// A four-character colour-space / class signature as a big-endian `u32`, for comparing against the
@@ -66,7 +107,7 @@ pub const fn fourcc(b: &[u8; 4]) -> u32 {
 
 /// An owned lcms2 profile handle (`cmsHPROFILE`); closed on drop.
 pub struct Profile {
-    raw: sys::cmsHPROFILE,
+    pub(crate) raw: sys::cmsHPROFILE,
 }
 
 impl Drop for Profile {
@@ -78,219 +119,9 @@ impl Drop for Profile {
     }
 }
 
-fn wrap(raw: sys::cmsHPROFILE) -> Profile {
+pub(crate) fn wrap(raw: sys::cmsHPROFILE) -> Profile {
     assert!(!raw.is_null(), "lcms2 returned a null profile handle");
     Profile { raw }
-}
-
-/// An owned lcms2 tone curve, freed on drop. Used only to feed the profile constructors.
-struct ToneCurve(*mut sys::cmsToneCurve);
-
-impl ToneCurve {
-    fn gamma(g: f64) -> Self {
-        // SAFETY: global context (null) is valid; returns an owned curve (checked non-null below).
-        let p = unsafe { sys::cmsBuildGamma(ptr::null_mut(), g) };
-        assert!(!p.is_null(), "cmsBuildGamma returned null");
-        Self(p)
-    }
-}
-
-impl Drop for ToneCurve {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: `0` is an owned curve from `cmsBuildGamma`, freed exactly once.
-            unsafe { sys::cmsFreeToneCurve(self.0) };
-        }
-    }
-}
-
-const fn xyy(x: f64, y: f64, big_y: f64) -> sys::cmsCIExyY {
-    sys::cmsCIExyY { x, y, Y: big_y }
-}
-
-// ---- Synthesis: build valid profiles in memory ------------------------------------------------
-
-/// The built-in sRGB profile (`cmsCreate_sRGBProfile`): a v4 matrix/TRC display RGB profile.
-#[must_use]
-pub fn srgb() -> Profile {
-    // SAFETY: constructor returns an owned handle (checked by `wrap`).
-    wrap(unsafe { sys::cmsCreate_sRGBProfile() })
-}
-
-/// An RGB matrix/TRC profile from a white point `(x, y)`, primaries `(x, y)` per channel, and a
-/// per-channel pure-gamma tone curve.
-#[must_use]
-pub fn rgb_matrix_shaper(white: [f64; 2], primaries: [[f64; 2]; 3], gamma: [f64; 3]) -> Profile {
-    let wp = xyy(white[0], white[1], 1.0);
-    let prim = sys::cmsCIExyYTRIPLE {
-        Red: xyy(primaries[0][0], primaries[0][1], 1.0),
-        Green: xyy(primaries[1][0], primaries[1][1], 1.0),
-        Blue: xyy(primaries[2][0], primaries[2][1], 1.0),
-    };
-    let curves = [
-        ToneCurve::gamma(gamma[0]),
-        ToneCurve::gamma(gamma[1]),
-        ToneCurve::gamma(gamma[2]),
-    ];
-    let mut raw = [curves[0].0, curves[1].0, curves[2].0];
-    // SAFETY: all pointers outlive the call; lcms copies the curve data into the new profile.
-    wrap(unsafe { sys::cmsCreateRGBProfile(&wp, &prim, raw.as_mut_ptr()) })
-}
-
-/// A grey-scale profile from a white point `(x, y)` and a pure-gamma tone curve.
-#[must_use]
-pub fn gray(white: [f64; 2], gamma: f64) -> Profile {
-    let wp = xyy(white[0], white[1], 1.0);
-    let tc = ToneCurve::gamma(gamma);
-    // SAFETY: pointers outlive the call; lcms copies the curve into the profile.
-    wrap(unsafe { sys::cmsCreateGrayProfile(&wp, tc.0) })
-}
-
-/// The built-in CIE XYZ identity profile (`cmsCreateXYZProfile`).
-#[must_use]
-pub fn xyz() -> Profile {
-    // SAFETY: constructor returns an owned handle.
-    wrap(unsafe { sys::cmsCreateXYZProfile() })
-}
-
-/// A v4 CIE L\*a\*b\* profile with the D50 white point (`cmsCreateLab4Profile(NULL)`).
-#[must_use]
-pub fn lab4() -> Profile {
-    // SAFETY: NULL white point selects D50; returns an owned handle.
-    wrap(unsafe { sys::cmsCreateLab4Profile(ptr::null()) })
-}
-
-/// A v2 CIE L\*a\*b\* profile with the D50 white point (`cmsCreateLab2Profile(NULL)`).
-#[must_use]
-pub fn lab2() -> Profile {
-    // SAFETY: NULL white point selects D50; returns an owned handle.
-    wrap(unsafe { sys::cmsCreateLab2Profile(ptr::null()) })
-}
-
-/// A CMYK ink-limiting device link (`cmsCreateInkLimitingDeviceLink`): a CLUT-bearing LUT profile,
-/// for exercising the `lut8`/`lut16` decoders (force v2 with [`Profile::set_version`]).
-#[must_use]
-pub fn cmyk_ink_limiting_devicelink(limit: f64) -> Profile {
-    let colorspace = u32::from_be_bytes(*b"CMYK") as sys::cmsColorSpaceSignature;
-    // SAFETY: constructor returns an owned handle.
-    wrap(unsafe { sys::cmsCreateInkLimitingDeviceLink(colorspace, limit) })
-}
-
-/// An RGB linearization device link (`cmsCreateLinearizationDeviceLink`) with identity curves, for
-/// exercising the `lutAToB` decoder in v4 profiles.
-#[must_use]
-pub fn rgb_linearization_devicelink() -> Profile {
-    let curves = [
-        ToneCurve::gamma(1.0),
-        ToneCurve::gamma(1.0),
-        ToneCurve::gamma(1.0),
-    ];
-    let mut raw = [curves[0].0, curves[1].0, curves[2].0];
-    let colorspace = u32::from_be_bytes(*b"RGB ") as sys::cmsColorSpaceSignature;
-    // SAFETY: the curve pointers outlive the call; lcms copies them into the profile.
-    wrap(unsafe { sys::cmsCreateLinearizationDeviceLink(colorspace, raw.as_mut_ptr()) })
-}
-
-/// A blank RGB→XYZ display profile placeholder, ready for a single tag to be written and the whole
-/// serialized — the base for the [`measurement`]/[`viewing_conditions`]/[`cicp`] cross-checks. The
-/// class/space fields are set so `gamut-icc` (which validates them) accepts the header.
-fn placeholder() -> sys::cmsHPROFILE {
-    // SAFETY: null context selects the global context; returns an owned handle (asserted non-null).
-    let raw = unsafe { sys::cmsCreateProfilePlaceholder(ptr::null_mut()) };
-    assert!(!raw.is_null(), "cmsCreateProfilePlaceholder returned null");
-    // SAFETY: `raw` is a live handle; each setter takes a signature as its enum-typed u32.
-    unsafe {
-        sys::cmsSetProfileVersion(raw, 4.3);
-        sys::cmsSetDeviceClass(raw, fourcc(b"mntr") as sys::cmsProfileClassSignature);
-        sys::cmsSetColorSpace(raw, fourcc(b"RGB ") as sys::cmsColorSpaceSignature);
-        sys::cmsSetPCS(raw, fourcc(b"XYZ ") as sys::cmsColorSpaceSignature);
-    }
-    raw
-}
-
-/// Writes `data` under tag `code` and returns the owned profile (`cmsWriteTag`).
-fn with_tag(raw: sys::cmsHPROFILE, code: &[u8; 4], data: *const std::ffi::c_void) -> Profile {
-    // SAFETY: `raw` is live; `data` points at a valid struct of the type lcms expects for `code`,
-    // which lcms serializes immediately during the call.
-    let ok = unsafe { sys::cmsWriteTag(raw, fourcc(code) as sys::cmsTagSignature, data) };
-    assert!(
-        ok != 0,
-        "cmsWriteTag failed for {:?}",
-        core::str::from_utf8(code)
-    );
-    wrap(raw)
-}
-
-/// A profile carrying one `measurementType` tag (`meas`) with the given fields, for cross-checking
-/// the `gamut-icc` decoder against lcms2's own serialization.
-#[must_use]
-pub fn measurement(
-    observer: u32,
-    backing: [f64; 3],
-    geometry: u32,
-    flare: f64,
-    illuminant: u32,
-) -> Profile {
-    let cond = sys::cmsICCMeasurementConditions {
-        Observer: observer,
-        Backing: sys::cmsCIEXYZ {
-            X: backing[0],
-            Y: backing[1],
-            Z: backing[2],
-        },
-        Geometry: geometry,
-        Flare: flare,
-        IlluminantType: illuminant,
-    };
-    with_tag(
-        placeholder(),
-        b"meas",
-        (&cond as *const sys::cmsICCMeasurementConditions).cast(),
-    )
-}
-
-/// A profile carrying one `viewingConditionsType` tag (`view`) with the given un-normalized CIEXYZ
-/// illuminant/surround and illuminant type.
-#[must_use]
-pub fn viewing_conditions(
-    illuminant: [f64; 3],
-    surround: [f64; 3],
-    illuminant_type: u32,
-) -> Profile {
-    let cond = sys::cmsICCViewingConditions {
-        IlluminantXYZ: sys::cmsCIEXYZ {
-            X: illuminant[0],
-            Y: illuminant[1],
-            Z: illuminant[2],
-        },
-        SurroundXYZ: sys::cmsCIEXYZ {
-            X: surround[0],
-            Y: surround[1],
-            Z: surround[2],
-        },
-        IlluminantType: illuminant_type,
-    };
-    with_tag(
-        placeholder(),
-        b"view",
-        (&cond as *const sys::cmsICCViewingConditions).cast(),
-    )
-}
-
-/// A profile carrying one `cicpType` tag (`cicp`) with the given four H.273 code points.
-#[must_use]
-pub fn cicp(primaries: u8, transfer: u8, matrix: u8, full_range: u8) -> Profile {
-    let signal = sys::cmsVideoSignalType {
-        ColourPrimaries: primaries,
-        TransferCharacteristics: transfer,
-        MatrixCoefficients: matrix,
-        VideoFullRangeFlag: full_range,
-    };
-    with_tag(
-        placeholder(),
-        b"cicp",
-        (&signal as *const sys::cmsVideoSignalType).cast(),
-    )
 }
 
 impl Profile {
@@ -405,6 +236,13 @@ impl Profile {
         unsafe { sys::cmsGetTagSignature(self.raw, n as u32) as u32 }
     }
 
+    /// Whether the profile carries tag `tag` (`cmsIsTag`).
+    #[must_use]
+    pub fn has_tag(&self, tag: u32) -> bool {
+        // SAFETY: `raw` is a live handle.
+        unsafe { sys::cmsIsTag(self.raw, tag as sys::cmsTagSignature) != 0 }
+    }
+
     /// Read an `XYZType` tag as `[X, Y, Z]`, via `cmsReadTag`. `None` if the tag is absent.
     #[must_use]
     pub fn read_xyz(&self, tag: u32) -> Option<[f64; 3]> {
@@ -485,8 +323,9 @@ impl Profile {
 
 // ---- Transform application ---------------------------------------------------------------------
 
-/// lcms2's `TYPE_RGB_8` pixel format: `COLORSPACE_SH(PT_RGB) | CHANNELS_SH(3) | BYTES_SH(1)`.
-const TYPE_RGB_8: u32 = (4 << 16) | (3 << 3) | 1;
+// `TYPE_RGB_8` now comes from `xform`, where every `TYPE_*` code is composed from the transcribed
+// `lcms2.h` shift macros and pinned against the header's expansions. The local literal this used to
+// carry was the same value.
 
 /// Transforms interleaved 8-bit RGB `pixels` from `input`'s space to `output`'s with the given
 /// rendering intent (`0` = perceptual), returning the transformed pixels. Panics on an lcms2

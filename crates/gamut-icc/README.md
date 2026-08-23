@@ -44,9 +44,10 @@ required tags a profile is missing for its device class, and `IccReader`/`IccWri
 validates the model and rejects data that would produce a corrupt profile (a *parsed* profile
 always re-serializes).
 
-**Out of scope:** applying a profile's transform (a CMM) and constructing transforms from
-`gamut-color` — the `to_f64`/`eval` accessors are the integration seam — and **iccMAX** (`ICC.2`), a
-separate next-generation format (see [`../../references/icc`](../../references/icc)).
+**Out of scope:** applying a profile's transform — that is [`gamut-cmm`](../gamut-cmm), the
+workspace CMM (epic #323), for which the `to_f64`/`eval` accessors are the integration seam — and
+**iccMAX** (`ICC.2`), a separate next-generation format (see
+[`../../references/icc`](../../references/icc)).
 
 ## Inspecting real profiles
 

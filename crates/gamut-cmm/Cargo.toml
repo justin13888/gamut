@@ -1,7 +1,7 @@
 [package]
-name = "gamut-color"
-description = "Color primitives for gamut: CICP code points, coded-plane bit depth and chroma subsampling, identity and BT.601 YCbCr planar buffers, and f64 colour science (encoder-exact transfers, OKLab, gamut mapping)."
-version = "2.0.0"
+name = "gamut-cmm"
+description = "ICC colour management module: builds and applies colour transforms from parsed ICC profiles."
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -15,22 +15,14 @@ categories.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = []
-serde = ["dep:serde", "gamut-core/serde"]
-
 [dependencies]
 gamut-core.workspace = true
-serde = { workspace = true, optional = true }
+gamut-color.workspace = true
+gamut-icc.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
-divan.workspace = true
-serde_json.workspace = true
 # Differential oracle: a vendored, statically-linked Little-CMS (lcms2). Dev-only and excluded
 # from the workspace, so a plain `cargo build` of this crate never needs a C toolchain; the
 # conformance tests do (`git submodule update --init` + a C compiler + libclang).
 lcms2-oracle = { path = "../../tooling/lcms2-oracle" }
-
-[[bench]]
-name = "color"
-harness = false

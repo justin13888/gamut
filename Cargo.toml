@@ -135,6 +135,8 @@ gamut-tonemap = { path = "crates/gamut-tonemap", version = "1.0.0" }
 # Image metadata primitives (issue #34): the shared TIFF/IFD core plus per-format crates.
 gamut-ifd = { path = "crates/gamut-ifd", version = "2.0.1" }
 gamut-icc = { path = "crates/gamut-icc", version = "1.0.0" }
+# ICC colour management module — applies profiles parsed by gamut-icc (issue #323).
+gamut-cmm = { path = "crates/gamut-cmm", version = "0.1.0" }
 gamut-xmp = { path = "crates/gamut-xmp", version = "1.0.0" }
 gamut-exif = { path = "crates/gamut-exif", version = "1.0.0" }
 gamut-iptc = { path = "crates/gamut-iptc", version = "1.0.0" }

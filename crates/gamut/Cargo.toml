@@ -45,6 +45,10 @@ gamut-exif = { workspace = true, optional = true }
 gamut-iptc = { workspace = true, optional = true }
 gamut-metadata = { workspace = true, optional = true }
 
+# Optional ICC colour management module (epic #323), re-exported behind the `cmm` feature: builds
+# and applies colour transforms from the profiles gamut-icc parses.
+gamut-cmm = { workspace = true, optional = true }
+
 # Optional shared primitives, re-exported behind the `primitives` feature for
 # tooling/sandbox use (e.g. gamut-cli); not needed for plain format encoding.
 gamut-color = { workspace = true, optional = true }
@@ -86,6 +90,8 @@ metadata = [
     "dep:gamut-iptc",
     "dep:gamut-ifd",
 ]
+# The ICC colour management module (transform engine) over gamut-icc profiles.
+cmm = ["dep:gamut-cmm"]
 all = [
     "avif",
     "jxl",
@@ -100,6 +106,7 @@ all = [
     "jpeg",
     "isobmff",
     "metadata",
+    "cmm",
     "primitives",
     "tonemap",
     "codec-abi",

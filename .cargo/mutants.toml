@@ -607,6 +607,71 @@ exclude_re = [
     # files decode and are killed by the typed-widening tests (sub-byte grey scaling, colour keys,
     # GrayAlpha16→Rgba16).
     'replace match guard native\.header\.bit_depth (==|<=) (8|16) with true in <impl DecodeImage<.+> for PngDecoder>::decode_image',
+    # gamut-color lab.rs — the CIELab companding branches are *tangent* at the junction: the
+    # cube-root and linear forms both evaluate to 6/29 (L* = 8) at t = ε = 216/24389 exactly, by
+    # construction of the exact rationals (that tangency is the reason ICC mandates them). `>` vs
+    # `>=` differs only on inputs whose reduced tristimulus (or its cube, in the inverse) equals ε
+    # exactly in f64, where the two branches agree to within one ulp of f64 `cbrt` — no test can
+    # separate them without asserting a specific rounding of `cbrt`, which is exactly the
+    # contrived-test shape this list exists to avoid.
+    'replace > with >= in lab_f',
+    'replace > with >= in lab_to_xyz',
+    # CIEDE2000 hue plumbing (Sharma et al. 2005). `wrap_hue_diff` folds Δh′ into (−180°, 180°]
+    # and feeds only `sin(Δh′/2)` (Eq. (11)), which is 360°-periodic — so adding versus
+    # subtracting 360° is provably unobservable (`- with +` / `+ with -`), and the strict-vs-
+    # inclusive boundary comparisons differ only when Δh′ = ±180.0 exactly, which requires both
+    # hues to be exactly-representable right angles; there the Eq. (19)–(21) rotation term the
+    # sign feeds is ~1e-22 (mean hue 90°/180° vs the 275° rotation centre) and the sign choice at
+    # exactly 180° is the formula's own documented ambiguity, resolved differently across
+    # implementations' last-ulp `atan2` scaling — unpinnable against any oracle.
+    'replace - with \+ in wrap_hue_diff',
+    'replace \+ with - in wrap_hue_diff',
+    'replace > with >= in wrap_hue_diff',
+    'replace < with <= in wrap_hue_diff',
+    # `chroma_product_is_zero` gates the degenerate hue conventions of Eqs. (10)/(14). When either
+    # chroma is zero every downstream hue term carries the factor √(C1′·C2′) = 0 (ΔH′ = 0, so the
+    # hue and rotation terms vanish identically), making the branch choice unobservable; `*` vs
+    # `+`/`/` on the product only changes *which* zero-chroma inputs take the degenerate branch.
+    # The `== with !=` mutant of the same comparison flips behaviour for chromatic pairs and
+    # stays killed by the Sharma golden set.
+    'replace \* with \+ in chroma_product_is_zero',
+    'replace \* with / in chroma_product_is_zero',
+    # …and the whole-function `-> false` replacement is the same class: it only reroutes
+    # zero-chroma pairs onto the general arms, whose hue terms the zero factor annihilates
+    # anyway. (`-> true` reroutes chromatic pairs and stays killed by the Sharma set.)
+    'replace chroma_product_is_zero -> bool with false',
+    # Same vanishing-term argument for the Eq. (14) degenerate sum itself: `h1′ + h2′` is only
+    # consumed when ΔH′ = 0 has already zeroed every term it feeds — so its operator mutants
+    # *and* every whole-function value replacement are unobservable alike.
+    'replace \+ with (-|\*) in degenerate_hue_sum',
+    'replace degenerate_hue_sum -> f64 with',
+    # The Eq. (14) mean-hue `sum < 360` boundary: `<` vs `<=` differs only when h1′ + h2′ ==
+    # 360.0 exactly with |h1′ − h2′| > 180°, which no exactly-representable hue pair satisfies
+    # (the representable right angles give |Δh′| ≤ 180°) — and even then the two arms differ by
+    # 360°, feeding the 360°-periodic Eq. (15) cosines and a Δθ rotation term at its ~1e-5 floor.
+    'replace < with <= in delta_e_2000_weighted',
+    # `ciede2000_hue_deg` normalizes atan2 into [0, 360): `h < 0` vs `<=` differs only at
+    # h == 0, where the mutant returns 360 — the same angle. Every consumer is wrap-invariant:
+    # Δh′ goes through the wrap fold and then `sin(Δh′/2)`, and the Eq. (14) mean re-folds a
+    # ±360° shift of either hue to the identical h̄′ (that invariance is the point of its
+    # adjustment arms). Provably equivalent.
+    'replace < with <= in ciede2000_hue_deg',
+    # gamut-cmm curve.rs — provably-equivalent mutants in tone-curve inversion/monotonicity.
+    #   is_monotonic: deleting the SampledInverse arm falls through to the dense-probe path; a
+    #   SampledInverse table always holds exactly INVERSE_SAMPLES == MONOTONICITY_PROBES
+    #   entries, and probing at i/(PROBES − 1) evaluates the linear interpolant exactly at
+    #   every entry, so both paths inspect the identical sample sequence. Equivalent. (The
+    #   analogous Icc(Sampled) arm deletion IS killable — tables of other lengths diverge — and
+    #   is killed by `sampled_monotonicity_is_judged_on_entries_not_probes`.)
+    'delete match arm Repr::SampledInverse\{table\} in ToneCurve::is_monotonic',
+    #   reverse_table's no-interval arm (the only bare `<`/`>` in the function): reached only
+    #   when the interval scan fails, and for the monotonic tables reverse_table receives, a
+    #   target exactly equal to table[0] is always bracketed by segment 0 (`table[0] <= y &&
+    #   y <= table[1]` holds at equality in both scan directions), so the boundary the mutation
+    #   changes (y == table[0]) never reaches these comparisons. Equivalent both times; the
+    #   strict sides ARE killed by `reverse_table_out_of_range_targets_clamp_to_domain_ends`.
+    'replace < with <= in reverse_table',
+    'replace > with >= in reverse_table',
     # gamut-webp VP8 sign reconstruction (tokens.rs / quant.rs) — two `x < 0` sign tests whose
     # `<=` twin differs only at zero, which neither can reach. `walk_block`'s sign bit is written
     # inside `if token != DCT_0`, and `token_for_abs` returns `DCT_0` exactly when the level is

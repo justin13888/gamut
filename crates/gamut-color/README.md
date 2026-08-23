@@ -19,8 +19,10 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
 - **Match the spec code points exactly.** CICP values mirror the H.273 / AV1 sequence-header code
   points so they round-trip through `av1C`/`colr` and AV1 headers unchanged.
 - **Provide the colour science.** The `transfer` (encoder-exact EOTFs), `oklab` (per-gamut OKLab
-  transforms), `matrix` (RGB↔XYZ via Bradford adaptation), `gamut_map` (hue-preserving soft clamp),
-  and `profile` (source bundles) modules. This math is **Tier-1** (correctness only): it uses `std`
+  transforms), `lab` (CIELab/LCh/xyY with exact-rational ε/κ, the ICC PCS fixed-point encodings,
+  and the ΔE\*ab / CIEDE2000 colour-difference metrics), `matrix` (RGB↔XYZ via Bradford
+  adaptation), `gamut_map` (hue-preserving soft clamp), `profile` (source bundles), and `linalg`
+  (the shared 3×3 helpers) modules. This math is **Tier-1** (correctness only): it uses `std`
   `f64`, so it is not bit-reproducible across platforms — see
   [`references/color/README.md`](../../references/color/README.md).
 - **Stay memory-safe.** `#![forbid(unsafe_code)]`.
@@ -52,10 +54,12 @@ API policies, and the deferrals. Implemented today: 8-bit RGB ↔ identity 4:4:4
 `colr` box needs, the BT.601 YCbCr 4:2:0 path (WebP), the general H.273 §8.3 luma–chroma transform
 in both directions (`RgbToYcbcr` / `YcbcrMatrix`: BT.601 / BT.470 B,G / BT.709 / BT.2020-NCL, both
 signal ranges, at every modeled bit depth — the AVIF lossy encode path and the AVIF/HEIC
-presentation path), and the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and
-ProPhoto gamuts. The 10/12-bit *plane* geometries and the subsampled ones are modeled in the type
-system (`#[non_exhaustive]` enums, so extension is non-breaking) and land with the milestones
-tracked in
+presentation path), the `f64` colour science for the sRGB, Display P3, Adobe RGB, BT.2020 and
+ProPhoto gamuts, and the CIELab / ΔE layer (issue #321: XYZ↔Lab↔LCh, xyY, the ICC PCS encodings,
+CIE76 and CIEDE2000 — the latter pinned to the Sharma 34-pair golden set, with lcms2 differential
+tests to follow in issue #322). The 10/12-bit *plane* geometries and the subsampled ones are
+modeled in the type system (`#[non_exhaustive]` enums, so extension is non-breaking) and land with
+the milestones tracked in
 [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md). See the crate docs ("Implemented vs. modeled")
 for the precise split.
 
