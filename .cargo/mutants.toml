@@ -206,7 +206,7 @@ exclude_re = [
     # generates no such mutant. This is the only mutant the function produces.
     'replace AvifEncoder::lossless -> Self with Default::default\(\)',
     # gamut-webp `WebpEncoder::lossless` returns `Self::default()` because the default configuration
-    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75 }`); replacing the body with the
+    # *is* lossless (`WebpConfig::default()` = `{ Lossless, 75, Effort::Default, None }`); replacing the body with the
     # equivalent `Default::default()` cannot change behaviour, so the mutant is unkillable. (The same
     # replacement on `lossy` *is* caught — it would wrongly produce a lossless encoder.)
     'replace WebpEncoder::lossless -> Self with Default::default\(\)',
@@ -716,4 +716,35 @@ exclude_re = [
     # observable behaviour. Every other mutant in ratio_excess (the dE2 == 0 guard, the
     # division, the subtraction, the branch bodies) IS killed by the same test's exact pins.
     'replace > with >= in ratio_excess',
+    # gamut-webp VP8 sign reconstruction (tokens.rs / quant.rs) — two `x < 0` sign tests whose
+    # `<=` twin differs only at zero, which neither can reach. `walk_block`'s sign bit is written
+    # inside `if token != DCT_0`, and `token_for_abs` returns `DCT_0` exactly when the level is
+    # zero, so the guarded level is never zero. `quantize_biased`'s sign is applied to a magnitude
+    # that is zero whenever `coeff` is zero (the bias term `bias * factor / (factor * 256)` floors
+    # to 0 for both biases the encoder uses, 128 and 120, which are the only values its single
+    # caller passes), and `-0 == 0` for integers. Both are equivalent mutants, not coverage gaps.
+    'tokens\.rs:.*: replace < with <= in walk_block',
+    'quant\.rs:.*: replace < with <= in quantize_biased',
+    # gamut-webp VP8L colour-transform block size (encoder.rs `encode_spatial`) — the transform
+    # header stores `size_bits - 2` (RFC 9649 §4.4). Every plan in the ladder emits the colour
+    # transform at `DEFAULT_TRANSFORM_BITS` (4), where `4 - 2` and `4 / 2` are both 2, so no input
+    # separates the two. The *predictor* transform's identical expression is NOT excluded: plans
+    # emit it at 2, 3, 4, 5 and 6, and the effort byte-pins kill it there.
+    'encoder\.rs:.*: replace - with / in encode_spatial',
+    # gamut-webp VP8L `single_group` (encoder.rs) — the degenerate assignment puts every
+    # meta-block in one prefix-code group, and a `GroupAssignment` with `num_groups == 1` never has
+    # its grid consulted: `group_of` returns 0 before touching `grid_width` or `block_group`
+    # (`num_groups <= 1` short-circuit), and the entropy sub-image is only emitted, and
+    # `block_group` only iterated, when `num_groups > 1`. The grid arithmetic these mutants corrupt
+    # is therefore unobservable through any input. The same expressions in `assign_groups`, where
+    # the grid *is* read, stay killed by the effort byte-pins.
+    'encoder\.rs:(508|509|510):\d+: replace (<< with >>|\* with [+/]) in single_group',
+    # gamut-webp VP8L zero-length-match guard (encoder.rs `nonempty_match`) — the comparison
+    # defends the parse cursor against a length `BackwardRefs::find` never returns, so `>` and
+    # `>=` admit exactly the same candidates on every input. That is what makes the mutant
+    # equivalent, and also what makes the guard worth keeping: what it prevents is a
+    # non-terminating loop, which produces no output to check. Named rather than line-anchored so
+    # it cannot also cover the observable `>` in the deferral probe, which the lazy-parse tests
+    # kill.
+    'replace > with >= in nonempty_match',
 ]
