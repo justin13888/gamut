@@ -39,7 +39,9 @@ const LARGE_DIMENSIONS: &[(u32, u32)] =
 
 /// Drops the alpha byte of an interleaved RGBA buffer, yielding interleaved RGB.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[0], p[1], p[2]])
         .collect()
 }
@@ -275,7 +277,7 @@ fn gamut_lossy_bpred_matches_libwebp_bit_exact() {
     for &(w, h) in &[(16u32, 16u32), (32, 32), (48, 48), (49, 33), (64, 16)] {
         for &quant_index in &[0u8, 8, 40] {
             let (payload, _) = encode_frame(&detailed_yuv(w, h), quant_index);
-            let webp = write_simple_lossy(&payload);
+            let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
@@ -366,7 +368,7 @@ fn gamut_lossy_options_match_libwebp_bit_exact() {
         for &(w, h) in &[(32u32, 32u32), (48, 48), (49, 33), (33, 145)] {
             for &q in &[12u8, 48] {
                 let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
-                let webp = write_simple_lossy(&payload);
+                let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
                 assert_eq!(gamut.y(), lib.y.as_slice(), "{label} Y at {w}x{h} q{q}");
@@ -397,7 +399,7 @@ fn gamut_lossy_yuv_matches_libwebp_bit_exact() {
     ] {
         for &quant_index in &[0u8, 20, 60, 110] {
             let (payload, _) = encode_frame(&synthetic_yuv(w, h), quant_index);
-            let webp = write_simple_lossy(&payload);
+            let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
@@ -444,7 +446,7 @@ fn gamut_lossy_yuv_realistic_and_large_matches_libwebp() {
     for &(w, h) in &dims {
         for &quant_index in &[12u8, 56] {
             let (payload, _) = encode_frame(&photo_like_yuv(w, h, 0x7e57), quant_index);
-            let webp = write_simple_lossy(&payload);
+            let webp = write_simple_lossy(&payload).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
@@ -492,7 +494,7 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
     // would make the conformance assertions below vacuous.
     {
         let yuv = detailed_yuv(48, 48);
-        let base = write_simple_lossy(&encode_frame(&yuv, 16).0);
+        let base = write_simple_lossy(&encode_frame(&yuv, 16).0).unwrap();
         let with = write_simple_lossy(
             &encode_frame_filtered(
                 &yuv,
@@ -503,7 +505,8 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                 },
             )
             .0,
-        );
+        )
+        .unwrap();
         assert_ne!(
             libwebp_decode_yuv(&base).y,
             libwebp_decode_yuv(&with).y,
@@ -519,7 +522,7 @@ fn gamut_lossy_loop_filter_deltas_match_libwebp_bit_exact() {
                     ..Default::default()
                 };
                 let (payload, _) = encode_frame_filtered(&detailed_yuv(w, h), q, opts);
-                let webp = write_simple_lossy(&payload);
+                let webp = write_simple_lossy(&payload).unwrap();
                 let lib = libwebp_decode_yuv(&webp);
                 let gamut = decode_frame(&payload).expect("gamut decode").to_yuv420();
                 assert_eq!((lib.width, lib.height), (w, h), "dims at {w}x{h}");
@@ -546,7 +549,7 @@ fn gamut_decodes_patched_vp8_profiles_like_libwebp() {
         for version in 1u8..=3 {
             let mut patched = payload.clone();
             patched[0] = (patched[0] & !0b1110) | (version << 1);
-            let webp = write_simple_lossy(&patched);
+            let webp = write_simple_lossy(&patched).unwrap();
             let lib = libwebp_decode_yuv(&webp);
             let gamut = decode_frame(&patched).expect("gamut decode").to_yuv420();
             assert_eq!((lib.width, lib.height), (w, h), "dims v{version} {w}x{h}");
@@ -879,8 +882,14 @@ fn libwebp_decodes_gamut_lossy_alpha_exactly() {
             .expect("gamut rgba encode");
         let decoded = libwebp_decode_rgba(&file);
         assert_eq!((decoded.width, decoded.height), (w, h), "dims at {w}x{h}");
-        let lib_alpha: Vec<u8> = decoded.rgba.chunks_exact(4).map(|p| p[3]).collect();
-        let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let lib_alpha: Vec<u8> = decoded
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(
             lib_alpha, src_alpha,
             "libwebp must recover gamut's exact alpha at {w}x{h}"
@@ -917,8 +926,14 @@ fn gamut_decodes_libwebp_lossy_alpha_exactly() {
                 height: h
             }
         );
-        let dec_alpha: Vec<u8> = got.as_samples().chunks_exact(4).map(|p| p[3]).collect();
-        let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        let dec_alpha: Vec<u8> = got
+            .as_samples()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(
             dec_alpha, src_alpha,
             "gamut must recover libwebp's exact alpha at {w}x{h}"
@@ -1027,8 +1042,14 @@ fn libwebp_reads_gamut_metadata_alongside_alpha() {
     );
     // And the alpha still survives the round-trip through gamut's own decoder.
     let got: ImageBuf<Rgba8> = WebpDecoder::new().decode_image(&file).expect("decode");
-    let dec_alpha: Vec<u8> = got.as_samples().chunks_exact(4).map(|p| p[3]).collect();
-    let src_alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+    let dec_alpha: Vec<u8> = got
+        .as_samples()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|p| p[3])
+        .collect();
+    let src_alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
     assert_eq!(dec_alpha, src_alpha);
 }
 

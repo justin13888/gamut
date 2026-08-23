@@ -31,6 +31,7 @@ fn main() {
     // NOT set it. The build re-runs if either variable's value changes.
     println!("cargo:rerun-if-env-changed=GAMUT_JXL_SYS_SKIP_NATIVE");
     println!("cargo:rerun-if-env-changed=GAMUT_JXL_SYS_LIBJXL_DIR");
+    println!("cargo:rerun-if-env-changed=CMAKE_BUILD_PARALLEL_LEVEL");
     if std::env::var("GAMUT_JXL_SYS_SKIP_NATIVE").as_deref() == Ok("1") {
         println!(
             "cargo:warning=GAMUT_JXL_SYS_SKIP_NATIVE=1: skipping the libjxl static build; \
@@ -114,7 +115,17 @@ fn build_emscripten() {
         .define("JPEGXL_ENABLE_OPENEXR", "OFF")
         .define("JPEGXL_BUNDLE_LIBPNG", "OFF")
         .define("JPEGXL_ENABLE_WASM_THREADS", "OFF");
-    if let Ok(parallelism) = std::thread::available_parallelism() {
+    // Build parallelism: honour an operator-set `CMAKE_BUILD_PARALLEL_LEVEL`, and only fall back
+    // to the CPU count when nothing was asked for. `available_parallelism` counts cores, not
+    // memory, and libjxl's C++ translation units are among the most memory-hungry things this
+    // workspace compiles — so on a many-core machine under a memory cap (a container, a systemd
+    // slice, a mutation-testing run with several build scenarios in flight) the core count is far
+    // too many compilers at once. Setting the variable unconditionally left the operator no way to
+    // say so; every other vendored build here takes `cmake --build --parallel`, which reads the
+    // same variable, so this is now the one dial for all of them.
+    if std::env::var_os("CMAKE_BUILD_PARALLEL_LEVEL").is_none()
+        && let Ok(parallelism) = std::thread::available_parallelism()
+    {
         config.env("CMAKE_BUILD_PARALLEL_LEVEL", parallelism.to_string());
     }
     let prefix = config.build();

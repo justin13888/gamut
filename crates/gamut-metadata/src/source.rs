@@ -7,7 +7,13 @@
 /// segment. The facade stays container-agnostic: it never parses boxes or chunks, only these
 /// payloads. (IPTC Core/Extension arrives inside an [`MetadataBlock::Xmp`] payload; the separate
 /// [`MetadataBlock::IptcIim`] is the legacy binary form from a Photoshop IRB.)
+///
+/// Marked `#[non_exhaustive]`, so a later carrier can add a variant without a breaking change;
+/// match with a wildcard arm. There is deliberately **no** variant for
+/// [`Metadata::extensions`](crate::Metadata::extensions): extensions hold data no carrier
+/// serializes, so no block can produce one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MetadataBlock<'a> {
     /// An EXIF blob (`Exif\0\0` + TIFF stream, or a bare TIFF stream).
     Exif(&'a [u8]),

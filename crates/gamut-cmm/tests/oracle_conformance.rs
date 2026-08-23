@@ -914,7 +914,7 @@ fn pixel_buffers_ride_the_conformance_transforms() {
         .collect();
     let mut dst = vec![0u8; 240];
     transform_interleaved_u8(&ours, PixelFormat::Rgb8, &src, PixelFormat::Cmyk8, &mut dst).unwrap();
-    for (px, out) in src.chunks_exact(3).zip(dst.chunks_exact(4)) {
+    for (px, out) in src.as_chunks::<3>().0.iter().zip(dst.as_chunks::<4>().0) {
         let device: Vec<f64> = px.iter().map(|&v| f64::from(v) / 255.0).collect();
         let mut want = [0.0; 4];
         ours.transform(&device, &mut want).unwrap();

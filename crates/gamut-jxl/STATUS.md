@@ -33,6 +33,23 @@ on a hand-written golden bitstream.
   pixels. Output is always container-framed (the `jbrd` box requires it); only `Effort` applies.
 - **Effort dial.** `Effort` `Lightning..=Glacier`, mapping libjxl effort `1..=10` (default
   `Squirrel` = 7). Level 11 ("tectonic plate") is expert-gated and out of scope.
+- **No `quality` dial, by design.** The rate knobs are `lossless()`, `lossy(Distance)`,
+  `with_effort` and `with_bit_depth` — there is deliberately no `0..=100` quality setting. Distance
+  is JPEG XL's native dial and expresses the whole lossy range exactly; a quality scale would be a
+  second, lossier spelling of it, and would have to invent a meaning for `0`, which `Distance`
+  rejects precisely so lossless stays structurally distinct. `0..=100` quality exists only as the
+  `gamut-codec-abi` **wire** mapping (`abi.rs`, a frozen contract: lossless → 100, distance `d` →
+  `clamp(100 − round(4·d), 0, 99)`), because that ABI has no distance field to carry.
+- **Modular-mode control (issue #339).** `ModularMode` `Auto`/`VarDct`/`Modular` via `with_modular`,
+  mapping libjxl's `JXL_ENC_FRAME_SETTING_MODULAR` values `-1`/`0`/`1`. `Auto` is the default and
+  leaves the option **unsent**, so a default encoder's bytes are unchanged. Forcing `VarDct` on a
+  lossless encoder is a typed `InvalidInput` rather than a silent no-op: libjxl's `SetLossless`
+  overrides the frame setting to modular unconditionally, so the request could not be honoured.
+  `ModularMode` is a codestream-level knob, so it reaches pushed backends through `JxlEncodeRequest`;
+  the `gamut-codec-abi` adapter has no `EncodeConfig` field for it and therefore **declines** a
+  pinned mode (as it already does for colour and orientation) instead of dropping it. It does not
+  apply to `recompress_jpeg`, which re-packs the JPEG's own coefficients — a non-default setting is
+  ignored there, as the other inapplicable knobs already are.
 - **Pixel layouts.** 8- and 16-bit **Gray / GrayAlpha / RGB / RGBA** (eight `EncodeImage` /
   `DecodeImage` impls); 16-bit samples handed to libjxl as native-endian bytes.
 - **Container framing.** Bare codestream (default, signature `FF 0A`) and the ISO BMFF `.jxl`
@@ -49,10 +66,30 @@ on a hand-written golden bitstream.
 - **Full pixel decode (jxl-rs).** Decodes the entire ISO/IEC 18181-1 pixel surface jxl-rs
   covers — VarDCT and Modular (RCT/palette/squeeze), XYB, splines/patches/noise/spot colours,
   progressive-encoded streams, and both `jxlc`/`jxlp` container framings — reshaping to the
-  requested layout losslessly (grayscale→RGB, opaque-alpha pad, alpha drop).
-- **Decode policies.** Pixel-limit bound (`1 << 28` samples); truncated → `InvalidInput`; animation,
-  premultiplied (associated) alpha, and colour-as-grayscale each → `Unsupported` (deliberate refusals
-  to guess, additive to relax later).
+  requested layout through `gamut_core::convert` (issue #268). `crate::convert` now keeps only the
+  jxl-specific half — reassembling jxl-rs's native-endian output *bytes* into typed samples — at the
+  cost of one extra pass and allocation the previously fused loop avoided.
+- **Best-effort decode of truncated streams (issue #256).** `DecodePartialImage` decodes an
+  incomplete codestream to the best image it supports plus a `JxlPartialReport` — the
+  `is_complete()` flag, a `JxlRender` (`HeaderOnly` / `BestEffort` / `Complete`), jxl-rs's completed
+  -pass count and its further-bytes hint. Implemented over jxl-rs `flush_pixels`, at the end of the
+  buffer, in the default `JxlProgressiveMode::Pass`. What it yields is bounded by JPEG XL's own
+  structure and documented as such: a truncated **VarDCT** stream renders groups with no detail pass
+  from the upsampled DC image, so the result is a full-size coarse preview sharpening toward the
+  front of the stream; a truncated **Modular** stream renders the groups that arrived exactly and
+  leaves the rest zero; an image small enough to be coded as a **single group** (≈256×256 or below)
+  is one TOC section, which jxl-rs never partially decodes, so it comes back blank. Truncation
+  before the image headers stays `InvalidInput` — there are no dimensions to size a buffer with —
+  and so do the truncation points jxl-rs cannot distinguish from corruption. Pinned to the built-in
+  tail: the codec-abi seam has no notion of a partial result, so the registry is not consulted, as
+  for `info` / `embedded_icc_profile`. It presents through the same `gamut_core::convert` seam, so
+  it answers to the same `ConvertPolicy`. The default `DecodeImage` path is unchanged.
+- **Decode policies.** Pixel-limit bound (`1 << 28` samples); truncated → `InvalidInput` on the
+  default `DecodeImage` path (`DecodePartialImage` above is the opt-in relaxation, and relaxes
+  *only* truncation); animation and premultiplied (associated) alpha → `Unsupported` (deliberate
+  refusals to guess, additive to relax later). Layout loss (dropping a present alpha channel,
+  reducing colour to grayscale) is refused by default and enabled per decoder with
+  `JxlDecoder::with_convert_policy` — the refusal is no longer unconditional.
 - **Pluggable codestream backends (issue #276).** Both directions are registries over the shared
   `gamut-codec-abi` seam, cut at the **bare `FF 0A` codestream**: `JxlEncoder::push_backend` /
   `JxlDecoder::push_backend` insert a `JxlCodestreamEncoder` / `JxlCodestreamDecoder` ahead of the
@@ -86,8 +123,14 @@ unlocks it.
 - **Premultiplied (associated) alpha decode.** Rejected today; unlocks with an un-premultiply step in
   `convert` (deliberately deferred: an integer un-premultiply is an approximate inverse — alpha = 0
   is unrecoverable — so it belongs behind an explicit opt-in, not a silent default).
-- **Progressive encode control.** No passes / group-order / responsive knobs are exposed; unlocks with
-  the corresponding `FrameSettingsSetOption` calls plus a config surface.
+- **Frame settings beyond effort and modular mode.** Progressive control (passes / group order /
+  responsive), the modular *tuning* knobs (`MODULAR_COLOR_SPACE`, `MODULAR_GROUP_SIZE`,
+  `MODULAR_PREDICTOR`, `MODULAR_NB_PREV_CHANNELS`, and the float-valued
+  `MODULAR_MA_TREE_LEARNING_PERCENT`, which additionally needs
+  `JxlEncoderFrameSettingsSetFloatOption` declared) and the coding-tool toggles (noise, dots,
+  patches, EPF, gaborish) are not exposed. Each unlocks with its `gamut-jxl-sys` enumerant plus a
+  config surface; issue #339 opened that seam, so these are now additive rather than an FFI change
+  each time.
 - **Extra channels beyond alpha.** Depth, thermal, spot, and other extra channels are ignored on
   decode and unsupported on encode; unlocks with a typed extra-channel model.
 - **Effort 11 ("tectonic plate").** Expert-gated behind `JxlEncoderAllowExpertOptions`; the `Effort`
@@ -98,8 +141,13 @@ unlocks it.
   the `.jxl` container over *any* backend's codestream, most naturally on `gamut-isobmff` — would let
   a pushed backend serve container output and metadata embedding too. Recorded, **not implemented**;
   it is purely additive to the seam (the traits and the fallback contract do not change).
-- **Streaming / partial decode API.** The decoder consumes a whole buffer per call; a chunked/streaming
-  entry point is a separate additive surface.
+- **Chunked / streaming decode input.** Partial *output* ships (`DecodePartialImage`, above), but the
+  decoder still consumes a whole buffer per call: there is no `feed(&[u8])` entry point that keeps a
+  decoder alive across chunks and re-renders as bytes arrive. Unlocks by holding jxl-rs's typestate
+  decoder across calls rather than driving it once. Progressive-mode control
+  (`JxlProgressiveMode::Eager`, which renders on every `process` rather than on completed passes)
+  belongs with it: the partial path deliberately keeps the `Pass` default so a complete stream
+  decodes identically through both entry points, and changing that needs a config surface.
 - **libjxl 0.12.x tracking.** The pin is exact (`jpegxl-src = "=0.12.0"` → libjxl 0.12.0). Bumps are
   deliberate: they must re-verify the FFI declarations against the new headers via the
   `gamut-jxl-sys` version-pin / symbol-drift test (`tests/version.rs`, asserting version `12000`) and
@@ -140,8 +188,17 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
   LfFrame-with-alpha ([#730](https://github.com/libjxl/jxl-rs/issues/730)); `flush_pixels` bugs
   ([#783](https://github.com/libjxl/jxl-rs/issues/783),
   [#771](https://github.com/libjxl/jxl-rs/issues/771)); high memory on progressive lossless
-  ([#782](https://github.com/libjxl/jxl-rs/issues/782)). gamut decodes complete (non-streaming)
-  streams, so it does not exercise these flush/partial paths.
+  ([#782](https://github.com/libjxl/jxl-rs/issues/782)). `DecodePartialImage` (issue #256) now
+  reaches the flush path, so the exposure is worth stating precisely: gamut calls `flush_pixels`
+  **exactly once, at end of input**, on a single visible frame, in the default
+  `JxlProgressiveMode::Pass`. It does not feed input in chunks, does not use `Eager`, and neither
+  produces nor requests preview frames (`skip_preview` defaults on, and gamut emits no preview) or
+  animation — so the preview half of #730 and the multi-chunk half of #783/#771 are unreachable from
+  gamut-produced streams. What *is* reached is the Modular partial-`LfGlobal` branch, the one place
+  jxl-rs hands a deliberately incomplete section to its bit reader. It is guarded by an all-lengths
+  truncation sweep of lossless streams in both framings, plus the whole hostile corpus (junk bodies,
+  short prefixes, every single-bit flip over the first 256 bytes) driven through the partial path in
+  `tests/robustness.rs`; no panic has been observed. The default `DecodeImage` path never flushes.
 - **Container Exif / XMP metadata not exposed.** jxl-rs does not surface the `Exif`/`xml ` box bytes
   ([#674](https://github.com/libjxl/jxl-rs/issues/674)) — the upstream half of gamut's deferred
   *read-back* support (gamut's encoder writes the boxes today).
@@ -164,7 +221,29 @@ The documented gaps, with upstream links (verified against the tracker 2026-07-1
 - **Feature grid + robustness.** A differential feature matrix (container × naked, effort extremes,
   16-bit, alpha, grayscale, gray+alpha) plus a large hostile-input corpus (empty,
   short prefixes, systematic truncations, garbage bodies, and bit-flips across the first 256 bytes,
-  and the pixel-limit trigger): every case returns a typed `Err`, never a panic.
+  and the pixel-limit trigger): every case returns a typed `Err`, never a panic. The whole corpus is
+  additionally driven through `DecodePartialImage`, where `Ok` is a legitimate outcome and the
+  invariant is only *no panic*, plus an all-lengths (step 1) truncation sweep of both framings.
+- **Partial decode — anchored on identity, asserted existentially.** There is deliberately **no**
+  libjxl differential for truncated renders. libjxl and jxl-rs do not agree on a partial render —
+  different group ordering, different DC-upsampling policy, and jxl-rs's willingness to draw from an
+  incomplete section is an internal ratio heuristic with no libjxl counterpart — so neither
+  bit-exactness nor a bounded difference would survive, and `JxlDecoderFlushImage` is not even
+  declared in `gamut-jxl-sys`. Instead `tests/partial.rs` pins **identity**: on a complete stream,
+  all eight layouts (and the `codestream_bit_depth` knob) must decode *bit-identically* through
+  `DecodePartialImage` and `DecodeImage`, which inherits the three-way oracle chain above without
+  duplicating it. Truncation is then asserted only as strongly as jxl-rs promises: dimensions never
+  vary, the byte hint is present exactly when incomplete, a header-only render is blank, and — over
+  a **whole sweep**, never per-prefix — some truncation renders a real sample. Fixtures are 1024×768
+  because a single-group frame has nothing to render partially. No pixel value, threshold length, or
+  pass count is pinned; observed coverage is monotone for Modular but *not* for VarDCT, so
+  monotonicity would be a false invariant.
+- **Coding tool — plumbed, and `Auto` provably inert.** Neither decoder reports whether a stream is
+  VarDCT or Modular, so `ModularMode` is pinned the way `Effort` is: forcing Modular must change the
+  stream bytes (against both forced VarDCT and libjxl's own choice) while staying decodable by
+  jxl-rs *and* the oracle, and a forced-Modular lossy stream must still clear the PSNR floor.
+  Conversely `ModularMode::Auto` must be **byte-identical** to an encoder that never named the knob
+  — the guard that keeps the option unsent — and lossless + forced VarDCT must be the typed refusal.
 - **jbrd — bit-exact reconstruction.** The vendored baseline-JPEG fixture recompresses and the
   libjxl oracle reconstructs the **original JPEG bytes exactly**; the stream's pixels also decode
   within the lossy agreement bound in both decoders; malformed/truncated JPEG inputs are typed

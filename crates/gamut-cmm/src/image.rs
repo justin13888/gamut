@@ -428,7 +428,7 @@ mod tests {
             &mut dst,
         )
         .unwrap();
-        for (s, d) in src.chunks_exact(3).zip(dst.chunks_exact(3)) {
+        for (s, d) in src.as_chunks::<3>().0.iter().zip(dst.as_chunks::<3>().0) {
             let mut want = [0.0; 3];
             let normalized: Vec<f64> = s.iter().map(|&v| f64::from(v) / 255.0).collect();
             transform.transform(&normalized, &mut want).unwrap();
@@ -456,7 +456,7 @@ mod tests {
             &mut dst,
         )
         .unwrap();
-        for (s, d) in src.chunks_exact(3).zip(dst.chunks_exact(3)) {
+        for (s, d) in src.as_chunks::<3>().0.iter().zip(dst.as_chunks::<3>().0) {
             let normalized: Vec<f64> = s.iter().map(|&v| f64::from(v) / 65535.0).collect();
             let mut want = [0.0; 3];
             transform.transform(&normalized, &mut want).unwrap();

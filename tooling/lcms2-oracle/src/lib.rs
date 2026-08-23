@@ -322,6 +322,36 @@ impl Profile {
     }
 }
 
+// ---- Transform application ---------------------------------------------------------------------
+
+// `TYPE_RGB_8` now comes from `xform`, where every `TYPE_*` code is composed from the transcribed
+// `lcms2.h` shift macros and pinned against the header's expansions. The local literal this used to
+// carry was the same value.
+
+/// Transforms interleaved 8-bit RGB `pixels` from `input`'s space to `output`'s with the given
+/// rendering intent (`0` = perceptual), returning the transformed pixels. Panics on an lcms2
+/// setup failure (a test-only oracle; a panic is a test failure).
+#[must_use]
+pub fn transform_rgb8(input: &Profile, output: &Profile, intent: u32, pixels: &[u8]) -> Vec<u8> {
+    assert!(pixels.len().is_multiple_of(3), "interleaved RGB expected");
+    let mut out = vec![0u8; pixels.len()];
+    // SAFETY: both profile handles are live (owned by the borrowed `Profile`s); the transform is
+    // created and freed in this scope; buffers are sized to `pixels.len()` with the pixel count
+    // passed as len/3 for the 3-byte TYPE_RGB_8 format.
+    unsafe {
+        let t = sys::cmsCreateTransform(input.raw, TYPE_RGB_8, output.raw, TYPE_RGB_8, intent, 0);
+        assert!(!t.is_null(), "cmsCreateTransform failed");
+        sys::cmsDoTransform(
+            t,
+            pixels.as_ptr().cast(),
+            out.as_mut_ptr().cast(),
+            (pixels.len() / 3) as u32,
+        );
+        sys::cmsDeleteTransform(t);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
