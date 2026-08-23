@@ -770,6 +770,35 @@ pub fn write_simple_prefix_code(w: &mut BitWriter, symbols: &[u16]) {
 mod tests {
     use super::*;
 
+    /// `simple_symbols` decides whether the *simple* code-length description can carry an
+    /// alphabet at all, and every one of its rules is a rejection — so the function is only
+    /// pinned by the shapes it must turn down.
+    ///
+    /// Two symbols is the format's ceiling (the description has one 1-or-8-bit field and one
+    /// 8-bit field), both must sit at depth 1, and neither may run past the 8-bit field. A
+    /// three-symbol alphabet is the interesting rejection: it cannot have every symbol at depth
+    /// 1 either — Kraft forbids 3/2 — so a guard that let it through would be caught by the depth
+    /// rule anyway *unless* the lengths lie, which is exactly what this asserts against.
+    #[test]
+    fn simple_symbols_accepts_only_what_the_simple_description_can_carry() {
+        // One symbol at depth 1, and two: the two shapes it exists to accept.
+        assert_eq!(simple_symbols(&[1, 0, 0]), Some(vec![0]));
+        assert_eq!(simple_symbols(&[0, 1, 1]), Some(vec![1, 2]));
+        // Three symbols: over the ceiling, whatever their depths claim.
+        assert_eq!(simple_symbols(&[1, 1, 1]), None);
+        // No symbols at all: nothing to describe.
+        assert_eq!(simple_symbols(&[0, 0, 0]), None);
+        assert_eq!(simple_symbols(&[]), None);
+        // A symbol below depth 1 is a code the simple form cannot reconstruct.
+        assert_eq!(simple_symbols(&[2, 2, 0]), None);
+        // And a symbol past the 8-bit field, which is what a colour cache pushes the green
+        // alphabet over.
+        let mut wide = vec![0_u8; 300];
+        wide[0] = 1;
+        wide[280] = 1;
+        assert_eq!(simple_symbols(&wide), None);
+    }
+
     #[test]
     fn canonical_codes_and_decoder_agree_with_unused_symbols() {
         use crate::vp8l::bit_io::{BitReader, BitWriter};

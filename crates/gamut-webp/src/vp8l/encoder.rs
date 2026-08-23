@@ -612,7 +612,12 @@ fn tokenize(pixels: &[u32], cache_bits: u32, lz77: &Lz77Params) -> Vec<Token> {
         // insert makes `prev[i] == i`, which loops forever in `find`. The cost of not indexing `i`
         // is only that a distance-1 match from `i + 1` is invisible to the probe, which merely
         // makes the encoder slightly less eager to defer — never incorrect.
-        let candidate = refs.find(pixels, i);
+        // A zero-length match is discarded rather than trusted. `find` never returns one, but
+        // the copy branch advances `i` by exactly `len`, so a zero would leave the cursor where
+        // it was and this loop would append tokens until the allocator gave out — a hang, not a
+        // wrong answer, and one that takes the machine with it. The guard costs a comparison per
+        // pixel and turns the whole class into "no match here".
+        let candidate = refs.find(pixels, i).filter(|&(len, _)| len > 0);
         let defer = lz77.lazy
             && candidate.is_some_and(|(len, _)| {
                 refs.find(pixels, i + 1)
