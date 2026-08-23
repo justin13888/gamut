@@ -28,9 +28,22 @@ concurrency:
 jobs:
   # Mutate only the code changed by the PR. Fast and blocking.
   incremental:
+    # Sharded because the runners are preemptible. A single pass over a large PR's mutants runs
+    # 80-plus minutes, and runs of that length were being killed partway through — "the runner has
+    # received a shutdown signal" — at 51, 64 and 85 minutes across five attempts, every one of
+    # them having missed nothing. The work is embarrassingly parallel and cargo-mutants shards it
+    # natively, so four shards of roughly twenty minutes each finish inside the window instead of
+    # racing it. Same total compute, and a lost shard costs a quarter of the job rather than all
+    # of it.
     name: Incremental (PR diff)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      # Every shard must report: a green run means all four agreed, and one bad shard fails the
+      # gate on its own.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -56,12 +69,17 @@ jobs:
           echo "Changed files cargo-mutants will consider:"
           git --no-pager diff --stat "origin/${{ github.base_ref }}...HEAD"
       - name: Run cargo-mutants on the diff
-        run: cargo mutants --no-shuffle -vV --in-diff mutants.diff
+        # Round-robin rather than the default contiguous slices: mutants from one file land in one
+        # slice, and a file whose tests are slow would then load a single shard while the others
+        # idle. Interleaving spreads that evenly.
+        run: >-
+          cargo mutants --no-shuffle -vV --in-diff mutants.diff
+          --shard ${{ matrix.shard }}/4 --sharding round-robin
       - name: Upload mutants report
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: mutants-incremental
+          name: mutants-incremental-shard-${{ matrix.shard }}
           path: mutants.out
 
   # Full-workspace survey. Manual; informational only.
