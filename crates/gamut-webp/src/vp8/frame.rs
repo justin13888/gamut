@@ -2246,7 +2246,9 @@ mod tests {
                         }
                         let need =
                             u64::from(bit_cost(true, up)) + RECORD - u64::from(bit_cost(false, up));
-                        if need % gain == 0 && need / gain > 0 && need / gain < u64::from(u32::MAX)
+                        if need.is_multiple_of(gain)
+                            && need / gain > 0
+                            && need / gain < u64::from(u32::MAX)
                         {
                             solved = Some((plane, band, ctx, node, old, (need / gain) as u32));
                             break 'search;
