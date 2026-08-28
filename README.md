@@ -126,7 +126,7 @@ format.
 | `gamut-ifd`       | TIFF/IFD container core (byte order, field types, IFD I/O) — EXIF+TIFF | scaffolding (impl in progress, #34)    |
 | `gamut-exif`      | EXIF (Exif 3.0) metadata parser/serializer — built on gamut-ifd        | scaffolding (impl in progress, #34)    |
 | `gamut-icc`       | ICC color profile (ICC.1:2022) parser/serializer                      | stable (v1, #180)                      |
-| `gamut-cmm`       | ICC colour management module (transform engine) over gamut-icc profiles | in progress (#323)                     |
+| `gamut-cmm`       | ICC colour management module (transform engine) over gamut-icc profiles | epic #323 complete (P1–P7); unpublished |
 | `gamut-xmp`       | XMP (RDF/XML) metadata parser/serializer                              | scaffolding (impl in progress, #34)    |
 | `gamut-iptc`      | IPTC photo metadata (IIM + Core/Extension over XMP)                    | scaffolding (impl in progress, #34)    |
 | `gamut-metadata`  | Unified metadata facade over EXIF/XMP/ICC/IPTC (extract + embed)       | scaffolding (impl in progress, #34)    |
@@ -308,6 +308,23 @@ publishes every changed crate in dependency order, then creates the per-crate ta
 releases. Publishing authenticates via crates.io
 [Trusted Publishing](https://crates.io/docs/trusted-publishing) (OIDC) — no
 `CARGO_REGISTRY_TOKEN` secret is stored.
+
+That automation has two prerequisites that live outside this repository's files, and the
+pipeline stalls silently when either is missing (issue #377):
+
+1. **The release PR needs permission to exist.** The default `GITHUB_TOKEN` cannot open a pull
+   request unless *Settings → Actions → "Allow GitHub Actions to create and approve pull
+   requests"* is enabled. Without it, release-plz pushes the version-bump branch and then fails
+   with `"GitHub Actions is not permitted to create or approve pull requests." 403`, so no bump
+   ever merges — and the release job keeps verifying crates against stale *published*
+   dependencies rather than the versions on `master`. Setting a `RELEASE_PLZ_TOKEN` secret (a PAT
+   with `contents:write` + `pull-requests:write`) is the alternative;
+   [`release.yml`](.github/workflows/release.yml) prefers it over `GITHUB_TOKEN` when present.
+2. **A brand-new crate needs one manual first publish.** Trusted Publishing mints a token *for a
+   crate that already exists*, so the very first version of a new crate must be published once
+   with an owner-scoped token, after which OIDC takes over. Crates still awaiting that bootstrap
+   have no `<crate>-v<version>` tag: currently `gamut-cmm`, `gamut-deflate`, `gamut-dng`,
+   `gamut-jpeg`, `gamut-jxl-sys` and `gamut-png`.
 
 ## License
 
