@@ -376,16 +376,26 @@ impl DngEncoder {
             tags::CALIBRATION_ILLUMINANT1,
             Value::Short(vec![profile.calibration_illuminant1().code()]),
         );
-        ifd.set(
-            tags::AS_SHOT_NEUTRAL,
-            Value::Rational(
-                profile
-                    .as_shot_neutral()
-                    .iter()
-                    .map(|&x| urational(x))
-                    .collect(),
-            ),
-        );
+        // The two as-shot white-balance tags are mutually exclusive: a profile that records a
+        // chromaticity writes `AsShotWhiteXY` and leaves `AsShotNeutral` out, even though the
+        // derived neutral is available, because a reader must not have to reconcile two answers.
+        if let Some([x, y]) = profile.as_shot_white_xy() {
+            ifd.set(
+                tags::AS_SHOT_WHITE_XY,
+                Value::Rational(vec![urational(x), urational(y)]),
+            );
+        } else {
+            ifd.set(
+                tags::AS_SHOT_NEUTRAL,
+                Value::Rational(
+                    profile
+                        .as_shot_neutral()
+                        .iter()
+                        .map(|&x| urational(x))
+                        .collect(),
+                ),
+            );
+        }
 
         // Optional calibration / profile-identity fields.
         if let Some((matrix2, illuminant2)) = profile.second_illuminant() {

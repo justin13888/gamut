@@ -95,9 +95,10 @@ pub fn cct_from_xy(xy: [f64; 2]) -> Option<f64> {
         // The isotemperature line's direction, normalised.
         let length = (1.0 + line.slope * line.slope).sqrt();
         let (du, dv) = (1.0 / length, line.slope / length);
-        // Signed distance from the line: negative once the sample lies on its far side.
+        // Signed distance from the line; its sign flips once the sample lies on its far side,
+        // which is the crossing this walk is looking for.
         let distance = -(u - line.u) * dv + (v - line.v) * du;
-        if distance > 0.0 && index != last {
+        if distance.is_sign_positive() && index != last {
             previous_distance = distance;
             continue;
         }
@@ -111,8 +112,10 @@ pub fn cct_from_xy(xy: [f64; 2]) -> Option<f64> {
         } else {
             distance / span
         };
+        // `f` is pinned to 0 at `index == 1`, so the blend never reaches `LINES[0]`'s 0 mired
+        // (infinite temperature): the smallest value it can take is `LINES[1]`'s 10 mired.
         let mired = LINES[index - 1].mired * f + line.mired * (1.0 - f);
-        return (mired > 0.0).then(|| 1.0e6 / mired);
+        return Some(1.0e6 / mired);
     }
     None
 }
@@ -170,8 +173,53 @@ mod tests {
         let hot = cct_from_xy([0.24, 0.24]).expect("blue-of-locus still resolves");
         let cold = cct_from_xy([0.55, 0.40]).expect("red-of-locus still resolves");
         assert!(hot > cold, "{hot} K should be hotter than {cold} K");
-        // 1.5 - x + 6y == 0 has no CIE 1960 image.
+        // Past the *cold* end of the table entirely — deep red, well beyond the 1667 K last row.
+        // The walk must fall back to that row rather than running off the end with no answer.
+        let coldest = cct_from_xy([0.6500, 0.3300]).expect("past the last isotemperature line");
+        assert!(
+            (1600.0..1750.0).contains(&coldest),
+            "a sample past the table's cold end takes its endpoint, got {coldest} K"
+        );
+        // 1.5 - x + 6y == 0 has no CIE 1960 image, and neither does a non-finite chromaticity —
+        // including the ones where the transform leaves exactly one of `u`/`v` finite.
         assert_eq!(cct_from_xy([1.5, 0.0]), None);
         assert_eq!(cct_from_xy([f64::NAN, 0.33]), None);
+        assert_eq!(cct_from_xy([f64::INFINITY, 0.33]), None);
+        assert_eq!(cct_from_xy([0.33, f64::INFINITY]), None);
+        assert_eq!(cct_from_xy([f64::NEG_INFINITY, 0.33]), None);
+    }
+
+    /// The table is transcribed by hand from a book, so its shape is pinned rather than trusted:
+    /// walking the Planckian locus from infinite temperature down to 1667 K, reciprocal temperature
+    /// rises, both UCS coordinates rise, and every isotemperature line slopes negatively and more
+    /// steeply than the last. A dropped sign or a transposed digit breaks one of those.
+    #[test]
+    fn the_isotemperature_table_is_transcribed_consistently() {
+        assert_eq!(LINES.len(), 31, "Robertson's table has 31 rows");
+        assert_eq!(LINES[0].mired, 0.0, "the first row is infinite temperature");
+        assert_eq!(LINES[30].mired, 600.0, "the last row is 1667 K");
+        for (index, pair) in LINES.windows(2).enumerate() {
+            let (previous, line) = (&pair[0], &pair[1]);
+            assert!(
+                line.mired > previous.mired,
+                "row {index}: mired must rise, {} then {}",
+                previous.mired,
+                line.mired
+            );
+            assert!(
+                line.u > previous.u && line.v > previous.v,
+                "row {index}: the locus must advance in u and v"
+            );
+            assert!(
+                line.slope < 0.0 && previous.slope < 0.0,
+                "row {index}: isotemperature lines slope negatively"
+            );
+            assert!(
+                line.slope < previous.slope,
+                "row {index}: the slope must steepen, {} then {}",
+                previous.slope,
+                line.slope
+            );
+        }
     }
 }

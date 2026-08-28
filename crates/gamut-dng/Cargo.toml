@@ -24,6 +24,10 @@ jxl-encode = ["gamut-jxl/encode"]
 
 [dependencies]
 gamut-core.workspace = true
+# The DNG 1.7.1 §6 white-balance conversion is colour science, not container work: the
+# chromaticity → XYZ step, the 3×3 algebra, and the correlated-colour-temperature the
+# calibration interpolation weights on all come from the shared colour primitive.
+gamut-color.workspace = true
 # DNG is a TIFF/EP profile: the IFD container (incl. sub-IFD trees and the BigTIFF variant) is the
 # shared gamut-ifd primitive. `bigtiff` is enabled for the DNG 1.7 64-bit-offset variant.
 gamut-ifd = { workspace = true, features = ["bigtiff"] }

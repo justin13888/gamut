@@ -88,7 +88,9 @@ Dependency edges (a crate depends on those to its right):
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
   photometry, uncompressed/Deflate/lossless-JPEG, colour-calibration profile, EXIF/XMP/ICC
   metadata. Conformance-gated against the headless-built **Adobe DNG SDK**. ← ifd, bitstream,
-  core (MSB-first sub-byte packing reuses `gamut-bitstream`; `miniz_oxide` for Deflate).
+  color, core (MSB-first sub-byte packing reuses `gamut-bitstream`; the DNG §6 `AsShotWhiteXY` →
+  camera-neutral conversion reuses `gamut-color`'s chromaticity/3×3/CCT math; `miniz_oxide` for
+  Deflate).
 - **gamut-cli** (binary `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib).
   ← gamut. `gamut-cli` is the sandbox exercising implemented features: decodes PNG/JPEG/WebP/JXL
   input with gamut's own decoders (only PPM uses the third-party `image` crate) and encodes only

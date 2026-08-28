@@ -4,6 +4,8 @@
 // the reference implementation accepts.
 
 #include "dng_auto_ptr.h"
+#include "dng_camera_profile.h"
+#include "dng_color_spec.h"
 #include "dng_errors.h"
 #include "dng_exceptions.h"
 #include "dng_file_stream.h"
@@ -246,4 +248,45 @@ extern "C" int gdng_decode_lossless_jpeg(const uint8_t *data, size_t len, size_t
 
 // Releases a buffer returned by `gdng_read_raw` / `gdng_read_linear` /
 // `gdng_decode_lossless_jpeg`.
+// Returns the camera-neutral coordinates the reference implementation derives for the DNG at
+// `path`, as `*out_channels` doubles written to `out_neutral` (room for `kMaxColorPlanes`).
+//
+// For a file whose white balance is stored as `AsShotWhiteXY` (50729) rather than `AsShotNeutral`
+// (50728), that derivation *is* the DNG spec's "Translating White Balance xy Coordinates to Camera
+// Neutral Coordinates" (dng_color_spec::SetWhiteXY), so this is the oracle for that conversion.
+// The SDK reads 50729 only when 50728 is absent, so a file carrying neither — or carrying the
+// neutral — is reported as `dng_error_bad_format` rather than silently answering for the wrong tag.
+extern "C" int gdng_camera_neutral_from_white_xy(const char *path, uint32_t *out_channels,
+                                                 double *out_neutral) {
+  try {
+    dng_host host;
+    dng_info info;
+    AutoPtr<dng_negative> negative;
+    dng_error_code rc = read_negative(path, host, info, negative);
+    if (rc != dng_error_none) {
+      return rc;
+    }
+    if (!negative->HasCameraWhiteXY()) {
+      return dng_error_bad_format;
+    }
+    AutoPtr<dng_color_spec> spec(negative->MakeColorSpec(dng_camera_profile_id()));
+    spec->SetWhiteXY(negative->CameraWhiteXY());
+    const dng_vector &white = spec->CameraWhite();
+    uint32 channels = white.Count();
+    if (channels == 0 || channels > kMaxColorPlanes) {
+      return dng_error_unsupported_dng;
+    }
+    for (uint32 index = 0; index < channels; index++) {
+      out_neutral[index] = white[index];
+    }
+    *out_channels = channels;
+  } catch (const dng_exception &except) {
+    return except.ErrorCode();
+  } catch (...) {
+    return dng_error_unknown;
+  }
+
+  return dng_error_none;
+}
+
 extern "C" void gdng_free(uint16_t *data) { free(data); }
