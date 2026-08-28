@@ -23,6 +23,8 @@
 //! The filter strengths/levels are quality decisions (rate-distortion selection is deferred); both
 //! are deterministic monotonic placeholders scaled by `base_q_idx`.
 
+use crate::geom::PlaneGeom;
+
 /// The `loop_filter_level` (§5.9.11) the encoder signals and applies as a function of `base_q_idx`.
 /// `0` disables the filter (the level is then omitted for chroma and no filtering occurs). The exact
 /// level is a quality decision (rate-distortion selection is deferred); this is a deterministic
@@ -208,8 +210,11 @@ fn filter_sample(
 }
 
 /// Applies the deblocking loop filter to the coded-grid reconstruction planes in place (§7.14).
-/// `coded_w` is the plane row stride; `mi_cols` strides the per-MI maps; `width`/`height` are the
-/// visible dimensions for the `onScreen` test. The luma transform size per 4×4 MI cell comes from
+/// `geom` supplies each plane's row stride and its visible extent; `mi_cols` strides the per-MI
+/// maps, which stay on the **luma** grid, so a chroma coordinate is scaled back to it by
+/// [`PlaneGeom::mi_col`]/[`PlaneGeom::mi_row`]. Per §7.14.1 each plane walks its own sample grid —
+/// which is what makes chroma step `1 << subsampling` luma samples per edge — while the `onScreen`
+/// test stays in luma coordinates. The luma transform size per 4×4 MI cell comes from
 /// `tx_log2` (which, under `TX_MODE_SELECT`, can be smaller than the block); 4:4:4 chroma always uses
 /// the block-size transform, so its size is `mi_bsl + 2`. Only transform-block edges are filtered; the
 /// filter size is `Min(Tx_Width)` across the edge (capped at 16 luma / 8 chroma) — 4 (narrow) for any
@@ -219,10 +224,8 @@ fn filter_sample(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn deblock(
     planes: &mut [Vec<u16>; 3],
-    coded_w: usize,
+    geom: &[PlaneGeom; 3],
     mi_cols: usize,
-    width: usize,
-    height: usize,
     tx_log2: &[u8],
     tx_log2_h: &[u8],
     mi_bsl: &[u8],
@@ -248,6 +251,8 @@ pub(crate) fn deblock(
 
     for (plane_idx, plane) in planes.iter_mut().enumerate() {
         let is_luma = plane_idx == 0;
+        let g = geom[plane_idx];
+        let (coded_w, width, height) = (g.coded_w, g.w, g.h);
         let size_cap = if is_luma { 16 } else { 8 };
         // Transform width/height (log2) for this plane at MI `cell`: luma uses the signaled tx size;
         // 4:4:4 chroma uses the block-size transform (`mi_bsl + 2`) capped at TX_32X32 (chroma never
@@ -274,10 +279,10 @@ pub(crate) fn deblock(
         // pass must finish before the horizontal pass, which reads the vertical-filtered samples.
         let mut x = 4;
         while x < width {
-            let col = x >> 2;
+            let col = g.mi_col(x);
             let mut y = 0;
             while y < height {
-                let row = y >> 2;
+                let row = g.mi_row(y);
                 let txw = 1usize << txlog2(row * mi_cols + col);
                 if x % txw == 0 {
                     let prev_txw = 1usize << txlog2(row * mi_cols + (col - 1));
@@ -296,10 +301,10 @@ pub(crate) fn deblock(
         // each MI block when the row is a transform-block edge.
         let mut y = 4;
         while y < height {
-            let row = y >> 2;
+            let row = g.mi_row(y);
             let mut x = 0;
             while x < width {
-                let col = x >> 2;
+                let col = g.mi_col(x);
                 let txh = 1usize << txlog2_h(row * mi_cols + col);
                 if y % txh == 0 {
                     let prev_txh = 1usize << txlog2_h((row - 1) * mi_cols + col);
@@ -540,11 +545,12 @@ fn block_all_skip(mi_skip: &[u8], mi_cols: usize, r4: usize, c4: usize) -> bool 
 /// Applies the CDEF deringing filter (§7.15) to the deblocked reconstruction planes, returning the
 /// filtered planes. Operates on the coded grid; every 8×8 luma block is filtered (`Skips` is 0 and
 /// `cdef_bits` is 0, so a single signaled strength set applies everywhere). All reads are from the
-/// pre-CDEF (deblocked) input, so a fresh output is produced. 4:4:4 ⇒ chroma shares the luma grid and
-/// `Cdef_Uv_Dir` is the identity.
+/// pre-CDEF (deblocked) input, so a fresh output is produced. The block position and extent are
+/// scaled into each plane by its [`PlaneGeom`]; `Cdef_Uv_Dir` is the identity at 4:4:4 (and at
+/// 4:2:0), so the chroma direction is the luma one — 4:2:2 needs the real table and lands with #391.
 pub(crate) fn cdef(
     planes: &[Vec<u16>; 3],
-    coded_w: usize,
+    geom: &[PlaneGeom; 3],
     mi_skip: &[u8],
     mi_cols: usize,
     qindex: u8,
@@ -554,7 +560,8 @@ pub(crate) fn cdef(
     if cdef_disabled(y_pri, y_sec, uv_pri, uv_sec) {
         return out;
     }
-    let coded_h = planes[0].len() / coded_w;
+    // The sweep is over 8x8 **luma** blocks; each plane's own extent comes from its geometry.
+    let (coded_w, coded_h) = (geom[0].coded_w, geom[0].coded_h);
     let mut y0 = 0;
     while y0 < coded_h {
         let mut x0 = 0;
@@ -592,19 +599,21 @@ pub(crate) fn cdef(
                 CDEF_DAMPING,
                 dir,
             );
-            // Chroma (4:4:4): no variance scaling, damping reduced by 1, direction via the identity
-            // Cdef_Uv_Dir.
+            // Chroma: no variance scaling, damping reduced by 1, direction via `Cdef_Uv_Dir`.
+            // That table is the identity for both 4:4:4 and 4:2:0, so `y_dir` passes through; the
+            // 4:2:2 row is the only non-identity one (#391).
             let cdir = if uv_pri == 0 { 0 } else { y_dir };
             for plane in 1..3 {
+                let g = geom[plane];
                 cdef_filter_block(
                     &planes[plane],
                     &mut out[plane],
-                    coded_w,
-                    coded_h,
-                    x0,
-                    y0,
-                    8,
-                    8,
+                    g.coded_w,
+                    g.coded_h,
+                    x0 >> g.ss_x,
+                    y0 >> g.ss_y,
+                    8 >> g.ss_x,
+                    8 >> g.ss_y,
                     uv_pri,
                     uv_sec,
                     CDEF_DAMPING - 1,
@@ -842,7 +851,15 @@ pub(crate) fn superres_downscaled_width(upscaled: usize, denom: usize) -> usize 
 
 #[cfg(test)]
 mod tests {
+    use gamut_color::ChromaSubsampling;
+
     use super::*;
+
+    /// The 4:4:4 geometry of a `w`x`h` frame whose coded grid is `cw`x`ch`, as the tests below use
+    /// it: every plane full resolution, so all three share one `PlaneGeom`.
+    fn geom444(w: usize, h: usize, mi_cols: usize, mi_rows: usize) -> [PlaneGeom; 3] {
+        PlaneGeom::frame(w, h, mi_cols, mi_rows, ChromaSubsampling::Cs444)
+    }
 
     #[test]
     fn superres_x0_matches_spec() {
@@ -991,7 +1008,8 @@ mod tests {
         ];
         // 16×16 ⇒ 4×4 MI grid; no block is skip, so CDEF visits every 8×8.
         let mi_skip = vec![0u8; 4 * 4];
-        assert_eq!(cdef(&flat, 16, &mi_skip, 4, 255), flat);
+        let g = geom444(16, 16, 4, 4);
+        assert_eq!(cdef(&flat, &g, &mi_skip, 4, 255), flat);
 
         // CDEF only attenuates *small* oscillations (large diffs are constrained away to preserve
         // edges). A low-amplitude vertical stripe gives the direction search a clear direction and a
@@ -1006,7 +1024,7 @@ mod tests {
                 planes[0][y * 16 + x] = if x % 2 == 0 { 126 } else { 132 };
             }
         }
-        let out = cdef(&planes, 16, &mi_skip, 4, 255);
+        let out = cdef(&planes, &g, &mi_skip, 4, 255);
         assert_ne!(
             out[0], planes[0],
             "CDEF should dering a low-amplitude oscillation"
@@ -1026,8 +1044,9 @@ mod tests {
         let tx_log2 = vec![2u8; 4 * 4];
         let mi_bsl = vec![0u8; 4 * 4];
         let mi_dlf = vec![0i8; 4 * 4];
+        let g = geom444(16, 16, 4, 4);
         deblock(
-            &mut flat, 16, 4, 16, 16, &tx_log2, &tx_log2, &mi_bsl, &mi_bsl, &mi_dlf, 64,
+            &mut flat, &g, 4, &tx_log2, &tx_log2, &mi_bsl, &mi_bsl, &mi_dlf, 64,
         );
         assert!(flat[0].iter().all(|&v| v == 128));
 
@@ -1045,10 +1064,8 @@ mod tests {
         let before = planes[0].clone();
         deblock(
             &mut planes,
-            16,
+            &g,
             4,
-            16,
-            16,
             &tx_log2,
             &tx_log2,
             &mi_bsl,

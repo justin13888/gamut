@@ -29,6 +29,7 @@ use gamut_color::{Planar8, clip_pixel};
 use gamut_dsp::math::round2_signed;
 
 use crate::cdf;
+use crate::geom::PlaneGeom;
 use crate::quant::{ac_q, dc_q, dequant, quantize};
 use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 
@@ -286,7 +287,9 @@ struct Pred {
 /// lossy path and exported for the bit-exact decoder cross-check.
 pub(crate) struct Reconstruction {
     pub planes: [Vec<u16>; 3],
-    pub coded_w: usize,
+    /// Sample geometry of each plane; `planes[i]` is `geom[i].len()` samples strided by
+    /// `geom[i].coded_w`.
+    pub geom: [PlaneGeom; 3],
     /// Bits per sample (8, 10, or 12); the planes carry values in `0..=(1 << bit_depth) - 1`.
     pub bit_depth: u32,
     /// Post-deblock (pre-CDEF) luma, retained for the loop-restoration stripe boundaries. Loop
@@ -299,12 +302,12 @@ pub(crate) struct Reconstruction {
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
     planes: [&'a [u8]; 3],
-    width: usize,
-    height: usize,
+    /// Per-plane sample geometry. `geom[0]` is luma; the MI grid, the partition search and every
+    /// entropy context stay on the **luma** grid, so a site that indexes `mi_cols`/`mi_rows` reads
+    /// `geom[0]` even when it is working on a chroma plane.
+    geom: [PlaneGeom; 3],
     mi_cols: usize,
     mi_rows: usize,
-    coded_w: usize,
-    coded_h: usize,
     /// MI boundaries of the tile currently being encoded (`0`/`mi_cols`/`mi_rows` for a single tile).
     /// A tile decodes independently, so neighbour availability (prediction samples and symbol
     /// contexts) stops at the tile edge even when it is not the frame edge.
@@ -430,28 +433,20 @@ impl<'a> FrameEncoder<'a> {
         let height = planes.height() as usize;
         let mi_cols = 2 * ((width + 7) >> 3);
         let mi_rows = 2 * ((height + 7) >> 3);
-        let coded_w = mi_cols * 4;
-        let coded_h = mi_rows * 4;
+        let geom = PlaneGeom::frame(width, height, mi_cols, mi_rows, planes.subsampling());
         // 8-bit input today; the buffer and clamp range are bit-depth-generic for the M2 high-bit-
         // depth path.
         let bit_depth = 8u32;
         let recon = if qindex > 0 {
-            [
-                vec![0u16; coded_w * coded_h],
-                vec![0u16; coded_w * coded_h],
-                vec![0u16; coded_w * coded_h],
-            ]
+            std::array::from_fn(|p| vec![0u16; geom[p].len()])
         } else {
             [Vec::new(), Vec::new(), Vec::new()]
         };
         Self {
             planes: [planes.plane(0), planes.plane(1), planes.plane(2)],
-            width,
-            height,
+            geom,
             mi_cols,
             mi_rows,
-            coded_w,
-            coded_h,
             tile_c0: 0,
             tile_x0: 0,
             tile_c1: mi_cols,
@@ -523,8 +518,10 @@ impl<'a> FrameEncoder<'a> {
         const UNIT: usize = 256;
         // (offset, num_syms, k) for the three Wiener half-taps (§5.11.58 read_lr_unit).
         const TAPS: [(i32, i32, u32); 3] = [(5, 16, 1), (23, 32, 2), (17, 64, 3)];
-        let unit_cols = ((self.width + UNIT / 2) / UNIT).max(1);
-        let unit_rows = ((self.height + UNIT / 2) / UNIT).max(1);
+        // Luma geometry deliberately: loop restoration signals `RESTORE_NONE` for both chroma
+        // planes, so the unit grid is defined on luma alone (§5.11.57).
+        let unit_cols = ((self.geom[0].w + UNIT / 2) / UNIT).max(1);
+        let unit_rows = ((self.geom[0].h + UNIT / 2) / UNIT).max(1);
         let row_start = (r * 4).div_ceil(UNIT);
         let row_end = unit_rows.min(((r + 16) * 4).div_ceil(UNIT));
         let col_start = (c * 4).div_ceil(UNIT);
@@ -597,10 +594,8 @@ impl<'a> FrameEncoder<'a> {
         if self.qindex > 0 {
             crate::filter::deblock(
                 &mut planes,
-                self.coded_w,
+                &self.geom,
                 self.mi_cols,
-                self.width,
-                self.height,
                 &self.tx_log2,
                 &self.tx_log2_h,
                 &self.mi_bsl,
@@ -614,7 +609,7 @@ impl<'a> FrameEncoder<'a> {
             deblocked_luma = planes[0].clone();
             planes = crate::filter::cdef(
                 &planes,
-                self.coded_w,
+                &self.geom,
                 &self.mi_skip,
                 self.mi_cols,
                 self.qindex,
@@ -622,7 +617,7 @@ impl<'a> FrameEncoder<'a> {
         }
         let recon = Reconstruction {
             planes,
-            coded_w: self.coded_w,
+            geom: self.geom,
             bit_depth: self.bit_depth,
             deblocked_luma,
         };
@@ -631,9 +626,10 @@ impl<'a> FrameEncoder<'a> {
 
     /// Padded (edge-replicated) source sample of `plane` at coded-grid position `(x, y)`.
     fn sample(&self, plane: usize, x: usize, y: usize) -> i32 {
-        let xx = x.min(self.width - 1);
-        let yy = y.min(self.height - 1);
-        i32::from(self.planes[plane][yy * self.width + xx])
+        let g = self.geom[plane];
+        let xx = x.min(g.w - 1);
+        let yy = y.min(g.h - 1);
+        i32::from(self.planes[plane][yy * g.w + xx])
     }
 
     fn encode_partition(&mut self, r: usize, c: usize, bw: usize) {
@@ -1097,14 +1093,15 @@ impl<'a> FrameEncoder<'a> {
         for i in 0..bw {
             for j in 0..bw {
                 let idx = pal.index_map[i * bw + j] as usize;
-                self.recon[0][(sy + i) * self.coded_w + (sx + j)] = u16::from(pal.colors[idx]);
+                self.recon[0][(sy + i) * self.geom[0].coded_w + (sx + j)] =
+                    u16::from(pal.colors[idx]);
             }
         }
         for plane in 1..3 {
             let dc = clip_pixel(self.dc_pred(plane, sx, sy, bw, bw), self.bit_depth);
             for i in 0..bw {
                 for j in 0..bw {
-                    self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = dc;
+                    self.recon[plane][(sy + i) * self.geom[plane].coded_w + (sx + j)] = dc;
                 }
             }
         }
@@ -1507,7 +1504,10 @@ impl<'a> FrameEncoder<'a> {
             while sy < r * 4 + bh {
                 let mut sx = c * 4;
                 while sx < c * 4 + bw {
-                    if sx < self.coded_w && sy < self.coded_h {
+                    // Luma geometry deliberately: `sx`/`sy` are luma MI positions (`c * 4`,
+                    // `r * 4`) for every plane. Mapping them into each plane's own coordinates is
+                    // the subsampled residual loop's job (§5.11.34), which lands with #390.
+                    if sx < self.geom[0].coded_w && sy < self.geom[0].coded_h {
                         self.transform_block(plane, sx, sy, bw, ptx, pred, skip);
                     }
                     // BlockDecoded (§5.11.34) is updated after each *transform* block (not the whole
@@ -1587,7 +1587,7 @@ impl<'a> FrameEncoder<'a> {
         if skip {
             for (i, prow) in pred.chunks_exact(tw).enumerate() {
                 for (j, &pv) in prow.iter().enumerate() {
-                    self.recon[plane][(sy + i) * self.coded_w + (sx + j)] =
+                    self.recon[plane][(sy + i) * self.geom[plane].coded_w + (sx + j)] =
                         clip_pixel(pv, self.bit_depth);
                 }
             }
@@ -1655,7 +1655,7 @@ impl<'a> FrameEncoder<'a> {
         for i in 0..th {
             for j in 0..tw {
                 let v = clip_pixel(pred[i * tw + j] + resid[i * tw + j], self.bit_depth);
-                self.recon[plane][(sy + i) * self.coded_w + (sx + j)] = v;
+                self.recon[plane][(sy + i) * self.geom[plane].coded_w + (sx + j)] = v;
             }
         }
     }
@@ -1748,7 +1748,7 @@ impl<'a> FrameEncoder<'a> {
     fn dc_pred(&self, plane: usize, sx: usize, sy: usize, w: usize, h: usize) -> i32 {
         let nb = |x: usize, y: usize| -> i32 {
             if self.qindex > 0 {
-                i32::from(self.recon[plane][y * self.coded_w + x])
+                i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
             } else {
                 self.sample(plane, x, y)
             }
@@ -1794,7 +1794,9 @@ impl<'a> FrameEncoder<'a> {
     /// above-right / below-left 4×4 has been decoded (`BlockDecoded`, §5.11.34), in which case they
     /// are real samples.
     fn reference_4x4(&self, plane: usize, sx: usize, sy: usize) -> ([i32; 8], [i32; 8], i32) {
-        let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
+        let nb = |x: usize, y: usize| -> i32 {
+            i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
+        };
         let have_above = sy > 0;
         let have_left = sx > self.tile_x0;
 
@@ -1805,7 +1807,7 @@ impl<'a> FrameEncoder<'a> {
         );
         let have_above_right = self.block_decoded_at(by - 1, bx + 1);
         let have_below_left = self.block_decoded_at(by + 1, bx - 1);
-        let (max_x, max_y) = (self.coded_w - 1, self.coded_h - 1);
+        let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
         let mut above = [127i32; 8]; // (1 << (BitDepth-1)) - 1 when neither neighbour exists
         if have_above {
@@ -2072,7 +2074,9 @@ impl<'a> FrameEncoder<'a> {
         sy: usize,
         n: usize,
     ) -> (Vec<i32>, Vec<i32>, i32) {
-        let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
+        let nb = |x: usize, y: usize| -> i32 {
+            i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
+        };
         let have_above = sy > 0;
         let have_left = sx > self.tile_x0;
         let step = (n / 4) as isize;
@@ -2082,7 +2086,7 @@ impl<'a> FrameEncoder<'a> {
         );
         let have_above_right = self.block_decoded_at(by - 1, bx + step);
         let have_below_left = self.block_decoded_at(by + step, bx - 1);
-        let (max_x, max_y) = (self.coded_w - 1, self.coded_h - 1);
+        let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
         let mut above = vec![127i32; 2 * n];
         if have_above {
@@ -2199,10 +2203,12 @@ impl<'a> FrameEncoder<'a> {
         w: usize,
         h: usize,
     ) -> (Vec<i32>, Vec<i32>, i32) {
-        let nb = |x: usize, y: usize| -> i32 { i32::from(self.recon[plane][y * self.coded_w + x]) };
+        let nb = |x: usize, y: usize| -> i32 {
+            i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
+        };
         let have_above = sy > 0;
         let have_left = sx > self.tile_x0;
-        let (max_x, max_y) = (self.coded_w - 1, self.coded_h - 1);
+        let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
         let mut above = vec![127i32; w];
         if have_above {
@@ -2424,7 +2430,10 @@ impl<'a> FrameEncoder<'a> {
         let mut sum = 0i32;
         for i in 0..n {
             for j in 0..n {
-                let v = i32::from(self.recon[0][(sy + i) * self.coded_w + (sx + j)]) << 3;
+                // Luma stride, and luma coordinates: at 4:4:4 a chroma sample sits on the luma
+                // sample of the same index. The §7.11.5 box average that maps them under
+                // subsampling lands with #390.
+                let v = i32::from(self.recon[0][(sy + i) * self.geom[0].coded_w + (sx + j)]) << 3;
                 l[i * n + j] = v;
                 sum += v;
             }
@@ -3053,6 +3062,45 @@ mod tests {
 
     use super::*;
 
+    /// Geometry only — deliberately does **not** call `encode()`. The coding path is still 4:4:4
+    /// (`encode_with` refuses a subsampled source), so this pins what the geometry slice actually
+    /// delivers: `FrameEncoder` sizes and strides every plane independently, and `sample` clamps to
+    /// each plane's own edge. Without it, every subsampling shift in the encoder is exercised only
+    /// at `ss = 0`, where it is the identity and its mutants are unkillable.
+    #[test]
+    fn geometry_is_per_plane_for_a_subsampled_source() {
+        // 17x13 luma ⇒ mi 6x4 ⇒ coded 24x16; 4:2:0 chroma is 9x7 visible on a 12x8 coded grid.
+        let luma: Vec<u8> = (0..17 * 13).map(|i| (i % 251) as u8).collect();
+        let chroma: Vec<u8> = (0..9 * 7).map(|i| (i % 241) as u8).collect();
+        let planes = Planar8::from_planes_subsampled(
+            17,
+            13,
+            gamut_color::ChromaSubsampling::Cs420,
+            [luma, chroma.clone(), chroma.clone()],
+        )
+        .expect("valid 4:2:0 planes");
+        let e = FrameEncoder::new(&planes, 40);
+
+        assert_eq!((e.geom[0].w, e.geom[0].h), (17, 13));
+        assert_eq!((e.geom[0].coded_w, e.geom[0].coded_h), (24, 16));
+        assert_eq!((e.geom[1].w, e.geom[1].h), (9, 7));
+        assert_eq!((e.geom[1].coded_w, e.geom[1].coded_h), (12, 8));
+        assert_eq!(e.geom[1], e.geom[2]);
+        // Chroma coded extent is exactly half of luma's on both axes, and each reconstruction
+        // buffer is allocated at its own plane's size — not the luma one.
+        assert_eq!(e.geom[1].coded_w * 2, e.geom[0].coded_w);
+        assert_eq!(e.geom[1].coded_h * 2, e.geom[0].coded_h);
+        for p in 0..3 {
+            assert_eq!(e.recon[p].len(), e.geom[p].len(), "plane {p}");
+        }
+
+        // `sample` clamps to the *plane's* edge, not luma's: a chroma read past 9x7 replicates the
+        // chroma corner. Reading with the luma extent would index a different sample entirely.
+        assert_eq!(e.sample(1, 99, 99), e.sample(1, 8, 6));
+        assert_eq!(e.sample(1, 8, 6), i32::from(chroma[6 * 9 + 8]));
+        assert_eq!(e.sample(0, 99, 99), e.sample(0, 16, 12));
+    }
+
     #[test]
     fn neg_interleave_inverts_neg_deinterleave() {
         // §5.11.9 decoder side; neg_interleave is its exact inverse, so the round-trip must recover
@@ -3262,7 +3310,7 @@ mod tests {
         // 12×12 mid-grey image → the coded grid has a block at (4,4) with available neighbours.
         let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
-        let cw = e.coded_w;
+        let cw = e.geom[0].coded_w;
         // Above row at y=3, x=4..8; left col at x=3, y=4..8; top-left at (3,3).
         for j in 0..4 {
             e.recon[0][3 * cw + (4 + j)] = 100;
@@ -3299,8 +3347,8 @@ mod tests {
         // cells are marked available so both code paths read the same extended references.
         let p = Planar8::from_rgb8_identity(&[128u8; 16 * 16 * 3], 16, 16).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
-        let cw = e.coded_w;
-        for y in 0..e.coded_h {
+        let cw = e.geom[0].coded_w;
+        for y in 0..e.geom[0].coded_h {
             for x in 0..cw {
                 e.recon[0][y * cw + x] = ((x * 7 + y * 13 + 5) & 0xff) as u16;
             }
@@ -3319,8 +3367,8 @@ mod tests {
         // across all four zones), exercising the extended 16-sample reference arrays.
         let p = Planar8::from_rgb8_identity(&[128u8; 32 * 32 * 3], 32, 32).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
-        let cw = e.coded_w;
-        for y in 0..e.coded_h {
+        let cw = e.geom[0].coded_w;
+        for y in 0..e.geom[0].coded_h {
             for x in 0..cw {
                 e.recon[0][y * cw + x] = (((x * 11) ^ (y * 5 + 9)) & 0xff) as u16;
             }
@@ -3354,7 +3402,7 @@ mod tests {
         // top-left 100.
         let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
-        let cw = e.coded_w;
+        let cw = e.geom[0].coded_w;
         for (j, &v) in [60u16, 90, 120, 150].iter().enumerate() {
             e.recon[0][3 * cw + (4 + j)] = v;
         }
@@ -3391,7 +3439,7 @@ mod tests {
         // recursive result (the lower 4×2 filters the upper 4×2's predicted row 1, §7.11.2.3).
         let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
-        let cw = e.coded_w;
+        let cw = e.geom[0].coded_w;
         e.recon[0][3 * cw + 4] = 16; // AboveRow[0]
         let pred = e.predict_filter_intra(0, 4, 4, 4, 0);
         assert_eq!(
@@ -3407,7 +3455,7 @@ mod tests {
         // reference must reproduce that constant for all five filter-intra modes.
         let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
-        let cw = e.coded_w;
+        let cw = e.geom[0].coded_w;
         for k in 0..8 {
             e.recon[0][3 * cw + (4 + k)] = 77; // above row + above-right
             e.recon[0][(4 + k) * cw + 3] = 77; // left col + below-left
@@ -3429,7 +3477,7 @@ mod tests {
         // term Round2Signed(2*(L-avg), 6) is -3,-1,+1,+3, added to a flat DC chroma prediction.
         let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
-        let cw = e.coded_w;
+        let cw = e.geom[0].coded_w;
         for i in 0..4 {
             for j in 0..4 {
                 e.recon[0][(4 + i) * cw + (4 + j)] = (80 + 8 * j) as u16;
@@ -3455,7 +3503,7 @@ mod tests {
         // so D45 (pAngle 45) reads the real extended above-row samples 4..8.
         let p = Planar8::from_rgb8_identity(&[128u8; 12 * 12 * 3], 12, 12).unwrap();
         let mut e = FrameEncoder::new(&p, 32);
-        let cw = e.coded_w;
+        let cw = e.geom[0].coded_w;
         for (k, &v) in [10u16, 20, 30, 40, 50, 60, 70, 80].iter().enumerate() {
             e.recon[0][3 * cw + (4 + k)] = v; // above row incl. above-right (x=4..12)
         }
