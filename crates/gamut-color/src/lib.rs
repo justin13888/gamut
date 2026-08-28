@@ -42,8 +42,9 @@
 //!   both H.273 directions ship at these depths; what is missing is the AV1 encode path and a
 //!   [`Planar8`] geometry to carry them. Distinct from [`BitDepth::Sixteen`], which is outside the
 //!   AV1 profile set entirely and exists for the 16-bit still-image pipelines that share these
-//!   types); the subsampled formats ([`ChromaSubsampling::Cs422`] / `Cs420` / `Cs400`) as a
-//!   [`Planar8`] geometry; [`MatrixCoefficients::YCgCo`], the one modeled matrix with neither
+//!   types); the subsampled formats ([`ChromaSubsampling::Cs422`] / `Cs420` / `Cs400`) as an
+//!   *encode path* — [`Planar8`] now carries their plane geometry, but no encoder produces one yet;
+//!   [`MatrixCoefficients::YCgCo`], the one modeled matrix with neither
 //!   direction (it is a lifting transform, not a `Kr`/`Kb` matrix); and the HLG / BT.709 transfer
 //!   curves
 //!   ([`eotf_for`](transfer::eotf_for) returns `None` for these). These land with the milestones
