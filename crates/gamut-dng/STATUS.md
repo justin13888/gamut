@@ -232,9 +232,14 @@ use; additions are semver-additive.
 - **`AsShotWhiteXY`** (50729) as a typed alternative to `AsShotNeutral` — the tag surfaces
   verbatim through `ifd0_extra`; converting xy to camera neutral is DNG §6 rendering work and no
   real file in the corpus needs it. A file carrying only `AsShotWhiteXY` decodes with no profile.
-- **Restoring unaccounted bytes to their original offsets** — the preserving rewrite carries a
-  vendor preamble, interstitial filler and a trailer through verbatim and reports where each
-  landed, but the rebuilt directory layout cannot generally reproduce their absolute positions.
+- **Restoring *interior* unaccounted bytes to their original offsets** — #350 landed the leading
+  case: a vendor preamble now keeps its offset, because `gamut-ifd`'s writer reserves the
+  header/first-directory gap for it (`WriteOptions::with_preamble`), which is the position that
+  matters — Apple ProRAW's `APPLEDNG` sits there and a vendor tool looks for it there. Interstitial
+  filler and an appended trailer still keep only their bytes: an interstitial run's original
+  position is interior to a payload layout the rewrite does not reproduce (the strips it sat
+  between are re-packed), so there is no offset to restore it to. `PreservedSpan` reports both
+  offsets, so a caller can see which happened.
 - **Floating-point samples** (`SampleFormat = 3`, fp16 JPEG XL, the float predictors
   34894/34895) — rejected with typed errors on decode; the u16 sample model would need a float
   sibling.
