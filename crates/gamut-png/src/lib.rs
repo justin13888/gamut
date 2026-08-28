@@ -9,6 +9,14 @@
 //! surfaces ancillary metadata (EXIF/ICC/XMP/text) as raw payloads. Animation (APNG) is out of
 //! scope. Correctness in both directions is proven differentially against a vendored libpng.
 //!
+//! # Reading metadata without the pixels
+//!
+//! [`metadata`] walks the chunk stream and returns a [`PngMetadata`] — the EXIF/ICC/XMP/text
+//! payloads plus the parsed colour chunks (`cICP`, `sRGB`, `gAMA`, `cHRM`) — skipping IDAT by
+//! length, so no pixel data is read or inflated. It is the counterpart of `gamut_jpeg::metadata`
+//! and `gamut_webp::metadata`, and what a colour-space probe should call.
+//! [`PngDecoder::metadata`] is the same walk with a configurable inflation budget.
+//!
 //! # Pluggable IDAT backends
 //!
 //! The PNG codestream is the concatenated-IDAT **zlib stream**, and it is where PNG spends its
@@ -57,8 +65,10 @@ pub use abi::{AbiDeflater, AbiInflater, CODEC_ID_ZLIB, PIXEL_FORMAT_FILTERED_BYT
 pub use ancillary::{PhysicalUnit, SrgbIntent};
 pub use backend::{IdatDeflater, IdatInflater, IdatInfo};
 pub use color::ColorType;
-pub use decoded::{Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, TextChunk};
-pub use decoder::{PngDecoder, TransparencyKey};
+pub use decoded::{
+    Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, PngMetadata, TextChunk,
+};
+pub use decoder::{PngDecoder, TransparencyKey, metadata};
 pub use encoder::PngEncoder;
 pub use filter::{FilterStrategy, FilterType};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
