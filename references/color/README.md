@@ -50,6 +50,9 @@ constant they define is instead transcribed with its exact value in the tables b
 - **CIE 15:2004** (colorimetry — CIELab) — CIE, paywalled; the ε/κ junction rationals are
   transcribed in the *CIELab* section below, and the freely-published Lindbloom page above is
   the vendored transcription of the same equations.
+- **Wyszecki & Stiles, _Color Science: Concepts and Methods, Quantitative Data and Formulae_,
+  2nd ed. (Wiley, 1982), p. 228** (Robertson's isotemperature lines) — a book, not vendorable;
+  the 31-row table is transcribed in the *Correlated colour temperature* section below.
 
 ---
 
@@ -283,6 +286,28 @@ ceiling), verified against a fresh derivation in `crates/gamut/tests/xyb_icc.rs`
 −0.050022    0.5683655  −0.018344
 −1.387676    1.1145555   0.6857255
 ```
+
+---
+
+## Correlated colour temperature — Robertson's method
+
+`cct::cct_from_xy` implements Robertson's method: convert the chromaticity to CIE 1960 UCS
+`(u, v)`, walk a table of *isotemperature lines* — points on the Planckian locus, each with the
+slope of the constant-CCT line crossing it — find the pair the sample falls between, and
+interpolate in **reciprocal** temperature (mired), where the locus is near-linear.
+
+The table is Wyszecki & Stiles, 2nd ed., p. 228: 31 rows of `(mired, u, v, slope)` from 0 mired
+(∞ K) to 600 mired (1667 K), transcribed verbatim into `crates/gamut-color/src/cct.rs`. That table
+is also what the **Adobe DNG SDK** carries in `dng_temperature.cpp`, which is why the two agree:
+DNG 1.7.1's "One, Two, or Three Color Calibrations" requires "linear interpolation using inverse
+correlated color temperature", so a DNG reader must resolve a white point's CCT exactly this way to
+weight a camera's colour calibrations. `gamut-dng` uses it for the §6 `AsShotWhiteXY` conversion,
+gated against the SDK's own derivation.
+
+Accuracy is the method's, not the transcription's: the standard illuminants recover their nominal
+temperatures to within ~10–20 K, which is what interpolating a 31-row table buys. Distance from the
+locus (the "tint" axis the SDK also reports) is deliberately not modelled — calibration
+interpolation weights on CCT alone.
 
 ---
 
