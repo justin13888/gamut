@@ -4,10 +4,6 @@
 use crate::adler32::adler32;
 use crate::{block, dynamic, lz77, zlib};
 
-/// Largest input for which `Level::Best` runs the (quadratic-ish) optimal parse; above this it falls
-/// back to lazy matching with block splitting, which already lands at/below zlib-9.
-const OPTIMAL_PARSE_LIMIT: usize = 1 << 20;
-
 /// Compression effort, trading encode time for output size. Every level produces a correct stream;
 /// they differ only in ratio.
 ///
@@ -32,6 +28,7 @@ pub enum Level {
 pub struct DeflateEncoder {
     level: Level,
     effort: u8,
+    optimal_parse_limit: usize,
 }
 
 impl Default for DeflateEncoder {
@@ -45,12 +42,21 @@ impl DeflateEncoder {
     /// parse runs unless overridden by [`DeflateEncoder::with_effort`].
     pub const DEFAULT_EFFORT: u8 = 6;
 
+    /// The default [`Level::Best`] optimal-parse limit: the largest span the shortest-path parse
+    /// handles in one piece, unless overridden by [`DeflateEncoder::with_optimal_parse_limit`].
+    ///
+    /// 1 MiB, chosen so a single span's dynamic program stays cheap in both time and working set.
+    /// Inputs larger than this are parsed as consecutive spans of this size rather than falling
+    /// back to lazy matching, so total input size never decides whether the optimal parse runs.
+    pub const DEFAULT_OPTIMAL_PARSE_LIMIT: usize = 1 << 20;
+
     /// Creates an encoder at [`Level::Default`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             level: Level::Default,
             effort: Self::DEFAULT_EFFORT,
+            optimal_parse_limit: Self::DEFAULT_OPTIMAL_PARSE_LIMIT,
         }
     }
 
@@ -68,11 +74,27 @@ impl DeflateEncoder {
     /// `0` skips refinement entirely and emits the lazy seed parse — still with `Best`'s full
     /// match-finder depth and block splitting, and always a correct stream. Higher values only cost
     /// time: passes stop early once the parse reaches a fixed point. The knob is ignored at every
-    /// other level, and for inputs over 1 MiB, where `Best` falls back to lazy matching regardless
-    /// of effort.
+    /// other level.
     #[must_use]
     pub fn with_effort(mut self, effort: u8) -> Self {
         self.effort = effort;
+        self
+    }
+
+    /// Sets the [`Level::Best`] optimal-parse limit: the largest span the shortest-path parse
+    /// handles in one piece (default [`DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT`]).
+    ///
+    /// Input longer than the limit is parsed as consecutive spans of this size, each with its own
+    /// refined cost model and each free to reference the history before it, so encode cost grows
+    /// linearly in the input rather than with the span's own super-linear curve. Raising the limit
+    /// lets one cost model span more data — usually a small ratio win on homogeneous input — at a
+    /// disproportionate time cost; lowering it does the reverse. A limit below the 32 KiB LZ77
+    /// window is raised to it: a shorter span would re-prime more history than it parses.
+    ///
+    /// The knob is ignored at every other level.
+    #[must_use]
+    pub fn with_optimal_parse_limit(mut self, limit: usize) -> Self {
+        self.optimal_parse_limit = limit;
         self
     }
 
@@ -105,11 +127,12 @@ impl DeflateEncoder {
             Level::Fast | Level::Default | Level::Best => {
                 let chain = self.max_chain();
                 let tokens = if matches!(self.level, Level::Best) {
-                    if data.len() <= OPTIMAL_PARSE_LIMIT {
-                        lz77::parse_optimal(data, chain, u32::from(self.effort))
-                    } else {
-                        lz77::parse(data, chain, true)
-                    }
+                    lz77::parse_optimal(
+                        data,
+                        chain,
+                        u32::from(self.effort),
+                        self.optimal_parse_limit,
+                    )
                 } else {
                     // Fast = greedy, Default = lazy.
                     lz77::parse(data, chain, matches!(self.level, Level::Default))
@@ -167,6 +190,13 @@ mod tests {
         // Trailer is the big-endian Adler-32 of the *uncompressed* data.
         let trailer = &out[out.len() - 4..];
         assert_eq!(trailer, adler32(1, data).to_be_bytes());
+    }
+
+    /// The default optimal-parse limit is a documented number — README, STATUS.md and the
+    /// `with_optimal_parse_limit` doc all name 1 MiB — so it is pinned rather than merely derived.
+    #[test]
+    fn default_optimal_parse_limit_is_one_mebibyte() {
+        assert_eq!(DeflateEncoder::DEFAULT_OPTIMAL_PARSE_LIMIT, 1_048_576);
     }
 
     #[test]

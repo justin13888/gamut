@@ -41,7 +41,10 @@ Output size in bytes (zlib streams; lower is better), reproduced by `cargo bench
 length-limiting, vs. this crate's default 6 passes + a count-floor heuristic) is a few percent
 smaller again at a much higher cost. The pass budget is configurable via
 `DeflateEncoder::with_effort` (0 = the lazy seed parse only; 15 ≈ zopfli's budget), so size-vs-time
-curves can be swept along one axis. If you need inflate, streaming, or gzip framing, reach for
+curves can be swept along one axis. `DeflateEncoder::with_optimal_parse_limit` is the second axis:
+the optimal parse works in spans of at most 1 MiB by default, each with its own refined cost model
+and each free to reference the history before it, so input size alone never disables it. If you need
+inflate, streaming, or gzip framing, reach for
 `flate2`/`miniz_oxide` instead — this crate is deliberately narrower (see [Scope](#scope)).
 
 ## Usage
@@ -59,11 +62,13 @@ DeflateEncoder::new().compress(&data, &mut raw);
 let mut zlib = Vec::new();
 DeflateEncoder::new().with_level(Level::Best).zlib_compress(&data, &mut zlib);
 
-// Best with a zopfli-class effort budget (more optimal-parse passes, more time):
+// Best with a zopfli-class effort budget (more optimal-parse passes, more time) and a wider
+// optimal-parse span (one cost model over more data, more memory):
 let mut dense = Vec::new();
 DeflateEncoder::new()
     .with_level(Level::Best)
     .with_effort(15)
+    .with_optimal_parse_limit(4 << 20)
     .zlib_compress(&data, &mut dense);
 ```
 
