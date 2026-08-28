@@ -19,6 +19,9 @@
 //! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. Planes stay 4:4:4 — a
 //! luma–chroma matrix changes what the samples *mean*, not their geometry — so the caller supplies
 //! either GBR planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
+//! The encoder carries each plane's geometry independently, so a subsampled `Planar8` is described
+//! correctly end to end, but the *coding* path is still 4:4:4 and a subsampled source is rejected
+//! (the residual loop, entropy contexts and CfL all step chroma over the luma extent).
 //!
 //! The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, quantizer matrices, and the
 //! AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
@@ -33,6 +36,7 @@
 mod cdf;
 mod encoder;
 mod filter;
+mod geom;
 mod headers;
 pub mod quant;
 mod tile;

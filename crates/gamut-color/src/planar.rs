@@ -3,6 +3,7 @@
 
 use gamut_core::{Dimensions, Error, ImageRef, Result, Rgb8};
 
+use crate::format::ChromaSubsampling;
 use crate::ycbcr::RgbToYcbcr;
 
 /// Maps an interleaved RGB buffer (`n` pixels) to identity GBR planes (`Y=G, U=B, V=R`).
@@ -45,12 +46,19 @@ fn rgb_to_ycbcr_planes(rgb: &[u8], n: usize, matrix: RgbToYcbcr) -> [Vec<u8>; 3]
 /// end-to-end round-trip (decode via `avifdec`) is the single source of truth for its correctness.
 ///
 /// For any other matrix the planes are **Y, Cb, Cr** in AV1's `Y/U/V` order;
-/// [`Planar8::from_rgb8_matrix`] applies the H.273 transform of [`RgbToYcbcr`]. Chroma stays at
-/// full resolution either way — subsampled (4:2:0 / 4:2:2) plane geometry is not modelled here yet.
+/// [`Planar8::from_rgb8_matrix`] applies the H.273 transform of [`RgbToYcbcr`].
+///
+/// The buffer carries its [`ChromaSubsampling`], so the chroma planes need not be full resolution.
+/// Every RGB constructor produces [`Cs444`](ChromaSubsampling::Cs444); subsampled buffers are built
+/// with [`from_planes_subsampled`](Self::from_planes_subsampled). The *format* is stored rather than
+/// three plane sizes, so there is no inconsistent state to keep in sync —
+/// [`plane_dimensions`](Self::plane_dimensions) derives each plane's geometry from
+/// `(width, height, subsampling)`.
 #[derive(Debug, Clone)]
 pub struct Planar8 {
     width: u32,
     height: u32,
+    subsampling: ChromaSubsampling,
     planes: [Vec<u8>; 3],
 }
 
@@ -87,6 +95,7 @@ impl Planar8 {
         Ok(Self {
             width,
             height,
+            subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_gbr_planes(rgb, n),
         })
     }
@@ -103,6 +112,7 @@ impl Planar8 {
         Self {
             width,
             height,
+            subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_gbr_planes(img.as_samples(), n),
         }
     }
@@ -149,6 +159,7 @@ impl Planar8 {
         Ok(Self {
             width,
             height,
+            subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_ycbcr_planes(rgb, n, matrix),
         })
     }
@@ -165,6 +176,7 @@ impl Planar8 {
         Self {
             width,
             height,
+            subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_ycbcr_planes(img.as_samples(), n, matrix),
         }
     }
@@ -177,32 +189,103 @@ impl Planar8 {
     /// Returns [`Error::InvalidInput`] if any plane's length is not `width * height`, or if that
     /// product overflows `usize`.
     pub fn from_planes(width: u32, height: u32, planes: [Vec<u8>; 3]) -> Result<Self> {
+        Self::from_planes_subsampled(width, height, ChromaSubsampling::Cs444, planes)
+    }
+
+    /// Builds a `Planar8` from three planes whose chroma is subsampled by `subsampling`.
+    ///
+    /// Plane 0 must be `width * height` samples; planes 1 and 2 must each match
+    /// [`ChromaSubsampling::chroma_dimensions`] for `(width, height)` — **ceiling** division on the
+    /// subsampled axes, so a 5×3 image in 4:2:0 needs 3×2 chroma planes.
+    /// [`ChromaSubsampling::Cs400`] has no chroma, so both chroma planes must be empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if any plane's length does not match its own dimensions, or
+    /// if `width * height` overflows `usize`.
+    pub fn from_planes_subsampled(
+        width: u32,
+        height: u32,
+        subsampling: ChromaSubsampling,
+        planes: [Vec<u8>; 3],
+    ) -> Result<Self> {
         let n = Dimensions { width, height }.num_pixels().ok_or_else(|| {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "image dimensions overflow usize")
         })?;
-        if planes.iter().any(|p| p.len() != n) {
+        if planes[0].len() != n {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "plane length != width * height",
+                "luma plane length != width * height",
+            ));
+        }
+        let (cw, ch) = subsampling.chroma_dimensions(width, height);
+        // Checked per plane, not as a pair: a length mismatch confined to U or to V must not be
+        // masked by the other being right.
+        let chroma_len = cw as usize * ch as usize;
+        if planes[1].len() != chroma_len {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "u plane length != chroma dimensions",
+            ));
+        }
+        if planes[2].len() != chroma_len {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "v plane length != chroma dimensions",
             ));
         }
         Ok(Self {
             width,
             height,
+            subsampling,
             planes,
         })
     }
 
     /// Reverses [`Planar8::from_rgb8_identity`], producing an interleaved 8-bit RGB buffer.
+    ///
+    /// For a subsampled buffer the chroma planes are expanded by **nearest-neighbour replication**
+    /// (each output sample reads `plane[(y >> ss_y) * cw + (x >> ss_x)]`). Identity coefficients
+    /// require 4:4:4 in a conformant AV1 stream (§6.4.2), so this path exists to keep the accessor
+    /// total, not as a resampling filter. [`ChromaSubsampling::Cs400`] has no chroma planes and
+    /// yields gray (`R = G = B = Y`).
     #[must_use]
     pub fn to_rgb8_identity(&self) -> Vec<u8> {
         let n = self.width as usize * self.height as usize;
         let (g, b, r) = (&self.planes[0], &self.planes[1], &self.planes[2]);
         let mut out = vec![0u8; n * 3];
-        for i in 0..n {
-            out[i * 3] = r[i];
-            out[i * 3 + 1] = g[i];
-            out[i * 3 + 2] = b[i];
+        if self.subsampling == ChromaSubsampling::Cs444 {
+            // Fast path: every plane shares the luma index, so this is a straight de-interleave.
+            for i in 0..n {
+                out[i * 3] = r[i];
+                out[i * 3 + 1] = g[i];
+                out[i * 3 + 2] = b[i];
+            }
+            return out;
+        }
+        if self.subsampling == ChromaSubsampling::Cs400 {
+            for i in 0..n {
+                out[i * 3] = g[i];
+                out[i * 3 + 1] = g[i];
+                out[i * 3 + 2] = g[i];
+            }
+            return out;
+        }
+        let (sx, sy) = self.subsampling.subsampling();
+        let (cw, _) = self.subsampling.chroma_dimensions(self.width, self.height);
+        let (w, cw) = (self.width as usize, cw as usize);
+        for y in 0..self.height as usize {
+            // In bounds without a runtime check: for `x < width`, `x >> sx` is at most
+            // `(width - 1) >> sx`, which is strictly less than `ceil(width / (1 << sx))` = `cw`.
+            // The same argument bounds the row against the chroma height.
+            let crow = (y >> sy) * cw;
+            for x in 0..w {
+                let i = y * w + x;
+                let ci = crow + (x >> sx);
+                out[i * 3] = r[ci];
+                out[i * 3 + 1] = g[i];
+                out[i * 3 + 2] = b[ci];
+            }
         }
         out
     }
@@ -219,7 +302,32 @@ impl Planar8 {
         self.height
     }
 
+    /// The chroma subsampling of the coded planes.
+    #[must_use]
+    pub fn subsampling(&self) -> ChromaSubsampling {
+        self.subsampling
+    }
+
+    /// The dimensions of plane `index`: `(width, height)` for luma, and
+    /// [`ChromaSubsampling::chroma_dimensions`] for the two chroma planes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= 3`, matching [`plane`](Self::plane).
+    #[must_use]
+    pub fn plane_dimensions(&self, index: usize) -> (u32, u32) {
+        match index {
+            0 => (self.width, self.height),
+            1 | 2 => self.subsampling.chroma_dimensions(self.width, self.height),
+            _ => panic!("plane index {index} out of range (0..3)"),
+        }
+    }
+
     /// The row-major samples of plane `index` (`0 = Y/G, 1 = U/B, 2 = V/R`).
+    ///
+    /// The slice is `w * h` samples for the plane's own
+    /// [`plane_dimensions`](Self::plane_dimensions), which for a subsampled buffer is smaller than
+    /// the luma plane.
     ///
     /// # Panics
     ///
@@ -327,5 +435,153 @@ mod tests {
         for i in 0..3 {
             assert_eq!(from_view.plane(i), from_slice.plane(i));
         }
+    }
+
+    #[test]
+    fn plane_dimensions_follow_the_subsampling() {
+        // 4:4:4 from an RGB constructor: every plane is full resolution.
+        let p = Planar8::from_rgb8_identity(&[0; 5 * 3 * 3], 5, 3).unwrap();
+        assert_eq!(p.subsampling(), ChromaSubsampling::Cs444);
+        for i in 0..3 {
+            assert_eq!(p.plane_dimensions(i), (5, 3));
+        }
+
+        // Odd dimensions are the interesting case: 5x3 in 4:2:0 has 3x2 chroma (ceiling), and in
+        // 4:2:2 has 3x3. A mutant that floors either axis produces 2x1 / 2x3 and dies here.
+        let p420 = Planar8::from_planes_subsampled(
+            5,
+            3,
+            ChromaSubsampling::Cs420,
+            [vec![0; 15], vec![0; 6], vec![0; 6]],
+        )
+        .unwrap();
+        assert_eq!(p420.plane_dimensions(0), (5, 3));
+        assert_eq!(p420.plane_dimensions(1), (3, 2));
+        assert_eq!(p420.plane_dimensions(2), (3, 2));
+
+        let p422 = Planar8::from_planes_subsampled(
+            5,
+            3,
+            ChromaSubsampling::Cs422,
+            [vec![0; 15], vec![0; 9], vec![0; 9]],
+        )
+        .unwrap();
+        assert_eq!(p422.plane_dimensions(1), (3, 3));
+    }
+
+    #[test]
+    fn from_planes_subsampled_rejects_a_wrong_luma_plane() {
+        // 5x3 in 4:2:0 ⇒ luma 15, chroma 3x2 = 6 each.
+        let err = Planar8::from_planes_subsampled(
+            5,
+            3,
+            ChromaSubsampling::Cs420,
+            [vec![0; 14], vec![0; 6], vec![0; 6]],
+        )
+        .expect_err("short luma plane");
+        // Asserting the specific diagnostic, not `is_err()`: the chroma checks below would reject a
+        // great many wrong inputs too, so only the message distinguishes this guard from them.
+        assert_eq!(
+            err.static_message(),
+            Some("luma plane length != width * height")
+        );
+    }
+
+    #[test]
+    fn from_planes_subsampled_rejects_a_wrong_u_plane() {
+        let err = Planar8::from_planes_subsampled(
+            5,
+            3,
+            ChromaSubsampling::Cs420,
+            [vec![0; 15], vec![0; 15], vec![0; 6]],
+        )
+        .expect_err("full-resolution u plane");
+        assert_eq!(
+            err.static_message(),
+            Some("u plane length != chroma dimensions")
+        );
+    }
+
+    #[test]
+    fn from_planes_subsampled_rejects_a_wrong_v_plane() {
+        // Separate from the U case on purpose: a guard that validated only `planes[1]` would pass
+        // the test above and fail only here.
+        let err = Planar8::from_planes_subsampled(
+            5,
+            3,
+            ChromaSubsampling::Cs420,
+            [vec![0; 15], vec![0; 6], vec![0; 15]],
+        )
+        .expect_err("full-resolution v plane");
+        assert_eq!(
+            err.static_message(),
+            Some("v plane length != chroma dimensions")
+        );
+    }
+
+    #[test]
+    fn from_planes_is_the_four_four_four_case_of_from_planes_subsampled() {
+        let planes = [vec![1u8; 6], vec![2; 6], vec![3; 6]];
+        let a = Planar8::from_planes(3, 2, planes.clone()).unwrap();
+        let b = Planar8::from_planes_subsampled(3, 2, ChromaSubsampling::Cs444, planes).unwrap();
+        assert_eq!(a.subsampling(), ChromaSubsampling::Cs444);
+        assert_eq!(a.subsampling(), b.subsampling());
+        for i in 0..3 {
+            assert_eq!(a.plane(i), b.plane(i));
+            assert_eq!(a.plane_dimensions(i), b.plane_dimensions(i));
+        }
+    }
+
+    #[test]
+    fn to_rgb8_identity_replicates_subsampled_chroma() {
+        // 3x3 in 4:2:0 ⇒ 2x2 chroma. Distinct chroma values per quadrant pin the replication map
+        // and, at the odd right column and bottom row, the edge clamp implied by ceiling division.
+        let luma: Vec<u8> = (0..9).collect();
+        let u = vec![10u8, 20, 30, 40];
+        let v = vec![50u8, 60, 70, 80];
+        let p =
+            Planar8::from_planes_subsampled(3, 3, ChromaSubsampling::Cs420, [luma, u, v]).unwrap();
+        let rgb = p.to_rgb8_identity();
+        // Identity order is R=V, G=Y, B=U. Chroma index is (y >> 1) * 2 + (x >> 1).
+        let at = |x: usize, y: usize| {
+            let i = (y * 3 + x) * 3;
+            (rgb[i], rgb[i + 1], rgb[i + 2])
+        };
+        assert_eq!(at(0, 0), (50, 0, 10));
+        assert_eq!(at(1, 0), (50, 1, 10)); // same chroma sample as (0,0)
+        assert_eq!(at(2, 0), (60, 2, 20)); // odd right column reads chroma column 1
+        assert_eq!(at(0, 2), (70, 6, 30)); // odd bottom row reads chroma row 1
+        assert_eq!(at(2, 2), (80, 8, 40));
+    }
+
+    #[test]
+    fn to_rgb8_identity_is_unchanged_on_the_four_four_four_fast_path() {
+        // The general path must agree with the fast path wherever both are defined, so a 4:4:4
+        // buffer built through `from_planes_subsampled` round-trips identically.
+        let rgb: Vec<u8> = (0..(4 * 3 * 3) as u8).collect();
+        let p = Planar8::from_rgb8_identity(&rgb, 4, 3).unwrap();
+        assert_eq!(p.to_rgb8_identity(), rgb);
+    }
+
+    #[test]
+    fn to_rgb8_identity_of_monochrome_is_gray() {
+        let p = Planar8::from_planes_subsampled(
+            2,
+            2,
+            ChromaSubsampling::Cs400,
+            [vec![7, 8, 9, 10], Vec::new(), Vec::new()],
+        )
+        .unwrap();
+        assert_eq!(
+            p.to_rgb8_identity(),
+            vec![7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "plane index 3 out of range")]
+    fn plane_dimensions_rejects_an_out_of_range_index() {
+        let p = Planar8::from_rgb8_identity(&[0; 3], 1, 1).unwrap();
+        let _ = p.plane_dimensions(3);
     }
 }
