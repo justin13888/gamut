@@ -170,9 +170,12 @@ mise; [nasm](https://www.nasm.us), needed to assemble the aom/dav1d x86 SIMD, is
 vendored source tarball by the oracle build scripts, so it is not a system dependency). Those
 tests link reference codecs (libaom, dav1d, libavif) built from the git submodules under
 `third_party/` via the dev-only oracle crates in `tooling/`; nothing is taken from
-system-installed codecs. libaom — the AV1 reference codec — is the definitive AVIF/AV1 oracle
-(see [`references/av1`](references/av1/README.md)). Install pkg-config on Debian/Ubuntu with
-`sudo apt-get install pkg-config` (macOS: `brew install pkg-config`).
+system-installed codecs. The `aom` and `dav1d` submodules are marked `update = none`, so a
+recursive submodule update skips them and taking any gamut crate as a git dependency does not
+drag in ~440 MiB of codecs Cargo never builds; `mise run fetch-av1-oracles` pulls them when you
+want the AV1/AVIF oracle tests. libaom — the AV1 reference codec — is the definitive AVIF/AV1
+oracle (see [`references/av1`](references/av1/README.md)). Install pkg-config on Debian/Ubuntu
+with `sudo apt-get install pkg-config` (macOS: `brew install pkg-config`).
 
 Those native builds are **hermetic to exactly what they configure**, including the toolchain: if
 your shell exports a compiler cache (`CC="sccache gcc"`, `CMAKE_C_COMPILER_LAUNCHER=ccache`, a
@@ -191,6 +194,10 @@ git submodule update --init --recursive
 # Dev tooling + git hooks (see Prerequisites; also needs system pkg-config).
 mise trust && mise install
 hk install
+
+# aom and dav1d are `update = none`, so the checkout above skips them (~440 MiB a consumer taking
+# gamut as a git dependency would otherwise pay for). Fetch them for the AV1/AVIF oracle tests:
+mise run fetch-av1-oracles
 
 cargo build --workspace
 cargo test --workspace

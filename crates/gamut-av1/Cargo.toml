@@ -25,7 +25,8 @@ gamut-bitstream.workspace = true
 # libaom (the AV1 reference codec) as the primary, definitive reconstruction oracle, and
 # dav1d as an independent corroborating decoder — both FFI to vendored, statically-linked C
 # libraries. Dev-only: the shipped library is C-free and needs no decoder. Building these
-# tests requires cmake/meson/ninja/nasm and the `third_party/{aom,dav1d}` submodules.
+# tests requires cmake/meson/ninja/nasm and the `third_party/{aom,dav1d}` submodules. Both are
+# `update = none`, so fetch them with `mise run fetch-av1-oracles` (issue #378).
 aom-oracle = { path = "../../tooling/aom-oracle" }
 dav1d-oracle = { path = "../../tooling/dav1d-oracle" }
 divan.workspace = true

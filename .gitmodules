@@ -1,6 +1,15 @@
+# The AV1 reference codecs — issue #378. `update = none` keeps them out of
+# `git submodule update --init --recursive`: together they are ~390 MiB of git objects (~440 MiB
+# once checked out), and Cargo
+# fetches every submodule when any gamut crate is taken as a git dependency, so a consumer that
+# only wants the Rust crates would otherwise pay for both. Only the dev-only oracles under
+# `tooling/` need them (`aom-oracle`, `dav1d-oracle`, and `libavif-oracle`, which links dav1d).
+# Fetch them explicitly:
+#     mise run fetch-av1-oracles
 [submodule "third_party/dav1d"]
 	path = third_party/dav1d
 	url = https://code.videolan.org/videolan/dav1d.git
+	update = none
 [submodule "third_party/libavif"]
 	path = third_party/libavif
 	url = https://github.com/AOMediaCodec/libavif.git
@@ -22,9 +31,12 @@
 [submodule "third_party/lcms2"]
 	path = third_party/lcms2
 	url = https://github.com/mm2/Little-CMS
+# `update = none` — see the dav1d entry at the top of this file. aom is almost all of the cost
+# (~380 MiB of the ~390 MiB): `mise run fetch-av1-oracles`.
 [submodule "third_party/aom"]
 	path = third_party/aom
 	url = https://aomedia.googlesource.com/aom
+	update = none
 [submodule "third_party/libjpeg-turbo"]
 	path = third_party/libjpeg-turbo
 	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git

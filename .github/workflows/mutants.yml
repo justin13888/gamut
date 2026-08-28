@@ -48,8 +48,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # The cross-check (oracle) tests link vendored dav1d/libavif from these submodules;
-          # mutants in gamut-av1/avif/webp need them to build a green baseline.
+          # The cross-check (oracle) tests link the vendored codecs in these submodules; mutants
+          # in gamut-av1/avif/webp need them to build a green baseline. `aom`/`dav1d` are
+          # `update = none` and arrive via the explicit fetch step below, not this checkout.
           submodules: recursive
           # Full history so we can diff against the PR's base branch.
           fetch-depth: 0
@@ -63,6 +64,11 @@ jobs:
           # Only cargo-mutants — a bare `mise install` would also build every other
           # mise.toml tool (convco, cargo-edit, …) that this job doesn't need.
           install_args: cargo:cargo-mutants
+      # `aom`/`dav1d` are `update = none` in `.gitmodules` (issue #378), so the `recursive`
+      # checkout above deliberately skips them; the oracle tests this job's baseline builds need
+      # them, so it pulls them explicitly. Every other submodule still arrives with the checkout.
+      - name: Fetch the AV1 oracle submodules
+        run: mise run fetch-av1-oracles
       - name: Compute changed regions vs base branch
         run: |
           git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
@@ -102,6 +108,11 @@ jobs:
           # Only cargo-mutants — a bare `mise install` would also build every other
           # mise.toml tool (convco, cargo-edit, …) that this job doesn't need.
           install_args: cargo:cargo-mutants
+      # `aom`/`dav1d` are `update = none` in `.gitmodules` (issue #378), so the `recursive`
+      # checkout above deliberately skips them; the oracle tests this job's baseline builds need
+      # them, so it pulls them explicitly. Every other submodule still arrives with the checkout.
+      - name: Fetch the AV1 oracle submodules
+        run: mise run fetch-av1-oracles
       - name: Run cargo-mutants over the whole workspace
         # Informational: surviving mutants in existing code don't fail the run.
         continue-on-error: true

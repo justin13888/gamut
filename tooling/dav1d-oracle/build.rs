@@ -16,7 +16,8 @@ fn main() {
     let meson_build = src.join("meson.build");
     assert!(
         meson_build.exists(),
-        "vendored dav1d not found at {} — run `git submodule update --init --recursive`",
+        "vendored dav1d not found at {} — `update = none` in .gitmodules keeps it out of a \
+         recursive submodule update; run `mise run fetch-av1-oracles`",
         src.display()
     );
 
