@@ -46,8 +46,15 @@
 //!   [`Planar8`] geometry; [`MatrixCoefficients::YCgCo`], the one modeled matrix with neither
 //!   direction (it is a lifting transform, not a `Kr`/`Kb` matrix); and the HLG / BT.709 transfer
 //!   curves
-//!   ([`eotf_for`](transfer::eotf_for) returns `None` for these). These land with the milestones
-//!   tracked in `gamut-avif/STATUS.md`.
+//!   ([`eotf_for`](transfer::eotf_for) and [`oetf_for`](transfer::oetf_for) both return `None` for
+//!   these). These land with the milestones tracked in `gamut-avif/STATUS.md`.
+//!
+//! [`oetf_for`](transfer::oetf_for) additionally returns `None` for `Pq` / `Bt2020_10`, where
+//! [`eotf_for`](transfer::eotf_for) returns `Some`: that arm is the tone-mapping
+//! [`bt2020_pq_to_sdr`](transfer::bt2020_pq_to_sdr), which is not invertible. The standards-pure
+//! pair [`pq_eotf`](transfer::pq_eotf) / [`pq_oetf`](transfer::pq_oetf) is exact in both
+//! directions. [`SourceTransfer::eotf`](profile::SourceTransfer::eotf) — the dispatch over the
+//! gamuts with no CICP transfer code point — likewise has no inverse yet.
 #![forbid(unsafe_code)]
 
 pub mod cicp;

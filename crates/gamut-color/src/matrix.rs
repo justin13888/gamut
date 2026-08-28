@@ -28,15 +28,27 @@ pub const BRADFORD: [[f64; 3]; 3] = [
 ];
 
 // Primaries as [R, G, B] chromaticity pairs (see references/color/README.md).
-const SRGB_PRIMARIES: [[f64; 2]; 3] = [[0.6400, 0.3300], [0.3000, 0.6000], [0.1500, 0.0600]];
-const DISPLAY_P3_PRIMARIES: [[f64; 2]; 3] = [[0.6800, 0.3200], [0.2650, 0.6900], [0.1500, 0.0600]];
+pub(crate) const SRGB_PRIMARIES: [[f64; 2]; 3] =
+    [[0.6400, 0.3300], [0.3000, 0.6000], [0.1500, 0.0600]];
+pub(crate) const DISPLAY_P3_PRIMARIES: [[f64; 2]; 3] =
+    [[0.6800, 0.3200], [0.2650, 0.6900], [0.1500, 0.0600]];
 const ADOBE_RGB_PRIMARIES: [[f64; 2]; 3] = [[0.6400, 0.3300], [0.2100, 0.7100], [0.1500, 0.0600]];
-const BT2020_PRIMARIES: [[f64; 2]; 3] = [[0.7080, 0.2920], [0.1700, 0.7970], [0.1310, 0.0460]];
+pub(crate) const BT2020_PRIMARIES: [[f64; 2]; 3] =
+    [[0.7080, 0.2920], [0.1700, 0.7970], [0.1310, 0.0460]];
 const PROPHOTO_PRIMARIES: [[f64; 2]; 3] = [
     [0.734699, 0.265301],
     [0.159597, 0.840403],
     [0.036598, 0.000105],
 ];
+
+// The two H.273 primary sets with no colour-science `Gamut` counterpart. Both are D65, and they
+// are *not* interchangeable despite both being called "BT.601": code point 5 is the 625-line
+// (PAL/SECAM) set from EBU Tech. 3213-E, code point 6 the 525-line (NTSC SMPTE 170M) set.
+// ITU-T H.273 Table 2; see references/color/.
+pub(crate) const BT601_625_PRIMARIES: [[f64; 2]; 3] =
+    [[0.6400, 0.3300], [0.2900, 0.6000], [0.1500, 0.0600]];
+pub(crate) const BT601_525_PRIMARIES: [[f64; 2]; 3] =
+    [[0.6300, 0.3400], [0.3100, 0.5950], [0.1550, 0.0700]];
 
 /// The `(primaries, white)` for a [`Gamut`].
 fn gamut_chromaticities(gamut: Gamut) -> ([[f64; 2]; 3], [f64; 2]) {

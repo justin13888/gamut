@@ -164,17 +164,25 @@ metrics tool predicts matches what the encoder did:
 ## RGB primaries + white points (CIE 1931 xy)
 
 Sources: ITU-R BT.709-6 (sRGB), ITU-R BT.2020-2 (BT.2020), SMPTE EG 432-1 (DCI-P3 with
-D65), Adobe RGB (1998) Color Image Encoding, ISO 22028-2 / ROMM RGB (ProPhoto).
+D65), Adobe RGB (1998) Color Image Encoding, ISO 22028-2 / ROMM RGB (ProPhoto),
+ITU-T H.273 Table 2 (the CICP `ColourPrimaries` code points).
 
-| gamut        | R              | G                | B                  | white |
-|--------------|----------------|------------------|--------------------|-------|
-| sRGB/BT.709  | (0.6400,0.3300)| (0.3000,0.6000)  | (0.1500,0.0600)    | D65   |
-| Display P3   | (0.6800,0.3200)| (0.2650,0.6900)  | (0.1500,0.0600)    | D65   |
-| Adobe RGB    | (0.6400,0.3300)| (0.2100,0.7100)  | (0.1500,0.0600)    | D65   |
-| BT.2020      | (0.7080,0.2920)| (0.1700,0.7970)  | (0.1310,0.0460)    | D65   |
-| ProPhoto RGB | (0.734699,0.265301)|(0.159597,0.840403)|(0.036598,0.000105)| D50  |
+| gamut        | R              | G                | B                  | white | CICP |
+|--------------|----------------|------------------|--------------------|-------|------|
+| sRGB/BT.709  | (0.6400,0.3300)| (0.3000,0.6000)  | (0.1500,0.0600)    | D65   | 1    |
+| BT.601 625-line | (0.6400,0.3300)| (0.2900,0.6000) | (0.1500,0.0600)   | D65   | 5    |
+| BT.601 525-line | (0.6300,0.3400)| (0.3100,0.5950) | (0.1550,0.0700)   | D65   | 6    |
+| BT.2020      | (0.7080,0.2920)| (0.1700,0.7970)  | (0.1310,0.0460)    | D65   | 9    |
+| Display P3   | (0.6800,0.3200)| (0.2650,0.6900)  | (0.1500,0.0600)    | D65   | 12   |
+| Adobe RGB    | (0.6400,0.3300)| (0.2100,0.7100)  | (0.1500,0.0600)    | D65   | —    |
+| ProPhoto RGB | (0.734699,0.265301)|(0.159597,0.840403)|(0.036598,0.000105)| D50  | —   |
 
 White points: **D65** = (0.3127, 0.3290); **D50** = (0.3457, 0.3585).
+
+The two BT.601 rows are **different** primary sets — 625-line is EBU Tech. 3213-E (PAL/SECAM),
+525-line is SMPTE 170M (NTSC). This is the opposite of the *matrix* coefficients for the same
+two code points, where 5 and 6 name identical `Kr`/`Kb` values. Adobe RGB and ProPhoto have no
+CICP code point and are reachable only through `gamut_color::profile`.
 
 ---
 
