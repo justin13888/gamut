@@ -172,7 +172,7 @@ fn metadata_does_not_disturb_the_coded_pixels() {
 
     // …and both are still bit-exact to the source (identity matrix: Y=G, U=B, V=R).
     let rgb = source_rgb();
-    for (i, px) in rgb.chunks_exact(3).enumerate() {
+    for (i, px) in rgb.as_chunks::<3>().0.iter().enumerate() {
         assert_eq!(b.planes[0][i], u16::from(px[1]), "Y = G at {i}");
         assert_eq!(b.planes[1][i], u16::from(px[2]), "U = B at {i}");
         assert_eq!(b.planes[2][i], u16::from(px[0]), "V = R at {i}");
