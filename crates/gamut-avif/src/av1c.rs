@@ -7,6 +7,7 @@
 //! AVIF v1.2.0 §2.1 (`references/avif`). All `reserved` fields are **ignored** on read; they are
 //! masked away and never validated.
 
+use gamut_color::ChromaSubsampling;
 use gamut_core::{Error, Result};
 
 use crate::obu::{ObuType, iter_obus, write_leb128};
@@ -32,6 +33,21 @@ pub enum ChromaFormat {
 }
 
 impl ChromaFormat {
+    /// The equivalent [`ChromaSubsampling`], gamut's shared plane-geometry vocabulary.
+    ///
+    /// A total mapping: this type's discriminants are the codec's `chroma_format_idc`, while
+    /// `ChromaSubsampling`'s are gamut's own, so the two never share a numbering and convert
+    /// explicitly.
+    #[must_use]
+    pub fn subsampling(self) -> ChromaSubsampling {
+        match self {
+            ChromaFormat::Monochrome => ChromaSubsampling::Cs400,
+            ChromaFormat::Yuv420 => ChromaSubsampling::Cs420,
+            ChromaFormat::Yuv422 => ChromaSubsampling::Cs422,
+            ChromaFormat::Yuv444 => ChromaSubsampling::Cs444,
+        }
+    }
+
     /// The dimensions of each chroma (Cb/Cr) plane for a luma plane of `width` × `height`, using
     /// **ceiling** division on the subsampled axes so an odd luma dimension keeps the half-covering
     /// edge sample: 4:2:0 ⇒ `(ceil(width/2), ceil(height/2))`, 4:2:2 ⇒ `(ceil(width/2), height)`,
@@ -39,12 +55,7 @@ impl ChromaFormat {
     /// `(0, 0)`.
     #[must_use]
     pub fn chroma_dimensions(self, width: u32, height: u32) -> (u32, u32) {
-        match self {
-            ChromaFormat::Monochrome => (0, 0),
-            ChromaFormat::Yuv420 => (width.div_ceil(2), height.div_ceil(2)),
-            ChromaFormat::Yuv422 => (width.div_ceil(2), height),
-            ChromaFormat::Yuv444 => (width, height),
-        }
+        self.subsampling().chroma_dimensions(width, height)
     }
 }
 
@@ -362,6 +373,26 @@ mod tests {
     use gamut_av1::Av1StillConfig;
 
     use super::*;
+
+    #[test]
+    fn chroma_format_maps_onto_the_shared_subsampling_vocabulary() {
+        // Total mapping, asserted per variant so a mutant that collapses two arms dies. The two
+        // enums deliberately do not share a numbering: these discriminants are the codec's
+        // `chroma_format_idc`, `ChromaSubsampling`'s are gamut's own.
+        assert_eq!(
+            ChromaFormat::Monochrome.subsampling(),
+            ChromaSubsampling::Cs400
+        );
+        assert_eq!(ChromaFormat::Yuv420.subsampling(), ChromaSubsampling::Cs420);
+        assert_eq!(ChromaFormat::Yuv422.subsampling(), ChromaSubsampling::Cs422);
+        assert_eq!(ChromaFormat::Yuv444.subsampling(), ChromaSubsampling::Cs444);
+        // The delegation preserves the documented ceiling-division behaviour on odd dimensions,
+        // which is the property downstream plane sizing depends on.
+        assert_eq!(ChromaFormat::Yuv420.chroma_dimensions(17, 13), (9, 7));
+        assert_eq!(ChromaFormat::Yuv422.chroma_dimensions(17, 13), (9, 13));
+        assert_eq!(ChromaFormat::Yuv444.chroma_dimensions(17, 13), (17, 13));
+        assert_eq!(ChromaFormat::Monochrome.chroma_dimensions(17, 13), (0, 0));
+    }
     use crate::encoder::av1c_record;
 
     #[test]
