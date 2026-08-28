@@ -301,6 +301,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recon_image_reports_each_plane_at_its_own_size() {
+        // 4:4:4: every plane is the display size.
+        let planes = Planar8::from_planes(4, 2, [vec![0; 8], vec![0; 8], vec![0; 8]]).unwrap();
+        let (_, recon) = encode_still_intra(&planes, 40).expect("encodes");
+        assert_eq!(recon.subsampling, gamut_color::ChromaSubsampling::Cs444);
+        for i in 0..3 {
+            assert_eq!(recon.plane_dimensions(i), (4, 2), "plane {i}");
+            assert_eq!(recon.planes[i].len(), 4 * 2, "plane {i}");
+        }
+
+        // The accessor must follow `subsampling`, not just echo the display size — checked by
+        // constructing the subsampled case directly, since the encoder cannot produce one yet.
+        // Odd dimensions make the ceiling division observable.
+        let sub = ReconImage {
+            width: 5,
+            height: 3,
+            bit_depth: BitDepth::Eight,
+            subsampling: gamut_color::ChromaSubsampling::Cs420,
+            planes: [vec![0; 15], vec![0; 6], vec![0; 6]],
+        };
+        assert_eq!(sub.plane_dimensions(0), (5, 3));
+        assert_eq!(sub.plane_dimensions(1), (3, 2));
+        assert_eq!(sub.plane_dimensions(2), (3, 2));
+    }
+
+    #[test]
+    #[should_panic(expected = "plane index 3 out of range")]
+    fn recon_image_plane_dimensions_rejects_an_out_of_range_index() {
+        let planes = Planar8::from_planes(4, 2, [vec![0; 8], vec![0; 8], vec![0; 8]]).unwrap();
+        let (_, recon) = encode_still_intra(&planes, 40).expect("encodes");
+        let _ = recon.plane_dimensions(3);
+    }
+
+    #[test]
     fn subsampled_planes_are_rejected_until_the_chroma_coding_path_lands() {
         // The plane geometry is per-plane, but the coding path is not: the residual loop, the
         // entropy contexts and CfL all still step chroma over the luma extent. Encoding a 4:2:0

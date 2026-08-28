@@ -283,6 +283,17 @@ struct Pred {
     cfl_alpha: Option<i32>,
 }
 
+/// Number of loop-restoration units spanning `size` samples on a `unit`-sample grid (§5.11.57).
+///
+/// A trailing partial unit smaller than half a unit is absorbed into the previous one rather than
+/// starting its own, hence the `+ unit / 2` before the divide; a frame smaller than one unit still
+/// has one. Extracted from `write_lr` so the rounding is directly testable: gamut's unit grid is
+/// 256 samples and every fixture is smaller than that, so in place this arithmetic is pinned at
+/// exactly one point (`1`) and any mutation of it survives.
+fn lr_unit_count(size: usize, unit: usize) -> usize {
+    ((size + unit / 2) / unit).max(1)
+}
+
 /// The reconstructed (decoded) planes on the coded MI grid, used as prediction neighbours in the
 /// lossy path and exported for the bit-exact decoder cross-check.
 pub(crate) struct Reconstruction {
@@ -520,8 +531,8 @@ impl<'a> FrameEncoder<'a> {
         const TAPS: [(i32, i32, u32); 3] = [(5, 16, 1), (23, 32, 2), (17, 64, 3)];
         // Luma geometry deliberately: loop restoration signals `RESTORE_NONE` for both chroma
         // planes, so the unit grid is defined on luma alone (§5.11.57).
-        let unit_cols = ((self.geom[0].w + UNIT / 2) / UNIT).max(1);
-        let unit_rows = ((self.geom[0].h + UNIT / 2) / UNIT).max(1);
+        let unit_cols = lr_unit_count(self.geom[0].w, UNIT);
+        let unit_rows = lr_unit_count(self.geom[0].h, UNIT);
         let row_start = (r * 4).div_ceil(UNIT);
         let row_end = unit_rows.min(((r + 16) * 4).div_ceil(UNIT));
         let col_start = (c * 4).div_ceil(UNIT);
@@ -3061,6 +3072,90 @@ mod tests {
     use gamut_color::Planar8;
 
     use super::*;
+
+    #[test]
+    fn prediction_references_clamp_to_the_last_sample_of_the_coded_plane() {
+        // `max_x`/`max_y` are `coded_w - 1` / `coded_h - 1`, and the `- 1` is load-bearing: one
+        // past the last column is not out of bounds, it is the *first sample of the next row*, so
+        // an off-by-one here silently substitutes a neighbouring sample instead of panicking.
+        //
+        // Driving the three reference builders directly is what makes the clamp observable: a
+        // whole-image encode only reaches it for blocks at the frame edge whose reference run
+        // overhangs the coded grid, which no fixture currently produces.
+        let planes = Planar8::from_rgb8_identity(&[0u8; 8 * 8 * 3], 8, 8).unwrap();
+        let mut e = FrameEncoder::new(&planes, 40);
+        assert_eq!((e.geom[0].coded_w, e.geom[0].coded_h), (8, 8));
+        // Distinct value per sample, so replicating the wrong one is always visible.
+        for (i, v) in e.recon[0].iter_mut().enumerate() {
+            *v = i as u16;
+        }
+        let cw = e.geom[0].coded_w;
+        let at = |x: usize, y: usize| (y * cw + x) as i32;
+
+        // (6, 6) on an 8x8 coded grid: the 4-sample reference run reaches column/row 9, so both
+        // clamps bite. Under `coded_w + 1` or `coded_w / 1` the clamped reads would wrap to the
+        // next row instead of repeating column 7.
+        let (above, left, corner) = e.reference_4x4(0, 6, 6);
+        assert_eq!(above[0], at(6, 5));
+        assert_eq!(above[1], at(7, 5));
+        assert_eq!(
+            above[2],
+            at(7, 5),
+            "past the right edge repeats the last column"
+        );
+        assert_eq!(above[7], at(7, 5));
+        assert_eq!(left[0], at(5, 6));
+        assert_eq!(left[1], at(5, 7));
+        assert_eq!(
+            left[2],
+            at(5, 7),
+            "past the bottom edge repeats the last row"
+        );
+        assert_eq!(corner, at(5, 5));
+
+        let (above, left, _) = e.reference_directional(0, 6, 6, 4);
+        assert_eq!(above[1], at(7, 5));
+        assert_eq!(above[2], at(7, 5));
+        assert_eq!(left[1], at(5, 7));
+        assert_eq!(left[2], at(5, 7));
+
+        // `reference_basic` clamps per sample with no separate limit, so a block whose width and
+        // height overhang the grid exercises both bounds directly.
+        let (above, left, _) = e.reference_basic(0, 4, 4, 8, 8);
+        assert_eq!(above[3], at(7, 3));
+        assert_eq!(
+            above[4],
+            at(7, 3),
+            "past the right edge repeats the last column"
+        );
+        assert_eq!(above[7], at(7, 3));
+        assert_eq!(left[3], at(3, 7));
+        assert_eq!(
+            left[4],
+            at(3, 7),
+            "past the bottom edge repeats the last row"
+        );
+        assert_eq!(left[7], at(3, 7));
+    }
+
+    #[test]
+    fn loop_restoration_unit_count_absorbs_a_short_trailing_unit() {
+        const UNIT: usize = 256;
+        // Below one unit — and at zero — there is still exactly one unit.
+        assert_eq!(lr_unit_count(0, UNIT), 1);
+        assert_eq!(lr_unit_count(1, UNIT), 1);
+        assert_eq!(lr_unit_count(256, UNIT), 1);
+        // A trailing remainder under half a unit is absorbed into the previous unit...
+        assert_eq!(lr_unit_count(383, UNIT), 1);
+        // ...and one at or over half a unit starts its own.
+        assert_eq!(lr_unit_count(384, UNIT), 2);
+        assert_eq!(lr_unit_count(512, UNIT), 2);
+        assert_eq!(lr_unit_count(639, UNIT), 2);
+        assert_eq!(lr_unit_count(640, UNIT), 3);
+        // A different unit size, so the constant is not baked into the expectations.
+        assert_eq!(lr_unit_count(64, 64), 1);
+        assert_eq!(lr_unit_count(96, 64), 2);
+    }
 
     /// Geometry only — deliberately does **not** call `encode()`. The coding path is still 4:4:4
     /// (`encode_with` refuses a subsampled source), so this pins what the geometry slice actually

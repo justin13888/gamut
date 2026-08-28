@@ -605,15 +605,17 @@ pub(crate) fn cdef(
             let cdir = if uv_pri == 0 { 0 } else { y_dir };
             for plane in 1..3 {
                 let g = geom[plane];
+                let (px, py) = g.scale_pos(x0, y0);
+                let (pw, ph) = g.scale_extent(8, 8);
                 cdef_filter_block(
                     &planes[plane],
                     &mut out[plane],
                     g.coded_w,
                     g.coded_h,
-                    x0 >> g.ss_x,
-                    y0 >> g.ss_y,
-                    8 >> g.ss_x,
-                    8 >> g.ss_y,
+                    px,
+                    py,
+                    pw,
+                    ph,
                     uv_pri,
                     uv_sec,
                     CDEF_DAMPING - 1,

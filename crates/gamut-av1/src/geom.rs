@@ -80,6 +80,26 @@ impl PlaneGeom {
     pub(crate) fn mi_row(self, y: usize) -> usize {
         (y << self.ss_y) >> 2
     }
+
+    /// Maps a **luma** sample position into this plane's own coordinates (`x >> ss_x`,
+    /// `y >> ss_y`).
+    ///
+    /// A method rather than an inline shift on purpose: at 4:4:4 both shifts are zero, so
+    /// `>>` and `<<` are indistinguishable at every call site the encoder can currently reach.
+    /// Here the direction is pinned by a test at `ss = 1`.
+    pub(crate) fn scale_pos(self, x: usize, y: usize) -> (usize, usize) {
+        (x >> self.ss_x, y >> self.ss_y)
+    }
+
+    /// Maps a **luma** block extent into this plane's own extent (`w >> ss_x`, `h >> ss_y`) — the
+    /// §7.15.1 chroma CDEF block, for instance, is `(8 >> ss_x) x (8 >> ss_y)`.
+    ///
+    /// Separate from [`scale_pos`](Self::scale_pos) despite the identical arithmetic: a position
+    /// and an extent are different quantities, and under formats gamut does not yet emit they stop
+    /// agreeing (a 1-sample extent cannot halve).
+    pub(crate) fn scale_extent(self, w: usize, h: usize) -> (usize, usize) {
+        (w >> self.ss_x, h >> self.ss_y)
+    }
 }
 
 #[cfg(test)]
@@ -161,6 +181,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn luma_positions_and_extents_scale_down_into_a_plane() {
+        let (mc, mr) = mi(64, 64);
+        let g = PlaneGeom::frame(64, 64, mc, mr, ChromaSubsampling::Cs420);
+        // Luma is the identity in both directions.
+        assert_eq!(g[0].scale_pos(16, 24), (16, 24));
+        assert_eq!(g[0].scale_extent(8, 8), (8, 8));
+        // 4:2:0 halves both axes. Asserting the halved values (not just "not equal") is what
+        // distinguishes `>>` from `<<`, which are the same operation at 4:4:4.
+        assert_eq!(g[1].scale_pos(16, 24), (8, 12));
+        assert_eq!(g[1].scale_extent(8, 8), (4, 4));
+        // 4:2:2 halves x only, so a transposed shift is visible here and nowhere else.
+        let g422 = PlaneGeom::frame(64, 64, mc, mr, ChromaSubsampling::Cs422);
+        assert_eq!(g422[1].scale_pos(16, 24), (8, 24));
+        assert_eq!(g422[1].scale_extent(8, 8), (4, 8));
     }
 
     #[test]
