@@ -57,6 +57,15 @@ unsafe extern "C" {
     /// `0` on success, else the SDK error code.
     fn gdng_new_raw_image_digest(path: *const c_char, out_digest: *mut u8) -> c_int;
 
+    /// Derives the camera neutral for the DNG at `path` from its `AsShotWhiteXY` tag, writing
+    /// `*out_channels` (at most 4) doubles to `out_neutral`; `0` on success, else the SDK error
+    /// code (`dng_error_bad_format` if the file carries no `AsShotWhiteXY`).
+    fn gdng_camera_neutral_from_white_xy(
+        path: *const c_char,
+        out_channels: *mut u32,
+        out_neutral: *mut f64,
+    ) -> c_int;
+
     /// Releases a buffer returned by [`gdng_read_raw`] / [`gdng_read_linear`] /
     /// [`gdng_decode_lossless_jpeg`].
     fn gdng_free(data: *mut u16);
@@ -199,6 +208,44 @@ fn read_image(
         planes,
         samples,
     })
+}
+
+/// Derives the camera neutral the Adobe DNG SDK computes for `bytes` from its `AsShotWhiteXY`
+/// (50729) tag — the DNG 1.7.1 "Translating White Balance xy Coordinates to Camera Neutral
+/// Coordinates" conversion, as the reference implementation performs it.
+///
+/// The SDK honours `AsShotWhiteXY` only when `AsShotNeutral` (50728) is absent, so this rejects a
+/// file carrying the neutral instead of quietly answering for the wrong tag.
+///
+/// # Errors
+///
+/// Returns an error message if the bytes cannot be written to a temporary file, or if the SDK
+/// cannot derive a neutral from them (with its numeric error code).
+pub fn camera_neutral_from_white_xy(bytes: &[u8]) -> Result<Vec<f64>, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("oracle.dng");
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let cpath =
+        CString::new(path.to_str().ok_or("non-UTF-8 temp path")?).map_err(|e| e.to_string())?;
+
+    let mut channels: u32 = 0;
+    // `kMaxColorPlanes` in the SDK; the shim refuses to write more.
+    let mut neutral = [0.0f64; 4];
+    // SAFETY: `cpath` is a valid NUL-terminated path; the shim writes at most `neutral.len()`
+    // doubles and reports how many in `channels`.
+    let code = unsafe {
+        gdng_camera_neutral_from_white_xy(cpath.as_ptr(), &mut channels, neutral.as_mut_ptr())
+    };
+    if code != 0 {
+        return Err(format!(
+            "Adobe DNG SDK could not derive a camera neutral from AsShotWhiteXY (code {code})"
+        ));
+    }
+    let channels = usize::try_from(channels).map_err(|e| e.to_string())?;
+    neutral
+        .get(..channels)
+        .map(<[f64]>::to_vec)
+        .ok_or_else(|| format!("Adobe DNG SDK reported {channels} colour channels"))
 }
 
 /// Reads `bytes` as a DNG with the Adobe DNG SDK and returns its stage-1 raw samples.

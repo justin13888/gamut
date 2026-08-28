@@ -37,6 +37,7 @@ tolerance-level, not bit-for-bit.
 | v1 | Issue #179 — API finalization (`non_exhaustive` policy, profile surface, code-point inverses), overflow-safe constructors, AV1 §6.4.2 monochrome fix, oracle-only minimal test set | ✅ |
 | P7 | `xyb` (issue #334): the JPEG XL opsin space — frozen libjxl 0.12.0 constants (absorbance matrix + bias + normative inverse, transcribed in `references/color/README.md` with `references/jxl/opsin_params.h` vendored), `linear_srgb_to_xyb`/`xyb_to_linear_srgb`, and the scaled-XYB byte encoding (`scale_xyb`/`unscale_xyb`, third stored channel `B − Y`) for `gamut-jpeg`'s XYB colour mode. Tier-1 f64 like the rest of the colour science | ✅ |
 | P8 | Issue #321 — CIELab colorimetry (`lab`): XYZ↔Lab (exact ε = 216/24389, κ = 24389/27), LCh, xyY, ICC PCS encodings (PCSXYZ u1Fixed15, 16-bit PCSLAB v4/v2, 8-bit Lab; lcms2 `cmspcs.c`-exact rounding/clamping), ΔE\*ab + CIEDE2000; `linalg` promoted public for gamut-cmm (#323/#327) | ✅ |
+| P9 | Issue #349 — `cct`: correlated colour temperature of a CIE 1931 chromaticity by Robertson's method (Wyszecki & Stiles isotemperature table, interpolated in mired). The definition raw formats build on: DNG 1.7.1 weights a camera's colour calibrations by inverse CCT, so `gamut-dng` needs it to read `AsShotWhiteXY`. Tier-1 f64 like the rest of the colour science | ✅ |
 
 ## API policies frozen at v1
 

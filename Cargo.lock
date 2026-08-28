@@ -666,6 +666,7 @@ version = "1.0.0"
 dependencies = [
  "divan",
  "gamut-bitstream",
+ "gamut-color",
  "gamut-core",
  "gamut-deflate",
  "gamut-dng",

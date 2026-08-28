@@ -7,10 +7,11 @@
 //! see `gamut-avif/STATUS.md`) extend without reshaping the types.
 //!
 //! On top of that metadata layer, the [`transfer`], [`oklab`], [`lab`], [`matrix`],
-//! [`gamut_map`], and [`profile`] modules add `f64` colour science — encoder-exact EOTFs, OKLab
+//! [`gamut_map`], [`cct`], and [`profile`] modules add `f64` colour science — encoder-exact EOTFs, OKLab
 //! transforms with per-gamut matrices (derived from chromaticities via Bradford adaptation),
 //! CIELab/LCh/xyY colorimetry with the ICC PCS fixed-point encodings and the ΔE\*ab / CIEDE2000
-//! colour-difference metrics, gamut clamping, and source-profile bundles over the CICP axes; the
+//! colour-difference metrics, correlated colour temperature by Robertson's method, gamut clamping,
+//! and source-profile bundles over the CICP axes; the
 //! [`linalg`] module exports the shared 3×3 helpers underneath them. This math is **Tier-1**
 //! (correctness only): it uses `std` `f64`, so it is not bit-reproducible across platforms — see
 //! `references/color/README.md`.
@@ -37,7 +38,7 @@
 //!   matrixing and de-matrixing at every modeled bit depth for [`MatrixCoefficients::Bt709`] /
 //!   `Bt601` / `Bt470Bg` / `Bt2020Ncl` in both ranges ([`RgbToYcbcr`] / [`YcbcrMatrix`])**; and the
 //!   `f64` colour science ([`transfer`], [`oklab`], [`lab`], [`xyb`], [`matrix`], [`gamut_map`],
-//!   [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
+//!   [`cct`], [`profile`]) for the sRGB, Display P3, Adobe RGB, BT.2020 and ProPhoto gamuts.
 //! - **Modeled but deferred:** 10/12-bit *plane* wiring ([`BitDepth::Ten`] / [`BitDepth::Twelve`] —
 //!   both H.273 directions ship at these depths; what is missing is the AV1 encode path and a
 //!   [`Planar8`] geometry to carry them. Distinct from [`BitDepth::Sixteen`], which is outside the
@@ -57,6 +58,7 @@
 //! gamuts with no CICP transfer code point — likewise has no inverse yet.
 #![forbid(unsafe_code)]
 
+pub mod cct;
 pub mod cicp;
 pub mod format;
 pub mod gamut_map;
@@ -71,6 +73,7 @@ pub mod transfer;
 pub mod xyb;
 pub mod ycbcr;
 
+pub use cct::cct_from_xy;
 pub use cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 pub use format::{BitDepth, ChromaSubsampling};
 pub use lab::{delta_e_76, delta_e_2000};

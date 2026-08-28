@@ -307,3 +307,82 @@ fn to_linear_matches_adobe_for_per_plane_whites() {
         .expect("levels");
     assert_to_linear_matches_adobe(&raw, "per-plane whites");
 }
+
+/// The DNG 1.7.1 §6 conversion, gated against the reference implementation that defines it.
+///
+/// A file whose white balance is `AsShotWhiteXY` (50729) carries no camera neutral; both gamut-dng
+/// and the Adobe SDK have to derive one from the chromaticity through the profile's calibration.
+/// This encodes such a file and requires the two derivations to agree.
+///
+/// The comparison uses profiles with an identity `CameraCalibration` and unit `AnalogBalance`.
+/// The spec's formula is `XYZtoCamera = AB · CC · CM`, but `dng_color_spec::SetWhiteXY` folds `CC`
+/// and `AB` into its later PCS transforms rather than into the camera white, so the two agree
+/// exactly wherever those are the identity — which is every profile this crate writes and every one
+/// in Adobe's own sample corpus.
+fn assert_neutral_matches_adobe(profile: &gamut_dng::CameraProfile, xy: [f64; 2], what: &str) {
+    let profile = profile
+        .clone()
+        .with_as_shot_white_xy(xy)
+        .expect("the chromaticity is convertible through this calibration");
+    let raw = common::sample_raw(32, 24, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &profile, &mut dng)
+        .expect("encode");
+    gamut_dng_oracle::validate_dng(&dng)
+        .unwrap_or_else(|e| panic!("Adobe DNG SDK must accept the {what} AsShotWhiteXY DNG: {e}"));
+
+    let adobe = gamut_dng_oracle::camera_neutral_from_white_xy(&dng)
+        .unwrap_or_else(|e| panic!("Adobe DNG SDK must derive a neutral for {what}: {e}"));
+    let ours = profile.as_shot_neutral();
+    // A neutral of all ones would mean the calibration was never applied, and would match Adobe's
+    // for the wrong reason; every fixture here has a genuinely coloured response.
+    assert!(
+        ours.iter().any(|&c| c < 0.999),
+        "{what}: the derivation must apply the calibration, got {ours:?}"
+    );
+    assert_eq!(adobe.len(), ours.len(), "{what}: colour channel count");
+    for (got, want) in ours.iter().zip(adobe.iter()) {
+        assert!(
+            (got - want).abs() < 1e-4,
+            "{what}: gamut derived {ours:?}, Adobe derived {adobe:?}"
+        );
+    }
+}
+
+#[test]
+fn as_shot_white_xy_matches_adobe_single_illuminant() {
+    // D65 — the calibration illuminant itself, so no interpolation is in play.
+    assert_neutral_matches_adobe(
+        &common::sample_profile(),
+        [0.3127, 0.3290],
+        "single-illuminant",
+    );
+}
+
+#[test]
+fn as_shot_white_xy_matches_adobe_between_two_illuminants() {
+    // The sample full profile calibrates at D65 and Standard Light A; ~4200 K sits between them,
+    // so the SDK and gamut must agree on the *interpolated* colour matrix, not just on one end.
+    assert_neutral_matches_adobe(
+        &common::sample_profile_full(),
+        [0.3730, 0.3750],
+        "interpolated",
+    );
+}
+
+#[test]
+fn as_shot_white_xy_matches_adobe_outside_both_illuminants() {
+    // Cooler than Standard Light A's 2850 K: the second calibration is taken whole.
+    assert_neutral_matches_adobe(
+        &common::sample_profile_full(),
+        [0.4900, 0.4100],
+        "clamped-warm",
+    );
+    // Hotter than D65's 6500 K: the first calibration is taken whole.
+    assert_neutral_matches_adobe(
+        &common::sample_profile_full(),
+        [0.2830, 0.2930],
+        "clamped-cool",
+    );
+}

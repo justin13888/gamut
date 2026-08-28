@@ -1297,12 +1297,13 @@ fn byte_chunks<'a>(offsets: &[u64], counts: &[u64], data: &'a [u8]) -> Result<Ve
 /// profile rather than failing — but a calibration that is *present and malformed* is still an
 /// error, because that is a broken file rather than an absent feature.
 fn decode_profile(ifd0: &TrackedIfd) -> Result<Option<CameraProfile>> {
-    // Absent colour calibration is a property of the camera, not a defect. `AsShotWhiteXY` (50729)
-    // is the spec's alternative to `AsShotNeutral`; typed support for it is deferred, so a file
-    // carrying only that also yields no profile and surfaces the tag through `ifd0_extra`.
+    // Absent colour calibration is a property of the camera, not a defect. The as-shot white
+    // balance may arrive either way — `AsShotNeutral` (50728) or the spec's alternative
+    // `AsShotWhiteXY` (50729) — so a file carrying only the chromaticity still yields a profile.
+    let white_xy = ifd0.get(tags::AS_SHOT_WHITE_XY).is_some();
     if ifd0.get(tags::COLOR_MATRIX1).is_none()
         || ifd0.get(tags::CALIBRATION_ILLUMINANT1).is_none()
-        || ifd0.get(tags::AS_SHOT_NEUTRAL).is_none()
+        || (ifd0.get(tags::AS_SHOT_NEUTRAL).is_none() && !white_xy)
     {
         return Ok(None);
     }
@@ -1316,18 +1317,33 @@ fn decode_profile(ifd0: &TrackedIfd) -> Result<Option<CameraProfile>> {
             "DNG: missing CalibrationIlluminant1",
         )
     })?;
-    let neutral = f64_vec(ifd0.get(tags::AS_SHOT_NEUTRAL))
-        .filter(|v| v.len() == 3)
-        .ok_or_else(|| {
-            Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: malformed AsShotNeutral")
-        })?;
+    // The spec makes the two white-balance tags mutually exclusive. A file carrying both is
+    // malformed; `AsShotNeutral` wins there, matching the reference implementation, and the
+    // chromaticity is dropped rather than left to contradict it.
+    let stored_xy = match ifd0.get(tags::AS_SHOT_WHITE_XY) {
+        Some(value) if ifd0.get(tags::AS_SHOT_NEUTRAL).is_none() => Some(
+            f64_vec(Some(value))
+                .filter(|v| v.len() == 2)
+                .map(|v| [v[0], v[1]])
+                .ok_or_else(|| {
+                    Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: malformed AsShotWhiteXY")
+                })?,
+        ),
+        _ => None,
+    };
+    let neutral = match ifd0.get(tags::AS_SHOT_NEUTRAL) {
+        Some(value) => f64_vec(Some(value))
+            .filter(|v| v.len() == 3)
+            .map(|v| [v[0], v[1], v[2]])
+            .ok_or_else(|| {
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: malformed AsShotNeutral")
+            })?,
+        // Replaced below by the DNG 1.7.1 §6 derivation, once the calibration it reads is in
+        // place. Never observable: `stored_xy` is `Some` exactly when this arm runs.
+        None => [1.0, 1.0, 1.0],
+    };
 
-    let mut profile = CameraProfile::new(
-        model,
-        color_matrix1,
-        illuminant1,
-        [neutral[0], neutral[1], neutral[2]],
-    )?;
+    let mut profile = CameraProfile::new(model, color_matrix1, illuminant1, neutral)?;
 
     if let (Ok(matrix2), Some(illuminant2)) = (
         matrix9(ifd0, tags::COLOR_MATRIX2),
@@ -1356,6 +1372,10 @@ fn decode_profile(ifd0: &TrackedIfd) -> Result<Option<CameraProfile>> {
         .and_then(ProfileEmbedPolicy::from_code)
     {
         profile = profile.with_profile_embed_policy(policy);
+    }
+    // Last, so the §6 conversion sees the whole calibration it interpolates over.
+    if let Some(xy) = stored_xy {
+        profile = profile.with_as_shot_white_xy(xy)?;
     }
     Ok(Some(profile))
 }
@@ -1451,6 +1471,95 @@ mod tests {
         assert!(is_raw_ifd(&ifd));
         // A missing tag is not raw either.
         assert!(!is_raw_ifd(&Ifd::new()));
+    }
+
+    /// A colour profile needs all three of `ColorMatrix1`, `CalibrationIlluminant1` and an as-shot
+    /// white balance. Any one missing means the camera did not calibrate — a monochrome body, say —
+    /// and yields `None` rather than a half-built profile or an error.
+    #[test]
+    fn a_profile_needs_a_matrix_an_illuminant_and_a_white_balance() {
+        let matrix = || {
+            Value::SRational(vec![
+                (1_000_000, 1_000_000),
+                (0, 1_000_000),
+                (0, 1_000_000),
+                (0, 1_000_000),
+                (1_000_000, 1_000_000),
+                (0, 1_000_000),
+                (0, 1_000_000),
+                (0, 1_000_000),
+                (1_000_000, 1_000_000),
+            ])
+        };
+        let neutral = || {
+            Value::Rational(vec![
+                (500_000, 1_000_000),
+                (1_000_000, 1_000_000),
+                (700_000, 1_000_000),
+            ])
+        };
+        let model = || Value::Ascii("gamut TestCam".into());
+
+        // All three present: a profile.
+        let mut ifd = Ifd::new();
+        ifd.set(tags::UNIQUE_CAMERA_MODEL, model());
+        ifd.set(tags::COLOR_MATRIX1, matrix());
+        ifd.set(tags::CALIBRATION_ILLUMINANT1, Value::Short(vec![21]));
+        ifd.set(tags::AS_SHOT_NEUTRAL, neutral());
+        assert!(
+            decode_profile(&TrackedIfd::new(&ifd))
+                .expect("a complete calibration decodes")
+                .is_some()
+        );
+
+        // Each one removed in turn: no profile, and no error.
+        for missing in [
+            tags::COLOR_MATRIX1,
+            tags::CALIBRATION_ILLUMINANT1,
+            tags::AS_SHOT_NEUTRAL,
+        ] {
+            let mut partial = Ifd::new();
+            partial.set(tags::UNIQUE_CAMERA_MODEL, model());
+            if missing != tags::COLOR_MATRIX1 {
+                partial.set(tags::COLOR_MATRIX1, matrix());
+            }
+            if missing != tags::CALIBRATION_ILLUMINANT1 {
+                partial.set(tags::CALIBRATION_ILLUMINANT1, Value::Short(vec![21]));
+            }
+            if missing != tags::AS_SHOT_NEUTRAL {
+                partial.set(tags::AS_SHOT_NEUTRAL, neutral());
+            }
+            assert!(
+                decode_profile(&TrackedIfd::new(&partial))
+                    .expect("an absent calibration is not an error")
+                    .is_none(),
+                "a calibration missing tag {missing} must yield no profile"
+            );
+        }
+
+        // `AsShotWhiteXY` satisfies the white-balance requirement on its own.
+        let mut by_xy = Ifd::new();
+        by_xy.set(tags::UNIQUE_CAMERA_MODEL, model());
+        by_xy.set(tags::COLOR_MATRIX1, matrix());
+        by_xy.set(tags::CALIBRATION_ILLUMINANT1, Value::Short(vec![21]));
+        by_xy.set(
+            tags::AS_SHOT_WHITE_XY,
+            Value::Rational(vec![(312_700, 1_000_000), (329_000, 1_000_000)]),
+        );
+        let profile = decode_profile(&TrackedIfd::new(&by_xy))
+            .expect("a chromaticity is a white balance")
+            .expect("a profile");
+        assert_eq!(profile.as_shot_white_xy(), Some([0.3127, 0.329]));
+
+        // Both tags is malformed; the neutral wins and the chromaticity is dropped, so a re-encode
+        // cannot end up writing a white balance that contradicts the one that was read.
+        let mut both = by_xy.clone();
+        both.set(tags::AS_SHOT_NEUTRAL, neutral());
+        let profile = decode_profile(&TrackedIfd::new(&both))
+            .expect("both tags decode")
+            .expect("a profile");
+        assert_eq!(profile.as_shot_white_xy(), None);
+        assert_eq!(profile.as_shot_neutral(), &[0.5, 1.0, 0.7]);
     }
 
     #[test]
