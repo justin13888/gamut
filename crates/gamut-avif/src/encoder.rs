@@ -6,8 +6,8 @@ use gamut_av1::{
     Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with, encode_still_intra16_with,
 };
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar16, Planar8,
-    RgbToYcbcr, TransferCharacteristics,
+    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
+    Planar16, RgbToYcbcr, TransferCharacteristics,
 };
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Result, Rgb8, Rgb16, Rgba8, Rgba16};
 use gamut_isobmff::{
@@ -642,13 +642,9 @@ impl AvifEncoder {
         let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, BitDepth::Eight);
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::Eight(planes))?
         {
-            Some(obus) => crate::backend::still_from_backend_obus(
-                obus,
-                dims,
-                colour,
-                chroma,
-                BitDepth::Eight,
-            ),
+            Some(obus) => {
+                crate::backend::still_from_backend_obus(obus, dims, colour, chroma, BitDepth::Eight)
+            }
             None => Ok(encode_still_intra_with(planes, base_q_idx, colour)?.0),
         }
     }
@@ -827,7 +823,12 @@ fn av1_profile_level(item: &Item) -> Option<(u8, u8)> {
         return None;
     }
     let record = item.properties.iter().find_map(|p| match &p.kind {
-        PropertyKind::CodecConfiguration { kind, data } if kind == b"av1C" => data.get(1).copied(),
+        // The four-byte array pattern rather than an `== b"av1C"` guard: the guard form is
+        // redundant to clippy, and a byte-string literal cannot pattern-match `[u8; 4]` directly.
+        PropertyKind::CodecConfiguration {
+            kind: [b'a', b'v', b'1', b'C'],
+            data,
+        } => data.get(1).copied(),
         _ => None,
     });
     Some(record.map_or((u8::MAX, u8::MAX), |b| (b >> 5, b & 0x1f)))
@@ -1160,10 +1161,19 @@ mod tests {
         let mut with_b = general.clone();
         with_b.push(*b"MA1B");
 
-        assert_eq!(compatible_brands(&[av01_item(1, 0), av01_item(1, 0)]), with_a);
-        assert_eq!(compatible_brands(&[av01_item(0, 0), av01_item(0, 0)]), with_b);
+        assert_eq!(
+            compatible_brands(&[av01_item(1, 0), av01_item(1, 0)]),
+            with_a
+        );
+        assert_eq!(
+            compatible_brands(&[av01_item(0, 0), av01_item(0, 0)]),
+            with_b
+        );
         // Mixed profiles: neither claim holds, even though each item alone would earn one.
-        assert_eq!(compatible_brands(&[av01_item(1, 0), av01_item(0, 0)]), general);
+        assert_eq!(
+            compatible_brands(&[av01_item(1, 0), av01_item(0, 0)]),
+            general
+        );
         // …and the level bound applies to whichever item breaches it, not just the first.
         assert_eq!(
             compatible_brands(&[av01_item(1, 0), av01_item(1, 17)]),

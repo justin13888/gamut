@@ -20,7 +20,7 @@ use gamut_av1::{
     encode_still_intra16_with,
 };
 use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
-use gamut_color::{BitDepth, ChromaSubsampling, Planar16, Planar8, RgbToYcbcr};
+use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16, RgbToYcbcr};
 use gamut_core::{Dimensions, ImageRef, Rgb8, Rgb16};
 
 /// Builds identity planes (Y=G, U=B, V=R) from an RGB generator.

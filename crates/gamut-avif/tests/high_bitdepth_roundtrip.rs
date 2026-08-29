@@ -277,12 +277,42 @@ fn depth_and_chroma_sampling_compose() {
     // with whichever pair was asked for.
     let px = source_rgb16();
     for (bits, chroma, want_profile, want_format) in [
-        (BitDepth::Ten, ChromaSubsampling::Cs420, 0u8, ChromaFormat::Yuv420),
-        (BitDepth::Ten, ChromaSubsampling::Cs422, 2, ChromaFormat::Yuv422),
-        (BitDepth::Ten, ChromaSubsampling::Cs444, 1, ChromaFormat::Yuv444),
-        (BitDepth::Twelve, ChromaSubsampling::Cs420, 2, ChromaFormat::Yuv420),
-        (BitDepth::Twelve, ChromaSubsampling::Cs422, 2, ChromaFormat::Yuv422),
-        (BitDepth::Twelve, ChromaSubsampling::Cs444, 2, ChromaFormat::Yuv444),
+        (
+            BitDepth::Ten,
+            ChromaSubsampling::Cs420,
+            0u8,
+            ChromaFormat::Yuv420,
+        ),
+        (
+            BitDepth::Ten,
+            ChromaSubsampling::Cs422,
+            2,
+            ChromaFormat::Yuv422,
+        ),
+        (
+            BitDepth::Ten,
+            ChromaSubsampling::Cs444,
+            1,
+            ChromaFormat::Yuv444,
+        ),
+        (
+            BitDepth::Twelve,
+            ChromaSubsampling::Cs420,
+            2,
+            ChromaFormat::Yuv420,
+        ),
+        (
+            BitDepth::Twelve,
+            ChromaSubsampling::Cs422,
+            2,
+            ChromaFormat::Yuv422,
+        ),
+        (
+            BitDepth::Twelve,
+            ChromaSubsampling::Cs444,
+            2,
+            ChromaFormat::Yuv444,
+        ),
     ] {
         let avif = AvifEncoder::lossy(70)
             .with_bit_depth(bits)
@@ -293,7 +323,11 @@ fn depth_and_chroma_sampling_compose() {
         let container = AvifContainer::parse(&avif).expect("our own reader parses it");
         let primary = container.image().primary_item();
         let config = primary.av1_config().unwrap().unwrap();
-        assert_eq!(config.bit_depth(), bits.bits(), "{bits:?} {chroma:?}: av1C depth");
+        assert_eq!(
+            config.bit_depth(),
+            bits.bits(),
+            "{bits:?} {chroma:?}: av1C depth"
+        );
         assert_eq!(config.chroma_format(), want_format, "{bits:?} {chroma:?}");
         assert_eq!(config.seq_profile, want_profile, "{bits:?} {chroma:?}");
         assert_eq!(
@@ -313,7 +347,11 @@ fn depth_and_chroma_sampling_compose() {
             (cw * ch) as usize,
             "{bits:?} {chroma:?}: chroma plane extent"
         );
-        assert_eq!(decoded.planes[0].len(), (W * H) as usize, "luma is never subsampled");
+        assert_eq!(
+            decoded.planes[0].len(),
+            (W * H) as usize,
+            "luma is never subsampled"
+        );
         assert!(
             decoded.planes[0].iter().any(|&v| v > 255),
             "{bits:?} {chroma:?}: decoded luma never exceeds 8 bits"

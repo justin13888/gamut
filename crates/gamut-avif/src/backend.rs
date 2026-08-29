@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{BitDepth, ChromaSubsampling, ColorRange, Planar16, Planar8};
+use gamut_color::{BitDepth, ChromaSubsampling, ColorRange, Planar8, Planar16};
 use gamut_core::{Dimensions, Error, PixelFormat, Result};
 
 use crate::av1c::Av1Config;

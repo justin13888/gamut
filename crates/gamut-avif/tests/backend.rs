@@ -5,11 +5,12 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::Av1Colour;
-use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
+use gamut_avif::{
+    AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifContainer, AvifEncoder, ChromaFormat,
+};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_avif::{AvifContainer, ChromaFormat};
 use gamut_color::{
-    BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar16, Planar8, RgbToYcbcr,
+    BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, Planar16, RgbToYcbcr,
 };
 use gamut_core::{
     Dimensions, EncodeImage, Error, ErrorKind, Gray8, ImageRef, Result, Rgb8, Rgb16, Rgba8,
