@@ -146,6 +146,18 @@ fn encode_with(
             "AV1: only 4:4:4 and monochrome planes are encoded today",
         ));
     }
+    // Superres over a monochrome source is refused rather than half-supported: the downscale later
+    // in this function is written for three luma-sized planes and relabels its result 4:4:4, so a
+    // monochrome buffer would read an empty chroma slice at luma dimensions and then hand
+    // `FrameEncoder` a plane count disagreeing with the `monochrome` the frame header was given.
+    // Checked before the matrix rule below so `encode_still_intra_superres` — which supplies the
+    // default identity colour — reports the reason that actually applies.
+    if monochrome && coded_denom.is_some() {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AV1: superres over a monochrome source is not implemented",
+        ));
+    }
     // §5.5.2 infers `subsampling_x = subsampling_y = 1` for a monochrome stream, and §6.4.2 permits
     // MC_IDENTITY only when both are 0. `Av1Colour::default()` is identity, so a caller reaching
     // here with monochrome planes and the default colour would otherwise emit a non-conformant
@@ -164,27 +176,15 @@ fn encode_with(
         Some(cd) => {
             let denom = cd as usize + 9;
             let dw = crate::filter::superres_downscaled_width(width as usize, denom);
-            // Only the *coded* planes are downscaled, and the result keeps the source's
-            // subsampling. Downscaling a plane that does not exist would read an empty slice at
-            // luma dimensions, and relabelling the result 4:4:4 would give the plane count two
-            // disagreeing sources of truth — `FrameEncoder` would derive 3 from `coded_src` while
-            // the frame header was told `monochrome` from the original buffer.
             let dp: [Vec<u8>; 3] = std::array::from_fn(|i| {
-                let (pw, ph) = planes.plane_dimensions(i);
-                if pw == 0 || ph == 0 {
-                    return Vec::new();
-                }
                 crate::filter::superres_downscale_plane(
                     planes.plane(i),
-                    pw as usize,
+                    width as usize,
                     dw,
-                    ph as usize,
+                    height as usize,
                 )
             });
-            (
-                dw as u32,
-                Planar8::from_planes_subsampled(dw as u32, height, planes.subsampling(), dp)?,
-            )
+            (dw as u32, Planar8::from_planes(dw as u32, height, dp)?)
         }
         None => (width, planes.clone()),
     };

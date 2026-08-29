@@ -15,7 +15,9 @@
 //! decoder binary. Building these tests therefore needs cmake/meson/ninja/nasm and the checked-out
 //! submodules (`git submodule update --init --recursive`).
 
-use gamut_av1::{Av1Colour, encode_still_intra, encode_still_intra_with};
+use gamut_av1::{
+    Av1Colour, encode_still_intra, encode_still_intra_superres, encode_still_intra_with,
+};
 use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_color::{ChromaSubsampling, Planar8};
 
@@ -905,4 +907,22 @@ fn monochrome_rejects_the_identity_matrix() {
     );
     // The same buffer encodes once the matrix is a conformant one.
     assert!(encode_still_intra_with(&p, 40, Av1Colour::monochrome()).is_ok());
+}
+
+#[test]
+fn monochrome_rejects_superres() {
+    // The superres downscale is written for three luma-sized planes and relabels its output 4:4:4,
+    // which would give the plane count two disagreeing sources of truth on a monochrome source.
+    // The combination is refused rather than half-supported, and the check runs before the matrix
+    // rule so the reported reason is the one that actually applies.
+    let p = mono_planes(32, 16, |x, y| (x ^ y) as u8);
+    let err = encode_still_intra_superres(&p, 40, 0)
+        .expect_err("superres over a monochrome source is refused");
+    assert_eq!(
+        err.static_message(),
+        Some("AV1: superres over a monochrome source is not implemented")
+    );
+    // The same request succeeds for a 4:4:4 source, so the guard keys on the plane count.
+    let rgb = planes(32, 16, |x, y| [x as u8, y as u8, 0]);
+    assert!(encode_still_intra_superres(&rgb, 40, 0).is_ok());
 }

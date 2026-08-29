@@ -584,8 +584,11 @@ impl<'a> FrameEncoder<'a> {
             self.cdfs = cdf::CdfContext::new(self.qctx);
             self.set_quant(i32::from(self.qindex));
             self.current_dlf = 0;
-            let mut r = 0;
-            while r < self.mi_rows {
+            // Stepping by whole superblocks over an exclusive range, rather than a hand-rolled
+            // `while r < self.mi_rows { ... r += SB4 }`: the comparison in that form is mutable to
+            // `<=` without any test noticing, because the extra iteration lands entirely outside
+            // the frame and `encode_partition` emits nothing for it.
+            for r in (0..self.mi_rows).step_by(SB4) {
                 for plane in 0..self.num_planes {
                     self.left_level[plane].iter_mut().for_each(|v| *v = 0);
                     self.left_dc[plane].iter_mut().for_each(|v| *v = 0);
@@ -603,7 +606,6 @@ impl<'a> FrameEncoder<'a> {
                     self.encode_partition(r, c, 64);
                     c += SB4;
                 }
-                r += SB4;
             }
             let sym = std::mem::replace(&mut self.sym, SymbolEncoder::new());
             tile_bytes.push(sym.finish());
@@ -3215,6 +3217,123 @@ mod tests {
         assert_eq!(e.sample(1, 99, 99), e.sample(1, 8, 6));
         assert_eq!(e.sample(1, 8, 6), i32::from(chroma[6 * 9 + 8]));
         assert_eq!(e.sample(0, 99, 99), e.sample(0, 16, 12));
+    }
+
+    /// Builds 4:4:4 planes from a luma and a chroma generator.
+    ///
+    /// Both `block_is_skippable` and `decide_palette` compare a block against its `DC_PRED`, which
+    /// on the lossy path reads the *reconstruction* buffer — all zeros until something is encoded.
+    /// So a block qualifies only where its samples are 0 and a neighbour is available, which is why
+    /// the fixtures below use 0 as the qualifying value and address blocks away from the frame edge.
+    fn planes_with(
+        w: u32,
+        h: u32,
+        luma: impl Fn(u32, u32) -> u8,
+        chroma: impl Fn(u32, u32) -> u8,
+    ) -> Planar8 {
+        let mut y = vec![0u8; (w * h) as usize];
+        let mut c = vec![0u8; (w * h) as usize];
+        for row in 0..h {
+            for col in 0..w {
+                let i = (row * w + col) as usize;
+                y[i] = luma(col, row);
+                c[i] = chroma(col, row);
+            }
+        }
+        Planar8::from_planes(w, h, [y, c.clone(), c]).expect("valid 4:4:4 planes")
+    }
+
+    #[test]
+    fn skippability_is_decided_at_the_addressed_block() {
+        // `block_is_skippable` picks `skip = 1`, which changes what is coded. Both the answer and
+        // the `(c * 4, r * 4)` MI-to-sample conversion locating the block are invisible to the
+        // oracle suite: every choice reconstructs bit-exactly, so a decision taken about the
+        // *wrong* block still round-trips. Driving it directly is what makes the position
+        // observable.
+        //
+        // Columns 0..16 are zero, 16.. are a gradient. MI column 4 is sample column 16, so MI (0, 4)
+        // is non-flat while MI (0, 1) — sample column 4 — is flat. `c + 4` or `c / 4` would address
+        // a different column and invert both answers.
+        let p = planes_with(
+            32,
+            8,
+            |x, _| if x < 16 { 0 } else { 70 + x as u8 },
+            |_, _| 0,
+        );
+        let e = FrameEncoder::new(&p, 40);
+        assert!(e.block_is_skippable(1, 1, 4), "flat block at sample x=4");
+        assert!(
+            !e.block_is_skippable(1, 4, 4),
+            "gradient block at sample x=16"
+        );
+
+        // The same asymmetry vertically, so `r * 4` is pinned independently of `c * 4`.
+        let p = planes_with(
+            32,
+            32,
+            |_, y| if y < 16 { 0 } else { 70 + y as u8 },
+            |_, _| 0,
+        );
+        let e = FrameEncoder::new(&p, 40);
+        assert!(e.block_is_skippable(1, 1, 4), "flat block at sample y=4");
+        assert!(
+            !e.block_is_skippable(4, 1, 4),
+            "gradient block at sample y=16"
+        );
+
+        // A qualifying block exists at all — the case that vanishes if the function is hardwired
+        // to `false`. A non-flat chroma plane alone disqualifies it, which is the part of the loop
+        // a monochrome frame no longer runs.
+        let p = planes_with(16, 16, |_, _| 0, |_, _| 0);
+        let e = FrameEncoder::new(&p, 40);
+        assert!(e.block_is_skippable(2, 2, 4));
+        let p = planes_with(16, 16, |_, _| 0, |x, y| u8::from(x == 9 && y == 9));
+        let e = FrameEncoder::new(&p, 40);
+        assert!(
+            !e.block_is_skippable(2, 2, 4),
+            "a single off chroma sample disqualifies the block"
+        );
+    }
+
+    #[test]
+    fn palette_is_chosen_only_for_two_to_eight_luma_colours() {
+        // Like skippability, palette selection is a pure quality decision: declining it always
+        // reconstructs correctly, so nothing in the oracle suite distinguishes "no palette here"
+        // from "never any palette". §5.11.46's 2..=8 bound is the contract worth pinning.
+        //
+        // The block is MI (2, 2) — samples (8, 8) to (15, 15) — so both neighbours exist and the
+        // zero chroma matches its DC prediction.
+        let two = |x: u32, _: u32| if x < 12 { 0 } else { 200 };
+        let e_planes = planes_with(32, 32, two, |_, _| 0);
+        let e = FrameEncoder::new(&e_planes, 40);
+        let pal = e
+            .decide_palette(2, 2, 8)
+            .expect("a two-colour block is a palette");
+        assert_eq!(pal.colors, vec![0, 200], "sorted distinct colours");
+        assert_eq!(pal.index_map.len(), 64);
+
+        // One colour is below the bound, nine is above it.
+        let e_planes = planes_with(32, 32, |_, _| 0, |_, _| 0);
+        let e = FrameEncoder::new(&e_planes, 40);
+        assert!(
+            e.decide_palette(2, 2, 8).is_none(),
+            "one colour is not a palette"
+        );
+        let e_planes = planes_with(32, 32, |x, y| ((x + y * 8) % 9) as u8, |_, _| 0);
+        let e = FrameEncoder::new(&e_planes, 40);
+        assert!(
+            e.decide_palette(2, 2, 8).is_none(),
+            "nine colours exceed the bound"
+        );
+
+        // Non-flat chroma disqualifies a block whose luma qualifies — the precondition that is
+        // load-bearing at 4:4:4 and vacuous for a monochrome frame.
+        let e_planes = planes_with(32, 32, two, |x, y| u8::from(x == 10 && y == 10));
+        let e = FrameEncoder::new(&e_planes, 40);
+        assert!(
+            e.decide_palette(2, 2, 8).is_none(),
+            "a non-flat chroma plane disqualifies the block"
+        );
     }
 
     #[test]
