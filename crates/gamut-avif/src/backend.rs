@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{ColorRange, Planar8};
+use gamut_color::{BitDepth, ColorRange, Planar8, Planar16};
 use gamut_core::{Dimensions, Error, PixelFormat, Result};
 
 use crate::av1c::Av1Config;
@@ -67,16 +67,24 @@ pub struct Av1EncodeRequest {
     base_q_idx: u8,
     /// The colour signalling the returned stream must carry — and the layout `planes` is in.
     colour: Av1Colour,
+    /// The depth the samples are coded at: 8, 10 or 12 bits.
+    bit_depth: BitDepth,
 }
 
 impl Av1EncodeRequest {
     /// Builds a request. Crate-internal: the `base_q_idx` must already have been derived through
     /// the encoder's frozen quality mapping.
-    pub(crate) fn new(dimensions: Dimensions, base_q_idx: u8, colour: Av1Colour) -> Self {
+    pub(crate) fn new(
+        dimensions: Dimensions,
+        base_q_idx: u8,
+        colour: Av1Colour,
+        bit_depth: BitDepth,
+    ) -> Self {
         Self {
             dimensions,
             base_q_idx,
             colour,
+            bit_depth,
         }
     }
 
@@ -125,6 +133,16 @@ impl Av1EncodeRequest {
     pub fn colour(&self) -> Av1Colour {
         self.colour
     }
+
+    /// The depth the samples are coded at.
+    ///
+    /// [`BitDepth::Eight`] is the only depth [`Av1StillEncoder::encode_still`] is ever handed;
+    /// [`BitDepth::Ten`] and [`BitDepth::Twelve`] arrive through
+    /// [`encode_still16`](Av1StillEncoder::encode_still16), whose default implementation declines.
+    #[must_use]
+    pub fn bit_depth(&self) -> BitDepth {
+        self.bit_depth
+    }
 }
 
 /// A pluggable AV1 **still-image encoder** backend.
@@ -162,6 +180,32 @@ pub trait Av1StillEncoder: Send {
     /// [`encode_image`](gamut_core::EncodeImage::encode_image); the built-in encoder is not used
     /// as a silent fallback. Decline the job from [`supports`](Self::supports) instead.
     fn encode_still(&mut self, req: &Av1EncodeRequest, planes: &Planar8) -> Result<Vec<u8>>;
+
+    /// Encodes **10- or 12-bit** planes, returning the AV1 OBU byte stream exactly as
+    /// [`encode_still`](Self::encode_still) does for 8-bit.
+    ///
+    /// The default implementation **declines**, and the host falls through to the next backend and
+    /// finally to the built-in `gamut-av1` tail — so a backend written against the 8-bit v1
+    /// contract keeps compiling *and* keeps its meaning: it is never handed samples it did not
+    /// agree to encode. Override it to opt into high bit depth.
+    ///
+    /// Declining here is the one late fall-through the seam allows, and it exists because
+    /// [`supports`](Self::supports) is a single answer for a job whose depth a pre-existing
+    /// implementation does not inspect. Every *other* failure after accepting a job still
+    /// propagates.
+    ///
+    /// The returned stream's `seq_profile` must match the depth §6.4.1 requires — 1 (or 0
+    /// monochrome) at 10 bits, 2 at 12 — and its `color_config()` must declare
+    /// [`Av1EncodeRequest::bit_depth`] and [`Av1EncodeRequest::colour`]; the crate re-derives the
+    /// `av1C`/`colr` boxes from it and rejects a disagreement.
+    ///
+    /// # Errors
+    ///
+    /// As [`encode_still`](Self::encode_still).
+    fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
+        let _ = (req, planes);
+        Err(LateDecline::error())
+    }
 }
 
 /// The registry entry type: a shared, interior-mutable backend.
@@ -171,13 +215,21 @@ pub trait Av1StillEncoder: Send {
 /// `&self` encoding can call the `&mut self` trait methods.
 pub(crate) type BackendSlot = Arc<Mutex<dyn Av1StillEncoder + Send>>;
 
+/// The planes one registry run offers a backend, at whichever width the job actually has.
+pub(crate) enum BackendPlanes<'a> {
+    /// 8-bit planes, offered through [`Av1StillEncoder::encode_still`].
+    Eight(&'a Planar8),
+    /// 10/12-bit planes, offered through [`Av1StillEncoder::encode_still16`].
+    High(&'a Planar16),
+}
+
 /// Runs the registry for one request: tries `backends` in push order, returning the first
 /// acceptance's OBUs, or `None` when every backend declines (the caller then uses the built-in
 /// `gamut-av1` tail).
 pub(crate) fn run_backends(
     backends: &[BackendSlot],
     req: &Av1EncodeRequest,
-    planes: &Planar8,
+    planes: BackendPlanes<'_>,
 ) -> Result<Option<Vec<u8>>> {
     for slot in backends {
         let mut backend = slot.lock().map_err(|_| {
@@ -190,7 +242,11 @@ pub(crate) fn run_backends(
             // Accepted: this backend owns the job, so its error propagates — falling back to a
             // different encoder here would silently change the output bytes. The sole exception is
             // the ABI adapter's late-`UNSUPPORTED` sentinel, which *is* a decline.
-            return match backend.encode_still(req, planes) {
+            let encoded = match planes {
+                BackendPlanes::Eight(p) => backend.encode_still(req, p),
+                BackendPlanes::High(p) => backend.encode_still16(req, p),
+            };
+            return match encoded {
                 Err(e) if LateDecline::is(&e) => continue,
                 other => other.map(Some),
             };
@@ -207,15 +263,24 @@ pub(crate) fn run_backends(
 ///
 /// - [`Error::InvalidInput`] if the stream has no parsable reduced-still-picture sequence header,
 ///   or if its coded dimensions disagree with `dims` (which the container's `ispe` states).
-/// - [`Error::Unsupported`] if the sequence header is not `seq_profile = 1` /
-///   `reduced_still_picture_header = 1` (the only shape the v1 surface can describe).
+/// - [`Error::Unsupported`] if the sequence header is not `reduced_still_picture_header = 1`, or
+///   its `seq_profile`/depth pair is not one this surface can describe.
+/// - [`Error::InvalidInput`] if the stream's coded depth is not the one the request asked for —
+///   the container's `av1C` and `pixi` would otherwise lie about the payload.
 /// - Whatever [`Av1Config::validate_still_payload`] reports for a non-conformant item payload.
 pub(crate) fn still_from_backend_obus(
     obus: Vec<u8>,
     dims: Dimensions,
     colour: Av1Colour,
+    bit_depth: BitDepth,
 ) -> Result<EncodedStill> {
     let header = SeqHeaderParams::parse(&obus)?;
+    if header.bit_depth != bit_depth {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: AV1 backend stream is coded at a different bit depth than requested",
+        ));
+    }
     if (header.width, header.height) != (dims.width, dims.height) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
@@ -243,8 +308,8 @@ pub(crate) fn still_from_backend_obus(
         seq_profile: header.seq_profile,
         seq_level_idx_0: header.seq_level_idx_0,
         seq_tier_0: 0,
-        high_bitdepth: false,
-        twelve_bit: false,
+        high_bitdepth: bit_depth != BitDepth::Eight,
+        twelve_bit: bit_depth == BitDepth::Twelve,
         monochrome: false,
         chroma_subsampling_x: 0,
         chroma_subsampling_y: 0,
@@ -273,6 +338,8 @@ struct SeqHeaderParams {
     /// `color_config()`: `(color_primaries, transfer_characteristics, matrix_coefficients,
     /// color_range == full)`.
     colour: (u16, u16, u16, bool),
+    /// `BitDepth`, as §5.5.2 derives it from `high_bitdepth`, `twelve_bit` and `seq_profile`.
+    bit_depth: BitDepth,
 }
 
 impl SeqHeaderParams {
@@ -300,14 +367,18 @@ impl SeqHeaderParams {
             })??;
         let mut r = BitReader::new(seq);
         let seq_profile = r.bits(3)? as u8;
-        // Enforced here, not by the caller, because `color_config()`'s *layout* depends on it: only
+        // Checked here, not by the caller, because `color_config()`'s *layout* depends on it: only
         // `seq_profile == 2` codes `twelve_bit`, and only `seq_profile != 1` codes `mono_chrome`.
         // Reading the colour fields off a profile this parser cannot describe would misparse them
         // before anyone had a chance to reject the stream.
-        if seq_profile != 1 {
+        //
+        // Profile 0 is admitted so far as the *syntax* goes — it is what a monochrome stream uses —
+        // but the `mono_chrome` bit below is then rejected, because the container surface this
+        // rebuilds an `av1C` for describes a three-plane colour item.
+        if seq_profile > 2 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)",
+                "AVIF: AV1 backend stream must use seq_profile 0, 1 or 2",
             ));
         }
         let _still_picture = r.bits(1)?;
@@ -327,12 +398,19 @@ impl SeqHeaderParams {
         // reach `color_config()`.
         r.bits(6)?; // use_128x128_superblock, filter_intra, intra_edge_filter, superres, cdef, restoration
 
-        // color_config() (§5.5.2). `seq_profile == 1` is already enforced by the caller, so
-        // `twelve_bit` is absent and `mono_chrome` is inferred 0.
-        if r.bits(1)? != 0 {
+        // color_config() (§5.5.2): `high_bitdepth`, then `twelve_bit` only under profile 2, then
+        // `mono_chrome` for every profile but 1.
+        let high_bitdepth = r.bits(1)? != 0;
+        let twelve_bit = seq_profile == 2 && high_bitdepth && r.bits(1)? != 0;
+        let bit_depth = match (high_bitdepth, twelve_bit) {
+            (false, _) => BitDepth::Eight,
+            (true, false) => BitDepth::Ten,
+            (true, true) => BitDepth::Twelve,
+        };
+        if seq_profile != 1 && r.bits(1)? != 0 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend stream must be 8-bit (high_bitdepth = 0)",
+                "AVIF: AV1 backend stream must be three-plane (mono_chrome = 0)",
             ));
         }
         // `color_description_present_flag = 0` leaves all three code points UNSPECIFIED (2), which
@@ -357,6 +435,7 @@ impl SeqHeaderParams {
         };
         let colour = (cp, tc, mc, full_range);
         Ok(Self {
+            bit_depth,
             seq_profile,
             seq_level_idx_0,
             width,
@@ -509,13 +588,15 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
     }
 }
 
-/// The sentinel by which [`AbiAv1StillEncoder`] reports a **late** [`Status::UNSUPPORTED`] — a
-/// backend that answered `supports` affirmatively and then declined at `encode` time.
+/// The sentinel for a **late** decline — a backend that answered `supports` affirmatively and then
+/// declined at `encode` time.
 ///
-/// The typed trait has no third outcome between "handled" and "declined", so the adapter encodes
-/// the late decline as this exact [`Error::Unsupported`] payload, which [`run_backends`] maps back
-/// to a fall-through. It is an internal protocol between the two: a hand-written
-/// [`Av1StillEncoder`] signals a decline from [`supports`](Av1StillEncoder::supports).
+/// The typed trait has no third outcome between "handled" and "declined", so the late decline is
+/// this exact [`Error::Unsupported`] payload, which [`run_backends`] maps back to a fall-through.
+/// Two things raise it: [`AbiAv1StillEncoder`] translating a late [`Status::UNSUPPORTED`] from a C
+/// backend, and the default [`Av1StillEncoder::encode_still16`], which is how a backend written
+/// against the 8-bit contract declines a high-bit-depth job it never agreed to. A hand-written
+/// backend otherwise signals a decline from [`supports`](Av1StillEncoder::supports).
 pub(crate) struct LateDecline;
 
 impl LateDecline {
