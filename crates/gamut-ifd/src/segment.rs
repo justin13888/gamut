@@ -383,6 +383,15 @@ impl SegmentReport {
         self.unclassified.iter().map(|r| r.len).sum()
     }
 
+    /// The offset one past the file header, when one was claimed — where a vendor preamble
+    /// starts. Both classification passes anchor on it, so they agree on that position.
+    fn header_end(&self) -> Option<u64> {
+        self.segments
+            .iter()
+            .find(|s| s.kind == SpanKind::Header)
+            .map(|s| s.range.end())
+    }
+
     /// Reclassifies word-alignment padding out of [`unclassified`](Self::unclassified) by
     /// inspecting the actual bytes: an **all-zero** unclassified range that either ends on an
     /// even (word) boundary immediately before a following segment, or reaches the end of the
@@ -390,17 +399,34 @@ impl SegmentReport {
     /// non-zero filler, or zeros in a structurally implausible place — stays unclassified,
     /// which is the correct archival signal.
     ///
+    /// The one structural exception is the **preamble region**: the run from the end of the
+    /// header to a directory body — the gap the header's first-IFD pointer skips over. Nothing
+    /// on disk separates a zero-filled vendor preamble there from alignment filler (nor either
+    /// from the filler byte an odd-length preamble carries *inside* it), so the whole run is left
+    /// to [`classify_unclaimed`](Self::classify_unclaimed) to name a single [`SpanKind::Preamble`]
+    /// — matching what a writer emitting a preamble declares.
+    ///
     /// # Errors
     ///
     /// Returns [`gamut_core::Error`] if `src` fails while the range's bytes are inspected.
     pub fn classify_padding<S: ReadAt>(&mut self, src: &mut S) -> Result<()> {
         let mut starts: Vec<u64> = self.segments.iter().map(|s| s.range.start).collect();
         starts.sort_unstable();
+        let mut directories: Vec<u64> = self
+            .segments
+            .iter()
+            .filter(|s| matches!(s.kind, SpanKind::IfdBody { .. }))
+            .map(|s| s.range.start)
+            .collect();
+        directories.sort_unstable();
+        let header_end = self.header_end();
         let mut remaining = Vec::new();
         for range in std::mem::take(&mut self.unclassified) {
+            let preamble_region =
+                Some(range.start) == header_end && directories.binary_search(&range.end()).is_ok();
             let interior = range.end() % 2 == 0 && starts.binary_search(&range.end()).is_ok();
             let at_eof = range.end() == self.file_len && range.len <= 1;
-            if (interior || at_eof) && all_zero(src, range)? {
+            if !preamble_region && (interior || at_eof) && all_zero(src, range)? {
                 self.segments.push(Segment {
                     range,
                     kind: SpanKind::Padding,
@@ -430,11 +456,7 @@ impl SegmentReport {
     /// them. The dual-ledger invariants ([`unclaimed_reads`](Self::unclaimed_reads) and
     /// [`unread_claims`](Self::unread_claims)) are untouched and still catch parser defects.
     pub fn classify_unclaimed(&mut self) {
-        let header_end = self
-            .segments
-            .iter()
-            .find(|s| s.kind == SpanKind::Header)
-            .map(|s| s.range.end());
+        let header_end = self.header_end();
         for range in std::mem::take(&mut self.unclassified) {
             let kind = if Some(range.start) == header_end {
                 SpanKind::Preamble
@@ -780,6 +802,67 @@ mod tests {
         let mut src = odd_end;
         r.classify_padding(&mut src).expect("classify");
         assert_eq!(r.unclassified, vec![Range { start: 6, len: 3 }]);
+    }
+
+    /// The header/first-directory gap is the preamble region: an all-zero run there is a
+    /// zero-filled vendor preamble (or a preamble plus its alignment filler), indistinguishable
+    /// on disk from either, so the padding pass must leave it whole for `classify_unclaimed`.
+    /// Both halves of the rule matter: a zero run that starts after the header but ends at
+    /// something other than a directory, or ends at a directory without starting at the header,
+    /// is ordinary alignment padding.
+    #[test]
+    fn classify_padding_leaves_the_preamble_region_to_classify_unclaimed() {
+        // [0,4) header | [4,8) all-zero preamble | [8,12) directory body.
+        let data: &[u8] = &[1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2];
+        let mut map = SegmentMap::new(data.len() as u64);
+        map.claim(0, 4, SpanKind::Header, Claim::Parsed);
+        map.claim(8, 4, SpanKind::IfdBody { ifd: 8 }, Claim::Parsed);
+        let mut r = map.finish(None);
+        let mut src = data;
+        r.classify_padding(&mut src).expect("classify");
+        assert_eq!(
+            r.unclassified,
+            vec![Range { start: 4, len: 4 }],
+            "the preamble region is not padding: {r:?}"
+        );
+        r.classify_unclaimed();
+        assert_eq!(
+            r.unclaimed_spans(),
+            vec![Segment {
+                range: Range { start: 4, len: 4 },
+                kind: SpanKind::Preamble,
+            }]
+        );
+
+        // Same zero run, but the following structure is a value rather than a directory body:
+        // ordinary alignment padding.
+        let mut map = SegmentMap::new(data.len() as u64);
+        map.claim(0, 4, SpanKind::Header, Claim::Parsed);
+        map.claim(8, 4, SpanKind::Value { ifd: 0, tag: 1 }, Claim::Parsed);
+        let mut r = map.finish(None);
+        let mut src = data;
+        r.classify_padding(&mut src).expect("classify");
+        assert!(r.is_fully_classified(), "report: {r:?}");
+        assert!(r.segments.contains(&Segment {
+            range: Range { start: 4, len: 4 },
+            kind: SpanKind::Padding,
+        }));
+
+        // A zero run before a directory body that does *not* start at the header's end is
+        // alignment padding too.
+        let interior: &[u8] = &[1, 1, 1, 1, 3, 3, 0, 0, 2, 2, 2, 2];
+        let mut map = SegmentMap::new(interior.len() as u64);
+        map.claim(0, 4, SpanKind::Header, Claim::Parsed);
+        map.claim(4, 2, SpanKind::Value { ifd: 0, tag: 1 }, Claim::Parsed);
+        map.claim(8, 4, SpanKind::IfdBody { ifd: 8 }, Claim::Parsed);
+        let mut r = map.finish(None);
+        let mut src = interior;
+        r.classify_padding(&mut src).expect("classify");
+        assert!(r.is_fully_classified(), "report: {r:?}");
+        assert!(r.segments.contains(&Segment {
+            range: Range { start: 6, len: 2 },
+            kind: SpanKind::Padding,
+        }));
     }
 
     /// The three positions a real camera file leaves bytes in — right after the header, between
