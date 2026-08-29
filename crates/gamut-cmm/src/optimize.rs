@@ -94,10 +94,21 @@ fn reasonable_grid_points(input_channels: u8) -> u8 {
 }
 
 /// The node-count ceiling on a resampled CLUT: past it the pass declines rather than
-/// allocating. `7^7` nodes still fit; `7^8` (5.8M nodes, ~370 MB of `f64` samples at 8 output
-/// channels) does not. lcms2 has no such guard because its tables are 16-bit and its hifi
-/// spaces rarely reach eight inputs; this crate's `f64` nodes make the ceiling worth pinning.
-const MAX_RESAMPLED_NODES: usize = 1 << 20;
+/// allocating.
+///
+/// Set to **exactly** the widest grid the pass will ever build — `7^7` = 823 543 nodes, seven
+/// hifi inputs at [`reasonable_grid_points`]'s 7-node resolution (~52 MB of `f64` samples at 8
+/// output channels). The next step up, `7^8`, is 5.8M nodes and ~370 MB, so it declines. lcms2
+/// needs no such guard: its tables are 16-bit and its own hifi grids stay small.
+///
+/// Sitting the constant *on* a reachable grid rather than near one is deliberate — it makes the
+/// ceiling a boundary a test can straddle exactly, which a round number like `1 << 20` could not,
+/// since no product of the 33/17/7 grid rule lands on it.
+///
+/// It also **subsumes** [`ClutTable`]'s own 15-axis limit: `reasonable_grid_points` returns 7 for
+/// any input count above four, and `7^8` already exceeds this ceiling, so no accepted grid ever
+/// reaches eight axes — let alone sixteen. A separate axis guard would be unreachable code.
+const MAX_RESAMPLED_NODES: usize = 7_usize.pow(7);
 
 /// Applies `level`'s passes to `pipeline` (the funnel behind [`Pipeline::optimized`]).
 ///
@@ -324,8 +335,8 @@ fn clamps_domain(stage: &Stage) -> bool {
 /// - the last stage does not confine its *output* to `[0, 1]`: [`ClutTable`] holds normalized
 ///   node samples, so a pipeline ending in decoded colorimetry (a PCS end) is not
 ///   representable as one;
-/// - the input channel count exceeds what a CLUT can index (15 axes), or the grid would
-///   exceed [`MAX_RESAMPLED_NODES`].
+/// - the grid would exceed [`MAX_RESAMPLED_NODES`], which is tighter than the 15 axes a
+///   [`ClutTable`] can index and is therefore the only size guard needed.
 ///
 /// # Errors
 ///
@@ -346,17 +357,14 @@ fn resample(pipeline: Pipeline) -> Result<Pipeline> {
     let outputs = pipeline.output_channels();
     let grid = reasonable_grid_points(inputs);
     let axes = usize::from(inputs);
-    // A CLUT indexes at most 15 axes (lcms2's MAX_INPUT_DIMENSIONS), and the grid must fit
-    // the node ceiling.
+    // The whole grid must fit the node ceiling, which is tighter than the 15 axes a CLUT can
+    // index (see MAX_RESAMPLED_NODES) and so is the only size guard the pass needs.
     let Some(nodes) = usize::from(grid)
         .checked_pow(u32::from(inputs))
         .filter(|&n| n <= MAX_RESAMPLED_NODES)
     else {
         return Ok(pipeline);
     };
-    if axes > 15 {
-        return Ok(pipeline);
-    }
     let divisor = f64::from(grid - 1);
     let mut samples = Vec::with_capacity(nodes * usize::from(outputs));
     let mut coordinates = vec![0.0_f64; axes];
