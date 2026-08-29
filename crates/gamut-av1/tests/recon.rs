@@ -938,3 +938,35 @@ fn subsampled_420_reconstruction_matches_across_matrices_and_ranges() {
         }
     }
 }
+
+#[test]
+fn subsampled_420_reconstruction_matches_on_palette_content() {
+    // Screen-content blocks take the palette path, where chroma is a flat DC and no CfL is
+    // signalled. That interaction is chroma-specific — a palette block still has chroma of its own
+    // — and only shows up when the encoder actually selects a palette, which photographic content
+    // never does. Few distinct colours in large flat runs is what triggers it.
+    let flat_runs = |x: u32, y: u32| match ((x / 8) + (y / 8)) % 3 {
+        0 => [20u8, 30, 40],
+        1 => [200, 30, 40],
+        _ => [20, 200, 210],
+    };
+    for (w, h) in [(32u32, 32u32), (64, 48), (17, 13)] {
+        let p = planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs420,
+            MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            flat_runs,
+        );
+        check_with(
+            encode_still_intra_with(
+                &p,
+                60,
+                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+            )
+            .unwrap(),
+            60,
+        );
+    }
+}
