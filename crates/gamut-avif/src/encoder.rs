@@ -108,9 +108,11 @@ impl AvifEncoder {
 
     /// Creates an encoder that produces a **lossy** still image at the given `quality` (`0..=100`,
     /// higher = larger output, closer to the source; values above `100` are clamped).
-    /// Lossy stills are coded in **BT.709 YCbCr** by default (full range, 4:4:4): the luma–chroma
-    /// decorrelation is worth a large fraction of the bitrate and costs nothing in coding tools.
-    /// Override it with [`AvifEncoder::with_matrix`].
+    /// Lossy stills are coded in **BT.709 YCbCr** at **4:2:0** by default (full range): the
+    /// luma–chroma decorrelation is worth a large fraction of the bitrate and costs nothing in
+    /// coding tools, and 4:2:0 (AV1 Profile 0) is what still-picture hardware decoders read.
+    /// Override the matrix with [`AvifEncoder::with_matrix`] and the sampling with
+    /// [`AvifEncoder::with_chroma`]; note the identity matrix forces 4:4:4 (§6.4.2).
     #[must_use]
     pub fn lossy(quality: u8) -> Self {
         Self {
@@ -564,16 +566,22 @@ impl EncodeImage<Rgb8> for AvifEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
         let colour = self.colour();
-        let chroma = self.chroma();
         let planes = match colour.matrix {
             MatrixCoefficients::Identity => Planar8::from_rgb8_identity_view(image),
             matrix => {
                 // Rejects a matrix with no luma–chroma transform (Unspecified, YCgCo) before any
                 // bytes are written.
                 let m = RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight)?;
-                Planar8::from_rgb8_matrix_subsampled(image, m, chroma)?
+                Planar8::from_rgb8_matrix_subsampled(image, m, self.chroma())?
             }
         };
+        // Read off the buffer, not the configuration: §6.4.2 forces 4:4:4 under the identity
+        // matrix, so `with_matrix(Identity)` on a lossy encoder produces 4:4:4 planes while
+        // `self.chroma()` still says 4:2:0. `Av1EncodeRequest::chroma` promises "the planes are in
+        // this layout", and `still_from_backend_obus` compares it against the stream the backend
+        // returns — so the configured value would both misdescribe the buffer and reject every
+        // conformant backend response.
+        let chroma = planes.subsampling();
         // base_q_idx 0 is the lossless path; encode_still_intra(_, 0) is exactly what
         // encode_still_lossless_identity does, so a single call covers both modes.
         let base_q_idx = match self.config.mode {
