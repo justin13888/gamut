@@ -257,6 +257,9 @@ pub(crate) fn deblock(
         // Transform width/height (log2) for this plane at MI `cell`: luma uses the signaled tx size;
         // 4:4:4 chroma uses the block-size transform (`mi_bsl + 2`) capped at TX_32X32 (chroma never
         // uses TX_64X64, so a 64×64 block's chroma is a raster of 32×32 transforms with an edge at 32).
+        // This is the **4:4:4** rule: under subsampling the chroma transform follows the plane
+        // residual size (§5.11.38), which is not `mi_bsl + 2`. Replaced when 4:2:0 is enabled, where
+        // the dual-oracle reconstruction check can actually prove it.
         let txlog2 = |cell: usize| -> u32 {
             if is_luma {
                 u32::from(tx_log2[cell])
@@ -279,10 +282,9 @@ pub(crate) fn deblock(
         // pass must finish before the horizontal pass, which reads the vertical-filtered samples.
         let mut x = 4;
         while x < width {
-            let col = g.mi_col(x);
             let mut y = 0;
             while y < height {
-                let row = g.mi_row(y);
+                let (col, row) = g.deblock_mi(x, y);
                 let txw = 1usize << txlog2(row * mi_cols + col);
                 if x % txw == 0 {
                     let prev_txw = 1usize << txlog2(row * mi_cols + (col - 1));
@@ -301,10 +303,9 @@ pub(crate) fn deblock(
         // each MI block when the row is a transform-block edge.
         let mut y = 4;
         while y < height {
-            let row = g.mi_row(y);
             let mut x = 0;
             while x < width {
-                let col = g.mi_col(x);
+                let (col, row) = g.deblock_mi(x, y);
                 let txh = 1usize << txlog2_h(row * mi_cols + col);
                 if y % txh == 0 {
                     let prev_txh = 1usize << txlog2_h((row - 1) * mi_cols + col);
