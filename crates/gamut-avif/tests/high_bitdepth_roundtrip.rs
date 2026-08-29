@@ -160,6 +160,19 @@ fn the_depth_is_stated_the_same_way_everywhere() {
             bits.bits(),
             "{bits:?}: libavif"
         );
+
+        // AVIF §8.3 admits only High Profile items into an `MA1A` file, so the depth decides the
+        // brand as a side effect of deciding the profile: 10-bit keeps it, 12-bit does not.
+        let brands = img.compatible_brands();
+        assert!(
+            brands.starts_with(&[*b"avif", *b"mif1", *b"miaf"]),
+            "{bits:?}"
+        );
+        assert_eq!(
+            brands.contains(b"MA1A"),
+            profile == 1,
+            "{bits:?}: MA1A claim, brands {brands:?}"
+        );
     }
 }
 

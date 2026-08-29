@@ -28,10 +28,12 @@ has landed), `D` where a deferred row has no milestone, `OOS` where the disposit
 
 ## Scope & dispositions (v1)
 
-**Implemented (v1.0).** Lossless (decoded output bit-exact to the input) and lossy AV1 intra
-encoding of 8-bit RGB at 4:4:4 — identity matrix for lossless, **BT.709 YCbCr by default** for
-lossy, with BT.601/BT.2020-NCL and studio range selectable — wrapped as a conformant MIAF/AVIF
-`av01` item — brands `avif`/`mif1`/`miaf`/`MA1A`, the AVIF §9.1.1 minimum box set, cross-box
+**Implemented (v1.0).** Lossless (decoded output bit-exact to the input, at the coded depth) and
+lossy AV1 intra encoding at 4:4:4 or monochrome, 8/10/12-bit, from `Rgb8`/`Rgba8`/`Gray8`/`Rgb16`/
+`Rgba16` — identity matrix for lossless, **BT.709 YCbCr by default** for lossy, with
+BT.601/BT.2020-NCL and studio range selectable — wrapped as a conformant MIAF/AVIF `av01` item
+(plus a monochrome alpha auxiliary when the input carries one) — brands `avif`/`mif1`/`miaf`, with
+`MA1A` when every image item is AV1 High Profile, the AVIF §9.1.1 minimum box set, cross-box
 consistency (`av1C`↔sequence header, `pixi`, `colr`, `ispe`) by construction — with `irot`/`imir`
 display orientation. The **colour and metadata surface** (issue #395) rides on top: selectable CICP
 primaries and transfer characteristics, an embedded ICC profile as a `colr` box of type `prof`
@@ -43,10 +45,8 @@ AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `d
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
-**Deferred (planned, additive).** Every ☐ row below: pixel formats (4:2:0/4:2:2, `MA1B` — the
-10/12-bit AV1 **sample path** has landed with #398, but no `gamut-avif` input reaches it until
-#399); depth auxiliary
-items; the HDR
+**Deferred (planned, additive).** Every ☐ row below: pixel formats (4:2:0/4:2:2, `MA1B`); depth
+auxiliary items; the HDR
 surface beyond CICP *tagging* (`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a
 PQ/HLG transfer labels samples but does not by itself make a conformant HDR image); container
 derivations
@@ -97,7 +97,7 @@ adding it needs no container change.
 | `iprp`/`ipco`/`ipma` property association (`av1C` essential) | 14496-12; AVIF §2.2.1 | ✅ | M0 |
 | `av1C` AV1ItemConfigurationProperty, empty `configOBUs` | AV1-ISOBMFF §2.3 | ✅ | M0 |
 | `ispe` image spatial extents | 23008-12 | ✅ | M0 |
-| `pixi` pixel information (one entry per coded plane: 3×8, or 1×8 monochrome) | 23008-12 | ✅ | M0/M3 |
+| `pixi` pixel information (one entry per coded plane, at the stream's own depth: 3×8/10/12, or 1× monochrome) | 23008-12 | ✅ | M0/M3 |
 | `colr` type `nclx` (CICP code points) | AVIF §2.2; AV1-ISOBMFF §2.3.4 | ✅ | M0 |
 | `colr` type `rICC`/`prof` (ICC profile) | 23008-12 | ✅ (`prof` written by `AvifEncoder::with_icc_profile`; both read) | M4 |
 | `pasp` pixel aspect ratio | 14496-12 | ☐ | M5 |
@@ -145,6 +145,7 @@ adding it needs no container change.
 | `enable_filter_intra` (1 on lossy, 0 on lossless) / `enable_intra_edge_filter`=0 | §5.5 | ✅ | M0/M1 |
 | `enable_superres`/`cdef`/`restoration`=0 | §5.5 | ✅ (off) | M0 |
 | color_config: mc=0 identity, 4:4:4, high_bitdepth=0, full range | §5.5.2 | ✅ | M0 |
+| high-bit-depth **input**: `Rgb16`/`Rgba16` narrowed to the coded depth (`AvifEncoder::with_bit_depth`, default 12-bit, truncating) | AVIF §2.2 | ✅ (#399) | M2 |
 | color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ✅ (`mono_chrome` with its inferred-subsampling branch, `high_bitdepth`/`twelve_bit`, and profile 2's coded `subsampling_x` — `gamut_av1::headers`; `chroma_sample_position` ☐ #390/#391) | M2 |
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
 | INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
@@ -280,7 +281,8 @@ copy, which is what a decoder does for an independently decodable tile.
 | `AvifEncoder::{new, lossless, lossy, config}` builder API | gamut-avif | ✅ | M0/M1 |
 | `AvifEncoder::{with_matrix, with_color_range}` colour selection | gamut-avif | ✅ (#335) | M2 |
 | `Rgba8` input + alpha-plane extraction; `Gray8` input | gamut-color/avif | ✅ (#397; `Planar8::from_rgba8_*_view`/`from_gray8_view`) | M3 |
-| 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16` carries 10/12-bit planes into `gamut-av1`; float HDR ☐) | M2/M4 |
+| `Rgb16`/`Rgba16` input → 10/12-bit AVIF (`with_bit_depth`) | gamut-color/avif | ✅ (#399; `Planar16::from_rgb16_*_view`/`from_rgba16_*_view`) | M2 |
+| 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16`; 16-bit input narrows to a 10/12-bit coded depth — float HDR ☐) | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |
 | AV1 **encode** backend seam (`Av1StillEncoder`/`Av1EncodeRequest`/`push_backend`/`AbiAv1StillEncoder`) | gamut-avif §M | ✅ | D |
@@ -360,7 +362,8 @@ propagating its error rather than being silently re-encoded.
 | Backend selection beyond first-supporter (cost/priority hints, per-request negotiation) | — | ☐ | D |
 | Colour on `Av1EncodeRequest` (`colour()`), validated against the returned stream's `color_config()` | AV1 §5.5.2 | ✅ (#335) | M2 |
 | Monochrome on `Av1EncodeRequest` (so a backend can encode, or decline, an alpha auxiliary or a `Gray8` primary — today those go straight to the `gamut-av1` tail, since a backend written against the 4:4:4 contract cannot decline what the request cannot express) | — | ☐ | M3 |
-| 10/12-bit and 4:2:0/4:2:2 fields on `Av1EncodeRequest` | — | ☐ | M2 |
+| Bit depth on `Av1EncodeRequest` + the defaulted `Av1StillEncoder::encode_still16` (whose default **declines**, so an 8-bit backend falls through rather than being handed 10/12-bit planes) | — | ✅ (#399) | M2 |
+| 4:2:0/4:2:2 fields on `Av1EncodeRequest` | — | ☐ | M2 |
 
 **Reserved: the decode-side registry.** The `Av1StillDecoder` trait ships today as a *single*
 caller-supplied decoder passed per call (`decode_primary_rgba8(&mut decoder)`). Its registry
