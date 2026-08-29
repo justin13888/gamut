@@ -41,12 +41,17 @@ struct Strength {
     limit: i32,
     blimit: i32,
     thresh: i32,
+    /// The frame's bit depth. The three thresholds above are already scaled to it (§7.14.6.2
+    /// applies `<< (BitDepth - 8)` at each comparison); this carries the depth on to the flatness
+    /// thresholds and the centring [`narrow_apply`] does, so one value travels with the edge
+    /// instead of a second parameter alongside it.
+    bit_depth: u32,
 }
 
 /// Computes the deblock masks (§7.14.6.2) for one boundary sample and, if the filter applies,
 /// returns `(hevMask, flatMask)`. `base` is the index of `q0`; `step` the stride perpendicular to
 /// the edge (`1` vertical, row stride horizontal). `filter_size` is 4 or 8; `is_luma` selects the
-/// tap count. Returns `None` when `filterMask == 0` (no filtering). 8-bit (`BitDepth == 8`).
+/// tap count. Returns `None` when `filterMask == 0` (no filtering).
 fn deblock_masks(
     buf: &[u16],
     base: usize,
@@ -59,6 +64,7 @@ fn deblock_masks(
         limit,
         blimit,
         thresh,
+        bit_depth,
     } = st;
     let s = |k: isize| -> i32 { i32::from(buf[(base as isize + k * step as isize) as usize]) };
     let (q0, q1, p0, p1) = (s(0), s(1), s(-1), s(-2));
@@ -97,9 +103,10 @@ fn deblock_masks(
     }
 
     // flatMask (only meaningful for filterSize >= 8, where filterLen >= 6 so p2/q2 are read);
-    // thresholdBd = 1 << (BitDepth - 8) = 1.
+    // thresholdBd = 1 << (BitDepth - 8).
+    let threshold_bd = 1 << (bit_depth - 8);
     let flat = if filter_size >= 8 {
-        let t = 1;
+        let t = threshold_bd;
         let mut fm = (p1 - p0).abs() > t
             || (q1 - q0).abs() > t
             || (p2 - p0).abs() > t
@@ -115,7 +122,7 @@ fn deblock_masks(
     // flatMask2 (only required for filterSize == 16): are the outer samples p4..p6 / q4..q6 also flat?
     // Only read at the wide 16-tap luma edges, where p6 = s(-7) / q6 = s(6) are guaranteed in bounds.
     let flat2 = if filter_size >= 16 {
-        let t = 1;
+        let t = threshold_bd;
         let (q4, q5, q6, p4, p5, p6) = (s(4), s(5), s(6), s(-5), s(-6), s(-7));
         let fm = (p6 - p0).abs() > t
             || (q6 - q0).abs() > t
@@ -131,23 +138,28 @@ fn deblock_masks(
 }
 
 /// Narrow (4-tap) deblock filter (§7.14.6.3): modifies up to two samples each side of the edge.
-fn narrow_apply(buf: &mut [u16], base: usize, step: usize, hev: bool) {
+///
+/// The samples are centred by `0x80 << (BitDepth - 8)` — mid-grey — so the intermediates live in
+/// `-(1 << (BitDepth-1)) ..= (1 << (BitDepth-1)) - 1`, which is exactly the range `filter4_clamp`
+/// confines them to.
+fn narrow_apply(buf: &mut [u16], base: usize, step: usize, hev: bool, bit_depth: u32) {
     let q0 = i32::from(buf[base]);
     let q1 = i32::from(buf[base + step]);
     let p0 = i32::from(buf[base - step]);
     let p1 = i32::from(buf[base - 2 * step]);
-    let clamp = |v: i32| v.clamp(-128, 127);
-    let (ps1, ps0, qs0, qs1) = (p1 - 128, p0 - 128, q0 - 128, q1 - 128);
+    let mid = 1i32 << (bit_depth - 1);
+    let clamp = |v: i32| v.clamp(-mid, mid - 1);
+    let (ps1, ps0, qs0, qs1) = (p1 - mid, p0 - mid, q0 - mid, q1 - mid);
     let mut filter = if hev { clamp(ps1 - qs1) } else { 0 };
     filter = clamp(filter + 3 * (qs0 - ps0));
     let filter1 = clamp(filter + 4) >> 3;
     let filter2 = clamp(filter + 3) >> 3;
-    buf[base] = (clamp(qs0 - filter1) + 128) as u16; // oq0
-    buf[base - step] = (clamp(ps0 + filter2) + 128) as u16; // op0
+    buf[base] = (clamp(qs0 - filter1) + mid) as u16; // oq0
+    buf[base - step] = (clamp(ps0 + filter2) + mid) as u16; // op0
     if !hev {
         let f = (filter1 + 1) >> 1; // Round2(filter1, 1)
-        buf[base + step] = (clamp(qs1 - f) + 128) as u16; // oq1
-        buf[base - 2 * step] = (clamp(ps1 + f) + 128) as u16; // op1
+        buf[base + step] = (clamp(qs1 - f) + mid) as u16; // oq1
+        buf[base - 2 * step] = (clamp(ps1 + f) + mid) as u16; // op1
     }
 }
 
@@ -200,7 +212,7 @@ fn filter_sample(
 ) {
     if let Some((hev, flat, flat2)) = deblock_masks(buf, base, step, filter_size, is_luma, st) {
         if filter_size == 4 || !flat {
-            narrow_apply(buf, base, step, hev);
+            narrow_apply(buf, base, step, hev, st.bit_depth);
         } else if filter_size == 8 || !flat2 {
             wide_apply(buf, base, step, is_luma, 3);
         } else {
@@ -232,6 +244,7 @@ pub(crate) fn deblock(
     mi_bsl_h: &[u8],
     mi_dlf: &[i8],
     qindex: u8,
+    bit_depth: u32,
 ) {
     let base_lvl = i32::from(deblock_level(qindex));
     if base_lvl == 0 {
@@ -239,13 +252,18 @@ pub(crate) fn deblock(
     }
     // The per-superblock loop-filter level is `Clip3(0, 63, loop_filter_level + DeltaLF)`; with
     // `loop_filter_sharpness = 0` the strength thresholds derive from it directly (§7.14.4/.5).
+    // §7.14.6.2 compares against `limit << (BitDepth - 8)` and friends; the three thresholds are
+    // derived from the 8-bit level first and then scaled, so the derivation itself stays the
+    // spec's.
+    let shift = bit_depth - 8;
     let strength_for = |cell: usize| -> Strength {
         let lvl = (base_lvl + i32::from(mi_dlf[cell])).clamp(0, 63);
         let limit = lvl.max(1);
         Strength {
-            limit,
-            blimit: 2 * (lvl + 2) + limit,
-            thresh: lvl >> 4,
+            limit: limit << shift,
+            blimit: (2 * (lvl + 2) + limit) << shift,
+            thresh: (lvl >> 4) << shift,
+            bit_depth,
         }
     };
 
@@ -376,6 +394,10 @@ pub(crate) fn cdef_strengths(qindex: u8) -> (i32, i32, i32, i32) {
 }
 
 /// `CdefDamping` (= `cdef_damping_minus_3 + 3`); fixed at 3 here.
+/// `FILTER_BITS` (§3): the precision of the interpolation and restoration filter taps, so a unit
+/// DC gain is `1 << FILTER_BITS`.
+const FILTER_BITS: u32 = 7;
+
 pub(crate) const CDEF_DAMPING: i32 = 3;
 
 /// CDEF direction process (§7.15.2): finds the dominant direction `yDir` (0..7) and the variance
@@ -385,20 +407,30 @@ pub(crate) const CDEF_DAMPING: i32 = 3;
 /// partial enters the direction cost only as a square (`cost += partial²`), so negating an entire
 /// accumulator — a `+=`→`-=` flip on any one line below — leaves every cost unchanged and is therefore
 /// equivalent; the live arithmetic is the index math and the `- 128` centring.
-/// An 8-bit sample centred for the §7.15.2 direction search. Each direction cost is a sum of squared
-/// `partial` sums and the chosen direction/variance are an argmax and a cost *difference*, both of
-/// which a uniform offset of every sample leaves unchanged — so the centring constant is inert here
-/// (kept for spec fidelity) and mutating it is equivalent.
-fn centred(sample: u16) -> i64 {
-    i64::from(sample) - 128
+/// A sample brought into the 8-bit domain and centred, for the §7.15.2 direction search:
+/// `(x >> (BitDepth - 8)) - 128`.
+///
+/// The `- 128` is inert — each direction cost is a sum of squared `partial` sums, and the chosen
+/// direction and variance are an argmax and a cost *difference*, both unchanged by a uniform offset
+/// of every sample — so mutating it is equivalent. The **shift** is not: `var` scales with the
+/// square of the sample range and reaches the filter through `FloorLog2(var >> 6)`, so a
+/// high-bit-depth block that skipped it would pick a different primary strength.
+fn centred(sample: u16, coeff_shift: u32) -> i64 {
+    i64::from(sample >> coeff_shift) - 128
 }
 
 #[allow(clippy::needless_range_loop)]
-fn cdef_partials(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> [[i64; 15]; 8] {
+fn cdef_partials(
+    luma: &[u16],
+    coded_w: usize,
+    x0: usize,
+    y0: usize,
+    coeff_shift: u32,
+) -> [[i64; 15]; 8] {
     let mut partial = [[0i64; 15]; 8];
     for i in 0..8 {
         for j in 0..8 {
-            let x = centred(luma[(y0 + i) * coded_w + (x0 + j)]);
+            let x = centred(luma[(y0 + i) * coded_w + (x0 + j)], coeff_shift);
             partial[0][i + j] += x;
             partial[1][i + j / 2] += x;
             partial[2][i] += x;
@@ -413,8 +445,14 @@ fn cdef_partials(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> [[i64; 1
 }
 
 #[allow(clippy::needless_range_loop)]
-fn cdef_direction(luma: &[u16], coded_w: usize, x0: usize, y0: usize) -> (usize, i32) {
-    let partial = cdef_partials(luma, coded_w, x0, y0);
+fn cdef_direction(
+    luma: &[u16],
+    coded_w: usize,
+    x0: usize,
+    y0: usize,
+    coeff_shift: u32,
+) -> (usize, i32) {
+    let partial = cdef_partials(luma, coded_w, x0, y0, coeff_shift);
     let mut cost = [0i64; 8];
     for i in 0..8 {
         cost[2] += partial[2][i] * partial[2][i];
@@ -478,6 +516,7 @@ fn cdef_filter_block(
     sec_str: i32,
     damping: i32,
     dir: usize,
+    coeff_shift: u32,
 ) {
     let at = |y: i32, x: i32| -> Option<i32> {
         if y >= 0 && (y as usize) < coded_h && x >= 0 && (x as usize) < coded_w {
@@ -486,8 +525,11 @@ fn cdef_filter_block(
             None
         }
     };
-    let pri_taps = &CDEF_PRI_TAPS[(pri_str & 1) as usize];
-    let sec_taps = &CDEF_SEC_TAPS[(pri_str & 1) as usize];
+    // §7.15.3 indexes the tap tables by `(priStr >> coeffShift) & 1` — the parity of the *signaled*
+    // strength, before it is scaled to the frame's depth.
+    let taps_idx = ((pri_str >> coeff_shift) & 1) as usize;
+    let pri_taps = &CDEF_PRI_TAPS[taps_idx];
+    let sec_taps = &CDEF_SEC_TAPS[taps_idx];
     for i in 0..h {
         for j in 0..w {
             let x = i32::from(input[(y0 + i) * coded_w + (x0 + j)]);
@@ -557,8 +599,18 @@ pub(crate) fn cdef(
     mi_cols: usize,
     qindex: u8,
     num_planes: usize,
+    bit_depth: u32,
 ) -> [Vec<u16>; 3] {
     let (y_pri, y_sec, uv_pri, uv_sec) = cdef_strengths(qindex);
+    // §7.15.1: every strength is signaled in the 8-bit domain and scaled to the frame's depth here,
+    // and the damping grows by the same shift.
+    let coeff_shift = bit_depth - 8;
+    let (y_pri, y_sec, uv_pri, uv_sec) = (
+        y_pri << coeff_shift,
+        y_sec << coeff_shift,
+        uv_pri << coeff_shift,
+        uv_sec << coeff_shift,
+    );
     let mut out = planes.clone();
     if cdef_disabled(y_pri, y_sec, uv_pri, uv_sec) {
         return out;
@@ -575,7 +627,7 @@ pub(crate) fn cdef(
                 x0 += 8;
                 continue;
             }
-            let (y_dir, var) = cdef_direction(&planes[0], coded_w, x0, y0);
+            let (y_dir, var) = cdef_direction(&planes[0], coded_w, x0, y0, coeff_shift);
             // Luma: the primary strength is scaled by the block variance (§7.15.1 steps 4-5).
             let dir = if y_pri == 0 { 0 } else { y_dir };
             let var_str = if var >> 6 != 0 {
@@ -599,8 +651,9 @@ pub(crate) fn cdef(
                 8,
                 luma_pri,
                 y_sec,
-                CDEF_DAMPING,
+                CDEF_DAMPING + coeff_shift as i32,
                 dir,
+                coeff_shift,
             );
             // Chroma: no variance scaling, damping reduced by 1, direction via `Cdef_Uv_Dir`.
             // That table is the identity for both 4:4:4 and 4:2:0, so `y_dir` passes through; the
@@ -621,8 +674,9 @@ pub(crate) fn cdef(
                     ph,
                     uv_pri,
                     uv_sec,
-                    CDEF_DAMPING - 1,
+                    CDEF_DAMPING + coeff_shift as i32 - 1,
                     cdir,
+                    coeff_shift,
                 );
             }
             x0 += 8;
@@ -645,8 +699,12 @@ pub(crate) const WIENER_DEFAULT: [i32; 3] = [3, -7, 15];
 /// filter reads the post-CDEF samples; the two rows immediately above the stripe top and below the
 /// stripe bottom come from the deblocked reconstruction (the saved "loop restoration line"), with the
 /// third tap replicating the nearer boundary row. At the frame top/bottom and left/right edges the
-/// nearest in-frame sample is replicated (a single restoration unit spans the width). 8-bit:
-/// horizontal `round_bits = 3`, vertical `round_bits = 11`, `round_offset = 1 << 18`.
+/// nearest in-frame sample is replicated (a single restoration unit spans the width).
+///
+/// The rounding is §7.11.3.2's `InterRound0`/`InterRound1` at `isCompound = 0`: `3` and `11`, except
+/// at 12 bits where they become `5` and `9`. §7.17.4's `offset` then re-centres the intermediate so
+/// it can be held unsigned, and `limit` bounds it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn loop_restore_wiener_luma(
     cdef: &mut [u16],
     deblock: &[u16],
@@ -655,12 +713,28 @@ pub(crate) fn loop_restore_wiener_luma(
     height: usize,
     fh: [i32; 3],
     fv: [i32; 3],
+    bit_depth: u32,
 ) {
     if width == 0 || height == 0 {
         return;
     }
-    // 7-tap symmetric filters. The horizontal centre excludes the implicit +128 (added per sample),
-    // the vertical centre includes it (§7.17.4).
+    // §7.11.3.2 with isCompound = 0. Only 12-bit differs from the 8-bit pair.
+    let (round0, round1) = if bit_depth == 12 {
+        (5u32, 9u32)
+    } else {
+        (3u32, 11u32)
+    };
+    // §7.17.4: `intermediate + offset` is what this code actually carries, so `offset << round0`
+    // is folded into the horizontal sum and the clip becomes `0..=limit`.
+    let offset = 1i32 << (bit_depth + FILTER_BITS - round0 - 1);
+    let limit = (1i32 << (bit_depth + 1 + FILTER_BITS - round0)) - 1;
+    let h_round = 1i32 << (round0 - 1);
+    let v_round = 1i32 << (round1 - 1);
+    // The vertical taps sum to `1 << FILTER_BITS`, so the per-sample `+ offset` the intermediate
+    // carries arrives in the vertical sum scaled by exactly that, and is removed once.
+    let v_offset = offset << FILTER_BITS;
+    // 7-tap symmetric filters. The horizontal centre excludes the implicit `1 << FILTER_BITS`
+    // (added per sample below), the vertical centre includes it (§7.17.4).
     let fh7 = [
         fh[0],
         fh[1],
@@ -674,23 +748,24 @@ pub(crate) fn loop_restore_wiener_luma(
         fv[0],
         fv[1],
         fv[2],
-        128 - 2 * (fv[0] + fv[1] + fv[2]),
+        (1 << FILTER_BITS) - 2 * (fv[0] + fv[1] + fv[2]),
         fv[2],
         fv[1],
         fv[0],
     ];
     let src_cdef = cdef.to_vec();
-    // Horizontal 7-tap filter of one source row → a `width`-long buffer clipped to `0..=8191`.
+    // Horizontal 7-tap filter of one source row → a `width`-long buffer holding
+    // `intermediate + offset`, clipped to `0..=limit`.
     let h_row = |buf: &[u16], row: usize| -> Vec<i32> {
         (0..width)
             .map(|x| {
                 let base = row * coded_w;
-                let mut sum = (1i32 << 14) + i32::from(buf[base + x]) * 128;
+                let mut sum = (offset << round0) + i32::from(buf[base + x]) * (1 << FILTER_BITS);
                 for (i, &tap) in fh7.iter().enumerate() {
                     let sx = (x as isize + i as isize - 3).clamp(0, width as isize - 1) as usize;
                     sum += i32::from(buf[base + sx]) * tap;
                 }
-                ((sum + 4) >> 3).clamp(0, 8191)
+                ((sum + h_round) >> round0).clamp(0, limit)
             })
             .collect()
     };
@@ -725,12 +800,13 @@ pub(crate) fn loop_restore_wiener_luma(
             .collect();
         for y in st..se {
             for x in 0..width {
-                let mut sum = -(1i32 << 18);
+                let mut sum = -v_offset;
                 for (t, &tap) in fv7.iter().enumerate() {
                     let bi = (y as isize + t as isize - 3 - (st as isize - 3)) as usize;
                     sum += band[bi][x] * tap;
                 }
-                cdef[y * coded_w + x] = gamut_color::clip_pixel((sum + 1024) >> 11, 8);
+                cdef[y * coded_w + x] =
+                    gamut_color::clip_pixel((sum + v_round) >> round1, bit_depth);
             }
         }
         st = se;
@@ -793,13 +869,14 @@ fn superres_x0(in_w: usize, out_w: usize, step: i32) -> i32 {
 
 /// Upscales one plane horizontally from `src_w` to `dst_w` (§7.16.3 superres). The 8-tap polyphase
 /// filter steps the subpel source position by `step = ((src_w << 14) + dst_w/2) / dst_w`, starting at
-/// `superres_x0`; out-of-frame samples replicate the nearest column. 8-bit (`FILTER_BITS = 7`).
+/// `superres_x0`; out-of-frame samples replicate the nearest column.
 pub(crate) fn superres_upscale_plane(
     src: &[u16],
     src_stride: usize,
     frame_w: usize,
     dst_w: usize,
     height: usize,
+    bit_depth: u32,
 ) -> Vec<u16> {
     // The subpel geometry (step/initial offset) is keyed by `FrameWidth`, but the source samples are
     // clamped to the coded grid (`src_stride = 4*bw`, padded past FrameWidth), matching dav1d.
@@ -817,7 +894,10 @@ pub(crate) fn superres_upscale_plane(
                 let sx = (src_x + k as i32 - 3).clamp(0, src_stride as i32 - 1) as usize;
                 sum += i32::from(tap) * i32::from(src[base + sx]);
             }
-            dst[dbase + x] = gamut_color::clip_pixel((-sum + 64) >> 7, 8);
+            dst[dbase + x] = gamut_color::clip_pixel(
+                (-sum + (1 << (FILTER_BITS - 1))) >> FILTER_BITS,
+                bit_depth,
+            );
             mx += step;
             src_x += mx >> 14;
             mx &= 0x3fff;
@@ -910,10 +990,16 @@ mod tests {
                 .map(|p| (100 + f(p % 8, p / 8) * 4) as u16)
                 .collect()
         };
-        assert_eq!(cdef_direction(&ramp(|x, _| x as i32), 8, 0, 0), (6, 4410));
-        assert_eq!(cdef_direction(&ramp(|_, y| y as i32), 8, 0, 0), (2, 4410));
         assert_eq!(
-            cdef_direction(&ramp(|x, y| (x + y) as i32), 8, 0, 0),
+            cdef_direction(&ramp(|x, _| x as i32), 8, 0, 0, 0),
+            (6, 4410)
+        );
+        assert_eq!(
+            cdef_direction(&ramp(|_, y| y as i32), 8, 0, 0, 0),
+            (2, 4410)
+        );
+        assert_eq!(
+            cdef_direction(&ramp(|x, y| (x + y) as i32), 8, 0, 0, 0),
             (0, 8820)
         );
     }
@@ -961,6 +1047,7 @@ mod tests {
                 limit: 10,
                 blimit: 34,
                 thresh: 0,
+                bit_depth: 8,
             },
         );
         assert_eq!(buf, [102, 103, 105, 106]);
@@ -980,6 +1067,7 @@ mod tests {
                 limit: 10,
                 blimit: 34,
                 thresh: 0,
+                bit_depth: 8,
             },
         );
         assert_eq!(buf, [100, 100, 120, 120]);
@@ -1014,7 +1102,7 @@ mod tests {
         // 16×16 ⇒ 4×4 MI grid; no block is skip, so CDEF visits every 8×8.
         let mi_skip = vec![0u8; 4 * 4];
         let g = geom444(16, 16, 4, 4);
-        assert_eq!(cdef(&flat, &g, &mi_skip, 4, 255, 3), flat);
+        assert_eq!(cdef(&flat, &g, &mi_skip, 4, 255, 3, 8), flat);
 
         // CDEF only attenuates *small* oscillations (large diffs are constrained away to preserve
         // edges). A low-amplitude vertical stripe gives the direction search a clear direction and a
@@ -1029,7 +1117,7 @@ mod tests {
                 planes[0][y * 16 + x] = if x % 2 == 0 { 126 } else { 132 };
             }
         }
-        let out = cdef(&planes, &g, &mi_skip, 4, 255, 3);
+        let out = cdef(&planes, &g, &mi_skip, 4, 255, 3, 8);
         assert_ne!(
             out[0], planes[0],
             "CDEF should dering a low-amplitude oscillation"
@@ -1051,7 +1139,7 @@ mod tests {
         let mi_dlf = vec![0i8; 4 * 4];
         let g = geom444(16, 16, 4, 4);
         deblock(
-            &mut flat, &g, 4, &tx_log2, &tx_log2, &mi_bsl, &mi_bsl, &mi_dlf, 64,
+            &mut flat, &g, 4, &tx_log2, &tx_log2, &mi_bsl, &mi_bsl, &mi_dlf, 64, 8,
         );
         assert!(flat[0].iter().all(|&v| v == 128));
 
@@ -1077,6 +1165,7 @@ mod tests {
             &mi_bsl,
             &mi_dlf,
             64,
+            8,
         ); // qindex 64 ⇒ level 16
         assert_ne!(
             planes[0], before,

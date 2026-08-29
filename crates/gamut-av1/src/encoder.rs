@@ -2,11 +2,11 @@
 //! unit for an AVIF still image.
 
 use gamut_color::cicp::{ColorRange, MatrixCoefficients};
-use gamut_color::{BitDepth, ChromaSubsampling, Planar8};
+use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16};
 use gamut_core::{Error, Result};
 
 use crate::headers::{self, Av1Colour, Av1StillConfig};
-use crate::tile::FrameEncoder;
+use crate::tile::{FrameEncoder, Reconstruction};
 
 /// The encoded AV1 temporal unit (sequence-header OBU + frame OBU) for one still image, plus the
 /// configuration values `gamut-avif` must mirror into the `av1C` and `colr` boxes.
@@ -120,6 +120,186 @@ pub fn encode_still_intra_superres(
     encode_with(planes, qindex, Some(coded_denom), Av1Colour::default())
 }
 
+/// Validates the source layout and dimensions shared by every entry point, returning whether the
+/// frame is monochrome.
+///
+/// The plane geometry is per-plane throughout, but the *coding* path is 4:4:4 or monochrome: the
+/// residual loop, the entropy contexts and CfL all step chroma over the luma extent, so a
+/// *subsampled* source would emit a stream that claims 4:4:4 and codes something else. Refuse it.
+/// Lifted by the 4:2:0 (#390) and 4:2:2 (#391) slices. Monochrome codes no chroma at all, so it has
+/// no such mismatch to hide.
+///
+/// §5.5.2 also infers `subsampling_x = subsampling_y = 1` for a monochrome stream, and §6.4.2
+/// permits `MC_IDENTITY` only when both are 0. `Av1Colour::default()` is identity, so a caller
+/// reaching here with monochrome planes and the default colour would otherwise emit a
+/// non-conformant stream that libaom and dav1d are entitled to reject; `Av1Colour::monochrome()`
+/// is the fix.
+fn check_layout(
+    width: u32,
+    height: u32,
+    subsampling: ChromaSubsampling,
+    colour: Av1Colour,
+) -> Result<bool> {
+    if width == 0 || height == 0 {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "image has a zero dimension",
+        ));
+    }
+    let monochrome = subsampling == ChromaSubsampling::Cs400;
+    if !monochrome && subsampling != ChromaSubsampling::Cs444 {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AV1: only 4:4:4 and monochrome planes are encoded today",
+        ));
+    }
+    if monochrome && colour.matrix == MatrixCoefficients::Identity {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AV1: a monochrome stream cannot signal the identity matrix (§6.4.2 allows MC_IDENTITY \
+             only at subsampling 0/0); use Av1Colour::monochrome()",
+        ));
+    }
+    Ok(monochrome)
+}
+
+/// The sequence-header field values for one still: the profile the depth and plane count force,
+/// the depth flags, and the CICP triple.
+///
+/// `seq_profile` follows §6.4.1's table exactly — profile 1 (High) is the 8/10-bit 4:4:4 profile
+/// and infers `mono_chrome = 0`, profile 0 (Main) is the 8/10-bit monochrome one, and 12-bit of any
+/// plane count is profile 2 (Professional).
+fn still_config(
+    width: u32,
+    height: u32,
+    monochrome: bool,
+    bit_depth: BitDepth,
+    subsampling: (u8, u8),
+    colour: Av1Colour,
+) -> Result<Av1StillConfig> {
+    if bit_depth == BitDepth::Sixteen {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AV1: only 8-, 10- and 12-bit samples are coded (§6.4.1)",
+        ));
+    }
+    let (sub_x, sub_y) = subsampling;
+    let config = Av1StillConfig {
+        seq_profile: if bit_depth == BitDepth::Twelve {
+            2
+        } else if monochrome {
+            0
+        } else {
+            1
+        },
+        seq_level_idx_0: headers::pick_level(width, height)?,
+        seq_tier_0: 0,
+        high_bitdepth: bit_depth != BitDepth::Eight,
+        twelve_bit: bit_depth == BitDepth::Twelve,
+        monochrome,
+        // Inferred, not coded, under monochrome: §5.5.2 fixes both to 1.
+        chroma_subsampling_x: sub_x,
+        chroma_subsampling_y: sub_y,
+        chroma_sample_position: 0,
+        color_primaries: colour.primaries.code_point(),
+        transfer_characteristics: colour.transfer.code_point(),
+        matrix_coefficients: colour.matrix.code_point(),
+        full_range: matches!(colour.range, ColorRange::Full),
+    };
+    // Under the §5.5.2 sRGB shortcut `color_range` is *inferred* as full and no bit is coded, so a
+    // studio-range request there could not be signalled — the stream would silently claim full
+    // range. Reject it rather than emit a header that disagrees with the samples.
+    if config.is_srgb_shortcut() && !config.full_range {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AV1: the sRGB color_config shortcut infers full range; studio range needs a non-identity matrix",
+        ));
+    }
+    Ok(config)
+}
+
+/// Appends the coded tiles to a frame-header payload (§5.11.1): the frame header already emitted
+/// the tile-group prefix, and each tile but the last is prefixed by its byte size minus one as a
+/// little-endian `TileSizeBytes`-byte field.
+fn append_tiles(frame_payload: &mut Vec<u8>, tile_bytes: &[Vec<u8>]) {
+    for (i, tile) in tile_bytes.iter().enumerate() {
+        if i + 1 < tile_bytes.len() {
+            let sz = (tile.len() - 1) as u32;
+            frame_payload.extend_from_slice(&sz.to_le_bytes()[..headers::TILE_SIZE_BYTES]);
+        }
+        frame_payload.extend_from_slice(tile);
+    }
+}
+
+/// Encodes **10- or 12-bit** 4:4:4 identity planes (Y=G, U=B, V=R), or a monochrome luma plane, as
+/// an AV1 intra keyframe at quantizer `qindex` (`base_q_idx`; `0` selects the lossless path).
+///
+/// The depth comes from the buffer, which validated its own samples against it, and decides the
+/// profile: 10-bit is profile 1 (or 0 monochrome) with `high_bitdepth`, and 12-bit of any plane
+/// count is profile 2 with `twelve_bit` (§6.4.1). The 8-bit sibling is
+/// [`encode_still_intra_with`]; a [`Planar16`] that carries [`BitDepth::Eight`] is accepted here
+/// too and produces exactly the stream that entry point would.
+///
+/// Returns the temporal unit and the encoder's reconstruction — the samples a conformant decoder
+/// produces, which at `qindex = 0` is the source.
+///
+/// # Errors
+///
+/// As [`encode_still_intra_with`], plus [`Error::Unsupported`] for [`BitDepth::Sixteen`], which is
+/// not an AV1 sample depth (§6.4.1 defines 8, 10 and 12 only).
+///
+/// Superres has no high-bit-depth entry point: [`encode_still_intra_superres`] takes a
+/// [`Planar8`], and its source downscale is written for 8-bit samples.
+pub fn encode_still_intra16_with(
+    planes: &Planar16,
+    qindex: u8,
+    colour: Av1Colour,
+) -> Result<(EncodedStill, ReconImage)> {
+    let (width, height) = (planes.width(), planes.height());
+    let monochrome = check_layout(width, height, planes.subsampling(), colour)?;
+    let config = still_config(
+        width,
+        height,
+        monochrome,
+        planes.bit_depth(),
+        planes.subsampling().subsampling(),
+        colour,
+    )?;
+
+    let mi_cols = 2 * ((width + 7) >> 3);
+    let mi_rows = 2 * ((height + 7) >> 3);
+    let seq_payload = headers::sequence_header_payload(&config, width, height, qindex > 0, false);
+    let mut frame_payload =
+        headers::frame_header_payload(width, height, mi_cols, mi_rows, qindex, None, monochrome);
+    let (tile_bytes, recon) = FrameEncoder::new16(planes, qindex).encode();
+    append_tiles(&mut frame_payload, &tile_bytes);
+
+    let recon_planes: [Vec<u16>; 3] = if qindex == 0 {
+        // Lossless: the reconstruction *is* the source. Each plane crops at its own extent, so a
+        // monochrome buffer's empty chroma planes stay empty.
+        std::array::from_fn(|i| {
+            let (pw, ph) = planes.plane_dimensions(i);
+            crop(planes.plane(i), pw, pw, ph)
+        })
+    } else {
+        restored_recon(&recon)
+    };
+
+    Ok((
+        EncodedStill {
+            obus: headers::assemble_temporal_unit(&seq_payload, &frame_payload),
+            config,
+        },
+        ReconImage {
+            width,
+            height,
+            bit_depth: planes.bit_depth(),
+            subsampling: planes.subsampling(),
+            planes: recon_planes,
+        },
+    ))
+}
+
 fn encode_with(
     planes: &Planar8,
     qindex: u8,
@@ -128,47 +308,20 @@ fn encode_with(
 ) -> Result<(EncodedStill, ReconImage)> {
     let width = planes.width();
     let height = planes.height();
-    if width == 0 || height == 0 {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "image has a zero dimension",
-        ));
-    }
-    // The plane geometry is per-plane throughout, but the *coding* path is 4:4:4 or monochrome: the
-    // residual loop, the entropy contexts and CfL all step chroma over the luma extent, so a
-    // *subsampled* source would emit a stream that claims 4:4:4 and codes something else. Refuse
-    // it. Lifted by the 4:2:0 (#390) and 4:2:2 (#391) slices. Monochrome codes no chroma at all,
-    // so it has no such mismatch to hide.
-    let monochrome = planes.subsampling() == ChromaSubsampling::Cs400;
-    if !monochrome && planes.subsampling() != ChromaSubsampling::Cs444 {
-        return Err(Error::unsupported(
-            env!("CARGO_PKG_NAME"),
-            "AV1: only 4:4:4 and monochrome planes are encoded today",
-        ));
-    }
-    // Superres over a monochrome source is refused rather than half-supported: the downscale later
-    // in this function is written for three luma-sized planes and relabels its result 4:4:4, so a
-    // monochrome buffer would read an empty chroma slice at luma dimensions and then hand
-    // `FrameEncoder` a plane count disagreeing with the `monochrome` the frame header was given.
-    // Checked before the matrix rule below so `encode_still_intra_superres` — which supplies the
-    // default identity colour — reports the reason that actually applies.
-    if monochrome && coded_denom.is_some() {
+    // Superres over a monochrome source is refused rather than half-supported: the downscale below
+    // is written for three luma-sized planes and relabels its result 4:4:4, so a monochrome buffer
+    // would read an empty chroma slice at luma dimensions and then hand `FrameEncoder` a plane
+    // count disagreeing with the `monochrome` the frame header was given. Checked *before*
+    // `check_layout`, whose matrix rule would otherwise fire first for
+    // `encode_still_intra_superres` — which supplies the default identity colour — and report a
+    // reason that is not the one that applies.
+    if coded_denom.is_some() && planes.subsampling() == ChromaSubsampling::Cs400 {
         return Err(Error::unsupported(
             env!("CARGO_PKG_NAME"),
             "AV1: superres over a monochrome source is not implemented",
         ));
     }
-    // §5.5.2 infers `subsampling_x = subsampling_y = 1` for a monochrome stream, and §6.4.2 permits
-    // MC_IDENTITY only when both are 0. `Av1Colour::default()` is identity, so a caller reaching
-    // here with monochrome planes and the default colour would otherwise emit a non-conformant
-    // stream that libaom and dav1d are entitled to reject. `Av1Colour::monochrome()` is the fix.
-    if monochrome && colour.matrix == MatrixCoefficients::Identity {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "AV1: a monochrome stream cannot signal the identity matrix (§6.4.2 allows MC_IDENTITY \
-             only at subsampling 0/0); use Av1Colour::monochrome()",
-        ));
-    }
+    let monochrome = check_layout(width, height, planes.subsampling(), colour)?;
 
     // Superres downscales the source horizontally to the coded (Frame) width; the reconstruction is
     // upscaled back to `width` at the end. `coded_src` is what the block encoder actually codes.
@@ -189,34 +342,14 @@ fn encode_with(
         None => (width, planes.clone()),
     };
 
-    let (sub_x, sub_y) = planes.subsampling().subsampling();
-    let config = Av1StillConfig {
-        // Profile 1 (High) is the 4:4:4 profile and infers `mono_chrome = 0`, so a monochrome
-        // still is profile 0 (Main) — the only other profile that can code 8-bit here.
-        seq_profile: if monochrome { 0 } else { 1 },
-        seq_level_idx_0: headers::pick_level(width, height)?,
-        seq_tier_0: 0,
-        high_bitdepth: false,
-        twelve_bit: false,
+    let config = still_config(
+        width,
+        height,
         monochrome,
-        // Inferred, not coded, under monochrome: §5.5.2 fixes both to 1.
-        chroma_subsampling_x: sub_x,
-        chroma_subsampling_y: sub_y,
-        chroma_sample_position: 0,
-        color_primaries: colour.primaries.code_point(),
-        transfer_characteristics: colour.transfer.code_point(),
-        matrix_coefficients: colour.matrix.code_point(),
-        full_range: matches!(colour.range, ColorRange::Full),
-    };
-    // Under the §5.5.2 sRGB shortcut `color_range` is *inferred* as full and no bit is coded, so a
-    // studio-range request there could not be signalled — the stream would silently claim full
-    // range. Reject it rather than emit a header that disagrees with the samples.
-    if config.is_srgb_shortcut() && !config.full_range {
-        return Err(Error::invalid_input(
-            env!("CARGO_PKG_NAME"),
-            "AV1: the sRGB color_config shortcut infers full range; studio range needs a non-identity matrix",
-        ));
-    }
+        BitDepth::Eight,
+        planes.subsampling().subsampling(),
+        colour,
+    )?;
 
     let mi_cols = 2 * ((coded_w + 7) >> 3);
     let mi_rows = 2 * ((height + 7) >> 3);
@@ -233,16 +366,7 @@ fn encode_with(
         monochrome,
     );
     let (tile_bytes, recon) = FrameEncoder::new(&coded_src, qindex).encode();
-    // tile_group_obu (§5.11.1): the frame header already emitted the tile-group prefix (the
-    // `tile_start_and_end_present_flag` and re-alignment for a multi-tile frame). Each tile but the
-    // last is prefixed by its byte size minus one as a little-endian `TileSizeBytes`-byte field.
-    for (i, tile) in tile_bytes.iter().enumerate() {
-        if i + 1 < tile_bytes.len() {
-            let sz = (tile.len() - 1) as u32;
-            frame_payload.extend_from_slice(&sz.to_le_bytes()[..headers::TILE_SIZE_BYTES]);
-        }
-        frame_payload.extend_from_slice(tile);
-    }
+    append_tiles(&mut frame_payload, &tile_bytes);
 
     // Crop the reconstruction from the coded grid to the display dimensions. For the lossless path
     // the reconstruction equals the source. With superres the coded grid is the downscaled width, so
@@ -275,6 +399,7 @@ fn encode_with(
                 coded_w as usize,
                 uw,
                 uh,
+                recon.bit_depth,
             )
         });
         let deblock_up = crate::filter::superres_upscale_plane(
@@ -283,6 +408,7 @@ fn encode_with(
             coded_w as usize,
             uw,
             uh,
+            recon.bit_depth,
         );
         crate::filter::loop_restore_wiener_luma(
             &mut up[0],
@@ -292,25 +418,11 @@ fn encode_with(
             uh,
             crate::filter::WIENER_DEFAULT,
             crate::filter::WIENER_DEFAULT,
+            recon.bit_depth,
         );
         up
     } else {
-        // No superres: loop restoration runs on the (display-width) coded reconstruction.
-        let mut planes = recon.planes.clone();
-        crate::filter::loop_restore_wiener_luma(
-            &mut planes[0],
-            &recon.deblocked_luma,
-            recon.geom[0].coded_w,
-            uw,
-            uh,
-            crate::filter::WIENER_DEFAULT,
-            crate::filter::WIENER_DEFAULT,
-        );
-        // Each plane crops from its own coded stride to its own visible extent.
-        std::array::from_fn(|i| {
-            let g = recon.geom[i];
-            crop(&planes[i], g.w as u32, g.coded_w as u32, g.h as u32)
-        })
+        restored_recon(&recon)
     };
 
     let still = EncodedStill {
@@ -330,6 +442,26 @@ fn encode_with(
         planes: recon_planes,
     };
     Ok((still, recon))
+}
+
+/// The lossy reconstruction of a frame coded **without** superres: loop restoration on the luma
+/// (§7.17), then each plane cropped from its own coded stride to its own visible extent.
+fn restored_recon(recon: &Reconstruction) -> [Vec<u16>; 3] {
+    let mut planes = recon.planes.clone();
+    crate::filter::loop_restore_wiener_luma(
+        &mut planes[0],
+        &recon.deblocked_luma,
+        recon.geom[0].coded_w,
+        recon.geom[0].w,
+        recon.geom[0].h,
+        crate::filter::WIENER_DEFAULT,
+        crate::filter::WIENER_DEFAULT,
+        recon.bit_depth,
+    );
+    std::array::from_fn(|i| {
+        let g = recon.geom[i];
+        crop(&planes[i], g.w as u32, g.coded_w as u32, g.h as u32)
+    })
 }
 
 /// Crops a `src_stride`-wide plane to `width × height`, row-major.

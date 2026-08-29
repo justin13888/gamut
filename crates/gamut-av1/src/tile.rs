@@ -25,7 +25,7 @@
 //! multiple of 8); the out-of-frame padding is edge-replicated and cropped away on decode.
 
 use gamut_bitstream::SymbolEncoder;
-use gamut_color::{Planar8, clip_pixel};
+use gamut_color::{ChromaSubsampling, Planar8, Planar16, clip_pixel};
 use gamut_dsp::math::round2_signed;
 
 use crate::cdf;
@@ -110,9 +110,40 @@ const fn is_directional(mode: u8) -> bool {
 /// A selected luma palette for a block (§5.11.46/.49): the sorted distinct colors and the per-pixel
 /// `ColorMapY` (index into `colors`, row-major over the block).
 struct PaletteBlock {
-    colors: Vec<u8>,
+    /// Palette entries, sorted ascending, at the frame's coded bit depth.
+    colors: Vec<u16>,
     index_map: Vec<u8>,
 }
+
+/// The encoder's borrowed source planes: 8-bit, or 10/12-bit.
+///
+/// One enum rather than a generic parameter, because the *only* place the width matters is
+/// [`FrameEncoder::sample`] — every other step already works in `i32` or `u16`. Widening an 8-bit
+/// carrier into `u16` up front would instead cost a full second copy of the image on the common
+/// path, and monomorphizing the 3,000-line coding path over the sample type would cost it twice in
+/// compiled code.
+#[derive(Clone, Copy)]
+pub(crate) enum PlaneSource<'a> {
+    /// Planes of 8-bit samples, from a [`Planar8`].
+    Eight([&'a [u8]; 3]),
+    /// Planes of 10- or 12-bit samples, from a [`Planar16`].
+    High([&'a [u16]; 3]),
+}
+
+impl PlaneSource<'_> {
+    /// The sample at `index` within `plane`, widened to the `i32` every coding step works in.
+    #[inline]
+    fn at(self, plane: usize, index: usize) -> i32 {
+        match self {
+            PlaneSource::Eight(planes) => i32::from(planes[plane][index]),
+            PlaneSource::High(planes) => i32::from(planes[plane][index]),
+        }
+    }
+}
+
+/// The largest luma palette AV1 allows (§5.11.46: `PaletteSizeY` is 2..=8), and therefore the
+/// capacity of both the palette itself and the neighbour cache entries that carry it.
+const PALETTE_MAX: usize = 8;
 
 /// `CeilLog2(x)` (§4.7): the smallest `k` with `2^k >= x` (0 for `x <= 1`).
 fn ceil_log2(x: usize) -> u32 {
@@ -312,7 +343,7 @@ pub(crate) struct Reconstruction {
 
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
-    planes: [&'a [u8]; 3],
+    planes: PlaneSource<'a>,
     /// AV1's `NumPlanes` (§5.5.2): 1 for a monochrome frame, 3 otherwise. Every chroma syntax
     /// element and every chroma coding step is gated on this — `HasChroma` (§5.11.5) is
     /// `NumPlanes > 1`, and since the coding path is 4:4:4 or monochrome, it is constant for the
@@ -384,7 +415,7 @@ pub(crate) struct FrameEncoder<'a> {
     mi_psize: Vec<u8>,
     /// `PaletteColors` (the sorted luma palette, up to 8 entries) of the block covering each MI cell,
     /// for `get_palette_cache` (only the first `mi_psize` entries are meaningful).
-    mi_pcolors: Vec<[u8; 8]>,
+    mi_pcolors: Vec<[u16; 8]>,
     /// `DeltaLF` (loop-filter-level delta) of the block covering each MI cell (§7.14.4), consumed by
     /// the deblocking filter to vary the level per superblock.
     mi_dlf: Vec<i8>,
@@ -447,25 +478,59 @@ impl<'a> FrameEncoder<'a> {
         self.num_planes > 1
     }
 
-    /// Creates an encoder over the identity planes (Y=G, U=B, V=R) at quantizer `qindex`
+    /// `1 << (BitDepth - 1)` — the mid-grey AV1 predicts with when a block has no neighbour at all
+    /// (§7.11.2). The `AboveRow` and `LeftCol` defaults are this minus and plus one respectively,
+    /// which is what makes `PAETH_PRED` resolve to the corner in that case.
+    fn neutral(&self) -> i32 {
+        1 << (self.bit_depth - 1)
+    }
+
+    /// Creates an encoder over 8-bit identity planes (Y=G, U=B, V=R) at quantizer `qindex`
     /// (`base_q_idx`; 0 selects the lossless path). 4:4:4, or monochrome with a luma plane only.
     pub(crate) fn new(planes: &'a Planar8, qindex: u8) -> Self {
-        let width = planes.width() as usize;
-        let height = planes.height() as usize;
+        Self::over(
+            PlaneSource::Eight([planes.plane(0), planes.plane(1), planes.plane(2)]),
+            planes.width() as usize,
+            planes.height() as usize,
+            planes.subsampling(),
+            8,
+            qindex,
+        )
+    }
+
+    /// Creates an encoder over high-bit-depth planes, at the depth the buffer itself carries.
+    pub(crate) fn new16(planes: &'a Planar16, qindex: u8) -> Self {
+        Self::over(
+            PlaneSource::High([planes.plane(0), planes.plane(1), planes.plane(2)]),
+            planes.width() as usize,
+            planes.height() as usize,
+            planes.subsampling(),
+            u32::from(planes.bit_depth().bits()),
+            qindex,
+        )
+    }
+
+    /// The shared constructor: everything below the sample width is identical, so the two entry
+    /// points differ only in the carrier they borrow and the depth they report.
+    fn over(
+        planes: PlaneSource<'a>,
+        width: usize,
+        height: usize,
+        subsampling: ChromaSubsampling,
+        bit_depth: u32,
+        qindex: u8,
+    ) -> Self {
         let mi_cols = 2 * ((width + 7) >> 3);
         let mi_rows = 2 * ((height + 7) >> 3);
-        let geom = PlaneGeom::frame(width, height, mi_cols, mi_rows, planes.subsampling());
-        // 8-bit input today; the buffer and clamp range are bit-depth-generic for the M2 high-bit-
-        // depth path.
-        let bit_depth = 8u32;
+        let geom = PlaneGeom::frame(width, height, mi_cols, mi_rows, subsampling);
         let recon = if qindex > 0 {
             std::array::from_fn(|p| vec![0u16; geom[p].len()])
         } else {
             [Vec::new(), Vec::new(), Vec::new()]
         };
         Self {
-            planes: [planes.plane(0), planes.plane(1), planes.plane(2)],
-            num_planes: planes.subsampling().num_planes(),
+            planes,
+            num_planes: subsampling.num_planes(),
             geom,
             mi_cols,
             mi_rows,
@@ -497,7 +562,7 @@ impl<'a> FrameEncoder<'a> {
             mi_skip: vec![0; mi_cols * mi_rows],
             mi_segid: vec![0; mi_cols * mi_rows],
             mi_psize: vec![0; mi_cols * mi_rows],
-            mi_pcolors: vec![[0u8; 8]; mi_cols * mi_rows],
+            mi_pcolors: vec![[0u16; 8]; mi_cols * mi_rows],
             mi_dlf: vec![0; mi_cols * mi_rows],
             tx_log2: vec![2; mi_cols * mi_rows],
             tx_log2_h: vec![2; mi_cols * mi_rows],
@@ -626,6 +691,7 @@ impl<'a> FrameEncoder<'a> {
                 &self.mi_bsl_h,
                 &self.mi_dlf,
                 self.qindex,
+                self.bit_depth,
             );
             // CDEF reads the deblocked reconstruction and produces a deringed one (§7.15). The
             // deblocked luma is retained for the loop-restoration stripe boundaries (§7.17); loop
@@ -638,6 +704,7 @@ impl<'a> FrameEncoder<'a> {
                 self.mi_cols,
                 self.qindex,
                 self.num_planes,
+                self.bit_depth,
             );
         }
         let recon = Reconstruction {
@@ -654,7 +721,7 @@ impl<'a> FrameEncoder<'a> {
         let g = self.geom[plane];
         let xx = x.min(g.w - 1);
         let yy = y.min(g.h - 1);
-        i32::from(self.planes[plane][yy * g.w + xx])
+        self.planes.at(plane, yy * g.w + xx)
     }
 
     fn encode_partition(&mut self, r: usize, c: usize, bw: usize) {
@@ -806,8 +873,8 @@ impl<'a> FrameEncoder<'a> {
     /// deliberately not touched here.
     fn set_quant(&mut self, qindex: i32) {
         self.current_qindex = qindex;
-        self.dc_quant = dc_q(8, qindex);
-        self.ac_quant = ac_q(8, qindex);
+        self.dc_quant = dc_q(self.bit_depth, qindex);
+        self.ac_quant = ac_q(self.bit_depth, qindex);
     }
 
     /// Sets the active dc/ac quantizers for a block to `get_qindex(segment)` (§7.12.2): the segment's
@@ -816,8 +883,8 @@ impl<'a> FrameEncoder<'a> {
     fn apply_seg_quant(&mut self, segid: usize) {
         let alt = SEG_ALT_Q[segid].unwrap_or(0);
         let bq = (self.current_qindex + alt).clamp(0, 255);
-        self.dc_quant = dc_q(8, bq);
-        self.ac_quant = ac_q(8, bq);
+        self.dc_quant = dc_q(self.bit_depth, bq);
+        self.ac_quant = ac_q(self.bit_depth, bq);
     }
 
     /// `read_segment_id` (§5.11.9) after the skip flag (`SegIdPreSkip = 0`): derives the predicted
@@ -955,19 +1022,22 @@ impl<'a> FrameEncoder<'a> {
     /// bit-exactly, so only the signaling has to be correct.
     fn decide_palette(&self, r: usize, c: usize, bw: usize) -> Option<PaletteBlock> {
         let (sx, sy) = (c * 4, r * 4);
-        // Distinct luma colors (sorted).
-        let mut set = [false; 256];
-        let mut count = 0;
+        // Distinct luma colors, kept sorted as they are found. A presence array would have to be
+        // `1 << BitDepth` entries and reallocated per candidate block; the palette can hold at most
+        // 8 colours, so an insertion-sorted 8-entry vector is both smaller and an earlier bail-out.
+        let mut colors: Vec<u16> = Vec::with_capacity(PALETTE_MAX);
         for i in 0..bw {
             for j in 0..bw {
-                let v = self.sample(0, sx + j, sy + i) as usize;
-                if !set[v] {
-                    set[v] = true;
-                    count += 1;
+                let v = self.sample(0, sx + j, sy + i) as u16;
+                if let Err(pos) = colors.binary_search(&v) {
+                    if colors.len() == PALETTE_MAX {
+                        return None; // more than 8 distinct colours
+                    }
+                    colors.insert(pos, v);
                 }
             }
         }
-        if !(2..=8).contains(&count) {
+        if colors.len() < 2 {
             return None;
         }
         // Chroma must be flat and exactly DC-predictable (chroma residual identically 0 ⇒ skip = 1).
@@ -986,11 +1056,10 @@ impl<'a> FrameEncoder<'a> {
                 return None;
             }
         }
-        let colors: Vec<u8> = (0..256).filter(|&v| set[v]).map(|v| v as u8).collect();
         let mut index_map = vec![0u8; bw * bw];
         for i in 0..bw {
             for j in 0..bw {
-                let v = self.sample(0, sx + j, sy + i) as u8;
+                let v = self.sample(0, sx + j, sy + i) as u16;
                 index_map[i * bw + j] = colors.binary_search(&v).unwrap_or(0) as u8;
             }
         }
@@ -1000,7 +1069,7 @@ impl<'a> FrameEncoder<'a> {
 
     /// `get_palette_cache` (§5.11.46) for luma: the sorted, deduplicated merge of the above (only
     /// when the block is not at the top of its 64-superblock) and left blocks' palettes.
-    fn palette_cache(&self, r: usize, c: usize) -> Vec<u8> {
+    fn palette_cache(&self, r: usize, c: usize) -> Vec<u16> {
         let above_n = if !r.is_multiple_of(16) {
             self.mi_psize[(r - 1) * self.mi_cols + c] as usize
         } else {
@@ -1011,7 +1080,7 @@ impl<'a> FrameEncoder<'a> {
         } else {
             0
         };
-        let blank = [0u8; 8];
+        let blank = [0u16; 8];
         let above = if above_n > 0 {
             &self.mi_pcolors[(r - 1) * self.mi_cols + c]
         } else {
@@ -1022,8 +1091,8 @@ impl<'a> FrameEncoder<'a> {
         } else {
             &blank
         };
-        let mut cache: Vec<u8> = Vec::new();
-        let push = |cache: &mut Vec<u8>, v: u8| {
+        let mut cache: Vec<u16> = Vec::new();
+        let push = |cache: &mut Vec<u16>, v: u16| {
             if cache.last() != Some(&v) {
                 cache.push(v);
             }
@@ -1071,22 +1140,26 @@ impl<'a> FrameEncoder<'a> {
 
     /// Signals the luma palette colors (§5.11.46): the cache-usage flags (all 0 — the encoder reuses
     /// no cached color) followed by every palette color as new — the first raw, the rest delta-coded.
-    fn signal_palette_colors(&mut self, colors: &[u8], cache_n: usize) {
+    fn signal_palette_colors(&mut self, colors: &[u16], cache_n: usize) {
         let psize = colors.len();
         // use_palette_color_cache_y flags: 0 for each cached color (none reused), while idx < psize.
         // Since none are used, idx stays 0 and all `cache_n` flags are emitted.
         for _ in 0..cache_n {
             self.sym.encode_literal(0, 1);
         }
-        // New colors: the first is raw 8-bit; the rest are positive deltas coded in `palette_bits`.
-        self.sym.encode_literal(u32::from(colors[0]), 8);
+        // New colors: the first is raw `L(BitDepth)`; the rest are positive deltas coded in
+        // `palette_bits = BitDepth - 3 + palette_num_extra_bits_y`.
+        self.sym
+            .encode_literal(u32::from(colors[0]), self.bit_depth);
         if psize > 1 {
-            self.sym.encode_literal(3, 2); // palette_num_extra_bits_y = 3 ⇒ palette_bits = 8 (always fits)
-            let mut palette_bits = 5 + 3u32;
+            // palette_num_extra_bits_y = 3 ⇒ palette_bits = BitDepth, which always holds a delta:
+            // the colours are sorted and distinct, so `delta - 1 < 1 << BitDepth`.
+            self.sym.encode_literal(3, 2);
+            let mut palette_bits = self.bit_depth - 3 + 3;
             for idx in 1..psize {
                 let delta = i32::from(colors[idx]) - i32::from(colors[idx - 1]); // ≥ 1 (sorted distinct)
                 self.sym.encode_literal((delta - 1) as u32, palette_bits);
-                let range = 256 - i32::from(colors[idx]) - 1;
+                let range = (1 << self.bit_depth) - i32::from(colors[idx]) - 1;
                 palette_bits = palette_bits.min(ceil_log2(range.max(1) as usize));
             }
         }
@@ -1122,8 +1195,7 @@ impl<'a> FrameEncoder<'a> {
         for i in 0..bw {
             for j in 0..bw {
                 let idx = pal.index_map[i * bw + j] as usize;
-                self.recon[0][(sy + i) * self.geom[0].coded_w + (sx + j)] =
-                    u16::from(pal.colors[idx]);
+                self.recon[0][(sy + i) * self.geom[0].coded_w + (sx + j)] = pal.colors[idx];
             }
         }
         for plane in 1..self.num_planes {
@@ -1459,11 +1531,11 @@ impl<'a> FrameEncoder<'a> {
         let txl_h = luma_tx.log2_height() as u8;
         let (psize, pcolors) = match &palette {
             Some(pal) => {
-                let mut buf = [0u8; 8];
+                let mut buf = [0u16; 8];
                 buf[..pal.colors.len()].copy_from_slice(&pal.colors);
                 (pal.colors.len() as u8, buf)
             }
-            None => (0u8, [0u8; 8]),
+            None => (0u8, [0u16; 8]),
         };
         for y in 0..n4h {
             for x in 0..n4 {
@@ -1676,16 +1748,16 @@ impl<'a> FrameEncoder<'a> {
                     } else {
                         self.ac_quant
                     };
-                    dq[i * 64 + j] = dequant(levels[i * 32 + j], q, dq_denom, 8);
+                    dq[i * 64 + j] = dequant(levels[i * 32 + j], q, dq_denom, self.bit_depth);
                 }
             }
         } else {
             for (i, &lvl) in levels.iter().enumerate() {
                 let q = if i == 0 { self.dc_quant } else { self.ac_quant };
-                dq[i] = dequant(lvl, q, dq_denom, 8);
+                dq[i] = dequant(lvl, q, dq_denom, self.bit_depth);
             }
         }
-        let resid = inverse_transform_2d(&dq, tx_size, tx, 8);
+        let resid = inverse_transform_2d(&dq, tx_size, tx, self.bit_depth);
         for i in 0..th {
             for j in 0..tw {
                 let v = clip_pixel(pred[i * tw + j] + resid[i * tw + j], self.bit_depth);
@@ -1816,7 +1888,7 @@ impl<'a> FrameEncoder<'a> {
                 }
                 (s + (w as i32 >> 1)) / w as i32
             }
-            (false, false) => 128, // 1 << (BitDepth - 1)
+            (false, false) => self.neutral(),
         }
     }
 
@@ -1843,7 +1915,7 @@ impl<'a> FrameEncoder<'a> {
         let have_below_left = self.block_decoded_at(by + 1, bx - 1);
         let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
-        let mut above = [127i32; 8]; // (1 << (BitDepth-1)) - 1 when neither neighbour exists
+        let mut above = [self.neutral() - 1; 8]; // when neither neighbour exists
         if have_above {
             let above_limit = max_x.min(sx + if have_above_right { 8 } else { 4 } - 1);
             for (i, a) in above.iter_mut().enumerate() {
@@ -1853,7 +1925,7 @@ impl<'a> FrameEncoder<'a> {
             above = [nb(sx - 1, sy); 8]; // CurrFrame[y][x-1]
         }
 
-        let mut left = [129i32; 8]; // (1 << (BitDepth-1)) + 1 when neither neighbour exists
+        let mut left = [self.neutral() + 1; 8]; // when neither neighbour exists
         if have_left {
             let left_limit = max_y.min(sy + if have_below_left { 8 } else { 4 } - 1);
             for (i, l) in left.iter_mut().enumerate() {
@@ -1870,7 +1942,7 @@ impl<'a> FrameEncoder<'a> {
         } else if have_left {
             nb(sx - 1, sy)
         } else {
-            128 // 1 << (BitDepth-1)
+            self.neutral()
         };
         (above, left, top_left)
     }
@@ -1927,7 +1999,7 @@ impl<'a> FrameEncoder<'a> {
                             pr += i32::from(tap) * p[k];
                         }
                         let idx = (((i2 << 1) + i1) * nn + (j4 << 2) + j1) as usize;
-                        pred[idx] = round2_signed(pr, 4).clamp(0, 255);
+                        pred[idx] = i32::from(clip_pixel(round2_signed(pr, 4), self.bit_depth));
                     }
                 }
             }
@@ -2122,7 +2194,7 @@ impl<'a> FrameEncoder<'a> {
         let have_below_left = self.block_decoded_at(by + step, bx - 1);
         let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
-        let mut above = vec![127i32; 2 * n];
+        let mut above = vec![self.neutral() - 1; 2 * n];
         if have_above {
             let above_limit = max_x.min(sx + if have_above_right { 2 * n } else { n } - 1);
             for (i, a) in above.iter_mut().enumerate() {
@@ -2132,7 +2204,7 @@ impl<'a> FrameEncoder<'a> {
             above = vec![nb(sx - 1, sy); 2 * n];
         }
 
-        let mut left = vec![129i32; 2 * n];
+        let mut left = vec![self.neutral() + 1; 2 * n];
         if have_left {
             let left_limit = max_y.min(sy + if have_below_left { 2 * n } else { n } - 1);
             for (i, l) in left.iter_mut().enumerate() {
@@ -2149,7 +2221,7 @@ impl<'a> FrameEncoder<'a> {
         } else if have_left {
             nb(sx - 1, sy)
         } else {
-            128
+            self.neutral()
         };
         (above, left, top_left)
     }
@@ -2244,7 +2316,7 @@ impl<'a> FrameEncoder<'a> {
         let have_left = sx > self.tile_x0;
         let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
-        let mut above = vec![127i32; w];
+        let mut above = vec![self.neutral() - 1; w];
         if have_above {
             for (i, a) in above.iter_mut().enumerate() {
                 *a = nb(max_x.min(sx + i), sy - 1);
@@ -2253,7 +2325,7 @@ impl<'a> FrameEncoder<'a> {
             above = vec![nb(sx - 1, sy); w];
         }
 
-        let mut left = vec![129i32; h];
+        let mut left = vec![self.neutral() + 1; h];
         if have_left {
             for (i, l) in left.iter_mut().enumerate() {
                 *l = nb(sx - 1, max_y.min(sy + i));
@@ -2269,7 +2341,7 @@ impl<'a> FrameEncoder<'a> {
         } else if have_left {
             nb(sx - 1, sy)
         } else {
-            128
+            self.neutral()
         };
         (above, left, top_left)
     }
@@ -2476,7 +2548,10 @@ impl<'a> FrameEncoder<'a> {
         let shift = 2 * n.trailing_zeros();
         let luma_avg = (sum + (1 << (shift - 1))) >> shift;
         for (p, &lv) in pred.iter_mut().zip(&l) {
-            *p = (*p + round2_signed(alpha * (lv - luma_avg), 6)).clamp(0, 255);
+            *p = i32::from(clip_pixel(
+                *p + round2_signed(alpha * (lv - luma_avg), 6),
+                self.bit_depth,
+            ));
         }
     }
 
@@ -2506,8 +2581,10 @@ impl<'a> FrameEncoder<'a> {
                 let mut s = 0;
                 for i in 0..n {
                     for j in 0..n {
-                        let pred = (dc + round2_signed(alpha * (l[i * n + j] - luma_avg), 6))
-                            .clamp(0, 255);
+                        let pred = i32::from(clip_pixel(
+                            dc + round2_signed(alpha * (l[i * n + j] - luma_avg), 6),
+                            self.bit_depth,
+                        ));
                         s += (self.sample(plane, sx + j, sy + i) - pred).abs();
                     }
                 }

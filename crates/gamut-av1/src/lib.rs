@@ -23,8 +23,15 @@
 //! correctly end to end, but the *coding* path is still 4:4:4 and a subsampled source is rejected
 //! (the residual loop, entropy contexts and CfL all step chroma over the luma extent).
 //!
-//! The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, quantizer matrices, and the
-//! AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
+//! **Bit depth** is the buffer's: [`encode_still_intra16_with`] takes a
+//! [`gamut_color::Planar16`] and codes at the depth it carries — 10-bit as `seq_profile = 1` (or 0
+//! monochrome) with `high_bitdepth`, 12-bit as `seq_profile = 2` with `twelve_bit` (§6.4.1). Every
+//! depth-derived quantity follows it: the quantizer tables, the dequant and inverse-transform
+//! clamps, the `1 << (BitDepth - 1)` intra seeds, the palette's `L(BitDepth)` colours, the deblock
+//! centring and thresholds, CDEF's `coeffShift`, and the Wiener rounding pair.
+//!
+//! The remaining surface (4:2:0/4:2:2, quantizer matrices, and the AVIF-level
+//! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D
@@ -44,6 +51,6 @@ pub mod transform;
 
 pub use encoder::{
     EncodedStill, ReconImage, encode_still_intra, encode_still_intra_superres,
-    encode_still_intra_with, encode_still_lossless_identity,
+    encode_still_intra_with, encode_still_intra16_with, encode_still_lossless_identity,
 };
 pub use headers::{Av1Colour, Av1StillConfig};
