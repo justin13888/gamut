@@ -17,9 +17,10 @@
 
 use gamut_av1::{
     Av1Colour, encode_still_intra, encode_still_intra_superres, encode_still_intra_with,
+    encode_still_intra16_with,
 };
 use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
-use gamut_color::{ChromaSubsampling, Planar8};
+use gamut_color::{BitDepth, ChromaSubsampling, Planar8, Planar16};
 
 /// Builds identity planes (Y=G, U=B, V=R) from an RGB generator.
 fn planes(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
@@ -925,4 +926,185 @@ fn monochrome_rejects_superres() {
     // The same request succeeds for a 4:4:4 source, so the guard keys on the plane count.
     let rgb = planes(32, 16, |x, y| [x as u8, y as u8, 0]);
     assert!(encode_still_intra_superres(&rgb, 40, 0).is_ok());
+}
+
+// ---- high bit depth (#398) --------------------------------------------------------------------
+
+/// Builds 4:4:4 identity planes at `bits` from a per-plane generator, so a value near the top of
+/// the coded range is reachable (the clamps, the palette delta width and the deblock centring are
+/// all range-dependent, and an 8-bit-sized pattern would never reach them).
+fn planes16(w: u32, h: u32, bits: BitDepth, f: impl Fn(u32, u32) -> [u16; 3]) -> Planar16 {
+    let mut p: [Vec<u16>; 3] = std::array::from_fn(|_| vec![0u16; (w * h) as usize]);
+    for y in 0..h {
+        for x in 0..w {
+            let v = f(x, y);
+            for (i, plane) in p.iter_mut().enumerate() {
+                plane[(y * w + x) as usize] = v[i].min(bits.max_value());
+            }
+        }
+    }
+    Planar16::from_planes(w, h, bits, p).expect("valid high-bit-depth planes")
+}
+
+/// A textured generator spanning the full `bits` range: the 8-bit pattern the lossy cases use,
+/// scaled up so the top of the range is actually exercised.
+fn texture16(bits: BitDepth) -> impl Fn(u32, u32) -> [u16; 3] {
+    let scale = u32::from(bits.max_value()) / 255;
+    move |x: u32, y: u32| {
+        let r = (x.wrapping_mul(3).wrapping_add(y) % 256) * scale;
+        let g = ((x + y.wrapping_mul(2)) % 256) * scale;
+        let b = (128 + ((x ^ y) % 64)) * scale;
+        [r as u16, g as u16, b as u16]
+    }
+}
+
+#[test]
+fn high_bit_depth_lossless_reconstruction_matches_both_decoders() {
+    // `qindex = 0` is the WHT lossless path: the decoded samples must equal the source exactly, at
+    // the coded depth. 12-bit also moves the stream to `seq_profile = 2` with `twelve_bit = 1`, a
+    // sequence header shape nothing else in the suite emits.
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        for &(w, h) in &[(1, 1), (8, 8), (17, 13), (64, 48)] {
+            let src = planes16(w, h, bits, texture16(bits));
+            let encoded = encode_still_intra16_with(&src, 0, Av1Colour::default()).unwrap();
+            assert_eq!(encoded.1.bit_depth, bits);
+            check_with(encoded, 0);
+        }
+    }
+}
+
+#[test]
+fn high_bit_depth_lossy_reconstruction_matches_both_decoders() {
+    // The lossy path is where the depth actually threads through everything: the dequant and
+    // inverse-transform clamps, the `1 << (BitDepth-1)` intra seeds, the deblock centring and
+    // threshold scaling, CDEF's `coeffShift` on the direction search and both strengths, the
+    // Wiener rounding pair (which differs only at 12 bits), and the palette's `L(BitDepth)` first
+    // colour. A mistake in any one of them desynchronises the decoders from the reconstruction.
+    //
+    // The lossy colour is BT.709 YCbCr, which leaves the §5.5.2 sRGB shortcut — so 12-bit also
+    // exercises the coded `subsampling_x` bit that only profile 2 at 12 bits emits.
+    let colour = Av1Colour {
+        matrix: MatrixCoefficients::Bt709,
+        ..Av1Colour::default()
+    };
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        for &q in &[4u8, 20, 40, 90, 160, 255] {
+            for &(w, h) in &[(8, 8), (17, 13), (40, 24), (100, 70)] {
+                let src = planes16(w, h, bits, texture16(bits));
+                check_with(encode_still_intra16_with(&src, q, colour).unwrap(), q);
+            }
+        }
+    }
+}
+
+#[test]
+fn high_bit_depth_flat_and_two_tone_content_matches_both_decoders() {
+    // The skip and palette paths. A two-tone block is coded as a palette whose first colour is
+    // `L(BitDepth)` bits and whose deltas are `BitDepth - 3 + 3` bits wide — the widths that were
+    // hardcoded to 8. Values at the extremes of the range make a too-narrow delta overflow.
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        let max = bits.max_value();
+        for &q in &[4u8, 40, 160] {
+            check_with(
+                encode_still_intra16_with(
+                    &planes16(48, 32, bits, |_, _| [max, 0, max / 2]),
+                    q,
+                    Av1Colour::default(),
+                )
+                .unwrap(),
+                q,
+            );
+            check_with(
+                encode_still_intra16_with(
+                    &planes16(48, 32, bits, |x, y| {
+                        let v = if (x / 8 + y / 8).is_multiple_of(2) {
+                            max
+                        } else {
+                            0
+                        };
+                        [v, v, v]
+                    }),
+                    q,
+                    Av1Colour::default(),
+                )
+                .unwrap(),
+                q,
+            );
+        }
+    }
+}
+
+#[test]
+fn high_bit_depth_monochrome_matches_both_decoders() {
+    // Monochrome at 12 bits is `seq_profile = 2` with both `mono_chrome` and `twelve_bit` coded —
+    // the one combination where §5.5.2's depth branch and its monochrome branch both fire.
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        let max = bits.max_value();
+        for &q in &[0u8, 20, 90, 255] {
+            let mut y = vec![0u16; 40 * 24];
+            for row in 0..24u32 {
+                for col in 0..40u32 {
+                    y[(row * 40 + col) as usize] =
+                        (((col * 37 + row * 11) % 256) * u32::from(max) / 255) as u16;
+                }
+            }
+            let src = Planar16::from_planes_subsampled(
+                40,
+                24,
+                ChromaSubsampling::Cs400,
+                bits,
+                [y, Vec::new(), Vec::new()],
+            )
+            .unwrap();
+            check_with(
+                encode_still_intra16_with(&src, q, Av1Colour::monochrome()).unwrap(),
+                q,
+            );
+        }
+    }
+}
+
+#[test]
+fn an_eight_bit_planar16_encodes_exactly_as_planar8_does() {
+    // The widening is meant to be transparent: `Planar16` at `BitDepth::Eight` carries the same
+    // samples through the same coding path, so it must emit the *same bytes* as the 8-bit entry
+    // point. This is what pins `PlaneSource` as a carrier choice rather than a behaviour change —
+    // any depth-derived constant that leaked a different value at 8 bits would show up here.
+    let texture = |x: u32, y: u32| {
+        let r = (x.wrapping_mul(3).wrapping_add(y) % 256) as u8;
+        let g = ((x + y.wrapping_mul(2)) % 256) as u8;
+        let b = (128 + ((x ^ y) % 64)) as u8;
+        [r, g, b]
+    };
+    for &q in &[0u8, 20, 90] {
+        for &(w, h) in &[(17, 13), (40, 24)] {
+            let eight = planes(w, h, texture);
+            // The *same* planes, widened — not the same RGB re-mapped, which would silently permute
+            // them (`planes` maps RGB to GBR; `planes16` is plane-direct).
+            let wide = Planar16::from_planes(
+                w,
+                h,
+                BitDepth::Eight,
+                std::array::from_fn(|i| eight.plane(i).iter().copied().map(u16::from).collect()),
+            )
+            .unwrap();
+            let a = encode_still_intra_with(&eight, q, Av1Colour::default()).unwrap();
+            let b = encode_still_intra16_with(&wide, q, Av1Colour::default()).unwrap();
+            assert_eq!(a.0.obus, b.0.obus, "{w}x{h} q{q}");
+            assert_eq!(a.1.planes, b.1.planes, "{w}x{h} q{q}");
+        }
+    }
+}
+
+#[test]
+fn sixteen_bit_samples_are_rejected() {
+    // `BitDepth::Sixteen` is a `gamut-color` depth for the interleaved 16-bit pipelines, not an AV1
+    // one — §6.4.1 defines 8, 10 and 12. It is refused rather than silently coded as 12.
+    let src = planes16(8, 8, BitDepth::Sixteen, |_, _| [65535, 0, 30000]);
+    let err = encode_still_intra16_with(&src, 40, Av1Colour::default())
+        .expect_err("16-bit samples are not an AV1 depth");
+    assert_eq!(
+        err.static_message(),
+        Some("AV1: only 8-, 10- and 12-bit samples are coded (§6.4.1)")
+    );
 }
