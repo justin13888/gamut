@@ -260,13 +260,35 @@ const fn block_exceeds_frame(
 /// The transform size that exactly covers a `w × h` block (the rectangular block's `Max_Tx_Size`
 /// under `TX_MODE_LARGEST`): a square block maps to its square transform, a rectangular one to the
 /// matching rectangular transform.
-const fn rect_tx(w: usize, h: usize) -> TxSize {
+const fn max_tx_size_rect(w: usize, h: usize) -> TxSize {
+    // The 128-sample axes clamp to 64: there is no transform wider or taller than that, which is
+    // why `Max_Tx_Size_Rect` maps BLOCK_64X128/128X64/128X128 all onto TX_64X64.
+    let w = if w > 64 { 64 } else { w };
+    let h = if h > 64 { 64 } else { h };
     match (w, h) {
-        (16, 8) => TxSize::Tx16x8,
+        (4, 4) => TxSize::Tx4x4,
+        (4, 8) => TxSize::Tx4x8,
+        (4, 16) => TxSize::Tx4x16,
+        (8, 4) => TxSize::Tx8x4,
+        (8, 8) => TxSize::Tx8x8,
         (8, 16) => TxSize::Tx8x16,
-        (32, 16) => TxSize::Tx32x16,
+        (8, 32) => TxSize::Tx8x32,
+        (16, 4) => TxSize::Tx16x4,
+        (16, 8) => TxSize::Tx16x8,
+        (16, 16) => TxSize::Tx16x16,
         (16, 32) => TxSize::Tx16x32,
-        _ => square_tx(w),
+        (16, 64) => TxSize::Tx16x64,
+        (32, 8) => TxSize::Tx32x8,
+        (32, 16) => TxSize::Tx32x16,
+        (32, 32) => TxSize::Tx32x32,
+        (32, 64) => TxSize::Tx32x64,
+        (64, 16) => TxSize::Tx64x16,
+        (64, 32) => TxSize::Tx64x32,
+        (64, 64) => TxSize::Tx64x64,
+        // AV1 has no block whose aspect ratio exceeds 4:1, so no other pair is constructible.
+        // Coding one against a mismatched transform would desynchronise the decoder silently, so
+        // fail here instead.
+        _ => panic!("no transform matches this block shape"),
     }
 }
 
@@ -1411,7 +1433,7 @@ impl<'a> FrameEncoder<'a> {
                 self.cdfs.tx_size_32x32[ctx].slot()
             };
             cdf::encode(&mut self.sym, 0, slot);
-            rect_tx(bw, bh)
+            max_tx_size_rect(bw, bh)
         } else if lossy_large {
             let max_depth = if bw == 8 { 1 } else { 2 };
             let tx_depth = self.select_tx_depth(c * 4, r * 4, bw, max_depth);
@@ -1483,7 +1505,7 @@ impl<'a> FrameEncoder<'a> {
         // before chroma, so the chroma CfL reads finalized luma recon.
         let chroma_tx = if is_rect {
             // 4:4:4 chroma uses the same rectangular transform as luma (one transform fills the block).
-            rect_tx(bw, bh)
+            max_tx_size_rect(bw, bh)
         } else {
             match bw {
                 8 => TxSize::Tx8x8,
@@ -2667,15 +2689,21 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // eob position (TX_CLASS_2D ⇒ eob_pt context 0). The eob class is the coded coefficient count
-        // (`area`): 16/64/128/256/512/1024. The 512 and 1024 tables have no neighbour-context dimension.
+        // (`area`): 16/32/64/128/256/512/1024. The 512 and 1024 tables have no neighbour-context
+        // dimension. 32 is reachable only with subsampled chroma (TX_4X8 / TX_8X4).
         let eobpt = eobpt_from_eob(eob);
         let eob_pt = match area {
             16 => self.cdfs.eob_pt_16[ptype].slot(),
+            32 => self.cdfs.eob_pt_32[ptype].slot(),
             64 => self.cdfs.eob_pt_64[ptype].slot(),
             128 => self.cdfs.eob_pt_128[ptype].slot(),
             256 => self.cdfs.eob_pt_256[ptype].slot(),
             512 => self.cdfs.eob_pt_512[ptype].slot(),
-            _ => self.cdfs.eob_pt_1024[ptype].slot(),
+            1024 => self.cdfs.eob_pt_1024[ptype].slot(),
+            // Deliberately not a catch-all: a transform area with no table of its own would be
+            // coded against the wrong one and desynchronise the decoder, which surfaces only as a
+            // corrupt stream. Fail at the encoder instead.
+            other => panic!("no eob_pt CDF for a {other}-coefficient transform"),
         };
         cdf::encode(&mut self.sym, eobpt - 1, eob_pt);
         if eobpt >= 3 {
@@ -3072,6 +3100,84 @@ mod tests {
     use gamut_color::Planar8;
 
     use super::*;
+
+    #[test]
+    fn max_tx_size_rect_matches_the_block_shape() {
+        // §9.3 `Max_Tx_Size_Rect`: the transform has the block's own dimensions. Every shape is
+        // pinned, because the previous partial table silently fell back to `square_tx(w)` — which
+        // is the wrong transform for any pair it did not list, and would have become reachable the
+        // moment subsampling produced one.
+        let cases = [
+            ((4, 4), TxSize::Tx4x4),
+            ((4, 8), TxSize::Tx4x8),
+            ((4, 16), TxSize::Tx4x16),
+            ((8, 4), TxSize::Tx8x4),
+            ((8, 8), TxSize::Tx8x8),
+            ((8, 16), TxSize::Tx8x16),
+            ((8, 32), TxSize::Tx8x32),
+            ((16, 4), TxSize::Tx16x4),
+            ((16, 8), TxSize::Tx16x8),
+            ((16, 16), TxSize::Tx16x16),
+            ((16, 32), TxSize::Tx16x32),
+            ((16, 64), TxSize::Tx16x64),
+            ((32, 8), TxSize::Tx32x8),
+            ((32, 16), TxSize::Tx32x16),
+            ((32, 32), TxSize::Tx32x32),
+            ((32, 64), TxSize::Tx32x64),
+            ((64, 16), TxSize::Tx64x16),
+            ((64, 32), TxSize::Tx64x32),
+            ((64, 64), TxSize::Tx64x64),
+        ];
+        for ((w, h), want) in cases {
+            assert_eq!(max_tx_size_rect(w, h), want, "{w}x{h}");
+        }
+        // The 128-sample axes clamp to 64, so the three 128-wide blocks share TX_64X64 with the
+        // 64x64 one rather than naming a transform that does not exist.
+        assert_eq!(max_tx_size_rect(64, 128), TxSize::Tx64x64);
+        assert_eq!(max_tx_size_rect(128, 64), TxSize::Tx64x64);
+        assert_eq!(max_tx_size_rect(128, 128), TxSize::Tx64x64);
+    }
+
+    #[test]
+    fn every_transform_the_encoder_selects_has_an_eob_position_cdf() {
+        // The `eob_pt` selector panics rather than falling through to the 1024-coefficient table,
+        // so this asserts the selector is total over the transforms `max_tx_size_rect` can return.
+        // 32 is the entry this change adds: it is unreachable at 4:4:4 and becomes reachable as
+        // soon as chroma is subsampled (TX_4X8 / TX_8X4).
+        let areas: std::collections::BTreeSet<usize> = [
+            (4, 4),
+            (4, 8),
+            (4, 16),
+            (8, 4),
+            (8, 8),
+            (8, 16),
+            (8, 32),
+            (16, 4),
+            (16, 8),
+            (16, 16),
+            (16, 32),
+            (16, 64),
+            (32, 8),
+            (32, 16),
+            (32, 32),
+            (32, 64),
+            (64, 16),
+            (64, 32),
+            (64, 64),
+        ]
+        .iter()
+        .map(|&(w, h)| {
+            let tx = max_tx_size_rect(w, h);
+            // The coded coefficient count is capped at 1024 (§5.11.39 `segEob`).
+            (tx.width() * tx.height()).min(1024)
+        })
+        .collect();
+        assert_eq!(
+            areas,
+            [16, 32, 64, 128, 256, 512, 1024].into_iter().collect(),
+            "the eob_pt selector must cover exactly these coefficient counts"
+        );
+    }
 
     #[test]
     fn prediction_references_clamp_to_the_last_sample_of_the_coded_plane() {
