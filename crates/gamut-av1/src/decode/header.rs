@@ -998,6 +998,14 @@ impl FrameHeader {
                 "AV1 decode: only 8-bit streams are implemented",
             ));
         }
+        // Monochrome carries no chroma at all, so a subsampling diagnostic would name the wrong
+        // reason for a stream this crate's own encoder can emit.
+        if seq.color.subsampling == super::obu::Subsampling::Monochrome {
+            return Err(Error::unsupported(
+                ORIGIN,
+                "AV1 decode: monochrome streams are not implemented",
+            ));
+        }
         if seq.color.subsampling != super::obu::Subsampling::Yuv444 {
             return Err(Error::unsupported(
                 ORIGIN,
@@ -1618,6 +1626,18 @@ mod tests {
                 .unwrap_err()
                 .static_message(),
             Some("AV1 decode: only 4:4:4 chroma is implemented")
+        );
+
+        // Monochrome is its own deferred row, and its own diagnostic: this crate encodes
+        // monochrome stills, so refusing one with a message about chroma subsampling would name a
+        // reason that does not exist for a stream carrying no chroma.
+        let mut mono = seq;
+        mono.color.subsampling = Subsampling::Monochrome;
+        assert_eq!(
+            fh.reject_unsupported_tools(&mono)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 decode: monochrome streams are not implemented")
         );
     }
 
