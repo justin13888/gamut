@@ -66,6 +66,10 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   maps (`DepthInfo`) — decoded where the scheme is in scope, verbatim chunks otherwise; typed
   **`ProfileGainTableMap`/`ProfileGainTableMap2`** parsing with byte-exact re-serialisation; and
   every unmodelled field surfaced verbatim as a typed `RawTag` (nothing is silently dropped).
+- **Colour projection** (decode): the camera-profile colour tags beyond the calibration —
+  hue/saturation/value and look tables, `ProfileToneCurve`, `BaselineExposureOffset`, the DNG 1.6
+  third calibration set and the reduction matrices — as a typed `ColorProfileInfo`, plus the raw
+  IFD's `NoiseProfile` as a typed `NoiseProfile` with its per-plane noise model.
 - **Raw digests** — the encoder writes `NewRawImageDigest` (51111), bit-matching the SDK's own
   MD5-over-raw-image computation (`RawImage::new_raw_image_digest`).
 - **`RawImage::to_linear`** — the spec's chapter-5 raw-to-linear-reference mapping, differentially
