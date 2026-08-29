@@ -24,8 +24,8 @@
 //! matrix requires 4:4:4 (§6.4.2) and a subsampled identity encode is refused. 4:2:2's geometry
 //! and signalling are in place but its coding path is not yet complete.
 //!
-//! The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, quantizer matrices, and the
-//! AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
+//! The remaining surface (10/12-bit, 4:2:2's coding path, quantizer matrices, and the AVIF-level
+//! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D
