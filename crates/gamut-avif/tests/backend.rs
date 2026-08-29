@@ -926,3 +926,44 @@ fn abi_adapter_exposes_the_wrapped_encoder() {
         "the same encoder comes back"
     );
 }
+
+#[test]
+fn backend_stream_may_use_the_professional_profile() {
+    // `seq_profile` 2 is 4:2:2, which the parser must read rather than refuse — the layout of
+    // `color_config()` depends on the profile, so accepting it means implementing its branches.
+    // Proven by feeding a *valid* profile-2 header to a 4:2:0 request and getting the chroma
+    // mismatch, which is a check strictly after the profile gate: a parser that still rejected
+    // profile 2 outright would report the profile error instead.
+    let mut w = BitVec::default();
+    w.push_bits(2, 3); // seq_profile = Professional
+    w.push_bits(1, 1); // still_picture
+    w.push_bits(1, 1); // reduced_still_picture_header
+    w.push_bits(0, 5); // seq_level_idx[0]
+    w.push_bits(5, 4); // frame_width_bits_minus_1
+    w.push_bits(4, 4); // frame_height_bits_minus_1
+    w.push_bits(W - 1, 6);
+    w.push_bits(H - 1, 5);
+    w.push_bits(0, 6); // the six enable flags
+    w.push_bits(0, 1); // high_bitdepth
+    w.push_bits(0, 1); // mono_chrome (coded because the profile is not High)
+    w.push_bits(1, 1); // color_description_present_flag
+    w.push_bits(1, 8); // color_primaries = BT.709
+    w.push_bits(13, 8); // transfer_characteristics = sRGB
+    w.push_bits(1, 8); // matrix_coefficients = BT.709 (so no sRGB shortcut)
+    w.push_bits(1, 1); // color_range = full
+    // 4:2:2 codes no chroma_sample_position.
+    w.push_bits(0, 1); // separate_uv_delta_q
+    let payload = w.finish();
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+
+    let log = log();
+    let mut encoder = AvifEncoder::lossy(50); // asks for 4:2:0
+    encoder.push_backend(Scripted::new("p2", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("4:2:2 stream for a 4:2:0 request is rejected");
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend stream signals a different chroma format than requested",
+    );
+}

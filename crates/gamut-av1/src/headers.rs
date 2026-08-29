@@ -399,6 +399,58 @@ pub(crate) fn assemble_temporal_unit(seq_payload: &[u8], frame_payload: &[u8]) -
 mod tests {
     use super::*;
 
+    /// A config in `chroma` with a non-identity matrix (so `color_config()` leaves the sRGB
+    /// shortcut and actually codes the range and position bits).
+    fn cfg_for(seq_profile: u8, ss_x: u8, ss_y: u8, csp: u8) -> Av1StillConfig {
+        Av1StillConfig {
+            seq_profile,
+            seq_level_idx_0: 0,
+            seq_tier_0: 0,
+            high_bitdepth: false,
+            twelve_bit: false,
+            monochrome: false,
+            chroma_subsampling_x: ss_x,
+            chroma_subsampling_y: ss_y,
+            chroma_sample_position: csp,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 1, // BT.709 — not the identity, so no shortcut
+            full_range: true,
+        }
+    }
+
+    #[test]
+    fn chroma_sample_position_is_coded_only_for_four_two_zero() {
+        // §5.5.2 gates the 2-bit field on `subsampling_x && subsampling_y`. Changing the position
+        // must therefore change a 4:2:0 header and leave 4:2:2 and 4:4:4 untouched — an `||` in
+        // that condition would emit the field for 4:2:2 too, shifting every later bit.
+        let p420_a = sequence_header_payload(&cfg_for(0, 1, 1, 0), 64, 64, true, false);
+        let p420_b = sequence_header_payload(&cfg_for(0, 1, 1, 3), 64, 64, true, false);
+        assert_ne!(p420_a, p420_b, "4:2:0 codes chroma_sample_position");
+
+        let p422_a = sequence_header_payload(&cfg_for(2, 1, 0, 0), 64, 64, true, false);
+        let p422_b = sequence_header_payload(&cfg_for(2, 1, 0, 3), 64, 64, true, false);
+        assert_eq!(p422_a, p422_b, "4:2:2 codes no chroma_sample_position");
+
+        let p444_a = sequence_header_payload(&cfg_for(1, 0, 0, 0), 64, 64, true, false);
+        let p444_b = sequence_header_payload(&cfg_for(1, 0, 0, 3), 64, 64, true, false);
+        assert_eq!(p444_a, p444_b, "4:4:4 codes no chroma_sample_position");
+    }
+
+    #[test]
+    fn mono_chrome_bit_is_coded_for_every_profile_but_high() {
+        // §5.5.2 codes `mono_chrome` unless `seq_profile == 1`. The bit is always 0 here, but its
+        // *presence* changes the payload length class: a 4:2:0 header carries one more coded bit
+        // than the 4:4:4 one before the colour description, plus the 2-bit sample position.
+        let p444 = sequence_header_payload(&cfg_for(1, 0, 0, 0), 64, 64, true, false);
+        let p420 = sequence_header_payload(&cfg_for(0, 1, 1, 0), 64, 64, true, false);
+        let p422 = sequence_header_payload(&cfg_for(2, 1, 0, 0), 64, 64, true, false);
+        // 4:2:2 differs from 4:4:4 by exactly the mono_chrome bit (and the profile field itself),
+        // and 4:2:0 differs from 4:2:2 by the two position bits.
+        assert_ne!(p444, p422);
+        assert_ne!(p422, p420);
+    }
+
     #[test]
     fn level_selection() {
         assert_eq!(pick_level(16, 16).unwrap(), 0);

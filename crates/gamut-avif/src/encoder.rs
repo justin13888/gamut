@@ -417,6 +417,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn profile_brands_require_both_the_av1_profile_and_its_level() {
+        // AVIF §8.2/§8.3 constrain the AV1 profile *and* the level: `MA1B` needs Main at ≤ 5.1
+        // (`seq_level_idx` ≤ 13), `MA1A` needs High at ≤ 6.0 (≤ 16). §8.1: a file matching neither
+        // declares only the general brands. `pick_level` never yields above 16 today, so the level
+        // guards are checked here rather than through an encode.
+        let cfg = |seq_profile: u8, seq_level_idx_0: u8| Av1StillConfig {
+            seq_profile,
+            seq_level_idx_0,
+            seq_tier_0: 0,
+            high_bitdepth: false,
+            twelve_bit: false,
+            monochrome: false,
+            chroma_subsampling_x: 0,
+            chroma_subsampling_y: 0,
+            chroma_sample_position: 0,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 1,
+            full_range: true,
+        };
+        let general = vec![*b"avif", *b"mif1", *b"miaf"];
+
+        // Main within level 5.1 earns MA1B; one level above loses it.
+        let mut with_b = general.clone();
+        with_b.push(*b"MA1B");
+        assert_eq!(compatible_brands(&cfg(0, 13)), with_b);
+        assert_eq!(compatible_brands(&cfg(0, 12)), with_b);
+        assert_eq!(compatible_brands(&cfg(0, 14)), general);
+
+        // High within level 6.0 earns MA1A; above it, general brands only.
+        let mut with_a = general.clone();
+        with_a.push(*b"MA1A");
+        assert_eq!(compatible_brands(&cfg(1, 16)), with_a);
+        assert_eq!(compatible_brands(&cfg(1, 17)), general);
+
+        // Professional (4:2:2) matches neither profile at any level.
+        assert_eq!(compatible_brands(&cfg(2, 0)), general);
+        assert_eq!(compatible_brands(&cfg(2, 16)), general);
+    }
+
+    #[test]
     fn av1c_record_encodes_every_field() {
         // Distinct, non-zero values in every field so each shift, mask, and `+` is observable (a
         // zero term would hide its operator: `0 + x == 0 - x`, `0 << n == 0 >> n`).

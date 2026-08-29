@@ -272,6 +272,58 @@ mod tests {
         }
         // Monochrome has no chroma plane to size.
         assert_eq!(plane_residual_size(8, 8, 1, ChromaSubsampling::Cs400), None);
+
+        // Every row of `Subsampled_Size`, so no arm can be deleted without a failure. Listed as
+        // (luma, 4:2:2, 4:2:0) with `None` for BLOCK_INVALID.
+        /// One `Subsampled_Size` row: the luma block, then its 4:2:2 and 4:2:0 chroma residuals.
+        type Row = (
+            (usize, usize),
+            Option<(usize, usize)>,
+            Option<(usize, usize)>,
+        );
+        let table: [Row; 22] = [
+            ((4, 4), Some((4, 4)), Some((4, 4))),
+            ((4, 8), None, Some((4, 4))),
+            ((8, 4), Some((4, 4)), Some((4, 4))),
+            ((8, 8), Some((4, 8)), Some((4, 4))),
+            ((8, 16), None, Some((4, 8))),
+            ((16, 8), Some((8, 8)), Some((8, 4))),
+            ((16, 16), Some((8, 16)), Some((8, 8))),
+            ((16, 32), None, Some((8, 16))),
+            ((32, 16), Some((16, 16)), Some((16, 8))),
+            ((32, 32), Some((16, 32)), Some((16, 16))),
+            ((32, 64), None, Some((16, 32))),
+            ((64, 32), Some((32, 32)), Some((32, 16))),
+            ((64, 64), Some((32, 64)), Some((32, 32))),
+            ((64, 128), None, Some((32, 64))),
+            ((128, 64), Some((64, 64)), Some((64, 32))),
+            ((128, 128), Some((64, 128)), Some((64, 64))),
+            ((4, 16), None, Some((4, 8))),
+            ((16, 4), Some((8, 4)), Some((8, 4))),
+            ((8, 32), None, Some((4, 16))),
+            ((32, 8), Some((16, 8)), Some((16, 4))),
+            ((16, 64), None, Some((8, 32))),
+            ((64, 16), Some((32, 16)), Some((32, 8))),
+        ];
+        for ((bw, bh), want422, want420) in table {
+            assert_eq!(
+                plane_residual_size(bw, bh, 1, Cs422),
+                want422,
+                "{bw}x{bh} at 4:2:2"
+            );
+            assert_eq!(
+                plane_residual_size(bw, bh, 1, Cs420),
+                want420,
+                "{bw}x{bh} at 4:2:0"
+            );
+            assert_eq!(
+                plane_residual_size(bw, bh, 1, Cs444),
+                Some((bw, bh)),
+                "{bw}x{bh} at 4:4:4"
+            );
+        }
+        // A shape with no row at all (AV1 has no 4x32 block) is not codable.
+        assert_eq!(plane_residual_size(4, 32, 1, Cs420), None);
     }
 
     #[test]
@@ -392,6 +444,10 @@ mod tests {
         assert_eq!(c420.deblock_mi(0, 0), (1, 1));
         // 4:2:2 subsamples x only, so the row keeps its even cell.
         assert_eq!(c422.deblock_mi(4, 4), (3, 1));
+        // The `|` must not be `^`: at a chroma column whose MI cell is already odd, OR keeps it and
+        // XOR would step *back* to the even one. Chroma x = 6 maps to luma 12, MI cell 3.
+        assert_eq!(c420.deblock_mi(6, 6), (3, 3));
+        assert_eq!(c420.deblock_mi(2, 2), (1, 1));
     }
 
     #[test]

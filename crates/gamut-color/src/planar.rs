@@ -665,4 +665,108 @@ mod tests {
         let p = Planar8::from_rgb8_identity(&[0; 3], 1, 1).unwrap();
         let _ = p.plane_dimensions(3);
     }
+
+    #[test]
+    fn downsample_box_averages_each_group_with_rounding() {
+        // 4x4 ramp: value = y * 4 + x.
+        let plane: Vec<u8> = (0..16u8).collect();
+        // 2x2 boxes: each output is the rounded mean of its four inputs.
+        // (0,1,4,5) -> 10/4 = 2.5 -> 3;  (2,3,6,7) -> 18/4 = 4.5 -> 5
+        // (8,9,12,13) -> 42/4 = 10.5 -> 11; (10,11,14,15) -> 50/4 = 12.5 -> 13
+        assert_eq!(downsample_box(&plane, 4, 4, 2, 2, 2, 2), vec![3, 5, 11, 13]);
+        // Horizontal only (4:2:2): pairs across x. (0,1) -> 0.5 -> 1, (2,3) -> 2.5 -> 3, ...
+        assert_eq!(
+            downsample_box(&plane, 4, 4, 2, 4, 2, 1),
+            vec![1, 3, 5, 7, 9, 11, 13, 15]
+        );
+        // 1x1 is an exact copy.
+        assert_eq!(downsample_box(&plane, 4, 4, 4, 4, 1, 1), plane);
+    }
+
+    #[test]
+    fn downsample_box_partial_edge_group_averages_only_real_samples() {
+        // 3x3, so the right column and bottom row have half-width / half-height boxes. Chroma is
+        // 2x2. Values: 0..8 row-major.
+        //   box (0,0) = mean(0,1,3,4) = 2
+        //   box (1,0) = mean(2,5)     = 3.5 -> 4   (only two samples exist)
+        //   box (0,1) = mean(6,7)     = 6.5 -> 7
+        //   box (1,1) = mean(8)       = 8
+        // A `count` fixed at sx*sy instead of the number of real samples would give 1/1/3/2.
+        let plane: Vec<u8> = (0..9u8).collect();
+        assert_eq!(downsample_box(&plane, 3, 3, 2, 2, 2, 2), vec![2, 4, 7, 8]);
+    }
+
+    #[test]
+    fn downsample_box_rounds_half_away_from_zero() {
+        // Two samples averaging exactly .5 must round up, which is what the `+ count / 2` addend
+        // does; truncation would give 10 and 12.
+        let plane = vec![10u8, 11, 12, 13];
+        assert_eq!(downsample_box(&plane, 4, 1, 2, 1, 2, 1), vec![11, 13]);
+    }
+
+    #[test]
+    fn matrix_subsampled_halves_only_the_subsampled_axes() {
+        // A vertical stripe at period 2: the 4:2:2 and 4:2:0 box averages both collapse it in x,
+        // while 4:4:4 keeps it. Distinguishes an x/y transposition, which a square image and a
+        // symmetric pattern cannot.
+        let (w, h) = (4u32, 2u32);
+        let mut rgb = vec![0u8; (w * h * 3) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 3) as usize;
+                // Coloured, not grey: a black/white stripe has neutral chroma either way, so it
+                // could not tell an averaged plane from an un-averaged one.
+                let px = if x % 2 == 0 {
+                    [255u8, 0, 0]
+                } else {
+                    [0, 0, 255]
+                };
+                rgb[i..i + 3].copy_from_slice(&px);
+            }
+        }
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(w, h).unwrap()).unwrap();
+        let m = RgbToYcbcr::new(
+            crate::cicp::MatrixCoefficients::Bt709,
+            crate::cicp::ColorRange::Full,
+            crate::BitDepth::Eight,
+        )
+        .unwrap();
+
+        let p444 = Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs444).unwrap();
+        assert_eq!(p444.subsampling(), ChromaSubsampling::Cs444);
+        assert_eq!(p444.plane_dimensions(1), (4, 2));
+
+        let p422 = Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs422).unwrap();
+        assert_eq!(p422.plane_dimensions(1), (2, 2));
+        assert_eq!(p422.plane(0).len(), 8, "luma keeps full resolution");
+
+        let p420 = Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
+        assert_eq!(p420.plane_dimensions(1), (2, 1));
+
+        // Averaging a red/blue pair gives the same chroma in both subsampled layouts (both halve
+        // x, and the stripe is constant in y), and it differs from the un-averaged red sample.
+        assert_eq!(p422.plane(1)[0], p420.plane(1)[0]);
+        assert_ne!(p444.plane(1)[0], p422.plane(1)[0]);
+        // Luma is untouched by subsampling, so the first sample is the same in all three.
+        assert_eq!(p444.plane(0)[0], p422.plane(0)[0]);
+        assert_eq!(p444.plane(0)[0], p420.plane(0)[0]);
+    }
+
+    #[test]
+    fn matrix_subsampled_rejects_monochrome() {
+        let rgb = [0u8; 3];
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(1, 1).unwrap()).unwrap();
+        let m = RgbToYcbcr::new(
+            crate::cicp::MatrixCoefficients::Bt709,
+            crate::cicp::ColorRange::Full,
+            crate::BitDepth::Eight,
+        )
+        .unwrap();
+        let err = Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs400)
+            .expect_err("monochrome has no chroma to subsample");
+        assert_eq!(
+            err.static_message(),
+            Some("monochrome has no chroma planes to subsample")
+        );
+    }
 }
