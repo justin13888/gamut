@@ -945,10 +945,16 @@ fn subsampled_420_reconstruction_matches_on_palette_content() {
     // signalled. That interaction is chroma-specific — a palette block still has chroma of its own
     // — and only shows up when the encoder actually selects a palette, which photographic content
     // never does. Few distinct colours in large flat runs is what triggers it.
-    let flat_runs = |x: u32, y: u32| match ((x / 8) + (y / 8)) % 3 {
-        0 => [20u8, 30, 40],
-        1 => [200, 30, 40],
-        _ => [20, 200, 210],
+    // Greyscale on purpose: a palette block must also match its chroma DC prediction, and neutral
+    // chroma everywhere is what lets that converge. Coloured runs vary the chroma per block and the
+    // palette path is then never taken, leaving the interaction untested.
+    let flat_runs = |x: u32, y: u32| {
+        let v = match ((x / 8) + (y / 8)) % 3 {
+            0 => 20u8,
+            1 => 128,
+            _ => 210,
+        };
+        [v, v, v]
     };
     for (w, h) in [(32u32, 32u32), (64, 48), (17, 13)] {
         let p = planes_subsampled(
