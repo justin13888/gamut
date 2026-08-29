@@ -28,8 +28,8 @@
 //! see `src/gamut.rs`).
 
 use gamut_cmm::{
-    GamutCheck, IccTransform, ProofingOptions, Transform as _, TransformOptions,
-    transform_interleaved_u8,
+    GamutCheck, IccTransform, PipelineOptimization, ProofingOptions, Transform as _,
+    TransformOptions, transform_interleaved_u8,
 };
 use gamut_core::PixelFormat;
 use gamut_icc::{IccProfile, RenderingIntent};
@@ -42,6 +42,16 @@ use lcms2_oracle::{
     gray, lab4, rgb_linearization_devicelink, rgb_matrix_shaper, rgb_matrix_shaper_d65_wtpt,
     scnr_lut, set_alarm_codes, set_quiet_log_handler, srgb,
 };
+
+/// [`TransformOptions`] at `intent` with every other knob at its default — BPC off and, the
+/// point of the gate, pipeline optimization **off**: every bound in this file is measured
+/// against the crate's stage-by-stage evaluation.
+fn intent_options(intent: RenderingIntent) -> TransformOptions {
+    TransformOptions {
+        intent,
+        ..TransformOptions::default()
+    }
+}
 
 /// D65 chromaticity and a wide (Adobe-ish) primary set for the synthesized shapers.
 const D65_XY: [f64; 2] = [0.3127, 0.3290];
@@ -290,6 +300,7 @@ fn conformance_pairs_battery() {
                     TransformOptions {
                         intent: our_intent,
                         black_point_compensation: bpc,
+                        optimization: PipelineOptimization::None,
                     },
                 )
                 .unwrap();
@@ -475,6 +486,7 @@ fn multiprofile_chain_matches_lcms2() {
                     TransformOptions {
                         intent: our_intent,
                         black_point_compensation: bpc,
+                        optimization: PipelineOptimization::None,
                     },
                 )
                 .unwrap();
@@ -504,6 +516,7 @@ fn multiprofile_chain_matches_lcms2() {
                     TransformOptions {
                         intent: our_intent,
                         black_point_compensation: bpc,
+                        optimization: PipelineOptimization::None,
                     },
                 )
                 .unwrap();
@@ -622,7 +635,7 @@ fn device_links_match_lcms2() {
         // Only A2B0 exists: every intent must take the perceptual fallback.
         (RenderingIntent::Saturation, INTENT_SATURATION),
     ] {
-        let ours = IccTransform::device_link(&parsed, our_intent).unwrap();
+        let ours = IccTransform::device_link(&parsed, intent_options(our_intent)).unwrap();
         let lcms = Transform::devicelink(
             &oracle,
             TYPE_CMYK_DBL,
@@ -654,8 +667,11 @@ fn device_links_match_lcms2() {
 
     // (b) The v4 curves-only RGB linearization link (identity curves: output == input).
     let (parsed, oracle) = reopen(&rgb_linearization_devicelink());
-    let ours =
-        IccTransform::device_link(&parsed, RenderingIntent::MediaRelativeColorimetric).unwrap();
+    let ours = IccTransform::device_link(
+        &parsed,
+        intent_options(RenderingIntent::MediaRelativeColorimetric),
+    )
+    .unwrap();
     let lcms = Transform::devicelink(
         &oracle,
         TYPE_RGB_DBL,
@@ -682,7 +698,8 @@ fn device_links_match_lcms2() {
     let bytes = link.to_bytes().expect("gamut-icc serializes the link");
     let reparsed = IccProfile::parse(&bytes).expect("round-trips");
     let oracle = Profile::from_bytes(&bytes).expect("lcms2 opens the link");
-    let ours = IccTransform::device_link(&reparsed, RenderingIntent::Perceptual).unwrap();
+    let ours =
+        IccTransform::device_link(&reparsed, intent_options(RenderingIntent::Perceptual)).unwrap();
     let lcms = Transform::devicelink(
         &oracle,
         TYPE_RGB_DBL,
@@ -739,6 +756,7 @@ fn proofing_matches_lcms2() {
                         intent: our_intent,
                         proofing_intent: our_proof_intent,
                         black_point_compensation: bpc,
+                        optimization: PipelineOptimization::None,
                     },
                 )
                 .unwrap();
@@ -786,6 +804,7 @@ fn proofing_matches_lcms2() {
             intent: RenderingIntent::MediaRelativeColorimetric,
             proofing_intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         },
     )
     .unwrap();
@@ -795,6 +814,7 @@ fn proofing_matches_lcms2() {
         TransformOptions {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         },
     )
     .unwrap();
@@ -852,7 +872,8 @@ fn gamut_check_classification_matches_lcms2() {
             ),
             (RenderingIntent::Perceptual, INTENT_PERCEPTUAL),
         ] {
-            let check = GamutCheck::new(&wide_parsed, proof_parsed, our_intent).unwrap();
+            let check =
+                GamutCheck::new(&wide_parsed, proof_parsed, intent_options(our_intent)).unwrap();
             let lcms = Transform::proofing(
                 &wide_oracle,
                 TYPE_RGB_DBL,

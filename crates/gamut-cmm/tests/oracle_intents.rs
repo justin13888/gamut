@@ -21,7 +21,7 @@
 //!
 //! Measured worst values are recorded at each assert.
 
-use gamut_cmm::{IccTransform, Transform as _, TransformOptions, bpc};
+use gamut_cmm::{IccTransform, PipelineOptimization, Transform as _, TransformOptions, bpc};
 use gamut_icc::{IccProfile, RenderingIntent};
 use lcms2_oracle::{
     FLAGS_BLACKPOINTCOMPENSATION, FLAGS_NOCACHE, FLAGS_NOOPTIMIZE, INTENT_ABSOLUTE_COLORIMETRIC,
@@ -164,6 +164,7 @@ fn absolute_on_a_non_d50_white_matches_lcms2() {
         TransformOptions {
             intent: RenderingIntent::IccAbsoluteColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         },
     )
     .unwrap();
@@ -200,6 +201,7 @@ fn absolute_on_a_non_d50_white_matches_lcms2() {
         TransformOptions {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         },
     )
     .unwrap();
@@ -232,6 +234,7 @@ fn absolute_between_d50_wtpt_profiles_is_exactly_relative() {
         TransformOptions {
             intent: RenderingIntent::IccAbsoluteColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         },
     )
     .unwrap();
@@ -241,6 +244,7 @@ fn absolute_between_d50_wtpt_profiles_is_exactly_relative() {
         TransformOptions {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         },
     )
     .unwrap();
@@ -455,6 +459,7 @@ fn bpc_on_a_v2_pair_matches_lcms2_and_differs_from_no_bpc() {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: bpc_on,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap()

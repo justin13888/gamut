@@ -35,6 +35,7 @@
 use gamut_icc::{ColorSpace, DeviceClass, IccProfile, RenderingIntent};
 
 use crate::error::{CmmError, Result};
+use crate::optimize::PipelineOptimization;
 use crate::pipeline::{Pipeline, Stage};
 use crate::transform::{IccTransform, TransformOptions, is_empty_layer};
 use crate::{bpc, intent, link};
@@ -266,6 +267,9 @@ pub struct ProofingOptions {
     /// chain; the proof→destination legs never compensate, as in lcms2's
     /// `cmsCreateProofingTransform` BPC array).
     pub black_point_compensation: bool,
+    /// How far to collapse the assembled four-hop pipeline before evaluating it — as
+    /// [`TransformOptions::optimization`], and defaulting the same way (off).
+    pub optimization: PipelineOptimization,
 }
 
 impl IccTransform {
@@ -301,9 +305,10 @@ impl IccTransform {
         }
         let intents = vec![options.intent; profiles.len()];
         let bpc_flags = vec![options.black_point_compensation; profiles.len()];
-        Ok(Self::from_pipeline(link_chain(
-            profiles, &intents, &bpc_flags,
-        )?))
+        Self::from_pipeline(
+            link_chain(profiles, &intents, &bpc_flags)?,
+            options.optimization,
+        )
     }
 
     /// Builds the transform a **device-link profile** embodies: its A2B pipeline from its
@@ -311,12 +316,21 @@ impl IccTransform {
     /// device space) — lcms2's one-profile `cmsCreateTransform` spelling over
     /// `_cmsReadDevicelinkLUT`.
     ///
-    /// The A2B tag is selected by `intent` with the perceptual fallback; there is
+    /// The A2B tag is selected by `options.intent` with the perceptual fallback; there is
     /// deliberately **no** matrix/TRC shaper fallback (a link without a usable A2B tag
     /// fails), no PCS-seam adjustment (a link is a finished rendering — intent math was
     /// baked in by whoever built it), and CLUTs interpolate trilinearly when the link's
     /// output space is Lab. Connection-space ends (an RGB→Lab link, say) carry the crate's
     /// decoded colorimetry; device ends are encoded `[0, 1]`.
+    ///
+    /// # Options
+    ///
+    /// Only [`intent`](TransformOptions::intent) and
+    /// [`optimization`](TransformOptions::optimization) are consumed:
+    /// [`black_point_compensation`](TransformOptions::black_point_compensation) is
+    /// **ignored**, because a device link applies no PCS-seam adjustment at all (the
+    /// paragraph above — a link is a finished rendering). The whole options struct is taken
+    /// anyway so every [`IccTransform`] constructor opts into optimization the same way.
     ///
     /// # Errors
     ///
@@ -324,15 +338,16 @@ impl IccTransform {
     /// [`DeviceClass::DeviceLink`] (abstract profiles chain via [`IccTransform::chain`]);
     /// [`CmmError::MissingTag`] when neither the intent's A2B tag nor `A2B0` exists;
     /// otherwise the usual LUT construction errors.
-    pub fn device_link(link: &IccProfile, intent: RenderingIntent) -> Result<Self> {
+    pub fn device_link(link: &IccProfile, options: TransformOptions) -> Result<Self> {
         if link.header.device_class != DeviceClass::DeviceLink {
             return Err(CmmError::UnsupportedProfile(
                 "device_link requires a link-class profile",
             ));
         }
-        Ok(Self::from_pipeline(link::device_link_pipeline(
-            link, intent,
-        )?))
+        Self::from_pipeline(
+            link::device_link_pipeline(link, options.intent)?,
+            options.optimization,
+        )
     }
 
     /// Builds a soft-proofing transform: `src` device → `dst` device, rendered **as the
@@ -371,9 +386,10 @@ impl IccTransform {
             false,
             false,
         ];
-        Ok(Self::from_pipeline(link_chain(
-            &profiles, &intents, &bpc_flags,
-        )?))
+        Self::from_pipeline(
+            link_chain(&profiles, &intents, &bpc_flags)?,
+            options.optimization,
+        )
     }
 }
 
@@ -388,6 +404,15 @@ mod tests {
     use crate::transform::Transform as _;
 
     const D65: [f64; 3] = [0.9504, 1.0, 1.0889];
+
+    /// [`TransformOptions`] at `intent` with every other knob at its default (BPC off,
+    /// optimization off) — the shape the intent-only constructors take.
+    fn intent_options(intent: RenderingIntent) -> TransformOptions {
+        TransformOptions {
+            intent,
+            ..TransformOptions::default()
+        }
+    }
 
     /// A v4 RGB→XYZ matrix/TRC display shaper over exact-dyadic colorants.
     fn rgb_shaper(wtpt: Option<[f64; 3]>) -> IccProfile {
@@ -526,6 +551,7 @@ mod tests {
                 let options = TransformOptions {
                     intent,
                     black_point_compensation,
+                    optimization: PipelineOptimization::None,
                 };
                 let between = IccTransform::between(&src, &dst, options).unwrap();
                 let chain = IccTransform::chain(&[&src, &dst], options).unwrap();
@@ -551,6 +577,7 @@ mod tests {
         let options = TransformOptions {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         };
         let pair = IccTransform::between(&src, &dst, options).unwrap();
         let chained = IccTransform::chain(&[&src, &lab, &dst], options).unwrap();
@@ -605,7 +632,8 @@ mod tests {
     #[test]
     fn device_link_requires_link_class() {
         let not_link = rgb_shaper(None);
-        let err = IccTransform::device_link(&not_link, RenderingIntent::Perceptual).unwrap_err();
+        let err = IccTransform::device_link(&not_link, intent_options(RenderingIntent::Perceptual))
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "cmm: unsupported profile (device_link requires a link-class profile)"
@@ -619,7 +647,8 @@ mod tests {
         let mut link = rgb_shaper(None);
         link.header.device_class = DeviceClass::DeviceLink;
         link.header.pcs = ColorSpace::Rgb;
-        let err = IccTransform::device_link(&link, RenderingIntent::Saturation).unwrap_err();
+        let err = IccTransform::device_link(&link, intent_options(RenderingIntent::Saturation))
+            .unwrap_err();
         assert_eq!(err.to_string(), "cmm: profile is missing required tag A2B2");
         // The perceptual fallback still applies when only A2B0 exists (checked end to end
         // below and in the oracle suite).
@@ -628,7 +657,8 @@ mod tests {
     #[test]
     fn device_link_runs_encoded_end_to_end() {
         let link = halving_link();
-        let transform = IccTransform::device_link(&link, RenderingIntent::Perceptual).unwrap();
+        let transform =
+            IccTransform::device_link(&link, intent_options(RenderingIntent::Perceptual)).unwrap();
         assert_eq!(transform.input_channels(), 3);
         assert_eq!(transform.output_channels(), 3);
         // Corner value 32768 halves to 32768/65535 (≈ 0.5 to 16-bit quantization); the
@@ -640,7 +670,8 @@ mod tests {
             assert!((got - want).abs() < 1e-12, "{out:?}");
         }
         // Every intent falls back to the sole A2B0.
-        let saturation = IccTransform::device_link(&link, RenderingIntent::Saturation).unwrap();
+        let saturation =
+            IccTransform::device_link(&link, intent_options(RenderingIntent::Saturation)).unwrap();
         assert_eq!(eval3(&transform, &[1.0; 3]), eval3(&saturation, &[1.0; 3]));
     }
 
@@ -673,6 +704,7 @@ mod tests {
             intent: RenderingIntent::MediaRelativeColorimetric,
             proofing_intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         };
         let proofed = IccTransform::proofing(&src, &dst, &src, options).unwrap();
         let plain = IccTransform::between(
@@ -681,6 +713,7 @@ mod tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
