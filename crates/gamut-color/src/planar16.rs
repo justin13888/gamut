@@ -496,8 +496,8 @@ mod tests {
             want[1].push(cb);
             want[2].push(cr);
         }
-        for i in 0..3 {
-            assert_eq!(p.plane(i), &want[i][..], "plane {i}");
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(p.plane(i), &w[..], "plane {i}");
             assert_eq!(p.plane(i).len(), 6, "plane {i} covers every pixel");
         }
         // The three planes differ, so a mapping that read one channel three times could not satisfy
