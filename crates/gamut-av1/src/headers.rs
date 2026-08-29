@@ -186,20 +186,30 @@ pub(crate) fn sequence_header_payload(
     w.put_bit(u8::from(lossy)); // enable_cdef
     w.put_bit(u8::from(lossy)); // enable_restoration (1 on the lossy path: luma Wiener)
 
-    // color_config() (§5.5.2): high_bitdepth=0; (profile 1 ⇒ mono_chrome=0 inferred);
+    // color_config() (§5.5.2): high_bitdepth=0; mono_chrome when the profile is not High;
     // color_description_present_flag=1; cp/tc/mc; then either the sRGB shortcut or an explicit
-    // color_range; separate_uv_delta_q=0.
-    w.put_bit(0); // high_bitdepth
+    // color_range plus chroma_sample_position; separate_uv_delta_q=0.
+    w.put_bit(0); // high_bitdepth (8-bit only; `twelve_bit` therefore never follows)
+    if cfg.seq_profile != 1 {
+        // Coded for every profile except High — so it appears as soon as the stream is 4:2:0
+        // (profile 0) or 4:2:2 (profile 2). gamut never encodes a monochrome still, so the value is
+        // always 0, but the **bit** is not optional: omitting it shifts every field after it and
+        // libaom misparses the header.
+        w.put_bit(u8::from(cfg.monochrome));
+    }
     w.put_bit(1); // color_description_present_flag
     w.put_bits(u32::from(cfg.color_primaries), 8);
     w.put_bits(u32::from(cfg.transfer_characteristics), 8);
     w.put_bits(u32::from(cfg.matrix_coefficients), 8);
     // §5.5.2: `cp == CP_BT_709 && tc == TC_SRGB && mc == MC_IDENTITY` infers full range and 4:4:4
-    // and codes **no** further bits. Outside that shortcut `color_range` is coded explicitly; for
-    // `seq_profile == 1` the subsampling is still inferred as 4:4:4 and, since neither
-    // `subsampling_x` nor `subsampling_y` is 1, no `chroma_sample_position` follows either.
+    // and codes **no** further bits. Outside that shortcut `color_range` is coded explicitly, and
+    // the subsampling is *inferred from `seq_profile`* rather than coded: 0 ⇒ 4:2:0, 1 ⇒ 4:4:4,
+    // 2 ⇒ 4:2:2 at 8-bit. Only 4:2:0 then carries `chroma_sample_position`.
     if !cfg.is_srgb_shortcut() {
         w.put_bit(u8::from(cfg.full_range)); // color_range
+        if cfg.chroma_subsampling_x == 1 && cfg.chroma_subsampling_y == 1 {
+            w.put_bits(u32::from(cfg.chroma_sample_position), 2);
+        }
     }
     w.put_bit(0); // separate_uv_delta_q
 

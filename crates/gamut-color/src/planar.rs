@@ -38,6 +38,44 @@ fn rgb_to_ycbcr_planes(rgb: &[u8], n: usize, matrix: RgbToYcbcr) -> [Vec<u8>; 3]
     [y, cb, cr]
 }
 
+/// Box-averages `plane` (`width` x `height`, row-major) down to `cw` x `ch` by `(sx, sy)`.
+///
+/// Partial edge boxes average only the samples that exist, which is edge replication. The filter is
+/// the encoder's free choice — AV1 signals *where* the chroma sample sits
+/// (`chroma_sample_position`), not how it was produced — and a symmetric box places it at the centre
+/// of the luma group it covers. `gamut-jpeg` makes the same choice for the same reason with its own
+/// private equivalent; the two differ only in the plane type they return.
+fn downsample_box(
+    plane: &[u8],
+    width: usize,
+    height: usize,
+    cw: usize,
+    ch: usize,
+    sx: usize,
+    sy: usize,
+) -> Vec<u8> {
+    let mut out = vec![0u8; cw * ch];
+    for cy in 0..ch {
+        for cx in 0..cw {
+            let (mut sum, mut count) = (0u32, 0u32);
+            for dy in 0..sy {
+                for dx in 0..sx {
+                    let px = cx * sx + dx;
+                    let py = cy * sy + dy;
+                    if px < width && py < height {
+                        sum += u32::from(plane[py * width + px]);
+                        count += 1;
+                    }
+                }
+            }
+            // `count` is at least one: `cx * sx < width` and `cy * sy < height` hold for every
+            // output sample, because `cw`/`ch` are ceiling divisions of exactly those extents.
+            out[cy * cw + cx] = ((sum + count / 2) / count) as u8;
+        }
+    }
+    out
+}
+
 /// Three full-resolution (4:4:4) 8-bit planes, each `width * height` samples, row-major.
 ///
 /// For identity matrix coefficients (CICP `mc = 0`) AV1 carries RGB directly with the plane order
@@ -179,6 +217,49 @@ impl Planar8 {
             subsampling: ChromaSubsampling::Cs444,
             planes: rgb_to_ycbcr_planes(img.as_samples(), n, matrix),
         }
+    }
+
+    /// Maps an interleaved 8-bit RGB image to `Y/Cb/Cr` planes through `matrix`, box-averaging the
+    /// chroma planes down to `subsampling`.
+    ///
+    /// Luma keeps full resolution. The chroma planes are the [`ChromaSubsampling::chroma_dimensions`]
+    /// of the image, so an odd axis keeps its half-covering edge sample and that sample averages
+    /// only the pixels that exist.
+    ///
+    /// [`ChromaSubsampling::Cs444`] is the no-op case and produces the same planes as
+    /// [`from_rgb8_matrix_view`](Self::from_rgb8_matrix_view). [`ChromaSubsampling::Cs400`] is not
+    /// accepted here — a monochrome encode drops chroma rather than averaging it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] for [`ChromaSubsampling::Cs400`].
+    pub fn from_rgb8_matrix_subsampled(
+        img: ImageRef<'_, Rgb8>,
+        matrix: RgbToYcbcr,
+        subsampling: ChromaSubsampling,
+    ) -> Result<Self> {
+        if subsampling == ChromaSubsampling::Cs400 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "monochrome has no chroma planes to subsample",
+            ));
+        }
+        let full = Self::from_rgb8_matrix_view(img, matrix);
+        if subsampling == ChromaSubsampling::Cs444 {
+            return Ok(full);
+        }
+        let (width, height) = (full.width as usize, full.height as usize);
+        let (cw, ch) = subsampling.chroma_dimensions(full.width, full.height);
+        let (sx, sy) = subsampling.subsampling();
+        let (sx, sy) = (1usize << sx, 1usize << sy);
+        let [y, u, v] = full.planes;
+        let chroma = |p: &[u8]| downsample_box(p, width, height, cw as usize, ch as usize, sx, sy);
+        Ok(Self {
+            width: full.width,
+            height: full.height,
+            subsampling,
+            planes: [y, chroma(&u), chroma(&v)],
+        })
     }
 
     /// Builds a `Planar8` directly from three `width * height` planes (`Y/U/V`, already in the

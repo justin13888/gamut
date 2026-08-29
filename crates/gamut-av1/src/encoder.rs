@@ -1,6 +1,6 @@
 //! Top-level: turn 4:4:4 identity planes into the AV1 temporal unit for an AVIF still image.
 
-use gamut_color::cicp::ColorRange;
+use gamut_color::cicp::{ColorRange, MatrixCoefficients};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8};
 use gamut_core::{Error, Result};
 
@@ -126,16 +126,32 @@ fn encode_with(
             "image has a zero dimension",
         ));
     }
-    // The plane geometry is per-plane throughout, but the *coding* path is still 4:4:4: the
-    // residual loop, the entropy contexts and CfL all step chroma over the luma extent. Refuse a
-    // subsampled source rather than emit a stream that claims 4:4:4 and codes something else.
-    // Lifted by the 4:2:0 (#390) and 4:2:2 (#391) slices.
-    if planes.subsampling() != ChromaSubsampling::Cs444 {
-        return Err(Error::unsupported(
+    let subsampling = planes.subsampling();
+    // §6.4.2: "If matrix_coefficients is equal to MC_IDENTITY, it is a requirement of bitstream
+    // conformance that subsampling_x is equal to 0 and subsampling_y is equal to 0." The identity
+    // matrix carries R'G'B' directly, and the three colour planes cannot be sampled at different
+    // rates. §5.5.2 says the same structurally: the sRGB shortcut infers 4:4:4 whatever the profile.
+    if colour.matrix == MatrixCoefficients::Identity && subsampling != ChromaSubsampling::Cs444 {
+        return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "AV1: only 4:4:4 planes are encoded today",
+            "AV1: the identity matrix requires 4:4:4 chroma",
         ));
     }
+    // Annex A.2 / §6.4.1: Main (0) is 4:2:0, High (1) is 4:4:4, Professional (2) adds 4:2:2. There
+    // is no profile that codes 4:4:4 *and* 4:2:0, which is why a 4:4:4 still cannot be read by a
+    // Main-profile-only hardware decoder.
+    let seq_profile = match subsampling {
+        ChromaSubsampling::Cs444 => 1,
+        ChromaSubsampling::Cs420 => 0,
+        ChromaSubsampling::Cs422 => 2,
+        _ => {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AV1: monochrome encoding is not supported",
+            ));
+        }
+    };
+    let (ss_x, ss_y) = subsampling.subsampling();
 
     // Superres downscales the source horizontally to the coded (Frame) width; the reconstruction is
     // upscaled back to `width` at the end. `coded_src` is what the block encoder actually codes.
@@ -157,14 +173,18 @@ fn encode_with(
     };
 
     let config = Av1StillConfig {
-        seq_profile: 1,
+        seq_profile,
         seq_level_idx_0: headers::pick_level(width, height)?,
         seq_tier_0: 0,
         high_bitdepth: false,
         twelve_bit: false,
         monochrome: false,
-        chroma_subsampling_x: 0,
-        chroma_subsampling_y: 0,
+        chroma_subsampling_x: ss_x,
+        chroma_subsampling_y: ss_y,
+        // `CSP_UNKNOWN`. There is no code point for the centre siting a symmetric box filter
+        // produces — `CSP_VERTICAL` is horizontally co-located and `CSP_COLOCATED` is co-located on
+        // both axes — so claiming either would misdescribe the samples. libavif reads UNKNOWN as
+        // centred for 4:2:0 and libaom defaults to it, so this also matches the corpus.
         chroma_sample_position: 0,
         color_primaries: colour.primaries.code_point(),
         transfer_characteristics: colour.transfer.code_point(),
@@ -296,7 +316,8 @@ fn crop<T: Copy>(plane: &[T], width: u32, src_stride: u32, height: u32) -> Vec<T
 
 #[cfg(test)]
 mod tests {
-    use gamut_color::Planar8;
+    use gamut_color::{Planar8, RgbToYcbcr};
+    use gamut_core::{Dimensions, ImageRef, Rgb8};
 
     use super::*;
 
@@ -335,29 +356,75 @@ mod tests {
     }
 
     #[test]
-    fn subsampled_planes_are_rejected_until_the_chroma_coding_path_lands() {
-        // The plane geometry is per-plane, but the coding path is not: the residual loop, the
-        // entropy contexts and CfL all still step chroma over the luma extent. Encoding a 4:2:0
-        // buffer would therefore emit a stream that claims 4:4:4 and codes something else.
-        //
-        // Asserted on the diagnostic rather than `is_err()`: `encode_with` has several other
-        // rejections, so only the message distinguishes this guard from them.
-        let planes = Planar8::from_planes_subsampled(
-            8,
-            8,
-            gamut_color::ChromaSubsampling::Cs420,
-            [vec![0; 64], vec![0; 16], vec![0; 16]],
+    fn the_identity_matrix_requires_four_four_four() {
+        // §6.4.2 makes this a conformance requirement, and §5.5.2 enforces it structurally: the
+        // sRGB shortcut infers 4:4:4 whatever the profile says, so an identity 4:2:0 stream would
+        // describe itself two ways at once. Asserted on the diagnostic, since `encode_with` has
+        // several other rejections.
+        let rgb = vec![0u8; 8 * 8 * 3];
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap();
+        let m = RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            BitDepth::Eight,
         )
-        .expect("valid 4:2:0 planes");
-        let err = encode_still_intra(&planes, 40).expect_err("4:2:0 is not encodable yet");
+        .unwrap();
+        let planes =
+            Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
+
+        let err = encode_still_intra(&planes, 40).expect_err("identity + 4:2:0 is not conformant");
         assert_eq!(
             err.static_message(),
-            Some("AV1: only 4:4:4 planes are encoded today")
+            Some("AV1: the identity matrix requires 4:4:4 chroma")
         );
-        // The same buffer at 4:4:4 encodes, so the guard is keyed on the subsampling and not on
-        // some other property of this input.
-        let full = Planar8::from_planes(8, 8, [vec![0; 64], vec![0; 64], vec![0; 64]]).unwrap();
-        assert!(encode_still_intra(&full, 40).is_ok());
+        // The same planes encode through a luma-chroma matrix, so the rejection is keyed on the
+        // matrix and not on the subsampling alone.
+        assert!(
+            encode_still_intra_with(
+                &planes,
+                40,
+                Av1Colour {
+                    matrix: gamut_color::cicp::MatrixCoefficients::Bt709,
+                    ..Av1Colour::default()
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_sequence_profile_follows_the_chroma_format() {
+        // Annex A.2: Main (0) is 4:2:0, High (1) is 4:4:4, Professional (2) adds 4:2:2. This is the
+        // whole reason a 4:4:4 still cannot be read by a Main-profile-only hardware decoder.
+        let rgb = vec![128u8; 16 * 16 * 3];
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(16, 16).unwrap()).unwrap();
+        let m = RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            BitDepth::Eight,
+        )
+        .unwrap();
+        let colour = Av1Colour {
+            matrix: gamut_color::cicp::MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        for (ss, want_profile, want_shifts) in [
+            (ChromaSubsampling::Cs444, 1u8, (0u8, 0u8)),
+            (ChromaSubsampling::Cs420, 0, (1, 1)),
+            (ChromaSubsampling::Cs422, 2, (1, 0)),
+        ] {
+            let planes = Planar8::from_rgb8_matrix_subsampled(img, m, ss).unwrap();
+            let (still, _) = encode_still_intra_with(&planes, 40, colour).expect("encodes");
+            assert_eq!(still.config.seq_profile, want_profile, "{ss:?}");
+            assert_eq!(
+                (
+                    still.config.chroma_subsampling_x,
+                    still.config.chroma_subsampling_y
+                ),
+                want_shifts,
+                "{ss:?}"
+            );
+        }
     }
 
     /// Builds identity planes from an RGB generator.

@@ -23,7 +23,10 @@
 //! The filter strengths/levels are quality decisions (rate-distortion selection is deferred); both
 //! are deterministic monotonic placeholders scaled by `base_q_idx`.
 
+use gamut_color::ChromaSubsampling;
+
 use crate::geom::PlaneGeom;
+use crate::tile::chroma_tx_log2;
 
 /// The `loop_filter_level` (§5.9.11) the encoder signals and applies as a function of `base_q_idx`.
 /// `0` disables the filter (the level is then omitted for chroma and no filtering occurs). The exact
@@ -225,6 +228,7 @@ fn filter_sample(
 pub(crate) fn deblock(
     planes: &mut [Vec<u16>; 3],
     geom: &[PlaneGeom; 3],
+    subsampling: ChromaSubsampling,
     mi_cols: usize,
     tx_log2: &[u8],
     tx_log2_h: &[u8],
@@ -257,14 +261,22 @@ pub(crate) fn deblock(
         // Transform width/height (log2) for this plane at MI `cell`: luma uses the signaled tx size;
         // 4:4:4 chroma uses the block-size transform (`mi_bsl + 2`) capped at TX_32X32 (chroma never
         // uses TX_64X64, so a 64×64 block's chroma is a raster of 32×32 transforms with an edge at 32).
-        // This is the **4:4:4** rule: under subsampling the chroma transform follows the plane
-        // residual size (§5.11.38), which is not `mi_bsl + 2`. Replaced when 4:2:0 is enabled, where
-        // the dual-oracle reconstruction check can actually prove it.
+        // Under subsampling the chroma transform follows the plane residual size (§5.11.38), which
+        // is not `mi_bsl + 2`: a 4:2:0 16x16 block has an 8x8 chroma transform, not 16x16. The
+        // block size is recovered from the per-MI log2 maps and run through §5.11.37. At 4:4:4 this
+        // reduces to the old `(mi_bsl + 2).min(5)`.
+        let chroma_log2 = |cell: usize| -> (u32, u32) {
+            let bw = 1usize << (u32::from(mi_bsl[cell]) + 2);
+            let bh = 1usize << (u32::from(mi_bsl_h[cell]) + 2);
+            // A block with no valid chroma residual is a conformance violation the partition search
+            // must prevent (§6.10.4); it cannot reach the filter, which runs after coding.
+            chroma_tx_log2(bw, bh, subsampling).unwrap_or((2, 2))
+        };
         let txlog2 = |cell: usize| -> u32 {
             if is_luma {
                 u32::from(tx_log2[cell])
             } else {
-                (u32::from(mi_bsl[cell]) + 2).min(5)
+                chroma_log2(cell).0
             }
         };
         // The transform *height* (log2) — equals `txlog2` for square transforms, differs for
@@ -273,7 +285,7 @@ pub(crate) fn deblock(
             if is_luma {
                 u32::from(tx_log2_h[cell])
             } else {
-                (u32::from(mi_bsl_h[cell]) + 2).min(5)
+                chroma_log2(cell).1
             }
         };
 
@@ -1049,7 +1061,16 @@ mod tests {
         let mi_dlf = vec![0i8; 4 * 4];
         let g = geom444(16, 16, 4, 4);
         deblock(
-            &mut flat, &g, 4, &tx_log2, &tx_log2, &mi_bsl, &mi_bsl, &mi_dlf, 64,
+            &mut flat,
+            &g,
+            ChromaSubsampling::Cs444,
+            4,
+            &tx_log2,
+            &tx_log2,
+            &mi_bsl,
+            &mi_bsl,
+            &mi_dlf,
+            64,
         );
         assert!(flat[0].iter().all(|&v| v == 128));
 
@@ -1068,6 +1089,7 @@ mod tests {
         deblock(
             &mut planes,
             &g,
+            ChromaSubsampling::Cs444,
             4,
             &tx_log2,
             &tx_log2,

@@ -263,7 +263,7 @@ const fn block_exceeds_frame(
 /// §5.11.37 `get_tx_size` for a chroma plane: the transform matching the plane's residual block,
 /// capped at 32 because chroma never uses a 64-sample transform. A 64-sample axis folds to 32,
 /// which is what makes a 64x64 block's 4:4:4 chroma a 2x2 raster of TX_32X32.
-fn chroma_tx_size(rw: usize, rh: usize) -> TxSize {
+pub(crate) fn chroma_tx_size(rw: usize, rh: usize) -> TxSize {
     let uv = max_tx_size_rect(rw, rh);
     if uv.width() == 64 || uv.height() == 64 {
         if uv.width() == 16 {
@@ -276,6 +276,16 @@ fn chroma_tx_size(rw: usize, rh: usize) -> TxSize {
     } else {
         uv
     }
+}
+
+/// `(Tx_Width_Log2, Tx_Height_Log2)` of the chroma transform covering a `bw` x `bh` luma block —
+/// the deblock filter's view of §5.11.37, derived from the per-MI block-size maps it already has.
+///
+/// `None` mirrors [`plane_residual_size`]'s `BLOCK_INVALID`.
+pub(crate) fn chroma_tx_log2(bw: usize, bh: usize, ss: ChromaSubsampling) -> Option<(u32, u32)> {
+    let (rw, rh) = plane_residual_size(bw, bh, 1, ss)?;
+    let tx = chroma_tx_size(rw, rh);
+    Some((tx.log2_width(), tx.log2_height()))
 }
 
 const fn max_tx_size_rect(w: usize, h: usize) -> TxSize {
@@ -661,6 +671,7 @@ impl<'a> FrameEncoder<'a> {
             crate::filter::deblock(
                 &mut planes,
                 &self.geom,
+                self.subsampling,
                 self.mi_cols,
                 &self.tx_log2,
                 &self.tx_log2_h,
@@ -970,17 +981,21 @@ impl<'a> FrameEncoder<'a> {
     /// block selects is `DC_PRED` with no CfL / filter-intra, so the predicted samples equal the
     /// source — the chosen `skip` is therefore bit-exact regardless of the (deterministic) mode.
     fn block_is_skippable(&self, r: usize, c: usize, bw: usize) -> bool {
-        let (sx, sy) = (c * 4, r * 4);
         for plane in 0..3 {
-            let v0 = self.sample(plane, sx, sy);
-            for i in 0..bw {
-                for j in 0..bw {
-                    if self.sample(plane, sx + j, sy + i) != v0 {
+            // Each plane is inspected over its own residual block: at 4:4:4 that is the luma
+            // extent, and under subsampling reading the luma extent would run off the chroma plane.
+            let Some((px, py, pw, ph)) = self.plane_block(r, c, bw, bw, plane) else {
+                continue;
+            };
+            let v0 = self.sample(plane, px, py);
+            for i in 0..ph {
+                for j in 0..pw {
+                    if self.sample(plane, px + j, py + i) != v0 {
                         return false;
                     }
                 }
             }
-            if self.dc_pred(plane, sx, sy, bw, bw) != v0 {
+            if self.dc_pred(plane, px, py, pw, ph) != v0 {
                 return false;
             }
         }
@@ -1011,15 +1026,18 @@ impl<'a> FrameEncoder<'a> {
         }
         // Chroma must be flat and exactly DC-predictable (chroma residual identically 0 ⇒ skip = 1).
         for plane in 1..3 {
-            let v0 = self.sample(plane, sx, sy);
-            for i in 0..bw {
-                for j in 0..bw {
-                    if self.sample(plane, sx + j, sy + i) != v0 {
+            let Some((px, py, pw, ph)) = self.plane_block(r, c, bw, bw, plane) else {
+                continue;
+            };
+            let v0 = self.sample(plane, px, py);
+            for i in 0..ph {
+                for j in 0..pw {
+                    if self.sample(plane, px + j, py + i) != v0 {
                         return None;
                     }
                 }
             }
-            if self.dc_pred(plane, sx, sy, bw, bw) != v0 {
+            if self.dc_pred(plane, px, py, pw, ph) != v0 {
                 return None;
             }
         }
@@ -1163,16 +1181,23 @@ impl<'a> FrameEncoder<'a> {
                     u16::from(pal.colors[idx]);
             }
         }
+        self.set_ctx(0, sx >> 2, sy >> 2, bw / 4, bw / 4, 0, 0);
+        // Chroma is flat DC over the plane's **own** residual block, at the plane's own base — not
+        // the luma extent at the luma position. A palette block is always at least 8x8, so it
+        // always has chroma of its own (§5.11.5).
+        let Some((cw, ch)) = plane_residual_size(bw, bw, 1, self.subsampling) else {
+            return;
+        };
         for plane in 1..3 {
-            let dc = clip_pixel(self.dc_pred(plane, sx, sy, bw, bw), self.bit_depth);
-            for i in 0..bw {
-                for j in 0..bw {
-                    self.recon[plane][(sy + i) * self.geom[plane].coded_w + (sx + j)] = dc;
+            let g = self.geom[plane];
+            let (cx, cy) = ((c >> g.ss_x) * 4, (r >> g.ss_y) * 4);
+            let dc = clip_pixel(self.dc_pred(plane, cx, cy, cw, ch), self.bit_depth);
+            for i in 0..ch {
+                for j in 0..cw {
+                    self.recon[plane][(cy + i) * g.coded_w + (cx + j)] = dc;
                 }
             }
-        }
-        for plane in 0..3 {
-            self.set_ctx(plane, sx >> 2, sy >> 2, bw / 4, bw / 4, 0, 0);
+            self.set_ctx(plane, cx >> 2, cy >> 2, cw / 4, ch / 4, 0, 0);
         }
     }
 
@@ -1830,6 +1855,22 @@ impl<'a> FrameEncoder<'a> {
     /// they are the reconstruction buffer, matching the decoder exactly.
     fn dc_avg(&self, plane: usize, sx: usize, sy: usize) -> i32 {
         self.dc_pred(plane, sx, sy, 4, 4)
+    }
+
+    /// The plane-local base position and residual extent of the block at MI `(r, c)` — the pair a
+    /// per-plane loop needs in order to read `plane`'s own samples rather than the luma ones.
+    /// `None` is §5.11.38's `BLOCK_INVALID`.
+    fn plane_block(
+        &self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        bh: usize,
+        plane: usize,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let g = self.geom[plane];
+        let (rw, rh) = plane_residual_size(bw, bh, plane, self.subsampling)?;
+        Some(((c >> g.ss_x) * 4, (r >> g.ss_y) * 4, rw, rh))
     }
 
     /// `DC_PRED` value for an `n × n` block at coded `(sx, sy)` (§7.11.2.5): the rounded average of
