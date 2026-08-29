@@ -3497,11 +3497,19 @@ mod tests {
         // case it exists for; a version that always returned `None` would still produce a
         // conformant stream, so only a direct assertion can distinguish them.
         //
-        // The split is at luma x = 12, so the block at MI (2, 2) — luma (8, 8) — straddles it.
-        // Reading the block at any other offset would see one colour, not two.
+        // Three bands: the block at MI (2, 2) — luma (8, 8) — spans only the middle and right
+        // ones, so it sees exactly two colours. The extra band at x < 4 exists so that reading the
+        // block at a *scaled* rather than offset position picks up a third colour instead of
+        // coincidentally reproducing the same set.
         let two = planes_420_with(16, 16, |p, x, _| {
             if p == 0 {
-                if x < 12 { 30 } else { 210 }
+                if x < 4 {
+                    50
+                } else if x < 12 {
+                    30
+                } else {
+                    210
+                }
             } else {
                 128
             }
@@ -3543,7 +3551,13 @@ mod tests {
         // shift and division yields zero and none of them is observable.
         let two = planes_420_with(16, 16, |p, x, _| {
             if p == 0 {
-                if x < 12 { 30 } else { 210 }
+                if x < 4 {
+                    50
+                } else if x < 12 {
+                    30
+                } else {
+                    210
+                }
             } else {
                 128
             }
@@ -3770,6 +3784,11 @@ mod tests {
         // Two 4x4 cells from x4 = 1 see levels 1 and 9 (top = 9); rows from y4 = 1 see 0 and 5
         // (left = 5). Both non-zero and both ≤ 3 is false, so the ladder lands on 6.
         assert_eq!(e.txb_skip_ctx(0, 1, 1, 16, 16, 8, 8), 6);
+        // A run reaching past the grid edge: cells 4..7 against a 6-column grid, so the guard must
+        // stop *before* index 6 — `<=` would read one past the end of the array. Cells 4..5 hold
+        // 2 and 0 (top = 2) and rows 0..3 hold 0, 0, 5, 3 (left = 5); both are non-zero and their
+        // minimum is at most 3, which is the ladder's rung 5.
+        assert_eq!(e.txb_skip_ctx(0, 4, 0, 32, 32, 16, 16), 5);
         let dc = e.dc_sign_ctx(1, 1, 1, 4, 4);
         assert_eq!(dc, 1, "two -1 categories sum negative");
     }
