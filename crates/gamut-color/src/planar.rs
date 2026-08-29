@@ -658,26 +658,32 @@ mod tests {
         );
     }
 
-    /// A 2x2 RGBA image whose four channels are pairwise distinct at every pixel, so a mapping
+    /// A 3x2 RGBA image whose four channels are pairwise distinct at every pixel, so a mapping
     /// that read the wrong channel or the wrong stride cannot produce the expected planes.
-    fn rgba_2x2() -> Vec<u8> {
+    ///
+    /// 3x2 rather than a square: the pixel count is `width * height`, and for 2x2 that is
+    /// indistinguishable from `width + height`.
+    fn rgba_3x2() -> Vec<u8> {
         vec![
             10, 20, 30, 40, // (0,0)
             11, 21, 31, 41, // (1,0)
-            12, 22, 32, 42, // (0,1)
-            13, 23, 33, 43, // (1,1)
+            12, 22, 32, 42, // (2,0)
+            13, 23, 33, 43, // (0,1)
+            14, 24, 34, 44, // (1,1)
+            15, 25, 35, 45, // (2,1)
         ]
     }
 
     #[test]
     fn rgba_colour_planes_ignore_alpha_and_match_the_rgb_mapping() {
-        let px = rgba_2x2();
-        let img = ImageRef::<Rgba8>::new(&px, Dimensions::new(2, 2).unwrap()).unwrap();
+        let px = rgba_3x2();
+        let img = ImageRef::<Rgba8>::new(&px, Dimensions::new(3, 2).unwrap()).unwrap();
         let p = Planar8::from_rgba8_identity_view(img);
-        // GBR order, exactly as the three-channel constructor produces: Y=G, U=B, V=R.
-        assert_eq!(p.plane(0), &[20u8, 21, 22, 23]);
-        assert_eq!(p.plane(1), &[30u8, 31, 32, 33]);
-        assert_eq!(p.plane(2), &[10u8, 11, 12, 13]);
+        // GBR order, exactly as the three-channel constructor produces: Y=G, U=B, V=R. Every plane
+        // is the full 6 samples, which is what fails if the pixel count is computed wrongly.
+        assert_eq!(p.plane(0), &[20u8, 21, 22, 23, 24, 25]);
+        assert_eq!(p.plane(1), &[30u8, 31, 32, 33, 34, 35]);
+        assert_eq!(p.plane(2), &[10u8, 11, 12, 13, 14, 15]);
         assert_eq!(p.subsampling(), ChromaSubsampling::Cs444);
 
         // The same colour values fed through the three-channel path give the same planes, which is
@@ -695,23 +701,24 @@ mod tests {
         )
         .unwrap();
         let from_rgba = Planar8::from_rgba8_matrix_view(img, matrix);
-        let from_rgb = Planar8::from_rgb8_matrix(&rgb, 2, 2, matrix).unwrap();
+        let from_rgb = Planar8::from_rgb8_matrix(&rgb, 3, 2, matrix).unwrap();
         for i in 0..3 {
             assert_eq!(from_rgba.plane(i), from_rgb.plane(i), "plane {i}");
+            assert_eq!(from_rgba.plane(i).len(), 6, "plane {i} covers every pixel");
         }
     }
 
     #[test]
     fn alpha_and_gray_views_are_monochrome() {
-        let px = rgba_2x2();
-        let img = ImageRef::<Rgba8>::new(&px, Dimensions::new(2, 2).unwrap()).unwrap();
+        let px = rgba_3x2();
+        let img = ImageRef::<Rgba8>::new(&px, Dimensions::new(3, 2).unwrap()).unwrap();
         let a = Planar8::from_rgba8_alpha_view(img);
         assert_eq!(a.subsampling(), ChromaSubsampling::Cs400);
         // The fourth channel of each pixel, in raster order — not the first, and not every fourth
         // *byte* from the start.
-        assert_eq!(a.plane(0), &[40u8, 41, 42, 43]);
+        assert_eq!(a.plane(0), &[40u8, 41, 42, 43, 44, 45]);
         assert!(a.plane(1).is_empty() && a.plane(2).is_empty());
-        assert_eq!(a.plane_dimensions(0), (2, 2));
+        assert_eq!(a.plane_dimensions(0), (3, 2));
         assert_eq!(a.plane_dimensions(1), (0, 0));
 
         let gray = [5u8, 6, 7, 8, 9, 10];

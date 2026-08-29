@@ -13,6 +13,7 @@
 //! fetch-av1-oracles`).
 
 use gamut_avif::{AvifContainer, AvifEncoder, AvifItem, ChromaFormat};
+use gamut_color::{ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
 use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Rgb8, Rgba8};
 
 const W: u32 = 34;
@@ -259,6 +260,34 @@ fn lossless_grayscale_round_trips_through_libavif() {
     let expected: Vec<u16> = source_gray().into_iter().map(u16::from).collect();
     assert_eq!(decoded.planes[0], expected);
     assert!(decoded.planes[1].is_empty() && decoded.planes[2].is_empty());
+}
+
+#[test]
+fn a_monochrome_item_still_carries_the_primaries_and_transfer_tags() {
+    // `with_primaries`/`with_transfer` only *tag* samples, so they apply to a monochrome item just
+    // as they do to a colour one — and they reach both the AV1 sequence header and `colr`, which
+    // §2.3.4 requires to agree. What does *not* apply is the matrix: there is no chroma to
+    // describe, and AV1 §6.4.2 forbids `MC_IDENTITY` on a single-plane stream, so the encoder
+    // signals `Unspecified` however `with_matrix` was set.
+    let avif = encode_gray(
+        &AvifEncoder::new()
+            .with_primaries(ColourPrimaries::Bt2020)
+            .with_transfer(TransferCharacteristics::Pq)
+            .with_matrix(MatrixCoefficients::Bt709),
+    );
+    let oracle = libavif_oracle::introspect(&avif).expect("libavif parses");
+    assert_eq!(oracle.color_primaries, ColourPrimaries::Bt2020.code_point());
+    assert_eq!(
+        oracle.transfer_characteristics,
+        TransferCharacteristics::Pq.code_point()
+    );
+    assert_eq!(
+        oracle.matrix_coefficients,
+        MatrixCoefficients::Unspecified.code_point()
+    );
+    // AVIF v1.2.0 §4.1 makes full range a *shall* for an auxiliary item, and a monochrome AV1
+    // stream codes the bit explicitly rather than inferring it.
+    assert!(oracle.full_range);
 }
 
 #[test]
