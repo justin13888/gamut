@@ -25,8 +25,8 @@
 //! encode is refused. Under 4:2:2 the partition search drops `PARTITION_VERT`, since §6.10.4
 //! forbids a block whose chroma residual would be `BLOCK_INVALID`.
 //!
-//! The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, quantizer matrices, and the
-//! AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
+//! The remaining surface (10/12-bit, 4:2:2's coding path, quantizer matrices, and the AVIF-level
+//! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D

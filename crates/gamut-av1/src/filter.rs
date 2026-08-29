@@ -299,7 +299,11 @@ pub(crate) fn deblock(
                 let (col, row) = g.deblock_mi(x, y);
                 let txw = 1usize << txlog2(row * mi_cols + col);
                 if x % txw == 0 {
-                    let prev_txw = 1usize << txlog2(row * mi_cols + (col - 1));
+                    // §7.14.2 steps the neighbour by `dx << subX`, not by one MI cell. At 4:2:0 and
+                    // 4:2:2 consecutive chroma edges land on MI cols 1, 3, 5 …, so `col - 1` is the
+                    // *even* cell of the current edge's own group — normally the same block — and
+                    // `Min(prevTxSz, txSz)` would silently collapse to `txSz`. Identity at 4:4:4.
+                    let prev_txw = 1usize << txlog2(row * mi_cols + (col - (1 << g.ss_x)));
                     let filter_size = prev_txw.min(txw).min(size_cap);
                     // The edge takes the level of its q0-side (right) block (§7.14.4).
                     let st = strength_for(row * mi_cols + col);
@@ -320,7 +324,8 @@ pub(crate) fn deblock(
                 let (col, row) = g.deblock_mi(x, y);
                 let txh = 1usize << txlog2_h(row * mi_cols + col);
                 if y % txh == 0 {
-                    let prev_txh = 1usize << txlog2_h((row - 1) * mi_cols + col);
+                    // §7.14.2's `prevRow = row - (dy << subY)`; see the vertical pass above.
+                    let prev_txh = 1usize << txlog2_h((row - (1 << g.ss_y)) * mi_cols + col);
                     let filter_size = prev_txh.min(txh).min(size_cap);
                     // The edge takes the level of its q0-side (bottom) block (§7.14.4).
                     let st = strength_for(row * mi_cols + col);
@@ -573,12 +578,15 @@ fn block_all_skip(mi_skip: &[u8], mi_cols: usize, r4: usize, c4: usize) -> bool 
 /// pre-CDEF (deblocked) input, so a fresh output is produced. The block position and extent are
 /// scaled into each plane by its [`PlaneGeom`]; `Cdef_Uv_Dir` is the identity at 4:4:4 (and at
 /// 4:2:0), so the chroma direction is the luma one — 4:2:2 needs the real table and lands with #391.
+/// `num_planes` is AV1's `NumPlanes`: at 1 (monochrome) the chroma pass is skipped entirely, and
+/// the signaled `cdef_uv_*` strengths do not exist.
 pub(crate) fn cdef(
     planes: &[Vec<u16>; 3],
     geom: &[PlaneGeom; 3],
     mi_skip: &[u8],
     mi_cols: usize,
     qindex: u8,
+    num_planes: usize,
 ) -> [Vec<u16>; 3] {
     let (y_pri, y_sec, uv_pri, uv_sec) = cdef_strengths(qindex);
     let mut out = planes.clone();
@@ -633,7 +641,7 @@ pub(crate) fn cdef(
             } else {
                 CDEF_UV_DIR[uv.ss_x as usize][uv.ss_y as usize][y_dir]
             };
-            for plane in 1..3 {
+            for plane in 1..num_planes {
                 let g = geom[plane];
                 let (px, py) = g.scale_pos(x0, y0);
                 let (pw, ph) = g.scale_extent(8, 8);
@@ -1041,7 +1049,7 @@ mod tests {
         // 16×16 ⇒ 4×4 MI grid; no block is skip, so CDEF visits every 8×8.
         let mi_skip = vec![0u8; 4 * 4];
         let g = geom444(16, 16, 4, 4);
-        assert_eq!(cdef(&flat, &g, &mi_skip, 4, 255), flat);
+        assert_eq!(cdef(&flat, &g, &mi_skip, 4, 255, 3), flat);
 
         // CDEF only attenuates *small* oscillations (large diffs are constrained away to preserve
         // edges). A low-amplitude vertical stripe gives the direction search a clear direction and a
@@ -1056,7 +1064,7 @@ mod tests {
                 planes[0][y * 16 + x] = if x % 2 == 0 { 126 } else { 132 };
             }
         }
-        let out = cdef(&planes, &g, &mi_skip, 4, 255);
+        let out = cdef(&planes, &g, &mi_skip, 4, 255, 3);
         assert_ne!(
             out[0], planes[0],
             "CDEF should dering a low-amplitude oscillation"

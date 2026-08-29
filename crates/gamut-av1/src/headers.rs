@@ -27,7 +27,7 @@ pub(crate) const TILE_SIZE_BYTES: usize = 4;
 /// the image size.
 #[derive(Debug, Clone, Copy)]
 pub struct Av1StillConfig {
-    /// `seq_profile` = 1 (High; required for 8-bit 4:4:4).
+    /// `seq_profile`: 1 (High) for 8-bit 4:4:4, 0 (Main) for a monochrome still.
     pub seq_profile: u8,
     /// `seq_level_idx[0]`, the smallest level (≤ 6.0) whose limits cover the image.
     pub seq_level_idx_0: u8,
@@ -37,11 +37,12 @@ pub struct Av1StillConfig {
     pub high_bitdepth: bool,
     /// `twelve_bit` = false.
     pub twelve_bit: bool,
-    /// `mono_chrome` = false.
+    /// `mono_chrome`: one coded luma plane and no chroma. Forces `seq_profile = 0` and, per
+    /// §5.5.2, an inferred `subsampling_x = subsampling_y = 1`.
     pub monochrome: bool,
-    /// `subsampling_x` = 0 (4:4:4).
+    /// `subsampling_x`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome) (inferred, not coded).
     pub chroma_subsampling_x: u8,
-    /// `subsampling_y` = 0 (4:4:4).
+    /// `subsampling_y`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome) (inferred, not coded).
     pub chroma_subsampling_y: u8,
     /// `chroma_sample_position` = 0.
     pub chroma_sample_position: u8,
@@ -60,9 +61,13 @@ impl Av1StillConfig {
     /// transfer function and the identity matrix, `color_range`, `subsampling_x` and
     /// `subsampling_y` are all **inferred** (full range, 4:4:4) and no bits are coded for them.
     /// Outside the shortcut `color_range` is coded explicitly.
+    ///
+    /// Always `false` for a monochrome stream: §5.5.2's `mono_chrome` branch precedes the shortcut
+    /// and returns, so the shortcut is unreachable there however the CICP triple reads.
     #[must_use]
     pub fn is_srgb_shortcut(&self) -> bool {
-        self.color_primaries == ColourPrimaries::Bt709.code_point()
+        !self.monochrome
+            && self.color_primaries == ColourPrimaries::Bt709.code_point()
             && self.transfer_characteristics == TransferCharacteristics::Srgb.code_point()
             && self.matrix_coefficients == MatrixCoefficients::Identity.code_point()
     }
@@ -93,6 +98,32 @@ impl Default for Av1Colour {
             transfer: TransferCharacteristics::Srgb,
             matrix: MatrixCoefficients::Identity,
             range: ColorRange::Full,
+        }
+    }
+}
+
+impl Av1Colour {
+    /// The colour signalling for a **monochrome** still: BT.709 primaries, sRGB transfer, full
+    /// range, and `Unspecified` matrix coefficients.
+    ///
+    /// The matrix is not a free choice here. AV1 §5.5.2 infers `subsampling_x = subsampling_y = 1`
+    /// for a monochrome stream, and §6.4.2 makes `MC_IDENTITY` legal *only* when both are 0 — so
+    /// the identity matrix of [`Av1Colour::default`] is non-conformant on a single-plane stream.
+    /// There is no luma–chroma transform to describe when there is no chroma, so `Unspecified` is
+    /// the honest code point (and what AVIF readers expect on an alpha auxiliary item).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_av1::Av1Colour;
+    /// use gamut_color::cicp::MatrixCoefficients;
+    /// assert_eq!(Av1Colour::monochrome().matrix, MatrixCoefficients::Unspecified);
+    /// ```
+    #[must_use]
+    pub fn monochrome() -> Self {
+        Self {
+            matrix: MatrixCoefficients::Unspecified,
+            ..Self::default()
         }
     }
 }
@@ -152,8 +183,8 @@ pub(crate) fn write_obu(out: &mut Vec<u8>, obu_type: u8, payload: &[u8]) {
     out.extend_from_slice(payload);
 }
 
-/// Builds the sequence-header OBU payload (reduced still picture, profile 1, 8-bit, 4:4:4),
-/// terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
+/// Builds the sequence-header OBU payload (reduced still picture, 8-bit; profile 1 at 4:4:4 or
+/// profile 0 monochrome), terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
 /// `lossy` enables `enable_filter_intra` (recursive filter-intra is used only on the lossy path;
 /// the lossless path stays DC-only and emits no `use_filter_intra` symbols).
 pub(crate) fn sequence_header_payload(
@@ -186,32 +217,41 @@ pub(crate) fn sequence_header_payload(
     w.put_bit(u8::from(lossy)); // enable_cdef
     w.put_bit(u8::from(lossy)); // enable_restoration (1 on the lossy path: luma Wiener)
 
-    // color_config() (§5.5.2): high_bitdepth=0; mono_chrome when the profile is not High;
-    // color_description_present_flag=1; cp/tc/mc; then either the sRGB shortcut or an explicit
-    // color_range plus chroma_sample_position; separate_uv_delta_q=0.
+    // color_config() (§5.5.2): high_bitdepth=0 (10/12-bit is M2); `mono_chrome` is coded whenever
+    // `seq_profile != 1` (profile 1 infers 0); color_description_present_flag=1; cp/tc/mc; then one
+    // of three tails — the monochrome branch, the sRGB shortcut, or an explicit color_range.
     w.put_bit(0); // high_bitdepth (8-bit only; `twelve_bit` therefore never follows)
     if cfg.seq_profile != 1 {
         // Coded for every profile except High — so it appears as soon as the stream is 4:2:0
-        // (profile 0) or 4:2:2 (profile 2). gamut never encodes a monochrome still, so the value is
-        // always 0, but the **bit** is not optional: omitting it shifts every field after it and
-        // libaom misparses the header.
-        w.put_bit(u8::from(cfg.monochrome));
+        // (profile 0) or 4:2:2 (profile 2). The **bit** is not optional: omitting it shifts every
+        // field after it and libaom misparses the header.
+        w.put_bit(u8::from(cfg.monochrome)); // mono_chrome
     }
     w.put_bit(1); // color_description_present_flag
     w.put_bits(u32::from(cfg.color_primaries), 8);
     w.put_bits(u32::from(cfg.transfer_characteristics), 8);
     w.put_bits(u32::from(cfg.matrix_coefficients), 8);
-    // §5.5.2: `cp == CP_BT_709 && tc == TC_SRGB && mc == MC_IDENTITY` infers full range and 4:4:4
-    // and codes **no** further bits. Outside that shortcut `color_range` is coded explicitly, and
-    // the subsampling is *inferred from `seq_profile`* rather than coded: 0 ⇒ 4:2:0, 1 ⇒ 4:4:4,
-    // 2 ⇒ 4:2:2 at 8-bit. Only 4:2:0 then carries `chroma_sample_position`.
-    if !cfg.is_srgb_shortcut() {
+    if cfg.monochrome {
+        // §5.5.2's monochrome branch codes `color_range` and then **returns**: `subsampling_x` and
+        // `subsampling_y` are inferred 1, `chroma_sample_position` CSP_UNKNOWN and
+        // `separate_uv_delta_q` 0, so none of them is coded. It precedes the sRGB shortcut, so a
+        // monochrome stream never takes it — which is consistent, since §6.4.2 forbids MC_IDENTITY
+        // once subsampling is 1 and `encode_with` rejects that combination up front.
         w.put_bit(u8::from(cfg.full_range)); // color_range
-        if cfg.chroma_subsampling_x == 1 && cfg.chroma_subsampling_y == 1 {
-            w.put_bits(u32::from(cfg.chroma_sample_position), 2);
+    } else {
+        // §5.5.2: `cp == CP_BT_709 && tc == TC_SRGB && mc == MC_IDENTITY` infers full range and
+        // 4:4:4 and codes **no** further bits. Outside that shortcut `color_range` is coded
+        // explicitly, and the subsampling is *inferred from `seq_profile`* rather than coded:
+        // 0 ⇒ 4:2:0, 1 ⇒ 4:4:4, 2 ⇒ 4:2:2 at 8-bit. Only 4:2:0 then carries
+        // `chroma_sample_position`.
+        if !cfg.is_srgb_shortcut() {
+            w.put_bit(u8::from(cfg.full_range)); // color_range
+            if cfg.chroma_subsampling_x == 1 && cfg.chroma_subsampling_y == 1 {
+                w.put_bits(u32::from(cfg.chroma_sample_position), 2);
+            }
         }
+        w.put_bit(0); // separate_uv_delta_q
     }
-    w.put_bit(0); // separate_uv_delta_q
 
     w.put_bit(0); // film_grain_params_present
 
@@ -238,6 +278,7 @@ pub(crate) fn frame_header_payload(
     mi_rows: u32,
     base_q_idx: u8,
     superres_coded_denom: Option<u8>,
+    monochrome: bool,
 ) -> Vec<u8> {
     let lossless = base_q_idx == 0;
     let mut w = BitWriter::new();
@@ -305,8 +346,12 @@ pub(crate) fn frame_header_payload(
     // quantization_params().
     w.put_bits(u32::from(base_q_idx), 8); // base_q_idx
     w.put_bit(0); // DeltaQYDc: delta_coded = 0
-    w.put_bit(0); // DeltaQUDc: delta_coded = 0
-    w.put_bit(0); // DeltaQUAc: delta_coded = 0
+    // §5.9.12 codes the chroma deltas only when `NumPlanes > 1`; `separate_uv_delta_q` is 0, so
+    // `diff_uv_delta` is not coded and V reuses U.
+    if !monochrome {
+        w.put_bit(0); // DeltaQUDc: delta_coded = 0
+        w.put_bit(0); // DeltaQUAc: delta_coded = 0
+    }
     w.put_bit(0); // using_qmatrix = 0
 
     // segmentation_params(): on the lossy path, enable per-segment alternate quantizers
@@ -338,13 +383,19 @@ pub(crate) fn frame_header_payload(
         // delta_lf_params(): per-superblock loop-filter-level deltas (single, not multi).
         w.put_bit(1); // delta_lf_present = 1
         w.put_bits(0, 2); // delta_lf_res = 0
+        // `delta_lf_multi = 0` is also what keeps `read_delta_lf` (§5.11.13) plane-count agnostic:
+        // it sets `frameLfCount = delta_lf_multi ? (NumPlanes > 1 ? FRAME_LF_COUNT
+        // : FRAME_LF_COUNT - 2) : 1`, so exactly one delta is coded whatever `NumPlanes` is. Turning
+        // multi on would make the count monochrome-dependent, and `signal_delta_lf` would have to
+        // follow.
         w.put_bit(0); // delta_lf_multi = 0
         // loop_filter_params(): a single deblock level (the same for both luma passes and both
         // chroma planes), scaled from base_q_idx. level 0 ⇒ deblock disabled and level[2]/[3] omitted.
         let lf = u32::from(crate::filter::deblock_level(base_q_idx));
         w.put_bits(lf, 6); // loop_filter_level[0]
         w.put_bits(lf, 6); // loop_filter_level[1]
-        if lf != 0 {
+        // §5.9.11 gates the chroma levels on `NumPlanes > 1` as well as on a non-zero luma level.
+        if lf != 0 && !monochrome {
             w.put_bits(lf, 6); // loop_filter_level[2] (U)
             w.put_bits(lf, 6); // loop_filter_level[3] (V)
         }
@@ -359,13 +410,18 @@ pub(crate) fn frame_header_payload(
         w.put_bits(0, 2); // cdef_bits = 0
         w.put_bits(y_pri as u32, 4); // cdef_y_pri_strength[0]
         w.put_bits(sec_code(y_sec), 2); // cdef_y_sec_strength[0]
-        w.put_bits(uv_pri as u32, 4); // cdef_uv_pri_strength[0]
-        w.put_bits(sec_code(uv_sec), 2); // cdef_uv_sec_strength[0]
+        if !monochrome {
+            w.put_bits(uv_pri as u32, 4); // cdef_uv_pri_strength[0]
+            w.put_bits(sec_code(uv_sec), 2); // cdef_uv_sec_strength[0]
+        }
         // lr_params() (§5.9.20): luma RESTORE_WIENER, chroma RESTORE_NONE. `lr_type` is 2 bits per
         // plane (`Remap_Lr_Type`: 0=NONE, 2=WIENER); only luma uses restoration.
+        // §5.9.20 loops `i < NumPlanes`, so a monochrome frame codes one `lr_type`, not three.
         w.put_bits(2, 2); // FrameRestorationType[0] = RESTORE_WIENER
-        w.put_bits(0, 2); // FrameRestorationType[1] = RESTORE_NONE
-        w.put_bits(0, 2); // FrameRestorationType[2] = RESTORE_NONE
+        if !monochrome {
+            w.put_bits(0, 2); // FrameRestorationType[1] = RESTORE_NONE
+            w.put_bits(0, 2); // FrameRestorationType[2] = RESTORE_NONE
+        }
         // usesLr ⇒ lr_unit_shift. Not a 128×128 superblock ⇒ f(1) then (if set) lr_unit_extra f(1).
         // shift = 2 ⇒ LoopRestorationSize = 256. usesChromaLr = 0 ⇒ no lr_uv_shift.
         w.put_bit(1); // lr_unit_shift bit 0

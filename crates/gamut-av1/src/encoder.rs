@@ -1,4 +1,5 @@
-//! Top-level: turn planar samples into the AV1 temporal unit for an AVIF still image.
+//! Top-level: turn planar samples — 4:4:4, 4:2:2 or 4:2:0 colour, or a monochrome luma plane —
+//! into the AV1 temporal unit for an AVIF still image.
 
 use gamut_color::cicp::{ColorRange, MatrixCoefficients};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8};
@@ -89,9 +90,16 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
 /// selects what the sequence header — and, through [`EncodedStill::config`], the container's `av1C`
 /// and `colr` boxes — declare the samples to be.
 ///
+/// This is also the entry point for a **monochrome** still: pass a
+/// [`ChromaSubsampling::Cs400`](gamut_color::ChromaSubsampling::Cs400) buffer (one luma plane, no
+/// chroma) together with [`Av1Colour::monochrome`]. The stream is then `seq_profile = 0` with
+/// `mono_chrome = 1` and no chroma is coded at all.
+///
 /// # Errors
 ///
-/// As [`encode_still_intra`].
+/// As [`encode_still_intra`], and [`Error::InvalidInput`] if monochrome planes are paired with
+/// [`MatrixCoefficients::Identity`] — AV1 §6.4.2 permits that matrix only at subsampling 0/0, and
+/// §5.5.2 infers 1/1 for a monochrome stream.
 pub fn encode_still_intra_with(
     planes: &Planar8,
     qindex: u8,
@@ -127,14 +135,45 @@ fn encode_with(
         ));
     }
     let subsampling = planes.subsampling();
+    let monochrome = subsampling == ChromaSubsampling::Cs400;
+    // Superres over a monochrome source is refused rather than half-supported: the downscale later
+    // in this function is written for three luma-sized planes and relabels its result 4:4:4, so a
+    // monochrome buffer would read an empty chroma slice at luma dimensions and then hand
+    // `FrameEncoder` a plane count disagreeing with the `monochrome` the frame header was given.
+    // Checked before the matrix rule below so `encode_still_intra_superres` — which supplies the
+    // default identity colour — reports the reason that actually applies.
+    if monochrome && coded_denom.is_some() {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AV1: superres over a monochrome source is not implemented",
+        ));
+    }
+    // The lossless path is 4:4:4 (or monochrome) only. §5.11.45 makes `is_cfl_allowed` under
+    // `Lossless` the test `Subsampled_Size[MiSize][subX][subY] == BLOCK_4X4`, which at 4:2:0 is
+    // true for 4x8, 8x4 and 8x8 as well as 4x4 — while the tile encoder tests `bw == 4`. Coding a
+    // subsampled lossless block would therefore emit `uv_mode` against the wrong CDF and
+    // desynchronise the decoder's symbol reader. #390 lifts the 4:4:4 restriction for the *lossy*
+    // path only, so the lossless one is refused rather than silently mis-coded.
+    if qindex == 0 && !monochrome && subsampling != ChromaSubsampling::Cs444 {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AV1: lossless coding requires 4:4:4 or monochrome planes",
+        ));
+    }
     // §6.4.2: "If matrix_coefficients is equal to MC_IDENTITY, it is a requirement of bitstream
     // conformance that subsampling_x is equal to 0 and subsampling_y is equal to 0." The identity
     // matrix carries R'G'B' directly, and the three colour planes cannot be sampled at different
-    // rates. §5.5.2 says the same structurally: the sRGB shortcut infers 4:4:4 whatever the profile.
+    // rates. §5.5.2 says the same structurally: the sRGB shortcut infers 4:4:4 whatever the
+    // profile, and a monochrome stream infers subsampling 1/1 — so identity is illegal there too.
     if colour.matrix == MatrixCoefficients::Identity && subsampling != ChromaSubsampling::Cs444 {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "AV1: the identity matrix requires 4:4:4 chroma",
+            if monochrome {
+                "AV1: a monochrome stream cannot signal the identity matrix (§6.4.2 allows \
+                 MC_IDENTITY only at subsampling 0/0); use Av1Colour::monochrome()"
+            } else {
+                "AV1: the identity matrix requires 4:4:4 chroma"
+            },
         ));
     }
     // Annex A.2 / §6.4.1: Main (0) is 4:2:0, High (1) is 4:4:4, Professional (2) adds 4:2:2. There
@@ -144,10 +183,15 @@ fn encode_with(
         ChromaSubsampling::Cs444 => 1,
         ChromaSubsampling::Cs420 => 0,
         ChromaSubsampling::Cs422 => 2,
+        // Profile 1 (High) is the 4:4:4 profile and infers `mono_chrome = 0`, so a monochrome
+        // still is profile 0 (Main) — the only other profile that can code 8-bit here.
+        ChromaSubsampling::Cs400 => 0,
+        // `ChromaSubsampling` is `#[non_exhaustive]` and models layouts beyond AV1's (4:1:1, say).
+        // AV1 has no profile for one, so it is refused rather than mapped onto a nearby profile.
         _ => {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "AV1: monochrome encoding is not supported",
+                "AV1: unsupported chroma subsampling",
             ));
         }
     };
@@ -178,7 +222,9 @@ fn encode_with(
         seq_tier_0: 0,
         high_bitdepth: false,
         twelve_bit: false,
-        monochrome: false,
+        monochrome,
+        // Inferred, not coded, under monochrome: §5.5.2 fixes both to 1, which is what
+        // `ChromaSubsampling::Cs400.subsampling()` returns.
         chroma_subsampling_x: ss_x,
         chroma_subsampling_y: ss_y,
         // `CSP_UNKNOWN`. There is no code point for the centre siting a symmetric box filter
@@ -206,8 +252,15 @@ fn encode_with(
 
     let seq_payload =
         headers::sequence_header_payload(&config, width, height, qindex > 0, coded_denom.is_some());
-    let mut frame_payload =
-        headers::frame_header_payload(coded_w, height, mi_cols, mi_rows, qindex, coded_denom);
+    let mut frame_payload = headers::frame_header_payload(
+        coded_w,
+        height,
+        mi_cols,
+        mi_rows,
+        qindex,
+        coded_denom,
+        monochrome,
+    );
     let (tile_bytes, recon) = FrameEncoder::new(&coded_src, qindex).encode();
     // tile_group_obu (§5.11.1): the frame header already emitted the tile-group prefix (the
     // `tile_start_and_end_present_flag` and re-alignment for a multi-tile frame). Each tile but the
@@ -226,8 +279,12 @@ fn encode_with(
     let (uw, uh) = (width as usize, height as usize);
     let recon_planes: [Vec<u16>; 3] = if qindex == 0 {
         // Lossless: the reconstruction equals the 8-bit source; widen it into the u16 recon buffer.
+        // Each plane crops at its **own** extent — the source carries no coded padding, so the
+        // stride is the plane width. A monochrome buffer's chroma planes are empty and stay empty;
+        // cropping them at the luma extent would index past the end of a zero-length slice.
         std::array::from_fn(|i| {
-            crop(planes.plane(i), width, planes.width(), height)
+            let (pw, ph) = planes.plane_dimensions(i);
+            crop(planes.plane(i), pw, pw, ph)
                 .into_iter()
                 .map(u16::from)
                 .collect()
@@ -353,6 +410,68 @@ mod tests {
         let planes = Planar8::from_planes(4, 2, [vec![0; 8], vec![0; 8], vec![0; 8]]).unwrap();
         let (_, recon) = encode_still_intra(&planes, 40).expect("encodes");
         let _ = recon.plane_dimensions(3);
+    }
+
+    #[test]
+    fn a_vertical_edge_at_four_two_two_does_not_reach_an_invalid_chroma_block() {
+        // A strong vertical edge is what makes `decide_rect` prefer PARTITION_VERT, producing a
+        // taller-than-wide half whose 4:2:2 chroma residual is `BLOCK_INVALID` (§5.11.38). The
+        // partition search must never emit one, so this encodes rather than hitting the residual
+        // loop's unreachable-by-contract arm.
+        let mut rgb = vec![0u8; 32 * 32 * 3];
+        for y in 0..32 {
+            for x in 16..32 {
+                let i = (y * 32 + x) * 3;
+                rgb[i] = 255;
+                rgb[i + 1] = 255;
+                rgb[i + 2] = 255;
+            }
+        }
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(32, 32).unwrap()).unwrap();
+        let m = RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            BitDepth::Eight,
+        )
+        .unwrap();
+        let colour = Av1Colour {
+            matrix: gamut_color::cicp::MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        let planes =
+            Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs422).unwrap();
+        let (still, _) = encode_still_intra_with(&planes, 40, colour).expect("4:2:2 encodes");
+        assert_eq!(still.config.seq_profile, 2);
+    }
+
+    #[test]
+    fn lossless_requires_four_four_four_or_monochrome() {
+        // §5.11.45 makes `is_cfl_allowed` under Lossless `Subsampled_Size[..] == BLOCK_4X4`, true
+        // at 4:2:0 for 4x8/8x4/8x8 as well as 4x4, while the tile encoder tests `bw == 4`. Coding
+        // a subsampled lossless block would pick the wrong `uv_mode` CDF and desync the decoder,
+        // so the whole combination is refused. #390 lifts 4:4:4 for the *lossy* path only.
+        let rgb = vec![0u8; 8 * 8 * 3];
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap();
+        let m = RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            BitDepth::Eight,
+        )
+        .unwrap();
+        let planes =
+            Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
+        let colour = Av1Colour {
+            matrix: gamut_color::cicp::MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        let err = encode_still_intra_with(&planes, 0, colour)
+            .expect_err("lossless 4:2:0 is refused, not mis-coded");
+        assert_eq!(
+            err.static_message(),
+            Some("AV1: lossless coding requires 4:4:4 or monochrome planes")
+        );
+        // The same planes encode on the lossy path, so the rejection is keyed on the quantizer.
+        assert!(encode_still_intra_with(&planes, 40, colour).is_ok());
     }
 
     #[test]

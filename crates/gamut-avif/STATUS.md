@@ -20,8 +20,8 @@ has landed), `D` where a deferred row has no milestone, `OOS` where the disposit
   set, segmentation/delta-q, superres, screen-content tools (palette/intrabc).
 - **M2** — Pixel formats: 10/12-bit, 4:2:0/4:2:2, monochrome, profiles 0 & 2, `MA1B` baseline
   brand, and chroma resampling. *(The RGB↔YCbCr matrices and limited range landed early, with
-  issue #335 — they need no plane-geometry change. 4:2:0, profile 0 and `MA1B` landed with #390 and
-  4:2:2 with #391; what remains is 10/12-bit and monochrome.)*
+  issue #335 — they need no plane-geometry change. Monochrome landed with #396; 4:2:0, profile 0
+  and `MA1B` landed with #390; 4:2:2 with #391. What remains is 10/12-bit.)*
 - **M3** — Alpha & auxiliary: alpha aux item, `auxC`/`auxl`, premultiplied (`prem`), depth maps.
 - **M4** — Color & metadata: ICC profiles, Exif/XMP items, HDR (PQ/HLG, `mdcv`/`clli`), film grain.
 - **M5** — Container transforms & derivation: `irot`/`imir`/`clap`/`pasp`, `grid`/overlay,
@@ -46,10 +46,13 @@ AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `d
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
-**Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit and monochrome —
-issues #396/#399); alpha and depth auxiliary items (#397); the HDR surface beyond CICP *tagging*
-(`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a PQ/HLG transfer labels samples
-but does not by itself make a conformant HDR image); container derivations
+**Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit — issues #398/#399
+— and 4:2:2's coding path, #391; 4:2:0, profile 0 and `MA1B` landed with #390, and the AV1
+**monochrome** encode with #396, though no `gamut-avif` input reaches monochrome until the
+`Gray8`/alpha surface of #397); alpha and depth auxiliary items (#397); the HDR
+surface beyond CICP *tagging* (`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a
+PQ/HLG transfer labels samples but does not by itself make a conformant HDR image); container
+derivations
 (`grid`, thumbnails, `idat`, `iloc` v1/v2 emission, `pasp`/`clap`); layered/progressive still
 images (`a1op`/`a1lx`/`lsel`, multi-operating-point sequence header); `tmap` tone-map (gain-map)
 derived items; `sato` sample transforms (bit depths beyond 12); `cmin`/`cmex` camera matrices;
@@ -138,7 +141,7 @@ adding it needs no container change.
 | `OBU_PADDING` / `OBU_REDUNDANT_FRAME_HEADER` | §5.7/§5.9 | ☐ | — |
 | `OBU_TILE_LIST` (large-scale tiles; forbidden in AVIF item) | §5.12 | ☐ | — |
 | seq_profile=1 (High) | Annex A §10.2; §6.4.1 | ✅ | M0 |
-| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ✅ (8-bit; 12-bit deferred) | M2 |
+| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ✅ (0 = 4:2:0 **and monochrome**; 2 = 4:2:2, coded; 12-bit deferred) | M2 |
 | `still_picture`=1, `reduced_still_picture_header`=1 | §5.5 | ✅ | M0 |
 | full seq header: multiple operating points (layered stills) | §5.5.1-.5.5.5 | ☐ | D |
 | full seq header: timing_info, decoder_model_info (sequences only) | §5.5.1-.5.5.5 | OOS | OOS |
@@ -147,7 +150,7 @@ adding it needs no container change.
 | `enable_filter_intra` (1 on lossy, 0 on lossless) / `enable_intra_edge_filter`=0 | §5.5 | ✅ | M0/M1 |
 | `enable_superres`/`cdef`/`restoration`=0 | §5.5 | ✅ (off) | M0 |
 | color_config: mc=0 identity, 4:4:4, high_bitdepth=0, full range | §5.5.2 | ✅ | M0 |
-| color_config: `mono_chrome` bit, profile-inferred subsampling, `chroma_sample_position` (`CSP_UNKNOWN`) | §5.5.2 | ✅ | M2 |
+| color_config: `mono_chrome` bit + its inferred-subsampling branch, profile-inferred subsampling, `chroma_sample_position` (`CSP_UNKNOWN`) | §5.5.2 | ✅ (`gamut_av1::headers`) | M2 |
 | color_config: high_bitdepth/twelve_bit (and the 12-bit coded subsampling flags) | §5.5.2 | ☐ | M2 |
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
 | INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
