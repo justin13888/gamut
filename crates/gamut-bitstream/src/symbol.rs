@@ -211,16 +211,20 @@ impl SymbolEncoder {
 /// counter, capped at 32 — a higher count slows adaptation. The encoder and a conformant decoder
 /// invoke this identically after coding each symbol, so their CDFs evolve in lockstep.
 fn update_cdf(cdf: &mut [u16], symbol: usize, count: &mut u16) {
-    let n = cdf.len();
+    // §8.2.6 with the loop's `tmp` 0/32768 split made explicit. The fixed top entry
+    // (cdf[N - 1] == 32768) is never updated; entries before `symbol` move toward 0 and those from
+    // `symbol` up to N - 2 move toward 32768, each by `delta >> rate`.
+    //
+    // An empty CDF codes nothing, so there is nothing to adapt — and no `FloorLog2(N)` either.
+    let Some((_top, body)) = cdf.split_last_mut() else {
+        return;
+    };
+    let n = body.len() + 1;
     // rate = 3 + (count > 15) + (count > 31) + Min(FloorLog2(N), 2).
     let rate = 3
         + u32::from(*count > 15)
         + u32::from(*count > 31)
         + (31 - (n as u32).leading_zeros()).min(2);
-    // §8.2.6 with the loop's `tmp` 0/32768 split made explicit. The fixed top entry
-    // (cdf[N - 1] == 32768) is never updated; entries before `symbol` move toward 0 and those from
-    // `symbol` up to N - 2 move toward 32768, each by `delta >> rate`.
-    let (_top, body) = cdf.split_last_mut().expect("a CDF has at least one entry");
     for v in &mut body[..symbol] {
         *v -= *v >> rate;
     }
@@ -311,27 +315,42 @@ impl<'a> SymbolDecoder<'a> {
     /// Decodes one symbol against a static cumulative `cdf` (`read_symbol`, AV1 §8.2.6).
     ///
     /// `cdf` is the gamut `N`-entry cumulative form (`cdf[N - 1] == 32768`); the adaptation
-    /// counter the spec keeps as a trailing `cdf[N]` is not needed here because the CDF does not
-    /// change. Use [`SymbolDecoder::read_symbol_adapt`] when `disable_cdf_update` is 0.
+    /// counter the spec keeps as a trailing `cdf[N]` is **not** part of it, and must not be
+    /// appended. Use [`SymbolDecoder::read_symbol_adapt`] when `disable_cdf_update` is 0.
+    ///
+    /// The returned symbol is always below `cdf.len()`, and an empty `cdf` decodes nothing and
+    /// returns 0: a CDF that breaks the convention yields a meaningless symbol, never a panic or a
+    /// read past the slice.
     pub fn read_symbol(&mut self, cdf: &[u16]) -> usize {
-        let n = cdf.len() as u32;
-        let mut cur = self.range;
-        let mut symbol: i64 = -1;
-        let mut prev;
-        loop {
-            symbol += 1;
-            prev = cur;
-            let f = CDF_PROB_TOP - u32::from(cdf[symbol as usize]);
-            cur = ec_partition(self.range, f);
-            cur += EC_MIN_PROB * (n - symbol as u32 - 1);
-            if self.value >= cur {
+        // The search is bounded by the alphabet, not by the CDF's contents: `cdf[N - 1] == 32768`
+        // is what would otherwise force the last bracket to 0 and end the loop, and a caller can
+        // hand over a CDF that does not honour it — the spec's §8.2.6 form, for one, carries the
+        // adaptation counter as a trailing `cdf[N]`, which gamut keeps separate. Treating the last
+        // symbol as forced makes the search total for any slice instead of running off its end.
+        let Some(last) = cdf.len().checked_sub(1) else {
+            return 0;
+        };
+        // `prev` is the previous symbol's bracket, `self.range` before the first; `cur` is the
+        // chosen symbol's, which is 0 at the forced last symbol.
+        let mut prev = self.range;
+        let mut symbol = last;
+        let mut cur = 0;
+        for (i, &entry) in cdf.iter().enumerate().take(last) {
+            // `f(i) = (1 << 15) - cdf[i]`, saturating so an out-of-convention entry above 32768
+            // cannot wrap; clamped to `prev` so the brackets stay ordered whatever the CDF says.
+            let f = CDF_PROB_TOP.saturating_sub(u32::from(entry));
+            let bracket = (ec_partition(self.range, f) + EC_MIN_PROB * (last - i) as u32).min(prev);
+            if self.value >= bracket {
+                symbol = i;
+                cur = bracket;
                 break;
             }
+            prev = bracket;
         }
         self.range = prev - cur;
         self.value -= cur;
         self.renormalize();
-        symbol as usize
+        symbol
     }
 
     /// Renormalises `(value, range)` back into `[1 << 15, 1 << 16)` (AV1 §8.2.6, ordered steps).
@@ -678,6 +697,56 @@ mod tests {
         for (i, &s) in stream.iter().enumerate() {
             assert_eq!(dec.read_symbol(&cdf), s, "event {i}");
         }
+    }
+
+    #[test]
+    fn a_cdf_in_the_specs_n_plus_1_form_cannot_read_past_its_end() {
+        // §8.2.6 keeps the adaptation counter as a trailing `cdf[N]`, so a caller transcribing the
+        // spec literally appends a 0. The search used to terminate only on `value >= cur`, which
+        // that trailing entry never produces: at `symbol == 1` the bracket is `EC_MIN_PROB`, and
+        // any decoder state below it walked on to `cdf[3]` — one past the end. All-ones data
+        // initialises `SymbolValue` to 0, which is exactly that state.
+        let spec_form = [16384u16, 32768, 0];
+        let mut dec = SymbolDecoder::new(&[0xff, 0xff, 0xff, 0xff]);
+        let s = dec.read_symbol(&spec_form);
+        assert!(s < spec_form.len(), "symbol {s} is past the end of the CDF");
+        // Still usable afterwards: the bounded exit leaves a renormalised, non-degenerate state.
+        let _ = dec.read_symbol(&spec_form);
+        let _ = dec.read_bool();
+
+        // The adapting entry point funnels through the same search.
+        let mut adapting = spec_form;
+        let mut count = 0;
+        let mut dec = SymbolDecoder::new(&[0xff, 0xff, 0xff, 0xff]);
+        let s = dec.read_symbol_adapt(&mut adapting, &mut count);
+        assert!(s < spec_form.len(), "symbol {s} is past the end of the CDF");
+    }
+
+    #[test]
+    fn an_empty_cdf_decodes_nothing_and_consumes_nothing() {
+        // `read_symbol(&[])` used to index `cdf[0]` unconditionally. There is no symbol to decode
+        // over an empty alphabet, so it must return 0 without touching the decoder state — proven
+        // by a second decoder that skips the empty read and stays in lockstep.
+        let cdf = [16384u16, 32768];
+        let mut enc = SymbolEncoder::new();
+        for s in [1usize, 0, 1, 1, 0] {
+            enc.encode_symbol(s, &cdf);
+        }
+        let bytes = enc.finish();
+
+        let mut with_empty = SymbolDecoder::new(&bytes);
+        let mut without = SymbolDecoder::new(&bytes);
+        for s in [1usize, 0, 1, 1, 0] {
+            assert_eq!(with_empty.read_symbol(&[]), 0);
+            assert_eq!(with_empty.read_symbol(&cdf), s);
+            assert_eq!(without.read_symbol(&cdf), s);
+        }
+
+        // The adapting path must survive it too: `update_cdf` has no top entry to hold and no
+        // `FloorLog2(N)` to take.
+        let mut count = 3u16;
+        assert_eq!(with_empty.read_symbol_adapt(&mut [], &mut count), 0);
+        assert_eq!(count, 3, "an empty CDF has nothing to adapt");
     }
 
     #[test]
