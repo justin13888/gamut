@@ -461,6 +461,69 @@ mod tests {
         }
     }
 
+    /// A 3x2 RGB16 image whose three channels are pairwise distinct at every pixel, with low bits
+    /// that survive no shift, so a narrowing in the wrong direction or from the wrong channel
+    /// cannot land on the right value.
+    fn rgb16_3x2() -> Vec<u16> {
+        let mut px = Vec::new();
+        for i in 0..6u16 {
+            px.extend_from_slice(&[0xF00D ^ (i << 3), 0x81C7 | i, 0x0FF1 + (i << 6)]);
+        }
+        px
+    }
+
+    #[test]
+    fn sixteen_bit_matrix_planes_narrow_before_the_transform() {
+        // `RgbToYcbcr` is built at the coded depth, so the narrowing has to happen *first* — the
+        // matrix must see samples already on the coded scale. The reference below applies the shift
+        // itself and then the same transform, so a narrowing done in the wrong direction, from the
+        // wrong channel, or at the wrong pixel gives a different plane.
+        let px = rgb16_3x2();
+        let dims = Dimensions::new(3, 2).unwrap();
+        let img = ImageRef::<Rgb16>::new(&px, dims).unwrap();
+        let matrix = RgbToYcbcr::new(
+            crate::MatrixCoefficients::Bt709,
+            crate::ColorRange::Full,
+            BitDepth::Twelve,
+        )
+        .unwrap();
+        let p = Planar16::from_rgb16_matrix_view(img, matrix, BitDepth::Twelve);
+
+        let mut want: [Vec<u16>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        for pixel in px.as_chunks::<3>().0 {
+            let (y, cb, cr) = matrix.from_rgb(pixel[0] >> 4, pixel[1] >> 4, pixel[2] >> 4);
+            want[0].push(y);
+            want[1].push(cb);
+            want[2].push(cr);
+        }
+        for i in 0..3 {
+            assert_eq!(p.plane(i), &want[i][..], "plane {i}");
+            assert_eq!(p.plane(i).len(), 6, "plane {i} covers every pixel");
+        }
+        // The three planes differ, so a mapping that read one channel three times could not satisfy
+        // the comparison above by coincidence.
+        assert_ne!(p.plane(0), p.plane(1));
+        assert_ne!(p.plane(1), p.plane(2));
+
+        // The four-channel source gives the same colour planes for the same colour values — the
+        // property that makes an RGBA colour item identical to the RGB one through the matrix path
+        // as well as the identity one.
+        let rgba: Vec<u16> = px
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|c| [c[0], c[1], c[2], 0xFFFF])
+            .collect();
+        let q = Planar16::from_rgba16_matrix_view(
+            ImageRef::<Rgba16>::new(&rgba, dims).unwrap(),
+            matrix,
+            BitDepth::Twelve,
+        );
+        for i in 0..3 {
+            assert_eq!(q.plane(i), p.plane(i), "rgba plane {i}");
+        }
+    }
+
     #[test]
     fn rgba16_colour_planes_ignore_alpha_and_alpha_is_its_own_plane() {
         let px = rgba16_3x2();
