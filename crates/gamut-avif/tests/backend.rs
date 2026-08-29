@@ -649,7 +649,67 @@ fn backend_stream_must_be_four_four_four() {
     assert_owned_error(
         &err,
         ErrorKind::Unsupported,
-        "AVIF: AV1 backend stream must be 4:4:4",
+        "AVIF: AV1 backend stream must be 4:4:4; its sequence header implies 4:2:0",
+    );
+}
+
+/// §5.5.2 fixes profile 2 at 4:2:2 below 12 bits without coding a bit for it, so the layout must be
+/// derived from the profile *and* the depth — reading a subsampling bit here would consume part of
+/// the next field.
+#[test]
+fn a_profile_two_stream_below_twelve_bits_is_four_two_two() {
+    // seq_profile=2, high_bitdepth=0 (so `twelve_bit` is not coded), mono_chrome=0, cp=1/tc=13/mc=1,
+    // color_range=0, then a zero pad byte — which a parser that wrongly read `subsampling_x` here
+    // would decode as 0 and mistake for 4:4:4.
+    let payload = [0x58u8, 0x15, 0x4F, 0x3C, 0x02, 0x02, 0x1A, 0x02, 0x00];
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+    let log = log();
+    let mut encoder = AvifEncoder::new();
+    encoder.push_backend(Scripted::new("p2-8bit", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("profile 2 below 12 bits is 4:2:2");
+    assert_owned_error(
+        &err,
+        ErrorKind::Unsupported,
+        "AVIF: AV1 backend stream must be 4:4:4; its sequence header implies 4:2:2",
+    );
+}
+
+/// At 12 bits profile 2 *does* code the pair, and `subsampling_y` follows only when
+/// `subsampling_x` is set — so 1/1 is 4:2:0 and must be named as such.
+#[test]
+fn a_twelve_bit_profile_two_stream_codes_its_subsampling() {
+    // subsampling_x=1, subsampling_y=1.
+    let payload = [0x58u8, 0x15, 0x4F, 0x3C, 0x0D, 0x01, 0x0D, 0x01, 0x60];
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+    let log = log();
+    let mut encoder = AvifEncoder::new();
+    encoder.push_backend(Scripted::new("p2-12bit", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("a coded 1/1 pair is 4:2:0");
+    assert_owned_error(
+        &err,
+        ErrorKind::Unsupported,
+        "AVIF: AV1 backend stream must be 4:4:4; its sequence header implies 4:2:0",
+    );
+}
+
+/// A coded `subsampling_x = 0` at 12-bit profile 2 *is* 4:4:4, so the layout check passes and the
+/// stream is refused later, on its depth. Pins that the check is a derivation and not a profile ban.
+#[test]
+fn a_twelve_bit_profile_two_stream_may_be_four_four_four() {
+    // subsampling_x=0, so subsampling_y is not coded and both are 0.
+    let payload = [0x58u8, 0x15, 0x4F, 0x3C, 0x0D, 0x01, 0x0D, 0x01, 0x00];
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+    let log = log();
+    let mut encoder = AvifEncoder::new();
+    encoder.push_backend(Scripted::new("p2-444", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("the 8-bit request rejects a 12-bit stream");
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend stream is coded at a different bit depth than requested",
     );
 }
 

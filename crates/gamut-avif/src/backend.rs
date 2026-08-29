@@ -454,9 +454,15 @@ impl SeqHeaderParams {
             }
         };
         if (subsampling_x, subsampling_y) != (0, 0) {
+            // Name the layout the header implies, not just the one required: the caller has to fix
+            // their encoder's configuration, and `subsampling_y` is what separates the two cases.
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend stream must be 4:4:4",
+                if subsampling_y == 1 {
+                    "AVIF: AV1 backend stream must be 4:4:4; its sequence header implies 4:2:0"
+                } else {
+                    "AVIF: AV1 backend stream must be 4:4:4; its sequence header implies 4:2:2"
+                },
             ));
         }
         let colour = (cp, tc, mc, full_range);
