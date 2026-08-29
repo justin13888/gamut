@@ -26,7 +26,7 @@
 
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{ChromaSubsampling, Planar8, clip_pixel};
-use gamut_dsp::math::round2_signed;
+use gamut_dsp::math::{round2, round2_signed};
 
 use crate::cdf;
 use crate::geom::{PlaneGeom, has_chroma, plane_residual_size};
@@ -1391,21 +1391,24 @@ impl<'a> FrameEncoder<'a> {
         } else {
             bw.max(bh) <= 32
         };
-        let cfl = if !block_has_chroma || palette.is_some() {
-            None // no chroma to predict, or a palette block (whose chroma is DC_PRED)
-        } else if self.qindex > 0 && cfl_allowed && !is_rect {
-            // The search runs in chroma coordinates over the chroma residual block. A block with no
-            // valid chroma residual simply gets no CfL; the residual loop is where that
-            // (4:2:2-only) conformance violation is reported.
-            match plane_residual_size(bw, bh, 1, self.subsampling) {
-                Some((cw, ch)) => {
-                    let gc = self.geom[1];
-                    self.select_cfl((c >> gc.ss_x) * 4, (r >> gc.ss_y) * 4, cw, ch)
+        let is_lossy = self.qindex != 0;
+        let cfl = match (block_has_chroma, palette.is_some()) {
+            // No chroma of its own, or a palette block — whose chroma is plain DC_PRED.
+            (false, _) | (_, true) => None,
+            _ if is_lossy && cfl_allowed && !is_rect => {
+                // The search runs in chroma coordinates over the chroma residual block. A block
+                // with no valid chroma residual simply gets no CfL; the residual loop is where
+                // that (4:2:2-only) conformance violation is reported.
+                match plane_residual_size(bw, bh, 1, self.subsampling) {
+                    Some((cw, ch)) => {
+                        let gc = self.geom[1];
+                        self.select_cfl((c >> gc.ss_x) * 4, (r >> gc.ss_y) * 4, cw, ch)
+                    }
+                    None => None,
                 }
-                None => None,
             }
-        } else {
-            None // CfL is square-only here; a rectangular block's chroma is plain DC_PRED
+            // CfL is square-only here; a rectangular block's chroma is plain DC_PRED.
+            _ => None,
         };
         let ym = usize::from(y_mode);
         if !block_has_chroma {
@@ -2600,7 +2603,9 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         let shift = tx_size.log2_width() + tx_size.log2_height();
-        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
+        // The shared `Round2`, not an open-coded addend: the test transcribes §7.11.5 separately,
+        // and two independent spellings of the same rounding is the point of that cross-check.
+        let luma_avg = round2(i64::from(sum), shift) as i32;
         let max = (1i32 << self.bit_depth) - 1;
         for (p, &lv) in pred.iter_mut().zip(&l) {
             *p = (*p + round2_signed(alpha * (lv - luma_avg), 6)).clamp(0, max);
@@ -2635,7 +2640,7 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         let shift = w.trailing_zeros() + h.trailing_zeros();
-        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
+        let luma_avg = round2(i64::from(sum), shift) as i32;
         let max = (1i32 << self.bit_depth) - 1;
 
         let best_alpha = |plane: usize| -> i32 {
@@ -3296,6 +3301,24 @@ mod tests {
             .expect("anti-correlated chroma wants CfL");
         assert_eq!(au, -2, "anti-correlated chroma ⇒ alpha -2");
 
+        // The same relationship rotated into y, so the *vertical* shift in the box sum is
+        // observable — the x-only cases above pass whatever it does.
+        let up_y = planes_420_with(16, 16, |p, _, y| {
+            if p == 0 {
+                (100 + y * 8) as u8
+            } else {
+                (122 + y * 4) as u8
+            }
+        });
+        let e = FrameEncoder::new(&up_y, 40);
+        let (au, _) = e
+            .select_cfl(0, 0, 4, 4)
+            .expect("correlated chroma wants CfL");
+        assert_eq!(
+            au, 2,
+            "the vertical relationship gives the same alpha as the horizontal one"
+        );
+
         // Flat chroma has no high-frequency content to predict, so plain DC wins and no alpha is
         // signalled at all.
         let flat = planes_420_with(
@@ -3397,7 +3420,11 @@ mod tests {
         // ones, so it sees exactly two colours. The extra band at x < 4 exists so that reading the
         // block at a *scaled* rather than offset position picks up a third colour instead of
         // coincidentally reproducing the same set.
-        let two = planes_420_with(16, 16, |p, x, _| {
+        // Luma: three bands, so the block at MI (2, 2) — luma (8, 8) — sees exactly two colours
+        // and reading it at a scaled position would pick up the third.
+        // Chroma: flat only *inside* the block's own chroma extent (4..8 on both axes), so a
+        // mis-positioned chroma read sees 60 instead of 128 and the flatness check rejects it.
+        let two = planes_420_with(16, 16, |p, x, y| {
             if p == 0 {
                 if x < 4 {
                     50
@@ -3406,8 +3433,10 @@ mod tests {
                 } else {
                     210
                 }
-            } else {
+            } else if (4..8).contains(&x) && (4..8).contains(&y) {
                 128
+            } else {
+                60
             }
         });
         let mut e = FrameEncoder::new(&two, 40);
@@ -3445,7 +3474,11 @@ mod tests {
         //
         // Driven at MI (2, 2) — luma base (8, 8), chroma base (4, 4) — because at the origin every
         // shift and division yields zero and none of them is observable.
-        let two = planes_420_with(16, 16, |p, x, _| {
+        // Luma: three bands, so the block at MI (2, 2) — luma (8, 8) — sees exactly two colours
+        // and reading it at a scaled position would pick up the third.
+        // Chroma: flat only *inside* the block's own chroma extent (4..8 on both axes), so a
+        // mis-positioned chroma read sees 60 instead of 128 and the flatness check rejects it.
+        let two = planes_420_with(16, 16, |p, x, y| {
             if p == 0 {
                 if x < 4 {
                     50
@@ -3454,8 +3487,10 @@ mod tests {
                 } else {
                     210
                 }
-            } else {
+            } else if (4..8).contains(&x) && (4..8).contains(&y) {
                 128
+            } else {
+                60
             }
         });
         let mut e = FrameEncoder::new(&two, 40);
@@ -3675,16 +3710,17 @@ mod tests {
 
         // The luma ladder reads a *run* of cells, so distinct levels and a window starting away
         // from zero make `x4 + k` and `x4 * k` select different cells.
-        e.above_level[0] = vec![0, 1, 9, 40, 2, 0];
+        e.above_level[0] = vec![0, 1, 9, 40, 2, 63];
         e.left_level[0] = vec![0, 0, 5, 3];
         // Two 4x4 cells from x4 = 1 see levels 1 and 9 (top = 9); rows from y4 = 1 see 0 and 5
         // (left = 5). Both non-zero and both ≤ 3 is false, so the ladder lands on 6.
         assert_eq!(e.txb_skip_ctx(0, 1, 1, 16, 16, 8, 8), 6);
-        // A run reaching past the grid edge: cells 4..7 against a 6-column grid, so the guard must
-        // stop *before* index 6 — `<=` would read one past the end of the array. Cells 4..5 hold
-        // 2 and 0 (top = 2) and rows 0..3 hold 0, 0, 5, 3 (left = 5); both are non-zero and their
-        // minimum is at most 3, which is the ladder's rung 5.
-        assert_eq!(e.txb_skip_ctx(0, 4, 0, 32, 32, 16, 16), 5);
+        // A window whose *guard* arithmetic decides which cells are read: four cells from x4 = 2
+        // are all inside the 6-column grid, so the highest level (63, at index 5) must be seen —
+        // a guard computing `x4 * k` would stop early and miss it. Four rows from y4 = 1 reach
+        // exactly the 4-row edge, so the row guard must stop *before* index 4; `<=` reads one past
+        // the end of the array. top = 63 and left = 5, both non-zero and both above 3 ⇒ rung 6.
+        assert_eq!(e.txb_skip_ctx(0, 2, 1, 32, 32, 16, 16), 6);
         let dc = e.dc_sign_ctx(1, 1, 1, 4, 4);
         assert_eq!(dc, 1, "two -1 categories sum negative");
     }
