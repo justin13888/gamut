@@ -22,6 +22,16 @@ pub(crate) const OBU_FRAME: u8 = 6;
 /// frame header's `tile_info`.
 pub(crate) const TILE_SIZE_BYTES: usize = 4;
 
+/// Whether `color_config()` codes `subsampling_x` explicitly (§5.5.2).
+///
+/// Only profile 2 at 12 bits does: profiles 0 and 1 infer their subsampling (4:2:0 and 4:4:4), and
+/// profile 2 below 12 bits is the fixed 4:2:2 pair. The two conditions are inseparable in the
+/// configurations this encoder builds — every profile-2 stream it emits is 12-bit — so the
+/// predicate is pinned here rather than left to a caller that cannot vary them independently.
+fn codes_subsampling(cfg: &Av1StillConfig) -> bool {
+    cfg.seq_profile == 2 && cfg.twelve_bit
+}
+
 /// The sequence-header field values that `gamut-avif` must mirror into `av1C` and `colr`
 /// (AV1-ISOBMFF v1.3.0 §2.3.4). Fixed by the M0 config except `seq_level_idx_0`, which depends on
 /// the image size.
@@ -251,7 +261,7 @@ pub(crate) fn sequence_header_payload(
             // `subsampling_x` only at 12 bits — at 8/10 it is the fixed 4:2:2 pair — and
             // `subsampling_y` only when `subsampling_x` is 1, which 4:4:4 never is. With both 0,
             // no `chroma_sample_position` follows.
-            if cfg.seq_profile == 2 && cfg.twelve_bit {
+            if codes_subsampling(cfg) {
                 w.put_bit(cfg.chroma_subsampling_x);
                 if cfg.chroma_subsampling_x == 1 {
                     w.put_bit(cfg.chroma_subsampling_y);
@@ -461,6 +471,36 @@ pub(crate) fn assemble_temporal_unit(seq_payload: &[u8], frame_payload: &[u8]) -
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_twelve_bit_profile_2_codes_its_subsampling() {
+        // §5.5.2: profile 0 infers 4:2:0 and profile 1 infers 4:4:4, so neither codes a bit;
+        // profile 2 codes `subsampling_x` only at 12 bits, because below that it is the fixed 4:2:2
+        // pair. Every profile-2 stream this encoder emits *is* 12-bit, so the two conditions can
+        // only be told apart here.
+        let cfg = |seq_profile: u8, twelve_bit: bool| Av1StillConfig {
+            seq_profile,
+            seq_level_idx_0: 0,
+            seq_tier_0: 0,
+            high_bitdepth: twelve_bit,
+            twelve_bit,
+            monochrome: false,
+            chroma_subsampling_x: 0,
+            chroma_subsampling_y: 0,
+            chroma_sample_position: 0,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 0,
+            full_range: true,
+        };
+        assert!(codes_subsampling(&cfg(2, true)));
+        assert!(!codes_subsampling(&cfg(2, false)));
+        assert!(!codes_subsampling(&cfg(1, false)));
+        // A 12-bit config on another profile is not one the encoder builds, but the predicate must
+        // still key on both halves rather than on the depth alone.
+        assert!(!codes_subsampling(&cfg(0, true)));
+    }
+
     use super::*;
 
     #[test]

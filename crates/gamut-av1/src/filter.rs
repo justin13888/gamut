@@ -690,6 +690,29 @@ pub(crate) fn cdef(
 /// the subexp coefficient deltas are coded against, so coding this filter emits a zero delta.
 pub(crate) const WIENER_DEFAULT: [i32; 3] = [3, -7, 15];
 
+/// The §7.17.4 Wiener constants at `bit_depth`: `(InterRound0, InterRound1, offset, limit)`.
+///
+/// The rounding pair is §7.11.3.2's at `isCompound = 0` — `3` and `11`, except at 12 bits where
+/// they become `5` and `9`. `offset` re-centres the intermediate so it can be held as an unsigned
+/// value in `0..=limit`, which is what [`loop_restore_wiener_luma`] carries between its two passes.
+///
+/// Extracted because in place these are nearly unobservable: the `+ offset` the horizontal pass
+/// adds is removed again by the vertical pass, so a wrong `offset` cancels itself out except at the
+/// clip, and `limit` only bites on content extreme enough to saturate the intermediate. Here every
+/// value is pinned directly against the spec.
+fn wiener_rounding(bit_depth: u32) -> (u32, u32, i32, i32) {
+    let (round0, round1) = if bit_depth == 12 {
+        (5u32, 9u32)
+    } else {
+        (3u32, 11u32)
+    };
+    // §7.17.4: `intermediate + offset` is what the filter actually carries, so `offset << round0`
+    // is folded into the horizontal sum and the clip becomes `0..=limit`.
+    let offset = 1i32 << (bit_depth + FILTER_BITS - round0 - 1);
+    let limit = (1i32 << (bit_depth + 1 + FILTER_BITS - round0)) - 1;
+    (round0, round1, offset, limit)
+}
+
 /// Applies the §7.17 Wiener loop-restoration filter to the luma plane in place (the post-CDEF
 /// reconstruction `cdef`), reading the **deblocked** (pre-CDEF) reconstruction `deblock` for the
 /// loop-restoration stripe boundaries. `fh`/`fv` are the three signaled half-taps for the horizontal
@@ -718,16 +741,7 @@ pub(crate) fn loop_restore_wiener_luma(
     if width == 0 || height == 0 {
         return;
     }
-    // §7.11.3.2 with isCompound = 0. Only 12-bit differs from the 8-bit pair.
-    let (round0, round1) = if bit_depth == 12 {
-        (5u32, 9u32)
-    } else {
-        (3u32, 11u32)
-    };
-    // §7.17.4: `intermediate + offset` is what this code actually carries, so `offset << round0`
-    // is folded into the horizontal sum and the clip becomes `0..=limit`.
-    let offset = 1i32 << (bit_depth + FILTER_BITS - round0 - 1);
-    let limit = (1i32 << (bit_depth + 1 + FILTER_BITS - round0)) - 1;
+    let (round0, round1, offset, limit) = wiener_rounding(bit_depth);
     let h_round = 1i32 << (round0 - 1);
     let v_round = 1i32 << (round1 - 1);
     // The vertical taps sum to `1 << FILTER_BITS`, so the per-sample `+ offset` the intermediate
@@ -936,6 +950,27 @@ pub(crate) fn superres_downscaled_width(upscaled: usize, denom: usize) -> usize 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn wiener_rounding_matches_the_spec_at_every_depth() {
+        // §7.11.3.2 at isCompound = 0 gives (InterRound0, InterRound1) = (3, 11), and only 12-bit
+        // moves them to (5, 9). §7.17.4 then derives
+        //   offset = 1 << (BitDepth + FILTER_BITS - InterRound0 - 1)
+        //   limit  = (1 << (BitDepth + 1 + FILTER_BITS - InterRound0)) - 1
+        // Both are nearly inert inside the filter — `offset` cancels between the two passes and
+        // `limit` only bites on saturating content — so they are pinned here by value.
+        assert_eq!(wiener_rounding(8), (3, 11, 1 << 11, (1 << 13) - 1));
+        assert_eq!(wiener_rounding(10), (3, 11, 1 << 13, (1 << 15) - 1));
+        assert_eq!(wiener_rounding(12), (5, 9, 1 << 13, (1 << 15) - 1));
+        // 10- and 12-bit share `offset`/`limit` *because* the rounding shift moves with the depth;
+        // that coincidence is what makes a mistake in either exponent hard to see elsewhere.
+        for bd in [8u32, 10, 12] {
+            let (round0, _, offset, limit) = wiener_rounding(bd);
+            assert_eq!(offset, 1 << (bd + 7 - round0 - 1), "{bd}-bit offset");
+            assert_eq!(limit, (1 << (bd + 1 + 7 - round0)) - 1, "{bd}-bit limit");
+        }
+    }
+
     use gamut_color::ChromaSubsampling;
 
     use super::*;

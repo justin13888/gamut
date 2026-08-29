@@ -145,6 +145,17 @@ impl PlaneSource<'_> {
 /// capacity of both the palette itself and the neighbour cache entries that carry it.
 const PALETTE_MAX: usize = 8;
 
+/// `paletteBits` after coding palette colour `colour` (§5.11.46): the delta width narrows to what
+/// the range still above that colour, `(1 << BitDepth) - colour - 1`, could ever need.
+///
+/// Extracted because in place it is invisible: a too-wide `paletteBits` still round-trips through
+/// the decoder for every palette whose later deltas happen to fit, so only the boundary colours —
+/// where `CeilLog2` changes — distinguish the right arithmetic from the wrong.
+fn palette_delta_bits(bit_depth: u32, colour: u16, current: u32) -> u32 {
+    let range = (1 << bit_depth) - i32::from(colour) - 1;
+    current.min(ceil_log2(range.max(1) as usize))
+}
+
 /// `CeilLog2(x)` (§4.7): the smallest `k` with `2^k >= x` (0 for `x <= 1`).
 fn ceil_log2(x: usize) -> u32 {
     if x < 2 { 0 } else { (x - 1).ilog2() + 1 }
@@ -1141,27 +1152,34 @@ impl<'a> FrameEncoder<'a> {
     /// Signals the luma palette colors (§5.11.46): the cache-usage flags (all 0 — the encoder reuses
     /// no cached color) followed by every palette color as new — the first raw, the rest delta-coded.
     fn signal_palette_colors(&mut self, colors: &[u16], cache_n: usize) {
-        let psize = colors.len();
-        // use_palette_color_cache_y flags: 0 for each cached color (none reused), while idx < psize.
-        // Since none are used, idx stays 0 and all `cache_n` flags are emitted.
+        // use_palette_color_cache_y flags: 0 for each cached color (none reused), while
+        // `idx < PaletteSizeY`. Since none are used, `idx` stays 0 and all `cache_n` flags are
+        // emitted.
         for _ in 0..cache_n {
             self.sym.encode_literal(0, 1);
         }
         // New colors: the first is raw `L(BitDepth)`; the rest are positive deltas coded in
-        // `palette_bits = BitDepth - 3 + palette_num_extra_bits_y`.
-        self.sym
-            .encode_literal(u32::from(colors[0]), self.bit_depth);
-        if psize > 1 {
-            // palette_num_extra_bits_y = 3 ⇒ palette_bits = BitDepth, which always holds a delta:
-            // the colours are sorted and distinct, so `delta - 1 < 1 << BitDepth`.
-            self.sym.encode_literal(3, 2);
-            let mut palette_bits = self.bit_depth - 3 + 3;
-            for idx in 1..psize {
-                let delta = i32::from(colors[idx]) - i32::from(colors[idx - 1]); // ≥ 1 (sorted distinct)
-                self.sym.encode_literal((delta - 1) as u32, palette_bits);
-                let range = (1 << self.bit_depth) - i32::from(colors[idx]) - 1;
-                palette_bits = palette_bits.min(ceil_log2(range.max(1) as usize));
-            }
+        // `palette_bits = BitDepth - 3 + palette_num_extra_bits_y`. Split rather than indexed, so
+        // the "is there a delta at all" question is the slice's own emptiness — `psize` never being
+        // 1 (§5.11.46 bounds it at 2..=8, and `decide_palette` enforces that) would otherwise leave
+        // a numeric bound here that no reachable palette can exercise.
+        let Some((&first, rest)) = colors.split_first() else {
+            return;
+        };
+        self.sym.encode_literal(u32::from(first), self.bit_depth);
+        if rest.is_empty() {
+            return;
+        }
+        // palette_num_extra_bits_y = 3 ⇒ palette_bits = BitDepth, which always holds a delta: the
+        // colours are sorted and distinct, so `delta - 1 < 1 << BitDepth`.
+        self.sym.encode_literal(3, 2);
+        let mut palette_bits = self.bit_depth - 3 + 3;
+        let mut prev = first;
+        for &colour in rest {
+            let delta = i32::from(colour) - i32::from(prev); // ≥ 1 (sorted distinct)
+            self.sym.encode_literal((delta - 1) as u32, palette_bits);
+            palette_bits = palette_delta_bits(self.bit_depth, colour, palette_bits);
+            prev = colour;
         }
     }
 
@@ -3380,14 +3398,33 @@ mod tests {
         //
         // The block is MI (2, 2) — samples (8, 8) to (15, 15) — so both neighbours exist and the
         // zero chroma matches its DC prediction.
-        let two = |x: u32, _: u32| if x < 12 { 0 } else { 200 };
-        let e_planes = planes_with(32, 32, two, |_, _| 0);
+        // The content is position-keyed: only the samples of MI (2, 2) — x and y both in 8..16 —
+        // carry the pair {50, 150}, in a checkerboard, and everything outside carries values
+        // distinct from both and from each other. So the palette and its index map are unique to
+        // *this* block, and any misaddressing — `c * 4` read as `c + 4`, `sx + j` as `sx * j`, a
+        // transposed row and column — samples something else and produces a different answer.
+        let keyed = |x: u32, y: u32| -> u8 {
+            if (8..16).contains(&x) && (8..16).contains(&y) {
+                if (x + y).is_multiple_of(2) { 50 } else { 150 }
+            } else {
+                (200 + (x % 5) * 10 + (y % 3)) as u8
+            }
+        };
+        let e_planes = planes_with(32, 32, keyed, |_, _| 0);
         let e = FrameEncoder::new(&e_planes, 40);
         let pal = e
             .decide_palette(2, 2, 8)
             .expect("a two-colour block is a palette");
-        assert_eq!(pal.colors, vec![0, 200], "sorted distinct colours");
+        assert_eq!(pal.colors, vec![50, 150], "sorted distinct colours");
         assert_eq!(pal.index_map.len(), 64);
+        // The map is the checkerboard itself: index 0 is 50 (the lower colour), 1 is 150. Row and
+        // column enter it differently, so a transposed read shows up as a shifted parity.
+        let want: Vec<u8> = (0..8u32)
+            .flat_map(|i| (0..8u32).map(move |j| u8::from(!(i + j).is_multiple_of(2))))
+            .collect();
+        assert_eq!(pal.index_map, want);
+
+        let two = |x: u32, _: u32| if x < 12 { 0 } else { 200 };
 
         // One colour is below the bound, nine is above it.
         let e_planes = planes_with(32, 32, |_, _| 0, |_, _| 0);
@@ -3411,6 +3448,29 @@ mod tests {
             e.decide_palette(2, 2, 8).is_none(),
             "a non-flat chroma plane disqualifies the block"
         );
+    }
+
+    #[test]
+    fn palette_delta_bits_narrows_to_the_remaining_range() {
+        // §5.11.46: after coding a colour, `paletteBits` narrows to `CeilLog2((1 << BitDepth) -
+        // colour - 1)`. Too *wide* a width still round-trips for any palette whose later deltas
+        // happen to fit, so only the colours at a `CeilLog2` boundary tell the arithmetic apart.
+        //
+        // At 8 bits colour 0 leaves 255, needing all 8; colour 127 leaves 128, needing 7. That
+        // second one is the discriminating case: a `- 1` written as `+ 1` leaves 130, and a
+        // `(1 << BitDepth) - colour` written as `+` leaves 382 — both `CeilLog2` 8, not 7.
+        assert_eq!(palette_delta_bits(8, 0, 8), 8);
+        assert_eq!(palette_delta_bits(8, 127, 8), 7);
+        assert_eq!(palette_delta_bits(8, 128, 8), 7);
+        // The top of the range: 254 leaves 1 and 255 leaves 0, both `CeilLog2` 0 — the `max(1)`
+        // that keeps `CeilLog2(0)` from being asked for.
+        assert_eq!(palette_delta_bits(8, 254, 8), 0);
+        assert_eq!(palette_delta_bits(8, 255, 8), 0);
+        // It only ever narrows, never widens back.
+        assert_eq!(palette_delta_bits(8, 0, 5), 5);
+        // And the range is the *coded depth's*, so the same colour narrows differently at 12 bits.
+        assert_eq!(palette_delta_bits(12, 128, 12), 12);
+        assert_eq!(palette_delta_bits(12, 2048, 12), 11);
     }
 
     #[test]
