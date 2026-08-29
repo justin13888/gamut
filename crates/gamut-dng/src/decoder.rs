@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
 
+use crate::color_profile::{ColorProfileInfo, NoiseProfile, TagSource};
 use crate::gain_map::ProfileGainTableMap;
 use crate::levels::RawLevels;
 use crate::metadata::{DngMetadata, ExifMetadata};
@@ -103,6 +104,18 @@ impl<'a> TrackedIfd<'a> {
     }
 }
 
+/// Reading a tag through a projection consumes it; rejecting a malformed one puts it back, so it
+/// still reaches the extras.
+impl TagSource for TrackedIfd<'_> {
+    fn value(&self, tag: u16) -> Option<&Value> {
+        self.get(tag)
+    }
+
+    fn reject(&self, tag: u16) {
+        self.untouch(tag);
+    }
+}
+
 /// A decoded DNG: the raw sensor image, the camera colour profile, and the declared DNG version.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -117,6 +130,17 @@ pub struct DecodedDng {
     /// 1.0.0.0 file carrying only `UniqueCameraModel`). The raw image still decodes; nothing is
     /// invented to fill the gap.
     pub profile: Option<CameraProfile>,
+    /// IFD 0's remaining camera-profile colour tags — the hue/saturation/value tables, the tone
+    /// curve, the profile exposure offset, the third calibration set and the reduction matrices —
+    /// when the file carries any of them.
+    ///
+    /// This is the rendering half of the colour model: [`profile`](Self::profile) carries the
+    /// calibration a raw processor needs to reach XYZ, this carries what the profile then asks it
+    /// to do with the result.
+    pub color_profile: Option<ColorProfileInfo>,
+    /// The raw IFD's `NoiseProfile` (51041) — the sensor's noise model — falling back to IFD 0
+    /// for a file that stores it there.
+    pub noise_profile: Option<NoiseProfile>,
     /// The `DNGVersion` the file declares, as its four dotted version octets in order — e.g. DNG
     /// 1.7.1.0 is `[1, 7, 1, 0]`. Kept as four bytes (not a packed `u32`) so each component reads
     /// directly and byte order never enters into it.
@@ -265,6 +289,13 @@ impl DngDecoder {
 
         let raw = decode_raw_image(raw_ifd, data, order)?;
         let profile = decode_profile(ifd0)?;
+        let color_profile = crate::color_profile::project(ifd0);
+        // The spec stores `NoiseProfile` in the raw (or enhanced) IFD; some writers put it in
+        // IFD 0 instead, so fall back there when the raw IFD is a distinct directory.
+        let mut noise_profile = crate::color_profile::project_noise(raw_ifd);
+        if noise_profile.is_none() && raw_index != 0 {
+            noise_profile = crate::color_profile::project_noise(ifd0);
+        }
         let dng_version = read_version(ifd0)?;
         let backward_version = bytes_value(ifd0.get(tags::DNG_BACKWARD_VERSION)).map(|b| {
             let mut v = [0u8; 4];
@@ -308,6 +339,8 @@ impl DngDecoder {
         Ok(DecodedDng {
             raw,
             profile,
+            color_profile,
+            noise_profile,
             dng_version,
             metadata,
             gain_table_map,
@@ -1416,7 +1449,7 @@ fn ratio(n: f64, d: f64) -> f64 {
 }
 
 /// Converts a `RATIONAL`/`SRATIONAL` value to `f64`s.
-fn f64_vec(value: Option<&Value>) -> Option<Vec<f64>> {
+pub(crate) fn f64_vec(value: Option<&Value>) -> Option<Vec<f64>> {
     let value = value?;
     if let Some(r) = value.as_rationals() {
         return Some(r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect());
