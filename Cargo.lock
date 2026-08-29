@@ -673,6 +673,7 @@ dependencies = [
  "gamut-dng-oracle",
  "gamut-ifd",
  "gamut-jxl",
+ "gamut-metadata",
  "libtiff-oracle",
  "miniz_oxide",
 ]

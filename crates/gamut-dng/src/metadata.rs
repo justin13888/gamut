@@ -1,81 +1,112 @@
 //! Optional metadata embedded in a DNG: an EXIF sub-IFD plus XMP / IPTC / ICC blocks.
 //!
-//! XMP, IPTC, and ICC are carried opaquely (callers supply the already-serialised bytes — gamut's
-//! dedicated `gamut-xmp`/`gamut-iptc`/`gamut-icc` crates produce them). EXIF capture settings are a
-//! small typed set written into an `ExifIFD` sub-IFD. The encoder writes whatever is present.
+//! The models are the workspace's, not this crate's. EXIF is
+//! [`gamut_metadata::exif::Exif`] — DNG's `ExifIFD` (34665) *is* an EXIF sub-IFD, so the facade's
+//! model describes it exactly and this crate no longer redefines a hand-picked subset of its
+//! fields. XMP (700), IPTC-IIM (33723) and ICC (34675) are single opaque payloads in the file, so
+//! they are carried verbatim as the byte blocks the facade consumes — the same shape
+//! `gamut-png` and `gamut-webp` hand over — and [`DngMetadata::blocks`] presents them as
+//! [`MetadataBlock`]s ready for [`gamut_metadata::Metadata::from_blocks`].
 
 use gamut_ifd::{Ifd, Value};
+use gamut_metadata::MetadataBlock;
+use gamut_metadata::exif::Exif;
 
 use crate::tags;
 
-/// Common EXIF capture settings, written into the DNG's `ExifIFD` sub-IFD.
+/// The `ExifVersion` written when the supplied EXIF sub-IFD does not carry one: EXIF 2.3.
 ///
-/// All fields are optional; only those set are emitted. Rationals are `(numerator, denominator)`.
-#[derive(Debug, Clone, Default)]
-pub struct ExifMetadata {
-    /// `ExposureTime` in seconds.
-    pub exposure_time: Option<(u32, u32)>,
-    /// `FNumber` (the lens f-stop).
-    pub f_number: Option<(u32, u32)>,
-    /// `ISOSpeedRatings`.
-    pub iso_speed: Option<u16>,
-    /// `DateTimeOriginal` (`YYYY:MM:DD HH:MM:SS`).
-    pub date_time_original: Option<String>,
-    /// `FocalLength` in millimetres.
-    pub focal_length: Option<(u32, u32)>,
-}
-
-impl ExifMetadata {
-    /// Whether any field is set (an empty EXIF IFD is not worth writing).
-    fn is_empty(&self) -> bool {
-        self.exposure_time.is_none()
-            && self.f_number.is_none()
-            && self.iso_speed.is_none()
-            && self.date_time_original.is_none()
-            && self.focal_length.is_none()
-    }
-
-    /// Builds the EXIF sub-IFD directory.
-    fn to_ifd(&self) -> Ifd {
-        let mut ifd = Ifd::new();
-        // ExifVersion is mandatory in an EXIF IFD; "0230" = EXIF 2.3.
-        ifd.set(tags::EXIF_VERSION, Value::Undefined(b"0230".to_vec()));
-        if let Some(rate) = self.exposure_time {
-            ifd.set(tags::EXPOSURE_TIME, Value::Rational(vec![rate]));
-        }
-        if let Some(f) = self.f_number {
-            ifd.set(tags::F_NUMBER, Value::Rational(vec![f]));
-        }
-        if let Some(iso) = self.iso_speed {
-            ifd.set(tags::ISO_SPEED_RATINGS, Value::Short(vec![iso]));
-        }
-        if let Some(dt) = &self.date_time_original {
-            ifd.set(tags::DATE_TIME_ORIGINAL, Value::Ascii(dt.clone()));
-        }
-        if let Some(fl) = self.focal_length {
-            ifd.set(tags::FOCAL_LENGTH, Value::Rational(vec![fl]));
-        }
-        ifd
-    }
-}
+/// `ExifVersion` (36864) is mandatory in an EXIF IFD, so the encoder supplies it rather than
+/// emit a directory a conforming reader may reject.
+const DEFAULT_EXIF_VERSION: &[u8; 4] = b"0230";
 
 /// Metadata to embed in a DNG: an EXIF sub-IFD and/or opaque XMP / IPTC / ICC blocks.
+///
+/// Construct one as a struct literal — it is deliberately exhaustive (see `STATUS.md`), so the
+/// four carriers a DNG holds are visible at the point of use:
+///
+/// ```
+/// use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, Value};
+///
+/// let mut exif = Exif::new(ByteOrder::LittleEndian);
+/// exif.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
+/// exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+///
+/// let meta = DngMetadata {
+///     exif: Some(exif),
+///     xmp: None,
+///     iptc: None,
+///     icc: None,
+/// };
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct DngMetadata {
-    /// EXIF capture settings (written into an `ExifIFD` sub-IFD).
-    pub exif: ExifMetadata,
-    /// An XMP packet (UTF-8 RDF/XML), stored in the `XMP` tag.
+    /// EXIF capture settings, as the shared [`Exif`] model.
+    ///
+    /// Only the model's **Exif sub-IFD** ([`Exif::exif_ifd`]) crosses into the file, as the DNG's
+    /// `ExifIFD` (34665) — that directory is the one this container owns a slot for. The model's
+    /// 0th IFD, GPS sub-IFD and thumbnail describe directories the DNG container builds itself
+    /// (IFD 0, and previews as `SubIFDs` entries), so the encoder does not write them and the
+    /// decoder does not populate them; a DNG's own IFD-0 fields reach the caller through
+    /// [`DecodedDng`](crate::DecodedDng) instead.
+    pub exif: Option<Exif>,
+    /// An XMP packet (UTF-8 RDF/XML), stored in the `XMP` tag (700), verbatim.
     pub xmp: Option<Vec<u8>>,
-    /// IPTC-IIM metadata, stored in the `IPTC/NAA` tag.
+    /// A legacy IPTC-IIM dataset stream, stored in the `IPTC/NAA` tag (33723), verbatim.
+    ///
+    /// Kept as its own carrier rather than folded into [`xmp`](Self::xmp): IIM is a genuinely
+    /// separate serialization that DNG files really do hold, and reconciling it into an XMP graph
+    /// is a policy decision (see [`gamut_metadata::ConflictPolicy`]) that belongs to the caller,
+    /// not to the container. [`blocks`](Self::blocks) hands it over for exactly that.
     pub iptc: Option<Vec<u8>>,
-    /// An ICC profile, stored in the `ICCProfile` tag.
+    /// An ICC profile, stored in the `ICCProfile` tag (34675), verbatim.
     pub icc: Option<Vec<u8>>,
 }
 
 impl DngMetadata {
+    /// The byte-carried blocks — XMP, IPTC-IIM and ICC — as [`MetadataBlock`]s, ready for
+    /// [`gamut_metadata::Metadata::from_blocks`] or a
+    /// [`MetadataExtractor`](gamut_metadata::MetadataExtractor) with a chosen
+    /// [`ConflictPolicy`](gamut_metadata::ConflictPolicy).
+    ///
+    /// [`exif`](Self::exif) is deliberately absent: it is already the facade's typed model, so it
+    /// is assigned straight onto [`Metadata::exif`](gamut_metadata::Metadata::exif) rather than
+    /// re-serialised to bytes and parsed back.
+    ///
+    /// ```
+    /// # use gamut_dng::DngMetadata;
+    /// # fn demo(meta: &DngMetadata) -> Result<(), gamut_metadata::MetadataError> {
+    /// let mut unified = gamut_metadata::Metadata::from_blocks(&meta.blocks())?;
+    /// unified.exif = meta.exif.clone();
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn blocks(&self) -> Vec<MetadataBlock<'_>> {
+        let mut blocks = Vec::new();
+        if let Some(xmp) = &self.xmp {
+            blocks.push(MetadataBlock::Xmp(xmp));
+        }
+        if let Some(iptc) = &self.iptc {
+            blocks.push(MetadataBlock::IptcIim(iptc));
+        }
+        if let Some(icc) = &self.icc {
+            blocks.push(MetadataBlock::Icc(icc));
+        }
+        blocks
+    }
+
+    /// The EXIF sub-IFD to write, or `None` when there is no EXIF content worth a directory.
+    fn exif_ifd(&self) -> Option<&Ifd> {
+        self.exif
+            .as_ref()
+            .and_then(Exif::exif_ifd)
+            .filter(|ifd| !ifd.fields().is_empty())
+    }
+
     /// Whether there is nothing to embed.
     pub(crate) fn is_empty(&self) -> bool {
-        self.exif.is_empty() && self.xmp.is_none() && self.iptc.is_none() && self.icc.is_none()
+        self.exif_ifd().is_none() && self.xmp.is_none() && self.iptc.is_none() && self.icc.is_none()
     }
 
     /// Writes the XMP / IPTC / ICC blocks into `ifd0` and returns the EXIF sub-IFD, if any.
@@ -89,17 +120,30 @@ impl DngMetadata {
         if let Some(icc) = &self.icc {
             ifd0.set(tags::ICC_PROFILE, Value::Undefined(icc.clone()));
         }
-        if self.exif.is_empty() {
-            None
-        } else {
-            Some(self.exif.to_ifd())
+        let mut exif = self.exif_ifd()?.clone();
+        if exif.get(tags::EXIF_VERSION).is_none() {
+            exif.set(
+                tags::EXIF_VERSION,
+                Value::Undefined(DEFAULT_EXIF_VERSION.to_vec()),
+            );
         }
+        Some(exif)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use gamut_ifd::ByteOrder;
+    use gamut_metadata::exif::ExifTag;
+
     use super::*;
+
+    /// An [`Exif`] whose Exif sub-IFD carries `tag`.
+    fn exif_with(tag: ExifTag, value: Value) -> Exif {
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.set_tag(tag, value);
+        exif
+    }
 
     #[test]
     fn empty_metadata_writes_nothing() {
@@ -108,68 +152,75 @@ mod tests {
         assert!(meta.is_empty());
         assert!(meta.apply(&mut ifd).is_none());
         assert!(ifd.fields().is_empty());
+        assert!(meta.blocks().is_empty());
     }
 
     #[test]
-    fn applies_blocks_and_builds_exif() {
-        let mut ifd = Ifd::new();
-        let meta = DngMetadata {
-            exif: ExifMetadata {
-                iso_speed: Some(400),
-                exposure_time: Some((1, 250)),
+    fn an_exif_model_with_no_sub_ifd_content_is_empty() {
+        // A bare model, and one whose *0th* IFD is populated, both leave the DNG's `ExifIFD`
+        // slot with nothing to write — only the Exif sub-IFD crosses into the file.
+        let mut image_only = Exif::new(ByteOrder::LittleEndian);
+        image_only
+            .image_mut()
+            .set(271, Value::Ascii("gamut".into()));
+        for exif in [Exif::new(ByteOrder::LittleEndian), image_only] {
+            let meta = DngMetadata {
+                exif: Some(exif),
                 ..Default::default()
-            },
+            };
+            assert!(meta.is_empty());
+            assert!(meta.apply(&mut Ifd::new()).is_none());
+        }
+    }
+
+    #[test]
+    fn applies_blocks_and_carries_the_exif_sub_ifd() {
+        let mut ifd = Ifd::new();
+        let mut exif = exif_with(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+        exif.set_tag(ExifTag::ExposureTime, Value::Rational(vec![(1, 250)]));
+        let meta = DngMetadata {
+            exif: Some(exif),
             xmp: Some(b"<x:xmpmeta/>".to_vec()),
             icc: Some(vec![0u8; 8]),
             ..Default::default()
         };
         assert!(!meta.is_empty());
-        let exif = meta.apply(&mut ifd).expect("exif IFD");
+        let written = meta.apply(&mut ifd).expect("exif IFD");
         assert_eq!(
             ifd.get(tags::XMP),
             Some(&Value::Byte(b"<x:xmpmeta/>".to_vec()))
         );
         assert!(ifd.get(tags::ICC_PROFILE).is_some());
         assert_eq!(
-            exif.get(tags::ISO_SPEED_RATINGS),
+            written.get(tags::ISO_SPEED_RATINGS),
             Some(&Value::Short(vec![400]))
         );
         assert_eq!(
-            exif.get(tags::EXPOSURE_TIME),
+            written.get(tags::EXPOSURE_TIME),
             Some(&Value::Rational(vec![(1, 250)]))
         );
-        assert!(exif.get(tags::EXIF_VERSION).is_some());
+        // Every field of the supplied directory survives, and the mandatory version is supplied.
+        assert_eq!(written.fields().len(), 3);
+        assert_eq!(
+            written.get(tags::EXIF_VERSION),
+            Some(&Value::Undefined(DEFAULT_EXIF_VERSION.to_vec()))
+        );
     }
 
     #[test]
-    fn exif_is_empty_only_when_every_field_is_unset() {
-        assert!(ExifMetadata::default().is_empty());
-        // Each field on its own makes the IFD worth writing — pins that every `&&` term contributes.
-        let singles = [
-            ExifMetadata {
-                exposure_time: Some((1, 250)),
-                ..Default::default()
-            },
-            ExifMetadata {
-                f_number: Some((28, 10)),
-                ..Default::default()
-            },
-            ExifMetadata {
-                iso_speed: Some(100),
-                ..Default::default()
-            },
-            ExifMetadata {
-                date_time_original: Some("2026:06:14 00:00:00".to_owned()),
-                ..Default::default()
-            },
-            ExifMetadata {
-                focal_length: Some((50, 1)),
-                ..Default::default()
-            },
-        ];
-        for (i, exif) in singles.iter().enumerate() {
-            assert!(!exif.is_empty(), "field {i} alone must be non-empty");
-        }
+    fn a_supplied_exif_version_is_not_overwritten() {
+        let meta = DngMetadata {
+            exif: Some(exif_with(
+                ExifTag::ExifVersion,
+                Value::Undefined(b"0300".to_vec()),
+            )),
+            ..Default::default()
+        };
+        let written = meta.apply(&mut Ifd::new()).expect("exif IFD");
+        assert_eq!(
+            written.get(tags::EXIF_VERSION),
+            Some(&Value::Undefined(b"0300".to_vec()))
+        );
     }
 
     #[test]
@@ -177,10 +228,10 @@ mod tests {
         assert!(DngMetadata::default().is_empty());
         let singles = [
             DngMetadata {
-                exif: ExifMetadata {
-                    iso_speed: Some(100),
-                    ..Default::default()
-                },
+                exif: Some(exif_with(
+                    ExifTag::PhotographicSensitivity,
+                    Value::Short(vec![100]),
+                )),
                 ..Default::default()
             },
             DngMetadata {
@@ -199,5 +250,26 @@ mod tests {
         for (i, meta) in singles.iter().enumerate() {
             assert!(!meta.is_empty(), "block {i} alone must be non-empty");
         }
+    }
+
+    #[test]
+    fn blocks_expose_every_byte_carrier_in_facade_form() {
+        let meta = DngMetadata {
+            exif: Some(exif_with(
+                ExifTag::PhotographicSensitivity,
+                Value::Short(vec![100]),
+            )),
+            xmp: Some(b"<x:xmpmeta/>".to_vec()),
+            iptc: Some(vec![0x1c, 0x02, 0x05]),
+            icc: Some(vec![7u8; 4]),
+        };
+        assert_eq!(
+            meta.blocks(),
+            vec![
+                MetadataBlock::Xmp(b"<x:xmpmeta/>"),
+                MetadataBlock::IptcIim(&[0x1c, 0x02, 0x05]),
+                MetadataBlock::Icc(&[7u8; 4]),
+            ]
+        );
     }
 }

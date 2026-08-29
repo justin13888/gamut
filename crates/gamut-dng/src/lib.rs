@@ -104,10 +104,16 @@ pub use gamut_core::{Dimensions, Error, Result};
 // `Segment`/`SpanKind` are part of the preservation surface, naming the byte runs a real camera
 // file carries that its own structures do not account for.
 pub use gamut_ifd::{ByteOrder, Segment, SpanKind, Value};
+// The shared metadata facade supplies this crate's metadata models rather than a DNG-local
+// restatement of them: `DngMetadata::exif` *is* the facade's `Exif`, and `DngMetadata::blocks`
+// hands the byte carriers over as `MetadataBlock`s. Re-exported so a caller can build and read
+// that surface without also depending on `gamut-metadata` directly.
+pub use gamut_metadata::MetadataBlock;
+pub use gamut_metadata::exif::{Exif, ExifTag, Rational};
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
 pub use lossless_jpeg::LosslessJpeg;
-pub use metadata::{DngMetadata, ExifMetadata};
+pub use metadata::DngMetadata;
 pub use opcode::{Opcode, OpcodeList, opcode_id};
 pub use profile::CameraProfile;
 pub use raw::{RawImage, RawPhotometry, cfa_color};

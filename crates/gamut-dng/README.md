@@ -14,8 +14,11 @@ raw decoder) that is:
   structure is a classic source of parser exploits, so the decoder is built to be robust against
   malformed IFDs, offset loops, and truncation.
 - **Built on shared primitives.** DNG is a profile of TIFF/EP, so its IFD container is the shared
-  [`gamut-ifd`](../gamut-ifd) crate (the same spine [`gamut-tiff`](../gamut-tiff) uses); this crate
-  adds only the DNG-specific tags, raw photometry, colour calibration, compression, and metadata.
+  [`gamut-ifd`](../gamut-ifd) crate (the same spine [`gamut-tiff`](../gamut-tiff) uses), and its
+  embedded metadata is the workspace facade's model, not a DNG-local restatement: a DNG's
+  `ExifIFD` *is* an EXIF sub-IFD, so `DngMetadata::exif` is
+  [`gamut-metadata`](../gamut-metadata)'s `Exif` over that very same directory type. This crate
+  adds only the DNG-specific tags, raw photometry, colour calibration, and compression.
 - **Permissively licensed**, matching the royalty-free DNG format.
 
 DNG is **natively a still-image** raw format — a good long-term fit for gamut's image-first focus.
@@ -59,7 +62,9 @@ Implemented and conformance-checked against the Adobe DNG SDK (issue #109); see
   BlackLevel repeat pattern with RATIONAL values, `BlackLevelDeltaH/V`, per-plane `WhiteLevel`,
   `LinearizationTable`, `MaskedAreas`), active area, default crop, and 8/10/12/14/16-bit packing;
   typed `OpcodeList1/2/3` containers (parse + pass-through write); an embedded RGB preview;
-  EXIF/XMP/IPTC/ICC metadata; classic TIFF and **BigTIFF**; the minimal `DNGVersion` and the
+  EXIF/XMP/IPTC/ICC metadata — the `ExifIFD` carried whole as `gamut-metadata`'s `Exif`, the
+  XMP/IPTC-IIM/ICC payloads verbatim and handed over as its `MetadataBlock`s; classic TIFF and
+  **BigTIFF**; the minimal `DNGVersion` and the
   spec's `DNGBackwardVersion` raises computed automatically.
 - **Beyond the raw image** (decode): every other image IFD as a typed `SubImage` — previews,
   transparency and **semantic masks** (`SemanticName`/`SemanticInstanceID`/`MaskSubArea`), depth
