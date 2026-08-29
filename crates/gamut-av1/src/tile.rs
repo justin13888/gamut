@@ -1260,6 +1260,16 @@ impl<'a> FrameEncoder<'a> {
             self.luma_range(sx, sy, bw, hp) <= 32 && self.luma_range(sx, sy + hp, bw, hp) <= 32;
         let vert_ok =
             self.luma_range(sx, sy, hp, bw) <= 32 && self.luma_range(sx + hp, sy, hp, bw) <= 32;
+        // §6.10.4 / §5.11.38: a half whose *chroma* residual is `BLOCK_INVALID` cannot be coded —
+        // at 4:2:2 that is every taller-than-wide shape. The residual loop's invariant is that the
+        // partition search never emits one, so the constraint belongs here; without it a vertical
+        // split on 4:2:2 content reaches an unreachable-by-contract arm. Monochrome has no chroma
+        // plane to constrain.
+        let chroma_codable = |w: usize, h: usize| {
+            !self.has_chroma() || plane_residual_size(w, h, 1, self.subsampling).is_some()
+        };
+        let horz_ok = horz_ok && chroma_codable(bw, hp);
+        let vert_ok = vert_ok && chroma_codable(hp, bw);
         if horz_ok {
             Some(1)
         } else if vert_ok {

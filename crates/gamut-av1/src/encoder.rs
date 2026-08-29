@@ -148,6 +148,18 @@ fn encode_with(
             "AV1: superres over a monochrome source is not implemented",
         ));
     }
+    // The lossless path is 4:4:4 (or monochrome) only. §5.11.45 makes `is_cfl_allowed` under
+    // `Lossless` the test `Subsampled_Size[MiSize][subX][subY] == BLOCK_4X4`, which at 4:2:0 is
+    // true for 4x8, 8x4 and 8x8 as well as 4x4 — while the tile encoder tests `bw == 4`. Coding a
+    // subsampled lossless block would therefore emit `uv_mode` against the wrong CDF and
+    // desynchronise the decoder's symbol reader. #390 lifts the 4:4:4 restriction for the *lossy*
+    // path only, so the lossless one is refused rather than silently mis-coded.
+    if qindex == 0 && !monochrome && subsampling != ChromaSubsampling::Cs444 {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AV1: lossless coding requires 4:4:4 or monochrome planes",
+        ));
+    }
     // §6.4.2: "If matrix_coefficients is equal to MC_IDENTITY, it is a requirement of bitstream
     // conformance that subsampling_x is equal to 0 and subsampling_y is equal to 0." The identity
     // matrix carries R'G'B' directly, and the three colour planes cannot be sampled at different
@@ -398,6 +410,68 @@ mod tests {
         let planes = Planar8::from_planes(4, 2, [vec![0; 8], vec![0; 8], vec![0; 8]]).unwrap();
         let (_, recon) = encode_still_intra(&planes, 40).expect("encodes");
         let _ = recon.plane_dimensions(3);
+    }
+
+    #[test]
+    fn a_vertical_edge_at_four_two_two_does_not_reach_an_invalid_chroma_block() {
+        // A strong vertical edge is what makes `decide_rect` prefer PARTITION_VERT, producing a
+        // taller-than-wide half whose 4:2:2 chroma residual is `BLOCK_INVALID` (§5.11.38). The
+        // partition search must never emit one, so this encodes rather than hitting the residual
+        // loop's unreachable-by-contract arm.
+        let mut rgb = vec![0u8; 32 * 32 * 3];
+        for y in 0..32 {
+            for x in 16..32 {
+                let i = (y * 32 + x) * 3;
+                rgb[i] = 255;
+                rgb[i + 1] = 255;
+                rgb[i + 2] = 255;
+            }
+        }
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(32, 32).unwrap()).unwrap();
+        let m = RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            BitDepth::Eight,
+        )
+        .unwrap();
+        let colour = Av1Colour {
+            matrix: gamut_color::cicp::MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        let planes =
+            Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs422).unwrap();
+        let (still, _) = encode_still_intra_with(&planes, 40, colour).expect("4:2:2 encodes");
+        assert_eq!(still.config.seq_profile, 2);
+    }
+
+    #[test]
+    fn lossless_requires_four_four_four_or_monochrome() {
+        // §5.11.45 makes `is_cfl_allowed` under Lossless `Subsampled_Size[..] == BLOCK_4X4`, true
+        // at 4:2:0 for 4x8/8x4/8x8 as well as 4x4, while the tile encoder tests `bw == 4`. Coding
+        // a subsampled lossless block would pick the wrong `uv_mode` CDF and desync the decoder,
+        // so the whole combination is refused. #390 lifts 4:4:4 for the *lossy* path only.
+        let rgb = vec![0u8; 8 * 8 * 3];
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(8, 8).unwrap()).unwrap();
+        let m = RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            BitDepth::Eight,
+        )
+        .unwrap();
+        let planes =
+            Planar8::from_rgb8_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
+        let colour = Av1Colour {
+            matrix: gamut_color::cicp::MatrixCoefficients::Bt709,
+            ..Av1Colour::default()
+        };
+        let err = encode_still_intra_with(&planes, 0, colour)
+            .expect_err("lossless 4:2:0 is refused, not mis-coded");
+        assert_eq!(
+            err.static_message(),
+            Some("AV1: lossless coding requires 4:4:4 or monochrome planes")
+        );
+        // The same planes encode on the lossy path, so the rejection is keyed on the quantizer.
+        assert!(encode_still_intra_with(&planes, 40, colour).is_ok());
     }
 
     #[test]
