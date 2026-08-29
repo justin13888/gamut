@@ -424,23 +424,49 @@ impl<'a> SymbolDecoder<'a> {
         (1u32 << length) + rest
     }
 
-    /// The `exit_symbol()` check of AV1 §8.2.4: the trailing padding of a tile must be zero.
+    /// The bit at `pos`, zero past the end of `data` — the same padding [`Self::read_f`] reads.
+    const fn bit_at(&self, pos: usize) -> u8 {
+        if pos >= self.data.len() * 8 {
+            return 0;
+        }
+        (self.data[pos >> 3] >> (7 - (pos & 7))) & 1
+    }
+
+    /// The `exit_symbol()` check of AV1 §8.2.4, run at the end of a tile.
     ///
-    /// Returns `false` when a non-zero bit is found in the padding — a malformed tile. The
-    /// symbol decoder itself is total (it pads with zeroes), so this is the only place a tile's
-    /// framing is validated.
+    /// Returns `false` for a tile that violates any of the section's three conformance
+    /// requirements: `SymbolMaxBits >= -14`, a `1` bit at `trailingBitPosition`, and zeroes
+    /// strictly between there and `paddingEndPosition`. The symbol decoder itself is total (it
+    /// pads with zeroes past the end of the data), so this is the only place a tile's framing is
+    /// validated.
     #[must_use]
     pub fn exit_symbol(&self) -> bool {
-        // Bits from the current position to the end of `data` must all be zero. `bit_pos` can sit
-        // past the end after reading into the padding region, in which case there is nothing left.
-        let mut pos = self.bit_pos;
-        // `max_bits` going negative means the decoder consumed padding it invented; the spec's
-        // `PaddingBit` check covers only the real bytes, so clamp to the data.
-        while pos < self.data.len() * 8 {
-            if (self.data[pos >> 3] >> (7 - (pos & 7))) & 1 != 0 {
+        // §8.2.4's first conformance requirement. Below -14 the decoder has invented more padding
+        // than the trailing bits can account for, and `trailingBitPosition` is not even defined.
+        if self.max_bits < -14 {
+            return false;
+        }
+        // trailingBitPosition = get_position() - Min(15, SymbolMaxBits + 15). The Min is in
+        // 1..=15 here, and `bit_pos` is always at least that far in: `init_symbol` reads
+        // `Min(8 * sz, 15)` bits up front (which is
+        // `Min(15, SymbolMaxBits + 15)` at that moment) and renormalisation only ever adds to it,
+        // so the saturation never binds.
+        let back = core::cmp::min(15, self.max_bits + 15) as usize;
+        let trailing = self.bit_pos.saturating_sub(back);
+        // The position indicator then advances by Max(0, SymbolMaxBits), which lands exactly on
+        // the end of the tile's bytes: `get_position() + SymbolMaxBits` is `8 * sz` for as long as
+        // SymbolMaxBits is non-negative, and once it goes negative `get_position()` has already
+        // stopped at `8 * sz` because renormalisation reads `Min(bits, Max(0, SymbolMaxBits))`.
+        let padding_end = self.data.len() * 8;
+        // The trailing bit closes the tile's arithmetic; an all-zero tail is non-conformant, not
+        // merely padding.
+        if self.bit_at(trailing) != 1 {
+            return false;
+        }
+        for pos in trailing + 1..padding_end {
+            if self.bit_at(pos) != 0 {
                 return false;
             }
-            pos += 1;
         }
         true
     }
@@ -747,6 +773,88 @@ mod tests {
         let mut count = 3u16;
         assert_eq!(with_empty.read_symbol_adapt(&mut [], &mut count), 0);
         assert_eq!(count, 3, "an empty CDF has nothing to adapt");
+    }
+
+    #[test]
+    fn exit_symbol_accepts_a_tile_the_encoder_flushed() {
+        // `finish` emits od_ec's minimal flush, whose `| (m + 1)` term *is* §8.2.4's trailing one
+        // bit. Decoding the whole tile back must therefore leave `exit_symbol` satisfied, for a
+        // flush of every length the coder produces.
+        let mut rng = Lcg(0x243f_6a88_85a3_08d3);
+        for nsyms in 2..8usize {
+            for len in [0usize, 1, 2, 7, 40, 300] {
+                let cdf = random_cdf(&mut rng, nsyms);
+                let stream: Vec<usize> =
+                    (0..len).map(|_| rng.below(nsyms as u32) as usize).collect();
+                let mut enc = SymbolEncoder::new();
+                for &s in &stream {
+                    enc.encode_symbol(s, &cdf);
+                }
+                let bytes = enc.finish();
+
+                let mut dec = SymbolDecoder::new(&bytes);
+                for (i, &s) in stream.iter().enumerate() {
+                    assert_eq!(
+                        dec.read_symbol(&cdf),
+                        s,
+                        "nsyms {nsyms}, len {len}, event {i}"
+                    );
+                }
+                assert!(
+                    dec.exit_symbol(),
+                    "a flushed tile of {len} symbols over {nsyms} must exit cleanly"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exit_symbol_rejects_a_tile_that_never_carried_its_trailing_bit() {
+        // §8.2.4 needs three things, and only the last is "the padding is zero". An all-zero tile
+        // satisfies that one and fails the other two, so checking padding alone silently accepts
+        // it: here `SymbolMaxBits` is 9 and `trailingBitPosition` is 0, whose bit must be 1.
+        assert!(!SymbolDecoder::new(&[0x00, 0x00, 0x00]).exit_symbol());
+
+        // The same tile with the trailing bit actually present is conformant.
+        assert!(SymbolDecoder::new(&[0x80, 0x00, 0x00]).exit_symbol());
+
+        // A bit set strictly between trailingBitPosition and paddingEndPosition is not padding.
+        // `paddingEndPosition` is the end of the tile's bytes, so the last byte is covered too.
+        assert!(!SymbolDecoder::new(&[0x80, 0x00, 0x04]).exit_symbol());
+        assert!(!SymbolDecoder::new(&[0x80, 0x40, 0x00]).exit_symbol());
+
+        // SymbolMaxBits is 8 * sz - 15, so a zero-length tile sits at -15: below §8.2.4's floor,
+        // and with no trailing bit anywhere to find.
+        assert!(!SymbolDecoder::new(&[]).exit_symbol());
+    }
+
+    #[test]
+    fn exit_symbol_tracks_the_trailing_bit_as_the_decoder_advances() {
+        // `trailingBitPosition` is derived from the decoder's own position and SymbolMaxBits, so
+        // it moves with the read cursor: the flush of a one-symbol tile is accepted only once
+        // that symbol has been consumed, and a tile decoded past its flush is refused.
+        let cdf = [16384u16, 32768];
+        let mut enc = SymbolEncoder::new();
+        for _ in 0..12 {
+            enc.encode_symbol(1, &cdf);
+        }
+        let bytes = enc.finish();
+
+        let mut dec = SymbolDecoder::new(&bytes);
+        for _ in 0..12 {
+            let _ = dec.read_symbol(&cdf);
+        }
+        assert!(dec.exit_symbol(), "the flush point exits cleanly");
+
+        // Reading on drives SymbolMaxBits down through §8.2.4's -14 floor.
+        let mut over = dec;
+        for _ in 0..32 {
+            let _ = over.read_symbol(&cdf);
+        }
+        assert!(
+            !over.exit_symbol(),
+            "a tile read past its padding is malformed"
+        );
     }
 
     #[test]
