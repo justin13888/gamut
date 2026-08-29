@@ -1451,6 +1451,73 @@ mod tests {
     }
 
     #[test]
+    fn tile_info_spaces_multiple_tile_rows_uniformly() {
+        // 256x256 is 4x4 64x64-superblocks. `tile_rows_log2 = 1` splits it into two tile rows of
+        // `ceil(4 / 2) = 2` superblocks, so the second row starts at superblock 2 — MI unit
+        // `2 << sbShift` = 32. Every other case in this suite has a single tile row, where both
+        // the ceiling term and the `<< sbShift` are unobservable: the loop pushes one start of 0
+        // whatever they compute.
+        let still = crate::decode::testutil::StillBuilder {
+            width: 256,
+            height: 256,
+            width_bits: 8,
+            height_bits: 8,
+            tile_rows_log2: 1,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.tile_info.tile_rows, 2);
+        assert_eq!(fh.tile_info.mi_row_starts, [0, 32, 64]);
+        assert_eq!(fh.tile_info.tile_rows_log2, 1);
+        // The columns stay a single tile, so the row spacing is the only thing under test.
+        assert_eq!(fh.tile_info.tile_cols, 1);
+        assert_eq!(fh.tile_info.mi_col_starts, [0, 64]);
+    }
+
+    #[test]
+    fn tile_info_reads_explicit_tile_spacing() {
+        // `uniform_tile_spacing_flag = 0` codes every tile's width and height as an `ns()` size
+        // instead of deriving them from a log2 count (§5.9.15). Neither `gamut-av1`'s encoder nor
+        // libaom ever writes this branch — both emit uniform spacing — so `StillBuilder` is the
+        // only way to reach it. A 2x2 grid over 4x4 superblocks puts each boundary at superblock
+        // 2, MI unit 32.
+        let still = crate::decode::testutil::StillBuilder {
+            width: 256,
+            height: 256,
+            width_bits: 8,
+            height_bits: 8,
+            explicit_tiles: Some((&[2, 2], &[2, 2])),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.tile_info.tile_cols, 2);
+        assert_eq!(fh.tile_info.tile_rows, 2);
+        assert_eq!(fh.tile_info.mi_col_starts, [0, 32, 64]);
+        assert_eq!(fh.tile_info.mi_row_starts, [0, 32, 64]);
+        assert_eq!(fh.tile_info.tile_cols_log2, 1);
+        assert_eq!(fh.tile_info.tile_rows_log2, 1);
+    }
+
+    #[test]
+    fn lr_params_are_skipped_when_all_lossless_even_with_restoration_enabled() {
+        // §5.9.20 returns the disabled defaults without coding a bit once AllLossless holds, even
+        // though the sequence header enabled restoration. Reading `lr_type` here would consume
+        // the bits that follow it and desync the rest of the header.
+        let still = crate::decode::testutil::StillBuilder {
+            enable_restoration: true,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq, fh) = parse_built(&still);
+        assert!(seq.enable_restoration);
+        assert!(fh.all_lossless);
+        assert_eq!(fh.lr.frame_restoration_type, [RestorationType::None; 3]);
+        assert!(!fh.lr.uses_lr);
+        assert_eq!(fh.lr.loop_restoration_size, [RESTORATION_TILESIZE_MAX; 3]);
+        // The bit `lr_params()` must not have eaten.
+        assert!(fh.reduced_tx_set);
+    }
+
+    #[test]
     fn superres_rounds_with_half_the_denominator() {
         // §5.9.8: FrameWidth = (UpscaledWidth * 8 + SuperresDenom / 2) / SuperresDenom. The
         // `/ 2` rounding term changes the result for an odd denominator, so coded_denom 2

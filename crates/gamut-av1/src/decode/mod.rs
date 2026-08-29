@@ -375,9 +375,17 @@ pub(crate) mod testutil {
         pub tile_cols_log2: u32,
         /// See [`tile_cols_log2`](Self::tile_cols_log2).
         pub tile_rows_log2: u32,
+        /// Explicit tile sizes in superblocks as `(per column, per row)`, coding
+        /// `uniform_tile_spacing_flag = 0` and an `ns()` size for every tile. `None` codes the
+        /// uniform branch from [`tile_cols_log2`](Self::tile_cols_log2) /
+        /// [`tile_rows_log2`](Self::tile_rows_log2) instead. Neither encoder emits this branch.
+        pub explicit_tiles: Option<(&'static [u32], &'static [u32])>,
         /// `enable_cdef` in the sequence header. A `CodedLossless` frame must still skip
         /// `cdef_params()` when this is set (§5.9.19).
         pub enable_cdef: bool,
+        /// `enable_restoration` in the sequence header. An `AllLossless` frame must still skip
+        /// `lr_params()` when this is set (§5.9.20).
+        pub enable_restoration: bool,
         /// Code an `INTRA_ONLY_FRAME` instead of a `KEY_FRAME`, which makes `error_resilient_mode`
         /// and `refresh_frame_flags` explicit (§5.9.2).
         pub intra_only: bool,
@@ -412,7 +420,9 @@ pub(crate) mod testutil {
                 render_size: None,
                 tile_cols_log2: 0,
                 tile_rows_log2: 0,
+                explicit_tiles: None,
                 enable_cdef: false,
+                enable_restoration: false,
                 intra_only: false,
                 refresh_frame_flags: 0xff,
                 frame_id_lengths: None,
@@ -480,7 +490,7 @@ pub(crate) mod testutil {
             }
             w.put_bit(0); // enable_superres
             w.put_bit(u8::from(self.enable_cdef));
-            w.put_bit(0); // enable_restoration
+            w.put_bit(u8::from(self.enable_restoration));
             // color_config(): 8-bit, then the sRGB shortcut infers full range and 4:4:4.
             w.put_bit(0); // high_bitdepth
             w.put_bit(1); // color_description_present_flag
@@ -573,7 +583,10 @@ pub(crate) mod testutil {
             w.byte_align(); // byte_alignment() before the tile group
             let mut out = w.into_bytes();
             // One tile group carrying a single byte of (never-decoded) tile data per tile.
-            let tiles = (1usize << self.tile_cols_log2) * (1usize << self.tile_rows_log2);
+            let tiles = match self.explicit_tiles {
+                Some((cols, rows)) => cols.len() * rows.len(),
+                None => (1usize << self.tile_cols_log2) * (1usize << self.tile_rows_log2),
+            };
             if tiles > 1 {
                 out.push(0); // tile_start_and_end_present_flag = 0, then byte alignment
                 for _ in 0..tiles - 1 {
@@ -616,6 +629,37 @@ pub(crate) mod testutil {
             let min_log2_tiles =
                 min_log2_tile_cols.max(tile_log2(max_tile_area_sb, sb_rows * sb_cols));
 
+            if let Some((cols, rows)) = self.explicit_tiles {
+                w.put_bit(0); // uniform_tile_spacing_flag
+                let mut start_sb = 0;
+                for &size_sb in cols {
+                    let max_width = (sb_cols - start_sb).min(max_tile_width_sb);
+                    put_ns(w, size_sb - 1, max_width); // width_in_sbs_minus_1
+                    start_sb += size_sb;
+                }
+                // §5.9.15 recomputes maxTileAreaSb from the columns just coded before the rows.
+                let widest_tile_sb = cols.iter().copied().max().unwrap_or(1);
+                let area_sb = if min_log2_tiles > 0 {
+                    (sb_rows * sb_cols) >> (min_log2_tiles + 1)
+                } else {
+                    sb_rows * sb_cols
+                };
+                let max_tile_height_sb = (area_sb / widest_tile_sb.max(1)).max(1);
+                let mut start_sb = 0;
+                for &size_sb in rows {
+                    let max_height = (sb_rows - start_sb).min(max_tile_height_sb);
+                    put_ns(w, size_sb - 1, max_height); // height_in_sbs_minus_1
+                    start_sb += size_sb;
+                }
+                let cols_log2 = tile_log2(1, cols.len() as u32);
+                let rows_log2 = tile_log2(1, rows.len() as u32);
+                if cols_log2 > 0 || rows_log2 > 0 {
+                    w.put_bits(0, rows_log2 + cols_log2); // context_update_tile_id
+                    w.put_bits(0, 2); // tile_size_bytes_minus_1 => TileSizeBytes = 1
+                }
+                return;
+            }
+
             w.put_bit(1); // uniform_tile_spacing_flag
             let mut cols_log2 = min_log2_tile_cols;
             while cols_log2 < max_log2_tile_cols {
@@ -648,6 +692,21 @@ pub(crate) mod testutil {
             write_obu(&mut out, 1, &self.sequence_header()); // OBU_SEQUENCE_HEADER
             write_obu(&mut out, 6, &self.frame_obu()); // OBU_FRAME
             out
+        }
+    }
+
+    /// Writes the `ns(n)` descriptor (AV1 §4.10.7) — the inverse of `BitReader::ns`.
+    fn put_ns(w: &mut BitWriter, value: u32, n: u32) {
+        let width = 32 - n.leading_zeros(); // FloorLog2(n) + 1
+        let m = (1u32 << width) - n;
+        if value < m {
+            w.put_bits(value, width - 1);
+        } else {
+            // The reader recovers `(v << 1) - m + extra`, so split `value + m` into its high
+            // bits and its low one.
+            let x = value + m;
+            w.put_bits(x >> 1, width - 1);
+            w.put_bits(x & 1, 1);
         }
     }
 
