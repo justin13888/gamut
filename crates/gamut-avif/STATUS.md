@@ -371,6 +371,65 @@ signal. The existing per-call `decode_*` entry points stay, so this lands semver
 blocked on nothing but sequencing; the pure-Rust AV1 decoder, when it arrives, becomes the
 implicit tail exactly as `gamut-av1` is on the encode side.
 
+## N. Pure-Rust AV1 codestream decoder (issue #259)
+
+The last decode-side gap. Section L decodes the container and hands the AV1 codestream to a
+caller-supplied `Av1StillDecoder`; this section is the **software implementation of that trait** —
+what makes the seam optional and unblocks `gamut_core::DecodeImage` for AVIF (section K) on
+targets with no hardware AV1 decode.
+
+It lives in `gamut-av1` behind a default-on `decode` feature, not in a new crate: the decoder
+needs `cdf.rs` (the §9.4 tables), `filter.rs`, `transform.rs` and `quant.rs`, which are private to
+that crate, and roughly half the normative decode-side maths is already written there to serve the
+encoder's reconstruction buffer. `default-features = false` yields the encoder-only crate exactly
+as it was.
+
+Delivered in slices, one PR each, the way section L delivered #250:
+**D1** the bit reader + symbol decoder (`gamut-bitstream`), **D2** the shared intra predictors,
+**D3** OBU / sequence header / frame header / tile-group framing (`decode/{obu,header,tilegroup}.rs`),
+**D4** tile parsing (partition, mode info, coefficients), **D5** reconstruction and the in-loop
+filters, **D6** the pixel-format matrix, **D7** the `gamut-avif` wiring.
+
+A decoder cannot pick a subset the way the encoder does — it must accept whatever a conformant
+encoder produced — so a ☐ row here is **refused with a typed `Error::Unsupported` naming the
+tool**, never approximated and never silently mis-decoded.
+
+Oracle: libaom's reference **encoder** (`aom_oracle::encode_still_intra`), staged for this purpose
+in [`references/av1`](../../references/av1/README.md), with `aom_oracle::decode_av1` and
+`dav1d_oracle::decode_obu` as the authorities on what each stream means. Streams from libaom
+exercise tools `gamut-av1` never emits, which its own round-trip suite cannot reach.
+
+| Component | Spec | Status | Slice |
+| --- | --- | --- | --- |
+| `BitReader`: `f(n)`, `su(n)`, `ns(n)`, `uvlc()`, `le(n)`, `leb128()`, `trailing_bits()` | §4.10, §5.3.4/.5 | ✅ | D1 |
+| `SymbolDecoder`: `init_symbol`/`read_symbol`/§8.2.6 adaptation/`read_literal`/`exit_symbol` | §8.2 | ✅ | D1 |
+| OBU walk: header, extension header, LEB128 size, operating-point drop rule | §5.3 | ✅ | D3 |
+| Sequence header: reduced **and** general form, operating points, `color_config()` | §5.5.1/.2 | ✅ | D3 |
+| Frame header: frame/render/superres size, `CodedLossless`, `AllLossless` | §5.9.2/.5/.6/.8/.9 | ✅ | D3 |
+| `tile_info()`: uniform **and** explicit spacing, tile rows and columns, `TileSizeBytes` | §5.9.15/.16 | ✅ | D3 |
+| `quantization_params()` incl. `using_qmatrix`; `segmentation_params()`; delta-q / delta-lf | §5.9.12/.13/.14/.17/.18 | ✅ | D3 |
+| `loop_filter_params()` / `cdef_params()` / `lr_params()` / `read_tx_mode()` | §5.9.11/.19/.20/.21 | ✅ | D3 |
+| `film_grain_params()` parse (synthesis itself deferred) | §5.9.30 | ✅ (parse) | D3 |
+| Frame OBU + tile group framing, tile-size prefixes | §5.10, §5.11.1 | ✅ | D3 |
+| `DecodeLimits`: dimension / sample-count / tile-count caps applied before allocation | (hardening) | ✅ | D3 |
+| `Av1Decoder::inspect` → `StreamInfo` (headers without decoding samples) | (crate API) | ✅ | D3 |
+| Shared intra predictors (lifted from `tile.rs`), edge filter + upsample | §7.11.2 | ☐ | D2 |
+| `decode_tile` / `decode_partition` / `decode_block`, full partition set, 128×128 SB | §5.11.2-.4 | ☐ | D4 |
+| Mode info: intra Y/UV modes, `angle_delta`, filter-intra, CfL, palette | §5.11.5-.24, §5.11.42-.50 | ☐ | D4 |
+| `coeffs()`: all tx sizes and classes, `transform_type`, `read_tx_size` | §5.11.15-.17, §5.11.39/.47/.48 | ☐ | D4 |
+| Reconstruction: dequant → inverse transform → predict → add | §7.11-§7.13 | ☐ | D5 |
+| In-loop filters driven by the parsed header (deblock, CDEF, LR incl. self-guided + chroma, superres) | §7.14-§7.17 | ☐ | D5 |
+| 10/12-bit, 4:2:0/4:2:2, monochrome, profiles 0 and 2 | §5.5.2, Annex A | ☐ | D6 |
+| Intra block copy (`allow_intrabc`) | §7.11.x | ☐ | D6 |
+| Film grain synthesis | §7.18.3 | ☐ | D6 |
+| `SoftwareAv1Decoder` + `AvifDecoder` (`DecodeImage` for Rgb8/Rgba8/Rgb16/Rgba16) | gamut-avif | ☐ | D7 |
+| libaom differential suite over the size / quantizer / content / tools matrix | (oracle) | ✅ (headers) | D3 |
+
+**Refused, by design.** Inter frames, `show_existing_frame`, `OBU_TILE_LIST`, a partial tile
+group, and decoder-model info are refused where they are read: each would need reference-frame or
+sequence machinery the charter puts permanently out of scope, and parsing past them would desync
+the bitstream rather than fail cleanly.
+
 ## The v1 guarantee
 
 `gamut-avif` 1.0 promises: an encoder with **no pushed backend** emits exactly the bytes it always

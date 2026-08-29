@@ -15,6 +15,12 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["decode"]
+# The AV1 still *decoder* (issue #259). Default-on; turn it off with `default-features = false`
+# for an encode-only build. The encoder is never gated.
+decode = []
+
 [dependencies]
 gamut-core.workspace = true
 gamut-color.workspace = true
