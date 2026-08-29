@@ -1,7 +1,9 @@
 //! Encoder configuration: lossless vs. lossy selection, the quality knob, and the output colour
 //! encoding.
 
-use gamut_color::{ChromaSubsampling, ColorRange, MatrixCoefficients};
+use gamut_color::{
+    ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics,
+};
 
 /// Which AVIF bitstream the encoder produces.
 ///
@@ -66,6 +68,22 @@ pub struct AvifConfig {
     ///
     /// [`ChromaSubsampling::Cs400`] (monochrome) is rejected at encode time.
     pub chroma: ChromaSubsampling,
+    /// The CICP colour primaries the samples are tagged with — the gamut their R'G'B' values are
+    /// interpreted in.
+    ///
+    /// Unlike `matrix` and `range`, this is a **pure tag**: no sample is touched by it, so
+    /// [`AvifMode::Lossless`] honours it rather than ignoring it. Defaults to
+    /// [`ColourPrimaries::Bt709`] — sRGB's gamut.
+    pub primaries: ColourPrimaries,
+    /// The CICP transfer characteristics the samples are tagged with — the transfer function
+    /// already applied to them.
+    ///
+    /// A pure tag like `primaries`: the encoder applies **no** transfer function, so selecting e.g.
+    /// [`TransferCharacteristics::Pq`] *labels* samples the caller has already encoded that way. It
+    /// does not convert them, and it does not by itself make a conformant HDR image — the HDR
+    /// metadata properties (`mdcv`/`clli`) are still deferred (`STATUS.md`). Defaults to
+    /// [`TransferCharacteristics::Srgb`].
+    pub transfer: TransferCharacteristics,
 }
 
 impl Default for AvifConfig {
@@ -76,6 +94,8 @@ impl Default for AvifConfig {
             matrix: MatrixCoefficients::Identity,
             range: ColorRange::Full,
             chroma: ChromaSubsampling::Cs444,
+            primaries: ColourPrimaries::Bt709,
+            transfer: TransferCharacteristics::Srgb,
         }
     }
 }
@@ -91,6 +111,8 @@ mod tests {
         assert_eq!(c.quality, 75);
         assert_eq!(c.matrix, MatrixCoefficients::Identity);
         assert_eq!(c.range, ColorRange::Full);
+        assert_eq!(c.primaries, ColourPrimaries::Bt709);
+        assert_eq!(c.transfer, TransferCharacteristics::Srgb);
         assert_eq!(AvifMode::default(), AvifMode::Lossless);
     }
 

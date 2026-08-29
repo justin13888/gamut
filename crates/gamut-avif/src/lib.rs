@@ -127,7 +127,10 @@
 //! 4:4:4 — lossless through the identity matrix, lossy through **BT.709 YCbCr** by default, with
 //! BT.601 / BT.2020-NCL and studio range selectable ([`AvifEncoder::with_matrix`] /
 //! [`AvifEncoder::with_color_range`]); `irot`/`imir` display orientation ([`AvifEncoder::with_rotation`] /
-//! [`AvifEncoder::with_mirror`]); and the **container decode surface** above (full read of items,
+//! [`AvifEncoder::with_mirror`]); the **colour and metadata surface** — CICP primaries and transfer
+//! ([`AvifEncoder::with_primaries`] / [`AvifEncoder::with_transfer`]), an embedded ICC profile
+//! ([`AvifEncoder::with_icc_profile`]), and Exif / XMP items
+//! ([`AvifEncoder::with_exif`] / [`AvifEncoder::with_xmp`]); and the **container decode surface** above (full read of items,
 //! properties, derivations, and metadata; planar, 8-bit and high-bit-depth RGBA presentation around
 //! a caller decoder). Output is validated end-to-end against `libavif` (its dav1d-backed reference
 //! container decoder); the wrapped AV1 bitstream is cross-checked against `libaom` — the AV1
@@ -135,7 +138,7 @@
 //!
 //! **Deferred, planned** (tracked row-by-row against the specs in `STATUS.md`, whose disposition
 //! ledger is the authority): alpha / RGBA *encoding*, 10/12-bit and 4:2:0/4:2:2 chroma
-//! subsampling, colour-primaries selection and ICC / Exif / XMP emission, HDR (PQ/HLG and the HDR
+//! subsampling, the HDR surface beyond CICP tagging (`mdcv`/`clli` and the rest of the HDR
 //! metadata properties),
 //! `grid` / `tmap` (gain-map) / `sato` derivations and the remaining container transforms on the
 //! encode side, layered/progressive still images, encoder speed / rate control, the pure-Rust AV1

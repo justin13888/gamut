@@ -74,8 +74,18 @@ is offered for pipelines that need it rather than as a default. Lossy trades fid
 `0..=100` quality scale (higher = closer to the source; the `quality → base_q_idx` mapping and its
 silent clamp above 100 are a frozen v1 contract, defined in
 [`references/avif`](../../references/avif/README.md)). `irot`/`imir` display orientation is
-supported. Output is verified against real decoders (`libavif`, `dav1d`, `libaom`),
-linked from vendored `third_party/` submodules rather than system-installed binaries.
+supported.
+
+**Colour and metadata.** CICP colour primaries and transfer characteristics are selectable with
+`with_primaries` / `with_transfer` — tags, not conversions, so unlike the matrix and range knobs
+they apply on the lossless path too. `with_icc_profile` embeds an ICC profile as a `colr` box of
+type `prof`, kept alongside the CICP box rather than replacing it. `with_exif` (a bare TIFF stream;
+the encoder adds HEIF's 4-byte offset prefix) and `with_xmp` attach metadata items carrying a
+`cdsc` reference to the primary image. All five carry their payloads verbatim and leave the
+codestream untouched; libavif reads every one of them back byte-for-byte.
+
+Output is verified against real decoders (`libavif`, `dav1d`, `libaom`), linked from vendored
+`third_party/` submodules rather than system-installed binaries.
 
 **Decode surface.** The container read + codestream handoff (issue #250, mirroring what
 `gamut-heic` ships for HEIF): byte-accounting parse, the full item/property/derivation model, the
@@ -87,8 +97,8 @@ identity / BT.601 / BT.709 / BT.2020-NCL / monochrome colour, alpha merge, overl
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
-specs: **deferred, planned** features (alpha/HDR/wide-gamut *encoding*, 10/12-bit and monochrome,
-ICC/Exif/XMP emission, gain maps, layered/progressive images, the pure-Rust AV1
+specs: **deferred, planned** features (alpha *encoding*, 10/12-bit and monochrome, the HDR
+metadata properties beyond CICP tagging, gain maps, layered/progressive images, the pure-Rust AV1
 codestream decoder, the decoder backend registry, …) all land semver-minor on the frozen v1
 surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per
 the image-first workspace charter.
