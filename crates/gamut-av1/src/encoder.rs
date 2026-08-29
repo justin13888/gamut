@@ -1,4 +1,5 @@
-//! Top-level: turn planar samples into the AV1 temporal unit for an AVIF still image.
+//! Top-level: turn planar samples — 4:4:4, 4:2:2 or 4:2:0 colour, or a monochrome luma plane —
+//! into the AV1 temporal unit for an AVIF still image.
 
 use gamut_color::cicp::{ColorRange, MatrixCoefficients};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8};
@@ -89,9 +90,16 @@ pub fn encode_still_intra(planes: &Planar8, qindex: u8) -> Result<(EncodedStill,
 /// selects what the sequence header — and, through [`EncodedStill::config`], the container's `av1C`
 /// and `colr` boxes — declare the samples to be.
 ///
+/// This is also the entry point for a **monochrome** still: pass a
+/// [`ChromaSubsampling::Cs400`](gamut_color::ChromaSubsampling::Cs400) buffer (one luma plane, no
+/// chroma) together with [`Av1Colour::monochrome`]. The stream is then `seq_profile = 0` with
+/// `mono_chrome = 1` and no chroma is coded at all.
+///
 /// # Errors
 ///
-/// As [`encode_still_intra`].
+/// As [`encode_still_intra`], and [`Error::InvalidInput`] if monochrome planes are paired with
+/// [`MatrixCoefficients::Identity`] — AV1 §6.4.2 permits that matrix only at subsampling 0/0, and
+/// §5.5.2 infers 1/1 for a monochrome stream.
 pub fn encode_still_intra_with(
     planes: &Planar8,
     qindex: u8,
@@ -127,14 +135,33 @@ fn encode_with(
         ));
     }
     let subsampling = planes.subsampling();
+    let monochrome = subsampling == ChromaSubsampling::Cs400;
+    // Superres over a monochrome source is refused rather than half-supported: the downscale later
+    // in this function is written for three luma-sized planes and relabels its result 4:4:4, so a
+    // monochrome buffer would read an empty chroma slice at luma dimensions and then hand
+    // `FrameEncoder` a plane count disagreeing with the `monochrome` the frame header was given.
+    // Checked before the matrix rule below so `encode_still_intra_superres` — which supplies the
+    // default identity colour — reports the reason that actually applies.
+    if monochrome && coded_denom.is_some() {
+        return Err(Error::unsupported(
+            env!("CARGO_PKG_NAME"),
+            "AV1: superres over a monochrome source is not implemented",
+        ));
+    }
     // §6.4.2: "If matrix_coefficients is equal to MC_IDENTITY, it is a requirement of bitstream
     // conformance that subsampling_x is equal to 0 and subsampling_y is equal to 0." The identity
     // matrix carries R'G'B' directly, and the three colour planes cannot be sampled at different
-    // rates. §5.5.2 says the same structurally: the sRGB shortcut infers 4:4:4 whatever the profile.
+    // rates. §5.5.2 says the same structurally: the sRGB shortcut infers 4:4:4 whatever the
+    // profile, and a monochrome stream infers subsampling 1/1 — so identity is illegal there too.
     if colour.matrix == MatrixCoefficients::Identity && subsampling != ChromaSubsampling::Cs444 {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
-            "AV1: the identity matrix requires 4:4:4 chroma",
+            if monochrome {
+                "AV1: a monochrome stream cannot signal the identity matrix (§6.4.2 allows \
+                 MC_IDENTITY only at subsampling 0/0); use Av1Colour::monochrome()"
+            } else {
+                "AV1: the identity matrix requires 4:4:4 chroma"
+            },
         ));
     }
     // Annex A.2 / §6.4.1: Main (0) is 4:2:0, High (1) is 4:4:4, Professional (2) adds 4:2:2. There
@@ -144,10 +171,15 @@ fn encode_with(
         ChromaSubsampling::Cs444 => 1,
         ChromaSubsampling::Cs420 => 0,
         ChromaSubsampling::Cs422 => 2,
+        // Profile 1 (High) is the 4:4:4 profile and infers `mono_chrome = 0`, so a monochrome
+        // still is profile 0 (Main) — the only other profile that can code 8-bit here.
+        ChromaSubsampling::Cs400 => 0,
+        // `ChromaSubsampling` is `#[non_exhaustive]` and models layouts beyond AV1's (4:1:1, say).
+        // AV1 has no profile for one, so it is refused rather than mapped onto a nearby profile.
         _ => {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "AV1: monochrome encoding is not supported",
+                "AV1: unsupported chroma subsampling",
             ));
         }
     };
@@ -178,7 +210,9 @@ fn encode_with(
         seq_tier_0: 0,
         high_bitdepth: false,
         twelve_bit: false,
-        monochrome: false,
+        monochrome,
+        // Inferred, not coded, under monochrome: §5.5.2 fixes both to 1, which is what
+        // `ChromaSubsampling::Cs400.subsampling()` returns.
         chroma_subsampling_x: ss_x,
         chroma_subsampling_y: ss_y,
         // `CSP_UNKNOWN`. There is no code point for the centre siting a symmetric box filter
@@ -206,8 +240,15 @@ fn encode_with(
 
     let seq_payload =
         headers::sequence_header_payload(&config, width, height, qindex > 0, coded_denom.is_some());
-    let mut frame_payload =
-        headers::frame_header_payload(coded_w, height, mi_cols, mi_rows, qindex, coded_denom);
+    let mut frame_payload = headers::frame_header_payload(
+        coded_w,
+        height,
+        mi_cols,
+        mi_rows,
+        qindex,
+        coded_denom,
+        monochrome,
+    );
     let (tile_bytes, recon) = FrameEncoder::new(&coded_src, qindex).encode();
     // tile_group_obu (§5.11.1): the frame header already emitted the tile-group prefix (the
     // `tile_start_and_end_present_flag` and re-alignment for a multi-tile frame). Each tile but the
@@ -226,8 +267,12 @@ fn encode_with(
     let (uw, uh) = (width as usize, height as usize);
     let recon_planes: [Vec<u16>; 3] = if qindex == 0 {
         // Lossless: the reconstruction equals the 8-bit source; widen it into the u16 recon buffer.
+        // Each plane crops at its **own** extent — the source carries no coded padding, so the
+        // stride is the plane width. A monochrome buffer's chroma planes are empty and stay empty;
+        // cropping them at the luma extent would index past the end of a zero-length slice.
         std::array::from_fn(|i| {
-            crop(planes.plane(i), width, planes.width(), height)
+            let (pw, ph) = planes.plane_dimensions(i);
+            crop(planes.plane(i), pw, pw, ph)
                 .into_iter()
                 .map(u16::from)
                 .collect()

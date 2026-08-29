@@ -105,6 +105,27 @@ impl ChromaSubsampling {
         }
     }
 
+    /// The number of coded planes: 1 for [`Cs400`](Self::Cs400) (monochrome), 3 otherwise.
+    ///
+    /// This is AV1's `NumPlanes` (§5.5.2), the value that gates every chroma syntax element and
+    /// every chroma coding step. It is deliberately derived from the layout rather than stored
+    /// beside it, so a buffer cannot claim a plane count that disagrees with its subsampling.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_color::ChromaSubsampling;
+    /// assert_eq!(ChromaSubsampling::Cs444.num_planes(), 3);
+    /// assert_eq!(ChromaSubsampling::Cs400.num_planes(), 1);
+    /// ```
+    #[must_use]
+    pub fn num_planes(self) -> usize {
+        match self {
+            ChromaSubsampling::Cs400 => 1,
+            _ => 3,
+        }
+    }
+
     /// The dimensions of each chroma (Cb/Cr) plane for a luma plane of `width` × `height`.
     ///
     /// **Ceiling** division on the subsampled axes, so an odd luma dimension keeps the
