@@ -67,6 +67,18 @@ plane and drops every chroma syntax element the spec gates on `NumPlanes > 1`. U
 for a monochrome stream and §6.4.2 permits `MC_IDENTITY` only at 0/0, so the default identity matrix
 is rejected. The subsampled geometries (4:2:0 / 4:2:2) are still deferred.
 
+**10- and 12-bit** samples are encoded from a `gamut_color::Planar16`, whose `BitDepth` decides the
+profile: 10-bit stays `seq_profile = 1` (or 0 monochrome) with `high_bitdepth`, and 12-bit of any
+plane count is `seq_profile = 2` with `twelve_bit` (§6.4.1).
+
+```rust,ignore
+let planes = Planar16::from_planes(w, h, BitDepth::Twelve, [y, u, v])?;
+let (still, recon) = encode_still_intra16_with(&planes, qindex, Av1Colour::default())?;
+```
+
+Superres has no high-bit-depth entry point; `BitDepth::Sixteen` is not an AV1 depth and is
+rejected.
+
 The wider AV1 surface — lossy DCT/ADST, more intra modes, in-loop filters, inter coding for image
 sequences — is tracked row by row in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md).
 
