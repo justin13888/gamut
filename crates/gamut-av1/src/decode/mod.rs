@@ -295,8 +295,10 @@ impl Av1Decoder {
                         "AV1 decode: tile list OBUs are forbidden in a still image",
                     ));
                 }
-                // Temporal delimiters, metadata, padding, and reserved types are ignored (§5.3.1).
-                obu::OBU_TEMPORAL_DELIMITER | obu::OBU_METADATA | obu::OBU_PADDING => {}
+                // Everything else is ignored per §5.3.1: temporal delimiters, metadata and
+                // padding carry nothing this decoder needs, and reserved types "shall be ignored
+                // by AV1 decoders". One arm, because a separate arm listing the named types would
+                // be indistinguishable from this one.
                 _ => {}
             }
         }
@@ -333,7 +335,328 @@ impl Av1Decoder {
 /// Shared fixtures for the decode-side unit tests.
 #[cfg(test)]
 pub(crate) mod testutil {
+    use gamut_bitstream::BitWriter;
+
+    use crate::decode::header::tile_log2;
     use crate::headers::{Av1Colour, Av1StillConfig};
+
+    /// A hand-built AV1 still, for syntax paths neither `gamut-av1`'s encoder nor libaom emits.
+    ///
+    /// The encoder only ever writes the *reduced* still-picture header with a single 64×64-superblock
+    /// tile, and libaom's all-intra usage writes the general header but with its own fixed choices.
+    /// Several §5.5.1/§5.9.2 branches — `frame_size_override_flag`, an explicit render size,
+    /// 128×128 superblocks, a multi-tile grid — are therefore unreachable from either. This builder
+    /// is the inverse of the parser for exactly those branches, so they can be exercised directly.
+    ///
+    /// Everything not named here is pinned to the simplest legal value: profile 1 (8-bit 4:4:4),
+    /// a shown `KEY_FRAME`, `base_q_idx = 0` (so `CodedLossless` holds and the in-loop filter
+    /// blocks code no bits), and the §5.5.2 sRGB shortcut.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct StillBuilder {
+        /// `max_frame_width_minus_1 + 1`.
+        pub width: u32,
+        /// `max_frame_height_minus_1 + 1`.
+        pub height: u32,
+        /// `frame_width_bits_minus_1 + 1`; may exceed the minimum the width needs.
+        pub width_bits: u32,
+        /// `frame_height_bits_minus_1 + 1`.
+        pub height_bits: u32,
+        /// `use_128x128_superblock`.
+        pub use_128x128_superblock: bool,
+        /// `operating_point_idc[0]`.
+        pub operating_point_idc: u32,
+        /// `frame_size_override_flag`; when set, the frame codes its own dimensions.
+        pub frame_size_override: bool,
+        /// The dimensions coded when `frame_size_override` is set.
+        pub coded_size: (u32, u32),
+        /// `render_and_frame_size_different`; when set, the render size is coded explicitly.
+        pub render_size: Option<(u32, u32)>,
+        /// How many `increment_tile_cols_log2` / `increment_tile_rows_log2` ones to emit.
+        pub tile_cols_log2: u32,
+        /// See [`tile_cols_log2`](Self::tile_cols_log2).
+        pub tile_rows_log2: u32,
+        /// `enable_cdef` in the sequence header. A `CodedLossless` frame must still skip
+        /// `cdef_params()` when this is set (§5.9.19).
+        pub enable_cdef: bool,
+        /// Code an `INTRA_ONLY_FRAME` instead of a `KEY_FRAME`, which makes `error_resilient_mode`
+        /// and `refresh_frame_flags` explicit (§5.9.2).
+        pub intra_only: bool,
+        /// `refresh_frame_flags`, coded only for an intra-only frame.
+        pub refresh_frame_flags: u8,
+        /// `frame_id_numbers_present_flag`, as
+        /// `(additional_frame_id_length, delta_frame_id_length)`. Setting it makes the frame
+        /// header code a `current_frame_id` of `additional + delta` bits (§5.9.2).
+        pub frame_id_lengths: Option<(u32, u32)>,
+        /// `seq_force_screen_content_tools`: `None` codes
+        /// `seq_choose_screen_content_tools = 1` (SELECT, so the frame header codes
+        /// `allow_screen_content_tools`), `Some(v)` codes the explicit value instead (§5.5.1).
+        pub screen_content_tools: Option<u8>,
+        /// `OrderHintBits`: `None` disables order hints, `Some(n)` codes
+        /// `order_hint_bits_minus_1 = n - 1` and an `order_hint` field per frame.
+        pub order_hint_bits: Option<u32>,
+        /// `error_resilient_mode`, coded only for a frame that is not a shown key frame.
+        pub error_resilient: bool,
+    }
+
+    impl Default for StillBuilder {
+        fn default() -> Self {
+            Self {
+                width: 64,
+                height: 64,
+                width_bits: 6,
+                height_bits: 6,
+                use_128x128_superblock: false,
+                operating_point_idc: 0,
+                frame_size_override: false,
+                coded_size: (64, 64),
+                render_size: None,
+                tile_cols_log2: 0,
+                tile_rows_log2: 0,
+                enable_cdef: false,
+                intra_only: false,
+                refresh_frame_flags: 0xff,
+                frame_id_lengths: None,
+                screen_content_tools: None,
+                order_hint_bits: None,
+                error_resilient: false,
+            }
+        }
+    }
+
+    impl StillBuilder {
+        /// Emits the sequence header OBU payload (§5.5.1, general form).
+        pub(crate) fn sequence_header(&self) -> Vec<u8> {
+            let mut w = BitWriter::new();
+            w.put_bits(1, 3); // seq_profile = 1 (High: 8-bit 4:4:4)
+            w.put_bit(0); // still_picture
+            w.put_bit(0); // reduced_still_picture_header — the general form
+            w.put_bit(0); // timing_info_present_flag
+            w.put_bit(0); // initial_display_delay_present_flag
+            w.put_bits(0, 5); // operating_points_cnt_minus_1
+            w.put_bits(self.operating_point_idc, 12); // operating_point_idc[0]
+            w.put_bits(0, 5); // seq_level_idx[0] (<= 7, so no seq_tier)
+            w.put_bits(self.width_bits - 1, 4);
+            w.put_bits(self.height_bits - 1, 4);
+            w.put_bits(self.width - 1, self.width_bits);
+            w.put_bits(self.height - 1, self.height_bits);
+            match self.frame_id_lengths {
+                Some((additional, delta)) => {
+                    w.put_bit(1); // frame_id_numbers_present_flag
+                    w.put_bits(delta - 2, 4); // delta_frame_id_length_minus_2
+                    w.put_bits(additional - 1, 3); // additional_frame_id_length_minus_1
+                }
+                None => w.put_bit(0),
+            }
+            w.put_bit(u8::from(self.use_128x128_superblock));
+            w.put_bit(0); // enable_filter_intra
+            w.put_bit(0); // enable_intra_edge_filter
+            w.put_bit(0); // enable_interintra_compound
+            w.put_bit(0); // enable_masked_compound
+            w.put_bit(0); // enable_warped_motion
+            w.put_bit(0); // enable_dual_filter
+            match self.order_hint_bits {
+                Some(_) => {
+                    w.put_bit(1); // enable_order_hint
+                    w.put_bit(0); // enable_jnt_comp
+                    w.put_bit(0); // enable_ref_frame_mvs
+                }
+                None => w.put_bit(0),
+            }
+            match self.screen_content_tools {
+                None => {
+                    w.put_bit(1); // seq_choose_screen_content_tools -> SELECT (> 0)
+                    w.put_bit(1); // seq_choose_integer_mv -> SELECT
+                }
+                Some(force) => {
+                    w.put_bit(0); // seq_choose_screen_content_tools
+                    w.put_bits(u32::from(force), 1); // seq_force_screen_content_tools
+                    if force > 0 {
+                        w.put_bit(1); // seq_choose_integer_mv -> SELECT
+                    }
+                }
+            }
+            if let Some(bits) = self.order_hint_bits {
+                w.put_bits(bits - 1, 3); // order_hint_bits_minus_1
+            }
+            w.put_bit(0); // enable_superres
+            w.put_bit(u8::from(self.enable_cdef));
+            w.put_bit(0); // enable_restoration
+            // color_config(): 8-bit, then the sRGB shortcut infers full range and 4:4:4.
+            w.put_bit(0); // high_bitdepth
+            w.put_bit(1); // color_description_present_flag
+            w.put_bits(1, 8); // color_primaries = CP_BT_709
+            w.put_bits(13, 8); // transfer_characteristics = TC_SRGB
+            w.put_bits(0, 8); // matrix_coefficients = MC_IDENTITY
+            w.put_bit(0); // separate_uv_delta_q
+            w.put_bit(0); // film_grain_params_present
+            w.put_bit(1); // trailing_bits
+            w.byte_align();
+            w.into_bytes()
+        }
+
+        /// Emits the frame OBU payload: the uncompressed header (§5.9.2) then one byte of tile data.
+        pub(crate) fn frame_obu(&self) -> Vec<u8> {
+            let mut w = BitWriter::new();
+            w.put_bit(0); // show_existing_frame
+            w.put_bits(if self.intra_only { 2 } else { 0 }, 2); // frame_type
+            w.put_bit(1); // show_frame
+            if self.intra_only {
+                // showable_frame is inferred from show_frame; error_resilient_mode is coded for
+                // anything but a shown key frame.
+                w.put_bit(u8::from(self.error_resilient));
+            }
+            w.put_bit(0); // disable_cdf_update
+            // allow_screen_content_tools is coded only when the sequence header chose SELECT.
+            if self.screen_content_tools.is_none() {
+                w.put_bit(0); // allow_screen_content_tools
+            } else if self.screen_content_tools == Some(1) {
+                // seq_force_screen_content_tools = 1 infers allow_screen_content_tools = 1, and
+                // seq_force_integer_mv is SELECT, so force_integer_mv is coded.
+                w.put_bit(0); // force_integer_mv
+            }
+            if let Some((additional, delta)) = self.frame_id_lengths {
+                // current_frame_id is idLen = additional_frame_id_length + delta_frame_id_length
+                // bits wide (§5.9.2).
+                w.put_bits(0, additional + delta);
+            }
+            w.put_bit(u8::from(self.frame_size_override));
+            // primary_ref_frame is inferred PRIMARY_REF_NONE for an intra frame.
+            if let Some(bits) = self.order_hint_bits {
+                w.put_bits(0, bits); // order_hint
+            }
+            if self.intra_only {
+                // A shown key frame infers refresh_frame_flags = allFrames; an intra-only frame
+                // codes it.
+                w.put_bits(u32::from(self.refresh_frame_flags), 8);
+                // §5.9.2 codes ref_order_hint only for a partial refresh of an error-resilient
+                // frame with order hints enabled.
+                if self.refresh_frame_flags != 0xff
+                    && self.error_resilient
+                    && let Some(bits) = self.order_hint_bits
+                {
+                    for _ in 0..8 {
+                        w.put_bits(0, bits); // ref_order_hint[i]
+                    }
+                }
+            }
+            if self.frame_size_override {
+                w.put_bits(self.coded_size.0 - 1, self.width_bits);
+                w.put_bits(self.coded_size.1 - 1, self.height_bits);
+            }
+            // superres_params codes nothing: enable_superres = 0.
+            match self.render_size {
+                Some((rw, rh)) => {
+                    w.put_bit(1); // render_and_frame_size_different
+                    w.put_bits(rw - 1, 16);
+                    w.put_bits(rh - 1, 16);
+                }
+                None => w.put_bit(0),
+            }
+            // §5.9.2 codes allow_intrabc when screen-content tools are on and superres is not
+            // scaling the frame. `allow_screen_content_tools` is only ever 1 here through an
+            // explicit `seq_force_screen_content_tools = 1`.
+            if self.screen_content_tools == Some(1) {
+                w.put_bit(0); // allow_intrabc
+            }
+            w.put_bit(1); // disable_frame_end_update_cdf (coded: general header, updates enabled)
+            self.tile_info(&mut w);
+            // quantization_params(): lossless, no deltas, no qmatrix.
+            w.put_bits(0, 8); // base_q_idx
+            w.put_bit(0); // DeltaQYDc delta_coded
+            w.put_bit(0); // DeltaQUDc delta_coded
+            w.put_bit(0); // DeltaQUAc delta_coded
+            w.put_bit(0); // using_qmatrix
+            w.put_bit(0); // segmentation_enabled
+            // delta_q/delta_lf code nothing at base_q_idx 0; CodedLossless skips the filter blocks
+            // and forces TxMode = ONLY_4X4.
+            w.put_bit(1); // reduced_tx_set
+            w.byte_align(); // byte_alignment() before the tile group
+            let mut out = w.into_bytes();
+            // One tile group carrying a single byte of (never-decoded) tile data per tile.
+            let tiles = (1usize << self.tile_cols_log2) * (1usize << self.tile_rows_log2);
+            if tiles > 1 {
+                out.push(0); // tile_start_and_end_present_flag = 0, then byte alignment
+                for _ in 0..tiles - 1 {
+                    out.push(0); // tile_size_minus_1, one byte (TileSizeBytes = 1)
+                    out.push(0xaa); // the tile's single byte
+                }
+            }
+            out.push(0xaa); // the last tile takes the remainder
+            out
+        }
+
+        /// `tile_info()` (§5.9.15), uniform spacing, emitting the requested log2 increments.
+        fn tile_info(&self, w: &mut BitWriter) {
+            let (sb_shift, mi_cols, mi_rows) = {
+                let coded = if self.frame_size_override {
+                    self.coded_size
+                } else {
+                    (self.width, self.height)
+                };
+                let shift = if self.use_128x128_superblock { 5 } else { 4 };
+                (shift, 2 * ((coded.0 + 7) >> 3), 2 * ((coded.1 + 7) >> 3))
+            };
+            let sb_cols = if self.use_128x128_superblock {
+                (mi_cols + 31) >> 5
+            } else {
+                (mi_cols + 15) >> 4
+            };
+            let sb_rows = if self.use_128x128_superblock {
+                (mi_rows + 31) >> 5
+            } else {
+                (mi_rows + 15) >> 4
+            };
+            let _ = sb_shift;
+            let sb_size = if self.use_128x128_superblock { 7 } else { 6 };
+            let max_tile_width_sb = 4096u32 >> sb_size;
+            let max_tile_area_sb = (4096u32 * 2304) >> (2 * sb_size);
+            let min_log2_tile_cols = tile_log2(max_tile_width_sb, sb_cols);
+            let max_log2_tile_cols = tile_log2(1, sb_cols.min(64));
+            let max_log2_tile_rows = tile_log2(1, sb_rows.min(64));
+            let min_log2_tiles =
+                min_log2_tile_cols.max(tile_log2(max_tile_area_sb, sb_rows * sb_cols));
+
+            w.put_bit(1); // uniform_tile_spacing_flag
+            let mut cols_log2 = min_log2_tile_cols;
+            while cols_log2 < max_log2_tile_cols {
+                let inc = cols_log2 < self.tile_cols_log2;
+                w.put_bit(u8::from(inc));
+                if !inc {
+                    break;
+                }
+                cols_log2 += 1;
+            }
+            let min_log2_tile_rows = min_log2_tiles.saturating_sub(cols_log2);
+            let mut rows_log2 = min_log2_tile_rows;
+            while rows_log2 < max_log2_tile_rows {
+                let inc = rows_log2 < self.tile_rows_log2;
+                w.put_bit(u8::from(inc));
+                if !inc {
+                    break;
+                }
+                rows_log2 += 1;
+            }
+            if cols_log2 > 0 || rows_log2 > 0 {
+                w.put_bits(0, rows_log2 + cols_log2); // context_update_tile_id
+                w.put_bits(0, 2); // tile_size_bytes_minus_1 => TileSizeBytes = 1
+            }
+        }
+
+        /// The complete temporal unit: sequence header OBU + frame OBU, each size-prefixed.
+        pub(crate) fn temporal_unit(&self) -> Vec<u8> {
+            let mut out = Vec::new();
+            write_obu(&mut out, 1, &self.sequence_header()); // OBU_SEQUENCE_HEADER
+            write_obu(&mut out, 6, &self.frame_obu()); // OBU_FRAME
+            out
+        }
+    }
+
+    /// Writes one OBU with `obu_has_size_field = 1` (§5.3.2).
+    pub(crate) fn write_obu(out: &mut Vec<u8>, obu_type: u8, payload: &[u8]) {
+        out.push((obu_type << 3) + 0b10);
+        gamut_bitstream::write_leb128(out, payload.len() as u64);
+        out.extend_from_slice(payload);
+    }
 
     /// Builds the [`Av1StillConfig`] the encoder derives for `colour` at this size, so the
     /// parsers here are checked against the exact headers `gamut-av1` emits.
@@ -398,6 +721,286 @@ mod tests {
             limits.check(16, 16, 4097).unwrap_err().static_message(),
             Some("AV1 decode: tile count exceeds the configured limit")
         );
+    }
+
+    #[test]
+    fn limits_are_inclusive_at_their_boundary() {
+        // Each cap admits its exact value and refuses one more — pinning `>` against `>=`.
+        let limits = DecodeLimits {
+            max_width: 64,
+            max_height: 32,
+            max_pixels: 64 * 32,
+            max_tiles: 4,
+        };
+        limits.check(64, 32, 4).unwrap();
+        assert_eq!(
+            limits.check(65, 32, 4).unwrap_err().static_message(),
+            Some("AV1 decode: frame dimensions exceed the configured limit")
+        );
+        assert_eq!(
+            limits.check(64, 33, 4).unwrap_err().static_message(),
+            Some("AV1 decode: frame dimensions exceed the configured limit")
+        );
+        assert_eq!(
+            limits.check(64, 32, 5).unwrap_err().static_message(),
+            Some("AV1 decode: tile count exceeds the configured limit")
+        );
+        // The sample cap is exact too: 64x32 fits, 65x32 would exceed it even if the dimension
+        // caps allowed it.
+        let wide = DecodeLimits {
+            max_width: 4096,
+            max_pixels: 64 * 32,
+            ..limits
+        };
+        wide.check(64, 32, 4).unwrap();
+        assert_eq!(
+            wide.check(65, 32, 4).unwrap_err().static_message(),
+            Some("AV1 decode: frame sample count exceeds the configured limit")
+        );
+    }
+
+    #[test]
+    fn the_tile_cap_counts_columns_times_rows() {
+        // A 2x2 grid is four tiles, not two: the cap must see the product.
+        let still = testutil::StillBuilder {
+            width: 512,
+            height: 512,
+            width_bits: 10,
+            height_bits: 10,
+            tile_cols_log2: 1,
+            tile_rows_log2: 1,
+            ..testutil::StillBuilder::default()
+        };
+        let unit = still.temporal_unit();
+
+        let info = Av1Decoder::new().inspect(&unit).unwrap();
+        assert_eq!(info.frame.tile_info.tile_cols, 2);
+        assert_eq!(info.frame.tile_info.tile_rows, 2);
+        assert_eq!(info.tile_count, 4);
+
+        let capped = Av1Decoder::with_limits(DecodeLimits {
+            max_tiles: 2,
+            ..DecodeLimits::default()
+        });
+        assert_eq!(
+            capped.inspect(&unit).unwrap_err().static_message(),
+            Some("AV1 decode: tile count exceeds the configured limit")
+        );
+        // Four is exactly the grid, so it is admitted.
+        let exact = Av1Decoder::with_limits(DecodeLimits {
+            max_tiles: 4,
+            ..DecodeLimits::default()
+        });
+        exact.inspect(&unit).unwrap();
+
+        // A 4x2 grid is eight tiles; their *sum* is six. A cap of seven must refuse it, which a
+        // sum would wrongly admit.
+        let rect = testutil::StillBuilder {
+            width: 1024,
+            height: 1024,
+            width_bits: 11,
+            height_bits: 11,
+            tile_cols_log2: 2,
+            tile_rows_log2: 1,
+            ..testutil::StillBuilder::default()
+        };
+        let rect_unit = rect.temporal_unit();
+        let info = Av1Decoder::new().inspect(&rect_unit).unwrap();
+        assert_eq!(
+            (
+                info.frame.tile_info.tile_cols,
+                info.frame.tile_info.tile_rows
+            ),
+            (4, 2)
+        );
+        assert_eq!(info.tile_count, 8);
+        let seven = Av1Decoder::with_limits(DecodeLimits {
+            max_tiles: 7,
+            ..DecodeLimits::default()
+        });
+        assert_eq!(
+            seven.inspect(&rect_unit).unwrap_err().static_message(),
+            Some("AV1 decode: tile count exceeds the configured limit")
+        );
+    }
+
+    #[test]
+    fn a_repeated_sequence_header_must_be_identical() {
+        // AV1 §7.5: a sequence header may be repeated, but a *changed* one would reinterpret the
+        // frame that follows, so it is refused rather than silently adopted.
+        let still = testutil::StillBuilder::default();
+        let mut repeated = Vec::new();
+        testutil::write_obu(&mut repeated, 1, &still.sequence_header());
+        testutil::write_obu(&mut repeated, 1, &still.sequence_header());
+        testutil::write_obu(&mut repeated, 6, &still.frame_obu());
+        Av1Decoder::new()
+            .inspect(&repeated)
+            .expect("an identical repeat is legal");
+
+        let other = testutil::StillBuilder {
+            width: 128,
+            width_bits: 8,
+            ..testutil::StillBuilder::default()
+        };
+        let mut changed = Vec::new();
+        testutil::write_obu(&mut changed, 1, &still.sequence_header());
+        testutil::write_obu(&mut changed, 1, &other.sequence_header());
+        testutil::write_obu(&mut changed, 6, &still.frame_obu());
+        assert_eq!(
+            Av1Decoder::new()
+                .inspect(&changed)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 decode: repeated sequence header differs from the first")
+        );
+    }
+
+    #[test]
+    fn obus_outside_the_chosen_operating_point_are_dropped() {
+        // OperatingPointIdc bit `temporal_id` selects the temporal layer and bit `spatial_id + 8`
+        // the spatial one (§5.3.1). With idc = 0x101 only temporal 0 / spatial 0 is in the
+        // operating point, so a frame tagged temporal 1 is dropped and the unit has no frame.
+        let still = testutil::StillBuilder {
+            operating_point_idc: 0x101,
+            ..testutil::StillBuilder::default()
+        };
+        let seq = still.sequence_header();
+        let frame = still.frame_obu();
+
+        /// Emits a frame OBU carrying an extension header with the given ids.
+        fn frame_with_extension(out: &mut Vec<u8>, temporal: u8, spatial: u8, payload: &[u8]) {
+            // forbidden=0, type=OBU_FRAME(6), extension=1, has_size=1, reserved=0.
+            out.push((6 << 3) | 0b100 | 0b10);
+            out.push((temporal << 5) | (spatial << 3));
+            gamut_bitstream::write_leb128(out, payload.len() as u64);
+            out.extend_from_slice(payload);
+        }
+
+        let mut inside = Vec::new();
+        testutil::write_obu(&mut inside, 1, &seq);
+        frame_with_extension(&mut inside, 0, 0, &frame);
+        Av1Decoder::new()
+            .inspect(&inside)
+            .expect("temporal 0 / spatial 0 is inside operating point 0x101");
+
+        for (temporal, spatial) in [(1u8, 0u8), (0, 1)] {
+            let mut outside = Vec::new();
+            testutil::write_obu(&mut outside, 1, &seq);
+            frame_with_extension(&mut outside, temporal, spatial, &frame);
+            assert_eq!(
+                Av1Decoder::new()
+                    .inspect(&outside)
+                    .unwrap_err()
+                    .static_message(),
+                Some("AV1 decode: no frame in the temporal unit"),
+                "temporal {temporal} / spatial {spatial} must be dropped"
+            );
+        }
+
+        // idc 0x202 selects temporal layer 1 and spatial layer 1, so the shift direction is
+        // observable: `idc >> 1` keeps the frame, `idc << 1` would drop it.
+        let shifted = testutil::StillBuilder {
+            operating_point_idc: 0x202,
+            ..testutil::StillBuilder::default()
+        };
+        let mut inside_upper = Vec::new();
+        testutil::write_obu(&mut inside_upper, 1, &shifted.sequence_header());
+        frame_with_extension(&mut inside_upper, 1, 1, &shifted.frame_obu());
+        Av1Decoder::new()
+            .inspect(&inside_upper)
+            .expect("temporal 1 / spatial 1 is inside operating point 0x202");
+        // Layer 0 is *outside* that operating point, which the previous case cannot show.
+        let mut outside_lower = Vec::new();
+        testutil::write_obu(&mut outside_lower, 1, &shifted.sequence_header());
+        frame_with_extension(&mut outside_lower, 0, 0, &shifted.frame_obu());
+        assert_eq!(
+            Av1Decoder::new()
+                .inspect(&outside_lower)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 decode: no frame in the temporal unit")
+        );
+
+        // With idc = 0 no OBU is ever dropped, whatever its layer ids.
+        let open = testutil::StillBuilder::default();
+        let mut all_layers = Vec::new();
+        testutil::write_obu(&mut all_layers, 1, &open.sequence_header());
+        frame_with_extension(&mut all_layers, 3, 2, &open.frame_obu());
+        Av1Decoder::new()
+            .inspect(&all_layers)
+            .expect("OperatingPointIdc 0 keeps every layer");
+    }
+
+    #[test]
+    fn a_tile_list_obu_is_refused() {
+        // Large-scale tile lists are forbidden in a still image (AV1-ISOBMFF §2.4); ignoring one
+        // would silently decode a different picture than the stream describes.
+        let still = testutil::StillBuilder::default();
+        let mut unit = Vec::new();
+        testutil::write_obu(&mut unit, 1, &still.sequence_header());
+        testutil::write_obu(&mut unit, 8, &[0u8; 4]); // OBU_TILE_LIST
+        testutil::write_obu(&mut unit, 6, &still.frame_obu());
+        assert_eq!(
+            Av1Decoder::new()
+                .inspect(&unit)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 decode: tile list OBUs are forbidden in a still image")
+        );
+    }
+
+    #[test]
+    fn a_separate_frame_header_and_tile_group_decode_together() {
+        // §5.9/§5.11: the frame header may arrive in its own OBU with the tiles following in an
+        // OBU_TILE_GROUP, instead of being fused into one OBU_FRAME.
+        let still = testutil::StillBuilder::default();
+        let frame = still.frame_obu();
+        // The builder's frame OBU is the header (byte-aligned) followed by one tile byte; a
+        // standalone frame header OBU ends with trailing_bits instead.
+        let (header, tiles) = frame.split_at(frame.len() - 1);
+        let mut header_obu = header.to_vec();
+        header_obu.push(0x80); // trailing_bits: a one bit then zero padding
+
+        let mut unit = Vec::new();
+        testutil::write_obu(&mut unit, 1, &still.sequence_header());
+        testutil::write_obu(&mut unit, 3, &header_obu); // OBU_FRAME_HEADER
+        testutil::write_obu(&mut unit, 4, tiles); // OBU_TILE_GROUP
+        let info = Av1Decoder::new()
+            .inspect(&unit)
+            .expect("a split frame header and tile group is a valid still");
+        assert_eq!(info.tile_count, 1);
+        assert_eq!(info.frame.upscaled_width, 64);
+
+        // A second tile group would mean a partially-coded frame.
+        let mut twice = unit.clone();
+        testutil::write_obu(&mut twice, 4, tiles);
+        assert_eq!(
+            Av1Decoder::new()
+                .inspect(&twice)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 decode: a still image must carry every tile in one tile group")
+        );
+    }
+
+    #[test]
+    fn a_redundant_frame_header_is_ignored_rather_than_decoded_twice() {
+        // OBU_REDUNDANT_FRAME_HEADER repeats a header already seen (§5.3.1); treating it as a
+        // second frame would refuse a legal stream.
+        let still = testutil::StillBuilder::default();
+        let frame = still.frame_obu();
+        let (header, _) = frame.split_at(frame.len() - 1);
+        let mut header_obu = header.to_vec();
+        header_obu.push(0x80);
+
+        let mut unit = Vec::new();
+        testutil::write_obu(&mut unit, 1, &still.sequence_header());
+        testutil::write_obu(&mut unit, 6, &frame); // OBU_FRAME
+        testutil::write_obu(&mut unit, 7, &header_obu); // OBU_REDUNDANT_FRAME_HEADER
+        let info = Av1Decoder::new()
+            .inspect(&unit)
+            .expect("a redundant frame header must not be mistaken for a second frame");
+        assert_eq!(info.tile_count, 1);
     }
 
     #[test]

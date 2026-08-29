@@ -1019,7 +1019,7 @@ const fn remap_sec_strength(coded: u8) -> u8 {
 }
 
 /// `tile_log2( blkSize, target )` (§5.9.16): the smallest `k` with `blkSize << k >= target`.
-fn tile_log2(blk_size: u32, target: u32) -> u32 {
+pub(crate) fn tile_log2(blk_size: u32, target: u32) -> u32 {
     let mut k = 0;
     while (blk_size << k) < target {
         k += 1;
@@ -1183,6 +1183,284 @@ mod tests {
         assert_eq!(fh.tile_info.tile_cols, 1);
         assert_eq!(fh.tile_info.tile_cols_log2, 0);
         assert_eq!(fh.tile_info.tile_size_bytes, 1);
+    }
+
+    /// Parses a synthetic still built by [`StillBuilder`].
+    fn parse_built(still: &crate::decode::testutil::StillBuilder) -> (SequenceHeader, FrameHeader) {
+        let seq = SequenceHeader::parse(&still.sequence_header()).unwrap();
+        let payload = still.frame_obu();
+        let mut r = BitReader::new(&payload);
+        let fh = FrameHeader::parse(&mut r, &seq).unwrap();
+        (seq, fh)
+    }
+
+    #[test]
+    fn loop_filter_defaults_match_setup_past_independence() {
+        // §7.20: INTRA_FRAME is +1, GOLDEN/ALTREF/ALTREF2 are -1, everything else 0. A
+        // CodedLossless frame returns these without coding any bits (§5.9.11).
+        let (_, fh) = parse_built(&crate::decode::testutil::StillBuilder::default());
+        assert!(fh.coded_lossless);
+        assert_eq!(fh.loop_filter.ref_deltas, [1, 0, 0, 0, -1, 0, -1, -1]);
+        assert_eq!(fh.loop_filter.mode_deltas, [0, 0]);
+        assert_eq!(fh.loop_filter.level, [0; 4]);
+        assert!(!fh.loop_filter.delta_enabled);
+        assert_eq!(fh.loop_filter.sharpness, 0);
+    }
+
+    #[test]
+    fn cdef_params_are_skipped_when_coded_lossless_even_with_cdef_enabled() {
+        // §5.9.19 returns early on `CodedLossless || allow_intrabc || !enable_cdef`. With CDEF
+        // enabled in the sequence header, only the CodedLossless term can skip the block — and it
+        // must, or the parser would consume strength bits that were never written.
+        let still = crate::decode::testutil::StillBuilder {
+            enable_cdef: true,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq, fh) = parse_built(&still);
+        assert!(seq.enable_cdef, "the sequence header enables CDEF");
+        assert!(fh.coded_lossless);
+        assert_eq!(fh.cdef, CdefParams::disabled());
+        // Everything after cdef_params still lands correctly, which is what proves no bits were
+        // consumed by mistake.
+        assert!(fh.reduced_tx_set);
+        assert_eq!(fh.tx_mode, TxMode::Only4x4);
+    }
+
+    #[test]
+    fn frame_size_override_codes_the_frames_own_dimensions() {
+        // §5.9.5: with the override flag the frame codes its dimensions with the *sequence
+        // header's* bit widths, independent of `max_frame_*`.
+        let still = crate::decode::testutil::StillBuilder {
+            width: 256,
+            height: 128,
+            width_bits: 12,
+            height_bits: 11,
+            frame_size_override: true,
+            coded_size: (200, 100),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.frame_width, 200, "the coded width, not max_frame_width");
+        assert_eq!(fh.frame_height, 100);
+        assert_eq!(fh.upscaled_width, 200);
+        // MiCols/MiRows follow the coded size (§5.9.9).
+        assert_eq!(fh.mi_cols, 2 * ((200 + 7) >> 3));
+        assert_eq!(fh.mi_rows, 2 * ((100 + 7) >> 3));
+        // Without the override the sequence header's maximum is used instead.
+        let (_, plain) = parse_built(&crate::decode::testutil::StillBuilder {
+            frame_size_override: false,
+            ..still
+        });
+        assert_eq!(plain.frame_width, 256);
+        assert_eq!(plain.frame_height, 128);
+    }
+
+    #[test]
+    fn an_explicit_render_size_is_read_as_coded() {
+        // §5.9.6: `render_and_frame_size_different` codes a 16-bit minus-one pair; otherwise the
+        // render size follows UpscaledWidth/FrameHeight.
+        let still = crate::decode::testutil::StillBuilder {
+            render_size: Some((1920, 1080)),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!((fh.render_width, fh.render_height), (1920, 1080));
+        assert_eq!(
+            fh.frame_width, 64,
+            "the render size does not change the coded size"
+        );
+
+        let (_, plain) = parse_built(&crate::decode::testutil::StillBuilder::default());
+        assert_eq!((plain.render_width, plain.render_height), (64, 64));
+    }
+
+    #[test]
+    fn an_intra_only_frame_codes_its_refresh_mask() {
+        // §5.9.2: a shown KEY_FRAME infers `refresh_frame_flags = allFrames` and codes no bits;
+        // an INTRA_ONLY_FRAME codes the 8-bit mask (and `error_resilient_mode` before it). Both
+        // must leave the rest of the header at the same bit position.
+        for mask in [0xffu8, 0x01, 0x00] {
+            let still = crate::decode::testutil::StillBuilder {
+                intra_only: true,
+                refresh_frame_flags: mask,
+                ..crate::decode::testutil::StillBuilder::default()
+            };
+            let (_, fh) = parse_built(&still);
+            assert_eq!(
+                fh.frame_width, 64,
+                "mask {mask:#x} must not desync the header"
+            );
+            assert!(fh.coded_lossless);
+            assert!(fh.reduced_tx_set);
+        }
+    }
+
+    #[test]
+    fn an_explicit_screen_content_tools_force_is_honoured() {
+        // §5.9.2 codes `allow_screen_content_tools` only when the sequence header chose SELECT;
+        // otherwise the sequence header's forced value stands. Getting that test backwards would
+        // consume — or fail to consume — the frame header's flag and desync the rest.
+        for (force, expected) in [(0u8, false), (1, true)] {
+            let still = crate::decode::testutil::StillBuilder {
+                screen_content_tools: Some(force),
+                ..crate::decode::testutil::StillBuilder::default()
+            };
+            let (seq, fh) = parse_built(&still);
+            assert_eq!(seq.seq_force_screen_content_tools, force);
+            assert_eq!(
+                fh.allow_screen_content_tools, expected,
+                "seq_force_screen_content_tools = {force} forces allow = {expected}"
+            );
+            assert_eq!(
+                fh.frame_width, 64,
+                "force {force} must not desync the header"
+            );
+            assert!(fh.reduced_tx_set);
+        }
+
+        // The SELECT case still reads the frame header's own flag.
+        let (seq, fh) = parse_built(&crate::decode::testutil::StillBuilder::default());
+        assert_eq!(
+            seq.seq_force_screen_content_tools,
+            SELECT_SCREEN_CONTENT_TOOLS
+        );
+        assert!(!fh.allow_screen_content_tools);
+    }
+
+    #[test]
+    fn a_full_refresh_mask_suppresses_the_reference_order_hints() {
+        // §5.9.2 reads `ref_order_hint[i]` only when `refresh_frame_flags != allFrames` (and the
+        // frame is error-resilient with order hints on). `allFrames` is `(1 << 8) - 1 = 255`, so
+        // a mask of 0xff must read no hints while 0x01 reads eight — a wrong constant would
+        // consume the wrong number of bits and desync everything after.
+        let base = crate::decode::testutil::StillBuilder {
+            intra_only: true,
+            error_resilient: true,
+            order_hint_bits: Some(7),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+
+        let (seq, fh) = parse_built(&crate::decode::testutil::StillBuilder {
+            refresh_frame_flags: 0xff,
+            ..base
+        });
+        assert!(seq.enable_order_hint);
+        assert_eq!(seq.order_hint_bits, 7);
+        assert_eq!(fh.frame_width, 64, "a full mask reads no ref_order_hint");
+        assert!(fh.reduced_tx_set);
+
+        let (_, partial) = parse_built(&crate::decode::testutil::StillBuilder {
+            refresh_frame_flags: 0x01,
+            ..base
+        });
+        assert_eq!(
+            partial.frame_width, 64,
+            "a partial mask reads eight ref_order_hint fields"
+        );
+        assert!(partial.reduced_tx_set);
+    }
+
+    #[test]
+    fn frame_id_numbers_widen_the_frame_header_by_their_sum() {
+        // §5.9.2: idLen = additional_frame_id_length + delta_frame_id_length, and
+        // `current_frame_id` occupies exactly that many bits. Reading the wrong width desyncs
+        // everything after it, so the rest of the header is asserted rather than the id itself
+        // (which this decoder discards). additional 1 + delta 2 = 3 bits, where a product gives 2.
+        for (additional, delta) in [(1u32, 2u32), (3, 5), (8, 2)] {
+            let still = crate::decode::testutil::StillBuilder {
+                frame_id_lengths: Some((additional, delta)),
+                ..crate::decode::testutil::StillBuilder::default()
+            };
+            let (seq, fh) = parse_built(&still);
+            assert!(seq.frame_id_numbers_present);
+            assert_eq!(seq.additional_frame_id_length, additional);
+            assert_eq!(seq.delta_frame_id_length, delta);
+            assert_eq!(
+                fh.frame_width, 64,
+                "id length {additional}+{delta} must not desync the header"
+            );
+            assert!(fh.coded_lossless);
+            assert!(fh.reduced_tx_set);
+        }
+    }
+
+    #[test]
+    fn tile_info_uses_the_128x128_superblock_geometry() {
+        // §5.9.15 derives sbCols/sbRows and sbSize from `use_128x128_superblock`; a 128-wide
+        // frame is two 64-superblocks but only one 128-superblock, so the two grids differ.
+        let base = crate::decode::testutil::StillBuilder {
+            width: 128,
+            height: 128,
+            width_bits: 8,
+            height_bits: 8,
+            tile_cols_log2: 1,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq64, small) = parse_built(&base);
+        assert!(!seq64.use_128x128_superblock);
+        assert_eq!(small.tile_info.tile_cols, 2, "two 64x64 superblock columns");
+        assert_eq!(small.tile_info.mi_col_starts, vec![0, 16, small.mi_cols]);
+
+        let (seq128, large) = parse_built(&crate::decode::testutil::StillBuilder {
+            use_128x128_superblock: true,
+            tile_cols_log2: 0,
+            ..base
+        });
+        assert!(seq128.use_128x128_superblock);
+        assert_eq!(
+            large.tile_info.tile_cols, 1,
+            "the same frame is a single 128x128 superblock column"
+        );
+        assert_eq!(large.tile_info.mi_col_starts, vec![0, large.mi_cols]);
+    }
+
+    #[test]
+    fn tile_info_derives_the_tile_limits_from_the_superblock_size() {
+        // `maxTileWidthSb = MAX_TILE_WIDTH >> sbSize` and
+        // `maxTileAreaSb = MAX_TILE_AREA >> (2 * sbSize)` set `minLog2TileCols` and
+        // `minLog2Tiles`, which force a minimum number of tiles once a frame is wide or large
+        // enough. A frame wider than MAX_TILE_WIDTH cannot be one tile column.
+        let wide = crate::decode::testutil::StillBuilder {
+            width: 8192,
+            height: 128,
+            width_bits: 13,
+            height_bits: 8,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&wide);
+        assert!(
+            fh.tile_info.tile_cols >= 2,
+            "8192 px exceeds MAX_TILE_WIDTH, so one tile column is illegal"
+        );
+        assert_eq!(fh.tile_info.tile_cols_log2, 1);
+
+        // A frame whose area exceeds MAX_TILE_AREA forces extra tiles through minLog2Tiles even
+        // when each column is narrow enough.
+        let big = crate::decode::testutil::StillBuilder {
+            width: 4096,
+            height: 4096,
+            width_bits: 12,
+            height_bits: 12,
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&big);
+        assert!(
+            fh.tile_info.tile_cols * fh.tile_info.tile_rows >= 2,
+            "a 4096x4096 frame exceeds MAX_TILE_AREA for a single tile"
+        );
+    }
+
+    #[test]
+    fn superres_rounds_with_half_the_denominator() {
+        // §5.9.8: FrameWidth = (UpscaledWidth * 8 + SuperresDenom / 2) / SuperresDenom. The
+        // `/ 2` rounding term changes the result for an odd denominator, so coded_denom 2
+        // (SuperresDenom 11) pins it: (64*8 + 5) / 11 = 47, where dropping or mis-taking the
+        // term gives 46.
+        let (_, fh) = parse_encoder_headers(64, 64, 100, Some(2));
+        assert_eq!(fh.superres_denom, 11);
+        assert_eq!(fh.upscaled_width, 64);
+        assert_eq!(fh.frame_width, (64 * 8 + 11 / 2) / 11);
+        assert_eq!(fh.frame_width, 47);
     }
 
     #[test]

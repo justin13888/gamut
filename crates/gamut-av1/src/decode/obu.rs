@@ -24,16 +24,12 @@ pub(crate) const OBU_TEMPORAL_DELIMITER: u8 = 2;
 pub(crate) const OBU_FRAME_HEADER: u8 = 3;
 /// `OBU_TILE_GROUP`.
 pub(crate) const OBU_TILE_GROUP: u8 = 4;
-/// `OBU_METADATA`.
-pub(crate) const OBU_METADATA: u8 = 5;
 /// `OBU_FRAME` (frame header ∥ tile group).
 pub(crate) const OBU_FRAME: u8 = 6;
 /// `OBU_REDUNDANT_FRAME_HEADER`.
 pub(crate) const OBU_REDUNDANT_FRAME_HEADER: u8 = 7;
 /// `OBU_TILE_LIST` (large-scale tiles; forbidden inside an AVIF item).
 pub(crate) const OBU_TILE_LIST: u8 = 8;
-/// `OBU_PADDING`.
-pub(crate) const OBU_PADDING: u8 = 15;
 
 /// `SELECT_SCREEN_CONTENT_TOOLS` (§3).
 pub(crate) const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
