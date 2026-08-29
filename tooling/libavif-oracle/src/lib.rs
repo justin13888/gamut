@@ -26,8 +26,9 @@ mod sys {
 /// A decoded planar image: one tightly packed `width * height` plane per component, each sample
 /// widened to `u16` (8-bit samples occupy `0..=255`, 10-/12-bit use the wider range).
 ///
-/// gamut emits 4:4:4 stills, so the three planes are full-resolution and carry `[Y, U, V]` (which
-/// under the identity matrix are `G, B, R`).
+/// gamut emits 4:4:4 and monochrome stills. For 4:4:4 the three planes are full-resolution and
+/// carry `[Y, U, V]` (which under the identity matrix are `G, B, R`); for a monochrome image only
+/// `Y` is present and the two chroma planes are **empty**.
 pub struct DecodedImage {
     /// Luma width in pixels.
     pub width: u32,
@@ -36,15 +37,19 @@ pub struct DecodedImage {
     /// Bits per component (8, 10, or 12).
     pub bit_depth: u8,
     /// `[Y, U, V]` planes, each in raster order with no row padding; samples widened to `u16`.
+    /// The two chroma planes are empty for a monochrome image.
     pub planes: [Vec<u16>; 3],
+    /// Whether libavif reports the image as monochrome (`AVIF_PIXEL_FORMAT_YUV400`).
+    pub monochrome: bool,
 }
 
-/// Decodes the first frame of an AVIF file into its 4:4:4 YUV planes (8/10/12-bit, widened to `u16`).
+/// Decodes the first frame of an AVIF file into its YUV planes (8/10/12-bit, widened to `u16`).
 ///
 /// # Errors
 ///
 /// Returns a message (including libavif's own result string) if the file cannot be parsed or
-/// decoded, or if the decoded image is not 4:4:4 or not 8/10/12-bit (the forms gamut emits).
+/// decoded, or if the decoded image is neither 4:4:4 nor monochrome, or is not 8/10/12-bit (the
+/// forms gamut emits).
 pub fn decode_avif(avif: &[u8]) -> Result<DecodedImage, String> {
     // SAFETY: the decoder and image handles below are created and destroyed in matched pairs on
     // every return path; pointers passed to libavif stay valid for each call's duration.
@@ -79,26 +84,31 @@ unsafe fn decode_inner(avif: &[u8]) -> Result<DecodedImage, String> {
     }
 }
 
-/// Copies the three YUV planes out of a decoded `avifImage` into owned, unpadded buffers.
+/// Copies the coded YUV planes out of a decoded `avifImage` into owned, unpadded buffers.
 unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
     let depth = image.depth as u8;
     if !matches!(depth, 8 | 10 | 12) {
         return Err(format!("unexpected bit depth: {depth}-bit"));
     }
-    if image.yuvFormat != sys::AVIF_PIXEL_FORMAT_YUV444 {
-        return Err(format!(
-            "expected 4:4:4, got pixel format {}",
-            image.yuvFormat
-        ));
-    }
+    // A monochrome image has one coded plane, and libavif leaves `yuvPlanes[1..]` unset for it —
+    // so the plane *count*, not just the copy, follows the format.
+    let coded = match image.yuvFormat {
+        sys::AVIF_PIXEL_FORMAT_YUV444 => 3,
+        sys::AVIF_PIXEL_FORMAT_YUV400 => 1,
+        other => {
+            return Err(format!(
+                "expected 4:4:4 or monochrome, got pixel format {other}"
+            ));
+        }
+    };
     let w = image.width as usize;
     let h = image.height as usize;
 
-    // SAFETY: a successfully decoded 4:4:4 image owns three planes of `h` rows; `yuvRowBytes[p]`
+    // SAFETY: a successfully decoded image owns `coded` planes of `h` rows; `yuvRowBytes[p]`
     // (the byte stride) spaces consecutive rows of plane `p`.
     unsafe {
         let mut planes = [Vec::new(), Vec::new(), Vec::new()];
-        for (p, plane) in planes.iter_mut().enumerate() {
+        for (p, plane) in planes.iter_mut().enumerate().take(coded) {
             let base = image.yuvPlanes[p];
             if base.is_null() {
                 return Err(format!("plane {p} is null"));
@@ -111,6 +121,7 @@ unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
             height: image.height,
             bit_depth: depth,
             planes: [y, u, v],
+            monochrome: coded == 1,
         })
     }
 }
@@ -166,6 +177,9 @@ pub struct AvifStructure {
     pub matrix_coefficients: u16,
     /// Whether an alpha plane (alpha auxiliary item) is present.
     pub alpha_present: bool,
+    /// Whether the colour values are declared **premultiplied** by that alpha — libavif's reading
+    /// of the `prem` item reference.
+    pub premultiplied_alpha: bool,
     /// The `irot` angle (anti-clockwise quarter turns), when the transform is present.
     pub irot_angle: Option<u8>,
     /// The `imir` axis, when the transform is present.
@@ -228,6 +242,7 @@ unsafe fn introspect_inner(avif: &[u8]) -> Result<AvifStructure, String> {
                 transfer_characteristics: image.transferCharacteristics,
                 matrix_coefficients: image.matrixCoefficients,
                 alpha_present: (*decoder).alphaPresent != 0,
+                premultiplied_alpha: image.alphaPremultiplied != 0,
                 irot_angle: (flags & sys::AVIF_TRANSFORM_IROT != 0).then_some(image.irot.angle),
                 imir_axis: (flags & sys::AVIF_TRANSFORM_IMIR != 0).then_some(image.imir.axis),
                 clap: (flags & sys::AVIF_TRANSFORM_CLAP != 0).then_some([

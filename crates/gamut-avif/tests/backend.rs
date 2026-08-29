@@ -8,7 +8,7 @@ use gamut_av1::Av1Colour;
 use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
 use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
-use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, Gray8, ImageRef, Result, Rgb8, Rgba8};
 
 /// The fixture the golden files in `tests/data` were produced from: a 34×18 deterministic RGB ramp.
 const W: u32 = 34;
@@ -108,6 +108,46 @@ fn default_encoder_output_is_byte_identical() {
         encode(&AvifEncoder::default()).unwrap(),
         encode(&AvifEncoder::lossless()).unwrap()
     );
+}
+
+/// The fixture's RGB channels with an added alpha ramp, so the colour planes a backend sees for an
+/// `Rgba8` encode are byte-identical to the ones it sees for [`fixture`].
+fn rgba_fixture() -> Vec<u8> {
+    let rgb = fixture();
+    let mut px = vec![0u8; (W * H * 4) as usize];
+    for i in 0..(W * H) as usize {
+        px[i * 4..i * 4 + 3].copy_from_slice(&rgb[i * 3..i * 3 + 3]);
+        px[i * 4 + 3] = (i * 5) as u8;
+    }
+    px
+}
+
+#[test]
+fn monochrome_jobs_never_reach_the_backend_registry() {
+    // The seam's v1 contract is 8-bit 4:4:4 `seq_profile = 1`, and `Av1EncodeRequest` cannot
+    // express anything else — so a backend written against it has no way to *decline* a monochrome
+    // job. Offering one would hand it single-plane input it never agreed to encode, which is why
+    // the alpha auxiliary and a `Gray8` primary go straight to the built-in tail. `Scripted`
+    // asserts the 4:4:4 layout itself, so a monochrome job reaching it fails loudly rather than
+    // silently.
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let mut encoder = AvifEncoder::new();
+    encoder.push_backend(Scripted::new("b", true, Outcome::Passthrough, &log));
+
+    // `Gray8` is monochrome end to end: the registry is not consulted at all.
+    let gray: Vec<u8> = (0..(W * H)).map(|i| (i * 37) as u8).collect();
+    encoder
+        .encode_to_vec(ImageRef::<Gray8>::new(&gray, dims()).unwrap())
+        .expect("grayscale encodes through the built-in tail");
+    assert!(log.lock().unwrap().is_empty(), "no backend call for Gray8");
+
+    // `Rgba8` splits: the 4:4:4 colour item is a job the backend owns, its monochrome alpha
+    // auxiliary is not. Exactly one supports/encode pair, for the colour half.
+    let rgba = rgba_fixture();
+    encoder
+        .encode_to_vec(ImageRef::<Rgba8>::new(&rgba, dims()).unwrap())
+        .expect("rgba encodes");
+    assert_eq!(*log.lock().unwrap(), ["b:supports", "b:encode"]);
 }
 
 // ================================================================================================
