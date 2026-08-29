@@ -3392,6 +3392,66 @@ mod tests {
     }
 
     #[test]
+    fn a_vertical_split_needs_both_halves_smooth_and_a_textured_whole() {
+        // `decide_rect` reaches its `vert_ok` answer only where PARTITION_HORZ is already refused,
+        // so the vertical edge test is observable in exactly one situation: a block whose whole
+        // extent and both horizontal halves are textured while its left and right halves are each
+        // flat. It also has to be a layout where the taller-than-wide half is codable at all —
+        // §6.10.4 rules PARTITION_VERT out entirely at 4:2:2, which is why every layout tested
+        // here is 4:4:4 or 4:2:0.
+        //
+        // Both answers reconstruct bit-exactly, so the dav1d/libaom recon oracles cannot see this
+        // decision: only a direct test separates the real edge test from one that measures the
+        // left half twice, that accepts a single smooth half, or that has either comparison
+        // inverted.
+        for ss in [ChromaSubsampling::Cs444, ChromaSubsampling::Cs420] {
+            for bw in [16usize, 32] {
+                let hp = bw / 2;
+
+                // A hard edge on the block's midline. Whole block and both horizontal halves span
+                // it (range 180 > 32, so no PARTITION_NONE and no PARTITION_HORZ); each vertical
+                // half is constant (range 0), so PARTITION_VERT is the answer.
+                let edge = flat_chroma_luma(bw, ss, |x, _| if x < hp { 20 } else { 200 });
+                assert_eq!(
+                    FrameEncoder::new(&edge, 40).decide_rect(0, 0, bw),
+                    Some(2),
+                    "{ss:?} {bw}x{bw}: a midline edge with two flat halves is PARTITION_VERT"
+                );
+
+                // The same flat left half, but a right half textured by alternating rows. The
+                // whole block (range 100) and both horizontal halves still exceed the threshold,
+                // so PARTITION_NONE and PARTITION_HORZ stay refused — and PARTITION_VERT must be
+                // refused too, because only the left half is smooth.
+                let one_half = flat_chroma_luma(bw, ss, |x, y| match (x < hp, y % 2) {
+                    (true, _) | (false, 0) => 20,
+                    (false, _) => 120,
+                });
+                assert_eq!(
+                    FrameEncoder::new(&one_half, 40).decide_rect(0, 0, bw),
+                    None,
+                    "{ss:?} {bw}x{bw}: one smooth half is not a vertical edge"
+                );
+            }
+        }
+    }
+
+    /// An `n x n` frame in `ss` whose luma is `luma(x, y)` and whose chroma planes are flat.
+    fn flat_chroma_luma(
+        n: usize,
+        ss: ChromaSubsampling,
+        luma: impl Fn(usize, usize) -> u8,
+    ) -> Planar8 {
+        let y = (0..n)
+            .flat_map(|row| (0..n).map(move |col| (col, row)))
+            .map(|(col, row)| luma(col, row))
+            .collect();
+        let (cw, ch) = ss.chroma_dimensions(n as u32, n as u32);
+        let chroma = vec![128u8; (cw * ch) as usize];
+        Planar8::from_planes_subsampled(n as u32, n as u32, ss, [y, chroma.clone(), chroma])
+            .expect("valid planes")
+    }
+
+    #[test]
     fn the_cfl_alpha_search_follows_the_sign_of_the_correlation() {
         // `select_cfl` is a pure encoder decision — any alpha reconstructs bit-exactly, so no
         // decoder disagrees with it and only a direct test separates a working search from one
