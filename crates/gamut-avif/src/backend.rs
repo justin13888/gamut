@@ -428,11 +428,37 @@ impl SeqHeaderParams {
         let mc = r.bits(8)? as u16;
         // The §5.5.2 shortcut: BT.709 primaries + sRGB transfer + identity matrix infer full range
         // (and 4:4:4) with no coded bit; every other triple codes `color_range`.
-        let full_range = if cp == 1 && tc == 13 && mc == 0 {
-            true
+        let shortcut = cp == 1 && tc == 13 && mc == 0;
+        let full_range = if shortcut { true } else { r.bits(1)? == 1 };
+        // §5.5.2 *derives* the subsampling from `seq_profile` rather than always coding it, so a
+        // stream can be subsampled without a bit here saying so: profile 0 is 4:2:0, profile 2 is
+        // 4:2:2 below 12-bit, and only profile 2 at 12-bit codes the pair. `still_from_backend_obus`
+        // rebuilds an `av1C` that declares 4:4:4 unconditionally, so anything else has to be
+        // refused *here* — `validate_still_payload` checks the record against the OBU structure,
+        // not against the sequence header's colour fields, and would not catch the disagreement.
+        let (subsampling_x, subsampling_y) = if shortcut {
+            // The shortcut infers 4:4:4 whatever the profile says.
+            (0, 0)
         } else {
-            r.bits(1)? == 1
+            match seq_profile {
+                0 => (1, 1),
+                1 => (0, 0),
+                // Profile 2: 4:2:2 at 8/10-bit; at 12-bit the pair is coded, and 4:4:4 is the one
+                // combination this container can describe.
+                _ if bit_depth == BitDepth::Twelve => {
+                    let sx = r.bits(1)?;
+                    let sy = if sx == 1 { r.bits(1)? } else { 0 };
+                    (sx as u8, sy as u8)
+                }
+                _ => (1, 0),
+            }
         };
+        if (subsampling_x, subsampling_y) != (0, 0) {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend stream must be 4:4:4",
+            ));
+        }
         let colour = (cp, tc, mc, full_range);
         Ok(Self {
             bit_depth,
@@ -497,6 +523,19 @@ impl<'a> BitReader<'a> {
 /// `quality` at `0` and passes the authoritative quantizer out-of-band, as the codec-specific
 /// [`EncodeConfig::extra`] blob: **one byte**, the AV1 `base_q_idx`. A backend registered for
 /// [`AV1_CODEC_ID`] must read `extra`, and must not read `quality`.
+///
+/// # Bit depth: 8-bit only
+///
+/// The adapter implements [`Av1StillEncoder::encode_still`] and **not**
+/// [`encode_still16`](Av1StillEncoder::encode_still16), so a 10- or 12-bit job never reaches the
+/// wrapped ABI encoder: the trait default declines it and the registry falls through to the next
+/// backend, ultimately the built-in software tail. A caller who wraps a hardware or `-sys` encoder
+/// and then encodes an `Rgb16`/`Rgba16` source therefore gets a correct file produced by
+/// `gamut-av1`, not by the backend they registered.
+///
+/// This is a limitation of the adapter, not of the seam: [`ImageDesc`] carries a `bit_depth`, so
+/// lowering `Planar16` across the ABI is expressible and is deferred additive work. Implement
+/// [`Av1StillEncoder`] directly to take high-bit-depth jobs today.
 ///
 /// # Status handling
 ///

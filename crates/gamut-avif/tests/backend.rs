@@ -627,6 +627,32 @@ fn backend_stream_must_be_three_plane() {
     );
 }
 
+/// Profiles 0 and 2 are parsed, but §5.5.2 *derives* their subsampling instead of coding it, so a
+/// three-plane stream can be 4:2:0 (profile 0) or 4:2:2 (profile 2) with no bit saying so. The
+/// rebuilt `av1C` declares 4:4:4 unconditionally, so such a stream must be refused here — nothing
+/// downstream compares the record against the sequence header's colour fields.
+#[test]
+fn backend_stream_must_be_four_four_four() {
+    // Hand-built rather than encoded, because this branch's own encoder cannot produce a
+    // subsampled stream. seq_profile(3)=0 | still_picture=1 | reduced=1 | seq_level_idx[0](5)=0 |
+    // frame_width_bits_minus_1(4)=5 | frame_height_bits_minus_1(4)=5 | max_frame_width_minus_1(6)=15
+    // | max_frame_height_minus_1(6)=15 | six enable flags=0 | high_bitdepth=0 | mono_chrome=0 |
+    // color_description_present_flag=1 | cp=1 | tc=13 | mc=1 | color_range=0. `mc = 1` keeps it off
+    // the identity shortcut, which would otherwise infer 4:4:4; profile 0 then infers 4:2:0.
+    let payload = [0x18u8, 0x15, 0x4F, 0x3C, 0x02, 0x02, 0x1A, 0x02];
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+    let log = log();
+    let mut encoder = AvifEncoder::new();
+    encoder.push_backend(Scripted::new("p0-420", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("a three-plane profile-0 stream is 4:2:0, not 4:4:4");
+    assert_owned_error(
+        &err,
+        ErrorKind::Unsupported,
+        "AVIF: AV1 backend stream must be 4:4:4",
+    );
+}
+
 /// A backend stream whose `color_config()` disagrees with the request is rejected: the container
 /// mirrors the sequence header into `colr`, so accepting it would publish a colour description the
 /// samples do not have.
