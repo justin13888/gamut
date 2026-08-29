@@ -418,6 +418,166 @@ fn conformance_pairs_battery() {
     assert!(loose[1].value > loose[0].value);
 }
 
+// The bounds the *optimized* transform paths (#372) are held to. Measured on this battery
+// (lcms2 2.19):
+//
+//   level          metric                       measured max        asserted
+//   Collapse       device units vs our None      1.00e-15            < COLLAPSE_BOUND
+//   Precalculate   ΔE₀₀ vs our None              2.58e-1 / 5.07e-2   < LOOSE_*_BOUND
+//   Precalculate   ΔE₀₀ vs lcms2 default path    3.53e-3 / 7.12e-3   < LOOSE_*_BOUND
+//
+// `Collapse` only re-associates matrix products, so it is measured in **device units**
+// rather than through the ΔE₀₀ lens: the lens is an lcms2 transform, whose internal floats
+// are f32, and it therefore cannot see an f64 last-place difference at all (through the lens
+// this same measurement reports a flat 0). 1.00e-15 is three ulps of a device sample: the
+// bound keeps three decades of headroom, enough that a pass which started *approximating*
+// rather than re-associating would break it immediately.
+//
+// `Precalculate` deliberately builds the very construction the LOOSE row above measures on
+// the oracle's side (a grid-33/grid-17 resampled CLUT and 4096-point joined curves), so its
+// budget is that row's bounds *verbatim* — the crate promises "no worse than the
+// approximation lcms2's own default path already makes", not a number invented for it. The
+// second precalculate row is the evidence for that reading: optimized-vs-lcms2-optimized
+// (3.5e-3) is two decades *closer* than unoptimized-vs-lcms2-optimized (3.34e-1), because
+// both sides are now resampling the same transform onto the same grid.
+const COLLAPSE_BOUND: f64 = 1e-12;
+
+#[test]
+fn optimized_transforms_stay_inside_the_precision_budget() {
+    set_quiet_log_handler();
+    let battery = battery();
+    let lab = lab4();
+    // Two intents and BPC off: the passes are intent-blind (they rewrite whatever chain the
+    // link produced), so the battery's job here is covering the *stage shapes* — shaper
+    // chains, LUT chains, channel-count changes — not re-covering the intent matrix.
+    let intents = [
+        (RenderingIntent::Perceptual, INTENT_PERCEPTUAL),
+        (
+            RenderingIntent::MediaRelativeColorimetric,
+            INTENT_RELATIVE_COLORIMETRIC,
+        ),
+    ];
+    let mut collapse = Worst::default();
+    let mut precalc = [Worst::default(), Worst::default()]; // [Shaper, Lut]
+    let mut precalc_vs_lcms = [Worst::default(), Worst::default()];
+    for (src_name, dst_name, class) in PAIRS {
+        let src = find(&battery, src_name);
+        let dst = find(&battery, dst_name);
+        let lens = Transform::new(
+            &dst.oracle,
+            dst.dbl_format,
+            &lab,
+            TYPE_Lab_DBL,
+            INTENT_RELATIVE_COLORIMETRIC,
+            FLAGS_NOCACHE,
+        );
+        for (our_intent, lcms_intent) in intents {
+            let cell = format!("{src_name}->{dst_name} {our_intent:?}");
+            let build = |optimization| {
+                IccTransform::between(
+                    &src.parsed,
+                    &dst.parsed,
+                    TransformOptions {
+                        intent: our_intent,
+                        black_point_compensation: false,
+                        optimization,
+                    },
+                )
+                .unwrap()
+            };
+            let plain = build(PipelineOptimization::None);
+            let collapsed = build(PipelineOptimization::Collapse);
+            let precalculated = build(PipelineOptimization::Precalculate);
+            let lcms_loose = Transform::new(
+                &src.oracle,
+                src.u16_format,
+                &dst.oracle,
+                dst.u16_format,
+                lcms_intent,
+                FLAGS_NOWHITEONWHITEFIXUP,
+            );
+            let class_slot = usize::from(class == Class::Lut);
+            for device in sweep(src.channels, 40, 0x0BAD_F372 ^ u64::from(lcms_intent)) {
+                let reference = eval_ours(&plain, &device);
+                // Folding: compared in device units, where f64 differences survive.
+                let folded = eval_ours(&collapsed, &device);
+                for (x, y) in reference.iter().zip(&folded) {
+                    collapse.feed((x - y).abs(), &cell);
+                }
+                let resampled = eval_ours(&precalculated, &device);
+                precalc[class_slot].feed(
+                    lens_delta_e(&lens, &reference, &resampled, dst.ink_scale),
+                    &cell,
+                );
+                // Against lcms2's own optimized path, on the identical quantized input.
+                let device16: Vec<u16> = device
+                    .iter()
+                    .map(|&v| {
+                        #[expect(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "v is in [0, 1]"
+                        )]
+                        {
+                            (v * 65535.0 + 0.5) as u16
+                        }
+                    })
+                    .collect();
+                let device_q: Vec<f64> = device16.iter().map(|&v| f64::from(v) / 65535.0).collect();
+                let ours_q = eval_ours(&precalculated, &device_q);
+                let want16 = lcms_loose.apply_u16(&device16, 1, dst.channels);
+                let want: Vec<f64> = want16.iter().map(|&v| f64::from(v) / 65535.0).collect();
+                precalc_vs_lcms[class_slot]
+                    .feed(lens_delta_e(&lens, &ours_q, &want, dst.ink_scale), &cell);
+            }
+        }
+    }
+    eprintln!(
+        "optimization maxima: collapse {:.3e} device units ({}), \
+         precalc shaper {:.3e} ({}), precalc LUT {:.3e} ({}), \
+         precalc-vs-lcms shaper {:.3e}, precalc-vs-lcms LUT {:.3e}",
+        collapse.value,
+        collapse.cell,
+        precalc[0].value,
+        precalc[0].cell,
+        precalc[1].value,
+        precalc[1].cell,
+        precalc_vs_lcms[0].value,
+        precalc_vs_lcms[1].value,
+    );
+    assert!(
+        collapse.value < COLLAPSE_BOUND,
+        "collapse max device deviation {:.3e} at {}",
+        collapse.value,
+        collapse.cell
+    );
+    let bounds = [LOOSE_SHAPER_BOUND, LOOSE_LUT_BOUND];
+    for (slot, name) in [(0, "shaper"), (1, "LUT")] {
+        assert!(
+            precalc[slot].value < bounds[slot],
+            "precalculate/{name} max ΔE00 {:.3e} at {}",
+            precalc[slot].value,
+            precalc[slot].cell
+        );
+        assert!(
+            precalc_vs_lcms[slot].value < bounds[slot],
+            "precalculate-vs-lcms/{name} max ΔE00 {:.3e} at {}",
+            precalc_vs_lcms[slot].value,
+            precalc_vs_lcms[slot].cell
+        );
+        // The resampling is a real approximation, not a no-op dressed up as one: if the pass
+        // silently stopped running, this would collapse to zero.
+        assert!(
+            precalc[slot].value > 1e-4,
+            "precalculate/{name} moved nothing — did the pass run?"
+        );
+    }
+    // And it lands the crate *closer* to lcms2's default path than the unoptimized one does
+    // (the LOOSE row of the table above), which is the whole point of matching lcms2's
+    // construction rather than inventing one.
+    assert!(precalc_vs_lcms[0].value < LOOSE_SHAPER_BOUND / 10.0);
+}
+
 #[test]
 fn multiprofile_chain_matches_lcms2() {
     set_quiet_log_handler();
