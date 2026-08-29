@@ -44,7 +44,9 @@ doctests, and the `libavif` round-trip/remux integration tests; B–H rows are o
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
 **Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit, 4:2:0/4:2:2,
-monochrome, `MA1B` — issues #396/#398/#399); alpha and depth auxiliary items (#397); the HDR
+`MA1B` — issues #398/#399; the AV1 **monochrome** encode itself has landed with #396, but no
+`gamut-avif` input reaches it until the `Gray8`/alpha surface of #397); alpha and depth auxiliary
+items (#397); the HDR
 surface beyond CICP *tagging* (`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a
 PQ/HLG transfer labels samples but does not by itself make a conformant HDR image); container
 derivations
@@ -134,7 +136,7 @@ adding it needs no container change.
 | `OBU_PADDING` / `OBU_REDUNDANT_FRAME_HEADER` | §5.7/§5.9 | ☐ | — |
 | `OBU_TILE_LIST` (large-scale tiles; forbidden in AVIF item) | §5.12 | ☐ | — |
 | seq_profile=1 (High) | Annex A §10.2; §6.4.1 | ✅ | M0 |
-| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ☐ | M2 |
+| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ✅ (profile 0 for **monochrome** stills only — its 4:2:0 form ☐ #390; profile 2 ☐ #398/#391) | M2 |
 | `still_picture`=1, `reduced_still_picture_header`=1 | §5.5 | ✅ | M0 |
 | full seq header: multiple operating points (layered stills) | §5.5.1-.5.5.5 | ☐ | D |
 | full seq header: timing_info, decoder_model_info (sequences only) | §5.5.1-.5.5.5 | OOS | OOS |
@@ -143,7 +145,7 @@ adding it needs no container change.
 | `enable_filter_intra` (1 on lossy, 0 on lossless) / `enable_intra_edge_filter`=0 | §5.5 | ✅ | M0/M1 |
 | `enable_superres`/`cdef`/`restoration`=0 | §5.5 | ✅ (off) | M0 |
 | color_config: mc=0 identity, 4:4:4, high_bitdepth=0, full range | §5.5.2 | ✅ | M0 |
-| color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ☐ | M2 |
+| color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ✅ (**`mono_chrome` only**, with its inferred-subsampling branch — `gamut_av1::headers`; high_bitdepth/twelve_bit ☐ #398, coded subsampling + chroma_sample_position ☐ #390/#391) | M2 |
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
 | INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
 | `disable_cdf_update`=1 (static CDFs) | §5.9.2 | ✅ | M0 |
