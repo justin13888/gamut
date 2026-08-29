@@ -1239,6 +1239,14 @@ impl<'a> FrameEncoder<'a> {
             self.luma_range(sx, sy, bw, hp) <= 32 && self.luma_range(sx, sy + hp, bw, hp) <= 32;
         let vert_ok =
             self.luma_range(sx, sy, hp, bw) <= 32 && self.luma_range(sx + hp, sy, hp, bw) <= 32;
+        // §6.10.4: a partition whose chroma residual would be `BLOCK_INVALID` is not conformant.
+        // Under 4:2:2 that rules out every taller-than-wide block — halving an 8x16 block's width
+        // implies a 4x16 chroma block, an aspect ratio AV1 does not code — so `PARTITION_VERT` is
+        // unavailable at every size. Derived from the table rather than special-cased, so a future
+        // layout with different invalid shapes needs no change here. This costs the 4:2:2 encoder
+        // half its rectangular partition set, which is a real (documented) rate cost.
+        let horz_ok = horz_ok && self.rect_partition_is_codable(bw, hp);
+        let vert_ok = vert_ok && self.rect_partition_is_codable(hp, bw);
         if horz_ok {
             Some(1)
         } else if vert_ok {
@@ -1386,6 +1394,14 @@ impl<'a> FrameEncoder<'a> {
         // a block codes no `uv_mode`, no `cfl_alpha` (§5.11.7) and no chroma residual (§5.11.34).
         // Always true at 4:4:4.
         let block_has_chroma = has_chroma(r, c, bw, bh, self.subsampling);
+        // §6.10.4 is a bitstream-conformance requirement the *partition search* has to respect, so
+        // assert it at the point a block is committed rather than discovering it in the residual
+        // loop. `decide_rect` is the only thing that can produce a shape that violates it.
+        debug_assert!(
+            !block_has_chroma || self.rect_partition_is_codable(bw, bh),
+            "{bw}x{bh} has no codable chroma residual under {:?}",
+            self.subsampling
+        );
         let cfl_allowed = if self.qindex == 0 {
             bw == 4
         } else {
@@ -1856,6 +1872,13 @@ impl<'a> FrameEncoder<'a> {
     /// they are the reconstruction buffer, matching the decoder exactly.
     fn dc_avg(&self, plane: usize, sx: usize, sy: usize) -> i32 {
         self.dc_pred(plane, sx, sy, 4, 4)
+    }
+
+    /// Whether a `bw` x `bh` block has a codable chroma residual under this frame's subsampling
+    /// (§5.11.38 / §6.10.4). Always true at 4:4:4 and 4:2:0; false for taller-than-wide blocks at
+    /// 4:2:2.
+    fn rect_partition_is_codable(&self, bw: usize, bh: usize) -> bool {
+        plane_residual_size(bw, bh, 1, self.subsampling).is_some()
     }
 
     /// The tile's left edge in `plane`'s own sample coordinates.
@@ -3251,6 +3274,87 @@ mod tests {
     use gamut_color::Planar8;
 
     use super::*;
+
+    #[test]
+    fn every_emitted_block_shape_has_a_codable_chroma_residual() {
+        // §6.10.4: `get_plane_residual_size(subSize, 1)` must never be BLOCK_INVALID. Enumerates
+        // the shapes `encode_partition` can produce — squares 4..64 and the PARTITION_HORZ/VERT
+        // halves at 16 and 32 — against each layout the encoder codes.
+        //
+        // 4:2:2 is the constraint that bites: it rules out every taller-than-wide shape, which is
+        // why `decide_rect` must not offer PARTITION_VERT there.
+        let squares = [(4, 4), (8, 8), (16, 16), (32, 32), (64, 64)];
+        let horz = [(16, 8), (32, 16)];
+        let vert = [(8, 16), (16, 32)];
+
+        for ss in [ChromaSubsampling::Cs444, ChromaSubsampling::Cs420] {
+            for (bw, bh) in squares.iter().chain(&horz).chain(&vert) {
+                assert!(
+                    plane_residual_size(*bw, *bh, 1, ss).is_some(),
+                    "{bw}x{bh} must be codable at {ss:?}"
+                );
+            }
+        }
+        for (bw, bh) in squares.iter().chain(&horz) {
+            assert!(
+                plane_residual_size(*bw, *bh, 1, ChromaSubsampling::Cs422).is_some(),
+                "{bw}x{bh} must be codable at 4:2:2"
+            );
+        }
+        for (bw, bh) in vert {
+            assert!(
+                plane_residual_size(bw, bh, 1, ChromaSubsampling::Cs422).is_none(),
+                "{bw}x{bh} must be rejected at 4:2:2"
+            );
+        }
+    }
+
+    #[test]
+    fn the_partition_search_offers_no_vertical_split_at_four_two_two() {
+        // Content shaped so a vertical split is the attractive one: two flat halves side by side
+        // with a hard edge between them. At 4:4:4 and 4:2:0 `decide_rect` may take it; at 4:2:2 it
+        // must not, because the resulting 8x16 block has no codable chroma residual.
+        for ss in [
+            ChromaSubsampling::Cs444,
+            ChromaSubsampling::Cs420,
+            ChromaSubsampling::Cs422,
+        ] {
+            let planes = planes_split_halves(ss);
+            let e = FrameEncoder::new(&planes, 40);
+            for (r, c) in [(0usize, 0usize), (0, 4), (4, 0), (4, 4)] {
+                if let Some(kind) = e.decide_rect(r, c, 16) {
+                    let (bw, bh) = if kind == 1 { (16, 8) } else { (8, 16) };
+                    assert!(
+                        plane_residual_size(bw, bh, 1, ss).is_some(),
+                        "{ss:?}: decide_rect offered an uncodable {bw}x{bh}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A 32x32 image split into a dark left half and a bright right half, in `ss`.
+    fn planes_split_halves(ss: ChromaSubsampling) -> Planar8 {
+        let mut rgb = vec![0u8; 32 * 32 * 3];
+        for y in 0..32usize {
+            for x in 0..32usize {
+                let v = if x < 16 { 20u8 } else { 200 };
+                rgb[(y * 32 + x) * 3..(y * 32 + x) * 3 + 3].copy_from_slice(&[v, v, v]);
+            }
+        }
+        let img = gamut_core::ImageRef::<gamut_core::Rgb8>::new(
+            &rgb,
+            gamut_core::Dimensions::new(32, 32).unwrap(),
+        )
+        .unwrap();
+        let m = gamut_color::RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            gamut_color::cicp::ColorRange::Full,
+            gamut_color::BitDepth::Eight,
+        )
+        .unwrap();
+        Planar8::from_rgb8_matrix_subsampled(img, m, ss).unwrap()
+    }
 
     #[test]
     fn the_cfl_alpha_search_follows_the_sign_of_the_correlation() {

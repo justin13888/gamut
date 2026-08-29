@@ -143,8 +143,9 @@ impl AvifEncoder {
     ///
     /// [`AvifMode::Lossy`] defaults to [`ChromaSubsampling::Cs420`] (AV1 Main profile).
     /// [`ChromaSubsampling::Cs444`] keeps full-resolution chroma but is AV1 **Profile 1**, which
-    /// hardware still-image decoders frequently reject; [`ChromaSubsampling::Cs422`] is Profile 2
-    /// and matches no AVIF profile brand at all.
+    /// hardware still-image decoders frequently reject; [`ChromaSubsampling::Cs422`] is Profile 2,
+    /// matches no AVIF profile brand at all, and loses the encoder half its rectangular partition
+    /// set, because AV1 §6.10.4 forbids taller-than-wide blocks under it.
     ///
     /// **Ignored by [`AvifMode::Lossless`]**, which always keeps 4:4:4 — see
     /// [`AvifConfig::chroma`]. [`ChromaSubsampling::Cs400`] is rejected at encode time.

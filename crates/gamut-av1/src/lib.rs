@@ -19,10 +19,11 @@
 //! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. The caller supplies either GBR
 //! planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
 //!
-//! Chroma sampling comes from the [`Planar8`](gamut_color::Planar8) itself: 4:4:4 and 4:2:0 are
-//! coded, and `seq_profile` follows the format (Main for 4:2:0, High for 4:4:4). The identity
-//! matrix requires 4:4:4 (§6.4.2) and a subsampled identity encode is refused. 4:2:2's geometry
-//! and signalling are in place but its coding path is not yet complete.
+//! Chroma sampling comes from the [`Planar8`](gamut_color::Planar8) itself: 4:4:4, 4:2:2 and 4:2:0
+//! are all coded, and `seq_profile` follows the format (Main for 4:2:0, High for 4:4:4,
+//! Professional for 4:2:2). The identity matrix requires 4:4:4 (§6.4.2) and a subsampled identity
+//! encode is refused. Under 4:2:2 the partition search drops `PARTITION_VERT`, since §6.10.4
+//! forbids a block whose chroma residual would be `BLOCK_INVALID`.
 //!
 //! The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, quantizer matrices, and the
 //! AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
