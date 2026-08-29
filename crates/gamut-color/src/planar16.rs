@@ -7,9 +7,60 @@
 //! an 8-bit buffer cannot need: the [`BitDepth`] its samples are coded at. `u16` is storage, `10`
 //! or `12` is meaning, and every sample is validated against it at construction.
 
-use gamut_core::{Dimensions, Error, Result};
+use gamut_core::{Dimensions, Error, ImageRef, Result, Rgb16, Rgba16};
 
 use crate::format::{BitDepth, ChromaSubsampling};
+use crate::ycbcr::RgbToYcbcr;
+
+/// How far a full-range 16-bit sample is shifted down to reach `bit_depth`.
+///
+/// [`gamut_core`]'s `u16` pixel layouts carry samples on the canonical full 16-bit scale, while a
+/// codec's *coded* depth is a separate concern — so narrowing is a right shift, and it **truncates**
+/// rather than rounds. Truncation is what keeps the mapping a pure prefix of the sample: the coded
+/// value is literally the top `bit_depth` bits, so the same source narrowed to 10 and to 12 bits
+/// agrees on the 10 bits they share, and re-widening never overshoots the original.
+fn narrowing_shift(bit_depth: BitDepth) -> u32 {
+    16 - u32::from(bit_depth.bits())
+}
+
+/// Maps an interleaved 16-bit buffer of `n` pixels, `stride` samples apart with `R, G, B` first, to
+/// identity GBR planes narrowed to the coded depth.
+fn rgb16_to_gbr_planes(px: &[u16], n: usize, stride: usize, shift: u32) -> [Vec<u16>; 3] {
+    let mut g = vec![0u16; n];
+    let mut b = vec![0u16; n];
+    let mut r = vec![0u16; n];
+    for i in 0..n {
+        r[i] = px[i * stride] >> shift;
+        g[i] = px[i * stride + 1] >> shift;
+        b[i] = px[i * stride + 2] >> shift;
+    }
+    [g, b, r]
+}
+
+/// Maps an interleaved 16-bit buffer to `Y/Cb/Cr` planes through `matrix`, narrowing to the coded
+/// depth **first** — `matrix` is built at that depth and expects its inputs there.
+fn rgb16_to_ycbcr_planes(
+    px: &[u16],
+    n: usize,
+    stride: usize,
+    shift: u32,
+    matrix: RgbToYcbcr,
+) -> [Vec<u16>; 3] {
+    let mut y = vec![0u16; n];
+    let mut cb = vec![0u16; n];
+    let mut cr = vec![0u16; n];
+    for i in 0..n {
+        let (yy, u, v) = matrix.from_rgb(
+            px[i * stride] >> shift,
+            px[i * stride + 1] >> shift,
+            px[i * stride + 2] >> shift,
+        );
+        y[i] = yy;
+        cb[i] = u;
+        cr[i] = v;
+    }
+    [y, cb, cr]
+}
 
 /// Three planes of 10-, 12-, or 16-bit samples, row-major, in AV1's `Y/U/V` order.
 ///
@@ -118,6 +169,135 @@ impl Planar16 {
             bit_depth,
             planes,
         })
+    }
+
+    /// Maps an interleaved 16-bit RGB image to 4:4:4 identity GBR planes at `bit_depth`.
+    ///
+    /// The samples arrive on [`gamut_core`]'s canonical full 16-bit scale and are narrowed by
+    /// **truncation** — `sample >> (16 - bit_depth)`. The consequence is worth stating plainly: a
+    /// lossless encode of the result is bit-exact *at the coded depth*, not to the 16-bit input.
+    /// Only [`BitDepth::Sixteen`] keeps every bit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use gamut_color::{BitDepth, Planar16};
+    /// use gamut_core::{Dimensions, ImageRef, Rgb16};
+    ///
+    /// let rgb = [0xFFFFu16, 0x8000, 0x0001];
+    /// let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(1, 1)?)?;
+    /// let p = Planar16::from_rgb16_identity_view(img, BitDepth::Twelve);
+    /// // GBR order, each sample's top 12 bits.
+    /// assert_eq!((p.plane(0)[0], p.plane(1)[0], p.plane(2)[0]), (0x800, 0x000, 0xFFF));
+    /// # Ok::<(), gamut_core::Error>(())
+    /// ```
+    #[must_use]
+    pub fn from_rgb16_identity_view(img: ImageRef<'_, Rgb16>, bit_depth: BitDepth) -> Self {
+        let (width, height) = (img.width(), img.height());
+        let n = width as usize * height as usize;
+        Self {
+            width,
+            height,
+            subsampling: ChromaSubsampling::Cs444,
+            bit_depth,
+            planes: rgb16_to_gbr_planes(img.as_samples(), n, 3, narrowing_shift(bit_depth)),
+        }
+    }
+
+    /// Maps an interleaved 16-bit RGB image to 4:4:4 `Y/Cb/Cr` planes through `matrix`, narrowed to
+    /// `bit_depth` exactly as [`from_rgb16_identity_view`](Self::from_rgb16_identity_view) narrows.
+    ///
+    /// `matrix` must be built at `bit_depth`: the narrowing happens *before* the transform, so the
+    /// matrix sees samples already on the coded scale.
+    #[must_use]
+    pub fn from_rgb16_matrix_view(
+        img: ImageRef<'_, Rgb16>,
+        matrix: RgbToYcbcr,
+        bit_depth: BitDepth,
+    ) -> Self {
+        let (width, height) = (img.width(), img.height());
+        let n = width as usize * height as usize;
+        Self {
+            width,
+            height,
+            subsampling: ChromaSubsampling::Cs444,
+            bit_depth,
+            planes: rgb16_to_ycbcr_planes(
+                img.as_samples(),
+                n,
+                3,
+                narrowing_shift(bit_depth),
+                matrix,
+            ),
+        }
+    }
+
+    /// The colour channels of an interleaved 16-bit RGBA image as 4:4:4 identity GBR planes,
+    /// ignoring alpha — [`from_rgb16_identity_view`](Self::from_rgb16_identity_view) for a
+    /// four-channel source.
+    #[must_use]
+    pub fn from_rgba16_identity_view(img: ImageRef<'_, Rgba16>, bit_depth: BitDepth) -> Self {
+        let (width, height) = (img.width(), img.height());
+        let n = width as usize * height as usize;
+        Self {
+            width,
+            height,
+            subsampling: ChromaSubsampling::Cs444,
+            bit_depth,
+            planes: rgb16_to_gbr_planes(img.as_samples(), n, 4, narrowing_shift(bit_depth)),
+        }
+    }
+
+    /// The colour channels of an interleaved 16-bit RGBA image as 4:4:4 `Y/Cb/Cr` planes through
+    /// `matrix`, ignoring alpha.
+    #[must_use]
+    pub fn from_rgba16_matrix_view(
+        img: ImageRef<'_, Rgba16>,
+        matrix: RgbToYcbcr,
+        bit_depth: BitDepth,
+    ) -> Self {
+        let (width, height) = (img.width(), img.height());
+        let n = width as usize * height as usize;
+        Self {
+            width,
+            height,
+            subsampling: ChromaSubsampling::Cs444,
+            bit_depth,
+            planes: rgb16_to_ycbcr_planes(
+                img.as_samples(),
+                n,
+                4,
+                narrowing_shift(bit_depth),
+                matrix,
+            ),
+        }
+    }
+
+    /// The **alpha** channel of an interleaved 16-bit RGBA image as monochrome planes at
+    /// `bit_depth` — one luma plane carrying the narrowed alpha, and no chroma.
+    ///
+    /// Alpha is opacity, not colour: it goes through no matrix and no range scaling, exactly as
+    /// [`Planar8::from_rgba8_alpha_view`](crate::Planar8::from_rgba8_alpha_view) carries the 8-bit
+    /// case.
+    #[must_use]
+    pub fn from_rgba16_alpha_view(img: ImageRef<'_, Rgba16>, bit_depth: BitDepth) -> Self {
+        let shift = narrowing_shift(bit_depth);
+        Self {
+            width: img.width(),
+            height: img.height(),
+            subsampling: ChromaSubsampling::Cs400,
+            bit_depth,
+            planes: [
+                img.as_samples()
+                    .iter()
+                    .skip(3)
+                    .step_by(4)
+                    .map(|&a| a >> shift)
+                    .collect(),
+                Vec::new(),
+                Vec::new(),
+            ],
+        }
     }
 
     /// Image width in samples.
@@ -239,6 +419,79 @@ mod tests {
             bad_v.unwrap_err().static_message(),
             Some("v plane length != chroma dimensions")
         );
+    }
+
+    /// A 3x2 RGBA16 image whose four channels are pairwise distinct at every pixel, with values
+    /// chosen so the discarded low bits differ from the kept high ones.
+    ///
+    /// 3x2 rather than a square: the pixel count is `width * height`, and for 2x2 that is
+    /// indistinguishable from `width + height`.
+    fn rgba16_3x2() -> Vec<u16> {
+        let mut px = Vec::new();
+        for i in 0..6u16 {
+            px.extend_from_slice(&[0xF000 | i, 0x8000 | (i << 4), 0x0FFF ^ i, 0xFFFF - (i << 8)]);
+        }
+        px
+    }
+
+    #[test]
+    fn sixteen_bit_rgb_is_narrowed_by_truncation() {
+        // The contract: the coded sample is the *top* `bit_depth` bits of the input, and the low
+        // bits are dropped rather than rounded — `0xFFFF` stays at the top of the range instead of
+        // rounding out of it, and `0x0FFF` keeps only what fits above the shift.
+        let rgb = [0xFFFFu16, 0x8000, 0x0FFF];
+        let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(1, 1).unwrap()).unwrap();
+        for (bits, want) in [
+            (BitDepth::Ten, (0x200u16, 0x03F, 0x3FF)),
+            (BitDepth::Twelve, (0x800, 0x0FF, 0xFFF)),
+            // Sixteen keeps every bit, so the shift is the identity.
+            (BitDepth::Sixteen, (0x8000, 0x0FFF, 0xFFFF)),
+        ] {
+            // GBR order: plane0 = G, plane1 = B, plane2 = R.
+            let p = Planar16::from_rgb16_identity_view(img, bits);
+            assert_eq!(
+                (p.plane(0)[0], p.plane(1)[0], p.plane(2)[0]),
+                want,
+                "{bits:?}"
+            );
+            assert_eq!(p.bit_depth(), bits);
+            // Every narrowed sample fits the claimed depth, which is what `from_planes_subsampled`
+            // would otherwise reject.
+            assert!(p.plane(2)[0] <= bits.max_value());
+        }
+    }
+
+    #[test]
+    fn rgba16_colour_planes_ignore_alpha_and_alpha_is_its_own_plane() {
+        let px = rgba16_3x2();
+        let img = ImageRef::<Rgba16>::new(&px, Dimensions::new(3, 2).unwrap()).unwrap();
+        let colour = Planar16::from_rgba16_identity_view(img, BitDepth::Twelve);
+        assert_eq!(colour.subsampling(), ChromaSubsampling::Cs444);
+        // Same mapping the three-channel constructor gives for the same colour values, which is
+        // what makes an RGBA colour item identical to the RGB one.
+        let rgb: Vec<u16> = px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|c| c[..3].to_vec())
+            .collect();
+        let from_rgb = Planar16::from_rgb16_identity_view(
+            ImageRef::<Rgb16>::new(&rgb, Dimensions::new(3, 2).unwrap()).unwrap(),
+            BitDepth::Twelve,
+        );
+        for i in 0..3 {
+            assert_eq!(colour.plane(i), from_rgb.plane(i), "plane {i}");
+            assert_eq!(colour.plane(i).len(), 6, "plane {i} covers every pixel");
+        }
+
+        let alpha = Planar16::from_rgba16_alpha_view(img, BitDepth::Twelve);
+        assert_eq!(alpha.subsampling(), ChromaSubsampling::Cs400);
+        // The fourth channel of each pixel, narrowed — not the first, and not every fourth sample
+        // from the start.
+        let want: Vec<u16> = (0..6u16).map(|i| (0xFFFF - (i << 8)) >> 4).collect();
+        assert_eq!(alpha.plane(0), &want[..]);
+        assert!(alpha.plane(1).is_empty());
+        assert_eq!(alpha.plane_dimensions(1), (0, 0));
     }
 
     #[test]
