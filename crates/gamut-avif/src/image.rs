@@ -18,7 +18,7 @@ use crate::av1c::Av1Config;
 
 /// The `aux_type` URN that marks an auxiliary image as an **alpha** plane (AVIF v1.2.0 §4 — the
 /// MIAF/CICP URN; AVIF defines no format-specific alias the way HEVC does).
-const ALPHA_AUX_URN: &str = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
+pub(crate) const ALPHA_AUX_URN: &str = "urn:mpeg:mpegB:cicp:systems:auxiliary:alpha";
 
 /// The `aux_type` URN that marks an auxiliary image as a **depth** map (AVIF v1.2.0 §4).
 const DEPTH_AUX_URN: &str = "urn:mpeg:mpegB:cicp:systems:auxiliary:depth";
