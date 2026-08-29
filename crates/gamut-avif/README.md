@@ -49,8 +49,13 @@ let avif = AvifEncoder::new().encode_to_vec(image).expect("encode");
 std::fs::write("out.avif", &avif).unwrap();
 ```
 
-`AvifEncoder` implements [`gamut_core::EncodeImage<Rgb8>`], so the input is a typed
-[`gamut_core::ImageRef`] and handing it an unsupported pixel layout is a compile error.
+`AvifEncoder` implements [`gamut_core::EncodeImage`] for `Rgb8`, `Rgba8` and `Gray8`, so the input
+is a typed [`gamut_core::ImageRef`] and handing it an unsupported pixel layout is a compile error.
+`Rgba8` splits into a 4:4:4 colour item plus a monochrome **alpha auxiliary item** (`auxC`/`auxl`,
+with `prem` when `with_premultiplied_alpha(true)` declares the colour premultiplied); `Gray8` is a
+single monochrome item rather than R=G=B replication. A file carrying a monochrome item signals
+only the general AVIF brands — the Advanced Profile brand `MA1A` requires every image item to be
+AV1 High Profile (AVIF v1.2.0 §8.3).
 
 Decoding (issue #250): `AvifContainer::parse` gives a byte-accounting view plus the role-typed
 `AvifImage` lens (primary item, alpha/depth auxiliaries, thumbnails, Exif/XMP, grid/overlay,
@@ -93,7 +98,7 @@ identity / BT.601 / BT.709 / BT.2020-NCL / monochrome colour, alpha merge, overl
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
-specs: **deferred, planned** features (alpha *encoding*, 10/12-bit and 4:2:0/4:2:2, the HDR
+specs: **deferred, planned** features (10/12-bit and 4:2:0/4:2:2, the HDR
 metadata properties beyond CICP tagging, gain maps, layered/progressive images, the pure-Rust AV1
 codestream decoder, the decoder backend registry, …) all land semver-minor on the frozen v1
 surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per
