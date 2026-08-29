@@ -299,7 +299,11 @@ pub(crate) fn deblock(
                 let (col, row) = g.deblock_mi(x, y);
                 let txw = 1usize << txlog2(row * mi_cols + col);
                 if x % txw == 0 {
-                    let prev_txw = 1usize << txlog2(row * mi_cols + (col - 1));
+                    // §7.14.2 steps the neighbour by `dx << subX`, not by one MI cell. At 4:2:0 and
+                    // 4:2:2 consecutive chroma edges land on MI cols 1, 3, 5 …, so `col - 1` is the
+                    // *even* cell of the current edge's own group — normally the same block — and
+                    // `Min(prevTxSz, txSz)` would silently collapse to `txSz`. Identity at 4:4:4.
+                    let prev_txw = 1usize << txlog2(row * mi_cols + (col - (1 << g.ss_x)));
                     let filter_size = prev_txw.min(txw).min(size_cap);
                     // The edge takes the level of its q0-side (right) block (§7.14.4).
                     let st = strength_for(row * mi_cols + col);
@@ -320,7 +324,8 @@ pub(crate) fn deblock(
                 let (col, row) = g.deblock_mi(x, y);
                 let txh = 1usize << txlog2_h(row * mi_cols + col);
                 if y % txh == 0 {
-                    let prev_txh = 1usize << txlog2_h((row - 1) * mi_cols + col);
+                    // §7.14.2's `prevRow = row - (dy << subY)`; see the vertical pass above.
+                    let prev_txh = 1usize << txlog2_h((row - (1 << g.ss_y)) * mi_cols + col);
                     let filter_size = prev_txh.min(txh).min(size_cap);
                     // The edge takes the level of its q0-side (bottom) block (§7.14.4).
                     let st = strength_for(row * mi_cols + col);
