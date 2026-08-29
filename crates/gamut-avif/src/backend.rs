@@ -28,15 +28,17 @@
 //! sequence header, the colour configuration is checked against the one the request asked for (so
 //! the `colr` box can never disagree with the payload), and the stream is then checked against the
 //! AVIF still-image item constraints
-//! ([`Av1Config::validate_still_payload`](crate::Av1Config::validate_still_payload)). The rest of
-//! the pixel parameters (8-bit, 4:4:4) are the v1 surface's fixed contract, stated on
-//! [`Av1StillEncoder::encode_still`] and enforced by the `seq_profile` check.
+//! ([`Av1Config::validate_still_payload`](crate::Av1Config::validate_still_payload)). The sample
+//! depth and the chroma format are read from `color_config()` the same way and checked against
+//! [`Av1EncodeRequest::bit_depth`] and [`Av1EncodeRequest::chroma`], so the record describes the
+//! stream it wraps rather than a fixed pixel format. Monochrome is the one shape refused: the item
+//! being described is the three-plane colour item.
 
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{BitDepth, ColorRange, Planar8, Planar16};
+use gamut_color::{BitDepth, ChromaSubsampling, ColorRange, Planar16, Planar8};
 use gamut_core::{Dimensions, Error, PixelFormat, Result};
 
 use crate::av1c::Av1Config;
@@ -56,8 +58,7 @@ pub const AV1_CODEC_ID: u32 = u32::from_be_bytes(*b"av01");
 /// guarantee (see `STATUS.md`) and lives inside the encoder, so a backend never sees — and can
 /// never reinterpret — the `0..=100` quality scale.
 ///
-/// `#[non_exhaustive]`, so the deferred pixel-format work (M2: 10/12-bit, 4:2:0/4:2:2, limited
-/// range) extends it additively.
+/// `#[non_exhaustive]`, so further pixel-format work extends it additively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct Av1EncodeRequest {
@@ -67,6 +68,8 @@ pub struct Av1EncodeRequest {
     base_q_idx: u8,
     /// The colour signalling the returned stream must carry — and the layout `planes` is in.
     colour: Av1Colour,
+    /// The chroma sampling of `planes`, which the returned stream must also code.
+    chroma: ChromaSubsampling,
     /// The depth the samples are coded at: 8, 10 or 12 bits.
     bit_depth: BitDepth,
 }
@@ -78,9 +81,11 @@ impl Av1EncodeRequest {
         dimensions: Dimensions,
         base_q_idx: u8,
         colour: Av1Colour,
+        chroma: ChromaSubsampling,
         bit_depth: BitDepth,
     ) -> Self {
         Self {
+            chroma,
             dimensions,
             base_q_idx,
             colour,
@@ -134,11 +139,26 @@ impl Av1EncodeRequest {
         self.colour
     }
 
+    /// The chroma sampling of the planes passed to [`Av1StillEncoder::encode_still`] /
+    /// [`encode_still16`](Av1StillEncoder::encode_still16).
+    ///
+    /// Like [`colour`](Self::colour) this is both an input and an obligation: the planes are in
+    /// this layout, and the returned stream must code it, because `av1C` mirrors the sequence
+    /// header and the two must agree (AV1-ISOBMFF v1.3.0 §2.3.4). A mismatch is rejected.
+    #[must_use]
+    pub fn chroma(&self) -> ChromaSubsampling {
+        self.chroma
+    }
+
     /// The depth the samples are coded at.
     ///
     /// [`BitDepth::Eight`] is the only depth [`Av1StillEncoder::encode_still`] is ever handed;
     /// [`BitDepth::Ten`] and [`BitDepth::Twelve`] arrive through
     /// [`encode_still16`](Av1StillEncoder::encode_still16), whose default implementation declines.
+    ///
+    /// Independent of [`chroma`](Self::chroma): §6.4.1 pairs the two only in deciding the
+    /// `seq_profile` the returned stream must carry, and every depth/format combination AV1 admits
+    /// is a job this request can describe.
     #[must_use]
     pub fn bit_depth(&self) -> BitDepth {
         self.bit_depth
@@ -167,12 +187,13 @@ pub trait Av1StillEncoder: Send {
     ///
     /// `planes` are `gamut-color` planes, each `width * height` 8-bit samples, in the layout
     /// [`Av1EncodeRequest::colour`] describes: identity GBR (`Y = G`, `U = B`, `V = R`) or
-    /// `Y/Cb/Cr` through that matrix. The v1 surface fixes the rest of the coding parameters: the
-    /// returned stream must be a **still picture** with `seq_profile = 1` (High), 8-bit, 4:4:4,
-    /// whose sequence header carries `reduced_still_picture_header = 1`, the request's dimensions,
-    /// and a `color_config()` matching the request's colour. The crate re-derives the
-    /// `av1C`/`colr` boxes from that sequence header and rejects a stream that does not meet the
-    /// contract.
+    /// `Y/Cb/Cr` through that matrix, subsampled as [`Av1EncodeRequest::chroma`] states. The
+    /// returned stream must be a **still picture** whose sequence header carries
+    /// `reduced_still_picture_header = 1`, the request's dimensions, a `color_config()` matching
+    /// the request's colour, three planes (`mono_chrome = 0`), 8-bit samples, and the request's
+    /// chroma format — which fixes `seq_profile` through §6.4.1: 1 (High) for 4:4:4, 0 (Main) for
+    /// 4:2:0, 2 (Professional) for 4:2:2. The crate re-derives the `av1C`/`colr` boxes from that
+    /// sequence header and rejects a stream that does not meet the contract.
     ///
     /// # Errors
     ///
@@ -194,9 +215,10 @@ pub trait Av1StillEncoder: Send {
     /// implementation does not inspect. Every *other* failure after accepting a job still
     /// propagates.
     ///
-    /// The returned stream's `seq_profile` must match the depth §6.4.1 requires — 1 (or 0
-    /// monochrome) at 10 bits, 2 at 12 — and its `color_config()` must declare
-    /// [`Av1EncodeRequest::bit_depth`] and [`Av1EncodeRequest::colour`]; the crate re-derives the
+    /// The returned stream's `seq_profile` must be the one §6.4.1 requires of the depth **and**
+    /// the chroma format together — 10-bit keeps the format's own profile, and 12-bit of any format
+    /// is 2 — and its `color_config()` must declare [`Av1EncodeRequest::bit_depth`],
+    /// [`Av1EncodeRequest::chroma`] and [`Av1EncodeRequest::colour`]; the crate re-derives the
     /// `av1C`/`colr` boxes from it and rejects a disagreement.
     ///
     /// # Errors
@@ -263,15 +285,17 @@ pub(crate) fn run_backends(
 ///
 /// - [`Error::InvalidInput`] if the stream has no parsable reduced-still-picture sequence header,
 ///   or if its coded dimensions disagree with `dims` (which the container's `ispe` states).
-/// - [`Error::Unsupported`] if the sequence header is not `reduced_still_picture_header = 1`, or
-///   its `seq_profile`/depth pair is not one this surface can describe.
-/// - [`Error::InvalidInput`] if the stream's coded depth is not the one the request asked for —
-///   the container's `av1C` and `pixi` would otherwise lie about the payload.
+/// - [`Error::Unsupported`] if the sequence header is not `reduced_still_picture_header = 1`, uses
+///   a reserved `seq_profile`, or is monochrome (this describes the three-plane colour item).
+/// - [`Error::InvalidInput`] if the stream's coded depth or chroma format is not the one the
+///   request asked for, or if its `seq_profile` does not admit the pair its own `color_config()`
+///   derives (§6.4.1) — the container's `av1C` and `pixi` would otherwise lie about the payload.
 /// - Whatever [`Av1Config::validate_still_payload`] reports for a non-conformant item payload.
 pub(crate) fn still_from_backend_obus(
     obus: Vec<u8>,
     dims: Dimensions,
     colour: Av1Colour,
+    chroma: ChromaSubsampling,
     bit_depth: BitDepth,
 ) -> Result<EncodedStill> {
     let header = SeqHeaderParams::parse(&obus)?;
@@ -302,18 +326,31 @@ pub(crate) fn still_from_backend_obus(
             "AVIF: AV1 backend stream signals a different colour configuration than requested",
         ));
     }
+    if header.chroma != chroma {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: AV1 backend stream signals a different chroma format than requested",
+        ));
+    }
     let (color_primaries, transfer_characteristics, matrix_coefficients, full_range) =
         header.colour;
+    // Both mirrored from the parsed header rather than re-derived from the request: §2.3.4 makes
+    // `av1C` a copy of the sequence header, and the two comparisons above have already established
+    // that the header says what was asked for.
+    let (chroma_x, chroma_y) = header.chroma.subsampling();
     let config = Av1StillConfig {
         seq_profile: header.seq_profile,
         seq_level_idx_0: header.seq_level_idx_0,
         seq_tier_0: 0,
-        high_bitdepth: bit_depth != BitDepth::Eight,
-        twelve_bit: bit_depth == BitDepth::Twelve,
+        high_bitdepth: header.bit_depth != BitDepth::Eight,
+        twelve_bit: header.bit_depth == BitDepth::Twelve,
         monochrome: false,
-        chroma_subsampling_x: 0,
-        chroma_subsampling_y: 0,
-        chroma_sample_position: 0,
+        chroma_subsampling_x: chroma_x,
+        chroma_subsampling_y: chroma_y,
+        // Mirrored, not required to match the request: §2.3.4 obliges `av1C` to agree with the
+        // sequence header, and a backend whose downsampler is co-sited may legitimately signal a
+        // position of its own.
+        chroma_sample_position: header.chroma_sample_position,
         color_primaries,
         transfer_characteristics,
         matrix_coefficients,
@@ -340,6 +377,11 @@ struct SeqHeaderParams {
     colour: (u16, u16, u16, bool),
     /// `BitDepth`, as §5.5.2 derives it from `high_bitdepth`, `twelve_bit` and `seq_profile`.
     bit_depth: BitDepth,
+    /// Chroma sampling, as §5.5.2 derives it — inferred from `seq_profile` except under profile 2
+    /// at 12 bits, the one combination that codes the pair.
+    chroma: ChromaSubsampling,
+    /// `chroma_sample_position`, coded for 4:2:0 only.
+    chroma_sample_position: u8,
 }
 
 impl SeqHeaderParams {
@@ -372,9 +414,9 @@ impl SeqHeaderParams {
         // Reading the colour fields off a profile this parser cannot describe would misparse them
         // before anyone had a chance to reject the stream.
         //
-        // Profile 0 is admitted so far as the *syntax* goes — it is what a monochrome stream uses —
-        // but the `mono_chrome` bit below is then rejected, because the container surface this
-        // rebuilds an `av1C` for describes a three-plane colour item.
+        // All three defined profiles are read: 0 is 4:2:0 (and monochrome, which the `mono_chrome`
+        // bit below then rejects — this rebuilds an `av1C` for a three-plane colour item), 1 is
+        // 4:4:4, and 2 is 4:2:2 or any 12-bit layout. 3..=7 are reserved (§6.4.1).
         if seq_profile > 2 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -399,7 +441,9 @@ impl SeqHeaderParams {
         r.bits(6)?; // use_128x128_superblock, filter_intra, intra_edge_filter, superres, cdef, restoration
 
         // color_config() (§5.5.2): `high_bitdepth`, then `twelve_bit` only under profile 2, then
-        // `mono_chrome` for every profile but 1.
+        // `mono_chrome` for every profile but 1. Both the depth and the layout below are read from
+        // the stream rather than assumed — the two vary independently, and the record this rebuilds
+        // has to describe whichever pair the backend actually coded.
         let high_bitdepth = r.bits(1)? != 0;
         let twelve_bit = seq_profile == 2 && high_bitdepth && r.bits(1)? != 0;
         let bit_depth = match (high_bitdepth, twelve_bit) {
@@ -407,6 +451,8 @@ impl SeqHeaderParams {
             (true, false) => BitDepth::Ten,
             (true, true) => BitDepth::Twelve,
         };
+        // `mono_chrome` is coded for every profile except High. A monochrome stream is refused:
+        // this rebuilds the `av1C` of a three-plane colour item.
         if seq_profile != 1 && r.bits(1)? != 0 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -429,34 +475,66 @@ impl SeqHeaderParams {
         // The §5.5.2 shortcut: BT.709 primaries + sRGB transfer + identity matrix infer full range
         // (and 4:4:4) with no coded bit; every other triple codes `color_range`.
         let shortcut = cp == 1 && tc == 13 && mc == 0;
+        // Under the shortcut §5.5.2 infers 4:4:4 whatever the profile says. That is consistent
+        // only where §6.4.1 lets the profile code 4:4:4 — High, and Professional at 12 bits;
+        // anywhere else the stream asserts two chroma formats at once. libaom asserts against
+        // exactly that construction, so no conformant encoder emits it.
+        let profile_codes_444 = seq_profile == 1 || (seq_profile == 2 && twelve_bit);
+        if shortcut && !profile_codes_444 {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: AV1 backend stream takes the sRGB color_config shortcut, which infers 4:4:4, \
+                 but its seq_profile declares subsampled chroma",
+            ));
+        }
         let full_range = if shortcut { true } else { r.bits(1)? == 1 };
         // §5.5.2 *derives* the subsampling from `seq_profile` rather than always coding it, so a
-        // stream can be subsampled without a bit here saying so: profile 0 is 4:2:0, profile 2 is
-        // 4:2:2 below 12-bit, and only profile 2 at 12-bit codes the pair. `still_from_backend_obus`
-        // rebuilds an `av1C` that declares 4:4:4 unconditionally, so anything else has to be
-        // refused *here* — `validate_still_payload` checks the record against the OBU structure,
-        // not against the sequence header's colour fields, and would not catch the disagreement.
+        // stream can be subsampled without a bit here saying so: profile 0 is 4:2:0 and profile 2
+        // is 4:2:2 below 12 bits. Only profile 2 at 12 bits — the one profile/depth pair that
+        // reaches every layout — codes the pair explicitly.
         let (subsampling_x, subsampling_y) = if shortcut {
-            // The shortcut infers 4:4:4 whatever the profile says.
-            (0, 0)
+            (0u8, 0u8)
         } else {
             match seq_profile {
                 0 => (1, 1),
                 1 => (0, 0),
-                // Profile 2: 4:2:2 at 8/10-bit; at 12-bit the pair is coded, and 4:4:4 is the one
-                // combination this container can describe.
                 _ if bit_depth == BitDepth::Twelve => {
-                    let sx = r.bits(1)?;
-                    let sy = if sx == 1 { r.bits(1)? } else { 0 };
-                    (sx as u8, sy as u8)
+                    let sx = r.bits(1)? as u8;
+                    let sy = if sx == 1 { r.bits(1)? as u8 } else { 0 };
+                    (sx, sy)
                 }
                 _ => (1, 0),
             }
         };
-        if (subsampling_x, subsampling_y) != (0, 0) {
-            return Err(Error::unsupported(
+        // Coded only for 4:2:0, and never under the shortcut, which infers 0/0.
+        let chroma_sample_position = if (subsampling_x, subsampling_y) == (1, 1) {
+            r.bits(2)? as u8
+        } else {
+            0
+        };
+        // `subsampling_y` is read only when `subsampling_x` is 1, so the 4:4:0 pair (0, 1) — which
+        // §5.5.2 cannot signal and §6.4.1 names no format for — is not constructible here.
+        let chroma = if subsampling_x == 0 {
+            ChromaSubsampling::Cs444
+        } else if subsampling_y == 0 {
+            ChromaSubsampling::Cs422
+        } else {
+            ChromaSubsampling::Cs420
+        };
+        // §6.4.1: Main is 8/10-bit 4:2:0, High is 8/10-bit 4:4:4, and Professional is 8/10-bit
+        // 4:2:2 or 12-bit anything. A stream whose profile does not admit the depth and layout its
+        // own `color_config()` derives is not conformant, and the `av1C` mirroring it would carry
+        // that contradiction into the container.
+        let profile_admits = match seq_profile {
+            0 => bit_depth != BitDepth::Twelve && chroma == ChromaSubsampling::Cs420,
+            1 => bit_depth != BitDepth::Twelve && chroma == ChromaSubsampling::Cs444,
+            _ => bit_depth == BitDepth::Twelve || chroma == ChromaSubsampling::Cs422,
+        };
+        if !profile_admits {
+            return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend stream must be 4:4:4",
+                "AVIF: AV1 backend stream's seq_profile does not admit the bit depth and chroma \
+                 format its color_config declares (\u{a7}6.4.1)",
             ));
         }
         let colour = (cp, tc, mc, full_range);
@@ -467,6 +545,8 @@ impl SeqHeaderParams {
             width,
             height,
             colour,
+            chroma,
+            chroma_sample_position,
         })
     }
 }
@@ -588,7 +668,8 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
         let cfg = Self::config(&q_idx);
         // Per plane, not one luma stride for all three: `Planar8` carries its chroma geometry, and
         // `ImageDesc` has a stride slot per plane precisely so a subsampled buffer is expressible.
-        // At 4:4:4 — everything this crate encodes today — all three are the luma width.
+        // At 4:4:4 all three are the luma width; at 4:2:0 and 4:2:2 the chroma pair is halved, and
+        // a backend handed the luma stride for them could not address the buffer.
         let stride = |i: usize| planes.plane_dimensions(i).0 as usize;
         // Encode inputs are read-only per `ImageDesc`'s contract; the `*mut` is the ABI's single
         // descriptor shape shared with the decode (write) direction.

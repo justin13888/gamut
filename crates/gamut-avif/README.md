@@ -51,11 +51,12 @@ std::fs::write("out.avif", &avif).unwrap();
 
 `AvifEncoder` implements [`gamut_core::EncodeImage`] for `Rgb8`, `Rgba8`, `Gray8`, `Rgb16` and
 `Rgba16`, so the input is a typed [`gamut_core::ImageRef`] and handing it an unsupported pixel
-layout is a compile error. `Rgba8`/`Rgba16` split into a 4:4:4 colour item plus a monochrome **alpha
+layout is a compile error. `Rgba8`/`Rgba16` split into a colour item plus a monochrome **alpha
 auxiliary item** (`auxC`/`auxl`, with `prem` when `with_premultiplied_alpha(true)` declares the
-colour premultiplied); `Gray8` is a single monochrome item rather than R=G=B replication. A file
-carrying a monochrome item signals only the general AVIF brands — the Advanced Profile brand `MA1A`
-requires every image item to be AV1 High Profile (AVIF v1.2.0 §8.3).
+colour premultiplied); `Gray8` is a single monochrome item rather than R=G=B replication. The
+profile brands `MA1A` (Advanced) and `MA1B` (Baseline) each constrain *every* image item in the
+file (AVIF v1.2.0 §8.2/§8.3), so a High-profile 4:4:4 colour item paired with its Main-profile
+monochrome alpha auxiliary claims neither and the file signals only the general brands.
 
 The 16-bit inputs carry samples on `gamut-core`'s full 16-bit scale, while AV1 codes 8, 10 or 12.
 `with_bit_depth` picks the coded depth (10 or 12, default **12**) and the encoder narrows by
@@ -67,6 +68,10 @@ let avif = AvifEncoder::new()
     .encode_to_vec(ImageRef::<Rgb16>::new(&rgb16, dims)?)?;
 ```
 
+Depth and chroma sampling are independent knobs: `with_bit_depth` and `with_chroma` compose, so a
+10-bit 4:2:0 or 12-bit 4:2:2 still is one call each. Only the resulting AV1 `seq_profile` couples
+them — §6.4.1 puts every 12-bit stream, and every 4:2:2 one, in Professional.
+
 Decoding (issue #250): `AvifContainer::parse` gives a byte-accounting view plus the role-typed
 `AvifImage` lens (primary item, alpha/depth auxiliaries, thumbnails, Exif/XMP, grid/overlay,
 typed `av1C` and OBU layers); `decode_item_planar` hands each coded item's `Av1Config` + OBU
@@ -77,11 +82,15 @@ worked example.
 ## Status
 
 **v1 surface.** The encoder produces **lossless** (the default) and **lossy**
-(`AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 4:4:4 planes and wrapped as
-a single `av01` item in a conformant MIAF/AVIF container. Lossless codes the identity matrix, so
-its output is bit-exact to the input; lossy codes **BT.709 YCbCr** by default — the luma–chroma
-decorrelation is worth a large fraction of the bitrate — with BT.601 / BT.2020-NCL and studio
-range selectable via `with_matrix` / `with_color_range`. Lossy trades fidelity for size on a
+(`AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 planes and wrapped as a
+single `av01` item in a conformant MIAF/AVIF container. Lossless codes the identity matrix at
+4:4:4, so its output is bit-exact to the input; lossy codes **BT.709 YCbCr at 4:2:0** by default —
+the luma–chroma decorrelation is worth a large fraction of the bitrate, and 4:2:0 is AV1 **Main**
+profile, the only one many hardware still-image decoders accept — with BT.601 / BT.2020-NCL,
+studio range and 4:4:4 / 4:2:2 selectable via `with_matrix` / `with_color_range` / `with_chroma`.
+4:2:2 is AV1 Professional profile, which matches no AVIF profile brand, and AV1 forbids
+taller-than-wide partitions there — so it costs the encoder half its rectangular partition set and
+is offered for pipelines that need it rather than as a default. Lossy trades fidelity for size on a
 `0..=100` quality scale (higher = closer to the source; the `quality → base_q_idx` mapping and its
 silent clamp above 100 are a frozen v1 contract, defined in
 [`references/avif`](../../references/avif/README.md)). `irot`/`imir` display orientation is
@@ -108,7 +117,7 @@ identity / BT.601 / BT.709 / BT.2020-NCL / monochrome colour, alpha merge, overl
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
-specs: **deferred, planned** features (10/12-bit and 4:2:0/4:2:2, the HDR
+specs: **deferred, planned** features (quantizer matrices, the HDR
 metadata properties beyond CICP tagging, gain maps, layered/progressive images, the pure-Rust AV1
 codestream decoder, the decoder backend registry, …) all land semver-minor on the frozen v1
 surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per

@@ -16,22 +16,28 @@
 //!
 //! The colour signalling is selectable: [`encode_still_intra_with`] takes an [`Av1Colour`] (CICP
 //! primaries/transfer/matrix plus the signal range) and mirrors it into `color_config()` and, via
-//! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. Planes stay 4:4:4 — a
-//! luma–chroma matrix changes what the samples *mean*, not their geometry — so the caller supplies
-//! either GBR planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
-//! The encoder carries each plane's geometry independently, so a subsampled `Planar8` is described
-//! correctly end to end, but the *coding* path is still 4:4:4 and a subsampled source is rejected
-//! (the residual loop, entropy contexts and CfL all step chroma over the luma extent).
+//! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. The caller supplies either GBR
+//! planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
 //!
-//! **Bit depth** is the buffer's: [`encode_still_intra16_with`] takes a
-//! [`gamut_color::Planar16`] and codes at the depth it carries — 10-bit as `seq_profile = 1` (or 0
-//! monochrome) with `high_bitdepth`, 12-bit as `seq_profile = 2` with `twelve_bit` (§6.4.1). Every
-//! depth-derived quantity follows it: the quantizer tables, the dequant and inverse-transform
-//! clamps, the `1 << (BitDepth - 1)` intra seeds, the palette's `L(BitDepth)` colours, the deblock
-//! centring and thresholds, CDEF's `coeffShift`, and the Wiener rounding pair.
+//! **Chroma sampling** comes from the buffer itself: 4:4:4, 4:2:2 and 4:2:0 are all coded, as is a
+//! monochrome luma plane. The identity matrix requires 4:4:4 (§6.4.2) and a subsampled identity
+//! encode is refused; so is a *lossless* subsampled encode, whose §5.11.45 `is_cfl_allowed` rule
+//! this encoder does not implement. Under 4:2:2 the partition search drops `PARTITION_VERT`, since
+//! §6.10.4 forbids a block whose chroma residual would be `BLOCK_INVALID`.
 //!
-//! The remaining surface (4:2:0/4:2:2, quantizer matrices, and the AVIF-level
-//! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
+//! **Bit depth** is the buffer's too: [`encode_still_intra16_with`] takes a
+//! [`gamut_color::Planar16`] and codes at the depth it carries. Every depth-derived quantity
+//! follows it: the quantizer tables, the dequant and inverse-transform clamps, the
+//! `1 << (BitDepth - 1)` intra seeds, the palette's `L(BitDepth)` colours, the deblock centring and
+//! thresholds, CDEF's `coeffShift`, and the Wiener rounding pair.
+//!
+//! The two axes compose, and `seq_profile` follows §6.4.1 across the whole matrix: Main (0) for
+//! 4:2:0 and for 8/10-bit monochrome, High (1) for 8/10-bit 4:4:4, and Professional (2) for 4:2:2
+//! and for anything 12-bit — the one case that *codes* `subsampling_x`/`subsampling_y` rather than
+//! leaving the decoder to infer them from the profile (§5.5.2).
+//!
+//! The remaining surface (quantizer matrices, and the AVIF-level metadata/container features) is
+//! tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D

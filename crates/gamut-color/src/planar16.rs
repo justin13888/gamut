@@ -275,6 +275,76 @@ impl Planar16 {
         }
     }
 
+    /// An interleaved 16-bit RGB image as `Y/Cb/Cr` planes through `matrix`, with chroma
+    /// box-averaged down to `subsampling` — the high-bit-depth
+    /// [`Planar8::from_rgb8_matrix_subsampled`](crate::Planar8::from_rgb8_matrix_subsampled).
+    ///
+    /// The two axes are independent: the samples are narrowed to `matrix`'s coded depth first, and
+    /// the box filter then runs at that depth. [`ChromaSubsampling::Cs444`] is the no-op case and
+    /// produces the same planes as [`from_rgb16_matrix_view`](Self::from_rgb16_matrix_view).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] for [`ChromaSubsampling::Cs400`] — a monochrome encode drops
+    /// chroma rather than averaging it.
+    pub fn from_rgb16_matrix_subsampled(
+        img: ImageRef<'_, Rgb16>,
+        matrix: RgbToYcbcr,
+        subsampling: ChromaSubsampling,
+    ) -> Result<Self> {
+        Self::from_rgb16_matrix_view(img, matrix).subsample(subsampling)
+    }
+
+    /// The colour channels of an interleaved 16-bit RGBA image as `Y/Cb/Cr` planes through
+    /// `matrix`, with chroma box-averaged down to `subsampling`, ignoring alpha.
+    ///
+    /// Alpha is extracted separately with [`from_rgba16_alpha_view`](Self::from_rgba16_alpha_view)
+    /// and is never subsampled — an AVIF alpha auxiliary is monochrome (v1.2.0 §4.1).
+    ///
+    /// # Errors
+    ///
+    /// As [`from_rgb16_matrix_subsampled`](Self::from_rgb16_matrix_subsampled).
+    pub fn from_rgba16_matrix_subsampled(
+        img: ImageRef<'_, Rgba16>,
+        matrix: RgbToYcbcr,
+        subsampling: ChromaSubsampling,
+    ) -> Result<Self> {
+        Self::from_rgba16_matrix_view(img, matrix).subsample(subsampling)
+    }
+
+    /// Box-averages this 4:4:4 buffer's chroma planes down to `subsampling`, leaving luma alone —
+    /// the [`Planar8`](crate::Planar8) filter over `u16` samples, which is the same arithmetic at a
+    /// wider accumulator input.
+    ///
+    /// Private and by value for the same reason as its 8-bit twin: it is only ever the tail of a
+    /// `_subsampled` constructor, so it cannot be reached with an already-subsampled buffer.
+    fn subsample(self, subsampling: ChromaSubsampling) -> Result<Self> {
+        if subsampling == ChromaSubsampling::Cs400 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "monochrome has no chroma planes to subsample",
+            ));
+        }
+        if subsampling == ChromaSubsampling::Cs444 {
+            return Ok(self);
+        }
+        let (width, height) = (self.width as usize, self.height as usize);
+        let (cw, ch) = subsampling.chroma_dimensions(self.width, self.height);
+        let (sx, sy) = subsampling.subsampling();
+        let (sx, sy) = (1usize << sx, 1usize << sy);
+        let [y, u, v] = self.planes;
+        let chroma = |p: &[u16]| {
+            crate::planar::downsample_box(p, width, height, cw as usize, ch as usize, sx, sy)
+        };
+        Ok(Self {
+            width: self.width,
+            height: self.height,
+            subsampling,
+            bit_depth: self.bit_depth,
+            planes: [y, chroma(&u), chroma(&v)],
+        })
+    }
+
     /// The **alpha** channel of an interleaved 16-bit RGBA image as monochrome planes at
     /// `bit_depth` — one luma plane carrying the narrowed alpha, and no chroma.
     ///

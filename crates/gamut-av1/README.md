@@ -60,16 +60,22 @@ The colour signalling is selectable on top of that: `encode_still_intra_with` ta
 the sequence header's `color_config()` and the `av1C`/`colr` values `gamut-avif` stamps. A
 luma–chroma matrix changes what the samples mean, not their geometry.
 
-**Monochrome** (`mono_chrome = 1`, `seq_profile = 0`) is the one geometry that is selectable: pass
-a `ChromaSubsampling::Cs400` `Planar8` — one luma plane, no chroma — and the encoder codes a single
-plane and drops every chroma syntax element the spec gates on `NumPlanes > 1`. Use
-`Av1Colour::monochrome()` rather than the default: §5.5.2 infers `subsampling_x = subsampling_y = 1`
-for a monochrome stream and §6.4.2 permits `MC_IDENTITY` only at 0/0, so the default identity matrix
-is rejected. The subsampled geometries (4:2:0 / 4:2:2) are still deferred.
+Chroma sampling is selectable alongside it: the buffer carries its own `ChromaSubsampling`, and
+4:4:4, 4:2:2 and 4:2:0 are all coded. The identity matrix is refused below 4:4:4, which AV1 §6.4.2
+requires, and so is a *lossless* subsampled encode — §5.11.45's `is_cfl_allowed` rule for that case
+is not implemented, and mis-coding it would desynchronise the decoder rather than degrade quality.
 
-**10- and 12-bit** samples are encoded from a `gamut_color::Planar16`, whose `BitDepth` decides the
-profile: 10-bit stays `seq_profile = 1` (or 0 monochrome) with `high_bitdepth`, and 12-bit of any
-plane count is `seq_profile = 2` with `twelve_bit` (§6.4.1).
+**Monochrome** (`mono_chrome = 1`) is a geometry of its own: pass a `ChromaSubsampling::Cs400`
+buffer — one luma plane, no chroma — and the encoder codes a single plane and drops every chroma
+syntax element the spec gates on `NumPlanes > 1`. Use `Av1Colour::monochrome()` rather than the
+default: §5.5.2 infers `subsampling_x = subsampling_y = 1` for a monochrome stream and §6.4.2
+permits `MC_IDENTITY` only at 0/0, so the default identity matrix is rejected.
+
+**10- and 12-bit** samples are encoded from a `gamut_color::Planar16`, whose `BitDepth` the encoder
+reads off the buffer exactly as it reads the chroma format. The two are independent, and only
+`seq_profile` couples them (§6.4.1): Main (0) for 8/10-bit 4:2:0 and 8/10-bit monochrome, High (1)
+for 8/10-bit 4:4:4, Professional (2) for 4:2:2 at any depth **and** for every 12-bit layout — the
+one case that codes `subsampling_x`/`subsampling_y` rather than leaving them to be inferred.
 
 ```rust,ignore
 let planes = Planar16::from_planes(w, h, BitDepth::Twelve, [y, u, v])?;

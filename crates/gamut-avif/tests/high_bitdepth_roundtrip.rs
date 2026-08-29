@@ -13,7 +13,7 @@
 use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, ChromaFormat, DecodedFrame,
 };
-use gamut_color::BitDepth;
+use gamut_color::{BitDepth, ChromaSubsampling};
 use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Result, Rgb16, Rgba16};
 
 const W: u32 = 34;
@@ -264,6 +264,59 @@ fn lossy_rgb16_decodes_at_the_coded_depth() {
         assert!(
             decoded.planes[0].iter().any(|&v| v > 255),
             "{bits:?}: decoded luma never exceeds 8 bits"
+        );
+    }
+}
+
+#[test]
+fn depth_and_chroma_sampling_compose() {
+    // The two knobs are independent axes and must hold at once: a 10-bit 4:2:0 and a 12-bit 4:2:2
+    // still are each one call. `seq_profile` is the only place they interact — §6.4.1 puts 4:2:2 at
+    // any depth, and *every* 12-bit layout, in Professional (2), while 8/10-bit 4:2:0 is Main (0)
+    // and 8/10-bit 4:4:4 is High (1) — and `av1C`, `pixi` and libavif's own reading must all agree
+    // with whichever pair was asked for.
+    let px = source_rgb16();
+    for (bits, chroma, want_profile, want_format) in [
+        (BitDepth::Ten, ChromaSubsampling::Cs420, 0u8, ChromaFormat::Yuv420),
+        (BitDepth::Ten, ChromaSubsampling::Cs422, 2, ChromaFormat::Yuv422),
+        (BitDepth::Ten, ChromaSubsampling::Cs444, 1, ChromaFormat::Yuv444),
+        (BitDepth::Twelve, ChromaSubsampling::Cs420, 2, ChromaFormat::Yuv420),
+        (BitDepth::Twelve, ChromaSubsampling::Cs422, 2, ChromaFormat::Yuv422),
+        (BitDepth::Twelve, ChromaSubsampling::Cs444, 2, ChromaFormat::Yuv444),
+    ] {
+        let avif = AvifEncoder::lossy(70)
+            .with_bit_depth(bits)
+            .with_chroma(chroma)
+            .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
+            .unwrap_or_else(|e| panic!("{bits:?} {chroma:?} encodes: {e}"));
+
+        let container = AvifContainer::parse(&avif).expect("our own reader parses it");
+        let primary = container.image().primary_item();
+        let config = primary.av1_config().unwrap().unwrap();
+        assert_eq!(config.bit_depth(), bits.bits(), "{bits:?} {chroma:?}: av1C depth");
+        assert_eq!(config.chroma_format(), want_format, "{bits:?} {chroma:?}");
+        assert_eq!(config.seq_profile, want_profile, "{bits:?} {chroma:?}");
+        assert_eq!(
+            primary.bits_per_channel(),
+            Some(&[bits.bits(), bits.bits(), bits.bits()][..]),
+            "{bits:?} {chroma:?}: pixi"
+        );
+
+        // libavif reads the same picture out of the file, at both the depth and the format the
+        // record claims — the cross-box consistency §2.3.4 requires, checked by a real reader.
+        let decoded = libavif_oracle::decode_avif(&avif)
+            .unwrap_or_else(|e| panic!("libavif decode failed at {bits:?} {chroma:?}: {e}"));
+        assert_eq!(decoded.bit_depth, bits.bits(), "{bits:?} {chroma:?}");
+        let (cw, ch) = chroma.chroma_dimensions(W, H);
+        assert_eq!(
+            decoded.planes[1].len(),
+            (cw * ch) as usize,
+            "{bits:?} {chroma:?}: chroma plane extent"
+        );
+        assert_eq!(decoded.planes[0].len(), (W * H) as usize, "luma is never subsampled");
+        assert!(
+            decoded.planes[0].iter().any(|&v| v > 255),
+            "{bits:?} {chroma:?}: decoded luma never exceeds 8 bits"
         );
     }
 }
