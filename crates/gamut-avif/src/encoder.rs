@@ -600,6 +600,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn lossless_pins_four_four_four_whatever_the_chroma_knob_says() {
+        // Lossless ignores `with_chroma` exactly as it ignores `with_matrix` and `quality`:
+        // discarding three quarters of the chroma is not lossless, and AV1 §6.4.2 forbids the
+        // identity matrix below 4:4:4 anyway — so honouring the request would produce a stream
+        // that cannot be built at all.
+        for requested in [
+            ChromaSubsampling::Cs444,
+            ChromaSubsampling::Cs422,
+            ChromaSubsampling::Cs420,
+        ] {
+            let enc = AvifEncoder::lossless().with_chroma(requested);
+            assert_eq!(
+                enc.config().chroma,
+                requested,
+                "the knob records the request"
+            );
+            assert_eq!(
+                enc.chroma(),
+                ChromaSubsampling::Cs444,
+                "but lossless codes 4:4:4 regardless"
+            );
+        }
+        // Lossy honours it, so the pinning is specific to the lossless path.
+        for requested in [
+            ChromaSubsampling::Cs444,
+            ChromaSubsampling::Cs422,
+            ChromaSubsampling::Cs420,
+        ] {
+            assert_eq!(
+                AvifEncoder::lossy(50).with_chroma(requested).chroma(),
+                requested
+            );
+        }
+        // And the default lossy format is 4:2:0 — AV1 Main, the profile hardware decoders accept.
+        assert_eq!(AvifEncoder::lossy(50).chroma(), ChromaSubsampling::Cs420);
+        assert_eq!(AvifEncoder::lossless().chroma(), ChromaSubsampling::Cs444);
+    }
+
+    #[test]
     fn profile_brands_require_both_the_av1_profile_and_its_level() {
         // AVIF §8.2/§8.3 constrain the AV1 profile *and* the level: `MA1B` needs Main at ≤ 5.1
         // (`seq_level_idx` ≤ 13), `MA1A` needs High at ≤ 6.0 (≤ 16). §8.1: a file matching neither

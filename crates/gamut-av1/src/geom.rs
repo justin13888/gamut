@@ -170,9 +170,9 @@ pub(crate) const fn plane_residual_size(
         ChromaSubsampling::Cs444 => Some((bw, bh)),
         ChromaSubsampling::Cs422 => c422,
         ChromaSubsampling::Cs420 => c420,
-        // Monochrome has no chroma plane to size.
-        ChromaSubsampling::Cs400 => None,
-        // `ChromaSubsampling` is `#[non_exhaustive]`; a layout added later has no table row yet.
+        // Monochrome has no chroma plane to size, and `ChromaSubsampling` is `#[non_exhaustive]`,
+        // so a layout added later has no table row yet. One arm, because a separate `Cs400 => None`
+        // would be indistinguishable from falling through to this one.
         _ => None,
     }
 }

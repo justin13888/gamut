@@ -3365,9 +3365,12 @@ mod tests {
         // Chroma that tracks luma upward must pick a positive alpha; chroma that moves against it,
         // a negative one. Both planes carry the same pattern, so the two returned alphas agree.
         // Chroma centred on 128 — the DC prediction for a block with no neighbours — so the
-        // baseline `alpha = 0` predicts the mean exactly and only the *shape* can beat it. Luma
-        // rises 8 per sample, so a chroma step spans 16 in luma and 32 in `L`; chroma rises 4 per
-        // step, which `Round2Signed(alpha * dL, 6)` matches at alpha = 8.
+        // baseline `alpha = 0` predicts the mean exactly and only the *shape* can beat it.
+        //
+        // Luma rises 8 per sample and is constant in y, so each 2x2 box sums to
+        // `2 * (l + (l + 8))` and `L = sum << 1`: `L` rises **128** per chroma step. The
+        // high-frequency term is `Round2Signed(alpha * dL, 6) = alpha * 2`, and chroma rises 4 per
+        // step, so the best alpha is 2.
         let up = planes_420_with(16, 16, |p, x, _| {
             if p == 0 {
                 (100 + x * 8) as u8
@@ -3379,10 +3382,9 @@ mod tests {
         let (au, av) = e
             .select_cfl(0, 0, 4, 4)
             .expect("correlated chroma wants CfL");
-        assert!(
-            au > 0,
-            "positively correlated chroma ⇒ positive alpha, got {au}"
-        );
+        // Pinned exactly, not just by sign: a wrong shift or a dropped mean subtraction in the
+        // source-luma box sum changes `L`'s slope and therefore this value.
+        assert_eq!(au, 2, "positively correlated chroma ⇒ alpha 2");
         assert_eq!(au, av, "both planes carry the same pattern");
 
         let down = planes_420_with(16, 16, |p, x, _| {
@@ -3396,7 +3398,7 @@ mod tests {
         let (au, _) = e
             .select_cfl(0, 0, 4, 4)
             .expect("anti-correlated chroma wants CfL");
-        assert!(au < 0, "anti-correlated chroma ⇒ negative alpha, got {au}");
+        assert_eq!(au, -2, "anti-correlated chroma ⇒ alpha -2");
 
         // Flat chroma has no high-frequency content to predict, so plain DC wins and no alpha is
         // signalled at all.
@@ -3491,22 +3493,32 @@ mod tests {
 
     #[test]
     fn a_two_colour_block_gets_a_palette() {
-        // `decide_palette` is likewise a pure encoder decision. Two luma colours over flat chroma
-        // is the case it exists for; a version that always returned `None` would still produce a
-        // conformant stream, so only this can distinguish them.
+        // `decide_palette` is a pure encoder decision. Two luma colours over flat chroma is the
+        // case it exists for; a version that always returned `None` would still produce a
+        // conformant stream, so only a direct assertion can distinguish them.
+        //
+        // The split is at luma x = 12, so the block at MI (2, 2) — luma (8, 8) — straddles it.
+        // Reading the block at any other offset would see one colour, not two.
         let two = planes_420_with(16, 16, |p, x, _| {
             if p == 0 {
-                if x < 4 { 30 } else { 210 }
+                if x < 12 { 30 } else { 210 }
             } else {
                 128
             }
         });
-        let e = FrameEncoder::new(&two, 40);
-        let pal = e.decide_palette(0, 0, 8).expect("two colours ⇒ palette");
+        let mut e = FrameEncoder::new(&two, 40);
+        // A palette block's chroma must also equal its DC prediction, which reads the
+        // reconstruction — empty here, so the neighbours are primed to the flat chroma value.
+        for plane in 1..3 {
+            e.recon[plane].fill(128);
+        }
+        let pal = e.decide_palette(2, 2, 8).expect("two colours ⇒ palette");
         assert_eq!(pal.colors, vec![30, 210], "sorted distinct luma colours");
         assert_eq!(pal.index_map.len(), 64);
-        // The map indexes into `colors`, so the left half is index 0 and the right half index 1.
+        // Luma 8..12 is the low colour and 12..16 the high one, so the map splits mid-block.
         assert_eq!(pal.index_map[0], 0);
+        assert_eq!(pal.index_map[3], 0);
+        assert_eq!(pal.index_map[4], 1);
         assert_eq!(pal.index_map[7], 1);
 
         // Too many distinct colours to be worth a palette.
@@ -3526,35 +3538,56 @@ mod tests {
         // The luma map is written at luma resolution and chroma gets a flat DC over its *own*
         // residual block — writing the luma extent at the luma position would overrun a subsampled
         // chroma plane, and did before this was fixed.
+        //
+        // Driven at MI (2, 2) — luma base (8, 8), chroma base (4, 4) — because at the origin every
+        // shift and division yields zero and none of them is observable.
         let two = planes_420_with(16, 16, |p, x, _| {
             if p == 0 {
-                if x < 4 { 30 } else { 210 }
+                if x < 12 { 30 } else { 210 }
             } else {
                 128
             }
         });
         let mut e = FrameEncoder::new(&two, 40);
-        let pal = e.decide_palette(0, 0, 8).expect("palette");
-        e.recon_palette(0, 0, 8, &pal);
+        for plane in 1..3 {
+            e.recon[plane].fill(128);
+        }
+        let pal = e.decide_palette(2, 2, 8).expect("palette");
+        // Primed non-zero so the context clear the palette path performs is observable at all — it
+        // writes zeros, which is indistinguishable from not writing on a fresh encoder.
+        e.above_level[0].fill(9);
+        e.left_level[0].fill(9);
+        e.recon_palette(2, 2, 8, &pal);
+        // The block spans MI columns 2..4, so those are cleared and the rest keep their priming.
+        assert_eq!(e.above_level[0][0], 9, "outside the block");
+        assert_eq!(e.above_level[0][1], 9);
+        assert_eq!(
+            e.above_level[0][2], 0,
+            "the block's own MI cells are cleared"
+        );
+        assert_eq!(e.above_level[0][3], 0);
+        assert_eq!(e.left_level[0][2], 0);
+        assert_eq!(e.left_level[0][3], 0);
 
-        // Luma: the palette colours land at luma resolution across the whole 8x8 block.
         let lw = e.geom[0].coded_w;
-        assert_eq!(e.recon[0][0], 30);
-        assert_eq!(e.recon[0][7], 210);
-        assert_eq!(e.recon[0][7 * lw + 7], 210);
-        // Chroma: a flat 4x4 DC block, and nothing written past it.
+        assert_eq!(e.recon[0][8 * lw + 8], 30, "luma base is (8, 8)");
+        assert_eq!(e.recon[0][8 * lw + 15], 210);
+        assert_eq!(e.recon[0][15 * lw + 15], 210);
+        assert_eq!(e.recon[0][0], 0, "nothing written outside the block");
+
+        // Chroma: a flat 4x4 DC block at the plane's own base, and nothing outside it.
         let cw = e.geom[1].coded_w;
-        let dc = e.recon[1][0];
-        for i in 0..4 {
-            for j in 0..4 {
-                assert_eq!(e.recon[1][i * cw + j], dc, "chroma ({j},{i})");
+        // The DC is the flat chroma value, written over the block's own 4x4 chroma extent.
+        for i in 4..8 {
+            for j in 4..8 {
+                assert_eq!(e.recon[1][i * cw + j], 128, "chroma ({j},{i})");
             }
         }
-        assert_eq!(
-            e.recon[1][4], 0,
-            "nothing written past the 4x4 chroma block"
-        );
-        assert_eq!(e.recon[1][4 * cw], 0);
+        // The surrounding samples were primed to 128 too, so a mis-placed write is caught by the
+        // *luma* assertions above and by the block's position rather than by a stray value here.
+        // What this pins is that the write stayed within a 4x4 extent at the chroma base: a luma
+        // extent (8x8) at the luma base (8, 8) would run past the 8x8 coded chroma plane entirely.
+        assert_eq!(e.recon[1].len(), e.geom[1].len());
     }
 
     #[test]
@@ -3586,27 +3619,92 @@ mod tests {
         assert_eq!(pred[1], 104);
     }
 
+    /// §7.11.5 transcribed independently of the encoder, for cross-checking `apply_cfl`.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_cfl(
+        recon_luma: &[u16],
+        luma_stride: usize,
+        max_luma_w: usize,
+        max_luma_h: usize,
+        sub_x: usize,
+        sub_y: usize,
+        sx: usize,
+        sy: usize,
+        w: usize,
+        h: usize,
+        alpha: i32,
+        dc: i32,
+    ) -> Vec<i32> {
+        let mut l = vec![0i32; w * h];
+        let mut sum = 0i32;
+        for i in 0..h {
+            let luma_y = ((sy + i) << sub_y).min(max_luma_h - (1 << sub_y));
+            for j in 0..w {
+                let luma_x = ((sx + j) << sub_x).min(max_luma_w - (1 << sub_x));
+                let mut t = 0i32;
+                for dy in 0..=sub_y {
+                    for dx in 0..=sub_x {
+                        t += i32::from(recon_luma[(luma_y + dy) * luma_stride + (luma_x + dx)]);
+                    }
+                }
+                let v = t << (3 - sub_x - sub_y);
+                l[i * w + j] = v;
+                sum += v;
+            }
+        }
+        let shift = w.trailing_zeros() + h.trailing_zeros();
+        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
+        l.iter()
+            .map(|&lv| (dc + round2_signed(alpha * (lv - luma_avg), 6)).clamp(0, 255))
+            .collect()
+    }
+
     #[test]
-    fn cfl_clamps_its_luma_reads_to_the_last_coded_transform() {
-        // §7.11.5's `Min(luma, MaxLuma - (1 << sub))` edge rule. `MaxLumaW/H` start at the coded
-        // plane extent, so a read past it repeats the last covered group rather than running off
-        // the buffer or wrapping into the next row.
+    fn cfl_matches_an_independent_transcription_of_the_spec() {
+        // Cross-checks `apply_cfl` against §7.11.5 written out separately, over configurations that
+        // exercise the box sum, the shift, and the `MaxLuma` edge clamp — including positions where
+        // the clamp actually bites, which a zero alpha would hide.
         let p = planes_420(16, 16);
         let mut e = enc420(&p);
         for (i, v) in e.recon[0].iter_mut().enumerate() {
-            *v = (i % 251) as u16;
+            *v = ((i * 7) % 251) as u16;
         }
-        e.max_luma_w = 8;
-        e.max_luma_h = 8;
-        // Chroma (2,2) covers luma (4,4); chroma (6,6) would cover luma (12,12), past MaxLuma, so
-        // it clamps to luma (6,6) — the last group inside it.
-        let mut a = vec![0i32; 1];
-        let mut b = vec![0i32; 1];
-        e.apply_cfl(&mut a, 3, 3, 0, TxSize::Tx4x4);
-        e.apply_cfl(&mut b, 9, 9, 0, TxSize::Tx4x4);
-        // alpha 0 leaves the prediction alone, so this only asserts the reads stayed in bounds.
-        assert_eq!(a[0], 0);
-        assert_eq!(b[0], 0);
+        let stride = e.geom[0].coded_w;
+        let luma = e.recon[0].clone();
+
+        for (max_w, max_h) in [(16usize, 16usize), (16, 8), (8, 16), (8, 8)] {
+            e.max_luma_w = max_w;
+            e.max_luma_h = max_h;
+            for (sx, sy) in [(0usize, 0usize), (0, 2), (2, 0), (2, 2)] {
+                for alpha in [-16i32, -1, 0, 8, 64] {
+                    let dc = 100;
+                    let mut got = vec![dc; 16];
+                    e.apply_cfl(&mut got, sx, sy, alpha, TxSize::Tx4x4);
+                    let want =
+                        reference_cfl(&luma, stride, max_w, max_h, 1, 1, sx, sy, 4, 4, alpha, dc);
+                    assert_eq!(
+                        got, want,
+                        "max=({max_w},{max_h}) at ({sx},{sy}) alpha {alpha}"
+                    );
+                }
+            }
+        }
+
+        // The same at 4:4:4, where both shifts are zero and `L` is the luma sample times eight.
+        let p444 =
+            Planar8::from_planes(16, 16, [vec![0; 256], vec![0; 256], vec![0; 256]]).unwrap();
+        let mut e444 = FrameEncoder::new(&p444, 40);
+        for (i, v) in e444.recon[0].iter_mut().enumerate() {
+            *v = ((i * 5) % 251) as u16;
+        }
+        let luma444 = e444.recon[0].clone();
+        let stride444 = e444.geom[0].coded_w;
+        e444.max_luma_w = 16;
+        e444.max_luma_h = 16;
+        let mut got = vec![120; 16];
+        e444.apply_cfl(&mut got, 4, 4, 32, TxSize::Tx4x4);
+        let want = reference_cfl(&luma444, stride444, 16, 16, 0, 0, 4, 4, 4, 4, 32, 120);
+        assert_eq!(got, want);
     }
 
     /// A 4:2:0 encoder over a 17x13 frame: coded luma 24x16, coded chroma 12x8, MI grid 6x4.
@@ -3664,6 +3762,14 @@ mod tests {
         // values that were written.
         let ctx = e.txb_skip_ctx(1, 1, 1, 8, 8, 16, 16);
         assert!(ctx >= 7, "chroma contexts start at 7, got {ctx}");
+
+        // The luma ladder reads a *run* of cells, so distinct levels and a window starting away
+        // from zero make `x4 + k` and `x4 * k` select different cells.
+        e.above_level[0] = vec![0, 1, 9, 40, 2, 0];
+        e.left_level[0] = vec![0, 0, 5, 3];
+        // Two 4x4 cells from x4 = 1 see levels 1 and 9 (top = 9); rows from y4 = 1 see 0 and 5
+        // (left = 5). Both non-zero and both ≤ 3 is false, so the ladder lands on 6.
+        assert_eq!(e.txb_skip_ctx(0, 1, 1, 16, 16, 8, 8), 6);
         let dc = e.dc_sign_ctx(1, 1, 1, 4, 4);
         assert_eq!(dc, 1, "two -1 categories sum negative");
     }
