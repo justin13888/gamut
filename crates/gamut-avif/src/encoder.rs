@@ -888,7 +888,7 @@ impl EncodeImage<Rgb16> for AvifEncoder {
             MatrixCoefficients::Identity => Planar16::from_rgb16_identity_view(image, depth),
             matrix => {
                 let m = RgbToYcbcr::new(matrix, colour.range, depth)?;
-                Planar16::from_rgb16_matrix_view(image, m, depth)
+                Planar16::from_rgb16_matrix_view(image, m)
             }
         };
         let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
@@ -908,7 +908,7 @@ impl EncodeImage<Rgba16> for AvifEncoder {
             MatrixCoefficients::Identity => Planar16::from_rgba16_identity_view(image, depth),
             matrix => {
                 let m = RgbToYcbcr::new(matrix, colour.range, depth)?;
-                Planar16::from_rgba16_matrix_view(image, m, depth)
+                Planar16::from_rgba16_matrix_view(image, m)
             }
         };
         let base_q_idx = self.base_q_idx();

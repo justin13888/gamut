@@ -207,14 +207,15 @@ impl Planar16 {
     /// Maps an interleaved 16-bit RGB image to 4:4:4 `Y/Cb/Cr` planes through `matrix`, narrowed to
     /// `bit_depth` exactly as [`from_rgb16_identity_view`](Self::from_rgb16_identity_view) narrows.
     ///
-    /// `matrix` must be built at `bit_depth`: the narrowing happens *before* the transform, so the
+    /// The coded depth is `matrix`'s own: the narrowing happens *before* the transform, so the
     /// matrix sees samples already on the coded scale.
     #[must_use]
-    pub fn from_rgb16_matrix_view(
-        img: ImageRef<'_, Rgb16>,
-        matrix: RgbToYcbcr,
-        bit_depth: BitDepth,
-    ) -> Self {
+    pub fn from_rgb16_matrix_view(img: ImageRef<'_, Rgb16>, matrix: RgbToYcbcr) -> Self {
+        // Taken from the matrix rather than passed alongside it: `round_clip` clips to the
+        // *matrix's* depth, so a disagreeing pair would produce samples above what this buffer
+        // claims — the state `from_planes_subsampled` rejects and this type's docs promise cannot
+        // exist. One source of truth makes the disagreement unrepresentable.
+        let bit_depth = matrix.bit_depth();
         let (width, height) = (img.width(), img.height());
         let n = width as usize * height as usize;
         Self {
@@ -251,11 +252,12 @@ impl Planar16 {
     /// The colour channels of an interleaved 16-bit RGBA image as 4:4:4 `Y/Cb/Cr` planes through
     /// `matrix`, ignoring alpha.
     #[must_use]
-    pub fn from_rgba16_matrix_view(
-        img: ImageRef<'_, Rgba16>,
-        matrix: RgbToYcbcr,
-        bit_depth: BitDepth,
-    ) -> Self {
+    pub fn from_rgba16_matrix_view(img: ImageRef<'_, Rgba16>, matrix: RgbToYcbcr) -> Self {
+        // Taken from the matrix rather than passed alongside it: `round_clip` clips to the
+        // *matrix's* depth, so a disagreeing pair would produce samples above what this buffer
+        // claims — the state `from_planes_subsampled` rejects and this type's docs promise cannot
+        // exist. One source of truth makes the disagreement unrepresentable.
+        let bit_depth = matrix.bit_depth();
         let (width, height) = (img.width(), img.height());
         let n = width as usize * height as usize;
         Self {
@@ -487,7 +489,7 @@ mod tests {
             BitDepth::Twelve,
         )
         .unwrap();
-        let p = Planar16::from_rgb16_matrix_view(img, matrix, BitDepth::Twelve);
+        let p = Planar16::from_rgb16_matrix_view(img, matrix);
 
         let mut want: [Vec<u16>; 3] = [Vec::new(), Vec::new(), Vec::new()];
         for pixel in px.as_chunks::<3>().0 {
@@ -517,7 +519,6 @@ mod tests {
         let q = Planar16::from_rgba16_matrix_view(
             ImageRef::<Rgba16>::new(&rgba, dims).unwrap(),
             matrix,
-            BitDepth::Twelve,
         );
         for i in 0..3 {
             assert_eq!(q.plane(i), p.plane(i), "rgba plane {i}");
