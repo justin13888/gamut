@@ -1857,6 +1857,17 @@ impl<'a> FrameEncoder<'a> {
         self.dc_pred(plane, sx, sy, 4, 4)
     }
 
+    /// The tile's left edge in `plane`'s own sample coordinates.
+    ///
+    /// `tile_x0` is a **luma** position, and prediction availability is tested against a
+    /// plane-local one. Tiles start on superblock boundaries (multiples of 16 MI cells, so 64 luma
+    /// samples), which makes the shift exact. Identity at 4:4:4 — and invisible there, which is why
+    /// a single-tile frame and a frame whose second tile is one chroma block wide both pass
+    /// regardless.
+    fn tile_left(&self, plane: usize) -> usize {
+        self.tile_x0 >> self.geom[plane].ss_x
+    }
+
     /// The plane-local base position and residual extent of the block at MI `(r, c)` — the pair a
     /// per-plane loop needs in order to read `plane`'s own samples rather than the luma ones.
     /// `None` is §5.11.38's `BLOCK_INVALID`.
@@ -1885,7 +1896,7 @@ impl<'a> FrameEncoder<'a> {
             }
         };
         let have_above = sy > 0;
-        let have_left = sx > self.tile_x0;
+        let have_left = sx > self.tile_left(plane);
         // §7.11.2.5 DC: average the `w` above + `h` left samples (a plain integer divide, since for a
         // rectangular block `w + h` is not a power of two; for square blocks this is the usual shift).
         match (have_above, have_left) {
@@ -1929,7 +1940,7 @@ impl<'a> FrameEncoder<'a> {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
         let have_above = sy > 0;
-        let have_left = sx > self.tile_x0;
+        let have_left = sx > self.tile_left(plane);
 
         // Above-right / below-left availability (§5.11.34) for the directional zone-1/3 angles.
         let (by, bx) = (
@@ -2209,7 +2220,7 @@ impl<'a> FrameEncoder<'a> {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
         let have_above = sy > 0;
-        let have_left = sx > self.tile_x0;
+        let have_left = sx > self.tile_left(plane);
         let step = (n / 4) as isize;
         let (by, bx) = (
             sy as isize / 4 - self.sb_r as isize,
@@ -2338,7 +2349,7 @@ impl<'a> FrameEncoder<'a> {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
         let have_above = sy > 0;
-        let have_left = sx > self.tile_x0;
+        let have_left = sx > self.tile_left(plane);
         let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
         let mut above = vec![127i32; w];

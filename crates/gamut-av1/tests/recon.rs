@@ -868,6 +868,13 @@ fn subsampled_420_reconstruction_matches_both_decoders() {
         (3, 5),
         (33, 17),
         (64, 64),
+        (40, 24),
+        // Wide enough for two tile columns, where the tile's left edge is a *luma* position that
+        // prediction availability must compare against in each plane's own coordinates. A frame
+        // narrower than this either has one tile or a second tile just one chroma block wide, and
+        // passes either way.
+        (100, 80),
+        (128, 72),
     ] {
         let p = planes_subsampled(
             w,

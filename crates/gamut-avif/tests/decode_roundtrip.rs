@@ -55,6 +55,12 @@ fn roundtrip(w: u32, h: u32) {
     let decoded = libavif_oracle::decode_avif(&avif)
         .unwrap_or_else(|e| panic!("libavif decode failed for {w}x{h}: {e}"));
     assert_eq!((decoded.width, decoded.height), (w, h));
+    // Lossless must stay 4:4:4 — the identity matrix requires it (AV1 §6.4.2) — so the luma index
+    // below is valid for all three planes. 1 is `AVIF_PIXEL_FORMAT_YUV444`.
+    assert_eq!(
+        decoded.yuv_format, 1,
+        "lossless must stay 4:4:4 for {w}x{h}"
+    );
     let [yp, up, vp] = &decoded.planes;
 
     // Identity matrix mapping: Y=G, U=B, V=R.
@@ -120,14 +126,33 @@ fn lossy_roundtrip_via_libavif() {
                 .unwrap();
 
             // The AV1 layer's reconstruction (the exact decoder output) for the same input, coded
-            // through the same BT.709 matrix the lossy encoder defaults to.
-            let planes =
-                gamut_color::Planar8::from_rgb8_matrix(&rgb, w, h, lossy_matrix()).unwrap();
+            // through the same BT.709 matrix *and* the same 4:2:0 chroma the lossy encoder
+            // defaults to.
+            let img = ImageRef::<Rgb8>::new(
+                &rgb,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+            )
+            .unwrap();
+            let planes = gamut_color::Planar8::from_rgb8_matrix_subsampled(
+                img,
+                lossy_matrix(),
+                gamut_color::ChromaSubsampling::Cs420,
+            )
+            .unwrap();
             let (_, recon) =
                 gamut_av1::encode_still_intra_with(&planes, qidx, lossy_colour()).unwrap();
 
             let decoded = libavif_oracle::decode_avif(&avif)
                 .unwrap_or_else(|e| panic!("libavif decode failed for {w}x{h} q{quality}: {e}"));
+            // libavif's own view of the format, so the container really carries 4:2:0 rather than
+            // the planes merely happening to line up. 3 is `AVIF_PIXEL_FORMAT_YUV420`.
+            assert_eq!(
+                decoded.yuv_format, 3,
+                "lossy output must be 4:2:0 for {w}x{h} q{quality}"
+            );
             // Decoded Y/Cb/Cr planes are the AV1 recon planes 0/1/2.
             for (p, (d, r)) in decoded.planes.iter().zip(&recon.planes).enumerate() {
                 assert_eq!(

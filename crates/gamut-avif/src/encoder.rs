@@ -3,7 +3,9 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with};
-use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
+use gamut_color::{
+    BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr,
+};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind, write,
@@ -101,6 +103,7 @@ impl AvifEncoder {
                 mode: AvifMode::Lossy,
                 quality,
                 matrix: MatrixCoefficients::Bt709,
+                chroma: ChromaSubsampling::Cs420,
                 ..AvifConfig::default()
             },
             transform: ImageTransform::default(),
@@ -135,6 +138,22 @@ impl AvifEncoder {
         self
     }
 
+    /// Selects how chroma is sampled relative to luma — the geometry half of the space/quality
+    /// tradeoff, and the half that decides which decoders can read the result.
+    ///
+    /// [`AvifMode::Lossy`] defaults to [`ChromaSubsampling::Cs420`] (AV1 Main profile).
+    /// [`ChromaSubsampling::Cs444`] keeps full-resolution chroma but is AV1 **Profile 1**, which
+    /// hardware still-image decoders frequently reject; [`ChromaSubsampling::Cs422`] is Profile 2
+    /// and matches no AVIF profile brand at all.
+    ///
+    /// **Ignored by [`AvifMode::Lossless`]**, which always keeps 4:4:4 — see
+    /// [`AvifConfig::chroma`]. [`ChromaSubsampling::Cs400`] is rejected at encode time.
+    #[must_use]
+    pub fn with_chroma(mut self, chroma: ChromaSubsampling) -> Self {
+        self.config.chroma = chroma;
+        self
+    }
+
     /// Selects the signal range the coded samples occupy, signalled in `colr` and the AV1 sequence
     /// header. Defaults to [`ColorRange::Full`], the AVIF ecosystem's default.
     ///
@@ -158,6 +177,15 @@ impl AvifEncoder {
                 range: self.config.range,
                 ..Av1Colour::default()
             },
+        }
+    }
+
+    /// The chroma sampling this configuration codes. Lossless pins 4:4:4 regardless of the
+    /// configured value, for the same reason it pins the identity matrix.
+    fn chroma(&self) -> ChromaSubsampling {
+        match self.config.mode {
+            AvifMode::Lossless => ChromaSubsampling::Cs444,
+            _ => self.config.chroma,
         }
     }
 
@@ -298,7 +326,7 @@ fn build_avif(
     let image = IsoBmffImage {
         major_brand: *b"avif",
         minor_version: 0,
-        compatible_brands: vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
+        compatible_brands: compatible_brands(&still.config),
         primary_item_id: 1,
         items: vec![Item {
             id: 1,
@@ -320,6 +348,29 @@ fn build_avif(
 /// quantization). `base_q_idx 0` (the lossless WHT path) is reserved for [`AvifEncoder::lossless`],
 /// so the lossy path stays on the DCT pipeline — `lossy(100)` is the finest lossy quantizer, not
 /// lossless. Finer rate control (target size/metric) is future work (see `STATUS.md`).
+/// The `ftyp` compatible brands for a stream with this sequence header (AVIF v1.2.0 §8.1-8.3).
+///
+/// The two AVIF profile brands each constrain the **AV1** profile and level:
+///
+/// - `MA1B` (Baseline, §8.2) — "the AV1 profile shall be the Main Profile and the level shall be
+///   5.1 or lower". Main is 4:2:0, so only a 4:2:0 still can claim it.
+/// - `MA1A` (Advanced, §8.3) — "the AV1 profile shall be the High Profile and the level shall be
+///   6.0 or lower". High is 4:4:4.
+///
+/// A 4:2:2 still is AV1 Professional, which satisfies **neither**, and §8.1 says a file whose
+/// encoding matches no defined AVIF profile simply declares the general brands. The level is
+/// checked against the spec's own thresholds (`seq_level_idx` 13 is level 5.1, 16 is 6.0) rather
+/// than against what `pick_level` happens to produce, so this stays correct if that table grows.
+fn compatible_brands(config: &Av1StillConfig) -> Vec<[u8; 4]> {
+    let mut brands = vec![*b"avif", *b"mif1", *b"miaf"];
+    match config.seq_profile {
+        0 if config.seq_level_idx_0 <= 13 => brands.push(*b"MA1B"),
+        1 if config.seq_level_idx_0 <= 16 => brands.push(*b"MA1A"),
+        _ => {}
+    }
+    brands
+}
+
 fn quality_to_quant(quality: u8) -> u8 {
     let q = u32::from(quality.min(100));
     (((100 - q) * 255 / 100) as u8).max(1)
@@ -331,13 +382,14 @@ impl EncodeImage<Rgb8> for AvifEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
         let colour = self.colour();
+        let chroma = self.chroma();
         let planes = match colour.matrix {
             MatrixCoefficients::Identity => Planar8::from_rgb8_identity_view(image),
             matrix => {
                 // Rejects a matrix with no luma–chroma transform (Unspecified, YCgCo) before any
                 // bytes are written.
                 let m = RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight)?;
-                Planar8::from_rgb8_matrix_view(image, m)
+                Planar8::from_rgb8_matrix_subsampled(image, m, chroma)?
             }
         };
         // base_q_idx 0 is the lossless path; encode_still_intra(_, 0) is exactly what
@@ -349,9 +401,9 @@ impl EncodeImage<Rgb8> for AvifEncoder {
         // Pluggable backends first, in push order; `gamut-av1` is the implicit tail when every
         // backend declines (and the only path taken by an encoder with no backends, which is why
         // the default output is byte-identical to the pre-backend encoder).
-        let request = Av1EncodeRequest::new(dims, base_q_idx, colour);
+        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma);
         let still = match crate::backend::run_backends(&self.backends, &request, &planes)? {
-            Some(obus) => crate::backend::still_from_backend_obus(obus, dims, colour)?,
+            Some(obus) => crate::backend::still_from_backend_obus(obus, dims, colour, chroma)?,
             None => encode_still_intra_with(&planes, base_q_idx, colour)?.0,
         };
         let file = build_avif(&still, dims, self.transform)?;
@@ -424,15 +476,31 @@ mod tests {
         // differs. Parsing it back (gamut-isobmff round-trips its own output) pins the brands, the
         // primary `av01` item, and the av1C-derived `ispe`/`pixi`/`colr` the encoder stamps — none
         // of which a box-presence check would catch if a field were wrong.
-        // `(encoder, expected matrix_coefficients, expected full_range)`: lossless is pinned to
-        // identity/full, lossy defaults to BT.709/full, and both knobs override the lossy defaults.
+        // `(encoder, expected matrix_coefficients, expected full_range, expected profile brand)`:
+        // lossless is pinned to identity/full/4:4:4, lossy defaults to BT.709/full/4:2:0, and the
+        // knobs override the lossy defaults. The brand follows the AV1 profile the chroma format
+        // selects — `MA1B` requires Main (4:2:0), `MA1A` requires High (4:4:4), and 4:2:2 is
+        // Professional, which matches neither.
         let cases = [
-            (AvifEncoder::lossless(), 0u16, true),
-            (AvifEncoder::lossy(50), 1, true),
+            (AvifEncoder::lossless(), 0u16, true, Some(*b"MA1A")),
+            (AvifEncoder::lossy(50), 1, true, Some(*b"MA1B")),
+            (
+                AvifEncoder::lossy(50).with_chroma(ChromaSubsampling::Cs444),
+                1,
+                true,
+                Some(*b"MA1A"),
+            ),
+            (
+                AvifEncoder::lossy(50).with_chroma(ChromaSubsampling::Cs422),
+                1,
+                true,
+                None,
+            ),
             (
                 AvifEncoder::lossy(50).with_matrix(MatrixCoefficients::Bt601),
                 6,
                 true,
+                Some(*b"MA1B"),
             ),
             // Studio range reaches `colr` — and can only be signalled outside the §5.5.2 sRGB
             // shortcut, which is why it pairs with a real matrix.
@@ -440,24 +508,39 @@ mod tests {
                 AvifEncoder::lossy(50).with_color_range(ColorRange::Limited),
                 1,
                 false,
+                Some(*b"MA1B"),
             ),
             // …but neither knob applies on the lossless path, which ignores them as it ignores
             // quality: an 8-bit YCbCr round trip is not bit-exact, and studio range discards codes.
+            // …but none of the knobs apply on the lossless path, which ignores them as it ignores
+            // quality: an 8-bit YCbCr round trip is not bit-exact, studio range discards codes, and
+            // subsampled chroma is not lossless at all.
             (
                 AvifEncoder::lossless()
                     .with_matrix(MatrixCoefficients::Bt709)
-                    .with_color_range(ColorRange::Limited),
+                    .with_color_range(ColorRange::Limited)
+                    .with_chroma(ChromaSubsampling::Cs420),
                 0,
                 true,
+                Some(*b"MA1A"),
             ),
         ];
-        for (enc, want_matrix, want_full_range) in cases {
+        for (enc, want_matrix, want_full_range, want_profile_brand) in cases {
             let img = read(&encode_with(enc, 34, 18)).expect("emitted AVIF parses");
             assert_eq!(img.major_brand, *b"avif");
-            for brand in [*b"avif", *b"mif1", *b"miaf", *b"MA1A"] {
+            for brand in [*b"avif", *b"mif1", *b"miaf"] {
                 assert!(
                     img.compatible_brands.contains(&brand),
                     "missing brand {brand:?}"
+                );
+            }
+            // Exactly one profile brand, or none — never both, and never one the AV1 profile
+            // does not satisfy.
+            for brand in [*b"MA1A", *b"MA1B"] {
+                assert_eq!(
+                    img.compatible_brands.contains(&brand),
+                    want_profile_brand == Some(brand),
+                    "brand {brand:?} presence"
                 );
             }
             assert_eq!(img.primary_item_id, 1);

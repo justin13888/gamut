@@ -20,7 +20,8 @@ has landed), `D` where a deferred row has no milestone, `OOS` where the disposit
   set, segmentation/delta-q, superres, screen-content tools (palette/intrabc).
 - **M2** — Pixel formats: 10/12-bit, 4:2:0/4:2:2, monochrome, profiles 0 & 2, `MA1B` baseline
   brand, and chroma resampling. *(The RGB↔YCbCr matrices and limited range landed early, with
-  issue #335 — they need no plane-geometry change.)*
+  issue #335 — they need no plane-geometry change. 4:2:0, profile 0 and `MA1B` landed with #390;
+  what remains is 10/12-bit, monochrome, and 4:2:2's coding path — #391.)*
 - **M3** — Alpha & auxiliary: alpha aux item, `auxC`/`auxl`, premultiplied (`prem`), depth maps.
 - **M4** — Color & metadata: ICC profiles, Exif/XMP items, HDR (PQ/HLG, `mdcv`/`clli`), film grain.
 - **M5** — Container transforms & derivation: `irot`/`imir`/`clap`/`pasp`, `grid`/overlay,
@@ -29,9 +30,11 @@ has landed), `D` where a deferred row has no milestone, `OOS` where the disposit
 ## Scope & dispositions (v1)
 
 **Implemented (v1.0).** Lossless (decoded output bit-exact to the input) and lossy AV1 intra
-encoding of 8-bit RGB at 4:4:4 — identity matrix for lossless, **BT.709 YCbCr by default** for
-lossy, with BT.601/BT.2020-NCL and studio range selectable — wrapped as a conformant MIAF/AVIF
-`av01` item — brands `avif`/`mif1`/`miaf`/`MA1A`, the AVIF §9.1.1 minimum box set, cross-box
+encoding of 8-bit RGB — identity matrix at 4:4:4 for lossless, **BT.709 YCbCr at 4:2:0 by
+default** for
+lossy, with BT.601/BT.2020-NCL, studio range and 4:4:4 selectable — wrapped as a conformant
+MIAF/AVIF `av01` item — brands `avif`/`mif1`/`miaf` plus the profile brand the chroma format earns
+(`MA1B` for 4:2:0, `MA1A` for 4:4:4), the AVIF §9.1.1 minimum box set, cross-box
 consistency (`av1C`↔sequence header, `pixi`, `colr`, `ispe`) by construction — with `irot`/`imir`
 display orientation. Output is validated end-to-end against `libavif` (dav1d backend); the wrapped
 AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `dav1d` via
@@ -39,8 +42,8 @@ AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `d
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
-**Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit, 4:2:0/4:2:2,
-monochrome, `MA1B`); alpha and depth auxiliary items; ICC / Exif / XMP; HDR
+**Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit, monochrome, and
+4:2:2's coding path); alpha and depth auxiliary items; ICC / Exif / XMP; HDR
 (PQ/HLG transfer, `mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain); container derivations
 (`grid`, thumbnails, `idat`, `iloc` v1/v2 emission, `pasp`/`clap`); layered/progressive still
 images (`a1op`/`a1lx`/`lsel`, multi-operating-point sequence header); `tmap` tone-map (gain-map)
@@ -53,10 +56,11 @@ oracle, see [`references/av1`](../../references/av1/README.md); today the codest
 through the external `Av1StillDecoder` seam). **Additivity guarantee:** each lands semver-minor —
 a new builder method on the (non-`Copy`) `AvifEncoder`, a new field on the `#[non_exhaustive]`
 `AvifConfig`, a new `AvifMode` variant, or a new crate item — never a reshape of the v1 surface.
-The **encoded bytes** are not part of that guarantee and never were: issue #335 changed the lossy
-default from identity to BT.709 YCbCr, which is smaller at the same quality (31–38% on correlated
-photographic content) and changes every default lossy stream. The lossless default is untouched
-and stays bit-exact.
+The **encoded bytes** are not part of that guarantee and never were. Issue #335 changed the lossy
+default from identity to BT.709 YCbCr (31–38% smaller on correlated photographic content), and
+issue #390 changed it again from 4:4:4 to 4:2:0 — a further 42% on the golden fixture, and the
+change that makes the output readable by a Main-profile-only hardware decoder at all. Both change
+every default lossy stream. The lossless default is untouched by either and stays bit-exact.
 
 **Permanently out of scope (workspace charter: image-first, no inter-frame/motion/sequence
 coding).** Image sequences and tracks — the `avis` and `avio` brands (AVIF §3, §6.3),
@@ -77,7 +81,7 @@ adding it needs no container change.
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | `ftyp`: major `avif`, compat `avif`/`mif1`/`miaf`/`MA1A` | AVIF §6,§8.3 | ✅ | M0 |
-| `MA1B` baseline brand (Main profile, ≤L5.1, 4:2:0) | AVIF §8.2 | ☐ | M2 |
+| `MA1B` baseline brand (Main profile, ≤L5.1, 4:2:0) | AVIF §8.2 | ✅ | M2 |
 | `avis` brand (image sequences) | AVIF §3,§6.3 | OOS | OOS |
 | `avio` brand (intra-only image sequences) | AVIF §6.3 | OOS | OOS |
 | `meta` (FullBox v0) container | 14496-12 | ✅ | M0 |
@@ -128,7 +132,7 @@ adding it needs no container change.
 | `OBU_PADDING` / `OBU_REDUNDANT_FRAME_HEADER` | §5.7/§5.9 | ☐ | — |
 | `OBU_TILE_LIST` (large-scale tiles; forbidden in AVIF item) | §5.12 | ☐ | — |
 | seq_profile=1 (High) | Annex A §10.2; §6.4.1 | ✅ | M0 |
-| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ☐ | M2 |
+| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ✅ (0 = 4:2:0; 2 signalled for 4:2:2, whose coding path is #391) | M2 |
 | `still_picture`=1, `reduced_still_picture_header`=1 | §5.5 | ✅ | M0 |
 | full seq header: multiple operating points (layered stills) | §5.5.1-.5.5.5 | ☐ | D |
 | full seq header: timing_info, decoder_model_info (sequences only) | §5.5.1-.5.5.5 | OOS | OOS |
@@ -137,7 +141,8 @@ adding it needs no container change.
 | `enable_filter_intra` (1 on lossy, 0 on lossless) / `enable_intra_edge_filter`=0 | §5.5 | ✅ | M0/M1 |
 | `enable_superres`/`cdef`/`restoration`=0 | §5.5 | ✅ (off) | M0 |
 | color_config: mc=0 identity, 4:4:4, high_bitdepth=0, full range | §5.5.2 | ✅ | M0 |
-| color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ☐ | M2 |
+| color_config: `mono_chrome` bit, profile-inferred subsampling, `chroma_sample_position` (`CSP_UNKNOWN`) | §5.5.2 | ✅ | M2 |
+| color_config: high_bitdepth/twelve_bit (and the 12-bit coded subsampling flags) | §5.5.2 | ☐ | M2 |
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
 | INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
 | `disable_cdf_update`=1 (static CDFs) | §5.9.2 | ✅ | M0 |
@@ -182,7 +187,7 @@ adding it needs no container change.
 | SMOOTH / SMOOTH_V / SMOOTH_H | §7.11.2.6 | ✅ (lossy luma, square 4×4–32×32 + rectangular; SAD-selected) | M1 |
 | PAETH | §7.11.2 | ✅ (lossy luma, square 4×4–32×32 + rectangular; SAD-selected) | M1 |
 | recursive filter-intra | §7.11.2.3,§5.11.24 | ✅ (lossy luma 4×4 + 8×8 + 16×16 + 32×32) | M1 |
-| chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy 4:4:4 4×4) | M1 |
+| chroma-from-luma (CfL) + `cfl_alpha` | §7.11.5,§5.11.45 | ✅ (lossy; the §7.11.5 subsampled box average at 4:4:4 and 4:2:0) | M1 |
 | palette mode (palette_tokens, color cache) | §7.11.4,§5.11.46-.50 | ✅ (lossy luma 8×8/16×16/32×32; sizes 2..8; color cache + wavefront index map) | M1 |
 | intra block copy (`allow_intrabc`) | §7.11.x,§5.11.x | ☐ | M1 |
 
@@ -237,7 +242,7 @@ copy, which is what a decoder does for an independently decodable tile.
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | deblocking loop filter | §5.9.11,§7.14 | ✅ (lossy 4×4/8×8/16×16, narrow + wide + widest) | M1 |
-| CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy 4:4:4) | M1 |
+| CDEF (constrained directional enhancement filter) | §5.9.19,§7.15 | ✅ (lossy 4:4:4 + 4:2:0; `Cdef_Uv_Dir` is the identity for both) | M1 |
 | loop restoration: Wiener (luma) + stripe boundaries + per-SB unit signaling | §5.9.20,§7.17 | ✅ (Wiener luma; self-guided/chroma deferred) | M1 |
 | superres horizontal upscaling (8-tap polyphase, LR after upscale) | §5.9.8,§7.16 | ✅ (opt-in via `encode_still_intra_superres`) | M1 |
 | film grain synthesis | §5.9.30,§7.18.3 | ☐ | M4 |
@@ -258,7 +263,7 @@ copy, which is what a decoder does for an independently decodable tile.
 | identity matrix (mc=0), full range, 4:4:4, planar G/B/R mapping | CICP H.273; §5.5.2 | ✅ | M0 |
 | BT.601/709/2020-NCL matrices (mc=1/6/9), studio range, `color_config()` non-shortcut branch | CICP H.273 §8.3; AV1 §5.5.2 | ✅ (encode + RGBA decode; #335) | M2 |
 | RGB↔YCbCr at 4:4:4 (`gamut_color::RgbToYcbcr` / `YcbcrMatrix`) | (gamut-color) | ✅ | M2 |
-| chroma down/up-sample (4:2:0/4:2:2 plane geometry) | (gamut-av1) | ☐ | M2 |
+| chroma down/up-sample (4:2:0 plane geometry + box downsample) | (gamut-av1) | ✅ (4:2:2 geometry present; its coding path is #391) | M2 |
 | transfer sRGB/BT.709 (tagged only in M0) | CICP H.273 | ✅ (tag) | M0 |
 | transfer PQ (SMPTE ST 2084) / HLG (BT.2100) | CICP H.273 | ☐ | M4 |
 | primaries variants; embedded ICC profile | CICP; 23008-12 | ☐ | M4 |
@@ -351,7 +356,8 @@ propagating its error rather than being silently re-encoded.
 | Decode registry `AvifContainer::push_decode_backend` + `AbiAv1StillDecoder` adapter | #241 | ☐ | D |
 | Backend selection beyond first-supporter (cost/priority hints, per-request negotiation) | — | ☐ | D |
 | Colour on `Av1EncodeRequest` (`colour()`), validated against the returned stream's `color_config()` | AV1 §5.5.2 | ✅ (#335) | M2 |
-| 10/12-bit and 4:2:0/4:2:2 fields on `Av1EncodeRequest` | — | ☐ | M2 |
+| Chroma on `Av1EncodeRequest` (`chroma()`), validated against the returned stream's `seq_profile` | AV1-ISOBMFF §2.3.4 | ✅ | M2 |
+| 10/12-bit fields on `Av1EncodeRequest` | — | ☐ | M2 |
 
 **Reserved: the decode-side registry.** The `Av1StillDecoder` trait ships today as a *single*
 caller-supplied decoder passed per call (`decode_primary_rgba8(&mut decoder)`). Its registry

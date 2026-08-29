@@ -1,4 +1,4 @@
-//! Top-level: turn 4:4:4 identity planes into the AV1 temporal unit for an AVIF still image.
+//! Top-level: turn planar samples into the AV1 temporal unit for an AVIF still image.
 
 use gamut_color::cicp::{ColorRange, MatrixCoefficients};
 use gamut_color::{BitDepth, ChromaSubsampling, Planar8};
