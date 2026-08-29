@@ -41,6 +41,12 @@ impl PlaneGeom {
     ///
     /// `width`/`height` are the luma display dimensions and `mi_cols`/`mi_rows` the luma MI grid.
     /// Luma always has `ss_x = ss_y = 0`; the chroma planes take their shifts from `subsampling`.
+    ///
+    /// Monochrome ([`ChromaSubsampling::Cs400`]) has **no** chroma planes, so both chroma entries
+    /// are zero-extent. `subsampling()` reports `(1, 1)` there because that is the AV1 §5.5.2
+    /// header inference, not a geometry — using it to size a plane would allocate half-sized
+    /// chroma buffers for planes that are never coded. Zero extent instead makes every
+    /// extent-bounded loop (deblocking, for one) a no-op without a plane-count test of its own.
     pub(crate) fn frame(
         width: usize,
         height: usize,
@@ -48,6 +54,25 @@ impl PlaneGeom {
         mi_rows: usize,
         subsampling: ChromaSubsampling,
     ) -> [PlaneGeom; 3] {
+        if subsampling == ChromaSubsampling::Cs400 {
+            let luma = PlaneGeom {
+                w: width,
+                h: height,
+                coded_w: mi_cols * 4,
+                coded_h: mi_rows * 4,
+                ss_x: 0,
+                ss_y: 0,
+            };
+            let none = PlaneGeom {
+                w: 0,
+                h: 0,
+                coded_w: 0,
+                coded_h: 0,
+                ss_x: 1,
+                ss_y: 1,
+            };
+            return [luma, none, none];
+        }
         let (sx, sy) = subsampling.subsampling();
         let (sx, sy) = (u32::from(sx), u32::from(sy));
         let plane = |ss_x: u32, ss_y: u32| PlaneGeom {
@@ -125,6 +150,52 @@ mod tests {
             assert_eq!((g.w, g.h), (17, 13), "{ss:?}");
             assert_eq!((g.coded_w, g.coded_h), (24, 16), "{ss:?}");
         }
+    }
+
+    #[test]
+    fn monochrome_has_one_plane_and_two_zero_extent_entries() {
+        // The whole point of `PlaneGeom` is that the geometry is unit-testable rather than inferred
+        // from a call site, and `Cs400` is the one layout whose chroma entries are never read by
+        // the coding path — `cdef` skips them via `1..num_planes` and `deblock`'s extent-bounded
+        // loops never execute. Without this test every field of both entries is unobservable, so a
+        // mutant that changed any of them would survive.
+        //
+        // Luma is the same geometry it has at 4:4:4: 17x13 ⇒ mi 6x4 ⇒ coded 24x16. The chroma
+        // entries are zero-extent, **not** the half-sized planes that `Cs400::subsampling()`'s
+        // header-inferred `(1, 1)` would otherwise produce — that pair is a §5.5.2 signalling
+        // convention, not a geometry, and the `ss_x`/`ss_y` below record it without sizing anything.
+        let (mc, mr) = mi(17, 13);
+        let g = PlaneGeom::frame(17, 13, mc, mr, ChromaSubsampling::Cs400);
+        assert_eq!(
+            g[0],
+            PlaneGeom {
+                w: 17,
+                h: 13,
+                coded_w: 24,
+                coded_h: 16,
+                ss_x: 0,
+                ss_y: 0,
+            }
+        );
+        let none = PlaneGeom {
+            w: 0,
+            h: 0,
+            coded_w: 0,
+            coded_h: 0,
+            ss_x: 1,
+            ss_y: 1,
+        };
+        assert_eq!(g[1], none);
+        assert_eq!(g[2], none);
+        // A zero-extent plane allocates nothing, which is what makes the chroma reconstruction
+        // buffers empty and every extent-bounded filter loop a no-op.
+        assert_eq!(g[1].len(), 0);
+        assert_eq!(g[2].len(), 0);
+        // Contrast with 4:2:0 at the same size, which *does* size its chroma from `(1, 1)`. Without
+        // this the `Cs400` early return would be indistinguishable from falling through.
+        let sub = PlaneGeom::frame(17, 13, mc, mr, ChromaSubsampling::Cs420);
+        assert_eq!((sub[1].w, sub[1].h), (9, 7));
+        assert_eq!((sub[1].coded_w, sub[1].coded_h), (12, 8));
     }
 
     #[test]

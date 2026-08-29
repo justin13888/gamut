@@ -33,15 +33,23 @@ encoding of 8-bit RGB at 4:4:4 — identity matrix for lossless, **BT.709 YCbCr 
 lossy, with BT.601/BT.2020-NCL and studio range selectable — wrapped as a conformant MIAF/AVIF
 `av01` item — brands `avif`/`mif1`/`miaf`/`MA1A`, the AVIF §9.1.1 minimum box set, cross-box
 consistency (`av1C`↔sequence header, `pixi`, `colr`, `ispe`) by construction — with `irot`/`imir`
-display orientation. Output is validated end-to-end against `libavif` (dav1d backend); the wrapped
+display orientation. The **colour and metadata surface** (issue #395) rides on top: selectable CICP
+primaries and transfer characteristics, an embedded ICC profile as a `colr` box of type `prof`
+alongside the CICP one, and Exif / XMP items carrying a `cdsc` reference to the primary. Those four
+are pure container-side additions — they leave the codestream byte-for-byte unchanged, which the
+libavif acceptance suite pins directly. Output is validated end-to-end against `libavif` (dav1d backend); the wrapped
 AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `dav1d` via
 `gamut-av1`. Evidence per section: A and K rows are pinned by this crate's parse-back unit tests,
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
 **Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit, 4:2:0/4:2:2,
-monochrome, `MA1B`); alpha and depth auxiliary items; ICC / Exif / XMP; HDR
-(PQ/HLG transfer, `mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain); container derivations
+`MA1B` — issues #398/#399; the AV1 **monochrome** encode itself has landed with #396, but no
+`gamut-avif` input reaches it until the `Gray8`/alpha surface of #397); alpha and depth auxiliary
+items (#397); the HDR
+surface beyond CICP *tagging* (`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a
+PQ/HLG transfer labels samples but does not by itself make a conformant HDR image); container
+derivations
 (`grid`, thumbnails, `idat`, `iloc` v1/v2 emission, `pasp`/`clap`); layered/progressive still
 images (`a1op`/`a1lx`/`lsel`, multi-operating-point sequence header); `tmap` tone-map (gain-map)
 derived items; `sato` sample transforms (bit depths beyond 12); `cmin`/`cmex` camera matrices;
@@ -91,14 +99,14 @@ adding it needs no container change.
 | `ispe` image spatial extents | 23008-12 | ✅ | M0 |
 | `pixi` pixel information (3×8) | 23008-12 | ✅ | M0 |
 | `colr` type `nclx` (CICP code points) | AVIF §2.2; AV1-ISOBMFF §2.3.4 | ✅ | M0 |
-| `colr` type `rICC`/`prof` (ICC profile) | 23008-12 | ☐ | M4 |
+| `colr` type `rICC`/`prof` (ICC profile) | 23008-12 | ✅ (`prof` written by `AvifEncoder::with_icc_profile`; both read) | M4 |
 | `pasp` pixel aspect ratio | 14496-12 | ☐ | M5 |
 | `clap` clean aperture | 23008-12 | ☐ | M5 |
 | `irot` rotation / `imir` mirror | 23008-12 | ✅ (essential transform properties; `AvifEncoder::with_rotation`/`with_mirror`) | M5 |
 | `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4.1 | ☐ | M3 |
 | depth auxiliary image item (`urn:…:auxiliary:depth`) | AVIF §4.1 | ☐ | M3 |
 | `prem` premultiplied-alpha association | AVIF §4 | ☐ | M3 |
-| `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ☐ | M3/M5 |
+| `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ✅ (`cdsc` emitted; all four read) | M3/M5 |
 | `grid` derived item + `dimg` refs (tiled mosaic) | 23008-12; MIAF | ☐ | M5 |
 | `tmap` tone-map derived item (gain maps) + `altr` grouping with the base item | AVIF §4.2.2 | ☐ | D |
 | `sato` sample-transform derived item (bit-depth extension beyond 12) | AVIF §4.2.3, App. A | ☐ | D |
@@ -108,7 +116,7 @@ adding it needs no container change.
 | `cmin`/`cmex` camera intrinsic/extrinsic matrices | AVIF §9.1.2 (HEIF) | ☐ | D |
 | `idat` inline item data | 14496-12 | ☐ | M5 |
 | `thmb` thumbnail item | 23008-12 | ☐ | M5 |
-| Exif / XMP metadata items + `cdsc` ref | AVIF §9.1.2; 23008-12 | ☐ | M4 |
+| Exif / XMP metadata items + `cdsc` ref | AVIF §9.1.2; 23008-12 | ✅ (`AvifEncoder::with_exif`/`with_xmp`) | M4 |
 | `a1op` operating-point sel / `a1lx` layered index / `lsel` layer sel (layered/progressive stills) | AVIF §2.3 | ☐ | D |
 | `dinf`/`dref` external data references | AVIF §9.1.2 | OOS | OOS |
 | sequence tracks: `moov`/`trak`/`mdia`/`stbl`, `av01` sample entry, `av1C` in `stsd` | 14496-12; AV1-ISOBMFF §3 | OOS | OOS |
@@ -128,7 +136,7 @@ adding it needs no container change.
 | `OBU_PADDING` / `OBU_REDUNDANT_FRAME_HEADER` | §5.7/§5.9 | ☐ | — |
 | `OBU_TILE_LIST` (large-scale tiles; forbidden in AVIF item) | §5.12 | ☐ | — |
 | seq_profile=1 (High) | Annex A §10.2; §6.4.1 | ✅ | M0 |
-| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ☐ | M2 |
+| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ✅ (profile 0 for **monochrome** stills only — its 4:2:0 form ☐ #390; profile 2 ☐ #398/#391) | M2 |
 | `still_picture`=1, `reduced_still_picture_header`=1 | §5.5 | ✅ | M0 |
 | full seq header: multiple operating points (layered stills) | §5.5.1-.5.5.5 | ☐ | D |
 | full seq header: timing_info, decoder_model_info (sequences only) | §5.5.1-.5.5.5 | OOS | OOS |
@@ -137,7 +145,7 @@ adding it needs no container change.
 | `enable_filter_intra` (1 on lossy, 0 on lossless) / `enable_intra_edge_filter`=0 | §5.5 | ✅ | M0/M1 |
 | `enable_superres`/`cdef`/`restoration`=0 | §5.5 | ✅ (off) | M0 |
 | color_config: mc=0 identity, 4:4:4, high_bitdepth=0, full range | §5.5.2 | ✅ | M0 |
-| color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ☐ | M2 |
+| color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ✅ (**`mono_chrome` only**, with its inferred-subsampling branch — `gamut_av1::headers`; high_bitdepth/twelve_bit ☐ #398, coded subsampling + chroma_sample_position ☐ #390/#391) | M2 |
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
 | INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
 | `disable_cdf_update`=1 (static CDFs) | §5.9.2 | ✅ | M0 |
@@ -260,8 +268,8 @@ copy, which is what a decoder does for an independently decodable tile.
 | RGB↔YCbCr at 4:4:4 (`gamut_color::RgbToYcbcr` / `YcbcrMatrix`) | (gamut-color) | ✅ | M2 |
 | chroma down/up-sample (4:2:0/4:2:2 plane geometry) | (gamut-av1) | ☐ | M2 |
 | transfer sRGB/BT.709 (tagged only in M0) | CICP H.273 | ✅ (tag) | M0 |
-| transfer PQ (SMPTE ST 2084) / HLG (BT.2100) | CICP H.273 | ☐ | M4 |
-| primaries variants; embedded ICC profile | CICP; 23008-12 | ☐ | M4 |
+| transfer PQ (SMPTE ST 2084) / HLG (BT.2100) | CICP H.273 | ✅ (tag only, `AvifEncoder::with_transfer`; no HDR pipeline — see `mdcv`/`clli` below) | M4 |
+| primaries variants; embedded ICC profile | CICP; 23008-12 | ✅ (`AvifEncoder::with_primaries`; ICC via `with_icc_profile`) | M4 |
 | HDR mastering display (`mdcv`) + content light level (`clli`) | §5.8.3/.4 | ☐ | M4 |
 
 ## K. Cross-crate API, I/O & tooling

@@ -418,6 +418,23 @@ impl<'a> AvifItem<'a> {
         })
     }
 
+    /// The embedded ICC profile from a `colr` box of type `rICC` or `prof`, if the item carries
+    /// one.
+    ///
+    /// Distinct from [`colour`](Self::colour), which returns the **first** `colr` property
+    /// whatever its type. An item may legitimately carry both a CICP `nclx` box and an ICC one
+    /// (ISO/IEC 14496-12 §12.1.5 allows one of each `colour_type`), and this crate's encoder writes
+    /// exactly that pairing, so the profile needs its own lens to be reachable.
+    #[must_use]
+    pub fn icc_profile(&self) -> Option<&'a [u8]> {
+        self.inner.properties.iter().find_map(|p| match &p.kind {
+            PropertyKind::Colour(
+                ColourInformation::RestrictedIcc(icc) | ColourInformation::UnrestrictedIcc(icc),
+            ) => Some(icc.as_slice()),
+            _ => None,
+        })
+    }
+
     /// The `clli` content light level (`MaxCLL`/`MaxPALL`), if present.
     #[must_use]
     pub fn content_light_level(&self) -> Option<ContentLightLevel> {
