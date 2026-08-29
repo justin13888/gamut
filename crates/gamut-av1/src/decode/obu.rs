@@ -36,6 +36,33 @@ pub(crate) const SELECT_SCREEN_CONTENT_TOOLS: u8 = 2;
 /// `SELECT_INTEGER_MV` (§3).
 pub(crate) const SELECT_INTEGER_MV: u8 = 2;
 
+/// `trailing_bits( obu_size * 8 - payloadBits )` (AV1 §5.3.1, §5.3.4) for an OBU whose payload
+/// `r` reads: a `1` marker bit, then zero padding to the **end of the payload**.
+///
+/// [`BitReader::trailing_bits`] alone stops at the next byte boundary, but §5.3.4's `nbBits` spans
+/// whole bytes to the end of the OBU, so the remainder is padding and must be zero too. Applied to
+/// every OBU except `OBU_TILE_GROUP`, `OBU_TILE_LIST` and `OBU_FRAME`, this is what makes a
+/// payload whose syntax was parsed at the wrong bit positions fail loudly instead of yielding a
+/// plausible-looking header.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the marker bit is absent, the payload is truncated, or any
+/// padding bit is set.
+pub(crate) fn obu_trailing_bits(r: &mut BitReader<'_>) -> Result<()> {
+    r.trailing_bits()?;
+    // Byte-aligned after `trailing_bits`, so the rest of the payload is whole padding bytes.
+    while r.bits_remaining() > 0 {
+        if r.f(8)? != 0 {
+            return Err(Error::invalid_input(
+                ORIGIN,
+                "AV1 OBU: non-zero padding after trailing_bits()",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// `CP_BT_709`, `TC_SRGB`, `MC_IDENTITY` — the §5.5.2 sRGB shortcut triple.
 const CP_BT_709: u8 = 1;
 /// See [`CP_BT_709`].
@@ -273,13 +300,26 @@ pub struct SequenceHeader {
 }
 
 impl SequenceHeader {
-    /// Parses a sequence header OBU payload (§5.5.1).
+    /// Parses a sequence header OBU payload (§5.5.1), including the OBU's trailing bits (§5.3.1).
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if the payload is truncated or internally inconsistent.
+    /// Returns [`Error::InvalidInput`] if the payload is truncated, internally inconsistent, or
+    /// does not end in the `trailing_bits()` the OBU's declared size requires.
     pub(crate) fn parse(payload: &[u8]) -> Result<Self> {
         let mut r = BitReader::new(payload);
+        let header = Self::parse_syntax(&mut r)?;
+        // §5.3.1 ends every OBU but a tile group, tile list or frame with
+        // `trailing_bits(obu_size * 8 - payloadBits)`. It is the only thing that ties the bits the
+        // parse consumed to the size the OBU declared: without it a header whose branch flags were
+        // corrupted parses a different field sequence, consumes a different number of bits, and
+        // still "succeeds" — yielding plausible but fabricated dimensions and CICP code points.
+        obu_trailing_bits(&mut r)?;
+        Ok(header)
+    }
+
+    /// The §5.5.1 syntax proper, leaving the OBU's trailing bits to [`SequenceHeader::parse`].
+    fn parse_syntax(r: &mut BitReader<'_>) -> Result<Self> {
         let seq_profile = r.f(3)? as u8;
         if seq_profile > 2 {
             return Err(Error::invalid_input(
@@ -302,7 +342,7 @@ impl SequenceHeader {
             let timing_info_present = r.flag()?;
             let mut buffer_delay_length = 0u32;
             if timing_info_present {
-                Self::skip_timing_info(&mut r)?;
+                Self::skip_timing_info(r)?;
                 decoder_model_info_present = r.flag()?;
                 if decoder_model_info_present {
                     buffer_delay_length = r.f(5)? + 1;
@@ -398,7 +438,7 @@ impl SequenceHeader {
         let enable_superres = r.flag()?;
         let enable_cdef = r.flag()?;
         let enable_restoration = r.flag()?;
-        let color = Self::parse_color_config(&mut r, seq_profile)?;
+        let color = Self::parse_color_config(r, seq_profile)?;
         let film_grain_params_present = r.flag()?;
 
         Ok(Self {
@@ -596,6 +636,69 @@ mod tests {
                 .unwrap_err()
                 .static_message(),
             Some("AV1 sequence header: seq_profile above 2 is reserved")
+        );
+    }
+
+    #[test]
+    fn a_sequence_header_must_end_in_the_obus_trailing_bits() {
+        // §5.3.1's `trailing_bits(obu_size * 8 - payloadBits)` is the only tie between the bits the
+        // parse consumed and the size the OBU declared. Without it a corrupted branch flag makes
+        // the parse read a different field sequence and still succeed, so the caller cross-checks
+        // its container against fabricated dimensions and CICP code points.
+        let payload = encoder_seq_header(16, 16, false, false);
+        SequenceHeader::parse(&payload).expect("the encoder's own header is well formed");
+
+        // Clearing the marker bit leaves only zero padding.
+        let mut no_marker = payload.clone();
+        let last = no_marker.len() - 1;
+        assert_ne!(no_marker[last], 0, "the marker bit lives in the last byte");
+        no_marker[last] = 0;
+        assert_eq!(
+            SequenceHeader::parse(&no_marker)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 trailing_bits(): missing marker bit")
+        );
+
+        // Padding past the byte boundary is still padding: a zero byte is legal, a non-zero one is
+        // not. `BitReader::trailing_bits` alone stops at the byte boundary and would accept both.
+        let mut zero_padded = payload.clone();
+        zero_padded.push(0);
+        SequenceHeader::parse(&zero_padded).expect("zero padding to the end of the OBU is legal");
+        let mut dirty_padded = payload.clone();
+        dirty_padded.push(0x01);
+        assert_eq!(
+            SequenceHeader::parse(&dirty_padded)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 OBU: non-zero padding after trailing_bits()")
+        );
+
+        // Dropping the last byte truncates the trailing bits away.
+        assert!(SequenceHeader::parse(&payload[..payload.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn a_flipped_branch_flag_is_refused_rather_than_silently_reinterpreted() {
+        // `color_description_present_flag` gates 24 bits of CICP. Clearing it makes the parse land
+        // 24 bits early, where the trailing-bits check is what turns "wrong colour" into a
+        // refusal. `StillBuilder`'s general header puts the flag at bit 64 — asserted here so the
+        // test fails loudly rather than silently flipping some other bit if the builder changes.
+        let still = crate::decode::testutil::StillBuilder::default();
+        let payload = still.sequence_header();
+        let sane = SequenceHeader::parse(&payload).expect("the builder's header is well formed");
+        assert_eq!(sane.color.transfer_characteristics, 13);
+        assert_eq!(
+            payload[8] & 0x80,
+            0x80,
+            "bit 64 is color_description_present_flag"
+        );
+
+        let mut flipped = payload;
+        flipped[8] &= 0x7f;
+        assert!(
+            SequenceHeader::parse(&flipped).is_err(),
+            "a header parsed at the wrong bit positions must be refused, not reinterpreted"
         );
     }
 

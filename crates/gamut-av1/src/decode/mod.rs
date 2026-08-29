@@ -269,7 +269,9 @@ impl Av1Decoder {
                     }
                     let mut r = BitReader::new(obu.payload);
                     let fh = FrameHeader::parse(&mut r, sh)?;
-                    r.trailing_bits()?;
+                    // §5.3.1: the frame header OBU ends in trailing bits spanning the rest of the
+                    // payload, so a header parsed at the wrong bit positions is refused here.
+                    obu::obu_trailing_bits(&mut r)?;
                     self.validate(sh, &fh)?;
                     // The tiles arrive in a separate OBU_TILE_GROUP; record the header and wait.
                     frame = Some((fh, Vec::new()));
@@ -1039,6 +1041,52 @@ mod tests {
                 .unwrap_err()
                 .static_message(),
             Some("AV1 decode: a still image must carry every tile in one tile group")
+        );
+    }
+
+    #[test]
+    fn a_frame_header_obu_must_end_in_the_obus_trailing_bits() {
+        // §5.3.4's `nbBits` spans whole bytes to the end of the OBU, while
+        // `BitReader::trailing_bits` stops at the next byte boundary — so the padding *after* that
+        // boundary needs checking too, or a frame header that consumed the wrong number of bits
+        // still passes.
+        let still = testutil::StillBuilder::default();
+        let frame = still.frame_obu();
+        let (header, tiles) = frame.split_at(frame.len() - 1);
+
+        let mut header_obu = header.to_vec();
+        header_obu.push(0x80); // trailing_bits: a one bit then zero padding
+        let mut good = Vec::new();
+        testutil::write_obu(&mut good, 1, &still.sequence_header());
+        testutil::write_obu(&mut good, 3, &header_obu);
+        testutil::write_obu(&mut good, 4, tiles);
+        Av1Decoder::new()
+            .inspect(&good)
+            .expect("well-formed padding");
+
+        // Zero padding to the end of the OBU is legal; a set bit in it is not.
+        let mut zero_padded = header_obu.clone();
+        zero_padded.push(0);
+        let mut clean = Vec::new();
+        testutil::write_obu(&mut clean, 1, &still.sequence_header());
+        testutil::write_obu(&mut clean, 3, &zero_padded);
+        testutil::write_obu(&mut clean, 4, tiles);
+        Av1Decoder::new()
+            .inspect(&clean)
+            .expect("zero padding to the end of the OBU is legal");
+
+        let mut dirty_padded = header_obu;
+        dirty_padded.push(0x01);
+        let mut dirty = Vec::new();
+        testutil::write_obu(&mut dirty, 1, &still.sequence_header());
+        testutil::write_obu(&mut dirty, 3, &dirty_padded);
+        testutil::write_obu(&mut dirty, 4, tiles);
+        assert_eq!(
+            Av1Decoder::new()
+                .inspect(&dirty)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 OBU: non-zero padding after trailing_bits()")
         );
     }
 
