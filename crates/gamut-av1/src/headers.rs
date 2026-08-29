@@ -48,12 +48,15 @@ pub struct Av1StillConfig {
     pub high_bitdepth: bool,
     /// `twelve_bit`: coded only when `seq_profile == 2 && high_bitdepth`, and true only at 12 bits.
     pub twelve_bit: bool,
-    /// `mono_chrome`: one coded luma plane and no chroma. Forces `seq_profile = 0` and, per
-    /// §5.5.2, an inferred `subsampling_x = subsampling_y = 1`.
+    /// `mono_chrome`: one coded luma plane and no chroma. Per §5.5.2 the subsampling is inferred
+    /// `subsampling_x = subsampling_y = 1`. The profile follows §6.4.1 rather than the flag: 0 at
+    /// 8/10 bits, 2 at 12, since Main does not reach 12-bit.
     pub monochrome: bool,
-    /// `subsampling_x`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome) (inferred, not coded).
+    /// `subsampling_x`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome). Inferred rather than
+    /// coded except under `seq_profile == 2` at 12 bits, which codes it (§5.5.2).
     pub chroma_subsampling_x: u8,
-    /// `subsampling_y`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome) (inferred, not coded).
+    /// `subsampling_y`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome). Coded only when
+    /// [`chroma_subsampling_x`](Self::chroma_subsampling_x) is coded and set (§5.5.2).
     pub chroma_subsampling_y: u8,
     /// `chroma_sample_position` = 0.
     pub chroma_sample_position: u8,
@@ -194,8 +197,9 @@ pub(crate) fn write_obu(out: &mut Vec<u8>, obu_type: u8, payload: &[u8]) {
     out.extend_from_slice(payload);
 }
 
-/// Builds the sequence-header OBU payload (reduced still picture, 8-bit; profile 1 at 4:4:4 or
-/// profile 0 monochrome), terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
+/// Builds the sequence-header OBU payload (reduced still picture; 8-, 10- or 12-bit, with the
+/// §6.4.1 profile the depth and plane count require — 1 at 4:4:4, 0 for 8/10-bit monochrome, 2 at
+/// 12 bits), terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
 /// `lossy` enables `enable_filter_intra` (recursive filter-intra is used only on the lossy path;
 /// the lossless path stays DC-only and emits no `use_filter_intra` symbols).
 pub(crate) fn sequence_header_payload(
