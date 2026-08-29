@@ -1159,6 +1159,11 @@ mod tests {
             }
         }
         assert!(!fh.segmentation.seg_id_pre_skip, "ALT_Q is below REF_FRAME");
+        // §5.9.14: every frame this decoder accepts has primary_ref_frame == PRIMARY_REF_NONE,
+        // which infers segmentation_update_map = 1 and segmentation_temporal_update = 0 rather
+        // than coding them — so an enabled segmentation always reports a fresh map.
+        assert!(fh.segmentation.update_map);
+        assert!(!fh.segmentation.temporal_update);
     }
 
     #[test]
@@ -1193,12 +1198,22 @@ mod tests {
         assert_eq!(fh.tile_info.tile_size_bytes, 1);
     }
 
-    /// Parses a synthetic still built by [`StillBuilder`].
+    /// Parses a synthetic still built by [`StillBuilder`], checking that the parser stops exactly
+    /// where the builder's uncompressed header ended.
+    ///
+    /// The position check is what makes fields the decoder *discards* testable: reading one at the
+    /// wrong width leaves every later field misplaced, which a `FrameHeader` comparison alone can
+    /// miss entirely when the misplaced fields are all thrown away (film grain is nothing else).
     fn parse_built(still: &crate::decode::testutil::StillBuilder) -> (SequenceHeader, FrameHeader) {
         let seq = SequenceHeader::parse(&still.sequence_header()).unwrap();
-        let payload = still.frame_obu();
+        let (payload, header_bits) = still.frame_obu_with_header_bits();
         let mut r = BitReader::new(&payload);
         let fh = FrameHeader::parse(&mut r, &seq).unwrap();
+        assert_eq!(
+            r.bit_position(),
+            header_bits,
+            "the parser must consume the coded header bit for bit"
+        );
         (seq, fh)
     }
 
@@ -1639,6 +1654,168 @@ mod tests {
                 .static_message(),
             Some("AV1 decode: monochrome streams are not implemented")
         );
+    }
+
+    #[test]
+    fn tile_info_recomputes_the_row_area_limit_from_the_coded_columns() {
+        // §5.9.15's explicit-spacing branch recomputes `maxTileAreaSb` *after* the columns are
+        // read: `(sbRows * sbCols) >> (minLog2Tiles + 1)` when `minLog2Tiles > 0`, the whole frame
+        // area otherwise. That sets `maxTileHeightSb`, the `ns()` bound every row size is coded
+        // against, so a wrong area reads the wrong number of bits per row.
+        //
+        // 3136 px is 49 64x64 superblocks each way. 49 * 49 = 2401 exceeds `maxTileAreaSb` (2304),
+        // so `minLog2Tiles` is 1 and the recomputed area is 2401 >> 2 = 600. A widest column of 25
+        // superblocks then caps a tile row at 600 / 25 = 24, which is why the rows below are
+        // 17 + 16 + 16 and not a single 49. Taking the `else` branch would allow 96, and dividing
+        // instead of multiplying would collapse the cap to 1 and split the frame into 49 rows.
+        let still = crate::decode::testutil::StillBuilder {
+            width: 3136,
+            height: 3136,
+            width_bits: 12,
+            height_bits: 12,
+            explicit_tiles: Some((&[25, 24], &[17, 16, 16])),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert_eq!(fh.tile_info.tile_cols, 2);
+        assert_eq!(fh.tile_info.tile_rows, 3);
+        assert_eq!(fh.tile_info.mi_col_starts, [0, 400, 784]);
+        assert_eq!(fh.tile_info.mi_row_starts, [0, 272, 528, 784]);
+        assert_eq!(fh.tile_info.tile_cols_log2, 1);
+        assert_eq!(fh.tile_info.tile_rows_log2, 2);
+    }
+
+    #[test]
+    fn loop_filter_codes_the_chroma_levels_when_either_luma_level_is_set() {
+        // §5.9.11 codes `loop_filter_level[2]` and `[3]` when NumPlanes > 1 and *either* luma
+        // level is non-zero. gamut's encoder derives both luma levels from `base_q_idx` and so
+        // always writes them equal; only a hand-built header separates the spec's `||` from `&&`.
+        let still = crate::decode::testutil::StillBuilder {
+            base_q_idx: 128,
+            loop_filter_level: [0, 5, 17, 34],
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (_, fh) = parse_built(&still);
+        assert!(!fh.coded_lossless, "base_q_idx 128 codes the filter blocks");
+        assert_eq!(fh.loop_filter.level, [0, 5, 17, 34]);
+        assert_eq!(fh.tx_mode, TxMode::Largest);
+
+        // The mirror case: with both luma levels zero no chroma level is coded at all, and the
+        // §7.20 ref-delta defaults still stand because `loop_filter_delta_enabled` is 0.
+        let (_, quiet) = parse_built(&crate::decode::testutil::StillBuilder {
+            loop_filter_level: [0, 0, 17, 34],
+            ..still
+        });
+        assert_eq!(quiet.loop_filter.level, [0; 4]);
+        assert_eq!(quiet.loop_filter.ref_deltas, [1, 0, 0, 0, -1, 0, -1, -1]);
+    }
+
+    #[test]
+    fn lr_params_code_the_uv_shift_only_for_subsampled_chroma_restoration() {
+        // §5.9.20 codes `lr_uv_shift` only when `subsampling_x`, `subsampling_y` and `usesChromaLr`
+        // all hold, and `usesChromaLr` is set by a plane *after* the first choosing a restoration
+        // type. gamut's encoder emits 4:4:4 with Wiener on luma alone, so it exercises neither.
+        let still = crate::decode::testutil::StillBuilder {
+            colour: crate::decode::testutil::BuilderColour::Yuv420,
+            base_q_idx: 128,
+            enable_restoration: true,
+            lr: crate::decode::testutil::LrSpec {
+                // Wiener on Y and U, none on V: the chroma term comes from plane 1.
+                types: [2, 2, 0],
+                unit_shift: 2,
+                uv_shift: 1,
+            },
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq, fh) = parse_built(&still);
+        assert_eq!(seq.color.subsampling, Subsampling::Yuv420);
+        assert!(fh.lr.uses_lr);
+        assert_eq!(
+            fh.lr.frame_restoration_type,
+            [
+                RestorationType::Wiener,
+                RestorationType::Wiener,
+                RestorationType::None
+            ]
+        );
+        // LoopRestorationSize[0] = 256 >> (2 - 2); the chroma planes take a further lr_uv_shift.
+        assert_eq!(fh.lr.loop_restoration_size, [256, 128, 128]);
+
+        // Luma-only restoration leaves `usesChromaLr` clear, so no `lr_uv_shift` is coded and the
+        // chroma sizes follow the luma one.
+        let (_, luma_only) = parse_built(&crate::decode::testutil::StillBuilder {
+            lr: crate::decode::testutil::LrSpec {
+                types: [2, 0, 0],
+                unit_shift: 2,
+                uv_shift: 0,
+            },
+            ..still
+        });
+        assert!(luma_only.lr.uses_lr);
+        assert_eq!(luma_only.lr.loop_restoration_size, [256; 3]);
+    }
+
+    #[test]
+    fn film_grain_params_are_consumed_at_their_full_width() {
+        // §5.9.30 is parsed purely for its width — the decoder keeps only `apply_grain` — so the
+        // bit-position check in `parse_built` is what pins every field. `film_grain_params_present`
+        // is 0 in everything either encoder emits, so this syntax is otherwise never entered.
+        //
+        // 4:4:4 with luma *and* chroma points takes the widest path: `numPosLuma` is
+        // 2 * 2 * 3 = 12 AR coefficients, `numPosChroma` is 13 because num_y_points is non-zero,
+        // and both the cb and the cr multiplier triples are coded.
+        let still = crate::decode::testutil::StillBuilder {
+            film_grain: Some(crate::decode::testutil::GrainSpec {
+                num_y_points: 3,
+                chroma_scaling_from_luma: false,
+                num_cb_points: 2,
+                num_cr_points: 1,
+                ar_coeff_lag: 2,
+            }),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq, fh) = parse_built(&still);
+        assert!(seq.film_grain_params_present);
+        assert!(fh.apply_grain);
+        assert_eq!(
+            fh.reject_unsupported_tools(&seq)
+                .unwrap_err()
+                .static_message(),
+            Some("AV1 decode: film grain synthesis is not implemented")
+        );
+
+        // `apply_grain = 0` still costs the one flag and nothing else.
+        let (_, none) = parse_built(&crate::decode::testutil::StillBuilder {
+            film_grain: None,
+            ..still
+        });
+        assert!(!none.apply_grain);
+    }
+
+    #[test]
+    fn film_grain_omits_the_chroma_points_for_subsampled_grain_without_luma_points() {
+        // §5.9.30 forces `num_cb_points` and `num_cr_points` to 0 — coding neither field, neither
+        // set of AR coefficients, and neither multiplier triple — when the stream is 4:2:0 and
+        // `num_y_points` is 0. It is the one input where all three terms of that condition are
+        // load-bearing, and where `chroma_scaling_from_luma || num_cb_points` must stay a genuine
+        // test rather than an always-true one.
+        let still = crate::decode::testutil::StillBuilder {
+            colour: crate::decode::testutil::BuilderColour::Yuv420,
+            film_grain: Some(crate::decode::testutil::GrainSpec {
+                num_y_points: 0,
+                chroma_scaling_from_luma: false,
+                num_cb_points: 0,
+                num_cr_points: 0,
+                // numPosLuma = 12, and with no luma points numPosChroma is 12 too — coefficients
+                // that must not be read at all here.
+                ar_coeff_lag: 2,
+            }),
+            ..crate::decode::testutil::StillBuilder::default()
+        };
+        let (seq, fh) = parse_built(&still);
+        assert_eq!(seq.color.subsampling, Subsampling::Yuv420);
+        assert!(seq.film_grain_params_present);
+        assert!(fh.apply_grain);
     }
 
     #[test]

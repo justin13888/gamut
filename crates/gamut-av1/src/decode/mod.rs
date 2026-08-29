@@ -342,6 +342,66 @@ pub(crate) mod testutil {
     use crate::decode::header::tile_log2;
     use crate::headers::{Av1Colour, Av1StillConfig};
 
+    /// The `color_config()` (§5.5.2) a [`StillBuilder`] codes. Both forms are 8-bit with three
+    /// planes; they differ in the chroma subsampling, which several later syntax conditions read.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum BuilderColour {
+        /// `seq_profile = 1` plus the §5.5.2 sRGB shortcut: 4:4:4, full range, nothing else coded.
+        Srgb444,
+        /// `seq_profile = 0` with an unspecified colour description: 4:2:0, so `subsampling_x`
+        /// and `subsampling_y` are both 1.
+        Yuv420,
+    }
+
+    impl BuilderColour {
+        /// `seq_profile`.
+        const fn seq_profile(self) -> u32 {
+            match self {
+                Self::Srgb444 => 1,
+                Self::Yuv420 => 0,
+            }
+        }
+
+        /// `(subsampling_x, subsampling_y)`.
+        const fn subsampling(self) -> (u32, u32) {
+            match self {
+                Self::Srgb444 => (0, 0),
+                Self::Yuv420 => (1, 1),
+            }
+        }
+    }
+
+    /// The `lr_params()` (§5.9.20) a [`StillBuilder`] codes, for a frame that is not `AllLossless`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct LrSpec {
+        /// `lr_type` per plane, as coded: an index into `Remap_Lr_Type`, so 0 is `RESTORE_NONE`.
+        pub types: [u32; 3],
+        /// The combined `lr_unit_shift`, `0..=2`, coded as one or two bits. A sequence header with
+        /// `use_128x128_superblock` codes `lr_unit_shift - 1`, so there it must be at least 1.
+        pub unit_shift: u32,
+        /// `lr_uv_shift`, coded only when the chroma is subsampled in both directions and a chroma
+        /// plane uses restoration.
+        pub uv_shift: u32,
+    }
+
+    /// The `film_grain_params()` (§5.9.30) a [`StillBuilder`] codes.
+    ///
+    /// Only the coded field *widths* matter: the decoder consumes the parameters and keeps nothing
+    /// but `apply_grain`, so every point and coefficient is written as filler.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct GrainSpec {
+        /// `num_y_points`.
+        pub num_y_points: u32,
+        /// `chroma_scaling_from_luma`.
+        pub chroma_scaling_from_luma: bool,
+        /// `num_cb_points`, coded only when §5.9.30's chroma-point condition holds.
+        pub num_cb_points: u32,
+        /// `num_cr_points`, coded alongside `num_cb_points`.
+        pub num_cr_points: u32,
+        /// `ar_coeff_lag`, which sets `numPosLuma = 2 * ar_coeff_lag * ( ar_coeff_lag + 1 )`.
+        pub ar_coeff_lag: u32,
+    }
+
     /// A hand-built AV1 still, for syntax paths neither `gamut-av1`'s encoder nor libaom emits.
     ///
     /// The encoder only ever writes the *reduced* still-picture header with a single 64×64-superblock
@@ -406,6 +466,20 @@ pub(crate) mod testutil {
         pub order_hint_bits: Option<u32>,
         /// `error_resilient_mode`, coded only for a frame that is not a shown key frame.
         pub error_resilient: bool,
+        /// The `color_config()` (§5.5.2) the sequence header codes.
+        pub colour: BuilderColour,
+        /// `base_q_idx`. Any non-zero value clears `CodedLossless`, which is what makes
+        /// `loop_filter_params()`, `cdef_params()`, `lr_params()` and `read_tx_mode()` code bits.
+        pub base_q_idx: u8,
+        /// `loop_filter_level[0..4]`. Levels 2 and 3 are coded only when the stream has chroma and
+        /// at least one luma level is non-zero (§5.9.11).
+        pub loop_filter_level: [u8; 4],
+        /// `lr_params()` (§5.9.20), coded when the frame is not `AllLossless` and the sequence
+        /// header set [`enable_restoration`](Self::enable_restoration).
+        pub lr: LrSpec,
+        /// `film_grain_params()` (§5.9.30). `Some` sets `film_grain_params_present` in the
+        /// sequence header and codes `apply_grain = 1`; neither encoder ever emits film grain.
+        pub film_grain: Option<GrainSpec>,
     }
 
     impl Default for StillBuilder {
@@ -431,6 +505,15 @@ pub(crate) mod testutil {
                 screen_content_tools: None,
                 order_hint_bits: None,
                 error_resilient: false,
+                colour: BuilderColour::Srgb444,
+                base_q_idx: 0,
+                loop_filter_level: [0; 4],
+                lr: LrSpec {
+                    types: [0; 3],
+                    unit_shift: 0,
+                    uv_shift: 0,
+                },
+                film_grain: None,
             }
         }
     }
@@ -439,7 +522,7 @@ pub(crate) mod testutil {
         /// Emits the sequence header OBU payload (§5.5.1, general form).
         pub(crate) fn sequence_header(&self) -> Vec<u8> {
             let mut w = BitWriter::new();
-            w.put_bits(1, 3); // seq_profile = 1 (High: 8-bit 4:4:4)
+            w.put_bits(self.colour.seq_profile(), 3);
             w.put_bit(0); // still_picture
             w.put_bit(0); // reduced_still_picture_header — the general form
             w.put_bit(0); // timing_info_present_flag
@@ -493,14 +576,28 @@ pub(crate) mod testutil {
             w.put_bit(0); // enable_superres
             w.put_bit(u8::from(self.enable_cdef));
             w.put_bit(u8::from(self.enable_restoration));
-            // color_config(): 8-bit, then the sRGB shortcut infers full range and 4:4:4.
+            // color_config() (§5.5.2), 8-bit either way.
             w.put_bit(0); // high_bitdepth
-            w.put_bit(1); // color_description_present_flag
-            w.put_bits(1, 8); // color_primaries = CP_BT_709
-            w.put_bits(13, 8); // transfer_characteristics = TC_SRGB
-            w.put_bits(0, 8); // matrix_coefficients = MC_IDENTITY
+            match self.colour {
+                BuilderColour::Srgb444 => {
+                    // seq_profile 1 infers mono_chrome = 0, and the sRGB triple then infers full
+                    // range and 4:4:4 without coding another bit.
+                    w.put_bit(1); // color_description_present_flag
+                    w.put_bits(1, 8); // color_primaries = CP_BT_709
+                    w.put_bits(13, 8); // transfer_characteristics = TC_SRGB
+                    w.put_bits(0, 8); // matrix_coefficients = MC_IDENTITY
+                }
+                BuilderColour::Yuv420 => {
+                    w.put_bit(0); // mono_chrome
+                    w.put_bit(0); // color_description_present_flag -> all three unspecified
+                    w.put_bit(0); // color_range
+                    // seq_profile 0 infers subsampling_x = subsampling_y = 1, which is what makes
+                    // chroma_sample_position coded.
+                    w.put_bits(0, 2); // chroma_sample_position = CSP_UNKNOWN
+                }
+            }
             w.put_bit(0); // separate_uv_delta_q
-            w.put_bit(0); // film_grain_params_present
+            w.put_bit(u8::from(self.film_grain.is_some())); // film_grain_params_present
             w.put_bit(1); // trailing_bits
             w.byte_align();
             w.into_bytes()
@@ -508,6 +605,15 @@ pub(crate) mod testutil {
 
         /// Emits the frame OBU payload: the uncompressed header (§5.9.2) then one byte of tile data.
         pub(crate) fn frame_obu(&self) -> Vec<u8> {
+            self.frame_obu_with_header_bits().0
+        }
+
+        /// [`frame_obu`](Self::frame_obu) plus the exact bit length of the uncompressed header.
+        ///
+        /// A parser that reads a field at the wrong width still returns a plausible-looking header
+        /// when the field's *value* is discarded — film grain is nothing but such fields. Comparing
+        /// the reader's final bit position against this is what catches that.
+        pub(crate) fn frame_obu_with_header_bits(&self) -> (Vec<u8>, usize) {
             let mut w = BitWriter::new();
             w.put_bit(0); // show_existing_frame
             w.put_bits(if self.intra_only { 2 } else { 0 }, 2); // frame_type
@@ -572,16 +678,32 @@ pub(crate) mod testutil {
             }
             w.put_bit(1); // disable_frame_end_update_cdf (coded: general header, updates enabled)
             self.tile_info(&mut w);
-            // quantization_params(): lossless, no deltas, no qmatrix.
-            w.put_bits(0, 8); // base_q_idx
+            // quantization_params() (§5.9.12): no DeltaQ*, no quantizer matrix.
+            w.put_bits(u32::from(self.base_q_idx), 8);
             w.put_bit(0); // DeltaQYDc delta_coded
             w.put_bit(0); // DeltaQUDc delta_coded
             w.put_bit(0); // DeltaQUAc delta_coded
             w.put_bit(0); // using_qmatrix
             w.put_bit(0); // segmentation_enabled
-            // delta_q/delta_lf code nothing at base_q_idx 0; CodedLossless skips the filter blocks
-            // and forces TxMode = ONLY_4X4.
+            // With no segment deltas and no DeltaQ*, CodedLossless is exactly `base_q_idx == 0` —
+            // and then delta_q_params(), the three in-loop filter blocks and read_tx_mode() all
+            // code nothing.
+            if self.base_q_idx != 0 {
+                w.put_bit(0); // delta_q_present
+                self.loop_filter_params(&mut w);
+                if self.enable_cdef {
+                    Self::cdef_params(&mut w);
+                }
+                if self.enable_restoration {
+                    self.lr_params(&mut w);
+                }
+                w.put_bit(0); // tx_mode_select = 0 -> TX_MODE_LARGEST
+            }
             w.put_bit(1); // reduced_tx_set
+            if let Some(grain) = self.film_grain {
+                self.film_grain_params(&mut w, grain);
+            }
+            let header_bits = w.bit_len();
             w.byte_align(); // byte_alignment() before the tile group
             let mut out = w.into_bytes();
             // One tile group carrying a single byte of (never-decoded) tile data per tile.
@@ -597,7 +719,130 @@ pub(crate) mod testutil {
                 }
             }
             out.push(0xaa); // the last tile takes the remainder
-            out
+            (out, header_bits)
+        }
+
+        /// `loop_filter_params()` (§5.9.11) for a frame that is not `CodedLossless`.
+        fn loop_filter_params(&self, w: &mut BitWriter) {
+            w.put_bits(u32::from(self.loop_filter_level[0]), 6);
+            w.put_bits(u32::from(self.loop_filter_level[1]), 6);
+            // NumPlanes is 3 for every colour this builder codes, so only the luma-level test
+            // decides whether the chroma levels are coded.
+            if self.loop_filter_level[0] != 0 || self.loop_filter_level[1] != 0 {
+                w.put_bits(u32::from(self.loop_filter_level[2]), 6);
+                w.put_bits(u32::from(self.loop_filter_level[3]), 6);
+            }
+            w.put_bits(0, 3); // loop_filter_sharpness
+            w.put_bit(0); // loop_filter_delta_enabled
+        }
+
+        /// `cdef_params()` (§5.9.19): one strength set, every strength zero.
+        fn cdef_params(w: &mut BitWriter) {
+            w.put_bits(0, 2); // cdef_damping_minus_3
+            w.put_bits(0, 2); // cdef_bits
+            w.put_bits(0, 4); // cdef_y_pri_strength[0]
+            w.put_bits(0, 2); // cdef_y_sec_strength[0]
+            w.put_bits(0, 4); // cdef_uv_pri_strength[0]
+            w.put_bits(0, 2); // cdef_uv_sec_strength[0]
+        }
+
+        /// `lr_params()` (§5.9.20) for a frame that is not `AllLossless`.
+        fn lr_params(&self, w: &mut BitWriter) {
+            let mut uses_lr = false;
+            let mut uses_chroma_lr = false;
+            for (plane, &kind) in self.lr.types.iter().enumerate() {
+                w.put_bits(kind, 2); // lr_type
+                if kind != 0 {
+                    uses_lr = true;
+                    if plane > 0 {
+                        uses_chroma_lr = true;
+                    }
+                }
+            }
+            if !uses_lr {
+                return;
+            }
+            if self.use_128x128_superblock {
+                // The parser adds the implicit 1 back.
+                w.put_bits(self.lr.unit_shift - 1, 1); // lr_unit_shift
+            } else if self.lr.unit_shift == 0 {
+                w.put_bit(0); // lr_unit_shift
+            } else {
+                w.put_bit(1); // lr_unit_shift
+                w.put_bits(self.lr.unit_shift - 1, 1); // lr_unit_extra_shift
+            }
+            let (ssx, ssy) = self.colour.subsampling();
+            if ssx == 1 && ssy == 1 && uses_chroma_lr {
+                w.put_bits(self.lr.uv_shift, 1); // lr_uv_shift
+            }
+        }
+
+        /// `film_grain_params()` (§5.9.30) with `apply_grain = 1`.
+        fn film_grain_params(&self, w: &mut BitWriter, grain: GrainSpec) {
+            w.put_bit(1); // apply_grain
+            w.put_bits(0xabcd, 16); // grain_seed
+            // update_grain is inferred 1: this is never an INTER_FRAME.
+            w.put_bits(grain.num_y_points, 4);
+            for _ in 0..grain.num_y_points {
+                w.put_bits(0, 8); // point_y_value
+                w.put_bits(0, 8); // point_y_scaling
+            }
+            // mono_chrome is 0 for every colour this builder codes, so the flag is always coded.
+            w.put_bit(u8::from(grain.chroma_scaling_from_luma));
+            let (ssx, ssy) = self.colour.subsampling();
+            let codes_chroma_points = !grain.chroma_scaling_from_luma
+                && !(ssx == 1 && ssy == 1 && grain.num_y_points == 0);
+            let (num_cb_points, num_cr_points) = if codes_chroma_points {
+                w.put_bits(grain.num_cb_points, 4);
+                for _ in 0..grain.num_cb_points {
+                    w.put_bits(0, 8); // point_cb_value
+                    w.put_bits(0, 8); // point_cb_scaling
+                }
+                w.put_bits(grain.num_cr_points, 4);
+                for _ in 0..grain.num_cr_points {
+                    w.put_bits(0, 8); // point_cr_value
+                    w.put_bits(0, 8); // point_cr_scaling
+                }
+                (grain.num_cb_points, grain.num_cr_points)
+            } else {
+                // §5.9.30 forces both counts to zero and codes neither field.
+                (0, 0)
+            };
+            w.put_bits(0, 2); // grain_scaling_minus_8
+            w.put_bits(grain.ar_coeff_lag, 2);
+            let num_pos_luma = 2 * grain.ar_coeff_lag * (grain.ar_coeff_lag + 1);
+            let num_pos_chroma = if grain.num_y_points > 0 {
+                for _ in 0..num_pos_luma {
+                    w.put_bits(0, 8); // ar_coeffs_y_plus_128[i]
+                }
+                num_pos_luma + 1
+            } else {
+                num_pos_luma
+            };
+            if grain.chroma_scaling_from_luma || num_cb_points > 0 {
+                for _ in 0..num_pos_chroma {
+                    w.put_bits(0, 8); // ar_coeffs_cb_plus_128[i]
+                }
+            }
+            if grain.chroma_scaling_from_luma || num_cr_points > 0 {
+                for _ in 0..num_pos_chroma {
+                    w.put_bits(0, 8); // ar_coeffs_cr_plus_128[i]
+                }
+            }
+            w.put_bits(0, 2); // ar_coeff_shift_minus_6
+            w.put_bits(0, 2); // grain_scale_shift
+            if num_cb_points > 0 {
+                w.put_bits(0, 8); // cb_mult
+                w.put_bits(0, 8); // cb_luma_mult
+                w.put_bits(0, 9); // cb_offset
+            }
+            if num_cr_points > 0 {
+                w.put_bits(0, 8); // cr_mult
+                w.put_bits(0, 8); // cr_luma_mult
+                w.put_bits(0, 9); // cr_offset
+            }
+            w.put_bit(0); // overlap_flag
+            w.put_bit(0); // clip_to_restricted_range
         }
 
         /// `tile_info()` (§5.9.15), uniform spacing, emitting the requested log2 increments.
