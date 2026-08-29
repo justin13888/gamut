@@ -165,8 +165,10 @@ impl AvifEncoder {
     /// hardware still-image decoders frequently reject; [`ChromaSubsampling::Cs422`] is Profile 2
     /// and matches no AVIF profile brand at all.
     ///
-    /// **Ignored by [`AvifMode::Lossless`]**, which always keeps 4:4:4 — see
-    /// [`AvifConfig::chroma`]. [`ChromaSubsampling::Cs400`] is rejected at encode time.
+    /// **Ignored by [`AvifMode::Lossless`]**, which always keeps 4:4:4, and by the identity
+    /// matrix, which §6.4.2 forces to 4:4:4 whatever is set here — see [`AvifConfig::chroma`].
+    /// [`ChromaSubsampling::Cs400`] is rejected at encode time on the YCbCr path; under the
+    /// identity matrix it is ignored along with every other value.
     #[must_use]
     pub fn with_chroma(mut self, chroma: ChromaSubsampling) -> Self {
         self.config.chroma = chroma;
