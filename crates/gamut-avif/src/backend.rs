@@ -468,7 +468,10 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
     fn encode_still(&mut self, req: &Av1EncodeRequest, planes: &Planar8) -> Result<Vec<u8>> {
         let q_idx = req.base_q_idx();
         let cfg = Self::config(&q_idx);
-        let stride = planes.width() as usize;
+        // Per plane, not one luma stride for all three: `Planar8` carries its chroma geometry, and
+        // `ImageDesc` has a stride slot per plane precisely so a subsampled buffer is expressible.
+        // At 4:4:4 — everything this crate encodes today — all three are the luma width.
+        let stride = |i: usize| planes.plane_dimensions(i).0 as usize;
         // Encode inputs are read-only per `ImageDesc`'s contract; the `*mut` is the ABI's single
         // descriptor shape shared with the decode (write) direction.
         let plane_ptr = |i: usize| planes.plane(i).as_ptr().cast_mut();
@@ -486,7 +489,7 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
                 plane_ptr(2),
                 std::ptr::null_mut(),
             ],
-            [stride, stride, stride, 0],
+            [stride(0), stride(1), stride(2), 0],
         );
         let mut obus = Vec::new();
         let status = self.inner.encode(&cfg, &image, &mut |chunk: &[u8]| {

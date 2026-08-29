@@ -137,9 +137,17 @@ Three breaking changes, all forced by real files:
   the file's storage demands — sample-domain for lossless, compressed-chunk for lossy/JXL — which
   a caller could not previously do, because `lossy_compressed_digest` is crate-private.
 
-`AsShotWhiteXY` (50729) as a typed alternative to `AsShotNeutral` remains **deferred**: no corpus
-file needs it, converting xy to camera neutral is DNG §6 rendering work, and the tag surfaces
-verbatim through `ifd0_extra` meanwhile.
+`AsShotWhiteXY` (50729) is now typed, both directions (#349). A profile records its as-shot white
+balance either way — `CameraProfile::with_as_shot_white_xy` selects the chromaticity form, and the
+encoder writes exactly one of the two mutually-exclusive tags — and a file carrying only the
+chromaticity decodes to a full profile rather than to `None`. The camera neutral it implies comes
+from the DNG 1.7.1 §6 conversion "Translating White Balance xy Coordinates to Camera Neutral
+Coordinates": interpolate the colour calibration by the white point's correlated colour temperature
+(Robertson's method, `gamut_color::cct_from_xy`), then apply `XYZtoCamera = AB · CC · CM`. The
+deferral said there was nothing to gate that conversion against beyond synthetic cases; there is
+now — `gamut-dng-oracle` exposes the reference implementation's own derivation
+(`dng_color_spec::SetWhiteXY`), and the single-illuminant, interpolated and clamped cases are all
+required to agree with it.
 
 ## Bridge surface for external RAW pipelines (issue #253)
 
@@ -229,9 +237,9 @@ use; additions are semver-additive.
   deferred JPEG-in-TIFF). Decode surfaces such images as verbatim chunks today; a lossy *raw*
   IFD is refused with a typed `Unsupported`, and its `NewRawImageDigest` still verifies (the
   compressed-chunk rule needs no pixels).
-- **`AsShotWhiteXY`** (50729) as a typed alternative to `AsShotNeutral` — the tag surfaces
-  verbatim through `ifd0_extra`; converting xy to camera neutral is DNG §6 rendering work and no
-  real file in the corpus needs it. A file carrying only `AsShotWhiteXY` decodes with no profile.
+- **A third colour calibration** (`CalibrationIlluminant3` / `ColorMatrix3`, DNG 1.6.0.0) — the
+  §6 white-balance interpolation weights over the first two calibrations, which is what the
+  pre-1.6 rule prescribes; a profile carrying a third set is read but not blended with it.
 - **Restoring *interior* unaccounted bytes to their original offsets** — #350 landed the leading
   case: a vendor preamble now keeps its offset, because `gamut-ifd`'s writer reserves the
   header/first-directory gap for it (`WriteOptions::with_preamble`), which is the position that

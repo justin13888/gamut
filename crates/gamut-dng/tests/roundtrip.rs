@@ -77,6 +77,67 @@ fn full_profile_roundtrips_optional_fields() {
     assert!((p.baseline_exposure().unwrap() - 0.5).abs() < 1e-5);
 }
 
+/// A profile may store its white balance as `AsShotWhiteXY` (50729) instead of `AsShotNeutral`
+/// (50728). The two are mutually exclusive, so the encoder must write one tag and not the other,
+/// and the decoder must recover both the stored chromaticity and the camera neutral DNG 1.7.1 §6
+/// derives from it — byte-identically to what the encoding profile held.
+#[test]
+fn as_shot_white_xy_roundtrips_and_excludes_as_shot_neutral() {
+    let xy = [0.3457, 0.3585]; // D50
+    let profile = common::sample_profile()
+        .with_as_shot_white_xy(xy)
+        .expect("D50 is convertible through the sample calibration");
+    let raw = common::sample_raw(16, 16, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &profile, &mut dng)
+        .expect("encode");
+
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    let p = decoded.profile.as_ref().expect("a profile decodes back");
+    let [x, y] = p
+        .as_shot_white_xy()
+        .expect("the chromaticity is the stored form");
+    assert!(
+        (x - xy[0]).abs() < 1e-6 && (y - xy[1]).abs() < 1e-6,
+        "got ({x}, {y})"
+    );
+    for (got, want) in p.as_shot_neutral().iter().zip(profile.as_shot_neutral()) {
+        assert!(
+            (got - want).abs() < 1e-6,
+            "derived neutral {:?} should match the encoder's {:?}",
+            p.as_shot_neutral(),
+            profile.as_shot_neutral()
+        );
+    }
+    // The mutually-exclusive partner must be absent, and 50729 must not fall through as an extra.
+    assert!(
+        !decoded
+            .ifd0_extra
+            .iter()
+            .any(|tag| tag.tag == gamut_dng::tags::AS_SHOT_WHITE_XY),
+        "AsShotWhiteXY must be consumed, not surfaced as an unrecognised tag"
+    );
+}
+
+/// The chromaticity form must not cost the plain form anything: a profile that never sets it still
+/// writes `AsShotNeutral` and decodes with no chromaticity.
+#[test]
+fn without_as_shot_white_xy_the_neutral_is_the_stored_form() {
+    let raw = common::sample_raw(16, 16, 16);
+    let mut dng = Vec::new();
+    DngEncoder::new()
+        .encode(&raw, &common::sample_profile(), &mut dng)
+        .expect("encode");
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+    let p = decoded.profile.as_ref().expect("a profile decodes back");
+    assert_eq!(p.as_shot_white_xy(), None);
+    assert_eq!(
+        p.as_shot_neutral(),
+        common::sample_profile().as_shot_neutral()
+    );
+}
+
 #[test]
 fn gamut_and_adobe_decoders_agree() {
     // gamut's decoder and the Adobe SDK must extract identical stage-1 samples from gamut's file.

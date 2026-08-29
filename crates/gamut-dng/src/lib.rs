@@ -82,6 +82,7 @@ mod jxl;
 mod md5;
 mod predictor;
 mod preview;
+mod whitebalance;
 mod writer;
 
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need

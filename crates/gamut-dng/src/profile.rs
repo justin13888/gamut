@@ -9,6 +9,7 @@
 use gamut_core::{Error, Result};
 
 use crate::values::{CalibrationIlluminant, ProfileEmbedPolicy};
+use crate::whitebalance::{Calibration, camera_neutral_from_white_xy};
 
 /// The denominator used when storing a coordinate as a TIFF `RATIONAL`/`SRATIONAL`.
 ///
@@ -38,6 +39,12 @@ pub(crate) fn urational(x: f64) -> (u32, u32) {
 /// value of a neutral subject (`AsShotNeutral`). The optional second illuminant, per-camera
 /// calibration, forward matrices, analog balance, and identity fields are set via the `with_*`
 /// methods.
+///
+/// A profile may instead record its white balance as a chromaticity — `AsShotWhiteXY` (50729), the
+/// spec's mutually-exclusive alternative to `AsShotNeutral` — via
+/// [`with_as_shot_white_xy`](Self::with_as_shot_white_xy). The camera-native neutral stays
+/// available either way: it is what [`as_shot_neutral`](Self::as_shot_neutral) returns, derived per
+/// DNG 1.7.1 §6 when the chromaticity is the stored form.
 #[derive(Debug, Clone)]
 pub struct CameraProfile {
     unique_camera_model: String,
@@ -50,6 +57,7 @@ pub struct CameraProfile {
     forward_matrix1: Option<[f64; 9]>,
     forward_matrix2: Option<[f64; 9]>,
     analog_balance: Option<[f64; 3]>,
+    as_shot_white_xy: Option<[f64; 2]>,
     baseline_exposure: Option<f64>,
     profile_name: Option<String>,
     profile_embed_policy: Option<ProfileEmbedPolicy>,
@@ -96,6 +104,7 @@ impl CameraProfile {
             forward_matrix1: None,
             forward_matrix2: None,
             analog_balance: None,
+            as_shot_white_xy: None,
             baseline_exposure: None,
             profile_name: None,
             profile_embed_policy: None,
@@ -135,6 +144,44 @@ impl CameraProfile {
     pub fn with_analog_balance(mut self, analog_balance: [f64; 3]) -> Self {
         self.analog_balance = Some(analog_balance);
         self
+    }
+
+    /// Records the as-shot white balance as `AsShotWhiteXY` (50729) — a CIE xy chromaticity —
+    /// instead of `AsShotNeutral` (50728), and recomputes the camera-native neutral from it.
+    ///
+    /// The two tags are mutually exclusive, so a profile carrying a chromaticity writes 50729 and
+    /// omits 50728. [`as_shot_neutral`](Self::as_shot_neutral) keeps working: it returns the
+    /// coordinates DNG 1.7.1 §6 derives from `xy` through this profile's calibration, replacing the
+    /// value passed to [`new`](Self::new).
+    ///
+    /// That derivation reads the colour matrices, the camera calibration and the analog balance, so
+    /// call this **after** the `with_*` setters that supply them; calling it earlier derives the
+    /// neutral from an incomplete calibration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] if `xy` is not a usable chromaticity, or if this profile's
+    /// calibration maps it to an all-zero camera response.
+    pub fn with_as_shot_white_xy(mut self, xy: [f64; 2]) -> Result<Self> {
+        self.as_shot_neutral = camera_neutral_from_white_xy(&self.calibration(), xy)?;
+        self.as_shot_white_xy = Some(xy);
+        Ok(self)
+    }
+
+    /// The colour-calibration inputs the DNG 1.7.1 §6 white-balance conversion reads.
+    fn calibration(&self) -> Calibration<'_> {
+        Calibration {
+            color_matrix1: (&self.color_matrix1, self.calibration_illuminant1),
+            color_matrix2: self
+                .color_matrix2
+                .as_ref()
+                .map(|(matrix, illuminant)| (matrix, *illuminant)),
+            camera_calibration: (
+                self.camera_calibration1.as_ref(),
+                self.camera_calibration2.as_ref(),
+            ),
+            analog_balance: self.analog_balance.as_ref(),
+        }
     }
 
     /// Sets the `BaselineExposure` (default exposure compensation, in stops).
@@ -203,6 +250,13 @@ impl CameraProfile {
         (self.forward_matrix1.as_ref(), self.forward_matrix2.as_ref())
     }
 
+    /// The as-shot white balance as a CIE xy chromaticity (`AsShotWhiteXY`), if that is the form
+    /// this profile stores. `None` means the white balance is stored as `AsShotNeutral`.
+    #[must_use]
+    pub fn as_shot_white_xy(&self) -> Option<[f64; 2]> {
+        self.as_shot_white_xy
+    }
+
     /// The `AnalogBalance`, if set.
     #[must_use]
     pub fn analog_balance(&self) -> Option<&[f64; 3]> {
@@ -247,6 +301,43 @@ mod tests {
         assert!(CameraProfile::new("Cam", m, CalibrationIlluminant::D65, [0.5, 1.0, 0.6]).is_ok());
         assert!(CameraProfile::new("", m, CalibrationIlluminant::D65, [0.5, 1.0, 0.6]).is_err());
         assert!(CameraProfile::new("Cam", m, CalibrationIlluminant::D65, [0.0, 1.0, 0.6]).is_err());
+    }
+
+    /// Recording the white balance as a chromaticity replaces the neutral `new` was given with
+    /// the one DNG 1.7.1 §6 derives, and reports the chromaticity as the stored form.
+    #[test]
+    fn as_shot_white_xy_replaces_the_neutral() {
+        let m = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let neutral = [0.5, 1.0, 0.6];
+        let plain = CameraProfile::new("Cam", m, CalibrationIlluminant::D65, neutral)
+            .expect("valid profile");
+        assert_eq!(plain.as_shot_white_xy(), None);
+        assert_eq!(plain.as_shot_neutral(), &neutral);
+
+        let xy = [0.3127, 0.3290];
+        let by_xy = plain.with_as_shot_white_xy(xy).expect("D65 is convertible");
+        assert_eq!(by_xy.as_shot_white_xy(), Some(xy));
+        assert_ne!(
+            by_xy.as_shot_neutral(),
+            &neutral,
+            "the derived neutral must replace the one `new` was given"
+        );
+        // Through an identity calibration the derivation is the normalised chromaticity.
+        let [x, y] = xy;
+        let z = (1.0 - x - y) / y;
+        assert!(
+            (by_xy.as_shot_neutral()[2] - 1.0).abs() < 1e-12,
+            "Z is the peak at D65"
+        );
+        assert!((by_xy.as_shot_neutral()[1] - 1.0 / z).abs() < 1e-9);
+    }
+
+    #[test]
+    fn as_shot_white_xy_rejects_an_unusable_chromaticity() {
+        let m = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let profile = CameraProfile::new("Cam", m, CalibrationIlluminant::D65, [0.5, 1.0, 0.6])
+            .expect("valid profile");
+        assert!(profile.with_as_shot_white_xy([0.3127, 0.0]).is_err());
     }
 
     #[test]

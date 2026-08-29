@@ -21,7 +21,9 @@ fn main() {
 
     assert!(
         dav1d_src.join("meson.build").exists() && avif_src.join("CMakeLists.txt").exists(),
-        "vendored dav1d/libavif not found under {} — run `git submodule update --init --recursive`",
+        "vendored dav1d/libavif not found under {} — dav1d is `update = none` in .gitmodules, so \
+         a recursive submodule update fetches libavif but not dav1d; run \
+         `mise run fetch-av1-oracles`",
         third_party.display()
     );
 

@@ -56,6 +56,15 @@ impl Matcher {
         (key.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize & (HASH_SIZE - 1)
     }
 
+    /// Seeds the chains with every position in the window preceding `start`, so a parse beginning
+    /// at `start` can still reference the bytes before it. Without this a span boundary would also
+    /// be a match boundary, costing ratio at every seam.
+    fn prime(&mut self, data: &[u8], start: usize) {
+        for pos in start.saturating_sub(WINDOW)..start {
+            self.insert(data, pos);
+        }
+    }
+
     /// Records `pos` as a future match candidate.
     fn insert(&mut self, data: &[u8], pos: usize) {
         if pos + MIN_MATCH > data.len() {
@@ -68,12 +77,15 @@ impl Matcher {
 
     /// Finds the longest back-reference for the bytes at `pos`, walking at most `max_chain`
     /// candidates. Returns `(len, dist)` with `len >= MIN_MATCH` and `1 <= dist <= 32768`.
-    fn find(&self, data: &[u8], pos: usize, max_chain: usize) -> Option<(u16, u16)> {
-        let n = data.len();
-        if pos + MIN_MATCH > n {
+    ///
+    /// Matches never extend past `limit` (`<= data.len()`), so a caller parsing one span of a
+    /// larger buffer cannot emit a token that runs off the end of its span. Candidates *behind*
+    /// `pos` are unrestricted, which is what lets a span reference the history before it.
+    fn find(&self, data: &[u8], pos: usize, max_chain: usize, limit: usize) -> Option<(u16, u16)> {
+        if pos + MIN_MATCH > limit {
             return None;
         }
-        let max_len = (n - pos).min(MAX_MATCH);
+        let max_len = (limit - pos).min(MAX_MATCH);
         let lowest = pos.saturating_sub(WINDOW); // candidates must be >= this for dist <= window
         let mut best_len = MIN_MATCH - 1; // a real match must strictly exceed this
         let mut best_dist = 0usize;
@@ -119,23 +131,33 @@ impl Matcher {
 /// literal. This finds better parses than pure greedy at a small time cost. A larger `max_chain`
 /// finds more/longer matches, also at a time cost.
 pub(crate) fn parse(data: &[u8], max_chain: usize, lazy: bool) -> Vec<Token> {
+    parse_range(data, 0, data.len(), max_chain, lazy)
+}
+
+/// Parses `data[start..end]` the same way [`parse`] does, with matches allowed to reference the
+/// history before `start` but never to extend past `end`.
+fn parse_range(data: &[u8], start: usize, end: usize, max_chain: usize, lazy: bool) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut matcher = Matcher::new();
-    let n = data.len();
-    let mut pos = 0;
-    while pos < n {
-        let current = matcher.find(data, pos, max_chain);
+    matcher.prime(data, start);
+    let mut pos = start;
+    while pos < end {
+        let current = matcher.find(data, pos, max_chain, end);
         matcher.insert(data, pos); // pos becomes a candidate for subsequent positions
-        let Some((len, dist)) = current else {
+        // A match covers at least `MIN_MATCH` bytes, so emitting one always advances the cursor.
+        // Requiring that here rather than trusting `find` keeps termination a property of this
+        // loop: a shorter run is not a codeable match anyway, and falls through to a literal.
+        let Some((len, dist)) = current.filter(|&(len, _)| usize::from(len) >= MIN_MATCH) else {
             tokens.push(Token::Literal(data[pos]));
             pos += 1;
             continue;
         };
         // Lazy matching: if the next position begins a strictly longer match, defer this one.
+        // No length or bounds guard is needed in front of the lookahead: `find` is already bounded
+        // by `end` (and yields nothing once fewer than `MIN_MATCH` bytes remain), and a maximal
+        // match cannot be beaten, so `next_len > len` rejects that case on its own.
         if lazy
-            && (len as usize) < MAX_MATCH
-            && pos + 1 < n
-            && let Some((next_len, _)) = matcher.find(data, pos + 1, max_chain)
+            && let Some((next_len, _)) = matcher.find(data, pos + 1, max_chain, end)
             && next_len > len
         {
             tokens.push(Token::Literal(data[pos]));
@@ -145,11 +167,11 @@ pub(crate) fn parse(data: &[u8], max_chain: usize, lazy: bool) -> Vec<Token> {
         tokens.push(Token::Match { len, dist });
         // `pos` is already inserted; insert the rest of the covered span so future matches can
         // reference inside it.
-        let end = pos + len as usize;
-        for p in (pos + 1)..end {
+        let covered = pos + len as usize;
+        for p in (pos + 1)..covered {
             matcher.insert(data, p);
         }
-        pos = end;
+        pos = covered;
     }
     tokens
 }
@@ -159,15 +181,46 @@ pub(crate) fn parse(data: &[u8], max_chain: usize, lazy: bool) -> Vec<Token> {
 /// Each pass runs a shortest-path dynamic program that minimises total bits under a per-symbol cost
 /// model, then rebuilds the cost model from the resulting parse and repeats. The parse and its
 /// entropy code co-adapt, finding cheaper parses than greedy/lazy. `iterations` bounds the passes.
-pub(crate) fn parse_optimal(data: &[u8], max_chain: usize, iterations: u32) -> Vec<Token> {
-    if data.is_empty() {
-        return Vec::new();
+///
+/// The input is processed in consecutive spans of at most `span` bytes (raised to [`WINDOW`] if
+/// smaller), each carrying its own cost model and each able to reference the history before it.
+/// That bounds the dynamic program's working set and per-span cost without letting the *total*
+/// input size decide whether the optimal parse runs at all: cost grows linearly in the number of
+/// spans.
+pub(crate) fn parse_optimal(
+    data: &[u8],
+    max_chain: usize,
+    iterations: u32,
+    span: usize,
+) -> Vec<Token> {
+    // A span shorter than the match window cannot pay for priming that window, and a zero span
+    // would not advance at all, so the window is the floor.
+    let span = span.max(WINDOW);
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    // Chunking (rather than an index walk) makes the advance structural: every span is non-empty
+    // and the spans exactly tile the input.
+    for chunk in data.chunks(span) {
+        let end = start + chunk.len();
+        tokens.append(&mut optimal_span(data, start, end, max_chain, iterations));
+        start = end;
     }
-    // Seed the cost model from a lazy parse.
-    let mut tokens = parse(data, max_chain, true);
+    tokens
+}
+
+/// Runs the iterated cost-model refinement over the single span `data[start..end]`.
+fn optimal_span(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    max_chain: usize,
+    iterations: u32,
+) -> Vec<Token> {
+    // Seed the cost model from a lazy parse of this span.
+    let mut tokens = parse_range(data, start, end, max_chain, true);
     for _ in 0..iterations {
         let (lit_cost, dist_cost) = costs(&tokens);
-        let next = parse_dp(data, max_chain, &lit_cost, &dist_cost);
+        let next = parse_dp(data, start, end, max_chain, &lit_cost, &dist_cost);
         if next == tokens {
             break; // converged
         }
@@ -201,27 +254,36 @@ fn costs(tokens: &[Token]) -> (Vec<u16>, Vec<u16>) {
     )
 }
 
-/// One shortest-path pass: finds the parse minimising total cost under `lit_cost`/`dist_cost`.
-fn parse_dp(data: &[u8], max_chain: usize, lit_cost: &[u16], dist_cost: &[u16]) -> Vec<Token> {
-    let n = data.len();
-    // `f[i]` = min cost in bits to encode `data[..i]`; `blen`/`bdist` record the edge taken to
-    // reach `i` (`blen == 0` means a literal).
+/// One shortest-path pass over `data[start..end]`: finds the parse minimising total cost under
+/// `lit_cost`/`dist_cost`. Matches may reach back before `start` but never past `end`.
+fn parse_dp(
+    data: &[u8],
+    start: usize,
+    end: usize,
+    max_chain: usize,
+    lit_cost: &[u16],
+    dist_cost: &[u16],
+) -> Vec<Token> {
+    let n = end - start;
+    // `f[i]` = min cost in bits to encode `data[start..start + i]`; `blen`/`bdist` record the edge
+    // taken to reach `i` (`blen == 0` means a literal). Indices are span-relative.
     let mut f = vec![u64::MAX; n + 1];
     let mut blen = vec![0u16; n + 1];
     let mut bdist = vec![0u16; n + 1];
     f[0] = 0;
     let mut matcher = Matcher::new();
+    matcher.prime(data, start);
     for i in 0..n {
         let fi = f[i];
         // A literal always advances one byte.
-        let lit = fi + u64::from(lit_cost[usize::from(data[i])]);
+        let lit = fi + u64::from(lit_cost[usize::from(data[start + i])]);
         if lit < f[i + 1] {
             f[i + 1] = lit;
             blen[i + 1] = 0;
             bdist[i + 1] = 0;
         }
-        let found = matcher.find(data, i, max_chain);
-        matcher.insert(data, i);
+        let found = matcher.find(data, start + i, max_chain, end);
+        matcher.insert(data, start + i);
         if let Some((max_len, dist)) = found {
             let (dsym, dbits, _) = symbols::distance_code(dist);
             let dcost = u64::from(dist_cost[dsym as usize]) + u64::from(dbits);
@@ -237,21 +299,27 @@ fn parse_dp(data: &[u8], max_chain: usize, lit_cost: &[u16], dist_cost: &[u16]) 
             }
         }
     }
-    // Backtrack from the end to recover the token sequence.
+    // Backtrack from the end to recover the token sequence. `blen[i] == 0` marks a literal edge,
+    // which covers one byte; any other value is the match length that reached `i`.
+    //
+    // Every edge covers at least one byte, so the walk visits at most `n` of them. Bounding the
+    // loop by that count — rather than by the cursor alone — keeps termination a property of this
+    // loop instead of an invariant of the table built above it.
     let mut tokens = Vec::new();
     let mut i = n;
-    while i > 0 {
+    for _ in 0..n {
+        if i == 0 {
+            break;
+        }
         let len = blen[i];
-        if len == 0 {
-            tokens.push(Token::Literal(data[i - 1]));
-            i -= 1;
-        } else {
-            tokens.push(Token::Match {
+        tokens.push(match len {
+            0 => Token::Literal(data[start + i - 1]),
+            len => Token::Match {
                 len,
                 dist: bdist[i],
-            });
-            i -= usize::from(len);
-        }
+            },
+        });
+        i -= usize::from(len).max(1);
     }
     tokens.reverse();
     tokens
@@ -327,7 +395,7 @@ mod tests {
             Vec::new(),
         ];
         for data in &inputs {
-            let tokens = parse_optimal(data, 256, 4);
+            let tokens = parse_optimal(data, 256, 4, 512);
             assert_eq!(
                 &reconstruct(&tokens),
                 data,
@@ -335,6 +403,114 @@ mod tests {
                 data.len()
             );
         }
+    }
+
+    /// Spanning must not change what the parse *means*: every span size reconstructs the input
+    /// exactly, including sizes that land mid-match and sizes larger than the input.
+    #[test]
+    fn spanned_optimal_parse_reconstructs_input() {
+        let data = b"the quick brown fox jumps over the lazy dog. ".repeat(2400);
+        assert!(
+            data.len() > 3 * WINDOW,
+            "the input must span several windows"
+        );
+        for span in [
+            0usize,
+            7,
+            WINDOW,
+            WINDOW + 1,
+            WINDOW * 2 + 913,
+            data.len() - 1,
+            data.len(),
+            data.len() * 2,
+        ] {
+            let tokens = parse_optimal(&data, 32, 2, span);
+            assert_eq!(reconstruct(&tokens), data, "span {span}");
+        }
+    }
+
+    /// A span boundary must not also be a match boundary: the second half of a doubled buffer is
+    /// wholly a back-reference into the first, so parsing it as its own span still has to find
+    /// those matches through the primed history rather than re-emitting literals.
+    #[test]
+    fn a_span_references_the_history_before_it() {
+        let half = b"abracadabra alakazam presto changeo ".repeat(1000);
+        let mut data = half.clone();
+        data.extend_from_slice(&half);
+
+        assert!(half.len() >= WINDOW, "each half must be a span of its own");
+        let tokens = parse_optimal(&data, 32, 2, half.len());
+        assert_eq!(reconstruct(&tokens), data);
+
+        // Tokens covering the second span, i.e. everything after the first `half.len()` bytes.
+        let mut covered = 0usize;
+        let second: Vec<Token> = tokens
+            .iter()
+            .copied()
+            .filter(|t| {
+                let at = covered;
+                covered += match t {
+                    Token::Literal(_) => 1,
+                    Token::Match { len, .. } => usize::from(*len),
+                };
+                at >= half.len()
+            })
+            .collect();
+        // Priming lets the span be covered by maximal-length back-references; without it the
+        // opening bytes would have to be re-emitted as literals.
+        assert!(
+            second.len() * 100 < half.len(),
+            "second span should be long back-references, got {} tokens for {} bytes",
+            second.len(),
+            half.len()
+        );
+        // The span's very first token starts exactly at the boundary, so any back-reference it
+        // makes necessarily reads bytes the span itself has not emitted — only the primed history
+        // can supply them.
+        assert!(
+            matches!(second.first(), Some(Token::Match { .. })),
+            "span should open with a back-reference into the primed history, got {:?}",
+            second.first()
+        );
+    }
+
+    /// The span bound must be applied, not merely accepted: no token may straddle a boundary.
+    #[test]
+    fn no_token_crosses_a_span_boundary() {
+        let data = vec![0x5Au8; WINDOW * 3 + 500];
+        let span = WINDOW;
+        let mut at = 0usize;
+        for token in parse_optimal(&data, 32, 2, span) {
+            let len = match token {
+                Token::Literal(_) => 1,
+                Token::Match { len, .. } => usize::from(len),
+            };
+            assert_eq!(
+                at / span,
+                (at + len - 1) / span,
+                "token at {at} (len {len}) crosses a {span}-byte boundary"
+            );
+            at += len;
+        }
+        assert_eq!(at, data.len());
+    }
+
+    /// A span shorter than the match window is raised to it: a sub-window span would re-prime
+    /// more history than it parses, and a zero span would not advance the cursor at all.
+    #[test]
+    fn a_short_span_is_raised_to_the_window() {
+        let data: Vec<u8> = (0..WINDOW as u32 * 2)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 25) as u8)
+            .collect();
+        let windowed = parse_optimal(&data, 32, 2, WINDOW);
+        for span in [0usize, 1, WINDOW - 1] {
+            assert_eq!(
+                parse_optimal(&data, 32, 2, span),
+                windowed,
+                "span {span} should parse as the {WINDOW}-byte window does"
+            );
+        }
+        assert_eq!(reconstruct(&windowed), data);
     }
 
     #[test]

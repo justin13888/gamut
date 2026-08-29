@@ -42,6 +42,13 @@ pub fn linear_eotf(x: f64) -> f64 {
     x
 }
 
+/// Linear inverse EOTF: the identity, the exact inverse of [`linear_eotf`]. Present so
+/// [`oetf_for`] can mirror [`eotf_for`] with a named function rather than a closure.
+#[must_use]
+pub fn linear_oetf(x: f64) -> f64 {
+    x
+}
+
 // --- sRGB (IEC 61966-2-1) --------------------------------------------------
 
 /// sRGB EOTF: gamma-encoded signal → linear light, on `[0, 1]`.
@@ -129,6 +136,34 @@ pub fn pq_eotf(x: f64) -> f64 {
     y_normalized * PQ_PEAK_NITS
 }
 
+/// PQ (ST 2084) inverse EOTF: **absolute luminance in cd/m² (nits)** → gamma-encoded signal on
+/// `[0, 1]`. The exact inverse of [`pq_eotf`], so it takes nits, not a normalized value.
+///
+/// Note this is *not* what [`oetf_for`] returns for [`TransferCharacteristics::Pq`]: that
+/// dispatch mirrors [`eotf_for`], whose PQ arm is the tone-mapping [`bt2020_pq_to_sdr`], which
+/// has no inverse. Reach for this function when you want the standards-pure curve.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::transfer::{pq_eotf, pq_oetf};
+/// // 203 nits is BT.2408 HDR reference white.
+/// let signal = pq_oetf(203.0);
+/// assert!((pq_eotf(signal) - 203.0).abs() < 1e-9);
+/// ```
+#[must_use]
+pub fn pq_oetf(nits: f64) -> f64 {
+    // Same ST 2084 constants as `pq_eotf`, applied in the opposite direction.
+    const M1: f64 = 0.1593017578125;
+    const M2: f64 = 78.84375;
+    const C1: f64 = 0.8359375;
+    const C2: f64 = 18.8515625;
+    const C3: f64 = 18.6875;
+
+    let y = (nits / PQ_PEAK_NITS).clamp(0.0, 1.0).powf(M1);
+    ((C1 + C2 * y) / (1.0 + C3 * y)).powf(M2)
+}
+
 /// BT.2020 **encoder-exact** path: PQ EOTF → nits → Reinhard tone map to
 /// SDR `[0, 1)` relative to the BT.2408 HDR reference white (203 nits; `L / (1 + L)`).
 #[must_use]
@@ -155,6 +190,47 @@ pub fn eotf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
         TransferCharacteristics::Srgb => Some(srgb_eotf),
         TransferCharacteristics::Pq | TransferCharacteristics::Bt2020_10 => Some(bt2020_pq_to_sdr),
         TransferCharacteristics::Bt709
+        | TransferCharacteristics::Hlg
+        | TransferCharacteristics::Unspecified => None,
+    }
+}
+
+/// The inverse of [`eotf_for`]: the OETF for a CICP [`TransferCharacteristics`] code point, as a
+/// `fn` mapping scene/display-linear `[0, 1]` → signal. Use it to encode *into* a code point's
+/// transfer, the direction [`eotf_for`] cannot express.
+///
+/// Where both return `Some`, they are exact inverses: `oetf_for(tc)(eotf_for(tc)(x)) == x` to
+/// within floating-point error. `Linear` returns the identity via [`linear_oetf`] and `Srgb` the
+/// gamma encode via [`srgb_oetf`].
+///
+/// `None` for the same code points [`eotf_for`] declines (`Bt709`, `Hlg`, `Unspecified` — no
+/// curve is implemented for them), **and additionally for `Pq` / `Bt2020_10`**: [`eotf_for`] maps
+/// those to [`bt2020_pq_to_sdr`], which tone-maps HDR to SDR and is therefore not invertible.
+/// [`pq_oetf`] is the inverse of the standards-pure [`pq_eotf`] if that is what you want.
+///
+/// # Examples
+///
+/// ```
+/// use gamut_color::cicp::TransferCharacteristics;
+/// use gamut_color::transfer::{eotf_for, oetf_for};
+///
+/// let eotf = eotf_for(TransferCharacteristics::Srgb).unwrap();
+/// let oetf = oetf_for(TransferCharacteristics::Srgb).unwrap();
+/// assert!((oetf(eotf(0.5)) - 0.5).abs() < 1e-12);
+///
+/// // PQ has an EOTF here but no inverse: its EOTF arm is a tone map.
+/// assert!(eotf_for(TransferCharacteristics::Pq).is_some());
+/// assert!(oetf_for(TransferCharacteristics::Pq).is_none());
+/// ```
+#[must_use]
+pub fn oetf_for(tc: TransferCharacteristics) -> Option<fn(f64) -> f64> {
+    match tc {
+        TransferCharacteristics::Linear => Some(linear_oetf),
+        TransferCharacteristics::Srgb => Some(srgb_oetf),
+        // `eotf_for`'s PQ arm is `bt2020_pq_to_sdr`, a tone map, so it has no inverse here.
+        TransferCharacteristics::Pq
+        | TransferCharacteristics::Bt2020_10
+        | TransferCharacteristics::Bt709
         | TransferCharacteristics::Hlg
         | TransferCharacteristics::Unspecified => None,
     }
@@ -255,26 +331,51 @@ mod tests {
     /// `c2`/`c3`, a wrong reciprocal) would break the round-trip even though both share the
     /// constants. (`bt2020_pq_full_signal_near_one` was dropped: the reference-formula test above
     /// already pins `bt2020_pq_to_sdr(1.0)` exactly.)
+    /// The BT.2100 Table 4 forward PQ OETF, transcribed here independently of the crate's own
+    /// [`pq_oetf`]. Kept separate on purpose: it is the reference both `pq_eotf` and `pq_oetf`
+    /// are checked against, so it must not be either of them.
+    ///
+    /// E' = ((c1 + c2·Y^m1) / (1 + c3·Y^m1))^m2, with Y = L / 10000.
+    fn bt2100_forward_oetf(nits: f64) -> f64 {
+        const M1: f64 = 0.1593017578125;
+        const M2: f64 = 78.84375;
+        const C1: f64 = 0.8359375;
+        const C2: f64 = 18.8515625;
+        const C3: f64 = 18.6875;
+        let yp = (nits / PQ_PEAK_NITS).powf(M1);
+        ((C1 + C2 * yp) / (1.0 + C3 * yp)).powf(M2)
+    }
+
+    /// A representative sweep of the PQ domain, from black to the 10000-nit peak.
+    const PQ_NITS_SWEEP: [f64; 8] = [0.0, 1.0, 10.0, 100.0, 203.0, 1000.0, 4000.0, 10000.0];
+
     #[test]
     fn pq_eotf_inverts_bt2100_forward_oetf() {
-        // E' = ((c1 + c2·Y^m1) / (1 + c3·Y^m1))^m2, with Y = L / 10000.
-        fn pq_oetf(nits: f64) -> f64 {
-            const M1: f64 = 0.1593017578125;
-            const M2: f64 = 78.84375;
-            const C1: f64 = 0.8359375;
-            const C2: f64 = 18.8515625;
-            const C3: f64 = 18.6875;
-            let yp = (nits / PQ_PEAK_NITS).powf(M1);
-            ((C1 + C2 * yp) / (1.0 + C3 * yp)).powf(M2)
-        }
-        for &nits in &[0.0, 1.0, 10.0, 100.0, 203.0, 1000.0, 4000.0, 10000.0] {
-            let back = pq_eotf(pq_oetf(nits));
+        for &nits in &PQ_NITS_SWEEP {
+            let back = pq_eotf(bt2100_forward_oetf(nits));
             let tol = 1e-9 * nits.max(1.0);
             assert!(
                 (back - nits).abs() <= tol,
                 "pq round-trip at {nits} nits → {back}"
             );
         }
+    }
+
+    /// The public [`pq_oetf`] must equal that same independent reference — not merely invert
+    /// `pq_eotf`, which a matching pair of transcription slips could still satisfy.
+    #[test]
+    fn pq_oetf_matches_bt2100_forward_oetf() {
+        for &nits in &PQ_NITS_SWEEP {
+            let (got, want) = (pq_oetf(nits), bt2100_forward_oetf(nits));
+            assert!(
+                (got - want).abs() < 1e-12,
+                "pq_oetf({nits}) = {got}, BT.2100 reference {want}"
+            );
+        }
+        // `pq_oetf` clamps its domain, so out-of-range luminance saturates rather than
+        // producing a NaN from `powf` on a negative base.
+        assert_eq!(pq_oetf(-1.0), pq_oetf(0.0));
+        assert_eq!(pq_oetf(20_000.0), pq_oetf(PQ_PEAK_NITS));
     }
 
     #[test]
@@ -292,6 +393,100 @@ mod tests {
         let f = eotf_for(TransferCharacteristics::Linear).unwrap();
         for &x in &[0.0, 0.25, 0.5, 0.75, 1.0] {
             assert_eq!(f(x), x);
+        }
+    }
+
+    #[test]
+    fn oetf_for_dispatch() {
+        // Some for exactly the two invertible code points, None for the rest. Spelled out per
+        // variant rather than as a loop so a mutant collapsing one arm cannot hide.
+        assert!(oetf_for(TransferCharacteristics::Linear).is_some());
+        assert!(oetf_for(TransferCharacteristics::Srgb).is_some());
+        assert!(oetf_for(TransferCharacteristics::Pq).is_none());
+        assert!(oetf_for(TransferCharacteristics::Bt2020_10).is_none());
+        assert!(oetf_for(TransferCharacteristics::Bt709).is_none());
+        assert!(oetf_for(TransferCharacteristics::Hlg).is_none());
+        assert!(oetf_for(TransferCharacteristics::Unspecified).is_none());
+
+        // The Srgb dispatch is the sRGB OETF, not the EOTF: at 0.5 the two differ by ~0.52, so
+        // a mutant returning `srgb_eotf` here is caught.
+        let f = oetf_for(TransferCharacteristics::Srgb).unwrap();
+        assert_eq!(f(0.5), srgb_oetf(0.5));
+        assert!((f(0.5) - srgb_eotf(0.5)).abs() > 0.5);
+
+        // The Linear dispatch is the identity.
+        let f = oetf_for(TransferCharacteristics::Linear).unwrap();
+        for &x in &[0.0, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(f(x), x);
+        }
+    }
+
+    /// Where both dispatches answer, they are exact inverses — the property that makes
+    /// `oetf_for` usable for the encode direction of a CICP-tagged conversion.
+    ///
+    /// The sample points avoid sRGB's piecewise breakpoint, which is a special case in its own
+    /// right (see `srgb_breakpoint_round_trip_is_inexact_by_construction`).
+    #[test]
+    fn oetf_for_inverts_eotf_for() {
+        for tc in [
+            TransferCharacteristics::Linear,
+            TransferCharacteristics::Srgb,
+        ] {
+            let eotf = eotf_for(tc).expect("modeled");
+            let oetf = oetf_for(tc).expect("modeled");
+            for &x in &[0.0, 0.01, 0.03, 0.2, 0.5, 0.8, 1.0] {
+                let back = oetf(eotf(x));
+                assert!((back - x).abs() < 1e-12, "{tc:?}: oetf(eotf({x})) = {back}");
+            }
+        }
+    }
+
+    /// sRGB's two published breakpoints are not exact reciprocals: IEC 61966-2-1 gives the decode
+    /// threshold as 0.04045 and the encode threshold as 0.0031308, but 0.04045 / 12.92 =
+    /// 0.0031308049…, which is *above* the encode threshold. So a value decoded at the breakpoint
+    /// re-encodes through the power branch rather than the linear one, and the round trip is off
+    /// by ~3e-8. That is a property of the standard's constants, not of this implementation —
+    /// pinned here so the looser tolerance is a documented fact rather than a silent fudge.
+    #[test]
+    fn srgb_breakpoint_round_trip_is_inexact_by_construction() {
+        const DECODE_THRESHOLD: f64 = 0.04045;
+        let back = srgb_oetf(srgb_eotf(DECODE_THRESHOLD));
+        let err = (back - DECODE_THRESHOLD).abs();
+        assert!(
+            err > 1e-12,
+            "expected the known breakpoint mismatch, got {err}"
+        );
+        assert!(
+            err < 1e-7,
+            "breakpoint error grew beyond the known ~3e-8: {err}"
+        );
+        // The cause: the decoded value lands just above the encode threshold.
+        assert!(srgb_eotf(DECODE_THRESHOLD) > 0.0031308);
+    }
+
+    /// `oetf_for` declines strictly more than `eotf_for`, and PQ is the whole of the difference.
+    /// This pins the asymmetry as deliberate rather than an oversight.
+    #[test]
+    fn pq_is_the_only_code_point_with_an_eotf_but_no_oetf() {
+        for code in 0..=u16::from(u8::MAX) {
+            let Some(tc) = TransferCharacteristics::from_code_point(code) else {
+                continue;
+            };
+            if oetf_for(tc).is_some() {
+                assert!(
+                    eotf_for(tc).is_some(),
+                    "{tc:?} has an inverse but no forward"
+                );
+            }
+            let asymmetric = eotf_for(tc).is_some() && oetf_for(tc).is_none();
+            assert_eq!(
+                asymmetric,
+                matches!(
+                    tc,
+                    TransferCharacteristics::Pq | TransferCharacteristics::Bt2020_10
+                ),
+                "{tc:?} disagrees with the PQ-only asymmetry"
+            );
         }
     }
 }

@@ -131,6 +131,14 @@ run = "cargo install --path crates/gamut-cli"
 description = "Run tests (workspace, all features)"
 run = "cargo test --workspace --all-features"
 
+# The AV1 reference codecs (issue #378). `aom` and `dav1d` are `update = none` in `.gitmodules`,
+# so `git submodule update --init --recursive` skips them and a git consumer of any gamut crate
+# does not pay ~440 MiB for codecs it never builds. Only the dev-only oracles need them, so any
+# task or CI job that builds `aom-oracle`, `dav1d-oracle` or `libavif-oracle` must run this first.
+[tasks.fetch-av1-oracles]
+description = "Fetch the aom/dav1d submodules (~440 MiB; needed by the AV1/AVIF oracle tests)"
+run = "git submodule update --init --checkout third_party/aom third_party/dav1d"
+
 # Real camera DNGs (issue #174). The corpus is the `gamut-dng-samples` submodule — ~178 MiB of
 # CC0 files written by actual cameras — and the harness is `tooling/gamut-dng-real-conformance`,
 # excluded from the workspace so `test` above never drags either in. Off the per-PR path by
@@ -153,9 +161,9 @@ description = "Run doctests only (the slice `coverage` cannot instrument on stab
 run = "cargo test --workspace --all-features --doc"
 
 # Divan; issue #149. Like `test`, this builds the codec crates' cross-check-oracle
-# dev-dependencies, so it needs the submodules + C toolchain. To pass Divan flags
-# (e.g. `--sample-count 50`) target one harness directly, since the per-crate
-# libtest stubs reject them: `cargo bench -p gamut-webp --bench codec -- <flags>`.
+# dev-dependencies, so it needs the submodules (including `fetch-av1-oracles`) + C toolchain.
+# To pass Divan flags (e.g. `--sample-count 50`) target one harness directly, since the
+# per-crate libtest stubs reject them: `cargo bench -p gamut-webp --bench codec -- <flags>`.
 [tasks.bench]
 description = "Run performance benchmarks (Divan; issue #149)"
 run = "cargo bench --workspace"
@@ -191,7 +199,7 @@ run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crate
 # without editing a task. `CMAKE_BUILD_PARALLEL_LEVEL` is the matching dial for the vendored
 # builds themselves (see `crates/gamut-jxl-sys/build.rs`).
 [tasks.mutants]
-description = "Mutation testing, whole workspace; slow (needs submodules + C toolchain)"
+description = "Mutation testing, whole workspace; slow (needs submodules incl. fetch-av1-oracles, + C toolchain)"
 run = "cargo mutants --jobs \"${MUTANTS_JOBS:-1}\" --jobserver-tasks \"${MUTANTS_JOBSERVER_TASKS:-$(nproc)}\""
 
 [tasks.mutants-diff]

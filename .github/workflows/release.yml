@@ -31,7 +31,19 @@ jobs:
         env:
           # No registry token needed: release-pr only opens/updates the version-bump
           # PR; it never publishes. crates.io reads (version checks) are unauthenticated.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          #
+          # RELEASE_PLZ_TOKEN, when set, takes priority over the default GITHUB_TOKEN.
+          # The default token cannot open a pull request unless the repository enables
+          # Settings → Actions → "Allow GitHub Actions to create and approve pull
+          # requests"; without it this step pushes the version-bump branch and then dies
+          # with `"GitHub Actions is not permitted to create or approve pull requests."
+          # 403` (issue #377), so no bump ever merges and the release job below keeps
+          # verifying crates against stale published dependencies. A PAT with
+          # `contents:write` + `pull-requests:write` in RELEASE_PLZ_TOKEN sidesteps that
+          # setting; it also makes the release PR's pushes trigger CI, which pushes made
+          # with the default token deliberately do not. Either fix works — the fallback
+          # keeps this workflow valid whether or not the secret exists.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
 
   # Publishes crates (in dependency order) + tags/releases once the release PR is
   # merged. Safe to run on every push: it only acts when an unpublished version exists.
@@ -46,6 +58,13 @@ jobs:
       # Exchanges the workflow's OIDC identity for a short-lived crates.io token.
       # Requires Trusted Publishing to be configured on each crate at
       # crates.io/crates/<name>/settings (and each crate to already exist).
+      #
+      # "already exist" is a real gate for a crate that has never been published: OIDC
+      # cannot mint a token for a name crates.io does not know, so the first version of
+      # a new crate needs one manual `cargo publish` with an owner-scoped token, after
+      # which Trusted Publishing takes over. As of this commit that applies to
+      # gamut-cmm, gamut-deflate, gamut-dng, gamut-jpeg, gamut-jxl-sys and gamut-png —
+      # none of which has a `<crate>-v<version>` tag yet.
       - uses: rust-lang/crates-io-auth-action@v1.0.4
         id: auth
       - name: release-plz (release)
@@ -53,6 +72,9 @@ jobs:
         with:
           command: release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same token precedence as the release-pr job above: this one creates git tags
+          # and GitHub releases, so it is kept on the same identity as the PR that
+          # produced the version bumps.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
           # Ephemeral token from the OIDC exchange above — not a stored secret.
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

@@ -88,7 +88,9 @@ Dependency edges (a crate depends on those to its right):
   profile on the shared **gamut-ifd** sub-IFD tree (with `bigtiff`). CFA/LinearRaw
   photometry, uncompressed/Deflate/lossless-JPEG, colour-calibration profile, EXIF/XMP/ICC
   metadata. Conformance-gated against the headless-built **Adobe DNG SDK**. ← ifd, bitstream,
-  core (MSB-first sub-byte packing reuses `gamut-bitstream`; `miniz_oxide` for Deflate).
+  color, core (MSB-first sub-byte packing reuses `gamut-bitstream`; the DNG §6 `AsShotWhiteXY` →
+  camera-neutral conversion reuses `gamut-color`'s chromaticity/3×3/CCT math; `miniz_oxide` for
+  Deflate).
 - **gamut-cli** (binary `gamut`) / **gamut-wasm** (cdylib) / **gamut-ffi** (cdylib/staticlib).
   ← gamut. `gamut-cli` is the sandbox exercising implemented features: decodes PNG/JPEG/WebP/JXL
   input with gamut's own decoders (only PPM uses the third-party `image` crate) and encodes only
@@ -123,6 +125,9 @@ mise run fmt-check     # formatting (nightly rustfmt, auto-installed)
 mise run lint          # lint (Clippy, warnings as errors)
 mise run coverage      # coverage (minimum 80%)
 mise run mutants       # mutation testing (needs submodules + C toolchain; run `mise install` once)
+mise run fetch-av1-oracles # fetch the `update = none` aom/dav1d submodules (~440 MiB); needed
+                       # before any task that builds the AV1/AVIF oracles (test, lint, coverage,
+                       # mutants), since a recursive submodule update deliberately skips them
 mise run test-dng-real # gamut-dng vs real camera DNGs (needs `mise run fetch-dng-samples`
                        # first: a ~178 MiB CC0 corpus submodule). Extended CI, master/manual
 mise run check-cross <triple> # cross-compile check (wasm32/aarch64/musl); extended CI, master/manual
@@ -137,7 +142,10 @@ dav1d, libavif, libtiff) built from `third_party/` git submodules via dev-only o
 in `tooling/`; libaom is the definitive AV1/AVIF oracle (see `references/av1/README.md`).
 Running these needs submodules checked out (`git submodule update --init --recursive`) and
 build tools on `PATH` (CMake/Ninja/Meson via mise; pkg-config is the one system package;
-nasm is built from a vendored tarball). No system-installed codec binaries are used.
+nasm is built from a vendored tarball). `aom` and `dav1d` are `update = none`, so that
+recursive update skips them — a git consumer of any gamut crate would otherwise fetch ~440 MiB
+of codecs Cargo never builds; `mise run fetch-av1-oracles` pulls them for the AV1/AVIF oracle
+tests. No system-installed codec binaries are used.
 
 These native builds are hermetic to exactly what they configure, **including the toolchain**:
 build scripts normalize an ambient compiler cache (`CC="sccache gcc"`,

@@ -3,10 +3,13 @@
 use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with};
-use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
+use gamut_color::{
+    BitDepth, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8, RgbToYcbcr,
+    TransferCharacteristics,
+};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
 use gamut_isobmff::{
-    ColourInformation, IsoBmffImage, Item, NclxColr, Property, PropertyKind, write,
+    ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind, write,
 };
 
 use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendSlot};
@@ -40,6 +43,12 @@ pub struct AvifEncoder {
     config: AvifConfig,
     /// Optional `irot`/`imir` display-orientation transforms.
     transform: ImageTransform,
+    /// An embedded ICC profile, carried verbatim into a `colr` box of type `prof`.
+    icc: Option<Vec<u8>>,
+    /// An Exif payload — a bare TIFF stream — carried verbatim into an `Exif` metadata item.
+    exif: Option<Vec<u8>>,
+    /// An XMP packet, carried verbatim into a `mime` metadata item.
+    xmp: Option<Vec<u8>>,
     /// Pluggable AV1 still-encode backends, tried in push order before the `gamut-av1` tail.
     /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::push_backend`].
     backends: Vec<BackendSlot>,
@@ -53,6 +62,11 @@ impl std::fmt::Debug for AvifEncoder {
         f.debug_struct("AvifEncoder")
             .field("config", &self.config)
             .field("transform", &self.transform)
+            // Payload *lengths*, not bytes: a profile is kilobytes of binary and would swamp the
+            // output, while its presence and size are what a caller debugging a build wants.
+            .field("icc", &self.icc.as_ref().map(Vec::len))
+            .field("exif", &self.exif.as_ref().map(Vec::len))
+            .field("xmp", &self.xmp.as_ref().map(Vec::len))
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -85,6 +99,9 @@ impl AvifEncoder {
                 ..AvifConfig::default()
             },
             transform: ImageTransform::default(),
+            icc: None,
+            exif: None,
+            xmp: None,
             backends: Vec::new(),
         }
     }
@@ -104,6 +121,9 @@ impl AvifEncoder {
                 ..AvifConfig::default()
             },
             transform: ImageTransform::default(),
+            icc: None,
+            exif: None,
+            xmp: None,
             backends: Vec::new(),
         }
     }
@@ -125,13 +145,50 @@ impl AvifEncoder {
     /// YCbCr round trip is not bit-exact, so a lossless encode through a luma–chroma matrix would
     /// not be lossless. This mirrors how lossless already ignores `quality`.
     ///
-    /// Colour **primaries** and the transfer function stay BT.709 / sRGB; selecting those is part
-    /// of the deferred colour-metadata surface (`STATUS.md`). A BT.2020 *matrix* with BT.709
-    /// primaries is legal CICP — the matrix is a coding choice, independent of the gamut — but a
-    /// caller wanting a true BT.2020 image needs that surface, not this knob.
+    /// The matrix is a *coding* choice, independent of the gamut: a BT.2020 matrix with BT.709
+    /// primaries is legal CICP. A caller wanting a true BT.2020 image selects the gamut with
+    /// [`AvifEncoder::with_primaries`], not with this knob.
     #[must_use]
     pub fn with_matrix(mut self, matrix: MatrixCoefficients) -> Self {
         self.config.matrix = matrix;
+        self
+    }
+
+    /// Tags the image with CICP colour **primaries** — the gamut its R'G'B' values are interpreted
+    /// in. Defaults to [`ColourPrimaries::Bt709`] (sRGB's gamut).
+    ///
+    /// This is a **tag, not a conversion**: the encoder does not gamut-map anything, so it declares
+    /// what the caller's samples already are. Unlike [`with_matrix`](Self::with_matrix) and
+    /// [`with_color_range`](Self::with_color_range) it touches no sample, so it applies to
+    /// [`AvifMode::Lossless`] as well as [`AvifMode::Lossy`].
+    ///
+    /// The value reaches both the AV1 sequence header's `color_config()` and the container's `colr`
+    /// box, which are required to agree (AV1-ISOBMFF v1.3.0 §2.3.4).
+    #[must_use]
+    pub fn with_primaries(mut self, primaries: ColourPrimaries) -> Self {
+        self.config.primaries = primaries;
+        self
+    }
+
+    /// Tags the image with CICP **transfer characteristics** — the transfer function already
+    /// applied to its samples. Defaults to [`TransferCharacteristics::Srgb`].
+    ///
+    /// A tag, not a conversion, exactly as [`with_primaries`](Self::with_primaries) is, and likewise
+    /// honoured on the lossless path. Selecting [`TransferCharacteristics::Pq`] or
+    /// [`TransferCharacteristics::Hlg`] *labels* samples the caller has already encoded that way; it
+    /// does not by itself produce a complete HDR image, because the HDR metadata properties
+    /// (`mdcv`/`clli`) are still deferred (`STATUS.md`).
+    ///
+    /// # Interaction with the AV1 sRGB shortcut
+    ///
+    /// AV1 §5.5.2 infers full range and 4:4:4 — coding no bits for either — only for the exact
+    /// triple BT.709 primaries / sRGB transfer / identity matrix. Selecting any other primaries or
+    /// transfer leaves that shortcut, so `color_range` is then coded explicitly. The stream stays
+    /// conformant: AV1 §6.4.2's only requirement for the identity matrix is 4:4:4, which always
+    /// holds here.
+    #[must_use]
+    pub fn with_transfer(mut self, transfer: TransferCharacteristics) -> Self {
+        self.config.transfer = transfer;
         self
     }
 
@@ -148,17 +205,77 @@ impl AvifEncoder {
 
     /// The colour signalling and plane layout this encoder's configuration selects.
     ///
-    /// Lossless pins identity/full regardless of the configured matrix and range — see
-    /// [`AvifEncoder::with_matrix`].
+    /// The split is between knobs that **transform samples** and knobs that only **tag** them.
+    /// `matrix` and `range` transform: an 8-bit YCbCr round trip is not bit-exact and studio range
+    /// discards codes, so lossless pins identity/full and ignores both (see
+    /// [`AvifEncoder::with_matrix`]). `primaries` and `transfer` touch no sample, so both modes
+    /// carry whatever the caller selected.
     fn colour(&self) -> Av1Colour {
+        let tagged = Av1Colour {
+            primaries: self.config.primaries,
+            transfer: self.config.transfer,
+            ..Av1Colour::default()
+        };
         match self.config.mode {
-            AvifMode::Lossless => Av1Colour::default(),
+            AvifMode::Lossless => tagged,
             _ => Av1Colour {
                 matrix: self.config.matrix,
                 range: self.config.range,
-                ..Av1Colour::default()
+                ..tagged
             },
         }
+    }
+
+    /// Embeds an ICC profile, describing the image's colour space to a colour-managed reader.
+    ///
+    /// The bytes are carried **verbatim** — the encoder neither parses nor validates the profile —
+    /// as a `colr` box of type `prof` (the unrestricted form, ISO/IEC 23008-12). `rICC` is not
+    /// emitted: it asserts the profile fits HEIF's restricted subset, which cannot be checked
+    /// without parsing it. Calling this twice keeps the **last** profile.
+    ///
+    /// The CICP `colr` box stays alongside it. It is not redundant: it describes what the AV1
+    /// codestream itself declares, and the two are required to agree (AV1-ISOBMFF v1.3.0 §2.3.4).
+    /// A colour-managed reader prefers the ICC profile; everything else falls back to the CICP
+    /// code points.
+    #[must_use]
+    pub fn with_icc_profile(mut self, profile: &[u8]) -> Self {
+        self.icc = Some(profile.to_vec());
+        self
+    }
+
+    /// Attaches Exif metadata, describing the primary image.
+    ///
+    /// `exif` is a **bare TIFF stream** — a byte-order mark, `42`, and the offset of the first IFD
+    /// — which is what [`gamut_exif::ExifWriter::write`] produces and what a PNG `eXIf` chunk or a
+    /// WebP `EXIF` chunk carries. It is *not* the `Exif\0\0`-prefixed form. The encoder adds the
+    /// 4-byte big-endian `exif_tiff_header_offset` that HEIF wraps around the stream, so a caller
+    /// never has to know that framing.
+    ///
+    /// The bytes are carried **verbatim** — the encoder neither parses nor rewrites them — as an
+    /// `Exif` item with a `cdsc` reference to the primary image. Calling this twice keeps the
+    /// **last** payload.
+    ///
+    /// Because nothing is validated here, a malformed stream reaches the file intact, and readers
+    /// do check: libavif rejects the whole file at parse time if the item is not a TIFF stream. The
+    /// caller owes a well-formed one.
+    ///
+    /// [`gamut_exif::ExifWriter::write`]: https://docs.rs/gamut-exif
+    #[must_use]
+    pub fn with_exif(mut self, exif: &[u8]) -> Self {
+        self.exif = Some(exif.to_vec());
+        self
+    }
+
+    /// Attaches an XMP packet, describing the primary image.
+    ///
+    /// Takes bytes rather than `&str` because a packet may legitimately open with a byte-order
+    /// mark. They are carried **verbatim** as a `mime` item whose `content_type` is
+    /// `application/rdf+xml`, with a `cdsc` reference to the primary image. Calling this twice
+    /// keeps the **last** payload.
+    #[must_use]
+    pub fn with_xmp(mut self, xmp: &[u8]) -> Self {
+        self.xmp = Some(xmp.to_vec());
+        self
     }
 
     /// Records an `irot` display [`Rotation`] applied by a reader (the stored pixels are unchanged,
@@ -221,6 +338,108 @@ impl AvifEncoder {
         self.backends.push(Arc::new(Mutex::new(backend)));
         self
     }
+
+    /// Wraps the encoded AV1 temporal unit in the AVIF container, stamping `av1C`/`colr`/`ispe`/`pixi`
+    /// from the AV1 configuration so the cross-box consistency requirements hold by construction
+    /// (AVIF v1.2.0 §2.2, AV1-ISOBMFF v1.3.0 §2.3.4), and appending whatever colour and metadata
+    /// payloads the encoder was configured with.
+    fn build_avif(&self, still: &EncodedStill, dims: Dimensions) -> Result<Vec<u8>> {
+        let c = &still.config;
+        // av1C is essential; ispe/pixi/colr are descriptive. Order fixes the ipco/ipma indices.
+        let mut properties = vec![
+            Property {
+                essential: true,
+                kind: PropertyKind::CodecConfiguration {
+                    kind: *b"av1C",
+                    data: av1c_record(c).to_vec(),
+                },
+            },
+            Property {
+                essential: false,
+                kind: PropertyKind::ImageSpatialExtents {
+                    width: dims.width,
+                    height: dims.height,
+                },
+            },
+            Property {
+                essential: false,
+                kind: PropertyKind::PixelInformation {
+                    bits_per_channel: vec![8, 8, 8],
+                },
+            },
+            Property {
+                essential: false,
+                kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
+                    colour_primaries: c.color_primaries,
+                    transfer_characteristics: c.transfer_characteristics,
+                    matrix_coefficients: c.matrix_coefficients,
+                    full_range: c.full_range,
+                })),
+            },
+        ];
+        // The ICC profile is a *second* `colr`, of a different `colour_type` — ISO/IEC 14496-12 §12.1.5
+        // allows one of each. It is appended after the four properties the v1 surface always writes, so
+        // an encoder with no profile keeps exactly the `ipco`/`ipma` indices it always had.
+        if let Some(icc) = &self.icc {
+            properties.push(Property {
+                essential: false,
+                kind: PropertyKind::Colour(ColourInformation::UnrestrictedIcc(icc.clone())),
+            });
+        }
+        // Transformative properties are essential (MIAF §7.3.6.7); applied irot-then-imir.
+        if self.transform.rotation_ccw != 0 {
+            properties.push(Property {
+                essential: true,
+                kind: PropertyKind::Rotation(self.transform.rotation_ccw),
+            });
+        }
+        if let Some(axis) = self.transform.mirror_axis {
+            properties.push(Property {
+                essential: true,
+                kind: PropertyKind::Mirror(axis),
+            });
+        }
+        let mut items = vec![Item {
+            id: PRIMARY_ITEM_ID,
+            item_type: *b"av01",
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            references: vec![],
+            properties,
+            payload: still.obus.clone(),
+        }];
+        // Metadata items follow the primary, taking the next free id in a fixed order. Ids come
+        // from position among the items actually present, so an XMP-only file gets id 2 — the
+        // primary stays id 1 (and `pitm` names it) whatever is attached.
+        if let Some(exif) = &self.exif {
+            // HEIF/AVIF wraps the TIFF stream in a 4-byte big-endian `exif_tiff_header_offset`;
+            // `0` means the stream starts immediately after it. `AvifItem` exposes the payload
+            // *including* this prefix, so both directions describe the same bytes.
+            let mut payload = Vec::with_capacity(4 + exif.len());
+            payload.extend_from_slice(&0u32.to_be_bytes());
+            payload.extend_from_slice(exif);
+            items.push(metadata_item(next_item_id(&items), *b"Exif", None, payload));
+        }
+        if let Some(xmp) = &self.xmp {
+            items.push(metadata_item(
+                next_item_id(&items),
+                *b"mime",
+                Some(XMP_CONTENT_TYPE.to_owned()),
+                xmp.clone(),
+            ));
+        }
+        let image = IsoBmffImage {
+            major_brand: *b"avif",
+            minor_version: 0,
+            compatible_brands: vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
+            primary_item_id: PRIMARY_ITEM_ID,
+            items,
+            groups: vec![],
+        };
+        write(&image)
+    }
 }
 
 /// The 4-byte `AV1CodecConfigurationRecord` body (empty `configOBUs`) stamped into the `av1C`
@@ -241,79 +460,44 @@ pub(crate) fn av1c_record(c: &Av1StillConfig) -> [u8; 4] {
     ]
 }
 
-/// Wraps the encoded AV1 temporal unit in the AVIF container, stamping `av1C`/`colr`/`ispe`/`pixi`
-/// from the AV1 configuration so the cross-box consistency requirements hold by construction
-/// (AVIF v1.2.0 §2.2, AV1-ISOBMFF v1.3.0 §2.3.4).
-fn build_avif(
-    still: &EncodedStill,
-    dims: Dimensions,
-    transform: ImageTransform,
-) -> Result<Vec<u8>> {
-    let c = &still.config;
-    // av1C is essential; ispe/pixi/colr are descriptive. Order fixes the ipco/ipma indices.
-    let mut properties = vec![
-        Property {
-            essential: true,
-            kind: PropertyKind::CodecConfiguration {
-                kind: *b"av1C",
-                data: av1c_record(c).to_vec(),
-            },
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::ImageSpatialExtents {
-                width: dims.width,
-                height: dims.height,
-            },
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::PixelInformation {
-                bits_per_channel: vec![8, 8, 8],
-            },
-        },
-        Property {
-            essential: false,
-            kind: PropertyKind::Colour(ColourInformation::Nclx(NclxColr {
-                colour_primaries: c.color_primaries,
-                transfer_characteristics: c.transfer_characteristics,
-                matrix_coefficients: c.matrix_coefficients,
-                full_range: c.full_range,
-            })),
-        },
-    ];
-    // Transformative properties are essential (MIAF §7.3.6.7); applied irot-then-imir.
-    if transform.rotation_ccw != 0 {
-        properties.push(Property {
-            essential: true,
-            kind: PropertyKind::Rotation(transform.rotation_ccw),
-        });
-    }
-    if let Some(axis) = transform.mirror_axis {
-        properties.push(Property {
-            essential: true,
-            kind: PropertyKind::Mirror(axis),
-        });
-    }
-    let image = IsoBmffImage {
-        major_brand: *b"avif",
-        minor_version: 0,
-        compatible_brands: vec![*b"avif", *b"mif1", *b"miaf", *b"MA1A"],
-        primary_item_id: 1,
-        items: vec![Item {
-            id: 1,
-            item_type: *b"av01",
-            name: String::new(),
-            content_type: None,
-            content_encoding: None,
-            hidden: false,
-            references: vec![],
-            properties,
-            payload: still.obus.clone(),
+/// The item id of the primary (displayed) image. Fixed at 1: `pitm` names it, and metadata items
+/// take the ids after it.
+const PRIMARY_ITEM_ID: u32 = 1;
+
+/// The `mime` `content_type` that identifies an XMP metadata item (ISO/IEC 23008-12) — the value
+/// [`AvifImage::xmp`](crate::AvifImage::xmp) matches on when reading.
+const XMP_CONTENT_TYPE: &str = "application/rdf+xml";
+
+/// The id one past the highest already assigned. Metadata items are appended to a list that starts
+/// with the primary at [`PRIMARY_ITEM_ID`], so this is simply the next position.
+fn next_item_id(items: &[Item]) -> u32 {
+    items.len() as u32 + PRIMARY_ITEM_ID
+}
+
+/// A metadata item describing the primary image: no properties, no pixels, and a `cdsc` reference.
+///
+/// `cdsc` runs **metadata → described image**, so the reference lives on this item and targets the
+/// primary — the direction [`AvifImage::metadata_of`](crate::AvifImage::metadata_of) reads back.
+fn metadata_item(
+    id: u32,
+    item_type: [u8; 4],
+    content_type: Option<String>,
+    payload: Vec<u8>,
+) -> Item {
+    Item {
+        id,
+        item_type,
+        name: String::new(),
+        content_type,
+        content_encoding: None,
+        hidden: false,
+        references: vec![ItemReference {
+            reference_type: *b"cdsc",
+            to_item_ids: vec![PRIMARY_ITEM_ID],
         }],
-        groups: vec![],
-    };
-    write(&image)
+        properties: vec![],
+        payload,
+    }
 }
 
 /// Maps a `0..=100` quality to an AV1 `base_q_idx` (`1..=255`); higher quality → lower index (less
@@ -354,7 +538,7 @@ impl EncodeImage<Rgb8> for AvifEncoder {
             Some(obus) => crate::backend::still_from_backend_obus(obus, dims, colour)?,
             None => encode_still_intra_with(&planes, base_q_idx, colour)?.0,
         };
-        let file = build_avif(&still, dims, self.transform)?;
+        let file = self.build_avif(&still, dims)?;
         out.extend_from_slice(&file);
         Ok(file.len())
     }
@@ -424,13 +608,15 @@ mod tests {
         // differs. Parsing it back (gamut-isobmff round-trips its own output) pins the brands, the
         // primary `av01` item, and the av1C-derived `ispe`/`pixi`/`colr` the encoder stamps — none
         // of which a box-presence check would catch if a field were wrong.
-        // `(encoder, expected matrix_coefficients, expected full_range)`: lossless is pinned to
-        // identity/full, lossy defaults to BT.709/full, and both knobs override the lossy defaults.
+        // `(encoder, expected primaries, transfer, matrix_coefficients, full_range)`: lossless is
+        // pinned to identity/full, lossy defaults to BT.709/full, and the knobs override.
         let cases = [
-            (AvifEncoder::lossless(), 0u16, true),
-            (AvifEncoder::lossy(50), 1, true),
+            (AvifEncoder::lossless(), 1u16, 13u16, 0u16, true),
+            (AvifEncoder::lossy(50), 1, 13, 1, true),
             (
                 AvifEncoder::lossy(50).with_matrix(MatrixCoefficients::Bt601),
+                1,
+                13,
                 6,
                 true,
             ),
@@ -438,6 +624,8 @@ mod tests {
             // shortcut, which is why it pairs with a real matrix.
             (
                 AvifEncoder::lossy(50).with_color_range(ColorRange::Limited),
+                1,
+                13,
                 1,
                 false,
             ),
@@ -447,11 +635,34 @@ mod tests {
                 AvifEncoder::lossless()
                     .with_matrix(MatrixCoefficients::Bt709)
                     .with_color_range(ColorRange::Limited),
+                1,
+                13,
                 0,
                 true,
             ),
+            // Primaries and transfer are tags, not transforms, so — unlike matrix and range — they
+            // reach `colr` on **both** paths. Lossless keeps identity/full alongside them.
+            (
+                AvifEncoder::lossless()
+                    .with_primaries(ColourPrimaries::Bt2020)
+                    .with_transfer(TransferCharacteristics::Pq),
+                9,
+                16,
+                0,
+                true,
+            ),
+            (
+                AvifEncoder::lossy(50)
+                    .with_primaries(ColourPrimaries::DisplayP3)
+                    .with_transfer(TransferCharacteristics::Hlg)
+                    .with_matrix(MatrixCoefficients::Bt2020Ncl),
+                12,
+                18,
+                9,
+                true,
+            ),
         ];
-        for (enc, want_matrix, want_full_range) in cases {
+        for (enc, want_primaries, want_transfer, want_matrix, want_full_range) in cases {
             let img = read(&encode_with(enc, 34, 18)).expect("emitted AVIF parses");
             assert_eq!(img.major_brand, *b"avif");
             for brand in [*b"avif", *b"mif1", *b"miaf", *b"MA1A"] {
@@ -483,14 +694,192 @@ mod tests {
                     _ => None,
                 })
                 .expect("colr nclx present");
-            // Primaries and transfer stay BT.709 / sRGB (the colour-metadata surface is deferred);
-            // the matrix and range are whatever the configuration selected (AVIF v1.2.0 §2.2;
-            // mc = 0 additionally requires 4:4:4 full range).
-            assert_eq!(nclx.colour_primaries, 1);
-            assert_eq!(nclx.transfer_characteristics, 13);
+            // Every CICP field is whatever the configuration selected (AVIF v1.2.0 §2.2; mc = 0
+            // additionally requires 4:4:4). `colr` must mirror the sequence header exactly, which
+            // the backend seam re-checks for a foreign stream (AV1-ISOBMFF v1.3.0 §2.3.4).
+            assert_eq!(nclx.colour_primaries, want_primaries);
+            assert_eq!(nclx.transfer_characteristics, want_transfer);
             assert_eq!(nclx.matrix_coefficients, want_matrix);
             assert_eq!(nclx.full_range, want_full_range);
         }
+    }
+
+    /// A deterministic non-trivial payload: distinct from the pixel ramp, and long enough that a
+    /// truncation or an off-by-one prefix would show.
+    fn payload(seed: u8, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| seed.wrapping_add((i * 31) as u8))
+            .collect()
+    }
+
+    #[test]
+    fn icc_profile_is_a_second_colr_of_type_prof() {
+        use gamut_isobmff::{ColourInformation, PropertyKind, read};
+        let icc = payload(0x11, 300);
+        let bytes = encode_with(AvifEncoder::new().with_icc_profile(&icc), 34, 18);
+        let img = read(&bytes).expect("emitted AVIF parses");
+        let colrs: Vec<&ColourInformation> = img.items[0]
+            .properties
+            .iter()
+            .filter_map(|p| match &p.kind {
+                PropertyKind::Colour(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        // Two `colr` boxes of different `colour_type` (ISO/IEC 14496-12 §12.1.5 allows one each),
+        // CICP first: it describes the codestream, which the container must agree with, and keeping
+        // it first leaves a profile-free file's property indices untouched.
+        assert_eq!(colrs.len(), 2, "CICP nclx and the ICC profile");
+        assert!(matches!(colrs[0], ColourInformation::Nclx(_)), "nclx first");
+        // `prof` (unrestricted), not `rICC`: the encoder does not parse the profile, so it cannot
+        // assert that it fits HEIF's restricted subset.
+        assert_eq!(
+            colrs[1],
+            &ColourInformation::UnrestrictedIcc(icc.clone()),
+            "profile carried verbatim as `prof`"
+        );
+        // …and it is reachable through the crate's own role lens, which `colour()` alone cannot do
+        // because that returns whichever `colr` comes first.
+        let container = crate::AvifContainer::parse(&bytes).expect("parses");
+        assert_eq!(
+            container.image().primary_item().icc_profile(),
+            Some(icc.as_slice())
+        );
+    }
+
+    #[test]
+    fn last_icc_profile_wins() {
+        use gamut_isobmff::{ColourInformation, PropertyKind, read};
+        let img = read(&encode_with(
+            AvifEncoder::new()
+                .with_icc_profile(&payload(0x11, 64))
+                .with_icc_profile(&payload(0x22, 96)),
+            4,
+            4,
+        ))
+        .expect("parses");
+        let icc = img.items[0].properties.iter().find_map(|p| match &p.kind {
+            PropertyKind::Colour(ColourInformation::UnrestrictedIcc(icc)) => Some(icc.clone()),
+            _ => None,
+        });
+        assert_eq!(icc, Some(payload(0x22, 96)), "the last profile is kept");
+    }
+
+    #[test]
+    fn metadata_items_describe_the_primary_with_cdsc() {
+        use gamut_isobmff::read;
+        let exif = payload(0x33, 120);
+        let xmp = payload(0x44, 80);
+        let bytes = encode_with(AvifEncoder::new().with_exif(&exif).with_xmp(&xmp), 34, 18);
+        let img = read(&bytes).expect("emitted AVIF parses");
+        // The primary keeps id 1 at index 0 and stays what `pitm` names, whatever is attached.
+        assert_eq!(img.primary_item_id, 1);
+        assert_eq!(img.items[0].id, 1);
+        assert_eq!(img.items[0].item_type, *b"av01");
+        assert_eq!(img.items.len(), 3, "primary + Exif + XMP");
+
+        let exif_item = &img.items[1];
+        assert_eq!(exif_item.id, 2);
+        assert_eq!(exif_item.item_type, *b"Exif");
+        assert_eq!(exif_item.content_type, None, "only `mime` items carry one");
+        // HEIF wraps the TIFF stream in a 4-byte big-endian `exif_tiff_header_offset`; the caller
+        // hands over a bare stream and the encoder adds it.
+        let mut want = 0u32.to_be_bytes().to_vec();
+        want.extend_from_slice(&exif);
+        assert_eq!(
+            exif_item.payload, want,
+            "4-byte offset prefix, then the TIFF"
+        );
+
+        let xmp_item = &img.items[2];
+        assert_eq!(xmp_item.id, 3);
+        assert_eq!(xmp_item.item_type, *b"mime");
+        assert_eq!(
+            xmp_item.content_type.as_deref(),
+            Some("application/rdf+xml"),
+            "the content type `AvifImage::xmp` matches on"
+        );
+        assert_eq!(xmp_item.payload, xmp, "packet carried verbatim");
+
+        // `cdsc` runs metadata → described image, so it lives on each metadata item and targets the
+        // primary — not the other way round.
+        for item in &img.items[1..] {
+            assert_eq!(item.references.len(), 1);
+            assert_eq!(item.references[0].reference_type, *b"cdsc");
+            assert_eq!(item.references[0].to_item_ids, vec![1]);
+        }
+        assert!(
+            img.items[0].references.is_empty(),
+            "the primary owns no references"
+        );
+
+        // …and the crate's own lenses find them by that relationship.
+        let container = crate::AvifContainer::parse(&bytes).expect("parses");
+        let image = container.image();
+        assert_eq!(
+            image.exif().map(|i| i.as_isobmff_item().payload.clone()),
+            Some(want)
+        );
+        assert_eq!(
+            image.xmp().map(|i| i.as_isobmff_item().payload.clone()),
+            Some(xmp)
+        );
+    }
+
+    #[test]
+    fn metadata_item_ids_follow_the_items_actually_present() {
+        use gamut_isobmff::read;
+        // Ids are positional among the items present, not fixed per kind: with no Exif, XMP takes
+        // id 2 rather than leaving a hole at 2 and claiming 3.
+        let img = read(&encode_with(
+            AvifEncoder::new().with_xmp(&payload(0x44, 40)),
+            4,
+            4,
+        ))
+        .expect("parses");
+        assert_eq!(img.items.len(), 2, "primary + XMP");
+        assert_eq!(img.items[1].id, 2);
+        assert_eq!(img.items[1].item_type, *b"mime");
+        assert_eq!(img.items[1].references[0].to_item_ids, vec![1]);
+    }
+
+    #[test]
+    fn debug_summarizes_the_payloads_by_length() {
+        // The payloads are opaque binary that would swamp the output, so `Debug` reports their
+        // size. An unset knob has to stay distinguishable from an empty payload.
+        let bare = format!("{:?}", AvifEncoder::new());
+        assert!(bare.contains("icc: None"), "{bare}");
+        assert!(bare.contains("exif: None"), "{bare}");
+        assert!(bare.contains("xmp: None"), "{bare}");
+
+        let set = format!(
+            "{:?}",
+            AvifEncoder::new()
+                .with_icc_profile(&payload(0x11, 512))
+                .with_exif(&payload(0x33, 64))
+                .with_xmp(&[])
+        );
+        assert!(set.contains("icc: Some(512)"), "{set}");
+        assert!(set.contains("exif: Some(64)"), "{set}");
+        assert!(
+            set.contains("xmp: Some(0)"),
+            "an empty payload is still set: {set}"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_encoder_adds_no_items_or_properties() {
+        use gamut_isobmff::read;
+        // The guard behind the crate's byte-identity promise: every knob added here is inert until
+        // it is set, so the default file keeps its item count *and* its `ipco`/`ipma` indices.
+        let img = read(&encode_with(AvifEncoder::new(), 34, 18)).expect("parses");
+        assert_eq!(img.items.len(), 1, "the primary alone");
+        assert_eq!(
+            img.items[0].properties.len(),
+            4,
+            "av1C, ispe, pixi, colr — and nothing else"
+        );
+        assert!(img.items[0].references.is_empty(), "so `iref` is omitted");
     }
 
     #[test]

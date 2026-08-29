@@ -18,7 +18,8 @@ fn main() {
     let cmakelists = src.join("CMakeLists.txt");
     assert!(
         cmakelists.exists(),
-        "vendored aom not found at {} — run `git submodule update --init --recursive`",
+        "vendored aom not found at {} — `update = none` in .gitmodules keeps it out of a \
+         recursive submodule update; run `mise run fetch-av1-oracles`",
         src.display()
     );
 

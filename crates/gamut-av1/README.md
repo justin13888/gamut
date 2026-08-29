@@ -49,7 +49,7 @@ std::fs::write("out.obu", &still.obus).unwrap();
 ## Status
 
 Today (milestone **M0**) the encoder implements a single, narrow path: a **lossless** all-intra
-keyframe — `seq_profile = 1` (8-bit 4:4:4), identity matrix coefficients, full range, single tile,
+keyframe — `seq_profile = 1`, 8-bit 4:4:4, identity matrix coefficients, full range, single tile,
 64×64 superblocks, `DC_PRED`, and the forced `TX_4X4` Walsh–Hadamard transform. Symbols are coded
 against adapting CDFs (`disable_cdf_update = 0`, AV1 §8.2.6): each tile starts from the §9.4
 defaults and nudges every context toward what it codes. It produces the AV1 temporal unit that
@@ -57,8 +57,15 @@ defaults and nudges every context toward what it codes. It produces the AV1 temp
 
 The colour signalling is selectable on top of that: `encode_still_intra_with` takes an
 `Av1Colour` (the CICP primaries/transfer/matrix triple plus the signal range) and mirrors it into
-the sequence header's `color_config()` and the `av1C`/`colr` values `gamut-avif` stamps. Planes
-stay 4:4:4 — a luma–chroma matrix changes what the samples mean, not their geometry.
+the sequence header's `color_config()` and the `av1C`/`colr` values `gamut-avif` stamps. A
+luma–chroma matrix changes what the samples mean, not their geometry.
+
+**Monochrome** (`mono_chrome = 1`, `seq_profile = 0`) is the one geometry that is selectable: pass
+a `ChromaSubsampling::Cs400` `Planar8` — one luma plane, no chroma — and the encoder codes a single
+plane and drops every chroma syntax element the spec gates on `NumPlanes > 1`. Use
+`Av1Colour::monochrome()` rather than the default: §5.5.2 infers `subsampling_x = subsampling_y = 1`
+for a monochrome stream and §6.4.2 permits `MC_IDENTITY` only at 0/0, so the default identity matrix
+is rejected. The subsampled geometries (4:2:0 / 4:2:2) are still deferred.
 
 The wider AV1 surface — lossy DCT/ADST, more intra modes, in-loop filters, inter coding for image
 sequences — is tracked row by row in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md).

@@ -28,7 +28,7 @@ use gamut_core::{
 use crate::backend::{IdatInflater, IdatInfo, Registry, run_inflaters};
 use crate::chunk::ChunkReader;
 use crate::color::ColorType;
-use crate::decoded::{self, DecodedPng, PngHeader, PngImage};
+use crate::decoded::{self, DecodedPng, PngHeader, PngImage, PngMetadata};
 use crate::filter::{self, FilterType};
 use crate::ihdr::{self, Ihdr};
 use crate::palette::PngPalette;
@@ -309,25 +309,14 @@ impl PngDecoder {
                     }
                 }
                 _ if chunk.is_ancillary() => {
-                    // Ancillary chunks do not affect the pixels. Metadata-bearing ones are
-                    // collected for the rich decode path (CRC-verified only, §13.1); anything
-                    // else — including APNG's acTL/fcTL/fdAT — is skipped, so an animated PNG
-                    // decodes as its default image.
-                    if want_metadata
-                        && chunk.crc_ok
-                        && matches!(
-                            &chunk.chunk_type,
-                            b"eXIf"
-                                | b"iCCP"
-                                | b"gAMA"
-                                | b"cHRM"
-                                | b"sRGB"
-                                | b"cICP"
-                                | b"tEXt"
-                                | b"zTXt"
-                                | b"iTXt"
-                        )
-                    {
+                    // Ancillary chunks do not affect the pixels. For the rich decode path they
+                    // are handed to `decoded::collect`, which is the single place that decides
+                    // which chunk types carry metadata — anything it does not recognise,
+                    // including APNG's acTL/fcTL/fdAT, is dropped there, so an animated PNG
+                    // decodes as its default image. Only the CRC is enforced here (§13.1).
+                    // These are borrowed slices, so an unrecognised chunk costs a fat pointer,
+                    // not a copy of its payload.
+                    if want_metadata && chunk.crc_ok {
                         ancillary.push((chunk.chunk_type, chunk.data));
                     }
                 }
@@ -431,6 +420,41 @@ impl PngDecoder {
         })
     }
 
+    /// Reads a PNG's ancillary metadata without decoding any pixels, honouring this decoder's
+    /// [`with_max_metadata_bytes`](Self::with_max_metadata_bytes) budget.
+    ///
+    /// Identical to the free [`metadata`] function except for that budget, which is why it exists:
+    /// a free function has nowhere to carry the limit. Use this when reading untrusted input with
+    /// a tighter cap than the 16 MiB default; use [`metadata`] otherwise.
+    ///
+    /// # Errors
+    ///
+    /// As [`metadata`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use gamut_png::PngDecoder;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let png = {
+    /// #     use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+    /// #     let pixels = vec![0u8; 12];
+    /// #     let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
+    /// #     gamut_png::PngEncoder::new().encode_to_vec(image)?
+    /// # };
+    /// // Refuse to inflate more than 4 KiB of compressed metadata.
+    /// let decoder = PngDecoder::new().with_max_metadata_bytes(4096);
+    /// let meta = decoder.metadata(&png)?;
+    /// assert!(meta.icc_profile.is_none());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn metadata(&self, data: &[u8]) -> Result<PngMetadata> {
+        let chunks = walk_metadata_chunks(data)?;
+        Ok(decoded::collect(&chunks, self.max_metadata_bytes))
+    }
+
     /// Runs the typed pipeline: parse (without metadata) → decode.
     fn decode_native(&self, data: &[u8]) -> Result<NativeImage> {
         let parsed = self.parse_stream(data, false)?;
@@ -496,6 +520,146 @@ impl PngDecoder {
             trns_key,
         })
     }
+}
+
+/// Walks the chunk stream collecting the CRC-valid ancillary chunks, for [`decoded::collect`] to
+/// classify — the same handoff [`PngDecoder::parse_stream`] makes, so the two entry points cannot
+/// disagree about which chunks carry metadata.
+///
+/// Deliberately not `parse_stream` itself: that accumulates every IDAT payload into an owned
+/// `Vec` and then requires at least one, neither of which a metadata read should do. Here IDAT
+/// (and PLTE) is skipped by length, so the pixel data is never touched or copied.
+fn walk_metadata_chunks(data: &[u8]) -> Result<Vec<([u8; 4], &[u8])>> {
+    let mut reader = ChunkReader::new(data)?;
+    let first = reader
+        .next_chunk()?
+        .ok_or_else(|| Error::invalid_input(env!("CARGO_PKG_NAME"), "PNG: missing IHDR"))?;
+    if first.chunk_type != *b"IHDR" {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: first chunk must be IHDR",
+        ));
+    }
+    if !first.crc_ok {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: critical chunk CRC mismatch",
+        ));
+    }
+    // Parsed but discarded: this validates the header the same way `decode` does, so a stream
+    // with a corrupt IHDR is rejected here too rather than yielding metadata from a broken file.
+    ihdr::parse(first.data)?;
+
+    let mut chunks = Vec::new();
+    let mut seen_iend = false;
+    while let Some(chunk) = reader.next_chunk()? {
+        match &chunk.chunk_type {
+            b"IHDR" => {
+                return Err(Error::invalid_input(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: duplicate IHDR",
+                ));
+            }
+            b"IEND" => {
+                if !chunk.crc_ok {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "PNG: critical chunk CRC mismatch",
+                    ));
+                }
+                if !chunk.data.is_empty() {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "PNG: IEND payload must be empty",
+                    ));
+                }
+                seen_iend = true;
+                break;
+            }
+            // The pixel-bearing critical chunks. Skipped by length — never read, never copied.
+            b"IDAT" | b"PLTE" => {}
+            _ if chunk.is_ancillary() => {
+                // §13.1: a CRC mismatch skips the chunk rather than failing the image.
+                if chunk.crc_ok {
+                    chunks.push((chunk.chunk_type, chunk.data));
+                }
+            }
+            _ => {
+                // §5.4/§13.2: an unknown critical chunk means this is not a stream this decoder
+                // understands. Rejected here as in `decode`, so `metadata` never reports on a
+                // file the rest of the crate would refuse.
+                return Err(Error::unsupported(
+                    env!("CARGO_PKG_NAME"),
+                    "PNG: unknown critical chunk",
+                ));
+            }
+        }
+    }
+    if !seen_iend {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "PNG: missing IEND",
+        ));
+    }
+    Ok(chunks)
+}
+
+/// Reads a PNG's ancillary metadata without decoding any pixels.
+///
+/// Walks the chunk stream, collecting the metadata-bearing ancillary chunks and inflating only
+/// the compressed ones (iCCP, zTXt, and compressed iTXt) under one cumulative 16 MiB budget.
+/// IDAT is skipped by length, so no pixel data is read, copied, or inflated — which makes this
+/// cheap enough for a probe on a large file. `cICP`, `sRGB`, `gAMA` and `cHRM` are uncompressed
+/// and cost nothing beyond the walk.
+///
+/// The result matches [`PngDecoder::decode`] field for field on the same file. Use
+/// [`PngDecoder::metadata`] instead if you need a metadata budget other than the default.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] if the signature, IHDR, or chunk framing is malformed, IHDR is
+/// duplicated, or IEND is missing; [`Error::Unsupported`] for an unknown critical chunk. Unlike
+/// [`PngDecoder::decode`] it does **not** require IDAT — a stream carrying only metadata is read
+/// successfully. Malformed *metadata* payloads are never errors: the affected chunk is skipped
+/// (§13.1) and its field stays empty, as are chunks whose CRC does not match.
+///
+/// # Example
+///
+/// The extracted payload is byte-for-byte identical to the one given to the encoder:
+///
+/// ```
+/// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+/// use gamut_png::PngEncoder;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let exif = b"II\x2a\x00opaque exif bytes";
+/// let pixels = vec![0u8; 3 * 4];
+/// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
+/// let png = PngEncoder::new().with_exif(exif).encode_to_vec(image)?;
+///
+/// let meta = gamut_png::metadata(&png)?;
+/// assert_eq!(meta.exif.as_deref(), Some(exif.as_slice()));
+/// # Ok(())
+/// # }
+/// ```
+///
+/// A PNG with no ancillary chunks reads back as the default:
+///
+/// ```
+/// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+/// use gamut_png::{PngEncoder, PngMetadata};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let pixels = vec![0u8; 3 * 4];
+/// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
+/// let png = PngEncoder::new().encode_to_vec(image)?;
+/// assert_eq!(gamut_png::metadata(&png)?, PngMetadata::default());
+/// # Ok(())
+/// # }
+/// ```
+pub fn metadata(data: &[u8]) -> Result<PngMetadata> {
+    let chunks = walk_metadata_chunks(data)?;
+    Ok(decoded::collect(&chunks, DEFAULT_MAX_METADATA_BYTES))
 }
 
 /// Validates PLTE presence/shape and tRNS shape against the colour type (§11.2.2, §11.3.1.1),

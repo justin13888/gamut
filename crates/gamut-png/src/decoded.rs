@@ -63,7 +63,7 @@ pub enum PngImage {
 }
 
 /// An embedded ICC profile (iCCP, §11.3.2.3), already inflated.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct IccProfile {
     /// The profile name (Latin-1, 1–79 bytes).
@@ -105,7 +105,7 @@ pub struct Cicp {
 /// tEXt/zTXt hold Latin-1, mapped code-point-for-code-point into the `String` (lossless);
 /// iTXt holds UTF-8. The XMP packet (`XML:com.adobe.xmp`) is surfaced as [`DecodedPng::xmp`],
 /// not repeated here.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TextChunk {
     /// The keyword (1–79 bytes).
@@ -154,16 +154,59 @@ pub struct DecodedPng {
     pub cicp: Option<Cicp>,
 }
 
-/// The ancillary metadata collected from a chunk walk.
-#[derive(Default)]
-pub(crate) struct Metadata {
+/// The ancillary metadata a PNG carries, read without decoding any pixels by
+/// [`metadata`](crate::metadata) or [`PngDecoder::metadata`](crate::PngDecoder::metadata).
+///
+/// Each payload is in the form the dedicated metadata crates parse (and
+/// [`gamut-metadata`](https://crates.io/crates/gamut-metadata)'s `MetadataBlock` borrows)
+/// directly, e.g. `meta.exif.as_deref().map(MetadataBlock::Exif)`. These are exactly the fields
+/// [`DecodedPng`] exposes alongside its pixels, so the two entry points agree field for field on
+/// the same file.
+///
+/// Unlike `gamut_jpeg::JpegMetadata` and `gamut_webp::WebpMetadata`, which carry only
+/// EXIF/XMP/ICC, this also surfaces PNG's parsed colour chunks — `cICP`, `sRGB`, `gAMA`, `cHRM` —
+/// because those are uncompressed and answer "what colour space is this?" on their own.
+///
+/// Marked `#[non_exhaustive]` so further ancillary chunks can be added without a breaking change.
+///
+/// # Example
+///
+/// ```
+/// use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+/// use gamut_png::PngEncoder;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let pixels = vec![0u8; 3 * 4];
+/// let image = ImageRef::<Rgb8>::new(&pixels, Dimensions::new(2, 2)?)?;
+/// let png = PngEncoder::new().with_gamma(1.0 / 2.2).encode_to_vec(image)?;
+///
+/// // gAMA stores the encoding gamma × 100 000, uncompressed — so a probe can read a PNG's
+/// // colour information without inflating anything.
+/// let meta = gamut_png::metadata(&png)?;
+/// assert_eq!(meta.gamma, Some(45_455));
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PngMetadata {
+    /// The eXIf payload verbatim: a TIFF stream starting with `II`/`MM` (§11.3.4.4). Feed as
+    /// `gamut_metadata::MetadataBlock::Exif`.
     pub exif: Option<Vec<u8>>,
+    /// The embedded ICC profile (iCCP), inflated. Feed as `MetadataBlock::Icc`.
     pub icc_profile: Option<IccProfile>,
+    /// The XMP packet (the `XML:com.adobe.xmp` iTXt, §11.3.3.2), decompressed if stored
+    /// compressed. Feed as `MetadataBlock::Xmp`.
     pub xmp: Option<Vec<u8>>,
+    /// tEXt/zTXt/iTXt annotations in file order (the XMP packet is excluded).
     pub texts: Vec<TextChunk>,
+    /// gAMA: image gamma × 100 000 (§11.3.2.2).
     pub gamma: Option<u32>,
+    /// cHRM chromaticities, each coordinate × 100 000.
     pub chromaticities: Option<Chromaticities>,
+    /// sRGB rendering intent (§11.3.2.4).
     pub srgb: Option<SrgbIntent>,
+    /// cICP video-signal code points.
     pub cicp: Option<Cicp>,
 }
 
@@ -171,8 +214,8 @@ pub(crate) struct Metadata {
 /// Malformed payloads skip their chunk (§13.1); compressed payloads share `budget` bytes of
 /// inflated output, and a payload that would bust the remainder is skipped, not an error.
 /// Once-only chunks keep their first occurrence.
-pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> Metadata {
-    let mut meta = Metadata::default();
+pub(crate) fn collect(chunks: &[([u8; 4], &[u8])], budget: usize) -> PngMetadata {
+    let mut meta = PngMetadata::default();
     let mut budget = budget;
     for &(chunk_type, data) in chunks {
         match &chunk_type {

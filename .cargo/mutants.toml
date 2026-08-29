@@ -5,7 +5,8 @@
 # Build & test with all features so the dav1d/libavif/libwebp differential "oracle" tests
 # run — they are the strongest signal for the encoder crates. Mirrors `mise run test`
 # (cargo test --workspace --all-features); mutants in gamut-av1/avif/webp therefore need the
-# C toolchain + the third_party/ git submodules checked out.
+# C toolchain + the third_party/ git submodules checked out — including the `update = none`
+# aom/dav1d pair, which `mise run fetch-av1-oracles` pulls (issue #378).
 all_features = true
 
 # Don't mutate the binary/binding crates or the dev-only oracle crates: the binaries' entry points
