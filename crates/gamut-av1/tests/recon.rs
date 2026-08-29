@@ -16,8 +16,8 @@
 //! submodules (`git submodule update --init --recursive`).
 
 use gamut_av1::{Av1Colour, encode_still_intra, encode_still_intra_with};
-use gamut_color::Planar8;
 use gamut_color::cicp::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::{ChromaSubsampling, Planar8};
 
 /// Builds identity planes (Y=G, U=B, V=R) from an RGB generator.
 fn planes(w: u32, h: u32, f: impl Fn(u32, u32) -> [u8; 3]) -> Planar8 {
@@ -54,7 +54,11 @@ fn check_with(encoded: (gamut_av1::EncodedStill, gamut_av1::ReconImage), qindex:
             (w, h),
             "{decoder}: decoded dimensions differ from reconstruction for {w}x{h} q{qindex}"
         );
-        for (p, (dec, enc)) in dplanes.iter().zip(&recon.planes).enumerate() {
+        // Only the coded planes are compared. The two oracles disagree about how to *present* an
+        // absent plane — dav1d returns an empty buffer, libaom materialises a neutral-filled one —
+        // so the presentation is checked separately below rather than folded into byte equality.
+        let coded = recon.subsampling.num_planes();
+        for (p, (dec, enc)) in dplanes.iter().zip(&recon.planes).take(coded).enumerate() {
             if dec != enc && std::env::var("GAMUT_DBG").is_ok() {
                 let k = dec
                     .iter()
@@ -70,6 +74,19 @@ fn check_with(encoded: (gamut_av1::EncodedStill, gamut_av1::ReconImage), qindex:
                 dec, enc,
                 "{decoder}: plane {p} mismatch (decoder vs encoder reconstruction) for {w}x{h} q{qindex}"
             );
+        }
+        // A monochrome stream must carry no chroma *detail*. Asserting emptiness alone would only
+        // hold for dav1d; asserting nothing would let a stream that accidentally coded real chroma
+        // pass, since the loop above never looks at those planes. Neutral-or-absent is the property
+        // both decoders can express, and it is exactly what `mono_chrome = 1` means.
+        if coded == 1 {
+            let neutral = 1u16 << (recon.bit_depth.bits() - 1);
+            for (p, dec) in dplanes.iter().enumerate().skip(1) {
+                assert!(
+                    dec.iter().all(|&v| v == neutral),
+                    "{decoder}: monochrome stream produced chroma detail in plane {p} for {w}x{h} q{qindex}"
+                );
+            }
         }
     };
 
@@ -808,4 +825,84 @@ fn paeth_mode_matches_dav1d() {
             check(&planes(w, h, separable), q);
         }
     }
+}
+
+/// Builds a monochrome (`Cs400`) buffer — one luma plane, no chroma — from a gray generator.
+fn mono_planes(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Planar8 {
+    let mut y = vec![0u8; (w * h) as usize];
+    for row in 0..h {
+        for col in 0..w {
+            y[(row * w + col) as usize] = f(col, row);
+        }
+    }
+    Planar8::from_planes_subsampled(w, h, ChromaSubsampling::Cs400, [y, Vec::new(), Vec::new()])
+        .expect("valid monochrome planes")
+}
+
+#[test]
+fn monochrome_reconstruction_matches_both_decoders() {
+    // A monochrome still is `seq_profile = 0` with `mono_chrome = 1`: one coded luma plane and, per
+    // §5.5.2, no `subsampling_x`/`subsampling_y`/`separate_uv_delta_q` bits at all. Every chroma
+    // syntax element the frame header would otherwise carry — the U delta-Q pair (§5.9.12), the two
+    // chroma deblock levels (§5.9.11), the CDEF UV strengths (§5.9.19) and two of the three
+    // `lr_type`s (§5.9.20) — disappears with it, and `HasChroma` (§5.11.5) turns off `uv_mode`,
+    // `read_cfl_alphas` and `has_palette_uv` in the tile.
+    //
+    // A single wrong bit anywhere in that set desynchronises the arithmetic decoder, so byte
+    // equality against both reference decoders is what proves the whole set is right.
+    let texture = |x: u32, y: u32| (x.wrapping_mul(3).wrapping_add(y.wrapping_mul(5)) % 256) as u8;
+    for &q in &[0u8, 4, 20, 40, 90, 160, 255] {
+        for &(w, h) in &[(8, 8), (17, 13), (32, 32), (64, 48), (100, 70)] {
+            let p = mono_planes(w, h, texture);
+            check_with(
+                encode_still_intra_with(&p, q, Av1Colour::monochrome()).unwrap(),
+                q,
+            );
+        }
+    }
+}
+
+#[test]
+fn monochrome_flat_and_two_tone_content_matches_both_decoders() {
+    // Flat content drives the `skip = 1` path, whose skippability test now consults only the coded
+    // planes; two-tone content drives luma palette mode, whose chroma-flatness precondition is
+    // vacuous without chroma, so a monochrome frame reaches palette on content a 4:4:4 frame would
+    // not. Both are reconstruction paths a plane-count mistake would corrupt silently.
+    let two_tone = |x: u32, y: u32| {
+        if (x / 4 + y / 4).is_multiple_of(2) {
+            30
+        } else {
+            210
+        }
+    };
+    for &q in &[0u8, 8, 64, 200] {
+        for &(w, h) in &[(16, 16), (33, 21), (64, 64)] {
+            check_with(
+                encode_still_intra_with(&mono_planes(w, h, |_, _| 137), q, Av1Colour::monochrome())
+                    .unwrap(),
+                q,
+            );
+            check_with(
+                encode_still_intra_with(&mono_planes(w, h, two_tone), q, Av1Colour::monochrome())
+                    .unwrap(),
+                q,
+            );
+        }
+    }
+}
+
+#[test]
+fn monochrome_rejects_the_identity_matrix() {
+    // §5.5.2 infers `subsampling_x = subsampling_y = 1` for a monochrome stream and §6.4.2 allows
+    // MC_IDENTITY only at 0/0, so the default colour is non-conformant here. Rejecting it keeps
+    // `Av1Colour::default()` from silently producing a stream a decoder may refuse.
+    let p = mono_planes(16, 16, |x, _| x as u8);
+    let err = encode_still_intra(&p, 40).expect_err("identity is not conformant when monochrome");
+    assert!(
+        err.static_message()
+            .is_some_and(|m| m.contains("monochrome stream cannot signal the identity matrix")),
+        "unexpected diagnostic: {err:?}"
+    );
+    // The same buffer encodes once the matrix is a conformant one.
+    assert!(encode_still_intra_with(&p, 40, Av1Colour::monochrome()).is_ok());
 }

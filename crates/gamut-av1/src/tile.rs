@@ -313,6 +313,11 @@ pub(crate) struct Reconstruction {
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
     planes: [&'a [u8]; 3],
+    /// AV1's `NumPlanes` (§5.5.2): 1 for a monochrome frame, 3 otherwise. Every chroma syntax
+    /// element and every chroma coding step is gated on this — `HasChroma` (§5.11.5) is
+    /// `NumPlanes > 1`, and since the coding path is 4:4:4 or monochrome, it is constant for the
+    /// whole frame rather than varying per block.
+    num_planes: usize,
     /// Per-plane sample geometry. `geom[0]` is luma; the MI grid, the partition search and every
     /// entropy context stay on the **luma** grid, so a site that indexes `mi_cols`/`mi_rows` reads
     /// `geom[0]` even when it is working on a chroma plane.
@@ -437,8 +442,13 @@ fn sm_weights(size: usize) -> &'static [i32] {
 }
 
 impl<'a> FrameEncoder<'a> {
-    /// Creates an encoder over the 4:4:4 identity planes (Y=G, U=B, V=R) at quantizer `qindex`
-    /// (`base_q_idx`; 0 selects the lossless path).
+    /// Whether chroma is coded (`HasChroma`, §5.11.5 — `NumPlanes > 1`).
+    fn has_chroma(&self) -> bool {
+        self.num_planes > 1
+    }
+
+    /// Creates an encoder over the identity planes (Y=G, U=B, V=R) at quantizer `qindex`
+    /// (`base_q_idx`; 0 selects the lossless path). 4:4:4, or monochrome with a luma plane only.
     pub(crate) fn new(planes: &'a Planar8, qindex: u8) -> Self {
         let width = planes.width() as usize;
         let height = planes.height() as usize;
@@ -455,6 +465,7 @@ impl<'a> FrameEncoder<'a> {
         };
         Self {
             planes: [planes.plane(0), planes.plane(1), planes.plane(2)],
+            num_planes: planes.subsampling().num_planes(),
             geom,
             mi_cols,
             mi_rows,
@@ -575,7 +586,7 @@ impl<'a> FrameEncoder<'a> {
             self.current_dlf = 0;
             let mut r = 0;
             while r < self.mi_rows {
-                for plane in 0..3 {
+                for plane in 0..self.num_planes {
                     self.left_level[plane].iter_mut().for_each(|v| *v = 0);
                     self.left_dc[plane].iter_mut().for_each(|v| *v = 0);
                 }
@@ -624,6 +635,7 @@ impl<'a> FrameEncoder<'a> {
                 &self.mi_skip,
                 self.mi_cols,
                 self.qindex,
+                self.num_planes,
             );
         }
         let recon = Reconstruction {
@@ -916,7 +928,7 @@ impl<'a> FrameEncoder<'a> {
     /// source — the chosen `skip` is therefore bit-exact regardless of the (deterministic) mode.
     fn block_is_skippable(&self, r: usize, c: usize, bw: usize) -> bool {
         let (sx, sy) = (c * 4, r * 4);
-        for plane in 0..3 {
+        for plane in 0..self.num_planes {
             let v0 = self.sample(plane, sx, sy);
             for i in 0..bw {
                 for j in 0..bw {
@@ -934,9 +946,11 @@ impl<'a> FrameEncoder<'a> {
 
     /// Decides whether to code a lossy block at MI `(r, c)` with luma palette mode (§5.11.46): the
     /// luma block must have 2..=8 distinct colors, and (so the block can be coded `skip = 1` with the
-    /// reconstruction being exactly the palette + DC chroma) every chroma plane must be flat and
-    /// DC-predictable. Returns the sorted palette and the per-pixel index map. This is a quality
-    /// decision; any choice reconstructs bit-exactly, so only the signaling has to be correct.
+    /// reconstruction being exactly the palette + DC chroma) every **coded** chroma plane must be
+    /// flat and DC-predictable — a monochrome frame has none, so that condition is vacuous there
+    /// and palette is reachable on content a 4:4:4 frame would reject. Returns the sorted palette
+    /// and the per-pixel index map. This is a quality decision; any choice reconstructs
+    /// bit-exactly, so only the signaling has to be correct.
     fn decide_palette(&self, r: usize, c: usize, bw: usize) -> Option<PaletteBlock> {
         let (sx, sy) = (c * 4, r * 4);
         // Distinct luma colors (sorted).
@@ -955,7 +969,9 @@ impl<'a> FrameEncoder<'a> {
             return None;
         }
         // Chroma must be flat and exactly DC-predictable (chroma residual identically 0 ⇒ skip = 1).
-        for plane in 1..3 {
+        // A monochrome frame has no chroma to constrain, so the loop is empty and every luma
+        // palette candidate stands on its own.
+        for plane in 1..self.num_planes {
             let v0 = self.sample(plane, sx, sy);
             for i in 0..bw {
                 for j in 0..bw {
@@ -1108,7 +1124,7 @@ impl<'a> FrameEncoder<'a> {
                     u16::from(pal.colors[idx]);
             }
         }
-        for plane in 1..3 {
+        for plane in 1..self.num_planes {
             let dc = clip_pixel(self.dc_pred(plane, sx, sy, bw, bw), self.bit_depth);
             for i in 0..bw {
                 for j in 0..bw {
@@ -1116,7 +1132,7 @@ impl<'a> FrameEncoder<'a> {
                 }
             }
         }
-        for plane in 0..3 {
+        for plane in 0..self.num_planes {
             self.set_ctx(plane, sx >> 2, sy >> 2, bw / 4, bw / 4, 0, 0);
         }
     }
@@ -1305,30 +1321,34 @@ impl<'a> FrameEncoder<'a> {
         } else {
             bw.max(bh) <= 32
         };
-        let cfl = if palette.is_some() {
-            None // a palette block's chroma is DC_PRED (no CfL)
+        let cfl = if !self.has_chroma() || palette.is_some() {
+            None // no chroma at all, or a palette block whose chroma is DC_PRED (no CfL)
         } else if self.qindex > 0 && cfl_allowed && !is_rect {
             self.select_cfl(c * 4, r * 4, bw)
         } else {
             None // CfL is square-only here; a rectangular block's chroma is plain DC_PRED
         };
         let ym = usize::from(y_mode);
-        if cfl_allowed {
-            let uv = if cfl.is_some() { UV_CFL_PRED } else { DC_PRED };
-            cdf::encode(
-                &mut self.sym,
-                usize::from(uv),
-                self.cdfs.uv_mode_cfl_allowed[ym].slot(),
-            );
-            if let Some((au, av)) = cfl {
-                self.emit_cfl_alphas(au, av);
+        // §5.11.7 wraps `uv_mode` (and the `read_cfl_alphas` that follows UV_CFL_PRED) in
+        // `if (HasChroma)`. A monochrome frame codes neither.
+        if self.has_chroma() {
+            if cfl_allowed {
+                let uv = if cfl.is_some() { UV_CFL_PRED } else { DC_PRED };
+                cdf::encode(
+                    &mut self.sym,
+                    usize::from(uv),
+                    self.cdfs.uv_mode_cfl_allowed[ym].slot(),
+                );
+                if let Some((au, av)) = cfl {
+                    self.emit_cfl_alphas(au, av);
+                }
+            } else {
+                cdf::encode(
+                    &mut self.sym,
+                    0,
+                    self.cdfs.uv_mode_cfl_not_allowed[ym].slot(),
+                );
             }
-        } else {
-            cdf::encode(
-                &mut self.sym,
-                0,
-                self.cdfs.uv_mode_cfl_not_allowed[ym].slot(),
-            );
         }
 
         // palette_mode_info (§5.11.46): with allow_screen_content_tools an 8×8..64×64 block signals
@@ -1359,7 +1379,8 @@ impl<'a> FrameEncoder<'a> {
                 }
             }
             // UVMode == DC_PRED; the context is `(PaletteSizeY > 0)`. No chroma palette is used.
-            if cfl.is_none() {
+            // §5.11.46 also requires `HasChroma`, so a monochrome frame codes no `has_palette_uv`.
+            if self.has_chroma() && cfl.is_none() {
                 let uctx = usize::from(palette.is_some());
                 cdf::encode(&mut self.sym, 0, self.cdfs.palette_uv_mode[uctx].slot());
             }
@@ -1491,7 +1512,7 @@ impl<'a> FrameEncoder<'a> {
                 _ => TxSize::Tx32x32,
             }
         };
-        for plane in 0..3 {
+        for plane in 0..self.num_planes {
             let pred = Pred {
                 mode: if plane == 0 { y_mode } else { DC_PRED },
                 angle_delta: if plane == 0 { angle_delta } else { 0 },
