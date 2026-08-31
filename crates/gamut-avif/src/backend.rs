@@ -709,3 +709,206 @@ impl LateDecline {
             && err.static_message() == Some(Self::MESSAGE)
     }
 }
+
+/// Direct tests of the private sequence-header parser.
+///
+/// [`SeqHeaderParams::parse`] is reachable from the integration suite only through
+/// [`still_from_backend_obus`], which checks the coded **bit depth before the chroma format**. Every
+/// 12-bit stream that suite can build is paired with an 8-bit request, so it stops at the depth
+/// error and never observes the derived layout at all — and the layout is what §5.5.2 makes
+/// subtle. Two of the derivations below have no end-to-end route whatever: `chroma_sample_position`
+/// because `gamut-av1` fixes it at 0 and exposes no entry point taking an
+/// [`Av1StillConfig`](gamut_av1::Av1StillConfig), and the coded `subsampling_y` because the encoder
+/// takes a job's chroma from the buffer it was handed and no *subsampled* 12-bit request reaches
+/// this parser. So these call `parse` directly and assert what it returned.
+///
+/// The bit writer duplicates the one in `tests/backend.rs` deliberately: an integration-test binary
+/// and a unit-test module cannot share code, and the crate may not dev-depend on `gamut-bitstream`
+/// (a publishable crate must not dev-depend on another without a normal edge — `check-release-deps`).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dimensions every test stream carries; both need more than one bit to code, so a
+    /// `dimension_bits` mistake cannot hide behind a zero-width field.
+    const W: u32 = 34;
+    const H: u32 = 18;
+
+    /// An MSB-first bit writer. The byte vector *is* the payload — a partial final byte is already
+    /// zero-padded, which is what `trailing_bits` requires.
+    #[derive(Default)]
+    struct BitWriter {
+        bytes: Vec<u8>,
+        bit: u32,
+    }
+
+    impl BitWriter {
+        /// Appends the low `n` bits of `value`, most significant first.
+        fn put(&mut self, value: u32, n: u32) -> &mut Self {
+            for i in (0..n).rev() {
+                if self.bit == 0 {
+                    self.bytes.push(0);
+                }
+                let last = self.bytes.len() - 1;
+                self.bytes[last] |= (((value >> i) & 1) as u8) << (7 - self.bit);
+                self.bit = (self.bit + 1) % 8;
+            }
+            self
+        }
+    }
+
+    /// The bit width `dimension_bits` gives `value`.
+    fn dim_bits(value: u32) -> u32 {
+        32 - (value - 1).leading_zeros()
+    }
+
+    /// A `reduced_still_picture_header` sequence-header OBU carrying the §5.5.2 colour tail the
+    /// arguments describe.
+    ///
+    /// `mc` selects the matrix code point, and with it whether the sRGB shortcut applies (`0` is
+    /// `MC_IDENTITY`, which alongside BT.709 primaries and sRGB transfer takes it). `coded_pair` is
+    /// the explicit `subsampling_x`/`subsampling_y` that only profile 2 at 12 bits codes, and `csp`
+    /// the `chroma_sample_position` that follows only when both axes are subsampled.
+    fn seq_header_obus(
+        seq_profile: u8,
+        high_bitdepth: bool,
+        twelve_bit: bool,
+        mc: u32,
+        coded_pair: Option<(u32, u32)>,
+        csp: u32,
+    ) -> Vec<u8> {
+        let (wbits, hbits) = (dim_bits(W), dim_bits(H));
+        let mut b = BitWriter::default();
+        b.put(u32::from(seq_profile), 3)
+            .put(1, 1) // still_picture
+            .put(1, 1) // reduced_still_picture_header
+            .put(0, 5) // seq_level_idx[0]
+            .put(wbits - 1, 4)
+            .put(hbits - 1, 4)
+            .put(W - 1, wbits)
+            .put(H - 1, hbits)
+            .put(0, 6) // the six enable flags
+            .put(u32::from(high_bitdepth), 1);
+        if seq_profile == 2 && high_bitdepth {
+            b.put(u32::from(twelve_bit), 1);
+        }
+        if seq_profile != 1 {
+            b.put(0, 1); // mono_chrome
+        }
+        b.put(1, 1) // color_description_present_flag
+            .put(1, 8) // color_primaries = BT.709
+            .put(13, 8) // transfer_characteristics = sRGB
+            .put(mc, 8);
+        if mc != 0 {
+            b.put(1, 1); // color_range = full
+            let (sx, sy) = match coded_pair {
+                Some((sx, sy)) => {
+                    b.put(sx, 1);
+                    if sx == 1 {
+                        b.put(sy, 1);
+                    }
+                    (sx, sy)
+                }
+                None if seq_profile == 0 => (1, 1),
+                None if seq_profile == 1 => (0, 0),
+                None => (1, 0),
+            };
+            if (sx, sy) == (1, 1) {
+                b.put(csp, 2);
+            }
+            // The tail §5.5.2 codes after the chroma fields. Present so a parser that reads one bit
+            // too many finds a real field rather than running off the payload — the failure should
+            // be a wrong value, not a truncation error.
+            b.put(0, 1); // separate_uv_delta_q
+            b.put(0, 1); // film_grain_params_present
+        }
+        let payload = std::mem::take(&mut b.bytes);
+        let mut obus = vec![0x0A, payload.len() as u8];
+        obus.extend_from_slice(&payload);
+        obus
+    }
+
+    /// Parses one stream, asserting every field the container mirrors — not just the one under
+    /// test. A misparse that happens to land on the expected chroma is then still caught.
+    #[track_caller]
+    fn assert_parse(
+        obus: &[u8],
+        bit_depth: BitDepth,
+        seq_profile: u8,
+        chroma: ChromaSubsampling,
+        chroma_sample_position: u8,
+    ) {
+        let h = SeqHeaderParams::parse(obus).expect("the stream is a well-formed sequence header");
+        assert_eq!(h.bit_depth, bit_depth, "bit_depth");
+        assert_eq!(h.seq_profile, seq_profile, "seq_profile");
+        assert_eq!(h.seq_level_idx_0, 0, "seq_level_idx_0");
+        assert_eq!((h.width, h.height), (W, H), "coded dimensions");
+        assert_eq!(h.colour, (1, 13, 1, true), "colour");
+        assert_eq!(h.chroma, chroma, "derived chroma");
+        assert_eq!(
+            h.chroma_sample_position, chroma_sample_position,
+            "chroma_sample_position"
+        );
+    }
+
+    /// §5.5.2 infers 4:4:4 for profile 1 with no bit coding it. The depth cannot reach 12 here —
+    /// `twelve_bit` is coded only under profile 2 — so the layout comes from the profile alone.
+    #[test]
+    fn profile_one_infers_four_four_four() {
+        let obus = seq_header_obus(1, false, false, 1, None, 0);
+        assert_parse(&obus, BitDepth::Eight, 1, ChromaSubsampling::Cs444, 0);
+    }
+
+    /// Profile 2 at 12 bits is the one configuration that *codes* the pair, and `subsampling_x = 0`
+    /// is 4:4:4 — the layout an ordinary lossless high-bit-depth encode produces. `subsampling_y`
+    /// is not coded, so a parser reading it here would consume `separate_uv_delta_q`.
+    #[test]
+    fn twelve_bit_profile_two_codes_four_four_four() {
+        let obus = seq_header_obus(2, true, true, 1, Some((0, 0)), 0);
+        assert_parse(&obus, BitDepth::Twelve, 2, ChromaSubsampling::Cs444, 0);
+    }
+
+    /// `subsampling_x = 1, subsampling_y = 0` is 4:2:2 — and, unlike every other profile-2 stream,
+    /// it is 4:2:2 because the bits say so rather than because §5.5.2 fixes it.
+    #[test]
+    fn twelve_bit_profile_two_codes_four_two_two() {
+        let obus = seq_header_obus(2, true, true, 1, Some((1, 0)), 0);
+        assert_parse(&obus, BitDepth::Twelve, 2, ChromaSubsampling::Cs422, 0);
+    }
+
+    /// Below 12 bits profile 2 is fixed at 4:2:2 with no bit coding it, so the pair must not be
+    /// read — the depth, not the profile alone, decides whether the syntax codes it.
+    #[test]
+    fn profile_two_below_twelve_bits_infers_four_two_two() {
+        let obus = seq_header_obus(2, true, false, 1, None, 0);
+        assert_parse(&obus, BitDepth::Ten, 2, ChromaSubsampling::Cs422, 0);
+    }
+
+    /// Profile 0 infers 4:2:0, and `chroma_sample_position` is coded exactly when both axes are
+    /// subsampled. A parser that skipped the read would report `CSP_UNKNOWN` for a stream that
+    /// named a real position.
+    #[test]
+    fn profile_zero_infers_four_two_zero_and_reads_its_sample_position() {
+        let obus = seq_header_obus(0, false, false, 1, None, 1);
+        assert_parse(&obus, BitDepth::Eight, 0, ChromaSubsampling::Cs420, 1);
+    }
+
+    /// The coded `(1, 1)` pair is 4:2:0, which then codes a sample position of its own — the one
+    /// stream in which both the coded pair and the position are read.
+    #[test]
+    fn twelve_bit_profile_two_codes_four_two_zero_with_a_sample_position() {
+        let obus = seq_header_obus(2, true, true, 1, Some((1, 1)), 2);
+        assert_parse(&obus, BitDepth::Twelve, 2, ChromaSubsampling::Cs420, 2);
+    }
+
+    /// The §5.5.2 sRGB shortcut infers 4:4:4 and codes nothing after the colour description — so
+    /// `chroma_sample_position` stays 0 even though the inferred layout is not 4:2:0.
+    #[test]
+    fn the_srgb_shortcut_infers_four_four_four_and_codes_no_sample_position() {
+        let obus = seq_header_obus(1, false, false, 0, None, 0);
+        let h = SeqHeaderParams::parse(&obus).expect("the shortcut stream parses");
+        assert_eq!(h.chroma, ChromaSubsampling::Cs444);
+        assert_eq!(h.chroma_sample_position, 0);
+        assert_eq!(h.colour, (1, 13, 0, true), "the shortcut infers full range");
+    }
+}
