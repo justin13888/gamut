@@ -9,11 +9,12 @@ use std::cell::RefCell;
 
 use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
+use gamut_metadata::exif::Exif;
 
 use crate::color_profile::{ColorProfileInfo, NoiseProfile, TagSource};
 use crate::gain_map::ProfileGainTableMap;
 use crate::levels::RawLevels;
-use crate::metadata::{DngMetadata, ExifMetadata};
+use crate::metadata::DngMetadata;
 use crate::opcode::OpcodeList;
 use crate::profile::CameraProfile;
 use crate::raw::RawImage;
@@ -146,6 +147,10 @@ pub struct DecodedDng {
     /// directly and byte order never enters into it.
     pub dng_version: [u8; 4],
     /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
+    ///
+    /// The `ExifIFD` arrives whole, as the shared [`Exif`](gamut_metadata::exif::Exif) model —
+    /// every entry of the directory, not a chosen subset — so nothing in it needs a separate
+    /// verbatim escape hatch.
     pub metadata: DngMetadata,
     /// The raw IFD's `ProfileGainTableMap` (52525), if present.
     pub gain_table_map: Option<ProfileGainTableMap>,
@@ -169,8 +174,6 @@ pub struct DecodedDng {
     /// Every unmodelled field of the raw IFD, verbatim. Empty when the raw image lives in IFD 0
     /// itself (its extras are then in [`ifd0_extra`](Self::ifd0_extra)).
     pub raw_extra: Vec<RawTag>,
-    /// Every EXIF sub-IFD entry beyond the typed [`ExifMetadata`] fields, verbatim.
-    pub exif_extra: Vec<RawTag>,
 }
 
 /// The verdict of [`DngDecoder::verify_new_raw_image_digest`].
@@ -306,7 +309,7 @@ impl DngDecoder {
         });
         let new_raw_image_digest = bytes_value(ifd0.get(tags::NEW_RAW_IMAGE_DIGEST))
             .and_then(|b| <[u8; 16]>::try_from(b).ok());
-        let (metadata, exif_extra) = decode_metadata(ifd0, data, order, variant);
+        let metadata = decode_metadata(ifd0, data, order, variant);
         let gain_table_map = decode_gain_map(raw_ifd, tags::PROFILE_GAIN_TABLE_MAP, order)?;
         let gain_table_map2 = decode_gain_map(ifd0, tags::PROFILE_GAIN_TABLE_MAP2, order)?;
         let depth_info = decode_depth_info(ifd0);
@@ -351,47 +354,35 @@ impl DngDecoder {
             new_raw_image_digest,
             ifd0_extra,
             raw_extra,
-            exif_extra,
         })
     }
 }
 
-/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD —
-/// plus the EXIF entries beyond the typed fields, verbatim.
+/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD.
+///
+/// The `ExifIFD` is handed over whole, as the shared [`Exif`] model's Exif sub-IFD: every entry
+/// the directory holds survives, so no field of it is "unmodelled" and none is dropped. The DNG's
+/// own IFD 0 is *not* copied into the model's 0th IFD — [`DecodedDng`] already carries those
+/// fields, typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
 fn decode_metadata(
     ifd0: &TrackedIfd,
     data: &[u8],
     order: ByteOrder,
     variant: Variant,
-) -> (DngMetadata, Vec<RawTag>) {
-    let (exif, exif_extra) = ifd0
+) -> DngMetadata {
+    let exif = ifd0
         .get_u32(tags::EXIF_IFD)
         .and_then(|offset| read_ifd_at(data, u64::from(offset), order, variant).ok())
         .map(|exif_ifd| {
-            let tracked = TrackedIfd::new(&exif_ifd);
-            let exif = decode_exif(&tracked);
-            (exif, tracked.remaining())
-        })
-        .unwrap_or_default();
-    let metadata = DngMetadata {
+            let mut exif = Exif::new(order);
+            exif.set_exif_ifd(exif_ifd);
+            exif
+        });
+    DngMetadata {
         exif,
         xmp: bytes_value(ifd0.get(tags::XMP)),
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
-    };
-    (metadata, exif_extra)
-}
-
-/// Reads the common capture settings out of an EXIF sub-IFD.
-fn decode_exif(exif: &TrackedIfd) -> ExifMetadata {
-    ExifMetadata {
-        exposure_time: rational_pair(exif.get(tags::EXPOSURE_TIME)),
-        f_number: rational_pair(exif.get(tags::F_NUMBER)),
-        iso_speed: exif
-            .get_u32(tags::ISO_SPEED_RATINGS)
-            .and_then(|v| u16::try_from(v).ok()),
-        date_time_original: ascii_value(exif.get(tags::DATE_TIME_ORIGINAL)),
-        focal_length: rational_pair(exif.get(tags::FOCAL_LENGTH)),
     }
 }
 
