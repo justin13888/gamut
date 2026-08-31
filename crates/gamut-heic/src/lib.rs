@@ -20,6 +20,9 @@
 //!   trailing non-box bytes become an explicit [`SegmentKind::Trailer`]. Boxes inside `meta` that
 //!   the semantic parse does not consume are surfaced as [`UnknownBox`]es. Vendor motion-photo
 //!   *semantics* stay downstream; this layer exposes the container's true representation.
+//!   [`HeifContainer::c2pa`] is a lens over the same walk: it locates the C2PA manifest store in a
+//!   top-level `uuid` `ContentProvenanceBox` and reports it as opaque bytes plus its exact byte
+//!   range ([`C2paManifestStore`] — a locator, never a validator).
 //! - [`HeifImage`] — the **role-typed semantic view** over the primary still-image stream, wrapping
 //!   [`gamut_isobmff::IsoBmffImage`]. It reads roles (primary image, alpha/depth auxiliaries,
 //!   thumbnails, Exif/XMP metadata, grid/overlay derivations) as computed lenses over the items,
@@ -144,6 +147,7 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+mod c2pa;
 mod container;
 mod decode;
 mod hvcc;
@@ -153,6 +157,7 @@ mod nal;
 pub use backend::{
     AbiHevcDecoder, BACKEND_DECLINED, HEVC_CODEC_ID, HevcDecoders, NO_BACKEND, planar_pixel_format,
 };
+pub use c2pa::{C2PA_UUID, C2paBoxPurpose, C2paManifestStore};
 pub use container::{HeifContainer, Segment, SegmentKind, UnknownBox, UnknownBoxLocation};
 pub use decode::{DecodedFrame, HevcDecoder};
 pub use hvcc::{ChromaFormat, HevcConfig, NalArray};

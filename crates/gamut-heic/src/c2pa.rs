@@ -1,0 +1,223 @@
+//! Locating the C2PA manifest store carried by a HEIF file ([`HeifContainer::c2pa`]).
+//!
+//! C2PA (Coalition for Content Provenance and Authenticity, spec version 2.4) carries its manifest
+//! store in an ISOBMFF file inside a top-level `uuid` box — the `ContentProvenanceBox` of §A.5.1 —
+//! whose 16-byte extended (user) type is [`C2PA_UUID`]. This module is a **locator only**: it finds
+//! that box, strips the framing the specification puts around the store, and reports the store as
+//! opaque bytes plus its exact byte range. It parses nothing inside the store beyond the outer JUMBF
+//! length field that bounds it, verifies no hash, checks no signature, and reaches no verdict about
+//! the file's provenance — validation belongs to a C2PA validator downstream.
+//!
+//! §A.5.1.2 defines the box as a `FullBox` with `version = 0` and `flags = 0`:
+//!
+//! ```text
+//! aligned(8) class ContentProvenanceBox extends FullBox('uuid', extended_type = C2PA_UUID,
+//!                                                      version = 0, 0) {
+//!   string box_purpose;   // null-terminated
+//!   bit(8) data[];
+//! }
+//! ```
+//!
+//! So the bytes after the box header run: the 16-byte user type, then the `FullBox` version and
+//! flags, then the null-terminated `box_purpose`, then `data`. What sits at the front of `data`
+//! depends on the purpose ([`C2paBoxPurpose`]), and what bounds the store inside it is the store's
+//! own JUMBF `LBox` ([`C2paManifestStore`]).
+use core::ops::Range;
+
+use crate::container::{HeifContainer, SegmentKind};
+
+/// The 16-byte extended (user) type identifying a `uuid` box as a C2PA `ContentProvenanceBox`.
+///
+/// `D8FEC3D6-1B0E-483C-9297-5828877EC481`, fixed by C2PA 2.4 §A.5.1.1.
+pub const C2PA_UUID: [u8; 16] = [
+    0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
+];
+
+/// Length of the `FullBox` version (1 byte) + flags (3 bytes) that follow the `uuid` user type.
+const VERSION_FLAGS_LEN: usize = 4;
+
+/// Length of the absolute file offset of the first `merkle` box, which §A.5.3 places at the front of
+/// `data` for the `manifest` and `original` purposes.
+const MERKLE_OFFSET_LEN: usize = 8;
+
+/// Minimum length of a JUMBF box: its 4-byte `LBox` plus its 4-byte `TBox` (§8.4.2.3).
+const JUMBF_HEADER_LEN: usize = 8;
+
+/// The `box_purpose` of a C2PA `uuid` box that carries a manifest store (C2PA 2.4 §A.5.3).
+///
+/// §A.5.3 admits exactly three purposes for a box that carries a manifest store, and they do not
+/// frame the box's `data` field identically:
+///
+/// | `box_purpose` | Meaning (§A.5.3) | `data` layout |
+/// | --- | --- | --- |
+/// | `manifest` | the ordinary manifest store | 8-byte absolute file offset of the first `merkle` box (zero if the file has none), then the store, then zero or more padding bytes |
+/// | `original` | the unchanged store of a file that is mid-update; a sibling `update` box is present | as `manifest` — §A.5.3 states the merkle offset is present "inside the 'uuid' box of type manifest **or original**" |
+/// | `update` | a store holding update manifests only | the store directly, then zero or more padding bytes — §A.5.3 attaches no merkle offset to this purpose |
+///
+/// That asymmetry is why [`C2paManifestStore::range`] starts eight bytes later inside a
+/// `manifest`/`original` box than inside an `update` one.
+///
+/// A fourth purpose, `merkle`, names an *auxiliary* box holding Merkle-tree hashes; §A.5.3 does not
+/// list it among the purposes of a manifest-store box, so a `merkle` box is **not** reported by
+/// [`HeifContainer::c2pa`] or [`HeifContainer::c2pa_manifest_stores`], and neither is any other
+/// unrecognised `box_purpose` value.
+///
+/// Non-exhaustive and with permanent discriminants: a later revision may add a variant without a
+/// breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum C2paBoxPurpose {
+    /// `manifest` — the ordinary manifest store. Its `data` opens with the 8-byte absolute file
+    /// offset of the first auxiliary `merkle` box (zero when the file has none).
+    Manifest = 0,
+    /// `original` — the untouched store of a file being updated; a sibling `update` box is present.
+    /// Its `data` is framed exactly as `manifest`'s, merkle offset included.
+    Original = 1,
+    /// `update` — a store containing update manifests only. Its `data` opens with the store itself:
+    /// no merkle offset precedes it.
+    Update = 2,
+}
+
+impl C2paBoxPurpose {
+    /// Maps the null-terminated `box_purpose` string's bytes to a manifest-store purpose, or `None`
+    /// for `merkle` and every unrecognised value.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        match bytes {
+            b"manifest" => Some(Self::Manifest),
+            b"original" => Some(Self::Original),
+            b"update" => Some(Self::Update),
+            _ => None,
+        }
+    }
+
+    /// The bytes of `data` that precede the manifest store for this purpose.
+    const fn store_prefix_len(self) -> usize {
+        match self {
+            Self::Manifest | Self::Original => MERKLE_OFFSET_LEN,
+            Self::Update => 0,
+        }
+    }
+}
+
+/// A C2PA manifest store located in a HEIF file: the store's opaque bytes, its exact byte range in
+/// the file, and the `box_purpose` of the `uuid` box that carried it.
+///
+/// # What bounds the store
+///
+/// Not the enclosing box length: C2PA 2.4 §A.5.3 permits "zero or more unused padding bytes" after
+/// the store. The store is a JUMBF superbox, and a JUMBF box begins with "a box length (LBox, as a
+/// 4-byte big-endian unsigned integer); a box type (TBox, 4-byte big-endian unsigned integer …)"
+/// (§8.4.2.3), so that leading `LBox` is what bounds it and what [`bytes`](Self::bytes) is trimmed
+/// to. An `LBox` smaller than the 8-byte JUMBF header it must itself cover, or one overrunning the
+/// enclosing `uuid` box, means the bytes are not a manifest store: nothing is reported for that box,
+/// and it is never turned into an error.
+///
+/// # The range is observability, not an exclusion range
+///
+/// [`range`](Self::range) is where the store sits in the file — for byte accounting, extraction, and
+/// reporting. It is **not** a BMFF hard-binding exclusion range: `c2pa.hash.bmff.v3` excludes content
+/// by *box path*, not by byte offset (C2PA 2.4 §18.6, §A.5.6), so computing or checking a BMFF hash
+/// from this range would be wrong. Nothing here validates anything.
+///
+/// Non-exhaustive: a later revision may report more of the box's framing without a breaking change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct C2paManifestStore<'a> {
+    /// The manifest store's bytes, exactly: the box header, the 16-byte user type, the `FullBox`
+    /// version and flags, the `box_purpose` string, the merkle offset (when the purpose carries one)
+    /// and any trailing padding are all excluded. Opaque — a JUMBF superbox this crate does not
+    /// parse beyond its outer `LBox`.
+    pub bytes: &'a [u8],
+    /// The half-open byte range [`bytes`](Self::bytes) occupies within the input file, so
+    /// `range.len() == bytes.len()`.
+    pub range: Range<usize>,
+    /// The `box_purpose` of the `uuid` box that carried this store.
+    pub purpose: C2paBoxPurpose,
+}
+
+impl<'a> HeifContainer<'a> {
+    /// The first C2PA manifest store in the file, in file order, or `None` if the file carries none.
+    ///
+    /// A file that is mid-update legitimately carries two stores — an `original` box and an `update`
+    /// box (C2PA 2.4 §A.5.3) — and deciding which of them is *active* is a validator's judgement,
+    /// not a container reader's. This accessor therefore promises only "the first one"; use
+    /// [`c2pa_manifest_stores`](Self::c2pa_manifest_stores) to see them all and their purposes.
+    ///
+    /// See [`C2paManifestStore`] for exactly what is stripped, what bounds the store, and why the
+    /// reported range must not be treated as a BMFF exclusion range.
+    #[must_use]
+    pub fn c2pa(&self) -> Option<C2paManifestStore<'a>> {
+        self.c2pa_manifest_stores().next()
+    }
+
+    /// Every C2PA manifest store in the file, in file order.
+    ///
+    /// Only *top-level* `uuid` boxes are considered, which is where C2PA 2.4 §A.5.3 puts the box
+    /// ("before the first 'mdat' box … after the 'ftyp' box"); a `uuid` box nested inside `meta` is
+    /// not a manifest store and is surfaced — as it always was — through
+    /// [`unknown_meta_boxes`](Self::unknown_meta_boxes) instead. The actual position of the box is
+    /// reported as found and never enforced: a store placed outside the window §A.5.3 mandates is
+    /// still reported, with its true range.
+    ///
+    /// A top-level `uuid` box whose user type is not [`C2PA_UUID`], whose `FullBox` version or flags
+    /// are non-zero, whose `box_purpose` is not one of [`C2paBoxPurpose`]'s, or whose contents are
+    /// truncated or self-inconsistent is skipped silently: this is a lens over bytes that happen to
+    /// be present, so a malformed or foreign box yields nothing rather than an error.
+    pub fn c2pa_manifest_stores(&self) -> impl Iterator<Item = C2paManifestStore<'a>> + '_ {
+        self.segments()
+            .iter()
+            .filter_map(|segment| match segment.kind {
+                SegmentKind::Box { ty, body } if &ty == b"uuid" => {
+                    // `range` spans the header and the body, so `range.end - body.len()` is the absolute
+                    // offset of the body — correct for an 8-byte header and a 16-byte largesize one
+                    // alike, without the container needing to report the header width.
+                    let body_start = segment.range.end.checked_sub(body.len())?;
+                    parse_content_provenance_box(body, body_start)
+                }
+                _ => None,
+            })
+    }
+}
+
+/// Parses one top-level `uuid` box body (starting at absolute offset `body_start`) into the manifest
+/// store it carries, or `None` if it does not carry one.
+fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paManifestStore<'_>> {
+    // §A.5.1.1: the extended type is what makes a `uuid` box a ContentProvenanceBox.
+    if body.get(..C2PA_UUID.len())? != &C2PA_UUID[..] {
+        return None;
+    }
+    // §A.5.1.2: a FullBox with version 0 and flags 0. `RawBox::payload` strips the user type but not
+    // these four bytes, so they are read here.
+    let after_uuid = body.get(C2PA_UUID.len()..)?;
+    if after_uuid.get(..VERSION_FLAGS_LEN)? != &[0u8; VERSION_FLAGS_LEN][..] {
+        return None;
+    }
+    let after_full_box = after_uuid.get(VERSION_FLAGS_LEN..)?;
+
+    // `string box_purpose` — null-terminated, per §A.5.1.2.
+    let terminator = after_full_box.iter().position(|&b| b == 0)?;
+    let purpose = C2paBoxPurpose::from_bytes(after_full_box.get(..terminator)?)?;
+    let data = after_full_box.get(terminator + 1..)?;
+
+    // §A.5.3: `manifest` and `original` put the absolute merkle-box offset in front of the store.
+    let store_and_padding = data.get(purpose.store_prefix_len()..)?;
+
+    // §8.4.2.3: a JUMBF box opens with a 4-byte big-endian LBox covering the whole box. It, not the
+    // enclosing `uuid` box, bounds the store — §A.5.3 allows unused padding bytes after it.
+    let lbox_bytes: [u8; 4] = store_and_padding.get(..4)?.try_into().ok()?;
+    let lbox = u32::from_be_bytes(lbox_bytes) as usize;
+    if lbox < JUMBF_HEADER_LEN {
+        return None;
+    }
+    // The same `get` rejects an `LBox` that overruns the box: padding may follow the store, but the
+    // store may not run past the bytes the box actually holds.
+    let bytes = store_and_padding.get(..lbox)?;
+
+    let start = body_start + (body.len() - store_and_padding.len());
+    Some(C2paManifestStore {
+        bytes,
+        range: start..start + lbox,
+        purpose,
+    })
+}
