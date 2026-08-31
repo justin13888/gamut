@@ -97,6 +97,14 @@ implementation writes and skips the 8-byte offset for `update` exactly as for th
 mid-update files carry it. Rather than pick a reading, the locator probes offset 8 first and falls
 back to offset 0, accepting the first that yields a valid `LBox` bound and reporting nothing if
 neither does; `manifest` and `original`, whose framing the specification does state, are not probed.
+That probe is decided by `LBox` validity alone, which is **content-dependent**: a JUMBF superbox's
+interior is itself length-prefixed, so for an `update` box written *without* the offset, offset 8
+lands past both `LBox` and `TBox` on the first interior box's own length — small, plausible and
+in-bounds — which can be accepted and trim the reported store to a fragment. A `manifest`/`original`
+store, and an `update` store carrying the `c2pa-rs` offset, are located reliably; only the
+offset-less `update` layout is exposed, and no known writer emits one. The probe is nonetheless
+strictly better than a fixed 8-byte skip, since the fallback runs only where the fixed offset found
+nothing. See the deferred row below for what would close it.
 `merkle` boxes and
 every unrecognised `box_purpose` are not manifest stores and are not reported; a `uuid` box nested in
 `meta` is not one either and keeps surfacing through `unknown_meta_boxes`. The scan covers the
@@ -132,6 +140,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Stop rules identical to `gamut_isobmff::read` (first ftyp wins; trailer only after ftyp+meta) | 14496-12 | ✅ | S1 |
 | Meta-level accounting: `meta`/`iprp` children not consumed by the model surfaced as `UnknownBox` (e.g. `dinf`/`dref`, `uuid`) | 14496-12 | ✅ | S1 |
 | C2PA manifest store located in a top-level `uuid` `ContentProvenanceBox`: opaque bytes + exact byte range, purposes `manifest`/`original`/`update` (`c2pa`, `c2pa_manifest_stores`) | C2PA 2.4 §A.5.1, §A.5.3, §8.4.2.3 (`references/c2pa` pending, #431) | ✅ | S7 |
+| `update` store bounding is probe-based and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length); closing it needs 19566-5's JUMBF type code or a `c2pa-rs` oracle fixture | ISO/IEC 19566-5 (not vendored); C2PA 2.4 §A.5.3 | ☐ | #239 oracle |
 | C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` | C2PA 2.4 §A.5 | ☐ | later |
 | C2PA validation: JUMBF interior parse, `c2pa.hash.bmff.v3` hard binding, signature/trust verification | C2PA 2.4 §18.6, §A.5.6 | ☐ | user / #239 |
 | `ftyp` brands + `is_hevc_still` (`heic`/`heix`/`heim`/`heis`, or `mif1`+`hvcC` primary) | 23008-12; `references/heif` §7 | ✅ | S1 |

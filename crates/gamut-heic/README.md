@@ -77,9 +77,15 @@ exclusion range, since `c2pa.hash.bmff.v3` excludes by box path rather than by b
 Two limits worth knowing. §A.5.3 states where the store begins for `manifest` and `original` (after
 the merkle offset) but says nothing at all for `update`, while the `c2pa-rs` reference implementation
 writes that offset for `update` too — so `update` is *probed*: offset 8 first, falling back to offset
-0, taking the first that yields a valid `LBox` bound and reporting nothing if neither does. And the
-scan covers the top-level boxes of the primary stream only, so a box inside an appended vendor stream
-(a motion-photo HEIC's second file) or a trailer is not seen.
+0, taking the first that yields a valid `LBox` bound and reporting nothing if neither does. That
+probe rests on `LBox` validity alone, which is content-dependent, because a JUMBF superbox's interior
+is itself length-prefixed: for an `update` box written *without* the offset, offset 8 lands on the
+first interior box's length, which can read as a valid bound and trim the reported store to a
+fragment. `manifest`/`original` stores and `c2pa-rs`-written `update` stores are located reliably;
+only the offset-less `update` layout is exposed, and no known writer emits one. Making it exact needs
+the JUMBF type code from ISO/IEC 19566-5, which is not vendored, or a `c2pa-rs` oracle fixture. And
+the scan covers the top-level boxes of the primary stream only, so a box inside an appended vendor
+stream (a motion-photo HEIC's second file) or a trailer is not seen.
 
 ## Conformance
 

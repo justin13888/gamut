@@ -73,12 +73,34 @@ const JUMBF_HEADER_LEN: usize = 8;
 /// Rather than pick one reading and mis-locate the store under the other, this crate **probes**: for
 /// `update` it looks for the store at offset 8 first and falls back to offset 0 when the `LBox` read
 /// there is not a valid bound (zero, below the 8-byte JUMBF header, or overrunning the box). The
-/// first candidate yielding a valid bound wins; if neither does, nothing is reported. In practice
-/// only one can succeed — under the `c2pa-rs` layout offset 0 reads the zero-filled merkle offset and
-/// fails, and under a specification-literal layout offset 8 reads bytes from inside the JUMBF
-/// superbox, which do not bound it — and both orders fail to absence rather than to a truncated
-/// payload. `manifest` and `original` are *not* probed: the specification states their framing, so a
-/// single offset is used and a file that disagrees is simply not reported.
+/// first candidate yielding a valid bound wins; if neither does, nothing is reported. `manifest` and
+/// `original` are *not* probed: the specification states their framing, so a single offset is used
+/// and a file that disagrees is simply not reported.
+///
+/// ## How strong the probe is, exactly
+///
+/// The probe is decided by `LBox` validity alone, and that discriminator is **content-dependent**,
+/// because a JUMBF superbox's interior is itself length-prefixed. Concretely:
+///
+/// - A `manifest` or `original` store is located **reliably**: its offset is stated, not probed.
+/// - An `update` store written with the `c2pa-rs` merkle offset is located **reliably**: offset 8
+///   lands on the store's own `LBox`, and it is tried first.
+/// - An `update` store written **without** the offset **can be mis-bounded**. The superbox is
+///   `LBox` (bytes 0..4), `TBox` (4..8), then its interior, so offset 8 lands past both — on the
+///   first interior box's own length field. That length is small, plausible and in-bounds, so it can
+///   read as a valid bound and be accepted, trimming the reported store to a fragment of itself
+///   rather than falling through to offset 0. It is not the case that a wrong probe always fails.
+///
+/// The probe is still strictly better than unconditionally skipping 8 bytes: the fallback runs only
+/// when offset 8 yields no valid bound, so it can rescue a file the fixed offset would have missed
+/// and can never spoil one the fixed offset would have got right. And the mis-bounding case has no
+/// known writer: `c2pa-rs` is the only implementation, and it always writes the offset.
+///
+/// Closing the gap properly needs the JUMBF box type code, which is normative only in ISO/IEC
+/// 19566-5 — not vendored, so asserting it here would mean transcribing an untraceable constant.
+/// That procurement, or a `c2pa-rs`-generated oracle fixture settling the layout empirically, is the
+/// condition under which this becomes exact; it is tracked as a deferred row in the crate's
+/// `STATUS.md`.
 ///
 /// # `merkle`
 ///

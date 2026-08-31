@@ -129,8 +129,11 @@ fn update_with_the_c2pa_rs_merkle_offset_is_located() {
 #[test]
 fn update_without_a_merkle_offset_is_located_by_the_fallback_probe() {
     // The specification-literal layout: the store begins immediately after the purpose string. The
-    // probe tries offset 8 first, reads bytes from inside the JUMBF superbox that do not bound it,
-    // and falls back to offset 0.
+    // probe tries offset 8 first; in *this* store that lands on the ASCII interior, which reads as a
+    // length far past the end, so it falls back to offset 0. That fall-through is a property of this
+    // fixture's contents, not a guarantee — offset 8 is past both `LBox` and `TBox`, so on a real
+    // superbox it lands on the first interior box's own length and can read as a valid bound. See
+    // `C2paBoxPurpose`; this is the documented content-dependent limit of the probe.
     let store = store();
     let data = file_with(&[c2pa_box("update", None, &store, &[])]);
     let c = HeifContainer::parse(&data).unwrap();
@@ -148,6 +151,10 @@ fn update_probes_the_merkle_offset_before_the_bare_store() {
     // bytes are 0x00000020 = 32, which is >= the 8-byte JUMBF header and <= the 37 bytes of `data`,
     // so reading an `LBox` at offset 0 yields a "valid" bound over the wrong 32 bytes. Trying offset
     // 8 first is what keeps the real store the one reported.
+    //
+    // This is also a constructed instance of the general hazard: `LBox` validity alone cannot tell a
+    // real store bound from a plausible number in the wrong place, which is why `C2paBoxPurpose`
+    // documents the offset-less `update` layout as possibly mis-bounded rather than fail-safe.
     let store = store();
     let data = file_with(&[c2pa_box("update", Some(0x0000_0020_0000_0000), &store, &[])]);
     let c = HeifContainer::parse(&data).unwrap();
@@ -164,7 +171,7 @@ fn update_probes_the_merkle_offset_before_the_bare_store() {
 #[test]
 fn update_reports_nothing_when_neither_probe_offset_bounds_a_store() {
     // Both candidates fail: 4 bytes of zero where an `LBox` would sit at offset 0, and nothing but
-    // padding at offset 8. Absence, never a truncated payload.
+    // padding at offset 8. When no candidate bounds anything the answer is absence, not a guess.
     let data = file_with(&[c2pa_box("update", None, &[0, 0, 0, 0], &[0xAB; 8])]);
     let c = HeifContainer::parse(&data).unwrap();
     assert!(c.c2pa().is_none());
