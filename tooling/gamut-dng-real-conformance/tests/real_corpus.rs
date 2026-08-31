@@ -244,7 +244,35 @@ fn every_real_file_survives_a_preserving_rewrite() {
                 &data[from..from + len],
                 "{name}: a preserved run's bytes changed"
             );
+            // A vendor preamble keeps its *position*, not just its bytes: a tool looking for
+            // Apple ProRAW's `APPLEDNG` immediately after the header must still find it there
+            // (issue #350). Every other run's original position is interior to a payload layout
+            // the rewrite does not reproduce, so it is only required to survive.
+            if span.kind == gamut_ifd::SpanKind::Preamble {
+                assert_eq!(
+                    span.offset, span.original_offset,
+                    "{name}: the vendor preamble must keep its original offset"
+                );
+            }
         }
+        // The rewritten stream's own audit must agree: the preamble is there, at that offset,
+        // and classified as one — not merely bytes that happen to match.
+        let rewritten_preamble = deconstruct(&out.bytes)
+            .expect("deconstruct rewrite")
+            .segments
+            .segments
+            .iter()
+            .find(|s| s.kind == gamut_ifd::SpanKind::Preamble)
+            .map(|s| (s.range.start, s.range.len));
+        let original_preamble = out
+            .preserved
+            .iter()
+            .find(|s| s.kind == gamut_ifd::SpanKind::Preamble)
+            .map(|s| (s.original_offset, s.len));
+        assert_eq!(
+            rewritten_preamble, original_preamble,
+            "{name}: the rewrite's own preamble segment must match the original's"
+        );
 
         let before = deconstruct(&data).expect("deconstruct original");
         let after = deconstruct(&out.bytes).unwrap_or_else(|e| panic!("{name}: deconstruct: {e}"));

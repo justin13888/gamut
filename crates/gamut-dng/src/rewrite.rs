@@ -45,9 +45,14 @@ pub enum MakerNotePreservation {
 ///
 /// Real camera files routinely carry these — a vendor preamble after the header (Apple ProRAW's
 /// `APPLEDNG`), leftover filler between structures, an appended trailer (a Leica M10 sample
-/// carries 651 KB of it). The typed codec has no model for them and the directory layout is
-/// rebuilt, so their original absolute offsets cannot generally be reproduced; the rewrite
-/// guarantees the **bytes** survive and reports where each run landed.
+/// carries 651 KB of it). The rewrite guarantees the **bytes** survive and reports where each run
+/// landed; compare [`offset`](Self::offset) with [`original_offset`](Self::original_offset) to see
+/// whether the position survived too.
+///
+/// A **preamble** does keep its position: it is defined by sitting between the header and the
+/// first directory, which the rewrite reserves for it. The others generally cannot — their
+/// original positions are interior to a payload layout the rewrite does not reproduce — so an
+/// interstitial run is appended after the payload region, and a trailer stays last.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PreservedSpan {
@@ -174,6 +179,20 @@ impl DngRewrite {
         DngDecoder::new().decode(&self.data)
     }
 
+    /// The original bytes of one unaccounted run, or an error if it lies outside the stream.
+    fn slice(&self, span: &gamut_ifd::Segment) -> Result<&[u8]> {
+        let start = usize::try_from(span.range.start)
+            .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows"))?;
+        let end = usize::try_from(span.range.end())
+            .map_err(|_| Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows"))?;
+        self.data.get(start..end).ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "DNG: an unaccounted run lies outside the original stream",
+            )
+        })
+    }
+
     /// Serialises the (possibly edited) tree, preserving everything: every tag value
     /// byte-exactly (unknown field types verbatim), every strip/tile/embedded-JPEG payload
     /// copied byte-for-byte from the original stream, and the maker note pinned at its original
@@ -181,9 +200,18 @@ impl DngRewrite {
     ///
     /// Byte runs the file's own structures do not account for — a vendor preamble, leftover
     /// filler between structures, an appended trailer — are carried through **verbatim** and
-    /// reported in [`RewrittenDng::preserved`]. Their bytes survive; their original absolute
-    /// offsets generally do not, because the directory layout is rebuilt, so they are appended
-    /// after the payload region in original file order (which leaves a trailer last).
+    /// reported in [`RewrittenDng::preserved`].
+    ///
+    /// A leading **preamble** keeps its original offset: it is defined by position rather than by
+    /// any tag, so the writer reserves the gap between the header and the first directory and
+    /// emits it there. That matters because vendors put signatures in it — Apple ProRAW's
+    /// `APPLEDNG` sits immediately after the 8-byte TIFF header, and a tool that looks for it
+    /// there would not find it if the rewrite moved it.
+    ///
+    /// The other runs keep their bytes but not their offsets. An interstitial run's original
+    /// position is interior to a payload layout the rewrite does not reproduce — the strips it sat
+    /// between are re-packed — so there is no offset to restore it to; those runs are appended
+    /// after the payload region in original file order, which leaves a trailer last.
     ///
     /// Declared dead space (`FreeOffsets`/`FreeByteCounts`) is dropped — the one intentional
     /// omission, since those tags name explicitly-dead bytes.
@@ -209,8 +237,16 @@ impl DngRewrite {
         let pin_at = self
             .maker_note_at
             .filter(|_| tree_has_tag(&tree, ifd_tags::MAKER_NOTE));
+        // A leading vendor preamble is restored to its original offset by reserving the gap it
+        // occupied; every other unaccounted run is appended after the payload region. `open`
+        // records the runs in file order, so the preamble — if there is one — is the first.
+        let (preamble, appended) = split_preamble(&self.unaccounted, self.variant);
+        let preamble_bytes = match preamble {
+            Some(span) => self.slice(span)?.to_vec(),
+            None => Vec::new(),
+        };
         let opts = |pin: Option<u64>| {
-            let mut o = WriteOptions::default();
+            let mut o = WriteOptions::default().with_preamble(preamble_bytes.clone());
             if let Some(at) = pin {
                 o = o.pin(ifd_tags::MAKER_NOTE, at);
             }
@@ -274,23 +310,20 @@ impl DngRewrite {
         }
         // Pass C: carry every unaccounted run through verbatim, in original file order, so a real
         // camera file's vendor preamble, leftover filler and appended trailer are not silently
-        // lost. The runs are appended after the payload region — the rebuilt directory layout
-        // cannot generally reproduce their original absolute offsets — and each one's landing
-        // place is reported back.
+        // lost. A leading preamble is already in place (the writer reserved its gap); the rest are
+        // appended after the payload region, and each run's landing place is reported back.
         let mut preserved = Vec::with_capacity(self.unaccounted.len());
-        for span in &self.unaccounted {
-            let start = usize::try_from(span.range.start).map_err(|_| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows")
-            })?;
-            let end = usize::try_from(span.range.end()).map_err(|_| {
-                Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows")
-            })?;
-            let source = self.data.get(start..end).ok_or_else(|| {
-                Error::invalid_input(
-                    env!("CARGO_PKG_NAME"),
-                    "DNG: an unaccounted run lies outside the original stream",
-                )
-            })?;
+        if let Some(span) = preamble {
+            // Already emitted, in place, by the writer.
+            preserved.push(PreservedSpan {
+                kind: span.kind,
+                original_offset: span.range.start,
+                offset: span.range.start,
+                len: span.range.len,
+            });
+        }
+        for span in appended {
+            let source = self.slice(span)?;
             let at = align_word(bytes.len() as u64);
             let at_usize = usize::try_from(at).map_err(|_| {
                 Error::invalid_input(env!("CARGO_PKG_NAME"), "DNG: layout overflows")
@@ -316,6 +349,29 @@ impl DngRewrite {
             maker_note,
             preserved,
         })
+    }
+}
+
+/// Splits the leading **vendor preamble** — a run of unaccounted bytes starting immediately after
+/// the file header — from the runs that have to be appended.
+///
+/// The header/first-directory gap is the one unaccounted position a rebuilt layout can reproduce,
+/// because it is defined relative to the header rather than to the payload arrangement. A run
+/// qualifies only if the audit called it a [`SpanKind::Preamble`] *and* it begins exactly at the
+/// end of the header, so a file with something unexpected there is appended like any other run
+/// rather than being silently relocated to a position it never had.
+fn split_preamble(
+    unaccounted: &[gamut_ifd::Segment],
+    variant: Variant,
+) -> (Option<&gamut_ifd::Segment>, &[gamut_ifd::Segment]) {
+    match unaccounted.split_first() {
+        Some((first, rest))
+            if first.kind == gamut_ifd::SpanKind::Preamble
+                && first.range.start == variant.header_size() as u64 =>
+        {
+            (Some(first), rest)
+        }
+        _ => (None, unaccounted),
     }
 }
 
@@ -475,5 +531,67 @@ mod tests {
         assert!(!stream_overflows(Variant::Classic, u64::from(u32::MAX)));
         assert!(stream_overflows(Variant::Classic, u64::from(u32::MAX) + 1));
         assert!(!stream_overflows(Variant::Big, u64::from(u32::MAX) + 1));
+    }
+
+    fn segment(kind: gamut_ifd::SpanKind, start: u64, len: u64) -> gamut_ifd::Segment {
+        gamut_ifd::Segment {
+            range: gamut_ifd::Range { start, len },
+            kind,
+        }
+    }
+
+    /// Only a run that is *both* classified a preamble and starts exactly where the header ends
+    /// can keep its offset — that gap is the one unaccounted position a rebuilt layout can
+    /// reproduce. Anything else is appended, because relocating it to a position it never held
+    /// would be worse than moving it honestly.
+    #[test]
+    fn only_a_run_at_the_end_of_the_header_is_treated_as_a_preamble() {
+        use gamut_ifd::SpanKind::{Interstitial, Preamble, Trailer};
+        let classic = Variant::Classic;
+        let header = classic.header_size() as u64;
+
+        // Apple ProRAW's shape: `APPLEDNG\0\0` at [8..18), then nothing else.
+        let apple = [segment(Preamble, header, 10)];
+        let (found, rest) = split_preamble(&apple, classic);
+        assert_eq!(found, Some(&apple[0]));
+        assert!(rest.is_empty());
+
+        // The Leica M10's shape: a preamble followed by interstitials and a trailer. Only the
+        // preamble is held back; the rest keep their order for appending.
+        let leica = [
+            segment(Preamble, header, 4),
+            segment(Interstitial, 10240, 4096),
+            segment(Trailer, 33_558_321, 651_471),
+        ];
+        let (found, rest) = split_preamble(&leica, classic);
+        assert_eq!(found, Some(&leica[0]));
+        assert_eq!(rest, &leica[1..]);
+
+        // Right position, wrong kind; and right kind, wrong position. Neither qualifies.
+        let mislabelled = [segment(Interstitial, header, 4)];
+        assert_eq!(
+            split_preamble(&mislabelled, classic),
+            (None, &mislabelled[..])
+        );
+        let displaced = [segment(Preamble, header + 2, 4)];
+        assert_eq!(split_preamble(&displaced, classic), (None, &displaced[..]));
+
+        // A preamble that is not the *first* run is not a leading preamble either.
+        let late = [segment(Interstitial, 100, 2), segment(Preamble, header, 4)];
+        assert_eq!(split_preamble(&late, classic), (None, &late[..]));
+
+        // Nothing unaccounted at all — every Adobe-authored sample.
+        assert_eq!(split_preamble(&[], classic), (None, &[][..]));
+
+        // BigTIFF's header is 16 bytes, so the qualifying offset moves with the variant — a
+        // classic-TIFF preamble offset does not qualify there. (`gamut-dng` always enables
+        // `gamut-ifd/bigtiff`, so both variants are always reachable here.)
+        let big = [segment(Preamble, header, 4)];
+        assert_eq!(split_preamble(&big, Variant::Big), (None, &big[..]));
+        let at_big_header = [segment(Preamble, Variant::Big.header_size() as u64, 4)];
+        assert_eq!(
+            split_preamble(&at_big_header, Variant::Big),
+            (Some(&at_big_header[0]), &[][..])
+        );
     }
 }

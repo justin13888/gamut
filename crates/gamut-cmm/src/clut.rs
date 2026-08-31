@@ -116,6 +116,47 @@ pub struct ClutTable {
     interpolation: ClutInterpolation,
 }
 
+/// The geometry invariants every [`ClutTable`] upholds, checked once per construction
+/// (shared by the parsed and the computed-sample constructors): a non-empty input dimension
+/// count within lcms2's `MAX_INPUT_DIMENSIONS`, an output channel count in
+/// `1..=`[`MAX_CHANNELS`], no zero-node axis, `samples.len() == ∏ grid_points ×
+/// output_channels`, and at least 3 input channels for tetrahedral interpolation.
+fn check_geometry(
+    grid_points: &[u8],
+    output_channels: u8,
+    sample_count: usize,
+    interpolation: ClutInterpolation,
+) -> Result<()> {
+    let dims = grid_points.len();
+    if dims == 0 {
+        return Err(CmmError::ClutGeometry("no input dimensions"));
+    }
+    if dims > MAX_INPUT_DIMENSIONS {
+        return Err(CmmError::TooManyChannels(
+            u8::try_from(dims).unwrap_or(u8::MAX),
+        ));
+    }
+    if output_channels == 0 || output_channels > MAX_CHANNELS {
+        return Err(CmmError::TooManyChannels(output_channels));
+    }
+    if grid_points.contains(&0) {
+        return Err(CmmError::ClutGeometry("zero grid axis"));
+    }
+    let nodes = grid_points
+        .iter()
+        .try_fold(1_usize, |acc, &n| acc.checked_mul(usize::from(n)));
+    let expected = nodes.and_then(|n| n.checked_mul(usize::from(output_channels)));
+    if expected != Some(sample_count) {
+        return Err(CmmError::ClutGeometry("sample count mismatch"));
+    }
+    if interpolation == ClutInterpolation::Tetrahedral && dims < 3 {
+        return Err(CmmError::ClutGeometry(
+            "tetrahedral interpolation requires at least 3 input channels",
+        ));
+    }
+    Ok(())
+}
+
 impl ClutTable {
     /// Builds an evaluation-ready table from a parsed CLUT with the lcms2 default
     /// interpolation: [`Tetrahedral`](ClutInterpolation::Tetrahedral) for 3 or more input
@@ -160,34 +201,12 @@ impl ClutTable {
         clut: &gamut_icc::Clut,
         interpolation: ClutInterpolation,
     ) -> Result<Self> {
-        let dims = clut.grid_points.len();
-        if dims == 0 {
-            return Err(CmmError::ClutGeometry("no input dimensions"));
-        }
-        if dims > MAX_INPUT_DIMENSIONS {
-            return Err(CmmError::TooManyChannels(
-                u8::try_from(dims).unwrap_or(u8::MAX),
-            ));
-        }
-        if clut.output_channels == 0 || clut.output_channels > MAX_CHANNELS {
-            return Err(CmmError::TooManyChannels(clut.output_channels));
-        }
-        if clut.grid_points.contains(&0) {
-            return Err(CmmError::ClutGeometry("zero grid axis"));
-        }
-        let nodes = clut
-            .grid_points
-            .iter()
-            .try_fold(1_usize, |acc, &n| acc.checked_mul(usize::from(n)));
-        let expected = nodes.and_then(|n| n.checked_mul(usize::from(clut.output_channels)));
-        if expected != Some(clut.samples.len()) {
-            return Err(CmmError::ClutGeometry("sample count mismatch"));
-        }
-        if interpolation == ClutInterpolation::Tetrahedral && dims < 3 {
-            return Err(CmmError::ClutGeometry(
-                "tetrahedral interpolation requires at least 3 input channels",
-            ));
-        }
+        check_geometry(
+            &clut.grid_points,
+            clut.output_channels,
+            clut.samples.len(),
+            interpolation,
+        )?;
         let full_scale = f64::from(clut.precision.full_scale());
         let samples = clut
             .samples
@@ -197,6 +216,35 @@ impl ClutTable {
         Ok(Self {
             grid_points: clut.grid_points.clone(),
             output_channels: clut.output_channels,
+            samples,
+            interpolation,
+        })
+    }
+
+    /// Builds a table directly from **computed** `f64` node samples, bypassing the parsed
+    /// [`gamut_icc::Clut`] the public constructors require — the construction path
+    /// [`crate::optimize`]'s CLUT resampling needs, where the nodes come from evaluating a
+    /// pipeline rather than from a profile's quantized table.
+    ///
+    /// `samples` is in the same grid order as a parsed CLUT (last input axis fastest, output
+    /// channels interleaved per node) and carries values already in the table's own domain —
+    /// no full-scale division happens here. Geometry is validated exactly as
+    /// [`ClutTable::with_interpolation`] validates it.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`ClutTable::with_interpolation`] reports for an inconsistent geometry.
+    #[must_use = "the constructed table is the only handle on the resampled grid"]
+    pub(crate) fn from_samples(
+        grid_points: Vec<u8>,
+        output_channels: u8,
+        samples: Vec<f64>,
+        interpolation: ClutInterpolation,
+    ) -> Result<Self> {
+        check_geometry(&grid_points, output_channels, samples.len(), interpolation)?;
+        Ok(Self {
+            grid_points,
+            output_channels,
             samples,
             interpolation,
         })
@@ -213,6 +261,14 @@ impl ClutTable {
     #[must_use]
     pub fn output_channels(&self) -> u8 {
         self.output_channels
+    }
+
+    /// Grid nodes per input axis, first axis slowest-varying (every entry ≥ 1) — the table's
+    /// resolution, which fixes both its interpolation error and its memory. Read by
+    /// [`crate::optimize`]'s resampling pass and by any caller sizing up a parsed CLUT.
+    #[must_use]
+    pub fn grid_points(&self) -> &[u8] {
+        &self.grid_points
     }
 
     /// The interpolation mode this table evaluates with.

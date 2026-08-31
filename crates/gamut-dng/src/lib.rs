@@ -31,6 +31,10 @@
 //! - **Raw model**: CFA and `LinearRaw` photometries at 1–16 bits, the typed [`RawLevels`] level
 //!   family, and the spec's chapter-5 raw-to-linear mapping as the explicit opt-in
 //!   [`RawImage::to_linear`] (differentially gated against the SDK's stage-2 image).
+//! - **Colour beyond the calibration**: the camera-profile tags [`CameraProfile`] does not model
+//!   — the hue/saturation/value and look tables, the tone curve, the profile exposure offset, the
+//!   DNG 1.6 third calibration set — decode as a typed [`ColorProfileInfo`], and the raw IFD's
+//!   noise model as a typed [`NoiseProfile`].
 //! - **Beyond the raw**: every other image IFD decodes as a typed [`SubImage`] — previews,
 //!   transparency and **semantic masks** ([`SemanticMaskInfo`]), depth maps — and the
 //!   gain-table maps ([`ProfileGainTableMap`], both tag versions) parse typed and re-serialise
@@ -59,6 +63,7 @@
 //! IFDs, offset loops, and truncation.
 #![forbid(unsafe_code)]
 
+pub mod color_profile;
 pub mod decoder;
 pub mod deconstruct;
 pub mod encoder;
@@ -87,6 +92,7 @@ mod writer;
 
 // The shared error/result/dimension types every gamut codec speaks, re-exported so callers need
 // not also depend on `gamut-core` directly, along with the byte-order selector from the IFD core.
+pub use color_profile::{ColorProfileInfo, HsvDelta, HsvTable, NoiseModel, NoiseProfile};
 pub use decoder::{DecodedDng, DigestCheck, DngDecoder, RawTag};
 pub use deconstruct::{
     Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
@@ -98,10 +104,16 @@ pub use gamut_core::{Dimensions, Error, Result};
 // `Segment`/`SpanKind` are part of the preservation surface, naming the byte runs a real camera
 // file carries that its own structures do not account for.
 pub use gamut_ifd::{ByteOrder, Segment, SpanKind, Value};
+// The shared metadata facade supplies this crate's metadata models rather than a DNG-local
+// restatement of them: `DngMetadata::exif` *is* the facade's `Exif`, and `DngMetadata::blocks`
+// hands the byte carriers over as `MetadataBlock`s. Re-exported so a caller can build and read
+// that surface without also depending on `gamut-metadata` directly.
+pub use gamut_metadata::MetadataBlock;
+pub use gamut_metadata::exif::{Exif, ExifTag, Rational};
 pub use levels::RawLevels;
 pub use linearize::LinearImage;
 pub use lossless_jpeg::LosslessJpeg;
-pub use metadata::{DngMetadata, ExifMetadata};
+pub use metadata::DngMetadata;
 pub use opcode::{Opcode, OpcodeList, opcode_id};
 pub use profile::CameraProfile;
 pub use raw::{RawImage, RawPhotometry, cfa_color};
@@ -111,5 +123,5 @@ pub use subimage::{
 };
 pub use values::{
     CalibrationIlluminant, CfaLayout, Compression, PhotometricInterpretation, Predictor,
-    PreviewColorSpace, ProfileEmbedPolicy, SampleFormat, new_subfile_type,
+    PreviewColorSpace, ProfileEmbedPolicy, SampleFormat, TableEncoding, new_subfile_type,
 };

@@ -1,7 +1,9 @@
 //! Encoder configuration: lossless vs. lossy selection, the quality knob, and the output colour
 //! encoding.
 
-use gamut_color::{ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics};
+use gamut_color::{
+    ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics,
+};
 
 /// Which AVIF bitstream the encoder produces.
 ///
@@ -33,7 +35,7 @@ pub enum AvifMode {
 /// `quality` and `matrix` consistent.
 ///
 /// `#[non_exhaustive]`: the configuration is an open set — fields for deferred encoder knobs
-/// (speed, rate control, bit depth, chroma subsampling; see `STATUS.md`) are added as they ship.
+/// (speed, rate control, bit depth; see `STATUS.md`) are added as they ship.
 /// Read it as the snapshot returned by [`AvifEncoder::config`](crate::AvifEncoder::config).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -50,11 +52,22 @@ pub struct AvifConfig {
     /// it ignores `quality`. [`AvifMode::Lossy`] defaults to [`MatrixCoefficients::Bt709`], whose
     /// luma–chroma decorrelation is worth a substantial fraction of the bitrate.
     ///
-    /// Chroma stays 4:4:4 in every case; 4:2:0/4:2:2 subsampling is still deferred (`STATUS.md`).
     pub matrix: MatrixCoefficients,
     /// The signal range the coded samples occupy. Full range is the AVIF ecosystem's default (it
     /// is what `avifImageCreate` sets) and spends all 256 codes on the signal.
     pub range: ColorRange,
+    /// How the chroma planes are sampled relative to luma.
+    ///
+    /// [`AvifMode::Lossy`] defaults to [`ChromaSubsampling::Cs420`]: it is smaller at equal quality
+    /// on photographic content, and it is the only format a Main-profile decoder can read — 4:4:4
+    /// is AV1 **Profile 1**, which several hardware still-image paths reject outright.
+    ///
+    /// [`AvifMode::Lossless`] always uses [`ChromaSubsampling::Cs444`] and **ignores** this field,
+    /// exactly as it ignores `matrix` and `quality`: discarding three quarters of the chroma
+    /// samples is not lossless, and AV1 §6.4.2 forbids the identity matrix below 4:4:4 anyway.
+    ///
+    /// [`ChromaSubsampling::Cs400`] (monochrome) is rejected at encode time.
+    pub chroma: ChromaSubsampling,
     /// The CICP colour primaries the samples are tagged with — the gamut their R'G'B' values are
     /// interpreted in.
     ///
@@ -80,6 +93,7 @@ impl Default for AvifConfig {
             quality: 75,
             matrix: MatrixCoefficients::Identity,
             range: ColorRange::Full,
+            chroma: ChromaSubsampling::Cs444,
             primaries: ColourPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
         }

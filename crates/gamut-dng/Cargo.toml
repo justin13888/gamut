@@ -33,6 +33,12 @@ gamut-color.workspace = true
 gamut-ifd = { workspace = true, features = ["bigtiff"] }
 # Shared MSB-first sample bit-packing for sub-byte depths (10/12/14-bit); see `bitpack`.
 gamut-bitstream.workspace = true
+# Embedded metadata comes from the workspace facade rather than a DNG-local restatement of it: a
+# DNG's `ExifIFD` *is* an EXIF sub-IFD, so `gamut-exif`'s `Exif` (reached through the facade, the
+# one entry point format crates consume) models it exactly, over the very same `gamut-ifd`
+# directory type this crate already speaks. The XMP/IPTC-IIM/ICC payloads stay verbatim bytes and
+# are handed over as the facade's `MetadataBlock`s.
+gamut-metadata.workspace = true
 # JPEG XL (Compression = 52546, DNG 1.7): decode is the pure-Rust jxl-rs path (wasm-safe, keeps
 # the default build C-free); encode is opt-in via the `jxl-encode` feature above.
 gamut-jxl = { workspace = true, features = ["decode"] }

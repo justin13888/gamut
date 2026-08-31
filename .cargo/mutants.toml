@@ -658,13 +658,18 @@ exclude_re = [
     # adjustment arms). Provably equivalent.
     'replace < with <= in ciede2000_hue_deg',
     # gamut-cmm curve.rs — provably-equivalent mutants in tone-curve inversion/monotonicity.
-    #   is_monotonic: deleting the SampledInverse arm falls through to the dense-probe path; a
-    #   SampledInverse table always holds exactly INVERSE_SAMPLES == MONOTONICITY_PROBES
-    #   entries, and probing at i/(PROBES − 1) evaluates the linear interpolant exactly at
-    #   every entry, so both paths inspect the identical sample sequence. Equivalent. (The
-    #   analogous Icc(Sampled) arm deletion IS killable — tables of other lengths diverge — and
-    #   is killed by `sampled_monotonicity_is_judged_on_entries_not_probes`.)
-    'delete match arm Repr::SampledInverse\{table\} in ToneCurve::is_monotonic',
+    #   is_monotonic: deleting the tabulated arm falls through to the dense-probe path; both
+    #   tabulated representations hold exactly MONOTONICITY_PROBES entries by construction
+    #   (INVERSE_SAMPLES for SampledInverse, JOIN_POINTS for the Table a curve join builds —
+    #   all three constants are 4096, deliberately matched so monotonicity is judged at the
+    #   resolution these tables resolve), and probing at i/(PROBES − 1) evaluates the linear
+    #   interpolant exactly at every entry: verified over all 4096 positions, `(i/4095)·4095`
+    #   is bit-exactly `i` with a zero interpolation fraction, so `interpolate` returns
+    #   `table[i]` itself. Both paths therefore inspect the identical sample sequence.
+    #   Equivalent. (The analogous Icc(Sampled) arm deletion IS killable — tables of other
+    #   lengths diverge — and is killed by
+    #   `sampled_monotonicity_is_judged_on_entries_not_probes`.)
+    'delete match arm Repr::SampledInverse\{table\} \| Repr::Table\{table\} in ToneCurve::is_monotonic',
     #   reverse_table's no-interval arm (the only bare `<`/`>` in the function): reached only
     #   when the interval scan fails, and for the monotonic tables reverse_table receives, a
     #   target exactly equal to table[0] is always bracketed by segment 0 (`table[0] <= y &&

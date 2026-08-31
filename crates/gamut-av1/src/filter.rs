@@ -23,7 +23,10 @@
 //! The filter strengths/levels are quality decisions (rate-distortion selection is deferred); both
 //! are deterministic monotonic placeholders scaled by `base_q_idx`.
 
+use gamut_color::ChromaSubsampling;
+
 use crate::geom::PlaneGeom;
+use crate::tile::chroma_tx_log2;
 
 /// The `loop_filter_level` (§5.9.11) the encoder signals and applies as a function of `base_q_idx`.
 /// `0` disables the filter (the level is then omitted for chroma and no filtering occurs). The exact
@@ -225,6 +228,7 @@ fn filter_sample(
 pub(crate) fn deblock(
     planes: &mut [Vec<u16>; 3],
     geom: &[PlaneGeom; 3],
+    subsampling: ChromaSubsampling,
     mi_cols: usize,
     tx_log2: &[u8],
     tx_log2_h: &[u8],
@@ -257,11 +261,22 @@ pub(crate) fn deblock(
         // Transform width/height (log2) for this plane at MI `cell`: luma uses the signaled tx size;
         // 4:4:4 chroma uses the block-size transform (`mi_bsl + 2`) capped at TX_32X32 (chroma never
         // uses TX_64X64, so a 64×64 block's chroma is a raster of 32×32 transforms with an edge at 32).
+        // Under subsampling the chroma transform follows the plane residual size (§5.11.38), which
+        // is not `mi_bsl + 2`: a 4:2:0 16x16 block has an 8x8 chroma transform, not 16x16. The
+        // block size is recovered from the per-MI log2 maps and run through §5.11.37. At 4:4:4 this
+        // reduces to the old `(mi_bsl + 2).min(5)`.
+        let chroma_log2 = |cell: usize| -> (u32, u32) {
+            let bw = 1usize << (u32::from(mi_bsl[cell]) + 2);
+            let bh = 1usize << (u32::from(mi_bsl_h[cell]) + 2);
+            // A block with no valid chroma residual is a conformance violation the partition search
+            // must prevent (§6.10.4); it cannot reach the filter, which runs after coding.
+            chroma_tx_log2(bw, bh, subsampling).unwrap_or((2, 2))
+        };
         let txlog2 = |cell: usize| -> u32 {
             if is_luma {
                 u32::from(tx_log2[cell])
             } else {
-                (u32::from(mi_bsl[cell]) + 2).min(5)
+                chroma_log2(cell).0
             }
         };
         // The transform *height* (log2) — equals `txlog2` for square transforms, differs for
@@ -270,7 +285,7 @@ pub(crate) fn deblock(
             if is_luma {
                 u32::from(tx_log2_h[cell])
             } else {
-                (u32::from(mi_bsl_h[cell]) + 2).min(5)
+                chroma_log2(cell).1
             }
         };
 
@@ -279,13 +294,16 @@ pub(crate) fn deblock(
         // pass must finish before the horizontal pass, which reads the vertical-filtered samples.
         let mut x = 4;
         while x < width {
-            let col = g.mi_col(x);
             let mut y = 0;
             while y < height {
-                let row = g.mi_row(y);
+                let (col, row) = g.deblock_mi(x, y);
                 let txw = 1usize << txlog2(row * mi_cols + col);
                 if x % txw == 0 {
-                    let prev_txw = 1usize << txlog2(row * mi_cols + (col - 1));
+                    // §7.14.2 steps the neighbour by `dx << subX`, not by one MI cell. At 4:2:0 and
+                    // 4:2:2 consecutive chroma edges land on MI cols 1, 3, 5 …, so `col - 1` is the
+                    // *even* cell of the current edge's own group — normally the same block — and
+                    // `Min(prevTxSz, txSz)` would silently collapse to `txSz`. Identity at 4:4:4.
+                    let prev_txw = 1usize << txlog2(row * mi_cols + (col - (1 << g.ss_x)));
                     let filter_size = prev_txw.min(txw).min(size_cap);
                     // The edge takes the level of its q0-side (right) block (§7.14.4).
                     let st = strength_for(row * mi_cols + col);
@@ -301,13 +319,13 @@ pub(crate) fn deblock(
         // each MI block when the row is a transform-block edge.
         let mut y = 4;
         while y < height {
-            let row = g.mi_row(y);
             let mut x = 0;
             while x < width {
-                let col = g.mi_col(x);
+                let (col, row) = g.deblock_mi(x, y);
                 let txh = 1usize << txlog2_h(row * mi_cols + col);
                 if y % txh == 0 {
-                    let prev_txh = 1usize << txlog2_h((row - 1) * mi_cols + col);
+                    // §7.14.2's `prevRow = row - (dy << subY)`; see the vertical pass above.
+                    let prev_txh = 1usize << txlog2_h((row - (1 << g.ss_y)) * mi_cols + col);
                     let filter_size = prev_txh.min(txh).min(size_cap);
                     // The edge takes the level of its q0-side (bottom) block (§7.14.4).
                     let st = strength_for(row * mi_cols + col);
@@ -330,6 +348,18 @@ pub(crate) fn deblock(
 }
 
 // ===== CDEF (Constrained Directional Enhancement Filter, §7.15) =====
+
+/// `Cdef_Uv_Dir[subsampling_x][subsampling_y][8]` (§7.15.2): the chroma direction for a given luma
+/// direction.
+///
+/// The identity for 4:4:4 (`[0][0]`) and 4:2:0 (`[1][1]`), which is why chroma could take the luma
+/// direction unchanged until 4:2:2 arrived. The 4:2:2 row `[1][0]` is **not a permutation** — 2
+/// appears once, 6 three times, and 1 and 3 not at all — so it cannot be expressed as a rotation or
+/// an offset; it is a literal lookup. `[0][1]` is the 4:4:0 layout, which AV1 cannot signal.
+static CDEF_UV_DIR: [[[usize; 8]; 2]; 2] = [
+    [[0, 1, 2, 3, 4, 5, 6, 7], [1, 2, 2, 2, 3, 4, 6, 0]],
+    [[7, 0, 2, 4, 5, 6, 6, 6], [0, 1, 2, 3, 4, 5, 6, 7]],
+];
 
 /// `Cdef_Directions[8][2][2]` (§7.15.3): the (row, col) sample offsets for each of the 8 directions.
 static CDEF_DIRECTIONS: [[[i32; 2]; 2]; 8] = [
@@ -602,10 +632,15 @@ pub(crate) fn cdef(
                 CDEF_DAMPING,
                 dir,
             );
-            // Chroma: no variance scaling, damping reduced by 1, direction via `Cdef_Uv_Dir`.
-            // That table is the identity for both 4:4:4 and 4:2:0, so `y_dir` passes through; the
-            // 4:2:2 row is the only non-identity one (#391).
-            let cdir = if uv_pri == 0 { 0 } else { y_dir };
+            // Chroma: no variance scaling, damping reduced by 1, direction remapped through
+            // `Cdef_Uv_Dir` (§7.15.2 step 11). Identity at 4:4:4 and 4:2:0; 4:2:2 is the one layout
+            // where the chroma direction genuinely differs from the luma one.
+            let uv = geom[1];
+            let cdir = if uv_pri == 0 {
+                0
+            } else {
+                CDEF_UV_DIR[uv.ss_x as usize][uv.ss_y as usize][y_dir]
+            };
             for plane in 1..num_planes {
                 let g = geom[plane];
                 let (px, py) = g.scale_pos(x0, y0);
@@ -1051,7 +1086,16 @@ mod tests {
         let mi_dlf = vec![0i8; 4 * 4];
         let g = geom444(16, 16, 4, 4);
         deblock(
-            &mut flat, &g, 4, &tx_log2, &tx_log2, &mi_bsl, &mi_bsl, &mi_dlf, 64,
+            &mut flat,
+            &g,
+            ChromaSubsampling::Cs444,
+            4,
+            &tx_log2,
+            &tx_log2,
+            &mi_bsl,
+            &mi_bsl,
+            &mi_dlf,
+            64,
         );
         assert!(flat[0].iter().all(|&v| v == 128));
 
@@ -1070,6 +1114,7 @@ mod tests {
         deblock(
             &mut planes,
             &g,
+            ChromaSubsampling::Cs444,
             4,
             &tx_log2,
             &tx_log2,

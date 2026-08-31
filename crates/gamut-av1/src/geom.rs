@@ -106,6 +106,20 @@ impl PlaneGeom {
         (y << self.ss_y) >> 2
     }
 
+    /// §7.14.2: the MI cell whose mode info governs a deblock edge at this plane's sample
+    /// `(x, y)` — `(mi_col(x) | ss_x, mi_row(y) | ss_y)`.
+    ///
+    /// The `| ss` selects the **odd** cell of each subsampled group: a 4:2:0 chroma edge takes the
+    /// block size and filter level of the bottom-right MI of its 2x2 luma group, not the top-left.
+    /// Identity at 4:4:4, and the difference is invisible unless the group's cells disagree — which
+    /// they do across a superblock boundary carrying a per-SB `DeltaLF`.
+    pub(crate) fn deblock_mi(self, x: usize, y: usize) -> (usize, usize) {
+        (
+            self.mi_col(x) | self.ss_x as usize,
+            self.mi_row(y) | self.ss_y as usize,
+        )
+    }
+
     /// Maps a **luma** sample position into this plane's own coordinates (`x >> ss_x`,
     /// `y >> ss_y`).
     ///
@@ -127,6 +141,95 @@ impl PlaneGeom {
     }
 }
 
+/// §5.11.38 `get_plane_residual_size`: the residual block size for `plane` of a `bw` x `bh` **luma**
+/// block, or `None` for the spec's `BLOCK_INVALID`.
+///
+/// This is a table (`Subsampled_Size`), **not** `bw >> ss_x, bh >> ss_y`: it clamps to a 4-sample
+/// minimum, so an 8x4 luma block in 4:2:0 has a 4x4 chroma residual rather than 4x2. The sub-8x8
+/// cases are exactly the ones subsampling makes reachable, so a shift-based derivation is wrong
+/// where it matters most.
+///
+/// `None` carries a conformance requirement (§6.10.4): *"it is a requirement of bitstream
+/// conformance that `get_plane_residual_size(subSize, 1)` is not equal to `BLOCK_INVALID` every
+/// time subSize is computed"*. Under 4:2:2 every taller-than-wide block is invalid — halving the
+/// width of an 8x32 block would imply a 4x32 chroma block, an aspect ratio AV1 does not code — so
+/// the partition search must not emit one.
+pub(crate) const fn plane_residual_size(
+    bw: usize,
+    bh: usize,
+    plane: usize,
+    ss: ChromaSubsampling,
+) -> Option<(usize, usize)> {
+    if plane == 0 {
+        return Some((bw, bh));
+    }
+    // Columns of `Subsampled_Size[bsize][1][0]` (4:2:2) and `[bsize][1][1]` (4:2:0). The
+    // `[0][1]` column (4:4:0) is omitted: AV1 §5.5.2 cannot signal `subsampling_x = 0` with
+    // `subsampling_y = 1`, and `gamut_avif::Av1Config` already rejects that pair as inexpressible.
+    let (c422, c420) = match (bw, bh) {
+        (4, 4) => (Some((4, 4)), Some((4, 4))),
+        (4, 8) => (None, Some((4, 4))),
+        (8, 4) => (Some((4, 4)), Some((4, 4))),
+        (8, 8) => (Some((4, 8)), Some((4, 4))),
+        (8, 16) => (None, Some((4, 8))),
+        (16, 8) => (Some((8, 8)), Some((8, 4))),
+        (16, 16) => (Some((8, 16)), Some((8, 8))),
+        (16, 32) => (None, Some((8, 16))),
+        (32, 16) => (Some((16, 16)), Some((16, 8))),
+        (32, 32) => (Some((16, 32)), Some((16, 16))),
+        (32, 64) => (None, Some((16, 32))),
+        (64, 32) => (Some((32, 32)), Some((32, 16))),
+        (64, 64) => (Some((32, 64)), Some((32, 32))),
+        (64, 128) => (None, Some((32, 64))),
+        (128, 64) => (Some((64, 64)), Some((64, 32))),
+        (128, 128) => (Some((64, 128)), Some((64, 64))),
+        (4, 16) => (None, Some((4, 8))),
+        (16, 4) => (Some((8, 4)), Some((8, 4))),
+        (8, 32) => (None, Some((4, 16))),
+        (32, 8) => (Some((16, 8)), Some((16, 4))),
+        (16, 64) => (None, Some((8, 32))),
+        (64, 16) => (Some((32, 16)), Some((32, 8))),
+        _ => (None, None),
+    };
+    match ss {
+        ChromaSubsampling::Cs444 => Some((bw, bh)),
+        ChromaSubsampling::Cs422 => c422,
+        ChromaSubsampling::Cs420 => c420,
+        // Monochrome has no chroma plane to size, and `ChromaSubsampling` is `#[non_exhaustive]`,
+        // so a layout added later has no table row yet. One arm, because a separate `Cs400 => None`
+        // would be indistinguishable from falling through to this one.
+        _ => None,
+    }
+}
+
+/// §5.11.5 `HasChroma`: whether the block at MI `(mi_row, mi_col)` codes chroma at all.
+///
+/// Under 4:2:0 a 4x4 luma block covers only a 2x2 chroma area, which is below the 4x4 minimum, so
+/// chroma is coded once for the 2x2 group of luma blocks — by the block at the **odd** MI row and
+/// column, i.e. the last of the group in decode order. Every other block of the group codes no
+/// `uv_mode`, no `cfl_alpha` and no chroma residual. Under 4:2:2 only the column parity applies.
+///
+/// The height test is evaluated before the width test, exactly as the spec writes it.
+pub(crate) fn has_chroma(
+    mi_row: usize,
+    mi_col: usize,
+    bw: usize,
+    bh: usize,
+    ss: ChromaSubsampling,
+) -> bool {
+    if matches!(ss, ChromaSubsampling::Cs400) {
+        return false; // NumPlanes == 1
+    }
+    let (ss_x, ss_y) = ss.subsampling();
+    // The spec writes this as two sequential tests that both yield 0; since neither branch has a
+    // side effect, the disjunction below is equivalent and the evaluation order is immaterial. A
+    // `bw`/`bh` of 4 is the spec's `bw4 == 1` / `bh4 == 1`: only a single-MI-cell extent can be
+    // shared with a neighbour.
+    let shares_a_neighbours_chroma = (bh == 4 && ss_y == 1 && mi_row.is_multiple_of(2))
+        || (bw == 4 && ss_x == 1 && mi_col.is_multiple_of(2));
+    !shares_a_neighbours_chroma
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +238,149 @@ mod tests {
     /// same terms the encoder uses.
     fn mi(width: usize, height: usize) -> (usize, usize) {
         (2 * ((width + 7) >> 3), 2 * ((height + 7) >> 3))
+    }
+
+    #[test]
+    fn plane_residual_size_is_a_table_not_a_shift() {
+        use ChromaSubsampling::{Cs420, Cs422, Cs444};
+        // Luma is never subsampled, whatever the format says.
+        for ss in [Cs444, Cs422, Cs420] {
+            assert_eq!(plane_residual_size(16, 8, 0, ss), Some((16, 8)), "{ss:?}");
+        }
+        // 4:4:4 chroma is the block itself.
+        assert_eq!(plane_residual_size(16, 8, 1, Cs444), Some((16, 8)));
+
+        // The min-4 clamp is why this cannot be `bw >> ss_x, bh >> ss_y`: an 8x4 block in 4:2:0
+        // has a 4x4 chroma residual, not 4x2, and a 4x4 block stays 4x4 rather than becoming 2x2.
+        assert_eq!(plane_residual_size(8, 4, 1, Cs420), Some((4, 4)));
+        assert_eq!(plane_residual_size(4, 4, 1, Cs420), Some((4, 4)));
+        assert_eq!(plane_residual_size(4, 8, 1, Cs420), Some((4, 4)));
+        // Ordinary halving above that.
+        assert_eq!(plane_residual_size(8, 8, 1, Cs420), Some((4, 4)));
+        assert_eq!(plane_residual_size(16, 16, 1, Cs420), Some((8, 8)));
+        assert_eq!(plane_residual_size(64, 64, 1, Cs420), Some((32, 32)));
+        assert_eq!(plane_residual_size(16, 8, 1, Cs420), Some((8, 4)));
+
+        // 4:2:2 halves width only.
+        assert_eq!(plane_residual_size(8, 8, 1, Cs422), Some((4, 8)));
+        assert_eq!(plane_residual_size(16, 16, 1, Cs422), Some((8, 16)));
+        assert_eq!(plane_residual_size(16, 8, 1, Cs422), Some((8, 8)));
+        assert_eq!(plane_residual_size(16, 4, 1, Cs422), Some((8, 4)));
+
+        // The §6.10.4 conformance boundary: under 4:2:2 every taller-than-wide block is
+        // BLOCK_INVALID, so the partition search must not emit one. Square and wider-than-tall
+        // blocks are all valid.
+        for (bw, bh) in [
+            (4, 8),
+            (8, 16),
+            (16, 32),
+            (32, 64),
+            (4, 16),
+            (8, 32),
+            (16, 64),
+        ] {
+            assert_eq!(
+                plane_residual_size(bw, bh, 1, Cs422),
+                None,
+                "{bw}x{bh} at 4:2:2"
+            );
+            assert!(
+                plane_residual_size(bw, bh, 1, Cs420).is_some(),
+                "{bw}x{bh} is valid at 4:2:0"
+            );
+        }
+        for (bw, bh) in [(4, 4), (8, 8), (16, 16), (8, 4), (16, 8), (32, 16), (16, 4)] {
+            assert!(
+                plane_residual_size(bw, bh, 1, Cs422).is_some(),
+                "{bw}x{bh} is valid at 4:2:2"
+            );
+        }
+        // Monochrome has no chroma plane to size.
+        assert_eq!(plane_residual_size(8, 8, 1, ChromaSubsampling::Cs400), None);
+
+        // Every row of `Subsampled_Size`, so no arm can be deleted without a failure. Listed as
+        // (luma, 4:2:2, 4:2:0) with `None` for BLOCK_INVALID.
+        /// One `Subsampled_Size` row: the luma block, then its 4:2:2 and 4:2:0 chroma residuals.
+        type Row = (
+            (usize, usize),
+            Option<(usize, usize)>,
+            Option<(usize, usize)>,
+        );
+        let table: [Row; 22] = [
+            ((4, 4), Some((4, 4)), Some((4, 4))),
+            ((4, 8), None, Some((4, 4))),
+            ((8, 4), Some((4, 4)), Some((4, 4))),
+            ((8, 8), Some((4, 8)), Some((4, 4))),
+            ((8, 16), None, Some((4, 8))),
+            ((16, 8), Some((8, 8)), Some((8, 4))),
+            ((16, 16), Some((8, 16)), Some((8, 8))),
+            ((16, 32), None, Some((8, 16))),
+            ((32, 16), Some((16, 16)), Some((16, 8))),
+            ((32, 32), Some((16, 32)), Some((16, 16))),
+            ((32, 64), None, Some((16, 32))),
+            ((64, 32), Some((32, 32)), Some((32, 16))),
+            ((64, 64), Some((32, 64)), Some((32, 32))),
+            ((64, 128), None, Some((32, 64))),
+            ((128, 64), Some((64, 64)), Some((64, 32))),
+            ((128, 128), Some((64, 128)), Some((64, 64))),
+            ((4, 16), None, Some((4, 8))),
+            ((16, 4), Some((8, 4)), Some((8, 4))),
+            ((8, 32), None, Some((4, 16))),
+            ((32, 8), Some((16, 8)), Some((16, 4))),
+            ((16, 64), None, Some((8, 32))),
+            ((64, 16), Some((32, 16)), Some((32, 8))),
+        ];
+        for ((bw, bh), want422, want420) in table {
+            assert_eq!(
+                plane_residual_size(bw, bh, 1, Cs422),
+                want422,
+                "{bw}x{bh} at 4:2:2"
+            );
+            assert_eq!(
+                plane_residual_size(bw, bh, 1, Cs420),
+                want420,
+                "{bw}x{bh} at 4:2:0"
+            );
+            assert_eq!(
+                plane_residual_size(bw, bh, 1, Cs444),
+                Some((bw, bh)),
+                "{bw}x{bh} at 4:4:4"
+            );
+        }
+        // A shape with no row at all (AV1 has no 4x32 block) is not codable.
+        assert_eq!(plane_residual_size(4, 32, 1, Cs420), None);
+    }
+
+    #[test]
+    fn has_chroma_follows_the_mi_parity_of_a_sub_eight_block() {
+        use ChromaSubsampling::{Cs420, Cs422, Cs444};
+        // 4:4:4 always codes chroma, at every position and size.
+        for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            assert!(has_chroma(r, c, 4, 4, Cs444), "({r},{c})");
+        }
+        // 4:2:0: a 4x4 block codes chroma only at odd MI row *and* column — the last of the 2x2
+        // group in decode order, which is what makes the covered luma already reconstructed.
+        assert!(!has_chroma(0, 0, 4, 4, Cs420));
+        assert!(!has_chroma(0, 1, 4, 4, Cs420));
+        assert!(!has_chroma(1, 0, 4, 4, Cs420));
+        assert!(has_chroma(1, 1, 4, 4, Cs420));
+        // The height test is evaluated first, so an 8-wide/4-tall block at an even row is excluded
+        // by height even though its width would pass.
+        assert!(!has_chroma(0, 0, 8, 4, Cs420));
+        assert!(has_chroma(1, 0, 8, 4, Cs420));
+        assert!(!has_chroma(0, 0, 4, 8, Cs420));
+        assert!(has_chroma(0, 1, 4, 8, Cs420));
+        // Any block 8x8 or larger always codes its own chroma.
+        for (r, c) in [(0, 0), (1, 1)] {
+            assert!(has_chroma(r, c, 8, 8, Cs420), "({r},{c})");
+        }
+        // 4:2:2 subsamples x only, so only the column parity applies.
+        assert!(!has_chroma(0, 0, 4, 4, Cs422));
+        assert!(has_chroma(0, 1, 4, 4, Cs422));
+        assert!(has_chroma(1, 1, 4, 4, Cs422));
+        assert!(has_chroma(0, 0, 8, 4, Cs422));
+        // Monochrome has no chroma at all.
+        assert!(!has_chroma(1, 1, 16, 16, ChromaSubsampling::Cs400));
     }
 
     #[test]
@@ -252,6 +498,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn deblock_mi_takes_the_odd_cell_of_a_subsampled_group() {
+        let (mc, mr) = mi(64, 64);
+        let luma = PlaneGeom::frame(64, 64, mc, mr, ChromaSubsampling::Cs420)[0];
+        let c420 = PlaneGeom::frame(64, 64, mc, mr, ChromaSubsampling::Cs420)[1];
+        let c422 = PlaneGeom::frame(64, 64, mc, mr, ChromaSubsampling::Cs422)[1];
+        // Luma: the plain cell division, unchanged.
+        assert_eq!(luma.deblock_mi(0, 0), (0, 0));
+        assert_eq!(luma.deblock_mi(4, 8), (1, 2));
+        // 4:2:0: chroma sample 4 covers luma 8, MI cell 2 — and the governing cell is the odd one,
+        // 3. A missing `| ss` would give 2, which is the same block only when the pair agrees.
+        assert_eq!(c420.deblock_mi(4, 4), (3, 3));
+        assert_eq!(c420.deblock_mi(0, 0), (1, 1));
+        // 4:2:2 subsamples x only, so the row keeps its even cell.
+        assert_eq!(c422.deblock_mi(4, 4), (3, 1));
+        // The `|` must not be `^`: at a chroma column whose MI cell is already odd, OR keeps it and
+        // XOR would step *back* to the even one. Chroma x = 6 maps to luma 12, MI cell 3.
+        assert_eq!(c420.deblock_mi(6, 6), (3, 3));
+        assert_eq!(c420.deblock_mi(2, 2), (1, 1));
     }
 
     #[test]

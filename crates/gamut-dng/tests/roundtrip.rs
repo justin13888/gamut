@@ -489,16 +489,22 @@ fn lossless_jpeg_roundtrips_and_validates() {
 
 #[test]
 fn metadata_embeds_and_roundtrips() {
-    use gamut_dng::{DngMetadata, ExifMetadata};
+    use gamut_dng::{ByteOrder, DngMetadata, Exif, ExifTag, Rational, Value};
     let raw = common::sample_raw(32, 24, 16);
+    let mut exif = Exif::new(ByteOrder::LittleEndian);
+    exif.set_tag(ExifTag::ExposureTime, Value::Rational(vec![(1, 250)]));
+    exif.set_tag(ExifTag::FNumber, Value::Rational(vec![(28, 10)]));
+    exif.set_tag(ExifTag::PhotographicSensitivity, Value::Short(vec![400]));
+    exif.set_tag(
+        ExifTag::DateTimeOriginal,
+        Value::Ascii("2026:06:13 12:00:00".to_owned()),
+    );
+    exif.set_tag(ExifTag::FocalLength, Value::Rational(vec![(50, 1)]));
+    // An entry the crate models no field for: it rides along in the same directory, so the
+    // decoder needs no separate verbatim escape hatch to return it.
+    exif.set_tag(ExifTag::LensModel, Value::Ascii("gamut 50mm".to_owned()));
     let meta = DngMetadata {
-        exif: ExifMetadata {
-            exposure_time: Some((1, 250)),
-            f_number: Some((28, 10)),
-            iso_speed: Some(400),
-            date_time_original: Some("2026:06:13 12:00:00".to_owned()),
-            focal_length: Some((50, 1)),
-        },
+        exif: Some(exif),
         xmp: Some(br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"></x:xmpmeta>"#.to_vec()),
         iptc: Some(vec![0x1c, 0x02, 0x05, 0x00, 0x03, b'a', b'b', b'c']),
         icc: Some(vec![0u8; 16]),
@@ -515,17 +521,39 @@ fn metadata_embeds_and_roundtrips() {
     // gamut reconstructs every block.
     let decoded = DngDecoder::new().decode(&dng).expect("decode");
     let got = &decoded.metadata;
-    assert_eq!(got.exif.exposure_time, Some((1, 250)));
-    assert_eq!(got.exif.f_number, Some((28, 10)));
-    assert_eq!(got.exif.iso_speed, Some(400));
+    let got_exif = got.exif.as_ref().expect("EXIF sub-IFD");
     assert_eq!(
-        got.exif.date_time_original.as_deref(),
-        Some("2026:06:13 12:00:00")
+        got_exif.exposure_time(),
+        Some(Rational { num: 1, den: 250 })
     );
-    assert_eq!(got.exif.focal_length, Some((50, 1)));
+    assert_eq!(got_exif.f_number(), Some(Rational { num: 28, den: 10 }));
+    assert_eq!(
+        got_exif.get_tag(ExifTag::PhotographicSensitivity),
+        Some(&Value::Short(vec![400]))
+    );
+    assert_eq!(
+        got_exif.get_tag(ExifTag::DateTimeOriginal),
+        Some(&Value::Ascii("2026:06:13 12:00:00".to_owned()))
+    );
+    assert_eq!(got_exif.focal_length(), Some(Rational { num: 50, den: 1 }));
+    assert_eq!(
+        got_exif.get_tag(ExifTag::LensModel),
+        Some(&Value::Ascii("gamut 50mm".to_owned()))
+    );
+    // The mandatory `ExifVersion` the encoder supplies is the only entry beyond what was set.
+    assert_eq!(got_exif.exif_ifd().expect("sub-IFD").fields().len(), 7);
     assert_eq!(got.xmp, meta.xmp);
     assert_eq!(got.iptc, meta.iptc);
     assert_eq!(got.icc, meta.icc);
+    // The byte carriers hand over to the unified facade model unchanged.
+    assert_eq!(
+        got.blocks(),
+        vec![
+            gamut_dng::MetadataBlock::Xmp(meta.xmp.as_deref().expect("xmp")),
+            gamut_dng::MetadataBlock::IptcIim(meta.iptc.as_deref().expect("iptc")),
+            gamut_dng::MetadataBlock::Icc(meta.icc.as_deref().expect("icc")),
+        ]
+    );
     // The raw image still round-trips alongside the metadata.
     assert_eq!(decoded.raw, raw);
 }
