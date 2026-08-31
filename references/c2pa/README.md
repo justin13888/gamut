@@ -165,6 +165,32 @@ any gamut crate reads under #239.
 unsigned integer. It does **not** say whether that count includes the 8-byte `LBox`+`TBox` header,
 and it says nothing at all about extended length forms.
 
+**The superbox's own type code, unlike its grammar, is traceable here.** §A.3.9 requires a JPEG XL
+file to carry the store in a *"JUMBF (`jumb`) superbox"* and §15.12.3.2 calls it *"a top level JUMBF
+box (JUMB)"*; §11.1.4.2 gives the manifest store's JUMBF type UUID as
+`63327061-0011-0010-8000-00AA00389B71`, and §15.12.3.1, §15.12.3.2 and §18.7.3.1 all describe the
+store as *"identified by it being a JUMBF superbox with a label of `c2pa` and a JUMBF type UUID of"*
+that value. So a reader wanting to confirm it is looking at a manifest store is **not** without a
+vendored constant — a claim to the contrary would be wrong. Two caveats bound how far that gets a
+gamut crate. Both `jumb` sentences are JPEG XL clauses that attribute the box to ISO/IEC 18181-2
+clause 9.3 rather than defining it, so a crate asserting `TBox == jumb` is leaning on an aside about
+a different container; that is a judgement call about narrowing what gets reported, not a
+procurement question. And the type UUID sits inside the JUMBF Description Box, whose layout **is**
+19566-5's — confirming a store the way the specification itself describes stays blocked on that
+document. **What 19566-5 withholds is the Description Box layout, not the type code**; nothing here
+should be recorded as the latter.
+
+**`LBox` is read as covering its own header, and that is an assumption.** Every gamut crate that
+reads this length — today only `gamut-heic`'s `locate_store` — treats `LBox` as counting the 8-byte
+`LBox`+`TBox` header, so a store's bytes are `data[..lbox]`. The basis is §8.4.2.3 introducing it as
+*"a box length"* over *"a standard box consisting of: a box length (LBox…); a box type (TBox…); and
+payload data"* — a length named as the box's own, over a box enumerated as those three parts — plus
+the JP2/ISOBMFF convention the family shares. It is an inference, not a quotation. If it were wrong
+the failure is silent and uniform: every store would be reported exactly 8 bytes short, and because
+the store is opaque to gamut nothing downstream would catch it. Acquiring 19566-5, or a single
+`c2pa-rs`-generated fixture, settles it in one observation. The rule stated below presumes this
+reading; the refusal it prescribes is about the *extended* forms, which remain genuinely unanswered.
+
 Those forms are the open question, and this README cannot answer it. JUMBF descends from the JP2 box
 structure, where — as in ISO/IEC 14496-12 §4.2, which gamut already implements in `gamut-isobmff` —
 a sentinel length selects a 64-bit size field or "runs to the end". **That is an inference from the
