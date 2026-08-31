@@ -2,22 +2,36 @@
 
 use gamut_isobmff::BoxReader;
 
+/// A `size == 1` box, whose real length follows the type as a 64-bit `largesize`:
+/// a 16-byte header (4 size + 4 type + 8 largesize) and a 3-byte body.
+const LARGESIZE_MDAT: [u8; 19] = [
+    0, 0, 0, 1, b'm', b'd', b'a', b't', // large-size marker and type
+    0, 0, 0, 0, 0, 0, 0, 19, // 16-byte header + 3-byte body
+    0xAA, 0xBB, 0xCC,
+];
+
 #[test]
-fn largesize_box_exposes_body_and_advances_over_full_header() {
-    let data = [
-        0, 0, 0, 1, b'm', b'd', b'a', b't', // large-size marker and type
-        0, 0, 0, 0, 0, 0, 0, 19, // 16-byte header + 3-byte body
-        0xAA, 0xBB, 0xCC,
-    ];
-    let mut reader = BoxReader::new(&data);
+fn a_largesize_box_exposes_the_body_after_its_sixteen_byte_header() {
+    let mut reader = BoxReader::new(&LARGESIZE_MDAT);
     let b = reader.next_box().unwrap().unwrap();
 
     assert_eq!(b.ty, *b"mdat");
     assert_eq!(b.offset, 0);
+    // The body starts after all sixteen header bytes, not after the first eight: a reader that
+    // mistook the largesize field for payload would report five bytes here.
     assert_eq!(b.body, &[0xAA, 0xBB, 0xCC]);
     assert_eq!(b.payload(), b.body);
     assert_eq!(b.user_type, None);
-    assert_eq!(reader.position(), data.len());
+}
+
+#[test]
+fn a_largesize_box_advances_the_cursor_over_its_full_header() {
+    let mut reader = BoxReader::new(&LARGESIZE_MDAT);
+    reader.next_box().unwrap().unwrap();
+
+    // Distinct from the body claim above: the body can be sliced correctly while the cursor is
+    // left short, and the walk would then resynchronise inside the box it just returned.
+    assert_eq!(reader.position(), LARGESIZE_MDAT.len());
     assert_eq!(reader.remaining(), 0);
     assert!(reader.next_box().unwrap().is_none());
 }
