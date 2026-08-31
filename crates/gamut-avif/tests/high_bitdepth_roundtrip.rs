@@ -13,7 +13,7 @@
 use gamut_avif::{
     Av1Config, Av1StillDecoder, AvifContainer, AvifEncoder, ChromaFormat, DecodedFrame,
 };
-use gamut_color::BitDepth;
+use gamut_color::{BitDepth, ChromaSubsampling, MatrixCoefficients};
 use gamut_core::{Dimensions, EncodeImage, Error, ImageRef, Result, Rgb16, Rgba16};
 
 const W: u32 = 34;
@@ -266,4 +266,83 @@ fn lossy_rgb16_decodes_at_the_coded_depth() {
             "{bits:?}: decoded luma never exceeds 8 bits"
         );
     }
+}
+
+/// `with_chroma` now reaches the 16-bit path, so a high-bit-depth item can be 4:2:2 or 4:2:0 —
+/// and libavif, decoding it in its strict mode, must report both the depth *and* the layout the
+/// container claims.
+///
+/// The two are coupled in the stream: §6.4.1 puts any 12-bit picture on profile 2, and §5.5.2 has
+/// profile 2 *code* its subsampling pair only at 12 bits — everywhere else the layout is inferred
+/// from the profile. So a 12-bit 4:2:0 file is the one configuration in which both subsampling bits
+/// are written, and it is the one this pins.
+#[test]
+fn sixteen_bit_input_honours_the_requested_chroma() {
+    for bits in [BitDepth::Ten, BitDepth::Twelve] {
+        for (chroma, want) in [
+            (ChromaSubsampling::Cs444, ChromaFormat::Yuv444),
+            (ChromaSubsampling::Cs422, ChromaFormat::Yuv422),
+            (ChromaSubsampling::Cs420, ChromaFormat::Yuv420),
+        ] {
+            let px = source_rgb16();
+            let avif = AvifEncoder::lossy(70)
+                .with_bit_depth(bits)
+                .with_matrix(MatrixCoefficients::Bt709)
+                .with_chroma(chroma)
+                .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
+                .unwrap_or_else(|e| panic!("encode at {bits:?}/{chroma:?} failed: {e}"));
+
+            // What the container says.
+            let container = AvifContainer::parse(&avif).expect("parse");
+            let cfg = container
+                .image()
+                .primary_item()
+                .av1_config()
+                .expect("an av01 item has an av1C")
+                .expect("the record parses");
+            assert_eq!(
+                cfg.chroma_format(),
+                want,
+                "{bits:?}/{chroma:?}: av1C layout"
+            );
+            assert_eq!(
+                cfg.bit_depth(),
+                bits.bits(),
+                "{bits:?}/{chroma:?}: av1C depth"
+            );
+
+            // What a real reader gets. libavif reports its own notion of the geometry, so a
+            // container that claimed a layout the payload did not carry would disagree here.
+            let decoded = libavif_oracle::decode_avif(&avif)
+                .unwrap_or_else(|e| panic!("libavif rejected {bits:?}/{chroma:?}: {e}"));
+            assert_eq!(decoded.bit_depth, bits.bits());
+            let (cw, ch) = chroma.chroma_dimensions(W, H);
+            assert_eq!(
+                decoded.planes[1].len(),
+                (cw * ch) as usize,
+                "{bits:?}/{chroma:?}: libavif's chroma plane size"
+            );
+        }
+    }
+}
+
+/// The identity matrix is 4:4:4 whatever `with_chroma` says — §6.4.2 permits `MC_IDENTITY` only
+/// there — so the knob is dropped rather than half-honoured, exactly as on the 8-bit path.
+#[test]
+fn the_identity_matrix_stays_four_four_four_at_high_bit_depth() {
+    let px = source_rgb16();
+    let avif = AvifEncoder::lossy(70)
+        .with_bit_depth(BitDepth::Twelve)
+        .with_matrix(MatrixCoefficients::Identity)
+        .with_chroma(ChromaSubsampling::Cs420)
+        .encode_to_vec(ImageRef::<Rgb16>::new(&px, DIMS).unwrap())
+        .expect("encode");
+    let container = AvifContainer::parse(&avif).expect("parse");
+    let cfg = container
+        .image()
+        .primary_item()
+        .av1_config()
+        .expect("an av01 item has an av1C")
+        .expect("the record parses");
+    assert_eq!(cfg.chroma_format(), ChromaFormat::Yuv444);
 }

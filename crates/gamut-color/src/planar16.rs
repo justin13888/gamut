@@ -10,6 +10,7 @@
 use gamut_core::{Dimensions, Error, ImageRef, Result, Rgb16, Rgba16};
 
 use crate::format::{BitDepth, ChromaSubsampling};
+use crate::planar::downsample_box;
 use crate::ycbcr::RgbToYcbcr;
 
 /// How far a full-range 16-bit sample is shifted down to reach `bit_depth`.
@@ -231,6 +232,56 @@ impl Planar16 {
                 matrix,
             ),
         }
+    }
+
+    /// Maps an interleaved 16-bit RGB image to `Y/Cb/Cr` planes through `matrix`, narrowing to the
+    /// coded depth and then box-averaging the chroma planes down to `subsampling`.
+    ///
+    /// The high-bit-depth twin of
+    /// [`Planar8::from_rgb8_matrix_subsampled`](crate::Planar8::from_rgb8_matrix_subsampled), and
+    /// deliberately the same filter: the two share `downsample_box`, so a 10/12-bit encode cannot
+    /// drift from the 8-bit chroma the goldens pin. Narrowing happens **before** the average, so the
+    /// samples are averaged on the scale they are coded at rather than on the 16-bit input scale.
+    ///
+    /// Luma keeps full resolution. The chroma planes are the
+    /// [`ChromaSubsampling::chroma_dimensions`] of the image, so an odd axis keeps its
+    /// half-covering edge sample and that sample averages only the pixels that exist.
+    ///
+    /// [`ChromaSubsampling::Cs444`] is the no-op case and produces the same planes as
+    /// [`from_rgb16_matrix_view`](Self::from_rgb16_matrix_view). [`ChromaSubsampling::Cs400`] is not
+    /// accepted — a monochrome encode drops chroma rather than averaging it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Unsupported`] for [`ChromaSubsampling::Cs400`].
+    pub fn from_rgb16_matrix_subsampled(
+        img: ImageRef<'_, Rgb16>,
+        matrix: RgbToYcbcr,
+        subsampling: ChromaSubsampling,
+    ) -> Result<Self> {
+        if subsampling == ChromaSubsampling::Cs400 {
+            return Err(Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "monochrome has no chroma planes to subsample",
+            ));
+        }
+        let full = Self::from_rgb16_matrix_view(img, matrix);
+        if subsampling == ChromaSubsampling::Cs444 {
+            return Ok(full);
+        }
+        let (width, height) = (full.width as usize, full.height as usize);
+        let (cw, ch) = subsampling.chroma_dimensions(full.width, full.height);
+        let (sx, sy) = subsampling.subsampling();
+        let (sx, sy) = (1usize << sx, 1usize << sy);
+        let [y, u, v] = full.planes;
+        let chroma = |p: &[u16]| downsample_box(p, width, height, cw as usize, ch as usize, sx, sy);
+        Ok(Self {
+            width: full.width,
+            height: full.height,
+            subsampling,
+            bit_depth: full.bit_depth,
+            planes: [y, chroma(&u), chroma(&v)],
+        })
     }
 
     /// The colour channels of an interleaved 16-bit RGBA image as 4:4:4 identity GBR planes,
@@ -563,5 +614,141 @@ mod tests {
     fn plane_dimensions_rejects_an_out_of_range_index() {
         let p = planes(BitDepth::Ten, vec![0; 6]).unwrap();
         let _ = p.plane_dimensions(3);
+    }
+
+    /// A BT.709 full-range matrix at `depth`.
+    fn matrix(depth: BitDepth) -> RgbToYcbcr {
+        RgbToYcbcr::new(
+            crate::cicp::MatrixCoefficients::Bt709,
+            crate::cicp::ColorRange::Full,
+            depth,
+        )
+        .unwrap()
+    }
+
+    /// A 4x2 vertical red/blue stripe at period 2, as interleaved 16-bit RGB.
+    fn stripe() -> Vec<u16> {
+        let (w, h) = (4usize, 2usize);
+        let mut rgb = vec![0u16; w * h * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 3;
+                // Coloured, not grey: a black/white stripe has neutral chroma either way, so it
+                // could not tell an averaged plane from an un-averaged one.
+                let px = if x % 2 == 0 {
+                    [u16::MAX, 0, 0]
+                } else {
+                    [0, 0, u16::MAX]
+                };
+                rgb[i..i + 3].copy_from_slice(&px);
+            }
+        }
+        rgb
+    }
+
+    #[test]
+    fn matrix_subsampled_halves_only_the_subsampled_axes() {
+        // The stripe varies in x and is constant in y, so 4:2:2 and 4:2:0 collapse it while 4:4:4
+        // keeps it. That distinguishes an x/y transposition, which a square image and a symmetric
+        // pattern could not.
+        let rgb = stripe();
+        let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(4, 2).unwrap()).unwrap();
+        let m = matrix(BitDepth::Twelve);
+
+        let p444 =
+            Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs444).unwrap();
+        assert_eq!(p444.subsampling(), ChromaSubsampling::Cs444);
+        assert_eq!(p444.plane_dimensions(1), (4, 2));
+
+        let p422 =
+            Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs422).unwrap();
+        assert_eq!(p422.subsampling(), ChromaSubsampling::Cs422);
+        assert_eq!(p422.plane_dimensions(1), (2, 2));
+        assert_eq!(p422.plane(0).len(), 8, "luma keeps full resolution");
+
+        let p420 =
+            Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
+        assert_eq!(p420.plane_dimensions(1), (2, 1));
+
+        // Both subsampled layouts halve x and the stripe is constant in y, so their chroma agrees —
+        // and differs from the un-averaged sample.
+        assert_eq!(p422.plane(1)[0], p420.plane(1)[0]);
+        assert_ne!(p444.plane(1)[0], p422.plane(1)[0]);
+        // Luma is untouched by subsampling.
+        assert_eq!(p444.plane(0)[0], p422.plane(0)[0]);
+        assert_eq!(p444.plane(0)[0], p420.plane(0)[0]);
+    }
+
+    #[test]
+    fn matrix_subsampled_averages_on_the_coded_scale_and_stays_in_depth() {
+        // The average is taken *after* narrowing, so every sample — chroma included — is within the
+        // depth the buffer claims. An average computed on the 16-bit input scale would overflow it.
+        let rgb = stripe();
+        let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(4, 2).unwrap()).unwrap();
+        for depth in [BitDepth::Ten, BitDepth::Twelve] {
+            let p = Planar16::from_rgb16_matrix_subsampled(
+                img,
+                matrix(depth),
+                ChromaSubsampling::Cs420,
+            )
+            .unwrap();
+            assert_eq!(p.bit_depth(), depth, "the depth comes from the matrix");
+            let max = depth.max_value();
+            for i in 0..3 {
+                assert!(
+                    p.plane(i).iter().all(|&s| s <= max),
+                    "plane {i} exceeds {depth:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matrix_subsampled_at_four_four_four_is_the_view_constructor() {
+        // The no-op case must not merely *look* like 4:4:4 — it must be the same planes, so the
+        // short-circuit cannot silently average with a (1, 1) box.
+        let rgb = stripe();
+        let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(4, 2).unwrap()).unwrap();
+        let m = matrix(BitDepth::Twelve);
+        let sub = Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs444).unwrap();
+        let view = Planar16::from_rgb16_matrix_view(img, m);
+        assert_eq!(sub.subsampling(), view.subsampling());
+        assert_eq!(sub.bit_depth(), view.bit_depth());
+        for i in 0..3 {
+            assert_eq!(sub.plane(i), view.plane(i), "plane {i}");
+        }
+    }
+
+    #[test]
+    fn matrix_subsampled_rejects_monochrome() {
+        let rgb = [0u16; 3];
+        let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(1, 1).unwrap()).unwrap();
+        let err = Planar16::from_rgb16_matrix_subsampled(
+            img,
+            matrix(BitDepth::Twelve),
+            ChromaSubsampling::Cs400,
+        )
+        .expect_err("monochrome has no chroma to subsample");
+        assert_eq!(
+            err.static_message(),
+            Some("monochrome has no chroma planes to subsample")
+        );
+    }
+
+    #[test]
+    fn matrix_subsampled_keeps_the_half_covering_edge_sample_on_an_odd_axis() {
+        // 3x1 in 4:2:0: chroma_dimensions ceilings to 2x1, and the second chroma sample covers one
+        // real pixel rather than two. A floor would drop the last column entirely.
+        let rgb: Vec<u16> = vec![u16::MAX, 0, 0, 0, u16::MAX, 0, 0, 0, u16::MAX];
+        let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(3, 1).unwrap()).unwrap();
+        let p = Planar16::from_rgb16_matrix_subsampled(
+            img,
+            matrix(BitDepth::Ten),
+            ChromaSubsampling::Cs420,
+        )
+        .unwrap();
+        assert_eq!(p.plane_dimensions(1), (2, 1));
+        assert_eq!(p.plane(1).len(), 2);
+        assert_eq!(p.plane(0).len(), 3, "luma keeps all three columns");
     }
 }

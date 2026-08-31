@@ -50,8 +50,9 @@ and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color
 
 **Deferred (planned, additive).** Every ☐ row below: 4:2:0/4:2:2 and `MA1B` landed with
 #390/#391, the alpha auxiliary, `Gray8` and monochrome surface with #396/#397, and the 10/12-bit
-path end to end with #398/#399 — what remains of the pixel-format surface is subsampled chroma on
-the `Rgba8` and 16-bit paths; depth auxiliary items; the HDR
+path end to end with #398/#399, and subsampled chroma on the `Rgb16` path with #399 — what remains
+of the pixel-format surface is subsampled chroma on the `Rgba8`/`Rgba16` paths, which need a
+4-stride downsampler; depth auxiliary items; the HDR
 surface beyond CICP *tagging* (`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a
 PQ/HLG transfer labels samples but does not by itself make a conformant HDR image); container
 derivations
@@ -289,8 +290,8 @@ copy, which is what a decoder does for an independently decodable tile.
 | `AvifEncoder::{with_matrix, with_color_range}` colour selection | gamut-avif | ✅ (#335) | M2 |
 | `Rgba8` input + alpha-plane extraction; `Gray8` input | gamut-color/avif | ✅ (#397; `Planar8::from_rgba8_*_view`/`from_gray8_view`) | M3 |
 | `Rgb16`/`Rgba16` input → 10/12-bit AVIF (`with_bit_depth`) | gamut-color/avif | ✅ (#399; `Planar16::from_rgb16_*_view`/`from_rgba16_*_view`) | M2 |
-| Subsampled chroma on the `Rgba8` path (`with_chroma` is honoured for `Rgb8`, but an RGBA colour item is always 4:4:4 — `Planar8` has no 4-stride downsampler) | — | ☐ | M3 |
-| Subsampled chroma at 10/12-bit (`Planar16` carries a `ChromaSubsampling`, but has no `from_rgb16_matrix_subsampled` to produce one, so every 16-bit input codes 4:4:4) | — | ☐ | M3 |
+| Subsampled chroma on the `Rgba8`/`Rgba16` paths (`with_chroma` is honoured for `Rgb8`/`Rgb16`, but an RGBA colour item is always 4:4:4 — neither `Planar8` nor `Planar16` has a 4-stride downsampler) | — | ☐ | M3 |
+| Subsampled chroma at 10/12-bit (`with_chroma` reaches the `Rgb16` path; `Planar16::from_rgb16_matrix_subsampled` shares `Planar8`'s box filter, so the two cannot drift) | — | ✅ (#399) | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16`; 16-bit input narrows to a 10/12-bit coded depth — float HDR ☐) | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |

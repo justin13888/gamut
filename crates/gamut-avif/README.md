@@ -59,7 +59,10 @@ requires every image item to be AV1 High Profile (AVIF v1.2.0 §8.3).
 
 The 16-bit inputs carry samples on `gamut-core`'s full 16-bit scale, while AV1 codes 8, 10 or 12.
 `with_bit_depth` picks the coded depth (10 or 12, default **12**) and the encoder narrows by
-**truncation**, so a lossless encode is bit-exact *at the coded depth*, not to the 16-bit input:
+**truncation**, so a lossless encode is bit-exact *at the coded depth*, not to the 16-bit input.
+`with_chroma` reaches the `Rgb16` path too, so a high-bit-depth item can be 4:2:2 or 4:2:0 — the
+chroma is averaged *after* narrowing, with the same box filter the 8-bit path uses. As on that path
+the identity matrix stays 4:4:4 (AV1 §6.4.2), and `AvifEncoder::lossy` defaults to 4:2:0:
 
 ```rust,ignore
 let avif = AvifEncoder::new()

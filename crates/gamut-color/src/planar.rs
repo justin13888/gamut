@@ -44,23 +44,58 @@ fn rgb_to_ycbcr_planes(px: &[u8], n: usize, stride: usize, matrix: RgbToYcbcr) -
     [y, cb, cr]
 }
 
+/// A sample type [`downsample_box`] can average: widened to `u32` for the sum, narrowed back after.
+///
+/// Implemented for `u8` and `u16` so the 8-bit and high-bit-depth planar buffers share one
+/// averaging filter rather than keeping a copy each. Narrowing is a plain truncating cast, which is
+/// lossless here: a box average never exceeds the largest input sample.
+pub(crate) trait BoxSample: Copy {
+    /// Widens a sample for accumulation.
+    fn widen(self) -> u32;
+    /// Narrows an averaged sample back. `value` is always within the type's range.
+    fn narrow(value: u32) -> Self;
+}
+
+impl BoxSample for u8 {
+    fn widen(self) -> u32 {
+        u32::from(self)
+    }
+
+    fn narrow(value: u32) -> Self {
+        value as Self
+    }
+}
+
+impl BoxSample for u16 {
+    fn widen(self) -> u32 {
+        u32::from(self)
+    }
+
+    fn narrow(value: u32) -> Self {
+        value as Self
+    }
+}
+
 /// Box-averages `plane` (`width` x `height`, row-major) down to `cw` x `ch` by `(sx, sy)`.
 ///
 /// Partial edge boxes average only the samples that exist, which is edge replication. The filter is
 /// the encoder's free choice — AV1 signals *where* the chroma sample sits
 /// (`chroma_sample_position`), not how it was produced — and a symmetric box places it at the centre
 /// of the luma group it covers. `gamut-jpeg` makes the same choice for the same reason with its own
-/// private equivalent; the two differ only in the plane type they return.
-fn downsample_box(
-    plane: &[u8],
+/// private equivalent.
+///
+/// Generic over [`BoxSample`] so [`Planar8`] and [`Planar16`](crate::Planar16) average identically:
+/// a 10/12-bit plane must not drift from the 8-bit filter that the `Rgb8` goldens pin.
+pub(crate) fn downsample_box<T: BoxSample>(
+    plane: &[T],
     width: usize,
     height: usize,
     cw: usize,
     ch: usize,
     sx: usize,
     sy: usize,
-) -> Vec<u8> {
-    let mut out = vec![0u8; cw * ch];
+) -> Vec<T> {
+    let mut out = vec![T::narrow(0); cw * ch];
     for cy in 0..ch {
         for cx in 0..cw {
             let (mut sum, mut count) = (0u32, 0u32);
@@ -69,14 +104,14 @@ fn downsample_box(
                     let px = cx * sx + dx;
                     let py = cy * sy + dy;
                     if px < width && py < height {
-                        sum += u32::from(plane[py * width + px]);
+                        sum += plane[py * width + px].widen();
                         count += 1;
                     }
                 }
             }
             // `count` is at least one: `cx * sx < width` and `cy * sy < height` hold for every
             // output sample, because `cw`/`ch` are ceiling divisions of exactly those extents.
-            out[cy * cw + cx] = ((sum + count / 2) / count) as u8;
+            out[cy * cw + cx] = T::narrow((sum + count / 2) / count);
         }
     }
     out

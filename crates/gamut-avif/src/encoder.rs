@@ -637,9 +637,10 @@ impl AvifEncoder {
         colour: Av1Colour,
     ) -> Result<EncodedStill> {
         let bit_depth = planes.bit_depth();
-        // Read off the buffer, not the configuration, exactly as the 8-bit path does: `Planar16`
-        // has no subsampled constructor yet, so a 16-bit input is always 4:4:4 whatever
-        // `with_chroma` says, and the request must describe the planes it actually carries.
+        // Read off the buffer, not the configuration, exactly as the 8-bit path does: §6.4.2
+        // forces 4:4:4 under the identity matrix and the `Rgba16` path has no 4-stride
+        // downsampler, so either can carry 4:4:4 planes while `with_chroma` says otherwise. The
+        // request must describe the planes it actually carries.
         let chroma = planes.subsampling();
         let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, bit_depth);
         match crate::backend::run_backends(&self.backends, &request, BackendPlanes::High(planes))? {
@@ -968,20 +969,24 @@ impl EncodeImage<Rgba8> for AvifEncoder {
 }
 
 impl EncodeImage<Rgb16> for AvifEncoder {
-    /// Narrows the 16-bit samples to the configured coding depth and codes them as one 4:4:4 item
-    /// — 10-bit stays AV1 profile 1, 12-bit moves to profile 2 (§6.4.1), and `av1C`/`pixi`/`colr`
-    /// follow from the stream.
+    /// Narrows the 16-bit samples to the configured coding depth and codes them as one item at
+    /// [`with_chroma`](AvifEncoder::with_chroma)'s sampling — 10-bit 4:4:4 stays AV1 profile 1,
+    /// anything 12-bit or subsampled moves to profile 2 (§6.4.1), and `av1C`/`pixi`/`colr` follow
+    /// from the stream.
     ///
-    /// The narrowing is truncation; see [`AvifEncoder::with_bit_depth`] for the contract.
+    /// The narrowing is truncation; see [`AvifEncoder::with_bit_depth`] for the contract. Chroma is
+    /// averaged *after* narrowing, so the samples are averaged on the scale they are coded at.
     fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
         let depth = self.coded_bit_depth()?;
         let colour = self.colour();
         let planes = match colour.matrix {
+            // §6.4.2 forces 4:4:4 under the identity matrix, exactly as on the 8-bit path, so
+            // `with_chroma` does not reach this arm.
             MatrixCoefficients::Identity => Planar16::from_rgb16_identity_view(image, depth),
             matrix => {
                 let m = RgbToYcbcr::new(matrix, colour.range, depth)?;
-                Planar16::from_rgb16_matrix_view(image, m)
+                Planar16::from_rgb16_matrix_subsampled(image, m, self.chroma())?
             }
         };
         let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
