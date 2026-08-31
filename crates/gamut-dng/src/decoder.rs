@@ -9,10 +9,12 @@ use std::cell::RefCell;
 
 use gamut_core::{Dimensions, Error, Result};
 use gamut_ifd::{ByteOrder, Ifd, TiffFile, Value, Variant, read, read_ifd_at};
+use gamut_metadata::exif::Exif;
 
+use crate::color_profile::{ColorProfileInfo, NoiseProfile, TagSource};
 use crate::gain_map::ProfileGainTableMap;
 use crate::levels::RawLevels;
-use crate::metadata::{DngMetadata, ExifMetadata};
+use crate::metadata::DngMetadata;
 use crate::opcode::OpcodeList;
 use crate::profile::CameraProfile;
 use crate::raw::RawImage;
@@ -103,6 +105,18 @@ impl<'a> TrackedIfd<'a> {
     }
 }
 
+/// Reading a tag through a projection consumes it; rejecting a malformed one puts it back, so it
+/// still reaches the extras.
+impl TagSource for TrackedIfd<'_> {
+    fn value(&self, tag: u16) -> Option<&Value> {
+        self.get(tag)
+    }
+
+    fn reject(&self, tag: u16) {
+        self.untouch(tag);
+    }
+}
+
 /// A decoded DNG: the raw sensor image, the camera colour profile, and the declared DNG version.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -117,11 +131,26 @@ pub struct DecodedDng {
     /// 1.0.0.0 file carrying only `UniqueCameraModel`). The raw image still decodes; nothing is
     /// invented to fill the gap.
     pub profile: Option<CameraProfile>,
+    /// IFD 0's remaining camera-profile colour tags — the hue/saturation/value tables, the tone
+    /// curve, the profile exposure offset, the third calibration set and the reduction matrices —
+    /// when the file carries any of them.
+    ///
+    /// This is the rendering half of the colour model: [`profile`](Self::profile) carries the
+    /// calibration a raw processor needs to reach XYZ, this carries what the profile then asks it
+    /// to do with the result.
+    pub color_profile: Option<ColorProfileInfo>,
+    /// The raw IFD's `NoiseProfile` (51041) — the sensor's noise model — falling back to IFD 0
+    /// for a file that stores it there.
+    pub noise_profile: Option<NoiseProfile>,
     /// The `DNGVersion` the file declares, as its four dotted version octets in order — e.g. DNG
     /// 1.7.1.0 is `[1, 7, 1, 0]`. Kept as four bytes (not a packed `u32`) so each component reads
     /// directly and byte order never enters into it.
     pub dng_version: [u8; 4],
     /// Embedded metadata (EXIF sub-IFD + XMP/IPTC/ICC blocks), reconstructed from IFD 0.
+    ///
+    /// The `ExifIFD` arrives whole, as the shared [`Exif`](gamut_metadata::exif::Exif) model —
+    /// every entry of the directory, not a chosen subset — so nothing in it needs a separate
+    /// verbatim escape hatch.
     pub metadata: DngMetadata,
     /// The raw IFD's `ProfileGainTableMap` (52525), if present.
     pub gain_table_map: Option<ProfileGainTableMap>,
@@ -145,8 +174,6 @@ pub struct DecodedDng {
     /// Every unmodelled field of the raw IFD, verbatim. Empty when the raw image lives in IFD 0
     /// itself (its extras are then in [`ifd0_extra`](Self::ifd0_extra)).
     pub raw_extra: Vec<RawTag>,
-    /// Every EXIF sub-IFD entry beyond the typed [`ExifMetadata`] fields, verbatim.
-    pub exif_extra: Vec<RawTag>,
 }
 
 /// The verdict of [`DngDecoder::verify_new_raw_image_digest`].
@@ -265,6 +292,13 @@ impl DngDecoder {
 
         let raw = decode_raw_image(raw_ifd, data, order)?;
         let profile = decode_profile(ifd0)?;
+        let color_profile = crate::color_profile::project(ifd0);
+        // The spec stores `NoiseProfile` in the raw (or enhanced) IFD; some writers put it in
+        // IFD 0 instead, so fall back there when the raw IFD is a distinct directory.
+        let mut noise_profile = crate::color_profile::project_noise(raw_ifd);
+        if noise_profile.is_none() && raw_index != 0 {
+            noise_profile = crate::color_profile::project_noise(ifd0);
+        }
         let dng_version = read_version(ifd0)?;
         let backward_version = bytes_value(ifd0.get(tags::DNG_BACKWARD_VERSION)).map(|b| {
             let mut v = [0u8; 4];
@@ -275,7 +309,7 @@ impl DngDecoder {
         });
         let new_raw_image_digest = bytes_value(ifd0.get(tags::NEW_RAW_IMAGE_DIGEST))
             .and_then(|b| <[u8; 16]>::try_from(b).ok());
-        let (metadata, exif_extra) = decode_metadata(ifd0, data, order, variant);
+        let metadata = decode_metadata(ifd0, data, order, variant);
         let gain_table_map = decode_gain_map(raw_ifd, tags::PROFILE_GAIN_TABLE_MAP, order)?;
         let gain_table_map2 = decode_gain_map(ifd0, tags::PROFILE_GAIN_TABLE_MAP2, order)?;
         let depth_info = decode_depth_info(ifd0);
@@ -308,6 +342,8 @@ impl DngDecoder {
         Ok(DecodedDng {
             raw,
             profile,
+            color_profile,
+            noise_profile,
             dng_version,
             metadata,
             gain_table_map,
@@ -318,47 +354,35 @@ impl DngDecoder {
             new_raw_image_digest,
             ifd0_extra,
             raw_extra,
-            exif_extra,
         })
     }
 }
 
-/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD —
-/// plus the EXIF entries beyond the typed fields, verbatim.
+/// Reconstructs embedded metadata from IFD 0 — the XMP/IPTC/ICC blocks and the EXIF sub-IFD.
+///
+/// The `ExifIFD` is handed over whole, as the shared [`Exif`] model's Exif sub-IFD: every entry
+/// the directory holds survives, so no field of it is "unmodelled" and none is dropped. The DNG's
+/// own IFD 0 is *not* copied into the model's 0th IFD — [`DecodedDng`] already carries those
+/// fields, typed or as [`ifd0_extra`](DecodedDng::ifd0_extra).
 fn decode_metadata(
     ifd0: &TrackedIfd,
     data: &[u8],
     order: ByteOrder,
     variant: Variant,
-) -> (DngMetadata, Vec<RawTag>) {
-    let (exif, exif_extra) = ifd0
+) -> DngMetadata {
+    let exif = ifd0
         .get_u32(tags::EXIF_IFD)
         .and_then(|offset| read_ifd_at(data, u64::from(offset), order, variant).ok())
         .map(|exif_ifd| {
-            let tracked = TrackedIfd::new(&exif_ifd);
-            let exif = decode_exif(&tracked);
-            (exif, tracked.remaining())
-        })
-        .unwrap_or_default();
-    let metadata = DngMetadata {
+            let mut exif = Exif::new(order);
+            exif.set_exif_ifd(exif_ifd);
+            exif
+        });
+    DngMetadata {
         exif,
         xmp: bytes_value(ifd0.get(tags::XMP)),
         iptc: bytes_value(ifd0.get(tags::IPTC_NAA)),
         icc: bytes_value(ifd0.get(tags::ICC_PROFILE)),
-    };
-    (metadata, exif_extra)
-}
-
-/// Reads the common capture settings out of an EXIF sub-IFD.
-fn decode_exif(exif: &TrackedIfd) -> ExifMetadata {
-    ExifMetadata {
-        exposure_time: rational_pair(exif.get(tags::EXPOSURE_TIME)),
-        f_number: rational_pair(exif.get(tags::F_NUMBER)),
-        iso_speed: exif
-            .get_u32(tags::ISO_SPEED_RATINGS)
-            .and_then(|v| u16::try_from(v).ok()),
-        date_time_original: ascii_value(exif.get(tags::DATE_TIME_ORIGINAL)),
-        focal_length: rational_pair(exif.get(tags::FOCAL_LENGTH)),
     }
 }
 
@@ -1416,7 +1440,7 @@ fn ratio(n: f64, d: f64) -> f64 {
 }
 
 /// Converts a `RATIONAL`/`SRATIONAL` value to `f64`s.
-fn f64_vec(value: Option<&Value>) -> Option<Vec<f64>> {
+pub(crate) fn f64_vec(value: Option<&Value>) -> Option<Vec<f64>> {
     let value = value?;
     if let Some(r) = value.as_rationals() {
         return Some(r.iter().map(|&(n, d)| ratio(n.into(), d.into())).collect());

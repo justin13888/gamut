@@ -94,13 +94,37 @@ profile battery × 4 intents × BPC on/off differenced against Little-CMS with p
 max-ΔE₀₀ bounds (see STATUS.md's threshold table) — all documented in
 [STATUS.md](STATUS.md).
 
+## Pipeline optimization
+
+Transforms evaluate **stage by stage by default**. `TransformOptions::optimization` (and its
+`ProofingOptions` twin) opts into collapsing the linked pipeline first — the passes lcms2
+applies by default in `cmsopt.c`:
+
+| level | passes | cost |
+|-------|--------|------|
+| `PipelineOptimization::None` (default) | none | v1's exact documented numerics |
+| `Collapse` | identity elision, adjacent matrix folding | `f64` re-association only (measured 1e-15 device units) |
+| `Precalculate` | + curve joining, whole-pipeline CLUT resampling | lcms2's own default-path approximation — the conformance gate's LOOSE bounds |
+
+```rust,ignore
+let fast = IccTransform::between(&src, &dst, TransformOptions {
+    intent: RenderingIntent::MediaRelativeColorimetric,
+    black_point_compensation: false,
+    optimization: PipelineOptimization::Precalculate,
+})?;
+```
+
+On a 256×256 buffer that is 2.8× the default path's throughput for a shaper pair and 4.6×
+for an RGB→CMYK LUT pair, against a one-off build cost of a few milliseconds
+(`cargo bench -p gamut-cmm`; numbers and the precision budget in [STATUS.md](STATUS.md)).
+
 ## Deferred
 
 iccMAX (`ICC.2`), `multiProcessElementsType` (`mpet`), and the `DToBx`/`BToDx` tags are out of
 scope — the still-image profiles embedded in real images are all ICC.1 v2/v4, and the lcms2
-oracle does not implement iccMAX. Pipeline optimization (lcms2's stage collapsing/CLUT
-resampling) is deferred to issue #372; per-hop intent arrays for chains stay internal until a
-consumer needs them. See [STATUS.md](STATUS.md).
+oracle does not implement iccMAX. Integer/`f32` fast paths are unplanned (evaluation is `f64`
+at Tier-1), and per-hop intent arrays for chains stay internal until a consumer needs them.
+See [STATUS.md](STATUS.md).
 
 ## License
 

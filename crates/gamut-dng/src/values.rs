@@ -1,6 +1,7 @@
 //! Enumerated DNG tag *values* — the codes stored in the `Compression`,
 //! `PhotometricInterpretation`, `CalibrationIlluminant`, `CFALayout`, `Predictor`, `SampleFormat`,
-//! `ProfileEmbedPolicy`, and `PreviewColorSpace` tags, plus the `NewSubFileType` bit values.
+//! `ProfileEmbedPolicy`, `PreviewColorSpace`, and `TableEncoding` tags, plus the
+//! `NewSubFileType` bit values.
 //!
 //! Values come from the **DNG 1.7.1.0** specification and the Adobe DNG SDK's `dng_tag_values.h`.
 //! Each enum mirrors the structural-codec pattern used elsewhere in the workspace: a `from_code`
@@ -495,6 +496,43 @@ impl PreviewColorSpace {
     }
 }
 
+/// How a 3D hue/saturation/value table is indexed, stored in `ProfileHueSatMapEncoding` (51107)
+/// and `ProfileLookTableEncoding` (51108).
+///
+/// Both tags default to [`Linear`](Self::Linear) when absent, and neither applies to a 2.5D table
+/// (one whose value division count is 1).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableEncoding {
+    /// `0` — the table is indexed by linear ProPhoto RGB converted straight to HSV.
+    #[default]
+    Linear,
+    /// `1` — the value coordinate is sRGB-encoded before indexing, giving shadows more table
+    /// precision.
+    Srgb,
+}
+
+impl TableEncoding {
+    /// Returns the encoding for an on-disk tag value, or `None` if unrecognised.
+    #[must_use]
+    pub fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            0 => TableEncoding::Linear,
+            1 => TableEncoding::Srgb,
+            _ => return None,
+        })
+    }
+
+    /// Returns the on-disk tag value.
+    #[must_use]
+    pub fn code(self) -> u32 {
+        match self {
+            TableEncoding::Linear => 0,
+            TableEncoding::Srgb => 1,
+        }
+    }
+}
+
 /// `NewSubFileType` (254) values DNG assigns to each subfile.
 ///
 /// The TIFF field is a 32-bit bit field, but DNG uses a small set of specific values to label what
@@ -630,6 +668,12 @@ mod tests {
             assert_eq!(PreviewColorSpace::from_code(c.code()), Some(c));
         }
         assert_eq!(PreviewColorSpace::from_code(5), None);
+
+        for e in [TableEncoding::Linear, TableEncoding::Srgb] {
+            assert_eq!(TableEncoding::from_code(e.code()), Some(e));
+        }
+        assert_eq!(TableEncoding::default(), TableEncoding::Linear);
+        assert_eq!(TableEncoding::from_code(2), None);
     }
 
     #[test]

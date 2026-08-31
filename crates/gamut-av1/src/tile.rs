@@ -26,10 +26,10 @@
 
 use gamut_bitstream::SymbolEncoder;
 use gamut_color::{ChromaSubsampling, Planar8, Planar16, clip_pixel};
-use gamut_dsp::math::round2_signed;
+use gamut_dsp::math::{round2, round2_signed};
 
 use crate::cdf;
-use crate::geom::PlaneGeom;
+use crate::geom::{PlaneGeom, has_chroma, plane_residual_size};
 use crate::quant::{ac_q, dc_q, dequant, quantize};
 use crate::transform::{TxSize, TxType, forward_transform_2d, inverse_transform_2d};
 
@@ -302,13 +302,64 @@ const fn block_exceeds_frame(
 /// The transform size that exactly covers a `w × h` block (the rectangular block's `Max_Tx_Size`
 /// under `TX_MODE_LARGEST`): a square block maps to its square transform, a rectangular one to the
 /// matching rectangular transform.
-const fn rect_tx(w: usize, h: usize) -> TxSize {
+/// §5.11.37 `get_tx_size` for a chroma plane: the transform matching the plane's residual block,
+/// capped at 32 because chroma never uses a 64-sample transform. A 64-sample axis folds to 32,
+/// which is what makes a 64x64 block's 4:4:4 chroma a 2x2 raster of TX_32X32.
+pub(crate) fn chroma_tx_size(rw: usize, rh: usize) -> TxSize {
+    let uv = max_tx_size_rect(rw, rh);
+    if uv.width() == 64 || uv.height() == 64 {
+        if uv.width() == 16 {
+            TxSize::Tx16x32
+        } else if uv.height() == 16 {
+            TxSize::Tx32x16
+        } else {
+            TxSize::Tx32x32
+        }
+    } else {
+        uv
+    }
+}
+
+/// `(Tx_Width_Log2, Tx_Height_Log2)` of the chroma transform covering a `bw` x `bh` luma block —
+/// the deblock filter's view of §5.11.37, derived from the per-MI block-size maps it already has.
+///
+/// `None` mirrors [`plane_residual_size`]'s `BLOCK_INVALID`.
+pub(crate) fn chroma_tx_log2(bw: usize, bh: usize, ss: ChromaSubsampling) -> Option<(u32, u32)> {
+    let (rw, rh) = plane_residual_size(bw, bh, 1, ss)?;
+    let tx = chroma_tx_size(rw, rh);
+    Some((tx.log2_width(), tx.log2_height()))
+}
+
+fn max_tx_size_rect(w: usize, h: usize) -> TxSize {
+    // The 128-sample axes clamp to 64: there is no transform wider or taller than that, which is
+    // why `Max_Tx_Size_Rect` maps BLOCK_64X128/128X64/128X128 all onto TX_64X64. Written as `min`
+    // rather than a comparison: both arms agree at exactly 64, so any `<`/`<=` spelling of it is
+    // the same function and could never be told apart by a test.
+    let (w, h) = (w.min(64), h.min(64));
     match (w, h) {
-        (16, 8) => TxSize::Tx16x8,
+        (4, 4) => TxSize::Tx4x4,
+        (4, 8) => TxSize::Tx4x8,
+        (4, 16) => TxSize::Tx4x16,
+        (8, 4) => TxSize::Tx8x4,
+        (8, 8) => TxSize::Tx8x8,
         (8, 16) => TxSize::Tx8x16,
-        (32, 16) => TxSize::Tx32x16,
+        (8, 32) => TxSize::Tx8x32,
+        (16, 4) => TxSize::Tx16x4,
+        (16, 8) => TxSize::Tx16x8,
+        (16, 16) => TxSize::Tx16x16,
         (16, 32) => TxSize::Tx16x32,
-        _ => square_tx(w),
+        (16, 64) => TxSize::Tx16x64,
+        (32, 8) => TxSize::Tx32x8,
+        (32, 16) => TxSize::Tx32x16,
+        (32, 32) => TxSize::Tx32x32,
+        (32, 64) => TxSize::Tx32x64,
+        (64, 16) => TxSize::Tx64x16,
+        (64, 32) => TxSize::Tx64x32,
+        (64, 64) => TxSize::Tx64x64,
+        // AV1 has no block whose aspect ratio exceeds 4:1, so no other pair is constructible.
+        // Coding one against a mismatched transform would desynchronise the decoder silently, so
+        // fail here instead.
+        _ => panic!("no transform matches this block shape"),
     }
 }
 
@@ -364,6 +415,14 @@ pub(crate) struct FrameEncoder<'a> {
     /// entropy context stay on the **luma** grid, so a site that indexes `mi_cols`/`mi_rows` reads
     /// `geom[0]` even when it is working on a chroma plane.
     geom: [PlaneGeom; 3],
+    /// The frame's chroma subsampling, for the §5.11.5/§5.11.38 block-level derivations.
+    subsampling: ChromaSubsampling,
+    /// §5.11.35 `MaxLumaW`/`MaxLumaH`: the right/bottom edge of the last in-bounds **luma**
+    /// transform block of the current `decode_block`, written on the plane-0 residual pass and read
+    /// by CfL to clamp its luma reads. Plane 0 is fully coded before chroma, so these are current by
+    /// the time CfL runs.
+    max_luma_w: usize,
+    max_luma_h: usize,
     mi_cols: usize,
     mi_rows: usize,
     /// MI boundaries of the tile currently being encoded (`0`/`mi_cols`/`mi_rows` for a single tile).
@@ -543,6 +602,11 @@ impl<'a> FrameEncoder<'a> {
             planes,
             num_planes: subsampling.num_planes(),
             geom,
+            subsampling,
+            // Before any luma transform block is coded the whole coded plane is the bound, which is
+            // both a sound starting value and the widest the per-block updates can ever set.
+            max_luma_w: geom[0].coded_w,
+            max_luma_h: geom[0].coded_h,
             mi_cols,
             mi_rows,
             tile_c0: 0,
@@ -561,10 +625,12 @@ impl<'a> FrameEncoder<'a> {
             recon,
             sym: SymbolEncoder::new(),
             cdfs: cdf::CdfContext::new(qctx_for(i32::from(qindex))),
-            above_level: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
-            above_dc: [vec![0; mi_cols], vec![0; mi_cols], vec![0; mi_cols]],
-            left_level: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
-            left_dc: [vec![0; mi_rows], vec![0; mi_rows], vec![0; mi_rows]],
+            // Sized per plane (§8.3.2 `maxX4`/`maxY4`), so a chroma context array is half the
+            // luma one under subsampling rather than over-allocated and wrongly indexed.
+            above_level: std::array::from_fn(|p| vec![0; mi_cols >> geom[p].ss_x]),
+            above_dc: std::array::from_fn(|p| vec![0; mi_cols >> geom[p].ss_x]),
+            left_level: std::array::from_fn(|p| vec![0; mi_rows >> geom[p].ss_y]),
+            left_dc: std::array::from_fn(|p| vec![0; mi_rows >> geom[p].ss_y]),
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_bsl_h: vec![0; mi_cols * mi_rows],
             above_partition: vec![0; mi_cols],
@@ -695,6 +761,7 @@ impl<'a> FrameEncoder<'a> {
             crate::filter::deblock(
                 &mut planes,
                 &self.geom,
+                self.subsampling,
                 self.mi_cols,
                 &self.tx_log2,
                 &self.tx_log2_h,
@@ -1007,17 +1074,22 @@ impl<'a> FrameEncoder<'a> {
     /// block selects is `DC_PRED` with no CfL / filter-intra, so the predicted samples equal the
     /// source — the chosen `skip` is therefore bit-exact regardless of the (deterministic) mode.
     fn block_is_skippable(&self, r: usize, c: usize, bw: usize) -> bool {
-        let (sx, sy) = (c * 4, r * 4);
+        // A monochrome frame has only plane 0 to inspect (`NumPlanes == 1`).
         for plane in 0..self.num_planes {
-            let v0 = self.sample(plane, sx, sy);
-            for i in 0..bw {
-                for j in 0..bw {
-                    if self.sample(plane, sx + j, sy + i) != v0 {
+            // Each plane is inspected over its own residual block: at 4:4:4 that is the luma
+            // extent, and under subsampling reading the luma extent would run off the chroma plane.
+            let Some((px, py, pw, ph)) = self.plane_block(r, c, bw, bw, plane) else {
+                continue;
+            };
+            let v0 = self.sample(plane, px, py);
+            for i in 0..ph {
+                for j in 0..pw {
+                    if self.sample(plane, px + j, py + i) != v0 {
                         return false;
                     }
                 }
             }
-            if self.dc_pred(plane, sx, sy, bw, bw) != v0 {
+            if self.dc_pred(plane, px, py, pw, ph) != v0 {
                 return false;
             }
         }
@@ -1055,15 +1127,19 @@ impl<'a> FrameEncoder<'a> {
         // A monochrome frame has no chroma to constrain, so the loop is empty and every luma
         // palette candidate stands on its own.
         for plane in 1..self.num_planes {
-            let v0 = self.sample(plane, sx, sy);
-            for i in 0..bw {
-                for j in 0..bw {
-                    if self.sample(plane, sx + j, sy + i) != v0 {
+            // The plane's own residual block, not the luma extent at the luma position.
+            let Some((px, py, pw, ph)) = self.plane_block(r, c, bw, bw, plane) else {
+                continue;
+            };
+            let v0 = self.sample(plane, px, py);
+            for i in 0..ph {
+                for j in 0..pw {
+                    if self.sample(plane, px + j, py + i) != v0 {
                         return None;
                     }
                 }
             }
-            if self.dc_pred(plane, sx, sy, bw, bw) != v0 {
+            if self.dc_pred(plane, px, py, pw, ph) != v0 {
                 return None;
             }
         }
@@ -1216,16 +1292,24 @@ impl<'a> FrameEncoder<'a> {
                 self.recon[0][(sy + i) * self.geom[0].coded_w + (sx + j)] = pal.colors[idx];
             }
         }
+        self.set_ctx(0, sx >> 2, sy >> 2, bw / 4, bw / 4, 0, 0);
+        // Chroma is flat DC over the plane's **own** residual block, at the plane's own base — not
+        // the luma extent at the luma position. A palette block is always at least 8x8, so it
+        // always has chroma of its own (§5.11.5) — unless the frame is monochrome, which has no
+        // chroma plane and therefore no chroma residual size either.
+        let Some((cw, ch)) = plane_residual_size(bw, bw, 1, self.subsampling) else {
+            return;
+        };
         for plane in 1..self.num_planes {
-            let dc = clip_pixel(self.dc_pred(plane, sx, sy, bw, bw), self.bit_depth);
-            for i in 0..bw {
-                for j in 0..bw {
-                    self.recon[plane][(sy + i) * self.geom[plane].coded_w + (sx + j)] = dc;
+            let g = self.geom[plane];
+            let (cx, cy) = ((c >> g.ss_x) * 4, (r >> g.ss_y) * 4);
+            let dc = clip_pixel(self.dc_pred(plane, cx, cy, cw, ch), self.bit_depth);
+            for i in 0..ch {
+                for j in 0..cw {
+                    self.recon[plane][(cy + i) * g.coded_w + (cx + j)] = dc;
                 }
             }
-        }
-        for plane in 0..self.num_planes {
-            self.set_ctx(plane, sx >> 2, sy >> 2, bw / 4, bw / 4, 0, 0);
+            self.set_ctx(plane, cx >> 2, cy >> 2, cw / 4, ch / 4, 0, 0);
         }
     }
 
@@ -1266,6 +1350,14 @@ impl<'a> FrameEncoder<'a> {
             self.luma_range(sx, sy, bw, hp) <= 32 && self.luma_range(sx, sy + hp, bw, hp) <= 32;
         let vert_ok =
             self.luma_range(sx, sy, hp, bw) <= 32 && self.luma_range(sx + hp, sy, hp, bw) <= 32;
+        // §6.10.4: a partition whose chroma residual would be `BLOCK_INVALID` is not conformant.
+        // Under 4:2:2 that rules out every taller-than-wide block — halving an 8x16 block's width
+        // implies a 4x16 chroma block, an aspect ratio AV1 does not code — so `PARTITION_VERT` is
+        // unavailable at every size. Derived from the table rather than special-cased, so a future
+        // layout with different invalid shapes needs no change here. This costs the 4:2:2 encoder
+        // half its rectangular partition set, which is a real (documented) rate cost.
+        let horz_ok = horz_ok && self.rect_partition_is_codable(bw, hp);
+        let vert_ok = vert_ok && self.rect_partition_is_codable(hp, bw);
         if horz_ok {
             Some(1)
         } else if vert_ok {
@@ -1408,39 +1500,67 @@ impl<'a> FrameEncoder<'a> {
         // when Lossless, else `Max(w, h) <= 32` — so CfL is allowed for the lossy 4×4 and 8×8 blocks
         // and the lossless 4×4 blocks. When allowed, the encoder picks chroma-from-luma if it beats
         // plain DC_PRED, then emits read_cfl_alphas; otherwise uv_mode = DC_PRED.
+        // §5.11.5 `HasChroma`: with subsampled chroma a sub-8x8 block can cover no chroma samples
+        // of its own, and the covering block of its MI group codes chroma for the whole group. Such
+        // a block codes no `uv_mode`, no `cfl_alpha` (§5.11.7) and no chroma residual (§5.11.34).
+        // Always true at 4:4:4, and always false in a monochrome frame — the spec writes the
+        // two parity tests first and then falls through to `HasChroma = NumPlanes > 1`.
+        let block_has_chroma = has_chroma(r, c, bw, bh, self.subsampling);
+        // §6.10.4 is a bitstream-conformance requirement the *partition search* has to respect, so
+        // assert it at the point a block is committed rather than discovering it in the residual
+        // loop. `decide_rect` is the only thing that can produce a shape that violates it.
+        debug_assert!(
+            !block_has_chroma || self.rect_partition_is_codable(bw, bh),
+            "{bw}x{bh} has no codable chroma residual under {:?}",
+            self.subsampling
+        );
         let cfl_allowed = if self.qindex == 0 {
             bw == 4
         } else {
             bw.max(bh) <= 32
         };
-        let cfl = if !self.has_chroma() || palette.is_some() {
-            None // no chroma at all, or a palette block whose chroma is DC_PRED (no CfL)
-        } else if self.qindex > 0 && cfl_allowed && !is_rect {
-            self.select_cfl(c * 4, r * 4, bw)
-        } else {
-            None // CfL is square-only here; a rectangular block's chroma is plain DC_PRED
+        let is_lossy = self.qindex != 0;
+        let cfl = match (block_has_chroma, palette.is_some()) {
+            // No chroma of its own (or none in the frame at all), or a palette block — whose
+            // chroma is plain DC_PRED.
+            (false, _) | (_, true) => None,
+            _ if is_lossy && cfl_allowed && !is_rect => {
+                // The search runs in chroma coordinates over the chroma residual block. A block
+                // with no valid chroma residual simply gets no CfL; the residual loop is where
+                // that (4:2:2-only) conformance violation is reported.
+                match plane_residual_size(bw, bh, 1, self.subsampling) {
+                    Some((cw, ch)) => {
+                        let gc = self.geom[1];
+                        self.select_cfl((c >> gc.ss_x) * 4, (r >> gc.ss_y) * 4, cw, ch)
+                    }
+                    None => None,
+                }
+            }
+            // CfL is square-only here; a rectangular block's chroma is plain DC_PRED.
+            _ => None,
         };
         let ym = usize::from(y_mode);
         // §5.11.7 wraps `uv_mode` (and the `read_cfl_alphas` that follows UV_CFL_PRED) in
-        // `if (HasChroma)`. A monochrome frame codes neither.
-        if self.has_chroma() {
-            if cfl_allowed {
-                let uv = if cfl.is_some() { UV_CFL_PRED } else { DC_PRED };
-                cdf::encode(
-                    &mut self.sym,
-                    usize::from(uv),
-                    self.cdfs.uv_mode_cfl_allowed[ym].slot(),
-                );
-                if let Some((au, av)) = cfl {
-                    self.emit_cfl_alphas(au, av);
-                }
-            } else {
-                cdf::encode(
-                    &mut self.sym,
-                    0,
-                    self.cdfs.uv_mode_cfl_not_allowed[ym].slot(),
-                );
+        // `if (HasChroma)`. A monochrome frame codes neither, and neither does a subsampled
+        // sub-8x8 block whose chroma is coded by the covering block of its MI group.
+        if !block_has_chroma {
+            // no uv_mode symbol at all
+        } else if cfl_allowed {
+            let uv = if cfl.is_some() { UV_CFL_PRED } else { DC_PRED };
+            cdf::encode(
+                &mut self.sym,
+                usize::from(uv),
+                self.cdfs.uv_mode_cfl_allowed[ym].slot(),
+            );
+            if let Some((au, av)) = cfl {
+                self.emit_cfl_alphas(au, av);
             }
+        } else {
+            cdf::encode(
+                &mut self.sym,
+                0,
+                self.cdfs.uv_mode_cfl_not_allowed[ym].slot(),
+            );
         }
 
         // palette_mode_info (§5.11.46): with allow_screen_content_tools an 8×8..64×64 block signals
@@ -1524,7 +1644,7 @@ impl<'a> FrameEncoder<'a> {
                 self.cdfs.tx_size_32x32[ctx].slot()
             };
             cdf::encode(&mut self.sym, 0, slot);
-            rect_tx(bw, bh)
+            max_tx_size_rect(bw, bh)
         } else if lossy_large {
             let max_depth = if bw == 8 { 1 } else { 2 };
             let tx_depth = self.select_tx_depth(c * 4, r * 4, bw, max_depth);
@@ -1594,17 +1714,10 @@ impl<'a> FrameEncoder<'a> {
         // DC_PRED (plus the CfL term) over the block-size transform — but chroma never uses TX_64X64,
         // so a 64×64 block's chroma is a 2×2 raster of TX_32X32. Luma (plane 0) is fully reconstructed
         // before chroma, so the chroma CfL reads finalized luma recon.
-        let chroma_tx = if is_rect {
-            // 4:4:4 chroma uses the same rectangular transform as luma (one transform fills the block).
-            rect_tx(bw, bh)
-        } else {
-            match bw {
-                8 => TxSize::Tx8x8,
-                16 => TxSize::Tx16x16,
-                _ => TxSize::Tx32x32,
-            }
-        };
-        for plane in 0..self.num_planes {
+        // `block_has_chroma` already carries the frame-level `NumPlanes > 1`, so a monochrome
+        // frame codes plane 0 alone and a subsampled block that shares its neighbour's chroma
+        // codes no chroma residual (§5.11.34).
+        for plane in 0..1 + 2 * usize::from(block_has_chroma) {
             let pred = Pred {
                 mode: if plane == 0 { y_mode } else { DC_PRED },
                 angle_delta: if plane == 0 { angle_delta } else { 0 },
@@ -1615,24 +1728,33 @@ impl<'a> FrameEncoder<'a> {
                     _ => None,
                 },
             };
-            let (ptx, pw, ph) = if plane == 0 {
-                (luma_tx, luma_tx.width(), luma_tx.height())
-            } else if lossy_large {
-                // Chroma transform size — the chroma block size capped at 32 (no TX_64X64); the
-                // residual loop steps by `pw`/`ph`, so e.g. a 64×64 block's chroma forms a 2×2 raster.
-                (chroma_tx, chroma_tx.width(), chroma_tx.height())
-            } else {
-                (TxSize::Tx4x4, 4, 4)
+            let g = self.geom[plane];
+            // §5.11.38: the residual block for this plane, which is a table lookup and not
+            // `bw >> ss_x` — it clamps to a 4-sample minimum.
+            let Some((rw, rh)) = plane_residual_size(bw, bh, plane, self.subsampling) else {
+                // `BLOCK_INVALID`. Only reachable under 4:2:2 for a taller-than-wide block, which
+                // §6.10.4 forbids and the partition search must never emit; coding one would
+                // produce a stream both reference decoders reject.
+                panic!("no plane-{plane} residual size for a {bw}x{bh} block");
             };
-            let mut sy = r * 4;
-            while sy < r * 4 + bh {
-                let mut sx = c * 4;
-                while sx < c * 4 + bw {
-                    // Luma geometry deliberately: `sx`/`sy` are luma MI positions (`c * 4`,
-                    // `r * 4`) for every plane. Mapping them into each plane's own coordinates is
-                    // the subsampled residual loop's job (§5.11.34), which lands with #390.
-                    if sx < self.geom[0].coded_w && sy < self.geom[0].coded_h {
-                        self.transform_block(plane, sx, sy, bw, ptx, pred, skip);
+            let ptx = if plane == 0 {
+                luma_tx
+            } else if lossy_large {
+                chroma_tx_size(rw, rh)
+            } else {
+                TxSize::Tx4x4
+            };
+            let (pw, ph) = (ptx.width(), ptx.height());
+            // §5.11.34 `baseXBlock`/`baseYBlock`: the MI position is scaled into the plane *before*
+            // it is converted to samples, so an odd MI column lands on the covering chroma block.
+            let base_x = (c >> g.ss_x) * 4;
+            let base_y = (r >> g.ss_y) * 4;
+            let mut sy = base_y;
+            while sy < base_y + rh {
+                let mut sx = base_x;
+                while sx < base_x + rw {
+                    if sx < g.coded_w && sy < g.coded_h {
+                        self.transform_block(plane, sx, sy, rw, rh, ptx, pred, skip);
                     }
                     // BlockDecoded (§5.11.34) is updated after each *transform* block (not the whole
                     // block), so a later luma sub-transform's directional prediction sees the
@@ -1664,6 +1786,7 @@ impl<'a> FrameEncoder<'a> {
         sx: usize,
         sy: usize,
         block_w: usize,
+        block_h: usize,
         tx_size: TxSize,
         desc: Pred,
         skip: bool,
@@ -1683,6 +1806,7 @@ impl<'a> FrameEncoder<'a> {
                 sx >> 2,
                 sy >> 2,
                 block_w,
+                block_h,
                 TxSize::Tx4x4,
                 &quant,
                 1,
@@ -1696,12 +1820,18 @@ impl<'a> FrameEncoder<'a> {
         // back. Because the recon is `pred + inverse(dequant(levels))` and the decoder runs the same
         // inverse on the same levels, the result is bit-exact for whichever transform type is signaled.
         let (tw, th) = (tx_size.width(), tx_size.height());
+        if plane == 0 {
+            // §5.11.35: recorded for every in-bounds luma transform block, so after the plane-0
+            // pass these hold the bottom-right edge CfL must clamp against.
+            self.max_luma_w = sx + tw;
+            self.max_luma_h = sy + th;
+        }
         let pred: Vec<i32> = match desc.filter_intra {
             Some(fi) if plane == 0 => self.predict_filter_intra(plane, sx, sy, tw, fi),
             _ => {
                 let mut p = self.predict_intra(plane, sx, sy, desc.mode, tw, th, desc.angle_delta);
                 if let Some(alpha) = desc.cfl_alpha {
-                    self.apply_cfl(&mut p, sx, sy, alpha, tw);
+                    self.apply_cfl(&mut p, sx, sy, alpha, tx_size);
                 }
                 p
             }
@@ -1746,6 +1876,7 @@ impl<'a> FrameEncoder<'a> {
             sx >> 2,
             sy >> 2,
             block_w,
+            block_h,
             tx_size,
             &levels,
             tx_sym,
@@ -1866,6 +1997,40 @@ impl<'a> FrameEncoder<'a> {
         self.dc_pred(plane, sx, sy, 4, 4)
     }
 
+    /// Whether a `bw` x `bh` block has a codable chroma residual under this frame's subsampling
+    /// (§5.11.38 / §6.10.4). Always true at 4:4:4 and 4:2:0, and in a monochrome frame — which has
+    /// no chroma plane to constrain; false for taller-than-wide blocks at 4:2:2.
+    fn rect_partition_is_codable(&self, bw: usize, bh: usize) -> bool {
+        !self.has_chroma() || plane_residual_size(bw, bh, 1, self.subsampling).is_some()
+    }
+
+    /// The tile's left edge in `plane`'s own sample coordinates.
+    ///
+    /// `tile_x0` is a **luma** position, and prediction availability is tested against a
+    /// plane-local one. Tiles start on superblock boundaries (multiples of 16 MI cells, so 64 luma
+    /// samples), which makes the shift exact. Identity at 4:4:4 — and invisible there, which is why
+    /// a single-tile frame and a frame whose second tile is one chroma block wide both pass
+    /// regardless.
+    fn tile_left(&self, plane: usize) -> usize {
+        self.tile_x0 >> self.geom[plane].ss_x
+    }
+
+    /// The plane-local base position and residual extent of the block at MI `(r, c)` — the pair a
+    /// per-plane loop needs in order to read `plane`'s own samples rather than the luma ones.
+    /// `None` is §5.11.38's `BLOCK_INVALID`.
+    fn plane_block(
+        &self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        bh: usize,
+        plane: usize,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let g = self.geom[plane];
+        let (rw, rh) = plane_residual_size(bw, bh, plane, self.subsampling)?;
+        Some(((c >> g.ss_x) * 4, (r >> g.ss_y) * 4, rw, rh))
+    }
+
     /// `DC_PRED` value for an `n × n` block at coded `(sx, sy)` (§7.11.2.5): the rounded average of
     /// the available `n` above and `n` left neighbours (both sides ⇒ `Round2(sum, log2(n) + 1)`; one
     /// side ⇒ `Round2(sum, log2(n))`; neither ⇒ `1 << (BitDepth - 1)`).
@@ -1878,7 +2043,7 @@ impl<'a> FrameEncoder<'a> {
             }
         };
         let have_above = sy > 0;
-        let have_left = sx > self.tile_x0;
+        let have_left = sx > self.tile_left(plane);
         // §7.11.2.5 DC: average the `w` above + `h` left samples (a plain integer divide, since for a
         // rectangular block `w + h` is not a power of two; for square blocks this is the usual shift).
         match (have_above, have_left) {
@@ -1922,7 +2087,7 @@ impl<'a> FrameEncoder<'a> {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
         let have_above = sy > 0;
-        let have_left = sx > self.tile_x0;
+        let have_left = sx > self.tile_left(plane);
 
         // Above-right / below-left availability (§5.11.34) for the directional zone-1/3 angles.
         let (by, bx) = (
@@ -2202,7 +2367,7 @@ impl<'a> FrameEncoder<'a> {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
         let have_above = sy > 0;
-        let have_left = sx > self.tile_x0;
+        let have_left = sx > self.tile_left(plane);
         let step = (n / 4) as isize;
         let (by, bx) = (
             sy as isize / 4 - self.sb_r as isize,
@@ -2331,7 +2496,7 @@ impl<'a> FrameEncoder<'a> {
             i32::from(self.recon[plane][y * self.geom[plane].coded_w + x])
         };
         let have_above = sy > 0;
-        let have_left = sx > self.tile_x0;
+        let have_left = sx > self.tile_left(plane);
         let (max_x, max_y) = (self.geom[plane].coded_w - 1, self.geom[plane].coded_h - 1);
 
         let mut above = vec![self.neutral() - 1; w];
@@ -2545,31 +2710,48 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    /// Adds the chroma-from-luma high-frequency term to a 4×4 chroma DC prediction in place
-    /// (§7.11.5). For 4:4:4 the subsampled luma `L[i][j]` is just the reconstructed luma sample
-    /// (`× 8`, i.e. 3 fractional bits); `lumaAvg = Round2(ΣL, 4)`. Each chroma sample becomes
+    /// Adds the chroma-from-luma high-frequency term to a chroma DC prediction in place (§7.11.5).
+    ///
+    /// `L[i][j]` is the **sum** of the `(1 << subX) x (1 << subY)` reconstructed luma samples the
+    /// chroma sample covers, shifted left by `3 - subX - subY`. That is exact at every subsampling —
+    /// all three layouts land on the same 3-fractional-bit scale with no rounding — so it must not
+    /// be written as "average, then scale", which truncates. At 4:4:4 it reduces to `luma << 3`.
+    ///
+    /// `lumaAvg = Round2(ΣL, Tx_Width_Log2 + Tx_Height_Log2)`, and each chroma sample becomes
     /// `Clip1(dc + Round2Signed(alpha * (L - lumaAvg), 6))`. `alpha == 0` is a no-op (plain DC).
-    fn apply_cfl(&self, pred: &mut [i32], sx: usize, sy: usize, alpha: i32, n: usize) {
-        let mut l = vec![0i32; n * n];
+    fn apply_cfl(&self, pred: &mut [i32], sx: usize, sy: usize, alpha: i32, tx_size: TxSize) {
+        let (w, h) = (tx_size.width(), tx_size.height());
+        let g = self.geom[1];
+        let (sub_x, sub_y) = (g.ss_x as usize, g.ss_y as usize);
+        let luma_stride = self.geom[0].coded_w;
+        let mut l = vec![0i32; w * h];
         let mut sum = 0i32;
-        for i in 0..n {
-            for j in 0..n {
-                // Luma stride, and luma coordinates: at 4:4:4 a chroma sample sits on the luma
-                // sample of the same index. The §7.11.5 box average that maps them under
-                // subsampling lands with #390.
-                let v = i32::from(self.recon[0][(sy + i) * self.geom[0].coded_w + (sx + j)]) << 3;
-                l[i * n + j] = v;
+        for i in 0..h {
+            // The clamps are §7.11.5's edge rule. They are inert for every block this encoder
+            // emits — `encode_partition` force-splits anything overhanging the MI grid, so the
+            // covered luma always lies inside the last coded transform — but a future
+            // frame-spanning PARTITION_NONE would need them, and the decoder applies them.
+            let luma_y = ((sy + i) << sub_y).min(self.max_luma_h - (1 << sub_y));
+            for j in 0..w {
+                let luma_x = ((sx + j) << sub_x).min(self.max_luma_w - (1 << sub_x));
+                let mut t = 0i32;
+                for dy in 0..=sub_y {
+                    for dx in 0..=sub_x {
+                        t += i32::from(self.recon[0][(luma_y + dy) * luma_stride + (luma_x + dx)]);
+                    }
+                }
+                let v = t << (3 - sub_x - sub_y);
+                l[i * w + j] = v;
                 sum += v;
             }
         }
-        // lumaAvg = Round2(ΣL, Tx_Width_Log2 + Tx_Height_Log2) = Round2(ΣL, 2 * log2(n)).
-        let shift = 2 * n.trailing_zeros();
-        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
+        let shift = tx_size.log2_width() + tx_size.log2_height();
+        // The shared `Round2`, not an open-coded addend: the test transcribes §7.11.5 separately,
+        // and two independent spellings of the same rounding is the point of that cross-check.
+        let luma_avg = round2(i64::from(sum), shift) as i32;
+        let max = (1i32 << self.bit_depth) - 1;
         for (p, &lv) in pred.iter_mut().zip(&l) {
-            *p = i32::from(clip_pixel(
-                *p + round2_signed(alpha * (lv - luma_avg), 6),
-                self.bit_depth,
-            ));
+            *p = (*p + round2_signed(alpha * (lv - luma_avg), 6)).clamp(0, max);
         }
     }
 
@@ -2579,30 +2761,39 @@ impl<'a> FrameEncoder<'a> {
     /// *source* luma as a proxy for the reconstruction (a quality decision; the signaled alpha is
     /// applied to the true reconstruction in [`Self::apply_cfl`], so the result is bit-exact either
     /// way). Returns `(CflAlphaU, CflAlphaV)`, each in `-16..=16` and not both zero.
-    fn select_cfl(&self, sx: usize, sy: usize, n: usize) -> Option<(i32, i32)> {
-        // Source luma high-frequency (matching apply_cfl's reconstructed-luma formula).
-        let mut l = vec![0i32; n * n];
+    fn select_cfl(&self, sx: usize, sy: usize, w: usize, h: usize) -> Option<(i32, i32)> {
+        // Source luma high-frequency, mirroring apply_cfl's box sum but over the *source* rather
+        // than the reconstruction. Unlike apply_cfl this needs no edge clamp: `sample` already
+        // replicates at the plane edge.
+        let g = self.geom[1];
+        let (sub_x, sub_y) = (g.ss_x as usize, g.ss_y as usize);
+        let mut l = vec![0i32; w * h];
         let mut sum = 0i32;
-        for i in 0..n {
-            for j in 0..n {
-                let v = self.sample(0, sx + j, sy + i) << 3;
-                l[i * n + j] = v;
+        for i in 0..h {
+            for j in 0..w {
+                let mut t = 0i32;
+                for dy in 0..=sub_y {
+                    for dx in 0..=sub_x {
+                        t += self.sample(0, ((sx + j) << sub_x) + dx, ((sy + i) << sub_y) + dy);
+                    }
+                }
+                let v = t << (3 - sub_x - sub_y);
+                l[i * w + j] = v;
                 sum += v;
             }
         }
-        let shift = 2 * n.trailing_zeros();
-        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
+        let shift = w.trailing_zeros() + h.trailing_zeros();
+        let luma_avg = round2(i64::from(sum), shift) as i32;
+        let max = (1i32 << self.bit_depth) - 1;
 
         let best_alpha = |plane: usize| -> i32 {
-            let dc = self.dc_pred(plane, sx, sy, n, n);
+            let dc = self.dc_pred(plane, sx, sy, w, h);
             let sad = |alpha: i32| -> i32 {
                 let mut s = 0;
-                for i in 0..n {
-                    for j in 0..n {
-                        let pred = i32::from(clip_pixel(
-                            dc + round2_signed(alpha * (l[i * n + j] - luma_avg), 6),
-                            self.bit_depth,
-                        ));
+                for i in 0..h {
+                    for j in 0..w {
+                        let pred = (dc + round2_signed(alpha * (l[i * w + j] - luma_avg), 6))
+                            .clamp(0, max);
                         s += (self.sample(plane, sx + j, sy + i) - pred).abs();
                     }
                 }
@@ -2679,6 +2870,7 @@ impl<'a> FrameEncoder<'a> {
         x4: usize,
         y4: usize,
         block_w: usize,
+        block_h: usize,
         tx_size: TxSize,
         quant: &[i32],
         tx_sym: usize,
@@ -2686,8 +2878,6 @@ impl<'a> FrameEncoder<'a> {
     ) {
         let ptype = usize::from(plane > 0);
         let (w, h) = (tx_size.width(), tx_size.height());
-        // OPTION A: a rectangular block is coded as the single transform that fills it, so block == tx.
-        let block_h = if w == h { block_w } else { h };
         let (w4, h4) = (w / 4, h / 4); // MI cells the transform spans on each axis
         // A >32 dimension (TX_64X64) codes only its top-left 32-wide/high sub-block (§7.13): the scan,
         // area and coefficient contexts use the `code_w × code_h` region, while the CDF tables and
@@ -2785,15 +2975,21 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // eob position (TX_CLASS_2D ⇒ eob_pt context 0). The eob class is the coded coefficient count
-        // (`area`): 16/64/128/256/512/1024. The 512 and 1024 tables have no neighbour-context dimension.
+        // (`area`): 16/32/64/128/256/512/1024. The 512 and 1024 tables have no neighbour-context
+        // dimension. 32 is reachable only with subsampled chroma (TX_4X8 / TX_8X4).
         let eobpt = eobpt_from_eob(eob);
         let eob_pt = match area {
             16 => self.cdfs.eob_pt_16[ptype].slot(),
+            32 => self.cdfs.eob_pt_32[ptype].slot(),
             64 => self.cdfs.eob_pt_64[ptype].slot(),
             128 => self.cdfs.eob_pt_128[ptype].slot(),
             256 => self.cdfs.eob_pt_256[ptype].slot(),
             512 => self.cdfs.eob_pt_512[ptype].slot(),
-            _ => self.cdfs.eob_pt_1024[ptype].slot(),
+            1024 => self.cdfs.eob_pt_1024[ptype].slot(),
+            // Deliberately not a catch-all: a transform area with no table of its own would be
+            // coded against the wrong one and desynchronise the decoder, which surfaces only as a
+            // corrupt stream. Fail at the encoder instead.
+            other => panic!("no eob_pt CDF for a {other}-coefficient transform"),
         };
         cdf::encode(&mut self.sym, eobpt - 1, eob_pt);
         if eobpt >= 3 {
@@ -2883,6 +3079,18 @@ impl<'a> FrameEncoder<'a> {
         self.set_ctx(plane, x4, y4, w4, h4, cul, dc_cat);
     }
 
+    /// §8.3.2 `maxX4`: the entropy-context column count of `plane` — the luma MI grid scaled by
+    /// the plane's subsampling. `mi_cols` is always even, so the shift is exact. Identical to
+    /// `mi_cols` at 4:4:4.
+    fn ctx_cols(&self, plane: usize) -> usize {
+        self.mi_cols >> self.geom[plane].ss_x
+    }
+
+    /// §8.3.2 `maxY4`, the row counterpart of [`Self::ctx_cols`].
+    fn ctx_rows(&self, plane: usize) -> usize {
+        self.mi_rows >> self.geom[plane].ss_y
+    }
+
     /// Writes `culLevel`/`dcCategory` into the above/left level-context arrays for every MI cell the
     /// transform block spans (§5.11.39: `for i in 0..w4`/`0..h4`). `n4 = Tx_Width / 4`.
     #[allow(clippy::too_many_arguments)]
@@ -2896,14 +3104,15 @@ impl<'a> FrameEncoder<'a> {
         cul: u8,
         dc: u8,
     ) {
+        let (cols, rows) = (self.ctx_cols(plane), self.ctx_rows(plane));
         for k in 0..w4 {
-            if x4 + k < self.mi_cols {
+            if x4 + k < cols {
                 self.above_level[plane][x4 + k] = cul;
                 self.above_dc[plane][x4 + k] = dc;
             }
         }
         for k in 0..h4 {
-            if y4 + k < self.mi_rows {
+            if y4 + k < rows {
                 self.left_level[plane][y4 + k] = cul;
                 self.left_dc[plane][y4 + k] = dc;
             }
@@ -2933,12 +3142,12 @@ impl<'a> FrameEncoder<'a> {
             let mut top = 0i32;
             let mut left = 0i32;
             for k in 0..w4 {
-                if x4 + k < self.mi_cols {
+                if x4 + k < self.ctx_cols(0) {
                     top = top.max(i32::from(self.above_level[0][x4 + k]));
                 }
             }
             for k in 0..h4 {
-                if y4 + k < self.mi_rows {
+                if y4 + k < self.ctx_rows(0) {
                     left = left.max(i32::from(self.left_level[0][y4 + k]));
                 }
             }
@@ -2957,12 +3166,12 @@ impl<'a> FrameEncoder<'a> {
             let mut above = 0u8;
             let mut left = 0u8;
             for k in 0..w4 {
-                if x4 + k < self.mi_cols {
+                if x4 + k < self.ctx_cols(plane) {
                     above |= self.above_level[plane][x4 + k] | self.above_dc[plane][x4 + k];
                 }
             }
             for k in 0..h4 {
-                if y4 + k < self.mi_rows {
+                if y4 + k < self.ctx_rows(plane) {
                     left |= self.left_level[plane][y4 + k] | self.left_dc[plane][y4 + k];
                 }
             }
@@ -2984,7 +3193,7 @@ impl<'a> FrameEncoder<'a> {
     fn dc_sign_ctx(&self, plane: usize, x4: usize, y4: usize, w4: usize, h4: usize) -> usize {
         let mut s = 0i32;
         for k in 0..w4 {
-            if x4 + k < self.mi_cols {
+            if x4 + k < self.ctx_cols(plane) {
                 match self.above_dc[plane][x4 + k] {
                     1 => s -= 1,
                     2 => s += 1,
@@ -2993,7 +3202,7 @@ impl<'a> FrameEncoder<'a> {
             }
         }
         for k in 0..h4 {
-            if y4 + k < self.mi_rows {
+            if y4 + k < self.ctx_rows(plane) {
                 match self.left_dc[plane][y4 + k] {
                     1 => s -= 1,
                     2 => s += 1,
@@ -3190,6 +3399,746 @@ mod tests {
     use gamut_color::Planar8;
 
     use super::*;
+
+    #[test]
+    fn every_emitted_block_shape_has_a_codable_chroma_residual() {
+        // §6.10.4: `get_plane_residual_size(subSize, 1)` must never be BLOCK_INVALID. Enumerates
+        // the shapes `encode_partition` can produce — squares 4..64 and the PARTITION_HORZ/VERT
+        // halves at 16 and 32 — against each layout the encoder codes.
+        //
+        // 4:2:2 is the constraint that bites: it rules out every taller-than-wide shape, which is
+        // why `decide_rect` must not offer PARTITION_VERT there.
+        let squares = [(4, 4), (8, 8), (16, 16), (32, 32), (64, 64)];
+        let horz = [(16, 8), (32, 16)];
+        let vert = [(8, 16), (16, 32)];
+
+        for ss in [ChromaSubsampling::Cs444, ChromaSubsampling::Cs420] {
+            for (bw, bh) in squares.iter().chain(&horz).chain(&vert) {
+                assert!(
+                    plane_residual_size(*bw, *bh, 1, ss).is_some(),
+                    "{bw}x{bh} must be codable at {ss:?}"
+                );
+            }
+        }
+        for (bw, bh) in squares.iter().chain(&horz) {
+            assert!(
+                plane_residual_size(*bw, *bh, 1, ChromaSubsampling::Cs422).is_some(),
+                "{bw}x{bh} must be codable at 4:2:2"
+            );
+        }
+        for (bw, bh) in vert {
+            assert!(
+                plane_residual_size(bw, bh, 1, ChromaSubsampling::Cs422).is_none(),
+                "{bw}x{bh} must be rejected at 4:2:2"
+            );
+        }
+    }
+
+    #[test]
+    fn the_partition_search_offers_no_vertical_split_at_four_two_two() {
+        // Content shaped so a vertical split is the attractive one: two flat halves side by side
+        // with a hard edge between them. At 4:4:4 and 4:2:0 `decide_rect` may take it; at 4:2:2 it
+        // must not, because the resulting 8x16 block has no codable chroma residual.
+        for ss in [
+            ChromaSubsampling::Cs444,
+            ChromaSubsampling::Cs420,
+            ChromaSubsampling::Cs422,
+        ] {
+            let planes = planes_split_halves(ss);
+            let e = FrameEncoder::new(&planes, 40);
+            for (r, c) in [(0usize, 0usize), (0, 4), (4, 0), (4, 4)] {
+                if let Some(kind) = e.decide_rect(r, c, 16) {
+                    let (bw, bh) = if kind == 1 { (16, 8) } else { (8, 16) };
+                    assert!(
+                        plane_residual_size(bw, bh, 1, ss).is_some(),
+                        "{ss:?}: decide_rect offered an uncodable {bw}x{bh}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A 32x32 image split into a dark left half and a bright right half, in `ss`.
+    fn planes_split_halves(ss: ChromaSubsampling) -> Planar8 {
+        let mut rgb = vec![0u8; 32 * 32 * 3];
+        for y in 0..32usize {
+            for x in 0..32usize {
+                let v = if x < 16 { 20u8 } else { 200 };
+                rgb[(y * 32 + x) * 3..(y * 32 + x) * 3 + 3].copy_from_slice(&[v, v, v]);
+            }
+        }
+        let img = gamut_core::ImageRef::<gamut_core::Rgb8>::new(
+            &rgb,
+            gamut_core::Dimensions::new(32, 32).unwrap(),
+        )
+        .unwrap();
+        let m = gamut_color::RgbToYcbcr::new(
+            gamut_color::cicp::MatrixCoefficients::Bt709,
+            gamut_color::cicp::ColorRange::Full,
+            gamut_color::BitDepth::Eight,
+        )
+        .unwrap();
+        Planar8::from_rgb8_matrix_subsampled(img, m, ss).unwrap()
+    }
+
+    #[test]
+    fn a_vertical_split_needs_both_halves_smooth_and_a_textured_whole() {
+        // `decide_rect` reaches its `vert_ok` answer only where PARTITION_HORZ is already refused,
+        // so the vertical edge test is observable in exactly one situation: a block whose whole
+        // extent and both horizontal halves are textured while its left and right halves are each
+        // flat. It also has to be a layout where the taller-than-wide half is codable at all —
+        // §6.10.4 rules PARTITION_VERT out entirely at 4:2:2, which is why every layout tested
+        // here is 4:4:4 or 4:2:0.
+        //
+        // Both answers reconstruct bit-exactly, so the dav1d/libaom recon oracles cannot see this
+        // decision: only a direct test separates the real edge test from one that measures the
+        // left half twice, that accepts a single smooth half, or that has either comparison
+        // inverted.
+        for ss in [ChromaSubsampling::Cs444, ChromaSubsampling::Cs420] {
+            for bw in [16usize, 32] {
+                let hp = bw / 2;
+
+                // A hard edge on the block's midline. Whole block and both horizontal halves span
+                // it (range 180 > 32, so no PARTITION_NONE and no PARTITION_HORZ); each vertical
+                // half is constant (range 0), so PARTITION_VERT is the answer.
+                let edge = flat_chroma_luma(bw, ss, |x, _| if x < hp { 20 } else { 200 });
+                assert_eq!(
+                    FrameEncoder::new(&edge, 40).decide_rect(0, 0, bw),
+                    Some(2),
+                    "{ss:?} {bw}x{bw}: a midline edge with two flat halves is PARTITION_VERT"
+                );
+
+                // The same flat left half, but a right half textured by alternating rows. The
+                // whole block (range 100) and both horizontal halves still exceed the threshold,
+                // so PARTITION_NONE and PARTITION_HORZ stay refused — and PARTITION_VERT must be
+                // refused too, because only the left half is smooth.
+                let one_half = flat_chroma_luma(bw, ss, |x, y| match (x < hp, y % 2) {
+                    (true, _) | (false, 0) => 20,
+                    (false, _) => 120,
+                });
+                assert_eq!(
+                    FrameEncoder::new(&one_half, 40).decide_rect(0, 0, bw),
+                    None,
+                    "{ss:?} {bw}x{bw}: one smooth half is not a vertical edge"
+                );
+            }
+        }
+    }
+
+    /// An `n x n` frame in `ss` whose luma is `luma(x, y)` and whose chroma planes are flat.
+    fn flat_chroma_luma(
+        n: usize,
+        ss: ChromaSubsampling,
+        luma: impl Fn(usize, usize) -> u8,
+    ) -> Planar8 {
+        let y = (0..n)
+            .flat_map(|row| (0..n).map(move |col| (col, row)))
+            .map(|(col, row)| luma(col, row))
+            .collect();
+        let (cw, ch) = ss.chroma_dimensions(n as u32, n as u32);
+        let chroma = vec![128u8; (cw * ch) as usize];
+        Planar8::from_planes_subsampled(n as u32, n as u32, ss, [y, chroma.clone(), chroma])
+            .expect("valid planes")
+    }
+
+    #[test]
+    fn the_cfl_alpha_search_follows_the_sign_of_the_correlation() {
+        // `select_cfl` is a pure encoder decision — any alpha reconstructs bit-exactly, so no
+        // decoder disagrees with it and only a direct test separates a working search from one
+        // that has the sign or the mean subtraction wrong.
+        //
+        // Chroma that tracks luma upward must pick a positive alpha; chroma that moves against it,
+        // a negative one. Both planes carry the same pattern, so the two returned alphas agree.
+        // Chroma centred on 128 — the DC prediction for a block with no neighbours — so the
+        // baseline `alpha = 0` predicts the mean exactly and only the *shape* can beat it.
+        //
+        // Luma rises 8 per sample and is constant in y, so each 2x2 box sums to
+        // `2 * (l + (l + 8))` and `L = sum << 1`: `L` rises **128** per chroma step. The
+        // high-frequency term is `Round2Signed(alpha * dL, 6) = alpha * 2`, and chroma rises 4 per
+        // step, so the best alpha is 2.
+        let up = planes_420_with(16, 16, |p, x, _| {
+            if p == 0 {
+                (100 + x * 8) as u8
+            } else {
+                (122 + x * 4) as u8
+            }
+        });
+        let e = FrameEncoder::new(&up, 40);
+        let (au, av) = e
+            .select_cfl(0, 0, 4, 4)
+            .expect("correlated chroma wants CfL");
+        // Pinned exactly, not just by sign: a wrong shift or a dropped mean subtraction in the
+        // source-luma box sum changes `L`'s slope and therefore this value.
+        assert_eq!(au, 2, "positively correlated chroma ⇒ alpha 2");
+        assert_eq!(au, av, "both planes carry the same pattern");
+
+        let down = planes_420_with(16, 16, |p, x, _| {
+            if p == 0 {
+                (100 + x * 8) as u8
+            } else {
+                (134 - x * 4) as u8
+            }
+        });
+        let e = FrameEncoder::new(&down, 40);
+        let (au, _) = e
+            .select_cfl(0, 0, 4, 4)
+            .expect("anti-correlated chroma wants CfL");
+        assert_eq!(au, -2, "anti-correlated chroma ⇒ alpha -2");
+
+        // The same relationship rotated into y, so the *vertical* shift in the box sum is
+        // observable — the x-only cases above pass whatever it does.
+        let up_y = planes_420_with(16, 16, |p, _, y| {
+            if p == 0 {
+                (100 + y * 8) as u8
+            } else {
+                (122 + y * 4) as u8
+            }
+        });
+        let e = FrameEncoder::new(&up_y, 40);
+        let (au, _) = e
+            .select_cfl(0, 0, 4, 4)
+            .expect("correlated chroma wants CfL");
+        assert_eq!(
+            au, 2,
+            "the vertical relationship gives the same alpha as the horizontal one"
+        );
+
+        // Flat chroma has no high-frequency content to predict, so plain DC wins and no alpha is
+        // signalled at all.
+        let flat = planes_420_with(
+            16,
+            16,
+            |p, x, _| {
+                if p == 0 { (100 + x * 8) as u8 } else { 128 }
+            },
+        );
+        let e = FrameEncoder::new(&flat, 40);
+        assert_eq!(e.select_cfl(0, 0, 4, 4), None);
+    }
+
+    /// A 4:2:0 `Planar8` whose planes are filled by `f(plane, x, y)` at each plane's own size.
+    fn planes_420_with(w: u32, h: u32, f: impl Fn(usize, usize, usize) -> u8) -> Planar8 {
+        let (cw, ch) = ((w as usize).div_ceil(2), (h as usize).div_ceil(2));
+        let luma = (0..h as usize)
+            .flat_map(|y| (0..w as usize).map(move |x| (x, y)))
+            .map(|(x, y)| f(0, x, y))
+            .collect();
+        let chroma = |p: usize| -> Vec<u8> {
+            (0..ch)
+                .flat_map(|y| (0..cw).map(move |x| (x, y)))
+                .map(|(x, y)| f(p, x, y))
+                .collect()
+        };
+        Planar8::from_planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs420,
+            [luma, chroma(1), chroma(2)],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_flat_block_is_skippable_and_a_varying_one_is_not() {
+        // `block_is_skippable` decides whether a block can be coded with no residual at all. It is
+        // an encoder choice, so no decoder disagrees with it — only a direct test can tell a
+        // working implementation from one that always answers `false`.
+        // 128 specifically: the block also has to match its own DC prediction, and the top-left
+        // block has no neighbours, so §7.11.2.5 predicts `1 << (BitDepth - 1)`. A flat block of any
+        // other value has a non-zero residual and is correctly *not* skippable.
+        let flat = planes_420_with(16, 16, |_, _, _| 128);
+        let e = FrameEncoder::new(&flat, 40);
+        assert!(
+            e.block_is_skippable(0, 0, 8),
+            "a block matching its DC prediction is skippable"
+        );
+        let off_dc = planes_420_with(16, 16, |_, _, _| 77);
+        let e = FrameEncoder::new(&off_dc, 40);
+        assert!(
+            !e.block_is_skippable(0, 0, 8),
+            "flat but not equal to the DC prediction"
+        );
+
+        // A single differing luma sample inside the block is enough to disqualify it.
+        let bumpy = planes_420_with(
+            16,
+            16,
+            |p, x, y| {
+                if p == 0 && (x, y) == (3, 3) { 200 } else { 128 }
+            },
+        );
+        let e = FrameEncoder::new(&bumpy, 40);
+        assert!(!e.block_is_skippable(0, 0, 8));
+
+        // …and so is one in *chroma* only, which is what makes the per-plane extent load-bearing:
+        // chroma (1,1) lies inside the block's 4x4 chroma residual, while chroma (5,5) is outside
+        // it and must not affect the answer.
+        let chroma_bump =
+            planes_420_with(
+                16,
+                16,
+                |p, x, y| {
+                    if p == 1 && (x, y) == (1, 1) { 200 } else { 128 }
+                },
+            );
+        let e = FrameEncoder::new(&chroma_bump, 40);
+        assert!(!e.block_is_skippable(0, 0, 8));
+        let outside = planes_420_with(
+            16,
+            16,
+            |p, x, y| {
+                if p == 1 && (x, y) == (5, 5) { 200 } else { 128 }
+            },
+        );
+        let e = FrameEncoder::new(&outside, 40);
+        assert!(e.block_is_skippable(0, 0, 8));
+    }
+
+    #[test]
+    fn a_two_colour_block_gets_a_palette() {
+        // `decide_palette` is a pure encoder decision. Two luma colours over flat chroma is the
+        // case it exists for; a version that always returned `None` would still produce a
+        // conformant stream, so only a direct assertion can distinguish them.
+        //
+        // Three bands: the block at MI (2, 2) — luma (8, 8) — spans only the middle and right
+        // ones, so it sees exactly two colours. The extra band at x < 4 exists so that reading the
+        // block at a *scaled* rather than offset position picks up a third colour instead of
+        // coincidentally reproducing the same set.
+        // Luma: three bands, so the block at MI (2, 2) — luma (8, 8) — sees exactly two colours
+        // and reading it at a scaled position would pick up the third.
+        // Chroma: flat only *inside* the block's own chroma extent (4..8 on both axes), so a
+        // mis-positioned chroma read sees 60 instead of 128 and the flatness check rejects it.
+        let two = planes_420_with(16, 16, |p, x, y| {
+            if p == 0 {
+                if x < 4 {
+                    50
+                } else if x < 12 {
+                    30
+                } else {
+                    210
+                }
+            } else if (4..8).contains(&x) && (4..8).contains(&y) {
+                128
+            } else {
+                60
+            }
+        });
+        let mut e = FrameEncoder::new(&two, 40);
+        // A palette block's chroma must also equal its DC prediction, which reads the
+        // reconstruction — empty here, so the neighbours are primed to the flat chroma value.
+        for plane in 1..3 {
+            e.recon[plane].fill(128);
+        }
+        let pal = e.decide_palette(2, 2, 8).expect("two colours ⇒ palette");
+        assert_eq!(pal.colors, vec![30, 210], "sorted distinct luma colours");
+        assert_eq!(pal.index_map.len(), 64);
+        // Luma 8..12 is the low colour and 12..16 the high one, so the map splits mid-block.
+        assert_eq!(pal.index_map[0], 0);
+        assert_eq!(pal.index_map[3], 0);
+        assert_eq!(pal.index_map[4], 1);
+        assert_eq!(pal.index_map[7], 1);
+
+        // Too many distinct colours to be worth a palette.
+        let many = planes_420_with(
+            16,
+            16,
+            |p, x, y| {
+                if p == 0 { (x * 16 + y * 3) as u8 } else { 128 }
+            },
+        );
+        let e = FrameEncoder::new(&many, 40);
+        assert!(e.decide_palette(0, 0, 8).is_none());
+    }
+
+    #[test]
+    fn palette_reconstruction_writes_each_plane_at_its_own_geometry() {
+        // The luma map is written at luma resolution and chroma gets a flat DC over its *own*
+        // residual block — writing the luma extent at the luma position would overrun a subsampled
+        // chroma plane, and did before this was fixed.
+        //
+        // Driven at MI (2, 2) — luma base (8, 8), chroma base (4, 4) — because at the origin every
+        // shift and division yields zero and none of them is observable.
+        // Luma: three bands, so the block at MI (2, 2) — luma (8, 8) — sees exactly two colours
+        // and reading it at a scaled position would pick up the third.
+        // Chroma: flat only *inside* the block's own chroma extent (4..8 on both axes), so a
+        // mis-positioned chroma read sees 60 instead of 128 and the flatness check rejects it.
+        let two = planes_420_with(16, 16, |p, x, y| {
+            if p == 0 {
+                if x < 4 {
+                    50
+                } else if x < 12 {
+                    30
+                } else {
+                    210
+                }
+            } else if (4..8).contains(&x) && (4..8).contains(&y) {
+                128
+            } else {
+                60
+            }
+        });
+        let mut e = FrameEncoder::new(&two, 40);
+        for plane in 1..3 {
+            e.recon[plane].fill(128);
+        }
+        let pal = e.decide_palette(2, 2, 8).expect("palette");
+        // Primed non-zero so the context clear the palette path performs is observable at all — it
+        // writes zeros, which is indistinguishable from not writing on a fresh encoder.
+        e.above_level[0].fill(9);
+        e.left_level[0].fill(9);
+        e.recon_palette(2, 2, 8, &pal);
+        // The block spans MI columns 2..4, so those are cleared and the rest keep their priming.
+        assert_eq!(e.above_level[0][0], 9, "outside the block");
+        assert_eq!(e.above_level[0][1], 9);
+        assert_eq!(
+            e.above_level[0][2], 0,
+            "the block's own MI cells are cleared"
+        );
+        assert_eq!(e.above_level[0][3], 0);
+        assert_eq!(e.left_level[0][2], 0);
+        assert_eq!(e.left_level[0][3], 0);
+
+        let lw = e.geom[0].coded_w;
+        assert_eq!(e.recon[0][8 * lw + 8], 30, "luma base is (8, 8)");
+        assert_eq!(e.recon[0][8 * lw + 15], 210);
+        assert_eq!(e.recon[0][15 * lw + 15], 210);
+        assert_eq!(e.recon[0][0], 0, "nothing written outside the block");
+
+        // Chroma: a flat 4x4 DC block at the plane's own base, and nothing outside it.
+        let cw = e.geom[1].coded_w;
+        // The DC is the flat chroma value, written over the block's own 4x4 chroma extent.
+        for i in 4..8 {
+            for j in 4..8 {
+                assert_eq!(e.recon[1][i * cw + j], 128, "chroma ({j},{i})");
+            }
+        }
+        // The surrounding samples were primed to 128 too, so a mis-placed write is caught by the
+        // *luma* assertions above and by the block's position rather than by a stray value here.
+        // What this pins is that the write stayed within a 4x4 extent at the chroma base: a luma
+        // extent (8x8) at the luma base (8, 8) would run past the 8x8 coded chroma plane entirely.
+        assert_eq!(e.recon[1].len(), e.geom[1].len());
+    }
+
+    #[test]
+    fn cfl_luma_is_a_shifted_sum_of_the_covered_samples() {
+        // §7.11.5: `L = (sum of the (1<<subX) x (1<<subY) covered luma samples) << (3 - subX - subY)`.
+        // Exact at every layout — writing it as "average, then << 3" truncates. With alpha = 0 the
+        // prediction is untouched, so the values are read back through `alpha = 64`, where the
+        // high-frequency term is `Round2Signed(64 * (L - lumaAvg), 6) = L - lumaAvg`.
+        let p = planes_420(16, 16);
+        let mut e = enc420(&p);
+        // Luma coded grid is 16x16. Give the four samples under chroma (0,0) distinct values whose
+        // sum is 40, and make every other covered quad sum to the same, so lumaAvg is uniform and
+        // the residual isolates the first sample.
+        for v in e.recon[0].iter_mut() {
+            *v = 10;
+        }
+        e.recon[0][0] = 1;
+        e.recon[0][1] = 2;
+        e.recon[0][16] = 3;
+        e.recon[0][17] = 4;
+        // 2x2 chroma block at chroma (0,0).
+        let mut pred = vec![100i32; 4];
+        e.apply_cfl(&mut pred, 0, 0, 64, TxSize::Tx4x4);
+        // L[0][0] = (1+2+3+4) << (3-1-1) = 10 << 1 = 20. Every other L = (10*4) << 1 = 80.
+        // lumaAvg = Round2(20 + 15*80, 4) = Round2(1220, 4) = 76.
+        // pred[0] = clip(100 + (20 - 76)) = 44.
+        assert_eq!(pred[0], 44);
+        // A sample over uniform luma sits at 100 + (80 - 76) = 104.
+        assert_eq!(pred[1], 104);
+    }
+
+    /// §7.11.5 transcribed independently of the encoder, for cross-checking `apply_cfl`.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_cfl(
+        recon_luma: &[u16],
+        luma_stride: usize,
+        max_luma_w: usize,
+        max_luma_h: usize,
+        sub_x: usize,
+        sub_y: usize,
+        sx: usize,
+        sy: usize,
+        w: usize,
+        h: usize,
+        alpha: i32,
+        dc: i32,
+    ) -> Vec<i32> {
+        let mut l = vec![0i32; w * h];
+        let mut sum = 0i32;
+        for i in 0..h {
+            let luma_y = ((sy + i) << sub_y).min(max_luma_h - (1 << sub_y));
+            for j in 0..w {
+                let luma_x = ((sx + j) << sub_x).min(max_luma_w - (1 << sub_x));
+                let mut t = 0i32;
+                for dy in 0..=sub_y {
+                    for dx in 0..=sub_x {
+                        t += i32::from(recon_luma[(luma_y + dy) * luma_stride + (luma_x + dx)]);
+                    }
+                }
+                let v = t << (3 - sub_x - sub_y);
+                l[i * w + j] = v;
+                sum += v;
+            }
+        }
+        let shift = w.trailing_zeros() + h.trailing_zeros();
+        let luma_avg = (sum + (1 << (shift - 1))) >> shift;
+        l.iter()
+            .map(|&lv| (dc + round2_signed(alpha * (lv - luma_avg), 6)).clamp(0, 255))
+            .collect()
+    }
+
+    #[test]
+    fn cfl_matches_an_independent_transcription_of_the_spec() {
+        // Cross-checks `apply_cfl` against §7.11.5 written out separately, over configurations that
+        // exercise the box sum, the shift, and the `MaxLuma` edge clamp — including positions where
+        // the clamp actually bites, which a zero alpha would hide.
+        let p = planes_420(16, 16);
+        let mut e = enc420(&p);
+        for (i, v) in e.recon[0].iter_mut().enumerate() {
+            *v = ((i * 7) % 251) as u16;
+        }
+        let stride = e.geom[0].coded_w;
+        let luma = e.recon[0].clone();
+
+        for (max_w, max_h) in [(16usize, 16usize), (16, 8), (8, 16), (8, 8)] {
+            e.max_luma_w = max_w;
+            e.max_luma_h = max_h;
+            for (sx, sy) in [(0usize, 0usize), (0, 2), (2, 0), (2, 2)] {
+                for alpha in [-16i32, -1, 0, 8, 64] {
+                    let dc = 100;
+                    let mut got = vec![dc; 16];
+                    e.apply_cfl(&mut got, sx, sy, alpha, TxSize::Tx4x4);
+                    let want =
+                        reference_cfl(&luma, stride, max_w, max_h, 1, 1, sx, sy, 4, 4, alpha, dc);
+                    assert_eq!(
+                        got, want,
+                        "max=({max_w},{max_h}) at ({sx},{sy}) alpha {alpha}"
+                    );
+                }
+            }
+        }
+
+        // The same at 4:4:4, where both shifts are zero and `L` is the luma sample times eight.
+        let p444 =
+            Planar8::from_planes(16, 16, [vec![0; 256], vec![0; 256], vec![0; 256]]).unwrap();
+        let mut e444 = FrameEncoder::new(&p444, 40);
+        for (i, v) in e444.recon[0].iter_mut().enumerate() {
+            *v = ((i * 5) % 251) as u16;
+        }
+        let luma444 = e444.recon[0].clone();
+        let stride444 = e444.geom[0].coded_w;
+        e444.max_luma_w = 16;
+        e444.max_luma_h = 16;
+        let mut got = vec![120; 16];
+        e444.apply_cfl(&mut got, 4, 4, 32, TxSize::Tx4x4);
+        let want = reference_cfl(&luma444, stride444, 16, 16, 0, 0, 4, 4, 4, 4, 32, 120);
+        assert_eq!(got, want);
+    }
+
+    /// A 4:2:0 encoder over a 17x13 frame: coded luma 24x16, coded chroma 12x8, MI grid 6x4.
+    fn enc420(planes: &Planar8) -> FrameEncoder<'_> {
+        FrameEncoder::new(planes, 40)
+    }
+
+    fn planes_420(w: u32, h: u32) -> Planar8 {
+        let (cw, ch) = ((w as usize).div_ceil(2), (h as usize).div_ceil(2));
+        Planar8::from_planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs420,
+            [
+                vec![0; w as usize * h as usize],
+                vec![0; cw * ch],
+                vec![0; cw * ch],
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn entropy_context_grids_are_the_plane_mi_grid() {
+        // §8.3.2 `maxX4`/`maxY4`: the luma MI grid scaled by the plane's subsampling. A `<<` in
+        // place of the `>>` would give four times the columns rather than half.
+        let p = planes_420(17, 13);
+        let e = enc420(&p);
+        assert_eq!((e.mi_cols, e.mi_rows), (6, 4));
+        assert_eq!((e.ctx_cols(0), e.ctx_rows(0)), (6, 4));
+        assert_eq!((e.ctx_cols(1), e.ctx_rows(1)), (3, 2));
+        assert_eq!((e.ctx_cols(2), e.ctx_rows(2)), (3, 2));
+        // Each context array is allocated at its own plane's grid, so the bound and the allocation
+        // agree — indexing one with the other's extent would be out of bounds.
+        for plane in 0..3 {
+            assert_eq!(e.above_level[plane].len(), e.ctx_cols(plane));
+            assert_eq!(e.left_level[plane].len(), e.ctx_rows(plane));
+        }
+    }
+
+    #[test]
+    fn context_writes_and_reads_stop_at_the_plane_grid() {
+        // The `x4 + k < cols` guards are load-bearing for a run that overhangs the plane's context
+        // grid: without them this indexes past the array. The residual loop does not currently
+        // produce such a run, so the guards are exercised directly.
+        let p = planes_420(17, 13);
+        let mut e = enc420(&p);
+        // Chroma grid is 3x2; write a 4-cell run starting at column 1, so cells 1 and 2 land and
+        // cells 3 and 4 are past the edge.
+        e.set_ctx(1, 1, 1, 4, 4, 9, 1);
+        assert_eq!(e.above_level[1], vec![0, 9, 9]);
+        assert_eq!(e.left_level[1], vec![0, 9]);
+        assert_eq!(e.above_dc[1], vec![0, 1, 1]);
+        // Reading back over the same overhanging run must also stay in bounds, and must see the
+        // values that were written.
+        let ctx = e.txb_skip_ctx(1, 1, 1, 8, 8, 16, 16);
+        assert!(ctx >= 7, "chroma contexts start at 7, got {ctx}");
+
+        // The luma ladder reads a *run* of cells, so distinct levels and a window starting away
+        // from zero make `x4 + k` and `x4 * k` select different cells.
+        e.above_level[0] = vec![0, 1, 9, 40, 2, 63];
+        e.left_level[0] = vec![0, 0, 5, 3];
+        // Two 4x4 cells from x4 = 1 see levels 1 and 9 (top = 9); rows from y4 = 1 see 0 and 5
+        // (left = 5). Both non-zero and both ≤ 3 is false, so the ladder lands on 6.
+        assert_eq!(e.txb_skip_ctx(0, 1, 1, 16, 16, 8, 8), 6);
+        // A window whose *guard* arithmetic decides which cells are read: four cells from x4 = 2
+        // are all inside the 6-column grid, so the highest level (63, at index 5) must be seen —
+        // a guard computing `x4 * k` would stop early and miss it. Four rows from y4 = 1 reach
+        // exactly the 4-row edge, so the row guard must stop *before* index 4; `<=` reads one past
+        // the end of the array. top = 63 and left = 5, both non-zero and both above 3 ⇒ rung 6.
+        assert_eq!(e.txb_skip_ctx(0, 2, 1, 32, 32, 16, 16), 6);
+        let dc = e.dc_sign_ctx(1, 1, 1, 4, 4);
+        assert_eq!(dc, 1, "two -1 categories sum negative");
+    }
+
+    #[test]
+    fn chroma_txb_skip_context_adds_three_when_the_block_exceeds_the_transform() {
+        // §8.3.2: `ctx = (above != 0) + (left != 0) + 7`, plus 3 when `bw * bh > w * h`. The `+ 7`
+        // and the `+ 3` are separate terms, and the comparison is between the *plane residual* and
+        // the transform — feeding it the luma block size would add 3 where it should not.
+        let p = planes_420(17, 13);
+        let e = enc420(&p);
+        // Nothing written yet, so both neighbours are zero: ctx = 0 + 0 + 7.
+        assert_eq!(e.txb_skip_ctx(1, 0, 0, 8, 8, 8, 8), 7);
+        // Block larger than the transform ⇒ +3.
+        assert_eq!(e.txb_skip_ctx(1, 0, 0, 8, 8, 4, 4), 10);
+        // Luma uses a different ladder entirely, and returns 0 when block == transform.
+        assert_eq!(e.txb_skip_ctx(0, 0, 0, 8, 8, 8, 8), 0);
+    }
+
+    #[test]
+    fn plane_block_gives_each_plane_its_own_base_and_extent() {
+        // The MI position is scaled into the plane *before* becoming samples: at MI column 3 a
+        // 4:2:0 chroma block starts at sample (3 >> 1) * 4 = 4, not (3 * 4) >> 1 = 6.
+        let p = planes_420(17, 13);
+        let e = enc420(&p);
+        assert_eq!(e.plane_block(0, 0, 8, 8, 0), Some((0, 0, 8, 8)));
+        assert_eq!(e.plane_block(0, 0, 8, 8, 1), Some((0, 0, 4, 4)));
+        assert_eq!(e.plane_block(2, 3, 8, 8, 0), Some((12, 8, 8, 8)));
+        assert_eq!(e.plane_block(2, 3, 8, 8, 1), Some((4, 4, 4, 4)));
+        // A shape with no chroma residual reports none rather than a zero-sized block.
+        let p422 = Planar8::from_planes_subsampled(
+            16,
+            16,
+            ChromaSubsampling::Cs422,
+            [vec![0; 256], vec![0; 128], vec![0; 128]],
+        )
+        .unwrap();
+        let e422 = FrameEncoder::new(&p422, 40);
+        assert_eq!(e422.plane_block(0, 0, 8, 16, 1), None);
+        assert_eq!(e422.plane_block(0, 0, 16, 8, 1), Some((0, 0, 8, 8)));
+    }
+
+    #[test]
+    fn chroma_transform_size_caps_a_sixty_four_sample_axis() {
+        // §5.11.37: chroma never uses a 64-sample transform, and the cap applies when *either*
+        // axis reaches 64 — an `&&` would leave a 32x64 residual on TX_32X64.
+        assert_eq!(chroma_tx_size(32, 64), TxSize::Tx32x32);
+        assert_eq!(chroma_tx_size(64, 32), TxSize::Tx32x32);
+        assert_eq!(chroma_tx_size(64, 64), TxSize::Tx32x32);
+        assert_eq!(chroma_tx_size(16, 64), TxSize::Tx16x32);
+        assert_eq!(chroma_tx_size(64, 16), TxSize::Tx32x16);
+        // Below 64 the transform matches the residual exactly.
+        assert_eq!(chroma_tx_size(32, 32), TxSize::Tx32x32);
+        assert_eq!(chroma_tx_size(4, 8), TxSize::Tx4x8);
+        assert_eq!(chroma_tx_size(8, 4), TxSize::Tx8x4);
+    }
+
+    #[test]
+    fn max_tx_size_rect_matches_the_block_shape() {
+        // §9.3 `Max_Tx_Size_Rect`: the transform has the block's own dimensions. Every shape is
+        // pinned, because the previous partial table silently fell back to `square_tx(w)` — which
+        // is the wrong transform for any pair it did not list, and would have become reachable the
+        // moment subsampling produced one.
+        let cases = [
+            ((4, 4), TxSize::Tx4x4),
+            ((4, 8), TxSize::Tx4x8),
+            ((4, 16), TxSize::Tx4x16),
+            ((8, 4), TxSize::Tx8x4),
+            ((8, 8), TxSize::Tx8x8),
+            ((8, 16), TxSize::Tx8x16),
+            ((8, 32), TxSize::Tx8x32),
+            ((16, 4), TxSize::Tx16x4),
+            ((16, 8), TxSize::Tx16x8),
+            ((16, 16), TxSize::Tx16x16),
+            ((16, 32), TxSize::Tx16x32),
+            ((16, 64), TxSize::Tx16x64),
+            ((32, 8), TxSize::Tx32x8),
+            ((32, 16), TxSize::Tx32x16),
+            ((32, 32), TxSize::Tx32x32),
+            ((32, 64), TxSize::Tx32x64),
+            ((64, 16), TxSize::Tx64x16),
+            ((64, 32), TxSize::Tx64x32),
+            ((64, 64), TxSize::Tx64x64),
+        ];
+        for ((w, h), want) in cases {
+            assert_eq!(max_tx_size_rect(w, h), want, "{w}x{h}");
+        }
+        // The 128-sample axes clamp to 64, so the three 128-wide blocks share TX_64X64 with the
+        // 64x64 one rather than naming a transform that does not exist.
+        assert_eq!(max_tx_size_rect(64, 128), TxSize::Tx64x64);
+        assert_eq!(max_tx_size_rect(128, 64), TxSize::Tx64x64);
+        assert_eq!(max_tx_size_rect(128, 128), TxSize::Tx64x64);
+    }
+
+    #[test]
+    fn every_transform_the_encoder_selects_has_an_eob_position_cdf() {
+        // The `eob_pt` selector panics rather than falling through to the 1024-coefficient table,
+        // so this asserts the selector is total over the transforms `max_tx_size_rect` can return.
+        // 32 is the entry this change adds: it is unreachable at 4:4:4 and becomes reachable as
+        // soon as chroma is subsampled (TX_4X8 / TX_8X4).
+        let areas: std::collections::BTreeSet<usize> = [
+            (4, 4),
+            (4, 8),
+            (4, 16),
+            (8, 4),
+            (8, 8),
+            (8, 16),
+            (8, 32),
+            (16, 4),
+            (16, 8),
+            (16, 16),
+            (16, 32),
+            (16, 64),
+            (32, 8),
+            (32, 16),
+            (32, 32),
+            (32, 64),
+            (64, 16),
+            (64, 32),
+            (64, 64),
+        ]
+        .iter()
+        .map(|&(w, h)| {
+            let tx = max_tx_size_rect(w, h);
+            // The coded coefficient count is capped at 1024 (§5.11.39 `segEob`).
+            (tx.width() * tx.height()).min(1024)
+        })
+        .collect();
+        assert_eq!(
+            areas,
+            [16, 32, 64, 128, 256, 512, 1024].into_iter().collect(),
+            "the eob_pt selector must cover exactly these coefficient counts"
+        );
+    }
 
     #[test]
     fn prediction_references_clamp_to_the_last_sample_of_the_coded_plane() {
@@ -3856,7 +4805,7 @@ mod tests {
             }
         }
         let mut pred = [128i32; 16];
-        e.apply_cfl(&mut pred, 4, 4, 2, 4);
+        e.apply_cfl(&mut pred, 4, 4, 2, TxSize::Tx4x4);
         assert_eq!(
             pred,
             [
@@ -3865,7 +4814,7 @@ mod tests {
         );
         // alpha = 0 is a no-op (plain DC).
         let mut flat = [100i32; 16];
-        e.apply_cfl(&mut flat, 4, 4, 0, 4);
+        e.apply_cfl(&mut flat, 4, 4, 0, TxSize::Tx4x4);
         assert_eq!(flat, [100; 16]);
     }
 

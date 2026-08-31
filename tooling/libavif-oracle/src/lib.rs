@@ -26,9 +26,9 @@ mod sys {
 /// A decoded planar image: one tightly packed `width * height` plane per component, each sample
 /// widened to `u16` (8-bit samples occupy `0..=255`, 10-/12-bit use the wider range).
 ///
-/// gamut emits 4:4:4 and monochrome stills. For 4:4:4 the three planes are full-resolution and
-/// carry `[Y, U, V]` (which under the identity matrix are `G, B, R`); for a monochrome image only
-/// `Y` is present and the two chroma planes are **empty**.
+/// The planes carry `[Y, U, V]` (which under the identity matrix are `G, B, R`). At 4:4:4 all
+/// three are full-resolution; under a subsampled format the chroma planes are smaller; and a
+/// monochrome image codes only `Y`, leaving the two chroma planes **empty**.
 pub struct DecodedImage {
     /// Luma width in pixels.
     pub width: u32,
@@ -37,19 +37,38 @@ pub struct DecodedImage {
     /// Bits per component (8, 10, or 12).
     pub bit_depth: u8,
     /// `[Y, U, V]` planes, each in raster order with no row padding; samples widened to `u16`.
-    /// The two chroma planes are empty for a monochrome image.
+    ///
+    /// The chroma planes are sized by [`yuv_format`](Self::yuv_format), so they are smaller than
+    /// luma for a subsampled image and **empty** for a monochrome one, which codes a single plane.
+    /// Their dimensions come from libavif's own accessors, not from a re-derivation here — the
+    /// point of a differential oracle is that the geometry is the reference implementation's
+    /// notion of it.
     pub planes: [Vec<u16>; 3],
-    /// Whether libavif reports the image as monochrome (`AVIF_PIXEL_FORMAT_YUV400`).
-    pub monochrome: bool,
+    /// The raw `avifPixelFormat` (1 = 4:4:4, 2 = 4:2:2, 3 = 4:2:0, 4 = monochrome), deliberately
+    /// left as libavif's own value rather than mapped into a gamut type.
+    pub yuv_format: u32,
 }
 
-/// Decodes the first frame of an AVIF file into its YUV planes (8/10/12-bit, widened to `u16`).
+impl DecodedImage {
+    /// Whether libavif reports the image as monochrome (`AVIF_PIXEL_FORMAT_YUV400`) — one coded
+    /// plane, with [`planes`](Self::planes)`[1..]` empty.
+    ///
+    /// Derived from [`yuv_format`](Self::yuv_format) rather than stored beside it, so the two
+    /// cannot disagree.
+    #[must_use]
+    pub fn monochrome(&self) -> bool {
+        self.yuv_format == sys::AVIF_PIXEL_FORMAT_YUV400
+    }
+}
+
+/// Decodes the first frame of an AVIF file into its YUV planes (8/10/12-bit, widened to `u16`),
+/// each at its own plane dimensions.
 ///
 /// # Errors
 ///
 /// Returns a message (including libavif's own result string) if the file cannot be parsed or
-/// decoded, or if the decoded image is neither 4:4:4 nor monochrome, or is not 8/10/12-bit (the
-/// forms gamut emits).
+/// decoded, or if it is not 8/10/12-bit. The pixel format is reported, not rejected: a caller that
+/// cares asserts on [`DecodedImage::yuv_format`].
 pub fn decode_avif(avif: &[u8]) -> Result<DecodedImage, String> {
     // SAFETY: the decoder and image handles below are created and destroyed in matched pairs on
     // every return path; pointers passed to libavif stay valid for each call's duration.
@@ -90,22 +109,19 @@ unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
     if !matches!(depth, 8 | 10 | 12) {
         return Err(format!("unexpected bit depth: {depth}-bit"));
     }
-    // A monochrome image has one coded plane, and libavif leaves `yuvPlanes[1..]` unset for it —
-    // so the plane *count*, not just the copy, follows the format.
-    let coded = match image.yuvFormat {
-        sys::AVIF_PIXEL_FORMAT_YUV444 => 3,
-        sys::AVIF_PIXEL_FORMAT_YUV400 => 1,
-        other => {
-            return Err(format!(
-                "expected 4:4:4 or monochrome, got pixel format {other}"
-            ));
-        }
+    // A monochrome image codes one plane, and libavif leaves `yuvPlanes[1..]` unset for it — so
+    // the plane *count* follows the format, not just the copy. Every other format libavif can
+    // report codes three; which of those gamut is willing to emit is the encoder's business, not
+    // the oracle's, so nothing is rejected here on format grounds.
+    let coded = if image.yuvFormat == sys::AVIF_PIXEL_FORMAT_YUV400 {
+        1
+    } else {
+        3
     };
-    let w = image.width as usize;
-    let h = image.height as usize;
 
-    // SAFETY: a successfully decoded image owns `coded` planes of `h` rows; `yuvRowBytes[p]`
-    // (the byte stride) spaces consecutive rows of plane `p`.
+    // SAFETY: a successfully decoded image owns `coded` planes; `avifImagePlaneWidth/Height` give
+    // plane `p`'s own extent (equal to luma at 4:4:4, halved on the subsampled axes otherwise) and
+    // `yuvRowBytes[p]` (the byte stride) spaces its consecutive rows.
     unsafe {
         let mut planes = [Vec::new(), Vec::new(), Vec::new()];
         for (p, plane) in planes.iter_mut().enumerate().take(coded) {
@@ -113,15 +129,17 @@ unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
             if base.is_null() {
                 return Err(format!("plane {p} is null"));
             }
-            *plane = copy_plane(base, image.yuvRowBytes[p] as usize, w, h, depth);
+            let pw = sys::avifImagePlaneWidth(image, p as i32) as usize;
+            let ph = sys::avifImagePlaneHeight(image, p as i32) as usize;
+            *plane = copy_plane(base, image.yuvRowBytes[p] as usize, pw, ph, depth);
         }
         let [y, u, v] = planes;
         Ok(DecodedImage {
             width: image.width,
             height: image.height,
             bit_depth: depth,
+            yuv_format: image.yuvFormat,
             planes: [y, u, v],
-            monochrome: coded == 1,
         })
     }
 }

@@ -1,0 +1,120 @@
+name: Bug report
+description: A defect in a gamut crate — wrong output, a panic, a spec or oracle disagreement.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        gamut's correctness bar is the official specification plus each crate's named oracle,
+        so a report is only actionable once someone else can reproduce it. Everything marked
+        required below exists to make that possible — please don't skip a field because the
+        problem seems obvious.
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: >-
+        The full commit hash you observed this on, and which you believe the report still
+        applies to. A released version alone is not enough — `master` moves, and a fix may
+        already have landed.
+      placeholder: 65508ee0000000000000000000000000000000000 (or the crate version, e.g. gamut-avif 1.1.0)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Crate
+      description: Which crate the defect is in. Pick the closest; correct it later if the trail leads elsewhere.
+      multiple: true
+      options:
+        - gamut (umbrella)
+        - gamut-av1
+        - gamut-av2
+        - gamut-avif
+        - gamut-bitstream
+        - gamut-cli
+        - gamut-cmm
+        - gamut-codec-abi
+        - gamut-color
+        - gamut-core
+        - gamut-deflate
+        - gamut-dng
+        - gamut-dsp
+        - gamut-exif
+        - gamut-ffi
+        - gamut-heic
+        - gamut-icc
+        - gamut-ifd
+        - gamut-iptc
+        - gamut-isobmff
+        - gamut-jpeg
+        - gamut-jxl
+        - gamut-jxl-sys
+        - gamut-metadata
+        - gamut-png
+        - gamut-riff
+        - gamut-tiff
+        - gamut-tonemap
+        - gamut-vvc
+        - gamut-wasm
+        - gamut-webp
+        - gamut-xmp
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should happen, and what says so
+      description: >-
+        Cite the authority: a clause of the format specification (section number, please),
+        the behaviour of the crate's oracle (libaom, dav1d, libavif, libpng, libjpeg-turbo,
+        libtiff, Little-CMS, the Adobe DNG SDK, libheif), or a documented contract in the
+        crate's own API docs or STATUS.md. "It looks wrong" is a starting point, not a claim
+        anyone can verify.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happens
+      description: >-
+        The observed output, the panic message and backtrace, or the differential against the
+        oracle. Paste text rather than a screenshot where you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: >-
+        The smallest thing that reproduces it — ideally a failing `#[test]`, a `gamut` CLI
+        invocation, or a short `main.rs`. If an input file is needed, attach it, or say
+        precisely how to generate one. A report nobody can run is a report nobody can fix.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS and architecture, plus `rustc --version`. Note it if you are cross-compiling or on wasm32.
+      placeholder: Linux x86_64, rustc 1.98.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: >-
+        Whether it is a regression and the last commit that worked, what you already ruled
+        out, or a hypothesis about the cause.
+    validations:
+      required: false

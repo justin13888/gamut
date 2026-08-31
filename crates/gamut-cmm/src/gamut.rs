@@ -40,7 +40,7 @@ use crate::bpc;
 use crate::chain::link_chain;
 use crate::error::{CmmError, Result};
 use crate::pipeline::{MAX_CHANNELS, Pipeline};
-use crate::transform::Transform;
+use crate::transform::{Transform, TransformOptions};
 
 /// The default gamut-check threshold, lcms2's `ERR_THRESHOLD` (`cmsgmt.c:210`).
 const ERR_THRESHOLD: f64 = 5.0;
@@ -98,24 +98,41 @@ pub struct GamutCheck {
 }
 
 impl GamutCheck {
-    /// Builds the gamut check: `src`'s colours are converted to Lab at `intent` (through
-    /// the same chain machinery a `[src, Lab-identity]` transform would use, forced-BPC
-    /// rule included — lcms2's `hInput`), then round-tripped twice through `proof` at
-    /// media-relative (`hForward`/`hReverse`) and judged by the ΔE table in the module
-    /// docs. The threshold is 5.0, tightened to 1.0 when `proof` is a matrix-shaper
+    /// Builds the gamut check: `src`'s colours are converted to Lab at `options.intent`
+    /// (through the same chain machinery a `[src, Lab-identity]` transform would use,
+    /// forced-BPC rule included — lcms2's `hInput`), then round-tripped twice through
+    /// `proof` at media-relative (`hForward`/`hReverse`) and judged by the ΔE table in the
+    /// module docs. The threshold is 5.0, tightened to 1.0 when `proof` is a matrix-shaper
     /// profile (lcms2's `cmsIsMatrixShaper` — tag presence, not the path actually used).
+    ///
+    /// # Options
+    ///
+    /// Only [`intent`](TransformOptions::intent) and
+    /// [`optimization`](TransformOptions::optimization) are consumed — the latter applied to
+    /// all three sub-pipelines.
+    /// [`black_point_compensation`](TransformOptions::black_point_compensation) is
+    /// **ignored**: lcms2's gamut sampler compensates on none of its three legs
+    /// (`cmsgmt.c`'s `BPCList` is all-false), and a compensated round trip would not be the
+    /// device's own reproduction any more. The whole options struct is taken so this
+    /// constructor opts into optimization exactly as the [`crate::IccTransform`] ones do.
     ///
     /// # Errors
     ///
     /// Whatever the underlying profile links raise: `src` needs a device→PCS rendition at
-    /// `intent`, `proof` needs **both** directions at media-relative
-    /// ([`CmmError::MissingTag`] and friends otherwise).
-    pub fn new(src: &IccProfile, proof: &IccProfile, intent: RenderingIntent) -> Result<Self> {
+    /// the intent, `proof` needs **both** directions at media-relative
+    /// ([`CmmError::MissingTag`] and friends otherwise); plus whatever
+    /// [`Pipeline::optimized`] reports for the requested level.
+    pub fn new(src: &IccProfile, proof: &IccProfile, options: TransformOptions) -> Result<Self> {
         let lab = lab_connection_profile();
+        let intent = options.intent;
         let relative = RenderingIntent::MediaRelativeColorimetric;
-        let input = link_chain(&[src, &lab], &[intent, intent], &[false, false])?;
-        let forward = link_chain(&[&lab, proof], &[relative, relative], &[false, false])?;
-        let reverse = link_chain(&[proof, &lab], &[relative, relative], &[false, false])?;
+        let optimization = options.optimization;
+        let input = link_chain(&[src, &lab], &[intent, intent], &[false, false])?
+            .optimized(optimization)?;
+        let forward = link_chain(&[&lab, proof], &[relative, relative], &[false, false])?
+            .optimized(optimization)?;
+        let reverse = link_chain(&[proof, &lab], &[relative, relative], &[false, false])?
+            .optimized(optimization)?;
         let threshold = if bpc::is_matrix_shaper(proof) {
             SHAPER_THRESHOLD
         } else {
@@ -213,6 +230,15 @@ mod tests {
     use gamut_icc::{U8Fixed8, XyzNumber};
 
     use super::*;
+
+    /// [`TransformOptions`] at `intent` with every other knob at its default (BPC off,
+    /// optimization off) — the shape the intent-only constructors take.
+    fn intent_options(intent: RenderingIntent) -> TransformOptions {
+        TransformOptions {
+            intent,
+            ..TransformOptions::default()
+        }
+    }
 
     /// An RGB→XYZ shaper whose colorant matrix is scaled by `gain` — `gain < 1` shrinks the
     /// reproducible gamut, so saturated colours of the unit-gain space fall outside it.
@@ -318,8 +344,12 @@ mod tests {
     fn shaper_proof_tightens_the_threshold() {
         let src = scaled_shaper(1.0);
         let proof = scaled_shaper(0.5);
-        let check =
-            GamutCheck::new(&src, &proof, RenderingIntent::MediaRelativeColorimetric).unwrap();
+        let check = GamutCheck::new(
+            &src,
+            &proof,
+            intent_options(RenderingIntent::MediaRelativeColorimetric),
+        )
+        .unwrap();
         assert_eq!(check.threshold, SHAPER_THRESHOLD);
         assert_eq!(check.input_channels(), 3);
         assert_eq!(check.output_channels(), 1);
@@ -342,8 +372,12 @@ mod tests {
         // Tag presence still satisfies cmsIsMatrixShaper (colorants + TRCs are all there),
         // so the tightened threshold applies even though the LUT path is used — the lcms2
         // quirk, replicated.
-        let check =
-            GamutCheck::new(&src, &lut_proof, RenderingIntent::MediaRelativeColorimetric).unwrap();
+        let check = GamutCheck::new(
+            &src,
+            &lut_proof,
+            intent_options(RenderingIntent::MediaRelativeColorimetric),
+        )
+        .unwrap();
         assert_eq!(check.threshold, SHAPER_THRESHOLD);
         // A proof with ONLY LUT tags gets the loose threshold.
         let mut bare_lut = lut_proof.clone();
@@ -360,8 +394,12 @@ mod tests {
                 a_curves: None,
             }),
         ));
-        let check =
-            GamutCheck::new(&src, &bare_lut, RenderingIntent::MediaRelativeColorimetric).unwrap();
+        let check = GamutCheck::new(
+            &src,
+            &bare_lut,
+            intent_options(RenderingIntent::MediaRelativeColorimetric),
+        )
+        .unwrap();
         assert_eq!(check.threshold, ERR_THRESHOLD);
     }
 
@@ -372,8 +410,12 @@ mod tests {
         // bright saturated ones are not.
         let src = scaled_shaper(1.0);
         let proof = scaled_shaper(0.5);
-        let check =
-            GamutCheck::new(&src, &proof, RenderingIntent::MediaRelativeColorimetric).unwrap();
+        let check = GamutCheck::new(
+            &src,
+            &proof,
+            intent_options(RenderingIntent::MediaRelativeColorimetric),
+        )
+        .unwrap();
         let mut out = [f64::NAN; 2];
         check
             .transform(&[0.2, 0.2, 0.2, 1.0, 0.1, 0.9], &mut out)
