@@ -52,6 +52,7 @@ iterate=""
 budget_gb="${GAMUT_MUTANTS_BUDGET_GB:-}"
 all_at_once=""
 dry_run=""
+want_diff=""
 set -- "$@"
 args_pre=""     # cargo-mutants args accumulated before the passthrough marker
 
@@ -91,9 +92,11 @@ while [ $# -gt 0 ]; do
 	# an absent argument, not an unknown option.
 	"") ;;
 	--diff)
+		# The argument cannot be added yet: it names a file under the target directory, which is
+		# resolved further down. Record the intent and append the pair once the path is known,
+		# rather than substituting a placeholder into the accumulated arguments afterwards.
 		selection="${selection}diff "
-		add_arg --in-diff
-		add_arg "@@DIFF@@"
+		want_diff=1
 		;;
 	--crate)
 		[ $# -ge 2 ] || die "--crate needs a package name"
@@ -308,15 +311,16 @@ fi
 [ -n "$iterate" ] && add_arg --iterate
 
 # The diff is materialised here rather than by the caller so every entry point spells the merge
-# base the same way.
-if [ "${mutant_args#*@@DIFF@@}" != "$mutant_args" ]; then
+# base the same way. `add_arg` quotes the path, so a target directory containing shell
+# metacharacters survives.
+if [ -n "$want_diff" ]; then
 	mkdir -p "$target_dir"
 	diff_file="$target_dir/mutants.diff"
 	base=$(git merge-base origin/master HEAD) || die "cannot find the merge base with origin/master"
 	git diff "$base...HEAD" >"$diff_file"
 	[ -s "$diff_file" ] || die "no changes vs origin/master, so --diff selects no mutants"
-	escaped=$(printf '%s' "$diff_file" | sed "s/'/'\\\\''/g")
-	mutant_args=$(printf '%s' "$mutant_args" | sed "s|@@DIFF@@|$escaped|")
+	add_arg --in-diff
+	add_arg "$diff_file"
 fi
 
 # ── Memory guards ───────────────────────────────────────────────────────────────────────────
