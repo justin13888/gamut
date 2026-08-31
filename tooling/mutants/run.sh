@@ -182,6 +182,12 @@ available_gb() {
 	awk '/^MemAvailable:/ {print int($2 / 1024 / 1024)}' /proc/meminfo 2>/dev/null
 }
 
+# Validate what the caller supplied before it reaches the arithmetic, so a typo is a sentence
+# rather than a shell error about an operand.
+case "${budget_gb:-0}" in
+*[!0-9]*) die "budget must be a whole number of GiB, got ${budget_gb:-}" ;;
+esac
+
 if [ -z "$budget_gb" ]; then
 	budget_gb=$(cgroup_limit_gb || true)
 	budget_source="cgroup limit"
@@ -239,6 +245,17 @@ MUTANTS_JOBS="${MUTANTS_JOBS:-$jobs}"
 MUTANTS_JOBSERVER_TASKS="${MUTANTS_JOBSERVER_TASKS:-$slots}"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$cargo_jobs}"
 CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$cmake_level}"
+
+# Each of the five is overridable, so each may arrive as anything. Reject what cannot be a
+# count before it reaches the arithmetic below (MUTANTS_JOBS divides the address-space limit)
+# or the tools themselves, where zero means "unlimited" to some of them.
+for dial in MUTANTS_JOBS MUTANTS_JOBSERVER_TASKS CARGO_BUILD_JOBS CMAKE_BUILD_PARALLEL_LEVEL RUST_TEST_THREADS; do
+	eval "value=\${$dial:-}"
+	[ -z "$value" ] && continue
+	case "$value" in
+	'' | *[!0-9]* | 0) die "$dial=$value is not a positive whole number" ;;
+	esac
+done
 # The test harness defaults to one thread per core and each thread decodes images, so it is a
 # third unbounded multiplier if left alone.
 RUST_TEST_THREADS="${RUST_TEST_THREADS:-$per_job}"
