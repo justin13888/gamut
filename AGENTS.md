@@ -157,6 +157,13 @@ chokepoint. So a native build failure is **not** explained by the invoking shell
 settings — do not "fix" it by overriding `CC`/`CXX` per command. `GAMUT_BUILD_KEEP_ENV=1`
 opts out (and confirms a suspected env interaction is real).
 
+A build-script failure that is **not** a compile error — cargo reporting that it could not run
+the build script itself — is usually a lost owner-execute bit under `target/debug/build/`, not a
+code problem. The damaged mode is `-rw-rwx---`: the group keeps `x`, so `ls` output looks
+unremarkable, but cargo runs as the owner and the owner class is what the kernel checks. Recover
+with `chmod -R u+x target/debug/build/` and re-run. The cause is environmental and outside this
+repo — nothing here sets file modes — so do not work around it by editing build scripts.
+
 ## Conventions
 
 - All `pub` items need doc comments. Mark fallible/owning return types `#[must_use]` where
