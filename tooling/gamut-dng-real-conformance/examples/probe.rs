@@ -8,7 +8,9 @@
 //!     --example probe -- third_party/gamut-dng-samples/apple/iphone-12-pro/IMG_1361.DNG
 //! ```
 
-use gamut_dng::{DngDecoder, DngRewrite, SubImageData, deconstruct};
+use gamut_dng::{
+    ColorProfileInfo, DngDecoder, DngRewrite, HsvTable, NoiseProfile, SubImageData, deconstruct,
+};
 
 fn main() {
     for path in std::env::args().skip(1) {
@@ -97,11 +99,20 @@ fn report_decode(data: &[u8]) {
         ),
         None => println!("  profile       : none (no colour calibration in the file)"),
     }
+    report_color_profile(decoded.color_profile.as_ref());
+    report_noise_profile(decoded.noise_profile.as_ref());
+    // `exif` counts the EXIF sub-IFD's own entries, not an extras list: the whole directory is
+    // carried inside `DngMetadata::exif`, so there is no unmodelled EXIF residue to count.
     println!(
         "  extras        : ifd0={} raw={} exif={} gain_map={} gain_map2={}",
         decoded.ifd0_extra.len(),
         decoded.raw_extra.len(),
-        decoded.exif_extra.len(),
+        decoded
+            .metadata
+            .exif
+            .as_ref()
+            .and_then(|e| e.exif_ifd())
+            .map_or(0, |ifd| ifd.fields().len()),
         decoded.gain_table_map.is_some(),
         decoded.gain_table_map2.is_some(),
     );
@@ -134,6 +145,79 @@ fn report_decode(data: &[u8]) {
             e.static_message()
         ),
     }
+}
+
+/// The camera-profile colour tags `CameraProfile` does not model: the rendering tables and curve,
+/// the profile exposure offset, the DNG 1.6 third calibration set and the reduction matrices.
+///
+/// These reach a caller typed rather than as `ifd0_extra` residue, so a file's colour rendering is
+/// visible here without reading raw tag numbers back by hand.
+fn report_color_profile(info: Option<&ColorProfileInfo>) {
+    let Some(info) = info else {
+        println!("  color_profile : none (no rendering tables, curve or third calibration set)");
+        return;
+    };
+    println!(
+        "  color_profile : hue_sat=[{}, {}, {}] look={} tone_curve={} exposure_offset={:?}",
+        hsv_table(info.hue_sat_map1.as_ref()),
+        hsv_table(info.hue_sat_map2.as_ref()),
+        hsv_table(info.hue_sat_map3.as_ref()),
+        hsv_table(info.look_table.as_ref()),
+        info.tone_curve
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |c| format!("{} pts", c.len())),
+        info.baseline_exposure_offset,
+    );
+    println!(
+        "      third calibration set: matrix={} illuminant={:?} calibration={} forward={}",
+        info.color_matrix3.is_some(),
+        info.calibration_illuminant3,
+        info.camera_calibration3.is_some(),
+        info.forward_matrix3.is_some(),
+    );
+    println!(
+        "      reduction matrices: 1={} 2={} 3={}",
+        matrix_terms(info.reduction_matrix1.as_deref()),
+        matrix_terms(info.reduction_matrix2.as_deref()),
+        matrix_terms(info.reduction_matrix3.as_deref()),
+    );
+}
+
+/// One hue/saturation/value table's divisions and encoding, or `-` when the file carries none.
+fn hsv_table(table: Option<&HsvTable>) -> String {
+    table.map_or_else(
+        || "-".to_string(),
+        |t| {
+            format!(
+                "{}x{}x{} {:?}",
+                t.hue_divisions, t.saturation_divisions, t.value_divisions, t.encoding
+            )
+        },
+    )
+}
+
+/// A reduction matrix's term count, or `-` when absent. Its shape is `3 x ColorPlanes`, so the
+/// count is three times the number of colour planes it reduces from.
+fn matrix_terms(matrix: Option<&[f64]>) -> String {
+    matrix.map_or_else(|| "-".to_string(), |m| format!("{} terms", m.len()))
+}
+
+/// The sensor's noise model, read from the raw IFD (the spec's home for it) with an IFD 0 fallback.
+fn report_noise_profile(profile: Option<&NoiseProfile>) {
+    let Some(profile) = profile else {
+        println!("  noise_profile : none");
+        return;
+    };
+    let models: Vec<String> = profile
+        .planes
+        .iter()
+        .map(|m| format!("scale={:.3e} offset={:.3e}", m.scale, m.offset))
+        .collect();
+    println!(
+        "  noise_profile : planes={} [{}]",
+        profile.planes.len(),
+        models.join(", "),
+    );
 }
 
 /// The preserving rewrite round-trip.
