@@ -108,7 +108,11 @@ jobs:
         # mutant the base branch introduced too — failing it on already-reviewed code.
         env:
           GAMUT_MUTANTS_BASE: origin/${{ github.base_ref }}
-        run: mise run mutants-diff --shard ${{ matrix.shard }}/4 -- --no-shuffle -vV
+        # First-class runner flags, not a `--` passthrough: mise strips that separator on some
+        # versions (it did here, and the shards failed with "unknown option --no-shuffle"), so
+        # CI must not depend on it surviving. `--no-shuffle` is gone because it is already
+        # cargo-mutants' default.
+        run: mise run mutants-diff --shard ${{ matrix.shard }}/4 --verbose
       - name: sccache stats
         if: always()
         run: sccache --show-stats
@@ -164,7 +168,7 @@ jobs:
         # `--all-at-once` is the deliberate opt-in past the runner's guard against an unsharded
         # whole-workspace run. This job is the one place that guard is meant to be waived: it is
         # manual, it is not a gate, and a full survey is the whole point of it.
-        run: mise run mutants --all-at-once -- --no-shuffle -vV
+        run: mise run mutants --all-at-once --verbose
       - name: sccache stats
         if: always()
         run: sccache --show-stats

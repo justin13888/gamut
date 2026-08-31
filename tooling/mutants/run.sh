@@ -50,6 +50,7 @@ die() {
 selection=""    # human-readable description of what was selected, for the banner
 shard=""
 iterate=""
+verbose=""
 budget_gb="${GAMUT_MUTANTS_BUDGET_GB:-}"
 all_at_once=""
 dry_run=""
@@ -78,11 +79,15 @@ Selection (a full-workspace run requires --shard or --all-at-once):
 Loop:
   --iterate             Skip mutants caught in a previous run (for tight debug loops)
 
+Output:
+  --verbose             Also list caught and unviable mutants (cargo-mutants -vV)
+
 Resources:
   --budget GB           Memory budget; every parallelism dial is derived from it
   --dry-run             Resolve and print the invocation, then exit without running it
 
-Anything after `--` is passed to cargo-mutants verbatim.
+Anything after `--` is passed to cargo-mutants verbatim — but note that a task runner in
+front of this script may swallow that separator, so prefer the flags above in scripts.
 USAGE
 }
 
@@ -129,6 +134,7 @@ while [ $# -gt 0 ]; do
 		;;
 	--shard=*) shard="${1#*=}" ;;
 	--iterate) iterate=1 ;;
+	--verbose) verbose=1 ;;
 	--budget)
 		[ $# -ge 2 ] || die "--budget needs a size in GiB"
 		budget_gb="$2"
@@ -347,6 +353,12 @@ fi
 	selection="${selection}shard:$shard "
 }
 [ -n "$iterate" ] && add_arg --iterate
+# -vV lists caught and unviable mutants too, which is what makes a CI log useful when a shard
+# reports a survivor: the reader can see what the run did rather than only what it missed.
+[ -n "$verbose" ] && {
+	add_arg -v
+	add_arg -V
+}
 
 # The diff is materialised here rather than by the caller so every entry point spells the merge
 # base the same way. `add_arg` quotes the path, so a target directory containing shell

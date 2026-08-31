@@ -20,7 +20,8 @@ CI spelled its own `cargo mutants` line, the dials documented in `mise.toml` app
 everything except CI, which is where the runs were being killed.
 
 Arguments after the task name go to the runner. Anything after a further `--` is handed to
-`cargo mutants` verbatim.
+`cargo mutants` verbatim — but some mise versions swallow that separator, so a script should
+prefer the runner's own flags (`--verbose` rather than `-- -vV`) instead of relying on it.
 
 ## Why a plain `cargo mutants` overruns
 
