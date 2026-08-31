@@ -151,6 +151,17 @@ run = "git submodule update --init --checkout third_party/gamut-dng-samples"
 description = "Validate gamut-dng against real camera DNGs (issue #174; needs fetch-dng-samples)"
 run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
 
+# The compile half of the tier above, and the only part of it the per-PR lane can afford. That
+# crate is excluded from the workspace *and* nothing depends on it — it is invoked by manifest
+# path — so `clippy --workspace --all-targets` and `test --workspace` never build it, and a
+# gamut-dng API change can break it while every per-PR gate stays green (#353 removed
+# `DecodedDng::exif_extra` and only master's extended run noticed, at compile time, before a
+# single sample was decoded). `check` needs no corpus, which is what makes this cheap enough for
+# the lint job; the corpus-backed assertions stay in `test-dng-real`.
+[tasks.check-dng-real]
+description = "Compile the real-camera DNG conformance tier (no corpus needed)"
+run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml --all-targets"
+
 # Doctests only. On stable, `cargo llvm-cov` cannot instrument doctests (that needs nightly), so
 # the coverage gate — which CI uses as its green-test gate — silently skips them. This task is the
 # missing slice: CI's lint lane runs it, reusing the `--all-targets --all-features` build it just

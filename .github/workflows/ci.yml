@@ -129,6 +129,14 @@ jobs:
       # doctests, which `cargo llvm-cov` cannot instrument on stable.
       - name: Clippy
         run: mise run lint
+      # `mise run lint` cannot reach the real-camera DNG conformance tier: it is excluded from the
+      # workspace and nothing depends on it, so no workspace command compiles it, and a gamut-dng
+      # API change breaks it unnoticed until the extended run on master. Its expensive half — the
+      # Adobe DNG SDK — is already built by this job for gamut-dng's own dev-dependency on
+      # `gamut-dng-oracle`, so what is added here is the tier's own Rust targets. `check` needs no
+      # corpus, so this job does not grow the ~178 MiB fetch that `test-dng-real` requires.
+      - name: Real-DNG conformance tier compiles
+        run: mise run check-dng-real
       - name: gamut-ffi feature sync
         run: mise run check-ffi-features
       - name: gamut-ffi header sync
