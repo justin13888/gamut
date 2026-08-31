@@ -52,10 +52,13 @@ fn main() {
                 expat_install.display()
             )));
     }
+    // `--parallel` takes an explicit count. Bare, it becomes `make -j` with no limit *and*
+    // overrides CMAKE_BUILD_PARALLEL_LEVEL, so the shared dial would be silently ignored.
     run(Command::new("cmake")
         .arg("--build")
         .arg(&expat_build)
-        .args(["--config", "Release", "--target", "install", "--parallel"]));
+        .args(["--config", "Release", "--target", "install", "--parallel"])
+        .arg(build_env::build_parallelism().to_string()));
 
     // ---- exiv2: static, XMP only (the bundled XMPCore), every other feature/dependency off. -----
     let exiv2_install = out.join("exiv2-install");
@@ -93,7 +96,8 @@ fn main() {
     run(Command::new("cmake")
         .arg("--build")
         .arg(&exiv2_build)
-        .args(["--config", "Release", "--target", "install", "--parallel"]));
+        .args(["--config", "Release", "--target", "install", "--parallel"])
+        .arg(build_env::build_parallelism().to_string()));
 
     // ---- Compile the shim and link the static archives. ----------------------------------------
     cc::Build::new()

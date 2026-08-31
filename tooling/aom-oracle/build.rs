@@ -57,8 +57,10 @@ fn main() {
             ]));
     }
     // Build only the static `aom` library target (its transitive deps come along).
-    // `--parallel` is passed explicitly: this is a `-G Ninja` build, and without it ninja
-    // picks its own default of NCPUS + 2 regardless of CMAKE_BUILD_PARALLEL_LEVEL.
+    // `--parallel` carries an explicit count rather than being bare: a bare `--parallel` means
+    // "no limit" to the build tool *and* overrides CMAKE_BUILD_PARALLEL_LEVEL, so it would
+    // silently defeat the shared dial. (Stating the count also removes the question of what
+    // this Ninja generator would have picked on its own — NCPUS + 2.)
     run(Command::new("cmake")
         .env("PATH", &path)
         .arg("--build")

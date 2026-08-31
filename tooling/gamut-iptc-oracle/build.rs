@@ -48,8 +48,8 @@ fn main() {
                 "-DEXIV2_BUILD_DOC=OFF",
             ]));
     }
-    // `--parallel` with an explicit count: without the flag CMake drives the generator
-    // serially or at its own default, and this build is a C++ exiv2 tree either way.
+    // `--parallel` with an explicit count, so this C++ exiv2 tree is bounded by the shared dial
+    // rather than by whatever the default generator would pick.
     run(Command::new("cmake")
         .arg("--build")
         .arg(&build)
