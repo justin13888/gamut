@@ -1,8 +1,9 @@
-//! AV1 multi-symbol arithmetic (range) encoder (AV1 §8.2, encoder side).
+//! AV1 multi-symbol arithmetic (range) coder (AV1 §8.2), both directions.
 //!
-//! The AV1 spec only defines the *decoder* (§8.2 "Parsing process for symbol decoder"). This is
-//! the matching encoder: it produces a byte stream that the §8.2 decoder maps back to the symbols
-//! that were encoded. The arithmetic mirrors the well-known `od_ec` range coder (the same one in
+//! The AV1 spec defines only the *decoder* (§8.2 "Parsing process for symbol decoder").
+//! [`SymbolDecoder`] is a direct transcription of it; [`SymbolEncoder`] is the matching encoder,
+//! derived by inverting it, producing a byte stream the §8.2 decoder maps back to the symbols that
+//! were encoded. The arithmetic mirrors the well-known `od_ec` range coder (the same one in
 //! libaom / rav1e), which is purpose-built for this decoder.
 //!
 //! CDF convention (matches §8.2.6): a CDF for `N` symbols is a slice of `N` cumulative values in
@@ -14,8 +15,9 @@
 //! the spec keeps as a trailing `cdf[N]` element is carried alongside as a separate `&mut u16`; a
 //! decoder must apply the identical update after each symbol to stay in lockstep.
 //!
-//! The hermetic `SymbolDecoder` in this module's tests is a direct transcription of §8.2 and is
-//! the oracle that proves the encoder correct without any external decoder.
+//! The two are each other's hermetic oracle: this module's round-trip tests prove the encoder
+//! correct without any external decoder, and prove the decoder recovers exactly what was coded —
+//! including that both sides' adapting CDFs stay bit-identical.
 
 /// Number of bits to reduce CDF precision during arithmetic coding (AV1 `EC_PROB_SHIFT`, §3).
 const EC_PROB_SHIFT: u32 = 6;
@@ -23,6 +25,8 @@ const EC_PROB_SHIFT: u32 = 6;
 const EC_MIN_PROB: u32 = 4;
 /// CDFs are expressed on a 1 << 15 scale (AV1 §8.2.6: `cdf[N - 1] == 1 << 15`).
 const CDF_PROB_TOP: u32 = 1 << 15;
+/// The fixed equiprobable CDF behind `read_bool()` / `read_literal(n)` (AV1 §8.2.3, §8.2.5).
+const BOOL_CDF: [u16; 2] = [1 << 14, 1 << 15];
 
 /// The od_ec scaled sub-interval width `(r >> 8) * (f >> EC_PROB_SHIFT) >> (7 - EC_PROB_SHIFT)`
 /// shared by both branches of [`SymbolEncoder::encode_q15`] (AV1 §8.2.6). `f` is an inverse-CDF
@@ -114,7 +118,6 @@ impl SymbolEncoder {
     /// This is the inverse of the decoder's `read_literal(n)` (AV1 §8.2.5), which itself calls
     /// `read_bool()` (§8.2.3) with the fixed CDF `{1 << 14, 1 << 15}`.
     pub fn encode_literal(&mut self, value: u32, n: u32) {
-        const BOOL_CDF: [u16; 2] = [1 << 14, 1 << 15];
         for i in (0..n).rev() {
             self.encode_symbol(((value >> i) & 1) as usize, &BOOL_CDF);
         }
@@ -208,16 +211,20 @@ impl SymbolEncoder {
 /// counter, capped at 32 — a higher count slows adaptation. The encoder and a conformant decoder
 /// invoke this identically after coding each symbol, so their CDFs evolve in lockstep.
 fn update_cdf(cdf: &mut [u16], symbol: usize, count: &mut u16) {
-    let n = cdf.len();
+    // §8.2.6 with the loop's `tmp` 0/32768 split made explicit. The fixed top entry
+    // (cdf[N - 1] == 32768) is never updated; entries before `symbol` move toward 0 and those from
+    // `symbol` up to N - 2 move toward 32768, each by `delta >> rate`.
+    //
+    // An empty CDF codes nothing, so there is nothing to adapt — and no `FloorLog2(N)` either.
+    let Some((_top, body)) = cdf.split_last_mut() else {
+        return;
+    };
+    let n = body.len() + 1;
     // rate = 3 + (count > 15) + (count > 31) + Min(FloorLog2(N), 2).
     let rate = 3
         + u32::from(*count > 15)
         + u32::from(*count > 31)
         + (31 - (n as u32).leading_zeros()).min(2);
-    // §8.2.6 with the loop's `tmp` 0/32768 split made explicit. The fixed top entry
-    // (cdf[N - 1] == 32768) is never updated; entries before `symbol` move toward 0 and those from
-    // `symbol` up to N - 2 move toward 32768, each by `delta >> rate`.
-    let (_top, body) = cdf.split_last_mut().expect("a CDF has at least one entry");
     for v in &mut body[..symbol] {
         *v -= *v >> rate;
     }
@@ -229,101 +236,245 @@ fn update_cdf(cdf: &mut [u16], symbol: usize, count: &mut u16) {
     }
 }
 
+/// Decoder for the AV1 symbol (range) coder — the parsing process of AV1 §8.2.
+///
+/// This is the normative side of the pair: [`SymbolEncoder`] exists to produce bytes this maps
+/// back to symbols. Construct with [`SymbolDecoder::new`] over one tile's coded bytes
+/// (`init_symbol(sz)`, §8.2.2), then read with [`SymbolDecoder::read_symbol`] (static CDFs,
+/// `disable_cdf_update = 1`) or [`SymbolDecoder::read_symbol_adapt`] (§8.2.6 adaptation,
+/// `disable_cdf_update = 0`), matching whatever the encoder did.
+///
+/// Reads past the end of `data` yield zero bits, exactly as §8.2.2 specifies — a tile's final
+/// symbols are decodable from a truncated final byte, so this is normative behaviour, not
+/// leniency. Use [`SymbolDecoder::exit_symbol`] at the end of a tile to check the padding
+/// invariant §8.2.4 requires.
+///
+/// ```
+/// use gamut_bitstream::{SymbolDecoder, SymbolEncoder};
+///
+/// let cdf = [16384u16, 32768];
+/// let mut enc = SymbolEncoder::new();
+/// enc.encode_symbol(1, &cdf);
+/// enc.encode_symbol(0, &cdf);
+/// let bytes = enc.finish();
+///
+/// let mut dec = SymbolDecoder::new(&bytes);
+/// assert_eq!(dec.read_symbol(&cdf), 1);
+/// assert_eq!(dec.read_symbol(&cdf), 0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct SymbolDecoder<'a> {
+    /// The coded bytes for this tile.
+    data: &'a [u8],
+    /// Read cursor in bits; may advance past `data.len() * 8`, where reads yield zeroes.
+    bit_pos: usize,
+    /// The spec's `SymbolValue`.
+    value: u32,
+    /// The spec's `SymbolRange`, renormalised into `[1 << 15, 1 << 16)`.
+    range: u32,
+    /// The spec's `SymbolMaxBits`; goes negative once the padding region is reached.
+    max_bits: i64,
+}
+
+impl<'a> SymbolDecoder<'a> {
+    /// Initialises the decoder over one tile's coded bytes (`init_symbol(sz)`, AV1 §8.2.2).
+    #[must_use]
+    pub fn new(data: &'a [u8]) -> Self {
+        let sz = data.len();
+        let mut d = Self {
+            data,
+            bit_pos: 0,
+            value: 0,
+            range: CDF_PROB_TOP,
+            max_bits: 8 * sz as i64 - 15,
+        };
+        let num_bits = core::cmp::min(sz * 8, 15) as u32;
+        let buf = d.read_f(num_bits);
+        let padded = buf << (15 - num_bits);
+        d.value = (CDF_PROB_TOP - 1) ^ padded;
+        d
+    }
+
+    /// `f(n)` for the symbol decoder (AV1 §8.1): MSB-first, **zero-padded past the end of the
+    /// data**, which §8.2.2 relies on for a tile's trailing symbols.
+    fn read_f(&mut self, n: u32) -> u32 {
+        let mut x = 0u32;
+        for _ in 0..n {
+            let idx = self.bit_pos >> 3;
+            let bit = if idx < self.data.len() {
+                (self.data[idx] >> (7 - (self.bit_pos & 7))) & 1
+            } else {
+                0
+            };
+            x = (x << 1) | u32::from(bit);
+            self.bit_pos += 1;
+        }
+        x
+    }
+
+    /// Decodes one symbol against a static cumulative `cdf` (`read_symbol`, AV1 §8.2.6).
+    ///
+    /// `cdf` is the gamut `N`-entry cumulative form (`cdf[N - 1] == 32768`); the adaptation
+    /// counter the spec keeps as a trailing `cdf[N]` is **not** part of it, and must not be
+    /// appended. Use [`SymbolDecoder::read_symbol_adapt`] when `disable_cdf_update` is 0.
+    ///
+    /// The returned symbol is always below `cdf.len()`, and an empty `cdf` decodes nothing and
+    /// returns 0: a CDF that breaks the convention yields a meaningless symbol, never a panic or a
+    /// read past the slice.
+    pub fn read_symbol(&mut self, cdf: &[u16]) -> usize {
+        // The search is bounded by the alphabet, not by the CDF's contents: `cdf[N - 1] == 32768`
+        // is what would otherwise force the last bracket to 0 and end the loop, and a caller can
+        // hand over a CDF that does not honour it — the spec's §8.2.6 form, for one, carries the
+        // adaptation counter as a trailing `cdf[N]`, which gamut keeps separate. Treating the last
+        // symbol as forced makes the search total for any slice instead of running off its end.
+        let Some(last) = cdf.len().checked_sub(1) else {
+            return 0;
+        };
+        // `prev` is the previous symbol's bracket, `self.range` before the first; `cur` is the
+        // chosen symbol's, which is 0 at the forced last symbol.
+        let mut prev = self.range;
+        let mut symbol = last;
+        let mut cur = 0;
+        for (i, &entry) in cdf.iter().enumerate().take(last) {
+            // `f(i) = (1 << 15) - cdf[i]`, saturating so an out-of-convention entry above 32768
+            // cannot wrap; clamped to `prev` so the brackets stay ordered whatever the CDF says.
+            let f = CDF_PROB_TOP.saturating_sub(u32::from(entry));
+            let bracket = (ec_partition(self.range, f) + EC_MIN_PROB * (last - i) as u32).min(prev);
+            if self.value >= bracket {
+                symbol = i;
+                cur = bracket;
+                break;
+            }
+            prev = bracket;
+        }
+        self.range = prev - cur;
+        self.value -= cur;
+        self.renormalize();
+        symbol
+    }
+
+    /// Renormalises `(value, range)` back into `[1 << 15, 1 << 16)` (AV1 §8.2.6, ordered steps).
+    fn renormalize(&mut self) {
+        let bits = 15 - (31 - self.range.leading_zeros());
+        self.range <<= bits;
+        let num_bits = core::cmp::min(i64::from(bits), self.max_bits.max(0)) as u32;
+        let new_data = self.read_f(num_bits);
+        let padded = new_data << (bits - num_bits);
+        self.value = padded ^ (((self.value + 1) << bits) - 1);
+        self.max_bits -= i64::from(bits);
+    }
+
+    /// Decodes one symbol against an *adapting* cumulative `cdf`, then applies the §8.2.6 CDF
+    /// adaptation in place — the exact mirror of [`SymbolEncoder::encode_symbol_adapt`].
+    ///
+    /// `count` is the spec's trailing `cdf[N]` adaptation counter; start it at 0 for a freshly
+    /// initialised context and keep it beside the CDF so the decoder's contexts evolve in
+    /// lockstep with the encoder's.
+    pub fn read_symbol_adapt(&mut self, cdf: &mut [u16], count: &mut u16) -> usize {
+        let s = self.read_symbol(cdf);
+        update_cdf(cdf, s, count);
+        s
+    }
+
+    /// Decodes one equiprobable bit (`read_bool()`, AV1 §8.2.3).
+    pub fn read_bool(&mut self) -> bool {
+        self.read_symbol(&BOOL_CDF) != 0
+    }
+
+    /// Decodes `n` equiprobable bits, most-significant first (`read_literal(n)`, AV1 §8.2.5).
+    pub fn read_literal(&mut self, n: u32) -> u32 {
+        let mut x = 0;
+        for _ in 0..n {
+            x = (x << 1) | u32::from(self.read_bool());
+        }
+        x
+    }
+
+    /// Decodes `read_ns(n)`: an unsigned value in `0..n` (AV1 §4.10.7, symbol-coded form).
+    ///
+    /// Returns 0 for `n == 0` rather than reading anything, so a caller that derives `n` from
+    /// other syntax cannot spin on a degenerate range.
+    pub fn read_ns(&mut self, n: u32) -> u32 {
+        if n == 0 {
+            return 0;
+        }
+        let w = 32 - n.leading_zeros();
+        let m = (1u32 << w) - n;
+        let v = self.read_literal(w - 1);
+        if v < m {
+            return v;
+        }
+        (v << 1) - m + self.read_literal(1)
+    }
+
+    /// Decodes `L(n)`-style unsigned data whose width is itself coded — the `decode_unsigned`
+    /// helper AV1 §5.9.13 and §5.11 use for `delta_q` and `delta_lf` magnitudes.
+    ///
+    /// Reads increasing unary-coded prefixes and then the remainder, capped at `max_bits` so a
+    /// hostile stream cannot drive an unbounded loop.
+    pub fn read_golomb(&mut self, max_bits: u32) -> u32 {
+        let mut length = 0u32;
+        while length < max_bits && !self.read_bool() {
+            length += 1;
+        }
+        if length == 0 {
+            return 1;
+        }
+        let rest = self.read_literal(length);
+        (1u32 << length) + rest
+    }
+
+    /// The bit at `pos`, zero past the end of `data` — the same padding [`Self::read_f`] reads.
+    const fn bit_at(&self, pos: usize) -> u8 {
+        if pos >= self.data.len() * 8 {
+            return 0;
+        }
+        (self.data[pos >> 3] >> (7 - (pos & 7))) & 1
+    }
+
+    /// The `exit_symbol()` check of AV1 §8.2.4, run at the end of a tile.
+    ///
+    /// Returns `false` for a tile that violates any of the section's three conformance
+    /// requirements: `SymbolMaxBits >= -14`, a `1` bit at `trailingBitPosition`, and zeroes
+    /// strictly between there and `paddingEndPosition`. The symbol decoder itself is total (it
+    /// pads with zeroes past the end of the data), so this is the only place a tile's framing is
+    /// validated.
+    #[must_use]
+    pub fn exit_symbol(&self) -> bool {
+        // §8.2.4's first conformance requirement. Below -14 the decoder has invented more padding
+        // than the trailing bits can account for, and `trailingBitPosition` is not even defined.
+        if self.max_bits < -14 {
+            return false;
+        }
+        // trailingBitPosition = get_position() - Min(15, SymbolMaxBits + 15). The Min is in
+        // 1..=15 here, and `bit_pos` is always at least that far in: `init_symbol` reads
+        // `Min(8 * sz, 15)` bits up front (which is
+        // `Min(15, SymbolMaxBits + 15)` at that moment) and renormalisation only ever adds to it,
+        // so the saturation never binds.
+        let back = core::cmp::min(15, self.max_bits + 15) as usize;
+        let trailing = self.bit_pos.saturating_sub(back);
+        // The position indicator then advances by Max(0, SymbolMaxBits), which lands exactly on
+        // the end of the tile's bytes: `get_position() + SymbolMaxBits` is `8 * sz` for as long as
+        // SymbolMaxBits is non-negative, and once it goes negative `get_position()` has already
+        // stopped at `8 * sz` because renormalisation reads `Min(bits, Max(0, SymbolMaxBits))`.
+        let padding_end = self.data.len() * 8;
+        // The trailing bit closes the tile's arithmetic; an all-zero tail is non-conformant, not
+        // merely padding.
+        if self.bit_at(trailing) != 1 {
+            return false;
+        }
+        for pos in trailing + 1..padding_end {
+            if self.bit_at(pos) != 0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Direct transcription of the AV1 §8.2 symbol decoder — the hermetic oracle for the encoder.
-    struct SymbolDecoder<'a> {
-        data: &'a [u8],
-        bit_pos: usize,
-        value: u32,
-        range: u32,
-        max_bits: i64,
-    }
-
-    impl<'a> SymbolDecoder<'a> {
-        /// `f(n)` parsing process (AV1 §8.1): MSB-first, zero-padded past the end of `data`.
-        fn read_f(&mut self, n: u32) -> u32 {
-            let mut x = 0u32;
-            for _ in 0..n {
-                let idx = self.bit_pos >> 3;
-                let bit = if idx < self.data.len() {
-                    (self.data[idx] >> (7 - (self.bit_pos & 7))) & 1
-                } else {
-                    0
-                };
-                x = (x << 1) | u32::from(bit);
-                self.bit_pos += 1;
-            }
-            x
-        }
-
-        /// `init_symbol(sz)` (AV1 §8.2.2).
-        fn new(data: &'a [u8]) -> Self {
-            let sz = data.len();
-            let mut d = Self {
-                data,
-                bit_pos: 0,
-                value: 0,
-                range: 1 << 15,
-                max_bits: 8 * sz as i64 - 15,
-            };
-            let num_bits = core::cmp::min(sz * 8, 15) as u32;
-            let buf = d.read_f(num_bits);
-            let padded = buf << (15 - num_bits);
-            d.value = ((1 << 15) - 1) ^ padded;
-            d
-        }
-
-        /// `read_symbol(cdf)` (AV1 §8.2.6); `cdf` is the cumulative form (no trailing count needed
-        /// because adaptation is disabled).
-        fn read_symbol(&mut self, cdf: &[u16]) -> usize {
-            let n = cdf.len() as u32;
-            let mut cur = self.range;
-            let mut symbol: i64 = -1;
-            let mut prev;
-            loop {
-                symbol += 1;
-                prev = cur;
-                let f = (1u32 << 15) - u32::from(cdf[symbol as usize]);
-                cur = ((self.range >> 8) * (f >> EC_PROB_SHIFT)) >> (7 - EC_PROB_SHIFT);
-                cur += EC_MIN_PROB * (n - symbol as u32 - 1);
-                if self.value >= cur {
-                    break;
-                }
-            }
-            self.range = prev - cur;
-            self.value -= cur;
-            // Renormalisation (AV1 §8.2.6 ordered steps).
-            let bits = 15 - (31 - self.range.leading_zeros());
-            self.range <<= bits;
-            let num_bits = core::cmp::min(i64::from(bits), self.max_bits.max(0)) as u32;
-            let new_data = self.read_f(num_bits);
-            let padded = new_data << (bits - num_bits);
-            self.value = padded ^ (((self.value + 1) << bits) - 1);
-            self.max_bits -= i64::from(bits);
-            symbol as usize
-        }
-
-        /// `read_symbol(cdf)` with the §8.2.6 adaptation enabled — the decoder mirror of
-        /// [`SymbolEncoder::encode_symbol_adapt`]. Decodes against the current CDF, then applies the
-        /// same [`update_cdf`] so the oracle's CDF tracks the encoder's.
-        fn read_symbol_adapt(&mut self, cdf: &mut [u16], count: &mut u16) -> usize {
-            let s = self.read_symbol(cdf);
-            update_cdf(cdf, s, count);
-            s
-        }
-
-        fn read_literal(&mut self, n: u32) -> u32 {
-            const BOOL_CDF: [u16; 2] = [1 << 14, 1 << 15];
-            let mut x = 0;
-            for _ in 0..n {
-                x = (x << 1) | self.read_symbol(&BOOL_CDF) as u32;
-            }
-            x
-        }
-    }
 
     /// Small deterministic LCG so tests are reproducible without `rand`.
     struct Lcg(u64);
@@ -572,6 +723,138 @@ mod tests {
         for (i, &s) in stream.iter().enumerate() {
             assert_eq!(dec.read_symbol(&cdf), s, "event {i}");
         }
+    }
+
+    #[test]
+    fn a_cdf_in_the_specs_n_plus_1_form_cannot_read_past_its_end() {
+        // §8.2.6 keeps the adaptation counter as a trailing `cdf[N]`, so a caller transcribing the
+        // spec literally appends a 0. The search used to terminate only on `value >= cur`, which
+        // that trailing entry never produces: at `symbol == 1` the bracket is `EC_MIN_PROB`, and
+        // any decoder state below it walked on to `cdf[3]` — one past the end. All-ones data
+        // initialises `SymbolValue` to 0, which is exactly that state.
+        let spec_form = [16384u16, 32768, 0];
+        let mut dec = SymbolDecoder::new(&[0xff, 0xff, 0xff, 0xff]);
+        let s = dec.read_symbol(&spec_form);
+        assert!(s < spec_form.len(), "symbol {s} is past the end of the CDF");
+        // Still usable afterwards: the bounded exit leaves a renormalised, non-degenerate state.
+        let _ = dec.read_symbol(&spec_form);
+        let _ = dec.read_bool();
+
+        // The adapting entry point funnels through the same search.
+        let mut adapting = spec_form;
+        let mut count = 0;
+        let mut dec = SymbolDecoder::new(&[0xff, 0xff, 0xff, 0xff]);
+        let s = dec.read_symbol_adapt(&mut adapting, &mut count);
+        assert!(s < spec_form.len(), "symbol {s} is past the end of the CDF");
+    }
+
+    #[test]
+    fn an_empty_cdf_decodes_nothing_and_consumes_nothing() {
+        // `read_symbol(&[])` used to index `cdf[0]` unconditionally. There is no symbol to decode
+        // over an empty alphabet, so it must return 0 without touching the decoder state — proven
+        // by a second decoder that skips the empty read and stays in lockstep.
+        let cdf = [16384u16, 32768];
+        let mut enc = SymbolEncoder::new();
+        for s in [1usize, 0, 1, 1, 0] {
+            enc.encode_symbol(s, &cdf);
+        }
+        let bytes = enc.finish();
+
+        let mut with_empty = SymbolDecoder::new(&bytes);
+        let mut without = SymbolDecoder::new(&bytes);
+        for s in [1usize, 0, 1, 1, 0] {
+            assert_eq!(with_empty.read_symbol(&[]), 0);
+            assert_eq!(with_empty.read_symbol(&cdf), s);
+            assert_eq!(without.read_symbol(&cdf), s);
+        }
+
+        // The adapting path must survive it too: `update_cdf` has no top entry to hold and no
+        // `FloorLog2(N)` to take.
+        let mut count = 3u16;
+        assert_eq!(with_empty.read_symbol_adapt(&mut [], &mut count), 0);
+        assert_eq!(count, 3, "an empty CDF has nothing to adapt");
+    }
+
+    #[test]
+    fn exit_symbol_accepts_a_tile_the_encoder_flushed() {
+        // `finish` emits od_ec's minimal flush, whose `| (m + 1)` term *is* §8.2.4's trailing one
+        // bit. Decoding the whole tile back must therefore leave `exit_symbol` satisfied, for a
+        // flush of every length the coder produces.
+        let mut rng = Lcg(0x243f_6a88_85a3_08d3);
+        for nsyms in 2..8usize {
+            for len in [0usize, 1, 2, 7, 40, 300] {
+                let cdf = random_cdf(&mut rng, nsyms);
+                let stream: Vec<usize> =
+                    (0..len).map(|_| rng.below(nsyms as u32) as usize).collect();
+                let mut enc = SymbolEncoder::new();
+                for &s in &stream {
+                    enc.encode_symbol(s, &cdf);
+                }
+                let bytes = enc.finish();
+
+                let mut dec = SymbolDecoder::new(&bytes);
+                for (i, &s) in stream.iter().enumerate() {
+                    assert_eq!(
+                        dec.read_symbol(&cdf),
+                        s,
+                        "nsyms {nsyms}, len {len}, event {i}"
+                    );
+                }
+                assert!(
+                    dec.exit_symbol(),
+                    "a flushed tile of {len} symbols over {nsyms} must exit cleanly"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exit_symbol_rejects_a_tile_that_never_carried_its_trailing_bit() {
+        // §8.2.4 needs three things, and only the last is "the padding is zero". An all-zero tile
+        // satisfies that one and fails the other two, so checking padding alone silently accepts
+        // it: here `SymbolMaxBits` is 9 and `trailingBitPosition` is 0, whose bit must be 1.
+        assert!(!SymbolDecoder::new(&[0x00, 0x00, 0x00]).exit_symbol());
+
+        // The same tile with the trailing bit actually present is conformant.
+        assert!(SymbolDecoder::new(&[0x80, 0x00, 0x00]).exit_symbol());
+
+        // A bit set strictly between trailingBitPosition and paddingEndPosition is not padding.
+        // `paddingEndPosition` is the end of the tile's bytes, so the last byte is covered too.
+        assert!(!SymbolDecoder::new(&[0x80, 0x00, 0x04]).exit_symbol());
+        assert!(!SymbolDecoder::new(&[0x80, 0x40, 0x00]).exit_symbol());
+
+        // SymbolMaxBits is 8 * sz - 15, so a zero-length tile sits at -15: below §8.2.4's floor,
+        // and with no trailing bit anywhere to find.
+        assert!(!SymbolDecoder::new(&[]).exit_symbol());
+    }
+
+    #[test]
+    fn exit_symbol_tracks_the_trailing_bit_as_the_decoder_advances() {
+        // `trailingBitPosition` is derived from the decoder's own position and SymbolMaxBits, so
+        // it moves with the read cursor: the flush of a one-symbol tile is accepted only once
+        // that symbol has been consumed, and a tile decoded past its flush is refused.
+        let cdf = [16384u16, 32768];
+        let mut enc = SymbolEncoder::new();
+        for _ in 0..12 {
+            enc.encode_symbol(1, &cdf);
+        }
+        let bytes = enc.finish();
+
+        let mut dec = SymbolDecoder::new(&bytes);
+        for _ in 0..12 {
+            let _ = dec.read_symbol(&cdf);
+        }
+        assert!(dec.exit_symbol(), "the flush point exits cleanly");
+
+        // Reading on drives SymbolMaxBits down through §8.2.4's -14 floor.
+        let mut over = dec;
+        for _ in 0..32 {
+            let _ = over.read_symbol(&cdf);
+        }
+        assert!(
+            !over.exit_symbol(),
+            "a tile read past its padding is malformed"
+        );
     }
 
     #[test]

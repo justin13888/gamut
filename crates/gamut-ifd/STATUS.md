@@ -125,7 +125,8 @@ convention:
   returns a map declaring every emitted byte (padding included, fully classified by
   construction), the audit reclassifies only byte-inspected plausible zero-fill, and
   `SegmentReport::is_fully_classified` is a zero-tolerance verdict. `write_with` also **pins**
-  named values at exact absolute offsets — the maker-note preservation primitive.
+  named values at exact absolute offsets — the maker-note preservation primitive — and **reserves**
+  a leading vendor preamble, the positional counterpart (`WriteOptions::preamble`, #350).
 
 ### Intentional drops (the complete ledger)
 
@@ -137,7 +138,9 @@ convention:
    tight value pool): original offsets, entry order, and padding of arbitrary *input* are not
    reproduced — `read(write(f)) == f` and the audit closed loop are the contract, not whole-file
    byte identity of foreign input. Pinned spans (`WriteOptions::pinned`) are the per-value
-   escape hatch.
+   escape hatch, and `WriteOptions::preamble` is its counterpart for the one *positional* run a
+   rebuilt layout can reproduce — the header/first-directory gap a vendor signature sits in
+   (issue #350).
 3. **Cross-order/variant transcoding of unknown-type values is refused** (a typed error), since
    the opaque word's meaning cannot be re-encoded.
 

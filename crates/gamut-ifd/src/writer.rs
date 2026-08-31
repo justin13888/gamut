@@ -51,6 +51,25 @@ pub struct WriteOptions {
     /// flows around the pinned ranges; the resulting zero filler is declared as
     /// [`SpanKind::Padding`] in the returned map.
     pub pinned: Vec<PinnedSpan>,
+    /// Bytes to emit immediately after the file header, before the first directory — a **vendor
+    /// preamble**.
+    ///
+    /// This is the position-preservation counterpart to [`PinnedSpan`]. Pinning keeps a *value*
+    /// where a vendor blob's internal offsets expect it; a preamble is not a value at all, so it
+    /// has no tag to pin by — it is identified only by sitting between the header and the first
+    /// structure. Real writers put signatures there: Apple's ProRAW files carry the ASCII
+    /// `APPLEDNG` immediately after the 8-byte TIFF header, and a rewrite that relocates those
+    /// bytes leaves a vendor tool looking at the wrong place.
+    ///
+    /// The directory region starts after the preamble (word-aligned), and the run is declared as
+    /// [`SpanKind::Preamble`] in the returned map. Empty — the default — reproduces the previous
+    /// layout byte for byte.
+    ///
+    /// An odd-length preamble is followed by one zero byte of word alignment, and the declared
+    /// span covers it: the declared preamble is always the whole gap between the header and the
+    /// first directory, `even(len)` bytes, because that is exactly what an independent audit of
+    /// the emitted bytes can see there.
+    pub preamble: Vec<u8>,
 }
 
 impl WriteOptions {
@@ -58,6 +77,14 @@ impl WriteOptions {
     #[must_use]
     pub fn pin(mut self, tag: u16, offset: u64) -> Self {
         self.pinned.push(PinnedSpan { tag, offset });
+        self
+    }
+
+    /// Sets the vendor preamble emitted between the header and the first directory,
+    /// builder-style: `WriteOptions::default().with_preamble(*b"APPLEDNG\0\0")`.
+    #[must_use]
+    pub fn with_preamble(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.preamble = bytes.into();
         self
     }
 }
@@ -226,7 +253,18 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
     }
 
     // Pass 1a: place every directory block (top-level and descendant), each on a word boundary.
-    let mut cursor = even(variant.header_size());
+    // A vendor preamble sits between the header and the first directory, so the region starts
+    // after it; with no preamble this is exactly the header size, as before.
+    let preamble_end = variant
+        .header_size()
+        .checked_add(opts.preamble.len())
+        .ok_or_else(|| {
+            Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "TIFF: preamble overflows the layout",
+            )
+        })?;
+    let mut cursor = even(preamble_end);
     for node in &mut nodes {
         // The entry count must fit its on-disk width (2 bytes in classic TIFF); a silent `as u16`
         // truncation would drop entries.
@@ -443,6 +481,8 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
         put_offset(&mut out, pos, next, order, variant);
     }
 
+    out[variant.header_size()..preamble_end].copy_from_slice(&opts.preamble);
+
     for (offset, bytes) in pool {
         out[offset..offset + bytes.len()].copy_from_slice(&bytes);
     }
@@ -455,6 +495,15 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
     let header_len = variant.header_size() as u64;
     map.claim(0, header_len, SpanKind::Header, Claim::Parsed);
     placed.push((0, header_len));
+    if !opts.preamble.is_empty() {
+        // The declared span runs to the first directory, so it swallows the word-alignment
+        // filler byte an odd-length preamble needs: nothing on disk separates that byte from the
+        // vendor bytes, so an audit of these bytes sees one run from the header's end to the
+        // first directory and must be able to name exactly what was declared here.
+        let len = even(opts.preamble.len()) as u64;
+        map.claim(header_len, len, SpanKind::Preamble, Claim::Parsed);
+        placed.push((header_len, len));
+    }
     for (idx, entries) in entries_per_node.iter().enumerate() {
         let body = (variant.count_size() + entries.len() * entry_size + offset_size) as u64;
         let ifd = nodes[idx].offset;
@@ -486,6 +535,7 @@ mod tests {
     // unused-import warning in classic-only builds.
     #[cfg(feature = "bigtiff")]
     use crate::read_header;
+    use crate::segment::{Range, Segment};
     use crate::{read, read_ifd_at};
 
     // Tag numbers are used literally: tag semantics live in the consuming codec, not this
@@ -867,6 +917,149 @@ mod tests {
             .classify_padding(&mut (&bytes[..]))
             .expect("classify");
         assert!(audit_report.is_fully_classified());
+        assert_eq!(writer_report.segments, audit_report.segments);
+    }
+
+    /// A vendor preamble lands immediately after the header, the directory region starts after
+    /// it, and the run is declared — so an audited read of the result sees the same preamble the
+    /// writer put there. This is what lets a rewrite keep Apple ProRAW's `APPLEDNG` signature at
+    /// the offset a vendor tool looks for.
+    #[test]
+    fn a_preamble_lands_between_the_header_and_the_first_directory() {
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd()],
+        };
+        let preamble = b"APPLEDNG\0\0";
+        let opts = WriteOptions::default().with_preamble(*preamble);
+        let (bytes, map) = write_with(&file, &opts).expect("write");
+
+        let header_len = Variant::Classic.header_size();
+        assert_eq!(&bytes[header_len..header_len + preamble.len()], preamble);
+        // The first directory starts after the preamble, word-aligned — not at the header's end.
+        let (_, _, first) = read_header(&bytes).expect("header");
+        assert_eq!(first, align_word((header_len + preamble.len()) as u64));
+
+        // Declared, not merely emitted: the writer's map is complete and an independent audit
+        // reproduces it, preamble segment included.
+        let writer_report = map.finish(None);
+        assert!(
+            writer_report.is_fully_classified(),
+            "writer must declare the preamble: {writer_report:?}"
+        );
+        assert!(
+            writer_report
+                .segments
+                .iter()
+                .any(|s| s.kind == SpanKind::Preamble
+                    && s.range.start == header_len as u64
+                    && s.range.len == preamble.len() as u64),
+            "the preamble must be declared as one: {writer_report:?}"
+        );
+        let (parsed, mut audit_report) = crate::read_audited(&bytes).expect("audit");
+        assert_eq!(parsed, file, "the directory survives a preamble");
+        audit_report
+            .classify_padding(&mut (&bytes[..]))
+            .expect("classify");
+        audit_report.classify_unclaimed();
+        assert_eq!(writer_report.segments, audit_report.segments);
+    }
+
+    /// An empty preamble is the default and must change nothing: byte-for-byte the same stream.
+    #[test]
+    fn an_empty_preamble_reproduces_the_plain_layout() {
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd()],
+        };
+        let plain = write_with(&file, &WriteOptions::default())
+            .expect("write")
+            .0;
+        let empty = write_with(&file, &WriteOptions::default().with_preamble(Vec::new()))
+            .expect("write")
+            .0;
+        assert_eq!(plain, empty);
+    }
+
+    /// An odd-length preamble still leaves the directory word-aligned, with the one filler byte
+    /// declared as part of the preamble rather than as a separate padding span — nothing on disk
+    /// separates it from the vendor bytes, so an independent audit reproduces the map only if the
+    /// writer declares the whole gap.
+    #[test]
+    fn an_odd_length_preamble_is_padded_to_the_word_boundary() {
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd()],
+        };
+        let opts = WriteOptions::default().with_preamble(vec![0xABu8; 5]);
+        let (bytes, map) = write_with(&file, &opts).expect("write");
+        let header_len = Variant::Classic.header_size() as u64;
+        let (_, _, first) = read_header(&bytes).expect("header");
+        assert_eq!(first, header_len + 6, "5 bytes of preamble, padded to 6");
+        assert_eq!(bytes[13], 0, "the filler byte is zero");
+
+        let writer_report = map.finish(None);
+        assert!(writer_report.is_fully_classified());
+        assert!(
+            writer_report.segments.contains(&Segment {
+                range: Range {
+                    start: header_len,
+                    len: 6
+                },
+                kind: SpanKind::Preamble,
+            }),
+            "the whole header/directory gap is the preamble: {writer_report:?}"
+        );
+        let (parsed, mut audit_report) = crate::read_audited(&bytes).expect("audit");
+        assert_eq!(parsed, file);
+        audit_report
+            .classify_padding(&mut (&bytes[..]))
+            .expect("classify");
+        audit_report.classify_unclaimed();
+        assert_eq!(writer_report.segments, audit_report.segments);
+    }
+
+    /// An all-zero preamble is a preamble, not padding: the audit's padding pass must leave the
+    /// header/first-directory gap alone even when its bytes are zero, or the two views of the
+    /// same stream disagree on what those bytes are.
+    #[test]
+    fn an_all_zero_preamble_stays_a_preamble() {
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![sample_ifd()],
+        };
+        let opts = WriteOptions::default().with_preamble(vec![0u8; 4]);
+        let (bytes, map) = write_with(&file, &opts).expect("write");
+        let header_len = Variant::Classic.header_size() as u64;
+        let (_, _, first) = read_header(&bytes).expect("header");
+        assert_eq!(first, header_len + 4);
+
+        let writer_report = map.finish(None);
+        assert!(writer_report.is_fully_classified());
+        let (_, mut audit_report) = crate::read_audited(&bytes).expect("audit");
+        audit_report
+            .classify_padding(&mut (&bytes[..]))
+            .expect("classify");
+        audit_report.classify_unclaimed();
+        assert!(
+            audit_report.is_fully_classified(),
+            "audit: {audit_report:?}"
+        );
+        assert_eq!(
+            audit_report.unclaimed_spans(),
+            vec![Segment {
+                range: Range {
+                    start: header_len,
+                    len: 4
+                },
+                kind: SpanKind::Preamble,
+            }],
+            "zeros after the header are the preamble, not padding"
+        );
         assert_eq!(writer_report.segments, audit_report.segments);
     }
 

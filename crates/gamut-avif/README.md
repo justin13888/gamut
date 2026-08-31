@@ -62,11 +62,15 @@ worked example.
 ## Status
 
 **v1 surface.** The encoder produces **lossless** (the default) and **lossy**
-(`AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 4:4:4 planes and wrapped as
-a single `av01` item in a conformant MIAF/AVIF container. Lossless codes the identity matrix, so
-its output is bit-exact to the input; lossy codes **BT.709 YCbCr** by default — the luma–chroma
-decorrelation is worth a large fraction of the bitrate — with BT.601 / BT.2020-NCL and studio
-range selectable via `with_matrix` / `with_color_range`. Lossy trades fidelity for size on a
+(`AvifEncoder::lossy(quality)`) still images: 8-bit RGB mapped to AV1 planes and wrapped as a
+single `av01` item in a conformant MIAF/AVIF container. Lossless codes the identity matrix at
+4:4:4, so its output is bit-exact to the input; lossy codes **BT.709 YCbCr at 4:2:0** by default —
+the luma–chroma decorrelation is worth a large fraction of the bitrate, and 4:2:0 is AV1 **Main**
+profile, the only one many hardware still-image decoders accept — with BT.601 / BT.2020-NCL,
+studio range and 4:4:4 / 4:2:2 selectable via `with_matrix` / `with_color_range` / `with_chroma`.
+4:2:2 is AV1 Professional profile, which matches no AVIF profile brand, and AV1 forbids
+taller-than-wide partitions there — so it costs the encoder half its rectangular partition set and
+is offered for pipelines that need it rather than as a default. Lossy trades fidelity for size on a
 `0..=100` quality scale (higher = closer to the source; the `quality → base_q_idx` mapping and its
 silent clamp above 100 are a frozen v1 contract, defined in
 [`references/avif`](../../references/avif/README.md)). `irot`/`imir` display orientation is
@@ -93,7 +97,7 @@ identity / BT.601 / BT.709 / BT.2020-NCL / monochrome colour, alpha merge, overl
 libavif + dav1d over the libavif conformance corpus (`tests/conformance.rs`).
 
 Everything beyond is dispositioned in [STATUS.md](STATUS.md), row by row against the relevant
-specs: **deferred, planned** features (alpha *encoding*, 10/12-bit and 4:2:0/4:2:2, the HDR
+specs: **deferred, planned** features (alpha *encoding*, 10/12-bit and monochrome, the HDR
 metadata properties beyond CICP tagging, gain maps, layered/progressive images, the pure-Rust AV1
 codestream decoder, the decoder backend registry, …) all land semver-minor on the frozen v1
 surface, while image sequences/tracks and AV1 inter coding are **permanently out of scope** per

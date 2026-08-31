@@ -32,7 +32,7 @@
 //! Many enum variants model the full spec surface but are **not yet wired into an encode path** —
 //! they exist so later milestones extend without reshaping the types. As of this release:
 //!
-//! - **Implemented:** 8-bit ([`BitDepth::Eight`]) RGB → 4:4:4 ([`ChromaSubsampling::Cs444`]) planes,
+//! - **Implemented:** 8-bit ([`BitDepth::Eight`]) RGB → 4:4:4, 4:2:2 or 4:2:0 planes,
 //!   either identity ([`MatrixCoefficients::Identity`]) or through a CICP luma–chroma matrix
 //!   ([`Planar8`]); the CICP code-point tables; BT.601 YCbCr 4:2:0 ([`ycbcr`]); **the H.273
 //!   matrixing and de-matrixing at every modeled bit depth for [`MatrixCoefficients::Bt709`] /
@@ -43,8 +43,7 @@
 //!   both H.273 directions ship at these depths; what is missing is the AV1 encode path and a
 //!   [`Planar8`] geometry to carry them. Distinct from [`BitDepth::Sixteen`], which is outside the
 //!   AV1 profile set entirely and exists for the 16-bit still-image pipelines that share these
-//!   types); the subsampled formats ([`ChromaSubsampling::Cs422`] / `Cs420` / `Cs400`) as an
-//!   *encode path* — [`Planar8`] now carries their plane geometry, but no encoder produces one yet;
+//!   types); [`ChromaSubsampling::Cs400`] (monochrome) as an encode path;
 //!   [`MatrixCoefficients::YCgCo`], the one modeled matrix with neither
 //!   direction (it is a lifting transform, not a `Kr`/`Kb` matrix); and the HLG / BT.709 transfer
 //!   curves

@@ -16,15 +16,17 @@
 //!
 //! The colour signalling is selectable: [`encode_still_intra_with`] takes an [`Av1Colour`] (CICP
 //! primaries/transfer/matrix plus the signal range) and mirrors it into `color_config()` and, via
-//! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. Planes stay 4:4:4 — a
-//! luma–chroma matrix changes what the samples *mean*, not their geometry — so the caller supplies
-//! either GBR planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
-//! The encoder carries each plane's geometry independently, so a subsampled `Planar8` is described
-//! correctly end to end, but the *coding* path is still 4:4:4 and a subsampled source is rejected
-//! (the residual loop, entropy contexts and CfL all step chroma over the luma extent).
+//! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. The caller supplies either GBR
+//! planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
 //!
-//! The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, quantizer matrices, and the
-//! AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
+//! Chroma sampling comes from the [`Planar8`](gamut_color::Planar8) itself: 4:4:4, 4:2:2 and 4:2:0
+//! are all coded, and `seq_profile` follows the format (Main for 4:2:0, High for 4:4:4,
+//! Professional for 4:2:2). The identity matrix requires 4:4:4 (§6.4.2) and a subsampled identity
+//! encode is refused. Under 4:2:2 the partition search drops `PARTITION_VERT`, since §6.10.4
+//! forbids a block whose chroma residual would be `BLOCK_INVALID`.
+//!
+//! The remaining surface (10/12-bit, 4:2:2's coding path, quantizer matrices, and the AVIF-level
+//! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D
@@ -34,6 +36,8 @@
 #![forbid(unsafe_code)]
 
 mod cdf;
+#[cfg(feature = "decode")]
+mod decode;
 mod encoder;
 mod filter;
 mod geom;
@@ -42,6 +46,12 @@ pub mod quant;
 mod tile;
 pub mod transform;
 
+#[cfg(feature = "decode")]
+pub use decode::{
+    Av1Decoder, CdefParams, ColorConfig, DecodeLimits, FrameHeader, LoopFilterParams, LrParams,
+    QuantizationParams, RestorationType, SegmentationParams, SequenceHeader, StreamInfo,
+    Subsampling, TileInfo, TxMode,
+};
 pub use encoder::{
     EncodedStill, ReconImage, encode_still_intra, encode_still_intra_superres,
     encode_still_intra_with, encode_still_lossless_identity,
