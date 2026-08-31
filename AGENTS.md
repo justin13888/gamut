@@ -103,6 +103,29 @@ Dependency edges (a crate depends on those to its right):
 - Correctness: implement the specification claimed; test thoroughly against the crate's
   oracle. Mutation testing should pass with only non-redundant, high-value tests;
   exclusions need strictly strong justification.
+- Test scope: **a test names one thing and fails for one reason.** Minimise its *reach* — the
+  modules a defect in which can fail it — and name it for that reach. Placement is mechanical, not
+  taste: if the assertion reads a non-`pub` item it goes inline in `#[cfg(test)] mod tests` beside
+  the code, because `.cargo/mutants.toml` sets `test_workspace = false` and a mutant masked at the
+  public boundary is killable *only* from there; it goes in `crates/<crate>/tests/` only when
+  linkage forces it (`unsafe` under `forbid(unsafe_code)`, a whole-file `#[cfg]` gate, or
+  `check-release-deps` topology); otherwise either is legal. A dev-dependency oracle is **not** a
+  reason to move up. `crates/gamut/tests/` is mutation-invisible, so nothing may be pinned only
+  there by choice. Before adding a test, name the one function whose mutation it kills — if you
+  cannot, it is at the wrong scope. **This rule never authorises relocating a crate's suite in
+  bulk.**
+- Test technique: use the **weakest technique that can falsify the claim** — example, exact-byte,
+  law, property, differential, conformance, drift guard, robustness. A round-trip is
+  self-consistent and cannot see a defect symmetric across encoder and decoder, so where the crate
+  has an oracle the oracle is the stronger test; where nothing stands in for one — see the
+  per-crate authority table in `docs/testing.md` — a property is. Write each law once as a plain
+  function in the crate's `invariants` module and drive it from both a **pinned-seed** `proptest`
+  and the fuzz tier: a property is the specification a fuzzer checks. Never leave a property's
+  `rng_seed`, shrink bounds or failure persistence unpinned — the mutation gate is blocking and
+  must be reproducible run to run — and remember an `invariants` module is the oracle, not the
+  system under test, so it is excluded from mutation. Do not convert existing deterministic sweeps
+  to properties. Placement, techniques, the authority table and the proptest/fuzz contract:
+  `docs/testing.md`.
 - Specification as source of truth: all implementation and tests are based on the official
   specs (in `references/`) and the oracle claimed in the crate's docs.
 - Design and documentation: public API is usable without reading docs; document features
