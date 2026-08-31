@@ -37,6 +37,15 @@ pub enum MetadataError {
         /// Its key within `namespace`.
         key: String,
     },
+    /// The model carried a [C2PA manifest store](crate::Metadata::c2pa) — which cannot be copied
+    /// into a rewritten file, because its hard binding digests the file it was signed over (C2PA
+    /// 2.4 §9.1, §15.12.1.1) — while the embedder was set to
+    /// [`C2paPolicy::Reject`](crate::C2paPolicy::Reject).
+    #[error("c2pa: a {len}-byte manifest store cannot be carried forward into a rewritten file")]
+    UnembeddableC2pa {
+        /// The size in bytes of the manifest store that was refused.
+        len: usize,
+    },
 }
 
 /// A [`Result`](core::result::Result) whose error is [`MetadataError`].
@@ -57,6 +66,16 @@ mod tests {
             MetadataError::Iptc(IptcError::Unsupported("charset"))
                 .to_string()
                 .starts_with("IPTC:")
+        );
+    }
+
+    #[test]
+    fn unembeddable_c2pa_states_the_size_and_the_reason() {
+        // The message must say what was refused (a store, with its size) and why it could not be
+        // written, so a caller reading a log knows provenance was dropped deliberately.
+        assert_eq!(
+            MetadataError::UnembeddableC2pa { len: 4_096 }.to_string(),
+            "c2pa: a 4096-byte manifest store cannot be carried forward into a rewritten file"
         );
     }
 

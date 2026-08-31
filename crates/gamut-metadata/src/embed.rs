@@ -25,6 +25,32 @@ pub enum ExtensionPolicy {
     Reject = 1,
 }
 
+/// What [`MetadataEmbedder::embed`] does with a model's
+/// [C2PA manifest store](crate::Metadata::c2pa).
+///
+/// A standard C2PA manifest binds to its asset with exactly one **hard binding** (C2PA 2.4 §9.1):
+/// a digest over the finished file, computed with the manifest store's own byte range excluded
+/// (§15.12.1.1) and covering the asset's other metadata (§9.2.6). Re-encoding the image, or even
+/// rewriting metadata around it, moves those bytes and invalidates the binding — so a store copied
+/// forward into the new file is a signature over a file that no longer exists. Embedding therefore
+/// never emits one, and this only chooses between doing that quietly and saying so.
+///
+/// There is deliberately **no** `Preserve` variant: copy-forward is the failure mode this type
+/// exists to make impossible. A derivative asset needs a *new* manifest that carries the parent as
+/// an ingredient, which is signing work no metadata facade can do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+#[repr(u8)]
+pub enum C2paPolicy {
+    /// Drop it. The emitted blocks carry no manifest store, so nothing stale reaches the new file.
+    /// **Default.**
+    #[default]
+    Drop = 0,
+    /// Fail with [`MetadataError::UnembeddableC2pa`] when the model carries a manifest store — for
+    /// a caller that must notice provenance is being lost rather than discover it downstream.
+    Reject = 1,
+}
+
 /// The per-carrier byte blocks produced by [`MetadataEmbedder::embed`] — the owned inverse of the
 /// [`MetadataBlock`](crate::MetadataBlock)s an [extractor](crate::MetadataExtractor) consumes.
 ///
@@ -34,7 +60,8 @@ pub enum ExtensionPolicy {
 /// [`MetadataEmbedder::emit_iptc_iim`].
 ///
 /// A model's [extensions](Metadata::extensions) produce no block — they have no carrier — so
-/// nothing here corresponds to them.
+/// nothing here corresponds to them. [`c2pa`](Self::c2pa) *is* a carrier field, but no policy fills
+/// it: a manifest store is never copied forward (see [`C2paPolicy`]).
 ///
 /// Marked `#[non_exhaustive]`, so a later carrier can add a field without a breaking change;
 /// build one with [`EncodedMetadata::default`] plus field assignment rather than a struct literal.
@@ -52,6 +79,14 @@ pub struct EncodedMetadata {
     /// resource), emitted only when [`MetadataEmbedder::emit_iptc_iim`] is set and the model carries
     /// IIM-expressible IPTC data.
     pub iptc_iim: Option<Vec<u8>>,
+    /// The C2PA manifest store to write — **always `None`**.
+    ///
+    /// The field completes the carrier set so a container writing blocks handles every one of them
+    /// uniformly, and so a future signing path could fill it without a breaking change. Today
+    /// nothing can: [`MetadataEmbedder::embed`] either drops the model's
+    /// [store](Metadata::c2pa) or refuses, per [`C2paPolicy`] — an extracted store's hard binding
+    /// does not survive the rewrite it would be written into.
+    pub c2pa: Option<Vec<u8>>,
 }
 
 /// Serializes a [`Metadata`] back into per-carrier byte blocks for a container to embed — the inverse
@@ -80,6 +115,7 @@ pub struct MetadataEmbedder {
     emit_iptc_iim: bool,
     iim_charset: IimCharset,
     extension_policy: ExtensionPolicy,
+    c2pa_policy: C2paPolicy,
 }
 
 impl Default for MetadataEmbedder {
@@ -88,13 +124,14 @@ impl Default for MetadataEmbedder {
             emit_iptc_iim: false,
             iim_charset: IimCharset::Utf8,
             extension_policy: ExtensionPolicy::Drop,
+            c2pa_policy: C2paPolicy::Drop,
         }
     }
 }
 
 impl MetadataEmbedder {
     /// Creates an embedder with the default options (no legacy IIM block; UTF-8 IIM charset;
-    /// extensions dropped).
+    /// extensions dropped; any C2PA manifest store dropped).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -125,10 +162,22 @@ impl MetadataEmbedder {
         self
     }
 
+    /// Sets what to do with the model's [C2PA manifest store](Metadata::c2pa), and returns the
+    /// embedder. Defaults to [`C2paPolicy::Drop`] — the store is never written into the new file
+    /// either way; this chooses whether losing it is an error.
+    #[must_use]
+    pub fn c2pa_policy(mut self, policy: C2paPolicy) -> Self {
+        self.c2pa_policy = policy;
+        self
+    }
+
     /// Serializes the model to its per-carrier blocks.
     ///
     /// The model's [extensions](Metadata::extensions) are not carriers and produce no block; they
-    /// are dropped, or rejected, per [`extension_policy`](Self::extension_policy).
+    /// are dropped, or rejected, per [`extension_policy`](Self::extension_policy). A
+    /// [C2PA manifest store](Metadata::c2pa) likewise produces no block — it cannot be copied into
+    /// a file it was not signed over — and is dropped, or rejected, per
+    /// [`c2pa_policy`](Self::c2pa_policy).
     ///
     /// # Errors
     ///
@@ -142,7 +191,10 @@ impl MetadataEmbedder {
     ///
     /// Also returns [`MetadataError::UnembeddableExtension`](crate::MetadataError::UnembeddableExtension),
     /// naming the first extension, when [`extension_policy`](Self::extension_policy) is
-    /// [`ExtensionPolicy::Reject`] and the model carries one.
+    /// [`ExtensionPolicy::Reject`] and the model carries one, or
+    /// [`MetadataError::UnembeddableC2pa`](crate::MetadataError::UnembeddableC2pa) when
+    /// [`c2pa_policy`](Self::c2pa_policy) is [`C2paPolicy::Reject`] and the model carries a
+    /// manifest store. When both apply, the extension error is reported.
     pub fn embed(&self, meta: &Metadata) -> Result<EncodedMetadata> {
         // Refuse before serializing anything, so a rejected model produces no partial work.
         if self.extension_policy == ExtensionPolicy::Reject
@@ -152,6 +204,12 @@ impl MetadataEmbedder {
                 namespace: ext.namespace.clone(),
                 key: ext.key.clone(),
             });
+        }
+
+        if self.c2pa_policy == C2paPolicy::Reject
+            && let Some(store) = meta.c2pa.as_ref()
+        {
+            return Err(MetadataError::UnembeddableC2pa { len: store.len() });
         }
 
         let exif = meta.exif.as_ref().map(Exif::to_bytes).transpose()?;
@@ -167,6 +225,9 @@ impl MetadataEmbedder {
             xmp,
             icc,
             iptc_iim,
+            // Never the model's store: its hard binding covers the file it came from, not the one
+            // these blocks are about to be written into.
+            c2pa: None,
         })
     }
 
