@@ -185,12 +185,22 @@ pub fn uuid_box(
 }
 
 /// A well-formed C2PA `ContentProvenanceBox`: the C2PA user type, version 0/flags 0, the given
-/// `box_purpose`, and `data` framed as §A.5.3 requires for that purpose — the 8-byte absolute merkle
-/// offset first for `manifest`/`original`, nothing for `update` — then `store`, then `padding`.
-pub fn c2pa_box(purpose: &str, merkle_offset: u64, store: &[u8], padding: &[u8]) -> Vec<u8> {
+/// `box_purpose`, and `data` laid out as `merkle_offset` (8 big-endian bytes when `Some`, omitted
+/// entirely when `None`), then `store`, then `padding`.
+///
+/// The offset is an explicit parameter rather than something derived from `purpose`, so a fixture
+/// cannot silently re-encode the reader's own assumption about which purposes carry it. §A.5.3
+/// mandates it for `manifest` and `original`; for `update` the specification is silent and both
+/// layouts occur, so update fixtures must state which one they are.
+pub fn c2pa_box(
+    purpose: &str,
+    merkle_offset: Option<u64>,
+    store: &[u8],
+    padding: &[u8],
+) -> Vec<u8> {
     let mut data = Vec::new();
-    if matches!(purpose, "manifest" | "original") {
-        data.extend_from_slice(&merkle_offset.to_be_bytes());
+    if let Some(offset) = merkle_offset {
+        data.extend_from_slice(&offset.to_be_bytes());
     }
     data.extend_from_slice(store);
     data.extend_from_slice(padding);

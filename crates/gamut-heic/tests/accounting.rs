@@ -164,7 +164,7 @@ fn c2pa_bearing_file_accounts_for_every_byte() {
     // must hold over it unchanged — and the located store must sit inside that box's segment.
     let clean = clean_file(1, vec![hvc1_item(1, vec![7, 7, 7, 7])]);
     let store = jumbf_store(b"opaque-manifest-store");
-    let provenance = c2pa_box("manifest", 0, &store, &[0xEE; 8]);
+    let provenance = c2pa_box("manifest", Some(0), &store, &[0xEE; 8]);
     let data = cat(&[clean.clone(), provenance.clone()]);
     let c = HeifContainer::parse(&data).unwrap();
 

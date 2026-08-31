@@ -42,7 +42,7 @@ fn manifest_store_range_excludes_every_byte_of_framing() {
     let store = store();
     assert_eq!(store.len(), 29, "fixture store length is load-bearing");
     // 8 bytes of padding after the store: §A.5.3 allows them, and they must not be reported.
-    let data = file_with(&[c2pa_box("manifest", 0, &store, &[0xEE; 8])]);
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store, &[0xEE; 8])]);
     let c = HeifContainer::parse(&data).unwrap();
 
     // 16 (ftyp) + 8 (box header) + 16 (user type) + 4 (FullBox version+flags)
@@ -65,7 +65,12 @@ fn manifest_store_range_excludes_every_byte_of_framing() {
 #[test]
 fn non_zero_merkle_offset_is_still_excluded_from_the_range() {
     let store = store();
-    let data = file_with(&[c2pa_box("manifest", 0x0102_0304_0506_0708, &store, &[])]);
+    let data = file_with(&[c2pa_box(
+        "manifest",
+        Some(0x0102_0304_0506_0708),
+        &store,
+        &[],
+    )]);
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("manifest store located");
@@ -78,7 +83,7 @@ fn non_zero_merkle_offset_is_still_excluded_from_the_range() {
 #[test]
 fn original_purpose_carries_the_merkle_offset_too() {
     let store = store();
-    let data = file_with(&[c2pa_box("original", 0, &store, &[])]);
+    let data = file_with(&[c2pa_box("original", Some(0), &store, &[])]);
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("original store located");
@@ -90,28 +95,92 @@ fn original_purpose_carries_the_merkle_offset_too() {
 }
 
 #[test]
-fn update_purpose_has_no_merkle_offset_before_the_store() {
+fn manifest_purpose_is_not_probed_and_needs_its_stated_merkle_offset() {
+    // §A.5.3 states the framing for `manifest`, so there is nothing to resolve and no fallback: a
+    // box laid out without the offset is simply not reported, rather than guessed at. This is the
+    // asymmetry against `update` below.
+    let data = file_with(&[c2pa_box("manifest", None, &store(), &[])]);
+    let c = HeifContainer::parse(&data).unwrap();
+    assert!(c.c2pa().is_none());
+}
+
+#[test]
+fn update_with_the_c2pa_rs_merkle_offset_is_located() {
+    // Regression: `c2pa-rs` writes 8 zero-filled merkle-offset bytes ahead of an `update` store just
+    // as it does for `manifest`/`original`, so this is the layout of real mid-update files. Reading
+    // the `LBox` at offset 0 would find those zeros and report nothing at all.
     let store = store();
-    let data = file_with(&[c2pa_box("update", 0, &store, &[])]);
+    let data = file_with(&[c2pa_box("update", Some(0), &store, &[])]);
     let c = HeifContainer::parse(&data).unwrap();
 
-    let found = c.c2pa().expect("update store located");
+    let found = c
+        .c2pa()
+        .expect("update store located past the merkle offset");
     assert_eq!(found.purpose, C2paBoxPurpose::Update);
-    // 16 + 8 + 16 + 4 + 7 ("update\0") = 51 — the store begins directly after the purpose string.
+    // 16 (ftyp) + 8 (header) + 16 (user type) + 4 (version+flags) + 7 ("update\0") = 51 for `data`,
+    // then 8 for the merkle offset = 59.
+    assert_eq!(found.range, 59..88);
+    assert_eq!(found.bytes, store.as_slice());
+    assert_eq!(&data[found.range.clone()], store.as_slice());
+    // The eight bytes before the store are the zero-filled offset, outside the range.
+    assert_eq!(&data[51..59], &[0u8; 8]);
+}
+
+#[test]
+fn update_without_a_merkle_offset_is_located_by_the_fallback_probe() {
+    // The specification-literal layout: the store begins immediately after the purpose string. The
+    // probe tries offset 8 first, reads bytes from inside the JUMBF superbox that do not bound it,
+    // and falls back to offset 0.
+    let store = store();
+    let data = file_with(&[c2pa_box("update", None, &store, &[])]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let found = c.c2pa().expect("update store located at the start of data");
+    assert_eq!(found.purpose, C2paBoxPurpose::Update);
     assert_eq!(found.range, 51..80);
     assert_eq!(found.bytes, store.as_slice());
     assert_eq!(&data[found.range.clone()], store.as_slice());
 }
 
 #[test]
+fn update_probes_the_merkle_offset_before_the_bare_store() {
+    // Probe *order* is load-bearing, not just probe membership. This merkle offset's leading four
+    // bytes are 0x00000020 = 32, which is >= the 8-byte JUMBF header and <= the 37 bytes of `data`,
+    // so reading an `LBox` at offset 0 yields a "valid" bound over the wrong 32 bytes. Trying offset
+    // 8 first is what keeps the real store the one reported.
+    let store = store();
+    let data = file_with(&[c2pa_box("update", Some(0x0000_0020_0000_0000), &store, &[])]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    let found = c
+        .c2pa()
+        .expect("update store located past the merkle offset");
+    assert_eq!(found.range, 59..88);
+    assert_eq!(found.bytes, store.as_slice());
+    // The decoy bound the reversed order would have produced.
+    assert_ne!(found.bytes, &data[51..83]);
+}
+
+#[test]
+fn update_reports_nothing_when_neither_probe_offset_bounds_a_store() {
+    // Both candidates fail: 4 bytes of zero where an `LBox` would sit at offset 0, and nothing but
+    // padding at offset 8. Absence, never a truncated payload.
+    let data = file_with(&[c2pa_box("update", None, &[0, 0, 0, 0], &[0xAB; 8])]);
+    let c = HeifContainer::parse(&data).unwrap();
+    assert!(c.c2pa().is_none());
+    assert_eq!(c.c2pa_manifest_stores().count(), 0);
+}
+
+#[test]
 fn mid_update_file_reports_both_stores_in_file_order() {
     // §A.5.3: an `original` box indicates a sibling `update` box. Which one is *active* is a
-    // validator's judgement, so both are reported and `c2pa()` promises only the first.
+    // validator's judgement, so both are reported and `c2pa()` promises only the first. Both boxes
+    // carry the merkle offset, which is the layout `c2pa-rs` writes for a mid-update file.
     let original = jumbf_store(b"original-store");
     let update = jumbf_store(b"update-store");
     let data = file_with(&[
-        c2pa_box("original", 0, &original, &[]),
-        c2pa_box("update", 0, &update, &[]),
+        c2pa_box("original", Some(0), &original, &[]),
+        c2pa_box("update", Some(0), &update, &[]),
     ]);
     let c = HeifContainer::parse(&data).unwrap();
 
@@ -131,7 +200,7 @@ fn mid_update_file_reports_both_stores_in_file_order() {
 fn largesize_header_shifts_the_range_by_its_extra_eight_bytes() {
     // A 64-bit largesize header is 16 bytes, not 8. The offsets are derived from the segment range
     // and the body length, so the store must move by exactly the extra 8 header bytes.
-    let inner = c2pa_box("manifest", 0, &store(), &[]);
+    let inner = c2pa_box("manifest", Some(0), &store(), &[]);
     let body = &inner[8..];
     let mut large = vec![0, 0, 0, 1, b'u', b'u', b'i', b'd'];
     large.extend_from_slice(&((16 + body.len()) as u64).to_be_bytes());
@@ -150,7 +219,7 @@ fn store_is_trimmed_to_its_lbox_not_to_the_box_length() {
     // The box carries 100 bytes of padding after a 12-byte store; only the store is reported.
     let store = jumbf_store(b"tiny");
     assert_eq!(store.len(), 12);
-    let data = file_with(&[c2pa_box("manifest", 0, &store, &[0x5A; 100])]);
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store, &[0x5A; 100])]);
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("manifest store located");
@@ -163,7 +232,7 @@ fn minimum_lbox_of_exactly_the_jumbf_header_is_accepted() {
     // LBox == 8 is the smallest legal JUMBF box (LBox + TBox, §8.4.2.3) — an empty superbox.
     let store = jumbf_store(b"");
     assert_eq!(store.len(), 8);
-    let data = file_with(&[c2pa_box("manifest", 0, &store, &[0x11; 4])]);
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store, &[0x11; 4])]);
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("manifest store located");
@@ -207,7 +276,7 @@ fn non_uuid_box_carrying_c2pa_framing_is_not_reported() {
     // one. A vendor box whose body is a byte-for-byte copy of a ContentProvenanceBox body — the C2PA
     // user type, `FullBox` 0/0, `manifest`, merkle offset and a valid store — is not a manifest
     // store, and the box type is the only thing that says so.
-    let provenance = c2pa_box("manifest", 0, &store(), &[]);
+    let provenance = c2pa_box("manifest", Some(0), &store(), &[]);
     let disguised = bx(b"mpvd", &provenance[8..]);
     let data = file_with(&[disguised]);
     let c = HeifContainer::parse(&data).unwrap();
@@ -226,7 +295,7 @@ fn non_uuid_box_carrying_c2pa_framing_is_not_reported() {
 fn uuid_inside_meta_is_not_a_manifest_store() {
     // §A.5.3 places the ContentProvenanceBox at the top level. A `meta` child with identical framing
     // is not one — but it is still surfaced verbatim as an unknown meta box.
-    let nested = c2pa_box("manifest", 0, &store(), &[]);
+    let nested = c2pa_box("manifest", Some(0), &store(), &[]);
     let m = meta(&[
         hdlr(),
         pitm_v0(1),
@@ -324,7 +393,7 @@ fn data_shorter_than_the_merkle_offset_is_not_reported() {
 #[test]
 fn store_shorter_than_its_lbox_field_is_not_reported() {
     // Three bytes where a 4-byte LBox must be.
-    let data = file_with(&[c2pa_box("manifest", 0, &[0, 0, 0], &[])]);
+    let data = file_with(&[c2pa_box("manifest", Some(0), &[0, 0, 0], &[])]);
     let c = HeifContainer::parse(&data).unwrap();
     assert!(c.c2pa().is_none());
 }
@@ -333,7 +402,7 @@ fn store_shorter_than_its_lbox_field_is_not_reported() {
 fn zero_lbox_is_not_reported() {
     let mut store = jumbf_store(b"payload");
     store[..4].copy_from_slice(&0u32.to_be_bytes());
-    let data = file_with(&[c2pa_box("manifest", 0, &store, &[])]);
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store, &[])]);
     let c = HeifContainer::parse(&data).unwrap();
     assert!(c.c2pa().is_none());
 }
@@ -343,7 +412,7 @@ fn lbox_below_the_jumbf_header_length_is_not_reported() {
     // Non-zero but smaller than the 8-byte LBox+TBox header it must itself cover (§8.4.2.3).
     let mut store = jumbf_store(b"payload");
     store[..4].copy_from_slice(&7u32.to_be_bytes());
-    let data = file_with(&[c2pa_box("manifest", 0, &store, &[])]);
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store, &[])]);
     let c = HeifContainer::parse(&data).unwrap();
     assert!(c.c2pa().is_none());
 }
@@ -353,7 +422,7 @@ fn lbox_overrunning_the_uuid_box_is_not_reported() {
     let mut store = jumbf_store(b"payload");
     let overrun = (store.len() + 1) as u32;
     store[..4].copy_from_slice(&overrun.to_be_bytes());
-    let data = file_with(&[c2pa_box("manifest", 0, &store, &[])]);
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store, &[])]);
     let c = HeifContainer::parse(&data).unwrap();
     assert!(c.c2pa().is_none());
 }
@@ -362,7 +431,7 @@ fn lbox_overrunning_the_uuid_box_is_not_reported() {
 fn lbox_exactly_filling_the_remaining_data_is_reported() {
     // The boundary case on the other side of the overrun check: LBox == the bytes available.
     let store = jumbf_store(b"payload");
-    let data = file_with(&[c2pa_box("manifest", 0, &store, &[])]);
+    let data = file_with(&[c2pa_box("manifest", Some(0), &store, &[])]);
     let c = HeifContainer::parse(&data).unwrap();
 
     let found = c.c2pa().expect("manifest store located");

@@ -36,26 +36,51 @@ pub const C2PA_UUID: [u8; 16] = [
 /// Length of the `FullBox` version (1 byte) + flags (3 bytes) that follow the `uuid` user type.
 const VERSION_FLAGS_LEN: usize = 4;
 
-/// Length of the absolute file offset of the first `merkle` box, which §A.5.3 places at the front of
-/// `data` for the `manifest` and `original` purposes.
+/// Length of the absolute file offset of the first `merkle` box. §A.5.3 places it at the front of
+/// `data` for the `manifest` and `original` purposes; for `update` the specification is silent and
+/// its presence is probed for (see [`C2paBoxPurpose`]).
 const MERKLE_OFFSET_LEN: usize = 8;
 
-/// Minimum length of a JUMBF box: its 4-byte `LBox` plus its 4-byte `TBox` (§8.4.2.3).
+/// Minimum length of a JUMBF box: its 4-byte `LBox` plus its 4-byte `TBox`. See
+/// [`C2paManifestStore`] for how far this shape is traceable to a vendored source.
 const JUMBF_HEADER_LEN: usize = 8;
 
 /// The `box_purpose` of a C2PA `uuid` box that carries a manifest store (C2PA 2.4 §A.5.3).
 ///
-/// §A.5.3 admits exactly three purposes for a box that carries a manifest store, and they do not
-/// frame the box's `data` field identically:
+/// §A.5.3 admits exactly three purposes for a box that carries a manifest store. What sits at the
+/// front of the box's `data` field, ahead of the store itself, differs between them:
 ///
-/// | `box_purpose` | Meaning (§A.5.3) | `data` layout |
+/// | `box_purpose` | Meaning (§A.5.3) | Start of `data` |
 /// | --- | --- | --- |
-/// | `manifest` | the ordinary manifest store | 8-byte absolute file offset of the first `merkle` box (zero if the file has none), then the store, then zero or more padding bytes |
-/// | `original` | the unchanged store of a file that is mid-update; a sibling `update` box is present | as `manifest` — §A.5.3 states the merkle offset is present "inside the 'uuid' box of type manifest **or original**" |
-/// | `update` | a store holding update manifests only | the store directly, then zero or more padding bytes — §A.5.3 attaches no merkle offset to this purpose |
+/// | `manifest` | the ordinary manifest store | the 8-byte absolute file offset of the first `merkle` box (zero if the file has none), then the store, then zero or more padding bytes — stated by §A.5.3 |
+/// | `original` | the unchanged store of a file that is mid-update; a sibling `update` box is present | as `manifest`: §A.5.3 places the offset "inside the 'uuid' box of type manifest **or original**", and states that "the original and manifest boxes are identical apart from value of box_purpose" |
+/// | `update` | a store holding update manifests only | **not stated by the specification** — probed for, see below |
 ///
-/// That asymmetry is why [`C2paManifestStore::range`] starts eight bytes later inside a
-/// `manifest`/`original` box than inside an `update` one.
+/// # `update`: the specification does not say, so the offset is probed for
+///
+/// §A.5.3 never describes an `update` box's framing. Its only sentence about that purpose constrains
+/// the store's *contents* ("shall only contain update manifests"), not the bytes around it, and the
+/// "manifest or original" phrasing above is explained by manifest and original being declared
+/// identical to each other rather than by any contrast with `update`. The silence is a gap in the
+/// specification, not a prohibition.
+///
+/// The reference implementation fills that gap in one direction. `c2pa-rs`
+/// (`sdk/src/asset_handlers/bmff_io.rs`, whose supported types include `heic`, `heif` and `avif`)
+/// writes the 8-byte offset ahead of an `update` store exactly as it does for `manifest` and
+/// `original` — zero-filled, an update box having no `merkle` box to point at — and its reader skips
+/// those 8 bytes for all three purposes. Mid-update files in circulation therefore carry the offset.
+///
+/// Rather than pick one reading and mis-locate the store under the other, this crate **probes**: for
+/// `update` it looks for the store at offset 8 first and falls back to offset 0 when the `LBox` read
+/// there is not a valid bound (zero, below the 8-byte JUMBF header, or overrunning the box). The
+/// first candidate yielding a valid bound wins; if neither does, nothing is reported. In practice
+/// only one can succeed — under the `c2pa-rs` layout offset 0 reads the zero-filled merkle offset and
+/// fails, and under a specification-literal layout offset 8 reads bytes from inside the JUMBF
+/// superbox, which do not bound it — and both orders fail to absence rather than to a truncated
+/// payload. `manifest` and `original` are *not* probed: the specification states their framing, so a
+/// single offset is used and a file that disagrees is simply not reported.
+///
+/// # `merkle`
 ///
 /// A fourth purpose, `merkle`, names an *auxiliary* box holding Merkle-tree hashes; §A.5.3 does not
 /// list it among the purposes of a manifest-store box, so a `merkle` box is **not** reported by
@@ -74,8 +99,9 @@ pub enum C2paBoxPurpose {
     /// `original` — the untouched store of a file being updated; a sibling `update` box is present.
     /// Its `data` is framed exactly as `manifest`'s, merkle offset included.
     Original = 1,
-    /// `update` — a store containing update manifests only. Its `data` opens with the store itself:
-    /// no merkle offset precedes it.
+    /// `update` — a store containing update manifests only. The specification does not state
+    /// whether the 8-byte merkle offset precedes its store, so both layouts are probed for; see the
+    /// [type docs](Self).
     Update = 2,
 }
 
@@ -91,11 +117,14 @@ impl C2paBoxPurpose {
         }
     }
 
-    /// The bytes of `data` that precede the manifest store for this purpose.
-    const fn store_prefix_len(self) -> usize {
+    /// The offsets into `data`, in probe order, at which this purpose's manifest store may begin.
+    ///
+    /// One candidate where §A.5.3 states the framing; two where it is silent (see the
+    /// [type docs](Self)).
+    const fn store_prefix_candidates(self) -> &'static [usize] {
         match self {
-            Self::Manifest | Self::Original => MERKLE_OFFSET_LEN,
-            Self::Update => 0,
+            Self::Manifest | Self::Original => &[MERKLE_OFFSET_LEN],
+            Self::Update => &[MERKLE_OFFSET_LEN, 0],
         }
     }
 }
@@ -200,24 +229,37 @@ fn parse_content_provenance_box(body: &[u8], body_start: usize) -> Option<C2paMa
     let purpose = C2paBoxPurpose::from_bytes(after_full_box.get(..terminator)?)?;
     let data = after_full_box.get(terminator + 1..)?;
 
-    // §A.5.3: `manifest` and `original` put the absolute merkle-box offset in front of the store.
-    let store_and_padding = data.get(purpose.store_prefix_len()..)?;
+    // Where the store begins inside `data`: one fixed offset for `manifest`/`original`, whose framing
+    // §A.5.3 states, and two probed in order for `update`, whose framing it does not — see
+    // `C2paBoxPurpose`. The first candidate whose `LBox` is a valid bound wins.
+    let data_start = body_start + (body.len() - data.len());
+    for &prefix in purpose.store_prefix_candidates() {
+        if let Some(bytes) = locate_store(data, prefix) {
+            let start = data_start + prefix;
+            return Some(C2paManifestStore {
+                bytes,
+                range: start..start + bytes.len(),
+                purpose,
+            });
+        }
+    }
+    None
+}
 
-    // §8.4.2.3: a JUMBF box opens with a 4-byte big-endian LBox covering the whole box. It, not the
-    // enclosing `uuid` box, bounds the store — §A.5.3 allows unused padding bytes after it.
+/// Reads the JUMBF `LBox` sitting `prefix` bytes into `data` and returns the store it bounds, or
+/// `None` if there is no valid bound there.
+///
+/// A JUMBF box opens with a 4-byte big-endian length covering the whole box; that length, not the
+/// enclosing `uuid` box, bounds the store, since §A.5.3 allows unused padding bytes after it (see
+/// [`C2paManifestStore`] for how far that framing is traceable). A length below the 8-byte header it
+/// must itself cover, or one overrunning the bytes actually present, is not a valid bound.
+fn locate_store(data: &[u8], prefix: usize) -> Option<&[u8]> {
+    let store_and_padding = data.get(prefix..)?;
     let lbox_bytes: [u8; 4] = store_and_padding.get(..4)?.try_into().ok()?;
     let lbox = u32::from_be_bytes(lbox_bytes) as usize;
     if lbox < JUMBF_HEADER_LEN {
         return None;
     }
-    // The same `get` rejects an `LBox` that overruns the box: padding may follow the store, but the
-    // store may not run past the bytes the box actually holds.
-    let bytes = store_and_padding.get(..lbox)?;
-
-    let start = body_start + (body.len() - store_and_padding.len());
-    Some(C2paManifestStore {
-        bytes,
-        range: start..start + lbox,
-        purpose,
-    })
+    // The same `get` rejects an `LBox` that overruns the box.
+    store_and_padding.get(..lbox)
 }
