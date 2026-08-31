@@ -388,14 +388,26 @@ mod tests {
     }
 
     #[test]
-    fn get_set_text_round_trips_and_replaces() {
+    fn set_text_is_readable_by_get_text() {
         let mut meta = XmpMeta::new();
+
+        // Absent reads as None rather than as an empty string, so "unset" and "set to nothing"
+        // stay distinguishable.
         assert_eq!(meta.get_text(DC, "creator"), None);
+
         meta.set_text(DC, "creator", "Ada");
         assert_eq!(meta.get_text(DC, "creator"), Some("Ada"));
-        // set replaces rather than duplicating.
+    }
+
+    #[test]
+    fn set_text_replaces_rather_than_duplicating() {
+        let mut meta = XmpMeta::new();
+        meta.set_text(DC, "creator", "Ada");
         meta.set_text(DC, "creator", "Grace");
+
         assert_eq!(meta.get_text(DC, "creator"), Some("Grace"));
+        // The property count is what separates replacement from an append that merely happens to
+        // be read back in the right order.
         assert_eq!(meta.properties.len(), 1);
     }
 
