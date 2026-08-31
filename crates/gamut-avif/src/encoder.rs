@@ -2,17 +2,19 @@
 
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with};
+use gamut_av1::{
+    Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with, encode_still_intra16_with,
+};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
-    RgbToYcbcr, TransferCharacteristics,
+    Planar16, RgbToYcbcr, TransferCharacteristics,
 };
-use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Result, Rgb8, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Result, Rgb8, Rgb16, Rgba8, Rgba16};
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind, write,
 };
 
-use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendSlot};
+use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
 use crate::config::{AvifConfig, AvifMode};
 use crate::image::ALPHA_AUX_URN;
 use crate::transform::{Mirror, Rotation};
@@ -42,6 +44,8 @@ struct ImageTransform {
 /// | [`Rgb8`] | one 4:4:4 colour item |
 /// | [`Rgba8`] | a 4:4:4 colour item plus a **monochrome alpha auxiliary item** |
 /// | [`Gray8`] | one **monochrome** item — not R=G=B replication |
+/// | [`Rgb16`] | one 4:4:4 colour item at [`AvifEncoder::with_bit_depth`]'s depth |
+/// | [`Rgba16`] | that, plus a monochrome alpha auxiliary at the same depth |
 ///
 /// Alpha is coded as its own AV1 still: AVIF v1.2.0 §4.1 makes `mono_chrome = 1` and full range a
 /// *shall* for an AV1 auxiliary image item, and the auxiliary is linked to the colour item by an
@@ -246,6 +250,32 @@ impl AvifEncoder {
         self
     }
 
+    /// Selects the depth **16-bit inputs** are coded at: [`BitDepth::Ten`] or
+    /// [`BitDepth::Twelve`] (the default). Any other depth is rejected at encode time.
+    ///
+    /// # What happens to the low bits
+    ///
+    /// [`Rgb16`] and [`Rgba16`] carry samples on `gamut-core`'s canonical **full 16-bit scale**,
+    /// while AV1 codes 8, 10 or 12. The encoder narrows by **truncation** — `sample >> (16 -
+    /// depth)` — so the coded value is the top `depth` bits of the caller's sample. That makes the
+    /// contract worth stating exactly:
+    ///
+    /// > A lossless encode of a 16-bit input is bit-exact **at the coded depth**, not to the
+    /// > 16-bit input.
+    ///
+    /// Truncation rather than rounding keeps the mapping a pure prefix: the same source narrowed to
+    /// 10 and to 12 bits agrees on the 10 bits they share, and no sample can round up out of range.
+    /// A caller who wants a different tradeoff — dithering, or a rounded narrowing — applies it
+    /// before handing the image over.
+    ///
+    /// **Ignored by the 8-bit inputs.** [`Rgb8`], [`Rgba8`] and [`Gray8`] always code 8-bit:
+    /// widening them would claim precision the caller never had.
+    #[must_use]
+    pub fn with_bit_depth(mut self, bit_depth: BitDepth) -> Self {
+        self.config.bit_depth = bit_depth;
+        self
+    }
+
     /// Declares that the colour values of an RGBA input are **premultiplied** by their alpha —
     /// i.e. already multiplied through, so a fully transparent pixel carries zeroed colour.
     ///
@@ -310,6 +340,22 @@ impl AvifEncoder {
         match self.config.mode {
             AvifMode::Lossless => ChromaSubsampling::Cs444,
             _ => self.config.chroma,
+        }
+    }
+
+    /// The depth a 16-bit input is coded at, rejecting one AV1 cannot express.
+    ///
+    /// §6.4.1 defines 8, 10 and 12. [`BitDepth::Sixteen`] is a `gamut-color` depth for the
+    /// interleaved 16-bit pipelines, and [`BitDepth::Eight`] would silently discard the input's
+    /// whole point, so both are refused rather than quietly reinterpreted.
+    fn coded_bit_depth(&self) -> Result<BitDepth> {
+        match self.config.bit_depth {
+            BitDepth::Ten | BitDepth::Twelve => Ok(self.config.bit_depth),
+            _ => Err(gamut_core::Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: a 16-bit input codes at 10 or 12 bits (AV1 \u{a7}6.4.1); \
+                 select one with AvifEncoder::with_bit_depth",
+            )),
         }
     }
 
@@ -570,10 +616,38 @@ impl AvifEncoder {
         colour: Av1Colour,
         chroma: ChromaSubsampling,
     ) -> Result<EncodedStill> {
-        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma);
-        match crate::backend::run_backends(&self.backends, &request, planes)? {
-            Some(obus) => crate::backend::still_from_backend_obus(obus, dims, colour, chroma),
+        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, BitDepth::Eight);
+        match crate::backend::run_backends(&self.backends, &request, BackendPlanes::Eight(planes))?
+        {
+            Some(obus) => {
+                crate::backend::still_from_backend_obus(obus, dims, colour, chroma, BitDepth::Eight)
+            }
             None => Ok(encode_still_intra_with(planes, base_q_idx, colour)?.0),
+        }
+    }
+
+    /// The high-bit-depth counterpart of [`colour_still`](Self::colour_still): the same registry,
+    /// entered through [`Av1StillEncoder::encode_still16`], whose default declines so a backend
+    /// written against the 8-bit contract falls through to the built-in tail.
+    fn colour_still16(
+        &self,
+        planes: &Planar16,
+        dims: Dimensions,
+        base_q_idx: u8,
+        colour: Av1Colour,
+    ) -> Result<EncodedStill> {
+        let bit_depth = planes.bit_depth();
+        // Read off the buffer, not the configuration, exactly as the 8-bit path does: §6.4.2
+        // forces 4:4:4 under the identity matrix and the `Rgba16` path has no 4-stride
+        // downsampler, so either can carry 4:4:4 planes while `with_chroma` says otherwise. The
+        // request must describe the planes it actually carries.
+        let chroma = planes.subsampling();
+        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, bit_depth);
+        match crate::backend::run_backends(&self.backends, &request, BackendPlanes::High(planes))? {
+            Some(obus) => {
+                crate::backend::still_from_backend_obus(obus, dims, colour, chroma, bit_depth)
+            }
+            None => Ok(encode_still_intra16_with(planes, base_q_idx, colour)?.0),
         }
     }
 
@@ -604,11 +678,32 @@ fn monochrome_still(planes: &Planar8, base_q_idx: u8, colour: Av1Colour) -> Resu
     Ok(encode_still_intra_with(planes, base_q_idx, colour)?.0)
 }
 
-/// The `pixi` bits-per-channel list for a coded item: one entry per coded plane, so a monochrome
-/// item declares a single 8-bit channel rather than three (AVIF v1.2.0 §2.2 requires `pixi` to
-/// describe the item's actual channels).
+/// The high-bit-depth [`monochrome_still`]; the registry is skipped for the same reason.
+fn monochrome_still16(
+    planes: &Planar16,
+    base_q_idx: u8,
+    colour: Av1Colour,
+) -> Result<EncodedStill> {
+    Ok(encode_still_intra16_with(planes, base_q_idx, colour)?.0)
+}
+
+/// The `pixi` bits-per-channel list for a coded item: one entry per coded plane, each carrying the
+/// stream's own bit depth (AVIF v1.2.0 §2.2 requires `pixi` to describe the item's actual
+/// channels). A monochrome item declares one channel, not three.
+///
+/// The depth is read back out of the `av1C` flags rather than passed alongside them, so `pixi` and
+/// `av1C` cannot disagree.
 fn pixi_channels(c: &Av1StillConfig) -> Vec<u8> {
-    if c.monochrome { vec![8] } else { vec![8, 8, 8] }
+    let bits = match (c.high_bitdepth, c.twelve_bit) {
+        (false, _) => 8,
+        (true, false) => 10,
+        (true, true) => 12,
+    };
+    if c.monochrome {
+        vec![bits]
+    } else {
+        vec![bits; 3]
+    }
 }
 
 /// The AV1 `seq_profile` and `seq_level_idx[0]` an `av01` item declares, or `None` when it carries
@@ -866,6 +961,58 @@ impl EncodeImage<Rgba8> for AvifEncoder {
         let still = self.colour_still(&planes, dims, base_q_idx, colour, planes.subsampling())?;
         let alpha = monochrome_still(
             &Planar8::from_rgba8_alpha_view(image),
+            base_q_idx,
+            self.monochrome_colour(),
+        )?;
+        self.emit(&still, dims, Some(&alpha), out)
+    }
+}
+
+impl EncodeImage<Rgb16> for AvifEncoder {
+    /// Narrows the 16-bit samples to the configured coding depth and codes them as one item at
+    /// [`with_chroma`](AvifEncoder::with_chroma)'s sampling — 10-bit 4:4:4 stays AV1 profile 1,
+    /// anything 12-bit or subsampled moves to profile 2 (§6.4.1), and `av1C`/`pixi`/`colr` follow
+    /// from the stream.
+    ///
+    /// The narrowing is truncation; see [`AvifEncoder::with_bit_depth`] for the contract. Chroma is
+    /// averaged *after* narrowing, so the samples are averaged on the scale they are coded at.
+    fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
+        let dims = image.dimensions();
+        let depth = self.coded_bit_depth()?;
+        let colour = self.colour();
+        let planes = match colour.matrix {
+            // §6.4.2 forces 4:4:4 under the identity matrix, exactly as on the 8-bit path, so
+            // `with_chroma` does not reach this arm.
+            MatrixCoefficients::Identity => Planar16::from_rgb16_identity_view(image, depth),
+            matrix => {
+                let m = RgbToYcbcr::new(matrix, colour.range, depth)?;
+                Planar16::from_rgb16_matrix_subsampled(image, m, self.chroma())?
+            }
+        };
+        let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
+        self.emit(&still, dims, None, out)
+    }
+}
+
+impl EncodeImage<Rgba16> for AvifEncoder {
+    /// [`EncodeImage<Rgb16>`] plus the alpha auxiliary item of [`EncodeImage<Rgba8>`], both at the
+    /// configured coding depth — AVIF v1.2.0 §4.1 requires the auxiliary to match the master's
+    /// depth.
+    fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
+        let dims = image.dimensions();
+        let depth = self.coded_bit_depth()?;
+        let colour = self.colour();
+        let planes = match colour.matrix {
+            MatrixCoefficients::Identity => Planar16::from_rgba16_identity_view(image, depth),
+            matrix => {
+                let m = RgbToYcbcr::new(matrix, colour.range, depth)?;
+                Planar16::from_rgba16_matrix_view(image, m)
+            }
+        };
+        let base_q_idx = self.base_q_idx();
+        let still = self.colour_still16(&planes, dims, base_q_idx, colour)?;
+        let alpha = monochrome_still16(
+            &Planar16::from_rgba16_alpha_view(image, depth),
             base_q_idx,
             self.monochrome_colour(),
         )?;

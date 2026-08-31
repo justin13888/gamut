@@ -2,7 +2,8 @@
 //! wrapped in an ISOBMFF/MIAF container.
 //!
 //! The encode surface is [`AvifEncoder`], which implements [`gamut_core::EncodeImage`] for
-//! [`Rgb8`](gamut_core::Rgb8), [`Rgba8`](gamut_core::Rgba8) and [`Gray8`](gamut_core::Gray8), so
+//! [`Rgb8`](gamut_core::Rgb8), [`Rgba8`](gamut_core::Rgba8), [`Gray8`](gamut_core::Gray8),
+//! [`Rgb16`](gamut_core::Rgb16) and [`Rgba16`](gamut_core::Rgba16), so
 //! the input is a typed [`ImageRef`](gamut_core::ImageRef) and handing it an unsupported pixel
 //! layout is a compile error. The crate is orchestration only: [`gamut_color`] maps pixels to
 //! planes — identity GBR at 4:4:4, or YCbCr through a CICP matrix at the configured chroma
