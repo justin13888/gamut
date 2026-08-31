@@ -531,9 +531,6 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Only the BigTIFF round-trip inspects the header directly; an unconditional import is an
-    // unused-import warning in classic-only builds.
-    #[cfg(feature = "bigtiff")]
     use crate::read_header;
     use crate::segment::{Range, Segment};
     use crate::{read, read_ifd_at};
