@@ -161,6 +161,8 @@ impl<'a> BitReader<'a> {
     /// Reads the `ns(n)` descriptor: an unsigned value in `0..n`, coded in `FloorLog2(n)` or
     /// `FloorLog2(n) + 1` bits (AV1 §4.10.7).
     ///
+    /// Any non-zero `n` is accepted, up to [`u32::MAX`].
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if the bitstream is truncated or `n` is 0.
@@ -169,13 +171,17 @@ impl<'a> BitReader<'a> {
             return Err(Error::invalid_input(ORIGIN, "AV1 ns(n): empty range"));
         }
         let w = 32 - n.leading_zeros(); // FloorLog2(n) + 1
-        let m = (1u32 << w) - n;
-        let v = self.f(w - 1)?;
+        // `w` reaches 32 once `n >= 2^31`, so the spec's `(1 << w) - n` and `(v << 1) - m` are
+        // evaluated in u64: in u32 the shift is a full type width, which panics under
+        // `debug_assertions` and otherwise masks to `1 << 0`, leaving `m` one too large. Every
+        // result is `< n`, so it fits back in u32.
+        let m = (1u64 << w) - u64::from(n);
+        let v = u64::from(self.f(w - 1)?);
         if v < m {
-            return Ok(v);
+            return Ok(v as u32);
         }
-        let extra = self.f(1)?;
-        Ok((v << 1) - m + extra)
+        let extra = u64::from(self.f(1)?);
+        Ok(((v << 1) - m + extra) as u32)
     }
 
     /// Reads the `uvlc()` descriptor: a variable-length unsigned integer (AV1 §4.10.3).
@@ -387,59 +393,77 @@ mod tests {
         );
     }
 
+    /// §4.10.7 transcribed independently of the reader under test.
+    ///
+    /// `w` reaches 32 for `n >= 2^31`, so the transcription evaluates the spec's `(1 << w) - n`
+    /// and `(v << 1) - m` in u64; in u32 the shift is a full type width and the oracle would
+    /// carry the very defect it exists to detect.
+    fn spec_ns(bits: &[u8], pos: &mut usize, n: u32) -> u32 {
+        let w = 32 - n.leading_zeros();
+        let m = (1u64 << w) - u64::from(n);
+        let mut v = 0u64;
+        for _ in 0..w - 1 {
+            v = (v << 1) | u64::from(bits[*pos]);
+            *pos += 1;
+        }
+        if v < m {
+            return v as u32;
+        }
+        let extra = u64::from(bits[*pos]);
+        *pos += 1;
+        ((v << 1) - m + extra) as u32
+    }
+
+    /// The `ns()` inverse: the bits a conforming encoder emits for `value` in `0..n`.
+    fn encode_ns(value: u32, n: u32) -> Vec<u8> {
+        let w = 32 - n.leading_zeros();
+        let m = (1u64 << w) - u64::from(n);
+        let value = u64::from(value);
+        let mut bits = Vec::new();
+        if value < m {
+            for i in (0..w - 1).rev() {
+                bits.push(((value >> i) & 1) as u8);
+            }
+        } else {
+            let coded = value + m;
+            for i in (0..w).rev() {
+                bits.push(((coded >> i) & 1) as u8);
+            }
+        }
+        bits
+    }
+
+    /// Round-trips one `(value, n)` pair through the independent oracle and through the reader,
+    /// pinning the consumed width in both. The width assertion is what catches a cursor desync:
+    /// a wrong `m` can return the right value while reading one bit too few.
+    fn check_ns(value: u32, n: u32) {
+        let bits = encode_ns(value, n);
+        let mut packed = BitWriter::new();
+        for b in &bits {
+            packed.put_bit(*b);
+        }
+        packed.byte_align();
+        let bytes = packed.into_bytes();
+
+        let mut pos = 0;
+        assert_eq!(
+            spec_ns(&bits, &mut pos, n),
+            value,
+            "spec ns n={n} v={value}"
+        );
+        assert_eq!(pos, bits.len(), "spec ns consumed the wrong width");
+
+        let mut r = BitReader::new(&bytes);
+        assert_eq!(r.ns(n).unwrap(), value, "reader ns n={n} v={value}");
+        assert_eq!(r.bit_position(), pos, "ns consumed the wrong width");
+    }
+
     #[test]
     fn ns_matches_the_spec_definition() {
-        /// §4.10.7 transcribed independently of the reader under test.
-        fn spec_ns(bits: &[u8], pos: &mut usize, n: u32) -> u32 {
-            let w = 32 - n.leading_zeros();
-            let m = (1u32 << w) - n;
-            let mut v = 0u32;
-            for _ in 0..w - 1 {
-                v = (v << 1) | u32::from(bits[*pos]);
-                *pos += 1;
-            }
-            if v < m {
-                return v;
-            }
-            let extra = u32::from(bits[*pos]);
-            *pos += 1;
-            (v << 1) - m + extra
-        }
-
         // Every value in 0..n must round-trip for a range that exercises both branches.
         for n in 1u32..=17 {
             for value in 0..n {
-                // Encode `value` with the ns() inverse, then read it back.
-                let w = 32 - n.leading_zeros();
-                let m = (1u32 << w) - n;
-                let mut bits = Vec::new();
-                if value < m {
-                    for i in (0..w - 1).rev() {
-                        bits.push(((value >> i) & 1) as u8);
-                    }
-                } else {
-                    let coded = value + m;
-                    for i in (0..w).rev() {
-                        bits.push(((coded >> i) & 1) as u8);
-                    }
-                }
-                let mut packed = BitWriter::new();
-                for b in &bits {
-                    packed.put_bit(*b);
-                }
-                packed.byte_align();
-                let bytes = packed.into_bytes();
-
-                let mut pos = 0;
-                assert_eq!(
-                    spec_ns(&bits, &mut pos, n),
-                    value,
-                    "spec ns n={n} v={value}"
-                );
-
-                let mut r = BitReader::new(&bytes);
-                assert_eq!(r.ns(n).unwrap(), value, "reader ns n={n} v={value}");
-                assert_eq!(r.bit_position(), pos, "ns consumed the wrong width");
+                check_ns(value, n);
             }
         }
 
@@ -448,6 +472,32 @@ mod tests {
             r.ns(0).unwrap_err().static_message(),
             Some("AV1 ns(n): empty range")
         );
+    }
+
+    #[test]
+    fn ns_spans_the_whole_u32_range() {
+        // `n >= 2^31` drives `w` to 32, where `(1 << w)` is a full-width u32 shift. Enumerating
+        // 0..n is impossible at this scale, so each `n` is probed at the branch boundary `m`,
+        // which is where a wrong `m` changes either the value or the bit count.
+
+        // n = 2^31: m == 2^31 and `v` is 31 bits, so every value takes the short branch. The
+        // masked-shift `m` (one too large) agrees here, which is why this case pins only that
+        // the full-width shift itself is gone.
+        for value in [0, 1, (1u32 << 31) - 1] {
+            check_ns(value, 1u32 << 31);
+        }
+
+        // n = 2^31 + 1: m == 2^31 - 1. The last two values cross into the long branch.
+        for value in [0, (1u32 << 31) - 2, (1u32 << 31) - 1, 1u32 << 31] {
+            check_ns(value, (1u32 << 31) + 1);
+        }
+
+        // n = u32::MAX: m == 1, so every value but 0 takes the long branch. Value 1 is the
+        // desync case (an `m` of 2 returns the right value from the short branch, one bit
+        // short) and value 2 is the off-by-one case (it returns 1).
+        for value in [0, 1, 2, u32::MAX - 1] {
+            check_ns(value, u32::MAX);
+        }
     }
 
     #[test]

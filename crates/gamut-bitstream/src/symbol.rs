@@ -399,12 +399,14 @@ impl<'a> SymbolDecoder<'a> {
             return 0;
         }
         let w = 32 - n.leading_zeros();
-        let m = (1u32 << w) - n;
-        let v = self.read_literal(w - 1);
+        // As in [`crate::BitReader::ns`]: `w` reaches 32 once `n >= 2^31`, so the spec arithmetic
+        // is evaluated in u64 to keep `1 << w` off the u32 type width. Every result is `< n`.
+        let m = (1u64 << w) - u64::from(n);
+        let v = u64::from(self.read_literal(w - 1));
         if v < m {
-            return v;
+            return v as u32;
         }
-        (v << 1) - m + self.read_literal(1)
+        ((v << 1) - m + u64::from(self.read_literal(1))) as u32
     }
 
     /// Decodes `L(n)`-style unsigned data whose width is itself coded — the `decode_unsigned`
@@ -412,6 +414,16 @@ impl<'a> SymbolDecoder<'a> {
     ///
     /// Reads increasing unary-coded prefixes and then the remainder, capped at `max_bits` so a
     /// hostile stream cannot drive an unbounded loop.
+    ///
+    /// `max_bits` must be `<= 31`.
+    ///
+    /// # Panics
+    ///
+    /// Debug builds panic when `max_bits > 31`: the prefix length reaches `max_bits`, and the
+    /// `1 << length` reconstructing the value is then a u32 shift at or past the type width
+    /// (release builds mask the shift instead). No saturating behaviour is defined for that
+    /// case — AV1 gives this helper no bound to saturate against, so the domain is left to the
+    /// caller rather than invented here.
     pub fn read_golomb(&mut self, max_bits: u32) -> u32 {
         let mut length = 0u32;
         while length < max_bits && !self.read_bool() {
@@ -504,6 +516,59 @@ mod tests {
         points.sort_unstable();
         points.push(32768);
         points
+    }
+
+    /// Encodes `value` in `0..n` with the `ns()` inverse (AV1 §4.10.7), in u64 so the
+    /// `n >= 2^31` cases are expressible at all.
+    fn encode_ns(enc: &mut SymbolEncoder, value: u32, n: u32) {
+        let w = 32 - n.leading_zeros();
+        let m = (1u64 << w) - u64::from(n);
+        let value = u64::from(value);
+        if value < m {
+            enc.encode_literal(value as u32, w - 1);
+        } else {
+            enc.encode_literal((value + m) as u32, w);
+        }
+    }
+
+    /// Round-trips one `(value, n)` pair through the symbol coder.
+    fn check_read_ns(value: u32, n: u32) {
+        let mut enc = SymbolEncoder::new();
+        encode_ns(&mut enc, value, n);
+        let bytes = enc.finish();
+        let mut dec = SymbolDecoder::new(&bytes);
+        assert_eq!(dec.read_ns(n), value, "read_ns n={n} v={value}");
+    }
+
+    #[test]
+    fn read_ns_matches_the_spec_definition() {
+        // Every value in 0..n for a range that exercises both branches.
+        for n in 1u32..=17 {
+            for value in 0..n {
+                check_read_ns(value, n);
+            }
+        }
+
+        // `n == 0` reads nothing and yields 0 rather than deriving a width from an empty range.
+        let bytes = SymbolEncoder::new().finish();
+        let mut dec = SymbolDecoder::new(&bytes);
+        assert_eq!(dec.read_ns(0), 0);
+    }
+
+    #[test]
+    fn read_ns_spans_the_whole_u32_range() {
+        // `n >= 2^31` drives `w` to 32, where `(1 << w)` is a full-width u32 shift. Same
+        // boundary probes as `BitReader::ns`: the short branch, the crossing at `m`, and the
+        // maximum value.
+        for value in [0, 1, (1u32 << 31) - 1] {
+            check_read_ns(value, 1u32 << 31);
+        }
+        for value in [0, (1u32 << 31) - 2, (1u32 << 31) - 1, 1u32 << 31] {
+            check_read_ns(value, (1u32 << 31) + 1);
+        }
+        for value in [0, 1, 2, u32::MAX - 1] {
+            check_read_ns(value, u32::MAX);
+        }
     }
 
     #[test]
