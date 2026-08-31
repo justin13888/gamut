@@ -21,12 +21,22 @@ default = []
 # field types. Additive — off by default so classic-only consumers (e.g. gamut-exif) stay lean;
 # gamut-tiff enables it. See `STATUS.md` (P8).
 bigtiff = []
+# Exposes `invariants` — the crate's executable laws — to an out-of-tree fuzz driver. Additive,
+# off by default, and deliberately NOT re-exported by the `gamut` umbrella, so the shipped
+# surface and `check-ffi-features` are unaffected. The crate's own tests get the module without
+# it (`#[cfg(any(test, feature = "test-support"))]`). The module is `doc(hidden)` and carries no
+# SemVer guarantee — it is gamut's own harness, not API to pin. See `docs/testing.md`.
+test-support = []
 
 [dependencies]
 gamut-core.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
+# Property testing (issue #240). Drives the `invariants` laws with a PINNED seed — see
+# `docs/testing.md`: the `--in-diff` mutation gate is blocking, so a test whose pass/fail depends
+# on OS entropy would make CAUGHT/MISSED vary run to run.
+proptest.workspace = true
 
 [[bench]]
 name = "ifd"

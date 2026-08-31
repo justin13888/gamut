@@ -72,6 +72,14 @@
 mod audit;
 mod byte_order;
 mod entry;
+// Executable laws over this crate's own types, shared by the property tests and the fuzz tier
+// (`docs/testing.md`). Always available to the crate's own tests; `test-support` exposes it to an
+// out-of-tree fuzz driver. Never enabled by the `gamut` umbrella, so it stays out of the shipped
+// surface and out of `check-ffi-features`. `doc(hidden)` because it carries **no SemVer
+// guarantee**: it is gamut's own harness, not API for consumers to pin.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod invariants;
 mod reader;
 mod segment;
 mod source;

@@ -101,6 +101,16 @@ divan = "0.1"
 # IIM↔XMP tables to the vendored IPTC machine-readable tech reference at test time. Dev-only,
 # untyped `Value` API (no serde derives) — never a dependency of shipped code.
 serde_json = "1"
+# Property testing (issue #240). Dev-only: pulled in as a `dev-dependency` by the crates whose
+# `invariants` module states executable laws, never by shipped code. Every gamut property pins
+# `rng_seed`, finite shrink bounds and `failure_persistence: None` IN CODE (`docs/testing.md`),
+# because the `--in-diff` mutation gate is blocking and cargo-mutants' pass/fail must be
+# reproducible run to run — the `PROPTEST_*` env overrides are additionally `#[cfg]`'d out on
+# wasm32, so configuration outside the code silently stops applying on any target the workspace
+# tests there. `default-features = false` drops `fork`/`timeout` (rusty-fork, tempfile,
+# wait-timeout and friends), which the mutants runner's per-process `ulimit -v` makes unusable
+# anyway; `bit-set` stays, because collection shrinking is the reason to adopt proptest at all.
+proptest = { version = "1.11", default-features = false, features = ["std", "bit-set"] }
 
 # Internal crates. `path` is used for local builds so cross-crate edits resolve without a
 # crates.io round-trip; `version` is the requirement recorded in the published manifest.
