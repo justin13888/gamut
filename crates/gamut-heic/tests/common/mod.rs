@@ -153,3 +153,55 @@ pub fn iinf_v0(infes: &[Vec<u8>]) -> Vec<u8> {
 pub fn meta(children: &[Vec<u8>]) -> Vec<u8> {
     full(b"meta", 0, 0, &cat(children))
 }
+
+// ---- C2PA box builders (C2PA 2.4 §A.5.1) ---------------------------------------------------
+
+/// The C2PA `ContentProvenanceBox` extended (user) type — C2PA 2.4 §A.5.1.1.
+pub const C2PA_UUID: [u8; 16] = [
+    0xD8, 0xFE, 0xC3, 0xD6, 0x1B, 0x0E, 0x48, 0x3C, 0x92, 0x97, 0x58, 0x28, 0x87, 0x7E, 0xC4, 0x81,
+];
+
+/// A top-level `uuid` box with an explicit user type, `FullBox` version/flags, null-terminated
+/// `box_purpose` and raw `data` — every field independently settable so malformed variants are
+/// expressible (§A.5.1.2).
+pub fn uuid_box(
+    user_type: &[u8; 16],
+    version: u8,
+    flags: u32,
+    purpose: &str,
+    data: &[u8],
+) -> Vec<u8> {
+    bx(
+        b"uuid",
+        &cat(&[
+            &user_type[..],
+            &[version],
+            &flags.to_be_bytes()[1..],
+            purpose.as_bytes(),
+            &[0],
+            data,
+        ]),
+    )
+}
+
+/// A well-formed C2PA `ContentProvenanceBox`: the C2PA user type, version 0/flags 0, the given
+/// `box_purpose`, and `data` framed as §A.5.3 requires for that purpose — the 8-byte absolute merkle
+/// offset first for `manifest`/`original`, nothing for `update` — then `store`, then `padding`.
+pub fn c2pa_box(purpose: &str, merkle_offset: u64, store: &[u8], padding: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    if matches!(purpose, "manifest" | "original") {
+        data.extend_from_slice(&merkle_offset.to_be_bytes());
+    }
+    data.extend_from_slice(store);
+    data.extend_from_slice(padding);
+    uuid_box(&C2PA_UUID, 0, 0, purpose, &data)
+}
+
+/// A JUMBF-shaped manifest store: a 4-byte big-endian `LBox` covering the whole box, the `jumb`
+/// `TBox`, then opaque contents (C2PA 2.4 §8.4.2.3).
+pub fn jumbf_store(contents: &[u8]) -> Vec<u8> {
+    let mut out = ((8 + contents.len()) as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(b"jumb");
+    out.extend_from_slice(contents);
+    out
+}
