@@ -252,6 +252,9 @@ if [ -z "${TMPDIR:-}" ]; then
 	TMPDIR="$target_dir/mutants-tmp"
 	mkdir -p "$TMPDIR"
 fi
+# Absolute: children run with a working directory of their own (each mutant builds in a copy of
+# the tree), so a relative TMPDIR would resolve somewhere different for each of them.
+TMPDIR=$(cd "$TMPDIR" && pwd) || die "TMPDIR=$TMPDIR is not a usable directory"
 export TMPDIR
 
 fstype=$(stat -f -c '%T' "$TMPDIR" 2>/dev/null || echo unknown)

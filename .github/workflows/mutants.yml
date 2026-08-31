@@ -10,6 +10,14 @@ name: Mutants
 #   * full — manual (workflow_dispatch) full-workspace survey. Informational only
 #     (continue-on-error) and uploads a report; existing code still has gaps, so it must
 #     not gate merges. Flip to blocking once the baseline is clean.
+#
+# Both jobs invoke `mise run mutants`, never `cargo mutants` directly. That runner
+# (tooling/mutants/run.sh) derives every parallelism dial from GAMUT_MUTANTS_BUDGET_GB and
+# applies the memory guards, so CI, a local run and an agent's debug loop are the same code path
+# with the same numbers. When this workflow spelled its own invocation it was the one
+# oracle-building lane running with cargo-mutants' stock defaults — jobserver-tasks = NCPUS, no
+# CARGO_BUILD_JOBS cap, no sccache — which is exactly the configuration ci.yml documents as
+# exhausting a 16 GB runner and getting the step SIGKILLed with no diagnostic.
 
 on:
   pull_request:
@@ -38,6 +46,20 @@ jobs:
     name: Incremental (PR diff)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      # 14 GiB of the runner's 16: the runner needs the rest, and the runner script derives
+      # MUTANTS_JOBS, CARGO_BUILD_JOBS, CMAKE_BUILD_PARALLEL_LEVEL and RUST_TEST_THREADS from
+      # this one number. On a four-core runner it yields CARGO_BUILD_JOBS=2, the value ci.yml's
+      # lint and coverage lanes already proved on this hardware.
+      GAMUT_MUTANTS_BUDGET_GB: 14
+      # The mise tasks are already installed below; never build a missing one mid-run.
+      MISE_TASK_RUN_AUTO_INSTALL: false
+      # The vendored C/C++ oracles are the bulk of every mutant's build and rust-cache
+      # structurally cannot cache them (see the rationale in ci.yml). Without this, each of the
+      # four shards rebuilds all fourteen from scratch.
+      SCCACHE_GHA_ENABLED: "true"
+      CC: sccache gcc
+      CXX: sccache g++
     strategy:
       # Every shard must report: a green run means all four agreed, and one bad shard fails the
       # gate on its own.
@@ -57,6 +79,7 @@ jobs:
       - name: Install native build deps (vendored dav1d/libavif oracles; nasm is vendored)
         run: sudo apt-get update && sudo apt-get install -y meson ninja-build cmake pkg-config
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-mutants (pinned via mise)
         uses: jdx/mise-action@v4
@@ -69,19 +92,21 @@ jobs:
       # them, so it pulls them explicitly. Every other submodule still arrives with the checkout.
       - name: Fetch the AV1 oracle submodules
         run: mise run fetch-av1-oracles
-      - name: Compute changed regions vs base branch
+      # The runner script diffs against the merge base itself; this fetch is what makes that
+      # base resolvable, and the summary is for a human reading the log.
+      - name: Fetch the base branch and summarise the changed files
         run: |
           git fetch --no-tags origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
-          git diff "origin/${{ github.base_ref }}...HEAD" > mutants.diff
           echo "Changed files cargo-mutants will consider:"
           git --no-pager diff --stat "origin/${{ github.base_ref }}...HEAD"
       - name: Run cargo-mutants on the diff
-        # Round-robin rather than the default contiguous slices: mutants from one file land in one
-        # slice, and a file whose tests are slow would then load a single shard while the others
-        # idle. Interleaving spreads that evenly.
-        run: >-
-          cargo mutants --no-shuffle -vV --in-diff mutants.diff
-          --shard ${{ matrix.shard }}/4 --sharding round-robin
+        # Sharding is round-robin rather than the default contiguous slices; the runner passes
+        # that, since mutants from one file land in one slice and a file whose tests are slow
+        # would then load a single shard while the others idle.
+        run: mise run mutants-diff --shard ${{ matrix.shard }}/4 -- --no-shuffle -vV
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
       - name: Upload mutants report
         if: always()
         uses: actions/upload-artifact@v6
@@ -94,6 +119,20 @@ jobs:
     name: Full workspace
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      # 14 GiB of the runner's 16: the runner needs the rest, and the runner script derives
+      # MUTANTS_JOBS, CARGO_BUILD_JOBS, CMAKE_BUILD_PARALLEL_LEVEL and RUST_TEST_THREADS from
+      # this one number. On a four-core runner it yields CARGO_BUILD_JOBS=2, the value ci.yml's
+      # lint and coverage lanes already proved on this hardware.
+      GAMUT_MUTANTS_BUDGET_GB: 14
+      # The mise tasks are already installed below; never build a missing one mid-run.
+      MISE_TASK_RUN_AUTO_INSTALL: false
+      # The vendored C/C++ oracles are the bulk of every mutant's build and rust-cache
+      # structurally cannot cache them (see the rationale in ci.yml). Without this, each of the
+      # four shards rebuilds all fourteen from scratch.
+      SCCACHE_GHA_ENABLED: "true"
+      CC: sccache gcc
+      CXX: sccache g++
     steps:
       - uses: actions/checkout@v5
         with:
@@ -101,6 +140,7 @@ jobs:
       - name: Install native build deps (vendored dav1d/libavif oracles; nasm is vendored)
         run: sudo apt-get update && sudo apt-get install -y meson ninja-build cmake pkg-config
       - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-mutants (pinned via mise)
         uses: jdx/mise-action@v4
@@ -116,7 +156,13 @@ jobs:
       - name: Run cargo-mutants over the whole workspace
         # Informational: surviving mutants in existing code don't fail the run.
         continue-on-error: true
-        run: cargo mutants --no-shuffle -vV
+        # `--all-at-once` is the deliberate opt-in past the runner's guard against an unsharded
+        # whole-workspace run. This job is the one place that guard is meant to be waived: it is
+        # manual, it is not a gate, and a full survey is the whole point of it.
+        run: mise run mutants --all-at-once -- --no-shuffle -vV
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
       - name: Upload mutants report
         if: always()
         uses: actions/upload-artifact@v6
