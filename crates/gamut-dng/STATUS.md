@@ -49,6 +49,7 @@ internal encode→decode round-trips guard every lossless path.
 | P22 | Ch4     | **Gain maps**: typed `ProfileGainTableMap` (52525) + `ProfileGainTableMap2` (52544) — parse, byte-exact re-serialise, embed on encode; gated against Adobe's PGTM sample files | ✅ done |
 | P23 | —       | **Explicitness**: every unmodelled IFD field surfaces verbatim as a typed `RawTag` (`ifd0_extra`/`raw_extra`/`exif_extra`/per-sub-image), via a consumption-tracking reader — issue #109's "all metadata explicitly represented" clause | ✅ done |
 | P24 | Ch2-4   | **Real camera conformance** (#174): the `gamut-dng-samples` corpus + `tooling/gamut-dng-real-conformance`; `Predictor`/`PlanarConfiguration` honoured, byte accounting and the preserving rewrite fixed for real files, optional camera profile | ✅ done |
+| P25 | Ch6     | **Colour projection** (#353): the camera-profile colour tags `CameraProfile` does not model — hue/sat and look tables (dims/data/encoding), `ProfileToneCurve`, `BaselineExposureOffset`, the DNG 1.6 third calibration set, `ReductionMatrix1/2/3` — as a typed read-direction `ColorProfileInfo`, plus the raw IFD's `NoiseProfile` as a typed `NoiseProfile`; a value outside the spec's domain stays in the extras | ✅ done |
 
 ## Apple ProRAW (DNG 1.7 + JPEG XL): fully covered for decode
 
@@ -239,7 +240,11 @@ use; additions are semver-additive.
   compressed-chunk rule needs no pixels).
 - **A third colour calibration** (`CalibrationIlluminant3` / `ColorMatrix3`, DNG 1.6.0.0) — the
   §6 white-balance interpolation weights over the first two calibrations, which is what the
-  pre-1.6 rule prescribes; a profile carrying a third set is read but not blended with it.
+  pre-1.6 rule prescribes; a profile carrying a third set decodes typed onto `ColorProfileInfo`
+  (P25) but is not blended with it.
+- **Writing the P25 colour tags** — the projection is read-direction only: `DngEncoder` builds
+  IFD 0 from a `CameraProfile`, so emitting the rendering tables, tone curve, noise profile and
+  third calibration set means widening that encoder input, which is its own feature.
 - **Restoring *interior* unaccounted bytes to their original offsets** — #350 landed the leading
   case: a vendor preamble now keeps its offset, because `gamut-ifd`'s writer reserves the
   header/first-directory gap for it (`WriteOptions::with_preamble`), which is the position that
