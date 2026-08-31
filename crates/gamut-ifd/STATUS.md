@@ -49,6 +49,16 @@ malformed inputs, a full truncation sweep, an LCG byte-flip fuzz, and an exhaust
 overwrite sweep, on both variants — and immediately caught (and fixed) a hostile-BigTIFF entry-count
 multiply overflow.
 
+The read ledger's laws are stated executably in [`src/invariants.rs`](src/invariants.rs) — the
+workspace's first `invariants` module (issue #240, `docs/testing.md`): plain functions checking that
+`record` produces a canonical span set and that `subtract` is the set difference in canonical form,
+driven here by a pinned-seed `proptest` and, once #264 lands, by the out-of-tree fuzz driver through
+the `test-support` feature. Writing the law once is what keeps the two lanes from drifting. It
+immediately retired a mutation exclusion that had been recorded as *provably equivalent*: the
+`r.len > 0` claim filter in `ReadLedger::subtract` is not — a zero-length claim inside an unclaimed
+stretch makes the walk emit two **adjacent** ranges where one is correct. The byte set is unchanged,
+which is why every set-equality test missed it; the canonical form is not.
+
 P7 is satisfied **through the consuming codecs**, deliberately: `gamut-tiff`'s libtiff oracle
 round-trips real TIFF containers byte-for-byte through this crate's reader/writer (including
 BigTIFF, multi-IFD, and sub-IFD structure), and `gamut-exif`'s exiv2 oracle parses/round-trips bare
