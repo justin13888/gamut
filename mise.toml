@@ -66,10 +66,11 @@ depends_post = ["fmt-tooling-check"]
 #
 # Deliberately *not* `--all` on each manifest: that flag means "all packages, and also their local
 # path-based dependencies", so `gamut-dng-real-conformance` alone drags the whole `crates/` tree
-# back in — 181 of the 212 files such a loop reaches, every one already covered by the `fmt --all`
-# above — and reports one drifting file once per dependent crate that can see it. Iterating the
-# manifests bare visits each crate's own targets (lib, examples, tests) exactly once: the same
-# `tooling/` coverage, 31 file-visits instead of 459.
+# back in — 483 of the 518 files such a loop reaches, every one already covered by the `fmt --all`
+# above — and reports one drifting file once per dependent crate that can see it, up to 18 times
+# for a single file. Iterating the manifests bare visits each crate's own targets (lib, examples,
+# tests) exactly once: the same `tooling/` coverage — set-identical, all 35 files across all 15
+# crates — for 35 file-visits instead of 1131.
 [tasks.fmt-tooling]
 description = "Format the workspace-excluded tooling crates (`fmt --all` stops at the workspace boundary)"
 depends = ["ensure-nightly-rustfmt"]
