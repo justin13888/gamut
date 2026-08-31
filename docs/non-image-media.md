@@ -198,7 +198,14 @@ exception, stated as a rule rather than a list:
 | Cue sheets | FLAC `CUESHEET`, Matroska `Cues` | Typed |
 | Attachments | Matroska `Attachments`, ISOBMFF item payloads | Declared with name/MIME/extent; payload opaque |
 | Embedded pictures | ID3 `APIC`, FLAC `PICTURE`, Ogg `METADATA_BLOCK_PICTURE`, `ilst` `covr` | Typed wrapper; the image bytes route to gamut's own image crates — the vertical integration [#216] asks for |
-| C2PA / JUMBF manifests | ISOBMFF `uuid` box `c2ma`/`c2um`, placed after `ftyp` and before `moov` | Located and carried as a metadata block; validation belongs to [#239] and `c2pa-rs` |
+| C2PA / JUMBF manifests | Top-level ISOBMFF `uuid` box, user type `D8FEC3D6-1B0E-483C-9297-5828877EC481`, placed after `ftyp` and before both the first `mdat` and any `moov` | Located and carried as a metadata block; validation belongs to [#239] and `c2pa-rs` |
+
+> **On the box types.** `c2ma` / `c2um` are **not** ISOBMFF box types. They are the leading four
+> ASCII bytes of JUMBF *type UUIDs* (`c2ma` = `63326D61…`), naming manifest superboxes *inside* the
+> store. The ISOBMFF carrier is one top-level `uuid` box whose payload holds the JUMBF manifest
+> store (the `c2pa` superbox). Note also that there is **no item-based placement**: C2PA 2.4
+> Appendix A defines only the top-level `uuid` box for every BMFF-based asset, with HEIF and AVIF
+> named explicitly, so `infe`/`iloc`/`ipco` are not a route.
 
 The common thread: gamut is the thing that *finds and bounds* the payload correctly in a hostile
 file. It types the payload only where the type is structural (a chapter's timing) rather than
@@ -298,7 +305,7 @@ implemented.
 | | `ID32` box (ID3v2 in BMFF) | R/W | `gamut-id3` |
 | | XMP `uuid` box | R/W | `gamut-xmp` (exists) |
 | | `Exif` / QuickTime `udta` EXIF | R/W | `gamut-exif` (exists) |
-| | C2PA `uuid` (`c2ma`/`c2um`, JUMBF) | R/passthrough | `gamut-isobmff` → [#239] |
+| | C2PA top-level `uuid` (user type `D8FEC3D6-…-C481`; payload is the JUMBF manifest store) | R/passthrough | `gamut-isobmff` → [#239] |
 | | Track `colr`, `pasp`, `clli`, `mdcv` | R/W | `gamut-isobmff` (partly exists) |
 | Matroska / WebM | `Tags` / `SimpleTag` | R/W | `gamut-ebml` + `gamut-media` |
 | | `Chapters`, `Attachments`, `Cues` | R/W | `gamut-ebml` |
@@ -469,7 +476,7 @@ existing per-format layout. Implementation without the vendored primary source v
 | APE tags | APEv2 specification |
 | RIFF / WAVE | Microsoft/IBM MMRIFF 1.0; EBU Tech 3285 (BWF); EBU Tech 3306 (RF64) |
 | AIFF | Apple AIFF/AIFF-C specification |
-| C2PA | C2PA Technical Specification (BMFF embedding) — with [#239] |
+| C2PA | C2PA Technical Specification 2.4 (April 2026), §A.5 (BMFF embedding) — CC BY 4.0, so vendorable; staked by [#427] |
 
 ---
 
@@ -484,3 +491,4 @@ existing per-format layout. Implementation without the vendored primary source v
 [#217]: https://github.com/visualcommons/gamut/issues/217
 [#239]: https://github.com/visualcommons/gamut/issues/239
 [#258]: https://github.com/visualcommons/gamut/issues/258
+[#427]: https://github.com/visualcommons/gamut/issues/427
