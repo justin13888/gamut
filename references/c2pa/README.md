@@ -50,9 +50,9 @@ e3168d82cc995dc3eac5c3f2cebb88cd670f582544633d47df75aca16e9acfb4  C2PA_Schemas_2
 `kroki.io` at view time; none of those are vendored. Two of the missing figures are load-bearing for
 this epic — Figure 4 (the JUMBF assertion box, §8.4.2.3) and Figure 8 (the Manifest Store,
 §11.1.4.2). A third, Figure 16 (§18.6.6), sits under a clause the `gamut-heic` row cites but is
-validation-side, which this epic scopes out. **Read any figure from the PDF**, which is self-contained. The site CSS/JS are
-deliberately absent: the footer carves the Antora UI out of the CC BY grant as MPL-2.0, so it does
-not belong in this tree.
+validation-side, which this epic scopes out. **Read any figure from the PDF**, which is
+self-contained. The site CSS/JS are deliberately absent: the footer carves the Antora UI out of the
+CC BY grant as MPL-2.0, so it does not belong in this tree.
 
 The 2.4 index page's download menu only lists documents up to 2.3, but both `_attachments/` URLs
 above resolve. Nothing in #239 consumes the CDDL yet — it is vendored because the JUMBF-interior
@@ -203,8 +203,9 @@ So a gamut crate reading this length **must refuse rather than guess**: treat an
 8-byte header, or larger than the bytes remaining in the enclosing box, as "not a manifest store"
 and report absence — never an error, never a truncated payload. That rejects every sentinel value by
 construction, whatever 19566-5 turns out to call them, which is why the rule is stated as a bound
-rather than as a list of cases. Should a container ever legitimately need the extended forms, 19566-5 must be acquired
-first; that is the same procurement gate as the JPEG slice, on a narrower question.
+rather than as a list of cases. Should a container ever legitimately need the extended forms,
+19566-5 must be acquired first; that is the same procurement gate as the JPEG slice, on a narrower
+question.
 
 ## The host containers — no action needed here
 
