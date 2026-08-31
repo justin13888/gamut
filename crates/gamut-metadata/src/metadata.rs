@@ -59,7 +59,7 @@ pub struct Metadata {
     /// The embedded ICC colour profile, if present.
     pub icc: Option<IccProfile>,
     /// The C2PA manifest store as located in the file — the raw JUMBF superbox bytes (C2PA 2.4
-    /// §11.1.1) — if present.
+    /// §11.1.4.2) — if present.
     ///
     /// Opaque: the facade never parses, validates, or signs it. Extraction fills this field from a
     /// [`MetadataBlock::C2pa`], but [`encode`](Self::encode) **never** emits it — a manifest's hard

@@ -81,7 +81,7 @@
 //! # C2PA: a carrier that must not be copied forward
 //!
 //! [`Metadata::c2pa`] holds a C2PA manifest store exactly as a container found it — the JUMBF
-//! superbox of C2PA 2.4 §11.1.1 — and the facade never looks inside it.
+//! superbox of C2PA 2.4 §11.1.4.2 — and the facade never looks inside it.
 //!
 //! It is a **carrier**, not an [extension](#extensions-data-with-no-carrier). Extensions exist for
 //! data no file holds, so extraction never produces one and nothing serializes them; a manifest

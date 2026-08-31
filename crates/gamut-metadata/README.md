@@ -74,7 +74,7 @@ by the caller only.
 ## C2PA: a carrier that must not be copied forward
 
 `Metadata::c2pa` holds a C2PA manifest store exactly as a container found it — the JUMBF superbox of
-the C2PA Technical Specification 2.4 §11.1.1 — as opaque bytes. The facade never looks inside it.
+the C2PA Technical Specification 2.4 §11.1.4.2 — as opaque bytes. The facade never looks inside it.
 
 **Why a carrier and not an extension.** Extensions exist for data no file holds: extraction never
 produces one, and nothing serializes them. A manifest store is the opposite on the first count — it

@@ -24,7 +24,7 @@ pub enum MetadataBlock<'a> {
     Icc(&'a [u8]),
     /// A legacy IPTC-IIM dataset stream (e.g. the `0x0404` Photoshop image resource's payload).
     IptcIim(&'a [u8]),
-    /// A C2PA manifest store: the JUMBF superbox a container located (C2PA 2.4 §11.1.1), taken
+    /// A C2PA manifest store: the JUMBF superbox a container located (C2PA 2.4 §11.1.4.2), taken
     /// verbatim.
     ///
     /// The facade never looks inside it. Extraction hands the bytes to
