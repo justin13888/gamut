@@ -46,9 +46,10 @@ AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `d
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
-**Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit — issues #398/#399;
-4:2:0/4:2:2 and `MA1B` landed with #390/#391, and the alpha auxiliary, `Gray8` and monochrome
-surface with #396/#397); depth auxiliary items; the HDR
+**Deferred (planned, additive).** Every ☐ row below: pixel formats (4:2:0/4:2:2 and `MA1B` landed
+with #390/#391, the alpha auxiliary, `Gray8` and monochrome surface with #396/#397, and the
+10/12-bit AV1 **sample path** with #398 — but no `gamut-avif` input reaches that depth until #399);
+depth auxiliary items; the HDR
 surface beyond CICP *tagging* (`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a
 PQ/HLG transfer labels samples but does not by itself make a conformant HDR image); container
 derivations
@@ -140,7 +141,7 @@ adding it needs no container change.
 | `OBU_PADDING` / `OBU_REDUNDANT_FRAME_HEADER` | §5.7/§5.9 | ☐ | — |
 | `OBU_TILE_LIST` (large-scale tiles; forbidden in AVIF item) | §5.12 | ☐ | — |
 | seq_profile=1 (High) | Annex A §10.2; §6.4.1 | ✅ | M0 |
-| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ✅ (0 = 4:2:0 **and monochrome**; 2 = 4:2:2, coded; 12-bit deferred) | M2 |
+| seq_profile=0 (Main) / =2 (Professional, 12-bit/4:2:2) | Annex A §10.2 | ✅ (joint over layout × depth — 0 = 4:2:0 **and monochrome**, 1 = 4:4:4, 2 = 4:2:2 **or any layout at 12-bit**; `seq_profile_for`) | M2 |
 | `still_picture`=1, `reduced_still_picture_header`=1 | §5.5 | ✅ | M0 |
 | full seq header: multiple operating points (layered stills) | §5.5.1-.5.5.5 | ☐ | D |
 | full seq header: timing_info, decoder_model_info (sequences only) | §5.5.1-.5.5.5 | OOS | OOS |
@@ -149,8 +150,7 @@ adding it needs no container change.
 | `enable_filter_intra` (1 on lossy, 0 on lossless) / `enable_intra_edge_filter`=0 | §5.5 | ✅ | M0/M1 |
 | `enable_superres`/`cdef`/`restoration`=0 | §5.5 | ✅ (off) | M0 |
 | color_config: mc=0 identity, 4:4:4, high_bitdepth=0, full range | §5.5.2 | ✅ | M0 |
-| color_config: `mono_chrome` bit + its inferred-subsampling branch, profile-inferred subsampling, `chroma_sample_position` (`CSP_UNKNOWN`) | §5.5.2 | ✅ (`gamut_av1::headers`) | M2 |
-| color_config: high_bitdepth/twelve_bit (and the 12-bit coded subsampling flags) | §5.5.2 | ☐ | M2 |
+| color_config: high_bitdepth/twelve_bit, mono_chrome, subsampling, chroma_sample_position | §5.5.2 | ✅ (the whole §5.5.2 walk in `gamut_av1::headers`: `high_bitdepth`/`twelve_bit`, `mono_chrome` with its inferred-subsampling branch, profile-inferred subsampling plus profile 2's coded pair at 12-bit, and `chroma_sample_position` (`CSP_UNKNOWN`) at 4:2:0) | M2 |
 | frame_type=KEY_FRAME, show_frame=1 | §5.9.2 | ✅ | M0 |
 | INTRA_ONLY / INTER / SWITCH frame types | §5.9.2 | OOS | OOS |
 | `disable_cdf_update`=1 (static CDFs) | §5.9.2 | ✅ | M0 |
@@ -216,7 +216,7 @@ adding it needs no container change.
 | Component | Spec | Status | M |
 | --- | --- | --- | --- |
 | lossless dequant (q_idx 0) feeding WHT reconstruct | §7.12.2/.3 | ✅ | M0 |
-| dc_q/ac_q lookup tables (8/10/12-bit) | §7.12.2 | ✅ (8/10/12-bit tables; 8-bit exercised, 10/12-bit wired at M2) | M1/M2 |
+| dc_q/ac_q lookup tables (8/10/12-bit) | §7.12.2 | ✅ (all three rows exercised: 8-bit, and 10/12-bit via `encode_still_intra16_with`) | M1/M2 |
 | quantizer matrices (qm_y/u/v) | §9.5 | ☐ | M1 |
 | encoder quantization (dead-zone, RDOQ) | (encoder) | ☐ | M1 |
 
@@ -286,7 +286,8 @@ copy, which is what a decoder does for an independently decodable tile.
 | `AvifEncoder::{with_matrix, with_color_range}` colour selection | gamut-avif | ✅ (#335) | M2 |
 | `Rgba8` input + alpha-plane extraction; `Gray8` input | gamut-color/avif | ✅ (#397; `Planar8::from_rgba8_*_view`/`from_gray8_view`) | M3 |
 | Subsampled chroma on the `Rgba8` path (`with_chroma` is honoured for `Rgb8`, but an RGBA colour item is always 4:4:4 — `Planar8` has no 4-stride downsampler) | — | ☐ | M3 |
-| 10/12/16-bit & float HDR input buffers | gamut-color | ☐ | M2/M4 |
+| Subsampled chroma at 10/12-bit (`Planar16` carries a `ChromaSubsampling`, but has no `from_rgb16_matrix_subsampled` to produce one) | — | ☐ | M3 |
+| 10/12/16-bit & float HDR input buffers | gamut-color | ✅ (`Planar16` carries 10/12-bit planes into `gamut-av1`; float HDR ☐) | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |
 | AV1 **encode** backend seam (`Av1StillEncoder`/`Av1EncodeRequest`/`push_backend`/`AbiAv1StillEncoder`) | gamut-avif §M | ✅ | D |
