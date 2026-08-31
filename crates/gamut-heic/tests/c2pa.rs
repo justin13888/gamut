@@ -202,6 +202,27 @@ fn top_level_uuid_with_a_non_c2pa_user_type_is_not_reported() {
 }
 
 #[test]
+fn non_uuid_box_carrying_c2pa_framing_is_not_reported() {
+    // §A.5.1.1 fixes the box type as `uuid`; the extended type only qualifies a box that already is
+    // one. A vendor box whose body is a byte-for-byte copy of a ContentProvenanceBox body — the C2PA
+    // user type, `FullBox` 0/0, `manifest`, merkle offset and a valid store — is not a manifest
+    // store, and the box type is the only thing that says so.
+    let provenance = c2pa_box("manifest", 0, &store(), &[]);
+    let disguised = bx(b"mpvd", &provenance[8..]);
+    let data = file_with(&[disguised]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    assert!(c.c2pa().is_none());
+    assert_eq!(c.c2pa_manifest_stores().count(), 0);
+    // Still accounted for as a top-level box, exactly as before.
+    let mpvd = c
+        .boxes()
+        .find(|(ty, _)| ty == b"mpvd")
+        .expect("mpvd surfaced");
+    assert_eq!(mpvd.1, &provenance[8..]);
+}
+
+#[test]
 fn uuid_inside_meta_is_not_a_manifest_store() {
     // §A.5.3 places the ContentProvenanceBox at the top level. A `meta` child with identical framing
     // is not one — but it is still surfaced verbatim as an unknown meta box.
