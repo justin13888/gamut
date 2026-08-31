@@ -7,6 +7,7 @@ use gamut_icc::{ColorSpace, DeviceClass, IccProfile, RenderingIntent};
 
 use crate::chain;
 use crate::error::{CmmError, Result};
+use crate::optimize::PipelineOptimization;
 use crate::pipeline::Pipeline;
 
 /// A runnable colour transform: interleaved `f64` pixels in, interleaved `f64` pixels out.
@@ -51,11 +52,14 @@ pub trait Transform {
 
 /// Options for building an [`IccTransform`].
 ///
-/// `Default` matches lcms2's `cmsCreateTransform` defaults: [`RenderingIntent::Perceptual`],
-/// black-point compensation off (though see the v4 forcing rule on
-/// [`IccTransform::between`]). The adaptation state is fixed at lcms2's default `1.0`
-/// (observer fully adapted) — the only state this crate implements, which is also what makes
-/// the `chad` tag irrelevant to the absolute intent here.
+/// `Default` matches lcms2's `cmsCreateTransform` defaults in the two knobs lcms2 also
+/// defaults: [`RenderingIntent::Perceptual`] and black-point compensation off (though see the
+/// v4 forcing rule on [`IccTransform::between`]). Pipeline optimization deliberately does
+/// **not** follow lcms2's default — it defaults *off*, so this crate's documented
+/// stage-by-stage numerics are what an unconfigured transform produces. The adaptation state
+/// is fixed at lcms2's default `1.0` (observer fully adapted) — the only state this crate
+/// implements, which is also what makes the `chad` tag irrelevant to the absolute intent
+/// here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TransformOptions {
     /// The rendering intent, selecting each profile's per-intent tables
@@ -67,6 +71,11 @@ pub struct TransformOptions {
     /// exclusive — lcms2 forces the flag off there, `cmscnvrt.c:1126-1127`), and forced *on*
     /// by the v4 rule documented on [`IccTransform::between`].
     pub black_point_compensation: bool,
+    /// How far to collapse the linked pipeline before evaluating it ([`crate::optimize`]).
+    /// [`PipelineOptimization::None`] — the default — evaluates the link stage by stage,
+    /// exactly as this crate's conformance gate pins it; the other levels trade a stated
+    /// precision budget for pixel-buffer throughput.
+    pub optimization: PipelineOptimization,
 }
 
 impl Default for TransformOptions {
@@ -74,6 +83,7 @@ impl Default for TransformOptions {
         Self {
             intent: RenderingIntent::Perceptual,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         }
     }
 }
@@ -190,13 +200,25 @@ impl IccTransform {
         let intents = [options.intent; 2];
         let bpc_flags = [options.black_point_compensation; 2];
         let pipeline = chain::link_chain(&[src, dst], &intents, &bpc_flags)?;
-        Ok(Self { pipeline })
+        Self::from_pipeline(pipeline, options.optimization)
     }
 
     /// Wraps an internally-built pipeline (the chain/devicelink/proofing constructors in
-    /// [`crate::chain`]).
-    pub(crate) fn from_pipeline(pipeline: Pipeline) -> Self {
-        Self { pipeline }
+    /// [`crate::chain`]), applying the requested optimization level.
+    ///
+    /// The **one funnel** every [`IccTransform`] constructor passes through, so the
+    /// optimization knob cannot be forgotten by a new one.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Pipeline::optimized`] reports.
+    pub(crate) fn from_pipeline(
+        pipeline: Pipeline,
+        optimization: PipelineOptimization,
+    ) -> Result<Self> {
+        Ok(Self {
+            pipeline: pipeline.optimized(optimization)?,
+        })
     }
 
     /// The number of device channels consumed per source pixel.
@@ -250,7 +272,7 @@ mod icc_transform_tests {
         TagData, U8Fixed8, XyzNumber,
     };
 
-    use super::{IccTransform, Transform, TransformOptions, is_empty_layer};
+    use super::{IccTransform, PipelineOptimization, Transform, TransformOptions, is_empty_layer};
     use crate::pipeline::Stage;
 
     const D65: [f64; 3] = [0.9504, 1.0, 1.0889];
@@ -358,6 +380,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::IccAbsoluteColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -367,6 +390,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -388,6 +412,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::IccAbsoluteColorimetric,
                 black_point_compensation: true, // must be ignored under absolute
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -411,6 +436,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -434,6 +460,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -449,6 +476,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::IccAbsoluteColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -471,6 +499,7 @@ mod icc_transform_tests {
         let options = TransformOptions {
             intent: RenderingIntent::IccAbsoluteColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         };
         let xyz_to_lab = IccTransform::between(&src, &dst, options).unwrap();
         assert_eq!(
@@ -494,6 +523,7 @@ mod icc_transform_tests {
         let rel = TransformOptions {
             intent: RenderingIntent::MediaRelativeColorimetric,
             black_point_compensation: false,
+            optimization: PipelineOptimization::None,
         };
         let xyz_to_lab = IccTransform::between(&src, &dst, rel).unwrap();
         assert_eq!(
@@ -519,6 +549,7 @@ mod icc_transform_tests {
                 TransformOptions {
                     intent,
                     black_point_compensation: false,
+                    optimization: PipelineOptimization::None,
                 },
             )
             .unwrap();
@@ -530,6 +561,7 @@ mod icc_transform_tests {
                 TransformOptions {
                     intent,
                     black_point_compensation: true,
+                    optimization: PipelineOptimization::None,
                 },
             )
             .unwrap();
@@ -545,6 +577,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -558,6 +591,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::Perceptual,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -569,6 +603,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::Perceptual,
                 black_point_compensation: true,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -583,6 +618,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::Perceptual,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -601,6 +637,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: true,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -610,6 +647,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -631,6 +669,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: true,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -640,6 +679,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();
@@ -700,6 +740,7 @@ mod icc_transform_tests {
             TransformOptions {
                 intent: RenderingIntent::MediaRelativeColorimetric,
                 black_point_compensation: false,
+                optimization: PipelineOptimization::None,
             },
         )
         .unwrap();

@@ -619,6 +619,7 @@ dependencies = [
 name = "gamut-cmm"
 version = "0.1.0"
 dependencies = [
+ "divan",
  "gamut-color",
  "gamut-core",
  "gamut-icc",

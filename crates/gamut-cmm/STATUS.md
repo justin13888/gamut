@@ -31,6 +31,7 @@ that add behaviour (#325 onward).
 | P5 | #328 | Profile linking: LUT (`lut8`/`lut16`/`mAB `/`mBA `) profile pairs — per-intent tag selection with lcms2's fallback, PCS encode/decode seams, `Stage::XyzToLab`/`LabToXyz` + the Lab-PCS RGB shaper lift | ✅ |
 | P6 | #329 | Rendering intents + black-point compensation: `IccTransform::between`/`TransformOptions` (the first end-to-end transform), ICC-absolute white scaling (`intent`), black-point detection + compensation (`bpc`) | ✅ |
 | P7 | #330 | Transform chaining (`IccTransform::chain`), device links (`IccTransform::device_link`), soft proofing (`IccTransform::proofing`/`ProofingOptions`), gamut check (`GamutCheck`), typed pixel buffers (`image`), and the epic's max-ΔE₀₀ conformance gate | ✅ |
+| P8 | #372 | Pipeline optimization: the opt-in `PipelineOptimization` knob (`optimize`) — identity elision, matrix folding, curve joining, CLUT resampling — threaded through every transform constructor, default off, with divan throughput benches | ✅ |
 
 ## Settled decisions (P2, tone curves)
 
@@ -298,11 +299,73 @@ that add behaviour (#325 onward).
   Processing is chunked (256 pixels) through one reused `f64` scratch pair — constant extra
   memory in the image size; planar buffers gather/scatter per chunk into the same
   interleaved core (identical numerics, one extra copy).
-- **Pipeline optimization deferred to #372:** transforms evaluate stage by stage in `f64`;
-  lcms2's stage collapsing / CLUT resampling / curve joining (`cmsopt.c`) is a performance
-  concern tracked as the follow-up issue #372, not a v1 correctness concern — the
-  conformance gate's LOOSE configuration measures exactly the behavioural gap those
-  optimizations introduce on the oracle's side.
+- **Pipeline optimization is opt-in (P8, #372):** transforms still evaluate stage by stage
+  **by default** — `PipelineOptimization::None`, the value every `TransformOptions`/
+  `ProofingOptions` default carries, so v1's documented numerics are what an unconfigured
+  transform produces. The collapsed forms are a knob, not a policy, precisely because the
+  conformance gate's LOOSE configuration already measures what they cost.
+
+## Settled decisions (P8, pipeline optimization)
+
+- **One knob, on every constructor.** `PipelineOptimization` is a fieldless `#[repr(u32)]`
+  enum with permanent append-only discriminants (the workspace C-portability convention, as
+  on `ClutInterpolation`), carried as a field of `TransformOptions` and `ProofingOptions`.
+  `IccTransform::device_link` and `GamutCheck::new` were widened from a bare
+  `RenderingIntent` to the same `TransformOptions` so no constructor can silently miss the
+  knob (a breaking signature change, taken while the crate is still unpublished; both
+  document that they consume `intent` + `optimization` and ignore `black_point_compensation`,
+  which neither construction has ever applied). Every `IccTransform` constructor funnels
+  through `IccTransform::from_pipeline`, which is where the level is applied.
+- **Three levels, cumulative.** `None` (default) → `Collapse` (identity elision + adjacent
+  affine folding, including `MatrixN` shape changes) → `Precalculate` (+ curve joining and
+  whole-pipeline CLUT resampling). Elision and folding run to a fixpoint; termination is
+  structural, since each rewrite strictly shortens the stage list.
+- **Resampling is gated on the domain, not guessed.** The whole chain collapses into one
+  CLUT only when its first stage confines its input to `[0, 1]` (`Curves`/`Clut`/`Clamp`) and
+  its last stage confines its output likewise — so a PCS-entering pipeline (which the link
+  module always starts with the PCS *encode* matrix) is never resampled onto a unit-cube grid
+  it does not live on, and a PCS-leaving one is never squeezed into a `ClutTable`'s
+  normalized nodes. Also declined: a chain of fewer than two stages (already one lookup), and
+  a grid above 2²⁰ nodes (`f64` nodes make the ceiling worth pinning; lcms2 has none).
+- **lcms2's constants, not invented ones.** Grid resolution follows
+  `_cmsReasonableGridpointsByColorspace`'s default arm (`cmspcs.c`): 33 nodes/axis up to 3
+  inputs, 17 for CMYK, 7 above four. Joined curves tabulate at 4096 points
+  (`PRELINEARIZATION_POINTS`, `cmsopt.c:418`). One deliberate divergence: no white-point
+  "scum dot" fixup (lcms2's `PatchLUT`) is applied — the same fixup the conformance gate
+  disables on the oracle's side with `NOWHITEONWHITEFIXUP`.
+- **Exactness where it is free.** Identity elision is exact-equality only (a near-identity
+  matrix is a real, if small, colour operation and stays); joining a structurally-identity
+  curve returns the other curve unchanged rather than tabulating it.
+
+### Precision budget (P8)
+
+Measured over the conformance battery (`tests/oracle_conformance.rs`,
+`optimized_transforms_stay_inside_the_precision_budget`, lcms2 2.19):
+
+| level | metric | measured max | asserted | justification |
+|-------|--------|--------------|----------|---------------|
+| `Collapse` | device units vs our own `None` | 1.00e-15 | `< 1e-12` | folding only re-associates the same products; 1e-15 is ~3 ulps of a sample. Measured in device units because the gate's ΔE₀₀ lens is an lcms2 transform whose internal floats are f32 — through the lens this reads a flat 0 |
+| `Precalculate` | ΔE₀₀ vs our own `None` | 2.58e-1 shaper / 5.07e-2 LUT | `< 6e-1` / `< 2.0` | **the LOOSE row of the conformance table above, verbatim** — `Precalculate` builds the very construction (grid-33/17 resampled CLUT, 4096-point joined curves) that row already measures on lcms2's side, so the budget is "no worse than lcms2's own default path", not a fresh number |
+| `Precalculate` | ΔE₀₀ vs lcms2 at default flags | 3.53e-3 shaper / 7.12e-3 LUT | `< 6e-1` / `< 2.0` | the evidence for that reading: matching lcms2's construction lands the optimized output **two decades closer** to lcms2's optimized output than the unoptimized path's 3.34e-1 |
+
+### Throughput (P8)
+
+`cargo bench -p gamut-cmm` (`benches/pipeline.rs`, divan; 256×256 interleaved `u8` buffer,
+median of 100 samples; one machine, so read the ratios, not the absolute times):
+
+| scenario | `None` | `Collapse` | `Precalculate` | lcms2 default | lcms2 `NOOPTIMIZE` |
+|----------|--------|------------|----------------|---------------|--------------------|
+| sRGB → Display P3 | 8.53 ms (7.7 Mpx/s) | 8.19 ms (8.0) | **3.03 ms (21.6)** | 0.46 ms (141) | 8.15 ms (8.0) |
+| sRGB → CMYK `prtr` (grid-9) | 15.04 ms (4.4) | 14.93 ms (4.4) | **3.26 ms (20.1)** | 1.22 ms (53.7) | 15.06 ms (4.4) |
+
+So: `Precalculate` is **2.8×/4.6×** the default path's throughput, `Collapse` alone is worth
+a few percent (it removes stages, not `powf` calls), and this crate's stage-by-stage
+evaluation sits right on lcms2's own stage-by-stage baseline. The remaining gap to lcms2's
+default path is representational, not structural — lcms2 runs a `u16` fixed-point CLUT under
+8-bit formatters where this crate interpolates `f64` (the deferred integer/`f32` fast paths
+below). Building the resampled transform costs 4.8 ms against 0.16 ms unoptimized (35 937
+pipeline evaluations for a 33³ grid), so the tier pays off from roughly one 256×256 buffer
+onward; its `f64` node table is ~6.9 MB at 3×3 channels.
 
 ## Conformance gate (P7)
 
@@ -342,7 +405,7 @@ intents), with our excess pinned to exactly `0.0` in-gamut.
 | iccMAX (`ICC.2:2019`) | A separate, parallel next-generation format (spectral PCS, v5 header); not an extension of ICC.1 and unimplementable against the lcms2 oracle. See [`references/icc`](../../references/icc/README.md). | ✗ out of scope |
 | `multiProcessElementsType` (`mpet`) + `DToBx`/`BToDx` tags | The v4/iccMAX general-purpose processing pipeline; `gamut-icc` preserves it as `Raw`, and this CMM does not evaluate it. | ✗ out of scope |
 | Integer/`f32` fast paths | Evaluation is `f64` throughout at Tier-1 (correctness only, not bit-reproducible — the `gamut-color` posture, see [`references/color`](../../references/color/README.md)). | ☐ unplanned |
-| Pipeline optimization / stage collapsing | lcms2 collapses chains into resampled LUTs by default (`cmsopt.c`); v1 evaluates stage by stage. Follow-up issue **#372** tracks it. | ☐ deferred (#372) |
+| White-point ("scum dot") fixup on a resampled CLUT | lcms2's `PatchLUT` snaps the input white node onto the output white in a precalculated table (`cmsFLAGS_NOWHITEONWHITEFIXUP` disables it, as the conformance gate does). An lcms2 aesthetic with no ICC.1 basis; the resampling pass does not replicate it. | ✗ out of scope |
 | Public per-hop intent/BPC arrays | The chain internals already take them (proofing uses them); the public `chain` API stays single-intent until a consumer needs lcms2's `cmsCreateExtendedTransform` shape. | ☐ deferred |
 | Named-colour profiles | No continuous pixel transform; rejected with a typed error everywhere. | ✗ out of scope |
 | K-preserving intents (`INTENT_PRESERVE_K_*`) | lcms2 extensions beyond the four ICC intents (`cmscnvrt.c` dispatch table); no ICC.1 basis. | ☐ unplanned |
@@ -413,7 +476,22 @@ devicelink `LinkMode` seam/trilinear unit pins, and the `image` suite (round-hal
 saturation pins incl. NaN, interleaved == scalar path exactly at both widths across chunk
 boundaries, planar == interleaved, alpha copy/drop/opaque-fill in both layouts, the
 Rgb8→Cmyk8 model change, every `UnsupportedPixelFormat`/`ImageGeometry`/`BufferLength`
-error, empty buffers, and a doctest). Gates: `mise run test` / `lint` /
+error, empty buffers, and a doctest). P8 adds `tests/optimize.rs` (the knob is off by
+default; optimization off reproduces `between` **bit-exactly** against the same link
+composed independently out of `device_to_pcs`/`pcs_to_device`; each pass observed through
+the public `Pipeline::optimized` API — folding to a single matrix, joining to a single curve
+set, resampling a shaper pair into one grid-33 tetrahedral CLUT; every constructor accepting
+the knob; and the shape invariance the knob must preserve) plus the optimization unit layer
+in `src/optimize.rs` (per-pass rewrites with hand-computed folded coefficients, the
+rectangular `MatrixN` fold across a shape change, the fixpoint that only an elision uncovers,
+exact-only identity elision against a one-ulp near-identity, the exact identity-curve join,
+node-exact resampling, lcms2's grid-point rule, and each of the four reasons resampling
+declines — PCS entry, PCS exit, a single-stage chain, and the node ceiling, with the
+one-channel-narrower grid that still fits proving the ceiling is a boundary and not a
+blanket refusal), the conformance gate's optimized-budget battery
+(`optimized_transforms_stay_inside_the_precision_budget` — the table above), and
+`benches/pipeline.rs` (divan throughput, off vs the
+two levels vs lcms2 at default and `NOOPTIMIZE` flags). Gates: `mise run test` / `lint` /
 `fmt-check` / `coverage` (≥ 80%) / `mise run mutants-crate gamut-cmm` (equivalent
 float-boundary survivors are excluded in `.cargo/mutants.toml` with per-mutant proofs, the
 workspace convention).
