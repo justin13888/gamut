@@ -135,12 +135,22 @@ impl C2paBoxPurpose {
 /// # What bounds the store
 ///
 /// Not the enclosing box length: C2PA 2.4 §A.5.3 permits "zero or more unused padding bytes" after
-/// the store. The store is a JUMBF superbox, and a JUMBF box begins with "a box length (LBox, as a
-/// 4-byte big-endian unsigned integer); a box type (TBox, 4-byte big-endian unsigned integer …)"
-/// (§8.4.2.3), so that leading `LBox` is what bounds it and what [`bytes`](Self::bytes) is trimmed
-/// to. An `LBox` smaller than the 8-byte JUMBF header it must itself cover, or one overrunning the
-/// enclosing `uuid` box, means the bytes are not a manifest store: nothing is reported for that box,
-/// and it is never turned into an error.
+/// the store. The store is a JUMBF superbox, and a JUMBF box opens with a 4-byte big-endian length
+/// (`LBox`) covering the whole box; that length is what bounds the store and what
+/// [`bytes`](Self::bytes) is trimmed to.
+///
+/// The general JUMBF box grammar belongs to ISO/IEC 19566-5, which C2PA 2.4 references but does not
+/// restate and which is not vendored here. Within the C2PA specification the `LBox` width and
+/// endianness are traceable only *incidentally*: §8.4.2.3, titled "Hashing JUMBF Boxes", describes
+/// "a box length (LBox, as a 4-byte big-endian unsigned integer); a box type (TBox, 4-byte big-endian
+/// unsigned integer, with a value of `c2sh` (for C2PA salt hash))" while defining that salt box in
+/// particular. It therefore evidences the *shape* of a JUMBF header, not the manifest-store
+/// superbox's own type code. Only the width and endianness are relied on here; no box type code is
+/// read or compared, because none is traceable to a vendored source.
+///
+/// An `LBox` smaller than the 8-byte header it must itself cover, or one overrunning the enclosing
+/// `uuid` box, means the bytes are not a manifest store: nothing is reported for that box, and it is
+/// never turned into an error.
 ///
 /// # The range is observability, not an exclusion range
 ///
@@ -180,7 +190,7 @@ impl<'a> HeifContainer<'a> {
         self.c2pa_manifest_stores().next()
     }
 
-    /// Every C2PA manifest store in the file, in file order.
+    /// Every C2PA manifest store among the **top-level boxes of the primary stream**, in file order.
     ///
     /// Only *top-level* `uuid` boxes are considered, which is where C2PA 2.4 §A.5.3 puts the box
     /// ("before the first 'mdat' box … after the 'ftyp' box"); a `uuid` box nested inside `meta` is
@@ -188,6 +198,17 @@ impl<'a> HeifContainer<'a> {
     /// [`unknown_meta_boxes`](Self::unknown_meta_boxes) instead. The actual position of the box is
     /// reported as found and never enforced: a store placed outside the window §A.5.3 mandates is
     /// still reported, with its true range.
+    ///
+    /// # What is not scanned
+    ///
+    /// The scan walks [`segments`](Self::segments), which stops emitting [`SegmentKind::Box`] at a
+    /// second top-level `ftyp` — from there the rest of the file is one
+    /// [`SegmentKind::AppendedStream`] — or at a malformed trailing box, which becomes a
+    /// [`SegmentKind::Trailer`]. Bytes inside those two regions are never examined. One real case is
+    /// affected: §A.5.3 requires an `update` box to be the last box of the file, so on a motion-photo
+    /// HEIC that appends a second whole file, an `update` box sitting after the appended stream is
+    /// not found. Reaching into an appended vendor stream is a container-level decision this lens
+    /// does not take on its own.
     ///
     /// A top-level `uuid` box whose user type is not [`C2PA_UUID`], whose `FullBox` version or flags
     /// are non-zero, whose `box_purpose` is not one of [`C2paBoxPurpose`]'s, or whose contents are

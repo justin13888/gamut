@@ -65,15 +65,21 @@ Reachable through the umbrella crate's `heic` feature.
 
 ### C2PA
 
-`c2pa()` returns the first C2PA manifest store in the file, `c2pa_manifest_stores()` every one of
-them in file order (a file mid-update carries both an `original` and an `update` box, C2PA 2.4
-§A.5.3). The reported range covers the store *exactly* — box header, extended type, `FullBox`
-version/flags, `box_purpose` string, the merkle offset that precedes the store for the `manifest` and
-`original` purposes, and any trailing padding are all excluded, the store being bounded by its own
-outer JUMBF `LBox`. It is a **locator**, not a validator: nothing inside the store is parsed, no hash
-is computed, no signature is checked, and no verdict about the file's provenance is reached. The
-range is for observability and byte accounting — it is not a BMFF exclusion range, since
-`c2pa.hash.bmff.v3` excludes by box path rather than by byte offset.
+`c2pa()` returns the first C2PA manifest store found, `c2pa_manifest_stores()` every one of them in
+file order (a file mid-update carries both an `original` and an `update` box, C2PA 2.4 §A.5.3). The
+reported range covers the store *exactly* — box header, extended type, `FullBox` version/flags,
+`box_purpose` string, the 8-byte merkle offset, and any trailing padding are all excluded, the store
+being bounded by its own outer JUMBF `LBox`. It is a **locator**, not a validator: nothing inside the
+store is parsed, no hash is computed, no signature is checked, and no verdict about the file's
+provenance is reached. The range is for observability and byte accounting — it is not a BMFF
+exclusion range, since `c2pa.hash.bmff.v3` excludes by box path rather than by byte offset.
+
+Two limits worth knowing. §A.5.3 states where the store begins for `manifest` and `original` (after
+the merkle offset) but says nothing at all for `update`, while the `c2pa-rs` reference implementation
+writes that offset for `update` too — so `update` is *probed*: offset 8 first, falling back to offset
+0, taking the first that yields a valid `LBox` bound and reporting nothing if neither does. And the
+scan covers the top-level boxes of the primary stream only, so a box inside an appended vendor stream
+(a motion-photo HEIC's second file) or a trailer is not seen.
 
 ## Conformance
 
