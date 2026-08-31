@@ -720,6 +720,35 @@ mod tests {
     }
 
     #[test]
+    fn matrix_subsampled_chroma_is_the_exact_mean_of_the_group_it_covers() {
+        // Not just "different from the un-averaged sample": the actual value, so a widening or
+        // narrowing that collapsed every sample to a constant would be caught. Each 4:2:0 chroma
+        // sample is the rounded mean of the 2x2 full-resolution group beneath it.
+        let rgb = stripe();
+        let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(4, 2).unwrap()).unwrap();
+        let m = matrix(BitDepth::Twelve);
+        let full = Planar16::from_rgb16_matrix_view(img, m);
+        let sub = Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs420).unwrap();
+
+        let (cw, _) = sub.plane_dimensions(1);
+        for plane in 1..3 {
+            for cx in 0..cw as usize {
+                let group: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                    .iter()
+                    .map(|&(dx, dy)| u32::from(full.plane(plane)[dy * 4 + cx * 2 + dx]))
+                    .sum();
+                assert_eq!(
+                    u32::from(sub.plane(plane)[cx]),
+                    (group + 2) / 4,
+                    "plane {plane} sample {cx}"
+                );
+            }
+        }
+        // And the values are not all equal, so an averaging bug cannot hide behind a flat plane.
+        assert_ne!(sub.plane(1)[0], sub.plane(2)[0]);
+    }
+
+    #[test]
     fn matrix_subsampled_rejects_monochrome() {
         let rgb = [0u16; 3];
         let img = ImageRef::<Rgb16>::new(&rgb, Dimensions::new(1, 1).unwrap()).unwrap();
