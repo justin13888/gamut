@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use gamut_av1::Av1Colour;
 use gamut_avif::{AbiAv1StillEncoder, Av1EncodeRequest, Av1StillEncoder, AvifEncoder};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{BitDepth, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr};
+use gamut_color::{
+    BitDepth, ChromaSubsampling, ColorRange, MatrixCoefficients, Planar8, RgbToYcbcr,
+};
 use gamut_core::{Dimensions, EncodeImage, Error, ErrorKind, ImageRef, Result, Rgb8};
 
 /// The fixture the golden files in `tests/data` were produced from: a 34×18 deterministic RGB ramp.
@@ -47,8 +49,18 @@ fn assert_owned_error(error: &Error, kind: ErrorKind, message: &'static str) {
 /// backend can hand back verbatim, so "the backend was used" is observable without a second AV1
 /// encoder. `colour` must match the request's, or the crate rejects the stream for signalling a
 /// different colour configuration than it asked for.
-fn builtin_obus(base_q_idx: u8, colour: Av1Colour) -> Vec<u8> {
-    let planes = fixture_planes(colour);
+/// The chroma an encoder with this colour codes: lossless pins 4:4:4 (identity requires it), and
+/// the lossy default is 4:2:0.
+fn chroma_for(colour: Av1Colour) -> ChromaSubsampling {
+    if colour == Av1Colour::default() {
+        ChromaSubsampling::Cs444
+    } else {
+        ChromaSubsampling::Cs420
+    }
+}
+
+fn builtin_obus(base_q_idx: u8, colour: Av1Colour, chroma: ChromaSubsampling) -> Vec<u8> {
+    let planes = fixture_planes(colour, chroma);
     gamut_av1::encode_still_intra_with(&planes, base_q_idx, colour)
         .unwrap()
         .0
@@ -56,16 +68,15 @@ fn builtin_obus(base_q_idx: u8, colour: Av1Colour) -> Vec<u8> {
 }
 
 /// The fixture in the plane layout `colour` describes: identity GBR, or YCbCr through its matrix.
-fn fixture_planes(colour: Av1Colour) -> Planar8 {
+fn fixture_planes(colour: Av1Colour, chroma: ChromaSubsampling) -> Planar8 {
+    let rgb = fixture();
     match colour.matrix {
-        MatrixCoefficients::Identity => Planar8::from_rgb8_identity(&fixture(), W, H).unwrap(),
-        matrix => Planar8::from_rgb8_matrix(
-            &fixture(),
-            W,
-            H,
-            RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight).unwrap(),
-        )
-        .unwrap(),
+        MatrixCoefficients::Identity => Planar8::from_rgb8_identity(&rgb, W, H).unwrap(),
+        matrix => {
+            let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(W, H).unwrap()).unwrap();
+            let m = RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight).unwrap();
+            Planar8::from_rgb8_matrix_subsampled(img, m, chroma).unwrap()
+        }
     }
 }
 
@@ -79,9 +90,11 @@ fn fixture_planes(colour: Av1Colour) -> Planar8 {
 /// The goldens are re-captured whenever the built-in AV1 encoder deliberately changes what it
 /// codes; they pin the seam's additivity, not the codec's output forever. Re-captured when
 /// `gamut-av1` enabled CDF adaptation (`disable_cdf_update = 0`), which shrank these two files
-/// from 4426/1864 bytes to 3407/1557 with an unchanged reconstruction, and again when the lossy
-/// encoder moved to BT.709 YCbCr, taking `lossy50` to 1323. The lossless golden is unaffected by
-/// the colour change — lossless stays on the identity matrix.
+/// from 4426/1864 bytes to 3407/1557 with an unchanged reconstruction; again when the lossy
+/// encoder moved to BT.709 YCbCr, taking `lossy50` to 1323; and again when the lossy default
+/// became 4:2:0, taking it to 763 — a 42% reduction at the same quality. The lossless golden is
+/// unaffected by both colour changes: lossless stays on the identity matrix at 4:4:4, which AV1
+/// §6.4.2 requires of it.
 #[test]
 fn default_encoder_output_is_byte_identical() {
     for (name, encoder) in [
@@ -177,13 +190,16 @@ impl Av1StillEncoder for Scripted {
         assert_eq!((planes.width(), planes.height()), (W, H));
         // The planes must be in exactly the layout the request's colour describes — identity GBR
         // for the lossless job, YCbCr through the matrix for the lossy one.
-        let expected = fixture_planes(req.colour());
+        // The planes must match the request's chroma as well as its colour: the request states
+        // both, and a backend that ignored either would be handed samples it could not describe.
+        assert_eq!(planes.subsampling(), req.chroma());
+        let expected = fixture_planes(req.colour(), req.chroma());
         for p in 0..3 {
             assert_eq!(planes.plane(p), expected.plane(p), "plane {p}");
         }
         self.record("encode");
         match &self.result {
-            Outcome::Passthrough => Ok(builtin_obus(req.base_q_idx(), req.colour())),
+            Outcome::Passthrough => Ok(builtin_obus(req.base_q_idx(), req.colour(), req.chroma())),
             Outcome::Bytes(b) => Ok(b.clone()),
             Outcome::Fail(msg) => Err(Error::Unsupported(msg)),
         }
@@ -419,21 +435,118 @@ fn backend_stream_must_be_a_reduced_still_picture() {
 
 /// Only `seq_profile = 1` (High — 8-bit 4:4:4) can be described by the v1 `av1C`/`colr` boxes.
 #[test]
-fn backend_stream_must_use_profile_1() {
-    // seq_profile(3)=0 | still_picture=1 | reduced=1 | seq_level_idx[0](5)=0 | width/height bits.
-    // 0b000_1_1_000 = 0x18, then level low bits 0 and frame_width_bits_minus_1 = 5 …
-    let payload = [0x18u8, 0b0001_0101, 0b0100_0000, 0x00, 0x00, 0x00];
+fn backend_stream_must_use_a_defined_profile() {
+    // seq_profile(3)=3 | still_picture=1 | reduced=1 | seq_level_idx[0](5)=0 | width/height bits.
+    // 0b011_1_1_000 = 0x78. Values 3..7 are reserved (§6.4.1), so the parser cannot describe the
+    // `color_config()` layout that would follow and must refuse before reading it.
+    let payload = [0x78u8, 0b0001_0101, 0b0100_0000, 0x00, 0x00, 0x00];
     let mut obus = vec![0x0A, payload.len() as u8];
     obus.extend_from_slice(&payload);
     let log = log();
     let mut encoder = AvifEncoder::new();
-    encoder.push_backend(Scripted::new("p0", true, Outcome::Bytes(obus), &log));
-    let err = encode(&encoder).expect_err("profile 0 rejected");
+    encoder.push_backend(Scripted::new("p3", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("reserved profile rejected");
     assert_owned_error(
         &err,
         ErrorKind::Unsupported,
-        "AVIF: AV1 backend stream must use seq_profile 1 (8-bit 4:4:4)",
+        "AVIF: AV1 backend stream must use seq_profile 0, 1 or 2",
     );
+}
+
+#[test]
+fn backend_stream_must_signal_the_requested_chroma() {
+    // The default lossy encoder asks for 4:2:0 (profile 0); hand back an otherwise-conformant
+    // 4:4:4 stream. `av1C` mirrors the sequence header, so accepting this would publish a chroma
+    // format that disagrees with the payload (AV1-ISOBMFF §2.3.4).
+    let colour = Av1Colour {
+        matrix: MatrixCoefficients::Bt709,
+        ..Av1Colour::default()
+    };
+    let stream = builtin_obus(127, colour, ChromaSubsampling::Cs444);
+    let log = log();
+    let mut encoder = AvifEncoder::lossy(50);
+    encoder.push_backend(Scripted::new(
+        "wrong-chroma",
+        true,
+        Outcome::Bytes(stream),
+        &log,
+    ));
+    let err = encode(&encoder).expect_err("4:4:4 stream for a 4:2:0 request is rejected");
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend stream signals a different chroma format than requested",
+    );
+}
+
+#[test]
+fn backend_stream_shortcut_must_not_contradict_its_profile() {
+    // The §5.5.2 sRGB shortcut infers 4:4:4 whatever the profile declares, so a profile-0 stream
+    // carrying BT.709 + sRGB + identity asserts two chroma formats at once. libaom asserts against
+    // exactly this construction, so no conformant encoder produces one.
+    //
+    // seq_profile(3)=0 | still_picture=1 | reduced=1 | seq_level_idx[0](5)=0, then the width/height
+    // bit counts and dimensions, six enable flags, high_bitdepth=0, mono_chrome=0,
+    // color_description_present=1, and cp=1 / tc=13 / mc=0.
+    let mut w = BitVec::default();
+    w.push_bits(0, 3); // seq_profile
+    w.push_bits(1, 1); // still_picture
+    w.push_bits(1, 1); // reduced_still_picture_header
+    w.push_bits(0, 5); // seq_level_idx[0]
+    w.push_bits(5, 4); // frame_width_bits_minus_1
+    w.push_bits(4, 4); // frame_height_bits_minus_1
+    w.push_bits(W - 1, 6);
+    w.push_bits(H - 1, 5);
+    w.push_bits(0, 6); // the six enable flags
+    w.push_bits(0, 1); // high_bitdepth
+    w.push_bits(0, 1); // mono_chrome (coded because the profile is not High)
+    w.push_bits(1, 1); // color_description_present_flag
+    w.push_bits(1, 8); // color_primaries = BT.709
+    w.push_bits(13, 8); // transfer_characteristics = sRGB
+    w.push_bits(0, 8); // matrix_coefficients = identity
+    let payload = w.finish();
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+    let log = log();
+    let mut encoder = AvifEncoder::lossy(50);
+    encoder.push_backend(Scripted::new(
+        "shortcut-p0",
+        true,
+        Outcome::Bytes(obus),
+        &log,
+    ));
+    let err = encode(&encoder).expect_err("shortcut on profile 0 is contradictory");
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend stream takes the sRGB color_config shortcut, which infers 4:4:4, but \
+         its seq_profile declares subsampled chroma",
+    );
+}
+
+/// A minimal MSB-first bit writer, for hand-assembling sequence-header payloads.
+#[derive(Default)]
+struct BitVec {
+    bytes: Vec<u8>,
+    bit: u32,
+}
+
+impl BitVec {
+    fn push_bits(&mut self, value: u32, n: u32) {
+        for i in (0..n).rev() {
+            if self.bit == 0 {
+                self.bytes.push(0);
+            }
+            let b = ((value >> i) & 1) as u8;
+            let last = self.bytes.len() - 1;
+            self.bytes[last] |= b << (7 - self.bit);
+            self.bit = (self.bit + 1) % 8;
+        }
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 /// A backend stream whose `color_config()` disagrees with the request is rejected: the container
@@ -443,7 +556,7 @@ fn backend_stream_must_use_profile_1() {
 fn backend_stream_must_signal_the_requested_colour() {
     // The default lossy encoder asks for BT.709; hand back an otherwise-conformant stream that
     // signals identity instead.
-    let identity_stream = builtin_obus(127, Av1Colour::default());
+    let identity_stream = builtin_obus(127, Av1Colour::default(), ChromaSubsampling::Cs444);
     let log = log();
     let mut encoder = AvifEncoder::lossy(50);
     encoder.push_backend(Scripted::new(
@@ -485,7 +598,7 @@ fn backend_stream_must_signal_the_requested_colour() {
         with_backend.push_backend(Scripted::new(
             "right-colour",
             true,
-            Outcome::Bytes(builtin_obus(base_q_idx, colour)),
+            Outcome::Bytes(builtin_obus(base_q_idx, colour, chroma_for(colour))),
             &log,
         ));
         assert_eq!(
@@ -666,7 +779,7 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
         matrix: MatrixCoefficients::Bt709,
         ..Av1Colour::default()
     };
-    let obus = builtin_obus(127, colour);
+    let obus = builtin_obus(127, colour, ChromaSubsampling::Cs420);
     // Two chunks, so the adapter's accumulation (not just a single hand-off) is exercised.
     let (head, tail) = obus.split_at(7);
     let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
@@ -691,7 +804,7 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
     );
     // The lowered plane pointers are the encoder's own BT.709 planes, not the raw RGB — the
     // adapter must hand a backend exactly what the request's colour describes.
-    let planes = fixture_planes(colour);
+    let planes = fixture_planes(colour, ChromaSubsampling::Cs420);
     let first = [planes.plane(0)[0], planes.plane(1)[0], planes.plane(2)[0]];
     assert_ne!(
         first,
@@ -706,7 +819,14 @@ fn abi_adapter_collects_sink_bytes_and_lowers_the_descriptors() {
             H,
             8,
             3,
-            [W as usize, W as usize, W as usize, 0],
+            // Per-plane strides: luma at full width, chroma halved by the 4:2:0 request. A single
+            // luma stride for all three would hand a backend a chroma plane it cannot address.
+            [
+                W as usize,
+                W.div_ceil(2) as usize,
+                W.div_ceil(2) as usize,
+                0,
+            ],
             first,
         ))
     );
@@ -804,5 +924,46 @@ fn abi_adapter_exposes_the_wrapped_encoder() {
     assert!(
         Arc::ptr_eq(&inner.0, &stub.0),
         "the same encoder comes back"
+    );
+}
+
+#[test]
+fn backend_stream_may_use_the_professional_profile() {
+    // `seq_profile` 2 is 4:2:2, which the parser must read rather than refuse — the layout of
+    // `color_config()` depends on the profile, so accepting it means implementing its branches.
+    // Proven by feeding a *valid* profile-2 header to a 4:2:0 request and getting the chroma
+    // mismatch, which is a check strictly after the profile gate: a parser that still rejected
+    // profile 2 outright would report the profile error instead.
+    let mut w = BitVec::default();
+    w.push_bits(2, 3); // seq_profile = Professional
+    w.push_bits(1, 1); // still_picture
+    w.push_bits(1, 1); // reduced_still_picture_header
+    w.push_bits(0, 5); // seq_level_idx[0]
+    w.push_bits(5, 4); // frame_width_bits_minus_1
+    w.push_bits(4, 4); // frame_height_bits_minus_1
+    w.push_bits(W - 1, 6);
+    w.push_bits(H - 1, 5);
+    w.push_bits(0, 6); // the six enable flags
+    w.push_bits(0, 1); // high_bitdepth
+    w.push_bits(0, 1); // mono_chrome (coded because the profile is not High)
+    w.push_bits(1, 1); // color_description_present_flag
+    w.push_bits(1, 8); // color_primaries = BT.709
+    w.push_bits(13, 8); // transfer_characteristics = sRGB
+    w.push_bits(1, 8); // matrix_coefficients = BT.709 (so no sRGB shortcut)
+    w.push_bits(1, 1); // color_range = full
+    // 4:2:2 codes no chroma_sample_position.
+    w.push_bits(0, 1); // separate_uv_delta_q
+    let payload = w.finish();
+    let mut obus = vec![0x0A, payload.len() as u8];
+    obus.extend_from_slice(&payload);
+
+    let log = log();
+    let mut encoder = AvifEncoder::lossy(50); // asks for 4:2:0
+    encoder.push_backend(Scripted::new("p2", true, Outcome::Bytes(obus), &log));
+    let err = encode(&encoder).expect_err("4:2:2 stream for a 4:2:0 request is rejected");
+    assert_owned_error(
+        &err,
+        ErrorKind::InvalidInput,
+        "AVIF: AV1 backend stream signals a different chroma format than requested",
     );
 }

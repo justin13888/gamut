@@ -36,10 +36,19 @@ pub struct DecodedImage {
     /// Bits per component (8, 10, or 12).
     pub bit_depth: u8,
     /// `[Y, U, V]` planes, each in raster order with no row padding; samples widened to `u16`.
+    ///
+    /// The chroma planes are sized by [`yuv_format`](Self::yuv_format), so they are smaller than
+    /// luma for a subsampled image. Their dimensions come from libavif's own accessors, not from a
+    /// re-derivation here — the point of a differential oracle is that the geometry is the
+    /// reference implementation's notion of it.
     pub planes: [Vec<u16>; 3],
+    /// The raw `avifPixelFormat` (1 = 4:4:4, 2 = 4:2:2, 3 = 4:2:0, 4 = monochrome), deliberately
+    /// left as libavif's own value rather than mapped into a gamut type.
+    pub yuv_format: u32,
 }
 
-/// Decodes the first frame of an AVIF file into its 4:4:4 YUV planes (8/10/12-bit, widened to `u16`).
+/// Decodes the first frame of an AVIF file into its YUV planes (8/10/12-bit, widened to `u16`),
+/// each at its own plane dimensions.
 ///
 /// # Errors
 ///
@@ -85,17 +94,13 @@ unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
     if !matches!(depth, 8 | 10 | 12) {
         return Err(format!("unexpected bit depth: {depth}-bit"));
     }
-    if image.yuvFormat != sys::AVIF_PIXEL_FORMAT_YUV444 {
-        return Err(format!(
-            "expected 4:4:4, got pixel format {}",
-            image.yuvFormat
-        ));
+    if image.yuvFormat == sys::AVIF_PIXEL_FORMAT_YUV400 {
+        return Err("monochrome is not handled by decode_avif".to_string());
     }
-    let w = image.width as usize;
-    let h = image.height as usize;
 
-    // SAFETY: a successfully decoded 4:4:4 image owns three planes of `h` rows; `yuvRowBytes[p]`
-    // (the byte stride) spaces consecutive rows of plane `p`.
+    // SAFETY: a successfully decoded image owns three planes; `avifImagePlaneWidth/Height` give
+    // plane `p`'s own extent (equal to luma at 4:4:4, halved on the subsampled axes otherwise) and
+    // `yuvRowBytes[p]` (the byte stride) spaces its consecutive rows.
     unsafe {
         let mut planes = [Vec::new(), Vec::new(), Vec::new()];
         for (p, plane) in planes.iter_mut().enumerate() {
@@ -103,13 +108,16 @@ unsafe fn extract(image: &sys::avifImage) -> Result<DecodedImage, String> {
             if base.is_null() {
                 return Err(format!("plane {p} is null"));
             }
-            *plane = copy_plane(base, image.yuvRowBytes[p] as usize, w, h, depth);
+            let pw = sys::avifImagePlaneWidth(image, p as i32) as usize;
+            let ph = sys::avifImagePlaneHeight(image, p as i32) as usize;
+            *plane = copy_plane(base, image.yuvRowBytes[p] as usize, pw, ph, depth);
         }
         let [y, u, v] = planes;
         Ok(DecodedImage {
             width: image.width,
             height: image.height,
             bit_depth: depth,
+            yuv_format: image.yuvFormat,
             planes: [y, u, v],
         })
     }

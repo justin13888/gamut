@@ -4,8 +4,8 @@
 //! the [`Pixel`](gamut_core::Pixel) vocabulary (`Rgb8`, `Rgba8`, …) in `gamut-core`. [`BitDepth`] is
 //! wired into the AV1 reconstruction; [`ChromaSubsampling`] models all four AV1 layouts and carries
 //! the plane geometry ([`ChromaSubsampling::chroma_dimensions`]) that [`Planar8`](crate::Planar8)
-//! uses, but only `Cs444` (4:4:4) is reachable from an encode path today — the subsampled coding
-//! path is M2 (see `gamut-avif/STATUS.md`).
+//! uses. `Cs444` and `Cs420` are coded end to end; `Cs400` (monochrome) is modelled only (see
+//! `gamut-avif/STATUS.md`).
 
 /// Bits per sample of a coded plane.
 ///

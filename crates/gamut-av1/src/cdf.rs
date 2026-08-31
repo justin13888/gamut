@@ -626,6 +626,56 @@ pub static EOB_PT_16: [[[[u16; 5]; 2]; 2]; 4] = [
         ],
     ],
 ];
+/// `Default_Eob_Pt_32_Cdf[idx]` for all four quantizer contexts, indexed `[qctx]` then [ptype][ctx].
+///
+/// Reached by the 32-coefficient transforms `TX_4X8`/`TX_8X4`, which only occur once chroma is
+/// subsampled: at 4:4:4 no block yields a 32-coefficient residual.
+pub static EOB_PT_32: [[[[u16; 6]; 2]; 2]; 4] = [
+    // qctx 0
+    [
+        [
+            [400, 520, 977, 2102, 6542, 32768],
+            [210, 405, 1315, 3326, 7537, 32768],
+        ],
+        [
+            [2636, 4273, 7588, 11794, 20401, 32768],
+            [1786, 3179, 6902, 11357, 19054, 32768],
+        ],
+    ],
+    // qctx 1
+    [
+        [
+            [989, 1249, 2019, 4151, 10785, 32768],
+            [313, 441, 1099, 2917, 8562, 32768],
+        ],
+        [
+            [8394, 10352, 13932, 18855, 26014, 32768],
+            [2578, 4124, 8181, 13670, 24234, 32768],
+        ],
+    ],
+    // qctx 2
+    [
+        [
+            [2515, 3003, 4452, 8162, 16041, 32768],
+            [574, 821, 1836, 5089, 13128, 32768],
+        ],
+        [
+            [13468, 16303, 20361, 25105, 29281, 32768],
+            [3542, 5502, 10415, 16760, 25644, 32768],
+        ],
+    ],
+    // qctx 3
+    [
+        [
+            [4617, 5709, 8446, 13584, 23135, 32768],
+            [1156, 1702, 3675, 9274, 20539, 32768],
+        ],
+        [
+            [22086, 24282, 27010, 29770, 31743, 32768],
+            [7699, 10897, 20891, 26926, 31628, 32768],
+        ],
+    ],
+];
 /// `Default_Eob_Extra_Cdf[idx][TX_4X4]` for all four quantizer contexts, indexed `[qctx]` then [ptype][eobPt-3].
 pub static EOB_EXTRA: [[[[u16; 2]; 9]; 2]; 4] = [
     // qctx 0
@@ -4996,6 +5046,8 @@ pub struct CdfContext {
     pub coeff_br: [[[Cdf<4>; 21]; 2]; BR_TX_SZ_CTX],
     /// `TileEobPt16Cdf`, indexed by plane type.
     pub eob_pt_16: [Cdf<5>; 2],
+    /// `EobPt32Cdf` — the 32-coefficient transforms, reachable only with subsampled chroma.
+    pub eob_pt_32: [Cdf<6>; 2],
     /// `TileEobPt64Cdf`, indexed by plane type.
     pub eob_pt_64: [Cdf<7>; 2],
     /// `TileEobPt128Cdf`, indexed by plane type.
@@ -5093,6 +5145,7 @@ impl CdfContext {
                 rows2(&COEFF_BR_32X32[qctx]),
             ],
             eob_pt_16: std::array::from_fn(|p| Cdf::new(EOB_PT_16[qctx][p][0])),
+            eob_pt_32: std::array::from_fn(|p| Cdf::new(EOB_PT_32[qctx][p][0])),
             eob_pt_64: std::array::from_fn(|p| Cdf::new(EOB_PT_64[qctx][p][0])),
             eob_pt_128: std::array::from_fn(|p| Cdf::new(EOB_PT_128[qctx][p][0])),
             eob_pt_256: std::array::from_fn(|p| Cdf::new(EOB_PT_256[qctx][p][0])),
@@ -5216,6 +5269,8 @@ mod context_tests {
             assert_eq!(c.coeff_base[2][1][7].probs(), COEFF_BASE_16X16[qctx][1][7]);
             assert_eq!(c.coeff_br[3][0][5].probs(), COEFF_BR_32X32[qctx][0][5]);
             assert_eq!(c.eob_pt_16[1].probs(), EOB_PT_16[qctx][1][0]);
+            assert_eq!(c.eob_pt_32[0].probs(), EOB_PT_32[qctx][0][0]);
+            assert_eq!(c.eob_pt_32[1].probs(), EOB_PT_32[qctx][1][0]);
             assert_eq!(c.eob_pt_1024[0].probs(), EOB_PT_1024[qctx][0]);
         }
         // TX_64X64 shares the TX_32X32 `coeff_br` row (`Min(txSzCtx, 3)`), so the table has four

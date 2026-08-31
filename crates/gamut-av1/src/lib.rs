@@ -16,15 +16,16 @@
 //!
 //! The colour signalling is selectable: [`encode_still_intra_with`] takes an [`Av1Colour`] (CICP
 //! primaries/transfer/matrix plus the signal range) and mirrors it into `color_config()` and, via
-//! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. Planes stay 4:4:4 — a
-//! luma–chroma matrix changes what the samples *mean*, not their geometry — so the caller supplies
-//! either GBR planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
-//! The encoder carries each plane's geometry independently, so a subsampled `Planar8` is described
-//! correctly end to end, but the *coding* path is still 4:4:4 and a subsampled source is rejected
-//! (the residual loop, entropy contexts and CfL all step chroma over the luma extent).
+//! [`EncodedStill::config`], the container's `av1C`/`colr` boxes. The caller supplies either GBR
+//! planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
 //!
-//! The remaining surface (10/12-bit, 4:2:0/4:2:2, monochrome, quantizer matrices, and the
-//! AVIF-level alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
+//! Chroma sampling comes from the [`Planar8`](gamut_color::Planar8) itself: 4:4:4 and 4:2:0 are
+//! coded, and `seq_profile` follows the format (Main for 4:2:0, High for 4:4:4). The identity
+//! matrix requires 4:4:4 (§6.4.2) and a subsampled identity encode is refused. 4:2:2's geometry
+//! and signalling are in place but its coding path is not yet complete.
+//!
+//! The remaining surface (10/12-bit, 4:2:2's coding path, quantizer matrices, and the AVIF-level
+//! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
 //! `tile` = partition/prediction/coefficient coding (§5.11), [`transform`] = forward/inverse 2-D

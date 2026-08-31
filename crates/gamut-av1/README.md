@@ -62,12 +62,16 @@ The colour signalling is selectable on top of that: `encode_still_intra_with` ta
 the sequence header's `color_config()` and the `av1C`/`colr` values `gamut-avif` stamps. A
 luma–chroma matrix changes what the samples mean, not their geometry.
 
-**Monochrome** (`mono_chrome = 1`, `seq_profile = 0`) is the one geometry that is selectable: pass
-a `ChromaSubsampling::Cs400` `Planar8` — one luma plane, no chroma — and the encoder codes a single
+Chroma sampling is selectable alongside it: `Planar8` carries its own `ChromaSubsampling`, and the
+`seq_profile` follows it (Main for 4:2:0, High for 4:4:4). The identity matrix is refused below
+4:4:4, which AV1 §6.4.2 requires.
+
+**Monochrome** (`mono_chrome = 1`, `seq_profile = 0`) is a geometry of its own: pass a
+`ChromaSubsampling::Cs400` `Planar8` — one luma plane, no chroma — and the encoder codes a single
 plane and drops every chroma syntax element the spec gates on `NumPlanes > 1`. Use
 `Av1Colour::monochrome()` rather than the default: §5.5.2 infers `subsampling_x = subsampling_y = 1`
 for a monochrome stream and §6.4.2 permits `MC_IDENTITY` only at 0/0, so the default identity matrix
-is rejected. The subsampled geometries (4:2:0 / 4:2:2) are still deferred.
+is rejected. 4:2:2 (Professional, `seq_profile = 2`) is the one layout still deferred.
 
 The wider AV1 surface — lossy DCT/ADST, more intra modes, in-loop filters, inter coding for image
 sequences — is tracked row by row in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md), whose
