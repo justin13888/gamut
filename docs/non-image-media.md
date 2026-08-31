@@ -476,7 +476,7 @@ existing per-format layout. Implementation without the vendored primary source v
 | APE tags | APEv2 specification |
 | RIFF / WAVE | Microsoft/IBM MMRIFF 1.0; EBU Tech 3285 (BWF); EBU Tech 3306 (RF64) |
 | AIFF | Apple AIFF/AIFF-C specification |
-| C2PA | C2PA Technical Specification 2.4 (April 2026), §A.5 (BMFF embedding) — CC BY 4.0, so vendorable; staked by [#427] |
+| C2PA | C2PA Technical Specification 2.4 (2026-04-01), §A.5 (BMFF embedding) — CC BY 4.0 (already vendored, `references/c2pa`) |
 
 ---
 
@@ -491,4 +491,3 @@ existing per-format layout. Implementation without the vendored primary source v
 [#217]: https://github.com/visualcommons/gamut/issues/217
 [#239]: https://github.com/visualcommons/gamut/issues/239
 [#258]: https://github.com/visualcommons/gamut/issues/258
-[#427]: https://github.com/visualcommons/gamut/issues/427
