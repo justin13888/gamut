@@ -14,7 +14,8 @@ the libheif differential-oracle slice (delivered — `tests/conformance.rs` over
 `tooling/libheif-oracle` dev-dependency); **S5** = the backend-registry slice (delivered —
 `src/backend.rs`, issue #273: `HevcDecoders` + the `gamut-codec-abi` adapter); **S6** = the
 high-bit-depth presentation slice (delivered — issue #303: `decode_item_rgba16` and the wider
-matrix set, retrofitted **additively** onto the S3 pipeline).
+matrix set, retrofitted **additively** onto the S3 pipeline); **S7** = the C2PA manifest-store
+locator slice (delivered — issue #429 under the #239 epic: `src/c2pa.rs`).
 
 This crate builds on [`gamut-isobmff` v1](../gamut-isobmff/STATUS.md): the box grammar, item model,
 property/reference parsing, and motion-photo *tolerance* already ship there. This ledger mirrors
@@ -82,6 +83,22 @@ The 8-bit surface still refuses a >8-bit frame rather than narrowing it, since t
 honest error for silent quality loss; 8-bit BT.601 keeps `gamut-color`'s libwebp-exact inverse so
 its output is byte-identical to every previous release.
 
+**Implemented (S7, issue #429).** `HeifContainer::c2pa` / `c2pa_manifest_stores` locate the C2PA
+manifest store carried in a top-level `uuid` `ContentProvenanceBox` (C2PA 2.4 §A.5.1) and report it
+as opaque bytes plus its exact byte range. The range covers the store *only*: the box header, the
+16-byte extended type, the `FullBox` version/flags, the null-terminated `box_purpose` string, the
+8-byte merkle offset that §A.5.3 places in front of the store for the `manifest` and `original`
+purposes (and pointedly not for `update`), and any trailing padding are all excluded, the store's own
+outer JUMBF `LBox` (§8.4.2.3) being what bounds it rather than the box length. `merkle` boxes and
+every unrecognised `box_purpose` are not manifest stores and are not reported; a `uuid` box nested in
+`meta` is not one either and keeps surfacing through `unknown_meta_boxes`. Malformed framing yields
+`None`, never an error — this is a lens over bytes that happen to be present. A mid-update file
+carrying both an `original` and an `update` store reports both, in file order, with their purposes:
+choosing the *active* manifest is a validator's judgement and this crate reaches no verdict. The
+reported range is for observability and byte accounting only — it is **not** a BMFF exclusion range,
+since `c2pa.hash.bmff.v3` excludes by box path, not by byte offset (§18.6, §A.5.6). Nothing inside
+the store is parsed, no hash is computed and no signature is checked.
+
 **Deferred (planned, additive).** The rows below. Each lands additively — new crate items or new
 `#[non_exhaustive]` variants — never a reshape of the shipped surface.
 
@@ -103,6 +120,9 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Trailing non-box bytes (Samsung SEF trailer) retained as `SegmentKind::Trailer` (post ftyp+meta) | `references/heif` §8b | ✅ | S1 |
 | Stop rules identical to `gamut_isobmff::read` (first ftyp wins; trailer only after ftyp+meta) | 14496-12 | ✅ | S1 |
 | Meta-level accounting: `meta`/`iprp` children not consumed by the model surfaced as `UnknownBox` (e.g. `dinf`/`dref`, `uuid`) | 14496-12 | ✅ | S1 |
+| C2PA manifest store located in a top-level `uuid` `ContentProvenanceBox`: opaque bytes + exact byte range, purposes `manifest`/`original`/`update` (`c2pa`, `c2pa_manifest_stores`) | C2PA 2.4 §A.5.1, §A.5.3, §8.4.2.3; `references/c2pa` | ✅ | S7 |
+| C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` | C2PA 2.4 §A.5 | ☐ | later |
+| C2PA validation: JUMBF interior parse, `c2pa.hash.bmff.v3` hard binding, signature/trust verification | C2PA 2.4 §18.6, §A.5.6 | ☐ | user / #239 |
 | `ftyp` brands + `is_hevc_still` (`heic`/`heix`/`heim`/`heis`, or `mif1`+`hvcC` primary) | 23008-12; `references/heif` §7 | ✅ | S1 |
 | Sequence brands `msf1`/`hevc`/`hevx` (image sequences) | `references/heif` §7 | OOS | OOS |
 

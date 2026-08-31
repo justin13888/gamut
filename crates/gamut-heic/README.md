@@ -34,6 +34,8 @@ workspace README's "Scope").
 - **`HeifContainer`** — the total, byte-accounting representation. `HeifContainer::parse(&[u8])`
   walks the top-level boxes into a contiguous, gap-free `segments` list covering `0..len` exactly,
   and shadow-walks `meta`/`iprp` for boxes the semantic layer does not consume (`unknown_meta_boxes`).
+  `c2pa()` / `c2pa_manifest_stores()` are lenses over that walk: they locate the C2PA manifest store
+  in a top-level `uuid` `ContentProvenanceBox` and hand back its opaque bytes and exact byte range.
 - **`HeifImage` / `HeifItem`** — the role-typed semantic view over the primary still-image stream
   (wrapping `gamut_isobmff::IsoBmffImage`): brands and `is_hevc_still()`, the validated primary
   item, item kinds and typed properties (`ispe`/`irot`/`imir`/`clap`/`pasp`/`pixi`/`colr`/`clli`/
@@ -55,7 +57,23 @@ if image.is_hevc_still() {
 }
 // Byte accounting: nothing is dropped.
 if let Some(appended) = container.appended_stream() { /* opaque motion-photo MP4 */ }
+// C2PA provenance: located, never validated.
+if let Some(store) = container.c2pa() {
+    let (bytes, range, purpose) = (store.bytes, store.range, store.purpose);
+}
 ```
+
+### C2PA
+
+`c2pa()` returns the first C2PA manifest store in the file, `c2pa_manifest_stores()` every one of
+them in file order (a file mid-update carries both an `original` and an `update` box, C2PA 2.4
+§A.5.3). The reported range covers the store *exactly* — box header, extended type, `FullBox`
+version/flags, `box_purpose` string, the merkle offset that precedes the store for the `manifest` and
+`original` purposes, and any trailing padding are all excluded, the store being bounded by its own
+outer JUMBF `LBox`. It is a **locator**, not a validator: nothing inside the store is parsed, no hash
+is computed, no signature is checked, and no verdict about the file's provenance is reached. The
+range is for observability and byte accounting — it is not a BMFF exclusion range, since
+`c2pa.hash.bmff.v3` excludes by box path rather than by byte offset.
 
 Reachable through the umbrella crate's `heic` feature.
 
@@ -79,7 +97,9 @@ C libraries build from source on the first run. See [`references/heif`](../../re
 
 Container-parsing / byte-accounting / role layer, the typed `hvcC` record + NAL demux, the pluggable
 `HevcDecoder` decode pipeline, and the libheif differential oracle are all implemented (issue #238),
-as is the high-bit-depth (10/12-bit, BT.709/BT.2020) `Rgba16` presentation surface (issue #303).
+as is the high-bit-depth (10/12-bit, BT.709/BT.2020) `Rgba16` presentation surface (issue #303). The
+C2PA manifest-store locator (issue #429, under the #239 provenance epic) is implemented as a lens
+over the byte-accounting walk.
 Encoding is **not** provided. See [`STATUS.md`](STATUS.md) for the full component ledger.
 
 ## License
