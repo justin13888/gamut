@@ -34,6 +34,9 @@
 //! ```
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+mod testrng;
+
 pub mod av1;
 pub mod jpeg;
 pub mod math;

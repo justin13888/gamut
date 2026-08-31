@@ -80,20 +80,7 @@ pub fn forward_identity(t: &mut [i64], n: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct Lcg(u64);
-    impl Lcg {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            self.0
-        }
-        fn coeff(&mut self, range: i64) -> i64 {
-            (self.next() >> 33) as i64 % (2 * range + 1) - range
-        }
-    }
+    use crate::testrng::Lcg;
 
     #[test]
     fn inverse_scales_match_spec_constants() {
@@ -146,7 +133,7 @@ mod tests {
     fn forward_then_inverse_recovers_within_rounding() {
         // The non-power-of-two scales (and the ÷2 / ÷4) round, so the round trip is exact only to
         // within a small tolerance — the inherent identity-transform loss.
-        let mut rng = Lcg(0xfadd_1357_2468_9bdf);
+        let mut rng = Lcg::new(0xfadd_1357_2468_9bdf);
         for n in 2..=5u32 {
             let len = 1usize << n;
             for _ in 0..500 {

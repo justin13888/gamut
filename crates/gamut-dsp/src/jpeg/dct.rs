@@ -192,27 +192,7 @@ pub fn idct8x8(block: &mut [i32; 64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Small deterministic LCG (reproducible test blocks, no `rand` dev-dependency). Same
-    /// multiplier/increment as the AV1 WHT tests.
-    struct Lcg(u64);
-    impl Lcg {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            self.0
-        }
-        /// Level-shifted 8-bit sample in `-128..=127` (§A.3.1, `P = 8`).
-        fn sample_8bit(&mut self) -> i32 {
-            ((self.next() >> 40) % 256) as i32 - 128
-        }
-        /// Level-shifted 12-bit sample in `-2048..=2047` (§A.3.1, `P = 12`).
-        fn sample_12bit(&mut self) -> i32 {
-            ((self.next() >> 40) % 4096) as i32 - 2048
-        }
-    }
+    use crate::testrng::Lcg;
 
     /// Largest tolerated gap between an integer transform output and the ideal real-valued §A.3.3
     /// result. A correct nearest-integer rounding is within `0.5`; the `1e-6` slack absorbs the
@@ -281,11 +261,11 @@ mod tests {
     /// diverges by far more than half a unit.
     #[test]
     fn fdct_matches_direct_formula() {
-        let mut rng = Lcg(0x1234_5678_9abc_def0);
+        let mut rng = Lcg::new(0x1234_5678_9abc_def0);
         for _ in 0..600 {
             let mut block = [0i32; 64];
             for s in &mut block {
-                *s = rng.sample_8bit();
+                *s = rng.level_shifted_sample(8);
             }
             let mut got = block;
             fdct8x8(&mut got);
@@ -294,7 +274,7 @@ mod tests {
         for _ in 0..200 {
             let mut block = [0i32; 64];
             for s in &mut block {
-                *s = rng.sample_12bit();
+                *s = rng.level_shifted_sample(12);
             }
             let mut got = block;
             fdct8x8(&mut got);
@@ -305,11 +285,11 @@ mod tests {
     /// Same battery for the inverse: [`idct8x8`] must round the independent direct double sum.
     #[test]
     fn idct_matches_direct_formula() {
-        let mut rng = Lcg(0x0fed_cba9_8765_4321);
+        let mut rng = Lcg::new(0x0fed_cba9_8765_4321);
         for _ in 0..600 {
             let mut coeffs = [0i32; 64];
             for c in &mut coeffs {
-                *c = rng.sample_8bit();
+                *c = rng.level_shifted_sample(8);
             }
             let mut got = coeffs;
             idct8x8(&mut got);
@@ -318,7 +298,7 @@ mod tests {
         for _ in 0..200 {
             let mut coeffs = [0i32; 64];
             for c in &mut coeffs {
-                *c = rng.sample_12bit();
+                *c = rng.level_shifted_sample(12);
             }
             let mut got = coeffs;
             idct8x8(&mut got);
@@ -438,11 +418,11 @@ mod tests {
     /// for these random blocks the combined per-sample error never exceeds one.
     #[test]
     fn forward_inverse_round_trip() {
-        let mut rng = Lcg(0xdead_beef_cafe_0007);
+        let mut rng = Lcg::new(0xdead_beef_cafe_0007);
         for _ in 0..400 {
             let mut original = [0i32; 64];
             for s in &mut original {
-                *s = rng.sample_8bit();
+                *s = rng.level_shifted_sample(8);
             }
             let mut block = original;
             fdct8x8(&mut block);

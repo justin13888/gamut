@@ -266,22 +266,7 @@ mod tests {
     use std::f64::consts::PI;
 
     use super::*;
-
-    /// Small deterministic LCG (reproducible, no `rand` dependency), matching `wht.rs`.
-    struct Lcg(u64);
-    impl Lcg {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            self.0
-        }
-        /// Coefficient in [-range, range].
-        fn coeff(&mut self, range: i64) -> i64 {
-            (self.next() >> 33) as i64 % (2 * range + 1) - range
-        }
-    }
+    use crate::testrng::Lcg;
 
     /// Orthonormal-relative DCT weight: the DC (k = 0) basis carries `1/√2` versus the AC bases.
     fn dct_weight(k: usize) -> f64 {
@@ -350,7 +335,7 @@ mod tests {
 
     #[test]
     fn inverse_dct_matches_naive_idct() {
-        let mut rng = Lcg(0x1234_5678_9abc_def0);
+        let mut rng = Lcg::new(0x1234_5678_9abc_def0);
         for n in 2..=6u32 {
             let len = 1usize << n;
             for _ in 0..200 {
@@ -367,7 +352,7 @@ mod tests {
 
     #[test]
     fn forward_dct_matches_naive_dct() {
-        let mut rng = Lcg(0x0fed_cba9_8765_4321);
+        let mut rng = Lcg::new(0x0fed_cba9_8765_4321);
         for n in 2..=6u32 {
             let len = 1usize << n;
             for _ in 0..200 {
@@ -384,7 +369,7 @@ mod tests {
     fn forward_then_inverse_is_proportional_identity() {
         // A DCT-II followed by the DCT-III inverse is a scaled identity; with both transforms
         // correct, inverse_dct(forward_dct(x)) must be proportional to x.
-        let mut rng = Lcg(0xdead_beef_cafe_0001);
+        let mut rng = Lcg::new(0xdead_beef_cafe_0001);
         for n in 2..=6u32 {
             let len = 1usize << n;
             for _ in 0..100 {
