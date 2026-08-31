@@ -18,10 +18,14 @@ workspace = true
 [features]
 default = []
 serde = ["dep:serde"]
+# Exposes the `invariants` module to the out-of-tree fuzz driver. `doc(hidden)`, no SemVer
+# guarantee, and never enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
+test-support = []
 
 [dependencies]
 serde = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 serde_json.workspace = true
