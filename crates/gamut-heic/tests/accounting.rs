@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{bx, cat, clean_file, ftyp, hvc1_item};
+use common::{bx, c2pa_box, cat, clean_file, ftyp, hvc1_item, jumbf_store};
 use gamut_heic::{HeifContainer, SegmentKind};
 
 /// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
@@ -156,4 +156,31 @@ fn malformed_box_before_meta_is_a_parse_error() {
         b"\x00\x00\x00\x40junk-oversized-box".to_vec(),
     ]);
     assert!(HeifContainer::parse(&data).is_err());
+}
+
+#[test]
+fn c2pa_bearing_file_accounts_for_every_byte() {
+    // The C2PA ContentProvenanceBox is an ordinary top-level `uuid` box, so the every-byte invariant
+    // must hold over it unchanged — and the located store must sit inside that box's segment.
+    let clean = clean_file(1, vec![hvc1_item(1, vec![7, 7, 7, 7])]);
+    let store = jumbf_store(b"opaque-manifest-store");
+    let provenance = c2pa_box("manifest", Some(0), &store, &[0xEE; 8]);
+    let data = cat(&[clean.clone(), provenance.clone()]);
+    let c = HeifContainer::parse(&data).unwrap();
+
+    assert_covers(&c, data.len());
+    assert_eq!(box_types(&c), vec![*b"ftyp", *b"meta", *b"mdat", *b"uuid"]);
+    assert!(c.appended_stream().is_none());
+    assert!(c.trailer().is_none());
+
+    let uuid_segment = c.segments().last().unwrap();
+    assert_eq!(uuid_segment.range, clean.len()..data.len());
+
+    let found = c.c2pa().expect("manifest store located");
+    assert_eq!(found.bytes, store.as_slice());
+    // Strictly inside the box segment: the framing before it and the padding after it are still
+    // claimed by that segment, so no byte is orphaned or double-counted.
+    assert!(uuid_segment.range.start < found.range.start);
+    assert!(found.range.end < uuid_segment.range.end);
+    assert_eq!(&data[found.range.clone()], store.as_slice());
 }
