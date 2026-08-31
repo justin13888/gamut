@@ -33,6 +33,10 @@ pub fn leb128_len(mut value: u64) -> usize {
 mod tests {
     use super::*;
 
+    /// The sweep both length and round-trip claims run over: each byte-count boundary
+    /// (127/128), a multi-byte value, and the 32-bit ceiling.
+    const VALUES: &[u64] = &[0, 1, 127, 128, 300, 0xffff, 0x10_0000, u32::MAX as u64];
+
     /// Minimal reference LEB128 reader for round-trip assertions.
     fn read_leb128(bytes: &[u8]) -> (u64, usize) {
         let mut value = 0u64;
@@ -68,14 +72,27 @@ mod tests {
     }
 
     #[test]
-    fn len_matches_written_and_roundtrips() {
-        for &v in &[0u64, 1, 127, 128, 300, 0xffff, 0x10_0000, u32::MAX as u64] {
+    fn leb128_len_predicts_what_the_writer_emits() {
+        // `leb128_len` computes the encoded size without encoding, so it is a second,
+        // independent implementation of the same length rule -- not a round trip. A defect in
+        // either one alone shows up here.
+        for &v in VALUES {
             let mut out = Vec::new();
             write_leb128(&mut out, v);
+
             assert_eq!(out.len(), leb128_len(v), "len mismatch for {v}");
+        }
+    }
+
+    #[test]
+    fn reading_back_a_written_value_recovers_it_and_its_length() {
+        for &v in VALUES {
+            let mut out = Vec::new();
+            write_leb128(&mut out, v);
+
             let (decoded, used) = read_leb128(&out);
             assert_eq!(decoded, v);
-            assert_eq!(used, out.len());
+            assert_eq!(used, out.len(), "reader consumed the wrong span for {v}");
         }
     }
 }
