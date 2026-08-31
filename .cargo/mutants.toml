@@ -201,6 +201,23 @@ exclude_re = [
     # occupies and `|` == `^`. Provably equivalent, as above. (`read_golomb`'s own mutants are
     # killed by the golomb tests; only these two accumulator ORs are unkillable.)
     "symbol\\.rs:.*: replace \\| with \\^ in SymbolDecoder<.a>::read_(f|literal)$",
+    # gamut-bitstream `BitReader::f64` — a non-terminating mutant, not a behavioural escape.
+    # `while left > 0` over a `u32` mutated to `>= 0` is always true; `take` becomes
+    # `0.min(32) == 0`, `f(0)` returns 0 and `left -= 0` never advances, so the loop spins and the
+    # scenario is reportable only as a TIMEOUT. Line- and column-anchored so it matches exactly
+    # this hang and leaves the sibling `n > 64` guard mutants — which DO terminate and ARE caught
+    # by `f_rejects_oversized_and_truncated_fields` — in the survey. Same shape as the
+    # gamut-jpeg `BitReader`/`Reader` hang exclusions below.
+    "bitreader\\.rs:125:20: replace > with >= in BitReader<.a>::f64$",
+    # gamut-bitstream `SymbolDecoder::read_golomb` — the other non-terminating mutant.
+    # `length += 1` mutated to `*= 1` pins `length` at 0, so `length < max_bits` never stops the
+    # unary-prefix loop; against a stream that never terminates the prefix (the all-zero buffer
+    # `read_golomb_caps_the_prefix_even_when_the_stream_never_terminates_it` feeds it, and the
+    # zero padding past the end keeps `read_bool` returning false) the loop spins. It is *detected*
+    # — the suite does not pass — but only ever as a TIMEOUT, at 60s a scenario. Line- and
+    # column-anchored: the `-=` sibling on the same line underflows `length` into a panic and IS
+    # caught, as are every other mutant in this function now that the golomb tests exist.
+    "symbol\\.rs:430:20: replace \\+= with \\*= in SymbolDecoder<.a>::read_golomb$",
     # gamut-tiff `within_size_limit` is the shared *allocation* guard behind `stored_total`
     # (decode_page_samples) and `tile_size` (decode_tiles): relaxing `>` to `==`/`>=` only changes
     # whether a 64 MiB+ buffer is reserved before the (still inevitable) decode error — the malformed

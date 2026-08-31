@@ -634,11 +634,32 @@ mod tests {
     }
 
     #[test]
-    fn reading_past_the_end_of_the_data_is_indistinguishable_from_reading_zeros() {
+    fn read_f_pads_with_zeros_past_the_end_of_the_data() {
         // `read_f` documents the window as zero-padded past the end of the data, which AV1
-        // section 8.2.2 relies on for a tile's trailing symbols. So a decoder handed nothing at
-        // all must behave exactly like one handed zeros -- and must not index past its slice
-        // getting there.
+        // section 8.2.2 relies on for a tile's trailing symbols.
+        //
+        // No public entry point reaches that branch: `new` is the only caller and it caps its
+        // priming read at `min(8 * len, 15)` bits, so the byte index never reaches `data.len()`.
+        // The behaviour is documented and the bounds check is real, so it is pinned here -- from
+        // inside the crate, which is the only place a private method's unreached branch can be
+        // reached at all.
+        let mut dec = SymbolDecoder::new(&[0xFF]);
+
+        dec.bit_pos = 0;
+        assert_eq!(dec.read_f(8), 0xFF, "the one real byte reads back");
+
+        // Now past it: further bits read as zero instead of indexing out of bounds.
+        assert_eq!(dec.read_f(16), 0);
+        assert_eq!(
+            dec.bit_pos, 24,
+            "the cursor still advances over the padding"
+        );
+    }
+
+    #[test]
+    fn a_decoder_over_an_empty_buffer_behaves_like_one_over_zeros() {
+        // The public consequence of that padding: a tile with no bytes at all must decode as one
+        // whose bytes are zero, rather than diverging or panicking.
         let mut empty = SymbolDecoder::new(&[]);
         let mut zeros = SymbolDecoder::new(&[0u8; 32]);
 
