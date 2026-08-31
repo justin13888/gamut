@@ -48,9 +48,13 @@ fn main() {
                 "-DEXIV2_BUILD_DOC=OFF",
             ]));
     }
+    // `--parallel` with an explicit count: without the flag CMake drives the generator
+    // serially or at its own default, and this build is a C++ exiv2 tree either way.
     run(Command::new("cmake")
         .arg("--build")
         .arg(&build)
+        .arg("--parallel")
+        .arg(build_env::build_parallelism().to_string())
         .args(["--config", "Release"]));
 
     let lib_dir = build.join("lib");

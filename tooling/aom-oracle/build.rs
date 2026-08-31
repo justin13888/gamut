@@ -57,10 +57,14 @@ fn main() {
             ]));
     }
     // Build only the static `aom` library target (its transitive deps come along).
+    // `--parallel` is passed explicitly: this is a `-G Ninja` build, and without it ninja
+    // picks its own default of NCPUS + 2 regardless of CMAKE_BUILD_PARALLEL_LEVEL.
     run(Command::new("cmake")
         .env("PATH", &path)
         .arg("--build")
         .arg(&build_dir)
+        .arg("--parallel")
+        .arg(build_env::build_parallelism().to_string())
         .args(["--target", "aom"]));
 
     // Compile the macro-unwrapping shim against libaom's public headers. `cc` emits its own
