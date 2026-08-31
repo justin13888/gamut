@@ -349,6 +349,18 @@ pub(crate) fn deblock(
 
 // ===== CDEF (Constrained Directional Enhancement Filter, §7.15) =====
 
+/// `Cdef_Uv_Dir[subsampling_x][subsampling_y][8]` (§7.15.2): the chroma direction for a given luma
+/// direction.
+///
+/// The identity for 4:4:4 (`[0][0]`) and 4:2:0 (`[1][1]`), which is why chroma could take the luma
+/// direction unchanged until 4:2:2 arrived. The 4:2:2 row `[1][0]` is **not a permutation** — 2
+/// appears once, 6 three times, and 1 and 3 not at all — so it cannot be expressed as a rotation or
+/// an offset; it is a literal lookup. `[0][1]` is the 4:4:0 layout, which AV1 cannot signal.
+static CDEF_UV_DIR: [[[usize; 8]; 2]; 2] = [
+    [[0, 1, 2, 3, 4, 5, 6, 7], [1, 2, 2, 2, 3, 4, 6, 0]],
+    [[7, 0, 2, 4, 5, 6, 6, 6], [0, 1, 2, 3, 4, 5, 6, 7]],
+];
+
 /// `Cdef_Directions[8][2][2]` (§7.15.3): the (row, col) sample offsets for each of the 8 directions.
 static CDEF_DIRECTIONS: [[[i32; 2]; 2]; 8] = [
     [[-1, 1], [-2, 2]],
@@ -620,10 +632,15 @@ pub(crate) fn cdef(
                 CDEF_DAMPING,
                 dir,
             );
-            // Chroma: no variance scaling, damping reduced by 1, direction via `Cdef_Uv_Dir`.
-            // That table is the identity for both 4:4:4 and 4:2:0, so `y_dir` passes through; the
-            // 4:2:2 row is the only non-identity one (#391).
-            let cdir = if uv_pri == 0 { 0 } else { y_dir };
+            // Chroma: no variance scaling, damping reduced by 1, direction remapped through
+            // `Cdef_Uv_Dir` (§7.15.2 step 11). Identity at 4:4:4 and 4:2:0; 4:2:2 is the one layout
+            // where the chroma direction genuinely differs from the luma one.
+            let uv = geom[1];
+            let cdir = if uv_pri == 0 {
+                0
+            } else {
+                CDEF_UV_DIR[uv.ss_x as usize][uv.ss_y as usize][y_dir]
+            };
             for plane in 1..num_planes {
                 let g = geom[plane];
                 let (px, py) = g.scale_pos(x0, y0);

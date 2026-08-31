@@ -959,6 +959,142 @@ fn subsampled_420_reconstruction_matches_across_matrices_and_ranges() {
 }
 
 #[test]
+fn subsampled_422_reconstruction_matches_both_decoders() {
+    // 4:2:2 is the only layout where `subsampling_x != subsampling_y`, so it is the only one that
+    // can catch an x/y transposition anywhere in the chroma derivations — 4:2:0 is blind to those
+    // by construction. It is also the only one with a non-identity `Cdef_Uv_Dir` and a constrained
+    // partition set (§6.10.4 forbids taller-than-wide blocks).
+    for (w, h) in [
+        (16, 16),
+        (17, 13),
+        (9, 9),
+        (8, 8),
+        (4, 4),
+        (1, 1),
+        (3, 5),
+        (33, 17),
+        (64, 64),
+        (40, 24),
+        (100, 80),
+        (128, 72),
+    ] {
+        let p = planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs422,
+            MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            textured,
+        );
+        check_with(
+            encode_still_intra_with(
+                &p,
+                40,
+                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+            )
+            .unwrap(),
+            40,
+        );
+    }
+}
+
+#[test]
+fn subsampled_422_reconstruction_matches_at_every_quantizer_context() {
+    for q in [4u8, 40, 90, 200] {
+        let p = planes_subsampled(
+            24,
+            24,
+            ChromaSubsampling::Cs422,
+            MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            textured,
+        );
+        check_with(
+            encode_still_intra_with(
+                &p,
+                q,
+                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+            )
+            .unwrap(),
+            q,
+        );
+    }
+}
+
+#[test]
+fn subsampled_422_reconstruction_matches_on_a_period_two_vertical_stripe() {
+    // The test 4:2:0 cannot substitute for. A stripe with period 2 in x is collapsed entirely by
+    // the 2x1 horizontal box average and left intact by a 2x2 one, so any derivation that swapped
+    // the x and y shifts produces visibly different chroma here and identical chroma at 4:2:0.
+    let stripe = |x: u32, _y: u32| {
+        if x.is_multiple_of(2) {
+            [220, 30, 40]
+        } else {
+            [30, 220, 210]
+        }
+    };
+    for (w, h) in [(32, 32), (17, 13), (64, 16)] {
+        let p = planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs422,
+            MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            stripe,
+        );
+        check_with(
+            encode_still_intra_with(
+                &p,
+                30,
+                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+            )
+            .unwrap(),
+            30,
+        );
+    }
+}
+
+#[test]
+fn subsampled_422_reconstruction_matches_on_every_cdef_direction() {
+    // `Cdef_Uv_Dir[1][0]` is the only non-identity row, and a wrong chroma direction on smooth
+    // content is nearly invisible. Diagonal ramps at a range of gradients drive the direction
+    // search across all eight of its outputs, so a rotated or offset remap diverges from both
+    // reference decoders.
+    for (dx, dy) in [
+        (1i32, 0i32),
+        (1, 1),
+        (0, 1),
+        (2, 1),
+        (1, 2),
+        (3, 1),
+        (1, 3),
+        (-1, 1),
+    ] {
+        let ramp = move |x: u32, y: u32| {
+            let v = ((x as i32 * dx + y as i32 * dy) * 9).rem_euclid(256) as u8;
+            [v, 255 - v, v / 2 + 40]
+        };
+        let p = planes_subsampled(
+            32,
+            32,
+            ChromaSubsampling::Cs422,
+            MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            ramp,
+        );
+        check_with(
+            encode_still_intra_with(
+                &p,
+                80,
+                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+            )
+            .unwrap(),
+            80,
+        );
+    }
+}
+
+#[test]
 fn subsampled_420_reconstruction_matches_on_palette_content() {
     // Screen-content blocks take the palette path, where chroma is a flat DC and no CfL is
     // signalled. That interaction is chroma-specific — a palette block still has chroma of its own
@@ -996,6 +1132,41 @@ fn subsampled_420_reconstruction_matches_on_palette_content() {
     }
 }
 
+#[test]
+fn subsampled_422_reconstruction_matches_on_palette_content() {
+    // The same screen-content path at 4:2:2, where the palette block's chroma residual is
+    // rectangular rather than square.
+    // Greyscale for the same reason as the 4:2:0 case: neutral chroma everywhere is what lets a
+    // palette block match its chroma DC prediction, and without that the palette path is never
+    // taken.
+    let flat_runs = |x: u32, y: u32| {
+        let v = match ((x / 8) + (y / 8)) % 3 {
+            0 => 20u8,
+            1 => 128,
+            _ => 210,
+        };
+        [v, v, v]
+    };
+    for (w, h) in [(32u32, 32u32), (64, 48), (17, 13)] {
+        let p = planes_subsampled(
+            w,
+            h,
+            ChromaSubsampling::Cs422,
+            MatrixCoefficients::Bt709,
+            ColorRange::Full,
+            flat_runs,
+        );
+        check_with(
+            encode_still_intra_with(
+                &p,
+                60,
+                colour_for(MatrixCoefficients::Bt709, ColorRange::Full),
+            )
+            .unwrap(),
+            60,
+        );
+    }
+}
 /// Builds a monochrome (`Cs400`) buffer — one luma plane, no chroma — from a gray generator.
 fn mono_planes(w: u32, h: u32, f: impl Fn(u32, u32) -> u8) -> Planar8 {
     let mut y = vec![0u8; (w * h) as usize];

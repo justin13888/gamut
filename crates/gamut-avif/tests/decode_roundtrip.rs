@@ -334,3 +334,59 @@ fn orientation_transforms_roundtrip_via_libavif() {
         }
     }
 }
+
+#[test]
+fn every_chroma_format_roundtrips_via_libavif() {
+    // The container-level gate for the chroma surface: what `with_chroma` selects must survive into
+    // the file, be what libavif reports, and decode to exactly the AV1 encoder's reconstruction.
+    // Odd dimensions make the ceiling division on each subsampled axis observable.
+    for (chroma, want_format) in [
+        (gamut_color::ChromaSubsampling::Cs444, 1u32),
+        (gamut_color::ChromaSubsampling::Cs422, 2),
+        (gamut_color::ChromaSubsampling::Cs420, 3),
+    ] {
+        for &(w, h) in &[(8u32, 8u32), (17, 13), (40, 24), (100, 80)] {
+            let rgb = source_rgb(w, h);
+            let mut avif = Vec::new();
+            AvifEncoder::lossy(60)
+                .with_chroma(chroma)
+                .encode_image(
+                    ImageRef::<Rgb8>::new(
+                        &rgb,
+                        Dimensions {
+                            width: w,
+                            height: h,
+                        },
+                    )
+                    .unwrap(),
+                    &mut avif,
+                )
+                .unwrap();
+
+            let img = ImageRef::<Rgb8>::new(
+                &rgb,
+                Dimensions {
+                    width: w,
+                    height: h,
+                },
+            )
+            .unwrap();
+            let planes =
+                gamut_color::Planar8::from_rgb8_matrix_subsampled(img, lossy_matrix(), chroma)
+                    .unwrap();
+            let (_, recon) =
+                gamut_av1::encode_still_intra_with(&planes, quality_to_quant(60), lossy_colour())
+                    .unwrap();
+
+            let decoded = libavif_oracle::decode_avif(&avif)
+                .unwrap_or_else(|e| panic!("libavif decode failed for {chroma:?} {w}x{h}: {e}"));
+            assert_eq!(
+                decoded.yuv_format, want_format,
+                "{chroma:?} {w}x{h}: container carries the wrong pixel format"
+            );
+            for (p, (d, r)) in decoded.planes.iter().zip(&recon.planes).enumerate() {
+                assert_eq!(d, r, "{chroma:?} {w}x{h}: plane {p} mismatch");
+            }
+        }
+    }
+}
