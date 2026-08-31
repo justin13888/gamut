@@ -35,11 +35,12 @@ fn with_byte_order_writes_requested_endianness() {
     assert_eq!(&le[0..2], b"II", "little-endian header");
 }
 
-#[test]
-fn with_predictor_is_applied_and_preserves_chained_settings() {
+/// Encodes a 16x16 RGB image big-endian, LZW, with horizontal differencing.
+///
+/// Shared by the two claims below, which fail for different reasons: one is about the builder,
+/// the other about the codec.
+fn predictor_encoded_big_endian() -> (Vec<u8>, Vec<u8>) {
     let buf = rgb(16, 16);
-    // Chaining with_predictor after with_byte_order(BE) must keep BE — a builder that returned
-    // `Default::default()` would reset it — and the predictor must round-trip through the decoder.
     let mut tiff = Vec::new();
     TiffEncoder::new()
         .with_byte_order(ByteOrder::BigEndian)
@@ -47,11 +48,29 @@ fn with_predictor_is_applied_and_preserves_chained_settings() {
         .with_predictor(Predictor::HorizontalDifferencing)
         .encode_image(img(&buf, 16, 16), &mut tiff)
         .unwrap();
+    (buf, tiff)
+}
+
+#[test]
+fn with_predictor_preserves_earlier_chained_settings() {
+    // A builder method that returned `Default::default()` instead of `self` would silently reset
+    // the byte order chosen before it, and the round-trip below would still pass.
+    let (_, tiff) = predictor_encoded_big_endian();
+
     assert_eq!(
         &tiff[0..2],
         b"MM",
         "with_predictor kept the big-endian setting"
     );
+}
+
+#[test]
+fn a_predicted_image_round_trips_through_the_decoder() {
+    // The codec claim: horizontal differencing is applied on the way out and undone on the way
+    // back. Independent of the builder claim above -- the setting can be preserved while the
+    // transform itself is wrong, and vice versa.
+    let (buf, tiff) = predictor_encoded_big_endian();
+
     let back: ImageBuf<Rgb8> = TiffDecoder::new().decode_image(&tiff).unwrap();
     assert_eq!(back.as_samples(), buf.as_slice(), "predictor round-trips");
 }

@@ -13,25 +13,11 @@ use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef
 use gamut_tiff::{ByteOrder, Compression, TiffDecoder, TiffEncoder, Variant, read};
 use libtiff_oracle::Compression as OracleCompression;
 
+mod common;
+
+use common::{gray_pattern, rgb_pattern};
+
 const SIZES: &[(u32, u32)] = &[(1, 1), (3, 7), (16, 16), (17, 13), (64, 100)];
-
-fn rgb_pattern(w: u32, h: u32) -> Vec<u8> {
-    let mut v = Vec::with_capacity((w * h * 3) as usize);
-    for y in 0..h {
-        for x in 0..w {
-            v.push((x.wrapping_mul(31).wrapping_add(y)) as u8);
-            v.push((y.wrapping_mul(17) ^ x) as u8);
-            v.push((x.wrapping_add(y).wrapping_mul(5)) as u8);
-        }
-    }
-    v
-}
-
-fn gray_pattern(w: u32, h: u32) -> Vec<u8> {
-    (0..w * h)
-        .map(|i| (i.wrapping_mul(97) >> 1) as u8)
-        .collect()
-}
 
 /// Confirms a byte stream really is BigTIFF (not silently downgraded to classic TIFF).
 fn assert_is_bigtiff(tiff: &[u8]) {
