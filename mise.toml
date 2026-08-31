@@ -173,6 +173,17 @@ run = "git submodule update --init --checkout third_party/gamut-dng-samples"
 description = "Validate gamut-dng against real camera DNGs (issue #174; needs fetch-dng-samples)"
 run = "cargo test --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml"
 
+# The compile half of the tier above, and the only part of it the per-PR lane can afford. That
+# crate is excluded from the workspace *and* nothing depends on it — it is invoked by manifest
+# path — so `clippy --workspace --all-targets` and `test --workspace` never build it, and a
+# gamut-dng API change can break it while every per-PR gate stays green (#353 removed
+# `DecodedDng::exif_extra` and only master's extended run noticed, at compile time, before a
+# single sample was decoded). `check` needs no corpus, which is what makes this cheap enough for
+# the lint job; the corpus-backed assertions stay in `test-dng-real`.
+[tasks.check-dng-real]
+description = "Compile the real-camera DNG conformance tier (no corpus needed)"
+run = "cargo check --manifest-path tooling/gamut-dng-real-conformance/Cargo.toml --all-targets"
+
 # Doctests only. On stable, `cargo llvm-cov` cannot instrument doctests (that needs nightly), so
 # the coverage gate — which CI uses as its green-test gate — silently skips them. This task is the
 # missing slice: CI's lint lane runs it, reusing the `--all-targets --all-features` build it just
@@ -204,36 +215,30 @@ run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crate
 description = "Run the coverage gate and write lcov.info (what CI runs)"
 run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crates/gamut-(cli|wasm|ffi|jxl-sys)|tooling)/' --fail-under-lines 80 --lcov --output-path lcov.info"
 
-# Mutation testing has two parallelism dials and both default to "as much as the machine has",
-# which is a poor fit for the thing that actually runs out first. Every scenario is a full
-# `cargo build` + `cargo test` of the workspace, vendored C/C++ oracles included, and those
-# translation units — libjxl's above all — are memory-hungry rather than CPU-hungry. Under a
-# memory cap with a high core count (a container, a systemd slice, CI) the core count is the
-# wrong number, and the failure mode is the OOM killer rather than a slow run.
-#
-# So both dials are named here instead of left implicit:
-#
-#   MUTANTS_JOBS            scenarios in flight            (cargo-mutants default: 1)
-#   MUTANTS_JOBSERVER_TASKS compilers in flight, in total  (cargo-mutants default: NCPUS)
-#
-# The defaults below reproduce cargo-mutants' own, so `mise run mutants` is unchanged; the point
-# is that a constrained environment can now say `MUTANTS_JOBSERVER_TASKS=4 mise run mutants-diff`
-# without editing a task. `CMAKE_BUILD_PARALLEL_LEVEL` is the matching dial for the vendored
-# builds themselves (see `crates/gamut-jxl-sys/build.rs`).
+# Mutation testing. Every entry point — this task, the mutants CI workflow, and an agent's tight
+# debug loop — goes through `tooling/mutants/run.sh`, so the dials cannot drift between them.
+# That script is where the reasoning lives; the short version is that the thing which runs out
+# first is memory, not cores, and the number that matters is a *product*: MUTANTS_JOBS scenarios,
+# each running CARGO_BUILD_JOBS build scripts, each fanning out to CMAKE_BUILD_PARALLEL_LEVEL
+# compilers. Bounding only the outer dial is what makes "1 job" mean sixteen memory-hungry
+# compiles. So every dial is derived from one memory budget, the run is wrapped in a systemd
+# memory scope, and each process gets an address-space limit — which is what turns a mutant that
+# allocates without limit into one `caught` result instead of an OOM kill that takes the whole
+# run down with it. See docs/mutation-testing.md.
 [tasks.mutants]
-description = "Mutation testing, whole workspace; slow (needs submodules incl. fetch-av1-oracles, + C toolchain)"
-run = "cargo mutants --jobs \"${MUTANTS_JOBS:-1}\" --jobserver-tasks \"${MUTANTS_JOBSERVER_TASKS:-$(nproc)}\""
+description = "Mutation testing; `mise run mutants -- --help` for selection and budget flags"
+run = "./tooling/mutants/run.sh"
 
+# Aliases for the two selections used most. Both delegate to the same runner, so they get the
+# same budget, guards and dials as everything else. Arguments after the task name reach the
+# runner; anything after a second `--` is passed through to cargo-mutants verbatim.
 [tasks.mutants-diff]
 description = "Mutation testing of only the code changed vs master; fast (mirrors PR CI)"
-run = [
-    "git diff origin/master...HEAD > target/mutants.diff",
-    "cargo mutants --in-diff target/mutants.diff --jobs \"${MUTANTS_JOBS:-1}\" --jobserver-tasks \"${MUTANTS_JOBSERVER_TASKS:-$(nproc)}\"",
-]
+run = "./tooling/mutants/run.sh --diff"
 
 [tasks.mutants-crate]
 description = "Mutation testing of one crate, e.g. `mise run mutants-crate gamut-bitstream`"
-run = "cargo mutants -p {{arg(name='crate')}} --jobs \"${MUTANTS_JOBS:-1}\" --jobserver-tasks \"${MUTANTS_JOBSERVER_TASKS:-$(nproc)}\""
+run = "./tooling/mutants/run.sh --crate"
 
 # release-plz orders normal and build dependencies, but deliberately ignores ordinary
 # dev-dependencies. A versioned dev-only edge between publishable workspace crates can therefore

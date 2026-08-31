@@ -22,27 +22,50 @@ pub(crate) const OBU_FRAME: u8 = 6;
 /// frame header's `tile_info`.
 pub(crate) const TILE_SIZE_BYTES: usize = 4;
 
+/// Whether `color_config()` codes `subsampling_x` explicitly (§5.5.2).
+///
+/// Only profile 2 at 12 bits does: profiles 0 and 1 infer their subsampling (4:2:0 and 4:4:4), and
+/// profile 2 below 12 bits is the fixed 4:2:2 pair.
+///
+/// The two conditions are **not** interchangeable, though an earlier revision of this encoder
+/// could treat them as such: back when profile 2 was reachable only by asking for 12 bits, testing
+/// either one answered for both. Profile 2 is now also how 8- and 10-bit 4:2:2 is coded, so the
+/// depth has to be tested on its own.
+///
+/// `twelve_bit` alone is not that test. §5.5.2 derives `BitDepth == 12` from
+/// `seq_profile == 2 && high_bitdepth && twelve_bit`, and the writer above emits the `twelve_bit`
+/// bit under exactly that guard — so a config with `twelve_bit` set but `high_bitdepth` clear
+/// codes no bit for it, and reading `twelve_bit` here would then code a `subsampling_x` the
+/// decoder is not expecting and shift every field after it.
+fn codes_subsampling(cfg: &Av1StillConfig) -> bool {
+    cfg.seq_profile == 2 && cfg.high_bitdepth && cfg.twelve_bit
+}
+
 /// The sequence-header field values that `gamut-avif` must mirror into `av1C` and `colr`
 /// (AV1-ISOBMFF v1.3.0 §2.3.4). Fixed by the M0 config except `seq_level_idx_0`, which depends on
 /// the image size.
 #[derive(Debug, Clone, Copy)]
 pub struct Av1StillConfig {
-    /// `seq_profile`: 1 (High) for 8-bit 4:4:4, 0 (Main) for a monochrome still.
+    /// `seq_profile` (§6.4.1): 1 (High) for 8/10-bit 4:4:4, 0 (Main) for an 8/10-bit monochrome
+    /// still, 2 (Professional) for anything 12-bit.
     pub seq_profile: u8,
     /// `seq_level_idx[0]`, the smallest level (≤ 6.0) whose limits cover the image.
     pub seq_level_idx_0: u8,
     /// `seq_tier[0]` = 0.
     pub seq_tier_0: u8,
-    /// `high_bitdepth` = false (8-bit).
+    /// `high_bitdepth`: false at 8 bits, true at 10 and 12.
     pub high_bitdepth: bool,
-    /// `twelve_bit` = false.
+    /// `twelve_bit`: coded only when `seq_profile == 2 && high_bitdepth`, and true only at 12 bits.
     pub twelve_bit: bool,
-    /// `mono_chrome`: one coded luma plane and no chroma. Forces `seq_profile = 0` and, per
-    /// §5.5.2, an inferred `subsampling_x = subsampling_y = 1`.
+    /// `mono_chrome`: one coded luma plane and no chroma. Per §5.5.2 the subsampling is inferred
+    /// `subsampling_x = subsampling_y = 1`. The profile follows §6.4.1 rather than the flag: 0 at
+    /// 8/10 bits, 2 at 12, since Main does not reach 12-bit.
     pub monochrome: bool,
-    /// `subsampling_x`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome) (inferred, not coded).
+    /// `subsampling_x`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome). Inferred rather than
+    /// coded except under `seq_profile == 2` at 12 bits, which codes it (§5.5.2).
     pub chroma_subsampling_x: u8,
-    /// `subsampling_y`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome) (inferred, not coded).
+    /// `subsampling_y`: 0 for 4:4:4, 1 when [`monochrome`](Self::monochrome). Coded only when
+    /// [`chroma_subsampling_x`](Self::chroma_subsampling_x) is coded and set (§5.5.2).
     pub chroma_subsampling_y: u8,
     /// `chroma_sample_position` = 0.
     pub chroma_sample_position: u8,
@@ -183,8 +206,9 @@ pub(crate) fn write_obu(out: &mut Vec<u8>, obu_type: u8, payload: &[u8]) {
     out.extend_from_slice(payload);
 }
 
-/// Builds the sequence-header OBU payload (reduced still picture, 8-bit; profile 1 at 4:4:4 or
-/// profile 0 monochrome), terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
+/// Builds the sequence-header OBU payload (reduced still picture; 8-, 10- or 12-bit, with the
+/// §6.4.1 profile the depth and plane count require — 1 at 4:4:4, 0 for 8/10-bit monochrome, 2 at
+/// 12 bits), terminated with `trailing_bits` (AV1 §5.2, §5.3.4).
 /// `lossy` enables `enable_filter_intra` (recursive filter-intra is used only on the lossy path;
 /// the lossless path stays DC-only and emits no `use_filter_intra` symbols).
 pub(crate) fn sequence_header_payload(
@@ -217,10 +241,14 @@ pub(crate) fn sequence_header_payload(
     w.put_bit(u8::from(lossy)); // enable_cdef
     w.put_bit(u8::from(lossy)); // enable_restoration (1 on the lossy path: luma Wiener)
 
-    // color_config() (§5.5.2): high_bitdepth=0 (10/12-bit is M2); `mono_chrome` is coded whenever
+    // color_config() (§5.5.2): `high_bitdepth`, then `twelve_bit` only under `seq_profile == 2`
+    // (elsewhere the depth is 8 or 10 and the flag alone decides); `mono_chrome` is coded whenever
     // `seq_profile != 1` (profile 1 infers 0); color_description_present_flag=1; cp/tc/mc; then one
     // of three tails — the monochrome branch, the sRGB shortcut, or an explicit color_range.
-    w.put_bit(0); // high_bitdepth (8-bit only; `twelve_bit` therefore never follows)
+    w.put_bit(u8::from(cfg.high_bitdepth));
+    if cfg.seq_profile == 2 && cfg.high_bitdepth {
+        w.put_bit(u8::from(cfg.twelve_bit));
+    }
     if cfg.seq_profile != 1 {
         // Coded for every profile except High — so it appears as soon as the stream is 4:2:0
         // (profile 0) or 4:2:2 (profile 2). The **bit** is not optional: omitting it shifts every
@@ -241,11 +269,23 @@ pub(crate) fn sequence_header_payload(
     } else {
         // §5.5.2: `cp == CP_BT_709 && tc == TC_SRGB && mc == MC_IDENTITY` infers full range and
         // 4:4:4 and codes **no** further bits. Outside that shortcut `color_range` is coded
-        // explicitly, and the subsampling is *inferred from `seq_profile`* rather than coded:
-        // 0 ⇒ 4:2:0, 1 ⇒ 4:4:4, 2 ⇒ 4:2:2 at 8-bit. Only 4:2:0 then carries
-        // `chroma_sample_position`.
+        // explicitly, and the subsampling is *inferred from `seq_profile`* rather than coded —
+        // 0 ⇒ 4:2:0, 1 ⇒ 4:4:4, 2 ⇒ 4:2:2 — with one exception: profile 2 at **12 bits** codes the
+        // pair, because that is the only configuration in which Professional is not fixed at
+        // 4:2:2. Either way, only a 4:2:0 result carries `chroma_sample_position`.
         if !cfg.is_srgb_shortcut() {
             w.put_bit(u8::from(cfg.full_range)); // color_range
+            // Profiles 0 and 1 infer their subsampling (4:2:0 and 4:4:4). Profile 2 codes
+            // `subsampling_x` only at 12 bits — at 8/10 it is the fixed 4:2:2 pair — and
+            // `subsampling_y` only when `subsampling_x` is 1, which 4:4:4 never is.
+            if codes_subsampling(cfg) {
+                w.put_bit(cfg.chroma_subsampling_x);
+                if cfg.chroma_subsampling_x == 1 {
+                    w.put_bit(cfg.chroma_subsampling_y);
+                }
+            }
+            // Whether the pair was coded just now or inferred from the profile, it is the pair
+            // that decides this: only 4:2:0 carries a sample position.
             if cfg.chroma_subsampling_x == 1 && cfg.chroma_subsampling_y == 1 {
                 w.put_bits(u32::from(cfg.chroma_sample_position), 2);
             }
@@ -453,6 +493,53 @@ pub(crate) fn assemble_temporal_unit(seq_payload: &[u8], frame_payload: &[u8]) -
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn only_twelve_bit_profile_2_codes_its_subsampling() {
+        // §5.5.2: profile 0 infers 4:2:0 and profile 1 infers 4:4:4, so neither codes a bit;
+        // profile 2 codes `subsampling_x` only at 12 bits, because below that it is the fixed
+        // 4:2:2 pair. Both halves are now independently reachable — profile 2 is how 8/10-bit
+        // 4:2:2 is coded as well as how any 12-bit stream is — so each is pinned on its own.
+        let cfg = |seq_profile: u8, high_bitdepth: bool, twelve_bit: bool| Av1StillConfig {
+            seq_profile,
+            seq_level_idx_0: 0,
+            seq_tier_0: 0,
+            high_bitdepth,
+            twelve_bit,
+            monochrome: false,
+            chroma_subsampling_x: 0,
+            chroma_subsampling_y: 0,
+            chroma_sample_position: 0,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 0,
+            full_range: true,
+        };
+        assert!(codes_subsampling(&cfg(2, true, true)), "profile 2, 12-bit");
+        // The case that makes the depth half load-bearing: 8-bit 4:2:2 is profile 2 and must NOT
+        // code the pair. Keying on the profile alone would emit a bit no decoder expects here.
+        assert!(
+            !codes_subsampling(&cfg(2, false, false)),
+            "profile 2, 8-bit"
+        );
+        assert!(
+            !codes_subsampling(&cfg(2, true, false)),
+            "profile 2, 10-bit"
+        );
+        assert!(!codes_subsampling(&cfg(1, false, false)), "profile 1");
+        // A 12-bit config on another profile is not one the encoder builds, but the predicate must
+        // still key on both halves rather than on the depth alone.
+        assert!(!codes_subsampling(&cfg(0, true, true)), "profile 0");
+        // `twelve_bit` without `high_bitdepth` is incoherent, and §5.5.2 derives `BitDepth == 12`
+        // from all three fields. The writer above emits no `twelve_bit` bit for such a config, so
+        // reading `twelve_bit` alone here would code a `subsampling_x` the decoder is not
+        // expecting and shift every field after it.
+        assert!(
+            !codes_subsampling(&cfg(2, false, true)),
+            "twelve_bit without high_bitdepth codes no depth bit, so it must code no pair"
+        );
+    }
+
     use super::*;
 
     /// A config in `chroma` with a non-identity matrix (so `color_config()` leaves the sRGB

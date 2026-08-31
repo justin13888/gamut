@@ -209,6 +209,9 @@ fn cmake_build_install_env(
         }
         run(&mut cmd);
     }
+    // `--parallel` takes an explicit count. Bare, it becomes `make -j` with no limit *and*
+    // overrides CMAKE_BUILD_PARALLEL_LEVEL, so the shared dial would be silently ignored — and
+    // this helper drives three C++ trees (libde265, kvazaar, libheif).
     let mut cmd = Command::new("cmake");
     cmd.arg("--build").arg(build).args([
         "--config",
@@ -216,6 +219,7 @@ fn cmake_build_install_env(
         "--target",
         "install",
         "--parallel",
+        &build_env::build_parallelism().to_string(),
     ]);
     for (k, v) in envs {
         cmd.env(k, v);

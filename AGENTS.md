@@ -126,7 +126,11 @@ mise run test          # correctness
 mise run fmt-check     # formatting (nightly rustfmt, auto-installed)
 mise run lint          # lint (Clippy, warnings as errors)
 mise run coverage      # coverage (minimum 80%)
-mise run mutants       # mutation testing (needs submodules + C toolchain; run `mise install` once)
+mise run mutants       # mutation testing (needs submodules + C toolchain; run `mise install` once).
+                       # Takes a selection: `--diff`, `--crate <name>` or `--shard i/n`; an
+                       # unsharded whole-workspace run (24k mutants) is refused. Every dial is
+                       # derived from a memory budget — see docs/mutation-testing.md. Never call
+                       # `cargo mutants` directly; the guards live in the mise task.
 mise run fetch-av1-oracles # fetch the `update = none` aom/dav1d submodules (~440 MiB); needed
                        # before any task that builds the AV1/AVIF oracles (test, lint, coverage,
                        # mutants), since a recursive submodule update deliberately skips them

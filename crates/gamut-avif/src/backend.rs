@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 
 use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill};
 use gamut_codec_abi::{EncodeConfig, Encoder, ImageDesc, Status};
-use gamut_color::{ChromaSubsampling, ColorRange, Planar8};
+use gamut_color::{BitDepth, ChromaSubsampling, ColorRange, Planar8, Planar16};
 use gamut_core::{Dimensions, Error, PixelFormat, Result};
 
 use crate::av1c::Av1Config;
@@ -69,6 +69,8 @@ pub struct Av1EncodeRequest {
     colour: Av1Colour,
     /// The chroma sampling of `planes`, which the returned stream must also code.
     chroma: ChromaSubsampling,
+    /// The depth the samples are coded at: 8, 10 or 12 bits.
+    bit_depth: BitDepth,
 }
 
 impl Av1EncodeRequest {
@@ -79,12 +81,14 @@ impl Av1EncodeRequest {
         base_q_idx: u8,
         colour: Av1Colour,
         chroma: ChromaSubsampling,
+        bit_depth: BitDepth,
     ) -> Self {
         Self {
             chroma,
             dimensions,
             base_q_idx,
             colour,
+            bit_depth,
         }
     }
 
@@ -144,6 +148,20 @@ impl Av1EncodeRequest {
     pub fn chroma(&self) -> ChromaSubsampling {
         self.chroma
     }
+
+    /// The depth the samples are coded at.
+    ///
+    /// The same obligation as [`chroma`](Self::chroma), and checked the same way: `seq_profile`
+    /// and the `high_bitdepth`/`twelve_bit` pair must declare this depth, because `av1C` mirrors
+    /// them.
+    ///
+    /// [`BitDepth::Eight`] is the only depth [`Av1StillEncoder::encode_still`] is ever handed;
+    /// [`BitDepth::Ten`] and [`BitDepth::Twelve`] arrive through
+    /// [`encode_still16`](Av1StillEncoder::encode_still16), whose default implementation declines.
+    #[must_use]
+    pub fn bit_depth(&self) -> BitDepth {
+        self.bit_depth
+    }
 }
 
 /// A pluggable AV1 **still-image encoder** backend.
@@ -181,6 +199,32 @@ pub trait Av1StillEncoder: Send {
     /// [`encode_image`](gamut_core::EncodeImage::encode_image); the built-in encoder is not used
     /// as a silent fallback. Decline the job from [`supports`](Self::supports) instead.
     fn encode_still(&mut self, req: &Av1EncodeRequest, planes: &Planar8) -> Result<Vec<u8>>;
+
+    /// Encodes **10- or 12-bit** planes, returning the AV1 OBU byte stream exactly as
+    /// [`encode_still`](Self::encode_still) does for 8-bit.
+    ///
+    /// The default implementation **declines**, and the host falls through to the next backend and
+    /// finally to the built-in `gamut-av1` tail — so a backend written against the 8-bit v1
+    /// contract keeps compiling *and* keeps its meaning: it is never handed samples it did not
+    /// agree to encode. Override it to opt into high bit depth.
+    ///
+    /// Declining here is the one late fall-through the seam allows, and it exists because
+    /// [`supports`](Self::supports) is a single answer for a job whose depth a pre-existing
+    /// implementation does not inspect. Every *other* failure after accepting a job still
+    /// propagates.
+    ///
+    /// The returned stream's `seq_profile` must match the depth §6.4.1 requires — 1 (or 0
+    /// monochrome) at 10 bits, 2 at 12 — and its `color_config()` must declare
+    /// [`Av1EncodeRequest::bit_depth`] and [`Av1EncodeRequest::colour`]; the crate re-derives the
+    /// `av1C`/`colr` boxes from it and rejects a disagreement.
+    ///
+    /// # Errors
+    ///
+    /// As [`encode_still`](Self::encode_still).
+    fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
+        let _ = (req, planes);
+        Err(LateDecline::error())
+    }
 }
 
 /// The registry entry type: a shared, interior-mutable backend.
@@ -190,13 +234,21 @@ pub trait Av1StillEncoder: Send {
 /// `&self` encoding can call the `&mut self` trait methods.
 pub(crate) type BackendSlot = Arc<Mutex<dyn Av1StillEncoder + Send>>;
 
+/// The planes one registry run offers a backend, at whichever width the job actually has.
+pub(crate) enum BackendPlanes<'a> {
+    /// 8-bit planes, offered through [`Av1StillEncoder::encode_still`].
+    Eight(&'a Planar8),
+    /// 10/12-bit planes, offered through [`Av1StillEncoder::encode_still16`].
+    High(&'a Planar16),
+}
+
 /// Runs the registry for one request: tries `backends` in push order, returning the first
 /// acceptance's OBUs, or `None` when every backend declines (the caller then uses the built-in
 /// `gamut-av1` tail).
 pub(crate) fn run_backends(
     backends: &[BackendSlot],
     req: &Av1EncodeRequest,
-    planes: &Planar8,
+    planes: BackendPlanes<'_>,
 ) -> Result<Option<Vec<u8>>> {
     for slot in backends {
         let mut backend = slot.lock().map_err(|_| {
@@ -209,7 +261,11 @@ pub(crate) fn run_backends(
             // Accepted: this backend owns the job, so its error propagates — falling back to a
             // different encoder here would silently change the output bytes. The sole exception is
             // the ABI adapter's late-`UNSUPPORTED` sentinel, which *is* a decline.
-            return match backend.encode_still(req, planes) {
+            let encoded = match planes {
+                BackendPlanes::Eight(p) => backend.encode_still(req, p),
+                BackendPlanes::High(p) => backend.encode_still16(req, p),
+            };
+            return match encoded {
                 Err(e) if LateDecline::is(&e) => continue,
                 other => other.map(Some),
             };
@@ -226,16 +282,25 @@ pub(crate) fn run_backends(
 ///
 /// - [`Error::InvalidInput`] if the stream has no parsable reduced-still-picture sequence header,
 ///   or if its coded dimensions disagree with `dims` (which the container's `ispe` states).
-/// - [`Error::Unsupported`] if the sequence header is not `seq_profile = 1` /
-///   `reduced_still_picture_header = 1` (the only shape the v1 surface can describe).
+/// - [`Error::Unsupported`] if the sequence header is not `reduced_still_picture_header = 1`, or
+///   its `seq_profile`/depth pair is not one this surface can describe.
+/// - [`Error::InvalidInput`] if the stream's coded depth is not the one the request asked for —
+///   the container's `av1C` and `pixi` would otherwise lie about the payload.
 /// - Whatever [`Av1Config::validate_still_payload`] reports for a non-conformant item payload.
 pub(crate) fn still_from_backend_obus(
     obus: Vec<u8>,
     dims: Dimensions,
     colour: Av1Colour,
     chroma: ChromaSubsampling,
+    bit_depth: BitDepth,
 ) -> Result<EncodedStill> {
     let header = SeqHeaderParams::parse(&obus)?;
+    if header.bit_depth != bit_depth {
+        return Err(Error::invalid_input(
+            env!("CARGO_PKG_NAME"),
+            "AVIF: AV1 backend stream is coded at a different bit depth than requested",
+        ));
+    }
     if (header.width, header.height) != (dims.width, dims.height) {
         return Err(Error::invalid_input(
             env!("CARGO_PKG_NAME"),
@@ -270,8 +335,8 @@ pub(crate) fn still_from_backend_obus(
         seq_profile: header.seq_profile,
         seq_level_idx_0: header.seq_level_idx_0,
         seq_tier_0: 0,
-        high_bitdepth: false,
-        twelve_bit: false,
+        high_bitdepth: bit_depth != BitDepth::Eight,
+        twelve_bit: bit_depth == BitDepth::Twelve,
         monochrome: false,
         chroma_subsampling_x: chroma_x,
         chroma_subsampling_y: chroma_y,
@@ -303,10 +368,12 @@ struct SeqHeaderParams {
     /// `color_config()`: `(color_primaries, transfer_characteristics, matrix_coefficients,
     /// color_range == full)`.
     colour: (u16, u16, u16, bool),
-    /// Chroma sampling, inferred from `seq_profile` (§5.5.2 codes the flags only at 12-bit).
+    /// Chroma sampling — inferred from `seq_profile`, except at 12-bit where §5.5.2 codes it.
     chroma: ChromaSubsampling,
     /// `chroma_sample_position`, coded for 4:2:0 only.
     chroma_sample_position: u8,
+    /// `BitDepth`, as §5.5.2 derives it from `high_bitdepth`, `twelve_bit` and `seq_profile`.
+    bit_depth: BitDepth,
 }
 
 impl SeqHeaderParams {
@@ -334,10 +401,15 @@ impl SeqHeaderParams {
             })??;
         let mut r = BitReader::new(seq);
         let seq_profile = r.bits(3)? as u8;
-        // Enforced here, not by the caller, because `color_config()`'s *layout* depends on it: only
+        // Checked here, not by the caller, because `color_config()`'s *layout* depends on it: only
         // `seq_profile == 2` codes `twelve_bit`, and only `seq_profile != 1` codes `mono_chrome`.
         // Reading the colour fields off a profile this parser cannot describe would misparse them
         // before anyone had a chance to reject the stream.
+        //
+        // All three profiles are admitted: 0 is 4:2:0 (and the one a monochrome stream would use,
+        // which the `mono_chrome` bit below still rejects — the container surface this rebuilds an
+        // `av1C` for describes a three-plane colour item), 1 is 4:4:4, 2 is 4:2:2 or any 12-bit
+        // layout.
         if seq_profile > 2 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
@@ -361,21 +433,20 @@ impl SeqHeaderParams {
         // reach `color_config()`.
         r.bits(6)?; // use_128x128_superblock, filter_intra, intra_edge_filter, superres, cdef, restoration
 
-        // color_config() (§5.5.2). Rejecting `high_bitdepth` here is what keeps the rest of this
-        // parser simple: with 8-bit samples `twelve_bit` is never coded (it needs
-        // `seq_profile == 2 && high_bitdepth`) and the subsampling is always *inferred* from the
-        // profile rather than read, so no layout below depends on the bit depth.
-        if r.bits(1)? != 0 {
-            return Err(Error::unsupported(
-                env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend stream must be 8-bit (high_bitdepth = 0)",
-            ));
-        }
+        // color_config() (§5.5.2): `high_bitdepth`, then `twelve_bit` only under profile 2 —
+        // `&&` short-circuits, so the bit is consumed exactly when the syntax codes it.
+        let high_bitdepth = r.bits(1)? != 0;
+        let twelve_bit = seq_profile == 2 && high_bitdepth && r.bits(1)? != 0;
+        let bit_depth = match (high_bitdepth, twelve_bit) {
+            (false, _) => BitDepth::Eight,
+            (true, false) => BitDepth::Ten,
+            (true, true) => BitDepth::Twelve,
+        };
         // `mono_chrome` is coded for every profile except High.
         if seq_profile != 1 && r.bits(1)? != 0 {
             return Err(Error::unsupported(
                 env!("CARGO_PKG_NAME"),
-                "AVIF: AV1 backend stream must not be monochrome",
+                "AVIF: AV1 backend stream must be three-plane (mono_chrome = 0)",
             ));
         }
         // `color_description_present_flag = 0` leaves all three code points UNSPECIFIED (2), which
@@ -394,35 +465,58 @@ impl SeqHeaderParams {
         // The §5.5.2 shortcut: BT.709 primaries + sRGB transfer + identity matrix infer full range
         // (and 4:4:4) with no coded bit; every other triple codes `color_range`.
         let shortcut = cp == 1 && tc == 13 && mc == 0;
-        // Under the shortcut the subsampling is inferred as 4:4:4 whatever the profile says, so a
-        // profile-0 or -2 stream carrying this triple asserts two chroma formats at once. libaom
+        // Under the shortcut the subsampling is inferred as 4:4:4 and no bit is coded, so a stream
+        // whose profile *forces* a subsampled layout asserts two chroma formats at once. libaom
         // asserts against exactly that construction, so no conformant encoder emits it.
-        if shortcut && seq_profile != 1 {
+        //
+        // Which profiles force one depends on the depth, and that is why this is not simply
+        // `seq_profile != 1`: profile 0 is always 4:2:0, and profile 2 is fixed at 4:2:2 only
+        // *below* 12 bits. At 12 bits profile 2 codes the pair instead — and the shortcut codes
+        // nothing, so it infers 4:4:4 and the two agree. A 12-bit 4:4:4 identity stream is exactly
+        // what a lossless high-bit-depth encode produces, so rejecting it here would refuse the
+        // most ordinary stream on this path.
+        let forces_subsampled =
+            seq_profile == 0 || (seq_profile == 2 && bit_depth != BitDepth::Twelve);
+        if shortcut && forces_subsampled {
             return Err(Error::invalid_input(
                 env!("CARGO_PKG_NAME"),
                 "AVIF: AV1 backend stream takes the sRGB color_config shortcut, which infers 4:4:4, \
                  but its seq_profile declares subsampled chroma",
             ));
         }
-        let chroma = match seq_profile {
-            0 => ChromaSubsampling::Cs420,
-            1 => ChromaSubsampling::Cs444,
-            // 8-bit Professional is 4:2:2; the 12-bit case that codes the flags explicitly is
-            // unreachable because `high_bitdepth` is rejected above.
-            _ => ChromaSubsampling::Cs422,
-        };
-        let mut chroma_sample_position = 0u8;
-        let full_range = if shortcut {
-            true
+        let full_range = if shortcut { true } else { r.bits(1)? == 1 };
+        // §5.5.2 *derives* the subsampling from `seq_profile` rather than always coding it —
+        // profile 0 is 4:2:0, profile 1 is 4:4:4, profile 2 is 4:2:2 — with one exception: profile
+        // 2 at 12-bit codes the pair, the only configuration in which Professional is not fixed at
+        // 4:2:2. `subsampling_y` is read only when `subsampling_x` is 1, so the syntax cannot
+        // express (0, 1) and there is no fourth case to handle.
+        let chroma = if shortcut {
+            ChromaSubsampling::Cs444
         } else {
-            let range = r.bits(1)? == 1;
-            if chroma == ChromaSubsampling::Cs420 {
-                chroma_sample_position = r.bits(2)? as u8;
+            match seq_profile {
+                0 => ChromaSubsampling::Cs420,
+                1 => ChromaSubsampling::Cs444,
+                _ if bit_depth == BitDepth::Twelve => {
+                    if r.bits(1)? == 0 {
+                        ChromaSubsampling::Cs444
+                    } else if r.bits(1)? == 0 {
+                        ChromaSubsampling::Cs422
+                    } else {
+                        ChromaSubsampling::Cs420
+                    }
+                }
+                _ => ChromaSubsampling::Cs422,
             }
-            range
         };
+        // Coded only when both axes are subsampled, and only outside the shortcut — which codes
+        // nothing after the colour description.
+        let mut chroma_sample_position = 0u8;
+        if !shortcut && chroma == ChromaSubsampling::Cs420 {
+            chroma_sample_position = r.bits(2)? as u8;
+        }
         let colour = (cp, tc, mc, full_range);
         Ok(Self {
+            bit_depth,
             seq_profile,
             seq_level_idx_0,
             width,
@@ -486,6 +580,23 @@ impl<'a> BitReader<'a> {
 /// `quality` at `0` and passes the authoritative quantizer out-of-band, as the codec-specific
 /// [`EncodeConfig::extra`] blob: **one byte**, the AV1 `base_q_idx`. A backend registered for
 /// [`AV1_CODEC_ID`] must read `extra`, and must not read `quality`.
+///
+/// # Bit depth
+///
+/// Both directions are lowered: an 8-bit job through [`Av1StillEncoder::encode_still`] and a 10- or
+/// 12-bit one through [`encode_still16`](Av1StillEncoder::encode_still16), so a wrapped hardware or
+/// `-sys` encoder owns the job at every depth rather than silently losing the high-bit-depth ones to
+/// the software tail.
+///
+/// [`ImageDesc`] describes the two identically except in three places, and a backend reading the
+/// descriptor must honour all three:
+///
+/// - [`ImageDesc::depth`] is the **coded** depth — `8`, `10` or `12` — never the storage width.
+/// - [`ImageDesc::strides`] are in **bytes**, so a high-bit-depth row is twice its sample count.
+/// - Above 8 bits the plane pointers address native-endian `u16` samples, **right-justified** at
+///   the coded depth (a 10-bit sample occupies `0..=1023`, not the top ten bits of a `u16`).
+///   [`ImageDesc::pixel_format`] carries `Rgb16` rather than `Rgb8` to say so, and `Planar16`
+///   validates every sample against its depth, so the range is a guarantee and not a convention.
 ///
 /// # Status handling
 ///
@@ -575,15 +686,64 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
             )
         }
     }
+
+    fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
+        let q_idx = req.base_q_idx();
+        let cfg = Self::config(&q_idx);
+        // Bytes, not samples: `ImageDesc::strides` is a byte stride, and a `u16` row is twice as
+        // wide as its sample count. Deriving it from the sample count instead would hand the
+        // backend every other row.
+        let stride = |i: usize| planes.plane_dimensions(i).0 as usize * size_of::<u16>();
+        // `Vec<u16>` is 2-byte aligned, which is what a backend reinterpreting the pointer as
+        // `uint16_t *` needs; the `*mut` is the ABI's one descriptor shape, shared with the decode
+        // (write) direction, and encode inputs stay read-only per its contract.
+        let plane_ptr = |i: usize| planes.plane(i).as_ptr().cast::<u8>().cast_mut();
+        let image = ImageDesc::new(
+            // `Rgb16` rather than `Rgb8`: the samples are `u16`, and the tag is what tells a
+            // backend how wide to read before `depth` tells it how many bits carry signal.
+            PixelFormat::Rgb16 as u32,
+            planes.width(),
+            planes.height(),
+            // The *coded* depth (10 or 12), not the 16-bit storage width — `av1C` mirrors this and
+            // a backend coding to the storage width would produce a stream the container's own
+            // depth check rejects.
+            u32::from(planes.bit_depth().bits()),
+            3,
+            [
+                plane_ptr(0),
+                plane_ptr(1),
+                plane_ptr(2),
+                std::ptr::null_mut(),
+            ],
+            [stride(0), stride(1), stride(2), 0],
+        );
+        let mut obus = Vec::new();
+        let status = self.inner.encode(&cfg, &image, &mut |chunk: &[u8]| {
+            obus.extend_from_slice(chunk);
+            Status::OK
+        });
+        if status.is_ok() {
+            Ok(obus)
+        } else if status.is_unsupported() {
+            Err(LateDecline::error().with_detail(format!("codec-abi status {}", status.0)))
+        } else {
+            Err(
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: AV1 encode backend failed")
+                    .with_detail(format!("codec-abi status {}", status.0)),
+            )
+        }
+    }
 }
 
-/// The sentinel by which [`AbiAv1StillEncoder`] reports a **late** [`Status::UNSUPPORTED`] — a
-/// backend that answered `supports` affirmatively and then declined at `encode` time.
+/// The sentinel for a **late** decline — a backend that answered `supports` affirmatively and then
+/// declined at `encode` time.
 ///
-/// The typed trait has no third outcome between "handled" and "declined", so the adapter encodes
-/// the late decline as this exact [`Error::Unsupported`] payload, which [`run_backends`] maps back
-/// to a fall-through. It is an internal protocol between the two: a hand-written
-/// [`Av1StillEncoder`] signals a decline from [`supports`](Av1StillEncoder::supports).
+/// The typed trait has no third outcome between "handled" and "declined", so the late decline is
+/// this exact [`Error::Unsupported`] payload, which [`run_backends`] maps back to a fall-through.
+/// Two things raise it: [`AbiAv1StillEncoder`] translating a late [`Status::UNSUPPORTED`] from a C
+/// backend, and the default [`Av1StillEncoder::encode_still16`], which is how a backend written
+/// against the 8-bit contract declines a high-bit-depth job it never agreed to. A hand-written
+/// backend otherwise signals a decline from [`supports`](Av1StillEncoder::supports).
 pub(crate) struct LateDecline;
 
 impl LateDecline {
@@ -598,5 +758,208 @@ impl LateDecline {
     pub(crate) fn is(err: &Error) -> bool {
         err.kind() == gamut_core::ErrorKind::Unsupported
             && err.static_message() == Some(Self::MESSAGE)
+    }
+}
+
+/// Direct tests of the private sequence-header parser.
+///
+/// [`SeqHeaderParams::parse`] is reachable from the integration suite only through
+/// [`still_from_backend_obus`], which checks the coded **bit depth before the chroma format**. Every
+/// 12-bit stream that suite can build is paired with an 8-bit request, so it stops at the depth
+/// error and never observes the derived layout at all — and the layout is what §5.5.2 makes
+/// subtle. Two of the derivations below have no end-to-end route whatever: `chroma_sample_position`
+/// because `gamut-av1` fixes it at 0 and exposes no entry point taking an
+/// [`Av1StillConfig`](gamut_av1::Av1StillConfig), and the coded `subsampling_y` because the encoder
+/// takes a job's chroma from the buffer it was handed and no *subsampled* 12-bit request reaches
+/// this parser. So these call `parse` directly and assert what it returned.
+///
+/// The bit writer duplicates the one in `tests/backend.rs` deliberately: an integration-test binary
+/// and a unit-test module cannot share code, and the crate may not dev-depend on `gamut-bitstream`
+/// (a publishable crate must not dev-depend on another without a normal edge — `check-release-deps`).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dimensions every test stream carries; both need more than one bit to code, so a
+    /// `dimension_bits` mistake cannot hide behind a zero-width field.
+    const W: u32 = 34;
+    const H: u32 = 18;
+
+    /// An MSB-first bit writer. The byte vector *is* the payload — a partial final byte is already
+    /// zero-padded, which is what `trailing_bits` requires.
+    #[derive(Default)]
+    struct BitWriter {
+        bytes: Vec<u8>,
+        bit: u32,
+    }
+
+    impl BitWriter {
+        /// Appends the low `n` bits of `value`, most significant first.
+        fn put(&mut self, value: u32, n: u32) -> &mut Self {
+            for i in (0..n).rev() {
+                if self.bit == 0 {
+                    self.bytes.push(0);
+                }
+                let last = self.bytes.len() - 1;
+                self.bytes[last] |= (((value >> i) & 1) as u8) << (7 - self.bit);
+                self.bit = (self.bit + 1) % 8;
+            }
+            self
+        }
+    }
+
+    /// The bit width `dimension_bits` gives `value`.
+    fn dim_bits(value: u32) -> u32 {
+        32 - (value - 1).leading_zeros()
+    }
+
+    /// A `reduced_still_picture_header` sequence-header OBU carrying the §5.5.2 colour tail the
+    /// arguments describe.
+    ///
+    /// `mc` selects the matrix code point, and with it whether the sRGB shortcut applies (`0` is
+    /// `MC_IDENTITY`, which alongside BT.709 primaries and sRGB transfer takes it). `coded_pair` is
+    /// the explicit `subsampling_x`/`subsampling_y` that only profile 2 at 12 bits codes, and `csp`
+    /// the `chroma_sample_position` that follows only when both axes are subsampled.
+    fn seq_header_obus(
+        seq_profile: u8,
+        high_bitdepth: bool,
+        twelve_bit: bool,
+        mc: u32,
+        coded_pair: Option<(u32, u32)>,
+        csp: u32,
+    ) -> Vec<u8> {
+        let (wbits, hbits) = (dim_bits(W), dim_bits(H));
+        let mut b = BitWriter::default();
+        b.put(u32::from(seq_profile), 3)
+            .put(1, 1) // still_picture
+            .put(1, 1) // reduced_still_picture_header
+            .put(0, 5) // seq_level_idx[0]
+            .put(wbits - 1, 4)
+            .put(hbits - 1, 4)
+            .put(W - 1, wbits)
+            .put(H - 1, hbits)
+            .put(0, 6) // the six enable flags
+            .put(u32::from(high_bitdepth), 1);
+        if seq_profile == 2 && high_bitdepth {
+            b.put(u32::from(twelve_bit), 1);
+        }
+        if seq_profile != 1 {
+            b.put(0, 1); // mono_chrome
+        }
+        b.put(1, 1) // color_description_present_flag
+            .put(1, 8) // color_primaries = BT.709
+            .put(13, 8) // transfer_characteristics = sRGB
+            .put(mc, 8);
+        if mc != 0 {
+            b.put(1, 1); // color_range = full
+            let (sx, sy) = match coded_pair {
+                Some((sx, sy)) => {
+                    b.put(sx, 1);
+                    if sx == 1 {
+                        b.put(sy, 1);
+                    }
+                    (sx, sy)
+                }
+                None if seq_profile == 0 => (1, 1),
+                None if seq_profile == 1 => (0, 0),
+                None => (1, 0),
+            };
+            if (sx, sy) == (1, 1) {
+                b.put(csp, 2);
+            }
+            // The tail §5.5.2 codes after the chroma fields. Present so a parser that reads one bit
+            // too many finds a real field rather than running off the payload — the failure should
+            // be a wrong value, not a truncation error.
+            b.put(0, 1); // separate_uv_delta_q
+            b.put(0, 1); // film_grain_params_present
+        }
+        let payload = std::mem::take(&mut b.bytes);
+        let mut obus = vec![0x0A, payload.len() as u8];
+        obus.extend_from_slice(&payload);
+        obus
+    }
+
+    /// Parses one stream, asserting every field the container mirrors — not just the one under
+    /// test. A misparse that happens to land on the expected chroma is then still caught.
+    #[track_caller]
+    fn assert_parse(
+        obus: &[u8],
+        bit_depth: BitDepth,
+        seq_profile: u8,
+        chroma: ChromaSubsampling,
+        chroma_sample_position: u8,
+    ) {
+        let h = SeqHeaderParams::parse(obus).expect("the stream is a well-formed sequence header");
+        assert_eq!(h.bit_depth, bit_depth, "bit_depth");
+        assert_eq!(h.seq_profile, seq_profile, "seq_profile");
+        assert_eq!(h.seq_level_idx_0, 0, "seq_level_idx_0");
+        assert_eq!((h.width, h.height), (W, H), "coded dimensions");
+        assert_eq!(h.colour, (1, 13, 1, true), "colour");
+        assert_eq!(h.chroma, chroma, "derived chroma");
+        assert_eq!(
+            h.chroma_sample_position, chroma_sample_position,
+            "chroma_sample_position"
+        );
+    }
+
+    /// §5.5.2 infers 4:4:4 for profile 1 with no bit coding it. The depth cannot reach 12 here —
+    /// `twelve_bit` is coded only under profile 2 — so the layout comes from the profile alone.
+    #[test]
+    fn profile_one_infers_four_four_four() {
+        let obus = seq_header_obus(1, false, false, 1, None, 0);
+        assert_parse(&obus, BitDepth::Eight, 1, ChromaSubsampling::Cs444, 0);
+    }
+
+    /// Profile 2 at 12 bits is the one configuration that *codes* the pair, and `subsampling_x = 0`
+    /// is 4:4:4 — the layout an ordinary lossless high-bit-depth encode produces. `subsampling_y`
+    /// is not coded, so a parser reading it here would consume `separate_uv_delta_q`.
+    #[test]
+    fn twelve_bit_profile_two_codes_four_four_four() {
+        let obus = seq_header_obus(2, true, true, 1, Some((0, 0)), 0);
+        assert_parse(&obus, BitDepth::Twelve, 2, ChromaSubsampling::Cs444, 0);
+    }
+
+    /// `subsampling_x = 1, subsampling_y = 0` is 4:2:2 — and, unlike every other profile-2 stream,
+    /// it is 4:2:2 because the bits say so rather than because §5.5.2 fixes it.
+    #[test]
+    fn twelve_bit_profile_two_codes_four_two_two() {
+        let obus = seq_header_obus(2, true, true, 1, Some((1, 0)), 0);
+        assert_parse(&obus, BitDepth::Twelve, 2, ChromaSubsampling::Cs422, 0);
+    }
+
+    /// Below 12 bits profile 2 is fixed at 4:2:2 with no bit coding it, so the pair must not be
+    /// read — the depth, not the profile alone, decides whether the syntax codes it.
+    #[test]
+    fn profile_two_below_twelve_bits_infers_four_two_two() {
+        let obus = seq_header_obus(2, true, false, 1, None, 0);
+        assert_parse(&obus, BitDepth::Ten, 2, ChromaSubsampling::Cs422, 0);
+    }
+
+    /// Profile 0 infers 4:2:0, and `chroma_sample_position` is coded exactly when both axes are
+    /// subsampled. A parser that skipped the read would report `CSP_UNKNOWN` for a stream that
+    /// named a real position.
+    #[test]
+    fn profile_zero_infers_four_two_zero_and_reads_its_sample_position() {
+        let obus = seq_header_obus(0, false, false, 1, None, 1);
+        assert_parse(&obus, BitDepth::Eight, 0, ChromaSubsampling::Cs420, 1);
+    }
+
+    /// The coded `(1, 1)` pair is 4:2:0, which then codes a sample position of its own — the one
+    /// stream in which both the coded pair and the position are read.
+    #[test]
+    fn twelve_bit_profile_two_codes_four_two_zero_with_a_sample_position() {
+        let obus = seq_header_obus(2, true, true, 1, Some((1, 1)), 2);
+        assert_parse(&obus, BitDepth::Twelve, 2, ChromaSubsampling::Cs420, 2);
+    }
+
+    /// The §5.5.2 sRGB shortcut infers 4:4:4 and codes nothing after the colour description — so
+    /// `chroma_sample_position` stays 0 even though the inferred layout is not 4:2:0.
+    #[test]
+    fn the_srgb_shortcut_infers_four_four_four_and_codes_no_sample_position() {
+        let obus = seq_header_obus(1, false, false, 0, None, 0);
+        let h = SeqHeaderParams::parse(&obus).expect("the shortcut stream parses");
+        assert_eq!(h.chroma, ChromaSubsampling::Cs444);
+        assert_eq!(h.chroma_sample_position, 0);
+        assert_eq!(h.colour, (1, 13, 0, true), "the shortcut infers full range");
     }
 }

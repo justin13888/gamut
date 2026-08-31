@@ -2,18 +2,21 @@
 
 use std::sync::{Arc, Mutex};
 
-use gamut_av1::{Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with};
+use gamut_av1::{
+    Av1Colour, Av1StillConfig, EncodedStill, encode_still_intra_with, encode_still_intra16_with,
+};
 use gamut_color::{
     BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, Planar8,
-    RgbToYcbcr, TransferCharacteristics,
+    Planar16, RgbToYcbcr, TransferCharacteristics,
 };
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Result, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, Gray8, ImageRef, Result, Rgb8, Rgb16, Rgba8, Rgba16};
 use gamut_isobmff::{
     ColourInformation, IsoBmffImage, Item, ItemReference, NclxColr, Property, PropertyKind, write,
 };
 
-use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendSlot};
+use crate::backend::{Av1EncodeRequest, Av1StillEncoder, BackendPlanes, BackendSlot};
 use crate::config::{AvifConfig, AvifMode};
+use crate::image::ALPHA_AUX_URN;
 use crate::transform::{Mirror, Rotation};
 
 /// The encoder's display-orientation transforms, applied by a reader at display time (the stored
@@ -28,11 +31,27 @@ struct ImageTransform {
 
 /// Encodes images to AVIF still images.
 ///
-/// 8-bit RGB in, mapped to AV1 identity-matrix 4:4:4 planes. Construct with [`AvifEncoder::new`]
-/// (lossless), [`AvifEncoder::lossless`], or [`AvifEncoder::lossy`], then encode via the
-/// [`EncodeImage<Rgb8>`](gamut_core::EncodeImage) trait, taking a typed [`ImageRef`].
+/// 8-bit input, mapped to AV1 planes. Construct with [`AvifEncoder::new`] (lossless),
+/// [`AvifEncoder::lossless`], or [`AvifEncoder::lossy`], then encode via the
+/// [`EncodeImage`](gamut_core::EncodeImage) trait, taking a typed [`ImageRef`].
 /// [`AvifEncoder::with_rotation`] / [`AvifEncoder::with_mirror`] add `irot`/`imir`
 /// display-orientation transforms.
+///
+/// # Inputs
+///
+/// | [`Pixel`](gamut_core::Pixel) | Coded as |
+/// | --- | --- |
+/// | [`Rgb8`] | one 4:4:4 colour item |
+/// | [`Rgba8`] | a 4:4:4 colour item plus a **monochrome alpha auxiliary item** |
+/// | [`Gray8`] | one **monochrome** item — not R=G=B replication |
+/// | [`Rgb16`] | one 4:4:4 colour item at [`AvifEncoder::with_bit_depth`]'s depth |
+/// | [`Rgba16`] | that, plus a monochrome alpha auxiliary at the same depth |
+///
+/// Alpha is coded as its own AV1 still: AVIF v1.2.0 §4.1 makes `mono_chrome = 1` and full range a
+/// *shall* for an AV1 auxiliary image item, and the auxiliary is linked to the colour item by an
+/// `auxl` reference and typed by an essential `auxC` property.
+/// [`AvifEncoder::with_premultiplied_alpha`] declares that the colour values are already
+/// multiplied by it.
 ///
 /// The AV1 codestream comes from `gamut-av1` by default; [`AvifEncoder::push_backend`] registers
 /// alternate [`Av1StillEncoder`] backends ahead of it (see [`crate::backend`] for the fallback
@@ -49,6 +68,9 @@ pub struct AvifEncoder {
     exif: Option<Vec<u8>>,
     /// An XMP packet, carried verbatim into a `mime` metadata item.
     xmp: Option<Vec<u8>>,
+    /// Whether the colour values are premultiplied by alpha, emitted as a `prem` item reference.
+    /// Meaningless without an alpha channel, so it reaches the file only for an RGBA encode.
+    premultiplied: bool,
     /// Pluggable AV1 still-encode backends, tried in push order before the `gamut-av1` tail.
     /// Shared (not copied) by [`Clone`] — see [`AvifEncoder::push_backend`].
     backends: Vec<BackendSlot>,
@@ -67,6 +89,7 @@ impl std::fmt::Debug for AvifEncoder {
             .field("icc", &self.icc.as_ref().map(Vec::len))
             .field("exif", &self.exif.as_ref().map(Vec::len))
             .field("xmp", &self.xmp.as_ref().map(Vec::len))
+            .field("premultiplied", &self.premultiplied)
             .field("backends", &self.backends.len())
             .finish()
     }
@@ -102,6 +125,7 @@ impl AvifEncoder {
             icc: None,
             exif: None,
             xmp: None,
+            premultiplied: false,
             backends: Vec::new(),
         }
     }
@@ -127,6 +151,7 @@ impl AvifEncoder {
             icc: None,
             exif: None,
             xmp: None,
+            premultiplied: false,
             backends: Vec::new(),
         }
     }
@@ -225,6 +250,50 @@ impl AvifEncoder {
         self
     }
 
+    /// Selects the depth **16-bit inputs** are coded at: [`BitDepth::Ten`] or
+    /// [`BitDepth::Twelve`] (the default). Any other depth is rejected at encode time.
+    ///
+    /// # What happens to the low bits
+    ///
+    /// [`Rgb16`] and [`Rgba16`] carry samples on `gamut-core`'s canonical **full 16-bit scale**,
+    /// while AV1 codes 8, 10 or 12. The encoder narrows by **truncation** — `sample >> (16 -
+    /// depth)` — so the coded value is the top `depth` bits of the caller's sample. That makes the
+    /// contract worth stating exactly:
+    ///
+    /// > A lossless encode of a 16-bit input is bit-exact **at the coded depth**, not to the
+    /// > 16-bit input.
+    ///
+    /// Truncation rather than rounding keeps the mapping a pure prefix: the same source narrowed to
+    /// 10 and to 12 bits agrees on the 10 bits they share, and no sample can round up out of range.
+    /// A caller who wants a different tradeoff — dithering, or a rounded narrowing — applies it
+    /// before handing the image over.
+    ///
+    /// **Ignored by the 8-bit inputs.** [`Rgb8`], [`Rgba8`] and [`Gray8`] always code 8-bit:
+    /// widening them would claim precision the caller never had.
+    #[must_use]
+    pub fn with_bit_depth(mut self, bit_depth: BitDepth) -> Self {
+        self.config.bit_depth = bit_depth;
+        self
+    }
+
+    /// Declares that the colour values of an RGBA input are **premultiplied** by their alpha —
+    /// i.e. already multiplied through, so a fully transparent pixel carries zeroed colour.
+    ///
+    /// This is a **declaration, not a conversion**: the encoder multiplies nothing and divides
+    /// nothing. It records the caller's assertion as a `prem` item reference from the colour item
+    /// to its alpha auxiliary (ISO/IEC 23008-12 §6), which is what tells a reader whether to
+    /// un-premultiply before compositing. Getting it wrong darkens or halos the edges of the
+    /// displayed image, so the default is `false` — unassociated alpha, the interpretation
+    /// [`Rgba8`]'s [`ColorModel::Rgba`](gamut_core::ColorModel::Rgba) already documents.
+    ///
+    /// Ignored by every input without an alpha channel: with no alpha auxiliary there is nothing
+    /// for the reference to target.
+    #[must_use]
+    pub fn with_premultiplied_alpha(mut self, premultiplied: bool) -> Self {
+        self.premultiplied = premultiplied;
+        self
+    }
+
     /// The colour signalling and plane layout this encoder's configuration selects.
     ///
     /// The split is between knobs that **transform samples** and knobs that only **tag** them.
@@ -248,12 +317,54 @@ impl AvifEncoder {
         }
     }
 
+    /// The colour signalling for a **monochrome** coded item: the caller's primaries and transfer
+    /// over `gamut-av1`'s monochrome defaults.
+    ///
+    /// Neither [`with_matrix`](Self::with_matrix) nor [`with_color_range`](Self::with_color_range)
+    /// applies here, and both are dropped rather than half-honoured. There is no chroma for a
+    /// matrix to produce — AV1 §6.4.2 in fact forbids `MC_IDENTITY` on a single-plane stream — and
+    /// the encoder scales no samples, so signalling limited range would describe samples it did
+    /// not narrow. `primaries` and `transfer` only *tag* the samples, so they carry through as
+    /// they do for a colour item.
+    fn monochrome_colour(&self) -> Av1Colour {
+        Av1Colour {
+            primaries: self.config.primaries,
+            transfer: self.config.transfer,
+            ..Av1Colour::monochrome()
+        }
+    }
+
     /// The chroma sampling this configuration codes. Lossless pins 4:4:4 regardless of the
     /// configured value, for the same reason it pins the identity matrix.
     fn chroma(&self) -> ChromaSubsampling {
         match self.config.mode {
             AvifMode::Lossless => ChromaSubsampling::Cs444,
             _ => self.config.chroma,
+        }
+    }
+
+    /// The depth a 16-bit input is coded at, rejecting one AV1 cannot express.
+    ///
+    /// §6.4.1 defines 8, 10 and 12. [`BitDepth::Sixteen`] is a `gamut-color` depth for the
+    /// interleaved 16-bit pipelines, and [`BitDepth::Eight`] would silently discard the input's
+    /// whole point, so both are refused rather than quietly reinterpreted.
+    fn coded_bit_depth(&self) -> Result<BitDepth> {
+        match self.config.bit_depth {
+            BitDepth::Ten | BitDepth::Twelve => Ok(self.config.bit_depth),
+            _ => Err(gamut_core::Error::unsupported(
+                env!("CARGO_PKG_NAME"),
+                "AVIF: a 16-bit input codes at 10 or 12 bits (AV1 \u{a7}6.4.1); \
+                 select one with AvifEncoder::with_bit_depth",
+            )),
+        }
+    }
+
+    /// The AV1 `base_q_idx` this configuration codes at: `0` — the lossless path — or the
+    /// quality mapping's quantizer.
+    fn base_q_idx(&self) -> u8 {
+        match self.config.mode {
+            AvifMode::Lossless => 0,
+            AvifMode::Lossy => quality_to_quant(self.config.quality),
         }
     }
 
@@ -374,7 +485,15 @@ impl AvifEncoder {
     /// from the AV1 configuration so the cross-box consistency requirements hold by construction
     /// (AVIF v1.2.0 §2.2, AV1-ISOBMFF v1.3.0 §2.3.4), and appending whatever colour and metadata
     /// payloads the encoder was configured with.
-    fn build_avif(&self, still: &EncodedStill, dims: Dimensions) -> Result<Vec<u8>> {
+    ///
+    /// `alpha`, when present, is the separately coded monochrome still that becomes the alpha
+    /// auxiliary image item.
+    fn build_avif(
+        &self,
+        still: &EncodedStill,
+        dims: Dimensions,
+        alpha: Option<&EncodedStill>,
+    ) -> Result<Vec<u8>> {
         let c = &still.config;
         // av1C is essential; ispe/pixi/colr are descriptive. Order fixes the ipco/ipma indices.
         let mut properties = vec![
@@ -395,7 +514,7 @@ impl AvifEncoder {
             Property {
                 essential: false,
                 kind: PropertyKind::PixelInformation {
-                    bits_per_channel: vec![8, 8, 8],
+                    bits_per_channel: pixi_channels(c),
                 },
             },
             Property {
@@ -441,7 +560,22 @@ impl AvifEncoder {
             properties,
             payload: still.obus.clone(),
         }];
-        // Metadata items follow the primary, taking the next free id in a fixed order. Ids come
+        // The alpha auxiliary precedes the metadata items, so a file with alpha *and* Exif reads
+        // 1 = colour, 2 = alpha, 3 = Exif — and a file without alpha keeps exactly the ids it
+        // always had.
+        if let Some(alpha) = alpha {
+            let id = next_item_id(&items);
+            items.push(alpha_item(id, alpha, dims));
+            // `prem` runs colour image → alpha auxiliary, so the reference lives on the *colour*
+            // item — the opposite direction to the `auxl` the auxiliary owns.
+            if self.premultiplied {
+                items[0].references.push(ItemReference {
+                    reference_type: *b"prem",
+                    to_item_ids: vec![id],
+                });
+            }
+        }
+        // Metadata items follow, taking the next free id in a fixed order. Ids come
         // from position among the items actually present, so an XMP-only file gets id 2 — the
         // primary stays id 1 (and `pitm` names it) whatever is attached.
         if let Some(exif) = &self.exif {
@@ -464,12 +598,234 @@ impl AvifEncoder {
         let image = IsoBmffImage {
             major_brand: *b"avif",
             minor_version: 0,
-            compatible_brands: compatible_brands(&still.config),
+            compatible_brands: compatible_brands(&items),
             primary_item_id: PRIMARY_ITEM_ID,
             items,
             groups: vec![],
         };
         write(&image)
+    }
+
+    /// Encodes the **colour** planes, offering the job to the registered backends in push order
+    /// before falling through to the built-in `gamut-av1` tail.
+    fn colour_still(
+        &self,
+        planes: &Planar8,
+        dims: Dimensions,
+        base_q_idx: u8,
+        colour: Av1Colour,
+        chroma: ChromaSubsampling,
+    ) -> Result<EncodedStill> {
+        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, BitDepth::Eight);
+        match crate::backend::run_backends(&self.backends, &request, BackendPlanes::Eight(planes))?
+        {
+            Some(obus) => {
+                crate::backend::still_from_backend_obus(obus, dims, colour, chroma, BitDepth::Eight)
+            }
+            None => Ok(encode_still_intra_with(planes, base_q_idx, colour)?.0),
+        }
+    }
+
+    /// The high-bit-depth counterpart of [`colour_still`](Self::colour_still): the same registry,
+    /// entered through [`Av1StillEncoder::encode_still16`], whose default declines so a backend
+    /// written against the 8-bit contract falls through to the built-in tail.
+    fn colour_still16(
+        &self,
+        planes: &Planar16,
+        dims: Dimensions,
+        base_q_idx: u8,
+        colour: Av1Colour,
+    ) -> Result<EncodedStill> {
+        let bit_depth = planes.bit_depth();
+        // Read off the buffer, not the configuration, exactly as the 8-bit path does: §6.4.2
+        // forces 4:4:4 under the identity matrix and the `Rgba16` path has no 4-stride
+        // downsampler, so either can carry 4:4:4 planes while `with_chroma` says otherwise. The
+        // request must describe the planes it actually carries.
+        let chroma = planes.subsampling();
+        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma, bit_depth);
+        match crate::backend::run_backends(&self.backends, &request, BackendPlanes::High(planes))? {
+            Some(obus) => {
+                crate::backend::still_from_backend_obus(obus, dims, colour, chroma, bit_depth)
+            }
+            None => Ok(encode_still_intra16_with(planes, base_q_idx, colour)?.0),
+        }
+    }
+
+    /// Builds the container around an encoded still and appends it to `out`, returning the number
+    /// of bytes written — the shared tail of every `EncodeImage` impl.
+    fn emit(
+        &self,
+        still: &EncodedStill,
+        dims: Dimensions,
+        alpha: Option<&EncodedStill>,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        let file = self.build_avif(still, dims, alpha)?;
+        out.extend_from_slice(&file);
+        Ok(file.len())
+    }
+}
+
+/// Encodes **monochrome** planes, always through the built-in `gamut-av1` encoder.
+///
+/// The [`Av1StillEncoder`] seam is deliberately skipped. Its v1 contract fixes 8-bit 4:4:4
+/// `seq_profile = 1` (see [`Av1StillEncoder::encode_still`]), and
+/// [`supports`](Av1StillEncoder::supports) is handed an [`Av1EncodeRequest`] that cannot express
+/// anything else — so a backend registered against that contract has no way to decline a
+/// monochrome job, and would be given single-plane input it never agreed to encode. Widening the
+/// request is the additive change that opens this path to backends (`STATUS.md`).
+fn monochrome_still(planes: &Planar8, base_q_idx: u8, colour: Av1Colour) -> Result<EncodedStill> {
+    Ok(encode_still_intra_with(planes, base_q_idx, colour)?.0)
+}
+
+/// The high-bit-depth [`monochrome_still`]; the registry is skipped for the same reason.
+fn monochrome_still16(
+    planes: &Planar16,
+    base_q_idx: u8,
+    colour: Av1Colour,
+) -> Result<EncodedStill> {
+    Ok(encode_still_intra16_with(planes, base_q_idx, colour)?.0)
+}
+
+/// The `pixi` bits-per-channel list for a coded item: one entry per coded plane, each carrying the
+/// stream's own bit depth (AVIF v1.2.0 §2.2 requires `pixi` to describe the item's actual
+/// channels). A monochrome item declares one channel, not three.
+///
+/// The depth is read back out of the `av1C` flags rather than passed alongside them, so `pixi` and
+/// `av1C` cannot disagree.
+fn pixi_channels(c: &Av1StillConfig) -> Vec<u8> {
+    let bits = match (c.high_bitdepth, c.twelve_bit) {
+        (false, _) => 8,
+        (true, false) => 10,
+        (true, true) => 12,
+    };
+    if c.monochrome {
+        vec![bits]
+    } else {
+        vec![bits; 3]
+    }
+}
+
+/// The AV1 `seq_profile` and `seq_level_idx[0]` an `av01` item declares, or `None` when it carries
+/// no `av1C` to read them from.
+///
+/// Reads the record the writer is about to emit, so a brand claim is derived from the bytes in the
+/// file rather than from a parallel flag. Both fields share the record's **second** byte
+/// (AV1-ISOBMFF v1.3.0 §2.3.3; the first is the marker/version pair `0x81`), as [`av1c_record`]
+/// writes it: `seq_profile` in the top three bits, `seq_level_idx[0]` in the low five.
+fn av1_profile_level(item: &Item) -> Option<(u8, u8)> {
+    /// The four-CC of the AV1 item configuration property (AV1-ISOBMFF v1.3.0 §2.2.1).
+    const AV1C: [u8; 4] = *b"av1C";
+    item.properties.iter().find_map(|p| match &p.kind {
+        PropertyKind::CodecConfiguration { kind: AV1C, data } => {
+            data.get(1).map(|&b| (b >> 5, b & 0x1f))
+        }
+        _ => None,
+    })
+}
+
+/// AV1 `seq_profile` 1 — the High Profile, the only one the AVIF Advanced Profile admits for an
+/// image item (AVIF v1.2.0 §8.3).
+const HIGH_PROFILE: u8 = 1;
+
+/// AV1 `seq_profile` 0 — the Main Profile, the only one the AVIF Baseline Profile admits (§8.2).
+const MAIN_PROFILE: u8 = 0;
+
+/// `seq_level_idx` 16 is AV1 level 6.0, the Advanced Profile's ceiling (§8.3).
+const MA1A_MAX_LEVEL: u8 = 16;
+
+/// `seq_level_idx` 13 is AV1 level 5.1, the Baseline Profile's ceiling (§8.2).
+const MA1B_MAX_LEVEL: u8 = 13;
+
+/// The `ftyp` compatible brands for a file built from `items` (AVIF v1.2.0 §8.1-8.3).
+///
+/// The two AVIF profile brands each constrain the **AV1** profile and level:
+///
+/// - `MA1B` (Baseline, §8.2) — "the AV1 profile shall be the Main Profile and the level shall be
+///   5.1 or lower". Main is 4:2:0, and also monochrome — which is what an alpha auxiliary and a
+///   `Gray8` primary code as.
+/// - `MA1A` (Advanced, §8.3) — "the AV1 profile shall be the High Profile and the level shall be
+///   6.0 or lower". High is 4:4:4.
+///
+/// Both constrain *every* AV1 image item in the file, not just the primary, so the test runs over
+/// all of them: a 4:4:4 colour item beside a monochrome alpha auxiliary is High and Main at once
+/// and can claim neither. A 4:2:2 still is AV1 Professional, which satisfies neither profile.
+/// §8.1 anticipates all of this — a file whose encoding matches no defined AVIF profile simply
+/// declares the general brands.
+///
+/// The level is checked against the spec's own thresholds rather than against what
+/// [`pick_level`](gamut_av1::headers::pick_level) happens to produce, so this stays correct if that
+/// table grows. An `av01` item with no `av1C` cannot be checked at all, so the file claims no
+/// profile brand rather than one it has not verified.
+fn compatible_brands(items: &[Item]) -> Vec<[u8; 4]> {
+    let mut brands = vec![*b"avif", *b"mif1", *b"miaf"];
+    let coded: Option<Vec<(u8, u8)>> = items
+        .iter()
+        .filter(|item| &item.item_type == b"av01")
+        .map(av1_profile_level)
+        .collect();
+    if let Some(coded) = coded {
+        let all = |profile: u8, max_level: u8| {
+            !coded.is_empty() && coded.iter().all(|&(p, l)| p == profile && l <= max_level)
+        };
+        if all(HIGH_PROFILE, MA1A_MAX_LEVEL) {
+            brands.push(*b"MA1A");
+        } else if all(MAIN_PROFILE, MA1B_MAX_LEVEL) {
+            brands.push(*b"MA1B");
+        }
+    }
+    brands
+}
+
+/// The alpha **auxiliary image item** for a colour item of `dims` (AVIF v1.2.0 §4).
+///
+/// Hidden, because it is not independently displayable; typed by an **essential** `auxC` carrying
+/// the alpha URN, so a reader that does not understand the auxiliary type refuses the item rather
+/// than showing an alpha plane as a picture; and owning the `auxl` reference, which runs
+/// auxiliary → master. No `colr` is stamped: §4.1 says it should be omitted on an alpha item, whose
+/// samples are opacity rather than colour.
+fn alpha_item(id: u32, alpha: &EncodedStill, dims: Dimensions) -> Item {
+    Item {
+        id,
+        item_type: *b"av01",
+        name: String::new(),
+        content_type: None,
+        content_encoding: None,
+        hidden: true,
+        references: vec![ItemReference {
+            reference_type: *b"auxl",
+            to_item_ids: vec![PRIMARY_ITEM_ID],
+        }],
+        properties: vec![
+            Property {
+                essential: true,
+                kind: PropertyKind::CodecConfiguration {
+                    kind: *b"av1C",
+                    data: av1c_record(&alpha.config).to_vec(),
+                },
+            },
+            Property {
+                essential: false,
+                kind: PropertyKind::ImageSpatialExtents {
+                    width: dims.width,
+                    height: dims.height,
+                },
+            },
+            Property {
+                essential: false,
+                kind: PropertyKind::PixelInformation {
+                    bits_per_channel: pixi_channels(&alpha.config),
+                },
+            },
+            Property {
+                essential: true,
+                kind: PropertyKind::AuxiliaryType {
+                    aux_type: ALPHA_AUX_URN.to_owned(),
+                    aux_subtype: Vec::new(),
+                },
+            },
+        ],
+        payload: alpha.obus.clone(),
     }
 }
 
@@ -535,37 +891,15 @@ fn metadata_item(
 /// quantization). `base_q_idx 0` (the lossless WHT path) is reserved for [`AvifEncoder::lossless`],
 /// so the lossy path stays on the DCT pipeline — `lossy(100)` is the finest lossy quantizer, not
 /// lossless. Finer rate control (target size/metric) is future work (see `STATUS.md`).
-/// The `ftyp` compatible brands for a stream with this sequence header (AVIF v1.2.0 §8.1-8.3).
-///
-/// The two AVIF profile brands each constrain the **AV1** profile and level:
-///
-/// - `MA1B` (Baseline, §8.2) — "the AV1 profile shall be the Main Profile and the level shall be
-///   5.1 or lower". Main is 4:2:0, so only a 4:2:0 still can claim it.
-/// - `MA1A` (Advanced, §8.3) — "the AV1 profile shall be the High Profile and the level shall be
-///   6.0 or lower". High is 4:4:4.
-///
-/// A 4:2:2 still is AV1 Professional, which satisfies **neither**, and §8.1 says a file whose
-/// encoding matches no defined AVIF profile simply declares the general brands. The level is
-/// checked against the spec's own thresholds (`seq_level_idx` 13 is level 5.1, 16 is 6.0) rather
-/// than against what `pick_level` happens to produce, so this stays correct if that table grows.
-fn compatible_brands(config: &Av1StillConfig) -> Vec<[u8; 4]> {
-    let mut brands = vec![*b"avif", *b"mif1", *b"miaf"];
-    match config.seq_profile {
-        0 if config.seq_level_idx_0 <= 13 => brands.push(*b"MA1B"),
-        1 if config.seq_level_idx_0 <= 16 => brands.push(*b"MA1A"),
-        _ => {}
-    }
-    brands
-}
-
 fn quality_to_quant(quality: u8) -> u8 {
     let q = u32::from(quality.min(100));
     (((100 - q) * 255 / 100) as u8).max(1)
 }
 
 impl EncodeImage<Rgb8> for AvifEncoder {
-    /// Maps the RGB image to AV1 4:4:4 planes — identity GBR, or YCbCr through the configured
-    /// matrix — and wraps the temporal unit in an AVIF file.
+    /// Maps the RGB image to AV1 planes — identity GBR at 4:4:4, or YCbCr through the configured
+    /// matrix at [`with_chroma`](AvifEncoder::with_chroma)'s sampling — and wraps the temporal unit
+    /// in an AVIF file.
     fn encode_image(&self, image: ImageRef<'_, Rgb8>, out: &mut Vec<u8>) -> Result<usize> {
         let dims = image.dimensions();
         let colour = self.colour();
@@ -587,21 +921,120 @@ impl EncodeImage<Rgb8> for AvifEncoder {
         let chroma = planes.subsampling();
         // base_q_idx 0 is the lossless path; encode_still_intra(_, 0) is exactly what
         // encode_still_lossless_identity does, so a single call covers both modes.
-        let base_q_idx = match self.config.mode {
-            AvifMode::Lossless => 0,
-            AvifMode::Lossy => quality_to_quant(self.config.quality),
-        };
+        //
         // Pluggable backends first, in push order; `gamut-av1` is the implicit tail when every
         // backend declines (and the only path taken by an encoder with no backends, which is why
         // the default output is byte-identical to the pre-backend encoder).
-        let request = Av1EncodeRequest::new(dims, base_q_idx, colour, chroma);
-        let still = match crate::backend::run_backends(&self.backends, &request, &planes)? {
-            Some(obus) => crate::backend::still_from_backend_obus(obus, dims, colour, chroma)?,
-            None => encode_still_intra_with(&planes, base_q_idx, colour)?.0,
+        let still = self.colour_still(&planes, dims, self.base_q_idx(), colour, chroma)?;
+        self.emit(&still, dims, None, out)
+    }
+}
+
+impl EncodeImage<Rgba8> for AvifEncoder {
+    /// Splits the image into colour and alpha, codes each as its own AV1 still — the colour item
+    /// as [`EncodeImage<Rgb8>`] would, the alpha as a monochrome auxiliary — and wraps both in one
+    /// AVIF file.
+    ///
+    /// Alpha is coded at the same `base_q_idx` as the colour, so a lossless encode round-trips
+    /// alpha bit-exactly and a lossy one quantizes it alongside the colour. It carries no `colr`
+    /// and goes through no matrix: opacity is not colour (AVIF v1.2.0 §4.1).
+    ///
+    /// # Chroma
+    ///
+    /// The colour item is coded at **4:4:4 regardless of
+    /// [`with_chroma`](AvifEncoder::with_chroma)**, which the `Rgb8` path does honour. Subsampling
+    /// an RGBA source needs a downsampler that reads a 4-sample stride, which `gamut-color` does
+    /// not yet expose; the request describes the buffer truthfully rather than the configuration,
+    /// so nothing mis-signals — an RGBA encode is simply larger than the same image without alpha.
+    /// Tracked in `STATUS.md`.
+    fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        let dims = image.dimensions();
+        let colour = self.colour();
+        let planes = match colour.matrix {
+            MatrixCoefficients::Identity => Planar8::from_rgba8_identity_view(image),
+            matrix => {
+                let m = RgbToYcbcr::new(matrix, colour.range, BitDepth::Eight)?;
+                Planar8::from_rgba8_matrix_view(image, m)
+            }
         };
-        let file = self.build_avif(&still, dims)?;
-        out.extend_from_slice(&file);
-        Ok(file.len())
+        let base_q_idx = self.base_q_idx();
+        let still = self.colour_still(&planes, dims, base_q_idx, colour, planes.subsampling())?;
+        let alpha = monochrome_still(
+            &Planar8::from_rgba8_alpha_view(image),
+            base_q_idx,
+            self.monochrome_colour(),
+        )?;
+        self.emit(&still, dims, Some(&alpha), out)
+    }
+}
+
+impl EncodeImage<Rgb16> for AvifEncoder {
+    /// Narrows the 16-bit samples to the configured coding depth and codes them as one item at
+    /// [`with_chroma`](AvifEncoder::with_chroma)'s sampling — 10-bit 4:4:4 stays AV1 profile 1,
+    /// anything 12-bit or subsampled moves to profile 2 (§6.4.1), and `av1C`/`pixi`/`colr` follow
+    /// from the stream.
+    ///
+    /// The narrowing is truncation; see [`AvifEncoder::with_bit_depth`] for the contract. Chroma is
+    /// averaged *after* narrowing, so the samples are averaged on the scale they are coded at.
+    fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
+        let dims = image.dimensions();
+        let depth = self.coded_bit_depth()?;
+        let colour = self.colour();
+        let planes = match colour.matrix {
+            // §6.4.2 forces 4:4:4 under the identity matrix, exactly as on the 8-bit path, so
+            // `with_chroma` does not reach this arm.
+            MatrixCoefficients::Identity => Planar16::from_rgb16_identity_view(image, depth),
+            matrix => {
+                let m = RgbToYcbcr::new(matrix, colour.range, depth)?;
+                Planar16::from_rgb16_matrix_subsampled(image, m, self.chroma())?
+            }
+        };
+        let still = self.colour_still16(&planes, dims, self.base_q_idx(), colour)?;
+        self.emit(&still, dims, None, out)
+    }
+}
+
+impl EncodeImage<Rgba16> for AvifEncoder {
+    /// [`EncodeImage<Rgb16>`] plus the alpha auxiliary item of [`EncodeImage<Rgba8>`], both at the
+    /// configured coding depth — AVIF v1.2.0 §4.1 requires the auxiliary to match the master's
+    /// depth.
+    fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
+        let dims = image.dimensions();
+        let depth = self.coded_bit_depth()?;
+        let colour = self.colour();
+        let planes = match colour.matrix {
+            MatrixCoefficients::Identity => Planar16::from_rgba16_identity_view(image, depth),
+            matrix => {
+                let m = RgbToYcbcr::new(matrix, colour.range, depth)?;
+                Planar16::from_rgba16_matrix_view(image, m)
+            }
+        };
+        let base_q_idx = self.base_q_idx();
+        let still = self.colour_still16(&planes, dims, base_q_idx, colour)?;
+        let alpha = monochrome_still16(
+            &Planar16::from_rgba16_alpha_view(image, depth),
+            base_q_idx,
+            self.monochrome_colour(),
+        )?;
+        self.emit(&still, dims, Some(&alpha), out)
+    }
+}
+
+impl EncodeImage<Gray8> for AvifEncoder {
+    /// Codes the grayscale image as a **single monochrome** AV1 item — one luma plane, no chroma,
+    /// and a `pixi` declaring one channel.
+    ///
+    /// Replicating the samples into three equal planes would code two constant chroma planes and
+    /// then claim three channels for an image that has one. The matrix and range knobs do not
+    /// apply (see [`AvifEncoder::with_matrix`]); the primaries and transfer tags do.
+    fn encode_image(&self, image: ImageRef<'_, Gray8>, out: &mut Vec<u8>) -> Result<usize> {
+        let dims = image.dimensions();
+        let still = monochrome_still(
+            &Planar8::from_gray8_view(image),
+            self.base_q_idx(),
+            self.monochrome_colour(),
+        )?;
+        self.emit(&still, dims, None, out)
     }
 }
 
@@ -648,45 +1081,125 @@ mod tests {
         assert_eq!(AvifEncoder::lossless().chroma(), ChromaSubsampling::Cs444);
     }
 
+    /// A coded `av01` item declaring `seq_profile` / `seq_level_idx[0]` through its `av1C`, which
+    /// is the only thing [`compatible_brands`] reads.
+    fn coded_item(seq_profile: u8, seq_level_idx_0: u8) -> Item {
+        Item {
+            id: PRIMARY_ITEM_ID,
+            item_type: *b"av01",
+            name: String::new(),
+            content_type: None,
+            content_encoding: None,
+            hidden: false,
+            references: vec![],
+            properties: vec![Property {
+                essential: true,
+                kind: PropertyKind::CodecConfiguration {
+                    kind: *b"av1C",
+                    data: av1c_record(&Av1StillConfig {
+                        seq_profile,
+                        seq_level_idx_0,
+                        seq_tier_0: 0,
+                        high_bitdepth: false,
+                        twelve_bit: false,
+                        monochrome: false,
+                        chroma_subsampling_x: 0,
+                        chroma_subsampling_y: 0,
+                        chroma_sample_position: 0,
+                        color_primaries: 1,
+                        transfer_characteristics: 13,
+                        matrix_coefficients: 1,
+                        full_range: true,
+                    })
+                    .to_vec(),
+                },
+            }],
+            payload: vec![],
+        }
+    }
+
+    fn general() -> Vec<[u8; 4]> {
+        vec![*b"avif", *b"mif1", *b"miaf"]
+    }
+
     #[test]
     fn profile_brands_require_both_the_av1_profile_and_its_level() {
         // AVIF §8.2/§8.3 constrain the AV1 profile *and* the level: `MA1B` needs Main at ≤ 5.1
         // (`seq_level_idx` ≤ 13), `MA1A` needs High at ≤ 6.0 (≤ 16). §8.1: a file matching neither
         // declares only the general brands. `pick_level` never yields above 16 today, so the level
         // guards are checked here rather than through an encode.
-        let cfg = |seq_profile: u8, seq_level_idx_0: u8| Av1StillConfig {
-            seq_profile,
-            seq_level_idx_0,
-            seq_tier_0: 0,
-            high_bitdepth: false,
-            twelve_bit: false,
-            monochrome: false,
-            chroma_subsampling_x: 0,
-            chroma_subsampling_y: 0,
-            chroma_sample_position: 0,
-            color_primaries: 1,
-            transfer_characteristics: 13,
-            matrix_coefficients: 1,
-            full_range: true,
-        };
-        let general = vec![*b"avif", *b"mif1", *b"miaf"];
+        let brands = |profile, level| compatible_brands(&[coded_item(profile, level)]);
 
         // Main within level 5.1 earns MA1B; one level above loses it.
-        let mut with_b = general.clone();
+        let mut with_b = general();
         with_b.push(*b"MA1B");
-        assert_eq!(compatible_brands(&cfg(0, 13)), with_b);
-        assert_eq!(compatible_brands(&cfg(0, 12)), with_b);
-        assert_eq!(compatible_brands(&cfg(0, 14)), general);
+        assert_eq!(brands(0, 13), with_b);
+        assert_eq!(brands(0, 12), with_b);
+        assert_eq!(brands(0, 14), general());
 
         // High within level 6.0 earns MA1A; above it, general brands only.
-        let mut with_a = general.clone();
+        let mut with_a = general();
         with_a.push(*b"MA1A");
-        assert_eq!(compatible_brands(&cfg(1, 16)), with_a);
-        assert_eq!(compatible_brands(&cfg(1, 17)), general);
+        assert_eq!(brands(1, 16), with_a);
+        assert_eq!(brands(1, 17), general());
 
-        // Professional (4:2:2) matches neither profile at any level.
-        assert_eq!(compatible_brands(&cfg(2, 0)), general);
-        assert_eq!(compatible_brands(&cfg(2, 16)), general);
+        // Professional (4:2:2, and any 12-bit stream) matches neither profile at any level.
+        assert_eq!(brands(2, 0), general());
+        assert_eq!(brands(2, 16), general());
+    }
+
+    #[test]
+    fn profile_brands_constrain_every_coded_item_not_just_the_primary() {
+        // §8.2/§8.3 both say "the AV1 profile" of the file, and MIAF applies a brand's constraints
+        // to every image item — so an alpha auxiliary or a `Gray8` primary, which code as Main
+        // monochrome, participate in the claim rather than riding on the primary's.
+        let mut with_a = general();
+        with_a.push(*b"MA1A");
+        let mut with_b = general();
+        with_b.push(*b"MA1B");
+
+        // A 4:4:4 colour item beside a monochrome alpha auxiliary is High *and* Main at once, so
+        // the file can claim neither. This is the case the alpha surface introduces.
+        assert_eq!(
+            compatible_brands(&[coded_item(1, 16), coded_item(0, 13)]),
+            general()
+        );
+        // All-Main — a 4:2:0 colour item with its alpha auxiliary — still earns MA1B.
+        assert_eq!(
+            compatible_brands(&[coded_item(0, 13), coded_item(0, 13)]),
+            with_b
+        );
+        // One item above the level ceiling costs the whole file the claim.
+        assert_eq!(
+            compatible_brands(&[coded_item(1, 16), coded_item(1, 17)]),
+            general()
+        );
+        // All-High stays MA1A.
+        assert_eq!(
+            compatible_brands(&[coded_item(1, 16), coded_item(1, 16)]),
+            with_a
+        );
+    }
+
+    #[test]
+    fn a_coded_item_without_an_av1c_forfeits_every_profile_brand() {
+        // The claim is derived from the bytes in the file. An `av01` item carrying no `av1C` has
+        // no profile to check, so no brand is claimed rather than one that was never verified —
+        // and vacuously claiming a brand for a file with no coded item at all is refused too.
+        let mut bare = coded_item(1, 16);
+        bare.properties.clear();
+        assert_eq!(compatible_brands(&[bare]), general());
+        assert_eq!(compatible_brands(&[]), general());
+    }
+
+    #[test]
+    fn non_av01_items_do_not_participate_in_the_brand_claim() {
+        // Exif and XMP are metadata items, not image items: §8.2/§8.3 constrain the AV1 profile of
+        // the *coded* items, so a metadata item beside a High primary must not cost it MA1A.
+        let mut with_a = general();
+        with_a.push(*b"MA1A");
+        let exif = metadata_item(2, *b"Exif", None, vec![0, 0, 0, 0]);
+        assert_eq!(compatible_brands(&[coded_item(1, 16), exif]), with_a);
     }
 
     #[test]

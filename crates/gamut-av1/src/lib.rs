@@ -20,12 +20,21 @@
 //! planes (identity) or `Y/Cb/Cr` planes (see `gamut_color::Planar8::from_rgb8_matrix`).
 //!
 //! Chroma sampling comes from the [`Planar8`](gamut_color::Planar8) itself: 4:4:4, 4:2:2 and 4:2:0
-//! are all coded, and `seq_profile` follows the format (Main for 4:2:0, High for 4:4:4,
-//! Professional for 4:2:2). The identity matrix requires 4:4:4 (§6.4.2) and a subsampled identity
-//! encode is refused. Under 4:2:2 the partition search drops `PARTITION_VERT`, since §6.10.4
-//! forbids a block whose chroma residual would be `BLOCK_INVALID`.
+//! are all coded. The identity matrix requires 4:4:4 (§6.4.2) and a subsampled identity encode is
+//! refused. Under 4:2:2 the partition search drops `PARTITION_VERT`, since §6.10.4 forbids a block
+//! whose chroma residual would be `BLOCK_INVALID`.
 //!
-//! The remaining surface (10/12-bit, 4:2:2's coding path, quantizer matrices, and the AVIF-level
+//! **Bit depth** is the buffer's too: [`encode_still_intra16_with`] takes a
+//! [`gamut_color::Planar16`] and codes at the depth it carries. Every depth-derived quantity
+//! follows it: the quantizer tables, the dequant and inverse-transform clamps, the
+//! `1 << (BitDepth - 1)` intra seeds, the palette's `L(BitDepth)` colours, the deblock centring and
+//! thresholds, CDEF's `coeffShift`, and the Wiener rounding pair.
+//!
+//! `seq_profile` is a joint function of the two (Annex A.2): Main (0) for 4:2:0 and monochrome,
+//! High (1) for 4:4:4, and Professional (2) for 4:2:2 — or for **any** layout at 12 bits, the only
+//! profile that codes `twelve_bit`.
+//!
+//! The remaining surface (quantizer matrices and the AVIF-level
 //! alpha/metadata/container features) is tracked in `gamut-avif/STATUS.md`.
 //!
 //! Modules mirror the spec: [`headers`] = OBU framing + sequence/frame headers (AV1 §5.3/§5.5/§5.9),
@@ -54,6 +63,6 @@ pub use decode::{
 };
 pub use encoder::{
     EncodedStill, ReconImage, encode_still_intra, encode_still_intra_superres,
-    encode_still_intra_with, encode_still_lossless_identity,
+    encode_still_intra_with, encode_still_intra16_with, encode_still_lossless_identity,
 };
 pub use headers::{Av1Colour, Av1StillConfig};

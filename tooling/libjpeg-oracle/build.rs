@@ -46,10 +46,13 @@ fn main() {
                 "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
             ]));
     }
+    // `--parallel` takes an explicit count. Bare, it becomes `make -j` with no limit *and*
+    // overrides CMAKE_BUILD_PARALLEL_LEVEL, so the shared dial would be silently ignored.
     run(Command::new("cmake").arg("--build").arg(&build).args([
         "--config",
         "Release",
         "--parallel",
+        &build_env::build_parallelism().to_string(),
     ]));
 
     // ---- Compile the shim against the freshly built headers. -------------------------------

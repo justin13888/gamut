@@ -46,10 +46,14 @@ fn main() {
     }
     // meson bakes nasm's absolute path into `build.ninja` at configure time, so ninja
     // does not strictly need the augmented PATH; pass it anyway for robust rebuilds.
+    // `-j` is explicit because ninja reads no CMake variable: left alone it would run
+    // NCPUS + 2 compilers, ignoring the one dial every other native build here honours.
     run(Command::new("ninja")
         .env("PATH", &path)
         .arg("-C")
-        .arg(&build_dir));
+        .arg(&build_dir)
+        .arg("-j")
+        .arg(build_env::build_parallelism().to_string()));
 
     // Link the freshly built static archive (`<build>/src/libdav1d.a`).
     println!(

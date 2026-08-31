@@ -48,9 +48,13 @@ fn main() {
                 "-DEXIV2_BUILD_DOC=OFF",
             ]));
     }
+    // `--parallel` with an explicit count, so this C++ exiv2 tree is bounded by the shared dial
+    // rather than by whatever the default generator would pick.
     run(Command::new("cmake")
         .arg("--build")
         .arg(&build)
+        .arg("--parallel")
+        .arg(build_env::build_parallelism().to_string())
         .args(["--config", "Release"]));
 
     let lib_dir = build.join("lib");

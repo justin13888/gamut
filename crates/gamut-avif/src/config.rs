@@ -2,7 +2,8 @@
 //! encoding.
 
 use gamut_color::{
-    ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients, TransferCharacteristics,
+    BitDepth, ChromaSubsampling, ColorRange, ColourPrimaries, MatrixCoefficients,
+    TransferCharacteristics,
 };
 
 /// Which AVIF bitstream the encoder produces.
@@ -84,6 +85,14 @@ pub struct AvifConfig {
     /// metadata properties (`mdcv`/`clli`) are still deferred (`STATUS.md`). Defaults to
     /// [`TransferCharacteristics::Srgb`].
     pub transfer: TransferCharacteristics,
+    /// The depth **16-bit inputs** are coded at: [`BitDepth::Ten`] or [`BitDepth::Twelve`],
+    /// defaulting to twelve.
+    ///
+    /// It selects a coding depth, not a conversion: an 8-bit input codes 8-bit whatever this says,
+    /// because widening samples the caller never had would invent precision. A 16-bit input is
+    /// narrowed to this depth by truncation — see
+    /// [`AvifEncoder::with_bit_depth`](crate::AvifEncoder::with_bit_depth).
+    pub bit_depth: BitDepth,
 }
 
 impl Default for AvifConfig {
@@ -96,6 +105,7 @@ impl Default for AvifConfig {
             chroma: ChromaSubsampling::Cs444,
             primaries: ColourPrimaries::Bt709,
             transfer: TransferCharacteristics::Srgb,
+            bit_depth: BitDepth::Twelve,
         }
     }
 }
@@ -113,6 +123,9 @@ mod tests {
         assert_eq!(c.range, ColorRange::Full);
         assert_eq!(c.primaries, ColourPrimaries::Bt709);
         assert_eq!(c.transfer, TransferCharacteristics::Srgb);
+        // 16-bit inputs default to the deepest AV1 depth: narrowing 16 bits to 12 discards the
+        // least, and 12-bit 4:4:4 is a profile every AVIF reader that handles high bit depth has.
+        assert_eq!(c.bit_depth, BitDepth::Twelve);
         assert_eq!(AvifMode::default(), AvifMode::Lossless);
     }
 
