@@ -208,7 +208,8 @@ pub fn c2pa_box(
 }
 
 /// A JUMBF-shaped manifest store: a 4-byte big-endian `LBox` covering the whole box, the `jumb`
-/// `TBox`, then opaque contents (C2PA 2.4 §8.4.2.3).
+/// `TBox`, then opaque contents. §8.4.2.3 gives the `LBox`/`TBox` width and endianness (while
+/// defining the `c2sh` salt box, whose own `TBox` differs); §A.3.9 names the superbox `jumb`.
 pub fn jumbf_store(contents: &[u8]) -> Vec<u8> {
     let mut out = ((8 + contents.len()) as u32).to_be_bytes().to_vec();
     out.extend_from_slice(b"jumb");

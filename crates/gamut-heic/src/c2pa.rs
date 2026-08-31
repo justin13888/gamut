@@ -74,33 +74,57 @@ const JUMBF_HEADER_LEN: usize = 8;
 /// `update` it looks for the store at offset 8 first and falls back to offset 0 when the `LBox` read
 /// there is not a valid bound (zero, below the 8-byte JUMBF header, or overrunning the box). The
 /// first candidate yielding a valid bound wins; if neither does, nothing is reported. `manifest` and
-/// `original` are *not* probed: the specification states their framing, so a single offset is used
-/// and a file that disagrees is simply not reported.
+/// `original` are *not* probed: the specification states their framing, so a single offset is used.
 ///
 /// ## How strong the probe is, exactly
 ///
-/// The probe is decided by `LBox` validity alone, and that discriminator is **content-dependent**,
-/// because a JUMBF superbox's interior is itself length-prefixed. Concretely:
+/// Every location decision here — the probed `update` offsets and the single stated offset alike —
+/// is settled by `LBox` validity alone, and that discriminator is **content-dependent**, because a
+/// JUMBF superbox's interior is itself length-prefixed.
 ///
-/// - A `manifest` or `original` store is located **reliably**: its offset is stated, not probed.
-/// - An `update` store written with the `c2pa-rs` merkle offset is located **reliably**: offset 8
-///   lands on the store's own `LBox`, and it is tried first.
-/// - An `update` store written **without** the offset **can be mis-bounded**. The superbox is
-///   `LBox` (bytes 0..4), `TBox` (4..8), then its interior, so offset 8 lands past both — on the
-///   first interior box's own length field. That length is small, plausible and in-bounds, so it can
-///   read as a valid bound and be accepted, trimming the reported store to a fragment of itself
-///   rather than falling through to offset 0. It is not the case that a wrong probe always fails.
+/// The mis-bounding shape is therefore the same in every case, and is stated once. A manifest
+/// store is `LBox` (bytes 0..4), `TBox` (4..8), then its interior, so reading an `LBox` 8 bytes
+/// into a store that does *not* begin with a merkle offset lands past both header fields, on the
+/// first interior box's own length — small, plausible and in-bounds, so it can read as a valid
+/// bound and be accepted, trimming the reported store to a fragment of itself. A wrong offset does
+/// **not** always fail.
 ///
-/// The probe is still strictly better than unconditionally skipping 8 bytes: the fallback runs only
-/// when offset 8 yields no valid bound, so it can rescue a file the fixed offset would have missed
-/// and can never spoil one the fixed offset would have got right. And the mis-bounding case has no
-/// known writer: `c2pa-rs` is the only implementation, and it always writes the offset.
+/// What differs between the purposes is only how a file gets into that state:
 ///
-/// Closing the gap properly needs the JUMBF box type code, which is normative only in ISO/IEC
-/// 19566-5 — not vendored, so asserting it here would mean transcribing an untraceable constant.
-/// That procurement, or a `c2pa-rs`-generated oracle fixture settling the layout empirically, is the
-/// condition under which this becomes exact; it is tracked as a deferred row in the crate's
-/// `STATUS.md`.
+/// - A **spec-conformant** `manifest` or `original` store is located exactly: §A.5.3 states that
+///   its `data` opens with the merkle offset, and that offset is used, not probed. A store written
+///   *without* it is out of spec, and is then mis-bounded by the same mechanism rather than
+///   rejected — the single offset is not self-checking either.
+/// - An `update` store written with the `c2pa-rs` merkle offset is located exactly: offset 8 lands
+///   on the store's own `LBox`, and it is tried first.
+/// - An `update` store written **without** the offset is the one in-spec layout exposed to the
+///   hazard, §A.5.3 having stated no framing for that purpose. No known writer emits it: `c2pa-rs`
+///   is the only implementation and it always writes the offset.
+///
+/// The fallback is still strictly better than unconditionally skipping 8 bytes: it runs only when
+/// offset 8 yields no valid bound, so it can rescue a file the fixed offset would have missed and
+/// can never spoil one the fixed offset would have got right.
+///
+/// ## What would make this exact
+///
+/// A `TBox` check. A store's own header is `LBox` then `jumb`, whereas a wrong offset lands on an
+/// interior box carrying its own type — so in every mis-bounding above, the four bytes after the
+/// accepted length are not `jumb`. Comparing them would reject the wrong candidate outright.
+///
+/// That constant *is* traceable to the vendored specification, contrary to what a first reading
+/// suggests: §A.3.9 requires a JPEG XL file to carry the store in a "JUMBF (`jumb`) superbox", and
+/// §15.12.3.2 calls it "a top level JUMBF box (JUMB)". Both sentences are JPEG XL clauses, and both
+/// attribute the box to ISO/IEC 18181-2 clause 9.3 rather than defining it, which is why this crate
+/// does not yet assert it: adding the check narrows what is reported, on a trace the specification
+/// makes in passing about a different container. That is a deliberate deferral, not an absence of
+/// source.
+///
+/// What ISO/IEC 19566-5 genuinely withholds is a *different* constant — the JUMBF Description Box
+/// layout needed to read the manifest store's JUMBF type UUID, which §11.1.4.2 does give as
+/// `63327061-0011-0010-8000-00AA00389B71`. Confirming the store by its type UUID, the check the
+/// specification itself describes, stays blocked on that document. Either route, or a
+/// `c2pa-rs`-generated oracle fixture settling the layout empirically, is tracked as a deferred row
+/// in the crate's `STATUS.md`.
 ///
 /// # `merkle`
 ///
@@ -167,8 +191,9 @@ impl C2paBoxPurpose {
 /// "a box length (LBox, as a 4-byte big-endian unsigned integer); a box type (TBox, 4-byte big-endian
 /// unsigned integer, with a value of `c2sh` (for C2PA salt hash))" while defining that salt box in
 /// particular. It therefore evidences the *shape* of a JUMBF header, not the manifest-store
-/// superbox's own type code. Only the width and endianness are relied on here; no box type code is
-/// read or compared, because none is traceable to a vendored source.
+/// superbox's own type code. Only the width and endianness are relied on here. No box type code is
+/// read or compared — a deliberate deferral rather than an absence of source, since §A.3.9 does
+/// name the superbox `jumb`; see [`C2paBoxPurpose`] for why that check is not yet asserted.
 ///
 /// An `LBox` smaller than the 8-byte header it must itself cover, or one overrunning the enclosing
 /// `uuid` box, means the bytes are not a manifest store: nothing is reported for that box, and it is

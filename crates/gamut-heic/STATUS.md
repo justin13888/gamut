@@ -91,32 +91,42 @@ as opaque bytes plus its exact byte range. The range covers the store *only*: th
 purposes, and any trailing padding are all excluded, the store's own outer JUMBF `LBox` being what
 bounds it rather than the box length (the `LBox` width and endianness are traceable within C2PA 2.4
 only incidentally, via §8.4.2.3's definition of the `c2sh` salt box; the general JUMBF grammar is
-ISO/IEC 19566-5, and no box type code is read). For `update`, §A.5.3 states no framing at all — its
-only sentence about that purpose constrains the store's contents — while the `c2pa-rs` reference
-implementation writes and skips the 8-byte offset for `update` exactly as for the other two, so real
-mid-update files carry it. Rather than pick a reading, the locator probes offset 8 first and falls
-back to offset 0, accepting the first that yields a valid `LBox` bound and reporting nothing if
-neither does; `manifest` and `original`, whose framing the specification does state, are not probed.
-That probe is decided by `LBox` validity alone, which is **content-dependent**: a JUMBF superbox's
-interior is itself length-prefixed, so for an `update` box written *without* the offset, offset 8
-lands past both `LBox` and `TBox` on the first interior box's own length — small, plausible and
-in-bounds — which can be accepted and trim the reported store to a fragment. A `manifest`/`original`
-store, and an `update` store carrying the `c2pa-rs` offset, are located reliably; only the
-offset-less `update` layout is exposed, and no known writer emits one. The probe is nonetheless
-strictly better than a fixed 8-byte skip, since the fallback runs only where the fixed offset found
-nothing. See the deferred row below for what would close it.
-`merkle` boxes and
-every unrecognised `box_purpose` are not manifest stores and are not reported; a `uuid` box nested in
+ISO/IEC 19566-5, and no box type code is read — see below). For `update`, §A.5.3 states no framing
+at all — its only sentence about that purpose constrains the store's contents — while the `c2pa-rs`
+reference implementation writes and skips the 8-byte offset for `update` exactly as for the other
+two, so real mid-update files carry it. Rather than pick a reading, the locator probes offset 8
+first and falls back to offset 0, accepting the first that yields a valid `LBox` bound and reporting
+nothing if neither does; `manifest` and `original`, whose framing the specification does state, are
+not probed. Every location decision is decided by `LBox` validity alone, which is
+**content-dependent**: a JUMBF superbox is `LBox`, `TBox`, then a length-prefixed interior, so
+reading an `LBox` 8 bytes into a store that does not begin with a merkle offset lands past both
+header fields on the first interior box's own length — small, plausible and in-bounds — which can be
+accepted and trim the reported store to a fragment. That shape is shared by all three purposes, and
+what differs is only how a file reaches it: a spec-conformant `manifest`/`original` store and a
+`c2pa-rs`-written `update` store are located exactly, an out-of-spec `manifest`/`original` store
+written without the stated offset is mis-bounded rather than rejected (a single stated offset is not
+self-checking either), and the offset-less `update` layout is the one *in-spec* layout exposed,
+which no known writer emits. The fallback is nonetheless strictly better than a fixed 8-byte skip,
+since it runs only where the fixed offset found nothing. What would close it is a `TBox` check: a
+store's own header is `LBox`+`jumb`, whereas a wrong offset lands on an interior box carrying its
+own type. That constant is traceable — §A.3.9 requires a JPEG XL file to carry the store in a "JUMBF
+(`jumb`) superbox" and §15.12.3.2 calls it "a top level JUMBF box (JUMB)" — but both sentences are
+JPEG XL clauses attributing the box to ISO/IEC 18181-2 clause 9.3 rather than defining it, so
+asserting it is a deliberate deferral (it narrows what is reported), not an absence of source. The
+constant ISO/IEC 19566-5 genuinely withholds is a different one: the JUMBF Description Box layout
+needed to read the store's JUMBF type UUID, which §11.1.4.2 does give as
+`63327061-0011-0010-8000-00AA00389B71`. See the deferred row below. `merkle` boxes and every
+unrecognised `box_purpose` are not manifest stores and are not reported; a `uuid` box nested in
 `meta` is not one either and keeps surfacing through `unknown_meta_boxes`. The scan covers the
 top-level boxes of the *primary* stream, so a box inside an appended vendor stream or a trailer is
 not seen — which excludes an `update` box placed, as §A.5.3 requires, last in a motion-photo file
-that appends a second whole file; reaching into an appended stream is a container-level change. Malformed framing yields
-`None`, never an error — this is a lens over bytes that happen to be present. A mid-update file
-carrying both an `original` and an `update` store reports both, in file order, with their purposes:
-choosing the *active* manifest is a validator's judgement and this crate reaches no verdict. The
-reported range is for observability and byte accounting only — it is **not** a BMFF exclusion range,
-since `c2pa.hash.bmff.v3` excludes by box path, not by byte offset (§18.6, §A.5.6). Nothing inside
-the store is parsed, no hash is computed and no signature is checked.
+that appends a second whole file; reaching into an appended stream is a container-level change.
+Malformed framing yields `None`, never an error — this is a lens over bytes that happen to be
+present. A mid-update file carrying both an `original` and an `update` store reports both, in file
+order, with their purposes: choosing the *active* manifest is a validator's judgement and this crate
+reaches no verdict. The reported range is for observability and byte accounting only — it is **not**
+a BMFF exclusion range, since `c2pa.hash.bmff.v3` excludes by box path, not by byte offset (§18.6,
+§A.5.6). Nothing inside the store is parsed, no hash is computed and no signature is checked.
 
 **Deferred (planned, additive).** The rows below. Each lands additively — new crate items or new
 `#[non_exhaustive]` variants — never a reshape of the shipped surface.
@@ -140,7 +150,7 @@ references (`dinf`/`dref`, `iloc` `construction_method` 2); mirroring the finali
 | Stop rules identical to `gamut_isobmff::read` (first ftyp wins; trailer only after ftyp+meta) | 14496-12 | ✅ | S1 |
 | Meta-level accounting: `meta`/`iprp` children not consumed by the model surfaced as `UnknownBox` (e.g. `dinf`/`dref`, `uuid`) | 14496-12 | ✅ | S1 |
 | C2PA manifest store located in a top-level `uuid` `ContentProvenanceBox`: opaque bytes + exact byte range, purposes `manifest`/`original`/`update` (`c2pa`, `c2pa_manifest_stores`) | C2PA 2.4 §A.5.1, §A.5.3, §8.4.2.3 (`references/c2pa` pending, #431) | ✅ | S7 |
-| `update` store bounding is probe-based and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length); closing it needs 19566-5's JUMBF type code or a `c2pa-rs` oracle fixture | ISO/IEC 19566-5 (not vendored); C2PA 2.4 §A.5.3 | ☐ | #239 oracle |
+| Store bounding is `LBox`-only and content-dependent (`LBox` validity alone cannot separate a store bound from a plausible interior length). Two routes close it: assert the `jumb` `TBox` — traceable to §A.3.9/§15.12.3.2 but only as a JPEG XL aside, so it is a maintainer call because it narrows what is reported — or confirm the store by §11.1.4.2's JUMBF type UUID, which needs 19566-5's Description Box layout. A `c2pa-rs` oracle fixture would settle either empirically | C2PA 2.4 §A.3.9, §11.1.4.2, §A.5.3; ISO/IEC 19566-5 (not vendored) | ☐ | #239 oracle |
 | C2PA store surfaced through the `gamut-metadata` facade as a `MetadataBlock` | C2PA 2.4 §A.5 | ☐ | later |
 | C2PA validation: JUMBF interior parse, `c2pa.hash.bmff.v3` hard binding, signature/trust verification | C2PA 2.4 §18.6, §A.5.6 | ☐ | user / #239 |
 | `ftyp` brands + `is_hevc_still` (`heic`/`heix`/`heim`/`heis`, or `mif1`+`hvcC` primary) | 23008-12; `references/heif` §7 | ✅ | S1 |

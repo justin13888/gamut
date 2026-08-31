@@ -96,9 +96,11 @@ fn original_purpose_carries_the_merkle_offset_too() {
 
 #[test]
 fn manifest_purpose_is_not_probed_and_needs_its_stated_merkle_offset() {
-    // §A.5.3 states the framing for `manifest`, so there is nothing to resolve and no fallback: a
-    // box laid out without the offset is simply not reported, rather than guessed at. This is the
-    // asymmetry against `update` below.
+    // §A.5.3 states the framing for `manifest`, so there is nothing to resolve and no fallback —
+    // the asymmetry against `update` below. Note what this does *not* prove: the single offset is
+    // no more self-checking than a probed one, and this box is unreported only because its bytes at
+    // offset 8 happen not to read as a valid `LBox`. An out-of-spec `manifest` box whose bytes do
+    // would be mis-bounded, exactly as `C2paBoxPurpose` documents for `update`.
     let data = file_with(&[c2pa_box("manifest", None, &store(), &[])]);
     let c = HeifContainer::parse(&data).unwrap();
     assert!(c.c2pa().is_none());

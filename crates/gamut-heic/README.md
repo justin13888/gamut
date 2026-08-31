@@ -79,11 +79,16 @@ the merkle offset) but says nothing at all for `update`, while the `c2pa-rs` ref
 writes that offset for `update` too — so `update` is *probed*: offset 8 first, falling back to offset
 0, taking the first that yields a valid `LBox` bound and reporting nothing if neither does. That
 probe rests on `LBox` validity alone, which is content-dependent, because a JUMBF superbox's interior
-is itself length-prefixed: for an `update` box written *without* the offset, offset 8 lands on the
-first interior box's length, which can read as a valid bound and trim the reported store to a
-fragment. `manifest`/`original` stores and `c2pa-rs`-written `update` stores are located reliably;
-only the offset-less `update` layout is exposed, and no known writer emits one. Making it exact needs
-the JUMBF type code from ISO/IEC 19566-5, which is not vendored, or a `c2pa-rs` oracle fixture. And
+is itself length-prefixed: reading an `LBox` 8 bytes into a store that does not begin with a merkle
+offset lands on the first interior box's length, which can read as a valid bound and trim the
+reported store to a fragment. That shape is shared by all three purposes — a spec-conformant
+`manifest`/`original` store and a `c2pa-rs`-written `update` store are located exactly, an
+out-of-spec `manifest`/`original` store is mis-bounded by the same mechanism rather than rejected,
+and the offset-less `update` layout is the one in-spec layout exposed, which no known writer emits.
+Making it exact needs a `TBox` check — the `jumb` constant is traceable (§A.3.9, §15.12.3.2) but
+only as a JPEG XL aside, so asserting it is a deferred maintainer call rather than a missing
+source — or the store's JUMBF type UUID (§11.1.4.2), which needs ISO/IEC 19566-5's Description Box
+layout, or a `c2pa-rs` oracle fixture. And
 the scan covers the top-level boxes of the primary stream only, so a box inside an appended vendor
 stream (a motion-photo HEIC's second file) or a trailer is not seen.
 
