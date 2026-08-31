@@ -8,7 +8,7 @@ extract/embed surface.
 ## Design
 
 - **One carrier, one field.** `Metadata` has exactly one field per genuinely distinct serialization
-  a container holds: `exif`, `xmp`, `icc`. **IPTC has no field of its own** — IPTC Photo Metadata
+  a container holds: `exif`, `xmp`, `icc`, `c2pa`. **IPTC has no field of its own** — IPTC Photo Metadata
   *is* XMP (properties in the `dc:`/`photoshop:`/`Iptc4xmp*` namespaces), so it lives inside `xmp`,
   read back through the `Metadata::iptc()` lens. Storing it separately would duplicate the same
   data. The one genuinely separate IPTC carrier, the legacy binary IIM block, is reconciled *into*
@@ -22,11 +22,15 @@ extract/embed surface.
 - **Cross-format reconciliation.** The two IPTC carriers — legacy IIM and IPTC-Core-in-XMP — are
   merged into the single XMP graph via `gamut-iptc`, resolving disagreements with a configurable
   `ConflictPolicy` (`conflicts()` reports them without resolving). Because each datum is stored once,
-  the extract → embed → extract round-trip is a **true equality**.
-- **Extensions are not a fourth carrier.** `Metadata::extensions` is a namespaced table for data no
+  the extract → embed → extract round-trip is a **true equality** — with one documented exception,
+  `c2pa`, below.
+- **Extensions are not a carrier.** `Metadata::extensions` is a namespaced table for data no
   carrier can express, so a downstream typed model round-trips through `Metadata` without being
-  narrowed to three fields. It is explicitly outside the carrier model: extraction never produces
-  an extension and embedding never emits one.
+  narrowed to the carrier fields. It is explicitly outside the carrier model: extraction never
+  produces an extension and embedding never emits one.
+- **The C2PA manifest store is a carrier, and never copied forward.** `Metadata::c2pa` holds the
+  JUMBF superbox verbatim; extraction produces it, and embedding always drops it (or fails, under
+  `C2paPolicy::Reject`). See below.
 
 ## Extensions: data with no carrier
 
@@ -41,7 +45,7 @@ Two guarantees, deliberately distinct:
 | | What survives | |
 | --- | --- | --- |
 | **Model round-trip** | carriers **and** extensions | `their model → Metadata → their model` |
-| **Carrier round-trip** (keystone, unchanged) | `exif` / `xmp` / `icc` only | extract → embed → extract is still a true equality |
+| **Carrier round-trip** (keystone) | `exif` / `xmp` / `icc` only — **not** `c2pa` | extract → embed → extract is a true equality over those three |
 
 **Prefer a carrier whenever one exists** — only a carrier reaches the file. An unmodelled EXIF tag,
 MakerNote included, already round-trips inside `exif` because `Exif` retains the raw `gamut_ifd::Ifd`;
@@ -67,6 +71,49 @@ Not yet supported, and deferred deliberately: a `MetadataBlock` variant for cont
 the facade does not model, which would let *extraction* produce extensions. Today extensions are set
 by the caller only.
 
+## C2PA: a carrier that must not be copied forward
+
+`Metadata::c2pa` holds a C2PA manifest store exactly as a container found it — the JUMBF superbox of
+the C2PA Technical Specification 2.4 §11.1.1 — as opaque bytes. The facade never looks inside it.
+
+**Why a carrier and not an extension.** Extensions exist for data no file holds: extraction never
+produces one, and nothing serializes them. A manifest store is the opposite on the first count — it
+comes *out* of a file, and a valid one belongs *in* a file — so it is a genuinely distinct
+serialization a container holds, which is precisely what the "one carrier, one field" rule admits.
+
+**The keystone carve-out.** The extract → embed → extract equality explicitly excludes `c2pa`.
+A standard manifest binds to its asset with exactly one **hard binding** (§9.1): a digest over the
+finished file, computed with the manifest store's own byte range excluded (§15.12.1.1) and covering
+the asset's other metadata (§9.2.6). Re-encoding the image — or any metadata-only rewrite that moves
+a byte — invalidates that digest, so a store copied into the new file would be a signature over a
+file that no longer exists. C2PA's model for a derivative asset is a *new* manifest carrying the
+parent as an ingredient, not the parent's signature laundered onto different bytes; producing one is
+signing work, outside this crate. Hence the asymmetry, which is deliberate and not a bug:
+**extraction produces `c2pa`, and embedding never emits it.**
+
+```rust
+use gamut_metadata::{C2paPolicy, Metadata, MetadataBlock, MetadataEmbedder};
+
+// A container located a manifest store; extraction carries the bytes through untouched.
+let meta = Metadata::from_blocks(&[MetadataBlock::C2pa(manifest_store)])?;
+assert_eq!(meta.c2pa.as_deref(), Some(manifest_store));
+
+let blocks = meta.encode()?;
+assert_eq!(blocks.c2pa, None);                      // dropped by default...
+let strict = MetadataEmbedder::new()
+    .c2pa_policy(C2paPolicy::Reject)
+    .embed(&meta);                                  // Err(MetadataError::UnembeddableC2pa { .. })
+```
+
+There is deliberately **no `Preserve` policy** — copy-forward is the failure mode `C2paPolicy` exists
+to make impossible — and deliberately **no byte range** beside `Metadata::c2pa`: an offset is a
+property of one file and becomes a lie the moment the model is embedded into another, so ranges stay
+with the format crate that knows the file.
+
+Deferred deliberately, and tracked by the C2PA epic rather than here: parsing the JUMBF interior,
+and any manifest validation, signing, or ingredient authoring — all of which need a trust model this
+facade does not have.
+
 ## Usage
 
 ```rust
@@ -80,6 +127,7 @@ let meta = MetadataExtractor::new()
         MetadataBlock::Xmp(xmp_payload),
         MetadataBlock::Icc(icc_payload),
         MetadataBlock::IptcIim(iptc_iim_payload), // legacy carrier, folded into `xmp`
+        MetadataBlock::C2pa(manifest_store),       // carried verbatim; never embedded back
     ])?;
 
 // Typed IPTC access is a lens over `meta.xmp` — it stores nothing.
@@ -97,8 +145,9 @@ The umbrella [`gamut`](../gamut) crate re-exports this crate as `gamut::metadata
 
 ## Migrating from 1.x
 
-`Metadata`, `MetadataBlock`, and `EncodedMetadata` are now `#[non_exhaustive]`, so a later carrier
-is an additive change rather than a breaking one. Struct literals become a constructor call:
+`Metadata`, `MetadataBlock`, and `EncodedMetadata` are `#[non_exhaustive]`, so a later carrier — the
+C2PA manifest store was one — is an additive change rather than a breaking one. Struct literals
+become a constructor call:
 
 ```rust
 // 1.x
