@@ -37,6 +37,23 @@
 //!
 //! Set `GAMUT_BUILD_KEEP_ENV=1` to disable all of this and use the ambient environment verbatim.
 //!
+//! # Build parallelism
+//!
+//! The second thing this crate normalises is *how many compilers run at once*. The oracles
+//! shell out to `cmake --build`/`ninja`, which do not join cargo's jobserver: cargo bounds its
+//! own rustc processes and then each build script fans out again underneath, so the real
+//! compiler count is cargo's job count multiplied by whatever each tool picks for itself
+//! (ninja's default is `NCPUS + 2`). Under a memory cap on a many-core machine — a container, a
+//! systemd slice, a mutation-testing run with several build scenarios in flight — that product
+//! exhausts memory long before it exhausts cores, and the failure is an OOM kill rather than a
+//! slow build.
+//!
+//! [`BuildEnv::apply`] therefore sets `CMAKE_BUILD_PARALLEL_LEVEL` on every command it
+//! sanitises, resolved by [`build_parallelism`]. That makes the variable a real single dial:
+//! every `cmake --build` reads it directly, and the sites that drive `ninja` or `make` pass
+//! [`build_parallelism`] on the command line. A caller that sets the variable on a specific
+//! command still wins, exactly as with `PATH`.
+//!
 //! # What this deliberately does not cover
 //!
 //! Only build scripts that shell out to **`cmake`/`meson` directly** need this. Those tools get
@@ -62,6 +79,14 @@ use std::process::Command;
 
 /// Opt-out switch: use the ambient compiler environment unmodified.
 pub const KEEP_ENV_VAR: &str = "GAMUT_BUILD_KEEP_ENV";
+
+/// The one dial for native build parallelism. CMake reads it directly; the `ninja`/`make`
+/// sites pass [`build_parallelism`] on the command line so they honour the same value.
+pub const PARALLEL_VAR: &str = "CMAKE_BUILD_PARALLEL_LEVEL";
+
+/// Cargo's own job count, set for every build script. Used as the fallback dial because it is
+/// what `cc::Build` already obeys, so honouring it keeps the `cc` and `cmake` sites in step.
+pub const NUM_JOBS_VAR: &str = "NUM_JOBS";
 
 /// Argv-0 basenames recognised as compiler launchers. Compared against the file *stem* of the
 /// first whitespace-separated word of `CC`/`CXX`, so both `sccache` and `/usr/bin/sccache.exe`
@@ -111,6 +136,8 @@ pub struct BuildEnv {
     vars: Vec<(String, String)>,
     /// A launcher-shim-filtered `PATH`, when filtering removed anything.
     path: Option<OsString>,
+    /// Compilers to run at once in each spawned native build, or `None` when the opt-out is on.
+    parallelism: Option<usize>,
     /// Whether the opt-out was honoured (everything else is then empty).
     disabled: bool,
 }
@@ -149,7 +176,13 @@ impl BuildEnv {
         }
 
         let ambient: BTreeMap<String, String> = std::env::vars().collect();
-        Self::resolve(&ambient, &target, &host, path.as_deref())
+        Self::resolve(
+            &ambient,
+            &target,
+            &host,
+            path.as_deref(),
+            host_parallelism(),
+        )
     }
 
     /// The pure core of [`BuildEnv::detect`], factored out so the unit tests never touch the
@@ -159,6 +192,7 @@ impl BuildEnv {
         target: &str,
         host: &str,
         path: Option<&OsStr>,
+        default_parallelism: usize,
     ) -> Self {
         let mut vars = Vec::new();
         let mut launcher_active = false;
@@ -201,6 +235,7 @@ impl BuildEnv {
         Self {
             vars,
             path,
+            parallelism: Some(resolve_parallelism(ambient, default_parallelism)),
             disabled: false,
         }
     }
@@ -222,6 +257,14 @@ impl BuildEnv {
         {
             cmd.env("PATH", path);
         }
+        // The parallelism dial rides on every sanitised command rather than on the process
+        // environment, for the same reason the toolchain vars do — and like `PATH`, a caller
+        // that set it on this specific command has said something more specific than we know.
+        if let Some(parallelism) = self.parallelism
+            && !overrides_env(cmd, PARALLEL_VAR)
+        {
+            cmd.env(PARALLEL_VAR, parallelism.to_string());
+        }
         cmd
     }
 
@@ -237,11 +280,63 @@ impl BuildEnv {
             .unwrap_or_default()
     }
 
+    /// Compilers to run at once in each native build this environment sanitises.
+    ///
+    /// Build scripts driving `ninja` or `make` — which read no CMake variable — pass this on the
+    /// command line (`ninja -j`, `make -j`) so they honour the same dial as the `cmake` sites.
+    /// Returns `None` only under the [`KEEP_ENV_VAR`] opt-out, where nothing is normalised.
+    #[must_use]
+    pub fn parallelism(&self) -> Option<usize> {
+        self.parallelism
+    }
+
     /// Whether the [`KEEP_ENV_VAR`] opt-out was honoured.
     #[must_use]
     pub fn is_disabled(&self) -> bool {
         self.disabled
     }
+}
+
+/// Compilers to run at once in a native build, from the ambient environment.
+///
+/// Precedence, most specific first:
+///
+/// 1. [`PARALLEL_VAR`] — the operator said exactly what they wanted.
+/// 2. [`NUM_JOBS_VAR`] — cargo's job count, derived from `--jobs`/`CARGO_BUILD_JOBS` and already
+///    obeyed by `cc::Build`. Following it keeps the `cc` sites and the `cmake` sites in step, so
+///    one `CARGO_BUILD_JOBS` bounds both.
+/// 3. The core count, which is what every one of these tools would have picked anyway.
+///
+/// Never returns zero: `-j0` means "unlimited" to make, which is the failure this exists to
+/// prevent.
+#[must_use]
+pub fn build_parallelism() -> usize {
+    let ambient: BTreeMap<String, String> = std::env::vars().collect();
+    resolve_parallelism(&ambient, host_parallelism())
+}
+
+/// The pure core of [`build_parallelism`], factored out so the unit tests never touch the real
+/// process environment.
+fn resolve_parallelism(ambient: &BTreeMap<String, String>, default: usize) -> usize {
+    // The usability filter belongs inside the search, not after it: an unusable value must
+    // fall through to the *next* source, not skip straight past it to the core count.
+    [PARALLEL_VAR, NUM_JOBS_VAR]
+        .into_iter()
+        .find_map(|var| {
+            ambient
+                .get(var)?
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+        })
+        .unwrap_or(default)
+        .max(1)
+}
+
+/// The core count, or 1 where it cannot be determined.
+fn host_parallelism() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 /// Resolves and applies the normalised toolchain to a single command.
@@ -270,7 +365,12 @@ fn overrides_env(cmd: &Command, key: &str) -> bool {
 
 /// Every environment variable [`BuildEnv::detect`] may consult, for `rerun-if-env-changed`.
 fn rerun_vars(target: &str, host: &str) -> Vec<String> {
-    let mut vars = vec![KEEP_ENV_VAR.to_owned(), "PATH".to_owned()];
+    let mut vars = vec![
+        KEEP_ENV_VAR.to_owned(),
+        "PATH".to_owned(),
+        PARALLEL_VAR.to_owned(),
+        NUM_JOBS_VAR.to_owned(),
+    ];
     for lang in [Lang::C, Lang::Cxx] {
         vars.extend(candidate_names(lang, target, host));
         vars.push(lang.cmake_launcher_var().to_owned());
@@ -383,6 +483,28 @@ mod tests {
             .collect()
     }
 
+    /// The pure core under test, with a fixed core count so the assertions do not depend on
+    /// the machine the tests run on.
+    fn resolve(
+        ambient: &BTreeMap<String, String>,
+        target: &str,
+        host: &str,
+        path: Option<&OsStr>,
+    ) -> BuildEnv {
+        BuildEnv::resolve(ambient, target, host, path, HOST_CORES)
+    }
+
+    /// A core count distinguishable from every dial value the tests set.
+    const HOST_CORES: usize = 8;
+
+    /// The value `apply` put on a command for `key`, if any.
+    fn cmd_env(cmd: &Command, key: &str) -> Option<OsString> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(OsStr::to_os_string)
+    }
+
     fn var<'a>(be: &'a BuildEnv, key: &str) -> Option<&'a str> {
         be.vars
             .iter()
@@ -391,8 +513,110 @@ mod tests {
     }
 
     #[test]
+    fn parallelism_prefers_the_explicit_dial() {
+        let ambient = env(&[(PARALLEL_VAR, "3"), (NUM_JOBS_VAR, "9")]);
+        assert_eq!(resolve_parallelism(&ambient, HOST_CORES), 3);
+    }
+
+    #[test]
+    fn parallelism_falls_back_to_cargos_job_count() {
+        let ambient = env(&[(NUM_JOBS_VAR, "2")]);
+        assert_eq!(resolve_parallelism(&ambient, HOST_CORES), 2);
+    }
+
+    #[test]
+    fn parallelism_falls_back_to_the_core_count() {
+        assert_eq!(resolve_parallelism(&env(&[]), HOST_CORES), HOST_CORES);
+    }
+
+    #[test]
+    fn parallelism_ignores_unusable_dial_values() {
+        // Zero means "unlimited" to make, and a non-numeric value is a typo; both must fall
+        // through to the next source rather than uncapping the build.
+        for value in ["0", "", "  ", "many", "-4"] {
+            let ambient = env(&[(PARALLEL_VAR, value), (NUM_JOBS_VAR, "2")]);
+            assert_eq!(
+                resolve_parallelism(&ambient, HOST_CORES),
+                2,
+                "{PARALLEL_VAR}={value:?} should fall through to {NUM_JOBS_VAR}"
+            );
+        }
+    }
+
+    #[test]
+    fn parallelism_is_never_zero_even_with_no_cores_reported() {
+        assert_eq!(resolve_parallelism(&env(&[]), 0), 1);
+    }
+
+    #[test]
+    fn parallelism_tolerates_surrounding_whitespace() {
+        assert_eq!(
+            resolve_parallelism(&env(&[(PARALLEL_VAR, " 4\n")]), HOST_CORES),
+            4
+        );
+    }
+
+    #[test]
+    fn apply_sets_the_parallelism_dial_on_every_command() {
+        let be = resolve(
+            &env(&[(NUM_JOBS_VAR, "2")]),
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+            None,
+        );
+        assert_eq!(be.parallelism(), Some(2));
+
+        let mut cmd = Command::new("cmake");
+        be.apply(&mut cmd);
+        assert_eq!(
+            cmd_env(&cmd, PARALLEL_VAR).as_deref(),
+            Some(OsStr::new("2"))
+        );
+    }
+
+    #[test]
+    fn apply_does_not_clobber_a_parallelism_the_command_already_set() {
+        let be = resolve(
+            &env(&[(NUM_JOBS_VAR, "2")]),
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+            None,
+        );
+        let mut cmd = Command::new("cmake");
+        cmd.env(PARALLEL_VAR, "1");
+        be.apply(&mut cmd);
+        assert_eq!(
+            cmd_env(&cmd, PARALLEL_VAR).as_deref(),
+            Some(OsStr::new("1"))
+        );
+    }
+
+    #[test]
+    fn the_opt_out_sets_no_parallelism_dial() {
+        // Under GAMUT_BUILD_KEEP_ENV the ambient environment is used verbatim, so imposing a
+        // dial here would be the one thing the opt-out promises not to do.
+        let be = BuildEnv {
+            disabled: true,
+            ..BuildEnv::default()
+        };
+        assert_eq!(be.parallelism(), None);
+
+        let mut cmd = Command::new("cmake");
+        be.apply(&mut cmd);
+        assert_eq!(cmd_env(&cmd, PARALLEL_VAR), None);
+    }
+
+    #[test]
+    fn the_parallelism_dials_are_declared_for_rerun() {
+        let vars = rerun_vars("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu");
+        // Without these, cargo caches the build script's output and a changed dial is ignored.
+        assert!(vars.contains(&PARALLEL_VAR.to_owned()), "{vars:?}");
+        assert!(vars.contains(&NUM_JOBS_VAR.to_owned()), "{vars:?}");
+    }
+
+    #[test]
     fn splits_launcher_into_bare_compiler_and_cmake_launcher() {
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[("CC", "sccache gcc"), ("CXX", "sccache g++")]),
             "x86_64-unknown-linux-gnu",
             "x86_64-unknown-linux-gnu",
@@ -408,7 +632,7 @@ mod tests {
     /// rather than left to stack on top of a launcher-prefixed `CC`.
     #[test]
     fn ambient_launcher_var_is_set_exactly_once() {
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[
                 ("CC", "sccache gcc"),
                 ("CMAKE_C_COMPILER_LAUNCHER", "sccache"),
@@ -431,7 +655,7 @@ mod tests {
     /// `sccache gcc` and genout runs a bare `gcc`. Nothing to repair.
     #[test]
     fn bare_compiler_with_launcher_var_is_left_alone() {
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[("CC", "gcc"), ("CMAKE_C_COMPILER_LAUNCHER", "sccache")]),
             "x86_64-unknown-linux-gnu",
             "x86_64-unknown-linux-gnu",
@@ -446,7 +670,7 @@ mod tests {
 
     #[test]
     fn clean_environment_is_untouched() {
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[("CC", "clang")]),
             "x86_64-unknown-linux-gnu",
             "x86_64-unknown-linux-gnu",
@@ -460,7 +684,7 @@ mod tests {
     /// is the one that must be rewritten — and bare `CC` must not be touched.
     #[test]
     fn rewrites_the_target_specific_variable_only() {
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[
                 ("CC", "sccache gcc"),
                 (
@@ -481,7 +705,7 @@ mod tests {
 
     #[test]
     fn underscored_target_variable_is_recognised() {
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[("CC_aarch64_unknown_linux_musl", "ccache clang")]),
             "aarch64-unknown-linux-musl",
             "x86_64-unknown-linux-gnu",
@@ -502,7 +726,7 @@ mod tests {
     #[test]
     fn ccache_shim_dirs_are_dropped_only_when_a_launcher_is_active() {
         let dirty = OsStr::new("/usr/lib64/ccache:/usr/bin:/bin");
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[("CC", "sccache gcc")]),
             "x86_64-unknown-linux-gnu",
             "x86_64-unknown-linux-gnu",
@@ -512,7 +736,7 @@ mod tests {
 
         // No launcher anywhere: the shim is the developer's only cache and is correctly
         // positioned, so it stays.
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[("CC", "gcc")]),
             "x86_64-unknown-linux-gnu",
             "x86_64-unknown-linux-gnu",
@@ -532,7 +756,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "with no compiler after it")]
     fn launcher_with_no_compiler_is_rejected() {
-        let _ = BuildEnv::resolve(
+        let _ = resolve(
             &env(&[("CC", "sccache")]),
             "x86_64-unknown-linux-gnu",
             "x86_64-unknown-linux-gnu",
@@ -545,7 +769,7 @@ mod tests {
     /// silently drop the vendored nasm and break the x86 SIMD assembly.
     #[test]
     fn apply_does_not_clobber_a_path_the_command_already_set() {
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[("CC", "sccache gcc")]),
             "x86_64-unknown-linux-gnu",
             "x86_64-unknown-linux-gnu",
@@ -569,7 +793,7 @@ mod tests {
 
     #[test]
     fn apply_sets_the_rewritten_vars_on_the_command() {
-        let be = BuildEnv::resolve(
+        let be = resolve(
             &env(&[("CC", "sccache gcc")]),
             "x86_64-unknown-linux-gnu",
             "x86_64-unknown-linux-gnu",

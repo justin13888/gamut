@@ -147,6 +147,11 @@ fn main() {
         build.file(manifest.join("src/jxl_stub.cpp"));
     }
     build.file(manifest.join("src/dng_xmp_sdk_stub.cpp"));
+    // Build parallelism: `cc::Build` spawns NUM_JOBS compilers — and this is the 50+ C++17
+    // translation units of the Adobe DNG SDK — while cargo derives NUM_JOBS from
+    // `--jobs`/`CARGO_BUILD_JOBS`. That is the same value `tooling/build-env`'s
+    // `build_parallelism` falls back to, so one `CARGO_BUILD_JOBS` bounds this compile and the
+    // cmake/ninja oracles together; there is deliberately no dial here.
     build.compile("dng_oracle");
 
     // The SDK includes <zlib.h> unconditionally (Deflate + big-table compression); link system z.
