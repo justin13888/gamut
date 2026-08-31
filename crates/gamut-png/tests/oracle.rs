@@ -359,10 +359,20 @@ fn metadata_chunks_embed_and_image_survives() {
     assert_eq!(dec.pixels, src);
 }
 
-#[test]
-fn auto_reduce_is_lossless_smaller_and_picks_the_right_type() {
+/// The three inputs auto-reduce is meant to recognise, each with the colour type it should pick.
+///
+/// Shared by the claims below so none of them carries a fixture whose construction is another
+/// claim's subject.
+struct AutoReduceCase {
+    name: &'static str,
+    rgba: Vec<u8>,
+    expected_type: u8,
+}
+
+fn auto_reduce_cases() -> (Dimensions, [AutoReduceCase; 3]) {
     let (w, h) = (32u32, 32u32);
     let n = (w * h) as usize;
+
     // Opaque greyscale stored as RGBA -> should reduce to greyscale.
     let gray: Vec<u8> = (0..n)
         .flat_map(|i| {
@@ -386,45 +396,92 @@ fn auto_reduce_is_lossless_smaller_and_picks_the_right_type() {
         }
     }
 
-    let cases: [(&str, &Vec<u8>, u8); 3] = [
-        ("gray", &gray, libpng_oracle::COLOR_GRAY),
-        ("palette", &palette, libpng_oracle::COLOR_PALETTE),
-        ("opaque", &opaque, libpng_oracle::COLOR_RGB),
-    ];
     let dims = Dimensions::new(w, h).unwrap();
-    for (name, src, expected_type) in cases {
-        let mut reduced = Vec::new();
-        PngEncoder::new()
-            .with_compression(Level::Best)
-            .with_auto_reduce(true)
-            .encode_image(ImageRef::<Rgba8>::new(src, dims).unwrap(), &mut reduced)
-            .expect("encode");
+    (
+        dims,
+        [
+            AutoReduceCase {
+                name: "gray",
+                rgba: gray,
+                expected_type: libpng_oracle::COLOR_GRAY,
+            },
+            AutoReduceCase {
+                name: "palette",
+                rgba: palette,
+                expected_type: libpng_oracle::COLOR_PALETTE,
+            },
+            AutoReduceCase {
+                name: "opaque",
+                rgba: opaque,
+                expected_type: libpng_oracle::COLOR_RGB,
+            },
+        ],
+    )
+}
+
+/// Encodes `src` as RGBA with auto-reduce on.
+fn encode_auto_reduced(src: &[u8], dims: Dimensions) -> Vec<u8> {
+    let mut out = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .with_auto_reduce(true)
+        .encode_image(ImageRef::<Rgba8>::new(src, dims).unwrap(), &mut out)
+        .expect("encode");
+    out
+}
+
+#[test]
+fn auto_reduce_picks_the_colour_type_the_pixels_allow() {
+    let (dims, cases) = auto_reduce_cases();
+
+    for case in &cases {
+        let reduced = encode_auto_reduced(&case.rgba, dims);
+
         assert_eq!(
             libpng_oracle::decode(&reduced).color_type,
-            expected_type,
-            "{name}: reduced to the expected colour type"
+            case.expected_type,
+            "{}: reduced to the expected colour type",
+            case.name
         );
-        // Lossless: resolving the reduced image back to RGBA equals the source.
-        let (_, _, rgba) = libpng_oracle::decode_rgba8(&reduced);
-        assert_eq!(&rgba, src, "{name}: reduction is lossless");
-
-        // Greyscale reduction (3 varying channels -> 1) is the robust size win; palette and
-        // alpha-drop can merely tie an already-tiny RGBA stream once DEFLATE has exploited the
-        // redundancy, so only assert a strict win for the greyscale case.
-        if name == "gray" {
-            let mut full = Vec::new();
-            PngEncoder::new()
-                .with_compression(Level::Best)
-                .encode_image(ImageRef::<Rgba8>::new(src, dims).unwrap(), &mut full)
-                .expect("encode");
-            assert!(
-                reduced.len() < full.len(),
-                "gray: reduced {} should beat full {}",
-                reduced.len(),
-                full.len()
-            );
-        }
     }
+}
+
+#[test]
+fn auto_reduce_is_lossless() {
+    // The claim that makes the reduction safe to enable at all: whatever colour type it chose,
+    // resolving the result back to RGBA must reproduce the source exactly. A reduction that
+    // picked the right type and quantised while doing it would satisfy the test above.
+    let (dims, cases) = auto_reduce_cases();
+
+    for case in &cases {
+        let reduced = encode_auto_reduced(&case.rgba, dims);
+
+        let (_, _, rgba) = libpng_oracle::decode_rgba8(&reduced);
+        assert_eq!(rgba, case.rgba, "{}: reduction is lossless", case.name);
+    }
+}
+
+#[test]
+fn auto_reduce_makes_a_greyscale_image_strictly_smaller() {
+    // Greyscale reduction (3 varying channels -> 1) is the robust size win, and the reason
+    // auto-reduce exists. Palette and alpha-drop can merely tie an already-tiny RGBA stream once
+    // DEFLATE has exploited the redundancy, so only the greyscale case is asserted strictly.
+    let (dims, cases) = auto_reduce_cases();
+    let gray = &cases[0].rgba;
+
+    let reduced = encode_auto_reduced(gray, dims);
+    let mut full = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .encode_image(ImageRef::<Rgba8>::new(gray, dims).unwrap(), &mut full)
+        .expect("encode");
+
+    assert!(
+        reduced.len() < full.len(),
+        "gray: reduced {} should beat full {}",
+        reduced.len(),
+        full.len()
+    );
 }
 
 #[test]
