@@ -21,6 +21,9 @@
 //!
 //! Measured worst values are recorded at each assert.
 
+mod common;
+
+use common::Lcg;
 use gamut_cmm::{IccTransform, PipelineOptimization, Transform as _, TransformOptions, bpc};
 use gamut_icc::{IccProfile, RenderingIntent};
 use lcms2_oracle::{
@@ -34,19 +37,6 @@ use lcms2_oracle::{
 /// D65 chromaticity and sRGB primaries, shared by the synthesized shaper profiles.
 const D65_XY: [f64; 2] = [0.3127, 0.3290];
 const SRGB_PRIMARIES: [[f64; 2]; 3] = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06]];
-
-/// A deterministic 64-bit LCG (Knuth's MMIX constants) for seeded sweeps.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_unit(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        f64::from((self.0 >> 33) as u32) / f64::from(u32::MAX)
-    }
-}
 
 /// Serializes an oracle-synthesized profile once and hands the same bytes to both sides.
 fn reopen(profile: &Profile) -> (IccProfile, Profile) {
@@ -70,7 +60,7 @@ fn rgb_sweep(seed: u64) -> Vec<[f64; 3]> {
         let v = f64::from(i) / 8.0;
         points.push([v; 3]);
     }
-    let mut lcg = Lcg(seed);
+    let mut lcg = Lcg::new(seed);
     while points.len() < 160 {
         points.push([lcg.next_unit(), lcg.next_unit(), lcg.next_unit()]);
     }
@@ -92,7 +82,7 @@ fn cmyk_sweep(seed: u64) -> Vec<[f64; 4]> {
         let v = f64::from(i) / 8.0;
         points.push([v; 4]);
     }
-    let mut lcg = Lcg(seed);
+    let mut lcg = Lcg::new(seed);
     while points.len() < 150 {
         points.push([
             lcg.next_unit(),

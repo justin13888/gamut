@@ -7,6 +7,9 @@
 //! (respectively `u8Fixed8` for pure gamma) **before** being handed to either side, so both
 //! evaluate the identical curve and the comparison measures evaluation, not encoding.
 
+mod common;
+
+use common::Lcg;
 use gamut_cmm::ToneCurve;
 use gamut_icc::{Curve, CurveOrParametric, ParametricCurve, S15Fixed16, U8Fixed8};
 use lcms2_oracle::ToneCurve as OracleCurve;
@@ -70,19 +73,6 @@ fn worst_forward_diff(ours: &ToneCurve, oracle: &OracleCurve, points: usize) -> 
         worst = worst.max(diff);
     }
     worst
-}
-
-/// A deterministic 64-bit LCG (Knuth's MMIX constants) for seeded random tables.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_u32(&mut self) -> u32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        (self.0 >> 33) as u32
-    }
 }
 
 #[test]
@@ -228,7 +218,7 @@ fn round_trip_holds_for_strictly_monotonic_curves() {
     // [100, 600), so slopes stay within a factor ~6 of 1 and the 4096-entry inverse grid
     // resolves x well below the 5e-4 bound; measured worst 1.5e-4 across the seeds).
     for seed in [1_u64, 7, 42] {
-        let mut lcg = Lcg(seed);
+        let mut lcg = Lcg::new(seed);
         let mut acc: u64 = 0;
         let raw: Vec<u64> = (0..257)
             .map(|_| {
@@ -261,7 +251,7 @@ fn range_side_round_trip_holds_for_curves_with_flat_runs() {
     // curve(x) still holds everywhere — including the flat-toe parametric type 1.
     let mut battery = vec![parametric_pair(1, &parametric_cases()[1].1).0];
     for seed in [3_u64, 11] {
-        let mut lcg = Lcg(seed);
+        let mut lcg = Lcg::new(seed);
         let mut acc: u64 = 0;
         // Increments in [0, 500): roughly one in five is small enough to quantize into a
         // flat run at 16 bits, and genuine zeros produce exact flats.
