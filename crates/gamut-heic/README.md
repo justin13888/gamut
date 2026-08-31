@@ -58,10 +58,10 @@ if image.is_hevc_still() {
 // Byte accounting: nothing is dropped.
 if let Some(appended) = container.appended_stream() { /* opaque motion-photo MP4 */ }
 // C2PA provenance: located, never validated.
-if let Some(store) = container.c2pa() {
-    let (bytes, range, purpose) = (store.bytes, store.range, store.purpose);
-}
+if let Some(store) = container.c2pa() { /* store.bytes, store.range, store.purpose */ }
 ```
+
+Reachable through the umbrella crate's `heic` feature.
 
 ### C2PA
 
@@ -74,8 +74,6 @@ outer JUMBF `LBox`. It is a **locator**, not a validator: nothing inside the sto
 is computed, no signature is checked, and no verdict about the file's provenance is reached. The
 range is for observability and byte accounting — it is not a BMFF exclusion range, since
 `c2pa.hash.bmff.v3` excludes by box path rather than by byte offset.
-
-Reachable through the umbrella crate's `heic` feature.
 
 ## Conformance
 
