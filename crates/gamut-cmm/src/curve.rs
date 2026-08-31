@@ -20,6 +20,12 @@ const INVERSE_SAMPLES: usize = 4096;
 /// resolves.
 const MONOTONICITY_PROBES: usize = 4096;
 
+/// Sample count of a curve table built by [`ToneCurve::joined`] — lcms2's
+/// `PRELINEARIZATION_POINTS` (`cmsopt.c:418`), the resolution its own curve-joining
+/// optimization tabulates at, and the same 4096 this crate already reverses curves at
+/// ([`INVERSE_SAMPLES`]).
+const JOIN_POINTS: usize = 4096;
+
 /// The internal representation of a [`ToneCurve`].
 #[derive(Debug, Clone)]
 enum Repr {
@@ -45,6 +51,14 @@ enum Repr {
     /// evaluated by linear interpolation.
     SampledInverse {
         /// The [`INVERSE_SAMPLES`]-entry inverse table, values in `[0, 1]`.
+        table: Vec<f64>,
+    },
+    /// A curve tabulated from computed samples at uniform positions, evaluated by linear
+    /// interpolation — what [`ToneCurve::joined`] builds when it collapses a curve pair.
+    /// Distinct from [`SampledInverse`](Repr::SampledInverse), which shares the evaluation
+    /// but carries the inverse-specific construction contract.
+    Table {
+        /// The uniformly spaced sample table (≥ 2 entries), values in `[0, 1]`.
         table: Vec<f64>,
     },
 }
@@ -113,7 +127,7 @@ impl ToneCurve {
                 function_type,
                 params,
             } => eval_inverse_parametric(*function_type, params, x),
-            Repr::SampledInverse { table } => interpolate(table, x),
+            Repr::SampledInverse { table } | Repr::Table { table } => interpolate(table, x),
         };
         y.clamp(0.0, 1.0)
     }
@@ -144,7 +158,9 @@ impl ToneCurve {
             Repr::Icc(CurveOrParametric::Curve(Curve::Sampled(table))) => {
                 samples_monotonic(table.iter().map(|&v| f64::from(v)))
             }
-            Repr::SampledInverse { table } => samples_monotonic(table.iter().copied()),
+            Repr::SampledInverse { table } | Repr::Table { table } => {
+                samples_monotonic(table.iter().copied())
+            }
             _ => samples_monotonic(
                 (0..MONOTONICITY_PROBES)
                     .map(|i| self.eval(i as f64 / (MONOTONICITY_PROBES - 1) as f64)),
@@ -220,11 +236,55 @@ impl ToneCurve {
                 let params = expand_params(&parametric.params);
                 parametric_inverse_repr(parametric.function_type, &params, self)
             }
-            Repr::InverseParametric { .. } | Repr::SampledInverse { .. } => {
+            Repr::InverseParametric { .. } | Repr::SampledInverse { .. } | Repr::Table { .. } => {
                 numeric_inverse_repr(self)
             }
         };
         Ok(ToneCurve { repr })
+    }
+
+    /// Whether this curve is the ICC identity element (`curveType` with zero entries — the
+    /// `Curve::Identity` `gamut-icc` parses a count-0 curve into).
+    ///
+    /// Deliberately narrow: a gamma-1.0 or a ramp-shaped sampled table also *evaluates* as
+    /// the identity, but only the structural identity is recognised, so the answer never
+    /// depends on floating-point luck. Used by [`joined`](Self::joined) to keep the
+    /// identity leg of a curve join exact.
+    pub(crate) fn is_identity(&self) -> bool {
+        matches!(
+            self.repr,
+            Repr::Icc(CurveOrParametric::Curve(Curve::Identity))
+        )
+    }
+
+    /// The composition `second(first(x))` as one curve — the two-curve collapse
+    /// [`crate::optimize`] applies to an adjacent [`Stage::Curves`](crate::Stage::Curves)
+    /// pair.
+    ///
+    /// Either leg being the structural identity ([`is_identity`](Self::is_identity)) returns
+    /// the *other* curve unchanged, which is exact: both legs clamp their input and their
+    /// output to `[0, 1]`, so composing with a clamp-only identity cannot move a sample.
+    /// Otherwise the composition is tabulated at [`JOIN_POINTS`] uniform positions and
+    /// evaluated by linear interpolation — **lossy**, exactly as lcms2's own curve joining
+    /// is (`cmsopt.c`'s `OptimizeByJoiningCurves` tabulates at the same 4096 points). The
+    /// error is the sampled table's chord error, which is largest where the composition is
+    /// steepest: an inverse-gamma toe near black is the worst case (see the crate's
+    /// `STATUS.md` precision budget).
+    #[must_use]
+    pub(crate) fn joined(first: &ToneCurve, second: &ToneCurve) -> ToneCurve {
+        if first.is_identity() {
+            return second.clone();
+        }
+        if second.is_identity() {
+            return first.clone();
+        }
+        let last = (JOIN_POINTS - 1) as f64;
+        let table = (0..JOIN_POINTS)
+            .map(|i| second.eval(first.eval(i as f64 / last)))
+            .collect();
+        ToneCurve {
+            repr: Repr::Table { table },
+        }
     }
 }
 

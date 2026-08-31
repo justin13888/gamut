@@ -341,6 +341,32 @@ impl Pipeline {
         &self.stages
     }
 
+    /// Consumes the pipeline into `(input_channels, output_channels, stages)` — the
+    /// take-apart half of [`Pipeline::new`], for the [`crate::optimize`] passes that rewrite a
+    /// chain and re-enter the validity boundary with it. Crate-internal: outside the crate
+    /// [`Pipeline::new`] must stay the only way a pipeline comes into existence.
+    pub(crate) fn into_parts(self) -> (u8, u8, Vec<Stage>) {
+        (self.input_channels, self.output_channels, self.stages)
+    }
+
+    /// An equivalent pipeline with `level`'s stage-collapsing passes applied — identity
+    /// elision and matrix folding, and at
+    /// [`Precalculate`](crate::PipelineOptimization::Precalculate) curve joining and CLUT
+    /// resampling ([`crate::optimize`] documents each pass and its precision budget).
+    ///
+    /// [`None`](crate::PipelineOptimization::None), the default, returns the pipeline
+    /// untouched: the collapsed forms are opt-in, so a caller that has pinned this crate's
+    /// stage-by-stage numerics keeps them.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Pipeline::new`] reports for the rewritten chain — unreachable for a
+    /// pipeline that was valid on the way in, since every pass preserves the channel count at
+    /// every seam.
+    pub fn optimized(self, level: crate::optimize::PipelineOptimization) -> Result<Self> {
+        crate::optimize::optimize(self, level)
+    }
+
     /// Concatenates `next` after `self`: the result runs `self`'s stages, then `next`'s, with
     /// `self`'s input and `next`'s output as its ends.
     ///

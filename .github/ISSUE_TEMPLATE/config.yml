@@ -1,0 +1,4 @@
+# A blank issue stays available, but the two forms below are what a report needs to be
+# verifiable. Maintainers use the blank option for roadmap epics, chores and tracking
+# issues, which carry no reporter-supplied evidence to collect.
+blank_issues_enabled: true

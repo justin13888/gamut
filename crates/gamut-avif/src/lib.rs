@@ -5,10 +5,10 @@
 //! [`Rgb8`](gamut_core::Rgb8), [`Rgba8`](gamut_core::Rgba8) and [`Gray8`](gamut_core::Gray8), so
 //! the input is a typed [`ImageRef`](gamut_core::ImageRef) and handing it an unsupported pixel
 //! layout is a compile error. The crate is orchestration only: [`gamut_color`] maps pixels to
-//! planes — 4:4:4 identity GBR or YCbCr through a CICP matrix for colour, monochrome for alpha and
-//! grayscale — [`gamut_av1`] encodes each AV1 temporal unit, and [`gamut_isobmff`] writes the
-//! container. An alpha channel becomes its own monochrome **auxiliary image item** (AVIF v1.2.0
-//! §4.1), not a fourth plane.
+//! planes — identity GBR at 4:4:4, or YCbCr through a CICP matrix at the configured chroma
+//! sampling, for colour; monochrome for alpha and grayscale — [`gamut_av1`] encodes each AV1
+//! temporal unit, and [`gamut_isobmff`] writes the container. An alpha channel becomes its own
+//! monochrome **auxiliary image item** (AVIF v1.2.0 §4.1), not a fourth plane.
 //!
 //! # The decode surface (issue #250)
 //!

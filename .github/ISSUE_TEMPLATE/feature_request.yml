@@ -1,0 +1,104 @@
+name: Feature request
+description: A capability gap — an unimplemented part of a format, a missing API, or an unsupported input.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, check the crate's `STATUS.md`: gamut tracks format coverage row by row,
+        and a gap is often already recorded there as deferred, with the reason. Saying which
+        row you mean makes the request concrete and saves a round trip.
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: >-
+        The full commit hash you checked against. This is what makes "not implemented" a
+        claim someone can verify rather than one they have to re-derive.
+      placeholder: 65508ee0000000000000000000000000000000000
+    validations:
+      required: true
+
+  - type: dropdown
+    id: crate
+    attributes:
+      label: Crate
+      description: Which crate would own this.
+      multiple: true
+      options:
+        - gamut (umbrella)
+        - gamut-av1
+        - gamut-av2
+        - gamut-avif
+        - gamut-bitstream
+        - gamut-cli
+        - gamut-cmm
+        - gamut-codec-abi
+        - gamut-color
+        - gamut-core
+        - gamut-deflate
+        - gamut-dng
+        - gamut-dsp
+        - gamut-exif
+        - gamut-ffi
+        - gamut-heic
+        - gamut-icc
+        - gamut-ifd
+        - gamut-iptc
+        - gamut-isobmff
+        - gamut-jpeg
+        - gamut-jxl
+        - gamut-jxl-sys
+        - gamut-metadata
+        - gamut-png
+        - gamut-riff
+        - gamut-tiff
+        - gamut-tonemap
+        - gamut-vvc
+        - gamut-wasm
+        - gamut-webp
+        - gamut-xmp
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: gap
+    attributes:
+      label: What is missing today
+      description: >-
+        The current behaviour, and the `STATUS.md` row or API surface that shows the gap. If
+        the crate refuses the input with a typed error, quote it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: want
+    attributes:
+      label: What you want instead
+      description: >-
+        The behaviour you need, and where the specification defines it (section number,
+        please). For an API request, sketch the call you want to write.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it matters
+      description: >-
+        What you cannot do without it, and whether a workaround exists. Real downstream
+        cases are what move a deferred row up the list — say what breaks concretely.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: How it should be verified
+      description: >-
+        Which oracle or conformance corpus would prove it correct, or which known-good file
+        should round-trip. Optional, but it is the part that turns a request into a plan.
+    validations:
+      required: false

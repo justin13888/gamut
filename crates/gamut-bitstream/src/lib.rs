@@ -1,13 +1,15 @@
-//! Low-level bit writers and entropy coders shared by the gamut codecs.
+//! Low-level bit readers/writers and entropy coders shared by the gamut codecs.
 //!
-//! The pieces here are the encoder-side mirror of the parsing processes defined in the AV1
-//! Bitstream & Decoding Process Specification (`references/av1/av1-spec.pdf`):
+//! The pieces here implement the parsing processes defined in the AV1 Bitstream & Decoding
+//! Process Specification (`references/av1/av1-spec.pdf`), and their encoder-side mirrors:
 //!
-//! - [`BitWriter`] — most-significant-bit-first fixed-width fields (`f(n)`) and byte alignment,
-//!   used by the AV1 uncompressed sequence/frame headers (AV1 §4, §8.1).
+//! - [`BitWriter`] / [`BitReader`] — most-significant-bit-first fixed-width fields (`f(n)`) and
+//!   byte alignment, used by the AV1 uncompressed sequence/frame headers (AV1 §4, §8.1). The
+//!   reader also covers `su(n)`, `ns(n)`, `uvlc()`, `le(n)`, and `leb128()`.
 //! - [`write_leb128`] / [`leb128_len`] — unsigned LEB128 used for OBU sizes (AV1 §4.10.5, Annex B).
-//! - [`SymbolEncoder`] — the AV1 multi-symbol arithmetic (range) coder, derived by inverting the
-//!   symbol *decoder* of AV1 §8.2. It is the entropy back-end for coded tile data.
+//! - [`SymbolDecoder`] / [`SymbolEncoder`] — the AV1 multi-symbol arithmetic (range) coder of
+//!   §8.2, the entropy back-end for coded tile data. The decoder is the normative direction; the
+//!   encoder is derived by inverting it.
 //!
 //! It also carries codec-agnostic bit-packing primitives:
 //!
@@ -18,12 +20,14 @@
 //! not implemented yet; they will join this crate behind their own modules.
 #![forbid(unsafe_code)]
 
+mod bitreader;
 mod bitwriter;
 mod leb128;
 mod samplepack;
 mod symbol;
 
+pub use bitreader::BitReader;
 pub use bitwriter::BitWriter;
 pub use leb128::{leb128_len, write_leb128};
 pub use samplepack::{pack_msb_rows, row_bytes, unpack_msb_rows};
-pub use symbol::SymbolEncoder;
+pub use symbol::{SymbolDecoder, SymbolEncoder};

@@ -200,17 +200,25 @@ fn grayscale_is_one_monochrome_item() {
 
 #[test]
 fn a_monochrome_item_costs_the_advanced_profile_brand() {
-    // AVIF v1.2.0 §8.3 constrains *every* AV1 image item in an `MA1A` file to the High Profile,
-    // and a monochrome item is Main (profile 0). §8.1 blesses signalling only the general brands
-    // when no profile fits, which is what an alpha or grayscale file does.
+    // AVIF v1.2.0 §8.2 and §8.3 both constrain "all AV1 Image Items", not just the primary, and
+    // each names one AV1 profile: Main for `MA1B`, High for `MA1A`. A monochrome item is Main
+    // (profile 0), which decides all three cases below.
+    //
+    // - `rgb`: one 4:4:4 High item — `MA1A`.
+    // - `rgba`: a 4:4:4 High colour item *beside* a monochrome Main alpha auxiliary. The file is
+    //   High and Main at once, so it fits neither profile and §8.1 blesses signalling only the
+    //   general brands. This is the case the alpha auxiliary introduces.
+    // - `gray`: a single monochrome item, uniformly Main — so `MA1B`, which §8.2 constrains on the
+    //   AV1 profile and level alone (its other requirements are self-containment, which this
+    //   writer satisfies, and four `should`s about sequences and tracks that a still cannot reach).
     let rgb = vec![0u8; (W * H * 3) as usize];
     let colour_only = AvifEncoder::new()
         .encode_to_vec(ImageRef::<Rgb8>::new(&rgb, DIMS).unwrap())
         .expect("encode");
-    for (name, avif, advanced) in [
-        ("rgb", colour_only, true),
-        ("rgba", encode_rgba(&AvifEncoder::new()), false),
-        ("gray", encode_gray(&AvifEncoder::new()), false),
+    for (name, avif, advanced, baseline) in [
+        ("rgb", colour_only, true, false),
+        ("rgba", encode_rgba(&AvifEncoder::new()), false, false),
+        ("gray", encode_gray(&AvifEncoder::new()), false, true),
     ] {
         let container = AvifContainer::parse(&avif).expect("parses");
         let brands = container.image().compatible_brands().to_vec();
@@ -223,9 +231,11 @@ fn a_monochrome_item_costs_the_advanced_profile_brand() {
             advanced,
             "{name}: MA1A claim, brands {brands:?}"
         );
-        // The Baseline brand is never claimed in its place: it carries MIAF constraints this
-        // encoder does not check.
-        assert!(!brands.contains(b"MA1B"), "{name}");
+        assert_eq!(
+            brands.contains(b"MA1B"),
+            baseline,
+            "{name}: MA1B claim, brands {brands:?}"
+        );
     }
 }
 
@@ -248,7 +258,7 @@ fn lossless_rgba_round_trips_through_libavif() {
     // this also puts the file through the reader's own conformance checks on an alpha item, the
     // `ispe` requirement among them.
     let strict = libavif_oracle::decode_avif(&avif).expect("strict libavif decode");
-    assert!(!strict.monochrome, "the colour item stays 4:4:4");
+    assert!(!strict.monochrome(), "the colour item stays 4:4:4");
 }
 
 #[test]
@@ -256,7 +266,7 @@ fn lossless_grayscale_round_trips_through_libavif() {
     let avif = encode_gray(&AvifEncoder::new());
     let decoded = libavif_oracle::decode_avif(&avif).expect("libavif decodes");
     assert_eq!((decoded.width, decoded.height), (W, H));
-    assert!(decoded.monochrome, "libavif reports one coded plane");
+    assert!(decoded.monochrome(), "libavif reports one coded plane");
     let expected: Vec<u16> = source_gray().into_iter().map(u16::from).collect();
     assert_eq!(decoded.planes[0], expected);
     assert!(decoded.planes[1].is_empty() && decoded.planes[2].is_empty());

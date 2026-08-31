@@ -43,6 +43,10 @@
 //!   per rendering intent with lcms2's intent tables and perceptual fallback) and matrix/TRC
 //!   shaper profiles; the module docs record the dispatch rule and the settled
 //!   `chad`/colorant convention.
+//! - [`optimize`] — [`PipelineOptimization`]: the opt-in stage-collapsing passes
+//!   ([`Pipeline::optimized`], threaded through every transform constructor's options) —
+//!   identity elision, matrix folding, curve joining, CLUT resampling. Off by default; the
+//!   module docs carry each pass's precision budget.
 //! - [`transform`] — the object-safe [`Transform`] entry trait every runnable transform
 //!   implements, and [`IccTransform`]/[`TransformOptions`]: two profiles linked end to end
 //!   at a rendering intent, with the ICC-absolute white scaling and black-point compensation
@@ -97,6 +101,7 @@ pub mod gamut;
 pub mod image;
 mod intent;
 pub mod link;
+pub mod optimize;
 pub mod pipeline;
 pub mod transform;
 
@@ -118,6 +123,8 @@ pub use image::{
 };
 #[doc(inline)]
 pub use link::{device_to_pcs, pcs_to_device};
+#[doc(inline)]
+pub use optimize::PipelineOptimization;
 #[doc(inline)]
 pub use pipeline::{MAX_CHANNELS, Pipeline, Stage};
 #[doc(inline)]
