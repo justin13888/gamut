@@ -39,6 +39,10 @@ fn main() {
         count > 20,
         "expected the full lcms2 source set, found only {count} files"
     );
+    // Build parallelism: `cc::Build` spawns NUM_JOBS compilers — the whole lcms2 source set at
+    // once — and cargo derives NUM_JOBS from `--jobs`/`CARGO_BUILD_JOBS`. That is the same value
+    // `tooling/build-env`'s `build_parallelism` falls back to, so one `CARGO_BUILD_JOBS` bounds
+    // this compile and the cmake/ninja oracles together; there is deliberately no dial here.
     build.compile("lcms2");
 
     // lcms2 uses libm (`pow`/`floor`/…); link it on platforms that split it from libc.

@@ -55,10 +55,22 @@ fn main() {
                 "-Denable_docs=false",
             ]));
     }
-    // `meson install` compiles the asm objects, so it also needs the vendored nasm on PATH.
+    // Build, then install without rebuilding. `meson install` on its own compiles the asm
+    // objects by driving ninja internally, and it takes no job-count option — so the compile
+    // would run at ninja's own default of NCPUS + 2, ignoring the dial every other native build
+    // here honours. Doing the build as an explicit bounded `ninja` and passing `--no-rebuild`
+    // leaves `meson install` with nothing to compile. (Same dav1d that `dav1d-oracle` builds.)
+    // Both still need the vendored nasm on PATH for the asm objects.
+    run(Command::new("ninja")
+        .env("PATH", &path)
+        .arg("-C")
+        .arg(&dav1d_build)
+        .arg("-j")
+        .arg(build_env::build_parallelism().to_string()));
     run(Command::new("meson")
         .env("PATH", &path)
         .arg("install")
+        .arg("--no-rebuild")
         .arg("-C")
         .arg(&dav1d_build));
     let pkgconfig = dav1d_prefix.join("lib").join("pkgconfig");
@@ -85,11 +97,14 @@ fn main() {
             ])
             .arg(format!("-DCMAKE_PREFIX_PATH={}", path_str(&dav1d_prefix))));
     }
+    // `--parallel` takes an explicit count. Bare, it becomes `make -j` with no limit *and*
+    // overrides CMAKE_BUILD_PARALLEL_LEVEL, so the shared dial would be silently ignored.
     run(Command::new("cmake")
         .env("PKG_CONFIG_PATH", &pkgconfig)
         .arg("--build")
         .arg(&avif_build)
-        .arg("--parallel"));
+        .arg("--parallel")
+        .arg(build_env::build_parallelism().to_string()));
 
     // ---- Link. The `avif_static` target merges dav1d into `libavif.a`, but we also offer the
     // installed `libdav1d.a` so platforms whose merge is a no-op still resolve dav1d. -------

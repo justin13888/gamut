@@ -57,10 +57,16 @@ fn main() {
             ]));
     }
     // Build only the static `aom` library target (its transitive deps come along).
+    // `--parallel` carries an explicit count rather than being bare: a bare `--parallel` means
+    // "no limit" to the build tool *and* overrides CMAKE_BUILD_PARALLEL_LEVEL, so it would
+    // silently defeat the shared dial. (Stating the count also removes the question of what
+    // this Ninja generator would have picked on its own — NCPUS + 2.)
     run(Command::new("cmake")
         .env("PATH", &path)
         .arg("--build")
         .arg(&build_dir)
+        .arg("--parallel")
+        .arg(build_env::build_parallelism().to_string())
         .args(["--target", "aom"]));
 
     // Compile the macro-unwrapping shim against libaom's public headers. `cc` emits its own

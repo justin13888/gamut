@@ -45,10 +45,13 @@ fn main() {
                 "-DCMAKE_INSTALL_LIBDIR=lib",
             ]));
     }
+    // `--parallel` takes an explicit count. Bare, it becomes `make -j` with no limit *and*
+    // overrides CMAKE_BUILD_PARALLEL_LEVEL, so the shared dial would be silently ignored.
     run(Command::new("cmake").arg("--build").arg(&zlib_build).args([
         "--config",
         "Release",
         "--parallel",
+        &build_env::build_parallelism().to_string(),
         "--target",
         "install",
     ]));
@@ -93,6 +96,7 @@ fn main() {
         "--config",
         "Release",
         "--parallel",
+        &build_env::build_parallelism().to_string(),
     ]));
 
     // ---- Link. ----------------------------------------------------------------------------

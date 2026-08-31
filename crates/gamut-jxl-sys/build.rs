@@ -32,6 +32,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GAMUT_JXL_SYS_SKIP_NATIVE");
     println!("cargo:rerun-if-env-changed=GAMUT_JXL_SYS_LIBJXL_DIR");
     println!("cargo:rerun-if-env-changed=CMAKE_BUILD_PARALLEL_LEVEL");
+    println!("cargo:rerun-if-env-changed=NUM_JOBS");
     if std::env::var("GAMUT_JXL_SYS_SKIP_NATIVE").as_deref() == Ok("1") {
         println!(
             "cargo:warning=GAMUT_JXL_SYS_SKIP_NATIVE=1: skipping the libjxl static build; \
@@ -63,6 +64,35 @@ fn main() {
             emit_include_metadata();
         }
     }
+}
+
+/// Compilers to run at once in the vendored libjxl build.
+///
+/// Precedence is `CMAKE_BUILD_PARALLEL_LEVEL`, then `NUM_JOBS` (cargo's own job count, derived
+/// from `--jobs`/`CARGO_BUILD_JOBS`), then the core count — matching `tooling/build-env`'s
+/// `build_parallelism`, which governs the dev-only oracles. The logic is duplicated rather than
+/// shared because this crate is published and must not take a path dependency on a dev-only
+/// workspace crate.
+///
+/// This mirrors what the native path already does: the `cmake` crate passes `--parallel
+/// $NUM_JOBS` to a Ninja build and forwards cargo's jobserver to a Makefile one, so the native
+/// libjxl build is bounded by cargo's job count. Applying the same resolution here keeps the
+/// emscripten path from being the one build that ignores an operator-set dial.
+///
+/// Never returns zero: `-j0` means "unlimited" to make.
+fn build_parallelism() -> usize {
+    ["CMAKE_BUILD_PARALLEL_LEVEL", "NUM_JOBS"]
+        .into_iter()
+        .find_map(|var| {
+            std::env::var(var)
+                .ok()?
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+        })
+        .or_else(|| std::thread::available_parallelism().ok().map(Into::into))
+        .unwrap_or(1)
 }
 
 /// Publishes the installed libjxl headers to dependent build scripts as `DEP_JXL_INCLUDE`
@@ -115,19 +145,15 @@ fn build_emscripten() {
         .define("JPEGXL_ENABLE_OPENEXR", "OFF")
         .define("JPEGXL_BUNDLE_LIBPNG", "OFF")
         .define("JPEGXL_ENABLE_WASM_THREADS", "OFF");
-    // Build parallelism: honour an operator-set `CMAKE_BUILD_PARALLEL_LEVEL`, and only fall back
-    // to the CPU count when nothing was asked for. `available_parallelism` counts cores, not
-    // memory, and libjxl's C++ translation units are among the most memory-hungry things this
-    // workspace compiles — so on a many-core machine under a memory cap (a container, a systemd
-    // slice, a mutation-testing run with several build scenarios in flight) the core count is far
-    // too many compilers at once. Setting the variable unconditionally left the operator no way to
-    // say so; every other vendored build here takes `cmake --build --parallel`, which reads the
-    // same variable, so this is now the one dial for all of them.
-    if std::env::var_os("CMAKE_BUILD_PARALLEL_LEVEL").is_none()
-        && let Ok(parallelism) = std::thread::available_parallelism()
-    {
-        config.env("CMAKE_BUILD_PARALLEL_LEVEL", parallelism.to_string());
-    }
+    // Build parallelism, resolved by [`build_parallelism`] so this path agrees with the native
+    // one. libjxl's C++ translation units are among the most memory-hungry things this workspace
+    // compiles, so on a many-core machine under a memory cap (a container, a systemd slice, a
+    // mutation-testing run with several build scenarios in flight) the core count is far too many
+    // compilers at once, and the failure is an OOM kill rather than a slow build.
+    config.env(
+        "CMAKE_BUILD_PARALLEL_LEVEL",
+        build_parallelism().to_string(),
+    );
     let prefix = config.build();
 
     let lib_dir = ["lib", "lib64"]

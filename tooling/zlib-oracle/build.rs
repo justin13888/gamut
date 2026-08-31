@@ -38,10 +38,13 @@ fn main() {
                 "-DZLIB_BUILD_EXAMPLES=OFF",
             ]));
     }
+    // `--parallel` takes an explicit count. Bare, it becomes `make -j` with no limit *and*
+    // overrides CMAKE_BUILD_PARALLEL_LEVEL, so the shared dial would be silently ignored.
     run(Command::new("cmake").arg("--build").arg(&build).args([
         "--config",
         "Release",
         "--parallel",
+        &build_env::build_parallelism().to_string(),
     ]));
 
     // ---- Link. zlib's CMake names the static archive `libz.a` (OUTPUT_NAME `z`) at the build
