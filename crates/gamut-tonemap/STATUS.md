@@ -91,6 +91,21 @@ Inline unit tests: per-operator fixed points plus independent golden values tran
 primary sources, monotonicity grids, constructor-rejection cases (including parameters whose
 *derived* math degenerates), one adversarial f32-extremes sweep (never-NaN / non-negative at
 `{0, 1e20, f32::MAX}` for all eight operators), and the Reinhard ↔ `gamut-color` cross-check.
+
+There is no oracle for this crate, so the `ToneCurve` contract itself is the authority and
+`src/invariants.rs` states it as executable laws — non-negative and never NaN, monotonic
+non-decreasing, and `map_slice` as elementwise order-independent `map`. Those laws are driven by
+pinned-seed `proptest` properties here and are the attachment point for the out-of-tree fuzz tier
+(`test-support`); see `docs/testing.md`. The per-operator tests above pin *where* each curve goes,
+the laws pin *what shape* it has everywhere.
+
+**Known divergence (#439).** `Drago::map` is documented as monotonic non-decreasing on
+`[0, world_max]` and is not: the denominator `ln(2 + 8·(x/world_max)^k)` outgrows the numerator
+`ln(x + 1)` over a band of `x`, so monotonicity needs `bias` to rise with `world_max`, and at
+`world_max = 1e6` even `DEFAULT_DRAGO_BIAS` fails. It reproduces in f64, so it is not an f32
+artefact. Whether the transcription, the contract, or the accepted parameter range is wrong is
+open. The monotonicity property is restricted to `world_max <= 100` and `bias >= 0.7` until it is
+resolved; the never-NaN / non-negative property runs over the full accepted range.
 Divan benches cover `map_slice` throughput for every operator (`cargo bench -p gamut-tonemap`).
 Gates: `mise run test` / `lint` (`clippy -D warnings`, `missing_docs` fatal) / `fmt-check` /
 `coverage` (≥ 80%) / `mise run mutants-crate gamut-tonemap`.
