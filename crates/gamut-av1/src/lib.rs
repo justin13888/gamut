@@ -34,6 +34,8 @@
 #![forbid(unsafe_code)]
 
 mod cdf;
+#[cfg(feature = "decode")]
+mod decode;
 mod encoder;
 mod filter;
 mod geom;
@@ -42,6 +44,12 @@ pub mod quant;
 mod tile;
 pub mod transform;
 
+#[cfg(feature = "decode")]
+pub use decode::{
+    Av1Decoder, CdefParams, ColorConfig, DecodeLimits, FrameHeader, LoopFilterParams, LrParams,
+    QuantizationParams, RestorationType, SegmentationParams, SequenceHeader, StreamInfo,
+    Subsampling, TileInfo, TxMode,
+};
 pub use encoder::{
     EncodedStill, ReconImage, encode_still_intra, encode_still_intra_superres,
     encode_still_intra_with, encode_still_lossless_identity,

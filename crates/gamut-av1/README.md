@@ -1,7 +1,9 @@
 # gamut-av1
 
-`gamut-av1` is a pure-Rust AV1 image encoder. AVIF relies on AV1 intra-frame coding, so this crate
-is usable standalone as well as through [`gamut-avif`](../gamut-avif).
+`gamut-av1` is a pure-Rust AV1 still-image codec. AVIF relies on AV1 intra-frame coding, so this
+crate is usable standalone as well as through [`gamut-avif`](../gamut-avif). The encoder is
+complete for its documented scope; the **decoder** is being built out slice by slice under
+[issue #259](https://github.com/visualcommons/gamut/issues/259).
 
 If you want a complete `.avif` file, use [`gamut-avif`](../gamut-avif). Reach for this crate when you
 need the **raw AV1 still bitstream** itself — to embed in your own container or build another
@@ -68,11 +70,46 @@ for a monochrome stream and §6.4.2 permits `MC_IDENTITY` only at 0/0, so the de
 is rejected. The subsampled geometries (4:2:0 / 4:2:2) are still deferred.
 
 The wider AV1 surface — lossy DCT/ADST, more intra modes, in-loop filters, inter coding for image
-sequences — is tracked row by row in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md).
+sequences — is tracked row by row in [`gamut-avif/STATUS.md`](../gamut-avif/STATUS.md), whose
+section N is the decoder's ledger.
+
+## Decoding
+
+Behind the default-on `decode` feature. Today it reads the **framing and header layer** of an AV1
+still — the OBU walk (§5.3), the full sequence header (§5.5) in both its reduced and general
+forms, the full uncompressed frame header (§5.9), and tile-group framing (§5.11.1):
+
+```rust
+use gamut_av1::Av1Decoder;
+
+# fn main() -> Result<(), gamut_core::Error> {
+# let temporal_unit: &[u8] = &[];
+# if !temporal_unit.is_empty() {
+let info = Av1Decoder::new().inspect(temporal_unit)?;
+println!(
+    "{}x{} at {}-bit",
+    info.frame.upscaled_width, info.frame.frame_height, info.sequence.color.bit_depth,
+);
+# }
+# Ok(())
+# }
+```
+
+Sample decoding — the tile body, reconstruction and the in-loop filters — is **not implemented
+yet**, and no entry point pretends otherwise. Streams are accepted only at `seq_profile = 1`
+(8-bit 4:4:4) with intra key frames; every other tool is refused with a typed
+`Error::Unsupported` naming it, never approximated. `default-features = false` drops the decoder
+entirely and leaves the encoder-only crate unchanged.
+
+It is checked against **libaom**, the AV1 reference codec, in the direction that matters for a
+decoder: libaom *encodes* the stills and its own decoder says what they mean, so the suite
+exercises tools this crate's encoder never emits.
 
 ## Roadmap
 
 - M1: lossy intra (DCT/ADST + quantization), adaptive CDFs ✅, more intra prediction modes.
+- #259: the pure-Rust decoder — headers ✅, then tile parsing, reconstruction, the in-loop
+  filters, and the 10/12-bit + 4:2:0/4:2:2 pixel-format matrix.
 - Later: in-loop filters, multi-tile, and inter coding for animated AVIF.
 
 ## License
