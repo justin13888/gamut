@@ -12,13 +12,15 @@
 //! # The model: one carrier, one field
 //!
 //! [`Metadata`] has exactly one field per genuinely distinct serialization a container holds —
-//! [`exif`](Metadata::exif), [`xmp`](Metadata::xmp), [`icc`](Metadata::icc). **IPTC has no field of
-//! its own:** IPTC Photo Metadata *is* XMP (properties in the `dc:`/`photoshop:`/`Iptc4xmp*`
-//! namespaces), so it lives inside [`xmp`](Metadata::xmp), read back through the
+//! [`exif`](Metadata::exif), [`xmp`](Metadata::xmp), [`icc`](Metadata::icc),
+//! [`c2pa`](Metadata::c2pa). **IPTC has no field of its own:** IPTC Photo Metadata *is* XMP
+//! (properties in the `dc:`/`photoshop:`/`Iptc4xmp*` namespaces), so it lives inside
+//! [`xmp`](Metadata::xmp), read back through the
 //! [`Metadata::iptc`] lens. The one genuinely separate IPTC carrier — the legacy binary IIM block —
 //! is reconciled *into* the XMP graph on [extraction](MetadataExtractor) (with a
 //! [`ConflictPolicy`]) and projected back out only on request when [embedding](MetadataEmbedder).
-//! Because each datum is stored once, the extract→embed→extract round-trip is a true equality.
+//! Because each datum is stored once, the extract→embed→extract round-trip is a true equality —
+//! with one documented exception, [`c2pa`](Metadata::c2pa), below.
 //!
 //! The fourth carrier is [`c2pa`](Metadata::c2pa), the C2PA manifest store: opaque bytes in, opaque
 //! bytes out, never parsed here. It is the one documented exception to that round-trip equality —

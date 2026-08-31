@@ -79,13 +79,15 @@ pub struct EncodedMetadata {
     /// resource), emitted only when [`MetadataEmbedder::emit_iptc_iim`] is set and the model carries
     /// IIM-expressible IPTC data.
     pub iptc_iim: Option<Vec<u8>>,
-    /// The C2PA manifest store to write — **always `None`**.
+    /// The C2PA manifest store to write — **never filled by [`MetadataEmbedder::embed`]**.
     ///
     /// The field completes the carrier set so a container writing blocks handles every one of them
-    /// uniformly, and so a future signing path could fill it without a breaking change. Today
-    /// nothing can: [`MetadataEmbedder::embed`] either drops the model's
-    /// [store](Metadata::c2pa) or refuses, per [`C2paPolicy`] — an extracted store's hard binding
-    /// does not survive the rewrite it would be written into.
+    /// uniformly, and so a future signing path could fill it without a breaking change. No embedder
+    /// setting fills it today: `embed` either drops the model's [store](Metadata::c2pa) or refuses,
+    /// per [`C2paPolicy`] — an extracted store's hard binding does not survive the rewrite it would
+    /// be written into, and there is no knob that would make copying one forward easy. Like every
+    /// other field here it is `pub`, so a caller may of course assign a store it has itself
+    /// produced; what this type guarantees is only that embedding never hands one back.
     pub c2pa: Option<Vec<u8>>,
 }
 

@@ -30,5 +30,11 @@ pub enum MetadataBlock<'a> {
     /// The facade never looks inside it. Extraction hands the bytes to
     /// [`Metadata::c2pa`](crate::Metadata::c2pa); embedding does **not** hand them back — see
     /// [`C2paPolicy`](crate::C2paPolicy) for why a store must not be copied into a rewritten file.
+    ///
+    /// **Hand over the complete store.** Where a carrier splits it across segments — C2PA's JPEG
+    /// carriage spans as many `APP11` segments as the store needs, which is the ordinary case once
+    /// a manifest embeds a thumbnail — the container reassembles them first, exactly as it already
+    /// does for a multi-segment `APP2 ICC_PROFILE`. One block per segment would not error: a
+    /// repeated block kind takes the last occurrence, so the model would quietly hold a fragment.
     C2pa(&'a [u8]),
 }
