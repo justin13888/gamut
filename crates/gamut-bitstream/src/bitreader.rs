@@ -575,6 +575,11 @@ mod tests {
         let mut r = BitReader::new(&[0x34, 0x12]);
         assert_eq!(r.le(2).unwrap(), 0x1234);
 
+        // Eight bytes is the widest field `le` accepts, so it is the exact boundary the `n > 8`
+        // guard decides; a guard mutated to `>=` rejects this.
+        let mut r = BitReader::new(&[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef]);
+        assert_eq!(r.le(8).unwrap(), 0xefcd_ab89_6745_2301);
+
         let mut r = BitReader::new(&[0xff; 9]);
         assert_eq!(
             r.le(9).unwrap_err().static_message(),
