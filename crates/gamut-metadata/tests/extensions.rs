@@ -47,6 +47,10 @@ fn reextract(enc: &EncodedMetadata) -> Metadata {
     if let Some(b) = &enc.icc {
         blocks.push(MetadataBlock::Icc(b));
     }
+    // Enumerated for completeness; embedding never fills it (see `roundtrip.rs`'s C2PA tests).
+    if let Some(b) = &enc.c2pa {
+        blocks.push(MetadataBlock::C2pa(b));
+    }
     MetadataExtractor::new().extract(&blocks).unwrap()
 }
 

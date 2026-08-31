@@ -12,13 +12,19 @@
 //! # The model: one carrier, one field
 //!
 //! [`Metadata`] has exactly one field per genuinely distinct serialization a container holds —
-//! [`exif`](Metadata::exif), [`xmp`](Metadata::xmp), [`icc`](Metadata::icc). **IPTC has no field of
-//! its own:** IPTC Photo Metadata *is* XMP (properties in the `dc:`/`photoshop:`/`Iptc4xmp*`
-//! namespaces), so it lives inside [`xmp`](Metadata::xmp), read back through the
+//! [`exif`](Metadata::exif), [`xmp`](Metadata::xmp), [`icc`](Metadata::icc),
+//! [`c2pa`](Metadata::c2pa). **IPTC has no field of its own:** IPTC Photo Metadata *is* XMP
+//! (properties in the `dc:`/`photoshop:`/`Iptc4xmp*` namespaces), so it lives inside
+//! [`xmp`](Metadata::xmp), read back through the
 //! [`Metadata::iptc`] lens. The one genuinely separate IPTC carrier — the legacy binary IIM block —
 //! is reconciled *into* the XMP graph on [extraction](MetadataExtractor) (with a
 //! [`ConflictPolicy`]) and projected back out only on request when [embedding](MetadataEmbedder).
-//! Because each datum is stored once, the extract→embed→extract round-trip is a true equality.
+//! Because each datum is stored once, the extract→embed→extract round-trip is a true equality —
+//! with one documented exception, [`c2pa`](Metadata::c2pa), below.
+//!
+//! The fourth carrier is [`c2pa`](Metadata::c2pa), the C2PA manifest store: opaque bytes in, opaque
+//! bytes out, never parsed here. It is the one documented exception to that round-trip equality —
+//! see [C2PA, below](#c2pa-a-carrier-that-must-not-be-copied-forward).
 //!
 //! # Extensions: data with no carrier
 //!
@@ -33,8 +39,9 @@
 //!
 //! - **Model round-trip.** Everything in a [`Metadata`] — carriers *and* extensions — survives
 //!   being handed to another model and back. This is what extensions are for.
-//! - **Carrier round-trip** (the keystone, unchanged). extract → embed → extract is still a true
-//!   equality over [`exif`](Metadata::exif)/[`xmp`](Metadata::xmp)/[`icc`](Metadata::icc).
+//! - **Carrier round-trip** (the keystone). extract → embed → extract is a true equality over
+//!   [`exif`](Metadata::exif)/[`xmp`](Metadata::xmp)/[`icc`](Metadata::icc) —
+//!   [`c2pa`](Metadata::c2pa) excepted, for the reason [below](#c2pa-a-carrier-that-must-not-be-copied-forward).
 //!   Extensions take no part: extraction never produces one, and [`Metadata::encode`] drops them
 //!   (or fails, under [`ExtensionPolicy::Reject`]).
 //!
@@ -71,6 +78,47 @@
 //! # Ok::<(), gamut_metadata::MetadataError>(())
 //! ```
 //!
+//! # C2PA: a carrier that must not be copied forward
+//!
+//! [`Metadata::c2pa`] holds a C2PA manifest store exactly as a container found it — the JUMBF
+//! superbox of C2PA 2.4 §11.1.4.2 — and the facade never looks inside it.
+//!
+//! It is a **carrier**, not an [extension](#extensions-data-with-no-carrier). Extensions exist for
+//! data no file holds, so extraction never produces one and nothing serializes them; a manifest
+//! store is the opposite on the first count — it comes *out* of a file — which is exactly what the
+//! [one carrier, one field](#the-model-one-carrier-one-field) rule is for.
+//!
+//! It is also the one **exception to the keystone**. A standard manifest binds to its asset with
+//! exactly one hard binding (§9.1): a digest over the finished file, computed with the store's own
+//! byte range excluded (§15.12.1.1) and covering the asset's other metadata (§9.2.6). Re-encoding
+//! the image — or any metadata-only rewrite that moves a byte — invalidates it. So embedding
+//! **never** re-emits the store: [`Metadata::encode`] drops it, or fails under
+//! [`C2paPolicy::Reject`], and `extract → embed → extract` deliberately loses it. C2PA's model for
+//! a derivative asset is a *new* manifest carrying the parent as an ingredient, not the parent's
+//! signature laundered onto different bytes; producing one is signing work, outside this crate.
+//!
+//! ```
+//! use gamut_metadata::{C2paPolicy, Metadata, MetadataBlock, MetadataEmbedder, MetadataError};
+//!
+//! // A container located a manifest store; extraction carries the bytes through untouched.
+//! let store = b"\0\0\0\x14jumbc2pa".to_vec();
+//! let meta = Metadata::from_blocks(&[MetadataBlock::C2pa(&store)])?;
+//! assert_eq!(meta.c2pa.as_deref(), Some(&store[..]));
+//!
+//! // Embedding refuses to launder it into a rewritten file — quietly by default...
+//! assert_eq!(meta.encode()?.c2pa, None);
+//!
+//! // ...or loudly, for a caller that must notice provenance is being dropped.
+//! let rejected = MetadataEmbedder::new()
+//!     .c2pa_policy(C2paPolicy::Reject)
+//!     .embed(&meta);
+//! assert!(matches!(rejected, Err(MetadataError::UnembeddableC2pa { .. })));
+//! # Ok::<(), gamut_metadata::MetadataError>(())
+//! ```
+//!
+//! Deferred deliberately: parsing the JUMBF interior, and any manifest validation, signing, or
+//! ingredient authoring — all of which need a trust model this facade does not have.
+//!
 //! # Quick start
 //!
 //! ```
@@ -101,7 +149,7 @@ pub mod metadata;
 pub mod source;
 
 // Re-export the per-format crates so consumers reach everything through one entry point.
-pub use embed::{EncodedMetadata, ExtensionPolicy, MetadataEmbedder};
+pub use embed::{C2paPolicy, EncodedMetadata, ExtensionPolicy, MetadataEmbedder};
 pub use error::{MetadataError, Result};
 pub use extension::{MetadataExtension, RESERVED_NAMESPACE_PREFIX};
 pub use extract::MetadataExtractor;

@@ -19,7 +19,8 @@ use crate::source::MetadataBlock;
 /// - [`exif`](Self::exif) — the EXIF blob (a TIFF/IFD binary stream, e.g. a JPEG `APP1` /
 ///   WebP `EXIF` / AVIF `Exif` payload);
 /// - [`xmp`](Self::xmp) — the XMP packet (the RDF/XML property graph);
-/// - [`icc`](Self::icc) — the embedded ICC colour profile.
+/// - [`icc`](Self::icc) — the embedded ICC colour profile;
+/// - [`c2pa`](Self::c2pa) — the C2PA manifest store, opaque bytes the facade never parses.
 ///
 /// Each field is `Some` only when that carrier was present.
 ///
@@ -35,10 +36,13 @@ use crate::source::MetadataBlock;
 ///
 /// # Extensions
 ///
-/// [`extensions`](Self::extensions) is deliberately **not** a fourth carrier: it holds data no
-/// carrier can express, so a downstream typed model survives `their model → Metadata → their
-/// model` in full. It does not serialize — see [`MetadataExtension`] and the
-/// [crate docs](crate#extensions-data-with-no-carrier).
+/// [`extensions`](Self::extensions) is deliberately **not** a carrier: it holds data no carrier can
+/// express, so a downstream typed model survives `their model → Metadata → their model` in full. It
+/// does not serialize — see [`MetadataExtension`] and the
+/// [crate docs](crate#extensions-data-with-no-carrier). A C2PA manifest store is the opposite —
+/// it comes out of a file — so [`c2pa`](Self::c2pa) is a carrier field, with its own asymmetry:
+/// extraction produces it and embedding never emits it (see the
+/// [crate docs](crate#c2pa-a-carrier-that-must-not-be-copied-forward)).
 ///
 /// # Construction
 ///
@@ -54,6 +58,19 @@ pub struct Metadata {
     pub xmp: Option<XmpMeta>,
     /// The embedded ICC colour profile, if present.
     pub icc: Option<IccProfile>,
+    /// The C2PA manifest store as located in the file — the raw JUMBF superbox bytes (C2PA 2.4
+    /// §11.1.4.2) — if present.
+    ///
+    /// Opaque: the facade never parses, validates, or signs it. Extraction fills this field from a
+    /// [`MetadataBlock::C2pa`], but [`encode`](Self::encode) **never** emits it — a manifest's hard
+    /// binding digests the finished file (C2PA 2.4 §9.1, §15.12.1.1), so copying a store into a
+    /// rewritten file publishes a signature over bytes that no longer exist. See
+    /// [`C2paPolicy`](crate::C2paPolicy) to be told rather than have it dropped quietly.
+    ///
+    /// There is deliberately no byte range beside it: an offset is a property of one file, and
+    /// would become a lie the moment this model were embedded into another. Ranges stay with the
+    /// format crate that knows the file.
+    pub c2pa: Option<Vec<u8>>,
     /// Data none of the carriers above models, in namespaces the caller owns.
     ///
     /// **Never serialized** — [`encode`](Self::encode) drops these (see
@@ -64,9 +81,13 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    /// Builds a model from the three carriers, with no [`extensions`](Self::extensions).
+    /// Builds a model from the three serializable carriers, with no
+    /// [`extensions`](Self::extensions) and no [`c2pa`](Self::c2pa).
     ///
     /// The `#[non_exhaustive]` replacement for a `Metadata { exif, xmp, icc }` struct literal.
+    /// [`c2pa`](Self::c2pa) is not a parameter: it never round-trips through embedding, so a
+    /// caller building a model to embed has nothing to pass. Assign the field directly when
+    /// modelling a store read out of a file.
     #[must_use]
     pub fn from_carriers(
         exif: Option<Exif>,
@@ -77,6 +98,7 @@ impl Metadata {
             exif,
             xmp,
             icc,
+            c2pa: None,
             extensions: Vec::new(),
         }
     }
@@ -172,6 +194,7 @@ impl Metadata {
         self.exif.is_none()
             && self.xmp.is_none()
             && self.icc.is_none()
+            && self.c2pa.is_none()
             && self.extensions.is_empty()
     }
 }
@@ -218,5 +241,20 @@ mod tests {
             }
             .is_empty()
         );
+        // A manifest store alone is metadata too, even though it never embeds.
+        assert!(
+            !Metadata {
+                c2pa: Some(vec![0x00, 0x00, 0x00, 0x14]),
+                ..Default::default()
+            }
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn from_carriers_leaves_the_manifest_store_empty() {
+        // `c2pa` is not a `from_carriers` parameter: a model built to embed carries no store.
+        let meta = Metadata::from_carriers(None, Some(XmpMeta::new()), None);
+        assert_eq!(meta.c2pa, None);
     }
 }
