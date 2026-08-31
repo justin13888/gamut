@@ -1,5 +1,7 @@
 # cargo-mutants configuration — https://mutants.rs
-# Run via `mise run mutants` (full workspace) or `mise run mutants-diff` (changed code only).
+# Run via `mise run mutants` — see `docs/mutation-testing.md`. Never invoke `cargo mutants`
+# directly: `tooling/mutants/run.sh` is what derives the parallelism dials from a memory budget
+# and applies the guards, and this file only carries what belongs to the tool itself.
 # The tool is installed by mise; see `mise.toml`.
 
 # Build & test with all features so the dav1d/libavif/libwebp differential "oracle" tests
