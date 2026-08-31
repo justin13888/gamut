@@ -46,10 +46,11 @@ e3168d82cc995dc3eac5c3f2cebb88cd670f582544633d47df75aca16e9acfb4  C2PA_Schemas_2
 ```
 
 **The vendored HTML carries the prose and the clause anchors, not the figures.** It references 16
-`_images/` assets, the Antora stylesheet and site JS, and renders five further diagrams from
-`kroki.io` at view time; none of those are vendored. Two of the missing figures are cited by clauses
-this epic depends on — Figure 4 (the JUMBF assertion box, §8.4.2.3) and Figure 8 (the Manifest
-Store, §11.1.4.2). **Read any figure from the PDF**, which is self-contained. The site CSS/JS are
+`_images/` assets, the Antora stylesheet and site JS, and renders six further diagrams from
+`kroki.io` at view time; none of those are vendored. Two of the missing figures are load-bearing for
+this epic — Figure 4 (the JUMBF assertion box, §8.4.2.3) and Figure 8 (the Manifest Store,
+§11.1.4.2). A third, Figure 16 (§18.6.6), sits under a clause the `gamut-heic` row cites but is
+validation-side, which this epic scopes out. **Read any figure from the PDF**, which is self-contained. The site CSS/JS are
 deliberately absent: the footer carves the Antora UI out of the CC BY grant as MPL-2.0, so it does
 not belong in this tree.
 
@@ -88,9 +89,8 @@ vendored **verbatim and unmodified**; no derivative was made.
 - **ISO/IEC 19566-5:2023** — *JPEG universal metadata box format (JUMBF)*, edition 2, 2023-06. The
   container the manifest store **is**. CHF 135, <https://www.iso.org/standard/84635.html>. gamut
   needs **Annex D.2** (the JPEG APP11 field layout: `CI`/`En`/`Z`/`LBox`/`TBox`) and **clause 4**'s
-  general box framing — in particular whether `LBox` counts its own 8-byte header, and the extended
-  forms (`LBox == 1` ⇒ a 64-bit `XLBox` follows; `LBox == 0` ⇒ the box runs to the end of its
-  container).
+  general box framing — in particular whether `LBox` counts its own 8-byte header, and how it spells
+  the extended length forms that the JP2/ISOBMFF box family it descends from defines.
 - **ISO/IEC 18477-3** — *JPEG XT box file format*. §A.3.1 defines the C2PA APP11 segment by
   reference to this document; it is the source of the marker-segment framing.
 - **ISO/IEC 18181-2:2024** — *JPEG XL container* (`jumb` box, clause 9.3), cited by §A.3.9.
@@ -103,7 +103,7 @@ vendored **verbatim and unmodified**; no derivative was made.
 | `gamut-heic` | §A.5.1–§A.5.3, §A.5.6, §15.12.2, §18.6 | top-level `uuid` box, user type `D8FEC3D6-…-C481`; `box_purpose` and the 8-byte merkle offset; BMFF excludes by box path, not byte offset |
 | `gamut-isobmff` | §A.5.3 | placement: after `ftyp`, before the first `mdat` and before any `moov` |
 | `gamut-avif` | §A.5 | same BMFF carriage; AVIF is named explicitly in §A.5.1 |
-| `gamut-png` | §A.3.2, §18.5.4 | `caBX` chunk — ancillary, private, not-safe-to-copy; should precede `IDAT`. The chunk's `Length` and type bytes go *inside* the exclusion range |
+| `gamut-png` | §A.3.2, §18.5.4 | `caBX` chunk — ancillary, private, not-safe-to-copy; should precede `IDAT`. §18.5.4 says it is *important* that the chunk's `Length` and `caBX` type bytes go inside the exclusion range — neither `shall` nor `should` |
 | `gamut-dng` | §A.3.6, §18.5.5 | tag 52545 / `0xCD41`, type 7, in the **last** IFD of the main chain; the entry's `count` field *should* be a *second, disjoint* exclusion range |
 | `gamut-tiff` | §A.3.6 | as DNG. §18.7.3.3 removed general box hash for TIFF, so `c2pa.hash.data` is the only binding |
 | `gamut-riff` / `gamut-webp` | §A.3.7 | `C2PA` chunk, last sub-chunk of the first RIFF header chunk |
@@ -163,26 +163,45 @@ any gamut crate reads under #239.
 
 **The trace reaches exactly one sentence, and no further.** It says `LBox` is a 4-byte big-endian
 unsigned integer. It does **not** say whether that count includes the 8-byte `LBox`+`TBox` header,
-and it says nothing about the extended forms the JP2/JUMBF box family defines in 19566-5 clause 4
-(`LBox == 1` ⇒ a 64-bit `XLBox` follows the `TBox`; `LBox == 0` ⇒ the box runs to the end of its
-container). A reader that guesses either way can silently truncate or overrun a manifest store, and
-because the store is opaque to gamut nothing downstream would catch it.
+and it says nothing at all about extended length forms.
+
+Those forms are the open question, and this README cannot answer it. JUMBF descends from the JP2 box
+structure, where — as in ISO/IEC 14496-12 §4.2, which gamut already implements in `gamut-isobmff` —
+a sentinel length selects a 64-bit size field or "runs to the end". **That is an inference from the
+box family, not something read from any document in this tree**, and 14496-12 is itself paywalled
+(above). Whether 19566-5 clause 4 spells it identically is unknown here. A reader that guesses can
+silently truncate or overrun a manifest store, and because the store is opaque to gamut nothing
+downstream would catch it.
 
 So a gamut crate reading this length **must refuse rather than guess**: treat any `LBox` below the
 8-byte header, or larger than the bytes remaining in the enclosing box, as "not a manifest store"
-and report absence — never an error, never a truncated payload. That covers `LBox ∈ {0, 1}` by
-construction. Should a container ever legitimately need the extended forms, 19566-5 must be acquired
+and report absence — never an error, never a truncated payload. That rejects every sentinel value by
+construction, whatever 19566-5 turns out to call them, which is why the rule is stated as a bound
+rather than as a list of cases. Should a container ever legitimately need the extended forms, 19566-5 must be acquired
 first; that is the same procurement gate as the JPEG slice, on a narrower question.
 
-## Already vendored elsewhere — no action
+## The host containers — no action needed here
 
-The host-container specifications the clauses above layer onto are already in this tree:
-[`references/jpeg`](../jpeg) (marker syntax, ITU-T T.81 §B.2.4.6) · [`references/png`](../png)
-(chunk layout, 4.7.2) · [`references/isobmff`](../isobmff) and [`references/heif`](../heif)
-(14496-12 box syntax) · [`references/tiff`](../tiff) (IFD entry layout) ·
+The specifications the clauses above layer onto are already covered elsewhere in this tree. Four are
+vendored outright: [`references/jpeg`](../jpeg) (marker syntax, ITU-T T.81 §B.2.4.6) ·
+[`references/png`](../png) (chunk layout, 4.7.2) · [`references/tiff`](../tiff) (IFD entry layout) ·
 [`references/webp`](../webp) (RIFF chunk order).
 
+**The BMFF box grammar is the exception, and it is paywalled too.** ISO/IEC 14496-12 is *not*
+vendored — [`references/isobmff`](../isobmff) and [`references/heif`](../heif) both list it under
+their own "not vendored (paywalled)" headings, and `references/isobmff/` holds nothing but a README.
+Those directories record the substitute route gamut already relies on: the box table in the vendored
+[AVIF v1.2.0 spec](../avif) plus cross-checking against the libavif/libheif oracles. The `Box`/
+`FullBox` layout the `gamut-heic`, `gamut-isobmff` and `gamut-avif` rows depend on comes from there,
+not from a vendored 14496-12.
+
 ## Oracle
+
+**Nothing in this section is checkable from this tree** — no `c2pa` dependency, submodule or
+`tooling/` crate exists yet. Every claim below, including the licence and the build flags, is
+recorded from [#239](https://github.com/visualcommons/gamut/issues/239) against `c2pa-rs`
+**0.90.16**; re-confirm the lot when `tooling/c2pa-oracle` lands, and pin that version in its
+`Cargo.toml`.
 
 `c2pa-rs` (Apache-2.0 / MIT), **dev-only**, in a workspace-`exclude`d `tooling/` crate — the
 [`tooling/gamut-dng-real-conformance`](../../tooling/gamut-dng-real-conformance) shape. Being a Rust
@@ -190,11 +209,7 @@ crate it needs no `third_party/` submodule. Build it `--no-default-features --fe
 rust_native_crypto`: the default `openssl` feature is pulled *vendored* and would compile OpenSSL
 from C source.
 
-Three properties of `c2pa-rs` **0.90.16** shaped how gamut splits the work. They are recorded from
-[#239](https://github.com/visualcommons/gamut/issues/239) and are **not checkable from this tree** —
-no `c2pa` dependency, submodule or `tooling/` crate exists yet. Re-confirm them against the pinned
-version when `tooling/c2pa-oracle` lands, and pin that version in its `Cargo.toml` so a later
-`c2pa-rs` cannot invalidate this rationale silently.
+Three of its properties shaped how gamut splits the work:
 
 - `Builder`'s `*_embeddable` path plus `composed_manifest(bytes, "application/c2pa")` yields raw
   manifest-store bytes for a host to embed itself, and `CallbackSigner` carries a `reserve_size` —
