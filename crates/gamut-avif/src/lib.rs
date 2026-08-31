@@ -1,11 +1,14 @@
 //! AVIF (AV1 Image File Format) encoder and **container decoder** — AV1 intra-frame bitstreams
 //! wrapped in an ISOBMFF/MIAF container.
 //!
-//! The encode surface is [`AvifEncoder`], which implements [`gamut_core::EncodeImage<Rgb8>`], so
+//! The encode surface is [`AvifEncoder`], which implements [`gamut_core::EncodeImage`] for
+//! [`Rgb8`](gamut_core::Rgb8), [`Rgba8`](gamut_core::Rgba8) and [`Gray8`](gamut_core::Gray8), so
 //! the input is a typed [`ImageRef`](gamut_core::ImageRef) and handing it an unsupported pixel
 //! layout is a compile error. The crate is orchestration only: [`gamut_color`] maps pixels to
-//! 4:4:4 planes — identity GBR, or YCbCr through a CICP matrix — [`gamut_av1`] encodes the AV1
-//! temporal unit, and [`gamut_isobmff`] writes the container.
+//! planes — identity GBR at 4:4:4, or YCbCr through a CICP matrix at the configured chroma
+//! sampling, for colour; monochrome for alpha and grayscale — [`gamut_av1`] encodes each AV1
+//! temporal unit, and [`gamut_isobmff`] writes the container. An alpha channel becomes its own
+//! monochrome **auxiliary image item** (AVIF v1.2.0 §4.1), not a fourth plane.
 //!
 //! # The decode surface (issue #250)
 //!

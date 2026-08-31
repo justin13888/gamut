@@ -46,10 +46,9 @@ AV1 bitstream is cross-checked against `libaom` (the AV1 reference codec) and `d
 doctests, and the `libavif` round-trip/remux integration tests; B–H rows are owned by `gamut-av1`
 and evidenced by its `libaom`/`dav1d` differential suite; J rows by `gamut-color`'s tests.
 
-**Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit — issues #398/#399
-— and 4:2:2's coding path, #391; 4:2:0, profile 0 and `MA1B` landed with #390, and the AV1
-**monochrome** encode with #396, though no `gamut-avif` input reaches monochrome until the
-`Gray8`/alpha surface of #397); alpha and depth auxiliary items (#397); the HDR
+**Deferred (planned, additive).** Every ☐ row below: pixel formats (10/12-bit — issues #398/#399;
+4:2:0/4:2:2 and `MA1B` landed with #390/#391, and the alpha auxiliary, `Gray8` and monochrome
+surface with #396/#397); depth auxiliary items; the HDR
 surface beyond CICP *tagging* (`mdcv`/`clli`/`cclv`/`amve`/`reve`/`ndwt`, film grain — selecting a
 PQ/HLG transfer labels samples but does not by itself make a conformant HDR image); container
 derivations
@@ -102,16 +101,16 @@ adding it needs no container change.
 | `iprp`/`ipco`/`ipma` property association (`av1C` essential) | 14496-12; AVIF §2.2.1 | ✅ | M0 |
 | `av1C` AV1ItemConfigurationProperty, empty `configOBUs` | AV1-ISOBMFF §2.3 | ✅ | M0 |
 | `ispe` image spatial extents | 23008-12 | ✅ | M0 |
-| `pixi` pixel information (3×8) | 23008-12 | ✅ | M0 |
+| `pixi` pixel information (one entry per coded plane: 3×8, or 1×8 monochrome) | 23008-12 | ✅ | M0/M3 |
 | `colr` type `nclx` (CICP code points) | AVIF §2.2; AV1-ISOBMFF §2.3.4 | ✅ | M0 |
 | `colr` type `rICC`/`prof` (ICC profile) | 23008-12 | ✅ (`prof` written by `AvifEncoder::with_icc_profile`; both read) | M4 |
 | `pasp` pixel aspect ratio | 14496-12 | ☐ | M5 |
 | `clap` clean aperture | 23008-12 | ☐ | M5 |
 | `irot` rotation / `imir` mirror | 23008-12 | ✅ (essential transform properties; `AvifEncoder::with_rotation`/`with_mirror`) | M5 |
-| `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4.1 | ☐ | M3 |
+| `auxC` aux-type property + `auxl` item ref (alpha plane) | 23008-12; AVIF §4.1 | ✅ (written for `Rgba8`, essential, hidden item, no `colr`; all read) | M3 |
 | depth auxiliary image item (`urn:…:auxiliary:depth`) | AVIF §4.1 | ☐ | M3 |
-| `prem` premultiplied-alpha association | AVIF §4 | ☐ | M3 |
-| `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ✅ (`cdsc` emitted; all four read) | M3/M5 |
+| `prem` premultiplied-alpha association | AVIF §4 | ✅ (`AvifEncoder::with_premultiplied_alpha`) | M3 |
+| `iref` (`auxl`/`dimg`/`thmb`/`cdsc`) | 23008-12 | ✅ (`cdsc`/`auxl`/`prem` emitted; all read) | M3/M5 |
 | `grid` derived item + `dimg` refs (tiled mosaic) | 23008-12; MIAF | ☐ | M5 |
 | `tmap` tone-map derived item (gain maps) + `altr` grouping with the base item | AVIF §4.2.2 | ☐ | D |
 | `sato` sample-transform derived item (bit-depth extension beyond 12) | AVIF §4.2.3, App. A | ☐ | D |
@@ -285,7 +284,8 @@ copy, which is what a decoder does for an independently decodable tile.
 | `gamut_core::EncodeImage<Rgb8>` impl (typed input) | gamut-core | ✅ | M0 |
 | `AvifEncoder::{new, lossless, lossy, config}` builder API | gamut-avif | ✅ | M0/M1 |
 | `AvifEncoder::{with_matrix, with_color_range}` colour selection | gamut-avif | ✅ (#335) | M2 |
-| RGBA8 input + alpha-plane extraction | gamut-color/avif | ☐ | M3 |
+| `Rgba8` input + alpha-plane extraction; `Gray8` input | gamut-color/avif | ✅ (#397; `Planar8::from_rgba8_*_view`/`from_gray8_view`) | M3 |
+| Subsampled chroma on the `Rgba8` path (`with_chroma` is honoured for `Rgb8`, but an RGBA colour item is always 4:4:4 — `Planar8` has no 4-stride downsampler) | — | ☐ | M3 |
 | 10/12/16-bit & float HDR input buffers | gamut-color | ☐ | M2/M4 |
 | quality config (`lossy(quality)`, 0..=100 → `base_q_idx`); speed / rate control | gamut-avif/av1 | ✅ (quality; speed + rate control deferred) | M1 |
 | AVIF container decode + codestream handoff (`AvifContainer`/`AvifImage`/`Av1StillDecoder`) | gamut-avif §L | ✅ | D |
@@ -366,6 +366,7 @@ propagating its error rather than being silently re-encoded.
 | Backend selection beyond first-supporter (cost/priority hints, per-request negotiation) | — | ☐ | D |
 | Colour on `Av1EncodeRequest` (`colour()`), validated against the returned stream's `color_config()` | AV1 §5.5.2 | ✅ (#335) | M2 |
 | Chroma on `Av1EncodeRequest` (`chroma()`), validated against the returned stream's `seq_profile` | AV1-ISOBMFF §2.3.4 | ✅ | M2 |
+| Monochrome on `Av1EncodeRequest` (so a backend can encode, or decline, an alpha auxiliary or a `Gray8` primary — today those go straight to the `gamut-av1` tail, since a backend written against the three-plane contract cannot decline what the request cannot express) | — | ☐ | M3 |
 | 10/12-bit fields on `Av1EncodeRequest` | — | ☐ | M2 |
 
 **Reserved: the decode-side registry.** The `Av1StillDecoder` trait ships today as a *single*
@@ -449,9 +450,11 @@ the bitstream rather than fail cleanly.
 
 `gamut-avif` 1.0 promises: an encoder with **no pushed backend** emits exactly the bytes it always
 has (pinned byte-for-byte by `tests/backend.rs` against goldens captured before the seam existed);
-every emitted file is a conformant MIAF/AVIF still image (brands
-`avif`/`mif1`/`miaf`/`MA1A`, the AVIF §9.1.1 minimum box set, cross-box consistency between
-`av1C`, the AV1 sequence header, `pixi`, `colr`, and `ispe` by construction); lossless mode
+every emitted file is a conformant MIAF/AVIF still image (brands `avif`/`mif1`/`miaf`, plus
+`MA1A` when every image item is AV1 High Profile — a monochrome item is Main, so an alpha or
+`Gray8` file signals only the general brands, per AVIF §8.1/§8.3; the AVIF §9.1.1 minimum box set;
+cross-box consistency between `av1C`, the AV1 sequence header, `pixi`, `colr`, and `ispe` by
+construction); lossless mode
 round-trips bit-exact through a conformant decoder; the `quality → base_q_idx` mapping is frozen
 (defined in [`references/avif`](../../references/avif/README.md), including the silent clamp of
 `quality > 100`); and the output is continuously validated against `libavif`+`dav1d` at the

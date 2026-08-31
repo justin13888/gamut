@@ -1,34 +1,40 @@
 //! Planar 8-bit image buffers and the RGB → plane mappings: identity (`mc = 0`) and the CICP
 //! luma–chroma matrices.
 
-use gamut_core::{Dimensions, Error, ImageRef, Result, Rgb8};
+use gamut_core::{Dimensions, Error, Gray8, ImageRef, Result, Rgb8, Rgba8};
 
 use crate::format::ChromaSubsampling;
 use crate::ycbcr::RgbToYcbcr;
 
-/// Maps an interleaved RGB buffer (`n` pixels) to identity GBR planes (`Y=G, U=B, V=R`).
-fn rgb_to_gbr_planes(rgb: &[u8], n: usize) -> [Vec<u8>; 3] {
+/// Maps an interleaved buffer of `n` pixels, `stride` bytes apart with `R, G, B` first, to identity
+/// GBR planes (`Y=G, U=B, V=R`).
+///
+/// `stride` is what lets RGB (3) and RGBA (4) share one mapping: the alpha byte of an RGBA source
+/// is simply never read, so the colour planes are built without materializing an RGB copy first.
+fn rgb_to_gbr_planes(px: &[u8], n: usize, stride: usize) -> [Vec<u8>; 3] {
     let mut g = vec![0u8; n];
     let mut b = vec![0u8; n];
     let mut r = vec![0u8; n];
     for i in 0..n {
-        r[i] = rgb[i * 3];
-        g[i] = rgb[i * 3 + 1];
-        b[i] = rgb[i * 3 + 2];
+        r[i] = px[i * stride];
+        g[i] = px[i * stride + 1];
+        b[i] = px[i * stride + 2];
     }
     [g, b, r]
 }
 
-/// Maps an interleaved RGB buffer (`n` pixels) to `Y/Cb/Cr` planes through `matrix`.
-fn rgb_to_ycbcr_planes(rgb: &[u8], n: usize, matrix: RgbToYcbcr) -> [Vec<u8>; 3] {
+/// Maps an interleaved buffer of `n` pixels, `stride` bytes apart with `R, G, B` first, to
+/// `Y/Cb/Cr` planes through `matrix`. `stride` carries RGBA exactly as it does for
+/// [`rgb_to_gbr_planes`].
+fn rgb_to_ycbcr_planes(px: &[u8], n: usize, stride: usize, matrix: RgbToYcbcr) -> [Vec<u8>; 3] {
     let mut y = vec![0u8; n];
     let mut cb = vec![0u8; n];
     let mut cr = vec![0u8; n];
     for i in 0..n {
         let (yy, u, v) = matrix.from_rgb(
-            u16::from(rgb[i * 3]),
-            u16::from(rgb[i * 3 + 1]),
-            u16::from(rgb[i * 3 + 2]),
+            u16::from(px[i * stride]),
+            u16::from(px[i * stride + 1]),
+            u16::from(px[i * stride + 2]),
         );
         // `matrix` is built at `BitDepth::Eight`, so every output is already in `0..=255`.
         y[i] = yy as u8;
@@ -134,7 +140,7 @@ impl Planar8 {
             width,
             height,
             subsampling: ChromaSubsampling::Cs444,
-            planes: rgb_to_gbr_planes(rgb, n),
+            planes: rgb_to_gbr_planes(rgb, n, 3),
         })
     }
 
@@ -151,7 +157,7 @@ impl Planar8 {
             width,
             height,
             subsampling: ChromaSubsampling::Cs444,
-            planes: rgb_to_gbr_planes(img.as_samples(), n),
+            planes: rgb_to_gbr_planes(img.as_samples(), n, 3),
         }
     }
 
@@ -198,7 +204,7 @@ impl Planar8 {
             width,
             height,
             subsampling: ChromaSubsampling::Cs444,
-            planes: rgb_to_ycbcr_planes(rgb, n, matrix),
+            planes: rgb_to_ycbcr_planes(rgb, n, 3, matrix),
         })
     }
 
@@ -215,7 +221,81 @@ impl Planar8 {
             width,
             height,
             subsampling: ChromaSubsampling::Cs444,
-            planes: rgb_to_ycbcr_planes(img.as_samples(), n, matrix),
+            planes: rgb_to_ycbcr_planes(img.as_samples(), n, 3, matrix),
+        }
+    }
+
+    /// Maps the colour channels of an interleaved RGBA image to 4:4:4 identity GBR planes, ignoring
+    /// alpha — the [`Planar8::from_rgb8_identity_view`] of a four-channel source.
+    ///
+    /// Alpha is a separate coded plane in every format that carries it planar (an AVIF alpha
+    /// auxiliary item, a WebP `ALPH` chunk), so it is extracted on its own with
+    /// [`from_rgba8_alpha_view`](Self::from_rgba8_alpha_view) rather than returned here. Reading
+    /// the colour channels straight out of the RGBA buffer avoids materializing an intermediate
+    /// RGB copy.
+    #[must_use]
+    pub fn from_rgba8_identity_view(img: ImageRef<'_, Rgba8>) -> Self {
+        let (width, height) = (img.width(), img.height());
+        // No overflow check needed: `ImageRef` already validated that width * height * 4 fits
+        // `usize` (it equals the sample slice's length).
+        let n = width as usize * height as usize;
+        Self {
+            width,
+            height,
+            subsampling: ChromaSubsampling::Cs444,
+            planes: rgb_to_gbr_planes(img.as_samples(), n, 4),
+        }
+    }
+
+    /// Maps the colour channels of an interleaved RGBA image to 4:4:4 `Y/Cb/Cr` planes through
+    /// `matrix`, ignoring alpha — the [`Planar8::from_rgb8_matrix_view`] of a four-channel source.
+    #[must_use]
+    pub fn from_rgba8_matrix_view(img: ImageRef<'_, Rgba8>, matrix: RgbToYcbcr) -> Self {
+        let (width, height) = (img.width(), img.height());
+        let n = width as usize * height as usize;
+        Self {
+            width,
+            height,
+            subsampling: ChromaSubsampling::Cs444,
+            planes: rgb_to_ycbcr_planes(img.as_samples(), n, 4, matrix),
+        }
+    }
+
+    /// Extracts the **alpha** channel of an interleaved RGBA image as monochrome planes
+    /// ([`ChromaSubsampling::Cs400`]): one luma plane carrying alpha verbatim, and no chroma.
+    ///
+    /// Alpha is opacity, not colour: it goes through no matrix and no range scaling, whatever the
+    /// colour planes use. Monochrome is also what the formats require of it — AVIF v1.2.0 §4.1
+    /// makes `mono_chrome = 1` and full range a *shall* for an AV1 alpha auxiliary item.
+    #[must_use]
+    pub fn from_rgba8_alpha_view(img: ImageRef<'_, Rgba8>) -> Self {
+        let px = img.as_samples();
+        Self {
+            width: img.width(),
+            height: img.height(),
+            subsampling: ChromaSubsampling::Cs400,
+            planes: [
+                px.iter().skip(3).step_by(4).copied().collect(),
+                Vec::new(),
+                Vec::new(),
+            ],
+        }
+    }
+
+    /// Wraps an 8-bit grayscale image as **monochrome** planes ([`ChromaSubsampling::Cs400`]): one
+    /// luma plane carrying the samples verbatim, and no chroma.
+    ///
+    /// Grayscale *is* the luma plane, so there is nothing for a matrix to decorrelate; encoding it
+    /// as three equal planes would code two constant chroma planes for no information. Infallible
+    /// for the same reason the other `_view` constructors are — the view already guarantees
+    /// `len() == width * height`.
+    #[must_use]
+    pub fn from_gray8_view(img: ImageRef<'_, Gray8>) -> Self {
+        Self {
+            width: img.width(),
+            height: img.height(),
+            subsampling: ChromaSubsampling::Cs400,
+            planes: [img.as_samples().to_vec(), Vec::new(), Vec::new()],
         }
     }
 
@@ -657,6 +737,81 @@ mod tests {
             p.to_rgb8_identity(),
             vec![7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 10]
         );
+    }
+
+    /// A 3x2 RGBA image whose four channels are pairwise distinct at every pixel, so a mapping
+    /// that read the wrong channel or the wrong stride cannot produce the expected planes.
+    ///
+    /// 3x2 rather than a square: the pixel count is `width * height`, and for 2x2 that is
+    /// indistinguishable from `width + height`.
+    fn rgba_3x2() -> Vec<u8> {
+        vec![
+            10, 20, 30, 40, // (0,0)
+            11, 21, 31, 41, // (1,0)
+            12, 22, 32, 42, // (2,0)
+            13, 23, 33, 43, // (0,1)
+            14, 24, 34, 44, // (1,1)
+            15, 25, 35, 45, // (2,1)
+        ]
+    }
+
+    #[test]
+    fn rgba_colour_planes_ignore_alpha_and_match_the_rgb_mapping() {
+        let px = rgba_3x2();
+        let img = ImageRef::<Rgba8>::new(&px, Dimensions::new(3, 2).unwrap()).unwrap();
+        let p = Planar8::from_rgba8_identity_view(img);
+        // GBR order, exactly as the three-channel constructor produces: Y=G, U=B, V=R. Every plane
+        // is the full 6 samples, which is what fails if the pixel count is computed wrongly.
+        assert_eq!(p.plane(0), &[20u8, 21, 22, 23, 24, 25]);
+        assert_eq!(p.plane(1), &[30u8, 31, 32, 33, 34, 35]);
+        assert_eq!(p.plane(2), &[10u8, 11, 12, 13, 14, 15]);
+        assert_eq!(p.subsampling(), ChromaSubsampling::Cs444);
+
+        // The same colour values fed through the three-channel path give the same planes, which is
+        // the property that makes an RGBA colour item byte-identical to the RGB one.
+        let rgb: Vec<u8> = px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|c| c[..3].to_vec())
+            .collect();
+        let matrix = RgbToYcbcr::new(
+            crate::MatrixCoefficients::Bt709,
+            crate::ColorRange::Full,
+            crate::BitDepth::Eight,
+        )
+        .unwrap();
+        let from_rgba = Planar8::from_rgba8_matrix_view(img, matrix);
+        let from_rgb = Planar8::from_rgb8_matrix(&rgb, 3, 2, matrix).unwrap();
+        for i in 0..3 {
+            assert_eq!(from_rgba.plane(i), from_rgb.plane(i), "plane {i}");
+            assert_eq!(from_rgba.plane(i).len(), 6, "plane {i} covers every pixel");
+        }
+    }
+
+    #[test]
+    fn alpha_and_gray_views_are_monochrome() {
+        let px = rgba_3x2();
+        let img = ImageRef::<Rgba8>::new(&px, Dimensions::new(3, 2).unwrap()).unwrap();
+        let a = Planar8::from_rgba8_alpha_view(img);
+        assert_eq!(a.subsampling(), ChromaSubsampling::Cs400);
+        // The fourth channel of each pixel, in raster order — not the first, and not every fourth
+        // *byte* from the start.
+        assert_eq!(a.plane(0), &[40u8, 41, 42, 43, 44, 45]);
+        assert!(a.plane(1).is_empty() && a.plane(2).is_empty());
+        assert_eq!(a.plane_dimensions(0), (3, 2));
+        assert_eq!(a.plane_dimensions(1), (0, 0));
+
+        let gray = [5u8, 6, 7, 8, 9, 10];
+        let g = Planar8::from_gray8_view(
+            ImageRef::<Gray8>::new(&gray, Dimensions::new(3, 2).unwrap()).unwrap(),
+        );
+        assert_eq!(g.subsampling(), ChromaSubsampling::Cs400);
+        assert_eq!((g.width(), g.height()), (3, 2));
+        assert_eq!(g.plane(0), &gray[..]);
+        assert!(g.plane(1).is_empty() && g.plane(2).is_empty());
+        // Grayscale is luma, so expanding it back gives R=G=B.
+        assert_eq!(g.to_rgb8_identity()[..6], [5, 5, 5, 6, 6, 6]);
     }
 
     #[test]
