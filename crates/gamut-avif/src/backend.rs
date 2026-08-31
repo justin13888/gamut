@@ -581,18 +581,22 @@ impl<'a> BitReader<'a> {
 /// [`EncodeConfig::extra`] blob: **one byte**, the AV1 `base_q_idx`. A backend registered for
 /// [`AV1_CODEC_ID`] must read `extra`, and must not read `quality`.
 ///
-/// # Bit depth: 8-bit only
+/// # Bit depth
 ///
-/// The adapter implements [`Av1StillEncoder::encode_still`] and **not**
-/// [`encode_still16`](Av1StillEncoder::encode_still16), so a 10- or 12-bit job never reaches the
-/// wrapped ABI encoder: the trait default declines it and the registry falls through to the next
-/// backend, ultimately the built-in software tail. A caller who wraps a hardware or `-sys` encoder
-/// and then encodes an `Rgb16`/`Rgba16` source therefore gets a correct file produced by
-/// `gamut-av1`, not by the backend they registered.
+/// Both directions are lowered: an 8-bit job through [`Av1StillEncoder::encode_still`] and a 10- or
+/// 12-bit one through [`encode_still16`](Av1StillEncoder::encode_still16), so a wrapped hardware or
+/// `-sys` encoder owns the job at every depth rather than silently losing the high-bit-depth ones to
+/// the software tail.
 ///
-/// This is a limitation of the adapter, not of the seam: [`ImageDesc`] carries a `bit_depth`, so
-/// lowering `Planar16` across the ABI is expressible and is deferred additive work. Implement
-/// [`Av1StillEncoder`] directly to take high-bit-depth jobs today.
+/// [`ImageDesc`] describes the two identically except in three places, and a backend reading the
+/// descriptor must honour all three:
+///
+/// - [`ImageDesc::depth`] is the **coded** depth — `8`, `10` or `12` — never the storage width.
+/// - [`ImageDesc::strides`] are in **bytes**, so a high-bit-depth row is twice its sample count.
+/// - Above 8 bits the plane pointers address native-endian `u16` samples, **right-justified** at
+///   the coded depth (a 10-bit sample occupies `0..=1023`, not the top ten bits of a `u16`).
+///   [`ImageDesc::pixel_format`] carries `Rgb16` rather than `Rgb8` to say so, and `Planar16`
+///   validates every sample against its depth, so the range is a guarantee and not a convention.
 ///
 /// # Status handling
 ///
@@ -657,6 +661,53 @@ impl<E: Encoder + Send> Av1StillEncoder for AbiAv1StillEncoder<E> {
             planes.width(),
             planes.height(),
             8,
+            3,
+            [
+                plane_ptr(0),
+                plane_ptr(1),
+                plane_ptr(2),
+                std::ptr::null_mut(),
+            ],
+            [stride(0), stride(1), stride(2), 0],
+        );
+        let mut obus = Vec::new();
+        let status = self.inner.encode(&cfg, &image, &mut |chunk: &[u8]| {
+            obus.extend_from_slice(chunk);
+            Status::OK
+        });
+        if status.is_ok() {
+            Ok(obus)
+        } else if status.is_unsupported() {
+            Err(LateDecline::error().with_detail(format!("codec-abi status {}", status.0)))
+        } else {
+            Err(
+                Error::invalid_input(env!("CARGO_PKG_NAME"), "AVIF: AV1 encode backend failed")
+                    .with_detail(format!("codec-abi status {}", status.0)),
+            )
+        }
+    }
+
+    fn encode_still16(&mut self, req: &Av1EncodeRequest, planes: &Planar16) -> Result<Vec<u8>> {
+        let q_idx = req.base_q_idx();
+        let cfg = Self::config(&q_idx);
+        // Bytes, not samples: `ImageDesc::strides` is a byte stride, and a `u16` row is twice as
+        // wide as its sample count. Deriving it from the sample count instead would hand the
+        // backend every other row.
+        let stride = |i: usize| planes.plane_dimensions(i).0 as usize * size_of::<u16>();
+        // `Vec<u16>` is 2-byte aligned, which is what a backend reinterpreting the pointer as
+        // `uint16_t *` needs; the `*mut` is the ABI's one descriptor shape, shared with the decode
+        // (write) direction, and encode inputs stay read-only per its contract.
+        let plane_ptr = |i: usize| planes.plane(i).as_ptr().cast::<u8>().cast_mut();
+        let image = ImageDesc::new(
+            // `Rgb16` rather than `Rgb8`: the samples are `u16`, and the tag is what tells a
+            // backend how wide to read before `depth` tells it how many bits carry signal.
+            PixelFormat::Rgb16 as u32,
+            planes.width(),
+            planes.height(),
+            // The *coded* depth (10 or 12), not the 16-bit storage width — `av1C` mirrors this and
+            // a backend coding to the storage width would produce a stream the container's own
+            // depth check rejects.
+            u32::from(planes.bit_depth().bits()),
             3,
             [
                 plane_ptr(0),

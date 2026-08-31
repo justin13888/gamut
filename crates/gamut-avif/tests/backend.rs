@@ -1347,3 +1347,120 @@ fn backend_stream_may_use_the_professional_profile() {
         "AVIF: AV1 backend stream signals a different chroma format than requested",
     );
 }
+
+/// The adapter lowers a **high-bit-depth** job instead of declining it, so a wrapped `-sys` or
+/// hardware encoder owns the 10/12-bit work rather than losing it to the software tail.
+///
+/// The descriptor is where the three high-bit-depth differences live, and this pins all of them at
+/// once: `Rgb16` says the samples are `u16`, `depth` is the *coded* 12 (not the 16-bit storage
+/// width), and the strides are **bytes** — so the subsampled chroma rows are `ceil(W/2) * 2`, which
+/// a sample-count stride or a luma-width stride would both get wrong.
+#[test]
+fn abi_adapter_lowers_a_high_bit_depth_job() {
+    let colour = Av1Colour {
+        matrix: MatrixCoefficients::Bt709,
+        ..Av1Colour::default()
+    };
+    let px = fixture16();
+    let img = ImageRef::<Rgb16>::new(&px, dims()).unwrap();
+    let m = RgbToYcbcr::new(
+        MatrixCoefficients::Bt709,
+        ColorRange::Full,
+        BitDepth::Twelve,
+    )
+    .unwrap();
+    let planes =
+        Planar16::from_rgb16_matrix_subsampled(img, m, ChromaSubsampling::Cs420).expect("planes");
+    let obus = gamut_av1::encode_still_intra16_with(&planes, 127, colour)
+        .expect("the built-in encoder handles the request")
+        .0
+        .obus;
+    // Two chunks, so the adapter's accumulation is exercised rather than a single hand-off.
+    let (head, tail) = obus.split_at(7);
+    let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
+        Status::OK,
+        Status::OK,
+        vec![head.to_vec(), tail.to_vec()],
+    ))));
+    let mut encoder = AvifEncoder::lossy(50) // quality 50 ⇒ base_q_idx 127
+        .with_bit_depth(BitDepth::Twelve)
+        .with_chroma(ChromaSubsampling::Cs420);
+    encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+    let out = encode16(&encoder).expect("the adapter owns the 12-bit job");
+    assert_eq!(
+        out,
+        encode16(
+            &AvifEncoder::lossy(50)
+                .with_bit_depth(BitDepth::Twelve)
+                .with_chroma(ChromaSubsampling::Cs420)
+        )
+        .unwrap(),
+        "the sink bytes became the item payload"
+    );
+
+    let seen = stub.0.lock().unwrap();
+    assert_eq!(
+        seen.seen_config,
+        Some((u32::from_be_bytes(*b"av01"), 0, Some(127))),
+        "codec id av01, quality unused (0), base_q_idx in extra"
+    );
+    // The stub captures the first *byte* of each plane, so compare against the low-order byte of
+    // the first `u16` in this platform's own order — which is the point: the pointer addresses
+    // native-endian `u16`s, not a byte plane.
+    let first = [0usize, 1, 2].map(|i| planes.plane(i)[0].to_ne_bytes()[0]);
+    let chroma_stride = W.div_ceil(2) as usize * size_of::<u16>();
+    assert_eq!(
+        seen.seen_image,
+        Some((
+            gamut_core::PixelFormat::Rgb16 as u32,
+            W,
+            H,
+            12,
+            3,
+            [
+                W as usize * size_of::<u16>(),
+                chroma_stride,
+                chroma_stride,
+                0,
+            ],
+            first,
+        ))
+    );
+}
+
+/// The depth reaching the descriptor is the request's, not a constant: a 10-bit job must not be
+/// lowered as 12-bit, which `av1C` would then mirror into a lie about the payload.
+#[test]
+fn abi_adapter_lowers_the_requested_depth_not_a_fixed_one() {
+    for (bits, depth) in [(BitDepth::Ten, 10u32), (BitDepth::Twelve, 12)] {
+        let px = fixture16();
+        let img = ImageRef::<Rgb16>::new(&px, dims()).unwrap();
+        let planes = Planar16::from_rgb16_identity_view(img, bits);
+        let obus = gamut_av1::encode_still_intra16_with(&planes, 0, Av1Colour::default())
+            .expect("built-in lossless encode")
+            .0
+            .obus;
+        let stub = SharedStub(Arc::new(Mutex::new(AbiStub::new(
+            Status::OK,
+            Status::OK,
+            vec![obus],
+        ))));
+        let mut encoder = AvifEncoder::new().with_bit_depth(bits);
+        encoder.push_backend(AbiAv1StillEncoder::new(stub.clone()));
+        encode16(&encoder).unwrap_or_else(|e| panic!("{bits:?}: {e}"));
+        let seen = stub.0.lock().unwrap();
+        let image = seen.seen_image.expect("the adapter lowered an image");
+        assert_eq!(image.3, depth, "{bits:?}: ImageDesc::depth");
+        // Lossless is 4:4:4, so every stride is the luma row in bytes.
+        assert_eq!(
+            image.5,
+            [
+                W as usize * size_of::<u16>(),
+                W as usize * size_of::<u16>(),
+                W as usize * size_of::<u16>(),
+                0
+            ],
+            "{bits:?}: byte strides"
+        );
+    }
+}
