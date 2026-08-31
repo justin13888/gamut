@@ -33,6 +33,15 @@ exclude_globs = [
     # lookup/replace/remove logic now, so it is mutation-tested in full.)
     "crates/gamut/**",
     "tooling/**",
+    # `invariants` modules are the executable laws a property test and the fuzz tier both drive
+    # (`docs/testing.md`) — the oracle, not the system under test, exactly like `tooling/**` above,
+    # so mutating them is meaningless: a law weakened to `Ok(())` is unkillable by definition,
+    # because the tests assert that it returns `Ok(())`. Note this is not covered by
+    # cargo-mutants' own `#[cfg(test)]` skip: the modules are gated
+    # `#[cfg(any(test, feature = "test-support"))]`, and the tool's `attr_is_cfg_test` does not
+    # recognise a nested `any(...)`, so without this glob it generates 32 mutants for
+    # gamut-ifd's module alone and the blocking `--in-diff` gate fails on the oracle.
+    "crates/*/src/invariants.rs",
 ]
 
 # The test suites are fast (sub-second baselines), so a mutant that runs much longer is
@@ -74,14 +83,20 @@ profile = "mutants"
 # a future, genuinely-killable one. Keep this list short and justified; a gap is *not* an excuse for
 # an entry.
 exclude_re = [
-    # gamut-ifd track::subtract — the claim-normalisation details are unobservable through the
-    # two-pointer walk. `r.len > 0` → `>=` only admits zero-length claims, which the walk's
-    # skip loop (`r.end() <= pos`) discards before they can cover anything; and disabling the
-    # merge guard leaves the claims as a sorted-but-overlapping list the walk consumes
-    # identically (each arm advances `pos` monotonically over the union). Both equivalent; the
-    # merge *arithmetic* is NOT excluded (killed by
-    # `subtract_normalises_overlapping_claims_away_from_origin`).
-    'replace > with >= in ReadLedger::subtract',
+    # gamut-ifd track::subtract — disabling the merge guard is equivalent by construction: the
+    # skip loop discards every claim with `end() <= pos`, and the covered arm advances `pos` to
+    # `r.end().min(end)`, strictly greater than `pos`, so an unmerged sorted-but-overlapping list
+    # is consumed identically to the merged one. That argument is what carries this entry; the
+    # property in `gamut_ifd::invariants` (issue #240) corroborates it — the mutant passes there
+    # too — but a finite run is evidence, not proof. The merge *arithmetic* is NOT excluded
+    # (killed by `subtract_normalises_overlapping_claims_away_from_origin`).
+    #
+    # The former sibling entry here — `replace > with >= in ReadLedger::subtract`, the
+    # `r.len > 0` claim filter — was NOT equivalent and has been removed. It admits zero-length
+    # claims, and a zero-length claim landing inside an unclaimed stretch makes the walk emit two
+    # *adjacent* ranges where one is correct: the byte set is unchanged, which is why every
+    # set-equality test missed it, but the canonical form is not. `subtract_is_the_set_difference`
+    # kills it and shrinks to `reads = [{2747, 103}], claims = [{2748, 0}]`.
     'replace match guard r\.start <= last\.end\(\) with false in ReadLedger::subtract',
     # gamut-dng rewrite::write — the pin-fallback match guard. With `pin == None` the guard is
     # the only difference between "return the error" and "retry the identical un-pinned write
