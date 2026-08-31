@@ -114,8 +114,8 @@ pub fn corpus_dir() -> PathBuf {
 #[must_use]
 pub fn manifest() -> Manifest {
     let path = corpus_dir().join("MANIFEST.toml");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     toml::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
@@ -125,6 +125,10 @@ pub fn manifest() -> Manifest {
 /// from the workspace, and the hash is needed for exactly one purpose.
 #[must_use]
 pub fn sha256(data: &[u8]) -> [u8; 32] {
+    // FIPS 180-4 round constants and initial hash values, laid out in the spec's own rows.
+    // Skipped because every element is 11 chars, one over rustfmt's
+    // `short_array_element_width_threshold`, which would otherwise break them one per line.
+    #[rustfmt::skip]
     const K: [u32; 64] = [
         0x428a_2f98, 0x7137_4491, 0xb5c0_fbcf, 0xe9b5_dba5, 0x3956_c25b, 0x59f1_11f1, 0x923f_82a4,
         0xab1c_5ed5, 0xd807_aa98, 0x1283_5b01, 0x2431_85be, 0x550c_7dc3, 0x72be_5d74, 0x80de_b1fe,
@@ -137,6 +141,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         0x748f_82ee, 0x78a5_636f, 0x84c8_7814, 0x8cc7_0208, 0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7,
         0xc671_78f2,
     ];
+    #[rustfmt::skip]
     let mut h: [u32; 8] = [
         0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a, 0x510e_527f, 0x9b05_688c, 0x1f83_d9ab,
         0x5be0_cd19,

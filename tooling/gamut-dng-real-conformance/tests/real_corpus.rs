@@ -220,8 +220,13 @@ fn every_real_file_survives_a_preserving_rewrite() {
             }
             Err(e) => panic!("{name}: open: {e}"),
         };
-        assert!(expect.rewritable, "{name}: opened, but manifest says it must not");
-        let out = rewrite.write().unwrap_or_else(|e| panic!("{name}: write: {e}"));
+        assert!(
+            expect.rewritable,
+            "{name}: opened, but manifest says it must not"
+        );
+        let out = rewrite
+            .write()
+            .unwrap_or_else(|e| panic!("{name}: write: {e}"));
 
         assert_eq!(
             maker_note_name(out.maker_note),

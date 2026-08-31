@@ -57,7 +57,10 @@ fn main() {
             println!("      preceded by: {:?}", before.map(|s| s.kind));
             println!("      followed by: {:?}", after.map(|s| s.kind));
             let peek_end = (end as usize).min(start as usize + 24);
-            println!("      bytes      : {:02x?}", &data[start as usize..peek_end]);
+            println!(
+                "      bytes      : {:02x?}",
+                &data[start as usize..peek_end]
+            );
             if let Ok(text) = std::str::from_utf8(&data[start as usize..peek_end])
                 && text.chars().all(|c| c.is_ascii_graphic() || c == '\0')
             {

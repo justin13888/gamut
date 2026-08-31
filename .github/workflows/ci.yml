@@ -12,10 +12,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The vendored C/C++ oracles (libaom, dav1d, libavif, libheif, exiv2, libjpeg-turbo, the DNG SDK,
-# libjxl, …) dominate CI: they are workspace members under `tooling/`, and Swatinem/rust-cache
-# deliberately drops workspace crates — including their build-script OUT_DIRs, where every static
-# archive lives — so before sccache each heavy job rebuilt all fourteen from scratch (~9 min, paid
-# twice per PR).
+# libjxl, …) dominate CI: they are local path crates — the `tooling/` oracles are
+# `[workspace].exclude` entries reached as path dev-dependencies, and libjxl builds inside the
+# member `gamut-jxl-sys` — and Swatinem/rust-cache deliberately drops local crates, including
+# their build-script OUT_DIRs where every static archive lives, so before sccache each heavy job
+# rebuilt all fourteen from scratch (~9 min, paid twice per PR).
 #
 # sccache is the right tool because it is content-addressed on preprocessed source + compiler +
 # flags: a `third_party/` submodule bump changes the content, changes the hash, and misses. There

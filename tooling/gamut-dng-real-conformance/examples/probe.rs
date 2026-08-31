@@ -124,13 +124,20 @@ fn report_decode(data: &[u8]) {
             SubImageData::Undecoded {
                 compression,
                 chunks,
-            } => format!("Undecoded(compression={compression}, {} chunks)", chunks.len()),
+            } => format!(
+                "Undecoded(compression={compression}, {} chunks)",
+                chunks.len()
+            ),
             SubImageData::Decoded(v) => format!("Decoded({} samples)", v.len()),
             _ => "Other".to_string(),
         };
         println!(
             "      kind={:?} {}x{} photometric={} bits={} spp={} -> {payload}",
-            s.kind, s.dimensions.width, s.dimensions.height, s.photometric, s.bits_per_sample,
+            s.kind,
+            s.dimensions.width,
+            s.dimensions.height,
+            s.photometric,
+            s.bits_per_sample,
             s.samples_per_pixel,
         );
     }
