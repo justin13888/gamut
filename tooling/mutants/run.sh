@@ -3,7 +3,7 @@
 #
 # Every caller goes through here — `mise run mutants`, the mutants CI workflow, and an agent's
 # tight debug loop — so the dials cannot drift between them. Run it via the mise task rather
-# than directly; `mise run mutants --help` lists the flags.
+# than directly; `mise run mutants -- --help` lists the flags (mise intercepts a bare --help).
 #
 # WHY THIS EXISTS
 #
@@ -23,6 +23,7 @@
 # ENVIRONMENT
 #
 #   GAMUT_MUTANTS_BUDGET_GB   memory budget; default: the cgroup limit, else MemAvailable
+#   GAMUT_MUTANTS_BASE        base ref for --diff              (default: origin/master)
 #   MUTANTS_JOBS              scenarios in flight            (derived)
 #   MUTANTS_JOBSERVER_TASKS   compilers in flight, in total  (derived)
 #   CARGO_BUILD_JOBS          cargo jobs per scenario; also NUM_JOBS for cc::Build  (derived)
@@ -53,11 +54,9 @@ budget_gb="${GAMUT_MUTANTS_BUDGET_GB:-}"
 all_at_once=""
 dry_run=""
 want_diff=""
-set -- "$@"
-args_pre=""     # cargo-mutants args accumulated before the passthrough marker
 
-# Accumulate cargo-mutants arguments in a way that survives `sh`'s lack of arrays: each is
-# appended to the positional list of a subshell-free loop via `set --`.
+# Accumulate cargo-mutants arguments in a way that survives `sh`'s lack of arrays: a single
+# string of individually single-quoted words, expanded once at the end.
 mutant_args=""
 add_arg() {
 	# Quote for `eval` below, so a glob or a space in a value survives intact.
@@ -69,7 +68,8 @@ usage() {
 Usage: mise run mutants [OPTIONS] [-- CARGO_MUTANTS_ARGS...]
 
 Selection (a full-workspace run requires --shard or --all-at-once):
-  --diff                Only mutants in code changed vs the merge base with origin/master
+  --diff                Only mutants in code changed vs the merge base with the base branch
+                        (origin/master; override with GAMUT_MUTANTS_BASE for a stacked branch)
   --crate NAME          Only mutants in one package (repeatable)
   --file GLOB           Only mutants in files matching a glob (repeatable)
   --shard I/N           Run shard I of N, round-robin across files
@@ -153,7 +153,6 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
-: "${args_pre:=}"
 
 # ── Memory budget ───────────────────────────────────────────────────────────────────────────
 # The cgroup limit is the honest number where one exists: on a workstation running agents under
@@ -163,9 +162,17 @@ done
 cgroup_limit_gb() {
 	cgroup=$(awk -F: '$1 == "0" {print $3}' /proc/self/cgroup 2>/dev/null) || return 1
 	[ -n "$cgroup" ] || return 1
-	dir="/sys/fs/cgroup$cgroup"
+	# Strip a trailing slash before appending. In a container the unified path is exactly `/`,
+	# which would otherwise make the root `/sys/fs/cgroup/` — never equal to the sentinel below,
+	# so the walk would climb past it and spin on `/` forever, hanging with no output.
+	dir="/sys/fs/cgroup${cgroup%/}"
 	# Walk up to the nearest ancestor that names a finite limit; an unlimited level says nothing.
-	while [ -n "$dir" ] && [ "$dir" != "/sys/fs/cgroup" ]; do
+	while [ "$dir" != "/sys/fs/cgroup" ]; do
+		# Belt and braces: never leave the cgroup mount, whatever the path turns out to look like.
+		case "$dir" in
+		/sys/fs/cgroup/*) ;;
+		*) return 1 ;;
+		esac
 		if [ -r "$dir/memory.max" ]; then
 			value=$(cat "$dir/memory.max")
 			if [ "$value" != "max" ]; then
@@ -175,6 +182,14 @@ cgroup_limit_gb() {
 		fi
 		dir=$(dirname "$dir")
 	done
+	# The root cgroup itself, which a container's `0::/` resolves straight to.
+	if [ -r "$dir/memory.max" ]; then
+		value=$(cat "$dir/memory.max")
+		[ "$value" != "max" ] && {
+			echo $((value / 1024 / 1024 / 1024))
+			return 0
+		}
+	fi
 	return 1
 }
 
@@ -289,8 +304,14 @@ esac
 free_gb=$(df -BG --output=avail "$TMPDIR" 2>/dev/null | tail -1 | tr -dc '0-9')
 need_gb=$((MUTANTS_JOBS * 15))
 if [ -n "$free_gb" ] && [ "$free_gb" -lt "$need_gb" ]; then
-	die "$TMPDIR has ${free_gb}GiB free; $MUTANTS_JOBS job(s) need about ${need_gb}GiB.
-     Free space, set TMPDIR to a roomier filesystem, or lower MUTANTS_JOBS."
+	# A warning, not a refusal. Running out of disk fails the build loudly, at the point of
+	# failure, with a message naming the problem — so it needs a heads-up, not a gate. That is
+	# the opposite of running out of memory, where the OOM killer picks a victim that may be
+	# cargo-mutants itself and takes hours of results with it, which is why *that* is guarded.
+	# The estimate is also deliberately pessimistic: it assumes a whole-workspace baseline, and
+	# a `--crate` selection needs far less.
+	echo "mutants: warning: $TMPDIR has ${free_gb}GiB free; $MUTANTS_JOBS job(s) may want up to \
+${need_gb}GiB. Set TMPDIR to a roomier filesystem or lower MUTANTS_JOBS if the build runs out." >&2
 fi
 
 # ── Selection guard ─────────────────────────────────────────────────────────────────────────
@@ -333,9 +354,17 @@ fi
 if [ -n "$want_diff" ]; then
 	mkdir -p "$target_dir"
 	diff_file="$target_dir/mutants.diff"
-	base=$(git merge-base origin/master HEAD) || die "cannot find the merge base with origin/master"
+	# The base is the branch this work will merge into, which is not always master: this repo
+	# stacks pull requests on each other. Diffing a stacked branch against master would hand the
+	# gate every mutant the *base* branch introduced as well, failing it on already-reviewed code
+	# and blowing out the shard budget. CI passes the pull request's own base ref.
+	base_ref="${GAMUT_MUTANTS_BASE:-origin/master}"
+	git rev-parse --verify --quiet "$base_ref" >/dev/null ||
+		die "base ref $base_ref does not resolve; fetch it or set GAMUT_MUTANTS_BASE"
+	base=$(git merge-base "$base_ref" HEAD) || die "cannot find the merge base with $base_ref"
 	git diff "$base...HEAD" >"$diff_file"
-	[ -s "$diff_file" ] || die "no changes vs origin/master, so --diff selects no mutants"
+	[ -s "$diff_file" ] || die "no changes vs $base_ref, so --diff selects no mutants"
+	selection="${selection}base:$base_ref "
 	add_arg --in-diff
 	add_arg "$diff_file"
 fi
@@ -388,7 +417,7 @@ mutants: jobs        $MUTANTS_JOBS scenario(s), $MUTANTS_JOBSERVER_TASKS jobserv
 mutants: per job     CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS CMAKE_BUILD_PARALLEL_LEVEL=$CMAKE_BUILD_PARALLEL_LEVEL RUST_TEST_THREADS=$RUST_TEST_THREADS
 mutants: tmpdir      $TMPDIR ($fstype, ${free_gb:-?}GiB free)
 mutants: guards      $guard_note
-mutants: command     ${scope:+$scope }sh -c "${inner#ulimit*; }"
+mutants: command     ${scope:+$scope }sh -c "$inner"
 EOF
 
 [ -n "$dry_run" ] && exit 0

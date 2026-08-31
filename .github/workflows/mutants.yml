@@ -103,6 +103,11 @@ jobs:
         # Sharding is round-robin rather than the default contiguous slices; the runner passes
         # that, since mutants from one file land in one slice and a file whose tests are slow
         # would then load a single shard while the others idle.
+        # GAMUT_MUTANTS_BASE is the pull request's own base branch, not master: this repo stacks
+        # pull requests, and diffing a stacked branch against master would hand the gate every
+        # mutant the base branch introduced too — failing it on already-reviewed code.
+        env:
+          GAMUT_MUTANTS_BASE: origin/${{ github.base_ref }}
         run: mise run mutants-diff --shard ${{ matrix.shard }}/4 -- --no-shuffle -vV
       - name: sccache stats
         if: always()

@@ -8,7 +8,7 @@ machine down.
 ## The one entry point
 
 ```bash
-mise run mutants --help                    # selection, budget and guard flags
+mise run mutants -- --help                 # selection, budget and guard flags
 mise run mutants -- --crate gamut-png      # one package
 mise run mutants-crate gamut-png           # same thing, shorter
 mise run mutants-diff                      # only what this branch changed (what PR CI runs)
@@ -48,8 +48,8 @@ result collected so far.
 25.0.2 and excludes only the top-level `target/` on its own, so every ignored artifact underneath
 was copied into every build directory: a stale `mutants.out/`, `lcov.info`, a `tooling/*/target`
 left by a standalone oracle build. `.cargo/mutants.toml` sets `gitignore = true`. Each job's
-directory still grows a cold `target/` of its own, which is why the runner refuses to start
-without room for it.
+directory still grows a cold `target/` of its own, which is why the runner warns when the
+filesystem is tight.
 
 ## What the runner does
 
@@ -65,6 +65,7 @@ reports the host's memory and the process is killed long before reaching it.
 | `CMAKE_BUILD_PARALLEL_LEVEL` | compilers per vendored native build | env |
 | `RUST_TEST_THREADS` | test threads per scenario | env |
 | `TMPDIR` | `target/mutants-tmp` | env |
+| `GAMUT_MUTANTS_BASE` | base ref for `--diff` (`origin/master`) | env |
 
 The split is anchored on a measured configuration: jobs 2, jobserver-tasks 4,
 `CARGO_BUILD_JOBS` 2 and `CMAKE_BUILD_PARALLEL_LEVEL` 2 — a product of 8 — peaks at about
@@ -80,13 +81,16 @@ Two memory guards, because one is not enough:
 
 Both auto-detect: on a runner with no systemd user manager only the address-space limit applies.
 
-Three refusals, each of which would otherwise surface as a crash much later:
+Two refusals, each of which would otherwise surface as a crash much later:
 
 - a tmpfs `TMPDIR`, which charges every build directory to memory — `/tmp` is a tmpfs on many
   systems, sometimes under a bind mount that is absent inside a mount namespace;
-- too little free disk for the cold `target/` each job carries;
 - an unsharded whole-workspace run, which takes days and is the run most likely to meet the
   mutant that allocates without limit. `--shard i/n` bounds it; `--all-at-once` means it anyway.
+
+Low disk is a warning rather than a refusal: running out of it fails the build loudly, at the
+point of failure, with a message naming the problem. That is the opposite of running out of
+memory, where the OOM killer picks a victim that may be cargo-mutants itself.
 
 `--dry-run` resolves and prints the whole invocation without running it.
 
@@ -108,7 +112,9 @@ each edit costs one build of one package rather than the whole survey.
 `.github/workflows/mutants.yml` has two jobs, both through `mise run mutants`:
 
 - **incremental** — every PR, `--in-diff`, four round-robin shards, blocking. A surviving mutant
-  in changed code fails the check.
+  in changed code fails the check. It passes `GAMUT_MUTANTS_BASE=origin/<the PR's base>`, not
+  master: this repo stacks pull requests, and diffing a stacked branch against master would hand
+  the gate every mutant the base branch introduced too.
 - **full** — manual, whole workspace, `--all-at-once`, informational (`continue-on-error`).
 
 Round-robin sharding rather than contiguous slices, because mutants from one file land in one

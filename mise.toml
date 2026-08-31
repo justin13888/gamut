@@ -193,7 +193,7 @@ run = "cargo llvm-cov --workspace --all-features --ignore-filename-regex '(crate
 # allocates without limit into one `caught` result instead of an OOM kill that takes the whole
 # run down with it. See docs/mutation-testing.md.
 [tasks.mutants]
-description = "Mutation testing; `mise run mutants --help` for selection and budget flags"
+description = "Mutation testing; `mise run mutants -- --help` for selection and budget flags"
 run = "./tooling/mutants/run.sh"
 
 # Aliases for the two selections used most. Both delegate to the same runner, so they get the
