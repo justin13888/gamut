@@ -31,6 +31,17 @@ pub enum FilterStrategy {
     /// Per scanline, pick the filter minimising the sum of absolute residuals — the standard
     /// libpng heuristic. A good size/speed balance and the default.
     MinSumAbs,
+    /// Per scanline, pick the filter whose residuals have the lowest Shannon entropy.
+    ///
+    /// Sum-of-absolutes asks "are these bytes small?"; entropy asks "are these bytes *repetitive*?"
+    /// — which is the question DEFLATE actually answers. A row of alternating 0 and 200 scores
+    /// badly under `MinSumAbs` and beautifully under this.
+    MinEntropy,
+    /// Per scanline, pick the filter producing the fewest distinct byte bigrams.
+    ///
+    /// A cheaper proxy for the same idea one order up: LZ77 matches runs, not single bytes, so
+    /// counting distinct adjacent pairs approximates how much of the row it can back-reference.
+    MinBigrams,
     /// Encode the whole image under several filter strategies, DEFLATE each, and keep the smallest.
     /// Pairs with [`Level::Best`](gamut_deflate::Level::Best) for maximum compression; slowest.
     BruteForce,
@@ -173,6 +184,76 @@ fn sum_abs(filtered: &[u8]) -> u64 {
         .sum()
 }
 
+/// How a candidate row is judged. Lower is better for all three, so they are interchangeable in
+/// [`choose_by`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Score {
+    /// Sum of absolute residuals, bytes read as signed magnitudes (libpng's heuristic).
+    SumAbs,
+    /// Shannon entropy of the byte histogram.
+    Entropy,
+    /// Count of distinct adjacent byte pairs.
+    Bigrams,
+}
+
+/// Scratch a scorer needs, allocated once per image rather than per scanline.
+///
+/// The bigram set is 8 KiB of bitset; rebuilding it per row would dominate the measurement it is
+/// supposed to make cheap.
+struct Scratch {
+    /// Byte histogram for [`Score::Entropy`].
+    histogram: [u32; 256],
+    /// One bit per (previous, current) byte pair for [`Score::Bigrams`].
+    bigrams: Vec<u64>,
+}
+
+impl Scratch {
+    fn new() -> Self {
+        Self {
+            histogram: [0; 256],
+            bigrams: vec![0; 1 << 10],
+        }
+    }
+}
+
+/// Scores a filtered row; lower is better in every variant, so candidates compare directly.
+fn score(kind: Score, filtered: &[u8], scratch: &mut Scratch) -> u64 {
+    match kind {
+        Score::SumAbs => sum_abs(filtered),
+        Score::Entropy => {
+            scratch.histogram.fill(0);
+            for &b in filtered {
+                scratch.histogram[b as usize] += 1;
+            }
+            // Shannon entropy over a fixed-length row is `n·log2(n) − Σ c·log2(c)`, and `n` is the
+            // same for every candidate, so the first term is a constant that cannot change the
+            // ranking. Minimising entropy is therefore maximising `Σ c·log2(c)` — negated here so
+            // that lower stays better, and scaled to integers so the comparison is exact and the
+            // choice reproducible run to run.
+            let weighted: f64 = scratch
+                .histogram
+                .iter()
+                .filter(|&&c| c > 1)
+                .map(|&c| f64::from(c) * f64::from(c).log2())
+                .sum();
+            u64::MAX - (weighted * 256.0) as u64
+        }
+        Score::Bigrams => {
+            scratch.bigrams.fill(0);
+            let mut distinct = 0u64;
+            for pair in filtered.windows(2) {
+                let index = (usize::from(pair[0]) << 8) | usize::from(pair[1]);
+                let (word, bit) = (index >> 6, index & 63);
+                if scratch.bigrams[word] & (1 << bit) == 0 {
+                    scratch.bigrams[word] |= 1 << bit;
+                    distinct += 1;
+                }
+            }
+            distinct
+        }
+    }
+}
+
 /// Filters every scanline of `samples` (row-major, `row_bytes` per row) per `strategy`, producing
 /// the filter-prefixed byte stream that gets compressed: a filter-type byte then the filtered row,
 /// for each scanline. `bpp` is the filter stride (bytes per pixel, ≥1).
@@ -188,17 +269,24 @@ pub fn filter_image(
     let mut prev = zero_row.as_slice();
     let mut scratch = Vec::with_capacity(row_bytes);
     let mut chosen = Vec::with_capacity(row_bytes);
+    let mut aux = Scratch::new();
+    // The per-scanline heuristics differ only in how they score a candidate. BruteForce is
+    // resolved to concrete strategies by the encoder; if it reaches here, fall back to MinSumAbs.
+    let adaptive = match strategy {
+        FilterStrategy::MinSumAbs | FilterStrategy::BruteForce => Some(Score::SumAbs),
+        FilterStrategy::MinEntropy => Some(Score::Entropy),
+        FilterStrategy::MinBigrams => Some(Score::Bigrams),
+        FilterStrategy::None | FilterStrategy::Fixed(_) => None,
+    };
     for y in 0..height {
         let cur = &samples[y * row_bytes..(y + 1) * row_bytes];
-        match strategy {
-            // BruteForce is resolved to concrete strategies by the encoder; if it reaches here,
-            // fall back to the per-scanline heuristic.
-            FilterStrategy::MinSumAbs | FilterStrategy::BruteForce => {
-                let filter = choose_min_sum_abs(cur, prev, bpp, &mut scratch, &mut chosen);
+        match adaptive {
+            Some(kind) => {
+                let filter = choose_by(kind, cur, prev, bpp, &mut scratch, &mut chosen, &mut aux);
                 out.push(filter as u8);
                 out.extend_from_slice(&chosen);
             }
-            FilterStrategy::None | FilterStrategy::Fixed(_) => {
+            None => {
                 let filter = match strategy {
                     FilterStrategy::Fixed(f) => f,
                     _ => FilterType::None,
@@ -220,12 +308,44 @@ pub fn filter_image(
 /// over the row instead of six: the caller would otherwise re-run [`filter_row`] for the filter
 /// just chosen, having already computed exactly those bytes and thrown them away. Keeping them
 /// costs one `memcpy` per improvement, against a full filter pass per scanline.
+#[cfg_attr(
+    not(feature = "test-support"),
+    allow(
+        dead_code,
+        reason = "the benchmark stage seam's entry point; see crate::stages"
+    )
+)]
 pub fn choose_min_sum_abs(
     cur: &[u8],
     prev: &[u8],
     bpp: usize,
     scratch: &mut Vec<u8>,
     best_bytes: &mut Vec<u8>,
+) -> FilterType {
+    choose_by(
+        Score::SumAbs,
+        cur,
+        prev,
+        bpp,
+        scratch,
+        best_bytes,
+        &mut Scratch::new(),
+    )
+}
+
+/// Tries all five filters and keeps the one `kind` ranks lowest, leaving its bytes in
+/// `best_bytes`.
+///
+/// The first minimum wins, so a tie resolves to the earlier filter in None/Sub/Up/Average/Paeth
+/// order — deterministic, which the byte-reproducibility contract depends on.
+fn choose_by(
+    kind: Score,
+    cur: &[u8],
+    prev: &[u8],
+    bpp: usize,
+    scratch: &mut Vec<u8>,
+    best_bytes: &mut Vec<u8>,
+    aux: &mut Scratch,
 ) -> FilterType {
     let mut best = FilterType::None;
     let mut best_score = u64::MAX;
@@ -237,7 +357,7 @@ pub fn choose_min_sum_abs(
         FilterType::Paeth,
     ] {
         filter_row(filter, cur, prev, bpp, scratch);
-        let score = sum_abs(scratch);
+        let score = score(kind, scratch, aux);
         if score < best_score {
             best_score = score;
             best = filter;
@@ -332,6 +452,60 @@ mod tests {
         unfilter_row(FilterType::Average, &mut wide2, &[255, 255], 1);
         assert_eq!(wide, [127, 127]); // floor(255/2) twice (a = 0 for the first pixel)
         assert_eq!(wide2, [128, 190]); // 1+floor(255/2)=128, then 255+floor((128+255)/2)=255+191 wraps to 190
+    }
+
+    /// A row that is *large* but *repetitive*: alternating 0 and 200 under `Sub`.
+    ///
+    /// This is the case the two new heuristics exist for. Sum-of-absolutes asks "are these bytes
+    /// small?" and rates it terribly; entropy and bigrams ask "are these bytes repetitive?", which
+    /// is the question DEFLATE actually answers.
+    #[test]
+    fn entropy_and_bigrams_prefer_repetition_where_sum_abs_prefers_smallness() {
+        let repetitive: Vec<u8> = (0..64).map(|i| if i % 2 == 0 { 0 } else { 200 }).collect();
+        let varied: Vec<u8> = (0..64u8).map(|i| i / 8).collect();
+        let mut aux = Scratch::new();
+
+        // Sum-of-absolutes: the varied row is far "smaller" and wins.
+        assert!(
+            score(Score::SumAbs, &varied, &mut aux) < score(Score::SumAbs, &repetitive, &mut aux)
+        );
+        // Entropy and bigrams: the repetitive row has two symbols and one alternating pair, and
+        // wins by a mile.
+        assert!(
+            score(Score::Entropy, &repetitive, &mut aux) < score(Score::Entropy, &varied, &mut aux)
+        );
+        assert!(
+            score(Score::Bigrams, &repetitive, &mut aux) < score(Score::Bigrams, &varied, &mut aux)
+        );
+    }
+
+    #[test]
+    fn the_bigram_score_counts_distinct_adjacent_pairs() {
+        let mut aux = Scratch::new();
+        // (1,2), (2,1), (1,2), (2,1) -> two distinct pairs, however long the run.
+        assert_eq!(score(Score::Bigrams, &[1, 2, 1, 2, 1], &mut aux), 2);
+        // A constant row has exactly one.
+        assert_eq!(score(Score::Bigrams, &[7, 7, 7, 7], &mut aux), 1);
+        // Every pair distinct.
+        assert_eq!(score(Score::Bigrams, &[1, 2, 3, 4], &mut aux), 3);
+        // Fewer than two bytes has no pairs at all.
+        assert_eq!(score(Score::Bigrams, &[9], &mut aux), 0);
+        assert_eq!(score(Score::Bigrams, &[], &mut aux), 0);
+    }
+
+    #[test]
+    fn the_scratch_is_reusable_across_rows() {
+        // The histogram and bigram set are allocated once per image, so a stale one would silently
+        // score the wrong thing on every row after the first.
+        let mut aux = Scratch::new();
+        let first = score(Score::Bigrams, &[1, 2, 3, 4], &mut aux);
+        let second = score(Score::Bigrams, &[7, 7, 7, 7], &mut aux);
+        assert_eq!(first, 3);
+        assert_eq!(second, 1, "the previous row's pairs must not carry over");
+
+        let a = score(Score::Entropy, &[0, 0, 0, 0], &mut aux);
+        let b = score(Score::Entropy, &[0, 1, 2, 3], &mut aux);
+        assert!(a < b, "a constant row must stay the lower-entropy one");
     }
 
     #[test]

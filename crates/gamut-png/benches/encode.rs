@@ -31,6 +31,7 @@ use corpus::{
 fn main() {
     print_size_table();
     print_stage_table();
+    print_heuristic_table();
     divan::main();
 }
 
@@ -234,6 +235,45 @@ fn print_stage_table() {
             report.idat_ratio() * 100.0,
             report.overhead_bytes(),
             filters,
+        );
+    }
+}
+
+/// Prints what each per-scanline filter heuristic is worth on its own.
+///
+/// `BruteForce` tries them all and keeps the smallest, so the aggregate table above cannot say
+/// *which* one earned the win — and that is exactly the question issue #480 asks. oxipng's
+/// evidence for demoting libpng's MinSum out of its default preset is a preset table, not
+/// published byte counts, so gamut has to measure it on its own corpus.
+fn print_heuristic_table() {
+    println!(
+        "\nper-scanline filter heuristic, IDAT bytes at Level::Best (lower is better):\n\n\
+         {:<17} {:>10} {:>10} {:>10}  winner",
+        "input", "MinSumAbs", "Entropy", "Bigrams"
+    );
+    for case in corpus() {
+        let of = |filter| {
+            let png = case.gamut(Level::Best, filter, false);
+            deconstruct(&png)
+                .expect("gamut's own output deconstructs")
+                .idat_compressed
+        };
+        let (msa, ent, big) = (
+            of(FilterStrategy::MinSumAbs),
+            of(FilterStrategy::MinEntropy),
+            of(FilterStrategy::MinBigrams),
+        );
+        let best = msa.min(ent).min(big);
+        let winner = if best == msa {
+            "MinSumAbs"
+        } else if best == ent {
+            "Entropy"
+        } else {
+            "Bigrams"
+        };
+        println!(
+            "{:<17} {:>10} {:>10} {:>10}  {winner}",
+            case.name, msa, ent, big
         );
     }
 }

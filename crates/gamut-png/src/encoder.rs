@@ -22,13 +22,22 @@ use crate::{ihdr, pack};
 const IDAT_MAX: usize = 1 << 16;
 
 /// Whole-image filter strategies tried by [`FilterStrategy::BruteForce`].
-const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 6] = [
+///
+/// [`FilterStrategy::MinEntropy`] is deliberately **not** here, and that was measured rather than
+/// assumed. Across the benchmark corpus it is never the unique winner: it beats `MinSumAbs` on the
+/// photographic and palette rows but loses to `MinBigrams` on both, and ties `MinSumAbs` elsewhere.
+/// Since this list is resolved by taking the smallest result, a candidate that is dominated
+/// everywhere costs a full filter pass and a full DEFLATE for nothing. It stays available as a
+/// caller-selectable strategy — the corpus is eight images, not a proof — but it does not earn a
+/// slot here. See `STATUS.md`'s heuristic table.
+const BRUTE_FORCE_STRATEGIES: [FilterStrategy; 7] = [
     FilterStrategy::None,
     FilterStrategy::Fixed(FilterType::Sub),
     FilterStrategy::Fixed(FilterType::Up),
     FilterStrategy::Fixed(FilterType::Average),
     FilterStrategy::Fixed(FilterType::Paeth),
     FilterStrategy::MinSumAbs,
+    FilterStrategy::MinBigrams,
 ];
 
 /// A reusable PNG encoder.

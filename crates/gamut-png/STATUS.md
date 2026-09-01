@@ -67,18 +67,44 @@ Everything here is produced by `cargo bench -p gamut-png` and gated by
 
 | input | raw | default | best | +clean | libpng-9 | best/lp9 | bpp |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `gradient_rgb8` | 196 608 | 2 831 | 2 272 | 2 272 | 2 393 | **−5.1%** | 0.277 |
-| `photo_rgb8` | 196 608 | 29 885 | 20 293 | 20 293 | 27 467 | **−26.1%** | 2.477 |
+| `gradient_rgb8` | 196 608 | 2 831 | 1 562 | 1 562 | 2 393 | **−34.7%** | 0.191 |
+| `photo_rgb8` | 196 608 | 29 885 | 19 570 | 19 570 | 27 467 | **−28.8%** | 2.389 |
 | `noise_rgb8` | 196 608 | 196 983 | 196 983 | 196 983 | 197 280 | −0.2% | 24.046 |
-| `grey_as_rgb8` | 196 608 | 721 | 370 | 370 | 566 | **−34.6%** | 0.045 |
+| `grey_as_rgb8` | 196 608 | 721 | 368 | 368 | 566 | **−35.0%** | 0.045 |
 | `palette64_rgba8` | 262 144 | 1 274 | 726 | 688 | 1 102 | **−34.1%** | 0.089 |
 | `sprite_rgba8` | 262 144 | 4 181 | 3 729 | **2 235** | 3 889 | −4.1% | 0.455 |
 | `flat_rgba8` | 262 144 | 821 | 103 | 103 | 664 | **−84.5%** | 0.013 |
-| `tiny_rgb8` (16×16) | 768 | 136 | 135 | 135 | 138 | −2.2% | 4.219 |
+| `tiny_rgb8` (16×16) | 768 | 136 | 119 | 119 | 138 | **−13.8%** | 3.719 |
 
 gamut is smaller than libpng-9 on every row. The margin is thin where no reduction applies
 (`gradient`, `tiny`) or nothing is compressible (`noise`), and large where a lawful
 representation change is available that libpng does not attempt.
+
+### Filter heuristics (issue #480)
+
+`BruteForce` tries every whole-image strategy and keeps the smallest, so the size table above
+cannot say *which* heuristic earned the win. IDAT bytes at `Level::Best`, each heuristic alone:
+
+| input | MinSumAbs | Entropy | Bigrams | winner |
+| --- | --- | --- | --- | --- |
+| `gradient_rgb8` | 2 215 | 2 215 | **1 505** | Bigrams |
+| `photo_rgb8` | 25 364 | 22 427 | **19 513** | Bigrams |
+| `noise_rgb8` | 196 890 | 196 890 | 196 890 | tie |
+| `grey_as_rgb8` | **475** | 506 | 506 | MinSumAbs |
+| `palette64_rgba8` | 990 | 899 | **770** | Bigrams |
+| `sprite_rgba8` | **3 672** | 3 857 | 4 062 | MinSumAbs |
+| `flat_rgba8` | **573** | 573 | 605 | MinSumAbs |
+| `tiny_rgb8` | 79 | 79 | **62** | Bigrams |
+
+**Bigrams wins four rows by 22–32%; MinSumAbs wins three by 5–6%.** Both stay in the brute-force
+set: neither dominates, and the margins run the wrong way to drop either. That matches oxipng
+keeping MinSum at `-o 0`/`-o 6` while its default preset leads with Bigrams.
+
+**Entropy is never the unique winner**, and that is a recorded negative result. It beats MinSumAbs
+on the photographic and palette rows but loses to Bigrams on both, and ties MinSumAbs elsewhere.
+Since the brute-force set is resolved by taking the smallest, a candidate dominated everywhere
+costs a full filter pass and a full DEFLATE for nothing — so it is not in that set. It stays
+selectable: eight images is a corpus, not a proof.
 
 ### Throughput
 
@@ -98,7 +124,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 
 | # | Axis | State |
 | --- | --- | --- |
-| 1 | Filter selection | **partial** — per-line MinSumAbs plus six whole-image candidates each fully DEFLATEd. No entropy or bigram heuristic, no per-line trial deflate, no pruning, no two-tier trial. [#480] |
+| 1 | Filter selection | **partial** — MinSumAbs, Entropy and Bigrams per line, plus seven whole-image candidates each fully DEFLATEd. Bigrams is worth 22–32% where it wins (see above). Still missing: per-line trial deflate, `AtomicMin` pruning, and a two-tier cheap-trial codec. [#480] |
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
 | 3 | Smallest lawful representation | **done** — grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour. The key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. |
 | 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
