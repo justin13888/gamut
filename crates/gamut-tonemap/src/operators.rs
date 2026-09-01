@@ -325,8 +325,27 @@ const DRAGO_LDMAX_NITS: f32 = 100.0;
 /// `map(world_max) == 1`. For `bias < 0.7` the output may exceed `1.0` (the display clamps to
 /// `Ldmax`); `map` is a faithful, clamp-free transcription of the paper's Eq. (4). Inputs are
 /// meaningful on the paper's domain `[0, world_max]` — far beyond it the output stays finite,
-/// non-negative, and non-NaN, but the curve no longer tracks the model (monotonicity is only
-/// promised on the domain). See `references/tonemap/README.md`.
+/// non-negative, and non-NaN, but the curve no longer tracks the model.
+///
+/// # Monotonicity is conditional
+///
+/// Eq. (4) is **not** monotonic non-decreasing for every `(world_max, bias)` pair the
+/// constructors accept, not even across `[0, world_max]`. That is a property of the published
+/// formula, not of this transcription, and it is [`Drago::is_monotonic`] that answers it for a
+/// given curve. Ask before relying on the ordering; the ceiling rises steeply with `bias`:
+///
+/// | `bias` | monotonic for `world_max` up to |
+/// |---|---|
+/// | 0.50 | 13.6 |
+/// | 0.70 | 262 |
+/// | 0.80 | 7.6 × 10³ |
+/// | 0.85 ([`DEFAULT_DRAGO_BIAS`]) | 2.1 × 10⁵ |
+/// | 0.90 | 1.7 × 10⁸ |
+/// | 0.95 | 7.8 × 10¹⁶ |
+///
+/// The paper's own worked example is `Lwmax = 230 cd/m²`, so the default configuration is
+/// monotonic with three orders of magnitude to spare. See `references/tonemap/README.md` for the
+/// derivation, and issue #439 for how this was found.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Drago {
     world_max: f32,
@@ -372,6 +391,9 @@ impl Drago {
     /// Set the bias, which steers contrast in dark vs. bright regions; any value in the open
     /// interval `(0, 1)` is accepted, the paper's useful range is `[0.5, 1.0]`, default `0.85`.
     ///
+    /// Bias also decides how much of the domain stays monotonic — see [`Drago::is_monotonic`],
+    /// which is worth re-asking after changing it.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidInput`] if `bias` is not finite or is not in the open interval
@@ -405,6 +427,36 @@ impl Drago {
     #[must_use]
     pub fn bias(self) -> f32 {
         self.bias
+    }
+
+    /// Whether [`map`](ToneCurve::map) is monotonic non-decreasing across the whole of this
+    /// curve's documented domain `[0, world_max]`.
+    ///
+    /// Eq. (4)'s numerator grows like `ln(x + 1)` while its denominator grows like
+    /// `ln(2 + 8·(x/world_max)^k)`, with `k = ln(bias) / ln(0.5)`. For a large enough domain the
+    /// denominator outruns the numerator over a band of `x` and the quotient falls. Differentiating
+    /// and collecting terms, `map` is non-decreasing at `x` exactly when
+    ///
+    /// ```text
+    /// x · (2 + w) · ln(2 + w)  ≥  (x + 1) · ln(x + 1) · k · w,     w = 8·(x/world_max)^k
+    /// ```
+    ///
+    /// and the tightest point of that is the top of the domain, `x = world_max`, where `w = 8`:
+    ///
+    /// ```text
+    /// world_max · 10 · ln(10)  ≥  8 · k · (world_max + 1) · ln(world_max + 1)
+    /// ```
+    ///
+    /// which is what this evaluates. See the table on [`Drago`] for what it means in practice, and
+    /// `references/tonemap/README.md` for the derivation and the numerical corroboration.
+    ///
+    /// Computed in `f64` from `bias` rather than from the stored `f32` exponent, so the answer
+    /// does not flip on rounding for parameters sitting right at the boundary.
+    #[must_use]
+    pub fn is_monotonic(self) -> bool {
+        let world_max = f64::from(self.world_max);
+        let k = f64::from(self.bias).ln() / 0.5_f64.ln();
+        8.0 * k * (world_max + 1.0) * (world_max + 1.0).ln() <= world_max * 10.0 * 10.0_f64.ln()
     }
 }
 
@@ -638,6 +690,62 @@ mod tests {
         assert_eq!(Aces.map(1e20), 1.0);
         let h = Hable::default();
         assert_eq!(h.map(f32::MAX), h.map(1e18));
+    }
+
+    /// The published monotonicity ceilings, straddled from both sides.
+    ///
+    /// These are the numbers the `Drago` rustdoc and `references/tonemap/README.md` print, so
+    /// they are pinned where a reader can check them rather than asserted in prose. Each bias is
+    /// tested just inside and just outside its ceiling, which is what makes the pair sensitive to
+    /// the constants in `is_monotonic` -- a one-sided assertion passes for a predicate that always
+    /// returns `true`.
+    #[test]
+    fn drago_monotonicity_ceilings() {
+        // (bias, largest monotonic world_max) -- from the derivation in references/tonemap.
+        let ceilings = [
+            (0.5_f32, 13.6_f32),
+            (0.7, 262.0),
+            (0.8, 7_625.0),
+            (DEFAULT_DRAGO_BIAS, 214_400.0),
+            (0.9, 1.673e8),
+            (0.95, 7.79e16),
+        ];
+        for (bias, ceiling) in ceilings {
+            let inside = Drago::new(ceiling * 0.99)
+                .expect("positive world max")
+                .with_bias(bias)
+                .expect("bias in (0,1)");
+            assert!(
+                inside.is_monotonic(),
+                "bias {bias} should be monotonic just below its ceiling {ceiling:e}"
+            );
+
+            let outside = Drago::new(ceiling * 1.01)
+                .expect("positive world max")
+                .with_bias(bias)
+                .expect("bias in (0,1)");
+            assert!(
+                !outside.is_monotonic(),
+                "bias {bias} should not be monotonic just above its ceiling {ceiling:e}"
+            );
+        }
+    }
+
+    /// The paper's own worked example sits well inside the default configuration's ceiling.
+    ///
+    /// Drago et al. Figure 5 uses `Lwmax = 230 cd/m²`; `Drago::new` defaults to bias 0.85, whose
+    /// ceiling is ~2.1e5. This is the case that matters to a caller who never touches `with_bias`,
+    /// and it is why #439 is a documentation defect rather than a numerical one.
+    #[test]
+    fn drago_default_configuration_is_monotonic_for_a_real_scene() {
+        assert!(
+            Drago::new(230.0)
+                .expect("positive world max")
+                .is_monotonic()
+        );
+        assert!(Drago::new(1e5).expect("positive world max").is_monotonic());
+        // And it does run out, which is the whole point of the predicate existing.
+        assert!(!Drago::new(1e6).expect("positive world max").is_monotonic());
     }
 
     #[test]

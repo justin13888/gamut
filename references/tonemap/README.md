@@ -194,6 +194,46 @@ prefactor are computed once at construction (identical expressions, identical f3
 hoisting). Inputs are meaningful on the paper's domain `[0, L_wmax]`; outside it the curve stays
 finite and non-NaN but is no longer a faithful reading of the model.
 
+**Monotonicity is conditional (#439).** Eq (4) is not monotonic non-decreasing on `[0, L_wmax]`
+for every parameter pair, and this is a property of the published formula, not of the crate's
+transcription — the base of the bias exponent is `log(0.5)` in both Eq (3) and Eq (4) as printed,
+with no `log(0.8)` variant anywhere in §3, and substituting `0.8` makes matters strictly worse
+(it breaks monotonicity even at `L_wmax = 100`, where base `0.5` is clean).
+
+Differentiating Eq (4): with `w = 8·(L_w/L_wmax)^k` and `k = log(b)/log(0.5)`, the derivative is
+non-negative at `L_w` exactly when
+
+    L_w · (2 + w) · ln(2 + w)  ≥  (L_w + 1) · ln(L_w + 1) · k · w
+
+The tightest point of that on the domain is the top, `L_w = L_wmax`, where `w = 8`, giving the
+closed form `gamut_tonemap::operators::Drago::is_monotonic` evaluates:
+
+    L_wmax · 10 · ln(10)  ≥  8 · k · (L_wmax + 1) · ln(L_wmax + 1)
+
+The endpoint being the binding point is a numerical result rather than an analytic one: the ratio
+of the two sides is *not* monotone in `L_w` (its `(2+w)ln(2+w)/w` factor dips near `w ≈ 3.2` and
+rises again by `w = 8`), and interior minima up to 7% below the endpoint do occur. What was
+checked is the thing that matters — that no interior minimum crosses 1 before the endpoint does.
+Binary-searching the flip point of the closed form against a 40 000-point sweep of the exact
+condition puts the two within six significant figures for every bias from 0.5 to 0.99, and the
+closed form never permits a `L_wmax` the sweep rejects.
+
+The resulting ceilings, which the `Drago` rustdoc reproduces:
+
+| `b` | monotonic for `L_wmax` up to |
+|---|---|
+| 0.50 | 13.6 |
+| 0.70 | 262 |
+| 0.80 | 7.63 × 10³ |
+| 0.85 (default) | 2.14 × 10⁵ |
+| 0.90 | 1.67 × 10⁸ |
+| 0.95 | 7.79 × 10¹⁶ |
+
+The paper's own worked example is `L_wmax = 230 cd/m²` (Figure 5), so the default configuration
+has three orders of magnitude of headroom. Note also that the paper divides `L_w` and `L_wmax` by
+the world adaptation luminance `L_wa` before Eq (4) (§3.1), which `gamut-tonemap` deliberately
+defers to `Exposure` — an unnormalized `L_wmax` of 10⁶ is not a case the paper contemplates.
+
 ---
 
 ## Cross-reference

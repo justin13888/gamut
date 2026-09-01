@@ -99,13 +99,18 @@ pinned-seed `proptest` properties here and are the attachment point for the out-
 (`test-support`); see `docs/testing.md`. The per-operator tests above pin *where* each curve goes,
 the laws pin *what shape* it has everywhere.
 
-**Known divergence (#439).** `Drago::map` is documented as monotonic non-decreasing on
-`[0, world_max]` and is not: the denominator `ln(2 + 8·(x/world_max)^k)` outgrows the numerator
-`ln(x + 1)` over a band of `x`, so monotonicity needs `bias` to rise with `world_max`, and at
-`world_max = 1e6` even `DEFAULT_DRAGO_BIAS` fails. It reproduces in f64, so it is not an f32
-artefact. Whether the transcription, the contract, or the accepted parameter range is wrong is
-open. The monotonicity property is restricted to `world_max <= 100` and `bias >= 0.7` until it is
-resolved; the never-NaN / non-negative property runs over the full accepted range.
+**Drago's monotonicity is conditional (#439, resolved).** `Drago::map` transcribes Eq (4)
+faithfully, and Eq (4) is not monotonic non-decreasing on `[0, world_max]` for every parameter
+pair the constructors accept: the denominator `ln(2 + 8·(x/world_max)^k)` outgrows the numerator
+`ln(x + 1)` over a band of `x`, so monotonicity needs `bias` to rise with `world_max`. The
+transcription was checked first and cleared — the paper prints `log(0.5)` as the bias base in both
+Eq (3) and Eq (4), and base `0.8` is strictly worse — so what was wrong was the blanket promise in
+the docs. `Drago::is_monotonic` now states the condition as a predicate
+(`world_max·10·ln 10 ≥ 8k(world_max+1)ln(world_max+1)`, `k = ln bias / ln 0.5`), and the
+`invariants` properties drive it in both directions over the full accepted parameter range: that
+the curve really is monotonic wherever the predicate says so, and that a decrease really is there
+wherever it says not. At the default bias the ceiling is `world_max ≈ 2.1e5`, against the paper's
+own worked example of 230 cd/m². Derivation and the measured table: `references/tonemap/README.md`.
 Divan benches cover `map_slice` throughput for every operator (`cargo bench -p gamut-tonemap`).
 Gates: `mise run test` / `lint` (`clippy -D warnings`, `missing_docs` fatal) / `fmt-check` /
 `coverage` (≥ 80%) / `mise run mutants-crate gamut-tonemap`.
