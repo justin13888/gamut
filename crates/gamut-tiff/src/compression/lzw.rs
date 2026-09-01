@@ -75,11 +75,14 @@ struct BitReader<'a> {
 }
 
 impl BitReader<'_> {
+    /// Accumulated as `value * 2 + bit`, not `(value << 1) | bit`. Same result, but the bitwise
+    /// form had an equivalent mutant: the shift always leaves a zero in the low bit, where `|` and
+    /// `^` agree, so nothing could tell them apart (#110). Same shape as `ccitt::parse`.
     fn read(&mut self, n: u32) -> Option<u32> {
         let mut value = 0u32;
         for _ in 0..n {
             let byte = *self.data.get(self.pos / 8)?;
-            value = (value << 1) | u32::from((byte >> (7 - (self.pos % 8))) & 1);
+            value = value * 2 + u32::from((byte >> (7 - (self.pos % 8))) & 1);
             self.pos += 1;
         }
         Some(value)

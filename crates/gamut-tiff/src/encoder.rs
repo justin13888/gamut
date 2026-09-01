@@ -648,6 +648,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_dimension_is_stored_as_short_only_while_it_fits() {
+        // Both types are valid per TIFF 6.0 §2, so a decoder -- ours or libtiff's -- accepts
+        // either and no round-trip or differential test can see the difference. What it changes is
+        // size: SHORT is 2 bytes inline, LONG is 4. The boundary is the whole claim, so it is
+        // asserted at the two values that straddle it rather than at a typical dimension.
+        assert!(matches!(dim_value(1), Value::Short(_)));
+        assert!(matches!(dim_value(u32::from(u16::MAX)), Value::Short(_)));
+        assert!(matches!(dim_value(u32::from(u16::MAX) + 1), Value::Long(_)));
+    }
+
+    #[test]
     fn image_ref_rejects_mismatched_buffer() {
         // Validation now lives at the ImageRef boundary, so a wrong-length or zero-sized buffer
         // can't even be constructed for the encoder's pixel types.
