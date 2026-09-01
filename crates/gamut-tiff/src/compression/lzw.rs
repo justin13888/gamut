@@ -175,6 +175,35 @@ mod tests {
         assert_eq!(dec, data);
     }
 
+    /// Repetitive input actually compresses -- the encoder's whole purpose.
+    ///
+    /// Every other LZW test is a round trip or a libtiff differential, and none of them can see an
+    /// encoder that has stopped compressing: the output stays valid LZW and decodes correctly, it
+    /// is merely enormous. Mutating the table-reset test `next_code == RESET_AT` to `!=` fires a
+    /// CLEAR after nearly every code, and the whole suite still passed (#110).
+    ///
+    /// Measured on this input: 8192 bytes in, **391 out** correctly, **18 434** under that mutant
+    /// -- a compressor that more than doubles what it is given. The bound below is deliberately
+    /// loose (4x, against the ~21x actually achieved), because this pins "compression happens at
+    /// all", not a particular ratio a legitimate tuning change might move.
+    #[test]
+    fn repetitive_input_compresses() {
+        let src: Vec<u8> = (0..8192).map(|i| (i % 7) as u8).collect();
+        let enc = encode(&src);
+
+        assert!(
+            enc.len() * 4 < src.len(),
+            "expected at least 4x compression, got {} -> {}",
+            src.len(),
+            enc.len()
+        );
+        assert_eq!(
+            decode(&enc, src.len()).expect("decode"),
+            src,
+            "and it still decodes to the original"
+        );
+    }
+
     #[test]
     fn roundtrips_varied_inputs() {
         roundtrip(&[]);
