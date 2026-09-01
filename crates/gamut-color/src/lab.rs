@@ -864,23 +864,38 @@ mod tests {
     /// L=50 → 50·655.35 = 32767.5 exactly in f64 → floor(+0.5) = 32768 = 0x8000 (the
     /// round-half-up pin); a=−128 → 0; b=127 → 255·257 = 65535.
     #[test]
-    fn pcs_lab_v4_encoding_vectors_and_round_trip() {
+    fn pcs_lab_v4_encodes_the_spec_vectors() {
         assert_eq!(
             encode_lab_v4_16([100.0, 0.0, 0.0]),
             [0xFFFF, 0x8080, 0x8080]
         );
         assert_eq!(encode_lab_v4_16([50.0, -128.0, 127.0]), [0x8000, 0, 0xFFFF]);
-        // Clamping: out-of-range input pins to the encoding extremes.
+    }
+
+    /// The decode direction of the same Annex A vector, exact to f64 tolerance.
+    #[test]
+    fn pcs_lab_v4_decodes_the_spec_vectors() {
+        let dec = decode_lab_v4_16([0xFFFF, 0x8080, 0x8080]);
+
+        assert!((dec[0] - 100.0).abs() < 1e-12);
+        assert!(dec[1].abs() < 1e-12 && dec[2].abs() < 1e-12);
+    }
+
+    /// Out-of-range input pins to the encoding extremes rather than wrapping.
+    #[test]
+    fn pcs_lab_v4_clamps_out_of_range_input_to_the_encoding_extremes() {
         assert_eq!(
             encode_lab_v4_16([120.0, -200.0, 300.0]),
             [0xFFFF, 0, 0xFFFF]
         );
-        let dec = decode_lab_v4_16([0xFFFF, 0x8080, 0x8080]);
-        assert!((dec[0] - 100.0).abs() < 1e-12);
-        assert!(dec[1].abs() < 1e-12 && dec[2].abs() < 1e-12);
-        // encode∘decode round trip within half a quantization step per channel.
+    }
+
+    /// `decode ∘ encode` lands within half a quantization step on every channel.
+    #[test]
+    fn pcs_lab_v4_round_trips_within_half_a_quantization_step() {
         for lab in [[0.0, 0.0, 0.0], [42.17, -27.3, 88.8], [99.9, 126.9, -127.9]] {
             let dec = decode_lab_v4_16(encode_lab_v4_16(lab));
+
             assert!((dec[0] - lab[0]).abs() <= 0.5 / 655.35);
             assert!((dec[1] - lab[1]).abs() <= 0.5 / 257.0);
             assert!((dec[2] - lab[2]).abs() <= 0.5 / 257.0);
@@ -888,23 +903,39 @@ mod tests {
     }
 
     /// PCSLAB v2 hand-derived vectors (ICC.1:2001-04 §6.3.4.2). Derivations:
-    /// L=100 → 100·652.8 = 65280 = 0xFF00 (the nominal v2 top); a=b=0 → 128·256 = 0x8000;
-    /// codes above 0xFF00 are legal but out of nominal range, so the lcms2 clamp tops at
-    /// L = 100.390625 → 0xFFFF and a/b = 127.99609375 → 0xFFFF.
+    /// L=100 → 100·652.8 = 65280 = 0xFF00 (the nominal v2 top); a=b=0 → 128·256 = 0x8000.
     #[test]
-    fn pcs_lab_v2_encoding_vectors_and_round_trip() {
+    fn pcs_lab_v2_encodes_the_spec_vectors() {
         assert_eq!(
             encode_lab_v2_16([100.0, 0.0, 0.0]),
             [0xFF00, 0x8000, 0x8000]
         );
         assert_eq!(encode_lab_v2_16([0.0, -128.0, 127.0]), [0, 0, 0xFF00]);
-        // lcms2 V2 clamp: input above nominal range saturates the full u16, not 0xFF00.
-        assert_eq!(encode_lab_v2_16([101.0, 128.0, 200.0]), [0xFFFF; 3]);
+    }
+
+    /// The decode direction of the same §6.3.4.2 vector, exact to f64 tolerance.
+    #[test]
+    fn pcs_lab_v2_decodes_the_spec_vectors() {
         let dec = decode_lab_v2_16([0xFF00, 0x8000, 0x8000]);
+
         assert!((dec[0] - 100.0).abs() < 1e-12);
         assert!(dec[1].abs() < 1e-12 && dec[2].abs() < 1e-12);
+    }
+
+    /// Codes above 0xFF00 are legal but outside the nominal range, so the lcms2 clamp tops at
+    /// L = 100.390625 → 0xFFFF and a/b = 127.99609375 → 0xFFFF. Input above nominal range
+    /// saturates the full u16, **not** 0xFF00 — the distinction a naive clamp gets wrong.
+    #[test]
+    fn pcs_lab_v2_clamps_above_nominal_range_to_the_full_u16() {
+        assert_eq!(encode_lab_v2_16([101.0, 128.0, 200.0]), [0xFFFF; 3]);
+    }
+
+    /// `decode ∘ encode` lands within half a quantization step on every channel.
+    #[test]
+    fn pcs_lab_v2_round_trips_within_half_a_quantization_step() {
         for lab in [[0.0, 0.0, 0.0], [42.17, -27.3, 88.8], [99.9, 126.9, -127.9]] {
             let dec = decode_lab_v2_16(encode_lab_v2_16(lab));
+
             assert!((dec[0] - lab[0]).abs() <= 0.5 / 652.8);
             assert!((dec[1] - lab[1]).abs() <= 0.5 / 256.0);
             assert!((dec[2] - lab[2]).abs() <= 0.5 / 256.0);
@@ -941,19 +972,35 @@ mod tests {
     }
 
     /// 8-bit Lab hand-derived vectors: L=100 → 255, a=0 → 128, b=−128 → 0, a=127 → 255;
-    /// L=50 → 127.5 → floor(+0.5) = 128 (round-half-up pin). Round trip within half a
-    /// step, and decode∘encode identity over the full u8 sweep.
+    /// L=50 → 127.5 → floor(+0.5) = 128 (the round-half-up pin).
     #[test]
-    fn lab_8_encoding_vectors_and_sweeps() {
+    fn lab_8_encodes_the_spec_vectors() {
         assert_eq!(encode_lab_8([100.0, 0.0, -128.0]), [255, 128, 0]);
         assert_eq!(encode_lab_8([50.0, 127.0, 127.0]), [128, 255, 255]);
+    }
+
+    /// Out-of-range input pins to the encoding extremes rather than wrapping.
+    #[test]
+    fn lab_8_clamps_out_of_range_input_to_the_encoding_extremes() {
         assert_eq!(encode_lab_8([-5.0, -300.0, 300.0]), [0, 0, 255]);
+    }
+
+    /// `decode ∘ encode` lands within half a quantization step on every channel.
+    #[test]
+    fn lab_8_round_trips_within_half_a_quantization_step() {
         for lab in [[0.0, 0.0, 0.0], [42.17, -27.3, 88.8]] {
             let dec = decode_lab_8(encode_lab_8(lab));
+
             assert!((dec[0] - lab[0]).abs() <= 0.5 * 100.0 / 255.0);
             assert!((dec[1] - lab[1]).abs() <= 0.5);
             assert!((dec[2] - lab[2]).abs() <= 0.5);
         }
+    }
+
+    /// `encode ∘ decode` is the identity on every 8-bit code — the sweep where a rounding-mode
+    /// drift shows up as an off-by-one.
+    #[test]
+    fn lab_8_decode_encode_is_the_identity_over_every_code() {
         for u in 0..=u8::MAX {
             assert_eq!(encode_lab_8(decode_lab_8([u; 3])), [u; 3]);
         }

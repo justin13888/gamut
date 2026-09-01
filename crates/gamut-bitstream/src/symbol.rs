@@ -615,6 +615,124 @@ mod tests {
         }
     }
 
+    /// Writes the bit pattern `read_golomb` consumes for `value`: a unary prefix of
+    /// `length` zero bools, a terminating one bool, then the `length`-bit remainder.
+    ///
+    /// The prefix is written out explicitly rather than by calling a `write_golomb` helper --
+    /// there is no such helper, and inventing one would make the tests below a round trip against
+    /// my own encoder instead of against the layout AV1 section 5.9.13 defines.
+    fn encode_golomb(enc: &mut SymbolEncoder, value: u32) {
+        assert!(value >= 1, "read_golomb never returns 0");
+        let length = 31 - value.leading_zeros();
+        for _ in 0..length {
+            enc.encode_symbol(0, &BOOL_CDF);
+        }
+        enc.encode_symbol(1, &BOOL_CDF);
+        if length > 0 {
+            enc.encode_literal(value - (1 << length), length);
+        }
+    }
+
+    #[test]
+    fn read_f_pads_with_zeros_past_the_end_of_the_data() {
+        // `read_f` documents the window as zero-padded past the end of the data, which AV1
+        // section 8.2.2 relies on for a tile's trailing symbols.
+        //
+        // No public entry point reaches that branch: `new` is the only caller and it caps its
+        // priming read at `min(8 * len, 15)` bits, so the byte index never reaches `data.len()`.
+        // The behaviour is documented and the bounds check is real, so it is pinned here -- from
+        // inside the crate, which is the only place a private method's unreached branch can be
+        // reached at all.
+        let mut dec = SymbolDecoder::new(&[0xFF]);
+
+        dec.bit_pos = 0;
+        assert_eq!(dec.read_f(8), 0xFF, "the one real byte reads back");
+
+        // Now past it: further bits read as zero instead of indexing out of bounds.
+        assert_eq!(dec.read_f(16), 0);
+        assert_eq!(
+            dec.bit_pos, 24,
+            "the cursor still advances over the padding"
+        );
+    }
+
+    #[test]
+    fn a_decoder_over_an_empty_buffer_behaves_like_one_over_zeros() {
+        // The public consequence of that padding: a tile with no bytes at all must decode as one
+        // whose bytes are zero, rather than diverging or panicking.
+        let mut empty = SymbolDecoder::new(&[]);
+        let mut zeros = SymbolDecoder::new(&[0u8; 32]);
+
+        for _ in 0..64 {
+            assert_eq!(empty.read_literal(4), zeros.read_literal(4));
+        }
+    }
+
+    #[test]
+    fn read_golomb_returns_one_when_the_prefix_stops_immediately() {
+        // A terminating bool with no preceding zeros is length 0, which the decoder shortcuts to
+        // 1 rather than reading a zero-width remainder.
+        let mut enc = SymbolEncoder::new();
+        enc.encode_symbol(1, &BOOL_CDF);
+        let bytes = enc.finish();
+
+        let mut dec = SymbolDecoder::new(&bytes);
+        assert_eq!(dec.read_golomb(8), 1);
+    }
+
+    #[test]
+    fn read_golomb_reconstructs_the_value_from_its_prefix_and_remainder() {
+        // Every value whose prefix fits in max_bits, including both ends of each prefix length --
+        // 2^k is a zero remainder, 2^(k+1) - 1 an all-ones one, which is where a `+` mutated to
+        // `*` or `-` and a `<<` mutated to `>>` diverge.
+        let values: Vec<u32> = (1..=64)
+            .chain([100, 127, 128, 255, 256, 1000, 1023, 1024])
+            .collect();
+
+        let mut enc = SymbolEncoder::new();
+        for &v in &values {
+            encode_golomb(&mut enc, v);
+        }
+        let bytes = enc.finish();
+
+        let mut dec = SymbolDecoder::new(&bytes);
+        for &v in &values {
+            assert_eq!(dec.read_golomb(16), v, "golomb round trip failed for {v}");
+        }
+    }
+
+    #[test]
+    fn read_golomb_stops_counting_the_prefix_at_max_bits() {
+        // A prefix longer than max_bits must be capped rather than counted on: the cap is what
+        // stops a hostile stream driving the loop. With max_bits = 4 the decoder consumes exactly
+        // four zero bools, never looks for a terminator, and reads a 4-bit remainder -- so the
+        // fifth bool it would otherwise have consumed is instead the top bit of that remainder.
+        const MAX_BITS: u32 = 4;
+        let mut enc = SymbolEncoder::new();
+        for _ in 0..MAX_BITS {
+            enc.encode_symbol(0, &BOOL_CDF);
+        }
+        enc.encode_literal(0b1011, MAX_BITS);
+        let bytes = enc.finish();
+
+        let mut dec = SymbolDecoder::new(&bytes);
+        assert_eq!(dec.read_golomb(MAX_BITS), (1 << MAX_BITS) + 0b1011);
+    }
+
+    #[test]
+    fn read_golomb_caps_the_prefix_even_when_the_stream_never_terminates_it() {
+        // The bound exists for a hostile stream. An all-zero buffer decodes to an endless run of
+        // zero bools, and the decoder must still return: `length` stops at max_bits.
+        let mut dec = SymbolDecoder::new(&[0u8; 16]);
+
+        let value = dec.read_golomb(4);
+        assert!(
+            value >= 1 << 4,
+            "prefix was not counted to the cap: {value}"
+        );
+        assert!(value < 1 << 5, "prefix ran past the cap: {value}");
+    }
+
     #[test]
     fn literals_roundtrip() {
         let mut rng = Lcg(0xdead_beef_0bad_f00d);

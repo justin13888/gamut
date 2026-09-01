@@ -111,22 +111,7 @@ pub fn inverse_wht4x4(quant: &[i32; 16]) -> [i32; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Small deterministic LCG (reproducible, no `rand` dependency).
-    struct Lcg(u64);
-    impl Lcg {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            self.0
-        }
-        /// Residual sample in [-255, 255].
-        fn residual(&mut self) -> i32 {
-            (self.next() >> 33) as i32 % 511 - 255
-        }
-    }
+    use crate::testrng::Lcg;
 
     #[test]
     fn roundtrip_zero() {
@@ -156,11 +141,11 @@ mod tests {
 
     #[test]
     fn roundtrip_random() {
-        let mut rng = Lcg(0xabcd_1234_5678_9999);
+        let mut rng = Lcg::new(0xabcd_1234_5678_9999);
         for _ in 0..2_000 {
             let mut r = [0i32; 16];
             for v in &mut r {
-                *v = rng.residual();
+                *v = rng.coeff(255) as i32;
             }
             assert_eq!(inverse_wht4x4(&forward_wht4x4(&r)), r);
         }

@@ -207,20 +207,7 @@ mod tests {
     use std::f64::consts::PI;
 
     use super::*;
-
-    struct Lcg(u64);
-    impl Lcg {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            self.0
-        }
-        fn coeff(&mut self, range: i64) -> i64 {
-            (self.next() >> 33) as i64 % (2 * range + 1) - range
-        }
-    }
+    use crate::testrng::Lcg;
 
     /// Independent naive reference for AV1's inverse ADST, used to pin the spec transcription.
     ///
@@ -271,7 +258,7 @@ mod tests {
 
     #[test]
     fn inverse_adst_matches_naive_reference() {
-        let mut rng = Lcg(0x51a7_c0de_1234_5678);
+        let mut rng = Lcg::new(0x51a7_c0de_1234_5678);
         for n in 2..=4u32 {
             let len = 1usize << n;
             for _ in 0..200 {
@@ -287,7 +274,7 @@ mod tests {
     #[test]
     fn forward_then_inverse_is_proportional_identity() {
         // ADST is orthogonal, so inverse_adst(forward_adst(x)) is a scaled identity.
-        let mut rng = Lcg(0x0bad_f00d_dead_0001);
+        let mut rng = Lcg::new(0x0bad_f00d_dead_0001);
         for n in 2..=4u32 {
             let len = 1usize << n;
             for _ in 0..200 {
