@@ -531,12 +531,8 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Only the BigTIFF round-trip inspects the header directly; an unconditional import is an
-    // unused-import warning in classic-only builds.
-    #[cfg(feature = "bigtiff")]
-    use crate::read_header;
     use crate::segment::{Range, Segment};
-    use crate::{read, read_ifd_at};
+    use crate::{read, read_header, read_ifd_at};
 
     // Tag numbers are used literally: tag semantics live in the consuming codec, not this
     // structural core. 256/257 = ImageWidth/ImageLength, 258 = BitsPerSample, 282 = XResolution.
@@ -1098,6 +1094,104 @@ mod tests {
         );
         // The stream ends at the pin's end (nothing after it).
         assert_eq!(bytes.len() as u64, pin_at + 10);
+    }
+
+    #[test]
+    fn overlapping_pins_are_rejected() {
+        // Two pinned spans that intersect cannot both be honoured, and silently dropping one
+        // would relocate a vendor blob whose internal offsets the pin exists to keep valid.
+        let mut ifd = Ifd::new();
+        ifd.set(37500, Value::Undefined(vec![0xC5; 10]));
+        ifd.set(37501, Value::Undefined(vec![0xD6; 10]));
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        };
+
+        // 100..110 and 105..115 overlap by five bytes.
+        let opts = WriteOptions::default().pin(37500, 100).pin(37501, 105);
+        let error = write_with(&file, &opts).expect_err("overlapping pins must be rejected");
+
+        assert_eq!(error.static_message(), Some("TIFF: pinned spans overlap"));
+    }
+
+    #[test]
+    fn pins_that_merely_abut_are_accepted() {
+        // The boundary the overlap check decides: a span ending exactly where the next begins is
+        // not an overlap. A `<` mutated to `<=` would reject this.
+        let mut ifd = Ifd::new();
+        ifd.set(37500, Value::Undefined(vec![0xC5; 10]));
+        ifd.set(37501, Value::Undefined(vec![0xD6; 10]));
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        };
+
+        // 100..110 then 110..120 -- adjacent, not overlapping.
+        let opts = WriteOptions::default().pin(37500, 100).pin(37501, 110);
+        let (bytes, _) = write_with(&file, &opts).expect("abutting pins are legal");
+
+        assert_eq!(&bytes[100..110], &[0xC5; 10]);
+        assert_eq!(&bytes[110..120], &[0xD6; 10]);
+    }
+
+    #[test]
+    fn a_pool_value_is_pushed_past_a_pin_it_would_have_landed_in() {
+        // The pool flows *around* pinned ranges. A pool value whose natural placement intersects
+        // a pin must jump to the far side of it rather than overwrite it.
+        let mut ifd = Ifd::new();
+        let pinned = vec![0xC5u8; 10];
+        let pooled = vec![0x77u8; 20];
+        ifd.set(37500, Value::Undefined(pinned.clone()));
+        ifd.set(700, Value::Undefined(pooled.clone()));
+        ifd.set(256, Value::Short(vec![640]));
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        };
+
+        // The directory ends at 50 for three entries, so an unpinned 20-byte value would sit at
+        // 50..70 -- straight through this pin.
+        let pin_at = 60u64;
+        let opts = WriteOptions::default().pin(37500, pin_at);
+        let (bytes, map) = write_with(&file, &opts).expect("write");
+
+        // The pin is intact: the pool did not write over it.
+        assert_eq!(
+            &bytes[pin_at as usize..pin_at as usize + pinned.len()],
+            pinned.as_slice()
+        );
+
+        // Both values still read back, so the pooled one was relocated rather than truncated.
+        let parsed = read(&bytes).expect("read");
+        assert_eq!(
+            parsed.ifds[0].get(37500),
+            Some(&Value::Undefined(pinned.clone()))
+        );
+        assert_eq!(
+            parsed.ifds[0].get(700),
+            Some(&Value::Undefined(pooled.clone()))
+        );
+
+        // Where it landed, not merely that it moved. The jump goes to the word-aligned end of the
+        // pin, so an off-by-one in that alignment relocates the value correctly and still puts it
+        // in the wrong place -- which every assertion above would accept.
+        let pooled_at = bytes
+            .windows(pooled.len())
+            .position(|w| w == pooled.as_slice())
+            .expect("the pooled value is in the file");
+        assert_eq!(
+            pooled_at as u64,
+            align_word(pin_at + pinned.len() as u64),
+            "the pool resumes at the word-aligned end of the pin"
+        );
+
+        // And the jump left no unaccounted bytes behind it.
+        let report = map.finish(None);
+        assert!(report.is_fully_classified(), "report: {report:?}");
     }
 
     #[test]

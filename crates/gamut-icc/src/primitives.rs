@@ -215,15 +215,20 @@ mod tests {
     }
 
     #[test]
-    fn s15fixed16_from_f64_rounds_and_saturates() {
-        // Round half away from zero: 2/3 * 65536 = 43690.66 → 43691 (truncation would give 43690).
+    fn s15fixed16_from_f64_rounds_half_away_from_zero() {
+        // 2/3 * 65536 = 43690.66 -> 43691; truncation would give 43690, which is the mutation
+        // this value exists to separate.
         assert_eq!(S15Fixed16::from_f64(2.0 / 3.0), S15Fixed16(43691));
         assert_eq!(S15Fixed16::from_f64(1.0), S15Fixed16(0x0001_0000));
         assert_eq!(
             S15Fixed16::from_f64(-1.0),
             S15Fixed16(0xFFFF_0000_u32 as i32)
         );
-        // Out of range saturates rather than wrapping.
+    }
+
+    #[test]
+    fn s15fixed16_from_f64_saturates_rather_than_wrapping() {
+        // A wrapping conversion would land anywhere; saturation pins both ends.
         assert_eq!(S15Fixed16::from_f64(1e9), S15Fixed16(i32::MAX));
         assert_eq!(S15Fixed16::from_f64(-1e9), S15Fixed16(i32::MIN));
     }
@@ -232,7 +237,13 @@ mod tests {
     fn u16fixed16_round_trip() {
         assert_eq!(U16Fixed16(0x0002_0000).to_f64(), 2.0);
         assert_eq!(U16Fixed16::from_f64(2.0), U16Fixed16(0x0002_0000));
-        assert_eq!(U16Fixed16::from_f64(-1.0), U16Fixed16(0)); // clamps at zero
+    }
+
+    #[test]
+    fn u16fixed16_clamps_a_negative_value_at_zero() {
+        // The type is unsigned, so there is no negative to represent and the conversion must not
+        // wrap into a large positive.
+        assert_eq!(U16Fixed16::from_f64(-1.0), U16Fixed16(0));
     }
 
     #[test]
