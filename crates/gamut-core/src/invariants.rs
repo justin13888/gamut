@@ -29,6 +29,28 @@ use crate::{Dimensions, ErrorKind, Pixel, PixelFormat, Sample};
 /// no generality while keeping every case allocation-bounded for a fuzz driver.
 pub const MAX_EDGE: u32 = 32;
 
+/// Every 8-bit-sampled layout in the [`Pixel`] matrix.
+///
+/// Shared by both tiers that drive these laws — the pinned-seed properties below and the
+/// out-of-tree fuzz target — so they search the same matrix rather than two lists that can drift.
+pub const NARROW_FORMATS: [PixelFormat; 7] = [
+    PixelFormat::Gray8,
+    PixelFormat::Bilevel,
+    PixelFormat::Indexed8,
+    PixelFormat::Rgb8,
+    PixelFormat::Rgba8,
+    PixelFormat::Cmyk8,
+    PixelFormat::GrayAlpha8,
+];
+
+/// Every 16-bit-sampled layout in the [`Pixel`] matrix. Companion to [`NARROW_FORMATS`].
+pub const WIDE_FORMATS: [PixelFormat; 4] = [
+    PixelFormat::Gray16,
+    PixelFormat::Rgb16,
+    PixelFormat::Rgba16,
+    PixelFormat::GrayAlpha16,
+];
+
 /// Maps arbitrary bits to a dimension pair inside [`MAX_EDGE`], never zero.
 ///
 /// Zero-sized images are a separate concern with their own refusal path in [`Dimensions`], and a
@@ -384,6 +406,7 @@ mod tests {
         output_shape_matches_the_target_layout, palette_and_cmyk_convert_only_to_themselves,
         the_in_place_door_matches_the_allocating_door, widening_to_16_bit_and_back_is_exact,
     };
+    use super::{NARROW_FORMATS, WIDE_FORMATS};
     use crate::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
     use crate::{
         Bilevel, Cmyk8, Dimensions, Gray8, Gray16, GrayAlpha8, GrayAlpha16, Indexed8, Pixel,
@@ -411,25 +434,6 @@ mod tests {
             ..Config::default()
         }
     }
-
-    /// Every 8-bit-sampled layout in the matrix.
-    const NARROW_FORMATS: [PixelFormat; 7] = [
-        PixelFormat::Gray8,
-        PixelFormat::Bilevel,
-        PixelFormat::Indexed8,
-        PixelFormat::Rgb8,
-        PixelFormat::Rgba8,
-        PixelFormat::Cmyk8,
-        PixelFormat::GrayAlpha8,
-    ];
-
-    /// Every 16-bit-sampled layout in the matrix.
-    const WIDE_FORMATS: [PixelFormat; 4] = [
-        PixelFormat::Gray16,
-        PixelFormat::Rgb16,
-        PixelFormat::Rgba16,
-        PixelFormat::GrayAlpha16,
-    ];
 
     /// Runs a two-parameter law for every 8-bit target layout, stopping at the first violation.
     ///

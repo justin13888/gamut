@@ -109,8 +109,16 @@ jobs:
   # the Adobe DNG SDK oracle and libjxl for the differential, which is why it is a slow, off-PR
   # lane rather than part of the coverage gate. Gate locally with `mise run test-dng-real`.
   fuzz:
-    name: Fuzz the invariants laws
+    name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
+    strategy:
+      # One target's crash says nothing about another's, so a failure must not cancel the rest.
+      fail-fast: false
+      matrix:
+        # One entry per file in tooling/gamut-fuzz/fuzz_targets. A matrix rather than three steps
+        # in one job, so each target gets the full time budget below in parallel instead of the
+        # job's wall time growing with every crate that gains laws.
+        target: [ifd_read_ledger, core_convert, tonemap_curves]
     env:
       MISE_TASK_RUN_AUTO_INSTALL: false
     steps:
@@ -142,7 +150,7 @@ jobs:
         # the ordering ci.yml's lint job documents for cbindgen. `MISE_TASK_RUN_AUTO_INSTALL` is
         # false for this job, so `mise run fuzz` below will not silently reinstall it either.
         run: mise install cargo:cargo-fuzz
-      - name: Fuzz the read-ledger laws
+      - name: Fuzz ${{ matrix.target }}
         # Time-bounded so the job terminates: this tier is unbounded by nature, which is exactly
         # why it is here and not in the per-PR `coverage` gate (see docs/testing.md). Ten minutes
         # buys roughly 5-6 million executions at the throughput measured locally (~9k/s).
@@ -150,12 +158,12 @@ jobs:
         # A crash found here is minimised and promoted into a NAMED DETERMINISTIC TEST in the
         # crate's own suite -- the corpus is a search aid, not the regression record -- so a
         # failure of this job is a signal to go and write that test, not to re-run until green.
-        run: mise run fuzz ifd_read_ledger -- -max_total_time=600
+        run: mise run fuzz ${{ matrix.target }} -- -max_total_time=600
       - name: Upload any crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
+          name: fuzz-artifacts-${{ matrix.target }}
           path: tooling/gamut-fuzz/artifacts/
           if-no-files-found: ignore
 

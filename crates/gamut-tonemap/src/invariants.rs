@@ -109,6 +109,41 @@ pub fn output_is_non_negative_and_never_nan(
     Ok(())
 }
 
+/// The magnitude the monotonicity tolerance is measured against: how large this curve's outputs
+/// get over the domain where it is doing real work.
+///
+/// **Not** the maximum of the sampled outputs alone, which is the bug the fuzz tier found within
+/// its first minute of running (#264). Several operators end in a subtraction that cancels to a
+/// residual near `x == 0` — `Hable`'s `- E/F` is the clearest — and if *every* sample lands in
+/// that region then the sampled maximum **is** the noise. The tolerance derived from it collapses
+/// to about `1e-13`, and the law reports the noise it was written to tolerate:
+///
+/// ```text
+/// monotonic_non_decreasing: map(9.360123e-10) == 2.1779319e-7 but map(3.8715506e-9) == 0e0
+/// ```
+///
+/// A pinned-seed property draws its samples across the whole input range, so an all-tiny set is
+/// vanishingly unlikely in 512 cases and none was ever drawn. A coverage-guided engine finds the
+/// class in seconds, which is the argument for the tier in one line.
+///
+/// So the scale is floored by probing the curve over a fixed ladder spanning the meaningful
+/// domain. Measured across every built-in and a range of parameters, the worst near-zero
+/// backwards step is **0.1 ULP of the curve's range** (`Hable`, at every white point tested;
+/// every other operator's is exactly zero), against the `8` ULP the caller allows — 80× of
+/// margin, and no real defect is masked: the genuine `Drago` non-monotonicity that #439 records
+/// shows drops of `1e-3` to `1e-2`, five decades above this floor.
+fn curve_output_scale(curve: &dyn ToneCurve, xs: &[f32]) -> f32 {
+    /// Spans the domain an operator is specified over: deep shadow to well past SDR white.
+    const LADDER: [f32; 7] = [1e-3, 1e-2, 0.1, 0.5, 1.0, 2.0, 10.0];
+
+    xs.iter()
+        .copied()
+        .chain(LADDER)
+        .map(|x| curve.map(x))
+        .filter(|y| y.is_finite())
+        .fold(0.0_f32, |acc, y| acc.max(y.abs()))
+}
+
 /// Law: the curve never decreases as its input rises.
 ///
 /// `xs` must be sorted ascending and lie within the operator's documented monotonic domain —
@@ -122,7 +157,10 @@ pub fn output_is_non_negative_and_never_nan(
 /// clearest — so their outputs there are numerical noise of order `1e-8` while the curve's range
 /// is order `1`. A purely relative tolerance collapses to about `1e-15` in that region and reports
 /// that noise as a violation, which says nothing about the curve's shape. The tolerance is
-/// therefore the larger of four ULPs of the local value and eight ULPs of the sampled range.
+/// therefore the larger of four ULPs of the local value and eight ULPs of the curve's output
+/// scale — see [`curve_output_scale`], and note that the scale is *not* taken from the samples
+/// alone, because a sample set drawn entirely from the cancellation region would then measure the
+/// noise against itself.
 ///
 /// # Errors
 ///
@@ -132,11 +170,7 @@ pub fn monotonic_non_decreasing(curve: &dyn ToneCurve, xs: &[f32]) -> Result<(),
 
     // The scale the curve actually reaches over these inputs, which is what "f32 rounding" is
     // relative to. Infinities are skipped: a saturated output carries no scale information.
-    let scale = xs
-        .iter()
-        .map(|&x| curve.map(x))
-        .filter(|y| y.is_finite())
-        .fold(0.0_f32, |acc, y| acc.max(y.abs()));
+    let scale = curve_output_scale(curve, xs);
 
     for pair in xs.windows(2) {
         let (lo, hi) = (pair[0], pair[1]);
@@ -477,6 +511,67 @@ mod tests {
                 "is_monotonic() == false but no decrease was found on [0.5·world_max, world_max]"
             );
         }
+    }
+
+    /// A sample set drawn entirely from `Hable`'s near-zero cancellation region is not a
+    /// monotonicity violation.
+    ///
+    /// The named, deterministic form of the first crash the fuzz tier found (#264). The corpus is
+    /// a search aid, not the regression record, so the input is written down here rather than
+    /// committed as a seed: a saved seed is reproducible only while the target's byte-to-input
+    /// mapping is unchanged, and this is reproducible forever.
+    ///
+    /// Before `curve_output_scale` probed the curve, the tolerance was derived from the sampled
+    /// outputs alone. Every output here is around `1e-7`, so the tolerance collapsed to about
+    /// `1e-13` and the law reported the very float noise its doc comment says it exists to
+    /// tolerate. A pinned-seed property never drew an all-tiny set in 512 cases; a coverage-guided
+    /// engine found the class in under a minute.
+    #[test]
+    fn hable_near_zero_noise_is_not_a_monotonicity_violation() {
+        // The region the crash landed in, at three white points including the default.
+        for white in [1.0_f32, crate::constants::DEFAULT_HABLE_WHITE, 0.1] {
+            let hable = Hable::new(white).expect("white > 0");
+            let xs: Vec<f32> = (0..64).map(|i| 1e-10 + (i as f32) * 1e-8).collect();
+
+            // Sanity: this really is the cancellation region — the outputs are noise-scale, far
+            // below the curve's range, which is what made the old tolerance collapse.
+            let biggest = xs
+                .iter()
+                .map(|&x| hable.map(x).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                biggest < 1e-5,
+                "the fixture must sit in the cancellation region, got {biggest:e}"
+            );
+
+            assert!(
+                monotonic_non_decreasing(&hable, &xs).is_ok(),
+                "white {white}: near-zero float noise reported as a shape violation"
+            );
+        }
+    }
+
+    /// And the fix does not blunt the law: a genuine decrease is still caught.
+    ///
+    /// Without this the widening is unfalsifiable — `curve_output_scale` could return `f32::MAX`
+    /// and the test above would still pass. The step here is `1e-5` against a curve of range 1,
+    /// which is **ten times** the `8`-ULP tolerance that scale allows (`9.5e-7`) and two decades
+    /// *below* the smallest genuine non-monotonicity the crate knows of (`Drago`'s, at `1e-3`).
+    /// So the law's sensitivity still brackets every real defect on record.
+    #[test]
+    fn the_widened_tolerance_still_catches_a_real_decrease() {
+        struct Sagging;
+        impl ToneCurve for Sagging {
+            fn map(&self, x: f32) -> f32 {
+                if x < 0.5 { 1.0 } else { 1.0 - 1e-5 }
+            }
+        }
+
+        let xs = [0.0_f32, 0.25, 0.75, 1.0];
+        assert!(
+            monotonic_non_decreasing(&Sagging, &xs).is_err(),
+            "a 1e-5 step down in a curve of range 1 must still be a violation"
+        );
     }
 
     // ---- the laws' own failure paths -------------------------------------------------------

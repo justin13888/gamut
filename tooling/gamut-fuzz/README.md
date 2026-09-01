@@ -73,6 +73,17 @@ same rule `docs/testing.md` applies to a shrunk `proptest` counterexample, and t
 | target | crate | laws |
 |---|---|---|
 | `ifd_read_ledger` | `gamut-ifd` | `ledger_is_canonical`, `subtract_is_set_difference` |
+| `core_convert` | `gamut-core` | `acceptance_is_independent_of_the_samples`, `output_shape_matches_the_target_layout`, `palette_and_cmyk_convert_only_to_themselves`, `the_in_place_door_matches_the_allocating_door`, `converting_a_layout_to_itself_changes_nothing` |
+| `tonemap_curves` | `gamut-tonemap` | `output_is_non_negative_and_never_nan`, `map_slice_is_elementwise_map`, `map_slice_is_order_independent`, `monotonic_non_decreasing` |
 
-`gamut-core` and `gamut-tonemap` gain `invariants` modules in #450; their targets are added here
-when that merges. The structure is deliberately one file per crate, so that is an additive change.
+One file per crate, deliberately, so adding a crate is an additive change.
+
+`Drago` is held to monotonicity only where `Drago::is_monotonic` says it claims it (#439); every
+other operator promises it unconditionally, and all of them are driven through the other three
+laws.
+
+The `tonemap_curves` target found a defect **in a law** within a minute of first running: the
+monotonicity tolerance derived its scale from the sampled outputs, so a sample set drawn entirely
+from `Hable`'s near-zero cancellation region measured the noise against itself. Fixed in the same
+change, with the case promoted into a named test — which is the workflow this file prescribes,
+exercised once.
