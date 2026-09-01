@@ -121,6 +121,25 @@ impl PngPalette {
 
 #[cfg(test)]
 mod tests {
+
+    /// A constructed palette is never empty, and `is_empty` says so.
+    ///
+    /// The method had no caller in any test, so it could return a constant `true` unnoticed
+    /// (#110). Its counterpart -- a constant `false` -- is a genuinely equivalent mutant rather
+    /// than a gap: `with_transparency` is the only constructor and it refuses an empty `rgb`, so
+    /// `self.rgb.is_empty()` is invariantly false for every value that exists. The refusal is
+    /// asserted here too, because that invariant is the whole reason the equivalence holds.
+    #[test]
+    fn a_constructed_palette_is_never_empty() {
+        let one = PngPalette::new(&[[1, 2, 3]]).expect("one entry is a palette");
+        assert!(!one.is_empty());
+        assert_eq!(one.len(), 1);
+
+        assert!(
+            PngPalette::new(&[]).is_err(),
+            "the constructor is what makes is_empty invariantly false"
+        );
+    }
     use super::*;
 
     #[test]

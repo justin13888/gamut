@@ -261,7 +261,12 @@ fn build_indexed(
     let trns = if palette.iter().any(|c| c[3] != 255) {
         let mut alphas: Vec<u8> = palette.iter().map(|c| c[3]).collect();
         // Trailing fully-opaque entries may be omitted (they default to opaque).
-        while alphas.len() > 1 && alphas.last() == Some(&255) {
+        //
+        // No length guard: this arm runs only when `needs_trns` held, i.e. some entry's alpha is
+        // not 255, so the `last() == 255` test always halts the loop before the vector empties.
+        // The `alphas.len() > 1` that used to be here therefore decided nothing, and `>` vs `>=`
+        // was an equivalent mutant no test could kill (#110) -- removed rather than excluded.
+        while alphas.last() == Some(&255) {
             alphas.pop();
         }
         Some(alphas)
@@ -299,6 +304,90 @@ mod tests {
                 assert_eq!(samples, (0..60u8).collect::<Vec<_>>());
             }
             _ => panic!("expected 8-bit Gray"),
+        }
+    }
+
+    /// A grey image *with* alpha picks grey+alpha, not something else.
+    ///
+    /// `gray_alpha_size` is gated on `all_gray && !all_opaque`. Every existing fixture was either
+    /// opaque or not grey, so the `!` could be deleted and nothing failed (#110) -- and without it
+    /// grey+alpha is never even a candidate, so an image that should cost two bytes a pixel gets
+    /// encoded as RGBA at four.
+    ///
+    /// The palette route is deliberately priced out of contention with more than 256 distinct
+    /// (grey, alpha) pairs, so the choice really is the one this gate makes.
+    #[test]
+    fn grey_with_alpha_chooses_gray_alpha() {
+        let mut rgba = Vec::new();
+        for i in 0..300u32 {
+            let g = (i % 256) as u8;
+            let a = (i / 2 % 254) as u8; // never 255: every pixel is genuinely translucent
+            rgba.extend_from_slice(&[g, g, g, a]);
+        }
+        match analyze8(&rgba, 4) {
+            Some(Reduced::GrayAlpha8(samples)) => {
+                assert_eq!(samples.len(), 600, "two bytes per pixel");
+            }
+            _ => panic!("expected GrayAlpha8"),
+        }
+    }
+
+    /// The palette's *overhead* is what decides against RGB here, not the pixel bytes.
+    ///
+    /// This fixture is sized so the two estimates sit close together: 350 pixels over 200 distinct
+    /// opaque colours gives a palette at `350 + 200*3 + 24 = 974` against RGB at `350*3 = 1050`.
+    /// Palette wins by 76 bytes -- narrow enough that any arithmetic slip in the estimate flips the
+    /// answer, which is exactly what four surviving mutants in that expression did (#110):
+    ///
+    ///   * `needs_trns` computed with `==` instead of `!=` adds a phantom tRNS table (+200) -> RGB
+    ///   * the trailing `+ 24` as `* 24` inflates the overhead to 14 400 -> RGB
+    ///   * `pixel_count * 3` as `+ 3` or `/ 3` under-prices RGB (353 or 116) -> RGB
+    ///
+    /// Every one of them lands on `Rgb8`, and the assertion below is that it is `Indexed`.
+    #[test]
+    fn palette_overhead_decides_against_rgb_at_the_margin() {
+        let mut rgba = Vec::new();
+        for i in 0..350u32 {
+            // 200 distinct colours, none grey (R != G), all fully opaque.
+            let c = (i % 200) as u8;
+            rgba.extend_from_slice(&[c, c.wrapping_add(64), 200, 255]);
+        }
+        match analyze8(&rgba, 4) {
+            Some(Reduced::Indexed {
+                depth, plte, trns, ..
+            }) => {
+                assert_eq!(depth, 8, "200 entries need the 8-bit index depth");
+                assert_eq!(plte.len(), 200 * 3);
+                assert_eq!(trns, None, "an all-opaque palette carries no tRNS");
+            }
+            _ => panic!("expected Indexed"),
+        }
+    }
+
+    /// Trailing opaque entries are trimmed from tRNS; the first non-opaque one is kept.
+    ///
+    /// Pins the loop whose length guard was removed as redundant: it stops at the last entry that
+    /// is *not* 255, which is what makes the guard unnecessary rather than merely unused.
+    #[test]
+    fn trns_keeps_up_to_the_last_translucent_entry() {
+        // Palette order follows first appearance: translucent, then two opaque. Repeated enough
+        // times that the palette actually beats the raw input -- with only three pixels the
+        // 36-byte palette overhead loses to 12 bytes of RGBA and nothing is reduced at all.
+        let mut rgba = Vec::new();
+        for _ in 0..100 {
+            rgba.extend_from_slice(&[10, 20, 30, 128]);
+            rgba.extend_from_slice(&[40, 50, 60, 255]);
+            rgba.extend_from_slice(&[70, 80, 90, 255]);
+        }
+        match analyze8(&rgba, 4) {
+            Some(Reduced::Indexed { trns, .. }) => {
+                assert_eq!(
+                    trns,
+                    Some(vec![128]),
+                    "the two trailing opaque entries are omitted, the translucent one kept"
+                );
+            }
+            _ => panic!("expected Indexed"),
         }
     }
 

@@ -244,6 +244,23 @@ mod tests {
         None
     }
 
+    /// `PhysicalUnit::Unknown` is unit code 0 and `Meter` is 1 — the two are not interchangeable.
+    ///
+    /// `SrgbIntent::code` was pinned by the serialisation test below; `PhysicalUnit::code` was
+    /// only ever called, never asserted, so it could return a constant 1 and nothing failed
+    /// (#110). A pHYs chunk claiming metres for an image whose aspect ratio is unitless is a
+    /// wrong file, not a wrong number: readers scale by it.
+    #[test]
+    fn physical_unit_codes_are_distinct() {
+        let mut unitless = Ancillary::default();
+        unitless.set_physical(300, 300, PhysicalUnit::Unknown);
+        assert_eq!(unitless.phys, Some((300, 300, 0)));
+
+        let mut metric = Ancillary::default();
+        metric.set_physical(2835, 2835, PhysicalUnit::Meter);
+        assert_eq!(metric.phys, Some((2835, 2835, 1)));
+    }
+
     #[test]
     fn pre_plte_serialisation() {
         let a = Ancillary {
