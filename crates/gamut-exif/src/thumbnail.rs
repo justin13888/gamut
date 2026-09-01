@@ -87,6 +87,22 @@ mod tests {
     }
 
     #[test]
+    fn ifd_mut_edits_the_thumbnail_directory_in_place() {
+        // Same gap as `Exif::image_mut`: nothing observed an edit made through the mutable
+        // accessor, so handing back a detached directory passed every test (#110).
+        let mut thumb = Thumbnail::from_jpeg(vec![0xFF, 0xD8, 0xFF, 0xD9]);
+        thumb
+            .ifd_mut()
+            .set(ExifTag::Orientation.tag_id(), Value::Short(vec![3]));
+
+        assert_eq!(
+            thumb.ifd().get(ExifTag::Orientation.tag_id()),
+            Some(&Value::Short(vec![3])),
+            "the edit landed in the directory this Thumbnail owns"
+        );
+    }
+
+    #[test]
     fn uncompressed_thumbnail_has_no_jpeg() {
         let mut ifd = Ifd::new();
         ifd.set(ExifTag::Compression.tag_id(), Value::Short(vec![1]));

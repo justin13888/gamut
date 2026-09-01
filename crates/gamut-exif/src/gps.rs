@@ -386,6 +386,105 @@ mod tests {
     }
 
     #[test]
+    fn western_longitude_is_negative() {
+        // The sibling test above covers South, so the *latitude* axis was pinned; longitude is
+        // East in every fixture, so `'W' | 'w' => West` in `GpsReference::parse` had no test at
+        // all -- deleting that arm entirely left the suite green (#110). Without it a western
+        // longitude parses as `None` and the coordinate silently disappears, which is every
+        // photograph taken in the Americas.
+        let mut ifd = sample_ifd();
+        ifd.set(ExifTag::GpsLongitudeRef.tag_id(), Value::Ascii("W".into()));
+        let gps = GpsInfo::from_ifd(&ifd).expect("gps");
+
+        assert_eq!(gps.longitude.unwrap().reference, GpsReference::West);
+        assert!(
+            gps.longitude_deg().unwrap() < 0.0,
+            "a western longitude is negative"
+        );
+        // The magnitude is unchanged -- only the sign flips.
+        assert!((gps.longitude_deg().unwrap() + 2.350_666).abs() < 1e-5);
+    }
+
+    #[test]
+    fn lowercase_references_parse_too() {
+        // `parse` accepts either case on all four axes. Only the uppercase arms were exercised.
+        let mut ifd = sample_ifd();
+        ifd.set(ExifTag::GpsLatitudeRef.tag_id(), Value::Ascii("s".into()));
+        ifd.set(ExifTag::GpsLongitudeRef.tag_id(), Value::Ascii("w".into()));
+        let gps = GpsInfo::from_ifd(&ifd).expect("gps");
+
+        assert_eq!(gps.latitude.unwrap().reference, GpsReference::South);
+        assert_eq!(gps.longitude.unwrap().reference, GpsReference::West);
+    }
+
+    #[test]
+    fn a_latitude_alone_is_still_gps_info() {
+        // `from_ifd` returns None only when *all three* of latitude, longitude and altitude are
+        // absent. Every fixture had either all three or none, so the conjunction was never
+        // evaluated with a mixture and `&&` could be `||` unnoticed -- which would discard a
+        // partial fix rather than reporting what it has.
+        let mut ifd = Ifd::new();
+        ifd.set(ExifTag::GpsLatitudeRef.tag_id(), Value::Ascii("N".into()));
+        ifd.set(
+            ExifTag::GpsLatitude.tag_id(),
+            Value::Rational(vec![(48, 1), (51, 1), (296, 10)]),
+        );
+
+        let gps = GpsInfo::from_ifd(&ifd).expect("a latitude alone is a GPS fix worth reporting");
+        assert!(gps.latitude_deg().is_some());
+        assert!(gps.longitude_deg().is_none());
+        assert_eq!(gps.altitude_m(), None);
+    }
+
+    #[test]
+    fn an_altitude_alone_is_still_gps_info() {
+        // The other end of the same conjunction: altitude present, both coordinates absent.
+        let mut ifd = Ifd::new();
+        ifd.set(ExifTag::GpsAltitudeRef.tag_id(), Value::Byte(vec![0]));
+        ifd.set(
+            ExifTag::GpsAltitude.tag_id(),
+            Value::Rational(vec![(35, 1)]),
+        );
+
+        let gps = GpsInfo::from_ifd(&ifd).expect("an altitude alone is still a reading");
+        assert_eq!(gps.altitude_m(), Some(35.0));
+        assert!(gps.latitude_deg().is_none());
+        assert!(gps.longitude_deg().is_none());
+    }
+
+    #[test]
+    fn a_truncated_dms_array_is_refused() {
+        // `coordinate` guards on `r.len() >= 3` before indexing `dms[0..=2]`. Nothing tested a
+        // shorter array, so the guard could be `true` unnoticed (#110) -- and then the very next
+        // lines index out of bounds and PANIC on a malformed file. This is a decode path fed
+        // untrusted input, so refusing is the contract and panicking is not.
+        for short in [vec![(48, 1)], vec![(48, 1), (51, 1)], vec![]] {
+            let mut ifd = Ifd::new();
+            ifd.set(ExifTag::GpsLatitudeRef.tag_id(), Value::Ascii("N".into()));
+            ifd.set(
+                ExifTag::GpsLatitude.tag_id(),
+                Value::Rational(short.clone()),
+            );
+
+            assert_eq!(
+                GpsInfo::from_ifd(&ifd),
+                None,
+                "a {}-element DMS array is not a coordinate",
+                short.len()
+            );
+        }
+
+        // And exactly three is accepted, so the guard is not simply refusing everything.
+        let mut ifd = Ifd::new();
+        ifd.set(ExifTag::GpsLatitudeRef.tag_id(), Value::Ascii("N".into()));
+        ifd.set(
+            ExifTag::GpsLatitude.tag_id(),
+            Value::Rational(vec![(48, 1), (51, 1), (296, 10)]),
+        );
+        assert!(GpsInfo::from_ifd(&ifd).is_some());
+    }
+
+    #[test]
     fn empty_ifd_has_no_gps_info() {
         assert_eq!(GpsInfo::from_ifd(&Ifd::new()), None);
     }
