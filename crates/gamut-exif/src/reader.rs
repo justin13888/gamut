@@ -278,6 +278,59 @@ mod tests {
         assert!(Exif::parse(&[]).is_err());
     }
 
+    /// The thumbnail's JPEG range is bounds-checked, and the two modes disagree about it.
+    ///
+    /// `read_thumbnail` documents that "in lenient mode an out-of-bounds JPEG range yields a
+    /// thumbnail without bytes; in strict mode it errors" -- and **neither branch had a test**
+    /// (#110). Both mutation directions of that `if self.strict` guard survived, which is what
+    /// "documented behaviour, zero coverage" looks like from the outside.
+    ///
+    /// This is a decode path fed untrusted input, so the bound is the point: without it the slice
+    /// would be taken from a hostile offset.
+    #[test]
+    fn an_out_of_bounds_thumbnail_jpeg_is_dropped_leniently_and_rejected_strictly() {
+        let mut image = Ifd::new();
+        image.set(0x010F, Value::Ascii("Canon".into()));
+        let mut thumb = Ifd::new();
+        // A JPEG that claims to start far past the end of the stream.
+        thumb.set(
+            ExifTag::JpegInterchangeFormat.tag_id(),
+            Value::Long(vec![0xFFFF]),
+        );
+        thumb.set(
+            ExifTag::JpegInterchangeFormatLength.tag_id(),
+            Value::Long(vec![16]),
+        );
+        let bytes = write(&TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![image, thumb],
+        })
+        .expect("write");
+
+        // Lenient: the thumbnail survives, minus the bytes it could not have.
+        let lenient = ExifReader::new().parse(&bytes).expect("lenient parse");
+        let t = lenient
+            .thumbnail()
+            .expect("the 1st IFD is still a thumbnail");
+        assert_eq!(t.jpeg(), None, "no bytes, rather than bytes from nowhere");
+        assert_eq!(
+            lenient.make(),
+            Some("Canon"),
+            "the rest of the file survives"
+        );
+
+        // Strict: the same input is refused.
+        let err = ExifReader::new()
+            .strict(true)
+            .parse(&bytes)
+            .expect_err("strict must reject an out-of-bounds thumbnail");
+        assert!(
+            matches!(err, ExifError::BadThumbnail(_)),
+            "wrong error for an out-of-bounds thumbnail: {err:?}"
+        );
+    }
+
     #[test]
     fn lenient_drops_a_dangling_sub_ifd_pointer_that_strict_rejects() {
         // An ExifIFD pointer that addresses far past the end of the stream.

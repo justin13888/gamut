@@ -396,6 +396,43 @@ mod tests {
     }
 
     #[test]
+    fn the_gps_accessor_lifts_the_sub_ifd() {
+        // `GpsInfo::from_ifd` is well covered; `Exif::gps`, the accessor that reaches it, was not
+        // -- it could return `None` unconditionally and every test still passed (#110). The two
+        // are different claims: one is that the parse works, the other that this crate hands the
+        // caller the parsed thing rather than nothing.
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        assert_eq!(exif.gps(), None, "no GPS sub-IFD yet");
+
+        exif.set_tag(ExifTag::GpsLatitudeRef, Value::Ascii("N".into()));
+        exif.set_tag(
+            ExifTag::GpsLatitude,
+            Value::Rational(vec![(48, 1), (51, 1), (296, 10)]),
+        );
+
+        let gps = exif
+            .gps()
+            .expect("the accessor reaches the sub-IFD it just wrote");
+        assert!((gps.latitude_deg().expect("latitude") - 48.858_222).abs() < 1e-5);
+    }
+
+    #[test]
+    fn image_mut_edits_the_zeroth_ifd_in_place() {
+        // The mutable accessor had no test that observed an edit through it, so returning a
+        // detached directory (which is what the mutant does) was invisible: writes went somewhere
+        // and the caller never checked they went *here*.
+        let mut exif = Exif::new(ByteOrder::LittleEndian);
+        exif.image_mut()
+            .set(ExifTag::Make.tag_id(), Value::Ascii("Canon".into()));
+
+        assert_eq!(
+            exif.image().get(ExifTag::Make.tag_id()),
+            Some(&Value::Ascii("Canon".into())),
+            "the edit landed in the 0th IFD this Exif owns"
+        );
+    }
+
+    #[test]
     fn equality_ignores_provenance() {
         // Where a model came from is not part of what it says. A parsed model equals a
         // from-scratch model with the same content even though only the former records a
