@@ -353,7 +353,9 @@ mod tests {
             rgba.extend_from_slice(&[c, c.wrapping_add(64), 200, 255]);
         }
         match analyze8(&rgba, 4) {
-            Some(Reduced::Indexed { depth, plte, trns, .. }) => {
+            Some(Reduced::Indexed {
+                depth, plte, trns, ..
+            }) => {
                 assert_eq!(depth, 8, "200 entries need the 8-bit index depth");
                 assert_eq!(plte.len(), 200 * 3);
                 assert_eq!(trns, None, "an all-opaque palette carries no tRNS");
