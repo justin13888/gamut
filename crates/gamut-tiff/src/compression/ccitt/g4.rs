@@ -246,6 +246,37 @@ pub fn g4_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
 mod tests {
     use super::*;
 
+    /// Every vertical-mode code, against ITU-T T.6 Table 4 (V0 / VR1-3 / VL1-3).
+    ///
+    /// `put_vertical` ends in a catch-all `_ => VL3`, so *deleting* any arm silently re-routes
+    /// that offset to VL3 rather than failing to compile. Only fixtures whose rows step by that
+    /// exact offset can notice, and the crate's G4 fixtures never step by +2 -- so the VR2 arm
+    /// could be deleted with the suite green (#110). Pinning the table asserts each arm directly,
+    /// which does not depend on any fixture reaching it.
+    #[test]
+    fn the_vertical_mode_codes_match_t6_table_4() {
+        // (offset, code, bit length) exactly as tabulated.
+        for (d, code, bits) in [
+            (0, 0b1, 1),
+            (1, 0b011, 3),
+            (-1, 0b010, 3),
+            (2, 0b000011, 6),
+            (-2, 0b000010, 6),
+            (3, 0b0000011, 7),
+            (-3, 0b0000010, 7),
+        ] {
+            let mut out = BitWriter::new();
+            put_vertical(&mut out, d);
+            // Left-justified in the first byte: the writer is MSB-first and pads with zeros.
+            let expected = (code << (8 - bits)) as u8;
+            assert_eq!(
+                out.into_bytes(),
+                vec![expected],
+                "vertical offset {d} must encode as the {bits}-bit code {code:b}"
+            );
+        }
+    }
+
     fn pack(bits: &[u8]) -> Vec<u8> {
         let mut row = vec![0u8; bits.len().div_ceil(8)];
         for (i, &b) in bits.iter().enumerate() {

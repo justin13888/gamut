@@ -82,6 +82,32 @@ pub fn decode(src: &[u8], expected: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// A run of exactly two ends the literal that precedes it.
+    ///
+    /// The literal scanner runs `while run_length(row, i) < 2`, and two is the boundary it turns
+    /// on. Relaxing it to `<= 2` absorbs the pair into the literal instead of emitting a
+    /// replicate -- still valid PackBits that decodes to the same row, so every round-trip stays
+    /// green, and the existing byte-exact tests use runs of 100 and 200, which never place a
+    /// two-run beside a literal (#110).
+    ///
+    /// Neither rule dominates: here ours costs a byte, because breaking the literal adds a second
+    /// control byte; on a row of nothing but pairs it saves one per pair. Ours is the simple
+    /// always-replicate rule, and this test is what makes that a decision rather than an
+    /// accident.
+    #[test]
+    fn a_run_of_exactly_two_is_emitted_as_a_replicate() {
+        let mut out = Vec::new();
+        encode_row(&[1, 2, 3, 4, 4, 5, 6], &mut out);
+        assert_eq!(
+            out,
+            vec![
+                2, 1, 2, 3, // literal: three bytes, stopped by the pair
+                0xFF, 4, // replicate: control 1 - 2 = -1, then the byte
+                1, 5, 6, // literal: the remaining two
+            ]
+        );
+    }
+
     fn roundtrip(row: &[u8]) {
         let mut enc = Vec::new();
         encode_row(row, &mut enc);
