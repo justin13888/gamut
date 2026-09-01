@@ -143,8 +143,10 @@ impl PngEncoder {
     /// this one is only reversible in what you can see.
     ///
     /// Worth enabling for sprites, icons and UI assets, where invisible colour noise is common
-    /// and can cost real bytes. No effect on an image with no fully transparent pixel, or on a
-    /// layout with no alpha channel.
+    /// and can cost real bytes. It applies to every layout that carries an alpha channel, at both
+    /// 8 and 16 bits per sample; a 16-bit pixel counts as invisible when its whole alpha sample is
+    /// zero, and all sixteen bits of each colour sample are cleared. No effect on an image with no
+    /// fully transparent pixel, or on a layout with no alpha channel.
     #[must_use]
     pub fn with_transparent_cleanup(mut self, enabled: bool) -> Self {
         self.clean_transparent = enabled;
@@ -378,15 +380,25 @@ impl PngEncoder {
             .flatten()
     }
 
+    /// The 16-bit twin of [`cleaned_samples`](Self::cleaned_samples): the cleaned samples, or
+    /// `None` to use the caller's buffer unchanged.
+    fn cleaned_samples16(&self, samples: &[u16], channels: usize) -> Option<Vec<u16>> {
+        self.clean_transparent
+            .then(|| clean_transparent16(samples, channels))
+            .flatten()
+    }
+
     /// Encodes a 16-bit-per-sample image, serialising samples big-endian (PNG's network byte order).
-    fn encode_16bit<P: Pixel<Sample = u16>>(
+    ///
+    /// Takes the samples rather than the [`ImageRef`] so the alpha layouts can hand over a cleaned
+    /// buffer (see [`cleaned_samples16`](Self::cleaned_samples16)).
+    fn encode_16bit(
         &self,
-        image: ImageRef<'_, P>,
+        dims: Dimensions,
+        samples: &[u16],
         color: ColorType,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        let dims = image.dimensions();
-        let samples = image.as_samples();
         let mut bytes = Vec::with_capacity(samples.len() * 2);
         for &sample in samples {
             bytes.extend_from_slice(&sample.to_be_bytes());
@@ -633,6 +645,35 @@ fn prefers_native(native_len: usize, palette_len: usize) -> bool {
     native_len < palette_len
 }
 
+/// Zeroes the colour samples of every fully transparent pixel in a 16-bit interleaved buffer,
+/// returning `None` when there is nothing to do (no alpha channel, or no fully transparent pixel)
+/// so the caller can keep borrowing its own samples.
+///
+/// The 8-bit twin is `reduce::clean_transparent`, which cannot serve here: it reads one-byte
+/// samples with a one-byte stride, whereas a 16-bit pixel is invisible only when its *whole* alpha
+/// sample is zero (both bytes of the stored big-endian pair), and clearing a colour sample must
+/// clear all sixteen bits. Working on the `u16` samples rather than on the big-endian bytes
+/// `PngEncoder::encode_16bit` emits keeps the ordering identical to the 8-bit paths — cleanup runs
+/// first, so `reduce::analyze16` gets to see the collapsed invisible pixels.
+fn clean_transparent16(samples: &[u16], channels: usize) -> Option<Vec<u16>> {
+    debug_assert!((1..=4).contains(&channels));
+    if !channels.is_multiple_of(2) {
+        return None; // no alpha channel
+    }
+    let colour = channels - 1; // colour samples are everything before alpha
+    if !samples.chunks_exact(channels).any(|px| px[colour] == 0) {
+        return None;
+    }
+
+    let mut out = samples.to_vec();
+    for px in out.chunks_exact_mut(channels) {
+        if px[colour] == 0 {
+            px[..colour].fill(0);
+        }
+    }
+    Some(out)
+}
+
 /// Writes the zlib datastream as one or more consecutive IDAT chunks.
 fn write_idat(out: &mut Vec<u8>, zlib_stream: &[u8]) {
     if zlib_stream.is_empty() {
@@ -766,62 +807,70 @@ impl EncodeImage<GrayAlpha8> for PngEncoder {
 }
 impl EncodeImage<Gray16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Gray16>, out: &mut Vec<u8>) -> Result<usize> {
+        let (dims, samples) = (image.dimensions(), image.as_samples());
         if self.auto_reduce
-            && let Some(reduced) = reduce::analyze16(image.as_samples(), 1)
+            && let Some(reduced) = reduce::analyze16(samples, 1)
         {
             return self.write_reduced_or_native(
-                image.dimensions(),
+                dims,
                 reduced,
-                |o| self.encode_16bit(image, ColorType::Grayscale, o),
+                |o| self.encode_16bit(dims, samples, ColorType::Grayscale, o),
                 out,
             );
         }
-        self.encode_16bit(image, ColorType::Grayscale, out)
+        self.encode_16bit(dims, samples, ColorType::Grayscale, out)
     }
 }
 impl EncodeImage<Rgb16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgb16>, out: &mut Vec<u8>) -> Result<usize> {
+        let (dims, samples) = (image.dimensions(), image.as_samples());
         if self.auto_reduce
-            && let Some(reduced) = reduce::analyze16(image.as_samples(), 3)
+            && let Some(reduced) = reduce::analyze16(samples, 3)
         {
             return self.write_reduced_or_native(
-                image.dimensions(),
+                dims,
                 reduced,
-                |o| self.encode_16bit(image, ColorType::Truecolor, o),
+                |o| self.encode_16bit(dims, samples, ColorType::Truecolor, o),
                 out,
             );
         }
-        self.encode_16bit(image, ColorType::Truecolor, out)
+        self.encode_16bit(dims, samples, ColorType::Truecolor, out)
     }
 }
 impl EncodeImage<Rgba16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgba16>, out: &mut Vec<u8>) -> Result<usize> {
+        let cleaned = self.cleaned_samples16(image.as_samples(), 4);
+        let samples = cleaned.as_deref().unwrap_or_else(|| image.as_samples());
+        let dims = image.dimensions();
         if self.auto_reduce
-            && let Some(reduced) = reduce::analyze16(image.as_samples(), 4)
+            && let Some(reduced) = reduce::analyze16(samples, 4)
         {
             return self.write_reduced_or_native(
-                image.dimensions(),
+                dims,
                 reduced,
-                |o| self.encode_16bit(image, ColorType::TruecolorAlpha, o),
+                |o| self.encode_16bit(dims, samples, ColorType::TruecolorAlpha, o),
                 out,
             );
         }
-        self.encode_16bit(image, ColorType::TruecolorAlpha, out)
+        self.encode_16bit(dims, samples, ColorType::TruecolorAlpha, out)
     }
 }
 impl EncodeImage<GrayAlpha16> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, GrayAlpha16>, out: &mut Vec<u8>) -> Result<usize> {
+        let cleaned = self.cleaned_samples16(image.as_samples(), 2);
+        let samples = cleaned.as_deref().unwrap_or_else(|| image.as_samples());
+        let dims = image.dimensions();
         if self.auto_reduce
-            && let Some(reduced) = reduce::analyze16(image.as_samples(), 2)
+            && let Some(reduced) = reduce::analyze16(samples, 2)
         {
             return self.write_reduced_or_native(
-                image.dimensions(),
+                dims,
                 reduced,
-                |o| self.encode_16bit(image, ColorType::GrayscaleAlpha, o),
+                |o| self.encode_16bit(dims, samples, ColorType::GrayscaleAlpha, o),
                 out,
             );
         }
-        self.encode_16bit(image, ColorType::GrayscaleAlpha, out)
+        self.encode_16bit(dims, samples, ColorType::GrayscaleAlpha, out)
     }
 }
 
@@ -917,5 +966,49 @@ mod tests {
         write_idat(&mut out, &big);
         let idats = out.windows(4).filter(|w| *w == b"IDAT").count();
         assert!(idats >= 3, "expected multiple IDAT chunks, found {idats}");
+    }
+
+    #[test]
+    fn cleaning_16_bit_pixels_needs_the_whole_alpha_sample_to_be_zero() {
+        // The byte-wise twin would read the big-endian pair `0x0001` as a zero high byte and
+        // wrongly call this pixel invisible; at `u16` width it is visible and must be untouched.
+        // The third pixel is the genuinely invisible one, and all three of its colour samples —
+        // both bytes of each — must be cleared.
+        let src: [u16; 12] = [
+            0x1234, 0x5678, 0x9ABC, 0xFFFF, // visible
+            0x1111, 0x2222, 0x3333, 0x0001, // alpha 1: barely visible, must stay
+            0x4444, 0x5555, 0x6666, 0x0000, // invisible: colour must go
+        ];
+        let cleaned = clean_transparent16(&src, 4).expect("there is a transparent pixel");
+        assert_eq!(
+            cleaned,
+            vec![
+                0x1234, 0x5678, 0x9ABC, 0xFFFF, //
+                0x1111, 0x2222, 0x3333, 0x0001, //
+                0, 0, 0, 0,
+            ]
+        );
+    }
+
+    #[test]
+    fn cleaning_16_bit_grey_alpha_zeroes_only_the_grey_sample() {
+        let src: [u16; 6] = [0xC800, 0xFFFF, 0x6F00, 0x0000, 0x5A00, 0x0001];
+        let cleaned = clean_transparent16(&src, 2).expect("there is a transparent pixel");
+        assert_eq!(cleaned, vec![0xC800, 0xFFFF, 0, 0, 0x5A00, 0x0001]);
+    }
+
+    #[test]
+    fn cleaning_16_bit_declines_when_there_is_nothing_to_clean() {
+        let opaque: [u16; 8] = [1, 2, 3, 0xFFFF, 4, 5, 6, 0xFFFF];
+        assert!(
+            clean_transparent16(&opaque, 4).is_none(),
+            "no fully transparent pixel"
+        );
+
+        // Odd channel counts have no alpha sample, so a zero there is a colour, not transparency.
+        let grey: [u16; 3] = [0, 7, 9];
+        assert!(clean_transparent16(&grey, 1).is_none(), "no alpha channel");
+        let rgb: [u16; 6] = [1, 2, 0, 4, 5, 6];
+        assert!(clean_transparent16(&rgb, 3).is_none(), "no alpha channel");
     }
 }
