@@ -489,41 +489,56 @@ fn mono_tile(id: u32, base: u8) -> Item {
     }
 }
 
-#[test]
-fn grid_assembles_row_major_tiles_and_crops() {
-    // 2x2 grid of 2x2 monochrome tiles ⇒ 4x4 canvas, cropped to 3x3 output. Distinct bases give
-    // each tile a distinct gradient so a swapped/misplaced tile is caught.
-    let tiles = [
-        mono_tile(2, 10),
-        mono_tile(3, 40),
-        mono_tile(4, 70),
-        mono_tile(5, 100),
-    ];
-    let bases = [10u8, 40, 70, 100];
+/// The tile bases a 2x2 grid of 2x2 monochrome tiles is built from.
+///
+/// Distinct bases give each tile a distinct gradient, so a swapped or misplaced tile shows up as a
+/// wrong pixel rather than as a coincidence.
+const GRID_TILE_BASES: [u8; 4] = [10, 40, 70, 100];
+
+/// A 2x2 grid of 2x2 monochrome tiles: a 4x4 canvas declared as a 3x3 output.
+///
+/// Shared by the two claims below so neither carries a container construction that is the other's
+/// subject.
+fn cropped_grid_frame() -> gamut_avif::DecodedFrame {
     let grid = grid_item(1, 2, 2, 3, 3, &[2, 3, 4, 5]);
     let bytes = file(
         1,
         vec![
             grid,
-            tiles[0].clone(),
-            tiles[1].clone(),
-            tiles[2].clone(),
-            tiles[3].clone(),
+            mono_tile(2, GRID_TILE_BASES[0]),
+            mono_tile(3, GRID_TILE_BASES[1]),
+            mono_tile(4, GRID_TILE_BASES[2]),
+            mono_tile(5, GRID_TILE_BASES[3]),
         ],
     );
-    let container = AvifContainer::parse(&bytes).unwrap();
-
-    let frame = container
+    AvifContainer::parse(&bytes)
+        .unwrap()
         .decode_item_planar(1, &mut Mock::default())
-        .unwrap();
+        .unwrap()
+}
+
+#[test]
+fn a_grid_is_cropped_to_its_declared_output_size() {
+    // The canvas is 4x4; the `grid` item declares 3x3. The extra row and column are dropped, not
+    // returned as padding -- independent of whether the tiles landed in the right places.
+    let frame = cropped_grid_frame();
+
     assert_eq!((frame.width(), frame.height()), (3, 3));
     assert_eq!(frame.chroma(), ChromaFormat::Monochrome);
-    // Independent reference: each output pixel comes from its covering tile's own gradient.
+}
+
+#[test]
+fn a_grid_places_its_tiles_in_row_major_order() {
+    // Independent reference: each output pixel is recomputed from its covering tile's own
+    // gradient, so a transposed or rotated tile order is caught pixel by pixel. This can fail
+    // while the crop above is perfectly correct.
+    let frame = cropped_grid_frame();
+
     for oy in 0..3u32 {
         for ox in 0..3u32 {
             let (trow, iy) = (oy / 2, oy % 2);
             let (tcol, ix) = (ox / 2, ox % 2);
-            let base = bases[(trow * 2 + tcol) as usize];
+            let base = GRID_TILE_BASES[(trow * 2 + tcol) as usize];
             assert_eq!(
                 frame.y()[(oy * 3 + ox) as usize],
                 ey(base, ix, iy, 8),
