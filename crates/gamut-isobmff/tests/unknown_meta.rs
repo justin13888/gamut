@@ -1,14 +1,18 @@
-//! Meta-level accounting: boxes inside `meta`/`iprp` that the semantic parse does not consume are
-//! surfaced verbatim as `UnknownBox`es, and the consumed ones are never double-reported.
+//! Meta-level accounting for [`walk_meta_children`]: boxes inside `meta`/`iprp` that the semantic
+//! parse does not consume are surfaced verbatim, and the consumed ones are never double-reported.
+//!
+//! Pinned against `walk_meta_children` directly rather than through a container's `parse`, so the
+//! reach is the shadow walk alone. `gamut-avif` and `gamut-heic` each carried a copy of this file
+//! whose normalised diff from the other was three comment rewraps (#436).
 
 mod common;
 
-use common::{bx, cat, ftyp, full, hdlr, iinf_v0, infe_v2, meta, pitm_v0};
-use gamut_heic::{HeifContainer, UnknownBoxLocation};
+use common::{bx, cat, full, hdlr, iinf_v0, infe_v2, meta, pitm_v0};
+use gamut_isobmff::{UnknownBoxLocation, walk_meta_children};
 
-/// A hand-authored file whose `meta` carries an unconsumed `uuid` child, and whose `iprp` carries an
-/// unconsumed `free` child alongside the real `ipco`/`ipma`. `read` must still parse it, and the two
-/// unknown boxes must surface with their exact bodies while the known children stay unreported.
+/// A hand-authored `meta` carrying an unconsumed `uuid` child, whose `iprp` carries an unconsumed
+/// `free` child alongside the real `ipco`/`ipma`. Both unknowns must surface with their exact
+/// bodies while the known children stay unreported.
 #[test]
 fn unknown_meta_and_iprp_children_surface_verbatim() {
     let ispe = full(
@@ -40,14 +44,13 @@ fn unknown_meta_and_iprp_children_surface_verbatim() {
     let m = meta(&[
         hdlr(),
         pitm_v0(1),
-        iinf_v0(&[infe_v2(1, b"hvc1", false)]),
+        iinf_v0(&[infe_v2(1, b"av01")]),
         iprp,
         uuid,
     ]);
-    let data = cat(&[ftyp(b"heic"), m]);
-    let c = HeifContainer::parse(&data).unwrap();
+    // `walk_meta_children` takes the meta *body*: strip the 8-byte box header.
+    let unknown = walk_meta_children(&m[8..]).unwrap();
 
-    let unknown = c.unknown_meta_boxes();
     assert_eq!(unknown.len(), 2, "exactly the two unconsumed boxes");
 
     let uuid_box = unknown
@@ -64,7 +67,8 @@ fn unknown_meta_and_iprp_children_surface_verbatim() {
     assert_eq!(iprp_box.location, UnknownBoxLocation::Iprp);
     assert_eq!(iprp_box.body, iprp_stray_body.as_slice());
 
-    // Consumed children (hdlr/pitm/iinf/iprp at meta level; ipco/ipma inside iprp) are NOT reported.
+    // Consumed children (hdlr/pitm/iinf/iprp at meta level; ipco/ipma inside iprp) are NOT
+    // reported.
     for consumed in [b"hdlr", b"pitm", b"iinf", b"iprp", b"ipco", b"ipma"] {
         assert!(
             !unknown.iter().any(|b| &b.ty == consumed),

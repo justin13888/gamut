@@ -23,8 +23,11 @@
 //! and its own `moov`, a Google `mpvd` box, or a trailing non-ISOBMFF vendor blob): the top-level
 //! walk stops cleanly at a second `ftyp` and at any malformed trailing box once `ftyp`+`meta` have
 //! been seen, so the semantic model covers the primary image and nothing else. Mapping every byte
-//! of the remainder to a box or trailer is a byte-accounting consumer's job (`gamut-heic`), for
-//! which the box-walk primitives [`BoxReader`] and [`RawBox`] are re-exported.
+//! of the file — the remainder included — to a box, an appended stream or a trailer is
+//! [`walk_segments`], which lives here rather than in a consumer since #436: `gamut-avif` and
+//! `gamut-heic` had a copy each, and after normalising the format names the two were identical.
+//! The box-walk primitives [`BoxReader`] and [`RawBox`] stay re-exported for a consumer that
+//! wants to account for something this walk does not model.
 //!
 //! ```
 //! use gamut_isobmff::{IsoBmffImage, Item, Property, PropertyKind, read, write};
@@ -60,6 +63,7 @@ mod grid;
 mod model;
 mod overlay;
 mod reader;
+mod segments;
 mod writer;
 
 pub use boxes::{BoxReader, RawBox};
@@ -70,4 +74,7 @@ pub use model::{
 };
 pub use overlay::ImageOverlay;
 pub use reader::read;
+pub use segments::{
+    Segment, SegmentKind, UnknownBox, UnknownBoxLocation, walk_meta_children, walk_segments,
+};
 pub use writer::write;
