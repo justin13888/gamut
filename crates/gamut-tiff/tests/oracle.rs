@@ -8,25 +8,11 @@ use gamut_core::{DecodeImage, Dimensions, EncodeImage, Gray8, ImageBuf, ImageRef
 use gamut_tiff::{TiffDecoder, TiffEncoder};
 use libtiff_oracle::Compression;
 
+mod common;
+
+use common::{gray_pattern, rgb_pattern};
+
 const SIZES: &[(u32, u32)] = &[(1, 1), (3, 7), (16, 16), (17, 13), (64, 100), (100, 70)];
-
-fn rgb_pattern(w: u32, h: u32) -> Vec<u8> {
-    let mut v = Vec::with_capacity((w * h * 3) as usize);
-    for y in 0..h {
-        for x in 0..w {
-            v.push((x.wrapping_mul(31).wrapping_add(y)) as u8);
-            v.push((y.wrapping_mul(17) ^ x) as u8);
-            v.push((x.wrapping_add(y).wrapping_mul(5)) as u8);
-        }
-    }
-    v
-}
-
-fn gray_pattern(w: u32, h: u32) -> Vec<u8> {
-    (0..w * h)
-        .map(|i| (i.wrapping_mul(97) >> 1) as u8)
-        .collect()
-}
 
 #[test]
 fn gamut_rgb_is_decoded_by_libtiff() {
