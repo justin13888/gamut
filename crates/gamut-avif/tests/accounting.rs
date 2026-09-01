@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{av01_item, bx, cat, clean_file, ftyp};
+use common::{av01_item, clean_file};
 use gamut_avif::{AvifContainer, SegmentKind};
 
 /// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next

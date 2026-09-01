@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{bx, c2pa_box, cat, clean_file, ftyp, hvc1_item, jumbf_store};
+use common::{c2pa_box, cat, clean_file, hvc1_item, jumbf_store};
 use gamut_heic::{HeifContainer, SegmentKind};
 
 /// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
