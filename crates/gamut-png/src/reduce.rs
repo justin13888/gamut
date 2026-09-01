@@ -134,6 +134,36 @@ fn pixel_key(px: &[u8], channels: usize) -> [u8; 4] {
     }
 }
 
+/// A `tRNS` chunk's cost for a greyscale image: one 16-bit sample plus 12 bytes of framing.
+const GREY_KEY_COST: usize = 2 + 12;
+
+/// A `tRNS` chunk's cost for truecolour: three 16-bit samples plus 12 bytes of framing.
+const RGB_KEY_COST: usize = 6 + 12;
+
+/// Whether a colour key could possibly apply, before paying for the scan that looks for one.
+///
+/// Needs an alpha channel to drop (`channels` even) and something for it to be carrying: an
+/// all-opaque image is better served by the plain alpha *drop*, which costs no chunk at all.
+///
+/// Split out, like [`keyed_size`], because [`write_reduced_or_native`] races the winning estimate
+/// against the unreduced encoding — so perturbing this decision usually changes which candidate is
+/// *offered* without changing the bytes that finally win, which makes it invisible from outside.
+///
+/// [`write_reduced_or_native`]: crate::PngEncoder
+fn may_have_colour_key(all_opaque: bool, channels: usize) -> bool {
+    !all_opaque && channels.is_multiple_of(2)
+}
+
+/// Raw bytes a colour-key encoding costs: one sample per pixel for greyscale or three for
+/// truecolour, plus the `tRNS` chunk that makes it lawful.
+fn keyed_size(pixel_count: usize, all_gray: bool) -> usize {
+    if all_gray {
+        pixel_count + GREY_KEY_COST
+    } else {
+        pixel_count * 3 + RGB_KEY_COST
+    }
+}
+
 /// The colour that can stand for "transparent", if a `tRNS` colour key applies at all.
 ///
 /// Three conditions, all necessary (§11.3.2.1 gives a decoder exactly one transparent colour, not
@@ -253,19 +283,10 @@ pub fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
     } else {
         usize::MAX
     };
-    // A colour key costs one `tRNS` chunk -- 6 bytes of payload for truecolour, 2 for greyscale,
-    // plus 12 of framing -- and buys the whole alpha channel. Only worth looking for when alpha is
-    // actually carrying something, which `all_opaque` already rules out.
-    let key = if all_opaque || !channels.is_multiple_of(2) {
-        None
-    } else {
-        colour_key(pixels, channels)
-    };
-    let keyed_size = match key {
-        Some(_) if all_gray => pixel_count + 14,
-        Some(_) => pixel_count * 3 + 18,
-        None => usize::MAX,
-    };
+    let key = may_have_colour_key(all_opaque, channels)
+        .then(|| colour_key(pixels, channels))
+        .flatten();
+    let keyed_size = key.map_or(usize::MAX, |_| keyed_size(pixel_count, all_gray));
 
     let best = palette_size
         .min(gray_size)
@@ -394,6 +415,33 @@ fn be_bytes(samples: impl Iterator<Item = u16>) -> Vec<u8> {
     samples.flat_map(u16::to_be_bytes).collect()
 }
 
+/// Orders the palette so the encoding costs less, returning the entries in their new order.
+///
+/// Index order is not free: it decides the `tRNS` chunk's length, and it decides what the row
+/// filters see, since a filtered index stream is the *difference* between neighbouring indices.
+/// Two rules, in priority order:
+///
+/// 1. **Transparent entries first**, least opaque first. `tRNS` may be shorter than `PLTE` and
+///    every omitted entry defaults to opaque (§11.3.2.1), so gathering the transparent entries at
+///    the front makes the trailing-opaque trim below cut as much as it possibly can. First-
+///    appearance order left them scattered, so one late transparent entry pinned the whole chunk
+///    to full length.
+/// 2. **Then by luminance.** Neighbouring indices become neighbouring brightnesses, so an image
+///    with smooth shading produces small index deltas rather than the arbitrary jumps
+///    raster-scan discovery order gives — which is what `Sub` and `Paeth` are good at.
+///
+/// Rec. 601 luma, integer, because this only has to *order* entries and never round-trips through
+/// a pixel. The full modified-Zeng ordering oxipng uses is a further step (#482).
+fn ordered_palette(palette: &[[u8; 4]]) -> Vec<[u8; 4]> {
+    let mut out = palette.to_vec();
+    out.sort_by_key(|c| {
+        let luma = 299 * u32::from(c[0]) + 587 * u32::from(c[1]) + 114 * u32::from(c[2]);
+        // Opaque entries sort after every transparent one; within each group, by alpha then luma.
+        (u32::from(c[3] == 255), u32::from(c[3]), luma)
+    });
+    out
+}
+
 /// Builds the indexed reduction from the collected palette.
 fn build_indexed(
     pixels: &[u8],
@@ -401,14 +449,28 @@ fn build_indexed(
     palette: &[[u8; 4]],
     palette_index: &HashMap<[u8; 4], u8>,
 ) -> Reduced {
+    let ordered = ordered_palette(palette);
+    // Reindex through the new order. `palette_index` maps a colour to its *discovery* index, so
+    // this composes discovery -> colour -> final position.
+    let mut remap = vec![0u8; palette.len()];
+    for (position, colour) in ordered.iter().enumerate() {
+        if let Some(&discovered) = palette_index.get(colour) {
+            remap[discovered as usize] = position as u8;
+        }
+    }
     let indices: Vec<u8> = pixels
         .chunks_exact(channels)
-        .map(|px| *palette_index.get(&pixel_key(px, channels)).unwrap_or(&0))
+        .map(|px| {
+            let discovered = *palette_index.get(&pixel_key(px, channels)).unwrap_or(&0);
+            remap[discovered as usize]
+        })
         .collect();
-    let plte: Vec<u8> = palette.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
-    let trns = if palette.iter().any(|c| c[3] != 255) {
-        let mut alphas: Vec<u8> = palette.iter().map(|c| c[3]).collect();
-        // Trailing fully-opaque entries may be omitted (they default to opaque).
+
+    let plte: Vec<u8> = ordered.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
+    let trns = if ordered.iter().any(|c| c[3] != 255) {
+        let mut alphas: Vec<u8> = ordered.iter().map(|c| c[3]).collect();
+        // Trailing fully-opaque entries may be omitted (they default to opaque). With the
+        // transparent entries gathered at the front this now trims everything after them.
         while alphas.len() > 1 && alphas.last() == Some(&255) {
             alphas.pop();
         }
@@ -417,7 +479,7 @@ fn build_indexed(
         None
     };
     Reduced::Indexed {
-        depth: index_bit_depth(palette.len()),
+        depth: index_bit_depth(ordered.len()),
         indices,
         plte,
         trns,
@@ -427,6 +489,31 @@ fn build_indexed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_colour_key_is_only_possible_with_an_alpha_channel_carrying_something() {
+        assert!(may_have_colour_key(false, 4), "RGBA with transparency");
+        assert!(
+            may_have_colour_key(false, 2),
+            "grey+alpha with transparency"
+        );
+        // An all-opaque image drops the channel outright, which costs no chunk.
+        assert!(!may_have_colour_key(true, 4));
+        // No alpha channel to drop in the first place.
+        assert!(!may_have_colour_key(false, 3));
+        assert!(!may_have_colour_key(false, 1));
+    }
+
+    #[test]
+    fn the_keyed_cost_is_the_samples_plus_one_trns_chunk() {
+        // Greyscale: one byte per pixel, and a tRNS of one 16-bit sample plus 12 framing.
+        assert_eq!(keyed_size(100, true), 100 + 2 + 12);
+        // Truecolour: three bytes per pixel, and three 16-bit samples plus 12 framing.
+        assert_eq!(keyed_size(100, false), 300 + 6 + 12);
+        // The chunk is a flat cost -- it does not scale with the image.
+        assert_eq!(keyed_size(0, true), GREY_KEY_COST);
+        assert_eq!(keyed_size(0, false), RGB_KEY_COST);
+    }
 
     #[test]
     fn cleaning_declines_when_there_is_nothing_invisible_to_clean() {
