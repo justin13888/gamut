@@ -401,12 +401,12 @@ mod tests {
     use proptest::test_runner::{Config, RngSeed};
 
     use super::{
-        MAX_EDGE, Violation, acceptance_is_independent_of_the_samples,
-        converting_a_layout_to_itself_changes_nothing, normalise_dims,
-        output_shape_matches_the_target_layout, palette_and_cmyk_convert_only_to_themselves,
-        the_in_place_door_matches_the_allocating_door, widening_to_16_bit_and_back_is_exact,
+        MAX_EDGE, NARROW_FORMATS, Violation, WIDE_FORMATS,
+        acceptance_is_independent_of_the_samples, converting_a_layout_to_itself_changes_nothing,
+        normalise_dims, output_shape_matches_the_target_layout,
+        palette_and_cmyk_convert_only_to_themselves, the_in_place_door_matches_the_allocating_door,
+        widening_to_16_bit_and_back_is_exact,
     };
-    use super::{NARROW_FORMATS, WIDE_FORMATS};
     use crate::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
     use crate::{
         Bilevel, Cmyk8, Dimensions, Gray8, Gray16, GrayAlpha8, GrayAlpha16, Indexed8, Pixel,

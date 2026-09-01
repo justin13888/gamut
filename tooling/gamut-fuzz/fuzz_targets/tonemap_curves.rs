@@ -106,8 +106,8 @@ fuzz_target!(|data: &[u8]| {
             sample_bytes
                 .chunks_exact(4)
                 .map(|c| {
-                    let fraction =
-                        f64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]])) / f64::from(u32::MAX);
+                    let fraction = f64::from(u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        / f64::from(u32::MAX);
                     (fraction as f32) * world_max
                 })
                 .collect()

@@ -14,13 +14,13 @@
 
 #![no_main]
 
+use gamut_core::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
 use gamut_core::invariants::{
     NARROW_FORMATS, Violation, acceptance_is_independent_of_the_samples,
     converting_a_layout_to_itself_changes_nothing, normalise_dims,
     output_shape_matches_the_target_layout, palette_and_cmyk_convert_only_to_themselves,
     the_in_place_door_matches_the_allocating_door,
 };
-use gamut_core::convert::{AlphaPolicy, ConvertPolicy, DepthPolicy, LumaPolicy};
 use gamut_core::{Bilevel, Cmyk8, Dimensions, Gray8, GrayAlpha8, Indexed8, Rgb8, Rgba8};
 use libfuzzer_sys::fuzz_target;
 
@@ -112,9 +112,13 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Law 2: an accepted conversion's output has the source's dimensions under the target layout.
-    if let Err(violation) =
-        for_each_narrow_target!(output_shape_matches_the_target_layout, format, dims, first, policy)
-    {
+    if let Err(violation) = for_each_narrow_target!(
+        output_shape_matches_the_target_layout,
+        format,
+        dims,
+        first,
+        policy
+    ) {
         panic!("{violation}");
     }
 
