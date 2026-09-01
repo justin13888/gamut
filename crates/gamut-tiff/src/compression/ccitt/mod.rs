@@ -26,10 +26,15 @@ struct Codes {
 }
 
 /// Parses a MSB-first binary string into `(value, bit length)`.
+///
+/// Accumulated as `acc * 2 + bit` rather than `(acc << 1) | bit`. The two compute the same thing,
+/// but the bitwise form had an equivalent mutant: `acc << 1` always leaves a zero in the low bit,
+/// where `|` and `^` agree, so no test could tell them apart (#110). The arithmetic form has no
+/// such twin -- every operator mutation of `*` or `+` changes the parsed code.
 fn parse(code: &str) -> (u32, u8) {
     let value = code
         .bytes()
-        .fold(0u32, |acc, b| (acc << 1) | u32::from(b == b'1'));
+        .fold(0u32, |acc, b| acc * 2 + u32::from(b == b'1'));
     (value, code.len() as u8)
 }
 
@@ -224,8 +229,16 @@ pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
                 )
                 .with_byte_offset((reader.pos / 8) as u64));
             }
-            let bit = if white { white_bit } else { 1 - white_bit };
-            if bit == 1 {
+            // Asked as a bool, not as a colour code compared against 1. With `white_bit` in
+            // {0, 1}, `1 - white_bit` yields {1, 0} and the mutation `1 + white_bit` yields
+            // {1, 2}; since the test below was `== 1`, and neither 0 nor 2 is 1, the two behaved
+            // identically and the mutant was unkillable (#110). Same shape as `g4::fill`.
+            let set = if white {
+                white_bit == 1
+            } else {
+                white_bit != 1
+            };
+            if set {
                 for p in pos..pos + run {
                     dst[p / 8] |= 0x80 >> (p % 8);
                 }
