@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runner for the dev-only fuzz tier (issues #264, #311), invoked as `mise run fuzz [target] [--]`.
+# Runner for the dev-only fuzz tier (issues #264, #311), invoked as `mise run fuzz [target] [args]`.
 #
 # A script rather than an inline `run =` because mise appends a task's arguments to the end of its
 # command, which a multi-line shell body cannot absorb -- the same reason `tooling/mutants/run.sh`
@@ -14,16 +14,57 @@ FUZZ_DIR="tooling/gamut-fuzz"
 target="$(rustc -vV | sed -n 's/^host: //p')"
 
 if [ "$#" -eq 0 ]; then
-    echo "fuzz targets (run one with: mise run fuzz <target>):"
-    cargo +nightly fuzz list --fuzz-dir "$FUZZ_DIR"
-    echo
-    echo "  mise run fuzz ifd_read_ledger                        # until it finds something, or Ctrl-C"
-    echo "  mise run fuzz ifd_read_ledger -- -max_total_time=60  # bounded"
-    echo
-    echo "A crash is minimised (cargo +nightly fuzz tmin --fuzz-dir $FUZZ_DIR <target> <input>)"
-    echo "and then promoted into a NAMED DETERMINISTIC TEST in the crate's own suite."
-    echo "The corpus is a search aid, not the regression record."
-    exit 0
+	echo "fuzz targets (run one with: mise run fuzz <target>):"
+	cargo +nightly fuzz list --fuzz-dir "$FUZZ_DIR"
+	echo
+	echo "  mise run fuzz ifd_read_ledger                        # until it finds something, or Ctrl-C"
+	echo "  mise run fuzz ifd_read_ledger -- -max_total_time=60  # bounded"
+	echo
+	echo "A crash is minimised (cargo +nightly fuzz tmin --fuzz-dir $FUZZ_DIR <target> <input>)"
+	echo "and then promoted into a NAMED DETERMINISTIC TEST in the crate's own suite."
+	echo "The corpus is a search aid, not the regression record."
+	exit 0
 fi
 
-exec cargo +nightly fuzz run --fuzz-dir "$FUZZ_DIR" --target "$target" "$@"
+# ── Reconstructing the `--` cargo-fuzz needs ────────────────────────────────────────────────
+#
+# `cargo fuzz run TARGET [CORPUS...] [-- <libFuzzer args>]` takes libFuzzer's arguments only after
+# a `--`. mise SWALLOWS that separator: `mise run fuzz ifd_read_ledger -- -max_total_time=600`
+# arrives here as two words, `ifd_read_ledger` and `-max_total_time=600`, and cargo-fuzz then
+# rejects the second as one of its own options --
+#
+#     error: Found argument '-m' which wasn't expected, or isn't valid in this context
+#
+# which is how the CI job failed on run 33467776925. `tooling/mutants/run.sh` documents the same
+# swallow; this runner did not guard for it, so the bounded form the README advertises had never
+# actually worked. The separator is therefore reconstructed rather than relied on.
+#
+# The discriminator is libFuzzer's own flag syntax, which is always `-name=value` -- a single dash
+# and an `=`. cargo-fuzz's options are `--long`, `--long=value` or a single-letter short, none of
+# which match. So `--release` and `-s none` still reach cargo-fuzz, and `-runs=100` still reaches
+# libFuzzer, with or without a `--`. An explicit `--` (invoking this script directly, where nothing
+# eats it) is honoured too: everything after it is libFuzzer's, unconditionally.
+cargo_args=()
+libfuzzer_args=()
+seen_separator=""
+for arg in "$@"; do
+	if [ -n "$seen_separator" ]; then
+		libfuzzer_args+=("$arg")
+	elif [ "$arg" = "--" ]; then
+		seen_separator=1
+	elif [[ $arg == -[!-]*=* ]]; then
+		libfuzzer_args+=("$arg")
+	else
+		cargo_args+=("$arg")
+	fi
+done
+
+invocation=(run --fuzz-dir "$FUZZ_DIR" --target "$target")
+if [ ${#cargo_args[@]} -gt 0 ]; then
+	invocation+=("${cargo_args[@]}")
+fi
+if [ ${#libfuzzer_args[@]} -gt 0 ]; then
+	invocation+=(-- "${libfuzzer_args[@]}")
+fi
+
+exec cargo +nightly fuzz "${invocation[@]}"
