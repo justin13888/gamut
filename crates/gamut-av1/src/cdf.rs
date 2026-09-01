@@ -5306,17 +5306,36 @@ mod context_tests {
     }
 
     #[test]
-    fn adaptation_counters_start_at_zero_and_move_the_cdf() {
+    fn a_fresh_context_starts_with_a_zero_adaptation_count() {
         // The defaults drop the spec's trailing `cdf[N]` element, whose initial value is 0.
-        let mut c = CdfContext::new(0);
+        let c = CdfContext::new(0);
+
         assert_eq!(c.skip[0].count, 0);
+    }
+
+    #[test]
+    fn coding_a_symbol_adapts_that_context() {
+        let mut c = CdfContext::new(0);
         let before = c.skip[0].cdf;
         let mut sym = SymbolEncoder::new();
+
         encode(&mut sym, 0, c.skip[0].slot());
+
         assert_eq!(c.skip[0].count, 1);
         assert_ne!(c.skip[0].cdf, before, "coding a symbol must adapt its CDF");
-        // A sibling context is untouched — contexts adapt independently.
-        assert_eq!(c.skip[1].cdf, SKIP[1]);
+    }
+
+    #[test]
+    fn contexts_adapt_independently_of_their_siblings() {
+        // The claim that makes per-context adaptation worth having, and the one that fails on its
+        // own: an implementation sharing one CDF across contexts would satisfy both tests above
+        // and still be wrong, because coding in context 0 would drag context 1 with it.
+        let mut c = CdfContext::new(0);
+        let mut sym = SymbolEncoder::new();
+
+        encode(&mut sym, 0, c.skip[0].slot());
+
+        assert_eq!(c.skip[1].cdf, SKIP[1], "a sibling context was disturbed");
         assert_eq!(c.skip[1].count, 0);
     }
 }
