@@ -181,32 +181,32 @@ fn keyed_size(pixel_count: usize, all_gray: bool) -> usize {
 /// needs. Without it, a source whose transparent pixels carry different unseen colours has no key
 /// available and keeps its alpha channel.
 ///
+/// Condition 2 needs no check of its own: `candidate` is assigned in the `alpha == 0` arm and
+/// nowhere else, so "some pixel is transparent" is exactly `candidate.is_some()` and the
+/// `candidate?` below discharges it. Callers reach here only through
+/// [`may_have_colour_key`], which already requires `!all_opaque`, and any alpha that is neither 0
+/// nor 255 returns early — so in practice the `?` never fires; it is the total spelling of a
+/// condition the caller gate has already established.
+///
 /// Two passes rather than one: the candidate is not known until the first transparent pixel is
 /// seen, so proving no *earlier* opaque pixel used it needs a second look. The second pass only
 /// runs when the first has already established a candidate.
 fn colour_key(pixels: &[u8], channels: usize) -> Option<[u8; 4]> {
     debug_assert!(channels == 2 || channels == 4);
     let mut candidate: Option<[u8; 4]> = None;
-    let mut any_transparent = false;
     for px in pixels.chunks_exact(channels) {
         let key = pixel_key(px, channels);
         match key[3] {
-            0 => {
-                any_transparent = true;
-                match candidate {
-                    // A second transparent colour: no single key can stand for both.
-                    Some(seen) if seen[..3] != key[..3] => return None,
-                    Some(_) => {}
-                    None => candidate = Some(key),
-                }
-            }
+            0 => match candidate {
+                // A second transparent colour: no single key can stand for both.
+                Some(seen) if seen[..3] != key[..3] => return None,
+                Some(_) => {}
+                None => candidate = Some(key),
+            },
             255 => {}
             // Partial transparency cannot be expressed as a colour key.
             _ => return None,
         }
-    }
-    if !any_transparent {
-        return None;
     }
     let candidate = candidate?;
     // The key must name a colour nothing visible uses.
@@ -314,8 +314,9 @@ pub fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
             out.push(key[3]);
         }
         Some(Reduced::GrayAlpha8(out))
-    } else if best == keyed_size {
-        let key = key.expect("keyed_size is only finite when a key was found");
+    } else if let Some(key) = key
+        && best == keyed_size
+    {
         if all_gray {
             Some(Reduced::GrayKeyed {
                 samples: pixels
