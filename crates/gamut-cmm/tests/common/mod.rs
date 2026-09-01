@@ -10,6 +10,14 @@
 //! two of these files would have had every reason to assume otherwise, and a sweep that quietly
 //! stopped covering its clamp edges is exactly the kind of thing no individual assertion notices.
 //! The two meanings now have two names.
+//!
+//! Neither of them did what it said. All six copies divided a **31-bit** `next_u32` by
+//! `u32::MAX`, so `next_unit` capped at 0.4999999999 and every sweep driven by it had only ever
+//! covered the lower half of its domain -- and `oracle_clut.rs`'s overshoot variant, documented as
+//! reaching `1.05`, never crossed 1.0 at all. That is #453, and it is fixed here: the divisor is
+//! now the generator's own maximum, so `next_unit` spans `[0, 1]` and the overshoot variant spans
+//! `[-0.05, 1.05]` as both always claimed. Every bound the widened sweeps run against was
+//! re-measured in the same change.
 
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
@@ -41,31 +49,30 @@ impl Lcg {
         (self.next_u32() & 0xFFFF) as u16
     }
 
-    /// A sample in `[0, 0.5)`.
+    /// The largest value [`Self::next_u32`] can return.
     ///
-    /// **Not `[0, 1]`, despite the name and the six copies this replaces.** [`Self::next_u32`]
-    /// takes its output from `self.0 >> 33`, which leaves 31 bits, so the largest value it can
-    /// return is `2^31 - 1` -- and this divides by `u32::MAX`, which is `2^32 - 1`. The quotient
-    /// therefore never exceeds 0.4999999999.
+    /// `next_u32` takes its output from `self.0 >> 33`, which leaves **31** bits, so its maximum
+    /// is `2^31 - 1` and not `u32::MAX`. Dividing by the wrong one of those is the whole of #453:
+    /// every sweep in this crate had only ever covered the lower half of its input domain.
+    const NEXT_U32_MAX: u32 = (1 << 31) - 1;
+
+    /// A sample in `[0, 1]`.
     ///
-    /// The behaviour is preserved exactly as the six copies had it, so every existing sweep sees
-    /// the sequence it has always seen. It is **not** correct, and #453 tracks it: all six
-    /// Little-CMS differential suites have only ever swept the lower half of their input domain,
-    /// and correcting the divisor pushes `conformance_pairs_battery` past `LOOSE_LUT_BOUND`.
-    /// Widening the domain and re-calibrating that bound is a judgement about acceptable colour
-    /// error against the reference CMM, which is why it is filed rather than done here.
+    /// Divides by [`Self::NEXT_U32_MAX`], the generator's actual maximum. The six copies this
+    /// replaces divided by `u32::MAX` and so capped at 0.4999999999 (#453); the bounds every
+    /// suite asserts against were re-measured over the widened domain in the same change.
     pub fn next_unit(&mut self) -> f64 {
-        f64::from(self.next_u32()) / f64::from(u32::MAX)
+        f64::from(self.next_u32()) / f64::from(Self::NEXT_U32_MAX)
     }
 
-    /// A sample in `[-0.05, 0.5)`, exercising the **lower** clamp edge alongside the interior.
+    /// A sample in `[-0.05, 1.05]`, exercising **both** clamp edges alongside the interior.
     ///
     /// Named apart from [`Self::next_unit`] on purpose: the overshoot is the point of it, and
     /// `oracle_clut.rs` is the suite whose subject is what happens outside the unit interval.
     ///
-    /// The copy this replaces documented it as `[-0.05, 1.05]` and `exercising the clamp edges`,
-    /// plural. It never reached the upper one: `next_unit` caps at 0.5 (see there), so
-    /// `0.5 * 1.1 - 0.05` is also 0.5. The upper clamp has never been tested. Part of #453.
+    /// With the pre-#453 divisor this reached `-0.05` but never went above `0.5`, so the upper
+    /// clamp -- the edge the copy's own comment claimed it was testing -- had never been exercised
+    /// at all.
     pub fn next_unit_with_overshoot(&mut self) -> f64 {
         self.next_unit() * 1.1 - 0.05
     }
@@ -104,33 +111,40 @@ mod tests {
     }
 
     #[test]
-    fn next_unit_covers_only_the_lower_half_of_the_unit_interval() {
-        // Pins the defect #453 records, so it cannot drift further while it is open and so the
-        // number in the doc comment above is checkable rather than asserted in prose. The upper
-        // bound is 0.5 because `next_u32` yields 31 bits and this divides by a 32-bit maximum.
+    fn next_unit_covers_the_whole_unit_interval() {
+        // The regression guard for #453. Before it, this generator capped at 0.4999999999 and no
+        // suite noticed, because every assertion was a one-sided bound on an error the narrowed
+        // corpus never provoked. Both halves are asserted: inside [0, 1], and actually reaching
+        // each end of it -- a divisor that is merely too large keeps the range legal while making
+        // the sweep degenerate.
         let mut rng = Lcg::new(0x51a7_c0de_1234_5678);
         let values: Vec<f64> = (0..8192).map(|_| rng.next_unit()).collect();
 
         assert!(
-            values.iter().all(|&v| (0.0..0.5).contains(&v)),
-            "outside [0, 0.5)"
+            values.iter().all(|&v| (0.0..=1.0).contains(&v)),
+            "outside [0, 1]"
         );
-        // And it does reach most of that half, so the sweeps are not degenerate as well as narrow.
-        assert!(values.iter().any(|&v| v > 0.49), "never approached 0.5");
+        assert!(values.iter().any(|&v| v > 0.99), "never approached 1");
         assert!(values.iter().any(|&v| v < 0.01), "never approached 0");
+        // The upper half is the half that was missing, so it is pinned on its own.
+        assert!(
+            values.iter().filter(|&&v| v > 0.5).count() > 3_000,
+            "the upper half of the domain is underpopulated -- has #453 regressed?"
+        );
     }
 
     #[test]
-    fn next_unit_with_overshoot_reaches_below_zero_but_not_above_one() {
-        // Half of what its name and its original comment claimed. The lower clamp edge is
-        // exercised; the upper one never is. Part of #453.
+    fn next_unit_with_overshoot_reaches_both_clamp_edges() {
+        // The other half of #453: this had never crossed 1.0, despite its own comment saying the
+        // clamp edges, plural, were the point of it. `oracle_clut.rs` is the suite that cares.
         let mut rng = Lcg::new(0x0bad_f00d_dead_0001);
         let values: Vec<f64> = (0..8192).map(|_| rng.next_unit_with_overshoot()).collect();
 
         assert!(values.iter().any(|&v| v < 0.0), "never went below 0");
+        assert!(values.iter().any(|&v| v > 1.0), "never went above 1");
         assert!(
-            values.iter().all(|&v| v <= 0.5),
-            "the upper clamp is unexpectedly reachable -- has #453 been fixed?"
+            values.iter().all(|&v| (-0.05..=1.05).contains(&v)),
+            "outside [-0.05, 1.05]"
         );
     }
 }

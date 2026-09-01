@@ -238,26 +238,44 @@ impl Worst {
     }
 }
 
-// The asserted per-class bounds. Measured (this battery, seeds below, lcms2 2.19):
+// The asserted per-class bounds. Measured (this battery, seeds below, lcms2 2.19) over the
+// **full** input domain — every figure here was re-measured for #453, and is not comparable
+// with the ones it replaces, because the sweeps producing those had only ever covered `[0, 0.5)`:
 //
 //   class          max ΔE₀₀   mean ΔE₀₀   worst cell
-//   tight/shaper   7.82e-4    —           gray→srgb perceptual (near-black γ-inverse noise)
-//   tight/LUT      6.87e-3    —           cmyk-v2→cmyk-v4 relative (16-bit CLUT quantization)
-//   loose/shaper   3.34e-1    1.49e-2     wide-d65→srgb relative (lcms2 grid-33 precalc toe)
-//   loose/LUT      1.10e0     7.23e-3     cmyk-v2→p3 absolute (precalc smoothing of the clip)
+//   tight/shaper   8.72e-4    —           gray→srgb perceptual (near-black γ-inverse noise)
+//   tight/LUT      8.77e-3    —           cmyk-v4→srgb relative+bpc (16-bit CLUT quantization)
+//   loose/shaper   3.92e-1    1.00e-2     wide-d65-wtpt→srgb absolute (lcms2 grid-33 precalc toe)
+//   loose/LUT      2.06e0     1.39e-2     cmyk-v4→srgb relative+bpc (precalc smoothing of the clip)
 //
-// Max bounds carry ~2-3× headroom over the measured maxima; the LOOSE class maxima are
-// dominated by the *oracle's* precalculated-CLUT approximation at gamut-clip boundaries and
-// deep-shadow toes (at those very pixels our output matches the TIGHT oracle to ~1e-3), so
-// the loose gate additionally asserts the MEAN — a wrong tag/seam/BPC regression shifts
-// whole sweeps, blowing the mean bound long before the max one. Full table + justifications
-// in STATUS.md.
-const TIGHT_SHAPER_BOUND: f64 = 2e-3;
-const TIGHT_LUT_BOUND: f64 = 2e-2;
-const LOOSE_SHAPER_BOUND: f64 = 6e-1;
-const LOOSE_LUT_BOUND: f64 = 2.0;
-const LOOSE_SHAPER_MEAN_BOUND: f64 = 5e-2;
-const LOOSE_LUT_MEAN_BOUND: f64 = 3e-2;
+// (Half-domain corpus, for comparison: 7.82e-4 / 6.87e-3 / 3.34e-1 / 1.10e0.)
+//
+// **The two classes bound different things, and only TIGHT bounds this crate.** TIGHT compares
+// against lcms2's own full-precision path (`TYPE_*_DBL`, NOOPTIMIZE|NOCACHE), so it is a bound on
+// *our* colour error — and doubling the domain barely moved it: 8.77e-3 ΔE₀₀ against 2e-2, the
+// same ~2.3× headroom it had before. LOOSE compares against lcms2's default 16-bit precalculated
+// path, so what it measures is how far the *oracle's own approximation* strays from the reference
+// answer. That is why the domain change moved LOOSE by 2× and TIGHT by 25%.
+//
+// The worst LOOSE cell settles that reading rather than assuming it. At cmyk-v4→srgb
+// MediaRelativeColorimetric with BPC, loose is 2.06 — while TIGHT **at that same cell** is
+// 8.77e-3, a factor of 235. Our output tracks lcms2's reference answer at those pixels; what it
+// diverges from is lcms2's grid. Same mechanism the pre-#453 comment attributed the cmyk-v2→p3
+// cell to, now measured at the cell that actually provoked the question.
+//
+// So LOOSE's job is catching a *structural* regression — a wrong tag, a wrong seam, BPC silently
+// dropped — which shifts whole sweeps rather than a handful of gamut-clip pixels. The MEAN bounds
+// are what do that, and they are the sensitive half. Note the shaper mean **tightens** here, 5e-2
+// → 3e-2: the widened corpus measured it at 1.00e-2, below the 1.49e-2 the narrow one reported.
+//
+// Max bounds carry ~2-3× headroom over the measured maxima. Full table + justifications in
+// STATUS.md.
+const TIGHT_SHAPER_BOUND: f64 = 2e-3; // 2.29× over 8.72e-4
+const TIGHT_LUT_BOUND: f64 = 2e-2; // 2.28× over 8.77e-3
+const LOOSE_SHAPER_BOUND: f64 = 1.0; // 2.55× over 3.92e-1
+const LOOSE_LUT_BOUND: f64 = 5.0; // 2.42× over 2.06e0
+const LOOSE_SHAPER_MEAN_BOUND: f64 = 3e-2; // 2.99× over 1.00e-2 (tightened from 5e-2)
+const LOOSE_LUT_MEAN_BOUND: f64 = 3e-2; // 2.16× over 1.39e-2
 
 #[test]
 fn conformance_pairs_battery() {
@@ -412,9 +430,9 @@ fn conformance_pairs_battery() {
 // (lcms2 2.19):
 //
 //   level          metric                       measured max        asserted
-//   Collapse       device units vs our None      1.00e-15            < COLLAPSE_BOUND
-//   Precalculate   ΔE₀₀ vs our None              2.58e-1 / 5.07e-2   < LOOSE_*_BOUND
-//   Precalculate   ΔE₀₀ vs lcms2 default path    3.53e-3 / 7.12e-3   < LOOSE_*_BOUND
+//   Collapse       device units vs our None      7.06e-16            < COLLAPSE_BOUND
+//   Precalculate   ΔE₀₀ vs our None              1.08e-1 / 6.35e-2   < LOOSE_*_BOUND, PRECALC_*_DRIFT
+//   Precalculate   ΔE₀₀ vs lcms2 default path    2.98e-3 / 7.12e-3   < LOOSE_*_BOUND, PRECALC_*_DRIFT
 //
 // `Collapse` only re-associates matrix products, so it is measured in **device units**
 // rather than through the ΔE₀₀ lens: the lens is an lcms2 transform, whose internal floats
@@ -428,9 +446,18 @@ fn conformance_pairs_battery() {
 // budget is that row's bounds *verbatim* — the crate promises "no worse than the
 // approximation lcms2's own default path already makes", not a number invented for it. The
 // second precalculate row is the evidence for that reading: optimized-vs-lcms2-optimized
-// (3.5e-3) is two decades *closer* than unoptimized-vs-lcms2-optimized (3.34e-1), because
+// (2.98e-3) is two decades *closer* than unoptimized-vs-lcms2-optimized (3.92e-1), because
 // both sides are now resampling the same transform onto the same grid.
+//
+// That contract is kept verbatim — but since #453 re-measured `LOOSE_LUT_BOUND` at 5.0, it is
+// now two decades above anything this pass actually does (6.35e-2), so on its own it would no
+// longer notice a regression: the promise and the gate had been the same number only by
+// coincidence of scale. Both are asserted now. The contract bound stays because it is the
+// promise; a drift guard at ~3× the measured maxima sits alongside it, so an actual regression
+// in the optimizer trips long before the contract does. See `docs/testing.md` on drift guards.
 const COLLAPSE_BOUND: f64 = 1e-12;
+const PRECALC_SHAPER_DRIFT: f64 = 3e-1; // 2.78× over 1.08e-1
+const PRECALC_LUT_DRIFT: f64 = 2e-1; // 3.15× over 6.35e-2
 
 #[test]
 fn optimized_transforms_stay_inside_the_precision_budget() {
@@ -542,6 +569,7 @@ fn optimized_transforms_stay_inside_the_precision_budget() {
         collapse.cell
     );
     let bounds = [LOOSE_SHAPER_BOUND, LOOSE_LUT_BOUND];
+    let drift = [PRECALC_SHAPER_DRIFT, PRECALC_LUT_DRIFT];
     for (slot, name) in [(0, "shaper"), (1, "LUT")] {
         assert!(
             precalc[slot].value < bounds[slot],
@@ -555,6 +583,24 @@ fn optimized_transforms_stay_inside_the_precision_budget() {
             precalc_vs_lcms[slot].value,
             precalc_vs_lcms[slot].cell
         );
+        // The drift guard. The two assertions above are the *contract*; these are what would
+        // actually catch the pass regressing, since the contract now sits two decades above
+        // where this pass operates. A failure here is not necessarily a defect -- it means the
+        // optimizer's approximation moved and the number wants re-measuring and re-recording.
+        assert!(
+            precalc[slot].value < drift[slot],
+            "precalculate/{name} drifted: max ΔE00 {:.3e} at {} (guard {:.3e})",
+            precalc[slot].value,
+            precalc[slot].cell,
+            drift[slot]
+        );
+        assert!(
+            precalc_vs_lcms[slot].value < drift[slot],
+            "precalculate-vs-lcms/{name} drifted: max ΔE00 {:.3e} at {} (guard {:.3e})",
+            precalc_vs_lcms[slot].value,
+            precalc_vs_lcms[slot].cell,
+            drift[slot]
+        );
         // The resampling is a real approximation, not a no-op dressed up as one: if the pass
         // silently stopped running, this would collapse to zero.
         assert!(
@@ -565,7 +611,9 @@ fn optimized_transforms_stay_inside_the_precision_budget() {
     // And it lands the crate *closer* to lcms2's default path than the unoptimized one does
     // (the LOOSE row of the table above), which is the whole point of matching lcms2's
     // construction rather than inventing one.
-    assert!(precalc_vs_lcms[0].value < LOOSE_SHAPER_BOUND / 10.0);
+    // Measured at 2.98e-3; pinned against the drift guard rather than the contract bound, which
+    // would silently loosen this claim every time the contract is re-measured upward.
+    assert!(precalc_vs_lcms[0].value < PRECALC_SHAPER_DRIFT / 10.0);
 }
 
 #[test]
