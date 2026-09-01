@@ -50,6 +50,12 @@ pub mod constants;
 pub mod curve;
 pub mod operators;
 
+/// Executable laws for the [`ToneCurve`] contract, shared by this crate's property tests and the
+/// out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod invariants;
+
 #[doc(inline)]
 pub use curve::ToneCurve;
 #[doc(inline)]

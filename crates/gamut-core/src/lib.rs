@@ -54,7 +54,13 @@
 #![forbid(unsafe_code)]
 
 pub mod convert;
+
 mod image;
+/// Executable laws for the conversion engine, shared by this crate's property tests and the
+/// out-of-tree fuzz tier (`test-support`). Not part of the stable API; see `docs/testing.md`.
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod invariants;
 pub mod luminance;
 mod pixel;
 

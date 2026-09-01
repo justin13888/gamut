@@ -83,7 +83,22 @@ backward-compatible; removing or reshaping any of the above would not.
 
 Backed by inline unit tests (each type's own contract) plus `tests/surface.rs`, which drives the
 crate through its **public API only** (a toy `EncodeImage` → `DecodeImage` round-trip) so the surface
-is proven self-sufficient. The crate-root doctest keeps the documented usage example compiler-checked.
+is proven self-sufficient.
+
+`convert` is the largest body of algorithmic content in the workspace with **no oracle anywhere** —
+no reference implementation converts gamut's pixel matrix and no specification ships vectors for it
+— so `docs/testing.md` names `gamut-core` a crate where a property is the primary signal.
+`src/invariants.rs` states the module's documented contract as executable laws: acceptance depends
+on the layouts and the policy and never on the sample values; an accepted conversion keeps the
+dimensions and the target layout's sample count; `Indexed8`/`Cmyk8` are closed under every policy;
+the in-place and allocating doors write the same image; every layout converts to itself unchanged;
+and widening 8-bit samples to 16 then rescaling back is exact, which is the inverse relationship
+the module claims of PNG §13.12. Those laws are driven by pinned-seed `proptest` properties here
+and are the attachment point for the out-of-tree fuzz tier (`test-support`).
+
+The laws are stated over `convert_from_raw`, not `convert`: the typed door is a one-line delegation
+to the raw one, so a law asserting the two agree would be checking the compiler rather than the
+engine. The crate-root doctest keeps the documented usage example compiler-checked.
 No benches: core has no computational hot path — its buffers are zero-cost branding and validation is
 a single length check — so there is nothing meaningful to measure (the workspace bench harness scopes
 to real-surface crates). Gates: `mise run test` / `lint` (`clippy -D warnings`, `missing_docs` fatal)

@@ -661,6 +661,7 @@ dependencies = [
 name = "gamut-core"
 version = "2.0.1"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",
@@ -867,6 +868,7 @@ version = "1.0.0"
 dependencies = [
  "divan",
  "gamut-core",
+ "proptest",
 ]
 
 [[package]]

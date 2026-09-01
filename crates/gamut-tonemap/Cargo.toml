@@ -15,11 +15,17 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes the `invariants` module to the out-of-tree fuzz driver. `doc(hidden)`, no SemVer
+# guarantee, and never enabled by the `gamut` umbrella; the crate's own tests get it via `cfg(test)`.
+test-support = []
+
 [dependencies]
 gamut-core.workspace = true
 
 [dev-dependencies]
 divan.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "tonemap"
