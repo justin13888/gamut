@@ -571,19 +571,20 @@ fn extended_auto_reduce_covers_grey_and_sixteen_bit_inputs() {
 
     // Low-cardinality grey off the scale grid. `reduce::analyze8` offers a 2-bit grey palette,
     // but on a fixture this small and this regular the plain 8-bit grey stream compresses to less
-    // than the palette's PLTE and framing, so `write_reduced_or_native` keeps grey. What matters
-    // here is that the pixels survive whichever wins.
+    // than the palette's PLTE and framing, so `write_reduced_or_native` keeps grey. Asserted
+    // exactly: no input reaches this line and comes back paletted, so admitting that as an
+    // alternative would be a branch nothing can take. The size at which a palette does win, and
+    // is packed below 8 bits, is covered by its own test at the end of this file.
     let off_grid: Vec<u8> = (0..n).map(|i| [5u8, 9, 200][i % 3]).collect();
     let mut png = Vec::new();
     encoder()
         .encode_image(ImageRef::<Gray8>::new(&off_grid, dims).unwrap(), &mut png)
         .expect("encode");
     let dec = libpng_oracle::decode(&png);
-    assert!(
-        dec.color_type == libpng_oracle::COLOR_GRAY
-            || dec.color_type == libpng_oracle::COLOR_PALETTE,
-        "off-grid grey stays grey or becomes a grey palette, got {}",
-        dec.color_type
+    assert_eq!(
+        dec.color_type,
+        libpng_oracle::COLOR_GRAY,
+        "off-grid grey stays grey at this size"
     );
     let (_, _, rgba) = libpng_oracle::decode_rgba8(&png);
     let expected: Vec<u8> = off_grid.iter().flat_map(|&v| [v, v, v, 255]).collect();
@@ -727,4 +728,85 @@ fn every_filter_strategy_survives_the_libpng_round_trip() {
         let dec = libpng_oracle::decode(&png);
         assert_eq!(dec.pixels, src, "{strategy:?} did not round-trip");
     }
+}
+
+/// Sub-byte indexed auto-reduce: the palette wins *and* its index depth drops below 8.
+///
+/// `a_palette_is_chosen_when_it_actually_wins` needs 64 colours to make the palette win, which is
+/// depth 8 -- so the encoder's `depth < 8` path into `pack::pack_scanlines`, and
+/// `reduce::index_bit_depth`'s `3..=4 => 2` arm, were only reached by inputs whose palette the
+/// race then declined.
+///
+/// Four colours, and **pseudo-random** rather than blocked. Blocked, the RGBA stream compresses
+/// away and `write_reduced_or_native` correctly keeps it -- which is exactly why the 64-colour
+/// fixture needed 64 colours. Scattered, the four-symbol stream is near its entropy either way,
+/// so the 2-bit packing is the whole difference. Measured at 192x192, `Level::Best`: 9500 bytes
+/// indexed (36 864 pixels at two bits is 9216 of payload) against 19 135 as RGBA, about 50%.
+#[test]
+fn a_small_palette_is_packed_to_a_sub_byte_index_depth() {
+    let (w, h) = (192u32, 192u32);
+    let dims = Dimensions::new(w, h).unwrap();
+    const PALETTE: [[u8; 4]; 4] = [
+        [220, 30, 40, 255],
+        [30, 200, 60, 255],
+        [40, 60, 210, 255],
+        [200, 190, 20, 255],
+    ];
+    let mut src = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            // A finalizer-quality avalanche over the pixel index. A cheaper mix (one multiply
+            // and a shift) is periodic in x, and DEFLATE finds the period: the same fixture came
+            // out at 272 bytes, which would have proved nothing about packing.
+            let mut hash = y * w + x;
+            hash ^= hash >> 16;
+            hash = hash.wrapping_mul(0x7feb_352d);
+            hash ^= hash >> 15;
+            hash = hash.wrapping_mul(0x846c_a68b);
+            hash ^= hash >> 16;
+            src.extend_from_slice(&PALETTE[(hash & 3) as usize]);
+        }
+    }
+
+    let reduced = encode_auto_reduced(&src, dims);
+    let dec = libpng_oracle::decode(&reduced);
+    assert_eq!(
+        dec.color_type,
+        libpng_oracle::COLOR_PALETTE,
+        "four colours over 36 864 pixels is a palette"
+    );
+    assert_eq!(dec.bit_depth, 2, "and four entries need only two bits");
+    assert_eq!(
+        read_chunk(&reduced, b"PLTE").expect("PLTE present").len(),
+        12,
+        "four RGB triples"
+    );
+
+    let mut plain = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .encode_image(ImageRef::<Rgba8>::new(&src, dims).unwrap(), &mut plain)
+        .expect("encode");
+    assert!(
+        reduced.len() < plain.len(),
+        "packed indices beat RGBA: {} vs {}",
+        reduced.len(),
+        plain.len()
+    );
+
+    let (_, _, rgba) = libpng_oracle::decode_rgba8(&reduced);
+    assert_eq!(rgba, src, "the packed palette resolves losslessly");
+}
+
+/// The payload of the first chunk of this type, if present.
+fn read_chunk(png: &[u8], want: &[u8; 4]) -> Option<Vec<u8>> {
+    let mut at = 8usize;
+    while at + 12 <= png.len() {
+        let len = u32::from_be_bytes([png[at], png[at + 1], png[at + 2], png[at + 3]]) as usize;
+        if &png[at + 4..at + 8] == want {
+            return Some(png[at + 8..at + 8 + len].to_vec());
+        }
+        at += 12 + len;
+    }
+    None
 }
