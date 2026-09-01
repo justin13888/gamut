@@ -256,6 +256,47 @@ mod tests {
         row
     }
 
+    /// A row whose reference line changes twice before it does is encoded in **pass mode**.
+    ///
+    /// The mode decision `b2 < a1` had no test (#110). Mutating it to `==` makes the encoder pick
+    /// horizontal mode instead -- which is still *valid* G4 and still decodes to the same image,
+    /// so the round-trip test passes and so does the libtiff differential oracle: libtiff happily
+    /// decodes any well-formed stream. Neither can see *which* mode was chosen, only that the
+    /// result is right.
+    ///
+    /// What separates them is size. Row 0 is black in 8..16 and row 1 is all white, so when
+    /// encoding row 1 the reference line's second change (16) precedes the coding line's first
+    /// (32, i.e. none) -- the definition of pass mode, a 4-bit code. Choosing horizontal instead
+    /// spends a 3-bit mode code plus two run codes:
+    ///
+    ///   pass       6 bytes
+    ///   horizontal 8 bytes
+    ///
+    /// So the length is asserted exactly, and the round trip is asserted alongside it because a
+    /// smaller encoding that decoded wrongly would be worse than a larger one.
+    #[test]
+    fn a_reference_line_change_before_the_coding_line_uses_pass_mode() {
+        let w = 32;
+        let mut row0 = vec![0u8; w];
+        for b in row0.iter_mut().take(16).skip(8) {
+            *b = 1;
+        }
+        let row1 = vec![0u8; w];
+        let packed: Vec<u8> = [pack(&row0), pack(&row1)].concat();
+
+        let enc = g4_encode_strip(&packed, w / 8, 2, w).expect("encode");
+        assert_eq!(
+            enc.len(),
+            6,
+            "pass mode is a 4-bit code; horizontal would cost two more bytes here"
+        );
+        assert_eq!(
+            g4_decode_strip(&enc, 2, w).expect("decode"),
+            packed,
+            "and it still decodes to the original rows"
+        );
+    }
+
     fn roundtrip(rows: &[Vec<u8>], width: usize) {
         let stored = width.div_ceil(8);
         let packed: Vec<u8> = rows.iter().flatten().copied().collect();
