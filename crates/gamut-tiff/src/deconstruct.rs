@@ -500,6 +500,42 @@ mod tests {
         );
     }
 
+    /// An IFD that claims to be tiled but carries no tile data is diagnosed *as tiled*.
+    ///
+    /// `check_pixel_structure` enters the tile branch on `TileWidth` **or** `TileOffsets`, and the
+    /// `||` is the whole point: a half-present pair is exactly the malformation the audit exists to
+    /// name. Mutated to `&&`, an IFD with only `TileWidth` falls through to the strip branch and
+    /// then to the generic "no strip or tile data" warning -- a different, vaguer diagnosis of the
+    /// same file, and a `Warning` where the truth is an `Error`.
+    ///
+    /// Every tile fixture in the suite was well-formed, so nothing distinguished the two (#110).
+    #[test]
+    fn flags_a_tiled_ifd_that_carries_no_tile_data() {
+        let mut ifd = image_ifd();
+        ifd.set(tags::TILE_WIDTH, Value::Short(vec![16]));
+        // Deliberately no TileOffsets/TileByteCounts, and no strip offsets either: the IFD says
+        // "tiled" and then provides nothing.
+        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+
+        let report = deconstruct(&bytes).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure {
+                    detail: "TIFF: tiled image missing TileOffsets/TileByteCounts",
+                    severity: Severity::Error,
+                    ..
+                }
+            )),
+            "expected the tiled diagnosis, got {report:?}"
+        );
+    }
+
     #[test]
     fn flags_strip_offset_count_mismatch() {
         // Two offsets but one byte count: a structural defect the deconstruct must surface.

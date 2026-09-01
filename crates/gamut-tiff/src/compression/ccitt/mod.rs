@@ -273,6 +273,34 @@ mod tests {
         roundtrip(&[pack(&starts_black)], w);
     }
 
+    /// A run whose length needs the make-up code for exactly 64.
+    ///
+    /// `decode_run` accumulates make-up codes and stops at the first *terminating* code, which is
+    /// the test `run < 64`: terminating codes are 0..=63 and make-ups are multiples of 64. At
+    /// exactly 64 the two forms disagree -- `<=` treats the make-up as terminating, returns
+    /// early, and leaves the terminating code that follows it unread, desynchronising everything
+    /// after.
+    ///
+    /// The existing long-run fixture uses 2700, which decomposes as 2560 + 128 + 12 and never
+    /// produces a 64, so `<` and `<=` behaved identically there (#110). Runs of 64..=127 are the
+    /// ones that use the 64 make-up, so this covers both ends of that band and the boundary just
+    /// below it.
+    #[test]
+    fn roundtrips_runs_that_use_the_64_make_up_code() {
+        let w = 256;
+        for run in [63usize, 64, 65, 127, 128] {
+            let mut bits = vec![0u8; w];
+            for b in bits.iter_mut().take(run) {
+                *b = 1;
+            }
+            let stored = w.div_ceil(8);
+            let packed = pack(&bits);
+            let enc = mh_encode_strip(&packed, stored, w).expect("encode");
+            let dec = mh_decode_strip(&enc, 1, w).expect("decode");
+            assert_eq!(dec, packed, "a black run of exactly {run} pixels");
+        }
+    }
+
     #[test]
     fn roundtrips_long_runs() {
         // A run longer than 64 forces a make-up code; > 2623 forces repeated 2560 make-ups.
