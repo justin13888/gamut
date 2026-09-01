@@ -406,9 +406,14 @@ fn auto_reduce_cases() -> (Dimensions, [AutoReduceCase; 3]) {
                 expected_type: libpng_oracle::COLOR_GRAY,
             },
             AutoReduceCase {
+                // Three colours repeating with period 3: DEFLATE squeezes the RGBA stream to
+                // less than the palette encoding's PLTE + tRNS + framing costs on its own, so
+                // `write_reduced_or_native` keeps the unreduced form. That is the smaller file,
+                // which is the contract; `a_palette_is_chosen_when_it_actually_wins` covers the
+                // other side of that race, and `reduce`'s own unit tests pin the analysis.
                 name: "palette",
                 rgba: palette,
-                expected_type: libpng_oracle::COLOR_PALETTE,
+                expected_type: libpng_oracle::COLOR_RGBA,
             },
             AutoReduceCase {
                 name: "opaque",
@@ -444,6 +449,54 @@ fn auto_reduce_picks_the_colour_type_the_pixels_allow() {
             case.name
         );
     }
+}
+
+/// The palette side of `write_reduced_or_native`'s race.
+///
+/// A palette costs a flat `PLTE` (+ `tRNS`) that DEFLATE cannot compress, so whether it wins is
+/// size-dependent: the fixed cost has to be amortised over enough pixels. At 32x32 it is not, and
+/// the cases above keep the unreduced form; at 192x192 with the same colour count it is, and the
+/// encoder must take the palette. Without this test the palette encoding path would only ever be
+/// exercised where it loses.
+#[test]
+fn a_palette_is_chosen_when_it_actually_wins() {
+    let (w, h) = (192u32, 192u32);
+    let dims = Dimensions::new(w, h).unwrap();
+    // 64 distinct colours in 8x8 blocks: too many for RGBA to compress away, few enough to index.
+    let mut src = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let idx = ((x / 8 + y / 8 * 8) % 64) as u8;
+            src.extend_from_slice(&[
+                idx.wrapping_mul(4),
+                idx.wrapping_mul(9),
+                255 - idx.wrapping_mul(3),
+                255,
+            ]);
+        }
+    }
+
+    let reduced = encode_auto_reduced(&src, dims);
+    assert_eq!(
+        libpng_oracle::decode(&reduced).color_type,
+        libpng_oracle::COLOR_PALETTE,
+        "the palette wins once its fixed cost is amortised"
+    );
+
+    let mut plain = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .encode_image(ImageRef::<Rgba8>::new(&src, dims).unwrap(), &mut plain)
+        .expect("encode");
+    assert!(
+        reduced.len() < plain.len(),
+        "and it is smaller: {} vs {}",
+        reduced.len(),
+        plain.len()
+    );
+
+    let (_, _, rgba) = libpng_oracle::decode_rgba8(&reduced);
+    assert_eq!(rgba, src, "the palette resolves losslessly");
 }
 
 #[test]
@@ -516,18 +569,25 @@ fn extended_auto_reduce_covers_grey_and_sixteen_bit_inputs() {
         // packed one. The depth/pixel checks above pin the contract that matters.
     }
 
-    // Low-cardinality grey off the scale grid -> a grey palette at 2 bits.
+    // Low-cardinality grey off the scale grid. `reduce::analyze8` offers a 2-bit grey palette,
+    // but on a fixture this small and this regular the plain 8-bit grey stream compresses to less
+    // than the palette's PLTE and framing, so `write_reduced_or_native` keeps grey. What matters
+    // here is that the pixels survive whichever wins.
     let off_grid: Vec<u8> = (0..n).map(|i| [5u8, 9, 200][i % 3]).collect();
     let mut png = Vec::new();
     encoder()
         .encode_image(ImageRef::<Gray8>::new(&off_grid, dims).unwrap(), &mut png)
         .expect("encode");
     let dec = libpng_oracle::decode(&png);
-    assert_eq!(dec.color_type, libpng_oracle::COLOR_PALETTE);
-    assert_eq!(dec.bit_depth, 2);
+    assert!(
+        dec.color_type == libpng_oracle::COLOR_GRAY
+            || dec.color_type == libpng_oracle::COLOR_PALETTE,
+        "off-grid grey stays grey or becomes a grey palette, got {}",
+        dec.color_type
+    );
     let (_, _, rgba) = libpng_oracle::decode_rgba8(&png);
     let expected: Vec<u8> = off_grid.iter().flat_map(|&v| [v, v, v, 255]).collect();
-    assert_eq!(rgba, expected, "grey palette resolves losslessly");
+    assert_eq!(rgba, expected, "off-grid grey resolves losslessly");
 
     // GrayAlpha8 with an all-opaque alpha channel -> plain 8-bit grey.
     let ga: Vec<u8> = (0..n).flat_map(|i| [(i % 89) as u8, 255]).collect();

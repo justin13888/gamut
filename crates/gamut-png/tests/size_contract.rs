@@ -82,20 +82,14 @@ const BUDGETS: &[Budget] = &[
     },
     Budget {
         name: "palette64_rgba8",
-        max_ratio: 1.15,
-        measured: 1.114,
-        // The one row where gamut is *larger* than libpng, and the budget says so rather than
-        // hiding it. A real defect the measurement found, filed separately.
-        why: "gamut auto-palettises (64 colours over two alpha levels); libpng-9 writes full \
-              RGBA. At 256x256 that wins by 35%, but at 128x128 it LOSES by 11%. Not because \
-              `reduce::analyze8` ignores the palette chunks -- it does count them -- but because \
-              it compares *raw* sizes, and raw size does not predict compressed size when one \
-              candidate's bytes are incompressible and the other's are not. Measured: PLTE + \
-              tRNS is a flat 273 bytes that DEFLATE cannot touch, while the indexed pixel data \
-              compresses to 121 and the RGBA alternative libpng writes compresses to 405 total. \
-              The estimate sees 16 664 against 65 536 and picks palette by 4x; the crossover is \
-              near 160x160. The budget records the loss; a cost model that weighs incompressible \
-              overhead against compressible pixels is what tightens it.",
+        max_ratio: 1.00,
+        measured: 0.963,
+        why: "64 colours over two alpha levels. The palette encoding wins outright at 256x256 \
+              but loses at this size, because PLTE + tRNS is a flat 273 incompressible bytes \
+              against pixels that compress ~160x; `write_reduced_or_native` encodes both and \
+              keeps the smaller, so the row measures whichever is actually better here rather \
+              than whichever the raw-size estimate preferred. Budgeted at 1.00 rather than \
+              tighter precisely because which candidate wins is size-dependent.",
     },
 ];
 
@@ -188,6 +182,7 @@ fn gamut_beats_libpng9_where_it_claims_to() {
         "grey_as_rgb8",
         "flat_rgba8",
         "sprite_rgba8",
+        "palette64_rgba8",
     ];
     for budget in BUDGETS.iter().filter(|b| WINS.contains(&b.name)) {
         let (samples, channels) = pixels(budget.name);

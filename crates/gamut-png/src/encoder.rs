@@ -468,6 +468,49 @@ impl PngEncoder {
         }
     }
 
+    /// Writes `reduced`, unless it is a palette encoding that turns out *larger* than encoding
+    /// the image untouched — in which case the untouched one wins.
+    ///
+    /// [`reduce::analyze8`] chooses by comparing **raw** sizes, and raw size does not predict
+    /// compressed size when one candidate's bytes are incompressible and the other's are not. A
+    /// palette carries a `PLTE` (and often `tRNS`) chunk that DEFLATE cannot touch, while the
+    /// pixels it replaces may compress by two orders of magnitude. On a 128x128 image with 64
+    /// colours the estimate sees 16 664 bytes against 65 536 and picks the palette by 4x — and
+    /// the finished file is 451 bytes against 405. The crossover sits near 160x160, so the
+    /// estimate is right on large images and wrong on small ones.
+    ///
+    /// Rather than guess a correction factor, the two candidates are encoded and the smaller
+    /// kept. That is exactly what [`FilterStrategy::BruteForce`] already does for filters, it
+    /// needs no tuned constant, and it cannot be worse than either candidate alone. A tie keeps
+    /// the palette, which decodes with less work.
+    ///
+    /// Only palette reductions pay for the second encode. Greyscale, alpha-drop and 16→8
+    /// demotion add no chunks at all, so for them the raw comparison is sound and this returns
+    /// immediately.
+    fn write_reduced_or_native(
+        &self,
+        dims: Dimensions,
+        reduced: Reduced,
+        native: impl FnOnce(&mut Vec<u8>) -> Result<usize>,
+        out: &mut Vec<u8>,
+    ) -> Result<usize> {
+        if !matches!(reduced, Reduced::Indexed { .. }) {
+            return self.write_reduced(dims, reduced, out);
+        }
+        let mut palette_encoding = Vec::new();
+        self.write_reduced(dims, reduced, &mut palette_encoding)?;
+        let mut native_encoding = Vec::new();
+        native(&mut native_encoding)?;
+
+        let winner = if native_encoding.len() < palette_encoding.len() {
+            native_encoding
+        } else {
+            palette_encoding
+        };
+        out.extend_from_slice(&winner);
+        Ok(winner.len())
+    }
+
     /// Writes a reduced encoding chosen by [`reduce::analyze8`] / [`reduce::analyze16`].
     fn write_reduced(
         &self,
@@ -564,7 +607,12 @@ impl EncodeImage<Gray8> for PngEncoder {
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze8(image.as_samples(), 1)
         {
-            return self.write_reduced(image.dimensions(), reduced, out);
+            return self.write_reduced_or_native(
+                image.dimensions(),
+                reduced,
+                |o| self.encode_8bit(image, ColorType::Grayscale, o),
+                out,
+            );
         }
         self.encode_8bit(image, ColorType::Grayscale, out)
     }
@@ -594,7 +642,12 @@ impl EncodeImage<Rgb8> for PngEncoder {
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze8(image.as_samples(), 3)
         {
-            return self.write_reduced(image.dimensions(), reduced, out);
+            return self.write_reduced_or_native(
+                image.dimensions(),
+                reduced,
+                |o| self.encode_8bit(image, ColorType::Truecolor, o),
+                out,
+            );
         }
         self.encode_8bit(image, ColorType::Truecolor, out)
     }
@@ -603,12 +656,26 @@ impl EncodeImage<Rgba8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
         let cleaned = self.cleaned_samples(image.as_samples(), 4);
         let samples = cleaned.as_deref().unwrap_or_else(|| image.as_samples());
+        let dims = image.dimensions();
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze8(samples, 4)
         {
-            return self.write_reduced(image.dimensions(), reduced, out);
+            return self.write_reduced_or_native(
+                dims,
+                reduced,
+                |o| {
+                    self.write_png(
+                        (dims.width, dims.height),
+                        samples,
+                        ColorType::TruecolorAlpha,
+                        8,
+                        |_| {},
+                        o,
+                    )
+                },
+                out,
+            );
         }
-        let dims = image.dimensions();
         self.write_png(
             (dims.width, dims.height),
             samples,
@@ -623,12 +690,26 @@ impl EncodeImage<GrayAlpha8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, GrayAlpha8>, out: &mut Vec<u8>) -> Result<usize> {
         let cleaned = self.cleaned_samples(image.as_samples(), 2);
         let samples = cleaned.as_deref().unwrap_or_else(|| image.as_samples());
+        let dims = image.dimensions();
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze8(samples, 2)
         {
-            return self.write_reduced(image.dimensions(), reduced, out);
+            return self.write_reduced_or_native(
+                dims,
+                reduced,
+                |o| {
+                    self.write_png(
+                        (dims.width, dims.height),
+                        samples,
+                        ColorType::GrayscaleAlpha,
+                        8,
+                        |_| {},
+                        o,
+                    )
+                },
+                out,
+            );
         }
-        let dims = image.dimensions();
         self.write_png(
             (dims.width, dims.height),
             samples,
@@ -644,7 +725,12 @@ impl EncodeImage<Gray16> for PngEncoder {
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze16(image.as_samples(), 1)
         {
-            return self.write_reduced(image.dimensions(), reduced, out);
+            return self.write_reduced_or_native(
+                image.dimensions(),
+                reduced,
+                |o| self.encode_16bit(image, ColorType::Grayscale, o),
+                out,
+            );
         }
         self.encode_16bit(image, ColorType::Grayscale, out)
     }
@@ -654,7 +740,12 @@ impl EncodeImage<Rgb16> for PngEncoder {
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze16(image.as_samples(), 3)
         {
-            return self.write_reduced(image.dimensions(), reduced, out);
+            return self.write_reduced_or_native(
+                image.dimensions(),
+                reduced,
+                |o| self.encode_16bit(image, ColorType::Truecolor, o),
+                out,
+            );
         }
         self.encode_16bit(image, ColorType::Truecolor, out)
     }
@@ -664,7 +755,12 @@ impl EncodeImage<Rgba16> for PngEncoder {
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze16(image.as_samples(), 4)
         {
-            return self.write_reduced(image.dimensions(), reduced, out);
+            return self.write_reduced_or_native(
+                image.dimensions(),
+                reduced,
+                |o| self.encode_16bit(image, ColorType::TruecolorAlpha, o),
+                out,
+            );
         }
         self.encode_16bit(image, ColorType::TruecolorAlpha, out)
     }
@@ -674,7 +770,12 @@ impl EncodeImage<GrayAlpha16> for PngEncoder {
         if self.auto_reduce
             && let Some(reduced) = reduce::analyze16(image.as_samples(), 2)
         {
-            return self.write_reduced(image.dimensions(), reduced, out);
+            return self.write_reduced_or_native(
+                image.dimensions(),
+                reduced,
+                |o| self.encode_16bit(image, ColorType::GrayscaleAlpha, o),
+                out,
+            );
         }
         self.encode_16bit(image, ColorType::GrayscaleAlpha, out)
     }
