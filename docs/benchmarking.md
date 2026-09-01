@@ -41,8 +41,19 @@ Counter units are fixed by kind, so figures are comparable across suites:
 | codec encode/decode | `BytesCount` | **source pixel** bytes |
 | compressor | `BytesCount` | input bytes |
 | container / parser | `BytesCount` | payload bytes |
-| per-pixel or per-sample kernel | `ItemsCount` | items |
+| byte-oriented codec pipeline stage | `BytesCount` | bytes the stage consumes |
+| per-pixel or per-sample kernel *whose item is not a byte* | `ItemsCount` | items |
 | one-off construction cost | none | — |
+
+The last two rows split on what the kernel's natural unit actually is, because the counter is what
+makes a figure comparable and a figure is only comparable to figures in the same unit. A stage
+inside a codec pipeline — CRC, scanline packing, filtering, a colour-type scan — consumes the
+byte stream the enclosing encoder consumes, so counting its bytes puts it in the same unit as the
+crate's own encode benchmark and its size table, and a per-stage figure can be read against the
+whole. `gamut-png`'s stage benches are all of this kind. `ItemsCount` is for a kernel whose item is
+*not* a byte and would be lost by counting bytes: `gamut-dsp` counts transform coefficients,
+`gamut-tonemap` `f32` samples, `gamut-color` `f64` samples and pixels, `gamut-bitstream` coded
+symbols, `gamut-cmm` transformed pixels. Bytes per second would say nothing about any of those.
 
 Fixtures are **generated, never vendored**, and each generator documents the one axis it exists
 for. Size them against the algorithm, not for speed: `gamut-png`'s corpus is 256×256 because RGB at

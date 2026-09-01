@@ -22,8 +22,9 @@ use gamut_png::{
 // Byte-identical defaults
 // ---------------------------------------------------------------------------------------------
 
-/// Bytes captured from the encoder **before** the seam existed. Pushing no backend must reproduce
-/// them exactly: the registry is inert by construction, not merely "close enough".
+/// Bytes captured from the encoder **before** the seam existed, except where a row's re-capture is
+/// recorded below. Pushing no backend must reproduce them exactly: the registry is inert by
+/// construction, not merely "close enough".
 ///
 /// This pins the *seam*, not the encoder — so a deliberate encoding improvement re-captures the
 /// affected row, and the change is recorded here rather than being absorbed silently:

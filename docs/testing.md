@@ -72,7 +72,7 @@ the first one that can falsify the claim.
 | **conformance** | the specification ships vectors |
 | **pin / drift guard** | an artifact must still equal an authority (`gamut-iptc/tests/techreference.rs`, `gamut-jxl-sys/tests/version.rs`) |
 | **null-change invariance** | output must be *unchanged*, correctness belonging elsewhere (`gamut-webp/tests/default_bytes.rs`) |
-| **size / effort contract** | an encoder knob's ladder is monotonic, deterministic, and correctness-independent (`gamut-webp/tests/effort.rs`) |
+| **size / effort contract** | an encoder knob's ladder is monotonic, deterministic, and correctness-independent (`gamut-webp/tests/effort.rs`), or its output stays within a budget against the crate's oracle (`crates/gamut-png/tests/size_contract.rs`) |
 | **robustness** | input is hostile; the claim is "no panic, bounded allocation, typed error" |
 
 A hand-written sweep over five sizes is a property test written badly. A property asserting one
@@ -189,7 +189,7 @@ mutation gates, and the stubs carry no function bodies.
 | gamut-icc | Little-CMS | differential | `IccProfile::parse` ☐ |
 | gamut-cmm | Little-CMS | differential | — |
 | gamut-deflate | zlib | differential | — |
-| gamut-png | libpng (both directions) | differential + conformance | `PngDecoder` ☐ |
+| gamut-png | libpng (both directions) | differential + conformance + size contract | `PngDecoder` ☐ |
 | gamut-jpeg | libjpeg-turbo | differential + exact-byte | `JpegDecoder` ☐ |
 | gamut-tiff | libtiff | differential | `TiffDecoder` ☐ |
 | gamut-dng | Adobe DNG SDK; libtiff (container) | conformance + differential | `DngDecoder` ☐ |
