@@ -24,7 +24,11 @@ impl Crc32 {
     // No `Default` impl to pair with this: nothing in the crate would call it, so it would be an
     // uncovered region and an unkillable mutant -- a delegation no test can reach. `new` is only
     // `pub` so `crate::stages` can re-export it to the benchmark driver.
-    #[expect(
+    // `allow`, not `expect`: the lint only fires when `test-support` re-exports this type through
+    // `crate::stages`, so an `expect` is unfulfilled in a default-feature build and fails there
+    // instead. A `Default` impl would be dead delegation -- nothing in the crate calls it, so it
+    // would be an uncovered region and a mutant no test could kill.
+    #[allow(
         clippy::new_without_default,
         reason = "a Default impl here would be dead delegation: uncovered, and unkillable by any test"
     )]

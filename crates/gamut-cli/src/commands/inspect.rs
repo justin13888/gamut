@@ -1,9 +1,14 @@
-//! `gamut inspect` — strict "deconstruct" of a TIFF or DNG (issues #197/#263).
+//! `gamut inspect` — strict "deconstruct" of a TIFF, DNG or PNG (issues #197/#263/#224).
 //!
 //! Walks the entire container, classifies every byte into typed segments, and flags anything
 //! unrecognised (unknown tags, unknown field types, out-of-spec codes, unclassified bytes).
 //! Prints a report to stdout and exits non-zero when the file is not fully accounted for —
 //! usable as an archival CI gate.
+//!
+//! For PNG the same walk answers a second question: **where did the bytes go?** The report carries
+//! the per-chunk-type breakdown, the compressed IDAT total against the filtered stream it inflates
+//! to, and the scanline filter distribution — which is what makes an encoder comparison possible
+//! from the command line, on files this crate did not write.
 
 use std::path::PathBuf;
 
@@ -21,7 +26,7 @@ const DNG_VERSION_TAG: u16 = 50706;
 /// Arguments for `gamut inspect`.
 #[derive(Args)]
 pub(crate) struct InspectArgs {
-    /// Input TIFF or DNG file.
+    /// Input TIFF, DNG or PNG file.
     input: PathBuf,
     /// Force the container format instead of auto-detecting it.
     #[arg(long, value_enum)]
@@ -35,6 +40,8 @@ pub(crate) enum Format {
     Tiff,
     /// DNG (Adobe Digital Negative; gamut-dng).
     Dng,
+    /// PNG (gamut-png).
+    Png,
 }
 
 /// A format-agnostic view of a deconstruct report, for printing.
@@ -56,9 +63,17 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
     })?;
     let format = args.format.unwrap_or_else(|| sniff(&data));
 
+    // PNG's report is a different shape -- it has no IFD tree and no tag vocabulary, but it does
+    // carry compression figures the others have no equivalent for -- so it prints on its own path
+    // rather than being flattened into `Summary`.
+    if matches!(format, Format::Png) {
+        return inspect_png(&args.input, &data);
+    }
+
     let summary = match format {
         Format::Dng => summarize_dng(gamut::dng::deconstruct(&data)?),
         Format::Tiff => summarize_tiff(gamut::tiff::deconstruct(&data)?),
+        Format::Png => unreachable!("handled above"),
     };
 
     print_summary(&args.input, format, &summary);
@@ -77,8 +92,15 @@ pub(crate) fn run(args: &InspectArgs) -> Result<(), CliError> {
     }
 }
 
-/// Detects DNG vs TIFF: a DNG is a TIFF whose IFD 0 carries the mandatory `DNGVersion` tag.
+/// The 8-byte PNG file signature (§5.2).
+const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Detects PNG by signature, then DNG vs TIFF: a DNG is a TIFF whose IFD 0 carries the mandatory
+/// `DNGVersion` tag.
 fn sniff(data: &[u8]) -> Format {
+    if data.starts_with(&PNG_SIGNATURE) {
+        return Format::Png;
+    }
     if let Ok(file) = gamut::tiff::read(data)
         && file
             .ifds
@@ -339,10 +361,133 @@ fn print_lines(label: &str, lines: &[String]) {
 }
 
 /// The display name of a format.
+/// Deconstructs a PNG and prints where its bytes went, exiting non-zero when the file is not a
+/// complete, undamaged datastream.
+fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
+    use gamut::png::{FilterType, SegmentKind};
+
+    let report = gamut::png::deconstruct(data)?;
+    let header = report.header;
+
+    println!("{}: PNG", path.display());
+    println!(
+        "  image:         {}x{} {:?} depth {}{}",
+        header.width,
+        header.height,
+        header.color_type,
+        header.bit_depth,
+        if header.interlaced {
+            ", Adam7 interlaced"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  size:          {} bytes ({:.3} bits/pixel)",
+        report.file_len,
+        report.bits_per_pixel()
+    );
+    println!(
+        "  IDAT:          {} bytes compressed from {} filtered ({:.1}%)",
+        report.idat_compressed,
+        report.filtered_len,
+        report.idat_ratio() * 100.0
+    );
+    println!(
+        "  overhead:      {} bytes, of which {} is chunk framing",
+        report.overhead_bytes(),
+        report.framing_bytes()
+    );
+
+    println!("  chunks:");
+    for stats in &report.chunks {
+        println!(
+            "    {} x{:<3} {:>9} payload + {:>4} framing{}",
+            String::from_utf8_lossy(&stats.chunk_type),
+            stats.count,
+            stats.payload_bytes,
+            stats.framing_bytes(),
+            if stats.is_ancillary() {
+                " (ancillary)"
+            } else {
+                ""
+            }
+        );
+    }
+
+    match report.filters {
+        Some(h) => {
+            let n = |f| h.count(f);
+            println!(
+                "  filters:       None {} / Sub {} / Up {} / Average {} / Paeth {}  ({} scanlines)",
+                n(FilterType::None),
+                n(FilterType::Sub),
+                n(FilterType::Up),
+                n(FilterType::Average),
+                n(FilterType::Paeth),
+                h.total()
+            );
+        }
+        None => println!("  filters:       unavailable (IDAT not inflatable within budget)"),
+    }
+
+    if report.passes.len() > 1 {
+        println!("  Adam7 passes:");
+        for pass in &report.passes {
+            println!(
+                "    {}: {}x{}, {} row bytes, {} filtered",
+                pass.index, pass.width, pass.height, pass.row_bytes, pass.filtered_len
+            );
+        }
+    }
+
+    let damaged: Vec<String> = report
+        .segments
+        .iter()
+        .filter_map(|seg| match seg.kind {
+            SegmentKind::Chunk {
+                chunk_type,
+                crc_ok: false,
+                ..
+            } => Some(format!(
+                "CRC mismatch in {} at offset {}",
+                String::from_utf8_lossy(&chunk_type),
+                seg.range.start
+            )),
+            SegmentKind::Truncated => Some(format!(
+                "truncated from offset {} ({} bytes)",
+                seg.range.start,
+                seg.range.len()
+            )),
+            SegmentKind::Trailer => Some(format!(
+                "{} trailing bytes after IEND at offset {}",
+                seg.range.len(),
+                seg.range.start
+            )),
+            _ => None,
+        })
+        .collect();
+    print_lines("findings", &damaged);
+
+    println!("  classified:    {}", yes_no(report.is_fully_classified()));
+    println!("  intact:        {}", yes_no(report.is_intact()));
+
+    if report.is_intact() {
+        Ok(())
+    } else {
+        Err(CliError::NotFullyAccounted(format!(
+            "{}: not a complete, undamaged PNG datastream — {} finding(s)",
+            path.display(),
+            damaged.len()
+        )))
+    }
+}
+
 fn format_name(format: Format) -> &'static str {
     match format {
         Format::Tiff => "TIFF",
         Format::Dng => "DNG",
+        Format::Png => "PNG",
     }
 }
 
