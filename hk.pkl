@@ -18,6 +18,13 @@ local fmt = new Step {
     check = "mise run fmt-check"
     fix = "mise run fmt"
 }
+local check_tests = new Step {
+    // Static and sub-second: it greps the tree, builds nothing. Checked (never fixed) because
+    // every rule needs a human decision -- what a file pins, which seed to pin, what to call an
+    // oracle file -- and a plausible auto-fix would be a wrong claim in a header.
+    glob = List("crates/*/tests/*.rs", "crates/*/src/**/*.rs")
+    check = "mise run check-tests"
+}
 local clippy = new Step {
     glob = List("**/*.rs")
     // Fast, default-feature clippy — does not build the C-oracle dev-deps. CI runs
@@ -55,6 +62,7 @@ hooks {
         steps {
             ["fmt"] = fmt
             ["clippy"] = clippy
+            ["check-tests"] = check_tests
         }
     }
 }
