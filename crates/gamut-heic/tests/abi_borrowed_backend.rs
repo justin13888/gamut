@@ -70,7 +70,7 @@ const VTABLE: DecoderVTable = DecoderVTable {
 };
 
 #[test]
-fn borrowed_foreign_decoder_adapts_per_item_and_destroys_once() {
+fn each_item_gets_a_borrowing_adapter_that_sees_its_own_dimensions() {
     let destroyed = AtomicUsize::new(0);
     let ctx = std::ptr::from_ref(&destroyed).cast_mut().cast();
 
@@ -78,27 +78,49 @@ fn borrowed_foreign_decoder_adapts_per_item_and_destroys_once() {
     let mut foreign = unsafe { ForeignDecoder::new(&VTABLE, ctx) }.expect("current ABI_VERSION");
     let config = HevcConfig::parse(&HVCC_MONO_8BIT).expect("minimal hvcC parses");
 
-    // Two items with different `ispe` dimensions share the one stored backend: each gets a
-    // fresh borrowing adapter, none of which takes ownership.
+    // Two items with different `ispe` dimensions share the one stored backend. Each adapter must
+    // carry its own item's size through to the backend, or a file whose items differ in size
+    // would decode every item at the first one's dimensions.
     for (width, height) in [(4u32, 2u32), (8, 3)] {
         let dims = Dimensions::new(width, height).expect("non-zero");
         let mut adapter = AbiHevcDecoder::new(&mut foreign, dims);
+
         assert!(adapter.supports(&config));
         let frame = adapter.decode_intra(&config, &[]).expect("stub decodes");
         assert_eq!(frame.width(), width);
         assert_eq!(frame.y().len(), (width * height) as usize);
         assert_eq!(frame.y()[0], width as u16, "backend saw this item's width");
     }
+}
 
+#[test]
+fn per_item_adapters_borrow_the_backend_rather_than_owning_it() {
+    let destroyed = AtomicUsize::new(0);
+    let ctx = std::ptr::from_ref(&destroyed).cast_mut().cast();
+
+    // SAFETY: VTABLE is valid for the program lifetime and ctx outlives the backend.
+    let mut foreign = unsafe { ForeignDecoder::new(&VTABLE, ctx) }.expect("current ABI_VERSION");
+    let config = HevcConfig::parse(&HVCC_MONO_8BIT).expect("minimal hvcC parses");
+
+    for (width, height) in [(4u32, 2u32), (8, 3)] {
+        let dims = Dimensions::new(width, height).expect("non-zero");
+        let mut adapter = AbiHevcDecoder::new(&mut foreign, dims);
+        adapter.decode_intra(&config, &[]).expect("stub decodes");
+    }
+
+    // Independent of whether the dimensions crossed correctly: an adapter that took ownership
+    // would tear the shared backend down after the first item, and the second item would be
+    // decoding through a destroyed context.
     assert_eq!(
         destroyed.load(Ordering::SeqCst),
         0,
         "no adapter ran destroy"
     );
+
     drop(foreign);
     assert_eq!(
         destroyed.load(Ordering::SeqCst),
         1,
-        "owner destroys exactly once"
+        "the owner destroys exactly once"
     );
 }
