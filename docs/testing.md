@@ -28,11 +28,16 @@ Placement is mechanical. Two questions, in order:
    public boundary is killable *only* from inside the crate's own lib target.
 2. **Is there a hard linkage reason it cannot compile in the lib target?** → `crates/<crate>/tests/`.
    There are exactly three:
-   - the assertion needs `unsafe` and the crate is `#![forbid(unsafe_code)]` — which is 27 of the
+   - the assertion needs `unsafe` and the crate is `#![forbid(unsafe_code)]` — which is 21 of the
      32 crates, so this is the common case: `gamut-heic`'s `tests/backend.rs` and
-     `tests/abi_borrowed_backend.rs`, `gamut-png`/`gamut-webp`/`gamut-jpeg`'s `tests/backends.rs`,
-     `gamut-avif`'s `tests/backend.rs`, and the FFI wrappers in `gamut-riff`/`gamut-webp`'s
-     `tests/common/mod.rs`;
+     `tests/abi_borrowed_backend.rs`, `gamut-webp`'s `tests/backends.rs`, `gamut-avif`'s
+     `tests/backend.rs`, and the FFI wrappers in `gamut-riff`/`gamut-webp`'s
+     `tests/common/mod.rs`. The six hot-path crates (`gamut-png`, `gamut-deflate`, `gamut-dsp`,
+     `gamut-color`, `gamut-cmm`, `gamut-jpeg`) are `deny`, not `forbid`, so this reason no longer
+     *forces* them up — an `unsafe` assertion there can carry
+     `#[expect(unsafe_code, reason = "…")]` and sit inline. Their existing suites stay where they
+     are: rule 3 makes either legal, and the rule above never authorises a bulk relocation.
+     `gamut-png`/`gamut-jpeg`'s `tests/backends.rs` are exactly that case;
    - the whole file is `#[cfg]`-gated on features or target (`gamut-jxl`, whose encoder is libjxl
      and absent on wasm32);
    - `mise run check-release-deps` topology forces it to the umbrella — why

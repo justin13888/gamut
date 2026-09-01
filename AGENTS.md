@@ -108,7 +108,7 @@ Dependency edges (a crate depends on those to its right):
   taste: if the assertion reads a non-`pub` item it goes inline in `#[cfg(test)] mod tests` beside
   the code, because `.cargo/mutants.toml` sets `test_workspace = false` and a mutant masked at the
   public boundary is killable *only* from there; it goes in `crates/<crate>/tests/` only when
-  linkage forces it (`unsafe` under `forbid(unsafe_code)`, a whole-file `#[cfg]` gate, or
+  linkage forces it (`unsafe` under a crate's `forbid(unsafe_code)`, a whole-file `#[cfg]` gate, or
   `check-release-deps` topology); otherwise either is legal. A dev-dependency oracle is **not** a
   reason to move up. `crates/gamut/tests/` is mutation-invisible, so nothing may be pinned only
   there by choice. Before adding a test, name the one function whose mutation it kills — if you
@@ -196,6 +196,24 @@ repo — nothing here sets file modes — so do not work around it by editing bu
 - All `pub` items need doc comments. Mark fallible/owning return types `#[must_use]` where
   dropping the value is likely a bug.
 - No `unwrap()`/`expect()` in library code paths — return typed errors via `thiserror`.
+- `unsafe` is **denied**, never *forbidden*, in the six hot-path crates (`gamut-png`,
+  `gamut-deflate`, `gamut-dsp`, `gamut-color`, `gamut-cmm`, `gamut-jpeg`). `forbid` cannot be
+  lifted at a site even with a written justification — it gives
+  `error[E0453]: expect(unsafe_code) incompatible with previous forbid` — so it makes a measured
+  win unarguable rather than merely discouraged. A site that has earned the exception carries
+  `#[expect(unsafe_code, reason = "…")]` naming the win **and** the benchmark that shows it,
+  plus a `// SAFETY:` comment per block. `expect` warns once the exception stops being needed,
+  so a hatch left open after a refactor fails CI on its own. **A win nobody measured is not a
+  reason** — land the bench first. Reach for it last: prefer a maintained crate that already
+  encapsulates the `unsafe` (`crc32fast`, `wide`), and note that since Rust 1.87
+  `#[target_feature]` on a *safe* `fn` makes most `core::arch` intrinsics safe to call — on
+  aarch64 (NEON always on) and wasm32 (`+simd128` is build-time) hand-written SIMD needs no
+  `unsafe` at all, and only x86 runtime dispatch does. The other twenty-one crates keep
+  `#![forbid(unsafe_code)]`: for the offset-driven parsers and the metadata crates, memory
+  safety on hostile input is the product guarantee, not a means to speed. Separately,
+  `gamut-codec-abi`, `gamut-ffi`, `gamut-jxl-sys` and `gamut-jxl`'s `ffi` are `extern "C"`
+  surfaces that cannot exist without `unsafe`; it stays confined to one named module there (the
+  `gamut-jxl` `ffi` / `gamut-codec-abi` `bridge` pattern) and is never widened for speed.
 - Keep encoders allocation-conscious: prefer slices and `&[u8]` over owned buffers in hot
   paths, and document each format's space/time tradeoff.
 - Stub crates stay region-free for the coverage gate: a placeholder `lib.rs` holds only
