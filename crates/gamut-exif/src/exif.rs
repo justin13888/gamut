@@ -370,11 +370,12 @@ mod tests {
     /// The manual `PartialEq` compares every *content* field (each must independently break
     /// equality) while ignoring the recorded maker-note source offset (provenance).
     #[test]
-    fn equality_covers_each_content_field_and_ignores_provenance() {
+    fn equality_covers_every_content_field() {
         let base = Exif::new(ByteOrder::LittleEndian);
         assert_eq!(base, base.clone());
 
-        // Each content field flips inequality on its own.
+        // Each content field flips inequality on its own, so none is silently excluded from the
+        // comparison.
         let order = Exif::new(ByteOrder::BigEndian);
         assert_ne!(base, order);
         let mut image = base.clone();
@@ -392,15 +393,20 @@ mod tests {
         let mut thumb = base.clone();
         thumb.set_thumbnail(vec![0xFF, 0xD8, 0xFF, 0xD9]);
         assert_ne!(base, thumb);
+    }
 
-        // Provenance is ignored: a parsed model equals a from-scratch model with the same
-        // content even though only the former records a maker-note offset.
+    #[test]
+    fn equality_ignores_provenance() {
+        // Where a model came from is not part of what it says. A parsed model equals a
+        // from-scratch model with the same content even though only the former records a
+        // maker-note offset -- otherwise round-tripping a file would appear to change it.
         let mut with_note = Exif::new(ByteOrder::LittleEndian);
         with_note.set_tag(
             ExifTag::MakerNote,
             Value::Undefined((0..32u8).collect::<Vec<u8>>()),
         );
         let parsed = Exif::parse(&with_note.to_bytes().expect("write")).expect("parse");
+
         assert!(parsed.maker_note_offset().is_some());
         assert!(with_note.maker_note_offset().is_none());
         assert_eq!(parsed, with_note);

@@ -90,23 +90,38 @@ fn extension_lookup_is_namespace_scoped() {
 }
 
 #[test]
-fn remove_extension_returns_the_value_and_drops_only_that_entry() {
+fn remove_extension_returns_the_value_it_removed() {
     let mut meta = Metadata::default();
     meta.set_extension(NS, "Depth", Value::Short(vec![14]));
-    meta.set_extension(OTHER_NS, "Depth", Value::Short(vec![8]));
 
     assert_eq!(
         meta.remove_extension(NS, "Depth"),
         Some(Value::Short(vec![14]))
     );
     assert_eq!(meta.extension(NS, "Depth"), None);
-    // The same key under another namespace is untouched.
+}
+
+#[test]
+fn remove_extension_leaves_the_same_key_under_another_namespace() {
+    // The namespace is half the key. A removal that matched on name alone would take both, and
+    // the caller would have no way to tell -- both reads simply return None.
+    let mut meta = Metadata::default();
+    meta.set_extension(NS, "Depth", Value::Short(vec![14]));
+    meta.set_extension(OTHER_NS, "Depth", Value::Short(vec![8]));
+
+    meta.remove_extension(NS, "Depth");
+
     assert_eq!(
         meta.extension(OTHER_NS, "Depth"),
         Some(&Value::Short(vec![8]))
     );
+}
 
+#[test]
+fn removing_an_absent_extension_reports_none() {
     // Removing what is not there reports so rather than panicking.
+    let mut meta = Metadata::default();
+
     assert_eq!(meta.remove_extension(NS, "Depth"), None);
 }
 
