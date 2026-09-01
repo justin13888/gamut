@@ -118,6 +118,33 @@ fn remove_extension_leaves_the_same_key_under_another_namespace() {
 }
 
 #[test]
+fn remove_extension_leaves_another_key_in_the_same_namespace() {
+    // The mirror of the test above, and the half that was missing (#110). Together they pin that
+    // the match is a conjunction: neither the namespace alone nor the key alone may decide it.
+    //
+    // Order matters here, and is why the sibling test could not catch this. `position` returns the
+    // FIRST match, so a removal matching on namespace alone still lands on the right entry
+    // whenever the target happens to come first. Putting a same-namespace, different-key entry
+    // BEFORE the target is what makes the two behaviours diverge: a disjunctive match removes
+    // `Alpha`, silently, and reports Alpha's value as though it were Depth's.
+    let mut meta = Metadata::default();
+    meta.set_extension(NS, "Alpha", Value::Short(vec![1]));
+    meta.set_extension(NS, "Depth", Value::Short(vec![14]));
+
+    assert_eq!(
+        meta.remove_extension(NS, "Depth"),
+        Some(Value::Short(vec![14])),
+        "the value returned must be the one asked for, not the first entry sharing its namespace"
+    );
+    assert_eq!(
+        meta.extension(NS, "Alpha"),
+        Some(&Value::Short(vec![1])),
+        "the untargeted key in the same namespace survives"
+    );
+    assert_eq!(meta.extension(NS, "Depth"), None);
+}
+
+#[test]
 fn removing_an_absent_extension_reports_none() {
     // Removing what is not there reports so rather than panicking.
     let mut meta = Metadata::default();
