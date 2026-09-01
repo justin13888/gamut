@@ -157,15 +157,16 @@ const BUDGETS: &[Budget] = &[
         fixture: "palette64_rgba8",
         side: 128,
         cleanup: true,
-        max_ratio: 1.02,
-        measured: 0.995,
-        why: "cleaning *costs* bytes here -- 403 against the uncleaned row's 364 -- and that is \
-              the point of the row. Collapsing the transparent entries does shorten PLTE and \
-              tRNS, but it also rewrites pixels that were compressing well, and at 128x128 the \
-              second effect wins. `with_transparent_cleanup` is a canonicalisation, not an \
-              optimisation, and this is the case that says so out loud; the same trade is \
-              asserted directly by `a_colour_key_can_lose_the_size_race`. 2% headroom for the \
-              same reason as `noise_rgb8`: there is no win here to protect.",
+        max_ratio: 0.95,
+        measured: 0.899,
+        why: "the row where cleaning does not pay, and therefore is not done. Collapsing the \
+              transparent entries shortens PLTE and tRNS, but it also rewrites pixels that were \
+              compressing well, and at 128x128 the second effect wins: cleaning measured 403 \
+              bytes against the uncleaned 364. `cleaned_or_plain` races the two and keeps the \
+              smaller, so this row now measures exactly what `palette64_rgba8` does, and the \
+              budget is the same. That equality is the assertion -- it is what \
+              `with_transparent_cleanup` never costing bytes looks like from here, and it is \
+              pinned as a law for every row by `cleanup_never_costs_bytes_on_any_corpus_row`.",
     },
     Budget {
         name: "tiny_rgb8",
@@ -345,3 +346,29 @@ fn encoded_size_is_deterministic() {
     }
 }
 
+
+#[test]
+fn cleanup_never_costs_bytes_on_any_corpus_row() {
+    // The gate on `with_transparent_cleanup`'s central claim. It is only true because the encoder
+    // *races* the cleaned and uncleaned encodings and keeps the smaller: cleaning is a transform,
+    // not a reduction, and on a fixture whose invisible pixels carry structure rather than noise
+    // it destroys compressible bytes. Measured before the race, on `palette64_rgba8`, cleaning was
+    // worth -2.3% at 32x32, +10.7% at 128x128 and -5.2% at 256x256 -- with both candidates landing
+    // on the same colour type, so the sign was a property of the image, not of the reduction.
+    //
+    // A law rather than a budget, so it covers every row and every side, and needs no constant.
+    for budget in BUDGETS.iter().filter(|b| !b.cleanup) {
+        let (samples, channels) = pixels(budget.fixture, budget.side);
+        let plain = gamut_best(&samples, channels, budget.side, false);
+        let cleaned = gamut_best(&samples, channels, budget.side, true);
+        assert!(
+            cleaned.len() <= plain.len(),
+            "{}: cleanup cost {} bytes ({} -> {}); the race in `cleaned_or_plain` should have \
+             kept the uncleaned encoding",
+            budget.name,
+            cleaned.len() - plain.len(),
+            plain.len(),
+            cleaned.len(),
+        );
+    }
+}
