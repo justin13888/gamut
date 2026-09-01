@@ -344,9 +344,9 @@ Measured over the conformance battery (`tests/oracle_conformance.rs`,
 
 | level | metric | measured max | asserted | justification |
 |-------|--------|--------------|----------|---------------|
-| `Collapse` | device units vs our own `None` | 1.00e-15 | `< 1e-12` | folding only re-associates the same products; 1e-15 is ~3 ulps of a sample. Measured in device units because the gate's ΔE₀₀ lens is an lcms2 transform whose internal floats are f32 — through the lens this reads a flat 0 |
-| `Precalculate` | ΔE₀₀ vs our own `None` | 2.58e-1 shaper / 5.07e-2 LUT | `< 6e-1` / `< 2.0` | **the LOOSE row of the conformance table above, verbatim** — `Precalculate` builds the very construction (grid-33/17 resampled CLUT, 4096-point joined curves) that row already measures on lcms2's side, so the budget is "no worse than lcms2's own default path", not a fresh number |
-| `Precalculate` | ΔE₀₀ vs lcms2 at default flags | 3.53e-3 shaper / 7.12e-3 LUT | `< 6e-1` / `< 2.0` | the evidence for that reading: matching lcms2's construction lands the optimized output **two decades closer** to lcms2's optimized output than the unoptimized path's 3.34e-1 |
+| `Collapse` | device units vs our own `None` | 7.06e-16 | `< 1e-12` | folding only re-associates the same products; 1e-15 is ~3 ulps of a sample. Measured in device units because the gate's ΔE₀₀ lens is an lcms2 transform whose internal floats are f32 — through the lens this reads a flat 0 |
+| `Precalculate` | ΔE₀₀ vs our own `None` | 1.08e-1 shaper / 6.35e-2 LUT | `< 1.0` / `< 5.0`, **and** `< 3e-1` / `< 2e-1` | **the LOOSE row of the conformance table above, verbatim** — `Precalculate` builds the very construction (grid-33/17 resampled CLUT, 4096-point joined curves) that row already measures on lcms2's side, so the budget is "no worse than lcms2's own default path", not a fresh number. Since #453 re-measured that row at 5.0, the contract sits two decades above what the pass does, so a **drift guard** at ~3× the measured maxima is asserted alongside it — the contract is the promise, the guard is what would catch a regression |
+| `Precalculate` | ΔE₀₀ vs lcms2 at default flags | 2.98e-3 shaper / 7.12e-3 LUT | `< 1.0` / `< 5.0`, **and** `< 3e-1` / `< 2e-1` | the evidence for that reading: matching lcms2's construction lands the optimized output **two decades closer** to lcms2's optimized output than the unoptimized path's 3.92e-1 |
 
 ### Throughput (P8)
 
@@ -381,10 +381,10 @@ crate). Measured maxima and asserted bounds (lcms2 2.19):
 
 | class | measured max ΔE₀₀ | asserted | justification |
 |-------|-------------------|----------|---------------|
-| tight / shaper pairs | 7.82e-4 | `< 2e-3` | lcms2 f32 stage noise + near-black γ-inverse amplification (gray→sRGB perceptual); ~2.5× headroom keeps a decade regression visible |
-| tight / LUT pairs | 6.87e-3 | `< 2e-2` | the oracle evaluates profile CLUTs through 16-bit fixed point even in double transforms (`EvaluateCLUTfloatIn16`); grid-9 tables bound the agreement |
-| loose / shaper pairs | 3.34e-1 (mean 1.49e-2) | max `< 6e-1`, mean `< 5e-2` | lcms2's default path resamples the transform into a grid-33 CLUT: deep-shadow toes of γ2.2 and gamut-clip corners interpolate coarsely **on the oracle's side** (at those pixels we match the TIGHT oracle to ~1e-3) |
-| loose / LUT pairs | 1.10e0 (mean 7.23e-3) | max `< 2.0`, mean `< 3e-2` | precalculated-CLUT smoothing of clip boundaries (absolute-intent white scaling clips hardest); the mean bound is the regression tripwire — a wrong tag/seam/BPC shifts whole sweeps |
+| tight / shaper pairs | 8.72e-4 | `< 2e-3` | lcms2 f32 stage noise + near-black γ-inverse amplification (gray→sRGB perceptual); ~2.5× headroom keeps a decade regression visible |
+| tight / LUT pairs | 8.77e-3 | `< 2e-2` | the oracle evaluates profile CLUTs through 16-bit fixed point even in double transforms (`EvaluateCLUTfloatIn16`); grid-9 tables bound the agreement |
+| loose / shaper pairs | 3.92e-1 (mean 1.00e-2) | max `< 1.0`, mean `< 3e-2` | lcms2's default path resamples the transform into a grid-33 CLUT: deep-shadow toes of γ2.2 and gamut-clip corners interpolate coarsely **on the oracle's side** (at those pixels we match the TIGHT oracle to ~1e-3) |
+| loose / LUT pairs | 2.06e0 (mean 1.39e-2) | max `< 5.0`, mean `< 3e-2` | precalculated-CLUT smoothing of clip boundaries (absolute-intent white scaling clips hardest); the mean bound is the regression tripwire — a wrong tag/seam/BPC shifts whole sweeps |
 
 The gate also asserts the classes stay *distinct* (LUT maxima dominate shaper maxima), so
 the split cannot silently go stale. Also inside the gate: 3-profile chains (src→Lab4→dst,
@@ -397,6 +397,20 @@ units, a bound the tetrahedral evaluation of the same CLUT fails); proofing vs
 plain pair transform); and gamut-check in/out classification agreement per pixel against
 `GAMUTCHECK` alarm substitution over sentinel alarm codes (shaper and LUT proofs, two
 intents), with our excess pinned to exactly `0.0` in-gamut.
+
+**All four rows were re-measured over the full input domain for #453.** Every sweep feeding them
+had previously covered only `[0, 0.5)`: the shared generator divided a 31-bit draw by `u32::MAX`,
+so `next_unit` capped at 0.4999999999 and `oracle_clut.rs`'s overshoot helper never crossed 1.0.
+The pre-#453 figures were 7.82e-4 / 6.87e-3 / 3.34e-1 (mean 1.49e-2) / 1.10e0 (mean 7.23e-3), and
+are not comparable with the ones above.
+
+Only the LOOSE class moved materially, and that is the expected direction: **TIGHT bounds this
+crate, LOOSE bounds the oracle's approximation.** TIGHT compares against lcms2's full-precision
+path and grew 25% (8.77e-3 against an unchanged `< 2e-2`); LOOSE compares against lcms2's default
+16-bit precalculated path and doubled. At the worst LOOSE cell — cmyk-v4→sRGB
+MediaRelativeColorimetric with BPC — TIGHT is 8.77e-3, a factor of 235 lower, so our output tracks
+lcms2's reference answer there and what it diverges from is lcms2's grid. The shaper mean
+**tightened**, 5e-2 → 3e-2.
 
 ## Deferred / out of scope
 
