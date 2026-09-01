@@ -1062,15 +1062,28 @@ mod tests {
     }
 
     #[test]
-    fn clones_share_one_registry_and_equality_ignores_backends() {
+    fn a_clone_shares_the_original_s_backend_registry() {
+        // The registry is shared, not copied: a backend pushed after cloning is visible through
+        // the clone. A deep copy here would silently give a cloned encoder a stale backend list.
         let mut enc = JxlEncoder::new();
         let clone = enc.clone();
+
         enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x77]));
-        // The clone sees the push, and equality still holds: only configuration is compared.
+
         assert!(!clone.backends.is_empty());
-        assert_eq!(enc, clone);
+    }
+
+    #[test]
+    fn equality_compares_configuration_and_ignores_backends() {
+        // Independent of the sharing above: `PartialEq` could compare backends while the registry
+        // is shared, or ignore them while it is copied. An encoder with a backend pushed must
+        // still equal a fresh one, because only configuration is compared.
+        let mut enc = JxlEncoder::new();
+        enc.push_backend(FixedBackend::new(vec![0xFF, 0x0A, 0x77]));
+
         assert_eq!(enc, JxlEncoder::new());
-        // A configuration difference is still a difference.
+        // ...but a configuration difference is still a difference, or the comparison would be
+        // vacuous.
         assert_ne!(enc, JxlEncoder::new().with_effort(Effort::Glacier));
     }
 
