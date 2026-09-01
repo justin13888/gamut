@@ -12,6 +12,14 @@ target
 # regenerates a redundant local lockfile that should not be committed.
 tooling/*/Cargo.lock
 
+# The fuzz tier's search state (issues #264, #311). The corpus is a search aid, not the regression
+# record: a saved input is only reproducible while the target's byte-to-input mapping is unchanged,
+# so a crash is minimised and promoted into a NAMED DETERMINISTIC TEST in the crate's own suite
+# instead (see tooling/gamut-fuzz/README.md and docs/testing.md).
+tooling/gamut-fuzz/corpus/
+tooling/gamut-fuzz/artifacts/
+tooling/gamut-fuzz/coverage/
+
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 

@@ -20,6 +20,7 @@ jq                            = "1.8.1"
 "aqua:taiki-e/cargo-llvm-cov" = "0.8.7"   # coverage (taiki-e prebuilt binary)
 "cargo:cargo-edit"            = "0.13.11" # `cargo set-version` for `mise run bump` (compiled from source)
 "cargo:cargo-mutants"         = "27.1.0"
+"cargo:cargo-fuzz"            = "0.13.1"
 "cargo:cbindgen"              = "0.29.4"  # gamut-ffi C header generation (gen-ffi-header / check-ffi-header)
 
 # Native build deps for the cross-check tests (build vendored dav1d/libavif from third_party/)
@@ -176,6 +177,23 @@ run = "git submodule update --init --checkout third_party/aom third_party/dav1d"
 [tasks.fetch-dng-samples]
 description = "Fetch the real-camera DNG corpus submodule (~178 MiB; needed by test-dng-real)"
 run = "git submodule update --init --checkout third_party/gamut-dng-samples"
+
+# Coverage-guided fuzzing of the `invariants` laws (issues #264, #311). Deliberately NOT in the
+# per-PR path: `coverage` is the only gate that runs tests, so anything in it must be bounded and
+# reproducible, and a corpus-guided engine is neither -- see `docs/testing.md`.
+#
+# Needs nightly for libFuzzer's `-Z sanitizer=fuzzer`; the workspace pins stable, so this selects
+# nightly for this crate only, the same shape as `fmt` selecting nightly rustfmt.
+#
+#   mise run fuzz                        # list the targets
+#   mise run fuzz ifd_read_ledger        # run one until it finds something or you stop it
+#   mise run fuzz ifd_read_ledger -- -max_total_time=60
+#
+# A crash is minimised and then promoted into a *named deterministic test* in the crate's own
+# suite. The corpus is a search aid, not the regression record.
+[tasks.fuzz]
+description = "Coverage-guided fuzzing of the invariants laws; `mise run fuzz <target>`"
+run = "./tooling/gamut-fuzz/run.sh"
 
 [tasks.test-dng-real]
 description = "Validate gamut-dng against real camera DNGs (issue #174; needs fetch-dng-samples)"

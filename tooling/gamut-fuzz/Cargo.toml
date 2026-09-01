@@ -1,0 +1,46 @@
+# Dev-only fuzz tier: NOT a member of the gamut workspace (listed under `[workspace].exclude` in
+# the root manifest). Nothing depends on it — it is invoked by manifest path, via `mise run fuzz`,
+# so `cargo test --workspace --all-features` never builds or runs it.
+#
+# It drives the `invariants` modules — the same executable laws the pinned-seed `proptest`
+# properties drive in the per-PR gate — under libFuzzer, which is coverage-guided and unbounded.
+# That split is the point of the whole design (`docs/testing.md`, "Properties and fuzzing are one
+# law"): the property is the specification, and this is the tier that searches for a counterexample
+# rather than sampling 512 of them.
+#
+# It is kept off the per-PR path for the reason `docs/testing.md` gives: the `coverage` job is the
+# only gate that runs tests, so anything in it must be bounded and reproducible, and a
+# coverage-guided engine is neither. Same placement as `gamut-dng-real-conformance` and the
+# `real-dng` job it feeds in `.github/workflows/extended.yml`.
+#
+# **Requires nightly**: libFuzzer needs `-Z sanitizer=fuzzer`, which stable does not expose. The
+# workspace pins `stable` in `rust-toolchain.toml`; `mise run fuzz` selects nightly for this crate
+# only, exactly as `mise run fmt` already does for the nightly-only rustfmt options.
+[package]
+name = "gamut-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Dev-only fuzz tier: drives the gamut crates' `invariants` laws under libFuzzer (issues #264, #311)."
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# Each target's crate is pulled in with `test-support`, the `doc(hidden)` feature that exposes its
+# `invariants` module. That feature is never enabled by the `gamut` umbrella, so the shipped
+# surface and `mise run check-ffi-features` are unaffected — verified in #434.
+gamut-ifd = { path = "../../crates/gamut-ifd", features = ["test-support"] }
+
+[[bin]]
+name = "ifd_read_ledger"
+path = "fuzz_targets/ifd_read_ledger.rs"
+test = false
+doc = false
+bench = false
+
+# Prevent this from being picked up as a workspace member of anything above it.
+[workspace]
