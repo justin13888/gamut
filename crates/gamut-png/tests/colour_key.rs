@@ -8,7 +8,7 @@
 
 mod common;
 
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, GrayAlpha8, ImageRef, Rgba8};
 use gamut_png::{FilterStrategy, Level, PngEncoder, deconstruct};
 
 /// 128, not something smaller, and the reason is the whole design of the reduction.
@@ -217,4 +217,76 @@ fn read_chunk(png: &[u8], want: &[u8; 4]) -> Option<Vec<u8>> {
         at += 12 + len;
     }
     None
+}
+
+/// Binary alpha over a grey ramp: the greyscale twin of [`keyable_rgba`]. Grey 7 stands for
+/// "invisible" and the visible ramp starts at 8, so no opaque pixel can collide with the key, and
+/// 200 distinct visible levels keep a palette out of the race.
+fn keyable_grey_alpha() -> Vec<u8> {
+    let mut buf = Vec::with_capacity((SIDE * SIDE * 2) as usize);
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            if outside(x, y) {
+                buf.extend_from_slice(&[7, 0]);
+            } else {
+                buf.extend_from_slice(&[8 + ((x + y) % 200) as u8, 255]);
+            }
+        }
+    }
+    buf
+}
+
+/// The greyscale twin of [`a_colour_key_drops_the_alpha_channel_losslessly`], covering
+/// `Reduced::GrayKeyed` -- reachable and correct, but produced by nothing else in the suite, so
+/// the encoder's arm for it (the `ColorType::Grayscale` choice, and the single 16-bit big-endian
+/// `tRNS` sample) had no test that could see it.
+///
+/// The win is thinner here than for truecolour: dropping the alpha plane saves one byte per pixel
+/// rather than three, while the `tRNS` chunk still costs a flat 14. It is a win regardless --
+/// measured at `SIDE`, brute-force filtered at `Level::Best`, 499 bytes keyed against 626 as
+/// `GrayAlpha8`, about 20% -- and it stayed a win at every square from 32 to 256, so no size
+/// threshold is needed on this side.
+///
+/// The key is grey 7 rather than 0 deliberately: a `tRNS` written little-endian would read
+/// `[7, 0]`, which a key of 0 could not tell from the correct `[0, 7]`.
+#[test]
+fn a_greyscale_colour_key_drops_the_alpha_channel_losslessly() {
+    let src = keyable_grey_alpha();
+    let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .with_filter(FilterStrategy::BruteForce)
+        .with_auto_reduce(true)
+        .encode_image(
+            ImageRef::<GrayAlpha8>::new(&src, dims).expect("buffer matches dimensions"),
+            &mut png,
+        )
+        .expect("encode");
+
+    let dec = libpng_oracle::decode(&png);
+    assert_eq!(
+        dec.color_type,
+        libpng_oracle::COLOR_GRAY,
+        "the alpha plane is gone"
+    );
+    assert_eq!(dec.bit_depth, 8, "a keyed grey is always depth 8");
+    assert_eq!(
+        read_chunk(&png, b"tRNS").expect("tRNS present"),
+        vec![0, 7],
+        "one 16-bit big-endian sample naming grey 7"
+    );
+
+    // The whole claim: libpng renders the key, and every pixel comes back exactly.
+    let (_, _, rgba) = libpng_oracle::decode_rgba8(&png);
+    let expected: Vec<u8> = src
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .flat_map(|px| {
+            let grey = if px[1] == 0 { 7 } else { px[0] };
+            [grey, grey, grey, px[1]]
+        })
+        .collect();
+    assert_eq!(rgba, expected, "the grey colour key resolves losslessly");
 }

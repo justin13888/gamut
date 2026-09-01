@@ -773,6 +773,56 @@ mod tests {
         }
     }
 
+    /// `Reduced::GrayKeyed` -- the greyscale twin of `Rgb8Keyed`, reachable and correct but
+    /// produced by nothing else in the suite, so `analyze8`'s `all_gray` split inside the keyed
+    /// arm had no test that could see it.
+    ///
+    /// Grey + binary alpha, every invisible pixel sharing grey 7, and 64 distinct opaque grey
+    /// levels 8..=71 that no invisible pixel can collide with. The estimates that race
+    /// (`pixel_count` = 256):
+    ///
+    /// - keyed: `256 + GREY_KEY_COST` = **270**
+    /// - grey + alpha: `256 * 2` = 512, which is also the input size, so it cannot win
+    /// - palette: 65 entries needs depth 8, `256 + 65 * 4 + 24` = 540
+    ///
+    /// 65 entries is what keeps the palette out of the race: below 17 the index depth drops to 4
+    /// and the palette would win on a fixture this large.
+    #[test]
+    fn binary_alpha_grey_reduces_to_a_colour_keyed_greyscale() {
+        let ga: Vec<u8> = (0..256u32)
+            .flat_map(|i| {
+                if i.is_multiple_of(5) {
+                    [7, 0] // invisible, all one grey
+                } else {
+                    [8 + (i % 64) as u8, 255]
+                }
+            })
+            .collect();
+
+        match analyze8(&ga, 2) {
+            Some(Reduced::GrayKeyed { samples, key }) => {
+                assert_eq!(key, 7, "the one grey every invisible pixel carries");
+                assert_eq!(samples.len(), 256, "one sample per pixel, alpha gone");
+                // The key erases whatever wears it, so nothing visible may wear it.
+                for (i, px) in ga.as_chunks::<2>().0.iter().enumerate() {
+                    if px[1] == 255 {
+                        assert_ne!(samples[i], key, "visible pixel {i} would be erased");
+                    }
+                }
+            }
+            other => panic!(
+                "expected GrayKeyed, got {}",
+                match other {
+                    Some(Reduced::Indexed { .. }) => "Indexed",
+                    Some(Reduced::GrayAlpha8(_)) => "GrayAlpha8",
+                    Some(Reduced::Rgb8Keyed { .. }) => "Rgb8Keyed",
+                    Some(_) => "some other reduction",
+                    None => "no reduction",
+                }
+            ),
+        }
+    }
+
     #[test]
     fn grey_alpha_noise_keeps_its_encoding() {
         let ga: Vec<u8> = (0..600u32)
