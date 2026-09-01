@@ -499,6 +499,42 @@ fn an_over_budget_image_reports_everything_but_the_histogram() {
     assert_eq!(report.header.width, 1 << 30);
 }
 
+/// A header whose filtered stream overflows `usize` still reports, and its ratio is finite.
+///
+/// §11.2.1 allows dimensions up to 2³¹−1 each, so 2³¹−1 square at RGBA16 implies 2⁶⁵ filtered
+/// bytes: `filtered_len` saturates to 0 rather than wrapping, and `idat_ratio` would otherwise
+/// divide by it. Thirteen header bytes reach this, and `gamut inspect` prints the ratio for every
+/// file it reads, so the guard in `idat_ratio` is live code on a hostile-input path — not the dead
+/// branch a filtered-stream budget would have made it.
+#[test]
+fn a_header_whose_stream_overflows_reports_a_zero_ratio_rather_than_dividing_by_it() {
+    let png = common::png_from_chunks(&[
+        common::chunk(
+            b"IHDR",
+            &common::ihdr_payload(0x7FFF_FFFF, 0x7FFF_FFFF, 16, 6, 0),
+        ),
+        common::chunk(b"IDAT", &common::zlib(&[0u8; 8])),
+        common::chunk(b"IEND", &[]),
+    ]);
+    let report = deconstruct(&png).expect("an unrepresentable stream is reported, not an error");
+
+    assert_covers(&report.segments, png.len());
+    assert_eq!(
+        report.filtered_len, 0,
+        "the implied stream is not representable"
+    );
+    assert!(report.idat_compressed > 0, "there is a numerator to divide");
+    assert_eq!(
+        report.idat_ratio(),
+        0.0,
+        "no division by zero, and not an infinity"
+    );
+    assert!(
+        report.passes.is_empty(),
+        "no pass geometry is representable either"
+    );
+}
+
 #[test]
 fn a_file_with_no_header_to_report_on_is_an_error() {
     assert!(deconstruct(&[]).is_err(), "empty input");

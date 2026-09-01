@@ -31,6 +31,7 @@ use gamut_core::{Error, Result};
 
 use crate::chunk::{ChunkReader, RawChunk, SIGNATURE};
 use crate::decoded::PngHeader;
+use crate::decoder::DEFAULT_MAX_IMAGE_BYTES;
 use crate::filter::FilterType;
 use crate::{adam7, ihdr, inflate};
 
@@ -235,6 +236,12 @@ impl PngReport {
     /// Below 1.0 means the codestream compressed. Filtering and colour-type choice are *upstream*
     /// of this number, which is what makes it the right lens for attributing a size difference to
     /// the compressor rather than to the rest of the encoder.
+    ///
+    /// `0.0` when the filtered stream has no length. That is not a dead branch: IHDR admits
+    /// dimensions whose filtered stream overflows `usize` — 2³¹−1 square at RGBA16 is 2⁶⁵ bytes —
+    /// and [`deconstruct`] reports such a file rather than refusing it, leaving
+    /// [`filtered_len`](Self::filtered_len) zero. Thirteen header bytes reach it, so the guard is
+    /// what keeps `gamut inspect` from dividing by zero on a hostile file.
     #[must_use]
     pub fn idat_ratio(&self) -> f64 {
         if self.filtered_len == 0 {
@@ -322,10 +329,6 @@ impl ChunkTally {
         self.stats
     }
 }
-
-/// The largest filtered stream this walk will inflate to count filter choices. Matches the
-/// decoder's own default image budget, so a report never allocates more than a decode would.
-const MAX_FILTERED_BYTES: usize = 64 << 20;
 
 /// Classifies every byte of `png` and, where the IDAT stream is sound and within budget, counts
 /// the scanline filter each row chose.
@@ -428,7 +431,7 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
 
     let passes = pass_stats(&native);
     let filtered_len = adam7::expected_stream_len(&native).unwrap_or(0);
-    let filters = filter_histogram(&idat, filtered_len, &passes);
+    let filters = filter_histogram(&native, &idat, filtered_len, &passes);
 
     Ok(PngReport {
         file_len: png.len(),
@@ -475,14 +478,29 @@ fn pass_stats(header: &ihdr::Ihdr) -> Vec<PassStats> {
     out
 }
 
-/// Whether a filtered stream of this length is worth inflating: non-empty, and within the budget.
+/// Whether this file's IDAT stream is worth inflating to count filters: whether the image its
+/// header describes fits `max_image_bytes`.
 ///
-/// Split out so the boundary is reachable from a unit test. Exercising it through [`deconstruct`]
-/// would need a real 64 MiB stream to sit either side of the cap, and a hostile IHDR alone cannot
-/// distinguish `>` from `>=` or `==` — every over-budget file is rejected a second time when the
-/// inflated length fails to match, so the guard's exact comparison is invisible from outside.
-fn within_inflation_budget(filtered_len: usize) -> bool {
-    filtered_len != 0 && filtered_len <= MAX_FILTERED_BYTES
+/// The budgeted quantity is [`ihdr::native_bytes`] — the decoded buffer — because that is exactly
+/// what [`crate::PngDecoder`] budgets, so "a report never allocates more than a decode would"
+/// holds by construction. Budgeting the *filtered* stream instead states the same intent over a
+/// different number: the two differ by one filter byte per scanline, so a 4096×4096 RGBA8 image
+/// is 67 108 864 native bytes (decodes on the default budget) and 67 112 960 filtered — and the
+/// report declined to scan a file the decoder decodes, reporting it as damaged.
+///
+/// Inflation is still bounded: the filtered stream is at most the native bytes plus one byte per
+/// scanline, so a file that passes here inflates to under twice the budget.
+///
+/// The budget is a parameter rather than a constant so the boundary is reachable from a unit test
+/// without a 64 MiB fixture.
+fn fits_decode_budget(header: &ihdr::Ihdr, max_image_bytes: usize) -> bool {
+    ihdr::native_bytes(
+        header.width,
+        header.height,
+        header.color.channels(),
+        header.bit_depth,
+    )
+    .is_some_and(|native| native <= max_image_bytes)
 }
 
 /// Inflates the IDAT stream and counts the filter byte leading each scanline.
@@ -491,11 +509,12 @@ fn within_inflation_budget(filtered_len: usize) -> bool {
 /// inflates to the wrong length, or carries a code §9.1 does not define. Every other figure in
 /// the report is derived from framing and IHDR, so it survives all of these.
 fn filter_histogram(
+    header: &ihdr::Ihdr,
     idat: &[u8],
     filtered_len: usize,
     passes: &[PassStats],
 ) -> Option<FilterHistogram> {
-    if !within_inflation_budget(filtered_len) {
+    if !fits_decode_budget(header, DEFAULT_MAX_IMAGE_BYTES) {
         return None;
     }
     let stream = inflate::inflate_zlib(idat, filtered_len).ok()?;
@@ -575,14 +594,37 @@ mod tests {
         assert!(report_with(&[], 0).is_fully_classified());
     }
 
+    /// A header for the budget boundary, built directly: `ihdr::parse` would only add a byte
+    /// layout between the test and the quantity under test.
+    fn header(width: u32, height: u32, bit_depth: u8, color: ColorType) -> ihdr::Ihdr {
+        ihdr::Ihdr {
+            width,
+            height,
+            bit_depth,
+            color,
+            interlaced: false,
+        }
+    }
+
     #[test]
-    fn the_inflation_budget_is_inclusive_and_rejects_an_empty_stream() {
-        // Exactly at the cap is worth inflating; one byte past is not. A zero-length stream has
-        // no scanlines to count and is rejected before any work.
-        assert!(!within_inflation_budget(0));
-        assert!(within_inflation_budget(1));
-        assert!(within_inflation_budget(MAX_FILTERED_BYTES));
-        assert!(!within_inflation_budget(MAX_FILTERED_BYTES + 1));
+    fn the_decode_budget_is_inclusive_and_measures_the_decoded_image() {
+        // 4096x4096 RGBA8 is exactly the decoder's default budget, so the walk must scan it. Its
+        // *filtered* stream is 67 112 960 bytes — 4096 more, one filter byte per scanline — which
+        // is how a cap stated over the filtered length came to decline an image that decodes.
+        let at_budget = header(4096, 4096, 8, ColorType::TruecolorAlpha);
+        assert!(fits_decode_budget(&at_budget, DEFAULT_MAX_IMAGE_BYTES));
+        assert!(!fits_decode_budget(&at_budget, DEFAULT_MAX_IMAGE_BYTES - 1));
+        assert!(fits_decode_budget(&at_budget, DEFAULT_MAX_IMAGE_BYTES + 1));
+        // One pixel past the budget, at the same dimensions: the depth is the difference.
+        assert!(!fits_decode_budget(
+            &header(4096, 4096, 16, ColorType::TruecolorAlpha),
+            DEFAULT_MAX_IMAGE_BYTES
+        ));
+        // A header whose decoded size overflows `usize` is declined, not wrapped.
+        assert!(!fits_decode_budget(
+            &header(0x7FFF_FFFF, 0x7FFF_FFFF, 16, ColorType::TruecolorAlpha),
+            usize::MAX
+        ));
     }
 
     #[test]
