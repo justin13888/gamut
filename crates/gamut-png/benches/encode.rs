@@ -371,19 +371,6 @@ mod stages {
             .bench_local(|| stages::filter_image(black_box(strategy), &samples, ROW_BYTES, BPP));
     }
 
-    /// The per-scanline heuristic in isolation: five trial filterings plus five scorings, per row.
-    #[divan::bench(args = [1usize, 3, 4])]
-    fn choose_min_sum_abs(bencher: Bencher, bpp: usize) {
-        let row: Vec<u8> = (0..ROW_BYTES).map(|i| (i * 7) as u8).collect();
-        let prev: Vec<u8> = (0..ROW_BYTES).map(|i| (i * 13 + 5) as u8).collect();
-        bencher
-            .counter(BytesCount::new(row.len()))
-            .with_inputs(|| (Vec::new(), Vec::new()))
-            .bench_local_refs(|(scratch, best): &mut (Vec<u8>, Vec<u8>)| {
-                stages::choose_min_sum_abs(&row, &prev, black_box(bpp), scratch, best)
-            });
-    }
-
     #[divan::bench(args = [1u8, 2, 4])]
     fn pack_scanlines(bencher: Bencher, depth: u8) {
         let samples = vec![1u8; (SIDE * SIDE) as usize];

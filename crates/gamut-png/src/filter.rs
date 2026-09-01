@@ -322,43 +322,16 @@ pub fn filter_image(
     out
 }
 
-/// Picks the filter with the lowest sum-of-absolute-residuals for one scanline, leaving that
-/// filter's bytes in `best_bytes`.
-///
-/// Returning the winning bytes rather than just the winning filter is what makes this five passes
-/// over the row instead of six: the caller would otherwise re-run [`filter_row`] for the filter
-/// just chosen, having already computed exactly those bytes and thrown them away. Keeping them
-/// costs one `memcpy` per improvement, against a full filter pass per scanline.
-#[cfg_attr(
-    not(feature = "test-support"),
-    allow(
-        dead_code,
-        reason = "the benchmark stage seam's entry point; see crate::stages"
-    )
-)]
-pub fn choose_min_sum_abs(
-    cur: &[u8],
-    prev: &[u8],
-    bpp: usize,
-    scratch: &mut Vec<u8>,
-    best_bytes: &mut Vec<u8>,
-) -> FilterType {
-    choose_by(
-        Score::SumAbs,
-        cur,
-        prev,
-        bpp,
-        scratch,
-        best_bytes,
-        &mut Scratch::new(),
-    )
-}
-
 /// Tries all five filters and keeps the one `kind` ranks lowest, leaving its bytes in
 /// `best_bytes`.
 ///
 /// The first minimum wins, so a tie resolves to the earlier filter in None/Sub/Up/Average/Paeth
 /// order — deterministic, which the byte-reproducibility contract depends on.
+///
+/// Returning the winning bytes in `best_bytes` rather than just the winning filter is what makes
+/// this five passes over the row instead of six: the caller would otherwise re-run [`filter_row`]
+/// for the filter just chosen, having already computed exactly those bytes and thrown them away.
+/// Keeping them costs one `memcpy` per improvement, against a full filter pass per scanline.
 fn choose_by(
     kind: Score,
     cur: &[u8],
@@ -579,7 +552,15 @@ mod tests {
         // scores far below None.
         let row: Vec<u8> = (0..30u8).map(|i| i.wrapping_mul(3)).collect();
         let prev = vec![0u8; row.len()];
-        let chosen = choose_min_sum_abs(&row, &prev, 1, &mut Vec::new(), &mut Vec::new());
+        let chosen = choose_by(
+            Score::SumAbs,
+            &row,
+            &prev,
+            1,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Scratch::new(),
+        );
         assert_eq!(chosen, FilterType::Sub);
     }
 }
