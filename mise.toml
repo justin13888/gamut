@@ -253,6 +253,14 @@ run = "./tooling/mutants/run.sh --crate"
 # make a major bump unpublishable: Cargo records the new requirement in the packaged manifest,
 # while release-plz may try the dependent first. Cross-crate interoperability tests belong in a
 # package (normally the gamut umbrella) that has real dependency edges to both sides.
+# Mechanical conventions from `docs/testing.md` (issue #435): every integration-test file names
+# what it pins, every proptest configuration pins its seed and disables failure persistence, and
+# differential files lead with `oracle`. Three rules that each hold across the whole corpus today
+# and each fail for one reason -- a lint for a convention that does not yet hold is noise.
+[tasks.check-tests]
+description = "Enforce the mechanical test conventions in docs/testing.md"
+run = "./tooling/check-tests/run.sh"
+
 [tasks.check-release-deps]
 description = "Reject publishable dev-only workspace edges that release-plz cannot order"
 run = '''cargo metadata --no-deps --format-version 1 | jq -r -e '
