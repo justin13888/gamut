@@ -166,7 +166,9 @@ fn decode_code(r: &mut BitReader, white: bool) -> Result<u16> {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: truncated code")
                 .with_byte_offset((r.pos / 8) as u64)
         })?;
-        value = (value << 1) | u32::from(bit);
+        // `value * 2 + bit`, not `(value << 1) | bit`: the shift leaves a zero in the low bit
+        // where `|` and `^` agree, which made the bitwise form an equivalent mutant (#110).
+        value = value * 2 + u32::from(bit);
         len += 1;
         if let Some(&run) = dec.get(&(len, value)) {
             return Ok(run);
