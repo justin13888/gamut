@@ -79,10 +79,22 @@ impl Case {
 
     /// Encodes with gamut at the given knobs.
     fn gamut(&self, level: Level, filter: FilterStrategy, auto_reduce: bool) -> Vec<u8> {
+        self.gamut_with(level, filter, auto_reduce, false)
+    }
+
+    /// As [`Self::gamut`], with the opt-in transparent-colour cleanup as well.
+    fn gamut_with(
+        &self,
+        level: Level,
+        filter: FilterStrategy,
+        auto_reduce: bool,
+        cleanup: bool,
+    ) -> Vec<u8> {
         let encoder = PngEncoder::new()
             .with_compression(level)
             .with_filter(filter)
-            .with_auto_reduce(auto_reduce);
+            .with_auto_reduce(auto_reduce)
+            .with_transparent_cleanup(cleanup);
         let dims = Dimensions::new(self.width, self.height).expect("corpus dimensions are valid");
         let mut out = Vec::new();
         match &self.pixels {
@@ -161,25 +173,27 @@ const BEST: (Level, FilterStrategy, bool) = (Level::Best, FilterStrategy::BruteF
 fn print_size_table() {
     println!(
         "\ngamut-png output size, bytes (lower is better); bpp is the whole file over the pixel count:\n\n\
-         {:<17} {:>9} {:>9} {:>9} {:>9}  {:>9} {:>7} {:>7}",
-        "input", "raw", "default", "best", "libpng-9", "best/lp9", "bpp", "lp9 bpp"
+         {:<17} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>9} {:>7}",
+        "input", "raw", "default", "best", "+clean", "libpng-9", "best/lp9", "bpp"
     );
     for case in corpus() {
         let default = case.gamut(Level::Default, FilterStrategy::MinSumAbs, false);
         let best = case.gamut(BEST.0, BEST.1, BEST.2);
+        // The opt-in cleanup is off in every other column; this one shows what it is worth.
+        let cleaned = case.gamut_with(BEST.0, BEST.1, BEST.2, true);
         let libpng = case.libpng9();
         let delta = (best.len() as f64 / libpng.len().max(1) as f64 - 1.0) * 100.0;
         let bpp = |bytes: &[u8]| bytes.len() as f64 * 8.0 / f64::from(case.width * case.height);
         println!(
-            "{:<17} {:>9} {:>9} {:>9} {:>9}  {:>8.1}% {:>7.3} {:>7.3}",
+            "{:<17} {:>9} {:>9} {:>9} {:>9} {:>9}  {:>8.1}% {:>7.3}",
             case.name,
             case.raw_len(),
             default.len(),
             best.len(),
+            cleaned.len(),
             libpng.len(),
             delta,
             bpp(&best),
-            bpp(&libpng),
         );
     }
 }

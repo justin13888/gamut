@@ -58,6 +58,49 @@ pub(crate) fn index_bit_depth(palette_len: usize) -> u8 {
     }
 }
 
+/// Zeroes the colour channels of every fully transparent pixel, leaving alpha alone. Returns
+/// `None` when the image has no fully transparent pixel to clean.
+///
+/// Nothing a decoder renders changes: at `alpha == 0` the colour channels are invisible by
+/// definition. What changes is how well the image *compresses*, in three compounding ways:
+///
+/// 1. Transparent pixels all become identical, so `Sub` and `Paeth` filter a run of them to
+///    zeros instead of to whatever noise the source happened to carry.
+/// 2. [`analyze8`] keys its palette on the whole RGBA quad, so two invisible pixels that differ
+///    only in their unseen colour cost two palette entries today. This collapses every
+///    transparent pixel to a single entry.
+/// 3. It is the precondition for a `tRNS` colour key, which needs one colour to stand for
+///    "transparent".
+///
+/// One constant, not the neighbouring pixel's colour, and that choice was measured rather than
+/// assumed. Inheriting the predecessor flattens a *run* just as well, but leaves every invisible
+/// pixel a distinct RGBA quad, so (2) and (3) both fail: on an image alternating visible and
+/// invisible pixels it collapsed nothing at all and saved zero bytes.
+///
+/// This is *not* lossless in the strict byte sense the rest of this module keeps -- the stored
+/// samples change -- which is why it is opt-in via
+/// [`PngEncoder::with_transparent_cleanup`](crate::PngEncoder::with_transparent_cleanup) and off
+/// by default. `channels` must be 2 (grey + alpha) or 4 (RGBA); layouts without an alpha channel
+/// have nothing to clean and return `None`.
+pub(crate) fn clean_transparent(pixels: &[u8], channels: usize) -> Option<Vec<u8>> {
+    debug_assert!((1..=4).contains(&channels));
+    if !channels.is_multiple_of(2) {
+        return None; // no alpha channel
+    }
+    let colour = channels - 1; // colour channels are everything before alpha
+    if !pixels.chunks_exact(channels).any(|px| px[colour] == 0) {
+        return None;
+    }
+
+    let mut out = pixels.to_vec();
+    for px in out.chunks_exact_mut(channels) {
+        if px[colour] == 0 {
+            px[..colour].fill(0);
+        }
+    }
+    Some(out)
+}
+
 /// The RGBA quad a pixel of any supported layout presents: grey replicates into R=G=B, and layouts
 /// without an alpha channel (the odd channel counts) are opaque.
 fn pixel_key(px: &[u8], channels: usize) -> [u8; 4] {

@@ -39,6 +39,7 @@ pub struct PngEncoder {
     filter: FilterStrategy,
     ancillary: Ancillary,
     auto_reduce: bool,
+    clean_transparent: bool,
     backends: Registry<dyn IdatDeflater + Send>,
 }
 
@@ -59,6 +60,7 @@ impl PngEncoder {
             filter: FilterStrategy::MinSumAbs,
             ancillary: Ancillary::default(),
             auto_reduce: false,
+            clean_transparent: false,
             backends: Registry::default(),
         }
     }
@@ -119,6 +121,24 @@ impl PngEncoder {
     #[must_use]
     pub fn with_filter(mut self, filter: FilterStrategy) -> Self {
         self.filter = filter;
+        self
+    }
+
+    /// Rewrites the colour channels of fully transparent pixels before encoding, so runs of
+    /// them compress instead of carrying whatever the source left there.
+    ///
+    /// Nothing a decoder renders changes -- at `alpha == 0` the colour channels are invisible by
+    /// definition -- but the stored samples do, so this is **not** lossless in the strict byte
+    /// sense [`with_auto_reduce`](Self::with_auto_reduce) keeps. That is why it is off by
+    /// default and separate from it: this crate's other reductions are exactly reversible, and
+    /// this one is only reversible in what you can see.
+    ///
+    /// Worth enabling for sprites, icons and UI assets, where invisible colour noise is common
+    /// and can cost real bytes. No effect on an image with no fully transparent pixel, or on a
+    /// layout with no alpha channel.
+    #[must_use]
+    pub fn with_transparent_cleanup(mut self, enabled: bool) -> Self {
+        self.clean_transparent = enabled;
         self
     }
 
@@ -339,6 +359,14 @@ impl PngEncoder {
             |_| {},
             out,
         )
+    }
+
+    /// The cleaned samples, or `None` to use the caller's buffer unchanged — either because the
+    /// knob is off or because the image has no fully transparent pixel.
+    fn cleaned_samples(&self, samples: &[u8], channels: usize) -> Option<Vec<u8>> {
+        self.clean_transparent
+            .then(|| reduce::clean_transparent(samples, channels))
+            .flatten()
     }
 
     /// Encodes a 16-bit-per-sample image, serialising samples big-endian (PNG's network byte order).
@@ -573,22 +601,42 @@ impl EncodeImage<Rgb8> for PngEncoder {
 }
 impl EncodeImage<Rgba8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, Rgba8>, out: &mut Vec<u8>) -> Result<usize> {
+        let cleaned = self.cleaned_samples(image.as_samples(), 4);
+        let samples = cleaned.as_deref().unwrap_or_else(|| image.as_samples());
         if self.auto_reduce
-            && let Some(reduced) = reduce::analyze8(image.as_samples(), 4)
+            && let Some(reduced) = reduce::analyze8(samples, 4)
         {
             return self.write_reduced(image.dimensions(), reduced, out);
         }
-        self.encode_8bit(image, ColorType::TruecolorAlpha, out)
+        let dims = image.dimensions();
+        self.write_png(
+            (dims.width, dims.height),
+            samples,
+            ColorType::TruecolorAlpha,
+            8,
+            |_| {},
+            out,
+        )
     }
 }
 impl EncodeImage<GrayAlpha8> for PngEncoder {
     fn encode_image(&self, image: ImageRef<'_, GrayAlpha8>, out: &mut Vec<u8>) -> Result<usize> {
+        let cleaned = self.cleaned_samples(image.as_samples(), 2);
+        let samples = cleaned.as_deref().unwrap_or_else(|| image.as_samples());
         if self.auto_reduce
-            && let Some(reduced) = reduce::analyze8(image.as_samples(), 2)
+            && let Some(reduced) = reduce::analyze8(samples, 2)
         {
             return self.write_reduced(image.dimensions(), reduced, out);
         }
-        self.encode_8bit(image, ColorType::GrayscaleAlpha, out)
+        let dims = image.dimensions();
+        self.write_png(
+            (dims.width, dims.height),
+            samples,
+            ColorType::GrayscaleAlpha,
+            8,
+            |_| {},
+            out,
+        )
     }
 }
 impl EncodeImage<Gray16> for PngEncoder {

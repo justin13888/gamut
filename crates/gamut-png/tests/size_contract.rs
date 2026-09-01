@@ -96,6 +96,7 @@ const BUDGETS: &[Budget] = &[
               The estimate sees 16 664 against 65 536 and picks palette by 4x; the crossover is \
               near 160x160. The budget records the loss; a cost model that weighs incompressible \
               overhead against compressible pixels is what tightens it.",
+    },
 ];
 
 /// Half the bench's side, so this file stays fast enough for the coverage and mutation lanes.
