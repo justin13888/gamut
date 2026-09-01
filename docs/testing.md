@@ -223,3 +223,8 @@ Compile-time assertions (`gamut-codec-abi/src/lib.rs`'s `const _` ABI pins), the
 gates, doctests (`mise run test-doc`), benchmarks, and the excluded
 `tooling/gamut-dng-real-conformance` tier. These are real checks; they are simply not tests this
 document places or classifies.
+
+Benchmarks have their own document, [`benchmarking.md`](benchmarking.md): where one lives, what its
+tables must record, and where the numbers are kept. The boundary is that a benchmark reports and
+only a test can fail a build, so a size claim that must not regress is a **size / effort contract**
+here — `gamut-png/tests/size_contract.rs` and `gamut-webp/tests/effort.rs` — not a bench.
