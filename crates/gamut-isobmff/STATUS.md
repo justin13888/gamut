@@ -66,9 +66,17 @@ is opaque — by the `gamut isobmff` CLI (`inspect`/`remux`/`build`) and two ora
 
 ## Exported walk primitives
 
-`BoxReader` and `RawBox` are re-exported from the crate root so a byte-accounting consumer
-(`gamut-heic`, issue #238) can map every byte of a file to a box: `RawBox::offset` is the absolute
-header offset within the reader's slice, and `BoxReader::position`/`remaining` bracket the cursor.
+Byte accounting itself is `walk_segments`/`walk_meta_children` (issue #436): every input byte maps
+to exactly one `Segment` — a top-level box, an appended foreign stream from a second `ftyp`, or a
+trailer — and `walk_meta_children` does the same one level down for boxes `read` does not consume.
+It stops on exactly `read`'s rules, so the accounting walk and the semantic parse cannot disagree
+about where the primary stream ends. It is deliberately not folded into `read`, which is strictly
+stricter (it rejects `moov`/`trak` where it meets them); the two are documented together in
+`src/segments.rs`.
+
+`BoxReader` and `RawBox` remain re-exported from the crate root so a consumer can account for
+something the shared walk does not model: `RawBox::offset` is the absolute header offset within
+the reader's slice, and `BoxReader::position`/`remaining` bracket the cursor.
 `RawBox::user_type` identifies UUID boxes while `RawBox::payload()` omits their 16-byte user-type
 prefix without changing the existing `body` view. The public surface is the walk only
 (`new`/`next_box`/`position`/`remaining` + `RawBox` fields/`payload`); scalar field readers and the
