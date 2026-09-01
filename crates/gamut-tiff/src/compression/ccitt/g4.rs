@@ -50,11 +50,12 @@ fn reference_changes(refr: &[usize], a0: i32, a0_color: u8, width: usize) -> (us
         k += 1;
     }
     // The colour to the right of `refr[k]` is black when `k` is even. Skip one if it doesn't match.
-    if k < refr.len() {
-        let color = u8::from(k % 2 == 0);
-        if color != opposite {
-            k += 1;
-        }
+    if refr.get(k).is_none() {
+        return (width, width);
+    }
+    let color = u8::from(k % 2 == 0);
+    if color != opposite {
+        k += 1;
     }
     let b1 = refr.get(k).copied().unwrap_or(width);
     let b2 = refr.get(k + 1).copied().unwrap_or(width);
@@ -125,8 +126,20 @@ pub fn g4_encode_strip(
 }
 
 /// Sets pixels `[from, to)` of `dst` to `color` (only black needs writing; `dst` starts white).
-fn fill(dst: &mut [u8], from: usize, to: usize, color: u8, width: usize) {
-    if color == 1 {
+/// The colour code for black, as `changing_elements` and `decode_row` carry it.
+const BLACK: u8 = 1;
+
+/// Sets `from..to` black, or leaves the span white.
+///
+/// Takes a `bool` rather than the raw colour code on purpose. It used to take `u8` and act only
+/// `if color == 1`, which silently ignored every other value -- and that made
+/// `fill(dst, a1, a2, 1 - a0_color, ..)` unfalsifiable: with `a0_color` in `{0, 1}`, the mutation
+/// `1 - a0_color` -> `1 + a0_color` yields `{1, 2}` against `{1, 0}`, and since neither 0 nor 2
+/// is 1 the two behave identically. The mutant survived the suite because it could not be
+/// distinguished, not because a test was missing (#110). Asking for a bool at the boundary moves
+/// the decision to the call site, where `== BLACK` and `!= BLACK` are killable.
+fn fill(dst: &mut [u8], from: usize, to: usize, black: bool, width: usize) {
+    if black {
         for p in from..to.min(width) {
             dst[p / 8] |= 0x80 >> (p % 8);
         }
@@ -189,7 +202,7 @@ fn decode_row(
         let start = a0.max(0) as usize;
         match read_mode(r)? {
             Mode::Pass => {
-                fill(dst, start, b2, a0_color, width);
+                fill(dst, start, b2, a0_color == BLACK, width);
                 a0 = b2 as i32;
             }
             Mode::Horizontal => {
@@ -197,13 +210,13 @@ fn decode_row(
                 let run2 = decode_run(r, a0_color != 0)?;
                 let a1 = (start + run1).min(width);
                 let a2 = (a1 + run2).min(width);
-                fill(dst, start, a1, a0_color, width);
-                fill(dst, a1, a2, 1 - a0_color, width);
+                fill(dst, start, a1, a0_color == BLACK, width);
+                fill(dst, a1, a2, a0_color != BLACK, width);
                 a0 = a2 as i32;
             }
             Mode::Vertical(d) => {
                 let a1 = (b1 as i32 + d).clamp(0, width as i32) as usize;
-                fill(dst, start, a1, a0_color, width);
+                fill(dst, start, a1, a0_color == BLACK, width);
                 a0 = a1 as i32;
                 a0_color = 1 - a0_color;
             }
