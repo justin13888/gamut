@@ -548,6 +548,45 @@ mod tests {
         assert_eq!(Vp8xHeader::from_payload(&p).unwrap(), tall);
     }
 
+    /// The canvas product bound is `<= 2^32 - 1`, so a product of *exactly* `2^32 - 1` is legal.
+    ///
+    /// RFC 9649 §2.7: "the product of Canvas Width and Canvas Height MUST be at most 2^32 - 1".
+    /// The straddling pair is `65537 x 65535`, whose product is `65536^2 - 1` — exactly the bound,
+    /// and both dimensions inside the 24-bit fields. Without this, nothing distinguished `>` from
+    /// `>=` in the check: every other canvas test is either comfortably inside the bound or well
+    /// past it, so the boundary itself was never evaluated (#110).
+    #[test]
+    fn vp8x_accepts_a_canvas_product_of_exactly_u32_max() {
+        let exact = Vp8xHeader {
+            canvas_width: 65_537,
+            canvas_height: 65_535,
+            ..Default::default()
+        };
+        assert_eq!(
+            u64::from(exact.canvas_width) * u64::from(exact.canvas_height),
+            u64::from(u32::MAX),
+            "the fixture must sit exactly on the bound, or it tests nothing"
+        );
+        assert!(
+            exact.to_payload().is_ok(),
+            "a product of exactly 2^32 - 1 is at most 2^32 - 1"
+        );
+
+        // And one more pixel over is refused, so the pair brackets the boundary.
+        let over = Vp8xHeader {
+            canvas_width: 65_538,
+            canvas_height: 65_535,
+            ..Default::default()
+        };
+        let err = over
+            .to_payload()
+            .expect_err("one past the bound is refused");
+        assert!(
+            err.to_string().contains("exceeds 2^32 - 1"),
+            "wrong rejection reason: {err}"
+        );
+    }
+
     #[test]
     fn vp8x_rejects_a_canvas_the_format_cannot_express() {
         let ok = Vp8xHeader {
@@ -1009,9 +1048,31 @@ mod tests {
             let error = WebpLayout::parse(&file).expect_err("out of order");
             assert_eq!(error.origin(), Some("gamut-riff"));
             assert_eq!(error.kind(), ErrorKind::InvalidInput);
+            // The offset is asserted by VALUE, not merely `is_some()`. The walk advances by
+            // `CHUNK_HEADER_LEN + payload + pad_len(payload)` per chunk, and `is_some()` holds for
+            // every arithmetic mutation of that sum -- `+` to `-` or `*` alike -- because the
+            // offending chunk is still reached and still reported, just at a nonsense position
+            // (#110). Recomputing the expected offset from the fixture is what makes the sum
+            // itself observable.
+            let mut boundaries = vec![12u64];
+            for (_, payload) in chunks.iter() {
+                let last = *boundaries
+                    .last()
+                    .expect("seeded with the RIFF header length");
+                boundaries.push(
+                    last + (CHUNK_HEADER_LEN + payload.len() + pad_len(payload.len() as u32))
+                        as u64,
+                );
+            }
+            let reported = error.byte_offset().expect("an offset is reported");
             assert!(
-                error.byte_offset().is_some(),
-                "the offending chunk's offset is reported"
+                boundaries.contains(&reported),
+                "reported offset {reported} is not a chunk boundary; boundaries are {boundaries:?}"
+            );
+            assert!(
+                reported > 12,
+                "the first chunk is never the out-of-order one, so 12 would mean the walk \
+                 never advanced"
             );
         }
     }
