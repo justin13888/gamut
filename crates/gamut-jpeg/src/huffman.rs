@@ -472,9 +472,12 @@ mod tests {
     }
 
     #[test]
-    fn codes_are_prefix_free_and_unique() {
+    fn the_standard_tables_are_prefix_free() {
         // No code is a prefix of another (the defining property of a valid Huffman code): for every
         // pair of used symbols, the shorter code must differ from the longer code's leading bits.
+        //
+        // This subsumes uniqueness, which the name used to claim separately: two identical codes of
+        // equal length are a prefix collision, so the check below already rejects them.
         for spec in [&STD_LUMA_DC, &STD_CHROMA_DC, &STD_LUMA_AC, &STD_CHROMA_AC] {
             let t = EncTable::from_spec(spec);
             let used: Vec<(u16, u8)> = (0..=255u16).filter_map(|s| t.lookup(s as u8)).collect();
