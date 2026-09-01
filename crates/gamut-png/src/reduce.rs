@@ -364,6 +364,40 @@ mod tests {
         }
     }
 
+    /// A translucent palette pays for its tRNS table, and the `+ 24` chunk overhead is real.
+    ///
+    /// The companion to `palette_overhead_decides_against_rgb_at_the_margin`, which uses an
+    /// all-opaque palette and so could not see this (#110). In `3*C + (trns ? C : 0) + 24`, the
+    /// mutation `+ 24` -> `* 24` binds to the conditional, not the sum:
+    ///
+    ///   opaque      `... + 0 * 24`          = the estimate merely loses 24 bytes
+    ///   translucent `... + C * 24`          = 4800 instead of 224, a 21x error
+    ///
+    /// So the opaque fixture's 76-byte margin absorbs it and a translucent one does not. Here the
+    /// estimate is 1124 against a 1200-byte raw input: reduction wins by 76 bytes. Under the
+    /// mutant it becomes 5700, exceeds the input, and `analyze8` declines to reduce at all --
+    /// which is what makes this a decisive kill rather than a tuned one.
+    #[test]
+    fn a_translucent_palette_pays_for_its_trns_table() {
+        let mut rgba = Vec::new();
+        for i in 0..300u32 {
+            // 200 distinct entries, every one translucent, none grey.
+            let c = (i % 200) as u8;
+            rgba.extend_from_slice(&[c, c.wrapping_add(64), 200, 128]);
+        }
+        match analyze8(&rgba, 4) {
+            Some(Reduced::Indexed { depth, trns, .. }) => {
+                assert_eq!(depth, 8, "200 entries need the 8-bit index depth");
+                assert_eq!(
+                    trns.map(|t| t.len()),
+                    Some(200),
+                    "every entry is translucent, so none is trimmed"
+                );
+            }
+            _ => panic!("expected Indexed"),
+        }
+    }
+
     /// Trailing opaque entries are trimmed from tRNS; the first non-opaque one is kept.
     ///
     /// Pins the loop whose length guard was removed as redundant: it stops at the last entry that
