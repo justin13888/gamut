@@ -357,13 +357,19 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
             // accounted as one opaque run rather than dropped (§13.2's tolerance, extended to
             // damage the spec does not describe).
             Err(_) => {
+                // `next_chunk` returns `Ok(None)` when nothing is left, so reaching an error means
+                // bytes remain and this range is never empty. No guard: a `start < png.len()`
+                // check here can never be false, which makes it dead code and an equivalent
+                // mutant rather than a safety net.
                 let start = reader.offset();
-                if start < png.len() {
-                    segments.push(Segment {
-                        range: start..png.len(),
-                        kind: SegmentKind::Truncated,
-                    });
-                }
+                debug_assert!(
+                    start < png.len(),
+                    "a framing error leaves bytes unaccounted"
+                );
+                segments.push(Segment {
+                    range: start..png.len(),
+                    kind: SegmentKind::Truncated,
+                });
                 break;
             }
         }
@@ -424,6 +430,16 @@ fn pass_stats(header: &ihdr::Ihdr) -> Vec<PassStats> {
     out
 }
 
+/// Whether a filtered stream of this length is worth inflating: non-empty, and within the budget.
+///
+/// Split out so the boundary is reachable from a unit test. Exercising it through [`deconstruct`]
+/// would need a real 64 MiB stream to sit either side of the cap, and a hostile IHDR alone cannot
+/// distinguish `>` from `>=` or `==` — every over-budget file is rejected a second time when the
+/// inflated length fails to match, so the guard's exact comparison is invisible from outside.
+fn within_inflation_budget(filtered_len: usize) -> bool {
+    filtered_len != 0 && filtered_len <= MAX_FILTERED_BYTES
+}
+
 /// Inflates the IDAT stream and counts the filter byte leading each scanline.
 ///
 /// `None` whenever the count cannot be trusted: the stream is over budget, corrupt, truncated,
@@ -434,7 +450,7 @@ fn filter_histogram(
     filtered_len: usize,
     passes: &[PassStats],
 ) -> Option<FilterHistogram> {
-    if filtered_len == 0 || filtered_len > MAX_FILTERED_BYTES {
+    if !within_inflation_budget(filtered_len) {
         return None;
     }
     let stream = inflate::inflate_zlib(idat, filtered_len).ok()?;
@@ -451,4 +467,81 @@ fn filter_histogram(
         }
     }
     Some(FilterHistogram { counts })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ColorType;
+
+    /// A report with the given segment ranges and file length. Built by hand because
+    /// [`deconstruct`] cannot produce a malformed tiling: it is correct by construction, so every
+    /// negative case for [`PngReport::is_fully_classified`] has to be assembled here. That is also
+    /// why these live inline — the predicate is only falsifiable from inside the crate.
+    fn report_with(ranges: &[(usize, usize)], file_len: usize) -> PngReport {
+        PngReport {
+            file_len,
+            header: PngHeader {
+                width: 1,
+                height: 1,
+                bit_depth: 8,
+                color_type: ColorType::Truecolor,
+                interlaced: false,
+            },
+            segments: ranges
+                .iter()
+                .map(|&(start, end)| Segment {
+                    range: start..end,
+                    kind: SegmentKind::Trailer,
+                })
+                .collect(),
+            chunks: Vec::new(),
+            idat_compressed: 0,
+            filtered_len: 0,
+            passes: Vec::new(),
+            filters: None,
+        }
+    }
+
+    #[test]
+    fn contiguous_segments_covering_the_file_are_fully_classified() {
+        assert!(report_with(&[(0, 8), (8, 20), (20, 33)], 33).is_fully_classified());
+    }
+
+    #[test]
+    fn a_gap_between_segments_is_not_fully_classified() {
+        // Every segment is non-empty and the last still reaches `file_len`, so only the
+        // start-chaining half of the predicate can reject this.
+        assert!(!report_with(&[(0, 8), (9, 33)], 33).is_fully_classified());
+    }
+
+    #[test]
+    fn an_empty_segment_is_not_fully_classified() {
+        // The mirror case: the chain is unbroken, so only the non-empty half can reject it.
+        assert!(!report_with(&[(0, 8), (8, 8), (8, 33)], 33).is_fully_classified());
+    }
+
+    #[test]
+    fn segments_must_start_at_zero_and_reach_the_end() {
+        assert!(!report_with(&[(4, 33)], 33).is_fully_classified());
+        assert!(!report_with(&[(0, 20)], 33).is_fully_classified());
+        assert!(!report_with(&[], 33).is_fully_classified());
+        // ...and a zero-length file with no segments is vacuously covered.
+        assert!(report_with(&[], 0).is_fully_classified());
+    }
+
+    #[test]
+    fn the_inflation_budget_is_inclusive_and_rejects_an_empty_stream() {
+        // Exactly at the cap is worth inflating; one byte past is not. A zero-length stream has
+        // no scanlines to count and is rejected before any work.
+        assert!(!within_inflation_budget(0));
+        assert!(within_inflation_budget(1));
+        assert!(within_inflation_budget(MAX_FILTERED_BYTES));
+        assert!(!within_inflation_budget(MAX_FILTERED_BYTES + 1));
+    }
+
+    #[test]
+    fn an_overlap_is_not_fully_classified() {
+        assert!(!report_with(&[(0, 20), (10, 33)], 33).is_fully_classified());
+    }
 }

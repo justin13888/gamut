@@ -324,6 +324,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cleaning_declines_when_there_is_nothing_invisible_to_clean() {
+        // `None` rather than an unchanged copy: the encoder must be able to tell "no work" from
+        // "work that happened to change nothing", or it allocates a whole image for nothing.
+        let opaque: Vec<u8> = (0..16u8).flat_map(|i| [i, i + 1, i + 2, 255]).collect();
+        assert!(clean_transparent(&opaque, 4).is_none());
+
+        // Layouts with no alpha channel have nothing to clean, whatever the samples say.
+        assert!(clean_transparent(&opaque, 3).is_none());
+        assert!(clean_transparent(&opaque, 1).is_none());
+    }
+
+    #[test]
+    fn cleaning_zeroes_invisible_colour_and_leaves_everything_else() {
+        let src: Vec<u8> = vec![
+            10, 20, 30, 255, // visible
+            40, 50, 60, 0, // invisible: colour must go
+            70, 80, 90, 128, // partially transparent: still visible, must stay
+        ];
+        let cleaned = clean_transparent(&src, 4).expect("there is a transparent pixel");
+        assert_eq!(
+            cleaned,
+            vec![
+                10, 20, 30, 255, //
+                0, 0, 0, 0, //
+                70, 80, 90, 128,
+            ]
+        );
+    }
+
+    #[test]
+    fn cleaning_grey_alpha_zeroes_only_the_grey_channel() {
+        let src: Vec<u8> = vec![200, 255, 111, 0, 90, 1];
+        let cleaned = clean_transparent(&src, 2).expect("there is a transparent pixel");
+        assert_eq!(cleaned, vec![200, 255, 0, 0, 90, 1]);
+    }
+
+    #[test]
     fn drops_opaque_alpha() {
         // Opaque, non-grey RGBA -> RGB.
         let rgba = [10, 20, 30, 255, 40, 50, 60, 255];

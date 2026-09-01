@@ -502,7 +502,7 @@ impl PngEncoder {
         let mut native_encoding = Vec::new();
         native(&mut native_encoding)?;
 
-        let winner = if native_encoding.len() < palette_encoding.len() {
+        let winner = if prefers_native(native_encoding.len(), palette_encoding.len()) {
             native_encoding
         } else {
             palette_encoding
@@ -587,6 +587,15 @@ impl PngEncoder {
             }
         }
     }
+}
+
+/// Whether the unreduced encoding beats the palette one, for [`PngEncoder::write_reduced_or_native`].
+///
+/// **A tie keeps the palette**, which decodes with less work for the same bytes. Split out because
+/// engineering two encodings of the same image to land on exactly equal lengths is not something a
+/// fixture can do reliably, so the tie is only assertable here.
+fn prefers_native(native_len: usize, palette_len: usize) -> bool {
+    native_len < palette_len
 }
 
 /// Writes the zlib datastream as one or more consecutive IDAT chunks.
@@ -825,6 +834,13 @@ mod tests {
         assert_eq!(written, alone, "only the PNG's own bytes are counted");
         assert_eq!(appended.len(), 17 + alone);
         assert_eq!(&appended[17..], &fresh[..], "the prefix is left untouched");
+    }
+
+    #[test]
+    fn a_tie_between_palette_and_native_keeps_the_palette() {
+        assert!(prefers_native(10, 11), "smaller native wins");
+        assert!(!prefers_native(11, 10), "smaller palette wins");
+        assert!(!prefers_native(10, 10), "a tie keeps the palette");
     }
 
     #[test]

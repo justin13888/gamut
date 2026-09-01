@@ -9,7 +9,7 @@
 
 mod common;
 
-use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8};
+use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut_png::{
     ChunkStats, FilterStrategy, FilterType, PngEncoder, Segment, SegmentKind, deconstruct,
 };
@@ -128,6 +128,71 @@ fn chunk_totals_match_an_independent_scan() {
     assert_eq!(report.framing_bytes(), report.chunks.len() * 12);
 }
 
+/// A chunk type that appears more than once must accumulate, not overwrite.
+///
+/// Every other fixture here carries at most one chunk of each type, so the accumulate arm of the
+/// chunk table never ran: `count` stayed at the 1 it is inserted with and `payload_bytes` at the
+/// first chunk's length, and no assertion could tell.
+#[test]
+fn repeated_chunk_types_accumulate_count_and_payload() {
+    let first: &[u8] = b"Author\0alice";
+    let second: &[u8] = b"Comment\0a considerably longer comment";
+    let png = common::png_from_chunks(&[
+        common::chunk(b"IHDR", &common::ihdr_payload(4, 4, 8, 2, 0)),
+        common::chunk(b"tEXt", first),
+        common::chunk(b"tEXt", second),
+        common::chunk(b"IDAT", &common::zlib(&[0u8; 4 * (4 * 3 + 1)])),
+        common::chunk(b"IEND", &[]),
+    ]);
+
+    let report = deconstruct(&png).expect("deconstruct");
+    assert_covers(&report.segments, png.len());
+
+    let text = report.chunk(b"tEXt").expect("tEXt accounted");
+    assert_eq!(text.count, 2, "both chunks counted");
+    assert_eq!(
+        text.payload_bytes,
+        first.len() + second.len(),
+        "payloads summed, not overwritten"
+    );
+    assert_eq!(text.framing_bytes(), 24, "12 framing bytes per chunk");
+    assert_eq!(text.total_bytes(), first.len() + second.len() + 24);
+    // The table lists each type once, in first-appearance order.
+    assert_eq!(
+        report
+            .chunks
+            .iter()
+            .map(|c| c.chunk_type)
+            .collect::<Vec<_>>(),
+        vec![*b"IHDR", *b"tEXt", *b"IDAT", *b"IEND"]
+    );
+}
+
+/// A stream large enough to split across several IDAT chunks: the same accumulation, on the path
+/// that actually produces it in production rather than a hand-built file.
+#[test]
+fn a_multi_idat_encode_accumulates_every_idat() {
+    // Incompressible, so the zlib stream stays far above the 64 KiB per-chunk cap.
+    let (w, h) = (256u32, 256u32);
+    let src = common::corpus::noise_rgb(w);
+    let dims = Dimensions::new(w, h).expect("valid dimensions");
+    let image = ImageRef::<Rgb8>::new(&src, dims).expect("buffer matches dimensions");
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .encode_image(image, &mut png)
+        .expect("encode");
+
+    let report = deconstruct(&png).expect("deconstruct");
+    assert_covers(&report.segments, png.len());
+    let idat = report.chunk(b"IDAT").expect("IDAT accounted");
+    assert!(idat.count > 1, "the fixture must actually split: {idat:?}");
+    assert_eq!(
+        idat.payload_bytes, report.idat_compressed,
+        "the chunk table and the compressed total are the same bytes counted twice"
+    );
+    assert!(report.is_intact(), "{report:?}");
+}
+
 #[test]
 fn trailing_bytes_after_iend_are_a_trailer() {
     let mut png = encode_rgb(8, 8);
@@ -234,6 +299,44 @@ fn the_filter_histogram_matches_the_filter_libpng_was_forced_to_use() {
             "every row used {expected:?} (mask {mask:#04x})"
         );
     }
+}
+
+/// The histogram must advance one scanline at a time.
+///
+/// Every other histogram assertion here forces a single filter for the whole image, which cannot
+/// tell a correct per-row walk from one that re-reads the same byte: both report `height` of the
+/// one filter. This fixture's rows choose differently, so a stalled cursor collapses the
+/// distribution to a single bucket and is visible.
+#[test]
+fn the_histogram_walks_each_scanline_not_the_first_one_repeatedly() {
+    const SIDE: u32 = 64;
+    let src = common::corpus::sprite_rgba(SIDE);
+    let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
+    let image = ImageRef::<Rgba8>::new(&src, dims).expect("buffer matches dimensions");
+    let mut png = Vec::new();
+    PngEncoder::new()
+        .with_filter(FilterStrategy::MinSumAbs)
+        .encode_image(image, &mut png)
+        .expect("encode");
+
+    let report = deconstruct(&png).expect("deconstruct");
+    let h = report.filters.expect("sound stream");
+    assert_eq!(h.total(), SIDE, "one filter byte per scanline");
+
+    let used = [
+        FilterType::None,
+        FilterType::Sub,
+        FilterType::Up,
+        FilterType::Average,
+        FilterType::Paeth,
+    ]
+    .into_iter()
+    .filter(|&f| h.count(f) > 0)
+    .count();
+    assert!(
+        used >= 2,
+        "this fixture's rows must not all choose the same filter, got {used} distinct"
+    );
 }
 
 #[test]
