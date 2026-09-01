@@ -8,7 +8,7 @@ transforms from parsed ICC profiles and applies them to pixels.
 Part of the [gamut](../../README.md) workspace, this crate exists to be the transform *engine*
 over [`gamut-icc`](../gamut-icc)'s parsed profiles:
 
-- **Memory-safe.** `#![forbid(unsafe_code)]`; pure scalar `f64` math over borrowed sample
+- **Memory-safe.** 100% safe Rust (`#![deny(unsafe_code)]`); pure scalar `f64` math over borrowed sample
   buffers, no I/O.
 - **Clean-slate from the spec, behaviour pinned to the reference CMM.** Data layouts follow
   **ICC.1:2022** ([`references/icc`](../../references/icc)); where ICC.1 is silent on CMM

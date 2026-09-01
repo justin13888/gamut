@@ -90,7 +90,9 @@
 //! assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9]); // EOI
 //! # Ok::<(), gamut_core::Error>(())
 //! ```
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
+// the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
+#![deny(unsafe_code)]
 
 pub mod backend;
 

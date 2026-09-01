@@ -18,7 +18,7 @@ Graphics, W3C 3rd edition) images:
   values. Hostile input is bounded: configurable dimension caps and byte budgets guard every
   allocation, and zlib bombs (IDAT or metadata) fail cleanly. Inflation uses `miniz_oxide`, the
   workspace's blessed decode-side inflate.
-- **Memory-safe.** `#![forbid(unsafe_code)]`.
+- **Memory-safe.** 100% safe Rust (`#![deny(unsafe_code)]`).
 
 ## Usage
 

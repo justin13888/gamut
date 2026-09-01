@@ -14,7 +14,7 @@
 //! # Contract
 //!
 //! Every function is pure, total, deterministic math on caller-provided values — no
-//! allocation, no dependencies, `#![forbid(unsafe_code)]`, and no `Result`s: nothing here is
+//! allocation, no dependencies, no `unsafe`, and no `Result`s: nothing here is
 //! data-dependent fallible. Semantic preconditions on configuration parameters (`n`, `r`,
 //! `bits`, `den` — encoder configuration, never untrusted data) are asserts documented
 //! under `# Panics`; arithmetic headroom limits are documented per function and guarded by
@@ -32,7 +32,9 @@
 //! // The shared forward-quantize rounding divides to the nearest level, ties away from zero.
 //! assert_eq!(round_div_nearest(-10, 4), -3);
 //! ```
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
+// the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
+#![deny(unsafe_code)]
 
 #[cfg(test)]
 mod testrng;

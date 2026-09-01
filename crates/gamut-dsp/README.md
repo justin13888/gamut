@@ -29,7 +29,7 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
   by exact golden vectors in-crate and by the dav1d/libaom conformance cross-checks through the
   2-D pipeline.
 - **Stay pure.** Every function is total, deterministic math on caller memory — in-place slices
-  or fixed-size arrays, no allocation, **zero dependencies**, `#![forbid(unsafe_code)]`.
+  or fixed-size arrays, no allocation, **zero dependencies**, no `unsafe`.
 
 ## Usage
 

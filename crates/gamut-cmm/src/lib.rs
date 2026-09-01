@@ -90,7 +90,9 @@
 //! assert_eq!(dst, [0.75, 0.5, 1.0]); // 2.0 → 1.25 → clamped to 1.0
 //! # Ok::<(), gamut_cmm::CmmError>(())
 //! ```
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
+// the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
+#![deny(unsafe_code)]
 
 pub mod bpc;
 pub mod chain;

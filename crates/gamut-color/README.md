@@ -25,7 +25,7 @@ Part of the [gamut](../../README.md) workspace, this crate exists to:
   (the shared 3×3 helpers) modules. This math is **Tier-1** (correctness only): it uses `std`
   `f64`, so it is not bit-reproducible across platforms — see
   [`references/color/README.md`](../../references/color/README.md).
-- **Stay memory-safe.** `#![forbid(unsafe_code)]`.
+- **Stay memory-safe.** 100% safe Rust (`#![deny(unsafe_code)]`).
 
 ## Usage
 
