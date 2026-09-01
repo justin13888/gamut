@@ -391,10 +391,10 @@ mod tests {
     /// Asserts the structural walk classified the whole file — zero tolerance: alignment
     /// padding must come back as typed `Padding` segments, not tolerated gaps.
     fn assert_clean_coverage(r: &DeconstructReport) {
-        assert!(
-            r.segments.is_fully_classified(),
-            "not fully classified: {r:?}"
-        );
+        // Through the public wrapper, not `r.segments` directly. Reaching past it left
+        // `DeconstructReport::is_fully_classified` asserted by nothing, so it could be replaced
+        // with either constant and the suite stayed green (#110).
+        assert!(r.is_fully_classified(), "not fully classified: {r:?}");
         assert!(r.unknown_fields.is_empty(), "unknown fields: {r:?}");
     }
 
@@ -560,6 +560,15 @@ mod tests {
             )),
             "{report:?}"
         );
+        // The other half of the verdict, and the only fixture in the suite that reaches it: the
+        // strips are declared at offset 1000 in a file far shorter than that, so the walk records
+        // an out-of-bounds segment and the archival claim is false. Without this the *negative*
+        // side of `is_fully_classified` was never observed at all.
+        assert!(
+            !report.is_fully_classified(),
+            "a strip past EOF must fail the archival verdict: {report:?}"
+        );
+        assert_eq!(report.segments.out_of_bounds.len(), 1, "{report:?}");
     }
 
     /// Two entries legitimately sharing one out-of-line value (TIFF permits it) is informational
