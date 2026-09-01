@@ -1167,8 +1167,27 @@ mod tests {
 
         // Both values still read back, so the pooled one was relocated rather than truncated.
         let parsed = read(&bytes).expect("read");
-        assert_eq!(parsed.ifds[0].get(37500), Some(&Value::Undefined(pinned)));
-        assert_eq!(parsed.ifds[0].get(700), Some(&Value::Undefined(pooled)));
+        assert_eq!(
+            parsed.ifds[0].get(37500),
+            Some(&Value::Undefined(pinned.clone()))
+        );
+        assert_eq!(
+            parsed.ifds[0].get(700),
+            Some(&Value::Undefined(pooled.clone()))
+        );
+
+        // Where it landed, not merely that it moved. The jump goes to the word-aligned end of the
+        // pin, so an off-by-one in that alignment relocates the value correctly and still puts it
+        // in the wrong place -- which every assertion above would accept.
+        let pooled_at = bytes
+            .windows(pooled.len())
+            .position(|w| w == pooled.as_slice())
+            .expect("the pooled value is in the file");
+        assert_eq!(
+            pooled_at as u64,
+            align_word(pin_at + pinned.len() as u64),
+            "the pool resumes at the word-aligned end of the pin"
+        );
 
         // And the jump left no unaccounted bytes behind it.
         let report = map.finish(None);
