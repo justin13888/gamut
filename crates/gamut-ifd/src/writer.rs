@@ -515,16 +515,37 @@ pub fn write_with(file: &TiffFile, opts: &WriteOptions) -> Result<(Vec<u8>, Segm
         placed.push((start, len));
     }
     placed.sort_unstable();
+    // Declare the gaps between placed spans, and any tail, as padding.
+    //
+    // Neither claim is guarded by a comparison, because `SegmentMap::claim` already returns
+    // early on a zero length: `if start > at { claim(at, start - at, ..) }` and
+    // `claim(at, start.saturating_sub(at), ..)` are the same function, and the second has no
+    // operator to get wrong. That is six surviving mutants removed structurally rather than
+    // excluded (#110) -- cargo-mutants could flip `>` to `>=` in either guard without any test
+    // noticing, precisely because the guard never decided anything.
+    //
+    // The tail claim is additionally unreachable as the writer stands: `total_len` is
+    // `max(cursor, farthest pinned end)`, every accepted pin is rejected unless it has a real
+    // out-of-line span (an absent, duplicated, unknown-type, inline, directory-colliding or
+    // overflowing pin all error out), and every such span is in `placed` -- so `at` always
+    // reaches `total_len`. It is kept rather than deleted because `saturating_sub` makes it free,
+    // and because that argument is about the *callers*, which a later feature could change.
     let mut at = 0u64;
     for &(start, len) in &placed {
-        if start > at {
-            map.claim(at, start - at, SpanKind::Padding, Claim::Parsed);
-        }
+        map.claim(
+            at,
+            start.saturating_sub(at),
+            SpanKind::Padding,
+            Claim::Parsed,
+        );
         at = at.max(start + len);
     }
-    if (total_len as u64) > at {
-        map.claim(at, total_len as u64 - at, SpanKind::Padding, Claim::Parsed);
-    }
+    map.claim(
+        at,
+        (total_len as u64).saturating_sub(at),
+        SpanKind::Padding,
+        Claim::Parsed,
+    );
     Ok((out, map))
 }
 
@@ -1135,6 +1156,58 @@ mod tests {
 
         assert_eq!(&bytes[100..110], &[0xC5; 10]);
         assert_eq!(&bytes[110..120], &[0xD6; 10]);
+    }
+
+    /// A pool value that ends exactly where a pin begins does **not** jump the pin.
+    ///
+    /// The sibling of `a_pool_value_is_pushed_past_a_pin_it_would_have_landed_in`, on the other
+    /// side of the boundary. The jump test is `p.offset < c + n`: the pin starts before the
+    /// value would end, i.e. they overlap. Merely abutting is not overlapping, and a value that
+    /// jumped anyway would leave a hole and a longer file for no reason.
+    ///
+    /// Nothing distinguished `<` from `<=` there before this (#110). Every other pin test either
+    /// overlaps by a wide margin or does not come near, so the one input where the two operators
+    /// disagree -- exact abutment -- was never written.
+    #[test]
+    fn a_pool_value_that_merely_abuts_a_pin_stays_where_it_is() {
+        let mut ifd = Ifd::new();
+        let pinned = vec![0xC5u8; 10];
+        let pooled = vec![0x77u8; 20];
+        ifd.set(37500, Value::Undefined(pinned.clone()));
+        ifd.set(700, Value::Undefined(pooled.clone()));
+        ifd.set(256, Value::Short(vec![640]));
+        let file = TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        };
+
+        // Three entries put the directory's end -- and so the pool -- at 50, and the 20-byte
+        // pooled value therefore occupies 50..70. Pinning at exactly 70 abuts it.
+        let pool_start = 50u64;
+        let pin_at = pool_start + pooled.len() as u64;
+        let opts = WriteOptions::default().pin(37500, pin_at);
+        let (bytes, map) = write_with(&file, &opts).expect("write");
+
+        let pooled_at = bytes
+            .windows(pooled.len())
+            .position(|w| w == pooled.as_slice())
+            .expect("the pooled value is in the file") as u64;
+        assert_eq!(
+            pooled_at, pool_start,
+            "abutting is not overlapping: the value must not have jumped the pin"
+        );
+        assert_eq!(
+            &bytes[pin_at as usize..pin_at as usize + pinned.len()],
+            pinned.as_slice(),
+            "and the pin is still intact"
+        );
+
+        // Both values read back, and every byte is still accounted for.
+        let parsed = read(&bytes).expect("read");
+        assert_eq!(parsed.ifds[0].get(700), Some(&Value::Undefined(pooled)));
+        assert_eq!(parsed.ifds[0].get(37500), Some(&Value::Undefined(pinned)));
+        assert!(map.finish(None).is_fully_classified());
     }
 
     #[test]

@@ -119,21 +119,22 @@ impl ReadLedger {
                         // Covered up to the claim's end.
                         pos = r.end().min(end);
                     }
-                    Some(r) if r.start < end => {
-                        // Uncovered up to the claim's start.
+                    // Uncovered up to whichever comes first: the next claim's start, or the end
+                    // of this span.
+                    //
+                    // The two cases were separate arms, split on `r.start < end`. They are the
+                    // same arm: at `r.start == end` the old second arm pushed `end - pos` and set
+                    // `pos = end`, which is exactly what the fallback did, so `<` and `<=` there
+                    // produced identical output and no test could tell them apart. Written as a
+                    // `min` the operator is gone rather than excluded (#110) -- and `min` is not
+                    // equivalent to `max` here, so what replaces it is killable.
+                    next => {
+                        let stop = next.map_or(end, |r| r.start.min(end));
                         out.push(Range {
                             start: pos,
-                            len: r.start - pos,
+                            len: stop - pos,
                         });
-                        pos = r.start;
-                    }
-                    _ => {
-                        // No claim reaches into the rest of this span.
-                        out.push(Range {
-                            start: pos,
-                            len: end - pos,
-                        });
-                        pos = end;
+                        pos = stop;
                     }
                 }
             }
