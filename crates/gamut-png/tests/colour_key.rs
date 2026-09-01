@@ -8,24 +8,33 @@
 
 mod common;
 
-use gamut_core::{Dimensions, EncodeImage, GrayAlpha8, ImageRef, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, GrayAlpha8, ImageRef, Rgb8, Rgba8};
 use gamut_png::{FilterStrategy, Level, PngEncoder, deconstruct};
 
 /// 128, not something smaller, and the reason is the whole design of the reduction.
 ///
 /// A colour key costs a flat 18-byte `tRNS` chunk that DEFLATE cannot touch, and buys an alpha
 /// plane that usually compresses very well. So whether it wins is size-dependent, exactly as the
-/// palette is: measured on this fixture the analysis offers `Rgb8Keyed` at every size, and
-/// `write_reduced_or_native` keeps plain RGBA below this size before taking the key at 128,
-/// where it is worth about 7% (863 bytes against 926).
+/// palette is: measured on this fixture the analysis offers `Rgb8Keyed` at every size, but
+/// `write_reduced_or_native` only takes it once the chunk is amortised. Brute-force filtered at
+/// `Level::Best`, keyed against plain RGBA: 32 declines it (279 against 274), 48 takes it (347
+/// against 353), and by 128 it is worth about 7% (863 against 926).
 ///
 /// That also matters for the *negative* tests below. Asserting "stayed RGBA" at a size where the
 /// key would never have been taken anyway proves nothing; at 128 a valid key is taken, so RGBA
-/// there is real evidence the reduction declined.
+/// there is real evidence the reduction declined. The one test that needs the *losing* side of
+/// that race says so and picks its own size.
 const SIDE: u32 = 128;
 
+/// The 18 bytes a truecolour `tRNS` adds to an encoding: 4 length + 4 type + 6 payload + 4 CRC.
+const TRNS_RGB_CHUNK: usize = 18;
+
 fn encode(samples: &[u8]) -> Vec<u8> {
-    let dims = Dimensions::new(SIDE, SIDE).expect("valid dimensions");
+    encode_at(SIDE, samples)
+}
+
+fn encode_at(side: u32, samples: &[u8]) -> Vec<u8> {
+    let dims = Dimensions::new(side, side).expect("valid dimensions");
     let image = ImageRef::<Rgba8>::new(samples, dims).expect("buffer matches dimensions");
     let mut out = Vec::new();
     PngEncoder::new()
@@ -46,18 +55,26 @@ fn encode(samples: &[u8]) -> Vec<u8> {
 /// race correctly declined it. A solid transparent region keeps the colour channels smooth, which
 /// is the shape real sprites and icons have and the shape where dropping the alpha plane pays.
 fn outside(x: u32, y: u32) -> bool {
-    let cx = i64::from(x) - i64::from(SIDE) / 2;
-    let cy = i64::from(y) - i64::from(SIDE) / 2;
-    cx * cx + cy * cy >= (i64::from(SIDE) * i64::from(SIDE)) / 9
+    outside_at(x, y, SIDE)
+}
+
+fn outside_at(x: u32, y: u32, side: u32) -> bool {
+    let cx = i64::from(x) - i64::from(side) / 2;
+    let cy = i64::from(y) - i64::from(side) / 2;
+    cx * cx + cy * cy >= (i64::from(side) * i64::from(side)) / 9
 }
 
 /// Binary alpha, one shared invisible colour, and enough distinct visible colours that a palette
 /// is not on the table — so the colour key is the only reduction available.
 fn keyable_rgba() -> Vec<u8> {
-    let mut buf = Vec::with_capacity((SIDE * SIDE * 4) as usize);
-    for y in 0..SIDE {
-        for x in 0..SIDE {
-            if outside(x, y) {
+    keyable_rgba_at(SIDE)
+}
+
+fn keyable_rgba_at(side: u32) -> Vec<u8> {
+    let mut buf = Vec::with_capacity((side * side * 4) as usize);
+    for y in 0..side {
+        for x in 0..side {
+            if outside_at(x, y, side) {
                 // Invisible, all sharing one colour no visible pixel below can produce.
                 buf.extend_from_slice(&[1, 2, 3, 0]);
             } else {
@@ -289,4 +306,53 @@ fn a_greyscale_colour_key_drops_the_alpha_channel_losslessly() {
         })
         .collect();
     assert_eq!(rgba, expected, "the grey colour key resolves losslessly");
+}
+
+/// The *losing* side of the race in `write_reduced_or_native`, which its `carries_chunks` set
+/// exists for.
+///
+/// The other negative tests here stay RGBA because no key was ever *offered* -- partial alpha, two
+/// invisible colours, a collision with a visible pixel. This one offers a perfectly valid key and
+/// has it declined on size alone, which is the only way the `Rgb8Keyed` member of `carries_chunks`
+/// is observable: drop it and the encoder would emit the larger keyed file without racing it.
+///
+/// Measured on `keyable_rgba_at(32)`, brute-force filtered at `Level::Best`: plain RGBA is 274
+/// bytes and `RGB + tRNS` is 279 (261 for the RGB stream plus the flat 18-byte chunk). 32 is the
+/// largest square where the key loses -- by 48 it already wins, 347 against 353.
+#[test]
+fn a_colour_key_that_would_cost_bytes_is_declined() {
+    const SMALL: u32 = 32;
+    let src = keyable_rgba_at(SMALL);
+    let chosen = encode_at(SMALL, &src);
+    assert_eq!(
+        libpng_oracle::decode(&chosen).color_type,
+        libpng_oracle::COLOR_RGBA,
+        "the key is valid at this size, so only its cost can have declined it"
+    );
+
+    // What the key would have cost. The encoder's `Rgb8Keyed` arm is the RGB stream through this
+    // same configuration plus one `tRNS`, so the losing candidate is reproducible from outside.
+    let rgb: Vec<u8> = src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|px| [px[0], px[1], px[2]])
+        .collect();
+    let dims = Dimensions::new(SMALL, SMALL).expect("valid dimensions");
+    let mut keyed = Vec::new();
+    PngEncoder::new()
+        .with_compression(Level::Best)
+        .with_filter(FilterStrategy::BruteForce)
+        .with_auto_reduce(false)
+        .encode_image(
+            ImageRef::<Rgb8>::new(&rgb, dims).expect("buffer matches dimensions"),
+            &mut keyed,
+        )
+        .expect("encode");
+    let keyed_len = keyed.len() + TRNS_RGB_CHUNK;
+    assert!(
+        keyed_len > chosen.len(),
+        "the declined candidate must really be the larger one: keyed {keyed_len} vs RGBA {}",
+        chosen.len()
+    );
 }
