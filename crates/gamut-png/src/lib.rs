@@ -53,6 +53,7 @@ mod color;
 mod crc32;
 mod decoded;
 mod decoder;
+mod deconstruct;
 mod encoder;
 mod filter;
 mod ihdr;
@@ -69,6 +70,9 @@ pub use decoded::{
     Chromaticities, Cicp, DecodedPng, IccProfile, PngHeader, PngImage, PngMetadata, TextChunk,
 };
 pub use decoder::{PngDecoder, TransparencyKey, metadata};
+pub use deconstruct::{
+    ChunkStats, FilterHistogram, PassStats, PngReport, Segment, SegmentKind, deconstruct,
+};
 pub use encoder::PngEncoder;
 pub use filter::{FilterStrategy, FilterType};
 /// The DEFLATE compression level, accepted by [`PngEncoder::with_compression`].
