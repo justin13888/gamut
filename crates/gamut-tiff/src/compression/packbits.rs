@@ -89,6 +89,72 @@ mod tests {
         assert_eq!(dec, row);
     }
 
+    /// A run of identical bytes is encoded as a *replicate*, not as literals.
+    ///
+    /// Every encoder test went through the round-trip helper, which decodes and compares to the
+    /// input -- and that cannot see an encoder which stops compressing. Replacing `run_length`
+    /// with a constant 0 or 1 makes `encode_row` take the literal branch for every byte: the
+    /// output is still valid PackBits, still decodes to exactly the input, and is *larger than
+    /// the row it encodes*. Both constants survived the whole suite (#110).
+    ///
+    /// So this asserts the bytes, not the round trip. A 100-byte run is two bytes: the control
+    /// `1 - 100 = -99`, then the value.
+    #[test]
+    fn a_run_is_encoded_as_a_replicate_not_as_literals() {
+        let row = vec![0xABu8; 100];
+        let mut out = Vec::new();
+        encode_row(&row, &mut out);
+
+        assert_eq!(
+            out,
+            vec![(1i32 - 100) as i8 as u8, 0xAB],
+            "a 100-byte run is one replicate pair"
+        );
+        assert!(
+            out.len() < row.len(),
+            "an encoder that does not compress is not an encoder"
+        );
+    }
+
+    /// Runs longer than 128 are split, because `run_length` caps there (§9's control-byte range).
+    ///
+    /// 200 identical bytes are two replicates -- 128 then 72 -- not one oversized control byte.
+    #[test]
+    fn a_run_longer_than_128_is_split_at_the_cap() {
+        let row = vec![0x5Au8; 200];
+        let mut out = Vec::new();
+        encode_row(&row, &mut out);
+
+        assert_eq!(
+            out,
+            vec![
+                (1i32 - 128) as i8 as u8,
+                0x5A,
+                (1i32 - 72) as i8 as u8,
+                0x5A,
+            ],
+            "128 then 72, each as its own replicate pair"
+        );
+    }
+
+    /// A row that alternates never repeats, so it is all literals -- the other side of the branch.
+    ///
+    /// Without this, capping the literal path would look like an improvement rather than a bug.
+    #[test]
+    fn a_row_without_runs_is_all_literals() {
+        let row: Vec<u8> = (0..100u8).collect();
+        let mut out = Vec::new();
+        encode_row(&row, &mut out);
+
+        assert_eq!(out[0], 99, "a single literal block of 100 bytes");
+        assert_eq!(&out[1..], &row[..]);
+        assert_eq!(
+            out.len(),
+            row.len() + 1,
+            "literals cost exactly one control byte"
+        );
+    }
+
     #[test]
     fn roundtrips_runs_and_literals() {
         roundtrip(&[]);
