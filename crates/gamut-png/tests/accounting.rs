@@ -9,6 +9,8 @@
 
 mod common;
 
+use std::time::Instant;
+
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut_png::{
     ChunkStats, FilterStrategy, FilterType, PngEncoder, Segment, SegmentKind, deconstruct,
@@ -170,6 +172,84 @@ fn repeated_chunk_types_accumulate_count_and_payload() {
 
 /// A stream large enough to split across several IDAT chunks: the same accumulation, on the path
 /// that actually produces it in production rather than a hand-built file.
+/// A synthetic chunk type for the quadratic regression fixture below: four lowercase letters, so
+/// it is ancillary, private, and can never collide with `IHDR`, `IDAT` or `IEND`. 26⁴ = 456 976
+/// distinct types, comfortably more than the fixture uses.
+fn synthetic_type(i: usize) -> [u8; 4] {
+    [
+        b'a' + (i % 26) as u8,
+        b'a' + (i / 26 % 26) as u8,
+        b'a' + (i / 676 % 26) as u8,
+        b'a' + (i / 17_576 % 26) as u8,
+    ]
+}
+
+/// Deconstruction must not slow down when every chunk type in the file is distinct.
+///
+/// A chunk type is four unvalidated bytes and the walk never drops a chunk, so an attacker
+/// chooses how many *distinct* types a file carries — one per 12-byte chunk, if they like.
+/// Accumulating the per-type totals with a linear scan made this quadratic in the file length
+/// (measured: 4.8 MB → 40.9 s), reachable from `gamut inspect` on an untrusted file.
+///
+/// The claim asserted is not "fast" — an absolute wall-clock ceiling is flaky under `llvm-cov`
+/// and parallel test binaries — but "the cost does not depend on how many distinct types the file
+/// carries". The two halves are byte-for-byte the same length and carry the same number of
+/// chunks, differing only in how many types those chunks use, and they run back to back in one
+/// process under one load, so each calibrates the other. The fixed path measures ~2–4×; the
+/// defect is three orders of magnitude worse, leaving ~5× of headroom above the fix and ~50×
+/// below the defect. The structural assertions below mean it is not purely a timing test.
+#[test]
+fn the_chunk_tally_does_not_slow_down_when_every_type_is_distinct() {
+    /// Empty chunks between IHDR and IEND: 12 bytes each, so ~3.1 MB per half.
+    const CHUNKS: usize = 262_144;
+
+    let build = |distinct: bool| {
+        let mut framed = Vec::with_capacity(CHUNKS + 2);
+        framed.push(common::chunk(b"IHDR", &common::ihdr_payload(1, 1, 8, 2, 0)));
+        framed.extend(
+            (0..CHUNKS).map(|i| common::chunk(&synthetic_type(if distinct { i } else { 0 }), &[])),
+        );
+        framed.push(common::chunk(b"IEND", &[]));
+        common::png_from_chunks(&framed)
+    };
+    let repeated = build(false);
+    let distinct = build(true);
+    assert_eq!(
+        repeated.len(),
+        distinct.len(),
+        "the two halves must be the same length, or the ratio compares two workloads"
+    );
+
+    let started = Instant::now();
+    let repeated_report = deconstruct(&repeated).expect("deconstruct");
+    let repeated_elapsed = started.elapsed();
+    let started = Instant::now();
+    let distinct_report = deconstruct(&distinct).expect("deconstruct");
+    let distinct_elapsed = started.elapsed();
+
+    assert_eq!(
+        distinct_report.chunks.len(),
+        CHUNKS + 2,
+        "IHDR, one entry per distinct type, IEND"
+    );
+    assert!(
+        distinct_report.chunks.iter().all(|stats| stats.count == 1),
+        "every synthetic type appears exactly once"
+    );
+    assert_eq!(
+        repeated_report.chunks.len(),
+        3,
+        "IHDR, the one repeated type, IEND"
+    );
+    assert_eq!(repeated_report.chunks[1].count, CHUNKS);
+
+    assert!(
+        distinct_elapsed < 20 * repeated_elapsed,
+        "distinct types cost {distinct_elapsed:?} against {repeated_elapsed:?} for the same \
+         bytes with one type: the tally is scaling with the number of distinct types"
+    );
+}
+
 #[test]
 fn a_multi_idat_encode_accumulates_every_idat() {
     // Incompressible, so the zlib stream stays far above the 64 KiB per-chunk cap.

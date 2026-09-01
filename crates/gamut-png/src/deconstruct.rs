@@ -25,6 +25,7 @@
 //! bad signature, no first chunk, a first chunk that is not IHDR, or an unparsable IHDR — fails.
 
 use core::ops::Range;
+use std::collections::HashMap;
 
 use gamut_core::{Error, Result};
 
@@ -256,12 +257,69 @@ impl PngReport {
     }
 
     /// The stats for one chunk type, if the file carries it.
+    ///
+    /// A linear scan of [`chunks`](Self::chunks), so it costs O(distinct chunk types) per call —
+    /// bounded by the *types* the file carries, not by its chunk count. Looking up a handful of
+    /// types is what this is for; to summarise every type, iterate [`chunks`](Self::chunks) once
+    /// rather than calling this per type.
     #[must_use]
     pub fn chunk(&self, chunk_type: &[u8; 4]) -> Option<ChunkStats> {
         self.chunks
             .iter()
             .find(|stats| &stats.chunk_type == chunk_type)
             .copied()
+    }
+}
+
+/// Accumulates the per-chunk-type totals of one walk, in time linear in the chunk count.
+///
+/// A chunk type is four **unvalidated** bytes — [`crate::chunk`] reads them straight out of the
+/// file and the walk never drops a chunk — so a hostile 12-byte-per-chunk file carries one
+/// *distinct* type per chunk. Accumulating with a linear `find` over the types seen so far is
+/// then quadratic in the file length: 4.8 MB of empty chunks took 40.9 s. The index makes each
+/// chunk O(1), and `stats` keeps the first-appearance order [`PngReport::chunks`] documents.
+///
+/// The keys are attacker-chosen, which is safe **because** [`HashMap`]'s default hasher is
+/// SipHash-1-3 seeded per process: collisions cannot be precomputed against it. Do not swap in a
+/// faster unseeded hasher (`FxHash`, `AHash` without a random seed) — that would reopen the
+/// quadratic blow-up this type exists to close, by a different route.
+struct ChunkTally {
+    /// One entry per distinct type, in first-appearance order.
+    stats: Vec<ChunkStats>,
+    /// Type → its index in `stats`. Dropped at the end of the walk; never surfaced.
+    index: HashMap<[u8; 4], usize>,
+}
+
+impl ChunkTally {
+    /// An empty tally.
+    fn new() -> Self {
+        Self {
+            stats: Vec::new(),
+            index: HashMap::new(),
+        }
+    }
+
+    /// Adds one chunk of `chunk_type` carrying `payload_len` payload bytes.
+    fn record(&mut self, chunk_type: [u8; 4], payload_len: usize) {
+        match self.index.get(&chunk_type) {
+            Some(&at) => {
+                self.stats[at].count += 1;
+                self.stats[at].payload_bytes += payload_len;
+            }
+            None => {
+                self.index.insert(chunk_type, self.stats.len());
+                self.stats.push(ChunkStats {
+                    chunk_type,
+                    count: 1,
+                    payload_bytes: payload_len,
+                });
+            }
+        }
+    }
+
+    /// The accumulated totals, in first-appearance order.
+    fn into_stats(self) -> Vec<ChunkStats> {
+        self.stats
     }
 }
 
@@ -310,10 +368,10 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
         interlaced: native.interlaced,
     };
 
-    let mut chunks: Vec<ChunkStats> = Vec::new();
+    let mut tally = ChunkTally::new();
     let mut idat = Vec::new();
     let mut saw_iend = false;
-    let push = |segments: &mut Vec<Segment>, chunks: &mut Vec<ChunkStats>, chunk: &RawChunk| {
+    let push = |segments: &mut Vec<Segment>, tally: &mut ChunkTally, chunk: &RawChunk| {
         segments.push(Segment {
             range: chunk.range.clone(),
             kind: SegmentKind::Chunk {
@@ -322,22 +380,9 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
                 crc_ok: chunk.crc_ok,
             },
         });
-        match chunks
-            .iter_mut()
-            .find(|stats| stats.chunk_type == chunk.chunk_type)
-        {
-            Some(stats) => {
-                stats.count += 1;
-                stats.payload_bytes += chunk.data.len();
-            }
-            None => chunks.push(ChunkStats {
-                chunk_type: chunk.chunk_type,
-                count: 1,
-                payload_bytes: chunk.data.len(),
-            }),
-        }
+        tally.record(chunk.chunk_type, chunk.data.len());
     };
-    push(&mut segments, &mut chunks, &first);
+    push(&mut segments, &mut tally, &first);
 
     loop {
         match reader.next_chunk() {
@@ -347,7 +392,7 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
                     idat.extend_from_slice(chunk.data);
                 }
                 let is_iend = &chunk.chunk_type == b"IEND";
-                push(&mut segments, &mut chunks, &chunk);
+                push(&mut segments, &mut tally, &chunk);
                 if is_iend {
                     saw_iend = true;
                     break;
@@ -389,7 +434,7 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
         file_len: png.len(),
         header,
         segments,
-        chunks,
+        chunks: tally.into_stats(),
         idat_compressed: idat.len(),
         filtered_len,
         passes,
