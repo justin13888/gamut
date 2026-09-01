@@ -71,8 +71,8 @@ Everything here is produced by `cargo bench -p gamut-png` and gated by
 | `photo_rgb8` | 196 608 | 29 885 | 20 293 | 20 293 | 27 467 | **−26.1%** | 2.477 |
 | `noise_rgb8` | 196 608 | 196 983 | 196 983 | 196 983 | 197 280 | −0.2% | 24.046 |
 | `grey_as_rgb8` | 196 608 | 721 | 370 | 370 | 566 | **−34.6%** | 0.045 |
-| `palette64_rgba8` | 262 144 | 1 274 | 715 | 682 | 1 102 | **−35.1%** | 0.087 |
-| `sprite_rgba8` | 262 144 | 4 181 | 3 729 | **2 619** | 3 889 | −4.1% | 0.455 |
+| `palette64_rgba8` | 262 144 | 1 274 | 726 | 688 | 1 102 | **−34.1%** | 0.089 |
+| `sprite_rgba8` | 262 144 | 4 181 | 3 729 | **2 235** | 3 889 | −4.1% | 0.455 |
 | `flat_rgba8` | 262 144 | 821 | 103 | 103 | 664 | **−84.5%** | 0.013 |
 | `tiny_rgb8` (16×16) | 768 | 136 | 135 | 135 | 138 | −2.2% | 4.219 |
 
@@ -101,7 +101,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 1 | Filter selection | **partial** — per-line MinSumAbs plus six whole-image candidates each fully DEFLATEd. No entropy or bigram heuristic, no per-line trial deflate, no pruning, no two-tier trial. [#480] |
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
 | 3 | Smallest lawful representation | **done** — grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour. The key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. |
-| 4 | Palette optimization | **minimal** — trailing-opaque `tRNS` trim only. First-appearance order, no sorting; caller-supplied palettes get no dedupe or unused-entry removal. [#482] |
+| 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
 | 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in. Worth 30% on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. |
 | 6 | Metadata hygiene | **no policy** — the encoder emits exactly what the caller set, and `gamut convert` drops metadata on the PNG path. [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
