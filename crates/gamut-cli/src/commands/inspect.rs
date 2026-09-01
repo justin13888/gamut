@@ -5,6 +5,24 @@
 //! Prints a report to stdout and exits non-zero when the file is not fully accounted for —
 //! usable as an archival CI gate.
 //!
+//! # What "fully accounted for" means, and what the exit code is
+//!
+//! Exit 0 is the file having nothing the walk can hold against it; exit 1 is a finding. Each
+//! format states that in its own vocabulary, and the two are deliberately the same strength:
+//!
+//! - **TIFF / DNG** — `is_fully_accounted()`: every byte classified, *and* no unknown field
+//!   type, no unknown tag, and no anomaly.
+//! - **PNG** — `is_intact()`: every byte classified, *and* every chunk CRC valid, IEND present,
+//!   no trailing bytes after it, no truncated tail, and nothing the filter scan found damaging.
+//!
+//! PNG's `is_fully_classified()` is **not** the gate, though it is printed: it is true by
+//! construction for every file `deconstruct` accepts (a truncated tail and a trailer each get a
+//! segment of their own, so the tiling still covers the file), and gating on it would exit 0 on a
+//! truncated PNG. It exists so that a walk *bug* makes the predicate false.
+//!
+//! A PNG whose filter scan was skipped only because the image is larger than this reader's byte
+//! budget is not a finding: nothing is known to be wrong with it.
+//!
 //! For PNG the same walk answers a second question: **where did the bytes go?** The report carries
 //! the per-chunk-type breakdown, the compressed IDAT total against the filtered stream it inflates
 //! to, and the scanline filter distribution — which is what makes an encoder comparison possible
@@ -360,7 +378,6 @@ fn print_lines(label: &str, lines: &[String]) {
     }
 }
 
-/// The display name of a format.
 /// Deconstructs a PNG and prints where its bytes went, exiting non-zero when the file is not a
 /// complete, undamaged datastream.
 fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
@@ -513,6 +530,7 @@ fn filter_skip_label(reason: gamut::png::SkippedFilterScan) -> &'static str {
     }
 }
 
+/// The display name of a format.
 fn format_name(format: Format) -> &'static str {
     match format {
         Format::Tiff => "TIFF",
