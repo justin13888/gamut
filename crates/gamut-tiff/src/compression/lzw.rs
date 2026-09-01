@@ -17,6 +17,15 @@ const MAX_WIDTH: u32 = 12;
 /// The table is reset when the next free code reaches this value (one before the 12-bit limit).
 const RESET_AT: u32 = 4094;
 
+/// The table is cleared before a code could ever need a thirteenth bit.
+///
+/// `encode` widens at `next_code == 1 << width`, so the widths step 9 -> 10 -> 11 -> 12 at 512,
+/// 1024 and 2048. Reaching `1 << MAX_WIDTH` would ask for width 13, and this assertion is why that
+/// cannot happen: the reset fires first. It replaces a runtime `width < MAX_WIDTH` guard that
+/// could never be false when it was evaluated -- an equivalent mutant no test could kill (#110) --
+/// with a relationship the compiler checks once.
+const _: () = assert!(RESET_AT < (1 << MAX_WIDTH));
+
 /// LZW-encodes `data` (one strip's bytes) into a self-delimiting `ClearCode … EndOfInformation`
 /// stream.
 #[must_use]
@@ -42,7 +51,7 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
             out.put_bits(omega, width);
             table.insert((omega, k), next_code);
             next_code += 1;
-            if next_code == (1 << width) && width < MAX_WIDTH {
+            if next_code == (1 << width) {
                 width += 1;
             }
             if next_code == RESET_AT {
