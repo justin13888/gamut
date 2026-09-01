@@ -14,8 +14,10 @@
 /// For a finite, non-negative input, every built-in operator returns a non-negative output and
 /// **never NaN**. The output is finite except where the operator's exact value exceeds the f32
 /// range — e.g. [`Exposure`](crate::operators::Exposure) with a huge gain — which saturates to
-/// `+∞`. Every built-in is monotonic non-decreasing in `x` up to f32 rounding;
-/// [`Drago`](crate::operators::Drago) promises this on its documented domain `[0, world_max]`.
+/// `+∞`. Every built-in is monotonic non-decreasing in `x` up to f32 rounding, with one
+/// exception: [`Drago`](crate::operators::Drago) transcribes a published formula that is not
+/// monotonic for every parameter pair it accepts, even inside its own domain, so it promises
+/// this only when [`Drago::is_monotonic`](crate::operators::Drago::is_monotonic) says so.
 /// Behaviour on negative or NaN inputs is operator-defined and outside this contract — linearize
 /// and clamp upstream if a source can produce them.
 pub trait ToneCurve {

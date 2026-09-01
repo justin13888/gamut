@@ -112,8 +112,9 @@ pub fn output_is_non_negative_and_never_nan(
 /// Law: the curve never decreases as its input rises.
 ///
 /// `xs` must be sorted ascending and lie within the operator's documented monotonic domain —
-/// `Drago` promises this only on `[0, world_max]`, so a caller checking `Drago` supplies samples
-/// from that interval.
+/// `Drago` promises this only on `[0, world_max]`, and only for the parameters
+/// [`Drago::is_monotonic`](crate::operators::Drago::is_monotonic) accepts, so a caller checking
+/// `Drago` supplies samples from that interval and asks that question first.
 ///
 /// The contract allows monotonicity to hold only "up to f32 rounding", and that has to be
 /// measured against the **curve's output scale**, not against the local value. Several operators
@@ -270,8 +271,9 @@ mod tests {
     /// already pinned by the `*_rejects_invalid_*` unit tests in `operators.rs`, and a law about
     /// curve *shape* has nothing to say about a curve that was never built.
     ///
-    /// `Drago` is absent deliberately: it promises monotonicity only on `[0, world_max]`, so it
-    /// needs inputs tied to its own parameter and gets its own property below.
+    /// `Drago` is absent deliberately: it promises monotonicity only on `[0, world_max]`, and
+    /// only for some parameters within that, so it needs inputs tied to its own parameter and
+    /// gets its own pair of properties below.
     #[derive(Debug, Clone, Copy)]
     enum Operator {
         Linear,
@@ -412,32 +414,68 @@ mod tests {
             prop_assert!(result.is_ok(), "{}", describe(&result));
         }
 
-        /// `Drago` is monotonic non-decreasing on `[0, world_max]` — for `world_max <= 100` and
-        /// `bias >= 0.7`.
+        /// `Drago` is monotonic on `[0, world_max]` wherever it says it is.
         ///
-        /// Those bounds describe the operator, not the law, and they mark a **known divergence**
-        /// from `Drago`'s documented contract rather than accepted behaviour. The denominator
-        /// `ln(2 + 8·(x/world_max)^k)`, with `k = ln(bias)/ln(0.5)`, outgrows the numerator
-        /// `ln(x + 1)` over a band of `x`; a smaller bias shrinks `k` and widens that band, and a
-        /// larger `world_max` needs a correspondingly larger bias to stay monotonic. At
-        /// `world_max = 1e6` even the crate's own `DEFAULT_DRAGO_BIAS` of 0.85 fails. It
-        /// reproduces in f64, so it is not an f32 artefact. Tracked as #439 with the shrunk
-        /// counterexample and the full table; widen these bounds when that is resolved.
+        /// This is the **soundness** half of `Drago::is_monotonic` (#439): the predicate may not
+        /// promise an ordering the curve does not have, or every caller that trusts it is wrong.
+        /// Parameters come from the constructors' whole accepted range rather than a hand-picked
+        /// safe corner — the point is to catch a predicate that is too generous, and restricting
+        /// the draw is exactly how the previous version of this property missed the defect.
+        ///
+        /// Cases where the predicate says `false` assert nothing here; that direction is the
+        /// converse property below.
         #[test]
-        fn drago_is_monotonic_where_the_operator_holds_to_its_contract(
-            world_max in 1e-2_f32..=1e2,
-            bias in 0.7_f32..0.99,
+        fn drago_is_monotonic_wherever_it_claims_to_be(
+            world_max in 1e-2_f32..1e6,
+            bias in 0.01_f32..0.99,
             fractions in collection::vec(0.0_f32..=1.0, 1..24),
         ) {
             let drago = Drago::new(world_max)
                 .expect("world_max > 0 and finite")
                 .with_bias(bias)
                 .expect("bias in (0, 1)");
-            let mut xs: Vec<f32> = fractions.iter().map(|f| f * world_max).collect();
-            xs.sort_by(f32::total_cmp);
+
+            if drago.is_monotonic() {
+                let mut xs: Vec<f32> = fractions.iter().map(|f| f * world_max).collect();
+                xs.sort_by(f32::total_cmp);
+
+                let result = monotonic_non_decreasing(&drago, &xs);
+                prop_assert!(result.is_ok(), "{}", describe(&result));
+            }
+        }
+
+        /// And where `Drago` says it is *not* monotonic, the decrease is really there.
+        ///
+        /// Without this the property above is vacuous: `is_monotonic` could return `false`
+        /// unconditionally and still pass it. So this is not a second opinion on the same claim,
+        /// it is the only thing standing between the predicate and a constant.
+        ///
+        /// The draw is deliberately well past the ceiling rather than just over it — at
+        /// `bias <= 0.79` the condition already fails by `world_max ≈ 7.6e3` — so the drop is
+        /// large compared with the law's ULP tolerance and the test does not hinge on rounding.
+        /// Measured across this box the smallest drop is `2.1e-3` against a tolerance of `1.0e-6`,
+        /// three orders of margin. Samples cover the top half of the domain, where the quotient
+        /// turns over.
+        #[test]
+        fn drago_really_decreases_where_it_says_it_is_not_monotonic(
+            world_max in 1e6_f32..1e12,
+            bias in 0.5_f32..0.79,
+        ) {
+            let drago = Drago::new(world_max)
+                .expect("world_max > 0 and finite")
+                .with_bias(bias)
+                .expect("bias in (0, 1)");
+            prop_assert!(!drago.is_monotonic(), "the box was chosen to be past the ceiling");
+
+            let xs: Vec<f32> = (0..=32)
+                .map(|i| world_max * (0.5 + 0.5 * i as f32 / 32.0))
+                .collect();
 
             let result = monotonic_non_decreasing(&drago, &xs);
-            prop_assert!(result.is_ok(), "{}", describe(&result));
+            prop_assert!(
+                result.is_err(),
+                "is_monotonic() == false but no decrease was found on [0.5·world_max, world_max]"
+            );
         }
     }
 
