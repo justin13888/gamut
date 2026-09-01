@@ -62,6 +62,11 @@ same rule `docs/testing.md` applies to a shrunk `proptest` counterexample, and t
   `x86_64-unknown-linux-musl`, and the sanitizer cannot link against a static libc. Without the
   pin the build fails before reaching a target at all.
 - **This crate is workspace-excluded**, so `cargo test --workspace --all-features` never builds it.
+- **The `--` is reconstructed, not passed through.** mise swallows a task's `--`, so
+  `mise run fuzz t -- -max_total_time=60` reaches `run.sh` as two bare words and cargo-fuzz would
+  reject the second as one of its own options. The runner re-splits on libFuzzer's own flag syntax
+  (`-name=value`, single dash plus an `=`), so libFuzzer arguments and cargo-fuzz options both land
+  where they belong with or without the separator. An explicit `--` still wins outright.
 
 ## Targets
 
