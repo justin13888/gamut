@@ -3,6 +3,9 @@
 //! CRC-32 so the builders do not depend on the crate under test.
 #![allow(dead_code)] // each integration-test binary uses its own subset
 
+/// The efficiency corpus, shared with `benches/encode.rs` (issue #224).
+pub mod corpus;
+
 /// The 8-byte PNG signature.
 pub const SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 

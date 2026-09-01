@@ -19,6 +19,15 @@ use divan::{Bencher, black_box};
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut_png::{FilterStrategy, FilterType, Level, PngEncoder, deconstruct};
 
+// The corpus lives with the size contract that asserts against it, so the budgets in
+// `tests/size_contract.rs` and the table printed here can never describe different pixels.
+#[path = "../tests/common/corpus.rs"]
+mod corpus;
+
+use corpus::{
+    flat_rgba, gradient_rgb, grey_as_rgb, noise_rgb, palette64_rgba, photo_rgb, sprite_rgba,
+};
+
 fn main() {
     print_size_table();
     print_stage_table();
@@ -110,133 +119,6 @@ impl Case {
             },
         )
     }
-}
-
-/// A deterministic, non-trivial RGB gradient -- the workspace's shared bench pattern. Avoids the
-/// all-constant fast paths so the measured work reflects realistic entropy.
-fn gradient_rgb(side: u32) -> Vec<u8> {
-    let mut buf = vec![0u8; (side * side * 3) as usize];
-    for y in 0..side {
-        for x in 0..side {
-            let i = ((y * side + x) * 3) as usize;
-            buf[i] = (x ^ y) as u8;
-            buf[i + 1] = x.wrapping_mul(3).wrapping_add(y) as u8;
-            buf[i + 2] = x.wrapping_add(y.wrapping_mul(7)) as u8;
-        }
-    }
-    buf
-}
-
-/// Smooth, photograph-like content: three integer sinusoid approximations at different periods.
-/// Palette-hostile and 16-bit-hostile, so no reduction applies and the residual is the compressor
-/// -- this is the row where gamut can lose to libpng, and the one to watch.
-fn photo_rgb(side: u32) -> Vec<u8> {
-    let mut buf = vec![0u8; (side * side * 3) as usize];
-    for y in 0..side {
-        for x in 0..side {
-            let i = ((y * side + x) * 3) as usize;
-            let (xi, yi) = (i64::from(x), i64::from(y));
-            // Triangle waves stand in for sinusoids: smooth, periodic, no float in a fixture.
-            let tri = |v: i64, period: i64| {
-                let m = v.rem_euclid(period * 2);
-                let up = if m < period { m } else { period * 2 - m };
-                (up * 255 / period) as u8
-            };
-            buf[i] = tri(xi + yi, 61);
-            buf[i + 1] = tri(xi * 2 - yi, 43);
-            buf[i + 2] = tri(xi + yi * 3, 97);
-        }
-    }
-    buf
-}
-
-/// Incompressible: a full avalanche mix of the byte index. Pins that the encoder does not
-/// *expand* random data, and drives `FilterType::None`.
-///
-/// Deliberately not the plain `i * 2654435761 >> 24` the deflate bench uses. Over a dense index
-/// that top byte changes only once every few hundred `i`, so the "noise" row compressed roughly
-/// 97x and measured nothing at all. Three xorshift-multiply rounds give a byte that does not
-/// correlate with its neighbours.
-fn noise_rgb(side: u32) -> Vec<u8> {
-    (0..(side * side * 3))
-        .map(|i: u32| {
-            let mut v = i.wrapping_add(0x9E37_79B9);
-            v ^= v >> 16;
-            v = v.wrapping_mul(0x21F0_AAAD);
-            v ^= v >> 15;
-            v = v.wrapping_mul(0x735A_2D97);
-            v ^= v >> 15;
-            v as u8
-        })
-        .collect()
-}
-
-/// Exactly 64 distinct colours over two alpha levels: the indexed + tRNS path, which is gamut's
-/// single biggest structural lever over libpng-9 (libpng does not auto-palettise).
-fn palette64_rgba(side: u32) -> Vec<u8> {
-    let mut buf = vec![0u8; (side * side * 4) as usize];
-    for y in 0..side {
-        for x in 0..side {
-            let i = ((y * side + x) * 4) as usize;
-            let idx = ((x / 8 + y / 8 * 8) % 64) as u8;
-            buf[i] = idx.wrapping_mul(4);
-            buf[i + 1] = idx.wrapping_mul(9);
-            buf[i + 2] = 255 - idx.wrapping_mul(3);
-            buf[i + 3] = if idx.is_multiple_of(8) { 0 } else { 255 };
-        }
-    }
-    buf
-}
-
-/// A sprite: binary alpha, and the fully transparent pixels carry *different* RGB values. That
-/// invisible colour noise is what today's palette build keys on, so this is the only row that can
-/// see the alpha-cleaning and tRNS-colour-key axes.
-fn sprite_rgba(side: u32) -> Vec<u8> {
-    let mut buf = vec![0u8; (side * side * 4) as usize];
-    for y in 0..side {
-        for x in 0..side {
-            let i = ((y * side + x) * 4) as usize;
-            let cx = i64::from(x) - i64::from(side) / 2;
-            let cy = i64::from(y) - i64::from(side) / 2;
-            let inside = cx * cx + cy * cy < (i64::from(side) * i64::from(side)) / 9;
-            if inside {
-                buf[i] = (x ^ y) as u8;
-                buf[i + 1] = 0x40;
-                buf[i + 2] = 0xC0;
-                buf[i + 3] = 255;
-            } else {
-                // Invisible, and deliberately not constant.
-                buf[i] = x as u8;
-                buf[i + 1] = y as u8;
-                buf[i + 2] = (x ^ y) as u8;
-                buf[i + 3] = 0;
-            }
-        }
-    }
-    buf
-}
-
-/// One fully opaque colour: the compressible extreme, where the whole reduce cascade applies and
-/// chunk framing is what is left to measure.
-fn flat_rgba(side: u32) -> Vec<u8> {
-    (0..(side * side))
-        .flat_map(|_| [0x2E, 0x86, 0xC1, 0xFF])
-        .collect()
-}
-
-/// A greyscale ramp presented as RGB: R=G=B everywhere, so the grey reduction applies.
-fn grey_as_rgb(side: u32) -> Vec<u8> {
-    let mut buf = vec![0u8; (side * side * 3) as usize];
-    for y in 0..side {
-        for x in 0..side {
-            let i = ((y * side + x) * 3) as usize;
-            let v = ((x + y) % 256) as u8;
-            buf[i] = v;
-            buf[i + 1] = v;
-            buf[i + 2] = v;
-        }
-    }
-    buf
 }
 
 /// The size-table corpus: one entry per axis that actually changes encoder behaviour.
