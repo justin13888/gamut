@@ -116,6 +116,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v4
+        with:
+          # Only put `mise` on PATH; do NOT build every `[tools]` entry. This job needs exactly
+          # one of them, and the default behaviour is what broke its first run: mise tried to
+          # build cargo-edit, cargo-fuzz, cargo-mutants and convco *before* the toolchain steps
+          # below, against the runner's baked-in half-installed `stable`, and reported
+          # "Failed to install tools: ... cargo exited with non-zero status: exit code 1".
+          # Same `install: false` the `cross` job above uses, for the same reason.
+          install: false
       - name: Clear pre-installed Rust toolchain
         # Same rustup `bin/cargo-fmt` conflict guard as the jobs above.
         run: rustup toolchain uninstall stable || true
@@ -128,6 +136,12 @@ jobs:
         # defaults to musl and the sanitizer cannot link a static libc.
         run: rustup toolchain install nightly --profile minimal
       - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz (needs the rustup toolchain installed above)
+        # cargo-fuzz is a `cargo:` mise tool, so installing it needs a working cargo -- which is
+        # why it cannot go in the mise-action step above, which runs before one exists. Exactly
+        # the ordering ci.yml's lint job documents for cbindgen. `MISE_TASK_RUN_AUTO_INSTALL` is
+        # false for this job, so `mise run fuzz` below will not silently reinstall it either.
+        run: mise install cargo:cargo-fuzz
       - name: Fuzz the read-ledger laws
         # Time-bounded so the job terminates: this tier is unbounded by nature, which is exactly
         # why it is here and not in the per-PR `coverage` gate (see docs/testing.md). Ten minutes
