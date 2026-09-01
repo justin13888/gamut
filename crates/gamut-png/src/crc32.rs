@@ -28,18 +28,25 @@ const fn build_table() -> [u32; 256] {
 }
 
 /// An incremental CRC-32 accumulator.
-pub(crate) struct Crc32 {
+pub struct Crc32 {
     value: u32,
 }
 
 impl Crc32 {
     /// Starts a fresh CRC (register initialised to all ones).
-    pub(crate) fn new() -> Self {
+    // No `Default` impl to pair with this: nothing in the crate would call it, so it would be an
+    // uncovered region and an unkillable mutant -- a delegation no test can reach. `new` is only
+    // `pub` so `crate::stages` can re-export it to the benchmark driver.
+    #[expect(
+        clippy::new_without_default,
+        reason = "a Default impl here would be dead delegation: uncovered, and unkillable by any test"
+    )]
+    pub fn new() -> Self {
         Self { value: 0xFFFF_FFFF }
     }
 
     /// Folds `data` into the running CRC.
-    pub(crate) fn update(&mut self, data: &[u8]) {
+    pub fn update(&mut self, data: &[u8]) {
         let mut crc = self.value;
         for &b in data {
             crc = TABLE[((crc ^ u32::from(b)) & 0xff) as usize] ^ (crc >> 8);
@@ -48,7 +55,7 @@ impl Crc32 {
     }
 
     /// Finalises the CRC (ones-complement of the register).
-    pub(crate) fn finish(self) -> u32 {
+    pub fn finish(self) -> u32 {
         self.value ^ 0xFFFF_FFFF
     }
 }

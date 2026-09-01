@@ -14,7 +14,7 @@ use std::collections::hash_map::Entry;
 use crate::pack::gray8_scale;
 
 /// A chosen reduced encoding for an image.
-pub(crate) enum Reduced {
+pub enum Reduced {
     /// Greyscale at depth 1, 2, 4, or 8 (R=G=B, fully opaque). `samples` holds one byte per pixel:
     /// the raw value at depth 8, the unscaled code (`value / gray8_scale(depth)`) below it.
     Gray {
@@ -76,7 +76,7 @@ fn pixel_key(px: &[u8], channels: usize) -> [u8; 4] {
 /// Analyses interleaved 8-bit samples (`channels`: 1 = grey, 2 = grey+alpha, 3 = RGB, 4 = RGBA)
 /// and returns the smallest lossless reduction that beats the input encoding, or `None` to keep it
 /// as-is.
-pub(crate) fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
+pub fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
     debug_assert!((1..=4).contains(&channels));
     let pixel_count = pixels.len() / channels;
 
@@ -181,7 +181,7 @@ pub(crate) fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
 /// widening) is demoted and re-analysed at 8 bits — the demotion alone halves the payload, so it
 /// always reduces. Otherwise only the 16-bit-native channel reductions (grey, alpha drop) apply;
 /// PNG has no 16-bit palette.
-pub(crate) fn analyze16(samples: &[u16], channels: usize) -> Option<Reduced> {
+pub fn analyze16(samples: &[u16], channels: usize) -> Option<Reduced> {
     debug_assert!((1..=4).contains(&channels));
     if let Some(demoted) = demote16(samples) {
         let further = analyze8(&demoted, channels);

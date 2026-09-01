@@ -120,7 +120,7 @@ fn sum_abs(filtered: &[u8]) -> u64 {
 /// Filters every scanline of `samples` (row-major, `row_bytes` per row) per `strategy`, producing
 /// the filter-prefixed byte stream that gets compressed: a filter-type byte then the filtered row,
 /// for each scanline. `bpp` is the filter stride (bytes per pixel, ≥1).
-pub(crate) fn filter_image(
+pub fn filter_image(
     strategy: FilterStrategy,
     samples: &[u8],
     row_bytes: usize,
@@ -151,7 +151,12 @@ pub(crate) fn filter_image(
 }
 
 /// Picks the filter with the lowest sum-of-absolute-residuals for one scanline.
-fn choose_min_sum_abs(cur: &[u8], prev: &[u8], bpp: usize, scratch: &mut Vec<u8>) -> FilterType {
+pub fn choose_min_sum_abs(
+    cur: &[u8],
+    prev: &[u8],
+    bpp: usize,
+    scratch: &mut Vec<u8>,
+) -> FilterType {
     let mut best = FilterType::None;
     let mut best_score = u64::MAX;
     for filter in [

@@ -61,6 +61,11 @@ mod inflate;
 mod pack;
 mod palette;
 mod reduce;
+/// The encoder's pipeline stages, re-exported for the out-of-tree benchmark driver (issue #224).
+/// Not part of the stable API; see `docs/benchmarking.md`.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod stages;
 
 pub use abi::{AbiDeflater, AbiInflater, CODEC_ID_ZLIB, PIXEL_FORMAT_FILTERED_BYTES};
 pub use ancillary::{PhysicalUnit, SrgbIntent};
