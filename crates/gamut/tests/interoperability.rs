@@ -1,4 +1,30 @@
-//! Cross-crate interoperability checks owned by the umbrella layer.
+//! integration · law — cross-crate interoperability checks owned by the umbrella layer.
+//!
+//! Each test here spans two publishable crates that must not gain a dev-dependency edge on one
+//! another: `mise run check-release-deps` rejects those, because release-plz orders normal and
+//! build edges but ignores dev-only ones, so a versioned dev edge between publishable crates can
+//! make a bump unpublishable. That is the third linkage cause in `docs/testing.md`, and it is why
+//! these cannot live in either crate they check.
+//!
+//! **These tests are mutation-invisible, and that cost is accepted here rather than overlooked.**
+//! `.cargo/mutants.toml` sets `test_workspace = false` and excludes `crates/gamut/**`, so nothing
+//! in this file can kill a mutant in `gamut-jpeg`, `gamut-webp`, `gamut-metadata`, `gamut-color`
+//! or `gamut-tonemap`. What each test pins, and where the mutation-visible coverage of the same
+//! machinery lives:
+//!
+//! - `metadata_facade_round_trips_through_a_jpeg_stream` and its WebP counterpart pin that the
+//!   **facade's** models survive a real container. The Exif/XMP encoders and the container writers
+//!   are each covered inside their own crates (`gamut-exif`'s exiv2 oracle, `gamut-jpeg`'s
+//!   libjpeg-turbo oracle, `gamut-webp`'s libwebp oracle); what is only checked here is that the
+//!   two ends agree across the seam.
+//! - `reinhard_matches_the_color_pq_to_sdr_step` pins that `gamut-tonemap`'s Reinhard curve agrees
+//!   with the value `gamut-color`'s PQ transfer function feeds it. Both sides are separately
+//!   pinned in their own crates -- `gamut-tonemap`'s operator tests and `src/invariants.rs`, and
+//!   `gamut-color`'s lcms2 oracle -- so a defect in either is caught there; the agreement between
+//!   them is what is only checked here.
+//!
+//! Nothing in this file is the *only* pin on a behaviour. Anything that would be belongs in the
+//! crate that owns it.
 
 use gamut::core::{Dimensions, EncodeImage, Gray8, ImageRef};
 
