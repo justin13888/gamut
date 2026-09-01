@@ -50,7 +50,9 @@
 //! // A zlib stream starts with the 0x78 CMF byte.
 //! assert_eq!(zlib_stream[0], 0x78);
 //! ```
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
+// the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
+#![deny(unsafe_code)]
 
 mod adler32;
 mod bitwriter;

@@ -56,7 +56,9 @@
 //! pair [`pq_eotf`](transfer::pq_eotf) / [`pq_oetf`](transfer::pq_oetf) is exact in both
 //! directions. [`SourceTransfer::eotf`](profile::SourceTransfer::eotf) — the dispatch over the
 //! gamuts with no CICP transfer code point — likewise has no inverse yet.
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
+// the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
+#![deny(unsafe_code)]
 
 pub mod cct;
 pub mod cicp;

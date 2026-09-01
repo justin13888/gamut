@@ -13,7 +13,7 @@ Part of the [gamut](../../README.md) workspace, this crate reads and writes JPEG
 - **Encoder + decoder.** Unlike the workspace's encoder-only PNG crate, JPEG is a two-way format:
   a baseline sequential and **progressive (SOF2)** DCT Huffman **encoder** and a **sequential +
   progressive decoder** ship together (see [STATUS.md](STATUS.md)).
-- **Memory-safe.** `#![forbid(unsafe_code)]`.
+- **Memory-safe.** 100% safe Rust (`#![deny(unsafe_code)]`).
 
 ## Usage
 

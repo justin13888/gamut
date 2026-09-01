@@ -16,7 +16,7 @@ behind the codecs that embed DEFLATE streams — most directly [`gamut-png`](../
 - **Encoder-only.** Inflating DEFLATE is a solved problem, so — per gamut's encoder-first philosophy
   — this crate does not decode; see [Scope](#scope). Correctness is proven differentially against the
   canonical C `zlib` (see [Validation](#validation)).
-- **Self-contained and safe.** `#![forbid(unsafe_code)]`, no internal dependencies.
+- **Self-contained and safe.** 100% safe Rust (`#![deny(unsafe_code)]`), no internal dependencies.
 
 ## Why this crate
 

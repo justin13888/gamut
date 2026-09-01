@@ -42,7 +42,9 @@
 //! let decoded: ImageBuf<Rgb8> = PngDecoder::new().decode_image(&png).unwrap();
 //! assert_eq!(decoded.as_samples(), rgb);
 //! ```
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`, because this crate is on an encode hot path: a measured win may take
+// the exception (AGENTS.md, `## Conventions`). None does today — this is 100% safe Rust.
+#![deny(unsafe_code)]
 
 mod abi;
 mod adam7;
