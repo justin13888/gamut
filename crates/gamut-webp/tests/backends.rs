@@ -426,10 +426,11 @@ impl WebpCodestreamEncoder for PanickingEncoder {
 }
 
 #[test]
-fn a_panicking_backend_poisons_the_registry_and_is_reported() {
+fn a_panicking_decode_backend_poisons_the_registry() {
     let (file, _) = lossless_fixture();
     let mut dec = WebpDecoder::new();
     dec.push_backend(PanickingDecoder);
+
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -437,23 +438,33 @@ fn a_panicking_backend_poisons_the_registry_and_is_reported() {
     }));
     std::panic::set_hook(hook);
     assert!(first.is_err(), "the backend panic must surface");
-    // The lock is now poisoned: the next decode reports it instead of using stale backend state.
+
+    // The lock is now poisoned: the next decode reports it instead of using stale backend state,
+    // which is the half that matters -- a silent retry over a half-updated registry is the
+    // failure this guard exists to prevent.
     let err: Result<ImageBuf<Rgb8>> = dec.decode_image(&file);
     assert_error(
         err,
         ErrorKind::InvalidInput,
         "WebP: a codestream backend panicked (registry lock poisoned)",
     );
+}
 
+#[test]
+fn a_panicking_encode_backend_poisons_the_registry() {
+    // The encoder keeps its own registry, so this can be wrong while the decoder path above is
+    // right. Same contract, separately reachable.
     let mut enc = WebpEncoder::lossless();
     enc.push_backend(PanickingEncoder);
+
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = encode_rgb(&enc, &rgb(8, 8), dims(8, 8));
     }));
     std::panic::set_hook(hook);
-    assert!(first.is_err());
+    assert!(first.is_err(), "the backend panic must surface");
+
     assert_error(
         encode_rgb(&enc, &rgb(8, 8), dims(8, 8)),
         ErrorKind::InvalidInput,
