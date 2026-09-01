@@ -100,9 +100,9 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | --- | --- | --- |
 | 1 | Filter selection | **partial** — per-line MinSumAbs plus six whole-image candidates each fully DEFLATEd. No entropy or bigram heuristic, no per-line trial deflate, no pruning, no two-tier trial. [#480] |
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
-| 3 | Smallest lawful representation | **partial** — grey, alpha-drop, ≤256 palette, 16→8, sub-byte all present; a `tRNS` colour key for grey/truecolour is not. [#481] |
+| 3 | Smallest lawful representation | **done** — grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour. The key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. |
 | 4 | Palette optimization | **minimal** — trailing-opaque `tRNS` trim only. First-appearance order, no sorting; caller-supplied palettes get no dedupe or unused-entry removal. [#482] |
-| 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in. Worth 30% on the sprite row. |
+| 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in. Worth 30% on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. |
 | 6 | Metadata hygiene | **no policy** — the encoder emits exactly what the caller set, and `gamut convert` drops metadata on the PNG path. [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
 | 8 | Effort / speed / determinism | Output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). Three independent knobs, no composed dial. No parallelism. [#484] |
