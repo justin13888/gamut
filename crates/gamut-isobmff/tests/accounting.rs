@@ -90,7 +90,7 @@ fn unknown_top_level_box_surfaces_verbatim() {
     let mpvd = segments
         .iter()
         .find_map(|s| match &s.kind {
-            SegmentKind::Box { ty, body } if ty == b"mpvd" => Some(*body),
+            SegmentKind::Box { ty, body } if *ty == *b"mpvd" => Some(*body),
             _ => None,
         })
         .expect("mpvd surfaced");
