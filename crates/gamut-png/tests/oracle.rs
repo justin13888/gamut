@@ -695,3 +695,36 @@ fn solid_image_round_trips() {
     let dec = libpng_oracle::decode(&png);
     assert_eq!(dec.pixels, src);
 }
+
+#[test]
+fn every_filter_strategy_survives_the_libpng_round_trip() {
+    // The end-to-end pin whose absence hid a silent-corruption defect: `MinEntropy` was scored but
+    // never encoded with, so nothing noticed that a row whose candidates all tied emitted its
+    // predecessor's residuals. Sweeping the whole enum means a new strategy cannot land unproven.
+    //
+    // Deliberately narrow: 3x7 is the smallest corpus size whose rows are short enough for an
+    // all-distinct-bytes tie, which is exactly the case that used to break.
+    let (w, h) = (3, 7);
+    let src = rgb_pattern(w, h);
+    let dims = Dimensions::new(w, h).unwrap();
+    for strategy in [
+        FilterStrategy::None,
+        FilterStrategy::Fixed(FilterType::None),
+        FilterStrategy::Fixed(FilterType::Sub),
+        FilterStrategy::Fixed(FilterType::Up),
+        FilterStrategy::Fixed(FilterType::Average),
+        FilterStrategy::Fixed(FilterType::Paeth),
+        FilterStrategy::MinSumAbs,
+        FilterStrategy::MinEntropy,
+        FilterStrategy::MinBigrams,
+        FilterStrategy::BruteForce,
+    ] {
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_filter(strategy)
+            .encode_image(ImageRef::<Rgb8>::new(&src, dims).unwrap(), &mut png)
+            .expect("encode");
+        let dec = libpng_oracle::decode(&png);
+        assert_eq!(dec.pixels, src, "{strategy:?} did not round-trip");
+    }
+}

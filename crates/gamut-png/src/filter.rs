@@ -36,6 +36,13 @@ pub enum FilterStrategy {
     /// Sum-of-absolutes asks "are these bytes small?"; entropy asks "are these bytes *repetitive*?"
     /// — which is the question DEFLATE actually answers. A row of alternating 0 and 200 scores
     /// badly under `MinSumAbs` and beautifully under this.
+    ///
+    /// The only strategy that scores in floating point. `f64::log2` is not required to be
+    /// correctly rounded, so this strategy's output is reproducible on a machine but not
+    /// guaranteed bit-identical across libm implementations — which is why it is absent from
+    /// [`BRUTE_FORCE_STRATEGIES`](crate::PngEncoder), keeping the default and `BruteForce` paths
+    /// integer-only and their output byte-exact everywhere. It never uniquely won a corpus row
+    /// (`STATUS.md`), so it is offered rather than chosen.
     MinEntropy,
     /// Per scanline, pick the filter producing the fewest distinct byte bigrams.
     ///
@@ -225,18 +232,28 @@ fn score(kind: Score, filtered: &[u8], scratch: &mut Scratch) -> u64 {
             for &b in filtered {
                 scratch.histogram[b as usize] += 1;
             }
-            // Shannon entropy over a fixed-length row is `n·log2(n) − Σ c·log2(c)`, and `n` is the
-            // same for every candidate, so the first term is a constant that cannot change the
-            // ranking. Minimising entropy is therefore maximising `Σ c·log2(c)` — negated here so
-            // that lower stays better, and scaled to integers so the comparison is exact and the
-            // choice reproducible run to run.
-            let weighted: f64 = scratch
+            // Shannon entropy times the row length, `Σ c·log2(n/c)`, in 1/256ths of a bit so the
+            // comparison is integer-exact and the choice reproducible run to run.
+            //
+            // Stated this way every term is non-negative (`c ≤ n`) and the whole score is bounded
+            // by `8n·256` — a byte alphabet carries at most 8 bits — so lower is better directly,
+            // rather than by complementing against `u64::MAX`. That matters beyond tidiness: a
+            // score that can *reach* `u64::MAX` is a score that can collide with a sentinel, and
+            // this one did.
+            //
+            // Equivalent to the `n·log2(n) − Σ c·log2(c)` form: `n` is constant across a row's
+            // five candidates, so it cannot change the ranking either way. The `c == 1` terms
+            // contribute `0` there and `1·log2(n)` here, which is why the filter below is `c > 0`
+            // — a zero count is excluded because `0·log2(n/0)` is not a number, not because it
+            // contributes nothing.
+            let n = filtered.len() as f64;
+            let bits: f64 = scratch
                 .histogram
                 .iter()
-                .filter(|&&c| c > 1)
-                .map(|&c| f64::from(c) * f64::from(c).log2())
+                .filter(|&&c| c > 0)
+                .map(|&c| f64::from(c) * (n / f64::from(c)).log2())
                 .sum();
-            u64::MAX - (weighted * 256.0) as u64
+            (bits * 256.0) as u64
         }
         Score::Bigrams => {
             scratch.bigrams.fill(0);
@@ -348,7 +365,12 @@ fn choose_by(
     aux: &mut Scratch,
 ) -> FilterType {
     let mut best = FilterType::None;
-    let mut best_score = u64::MAX;
+    // `None`, not a sentinel score. Seeding with `u64::MAX` and improving on a strict `<` leaves
+    // `best_bytes` unwritten when every candidate scores `u64::MAX` — and `filter_image` reuses
+    // that buffer across scanlines, so the row would be emitted with its predecessor's residuals
+    // under a filter byte of 0. `Option` makes "nothing chosen yet" unrepresentable as a score, so
+    // the first candidate is always taken whatever any scorer returns.
+    let mut best_score: Option<u64> = None;
     for filter in [
         FilterType::None,
         FilterType::Sub,
@@ -357,9 +379,9 @@ fn choose_by(
         FilterType::Paeth,
     ] {
         filter_row(filter, cur, prev, bpp, scratch);
-        let score = score(kind, scratch, aux);
-        if score < best_score {
-            best_score = score;
+        let candidate = score(kind, scratch, aux);
+        if best_score.is_none_or(|best| candidate < best) {
+            best_score = Some(candidate);
             best = filter;
             best_bytes.clear();
             best_bytes.extend_from_slice(scratch);
@@ -506,6 +528,41 @@ mod tests {
         let a = score(Score::Entropy, &[0, 0, 0, 0], &mut aux);
         let b = score(Score::Entropy, &[0, 1, 2, 3], &mut aux);
         assert!(a < b, "a constant row must stay the lower-entropy one");
+    }
+
+    #[test]
+    fn a_universal_score_tie_keeps_the_first_filters_bytes() {
+        // Every candidate for this row has all-distinct bytes, so under a scorer that ranks by
+        // repetition they all score identically. `choose_by` must still emit the first candidate's
+        // bytes: before the `Option` seed it emitted none at all, and `filter_image` produced a
+        // one-byte stream for a two-byte row -- a PNG whose IDAT is shorter than its image.
+        assert_eq!(
+            filter_image(FilterStrategy::MinEntropy, &[1, 3], 2, 1),
+            [FilterType::None as u8, 1, 3]
+        );
+    }
+
+    #[test]
+    fn a_tied_row_does_not_reuse_the_previous_rows_residuals() {
+        // The companion failure to the one above, and the dangerous one: `filter_image` hoists the
+        // chosen-bytes buffer out of the row loop, so a row that chose nothing re-emitted its
+        // predecessor's residuals under a filter byte of 0 -- a structurally valid PNG carrying
+        // the wrong pixels, with no error anywhere.
+        assert_eq!(
+            filter_image(FilterStrategy::MinEntropy, &[0, 0, 0, 1], 2, 1),
+            [FilterType::None as u8, 0, 0, FilterType::None as u8, 0, 1]
+        );
+    }
+
+    #[test]
+    fn the_entropy_scale_separates_rows_closer_than_one_bit() {
+        // The scale is what makes the score integer-exact: these two rows carry 8.000 and 8.490
+        // bits, which both floor to 8. Only multiplying by 256 before the cast keeps them apart,
+        // so this is the assertion that a `+ 256.0` or `/ 256.0` scale cannot satisfy.
+        let mut aux = Scratch::new();
+        let even = score(Score::Entropy, &[0, 0, 0, 0, 1, 1, 1, 1], &mut aux);
+        let skewed = score(Score::Entropy, &[0, 0, 0, 0, 0, 0, 1, 2], &mut aux);
+        assert!(even < skewed, "{even} < {skewed}");
     }
 
     #[test]
