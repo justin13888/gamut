@@ -34,6 +34,11 @@ gamut-deflate.workspace = true
 # is deliberately encoder-only, and its docs bless miniz_oxide as the decode-side inflate (the same
 # choice gamut-dng made); revisiting an in-house inflater is tracked by issue #196.
 miniz_oxide = "0.8"
+# CRC-32 (ISO-HDLC) for every chunk, IDAT included, so it is on the critical path of every encode.
+# Hardware-accelerated (x86-64 PCLMULQDQ/AVX-512, aarch64 `crc32`) with a table fallback elsewhere,
+# including wasm32. MIT/Apache-2.0, pure Rust, and it keeps its `unsafe` to itself -- gamut-png
+# stays 100% safe Rust. Replaces a hand-written byte-at-a-time table loop; see `src/crc32.rs`.
+crc32fast = "1.5"
 
 [dev-dependencies]
 # Differential cross-check oracle: a vendored, statically-linked libpng (built from the

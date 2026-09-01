@@ -70,21 +70,77 @@ fn paeth(a: u8, b: u8, c: u8) -> u8 {
 
 /// Forward-filters one scanline `cur` (with previous raw row `prev`, all zero for the first row)
 /// into `out` (which is overwritten to `cur.len()` bytes).
+///
+/// Structured for the vectoriser rather than for brevity, because this is the encoder's hottest
+/// loop -- `MinSumAbs` runs it five times per scanline and `BruteForce` up to ten. Three things
+/// matter, and the straightforward version does none of them:
+///
+/// * The `i >= bpp` test that picks between a real left-neighbour and an implicit zero is loop
+///   invariant, so the row splits into a `bpp`-long prologue where `a` and `c` are zero and a
+///   body where they are not. Testing it per byte defeats vectorisation outright.
+/// * The body then reads five *equal-length* subslices, which lets the bounds checks fold away
+///   instead of being re-proved for every index.
+/// * The filter is matched once, outside the loop, so each arm is a straight-line kernel rather
+///   than a branch per byte. And `out` is sized once, so there is no capacity check per `push`.
 fn filter_row(filter: FilterType, cur: &[u8], prev: &[u8], bpp: usize, out: &mut Vec<u8>) {
+    let n = cur.len();
     out.clear();
-    out.reserve(cur.len());
-    for i in 0..cur.len() {
-        let a = if i >= bpp { cur[i - bpp] } else { 0 };
-        let b = prev[i];
-        let c = if i >= bpp { prev[i - bpp] } else { 0 };
-        let residual = match filter {
-            FilterType::None => cur[i],
-            FilterType::Sub => cur[i].wrapping_sub(a),
-            FilterType::Up => cur[i].wrapping_sub(b),
-            FilterType::Average => cur[i].wrapping_sub(((u16::from(a) + u16::from(b)) / 2) as u8),
-            FilterType::Paeth => cur[i].wrapping_sub(paeth(a, b, c)),
-        };
-        out.push(residual);
+    out.resize(n, 0);
+    let head = bpp.min(n);
+
+    // Prologue: the first `bpp` bytes have no left neighbour, so `a == c == 0`. That collapses
+    // Sub to a copy and -- less obviously -- Paeth to Up, because `paeth(0, b, 0) == b` for every
+    // `b` (at `b == 0` all three distances tie and the spec's order picks `a`, which is also 0).
+    match filter {
+        FilterType::None | FilterType::Sub => out[..head].copy_from_slice(&cur[..head]),
+        FilterType::Up | FilterType::Paeth => {
+            for (d, (&x, &b)) in out[..head]
+                .iter_mut()
+                .zip(cur[..head].iter().zip(&prev[..head]))
+            {
+                *d = x.wrapping_sub(b);
+            }
+        }
+        FilterType::Average => {
+            for (d, (&x, &b)) in out[..head]
+                .iter_mut()
+                .zip(cur[..head].iter().zip(&prev[..head]))
+            {
+                *d = x.wrapping_sub(b / 2);
+            }
+        }
+    }
+
+    // Body: `x` is the current byte, `a` the byte `bpp` to its left, `b` the byte above, `c` the
+    // byte above-left. All five slices are the same length by construction.
+    let m = n - head;
+    let dst = &mut out[head..];
+    let x = &cur[head..];
+    let a = &cur[..m];
+    let b = &prev[head..];
+    let c = &prev[..m];
+    match filter {
+        FilterType::None => dst.copy_from_slice(x),
+        FilterType::Sub => {
+            for (d, (&x, &a)) in dst.iter_mut().zip(x.iter().zip(a)) {
+                *d = x.wrapping_sub(a);
+            }
+        }
+        FilterType::Up => {
+            for (d, (&x, &b)) in dst.iter_mut().zip(x.iter().zip(b)) {
+                *d = x.wrapping_sub(b);
+            }
+        }
+        FilterType::Average => {
+            for (d, ((&x, &a), &b)) in dst.iter_mut().zip(x.iter().zip(a).zip(b)) {
+                *d = x.wrapping_sub(((u16::from(a) + u16::from(b)) / 2) as u8);
+            }
+        }
+        FilterType::Paeth => {
+            for (d, (((&x, &a), &b), &c)) in dst.iter_mut().zip(x.iter().zip(a).zip(b).zip(c)) {
+                *d = x.wrapping_sub(paeth(a, b, c));
+            }
+        }
     }
 }
 
@@ -131,31 +187,45 @@ pub fn filter_image(
     let zero_row = vec![0u8; row_bytes];
     let mut prev = zero_row.as_slice();
     let mut scratch = Vec::with_capacity(row_bytes);
+    let mut chosen = Vec::with_capacity(row_bytes);
     for y in 0..height {
         let cur = &samples[y * row_bytes..(y + 1) * row_bytes];
-        let filter = match strategy {
-            FilterStrategy::None => FilterType::None,
-            FilterStrategy::Fixed(f) => f,
-            // BruteForce is resolved to concrete strategies by the encoder; if it reaches here, fall
-            // back to the per-scanline heuristic.
+        match strategy {
+            // BruteForce is resolved to concrete strategies by the encoder; if it reaches here,
+            // fall back to the per-scanline heuristic.
             FilterStrategy::MinSumAbs | FilterStrategy::BruteForce => {
-                choose_min_sum_abs(cur, prev, bpp, &mut scratch)
+                let filter = choose_min_sum_abs(cur, prev, bpp, &mut scratch, &mut chosen);
+                out.push(filter as u8);
+                out.extend_from_slice(&chosen);
             }
-        };
-        out.push(filter as u8);
-        filter_row(filter, cur, prev, bpp, &mut scratch);
-        out.extend_from_slice(&scratch);
+            FilterStrategy::None | FilterStrategy::Fixed(_) => {
+                let filter = match strategy {
+                    FilterStrategy::Fixed(f) => f,
+                    _ => FilterType::None,
+                };
+                out.push(filter as u8);
+                filter_row(filter, cur, prev, bpp, &mut scratch);
+                out.extend_from_slice(&scratch);
+            }
+        }
         prev = cur;
     }
     out
 }
 
-/// Picks the filter with the lowest sum-of-absolute-residuals for one scanline.
+/// Picks the filter with the lowest sum-of-absolute-residuals for one scanline, leaving that
+/// filter's bytes in `best_bytes`.
+///
+/// Returning the winning bytes rather than just the winning filter is what makes this five passes
+/// over the row instead of six: the caller would otherwise re-run [`filter_row`] for the filter
+/// just chosen, having already computed exactly those bytes and thrown them away. Keeping them
+/// costs one `memcpy` per improvement, against a full filter pass per scanline.
 pub fn choose_min_sum_abs(
     cur: &[u8],
     prev: &[u8],
     bpp: usize,
     scratch: &mut Vec<u8>,
+    best_bytes: &mut Vec<u8>,
 ) -> FilterType {
     let mut best = FilterType::None;
     let mut best_score = u64::MAX;
@@ -171,6 +241,8 @@ pub fn choose_min_sum_abs(
         if score < best_score {
             best_score = score;
             best = filter;
+            best_bytes.clear();
+            best_bytes.extend_from_slice(scratch);
         }
     }
     best
@@ -268,7 +340,7 @@ mod tests {
         // scores far below None.
         let row: Vec<u8> = (0..30u8).map(|i| i.wrapping_mul(3)).collect();
         let prev = vec![0u8; row.len()];
-        let chosen = choose_min_sum_abs(&row, &prev, 1, &mut Vec::new());
+        let chosen = choose_min_sum_abs(&row, &prev, 1, &mut Vec::new(), &mut Vec::new());
         assert_eq!(chosen, FilterType::Sub);
     }
 }

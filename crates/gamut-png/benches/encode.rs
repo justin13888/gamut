@@ -338,9 +338,9 @@ mod stages {
         let prev: Vec<u8> = (0..ROW_BYTES).map(|i| (i * 13 + 5) as u8).collect();
         bencher
             .counter(BytesCount::new(row.len()))
-            .with_inputs(Vec::new)
-            .bench_local_refs(|scratch: &mut Vec<u8>| {
-                stages::choose_min_sum_abs(&row, &prev, black_box(bpp), scratch)
+            .with_inputs(|| (Vec::new(), Vec::new()))
+            .bench_local_refs(|(scratch, best): &mut (Vec<u8>, Vec<u8>)| {
+                stages::choose_min_sum_abs(&row, &prev, black_box(bpp), scratch, best)
             });
     }
 

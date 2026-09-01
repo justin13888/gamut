@@ -3,34 +3,21 @@
 //! This is the reflected CRC-32 with polynomial `0xEDB88320`, initial value all-ones, and a final
 //! ones-complement, computed over a chunk's **type and data** (not its length). zlib uses Adler-32,
 //! never this — so CRC-32 lives in the PNG crate, not in `gamut-deflate`.
-
-/// Precomputed byte-wise CRC table (built at compile time).
-const TABLE: [u32; 256] = build_table();
-
-const fn build_table() -> [u32; 256] {
-    let mut table = [0u32; 256];
-    let mut n = 0usize;
-    while n < 256 {
-        let mut c = n as u32;
-        let mut k = 0;
-        while k < 8 {
-            c = if c & 1 != 0 {
-                0xEDB8_8320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
-            k += 1;
-        }
-        table[n] = c;
-        n += 1;
-    }
-    table
-}
+//!
+//! The arithmetic is [`crc32fast`]'s; this module is the PNG-shaped wrapper over it. The tests
+//! below stay as a drift guard: they pin the polynomial this file's doc claims, so swapping the
+//! backend for one computing a different CRC-32 variant (Castagnoli, say) fails here rather than
+//! silently producing files no decoder accepts.
 
 /// An incremental CRC-32 accumulator.
-pub struct Crc32 {
-    value: u32,
-}
+///
+/// Delegates to [`crc32fast`], which dispatches to PCLMULQDQ/AVX-512 on x86-64 and the `crc32`
+/// instructions on aarch64, falling back to a table elsewhere (wasm32 included). The `unsafe`
+/// that needs is entirely inside that crate; nothing here changes.
+///
+/// This runs over every byte of every chunk, IDAT included, so it is on the critical path of
+/// every encode. The byte-at-a-time table loop it replaces managed roughly 420 MB/s.
+pub struct Crc32(crc32fast::Hasher);
 
 impl Crc32 {
     /// Starts a fresh CRC (register initialised to all ones).
@@ -42,21 +29,17 @@ impl Crc32 {
         reason = "a Default impl here would be dead delegation: uncovered, and unkillable by any test"
     )]
     pub fn new() -> Self {
-        Self { value: 0xFFFF_FFFF }
+        Self(crc32fast::Hasher::new())
     }
 
     /// Folds `data` into the running CRC.
     pub fn update(&mut self, data: &[u8]) {
-        let mut crc = self.value;
-        for &b in data {
-            crc = TABLE[((crc ^ u32::from(b)) & 0xff) as usize] ^ (crc >> 8);
-        }
-        self.value = crc;
+        self.0.update(data);
     }
 
     /// Finalises the CRC (ones-complement of the register).
     pub fn finish(self) -> u32 {
-        self.value ^ 0xFFFF_FFFF
+        self.0.finalize()
     }
 }
 
