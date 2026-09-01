@@ -259,7 +259,11 @@ fn score(kind: Score, filtered: &[u8], scratch: &mut Scratch) -> u64 {
             scratch.bigrams.fill(0);
             let mut distinct = 0u64;
             for pair in filtered.windows(2) {
-                let index = (usize::from(pair[0]) << 8) | usize::from(pair[1]);
+                // The pair *is* a big-endian `u16`, so read it as one. Spelling it `a << 8 | b`
+                // costs two operators that carry no meaning of their own -- one of which has no
+                // behavioural variant at all, since the low byte of `a << 8` is zero and `|` is
+                // therefore indistinguishable from `^`.
+                let index = usize::from(u16::from_be_bytes([pair[0], pair[1]]));
                 let (word, bit) = (index >> 6, index & 63);
                 if scratch.bigrams[word] & (1 << bit) == 0 {
                     scratch.bigrams[word] |= 1 << bit;
@@ -513,6 +517,10 @@ mod tests {
         // Fewer than two bytes has no pairs at all.
         assert_eq!(score(Score::Bigrams, &[9], &mut aux), 0);
         assert_eq!(score(Score::Bigrams, &[], &mut aux), 0);
+        // Distinct *pairs*, not distinct second bytes: (1,3), (3,2), (2,3) is three pairs over two
+        // distinct second bytes, so an index that dropped the high byte would report two. Every
+        // vector above happens to have as many pairs as second bytes, so none of them can tell.
+        assert_eq!(score(Score::Bigrams, &[1, 3, 2, 3], &mut aux), 3);
     }
 
     #[test]
