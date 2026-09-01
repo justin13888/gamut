@@ -20,6 +20,9 @@
 //! against an independent naive 2ᴺ-corner-weight implementation in the crate's unit tests, and
 //! its 1-D/2-D base cases (where lcms2's float routines *are* multilinear) are swept here.
 
+mod common;
+
+use common::Lcg;
 use gamut_cmm::{ClutInterpolation, ClutTable, Pipeline, Stage};
 use gamut_icc::{Clut, ClutPrecision};
 use lcms2_oracle::{
@@ -27,30 +30,8 @@ use lcms2_oracle::{
     TYPE_RGB_DBL, Transform, clut_probe_profile,
 };
 
-/// A deterministic 64-bit LCG (Knuth's MMIX constants) for seeded random tables and sweeps.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_u32(&mut self) -> u32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        (self.0 >> 33) as u32
-    }
-
-    fn next_u16(&mut self) -> u16 {
-        (self.next_u32() & 0xFFFF) as u16
-    }
-
-    /// A sample roughly in `[−0.05, 1.05]`, exercising the clamp edges alongside the interior.
-    fn next_unit(&mut self) -> f64 {
-        f64::from(self.next_u32()) / f64::from(u32::MAX) * 1.1 - 0.05
-    }
-}
-
 fn random_samples(seed: u64, n: usize) -> Vec<u16> {
-    let mut lcg = Lcg(seed);
+    let mut lcg = Lcg::new(seed);
     (0..n).map(|_| lcg.next_u16()).collect()
 }
 
@@ -125,9 +106,9 @@ fn sweep_points(seed: u64, grid: &[u8], count: usize) -> Vec<Vec<f64>> {
     nan_point[0] = f64::NAN;
     points.push(nan_point);
     // Seeded random fill to `count`.
-    let mut lcg = Lcg(seed);
+    let mut lcg = Lcg::new(seed);
     while points.len() < count {
-        points.push((0..dims).map(|_| lcg.next_unit()).collect());
+        points.push((0..dims).map(|_| lcg.next_unit_with_overshoot()).collect());
     }
     points
 }

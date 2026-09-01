@@ -23,6 +23,9 @@
 //!   the piecewise (toe-limited) TRCs; a pure-gamma TRC amplifies the f64 `M·M⁻¹` residue
 //!   at an exactly-zero channel to `ε^(1/γ)` ≈ 3e-8, which sets the asserted envelope.
 
+mod common;
+
+use common::Lcg;
 use gamut_cmm::{Pipeline, Stage, device_to_pcs, pcs_to_device};
 use gamut_color::lab::{D50_XYZ, delta_e_2000, xyz_to_lab};
 use gamut_icc::{IccProfile, KnownTag, RenderingIntent};
@@ -53,19 +56,6 @@ const P3_PRIMARIES: [[f64; 2]; 3] = [[0.680, 0.320], [0.265, 0.690], [0.150, 0.0
 
 /// Adobe-RGB-ish primaries.
 const ADOBE_PRIMARIES: [[f64; 2]; 3] = [[0.640, 0.330], [0.210, 0.710], [0.150, 0.060]];
-
-/// A deterministic 64-bit LCG (Knuth's MMIX constants) for seeded sweeps.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_unit(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        f64::from((self.0 >> 33) as u32) / f64::from(u32::MAX)
-    }
-}
 
 /// Serializes an oracle-synthesized profile once and hands the **same bytes** to both sides:
 /// parsed by `gamut-icc` for this crate, reopened by lcms2 for the oracle transform. Without
@@ -100,7 +90,7 @@ fn rgb_sweep(seed: u64) -> Vec<[f64; 3]> {
         points.push([junction, 0.5, 1.0 - junction]);
         points.push([junction; 3]);
     }
-    let mut lcg = Lcg(seed);
+    let mut lcg = Lcg::new(seed);
     while points.len() < 220 {
         points.push([lcg.next_unit(), lcg.next_unit(), lcg.next_unit()]);
     }
@@ -110,7 +100,7 @@ fn rgb_sweep(seed: u64) -> Vec<[f64; 3]> {
 /// The gray device sweep: endpoints, a uniform ramp, and seeded random fill to ≥ 200 points.
 fn gray_sweep(seed: u64) -> Vec<f64> {
     let mut points: Vec<f64> = (0..=32).map(|i| f64::from(i) / 32.0).collect();
-    let mut lcg = Lcg(seed);
+    let mut lcg = Lcg::new(seed);
     while points.len() < 200 {
         points.push(lcg.next_unit());
     }

@@ -27,6 +27,9 @@
 //! quantizes its ΔE excess into a 16-bit CLUT, so magnitudes are deliberately not compared;
 //! see `src/gamut.rs`).
 
+mod common;
+
+use common::Lcg;
 use gamut_cmm::{
     GamutCheck, IccTransform, PipelineOptimization, ProofingOptions, Transform as _,
     TransformOptions, transform_interleaved_u8,
@@ -57,19 +60,6 @@ fn intent_options(intent: RenderingIntent) -> TransformOptions {
 const D65_XY: [f64; 2] = [0.3127, 0.3290];
 const WIDE_PRIMARIES: [[f64; 2]; 3] = [[0.64, 0.33], [0.21, 0.71], [0.15, 0.06]];
 
-/// A deterministic 64-bit LCG (Knuth's MMIX constants) for seeded sweeps.
-struct Lcg(u64);
-
-impl Lcg {
-    fn next_unit(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        f64::from((self.0 >> 33) as u32) / f64::from(u32::MAX)
-    }
-}
-
 /// Serializes an oracle-synthesized profile once and hands the same bytes to both sides.
 fn reopen(profile: &Profile) -> (IccProfile, Profile) {
     let bytes = profile.to_bytes();
@@ -92,7 +82,7 @@ fn sweep(channels: usize, count: usize, seed: u64) -> Vec<Vec<f64>> {
     for i in 0..=8 {
         points.push(vec![f64::from(i) / 8.0; channels]);
     }
-    let mut lcg = Lcg(seed);
+    let mut lcg = Lcg::new(seed);
     while points.len() < count {
         points.push((0..channels).map(|_| lcg.next_unit()).collect());
     }
