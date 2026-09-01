@@ -594,6 +594,25 @@ exclude_re = [
     # reportable only as a TIMEOUT, never a catchable behavioural escape. Line/col-anchored so each
     # matches exactly its hang mutant; the `-=` siblings walk `k` backwards into a usize underflow that
     # panics and ARE caught. Same shape as the sequential BitReader/Reader hang exclusions above.
+    # gamut-tiff CCITT G4 `reference_changes` and LZW `BitReader::read`, stubbed to a constant.
+    # Both are cursor-advance functions whose callers loop until the cursor passes a bound, so a
+    # constant return removes the only thing that ends the loop -- non-terminating, and reportable
+    # only as a TIMEOUT (exit 3, gate-failing), never as a catchable behavioural escape. Same shape
+    # and justification as the gamut-jpeg entropy-reader hangs above.
+    #
+    # `reference_changes` returns b1/b2, the changing elements strictly right of a0. Every one of
+    # the four constants puts b2 at or behind a0, so `encode_row` takes pass mode, assigns
+    # `a0 = b2`, and finds the same b2 on the next pass, forever. `BitReader::read` stubbed to
+    # `Some(0)`/`Some(1)` returns a code that is never EOI, so `decode`'s loop never reaches its
+    # terminating code and the string table grows without bound.
+    #
+    # Anchored on the function signature rather than on line:col, unlike the jpeg entries above: a
+    # line-anchored regex silently stops matching when code above it moves, which turns a suppressed
+    # timeout back into a red gate at an unrelated moment. Both names are unique workspace-wide, and
+    # the anchors name the return type, so only the whole-body replacements match -- every operator
+    # mutation inside either function stays in the survey, and this branch kills several of them.
+    'replace reference_changes -> \(usize, usize\) with \((0|1), (0|1)\)',
+    "replace BitReader<'_>::read -> Option<u32> with Some\\((0|1)\\)",
     "scan\\.rs:893:19: replace \\+= with \\*= in decode_ac_refine",
     "scan\\.rs:917:15: replace \\+= with \\*= in decode_ac_refine",
     # gamut-jpeg `refine` (§G.1.2.3 correction) sign test `if coeff > 0`: `refine` is only ever called
