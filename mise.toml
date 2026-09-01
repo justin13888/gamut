@@ -227,6 +227,23 @@ run = "cargo test --workspace --all-features --doc"
 description = "Run performance benchmarks (Divan; issue #149)"
 run = "cargo bench --workspace"
 
+# Runs every bench ONCE, to prove it still executes (issue #437). Divan's own flag for it:
+# "Run benchmarks once to ensure they run successfully". This is not a performance measurement and
+# must not be read as one -- it takes no timings and asserts no thresholds.
+#
+# What it adds over the existing gates is narrow but real. `mise run lint` is
+# `cargo clippy --workspace --all-targets --all-features`, and `--all-targets` includes
+# `--benches`, so every bench file is already *compiled* on every PR and cannot rot silently. What
+# nothing did was *run* one, so a bench that panics in setup -- a bad fixture, a wrong dimension,
+# an `unwrap` on an encode that now fails -- was invisible.
+#
+# `--benches` restricts this to bench targets. Without it `cargo bench` also builds every lib and
+# test target in release just to look for `#[bench]` functions that do not exist here (all 15
+# benches are `harness = false` Divan), which is a second full release build for nothing.
+[tasks.bench-test]
+description = "Run every bench once to prove it still executes (no timings; issue #437)"
+run = "cargo bench --workspace --benches -- --test"
+
 # Bindings/binary crates (cli, wasm, ffi), the declarations-only `gamut-jxl-sys` FFI crate, and the
 # dev-only `tooling/` oracles are excluded — their entry points are not meaningfully unit-testable
 # (jxl-sys has no function bodies at all) and would otherwise skew the gate.
