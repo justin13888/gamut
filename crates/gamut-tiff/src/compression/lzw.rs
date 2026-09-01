@@ -172,6 +172,55 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// The decoder holds the code width at 12 bits when the table fills without a `ClearCode`.
+    ///
+    /// TIFF 6.0 section 13 steps the width 9 -> 10 -> 11 -> 12 as the table fills and stops there.
+    /// Our *encoder* resets at 4094, so it never approaches the cap -- which is why the round-trip
+    /// tests and the libtiff differential both miss this: no cooperative encoder emits the one
+    /// stream that reaches it. A decoder reads whatever it is given (#489).
+    ///
+    /// Every code is `0`, so the stream is entirely zero bytes and the only thing that varies is
+    /// how many bits each code occupies. That is exactly what the cap governs: relaxing
+    /// `width < MAX_WIDTH` to `<=` widens to 13 bits at 4095 entries, the reader then consumes 13
+    /// bits where 12 were written, and it runs off the end of the stream before producing the
+    /// expected bytes.
+    #[test]
+    fn the_code_width_stops_at_twelve_when_the_table_fills() {
+        /// The width a code occupies, as a function of the table size before it is read.
+        fn width_for(table_len: usize) -> u32 {
+            match table_len {
+                ..=510 => 9,
+                511..=1022 => 10,
+                1023..=2046 => 11,
+                _ => 12,
+            }
+        }
+
+        // Enough literal codes to carry the table past 4095 entries -- the boundary the cap
+        // guards -- and eight more beyond it.
+        const CODES: usize = 3846;
+        let mut table_len = 258usize;
+        let mut bits = 0usize;
+        let mut grows = false;
+        for _ in 0..CODES {
+            bits += width_for(table_len) as usize;
+            // The decoder appends an entry for every code after the first.
+            if grows {
+                table_len += 1;
+            }
+            grows = true;
+        }
+        assert!(
+            table_len > 4095,
+            "the stream must reach the cap, got {table_len}"
+        );
+
+        let stream = vec![0u8; bits.div_ceil(8)];
+        let decoded =
+            decode(&stream, CODES).expect("a full table without a ClearCode still decodes");
+        assert_eq!(decoded, vec![0u8; CODES]);
+    }
+
     fn roundtrip(data: &[u8]) {
         let enc = encode(data);
         let dec = decode(&enc, data.len()).expect("decode");
