@@ -276,7 +276,13 @@ impl Hable {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] if `white` is not finite or is not strictly positive.
+    /// Returns [`Error::InvalidInput`] if `white` is not finite, is not strictly positive, or if
+    /// the derived divisor `hable_partial(white)` is not a normal f32. That last case is not a
+    /// range: `hable_partial` ends in a subtraction that cancels, and at isolated white points the
+    /// cancellation lands on exactly zero, which would make every `map` call divide by it —
+    /// `map(white)` returning `0 / 0 = NaN` and every other input `+∞`. Found by the fuzz tier
+    /// (#264) at `white = 3.738137e-9`; the guard mirrors the one
+    /// [`ReinhardExtended::new`] already applies to `white²` and [`Drago::new`] to its prefactor.
     pub fn new(white: f32) -> Result<Self> {
         if !white.is_finite() || white <= 0.0 {
             return Err(Error::invalid_input(
@@ -284,9 +290,16 @@ impl Hable {
                 "Hable white point must be finite and greater than zero",
             ));
         }
+        let partial_white = hable_partial(white);
+        if !partial_white.is_normal() || partial_white <= 0.0 {
+            return Err(Error::invalid_input(
+                env!("CARGO_PKG_NAME"),
+                "Hable white point must yield a normal, positive curve divisor",
+            ));
+        }
         Ok(Self {
             white,
-            partial_white: hable_partial(white),
+            partial_white,
         })
     }
 
@@ -746,6 +759,31 @@ mod tests {
         assert!(Drago::new(1e5).expect("positive world max").is_monotonic());
         // And it does run out, which is the whole point of the predicate existing.
         assert!(!Drago::new(1e6).expect("positive world max").is_monotonic());
+    }
+
+    /// A white point whose derived divisor cancels to zero is refused, not accepted and broken.
+    ///
+    /// The named, deterministic form of the second thing the fuzz tier found (#264). At
+    /// `white = 3.738137e-9` the subtraction ending `hable_partial` lands on exactly zero, so
+    /// every `map` call divided by it: `map(white)` was `0 / 0 = NaN` and every other input
+    /// `+∞`. `Hable::new` accepted it, because it was the one parameterised constructor checking
+    /// only its argument and not the value the hot loop actually divides by --
+    /// `ReinhardExtended::new` has always checked `white²`, and `Drago::new` its prefactor.
+    ///
+    /// This is not a range, which is why a boundary test would have missed it: the offending
+    /// whites are isolated points where f32 rounding happens to cancel exactly. Swept one ULP at
+    /// a time across all 55.4 million f32 values in `[1e-9, 1e-7)`, the guard rejects 2 097 151 of
+    /// them, leaves no accepted-but-degenerate curve behind, and rejects none whose divisor is
+    /// sound.
+    #[test]
+    fn hable_rejects_a_white_whose_divisor_cancels_to_zero() {
+        assert!(Hable::new(3.738137e-9).is_err());
+
+        // The neighbours are fine, so the guard is not a blanket ban on small white points --
+        // `Hable::new(1e-30)` is still accepted and still maps `white` to 1.
+        let tiny = Hable::new(1e-30).expect("a tiny white with a sound divisor is still valid");
+        assert!(close_eps(tiny.map(tiny.white()), 1.0, 1e-5));
+        assert!(tiny.map(1.0).is_finite());
     }
 
     #[test]
