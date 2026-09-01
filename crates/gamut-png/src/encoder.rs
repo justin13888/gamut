@@ -484,9 +484,9 @@ impl PngEncoder {
     /// needs no tuned constant, and it cannot be worse than either candidate alone. A tie keeps
     /// the palette, which decodes with less work.
     ///
-    /// Only palette reductions pay for the second encode. Greyscale, alpha-drop and 16→8
-    /// demotion add no chunks at all, so for them the raw comparison is sound and this returns
-    /// immediately.
+    /// Only the reductions that *carry a chunk* pay for the second encode — a palette's `PLTE`
+    /// (+ `tRNS`), or a colour key's `tRNS`. Greyscale, alpha-drop and 16→8 demotion add no chunks
+    /// at all, so for them the raw comparison is sound and this returns immediately.
     fn write_reduced_or_native(
         &self,
         dims: Dimensions,
@@ -494,7 +494,11 @@ impl PngEncoder {
         native: impl FnOnce(&mut Vec<u8>) -> Result<usize>,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
-        if !matches!(reduced, Reduced::Indexed { .. }) {
+        let carries_chunks = matches!(
+            reduced,
+            Reduced::Indexed { .. } | Reduced::Rgb8Keyed { .. } | Reduced::GrayKeyed { .. }
+        );
+        if !carries_chunks {
             return self.write_reduced(dims, reduced, out);
         }
         let mut palette_encoding = Vec::new();
@@ -541,6 +545,28 @@ impl PngEncoder {
             Reduced::Rgb8(samples) => {
                 self.write_png(wh, &samples, ColorType::Truecolor, 8, |_| {}, out)
             }
+            // §11.3.2.1: for truecolour, tRNS is three 16-bit big-endian samples naming the one
+            // colour a decoder renders as fully transparent. At depth 8 the high byte is zero.
+            Reduced::Rgb8Keyed { samples, key } => self.write_png(
+                wh,
+                &samples,
+                ColorType::Truecolor,
+                8,
+                |out| {
+                    let trns = [0, key[0], 0, key[1], 0, key[2]];
+                    chunk::write_chunk(out, *b"tRNS", &trns);
+                },
+                out,
+            ),
+            // ...and for greyscale, one 16-bit big-endian sample.
+            Reduced::GrayKeyed { samples, key } => self.write_png(
+                wh,
+                &samples,
+                ColorType::Grayscale,
+                8,
+                |out| chunk::write_chunk(out, *b"tRNS", &[0, key]),
+                out,
+            ),
             Reduced::Rgba8(samples) => {
                 self.write_png(wh, &samples, ColorType::TruecolorAlpha, 8, |_| {}, out)
             }

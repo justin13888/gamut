@@ -35,6 +35,24 @@ pub enum Reduced {
     GrayAlpha16Be(Vec<u8>),
     /// 16-bit RGB (alpha was fully opaque and dropped), pre-serialised big-endian.
     Rgb16Be(Vec<u8>),
+    /// 8-bit RGB plus a `tRNS` colour key (§11.3.2.1): the alpha channel was binary, every
+    /// transparent pixel shared one colour, and no opaque pixel used it, so that colour can stand
+    /// for "transparent" and the fourth channel disappears.
+    Rgb8Keyed {
+        /// One RGB triple per pixel.
+        samples: Vec<u8>,
+        /// The colour a decoder must render as fully transparent.
+        key: [u8; 3],
+    },
+    /// Greyscale plus a `tRNS` colour key — the greyscale twin of [`Reduced::Rgb8Keyed`]. Always
+    /// depth 8: a sub-byte depth would have to scale the key too, and the saving over depth 8 is
+    /// smaller than the risk of getting that wrong.
+    GrayKeyed {
+        /// One grey sample per pixel.
+        samples: Vec<u8>,
+        /// The grey value a decoder must render as fully transparent.
+        key: u8,
+    },
     /// Indexed colour with the smallest sufficient bit depth.
     Indexed {
         /// Index bit depth (1, 2, 4, or 8).
@@ -116,6 +134,59 @@ fn pixel_key(px: &[u8], channels: usize) -> [u8; 4] {
     }
 }
 
+/// The colour that can stand for "transparent", if a `tRNS` colour key applies at all.
+///
+/// Three conditions, all necessary (§11.3.2.1 gives a decoder exactly one transparent colour, not
+/// a mask):
+///
+/// 1. every alpha is 0 or 255 — a partially transparent pixel cannot be expressed by a key;
+/// 2. at least one pixel is transparent — otherwise the plain alpha *drop* already applies and is
+///    strictly better, since it costs no chunk;
+/// 3. every transparent pixel shares one colour, and **no opaque pixel uses it** — otherwise the
+///    key would erase a pixel that should be visible.
+///
+/// Condition 3 is why
+/// [`PngEncoder::with_transparent_cleanup`](crate::PngEncoder::with_transparent_cleanup) pairs
+/// with this: it collapses every invisible pixel to one colour, which is precisely what a key
+/// needs. Without it, a source whose transparent pixels carry different unseen colours has no key
+/// available and keeps its alpha channel.
+///
+/// Two passes rather than one: the candidate is not known until the first transparent pixel is
+/// seen, so proving no *earlier* opaque pixel used it needs a second look. The second pass only
+/// runs when the first has already established a candidate.
+fn colour_key(pixels: &[u8], channels: usize) -> Option<[u8; 4]> {
+    debug_assert!(channels == 2 || channels == 4);
+    let mut candidate: Option<[u8; 4]> = None;
+    let mut any_transparent = false;
+    for px in pixels.chunks_exact(channels) {
+        let key = pixel_key(px, channels);
+        match key[3] {
+            0 => {
+                any_transparent = true;
+                match candidate {
+                    // A second transparent colour: no single key can stand for both.
+                    Some(seen) if seen[..3] != key[..3] => return None,
+                    Some(_) => {}
+                    None => candidate = Some(key),
+                }
+            }
+            255 => {}
+            // Partial transparency cannot be expressed as a colour key.
+            _ => return None,
+        }
+    }
+    if !any_transparent {
+        return None;
+    }
+    let candidate = candidate?;
+    // The key must name a colour nothing visible uses.
+    let collides = pixels.chunks_exact(channels).any(|px| {
+        let key = pixel_key(px, channels);
+        key[3] == 255 && key[..3] == candidate[..3]
+    });
+    (!collides).then_some(candidate)
+}
+
 /// Analyses interleaved 8-bit samples (`channels`: 1 = grey, 2 = grey+alpha, 3 = RGB, 4 = RGBA)
 /// and returns the smallest lossless reduction that beats the input encoding, or `None` to keep it
 /// as-is.
@@ -182,11 +253,25 @@ pub fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
     } else {
         usize::MAX
     };
+    // A colour key costs one `tRNS` chunk -- 6 bytes of payload for truecolour, 2 for greyscale,
+    // plus 12 of framing -- and buys the whole alpha channel. Only worth looking for when alpha is
+    // actually carrying something, which `all_opaque` already rules out.
+    let key = if all_opaque || !channels.is_multiple_of(2) {
+        None
+    } else {
+        colour_key(pixels, channels)
+    };
+    let keyed_size = match key {
+        Some(_) if all_gray => pixel_count + 14,
+        Some(_) => pixel_count * 3 + 18,
+        None => usize::MAX,
+    };
 
     let best = palette_size
         .min(gray_size)
         .min(gray_alpha_size)
-        .min(rgb_size);
+        .min(rgb_size)
+        .min(keyed_size);
     if best >= input_size {
         return None; // no reduction is smaller
     }
@@ -208,6 +293,26 @@ pub fn analyze8(pixels: &[u8], channels: usize) -> Option<Reduced> {
             out.push(key[3]);
         }
         Some(Reduced::GrayAlpha8(out))
+    } else if best == keyed_size {
+        let key = key.expect("keyed_size is only finite when a key was found");
+        if all_gray {
+            Some(Reduced::GrayKeyed {
+                samples: pixels
+                    .chunks_exact(channels)
+                    .map(|px| pixel_key(px, channels)[0])
+                    .collect(),
+                key: key[0],
+            })
+        } else {
+            let mut out = Vec::with_capacity(pixel_count * 3);
+            for px in pixels.chunks_exact(channels) {
+                out.extend_from_slice(&pixel_key(px, channels)[0..3]);
+            }
+            Some(Reduced::Rgb8Keyed {
+                samples: out,
+                key: [key[0], key[1], key[2]],
+            })
+        }
     } else if best == rgb_size {
         let mut out = Vec::with_capacity(pixel_count * 3);
         for px in pixels.chunks_exact(channels) {
