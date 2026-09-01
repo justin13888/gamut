@@ -20,6 +20,11 @@ exclude = [
     # submodule (issue #174). Excluded so `cargo test --workspace` never pulls in ~178 MiB of
     # camera files or the slow SDK oracle build; run it explicitly with `mise run test-dng-real`.
     "tooling/gamut-dng-real-conformance",
+    # Dev-only fuzz tier (issues #264, #311): drives the crates' `invariants` laws under
+    # libFuzzer. Excluded because it needs nightly (`-Z sanitizer=fuzzer`) while the workspace
+    # pins stable, and because a coverage-guided engine is unbounded and so cannot sit in the
+    # `coverage` job, the only gate that runs tests. Run it with `mise run fuzz`.
+    "tooling/gamut-fuzz",
     "tooling/gamut-iptc-oracle",
     "tooling/zlib-oracle",
     "tooling/libpng-oracle",

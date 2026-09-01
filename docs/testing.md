@@ -99,9 +99,11 @@ It returns a typed violation rather than panicking, and it normalises its inputs
 universe so an arbitrary byte string maps to a cheap case. Two drivers call it:
 
 - an inline `proptest` with a **pinned seed** — the per-PR gate;
-- an out-of-tree corpus-guided driver — extended CI. **This half does not exist yet**: it is
-  `tooling/gamut-fuzz`, and issues #264 and #311 build it. The `test-support` feature and the
-  plain-function shape of the laws are what it will attach to.
+- an out-of-tree corpus-guided driver — extended CI. This is `tooling/gamut-fuzz`, run with
+  `mise run fuzz <target>` (issues #264, #311). It calls the same law functions the property
+  calls: a law written twice is a law that can disagree with itself, and each tier would keep
+  passing against its own copy. The `test-support` feature and the plain-function shape of the
+  laws are what it attaches to.
 
 `gamut_ifd::invariants` is the worked example. The `test-support` feature exposes the module to the
 fuzz driver; it is **never re-exported by the `gamut` umbrella**, so the shipped surface and
