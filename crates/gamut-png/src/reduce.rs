@@ -611,6 +611,74 @@ mod tests {
         assert!(analyze8(&rgb, 3).is_none());
     }
 
+    /// Rec. 601 luma is the *only* thing separating these five opaque entries -- same alpha, so
+    /// the first two sort-key components tie -- and the fixture is chosen so collapsing any one of
+    /// the three weights from a multiply to an add returns a different order:
+    ///
+    /// | entry | `299*c0 + 587*c1 + 114*c2` | `299 +` | `587 +` | `114 +` |
+    /// | --- | --- | --- | --- | --- |
+    /// | `[255, 0, 0]` | 76 245 | 554 | 76 832 | 76 359 |
+    /// | `[0, 100, 0]` | 58 700 | 58 999 | 687 | 58 814 |
+    /// | `[0, 130, 0]` | 76 310 | 76 609 | 717 | 76 424 |
+    /// | `[0, 0, 255]` | 29 070 | 29 369 | 29 657 | 369 |
+    /// | `[0, 49, 0]` | 28 763 | 29 062 | 636 | 28 877 |
+    ///
+    /// Every other palette fixture in the crate happens to have discovery order equal to sorted
+    /// order, so none of them can tell [`ordered_palette`] from the identity, let alone tell one
+    /// weight from another. The input order below is deliberately not the expected order.
+    #[test]
+    fn the_palette_orders_by_rec_601_luma() {
+        let palette = [
+            [255, 0, 0, 255],
+            [0, 100, 0, 255],
+            [0, 130, 0, 255],
+            [0, 0, 255, 255],
+            [0, 49, 0, 255],
+        ];
+        assert_eq!(
+            ordered_palette(&palette),
+            vec![
+                [0, 49, 0, 255],
+                [0, 0, 255, 255],
+                [0, 100, 0, 255],
+                [255, 0, 0, 255],
+                [0, 130, 0, 255],
+            ]
+        );
+    }
+
+    /// Rule 1 of [`ordered_palette`] earning its keep, end to end through [`build_indexed`].
+    ///
+    /// The transparent entry is discovered *last* here: the raster scan meets opaque white, then
+    /// opaque red, and only then the invisible pixels. In discovery order the `tRNS` alphas would
+    /// be `[255, 255, 0]`, which the trailing-opaque trim cannot shorten at all -- one late
+    /// transparent entry pins the chunk to full length. Sorting transparent-first makes them
+    /// `[0, 255, 255]`, and the trim cuts two of the three.
+    #[test]
+    fn a_late_transparent_entry_moves_to_index_zero_and_shortens_trns() {
+        let mut rgba = Vec::new();
+        for i in 0..80u32 {
+            if i % 2 == 0 {
+                rgba.extend_from_slice(&[255, 255, 255, 255]); // opaque white
+            } else {
+                rgba.extend_from_slice(&[200, 10, 10, 255]); // opaque red
+            }
+        }
+        rgba.extend_from_slice(&[0, 0, 0, 0].repeat(40)); // invisible, discovered last
+
+        match analyze8(&rgba, 4) {
+            Some(Reduced::Indexed { plte, trns, .. }) => {
+                assert_eq!(
+                    plte,
+                    vec![0, 0, 0, 200, 10, 10, 255, 255, 255],
+                    "transparent first, then opaque by luma"
+                );
+                assert_eq!(trns, Some(vec![0]), "the trim reaches every opaque entry");
+            }
+            _ => panic!("expected Indexed"),
+        }
+    }
+
     #[test]
     fn palette_with_transparency_emits_trns() {
         let rgba = [
