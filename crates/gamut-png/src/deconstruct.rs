@@ -148,6 +148,88 @@ impl FilterHistogram {
     }
 }
 
+/// The outcome of the walk's optional filter scan: the counts, or why there are none.
+///
+/// The scan is the one part of a report that has to inflate the IDAT stream, so it is the one
+/// part that can be absent. Which is why the absence is *typed*: "no histogram" conflates a file
+/// this reader declined to inflate with a file whose compressed data is broken, and only the
+/// second is damage. [`is_damage`](Self::is_damage) answers that question once, for both
+/// [`PngReport::is_intact`] and any caller that has to grade a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterScan {
+    /// The IDAT stream inflated to the expected length and every scanline's filter code was read.
+    Counted(FilterHistogram),
+    /// No counts, for the stated reason.
+    Skipped(SkippedFilterScan),
+}
+
+impl FilterScan {
+    /// The per-filter counts, if the scan ran.
+    #[must_use]
+    pub fn histogram(self) -> Option<FilterHistogram> {
+        match self {
+            Self::Counted(histogram) => Some(histogram),
+            Self::Skipped(_) => None,
+        }
+    }
+
+    /// Why there are no counts, if there are none.
+    #[must_use]
+    pub fn skipped(self) -> Option<SkippedFilterScan> {
+        match self {
+            Self::Counted(_) => None,
+            Self::Skipped(reason) => Some(reason),
+        }
+    }
+
+    /// Whether the missing counts mean the *file* is damaged — see
+    /// [`SkippedFilterScan::is_damage`]. A scan that ran is never damage.
+    #[must_use]
+    pub fn is_damage(self) -> bool {
+        match self {
+            Self::Counted(_) => false,
+            Self::Skipped(reason) => reason.is_damage(),
+        }
+    }
+}
+
+/// Why a [`FilterScan`] carries no counts.
+///
+/// `#[repr(u8)]` with explicit discriminants, which are **permanent and append-only**: the value
+/// is plain data a C caller reads by number, so a variant is never renumbered or removed.
+/// Non-exhaustive — match with a wildcard arm, and prefer [`is_damage`](Self::is_damage) to
+/// enumerating the reasons yourself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[non_exhaustive]
+pub enum SkippedFilterScan {
+    /// The image the header describes is larger than this reader's byte budget, so the walk
+    /// declined to inflate a stream a decode would refuse to allocate. **Nothing is known to be
+    /// wrong with the file** — it may be a perfectly sound very large PNG.
+    OverBudget = 0,
+    /// The IDAT stream is not a valid zlib stream, is truncated, or inflates past the length the
+    /// header implies.
+    CorruptStream = 1,
+    /// The stream inflated, but to a different length than the header implies, so the scanline
+    /// boundaries it describes are not where the filter bytes are.
+    LengthMismatch = 2,
+    /// A scanline's leading byte is not one of the five filter codes §9.1 defines.
+    UndefinedFilterCode = 3,
+}
+
+impl SkippedFilterScan {
+    /// Whether this reason means the **file** is damaged, rather than merely unread.
+    ///
+    /// The single source of truth for that question, so no caller has to re-derive it from the
+    /// variant list. [`OverBudget`](Self::OverBudget) is the only reason that is not damage: it
+    /// describes the reader's budget, not the file. Every other reason is a statement about the
+    /// bytes, and a future reason is damage until it says otherwise.
+    #[must_use]
+    pub fn is_damage(self) -> bool {
+        !matches!(self, Self::OverBudget)
+    }
+}
+
 /// Where a PNG's bytes went: a total byte accounting plus the figures an encoder-efficiency
 /// comparison is built from. Produced by [`deconstruct`].
 ///
@@ -170,16 +252,14 @@ pub struct PngReport {
     pub idat_compressed: usize,
     /// The length that codestream inflates to — the filter-prefixed scanline stream. Derived from
     /// IHDR alone (the sum over [`passes`](Self::passes) when interlaced), so it is known even
-    /// when [`filters`](Self::filters) is `None`.
+    /// when [`filters`](Self::filters) was skipped.
     pub filtered_len: usize,
     /// The reduced images making up the filtered stream: one entry per non-empty Adam7 pass, or
     /// exactly one entry for a non-interlaced image.
     pub passes: Vec<PassStats>,
-    /// Scanlines per filter type, or `None` when the IDAT stream was not inflated: it was corrupt
-    /// or truncated, it did not inflate to [`filtered_len`](Self::filtered_len), it carried an
-    /// undefined filter code, or it was larger than the inflation cap. Everything else in this
-    /// report is available without inflating.
-    pub filters: Option<FilterHistogram>,
+    /// Scanlines per filter type, or the reason the IDAT stream was not scanned. Everything else
+    /// in this report is derived from framing and IHDR, so it survives whatever the reason is.
+    pub filters: FilterScan,
 }
 
 impl PngReport {
@@ -200,8 +280,7 @@ impl PngReport {
 
     /// Whether every byte of this file belongs to a complete, undamaged PNG datastream: fully
     /// classified, no [`SegmentKind::Truncated`] and no [`SegmentKind::Trailer`], every CRC
-    /// valid, IEND present, and the IDAT stream inflated to exactly
-    /// [`filtered_len`](Self::filtered_len).
+    /// valid, IEND present, and nothing damaging found by the filter scan.
     ///
     /// A trailer counts against it even though §13.2 lets a *decoder* ignore trailing bytes,
     /// because [`bits_per_pixel`](Self::bits_per_pixel) divides the whole file by the pixel
@@ -209,11 +288,15 @@ impl PngReport {
     /// comparison has to know they are there.
     ///
     /// Independent of whether every chunk type was *recognised* — an unknown critical chunk is
-    /// still accounted for.
+    /// still accounted for. The filter conjunct is
+    /// [`!filters.is_damage()`](FilterScan::is_damage), not "the scan ran": a stream this reader
+    /// declined to inflate says nothing against the file, while a corrupt zlib payload under a
+    /// valid CRC is damage **only** the scan can see, so dropping the conjunct would stop
+    /// detecting it.
     #[must_use]
     pub fn is_intact(&self) -> bool {
         self.is_fully_classified()
-            && self.filters.is_some()
+            && !self.filters.is_damage()
             && self.segments.iter().all(|segment| match segment.kind {
                 SegmentKind::Truncated | SegmentKind::Trailer => false,
                 SegmentKind::Chunk { crc_ok, .. } => crc_ok,
@@ -261,6 +344,23 @@ impl PngReport {
     #[must_use]
     pub fn framing_bytes(&self) -> usize {
         self.chunks.iter().map(ChunkStats::framing_bytes).sum()
+    }
+
+    /// The decoded image's byte cost — `width × height × channels`, doubled at depth 16 — or
+    /// `None` when that overflows `usize`.
+    ///
+    /// The quantity a decoder budgets, and the one this walk gates its filter scan on, so a
+    /// [`SkippedFilterScan::OverBudget`] report is exactly one whose `native_bytes` exceeds the
+    /// reader's budget. Distinct from [`filtered_len`](Self::filtered_len), which adds one filter
+    /// byte per scanline and counts sub-byte samples packed.
+    #[must_use]
+    pub fn native_bytes(&self) -> Option<usize> {
+        ihdr::native_bytes(
+            self.header.width,
+            self.header.height,
+            self.header.color_type.channels(),
+            self.header.bit_depth,
+        )
     }
 
     /// The stats for one chunk type, if the file carries it.
@@ -431,7 +531,7 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
 
     let passes = pass_stats(&native);
     let filtered_len = adam7::expected_stream_len(&native).unwrap_or(0);
-    let filters = filter_histogram(&native, &idat, filtered_len, &passes);
+    let filters = scan_filters(&native, &idat, filtered_len, &passes);
 
     Ok(PngReport {
         file_len: png.len(),
@@ -505,32 +605,41 @@ fn fits_decode_budget(header: &ihdr::Ihdr, max_image_bytes: usize) -> bool {
 
 /// Inflates the IDAT stream and counts the filter byte leading each scanline.
 ///
-/// `None` whenever the count cannot be trusted: the stream is over budget, corrupt, truncated,
-/// inflates to the wrong length, or carries a code §9.1 does not define. Every other figure in
-/// the report is derived from framing and IHDR, so it survives all of these.
-fn filter_histogram(
+/// Every early return names its own reason, so a caller can tell a file this reader declined to
+/// inflate from one whose compressed data is broken. Every other figure in the report is derived
+/// from framing and IHDR, so it survives all of these.
+fn scan_filters(
     header: &ihdr::Ihdr,
     idat: &[u8],
     filtered_len: usize,
     passes: &[PassStats],
-) -> Option<FilterHistogram> {
+) -> FilterScan {
     if !fits_decode_budget(header, DEFAULT_MAX_IMAGE_BYTES) {
-        return None;
+        return FilterScan::Skipped(SkippedFilterScan::OverBudget);
     }
-    let stream = inflate::inflate_zlib(idat, filtered_len).ok()?;
+    let Ok(stream) = inflate::inflate_zlib(idat, filtered_len) else {
+        return FilterScan::Skipped(SkippedFilterScan::CorruptStream);
+    };
     if stream.len() != filtered_len {
-        return None;
+        return FilterScan::Skipped(SkippedFilterScan::LengthMismatch);
     }
     let mut counts = [0u32; 5];
     let mut at = 0usize;
     for pass in passes {
         for _ in 0..pass.height {
-            let filter = FilterType::from_code(*stream.get(at)?)?;
+            // The pass geometry sums to `filtered_len`, which the stream just matched, so this
+            // index is in range; a mismatch between the two is the same defect as a short stream.
+            let Some(&code) = stream.get(at) else {
+                return FilterScan::Skipped(SkippedFilterScan::LengthMismatch);
+            };
+            let Some(filter) = FilterType::from_code(code) else {
+                return FilterScan::Skipped(SkippedFilterScan::UndefinedFilterCode);
+            };
             counts[filter as usize] += 1;
             at += 1 + pass.row_bytes;
         }
     }
-    Some(FilterHistogram { counts })
+    FilterScan::Counted(FilterHistogram { counts })
 }
 
 #[cfg(test)]
@@ -563,7 +672,7 @@ mod tests {
             idat_compressed: 0,
             filtered_len: 0,
             passes: Vec::new(),
-            filters: None,
+            filters: FilterScan::Skipped(SkippedFilterScan::CorruptStream),
         }
     }
 
@@ -625,6 +734,52 @@ mod tests {
             &header(0x7FFF_FFFF, 0x7FFF_FFFF, 16, ColorType::TruecolorAlpha),
             usize::MAX
         ));
+    }
+
+    #[test]
+    fn only_an_over_budget_scan_is_not_damage() {
+        // The single source of truth for `is_intact`'s filter conjunct: declining to inflate a
+        // stream is a statement about this reader's budget, everything else about the file.
+        assert!(!SkippedFilterScan::OverBudget.is_damage());
+        for reason in [
+            SkippedFilterScan::CorruptStream,
+            SkippedFilterScan::LengthMismatch,
+            SkippedFilterScan::UndefinedFilterCode,
+        ] {
+            assert!(reason.is_damage(), "{reason:?}");
+            assert!(FilterScan::Skipped(reason).is_damage(), "{reason:?}");
+        }
+        assert!(!FilterScan::Skipped(SkippedFilterScan::OverBudget).is_damage());
+        let counted = FilterScan::Counted(FilterHistogram {
+            counts: [1, 0, 0, 0, 0],
+        });
+        assert!(!counted.is_damage(), "a scan that ran is never damage");
+    }
+
+    #[test]
+    fn a_filter_scan_exposes_exactly_one_of_its_two_sides() {
+        // Built here because `FilterHistogram`'s counts are private, so the `Counted` side is
+        // only constructible from inside the crate.
+        let histogram = FilterHistogram {
+            counts: [1, 2, 0, 0, 0],
+        };
+        let counted = FilterScan::Counted(histogram);
+        assert_eq!(counted.histogram(), Some(histogram));
+        assert_eq!(counted.skipped(), None);
+
+        let skipped = FilterScan::Skipped(SkippedFilterScan::OverBudget);
+        assert_eq!(skipped.histogram(), None);
+        assert_eq!(skipped.skipped(), Some(SkippedFilterScan::OverBudget));
+    }
+
+    #[test]
+    fn the_skip_reasons_keep_their_published_discriminants() {
+        // `#[repr(u8)]` plain data crossing the C ABI: these numbers are permanent and
+        // append-only, so a variant is never renumbered or removed, only added after the last.
+        assert_eq!(SkippedFilterScan::OverBudget as u8, 0);
+        assert_eq!(SkippedFilterScan::CorruptStream as u8, 1);
+        assert_eq!(SkippedFilterScan::LengthMismatch as u8, 2);
+        assert_eq!(SkippedFilterScan::UndefinedFilterCode as u8, 3);
     }
 
     #[test]

@@ -76,7 +76,8 @@ pub use decoded::{
 };
 pub use decoder::{PngDecoder, TransparencyKey, metadata};
 pub use deconstruct::{
-    ChunkStats, FilterHistogram, PassStats, PngReport, Segment, SegmentKind, deconstruct,
+    ChunkStats, FilterHistogram, FilterScan, PassStats, PngReport, Segment, SegmentKind,
+    SkippedFilterScan, deconstruct,
 };
 pub use encoder::PngEncoder;
 pub use filter::{FilterStrategy, FilterType};

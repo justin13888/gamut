@@ -364,7 +364,7 @@ fn print_lines(label: &str, lines: &[String]) {
 /// Deconstructs a PNG and prints where its bytes went, exiting non-zero when the file is not a
 /// complete, undamaged datastream.
 fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
-    use gamut::png::{FilterType, SegmentKind};
+    use gamut::png::{FilterScan, FilterType, SegmentKind};
 
     let report = gamut::png::deconstruct(data)?;
     let header = report.header;
@@ -416,7 +416,7 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
     }
 
     match report.filters {
-        Some(h) => {
+        FilterScan::Counted(h) => {
             let n = |f| h.count(f);
             println!(
                 "  filters:       None {} / Sub {} / Up {} / Average {} / Paeth {}  ({} scanlines)",
@@ -428,7 +428,12 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
                 h.total()
             );
         }
-        None => println!("  filters:       unavailable (IDAT not inflatable within budget)"),
+        FilterScan::Skipped(reason) => {
+            println!(
+                "  filters:       not counted — {}",
+                filter_skip_label(reason)
+            );
+        }
     }
 
     if report.passes.len() > 1 {
@@ -441,7 +446,7 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
         }
     }
 
-    let damaged: Vec<String> = report
+    let mut damaged: Vec<String> = report
         .segments
         .iter()
         .filter_map(|seg| match seg.kind {
@@ -467,6 +472,17 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
             _ => None,
         })
         .collect();
+    // A skip the file itself caused is a finding, and it is counted before the list is printed so
+    // the exit message cannot report "0 finding(s)" while exiting non-zero. An over-budget skip is
+    // not damage — nothing is known to be wrong with the file — so it is not one.
+    if let FilterScan::Skipped(reason) = report.filters
+        && reason.is_damage()
+    {
+        damaged.push(format!(
+            "filters not counted — {}",
+            filter_skip_label(reason)
+        ));
+    }
     print_lines("findings", &damaged);
 
     println!("  classified:    {}", yes_no(report.is_fully_classified()));
@@ -480,6 +496,20 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
             path.display(),
             damaged.len()
         )))
+    }
+}
+
+/// Renders why a PNG's scanline filters were not counted.
+fn filter_skip_label(reason: gamut::png::SkippedFilterScan) -> &'static str {
+    use gamut::png::SkippedFilterScan as Reason;
+    match reason {
+        Reason::OverBudget => "the image is larger than the reader's byte budget",
+        Reason::CorruptStream => "the IDAT stream is corrupt or truncated",
+        Reason::LengthMismatch => "the IDAT stream inflated to the wrong length",
+        Reason::UndefinedFilterCode => "a scanline carries an undefined filter code",
+        // `SkippedFilterScan` is non-exhaustive; describe future reasons generically. They are
+        // damage by default, so the finding is still raised.
+        _ => "the scan could not be trusted",
     }
 }
 

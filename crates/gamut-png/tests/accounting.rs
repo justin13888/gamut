@@ -13,7 +13,8 @@ use std::time::Instant;
 
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut_png::{
-    ChunkStats, FilterStrategy, FilterType, PngEncoder, Segment, SegmentKind, deconstruct,
+    ChunkStats, FilterScan, FilterStrategy, FilterType, PngEncoder, Segment, SegmentKind,
+    SkippedFilterScan, deconstruct,
 };
 
 /// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
@@ -370,6 +371,7 @@ fn the_filter_histogram_matches_the_filter_libpng_was_forced_to_use() {
         let report = deconstruct(&png).expect("deconstruct");
         let filters = report
             .filters
+            .histogram()
             .expect("a sound IDAT stream yields a histogram");
 
         assert_eq!(filters.total(), 14, "one filter byte per scanline");
@@ -400,7 +402,7 @@ fn the_histogram_walks_each_scanline_not_the_first_one_repeatedly() {
         .expect("encode");
 
     let report = deconstruct(&png).expect("deconstruct");
-    let h = report.filters.expect("sound stream");
+    let h = report.filters.histogram().expect("sound stream");
     assert_eq!(h.total(), SIDE, "one filter byte per scanline");
 
     let used = [
@@ -440,7 +442,7 @@ fn interlaced_filtered_length_is_the_per_pass_sum() {
 
         let rows: u32 = report.passes.iter().map(|p| p.height).sum();
         assert_eq!(
-            report.filters.expect("sound stream").total(),
+            report.filters.histogram().expect("sound stream").total(),
             rows,
             "{w}x{h}: one filter byte per scanline of every non-empty pass"
         );
@@ -474,7 +476,15 @@ fn a_corrupt_zlib_stream_with_a_valid_crc_yields_no_histogram() {
         }),
         "every CRC is valid in this fixture"
     );
-    assert_eq!(report.filters, None, "the histogram is the only casualty");
+    assert_eq!(
+        report.filters,
+        FilterScan::Skipped(SkippedFilterScan::CorruptStream),
+        "the scan is the only casualty, and it names why"
+    );
+    assert!(
+        report.filters.is_damage(),
+        "a corrupt payload is damage, not a budget refusal"
+    );
     assert!(!report.is_intact());
     // Framing- and IHDR-derived figures are unaffected.
     assert_eq!(report.header.width, 16);
@@ -484,19 +494,62 @@ fn a_corrupt_zlib_stream_with_a_valid_crc_yields_no_histogram() {
 
 #[test]
 fn an_over_budget_image_reports_everything_but_the_histogram() {
-    // A hand-built IHDR claiming 2^30 x 2^30 with a tiny IDAT: the filtered stream it implies is
-    // far past the inflation cap, so the walk must decline to inflate rather than try. Without
-    // this the cap comparison is never exercised.
+    // A hand-built IHDR claiming 2^30 x 2^30 with a tiny IDAT: the image it implies is far past
+    // the decoder's byte budget, so the walk must decline to inflate rather than try. Without
+    // this the budget comparison is never exercised.
     let png = common::png_with_huge_ihdr();
     let report = deconstruct(&png).expect("an oversized header is reported, not an error");
 
     assert_covers(&report.segments, png.len());
-    assert_eq!(report.filters, None, "declined: over the inflation cap");
+    assert_eq!(
+        report.filters,
+        FilterScan::Skipped(SkippedFilterScan::OverBudget),
+        "declined: over the decoder's byte budget"
+    );
     assert!(
-        report.filtered_len > (64 << 20),
-        "the implied stream is huge"
+        report.native_bytes().expect("representable") > (64 << 20),
+        "the implied image is huge"
     );
     assert_eq!(report.header.width, 1 << 30);
+    // And so this file is *not* reported as damaged: nothing here can tell whether its IDAT is
+    // sound, and no decoder in the workspace could read it either, so claiming damage would be
+    // claiming knowledge the walk does not have.
+    assert!(!report.filters.is_damage());
+    assert!(report.is_intact(), "{report:?}");
+}
+
+/// An image exactly at the decoder's byte budget must still be scanned.
+///
+/// 4096x4096 RGBA8 is 67 108 864 native bytes — the default budget to the byte — but 67 112 960
+/// *filtered*, one more per scanline. A budget stated over the filtered stream therefore declined
+/// it, and `is_intact` reported an image the decoder decodes as damaged. Cheap despite the
+/// dimensions: nothing allocates `filtered_len`, and the 16-byte IDAT stops the scan at the
+/// length check, so the reason is `LengthMismatch` — the file was scanned — and never
+/// `OverBudget`.
+#[test]
+fn an_image_at_the_decoders_byte_budget_is_still_scanned() {
+    let png = common::png_from_chunks(&[
+        common::chunk(b"IHDR", &common::ihdr_payload(4096, 4096, 8, 6, 0)),
+        common::chunk(b"IDAT", &common::zlib(&[0u8; 16])),
+        common::chunk(b"IEND", &[]),
+    ]);
+    let report = deconstruct(&png).expect("deconstruct");
+
+    assert_eq!(
+        report.native_bytes(),
+        Some(64 << 20),
+        "exactly the decoder's default budget"
+    );
+    assert!(
+        report.filtered_len > 64 << 20,
+        "and past it once the filter bytes are counted: {}",
+        report.filtered_len
+    );
+    assert_eq!(
+        report.filters,
+        FilterScan::Skipped(SkippedFilterScan::LengthMismatch),
+        "scanned, and stopped by this file's short stream — not declined for budget"
+    );
 }
 
 /// A header whose filtered stream overflows `usize` still reports, and its ratio is finite.
@@ -593,5 +646,8 @@ fn a_brute_force_encode_still_accounts_and_reports_its_filters() {
     let report = deconstruct(&png).expect("deconstruct");
     assert_covers(&report.segments, png.len());
     assert!(report.is_intact());
-    assert_eq!(report.filters.expect("sound stream").total(), 32);
+    assert_eq!(
+        report.filters.histogram().expect("sound stream").total(),
+        32
+    );
 }

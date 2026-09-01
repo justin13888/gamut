@@ -211,7 +211,7 @@ fn print_stage_table() {
     for case in corpus() {
         let png = case.gamut(BEST.0, BEST.1, BEST.2);
         let report = deconstruct(&png).expect("gamut's own output deconstructs");
-        let filters = report.filters.map_or_else(
+        let filters = report.filters.histogram().map_or_else(
             || "-".to_string(),
             |h| {
                 let n = |f| h.count(f);
