@@ -56,8 +56,10 @@ any of the above would not.
 - **Numeric contract over literal transcription at f32 extremes.** Every operator is NaN-free
   across the entire f32 input range: `Aces` evaluates at `min(x, 8)` inside its exact saturation
   region, `Hable` clamps its argument where the curve sits within one ULP of its asymptote (both
-  branchless), `ReinhardExtended` evaluates Eq (4) in factored form. Each deviation is derived and
-  justified in `references/tonemap/README.md`; all published golden values are unchanged.
+  branchless), `ReinhardExtended` evaluates Eq (4) as `t + (x·t)/white²` with `t = x/(1 + x)`,
+  which is the association that saturates only when the exact value genuinely exceeds f32 rather
+  than when an intermediate does (#471). Each deviation is derived and justified in
+  `references/tonemap/README.md`; all published golden values are unchanged.
 - **`Aces` names the Narkowicz fit.** The official colour-coupled ACES RRT+ODT — and the Hill
   fit — need 3×3 matrices and could never be a scalar `ToneCurve`, so there is no ambiguity to
   reserve the name against.
