@@ -1443,7 +1443,11 @@ pub fn encode_frame_filtered(
     // bounded here.
     for part in &token_parts[..n - 1] {
         let len = token_partition_size(part.len())?;
-        out.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8]);
+        // The low three bytes of the little-endian `u32`, rather than three hand-cut shifts. The
+        // shifted form put each byte in its own lane, where the operator has slack no test could
+        // see: with every partition under 64 KiB the top byte is zero either way (#110). This is
+        // `split_token_partitions`' read, spelled the same way round.
+        out.extend_from_slice(&len.to_le_bytes()[..3]);
     }
     for part in &token_parts {
         out.extend_from_slice(part);
