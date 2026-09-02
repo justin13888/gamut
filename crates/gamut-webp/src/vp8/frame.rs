@@ -1661,7 +1661,7 @@ mod tests {
         Yuv420::new(width, height, y, u, v).unwrap()
     }
 
-    /// Dark top half, bright bottom half, each lightly textured.
+    /// Four horizontal bands, one per quantizer segment, each lightly textured.
     ///
     /// Segments are assigned by macroblock luma mean (`(mean / 64).min(3)`), so a fixture only
     /// exercises the per-macroblock segment lookup if its macroblocks land in *different* buckets.
@@ -1669,10 +1669,13 @@ mod tests {
     /// macroblock, so each one averages near 128 and the segment map comes out uniform -- and a
     /// uniform map makes any index into it indistinguishable from any other.
     ///
-    /// Here the halves average about 23 and 207, which is segment 0 against segment 3, and the
-    /// split is *horizontal* so the difference falls between macroblock rows -- what a wrong row
-    /// stride actually gets wrong. The `i % 16` texture keeps blocks from being flat enough to
-    /// skip entirely.
+    /// The bands average about 23, 87, 151 and 215, one per segment, and they are *horizontal* so
+    /// the difference falls between macroblock rows -- what a wrong row stride gets wrong. All
+    /// four matter: with only the outer two, the quantizer deltas for segments 1 and 2 are never
+    /// applied and changing either goes unnoticed. The `i % 16` texture keeps blocks from being
+    /// flat enough to skip entirely.
+    ///
+    /// `height` should cover four macroblock rows (64) so every band gets one.
     fn banded(width: u32, height: u32) -> Yuv420 {
         let (w, h) = (width as usize, height as usize);
         let (cw, ch) = (
@@ -1681,7 +1684,8 @@ mod tests {
         );
         let y = (0..w * h)
             .map(|i| {
-                let base = if i / w < h / 2 { 16 } else { 200 };
+                let band = (i / w) * 4 / h.max(1);
+                let base = [16usize, 80, 144, 208][band.min(3)];
                 (base + (i % 16)) as u8
             })
             .collect();
@@ -1942,9 +1946,9 @@ mod tests {
     /// Re-pinning is expected when the encoder legitimately improves; the commit that moves this
     /// number says why. Same contract as `tests/default_bytes.rs`.
     /// Pinned from the current encoder; see `segmented_stream_is_byte_stable`.
-    const SEGMENTED_GOLDEN_LEN: usize = 686;
+    const SEGMENTED_GOLDEN_LEN: usize = 875;
     /// FNV-1a over the same bytes.
-    const SEGMENTED_GOLDEN_DIGEST: u64 = 16_840_429_707_808_062_004;
+    const SEGMENTED_GOLDEN_DIGEST: u64 = 2_735_266_621_437_739_432;
 
     #[test]
     fn segmented_stream_is_byte_stable() {
@@ -1953,7 +1957,7 @@ mod tests {
             ..EncodeOptions::default()
         };
         // Banded content over three macroblock rows, so the segment genuinely varies by row.
-        let (bits, _) = encode_frame_filtered(&banded(64, 48), 40, opts).expect("encode");
+        let (bits, _) = encode_frame_filtered(&banded(64, 64), 40, opts).expect("encode");
 
         let digest = bits.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
             (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
