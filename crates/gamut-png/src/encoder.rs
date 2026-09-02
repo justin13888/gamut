@@ -918,6 +918,100 @@ mod tests {
 
     use super::*;
 
+    /// Walks the chunk stream after the signature and returns a chunk's payload.
+    fn find_chunk(png: &[u8], ty: &[u8; 4]) -> Option<Vec<u8>> {
+        let mut i = 8;
+        while i + 12 <= png.len() {
+            let len = u32::from_be_bytes([png[i], png[i + 1], png[i + 2], png[i + 3]]) as usize;
+            if &png[i + 4..i + 8] == ty {
+                return Some(png[i + 8..i + 8 + len].to_vec());
+            }
+            i += 12 + len;
+        }
+        None
+    }
+
+    /// The background builders reach the bKGD chunk, in the width the colour type requires.
+    ///
+    /// Both `with_background_gray` and `with_background_index` could return `Self::default()` --
+    /// discarding the caller's colour *and* every other setting made before them -- and no test
+    /// noticed (#110). `with_background_rgb` was covered; these two were not.
+    ///
+    /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.5.1): two bytes for
+    /// greyscale, one for indexed. Asserting the bytes rather than mere presence is what
+    /// distinguishes the right builder from any of them.
+    #[test]
+    fn background_builders_reach_the_bkgd_chunk() {
+        let gray = vec![0u8; 4 * 4];
+        let img = ImageRef::<Gray8>::new(&gray, Dimensions::new(4, 4).unwrap()).unwrap();
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_background_gray(0x1234)
+            .encode_image(img, &mut png)
+            .unwrap();
+        assert_eq!(
+            find_chunk(&png, b"bKGD"),
+            Some(vec![0x12, 0x34]),
+            "greyscale bKGD is the 16-bit level, big-endian"
+        );
+
+        // Indexed: one byte, the palette index.
+        let mut rgb = Vec::new();
+        for i in 0..200u32 {
+            let c = (i % 32) as u8;
+            rgb.extend_from_slice(&[c, c.wrapping_add(70), 90]);
+        }
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(200, 1).unwrap()).unwrap();
+        let mut png = Vec::new();
+        PngEncoder::new()
+            .with_background_index(7)
+            .encode_image(img, &mut png)
+            .unwrap();
+        assert_eq!(find_chunk(&png, b"bKGD"), Some(vec![7]));
+    }
+
+    /// An indexed image needing 8-bit indices is written a byte per pixel, not bit-packed.
+    ///
+    /// The packing branch is gated on `depth < 8`. Every indexed fixture had at most 16 colours,
+    /// so depth was always 1, 2 or 4 and the boundary was never reached -- `<=` survived (#110).
+    /// It is not a cosmetic difference: `pack_scanlines` asserts `1 | 2 | 4` and computes
+    /// `1u8 << depth`, which overflows at 8.
+    #[test]
+    fn indexed_at_depth_eight_is_not_bit_packed() {
+        // 32 distinct opaque colours over 1024 pixels: more than 16, so the index depth is 8.
+        //
+        // Pseudo-random rather than cycling, and 1024 pixels rather than 200, because
+        // `write_reduced_or_native` races the palette against the unreduced encoding and keeps
+        // whichever is smaller. A period-32 cycle over 200 pixels compresses to an 82-byte RGB
+        // file, which a 96-byte `PLTE` cannot beat before a single index is written -- the race
+        // correctly declines the palette, and pinning `Indexed` there would assert the defect the
+        // race exists to fix. Shuffling denies DEFLATE the period and 1024 pixels amortise the
+        // palette: 479 bytes indexed against 525 unreduced.
+        let mut rgb = Vec::new();
+        for i in 0..1024u32 {
+            let mut h = i.wrapping_mul(2654435761);
+            h ^= h >> 15;
+            let c = (h % 32) as u8;
+            rgb.extend_from_slice(&[c, c.wrapping_add(70), 90]);
+        }
+        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(1024, 1).unwrap()).unwrap();
+        let mut png = Vec::new();
+        // Reduction is opt-in; without it the encoder writes the input layout unchanged and the
+        // indexed path -- the one this test is about -- is never reached.
+        PngEncoder::new()
+            .with_auto_reduce(true)
+            .encode_image(img, &mut png)
+            .unwrap();
+
+        assert_eq!(png[24], 8, "bit depth");
+        assert_eq!(png[25], ColorType::Indexed.code(), "colour type");
+        assert_eq!(
+            find_chunk(&png, b"PLTE").map(|p| p.len()),
+            Some(32 * 3),
+            "32 palette entries"
+        );
+    }
+
     #[test]
     fn emits_signature_ihdr_idat_iend() {
         let src = vec![0u8; 2 * 2 * 3];

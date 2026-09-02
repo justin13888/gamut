@@ -392,7 +392,27 @@ ulimit_kb=$((budget_gb * 1024 * 1024 / MUTANTS_JOBS))
 floor_kb=$((6 * 1024 * 1024)) # a full build+test of one package fits in 6 GiB of address space
 [ "$ulimit_kb" -lt "$floor_kb" ] && ulimit_kb="$floor_kb"
 
-inner="cargo mutants --jobs $MUTANTS_JOBS --jobserver-tasks $MUTANTS_JOBSERVER_TASKS$mutant_args"
+# `--gitignore=false`: copy the tree verbatim rather than filtering it through .gitignore.
+#
+# cargo-mutants builds each scenario in a COPY of the tree, and by default that copy skips anything
+# a .gitignore matches -- at any level, including the vendored submodules under third_party/. That
+# is wrong here, because a submodule may TRACK a path its own .gitignore also matches: git keeps a
+# tracked file regardless of a later ignore rule, but the copy does not.
+#
+# libtiff is exactly that case. Its .gitignore carries `build*` (line 82) while the repository
+# tracks `build/CMakeLists.txt`, which its top-level CMakeLists.txt reaches via
+# `add_subdirectory(build)`. The copy therefore lost the directory and every scenario died in the
+# oracle build before a single mutant ran:
+#
+#     CMake Error at CMakeLists.txt:155 (add_subdirectory):
+#       add_subdirectory given source "build" which is not an existing directory
+#     ERROR cargo build failed in an unmutated tree, so no mutants were tested
+#
+# That made gamut-tiff and gamut-dng -- the two crates that dev-depend on libtiff-oracle --
+# impossible to survey at all, which is why neither had ever produced a number.
+#
+# `target/` is still excluded: that is `--copy-target`, a separate flag, left at its default.
+inner="cargo mutants --gitignore=false --jobs $MUTANTS_JOBS --jobserver-tasks $MUTANTS_JOBSERVER_TASKS$mutant_args"
 if [ -z "${GAMUT_MUTANTS_NO_ULIMIT:-}" ]; then
 	inner="ulimit -v $ulimit_kb; exec $inner"
 	guard_note="ulimit -v $((ulimit_kb / 1024 / 1024))GiB per process"
