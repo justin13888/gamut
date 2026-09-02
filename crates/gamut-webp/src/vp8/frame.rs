@@ -1483,8 +1483,11 @@ fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>>
     let mut offset = sizes_len;
     for i in 0..n {
         let size = if i < n - 1 {
+            // A 24-bit little-endian size, read as one. Spelling it
+            // `s[0] | s[1] << 8 | s[2] << 16` puts each byte in its own lane, and disjoint lanes
+            // are where `|` and `^` agree -- unkillable mutants for no gain (#110).
             let s = &data[i * 3..i * 3 + 3];
-            usize::from(s[0]) | (usize::from(s[1]) << 8) | (usize::from(s[2]) << 16)
+            u32::from_le_bytes([s[0], s[1], s[2], 0]) as usize
         } else {
             data.len() - offset
         };
@@ -2144,6 +2147,30 @@ mod tests {
             decode_frame(&bits),
             Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
+    }
+
+    #[test]
+    /// A partition size that needs its third byte.
+    ///
+    /// The size is 24-bit little-endian, and every fixture in the suite has partitions under
+    /// 64 KiB -- so the high byte was always zero, and dropping it entirely changed nothing
+    /// (#110). Asserted at the boundary from both sides: a buffer exactly long enough for a
+    /// 65536-byte partition is accepted, and one byte shorter is refused. A reader that ignores
+    /// the high byte computes a size of 0 and accepts both.
+    #[test]
+    fn a_partition_size_uses_its_high_byte() {
+        const SIZE: usize = 1 << 16;
+        // n = 2: three bytes of size table, then the first partition, then the second.
+        let mut data = vec![0x00u8, 0x00, 0x01]; // little-endian 0x010000 = 65536
+        data.resize(3 + SIZE, 0);
+
+        let parts = split_token_partitions(&data, 2).expect("exactly long enough");
+        assert_eq!(parts.len(), 2);
+
+        data.pop();
+        let err =
+            split_token_partitions(&data, 2).expect_err("one byte short of the declared size");
+        assert!(err.to_string().contains("exceeds frame"), "{err}");
     }
 
     #[test]

@@ -571,6 +571,20 @@ exclude_re = [
     # than matching every comparison in the function.
     'replace && with \|\| in canonical_codes',
     'replace > with >= in canonical_codes',
+    # gamut-webp hang-on-mutation timeouts: two cursor advances that stop advancing.
+    #
+    # `decode_image_data` advances `i` with `i += 1` in three branches of one `while i < n` loop
+    # -- the literal, the copy and the cache paths. Mutated to `*= 1` each pins `i` (it is >= 1 by
+    # the time any of them runs a second time), so the loop never terminates and cargo-mutants can
+    # only ever report TIMEOUT. All three are the same statement in the same loop, which is why one
+    # entry covers them. The `-=` siblings are deliberately NOT excluded: they underflow at `i == 0`
+    # and panic, so they terminate and are caught.
+    #
+    # `code_length_count` counts down with `count -= 1` under `while count > 4 && ...`. Mutated to
+    # `/= 1` the count never changes and the loop spins. (`+=` grows it out of the array's range and
+    # panics, so that one is caught and stays.)
+    'replace \+= with \*= in decode_image_data',
+    'replace -= with /= in code_length_count',
     # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
     # `>= 4`. Reaching 3 would underflow the caller's `- 4` on a `usize` and panic, but the loop
     # can never get there.
