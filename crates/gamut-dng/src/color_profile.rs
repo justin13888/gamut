@@ -493,6 +493,28 @@ mod tests {
         Value::Float(vec![0.0, 1.0, 1.0, 10.0, 1.5, 0.5])
     }
 
+    /// A `FLOAT` tag present but empty is rejected, not read as an empty array.
+    ///
+    /// `floats` guards on `!v.is_empty()`, and only the well-formed and wrong-type cases were
+    /// tested, so relaxing that guard to `true` let an empty array through as `Some(vec![])` and
+    /// nothing noticed (#110). Both sides are asserted, since a `floats` that always returned
+    /// `None` would satisfy the rejection on its own.
+    #[test]
+    fn an_empty_float_array_is_rejected() {
+        let mut ifd = empty();
+        ifd.set(tags::PROFILE_TONE_CURVE, Value::Float(vec![]));
+        assert_eq!(floats(&ifd, tags::PROFILE_TONE_CURVE), None);
+
+        ifd.set(
+            tags::PROFILE_TONE_CURVE,
+            Value::Float(vec![0.0, 0.0, 1.0, 1.0]),
+        );
+        assert_eq!(
+            floats(&ifd, tags::PROFILE_TONE_CURVE),
+            Some(vec![0.0, 0.0, 1.0, 1.0])
+        );
+    }
+
     #[test]
     fn a_directory_without_profile_tags_projects_nothing() {
         assert_eq!(ColorProfileInfo::from_ifd(&empty()), None);
