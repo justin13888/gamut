@@ -34,6 +34,19 @@ fn small_table() -> Value {
 /// Builds a DNG whose IFD 0 is an RGB preview carrying the camera-profile colour tags, with the
 /// 4x4 8-bit CFA raw in a sub-IFD carrying `noise_profile`.
 fn build_profile_dng(noise_profile: Value) -> Vec<u8> {
+    build_profile_dng_at(noise_profile, NoiseAt::RawIfd)
+}
+
+/// Which directory the `NoiseProfile` tag is written to.
+#[derive(Clone, Copy, PartialEq)]
+enum NoiseAt {
+    /// Where the spec puts it.
+    RawIfd,
+    /// Where some writers put it instead, which the decoder falls back to.
+    Ifd0,
+}
+
+fn build_profile_dng_at(noise_profile: Value, at: NoiseAt) -> Vec<u8> {
     let preview_pixels: Vec<u8> = (0..48).collect();
     let raw_pixels: Vec<u8> = (0..16).collect();
 
@@ -106,7 +119,10 @@ fn build_profile_dng(noise_profile: Value) -> Vec<u8> {
     raw.set(tags::CFA_PATTERN, Value::Byte(vec![0, 1, 1, 2]));
     raw.set(tags::STRIP_OFFSETS, Value::Long(vec![0]));
     raw.set(tags::STRIP_BYTE_COUNTS, Value::Long(vec![16]));
-    raw.set(tags::NOISE_PROFILE, noise_profile);
+    match at {
+        NoiseAt::RawIfd => raw.set(tags::NOISE_PROFILE, noise_profile),
+        NoiseAt::Ifd0 => ifd0.set(tags::NOISE_PROFILE, noise_profile),
+    }
     ifd0.set_sub_ifd(tags::SUB_IFDS, vec![raw]);
 
     // Two-pass layout: learn the tree length, patch real offsets, re-write, append pixels.
@@ -190,6 +206,24 @@ fn camera_profile_colour_tags_decode_typed() {
     let profile = decoded.profile.as_ref().expect("camera profile");
     assert_eq!(profile.unique_camera_model(), "gamut ProfileCam");
     assert_eq!(profile.color_matrix1(), &identity);
+}
+
+/// A `NoiseProfile` written to IFD 0 instead of the raw IFD is still found.
+///
+/// The decoder falls back to IFD 0 when the raw IFD carries none, guarded by `raw_index != 0` so
+/// it does not re-read the same directory. Every fixture put the tag where the spec says, so
+/// inverting that guard to `== 0` disabled the fallback in exactly the case it exists for and no
+/// test noticed (#110). This is the writer quirk the fallback was added for.
+#[test]
+fn the_noise_profile_falls_back_to_ifd0() {
+    let dng = build_profile_dng_at(noise_parameters(), NoiseAt::Ifd0);
+    let decoded = DngDecoder::new().decode(&dng).expect("decode");
+
+    let noise = decoded
+        .noise_profile
+        .expect("a NoiseProfile in IFD 0 must still be found");
+    assert_eq!(noise.planes.len(), 3);
+    assert_eq!(noise.for_plane(0).map(|m| m.scale), Some(2e-5));
 }
 
 #[test]

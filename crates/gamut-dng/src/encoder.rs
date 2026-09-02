@@ -843,6 +843,76 @@ mod tests {
     use crate::raw::cfa_color;
     use crate::values::CalibrationIlluminant;
 
+    /// Both halves of the WhiteLevel guard, and the width it picks when the value passes.
+    ///
+    /// `values.iter().any(|v| v.fract() != 0.0 || *v > u32::MAX)` was only ever fed values that
+    /// pass, so neither disjunct was exercised: relaxing the `||` to `&&` accepted a fractional
+    /// level, and narrowing the `>` to `==` accepted one past `u32::MAX` (#110). Each needs its
+    /// own case, because a value that trips one does not trip the other.
+    #[test]
+    fn a_white_level_must_be_a_whole_number_that_fits_a_long() {
+        let fractional = white_level_value(&[100.5]).expect_err("fractional is not storable");
+        assert!(
+            fractional.to_string().contains("must be integers"),
+            "{fractional}"
+        );
+
+        let too_large = white_level_value(&[f64::from(u32::MAX) + 1.0])
+            .expect_err("past u32::MAX is not storable");
+        assert!(
+            too_large.to_string().contains("must be integers"),
+            "{too_large}"
+        );
+    }
+
+    /// The RATIONAL grid's upper bound is exclusive, and has to be.
+    ///
+    /// A fractional black level is stored as `(v * 65536).round() / 65536`, so a value of exactly
+    /// 65536 would need a numerator of 2^32 -- one past `u32::MAX`, where the `as u32` cast
+    /// wraps. Relaxing `<` to `<=` admits precisely the value whose numerator does not fit (#110).
+    ///
+    /// Reaching that arm needs a *mixed* slice: 65536 on its own is integral and is taken by the
+    /// LONG arm above, so it never gets here. The 0.5 is what forces the fractional path.
+    #[test]
+    fn a_fractional_black_level_must_stay_below_the_rational_grid() {
+        let err = black_level_value(&[f64::from(LEVEL_DEN), 0.5])
+            .expect_err("65536 has no numerator on this grid");
+        assert!(err.to_string().contains("must be below 65536"), "{err}");
+
+        // One below the bound, with the same fractional companion, is stored.
+        assert!(matches!(
+            black_level_value(&[f64::from(LEVEL_DEN) - 1.0, 0.5]),
+            Ok(Value::Rational(_))
+        ));
+    }
+
+    /// The same boundary for `BlackLevel`, which has its own copy of the comparison.
+    #[test]
+    fn a_black_level_is_stored_short_only_while_it_fits() {
+        assert!(matches!(
+            black_level_value(&[f64::from(u16::MAX)]),
+            Ok(Value::Short(_))
+        ));
+        assert!(matches!(
+            black_level_value(&[f64::from(u16::MAX) + 1.0]),
+            Ok(Value::Long(_))
+        ));
+    }
+
+    /// SHORT while the levels fit, LONG once one does not -- a size choice both DNG readers
+    /// accept, so only the file's length records which was taken.
+    #[test]
+    fn a_white_level_is_stored_short_only_while_it_fits() {
+        assert!(matches!(
+            white_level_value(&[f64::from(u16::MAX)]),
+            Ok(Value::Short(_))
+        ));
+        assert!(matches!(
+            white_level_value(&[f64::from(u16::MAX) + 1.0]),
+            Ok(Value::Long(_))
+        ));
+    }
+
     #[test]
     fn black_level_delta_rejects_each_invalid_class_independently() {
         for value in [

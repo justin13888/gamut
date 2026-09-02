@@ -194,6 +194,42 @@ mod tests {
         assert_eq!(linear.samples, expected);
     }
 
+    /// `BlackLevelDeltaV` must carry one finite value per active-area row.
+    ///
+    /// The guard is `deltas.len() != aa_height || deltas.iter().any(|d| !d.is_finite())`, and
+    /// only well-formed deltas were ever passed, so relaxing the `||` to `&&` accepted a delta
+    /// that failed one condition but not both (#110). Both malformations are asserted, because
+    /// either alone leaves the other disjunct unexercised.
+    #[test]
+    fn a_malformed_black_level_delta_v_is_rejected() {
+        let linearized = |dv: Vec<f64>| {
+            RawImage::new_cfa(dims(3, 3), 8, (1, 1), vec![0], vec![60u16; 9])
+                .unwrap()
+                .with_levels(
+                    RawLevels::uniform(1, 10.0, 110.0)
+                        .unwrap()
+                        .with_black_delta_v(dv),
+                )
+                .unwrap()
+                .to_linear()
+        };
+
+        let short = linearized(vec![0.0, 1.0]).expect_err("two deltas for three rows");
+        assert!(
+            short
+                .to_string()
+                .contains("BlackLevelDeltaV needs one finite"),
+            "{short}"
+        );
+
+        let nan = linearized(vec![0.0, f64::NAN, 1.0]).expect_err("a non-finite delta");
+        assert!(
+            nan.to_string()
+                .contains("BlackLevelDeltaV needs one finite"),
+            "{nan}"
+        );
+    }
+
     /// Distinct per-column and per-row deltas (asymmetric, so swapping H/V is caught): the black
     /// for pixel (r, c) is `base + dh[c] + dv[r]`, and the scale uses the *maximum* computed
     /// black (base + max dh + max dv), not the base alone.

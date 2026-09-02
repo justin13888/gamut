@@ -109,8 +109,14 @@ pub(crate) fn md5(data: &[u8]) -> [u8; 16] {
         let [mut a, mut b, mut c, mut d] = state;
         for i in 0..64 {
             let (f, g) = match i / 16 {
-                0 => ((b & c) | (!b & d), i),
-                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                // F and G in their XOR forms rather than RFC 1321's printed
+                // `(b & c) | (!b & d)` and `(d & b) | (!d & c)`. The two halves of each are
+                // disjoint by construction -- where `b` is set the second term is zero, where it
+                // is clear the first is -- so `|` and `^` agree on every input and the printed
+                // form carries an unkillable mutant (#110). These are the standard equivalent
+                // formulations; the RFC 1321 vectors below check they are.
+                0 => (d ^ (b & (c ^ d)), i),
+                1 => (c ^ (d & (b ^ c)), (5 * i + 1) % 16),
                 2 => (b ^ c ^ d, (3 * i + 5) % 16),
                 _ => (c ^ (b | !d), (7 * i) % 16),
             };
