@@ -545,6 +545,21 @@ exclude_re = [
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
     # the same scale and no input can distinguish the mutant: equivalent.
     'replace < with <= in quality_scale',
+    # gamut-dng predictor `x_factor`: deleting the `Predictor::None => Some(0)` arm drops it to
+    # `_ => None`, and neither caller can tell the two apart.
+    #
+    # `validate` returns early at `if predictor == Predictor::None` -- several lines *above* its
+    # `x_factor(predictor).is_none()` check -- so the only site that distinguishes `None` from
+    # `Some(_)` is unreachable with that predictor. The other site is
+    # `x_factor(predictor).filter(|&f| f > 0)`, where `Some(0)` and `None` both yield `None` and
+    # take the same early return. So the arm is equivalent for every reachable call: provably
+    # unkillable.
+    #
+    # It stays rather than being deleted because it keeps the match total and its doc honest --
+    # `Predictor::None` really does difference against zero pixels to the left, and if the early
+    # return above ever moved, `_ => None` would misreport it as a floating-point predictor. Same
+    # shape and justification as the defensive clamps below.
+    'delete match arm Predictor::None in x_factor',
     # gamut-jpeg decoder DecodedImage::sample — the upsampling clamps `.min(comp_w - 1)` /
     # `.min(comp_h - 1)` are defence-in-depth that provably never engage: `px ≤ X−1` (the present
     # loops) gives `cx = ⌊px·h/hmax⌋ ≤ ⌊(X·h−1)/hmax⌋ ≤ ⌈X·h/hmax⌉−1 = comp_w−1` (h ≥ 1, h ≤ hmax;
