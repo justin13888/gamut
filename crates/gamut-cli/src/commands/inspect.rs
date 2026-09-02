@@ -12,16 +12,24 @@
 //!
 //! - **TIFF / DNG** — `is_fully_accounted()`: every byte classified, *and* no unknown field
 //!   type, no unknown tag, and no anomaly.
-//! - **PNG** — `is_intact()`: every byte classified, *and* every chunk CRC valid, IEND present,
-//!   no trailing bytes after it, no truncated tail, and nothing the filter scan found damaging.
+//! - **PNG** — `is_verified()`: `is_intact()` (every byte classified, every chunk CRC valid, IEND
+//!   present, no trailing bytes after it, no truncated tail, nothing the filter scan found
+//!   damaging) *and* the filter scan actually ran.
 //!
 //! PNG's `is_fully_classified()` is **not** the gate, though it is printed: it is true by
 //! construction for every file `deconstruct` accepts (a truncated tail and a trailer each get a
 //! segment of their own, so the tiling still covers the file), and gating on it would exit 0 on a
 //! truncated PNG. It exists so that a walk *bug* makes the predicate false.
 //!
-//! A PNG whose filter scan was skipped only because the image is larger than this reader's byte
-//! budget is not a finding: nothing is known to be wrong with it.
+//! `is_intact()` is **not** the gate either, and the difference is the reason `is_verified` exists.
+//! A PNG whose filter scan was skipped for budget is not *damaged* — nothing is known to be wrong
+//! with it — so it is not a finding, and `intact: yes` is printed truthfully. But a corrupt zlib
+//! payload under a valid CRC is damage only the scan can see, so an unread file is one this
+//! command cannot vouch for, and exiting 0 on it would report this reader's budget as a property
+//! of the file. Such a file exits non-zero saying it was not verified, distinctly from a damaged
+//! one. To keep that rare, the walk's budget here is a gigabyte rather than the decoder's 64 MiB,
+//! which is past any real image — at the decoder's budget every PNG over 4096x4096 RGBA8 would go
+//! unread.
 //!
 //! For PNG the same walk answers a second question: **where did the bytes go?** The report carries
 //! the per-chunk-type breakdown, the compressed IDAT total against the filtered stream it inflates
@@ -366,15 +374,23 @@ fn print_ranges(label: &str, ranges: &[(u64, u64)]) {
 
 /// Prints a pre-formatted line list under `label`, truncating past [`MAX_LIST`].
 fn print_lines(label: &str, lines: &[String]) {
-    if lines.is_empty() {
+    print_lines_of(label, lines, lines.len());
+}
+
+/// [`print_lines`], where `lines` is already truncated and `total` is how many there really are.
+///
+/// Splitting the count from the list is what lets a caller whose list length is chosen by the
+/// input build only the lines it will print while still reporting the true total.
+fn print_lines_of(label: &str, lines: &[String], total: usize) {
+    if total == 0 {
         return;
     }
-    println!("  {label}: {}", lines.len());
+    println!("  {label}: {total}");
     for line in lines.iter().take(MAX_LIST) {
         println!("    - {line}");
     }
-    if lines.len() > MAX_LIST {
-        println!("    … and {} more", lines.len() - MAX_LIST);
+    if total > lines.len() {
+        println!("    … and {} more", total - lines.len());
     }
 }
 
@@ -383,7 +399,13 @@ fn print_lines(label: &str, lines: &[String]) {
 fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
     use gamut::png::{FilterScan, FilterType, SegmentKind};
 
-    let report = gamut::png::deconstruct(data)?;
+    // Inspection budgets differently from decoding. `gamut::png::deconstruct`'s default matches
+    // the *decoder*'s, which guards a decode against hostile input; but a file this command
+    // declines to inflate is a file it cannot verify, and at the decoder's 64 MiB that is every
+    // PNG past 4096x4096 RGBA8 -- an ordinary photograph. Reading it is the whole job, so the
+    // ceiling is raised to a gigabyte: past any real image, short of unbounded.
+    let limits = gamut::png::DeconstructLimits::default().with_max_image_bytes(1 << 30);
+    let report = gamut::png::deconstruct_with_limits(data, limits)?;
     let header = report.header;
 
     println!("{}: PNG", path.display());
@@ -416,8 +438,10 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
         report.framing_bytes()
     );
 
-    println!("  chunks:");
-    for stats in &report.chunks {
+    // Truncated like every other list here: a chunk type is four unvalidated bytes, so the number
+    // of distinct types is chosen by the input, not by the image.
+    println!("  chunks: {}", report.chunks.len());
+    for stats in report.chunks.iter().take(MAX_LIST) {
         println!(
             "    {} x{:<3} {:>9} payload + {:>4} framing{}",
             String::from_utf8_lossy(&stats.chunk_type),
@@ -430,6 +454,9 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
                 ""
             }
         );
+    }
+    if report.chunks.len() > MAX_LIST {
+        println!("    … and {} more", report.chunks.len() - MAX_LIST);
     }
 
     match report.filters {
@@ -463,55 +490,85 @@ fn inspect_png(path: &std::path::Path, data: &[u8]) -> Result<(), CliError> {
         }
     }
 
+    // One damaged chunk yields one `String`, and the chunk count is chosen by the input, so the
+    // list is built under the same bound it is printed under: the total is counted separately and
+    // only the lines that will be shown are ever materialized.
+    let is_damaged_segment = |seg: &gamut::png::Segment| {
+        matches!(
+            seg.kind,
+            SegmentKind::Chunk { crc_ok: false, .. }
+                | SegmentKind::Truncated
+                | SegmentKind::Trailer
+        )
+    };
+    let mut findings = report
+        .segments
+        .iter()
+        .filter(|seg| is_damaged_segment(seg))
+        .count();
     let mut damaged: Vec<String> = report
         .segments
         .iter()
-        .filter_map(|seg| match seg.kind {
-            SegmentKind::Chunk {
-                chunk_type,
-                crc_ok: false,
-                ..
-            } => Some(format!(
+        .filter(|seg| is_damaged_segment(seg))
+        .take(MAX_LIST)
+        .map(|seg| match seg.kind {
+            SegmentKind::Chunk { chunk_type, .. } => format!(
                 "CRC mismatch in {} at offset {}",
                 String::from_utf8_lossy(&chunk_type),
                 seg.range.start
-            )),
-            SegmentKind::Truncated => Some(format!(
+            ),
+            SegmentKind::Truncated => format!(
                 "truncated from offset {} ({} bytes)",
                 seg.range.start,
                 seg.range.len()
-            )),
-            SegmentKind::Trailer => Some(format!(
+            ),
+            _ => format!(
                 "{} trailing bytes after IEND at offset {}",
                 seg.range.len(),
                 seg.range.start
-            )),
-            _ => None,
+            ),
         })
         .collect();
-    // A skip the file itself caused is a finding, and it is counted before the list is printed so
-    // the exit message cannot report "0 finding(s)" while exiting non-zero. An over-budget skip is
-    // not damage — nothing is known to be wrong with the file — so it is not one.
+    // A skip the file itself caused is damage. An over-budget skip is not — nothing is known to be
+    // wrong with the file — but it is still a reason this command cannot vouch for it, which is a
+    // separate question the verdict below keeps separate.
     if let FilterScan::Skipped(reason) = report.filters
         && reason.is_damage()
     {
-        damaged.push(format!(
-            "filters not counted — {}",
-            filter_skip_label(reason)
-        ));
+        findings += 1;
+        if damaged.len() < MAX_LIST {
+            damaged.push(format!(
+                "filters not counted — {}",
+                filter_skip_label(reason)
+            ));
+        }
     }
-    print_lines("findings", &damaged);
+    print_lines_of("findings", &damaged, findings);
 
     println!("  classified:    {}", yes_no(report.is_fully_classified()));
     println!("  intact:        {}", yes_no(report.is_intact()));
+    println!("  verified:      {}", yes_no(report.is_verified()));
 
-    if report.is_intact() {
+    // The gate is `is_verified`, not `is_intact`. `is_intact` is "nothing is known against this
+    // file", which a file whose IDAT was never inflated satisfies without anything having been
+    // read — and a corrupt zlib payload under a valid CRC is exactly the damage only the scan
+    // sees. An archival gate that passed such a file would be reporting the reader's budget as a
+    // property of the file.
+    if report.is_verified() {
         Ok(())
+    } else if report.is_intact() {
+        Err(CliError::NotFullyAccounted(format!(
+            "{}: not verified — {}",
+            path.display(),
+            report
+                .filters
+                .skipped()
+                .map_or("the filter scan did not run", filter_skip_label)
+        )))
     } else {
         Err(CliError::NotFullyAccounted(format!(
-            "{}: not a complete, undamaged PNG datastream — {} finding(s)",
+            "{}: not a complete, undamaged PNG datastream — {findings} finding(s)",
             path.display(),
-            damaged.len()
         )))
     }
 }
