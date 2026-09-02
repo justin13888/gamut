@@ -545,6 +545,15 @@ exclude_re = [
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
     # the same scale and no input can distinguish the mutant: equivalent.
     'replace < with <= in quality_scale',
+    # gamut-dng predictor `undo`: `if channels == 0 || group_cols < 2 { return; }`, relaxed to
+    # `&&`, is equivalent. `factor` reaches this line only through
+    # `x_factor(predictor).filter(|&f| f > 0)`, so `channels = spp * factor` is zero only when
+    # `spp` is, and in every case the guard skips, the loop it guards is already empty:
+    # `row_step = group_cols * channels`, and the body runs `for i in channels..row_step`, which
+    # is an empty range whenever `group_cols < 2` (row_step <= channels) or `channels == 0`
+    # (row_step == 0). The mutant therefore does strictly more work and writes exactly the same
+    # bytes. An early return for speed, not for behaviour -- same shape as the `pt > 0` skip below.
+    'replace \|\| with && in undo',
     # gamut-dng lossless JPEG `decode`: `if pt > 0` guarding the point-transform upshift.
     # `pt` is a `u16`, so `pt >= 0` is unconditionally true and the loop it guards runs with a
     # shift of zero -- `*sample <<= 0` leaves every sample exactly as it was. The mutant does
