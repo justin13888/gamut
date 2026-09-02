@@ -65,12 +65,23 @@ reverts to Eq (3).
 SDR diffuse white (100 cd/m²). Golden: `Reinhard.map(1)=0.5`, `map(3)=0.75`;
 `ReinhardExtended{4}.map(4)=1.0`, `map(2)=0.75`.
 
-**Evaluation note — factored form.** Eq (4) is evaluated as `(L / (1 + L)) · (1 + L / L_white²)`,
-algebraically identical to the printed form. The direct numerator `L · (1 + L / L_white²)` can
-overflow f32 for huge `L` even when the exact result fits (e.g. `L = f32::MAX`, `L_white = 2.03`:
-exact `≈ 8×10³⁷`); the factored first term is bounded by 1, so the product only saturates to `+∞`
-when the exact value genuinely exceeds f32 range. Every golden above is bit-identical under either
-form.
+**Evaluation note — factored form.** With `t = L / (1 + L)`, Eq (4) is evaluated as
+`t + (L·t) / L_white²`, algebraically identical to the printed form. Two overflows are avoided,
+and they are different:
+
+- The direct numerator `L · (1 + L / L_white²)` overflows for huge `L` even when the exact result
+  fits (e.g. `L = f32::MAX`, `L_white = 2.03`: exact `≈ 8×10³⁷`). `t` is bounded by 1, which fixes
+  that.
+- The quotient `L / L_white²` overflows *on its own* for `L_white` near the bottom of the
+  construction domain below, even where the whole expression fits comfortably. Dividing
+  `L·t = L²/(1 + L) < L` instead of `L` fixes that: it is the smaller numerator over the same
+  divisor. The largest admitted `L_white` that used to overflow was `1.7141993×10⁻¹⁹`, at
+  `L = 10`, where the exact value is `≈ 3.09×10³⁸` — inside f32 with room to spare (#471).
+
+What remains saturates to `+∞` only when the exact value genuinely exceeds f32 range, which the
+`ToneCurve` contract permits. Every golden above is bit-identical under either form; the current
+order is also the one that lands `map(L_white)` on exactly `1.0` at extreme white points, where
+the earlier order returned `0.99999994`.
 
 **Construction domain.** `L_white²` (the divisor) must be a normal f32, i.e. `L_white` roughly
 within `[1.1×10⁻¹⁹, 1.8×10¹⁹]`: a square that underflows to zero or subnormal makes the division
