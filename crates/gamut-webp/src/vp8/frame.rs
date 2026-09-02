@@ -1688,6 +1688,28 @@ mod tests {
         Yuv420::new(width, height, y, u, v).unwrap()
     }
 
+    /// A coarse stepped gradient: structure enough for B_PRED, shallow enough to quantize away.
+    ///
+    /// Getting a macroblock that is *both* B_PRED and skipped needs two things that pull against
+    /// each other -- structure a whole-block mode predicts badly, and a residual that vanishes at
+    /// a coarse quantizer. `detailed` is too contrasty (its residual survives even at q=127) and
+    /// flat content is too plain (a whole-block mode wins, so B_PRED is never chosen). Stepping
+    /// the value every four pixels sits between the two.
+    fn stepped(width: u32, height: u32) -> Yuv420 {
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = (
+            Yuv420::chroma_width(width) as usize,
+            Yuv420::chroma_height(height) as usize,
+        );
+        let y = (0..w * h)
+            .map(|i| {
+                let (x, yy) = (i % w, i / w);
+                (100 + (x / 4 + yy / 4) % 8 * 2) as u8
+            })
+            .collect();
+        Yuv420::new(width, height, y, vec![128; cw * ch], vec![128; cw * ch]).unwrap()
+    }
+
     /// Builds B_PRED-favorable content: each 4×4 region carries a different gradient direction, so a
     /// single whole-block mode predicts the macroblock poorly but per-subblock modes do not.
     fn detailed(width: u32, height: u32) -> Yuv420 {
@@ -1717,7 +1739,7 @@ mod tests {
     /// genuinely exercised (not merely available).
     /// Re-reads partition 0 (modes) and returns `(B_PRED macroblocks, skipped macroblocks)`, to
     /// confirm those paths are genuinely exercised.
-    fn mode_stats(data: &[u8]) -> (usize, usize) {
+    fn mode_stats(data: &[u8]) -> Modes {
         let chunk = header::read_uncompressed_chunk(data).unwrap();
         let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
         let mut modes = BoolDecoder::new(&data[UNCOMPRESSED_CHUNK_LEN..part0_end]);
@@ -1725,20 +1747,24 @@ mod tests {
         let mb_cols = (chunk.width as usize).div_ceil(16);
         let mb_rows = (chunk.height as usize).div_ceil(16);
         let mut above_bmodes = vec![[B_DC_PRED; 4]; mb_cols];
-        let (mut bpred, mut skipped) = (0, 0);
+        let (mut bpred, mut skipped, mut bpred_skipped) = (0, 0, 0);
         for _ in 0..mb_rows {
             let mut left_bmodes = [B_DC_PRED; 4];
             for mb_x in 0..mb_cols {
                 if head.segmentation.update_map {
                     let _ = modes.get_tree(MB_SEGMENT_TREE, &head.segmentation.tree_probs);
                 }
-                if head.mb_no_skip_coeff && modes.get_bool(head.prob_skip_false) {
+                let is_skipped = head.mb_no_skip_coeff && modes.get_bool(head.prob_skip_false);
+                if is_skipped {
                     skipped += 1;
                 }
                 let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
                 let is_bpred = y_mode == B_PRED;
                 let sub_modes = if is_bpred {
                     bpred += 1;
+                    if is_skipped {
+                        bpred_skipped += 1;
+                    }
                     read_bmodes(&mut modes, &above_bmodes[mb_x], &left_bmodes)
                 } else {
                     [B_DC_PRED; 16]
@@ -1747,7 +1773,49 @@ mod tests {
                 (above_bmodes[mb_x], left_bmodes) = bmode_propagation(is_bpred, y_mode, &sub_modes);
             }
         }
-        (bpred, skipped)
+        Modes {
+            bpred,
+            skipped,
+            bpred_skipped,
+        }
+    }
+
+    /// What `mode_stats` counts across a frame's macroblocks.
+    struct Modes {
+        bpred: usize,
+        skipped: usize,
+        /// Macroblocks that are *both* -- the pair `reconstruct_bpred_zero` exists for.
+        bpred_skipped: usize,
+    }
+
+    /// A macroblock that is B_PRED *and* skipped, which is what `reconstruct_bpred_zero` is for.
+    ///
+    /// That function could be replaced with `()` outright and nothing failed (#110): B_PRED is
+    /// covered, skipping is covered, but never the two together. Detailed content picks B_PRED,
+    /// and a coarse quantizer makes its residual vanish -- so the encoder reconstructs those
+    /// macroblocks from prediction alone, and if it does not, its recon stops matching the
+    /// decoder's.
+    ///
+    /// The combination is asserted directly, not just the two counts separately, so this cannot
+    /// quietly stop covering the pair if the encoder's mode decisions shift.
+    #[test]
+    fn a_skipped_bpred_macroblock_reconstructs_from_prediction_alone() {
+        let yuv = stepped(48, 48);
+        let (bits, recon) = encode_frame(&yuv, 110).expect("fixture fits the size fields");
+
+        let modes = mode_stats(&bits);
+        assert!(
+            modes.bpred_skipped > 0,
+            "need a macroblock that is both B_PRED and skipped, got bpred={} skipped={}",
+            modes.bpred,
+            modes.skipped
+        );
+
+        let decoded = decode_frame(&bits).expect("decode");
+        let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
+        assert_eq!(enc.y(), dec.y(), "luma mismatch on a skipped B_PRED frame");
+        assert_eq!(enc.u(), dec.u(), "u mismatch");
+        assert_eq!(enc.v(), dec.v(), "v mismatch");
     }
 
     #[test]
@@ -1756,7 +1824,7 @@ mod tests {
         let (bitstream, recon) =
             encode_frame(&yuv, 8).expect("fixture fits the partition-size fields");
         assert!(
-            mode_stats(&bitstream).0 > 0,
+            mode_stats(&bitstream).bpred > 0,
             "detailed content should select B_PRED for some macroblocks"
         );
         let decoded = decode_frame(&bitstream).expect("decode");
@@ -1785,7 +1853,7 @@ mod tests {
         .unwrap();
         let (bits, recon) = encode_frame(&yuv, 60).expect("fixture fits the partition-size fields");
         assert!(
-            mode_stats(&bits).1 > 0,
+            mode_stats(&bits).skipped > 0,
             "flat content should skip macroblocks"
         );
         let dec = decode_frame(&bits).expect("decode");
