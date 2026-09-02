@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use gamut_core::{Dimensions, EncodeImage, ImageRef, Rgb8, Rgba8};
 use gamut_png::{
-    ChunkStats, FilterScan, FilterStrategy, FilterType, PngEncoder, Segment, SegmentKind,
-    SkippedFilterScan, deconstruct,
+    ChunkStats, DeconstructLimits, FilterScan, FilterStrategy, FilterType, PngEncoder, Segment,
+    SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
 };
 
 /// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
@@ -493,6 +493,91 @@ fn a_corrupt_zlib_stream_with_a_valid_crc_yields_no_histogram() {
 }
 
 #[test]
+fn an_undefined_filter_code_is_named_and_is_damage() {
+    // The fourth skip reason, and the only one with no fixture of its own: a stream that inflates
+    // to exactly the right length but whose scanline carries a filter code PNG SS9.1 does not
+    // define. Without this the `FilterType::from_code` guard can be deleted -- counting an
+    // undefined code as `None` and reporting a bogus histogram for a hostile file -- and every
+    // other assertion in the suite still passes.
+    let filtered = [9u8, 0, 0, 0, 0, 0, 0]; // 2x1 RGB8: one row, 6 bytes, filter code 9.
+    let png = common::png_from_chunks(&[
+        common::chunk(b"IHDR", &common::ihdr_payload(2, 1, 8, 2, 0)),
+        common::chunk(b"IDAT", &common::zlib(&filtered)),
+        common::chunk(b"IEND", &[]),
+    ]);
+    let report = deconstruct(&png).expect("an undefined filter code is reported, not an error");
+
+    assert_covers(&report.segments, png.len());
+    assert_eq!(
+        report.filtered_len, 7,
+        "one row of 6 bytes plus its filter byte"
+    );
+    assert_eq!(
+        report.filters,
+        FilterScan::Skipped(SkippedFilterScan::UndefinedFilterCode),
+        "the scan names the undefined code rather than any other reason"
+    );
+    assert!(
+        report.filters.is_damage(),
+        "an undefined filter code is a statement about the bytes"
+    );
+    assert!(!report.is_intact());
+}
+
+#[test]
+fn an_unread_file_is_intact_but_not_verified() {
+    // The distinction `is_verified` exists to make. Nothing is known to be wrong with an
+    // over-budget file, so `is_intact` is true -- but its IDAT was never inflated, so no claim
+    // about the compressed data has been checked and `is_verified` is false. Collapsing the two
+    // is what let an archival gate pass a file it never read.
+    let png = common::png_with_huge_ihdr();
+    let report = deconstruct(&png).expect("deconstruct");
+
+    assert_eq!(
+        report.filters,
+        FilterScan::Skipped(SkippedFilterScan::OverBudget)
+    );
+    assert!(
+        !report.filters.is_damage(),
+        "a budget refusal is not damage"
+    );
+    assert!(
+        !report.filters.is_counted(),
+        "and it is not a reading either"
+    );
+    assert!(report.is_intact(), "nothing is known against this file");
+    assert!(
+        !report.is_verified(),
+        "but nothing about its compressed data was checked"
+    );
+}
+
+#[test]
+fn a_file_past_the_chunk_ceiling_is_refused() {
+    // The chunk count is chosen by the input -- a chunk costs 12 bytes and buys a segment -- so
+    // the walk caps it. Below the ceiling the same file reports normally, which is what keeps the
+    // cap from being a refusal to measure.
+    let mut chunks = vec![common::chunk(b"IHDR", &common::ihdr_payload(1, 1, 8, 0, 0))];
+    for _ in 0..8 {
+        chunks.push(common::chunk(b"crUD", &[]));
+    }
+    chunks.push(common::chunk(b"IEND", &[]));
+    let png = common::png_from_chunks(&chunks);
+
+    let generous = DeconstructLimits::default().with_max_chunks(100);
+    let report = deconstruct_with_limits(&png, generous).expect("under the ceiling");
+    assert_eq!(report.segments.len(), 11, "signature plus ten chunks");
+
+    let stingy = DeconstructLimits::default().with_max_chunks(4);
+    let err = deconstruct_with_limits(&png, stingy)
+        .expect_err("past the ceiling the walk refuses rather than allocating");
+    assert!(
+        err.to_string().contains("more chunks"),
+        "the error names the ceiling it hit, got: {err}"
+    );
+}
+
+#[test]
 fn an_over_budget_image_reports_everything_but_the_histogram() {
     // A hand-built IHDR claiming 2^30 x 2^30 with a tiny IDAT: the image it implies is far past
     // the decoder's byte budget, so the walk must decline to inflate rather than try. Without
@@ -586,6 +671,38 @@ fn a_header_whose_stream_overflows_reports_a_zero_ratio_rather_than_dividing_by_
         report.passes.is_empty(),
         "no pass geometry is representable either"
     );
+}
+
+/// The interlaced twin of the case above, which is where the two overflow checks can disagree.
+///
+/// Adam7 splits the image into seven smaller passes, so a header can be unrepresentable overall
+/// while every individual pass fits `usize`. `adam7::expected_stream_len` fails on the seven-pass
+/// *sum*, so `filtered_len` saturates to 0; `pass_stats` has to fail on the same sum or the report
+/// contradicts itself -- seven passes described, and a `filtered_len` of 0 that `idat_ratio` then
+/// reports as `0.0%` as though it were a measurement.
+#[test]
+fn an_interlaced_header_whose_passes_fit_but_whose_sum_does_not_reports_no_geometry() {
+    let png = common::png_from_chunks(&[
+        common::chunk(
+            b"IHDR",
+            &common::ihdr_payload(0x7FFF_FFFF, 0x7FFF_FFFF, 16, 6, 1),
+        ),
+        common::chunk(b"IDAT", &common::zlib(&[0u8; 8])),
+        common::chunk(b"IEND", &[]),
+    ]);
+    let report = deconstruct(&png).expect("an unrepresentable stream is reported, not an error");
+
+    assert_covers(&report.segments, png.len());
+    assert_eq!(
+        report.filtered_len, 0,
+        "the seven-pass sum is not representable"
+    );
+    assert!(
+        report.passes.is_empty(),
+        "and the per-pass geometry must saturate with it, not describe seven passes \
+         against a zero total"
+    );
+    assert_eq!(report.idat_ratio(), 0.0, "no division by zero");
 }
 
 #[test]
