@@ -22,7 +22,12 @@ pub enum FilterType {
 }
 
 /// How the encoder chooses a filter for each scanline (a space/time trade-off).
+///
+/// Non-exhaustive: a heuristic is a measurement result, and this crate's own `STATUS.md` records
+/// the corpus that decides which ones are worth shipping — so the set grows as that corpus does.
+/// Match with a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FilterStrategy {
     /// Filter every scanline with [`FilterType::None`] (fastest; good for already-random data).
     None,
@@ -205,13 +210,19 @@ enum Score {
 
 /// Scratch a scorer needs, allocated once per image rather than per scanline.
 ///
-/// The bigram set is 8 KiB of bitset; rebuilding it per row would dominate the measurement it is
-/// supposed to make cheap.
+/// Hoisting saves the *allocation*; it does not on its own save the clearing, and the clearing is
+/// the larger cost. The bigram set is 8 KiB, so wiping it wholesale would cost 8 KiB per candidate
+/// and five candidates per scanline — 40 KiB of memset per row, independent of how long the row
+/// is, which for any ordinary row is more work than the scoring. So the set records which words it
+/// dirtied and clears only those: a row of `n` bytes touches at most `n - 1` of them.
 struct Scratch {
     /// Byte histogram for [`Score::Entropy`].
     histogram: [u32; 256],
     /// One bit per (previous, current) byte pair for [`Score::Bigrams`].
     bigrams: Vec<u64>,
+    /// The indices of the `bigrams` words this scorer set, so the reset touches only them. Holds
+    /// each dirtied word exactly once — a word is pushed when it goes from all-zero to non-zero.
+    dirty: Vec<usize>,
 }
 
 impl Scratch {
@@ -219,6 +230,7 @@ impl Scratch {
         Self {
             histogram: [0; 256],
             bigrams: vec![0; 1 << 10],
+            dirty: Vec::new(),
         }
     }
 }
@@ -256,7 +268,6 @@ fn score(kind: Score, filtered: &[u8], scratch: &mut Scratch) -> u64 {
             (bits * 256.0) as u64
         }
         Score::Bigrams => {
-            scratch.bigrams.fill(0);
             let mut distinct = 0u64;
             for pair in filtered.windows(2) {
                 // The pair *is* a big-endian `u16`, so read it as one. Spelling it `a << 8 | b`
@@ -266,10 +277,20 @@ fn score(kind: Score, filtered: &[u8], scratch: &mut Scratch) -> u64 {
                 let index = usize::from(u16::from_be_bytes([pair[0], pair[1]]));
                 let (word, bit) = (index >> 6, index & 63);
                 if scratch.bigrams[word] & (1 << bit) == 0 {
+                    // Record the word the first time it leaves zero, so `dirty` lists each
+                    // dirtied word once and the reset below is exact.
+                    if scratch.bigrams[word] == 0 {
+                        scratch.dirty.push(word);
+                    }
                     scratch.bigrams[word] |= 1 << bit;
                     distinct += 1;
                 }
             }
+            // Leave the set all-zero for the next candidate, touching only what was dirtied.
+            for &word in &scratch.dirty {
+                scratch.bigrams[word] = 0;
+            }
+            scratch.dirty.clear();
             distinct
         }
     }
