@@ -593,6 +593,11 @@ exclude_re = [
     # `/= 1` the count never changes and the loop spins. (`+=` grows it out of the array's range and
     # panics, so that one is caught and stays.)
     'replace \+= with \*= in decode_image_data',
+    # `tokenize` is the encoder's mirror of that loop: three `i += 1` in one `while i < n`, pinned
+    # the same way by `*= 1`. Its `-=` siblings terminate too -- they underflow and panic -- so they
+    # stay in the survey, and one of them is what caught this reasoning being checked rather than
+    # assumed.
+    'replace \+= with \*= in tokenize',
     'replace -= with /= in code_length_count',
     # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
     # `>= 4`. Reaching 3 would underflow the caller's `- 4` on a `usize` and panic, but the loop
