@@ -78,8 +78,8 @@ pub use decoded::{
 };
 pub use decoder::{PngDecoder, TransparencyKey, metadata};
 pub use deconstruct::{
-    ChunkStats, FilterHistogram, FilterScan, PassStats, PngReport, Segment, SegmentKind,
-    SkippedFilterScan, deconstruct,
+    ChunkStats, DEFAULT_MAX_CHUNKS, DeconstructLimits, FilterHistogram, FilterScan, PassStats,
+    PngReport, Segment, SegmentKind, SkippedFilterScan, deconstruct, deconstruct_with_limits,
 };
 pub use encoder::PngEncoder;
 pub use filter::{FilterStrategy, FilterType};

@@ -182,6 +182,17 @@ impl FilterScan {
         }
     }
 
+    /// Whether the scan actually ran, so the counts describe bytes this reader read.
+    ///
+    /// The complement of [`is_damage`](Self::is_damage) only for a scan that ran: a skip is
+    /// either damage or a budget refusal, and **neither is a verification**. A caller grading a
+    /// file — [`PngReport::is_verified`], an archival gate — asks this; a caller asking whether
+    /// anything is known to be *wrong* asks `is_damage`.
+    #[must_use]
+    pub fn is_counted(self) -> bool {
+        matches!(self, Self::Counted(_))
+    }
+
     /// Whether the missing counts mean the *file* is damaged — see
     /// [`SkippedFilterScan::is_damage`]. A scan that ran is never damage.
     #[must_use]
@@ -303,6 +314,20 @@ impl PngReport {
                 SegmentKind::Signature => true,
             })
             && self.chunk(b"IEND").is_some()
+    }
+
+    /// Whether this file is intact **and every byte of it was actually read**: `is_intact()` plus
+    /// [`FilterScan::is_counted`].
+    ///
+    /// The distinction [`is_intact`](Self::is_intact) deliberately does not make. `is_intact` is
+    /// "nothing is known to be wrong", which a file whose IDAT was never inflated satisfies
+    /// vacuously — and a corrupt zlib payload under a valid CRC is damage *only* the scan can
+    /// see, so for an over-budget file `is_intact` is a statement about this reader's budget
+    /// rather than about the bytes. A gate that must not pass an unread file asks this instead;
+    /// a caller reporting what is known against a file keeps asking `is_intact`.
+    #[must_use]
+    pub fn is_verified(&self) -> bool {
+        self.is_intact() && self.filters.is_counted()
     }
 
     /// **Stored bits per image pixel** — the space-efficiency figure of merit: the whole file,
@@ -440,13 +465,93 @@ impl ChunkTally {
 /// Works on any PNG, whichever encoder produced it, which is what makes the figures comparable
 /// across encoders (issue #224).
 ///
+/// Walks under [`DeconstructLimits::default()`]. Use
+/// [`deconstruct_with_limits`] to match a decoder you configured yourself.
+///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] only when there is no header to report on: a bad signature, no
-/// first chunk, a first chunk that is not IHDR, or an IHDR whose payload is invalid. Everything
-/// else is **reported, not errored** — unknown ancillary *and critical* chunks, CRC mismatches, a
-/// missing IEND, trailing bytes after IEND, a truncated tail, and a corrupt IDAT stream.
+/// Returns [`Error::InvalidInput`] when there is no header to report on — a bad signature, no
+/// first chunk, a first chunk that is not IHDR, or an IHDR whose payload is invalid — or when the
+/// input carries more chunks than [`DeconstructLimits::max_chunks`] allows. Everything else is
+/// **reported, not errored** — unknown ancillary *and critical* chunks, CRC mismatches, a missing
+/// IEND, trailing bytes after IEND, a truncated tail, and a corrupt IDAT stream.
 pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
+    deconstruct_with_limits(png, DeconstructLimits::default())
+}
+
+/// The ceilings a [`deconstruct`] walk observes on attacker-chosen quantities.
+///
+/// Every field is a quantity the *input* chooses, which is why each has a ceiling: a report is
+/// routinely run over files from anywhere (`gamut inspect` is pointed at whatever is on disk), and
+/// the crate's decoder already caps the same quantities for the same reason.
+///
+/// Non-exhaustive: ceilings may be added without a breaking change. Build from
+/// [`default()`](Self::default) and adjust the fields you care about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeconstructLimits {
+    /// The largest decoded image, in bytes, whose IDAT stream is worth inflating to count
+    /// filters. Above it the scan is skipped as [`SkippedFilterScan::OverBudget`] and every other
+    /// figure is still reported, because everything else is derived from framing and IHDR.
+    ///
+    /// This is the quantity [`crate::PngDecoder::with_max_image_bytes`] budgets, and matching the
+    /// two is the point: a report is only "what a decode would have allocated" against a decoder
+    /// configured the same way. The default matches the decoder's default.
+    pub max_image_bytes: usize,
+    /// The largest number of chunks the walk will materialize into segments and per-type stats.
+    ///
+    /// A chunk costs 12 bytes of input and buys a `Segment` plus, for a type not seen before, a
+    /// `ChunkStats` and an index entry — so an input of unbounded chunk count is an input of
+    /// unbounded heap, at roughly an order of magnitude over the file size. The chunk *type* is
+    /// four unvalidated bytes, so the distinct-type count is attacker-chosen too.
+    ///
+    /// The default admits any plausible real file — a PNG at the ceiling is at least 12 MiB of
+    /// pure chunk framing — while bounding a crafted one.
+    pub max_chunks: usize,
+}
+
+/// The chunk-count ceiling a default [`deconstruct`] walk observes.
+///
+/// A PNG reaching it carries at least 12 MiB of chunk framing alone, which no real file does and a
+/// crafted one reaches cheaply.
+pub const DEFAULT_MAX_CHUNKS: usize = 1 << 20;
+
+impl Default for DeconstructLimits {
+    fn default() -> Self {
+        Self {
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
+            max_chunks: DEFAULT_MAX_CHUNKS,
+        }
+    }
+}
+
+impl DeconstructLimits {
+    /// Sets [`max_image_bytes`](Self::max_image_bytes).
+    ///
+    /// Builder methods rather than a struct literal, matching
+    /// [`PngDecoder::with_max_image_bytes`](crate::PngDecoder::with_max_image_bytes) — and
+    /// necessary as well as symmetrical, since a non-exhaustive struct cannot be built by literal
+    /// outside this crate at all.
+    #[must_use]
+    pub fn with_max_image_bytes(mut self, bytes: usize) -> Self {
+        self.max_image_bytes = bytes;
+        self
+    }
+
+    /// Sets [`max_chunks`](Self::max_chunks).
+    #[must_use]
+    pub fn with_max_chunks(mut self, chunks: usize) -> Self {
+        self.max_chunks = chunks;
+        self
+    }
+}
+
+/// [`deconstruct`], under caller-chosen [`DeconstructLimits`].
+///
+/// # Errors
+///
+/// As [`deconstruct`], against `limits` rather than the defaults.
+pub fn deconstruct_with_limits(png: &[u8], limits: DeconstructLimits) -> Result<PngReport> {
     let mut reader = ChunkReader::new(png)?;
     let mut segments = vec![Segment {
         range: 0..SIGNATURE.len(),
@@ -496,6 +601,12 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
                 }
                 let is_iend = &chunk.chunk_type == b"IEND";
                 push(&mut segments, &mut tally, &chunk);
+                if segments.len() > limits.max_chunks {
+                    return Err(Error::invalid_input(
+                        env!("CARGO_PKG_NAME"),
+                        "PNG: more chunks than the walk's ceiling admits",
+                    ));
+                }
                 if is_iend {
                     saw_iend = true;
                     break;
@@ -531,7 +642,13 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
 
     let passes = pass_stats(&native);
     let filtered_len = adam7::expected_stream_len(&native).unwrap_or(0);
-    let filters = scan_filters(&native, &idat, filtered_len, &passes);
+    let filters = scan_filters(
+        &native,
+        &idat,
+        filtered_len,
+        &passes,
+        limits.max_image_bytes,
+    );
 
     Ok(PngReport {
         file_len: png.len(),
@@ -550,6 +667,7 @@ pub fn deconstruct(png: &[u8]) -> Result<PngReport> {
 /// against it rather than merely asserted.
 fn pass_stats(header: &ihdr::Ihdr) -> Vec<PassStats> {
     let mut out = Vec::new();
+    let mut total = 0usize;
     for (index, pass) in adam7::passes_for(header.interlaced).iter().enumerate() {
         let (width, height) = adam7::pass_dimensions(pass, header.width, header.height);
         if width == 0 || height == 0 {
@@ -567,6 +685,15 @@ fn pass_stats(header: &ihdr::Ihdr) -> Vec<PassStats> {
         else {
             return Vec::new();
         };
+        // `adam7::expected_stream_len` fails on the seven-pass *sum* as well as on each pass, so
+        // this has to fail with it. Without the running check, a header whose passes each fit but
+        // whose total overflows leaves `filtered_len` saturated to 0 while `passes` still
+        // describes all seven -- a self-inconsistent report, and a `0.0%` ratio that reads as a
+        // measurement rather than as an overflow.
+        let Some(running) = total.checked_add(filtered_len) else {
+            return Vec::new();
+        };
+        total = running;
         out.push(PassStats {
             index: index as u8,
             width,
@@ -613,8 +740,9 @@ fn scan_filters(
     idat: &[u8],
     filtered_len: usize,
     passes: &[PassStats],
+    max_image_bytes: usize,
 ) -> FilterScan {
-    if !fits_decode_budget(header, DEFAULT_MAX_IMAGE_BYTES) {
+    if !fits_decode_budget(header, max_image_bytes) {
         return FilterScan::Skipped(SkippedFilterScan::OverBudget);
     }
     let Ok(stream) = inflate::inflate_zlib(idat, filtered_len) else {
