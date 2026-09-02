@@ -776,6 +776,26 @@ pub fn write_simple_prefix_code(w: &mut BitWriter, symbols: &[u16]) {
 mod tests {
     use super::*;
 
+    /// An unused symbol must not disturb the code assigned to any used one.
+    ///
+    /// `canonical_codes` counts lengths under `len > 0 && len <= MAX_CODE_LENGTH`. Relaxed to
+    /// `||`, a zero length passes the first test's negation and lands in `bl_count[0]` -- which is
+    /// read back at `bits == 1` as `code = (code + bl_count[0]) << 1`, so every code in the
+    /// alphabet shifts. It survived because the fixtures only ever passed fully dense length
+    /// arrays, and a sparse alphabet is the normal case in VP8L (#110).
+    #[test]
+    fn an_unused_symbol_does_not_shift_the_others() {
+        // RFC 1951 section 3.2.2 assignment for lengths [2, 2, 3, 3]: first codes per length are
+        // 0 and 4, handed out in symbol order, then reversed to their length for LSB-first
+        // writing: 00 -> 0, 01 -> 10 = 2, 100 -> 001 = 1, 101 -> 101 = 5.
+        assert_eq!(canonical_codes(&[2, 2, 3, 3]), vec![0, 2, 1, 5]);
+
+        // Prepending an unused symbol changes nothing but its own slot, which is 0.
+        let sparse = canonical_codes(&[0, 2, 2, 3, 3]);
+        assert_eq!(sparse[0], 0, "an unused symbol codes as 0");
+        assert_eq!(sparse[1..], *canonical_codes(&[2, 2, 3, 3]).as_slice());
+    }
+
     /// `simple_symbols` decides whether the *simple* code-length description can carry an
     /// alphabet at all, and every one of its rules is a rejection — so the function is only
     /// pinned by the shapes it must turn down.
