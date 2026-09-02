@@ -1654,6 +1654,37 @@ mod tests {
         Yuv420::new(width, height, y, u, v).unwrap()
     }
 
+    /// Dark top half, bright bottom half, each lightly textured.
+    ///
+    /// Segments are assigned by macroblock luma mean (`(mean / 64).min(3)`), so a fixture only
+    /// exercises the per-macroblock segment lookup if its macroblocks land in *different* buckets.
+    /// `pattern`'s wrapping ramp does not: it sweeps the whole 0..255 range inside every
+    /// macroblock, so each one averages near 128 and the segment map comes out uniform -- and a
+    /// uniform map makes any index into it indistinguishable from any other.
+    ///
+    /// Here the halves average about 23 and 207, which is segment 0 against segment 3, and the
+    /// split is *horizontal* so the difference falls between macroblock rows -- what a wrong row
+    /// stride actually gets wrong. The `i % 16` texture keeps blocks from being flat enough to
+    /// skip entirely.
+    fn banded(width: u32, height: u32) -> Yuv420 {
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = (
+            Yuv420::chroma_width(width) as usize,
+            Yuv420::chroma_height(height) as usize,
+        );
+        let y = (0..w * h)
+            .map(|i| {
+                let base = if i / w < h / 2 { 16 } else { 200 };
+                (base + (i % 16)) as u8
+            })
+            .collect();
+        let u = (0..cw * ch).map(|i| ((i * 5 + 64) & 0xff) as u8).collect();
+        let v = (0..cw * ch)
+            .map(|i| ((i * 11 + 128) & 0xff) as u8)
+            .collect();
+        Yuv420::new(width, height, y, u, v).unwrap()
+    }
+
     /// Builds B_PRED-favorable content: each 4×4 region carries a different gradient direction, so a
     /// single whole-block mode predicts the macroblock poorly but per-subblock modes do not.
     fn detailed(width: u32, height: u32) -> Yuv420 {
@@ -1787,6 +1818,76 @@ mod tests {
                 assert_encoder_recon_matches_decoder(w, h, q);
             }
         }
+    }
+
+    /// The recon-equals-decoder invariant with quantizer segmentation on.
+    ///
+    /// `assert_encoder_recon_matches_decoder` above runs through `encode_frame`, so it always
+    /// encodes with segmentation off and every macroblock on the frame quantizer. This runs the
+    /// same invariant with it on, over content whose macroblocks land in different segments.
+    ///
+    /// It does *not* catch a wrong per-macroblock segment lookup -- see
+    /// `segmented_stream_is_byte_stable` below for why nothing consistency-shaped can.
+    #[test]
+    fn encoder_recon_matches_decoder_with_segmentation() {
+        let opts = EncodeOptions {
+            segmented: true,
+            ..EncodeOptions::default()
+        };
+        // Sizes spanning more than one macroblock row, so `mb_y` is not always 0 -- at one row the
+        // row-stride arithmetic cannot be distinguished from anything.
+        for &(w, h) in &[(64u32, 48u32), (33, 41)] {
+            for &q in &[10u8, 60] {
+                let yuv = banded(w, h);
+                let (bits, recon) =
+                    encode_frame_filtered(&yuv, q, opts).expect("fixture fits the size fields");
+                let decoded = decode_frame(&bits).expect("decode");
+                let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
+                assert_eq!(enc.y(), dec.y(), "luma mismatch at {w}x{h} q{q} segmented");
+                assert_eq!(enc.u(), dec.u(), "u mismatch at {w}x{h} q{q} segmented");
+                assert_eq!(enc.v(), dec.v(), "v mismatch at {w}x{h} q{q} segmented");
+            }
+        }
+    }
+
+    /// The segmented stream is pinned byte for byte, because nothing else can see the segment
+    /// each macroblock was assigned.
+    ///
+    /// `segment_map[mb_y * mb_cols + mb_x]` can be indexed with `mb_y / mb_cols` instead and every
+    /// consistency check still passes (#110). The segment the encoder used is recorded in
+    /// `MbRecord::segment` and transmitted from there, so the stream stays internally coherent:
+    /// both decoders read the same declared map, agree with each other, and agree with the
+    /// encoder's reconstruction. The loop filter does read the true map, but this configuration
+    /// sets `filter_strength: [0; 4]`, so that cannot separate them either.
+    ///
+    /// What changes is only *which quantizer each macroblock got* -- a worse encode that is still
+    /// a valid one. That is the same blind spot the tiff codecs had, and it needs the same answer:
+    /// assert the output, not its self-consistency.
+    ///
+    /// Re-pinning is expected when the encoder legitimately improves; the commit that moves this
+    /// number says why. Same contract as `tests/default_bytes.rs`.
+    /// Pinned from the current encoder; see `segmented_stream_is_byte_stable`.
+    const SEGMENTED_GOLDEN_LEN: usize = 686;
+    /// FNV-1a over the same bytes.
+    const SEGMENTED_GOLDEN_DIGEST: u64 = 16_840_429_707_808_062_004;
+
+    #[test]
+    fn segmented_stream_is_byte_stable() {
+        let opts = EncodeOptions {
+            segmented: true,
+            ..EncodeOptions::default()
+        };
+        // Banded content over three macroblock rows, so the segment genuinely varies by row.
+        let (bits, _) = encode_frame_filtered(&banded(64, 48), 40, opts).expect("encode");
+
+        let digest = bits.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        assert_eq!(
+            (bits.len(), digest),
+            (SEGMENTED_GOLDEN_LEN, SEGMENTED_GOLDEN_DIGEST),
+            "segmented encode drifted"
+        );
     }
 
     #[test]
