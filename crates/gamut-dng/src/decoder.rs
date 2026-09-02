@@ -1484,6 +1484,25 @@ fn illuminant(ifd: &TrackedIfd, tag: u16) -> Option<CalibrationIlluminant> {
 mod tests {
     use super::*;
 
+    /// All three types `BlackLevel` allows, and nothing else.
+    ///
+    /// Only `SHORT` and `RATIONAL` were reached by fixtures, so deleting the `LONG` arm dropped it
+    /// to `_ => None` and the suite stayed green (#110) -- a black level stored as `LONG`, which
+    /// the spec permits, would have been refused as a bad type.
+    #[test]
+    fn unsigned_f64s_accepts_short_long_and_rational() {
+        assert_eq!(unsigned_f64s(&Value::Short(vec![7])), Some(vec![7.0]));
+        assert_eq!(
+            unsigned_f64s(&Value::Long(vec![70000])),
+            Some(vec![70000.0])
+        );
+        assert_eq!(
+            unsigned_f64s(&Value::Rational(vec![(1, 2)])),
+            Some(vec![0.5])
+        );
+        assert_eq!(unsigned_f64s(&Value::Byte(vec![7])), None);
+    }
+
     #[test]
     fn is_raw_ifd_only_for_raw_photometry() {
         let mut ifd = Ifd::new();

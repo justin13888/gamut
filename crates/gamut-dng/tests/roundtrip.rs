@@ -833,6 +833,34 @@ fn a_black_level_repeat_dim_that_is_not_two_values_is_rejected() {
 }
 
 #[test]
+fn a_zero_black_level_repeat_dimension_is_rejected() {
+    // `(rows, cols)` are counts, so zero is malformed -- and the guard that says so is
+    // `.filter(|r| *r > 0)`, which no fixture reached: relaxing it to `>= 0` accepts zero for a
+    // `u16` unconditionally, giving a repeat of (0, 0) and a cell count of nothing (#110).
+    use gamut_ifd::Value;
+
+    // Rows and columns are filtered separately, so a zero in one does not exercise the other's
+    // guard -- both orientations are needed.
+    for dim in [vec![1, 0], vec![0, 1]] {
+        let rebuilt = rebuilt_with_raw_ifd(|ifd| {
+            ifd.set(
+                gamut_dng::tags::BLACK_LEVEL_REPEAT_DIM,
+                Value::Short(dim.clone()),
+            );
+        });
+
+        let err = DngDecoder::new()
+            .decode(&rebuilt)
+            .expect_err("a zero repeat dimension must be refused");
+        assert!(
+            err.to_string()
+                .contains("BlackLevelRepeatDim dimensions must be non-zero"),
+            "expected the non-zero error for {dim:?}, got: {err}"
+        );
+    }
+}
+
+#[test]
 fn a_white_level_count_that_is_neither_one_nor_per_plane_is_rejected() {
     // The decoder accepts WhiteLevel at exactly two counts -- one per sample plane, or a single
     // value it broadcasts -- and rejects everything else. Only the two accepted counts were

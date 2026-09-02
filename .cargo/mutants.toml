@@ -545,6 +545,12 @@ exclude_re = [
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
     # the same scale and no input can distinguish the mutant: equivalent.
     'replace < with <= in quality_scale',
+    # gamut-dng lossless JPEG `decode`: `if pt > 0` guarding the point-transform upshift.
+    # `pt` is a `u16`, so `pt >= 0` is unconditionally true and the loop it guards runs with a
+    # shift of zero -- `*sample <<= 0` leaves every sample exactly as it was. The mutant does
+    # strictly more work and produces byte-identical output, so no test can separate them: the
+    # guard is an optimisation, not a behaviour. Equivalent.
+    'replace > with >= in decode',
     # gamut-dng predictor `x_factor`: deleting the `Predictor::None => Some(0)` arm drops it to
     # `_ => None`, and neither caller can tell the two apart.
     #

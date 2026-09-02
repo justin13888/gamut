@@ -865,6 +865,19 @@ mod tests {
         );
     }
 
+    /// The same boundary for `BlackLevel`, which has its own copy of the comparison.
+    #[test]
+    fn a_black_level_is_stored_short_only_while_it_fits() {
+        assert!(matches!(
+            black_level_value(&[f64::from(u16::MAX)]),
+            Ok(Value::Short(_))
+        ));
+        assert!(matches!(
+            black_level_value(&[f64::from(u16::MAX) + 1.0]),
+            Ok(Value::Long(_))
+        ));
+    }
+
     /// SHORT while the levels fit, LONG once one does not -- a size choice both DNG readers
     /// accept, so only the file's length records which was taken.
     #[test]

@@ -560,6 +560,20 @@ pub mod new_subfile_type {
 mod tests {
     use super::*;
 
+    /// `is_lossy` splits the compressions that route through the compressed-chunk digest path
+    /// from the ones that do not. Nothing asserted it, so it could be replaced by either constant
+    /// (#110) -- which needs cases on both sides to close.
+    #[test]
+    fn is_lossy_names_the_compressed_chunk_compressions() {
+        assert!(Compression::LossyJpeg.is_lossy());
+        // JPEG XL counts as lossy storage whether or not its codestream was lossless.
+        assert!(Compression::JpegXl.is_lossy());
+
+        assert!(!Compression::Uncompressed.is_lossy());
+        assert!(!Compression::LosslessJpeg.is_lossy());
+        assert!(!Compression::Deflate.is_lossy());
+    }
+
     #[test]
     fn compression_codes_round_trip() {
         for c in [
