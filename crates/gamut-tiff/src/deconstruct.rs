@@ -391,10 +391,10 @@ mod tests {
     /// Asserts the structural walk classified the whole file — zero tolerance: alignment
     /// padding must come back as typed `Padding` segments, not tolerated gaps.
     fn assert_clean_coverage(r: &DeconstructReport) {
-        assert!(
-            r.segments.is_fully_classified(),
-            "not fully classified: {r:?}"
-        );
+        // Through the public wrapper, not `r.segments` directly. Reaching past it left
+        // `DeconstructReport::is_fully_classified` asserted by nothing, so it could be replaced
+        // with either constant and the suite stayed green (#110).
+        assert!(r.is_fully_classified(), "not fully classified: {r:?}");
         assert!(r.unknown_fields.is_empty(), "unknown fields: {r:?}");
     }
 
@@ -500,6 +500,124 @@ mod tests {
         );
     }
 
+    /// An IFD that claims to be tiled but carries no tile data is diagnosed *as tiled*.
+    ///
+    /// `check_pixel_structure` enters the tile branch on `TileWidth` **or** `TileOffsets`, and the
+    /// `||` is the whole point: a half-present pair is exactly the malformation the audit exists to
+    /// name. Mutated to `&&`, an IFD with only `TileWidth` falls through to the strip branch and
+    /// then to the generic "no strip or tile data" warning -- a different, vaguer diagnosis of the
+    /// same file, and a `Warning` where the truth is an `Error`.
+    ///
+    /// Every tile fixture in the suite was well-formed, so nothing distinguished the two (#110).
+    #[test]
+    fn flags_a_tiled_ifd_that_carries_no_tile_data() {
+        let mut ifd = image_ifd();
+        ifd.set(tags::TILE_WIDTH, Value::Short(vec![16]));
+        // Deliberately no TileOffsets/TileByteCounts, and no strip offsets either: the IFD says
+        // "tiled" and then provides nothing.
+        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+
+        let report = deconstruct(&bytes).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure {
+                    detail: "TIFF: tiled image missing TileOffsets/TileByteCounts",
+                    severity: Severity::Error,
+                    ..
+                }
+            )),
+            "expected the tiled diagnosis, got {report:?}"
+        );
+    }
+
+    /// A self-pointing sub-IFD is diagnosed as a cycle, not merely as unparseable.
+    ///
+    /// `map_audit_findings` translates the audit walk's findings into this crate's anomaly
+    /// taxonomy, and until these three tests nothing produced an `AuditFinding` at all -- the
+    /// whole function could be replaced with `()` and the suite stayed green (#110, #490). The
+    /// detail string is asserted rather than the variant, because deleting the `Cycle` arm falls
+    /// through to the generic "could not be parsed" and stays an `Anomaly::Structure` either way.
+    #[test]
+    fn diagnoses_a_sub_ifd_cycle() {
+        // Root @8 points at the child @26, whose own SubIFDs pointer aims back at 26.
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, //
+            0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, //
+            0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let report = deconstruct(data).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure { detail, severity: Severity::Error, .. }
+                    if detail.contains("possible cycle")
+            )),
+            "{report:?}"
+        );
+    }
+
+    /// A sub-IFD carrying a next-IFD chain is out of spec, and only a warning.
+    #[test]
+    fn diagnoses_a_chained_sub_ifd() {
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+            0x01, 0x00, //
+            0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00,
+            0x00, // 330 -> 26
+            0x00, 0x00, 0x00, 0x00, //
+            0x01, 0x00, // child A @ 26
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, //
+            0x2c, 0x00, 0x00, 0x00, // next = 44, out of spec for a sub-IFD
+            0x01, 0x00, // child B @ 44
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, //
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let report = deconstruct(data).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure { detail, severity: Severity::Warning, .. }
+                    if detail.contains("next-IFD chain")
+            )),
+            "{report:?}"
+        );
+    }
+
+    /// Nesting past the audit's depth guard is diagnosed as too deep, not as a parse failure.
+    #[test]
+    fn diagnoses_sub_ifd_nesting_that_is_too_deep() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        for _ in 0..20 {
+            let mut parent = Ifd::new();
+            parent.set_sub_ifd(tags::SUB_IFDS, vec![ifd]);
+            ifd = parent;
+        }
+        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        let report = deconstruct(&bytes).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure { detail, severity: Severity::Error, .. }
+                    if detail.contains("too deep")
+            )),
+            "{report:?}"
+        );
+    }
+
     #[test]
     fn flags_strip_offset_count_mismatch() {
         // Two offsets but one byte count: a structural defect the deconstruct must surface.
@@ -524,6 +642,15 @@ mod tests {
             )),
             "{report:?}"
         );
+        // The other half of the verdict, and the only fixture in the suite that reaches it: the
+        // strips are declared at offset 1000 in a file far shorter than that, so the walk records
+        // an out-of-bounds segment and the archival claim is false. Without this the *negative*
+        // side of `is_fully_classified` was never observed at all.
+        assert!(
+            !report.is_fully_classified(),
+            "a strip past EOF must fail the archival verdict: {report:?}"
+        );
+        assert_eq!(report.segments.out_of_bounds.len(), 1, "{report:?}");
     }
 
     /// Two entries legitimately sharing one out-of-line value (TIFF permits it) is informational
