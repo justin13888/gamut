@@ -536,6 +536,31 @@ mod tests {
     }
 
     #[test]
+    fn the_entropy_score_weights_each_symbol_by_how_often_it_occurs() {
+        // Entropy is `sum c*log2(n/c)`, not `sum log2(n/c)`: each symbol's surprise is weighted by
+        // how much of the row it accounts for. Drop the weighting and the score degenerates into
+        // something that mostly counts distinct symbols, which ranks these two rows the other way
+        // round.
+        //
+        // `balanced` is two symbols split evenly -- the worst case for a two-symbol row, a full
+        // bit per byte. `concentrated` has *more* distinct symbols but spends 14 of its 16 bytes
+        // on one of them, so it carries less information and must score lower. Unweighted it
+        // scores higher, because it has three log terms against two.
+        let mut aux = Scratch::new();
+        let mut balanced = vec![0u8; 8];
+        balanced.extend(std::iter::repeat_n(1u8, 8));
+        let mut concentrated = vec![0u8; 14];
+        concentrated.extend_from_slice(&[1, 2]);
+
+        let balanced = score(Score::Entropy, &balanced, &mut aux);
+        let concentrated = score(Score::Entropy, &concentrated, &mut aux);
+        assert!(
+            concentrated < balanced,
+            "concentrated {concentrated} should score below balanced {balanced}"
+        );
+    }
+
+    #[test]
     fn the_entropy_scale_separates_rows_closer_than_one_bit() {
         // The scale is what makes the score integer-exact: these two rows carry 8.000 and 8.490
         // bits, which both floor to 8. Only multiplying by 256 before the cast keeps them apart,

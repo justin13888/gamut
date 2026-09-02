@@ -449,7 +449,7 @@ impl PngEncoder {
         let mut plain_encoding = Vec::new();
         plain(&mut plain_encoding)?;
 
-        let winner = if plain_encoding.len() < cleaned_encoding.len() {
+        let winner = if prefers_plain(plain_encoding.len(), cleaned_encoding.len()) {
             plain_encoding
         } else {
             cleaned_encoding
@@ -720,6 +720,16 @@ impl PngEncoder {
             }
         }
     }
+}
+
+/// Whether the uncleaned encoding beats the cleaned one, for [`PngEncoder::cleaned_or_plain`].
+///
+/// **A tie keeps the cleaned encoding**, which carries less unseen data for the same bytes. Split
+/// out for the same reason as [`prefers_native`]: engineering two encodings of the same image to
+/// land on exactly equal lengths is not something a fixture can do reliably, so the tie is only
+/// assertable here.
+fn prefers_plain(plain_len: usize, cleaned_len: usize) -> bool {
+    plain_len < cleaned_len
 }
 
 /// Whether the unreduced encoding beats the palette one, for [`PngEncoder::write_reduced_or_native`].
@@ -1057,6 +1067,13 @@ mod tests {
         assert!(prefers_native(10, 11), "smaller native wins");
         assert!(!prefers_native(11, 10), "smaller palette wins");
         assert!(!prefers_native(10, 10), "a tie keeps the palette");
+    }
+
+    #[test]
+    fn a_tie_between_cleaned_and_plain_keeps_the_cleaned_encoding() {
+        assert!(prefers_plain(10, 11), "smaller plain wins");
+        assert!(!prefers_plain(11, 10), "smaller cleaned wins");
+        assert!(!prefers_plain(10, 10), "a tie keeps the cleaned encoding");
     }
 
     #[test]
