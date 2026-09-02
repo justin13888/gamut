@@ -571,6 +571,15 @@ exclude_re = [
     # than matching every comparison in the function.
     'replace && with \|\| in canonical_codes',
     'replace > with >= in canonical_codes',
+    # gamut-webp `BoolDecoder::get_bool` renormalisation: `self.range *= 2` under
+    # `while self.range < 128`. Reversed to `/= 2` the range shrinks toward zero, never reaches
+    # 128, and the loop never returns -- reportable only as a TIMEOUT.
+    #
+    # The statement is written `*= 2` rather than `<<= 1` precisely so this entry can name it. The
+    # `self.value <<= 1` on the line above is the same operator applied to a different field, and
+    # reversing *that* one is caught -- so a `<<=`-shaped exclusion would have hidden real
+    # coverage, and a line-anchored one stops matching as soon as anything above it moves.
+    'replace \*= with /= in BoolDecoder<.a>::get_bool',
     # gamut-webp hang-on-mutation timeouts: two cursor advances that stop advancing.
     #
     # `decode_image_data` advances `i` with `i += 1` in three branches of one `while i < n` loop
