@@ -346,7 +346,6 @@ fn encoded_size_is_deterministic() {
     }
 }
 
-
 #[test]
 fn cleanup_never_costs_bytes_on_any_corpus_row() {
     // The gate on `with_transparent_cleanup`'s central claim. It is only true because the encoder
