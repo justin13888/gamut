@@ -246,7 +246,9 @@ impl Av1Config {
                 // Re-emit with obu_has_size_field set: header byte(s) verbatim except the size
                 // bit (0x02), then the minimal leb128 payload size, then the payload.
                 let header_len = obu.raw.len() - obu.payload.len();
-                out.push(obu.raw[0] | 0x02);
+                // `+ 0x02`, not `| 0x02`: this arm is reached only when `has_size_field` is
+                // false, and 0x02 is that very bit, so it is known clear and `|`/`^` agree (#110).
+                out.push(obu.raw[0] + 0x02);
                 out.extend_from_slice(&obu.raw[1..header_len]);
                 write_leb128(obu.payload.len() as u64, out);
                 out.extend_from_slice(obu.payload);

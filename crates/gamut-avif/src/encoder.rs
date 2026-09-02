@@ -116,11 +116,12 @@ impl AvifEncoder {
     #[must_use]
     pub fn lossless() -> Self {
         Self {
-            config: AvifConfig {
-                mode: AvifMode::Lossless,
-                // Quality is ignored in lossless mode; carry the config's default for `config()`.
-                ..AvifConfig::default()
-            },
+            // `AvifConfig::default()` outright, with no `mode:` override: lossless *is* the
+            // default mode, so writing it again changed nothing and the field could be deleted
+            // with the suite green (#110). `lossless_is_the_default_mode` below pins the coupling
+            // this relies on, so a change to the default fails there rather than silently making
+            // `lossless()` lossy.
+            config: AvifConfig::default(),
             transform: ImageTransform::default(),
             icc: None,
             exif: None,
@@ -1041,6 +1042,19 @@ impl EncodeImage<Gray8> for AvifEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `lossless()` carries no explicit mode because the default already is one, so that has to
+    /// stay true. If the default ever changes, this fails here rather than turning `lossless()`
+    /// lossy in silence.
+    #[test]
+    fn lossless_is_the_default_mode() {
+        assert_eq!(AvifConfig::default().mode, AvifMode::Lossless);
+        assert_eq!(AvifEncoder::lossless().config().mode, AvifMode::Lossless);
+        assert_eq!(
+            AvifEncoder::new().config(),
+            AvifEncoder::lossless().config()
+        );
+    }
 
     #[test]
     fn lossless_pins_four_four_four_whatever_the_chroma_knob_says() {
