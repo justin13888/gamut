@@ -937,7 +937,8 @@ mod tests {
             })
             .collect();
 
-        for prefix_bits in [2u32] {
+        {
+            let prefix_bits = 2u32;
             let plan = Vp8lPlan {
                 structure: Structure::Auto,
                 cache: CacheBits::Auto,

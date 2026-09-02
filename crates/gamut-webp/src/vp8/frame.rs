@@ -2221,7 +2221,6 @@ mod tests {
         ));
     }
 
-    #[test]
     /// A partition size that needs its third byte.
     ///
     /// The size is 24-bit little-endian, and every fixture in the suite has partitions under
