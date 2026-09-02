@@ -1443,7 +1443,11 @@ pub fn encode_frame_filtered(
     // bounded here.
     for part in &token_parts[..n - 1] {
         let len = token_partition_size(part.len())?;
-        out.extend_from_slice(&[len as u8, (len >> 8) as u8, (len >> 16) as u8]);
+        // The low three bytes of the little-endian `u32`, rather than three hand-cut shifts. The
+        // shifted form put each byte in its own lane, where the operator has slack no test could
+        // see: with every partition under 64 KiB the top byte is zero either way (#110). This is
+        // `split_token_partitions`' read, spelled the same way round.
+        out.extend_from_slice(&len.to_le_bytes()[..3]);
     }
     for part in &token_parts {
         out.extend_from_slice(part);
@@ -1483,8 +1487,11 @@ fn split_token_partitions(data: &[u8], n: usize) -> Result<Vec<BoolDecoder<'_>>>
     let mut offset = sizes_len;
     for i in 0..n {
         let size = if i < n - 1 {
+            // A 24-bit little-endian size, read as one. Spelling it
+            // `s[0] | s[1] << 8 | s[2] << 16` puts each byte in its own lane, and disjoint lanes
+            // are where `|` and `^` agree -- unkillable mutants for no gain (#110).
             let s = &data[i * 3..i * 3 + 3];
-            usize::from(s[0]) | (usize::from(s[1]) << 8) | (usize::from(s[2]) << 16)
+            u32::from_le_bytes([s[0], s[1], s[2], 0]) as usize
         } else {
             data.len() - offset
         };
@@ -1654,6 +1661,63 @@ mod tests {
         Yuv420::new(width, height, y, u, v).unwrap()
     }
 
+    /// Four horizontal bands, one per quantizer segment, each lightly textured.
+    ///
+    /// Segments are assigned by macroblock luma mean (`(mean / 64).min(3)`), so a fixture only
+    /// exercises the per-macroblock segment lookup if its macroblocks land in *different* buckets.
+    /// `pattern`'s wrapping ramp does not: it sweeps the whole 0..255 range inside every
+    /// macroblock, so each one averages near 128 and the segment map comes out uniform -- and a
+    /// uniform map makes any index into it indistinguishable from any other.
+    ///
+    /// The bands average about 23, 87, 151 and 215, one per segment, and they are *horizontal* so
+    /// the difference falls between macroblock rows -- what a wrong row stride gets wrong. All
+    /// four matter: with only the outer two, the quantizer deltas for segments 1 and 2 are never
+    /// applied and changing either goes unnoticed. The `i % 16` texture keeps blocks from being
+    /// flat enough to skip entirely.
+    ///
+    /// `height` should cover four macroblock rows (64) so every band gets one.
+    fn banded(width: u32, height: u32) -> Yuv420 {
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = (
+            Yuv420::chroma_width(width) as usize,
+            Yuv420::chroma_height(height) as usize,
+        );
+        let y = (0..w * h)
+            .map(|i| {
+                let band = (i / w) * 4 / h.max(1);
+                let base = [16usize, 80, 144, 208][band.min(3)];
+                (base + (i % 16)) as u8
+            })
+            .collect();
+        let u = (0..cw * ch).map(|i| ((i * 5 + 64) & 0xff) as u8).collect();
+        let v = (0..cw * ch)
+            .map(|i| ((i * 11 + 128) & 0xff) as u8)
+            .collect();
+        Yuv420::new(width, height, y, u, v).unwrap()
+    }
+
+    /// A coarse stepped gradient: structure enough for B_PRED, shallow enough to quantize away.
+    ///
+    /// Getting a macroblock that is *both* B_PRED and skipped needs two things that pull against
+    /// each other -- structure a whole-block mode predicts badly, and a residual that vanishes at
+    /// a coarse quantizer. `detailed` is too contrasty (its residual survives even at q=127) and
+    /// flat content is too plain (a whole-block mode wins, so B_PRED is never chosen). Stepping
+    /// the value every four pixels sits between the two.
+    fn stepped(width: u32, height: u32) -> Yuv420 {
+        let (w, h) = (width as usize, height as usize);
+        let (cw, ch) = (
+            Yuv420::chroma_width(width) as usize,
+            Yuv420::chroma_height(height) as usize,
+        );
+        let y = (0..w * h)
+            .map(|i| {
+                let (x, yy) = (i % w, i / w);
+                (100 + (x / 4 + yy / 4) % 8 * 2) as u8
+            })
+            .collect();
+        Yuv420::new(width, height, y, vec![128; cw * ch], vec![128; cw * ch]).unwrap()
+    }
+
     /// Builds B_PRED-favorable content: each 4×4 region carries a different gradient direction, so a
     /// single whole-block mode predicts the macroblock poorly but per-subblock modes do not.
     fn detailed(width: u32, height: u32) -> Yuv420 {
@@ -1683,7 +1747,7 @@ mod tests {
     /// genuinely exercised (not merely available).
     /// Re-reads partition 0 (modes) and returns `(B_PRED macroblocks, skipped macroblocks)`, to
     /// confirm those paths are genuinely exercised.
-    fn mode_stats(data: &[u8]) -> (usize, usize) {
+    fn mode_stats(data: &[u8]) -> Modes {
         let chunk = header::read_uncompressed_chunk(data).unwrap();
         let part0_end = UNCOMPRESSED_CHUNK_LEN + chunk.first_partition_size as usize;
         let mut modes = BoolDecoder::new(&data[UNCOMPRESSED_CHUNK_LEN..part0_end]);
@@ -1691,20 +1755,24 @@ mod tests {
         let mb_cols = (chunk.width as usize).div_ceil(16);
         let mb_rows = (chunk.height as usize).div_ceil(16);
         let mut above_bmodes = vec![[B_DC_PRED; 4]; mb_cols];
-        let (mut bpred, mut skipped) = (0, 0);
+        let (mut bpred, mut skipped, mut bpred_skipped) = (0, 0, 0);
         for _ in 0..mb_rows {
             let mut left_bmodes = [B_DC_PRED; 4];
             for mb_x in 0..mb_cols {
                 if head.segmentation.update_map {
                     let _ = modes.get_tree(MB_SEGMENT_TREE, &head.segmentation.tree_probs);
                 }
-                if head.mb_no_skip_coeff && modes.get_bool(head.prob_skip_false) {
+                let is_skipped = head.mb_no_skip_coeff && modes.get_bool(head.prob_skip_false);
+                if is_skipped {
                     skipped += 1;
                 }
                 let y_mode = modes.get_tree(prediction::KF_YMODE_TREE, &prediction::KF_YMODE_PROB);
                 let is_bpred = y_mode == B_PRED;
                 let sub_modes = if is_bpred {
                     bpred += 1;
+                    if is_skipped {
+                        bpred_skipped += 1;
+                    }
                     read_bmodes(&mut modes, &above_bmodes[mb_x], &left_bmodes)
                 } else {
                     [B_DC_PRED; 16]
@@ -1713,7 +1781,49 @@ mod tests {
                 (above_bmodes[mb_x], left_bmodes) = bmode_propagation(is_bpred, y_mode, &sub_modes);
             }
         }
-        (bpred, skipped)
+        Modes {
+            bpred,
+            skipped,
+            bpred_skipped,
+        }
+    }
+
+    /// What `mode_stats` counts across a frame's macroblocks.
+    struct Modes {
+        bpred: usize,
+        skipped: usize,
+        /// Macroblocks that are *both* -- the pair `reconstruct_bpred_zero` exists for.
+        bpred_skipped: usize,
+    }
+
+    /// A macroblock that is B_PRED *and* skipped, which is what `reconstruct_bpred_zero` is for.
+    ///
+    /// That function could be replaced with `()` outright and nothing failed (#110): B_PRED is
+    /// covered, skipping is covered, but never the two together. Detailed content picks B_PRED,
+    /// and a coarse quantizer makes its residual vanish -- so the encoder reconstructs those
+    /// macroblocks from prediction alone, and if it does not, its recon stops matching the
+    /// decoder's.
+    ///
+    /// The combination is asserted directly, not just the two counts separately, so this cannot
+    /// quietly stop covering the pair if the encoder's mode decisions shift.
+    #[test]
+    fn a_skipped_bpred_macroblock_reconstructs_from_prediction_alone() {
+        let yuv = stepped(48, 48);
+        let (bits, recon) = encode_frame(&yuv, 110).expect("fixture fits the size fields");
+
+        let modes = mode_stats(&bits);
+        assert!(
+            modes.bpred_skipped > 0,
+            "need a macroblock that is both B_PRED and skipped, got bpred={} skipped={}",
+            modes.bpred,
+            modes.skipped
+        );
+
+        let decoded = decode_frame(&bits).expect("decode");
+        let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
+        assert_eq!(enc.y(), dec.y(), "luma mismatch on a skipped B_PRED frame");
+        assert_eq!(enc.u(), dec.u(), "u mismatch");
+        assert_eq!(enc.v(), dec.v(), "v mismatch");
     }
 
     #[test]
@@ -1722,7 +1832,7 @@ mod tests {
         let (bitstream, recon) =
             encode_frame(&yuv, 8).expect("fixture fits the partition-size fields");
         assert!(
-            mode_stats(&bitstream).0 > 0,
+            mode_stats(&bitstream).bpred > 0,
             "detailed content should select B_PRED for some macroblocks"
         );
         let decoded = decode_frame(&bitstream).expect("decode");
@@ -1751,7 +1861,7 @@ mod tests {
         .unwrap();
         let (bits, recon) = encode_frame(&yuv, 60).expect("fixture fits the partition-size fields");
         assert!(
-            mode_stats(&bits).1 > 0,
+            mode_stats(&bits).skipped > 0,
             "flat content should skip macroblocks"
         );
         let dec = decode_frame(&bits).expect("decode");
@@ -1787,6 +1897,76 @@ mod tests {
                 assert_encoder_recon_matches_decoder(w, h, q);
             }
         }
+    }
+
+    /// The recon-equals-decoder invariant with quantizer segmentation on.
+    ///
+    /// `assert_encoder_recon_matches_decoder` above runs through `encode_frame`, so it always
+    /// encodes with segmentation off and every macroblock on the frame quantizer. This runs the
+    /// same invariant with it on, over content whose macroblocks land in different segments.
+    ///
+    /// It does *not* catch a wrong per-macroblock segment lookup -- see
+    /// `segmented_stream_is_byte_stable` below for why nothing consistency-shaped can.
+    #[test]
+    fn encoder_recon_matches_decoder_with_segmentation() {
+        let opts = EncodeOptions {
+            segmented: true,
+            ..EncodeOptions::default()
+        };
+        // Sizes spanning more than one macroblock row, so `mb_y` is not always 0 -- at one row the
+        // row-stride arithmetic cannot be distinguished from anything.
+        for &(w, h) in &[(64u32, 48u32), (33, 41)] {
+            for &q in &[10u8, 60] {
+                let yuv = banded(w, h);
+                let (bits, recon) =
+                    encode_frame_filtered(&yuv, q, opts).expect("fixture fits the size fields");
+                let decoded = decode_frame(&bits).expect("decode");
+                let (enc, dec) = (recon.to_yuv420(), decoded.to_yuv420());
+                assert_eq!(enc.y(), dec.y(), "luma mismatch at {w}x{h} q{q} segmented");
+                assert_eq!(enc.u(), dec.u(), "u mismatch at {w}x{h} q{q} segmented");
+                assert_eq!(enc.v(), dec.v(), "v mismatch at {w}x{h} q{q} segmented");
+            }
+        }
+    }
+
+    /// The segmented stream is pinned byte for byte, because nothing else can see the segment
+    /// each macroblock was assigned.
+    ///
+    /// `segment_map[mb_y * mb_cols + mb_x]` can be indexed with `mb_y / mb_cols` instead and every
+    /// consistency check still passes (#110). The segment the encoder used is recorded in
+    /// `MbRecord::segment` and transmitted from there, so the stream stays internally coherent:
+    /// both decoders read the same declared map, agree with each other, and agree with the
+    /// encoder's reconstruction. The loop filter does read the true map, but this configuration
+    /// sets `filter_strength: [0; 4]`, so that cannot separate them either.
+    ///
+    /// What changes is only *which quantizer each macroblock got* -- a worse encode that is still
+    /// a valid one. That is the same blind spot the tiff codecs had, and it needs the same answer:
+    /// assert the output, not its self-consistency.
+    ///
+    /// Re-pinning is expected when the encoder legitimately improves; the commit that moves this
+    /// number says why. Same contract as `tests/default_bytes.rs`.
+    /// Pinned from the current encoder; see `segmented_stream_is_byte_stable`.
+    const SEGMENTED_GOLDEN_LEN: usize = 875;
+    /// FNV-1a over the same bytes.
+    const SEGMENTED_GOLDEN_DIGEST: u64 = 2_735_266_621_437_739_432;
+
+    #[test]
+    fn segmented_stream_is_byte_stable() {
+        let opts = EncodeOptions {
+            segmented: true,
+            ..EncodeOptions::default()
+        };
+        // Banded content over three macroblock rows, so the segment genuinely varies by row.
+        let (bits, _) = encode_frame_filtered(&banded(64, 64), 40, opts).expect("encode");
+
+        let digest = bits.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+        assert_eq!(
+            (bits.len(), digest),
+            (SEGMENTED_GOLDEN_LEN, SEGMENTED_GOLDEN_DIGEST),
+            "segmented encode drifted"
+        );
     }
 
     #[test]
@@ -2043,6 +2223,29 @@ mod tests {
             decode_frame(&bits),
             Err(error) if error.kind() == gamut_core::ErrorKind::InvalidInput
         ));
+    }
+
+    /// A partition size that needs its third byte.
+    ///
+    /// The size is 24-bit little-endian, and every fixture in the suite has partitions under
+    /// 64 KiB -- so the high byte was always zero, and dropping it entirely changed nothing
+    /// (#110). Asserted at the boundary from both sides: a buffer exactly long enough for a
+    /// 65536-byte partition is accepted, and one byte shorter is refused. A reader that ignores
+    /// the high byte computes a size of 0 and accepts both.
+    #[test]
+    fn a_partition_size_uses_its_high_byte() {
+        const SIZE: usize = 1 << 16;
+        // n = 2: three bytes of size table, then the first partition, then the second.
+        let mut data = vec![0x00u8, 0x00, 0x01]; // little-endian 0x010000 = 65536
+        data.resize(3 + SIZE, 0);
+
+        let parts = split_token_partitions(&data, 2).expect("exactly long enough");
+        assert_eq!(parts.len(), 2);
+
+        data.pop();
+        let err =
+            split_token_partitions(&data, 2).expect_err("one byte short of the declared size");
+        assert!(err.to_string().contains("exceeds frame"), "{err}");
     }
 
     #[test]

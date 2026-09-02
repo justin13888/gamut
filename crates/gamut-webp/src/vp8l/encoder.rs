@@ -598,11 +598,11 @@ fn tokenize(pixels: &[u32], cache_bits: u32, lz77: &Lz77Params) -> Vec<Token> {
     let n = pixels.len();
     let mut tokens = Vec::new();
     let mut refs = BackwardRefs::new(n, lz77.max_chain);
-    let mut cache = if cache_bits > 0 {
-        ColorCache::new(cache_bits).ok()
-    } else {
-        None
-    };
+    // No `cache_bits > 0` guard: `ColorCache::new` already rejects anything outside
+    // `MIN_CACHE_BITS..=MAX_CACHE_BITS`, and `MIN_CACHE_BITS` is 1, so zero yields `None` through
+    // `.ok()` exactly as the guard's `else` did. The guard reproduced a rejection the constructor
+    // already makes, which left `> 0` with an unkillable `>= 0` twin (#110).
+    let mut cache = ColorCache::new(cache_bits).ok();
 
     let mut i = 0;
     while i < n {
@@ -908,6 +908,66 @@ mod tests {
     fn round_trips_solid_color() {
         let img = vec![make_argb(0xff, 9, 9, 9); 17 * 9];
         round_trip(&img, 17, 9);
+    }
+
+    /// The entropy image's block-size exponent goes out as `prefix_bits - 2`.
+    ///
+    /// Driven straight rather than through `encode`, for the reason the lazy-matching test above
+    /// gives: plans race for the whole image, so whether one with a given `prefix_bits` ever wins
+    /// depends on the fixture. Here the plan is handed in.
+    ///
+    /// It also has to be a plan whose `prefix_bits` distinguishes `- 2` from `/ 2`, and most do
+    /// not: `4 - 2` and `4 / 2` are both 2, and `3 - 2` and `3 / 2` are both 1.
+    /// `DEFAULT_PREFIX_BITS` is 4, so every default encode writes the same field either way --
+    /// which is why this went untested. Only 2 and 5 separate them, and they appear on
+    /// higher-effort plans that reach this line only when they win the race (#110). 2 gives
+    /// 4-pixel blocks, so a 64x64 fixture has 256 of them and the signatures genuinely differ.
+    #[test]
+    fn the_entropy_image_block_size_is_written_as_prefix_bits_minus_two() {
+        use crate::vp8l::bit_io::BitReader;
+
+        // Four 32x32 quadrants of clearly different green, so blocks at `prefix_bits = 5`
+        // (32-pixel blocks) get different signatures and more than one group is assigned.
+        let (w, h) = (64u32, 64u32);
+        let pixels: Vec<u32> = (0..(w * h))
+            .map(|i| {
+                let (x, y) = (i % w, i / w);
+                let quadrant = (x / 32) + 2 * (y / 32);
+                make_argb(0xff, 0x10, (quadrant as u8) * 60 + (i % 7) as u8, 0x20)
+            })
+            .collect();
+
+        {
+            let prefix_bits = 2u32;
+            let plan = Vp8lPlan {
+                structure: Structure::Auto,
+                cache: CacheBits::Auto,
+                grouping: Grouping::Signature { prefix_bits },
+                lz77: Lz77Params {
+                    max_chain: 32,
+                    lazy: false,
+                },
+            };
+            let mut bw = BitWriter::new();
+            write_main_image(&mut bw, &pixels, w, &plan);
+            let bytes = bw.finish();
+
+            let mut r = BitReader::new(&bytes);
+            // The colour-cache header comes first: a flag, plus four bits of size when set.
+            if r.read_bits(1).expect("cache flag") == 1 {
+                r.read_bits(4).expect("cache size");
+            }
+            assert_eq!(
+                r.read_bits(1).expect("meta flag"),
+                1,
+                "this fixture must produce more than one entropy group at prefix_bits={prefix_bits}"
+            );
+            assert_eq!(
+                r.read_bits(3).expect("block-size exponent"),
+                prefix_bits - 2,
+                "the block size is written as prefix_bits - 2"
+            );
+        }
     }
 
     #[test]

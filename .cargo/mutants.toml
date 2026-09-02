@@ -540,6 +540,91 @@ exclude_re = [
     # replacement is byte-identical — provably equivalent, unkillable. Same shape and justification
     # as the AvifEncoder::lossless / WebpEncoder::lossless entries above.
     'replace JxlEncoder::lossless -> Self with Default::default\(\)',
+    # gamut-webp `vp8l::prefix::canonical_codes` writes `len > 0 && (len as usize) <=
+    # MAX_CODE_LENGTH` twice -- once counting into `bl_count`, once assigning from `next_code` --
+    # and relaxing either to `||` is equivalent. Neither is obvious, and both were checked by
+    # applying the mutant, not by argument alone.
+    #
+    # COUNTING GUARD. Under `||` a zero length is counted into `bl_count[0]`, which the next loop
+    # reads back at `bits == 1` (`code = (code + bl_count[bits - 1]) << 1`). Writing `z` for the
+    # number of unused symbols, `next_code[L]` then comes out as `correct + 2^L * z` at every
+    # length L -- each iteration shifts the extra `z` left once more. Every code is emitted through
+    # `reverse_bits(c, len)`, whose loop consumes only the low `len` bits, and `2^L * z` is
+    # congruent to 0 modulo `2^L`. The offset is exactly a multiple of the mask at every length, so
+    # it cannot be observed: identical codes for every input.
+    #
+    # ASSIGNMENT GUARD. Under `||` a zero-length symbol takes `c = next_code[0]` and writes
+    # `reverse_bits(c, 0)`, and that call's loop runs zero times and returns 0 -- which is what the
+    # slot already held, since `codes` is initialised to zeros. The `next_code[0] += 1` it also
+    # performs is dead: nothing reads `next_code[0]`, as the assignment loop only indexes lengths
+    # it just skipped and the count loop writes `next_code[1..]`.
+    #
+    # The `<= MAX_CODE_LENGTH` half is unobservable in both. A greater length would index out of
+    # bounds and panic, but lengths reach this function only from `build_length_limited_lengths`,
+    # which caps them at `max_len <= MAX_CODE_LENGTH` by construction. Both halves stay: they are
+    # what make the reasoning above safe rather than lucky.
+    #
+    # `len > 0` relaxed to `len >= 0` admits a zero length in exactly the same way, so both guards
+    # are equivalent under that mutation too, by the same two derivations. Checked by applying it.
+    # The neighbouring `== 0` and `< 0` mutations are NOT equivalent -- `== 0` inverts the guard
+    # and is caught -- so they stay in the survey, which is why these entries name `>=` rather
+    # than matching every comparison in the function.
+    'replace && with \|\| in canonical_codes',
+    'replace > with >= in canonical_codes',
+    # gamut-webp `BoolDecoder::get_bool` renormalisation: `self.range *= 2` under
+    # `while self.range < 128`. Reversed to `/= 2` the range shrinks toward zero, never reaches
+    # 128, and the loop never returns -- reportable only as a TIMEOUT.
+    #
+    # The statement is written `*= 2` rather than `<<= 1` precisely so this entry can name it. The
+    # `self.value <<= 1` on the line above is the same operator applied to a different field, and
+    # reversing *that* one is caught -- so a `<<=`-shaped exclusion would have hidden real
+    # coverage, and a line-anchored one stops matching as soon as anything above it moves.
+    'replace \*= with /= in BoolDecoder<.a>::get_bool',
+    # gamut-webp hang-on-mutation timeouts: two cursor advances that stop advancing.
+    #
+    # `decode_image_data` advances `i` with `i += 1` in three branches of one `while i < n` loop
+    # -- the literal, the copy and the cache paths. Mutated to `*= 1` each pins `i` (it is >= 1 by
+    # the time any of them runs a second time), so the loop never terminates and cargo-mutants can
+    # only ever report TIMEOUT. All three are the same statement in the same loop, which is why one
+    # entry covers them. The `-=` siblings are deliberately NOT excluded: they underflow at `i == 0`
+    # and panic, so they terminate and are caught.
+    #
+    # `code_length_count` counts down with `count -= 1` under `while count > 4 && ...`. Mutated to
+    # `/= 1` the count never changes and the loop spins. (`+=` grows it out of the array's range and
+    # panics, so that one is caught and stays.)
+    'replace \+= with \*= in decode_image_data',
+    # `tokenize` is the encoder's mirror of that loop: three `i += 1` in one `while i < n`, pinned
+    # the same way by `*= 1`. Its `-=` siblings terminate too -- they underflow and panic -- so they
+    # stay in the survey, and one of them is what caught this reasoning being checked rather than
+    # assumed.
+    'replace \+= with \*= in tokenize',
+    # `build_length_limited_lengths` raises the histogram's floor and rebuilds until the tree fits
+    # `max_len`. `if max_depth <= max_len { return }` is the loop's only exit, so reversing it to
+    # `>` means the loop returns exactly when it should keep going and spins when it should stop:
+    # once the tree fits, `count_min` saturates and every further pass produces the same
+    # already-flat tree. Non-terminating, reportable only as a TIMEOUT. It is the sole `<=` in the
+    # function, so this names it unambiguously.
+    'replace <= with > in build_length_limited_lengths',
+    # `BoolDecoder::get_tree_start` descends a tree until it reaches a leaf, which `i <= 0` marks.
+    # That test is the descent's only exit, so reversing it keeps the loop going at every leaf --
+    # confirmed by applying it against a 120s cap, which the suite exceeds rather than failing. It
+    # is the sole `<=` in the function.
+    "replace <= with > in BoolDecoder<.a>::get_tree_start",
+    'replace -= with /= in code_length_count',
+    # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
+    # `>= 4`. Reaching 3 would underflow the caller's `- 4` on a `usize` and panic, but the loop
+    # can never get there.
+    #
+    # `CODE_LENGTH_CODE_ORDER` begins `[17, 18, 0, 1, 2, ...]`, so every *length value* 1..=15 sits
+    # at index 3 or later. Any real prefix code has at least one symbol of nonzero length L, which
+    # puts a nonzero `cl_lengths[L]` at index >= 3, and the `== 0` half of the condition stops the
+    # loop there. The floor is never the binding condition: the zero check always is.
+    #
+    # The loop was lifted out of `write_description` to make this entry precise. That function has
+    # three `>` comparisons and the other two are *not* equivalent -- `symbol0 > 1` and the
+    # `rposition(|&l| l > 0)` that trims `max_symbol` are both real gaps -- so an exclusion named
+    # for `write_description` would have hidden them.
+    'replace > with >= in code_length_count',
     # gamut-jpeg quant::quality_scale — `if q < 50 { 5000 / q } else { 200 - 2 * q }` (the frozen
     # IJG quality mapping). The mapping is continuous at the branch point: at q == 50 — the only
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce

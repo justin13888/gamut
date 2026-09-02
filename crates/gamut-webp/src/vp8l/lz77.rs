@@ -202,12 +202,24 @@ pub fn value_to_prefix(value: u32) -> (u16, u8, u32) {
     let v = value - 1;
     let log = 31 - v.leading_zeros(); // floor(log2(v))
     let extra_bits = log - 1;
-    let (prefix_code, offset) = if v < (3u32 << extra_bits) {
-        (2 * extra_bits + 2, 1u32 << (extra_bits + 1))
+    let prefix_code = if v < (3u32 << extra_bits) {
+        2 * extra_bits + 2
     } else {
-        (2 * extra_bits + 3, 3u32 << extra_bits)
+        2 * extra_bits + 3
     };
-    (prefix_code as u16, extra_bits as u8, v - offset)
+    // The extra value is just the low `extra_bits` bits of `v`, so it is masked rather than
+    // computed as `v - offset`. The two offsets this used to subtract -- `2^(extra_bits+1)` and
+    // `3 * 2^extra_bits` -- are both multiples of `2^extra_bits`, and `v - offset` is always less
+    // than that, so the subtraction only ever cleared bits the mask clears anyway.
+    //
+    // Which is also why the old form could not be tested: any offset congruent to 0 modulo
+    // `2^extra_bits` gives identical output, so mutating one of the shifts changed nothing
+    // observable (#110). Masking says what is meant and has no such slack.
+    (
+        prefix_code as u16,
+        extra_bits as u8,
+        v & ((1u32 << extra_bits) - 1),
+    )
 }
 
 /// Maps a backward pixel `distance` to the smallest distance *code* for an image of `width` pixels:

@@ -248,7 +248,13 @@ impl<'a> BoolDecoder<'a> {
         };
         while self.range < 128 {
             self.value <<= 1;
-            self.range <<= 1;
+            // `*= 2`, not `<<= 1`. Identical on a `u32`, but it gives this statement a mutation
+            // description distinct from the `value` shift above it: reversing *this* one makes the
+            // loop non-terminating, so it has to be excluded, while reversing the `value` shift is
+            // caught and must stay in the survey. Same operator on both lines would force the
+            // exclusion to be anchored on a line number, which stops matching the moment anything
+            // above it moves (#110).
+            self.range *= 2;
             self.bit_count += 1;
             if self.bit_count == 8 {
                 self.bit_count = 0;
