@@ -598,11 +598,11 @@ fn tokenize(pixels: &[u32], cache_bits: u32, lz77: &Lz77Params) -> Vec<Token> {
     let n = pixels.len();
     let mut tokens = Vec::new();
     let mut refs = BackwardRefs::new(n, lz77.max_chain);
-    let mut cache = if cache_bits > 0 {
-        ColorCache::new(cache_bits).ok()
-    } else {
-        None
-    };
+    // No `cache_bits > 0` guard: `ColorCache::new` already rejects anything outside
+    // `MIN_CACHE_BITS..=MAX_CACHE_BITS`, and `MIN_CACHE_BITS` is 1, so zero yields `None` through
+    // `.ok()` exactly as the guard's `else` did. The guard reproduced a rejection the constructor
+    // already makes, which left `> 0` with an unkillable `>= 0` twin (#110).
+    let mut cache = ColorCache::new(cache_bits).ok();
 
     let mut i = 0;
     while i < n {
