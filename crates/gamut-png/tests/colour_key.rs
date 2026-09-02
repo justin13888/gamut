@@ -8,7 +8,7 @@
 
 mod common;
 
-use gamut_core::{Dimensions, EncodeImage, GrayAlpha8, ImageRef, Rgb8, Rgba8};
+use gamut_core::{Dimensions, EncodeImage, Gray8, GrayAlpha8, ImageRef, Rgb8, Rgba8};
 use gamut_png::{FilterStrategy, Level, PngEncoder, deconstruct};
 
 /// 128, not something smaller, and the reason is the whole design of the reduction.
@@ -28,6 +28,9 @@ const SIDE: u32 = 128;
 
 /// The 18 bytes a truecolour `tRNS` adds to an encoding: 4 length + 4 type + 6 payload + 4 CRC.
 const TRNS_RGB_CHUNK: usize = 18;
+
+/// The 14 bytes a greyscale `tRNS` adds: the same framing over a single 16-bit sample.
+const TRNS_GRAY_CHUNK: usize = 14;
 
 fn encode(samples: &[u8]) -> Vec<u8> {
     encode_at(SIDE, samples)
@@ -306,6 +309,69 @@ fn a_greyscale_colour_key_drops_the_alpha_channel_losslessly() {
         })
         .collect();
     assert_eq!(rgba, expected, "the grey colour key resolves losslessly");
+}
+
+/// The greyscale twin of [`a_colour_key_that_would_cost_bytes_is_declined`], and the only test
+/// that can see the `GrayKeyed` member of `write_reduced_or_native`'s `carries_chunks` set.
+///
+/// [`a_greyscale_colour_key_drops_the_alpha_channel_losslessly`] proves `GrayKeyed` is *reachable*,
+/// but its fixture wins at every size, so dropping `GrayKeyed` from `carries_chunks` -- emitting
+/// the keyed file with no race -- would not change its result. Losing needs a thinner saving: the
+/// `tRNS` costs a flat 14 bytes while dropping the alpha plane saves only one byte per pixel, so a
+/// mostly-opaque image is where the fixed cost wins. A quarter-width transparent border at 16x16
+/// measures 88 bytes as `GrayAlpha8` against 97 for the key, and the encoder must emit the 88.
+#[test]
+fn a_greyscale_colour_key_that_would_cost_bytes_is_declined() {
+    const SMALL: u32 = 16;
+    // Mostly opaque, so the alpha plane the key removes is cheap to keep. Grey 7 is the invisible
+    // colour and the visible ramp starts at 8, so the key is valid -- only its cost declines it.
+    let mut src = Vec::with_capacity((SMALL * SMALL * 2) as usize);
+    for y in 0..SMALL {
+        for x in 0..SMALL {
+            if x < SMALL / 4 || y < SMALL / 4 {
+                src.extend_from_slice(&[7, 0]);
+            } else {
+                src.extend_from_slice(&[8 + ((x + y) % 200) as u8, 255]);
+            }
+        }
+    }
+    let dims = Dimensions::new(SMALL, SMALL).expect("valid dimensions");
+    let encoder = || {
+        PngEncoder::new()
+            .with_compression(Level::Best)
+            .with_filter(FilterStrategy::BruteForce)
+    };
+    let mut chosen = Vec::new();
+    encoder()
+        .with_auto_reduce(true)
+        .encode_image(
+            ImageRef::<GrayAlpha8>::new(&src, dims).expect("buffer matches dimensions"),
+            &mut chosen,
+        )
+        .expect("encode");
+    assert_eq!(
+        libpng_oracle::decode(&chosen).color_type,
+        libpng_oracle::COLOR_GRAY_ALPHA,
+        "the key is valid at this size, so only its cost can have declined it"
+    );
+
+    // What the key would have cost: the grey plane alone through the same configuration, plus the
+    // flat `tRNS`. Reproducible from outside exactly as the truecolour twin does it.
+    let grey: Vec<u8> = src.as_chunks::<2>().0.iter().map(|px| px[0]).collect();
+    let mut keyed = Vec::new();
+    encoder()
+        .with_auto_reduce(false)
+        .encode_image(
+            ImageRef::<Gray8>::new(&grey, dims).expect("buffer matches dimensions"),
+            &mut keyed,
+        )
+        .expect("encode");
+    let keyed_len = keyed.len() + TRNS_GRAY_CHUNK;
+    assert!(
+        keyed_len > chosen.len(),
+        "the declined candidate must really be the larger one: keyed {keyed_len} vs GrayAlpha8 {}",
+        chosen.len()
+    );
 }
 
 /// The *losing* side of the race in `write_reduced_or_native`, which its `carries_chunks` set
