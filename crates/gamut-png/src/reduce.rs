@@ -437,8 +437,10 @@ fn ordered_palette(palette: &[[u8; 4]]) -> Vec<[u8; 4]> {
     let mut out = palette.to_vec();
     out.sort_by_key(|c| {
         let luma = 299 * u32::from(c[0]) + 587 * u32::from(c[1]) + 114 * u32::from(c[2]);
-        // Opaque entries sort after every transparent one; within each group, by alpha then luma.
-        (u32::from(c[3] == 255), u32::from(c[3]), luma)
+        // Alpha first, so every transparent entry sorts ahead of every opaque one -- 255 is the
+        // maximum, so ordering by alpha *is* "opaque last" and a separate `c[3] == 255` component
+        // ahead of it can never change the order this returns.
+        (u32::from(c[3]), luma)
     });
     out
 }
