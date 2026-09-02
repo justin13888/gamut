@@ -571,6 +571,20 @@ exclude_re = [
     # than matching every comparison in the function.
     'replace && with \|\| in canonical_codes',
     'replace > with >= in canonical_codes',
+    # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
+    # `>= 4`. Reaching 3 would underflow the caller's `- 4` on a `usize` and panic, but the loop
+    # can never get there.
+    #
+    # `CODE_LENGTH_CODE_ORDER` begins `[17, 18, 0, 1, 2, ...]`, so every *length value* 1..=15 sits
+    # at index 3 or later. Any real prefix code has at least one symbol of nonzero length L, which
+    # puts a nonzero `cl_lengths[L]` at index >= 3, and the `== 0` half of the condition stops the
+    # loop there. The floor is never the binding condition: the zero check always is.
+    #
+    # The loop was lifted out of `write_description` to make this entry precise. That function has
+    # three `>` comparisons and the other two are *not* equivalent -- `symbol0 > 1` and the
+    # `rposition(|&l| l > 0)` that trims `max_symbol` are both real gaps -- so an exclusion named
+    # for `write_description` would have hidden them.
+    'replace > with >= in code_length_count',
     # gamut-jpeg quant::quality_scale — `if q < 50 { 5000 / q } else { 200 - 2 * q }` (the frozen
     # IJG quality mapping). The mapping is continuous at the branch point: at q == 50 — the only
     # value where `<` and `<=` disagree — 5000/50 == 200 − 2·50 == 100, so both branches produce
