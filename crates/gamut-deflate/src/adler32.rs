@@ -22,7 +22,10 @@ pub fn adler32(seed: u32, data: &[u8]) -> u32 {
         s1 %= MOD_ADLER;
         s2 %= MOD_ADLER;
     }
-    (s2 << 16) | s1
+    // `s2 * 65536 + s1`, not `(s2 << 16) | s1`. Both sums are reduced mod 65521, so `s1` always
+    // fits the low 16 bits and the two lanes are disjoint -- which is exactly where `|`, `^` and
+    // `+` all agree, leaving the bitwise form with an unkillable twin (#110).
+    s2 * 65536 + s1
 }
 
 #[cfg(test)]

@@ -50,10 +50,13 @@ impl Matcher {
 
     /// Hashes the 3 bytes at `pos` (caller guarantees `pos + 3 <= data.len()`).
     fn hash(data: &[u8], pos: usize) -> usize {
-        let key = (u32::from(data[pos]) << 16)
-            | (u32::from(data[pos + 1]) << 8)
-            | u32::from(data[pos + 2]);
-        (key.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize & (HASH_SIZE - 1)
+        // The three bytes are a big-endian `u32`, so they are read as one. Spelling it
+        // `b0 << 16 | b1 << 8 | b2` puts each byte in its own lane, and disjoint lanes are where
+        // `|` and `^` agree -- two unkillable mutants for no gain (#110).
+        let key = u32::from_be_bytes([0, data[pos], data[pos + 1], data[pos + 2]]);
+        // The shift already leaves exactly `HASH_BITS` bits, so the former `& (HASH_SIZE - 1)` was
+        // a no-op -- and a no-op mask is unkillable by construction.
+        (key.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
     }
 
     /// Seeds the chains with every position in the window preceding `start`, so a parse beginning
