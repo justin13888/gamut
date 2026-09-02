@@ -311,6 +311,53 @@ fn full_stream_normalizes_a_sizeless_last_obu() {
     assert_eq!(out, expected);
 }
 
+/// A sizeless OBU carrying exactly one payload byte, which is what separates the header length
+/// from a plausible-looking wrong answer.
+///
+/// `full_stream` computes `header_len = raw.len() - payload.len()`. The neighbouring test uses a
+/// three-byte payload behind a one-byte header, where `4 - 3` and `4 / 3` are both 1 -- so the
+/// division mutant produced identical output and survived (#110). With a one-byte payload the two
+/// part company: `2 - 1` is 1 and `2 / 1` is 2, and the mutant copies the payload byte into the
+/// header and then emits it again.
+#[test]
+fn full_stream_normalizes_a_sizeless_obu_with_a_single_payload_byte() {
+    let c = Av1Config::parse(&[0x81, 1 << 5, 0x00, 0x00]).unwrap();
+    let mut payload = seq_obu(true);
+    payload.push(6 << 3); // frame OBU header, no size field, no extension
+    payload.push(0x10); // exactly one payload byte
+    let mut out = Vec::new();
+    c.full_stream(&payload, &mut out).unwrap();
+    let expected = concat(&[vec![0x12, 0x00], seq_obu(true), obu(6, &[0x10])]);
+    assert_eq!(out, expected);
+}
+
+/// A payload long enough to need a two-byte leb128 size, which is the only way to observe the
+/// continuation bit.
+///
+/// `write_leb128` sets it with `byte | 0x80`. Every OBU in the suite was short enough to encode
+/// its size in one byte, so the loop never took a second pass and the continuation bit was never
+/// written -- mutating that `|` to `&`, which would clear the byte entirely, changed nothing
+/// observable (#110).
+#[test]
+fn full_stream_writes_a_multi_byte_leb128_size() {
+    let c = Av1Config::parse(&[0x81, 1 << 5, 0x00, 0x00]).unwrap();
+    // 200 bytes: over the 127-byte single-byte leb128 limit, so the size encodes as 0xC8 0x01.
+    let body: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
+    let mut payload = seq_obu(true);
+    payload.push(6 << 3); // sizeless frame OBU, so full_stream must write the size itself
+    payload.extend_from_slice(&body);
+    let mut out = Vec::new();
+    c.full_stream(&payload, &mut out).unwrap();
+
+    let expected = concat(&[vec![0x12, 0x00], seq_obu(true), obu(6, &body)]);
+    assert_eq!(out, expected);
+    // Stated directly as well, so the intent survives a change to the `obu` helper.
+    assert!(
+        out.windows(2).any(|w| w == [0xC8, 0x01]),
+        "the 200-byte size must be encoded as a two-byte leb128"
+    );
+}
+
 // ---- validate_still_payload ------------------------------------------------------------------
 
 fn config() -> Av1Config {
