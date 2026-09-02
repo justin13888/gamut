@@ -809,6 +809,30 @@ fn single_value_black_and_white_levels_broadcast_on_decode() {
 }
 
 #[test]
+fn a_black_level_repeat_dim_that_is_not_two_values_is_rejected() {
+    // The tag is `(rows, cols)`, so any other count is malformed. Only the well-formed and absent
+    // cases were tested, so relaxing the `v.len() == 2` guard to `true` read the first two values
+    // and ignored the rest instead of refusing the file (#110).
+    use gamut_ifd::Value;
+
+    let rebuilt = rebuilt_with_raw_ifd(|ifd| {
+        ifd.set(
+            gamut_dng::tags::BLACK_LEVEL_REPEAT_DIM,
+            Value::Short(vec![1, 1, 1]),
+        );
+    });
+
+    let err = DngDecoder::new()
+        .decode(&rebuilt)
+        .expect_err("a three-value BlackLevelRepeatDim must be refused");
+    assert!(
+        err.to_string()
+            .contains("BlackLevelRepeatDim needs two values"),
+        "expected the repeat-dim count error, got: {err}"
+    );
+}
+
+#[test]
 fn a_white_level_count_that_is_neither_one_nor_per_plane_is_rejected() {
     // The decoder accepts WhiteLevel at exactly two counts -- one per sample plane, or a single
     // value it broadcasts -- and rejects everything else. Only the two accepted counts were

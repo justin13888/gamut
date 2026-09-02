@@ -843,6 +843,42 @@ mod tests {
     use crate::raw::cfa_color;
     use crate::values::CalibrationIlluminant;
 
+    /// Both halves of the WhiteLevel guard, and the width it picks when the value passes.
+    ///
+    /// `values.iter().any(|v| v.fract() != 0.0 || *v > u32::MAX)` was only ever fed values that
+    /// pass, so neither disjunct was exercised: relaxing the `||` to `&&` accepted a fractional
+    /// level, and narrowing the `>` to `==` accepted one past `u32::MAX` (#110). Each needs its
+    /// own case, because a value that trips one does not trip the other.
+    #[test]
+    fn a_white_level_must_be_a_whole_number_that_fits_a_long() {
+        let fractional = white_level_value(&[100.5]).expect_err("fractional is not storable");
+        assert!(
+            fractional.to_string().contains("must be integers"),
+            "{fractional}"
+        );
+
+        let too_large = white_level_value(&[f64::from(u32::MAX) + 1.0])
+            .expect_err("past u32::MAX is not storable");
+        assert!(
+            too_large.to_string().contains("must be integers"),
+            "{too_large}"
+        );
+    }
+
+    /// SHORT while the levels fit, LONG once one does not -- a size choice both DNG readers
+    /// accept, so only the file's length records which was taken.
+    #[test]
+    fn a_white_level_is_stored_short_only_while_it_fits() {
+        assert!(matches!(
+            white_level_value(&[f64::from(u16::MAX)]),
+            Ok(Value::Short(_))
+        ));
+        assert!(matches!(
+            white_level_value(&[f64::from(u16::MAX) + 1.0]),
+            Ok(Value::Long(_))
+        ));
+    }
+
     #[test]
     fn black_level_delta_rejects_each_invalid_class_independently() {
         for value in [
