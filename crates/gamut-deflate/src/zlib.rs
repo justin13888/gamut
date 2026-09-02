@@ -20,7 +20,9 @@ pub(crate) fn header(level: Level) -> [u8; 2] {
         Level::Best => 3,
     };
     let flg_base = flevel << 6; // FLEVEL in bits 6-7; FDICT (bit 5) and FCHECK (bits 0-4) start at 0.
-    let mut value = (CMF << 8) | flg_base;
+    // `CMF * 256 + flg_base`: `flg_base` is `flevel << 6` with `flevel <= 3`, so it never exceeds
+    // 0xC0 and cannot reach the high byte. Disjoint lanes make `|` and `^` indistinguishable (#110).
+    let mut value = CMF * 256 + flg_base;
     let rem = value % 31;
     if rem != 0 {
         // Setting the low FCHECK bits to (31 - rem) makes the header divisible by 31. The addition
