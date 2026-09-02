@@ -536,7 +536,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// A self-pointing sub-IFD is diagnosed as a cycle, not merely as unparseable.
     ///
     /// `map_audit_findings` translates the audit walk's findings into this crate's anomaly
@@ -619,6 +618,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn flags_strip_offset_count_mismatch() {
         // Two offsets but one byte count: a structural defect the deconstruct must surface.
         let mut ifd = image_ifd();
