@@ -553,10 +553,12 @@ fn an_unread_file_is_intact_but_not_verified() {
 }
 
 #[test]
-fn a_file_past_the_chunk_ceiling_is_refused() {
+fn the_chunk_ceiling_admits_exactly_its_own_count_and_refuses_one_more() {
     // The chunk count is chosen by the input -- a chunk costs 12 bytes and buys a segment -- so
-    // the walk caps it. Below the ceiling the same file reports normally, which is what keeps the
-    // cap from being a refusal to measure.
+    // the walk caps it. Asserted *at the boundary* rather than far past it: a file well over the
+    // ceiling is refused by `>`, `>=` and `==` alike, so only the exact count separates them.
+    // Eleven segments here: the signature, IHDR, eight fillers and IEND.
+    const SEGMENTS: usize = 11;
     let mut chunks = vec![common::chunk(b"IHDR", &common::ihdr_payload(1, 1, 8, 0, 0))];
     for _ in 0..8 {
         chunks.push(common::chunk(b"crUD", &[]));
@@ -564,16 +566,58 @@ fn a_file_past_the_chunk_ceiling_is_refused() {
     chunks.push(common::chunk(b"IEND", &[]));
     let png = common::png_from_chunks(&chunks);
 
-    let generous = DeconstructLimits::default().with_max_chunks(100);
-    let report = deconstruct_with_limits(&png, generous).expect("under the ceiling");
-    assert_eq!(report.segments.len(), 11, "signature plus ten chunks");
+    let exact = DeconstructLimits::default().with_max_chunks(SEGMENTS);
+    let report = deconstruct_with_limits(&png, exact)
+        .expect("a file of exactly the ceiling's size is admitted, not refused");
+    assert_eq!(report.segments.len(), SEGMENTS);
+    assert!(report.is_fully_classified(), "and it reports normally");
 
-    let stingy = DeconstructLimits::default().with_max_chunks(4);
-    let err = deconstruct_with_limits(&png, stingy)
-        .expect_err("past the ceiling the walk refuses rather than allocating");
+    let one_short = DeconstructLimits::default().with_max_chunks(SEGMENTS - 1);
+    let err = deconstruct_with_limits(&png, one_short)
+        .expect_err("one past the ceiling the walk refuses rather than allocating");
     assert!(
         err.to_string().contains("more chunks"),
         "the error names the ceiling it hit, got: {err}"
+    );
+}
+
+#[test]
+fn the_image_budget_is_the_callers_to_set() {
+    // `with_max_image_bytes` has to be observable, or the walk silently keeps the decoder's
+    // default and `deconstruct_with_limits` is `deconstruct` with extra steps. A one-byte budget
+    // turns an ordinary small file -- comfortably scanned under the default -- into a refusal.
+    let png = common::minimal_png();
+    assert!(
+        deconstruct(&png).expect("deconstruct").filters.is_counted(),
+        "the fixture is scanned under the default budget"
+    );
+
+    let stingy = DeconstructLimits::default().with_max_image_bytes(1);
+    let report = deconstruct_with_limits(&png, stingy).expect("a budget refusal is not an error");
+    assert_eq!(
+        report.filters,
+        FilterScan::Skipped(SkippedFilterScan::OverBudget),
+        "the caller's budget decides, not the decoder's default"
+    );
+}
+
+#[test]
+fn a_sound_file_is_both_read_and_verified() {
+    // The positive side of `is_counted` and `is_verified`. Without it both can be pinned to
+    // `false` by the negative cases alone -- an over-budget file satisfies every assertion they
+    // make -- and the verdict a gate depends on would be one that always says no.
+    let png = common::minimal_png();
+    let report = deconstruct(&png).expect("deconstruct");
+
+    assert!(
+        report.filters.is_counted(),
+        "a sound stream is read, not skipped"
+    );
+    assert!(report.filters.histogram().is_some(), "so it has counts");
+    assert!(report.is_intact(), "and nothing is held against it");
+    assert!(
+        report.is_verified(),
+        "which together with having been read is what verification means"
     );
 }
 
