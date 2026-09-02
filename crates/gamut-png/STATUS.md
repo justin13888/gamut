@@ -57,8 +57,13 @@ opts into narrowing. That is distinct from the encoder's *lossless* auto-reduce 
 Correctness was settled long before efficiency was measured. This section is the measured state:
 what the encoder achieves, what it costs, and — per axis — what it does not do yet.
 
-Everything here is produced by `cargo bench -p gamut-png` and gated by
-`tests/size_contract.rs`. One machine, so **read the ratios, not the absolute times**.
+Everything here is produced by `cargo bench -p gamut-png`. What is *gated* is narrower, and
+worth being precise about: `tests/size_contract.rs` asserts the size table -- every row including
+`tiny_rgb8` and both `+clean` columns -- as a ratio against libpng-9 at 128×128, and pins
+`with_transparent_cleanup` never costing bytes on any row. The throughput and per-heuristic tables
+below are **reported, not gated**: timings cannot fail a build without making it flaky, which is
+why CI runs the benches for compile-rot only ([#437]). One machine, so **read the ratios, not the
+absolute times**.
 
 ### Output size vs libpng at zlib level 9
 
@@ -114,7 +119,6 @@ selectable: eight images is a corpus, not a proof.
 | `filter_image` / None | 497.9 MB/s | 16.26 GB/s | 33× |
 | `filter_image` / `Fixed(Paeth)` | 277.1 MB/s | 1.202 GB/s | 4.3× |
 | `filter_image` / `MinSumAbs` | 46.7 MB/s | 265.8 MB/s | 5.7× |
-| `choose_min_sum_abs` | 68.0 MB/s | 308.4 MB/s | 4.5× |
 
 All safe Rust: `crc32fast` keeps its `unsafe` to itself, and the filter gains are structural
 (hoisting a loop-invariant branch, equal-length subslices, one `match` per row instead of per
@@ -128,7 +132,7 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
 | 3 | Smallest lawful representation | **done** — grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour. The key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. |
 | 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
-| 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in. Worth 30% on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. |
+| 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. |
 | 6 | Metadata hygiene | **no policy** — the encoder emits exactly what the caller set, and `gamut convert` drops metadata on the PNG path. [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
 | 8 | Effort / speed / determinism | Output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). Three independent knobs, no composed dial. No parallelism. [#484] |
@@ -154,6 +158,7 @@ way `FilterStrategy::BruteForce` already resolves filters — no tuned constant,
 either candidate alone. Only palette reductions pay for the second encode; greyscale, alpha-drop
 and 16→8 demotion add no chunks, so for them the raw comparison is sound.
 
+[#437]: https://github.com/visualcommons/gamut/issues/437
 [#478]: https://github.com/visualcommons/gamut/issues/478
 [#479]: https://github.com/visualcommons/gamut/issues/479
 [#480]: https://github.com/visualcommons/gamut/issues/480

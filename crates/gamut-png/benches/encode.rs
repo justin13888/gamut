@@ -13,6 +13,17 @@
 //! Counters report bytes of *source* pixels per second, so figures are comparable with the other
 //! codec suites. Run with `cargo bench -p gamut-png` (or `mise run bench`); add
 //! `--features test-support` for the per-stage rows.
+//!
+//! Intentionally tight: this measures **encoding**, on a generated 8-bit corpus, and nothing else.
+//! There is no decode axis -- `PngDecoder`'s cost is a separate question against a separate
+//! oracle, and folding the two into one aggregate would let a decode win mask an encode
+//! regression. There is no ancillary-chunk axis: a metadata chunk costs its own payload plus
+//! twelve bytes of framing, and the one piece of real work in the compressed ones (`iCCP`,
+//! `zTXt`) is a `gamut-deflate` call that `gamut-deflate`'s own suite already measures -- none of
+//! it is decided by the encoder's pixel path. There is no interlace axis because there is nothing
+//! to measure: `ihdr::write` always emits interlace method 0, and Adam7 is a decode-side feature
+//! here. What is left -- compression level, filter strategy, auto-reduce, and the corpus itself --
+//! are the four axes the encoder actually chooses between.
 
 use divan::counter::BytesCount;
 use divan::{Bencher, black_box};
