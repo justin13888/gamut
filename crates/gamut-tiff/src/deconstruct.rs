@@ -537,6 +537,88 @@ mod tests {
     }
 
     #[test]
+    /// A self-pointing sub-IFD is diagnosed as a cycle, not merely as unparseable.
+    ///
+    /// `map_audit_findings` translates the audit walk's findings into this crate's anomaly
+    /// taxonomy, and until these three tests nothing produced an `AuditFinding` at all -- the
+    /// whole function could be replaced with `()` and the suite stayed green (#110, #490). The
+    /// detail string is asserted rather than the variant, because deleting the `Cycle` arm falls
+    /// through to the generic "could not be parsed" and stays an `Anomaly::Structure` either way.
+    #[test]
+    fn diagnoses_a_sub_ifd_cycle() {
+        // Root @8 points at the child @26, whose own SubIFDs pointer aims back at 26.
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, //
+            0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, //
+            0x01, 0x00, 0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let report = deconstruct(data).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure { detail, severity: Severity::Error, .. }
+                    if detail.contains("possible cycle")
+            )),
+            "{report:?}"
+        );
+    }
+
+    /// A sub-IFD carrying a next-IFD chain is out of spec, and only a warning.
+    #[test]
+    fn diagnoses_a_chained_sub_ifd() {
+        let data: &[u8] = &[
+            b'I', b'I', 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, // header, IFD0 @ 8
+            0x01, 0x00, //
+            0x4a, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1a, 0x00, 0x00,
+            0x00, // 330 -> 26
+            0x00, 0x00, 0x00, 0x00, //
+            0x01, 0x00, // child A @ 26
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, //
+            0x2c, 0x00, 0x00, 0x00, // next = 44, out of spec for a sub-IFD
+            0x01, 0x00, // child B @ 44
+            0x00, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, //
+            0x00, 0x00, 0x00, 0x00,
+        ];
+        let report = deconstruct(data).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure { detail, severity: Severity::Warning, .. }
+                    if detail.contains("next-IFD chain")
+            )),
+            "{report:?}"
+        );
+    }
+
+    /// Nesting past the audit's depth guard is diagnosed as too deep, not as a parse failure.
+    #[test]
+    fn diagnoses_sub_ifd_nesting_that_is_too_deep() {
+        let mut ifd = Ifd::new();
+        ifd.set(tags::IMAGE_WIDTH, Value::Short(vec![1]));
+        for _ in 0..20 {
+            let mut parent = Ifd::new();
+            parent.set_sub_ifd(tags::SUB_IFDS, vec![ifd]);
+            ifd = parent;
+        }
+        let bytes = gamut_ifd::write(&gamut_ifd::TiffFile {
+            order: ByteOrder::LittleEndian,
+            variant: Variant::Classic,
+            ifds: vec![ifd],
+        })
+        .expect("write");
+        let report = deconstruct(&bytes).expect("deconstruct");
+        assert!(
+            report.anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::Structure { detail, severity: Severity::Error, .. }
+                    if detail.contains("too deep")
+            )),
+            "{report:?}"
+        );
+    }
+
     fn flags_strip_offset_count_mismatch() {
         // Two offsets but one byte count: a structural defect the deconstruct must surface.
         let mut ifd = image_ifd();
