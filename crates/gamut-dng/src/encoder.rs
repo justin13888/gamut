@@ -865,6 +865,27 @@ mod tests {
         );
     }
 
+    /// The RATIONAL grid's upper bound is exclusive, and has to be.
+    ///
+    /// A fractional black level is stored as `(v * 65536).round() / 65536`, so a value of exactly
+    /// 65536 would need a numerator of 2^32 -- one past `u32::MAX`, where the `as u32` cast
+    /// wraps. Relaxing `<` to `<=` admits precisely the value whose numerator does not fit (#110).
+    ///
+    /// Reaching that arm needs a *mixed* slice: 65536 on its own is integral and is taken by the
+    /// LONG arm above, so it never gets here. The 0.5 is what forces the fractional path.
+    #[test]
+    fn a_fractional_black_level_must_stay_below_the_rational_grid() {
+        let err = black_level_value(&[f64::from(LEVEL_DEN), 0.5])
+            .expect_err("65536 has no numerator on this grid");
+        assert!(err.to_string().contains("must be below 65536"), "{err}");
+
+        // One below the bound, with the same fractional companion, is stored.
+        assert!(matches!(
+            black_level_value(&[f64::from(LEVEL_DEN) - 1.0, 0.5]),
+            Ok(Value::Rational(_))
+        ));
+    }
+
     /// The same boundary for `BlackLevel`, which has its own copy of the comparison.
     #[test]
     fn a_black_level_is_stored_short_only_while_it_fits() {
