@@ -605,6 +605,11 @@ exclude_re = [
     # already-flat tree. Non-terminating, reportable only as a TIMEOUT. It is the sole `<=` in the
     # function, so this names it unambiguously.
     'replace <= with > in build_length_limited_lengths',
+    # `BoolDecoder::get_tree_start` descends a tree until it reaches a leaf, which `i <= 0` marks.
+    # That test is the descent's only exit, so reversing it keeps the loop going at every leaf --
+    # confirmed by applying it against a 120s cap, which the suite exceeds rather than failing. It
+    # is the sole `<=` in the function.
+    "replace <= with > in BoolDecoder<.a>::get_tree_start",
     'replace -= with /= in code_length_count',
     # gamut-webp `vp8l::prefix::code_length_count`: the trim's floor, `count > 4`, relaxed to
     # `>= 4`. Reaching 3 would underflow the caller's `- 4` on a `usize` and panic, but the loop
