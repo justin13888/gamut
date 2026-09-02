@@ -145,6 +145,14 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
             );
         };
         out.extend_from_slice(&entry);
+        // Stop once the strip is satisfied. The trailing bytes are dropped by the `truncate`
+        // below either way, so this changes no output -- what it changes is that a hostile stream
+        // can no longer make the decoder run, and grow its string table, past the size the IFD
+        // declared. Without it a stream that never sends EndOfInformation is bounded only by its
+        // own length.
+        if out.len() >= expected {
+            break;
+        }
 
         if let Some(p) = prev {
             let mut s = table[p as usize].clone();
