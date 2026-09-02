@@ -375,7 +375,12 @@ pub fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
 #[must_use]
 pub fn build_length_limited_lengths(histogram: &[u32], max_len: u8) -> Vec<u8> {
     let n = histogram.len();
-    let used = histogram.iter().filter(|&&h| h > 0).count();
+    // `h != 0`, not `h > 0`: identical on a `u32`, but `>` carries a `>=` variant that is true
+    // for every count, and the only thing that changes is whether the two degenerate early returns
+    // below are taken -- and the general path produces exactly what they do, so nothing could tell
+    // the difference (#110). `!=` has no such variant: its `==` mutant counts the unused symbols
+    // and breaks every dense histogram.
+    let used = histogram.iter().filter(|&&h| h != 0).count();
     if used == 0 {
         return vec![0u8; n];
     }
@@ -1051,6 +1056,29 @@ mod tests {
         // Still a usable, complete code.
         let stream: Vec<usize> = (0..64).collect();
         assert_code_round_trips(&hist, &stream, 15);
+    }
+
+    /// The two degenerate histograms `build_length_limited_lengths` documents.
+    ///
+    /// Its contract names both -- "an empty histogram yields all-zero lengths; a single nonzero
+    /// symbol gets length 1" -- and every fixture fed it a dense histogram instead, so the two
+    /// early returns that implement them went unexercised. Counting used symbols with `h >= 0`
+    /// instead of `h > 0` makes `used` the whole alphabet, which skips both (#110).
+    #[test]
+    fn degenerate_histograms_get_the_documented_lengths() {
+        // Nothing used: no code at all.
+        assert_eq!(build_length_limited_lengths(&[0, 0, 0, 0], 15), vec![0; 4]);
+
+        // One symbol used: it takes a single bit, and nothing else takes any.
+        assert_eq!(
+            build_length_limited_lengths(&[0, 0, 9, 0], 15),
+            vec![0, 0, 1, 0]
+        );
+        // Wherever it sits in the alphabet.
+        assert_eq!(
+            build_length_limited_lengths(&[5, 0, 0, 0], 15),
+            vec![1, 0, 0, 0]
+        );
     }
 
     #[test]
