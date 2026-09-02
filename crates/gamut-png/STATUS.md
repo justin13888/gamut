@@ -81,7 +81,10 @@ absolute times**.
 | `flat_rgba8` | 262 144 | 821 | 103 | 103 | 664 | **−84.5%** | 0.013 |
 | `tiny_rgb8` (16×16) | 768 | 136 | 119 | 119 | 138 | **−13.8%** | 3.719 |
 
-gamut is smaller than libpng-9 on every row. The margin is thin where no reduction applies
+gamut is smaller than libpng-9 on every row, though `noise_rgb8` is a 0.2% near-tie rather than a
+win: incompressible input leaves both encoders emitting stored blocks, so that row's budget is the
+one deliberately set above parity (1.02) and it is excluded from the win assertion. The margin is
+thin where no reduction applies
 (`gradient`, `tiny`) or nothing is compressible (`noise`), and large where a lawful
 representation change is available that libpng does not attempt.
 
@@ -143,20 +146,27 @@ byte) plus removing a sixth redundant filter pass per scanline.
 `reduce::analyze8` chooses by comparing **raw** sizes, which does not predict compressed size when
 one candidate's bytes are incompressible and the other's are not. A palette carries a `PLTE` (and
 often `tRNS`) that DEFLATE cannot touch, while the pixels it replaces may compress by two orders of
-magnitude. Measured on `palette64_rgba8`, where `PLTE` + `tRNS` is a flat 273 bytes:
+magnitude. Measured on `palette64_rgba8`, whose palette candidate carries a flat 224 bytes of
+`PLTE` + `tRNS` (192 + 8 payload, 24 framing) at every size — the fixture's colour count does not
+depend on its side:
 
-| side | gamut | IDAT | PLTE+tRNS | libpng-9 |
+| side | emitted | IDAT | PLTE+tRNS emitted | libpng-9 |
 | --- | --- | --- | --- | --- |
-| 128 | 451 | 121 | 273 | 405 |
-| 160 | 511 | 181 | 273 | 572 |
-| 192 | 564 | 234 | 273 | 707 |
-| 256 | 715 | 385 | 273 | 1 102 |
+| 128 | 364 | 307 | — palette declined | 405 |
+| 160 | 465 | 408 | — palette declined | 572 |
+| 192 | 563 | 506 | — palette declined | 707 |
+| 256 | 726 | 445 | 224 | 1 102 |
 
-The estimate sees 16 664 against 65 536 and picks the palette by 4×; the finished files cross over
-near 160×160. So `write_reduced_or_native` encodes both candidates and keeps the smaller, the same
-way `FilterStrategy::BruteForce` already resolves filters — no tuned constant, and never worse than
-either candidate alone. Only palette reductions pay for the second encode; greyscale, alpha-drop
-and 16→8 demotion add no chunks, so for them the raw comparison is sound.
+The raw-size estimate sees 16 664 against 65 536 and picks the palette by 4× **at every one of
+these sizes**. The finished files disagree: the palette's 224 fixed bytes are incompressible while
+the pixels they replace compress by two orders of magnitude, so indexing only pays once the image
+is large enough to amortise them — the crossover sits between 192 and 256. So
+`write_reduced_or_native` encodes both candidates and keeps the smaller, the same way
+`FilterStrategy::BruteForce` already resolves filters — no tuned constant, and never worse than
+either candidate alone. The three declined rows are the evidence: had the estimate been trusted,
+each would have carried a palette and been larger. Only palette reductions pay for the second
+encode; greyscale, alpha-drop and 16→8 demotion add no chunks, so for them the raw comparison is
+sound.
 
 [#437]: https://github.com/visualcommons/gamut/issues/437
 [#478]: https://github.com/visualcommons/gamut/issues/478

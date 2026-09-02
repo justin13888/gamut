@@ -147,10 +147,11 @@ const BUDGETS: &[Budget] = &[
         max_ratio: 0.95,
         measured: 0.899,
         why: "64 colours over two alpha levels. The palette encoding wins outright at 256x256 \
-              but loses at this size, because PLTE + tRNS is a flat 273 incompressible bytes \
+              but loses at this size, because PLTE + tRNS is a flat 224 incompressible bytes \
               against pixels that compress ~160x; `write_reduced_or_native` encodes both and \
-              keeps the smaller, so the row measures whichever is actually better here. The race \
-              is what makes the outcome stable enough to budget below 1.00.",
+              keeps the smaller, so the row measures whichever is actually better here -- at \
+              128x128 that is the unreduced encoding, which carries no PLTE at all. The race is \
+              what makes the outcome stable enough to budget below 1.00.",
     },
     Budget {
         name: "palette64_rgba8 +clean",
@@ -303,11 +304,18 @@ fn gamut_beats_libpng9_where_it_claims_to() {
 }
 
 #[test]
-fn the_deflate_stage_accounts_for_the_residual_gap() {
-    // The attribution test, and the reason `deconstruct` is a dependency of this file. Where both
-    // encoders land on the same colour type and depth, the filtered stream is identical by
-    // construction, so the ratio of the *compressed* streams isolates DEFLATE from filtering and
-    // from the colour-type choice. Only the rows where no reduction applies can say this.
+fn the_codestream_is_no_larger_where_both_encoders_choose_the_same_representation() {
+    // The reason `deconstruct` is a dependency of this file: it reads the IDAT total out of both
+    // encoders' output, so the comparison is over codestreams rather than whole files, with
+    // framing and chunk differences excluded.
+    //
+    // This is deliberately *not* an attribution to DEFLATE. Landing on the same colour type and
+    // depth makes `filtered_len` identical -- it is a function of IHDR alone -- but not the
+    // filtered *bytes*: gamut runs `BruteForce` (MinBigrams wins `gradient_rgb8`) while libpng
+    // runs its own adaptive heuristic, so the two compress different inputs. What is asserted is
+    // the combined result of filtering and DEFLATE, which is what the size claim rests on anyway;
+    // isolating the DEFLATE stage would mean re-filtering libpng's pixels with gamut's own
+    // choices first. Only the rows where no reduction applies can be compared at all.
     for name in ["gradient_rgb8", "photo_rgb8"] {
         let (samples, channels) = pixels(name, SIDE);
         let ours = gamut_best(&samples, channels, SIDE, false);
@@ -328,7 +336,7 @@ fn the_deflate_stage_accounts_for_the_residual_gap() {
         );
         assert!(
             a.idat_compressed <= b.idat_compressed,
-            "{name}: gamut's DEFLATE stage produced {} bytes against libpng-9's {}",
+            "{name}: gamut's codestream is {} bytes against libpng-9's {}",
             a.idat_compressed,
             b.idat_compressed,
         );

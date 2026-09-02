@@ -11,8 +11,9 @@
 //! the colour-type choice, or to DEFLATE.
 //!
 //! Counters report bytes of *source* pixels per second, so figures are comparable with the other
-//! codec suites. Run with `cargo bench -p gamut-png` (or `mise run bench`); add
-//! `--features test-support` for the per-stage rows.
+//! codec suites. Run with `cargo bench -p gamut-png` (or `mise run bench`). The per-stage rows
+//! need this crate's `test-support` feature, which its own dev-dependency on itself already
+//! enables for every test and bench build -- there is no flag to pass.
 //!
 //! Intentionally tight: this measures **encoding**, on a generated 8-bit corpus, and nothing else.
 //! There is no decode axis -- `PngDecoder`'s cost is a separate question against a separate
@@ -275,7 +276,11 @@ fn print_heuristic_table() {
             of(FilterStrategy::MinBigrams),
         );
         let best = msa.min(ent).min(big);
-        let winner = if best == msa {
+        // A three-way tie is a real outcome on incompressible input, and naming the first
+        // heuristic the winner there would record a preference the measurement did not find.
+        let winner = if msa == ent && ent == big {
+            "tie"
+        } else if best == msa {
             "MinSumAbs"
         } else if best == ent {
             "Entropy"
