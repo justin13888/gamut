@@ -296,6 +296,41 @@ mod tests {
         assert_eq!(linear.samples, vec![1.0f32, 0.0]);
     }
 
+    /// The maximum black is found per plane across the repeat pattern's cells.
+    ///
+    /// `levels.black()[(j * cols + k) * spp + plane]` walks the pattern to find each plane's
+    /// largest black, which sets that plane's scale. With one sample per pixel `* spp` and `/ spp`
+    /// agree, and with a 1x1 pattern the index is `plane` either way -- so the fixtures had
+    /// covered multiple planes and multiple cells, but never both at once, and the mutant went
+    /// unnoticed (#110).
+    ///
+    /// Here two planes meet a 1x2 pattern. Plane 0's blacks are 0 and 40, so its range is
+    /// `140 - 40`; dividing instead collapses both cells onto index 0, finds a maximum black of 0,
+    /// and stretches the range to the full 140.
+    #[test]
+    fn the_maximum_black_is_found_per_plane_across_the_pattern() {
+        let raw = RawImage::new_linear_raw(dims(2, 1), 8, 2, vec![50u16, 50, 50, 50])
+            .unwrap()
+            .with_levels(
+                RawLevels::new(2, (1, 2), vec![0.0, 0.0, 40.0, 0.0], vec![140.0, 100.0]).unwrap(),
+            )
+            .unwrap();
+        let linear = raw.to_linear().expect("linearize");
+
+        // Plane 0 scales by 1/(140 - 40); plane 1 by 1/(100 - 0).
+        let p0 = |stored: f64, black: f64| ((stored - black) / 100.0) as f32;
+        let p1 = |stored: f64, black: f64| ((stored - black) / 100.0) as f32;
+        assert_eq!(
+            linear.samples,
+            vec![
+                p0(50.0, 0.0),  // pixel 0, plane 0: cell (0,0) black 0
+                p1(50.0, 0.0),  // pixel 0, plane 1: cell (0,0) black 0
+                p0(50.0, 40.0), // pixel 1, plane 0: cell (0,1) black 40
+                p1(50.0, 0.0),  // pixel 1, plane 1: cell (0,1) black 0
+            ]
+        );
+    }
+
     /// Each plane of a LinearRaw image scales by its own white level.
     #[test]
     fn per_plane_whites_scale_independently() {
