@@ -104,7 +104,10 @@ impl Matcher {
                 break; // out of window; chain only gets older from here
             }
             // Prune: a candidate can only win if it matches at the byte just past the current best.
-            if best_len < max_len && data[c + best_len] == data[pos + best_len] {
+            // `best_len < max_len` holds throughout the loop -- it starts at `MIN_MATCH - 1 < 3 <=
+            // max_len`, and a match that reaches `max_len` breaks out below before it is stored --
+            // so both reads stay inside the two `max_len` windows compared next.
+            if data[c + best_len] == data[pos + best_len] {
                 // `c < pos`, so both windows end at or before `limit <= data.len()`.
                 let len = common_prefix_len(&data[c..c + max_len], &data[pos..pos + max_len]);
                 if len > best_len {
