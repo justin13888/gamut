@@ -8,7 +8,7 @@ use gamut_core::{
 };
 use gamut_deflate::{DeflateEncoder, Level};
 
-use crate::ancillary::{Ancillary, PhysicalUnit, SrgbIntent};
+use crate::ancillary::{Ancillary, PhysicalUnit, SrgbIntent, WrittenHeader};
 use crate::backend::{IdatDeflater, IdatInfo, Registry, run_deflaters};
 use crate::chunk::{self, SIGNATURE};
 use crate::color::ColorType;
@@ -342,8 +342,11 @@ impl PngEncoder {
         self.write_png(
             (dims.width, dims.height),
             sample_bytes,
-            ColorType::Indexed,
-            depth,
+            WrittenHeader {
+                color: ColorType::Indexed,
+                bit_depth: depth,
+                plte: Some(&plte),
+            },
             |out| {
                 chunk::write_chunk(out, *b"PLTE", &plte);
                 if let Some(alpha) = trns {
@@ -365,8 +368,7 @@ impl PngEncoder {
         self.write_png(
             (dims.width, dims.height),
             image.as_samples(),
-            color,
-            8,
+            WrittenHeader::new(color, 8),
             |_| {},
             out,
         )
@@ -391,11 +393,25 @@ impl PngEncoder {
             return self.write_reduced_or_native(
                 dims,
                 reduced,
-                |o| self.write_png((dims.width, dims.height), samples, color, 8, |_| {}, o),
+                |o| {
+                    self.write_png(
+                        (dims.width, dims.height),
+                        samples,
+                        WrittenHeader::new(color, 8),
+                        |_| {},
+                        o,
+                    )
+                },
                 out,
             );
         }
-        self.write_png((dims.width, dims.height), samples, color, 8, |_| {}, out)
+        self.write_png(
+            (dims.width, dims.height),
+            samples,
+            WrittenHeader::new(color, 8),
+            |_| {},
+            out,
+        )
     }
 
     /// The 16-bit twin of [`encode_alpha8`](Self::encode_alpha8).
@@ -489,21 +505,30 @@ impl PngEncoder {
         for &sample in samples {
             bytes.extend_from_slice(&sample.to_be_bytes());
         }
-        self.write_png((dims.width, dims.height), &bytes, color, 16, |_| {}, out)
+        self.write_png(
+            (dims.width, dims.height),
+            &bytes,
+            WrittenHeader::new(color, 16),
+            |_| {},
+            out,
+        )
     }
 
     /// Shared back end: signature → IHDR → `pre_idat` chunks (e.g. PLTE/tRNS) → filtered +
     /// DEFLATE-compressed scanlines as IDAT(s) → IEND. `sample_bytes` is the image in PNG storage
-    /// order; the stride is derived from `color` and `bit_depth`.
+    /// order; the stride is derived from `written`'s colour type and bit depth. `written` also
+    /// carries the palette `pre_idat` writes for an indexed image, which `bKGD` is resolved
+    /// against: the ancillary chunks whose shape is the colour type are emitted for the header
+    /// written here, not the one the caller set them for (see [`crate::ancillary`]).
     fn write_png<F: FnOnce(&mut Vec<u8>)>(
         &self,
         (width, height): (u32, u32),
         sample_bytes: &[u8],
-        color: ColorType,
-        bit_depth: u8,
+        written: WrittenHeader<'_>,
         pre_idat: F,
         out: &mut Vec<u8>,
     ) -> Result<usize> {
+        let (color, bit_depth) = (written.color, written.bit_depth);
         // Stride in bytes per pixel (≥1, even for sub-byte depths) and the padded row length.
         let bits_per_pixel = color.channels() * bit_depth as usize;
         let bpp = bits_per_pixel.div_ceil(8).max(1);
@@ -512,9 +537,11 @@ impl PngEncoder {
         let start = out.len();
         out.extend_from_slice(&SIGNATURE);
         ihdr::write(out, width, height, bit_depth, color);
-        self.ancillary.write_pre_plte(out, self.effort); // colour-space chunks precede PLTE
+        // Colour-space chunks precede PLTE.
+        self.ancillary.write_pre_plte(out, self.effort, written);
         pre_idat(out); // PLTE + tRNS (indexed only)
-        self.ancillary.write_post_plte(out, self.effort); // background / physical / timing / text
+        // Background / physical / timing / text.
+        self.ancillary.write_post_plte(out, self.effort, written);
 
         let idat = self.compress_scanlines(
             sample_bytes,
@@ -644,21 +671,34 @@ impl PngEncoder {
                 } else {
                     &samples
                 };
-                self.write_png(wh, sample_bytes, ColorType::Grayscale, depth, |_| {}, out)
+                self.write_png(
+                    wh,
+                    sample_bytes,
+                    WrittenHeader::new(ColorType::Grayscale, depth),
+                    |_| {},
+                    out,
+                )
             }
-            Reduced::GrayAlpha8(samples) => {
-                self.write_png(wh, &samples, ColorType::GrayscaleAlpha, 8, |_| {}, out)
-            }
-            Reduced::Rgb8(samples) => {
-                self.write_png(wh, &samples, ColorType::Truecolor, 8, |_| {}, out)
-            }
+            Reduced::GrayAlpha8(samples) => self.write_png(
+                wh,
+                &samples,
+                WrittenHeader::new(ColorType::GrayscaleAlpha, 8),
+                |_| {},
+                out,
+            ),
+            Reduced::Rgb8(samples) => self.write_png(
+                wh,
+                &samples,
+                WrittenHeader::new(ColorType::Truecolor, 8),
+                |_| {},
+                out,
+            ),
             // §11.3.2.1: for truecolour, tRNS is three 16-bit big-endian samples naming the one
             // colour a decoder renders as fully transparent. At depth 8 the high byte is zero.
             Reduced::Rgb8Keyed { samples, key } => self.write_png(
                 wh,
                 &samples,
-                ColorType::Truecolor,
-                8,
+                WrittenHeader::new(ColorType::Truecolor, 8),
                 |out| {
                     let trns = [0, key[0], 0, key[1], 0, key[2]];
                     chunk::write_chunk(out, *b"tRNS", &trns);
@@ -669,23 +709,38 @@ impl PngEncoder {
             Reduced::GrayKeyed { samples, key } => self.write_png(
                 wh,
                 &samples,
-                ColorType::Grayscale,
-                8,
+                WrittenHeader::new(ColorType::Grayscale, 8),
                 |out| chunk::write_chunk(out, *b"tRNS", &[0, key]),
                 out,
             ),
-            Reduced::Rgba8(samples) => {
-                self.write_png(wh, &samples, ColorType::TruecolorAlpha, 8, |_| {}, out)
-            }
-            Reduced::Gray16Be(bytes) => {
-                self.write_png(wh, &bytes, ColorType::Grayscale, 16, |_| {}, out)
-            }
-            Reduced::GrayAlpha16Be(bytes) => {
-                self.write_png(wh, &bytes, ColorType::GrayscaleAlpha, 16, |_| {}, out)
-            }
-            Reduced::Rgb16Be(bytes) => {
-                self.write_png(wh, &bytes, ColorType::Truecolor, 16, |_| {}, out)
-            }
+            Reduced::Rgba8(samples) => self.write_png(
+                wh,
+                &samples,
+                WrittenHeader::new(ColorType::TruecolorAlpha, 8),
+                |_| {},
+                out,
+            ),
+            Reduced::Gray16Be(bytes) => self.write_png(
+                wh,
+                &bytes,
+                WrittenHeader::new(ColorType::Grayscale, 16),
+                |_| {},
+                out,
+            ),
+            Reduced::GrayAlpha16Be(bytes) => self.write_png(
+                wh,
+                &bytes,
+                WrittenHeader::new(ColorType::GrayscaleAlpha, 16),
+                |_| {},
+                out,
+            ),
+            Reduced::Rgb16Be(bytes) => self.write_png(
+                wh,
+                &bytes,
+                WrittenHeader::new(ColorType::Truecolor, 16),
+                |_| {},
+                out,
+            ),
             Reduced::Indexed {
                 depth,
                 indices,
@@ -707,8 +762,11 @@ impl PngEncoder {
                 self.write_png(
                     wh,
                     sample_bytes,
-                    ColorType::Indexed,
-                    depth,
+                    WrittenHeader {
+                        color: ColorType::Indexed,
+                        bit_depth: depth,
+                        plte: Some(&plte),
+                    },
                     |out| {
                         chunk::write_chunk(out, *b"PLTE", &plte);
                         if let Some(alpha) = &trns {
@@ -811,8 +869,7 @@ impl EncodeImage<Bilevel> for PngEncoder {
         self.write_png(
             (dims.width, dims.height),
             &packed,
-            ColorType::Grayscale,
-            1,
+            WrittenHeader::new(ColorType::Grayscale, 1),
             |_| {},
             out,
         )
@@ -950,32 +1007,35 @@ mod tests {
     /// bKGD's payload width is colour-type-specific (PNG 3rd ed. §11.3.5.1): two bytes for
     /// greyscale, one for indexed. Asserting the bytes rather than mere presence is what
     /// distinguishes the right builder from any of them.
+    ///
+    /// Each colour is one the written file can carry — a grey level inside the 8-bit depth, an
+    /// index inside the palette `encode_indexed8` writes — because a background the written
+    /// header cannot express is omitted rather than emitted for a reader to reject
+    /// (`ancillary::bkgd_for`), and that omission is pinned by its own tests.
     #[test]
     fn background_builders_reach_the_bkgd_chunk() {
         let gray = vec![0u8; 4 * 4];
         let img = ImageRef::<Gray8>::new(&gray, Dimensions::new(4, 4).unwrap()).unwrap();
         let mut png = Vec::new();
         PngEncoder::new()
-            .with_background_gray(0x1234)
+            .with_background_gray(0x34)
             .encode_image(img, &mut png)
             .unwrap();
         assert_eq!(
             find_chunk(&png, b"bKGD"),
-            Some(vec![0x12, 0x34]),
+            Some(vec![0x00, 0x34]),
             "greyscale bKGD is the 16-bit level, big-endian"
         );
 
         // Indexed: one byte, the palette index.
-        let mut rgb = Vec::new();
-        for i in 0..200u32 {
-            let c = (i % 32) as u8;
-            rgb.extend_from_slice(&[c, c.wrapping_add(70), 90]);
-        }
-        let img = ImageRef::<Rgb8>::new(&rgb, Dimensions::new(200, 1).unwrap()).unwrap();
+        let entries: Vec<[u8; 3]> = (0..8u8).map(|i| [i, i.wrapping_add(70), 90]).collect();
+        let palette = PngPalette::new(&entries).unwrap();
+        let indices: Vec<u8> = (0..200u8).map(|i| i % 8).collect();
+        let img = ImageRef::<Indexed8>::new(&indices, Dimensions::new(200, 1).unwrap()).unwrap();
         let mut png = Vec::new();
         PngEncoder::new()
             .with_background_index(7)
-            .encode_image(img, &mut png)
+            .encode_indexed8(img, &palette, &mut png)
             .unwrap();
         assert_eq!(find_chunk(&png, b"bKGD"), Some(vec![7]));
     }
