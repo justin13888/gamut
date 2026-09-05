@@ -34,6 +34,50 @@ pub struct IsoBmffImage {
     pub groups: Vec<EntityGroup>,
 }
 
+impl IsoBmffImage {
+    /// A still-image file with the given `ftyp` major brand and compatible brands, primary item id,
+    /// and items; `minor_version` is `0` and there are no entity groups. Adjust the rest with the
+    /// `with_*` builders or by assigning the public fields.
+    ///
+    /// ```
+    /// use gamut_isobmff::{IsoBmffImage, Item};
+    ///
+    /// let img = IsoBmffImage::new(*b"avif", vec![*b"avif", *b"mif1"], 1, Vec::<Item>::new());
+    /// assert_eq!(img.minor_version, 0);
+    /// assert!(img.groups.is_empty());
+    /// ```
+    #[must_use]
+    pub fn new(
+        major_brand: [u8; 4],
+        compatible_brands: Vec<[u8; 4]>,
+        primary_item_id: u32,
+        items: Vec<Item>,
+    ) -> Self {
+        Self {
+            major_brand,
+            minor_version: 0,
+            compatible_brands,
+            primary_item_id,
+            items,
+            groups: Vec::new(),
+        }
+    }
+
+    /// Sets the `ftyp` minor version.
+    #[must_use]
+    pub fn with_minor_version(mut self, minor_version: u32) -> Self {
+        self.minor_version = minor_version;
+        self
+    }
+
+    /// Sets the `grpl` entity groups.
+    #[must_use]
+    pub fn with_groups(mut self, groups: Vec<EntityGroup>) -> Self {
+        self.groups = groups;
+        self
+    }
+}
+
 /// One image item: its `infe` identity, the properties associated with it, its outgoing item
 /// references, and its payload bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
