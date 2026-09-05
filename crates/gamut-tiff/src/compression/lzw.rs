@@ -17,6 +17,15 @@ const MAX_WIDTH: u32 = 12;
 /// The table is reset when the next free code reaches this value (one before the 12-bit limit).
 const RESET_AT: u32 = 4094;
 
+/// The table is cleared before a code could ever need a thirteenth bit.
+///
+/// `encode` widens at `next_code == 1 << width`, so the widths step 9 -> 10 -> 11 -> 12 at 512,
+/// 1024 and 2048. Reaching `1 << MAX_WIDTH` would ask for width 13, and this assertion is why that
+/// cannot happen: the reset fires first. It replaces a runtime `width < MAX_WIDTH` guard that
+/// could never be false when it was evaluated -- an equivalent mutant no test could kill (#110) --
+/// with a relationship the compiler checks once.
+const _: () = assert!(RESET_AT < (1 << MAX_WIDTH));
+
 /// LZW-encodes `data` (one strip's bytes) into a self-delimiting `ClearCode … EndOfInformation`
 /// stream.
 #[must_use]
@@ -42,7 +51,7 @@ pub fn encode(data: &[u8]) -> Vec<u8> {
             out.put_bits(omega, width);
             table.insert((omega, k), next_code);
             next_code += 1;
-            if next_code == (1 << width) && width < MAX_WIDTH {
+            if next_code == (1 << width) {
                 width += 1;
             }
             if next_code == RESET_AT {
@@ -66,11 +75,14 @@ struct BitReader<'a> {
 }
 
 impl BitReader<'_> {
+    /// Accumulated as `value * 2 + bit`, not `(value << 1) | bit`. Same result, but the bitwise
+    /// form had an equivalent mutant: the shift always leaves a zero in the low bit, where `|` and
+    /// `^` agree, so nothing could tell them apart (#110). Same shape as `ccitt::parse`.
     fn read(&mut self, n: u32) -> Option<u32> {
         let mut value = 0u32;
         for _ in 0..n {
             let byte = *self.data.get(self.pos / 8)?;
-            value = (value << 1) | u32::from((byte >> (7 - (self.pos % 8))) & 1);
+            value = value * 2 + u32::from((byte >> (7 - (self.pos % 8))) & 1);
             self.pos += 1;
         }
         Some(value)
@@ -133,6 +145,14 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
             );
         };
         out.extend_from_slice(&entry);
+        // Stop once the strip is satisfied. The trailing bytes are dropped by the `truncate`
+        // below either way, so this changes no output -- what it changes is that a hostile stream
+        // can no longer make the decoder run, and grow its string table, past the size the IFD
+        // declared. Without it a stream that never sends EndOfInformation is bounded only by its
+        // own length.
+        if out.len() >= expected {
+            break;
+        }
 
         if let Some(p) = prev {
             let mut s = table[p as usize].clone();
@@ -160,10 +180,88 @@ pub fn decode(data: &[u8], expected: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// The decoder holds the code width at 12 bits when the table fills without a `ClearCode`.
+    ///
+    /// TIFF 6.0 section 13 steps the width 9 -> 10 -> 11 -> 12 as the table fills and stops there.
+    /// Our *encoder* resets at 4094, so it never approaches the cap -- which is why the round-trip
+    /// tests and the libtiff differential both miss this: no cooperative encoder emits the one
+    /// stream that reaches it. A decoder reads whatever it is given (#489).
+    ///
+    /// Every code is `0`, so the stream is entirely zero bytes and the only thing that varies is
+    /// how many bits each code occupies. That is exactly what the cap governs: relaxing
+    /// `width < MAX_WIDTH` to `<=` widens to 13 bits at 4095 entries, the reader then consumes 13
+    /// bits where 12 were written, and it runs off the end of the stream before producing the
+    /// expected bytes.
+    #[test]
+    fn the_code_width_stops_at_twelve_when_the_table_fills() {
+        /// The width a code occupies, as a function of the table size before it is read.
+        fn width_for(table_len: usize) -> u32 {
+            match table_len {
+                ..=510 => 9,
+                511..=1022 => 10,
+                1023..=2046 => 11,
+                _ => 12,
+            }
+        }
+
+        // Enough literal codes to carry the table past 4095 entries -- the boundary the cap
+        // guards -- and eight more beyond it.
+        const CODES: usize = 3846;
+        let mut table_len = 258usize;
+        let mut bits = 0usize;
+        let mut grows = false;
+        for _ in 0..CODES {
+            bits += width_for(table_len) as usize;
+            // The decoder appends an entry for every code after the first.
+            if grows {
+                table_len += 1;
+            }
+            grows = true;
+        }
+        assert!(
+            table_len > 4095,
+            "the stream must reach the cap, got {table_len}"
+        );
+
+        let stream = vec![0u8; bits.div_ceil(8)];
+        let decoded =
+            decode(&stream, CODES).expect("a full table without a ClearCode still decodes");
+        assert_eq!(decoded, vec![0u8; CODES]);
+    }
+
     fn roundtrip(data: &[u8]) {
         let enc = encode(data);
         let dec = decode(&enc, data.len()).expect("decode");
         assert_eq!(dec, data);
+    }
+
+    /// Repetitive input actually compresses -- the encoder's whole purpose.
+    ///
+    /// Every other LZW test is a round trip or a libtiff differential, and none of them can see an
+    /// encoder that has stopped compressing: the output stays valid LZW and decodes correctly, it
+    /// is merely enormous. Mutating the table-reset test `next_code == RESET_AT` to `!=` fires a
+    /// CLEAR after nearly every code, and the whole suite still passed (#110).
+    ///
+    /// Measured on this input: 8192 bytes in, **391 out** correctly, **18 434** under that mutant
+    /// -- a compressor that more than doubles what it is given. The bound below is deliberately
+    /// loose (4x, against the ~21x actually achieved), because this pins "compression happens at
+    /// all", not a particular ratio a legitimate tuning change might move.
+    #[test]
+    fn repetitive_input_compresses() {
+        let src: Vec<u8> = (0..8192).map(|i| (i % 7) as u8).collect();
+        let enc = encode(&src);
+
+        assert!(
+            enc.len() * 4 < src.len(),
+            "expected at least 4x compression, got {} -> {}",
+            src.len(),
+            enc.len()
+        );
+        assert_eq!(
+            decode(&enc, src.len()).expect("decode"),
+            src,
+            "and it still decodes to the original"
+        );
     }
 
     #[test]

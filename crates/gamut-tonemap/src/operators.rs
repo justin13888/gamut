@@ -145,11 +145,22 @@ impl Default for ReinhardExtended {
 impl ToneCurve for ReinhardExtended {
     #[inline]
     fn map(&self, x: f32) -> f32 {
-        // Factored form of Eq (4): the direct `x * (1 + x/white²) / (1 + x)` overflows its
-        // numerator for huge x even when the exact value fits f32; `x / (1 + x)` is bounded by 1,
-        // so this order only saturates when the exact value genuinely exceeds f32 range. See
-        // references/tonemap/README.md.
-        (x / (1.0 + x)) * (1.0 + x / self.white_sq)
+        // Factored form of Eq (4), associated so that nothing overflows ahead of the result.
+        //
+        // `t = x / (1 + x)` is bounded by 1, and the algebra
+        //
+        //     x · (1 + x/white²) / (1 + x)  =  t + (x·t) / white²
+        //
+        // divides `x·t = x²/(1 + x) < x` by white² rather than `x` itself. That matters at the
+        // bottom of the admitted white range: the earlier form computed `x / white²` on its own,
+        // which reaches +inf for white just above the `white_sq.is_normal()` threshold even when
+        // the whole expression is comfortably inside f32 (#471). It also lands `map(white)` on
+        // exactly 1.0 at extreme whites, where the earlier order returned 0.999999940.
+        //
+        // What remains is only the contract's permitted saturation: this form overflows just when
+        // the exact value does. See references/tonemap/README.md.
+        let t = x / (1.0 + x);
+        t + (x * t) / self.white_sq
     }
 }
 
@@ -590,6 +601,29 @@ mod tests {
         assert!(ReinhardExtended::new(1e-25).is_err());
         assert!(ReinhardExtended::new(1e-20).is_err());
         assert!(ReinhardExtended::new(1e30).is_err());
+    }
+
+    #[test]
+    fn reinhard_extended_holds_at_the_bottom_of_its_admitted_range() {
+        // #471. The guard admits any white whose square is a normal f32, which reaches down to
+        // about 1.1e-19 -- but the evaluation order used to compute `x / white^2` on its own, and
+        // that quotient overflows to +inf just above the threshold even where the whole
+        // expression fits f32 with room to spare.
+        //
+        // 1.7141993e-19 is the measured worst case: the largest admitted white that used to
+        // return +inf. At x = 10 the exact value is about 3.09e38, inside f32's range.
+        let c = ReinhardExtended::new(1.7141993e-19).expect("white^2 is normal, so it is admitted");
+        let y = c.map(10.0);
+        assert!(y.is_finite(), "map(10.0) must not overflow, got {y}");
+        assert!(y > 3.0e38, "and it must be the real value, got {y}");
+
+        // The white point still maps to display white, which is the property the guard exists to
+        // protect in the first place.
+        assert!(close_eps(c.map(c.white()), 1.0, 1e-5));
+
+        // Genuine saturation is still allowed: at a white this small the exact value at x = 100
+        // really does exceed f32, and +inf is the contract's answer, not a defect.
+        assert!(c.map(100.0).is_infinite());
     }
 
     #[test]

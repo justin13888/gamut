@@ -194,6 +194,42 @@ mod tests {
         assert_eq!(linear.samples, expected);
     }
 
+    /// `BlackLevelDeltaV` must carry one finite value per active-area row.
+    ///
+    /// The guard is `deltas.len() != aa_height || deltas.iter().any(|d| !d.is_finite())`, and
+    /// only well-formed deltas were ever passed, so relaxing the `||` to `&&` accepted a delta
+    /// that failed one condition but not both (#110). Both malformations are asserted, because
+    /// either alone leaves the other disjunct unexercised.
+    #[test]
+    fn a_malformed_black_level_delta_v_is_rejected() {
+        let linearized = |dv: Vec<f64>| {
+            RawImage::new_cfa(dims(3, 3), 8, (1, 1), vec![0], vec![60u16; 9])
+                .unwrap()
+                .with_levels(
+                    RawLevels::uniform(1, 10.0, 110.0)
+                        .unwrap()
+                        .with_black_delta_v(dv),
+                )
+                .unwrap()
+                .to_linear()
+        };
+
+        let short = linearized(vec![0.0, 1.0]).expect_err("two deltas for three rows");
+        assert!(
+            short
+                .to_string()
+                .contains("BlackLevelDeltaV needs one finite"),
+            "{short}"
+        );
+
+        let nan = linearized(vec![0.0, f64::NAN, 1.0]).expect_err("a non-finite delta");
+        assert!(
+            nan.to_string()
+                .contains("BlackLevelDeltaV needs one finite"),
+            "{nan}"
+        );
+    }
+
     /// Distinct per-column and per-row deltas (asymmetric, so swapping H/V is caught): the black
     /// for pixel (r, c) is `base + dh[c] + dv[r]`, and the scale uses the *maximum* computed
     /// black (base + max dh + max dv), not the base alone.
@@ -258,6 +294,41 @@ mod tests {
             .unwrap();
         let linear = raw.to_linear().expect("linearize");
         assert_eq!(linear.samples, vec![1.0f32, 0.0]);
+    }
+
+    /// The maximum black is found per plane across the repeat pattern's cells.
+    ///
+    /// `levels.black()[(j * cols + k) * spp + plane]` walks the pattern to find each plane's
+    /// largest black, which sets that plane's scale. With one sample per pixel `* spp` and `/ spp`
+    /// agree, and with a 1x1 pattern the index is `plane` either way -- so the fixtures had
+    /// covered multiple planes and multiple cells, but never both at once, and the mutant went
+    /// unnoticed (#110).
+    ///
+    /// Here two planes meet a 1x2 pattern. Plane 0's blacks are 0 and 40, so its range is
+    /// `140 - 40`; dividing instead collapses both cells onto index 0, finds a maximum black of 0,
+    /// and stretches the range to the full 140.
+    #[test]
+    fn the_maximum_black_is_found_per_plane_across_the_pattern() {
+        let raw = RawImage::new_linear_raw(dims(2, 1), 8, 2, vec![50u16, 50, 50, 50])
+            .unwrap()
+            .with_levels(
+                RawLevels::new(2, (1, 2), vec![0.0, 0.0, 40.0, 0.0], vec![140.0, 100.0]).unwrap(),
+            )
+            .unwrap();
+        let linear = raw.to_linear().expect("linearize");
+
+        // Plane 0 scales by 1/(140 - 40); plane 1 by 1/(100 - 0).
+        let p0 = |stored: f64, black: f64| ((stored - black) / 100.0) as f32;
+        let p1 = |stored: f64, black: f64| ((stored - black) / 100.0) as f32;
+        assert_eq!(
+            linear.samples,
+            vec![
+                p0(50.0, 0.0),  // pixel 0, plane 0: cell (0,0) black 0
+                p1(50.0, 0.0),  // pixel 0, plane 1: cell (0,0) black 0
+                p0(50.0, 40.0), // pixel 1, plane 0: cell (0,1) black 40
+                p1(50.0, 0.0),  // pixel 1, plane 1: cell (0,1) black 0
+            ]
+        );
     }
 
     /// Each plane of a LinearRaw image scales by its own white level.

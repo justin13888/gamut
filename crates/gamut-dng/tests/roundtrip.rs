@@ -727,10 +727,13 @@ fn non_optional_opcodes_raise_the_backward_version() {
     );
 }
 
-#[test]
-fn single_value_black_and_white_levels_broadcast_on_decode() {
-    // Writers (including pre-pattern gamut-dng) may store BlackLevel/WhiteLevel with count 1
-    // even when SamplesPerPixel > 1; the decoder broadcasts the value to every cell/plane.
+/// Encodes the sample LinearRaw image, then rebuilds it as a minimal single-IFD DNG with
+/// `mutate` applied to the raw IFD first.
+///
+/// Shared by the level-count tests below: what varies between them is only which level tags they
+/// write, and the rest of the scaffolding -- pulling the strip out, re-emitting the IFD in two
+/// passes to learn its size, appending the data -- is identical.
+fn rebuilt_with_raw_ifd(mutate: impl FnOnce(&mut gamut_ifd::Ifd)) -> Vec<u8> {
     use gamut_ifd::{ByteOrder, TiffFile, Value, Variant, read, read_ifd_at, write};
 
     let raw = common::sample_linear_raw(8, 6, 16);
@@ -739,20 +742,14 @@ fn single_value_black_and_white_levels_broadcast_on_decode() {
         .encode(&raw, &common::sample_profile(), &mut dng)
         .expect("encode");
 
-    // Rewrite the raw sub-IFD's levels as count-1 tags via the IFD layer.
     let file = read(&dng).expect("parse");
     let ifd0 = &file.ifds[0];
     let raw_off = ifd0
         .get_u32(gamut_dng::tags::SUB_IFDS)
         .expect("SubIFDs pointer");
     let mut raw_ifd = read_ifd_at(&dng, raw_off.into(), file.order, file.variant).expect("raw IFD");
-    raw_ifd.set(gamut_dng::tags::BLACK_LEVEL, Value::Short(vec![7]));
-    raw_ifd.set(gamut_dng::tags::WHITE_LEVEL, Value::Long(vec![60000]));
-    raw_ifd.set(
-        gamut_dng::tags::BLACK_LEVEL_REPEAT_DIM,
-        Value::Short(vec![1, 1]),
-    );
-    // Re-emit a minimal single-IFD file holding just the raw image (strip data inline).
+    mutate(&mut raw_ifd);
+
     let strip_off = raw_ifd
         .get_u32_vec(gamut_dng::tags::STRIP_OFFSETS)
         .expect("offsets")[0] as usize;
@@ -788,10 +785,104 @@ fn single_value_black_and_white_levels_broadcast_on_decode() {
     );
     rebuilt = write(&single(rebuilt_ifd)).expect("rewrite");
     rebuilt.extend_from_slice(&strip);
+    rebuilt
+}
+
+#[test]
+fn single_value_black_and_white_levels_broadcast_on_decode() {
+    // Writers (including pre-pattern gamut-dng) may store BlackLevel/WhiteLevel with count 1
+    // even when SamplesPerPixel > 1; the decoder broadcasts the value to every cell/plane.
+    use gamut_ifd::Value;
+
+    let rebuilt = rebuilt_with_raw_ifd(|ifd| {
+        ifd.set(gamut_dng::tags::BLACK_LEVEL, Value::Short(vec![7]));
+        ifd.set(gamut_dng::tags::WHITE_LEVEL, Value::Long(vec![60000]));
+        ifd.set(
+            gamut_dng::tags::BLACK_LEVEL_REPEAT_DIM,
+            Value::Short(vec![1, 1]),
+        );
+    });
 
     let decoded = DngDecoder::new().decode(&rebuilt).expect("decode");
     assert_eq!(decoded.raw.levels().black(), &[7.0, 7.0, 7.0]);
     assert_eq!(decoded.raw.levels().white(), &[60000.0, 60000.0, 60000.0]);
+}
+
+#[test]
+fn a_black_level_repeat_dim_that_is_not_two_values_is_rejected() {
+    // The tag is `(rows, cols)`, so any other count is malformed. Only the well-formed and absent
+    // cases were tested, so relaxing the `v.len() == 2` guard to `true` read the first two values
+    // and ignored the rest instead of refusing the file (#110).
+    use gamut_ifd::Value;
+
+    let rebuilt = rebuilt_with_raw_ifd(|ifd| {
+        ifd.set(
+            gamut_dng::tags::BLACK_LEVEL_REPEAT_DIM,
+            Value::Short(vec![1, 1, 1]),
+        );
+    });
+
+    let err = DngDecoder::new()
+        .decode(&rebuilt)
+        .expect_err("a three-value BlackLevelRepeatDim must be refused");
+    assert!(
+        err.to_string()
+            .contains("BlackLevelRepeatDim needs two values"),
+        "expected the repeat-dim count error, got: {err}"
+    );
+}
+
+#[test]
+fn a_zero_black_level_repeat_dimension_is_rejected() {
+    // `(rows, cols)` are counts, so zero is malformed -- and the guard that says so is
+    // `.filter(|r| *r > 0)`, which no fixture reached: relaxing it to `>= 0` accepts zero for a
+    // `u16` unconditionally, giving a repeat of (0, 0) and a cell count of nothing (#110).
+    use gamut_ifd::Value;
+
+    // Rows and columns are filtered separately, so a zero in one does not exercise the other's
+    // guard -- both orientations are needed.
+    for dim in [vec![1, 0], vec![0, 1]] {
+        let rebuilt = rebuilt_with_raw_ifd(|ifd| {
+            ifd.set(
+                gamut_dng::tags::BLACK_LEVEL_REPEAT_DIM,
+                Value::Short(dim.clone()),
+            );
+        });
+
+        let err = DngDecoder::new()
+            .decode(&rebuilt)
+            .expect_err("a zero repeat dimension must be refused");
+        assert!(
+            err.to_string()
+                .contains("BlackLevelRepeatDim dimensions must be non-zero"),
+            "expected the non-zero error for {dim:?}, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_white_level_count_that_is_neither_one_nor_per_plane_is_rejected() {
+    // The decoder accepts WhiteLevel at exactly two counts -- one per sample plane, or a single
+    // value it broadcasts -- and rejects everything else. Only the two accepted counts were
+    // tested, so relaxing the `v.len() == 1` guard to `true` swallowed every wrong count into the
+    // broadcast arm and no test noticed (#110). Two values across three planes is neither.
+    use gamut_ifd::Value;
+
+    let rebuilt = rebuilt_with_raw_ifd(|ifd| {
+        ifd.set(
+            gamut_dng::tags::WHITE_LEVEL,
+            Value::Long(vec![60000, 60000]),
+        );
+    });
+
+    let err = DngDecoder::new()
+        .decode(&rebuilt)
+        .expect_err("a two-value WhiteLevel over three planes must be refused");
+    assert!(
+        err.to_string()
+            .contains("WhiteLevel needs one value per sample plane"),
+        "expected the WhiteLevel count error, got: {err}"
+    );
 }
 
 #[test]

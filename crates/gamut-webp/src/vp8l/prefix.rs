@@ -375,7 +375,12 @@ pub fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
 #[must_use]
 pub fn build_length_limited_lengths(histogram: &[u32], max_len: u8) -> Vec<u8> {
     let n = histogram.len();
-    let used = histogram.iter().filter(|&&h| h > 0).count();
+    // `h != 0`, not `h > 0`: identical on a `u32`, but `>` carries a `>=` variant that is true
+    // for every count, and the only thing that changes is whether the two degenerate early returns
+    // below are taken -- and the general path produces exactly what they do, so nothing could tell
+    // the difference (#110). `!=` has no such variant: its `==` mutant counts the unused symbols
+    // and breaks every dense histogram.
+    let used = histogram.iter().filter(|&&h| h != 0).count();
     if used == 0 {
         return vec![0u8; n];
     }
@@ -646,6 +651,23 @@ fn max_symbol_field(count: usize) -> Option<(u32, u32)> {
     })
 }
 
+/// How many code-length entries to emit: all of them, less trailing zeros in
+/// [`CODE_LENGTH_CODE_ORDER`], floored at the 4 the 4-bit count field can express.
+///
+/// Split out of `write_description` so the floor can be named. It reads as the binding constraint
+/// and is not one: `CODE_LENGTH_CODE_ORDER` begins `[17, 18, 0, 1, 2, ...]`, so every length value
+/// `1..=15` sits at index 3 or later, and any real prefix code has some symbol of nonzero length
+/// `L` -- which puts a nonzero `cl_lengths[L]` at index >= 3 and stops the loop there. The zero
+/// check always halts first, so `> 4` and `>= 4` cannot be told apart (#110). The floor stays
+/// because it is what makes the caller's `- 4` safe to read.
+fn code_length_count(cl_lengths: &[u8]) -> usize {
+    let mut count = CODE_LENGTH_CODES;
+    while count > 4 && cl_lengths[CODE_LENGTH_CODE_ORDER[count - 1]] == 0 {
+        count -= 1;
+    }
+    count
+}
+
 /// Writes `lengths` under `description`, or returns `false` without writing if that description
 /// cannot express them.
 fn write_description(w: &mut BitWriter, lengths: &[u8], description: Description) -> bool {
@@ -696,13 +718,8 @@ fn write_description(w: &mut BitWriter, lengths: &[u8], description: Description
             let cl_encoder = PrefixEncoder::from_lengths(&cl_lengths);
 
             w.write_bits(0, 1); // 0 = normal (not simple) code length code.
-            // Emit the meta code lengths in CODE_LENGTH_CODE_ORDER, trimming trailing zeros (min 4).
-            let mut num_code_lengths = CODE_LENGTH_CODES;
-            while num_code_lengths > 4
-                && cl_lengths[CODE_LENGTH_CODE_ORDER[num_code_lengths - 1]] == 0
-            {
-                num_code_lengths -= 1;
-            }
+            // Emit the meta code lengths in CODE_LENGTH_CODE_ORDER, trimming trailing zeros.
+            let num_code_lengths = code_length_count(&cl_lengths);
             w.write_bits((num_code_lengths - 4) as u32, 4);
             for &order in CODE_LENGTH_CODE_ORDER.iter().take(num_code_lengths) {
                 w.write_bits(u32::from(cl_lengths[order]), 3);
@@ -775,6 +792,145 @@ pub fn write_simple_prefix_code(w: &mut BitWriter, symbols: &[u16]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The simple description spends one bit on a first symbol of 0 or 1, and eight otherwise.
+    ///
+    /// `symbol0 > 1` picks the width, and the width is *transmitted*, so getting it wrong still
+    /// produces a stream every decoder reads correctly -- just seven bits longer. Nothing asserted
+    /// the size, so `>= 1` survived: it only misjudges a first symbol of exactly 1, and no fixture
+    /// had one (#110).
+    #[test]
+    fn the_simple_description_spends_one_bit_on_a_low_first_symbol() {
+        let describe = |symbol: usize| {
+            let mut lengths = vec![0u8; 280];
+            lengths[symbol] = 1;
+            let mut w = BitWriter::new();
+            assert!(write_description(&mut w, &lengths, Description::Simple));
+            w.finish().len()
+        };
+
+        // 0 and 1 both fit the 1-bit field: 1 + 1 + 1 + 1 = 4 bits, one byte.
+        assert_eq!(describe(0), 1, "symbol 0 fits the short field");
+        assert_eq!(
+            describe(1),
+            1,
+            "symbol 1 fits it too -- this is the boundary"
+        );
+        // 2 needs the 8-bit field: 1 + 1 + 1 + 8 = 11 bits, two bytes.
+        assert_eq!(describe(2), 2, "symbol 2 needs the long field");
+    }
+
+    /// Trimming to the last used symbol has to actually shorten the description.
+    ///
+    /// `rposition(|&l| l > 0)` finds that symbol. Relaxed to `>= 0` it is true for every `u8`, so
+    /// the search returns the last index whatever the lengths are and the trimmed description
+    /// stops trimming -- emitting every trailing zero. The output stays valid and decodes the
+    /// same, which is why nothing caught it; what changes is only its size (#110).
+    #[test]
+    fn trimming_shortens_a_description_with_trailing_zeros() {
+        // Two used symbols near the front, and a long tail of unused ones to trim away.
+        let mut lengths = vec![0u8; 280];
+        lengths[0] = 1;
+        lengths[1] = 1;
+
+        let describe = |trim: bool| {
+            let mut w = BitWriter::new();
+            assert!(write_description(
+                &mut w,
+                &lengths,
+                Description::Normal {
+                    run_coded: false,
+                    trim
+                }
+            ));
+            w.finish().len()
+        };
+
+        assert!(
+            describe(true) < describe(false),
+            "trimming must be shorter: trimmed {} vs untrimmed {}",
+            describe(true),
+            describe(false)
+        );
+    }
+
+    /// The code-length trim stops at four entries, which is the floor VP8L's 4-bit count field
+    /// can express (`num_code_lengths - 4`).
+    ///
+    /// A one- or two-symbol alphabet trims all the way down to that floor. Nothing in the suite
+    /// reached it: an instrumented run never drove the count below 7, because the fixtures are all
+    /// busy images. Solid content is what gets there (#110).
+    ///
+    /// This does not kill the `>= 4` mutant on the loop -- that floor turns out to be unreachable,
+    /// for the reason recorded in `.cargo/mutants.toml`.
+    ///
+    /// The two-symbol case is the one that matters, and it is not hypothetical -- it is what a
+    /// solid image actually produces. `simple_symbols` would normally carry a two-symbol code, but
+    /// it declines any symbol above `0xff`, and the second symbol here is 273: a backward
+    /// reference length, which is how a solid image codes its repetition. So the normal
+    /// description has to handle it.
+    #[test]
+    fn the_code_length_trim_stops_at_four_entries() {
+        // 280 symbols: the green/literal alphabet, where 256.. are the length codes.
+        let mut lengths = vec![0u8; 280];
+        lengths[0] = 1;
+        lengths[273] = 1;
+
+        for description in [
+            Description::Normal {
+                run_coded: false,
+                trim: false,
+            },
+            Description::Normal {
+                run_coded: true,
+                trim: false,
+            },
+            Description::Normal {
+                run_coded: true,
+                trim: true,
+            },
+        ] {
+            let mut w = BitWriter::new();
+            assert!(
+                write_description(&mut w, &lengths, description),
+                "the normal description must carry a literal-plus-length alphabet"
+            );
+            assert!(!w.clone().finish().is_empty(), "it must write something");
+        }
+
+        // And the single-symbol shape, which trims to the same floor.
+        let mut lone = vec![0u8; 280];
+        lone[0] = 1;
+        let mut w = BitWriter::new();
+        assert!(write_description(
+            &mut w,
+            &lone,
+            Description::Normal {
+                run_coded: true,
+                trim: false
+            }
+        ));
+    }
+
+    /// An unused symbol must not disturb the code assigned to any used one.
+    ///
+    /// `canonical_codes` counts lengths under `len > 0 && len <= MAX_CODE_LENGTH`. Relaxed to
+    /// `||`, a zero length passes the first test's negation and lands in `bl_count[0]` -- which is
+    /// read back at `bits == 1` as `code = (code + bl_count[0]) << 1`, so every code in the
+    /// alphabet shifts. It survived because the fixtures only ever passed fully dense length
+    /// arrays, and a sparse alphabet is the normal case in VP8L (#110).
+    #[test]
+    fn an_unused_symbol_does_not_shift_the_others() {
+        // RFC 1951 section 3.2.2 assignment for lengths [2, 2, 3, 3]: first codes per length are
+        // 0 and 4, handed out in symbol order, then reversed to their length for LSB-first
+        // writing: 00 -> 0, 01 -> 10 = 2, 100 -> 001 = 1, 101 -> 101 = 5.
+        assert_eq!(canonical_codes(&[2, 2, 3, 3]), vec![0, 2, 1, 5]);
+
+        // Prepending an unused symbol changes nothing but its own slot, which is 0.
+        let sparse = canonical_codes(&[0, 2, 2, 3, 3]);
+        assert_eq!(sparse[0], 0, "an unused symbol codes as 0");
+        assert_eq!(sparse[1..], *canonical_codes(&[2, 2, 3, 3]).as_slice());
+    }
 
     /// `simple_symbols` decides whether the *simple* code-length description can carry an
     /// alphabet at all, and every one of its rules is a rejection — so the function is only
@@ -900,6 +1056,29 @@ mod tests {
         // Still a usable, complete code.
         let stream: Vec<usize> = (0..64).collect();
         assert_code_round_trips(&hist, &stream, 15);
+    }
+
+    /// The two degenerate histograms `build_length_limited_lengths` documents.
+    ///
+    /// Its contract names both -- "an empty histogram yields all-zero lengths; a single nonzero
+    /// symbol gets length 1" -- and every fixture fed it a dense histogram instead, so the two
+    /// early returns that implement them went unexercised. Counting used symbols with `h >= 0`
+    /// instead of `h > 0` makes `used` the whole alphabet, which skips both (#110).
+    #[test]
+    fn degenerate_histograms_get_the_documented_lengths() {
+        // Nothing used: no code at all.
+        assert_eq!(build_length_limited_lengths(&[0, 0, 0, 0], 15), vec![0; 4]);
+
+        // One symbol used: it takes a single bit, and nothing else takes any.
+        assert_eq!(
+            build_length_limited_lengths(&[0, 0, 9, 0], 15),
+            vec![0, 0, 1, 0]
+        );
+        // Wherever it sits in the alphabet.
+        assert_eq!(
+            build_length_limited_lengths(&[5, 0, 0, 0], 15),
+            vec![1, 0, 0, 0]
+        );
     }
 
     #[test]

@@ -303,6 +303,9 @@ pub(crate) fn write_leb128(mut value: u64, out: &mut Vec<u8>) {
             out.push(byte);
             break;
         }
-        out.push(byte | 0x80);
+        // `byte + 0x80`, not `byte | 0x80`. `byte` is `value & 0x7f`, so bit 7 is known clear and
+        // `|` and `^` cannot be told apart there -- an unkillable mutant (#110). The `&` mutation
+        // of the same operator is a different matter and is caught by the multi-byte test below.
+        out.push(byte + 0x80);
     }
 }

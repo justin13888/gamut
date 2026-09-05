@@ -86,6 +86,37 @@ fn decoder_deconstruct_returns_image_and_report() {
     assert_clean(&report);
 }
 
+/// A strip declared past the end of the file leaves the verdict false.
+///
+/// Every assertion on `is_fully_classified` expected `true`, so replacing it with the constant
+/// `true` satisfied all of them (#110) -- the suite pinned that clean files are clean and never
+/// that a broken one is not. The same gap, and the same fixture shape, as gamut-tiff's.
+#[test]
+fn a_strip_past_the_end_of_file_is_not_fully_classified() {
+    use gamut_ifd::{TiffFile, Value, Variant, write};
+
+    let mut ifd0 = gamut_ifd::Ifd::new();
+    ifd0.set(50706, Value::Byte(vec![1, 7, 0, 0])); // DNGVersion
+    // A strip at offset 100000 in a file of a few hundred bytes: the walk can name the segment
+    // but cannot place it, which is `out_of_bounds` -- one of the five conditions the verdict is
+    // built from.
+    ifd0.set(273, Value::Long(vec![100_000])); // StripOffsets
+    ifd0.set(279, Value::Long(vec![16])); // StripByteCounts
+    let bytes = write(&TiffFile {
+        order: ByteOrder::LittleEndian,
+        variant: Variant::Classic,
+        ifds: vec![ifd0],
+    })
+    .expect("write");
+
+    let report = deconstruct(&bytes).expect("deconstruct");
+    assert!(
+        !report.is_fully_classified(),
+        "a strip past EOF must fail the archival verdict: {report:?}"
+    );
+    assert_eq!(report.segments.out_of_bounds.len(), 1, "{report:?}");
+}
+
 #[test]
 fn unknown_private_tag_is_flagged() {
     // Inject a private tag into the encoded stream by editing IFD 0 through a re-parse/re-write is

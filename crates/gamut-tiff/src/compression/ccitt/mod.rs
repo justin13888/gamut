@@ -26,10 +26,15 @@ struct Codes {
 }
 
 /// Parses a MSB-first binary string into `(value, bit length)`.
+///
+/// Accumulated as `acc * 2 + bit` rather than `(acc << 1) | bit`. The two compute the same thing,
+/// but the bitwise form had an equivalent mutant: `acc << 1` always leaves a zero in the low bit,
+/// where `|` and `^` agree, so no test could tell them apart (#110). The arithmetic form has no
+/// such twin -- every operator mutation of `*` or `+` changes the parsed code.
 fn parse(code: &str) -> (u32, u8) {
     let value = code
         .bytes()
-        .fold(0u32, |acc, b| (acc << 1) | u32::from(b == b'1'));
+        .fold(0u32, |acc, b| acc * 2 + u32::from(b == b'1'));
     (value, code.len() as u8)
 }
 
@@ -161,7 +166,9 @@ fn decode_code(r: &mut BitReader, white: bool) -> Result<u16> {
             Error::invalid_input(env!("CARGO_PKG_NAME"), "CCITT: truncated code")
                 .with_byte_offset((r.pos / 8) as u64)
         })?;
-        value = (value << 1) | u32::from(bit);
+        // `value * 2 + bit`, not `(value << 1) | bit`: the shift leaves a zero in the low bit
+        // where `|` and `^` agree, which made the bitwise form an equivalent mutant (#110).
+        value = value * 2 + u32::from(bit);
         len += 1;
         if let Some(&run) = dec.get(&(len, value)) {
             return Ok(run);
@@ -224,8 +231,16 @@ pub fn mh_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
                 )
                 .with_byte_offset((reader.pos / 8) as u64));
             }
-            let bit = if white { white_bit } else { 1 - white_bit };
-            if bit == 1 {
+            // Asked as a bool, not as a colour code compared against 1. With `white_bit` in
+            // {0, 1}, `1 - white_bit` yields {1, 0} and the mutation `1 + white_bit` yields
+            // {1, 2}; since the test below was `== 1`, and neither 0 nor 2 is 1, the two behaved
+            // identically and the mutant was unkillable (#110). Same shape as `g4::fill`.
+            let set = if white {
+                white_bit == 1
+            } else {
+                white_bit != 1
+            };
+            if set {
                 for p in pos..pos + run {
                     dst[p / 8] |= 0x80 >> (p % 8);
                 }
@@ -271,6 +286,34 @@ mod tests {
         roundtrip(&[pack(&alt)], w);
         let starts_black: Vec<u8> = (0..16).map(|i| u8::from(i < 5)).collect();
         roundtrip(&[pack(&starts_black)], w);
+    }
+
+    /// A run whose length needs the make-up code for exactly 64.
+    ///
+    /// `decode_run` accumulates make-up codes and stops at the first *terminating* code, which is
+    /// the test `run < 64`: terminating codes are 0..=63 and make-ups are multiples of 64. At
+    /// exactly 64 the two forms disagree -- `<=` treats the make-up as terminating, returns
+    /// early, and leaves the terminating code that follows it unread, desynchronising everything
+    /// after.
+    ///
+    /// The existing long-run fixture uses 2700, which decomposes as 2560 + 128 + 12 and never
+    /// produces a 64, so `<` and `<=` behaved identically there (#110). Runs of 64..=127 are the
+    /// ones that use the 64 make-up, so this covers both ends of that band and the boundary just
+    /// below it.
+    #[test]
+    fn roundtrips_runs_that_use_the_64_make_up_code() {
+        let w = 256;
+        for run in [63usize, 64, 65, 127, 128] {
+            let mut bits = vec![0u8; w];
+            for b in bits.iter_mut().take(run) {
+                *b = 1;
+            }
+            let stored = w.div_ceil(8);
+            let packed = pack(&bits);
+            let enc = mh_encode_strip(&packed, stored, w).expect("encode");
+            let dec = mh_decode_strip(&enc, 1, w).expect("decode");
+            assert_eq!(dec, packed, "a black run of exactly {run} pixels");
+        }
     }
 
     #[test]

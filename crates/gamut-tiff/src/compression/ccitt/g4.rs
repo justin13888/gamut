@@ -50,11 +50,12 @@ fn reference_changes(refr: &[usize], a0: i32, a0_color: u8, width: usize) -> (us
         k += 1;
     }
     // The colour to the right of `refr[k]` is black when `k` is even. Skip one if it doesn't match.
-    if k < refr.len() {
-        let color = u8::from(k % 2 == 0);
-        if color != opposite {
-            k += 1;
-        }
+    if refr.get(k).is_none() {
+        return (width, width);
+    }
+    let color = u8::from(k % 2 == 0);
+    if color != opposite {
+        k += 1;
     }
     let b1 = refr.get(k).copied().unwrap_or(width);
     let b2 = refr.get(k + 1).copied().unwrap_or(width);
@@ -125,8 +126,20 @@ pub fn g4_encode_strip(
 }
 
 /// Sets pixels `[from, to)` of `dst` to `color` (only black needs writing; `dst` starts white).
-fn fill(dst: &mut [u8], from: usize, to: usize, color: u8, width: usize) {
-    if color == 1 {
+/// The colour code for black, as `changing_elements` and `decode_row` carry it.
+const BLACK: u8 = 1;
+
+/// Sets `from..to` black, or leaves the span white.
+///
+/// Takes a `bool` rather than the raw colour code on purpose. It used to take `u8` and act only
+/// `if color == 1`, which silently ignored every other value -- and that made
+/// `fill(dst, a1, a2, 1 - a0_color, ..)` unfalsifiable: with `a0_color` in `{0, 1}`, the mutation
+/// `1 - a0_color` -> `1 + a0_color` yields `{1, 2}` against `{1, 0}`, and since neither 0 nor 2
+/// is 1 the two behave identically. The mutant survived the suite because it could not be
+/// distinguished, not because a test was missing (#110). Asking for a bool at the boundary moves
+/// the decision to the call site, where `== BLACK` and `!= BLACK` are killable.
+fn fill(dst: &mut [u8], from: usize, to: usize, black: bool, width: usize) {
+    if black {
         for p in from..to.min(width) {
             dst[p / 8] |= 0x80 >> (p % 8);
         }
@@ -189,7 +202,7 @@ fn decode_row(
         let start = a0.max(0) as usize;
         match read_mode(r)? {
             Mode::Pass => {
-                fill(dst, start, b2, a0_color, width);
+                fill(dst, start, b2, a0_color == BLACK, width);
                 a0 = b2 as i32;
             }
             Mode::Horizontal => {
@@ -197,13 +210,13 @@ fn decode_row(
                 let run2 = decode_run(r, a0_color != 0)?;
                 let a1 = (start + run1).min(width);
                 let a2 = (a1 + run2).min(width);
-                fill(dst, start, a1, a0_color, width);
-                fill(dst, a1, a2, 1 - a0_color, width);
+                fill(dst, start, a1, a0_color == BLACK, width);
+                fill(dst, a1, a2, a0_color != BLACK, width);
                 a0 = a2 as i32;
             }
             Mode::Vertical(d) => {
                 let a1 = (b1 as i32 + d).clamp(0, width as i32) as usize;
-                fill(dst, start, a1, a0_color, width);
+                fill(dst, start, a1, a0_color == BLACK, width);
                 a0 = a1 as i32;
                 a0_color = 1 - a0_color;
             }
@@ -233,6 +246,37 @@ pub fn g4_decode_strip(data: &[u8], rows: usize, width: usize) -> Result<Vec<u8>
 mod tests {
     use super::*;
 
+    /// Every vertical-mode code, against ITU-T T.6 Table 4 (V0 / VR1-3 / VL1-3).
+    ///
+    /// `put_vertical` ends in a catch-all `_ => VL3`, so *deleting* any arm silently re-routes
+    /// that offset to VL3 rather than failing to compile. Only fixtures whose rows step by that
+    /// exact offset can notice, and the crate's G4 fixtures never step by +2 -- so the VR2 arm
+    /// could be deleted with the suite green (#110). Pinning the table asserts each arm directly,
+    /// which does not depend on any fixture reaching it.
+    #[test]
+    fn the_vertical_mode_codes_match_t6_table_4() {
+        // (offset, code, bit length) exactly as tabulated.
+        for (d, code, bits) in [
+            (0, 0b1, 1),
+            (1, 0b011, 3),
+            (-1, 0b010, 3),
+            (2, 0b000011, 6),
+            (-2, 0b000010, 6),
+            (3, 0b0000011, 7),
+            (-3, 0b0000010, 7),
+        ] {
+            let mut out = BitWriter::new();
+            put_vertical(&mut out, d);
+            // Left-justified in the first byte: the writer is MSB-first and pads with zeros.
+            let expected = (code << (8 - bits)) as u8;
+            assert_eq!(
+                out.into_bytes(),
+                vec![expected],
+                "vertical offset {d} must encode as the {bits}-bit code {code:b}"
+            );
+        }
+    }
+
     fn pack(bits: &[u8]) -> Vec<u8> {
         let mut row = vec![0u8; bits.len().div_ceil(8)];
         for (i, &b) in bits.iter().enumerate() {
@@ -241,6 +285,47 @@ mod tests {
             }
         }
         row
+    }
+
+    /// A row whose reference line changes twice before it does is encoded in **pass mode**.
+    ///
+    /// The mode decision `b2 < a1` had no test (#110). Mutating it to `==` makes the encoder pick
+    /// horizontal mode instead -- which is still *valid* G4 and still decodes to the same image,
+    /// so the round-trip test passes and so does the libtiff differential oracle: libtiff happily
+    /// decodes any well-formed stream. Neither can see *which* mode was chosen, only that the
+    /// result is right.
+    ///
+    /// What separates them is size. Row 0 is black in 8..16 and row 1 is all white, so when
+    /// encoding row 1 the reference line's second change (16) precedes the coding line's first
+    /// (32, i.e. none) -- the definition of pass mode, a 4-bit code. Choosing horizontal instead
+    /// spends a 3-bit mode code plus two run codes:
+    ///
+    ///   pass       6 bytes
+    ///   horizontal 8 bytes
+    ///
+    /// So the length is asserted exactly, and the round trip is asserted alongside it because a
+    /// smaller encoding that decoded wrongly would be worse than a larger one.
+    #[test]
+    fn a_reference_line_change_before_the_coding_line_uses_pass_mode() {
+        let w = 32;
+        let mut row0 = vec![0u8; w];
+        for b in row0.iter_mut().take(16).skip(8) {
+            *b = 1;
+        }
+        let row1 = vec![0u8; w];
+        let packed: Vec<u8> = [pack(&row0), pack(&row1)].concat();
+
+        let enc = g4_encode_strip(&packed, w / 8, 2, w).expect("encode");
+        assert_eq!(
+            enc.len(),
+            6,
+            "pass mode is a 4-bit code; horizontal would cost two more bytes here"
+        );
+        assert_eq!(
+            g4_decode_strip(&enc, 2, w).expect("decode"),
+            packed,
+            "and it still decodes to the original rows"
+        );
     }
 
     fn roundtrip(rows: &[Vec<u8>], width: usize) {

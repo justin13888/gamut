@@ -82,11 +82,103 @@ pub fn decode(src: &[u8], expected: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// A run of exactly two ends the literal that precedes it.
+    ///
+    /// The literal scanner runs `while run_length(row, i) < 2`, and two is the boundary it turns
+    /// on. Relaxing it to `<= 2` absorbs the pair into the literal instead of emitting a
+    /// replicate -- still valid PackBits that decodes to the same row, so every round-trip stays
+    /// green, and the existing byte-exact tests use runs of 100 and 200, which never place a
+    /// two-run beside a literal (#110).
+    ///
+    /// Neither rule dominates: here ours costs a byte, because breaking the literal adds a second
+    /// control byte; on a row of nothing but pairs it saves one per pair. Ours is the simple
+    /// always-replicate rule, and this test is what makes that a decision rather than an
+    /// accident.
+    #[test]
+    fn a_run_of_exactly_two_is_emitted_as_a_replicate() {
+        let mut out = Vec::new();
+        encode_row(&[1, 2, 3, 4, 4, 5, 6], &mut out);
+        assert_eq!(
+            out,
+            vec![
+                2, 1, 2, 3, // literal: three bytes, stopped by the pair
+                0xFF, 4, // replicate: control 1 - 2 = -1, then the byte
+                1, 5, 6, // literal: the remaining two
+            ]
+        );
+    }
+
     fn roundtrip(row: &[u8]) {
         let mut enc = Vec::new();
         encode_row(row, &mut enc);
         let dec = decode(&enc, row.len()).expect("decode");
         assert_eq!(dec, row);
+    }
+
+    /// A run of identical bytes is encoded as a *replicate*, not as literals.
+    ///
+    /// Every encoder test went through the round-trip helper, which decodes and compares to the
+    /// input -- and that cannot see an encoder which stops compressing. Replacing `run_length`
+    /// with a constant 0 or 1 makes `encode_row` take the literal branch for every byte: the
+    /// output is still valid PackBits, still decodes to exactly the input, and is *larger than
+    /// the row it encodes*. Both constants survived the whole suite (#110).
+    ///
+    /// So this asserts the bytes, not the round trip. A 100-byte run is two bytes: the control
+    /// `1 - 100 = -99`, then the value.
+    #[test]
+    fn a_run_is_encoded_as_a_replicate_not_as_literals() {
+        let row = vec![0xABu8; 100];
+        let mut out = Vec::new();
+        encode_row(&row, &mut out);
+
+        assert_eq!(
+            out,
+            vec![(1i32 - 100) as i8 as u8, 0xAB],
+            "a 100-byte run is one replicate pair"
+        );
+        assert!(
+            out.len() < row.len(),
+            "an encoder that does not compress is not an encoder"
+        );
+    }
+
+    /// Runs longer than 128 are split, because `run_length` caps there (§9's control-byte range).
+    ///
+    /// 200 identical bytes are two replicates -- 128 then 72 -- not one oversized control byte.
+    #[test]
+    fn a_run_longer_than_128_is_split_at_the_cap() {
+        let row = vec![0x5Au8; 200];
+        let mut out = Vec::new();
+        encode_row(&row, &mut out);
+
+        assert_eq!(
+            out,
+            vec![
+                (1i32 - 128) as i8 as u8,
+                0x5A,
+                (1i32 - 72) as i8 as u8,
+                0x5A,
+            ],
+            "128 then 72, each as its own replicate pair"
+        );
+    }
+
+    /// A row that alternates never repeats, so it is all literals -- the other side of the branch.
+    ///
+    /// Without this, capping the literal path would look like an improvement rather than a bug.
+    #[test]
+    fn a_row_without_runs_is_all_literals() {
+        let row: Vec<u8> = (0..100u8).collect();
+        let mut out = Vec::new();
+        encode_row(&row, &mut out);
+
+        assert_eq!(out[0], 99, "a single literal block of 100 bytes");
+        assert_eq!(&out[1..], &row[..]);
+        assert_eq!(
+            out.len(),
+            row.len() + 1,
+            "literals cost exactly one control byte"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 
 mod common;
 
-use common::{av01_item, clean_file};
+use common::{av01_item, bx, clean_file};
 use gamut_avif::{AvifContainer, SegmentKind};
 
 /// Folds over the segments asserting: non-empty, first starts at 0, each end chains to the next
@@ -66,6 +66,68 @@ fn parse_exposes_the_shared_segment_walk() {
     assert_eq!(c.data(), data.as_slice());
     assert_eq!(c.data().as_ptr(), data.as_ptr());
     assert_eq!(c.data().len(), data.len());
+}
+
+/// The trailer accessor surfaces trailing bytes, not just the absence of them.
+///
+/// `parse_exposes_the_shared_segment_walk` asserts `trailer().is_none()` on a clean file, and that
+/// was the whole of what the suite said about it -- so an accessor hard-wired to `None` satisfied
+/// it, and both the `-> None` replacement and the deletion of its `Trailer` arm survived (#110).
+/// Pinning the absent case cannot distinguish "there is none here" from "there is never any".
+#[test]
+fn trailer_surfaces_trailing_bytes() {
+    // Three bytes cannot be a box header, which needs eight, so the walk ends the file with a
+    // trailer segment rather than another box.
+    let mut data = clean_file(1, vec![av01_item(1, vec![0xAA, 0xBB, 0xCC, 0xDD])]);
+    let clean_len = data.len();
+    data.extend_from_slice(&[0xDE, 0xAD, 0xBE]);
+
+    let c = AvifContainer::parse(&data).unwrap();
+    assert_eq!(c.trailer(), Some(&[0xDE, 0xAD, 0xBE][..]));
+    assert_covers(&c, data.len());
+    // It borrows the input rather than copying, and starts exactly where the boxes stop.
+    assert_eq!(c.trailer().unwrap().as_ptr(), data[clean_len..].as_ptr());
+}
+
+/// The unknown-meta-box accessor surfaces what the semantic parse did not consume.
+///
+/// The same gap as `trailer`: the only assertion was `is_empty()` on the encoder's own output,
+/// which an accessor returning a permanently empty slice satisfies.
+#[test]
+fn unknown_meta_boxes_surfaces_unconsumed_children() {
+    let clean = clean_file(1, vec![av01_item(1, vec![0xAA, 0xBB, 0xCC, 0xDD])]);
+    // `free` is a real ISOBMFF box that the AVIF semantic parse has no use for, so it comes back
+    // out of `meta` verbatim.
+    let data = splice_into_meta(&clean, &bx(b"free", &[0x01, 0x02, 0x03, 0x04]));
+
+    let c = AvifContainer::parse(&data).unwrap();
+    let unknown = c.unknown_meta_boxes();
+    assert_eq!(unknown.len(), 1, "the free box is surfaced");
+    assert_eq!(unknown[0].ty, *b"free");
+    assert_eq!(unknown[0].body, &[0x01, 0x02, 0x03, 0x04]);
+    assert_covers(&c, data.len());
+}
+
+/// Rebuilds `data` with `child` appended inside its top-level `meta` box, fixing the box size.
+fn splice_into_meta(data: &[u8], child: &[u8]) -> Vec<u8> {
+    let mut pos = 0usize;
+    while pos + 8 <= data.len() {
+        let size = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        assert!(size >= 8, "well-formed box");
+        if &data[pos + 4..pos + 8] == b"meta" {
+            let end = pos + size;
+            let mut out = Vec::with_capacity(data.len() + child.len());
+            out.extend_from_slice(&data[..pos]);
+            out.extend_from_slice(&((size + child.len()) as u32).to_be_bytes());
+            out.extend_from_slice(b"meta");
+            out.extend_from_slice(&data[pos + 8..end]);
+            out.extend_from_slice(child);
+            out.extend_from_slice(&data[end..]);
+            return out;
+        }
+        pos += size;
+    }
+    panic!("no meta box in fixture");
 }
 
 #[test]

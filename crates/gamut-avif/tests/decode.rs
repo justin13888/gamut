@@ -1144,6 +1144,16 @@ fn clap_guard_messages_pin_each_disjunction() {
     // Height overshoot only (top = 1, crop_h = 2 on a 2-tall image ⇒ top + crop_h = 3 > 2).
     let e = clap_error(clap(2, 1, 2, 1, neg(-1), 1, 1, 1));
     assert!(e.to_string().contains("outside the image"), "{e}");
+
+    // Width overshoot only: left = 1, crop_w = 4 on a 4-wide image ⇒ left + crop_w = 5 > 4.
+    //
+    // Its own case, because the height overshoot above does not stand in for it: the two are
+    // separate disjuncts, and the width one was unreached, which left all three of its mutants
+    // alive (#110). The numbers are chosen so the arithmetic mutants disagree with the real
+    // comparison rather than happening to agree with it -- `1 * 4` is 4, which is *not* greater
+    // than 4, and `1 - 4` is negative, so both let the input through where `1 + 4` rejects it.
+    let e = clap_error(clap(4, 1, 2, 1, 1, 1, 0, 1));
+    assert!(e.to_string().contains("outside the image"), "{e}");
 }
 
 #[test]
