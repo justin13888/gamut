@@ -12,10 +12,21 @@
 //! [`properties`](Item::properties) list (not raw `ipco` indices), and its outgoing
 //! [`references`](Item::references) (not the file-level `iref` table), so
 //! `read(&write(&img)?) == img`.
+//!
+//! Top-level boxes the model does not otherwise own — a C2PA `uuid` box, a `free`, a vendor box —
+//! are kept in [`IsoBmffImage::top_level_boxes`] as [`TopLevelBox`]es, each tagged with the
+//! [`TopLevelPosition`] the writer places it at, so a file carrying one round-trips byte-identically
+//! rather than losing the box.
 
 /// A parsed or constructed ISOBMFF still-image file: its `ftyp` brands, the id of the primary
-/// (displayed) item, the image items, and the entity groups.
+/// (displayed) item, the image items, the entity groups, and any top-level boxes the model does not
+/// otherwise own.
+///
+/// Non-exhaustive: construct it with [`IsoBmffImage::new`] and the `with_*` builders (or assign
+/// the public fields), not a struct literal, so a field added in a future minor release does not
+/// break callers.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct IsoBmffImage {
     /// The `ftyp` major brand (e.g. `*b"avif"`, `*b"heic"`).
     pub major_brand: [u8; 4],
@@ -32,12 +43,17 @@ pub struct IsoBmffImage {
     /// The `grpl` entity groups (e.g. `altr` alternatives), in file order; usually empty. An empty
     /// list round-trips as an absent `grpl` box.
     pub groups: Vec<EntityGroup>,
+    /// Top-level boxes the model does not otherwise own — anything but `ftyp`, `meta` and `mdat`
+    /// (and an appended motion-photo stream, which [`crate::read`] stops at) — in file order, each
+    /// carrying the [`TopLevelPosition`] it is written at. This is where a C2PA
+    /// `ContentProvenanceBox` (a `uuid` box with the C2PA user type) lives; usually empty.
+    pub top_level_boxes: Vec<TopLevelBox>,
 }
 
 impl IsoBmffImage {
     /// A still-image file with the given `ftyp` major brand and compatible brands, primary item id,
-    /// and items; `minor_version` is `0` and there are no entity groups. Adjust the rest with the
-    /// `with_*` builders or by assigning the public fields.
+    /// and items; `minor_version` is `0` and there are no entity groups or top-level boxes. Adjust
+    /// the rest with the `with_*` builders or by assigning the public fields.
     ///
     /// ```
     /// use gamut_isobmff::{IsoBmffImage, Item};
@@ -45,6 +61,7 @@ impl IsoBmffImage {
     /// let img = IsoBmffImage::new(*b"avif", vec![*b"avif", *b"mif1"], 1, Vec::<Item>::new());
     /// assert_eq!(img.minor_version, 0);
     /// assert!(img.groups.is_empty());
+    /// assert!(img.top_level_boxes.is_empty());
     /// ```
     #[must_use]
     pub fn new(
@@ -60,6 +77,7 @@ impl IsoBmffImage {
             primary_item_id,
             items,
             groups: Vec::new(),
+            top_level_boxes: Vec::new(),
         }
     }
 
@@ -76,6 +94,89 @@ impl IsoBmffImage {
         self.groups = groups;
         self
     }
+
+    /// Sets the top-level boxes the model does not otherwise own (see
+    /// [`top_level_boxes`](Self::top_level_boxes)).
+    #[must_use]
+    pub fn with_top_level_boxes(mut self, top_level_boxes: Vec<TopLevelBox>) -> Self {
+        self.top_level_boxes = top_level_boxes;
+        self
+    }
+}
+
+/// A top-level box the model does not otherwise own, carried verbatim so it round-trips: its
+/// four-character type, the 16-byte user type when it is a `uuid` box, its payload, and where the
+/// writer places it.
+///
+/// The `uuid` split follows [`crate::RawBox`]: `user_type` is `Some` exactly when `ty` is `uuid`,
+/// and `payload` is the body *after* the user type. [`crate::write`] rejects a box that breaks
+/// that pairing, and a box typed `ftyp`/`meta`/`mdat` (the writer emits those from the model) or
+/// `moov`/`trak` (image sequences, which [`crate::read`] rejects).
+///
+/// The C2PA `ContentProvenanceBox` (C2PA 2.4 §A.5.1) is a `uuid` box with user type
+/// `D8FEC3D6-1B0E-483C-9297-5828877EC481`; its payload — the `FullBox` version/flags, the
+/// `box_purpose` string and the manifest store — is opaque here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopLevelBox {
+    /// The box type four-character code (e.g. `*b"uuid"`, `*b"free"`).
+    pub ty: [u8; 4],
+    /// The 16-byte extended type of a `uuid` box; `None` for every other type.
+    pub user_type: Option<[u8; 16]>,
+    /// The box body after the size/type header and, for a `uuid` box, after the user type.
+    pub payload: Vec<u8>,
+    /// Where [`crate::write`] places the box.
+    pub position: TopLevelPosition,
+}
+
+impl TopLevelBox {
+    /// A non-`uuid` box of type `ty` with the given payload, placed [`TopLevelPosition::AfterFtyp`].
+    #[must_use]
+    pub fn new(ty: [u8; 4], payload: Vec<u8>) -> Self {
+        Self {
+            ty,
+            user_type: None,
+            payload,
+            position: TopLevelPosition::AfterFtyp,
+        }
+    }
+
+    /// A `uuid` box with the given user type and payload, placed [`TopLevelPosition::AfterFtyp`] —
+    /// the C2PA 2.4 §A.5.3 placement for a `ContentProvenanceBox`.
+    #[must_use]
+    pub fn uuid(user_type: [u8; 16], payload: Vec<u8>) -> Self {
+        Self {
+            ty: *b"uuid",
+            user_type: Some(user_type),
+            payload,
+            position: TopLevelPosition::AfterFtyp,
+        }
+    }
+
+    /// Sets where the writer places the box.
+    #[must_use]
+    pub fn with_position(mut self, position: TopLevelPosition) -> Self {
+        self.position = position;
+        self
+    }
+}
+
+/// Where [`crate::write`] places a [`TopLevelBox`] within the `ftyp` + `meta` + `mdat` layout.
+///
+/// [`crate::read`] assigns the position from where it found the box: before `mdat` (whether
+/// before or after `meta`) is [`AfterFtyp`](Self::AfterFtyp), after `mdat` is
+/// [`Trailing`](Self::Trailing). A box a foreign file put between `meta` and `mdat` is therefore
+/// written back between `ftyp` and `meta` — the one reordering the round-trip performs, and never
+/// one that moves a lawfully placed C2PA box (§A.5.3 requires it before the first `mdat`).
+///
+/// Discriminants are permanent and append-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TopLevelPosition {
+    /// After `ftyp` and before `meta` (so also before the first `mdat`): the C2PA 2.4 §A.5.3
+    /// placement.
+    AfterFtyp = 0,
+    /// After `mdat`, at the end of the primary stream.
+    Trailing = 1,
 }
 
 /// One image item: its `infe` identity, the properties associated with it, its outgoing item
