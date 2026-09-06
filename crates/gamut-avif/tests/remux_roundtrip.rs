@@ -66,7 +66,7 @@ fn remux_with_a_c2pa_uuid_box_preserves_decoded_pixels() {
     // gamut-isobmff's `tests/top_level.rs`, not here.
     let src = std::fs::read(corpus_444()).expect("read the corpus fixture");
     let mut model = gamut_isobmff::read(&src).expect("gamut-isobmff reads the foreign container");
-    model.top_level_boxes.push(TopLevelBox::uuid(
+    model.push_top_level_box(TopLevelBox::uuid(
         C2PA_UUID,
         b"opaque-manifest-store".to_vec(),
     ));
