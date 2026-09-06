@@ -28,7 +28,8 @@ zlib streams than `zlib -9` and `miniz_oxide` at their maximum levels** on every
 while staying close to `zopfli` — all behind one dependency-free `Level` knob that also spans the
 fast tiers, so codecs don't juggle two external crates.
 
-Output size in bytes (zlib streams; lower is better), reproduced by `cargo bench -p gamut-deflate`:
+Output size in bytes (zlib streams; lower is better). Every row except the pinned `lz77.rs` row is
+reproduced by `cargo bench -p gamut-deflate`; that row is historical — see the note below the table:
 
 | input                         |    raw | `Level::Best` | `zlib -9` | `miniz_oxide`-10 | `zopfli` |
 | ----------------------------- | -----: | ------------: | --------: | ---------------: | -------: |
@@ -37,8 +38,9 @@ Output size in bytes (zlib streams; lower is better), reproduced by `cargo bench
 | Rust source (`lz77.rs` at `4f2c2a4`) | 25 031 | **8 003** |     8 268 |            8 269 |    7 950 |
 | pseudo-random (~incompressible)| 20 000 |     **2 236** |     2 290 |            2 291 |    2 122 |
 
-The `lz77.rs` row compresses this crate's own match finder, so it is pinned to one revision of the
-file (the `cargo bench` run compresses whatever the file currently is).
+The `lz77.rs` row compresses this crate's own match finder, so it is pinned to the file at commit
+`4f2c2a4` (25 031 bytes): a later `cargo bench` run compresses whatever the file is by then, and
+reproduces this row only against that revision of the file.
 
 `Level::Best` lands ~2–7% below `zlib -9` and within ~1% of `zopfli` on real text and source, now
 that the optimal parse prices each match length at its own nearest distance (zopfli's `sublen`)

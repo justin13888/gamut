@@ -67,9 +67,10 @@ matcher-free `Store` row also moved 7% between the two runs, so that figure is a
 
 ### Throughput (measured)
 
-`Matcher::find` — the hash-chain longest-match loop, run up to `max_chain` (1024 at `Level::Best`)
-times per input position — measures each candidate that survives its one-byte prune **eight bytes
-at a time** (#478): both windows are read as a `u64`, the first differing byte is
+`Matcher::walk` — the hash-chain longest-match loop behind `find` (the lazy parser) and
+`find_sublen` (the optimal parse, #479), run up to `max_chain` (1024 at `Level::Best`) times per
+input position — measures each candidate that survives its one-byte prune **eight bytes at a
+time** (#478): both windows are read as a `u64`, the first differing byte is
 `(x ^ y).trailing_zeros() / 8`, and the sub-word tail is compared byte-wise. Pure safe Rust, no
 dependency, identical on every target, and byte-identical output — the same matches are found,
 only measured faster; `tests/default_bytes.rs` pins the exact bytes at every level and passed
