@@ -29,7 +29,7 @@ use std::collections::HashMap;
 
 use gamut_core::{Error, Result};
 
-use crate::chunk::{ChunkReader, RawChunk, SIGNATURE};
+use crate::chunk::{C2paSpan, CABX, ChunkReader, RawChunk, SIGNATURE};
 use crate::decoded::PngHeader;
 use crate::decoder::DEFAULT_MAX_IMAGE_BYTES;
 use crate::filter::FilterType;
@@ -389,6 +389,36 @@ impl PngReport {
             self.header.color_type.channels(),
             self.header.bit_depth,
         )
+    }
+
+    /// The C2PA manifest store's carriage: the whole span of the first CRC-valid `caBX` chunk —
+    /// length, type, payload **and CRC** — which is what a `c2pa.hash.data` assertion must exclude
+    /// (C2PA 2.4 §18.5.4): the store's bytes change when it is written, the length field when it
+    /// is resized, and the CRC with either, so a hash that keeps any of them breaks on the store's
+    /// first update. The store's own bytes are the span's `payload`. `None` when the file carries
+    /// no such chunk.
+    ///
+    /// The first CRC-valid one, so this names the chunk [`PngDecoder::decode`] surfaces as its
+    /// `c2pa` payload (§13.1 skips a CRC mismatch on both sides). A further `caBX` is a malformed
+    /// file's duplicate — counted by [`chunk`](Self::chunk)`(b"caBX")` and by the decoder's
+    /// `c2pa_duplicates`, never merged into the span.
+    ///
+    /// [`PngDecoder::decode`]: crate::PngDecoder::decode
+    #[must_use]
+    pub fn c2pa(&self) -> Option<C2paSpan> {
+        self.segments
+            .iter()
+            .find(|segment| {
+                matches!(
+                    segment.kind,
+                    SegmentKind::Chunk {
+                        chunk_type: CABX,
+                        crc_ok: true,
+                        ..
+                    }
+                )
+            })
+            .map(|segment| C2paSpan::of(segment.range.clone()))
     }
 
     /// The stats for one chunk type, if the file carries it.
