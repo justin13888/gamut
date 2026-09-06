@@ -990,6 +990,44 @@ mod tests {
         );
     }
 
+    /// The tally answers "have I seen this type?" from its index, never by scanning `stats` —
+    /// which is what makes a file of N distinct chunk types cost O(N) rather than O(N²). That is
+    /// a structural claim, so it is asserted structurally: after any sequence of records, the
+    /// index holds exactly one entry per distinct type, and each maps to the position in `stats`
+    /// whose entry carries that type. A `record` that failed to index a new type, or indexed it at
+    /// the wrong position, would fall back to nothing at all — the lookup below has no linear
+    /// scan to fall back to — and this is where that shows. Timing belongs to `benches/`.
+    #[test]
+    fn the_tally_index_names_every_recorded_type_at_its_position() {
+        let mut tally = ChunkTally::new();
+        let types: Vec<[u8; 4]> = (0..300u32).map(|i| i.to_be_bytes()).collect();
+        for (i, ty) in types.iter().enumerate() {
+            // Every type once, every third one a second time: both arms of `record`.
+            tally.record(*ty, i);
+            if i % 3 == 0 {
+                tally.record(*ty, 1);
+            }
+        }
+        assert_eq!(
+            tally.index.len(),
+            tally.stats.len(),
+            "one index entry per distinct type"
+        );
+        assert_eq!(tally.stats.len(), types.len());
+        for (at, stats) in tally.stats.iter().enumerate() {
+            assert_eq!(
+                tally.index.get(&stats.chunk_type),
+                Some(&at),
+                "type {:?} is indexed at its own position",
+                stats.chunk_type
+            );
+            assert_eq!(stats.chunk_type, types[at], "first-appearance order");
+            let repeated = at % 3 == 0;
+            assert_eq!(stats.count, if repeated { 2 } else { 1 });
+            assert_eq!(stats.payload_bytes, at + usize::from(repeated));
+        }
+    }
+
     #[test]
     fn the_inflation_ratio_is_inclusive_and_saturates() {
         // A stream may inflate to exactly sixty-four times its length and not one byte more.
