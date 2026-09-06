@@ -8,7 +8,8 @@
 //! Requires the `third_party/exiv2` + `third_party/expat` submodules and a C++ toolchain.
 
 use gamut_xmp::{
-    Namespace, WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpValue, XmpWriter,
+    Namespace, WellKnownNs, XmpArray, XmpItem, XmpMeta, XmpProperty, XmpSidecar, XmpValue,
+    XmpWriter,
 };
 
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -467,4 +468,40 @@ fn darwin_core_record_field_reads_back_under_the_dwc_key() {
     );
     assert_eq!(xmpcore_output_uri(dwc), "http://rs.tdwg.org/dwc/index.htm/");
     struct_field_survives_xmpcore(dwc, "Record", "institutionID", "GAMUT");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Sidecars (issue #421): the file gamut writes is XMP to the reference engine, and the file the
+// reference engine writes is a sidecar to gamut.
+// ---------------------------------------------------------------------------------------------------
+
+#[test]
+fn sidecar_written_by_gamut_is_read_by_xmpcore() {
+    // The whole file — XML declaration, read-only packet wrapper, x:xmpmeta — is handed to XMPCore
+    // as-is, the way exiv2's sidecar reader passes a .xmp file's bytes to the parser.
+    let file = XmpSidecar::write(&sample());
+    exiv2_oracle::validate(&file).expect("exiv2 (Adobe XMPCore) must accept gamut's sidecar");
+    assert_eq!(
+        exiv2_oracle::get_property(&file, "Xmp.dc.format").unwrap(),
+        "text/plain"
+    );
+    assert_eq!(
+        exiv2_oracle::get_property(&file, "Xmp.xmp.BaseURL").unwrap(),
+        "http://example.com/"
+    );
+}
+
+#[test]
+fn gamut_reads_the_sidecar_xmpcore_writes() {
+    // XMPCore's default serialization is the `<?xpacket?>` + `<x:xmpmeta>` form exiv2 stores in a
+    // .xmp file (its sidecar writer only prepends the packet header when the packet lacks one), so
+    // the reference engine's output is exactly what a sidecar on disk looks like.
+    let reference = exiv2_oracle::roundtrip(&sample().to_packet()).expect("exiv2 round-trip");
+    assert!(
+        String::from_utf8_lossy(&reference).contains("<x:xmpmeta"),
+        "precondition: XMPCore's serialization carries the wrapper a sidecar requires"
+    );
+    let parsed = XmpSidecar::read(&reference).expect("gamut reads XMPCore's sidecar");
+    assert_eq!(parsed.get_text(DC, "format"), Some("text/plain"));
+    assert_eq!(parsed.get_lang_alt(DC, "title", "x-default"), Some("Hello"));
 }

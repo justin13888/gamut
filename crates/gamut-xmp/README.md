@@ -56,6 +56,17 @@ a custom schema. `WellKnownNs` supplies the standard schema URIs and prefixes so
 hand-write them. For in-place editing, `XmpPacket::scan` exposes the envelope (writability,
 padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that composition.
 
+**Sidecars.** `XmpSidecar::write` / `XmpSidecar::read` are the bytes of a standalone `.xmp` file —
+the interchange RAW workflows use, since a camera's raw format is not extensible (Part 3, "External
+storage of metadata"). A sidecar is the packet as embedded, so `read` accepts everything
+`from_packet` does but **requires the `x:xmpmeta` document element**: Part 1 §7.3.3 makes it the
+marker that identifies XMP inside general XML text, which is what a standalone file is (exiv2's
+sidecar sniffer keys on the same `<?xpacket?>` / `<x:xmpmeta>`). `write` emits the XML declaration
+Part 3 asks for, then a read-only, unpadded packet in canonical form, so two sidecars of the same
+graph are byte-identical. The crate has no filesystem API; the naming convention — `photo.xmp`
+beside `photo.dng`, looked up in the image's directory — is documented, not enforced, and the caller
+owns the path.
+
 ## Scope
 
 - **Part 1 (data model + serialization): both directions.** The permissive reader accepts the
@@ -95,8 +106,8 @@ padding) and `XmpPacket::parse` the graph — `from_packet` is exactly that comp
 
 **Production-ready v1** (issue #189). Implemented: parser + canonical serializer for the full XMP
 data model (simple / URI / structured / `Bag`·`Seq`·`Alt`, qualifiers, language alternatives), the
-`<?xpacket?>` wrapper, and a 30-schema registry at parity with exiv2's documented set (issue
-#421). See [STATUS.md](STATUS.md).
+`<?xpacket?>` wrapper, a 30-schema registry at parity with exiv2's documented set, and `.xmp`
+sidecar read/write (issue #421). See [STATUS.md](STATUS.md).
 
 ## Migrating from 1.x
 
@@ -115,7 +126,8 @@ changed — every existing variant, URI, prefix and method keeps its meaning.
 - **Differential oracle** against exiv2's bundled **Adobe XMPCore**: gamut's packets validate and
   round-trip through the reference engine, every `WellKnownNs` URI is vouched for by its schema
   registry (one test per exiv2-parity schema reads a documented property back by its
-  `Xmp.<prefix>.<name>` key), and the default-`xml:lang` posture is pinned to parity
+  `Xmp.<prefix>.<name>` key), a sidecar gamut writes is read by the engine and the engine's own
+  serialization is read as a sidecar, and the default-`xml:lang` posture is pinned to parity
   (`tests/oracle.rs`; needs the `third_party/exiv2` + `third_party/expat` submodules and a C++
   toolchain). One oracle normalization is pinned as such: exiv2 appends `/` to a namespace URI
   ending in neither `/` nor `#` when it registers it with XMPCore, so the engine re-serializes

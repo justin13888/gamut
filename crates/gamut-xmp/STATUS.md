@@ -45,6 +45,18 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
   (`XmpProperties::registerNs`), so the engine re-serializes `dwc` as `…/index.htm/` while gamut
   writes the `…/index.htm` exiv2 documents — pinned in `tests/oracle.rs` as an oracle
   normalization.
+- **Sidecars require `x:xmpmeta` (issue #421).** `XmpSidecar::read` accepts everything
+  `XmpMeta::from_packet` does — XML declaration, BOM, wrapper or bare — but rejects a document
+  whose element is not `x:xmpmeta` with `XmpError::Prohibited` naming the element found. Part 3
+  ("External storage of metadata", in the vendored 2020 edition's Introduction) defines a sidecar as
+  the packet "as though it were embedded and then … extracted"; Part 1 §7.3.3 gives `x:xmpmeta`
+  exactly one purpose, identifying XMP inside general XML text, which a standalone `.xmp` file is;
+  exiv2's sidecar sniffer keys on `<?xpacket` or `<x:xmpmeta`. `XmpSidecar::write` emits the XML
+  declaration Part 3 asks for, then a read-only (`end="r"`), unpadded packet wrapping the canonical
+  body in `x:xmpmeta` — byte-stable per graph. No filesystem API and no enforced file name: the
+  `.xmp`-beside-the-image convention is documented for the caller. The missing-wrapper error reuses
+  `XmpError::Prohibited` (a dedicated variant is a possible later addition; `XmpError` is
+  `#[non_exhaustive]`).
 
 ## Phases
 
@@ -57,7 +69,7 @@ placement, and array/struct nesting so output is stable, diffable, and round-tri
 | P5 | Part 1 §7 | **Keystone** — canonical RDF/XML serialization + packet emit (writable padding) | ✅ done |
 | P6 | — | exiv2 differential conformance gate | ✅ done |
 | P7 | Parts 1–3 | **v1 stabilization** (issue #189) — API finalization (`XmpPacket::parse` composition, `XmpWriter::with_namespace` prefix registration, model conveniences), conformance audit (control-character escaping fix, trailer `end=` matching, edge-case pins), gamut-iptc dogfood migration, docs | ✅ done |
-| P8 | Part 2 | **Breadth** (issue #421) — registry at parity with exiv2's documented schemas (17 → 30 entries), per-schema oracle tests | ✅ done |
+| P8 | Part 2; Part 3 "External storage" | **Breadth** (issue #421) — registry at parity with exiv2's documented schemas (17 → 30 entries), `.xmp` sidecar read/write, per-schema and sidecar oracle tests | ✅ done |
 
 ## Intentional skips (audited for v1)
 
@@ -78,5 +90,7 @@ deliberately:
   supplies wrapper-optional parse, bare-body serialization, and the writable/padding envelope.
 - **Per-schema value validation (Part 2):** values are uninterpreted text; `WellKnownNs` is a
   namespace registry, not a validator — still true after the exiv2-parity additions (issue #421).
+- **Sidecar file naming and I/O (Part 3):** `XmpSidecar` is bytes-in / bytes-out; locating
+  `photo.xmp` beside `photo.dng` is the caller's, as embedding is the format crates'.
 - **Deferred additive API** (post-1.0, no consumer today): an opt-in `XmpMeta::validate()`, and
   nested-structure field lookup.
