@@ -408,11 +408,48 @@ fn struct_bag_item_field_survives_xmpcore(
     );
     let out = exiv2_oracle::roundtrip(&packet).expect("exiv2 round-trip");
     let parsed = XmpMeta::from_packet(&out).expect("gamut parses exiv2's output");
+    // Compare under the engine's output URI (the identity for both MWG schemas; see
+    // `xmpcore_output_uri`), so the helper stays correct for a `dwc`-style URI too.
+    let out_uri = xmpcore_output_uri(ns);
+    let mut expected = meta.get(uri, name).cloned().expect("the property just set");
+    rename_namespace(&mut expected, uri, &out_uri);
     assert_eq!(
-        parsed.get(uri, name),
-        meta.get(uri, name),
+        parsed.get(&out_uri, name),
+        Some(&expected),
         "{prefix}:{name} must round-trip through XMPCore unchanged"
     );
+}
+
+/// Rewrites every occurrence of namespace `from` in `property` (itself, its fields, items and
+/// qualifiers) to `to`.
+fn rename_namespace(property: &mut XmpProperty, from: &str, to: &str) {
+    if property.namespace == from {
+        property.namespace = to.to_owned();
+    }
+    for qualifier in &mut property.qualifiers {
+        rename_namespace(qualifier, from, to);
+    }
+    rename_namespace_in_value(&mut property.value, from, to);
+}
+
+/// The value half of [`rename_namespace`].
+fn rename_namespace_in_value(value: &mut XmpValue, from: &str, to: &str) {
+    match value {
+        XmpValue::Simple(_) | XmpValue::Uri(_) => {}
+        XmpValue::Structured(fields) => {
+            for field in fields {
+                rename_namespace(field, from, to);
+            }
+        }
+        XmpValue::Array(array) => {
+            for item in array.items_mut() {
+                rename_namespace_in_value(&mut item.value, from, to);
+                for qualifier in &mut item.qualifiers {
+                    rename_namespace(qualifier, from, to);
+                }
+            }
+        }
+    }
 }
 
 #[test]

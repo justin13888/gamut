@@ -111,23 +111,23 @@ const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
 fn document_element_unless_xmpmeta(xml: &str) -> Result<Option<String>> {
     let mut reader = NsReader::from_str(xml);
     loop {
-        match reader
+        let event = reader
             .read_event()
-            .map_err(|err| XmpError::Xml(err.to_string()))?
-        {
-            Event::Start(start) | Event::Empty(start) => {
-                let (resolved, local) = reader.resolver().resolve_element(start.name());
-                let local = String::from_utf8_lossy(local.as_ref()).into_owned();
-                let is_xmpmeta = matches!(resolved, ResolveResult::Bound(ns)
-                    if ns.as_ref() == XMPMETA_NAMESPACE.as_bytes())
-                    && local == "xmpmeta";
-                return Ok((!is_xmpmeta).then_some(local));
-            }
-            Event::Eof => {
-                return Err(XmpError::Xml("sidecar has no document element".into()));
-            }
-            _ => {}
+            .map_err(|err| XmpError::Xml(err.to_string()))?;
+        // Checked before the match (as `reader.rs` does) so the loop's exit does not depend on a
+        // match arm: end of input is always terminal.
+        if matches!(event, Event::Eof) {
+            return Err(XmpError::Xml("sidecar has no document element".into()));
         }
+        if let Event::Start(start) | Event::Empty(start) = event {
+            let (resolved, local) = reader.resolver().resolve_element(start.name());
+            let local = String::from_utf8_lossy(local.as_ref()).into_owned();
+            let is_xmpmeta = matches!(resolved, ResolveResult::Bound(ns)
+                if ns.as_ref() == XMPMETA_NAMESPACE.as_bytes())
+                && local == "xmpmeta";
+            return Ok((!is_xmpmeta).then_some(local));
+        }
+        // Declaration, comments, processing instructions, DOCTYPE and whitespace: prolog, skipped.
     }
 }
 

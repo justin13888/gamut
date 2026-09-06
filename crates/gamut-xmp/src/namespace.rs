@@ -399,8 +399,7 @@ mod tests {
                 "{ns:?} must be in ALL so from_uri and the writer's prefix table see it"
             );
         }
-        // exiv2 documents 29 schemas; with `dcterms` counted once and the two structure types
-        // (`stDim`, `stRef`) the registry holds 30 entries.
+        // 18 entries before this change (the original 17 plus `dcterms`) and twelve added: 30.
         assert_eq!(WellKnownNs::ALL.len(), 30);
     }
 
