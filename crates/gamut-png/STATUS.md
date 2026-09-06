@@ -135,8 +135,8 @@ byte) plus removing a sixth redundant filter pass per scanline.
 | 2 | DEFLATE quality | **good, ~2% behind zopfli**, and honestly documented in `gamut-deflate`. Two contained wins remain: an 8-byte-at-a-time match compare, and `parse_dp`'s single-distance relaxation. [#478], [#479] |
 | 3 | Smallest lawful representation | **done** — grey, alpha-drop, ≤256 palette, 16→8, sub-byte, and a `tRNS` colour key for grey/truecolour. The key is worth ~7–9% on a contiguous transparent region, *not* the 25% the raw-byte arithmetic suggests: the alpha plane it removes is usually the most compressible plane in the image. |
 | 4 | Palette optimization | **partial** — trailing-opaque `tRNS` trim, plus ordering: transparent entries first (so that trim cuts as far as §11.3.2.1 allows) then by luma. Worth −14.7% on the sprite row against +1.5% on `palette64`. Modified-Zeng ordering and caller-supplied palette cleanup remain. [#482] |
-| 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. |
-| 6 | Metadata hygiene | **no policy** — the encoder emits exactly what the caller set, and `gamut convert` drops metadata on the PNG path. [#483] |
+| 5 | Cleaning invisible data | **done** — `with_transparent_cleanup`, opt-in, on every alpha-carrying layout at 8 and 16 bits. It is the crate's **one lossy knob**: it rewrites stored samples no decoder renders, where every other reduction here is byte-exact, which is why it is off by default and separate from `with_auto_reduce`. Worth **40.1%** on the sprite row, and it is what makes a colour key reachable at all on a source whose invisible pixels carry different unseen colours. It is a *transform*, not a reduction, so it is **raced** rather than assumed: on `palette64_rgba8` cleaning measured −2.3% at 32×32, **+10.7% at 128×128** and −5.2% at 256×256, because zeroing invisible pixels that carry structure destroys bytes DEFLATE was compressing. `cleaned_or_plain` encodes both and keeps the smaller, so the knob can never cost bytes. |
+| 6 | Metadata hygiene | **no policy** — the encoder emits exactly what the caller set, and `gamut convert` drops metadata on the PNG path. The one exception is shape, not policy: `bKGD` and `sBIT` are resolved against the header actually written (see [Chunks that follow the race](#the-cost-model-and-why-it-is-a-race)). [#483] |
 | 7 | Interlacing | **correctly none.** Adam7 costs 5–20%; out of scope by declaration. |
 | 8 | Effort / speed / determinism | Output is byte-reproducible (no time, no randomness, and the one `HashMap` is never iterated). Three independent knobs, no composed dial. No parallelism. [#484] |
 | 9 | Correctness / robustness | **covered** — 16-bit, odd dimensions, 1×1, CRC policy, malformed input. |
@@ -167,6 +167,22 @@ either candidate alone. The three declined rows are the evidence: had the estima
 each would have carried a palette and been larger. Only palette reductions pay for the second
 encode; greyscale, alpha-drop and 16→8 demotion add no chunks, so for them the raw comparison is
 sound.
+
+**What the races cost.** Each race is a full extra encode, and they nest: `FilterStrategy::BruteForce`
+tries seven whole-image strategies, `write_reduced_or_native` encodes both candidates when the
+reduction carries a chunk (a palette's `PLTE`/`tRNS`, a colour key's `tRNS`), and `cleaned_or_plain`
+encodes both the cleaned and the untouched samples when cleanup changed anything. The worst case —
+`Level::Best` + `BruteForce` + auto-reduce + cleanup on an alpha image that is both cleanable and
+palettisable or keyable — is therefore 7 × 2 × 2 = **28** filter-plus-DEFLATE passes for one file,
+against 7 for `BruteForce` alone. That is the price of choosing by measured size rather than by a
+cost model; a model good enough to skip the losing candidate is [#480]'s remainder.
+
+**Chunks that follow the race.** `bKGD` and `sBIT` have a payload whose shape is the colour type, and
+the race decides the colour type after they were set. Both are resolved against the header actually
+written — RGBA `sBIT` loses its alpha entry under RGB or a palette, an RGB or grey background under a
+palette becomes the index of its entry, a grey RGB triple collapses to one grey sample — and omitted
+where no lossless conversion exists, since a payload shaped for the wrong colour type is a chunk
+libpng rejects and drops.
 
 [#437]: https://github.com/visualcommons/gamut/issues/437
 [#478]: https://github.com/visualcommons/gamut/issues/478

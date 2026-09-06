@@ -215,8 +215,11 @@ impl FilterScan {
 #[non_exhaustive]
 pub enum SkippedFilterScan {
     /// The image the header describes is larger than this reader's byte budget, so the walk
-    /// declined to inflate a stream a decode would refuse to allocate. **Nothing is known to be
-    /// wrong with the file** — it may be a perfectly sound very large PNG.
+    /// declined to inflate a stream a decode would refuse to allocate — or the image is past the
+    /// decoder's default budget and the stream is too short to plausibly inflate to it (more than
+    /// sixty-four times its own length), which is the shape of a zlib bomb under a permissive
+    /// budget. **Nothing is known to be wrong with the file** — it may be a perfectly sound very
+    /// large PNG.
     OverBudget = 0,
     /// The IDAT stream is not a valid zlib stream, is truncated, or inflates past the length the
     /// header implies.
@@ -497,6 +500,11 @@ pub struct DeconstructLimits {
     /// This is the quantity [`crate::PngDecoder::with_max_image_bytes`] budgets, and matching the
     /// two is the point: a report is only "what a decode would have allocated" against a decoder
     /// configured the same way. The default matches the decoder's default.
+    ///
+    /// Raising it past the decoder's default admits larger *images*, not larger *inflations from
+    /// small files*: above that default the walk also refuses, before inflating, a stream that
+    /// would grow to more than sixty-four times its own length, so a permissive budget cannot be
+    /// spent by a zlib bomb. That refusal is the same [`SkippedFilterScan::OverBudget`].
     pub max_image_bytes: usize,
     /// The largest number of chunks the walk will materialize into segments and per-type stats.
     ///

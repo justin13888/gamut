@@ -1326,8 +1326,9 @@ mod tests {
         assert_eq!(decoded.as_samples(), expected);
     }
 
-    /// Hand-assembles a greyscale PNG from raw parts (the encoder cannot write interlaced files
-    /// or greyscale/truecolour tRNS colour keys).
+    /// Hand-assembles a greyscale PNG from raw parts (the encoder cannot write interlaced files,
+    /// and choosing the colour key by hand keeps the decoder's claim independent of
+    /// `reduce`'s).
     fn build_gray_png(
         width: u32,
         height: u32,
