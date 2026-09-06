@@ -97,13 +97,18 @@ pub use decoder::{DecodedDng, DigestCheck, DngDecoder, RawTag};
 pub use deconstruct::{
     Anomaly, DeconstructReport, Severity, UnknownFieldType, UnknownTag, deconstruct,
 };
-pub use encoder::DngEncoder;
+pub use encoder::{DngEncodeReport, DngEncoder};
 pub use gain_map::{GainValues, ProfileGainTableMap};
 pub use gamut_core::{Dimensions, Error, Result};
+// The C2PA exclusion set (C2PA 2.4 §18.5.5) is `gamut-ifd`'s — the placement and exclusion
+// rules are stated once there for every TIFF-based codec — re-exported so a signer reading
+// `DngEncodeReport`/`DecodedDng` needs no direct `gamut-ifd` dependency.
+pub use gamut_ifd::c2pa::C2paExclusions;
 // `Value` is part of the decode surface: `RawTag` carries unmodelled fields as this typed enum;
-// `Segment`/`SpanKind` are part of the preservation surface, naming the byte runs a real camera
-// file carries that its own structures do not account for.
-pub use gamut_ifd::{ByteOrder, Segment, SpanKind, Value};
+// `Segment`/`SpanKind`/`Range` are part of the preservation surface, naming the byte runs a
+// real camera file carries that its own structures do not account for (`Range` is also what
+// `C2paExclusions` measures in).
+pub use gamut_ifd::{ByteOrder, Range, Segment, SpanKind, Value};
 // The shared metadata facade supplies this crate's metadata models rather than a DNG-local
 // restatement of them: `DngMetadata::exif` *is* the facade's `Exif`, and `DngMetadata::blocks`
 // hands the byte carriers over as `MetadataBlock`s. Re-exported so a caller can build and read

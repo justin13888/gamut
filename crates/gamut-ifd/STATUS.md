@@ -34,6 +34,7 @@ read/write code paths byte-for-byte.
 | P8 | — | BigTIFF (8-byte offsets/counts, `Long8`/`SLong8`/`Ifd8`) — gated `bigtiff` feature, additive | ✅ done |
 | P9 | §2 | RAW-grade streaming: `ReadAt` sources (slice / `Read + Seek` / rebased), lazy `IfdReader`, structural `tags` | ✅ done (#252) |
 | P10 | §2 | **Byte completeness** (2.0 reshape): lossless `Value::Unknown` model, one-parser collapse, dual-ledger `Tracked`+`SegmentMap` audit, writer-declared padding + pinned spans | ✅ done (#263) |
+| P11 | C2PA §A.3.6, §18.5.5 | **C2PA manifest-store carriage** (`c2pa`): the tag, the last-main-IFD placement rule, end-of-file placement by post-write relocation, the two-range exclusion set, and the read-side locator — shared by the TIFF-based codecs | ✅ done (#442) |
 
 P5's **write** side landed with the DNG codec (issue #109): [`write`](src/writer.rs) lays out the
 whole IFD *tree* — [`Ifd::set_sub_ifd`](src/entry.rs) attaches children under a pointer tag
@@ -175,3 +176,44 @@ lossless. [`tests/hardening_audit.rs`](tests/hardening_audit.rs) remains the acc
 pinning the exact `Error::InvalidInput` string rawshift keys its `ParseError` mapping on for every
 checklist case; per the issue ("correctness verification, not an API ask") error granularity stays
 `InvalidInput(&'static str)` — no per-case error variants were added.
+
+## P11 — C2PA manifest-store carriage (issue #442, epic #239)
+
+The C2PA manifest store is the one cross-format payload a TIFF-based file carries *by tag*
+(C2PA 2.4 §A.3.6: tag 52545 / `0xCD41`, type `UNDEFINED`), and its placement rule is unusual
+enough — one store per asset, its entry in the **last IFD of the main chain**, its bytes at the
+**end of the file** so a resize moves no other offset — that stating it once here, for both
+`gamut-dng` (#442) and `gamut-tiff` (#446), beats two derivations. The [`c2pa`](src/c2pa.rs)
+module is that one statement; `references/c2pa/README.md` is the clause map. The store stays
+opaque bytes: nothing here parses the JUMBF interior or reaches a verdict.
+
+- **Placement is a post-write relocation, not a new writer mode.** A codec that appends image
+  data after `write`'s stream cannot get a value placed *after* that data from the value pool,
+  and a pinned span would need the data's extent before the layout it depends on exists. So
+  `reserve_entry` puts a one-byte inline placeholder in the last main IFD (the directory layout
+  is final; the pool is untouched), the codec writes its whole file, and `append_store` lands
+  the store at `align_word(len)`, patching only the entry's `count` and value/offset words. The
+  alternative — a `WriteOptions` directive placing a tag's value at the end of the *stream* —
+  would still sit before the codec's pixel data, which is not "the end of the file".
+- **The exclusion set is two ranges** (§18.5.5): `C2paExclusions { store, count_field }`, the
+  count field being the offset-width word at entry offset 4 (4 bytes classic, 8 BigTIFF). They
+  are disjoint by construction, and reported in the crate's own `Range` (u64 start/len) — the
+  same measure the segment map uses — rather than `core::ops::Range<usize>`.
+- **Read side.** `locate` walks the chain to its last directory over any `ReadAt` source and
+  reports the ranges for an out-of-line *or* inline store; a tag-52545 entry of another type, or
+  one in a non-last directory, is "no store" (never an error), so a decoder can still surface
+  it as an unmodelled field. A store declared past the end of the file is `InvalidInput`, the
+  verdict `read` gives the same file.
+- **Endianness.** §A.3.6 says the header's `ByteOrder` "does not govern the endianness of the
+  embedded C2PA Manifest Store": the bytes cross verbatim in both directions, pinned on `MM`
+  fixtures whose store is asymmetric.
+- **Minimum length.** `append_store` refuses a store shorter than a JUMBF box header (8 bytes,
+  `MIN_STORE_LEN`): nothing shorter can be a manifest store, and the bound also guarantees the
+  value is out of line in both variants.
+- **Byte accounting.** The store is the entry's `Value` span and the alignment filler before
+  it is `Padding`, so an audited read of the result is fully classified — a store at the end of
+  the file is never a `Trailer`.
+
+Deliberately not here: a `TiffFile`-level "reserve the entry in the right IFD" helper. The
+codecs hold their last main IFD by hand (a DNG has exactly one), and picking it out of a chain
+is a one-liner nobody would get wrong.

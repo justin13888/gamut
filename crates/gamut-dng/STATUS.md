@@ -50,6 +50,7 @@ internal encode→decode round-trips guard every lossless path.
 | P23 | —       | **Explicitness**: every unmodelled IFD field surfaces verbatim as a typed `RawTag` (`ifd0_extra`/`raw_extra`/per-sub-image), via a consumption-tracking reader — issue #109's "all metadata explicitly represented" clause. The EXIF sub-IFD needs no extras list of its own since #353: it arrives whole, inside `Exif` | ✅ done |
 | P24 | Ch2-4   | **Real camera conformance** (#174): the `gamut-dng-samples` corpus + `tooling/gamut-dng-real-conformance`; `Predictor`/`PlanarConfiguration` honoured, byte accounting and the preserving rewrite fixed for real files, optional camera profile | ✅ done |
 | P25 | Ch6     | **Colour projection** (#353): the camera-profile colour tags `CameraProfile` does not model — hue/sat and look tables (dims/data/encoding), `ProfileToneCurve`, `BaselineExposureOffset`, the DNG 1.6 third calibration set, `ReductionMatrix1/2/3` — as a typed read-direction `ColorProfileInfo`, plus the raw IFD's `NoiseProfile` as a typed `NoiseProfile`; a value outside the spec's domain stays in the extras | ✅ done |
+| P26 | C2PA §A.3.6, §18.5.5 | **C2PA manifest store** (#442): typed on both sides (`DngMetadata::c2pa`), entry in IFD 0 with the value last in the file, a zero-filled reservation (`with_c2pa_reserved`), both exclusion ranges reported (`encode_with_report` / `DecodedDng::c2pa_exclusions`), bytes verbatim in either byte order, Adobe-validated | ✅ done |
 
 ## Apple ProRAW (DNG 1.7 + JPEG XL): fully covered for decode
 
@@ -178,6 +179,50 @@ now — `gamut-dng-oracle` exposes the reference implementation's own derivation
 (`dng_color_spec::SetWhiteXY`), and the single-illuminant, interpolated and clamped cases are all
 required to agree with it.
 
+## C2PA manifest store (issue #442, epic #239) — a `DngMetadata` break
+
+The store (C2PA 2.4 §A.3.6: tag 52545 / `0xCD41`, type `UNDEFINED`) was already *visible* — a
+decoded file carried it as an untyped `RawTag` — but had no name, no placement rule and no
+exclusion ranges. Now:
+
+- **`DngMetadata::c2pa: Option<Vec<u8>>`** is the fifth carrier, on the same terms as XMP /
+  IPTC-IIM / ICC: opaque bytes, verbatim in both directions, handed over by `blocks()` as
+  `MetadataBlock::C2pa`. `DngMetadata` is deliberately exhaustive (see the freeze decisions),
+  so this is **semver-major**: every struct literal gains `c2pa: None`. Unlike the other
+  carriers, a store is bound to one exact file — it is a signed hash over the bytes around it —
+  so the only valid input is one an external signer computed over *this* encoder's output;
+  `gamut_metadata::Metadata::encode` never hands one back (`C2paPolicy::Drop`).
+- **Placement** is `gamut_ifd::c2pa`'s (the shared statement of §A.3.6, reused by #446): the
+  entry goes in IFD 0 — the last and only IFD of this crate's main chain, the form the Adobe
+  SDK reads without surprise — as an inline placeholder while the tree is laid out, and the
+  store's bytes are appended **after the image data, last in the file**, with only the entry's
+  count/offset words patched. The alternative §A.3.6 form, a trailing IFD holding only the
+  entry, is *read* (the decoder consults the last main-chain IFD) but not written.
+- **A reservation.** `DngEncoder::with_c2pa_reserved(len)` writes `len` zero bytes where the
+  store goes; `encode_with_report` returns `DngEncodeReport { len, c2pa: Option<C2paExclusions> }`
+  with the **two disjoint ranges** §18.5.5 needs — the store, and the entry's `count` field (4
+  bytes classic, 8 BigTIFF) — so a signer hashes around them and overwrites the reservation in
+  place. A reservation and a same-sized store produce byte-identical files outside the store
+  range, and a store of a different size changes the count field and nothing else: the epic's
+  "nothing after placement moves a byte" criterion, tested exactly. `encode` is unchanged (it
+  delegates), and `EncodeImage` is untouched. A store and a reservation together, or a store
+  shorter than a JUMBF box header (8 bytes), are typed errors before any pixel work.
+- **Decode.** `DecodedDng::c2pa_exclusions` carries the ranges `gamut_ifd::c2pa::locate` finds,
+  alongside the bytes in `metadata.c2pa`. A tag-52545 entry of another type is not a store and
+  stays in `ifd0_extra`; so does one in IFD 0 when the main chain continues past it.
+- **Byte accounting.** `deconstruct` claims the store as IFD 0's `Value { tag: 52545 }` span and
+  the alignment filler before it as `Padding` — a store at the end of the file is never a
+  `Trailer` — so a store-carrying file is fully classified. `tags::is_known_tag` does not yet
+  list 52545 (the constant lives in `gamut-ifd`), so `is_fully_accounted` still reports it as an
+  `UnknownTag`; adding it there is a one-line follow-up outside this change's manifest.
+- **Version.** Carrying the tag raises neither `DNGVersion` nor `DNGBackwardVersion`: like XMP
+  and ICC it is metadata a reader may ignore, and the tag is C2PA's, not a DNG feature a
+  reader must implement (the SDK's tag table names it as `tcC2PAManifest` and validates a file
+  carrying it).
+- **Not done here.** The store is never parsed; a `DngRewrite` of a file carrying one relocates
+  it into the value pool like any other value (a rewrite invalidates the binding regardless);
+  the behavioural `c2pa-rs` oracle is #447's.
+
 ## Bridge surface for external RAW pipelines (issue #253)
 
 Downstream raw *processors* (e.g. rawshift) consume gamut-dng's decode as their DNG front end and
@@ -225,7 +270,8 @@ separate path (below).
   #353 did to `DngMetadata::exif`, changing one's type — is accepted as semver-major.
   `ExifMetadata` was on this list until #353 retired it in favour of `gamut-exif`'s `Exif`, whose
   own construction is `Exif::new(order)` plus `set_tag`/`exif_ifd_mut`; `DngMetadata` itself is
-  still a struct literal, so the four carriers stay visible at the point of use. `GainValues`
+  still a struct literal, so the carriers (five since #442 added `c2pa`) stay visible at the
+  point of use. `GainValues`
   stays exhaustive — its four variants are the spec's closed `DataType` set.
 - Re-export closure: everything on the crate root, including `RawPhotometry`, `cfa_color`,
   `opcode_id`, `new_subfile_type`, `gamut_ifd::Value` (the `RawTag` payload type), and the
@@ -302,7 +348,8 @@ use; additions are semver-additive.
 - **JPEG-compressed previews as pixels** — surfaced as verbatim chunks (`SubImageData::
   Undecoded`); decoding them needs the baseline DCT codec above.
 - **Advanced 1.7 metadata without a typed surface** (`RGBTables`, `ImageStats`,
-  `ImageSequenceInfo`, `ProfileDynamicRange`, C2PA) — explicitly surfaced as typed `RawTag`s.
+  `ImageSequenceInfo`, `ProfileDynamicRange`) — explicitly surfaced as typed `RawTag`s. (The
+  C2PA manifest store left this list in #442: `DngMetadata::c2pa`.)
 - **The GPS sub-IFD (`GPSInfo`, 34853) and an EXIF 0th IFD / thumbnail** — `DngMetadata::exif`
   is a whole `gamut_exif::Exif`, so those directories are *expressible* in the encoder input,
   but only its Exif sub-IFD is written: IFD 0 and the preview sub-IFDs are the DNG container's
