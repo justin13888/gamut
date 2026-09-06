@@ -5,6 +5,10 @@
 //! Prints a report to stdout and exits non-zero when the file is not fully accounted for —
 //! usable as an archival CI gate.
 //!
+//! The contract itself — the gate per format, the two exit codes, the budgets, and every reason
+//! the PNG filter scan declines — is recorded in `docs/inspect-exit-codes.md`, which is normative
+//! for it. What follows is why the code is shaped that way.
+//!
 //! # What "fully accounted for" means, and what the exit code is
 //!
 //! Exit 0 is the file having nothing the walk can hold against it; exit 1 is a finding. Each
