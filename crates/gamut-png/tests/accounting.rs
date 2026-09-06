@@ -191,12 +191,13 @@ fn synthetic_type(i: usize) -> [u8; 4] {
 /// Accumulating the per-type totals with a linear scan made this quadratic in the file length
 /// (measured: 4.8 MB → 40.9 s), reachable from `gamut inspect` on an untrusted file.
 ///
-/// The complexity claim itself is pinned structurally, inside the crate, where the tally's index
-/// is visible (`deconstruct::tests::the_tally_index_names_every_recorded_type_at_its_position`):
+/// The complexity claim itself is pinned inside the crate, where the tally's lookup work can be
+/// counted (`deconstruct::tests::the_tally_probes_once_per_chunk_whatever_the_number_of_distinct_types`):
 /// a wall-clock ratio between two runs in the blocking gate is flaky under `llvm-cov` and parallel
 /// test binaries, and timing belongs to `benches/`. What this test adds from the public side is
 /// the *content* at scale — 262 144 distinct types against the same bytes with one type — which
-/// is what the index exists to produce, and a fixture that would not complete under the defect.
+/// is what the index exists to produce. Under the defect this fixture took about 17 s (it did
+/// complete); it is the probe count, not this test's duration, that tells the two apart.
 #[test]
 fn every_distinct_chunk_type_gets_its_own_tally_entry_at_scale() {
     /// Empty chunks between IHDR and IEND: 12 bytes each, so ~3.1 MB per half.

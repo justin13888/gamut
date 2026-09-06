@@ -423,6 +423,10 @@ struct ChunkTally {
     stats: Vec<ChunkStats>,
     /// Type → its index in `stats`. Dropped at the end of the walk; never surfaced.
     index: HashMap<[u8; 4], usize>,
+    /// Lookup work done so far, in entries examined — the probe that makes this type's
+    /// complexity assertable by count rather than by clock. See [`record`](Self::record).
+    #[cfg(test)]
+    probes: usize,
 }
 
 impl ChunkTally {
@@ -431,11 +435,22 @@ impl ChunkTally {
         Self {
             stats: Vec::new(),
             index: HashMap::new(),
+            #[cfg(test)]
+            probes: 0,
         }
     }
 
     /// Adds one chunk of `chunk_type` carrying `payload_len` payload bytes.
+    ///
+    /// The lookup accounts one probe per entry it examines: a hash lookup examines one, so a
+    /// file of N chunks costs N probes whatever its number of distinct types. Any replacement
+    /// lookup strategy must account its work here the same way — a linear scan, one per entry
+    /// compared — which is what lets the inline test bound the walk at O(N) instead of timing it.
     fn record(&mut self, chunk_type: [u8; 4], payload_len: usize) {
+        #[cfg(test)]
+        {
+            self.probes += 1;
+        }
         match self.index.get(&chunk_type) {
             Some(&at) => {
                 self.stats[at].count += 1;
@@ -998,13 +1013,12 @@ mod tests {
         );
     }
 
-    /// The tally answers "have I seen this type?" from its index, never by scanning `stats` —
-    /// which is what makes a file of N distinct chunk types cost O(N) rather than O(N²). That is
-    /// a structural claim, so it is asserted structurally: after any sequence of records, the
-    /// index holds exactly one entry per distinct type, and each maps to the position in `stats`
-    /// whose entry carries that type. A `record` that failed to index a new type, or indexed it at
-    /// the wrong position, would fall back to nothing at all — the lookup below has no linear
-    /// scan to fall back to — and this is where that shows. Timing belongs to `benches/`.
+    /// The index is what `record` answers "have I seen this type?" from, so it has to be
+    /// complete and right: after any sequence of records it holds exactly one entry per distinct
+    /// type, each mapping to the position in `stats` whose entry carries that type, and the
+    /// counts show both arms of `record` ran. This pins the index's *content*; it does not by
+    /// itself rule out a `record` that scans `stats` and also maintains the index — the probe
+    /// count in `the_tally_probes_once_per_chunk_whatever_the_number_of_distinct_types` does.
     #[test]
     fn the_tally_index_names_every_recorded_type_at_its_position() {
         let mut tally = ChunkTally::new();
@@ -1034,6 +1048,39 @@ mod tests {
             assert_eq!(stats.count, if repeated { 2 } else { 1 });
             assert_eq!(stats.payload_bytes, at + usize::from(repeated));
         }
+    }
+
+    /// The complexity claim itself, by count rather than by clock: N chunks cost N lookup
+    /// probes however many distinct types they use. A linear scan over `stats` — the defect the
+    /// index replaced, quadratic in the number of distinct types — accounts one probe per entry
+    /// compared and lands near N²/2 here; the hash lookup accounts exactly one per record. Two
+    /// files of the same chunk count, one with every type distinct and one with a single type,
+    /// must cost the same. Wall-clock timing of the same claim belongs to `benches/`.
+    #[test]
+    fn the_tally_probes_once_per_chunk_whatever_the_number_of_distinct_types() {
+        const CHUNKS: usize = 2048;
+        let mut distinct = ChunkTally::new();
+        for i in 0..CHUNKS as u32 {
+            distinct.record(i.to_be_bytes(), 0);
+        }
+        let mut repeated = ChunkTally::new();
+        for _ in 0..CHUNKS {
+            repeated.record(*b"crUD", 0);
+        }
+        assert_eq!(
+            distinct.stats.len(),
+            CHUNKS,
+            "precondition: every type distinct"
+        );
+        assert_eq!(repeated.stats.len(), 1, "precondition: one type throughout");
+        assert_eq!(
+            distinct.probes, CHUNKS,
+            "one probe per record with every type distinct"
+        );
+        assert_eq!(
+            repeated.probes, CHUNKS,
+            "and the same with one type: the count is O(N)"
+        );
     }
 
     #[test]
